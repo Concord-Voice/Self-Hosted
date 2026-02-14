@@ -1,0 +1,166 @@
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: concord-postgres
+    environment:
+      POSTGRES_USER: concord
+      POSTGRES_PASSWORD: concord_dev_password
+      POSTGRES_DB: concord
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./infrastructure/docker/postgres/init:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U concord"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - concord-network
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: concord-redis
+    command: redis-server --appendonly yes
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - concord-network
+
+  # NATS Message Broker (for inter-service messaging)
+  nats:
+    image: nats:2-alpine
+    container_name: concord-nats
+    command: "-js -m 8222"
+    ports:
+      - "4222:4222"  # Client connections
+      - "8222:8222"  # HTTP monitoring
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - concord-network
+
+  # PostgreSQL Admin (optional, for development)
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: concord-pgadmin
+    environment:
+      PGADMIN_DEFAULT_EMAIL: admin@concord.local
+      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    ports:
+      - "5050:80"
+    depends_on:
+      - postgres
+    networks:
+      - concord-network
+    profiles:
+      - tools
+
+  # Redis Commander (optional, for development)
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: concord-redis-commander
+    environment:
+      REDIS_HOSTS: local:redis:6379
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    networks:
+      - concord-network
+    profiles:
+      - tools
+
+  # Control Plane Service (Go)
+  control-plane:
+    build:
+      context: ./services/control-plane
+      dockerfile: Dockerfile
+    container_name: concord-control-plane
+    environment:
+      DATABASE_URL: postgres://concord:concord_dev_password@postgres:5432/concord?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      NATS_URL: nats://nats:4222
+      JWT_SECRET: dev_jwt_secret_change_in_production
+      PORT: 8080
+    ports:
+      - "8080:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      nats:
+        condition: service_healthy
+    networks:
+      - concord-network
+    profiles:
+      - services
+
+  # Media Plane Service (Node.js + mediasoup)
+  media-plane:
+    build:
+      context: ./services/media-plane
+      dockerfile: Dockerfile
+    container_name: concord-media-plane
+    environment:
+      CONTROL_PLANE_URL: http://control-plane:8080
+      REDIS_URL: redis://redis:6379
+      RTC_MIN_PORT: 40000
+      RTC_MAX_PORT: 49999
+      ANNOUNCED_IP: 127.0.0.1
+      PORT: 3000
+    ports:
+      - "3000:3000"
+      - "40000-40099:40000-40099/udp"  # RTC ports (limited range for dev)
+    depends_on:
+      - redis
+      - control-plane
+    networks:
+      - concord-network
+    profiles:
+      - services
+
+  # Licensing Authority Service (Go)
+  licensing-authority:
+    build:
+      context: ./services/licensing-authority
+      dockerfile: Dockerfile
+    container_name: concord-licensing-authority
+    environment:
+      DATABASE_URL: postgres://concord:concord_dev_password@postgres:5432/concord?sslmode=disable
+      PRIVATE_KEY_PATH: /app/keys/license_private_key.pem
+      PORT: 8082
+    ports:
+      - "8082:8082"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - ./infrastructure/docker/licensing/keys:/app/keys
+    networks:
+      - concord-network
+    profiles:
+      - services
+
+volumes:
+  postgres-data:
+  redis-data:
+
+networks:
+  concord-network:
+    driver: bridge

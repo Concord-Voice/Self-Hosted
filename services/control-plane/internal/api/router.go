@@ -1,0 +1,139 @@
+package api
+
+import (
+	"database/sql"
+	"net/http"
+	"time"
+
+	"github.com/concord/control-plane/internal/auth"
+	"github.com/concord/control-plane/internal/middleware"
+	"github.com/concord/control-plane/internal/sessions"
+	"github.com/concord/control-plane/internal/users"
+	"github.com/concord/control-plane/pkg/config"
+	"github.com/concord/control-plane/pkg/logger"
+	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
+)
+
+// NewRouter creates a new API router
+func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.Logger) *gin.Engine {
+	router := gin.New()
+
+	// Middleware
+	router.Use(gin.Recovery())
+	router.Use(middleware.Logger(log))
+	router.Use(middleware.CORS(cfg.AllowedOrigins))
+
+	// Health check
+	router.GET("/health", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"status": "healthy",
+			"service": "control-plane",
+		})
+	})
+
+	// Initialize handlers
+	authHandler := auth.NewHandler(db, log, cfg.JWTSecret)
+	sessionsHandler := sessions.NewHandler(db, log)
+	usersHandler := users.NewHandler(db, log)
+
+	// API v1 routes
+	v1 := router.Group("/api/v1")
+	{
+		// Auth routes with rate limiting
+		authRoutes := v1.Group("/auth")
+		{
+			// Register: 5 attempts per 15 minutes (prevent spam account creation)
+			authRoutes.POST("/register",
+				middleware.RateLimitByIP(redis, 5, 15*time.Minute),
+				authHandler.Register,
+			)
+
+			// Login: 10 attempts per 15 minutes (prevent brute force)
+			authRoutes.POST("/login",
+				middleware.RateLimitByIP(redis, 10, 15*time.Minute),
+				authHandler.Login,
+			)
+
+			// Refresh: 30 attempts per minute (normal usage, but prevent abuse)
+			authRoutes.POST("/refresh",
+				middleware.RateLimitByIP(redis, 30, 1*time.Minute),
+				authHandler.Refresh,
+			)
+
+			// Logout: 10 attempts per minute
+			authRoutes.POST("/logout",
+				middleware.RateLimitByIP(redis, 10, 1*time.Minute),
+				authHandler.Logout,
+			)
+		}
+
+		// Protected routes
+		protected := v1.Group("/")
+		protected.Use(middleware.AuthRequired(cfg.JWTSecret))
+		{
+			// User routes
+			userRoutes := protected.Group("/users")
+			{
+				userRoutes.GET("/me",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					usersHandler.GetMe,
+				)
+			}
+
+			// Session management routes
+			sessionRoutes := protected.Group("/sessions")
+			{
+				// List all active sessions (10 requests per minute)
+				sessionRoutes.GET("",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					sessionsHandler.ListSessions,
+				)
+
+				// Revoke a specific session (10 requests per minute)
+				sessionRoutes.DELETE("/:id",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					sessionsHandler.RevokeSession,
+				)
+
+				// Revoke all other sessions (5 requests per minute - more sensitive)
+				sessionRoutes.DELETE("",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					sessionsHandler.RevokeAllSessions,
+				)
+			}
+
+			// Server routes
+			servers := protected.Group("/servers")
+			{
+				servers.GET("", func(c *gin.Context) {
+					c.JSON(http.StatusNotImplemented, gin.H{"message": "Not implemented yet"})
+				})
+				servers.POST("", func(c *gin.Context) {
+					c.JSON(http.StatusNotImplemented, gin.H{"message": "Not implemented yet"})
+				})
+				servers.GET("/:id", func(c *gin.Context) {
+					c.JSON(http.StatusNotImplemented, gin.H{"message": "Not implemented yet"})
+				})
+			}
+
+			// Channel routes
+			channels := protected.Group("/channels")
+			{
+				channels.POST("", func(c *gin.Context) {
+					c.JSON(http.StatusNotImplemented, gin.H{"message": "Not implemented yet"})
+				})
+				channels.GET("/:id", func(c *gin.Context) {
+					c.JSON(http.StatusNotImplemented, gin.H{"message": "Not implemented yet"})
+				})
+			}
+		}
+
+		// WebSocket signaling
+		v1.GET("/ws", func(c *gin.Context) {
+			c.JSON(http.StatusNotImplemented, gin.H{"message": "WebSocket not implemented yet"})
+		})
+	}
+
+	return router
+}
