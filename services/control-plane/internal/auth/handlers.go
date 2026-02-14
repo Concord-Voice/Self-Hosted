@@ -58,6 +58,12 @@ func (h *Handler) Register(c *gin.Context) {
 		return
 	}
 
+	// Validate username
+	if err := ValidateUsername(req.Username); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
 	// Validate password strength
 	if err := ValidatePasswordStrength(req.Password); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -100,6 +106,9 @@ func (h *Handler) Register(c *gin.Context) {
 	}
 	defer tx.Rollback()
 
+	// Normalize username (store lowercase)
+	normalizedUsername := NormalizeUsername(req.Username)
+
 	// Create user
 	userID := uuid.New().String()
 	_, err = tx.Exec(
@@ -107,7 +116,7 @@ func (h *Handler) Register(c *gin.Context) {
 		 VALUES ($1, $2, $3, $4, $5, $6)`,
 		userID,
 		req.Email,
-		req.Username,
+		normalizedUsername,
 		passwordHash,
 		true, // Age verified via confirmation
 		req.E2EEPreference,

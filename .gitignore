@@ -18,11 +18,15 @@ Thumbs.db
 *.sublime-project
 *.sublime-workspace
 
-# Environment Variables
+# Environment Variables (CRITICAL - NEVER COMMIT)
 .env
 .env.local
 .env.*.local
+.env.production
+.env.development
+.env.test
 *.env
+!.env.example
 
 # Node.js
 node_modules/
@@ -124,3 +128,36 @@ licenses/*.license
 # Monitoring and Telemetry
 .prometheus/
 .grafana/
+
+# Process IDs
+.pids/
+*.pid
+
+# Security-Critical Files (NEVER COMMIT)
+id_rsa
+id_rsa.pub
+id_dsa
+id_ecdsa
+*.ppk
+credentials.json
+service-account.json
+service-account-*.json
+*-credentials.json
+auth.json
+secrets.json
+config.production.json
+.npmrc
+.pypirc
+
+# AWS
+.aws/
+*.pem
+aws-exports.js
+
+# Google Cloud
+*-key.json
+gcloud-service-key.json
+
+# Session storage
+.sessions/
+sessions/
