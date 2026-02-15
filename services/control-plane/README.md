@@ -100,34 +100,62 @@ LICENSING_AUTHORITY_URL=http://localhost:8082
 GET /health
 ```
 
-#### Authentication
+#### Authentication (Phase 1A) ✅ IMPLEMENTED
 ```
 POST /api/v1/auth/register
+  - Registers new user with Argon2id password hashing
+  - Validates username (profanity filtering, leetspeak detection)
+  - Stores E2EE public key
+  - Returns JWT access token + refresh token (HttpOnly cookie)
+
 POST /api/v1/auth/login
+  - Authenticates user
+  - Returns JWT access token + refresh token
+  - Returns E2EE keys (wrapped_private_key, key_derivation_salt)
+
+POST /api/v1/auth/refresh
+  - Refreshes access token using refresh token cookie
+
 POST /api/v1/auth/logout
+  - Revokes refresh token
+
+GET /api/v1/auth/sessions (authenticated)
+  - Lists user's active sessions
+
+DELETE /api/v1/auth/sessions/:id (authenticated)
+  - Revokes a specific session
 ```
 
-#### Users
+#### Users (Phase 1A) ✅ IMPLEMENTED
 ```
 GET /api/v1/users/me (authenticated)
+  - Returns current user info
 ```
 
-#### Servers
+#### Servers (Phase 1B) 🚧 PLANNED
 ```
 GET /api/v1/servers (authenticated)
 POST /api/v1/servers (authenticated)
 GET /api/v1/servers/:id (authenticated)
+PATCH /api/v1/servers/:id (authenticated)
+DELETE /api/v1/servers/:id (authenticated)
 ```
 
-#### Channels
+#### Channels (Phase 1B) 🚧 PLANNED
 ```
-POST /api/v1/channels (authenticated)
+POST /api/v1/servers/:server_id/channels (authenticated)
+GET /api/v1/servers/:server_id/channels (authenticated)
 GET /api/v1/channels/:id (authenticated)
+PATCH /api/v1/channels/:id (authenticated)
+DELETE /api/v1/channels/:id (authenticated)
 ```
 
-#### WebSocket
+#### WebSocket (Phase 1B) 🚧 PLANNED
 ```
 GET /api/v1/ws (authenticated)
+  - Real-time messaging
+  - Presence updates
+  - Typing indicators
 ```
 
 ### Testing
@@ -155,44 +183,95 @@ docker build -t concord-control-plane .
 
 ## Database Schema
 
-### Users
+### Users (Phase 1A) ✅
 - id (UUID, PK)
 - email (unique)
-- username (unique)
-- password_hash
+- username (unique, lowercase)
+- password_hash (Argon2id)
+- age_confirmed (boolean)
+- e2ee_preference (boolean)
 - created_at
 - updated_at
 
-### Servers
+### Public Keys (Phase 1A) ✅
+- id (UUID, PK)
+- user_id (FK → users)
+- public_key (BYTEA, base64-encoded SPKI format)
+- key_version (integer, default 1)
+- created_at
+- updated_at
+- UNIQUE(user_id, key_version)
+
+### Refresh Tokens (Phase 1A) ✅
+- id (UUID, PK)
+- user_id (FK → users)
+- token_hash (SHA256)
+- user_agent (text)
+- ip_address (text)
+- created_at
+- expires_at
+
+### Servers (Phase 1B) 🚧
 - id (UUID, PK)
 - name
 - owner_id (FK → users)
+- icon_url (text, nullable)
 - created_at
 - updated_at
 
-### Channels
+### Channels (Phase 1B) 🚧
 - id (UUID, PK)
-- server_id (FK → servers)
+- server_id (FK → servers, ON DELETE CASCADE)
 - name
-- type (voice, text)
+- type (text: 'text', 'voice', 'announcement')
+- position (integer, default 0)
 - created_at
-- updated_at
 
-### Server Members
-- server_id (FK → servers)
-- user_id (FK → users)
-- role (owner, admin, member)
+### Server Members (Phase 1B) 🚧
+- server_id (FK → servers, ON DELETE CASCADE)
+- user_id (FK → users, ON DELETE CASCADE)
+- role (text: 'owner', 'admin', 'member')
 - joined_at
+- PRIMARY KEY (server_id, user_id)
 
-## Future Enhancements
+### Messages (Phase 1B) 🚧
+- id (UUID, PK)
+- channel_id (FK → channels, ON DELETE CASCADE)
+- user_id (FK → users)
+- content (text, encrypted if is_encrypted=true)
+- is_encrypted (boolean, default false)
+- edited_at (timestamp, nullable)
+- created_at
 
-- [ ] Implement full authentication handlers
-- [ ] Add server and channel CRUD operations
+## Current Status
+
+### Phase 1A: Authentication & E2EE ✅ COMPLETE
+- [x] User registration with Argon2id password hashing
+- [x] Login with JWT access tokens (15 min) + refresh tokens (30 day)
+- [x] Username validation with profanity filtering and leetspeak detection
+- [x] E2EE public key storage
+- [x] Session management (list/revoke sessions)
+- [x] Rate limiting (Redis-based, per-IP and per-user)
+- [x] Password strength validation
+
+### Phase 1B: Channels & Text Chat 🚧 IN PROGRESS
+- [ ] Server CRUD operations
+- [ ] Channel CRUD operations
+- [ ] WebSocket real-time messaging
+- [ ] User presence tracking (online/offline/typing)
+- [ ] Message history and pagination
+- [ ] Basic permissions (owner, admin, member)
+
+### Phase 1C: Voice Communication 📋 PLANNED
 - [ ] WebSocket signaling for voice connections
-- [ ] Rate limiting
-- [ ] User presence tracking
+- [ ] Integration with Media Plane
+
+### Phase 2+: Advanced Features 📋 PLANNED
 - [ ] Billing integration (Stripe)
 - [ ] Advanced permissions system
 - [ ] Audit logging
+- [ ] File uploads (S3 + CDN)
+- [ ] Message search
 - [ ] LDAP/SAML integration for enterprise
-- [ ] API rate limiting and quotas
+- [ ] API rate limiting tiers and quotas
+- [ ] Moderation tools (kick, ban, timeout)

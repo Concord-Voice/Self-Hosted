@@ -1,5 +1,7 @@
 # Media Plane Service
 
+**Status:** 📋 PLANNED (Phase 1C - Voice Communication)
+
 WebRTC Selective Forwarding Unit (SFU) for routing voice media in Concord.
 
 ## Tech Stack

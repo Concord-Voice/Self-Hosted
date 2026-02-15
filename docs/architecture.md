@@ -107,11 +107,14 @@ GET    /api/v1/channels/:id
 WS     /api/v1/ws (signaling)
 ```
 
-**Database Schema**:
-- users (id, email, username, password_hash)
-- servers (id, name, owner_id)
-- channels (id, server_id, name, type)
-- server_members (server_id, user_id, role)
+**Database Schema** (Current):
+- **users** (id, email, username, password_hash, age_confirmed, e2ee_preference, created_at, updated_at)
+- **public_keys** (id, user_id, public_key, key_version, created_at, updated_at)
+- **refresh_tokens** (id, user_id, token_hash, user_agent, ip_address, created_at, expires_at)
+- **servers** (id, name, owner_id, icon_url, created_at, updated_at) - Planned Phase 1B
+- **channels** (id, server_id, name, type, position, created_at) - Planned Phase 1B
+- **server_members** (server_id, user_id, role, joined_at) - Planned Phase 1B
+- **messages** (id, channel_id, user_id, content, is_encrypted, edited_at, created_at) - Planned Phase 1B
 
 ### Media Plane (Node.js + mediasoup)
 
@@ -312,16 +315,22 @@ For larger self-hosted deployments:
 
 ### Authentication & Authorization
 
-**SaaS**:
-- Email + password (bcrypt)
+**Current Implementation (Phase 1A)** ✅:
+- Email + password with Argon2id hashing
+- Username validation with profanity filtering and leetspeak detection
+- Username format: `username@concordvoice.chat` (federated identity)
+- JWT access tokens (15-minute expiry)
+- Refresh tokens (30-day expiry) in HttpOnly cookies
+- Session management (list sessions, revoke sessions)
+- Rate limiting (Redis-based, per-IP and per-user)
+- E2EE key generation and storage (RSA-OAEP 2048-bit)
+
+**Planned**:
 - Magic link (passwordless)
 - OAuth2 (Google, GitHub)
 - 2FA via TOTP
-- JWT tokens with 24h expiry
-- Refresh tokens in HttpOnly cookies
 
-**Self-Hosted**:
-- All of the above, plus:
+**Self-Hosted (Phase 3)**:
 - LDAP integration
 - SAML 2.0 for enterprise SSO
 - Custom identity providers
@@ -330,15 +339,23 @@ For larger self-hosted deployments:
 
 - **Signaling**: TLS 1.3 (HTTP/WebSocket)
 - **Media**: DTLS + SRTP (WebRTC)
-- **Optional E2EE**: Client-side encryption for sensitive channels
+- **E2EE**: Client-side encryption implemented ✅
+  - RSA-OAEP 2048-bit for key exchange
+  - AES-GCM for message encryption
+  - PBKDF2 with 600,000 iterations for key derivation
+  - Public keys stored in PostgreSQL, private keys never leave client
+  - E2EE → E2EE: Fully encrypted (maximum privacy)
+  - E2EE → Non-E2EE: Messages sent in plaintext (user warned)
 
 ### Data Privacy
 
 - Minimal telemetry collection
+- No biometric ID requirements
 - No voice content retention
 - Opt-in analytics only
 - Clear data deletion policies
-- GDPR/CCPA compliance
+- GDPR/CCPA compliance (planned)
+- Privacy-first architecture from day one
 
 ## Scalability Strategy
 

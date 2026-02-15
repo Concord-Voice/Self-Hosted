@@ -2,6 +2,15 @@
 
 This guide will help you get Concord running locally for development.
 
+**IMPORTANT:** Before you start developing, install git hooks to prevent committing secrets:
+
+```bash
+cd /path/to/Concord
+./scripts/install-git-hooks.sh
+```
+
+See [SETUP_GITHUB.md](./SETUP_GITHUB.md) for full GitHub collaboration workflow.
+
 ## Prerequisites
 
 ### Required
