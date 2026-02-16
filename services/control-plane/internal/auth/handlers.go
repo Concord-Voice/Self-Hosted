@@ -104,7 +104,11 @@ func (h *Handler) Register(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create account"})
 		return
 	}
-	defer tx.Rollback()
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			h.log.Error("Failed to rollback transaction", "error", rbErr)
+		}
+	}()
 
 	// Normalize username (store lowercase)
 	normalizedUsername := NormalizeUsername(req.Username)

@@ -1,4 +1,16 @@
+# ============================================================================
+# DOCUMENTATION FILES - ALWAYS COMMIT (DO NOT IGNORE)
+# ============================================================================
+# The following files SHOULD be tracked in git:
+# - LICENSE (BSL 1.1 license file)
+# - README.md, [internal], ROADMAP.md, FAQ.md, AI-CONTEXT.md
+# - docs/*.md (all documentation)
+# - docs/archive/*.md (archived legacy documentation)
+# These are explicitly NOT ignored below.
+
+# ============================================================================
 # Operating System Files
+# ============================================================================
 .DS_Store
 .DS_Store?
 ._*
@@ -36,6 +48,7 @@ yarn-error.log*
 lerna-debug.log*
 .pnpm-debug.log*
 package-lock.json
+!client/desktop/package-lock.json
 yarn.lock
 pnpm-lock.yaml
 

@@ -7,8 +7,10 @@ import (
 
 	"github.com/concord/control-plane/internal/auth"
 	"github.com/concord/control-plane/internal/middleware"
+	"github.com/concord/control-plane/internal/servers"
 	"github.com/concord/control-plane/internal/sessions"
 	"github.com/concord/control-plane/internal/users"
+	"github.com/concord/control-plane/internal/websocket"
 	"github.com/concord/control-plane/pkg/config"
 	"github.com/concord/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
@@ -32,10 +34,16 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 		})
 	})
 
+	// Initialize WebSocket hub
+	hub := websocket.NewHub()
+	go hub.Run()
+
 	// Initialize handlers
 	authHandler := auth.NewHandler(db, log, cfg.JWTSecret)
 	sessionsHandler := sessions.NewHandler(db, log)
 	usersHandler := users.NewHandler(db, log)
+	serversHandler := servers.NewHandler(db, log)
+	wsHandler := websocket.NewHandler(hub, cfg.JWTSecret)
 
 	// API v1 routes
 	v1 := router.Group("/api/v1")
@@ -104,17 +112,37 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 			}
 
 			// Server routes
-			servers := protected.Group("/servers")
+			serverRoutes := protected.Group("/servers")
 			{
-				servers.GET("", func(c *gin.Context) {
-					c.JSON(http.StatusNotImplemented, gin.H{"message": "Not implemented yet"})
-				})
-				servers.POST("", func(c *gin.Context) {
-					c.JSON(http.StatusNotImplemented, gin.H{"message": "Not implemented yet"})
-				})
-				servers.GET("/:id", func(c *gin.Context) {
-					c.JSON(http.StatusNotImplemented, gin.H{"message": "Not implemented yet"})
-				})
+				// List user's servers (30 requests per minute)
+				serverRoutes.GET("",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					serversHandler.ListServers,
+				)
+
+				// Create server (10 requests per minute)
+				serverRoutes.POST("",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					serversHandler.CreateServer,
+				)
+
+				// Get specific server (30 requests per minute)
+				serverRoutes.GET("/:id",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					serversHandler.GetServer,
+				)
+
+				// Update server (10 requests per minute)
+				serverRoutes.PATCH("/:id",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					serversHandler.UpdateServer,
+				)
+
+				// Delete server (5 requests per minute - destructive action)
+				serverRoutes.DELETE("/:id",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					serversHandler.DeleteServer,
+				)
 			}
 
 			// Channel routes
@@ -129,10 +157,8 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 			}
 		}
 
-		// WebSocket signaling
-		v1.GET("/ws", func(c *gin.Context) {
-			c.JSON(http.StatusNotImplemented, gin.H{"message": "WebSocket not implemented yet"})
-		})
+		// WebSocket endpoint (requires JWT authentication via query parameter or header)
+		v1.GET("/ws", wsHandler.HandleWebSocket)
 	}
 
 	return router

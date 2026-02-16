@@ -177,9 +177,65 @@ go test -race ./...
 # Build binary
 go build -o bin/control-plane cmd/server/main.go
 
+# Or use Make
+make build
+
 # Build Docker image
 docker build -t concord-control-plane .
 ```
+
+## Database Migrations
+
+This service uses [golang-migrate](https://github.com/golang-migrate/migrate) for versioned database migrations with rollback support.
+
+### Quick Start
+
+```bash
+# Apply all pending migrations
+make migrate-up
+
+# Rollback last migration
+make migrate-down
+
+# Check current version
+make migrate-version
+
+# Create new migration
+make migrate-create NAME=add_user_status
+```
+
+### How Migrations Work
+
+- Migrations run automatically when the server starts
+- Each migration has an UP (apply) and DOWN (rollback) SQL file
+- Migrations are versioned sequentially (000001, 000002, etc.)
+- Migration state is tracked in the `schema_migrations` table
+
+### Creating New Migrations
+
+1. Use the Make command to generate migration files:
+   ```bash
+   make migrate-create NAME=add_user_profile_fields
+   ```
+
+2. Edit the generated files in `migrations/`:
+   - `000004_add_user_profile_fields.up.sql` - Forward migration
+   - `000004_add_user_profile_fields.down.sql` - Rollback migration
+
+3. Apply the migration:
+   ```bash
+   make migrate-up
+   ```
+
+### Migration Best Practices
+
+- Always create both UP and DOWN migrations
+- Test rollbacks to ensure they properly reverse changes
+- One logical change per migration
+- Never modify committed migrations (create new ones instead)
+- Migrations run in transactions automatically
+
+For detailed migration documentation, see [migrations/README.md](migrations/README.md).
 
 ## Database Schema
 

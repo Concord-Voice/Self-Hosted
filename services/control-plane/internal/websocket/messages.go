@@ -1,0 +1,51 @@
+package websocket
+
+import "github.com/google/uuid"
+
+// IncomingMessage represents a message received from a client
+type IncomingMessage struct {
+	// Message type: subscribe, unsubscribe, message, typing
+	Type string `json:"type"`
+
+	// Message data (type-specific)
+	Data map[string]interface{} `json:"data"`
+
+	// Sender info (set by server)
+	UserID   uuid.UUID `json:"-"`
+	ClientID uuid.UUID `json:"-"`
+}
+
+// OutgoingMessage represents a message sent to a client
+type OutgoingMessage struct {
+	// Message type: connected, subscribed, message, typing, presence, error
+	Type string `json:"type"`
+
+	// Message data (type-specific)
+	Data map[string]interface{} `json:"data"`
+}
+
+// BroadcastMessage represents a message to be broadcast to channel subscribers
+type BroadcastMessage struct {
+	// Target channel ID
+	ChannelID uuid.UUID
+
+	// Message to send
+	Data OutgoingMessage
+
+	// Optional: exclude this user from receiving the message
+	ExcludeUser *uuid.UUID
+}
+
+// PresenceUpdate represents a user presence change
+type PresenceUpdate struct {
+	UserID    uuid.UUID `json:"user_id"`
+	Status    string    `json:"status"`    // online, offline, away
+	Timestamp int64     `json:"timestamp"` // Unix timestamp
+}
+
+// TypingIndicator represents a typing indicator event
+type TypingIndicator struct {
+	UserID    uuid.UUID `json:"user_id"`
+	ChannelID uuid.UUID `json:"channel_id"`
+	IsTyping  bool      `json:"is_typing"`
+}
