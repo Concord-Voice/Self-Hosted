@@ -16,7 +16,7 @@ var (
 	ErrIncompatibleVersion = errors.New("incompatible argon2 version")
 )
 
-// Argon2id parameters (OWASP recommended 2023)
+// Argon2id parameters (exceeds OWASP 2023 recommendations)
 type Argon2Params struct {
 	Memory      uint32
 	Iterations  uint32
@@ -25,12 +25,13 @@ type Argon2Params struct {
 	KeyLength   uint32
 }
 
-// DefaultParams returns OWASP recommended parameters for Argon2id
+// DefaultParams returns enhanced parameters for Argon2id
+// These settings exceed OWASP recommendations, optimized for modern multi-core systems
 func DefaultParams() *Argon2Params {
 	return &Argon2Params{
 		Memory:      64 * 1024, // 64 MB
 		Iterations:  3,
-		Parallelism: 2,
+		Parallelism: 4, // Increased from 2 for better resistance on modern CPUs
 		SaltLength:  16,
 		KeyLength:   32,
 	}
@@ -59,7 +60,7 @@ func HashPasswordWithParams(password string, p *Argon2Params) (string, error) {
 		p.KeyLength,
 	)
 
-	// Encode to string: $argon2id$v=19$m=65536,t=3,p=2$salt$hash
+	// Encode to string: $argon2id$v=19$m=65536,t=3,p=4$salt$hash
 	b64Salt := base64.RawStdEncoding.EncodeToString(salt)
 	b64Hash := base64.RawStdEncoding.EncodeToString(hash)
 
