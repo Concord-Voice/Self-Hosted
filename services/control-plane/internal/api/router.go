@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/concord/control-plane/internal/auth"
+	"github.com/concord/control-plane/internal/channels"
 	"github.com/concord/control-plane/internal/middleware"
 	"github.com/concord/control-plane/internal/servers"
 	"github.com/concord/control-plane/internal/sessions"
@@ -43,6 +44,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	sessionsHandler := sessions.NewHandler(db, log)
 	usersHandler := users.NewHandler(db, log)
 	serversHandler := servers.NewHandler(db, log)
+	channelsHandler := channels.NewHandler(db, log)
 	wsHandler := websocket.NewHandler(hub, cfg.JWTSecret)
 
 	// API v1 routes
@@ -143,17 +145,40 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
 					serversHandler.DeleteServer,
 				)
+
+				// List channels in a server (30 requests per minute)
+				serverRoutes.GET("/:id/channels",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					channelsHandler.ListChannels,
+				)
 			}
 
 			// Channel routes
-			channels := protected.Group("/channels")
+			channelRoutes := protected.Group("/channels")
 			{
-				channels.POST("", func(c *gin.Context) {
-					c.JSON(http.StatusNotImplemented, gin.H{"message": "Not implemented yet"})
-				})
-				channels.GET("/:id", func(c *gin.Context) {
-					c.JSON(http.StatusNotImplemented, gin.H{"message": "Not implemented yet"})
-				})
+				// Create channel (10 requests per minute)
+				channelRoutes.POST("",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					channelsHandler.CreateChannel,
+				)
+
+				// Get specific channel (30 requests per minute)
+				channelRoutes.GET("/:id",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					channelsHandler.GetChannel,
+				)
+
+				// Update channel (10 requests per minute)
+				channelRoutes.PATCH("/:id",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					channelsHandler.UpdateChannel,
+				)
+
+				// Delete channel (5 requests per minute - destructive action)
+				channelRoutes.DELETE("/:id",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					channelsHandler.DeleteChannel,
+				)
 			}
 		}
 
