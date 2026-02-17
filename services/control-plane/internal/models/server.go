@@ -6,6 +6,7 @@ import "time"
 type Server struct {
 	ID        string    `json:"id" db:"id"`
 	Name      string    `json:"name" db:"name"`
+	IconURL   *string   `json:"icon_url,omitempty" db:"icon_url"`
 	OwnerID   string    `json:"owner_id" db:"owner_id"`
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`

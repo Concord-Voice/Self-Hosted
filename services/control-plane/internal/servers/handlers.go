@@ -3,6 +3,7 @@ package servers
 import (
 	"database/sql"
 	"net/http"
+	"strings"
 
 	"github.com/concord/control-plane/internal/models"
 	"github.com/concord/control-plane/pkg/logger"
@@ -26,12 +27,14 @@ func NewHandler(db *sql.DB, log *logger.Logger) *Handler {
 
 // CreateServerRequest represents a request to create a server
 type CreateServerRequest struct {
-	Name string `json:"name" binding:"required,min=3,max=100"`
+	Name    string  `json:"name" binding:"required,min=3,max=100"`
+	IconURL *string `json:"icon_url"`
 }
 
 // UpdateServerRequest represents a request to update a server
 type UpdateServerRequest struct {
-	Name string `json:"name" binding:"required,min=3,max=100"`
+	Name    string  `json:"name" binding:"required,min=3,max=100"`
+	IconURL *string `json:"icon_url"`
 }
 
 // ListServers returns all servers the user is a member of
@@ -39,7 +42,7 @@ func (h *Handler) ListServers(c *gin.Context) {
 	userID := c.GetString("user_id")
 
 	query := `
-		SELECT s.id, s.name, s.owner_id, s.created_at, s.updated_at, sm.role
+		SELECT s.id, s.name, s.icon_url, s.owner_id, s.created_at, s.updated_at, sm.role
 		FROM servers s
 		INNER JOIN server_members sm ON s.id = sm.server_id
 		WHERE sm.user_id = $1
@@ -60,6 +63,7 @@ func (h *Handler) ListServers(c *gin.Context) {
 		err := rows.Scan(
 			&server.ID,
 			&server.Name,
+			&server.IconURL,
 			&server.OwnerID,
 			&server.CreatedAt,
 			&server.UpdatedAt,
@@ -98,20 +102,33 @@ func (h *Handler) CreateServer(c *gin.Context) {
 		}
 	}()
 
+	// Validate icon_url if provided
+	if req.IconURL != nil && *req.IconURL != "" {
+		if !strings.HasPrefix(*req.IconURL, "data:image/") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon must be a valid image data URL"})
+			return
+		}
+		if len(*req.IconURL) > 500000 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon data URL must be less than 500KB"})
+			return
+		}
+	}
+
 	// Create server
 	serverID := uuid.New().String()
 	serverQuery := `
-		INSERT INTO servers (id, name, owner_id, created_at, updated_at)
-		VALUES ($1, $2, $3, NOW(), NOW())
+		INSERT INTO servers (id, name, icon_url, owner_id, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, NOW(), NOW())
 		RETURNING created_at, updated_at
 	`
 
 	var server models.Server
 	server.ID = serverID
 	server.Name = req.Name
+	server.IconURL = req.IconURL
 	server.OwnerID = userID
 
-	err = tx.QueryRow(serverQuery, serverID, req.Name, userID).Scan(
+	err = tx.QueryRow(serverQuery, serverID, req.Name, req.IconURL, userID).Scan(
 		&server.CreatedAt,
 		&server.UpdatedAt,
 	)
@@ -180,7 +197,7 @@ func (h *Handler) GetServer(c *gin.Context) {
 	// Get server details
 	var server models.Server
 	serverQuery := `
-		SELECT id, name, owner_id, created_at, updated_at
+		SELECT id, name, icon_url, owner_id, created_at, updated_at
 		FROM servers
 		WHERE id = $1
 	`
@@ -188,6 +205,7 @@ func (h *Handler) GetServer(c *gin.Context) {
 	err = h.db.QueryRow(serverQuery, serverID).Scan(
 		&server.ID,
 		&server.Name,
+		&server.IconURL,
 		&server.OwnerID,
 		&server.CreatedAt,
 		&server.UpdatedAt,
@@ -246,19 +264,32 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 		return
 	}
 
+	// Validate icon_url if provided
+	if req.IconURL != nil && *req.IconURL != "" {
+		if !strings.HasPrefix(*req.IconURL, "data:image/") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon must be a valid image data URL"})
+			return
+		}
+		if len(*req.IconURL) > 500000 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon data URL must be less than 500KB"})
+			return
+		}
+	}
+
 	// Update server
 	updateQuery := `
 		UPDATE servers
-		SET name = $1, updated_at = NOW()
-		WHERE id = $2
-		RETURNING name, owner_id, created_at, updated_at
+		SET name = $1, icon_url = $2, updated_at = NOW()
+		WHERE id = $3
+		RETURNING name, icon_url, owner_id, created_at, updated_at
 	`
 
 	var server models.Server
 	server.ID = serverID
 
-	err = h.db.QueryRow(updateQuery, req.Name, serverID).Scan(
+	err = h.db.QueryRow(updateQuery, req.Name, req.IconURL, serverID).Scan(
 		&server.Name,
+		&server.IconURL,
 		&server.OwnerID,
 		&server.CreatedAt,
 		&server.UpdatedAt,
