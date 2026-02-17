@@ -7,6 +7,7 @@ import (
 
 	"github.com/concord/control-plane/internal/auth"
 	"github.com/concord/control-plane/internal/channels"
+	"github.com/concord/control-plane/internal/members"
 	"github.com/concord/control-plane/internal/middleware"
 	"github.com/concord/control-plane/internal/servers"
 	"github.com/concord/control-plane/internal/sessions"
@@ -45,6 +46,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	usersHandler := users.NewHandler(db, log)
 	serversHandler := servers.NewHandler(db, log)
 	channelsHandler := channels.NewHandler(db, log)
+	membersHandler := members.NewHandler(db, log)
 	wsHandler := websocket.NewHandler(hub, cfg.JWTSecret)
 
 	// API v1 routes
@@ -150,6 +152,30 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 				serverRoutes.GET("/:id/channels",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					channelsHandler.ListChannels,
+				)
+
+				// List members in a server (30 requests per minute)
+				serverRoutes.GET("/:id/members",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					membersHandler.ListMembers,
+				)
+
+				// Add member to server (10 requests per minute)
+				serverRoutes.POST("/:id/members",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					membersHandler.AddMember,
+				)
+
+				// Update member role (5 requests per minute - sensitive operation)
+				serverRoutes.PATCH("/:id/members/:user_id",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					membersHandler.UpdateMember,
+				)
+
+				// Remove member from server (5 requests per minute - sensitive operation)
+				serverRoutes.DELETE("/:id/members/:user_id",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					membersHandler.RemoveMember,
 				)
 			}
 
