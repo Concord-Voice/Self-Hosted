@@ -15,10 +15,11 @@ type User struct {
 	UpdatedAt      time.Time `json:"updated_at" db:"updated_at"`
 }
 
-// PublicUser returns user data safe for public consumption
+// PublicUser returns user data safe for the authenticated user
 func (u *User) PublicUser() map[string]interface{} {
 	return map[string]interface{}{
 		"id":              u.ID,
+		"email":           u.Email,
 		"username":        u.Username,
 		"e2ee_preference": u.E2EEPreference,
 		"created_at":      u.CreatedAt,
