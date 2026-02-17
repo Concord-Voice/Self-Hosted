@@ -8,6 +8,7 @@ import (
 	"github.com/concord/control-plane/internal/auth"
 	"github.com/concord/control-plane/internal/channels"
 	"github.com/concord/control-plane/internal/members"
+	"github.com/concord/control-plane/internal/messages"
 	"github.com/concord/control-plane/internal/middleware"
 	"github.com/concord/control-plane/internal/servers"
 	"github.com/concord/control-plane/internal/sessions"
@@ -47,6 +48,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	serversHandler := servers.NewHandler(db, log)
 	channelsHandler := channels.NewHandler(db, log)
 	membersHandler := members.NewHandler(db, log)
+	messagesHandler := messages.NewHandler(db, log)
 	wsHandler := websocket.NewHandler(hub, cfg.JWTSecret)
 
 	// API v1 routes
@@ -204,6 +206,34 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 				channelRoutes.DELETE("/:id",
 					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
 					channelsHandler.DeleteChannel,
+				)
+
+				// Get message history for a channel (30 requests per minute)
+				channelRoutes.GET("/:id/messages",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					messagesHandler.GetMessages,
+				)
+			}
+
+			// Message routes
+			messageRoutes := protected.Group("/messages")
+			{
+				// Send message (30 requests per minute)
+				messageRoutes.POST("",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					messagesHandler.SendMessage,
+				)
+
+				// Update message (10 requests per minute)
+				messageRoutes.PATCH("/:id",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					messagesHandler.UpdateMessage,
+				)
+
+				// Delete message (10 requests per minute)
+				messageRoutes.DELETE("/:id",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					messagesHandler.DeleteMessage,
 				)
 			}
 		}

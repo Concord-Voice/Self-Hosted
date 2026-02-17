@@ -1,0 +1,337 @@
+package messages
+
+import (
+	"database/sql"
+	"net/http"
+	"strconv"
+
+	"github.com/concord/control-plane/internal/models"
+	"github.com/concord/control-plane/pkg/logger"
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+)
+
+// Handler handles message-related requests
+type Handler struct {
+	db  *sql.DB
+	log *logger.Logger
+}
+
+// NewHandler creates a new message handler
+func NewHandler(db *sql.DB, log *logger.Logger) *Handler {
+	return &Handler{
+		db:  db,
+		log: log,
+	}
+}
+
+// SendMessageRequest represents a request to send a message
+type SendMessageRequest struct {
+	ChannelID   string `json:"channel_id" binding:"required,uuid"`
+	Content     string `json:"content" binding:"required,min=1,max=4000"`
+	IsEncrypted bool   `json:"is_encrypted"`
+}
+
+// UpdateMessageRequest represents a request to update a message
+type UpdateMessageRequest struct {
+	Content string `json:"content" binding:"required,min=1,max=4000"`
+}
+
+// GetMessages returns message history for a channel
+func (h *Handler) GetMessages(c *gin.Context) {
+	userID := c.GetString("user_id")
+	channelID := c.Param("id")
+
+	// Validate channel ID
+	if _, err := uuid.Parse(channelID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
+		return
+	}
+
+	// Pagination parameters
+	limit := 50 // Default limit
+	if limitParam := c.Query("limit"); limitParam != "" {
+		if l, err := strconv.Atoi(limitParam); err == nil && l > 0 && l <= 100 {
+			limit = l
+		}
+	}
+
+	before := c.Query("before") // Message ID to get messages before (for pagination)
+
+	// Check if user is a member of the channel's server
+	var isMember bool
+	memberQuery := `
+		SELECT EXISTS(
+			SELECT 1 FROM channels c
+			INNER JOIN server_members sm ON c.server_id = sm.server_id
+			WHERE c.id = $1 AND sm.user_id = $2
+		)
+	`
+
+	err := h.db.QueryRow(memberQuery, channelID, userID).Scan(&isMember)
+	if err != nil {
+		h.log.Error("Failed to check membership", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch messages"})
+		return
+	}
+
+	if !isMember {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this channel's server"})
+		return
+	}
+
+	// Build query based on pagination
+	var query string
+	var args []interface{}
+
+	if before != "" {
+		// Get messages before a specific message ID
+		query = `
+			SELECT m.id, m.channel_id, m.user_id, m.content, m.is_encrypted,
+			       m.edited_at, m.created_at, m.updated_at, u.username
+			FROM messages m
+			INNER JOIN users u ON m.user_id = u.id
+			WHERE m.channel_id = $1
+			  AND m.created_at < (SELECT created_at FROM messages WHERE id = $2)
+			ORDER BY m.created_at DESC
+			LIMIT $3
+		`
+		args = []interface{}{channelID, before, limit}
+	} else {
+		// Get most recent messages
+		query = `
+			SELECT m.id, m.channel_id, m.user_id, m.content, m.is_encrypted,
+			       m.edited_at, m.created_at, m.updated_at, u.username
+			FROM messages m
+			INNER JOIN users u ON m.user_id = u.id
+			WHERE m.channel_id = $1
+			ORDER BY m.created_at DESC
+			LIMIT $2
+		`
+		args = []interface{}{channelID, limit}
+	}
+
+	rows, err := h.db.Query(query, args...)
+	if err != nil {
+		h.log.Error("Failed to query messages", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch messages"})
+		return
+	}
+	defer rows.Close()
+
+	messages := []models.MessageWithUser{}
+	for rows.Next() {
+		var msg models.MessageWithUser
+		err := rows.Scan(
+			&msg.ID,
+			&msg.ChannelID,
+			&msg.UserID,
+			&msg.Content,
+			&msg.IsEncrypted,
+			&msg.EditedAt,
+			&msg.CreatedAt,
+			&msg.UpdatedAt,
+			&msg.Username,
+		)
+		if err != nil {
+			h.log.Error("Failed to scan message", "error", err)
+			continue
+		}
+		messages = append(messages, msg)
+	}
+
+	// Reverse to get chronological order (oldest first)
+	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
+		messages[i], messages[j] = messages[j], messages[i]
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"messages": messages,
+		"count":    len(messages),
+	})
+}
+
+// SendMessage sends a new message to a channel
+func (h *Handler) SendMessage(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	var req SendMessageRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Check if user is a member of the channel's server
+	var isMember bool
+	memberQuery := `
+		SELECT EXISTS(
+			SELECT 1 FROM channels c
+			INNER JOIN server_members sm ON c.server_id = sm.server_id
+			WHERE c.id = $1 AND sm.user_id = $2
+		)
+	`
+
+	err := h.db.QueryRow(memberQuery, req.ChannelID, userID).Scan(&isMember)
+	if err != nil {
+		h.log.Error("Failed to check membership", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send message"})
+		return
+	}
+
+	if !isMember {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this channel's server"})
+		return
+	}
+
+	// Create message
+	messageID := uuid.New().String()
+	insertQuery := `
+		INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+		RETURNING created_at, updated_at
+	`
+
+	var message models.Message
+	message.ID = messageID
+	message.ChannelID = req.ChannelID
+	message.UserID = userID
+	message.Content = req.Content
+	message.IsEncrypted = req.IsEncrypted
+
+	err = h.db.QueryRow(insertQuery, messageID, req.ChannelID, userID, req.Content, req.IsEncrypted).Scan(
+		&message.CreatedAt,
+		&message.UpdatedAt,
+	)
+	if err != nil {
+		h.log.Error("Failed to create message", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send message"})
+		return
+	}
+
+	h.log.Info("Message sent", "message_id", messageID, "channel_id", req.ChannelID, "user_id", userID)
+
+	c.JSON(http.StatusCreated, gin.H{"message": message})
+}
+
+// UpdateMessage updates a message's content
+func (h *Handler) UpdateMessage(c *gin.Context) {
+	userID := c.GetString("user_id")
+	messageID := c.Param("id")
+
+	// Validate message ID
+	if _, err := uuid.Parse(messageID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid message ID"})
+		return
+	}
+
+	var req UpdateMessageRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Check if message exists and user is the author
+	var authorID string
+	authorQuery := `SELECT user_id FROM messages WHERE id = $1`
+
+	err := h.db.QueryRow(authorQuery, messageID).Scan(&authorID)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Message not found"})
+		return
+	} else if err != nil {
+		h.log.Error("Failed to check message author", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update message"})
+		return
+	}
+
+	if authorID != userID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You can only edit your own messages"})
+		return
+	}
+
+	// Update message
+	updateQuery := `
+		UPDATE messages
+		SET content = $1, edited_at = NOW(), updated_at = NOW()
+		WHERE id = $2
+		RETURNING channel_id, is_encrypted, edited_at, created_at, updated_at
+	`
+
+	var message models.Message
+	message.ID = messageID
+	message.UserID = userID
+	message.Content = req.Content
+
+	err = h.db.QueryRow(updateQuery, req.Content, messageID).Scan(
+		&message.ChannelID,
+		&message.IsEncrypted,
+		&message.EditedAt,
+		&message.CreatedAt,
+		&message.UpdatedAt,
+	)
+
+	if err != nil {
+		h.log.Error("Failed to update message", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update message"})
+		return
+	}
+
+	h.log.Info("Message updated", "message_id", messageID, "user_id", userID)
+
+	c.JSON(http.StatusOK, gin.H{"message": message})
+}
+
+// DeleteMessage deletes a message
+func (h *Handler) DeleteMessage(c *gin.Context) {
+	userID := c.GetString("user_id")
+	messageID := c.Param("id")
+
+	// Validate message ID
+	if _, err := uuid.Parse(messageID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid message ID"})
+		return
+	}
+
+	// Check if message exists and get author + server info
+	var authorID, serverID string
+	var userRole string
+	checkQuery := `
+		SELECT m.user_id, c.server_id, sm.role
+		FROM messages m
+		INNER JOIN channels c ON m.channel_id = c.id
+		LEFT JOIN server_members sm ON c.server_id = sm.server_id AND sm.user_id = $2
+		WHERE m.id = $1
+	`
+
+	err := h.db.QueryRow(checkQuery, messageID, userID).Scan(&authorID, &serverID, &userRole)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Message not found"})
+		return
+	} else if err != nil {
+		h.log.Error("Failed to check message permissions", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete message"})
+		return
+	}
+
+	// Check permissions: user must be the author, or owner/admin of the server
+	canDelete := authorID == userID || userRole == "owner" || userRole == "admin"
+
+	if !canDelete {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You can only delete your own messages or be a server admin/owner"})
+		return
+	}
+
+	// Delete message
+	deleteQuery := `DELETE FROM messages WHERE id = $1`
+
+	_, err = h.db.Exec(deleteQuery, messageID)
+	if err != nil {
+		h.log.Error("Failed to delete message", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete message"})
+		return
+	}
+
+	h.log.Info("Message deleted", "message_id", messageID, "deleted_by", userID, "author", authorID)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Message deleted successfully"})
+}
