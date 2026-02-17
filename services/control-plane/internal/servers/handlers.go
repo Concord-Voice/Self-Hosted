@@ -92,7 +92,11 @@ func (h *Handler) CreateServer(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create server"})
 		return
 	}
-	defer tx.Rollback()
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			h.log.Error("Failed to rollback transaction", "error", rbErr)
+		}
+	}()
 
 	// Create server
 	serverID := uuid.New().String()

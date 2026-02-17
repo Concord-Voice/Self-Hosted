@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"encoding/base64"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/concord/control-plane/internal/models"
@@ -128,11 +129,11 @@ func (h *Handler) Register(c *gin.Context) {
 	if err != nil {
 		h.log.Error("Failed to create user", "error", err)
 		// Check for duplicate email or username
-		if err.Error() == "pq: duplicate key value violates unique constraint \"users_email_key\"" {
+		if strings.Contains(err.Error(), "users_email_key") {
 			c.JSON(http.StatusConflict, gin.H{"error": "Email already in use"})
 			return
 		}
-		if err.Error() == "pq: duplicate key value violates unique constraint \"users_username_key\"" {
+		if strings.Contains(err.Error(), "users_username_key") {
 			c.JSON(http.StatusConflict, gin.H{"error": "Username already taken"})
 			return
 		}
