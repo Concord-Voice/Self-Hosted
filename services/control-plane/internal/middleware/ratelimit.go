@@ -60,13 +60,15 @@ func rateLimit(redis *redis.Client, config RateLimitConfig) gin.HandlerFunc {
 			return
 		}
 
-		// Set expiry on first request
-		if count == 1 {
+		// Set expiry on first request OR if key somehow lost its TTL
+		// This prevents keys from persisting indefinitely if Expire fails
+		ttl, err := redis.TTL(ctx, key).Result()
+		if err != nil || ttl == -1 || count == 1 {
+			// TTL is -1 when key exists but has no expiry
+			// Always set expiry to ensure window resets properly
 			redis.Expire(ctx, key, config.Window)
+			ttl = config.Window
 		}
-
-		// Get TTL for rate limit reset time
-		ttl, _ := redis.TTL(ctx, key).Result()
 
 		// Set rate limit headers
 		c.Header("X-RateLimit-Limit", fmt.Sprintf("%d", config.Requests))
