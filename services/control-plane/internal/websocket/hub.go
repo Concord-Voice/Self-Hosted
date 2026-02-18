@@ -332,15 +332,20 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		return
 	}
 
-	// Broadcast persisted message to all subscribers of the channel
+	// Broadcast persisted message to all subscribers except sender
+	// (sender sees the message instantly via optimistic UI)
 	broadcastMsg := BroadcastMessage{
-		ChannelID: channelUUID,
+		ChannelID:   channelUUID,
+		ExcludeUser: &msg.UserID,
 		Data: OutgoingMessage{
 			Type: "message",
 			Data: map[string]interface{}{
 				"id":           messageID,
 				"channel_id":   channelUUID,
 				"user_id":      msg.UserID,
+				"username":     client.Username,
+				"display_name": client.DisplayName,
+				"avatar_url":   client.AvatarURL,
 				"content":      content,
 				"is_encrypted": isEncrypted,
 				"created_at":   createdAt,
@@ -382,6 +387,7 @@ func (h *Hub) handleTyping(msg IncomingMessage) {
 			Data: map[string]interface{}{
 				"channel_id": channelUUID,
 				"user_id":    msg.UserID,
+				"username":   client.Username,
 				"is_typing":  msg.Data["is_typing"],
 			},
 		},

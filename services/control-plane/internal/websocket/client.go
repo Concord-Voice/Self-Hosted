@@ -32,6 +32,15 @@ type Client struct {
 	// User ID from JWT token
 	UserID uuid.UUID
 
+	// Username from database (set at connection time)
+	Username string
+
+	// DisplayName from database (set at connection time)
+	DisplayName *string
+
+	// AvatarURL from database (set at connection time)
+	AvatarURL *string
+
 	// The WebSocket connection
 	Conn *websocket.Conn
 
