@@ -29,13 +29,13 @@ func NewHandler(db *sql.DB, log *logger.Logger) *Handler {
 type CreateChannelRequest struct {
 	ServerID string `json:"server_id" binding:"required,uuid"`
 	Name     string `json:"name" binding:"required,min=3,max=100"`
-	Type     string `json:"type" binding:"required,oneof=text voice announcement"`
+	Type     string `json:"type" binding:"required,oneof=text voice bulletin"`
 }
 
 // UpdateChannelRequest represents a request to update a channel
 type UpdateChannelRequest struct {
 	Name string `json:"name" binding:"required,min=3,max=100"`
-	Type string `json:"type" binding:"required,oneof=text voice announcement"`
+	Type string `json:"type" binding:"required,oneof=text voice bulletin"`
 }
 
 // ListChannels returns all channels in a server
