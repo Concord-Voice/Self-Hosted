@@ -79,6 +79,11 @@ func (h *Hub) handleRegister(client *Client) {
 	}
 	h.userClients[client.UserID][client.ID] = true
 
+	// If this is the user's first connection, broadcast online presence
+	if len(h.userClients[client.UserID]) == 1 {
+		h.broadcastPresenceToAll(client.UserID, "online")
+	}
+
 	log.Printf("Client registered: user=%s client=%s total_clients=%d",
 		client.UserID, client.ID, len(h.clients))
 
@@ -94,6 +99,21 @@ func (h *Hub) handleRegister(client *Client) {
 	if data, err := json.Marshal(confirmMsg); err == nil {
 		client.Send <- data
 	}
+
+	// Send presence snapshot of all currently online users to the new client
+	onlineUsers := make([]string, 0, len(h.userClients))
+	for uid := range h.userClients {
+		onlineUsers = append(onlineUsers, uid.String())
+	}
+	presenceSnapshot := OutgoingMessage{
+		Type: "presence_snapshot",
+		Data: map[string]interface{}{
+			"online_user_ids": onlineUsers,
+		},
+	}
+	if data, err := json.Marshal(presenceSnapshot); err == nil {
+		client.Send <- data
+	}
 }
 
 // handleUnregister unregisters a client
@@ -107,6 +127,8 @@ func (h *Hub) handleUnregister(client *Client) {
 			delete(userClients, client.ID)
 			if len(userClients) == 0 {
 				delete(h.userClients, client.UserID)
+				// User's last client disconnected — broadcast offline
+				h.broadcastPresenceToAll(client.UserID, "offline")
 			}
 		}
 
@@ -424,4 +446,26 @@ func (h *Hub) GetUserClientCount(userID uuid.UUID) int {
 		return len(clients)
 	}
 	return 0
+}
+
+// broadcastPresenceToAll sends a presence update to all connected clients
+func (h *Hub) broadcastPresenceToAll(userID uuid.UUID, status string) {
+	msg := OutgoingMessage{
+		Type: "presence",
+		Data: map[string]interface{}{
+			"user_id": userID.String(),
+			"status":  status,
+		},
+	}
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Printf("Failed to marshal presence message: %v", err)
+		return
+	}
+	for _, client := range h.clients {
+		select {
+		case client.Send <- data:
+		default:
+		}
+	}
 }
