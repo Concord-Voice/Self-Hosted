@@ -87,6 +87,11 @@ func (h *Handler) ListSessions(c *gin.Context) {
 
 		sessions = append(sessions, sessionData)
 	}
+	if err := rows.Err(); err != nil {
+		h.log.Error("Error iterating sessions", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch sessions"})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"sessions": sessions,

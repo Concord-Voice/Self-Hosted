@@ -20,23 +20,21 @@ var (
 	consecutiveSpecial = regexp.MustCompile(`[_-]{2,}`)
 )
 
-// Common offensive/reserved words (basic list - expand as needed)
-// These are case-insensitive and checked for exact matches and variations
-var blockedWords = []string{
-	// System reserved
+// reservedWords are checked with substring matching to prevent variations like "admin123"
+var reservedWords = []string{
 	"admin", "administrator", "root", "system", "moderator", "mod",
 	"support", "help", "concord", "concordvoice", "official",
 	"api", "www", "mail", "smtp", "ftp", "noreply",
+	"staff", "employee", "team", "service", "bot",
+}
 
-	// Profanity (basic list - use a proper library for production)
+// profanityWords are checked with exact match only to avoid false positives
+// (e.g., "ass" matching "classical", "cock" matching "peacock").
+// Use a proper library for production.
+var profanityWords = []string{
 	"fuck", "shit", "damn", "bitch", "ass", "bastard",
 	"asshole", "dick", "pussy", "cock", "cunt",
-
-	// Slurs and hate speech (basic - expand significantly)
 	"nigger", "nigga", "faggot", "retard", "tranny",
-
-	// Impersonation risks
-	"staff", "employee", "team", "service", "bot",
 }
 
 // Leetspeak substitution map for detecting variations
@@ -91,17 +89,17 @@ func checkBlockedWords(username string) error {
 	// Convert leetspeak to normal characters
 	deLeeted := deLeetSpeak(stripped)
 
-	// Check exact match and contains
-	for _, blocked := range blockedWords {
-		blocked = strings.ToLower(blocked)
-
-		// Check if normalized username matches or contains blocked word
-		if normalized == blocked || stripped == blocked || deLeeted == blocked {
+	// Check reserved words with substring matching (to catch "admin123", "sysadmin", etc.)
+	for _, reserved := range reservedWords {
+		if strings.Contains(stripped, reserved) || strings.Contains(deLeeted, reserved) {
 			return fmt.Errorf("username is not available")
 		}
+	}
 
-		// Check if it contains the blocked word (to catch things like "admin123")
-		if strings.Contains(stripped, blocked) || strings.Contains(deLeeted, blocked) {
+	// Check profanity with exact match only to avoid false positives
+	// (e.g., "ass" matching "classical", "cock" matching "peacock")
+	for _, profane := range profanityWords {
+		if stripped == profane || deLeeted == profane {
 			return fmt.Errorf("username is not available")
 		}
 	}

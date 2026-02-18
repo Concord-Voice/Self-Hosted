@@ -39,7 +39,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	})
 
 	// Initialize WebSocket hub
-	hub := websocket.NewHub()
+	hub := websocket.NewHub(db)
 	go hub.Run()
 
 	// Initialize handlers
@@ -50,7 +50,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	channelsHandler := channels.NewHandler(db, log)
 	membersHandler := members.NewHandler(db, log)
 	messagesHandler := messages.NewHandler(db, log)
-	wsHandler := websocket.NewHandler(hub, cfg.JWTSecret)
+	wsHandler := websocket.NewHandler(hub, cfg.JWTSecret, cfg.AllowedOrigins)
 
 	// API v1 routes
 	v1 := router.Group("/api/v1")

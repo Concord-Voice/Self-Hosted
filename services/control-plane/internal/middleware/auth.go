@@ -45,13 +45,21 @@ func AuthRequired(jwtSecret string) gin.HandlerFunc {
 		}
 
 		// Extract claims
-		if claims, ok := token.Claims.(jwt.MapClaims); ok {
-			// Store user ID in context
-			if userID, ok := claims["user_id"].(string); ok {
-				c.Set("user_id", userID)
-			}
+		claims, ok := token.Claims.(jwt.MapClaims)
+		if !ok {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token claims"})
+			c.Abort()
+			return
 		}
 
+		userID, ok := claims["user_id"].(string)
+		if !ok || userID == "" {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid token: missing user ID"})
+			c.Abort()
+			return
+		}
+
+		c.Set("user_id", userID)
 		c.Next()
 	}
 }

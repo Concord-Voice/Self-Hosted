@@ -23,7 +23,7 @@ func RateLimitByIP(redis *redis.Client, requests int, window time.Duration) gin.
 		Requests: requests,
 		Window:   window,
 		KeyFunc: func(c *gin.Context) string {
-			return fmt.Sprintf("ratelimit:ip:%s", c.ClientIP())
+			return fmt.Sprintf("ratelimit:ip:%s:%s:%s", c.ClientIP(), c.Request.Method, c.FullPath())
 		},
 	}
 	return rateLimit(redis, config)
@@ -38,9 +38,9 @@ func RateLimitByUser(redis *redis.Client, requests int, window time.Duration) gi
 			userID, exists := c.Get("user_id")
 			if !exists {
 				// Fall back to IP if user not authenticated
-				return fmt.Sprintf("ratelimit:ip:%s", c.ClientIP())
+				return fmt.Sprintf("ratelimit:ip:%s:%s:%s", c.ClientIP(), c.Request.Method, c.FullPath())
 			}
-			return fmt.Sprintf("ratelimit:user:%v", userID)
+			return fmt.Sprintf("ratelimit:user:%v:%s:%s", userID, c.Request.Method, c.FullPath())
 		},
 	}
 	return rateLimit(redis, config)

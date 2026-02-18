@@ -108,6 +108,11 @@ func (h *Handler) ListChannels(c *gin.Context) {
 		}
 		channels = append(channels, channel)
 	}
+	if err := rows.Err(); err != nil {
+		h.log.Error("Error iterating channels", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch channels"})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{"channels": channels})
 }

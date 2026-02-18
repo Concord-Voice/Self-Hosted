@@ -107,6 +107,11 @@ func (h *Handler) ListMembers(c *gin.Context) {
 		}
 		members = append(members, member)
 	}
+	if err := rows.Err(); err != nil {
+		h.log.Error("Error iterating members", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch members"})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{"members": members})
 }
@@ -216,7 +221,7 @@ func (h *Handler) UpdateMember(c *gin.Context) {
 	}
 
 	// Get requesting user's role and target user's role
-	var requesterRole, targetRole string
+	var requesterRole, targetRole sql.NullString
 	roleQuery := `
 		SELECT
 			(SELECT role FROM server_members WHERE server_id = $1 AND user_id = $2) as requester_role,
@@ -231,17 +236,22 @@ func (h *Handler) UpdateMember(c *gin.Context) {
 	}
 
 	// Check permissions
-	if requesterRole != "owner" {
+	if !requesterRole.Valid {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this server"})
+		return
+	}
+
+	if requesterRole.String != "owner" {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Only the server owner can change member roles"})
 		return
 	}
 
-	if targetRole == "" {
+	if !targetRole.Valid {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User is not a member of this server"})
 		return
 	}
 
-	if targetRole == "owner" {
+	if targetRole.String == "owner" {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Cannot change the owner's role"})
 		return
 	}
@@ -288,7 +298,7 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 	}
 
 	// Get roles
-	var requesterRole, targetRole string
+	var requesterRole, targetRole sql.NullString
 	roleQuery := `
 		SELECT
 			(SELECT role FROM server_members WHERE server_id = $1 AND user_id = $2) as requester_role,
@@ -302,12 +312,12 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 		return
 	}
 
-	if requesterRole == "" {
+	if !requesterRole.Valid {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this server"})
 		return
 	}
 
-	if targetRole == "" {
+	if !targetRole.Valid {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User is not a member of this server"})
 		return
 	}
@@ -317,25 +327,25 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 
 	if !isSelfRemoval {
 		// Kicking someone else - need to be owner or admin
-		if requesterRole != "owner" && requesterRole != "admin" {
+		if requesterRole.String != "owner" && requesterRole.String != "admin" {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Only owners and admins can remove members"})
 			return
 		}
 
 		// Can't kick the owner
-		if targetRole == "owner" {
+		if targetRole.String == "owner" {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Cannot remove the server owner"})
 			return
 		}
 
 		// Admins can't kick other admins or the owner
-		if requesterRole == "admin" && (targetRole == "admin" || targetRole == "owner") {
+		if requesterRole.String == "admin" && (targetRole.String == "admin" || targetRole.String == "owner") {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Admins cannot remove other admins or the owner"})
 			return
 		}
 	} else {
 		// Self-removal (leaving) - owner can't leave their own server
-		if requesterRole == "owner" {
+		if requesterRole.String == "owner" {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Server owner cannot leave. Delete the server or transfer ownership first."})
 			return
 		}

@@ -140,6 +140,11 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		}
 		messages = append(messages, msg)
 	}
+	if err := rows.Err(); err != nil {
+		h.log.Error("Error iterating messages", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch messages"})
+		return
+	}
 
 	// Reverse to get chronological order (oldest first)
 	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
@@ -295,7 +300,7 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 
 	// Check if message exists and get author + server info
 	var authorID, serverID string
-	var userRole string
+	var userRole sql.NullString
 	checkQuery := `
 		SELECT m.user_id, c.server_id, sm.role
 		FROM messages m
@@ -315,7 +320,7 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 	}
 
 	// Check permissions: user must be the author, or owner/admin of the server
-	canDelete := authorID == userID || userRole == "owner" || userRole == "admin"
+	canDelete := authorID == userID || (userRole.Valid && (userRole.String == "owner" || userRole.String == "admin"))
 
 	if !canDelete {
 		c.JSON(http.StatusForbidden, gin.H{"error": "You can only delete your own messages or be a server admin/owner"})

@@ -101,26 +101,8 @@ func (c *Client) writePump() {
 				return
 			}
 
-			w, err := c.Conn.NextWriter(websocket.TextMessage)
-			if err != nil {
-				return
-			}
-			if _, err := w.Write(message); err != nil {
-				return
-			}
-
-			// Add queued messages to the current WebSocket message
-			n := len(c.Send)
-			for i := 0; i < n; i++ {
-				if _, err := w.Write([]byte{'\n'}); err != nil {
-					return
-				}
-				if _, err := w.Write(<-c.Send); err != nil {
-					return
-				}
-			}
-
-			if err := w.Close(); err != nil {
+			// Send each message as its own WebSocket frame to ensure valid JSON
+			if err := c.Conn.WriteMessage(websocket.TextMessage, message); err != nil {
 				return
 			}
 

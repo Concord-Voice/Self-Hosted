@@ -10,27 +10,38 @@ import (
 	"github.com/gorilla/websocket"
 )
 
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	CheckOrigin: func(_ *http.Request) bool {
-		// TODO: In production, check against allowed origins
-		return true
-	},
-}
-
 // Handler handles WebSocket connections
 type Handler struct {
-	hub       *Hub
-	jwtSecret string
+	hub            *Hub
+	jwtSecret      string
+	allowedOrigins []string
+	upgrader       websocket.Upgrader
 }
 
 // NewHandler creates a new WebSocket handler
-func NewHandler(hub *Hub, jwtSecret string) *Handler {
-	return &Handler{
-		hub:       hub,
-		jwtSecret: jwtSecret,
+func NewHandler(hub *Hub, jwtSecret string, allowedOrigins []string) *Handler {
+	h := &Handler{
+		hub:            hub,
+		jwtSecret:      jwtSecret,
+		allowedOrigins: allowedOrigins,
 	}
+	h.upgrader = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			origin := r.Header.Get("Origin")
+			if origin == "" {
+				return true // Allow connections without Origin header (native apps, CLI tools)
+			}
+			for _, allowed := range h.allowedOrigins {
+				if origin == allowed {
+					return true
+				}
+			}
+			return false
+		},
+	}
+	return h
 }
 
 // HandleWebSocket upgrades HTTP connections to WebSocket
@@ -43,7 +54,8 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 	}
 
 	// Upgrade HTTP connection to WebSocket
-	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+	// Origin is validated by h.upgrader.CheckOrigin (configured in NewHandler)
+	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil) // nosemgrep: go.gorilla.security.audit.websocket-missing-origin-check.websocket-missing-origin-check
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to upgrade connection"})
 		return

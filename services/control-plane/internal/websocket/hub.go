@@ -1,14 +1,19 @@
 package websocket
 
 import (
+	"database/sql"
 	"encoding/json"
 	"log"
+	"time"
 
 	"github.com/google/uuid"
 )
 
 // Hub maintains the set of active clients and broadcasts messages
 type Hub struct {
+	// Database connection for authorization checks
+	db *sql.DB
+
 	// Registered clients (client ID -> Client)
 	clients map[uuid.UUID]*Client
 
@@ -32,8 +37,9 @@ type Hub struct {
 }
 
 // NewHub creates a new Hub
-func NewHub() *Hub {
+func NewHub(db *sql.DB) *Hub {
 	return &Hub{
+		db:                   db,
 		clients:              make(map[uuid.UUID]*Client),
 		userClients:          make(map[uuid.UUID]map[uuid.UUID]bool),
 		channelSubscriptions: make(map[uuid.UUID]map[uuid.UUID]bool),
@@ -138,22 +144,42 @@ func (h *Hub) handleIncoming(msg IncomingMessage) {
 	}
 }
 
-// handleSubscribe subscribes a client to a channel
+// handleSubscribe subscribes a client to a channel after verifying membership
 func (h *Hub) handleSubscribe(msg IncomingMessage) {
 	channelID, ok := msg.Data["channel_id"].(string)
 	if !ok {
-		log.Printf("Invalid channel_id in subscribe message")
+		h.sendError(msg.ClientID, "Invalid channel_id in subscribe message")
 		return
 	}
 
 	channelUUID, err := uuid.Parse(channelID)
 	if err != nil {
-		log.Printf("Invalid channel UUID: %v", err)
+		h.sendError(msg.ClientID, "Invalid channel UUID")
 		return
 	}
 
 	client, ok := h.clients[msg.ClientID]
 	if !ok {
+		return
+	}
+
+	// Verify the user is a member of the channel's server
+	var isMember bool
+	err = h.db.QueryRow(
+		`SELECT EXISTS(
+			SELECT 1 FROM channels c
+			INNER JOIN server_members sm ON c.server_id = sm.server_id
+			WHERE c.id = $1 AND sm.user_id = $2
+		)`,
+		channelUUID, client.UserID,
+	).Scan(&isMember)
+	if err != nil {
+		log.Printf("Failed to check channel membership: %v", err)
+		h.sendError(msg.ClientID, "Failed to verify channel access")
+		return
+	}
+	if !isMember {
+		h.sendError(msg.ClientID, "Not authorized to subscribe to this channel")
 		return
 	}
 
@@ -214,7 +240,27 @@ func (h *Hub) handleUnsubscribe(msg IncomingMessage) {
 	log.Printf("Client %s unsubscribed from channel %s", client.ID, channelUUID)
 }
 
-// handleMessage handles a chat message
+// sendError sends an error message to a specific client
+func (h *Hub) sendError(clientID uuid.UUID, message string) {
+	client, ok := h.clients[clientID]
+	if !ok {
+		return
+	}
+	errMsg := OutgoingMessage{
+		Type: "error",
+		Data: map[string]interface{}{
+			"message": message,
+		},
+	}
+	if data, err := json.Marshal(errMsg); err == nil {
+		select {
+		case client.Send <- data:
+		default:
+		}
+	}
+}
+
+// handleMessage handles a chat message: validates, persists to DB, then broadcasts
 func (h *Hub) handleMessage(msg IncomingMessage) {
 	channelID, ok := msg.Data["channel_id"].(string)
 	if !ok {
@@ -226,16 +272,57 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		return
 	}
 
-	// Broadcast to all subscribers of the channel
+	// Verify the client is subscribed to this channel
+	client, ok := h.clients[msg.ClientID]
+	if !ok {
+		return
+	}
+	if !client.Channels[channelUUID] {
+		h.sendError(msg.ClientID, "Not subscribed to this channel")
+		return
+	}
+
+	// Validate content
+	content, ok := msg.Data["content"].(string)
+	if !ok || content == "" {
+		h.sendError(msg.ClientID, "Message content is required")
+		return
+	}
+	if len(content) > 4000 {
+		h.sendError(msg.ClientID, "Message content exceeds maximum length")
+		return
+	}
+
+	isEncrypted, _ := msg.Data["is_encrypted"].(bool)
+
+	// Persist message to database
+	messageID := uuid.New()
+	var createdAt, updatedAt time.Time
+	err = h.db.QueryRow(
+		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+		 RETURNING created_at, updated_at`,
+		messageID, channelUUID, msg.UserID, content, isEncrypted,
+	).Scan(&createdAt, &updatedAt)
+	if err != nil {
+		log.Printf("Failed to persist message: %v", err)
+		h.sendError(msg.ClientID, "Failed to save message")
+		return
+	}
+
+	// Broadcast persisted message to all subscribers of the channel
 	broadcastMsg := BroadcastMessage{
 		ChannelID: channelUUID,
 		Data: OutgoingMessage{
 			Type: "message",
 			Data: map[string]interface{}{
-				"channel_id": channelUUID,
-				"user_id":    msg.UserID,
-				"content":    msg.Data["content"],
-				"timestamp":  msg.Data["timestamp"],
+				"id":           messageID,
+				"channel_id":   channelUUID,
+				"user_id":      msg.UserID,
+				"content":      content,
+				"is_encrypted": isEncrypted,
+				"created_at":   createdAt,
+				"updated_at":   updatedAt,
 			},
 		},
 	}
@@ -252,6 +339,15 @@ func (h *Hub) handleTyping(msg IncomingMessage) {
 
 	channelUUID, err := uuid.Parse(channelID)
 	if err != nil {
+		return
+	}
+
+	// Verify the client is subscribed to this channel
+	client, ok := h.clients[msg.ClientID]
+	if !ok {
+		return
+	}
+	if !client.Channels[channelUUID] {
 		return
 	}
 
@@ -299,9 +395,8 @@ func (h *Hub) handleBroadcast(msg BroadcastMessage) {
 		select {
 		case client.Send <- messageData:
 		default:
-			// Client's send channel is full, close it
-			close(client.Send)
-			delete(h.clients, client.ID)
+			// Client's send channel is full, perform full cleanup
+			h.handleUnregister(client)
 		}
 	}
 }

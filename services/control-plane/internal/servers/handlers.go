@@ -76,6 +76,11 @@ func (h *Handler) ListServers(c *gin.Context) {
 		}
 		servers = append(servers, server)
 	}
+	if err := rows.Err(); err != nil {
+		h.log.Error("Error iterating servers", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch servers"})
+		return
+	}
 
 	c.JSON(http.StatusOK, gin.H{"servers": servers})
 }
