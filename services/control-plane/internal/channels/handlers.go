@@ -27,9 +27,10 @@ func NewHandler(db *sql.DB, log *logger.Logger) *Handler {
 
 // CreateChannelRequest represents a request to create a channel
 type CreateChannelRequest struct {
-	ServerID string `json:"server_id" binding:"required,uuid"`
-	Name     string `json:"name" binding:"required,min=3,max=100"`
-	Type     string `json:"type" binding:"required,oneof=text voice bulletin"`
+	ServerID string  `json:"server_id" binding:"required,uuid"`
+	Name     string  `json:"name" binding:"required,min=3,max=100"`
+	Type     string  `json:"type" binding:"required,oneof=text voice bulletin"`
+	Emoji    *string `json:"emoji,omitempty"` // Optional custom emoji
 }
 
 // UpdateChannelRequest represents a request to update a channel
@@ -142,8 +143,8 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 	// Create channel
 	channelID := uuid.New().String()
 	insertQuery := `
-		INSERT INTO channels (id, server_id, name, type, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, NOW(), NOW())
+		INSERT INTO channels (id, server_id, name, type, emoji, position, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
 		RETURNING created_at, updated_at
 	`
 
@@ -152,8 +153,10 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 	channel.ServerID = req.ServerID
 	channel.Name = req.Name
 	channel.Type = req.Type
+	channel.Emoji = req.Emoji
+	channel.Position = 0 // Default position, can be reordered later
 
-	err = h.db.QueryRow(insertQuery, channelID, req.ServerID, req.Name, req.Type).Scan(
+	err = h.db.QueryRow(insertQuery, channelID, req.ServerID, req.Name, req.Type, req.Emoji, 0).Scan(
 		&channel.CreatedAt,
 		&channel.UpdatedAt,
 	)

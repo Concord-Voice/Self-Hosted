@@ -29,12 +29,15 @@ type ServerWithRole struct {
 
 // Channel represents a voice or text channel within a server
 type Channel struct {
-	ID        string    `json:"id" db:"id"`
-	ServerID  string    `json:"server_id" db:"server_id"`
-	Name      string    `json:"name" db:"name"`
-	Type      string    `json:"type" db:"type"` // voice, text, announcement
-	CreatedAt time.Time `json:"created_at" db:"created_at"`
-	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
+	ID          string    `json:"id" db:"id"`
+	ServerID    string    `json:"server_id" db:"server_id"`
+	Name        string    `json:"name" db:"name"`
+	Description *string   `json:"description,omitempty" db:"description"`
+	Type        string    `json:"type" db:"type"` // voice, text, bulletin
+	Emoji       *string   `json:"emoji,omitempty" db:"emoji"` // Optional custom emoji
+	Position    int       `json:"position" db:"position"`
+	CreatedAt   time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // Message represents a chat message in a channel
