@@ -1,3 +1,4 @@
+// Package channels provides handlers for managing server channels.
 package channels
 
 import (
@@ -83,7 +84,7 @@ func (h *Handler) ListChannels(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch channels"})
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	channels := []models.Channel{}
 	for rows.Next() {

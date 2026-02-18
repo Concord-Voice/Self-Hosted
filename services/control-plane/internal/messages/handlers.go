@@ -1,3 +1,4 @@
+// Package messages provides handlers for managing chat messages.
 package messages
 
 import (
@@ -117,7 +118,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch messages"})
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	messages := []models.MessageWithUser{}
 	for rows.Next() {

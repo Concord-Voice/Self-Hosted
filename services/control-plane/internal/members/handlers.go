@@ -1,3 +1,4 @@
+// Package members provides handlers for managing server membership.
 package members
 
 import (
@@ -89,7 +90,7 @@ func (h *Handler) ListMembers(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch members"})
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	members := []MemberWithUser{}
 	for rows.Next() {

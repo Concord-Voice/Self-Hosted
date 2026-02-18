@@ -12,11 +12,13 @@ import (
 )
 
 var (
+	// ErrInvalidHash indicates the password hash format is invalid.
 	ErrInvalidHash         = errors.New("invalid hash format")
+	// ErrIncompatibleVersion indicates the Argon2 version is incompatible.
 	ErrIncompatibleVersion = errors.New("incompatible argon2 version")
 )
 
-// Argon2id parameters (exceeds OWASP 2023 recommendations)
+// Argon2Params contains Argon2id parameters that exceed OWASP 2023 recommendations.
 type Argon2Params struct {
 	Memory      uint32
 	Iterations  uint32
@@ -141,14 +143,22 @@ func decodeHash(encodedHash string) (*Argon2Params, []byte, []byte, error) {
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	p.SaltLength = uint32(len(salt))
+	saltLen := len(salt)
+	if saltLen < 0 || saltLen > 0xFFFFFFFF {
+		return nil, nil, nil, ErrInvalidHash
+	}
+	p.SaltLength = uint32(saltLen)
 
 	// Decode hash
 	hash, err := base64.RawStdEncoding.DecodeString(parts[5])
 	if err != nil {
 		return nil, nil, nil, err
 	}
-	p.KeyLength = uint32(len(hash))
+	hashLen := len(hash)
+	if hashLen < 0 || hashLen > 0xFFFFFFFF {
+		return nil, nil, nil, ErrInvalidHash
+	}
+	p.KeyLength = uint32(hashLen)
 
 	return p, salt, hash, nil
 }

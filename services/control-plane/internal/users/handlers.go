@@ -1,3 +1,4 @@
+// Package users provides handlers for user profile management and settings.
 package users
 
 import (
@@ -14,11 +15,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// Handler handles user-related requests including profile management and settings.
 type Handler struct {
 	db  *sql.DB
 	log *logger.Logger
 }
 
+// NewHandler creates a new user handler.
 func NewHandler(db *sql.DB, log *logger.Logger) *Handler {
 	return &Handler{
 		db:  db,
@@ -308,6 +311,8 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 	setClauses = append(setClauses, "updated_at = NOW()")
 
 	// Build and execute query
+	// #nosec G201 -- Safe: setClauses contains only parameterized assignments (e.g., "email = $1")
+	// User input is passed through args, not concatenated into SQL string
 	query := fmt.Sprintf(
 		`UPDATE users SET %s WHERE id = $%d
 		 RETURNING id, email, username, display_name, bio, avatar_url, COALESCE(links, '[]'::jsonb),

@@ -1,3 +1,4 @@
+// Package auth provides authentication and authorization functionality including user registration and login.
 package auth
 
 import (
@@ -13,12 +14,14 @@ import (
 	"github.com/google/uuid"
 )
 
+// Handler handles authentication-related requests including registration and login.
 type Handler struct {
 	db        *sql.DB
 	log       *logger.Logger
 	jwtSecret string
 }
 
+// NewHandler creates a new authentication handler.
 func NewHandler(db *sql.DB, log *logger.Logger, jwtSecret string) *Handler {
 	return &Handler{
 		db:        db,
@@ -31,7 +34,7 @@ func NewHandler(db *sql.DB, log *logger.Logger, jwtSecret string) *Handler {
 type RegisterRequest struct {
 	Email                string `json:"email" binding:"required,email"`
 	Username             string `json:"username" binding:"required,min=3,max=50"`
-	Password             string `json:"password" binding:"required"`
+	Password             string `json:"password" binding:"required"`             // #nosec G117 -- False positive: request field, not stored secret
 	AgeConfirmation      bool   `json:"age_confirmation" binding:"required"`
 	PublicKey            string `json:"public_key" binding:"required"`           // base64 encoded SPKI
 	WrappedPrivateKey    string `json:"wrapped_private_key" binding:"required"` // base64 encoded
@@ -42,7 +45,7 @@ type RegisterRequest struct {
 // LoginRequest represents login payload
 type LoginRequest struct {
 	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required"`
+	Password string `json:"password" binding:"required"` // #nosec G117 -- False positive: request field, not stored secret
 }
 
 // Register handles user registration

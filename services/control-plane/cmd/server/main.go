@@ -1,3 +1,4 @@
+// Package main is the entry point for the Control Plane server.
 package main
 
 import (
@@ -32,7 +33,11 @@ func main() {
 	if err != nil {
 		log.Fatal("Failed to connect to database", "error", err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Error("Error closing database", "error", err)
+		}
+	}()
 
 	// Run migrations
 	if err := database.RunMigrations(db); err != nil {
@@ -41,7 +46,11 @@ func main() {
 
 	// Initialize Redis
 	redisClient := database.NewRedisClient(cfg.RedisURL)
-	defer redisClient.Close()
+	defer func() {
+		if err := redisClient.Close(); err != nil {
+			log.Error("Error closing Redis client", "error", err)
+		}
+	}()
 
 	// Set Gin mode
 	if cfg.Environment == "production" {

@@ -1,4 +1,5 @@
-package api
+// Package api provides HTTP routing and middleware setup for the Control Plane REST API.
+package api // revive:disable-line:var-naming
 
 import (
 	"database/sql"

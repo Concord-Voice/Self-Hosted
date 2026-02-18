@@ -70,7 +70,7 @@ func rateLimit(redis *redis.Client, config RateLimitConfig) gin.HandlerFunc {
 
 		// Set rate limit headers
 		c.Header("X-RateLimit-Limit", fmt.Sprintf("%d", config.Requests))
-		c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", max(0, config.Requests-int(count))))
+		c.Header("X-RateLimit-Remaining", fmt.Sprintf("%d", maxInt(0, config.Requests-int(count))))
 		c.Header("X-RateLimit-Reset", fmt.Sprintf("%d", time.Now().Add(ttl).Unix()))
 
 		// Check if rate limit exceeded
@@ -88,7 +88,7 @@ func rateLimit(redis *redis.Client, config RateLimitConfig) gin.HandlerFunc {
 	}
 }
 
-func max(a, b int) int {
+func maxInt(a, b int) int {
 	if a > b {
 		return a
 	}

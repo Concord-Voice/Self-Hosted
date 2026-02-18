@@ -1,3 +1,4 @@
+// Package models contains data models for the Concord platform.
 package models
 
 import "time"

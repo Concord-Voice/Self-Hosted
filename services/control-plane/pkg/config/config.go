@@ -1,3 +1,4 @@
+// Package config provides configuration management for the Control Plane service.
 package config
 
 import (
@@ -12,7 +13,7 @@ type Config struct {
 	Port        string
 	DatabaseURL string
 	RedisURL    string
-	JWTSecret   string
+	JWTSecret   string // #nosec G117 -- False positive: config field name, actual secret loaded from env
 	NATSUrl     string
 
 	// CORS settings

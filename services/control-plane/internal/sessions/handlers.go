@@ -1,3 +1,4 @@
+// Package sessions provides handlers for managing user authentication sessions.
 package sessions
 
 import (
@@ -10,11 +11,13 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+// Handler handles session-related requests for managing user authentication sessions.
 type Handler struct {
 	db  *sql.DB
 	log *logger.Logger
 }
 
+// NewHandler creates a new session handler.
 func NewHandler(db *sql.DB, log *logger.Logger) *Handler {
 	return &Handler{
 		db:  db,
@@ -44,7 +47,7 @@ func (h *Handler) ListSessions(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch sessions"})
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	sessions := []gin.H{}
 	for rows.Next() {

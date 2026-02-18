@@ -1,3 +1,4 @@
+// Package servers provides handlers for managing Concord servers (community-style communities).
 package servers
 
 import (
@@ -55,7 +56,7 @@ func (h *Handler) ListServers(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch servers"})
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	servers := []models.ServerWithRole{}
 	for rows.Next() {

@@ -1,3 +1,4 @@
+// Package main provides a CLI tool for managing database migrations.
 package main
 
 import (
@@ -64,7 +65,11 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer db.Close()
+	defer func() {
+		if err := db.Close(); err != nil {
+			log.Printf("Error closing database: %v", err)
+		}
+	}()
 
 	if err := db.Ping(); err != nil {
 		log.Fatalf("Failed to ping database: %v", err)
@@ -145,7 +150,7 @@ func createMigration(path, name string) error {
 
 	// Create migrations directory if it doesn't exist
 	if os.IsNotExist(err) {
-		if err := os.MkdirAll(path, 0755); err != nil {
+		if err := os.MkdirAll(path, 0750); err != nil {
 			return fmt.Errorf("could not create migrations directory: %w", err)
 		}
 	}
@@ -170,13 +175,13 @@ func createMigration(path, name string) error {
 
 	// Create up migration file
 	upContent := fmt.Sprintf("-- Migration: %s (up)\n-- Created: %s\n\n-- Add your UP migration here\n", name, "auto-generated")
-	if err := os.WriteFile(upFile, []byte(upContent), 0644); err != nil {
+	if err := os.WriteFile(upFile, []byte(upContent), 0600); err != nil {
 		return fmt.Errorf("could not create up migration: %w", err)
 	}
 
 	// Create down migration file
 	downContent := fmt.Sprintf("-- Migration: %s (down)\n-- Created: %s\n\n-- Add your DOWN migration here (rollback)\n", name, "auto-generated")
-	if err := os.WriteFile(downFile, []byte(downContent), 0644); err != nil {
+	if err := os.WriteFile(downFile, []byte(downContent), 0600); err != nil {
 		return fmt.Errorf("could not create down migration: %w", err)
 	}
 
