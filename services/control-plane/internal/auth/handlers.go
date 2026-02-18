@@ -252,7 +252,8 @@ func (h *Handler) Login(c *gin.Context) {
 	// Fetch user by email
 	var user models.User
 	err := h.db.QueryRow(
-		`SELECT id, email, username, password_hash, email_verified, age_verified, e2ee_preference, created_at, updated_at
+		`SELECT id, email, username, password_hash, display_name, bio, avatar_url, COALESCE(links, '[]'::jsonb),
+		        email_verified, age_verified, e2ee_preference, created_at, updated_at
 		 FROM users WHERE email = $1`,
 		req.Email,
 	).Scan(
@@ -260,6 +261,10 @@ func (h *Handler) Login(c *gin.Context) {
 		&user.Email,
 		&user.Username,
 		&user.PasswordHash,
+		&user.DisplayName,
+		&user.Bio,
+		&user.AvatarURL,
+		&user.Links,
 		&user.EmailVerified,
 		&user.AgeVerified,
 		&user.E2EEPreference,

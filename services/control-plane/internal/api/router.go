@@ -93,6 +93,30 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					usersHandler.GetMe,
 				)
+
+				// Update profile (10 requests per minute)
+				userRoutes.PATCH("/me",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					usersHandler.UpdateMe,
+				)
+
+				// Get E2EE keys (for password change re-wrapping)
+				userRoutes.GET("/me/keys",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					usersHandler.GetMyKeys,
+				)
+
+				// Replace E2EE keys (for key recovery)
+				userRoutes.PUT("/me/keys",
+					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
+					usersHandler.ReplaceMyKeys,
+				)
+
+				// Change password (5 requests per minute - sensitive)
+				userRoutes.POST("/me/password",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					usersHandler.ChangePassword,
+				)
 			}
 
 			// Session management routes
