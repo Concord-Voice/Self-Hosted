@@ -34,9 +34,16 @@ func (h *Handler) ListSessions(c *gin.Context) {
 		return
 	}
 
-	// Fetch all active sessions
+	// Get current session's refresh token to identify it
+	var currentTokenHash string
+	currentToken, cookieErr := c.Cookie("refresh_token")
+	if cookieErr == nil && currentToken != "" {
+		currentTokenHash = auth.HashRefreshToken(currentToken)
+	}
+
+	// Fetch all active sessions (include token_hash for current-session detection)
 	rows, err := h.db.Query(
-		`SELECT id, device_name, ip_address, user_agent, expires_at, created_at, last_used_at
+		`SELECT id, token_hash, device_name, ip_address, user_agent, expires_at, created_at, last_used_at
 		 FROM refresh_tokens
 		 WHERE user_id = $1 AND expires_at > NOW()
 		 ORDER BY last_used_at DESC`,
@@ -54,6 +61,7 @@ func (h *Handler) ListSessions(c *gin.Context) {
 		var session models.RefreshToken
 		err := rows.Scan(
 			&session.ID,
+			&session.TokenHash,
 			&session.DeviceName,
 			&session.IPAddress,
 			&session.UserAgent,
@@ -74,7 +82,7 @@ func (h *Handler) ListSessions(c *gin.Context) {
 			"expires_at":  session.ExpiresAt,
 			"created_at":  session.CreatedAt,
 			"last_used":   session.LastUsedAt,
-			"is_current":  false, // Will update if this is current session
+			"is_current":  currentTokenHash != "" && session.TokenHash == currentTokenHash,
 		}
 
 		sessions = append(sessions, sessionData)
