@@ -35,8 +35,9 @@ type CreateChannelRequest struct {
 
 // UpdateChannelRequest represents a request to update a channel
 type UpdateChannelRequest struct {
-	Name string `json:"name" binding:"required,min=3,max=100"`
-	Type string `json:"type" binding:"required,oneof=text voice bulletin"`
+	Name  string  `json:"name" binding:"required,min=3,max=100"`
+	Type  string  `json:"type" binding:"required,oneof=text voice bulletin"`
+	Emoji *string `json:"emoji,omitempty"`
 }
 
 // ListChannels returns all channels in a server
@@ -73,10 +74,10 @@ func (h *Handler) ListChannels(c *gin.Context) {
 
 	// Get all channels in the server
 	query := `
-		SELECT id, server_id, name, type, created_at, updated_at
+		SELECT id, server_id, name, type, description, emoji, position, created_at, updated_at
 		FROM channels
 		WHERE server_id = $1
-		ORDER BY created_at ASC
+		ORDER BY position ASC, created_at ASC
 	`
 
 	rows, err := h.db.Query(query, serverID)
@@ -95,6 +96,9 @@ func (h *Handler) ListChannels(c *gin.Context) {
 			&channel.ServerID,
 			&channel.Name,
 			&channel.Type,
+			&channel.Description,
+			&channel.Emoji,
+			&channel.Position,
 			&channel.CreatedAt,
 			&channel.UpdatedAt,
 		)
@@ -184,7 +188,7 @@ func (h *Handler) GetChannel(c *gin.Context) {
 
 	// Get channel and check if user is a member of the server
 	query := `
-		SELECT c.id, c.server_id, c.name, c.type, c.created_at, c.updated_at
+		SELECT c.id, c.server_id, c.name, c.type, c.description, c.emoji, c.position, c.created_at, c.updated_at
 		FROM channels c
 		INNER JOIN server_members sm ON c.server_id = sm.server_id
 		WHERE c.id = $1 AND sm.user_id = $2
@@ -196,6 +200,9 @@ func (h *Handler) GetChannel(c *gin.Context) {
 		&channel.ServerID,
 		&channel.Name,
 		&channel.Type,
+		&channel.Description,
+		&channel.Emoji,
+		&channel.Position,
 		&channel.CreatedAt,
 		&channel.UpdatedAt,
 	)
@@ -257,9 +264,9 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 	// Update channel
 	updateQuery := `
 		UPDATE channels
-		SET name = $1, type = $2, updated_at = NOW()
-		WHERE id = $3
-		RETURNING server_id, created_at, updated_at
+		SET name = $1, type = $2, emoji = $3, updated_at = NOW()
+		WHERE id = $4
+		RETURNING server_id, emoji, position, created_at, updated_at
 	`
 
 	var channel models.Channel
@@ -267,8 +274,10 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 	channel.Name = req.Name
 	channel.Type = req.Type
 
-	err = h.db.QueryRow(updateQuery, req.Name, req.Type, channelID).Scan(
+	err = h.db.QueryRow(updateQuery, req.Name, req.Type, req.Emoji, channelID).Scan(
 		&channel.ServerID,
+		&channel.Emoji,
+		&channel.Position,
 		&channel.CreatedAt,
 		&channel.UpdatedAt,
 	)
