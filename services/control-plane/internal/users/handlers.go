@@ -450,7 +450,11 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to change password"})
 		return
 	}
-	defer tx.Rollback()
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			h.log.Error("Failed to rollback transaction", "error", rbErr)
+		}
+	}()
 
 	// Update password
 	_, err = tx.Exec(
