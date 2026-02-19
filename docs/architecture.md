@@ -79,11 +79,11 @@ Self-Hosted Instances:
 **Port**: 8080
 
 **Tech Stack**:
-- Go 1.21+
+- Go 1.24+
 - Gin web framework
-- PostgreSQL (persistent data)
-- Redis (ephemeral state, sessions)
-- WebSocket signaling
+- PostgreSQL 16 (persistent data)
+- Redis 7 (ephemeral state, sessions, rate limiting)
+- gorilla/websocket (real-time messaging)
 
 **Responsibilities**:
 - User authentication (JWT)
@@ -111,10 +111,10 @@ WS     /api/v1/ws (signaling)
 - **users** (id, email, username, password_hash, age_confirmed, e2ee_preference, created_at, updated_at)
 - **public_keys** (id, user_id, public_key, key_version, created_at, updated_at)
 - **refresh_tokens** (id, user_id, token_hash, user_agent, ip_address, created_at, expires_at)
-- **servers** (id, name, owner_id, icon_url, created_at, updated_at) - Planned Phase 1B
-- **channels** (id, server_id, name, type, position, created_at) - Planned Phase 1B
-- **server_members** (server_id, user_id, role, joined_at) - Planned Phase 1B
-- **messages** (id, channel_id, user_id, content, is_encrypted, edited_at, created_at) - Planned Phase 1B
+- **servers** (id, name, owner_id, icon_url, created_at, updated_at) ✅
+- **channels** (id, server_id, name, type, emoji, description, position, created_at) ✅
+- **server_members** (server_id, user_id, role, joined_at) ✅
+- **messages** (id, channel_id, user_id, content, is_encrypted, edited_at, created_at) ✅
 
 ### Media Plane (Node.js + mediasoup)
 
@@ -204,6 +204,22 @@ Client → POST /api/v1/auth/login
     Store session in Redis
          ↓
     Return token to client
+```
+
+### Sending a Chat Message (Real-Time) ✅
+
+```
+SEND:  User types → ChatView → useMessaging (optimistic add) → WebSocket → Server persists
+       → Server broadcasts to OTHER users (ExcludeUser) → their useWebSocket → addMessage()
+       Sender sees message instantly via optimistic add. Others see it via WS broadcast.
+
+EDIT:  User edits → ChatView → REST PATCH → Server updates DB → updateMessage() locally
+       → Server broadcasts message_update → other users' useWebSocket → updateMessage()
+
+DELETE: User deletes → ChatView → REST DELETE → Server deletes → deleteMessage() locally
+        → Server broadcasts message_delete → other users' useWebSocket → deleteMessage()
+
+HISTORY: Channel selected → ChatView fetches REST GET → setMessages() → MessageList renders
 ```
 
 ### Joining a Voice Channel
