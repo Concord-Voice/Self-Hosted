@@ -204,7 +204,9 @@ func (h *Handler) AddMember(c *gin.Context) {
 		return
 	}
 
-	// Add member with role 'member'
+	// TODO: [RBAC] Currently grants full access as 'member' role with no restrictions.
+	// When RBAC/SBAC is implemented, new members should receive a configurable default
+	// role with restricted permissions.
 	insertQuery := `
 		INSERT INTO server_members (server_id, user_id, role, joined_at)
 		VALUES ($1, $2, 'member', NOW())

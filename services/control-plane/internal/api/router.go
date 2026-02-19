@@ -8,6 +8,7 @@ import (
 
 	"github.com/concord/control-plane/internal/auth"
 	"github.com/concord/control-plane/internal/channels"
+	"github.com/concord/control-plane/internal/invites"
 	"github.com/concord/control-plane/internal/members"
 	"github.com/concord/control-plane/internal/messages"
 	"github.com/concord/control-plane/internal/middleware"
@@ -33,7 +34,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	// Health check
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"status": "healthy",
+			"status":  "healthy",
 			"service": "control-plane",
 		})
 	})
@@ -46,10 +47,11 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	authHandler := auth.NewHandler(db, log, cfg.JWTSecret)
 	sessionsHandler := sessions.NewHandler(db, log)
 	usersHandler := users.NewHandler(db, log)
-	serversHandler := servers.NewHandler(db, log)
+	serversHandler := servers.NewHandler(db, log, hub)
 	channelsHandler := channels.NewHandler(db, log)
 	membersHandler := members.NewHandler(db, log, redis)
 	messagesHandler := messages.NewHandler(db, log, hub)
+	invitesHandler := invites.NewHandler(db, log, hub)
 	wsHandler := websocket.NewHandler(hub, db, cfg.JWTSecret, cfg.AllowedOrigins)
 
 	// API v1 routes
@@ -151,6 +153,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					serversHandler.ListServers,
 				)
 
+				// Get unread status across all user's servers (30 requests per minute)
+				serverRoutes.GET("/unread-status",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					channelsHandler.GetServerUnreadStatus,
+				)
+
 				// Create server (10 requests per minute)
 				serverRoutes.POST("",
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
@@ -204,6 +212,36 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
 					membersHandler.RemoveMember,
 				)
+
+				// Create invite for server (10 requests per minute)
+				serverRoutes.POST("/:id/invites",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					invitesHandler.CreateInvite,
+				)
+
+				// List invites for server (30 requests per minute)
+				serverRoutes.GET("/:id/invites",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					invitesHandler.ListInvites,
+				)
+
+				// Revoke invite (10 requests per minute)
+				serverRoutes.DELETE("/:id/invites/:invite_id",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					invitesHandler.RevokeInvite,
+				)
+
+				// Get unread counts for all channels in a server (30 requests per minute)
+				serverRoutes.GET("/:id/unread",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					channelsHandler.GetUnreadCounts,
+				)
+
+				// Mark all channels in a server as read (30 requests per minute)
+				serverRoutes.POST("/:id/read",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					channelsHandler.MarkServerRead,
+				)
 			}
 
 			// Channel routes
@@ -238,6 +276,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					messagesHandler.GetMessages,
 				)
+
+				// Mark channel as read (30 requests per minute)
+				channelRoutes.POST("/:id/read",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					channelsHandler.MarkChannelRead,
+				)
 			}
 
 			// Message routes
@@ -259,6 +303,22 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 				messageRoutes.DELETE("/:id",
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					messagesHandler.DeleteMessage,
+				)
+			}
+
+			// Invite routes (join + preview)
+			inviteRoutes := protected.Group("/invites")
+			{
+				// Join server via invite code (10 requests per minute)
+				inviteRoutes.POST("/join",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					invitesHandler.JoinServer,
+				)
+
+				// Get invite info / preview (30 requests per minute)
+				inviteRoutes.GET("/:code",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					invitesHandler.GetInviteInfo,
 				)
 			}
 		}

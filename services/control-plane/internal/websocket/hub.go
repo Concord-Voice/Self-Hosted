@@ -32,6 +32,10 @@ type Hub struct {
 	// Username cache (user ID -> username) for typing indicators
 	usernames map[uuid.UUID]string
 
+	// Server subscriptions (server ID -> set of client IDs)
+	// Used for lightweight unread notifications without full message delivery
+	serverSubscriptions map[uuid.UUID]map[uuid.UUID]bool
+
 	// Register requests from clients
 	register chan *Client
 
@@ -43,6 +47,9 @@ type Hub struct {
 
 	// Broadcast messages to all clients in a channel
 	broadcast chan BroadcastMessage
+
+	// Global broadcast messages to all connected clients
+	globalBroadcast chan OutgoingMessage
 }
 
 // NewHub creates a new Hub
@@ -54,10 +61,12 @@ func NewHub(db *sql.DB, redisClient *redis.Client) *Hub {
 		userClients:          make(map[uuid.UUID]map[uuid.UUID]bool),
 		channelSubscriptions: make(map[uuid.UUID]map[uuid.UUID]bool),
 		usernames:            make(map[uuid.UUID]string),
+		serverSubscriptions:  make(map[uuid.UUID]map[uuid.UUID]bool),
 		register:             make(chan *Client),
 		unregister:           make(chan *Client),
 		incoming:             make(chan IncomingMessage, 256),
 		broadcast:            make(chan BroadcastMessage, 256),
+		globalBroadcast:      make(chan OutgoingMessage, 256),
 	}
 }
 
@@ -76,6 +85,9 @@ func (h *Hub) Run() {
 
 		case message := <-h.broadcast:
 			h.handleBroadcast(message)
+
+		case message := <-h.globalBroadcast:
+			h.handleGlobalBroadcast(message)
 		}
 	}
 }
@@ -194,6 +206,14 @@ func (h *Hub) handleUnregister(client *Client) {
 			}
 		}
 
+		// Remove from all server subscriptions
+		for serverID, clients := range h.serverSubscriptions {
+			delete(clients, client.ID)
+			if len(clients) == 0 {
+				delete(h.serverSubscriptions, serverID)
+			}
+		}
+
 		// Close send channel
 		close(client.Send)
 
@@ -209,14 +229,22 @@ func (h *Hub) handleIncoming(msg IncomingMessage) {
 		h.handleSubscribe(msg)
 	case "unsubscribe":
 		h.handleUnsubscribe(msg)
+	case "subscribe_server":
+		h.handleSubscribeServer(msg)
+	case "unsubscribe_server":
+		h.handleUnsubscribeServer(msg)
 	case "message":
 		h.handleMessage(msg)
 	case "typing":
 		h.handleTyping(msg)
+	case "profile_update":
+		h.handleProfileUpdate(msg)
 	case "heartbeat":
 		h.handleHeartbeat(msg)
 	case "set_status":
 		h.handleSetStatus(msg)
+	case "server_update":
+		h.handleServerUpdate(msg)
 	default:
 		log.Printf("Unknown message type: %s", msg.Type)
 	}
@@ -318,6 +346,77 @@ func (h *Hub) handleUnsubscribe(msg IncomingMessage) {
 	log.Printf("Client %s unsubscribed from channel %s", client.ID, channelUUID)
 }
 
+// handleSubscribeServer subscribes a client to server-level notifications (unread pings)
+func (h *Hub) handleSubscribeServer(msg IncomingMessage) {
+	serverID, ok := msg.Data["server_id"].(string)
+	if !ok {
+		h.sendError(msg.ClientID, "Invalid server_id in subscribe_server message")
+		return
+	}
+
+	serverUUID, err := uuid.Parse(serverID)
+	if err != nil {
+		h.sendError(msg.ClientID, "Invalid server UUID")
+		return
+	}
+
+	client, ok := h.clients[msg.ClientID]
+	if !ok {
+		return
+	}
+
+	// Verify the user is a member of this server
+	var isMember bool
+	err = h.db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2)`,
+		serverUUID, client.UserID,
+	).Scan(&isMember)
+	if err != nil {
+		log.Printf("Failed to check server membership: %v", err)
+		h.sendError(msg.ClientID, "Failed to verify server access")
+		return
+	}
+	if !isMember {
+		h.sendError(msg.ClientID, "Not a member of this server")
+		return
+	}
+
+	// Add to server subscriptions
+	if _, ok := h.serverSubscriptions[serverUUID]; !ok {
+		h.serverSubscriptions[serverUUID] = make(map[uuid.UUID]bool)
+	}
+	h.serverSubscriptions[serverUUID][client.ID] = true
+
+	log.Printf("Client %s subscribed to server %s notifications", client.ID, serverUUID)
+}
+
+// handleUnsubscribeServer unsubscribes a client from server-level notifications
+func (h *Hub) handleUnsubscribeServer(msg IncomingMessage) {
+	serverID, ok := msg.Data["server_id"].(string)
+	if !ok {
+		return
+	}
+
+	serverUUID, err := uuid.Parse(serverID)
+	if err != nil {
+		return
+	}
+
+	client, ok := h.clients[msg.ClientID]
+	if !ok {
+		return
+	}
+
+	if clients, ok := h.serverSubscriptions[serverUUID]; ok {
+		delete(clients, client.ID)
+		if len(clients) == 0 {
+			delete(h.serverSubscriptions, serverUUID)
+		}
+	}
+
+	log.Printf("Client %s unsubscribed from server %s notifications", client.ID, serverUUID)
+}
+
 // sendError sends an error message to a specific client
 func (h *Hub) sendError(clientID uuid.UUID, message string) {
 	client, ok := h.clients[clientID]
@@ -388,6 +487,26 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		return
 	}
 
+	// Send message_ack to the sender with the server-assigned UUID
+	// so the frontend can update the temporary client ID
+	nonce, _ := msg.Data["nonce"].(string)
+	ackMsg := OutgoingMessage{
+		Type: "message_ack",
+		Data: map[string]interface{}{
+			"nonce":      nonce,
+			"id":         messageID.String(),
+			"channel_id": channelUUID.String(),
+			"created_at": createdAt,
+			"updated_at": updatedAt,
+		},
+	}
+	if ackData, ackErr := json.Marshal(ackMsg); ackErr == nil {
+		select {
+		case client.Send <- ackData:
+		default:
+		}
+	}
+
 	// Broadcast persisted message to all subscribers except sender
 	// (sender sees the message instantly via optimistic UI)
 	broadcastMsg := BroadcastMessage{
@@ -411,6 +530,61 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 	}
 
 	h.broadcast <- broadcastMsg
+
+	// Send lightweight unread_notify to server subscribers NOT subscribed to this channel.
+	// Look up which server this channel belongs to.
+	var serverUUID uuid.UUID
+	err = h.db.QueryRow(`SELECT server_id FROM channels WHERE id = $1`, channelUUID).Scan(&serverUUID)
+	if err != nil {
+		log.Printf("Failed to look up server for channel %s: %v", channelUUID, err)
+	} else {
+		h.sendUnreadNotify(serverUUID, channelUUID, msg.UserID)
+	}
+}
+
+// sendUnreadNotify sends a lightweight notification to server subscribers
+// who are not subscribed to the given channel (they already get the full message).
+func (h *Hub) sendUnreadNotify(serverID, channelID, senderUserID uuid.UUID) {
+	serverClients, ok := h.serverSubscriptions[serverID]
+	if !ok {
+		return
+	}
+
+	channelClients := h.channelSubscriptions[channelID] // may be nil, that's ok
+
+	notifyMsg := OutgoingMessage{
+		Type: "unread_notify",
+		Data: map[string]interface{}{
+			"channel_id": channelID.String(),
+			"server_id":  serverID.String(),
+		},
+	}
+	data, err := json.Marshal(notifyMsg)
+	if err != nil {
+		return
+	}
+
+	for clientID := range serverClients {
+		// Skip clients already subscribed to the channel — they got the full message
+		if channelClients != nil && channelClients[clientID] {
+			continue
+		}
+
+		client, ok := h.clients[clientID]
+		if !ok {
+			continue
+		}
+
+		// Skip the sender
+		if client.UserID == senderUserID {
+			continue
+		}
+
+		select {
+		case client.Send <- data:
+		default:
+		}
+	}
 }
 
 // handleTyping handles typing indicator
@@ -556,6 +730,130 @@ func (h *Hub) GetUserClientCount(userID uuid.UUID) int {
 		return len(clients)
 	}
 	return 0
+}
+
+// handleGlobalBroadcast sends a message to all connected clients
+func (h *Hub) handleGlobalBroadcast(msg OutgoingMessage) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Printf("Failed to marshal global broadcast: %v", err)
+		return
+	}
+	for _, client := range h.clients {
+		select {
+		case client.Send <- data:
+		default:
+		}
+	}
+}
+
+// BroadcastToAll sends a message to all connected clients (thread-safe).
+func (h *Hub) BroadcastToAll(msg OutgoingMessage) {
+	h.globalBroadcast <- msg
+}
+
+// handleProfileUpdate refreshes cached user info and broadcasts the update to all clients.
+func (h *Hub) handleProfileUpdate(msg IncomingMessage) {
+	client, ok := h.clients[msg.ClientID]
+	if !ok {
+		return
+	}
+
+	// Re-query user info from DB
+	var username string
+	var displayName *string
+	var avatarURL *string
+	err := h.db.QueryRow(
+		"SELECT username, display_name, avatar_url FROM users WHERE id = $1",
+		msg.UserID,
+	).Scan(&username, &displayName, &avatarURL)
+	if err != nil {
+		log.Printf("Failed to refresh user info for %s: %v", msg.UserID, err)
+		return
+	}
+
+	// Update cached fields on all of this user's clients
+	if userClients, ok := h.userClients[client.UserID]; ok {
+		for clientID := range userClients {
+			if c, ok := h.clients[clientID]; ok {
+				c.Username = username
+				c.DisplayName = displayName
+				c.AvatarURL = avatarURL
+			}
+		}
+	}
+
+	// Broadcast to all connected clients
+	broadcastMsg := OutgoingMessage{
+		Type: "profile_updated",
+		Data: map[string]interface{}{
+			"user_id":      msg.UserID.String(),
+			"username":     username,
+			"display_name": displayName,
+			"avatar_url":   avatarURL,
+		},
+	}
+	data, err := json.Marshal(broadcastMsg)
+	if err != nil {
+		return
+	}
+	for _, c := range h.clients {
+		select {
+		case c.Send <- data:
+		default:
+		}
+	}
+}
+
+// handleServerUpdate re-queries server info from DB and broadcasts to all server subscribers.
+func (h *Hub) handleServerUpdate(msg IncomingMessage) {
+	serverIDStr, ok := msg.Data["server_id"].(string)
+	if !ok {
+		return
+	}
+	serverID, err := uuid.Parse(serverIDStr)
+	if err != nil {
+		return
+	}
+
+	// Re-query server info from DB
+	var name string
+	var iconURL *string
+	err = h.db.QueryRow(
+		"SELECT name, icon_url FROM servers WHERE id = $1",
+		serverID,
+	).Scan(&name, &iconURL)
+	if err != nil {
+		log.Printf("Failed to refresh server info for %s: %v", serverID, err)
+		return
+	}
+
+	// Broadcast to all subscribers of this server
+	broadcastMsg := OutgoingMessage{
+		Type: "server_updated",
+		Data: map[string]interface{}{
+			"server_id": serverID.String(),
+			"name":      name,
+			"icon_url":  iconURL,
+		},
+	}
+	data, err := json.Marshal(broadcastMsg)
+	if err != nil {
+		return
+	}
+
+	subscribers, ok := h.serverSubscriptions[serverID]
+	if !ok {
+		return
+	}
+	for clientID := range subscribers {
+		if c, ok := h.clients[clientID]; ok {
+			select {
+			case c.Send <- data:
+			default:
+			}
+		}
+	}
 }
 
 // broadcastPresenceToAll sends a presence update to all connected clients

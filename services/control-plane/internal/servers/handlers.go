@@ -3,10 +3,12 @@ package servers
 
 import (
 	"database/sql"
+	"encoding/json"
 	"net/http"
 	"strings"
 
 	"github.com/concord/control-plane/internal/models"
+	"github.com/concord/control-plane/internal/websocket"
 	"github.com/concord/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -16,13 +18,15 @@ import (
 type Handler struct {
 	db  *sql.DB
 	log *logger.Logger
+	hub *websocket.Hub
 }
 
 // NewHandler creates a new server handler
-func NewHandler(db *sql.DB, log *logger.Logger) *Handler {
+func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub) *Handler {
 	return &Handler{
 		db:  db,
 		log: log,
+		hub: hub,
 	}
 }
 
@@ -32,10 +36,12 @@ type CreateServerRequest struct {
 	IconURL *string `json:"icon_url"`
 }
 
-// UpdateServerRequest represents a request to update a server
+// UpdateServerRequest represents a request to update a server.
+// IconURL uses json.RawMessage so we can distinguish between
+// "field absent" (nil → don't touch icon) and "field set to null" (remove icon).
 type UpdateServerRequest struct {
-	Name    string  `json:"name" binding:"required,min=3,max=100"`
-	IconURL *string `json:"icon_url"`
+	Name    string          `json:"name" binding:"required,min=3,max=100"`
+	IconURL json.RawMessage `json:"icon_url"`
 }
 
 // ListServers returns all servers the user is a member of
@@ -292,36 +298,66 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 		return
 	}
 
-	// Validate icon_url if provided
-	if req.IconURL != nil && *req.IconURL != "" {
-		if !strings.HasPrefix(*req.IconURL, "data:image/") {
+	// Determine if icon_url was explicitly provided in the request body.
+	// json.RawMessage lets us distinguish:
+	//   nil             → field absent (don't touch icon)
+	//   []byte("null")  → explicitly null (remove icon)
+	//   []byte("\"...\"") → new icon value
+	iconURLProvided := req.IconURL != nil
+	var iconURL *string
+
+	if iconURLProvided {
+		if string(req.IconURL) == "null" {
+			// Explicitly set to null → remove icon
+			iconURL = nil
+		} else {
+			var url string
+			if err := json.Unmarshal(req.IconURL, &url); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid icon_url format"})
+				return
+			}
+			iconURL = &url
+		}
+	}
+
+	// Validate icon_url if a new value was provided
+	if iconURL != nil && *iconURL != "" {
+		if !strings.HasPrefix(*iconURL, "data:image/") {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon must be a valid image data URL"})
 			return
 		}
-		if len(*req.IconURL) > 500000 {
+		if len(*iconURL) > 500000 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon data URL must be less than 500KB"})
 			return
 		}
 	}
 
-	// Update server
-	updateQuery := `
-		UPDATE servers
-		SET name = $1, icon_url = $2, updated_at = NOW()
-		WHERE id = $3
-		RETURNING name, icon_url, owner_id, created_at, updated_at
-	`
-
+	// Build query: only update icon_url if it was explicitly provided
 	var server models.Server
 	server.ID = serverID
 
-	err = h.db.QueryRow(updateQuery, req.Name, req.IconURL, serverID).Scan(
-		&server.Name,
-		&server.IconURL,
-		&server.OwnerID,
-		&server.CreatedAt,
-		&server.UpdatedAt,
-	)
+	if iconURLProvided {
+		updateQuery := `
+			UPDATE servers
+			SET name = $1, icon_url = $2, updated_at = NOW()
+			WHERE id = $3
+			RETURNING name, icon_url, owner_id, created_at, updated_at
+		`
+		err = h.db.QueryRow(updateQuery, req.Name, iconURL, serverID).Scan(
+			&server.Name, &server.IconURL, &server.OwnerID, &server.CreatedAt, &server.UpdatedAt,
+		)
+	} else {
+		updateQuery := `
+			UPDATE servers
+			SET name = $1, updated_at = NOW()
+			WHERE id = $2
+			RETURNING name, icon_url, owner_id, created_at, updated_at
+		`
+		err = h.db.QueryRow(updateQuery, req.Name, serverID).Scan(
+			&server.Name, &server.IconURL, &server.OwnerID, &server.CreatedAt, &server.UpdatedAt,
+		)
+	}
+
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
 		return
@@ -332,6 +368,16 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 	}
 
 	h.log.Info("Server updated", "server_id", serverID, "user_id", userID)
+
+	// Broadcast update to all connected clients so other members see changes in real time
+	h.hub.BroadcastToAll(websocket.OutgoingMessage{
+		Type: "server_updated",
+		Data: map[string]interface{}{
+			"server_id": serverID,
+			"name":      server.Name,
+			"icon_url":  server.IconURL,
+		},
+	})
 
 	c.JSON(http.StatusOK, gin.H{
 		"server": server,
