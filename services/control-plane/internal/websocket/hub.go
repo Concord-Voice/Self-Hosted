@@ -34,6 +34,9 @@ type Hub struct {
 
 	// Broadcast messages to all clients in a channel
 	broadcast chan BroadcastMessage
+
+	// Global broadcast messages to all connected clients
+	globalBroadcast chan OutgoingMessage
 }
 
 // NewHub creates a new Hub
@@ -47,6 +50,7 @@ func NewHub(db *sql.DB) *Hub {
 		unregister:           make(chan *Client),
 		incoming:             make(chan IncomingMessage, 256),
 		broadcast:            make(chan BroadcastMessage, 256),
+		globalBroadcast:      make(chan OutgoingMessage, 256),
 	}
 }
 
@@ -65,6 +69,9 @@ func (h *Hub) Run() {
 
 		case message := <-h.broadcast:
 			h.handleBroadcast(message)
+
+		case message := <-h.globalBroadcast:
+			h.handleGlobalBroadcast(message)
 		}
 	}
 }
@@ -161,6 +168,8 @@ func (h *Hub) handleIncoming(msg IncomingMessage) {
 		h.handleMessage(msg)
 	case "typing":
 		h.handleTyping(msg)
+	case "profile_update":
+		h.handleProfileUpdate(msg)
 	default:
 		log.Printf("Unknown message type: %s", msg.Type)
 	}
@@ -332,6 +341,26 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		return
 	}
 
+	// Send message_ack to the sender with the server-assigned UUID
+	// so the frontend can update the temporary client ID
+	nonce, _ := msg.Data["nonce"].(string)
+	ackMsg := OutgoingMessage{
+		Type: "message_ack",
+		Data: map[string]interface{}{
+			"nonce":      nonce,
+			"id":         messageID.String(),
+			"channel_id": channelUUID.String(),
+			"created_at": createdAt,
+			"updated_at": updatedAt,
+		},
+	}
+	if ackData, ackErr := json.Marshal(ackMsg); ackErr == nil {
+		select {
+		case client.Send <- ackData:
+		default:
+		}
+	}
+
 	// Broadcast persisted message to all subscribers except sender
 	// (sender sees the message instantly via optimistic UI)
 	broadcastMsg := BroadcastMessage{
@@ -452,6 +481,79 @@ func (h *Hub) GetUserClientCount(userID uuid.UUID) int {
 		return len(clients)
 	}
 	return 0
+}
+
+// handleGlobalBroadcast sends a message to all connected clients
+func (h *Hub) handleGlobalBroadcast(msg OutgoingMessage) {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		log.Printf("Failed to marshal global broadcast: %v", err)
+		return
+	}
+	for _, client := range h.clients {
+		select {
+		case client.Send <- data:
+		default:
+		}
+	}
+}
+
+// BroadcastToAll sends a message to all connected clients (thread-safe).
+func (h *Hub) BroadcastToAll(msg OutgoingMessage) {
+	h.globalBroadcast <- msg
+}
+
+// handleProfileUpdate refreshes cached user info and broadcasts the update to all clients.
+func (h *Hub) handleProfileUpdate(msg IncomingMessage) {
+	client, ok := h.clients[msg.ClientID]
+	if !ok {
+		return
+	}
+
+	// Re-query user info from DB
+	var username string
+	var displayName *string
+	var avatarURL *string
+	err := h.db.QueryRow(
+		"SELECT username, display_name, avatar_url FROM users WHERE id = $1",
+		msg.UserID,
+	).Scan(&username, &displayName, &avatarURL)
+	if err != nil {
+		log.Printf("Failed to refresh user info for %s: %v", msg.UserID, err)
+		return
+	}
+
+	// Update cached fields on all of this user's clients
+	if userClients, ok := h.userClients[client.UserID]; ok {
+		for clientID := range userClients {
+			if c, ok := h.clients[clientID]; ok {
+				c.Username = username
+				c.DisplayName = displayName
+				c.AvatarURL = avatarURL
+			}
+		}
+	}
+
+	// Broadcast to all connected clients
+	broadcastMsg := OutgoingMessage{
+		Type: "profile_updated",
+		Data: map[string]interface{}{
+			"user_id":      msg.UserID.String(),
+			"username":     username,
+			"display_name": displayName,
+			"avatar_url":   avatarURL,
+		},
+	}
+	data, err := json.Marshal(broadcastMsg)
+	if err != nil {
+		return
+	}
+	for _, c := range h.clients {
+		select {
+		case c.Send <- data:
+		default:
+		}
+	}
 }
 
 // broadcastPresenceToAll sends a presence update to all connected clients

@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/concord/control-plane/internal/models"
+	"github.com/concord/control-plane/internal/websocket"
 	"github.com/concord/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -15,11 +16,12 @@ import (
 type Handler struct {
 	db  *sql.DB
 	log *logger.Logger
+	hub *websocket.Hub
 }
 
 // NewHandler creates a new invite handler.
-func NewHandler(db *sql.DB, log *logger.Logger) *Handler {
-	return &Handler{db: db, log: log}
+func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub) *Handler {
+	return &Handler{db: db, log: log, hub: hub}
 }
 
 // createInviteRequest is the JSON body for creating an invite.
@@ -355,6 +357,27 @@ func (h *Handler) JoinServer(c *gin.Context) {
 	}
 
 	h.log.Info("User joined server", "user_id", userID, "server_id", invite.ServerID, "code", req.Code)
+
+	// Broadcast member_joined to all connected clients so member lists update in real time
+	var username string
+	var displayName *string
+	var avatarURL *string
+	_ = h.db.QueryRow(
+		"SELECT username, display_name, avatar_url FROM users WHERE id = $1", userID,
+	).Scan(&username, &displayName, &avatarURL)
+
+	h.hub.BroadcastToAll(websocket.OutgoingMessage{
+		Type: "member_joined",
+		Data: map[string]interface{}{
+			"server_id":    invite.ServerID,
+			"user_id":      userID,
+			"username":     username,
+			"display_name": displayName,
+			"avatar_url":   avatarURL,
+			"role":         "member",
+		},
+	})
+
 	c.JSON(http.StatusOK, gin.H{"server": server, "role": "member"})
 }
 
