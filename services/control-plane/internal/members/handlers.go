@@ -2,26 +2,32 @@
 package members
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
 	"net/http"
+	"strconv"
 
 	"github.com/concord/control-plane/internal/models"
 	"github.com/concord/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 )
 
 // Handler handles member-related requests
 type Handler struct {
-	db  *sql.DB
-	log *logger.Logger
+	db    *sql.DB
+	log   *logger.Logger
+	redis *redis.Client
 }
 
 // NewHandler creates a new member handler
-func NewHandler(db *sql.DB, log *logger.Logger) *Handler {
+func NewHandler(db *sql.DB, log *logger.Logger, redisClient *redis.Client) *Handler {
 	return &Handler{
-		db:  db,
-		log: log,
+		db:    db,
+		log:   log,
+		redis: redisClient,
 	}
 }
 
@@ -44,6 +50,7 @@ type MemberWithUser struct {
 	AvatarURL   *string `json:"avatar_url,omitempty"`
 	Role        string  `json:"role"`
 	JoinedAt    string  `json:"joined_at"`
+	LastSeen    *int64  `json:"last_seen,omitempty"`
 }
 
 // ListMembers returns all members of a server
@@ -117,6 +124,27 @@ func (h *Handler) ListMembers(c *gin.Context) {
 		h.log.Error("Error iterating members", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch members"})
 		return
+	}
+
+	// Batch fetch last_seen timestamps from Redis
+	if len(members) > 0 {
+		keys := make([]string, len(members))
+		for i, m := range members {
+			keys[i] = fmt.Sprintf("last_seen:%s", m.UserID)
+		}
+		ctx := context.Background()
+		vals, err := h.redis.MGet(ctx, keys...).Result()
+		if err == nil {
+			for i, val := range vals {
+				if val != nil {
+					if tsStr, ok := val.(string); ok {
+						if ts, parseErr := strconv.ParseInt(tsStr, 10, 64); parseErr == nil {
+							members[i].LastSeen = &ts
+						}
+					}
+				}
+			}
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"members": members})
