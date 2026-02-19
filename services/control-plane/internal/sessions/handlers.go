@@ -41,11 +41,11 @@ func (h *Handler) ListSessions(c *gin.Context) {
 		currentTokenHash = auth.HashRefreshToken(currentToken)
 	}
 
-	// Fetch all active sessions (include token_hash for current-session detection)
+	// Fetch active sessions (not revoked, not expired)
 	rows, err := h.db.Query(
-		`SELECT id, token_hash, device_name, ip_address, user_agent, expires_at, created_at, last_used_at
+		`SELECT id, token_hash, device_name, ip_address, user_agent, expires_at, created_at, last_used_at, remember_me
 		 FROM refresh_tokens
-		 WHERE user_id = $1 AND expires_at > NOW()
+		 WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > NOW()
 		 ORDER BY last_used_at DESC`,
 		userID,
 	)
@@ -56,7 +56,7 @@ func (h *Handler) ListSessions(c *gin.Context) {
 	}
 	defer func() { _ = rows.Close() }()
 
-	sessions := []gin.H{}
+	activeSessions := []gin.H{}
 	for rows.Next() {
 		var session models.RefreshToken
 		err := rows.Scan(
@@ -68,13 +68,14 @@ func (h *Handler) ListSessions(c *gin.Context) {
 			&session.ExpiresAt,
 			&session.CreatedAt,
 			&session.LastUsedAt,
+			&session.RememberMe,
 		)
 		if err != nil {
 			h.log.Error("Failed to scan session", "error", err)
 			continue
 		}
 
-		sessionData := gin.H{
+		activeSessions = append(activeSessions, gin.H{
 			"id":          session.ID,
 			"device_name": session.DeviceName,
 			"ip_address":  session.IPAddress,
@@ -82,10 +83,9 @@ func (h *Handler) ListSessions(c *gin.Context) {
 			"expires_at":  session.ExpiresAt,
 			"created_at":  session.CreatedAt,
 			"last_used":   session.LastUsedAt,
+			"remember_me": session.RememberMe,
 			"is_current":  currentTokenHash != "" && session.TokenHash == currentTokenHash,
-		}
-
-		sessions = append(sessions, sessionData)
+		})
 	}
 	if err := rows.Err(); err != nil {
 		h.log.Error("Error iterating sessions", "error", err)
@@ -93,9 +93,59 @@ func (h *Handler) ListSessions(c *gin.Context) {
 		return
 	}
 
+	// Fetch past sessions (revoked within the last 30 days)
+	pastRows, err := h.db.Query(
+		`SELECT id, device_name, ip_address, user_agent, created_at, last_used_at, revoked_at
+		 FROM refresh_tokens
+		 WHERE user_id = $1 AND revoked_at IS NOT NULL AND revoked_at > NOW() - INTERVAL '30 days'
+		 ORDER BY revoked_at DESC
+		 LIMIT 10`,
+		userID,
+	)
+	if err != nil {
+		h.log.Error("Failed to fetch past sessions", "error", err)
+		// Non-critical: return active sessions without past
+		c.JSON(http.StatusOK, gin.H{
+			"sessions":      activeSessions,
+			"past_sessions": []gin.H{},
+			"total":         len(activeSessions),
+		})
+		return
+	}
+	defer func() { _ = pastRows.Close() }()
+
+	pastSessions := []gin.H{}
+	for pastRows.Next() {
+		var session models.RefreshToken
+		err := pastRows.Scan(
+			&session.ID,
+			&session.DeviceName,
+			&session.IPAddress,
+			&session.UserAgent,
+			&session.CreatedAt,
+			&session.LastUsedAt,
+			&session.RevokedAt,
+		)
+		if err != nil {
+			h.log.Error("Failed to scan past session", "error", err)
+			continue
+		}
+
+		pastSessions = append(pastSessions, gin.H{
+			"id":          session.ID,
+			"device_name": session.DeviceName,
+			"ip_address":  session.IPAddress,
+			"user_agent":  session.UserAgent,
+			"created_at":  session.CreatedAt,
+			"last_used":   session.LastUsedAt,
+			"revoked_at":  session.RevokedAt,
+		})
+	}
+
 	c.JSON(http.StatusOK, gin.H{
-		"sessions": sessions,
-		"total":    len(sessions),
+		"sessions":      activeSessions,
+		"past_sessions": pastSessions,
+		"total":         len(activeSessions),
 	})
 }
 
@@ -114,9 +164,9 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 		return
 	}
 
-	// Delete the session (only if it belongs to the user)
+	// Soft-delete: mark the session as revoked
 	result, err := h.db.Exec(
-		`DELETE FROM refresh_tokens WHERE id = $1 AND user_id = $2`,
+		`UPDATE refresh_tokens SET revoked_at = NOW() WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL`,
 		sessionID,
 		userID,
 	)
@@ -140,7 +190,8 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 	})
 }
 
-// RevokeAllSessions revokes all sessions except the current one
+// RevokeAllSessions revokes all sessions. By default it preserves the current
+// session; pass ?include_current=true to also revoke the caller's own session.
 func (h *Handler) RevokeAllSessions(c *gin.Context) {
 	// Get user ID from auth middleware
 	userID, exists := c.Get("user_id")
@@ -149,26 +200,29 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 		return
 	}
 
-	// Get current session token to preserve it
+	includeCurrent := c.Query("include_current") == "true"
+
+	// Get current session token
 	currentToken, err := c.Cookie("refresh_token")
 	if err != nil {
-		// If no current token, revoke all sessions
 		currentToken = ""
 	}
 
 	var result sql.Result
-	if currentToken != "" {
+	if currentToken != "" && !includeCurrent {
 		currentTokenHash := auth.HashRefreshToken(currentToken)
-		// Delete all sessions except the current one
+		// Revoke all sessions except the current one
 		result, err = h.db.Exec(
-			`DELETE FROM refresh_tokens WHERE user_id = $1 AND token_hash != $2`,
+			`UPDATE refresh_tokens SET revoked_at = NOW()
+			 WHERE user_id = $1 AND token_hash != $2 AND revoked_at IS NULL`,
 			userID,
 			currentTokenHash,
 		)
 	} else {
-		// Delete all sessions
+		// Revoke all sessions (including current)
 		result, err = h.db.Exec(
-			`DELETE FROM refresh_tokens WHERE user_id = $1`,
+			`UPDATE refresh_tokens SET revoked_at = NOW()
+			 WHERE user_id = $1 AND revoked_at IS NULL`,
 			userID,
 		)
 	}
@@ -181,10 +235,18 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 
 	rowsAffected, _ := result.RowsAffected()
 
-	h.log.Info("Sessions revoked", "user_id", userID, "count", rowsAffected)
+	h.log.Info("Sessions revoked", "user_id", userID, "count", rowsAffected, "include_current", includeCurrent)
+
+	message := "All other sessions revoked successfully"
+	if includeCurrent {
+		message = "All sessions revoked successfully"
+		// Clear cookie since current session was also revoked
+		c.SetCookie("refresh_token", "", -1, "/", "", c.Request.TLS != nil, true)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "All other sessions revoked successfully",
-		"count":   rowsAffected,
+		"message":          message,
+		"count":            rowsAffected,
+		"include_current":  includeCurrent,
 	})
 }

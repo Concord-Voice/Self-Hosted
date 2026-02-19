@@ -34,7 +34,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	// Health check
 	router.GET("/health", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{
-			"status": "healthy",
+			"status":  "healthy",
 			"service": "control-plane",
 		})
 	})
@@ -47,7 +47,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	authHandler := auth.NewHandler(db, log, cfg.JWTSecret)
 	sessionsHandler := sessions.NewHandler(db, log)
 	usersHandler := users.NewHandler(db, log)
-	serversHandler := servers.NewHandler(db, log)
+	serversHandler := servers.NewHandler(db, log, hub)
 	channelsHandler := channels.NewHandler(db, log)
 	membersHandler := members.NewHandler(db, log, redis)
 	messagesHandler := messages.NewHandler(db, log, hub)
@@ -153,6 +153,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					serversHandler.ListServers,
 				)
 
+				// Get unread status across all user's servers (30 requests per minute)
+				serverRoutes.GET("/unread-status",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					channelsHandler.GetServerUnreadStatus,
+				)
+
 				// Create server (10 requests per minute)
 				serverRoutes.POST("",
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
@@ -224,6 +230,18 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					invitesHandler.RevokeInvite,
 				)
+
+				// Get unread counts for all channels in a server (30 requests per minute)
+				serverRoutes.GET("/:id/unread",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					channelsHandler.GetUnreadCounts,
+				)
+
+				// Mark all channels in a server as read (30 requests per minute)
+				serverRoutes.POST("/:id/read",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					channelsHandler.MarkServerRead,
+				)
 			}
 
 			// Channel routes
@@ -257,6 +275,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 				channelRoutes.GET("/:id/messages",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					messagesHandler.GetMessages,
+				)
+
+				// Mark channel as read (30 requests per minute)
+				channelRoutes.POST("/:id/read",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					channelsHandler.MarkChannelRead,
 				)
 			}
 

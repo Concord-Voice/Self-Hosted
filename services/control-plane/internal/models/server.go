@@ -78,3 +78,9 @@ type ServerInviteWithCreator struct {
 	ServerInvite
 	CreatorUsername string `json:"creator_username" db:"creator_username"`
 }
+
+// ChannelUnreadCount represents the unread message count for a channel
+type ChannelUnreadCount struct {
+	ChannelID   string `json:"channel_id"`
+	UnreadCount int    `json:"unread_count"`
+}

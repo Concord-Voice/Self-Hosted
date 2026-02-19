@@ -44,8 +44,9 @@ type RegisterRequest struct {
 
 // LoginRequest represents login payload
 type LoginRequest struct {
-	Email    string `json:"email" binding:"required,email"`
-	Password string `json:"password" binding:"required"` // #nosec G117 -- False positive: request field, not stored secret
+	Email      string `json:"email" binding:"required,email"`
+	Password   string `json:"password" binding:"required"` // #nosec G117 -- False positive: request field, not stored secret
+	RememberMe *bool  `json:"remember_me"`                 // nil defaults to true for backward compat
 }
 
 // Register handles user registration
@@ -203,8 +204,8 @@ func (h *Handler) Register(c *gin.Context) {
 	expiresAt := time.Now().Add(30 * 24 * time.Hour) // 30 days
 
 	_, err = h.db.Exec(
-		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, remember_me)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		tokenID,
 		userID,
 		tokenHash,
@@ -212,6 +213,7 @@ func (h *Handler) Register(c *gin.Context) {
 		c.ClientIP(),
 		c.GetHeader("User-Agent"),
 		expiresAt,
+		true, // Registration always defaults to remember_me=true
 	)
 	if err != nil {
 		h.log.Error("Failed to store refresh token", "error", err)
@@ -236,6 +238,7 @@ func (h *Handler) Register(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{
 		"access_token": accessToken,
 		"expires_in":   900, // 15 minutes
+		"remember_me":  true,
 		"user": gin.H{
 			"id":              userID,
 			"username":        req.Username,
@@ -312,21 +315,40 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
+	// Resolve remember_me preference (default: true for backward compat)
+	rememberMe := true
+	if req.RememberMe != nil {
+		rememberMe = *req.RememberMe
+	}
+
 	// Store refresh token in database
 	tokenHash := HashRefreshToken(refreshToken)
 	tokenID := uuid.New().String()
 	expiresAt := time.Now().Add(30 * 24 * time.Hour) // 30 days
+	deviceName := c.GetHeader("X-Device-Name")
+	ipAddress := c.ClientIP()
+	userAgent := c.GetHeader("User-Agent")
+
+	// Revoke old sessions from the same device+IP to prevent duplicates.
+	// This handles repeated logins from the same client without explicit logout.
+	_, _ = h.db.Exec(
+		`UPDATE refresh_tokens SET revoked_at = NOW()
+		 WHERE user_id = $1 AND ip_address = $2 AND user_agent = $3
+		   AND revoked_at IS NULL`,
+		user.ID, ipAddress, userAgent,
+	)
 
 	_, err = h.db.Exec(
-		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, remember_me)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
 		tokenID,
 		user.ID,
 		tokenHash,
-		c.GetHeader("X-Device-Name"),
-		c.ClientIP(),
-		c.GetHeader("User-Agent"),
+		deviceName,
+		ipAddress,
+		userAgent,
 		expiresAt,
+		rememberMe,
 	)
 	if err != nil {
 		h.log.Error("Failed to store refresh token", "error", err)
@@ -334,11 +356,17 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
+	// Cookie MaxAge: 30 days if remember_me, session-scoped otherwise
+	cookieMaxAge := 30 * 24 * 60 * 60 // 30 days in seconds
+	if !rememberMe {
+		cookieMaxAge = 0 // Session cookie
+	}
+
 	// Set refresh token as httpOnly cookie
 	c.SetCookie(
 		"refresh_token",
 		refreshToken,
-		30*24*60*60, // 30 days in seconds
+		cookieMaxAge,
 		"/",
 		"",
 		c.Request.TLS != nil, // Secure only if HTTPS
@@ -369,6 +397,7 @@ func (h *Handler) Login(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"access_token": accessToken,
 		"expires_in":   900, // 15 minutes
+		"remember_me":  rememberMe,
 		"user":         user.PublicUser(),
 		"e2ee_keys": gin.H{
 			"wrapped_private_key":  base64.StdEncoding.EncodeToString(keys.WrappedPrivateKey),
@@ -390,11 +419,11 @@ func (h *Handler) Refresh(c *gin.Context) {
 	// Hash the token to look it up
 	tokenHash := HashRefreshToken(refreshToken)
 
-	// Fetch token from database
+	// Fetch token from database (exclude revoked sessions)
 	var token models.RefreshToken
 	err = h.db.QueryRow(
-		`SELECT id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, created_at, last_used_at
-		 FROM refresh_tokens WHERE token_hash = $1`,
+		`SELECT id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, created_at, last_used_at, remember_me
+		 FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NULL`,
 		tokenHash,
 	).Scan(
 		&token.ID,
@@ -406,6 +435,7 @@ func (h *Handler) Refresh(c *gin.Context) {
 		&token.ExpiresAt,
 		&token.CreatedAt,
 		&token.LastUsedAt,
+		&token.RememberMe,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -423,14 +453,36 @@ func (h *Handler) Refresh(c *gin.Context) {
 		return
 	}
 
-	// Update last used timestamp
-	_, err = h.db.Exec(
-		`UPDATE refresh_tokens SET last_used_at = NOW() WHERE id = $1`,
-		token.ID,
-	)
-	if err != nil {
-		h.log.Error("Failed to update refresh token", "error", err)
-		// Non-critical, continue
+	// Rolling expiration for remember_me sessions: extend 30 days from now on each use.
+	// Non-remember-me sessions only update last_used_at without extending expiry.
+	if token.RememberMe {
+		newExpiry := time.Now().Add(30 * 24 * time.Hour)
+		_, err = h.db.Exec(
+			`UPDATE refresh_tokens SET last_used_at = NOW(), expires_at = $1 WHERE id = $2`,
+			newExpiry, token.ID,
+		)
+		if err != nil {
+			h.log.Error("Failed to update refresh token", "error", err)
+		}
+
+		// Re-set cookie with fresh 30-day MaxAge so browser expiry stays in sync
+		c.SetCookie(
+			"refresh_token",
+			refreshToken,
+			30*24*60*60,
+			"/",
+			"",
+			c.Request.TLS != nil,
+			true,
+		)
+	} else {
+		_, err = h.db.Exec(
+			`UPDATE refresh_tokens SET last_used_at = NOW() WHERE id = $1`,
+			token.ID,
+		)
+		if err != nil {
+			h.log.Error("Failed to update refresh token", "error", err)
+		}
 	}
 
 	// Generate new access token
@@ -456,11 +508,11 @@ func (h *Handler) Logout(c *gin.Context) {
 		return
 	}
 
-	// Delete refresh token from database
+	// Soft-delete: mark session as revoked so it appears in "Past Sessions"
 	tokenHash := HashRefreshToken(refreshToken)
-	_, err = h.db.Exec(`DELETE FROM refresh_tokens WHERE token_hash = $1`, tokenHash)
+	_, err = h.db.Exec(`UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_hash = $1`, tokenHash)
 	if err != nil {
-		h.log.Error("Failed to delete refresh token", "error", err)
+		h.log.Error("Failed to revoke refresh token", "error", err)
 		// Continue anyway
 	}
 

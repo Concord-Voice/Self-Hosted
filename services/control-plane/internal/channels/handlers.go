@@ -350,3 +350,211 @@ func (h *Handler) DeleteChannel(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "Channel deleted successfully"})
 }
+
+// GetUnreadCounts returns unread message counts for all channels in a server.
+// For each channel, counts messages created after the user's last_read_at.
+func (h *Handler) GetUnreadCounts(c *gin.Context) {
+	userID := c.GetString("user_id")
+	serverID := c.Param("id")
+
+	if _, err := uuid.Parse(serverID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		return
+	}
+
+	// Verify membership
+	var isMember bool
+	err := h.db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2)`,
+		serverID, userID,
+	).Scan(&isMember)
+	if err != nil {
+		h.log.Error("Failed to check membership", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch unread counts"})
+		return
+	}
+	if !isMember {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this server"})
+		return
+	}
+
+	// For each channel in the server, count messages newer than last_read_at.
+	// If no read state exists, fall back to the user's join date so pre-existing
+	// messages are not counted as unread for first-time members.
+	query := `
+		SELECT ch.id,
+			COUNT(m.id)::int AS unread_count
+		FROM channels ch
+		LEFT JOIN messages m
+			ON m.channel_id = ch.id
+			AND m.user_id != $2
+			AND m.created_at > COALESCE(
+				(SELECT last_read_at FROM channel_read_states WHERE user_id = $2 AND channel_id = ch.id),
+				(SELECT joined_at FROM server_members WHERE server_id = $1 AND user_id = $2)
+			)
+		WHERE ch.server_id = $1
+		GROUP BY ch.id
+	`
+
+	rows, err := h.db.Query(query, serverID, userID)
+	if err != nil {
+		h.log.Error("Failed to query unread counts", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch unread counts"})
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	type unreadEntry struct {
+		ChannelID   string `json:"channel_id"`
+		UnreadCount int    `json:"unread_count"`
+	}
+	unreads := []unreadEntry{}
+	for rows.Next() {
+		var entry unreadEntry
+		if err := rows.Scan(&entry.ChannelID, &entry.UnreadCount); err != nil {
+			h.log.Error("Failed to scan unread count", "error", err)
+			continue
+		}
+		unreads = append(unreads, entry)
+	}
+	if err := rows.Err(); err != nil {
+		h.log.Error("Error iterating unread counts", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch unread counts"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"unreads": unreads})
+}
+
+// GetServerUnreadStatus returns a list of server IDs where the user has unread messages.
+// Used to show unread dots on server icons without fetching per-channel counts for every server.
+func (h *Handler) GetServerUnreadStatus(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	query := `
+		SELECT DISTINCT ch.server_id
+		FROM channels ch
+		INNER JOIN server_members sm
+			ON ch.server_id = sm.server_id AND sm.user_id = $1
+		INNER JOIN messages m
+			ON m.channel_id = ch.id
+			AND m.user_id != $1
+			AND m.created_at > COALESCE(
+				(SELECT last_read_at FROM channel_read_states WHERE user_id = $1 AND channel_id = ch.id),
+				sm.joined_at
+			)
+	`
+
+	rows, err := h.db.Query(query, userID)
+	if err != nil {
+		h.log.Error("Failed to query server unread status", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch server unread status"})
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	serverIDs := []string{}
+	for rows.Next() {
+		var serverID string
+		if err := rows.Scan(&serverID); err != nil {
+			h.log.Error("Failed to scan server ID", "error", err)
+			continue
+		}
+		serverIDs = append(serverIDs, serverID)
+	}
+	if err := rows.Err(); err != nil {
+		h.log.Error("Error iterating server unread status", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch server unread status"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"server_ids": serverIDs})
+}
+
+// MarkChannelRead updates the user's last_read_at for a channel (upsert).
+func (h *Handler) MarkChannelRead(c *gin.Context) {
+	userID := c.GetString("user_id")
+	channelID := c.Param("id")
+
+	if _, err := uuid.Parse(channelID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
+		return
+	}
+
+	// Verify user is a member of the channel's server
+	var isMember bool
+	err := h.db.QueryRow(
+		`SELECT EXISTS(
+			SELECT 1 FROM channels c
+			INNER JOIN server_members sm ON c.server_id = sm.server_id
+			WHERE c.id = $1 AND sm.user_id = $2
+		)`,
+		channelID, userID,
+	).Scan(&isMember)
+	if err != nil {
+		h.log.Error("Failed to check channel membership", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to mark channel read"})
+		return
+	}
+	if !isMember {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this server"})
+		return
+	}
+
+	// Upsert read state
+	_, err = h.db.Exec(
+		`INSERT INTO channel_read_states (user_id, channel_id, last_read_at)
+		 VALUES ($1, $2, NOW())
+		 ON CONFLICT (user_id, channel_id) DO UPDATE SET last_read_at = NOW()`,
+		userID, channelID,
+	)
+	if err != nil {
+		h.log.Error("Failed to upsert read state", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to mark channel read"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Channel marked as read"})
+}
+
+// MarkServerRead marks all channels in a server as read for the user.
+func (h *Handler) MarkServerRead(c *gin.Context) {
+	userID := c.GetString("user_id")
+	serverID := c.Param("id")
+
+	if _, err := uuid.Parse(serverID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		return
+	}
+
+	// Verify membership
+	var isMember bool
+	err := h.db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2)`,
+		serverID, userID,
+	).Scan(&isMember)
+	if err != nil {
+		h.log.Error("Failed to check membership", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to mark server read"})
+		return
+	}
+	if !isMember {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this server"})
+		return
+	}
+
+	// Upsert read state for every channel in the server
+	_, err = h.db.Exec(
+		`INSERT INTO channel_read_states (user_id, channel_id, last_read_at)
+		 SELECT $1, id, NOW() FROM channels WHERE server_id = $2
+		 ON CONFLICT (user_id, channel_id) DO UPDATE SET last_read_at = NOW()`,
+		userID, serverID,
+	)
+	if err != nil {
+		h.log.Error("Failed to mark server read", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to mark server read"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "All channels marked as read"})
+}
