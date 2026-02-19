@@ -458,13 +458,14 @@ func (h *Hub) handleHeartbeat(msg IncomingMessage) {
 	key := fmt.Sprintf("presence:%s", msg.UserID)
 	// Refresh TTL for any user-set status (don't change the value, just extend the TTL)
 	val, err := h.redis.Get(ctx, key).Result()
-	if err == nil {
+	switch err {
+	case nil:
 		// Extend TTL for any valid status
 		switch val {
 		case "online", "dnd", "invisible":
 			h.redis.Expire(ctx, key, 120*time.Second)
 		}
-	} else if err == redis.Nil {
+	case redis.Nil:
 		// Key expired or missing — re-set to online if user is still connected
 		if _, ok := h.userClients[msg.UserID]; ok {
 			h.redis.Set(ctx, key, "online", 120*time.Second)
