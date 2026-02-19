@@ -8,6 +8,7 @@ import (
 
 	"github.com/concord/control-plane/internal/auth"
 	"github.com/concord/control-plane/internal/channels"
+	"github.com/concord/control-plane/internal/invites"
 	"github.com/concord/control-plane/internal/members"
 	"github.com/concord/control-plane/internal/messages"
 	"github.com/concord/control-plane/internal/middleware"
@@ -50,6 +51,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	channelsHandler := channels.NewHandler(db, log)
 	membersHandler := members.NewHandler(db, log)
 	messagesHandler := messages.NewHandler(db, log, hub)
+	invitesHandler := invites.NewHandler(db, log)
 	wsHandler := websocket.NewHandler(hub, db, cfg.JWTSecret, cfg.AllowedOrigins)
 
 	// API v1 routes
@@ -204,6 +206,24 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
 					membersHandler.RemoveMember,
 				)
+
+				// Create invite for server (10 requests per minute)
+				serverRoutes.POST("/:id/invites",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					invitesHandler.CreateInvite,
+				)
+
+				// List invites for server (30 requests per minute)
+				serverRoutes.GET("/:id/invites",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					invitesHandler.ListInvites,
+				)
+
+				// Revoke invite (10 requests per minute)
+				serverRoutes.DELETE("/:id/invites/:invite_id",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					invitesHandler.RevokeInvite,
+				)
 			}
 
 			// Channel routes
@@ -259,6 +279,22 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 				messageRoutes.DELETE("/:id",
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					messagesHandler.DeleteMessage,
+				)
+			}
+
+			// Invite routes (join + preview)
+			inviteRoutes := protected.Group("/invites")
+			{
+				// Join server via invite code (10 requests per minute)
+				inviteRoutes.POST("/join",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					invitesHandler.JoinServer,
+				)
+
+				// Get invite info / preview (30 requests per minute)
+				inviteRoutes.GET("/:code",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					invitesHandler.GetInviteInfo,
 				)
 			}
 		}

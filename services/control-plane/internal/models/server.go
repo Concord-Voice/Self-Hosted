@@ -59,3 +59,22 @@ type MessageWithUser struct {
 	DisplayName *string `json:"display_name,omitempty" db:"display_name"`
 	AvatarURL   *string `json:"avatar_url,omitempty" db:"avatar_url"`
 }
+
+// ServerInvite represents an invite code for joining a server
+type ServerInvite struct {
+	ID        string     `json:"id" db:"id"`
+	ServerID  string     `json:"server_id" db:"server_id"`
+	Code      string     `json:"code" db:"code"`
+	CreatedBy string     `json:"created_by" db:"created_by"`
+	MaxUses   *int       `json:"max_uses" db:"max_uses"`
+	UseCount  int        `json:"use_count" db:"use_count"`
+	ExpiresAt *time.Time `json:"expires_at,omitempty" db:"expires_at"`
+	IsRevoked bool       `json:"is_revoked" db:"is_revoked"`
+	CreatedAt time.Time  `json:"created_at" db:"created_at"`
+}
+
+// ServerInviteWithCreator combines invite info with creator's username
+type ServerInviteWithCreator struct {
+	ServerInvite
+	CreatorUsername string `json:"creator_username" db:"creator_username"`
+}
