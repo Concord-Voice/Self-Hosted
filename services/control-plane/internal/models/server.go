@@ -55,5 +55,7 @@ type Message struct {
 // MessageWithUser combines message with user details
 type MessageWithUser struct {
 	Message
-	Username string `json:"username" db:"username"`
+	Username    string  `json:"username" db:"username"`
+	DisplayName *string `json:"display_name,omitempty" db:"display_name"`
+	AvatarURL   *string `json:"avatar_url,omitempty" db:"avatar_url"`
 }

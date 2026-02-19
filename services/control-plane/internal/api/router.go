@@ -49,8 +49,8 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	serversHandler := servers.NewHandler(db, log)
 	channelsHandler := channels.NewHandler(db, log)
 	membersHandler := members.NewHandler(db, log, redis)
-	messagesHandler := messages.NewHandler(db, log)
-	wsHandler := websocket.NewHandler(hub, cfg.JWTSecret, cfg.AllowedOrigins)
+	messagesHandler := messages.NewHandler(db, log, hub)
+	wsHandler := websocket.NewHandler(hub, db, cfg.JWTSecret, cfg.AllowedOrigins)
 
 	// API v1 routes
 	v1 := router.Group("/api/v1")
