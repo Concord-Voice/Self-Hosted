@@ -1,6 +1,8 @@
 package websocket
 
 import (
+	"database/sql"
+	"log"
 	"net/http"
 	"strings"
 
@@ -13,15 +15,17 @@ import (
 // Handler handles WebSocket connections
 type Handler struct {
 	hub            *Hub
+	db             *sql.DB
 	jwtSecret      string
 	allowedOrigins []string
 	upgrader       websocket.Upgrader
 }
 
 // NewHandler creates a new WebSocket handler
-func NewHandler(hub *Hub, jwtSecret string, allowedOrigins []string) *Handler {
+func NewHandler(hub *Hub, db *sql.DB, jwtSecret string, allowedOrigins []string) *Handler {
 	h := &Handler{
 		hub:            hub,
+		db:             db,
 		jwtSecret:      jwtSecret,
 		allowedOrigins: allowedOrigins,
 	}
@@ -53,6 +57,15 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 		return
 	}
 
+	// Look up username, display name, and avatar for this user
+	var username string
+	var displayName *string
+	var avatarURL *string
+	if err := h.db.QueryRow("SELECT username, display_name, avatar_url FROM users WHERE id = $1", userID).Scan(&username, &displayName, &avatarURL); err != nil {
+		log.Printf("Failed to look up username for user %s: %v", userID, err)
+		username = "Unknown"
+	}
+
 	// Upgrade HTTP connection to WebSocket
 	// Origin is validated by h.upgrader.CheckOrigin (configured in NewHandler)
 	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, nil) // nosemgrep: go.gorilla.security.audit.websocket-missing-origin-check.websocket-missing-origin-check
@@ -63,12 +76,15 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 
 	// Create new client
 	client := &Client{
-		ID:       uuid.New(),
-		UserID:   userID,
-		Conn:     conn,
-		Hub:      h.hub,
-		Send:     make(chan []byte, 256),
-		Channels: make(map[uuid.UUID]bool),
+		ID:          uuid.New(),
+		UserID:      userID,
+		Username:    username,
+		DisplayName: displayName,
+		AvatarURL:   avatarURL,
+		Conn:        conn,
+		Hub:         h.hub,
+		Send:        make(chan []byte, 256),
+		Channels:    make(map[uuid.UUID]bool),
 	}
 
 	// Register client with hub

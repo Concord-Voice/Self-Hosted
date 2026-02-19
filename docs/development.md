@@ -16,7 +16,7 @@ See [SETUP_GITHUB.md](./SETUP_GITHUB.md) for full GitHub collaboration workflow.
 ### Required
 
 - **Node.js** 20+ and npm 10+
-- **Go** 1.21+
+- **Go** 1.24+
 - **Docker** and **Docker Compose**
 - **Git**
 

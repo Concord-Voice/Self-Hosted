@@ -7,6 +7,7 @@ import (
 	"strconv"
 
 	"github.com/concord/control-plane/internal/models"
+	"github.com/concord/control-plane/internal/websocket"
 	"github.com/concord/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -16,13 +17,15 @@ import (
 type Handler struct {
 	db  *sql.DB
 	log *logger.Logger
+	hub *websocket.Hub
 }
 
 // NewHandler creates a new message handler
-func NewHandler(db *sql.DB, log *logger.Logger) *Handler {
+func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub) *Handler {
 	return &Handler{
 		db:  db,
 		log: log,
+		hub: hub,
 	}
 }
 
@@ -89,7 +92,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		// Get messages before a specific message ID
 		query = `
 			SELECT m.id, m.channel_id, m.user_id, m.content, m.is_encrypted,
-			       m.edited_at, m.created_at, m.updated_at, u.username
+			       m.edited_at, m.created_at, m.updated_at, u.username, u.display_name, u.avatar_url
 			FROM messages m
 			INNER JOIN users u ON m.user_id = u.id
 			WHERE m.channel_id = $1
@@ -102,7 +105,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		// Get most recent messages
 		query = `
 			SELECT m.id, m.channel_id, m.user_id, m.content, m.is_encrypted,
-			       m.edited_at, m.created_at, m.updated_at, u.username
+			       m.edited_at, m.created_at, m.updated_at, u.username, u.display_name, u.avatar_url
 			FROM messages m
 			INNER JOIN users u ON m.user_id = u.id
 			WHERE m.channel_id = $1
@@ -133,6 +136,8 @@ func (h *Handler) GetMessages(c *gin.Context) {
 			&msg.CreatedAt,
 			&msg.UpdatedAt,
 			&msg.Username,
+			&msg.DisplayName,
+			&msg.AvatarURL,
 		)
 		if err != nil {
 			h.log.Error("Failed to scan message", "error", err)
@@ -284,6 +289,21 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 
 	h.log.Info("Message updated", "message_id", messageID, "user_id", userID)
 
+	// Broadcast update to channel subscribers via WebSocket
+	channelUUID, err := uuid.Parse(message.ChannelID)
+	if err == nil {
+		h.hub.BroadcastToChannel(channelUUID, websocket.OutgoingMessage{
+			Type: "message_update",
+			Data: map[string]interface{}{
+				"id":         messageID,
+				"channel_id": message.ChannelID,
+				"content":    message.Content,
+				"edited_at":  message.EditedAt,
+				"updated_at": message.UpdatedAt,
+			},
+		})
+	}
+
 	c.JSON(http.StatusOK, gin.H{"message": message})
 }
 
@@ -298,18 +318,18 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 		return
 	}
 
-	// Check if message exists and get author + server info
-	var authorID, serverID string
+	// Check if message exists and get author + server info + channel ID
+	var authorID, channelID, serverID string
 	var userRole sql.NullString
 	checkQuery := `
-		SELECT m.user_id, c.server_id, sm.role
+		SELECT m.user_id, m.channel_id, c.server_id, sm.role
 		FROM messages m
 		INNER JOIN channels c ON m.channel_id = c.id
 		LEFT JOIN server_members sm ON c.server_id = sm.server_id AND sm.user_id = $2
 		WHERE m.id = $1
 	`
 
-	err := h.db.QueryRow(checkQuery, messageID, userID).Scan(&authorID, &serverID, &userRole)
+	err := h.db.QueryRow(checkQuery, messageID, userID).Scan(&authorID, &channelID, &serverID, &userRole)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Message not found"})
 		return
@@ -338,6 +358,18 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 	}
 
 	h.log.Info("Message deleted", "message_id", messageID, "deleted_by", userID, "author", authorID)
+
+	// Broadcast deletion to channel subscribers via WebSocket
+	channelUUID, err := uuid.Parse(channelID)
+	if err == nil {
+		h.hub.BroadcastToChannel(channelUUID, websocket.OutgoingMessage{
+			Type: "message_delete",
+			Data: map[string]interface{}{
+				"id":         messageID,
+				"channel_id": channelID,
+			},
+		})
+	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Message deleted successfully"})
 }

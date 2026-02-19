@@ -157,6 +157,28 @@ func (h *Handler) CreateServer(c *gin.Context) {
 		return
 	}
 
+	// Create default channels
+	channelQuery := `
+		INSERT INTO channels (id, server_id, name, type, position, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+	`
+
+	textChannelID := uuid.New().String()
+	_, err = tx.Exec(channelQuery, textChannelID, serverID, "general", "text", 0)
+	if err != nil {
+		h.log.Error("Failed to create default text channel", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create server"})
+		return
+	}
+
+	voiceChannelID := uuid.New().String()
+	_, err = tx.Exec(channelQuery, voiceChannelID, serverID, "General", "voice", 1)
+	if err != nil {
+		h.log.Error("Failed to create default voice channel", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create server"})
+		return
+	}
+
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit transaction", "error", err)
