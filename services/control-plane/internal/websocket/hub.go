@@ -1,18 +1,24 @@
 package websocket
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"log"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 )
 
 // Hub maintains the set of active clients and broadcasts messages
 type Hub struct {
 	// Database connection for authorization checks
 	db *sql.DB
+
+	// Redis client for presence persistence
+	redis *redis.Client
 
 	// Registered clients (client ID -> Client)
 	clients map[uuid.UUID]*Client
@@ -22,6 +28,9 @@ type Hub struct {
 
 	// Channel subscriptions (channel ID -> set of client IDs)
 	channelSubscriptions map[uuid.UUID]map[uuid.UUID]bool
+
+	// Username cache (user ID -> username) for typing indicators
+	usernames map[uuid.UUID]string
 
 	// Register requests from clients
 	register chan *Client
@@ -37,12 +46,14 @@ type Hub struct {
 }
 
 // NewHub creates a new Hub
-func NewHub(db *sql.DB) *Hub {
+func NewHub(db *sql.DB, redisClient *redis.Client) *Hub {
 	return &Hub{
 		db:                   db,
+		redis:                redisClient,
 		clients:              make(map[uuid.UUID]*Client),
 		userClients:          make(map[uuid.UUID]map[uuid.UUID]bool),
 		channelSubscriptions: make(map[uuid.UUID]map[uuid.UUID]bool),
+		usernames:            make(map[uuid.UUID]string),
 		register:             make(chan *Client),
 		unregister:           make(chan *Client),
 		incoming:             make(chan IncomingMessage, 256),
@@ -79,9 +90,20 @@ func (h *Hub) handleRegister(client *Client) {
 	}
 	h.userClients[client.UserID][client.ID] = true
 
-	// If this is the user's first connection, broadcast online presence
+	// Cache username for typing indicators
+	if _, cached := h.usernames[client.UserID]; !cached {
+		var username string
+		err := h.db.QueryRow("SELECT username FROM users WHERE id = $1", client.UserID).Scan(&username)
+		if err == nil {
+			h.usernames[client.UserID] = username
+		}
+	}
+
+	// If this is the user's first connection, broadcast online presence and set Redis
 	if len(h.userClients[client.UserID]) == 1 {
-		h.broadcastPresenceToAll(client.UserID, "online")
+		ctx := context.Background()
+		h.redis.Set(ctx, fmt.Sprintf("presence:%s", client.UserID), "online", 120*time.Second)
+		h.broadcastPresenceToAll(client.UserID, "online", time.Now().Unix())
 	}
 
 	log.Printf("Client registered: user=%s client=%s total_clients=%d",
@@ -100,15 +122,39 @@ func (h *Hub) handleRegister(client *Client) {
 		client.Send <- data
 	}
 
-	// Send presence snapshot of all currently online users to the new client
-	onlineUsers := make([]string, 0, len(h.userClients))
+	// Send enhanced presence snapshot of all currently online users to the new client
+	ctx := context.Background()
+	type userPresenceInfo struct {
+		UserID string `json:"user_id"`
+		Status string `json:"status"`
+	}
+	users := make([]userPresenceInfo, 0, len(h.userClients))
+	onlineUserIDs := make([]string, 0, len(h.userClients))
 	for uid := range h.userClients {
-		onlineUsers = append(onlineUsers, uid.String())
+		uidStr := uid.String()
+		status := "online"
+		if val, err := h.redis.Get(ctx, fmt.Sprintf("presence:%s", uid)).Result(); err == nil {
+			status = val
+		}
+		// Invisible users appear as offline to others, but show real status to self
+		visibleStatus := status
+		if status == "invisible" && uid != client.UserID {
+			visibleStatus = "offline"
+		} else if status == "invisible" && uid == client.UserID {
+			// Keep "invisible" so the user knows their own status
+			visibleStatus = "invisible"
+		}
+		// Only add to online_user_ids if visible (not invisible to this viewer)
+		if visibleStatus != "offline" {
+			onlineUserIDs = append(onlineUserIDs, uidStr)
+		}
+		users = append(users, userPresenceInfo{UserID: uidStr, Status: visibleStatus})
 	}
 	presenceSnapshot := OutgoingMessage{
 		Type: "presence_snapshot",
 		Data: map[string]interface{}{
-			"online_user_ids": onlineUsers,
+			"online_user_ids": onlineUserIDs,
+			"users":           users,
 		},
 	}
 	if data, err := json.Marshal(presenceSnapshot); err == nil {
@@ -127,8 +173,14 @@ func (h *Hub) handleUnregister(client *Client) {
 			delete(userClients, client.ID)
 			if len(userClients) == 0 {
 				delete(h.userClients, client.UserID)
-				// User's last client disconnected — broadcast offline
-				h.broadcastPresenceToAll(client.UserID, "offline")
+				// User's last client disconnected — update Redis and broadcast offline
+				now := time.Now().Unix()
+				ctx := context.Background()
+				h.redis.Del(ctx, fmt.Sprintf("presence:%s", client.UserID))
+				h.redis.Set(ctx, fmt.Sprintf("last_seen:%s", client.UserID), fmt.Sprintf("%d", now), 0)
+				h.broadcastPresenceToAll(client.UserID, "offline", now)
+				// Clean up username cache
+				delete(h.usernames, client.UserID)
 			}
 		}
 
@@ -161,6 +213,10 @@ func (h *Hub) handleIncoming(msg IncomingMessage) {
 		h.handleMessage(msg)
 	case "typing":
 		h.handleTyping(msg)
+	case "heartbeat":
+		h.handleHeartbeat(msg)
+	case "set_status":
+		h.handleSetStatus(msg)
 	default:
 		log.Printf("Unknown message type: %s", msg.Type)
 	}
@@ -396,6 +452,54 @@ func (h *Hub) handleTyping(msg IncomingMessage) {
 	h.broadcast <- broadcastMsg
 }
 
+// handleHeartbeat refreshes the Redis presence TTL for the user
+func (h *Hub) handleHeartbeat(msg IncomingMessage) {
+	ctx := context.Background()
+	key := fmt.Sprintf("presence:%s", msg.UserID)
+	// Refresh TTL for any user-set status (don't change the value, just extend the TTL)
+	val, err := h.redis.Get(ctx, key).Result()
+	switch err {
+	case nil:
+		// Extend TTL for any valid status
+		switch val {
+		case "online", "dnd", "invisible":
+			h.redis.Expire(ctx, key, 120*time.Second)
+		}
+	case redis.Nil:
+		// Key expired or missing — re-set to online if user is still connected
+		if _, ok := h.userClients[msg.UserID]; ok {
+			h.redis.Set(ctx, key, "online", 120*time.Second)
+		}
+	}
+}
+
+// handleSetStatus allows users to manually set their status (online/dnd/invisible)
+func (h *Hub) handleSetStatus(msg IncomingMessage) {
+	status, ok := msg.Data["status"].(string)
+	if !ok {
+		return
+	}
+
+	// Validate status
+	switch status {
+	case "online", "dnd", "invisible":
+		// valid
+	default:
+		return
+	}
+
+	ctx := context.Background()
+	key := fmt.Sprintf("presence:%s", msg.UserID)
+	h.redis.Set(ctx, key, status, 120*time.Second)
+
+	// For invisible, broadcast as "offline" to other users (but store real status in Redis)
+	broadcastStatus := status
+	if status == "invisible" {
+		broadcastStatus = "offline"
+	}
+	h.broadcastPresenceToAll(msg.UserID, broadcastStatus, time.Now().Unix())
+}
+
 // handleBroadcast broadcasts a message to all subscribers of a channel
 func (h *Hub) handleBroadcast(msg BroadcastMessage) {
 	subscribers, ok := h.channelSubscriptions[msg.ChannelID]
@@ -455,12 +559,13 @@ func (h *Hub) GetUserClientCount(userID uuid.UUID) int {
 }
 
 // broadcastPresenceToAll sends a presence update to all connected clients
-func (h *Hub) broadcastPresenceToAll(userID uuid.UUID, status string) {
+func (h *Hub) broadcastPresenceToAll(userID uuid.UUID, status string, timestamp int64) {
 	msg := OutgoingMessage{
 		Type: "presence",
 		Data: map[string]interface{}{
-			"user_id": userID.String(),
-			"status":  status,
+			"user_id":   userID.String(),
+			"status":    status,
+			"timestamp": timestamp,
 		},
 	}
 	data, err := json.Marshal(msg)

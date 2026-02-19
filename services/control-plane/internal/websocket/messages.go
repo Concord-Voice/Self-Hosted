@@ -4,7 +4,7 @@ import "github.com/google/uuid"
 
 // IncomingMessage represents a message received from a client
 type IncomingMessage struct {
-	// Message type: subscribe, unsubscribe, message, typing
+	// Message type: subscribe, unsubscribe, message, typing, heartbeat, set_status
 	Type string `json:"type"`
 
 	// Message data (type-specific)
@@ -39,7 +39,7 @@ type BroadcastMessage struct {
 // PresenceUpdate represents a user presence change
 type PresenceUpdate struct {
 	UserID    uuid.UUID `json:"user_id"`
-	Status    string    `json:"status"`    // online, offline, away
+	Status    string    `json:"status"`    // online, offline, dnd, invisible
 	Timestamp int64     `json:"timestamp"` // Unix timestamp
 }
 
