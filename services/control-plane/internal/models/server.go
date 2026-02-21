@@ -5,12 +5,13 @@ import "time"
 
 // Server represents a Concord server (community-style community)
 type Server struct {
-	ID        string    `json:"id" db:"id"`
-	Name      string    `json:"name" db:"name"`
-	IconURL   *string   `json:"icon_url,omitempty" db:"icon_url"`
-	OwnerID   string    `json:"owner_id" db:"owner_id"`
-	CreatedAt time.Time `json:"created_at" db:"created_at"`
-	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
+	ID          string    `json:"id" db:"id"`
+	Name        string    `json:"name" db:"name"`
+	IconURL     *string   `json:"icon_url,omitempty" db:"icon_url"`
+	OwnerID     string    `json:"owner_id" db:"owner_id"`
+	E2EEDefault bool      `json:"e2ee_default" db:"e2ee_default"`
+	CreatedAt   time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // ServerMember represents a user's membership in a server
@@ -35,9 +36,20 @@ type Channel struct {
 	Description *string   `json:"description,omitempty" db:"description"`
 	Type        string    `json:"type" db:"type"` // voice, text, bulletin
 	Emoji       *string   `json:"emoji,omitempty" db:"emoji"` // Optional custom emoji
+	IsEncrypted bool      `json:"is_encrypted" db:"is_encrypted"`
 	Position    int       `json:"position" db:"position"`
 	CreatedAt   time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
+}
+
+// ChannelKey represents a channel symmetric key wrapped for a specific user
+type ChannelKey struct {
+	ID         string    `json:"id" db:"id"`
+	ChannelID  string    `json:"channel_id" db:"channel_id"`
+	UserID     string    `json:"user_id" db:"user_id"`
+	WrappedKey string    `json:"wrapped_key" db:"wrapped_key"`
+	KeyVersion int       `json:"key_version" db:"key_version"`
+	CreatedAt  time.Time `json:"created_at" db:"created_at"`
 }
 
 // Message represents a chat message in a channel

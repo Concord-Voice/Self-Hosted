@@ -24,6 +24,13 @@ const (
 	maxMessageSize = 512 * 1024 // 512 KB
 )
 
+const (
+	// Token bucket rate limit for chat messages per client.
+	rateLimitBurst    = 10 // max burst
+	rateLimitPerSec   = 5  // sustained rate (tokens per second)
+	rateLimitInterval = time.Second / time.Duration(rateLimitPerSec)
+)
+
 // Client represents a single WebSocket connection
 type Client struct {
 	// Unique client ID
@@ -52,6 +59,36 @@ type Client struct {
 
 	// Channels the user is subscribed to
 	Channels map[uuid.UUID]bool
+
+	// Rate limiting: token bucket for chat messages
+	rateTokens   int
+	rateLastFill time.Time
+}
+
+// rateLimitAllow checks the token bucket and returns true if the message is allowed.
+func (c *Client) rateLimitAllow() bool {
+	now := time.Now()
+	if c.rateLastFill.IsZero() {
+		c.rateTokens = rateLimitBurst
+		c.rateLastFill = now
+	}
+
+	// Refill tokens based on elapsed time
+	elapsed := now.Sub(c.rateLastFill)
+	newTokens := int(elapsed / rateLimitInterval)
+	if newTokens > 0 {
+		c.rateTokens += newTokens
+		if c.rateTokens > rateLimitBurst {
+			c.rateTokens = rateLimitBurst
+		}
+		c.rateLastFill = now
+	}
+
+	if c.rateTokens > 0 {
+		c.rateTokens--
+		return true
+	}
+	return false
 }
 
 // readPump pumps messages from the WebSocket connection to the hub

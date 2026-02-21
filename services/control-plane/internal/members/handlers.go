@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"github.com/concord/control-plane/internal/models"
+	"github.com/concord/control-plane/internal/websocket"
 	"github.com/concord/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -20,14 +21,16 @@ type Handler struct {
 	db    *sql.DB
 	log   *logger.Logger
 	redis *redis.Client
+	hub   *websocket.Hub
 }
 
 // NewHandler creates a new member handler
-func NewHandler(db *sql.DB, log *logger.Logger, redisClient *redis.Client) *Handler {
+func NewHandler(db *sql.DB, log *logger.Logger, redisClient *redis.Client, hub *websocket.Hub) *Handler {
 	return &Handler{
 		db:    db,
 		log:   log,
 		redis: redisClient,
+		hub:   hub,
 	}
 }
 
@@ -387,12 +390,69 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 		}
 	}
 
-	// Remove member
-	deleteQuery := `DELETE FROM server_members WHERE server_id = $1 AND user_id = $2`
+	// Remove member and clean up related data in a transaction
+	tx, err := h.db.Begin()
+	if err != nil {
+		h.log.Error("Failed to start transaction", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+		return
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			h.log.Error("Failed to rollback transaction", "error", rbErr)
+		}
+	}()
 
-	_, err = h.db.Exec(deleteQuery, serverID, targetUserID)
+	// Delete the membership
+	deleteQuery := `DELETE FROM server_members WHERE server_id = $1 AND user_id = $2`
+	_, err = tx.Exec(deleteQuery, serverID, targetUserID)
 	if err != nil {
 		h.log.Error("Failed to remove member", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+		return
+	}
+
+	// Revoke E2EE keys — delete all wrapped keys for this user in this server's channels
+	keysQuery := `
+		DELETE FROM channel_keys
+		WHERE user_id = $1
+		  AND channel_id IN (SELECT id FROM channels WHERE server_id = $2)
+	`
+	_, err = tx.Exec(keysQuery, targetUserID, serverID)
+	if err != nil {
+		h.log.Error("Failed to clean up channel keys", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+		return
+	}
+
+	// Clean up pending key requests
+	pendingQuery := `
+		DELETE FROM pending_key_requests
+		WHERE user_id = $1
+		  AND channel_id IN (SELECT id FROM channels WHERE server_id = $2)
+	`
+	_, err = tx.Exec(pendingQuery, targetUserID, serverID)
+	if err != nil {
+		h.log.Error("Failed to clean up pending key requests", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+		return
+	}
+
+	// Clean up read states
+	readQuery := `
+		DELETE FROM channel_read_states
+		WHERE user_id = $1
+		  AND channel_id IN (SELECT id FROM channels WHERE server_id = $2)
+	`
+	_, err = tx.Exec(readQuery, targetUserID, serverID)
+	if err != nil {
+		h.log.Error("Failed to clean up read states", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		h.log.Error("Failed to commit transaction", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
 		return
 	}
@@ -403,6 +463,15 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 	}
 
 	h.log.Info("Member "+action, "server_id", serverID, "target_user", targetUserID, "by_user", userID)
+
+	// Broadcast to all connected clients
+	h.hub.BroadcastToAll(websocket.OutgoingMessage{
+		Type: "member_removed",
+		Data: map[string]interface{}{
+			"server_id": serverID,
+			"user_id":   targetUserID,
+		},
+	})
 
 	c.JSON(http.StatusOK, gin.H{"message": "Member " + action + " successfully"})
 }

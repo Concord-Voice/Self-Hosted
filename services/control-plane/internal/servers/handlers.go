@@ -32,8 +32,9 @@ func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub) *Handler {
 
 // CreateServerRequest represents a request to create a server
 type CreateServerRequest struct {
-	Name    string  `json:"name" binding:"required,min=3,max=100"`
-	IconURL *string `json:"icon_url"`
+	Name        string  `json:"name" binding:"required,min=3,max=100"`
+	IconURL     *string `json:"icon_url"`
+	E2EEDefault *bool   `json:"e2ee_default,omitempty"` // Defaults to true if not specified
 }
 
 // UpdateServerRequest represents a request to update a server.
@@ -49,7 +50,7 @@ func (h *Handler) ListServers(c *gin.Context) {
 	userID := c.GetString("user_id")
 
 	query := `
-		SELECT s.id, s.name, s.icon_url, s.owner_id, s.created_at, s.updated_at, sm.role
+		SELECT s.id, s.name, s.icon_url, s.owner_id, s.e2ee_default, s.created_at, s.updated_at, sm.role
 		FROM servers s
 		INNER JOIN server_members sm ON s.id = sm.server_id
 		WHERE sm.user_id = $1
@@ -72,6 +73,7 @@ func (h *Handler) ListServers(c *gin.Context) {
 			&server.Name,
 			&server.IconURL,
 			&server.OwnerID,
+			&server.E2EEDefault,
 			&server.CreatedAt,
 			&server.UpdatedAt,
 			&server.Role,
@@ -126,11 +128,17 @@ func (h *Handler) CreateServer(c *gin.Context) {
 		}
 	}
 
+	// Determine E2EE default (true if not specified)
+	e2eeDefault := true
+	if req.E2EEDefault != nil {
+		e2eeDefault = *req.E2EEDefault
+	}
+
 	// Create server
 	serverID := uuid.New().String()
 	serverQuery := `
-		INSERT INTO servers (id, name, icon_url, owner_id, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, NOW(), NOW())
+		INSERT INTO servers (id, name, icon_url, owner_id, e2ee_default, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
 		RETURNING created_at, updated_at
 	`
 
@@ -139,8 +147,9 @@ func (h *Handler) CreateServer(c *gin.Context) {
 	server.Name = req.Name
 	server.IconURL = req.IconURL
 	server.OwnerID = userID
+	server.E2EEDefault = e2eeDefault
 
-	err = tx.QueryRow(serverQuery, serverID, req.Name, req.IconURL, userID).Scan(
+	err = tx.QueryRow(serverQuery, serverID, req.Name, req.IconURL, userID, e2eeDefault).Scan(
 		&server.CreatedAt,
 		&server.UpdatedAt,
 	)
@@ -163,29 +172,9 @@ func (h *Handler) CreateServer(c *gin.Context) {
 		return
 	}
 
-	// Create default channels
-	channelQuery := `
-		INSERT INTO channels (id, server_id, name, type, position, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
-	`
-
-	textChannelID := uuid.New().String()
-	_, err = tx.Exec(channelQuery, textChannelID, serverID, "general", "text", 0)
-	if err != nil {
-		h.log.Error("Failed to create default text channel", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create server"})
-		return
-	}
-
-	voiceChannelID := uuid.New().String()
-	_, err = tx.Exec(channelQuery, voiceChannelID, serverID, "General", "voice", 1)
-	if err != nil {
-		h.log.Error("Failed to create default voice channel", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create server"})
-		return
-	}
-
-	// Commit transaction
+	// Commit transaction — no default channels are created at server spawn.
+	// The owner creates channels through the UI, which handles E2EE key
+	// generation and wrapping when the server's e2ee_default is enabled.
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit transaction", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create server"})
@@ -231,7 +220,7 @@ func (h *Handler) GetServer(c *gin.Context) {
 	// Get server details
 	var server models.Server
 	serverQuery := `
-		SELECT id, name, icon_url, owner_id, created_at, updated_at
+		SELECT id, name, icon_url, owner_id, e2ee_default, created_at, updated_at
 		FROM servers
 		WHERE id = $1
 	`
@@ -241,6 +230,7 @@ func (h *Handler) GetServer(c *gin.Context) {
 		&server.Name,
 		&server.IconURL,
 		&server.OwnerID,
+		&server.E2EEDefault,
 		&server.CreatedAt,
 		&server.UpdatedAt,
 	)
@@ -341,20 +331,20 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 			UPDATE servers
 			SET name = $1, icon_url = $2, updated_at = NOW()
 			WHERE id = $3
-			RETURNING name, icon_url, owner_id, created_at, updated_at
+			RETURNING name, icon_url, owner_id, e2ee_default, created_at, updated_at
 		`
 		err = h.db.QueryRow(updateQuery, req.Name, iconURL, serverID).Scan(
-			&server.Name, &server.IconURL, &server.OwnerID, &server.CreatedAt, &server.UpdatedAt,
+			&server.Name, &server.IconURL, &server.OwnerID, &server.E2EEDefault, &server.CreatedAt, &server.UpdatedAt,
 		)
 	} else {
 		updateQuery := `
 			UPDATE servers
 			SET name = $1, updated_at = NOW()
 			WHERE id = $2
-			RETURNING name, icon_url, owner_id, created_at, updated_at
+			RETURNING name, icon_url, owner_id, e2ee_default, created_at, updated_at
 		`
 		err = h.db.QueryRow(updateQuery, req.Name, serverID).Scan(
-			&server.Name, &server.IconURL, &server.OwnerID, &server.CreatedAt, &server.UpdatedAt,
+			&server.Name, &server.IconURL, &server.OwnerID, &server.E2EEDefault, &server.CreatedAt, &server.UpdatedAt,
 		)
 	}
 
@@ -428,6 +418,14 @@ func (h *Handler) DeleteServer(c *gin.Context) {
 	}
 
 	h.log.Info("Server deleted", "server_id", serverID, "user_id", userID)
+
+	// Broadcast deletion to all connected clients so frontends can clean up
+	h.hub.BroadcastToAll(websocket.OutgoingMessage{
+		Type: "server_deleted",
+		Data: map[string]interface{}{
+			"server_id": serverID,
+		},
+	})
 
 	c.JSON(http.StatusOK, gin.H{"message": "Server deleted successfully"})
 }

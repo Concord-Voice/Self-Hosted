@@ -2,29 +2,42 @@
 package auth
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
 
+	"github.com/concord/control-plane/internal/middleware"
 	"github.com/concord/control-plane/internal/models"
 	"github.com/concord/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 )
+
+// setRefreshCookie sets a refresh_token cookie with secure defaults.
+func setRefreshCookie(c *gin.Context, value string, maxAge int) {
+	secure := c.Request.TLS != nil
+	c.SetSameSite(http.SameSiteLaxMode)
+	c.SetCookie("refresh_token", value, maxAge, "/", "", secure, true)
+}
 
 // Handler handles authentication-related requests including registration and login.
 type Handler struct {
 	db        *sql.DB
+	redis     *redis.Client
 	log       *logger.Logger
 	jwtSecret string
 }
 
 // NewHandler creates a new authentication handler.
-func NewHandler(db *sql.DB, log *logger.Logger, jwtSecret string) *Handler {
+func NewHandler(db *sql.DB, redisClient *redis.Client, log *logger.Logger, jwtSecret string) *Handler {
 	return &Handler{
 		db:        db,
+		redis:     redisClient,
 		log:       log,
 		jwtSecret: jwtSecret,
 	}
@@ -222,15 +235,7 @@ func (h *Handler) Register(c *gin.Context) {
 	}
 
 	// Set refresh token as httpOnly cookie
-	c.SetCookie(
-		"refresh_token",
-		refreshToken,
-		30*24*60*60, // 30 days in seconds
-		"/",
-		"",
-		c.Request.TLS != nil, // Secure only if HTTPS
-		true,                  // HttpOnly
-	)
+	setRefreshCookie(c, refreshToken, 30*24*60*60)
 
 	h.log.Info("User registered", "user_id", userID, "email", req.Email, "username", req.Username)
 
@@ -247,11 +252,68 @@ func (h *Handler) Register(c *gin.Context) {
 	})
 }
 
+// loginLockoutThreshold is the number of failed attempts before lockout.
+const loginLockoutThreshold = 5
+
+// loginLockoutDurations defines escalating lockout windows.
+var loginLockoutDurations = []time.Duration{15 * time.Minute, 30 * time.Minute, 60 * time.Minute}
+
+// checkLoginLockout returns true if the account is currently locked out.
+func (h *Handler) checkLoginLockout(ctx context.Context, email string) bool {
+	key := fmt.Sprintf("login_lockout:%s", email)
+	if _, err := h.redis.Get(ctx, key).Result(); err == nil {
+		return true // lockout key exists
+	}
+	return false
+}
+
+// recordFailedLogin increments the failure counter and applies lockout if threshold is reached.
+func (h *Handler) recordFailedLogin(ctx context.Context, email string) {
+	attemptsKey := fmt.Sprintf("login_attempts:%s", email)
+	lockoutKey := fmt.Sprintf("login_lockout:%s", email)
+	lockoutCountKey := fmt.Sprintf("login_lockout_count:%s", email)
+
+	count, _ := h.redis.Incr(ctx, attemptsKey).Result()
+	// Set a 1-hour window for the attempts counter to auto-expire
+	h.redis.Expire(ctx, attemptsKey, 1*time.Hour)
+
+	if count >= int64(loginLockoutThreshold) {
+		// Determine lockout duration (escalating)
+		lockoutCount, _ := h.redis.Incr(ctx, lockoutCountKey).Result()
+		h.redis.Expire(ctx, lockoutCountKey, 24*time.Hour)
+		idx := int(lockoutCount) - 1
+		if idx >= len(loginLockoutDurations) {
+			idx = len(loginLockoutDurations) - 1
+		}
+		duration := loginLockoutDurations[idx]
+
+		h.redis.Set(ctx, lockoutKey, "1", duration)
+		h.redis.Del(ctx, attemptsKey) // Reset attempts counter
+	}
+}
+
+// clearLoginAttempts resets counters on successful login.
+func (h *Handler) clearLoginAttempts(ctx context.Context, email string) {
+	h.redis.Del(ctx,
+		fmt.Sprintf("login_attempts:%s", email),
+		fmt.Sprintf("login_lockout:%s", email),
+		fmt.Sprintf("login_lockout_count:%s", email),
+	)
+}
+
 // Login handles user authentication
 func (h *Handler) Login(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Check if account is locked out (generic message — don't reveal lockout)
+	if h.checkLoginLockout(ctx, req.Email) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
 		return
 	}
 
@@ -279,7 +341,9 @@ func (h *Handler) Login(c *gin.Context) {
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
+			// Record failure even for non-existent accounts (timing-safe)
+			h.recordFailedLogin(ctx, req.Email)
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
 			return
 		}
 		h.log.Error("Failed to fetch user", "error", err)
@@ -295,9 +359,13 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 	if !valid {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid email or password"})
+		h.recordFailedLogin(ctx, req.Email)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
 		return
 	}
+
+	// Clear failed login attempts on success
+	h.clearLoginAttempts(ctx, req.Email)
 
 	// Generate access token (JWT, 15 min)
 	accessToken, err := GenerateAccessToken(user.ID, h.jwtSecret)
@@ -363,15 +431,7 @@ func (h *Handler) Login(c *gin.Context) {
 	}
 
 	// Set refresh token as httpOnly cookie
-	c.SetCookie(
-		"refresh_token",
-		refreshToken,
-		cookieMaxAge,
-		"/",
-		"",
-		c.Request.TLS != nil, // Secure only if HTTPS
-		true,                  // HttpOnly
-	)
+	setRefreshCookie(c, refreshToken, cookieMaxAge)
 
 	// Fetch E2EE keys
 	var keys models.UserKeys
@@ -407,7 +467,10 @@ func (h *Handler) Login(c *gin.Context) {
 	})
 }
 
-// Refresh handles access token refresh
+// Refresh handles access token refresh with token rotation.
+// Each refresh token is single-use: a new refresh token is issued on every refresh.
+// If a previously-used token is presented again, ALL tokens for the user are revoked
+// (breach detection — the old token was likely stolen).
 func (h *Handler) Refresh(c *gin.Context) {
 	// Get refresh token from cookie
 	refreshToken, err := c.Cookie("refresh_token")
@@ -439,6 +502,21 @@ func (h *Handler) Refresh(c *gin.Context) {
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
+			// Breach detection: check if this token was already used (revoked but exists)
+			var revokedUserID string
+			revokeErr := h.db.QueryRow(
+				`SELECT user_id FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NOT NULL`,
+				tokenHash,
+			).Scan(&revokedUserID)
+			if revokeErr == nil && revokedUserID != "" {
+				// A previously-used token was replayed — revoke ALL tokens for this user
+				h.log.Error("Refresh token replay detected, revoking all sessions",
+					"user_id", revokedUserID)
+				_, _ = h.db.Exec(
+					`UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`,
+					revokedUserID,
+				)
+			}
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid refresh token"})
 			return
 		}
@@ -453,37 +531,54 @@ func (h *Handler) Refresh(c *gin.Context) {
 		return
 	}
 
-	// Rolling expiration for remember_me sessions: extend 30 days from now on each use.
-	// Non-remember-me sessions only update last_used_at without extending expiry.
-	if token.RememberMe {
-		newExpiry := time.Now().Add(30 * 24 * time.Hour)
-		_, err = h.db.Exec(
-			`UPDATE refresh_tokens SET last_used_at = NOW(), expires_at = $1 WHERE id = $2`,
-			newExpiry, token.ID,
-		)
-		if err != nil {
-			h.log.Error("Failed to update refresh token", "error", err)
-		}
-
-		// Re-set cookie with fresh 30-day MaxAge so browser expiry stays in sync
-		c.SetCookie(
-			"refresh_token",
-			refreshToken,
-			30*24*60*60,
-			"/",
-			"",
-			c.Request.TLS != nil,
-			true,
-		)
-	} else {
-		_, err = h.db.Exec(
-			`UPDATE refresh_tokens SET last_used_at = NOW() WHERE id = $1`,
-			token.ID,
-		)
-		if err != nil {
-			h.log.Error("Failed to update refresh token", "error", err)
-		}
+	// Revoke the old refresh token (single-use rotation)
+	_, err = h.db.Exec(
+		`UPDATE refresh_tokens SET revoked_at = NOW(), last_used_at = NOW() WHERE id = $1`,
+		token.ID,
+	)
+	if err != nil {
+		h.log.Error("Failed to revoke old refresh token", "error", err)
 	}
+
+	// Generate new refresh token
+	newRefreshToken, err := GenerateRefreshToken()
+	if err != nil {
+		h.log.Error("Failed to generate refresh token", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
+		return
+	}
+
+	// Determine expiry for the new token
+	newExpiry := token.ExpiresAt
+	cookieMaxAge := 0
+	if token.RememberMe {
+		newExpiry = time.Now().Add(30 * 24 * time.Hour) // Rolling 30 days
+		cookieMaxAge = 30 * 24 * 60 * 60
+	}
+
+	// Store new refresh token
+	newTokenHash := HashRefreshToken(newRefreshToken)
+	newTokenID := uuid.New().String()
+	_, err = h.db.Exec(
+		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, remember_me)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		newTokenID,
+		token.UserID,
+		newTokenHash,
+		token.DeviceName,
+		c.ClientIP(),
+		c.GetHeader("User-Agent"),
+		newExpiry,
+		token.RememberMe,
+	)
+	if err != nil {
+		h.log.Error("Failed to store new refresh token", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
+		return
+	}
+
+	// Set new refresh token cookie
+	setRefreshCookie(c, newRefreshToken, cookieMaxAge)
 
 	// Generate new access token
 	accessToken, err := GenerateAccessToken(token.UserID, h.jwtSecret)
@@ -501,6 +596,19 @@ func (h *Handler) Refresh(c *gin.Context) {
 
 // Logout handles session termination
 func (h *Handler) Logout(c *gin.Context) {
+	// Blacklist the current access token if provided (best-effort)
+	if authHeader := c.GetHeader("Authorization"); authHeader != "" {
+		if parts := strings.SplitN(authHeader, " ", 2); len(parts) == 2 {
+			if claims, err := ValidateAccessToken(parts[1], h.jwtSecret); err == nil && claims.ID != "" {
+				remaining := time.Until(claims.ExpiresAt.Time)
+				ctx := context.Background()
+				if blErr := middleware.BlacklistToken(ctx, h.redis, claims.ID, remaining); blErr != nil {
+					h.log.Error("Failed to blacklist access token", "error", blErr)
+				}
+			}
+		}
+	}
+
 	// Get refresh token from cookie
 	refreshToken, err := c.Cookie("refresh_token")
 	if err != nil {
@@ -517,15 +625,7 @@ func (h *Handler) Logout(c *gin.Context) {
 	}
 
 	// Clear cookie
-	c.SetCookie(
-		"refresh_token",
-		"",
-		-1, // Expire immediately
-		"/",
-		"",
-		c.Request.TLS != nil,
-		true,
-	)
+	setRefreshCookie(c, "", -1)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
 }

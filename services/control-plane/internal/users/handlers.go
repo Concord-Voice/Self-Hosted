@@ -496,3 +496,32 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		"message": "Password changed successfully",
 	})
 }
+
+// GetPublicKey returns a user's latest public key (for E2EE key wrapping).
+func (h *Handler) GetPublicKey(c *gin.Context) {
+	targetUserID := c.Param("user_id")
+
+	var publicKey []byte
+	var keyVersion int
+	err := h.db.QueryRow(
+		`SELECT public_key, key_version FROM public_keys
+		 WHERE user_id = $1 ORDER BY key_version DESC LIMIT 1`,
+		targetUserID,
+	).Scan(&publicKey, &keyVersion)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "Public key not found"})
+			return
+		}
+		h.log.Error("Failed to fetch public key", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch public key"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"user_id":     targetUserID,
+		"public_key":  base64.StdEncoding.EncodeToString(publicKey),
+		"key_version": keyVersion,
+	})
+}

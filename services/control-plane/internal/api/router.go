@@ -29,6 +29,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	// Middleware
 	router.Use(gin.Recovery())
 	router.Use(middleware.Logger(log))
+	router.Use(middleware.SecurityHeaders())
 	router.Use(middleware.CORS(cfg.AllowedOrigins))
 
 	// Health check
@@ -44,15 +45,16 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	go hub.Run()
 
 	// Initialize handlers
-	authHandler := auth.NewHandler(db, log, cfg.JWTSecret)
+	authHandler := auth.NewHandler(db, redis, log, cfg.JWTSecret)
 	sessionsHandler := sessions.NewHandler(db, log)
 	usersHandler := users.NewHandler(db, log)
 	serversHandler := servers.NewHandler(db, log, hub)
-	channelsHandler := channels.NewHandler(db, log)
-	membersHandler := members.NewHandler(db, log, redis)
+	channelsHandler := channels.NewHandler(db, log, hub)
+	membersHandler := members.NewHandler(db, log, redis, hub)
 	messagesHandler := messages.NewHandler(db, log, hub)
 	invitesHandler := invites.NewHandler(db, log, hub)
-	wsHandler := websocket.NewHandler(hub, db, cfg.JWTSecret, cfg.AllowedOrigins)
+	wsHandler := websocket.NewHandler(hub, db, redis, cfg.JWTSecret, cfg.AllowedOrigins)
+	wsTicketHandler := auth.NewWSTicketHandler(redis, cfg.JWTSecret)
 
 	// API v1 routes
 	v1 := router.Group("/api/v1")
@@ -87,8 +89,14 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 
 		// Protected routes
 		protected := v1.Group("/")
-		protected.Use(middleware.AuthRequired(cfg.JWTSecret))
+		protected.Use(middleware.AuthRequired(cfg.JWTSecret, redis))
 		{
+			// WebSocket ticket (short-lived, single-use)
+			protected.POST("/auth/ws-ticket",
+				middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+				wsTicketHandler.IssueTicket,
+			)
+
 			// User routes
 			userRoutes := protected.Group("/users")
 			{
@@ -119,6 +127,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 				userRoutes.POST("/me/password",
 					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
 					usersHandler.ChangePassword,
+				)
+
+				// Get user's public key (for E2EE key wrapping)
+				userRoutes.GET("/:user_id/public-key",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					usersHandler.GetPublicKey,
 				)
 			}
 
@@ -281,6 +295,24 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 				channelRoutes.POST("/:id/read",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					channelsHandler.MarkChannelRead,
+				)
+
+				// Get channel encryption keys (for E2EE channels)
+				channelRoutes.GET("/:id/keys",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					channelsHandler.GetChannelKeys,
+				)
+
+				// Distribute channel keys to new members (E2EE key distribution)
+				channelRoutes.POST("/:id/keys",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					channelsHandler.DistributeChannelKeys,
+				)
+
+				// Get pending key requests (for E2EE key distribution)
+				channelRoutes.GET("/pending-keys",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					channelsHandler.GetPendingKeyRequests,
 				)
 			}
 

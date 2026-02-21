@@ -2,10 +2,13 @@
 package config
 
 import (
+	"log"
 	"os"
 
 	"github.com/joho/godotenv"
 )
+
+const devJWTSecret = "dev_jwt_secret_change_in_production" // #nosec G101 -- Not a real secret, just the default placeholder
 
 // Config holds all configuration for the application
 type Config struct {
@@ -36,14 +39,25 @@ func Load() (*Config, error) {
 		Port:                  getEnv("PORT", "8080"),
 		DatabaseURL:           getEnv("DATABASE_URL", "postgres://concord:concord_dev_password@localhost:5432/concord?sslmode=disable"),
 		RedisURL:              getEnv("REDIS_URL", "redis://localhost:6379"),
-		JWTSecret:             getEnv("JWT_SECRET", "dev_jwt_secret_change_in_production"),
+		JWTSecret:             getEnv("JWT_SECRET", devJWTSecret),
 		NATSUrl:               getEnv("NATS_URL", "nats://localhost:4222"),
 		MediaPlaneURL:         getEnv("MEDIA_PLANE_URL", "http://localhost:3000"),
 		LicensingAuthorityURL: getEnv("LICENSING_AUTHORITY_URL", "http://localhost:8082"),
 		AllowedOrigins:        []string{"http://localhost:3001", "http://localhost:3002"},
 	}
 
+	cfg.validate()
+
 	return cfg, nil
+}
+
+// validate checks for dangerous configuration in production environments.
+// Fatally exits if a real JWT_SECRET is not set in production.
+func (c *Config) validate() {
+	if c.Environment == "production" && c.JWTSecret == devJWTSecret {
+		log.Fatal("FATAL: JWT_SECRET must be set to a secure value in production. " +
+			"The default dev secret is not allowed.")
+	}
 }
 
 func getEnv(key, defaultValue string) string {

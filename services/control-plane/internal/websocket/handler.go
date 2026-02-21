@@ -1,31 +1,38 @@
 package websocket
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/concord/control-plane/internal/auth"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/redis/go-redis/v9"
 )
 
 // Handler handles WebSocket connections
 type Handler struct {
 	hub            *Hub
 	db             *sql.DB
+	redis          *redis.Client
 	jwtSecret      string
 	allowedOrigins []string
 	upgrader       websocket.Upgrader
 }
 
 // NewHandler creates a new WebSocket handler
-func NewHandler(hub *Hub, db *sql.DB, jwtSecret string, allowedOrigins []string) *Handler {
+func NewHandler(hub *Hub, db *sql.DB, redisClient *redis.Client, jwtSecret string, allowedOrigins []string) *Handler {
 	h := &Handler{
 		hub:            hub,
 		db:             db,
+		redis:          redisClient,
 		jwtSecret:      jwtSecret,
 		allowedOrigins: allowedOrigins,
 	}
@@ -50,7 +57,7 @@ func NewHandler(hub *Hub, db *sql.DB, jwtSecret string, allowedOrigins []string)
 
 // HandleWebSocket upgrades HTTP connections to WebSocket
 func (h *Handler) HandleWebSocket(c *gin.Context) {
-	// Extract and validate JWT token
+	// Authenticate: prefer ticket-based auth, fall back to JWT for backward compat
 	userID, err := h.authenticateWebSocket(c)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
@@ -95,29 +102,43 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 	go client.readPump()
 }
 
-// authenticateWebSocket validates JWT token from WebSocket connection
+// authenticateWebSocket validates the connection using ticket-based auth (preferred)
+// or falls back to JWT for backward compatibility.
 func (h *Handler) authenticateWebSocket(c *gin.Context) (uuid.UUID, error) {
-	// Try to get token from query parameter first (for WebSocket connections)
-	tokenString := c.Query("token")
-
-	// Fall back to Authorization header
-	if tokenString == "" {
-		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
-			return uuid.Nil, jwt.ErrSignatureInvalid
+	// Prefer ticket-based auth (short-lived, single-use, not logged in URLs)
+	if ticket := c.Query("ticket"); ticket != "" {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+		defer cancel()
+		userIDStr, err := auth.ValidateTicket(ctx, h.redis, ticket)
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("invalid ticket: %w", err)
 		}
-
-		// Remove "Bearer " prefix
-		if len(authHeader) > 7 && strings.ToLower(authHeader[0:7]) == "bearer " {
-			tokenString = authHeader[7:]
-		} else {
-			return uuid.Nil, jwt.ErrSignatureInvalid
+		userID, err := uuid.Parse(userIDStr)
+		if err != nil {
+			return uuid.Nil, fmt.Errorf("invalid user ID in ticket: %w", err)
 		}
+		return userID, nil
 	}
 
-	// Parse and validate token
+	// Fall back to JWT — check Authorization header first, then ?token= query param
+	tokenString := ""
+	if authHeader := c.GetHeader("Authorization"); authHeader != "" {
+		if len(authHeader) > 7 && strings.ToLower(authHeader[0:7]) == "bearer " {
+			tokenString = authHeader[7:]
+		}
+	}
+	if tokenString == "" {
+		// WebSocket connections from browsers can't set custom headers,
+		// so also accept JWT via ?token= query param
+		tokenString = c.Query("token")
+	}
+
+	if tokenString == "" {
+		return uuid.Nil, fmt.Errorf("no authentication provided")
+	}
+
+	// Parse and validate JWT
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		// Verify signing method
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, jwt.ErrSignatureInvalid
 		}
@@ -128,22 +149,19 @@ func (h *Handler) authenticateWebSocket(c *gin.Context) (uuid.UUID, error) {
 		return uuid.Nil, err
 	}
 
-	// Extract user ID from claims
 	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
 		userIDStr, ok := claims["user_id"].(string)
 		if !ok {
 			return uuid.Nil, jwt.ErrTokenInvalidClaims
 		}
-
 		userID, err := uuid.Parse(userIDStr)
 		if err != nil {
 			return uuid.Nil, err
 		}
-
 		return userID, nil
 	}
 
-	return uuid.Nil, jwt.ErrSignatureInvalid
+	return uuid.Nil, fmt.Errorf("invalid authentication")
 }
 
 // GetHub returns the hub instance (for external access)

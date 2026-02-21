@@ -459,18 +459,45 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		return
 	}
 
+	// Rate limit check
+	if !client.rateLimitAllow() {
+		h.sendError(msg.ClientID, "Rate limit exceeded, please slow down")
+		return
+	}
+
 	// Validate content
 	content, ok := msg.Data["content"].(string)
 	if !ok || content == "" {
 		h.sendError(msg.ClientID, "Message content is required")
 		return
 	}
-	if len(content) > 4000 {
+
+	isEncrypted, _ := msg.Data["is_encrypted"].(bool)
+
+	// Encrypted messages are larger due to AES-GCM (IV + auth tag) + base64 encoding.
+	// A 4000-char plaintext can produce up to ~24KB of ciphertext (multi-byte UTF-8 worst case).
+	// Plaintext messages keep the 4000-char limit.
+	maxContentLen := 4000
+	if isEncrypted {
+		maxContentLen = 24000
+	}
+	if len(content) > maxContentLen {
 		h.sendError(msg.ClientID, "Message content exceeds maximum length")
 		return
 	}
 
-	isEncrypted, _ := msg.Data["is_encrypted"].(bool)
+	// Server-side encryption enforcement: if channel is E2EE, reject plaintext messages (fail-closed)
+	var channelEncrypted bool
+	encErr := h.db.QueryRow(`SELECT is_encrypted FROM channels WHERE id = $1`, channelUUID).Scan(&channelEncrypted)
+	if encErr != nil {
+		log.Printf("Failed to check channel encryption status: %v", encErr)
+		h.sendError(msg.ClientID, "Failed to verify channel encryption status")
+		return
+	}
+	if channelEncrypted && !isEncrypted {
+		h.sendError(msg.ClientID, "E2EE channel requires encrypted messages")
+		return
+	}
 
 	// Persist message to database
 	messageID := uuid.New()

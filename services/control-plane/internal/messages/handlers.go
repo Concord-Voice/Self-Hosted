@@ -29,16 +29,19 @@ func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub) *Handler {
 	}
 }
 
-// SendMessageRequest represents a request to send a message
+// SendMessageRequest represents a request to send a message.
+// Max content length is 24000 to accommodate encrypted messages (AES-GCM + base64 overhead).
+// Plaintext messages are limited to 4000 chars on the client side.
 type SendMessageRequest struct {
 	ChannelID   string `json:"channel_id" binding:"required,uuid"`
-	Content     string `json:"content" binding:"required,min=1,max=4000"`
+	Content     string `json:"content" binding:"required,min=1,max=24000"`
 	IsEncrypted bool   `json:"is_encrypted"`
 }
 
-// UpdateMessageRequest represents a request to update a message
+// UpdateMessageRequest represents a request to update a message.
+// Max content length is 24000 to accommodate encrypted messages.
 type UpdateMessageRequest struct {
-	Content string `json:"content" binding:"required,min=1,max=4000"`
+	Content string `json:"content" binding:"required,min=1,max=24000"`
 }
 
 // GetMessages returns message history for a channel

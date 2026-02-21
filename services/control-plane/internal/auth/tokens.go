@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 )
 
 var (
@@ -24,13 +25,17 @@ type Claims struct {
 	jwt.RegisteredClaims
 }
 
-// GenerateAccessToken creates a short-lived JWT access token
+// AccessTokenTTL is the lifetime of JWT access tokens.
+const AccessTokenTTL = 15 * time.Minute
+
+// GenerateAccessToken creates a short-lived JWT access token with a unique JTI.
 func GenerateAccessToken(userID, jwtSecret string) (string, error) {
 	now := time.Now()
 	claims := Claims{
 		UserID: userID,
 		RegisteredClaims: jwt.RegisteredClaims{
-			ExpiresAt: jwt.NewNumericDate(now.Add(15 * time.Minute)),
+			ID:        uuid.New().String(),
+			ExpiresAt: jwt.NewNumericDate(now.Add(AccessTokenTTL)),
 			IssuedAt:  jwt.NewNumericDate(now),
 			NotBefore: jwt.NewNumericDate(now),
 			Issuer:    "concord-control-plane",
