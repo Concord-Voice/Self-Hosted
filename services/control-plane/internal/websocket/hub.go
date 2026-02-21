@@ -779,7 +779,9 @@ func (h *Hub) BroadcastToAll(msg OutgoingMessage) {
 	h.globalBroadcast <- msg
 }
 
-// handleProfileUpdate refreshes cached user info and broadcasts the update to all clients.
+// handleProfileUpdate refreshes cached user info on the hub's Client objects.
+// The actual "profile_updated" broadcast is sent by the HTTP handler (UpdateMe)
+// to ensure reliable delivery without depending on the client-driven WS round-trip.
 func (h *Hub) handleProfileUpdate(msg IncomingMessage) {
 	client, ok := h.clients[msg.ClientID]
 	if !ok {
@@ -807,27 +809,6 @@ func (h *Hub) handleProfileUpdate(msg IncomingMessage) {
 				c.DisplayName = displayName
 				c.AvatarURL = avatarURL
 			}
-		}
-	}
-
-	// Broadcast to all connected clients
-	broadcastMsg := OutgoingMessage{
-		Type: "profile_updated",
-		Data: map[string]interface{}{
-			"user_id":      msg.UserID.String(),
-			"username":     username,
-			"display_name": displayName,
-			"avatar_url":   avatarURL,
-		},
-	}
-	data, err := json.Marshal(broadcastMsg)
-	if err != nil {
-		return
-	}
-	for _, c := range h.clients {
-		select {
-		case c.Send <- data:
-		default:
 		}
 	}
 }

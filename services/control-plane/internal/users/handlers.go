@@ -11,6 +11,7 @@ import (
 
 	"github.com/concord/control-plane/internal/auth"
 	"github.com/concord/control-plane/internal/models"
+	"github.com/concord/control-plane/internal/websocket"
 	"github.com/concord/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 )
@@ -19,13 +20,15 @@ import (
 type Handler struct {
 	db  *sql.DB
 	log *logger.Logger
+	hub *websocket.Hub
 }
 
 // NewHandler creates a new user handler.
-func NewHandler(db *sql.DB, log *logger.Logger) *Handler {
+func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub) *Handler {
 	return &Handler{
 		db:  db,
 		log: log,
+		hub: hub,
 	}
 }
 
@@ -353,6 +356,19 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 	}
 
 	h.log.Info("Profile updated", "user_id", userID)
+
+	// Broadcast profile update to all connected clients in real time
+	if h.hub != nil {
+		h.hub.BroadcastToAll(websocket.OutgoingMessage{
+			Type: "profile_updated",
+			Data: map[string]interface{}{
+				"user_id":      user.ID,
+				"username":     user.Username,
+				"display_name": user.DisplayName,
+				"avatar_url":   user.AvatarURL,
+			},
+		})
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"user": user.PublicUser(),

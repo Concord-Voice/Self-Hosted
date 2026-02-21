@@ -802,6 +802,17 @@ func (h *Handler) DistributeChannelKeys(c *gin.Context) {
 			channelID, memberUserID,
 		)
 
+		// Notify the recipient that their key is ready
+		if h.hub != nil {
+			h.hub.BroadcastToAll(websocket.OutgoingMessage{
+				Type: "key_delivered",
+				Data: map[string]interface{}{
+					"channel_id": channelID,
+					"user_id":    memberUserID,
+				},
+			})
+		}
+
 		distributed++
 	}
 

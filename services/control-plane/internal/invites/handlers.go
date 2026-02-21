@@ -78,17 +78,19 @@ func (h *Handler) CreateInvite(c *gin.Context) {
 		return
 	}
 
-	// Apply defaults
-	maxUses := 1
-	if req.MaxUses != nil {
-		maxUses = *req.MaxUses
-		if maxUses < 1 {
-			maxUses = 1
-		}
+	// Apply defaults (max_uses: nil → default 1, 0 → unlimited/NULL, >0 → that value)
+	var maxUsesPtr *int
+	if req.MaxUses != nil && *req.MaxUses > 0 {
+		maxUses := *req.MaxUses
 		if maxUses > 100 {
 			maxUses = 100
 		}
+		maxUsesPtr = &maxUses
+	} else if req.MaxUses == nil {
+		defaultMax := 1
+		maxUsesPtr = &defaultMax
 	}
+	// When req.MaxUses is explicitly 0 → maxUsesPtr stays nil → NULL in DB (unlimited)
 
 	expiresInSec := 86400 // 24 hours
 	if req.ExpiresIn != nil {
@@ -100,7 +102,7 @@ func (h *Handler) CreateInvite(c *gin.Context) {
 			expiresInSec = 604800
 		}
 	}
-	expiresAt := time.Now().Add(time.Duration(expiresInSec) * time.Second)
+	expiresAt := time.Now().UTC().Add(time.Duration(expiresInSec) * time.Second)
 
 	// Generate unique code with retry
 	var code string
@@ -118,7 +120,7 @@ func (h *Handler) CreateInvite(c *gin.Context) {
 		invite.ServerID = serverID
 		invite.Code = code
 		invite.CreatedBy = userID
-		invite.MaxUses = &maxUses
+		invite.MaxUses = maxUsesPtr
 		invite.UseCount = 0
 		invite.ExpiresAt = &expiresAt
 		invite.IsRevoked = false
@@ -127,7 +129,7 @@ func (h *Handler) CreateInvite(c *gin.Context) {
 			INSERT INTO server_invites (id, server_id, code, created_by, max_uses, expires_at, created_at)
 			VALUES ($1, $2, $3, $4, $5, $6, NOW())
 			RETURNING created_at
-		`, invite.ID, serverID, code, userID, maxUses, expiresAt).Scan(&invite.CreatedAt)
+		`, invite.ID, serverID, code, userID, maxUsesPtr, expiresAt).Scan(&invite.CreatedAt)
 
 		if insertErr != nil {
 			// Likely unique constraint violation — retry with new code
@@ -288,11 +290,11 @@ func (h *Handler) JoinServer(c *gin.Context) {
 		c.JSON(http.StatusGone, gin.H{"error": "This invite has been revoked"})
 		return
 	}
-	if invite.ExpiresAt != nil && invite.ExpiresAt.Before(time.Now()) {
+	if invite.ExpiresAt != nil && invite.ExpiresAt.Before(time.Now().UTC()) {
 		c.JSON(http.StatusGone, gin.H{"error": "This invite has expired"})
 		return
 	}
-	if invite.MaxUses != nil && invite.UseCount >= *invite.MaxUses {
+	if invite.MaxUses != nil && *invite.MaxUses > 0 && invite.UseCount >= *invite.MaxUses {
 		c.JSON(http.StatusGone, gin.H{"error": "This invite has reached its maximum uses"})
 		return
 	}
@@ -338,11 +340,11 @@ func (h *Handler) JoinServer(c *gin.Context) {
 	// Fetch server details for response
 	var server models.Server
 	err = tx.QueryRow(`
-		SELECT id, name, icon_url, owner_id, created_at, updated_at
+		SELECT id, name, icon_url, owner_id, e2ee_default, created_at, updated_at
 		FROM servers WHERE id = $1
 	`, invite.ServerID).Scan(
 		&server.ID, &server.Name, &server.IconURL, &server.OwnerID,
-		&server.CreatedAt, &server.UpdatedAt,
+		&server.E2EEDefault, &server.CreatedAt, &server.UpdatedAt,
 	)
 	if err != nil {
 		h.log.Error("Failed to fetch server", "error", err)
@@ -377,6 +379,44 @@ func (h *Handler) JoinServer(c *gin.Context) {
 			"role":         "member",
 		},
 	})
+
+	// Create pending key requests for all E2EE channels in the server.
+	// This enables existing members with the channel key to distribute it to the new member.
+	rows, qErr := h.db.Query(`
+		INSERT INTO pending_key_requests (channel_id, user_id)
+		SELECT c.id, $1
+		FROM channels c
+		WHERE c.server_id = $2 AND c.is_encrypted = TRUE
+		ON CONFLICT (channel_id, user_id) DO NOTHING
+		RETURNING channel_id
+	`, userID, invite.ServerID)
+	if qErr != nil {
+		h.log.Error("Failed to create pending key requests", "error", qErr)
+	} else {
+		var pendingChannels []string
+		for rows.Next() {
+			var chID string
+			if sErr := rows.Scan(&chID); sErr == nil {
+				pendingChannels = append(pendingChannels, chID)
+			}
+		}
+		_ = rows.Close()
+
+		// Broadcast key_needed to all online members so they can auto-distribute
+		if len(pendingChannels) > 0 {
+			h.hub.BroadcastToAll(websocket.OutgoingMessage{
+				Type: "key_needed",
+				Data: map[string]interface{}{
+					"server_id":   invite.ServerID,
+					"user_id":     userID,
+					"channel_ids": pendingChannels,
+				},
+			})
+			h.log.Info("Pending key requests created",
+				"user_id", userID, "server_id", invite.ServerID,
+				"channels", len(pendingChannels))
+		}
+	}
 
 	c.JSON(http.StatusOK, gin.H{"server": server, "role": "member"})
 }
@@ -423,8 +463,8 @@ func (h *Handler) GetInviteInfo(c *gin.Context) {
 	}
 
 	valid := !isRevoked &&
-		(expiresAt == nil || expiresAt.After(time.Now())) &&
-		(maxUses == nil || useCount < *maxUses)
+		(expiresAt == nil || expiresAt.After(time.Now().UTC())) &&
+		(maxUses == nil || *maxUses == 0 || useCount < *maxUses)
 
 	c.JSON(http.StatusOK, gin.H{
 		"server_name":  serverName,

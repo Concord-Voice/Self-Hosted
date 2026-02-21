@@ -47,7 +47,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	// Initialize handlers
 	authHandler := auth.NewHandler(db, redis, log, cfg.JWTSecret)
 	sessionsHandler := sessions.NewHandler(db, log)
-	usersHandler := users.NewHandler(db, log)
+	usersHandler := users.NewHandler(db, log, hub)
 	serversHandler := servers.NewHandler(db, log, hub)
 	channelsHandler := channels.NewHandler(db, log, hub)
 	membersHandler := members.NewHandler(db, log, redis, hub)
@@ -309,8 +309,13 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					channelsHandler.DistributeChannelKeys,
 				)
 
+			}
+
+			// E2EE key management routes (separate group to avoid gin /:id wildcard conflict)
+			e2eeRoutes := protected.Group("/e2ee")
+			{
 				// Get pending key requests (for E2EE key distribution)
-				channelRoutes.GET("/pending-keys",
+				e2eeRoutes.GET("/pending-keys",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					channelsHandler.GetPendingKeyRequests,
 				)
