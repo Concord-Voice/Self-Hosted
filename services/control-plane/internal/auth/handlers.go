@@ -18,6 +18,17 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// maxUserAgentLength limits User-Agent storage to reduce metadata footprint.
+const maxUserAgentLength = 256
+
+// truncateUserAgent limits the User-Agent string to maxUserAgentLength.
+func truncateUserAgent(ua string) string {
+	if len(ua) > maxUserAgentLength {
+		return ua[:maxUserAgentLength]
+	}
+	return ua
+}
+
 // setRefreshCookie sets a refresh_token cookie with secure defaults.
 func setRefreshCookie(c *gin.Context, value string, maxAge int) {
 	secure := c.Request.TLS != nil
@@ -224,7 +235,7 @@ func (h *Handler) Register(c *gin.Context) {
 		tokenHash,
 		c.GetHeader("X-Device-Name"),
 		c.ClientIP(),
-		c.GetHeader("User-Agent"),
+		truncateUserAgent(c.GetHeader("User-Agent")),
 		expiresAt,
 		true, // Registration always defaults to remember_me=true
 	)
@@ -395,7 +406,7 @@ func (h *Handler) Login(c *gin.Context) {
 	expiresAt := time.Now().Add(30 * 24 * time.Hour) // 30 days
 	deviceName := c.GetHeader("X-Device-Name")
 	ipAddress := c.ClientIP()
-	userAgent := c.GetHeader("User-Agent")
+	userAgent := truncateUserAgent(c.GetHeader("User-Agent"))
 
 	// Revoke old sessions from the same device+IP to prevent duplicates.
 	// This handles repeated logins from the same client without explicit logout.
@@ -567,9 +578,15 @@ func (h *Handler) Refresh(c *gin.Context) {
 		newTokenHash,
 		token.DeviceName,
 		c.ClientIP(),
-		c.GetHeader("User-Agent"),
+		truncateUserAgent(c.GetHeader("User-Agent")),
 		newExpiry,
 		token.RememberMe,
+	)
+
+	// Auto-purge old revoked sessions for this user (> 90 days) to minimize metadata retention
+	_, _ = h.db.Exec(
+		`DELETE FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NOT NULL AND revoked_at < NOW() - INTERVAL '90 days'`,
+		token.UserID,
 	)
 	if err != nil {
 		h.log.Error("Failed to store new refresh token", "error", err)

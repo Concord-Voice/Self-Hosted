@@ -3,13 +3,42 @@ package sessions
 
 import (
 	"database/sql"
+	"net"
 	"net/http"
+	"strings"
 
 	"github.com/concord/control-plane/internal/auth"
 	"github.com/concord/control-plane/internal/models"
 	"github.com/concord/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 )
+
+// maskIPAddress masks the last octet of an IPv4 address (e.g., "192.168.1.x")
+// or the last 80 bits of an IPv6 address (keeping the /48 prefix).
+// This minimizes PII exposure in API responses while still being useful for session identification.
+func maskIPAddress(ip string) string {
+	parsed := net.ParseIP(ip)
+	if parsed == nil {
+		return "unknown"
+	}
+
+	if parsed.To4() != nil {
+		// IPv4: mask last octet
+		parts := strings.Split(ip, ".")
+		if len(parts) == 4 {
+			parts[3] = "x"
+			return strings.Join(parts, ".")
+		}
+	}
+
+	// IPv6: keep first 3 groups (/48), mask rest
+	parts := strings.Split(ip, ":")
+	if len(parts) > 3 {
+		return strings.Join(parts[:3], ":") + "::x"
+	}
+
+	return "unknown"
+}
 
 // Handler handles session-related requests for managing user authentication sessions.
 type Handler struct {
@@ -78,7 +107,7 @@ func (h *Handler) ListSessions(c *gin.Context) {
 		activeSessions = append(activeSessions, gin.H{
 			"id":          session.ID,
 			"device_name": session.DeviceName,
-			"ip_address":  session.IPAddress,
+			"ip_address":  maskIPAddress(session.IPAddress),
 			"user_agent":  session.UserAgent,
 			"expires_at":  session.ExpiresAt,
 			"created_at":  session.CreatedAt,
@@ -134,7 +163,7 @@ func (h *Handler) ListSessions(c *gin.Context) {
 		pastSessions = append(pastSessions, gin.H{
 			"id":          session.ID,
 			"device_name": session.DeviceName,
-			"ip_address":  session.IPAddress,
+			"ip_address":  maskIPAddress(session.IPAddress),
 			"user_agent":  session.UserAgent,
 			"created_at":  session.CreatedAt,
 			"last_used":   session.LastUsedAt,

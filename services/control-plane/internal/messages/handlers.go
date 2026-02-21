@@ -3,6 +3,7 @@ package messages
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"net/http"
 	"strconv"
 
@@ -12,6 +13,20 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
+
+// minCiphertextSize is the minimum base64-decoded size for a valid AES-GCM ciphertext:
+// 12 bytes IV + 16 bytes auth tag = 28 bytes minimum (empty plaintext).
+const minCiphertextSize = 28
+
+// isValidCiphertext checks that content is valid base64 and meets the minimum
+// size for an AES-256-GCM ciphertext (12-byte IV + 16-byte auth tag).
+func isValidCiphertext(content string) bool {
+	decoded, err := base64.StdEncoding.DecodeString(content)
+	if err != nil {
+		return false
+	}
+	return len(decoded) >= minCiphertextSize
+}
 
 // Handler handles message-related requests
 type Handler struct {
@@ -197,6 +212,23 @@ func (h *Handler) SendMessage(c *gin.Context) {
 		return
 	}
 
+	// E2EE enforcement: if channel is encrypted, message MUST be encrypted with valid ciphertext
+	var channelEncrypted bool
+	encQuery := `SELECT is_encrypted FROM channels WHERE id = $1`
+	if err := h.db.QueryRow(encQuery, req.ChannelID).Scan(&channelEncrypted); err != nil {
+		h.log.Error("Failed to check channel encryption status", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send message"})
+		return
+	}
+	if channelEncrypted && !req.IsEncrypted {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "E2EE channel requires encrypted messages"})
+		return
+	}
+	if channelEncrypted && !isValidCiphertext(req.Content) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ciphertext format for E2EE channel"})
+		return
+	}
+
 	// Create message
 	messageID := uuid.New().String()
 	insertQuery := `
@@ -260,6 +292,19 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 
 	if authorID != userID {
 		c.JSON(http.StatusForbidden, gin.H{"error": "You can only edit your own messages"})
+		return
+	}
+
+	// E2EE enforcement: if the message was originally encrypted, updates must also be encrypted
+	var msgEncrypted bool
+	encCheckQuery := `SELECT COALESCE(c.is_encrypted, false) FROM messages m INNER JOIN channels c ON m.channel_id = c.id WHERE m.id = $1`
+	if err := h.db.QueryRow(encCheckQuery, messageID).Scan(&msgEncrypted); err != nil {
+		h.log.Error("Failed to check channel encryption for update", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update message"})
+		return
+	}
+	if msgEncrypted && !isValidCiphertext(req.Content) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ciphertext format for E2EE channel"})
 		return
 	}
 
