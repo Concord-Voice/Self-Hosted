@@ -25,7 +25,9 @@ type ServerMember struct {
 // ServerWithRole combines server info with user's role
 type ServerWithRole struct {
 	Server
-	Role string `json:"role" db:"role"`
+	Role        string `json:"role" db:"role"`
+	MemberCount int    `json:"member_count" db:"member_count"`
+	OnlineCount int    `json:"online_count" db:"online_count"`
 }
 
 // Channel represents a voice or text channel within a server

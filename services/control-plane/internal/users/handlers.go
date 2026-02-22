@@ -14,6 +14,7 @@ import (
 	"github.com/concord/control-plane/internal/websocket"
 	"github.com/concord/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // Handler handles user-related requests including profile management and settings.
@@ -539,5 +540,109 @@ func (h *Handler) GetPublicKey(c *gin.Context) {
 		"user_id":     targetUserID,
 		"public_key":  base64.StdEncoding.EncodeToString(publicKey),
 		"key_version": keyVersion,
+	})
+}
+
+// GetPreferences returns the current user's encrypted preferences blob.
+// Returns { preferences: null } when no preferences exist (first login).
+func (h *Handler) GetPreferences(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	var encryptedData string
+	var version int
+	var updatedAt string
+	err := h.db.QueryRow(
+		`SELECT encrypted_data, version, updated_at FROM user_preferences WHERE user_id = $1`,
+		userID,
+	).Scan(&encryptedData, &version, &updatedAt)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusOK, gin.H{"preferences": nil})
+			return
+		}
+		h.log.Error("Failed to fetch preferences", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch preferences"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"preferences": gin.H{
+			"encrypted_data": encryptedData,
+			"version":        version,
+			"updated_at":     updatedAt,
+		},
+	})
+}
+
+// UpdatePreferencesRequest represents a request to update encrypted preferences
+type UpdatePreferencesRequest struct {
+	EncryptedData string `json:"encrypted_data" binding:"required"`
+}
+
+// UpdatePreferences upserts the current user's encrypted preferences blob.
+// After storing, broadcasts a notification to the user's other connected clients.
+func (h *Handler) UpdatePreferences(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	var req UpdatePreferencesRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "encrypted_data is required"})
+		return
+	}
+
+	// Validate base64 format
+	if _, err := base64.StdEncoding.DecodeString(req.EncryptedData); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "encrypted_data must be valid base64"})
+		return
+	}
+
+	// Size limit: 64KB of base64 text
+	if len(req.EncryptedData) > 65536 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "encrypted_data exceeds 64KB limit"})
+		return
+	}
+
+	// Upsert preferences
+	var version int
+	err := h.db.QueryRow(
+		`INSERT INTO user_preferences (user_id, encrypted_data, version, updated_at)
+		 VALUES ($1, $2, 1, NOW())
+		 ON CONFLICT (user_id) DO UPDATE
+		 SET encrypted_data = $2, version = user_preferences.version + 1, updated_at = NOW()
+		 RETURNING version`,
+		userID, req.EncryptedData,
+	).Scan(&version)
+
+	if err != nil {
+		h.log.Error("Failed to update preferences", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update preferences"})
+		return
+	}
+
+	// Broadcast to user's other connected clients so they can pull the update
+	if h.hub != nil {
+		if uid, ok := userID.(string); ok {
+			if parsed, err := uuid.Parse(uid); err == nil {
+				h.hub.BroadcastToUser(parsed, websocket.OutgoingMessage{
+					Type: "preferences_updated",
+					Data: map[string]interface{}{
+						"version": version,
+					},
+				})
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"version": version,
 	})
 }

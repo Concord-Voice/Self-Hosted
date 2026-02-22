@@ -12,6 +12,7 @@ import (
 	"github.com/concord/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 )
 
 // Handler handles server-related requests
@@ -49,15 +50,24 @@ type UpdateServerRequest struct {
 func (h *Handler) ListServers(c *gin.Context) {
 	userID := c.GetString("user_id")
 
+	// Get connected user IDs from the hub for online count computation
+	connectedUsers := h.hub.GetConnectedUsers()
+	connectedIDs := make([]string, 0, len(connectedUsers))
+	for uid := range connectedUsers {
+		connectedIDs = append(connectedIDs, uid.String())
+	}
+
 	query := `
-		SELECT s.id, s.name, s.icon_url, s.owner_id, s.e2ee_default, s.created_at, s.updated_at, sm.role
+		SELECT s.id, s.name, s.icon_url, s.owner_id, s.e2ee_default, s.created_at, s.updated_at, sm.role,
+			(SELECT COUNT(*) FROM server_members WHERE server_id = s.id) AS member_count,
+			(SELECT COUNT(*) FROM server_members WHERE server_id = s.id AND user_id = ANY($2::uuid[])) AS online_count
 		FROM servers s
 		INNER JOIN server_members sm ON s.id = sm.server_id
 		WHERE sm.user_id = $1
 		ORDER BY s.created_at DESC
 	`
 
-	rows, err := h.db.Query(query, userID)
+	rows, err := h.db.Query(query, userID, pq.Array(connectedIDs))
 	if err != nil {
 		h.log.Error("Failed to query servers", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch servers"})
@@ -77,6 +87,8 @@ func (h *Handler) ListServers(c *gin.Context) {
 			&server.CreatedAt,
 			&server.UpdatedAt,
 			&server.Role,
+			&server.MemberCount,
+			&server.OnlineCount,
 		)
 		if err != nil {
 			h.log.Error("Failed to scan server", "error", err)

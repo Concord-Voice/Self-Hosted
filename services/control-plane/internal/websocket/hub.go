@@ -50,6 +50,9 @@ type Hub struct {
 
 	// Global broadcast messages to all connected clients
 	globalBroadcast chan OutgoingMessage
+
+	// User-scoped broadcast messages (sent to all clients of a specific user)
+	userBroadcast chan UserBroadcastMessage
 }
 
 // NewHub creates a new Hub
@@ -67,6 +70,7 @@ func NewHub(db *sql.DB, redisClient *redis.Client) *Hub {
 		incoming:             make(chan IncomingMessage, 256),
 		broadcast:            make(chan BroadcastMessage, 256),
 		globalBroadcast:      make(chan OutgoingMessage, 256),
+		userBroadcast:        make(chan UserBroadcastMessage, 256),
 	}
 }
 
@@ -88,6 +92,9 @@ func (h *Hub) Run() {
 
 		case message := <-h.globalBroadcast:
 			h.handleGlobalBroadcast(message)
+
+		case message := <-h.userBroadcast:
+			h.handleUserBroadcast(message)
 		}
 	}
 }
@@ -779,6 +786,42 @@ func (h *Hub) BroadcastToAll(msg OutgoingMessage) {
 	h.globalBroadcast <- msg
 }
 
+// handleUserBroadcast sends a message to all clients of a specific user.
+func (h *Hub) handleUserBroadcast(msg UserBroadcastMessage) {
+	clients, ok := h.userClients[msg.UserID]
+	if !ok {
+		return
+	}
+
+	data, err := json.Marshal(msg.Data)
+	if err != nil {
+		log.Printf("Failed to marshal user broadcast: %v", err)
+		return
+	}
+
+	for clientID := range clients {
+		if msg.ExcludeClientID != nil && clientID == *msg.ExcludeClientID {
+			continue
+		}
+		client, ok := h.clients[clientID]
+		if !ok {
+			continue
+		}
+		select {
+		case client.Send <- data:
+		default:
+		}
+	}
+}
+
+// BroadcastToUser sends a message to all connected clients of a specific user (thread-safe).
+func (h *Hub) BroadcastToUser(userID uuid.UUID, msg OutgoingMessage) {
+	h.userBroadcast <- UserBroadcastMessage{
+		UserID: userID,
+		Data:   msg,
+	}
+}
+
 // handleProfileUpdate refreshes cached user info on the hub's Client objects.
 // The actual "profile_updated" broadcast is sent by the HTTP handler (UpdateMe)
 // to ensure reliable delivery without depending on the client-driven WS round-trip.
@@ -885,4 +928,95 @@ func (h *Hub) broadcastPresenceToAll(userID uuid.UUID, status string, timestamp 
 		default:
 		}
 	}
+
+	// After every presence change, recompute and broadcast online counts
+	// for all servers the affected user belongs to.
+	h.broadcastServerOnlineCounts(userID)
+}
+
+// broadcastServerOnlineCounts recomputes the visible online member count for
+// every server that userID belongs to, then broadcasts the updated counts to
+// all connected clients. A member is "visible online" if they have an active
+// WebSocket connection and their status is not "invisible".
+//
+// Called from within the hub's Run goroutine, so h.userClients is safe to read.
+func (h *Hub) broadcastServerOnlineCounts(userID uuid.UUID) {
+	// 1. Get all members for every server the user belongs to (one query).
+	rows, err := h.db.Query(`
+		SELECT sm.server_id, sm.user_id
+		FROM server_members sm
+		WHERE sm.server_id IN (SELECT server_id FROM server_members WHERE user_id = $1)
+	`, userID)
+	if err != nil {
+		log.Printf("Failed to query memberships for online counts: %v", err)
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	// Group member IDs by server, collect unique member IDs for status checks.
+	serverMembers := make(map[string][]uuid.UUID)
+	allMemberIDs := make(map[uuid.UUID]bool)
+	for rows.Next() {
+		var sid, uid uuid.UUID
+		if err := rows.Scan(&sid, &uid); err == nil {
+			sidStr := sid.String()
+			serverMembers[sidStr] = append(serverMembers[sidStr], uid)
+			allMemberIDs[uid] = true
+		}
+	}
+	if len(serverMembers) == 0 {
+		return
+	}
+
+	// 2. Batch-check which members are connected and not invisible.
+	//    Use Redis MGET to fetch all statuses in one round-trip.
+	ctx := context.Background()
+	connectedUIDs := make([]uuid.UUID, 0, len(allMemberIDs))
+	redisKeys := make([]string, 0, len(allMemberIDs))
+	for uid := range allMemberIDs {
+		if _, connected := h.userClients[uid]; connected {
+			connectedUIDs = append(connectedUIDs, uid)
+			redisKeys = append(redisKeys, fmt.Sprintf("presence:%s", uid))
+		}
+	}
+
+	visibleOnline := make(map[uuid.UUID]bool, len(connectedUIDs))
+	if len(redisKeys) > 0 {
+		statuses, err := h.redis.MGet(ctx, redisKeys...).Result()
+		if err != nil {
+			// Redis error — fall back to counting all connected as online
+			for _, uid := range connectedUIDs {
+				visibleOnline[uid] = true
+			}
+		} else {
+			for i, val := range statuses {
+				if val == nil {
+					// No key → just connected, treat as online
+					visibleOnline[connectedUIDs[i]] = true
+				} else if val.(string) != "invisible" {
+					visibleOnline[connectedUIDs[i]] = true
+				}
+			}
+		}
+	}
+
+	// 3. Compute per-server online counts.
+	counts := make(map[string]int, len(serverMembers))
+	for sid, members := range serverMembers {
+		count := 0
+		for _, uid := range members {
+			if visibleOnline[uid] {
+				count++
+			}
+		}
+		counts[sid] = count
+	}
+
+	// 4. Broadcast to all connected clients.
+	h.handleGlobalBroadcast(OutgoingMessage{
+		Type: "server_online_counts",
+		Data: map[string]interface{}{
+			"counts": counts,
+		},
+	})
 }
