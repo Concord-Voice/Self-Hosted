@@ -21,7 +21,7 @@ Thank you for your interest in contributing to Concord! This document provides g
 ## Getting Started
 
 ### Prerequisites
-- Go 1.22+
+- Go 1.24+
 - Node.js 20+
 - Docker & Docker Compose
 - Git
@@ -29,8 +29,8 @@ Thank you for your interest in contributing to Concord! This document provides g
 ### Setup
 ```bash
 # Clone the repository
-git clone https://github.com/YOUR_ORG/concord.git
-cd concord
+git clone https://github.com/markdrogersjr/Concord.git
+cd Concord
 
 # Install Git hooks (prevents committing secrets)
 ./scripts/install-git-hooks.sh

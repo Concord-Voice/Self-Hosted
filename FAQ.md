@@ -1,6 +1,6 @@
 # Concord Frequently Asked Questions (FAQ)
 
-**Last Updated:** 2026-02-15
+**Last Updated:** 2026-02-22
 
 This document answers common questions about Concord's licensing, security, development, deployment, and usage.
 
@@ -210,7 +210,7 @@ BSL 1.1 balances immediate transparency with sustainable development.
 Yes. We implement industry-standard security practices:
 
 **Cryptography:**
-- 🔐 **E2EE:** RSA-OAEP 2048-bit + AES-GCM encryption
+- 🔐 **E2EE:** RSA-OAEP 4096-bit + AES-GCM encryption
 - 🔑 **Password Hashing:** Argon2id (OWASP recommended)
 - 🎫 **Tokens:** JWT access tokens (15min) + HttpOnly refresh tokens (30d)
 - 🔐 **Key Derivation:** PBKDF2 600k iterations
@@ -350,7 +350,7 @@ See [docs/GETTING_STARTED.md](./docs/GETTING_STARTED.md) for detailed instructio
 
 **Required:**
 - **Node.js** 20+
-- **Go** 1.22+
+- **Go** 1.24+
 - **Docker** & **Docker Compose**
 - **Git**
 
@@ -495,9 +495,11 @@ npm test
 
 **Current workaround** (for developers):
 ```bash
-# Use Docker Compose for local deployment
-cd infrastructure/docker
+# Use Docker Compose for local deployment (from project root)
 docker-compose up -d
+
+# Or use the dev script for the full stack
+./scripts/dev-start.sh
 
 # Access at http://localhost:8080
 ```
@@ -667,15 +669,29 @@ lsof -ti:5173 | xargs kill -9
 
 ### Database migrations aren't running
 
-**Status:** Migration system not yet implemented (Phase 1B task).
+The migration system uses `golang-migrate/v4` and runs automatically on server startup. There are currently **16 migrations** (000001-000016).
 
-**Workaround:**
+**Check migration status:**
 ```bash
-# Connect to PostgreSQL
-docker exec -it concord-postgres psql -U concord
+cd services/control-plane
+make migrate-version
+```
 
-# Manually run migration SQL
-\i /path/to/migration.sql
+**Run migrations manually:**
+```bash
+cd services/control-plane
+make migrate-up
+```
+
+**Rollback:**
+```bash
+cd services/control-plane
+make migrate-down
+```
+
+**If migrations fail**, ensure PostgreSQL is running and accessible:
+```bash
+docker exec -it concord-postgres psql -U concord -d concord -c "SELECT version FROM schema_migrations;"
 ```
 
 ---
@@ -724,8 +740,8 @@ npm test
 # Stop services
 ./scripts/dev-stop.sh
 
-# Remove Docker volumes
-docker-compose -f infrastructure/docker/docker-compose.yml down -v
+# Remove Docker volumes (from project root)
+docker-compose down -v
 
 # Restart
 ./scripts/dev-start.sh
@@ -788,4 +804,4 @@ If your question isn't answered here:
 
 ---
 
-**Last Updated:** 2026-02-15 | **Version:** 1.0.0
+**Last Updated:** 2026-02-22 | **Version:** 1.1.0

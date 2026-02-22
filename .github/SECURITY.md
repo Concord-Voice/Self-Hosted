@@ -20,7 +20,7 @@ Public disclosure puts all users at risk. Instead, use one of these private chan
 ### 2. Preferred Reporting Methods
 
 **Option A: GitHub Security Advisories (Recommended)**
-1. Go to the [Security tab](https://github.com/YOUR_ORG/concord/security/advisories)
+1. Go to the [Security tab](https://github.com/markdrogersjr/Concord/security/advisories)
 2. Click "Report a vulnerability"
 3. Fill out the form with details
 
@@ -112,7 +112,7 @@ Subscribe to security updates:
 
 ### Encryption
 - TLS 1.3 for transport
-- RSA-OAEP 2048-bit for E2EE
+- RSA-OAEP 4096-bit for E2EE
 - AES-GCM for key wrapping
 - PBKDF2 600k iterations for key derivation
 
@@ -129,10 +129,10 @@ Subscribe to security updates:
 - PGP Key: [Available on request]
 
 **Project Leads:**
-- GitHub: @YOUR_USERNAME
+- GitHub: @markdrogersjr
 
 ---
 
-**Last Updated:** 2024-02-14
+**Last Updated:** 2026-02-22
 
 Thank you for helping keep Concord secure! 🔒

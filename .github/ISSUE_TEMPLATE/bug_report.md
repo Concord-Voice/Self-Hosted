@@ -21,10 +21,11 @@ assignees: ''
 <!-- What actually happens -->
 
 ## Environment
-- **Component:** (Control Plane / Media Plane / Desktop Client / Web Client)
+- **Component:** (Control Plane / Media Plane / Desktop Client)
 - **OS:** (macOS / Windows / Linux)
-- **Version:** (e.g., v0.1.0)
-- **Browser:** (if applicable)
+- **App Version:** (e.g., v0.1.0)
+- **Electron Version:** (if desktop client — check Help > About)
+- **Node.js Version:** (if applicable)
 
 ## Screenshots/Logs
 <!-- If applicable, add screenshots or error logs -->
