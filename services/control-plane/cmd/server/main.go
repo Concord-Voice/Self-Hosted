@@ -60,8 +60,8 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	// Initialize router
-	router, hub := api.NewRouter(db, redisClient, cfg, log)
+	// Initialize router (starts hub, connects NATS, subscribes to voice events)
+	router, hub, natsClient := api.NewRouter(db, redisClient, cfg, log)
 
 	// Create HTTP server
 	srv := &http.Server{
@@ -94,6 +94,11 @@ func main() {
 
 	// Shut down WebSocket hub (close all client connections)
 	hub.Shutdown()
+
+	// Close NATS connection
+	if natsClient != nil {
+		natsClient.Close()
+	}
 
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Fatal("Server forced to shutdown", "error", err)

@@ -1,9 +1,15 @@
 import express from 'express';
-import { Server as SocketIOServer } from 'socket.io';
+import { Server as SocketIOServer, Socket } from 'socket.io';
 import { createServer } from 'http';
 import { config } from './config/index.js';
 import { logger } from './lib/logger.js';
 import { MediasoupService } from './lib/mediasoup.js';
+import { RoomManager } from './lib/roomManager.js';
+import type { MediaSource } from './lib/roomManager.js';
+import { createAuthMiddleware, validateChannelAccess } from './middleware/auth.js';
+import type { AuthenticatedSocketData } from './middleware/auth.js';
+import { NatsService } from './lib/nats.js';
+import { RedisService } from './lib/redis.js';
 
 async function main() {
   // Create Express app
@@ -13,20 +19,52 @@ async function main() {
   // Middleware
   app.use(express.json());
 
-  // Health check endpoint
-  app.get('/health', (req, res) => {
-    res.json({
-      status: 'healthy',
-      service: 'media-plane',
-    });
-  });
-
   // Initialize mediasoup
   const mediasoupService = new MediasoupService();
   await mediasoupService.init();
 
   logger.info('Mediasoup initialized', {
     workers: mediasoupService.getWorkerCount(),
+  });
+
+  // Initialize NATS (inter-service messaging)
+  const natsService = new NatsService();
+  try {
+    await natsService.connect();
+  } catch {
+    logger.warn('NATS connection failed — running without inter-service messaging');
+  }
+
+  // Initialize Redis (room state)
+  const redisService = new RedisService();
+  try {
+    await redisService.connect();
+  } catch {
+    logger.warn('Redis connection failed — running without persistent room state');
+  }
+
+  // Initialize RoomManager
+  const roomManager = new RoomManager(mediasoupService);
+
+  // Wire up room events
+  roomManager.onEvent((event) => {
+    logger.debug('Room event', { type: event.type, roomId: event.roomId });
+  });
+  roomManager.onEvent(natsService.createRoomEventHandler());
+  roomManager.onEvent(redisService.createRoomEventHandler());
+
+  // Health check endpoint (enhanced — A8)
+  app.get('/health', (_req, res) => {
+    const stats = roomManager.getStats();
+    res.json({
+      status: 'healthy',
+      service: 'media-plane',
+      workers: mediasoupService.getWorkerCount(),
+      activeRooms: stats.activeRooms,
+      totalParticipants: stats.totalParticipants,
+      totalProducers: stats.totalProducers,
+      totalConsumers: stats.totalConsumers,
+    });
   });
 
   // Initialize Socket.IO
@@ -37,155 +75,379 @@ async function main() {
     },
   });
 
-  // Socket.IO connection handling
+  // Socket.IO JWT authentication middleware (A2)
+  io.use(createAuthMiddleware());
+
+  // ─── Socket.IO connection handling ───────────────────────────────────
+
   io.on('connection', (socket) => {
-    logger.info('Client connected', { socketId: socket.id });
+    const data = socket.data as AuthenticatedSocketData;
+    logger.info('Client connected', {
+      socketId: socket.id,
+      userId: data.userId,
+      username: data.username,
+    });
 
-    // Join room
-    socket.on('join-room', async ({ roomId, userId }) => {
+    // ── join-room ────────────────────────────────────────────────────
+    // Client sends: { roomId, rtpCapabilities }
+    // Server responds with: room-joined event containing router caps, existing producers, participants
+    socket.on('join-room', async ({ roomId, rtpCapabilities }, callback?) => {
       try {
-        logger.info('User joining room', { roomId, userId, socketId: socket.id });
+        // Validate channel access via control plane
+        const token = socket.handshake.auth.token;
+        const access = await validateChannelAccess(data.userId, roomId, token);
 
+        if (!access.allowed) {
+          logger.warn('Channel access denied', {
+            userId: data.userId,
+            roomId,
+            error: access.error,
+          });
+          const errPayload = { error: access.error || 'Access denied' };
+          if (callback) return callback(errPayload);
+          socket.emit('error', errPayload);
+          return;
+        }
+
+        // Join the room via RoomManager
+        const result = await roomManager.joinRoom(
+          roomId,
+          data.userId,
+          socket.id,
+          data.username,
+          data.displayName,
+          data.avatarUrl,
+          rtpCapabilities
+        );
+
+        // Join Socket.IO room for broadcasting
         socket.join(roomId);
-        socket.data.roomId = roomId;
-        socket.data.userId = userId;
+        data.roomId = roomId;
 
-        // Get router for this room
-        const router = await mediasoupService.getOrCreateRouter(roomId);
-
-        // Send router RTP capabilities
-        socket.emit('router-rtp-capabilities', {
-          rtpCapabilities: router.rtpCapabilities,
+        // Notify others in the room
+        socket.to(roomId).emit('user-joined', {
+          userId: data.userId,
+          username: data.username,
+          displayName: data.displayName,
+          avatarUrl: data.avatarUrl,
         });
 
-        // Notify others in room
-        socket.to(roomId).emit('user-joined', { userId });
+        // Respond to the joining client
+        const response = {
+          rtpCapabilities: result.rtpCapabilities,
+          existingProducers: result.existingProducers,
+          participants: result.participants,
+          isEncrypted: access.isEncrypted,
+          channelName: access.channelName,
+        };
+
+        if (callback) {
+          callback(response);
+        } else {
+          socket.emit('room-joined', response);
+        }
       } catch (error) {
-        logger.error('Error joining room', { error });
-        socket.emit('error', { message: 'Failed to join room' });
+        logger.error('Error joining room', { error, roomId, userId: data.userId });
+        const errPayload = { error: 'Failed to join room' };
+        if (callback) return callback(errPayload);
+        socket.emit('error', errPayload);
       }
     });
 
-    // Create WebRTC transport
-    socket.on('create-transport', async ({ roomId, direction }, callback) => {
+    // ── create-transport ─────────────────────────────────────────────
+    socket.on('create-transport', async ({ direction }, callback) => {
       try {
-        const transport = await mediasoupService.createWebRtcTransport(roomId, direction);
+        const roomId = data.roomId;
+        if (!roomId) {
+          return callback({ error: 'Not in a room' });
+        }
 
-        callback({
-          id: transport.id,
-          iceParameters: transport.iceParameters,
-          iceCandidates: transport.iceCandidates,
-          dtlsParameters: transport.dtlsParameters,
-        });
+        const transportOptions = await roomManager.createTransport(
+          roomId,
+          data.userId,
+          direction
+        );
+
+        callback(transportOptions);
       } catch (error) {
-        logger.error('Error creating transport', { error });
+        logger.error('Error creating transport', { error, userId: data.userId });
         callback({ error: 'Failed to create transport' });
       }
     });
 
-    // Connect transport
+    // ── connect-transport ────────────────────────────────────────────
     socket.on('connect-transport', async ({ transportId, dtlsParameters }, callback) => {
       try {
-        await mediasoupService.connectTransport(transportId, dtlsParameters);
+        const roomId = data.roomId;
+        if (!roomId) {
+          return callback({ error: 'Not in a room' });
+        }
+
+        await roomManager.connectTransport(roomId, data.userId, transportId, dtlsParameters);
         callback({ success: true });
       } catch (error) {
-        logger.error('Error connecting transport', { error });
+        logger.error('Error connecting transport', { error, userId: data.userId });
         callback({ error: 'Failed to connect transport' });
       }
     });
 
-    // Produce media
-    socket.on('produce', async ({ transportId, kind, rtpParameters }, callback) => {
+    // ── produce ──────────────────────────────────────────────────────
+    // Client sends: { transportId, kind, rtpParameters, appData: { source } }
+    socket.on('produce', async ({ transportId, kind, rtpParameters, appData }, callback) => {
       try {
-        const { producer, roomId } = await mediasoupService.produce(
+        const roomId = data.roomId;
+        if (!roomId) {
+          return callback({ error: 'Not in a room' });
+        }
+
+        const source: MediaSource = appData?.source || 'mic';
+        const producerInfo = await roomManager.produce(
+          roomId,
+          data.userId,
           transportId,
           kind,
           rtpParameters,
-          socket.data.userId
+          source
         );
 
-        // Notify other users in the room
+        // Notify other users in the room about the new producer
         socket.to(roomId).emit('new-producer', {
-          producerId: producer.id,
-          userId: socket.data.userId,
+          producerId: producerInfo.producerId,
+          userId: data.userId,
+          kind: producerInfo.kind,
+          source: producerInfo.source,
         });
 
-        callback({ id: producer.id });
+        callback({ id: producerInfo.producerId });
       } catch (error) {
-        logger.error('Error producing', { error });
+        logger.error('Error producing', { error, userId: data.userId });
         callback({ error: 'Failed to produce' });
       }
     });
 
-    // Consume media
-    socket.on('consume', async ({ producerId, rtpCapabilities }, callback) => {
+    // ── consume ──────────────────────────────────────────────────────
+    socket.on('consume', async ({ producerId }, callback) => {
       try {
-        const consumer = await mediasoupService.consume(
-          socket.data.roomId,
-          producerId,
-          rtpCapabilities
-        );
+        const roomId = data.roomId;
+        if (!roomId) {
+          return callback({ error: 'Not in a room' });
+        }
 
-        if (!consumer) {
-          callback({ error: 'Cannot consume' });
-          return;
+        const result = await roomManager.consume(roomId, data.userId, producerId);
+
+        if (!result) {
+          return callback({ error: 'Cannot consume — incompatible codecs' });
         }
 
         callback({
-          id: consumer.id,
-          producerId,
-          kind: consumer.kind,
-          rtpParameters: consumer.rtpParameters,
+          id: result.id,
+          producerId: result.producerId,
+          kind: result.kind,
+          rtpParameters: result.rtpParameters,
+          producerUserId: result.producerUserId,
+          source: result.source,
         });
       } catch (error) {
-        logger.error('Error consuming', { error });
+        logger.error('Error consuming', { error, userId: data.userId });
         callback({ error: 'Failed to consume' });
       }
     });
 
-    // Leave room
-    socket.on('leave-room', () => {
-      const { roomId, userId } = socket.data;
+    // ── resume-consumer ──────────────────────────────────────────────
+    socket.on('resume-consumer', async ({ consumerId }, callback?) => {
+      try {
+        const roomId = data.roomId;
+        if (!roomId) {
+          if (callback) return callback({ error: 'Not in a room' });
+          return;
+        }
 
-      if (roomId) {
-        socket.to(roomId).emit('user-left', { userId });
-        socket.leave(roomId);
-        logger.info('User left room', { roomId, userId });
+        await roomManager.resumeConsumer(roomId, data.userId, consumerId);
+        if (callback) callback({ success: true });
+      } catch (error) {
+        logger.error('Error resuming consumer', { error, userId: data.userId });
+        if (callback) callback({ error: 'Failed to resume consumer' });
       }
     });
 
-    // Disconnect
-    socket.on('disconnect', () => {
-      const { roomId, userId } = socket.data;
+    // ── pause-producer ───────────────────────────────────────────────
+    socket.on('pause-producer', async ({ producerId }, callback?) => {
+      try {
+        const roomId = data.roomId;
+        if (!roomId) {
+          if (callback) return callback({ error: 'Not in a room' });
+          return;
+        }
 
-      if (roomId) {
-        socket.to(roomId).emit('user-left', { userId });
+        await roomManager.pauseProducer(roomId, data.userId, producerId);
+
+        // Notify others
+        socket.to(roomId).emit('producer-paused', {
+          producerId,
+          userId: data.userId,
+        });
+
+        if (callback) callback({ success: true });
+      } catch (error) {
+        logger.error('Error pausing producer', { error, userId: data.userId });
+        if (callback) callback({ error: 'Failed to pause producer' });
       }
-
-      logger.info('Client disconnected', { socketId: socket.id, userId });
     });
+
+    // ── resume-producer ──────────────────────────────────────────────
+    socket.on('resume-producer', async ({ producerId }, callback?) => {
+      try {
+        const roomId = data.roomId;
+        if (!roomId) {
+          if (callback) return callback({ error: 'Not in a room' });
+          return;
+        }
+
+        await roomManager.resumeProducer(roomId, data.userId, producerId);
+
+        // Notify others
+        socket.to(roomId).emit('producer-resumed', {
+          producerId,
+          userId: data.userId,
+        });
+
+        if (callback) callback({ success: true });
+      } catch (error) {
+        logger.error('Error resuming producer', { error, userId: data.userId });
+        if (callback) callback({ error: 'Failed to resume producer' });
+      }
+    });
+
+    // ── close-producer ───────────────────────────────────────────────
+    socket.on('close-producer', async ({ producerId }, callback?) => {
+      try {
+        const roomId = data.roomId;
+        if (!roomId) {
+          if (callback) return callback({ error: 'Not in a room' });
+          return;
+        }
+
+        const source = await roomManager.closeProducer(roomId, data.userId, producerId);
+
+        // Notify others
+        if (source) {
+          socket.to(roomId).emit('producer-closed', {
+            producerId,
+            userId: data.userId,
+            source,
+          });
+        }
+
+        if (callback) callback({ success: true });
+      } catch (error) {
+        logger.error('Error closing producer', { error, userId: data.userId });
+        if (callback) callback({ error: 'Failed to close producer' });
+      }
+    });
+
+    // ── leave-room ───────────────────────────────────────────────────
+    socket.on('leave-room', async (_, callback?) => {
+      try {
+        await handleLeaveRoom(socket);
+        if (callback) callback({ success: true });
+      } catch (error) {
+        logger.error('Error leaving room', { error, userId: data.userId });
+        if (callback) callback({ error: 'Failed to leave room' });
+      }
+    });
+
+    // ── disconnect ───────────────────────────────────────────────────
+    socket.on('disconnect', async (reason) => {
+      logger.info('Client disconnected', {
+        socketId: socket.id,
+        userId: data.userId,
+        reason,
+      });
+
+      try {
+        await handleLeaveRoom(socket);
+      } catch (error) {
+        logger.error('Error during disconnect cleanup', { error, userId: data.userId });
+      }
+    });
+  });
+
+  /** Shared cleanup for leave-room and disconnect */
+  async function handleLeaveRoom(socket: Socket) {
+    const socketData = socket.data as AuthenticatedSocketData;
+    const roomId = socketData.roomId;
+    const userId = socketData.userId;
+
+    if (!roomId || !userId) return;
+
+    // Notify others before cleanup
+    socket.to(roomId).emit('user-left', { userId });
+
+    // Clean up via RoomManager (closes transports, producers, consumers)
+    await roomManager.leaveRoom(roomId, userId);
+
+    // Leave Socket.IO room
+    socket.leave(roomId);
+    socketData.roomId = undefined;
+  }
+
+  // Wire up active speaker events to broadcast to room
+  roomManager.onEvent((event) => {
+    if (event.type === 'active-speaker') {
+      io.to(event.roomId).emit('active-speaker', {
+        userId: event.userId,
+        volume: event.volume,
+      });
+    }
+
+    // Broadcast producer-closed from server-side cleanup (e.g. transport close)
+    if (event.type === 'producer-removed') {
+      io.to(event.roomId).emit('producer-closed', {
+        producerId: event.producerId,
+        userId: event.userId,
+        kind: event.kind,
+        source: event.source,
+      });
+    }
   });
 
   // Start server
   const port = config.port;
   httpServer.listen(port, () => {
-    logger.info(`Media Plane server started`, {
+    logger.info('Media Plane server started', {
       port,
       environment: config.environment,
     });
   });
 
   // Graceful shutdown
-  process.on('SIGTERM', async () => {
-    logger.info('SIGTERM received, shutting down gracefully');
+  const shutdown = async () => {
+    logger.info('Shutting down gracefully');
 
+    // Close all rooms first (notifies participants, publishes NATS events)
+    await roomManager.closeAll();
+
+    // Close inter-service connections
+    await natsService.close();
+    await redisService.close();
+
+    // Close mediasoup workers
     await mediasoupService.close();
 
     httpServer.close(() => {
       logger.info('Server closed');
       process.exit(0);
     });
-  });
+
+    // Force exit after 10 seconds
+    setTimeout(() => {
+      logger.warn('Forced shutdown after timeout');
+      process.exit(1);
+    }, 10_000);
+  };
+
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
 
 // Start the application

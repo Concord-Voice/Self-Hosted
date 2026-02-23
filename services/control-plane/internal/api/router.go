@@ -15,15 +15,17 @@ import (
 	"github.com/concord/control-plane/internal/servers"
 	"github.com/concord/control-plane/internal/sessions"
 	"github.com/concord/control-plane/internal/users"
+	"github.com/concord/control-plane/internal/voice"
 	"github.com/concord/control-plane/internal/websocket"
 	"github.com/concord/control-plane/pkg/config"
 	"github.com/concord/control-plane/pkg/logger"
+	natsclient "github.com/concord/control-plane/pkg/nats"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 )
 
-// NewRouter creates a new API router and returns the WebSocket hub for lifecycle management.
-func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.Logger) (*gin.Engine, *websocket.Hub) {
+// NewRouter creates a new API router and returns the WebSocket hub and NATS client for lifecycle management.
+func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.Logger) (*gin.Engine, *websocket.Hub, *natsclient.Client) {
 	router := gin.New()
 
 	// Middleware
@@ -44,6 +46,15 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	hub := websocket.NewHub(db, redis)
 	go hub.Run()
 
+	// Initialize NATS (inter-service messaging with media plane)
+	var natsClient *natsclient.Client
+	nc, err := natsclient.Connect(cfg.NATSUrl)
+	if err != nil {
+		log.Warn("NATS connection failed — voice state sync disabled", "error", err)
+	} else {
+		natsClient = nc
+	}
+
 	// Initialize handlers
 	authHandler := auth.NewHandler(db, redis, log, cfg.JWTSecret)
 	sessionsHandler := sessions.NewHandler(db, log)
@@ -53,8 +64,17 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	membersHandler := members.NewHandler(db, log, redis, hub)
 	messagesHandler := messages.NewHandler(db, log, hub)
 	invitesHandler := invites.NewHandler(db, log, hub)
+	voiceHandler := voice.NewHandler(db, log, hub, cfg)
 	wsHandler := websocket.NewHandler(hub, db, redis, cfg.JWTSecret, cfg.AllowedOrigins)
 	wsTicketHandler := auth.NewWSTicketHandler(redis, cfg.JWTSecret)
+
+	// Start NATS voice event subscriber
+	if natsClient != nil {
+		voiceSub := voice.NewNATSSubscriber(db, log, hub, natsClient)
+		if subErr := voiceSub.Subscribe(); subErr != nil {
+			log.Error("Failed to subscribe to voice NATS events", "error", subErr)
+		}
+	}
 
 	// API v1 routes
 	v1 := router.Group("/api/v1")
@@ -319,6 +339,16 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					channelsHandler.DistributeChannelKeys,
 				)
 
+				// Voice channel routes
+				channelRoutes.GET("/:id/voice/participants",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					voiceHandler.GetParticipants,
+				)
+				channelRoutes.POST("/:id/voice/join",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					voiceHandler.AuthorizeJoin,
+				)
+
 			}
 
 			// E2EE key management routes (separate group to avoid gin /:id wildcard conflict)
@@ -374,5 +404,5 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 		v1.GET("/ws", wsHandler.HandleWebSocket)
 	}
 
-	return router, hub
+	return router, hub, natsClient
 }

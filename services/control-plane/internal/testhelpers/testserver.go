@@ -48,7 +48,10 @@ func SetupTestServer(t *testing.T) *TestServer {
 
 	log := logger.New("test")
 
-	router, hub := api.NewRouter(db, redisClient, cfg, log)
+	router, hub, natsClient := api.NewRouter(db, redisClient, cfg, log)
+	if natsClient != nil {
+		t.Cleanup(func() { natsClient.Close() })
+	}
 
 	t.Cleanup(func() {
 		redisCleanup()
