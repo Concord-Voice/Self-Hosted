@@ -276,6 +276,7 @@ func TestRefresh_InvalidToken(t *testing.T) {
 	ts := setupTS(t)
 
 	req := httptest.NewRequest("POST", "/api/v1/auth/refresh", nil)
+	// nosemgrep: go.lang.security.audit.net.cookie-missing-httponly.cookie-missing-httponly, go.lang.security.audit.net.cookie-missing-secure.cookie-missing-secure
 	req.AddCookie(&http.Cookie{Name: "refresh_token", Value: "totally-invalid-token"})
 	req.Header.Set("Content-Type", "application/json")
 
@@ -348,6 +349,7 @@ func TestHealthCheck(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var body map[string]interface{}
-	json.NewDecoder(w.Body).Decode(&body)
+	err := json.NewDecoder(w.Body).Decode(&body)
+	require.NoError(t, err)
 	assert.Equal(t, "healthy", body["status"])
 }

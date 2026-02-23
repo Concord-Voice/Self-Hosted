@@ -11,12 +11,12 @@ import (
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
+	_ "github.com/golang-migrate/migrate/v4/source/file" // Required for file:// migration source
 	_ "github.com/lib/pq"
 )
 
 // defaultTestDatabaseURL is used when DATABASE_URL is not set.
-const defaultTestDatabaseURL = "postgres://concord:concord_dev_password@localhost:5432/concord?sslmode=disable"
+const defaultTestDatabaseURL = "postgres://concord:concord_dev_password@localhost:5432/concord?sslmode=disable" //nolint:gosec // Test-only default, not a production credential
 
 // SetupTestDB creates a database connection, runs migrations, and returns a cleanup function.
 func SetupTestDB(t *testing.T) (*sql.DB, func()) {
@@ -47,7 +47,7 @@ func SetupTestDB(t *testing.T) (*sql.DB, func()) {
 		if err := TruncateAllTables(db); err != nil {
 			t.Errorf("testhelpers: failed to truncate tables: %v", err)
 		}
-		db.Close()
+		_ = db.Close()
 	}
 
 	return db, cleanup

@@ -11,45 +11,49 @@ Concord is a distributed real-time communications platform with clear separation
 
 ## High-Level Architecture
 
-```
-┌──────────────┐     ┌──────────────┐     ┌──────────────┐
-│   Desktop    │     │   Web App    │     │   Mobile     │
-│    Client    │     │              │     │   (Future)   │
-└──────┬───────┘     └──────┬───────┘     └──────┬───────┘
-       │                    │                     │
-       └────────────────────┼─────────────────────┘
-                            │
-                ┌───────────┴───────────┐
-                │                       │
-        ┌───────▼────────┐      ┌──────▼──────┐
-        │ Control Plane  │      │ Media Plane │
-        │   (Go HTTP)    │      │  (Node.js)  │
-        └───────┬────────┘      └──────┬──────┘
-                │                      │
-        ┌───────┴────────┐            │
-        │                │            │
-   ┌────▼─────┐    ┌────▼─────┐      │
-   │PostgreSQL│    │  Redis   │◄─────┘
-   └──────────┘    └──────────┘
+```mermaid
+flowchart TB
+    subgraph Clients
+        Desktop["Desktop Client<br/>Electron + React"]
+        Web["Web App<br/>React (future)"]
+        Mobile["Mobile<br/>(future)"]
+    end
 
-Self-Hosted Instances:
-┌────────────────────────────────┐
-│  Self-Hosted Concord Server    │
-│  ┌──────────┬──────────┐       │
-│  │ Control  │  Media   │       │
-│  │  Plane   │  Plane   │       │
-│  └─────┬────┴────┬─────┘       │
-│        │         │             │
-│   ┌────▼────┬────▼────┐        │
-│   │  Postgres  │ Redis │       │
-│   └────────────┴───────┘       │
-└────────┬───────────────────────┘
-         │ Check-in (periodic)
-         ▼
-┌──────────────────────┐
-│ Licensing Authority  │
-│   (Validates licenses)│
-└──────────────────────┘
+    subgraph Services
+        CP["Control Plane<br/>Go :8080"]
+        MP["Media Plane<br/>Node.js :3000"]
+    end
+
+    subgraph Infrastructure
+        PG[("PostgreSQL 16<br/>13 tables")]
+        RD[("Redis 7<br/>sessions / presence")]
+        NATS["NATS<br/>inter-service"]
+    end
+
+    Desktop -- "HTTP / WebSocket" --> CP
+    Desktop -- "WebRTC (audio)" --> MP
+    Web -- "HTTP / WebSocket" --> CP
+    Web -- "WebRTC" --> MP
+    Mobile -.-> CP
+    Mobile -.-> MP
+
+    CP --> PG
+    CP --> RD
+    CP --> NATS
+    MP --> RD
+    MP --> NATS
+
+    subgraph Self-Hosted
+        SH_CP["Control Plane"]
+        SH_MP["Media Plane"]
+        SH_PG[("PostgreSQL")]
+        SH_RD[("Redis")]
+        SH_CP --> SH_PG
+        SH_CP --> SH_RD
+        SH_MP --> SH_RD
+    end
+
+    Self-Hosted -- "license check-in<br/>(periodic)" --> LA["Licensing Authority<br/>Go :8082"]
 ```
 
 ## Component Details
@@ -96,25 +100,129 @@ Self-Hosted Instances:
 - Rate limiting
 - Moderation logic
 
-**Key Endpoints**:
-```
-POST   /api/v1/auth/register
-POST   /api/v1/auth/login
-GET    /api/v1/users/me
-GET    /api/v1/servers
-POST   /api/v1/servers
-GET    /api/v1/channels/:id
-WS     /api/v1/ws (signaling)
+**API**: 54 REST endpoints + 1 WebSocket endpoint across 10 groups (Auth, Users, Sessions, Servers, Channels, Messages, Members, Invites, E2EE, WebSocket). See [API Documentation](./api/README.md) for the full OpenAPI 3.0 spec.
+
+**Database Schema** (13 tables across 18 migrations):
+
+```mermaid
+erDiagram
+    users {
+        UUID id PK
+        VARCHAR email UK
+        VARCHAR username UK
+        TEXT password_hash
+        BOOLEAN e2ee_preference
+        VARCHAR display_name
+        TEXT bio
+        TEXT avatar_url
+        JSONB links
+    }
+    user_keys {
+        UUID user_id PK,FK
+        BYTEA wrapped_private_key
+        BYTEA key_derivation_salt
+        INTEGER key_version
+    }
+    public_keys {
+        UUID id PK
+        UUID user_id FK
+        BYTEA public_key
+        INTEGER key_version
+    }
+    refresh_tokens {
+        UUID id PK
+        UUID user_id FK
+        TEXT token_hash UK
+        VARCHAR device_name
+        INET ip_address
+        TIMESTAMPTZ expires_at
+        TIMESTAMPTZ revoked_at
+    }
+    user_preferences {
+        UUID user_id PK,FK
+        TEXT encrypted_data
+        INTEGER version
+    }
+    servers {
+        UUID id PK
+        VARCHAR name
+        UUID owner_id FK
+        TEXT icon_url
+        BOOLEAN e2ee_default
+    }
+    channels {
+        UUID id PK
+        UUID server_id FK
+        VARCHAR name
+        VARCHAR type
+        VARCHAR emoji
+        TEXT description
+        INTEGER position
+        BOOLEAN is_encrypted
+    }
+    server_members {
+        UUID server_id PK,FK
+        UUID user_id PK,FK
+        VARCHAR role
+        TIMESTAMPTZ joined_at
+    }
+    messages {
+        UUID id PK
+        UUID channel_id FK
+        UUID user_id FK
+        TEXT content
+        BOOLEAN is_encrypted
+        TIMESTAMPTZ edited_at
+    }
+    server_invites {
+        UUID id PK
+        UUID server_id FK
+        VARCHAR code UK
+        UUID created_by FK
+        INTEGER max_uses
+        INTEGER use_count
+        BOOLEAN is_revoked
+        TIMESTAMPTZ expires_at
+    }
+    channel_read_states {
+        UUID user_id PK,FK
+        UUID channel_id PK,FK
+        TIMESTAMPTZ last_read_at
+    }
+    channel_keys {
+        UUID id PK
+        UUID channel_id FK
+        UUID user_id FK
+        TEXT wrapped_key
+        INTEGER key_version
+    }
+    pending_key_requests {
+        UUID id PK
+        UUID channel_id FK
+        UUID user_id FK
+    }
+
+    users ||--o| user_keys : "has"
+    users ||--o{ public_keys : "has"
+    users ||--o{ refresh_tokens : "has"
+    users ||--o| user_preferences : "has"
+    users ||--o{ server_members : "joins"
+    users ||--o{ messages : "sends"
+    users ||--o{ server_invites : "creates"
+    users ||--o{ channel_keys : "holds"
+    users ||--o{ pending_key_requests : "requests"
+    users ||--o{ channel_read_states : "tracks"
+    servers ||--o{ channels : "contains"
+    servers ||--o{ server_members : "has"
+    servers ||--o{ server_invites : "has"
+    servers }o--|| users : "owned by"
+    channels ||--o{ messages : "contains"
+    channels ||--o{ channel_read_states : "tracks"
+    channels ||--o{ channel_keys : "has"
+    channels ||--o{ pending_key_requests : "has"
 ```
 
-**Database Schema** (Current):
-- **users** (id, email, username, password_hash, age_confirmed, e2ee_preference, created_at, updated_at)
-- **public_keys** (id, user_id, public_key, key_version, created_at, updated_at)
-- **refresh_tokens** (id, user_id, token_hash, user_agent, ip_address, created_at, expires_at)
-- **servers** (id, name, owner_id, icon_url, created_at, updated_at) ✅
-- **channels** (id, server_id, name, type, emoji, description, position, created_at) ✅
-- **server_members** (server_id, user_id, role, joined_at) ✅
-- **messages** (id, channel_id, user_id, content, is_encrypted, edited_at, created_at) ✅
+Channel types: `text`, `voice`, `bulletin`
 
 ### Media Plane (Node.js + mediasoup)
 
@@ -192,34 +300,54 @@ Producers (outgoing audio) / Consumers (incoming audio)
 
 ### User Authentication
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant CP as Control Plane
+    participant PG as PostgreSQL
+    participant RD as Redis
+
+    C->>CP: POST /auth/login {username, password}
+    CP->>PG: Look up user by username
+    PG-->>CP: User record (password_hash)
+    CP->>CP: Verify password (Argon2id)
+    CP->>PG: Create refresh_token record
+    CP->>RD: Store session metadata
+    CP-->>C: 200 {access_token, user} + Set-Cookie: refresh_token
 ```
-Client → POST /api/v1/auth/login
-         ↓
-    Control Plane
-         ↓
-    Check password (bcrypt)
-         ↓
-    Generate JWT token
-         ↓
-    Store session in Redis
-         ↓
-    Return token to client
-```
 
-### Sending a Chat Message (Real-Time) ✅
+### WebSocket Message Flow
 
-```
-SEND:  User types → ChatView → useMessaging (optimistic add) → WebSocket → Server persists
-       → Server broadcasts to OTHER users (ExcludeUser) → their useWebSocket → addMessage()
-       Sender sees message instantly via optimistic add. Others see it via WS broadcast.
+```mermaid
+sequenceDiagram
+    participant A as User A (sender)
+    participant WS as WebSocket Hub
+    participant PG as PostgreSQL
+    participant RD as Redis
+    participant B as User B (subscriber)
 
-EDIT:  User edits → ChatView → REST PATCH → Server updates DB → updateMessage() locally
-       → Server broadcasts message_update → other users' useWebSocket → updateMessage()
+    Note over A,B: Connection & Subscription
+    A->>WS: WS upgrade (ticket or JWT)
+    WS->>RD: Set presence (online)
+    WS-->>A: presence_initial (online users)
+    A->>WS: subscribe {channel_id}
+    WS->>PG: Verify membership
+    WS-->>A: subscribe_ack
 
-DELETE: User deletes → ChatView → REST DELETE → Server deletes → deleteMessage() locally
-        → Server broadcasts message_delete → other users' useWebSocket → deleteMessage()
+    Note over A,B: Sending a Message
+    A->>WS: message {channel_id, content}
+    WS->>PG: INSERT message
+    PG-->>WS: message row
+    WS-->>A: message_ack {message_id, created_at}
+    WS->>PG: Update unread counts
+    WS-->>B: message {id, content, user, channel}
+    WS->>WS: server_broadcast: unread_update
 
-HISTORY: Channel selected → ChatView fetches REST GET → setMessages() → MessageList renders
+    Note over A,B: Edit / Delete (REST)
+    A->>WS: PATCH /messages/:id (via HTTP)
+    WS-->>B: message_update {id, content, edited_at}
+    A->>WS: DELETE /messages/:id (via HTTP)
+    WS-->>B: message_delete {id}
 ```
 
 ### Joining a Voice Channel
@@ -331,7 +459,7 @@ For larger self-hosted deployments:
 
 ### Authentication & Authorization
 
-**Current Implementation (Phase 1A)** ✅:
+**Current Implementation (Phase 1B complete)**:
 - Email + password with Argon2id hashing
 - Username validation with profanity filtering and leetspeak detection
 - Username format: `username@concordvoice.chat` (federated identity)
@@ -339,7 +467,7 @@ For larger self-hosted deployments:
 - Refresh tokens (30-day expiry) in HttpOnly cookies
 - Session management (list sessions, revoke sessions)
 - Rate limiting (Redis-based, per-IP and per-user)
-- E2EE key generation and storage (RSA-OAEP 2048-bit)
+- E2EE key generation and storage (RSA-OAEP 4096-bit)
 
 **Planned**:
 - Magic link (passwordless)
@@ -355,13 +483,51 @@ For larger self-hosted deployments:
 
 - **Signaling**: TLS 1.3 (HTTP/WebSocket)
 - **Media**: DTLS + SRTP (WebRTC)
-- **E2EE**: Client-side encryption implemented ✅
-  - RSA-OAEP 2048-bit for key exchange
-  - AES-GCM for message encryption
+- **E2EE**: Client-side encryption implemented
+  - RSA-OAEP 4096-bit for key exchange
+  - AES-256-GCM for message encryption
   - PBKDF2 with 600,000 iterations for key derivation
   - Public keys stored in PostgreSQL, private keys never leave client
   - E2EE → E2EE: Fully encrypted (maximum privacy)
   - E2EE → Non-E2EE: Messages sent in plaintext (user warned)
+
+### E2EE Key Flow
+
+```mermaid
+sequenceDiagram
+    participant A as User A (creator)
+    participant S as Server (zero-knowledge)
+    participant B as User B (new member)
+
+    Note over A,B: Registration — key pair generation
+    A->>A: Generate RSA-4096 key pair
+    A->>A: PBKDF2(password, salt, 600k) → wrapping key
+    A->>A: AES-KW wrap private key
+    A->>S: POST /users/me/keys {wrapped_private_key, salt, public_key}
+
+    Note over A,B: Encrypted channel creation
+    A->>A: Generate AES-256-GCM channel symmetric key (CSK)
+    A->>A: RSA-OAEP wrap CSK with own public key
+    A->>S: POST /channels {is_encrypted: true, wrapped_key}
+
+    Note over A,B: New member joins encrypted channel
+    B->>S: Join server (via invite)
+    S->>S: Create pending_key_request for each encrypted channel
+    S-->>A: WS: key_request_pending {channel_id, user_id}
+    A->>S: GET /users/{B}/public-key
+    S-->>A: B's RSA-4096 public key
+    A->>A: Unwrap CSK with own private key
+    A->>A: Re-wrap CSK with B's public key
+    A->>S: POST /channels/{id}/keys {user_id: B, wrapped_key}
+    S-->>B: WS: key_delivered {channel_id}
+
+    Note over A,B: Sending an encrypted message
+    A->>A: AES-256-GCM encrypt(CSK, plaintext) → ciphertext
+    A->>S: WS: message {content: ciphertext, is_encrypted: true}
+    S->>S: Persist ciphertext (cannot read it)
+    S-->>B: WS: message {content: ciphertext}
+    B->>B: AES-256-GCM decrypt(CSK, ciphertext) → plaintext
+```
 
 ### Data Privacy
 
@@ -487,4 +653,6 @@ US-East US-West   EU-Central APAC
 
 ## Next Steps
 
-See [development.md](./development.md) for local development setup and [self-hosting.md](./self-hosting.md) for deployment instructions.
+- [API Documentation](./api/README.md) — OpenAPI 3.0 spec for all 54 endpoints
+- [Development Guide](./development.md) — Local setup, running tests
+- [Self-Hosting Guide](./self-hosting.md) — Deployment instructions (planned)

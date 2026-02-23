@@ -531,7 +531,7 @@ Recommended:
 
 ## Next Steps
 
-- Read [API Documentation](./api.md)
-- Review [Architecture](./architecture.md)
-- Check [Contributing Guidelines](./CONTRIBUTING.md)
+- Read [API Documentation](./api/) — OpenAPI 3.0 spec for all 54 endpoints
+- Review [Architecture](./architecture.md) — System diagrams, database ERD, message flows
+- Check [Contributing Guidelines](../CONTRIBUTING.md)
 - Join the major comms platforms for discussions

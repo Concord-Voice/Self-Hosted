@@ -10,8 +10,7 @@ import (
 
 func TestGetEnv(t *testing.T) {
 	t.Run("returns env value when set", func(t *testing.T) {
-		os.Setenv("TEST_CONFIG_VAR", "custom_value")
-		defer os.Unsetenv("TEST_CONFIG_VAR")
+		t.Setenv("TEST_CONFIG_VAR", "custom_value")
 
 		assert.Equal(t, "custom_value", getEnv("TEST_CONFIG_VAR", "default"))
 	})
@@ -21,8 +20,7 @@ func TestGetEnv(t *testing.T) {
 	})
 
 	t.Run("empty env value uses default", func(t *testing.T) {
-		os.Setenv("TEST_EMPTY_VAR", "")
-		defer os.Unsetenv("TEST_EMPTY_VAR")
+		t.Setenv("TEST_EMPTY_VAR", "")
 
 		assert.Equal(t, "fallback", getEnv("TEST_EMPTY_VAR", "fallback"))
 	})
@@ -56,16 +54,22 @@ func TestParseOrigins(t *testing.T) {
 }
 
 func TestLoad(t *testing.T) {
-	// Unset all env vars to test defaults
-	for _, key := range []string{"ENVIRONMENT", "PORT", "DATABASE_URL", "REDIS_URL", "JWT_SECRET", "NATS_URL", "ALLOWED_ORIGINS"} {
-		original := os.Getenv(key)
-		os.Unsetenv(key)
-		defer func(k, v string) {
-			if v != "" {
-				os.Setenv(k, v)
-			}
-		}(key, original)
+	// Save and unset all env vars to test defaults
+	envVars := []string{"ENVIRONMENT", "PORT", "DATABASE_URL", "REDIS_URL", "JWT_SECRET", "NATS_URL", "ALLOWED_ORIGINS"}
+	saved := make(map[string]string)
+	for _, key := range envVars {
+		saved[key] = os.Getenv(key)
+		if err := os.Unsetenv(key); err != nil {
+			t.Fatalf("failed to unset %s: %v", key, err)
+		}
 	}
+	t.Cleanup(func() {
+		for k, v := range saved {
+			if v != "" {
+				_ = os.Setenv(k, v) //nolint:errcheck
+			}
+		}
+	})
 
 	t.Run("default values", func(t *testing.T) {
 		cfg, err := Load()
@@ -81,10 +85,8 @@ func TestLoad(t *testing.T) {
 	})
 
 	t.Run("env overrides", func(t *testing.T) {
-		os.Setenv("PORT", "9090")
-		os.Setenv("ENVIRONMENT", "staging")
-		defer os.Unsetenv("PORT")
-		defer os.Unsetenv("ENVIRONMENT")
+		t.Setenv("PORT", "9090")
+		t.Setenv("ENVIRONMENT", "staging")
 
 		cfg, err := Load()
 		require.NoError(t, err)

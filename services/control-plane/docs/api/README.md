@@ -335,6 +335,6 @@ Import the Postman collection from: `docs/api/Concord.postman_collection.json`
 
 ## Further Reading
 
-- [Architecture Overview](../architecture/README.md)
-- [WebSocket Protocol](./websocket.md)
-- [Authentication Flow](./authentication.md)
+- [Architecture Overview](../../../../docs/architecture.md)
+- [OpenAPI Spec](../../../../docs/api/openapi.yaml)
+- [Development Guide](../../../../docs/development.md)

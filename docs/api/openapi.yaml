@@ -1,0 +1,2215 @@
+openapi: 3.0.3
+info:
+  title: Concord Control Plane API
+  description: |
+    REST API for the Concord real-time communications platform.
+
+    ## Authentication
+    Most endpoints require a JWT access token passed via the `Authorization: Bearer <token>` header.
+    Tokens are obtained via `/auth/login` or `/auth/register` and expire after 15 minutes.
+    Use `/auth/refresh` with the HttpOnly refresh token cookie to obtain a new access token.
+
+    ## Conventions
+    - All IDs are UUIDs (v4)
+    - All timestamps are ISO 8601 with timezone (TIMESTAMPTZ)
+    - Error responses use `{"error": "message"}` format
+    - Rate limits are documented per-endpoint; exceeded limits return 429
+
+    ## End-to-End Encryption (E2EE)
+    Channels can be encrypted using AES-256-GCM with per-channel symmetric keys (CSK).
+    CSKs are wrapped per-member using RSA-OAEP 4096-bit public keys.
+    The server never has access to plaintext messages or unwrapped keys.
+
+    ## WebSocket
+    Real-time messaging uses a WebSocket connection at `/api/v1/ws`.
+    See the WebSocket tag for protocol details.
+  version: 1.0.0
+  contact:
+    name: Concord
+    url: https://github.com/markdrogersjr/Concord
+  license:
+    name: BSL 1.1
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Local development
+  - url: https://api.concordvoice.chat/api/v1
+    description: Production
+
+tags:
+  - name: Auth
+    description: Registration, login, token management, logout
+  - name: Users
+    description: User profile, E2EE keys, preferences
+  - name: Sessions
+    description: Session listing and revocation
+  - name: Servers
+    description: Server CRUD and management
+  - name: Channels
+    description: Channel CRUD, read states, encryption keys
+  - name: Messages
+    description: Send, edit, delete messages
+  - name: Members
+    description: Server membership management
+  - name: Invites
+    description: Server invite codes and joining
+  - name: E2EE
+    description: End-to-end encryption key management
+  - name: WebSocket
+    description: Real-time WebSocket protocol
+
+# ============================================================
+# PATHS
+# ============================================================
+paths:
+
+  # ----------------------------------------------------------
+  # AUTH
+  # ----------------------------------------------------------
+  /auth/register:
+    post:
+      tags: [Auth]
+      summary: Register a new user
+      description: |
+        Create a new user account with E2EE key material.
+        Rate limit: 5 requests per 15 minutes (IP-based).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RegisterRequest'
+      responses:
+        '201':
+          description: User created successfully
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+                  expires_in:
+                    type: integer
+                    example: 900
+                  remember_me:
+                    type: boolean
+                  user:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      username:
+                        type: string
+                      e2ee_preference:
+                        type: boolean
+          headers:
+            Set-Cookie:
+              description: HttpOnly refresh token cookie
+              schema:
+                type: string
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Email or username already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      summary: Log in
+      description: |
+        Authenticate with email and password. Returns access token, user profile, and E2EE keys.
+        Rate limit: 10 requests per 15 minutes (IP-based).
+        Account locks after 5 failed attempts (escalating: 15m, 30m, 60m).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+                  expires_in:
+                    type: integer
+                    example: 900
+                  remember_me:
+                    type: boolean
+                  user:
+                    $ref: '#/components/schemas/User'
+                  e2ee_keys:
+                    $ref: '#/components/schemas/E2EEKeys'
+          headers:
+            Set-Cookie:
+              description: HttpOnly refresh token cookie
+              schema:
+                type: string
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: Account locked due to too many failed attempts
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      summary: Refresh access token
+      description: |
+        Exchange the HttpOnly refresh token cookie for a new access token.
+        Implements single-use rotation with breach detection.
+        Rate limit: 30 requests per minute (IP-based).
+      security:
+        - CookieAuth: []
+      responses:
+        '200':
+          description: New access token
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  access_token:
+                    type: string
+                  expires_in:
+                    type: integer
+                    example: 900
+          headers:
+            Set-Cookie:
+              description: New HttpOnly refresh token cookie (rotation)
+              schema:
+                type: string
+        '401':
+          description: Invalid or expired refresh token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      summary: Log out
+      description: |
+        Invalidate the current session. Blacklists the access token in Redis.
+        Rate limit: 10 requests per minute (IP-based).
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Logged out
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /auth/ws-ticket:
+    post:
+      tags: [Auth]
+      summary: Issue a WebSocket ticket
+      description: |
+        Generate a short-lived, single-use ticket for WebSocket authentication.
+        The ticket is valid for 30 seconds and can only be used once.
+        Rate limit: 10 requests per minute.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Ticket issued
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  ticket:
+                    type: string
+                    description: Single-use ticket (30s TTL)
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  # ----------------------------------------------------------
+  # USERS
+  # ----------------------------------------------------------
+  /users/me:
+    get:
+      tags: [Users]
+      summary: Get current user profile
+      description: 'Rate limit: 30 requests per minute.'
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    $ref: '#/components/schemas/User'
+    patch:
+      tags: [Users]
+      summary: Update current user profile
+      description: |
+        Update profile fields. All fields are optional.
+        Rate limit: 10 requests per minute.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateProfileRequest'
+      responses:
+        '200':
+          description: Updated user profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    $ref: '#/components/schemas/User'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '409':
+          description: Username already taken
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /users/me/keys:
+    get:
+      tags: [Users]
+      summary: Get E2EE keys
+      description: |
+        Retrieve wrapped private key and derivation salt for the current user.
+        Used during password change to re-wrap keys.
+        Rate limit: 5 requests per minute.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: E2EE key material
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  e2ee_keys:
+                    $ref: '#/components/schemas/E2EEKeys'
+    put:
+      tags: [Users]
+      summary: Replace E2EE keys
+      description: |
+        Replace wrapped private key and salt (for key recovery).
+        Rate limit: 3 requests per minute.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReplaceKeysRequest'
+      responses:
+        '200':
+          description: Keys replaced
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /users/me/password:
+    post:
+      tags: [Users]
+      summary: Change password
+      description: |
+        Change password and re-wrap E2EE private key atomically.
+        Rate limit: 5 requests per minute.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ChangePasswordRequest'
+      responses:
+        '200':
+          description: Password changed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Current password incorrect
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /users/{user_id}/public-key:
+    get:
+      tags: [Users]
+      summary: Get user's public key
+      description: |
+        Retrieve a user's RSA public key for E2EE key wrapping.
+        Rate limit: 30 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Public key
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user_id:
+                    type: string
+                    format: uuid
+                  public_key:
+                    type: string
+                    description: Base64-encoded SPKI public key
+                  key_version:
+                    type: integer
+        '404':
+          description: User or public key not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /users/me/preferences:
+    get:
+      tags: [Users]
+      summary: Get user preferences
+      description: |
+        Retrieve client-encrypted preferences blob for cross-device sync.
+        Rate limit: 10 requests per minute.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Preferences (null if not set)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  preferences:
+                    nullable: true
+                    type: object
+                    properties:
+                      encrypted_data:
+                        type: string
+                        description: Base64-encoded AES-256-GCM ciphertext
+                      version:
+                        type: integer
+                      updated_at:
+                        type: string
+                        format: date-time
+    put:
+      tags: [Users]
+      summary: Update user preferences
+      description: |
+        Store client-encrypted preferences blob (max 64KB).
+        Rate limit: 10 requests per minute.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdatePreferencesRequest'
+      responses:
+        '200':
+          description: Preferences saved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: integer
+
+  # ----------------------------------------------------------
+  # SESSIONS
+  # ----------------------------------------------------------
+  /sessions:
+    get:
+      tags: [Sessions]
+      summary: List sessions
+      description: |
+        List active and past sessions for the current user.
+        IP addresses are masked for privacy.
+        Rate limit: 10 requests per minute.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Session list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  sessions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Session'
+                  past_sessions:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PastSession'
+                  total:
+                    type: integer
+    delete:
+      tags: [Sessions]
+      summary: Revoke all sessions
+      description: |
+        Revoke all sessions except the current one (default).
+        Pass `?include_current=true` to also revoke the current session.
+        Rate limit: 5 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: include_current
+          in: query
+          schema:
+            type: boolean
+            default: false
+      responses:
+        '200':
+          description: Sessions revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  count:
+                    type: integer
+                  include_current:
+                    type: boolean
+
+  /sessions/{id}:
+    delete:
+      tags: [Sessions]
+      summary: Revoke a specific session
+      description: 'Rate limit: 10 requests per minute.'
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Session revoked
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  session_id:
+                    type: string
+                    format: uuid
+        '404':
+          description: Session not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ----------------------------------------------------------
+  # SERVERS
+  # ----------------------------------------------------------
+  /servers:
+    get:
+      tags: [Servers]
+      summary: List user's servers
+      description: |
+        List all servers the current user is a member of, including role and member counts.
+        Rate limit: 30 requests per minute.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Server list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  servers:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ServerWithRole'
+    post:
+      tags: [Servers]
+      summary: Create a server
+      description: |
+        Create a new server. The creator becomes the owner.
+        Rate limit: 10 requests per minute.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateServerRequest'
+      responses:
+        '201':
+          description: Server created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  server:
+                    $ref: '#/components/schemas/Server'
+                  role:
+                    type: string
+                    example: owner
+        '400':
+          $ref: '#/components/responses/BadRequest'
+
+  /servers/unread-status:
+    get:
+      tags: [Servers]
+      summary: Get unread status across all servers
+      description: |
+        Returns a list of server IDs that have unread messages.
+        Rate limit: 30 requests per minute.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Server IDs with unread messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  server_ids:
+                    type: array
+                    items:
+                      type: string
+                      format: uuid
+
+  /servers/{id}:
+    get:
+      tags: [Servers]
+      summary: Get a server
+      description: |
+        Get server details including the current user's role.
+        Rate limit: 30 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+      responses:
+        '200':
+          description: Server details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  server:
+                    $ref: '#/components/schemas/Server'
+                  role:
+                    type: string
+                    enum: [owner, admin, member]
+        '403':
+          description: Not a member of this server
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: Server not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      tags: [Servers]
+      summary: Update a server
+      description: |
+        Update server name and icon. Requires owner or admin role.
+        Rate limit: 10 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateServerRequest'
+      responses:
+        '200':
+          description: Server updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  server:
+                    $ref: '#/components/schemas/Server'
+                  role:
+                    type: string
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags: [Servers]
+      summary: Delete a server
+      description: |
+        Permanently delete a server. Owner only.
+        Rate limit: 5 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+      responses:
+        '200':
+          description: Server deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+        '403':
+          description: Only the server owner can delete
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ----------------------------------------------------------
+  # SERVER SUB-RESOURCES
+  # ----------------------------------------------------------
+  /servers/{id}/channels:
+    get:
+      tags: [Channels]
+      summary: List channels in a server
+      description: 'Rate limit: 30 requests per minute.'
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+      responses:
+        '200':
+          description: Channel list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  channels:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Channel'
+
+  /servers/{id}/members:
+    get:
+      tags: [Members]
+      summary: List server members
+      description: 'Rate limit: 30 requests per minute.'
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+      responses:
+        '200':
+          description: Member list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  members:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MemberWithUser'
+    post:
+      tags: [Members]
+      summary: Add a member to a server
+      description: |
+        Add a user to the server. Requires owner or admin role.
+        Rate limit: 10 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AddMemberRequest'
+      responses:
+        '201':
+          description: Member added
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  member:
+                    $ref: '#/components/schemas/ServerMember'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: User is already a member
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /servers/{id}/members/{user_id}:
+    patch:
+      tags: [Members]
+      summary: Update member role
+      description: |
+        Change a member's role. Owner only.
+        Rate limit: 5 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateMemberRequest'
+      responses:
+        '200':
+          description: Role updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  member:
+                    $ref: '#/components/schemas/ServerMember'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags: [Members]
+      summary: Remove a member
+      description: |
+        Remove a member from the server (kick) or leave the server (self).
+        Owner/admin can kick members; any member can leave.
+        Owners cannot leave their own server.
+        Rate limit: 5 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Member removed or left
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+        '403':
+          description: Insufficient permissions or owner cannot leave
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /servers/{id}/invites:
+    get:
+      tags: [Invites]
+      summary: List server invites
+      description: |
+        List all invites for a server. Owner/admin only.
+        Rate limit: 30 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+      responses:
+        '200':
+          description: Invite list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invites:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ServerInviteWithCreator'
+    post:
+      tags: [Invites]
+      summary: Create an invite code
+      description: |
+        Generate a new invite code for the server. Owner/admin only.
+        Defaults: max_uses=1, expires_in=86400 (24h).
+        Rate limit: 10 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+      requestBody:
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateInviteRequest'
+      responses:
+        '201':
+          description: Invite created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  invite:
+                    $ref: '#/components/schemas/ServerInvite'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /servers/{id}/invites/{invite_id}:
+    delete:
+      tags: [Invites]
+      summary: Revoke an invite
+      description: |
+        Revoke a server invite code. Owner/admin only.
+        Rate limit: 10 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+        - name: invite_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Invite revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+
+  /servers/{id}/unread:
+    get:
+      tags: [Channels]
+      summary: Get unread counts per channel
+      description: |
+        Get unread message counts for all channels in a server.
+        Rate limit: 30 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+      responses:
+        '200':
+          description: Unread counts
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  unreads:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ChannelUnreadCount'
+
+  /servers/{id}/read:
+    post:
+      tags: [Channels]
+      summary: Mark all channels as read
+      description: |
+        Mark all channels in a server as read.
+        Rate limit: 30 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+      responses:
+        '200':
+          description: All channels marked as read
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+
+  # ----------------------------------------------------------
+  # CHANNELS
+  # ----------------------------------------------------------
+  /channels:
+    post:
+      tags: [Channels]
+      summary: Create a channel
+      description: |
+        Create a channel in a server. Requires owner or admin role.
+        For encrypted channels, provide wrapped_keys mapping user IDs to wrapped CSKs.
+        Rate limit: 10 requests per minute.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateChannelRequest'
+      responses:
+        '201':
+          description: Channel created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  channel:
+                    $ref: '#/components/schemas/Channel'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /channels/{id}:
+    get:
+      tags: [Channels]
+      summary: Get a channel
+      description: 'Rate limit: 30 requests per minute.'
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ChannelId'
+      responses:
+        '200':
+          description: Channel details
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  channel:
+                    $ref: '#/components/schemas/Channel'
+    patch:
+      tags: [Channels]
+      summary: Update a channel
+      description: |
+        Update channel name, type, and emoji. Encryption status cannot be changed.
+        Requires owner or admin role.
+        Rate limit: 10 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ChannelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateChannelRequest'
+      responses:
+        '200':
+          description: Channel updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  channel:
+                    $ref: '#/components/schemas/Channel'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags: [Channels]
+      summary: Delete a channel
+      description: |
+        Permanently delete a channel. Requires owner or admin role.
+        Rate limit: 5 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ChannelId'
+      responses:
+        '200':
+          description: Channel deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /channels/{id}/messages:
+    get:
+      tags: [Messages]
+      summary: Get message history
+      description: |
+        Retrieve messages for a channel with cursor-based pagination.
+        Messages are returned newest-first.
+        Rate limit: 30 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ChannelId'
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 50
+        - name: before
+          in: query
+          description: Message UUID for cursor pagination (get messages before this ID)
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Messages
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MessageWithUser'
+                  count:
+                    type: integer
+
+  /channels/{id}/read:
+    post:
+      tags: [Channels]
+      summary: Mark channel as read
+      description: 'Rate limit: 30 requests per minute.'
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ChannelId'
+      responses:
+        '200':
+          description: Channel marked as read
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+
+  /channels/{id}/keys:
+    get:
+      tags: [E2EE]
+      summary: Get channel encryption key
+      description: |
+        Get the caller's wrapped channel symmetric key (CSK) for an encrypted channel.
+        Returns 404 with `pending: true` if the key has not yet been distributed.
+        Rate limit: 30 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ChannelId'
+      responses:
+        '200':
+          description: Channel key
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key:
+                    $ref: '#/components/schemas/ChannelKey'
+        '404':
+          description: Key not yet distributed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                    example: No encryption key available yet
+                  pending:
+                    type: boolean
+                    example: true
+    post:
+      tags: [E2EE]
+      summary: Distribute channel keys
+      description: |
+        Distribute wrapped CSKs to new members. The caller must already have a key for this channel.
+        First-response-wins on duplicates.
+        Rate limit: 10 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ChannelId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/DistributeKeysRequest'
+      responses:
+        '200':
+          description: Keys distributed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  distributed:
+                    type: integer
+                  duplicates:
+                    type: integer
+
+  # ----------------------------------------------------------
+  # E2EE
+  # ----------------------------------------------------------
+  /e2ee/pending-keys:
+    get:
+      tags: [E2EE]
+      summary: Get pending key requests
+      description: |
+        List channels where the current user needs to distribute keys to new members.
+        Rate limit: 30 requests per minute.
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Pending key requests
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pending_requests:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/PendingKeyRequest'
+
+  # ----------------------------------------------------------
+  # MESSAGES
+  # ----------------------------------------------------------
+  /messages:
+    post:
+      tags: [Messages]
+      summary: Send a message
+      description: |
+        Send a message to a channel. For encrypted channels, content must be
+        base64-encoded AES-256-GCM ciphertext and is_encrypted must be true.
+        Rate limit: 30 requests per minute.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/SendMessageRequest'
+      responses:
+        '201':
+          description: Message sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    $ref: '#/components/schemas/Message'
+        '400':
+          description: Validation error or E2EE enforcement failure
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Not a member of the channel's server
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /messages/{id}:
+    patch:
+      tags: [Messages]
+      summary: Edit a message
+      description: |
+        Edit a message. Only the author can edit.
+        Rate limit: 10 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UpdateMessageRequest'
+      responses:
+        '200':
+          description: Message updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    $ref: '#/components/schemas/Message'
+        '403':
+          description: Not the message author
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    delete:
+      tags: [Messages]
+      summary: Delete a message
+      description: |
+        Delete a message. Author, server owner, or admin can delete.
+        Rate limit: 10 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Message deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+        '403':
+          description: Insufficient permissions
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ----------------------------------------------------------
+  # INVITES
+  # ----------------------------------------------------------
+  /invites/join:
+    post:
+      tags: [Invites]
+      summary: Join a server via invite code
+      description: |
+        Join a server using an 8-character invite code.
+        Creates pending key requests for E2EE channels.
+        Rate limit: 10 requests per minute.
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [code]
+              properties:
+                code:
+                  type: string
+                  minLength: 1
+                  description: 8-character invite code
+      responses:
+        '200':
+          description: Joined server
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  server:
+                    $ref: '#/components/schemas/Server'
+                  role:
+                    type: string
+                    example: member
+        '400':
+          description: Invalid, expired, or used-up invite
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Already a member
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /invites/{code}:
+    get:
+      tags: [Invites]
+      summary: Preview an invite
+      description: |
+        Get server info for an invite code without joining.
+        Rate limit: 30 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Invite info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  server_name:
+                    type: string
+                  server_icon:
+                    type: string
+                    nullable: true
+                  member_count:
+                    type: integer
+                  valid:
+                    type: boolean
+        '404':
+          description: Invalid invite code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ----------------------------------------------------------
+  # WEBSOCKET
+  # ----------------------------------------------------------
+  /ws:
+    get:
+      tags: [WebSocket]
+      summary: WebSocket connection
+      description: |
+        Upgrade to a WebSocket connection for real-time messaging.
+
+        ## Authentication
+        Use one of:
+        - `?ticket=<ticket>` — Preferred. Get a ticket from `POST /auth/ws-ticket`.
+        - `?token=<jwt>` — JWT access token as query parameter.
+        - `Authorization: Bearer <jwt>` — JWT in header (before upgrade).
+
+        ## Connection Lifecycle
+        - Server sends `connected` message with `client_id` and `user_id`
+        - Server sends `presence_snapshot` with all online users
+        - Client subscribes to channels/servers
+        - Ping/pong: 54s ping interval, 60s pong timeout
+        - Max message size: 512KB
+
+        ## Rate Limiting
+        Token bucket: 10 message burst, 5 messages/second sustained.
+
+        ## Client → Server Messages
+
+        | Type | Fields | Description |
+        |------|--------|-------------|
+        | `subscribe` | `channel_id` | Subscribe to channel messages (verifies membership) |
+        | `unsubscribe` | `channel_id` | Unsubscribe from channel |
+        | `subscribe_server` | `server_id` | Subscribe to server-level events |
+        | `unsubscribe_server` | `server_id` | Unsubscribe from server |
+        | `message` | `channel_id`, `content`, `is_encrypted`, `nonce` | Send message (persisted to DB) |
+        | `typing` | `channel_id`, `is_typing` | Typing indicator |
+        | `heartbeat` | — | Refresh presence TTL |
+        | `set_status` | `status` (online/dnd/invisible) | Set user status |
+
+        ## Server → Client Messages
+
+        | Type | Fields | Description |
+        |------|--------|-------------|
+        | `connected` | `client_id`, `user_id` | Connection established |
+        | `presence_snapshot` | `users[]` | All online users with statuses |
+        | `subscribed` | `channel_id` | Channel subscription confirmed |
+        | `message` | `id`, `channel_id`, `user_id`, `username`, `display_name`, `avatar_url`, `content`, `is_encrypted`, `created_at` | New message |
+        | `message_ack` | `nonce`, `id`, `channel_id`, `created_at` | Message persisted (sent to author) |
+        | `message_update` | `id`, `channel_id`, `content`, `edited_at` | Message edited |
+        | `message_delete` | `id`, `channel_id` | Message deleted |
+        | `typing` | `channel_id`, `user_id`, `username`, `is_typing` | Typing indicator |
+        | `presence` | `user_id`, `status`, `timestamp` | User status change |
+        | `server_online_counts` | `counts` (server_id → count) | Updated online counts |
+        | `unread_notify` | `channel_id`, `server_id` | Unread notification |
+        | `profile_updated` | `user_id`, `username`, `display_name`, `avatar_url` | Profile changed |
+        | `preferences_updated` | `version` | Preferences sync trigger |
+        | `server_updated` | `server_id`, `name`, `icon_url` | Server modified |
+        | `server_deleted` | `server_id` | Server deleted |
+        | `channel_created` | channel fields | New channel |
+        | `channel_updated` | `channel_id`, `server_id`, `name`, `type`, `emoji`, `is_encrypted` | Channel modified |
+        | `channel_deleted` | `channel_id`, `server_id` | Channel deleted |
+        | `member_joined` | `server_id`, `user_id`, `username`, `display_name`, `avatar_url`, `role` | New member |
+        | `member_removed` | `server_id`, `user_id` | Member left/kicked |
+        | `key_delivered` | `channel_id`, `user_id` | E2EE key now available |
+        | `key_needed` | `server_id`, `user_id`, `channel_ids[]` | Key distribution needed |
+        | `error` | `message` | Error |
+      responses:
+        '101':
+          description: Switching Protocols (WebSocket upgrade)
+
+# ============================================================
+# COMPONENTS
+# ============================================================
+components:
+
+  # ----------------------------------------------------------
+  # SECURITY SCHEMES
+  # ----------------------------------------------------------
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: JWT access token (15-minute expiry)
+    CookieAuth:
+      type: apiKey
+      in: cookie
+      name: refresh_token
+      description: HttpOnly refresh token cookie (30-day expiry)
+
+  # ----------------------------------------------------------
+  # PARAMETERS
+  # ----------------------------------------------------------
+  parameters:
+    ServerId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Server UUID
+    ChannelId:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+      description: Channel UUID
+
+  # ----------------------------------------------------------
+  # RESPONSES
+  # ----------------------------------------------------------
+  responses:
+    BadRequest:
+      description: Validation error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    RateLimited:
+      description: Too many requests
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+
+  # ----------------------------------------------------------
+  # SCHEMAS
+  # ----------------------------------------------------------
+  schemas:
+
+    # Common
+    Error:
+      type: object
+      properties:
+        error:
+          type: string
+      required: [error]
+
+    SuccessMessage:
+      type: object
+      properties:
+        message:
+          type: string
+      required: [message]
+
+    # Auth Requests
+    RegisterRequest:
+      type: object
+      required: [email, username, password, age_confirmation, public_key, wrapped_private_key, key_derivation_salt]
+      properties:
+        email:
+          type: string
+          format: email
+        username:
+          type: string
+          minLength: 3
+          maxLength: 50
+        password:
+          type: string
+          minLength: 12
+          description: Must include uppercase, lowercase, digit, and special character
+        age_confirmation:
+          type: boolean
+          description: Must be true (user confirms they are 16+)
+        public_key:
+          type: string
+          description: Base64-encoded SPKI RSA-4096 public key
+        wrapped_private_key:
+          type: string
+          description: Base64-encoded AES-GCM encrypted private key
+        key_derivation_salt:
+          type: string
+          description: Base64-encoded 16-byte PBKDF2 salt
+        e2ee_preference:
+          type: boolean
+          default: true
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+        remember_me:
+          type: boolean
+          description: 'Default: true. When false, session uses browser-session cookie.'
+
+    # User Requests
+    UpdateProfileRequest:
+      type: object
+      properties:
+        username:
+          type: string
+          minLength: 3
+          maxLength: 50
+        display_name:
+          type: string
+          maxLength: 100
+          nullable: true
+          description: Set to null to clear
+        bio:
+          type: string
+          maxLength: 500
+          nullable: true
+        avatar_url:
+          type: string
+          nullable: true
+          description: Data URL (max 500KB) or null to remove
+        links:
+          type: array
+          items:
+            type: string
+          maxItems: 5
+          description: HTTP(S) URLs, max 500 chars each
+
+    ChangePasswordRequest:
+      type: object
+      required: [current_password, new_password, wrapped_private_key, key_derivation_salt]
+      properties:
+        current_password:
+          type: string
+        new_password:
+          type: string
+          minLength: 12
+        wrapped_private_key:
+          type: string
+          description: Re-wrapped with new PBKDF2-derived key
+        key_derivation_salt:
+          type: string
+          description: New salt for PBKDF2 derivation
+
+    ReplaceKeysRequest:
+      type: object
+      required: [wrapped_private_key, key_derivation_salt]
+      properties:
+        wrapped_private_key:
+          type: string
+        key_derivation_salt:
+          type: string
+
+    UpdatePreferencesRequest:
+      type: object
+      required: [encrypted_data]
+      properties:
+        encrypted_data:
+          type: string
+          maxLength: 65536
+          description: Base64-encoded AES-256-GCM encrypted preferences blob
+
+    # Server Requests
+    CreateServerRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 3
+          maxLength: 100
+        icon_url:
+          type: string
+          nullable: true
+          description: Data URL (max 500KB)
+        e2ee_default:
+          type: boolean
+          default: true
+          description: Whether new channels are encrypted by default
+
+    UpdateServerRequest:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 3
+          maxLength: 100
+        icon_url:
+          type: string
+          nullable: true
+          description: Data URL or null to remove
+
+    # Channel Requests
+    CreateChannelRequest:
+      type: object
+      required: [server_id, name, type]
+      properties:
+        server_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          minLength: 3
+          maxLength: 100
+        type:
+          type: string
+          enum: [text, voice, bulletin]
+        emoji:
+          type: string
+          nullable: true
+        is_encrypted:
+          type: boolean
+          description: Defaults to the server's e2ee_default
+        wrapped_keys:
+          type: object
+          additionalProperties:
+            type: string
+          description: 'Required if encrypted. Map of user_id → base64 wrapped CSK.'
+
+    UpdateChannelRequest:
+      type: object
+      required: [name, type]
+      properties:
+        name:
+          type: string
+          minLength: 3
+          maxLength: 100
+        type:
+          type: string
+          enum: [text, voice, bulletin]
+        emoji:
+          type: string
+          nullable: true
+
+    DistributeKeysRequest:
+      type: object
+      required: [wrapped_keys]
+      properties:
+        wrapped_keys:
+          type: object
+          additionalProperties:
+            type: string
+          description: 'Map of user_id → base64 wrapped CSK'
+
+    # Message Requests
+    SendMessageRequest:
+      type: object
+      required: [channel_id, content]
+      properties:
+        channel_id:
+          type: string
+          format: uuid
+        content:
+          type: string
+          minLength: 1
+          maxLength: 24000
+          description: Plaintext or base64-encoded AES-256-GCM ciphertext
+        is_encrypted:
+          type: boolean
+          default: false
+
+    UpdateMessageRequest:
+      type: object
+      required: [content]
+      properties:
+        content:
+          type: string
+          minLength: 1
+          maxLength: 24000
+
+    # Member Requests
+    AddMemberRequest:
+      type: object
+      required: [user_id]
+      properties:
+        user_id:
+          type: string
+          format: uuid
+
+    UpdateMemberRequest:
+      type: object
+      required: [role]
+      properties:
+        role:
+          type: string
+          enum: [admin, member]
+
+    # Invite Requests
+    CreateInviteRequest:
+      type: object
+      properties:
+        max_uses:
+          type: integer
+          minimum: 0
+          maximum: 100
+          default: 1
+          description: '0 = unlimited'
+        expires_in:
+          type: integer
+          minimum: 300
+          maximum: 604800
+          default: 86400
+          description: Seconds until expiry (5min to 7d, default 24h)
+
+    # Response Models
+    User:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+          format: email
+        username:
+          type: string
+        display_name:
+          type: string
+          nullable: true
+        bio:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          nullable: true
+        links:
+          type: array
+          items:
+            type: string
+        email_verified:
+          type: boolean
+        age_verified:
+          type: boolean
+        e2ee_preference:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    E2EEKeys:
+      type: object
+      properties:
+        wrapped_private_key:
+          type: string
+          description: Base64-encoded AES-GCM encrypted RSA private key
+        key_derivation_salt:
+          type: string
+          description: Base64-encoded PBKDF2 salt
+        key_version:
+          type: integer
+
+    Server:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        icon_url:
+          type: string
+          nullable: true
+        owner_id:
+          type: string
+          format: uuid
+        e2ee_default:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ServerWithRole:
+      allOf:
+        - $ref: '#/components/schemas/Server'
+        - type: object
+          properties:
+            role:
+              type: string
+              enum: [owner, admin, member]
+            member_count:
+              type: integer
+            online_count:
+              type: integer
+
+    Channel:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        server_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        type:
+          type: string
+          enum: [text, voice, bulletin]
+        description:
+          type: string
+          nullable: true
+        emoji:
+          type: string
+          nullable: true
+        is_encrypted:
+          type: boolean
+        position:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    Message:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        channel_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        content:
+          type: string
+        is_encrypted:
+          type: boolean
+        edited_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    MessageWithUser:
+      allOf:
+        - $ref: '#/components/schemas/Message'
+        - type: object
+          properties:
+            username:
+              type: string
+            display_name:
+              type: string
+              nullable: true
+            avatar_url:
+              type: string
+              nullable: true
+
+    ServerMember:
+      type: object
+      properties:
+        server_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        role:
+          type: string
+          enum: [owner, admin, member]
+        joined_at:
+          type: string
+          format: date-time
+
+    MemberWithUser:
+      type: object
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        display_name:
+          type: string
+          nullable: true
+        bio:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          nullable: true
+        role:
+          type: string
+          enum: [owner, admin, member]
+        joined_at:
+          type: string
+          format: date-time
+        last_seen:
+          type: integer
+          format: int64
+          nullable: true
+          description: Unix timestamp of last activity
+
+    ServerInvite:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        server_id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          description: 8-character invite code
+        created_by:
+          type: string
+          format: uuid
+        max_uses:
+          type: integer
+          nullable: true
+        use_count:
+          type: integer
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        is_revoked:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    ServerInviteWithCreator:
+      allOf:
+        - $ref: '#/components/schemas/ServerInvite'
+        - type: object
+          properties:
+            creator_username:
+              type: string
+
+    ChannelKey:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        channel_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        wrapped_key:
+          type: string
+          description: Base64-encoded RSA-OAEP wrapped CSK
+        key_version:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    ChannelUnreadCount:
+      type: object
+      properties:
+        channel_id:
+          type: string
+          format: uuid
+        unread_count:
+          type: integer
+
+    PendingKeyRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        channel_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+
+    Session:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        device_name:
+          type: string
+        ip_address:
+          type: string
+          description: Masked for privacy (e.g., 192.168.1.x)
+        user_agent:
+          type: string
+        expires_at:
+          type: string
+          format: date-time
+        created_at:
+          type: string
+          format: date-time
+        last_used:
+          type: string
+          format: date-time
+        remember_me:
+          type: boolean
+        is_current:
+          type: boolean
+
+    PastSession:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        device_name:
+          type: string
+        ip_address:
+          type: string
+        user_agent:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        last_used:
+          type: string
+          format: date-time
+        revoked_at:
+          type: string
+          format: date-time

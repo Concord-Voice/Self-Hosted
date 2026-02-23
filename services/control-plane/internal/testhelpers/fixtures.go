@@ -10,7 +10,7 @@ const TestPassword = "TestPassword123!"
 
 // TestPasswordHash is a pre-computed Argon2id hash of TestPassword.
 // Pre-computing avoids the ~100ms cost of Argon2id (64MB, 3 iterations) per user creation.
-const TestPasswordHash = "$argon2id$v=19$m=65536,t=3,p=4$3pE9STD1TqLPoZQ2/BTLCg$8SKTCjsZh8Q7pAulEqAIEzJQK9eeOb5ipWhPz4REdCY"
+const TestPasswordHash = "$argon2id$v=19$m=65536,t=3,p=4$3pE9STD1TqLPoZQ2/BTLCg$8SKTCjsZh8Q7pAulEqAIEzJQK9eeOb5ipWhPz4REdCY" //nolint:gosec // Test-only pre-computed hash, not a real credential
 
 // TestJWTSecret is the JWT signing key used in test servers.
 const TestJWTSecret = "test_secret_for_testing"
@@ -20,22 +20,22 @@ type TestUser struct {
 	ID          string
 	Email       string
 	Username    string
-	Password    string
-	AccessToken string
+	Password    string      //nolint:gosec // Test struct field, not a credential
+	AccessToken string      //nolint:gosec // Test struct field, not a credential
 }
 
 // E2EETestKeys returns structurally valid but random E2EE key material (base64 encoded).
 func E2EETestKeys() (publicKeyB64, wrappedPrivateKeyB64, saltB64 string) {
 	pubKey := make([]byte, 550) // Approximate RSA-4096 SPKI export size
-	rand.Read(pubKey)
+	_, _ = rand.Read(pubKey)
 	publicKeyB64 = base64.StdEncoding.EncodeToString(pubKey)
 
 	wrappedKey := make([]byte, 512) // Wrapped private key
-	rand.Read(wrappedKey)
+	_, _ = rand.Read(wrappedKey)
 	wrappedPrivateKeyB64 = base64.StdEncoding.EncodeToString(wrappedKey)
 
 	derivationSalt := make([]byte, 16)
-	rand.Read(derivationSalt)
+	_, _ = rand.Read(derivationSalt)
 	saltB64 = base64.StdEncoding.EncodeToString(derivationSalt)
 
 	return
@@ -45,6 +45,6 @@ func E2EETestKeys() (publicKeyB64, wrappedPrivateKeyB64, saltB64 string) {
 // minimum ciphertext length validation (28 bytes: 12 IV + 16 auth tag).
 func ValidCiphertext() string {
 	ct := make([]byte, 40)
-	rand.Read(ct)
+	_, _ = rand.Read(ct)
 	return base64.StdEncoding.EncodeToString(ct)
 }

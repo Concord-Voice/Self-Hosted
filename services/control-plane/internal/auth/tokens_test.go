@@ -84,6 +84,7 @@ func TestValidateAccessToken(t *testing.T) {
 			},
 		}
 		token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+		// nosemgrep: go.jwt-go.security.jwt.hardcoded-jwt-key
 		tokenStr, _ := token.SignedString([]byte(testJWTSecret))
 
 		_, err := ValidateAccessToken(tokenStr, testJWTSecret)

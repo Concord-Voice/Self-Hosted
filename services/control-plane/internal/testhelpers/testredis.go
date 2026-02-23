@@ -35,8 +35,8 @@ func SetupTestRedis(t *testing.T) (*redis.Client, func()) {
 	}
 
 	cleanup := func() {
-		client.FlushDB(context.Background())
-		client.Close()
+		_ = client.FlushDB(context.Background()).Err()
+		_ = client.Close()
 	}
 
 	// Start clean
