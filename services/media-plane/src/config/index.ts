@@ -208,19 +208,16 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
     rtcpFeedback: VIDEO_RTCP_FEEDBACK,
   },
 
-  // ── VIDEO: H265/HEVC Main — Premium 4K+ (mediasoup 3.13.x native) ─────
-  // macOS ~99% HW decode, Windows ~75%, Linux varies.
-  // Chromium 136+ / Electron 40+ has WebRTC H265 support (HW-only).
-  {
-    kind: 'video',
-    mimeType: 'video/H265',
-    clockRate: 90000,
-    parameters: {
-      'profile-id': 1,   // Main profile
-      'level-id': 153,   // Level 5.1 (4K30)
-    },
-    rtcpFeedback: VIDEO_RTCP_FEEDBACK,
-  },
+  // NOTE: H265/HEVC is NOT yet in mediasoup's supportedRtpCapabilities
+  // (as of 3.13.x). When mediasoup adds it, uncomment and re-enable.
+  //
+  // {
+  //   kind: 'video',
+  //   mimeType: 'video/H265',
+  //   clockRate: 90000,
+  //   parameters: { 'profile-id': 1, 'level-id': 153 },
+  //   rtcpFeedback: VIDEO_RTCP_FEEDBACK,
+  // },
 
   // ── VIDEO: AV1 — Best compression, SVC capable ────────────────────────
   // Chrome 90+ encode (software libaom), Chrome 113+ improved real-time.

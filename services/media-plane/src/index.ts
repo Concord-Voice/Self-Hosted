@@ -109,6 +109,8 @@ async function main() {
           return;
         }
 
+        logger.debug('Channel access validated', { roomId, userId: data.userId });
+
         // Join the room via RoomManager
         const result = await roomManager.joinRoom(
           roomId,
@@ -147,7 +149,12 @@ async function main() {
           socket.emit('room-joined', response);
         }
       } catch (error) {
-        logger.error('Error joining room', { error, roomId, userId: data.userId });
+        logger.error('Error joining room', {
+          error: error instanceof Error ? error.message : error,
+          stack: error instanceof Error ? error.stack : undefined,
+          roomId,
+          userId: data.userId,
+        });
         const errPayload = { error: 'Failed to join room' };
         if (callback) return callback(errPayload);
         socket.emit('error', errPayload);
