@@ -3,6 +3,7 @@ package auth_test
 import (
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/concord/control-plane/internal/testhelpers"
@@ -228,6 +229,114 @@ func TestProtectedRoute_ValidToken(t *testing.T) {
 	testhelpers.ParseJSON(t, w, &body)
 	userData := body["user"].(map[string]interface{})
 	assert.Equal(t, user.Username, userData["username"])
+}
+
+// --- Refresh Tests ---
+
+func TestRefresh_Success(t *testing.T) {
+	ts := setupTS(t)
+
+	// Register to get a refresh cookie
+	w := ts.DoRequest("POST", "/api/v1/auth/register", registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	// Extract refresh_token cookie
+	var refreshCookie *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "refresh_token" {
+			refreshCookie = c
+			break
+		}
+	}
+	require.NotNil(t, refreshCookie)
+
+	// Build request with cookie
+	req := httptest.NewRequest("POST", "/api/v1/auth/refresh", nil)
+	req.AddCookie(refreshCookie)
+	req.Header.Set("Content-Type", "application/json")
+
+	rw := httptest.NewRecorder()
+	ts.Router.ServeHTTP(rw, req)
+
+	assert.Equal(t, http.StatusOK, rw.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, rw, &body)
+	assert.NotEmpty(t, body["access_token"])
+	assert.Equal(t, float64(900), body["expires_in"])
+}
+
+func TestRefresh_NoCookie(t *testing.T) {
+	ts := setupTS(t)
+
+	w := ts.DoRequest("POST", "/api/v1/auth/refresh", nil, nil)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestRefresh_InvalidToken(t *testing.T) {
+	ts := setupTS(t)
+
+	req := httptest.NewRequest("POST", "/api/v1/auth/refresh", nil)
+	req.AddCookie(&http.Cookie{Name: "refresh_token", Value: "totally-invalid-token"})
+	req.Header.Set("Content-Type", "application/json")
+
+	rw := httptest.NewRecorder()
+	ts.Router.ServeHTTP(rw, req)
+
+	assert.Equal(t, http.StatusUnauthorized, rw.Code)
+}
+
+func TestRefresh_RotatesToken(t *testing.T) {
+	ts := setupTS(t)
+
+	// Register
+	w := ts.DoRequest("POST", "/api/v1/auth/register", registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	var firstCookie *http.Cookie
+	for _, c := range w.Result().Cookies() {
+		if c.Name == "refresh_token" {
+			firstCookie = c
+			break
+		}
+	}
+	require.NotNil(t, firstCookie)
+
+	// First refresh — should succeed
+	req := httptest.NewRequest("POST", "/api/v1/auth/refresh", nil)
+	req.AddCookie(firstCookie)
+	req.Header.Set("Content-Type", "application/json")
+	rw := httptest.NewRecorder()
+	ts.Router.ServeHTTP(rw, req)
+	require.Equal(t, http.StatusOK, rw.Code)
+
+	// Replay old token — should fail (breach detection)
+	req2 := httptest.NewRequest("POST", "/api/v1/auth/refresh", nil)
+	req2.AddCookie(firstCookie)
+	req2.Header.Set("Content-Type", "application/json")
+	rw2 := httptest.NewRecorder()
+	ts.Router.ServeHTTP(rw2, req2)
+	assert.Equal(t, http.StatusUnauthorized, rw2.Code)
+}
+
+// --- WS Ticket Tests ---
+
+func TestIssueWSTicket_Success(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "wsticketuser")
+
+	w := ts.DoRequest("POST", "/api/v1/auth/ws-ticket", nil, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.NotEmpty(t, body["ticket"])
+}
+
+func TestIssueWSTicket_Unauthorized(t *testing.T) {
+	ts := setupTS(t)
+
+	w := ts.DoRequest("POST", "/api/v1/auth/ws-ticket", nil, nil)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
 // --- Health Check ---

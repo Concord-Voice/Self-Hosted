@@ -124,3 +124,167 @@ func TestUpdatePreferences_Success(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 }
+
+// --- Replace My Keys ---
+
+func TestReplaceMyKeys_Success(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "replacekeysuser")
+
+	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
+	w := ts.DoRequest("PUT", "/api/v1/users/me/keys", map[string]interface{}{
+		"wrapped_private_key": newWrapped,
+		"key_derivation_salt": newSalt,
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "Keys replaced successfully", body["message"])
+}
+
+func TestReplaceMyKeys_InvalidBase64(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "badkeysuser")
+
+	w := ts.DoRequest("PUT", "/api/v1/users/me/keys", map[string]interface{}{
+		"wrapped_private_key": "not-valid-base64!!!",
+		"key_derivation_salt": "also-bad!!!",
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestReplaceMyKeys_MissingFields(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "missingkeysuser")
+
+	w := ts.DoRequest("PUT", "/api/v1/users/me/keys", map[string]interface{}{}, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// --- Change Password ---
+
+func TestChangePassword_Success(t *testing.T) {
+	ts := setupTS(t)
+
+	// Register via API so password hash is real Argon2id
+	pub, priv, salt := testhelpers.E2EETestKeys()
+	regW := ts.DoRequest("POST", "/api/v1/auth/register", map[string]interface{}{
+		"email":               "changepw@test.concord.chat",
+		"username":            "changepwuser",
+		"password":            "TestPassword123!",
+		"age_confirmation":    true,
+		"public_key":          pub,
+		"wrapped_private_key": priv,
+		"key_derivation_salt": salt,
+	}, nil)
+	assert.Equal(t, http.StatusCreated, regW.Code)
+
+	var regBody map[string]interface{}
+	testhelpers.ParseJSON(t, regW, &regBody)
+	accessToken := regBody["access_token"].(string)
+
+	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
+	w := ts.DoRequest("POST", "/api/v1/users/me/password", map[string]interface{}{
+		"current_password":    "TestPassword123!",
+		"new_password":        "NewStrongPassword456!",
+		"wrapped_private_key": newWrapped,
+		"key_derivation_salt": newSalt,
+	}, testhelpers.AuthHeaders(accessToken))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "Password changed successfully", body["message"])
+}
+
+func TestChangePassword_WrongCurrentPassword(t *testing.T) {
+	ts := setupTS(t)
+
+	pub, priv, salt := testhelpers.E2EETestKeys()
+	regW := ts.DoRequest("POST", "/api/v1/auth/register", map[string]interface{}{
+		"email":               "wrongpw@test.concord.chat",
+		"username":            "wrongpwuser",
+		"password":            "TestPassword123!",
+		"age_confirmation":    true,
+		"public_key":          pub,
+		"wrapped_private_key": priv,
+		"key_derivation_salt": salt,
+	}, nil)
+	assert.Equal(t, http.StatusCreated, regW.Code)
+
+	var regBody map[string]interface{}
+	testhelpers.ParseJSON(t, regW, &regBody)
+	accessToken := regBody["access_token"].(string)
+
+	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
+	w := ts.DoRequest("POST", "/api/v1/users/me/password", map[string]interface{}{
+		"current_password":    "WrongPassword!!!!",
+		"new_password":        "NewStrongPassword456!",
+		"wrapped_private_key": newWrapped,
+		"key_derivation_salt": newSalt,
+	}, testhelpers.AuthHeaders(accessToken))
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestChangePassword_SameAsOld(t *testing.T) {
+	ts := setupTS(t)
+
+	pub, priv, salt := testhelpers.E2EETestKeys()
+	regW := ts.DoRequest("POST", "/api/v1/auth/register", map[string]interface{}{
+		"email":               "samepw@test.concord.chat",
+		"username":            "samepwuser",
+		"password":            "TestPassword123!",
+		"age_confirmation":    true,
+		"public_key":          pub,
+		"wrapped_private_key": priv,
+		"key_derivation_salt": salt,
+	}, nil)
+	assert.Equal(t, http.StatusCreated, regW.Code)
+
+	var regBody map[string]interface{}
+	testhelpers.ParseJSON(t, regW, &regBody)
+	accessToken := regBody["access_token"].(string)
+
+	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
+	w := ts.DoRequest("POST", "/api/v1/users/me/password", map[string]interface{}{
+		"current_password":    "TestPassword123!",
+		"new_password":        "TestPassword123!",
+		"wrapped_private_key": newWrapped,
+		"key_derivation_salt": newSalt,
+	}, testhelpers.AuthHeaders(accessToken))
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestChangePassword_WeakNewPassword(t *testing.T) {
+	ts := setupTS(t)
+
+	pub, priv, salt := testhelpers.E2EETestKeys()
+	regW := ts.DoRequest("POST", "/api/v1/auth/register", map[string]interface{}{
+		"email":               "weaknewpw@test.concord.chat",
+		"username":            "weaknewpwuser",
+		"password":            "TestPassword123!",
+		"age_confirmation":    true,
+		"public_key":          pub,
+		"wrapped_private_key": priv,
+		"key_derivation_salt": salt,
+	}, nil)
+	assert.Equal(t, http.StatusCreated, regW.Code)
+
+	var regBody map[string]interface{}
+	testhelpers.ParseJSON(t, regW, &regBody)
+	accessToken := regBody["access_token"].(string)
+
+	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
+	w := ts.DoRequest("POST", "/api/v1/users/me/password", map[string]interface{}{
+		"current_password":    "TestPassword123!",
+		"new_password":        "weak",
+		"wrapped_private_key": newWrapped,
+		"key_derivation_salt": newSalt,
+	}, testhelpers.AuthHeaders(accessToken))
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
