@@ -191,20 +191,36 @@ Then open http://localhost:8081
 
 ## Testing
 
-### Control Plane
+### Control Plane (Go)
 
 ```bash
 cd services/control-plane
 
-# Run tests
+# Run all tests (unit + integration)
 go test ./...
 
-# Run tests with coverage
-go test -cover ./...
+# Run with race detection (recommended)
+go test -race ./...
+
+# Run with coverage report
+go test -coverprofile=coverage.out ./...
+go tool cover -func=coverage.out     # Terminal summary
+go tool cover -html=coverage.out     # Browser report
 
 # Run specific package
 go test ./internal/auth/...
+go test ./internal/channels/...
+
+# Run unit tests only (no DB required)
+go test ./internal/auth/ -run "TestHashPassword|TestValidatePassword|TestValidateUsername"
+go test ./pkg/config/...
+
+# Run integration tests (requires PostgreSQL + Redis via Docker)
+go test ./internal/auth/ -run "Integration"
+go test ./internal/servers/... ./internal/channels/... ./internal/messages/...
 ```
+
+Integration tests use the `testhelpers` package which auto-connects to PostgreSQL/Redis, runs migrations, and provides user/server/channel creation helpers. See `services/control-plane/tests/README.md` for details.
 
 ### Media Plane
 
@@ -218,13 +234,28 @@ npm test
 npm run test:coverage
 ```
 
-### Desktop Client
+### Desktop Client (React/TypeScript)
 
 ```bash
 cd client/desktop
 
-# Run tests (when implemented)
-npm test
+# Run all unit tests
+npx vitest run
+
+# Watch mode (re-runs on file changes)
+npx vitest
+
+# Run with coverage
+npx vitest run --coverage
+
+# Run specific test file
+npx vitest run tests/unit/stores/chatStore.test.ts
+
+# Run tests matching a pattern
+npx vitest run -t "renders login form"
+
+# Run E2E tests (requires running dev server + backend)
+npx playwright test
 
 # Type checking
 npm run typecheck
@@ -232,6 +263,8 @@ npm run typecheck
 # Linting
 npm run lint
 ```
+
+Tests use Vitest + Testing Library + MSW. See `client/desktop/tests/README.md` for full details on test infrastructure and patterns.
 
 ## Debugging
 
