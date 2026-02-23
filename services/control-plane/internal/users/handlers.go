@@ -79,6 +79,53 @@ func (h *Handler) GetMe(c *gin.Context) {
 	})
 }
 
+// GetPublicProfile returns another user's public profile (no email or private fields)
+func (h *Handler) GetPublicProfile(c *gin.Context) {
+	// Ensure the requester is authenticated
+	_, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	targetUserID := c.Param("user_id")
+
+	var user models.User
+	err := h.db.QueryRow(
+		`SELECT id, email, username, display_name, bio, avatar_url, COALESCE(links, '[]'::jsonb),
+		        email_verified, age_verified, e2ee_preference, created_at, updated_at
+		 FROM users WHERE id = $1`,
+		targetUserID,
+	).Scan(
+		&user.ID,
+		&user.Email,
+		&user.Username,
+		&user.DisplayName,
+		&user.Bio,
+		&user.AvatarURL,
+		&user.Links,
+		&user.EmailVerified,
+		&user.AgeVerified,
+		&user.E2EEPreference,
+		&user.CreatedAt,
+		&user.UpdatedAt,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+			return
+		}
+		h.log.Error("Failed to fetch user profile", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user profile"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"user": user.ProfileForOthers(),
+	})
+}
+
 // GetMyKeys returns the current user's E2EE keys (for key re-wrapping during password change)
 func (h *Handler) GetMyKeys(c *gin.Context) {
 	userID, exists := c.Get("user_id")

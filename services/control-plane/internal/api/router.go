@@ -135,6 +135,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					usersHandler.GetPublicKey,
 				)
 
+				// Get user's public profile (for viewing other users)
+				userRoutes.GET("/:user_id/profile",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					usersHandler.GetPublicProfile,
+				)
+
 				// Encrypted user preferences (cross-device sync)
 				userRoutes.GET("/me/preferences",
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),

@@ -47,6 +47,29 @@ func (u *User) PublicUser() map[string]interface{} {
 	return result
 }
 
+// ProfileForOthers returns user data safe for viewing by other users (no email or private fields)
+func (u *User) ProfileForOthers() map[string]interface{} {
+	result := map[string]interface{}{
+		"id":         u.ID,
+		"username":   u.Username,
+		"created_at": u.CreatedAt,
+		"links":      json.RawMessage("[]"),
+	}
+	if u.DisplayName != nil {
+		result["display_name"] = *u.DisplayName
+	}
+	if u.Bio != nil {
+		result["bio"] = *u.Bio
+	}
+	if u.AvatarURL != nil {
+		result["avatar_url"] = *u.AvatarURL
+	}
+	if len(u.Links) > 0 {
+		result["links"] = u.Links
+	}
+	return result
+}
+
 // UserKeys represents E2EE keys for a user
 type UserKeys struct {
 	UserID            string    `json:"user_id" db:"user_id"`
