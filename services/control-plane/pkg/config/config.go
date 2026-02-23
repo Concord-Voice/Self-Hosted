@@ -4,6 +4,7 @@ package config
 import (
 	"log"
 	"os"
+	"strings"
 
 	"github.com/joho/godotenv"
 )
@@ -38,12 +39,12 @@ func Load() (*Config, error) {
 		Environment:           getEnv("ENVIRONMENT", "development"),
 		Port:                  getEnv("PORT", "8080"),
 		DatabaseURL:           getEnv("DATABASE_URL", "postgres://concord:concord_dev_password@localhost:5432/concord?sslmode=disable"),
-		RedisURL:              getEnv("REDIS_URL", "redis://localhost:6379"),
+		RedisURL:              getEnv("REDIS_URL", "redis://:concord_dev_redis@localhost:6379"),
 		JWTSecret:             getEnv("JWT_SECRET", devJWTSecret),
 		NATSUrl:               getEnv("NATS_URL", "nats://localhost:4222"),
 		MediaPlaneURL:         getEnv("MEDIA_PLANE_URL", "http://localhost:3000"),
 		LicensingAuthorityURL: getEnv("LICENSING_AUTHORITY_URL", "http://localhost:8082"),
-		AllowedOrigins:        []string{"http://localhost:3001", "http://localhost:3002"},
+		AllowedOrigins:        parseOrigins(getEnv("ALLOWED_ORIGINS", "http://localhost:3001,http://localhost:3002")),
 	}
 
 	cfg.validate()
@@ -58,6 +59,18 @@ func (c *Config) validate() {
 		log.Fatal("FATAL: JWT_SECRET must be set to a secure value in production. " +
 			"The default dev secret is not allowed.")
 	}
+}
+
+// parseOrigins splits a comma-separated list of origins into a slice.
+func parseOrigins(raw string) []string {
+	parts := strings.Split(raw, ",")
+	origins := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if trimmed := strings.TrimSpace(p); trimmed != "" {
+			origins = append(origins, trimmed)
+		}
+	}
+	return origins
 }
 
 func getEnv(key, defaultValue string) string {

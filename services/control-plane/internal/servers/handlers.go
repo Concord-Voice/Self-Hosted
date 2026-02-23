@@ -111,7 +111,7 @@ func (h *Handler) CreateServer(c *gin.Context) {
 
 	var req CreateServerRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
 
@@ -274,7 +274,7 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 
 	var req UpdateServerRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
 
@@ -371,15 +371,17 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 
 	h.log.Info("Server updated", "server_id", serverID, "user_id", userID)
 
-	// Broadcast update to all connected clients so other members see changes in real time
-	h.hub.BroadcastToAll(websocket.OutgoingMessage{
-		Type: "server_updated",
-		Data: map[string]interface{}{
-			"server_id": serverID,
-			"name":      server.Name,
-			"icon_url":  server.IconURL,
-		},
-	})
+	// Broadcast update to server subscribers so members see changes in real time
+	if serverUUID, err := uuid.Parse(serverID); err == nil {
+		h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+			Type: "server_updated",
+			Data: map[string]interface{}{
+				"server_id": serverID,
+				"name":      server.Name,
+				"icon_url":  server.IconURL,
+			},
+		})
+	}
 
 	c.JSON(http.StatusOK, gin.H{
 		"server": server,
@@ -431,13 +433,15 @@ func (h *Handler) DeleteServer(c *gin.Context) {
 
 	h.log.Info("Server deleted", "server_id", serverID, "user_id", userID)
 
-	// Broadcast deletion to all connected clients so frontends can clean up
-	h.hub.BroadcastToAll(websocket.OutgoingMessage{
-		Type: "server_deleted",
-		Data: map[string]interface{}{
-			"server_id": serverID,
-		},
-	})
+	// Broadcast deletion to server subscribers so frontends can clean up
+	if serverUUID, err := uuid.Parse(serverID); err == nil {
+		h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+			Type: "server_deleted",
+			Data: map[string]interface{}{
+				"server_id": serverID,
+			},
+		})
+	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Server deleted successfully"})
 }

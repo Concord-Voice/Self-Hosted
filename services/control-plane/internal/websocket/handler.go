@@ -150,6 +150,15 @@ func (h *Handler) authenticateWebSocket(c *gin.Context) (uuid.UUID, error) {
 	}
 
 	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
+		// Check token blacklist (matches AuthRequired middleware behavior)
+		if jti, ok := claims["jti"].(string); ok && jti != "" {
+			ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+			defer cancel()
+			if exists, _ := h.redis.Exists(ctx, fmt.Sprintf("blacklist:%s", jti)).Result(); exists > 0 {
+				return uuid.Nil, fmt.Errorf("token has been revoked")
+			}
+		}
+
 		userIDStr, ok := claims["user_id"].(string)
 		if !ok {
 			return uuid.Nil, jwt.ErrTokenInvalidClaims

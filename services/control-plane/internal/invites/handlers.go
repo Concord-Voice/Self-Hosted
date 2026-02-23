@@ -368,17 +368,19 @@ func (h *Handler) JoinServer(c *gin.Context) {
 		"SELECT username, display_name, avatar_url FROM users WHERE id = $1", userID,
 	).Scan(&username, &displayName, &avatarURL)
 
-	h.hub.BroadcastToAll(websocket.OutgoingMessage{
-		Type: "member_joined",
-		Data: map[string]interface{}{
-			"server_id":    invite.ServerID,
-			"user_id":      userID,
-			"username":     username,
-			"display_name": displayName,
-			"avatar_url":   avatarURL,
-			"role":         "member",
-		},
-	})
+	if serverUUID, parseErr := uuid.Parse(invite.ServerID); parseErr == nil {
+		h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+			Type: "member_joined",
+			Data: map[string]interface{}{
+				"server_id":    invite.ServerID,
+				"user_id":      userID,
+				"username":     username,
+				"display_name": displayName,
+				"avatar_url":   avatarURL,
+				"role":         "member",
+			},
+		})
+	}
 
 	// Create pending key requests for all E2EE channels in the server.
 	// This enables existing members with the channel key to distribute it to the new member.
@@ -402,16 +404,18 @@ func (h *Handler) JoinServer(c *gin.Context) {
 		}
 		_ = rows.Close()
 
-		// Broadcast key_needed to all online members so they can auto-distribute
+		// Broadcast key_needed to server subscribers so they can auto-distribute
 		if len(pendingChannels) > 0 {
-			h.hub.BroadcastToAll(websocket.OutgoingMessage{
-				Type: "key_needed",
-				Data: map[string]interface{}{
-					"server_id":   invite.ServerID,
-					"user_id":     userID,
-					"channel_ids": pendingChannels,
-				},
-			})
+			if serverUUID, parseErr := uuid.Parse(invite.ServerID); parseErr == nil {
+				h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+					Type: "key_needed",
+					Data: map[string]interface{}{
+						"server_id":   invite.ServerID,
+						"user_id":     userID,
+						"channel_ids": pendingChannels,
+					},
+				})
+			}
 			h.log.Info("Pending key requests created",
 				"user_id", userID, "server_id", invite.ServerID,
 				"channels", len(pendingChannels))

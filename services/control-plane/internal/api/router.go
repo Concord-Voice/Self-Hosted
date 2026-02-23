@@ -22,14 +22,14 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// NewRouter creates a new API router
-func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.Logger) *gin.Engine {
+// NewRouter creates a new API router and returns the WebSocket hub for lifecycle management.
+func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.Logger) (*gin.Engine, *websocket.Hub) {
 	router := gin.New()
 
 	// Middleware
 	router.Use(gin.Recovery())
 	router.Use(middleware.Logger(log))
-	router.Use(middleware.SecurityHeaders())
+	router.Use(middleware.SecurityHeaders(cfg.Environment))
 	router.Use(middleware.CORS(cfg.AllowedOrigins))
 
 	// Health check
@@ -374,5 +374,5 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 		v1.GET("/ws", wsHandler.HandleWebSocket)
 	}
 
-	return router
+	return router, hub
 }

@@ -31,7 +31,7 @@ func truncateUserAgent(ua string) string {
 
 // setRefreshCookie sets a refresh_token cookie with secure defaults.
 func setRefreshCookie(c *gin.Context, value string, maxAge int) {
-	secure := c.Request.TLS != nil
+	secure := c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https"
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie("refresh_token", value, maxAge, "/", "", secure, true)
 }
@@ -77,7 +77,7 @@ type LoginRequest struct {
 func (h *Handler) Register(c *gin.Context) {
 	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
 
@@ -139,8 +139,9 @@ func (h *Handler) Register(c *gin.Context) {
 		}
 	}()
 
-	// Normalize username (store lowercase)
+	// Normalize username and email (store lowercase)
 	normalizedUsername := NormalizeUsername(req.Username)
+	normalizedEmail := strings.ToLower(strings.TrimSpace(req.Email))
 
 	// Create user
 	userID := uuid.New().String()
@@ -148,7 +149,7 @@ func (h *Handler) Register(c *gin.Context) {
 		`INSERT INTO users (id, email, username, password_hash, age_verified, e2ee_preference)
 		 VALUES ($1, $2, $3, $4, $5, $6)`,
 		userID,
-		req.Email,
+		normalizedEmail,
 		normalizedUsername,
 		passwordHash,
 		true, // Age verified via confirmation
@@ -248,7 +249,7 @@ func (h *Handler) Register(c *gin.Context) {
 	// Set refresh token as httpOnly cookie
 	setRefreshCookie(c, refreshToken, 30*24*60*60)
 
-	h.log.Info("User registered", "user_id", userID, "email", req.Email, "username", req.Username)
+	h.log.Info("User registered", "user_id", userID, "username", normalizedUsername)
 
 	// Return access token and user data (same format as login)
 	c.JSON(http.StatusCreated, gin.H{
@@ -257,7 +258,7 @@ func (h *Handler) Register(c *gin.Context) {
 		"remember_me":  true,
 		"user": gin.H{
 			"id":              userID,
-			"username":        req.Username,
+			"username":        normalizedUsername,
 			"e2ee_preference": req.E2EEPreference,
 		},
 	})
@@ -316,7 +317,7 @@ func (h *Handler) clearLoginAttempts(ctx context.Context, email string) {
 func (h *Handler) Login(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
 
@@ -462,7 +463,7 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
-	h.log.Info("User logged in", "user_id", user.ID, "email", user.Email)
+	h.log.Info("User logged in", "user_id", user.ID)
 
 	// Return access token and user data
 	c.JSON(http.StatusOK, gin.H{

@@ -48,6 +48,15 @@ type UserBroadcastMessage struct {
 	ExcludeClientID *uuid.UUID
 }
 
+// ServerBroadcastMessage represents a message to be sent to all clients subscribed to a server
+type ServerBroadcastMessage struct {
+	// Target server ID
+	ServerID uuid.UUID
+
+	// Message to send
+	Data OutgoingMessage
+}
+
 // PresenceUpdate represents a user presence change
 type PresenceUpdate struct {
 	UserID    uuid.UUID `json:"user_id"`

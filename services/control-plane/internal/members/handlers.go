@@ -166,7 +166,7 @@ func (h *Handler) AddMember(c *gin.Context) {
 
 	var req AddMemberRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
 
@@ -255,7 +255,7 @@ func (h *Handler) UpdateMember(c *gin.Context) {
 
 	var req UpdateMemberRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
 
@@ -464,14 +464,16 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 
 	h.log.Info("Member "+action, "server_id", serverID, "target_user", targetUserID, "by_user", userID)
 
-	// Broadcast to all connected clients
-	h.hub.BroadcastToAll(websocket.OutgoingMessage{
-		Type: "member_removed",
-		Data: map[string]interface{}{
-			"server_id": serverID,
-			"user_id":   targetUserID,
-		},
-	})
+	// Broadcast to server subscribers
+	if serverUUID, err := uuid.Parse(serverID); err == nil {
+		h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+			Type: "member_removed",
+			Data: map[string]interface{}{
+				"server_id": serverID,
+				"user_id":   targetUserID,
+			},
+		})
+	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Member " + action + " successfully"})
 }

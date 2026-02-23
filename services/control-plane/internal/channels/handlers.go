@@ -129,7 +129,7 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 
 	var req CreateChannelRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
 
@@ -299,7 +299,7 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 
 	var req UpdateChannelRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
 
@@ -361,19 +361,21 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 
 	h.log.Info("Channel updated", "channel_id", channelID, "user_id", userID)
 
-	// Broadcast channel update to all connected clients so other users see the change
+	// Broadcast channel update to server subscribers so other members see the change
 	if h.hub != nil {
-		h.hub.BroadcastToAll(websocket.OutgoingMessage{
-			Type: "channel_updated",
-			Data: map[string]interface{}{
-				"channel_id":   channelID,
-				"server_id":    channel.ServerID,
-				"name":         channel.Name,
-				"type":         channel.Type,
-				"emoji":        channel.Emoji,
-				"is_encrypted": channel.IsEncrypted,
-			},
-		})
+		if serverUUID, err := uuid.Parse(channel.ServerID); err == nil {
+			h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+				Type: "channel_updated",
+				Data: map[string]interface{}{
+					"channel_id":   channelID,
+					"server_id":    channel.ServerID,
+					"name":         channel.Name,
+					"type":         channel.Type,
+					"emoji":        channel.Emoji,
+					"is_encrypted": channel.IsEncrypted,
+				},
+			})
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"channel": channel})
@@ -426,15 +428,17 @@ func (h *Handler) DeleteChannel(c *gin.Context) {
 
 	h.log.Info("Channel deleted", "channel_id", channelID, "user_id", userID)
 
-	// Broadcast deletion to all connected clients so frontends can clean up
+	// Broadcast deletion to server subscribers so frontends can clean up
 	if h.hub != nil {
-		h.hub.BroadcastToAll(websocket.OutgoingMessage{
-			Type: "channel_deleted",
-			Data: map[string]interface{}{
-				"channel_id": channelID,
-				"server_id":  serverID,
-			},
-		})
+		if serverUUID, err := uuid.Parse(serverID); err == nil {
+			h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+				Type: "channel_deleted",
+				Data: map[string]interface{}{
+					"channel_id": channelID,
+					"server_id":  serverID,
+				},
+			})
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Channel deleted successfully"})
@@ -722,7 +726,7 @@ func (h *Handler) DistributeChannelKeys(c *gin.Context) {
 
 	var req DistributeChannelKeysRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
 
@@ -767,17 +771,6 @@ func (h *Handler) DistributeChannelKeys(c *gin.Context) {
 			continue
 		}
 
-		// First-response-wins: check if key already exists
-		var exists bool
-		_ = h.db.QueryRow(
-			`SELECT EXISTS(SELECT 1 FROM channel_keys WHERE channel_id = $1 AND user_id = $2)`,
-			channelID, memberUserID,
-		).Scan(&exists)
-		if exists {
-			duplicates++
-			continue
-		}
-
 		// Get the latest key version for this channel
 		var keyVersion int
 		_ = h.db.QueryRow(
@@ -785,7 +778,8 @@ func (h *Handler) DistributeChannelKeys(c *gin.Context) {
 			channelID,
 		).Scan(&keyVersion)
 
-		_, err := h.db.Exec(
+		// First-response-wins via ON CONFLICT DO NOTHING — no TOCTOU race
+		result, err := h.db.Exec(
 			`INSERT INTO channel_keys (channel_id, user_id, wrapped_key, key_version)
 			 VALUES ($1, $2, $3, $4)
 			 ON CONFLICT (channel_id, user_id, key_version) DO NOTHING`,
@@ -793,6 +787,11 @@ func (h *Handler) DistributeChannelKeys(c *gin.Context) {
 		)
 		if err != nil {
 			h.log.Error("Failed to store key for member", "error", err, "user_id", memberUserID)
+			continue
+		}
+		rowsAffected, _ := result.RowsAffected()
+		if rowsAffected == 0 {
+			duplicates++
 			continue
 		}
 
@@ -804,13 +803,15 @@ func (h *Handler) DistributeChannelKeys(c *gin.Context) {
 
 		// Notify the recipient that their key is ready
 		if h.hub != nil {
-			h.hub.BroadcastToAll(websocket.OutgoingMessage{
-				Type: "key_delivered",
-				Data: map[string]interface{}{
-					"channel_id": channelID,
-					"user_id":    memberUserID,
-				},
-			})
+			if recipientUUID, parseErr := uuid.Parse(memberUserID); parseErr == nil {
+				h.hub.BroadcastToUser(recipientUUID, websocket.OutgoingMessage{
+					Type: "key_delivered",
+					Data: map[string]interface{}{
+						"channel_id": channelID,
+						"user_id":    memberUserID,
+					},
+				})
+			}
 		}
 
 		distributed++

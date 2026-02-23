@@ -79,6 +79,12 @@ func (h *Handler) GetMessages(c *gin.Context) {
 	}
 
 	before := c.Query("before") // Message ID to get messages before (for pagination)
+	if before != "" {
+		if _, err := uuid.Parse(before); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid 'before' parameter"})
+			return
+		}
+	}
 
 	// Check if user is a member of the channel's server
 	var isMember bool
@@ -186,7 +192,7 @@ func (h *Handler) SendMessage(c *gin.Context) {
 
 	var req SendMessageRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
 
@@ -272,7 +278,7 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 
 	var req UpdateMessageRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
 

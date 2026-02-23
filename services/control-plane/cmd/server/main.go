@@ -61,7 +61,7 @@ func main() {
 	}
 
 	// Initialize router
-	router := api.NewRouter(db, redisClient, cfg, log)
+	router, hub := api.NewRouter(db, redisClient, cfg, log)
 
 	// Create HTTP server
 	srv := &http.Server{
@@ -91,6 +91,9 @@ func main() {
 	// Graceful shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+
+	// Shut down WebSocket hub (close all client connections)
+	hub.Shutdown()
 
 	if err := srv.Shutdown(ctx); err != nil {
 		log.Fatal("Server forced to shutdown", "error", err)

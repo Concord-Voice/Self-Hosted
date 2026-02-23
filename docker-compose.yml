@@ -1,11 +1,11 @@
 services:
   # PostgreSQL Database
   postgres:
-    image: postgres:15-alpine
+    image: postgres:16-alpine
     container_name: concord-postgres
     environment:
       POSTGRES_USER: concord
-      POSTGRES_PASSWORD: concord_dev_password
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-concord_dev_password}
       POSTGRES_DB: concord
     ports:
       - "5432:5432"
@@ -24,13 +24,13 @@ services:
   redis:
     image: redis:7-alpine
     container_name: concord-redis
-    command: redis-server --appendonly yes
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-concord_dev_redis}
     ports:
       - "6379:6379"
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-concord_dev_redis}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -59,7 +59,7 @@ services:
     container_name: concord-pgadmin
     environment:
       PGADMIN_DEFAULT_EMAIL: admin@concord.local
-      PGADMIN_DEFAULT_PASSWORD: admin
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
       PGADMIN_CONFIG_SERVER_MODE: 'False'
     ports:
       - "5050:80"
@@ -75,7 +75,7 @@ services:
     image: rediscommander/redis-commander:latest
     container_name: concord-redis-commander
     environment:
-      REDIS_HOSTS: local:redis:6379
+      REDIS_HOSTS: local:redis:6379:0:${REDIS_PASSWORD:-concord_dev_redis}
     ports:
       - "8081:8081"
     depends_on:
@@ -92,10 +92,10 @@ services:
       dockerfile: Dockerfile
     container_name: concord-control-plane
     environment:
-      DATABASE_URL: postgres://concord:concord_dev_password@postgres:5432/concord?sslmode=disable
-      REDIS_URL: redis://redis:6379
+      DATABASE_URL: postgres://concord:${POSTGRES_PASSWORD:-concord_dev_password}@postgres:5432/concord?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:-concord_dev_redis}@redis:6379
       NATS_URL: nats://nats:4222
-      JWT_SECRET: dev_jwt_secret_change_in_production
+      JWT_SECRET: ${JWT_SECRET:-dev_jwt_secret_change_in_production}
       PORT: 8080
     ports:
       - "8080:8080"
@@ -119,7 +119,7 @@ services:
     container_name: concord-media-plane
     environment:
       CONTROL_PLANE_URL: http://control-plane:8080
-      REDIS_URL: redis://redis:6379
+      REDIS_URL: redis://:${REDIS_PASSWORD:-concord_dev_redis}@redis:6379
       RTC_MIN_PORT: 40000
       RTC_MAX_PORT: 49999
       ANNOUNCED_IP: 127.0.0.1
@@ -142,7 +142,7 @@ services:
       dockerfile: Dockerfile
     container_name: concord-licensing-authority
     environment:
-      DATABASE_URL: postgres://concord:concord_dev_password@postgres:5432/concord?sslmode=disable
+      DATABASE_URL: postgres://concord:${POSTGRES_PASSWORD:-concord_dev_password}@postgres:5432/concord?sslmode=disable
       PRIVATE_KEY_PATH: /app/keys/license_private_key.pem
       PORT: 8082
     ports:

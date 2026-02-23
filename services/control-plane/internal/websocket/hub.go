@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,6 +20,9 @@ type Hub struct {
 
 	// Redis client for presence persistence
 	redis *redis.Client
+
+	// Mutex protecting maps accessed from outside the Run goroutine
+	mu sync.RWMutex
 
 	// Registered clients (client ID -> Client)
 	clients map[uuid.UUID]*Client
@@ -53,6 +57,12 @@ type Hub struct {
 
 	// User-scoped broadcast messages (sent to all clients of a specific user)
 	userBroadcast chan UserBroadcastMessage
+
+	// Server-scoped broadcast messages (sent to all clients subscribed to a server)
+	serverBroadcast chan ServerBroadcastMessage
+
+	// Shutdown signal
+	done chan struct{}
 }
 
 // NewHub creates a new Hub
@@ -71,6 +81,8 @@ func NewHub(db *sql.DB, redisClient *redis.Client) *Hub {
 		broadcast:            make(chan BroadcastMessage, 256),
 		globalBroadcast:      make(chan OutgoingMessage, 256),
 		userBroadcast:        make(chan UserBroadcastMessage, 256),
+		serverBroadcast:      make(chan ServerBroadcastMessage, 256),
+		done:                 make(chan struct{}),
 	}
 }
 
@@ -95,12 +107,29 @@ func (h *Hub) Run() {
 
 		case message := <-h.userBroadcast:
 			h.handleUserBroadcast(message)
+
+		case message := <-h.serverBroadcast:
+			h.handleServerBroadcast(message)
+
+		case <-h.done:
+			// Graceful shutdown: close all client connections
+			for _, client := range h.clients {
+				close(client.Send)
+			}
+			log.Printf("Hub shut down, closed %d client connections", len(h.clients))
+			return
 		}
 	}
 }
 
+// Shutdown gracefully stops the hub's Run loop and closes all client connections.
+func (h *Hub) Shutdown() {
+	close(h.done)
+}
+
 // handleRegister registers a new client
 func (h *Hub) handleRegister(client *Client) {
+	h.mu.Lock()
 	h.clients[client.ID] = client
 
 	// Track user's clients (multi-device support)
@@ -118,8 +147,11 @@ func (h *Hub) handleRegister(client *Client) {
 		}
 	}
 
+	isFirstConnection := len(h.userClients[client.UserID]) == 1
+	h.mu.Unlock()
+
 	// If this is the user's first connection, broadcast online presence and set Redis
-	if len(h.userClients[client.UserID]) == 1 {
+	if isFirstConnection {
 		ctx := context.Background()
 		h.redis.Set(ctx, fmt.Sprintf("presence:%s", client.UserID), "online", 120*time.Second)
 		h.broadcastPresenceToAll(client.UserID, "online", time.Now().Unix())
@@ -183,50 +215,62 @@ func (h *Hub) handleRegister(client *Client) {
 
 // handleUnregister unregisters a client
 func (h *Hub) handleUnregister(client *Client) {
-	if _, ok := h.clients[client.ID]; ok {
-		// Remove from clients map
-		delete(h.clients, client.ID)
+	h.mu.Lock()
+	_, exists := h.clients[client.ID]
+	if !exists {
+		h.mu.Unlock()
+		return
+	}
 
-		// Remove from user's clients
-		if userClients, ok := h.userClients[client.UserID]; ok {
-			delete(userClients, client.ID)
-			if len(userClients) == 0 {
-				delete(h.userClients, client.UserID)
-				// User's last client disconnected — update Redis and broadcast offline
-				now := time.Now().Unix()
-				ctx := context.Background()
-				h.redis.Del(ctx, fmt.Sprintf("presence:%s", client.UserID))
-				h.redis.Set(ctx, fmt.Sprintf("last_seen:%s", client.UserID), fmt.Sprintf("%d", now), 0)
-				h.broadcastPresenceToAll(client.UserID, "offline", now)
-				// Clean up username cache
-				delete(h.usernames, client.UserID)
-			}
+	// Remove from clients map
+	delete(h.clients, client.ID)
+
+	// Remove from user's clients
+	isLastConnection := false
+	if userClients, ok := h.userClients[client.UserID]; ok {
+		delete(userClients, client.ID)
+		if len(userClients) == 0 {
+			delete(h.userClients, client.UserID)
+			delete(h.usernames, client.UserID)
+			isLastConnection = true
 		}
+	}
 
-		// Remove from all channel subscriptions
-		for channelID := range client.Channels {
-			if clients, ok := h.channelSubscriptions[channelID]; ok {
-				delete(clients, client.ID)
-				if len(clients) == 0 {
-					delete(h.channelSubscriptions, channelID)
-				}
-			}
-		}
-
-		// Remove from all server subscriptions
-		for serverID, clients := range h.serverSubscriptions {
+	// Remove from all channel subscriptions
+	for channelID := range client.Channels {
+		if clients, ok := h.channelSubscriptions[channelID]; ok {
 			delete(clients, client.ID)
 			if len(clients) == 0 {
-				delete(h.serverSubscriptions, serverID)
+				delete(h.channelSubscriptions, channelID)
 			}
 		}
-
-		// Close send channel
-		close(client.Send)
-
-		log.Printf("Client unregistered: user=%s client=%s remaining=%d",
-			client.UserID, client.ID, len(h.clients))
 	}
+
+	// Remove from all server subscriptions
+	for serverID, clients := range h.serverSubscriptions {
+		delete(clients, client.ID)
+		if len(clients) == 0 {
+			delete(h.serverSubscriptions, serverID)
+		}
+	}
+
+	remaining := len(h.clients)
+	h.mu.Unlock()
+
+	// Close send channel
+	close(client.Send)
+
+	if isLastConnection {
+		// User's last client disconnected — update Redis and broadcast offline
+		now := time.Now().Unix()
+		ctx := context.Background()
+		h.redis.Del(ctx, fmt.Sprintf("presence:%s", client.UserID))
+		h.redis.Set(ctx, fmt.Sprintf("last_seen:%s", client.UserID), fmt.Sprintf("%d", now), 0)
+		h.broadcastPresenceToAll(client.UserID, "offline", now)
+	}
+
+	log.Printf("Client unregistered: user=%s client=%s remaining=%d",
+		client.UserID, client.ID, remaining)
 }
 
 // handleIncoming processes incoming messages from clients
@@ -749,17 +793,21 @@ func (h *Hub) BroadcastToChannel(channelID uuid.UUID, message OutgoingMessage) {
 	}
 }
 
-// GetConnectedUsers returns a map of user IDs currently connected
+// GetConnectedUsers returns a map of user IDs currently connected (thread-safe).
 func (h *Hub) GetConnectedUsers() map[uuid.UUID]bool {
-	users := make(map[uuid.UUID]bool)
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	users := make(map[uuid.UUID]bool, len(h.userClients))
 	for userID := range h.userClients {
 		users[userID] = true
 	}
 	return users
 }
 
-// GetUserClientCount returns the number of connected clients for a user
+// GetUserClientCount returns the number of connected clients for a user (thread-safe).
 func (h *Hub) GetUserClientCount(userID uuid.UUID) int {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
 	if clients, ok := h.userClients[userID]; ok {
 		return len(clients)
 	}
@@ -784,6 +832,39 @@ func (h *Hub) handleGlobalBroadcast(msg OutgoingMessage) {
 // BroadcastToAll sends a message to all connected clients (thread-safe).
 func (h *Hub) BroadcastToAll(msg OutgoingMessage) {
 	h.globalBroadcast <- msg
+}
+
+// handleServerBroadcast sends a message to all clients subscribed to a server.
+func (h *Hub) handleServerBroadcast(msg ServerBroadcastMessage) {
+	subscribers, ok := h.serverSubscriptions[msg.ServerID]
+	if !ok {
+		return
+	}
+
+	data, err := json.Marshal(msg.Data)
+	if err != nil {
+		log.Printf("Failed to marshal server broadcast: %v", err)
+		return
+	}
+
+	for clientID := range subscribers {
+		client, ok := h.clients[clientID]
+		if !ok {
+			continue
+		}
+		select {
+		case client.Send <- data:
+		default:
+		}
+	}
+}
+
+// BroadcastToServer sends a message to all clients subscribed to a server (thread-safe).
+func (h *Hub) BroadcastToServer(serverID uuid.UUID, msg OutgoingMessage) {
+	h.serverBroadcast <- ServerBroadcastMessage{
+		ServerID: serverID,
+		Data:     msg,
+	}
 }
 
 // handleUserBroadcast sends a message to all clients of a specific user.
@@ -993,7 +1074,7 @@ func (h *Hub) broadcastServerOnlineCounts(userID uuid.UUID) {
 				if val == nil {
 					// No key → just connected, treat as online
 					visibleOnline[connectedUIDs[i]] = true
-				} else if val.(string) != "invisible" {
+				} else if s, ok := val.(string); ok && s != "invisible" {
 					visibleOnline[connectedUIDs[i]] = true
 				}
 			}

@@ -17,14 +17,21 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main ./cmd/server
 
 # Final stage
-FROM alpine:latest
+FROM alpine:3.21
 
 RUN apk --no-cache add ca-certificates
 
-WORKDIR /root/
+# Run as non-root user
+RUN addgroup -S appuser && adduser -S appuser -G appuser
+WORKDIR /home/appuser
 
 # Copy the binary from builder
 COPY --from=builder /app/main .
+
+# Copy migrations
+COPY --from=builder /app/migrations ./migrations
+
+USER appuser
 
 # Expose port
 EXPOSE 8080
