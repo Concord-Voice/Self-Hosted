@@ -254,7 +254,7 @@ export const config = {
   controlPlaneUrl: process.env.CONTROL_PLANE_URL || 'http://localhost:8080',
 
   // JWT — shared secret for Socket.IO auth (must match control plane)
-  jwtSecret: process.env.JWT_SECRET || 'dev-secret-change-in-production',
+  jwtSecret: process.env.JWT_SECRET || 'dev_jwt_secret_change_in_production',
 
   // ICE servers — returned to clients via control plane /voice/join
   iceServers: [
