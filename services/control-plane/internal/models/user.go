@@ -14,6 +14,7 @@ type User struct {
 	DisplayName    *string         `json:"display_name,omitempty" db:"display_name"`
 	Bio            *string         `json:"bio,omitempty" db:"bio"`
 	AvatarURL      *string         `json:"avatar_url,omitempty" db:"avatar_url"`
+	HeaderImageURL *string         `json:"header_image_url,omitempty" db:"header_image_url"`
 	Links          json.RawMessage `json:"links" db:"links"`
 	EmailVerified  bool            `json:"email_verified" db:"email_verified"`
 	AgeVerified    bool            `json:"age_verified" db:"age_verified"`
@@ -41,6 +42,9 @@ func (u *User) PublicUser() map[string]interface{} {
 	if u.AvatarURL != nil {
 		result["avatar_url"] = *u.AvatarURL
 	}
+	if u.HeaderImageURL != nil {
+		result["header_image_url"] = *u.HeaderImageURL
+	}
 	if len(u.Links) > 0 {
 		result["links"] = u.Links
 	}
@@ -63,6 +67,9 @@ func (u *User) ProfileForOthers() map[string]interface{} {
 	}
 	if u.AvatarURL != nil {
 		result["avatar_url"] = *u.AvatarURL
+	}
+	if u.HeaderImageURL != nil {
+		result["header_image_url"] = *u.HeaderImageURL
 	}
 	if len(u.Links) > 0 {
 		result["links"] = u.Links
