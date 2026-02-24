@@ -80,14 +80,15 @@ const VIDEO_RTCP_FEEDBACK = [
 //   VP8        — Universal fallback, wide HW decode support
 //   VP9        — Default for video calls (SVC L3T3 capable), HDR via Profile 2
 //   H264       — Constrained Baseline (compat), Main (5.0), High (5.2 = 4K60)
-//   H265/HEVC  — Premium 4K30+ (macOS ~99%, Windows ~75% HW decode)
-//   AV1        — Best compression, SVC capable, ideal for screen sharing
+//   AV1        — Best compression, SVC capable, royalty-free, HDR via Main profile
 //
-// Strategy:
-//   Default video calls  → VP9 SVC L3T3 (3 spatial + 3 temporal layers)
-//   Fallback             → H264 simulcast (180p / 360p / full)
-//   Screen sharing       → AV1 SVC if HW-supported, else VP9 SVC
-//   Premium 4K60         → H264 High Level 5.2 or H265
+// Strategy (codec preference enforced client-side in voiceService.ts):
+//   Camera video     → VP9 SVC L3T3 (3 spatial + 3 temporal layers)
+//   Camera fallback  → H264 simulcast (180p / 360p / full) → VP8 simulcast
+//   Screen sharing   → AV1 SVC L3T3 (best compression for static content)
+//   Screen fallback  → VP9 SVC → H264
+//   Premium 4K60     → H264 High Level 5.2 (universal HW), AV1 SVC (better compression)
+//   HDR              → VP9 Profile 2 (10-bit), AV1 Main (10-bit capable)
 //
 // IGNIS insight: 4:2:0 subsampling is sufficient for most use cases. Only
 // text-heavy screenshare benefits from 4:4:4. Default to 4:2:0.
