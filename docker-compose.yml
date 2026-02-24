@@ -161,7 +161,7 @@ services:
     networks:
       - concord-network
     profiles:
-      - services
+      - licensing
 
 volumes:
   postgres-data:
