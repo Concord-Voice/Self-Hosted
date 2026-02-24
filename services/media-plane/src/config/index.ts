@@ -243,7 +243,8 @@ export const config = {
   port: parseInt(process.env.PORT || '3000', 10),
 
   // Redis — room state, cross-instance coordination
-  redisUrl: process.env.REDIS_URL || 'redis://localhost:6379',
+  // Default includes dev password to match docker-compose and control plane defaults
+  redisUrl: process.env.REDIS_URL || 'redis://:concord_dev_redis@localhost:6379',
 
   // NATS — inter-service messaging (control plane ↔ media plane)
   natsUrl: process.env.NATS_URL || 'nats://localhost:4222',
