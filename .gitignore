@@ -86,6 +86,9 @@ Cargo.lock
 *.sqlite
 *.sqlite3
 data/
+!client/desktop/src/renderer/data/
+!client/desktop/src/renderer/data/emoji/
+!client/desktop/src/renderer/data/emoji/**
 postgres-data/
 redis-data/
 
