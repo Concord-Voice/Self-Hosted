@@ -111,7 +111,17 @@ export class RoomManager {
   /** Get or create a room for the given channel ID */
   private async getOrCreateRoom(roomId: string): Promise<Room> {
     let room = this.rooms.get(roomId);
-    if (room) return room;
+    if (room) {
+      // Defensive: if the router was closed (e.g. race between leave and rejoin),
+      // discard the stale room and recreate it below.
+      if (room.router.closed) {
+        logger.warn('Room has closed router, discarding stale room', { roomId });
+        this.rooms.delete(roomId);
+        room = undefined;
+      } else {
+        return room;
+      }
+    }
 
     const router = await this.mediasoup.getOrCreateRouter(roomId);
 
@@ -155,6 +165,16 @@ export class RoomManager {
           }
         }
       });
+
+      // Clear active speaker when everyone stops talking
+      audioLevelObserver.on('silence', () => {
+        this.emitEvent({
+          type: 'active-speaker',
+          roomId,
+          userId: '',
+          volume: -Infinity,
+        });
+      });
     }
 
     this.rooms.set(roomId, room);
@@ -180,6 +200,9 @@ export class RoomManager {
 
     this.rooms.delete(roomId);
 
+    // Remove the stale router from the mediasoup cache so rejoin creates a fresh one
+    this.mediasoup.removeRouter(roomId);
+
     logger.info('Room closed', { roomId });
     this.emitEvent({ type: 'room-empty', roomId });
   }
@@ -200,7 +223,7 @@ export class RoomManager {
     existingProducers: ProducerInfo[];
     participants: Array<{ userId: string; username: string; displayName?: string; avatarUrl?: string }>;
   }> {
-    const room = await this.getOrCreateRoom(roomId);
+    let room = await this.getOrCreateRoom(roomId);
 
     // Check if user is already in this room (reconnect scenario)
     const existing = room.participants.get(userId);
@@ -212,6 +235,8 @@ export class RoomManager {
         newSocketId: socketId,
       });
       await this.leaveRoom(roomId, userId);
+      // Room may have been closed if user was the only participant — re-create
+      room = await this.getOrCreateRoom(roomId);
     }
 
     const participant: Participant = {
@@ -641,6 +666,14 @@ export class RoomManager {
   }
 
   /** Get a participant by userId in a specific room */
+  /** Update a participant's RTP capabilities (after device.load on client) */
+  updateRtpCapabilities(roomId: string, userId: string, rtpCapabilities: RtpCapabilities): void {
+    const participant = this.rooms.get(roomId)?.participants.get(userId);
+    if (participant) {
+      participant.rtpCapabilities = rtpCapabilities;
+    }
+  }
+
   getParticipant(roomId: string, userId: string): Participant | undefined {
     return this.rooms.get(roomId)?.participants.get(userId);
   }

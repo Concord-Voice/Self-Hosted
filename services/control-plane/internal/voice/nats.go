@@ -165,5 +165,27 @@ func (s *NATSSubscriber) handleRoomEmpty(data []byte) {
 		s.log.Error("Failed to clear voice participants", "error", err, "channel_id", event.ChannelID)
 	}
 
+	// Broadcast room_empty so clients clear any stale voice members for this channel.
+	// This is a safety net: handleLeft should have already broadcast individual "left"
+	// events, but NATS message ordering isn't guaranteed across subjects.
+	var serverID string
+	if err := s.db.QueryRow("SELECT server_id FROM channels WHERE id = $1", event.ChannelID).Scan(&serverID); err != nil {
+		s.log.Error("Failed to look up server for channel (room_empty)", "error", err, "channel_id", event.ChannelID)
+		return
+	}
+
+	serverUUID, err := uuid.Parse(serverID)
+	if err != nil {
+		return
+	}
+
+	s.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+		Type: "voice_state_update",
+		Data: map[string]interface{}{
+			"channel_id": event.ChannelID,
+			"action":     "room_empty",
+		},
+	})
+
 	s.log.Info("Voice room empty", "channel_id", event.ChannelID)
 }

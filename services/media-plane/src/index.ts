@@ -161,6 +161,24 @@ async function main() {
       }
     });
 
+    // ── update-rtp-capabilities ─────────────────────────────────────
+    // Client sends this after device.load() to provide its actual RTP capabilities
+    socket.on('update-rtp-capabilities', ({ rtpCapabilities }, callback?) => {
+      try {
+        const roomId = data.roomId;
+        if (!roomId) {
+          if (callback) return callback({ error: 'Not in a room' });
+          return;
+        }
+
+        roomManager.updateRtpCapabilities(roomId, data.userId, rtpCapabilities);
+        if (callback) callback({ success: true });
+      } catch (error) {
+        logger.error('Error updating RTP capabilities', { error, userId: data.userId });
+        if (callback) callback({ error: 'Failed to update RTP capabilities' });
+      }
+    });
+
     // ── create-transport ─────────────────────────────────────────────
     socket.on('create-transport', async ({ direction }, callback) => {
       try {
@@ -387,6 +405,24 @@ async function main() {
 
     if (!roomId || !userId) return;
 
+    // Guard: only clean up if this socket still owns the participant.
+    // Race condition: a newer socket may have already re-joined the room
+    // (e.g. old socket disconnect fires AFTER new socket's join-room).
+    // Without this check, the old socket's cleanup would remove the
+    // participant that the new socket just added.
+    const participant = roomManager.getParticipant(roomId, userId);
+    if (participant && participant.socketId !== socket.id) {
+      logger.info('Skipping cleanup — participant reconnected on a newer socket', {
+        roomId,
+        userId,
+        oldSocketId: socket.id,
+        newSocketId: participant.socketId,
+      });
+      socketData.roomId = undefined;
+      socket.leave(roomId);
+      return;
+    }
+
     // Notify others before cleanup
     socket.to(roomId).emit('user-left', { userId });
 
@@ -401,8 +437,9 @@ async function main() {
   // Wire up active speaker events to broadcast to room
   roomManager.onEvent((event) => {
     if (event.type === 'active-speaker') {
+      // Empty userId signals silence (no one is speaking)
       io.to(event.roomId).emit('active-speaker', {
-        userId: event.userId,
+        userId: event.userId || null,
         volume: event.volume,
       });
     }

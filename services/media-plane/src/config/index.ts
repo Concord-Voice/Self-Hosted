@@ -308,11 +308,9 @@ export const config = {
     },
   },
 
-  // CORS — allowed origins for Socket.IO
-  allowedOrigins: [
-    'http://localhost:3001',
-    'http://localhost:3002',
-  ],
+  // CORS — allowed origins for Socket.IO (env-configurable for LAN/staging)
+  allowedOrigins: (process.env.ALLOWED_ORIGINS || 'http://localhost:3001,http://localhost:3002')
+    .split(',').map((s: string) => s.trim()).filter(Boolean),
 
   // Active speaker detection
   audioLevelObserver: {
