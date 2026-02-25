@@ -238,17 +238,21 @@ async function main() {
         );
 
         // Notify other users in the room about the new producer
+        // Screen shares require opt-in (Tune In model) — not auto-consumed
         socket.to(roomId).emit('new-producer', {
           producerId: producerInfo.producerId,
           userId: data.userId,
           kind: producerInfo.kind,
           source: producerInfo.source,
+          requiresOptIn: producerInfo.source === 'screen',
         });
 
         callback({ id: producerInfo.producerId });
       } catch (error) {
-        logger.error('Error producing', { error, userId: data.userId });
-        callback({ error: 'Failed to produce' });
+        const message = error instanceof Error ? error.message : 'Failed to produce';
+        logger.error('Error producing', { error: message, userId: data.userId });
+        // Surface limit errors to client (e.g. "Video participant limit reached (max 25)")
+        callback({ error: message });
       }
     });
 

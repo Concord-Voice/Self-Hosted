@@ -466,6 +466,31 @@ export class RoomManager {
       throw new Error('Send transport not found or mismatch');
     }
 
+    // Enforce stream limits
+    if (source === 'camera') {
+      let cameraCount = 0;
+      for (const [, p] of room.participants) {
+        for (const [, info] of p.producers) {
+          if (info.source === 'camera') cameraCount++;
+        }
+      }
+      if (cameraCount >= 25) {
+        throw new Error('Video participant limit reached (max 25)');
+      }
+    }
+
+    if (source === 'screen') {
+      let screenCount = 0;
+      for (const [, p] of room.participants) {
+        for (const [, info] of p.producers) {
+          if (info.source === 'screen') screenCount++;
+        }
+      }
+      if (screenCount >= 5) {
+        throw new Error('Screen share limit reached (max 5)');
+      }
+    }
+
     const producer = await participant.sendTransport.produce({
       kind,
       rtpParameters,
