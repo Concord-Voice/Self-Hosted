@@ -32,16 +32,17 @@ type ServerWithRole struct {
 
 // Channel represents a voice or text channel within a server
 type Channel struct {
-	ID          string    `json:"id" db:"id"`
-	ServerID    string    `json:"server_id" db:"server_id"`
-	Name        string    `json:"name" db:"name"`
-	Description *string   `json:"description,omitempty" db:"description"`
-	Type        string    `json:"type" db:"type"` // voice, text, bulletin
-	Emoji       *string   `json:"emoji,omitempty" db:"emoji"` // Optional custom emoji
-	IsEncrypted bool      `json:"is_encrypted" db:"is_encrypted"`
-	Position    int       `json:"position" db:"position"`
-	CreatedAt   time.Time `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
+	ID               string    `json:"id" db:"id"`
+	ServerID         string    `json:"server_id" db:"server_id"`
+	Name             string    `json:"name" db:"name"`
+	Description      *string   `json:"description,omitempty" db:"description"`
+	Type             string    `json:"type" db:"type"` // voice, text, bulletin
+	Emoji            *string   `json:"emoji,omitempty" db:"emoji"` // Optional custom emoji
+	IsEncrypted      bool      `json:"is_encrypted" db:"is_encrypted"`
+	AudioQualityTier *string   `json:"audio_quality_tier,omitempty" db:"audio_quality_tier"` // voice/standard/high/hifi/studio or nil (personal)
+	Position         int       `json:"position" db:"position"`
+	CreatedAt        time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt        time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // ChannelKey represents a channel symmetric key wrapped for a specific user

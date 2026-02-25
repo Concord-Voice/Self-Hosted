@@ -40,9 +40,15 @@ type CreateChannelRequest struct {
 
 // UpdateChannelRequest represents a request to update a channel
 type UpdateChannelRequest struct {
-	Name  string  `json:"name" binding:"required,min=3,max=100"`
-	Type  string  `json:"type" binding:"required,oneof=text voice bulletin"`
-	Emoji *string `json:"emoji,omitempty"`
+	Name             string  `json:"name" binding:"required,min=3,max=100"`
+	Type             string  `json:"type" binding:"required,oneof=text voice bulletin"`
+	Emoji            *string `json:"emoji,omitempty"`
+	AudioQualityTier *string `json:"audio_quality_tier,omitempty"`
+}
+
+// Valid audio quality tier values
+var validAudioQualityTiers = map[string]bool{
+	"voice": true, "standard": true, "high": true, "hifi": true, "studio": true,
 }
 
 // ListChannels returns all channels in a server
@@ -79,7 +85,7 @@ func (h *Handler) ListChannels(c *gin.Context) {
 
 	// Get all channels in the server
 	query := `
-		SELECT id, server_id, name, type, description, emoji, is_encrypted, position, created_at, updated_at
+		SELECT id, server_id, name, type, description, emoji, is_encrypted, audio_quality_tier, position, created_at, updated_at
 		FROM channels
 		WHERE server_id = $1
 		ORDER BY position ASC, created_at ASC
@@ -104,6 +110,7 @@ func (h *Handler) ListChannels(c *gin.Context) {
 			&channel.Description,
 			&channel.Emoji,
 			&channel.IsEncrypted,
+			&channel.AudioQualityTier,
 			&channel.Position,
 			&channel.CreatedAt,
 			&channel.UpdatedAt,
@@ -276,7 +283,7 @@ func (h *Handler) GetChannel(c *gin.Context) {
 
 	// Get channel and check if user is a member of the server
 	query := `
-		SELECT c.id, c.server_id, c.name, c.type, c.description, c.emoji, c.is_encrypted, c.position, c.created_at, c.updated_at
+		SELECT c.id, c.server_id, c.name, c.type, c.description, c.emoji, c.is_encrypted, c.audio_quality_tier, c.position, c.created_at, c.updated_at
 		FROM channels c
 		INNER JOIN server_members sm ON c.server_id = sm.server_id
 		WHERE c.id = $1 AND sm.user_id = $2
@@ -291,6 +298,7 @@ func (h *Handler) GetChannel(c *gin.Context) {
 		&channel.Description,
 		&channel.Emoji,
 		&channel.IsEncrypted,
+		&channel.AudioQualityTier,
 		&channel.Position,
 		&channel.CreatedAt,
 		&channel.UpdatedAt,
@@ -350,12 +358,20 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 		return
 	}
 
+	// Validate audio quality tier if provided
+	if req.AudioQualityTier != nil && *req.AudioQualityTier != "" {
+		if !validAudioQualityTiers[*req.AudioQualityTier] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid audio quality tier"})
+			return
+		}
+	}
+
 	// Update channel (is_encrypted is immutable — cannot be changed after creation)
 	updateQuery := `
 		UPDATE channels
-		SET name = $1, type = $2, emoji = $3, updated_at = NOW()
-		WHERE id = $4
-		RETURNING server_id, emoji, is_encrypted, position, created_at, updated_at
+		SET name = $1, type = $2, emoji = $3, audio_quality_tier = $4, updated_at = NOW()
+		WHERE id = $5
+		RETURNING server_id, emoji, is_encrypted, audio_quality_tier, position, created_at, updated_at
 	`
 
 	var channel models.Channel
@@ -363,10 +379,11 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 	channel.Name = req.Name
 	channel.Type = req.Type
 
-	err = h.db.QueryRow(updateQuery, req.Name, req.Type, req.Emoji, channelID).Scan(
+	err = h.db.QueryRow(updateQuery, req.Name, req.Type, req.Emoji, req.AudioQualityTier, channelID).Scan(
 		&channel.ServerID,
 		&channel.Emoji,
 		&channel.IsEncrypted,
+		&channel.AudioQualityTier,
 		&channel.Position,
 		&channel.CreatedAt,
 		&channel.UpdatedAt,
@@ -389,12 +406,13 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 			h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
 				Type: "channel_updated",
 				Data: map[string]interface{}{
-					"channel_id":   channelID,
-					"server_id":    channel.ServerID,
-					"name":         channel.Name,
-					"type":         channel.Type,
-					"emoji":        channel.Emoji,
-					"is_encrypted": channel.IsEncrypted,
+					"channel_id":         channelID,
+					"server_id":          channel.ServerID,
+					"name":               channel.Name,
+					"type":               channel.Type,
+					"emoji":              channel.Emoji,
+					"is_encrypted":       channel.IsEncrypted,
+					"audio_quality_tier": channel.AudioQualityTier,
 				},
 			})
 		}
