@@ -251,11 +251,15 @@ func (h *Handler) Register(c *gin.Context) {
 
 	h.log.Info("User registered", "user_id", userID, "username", normalizedUsername)
 
-	// Return access token and user data (same format as login)
+	// Return access token, refresh token, and user data (same format as login).
+	// The refresh token is returned in both a cookie and the body so that
+	// Electron/native clients (file:// origin) can store it explicitly —
+	// SameSite=Lax cookies are not sent on cross-site POST requests.
 	c.JSON(http.StatusCreated, gin.H{
-		"access_token": accessToken,
-		"expires_in":   900, // 15 minutes
-		"remember_me":  true,
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+		"expires_in":    900, // 15 minutes
+		"remember_me":   true,
 		"user": gin.H{
 			"id":              userID,
 			"username":        normalizedUsername,
@@ -465,12 +469,16 @@ func (h *Handler) Login(c *gin.Context) {
 
 	h.log.Info("User logged in", "user_id", user.ID)
 
-	// Return access token and user data
+	// Return access token, refresh token, and user data.
+	// The refresh token is returned in both a cookie and the body so that
+	// Electron/native clients (file:// origin) can store it explicitly —
+	// SameSite=Lax cookies are not sent on cross-site POST requests.
 	c.JSON(http.StatusOK, gin.H{
-		"access_token": accessToken,
-		"expires_in":   900, // 15 minutes
-		"remember_me":  rememberMe,
-		"user":         user.PublicUser(),
+		"access_token":  accessToken,
+		"refresh_token": refreshToken,
+		"expires_in":    900, // 15 minutes
+		"remember_me":   rememberMe,
+		"user":          user.PublicUser(),
 		"e2ee_keys": gin.H{
 			"wrapped_private_key":  base64.StdEncoding.EncodeToString(keys.WrappedPrivateKey),
 			"key_derivation_salt":  base64.StdEncoding.EncodeToString(keys.KeyDerivationSalt),
@@ -484,9 +492,14 @@ func (h *Handler) Login(c *gin.Context) {
 // If a previously-used token is presented again, ALL tokens for the user are revoked
 // (breach detection — the old token was likely stolen).
 func (h *Handler) Refresh(c *gin.Context) {
-	// Get refresh token from cookie
+	// Get refresh token from cookie first, fall back to X-Refresh-Token header.
+	// Electron/native clients loaded from file:// can't send SameSite=Lax
+	// cookies on cross-site POST requests, so they pass the token via header.
 	refreshToken, err := c.Cookie("refresh_token")
-	if err != nil {
+	if err != nil || refreshToken == "" {
+		refreshToken = c.GetHeader("X-Refresh-Token")
+	}
+	if refreshToken == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "No refresh token provided"})
 		return
 	}
@@ -607,8 +620,9 @@ func (h *Handler) Refresh(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"access_token": accessToken,
-		"expires_in":   900, // 15 minutes
+		"access_token":  accessToken,
+		"refresh_token": newRefreshToken,
+		"expires_in":    900, // 15 minutes
 	})
 }
 
@@ -627,9 +641,12 @@ func (h *Handler) Logout(c *gin.Context) {
 		}
 	}
 
-	// Get refresh token from cookie
+	// Get refresh token from cookie or header
 	refreshToken, err := c.Cookie("refresh_token")
-	if err != nil {
+	if err != nil || refreshToken == "" {
+		refreshToken = c.GetHeader("X-Refresh-Token")
+	}
+	if refreshToken == "" {
 		c.JSON(http.StatusOK, gin.H{"message": "Already logged out"})
 		return
 	}

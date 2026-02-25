@@ -32,8 +32,8 @@ func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, cfg *config.
 	}
 }
 
-// VoiceParticipant represents a user currently in a voice channel.
-type VoiceParticipant struct {
+// Participant represents a user currently in a voice channel.
+type Participant struct {
 	UserID         string `json:"user_id"`
 	Username       string `json:"username"`
 	DisplayName    string `json:"display_name,omitempty"`
@@ -89,9 +89,9 @@ func (h *Handler) GetParticipants(c *gin.Context) {
 	}
 	defer func() { _ = rows.Close() }()
 
-	participants := []VoiceParticipant{}
+	participants := []Participant{}
 	for rows.Next() {
-		var p VoiceParticipant
+		var p Participant
 		if err := rows.Scan(
 			&p.UserID, &p.Username, &p.DisplayName, &p.AvatarURL,
 			&p.IsMuted, &p.IsDeafened, &p.IsVideoOn, &p.IsScreenSharing, &p.JoinedAt,

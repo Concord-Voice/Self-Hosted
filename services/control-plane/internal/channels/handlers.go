@@ -238,6 +238,28 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 
 	h.log.Info("Channel created", "channel_id", channelID, "server_id", req.ServerID, "user_id", userID, "encrypted", isEncrypted)
 
+	// Broadcast new channel to server subscribers so other members see it instantly
+	if h.hub != nil {
+		if serverUUID, err := uuid.Parse(req.ServerID); err == nil {
+			h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+				Type: "channel_created",
+				Data: map[string]interface{}{
+					"channel": map[string]interface{}{
+						"id":           channel.ID,
+						"server_id":    channel.ServerID,
+						"name":         channel.Name,
+						"type":         channel.Type,
+						"emoji":        channel.Emoji,
+						"is_encrypted": channel.IsEncrypted,
+						"position":     channel.Position,
+						"created_at":   channel.CreatedAt,
+						"updated_at":   channel.UpdatedAt,
+					},
+				},
+			})
+		}
+	}
+
 	c.JSON(http.StatusCreated, gin.H{"channel": channel})
 }
 

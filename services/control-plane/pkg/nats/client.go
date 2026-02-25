@@ -54,6 +54,6 @@ func (c *Client) Publish(subject string, data interface{}) error {
 // Close drains and closes the NATS connection.
 func (c *Client) Close() {
 	if c.conn != nil {
-		c.conn.Drain()
+		_ = c.conn.Drain()
 	}
 }
