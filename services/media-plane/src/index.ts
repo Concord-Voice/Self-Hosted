@@ -119,7 +119,8 @@ async function main() {
           data.username,
           data.displayName,
           data.avatarUrl,
-          rtpCapabilities
+          rtpCapabilities,
+          access.isEncrypted
         );
 
         // Join Socket.IO room for broadcasting
@@ -141,6 +142,7 @@ async function main() {
           participants: result.participants,
           isEncrypted: access.isEncrypted,
           channelName: access.channelName,
+          e2eeEpoch: result.e2eeEpoch,
         };
 
         if (callback) {
@@ -455,6 +457,16 @@ async function main() {
     }
   });
 
+  // Broadcast epoch-sync to encrypted rooms every 30s
+  const epochSyncInterval = setInterval(() => {
+    for (const roomId of roomManager.getActiveRoomIds()) {
+      const room = roomManager.getRoom(roomId);
+      if (room && room.isEncrypted) {
+        io.to(roomId).emit('epoch-sync', { epoch: room.e2eeEpoch });
+      }
+    }
+  }, 30_000);
+
   // Start server
   const port = config.port;
   httpServer.listen(port, () => {
@@ -467,6 +479,7 @@ async function main() {
   // Graceful shutdown
   const shutdown = async () => {
     logger.info('Shutting down gracefully');
+    clearInterval(epochSyncInterval);
 
     // Close all rooms first (notifies participants, publishes NATS events)
     await roomManager.closeAll();
