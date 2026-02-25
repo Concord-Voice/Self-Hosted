@@ -41,14 +41,15 @@ func NewHandler(hub *Hub, db *sql.DB, redisClient *redis.Client, jwtSecret strin
 		WriteBufferSize: 1024,
 		CheckOrigin: func(r *http.Request) bool {
 			origin := r.Header.Get("Origin")
-			if origin == "" {
-				return true // Allow connections without Origin header (native apps, CLI tools)
+			if origin == "" || origin == "null" {
+				return true // Allow connections without Origin header (native apps, CLI tools, packaged Electron)
 			}
 			for _, allowed := range h.allowedOrigins {
-				if origin == allowed {
+				if allowed == "*" || origin == allowed {
 					return true
 				}
 			}
+			log.Printf("[websocket] Origin rejected: %q (allowed: %v)", origin, h.allowedOrigins)
 			return false
 		},
 	}
