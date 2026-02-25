@@ -35,6 +35,7 @@ type CreateChannelRequest struct {
 	Type        string            `json:"type" binding:"required,oneof=text voice bulletin"`
 	Emoji       *string           `json:"emoji,omitempty"`        // Optional custom emoji
 	IsEncrypted *bool             `json:"is_encrypted,omitempty"` // Defaults to server's e2ee_default
+	GroupID     *string           `json:"group_id,omitempty"`     // Channel group (category); nil = uncategorized
 	WrappedKeys map[string]string `json:"wrapped_keys,omitempty"` // user_id → wrapped CSK (required if encrypted)
 }
 
@@ -44,6 +45,7 @@ type UpdateChannelRequest struct {
 	Type             string  `json:"type" binding:"required,oneof=text voice bulletin"`
 	Emoji            *string `json:"emoji,omitempty"`
 	AudioQualityTier *string `json:"audio_quality_tier,omitempty"`
+	GroupID          *string `json:"group_id"` // pointer: nil=unchanged, ""=uncategorized, "uuid"=set group
 }
 
 // Valid audio quality tier values
@@ -85,7 +87,7 @@ func (h *Handler) ListChannels(c *gin.Context) {
 
 	// Get all channels in the server
 	query := `
-		SELECT id, server_id, name, type, description, emoji, is_encrypted, audio_quality_tier, position, created_at, updated_at
+		SELECT id, server_id, name, type, description, emoji, is_encrypted, audio_quality_tier, group_id, linked_voice_channel_id, position, created_at, updated_at
 		FROM channels
 		WHERE server_id = $1
 		ORDER BY position ASC, created_at ASC
@@ -111,6 +113,8 @@ func (h *Handler) ListChannels(c *gin.Context) {
 			&channel.Emoji,
 			&channel.IsEncrypted,
 			&channel.AudioQualityTier,
+			&channel.GroupID,
+			&channel.LinkedVoiceChannelID,
 			&channel.Position,
 			&channel.CreatedAt,
 			&channel.UpdatedAt,
@@ -127,7 +131,37 @@ func (h *Handler) ListChannels(c *gin.Context) {
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"channels": channels})
+	// Also fetch channel groups for this server
+	groupRows, err := h.db.Query(
+		`SELECT id, server_id, name, position, created_at, updated_at
+		 FROM channel_groups
+		 WHERE server_id = $1
+		 ORDER BY position ASC, created_at ASC`,
+		serverID,
+	)
+	if err != nil {
+		h.log.Error("Failed to query channel groups", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch channels"})
+		return
+	}
+	defer func() { _ = groupRows.Close() }()
+
+	groups := []models.ChannelGroup{}
+	for groupRows.Next() {
+		var g models.ChannelGroup
+		if err := groupRows.Scan(&g.ID, &g.ServerID, &g.Name, &g.Position, &g.CreatedAt, &g.UpdatedAt); err != nil {
+			h.log.Error("Failed to scan channel group", "error", err)
+			continue
+		}
+		groups = append(groups, g)
+	}
+	if err := groupRows.Err(); err != nil {
+		h.log.Error("Error iterating channel groups", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch channels"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"channels": channels, "channel_groups": groups})
 }
 
 // CreateChannel creates a new channel in a server
@@ -194,8 +228,8 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 	// Create channel
 	channelID := uuid.New().String()
 	insertQuery := `
-		INSERT INTO channels (id, server_id, name, type, emoji, is_encrypted, position, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+		INSERT INTO channels (id, server_id, name, type, emoji, is_encrypted, group_id, position, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
 		RETURNING created_at, updated_at
 	`
 
@@ -206,9 +240,10 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 	channel.Type = req.Type
 	channel.Emoji = req.Emoji
 	channel.IsEncrypted = isEncrypted
+	channel.GroupID = req.GroupID
 	channel.Position = 0 // Default position, can be reordered later
 
-	err = tx.QueryRow(insertQuery, channelID, req.ServerID, req.Name, req.Type, req.Emoji, isEncrypted, 0).Scan(
+	err = tx.QueryRow(insertQuery, channelID, req.ServerID, req.Name, req.Type, req.Emoji, isEncrypted, req.GroupID, 0).Scan(
 		&channel.CreatedAt,
 		&channel.UpdatedAt,
 	)
@@ -237,6 +272,56 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 		}
 	}
 
+	// Auto-create linked text channel for voice channels
+	var linkedTextChannel *models.Channel
+	if req.Type == "voice" {
+		linkedTextID := uuid.New().String()
+		linkedInsert := `
+			INSERT INTO channels (id, server_id, name, type, is_encrypted, group_id, linked_voice_channel_id, position, created_at, updated_at)
+			VALUES ($1, $2, $3, 'text', $4, $5, $6, 1, NOW(), NOW())
+			RETURNING created_at, updated_at
+		`
+		var ltc models.Channel
+		ltc.ID = linkedTextID
+		ltc.ServerID = req.ServerID
+		ltc.Name = req.Name
+		ltc.Type = "text"
+		ltc.IsEncrypted = isEncrypted
+		ltc.GroupID = req.GroupID
+		ltc.LinkedVoiceChannelID = &channelID
+		ltc.Position = 1
+
+		err = tx.QueryRow(linkedInsert, linkedTextID, req.ServerID, req.Name, isEncrypted, req.GroupID, channelID).Scan(
+			&ltc.CreatedAt,
+			&ltc.UpdatedAt,
+		)
+		if err != nil {
+			h.log.Error("Failed to create linked text channel", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create linked text channel"})
+			return
+		}
+
+		// If encrypted, copy wrapped keys for the linked text channel too
+		if isEncrypted {
+			keyInsertLinked := `
+				INSERT INTO channel_keys (channel_id, user_id, wrapped_key, key_version)
+				VALUES ($1, $2, $3, 1)
+			`
+			for memberUserID, wrappedKey := range req.WrappedKeys {
+				if _, parseErr := uuid.Parse(memberUserID); parseErr != nil {
+					continue
+				}
+				_, err = tx.Exec(keyInsertLinked, linkedTextID, memberUserID, wrappedKey)
+				if err != nil {
+					h.log.Error("Failed to store linked text channel key", "error", err, "user_id", memberUserID)
+					// Non-fatal — keys can be distributed later
+				}
+			}
+		}
+
+		linkedTextChannel = &ltc
+	}
+
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit transaction", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create channel"})
@@ -258,16 +343,43 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 						"type":         channel.Type,
 						"emoji":        channel.Emoji,
 						"is_encrypted": channel.IsEncrypted,
+						"group_id":     channel.GroupID,
 						"position":     channel.Position,
 						"created_at":   channel.CreatedAt,
 						"updated_at":   channel.UpdatedAt,
 					},
 				},
 			})
+
+			// Also broadcast the linked text channel creation
+			if linkedTextChannel != nil {
+				h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+					Type: "channel_created",
+					Data: map[string]interface{}{
+						"channel": map[string]interface{}{
+							"id":                       linkedTextChannel.ID,
+							"server_id":                linkedTextChannel.ServerID,
+							"name":                     linkedTextChannel.Name,
+							"type":                     linkedTextChannel.Type,
+							"is_encrypted":              linkedTextChannel.IsEncrypted,
+							"group_id":                 linkedTextChannel.GroupID,
+							"linked_voice_channel_id":  linkedTextChannel.LinkedVoiceChannelID,
+							"position":                 linkedTextChannel.Position,
+							"created_at":               linkedTextChannel.CreatedAt,
+							"updated_at":               linkedTextChannel.UpdatedAt,
+						},
+					},
+				})
+			}
 		}
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"channel": channel})
+	// Return response: voice channels include the linked text channel
+	response := gin.H{"channel": channel}
+	if linkedTextChannel != nil {
+		response["linked_text_channel"] = linkedTextChannel
+	}
+	c.JSON(http.StatusCreated, response)
 }
 
 // GetChannel returns a specific channel
@@ -283,7 +395,7 @@ func (h *Handler) GetChannel(c *gin.Context) {
 
 	// Get channel and check if user is a member of the server
 	query := `
-		SELECT c.id, c.server_id, c.name, c.type, c.description, c.emoji, c.is_encrypted, c.audio_quality_tier, c.position, c.created_at, c.updated_at
+		SELECT c.id, c.server_id, c.name, c.type, c.description, c.emoji, c.is_encrypted, c.audio_quality_tier, c.group_id, c.linked_voice_channel_id, c.position, c.created_at, c.updated_at
 		FROM channels c
 		INNER JOIN server_members sm ON c.server_id = sm.server_id
 		WHERE c.id = $1 AND sm.user_id = $2
@@ -299,6 +411,8 @@ func (h *Handler) GetChannel(c *gin.Context) {
 		&channel.Emoji,
 		&channel.IsEncrypted,
 		&channel.AudioQualityTier,
+		&channel.GroupID,
+		&channel.LinkedVoiceChannelID,
 		&channel.Position,
 		&channel.CreatedAt,
 		&channel.UpdatedAt,
@@ -366,28 +480,61 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 		}
 	}
 
-	// Update channel (is_encrypted is immutable — cannot be changed after creation)
-	updateQuery := `
-		UPDATE channels
-		SET name = $1, type = $2, emoji = $3, audio_quality_tier = $4, updated_at = NOW()
-		WHERE id = $5
-		RETURNING server_id, emoji, is_encrypted, audio_quality_tier, position, created_at, updated_at
-	`
+	// Resolve group_id: nil pointer means "don't change" (use existing), non-nil updates it
+	// Empty string (*string pointing to "") = set to NULL (uncategorized)
+	var groupIDParam interface{}
+	if req.GroupID != nil {
+		if *req.GroupID == "" {
+			groupIDParam = nil // SQL NULL = uncategorized
+		} else {
+			groupIDParam = *req.GroupID
+		}
+	}
 
+	// Update channel (is_encrypted is immutable — cannot be changed after creation)
+	var updateQuery string
 	var channel models.Channel
 	channel.ID = channelID
 	channel.Name = req.Name
 	channel.Type = req.Type
 
-	err = h.db.QueryRow(updateQuery, req.Name, req.Type, req.Emoji, req.AudioQualityTier, channelID).Scan(
-		&channel.ServerID,
-		&channel.Emoji,
-		&channel.IsEncrypted,
-		&channel.AudioQualityTier,
-		&channel.Position,
-		&channel.CreatedAt,
-		&channel.UpdatedAt,
-	)
+	if req.GroupID != nil {
+		updateQuery = `
+			UPDATE channels
+			SET name = $1, type = $2, emoji = $3, audio_quality_tier = $4, group_id = $5, updated_at = NOW()
+			WHERE id = $6
+			RETURNING server_id, emoji, is_encrypted, audio_quality_tier, group_id, linked_voice_channel_id, position, created_at, updated_at
+		`
+		err = h.db.QueryRow(updateQuery, req.Name, req.Type, req.Emoji, req.AudioQualityTier, groupIDParam, channelID).Scan(
+			&channel.ServerID,
+			&channel.Emoji,
+			&channel.IsEncrypted,
+			&channel.AudioQualityTier,
+			&channel.GroupID,
+			&channel.LinkedVoiceChannelID,
+			&channel.Position,
+			&channel.CreatedAt,
+			&channel.UpdatedAt,
+		)
+	} else {
+		updateQuery = `
+			UPDATE channels
+			SET name = $1, type = $2, emoji = $3, audio_quality_tier = $4, updated_at = NOW()
+			WHERE id = $5
+			RETURNING server_id, emoji, is_encrypted, audio_quality_tier, group_id, linked_voice_channel_id, position, created_at, updated_at
+		`
+		err = h.db.QueryRow(updateQuery, req.Name, req.Type, req.Emoji, req.AudioQualityTier, channelID).Scan(
+			&channel.ServerID,
+			&channel.Emoji,
+			&channel.IsEncrypted,
+			&channel.AudioQualityTier,
+			&channel.GroupID,
+			&channel.LinkedVoiceChannelID,
+			&channel.Position,
+			&channel.CreatedAt,
+			&channel.UpdatedAt,
+		)
+	}
 
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found"})
@@ -413,6 +560,7 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 					"emoji":              channel.Emoji,
 					"is_encrypted":       channel.IsEncrypted,
 					"audio_quality_tier": channel.AudioQualityTier,
+					"group_id":           channel.GroupID,
 				},
 			})
 		}

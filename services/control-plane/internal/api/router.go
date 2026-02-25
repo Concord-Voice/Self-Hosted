@@ -275,6 +275,30 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					invitesHandler.RevokeInvite,
 				)
 
+				// Channel group routes
+				serverRoutes.GET("/:id/channel-groups",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					channelsHandler.ListChannelGroups,
+				)
+				serverRoutes.POST("/:id/channel-groups",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					channelsHandler.CreateChannelGroup,
+				)
+				serverRoutes.PATCH("/:id/channel-groups/:group_id",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					channelsHandler.UpdateChannelGroup,
+				)
+				serverRoutes.DELETE("/:id/channel-groups/:group_id",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					channelsHandler.DeleteChannelGroup,
+				)
+
+				// Bulk reorder channels (drag-and-drop between groups)
+				serverRoutes.PUT("/:id/channels/reorder",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					channelsHandler.ReorderChannels,
+				)
+
 				// Get unread counts for all channels in a server (30 requests per minute)
 				serverRoutes.GET("/:id/unread",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
