@@ -225,8 +225,24 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 		}
 	}()
 
-	// Create channel
+	// Create channel — place at end of its group (or end of uncategorized)
 	channelID := uuid.New().String()
+
+	// Compute next position: max(position) + 1 within the same group
+	var maxPos int
+	if req.GroupID != nil {
+		_ = tx.QueryRow(
+			`SELECT COALESCE(MAX(position), -1) FROM channels WHERE server_id = $1 AND group_id = $2`,
+			req.ServerID, *req.GroupID,
+		).Scan(&maxPos)
+	} else {
+		_ = tx.QueryRow(
+			`SELECT COALESCE(MAX(position), -1) FROM channels WHERE server_id = $1 AND group_id IS NULL`,
+			req.ServerID,
+		).Scan(&maxPos)
+	}
+	nextPos := maxPos + 1
+
 	insertQuery := `
 		INSERT INTO channels (id, server_id, name, type, emoji, is_encrypted, group_id, position, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
@@ -241,9 +257,9 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 	channel.Emoji = req.Emoji
 	channel.IsEncrypted = isEncrypted
 	channel.GroupID = req.GroupID
-	channel.Position = 0 // Default position, can be reordered later
+	channel.Position = nextPos
 
-	err = tx.QueryRow(insertQuery, channelID, req.ServerID, req.Name, req.Type, req.Emoji, isEncrypted, req.GroupID, 0).Scan(
+	err = tx.QueryRow(insertQuery, channelID, req.ServerID, req.Name, req.Type, req.Emoji, isEncrypted, req.GroupID, nextPos).Scan(
 		&channel.CreatedAt,
 		&channel.UpdatedAt,
 	)
@@ -276,9 +292,10 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 	var linkedTextChannel *models.Channel
 	if req.Type == "voice" {
 		linkedTextID := uuid.New().String()
+		linkedTextPos := nextPos + 1 // Place right after the voice channel
 		linkedInsert := `
 			INSERT INTO channels (id, server_id, name, type, is_encrypted, group_id, linked_voice_channel_id, position, created_at, updated_at)
-			VALUES ($1, $2, $3, 'text', $4, $5, $6, 1, NOW(), NOW())
+			VALUES ($1, $2, $3, 'text', $4, $5, $6, $7, NOW(), NOW())
 			RETURNING created_at, updated_at
 		`
 		var ltc models.Channel
@@ -289,9 +306,9 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 		ltc.IsEncrypted = isEncrypted
 		ltc.GroupID = req.GroupID
 		ltc.LinkedVoiceChannelID = &channelID
-		ltc.Position = 1
+		ltc.Position = linkedTextPos
 
-		err = tx.QueryRow(linkedInsert, linkedTextID, req.ServerID, req.Name, isEncrypted, req.GroupID, channelID).Scan(
+		err = tx.QueryRow(linkedInsert, linkedTextID, req.ServerID, req.Name, isEncrypted, req.GroupID, channelID, linkedTextPos).Scan(
 			&ltc.CreatedAt,
 			&ltc.UpdatedAt,
 		)
