@@ -315,8 +315,8 @@ export const config = {
   // Active speaker detection
   audioLevelObserver: {
     maxEntries: 1,       // Report top 1 speaker
-    threshold: -50,      // dBV threshold
-    interval: 800,       // Check every 800ms
+    threshold: -60,      // dBV threshold (lower = more sensitive)
+    interval: 300,       // Check every 300ms for snappier feedback
   },
 };
 
