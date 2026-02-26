@@ -581,7 +581,7 @@ The desktop Electron app works on laptops/tablets, but no native mobile UI yet.
 | **Source Code** | ❌ Proprietary | ✅ BSL 1.1 (→ AGPL) |
 | **Privacy** | ⚠️ Collects data | ✅ Minimal telemetry |
 | **Business Model** | Nitro subscriptions | À-la-carte + self-host |
-| **Voice Quality** | Good (Opus) | Planned Hi-Fi (256kbps+) |
+| **Voice Quality** | Good (Opus) | ✅ Hi-Fi (256kbps+, 5 quality tiers) |
 | **Bots** | ✅ Yes | 📋 Planned (Phase 5) |
 
 **Concord's focus:** Privacy, sovereignty, eventual open source.
@@ -590,9 +590,13 @@ The desktop Electron app works on laptops/tablets, but no native mobile UI yet.
 
 ### Does Concord support screen sharing?
 
-**Status:** Planned for Phase 2 (Q3 2026).
+**Status:** ✅ Implemented (Phase 1C, PR #114).
 
-Will use WebRTC screen capture API for peer-to-peer sharing.
+Screen sharing uses WebRTC via the mediasoup SFU. Features include:
+- Full-screen and window/tab selection via ScreenSharePicker
+- AV1 codec for screen share (high quality at low bitrate)
+- IGNIS decoder budget system for managing stream limits
+- Opt-in screen share viewing to conserve bandwidth
 
 ---
 
