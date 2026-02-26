@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -489,8 +490,8 @@ func (h *Handler) Login(c *gin.Context) {
 
 // Refresh handles access token refresh with token rotation.
 // Each refresh token is single-use: a new refresh token is issued on every refresh.
-// If a previously-used token is presented again, ALL tokens for the user are revoked
-// (breach detection — the old token was likely stolen).
+// If a previously-used token is presented again, the request is rejected and the
+// anomaly is logged. The replayed token is already revoked (single-use rotation).
 func (h *Handler) Refresh(c *gin.Context) {
 	// Get refresh token from cookie first, fall back to X-Refresh-Token header.
 	// Electron/native clients loaded from file:// can't send SameSite=Lax
@@ -527,19 +528,20 @@ func (h *Handler) Refresh(c *gin.Context) {
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
-			// Breach detection: check if this token was already used (revoked but exists)
+			// Replay detection: check if this token was already used (revoked but exists)
 			var revokedUserID string
 			revokeErr := h.db.QueryRow(
 				`SELECT user_id FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NOT NULL`,
 				tokenHash,
 			).Scan(&revokedUserID)
 			if revokeErr == nil && revokedUserID != "" {
-				// A previously-used token was replayed — revoke ALL tokens for this user
-				h.log.Error("Refresh token replay detected, revoking all sessions",
-					"user_id", revokedUserID)
-				_, _ = h.db.Exec(
-					`UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`,
-					revokedUserID,
+				// Log the anomaly but do NOT revoke all sessions.
+				// Mass revocation is weaponizable as a DoS — an attacker replays
+				// one stolen token and the victim loses all active sessions.
+				// The replayed token is already revoked (single-use rotation).
+				h.log.Warn("Refresh token replay detected, stale token replayed",
+					"user_id", revokedUserID,
+					"token_hash", tokenHash,
 				)
 			}
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid refresh token"})
@@ -554,6 +556,34 @@ func (h *Handler) Refresh(c *gin.Context) {
 	if time.Now().After(token.ExpiresAt) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Refresh token expired"})
 		return
+	}
+
+	// Offline-duration expiry: for "Remember Me" tokens, the 30-day timer only
+	// counts while the user is offline. If they're online (including invisible),
+	// the token never expires from inactivity.
+	if token.RememberMe {
+		ctx := context.Background()
+		presenceKey := fmt.Sprintf("presence:%s", token.UserID)
+		_, presenceErr := h.redis.Get(ctx, presenceKey).Result()
+
+		if presenceErr == redis.Nil {
+			// User is offline — check how long
+			lastSeenKey := fmt.Sprintf("last_seen:%s", token.UserID)
+			lastSeenStr, lsErr := h.redis.Get(ctx, lastSeenKey).Result()
+			if lsErr == nil && lastSeenStr != "" {
+				lastSeenUnix, parseErr := strconv.ParseInt(lastSeenStr, 10, 64)
+				if parseErr == nil {
+					offlineDuration := time.Since(time.Unix(lastSeenUnix, 0))
+					if offlineDuration > 30*24*time.Hour {
+						c.JSON(http.StatusUnauthorized, gin.H{
+							"error": "Session expired due to prolonged inactivity",
+						})
+						return
+					}
+				}
+			}
+		}
+		// presence key exists (online/dnd/invisible) → skip, token stays valid
 	}
 
 	// Revoke the old refresh token (single-use rotation)

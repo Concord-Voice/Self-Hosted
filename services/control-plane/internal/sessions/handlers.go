@@ -219,8 +219,10 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 	})
 }
 
-// RevokeAllSessions revokes all sessions. By default it preserves the current
-// session; pass ?include_current=true to also revoke the caller's own session.
+// RevokeAllSessions revokes all sessions after verifying the user's password.
+// Requires a JSON body with "password" and optionally "include_current".
+// Password re-verification prevents an attacker with a stolen session from
+// mass-revoking the victim's sessions as a DoS.
 func (h *Handler) RevokeAllSessions(c *gin.Context) {
 	// Get user ID from auth middleware
 	userID, exists := c.Get("user_id")
@@ -229,16 +231,46 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 		return
 	}
 
-	includeCurrent := c.Query("include_current") == "true"
+	// Parse request body for password
+	var req struct {
+		Password       string `json:"password"`
+		IncludeCurrent bool   `json:"include_current"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.Password == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required to revoke all sessions"})
+		return
+	}
+
+	// Verify password against stored hash
+	var passwordHash string
+	err := h.db.QueryRow(
+		`SELECT password_hash FROM users WHERE id = $1`, userID,
+	).Scan(&passwordHash)
+	if err != nil {
+		h.log.Error("Failed to fetch password hash for session revocation", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify password"})
+		return
+	}
+
+	passwordMatch, verifyErr := auth.VerifyPassword(req.Password, passwordHash)
+	if verifyErr != nil {
+		h.log.Error("Password verification failed", "error", verifyErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify password"})
+		return
+	}
+	if !passwordMatch {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Incorrect password"})
+		return
+	}
 
 	// Get current session token
-	currentToken, err := c.Cookie("refresh_token")
-	if err != nil {
+	currentToken, cookieErr := c.Cookie("refresh_token")
+	if cookieErr != nil {
 		currentToken = ""
 	}
 
 	var result sql.Result
-	if currentToken != "" && !includeCurrent {
+	if currentToken != "" && !req.IncludeCurrent {
 		currentTokenHash := auth.HashRefreshToken(currentToken)
 		// Revoke all sessions except the current one
 		result, err = h.db.Exec(
@@ -264,18 +296,18 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 
 	rowsAffected, _ := result.RowsAffected()
 
-	h.log.Info("Sessions revoked", "user_id", userID, "count", rowsAffected, "include_current", includeCurrent)
+	h.log.Info("Sessions revoked", "user_id", userID, "count", rowsAffected, "include_current", req.IncludeCurrent)
 
 	message := "All other sessions revoked successfully"
-	if includeCurrent {
+	if req.IncludeCurrent {
 		message = "All sessions revoked successfully"
 		// Clear cookie since current session was also revoked
 		c.SetCookie("refresh_token", "", -1, "/", "", c.Request.TLS != nil, true)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":          message,
-		"count":            rowsAffected,
-		"include_current":  includeCurrent,
+		"message":         message,
+		"count":           rowsAffected,
+		"include_current": req.IncludeCurrent,
 	})
 }

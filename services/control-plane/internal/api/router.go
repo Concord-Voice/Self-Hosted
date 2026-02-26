@@ -187,8 +187,8 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					sessionsHandler.RevokeSession,
 				)
 
-				// Revoke all other sessions (5 requests per minute - more sensitive)
-				sessionRoutes.DELETE("",
+				// Revoke all sessions (5 requests per minute - requires password re-verification)
+				sessionRoutes.POST("/revoke-all",
 					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
 					sessionsHandler.RevokeAllSessions,
 				)
