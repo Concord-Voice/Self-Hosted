@@ -471,6 +471,21 @@ async function main() {
     }
   }, 30_000);
 
+  // Publish room heartbeat every 30s for control plane reconciliation.
+  // Each message contains the authoritative list of users in each room,
+  // allowing the control plane to delete stale voice_participants rows.
+  const roomHeartbeatInterval = setInterval(() => {
+    for (const roomId of roomManager.getActiveRoomIds()) {
+      const room = roomManager.getRoom(roomId);
+      if (!room) continue;
+      natsService.publish('voice.heartbeat', {
+        channelId: roomId,
+        userIds: Array.from(room.participants.keys()),
+        timestamp: new Date().toISOString(),
+      });
+    }
+  }, 30_000);
+
   // Start server
   const port = config.port;
   httpServer.listen(port, () => {
@@ -484,6 +499,7 @@ async function main() {
   const shutdown = async () => {
     logger.info('Shutting down gracefully');
     clearInterval(epochSyncInterval);
+    clearInterval(roomHeartbeatInterval);
 
     // Close all rooms first (notifies participants, publishes NATS events)
     await roomManager.closeAll();

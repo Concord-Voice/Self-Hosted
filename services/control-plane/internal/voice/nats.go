@@ -51,6 +51,13 @@ type voiceRoomEmptyEvent struct {
 	Timestamp string `json:"timestamp"`
 }
 
+// voiceHeartbeatEvent is the per-room heartbeat from the media plane.
+type voiceHeartbeatEvent struct {
+	ChannelID string   `json:"channelId"`
+	UserIDs   []string `json:"userIds"`
+	Timestamp string   `json:"timestamp"`
+}
+
 // Subscribe registers handlers for all voice NATS subjects.
 func (s *NATSSubscriber) Subscribe() error {
 	if _, err := s.nats.Subscribe("voice.joined", s.handleJoined); err != nil {
@@ -60,6 +67,9 @@ func (s *NATSSubscriber) Subscribe() error {
 		return err
 	}
 	if _, err := s.nats.Subscribe("voice.room_empty", s.handleRoomEmpty); err != nil {
+		return err
+	}
+	if _, err := s.nats.Subscribe("voice.heartbeat", s.handleHeartbeat); err != nil {
 		return err
 	}
 
@@ -106,6 +116,7 @@ func (s *NATSSubscriber) handleJoined(data []byte) {
 			"username":     event.Username,
 			"display_name": event.DisplayName,
 			"action":       "joined",
+			"server_id":    serverID,
 		},
 	})
 
@@ -146,6 +157,7 @@ func (s *NATSSubscriber) handleLeft(data []byte) {
 			"channel_id": event.ChannelID,
 			"user_id":    event.UserID,
 			"action":     "left",
+			"server_id":  serverID,
 		},
 	})
 
@@ -184,8 +196,90 @@ func (s *NATSSubscriber) handleRoomEmpty(data []byte) {
 		Data: map[string]interface{}{
 			"channel_id": event.ChannelID,
 			"action":     "room_empty",
+			"server_id":  serverID,
 		},
 	})
 
 	s.log.Info("Voice room empty", "channel_id", event.ChannelID)
+}
+
+// handleHeartbeat reconciles voice_participants against the media plane's
+// ground-truth room state. Any DB entries not present in the heartbeat are
+// stale (client crashed / network dropped) and get cleaned up.
+func (s *NATSSubscriber) handleHeartbeat(data []byte) {
+	var event voiceHeartbeatEvent
+	if err := json.Unmarshal(data, &event); err != nil {
+		s.log.Error("Failed to unmarshal voice.heartbeat", "error", err)
+		return
+	}
+
+	// Query current DB participants for this channel
+	rows, err := s.db.Query(`SELECT user_id FROM voice_participants WHERE channel_id = $1`, event.ChannelID)
+	if err != nil {
+		s.log.Error("Failed to query voice_participants for reconciliation", "error", err, "channel_id", event.ChannelID)
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	dbUsers := make(map[string]bool)
+	for rows.Next() {
+		var uid string
+		if err := rows.Scan(&uid); err == nil {
+			dbUsers[uid] = true
+		}
+	}
+
+	// Nothing in DB — nothing to reconcile
+	if len(dbUsers) == 0 {
+		return
+	}
+
+	// Build set of media-plane users
+	mpUsers := make(map[string]bool)
+	for _, uid := range event.UserIDs {
+		mpUsers[uid] = true
+	}
+
+	// Look up server_id (needed for broadcasts)
+	var serverID string
+	if err := s.db.QueryRow("SELECT server_id FROM channels WHERE id = $1", event.ChannelID).Scan(&serverID); err != nil {
+		s.log.Error("Failed to look up server for channel (heartbeat)", "error", err, "channel_id", event.ChannelID)
+		return
+	}
+	serverUUID, err := uuid.Parse(serverID)
+	if err != nil {
+		return
+	}
+
+	// Find and remove stale DB users (in DB but not in media plane)
+	for uid := range dbUsers {
+		if !mpUsers[uid] {
+			_, _ = s.db.Exec(`DELETE FROM voice_participants WHERE channel_id = $1 AND user_id = $2`,
+				event.ChannelID, uid)
+
+			s.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+				Type: "voice_state_update",
+				Data: map[string]interface{}{
+					"channel_id": event.ChannelID,
+					"user_id":    uid,
+					"action":     "left",
+					"server_id":  serverID,
+				},
+			})
+
+			s.log.Info("Reconciled stale voice participant", "channel_id", event.ChannelID, "user_id", uid)
+		}
+	}
+
+	// If media plane reports empty room but DB still had entries, broadcast room_empty
+	if len(event.UserIDs) == 0 && len(dbUsers) > 0 {
+		s.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+			Type: "voice_state_update",
+			Data: map[string]interface{}{
+				"channel_id": event.ChannelID,
+				"action":     "room_empty",
+				"server_id":  serverID,
+			},
+		})
+	}
 }
