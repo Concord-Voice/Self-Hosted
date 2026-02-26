@@ -163,11 +163,11 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 
 				// Encrypted user preferences (cross-device sync)
 				userRoutes.GET("/me/preferences",
-					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					usersHandler.GetPreferences,
 				)
 				userRoutes.PUT("/me/preferences",
-					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					usersHandler.UpdatePreferences,
 				)
 			}
