@@ -45,7 +45,8 @@ func (h *Handler) GetMe(c *gin.Context) {
 	// Fetch user from database
 	var user models.User
 	err := h.db.QueryRow(
-		`SELECT id, email, username, display_name, bio, avatar_url, COALESCE(links, '[]'::jsonb),
+		`SELECT id, email, username, display_name, bio, avatar_url, header_image_url,
+		        COALESCE(links, '[]'::jsonb),
 		        email_verified, age_verified, e2ee_preference, created_at, updated_at
 		 FROM users WHERE id = $1`,
 		userID,
@@ -56,6 +57,7 @@ func (h *Handler) GetMe(c *gin.Context) {
 		&user.DisplayName,
 		&user.Bio,
 		&user.AvatarURL,
+		&user.HeaderImageURL,
 		&user.Links,
 		&user.EmailVerified,
 		&user.AgeVerified,
@@ -76,6 +78,55 @@ func (h *Handler) GetMe(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{
 		"user": user.PublicUser(),
+	})
+}
+
+// GetPublicProfile returns another user's public profile (no email or private fields)
+func (h *Handler) GetPublicProfile(c *gin.Context) {
+	// Ensure the requester is authenticated
+	_, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	targetUserID := c.Param("user_id")
+
+	var user models.User
+	err := h.db.QueryRow(
+		`SELECT id, email, username, display_name, bio, avatar_url, header_image_url,
+		        COALESCE(links, '[]'::jsonb),
+		        email_verified, age_verified, e2ee_preference, created_at, updated_at
+		 FROM users WHERE id = $1`,
+		targetUserID,
+	).Scan(
+		&user.ID,
+		&user.Email,
+		&user.Username,
+		&user.DisplayName,
+		&user.Bio,
+		&user.AvatarURL,
+		&user.HeaderImageURL,
+		&user.Links,
+		&user.EmailVerified,
+		&user.AgeVerified,
+		&user.E2EEPreference,
+		&user.CreatedAt,
+		&user.UpdatedAt,
+	)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+			return
+		}
+		h.log.Error("Failed to fetch user profile", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user profile"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"user": user.ProfileForOthers(),
 	})
 }
 
@@ -165,11 +216,12 @@ func (h *Handler) ReplaceMyKeys(c *gin.Context) {
 
 // UpdateProfileRequest represents a request to update profile fields
 type UpdateProfileRequest struct {
-	Username    *string          `json:"username"`
-	DisplayName *string          `json:"display_name"`
-	Bio         *string          `json:"bio"`
-	AvatarURL   *string          `json:"avatar_url"`
-	Links       *json.RawMessage `json:"links"`
+	Username       *string          `json:"username"`
+	DisplayName    *string          `json:"display_name"`
+	Bio            *string          `json:"bio"`
+	AvatarURL      *string          `json:"avatar_url"`
+	HeaderImageURL *string          `json:"header_image_url"`
+	Links          *json.RawMessage `json:"links"`
 }
 
 // UpdateMe updates the current user's profile
@@ -278,6 +330,27 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 		argIdx++
 	}
 
+	// Validate and add header_image_url if provided
+	if req.HeaderImageURL != nil {
+		if *req.HeaderImageURL != "" {
+			if !strings.HasPrefix(*req.HeaderImageURL, "data:image/") {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Header image must be a valid image data URL"})
+				return
+			}
+			if len(*req.HeaderImageURL) > 1000000 { // 1MB limit for banner images
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Header image data URL must be less than 1MB"})
+				return
+			}
+			setClauses = append(setClauses, fmt.Sprintf("header_image_url = $%d", argIdx))
+			args = append(args, *req.HeaderImageURL)
+		} else {
+			// Empty string means remove header image
+			setClauses = append(setClauses, fmt.Sprintf("header_image_url = $%d", argIdx))
+			args = append(args, nil)
+		}
+		argIdx++
+	}
+
 	// Validate and add links if provided
 	if req.Links != nil {
 		var links []string
@@ -319,7 +392,8 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 	// User input is passed through args, not concatenated into SQL string
 	query := fmt.Sprintf(
 		`UPDATE users SET %s WHERE id = $%d
-		 RETURNING id, email, username, display_name, bio, avatar_url, COALESCE(links, '[]'::jsonb),
+		 RETURNING id, email, username, display_name, bio, avatar_url, header_image_url,
+		           COALESCE(links, '[]'::jsonb),
 		           email_verified, age_verified, e2ee_preference, created_at, updated_at`,
 		strings.Join(setClauses, ", "), argIdx,
 	)
@@ -333,6 +407,7 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 		&user.DisplayName,
 		&user.Bio,
 		&user.AvatarURL,
+		&user.HeaderImageURL,
 		&user.Links,
 		&user.EmailVerified,
 		&user.AgeVerified,
@@ -363,10 +438,11 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 		h.hub.BroadcastToAll(websocket.OutgoingMessage{
 			Type: "profile_updated",
 			Data: map[string]interface{}{
-				"user_id":      user.ID,
-				"username":     user.Username,
-				"display_name": user.DisplayName,
-				"avatar_url":   user.AvatarURL,
+				"user_id":          user.ID,
+				"username":         user.Username,
+				"display_name":     user.DisplayName,
+				"avatar_url":       user.AvatarURL,
+				"header_image_url": user.HeaderImageURL,
 			},
 		})
 	}

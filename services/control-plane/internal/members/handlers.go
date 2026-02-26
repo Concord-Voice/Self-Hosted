@@ -46,14 +46,15 @@ type UpdateMemberRequest struct {
 
 // MemberWithUser represents a member with user details
 type MemberWithUser struct {
-	UserID      string  `json:"user_id"`
-	Username    string  `json:"username"`
-	DisplayName *string `json:"display_name,omitempty"`
-	Bio         *string `json:"bio,omitempty"`
-	AvatarURL   *string `json:"avatar_url,omitempty"`
-	Role        string  `json:"role"`
-	JoinedAt    string  `json:"joined_at"`
-	LastSeen    *int64  `json:"last_seen,omitempty"`
+	UserID         string  `json:"user_id"`
+	Username       string  `json:"username"`
+	DisplayName    *string `json:"display_name,omitempty"`
+	Bio            *string `json:"bio,omitempty"`
+	AvatarURL      *string `json:"avatar_url,omitempty"`
+	HeaderImageURL *string `json:"header_image_url,omitempty"`
+	Role           string  `json:"role"`
+	JoinedAt       string  `json:"joined_at"`
+	LastSeen       *int64  `json:"last_seen,omitempty"`
 }
 
 // ListMembers returns all members of a server
@@ -90,7 +91,7 @@ func (h *Handler) ListMembers(c *gin.Context) {
 
 	// Get all members of the server with user details
 	query := `
-		SELECT sm.user_id, u.username, u.display_name, u.bio, u.avatar_url, sm.role, sm.joined_at
+		SELECT sm.user_id, u.username, u.display_name, u.bio, u.avatar_url, u.header_image_url, sm.role, sm.joined_at
 		FROM server_members sm
 		INNER JOIN users u ON sm.user_id = u.id
 		WHERE sm.server_id = $1
@@ -114,6 +115,7 @@ func (h *Handler) ListMembers(c *gin.Context) {
 			&member.DisplayName,
 			&member.Bio,
 			&member.AvatarURL,
+			&member.HeaderImageURL,
 			&member.Role,
 			&member.JoinedAt,
 		)
