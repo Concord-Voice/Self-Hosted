@@ -58,6 +58,7 @@ dist/
 build/
 !client/desktop/build/
 out/
+client-builds/
 .next/
 .nuxt/
 .cache/
