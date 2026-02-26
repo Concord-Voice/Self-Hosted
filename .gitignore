@@ -178,6 +178,6 @@ aws-exports.js
 *-key.json
 gcloud-service-key.json
 
-# Session storage
-.sessions/
-sessions/
+# Session storage (root-level only, not internal/sessions/)
+/.sessions/
+/sessions/

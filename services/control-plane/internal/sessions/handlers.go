@@ -233,7 +233,7 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 
 	// Parse request body for password
 	var req struct {
-		Password       string `json:"password"`
+		Password       string `json:"password"`       // #nosec G117 -- not a secret field, receives user input for auth verification
 		IncludeCurrent bool   `json:"include_current"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil || req.Password == "" {
