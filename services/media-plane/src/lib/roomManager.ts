@@ -713,6 +713,41 @@ export class RoomManager {
     }
   }
 
+  /**
+   * Compute the "codec floor" — the intersection of all participants' video
+   * decode capabilities. Returns lowercase mimeTypes that every participant
+   * with non-null rtpCapabilities can decode.
+   * Returns null if <2 participants have capabilities (no constraint needed).
+   */
+  computeCodecFloor(roomId: string): string[] | null {
+    const room = this.rooms.get(roomId);
+    if (!room) return null;
+
+    const capableParts: RtpCapabilities[] = [];
+    for (const [, p] of room.participants) {
+      if (p.rtpCapabilities) capableParts.push(p.rtpCapabilities);
+    }
+
+    if (capableParts.length < 2) return null;
+
+    let floor: Set<string> | null = null;
+    for (const caps of capableParts) {
+      const videoMimes = new Set<string>();
+      for (const c of caps.codecs ?? []) {
+        if (c.kind === 'video') videoMimes.add(c.mimeType.toLowerCase());
+      }
+      if (!floor) {
+        floor = videoMimes;
+      } else {
+        for (const m of floor) {
+          if (!videoMimes.has(m)) floor.delete(m);
+        }
+      }
+    }
+
+    return floor ? Array.from(floor) : [];
+  }
+
   getParticipant(roomId: string, userId: string): Participant | undefined {
     return this.rooms.get(roomId)?.participants.get(userId);
   }

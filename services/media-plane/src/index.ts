@@ -174,6 +174,11 @@ async function main() {
         }
 
         roomManager.updateRtpCapabilities(roomId, data.userId, rtpCapabilities);
+
+        // Broadcast updated codec floor to all room members
+        const codecFloor = roomManager.computeCodecFloor(roomId);
+        io.to(roomId).emit('room-codec-floor', { codecFloor });
+
         if (callback) callback({ success: true });
       } catch (error) {
         logger.error('Error updating RTP capabilities', { error, userId: data.userId });
@@ -434,6 +439,12 @@ async function main() {
 
     // Clean up via RoomManager (closes transports, producers, consumers)
     await roomManager.leaveRoom(roomId, userId);
+
+    // Recompute and broadcast codec floor if room still exists
+    if (roomManager.getRoom(roomId)) {
+      const codecFloor = roomManager.computeCodecFloor(roomId);
+      io.to(roomId).emit('room-codec-floor', { codecFloor });
+    }
 
     // Leave Socket.IO room
     socket.leave(roomId);
