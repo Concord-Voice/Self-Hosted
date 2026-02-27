@@ -45,7 +45,7 @@ func (h *Handler) GetMe(c *gin.Context) {
 	// Fetch user from database
 	var user models.User
 	err := h.db.QueryRow(
-		`SELECT id, email, username, display_name, bio, avatar_url, header_image_url,
+		`SELECT id, email, username, display_name, bio, avatar_url, header_image_url, color_scheme,
 		        COALESCE(links, '[]'::jsonb),
 		        email_verified, age_verified, e2ee_preference, created_at, updated_at
 		 FROM users WHERE id = $1`,
@@ -58,6 +58,7 @@ func (h *Handler) GetMe(c *gin.Context) {
 		&user.Bio,
 		&user.AvatarURL,
 		&user.HeaderImageURL,
+		&user.ColorScheme,
 		&user.Links,
 		&user.EmailVerified,
 		&user.AgeVerified,
@@ -94,7 +95,7 @@ func (h *Handler) GetPublicProfile(c *gin.Context) {
 
 	var user models.User
 	err := h.db.QueryRow(
-		`SELECT id, email, username, display_name, bio, avatar_url, header_image_url,
+		`SELECT id, email, username, display_name, bio, avatar_url, header_image_url, color_scheme,
 		        COALESCE(links, '[]'::jsonb),
 		        email_verified, age_verified, e2ee_preference, created_at, updated_at
 		 FROM users WHERE id = $1`,
@@ -107,6 +108,7 @@ func (h *Handler) GetPublicProfile(c *gin.Context) {
 		&user.Bio,
 		&user.AvatarURL,
 		&user.HeaderImageURL,
+		&user.ColorScheme,
 		&user.Links,
 		&user.EmailVerified,
 		&user.AgeVerified,
@@ -221,6 +223,7 @@ type UpdateProfileRequest struct {
 	Bio            *string          `json:"bio"`
 	AvatarURL      *string          `json:"avatar_url"`
 	HeaderImageURL *string          `json:"header_image_url"`
+	ColorScheme    *string          `json:"color_scheme"`
 	Links          *json.RawMessage `json:"links"`
 }
 
@@ -378,6 +381,30 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 		argIdx++
 	}
 
+	// Validate and add color_scheme if provided
+	if req.ColorScheme != nil {
+		trimmed := strings.TrimSpace(*req.ColorScheme)
+		if trimmed == "" {
+			// Empty string means clear color scheme
+			setClauses = append(setClauses, fmt.Sprintf("color_scheme = $%d", argIdx))
+			args = append(args, nil)
+		} else {
+			if len(trimmed) > 200 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "color_scheme must be at most 200 characters"})
+				return
+			}
+			// Validate JSON structure
+			var parsed map[string]interface{}
+			if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "color_scheme must be valid JSON"})
+				return
+			}
+			setClauses = append(setClauses, fmt.Sprintf("color_scheme = $%d", argIdx))
+			args = append(args, trimmed)
+		}
+		argIdx++
+	}
+
 	// Nothing to update
 	if len(setClauses) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "No fields to update"})
@@ -392,7 +419,7 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 	// User input is passed through args, not concatenated into SQL string
 	query := fmt.Sprintf(
 		`UPDATE users SET %s WHERE id = $%d
-		 RETURNING id, email, username, display_name, bio, avatar_url, header_image_url,
+		 RETURNING id, email, username, display_name, bio, avatar_url, header_image_url, color_scheme,
 		           COALESCE(links, '[]'::jsonb),
 		           email_verified, age_verified, e2ee_preference, created_at, updated_at`,
 		strings.Join(setClauses, ", "), argIdx,
@@ -408,6 +435,7 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 		&user.Bio,
 		&user.AvatarURL,
 		&user.HeaderImageURL,
+		&user.ColorScheme,
 		&user.Links,
 		&user.EmailVerified,
 		&user.AgeVerified,
@@ -443,6 +471,7 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 				"display_name":     user.DisplayName,
 				"avatar_url":       user.AvatarURL,
 				"header_image_url": user.HeaderImageURL,
+				"color_scheme":     user.ColorScheme,
 			},
 		})
 	}
