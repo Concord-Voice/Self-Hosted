@@ -57,7 +57,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 
 	// Initialize handlers
 	authHandler := auth.NewHandler(db, redis, log, cfg.JWTSecret)
-	sessionsHandler := sessions.NewHandler(db, log)
+	sessionsHandler := sessions.NewHandler(db, redis, log)
 	usersHandler := users.NewHandler(db, log, hub)
 	serversHandler := servers.NewHandler(db, log, hub)
 	channelsHandler := channels.NewHandler(db, log, hub)
@@ -191,6 +191,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 				sessionRoutes.POST("/revoke-all",
 					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
 					sessionsHandler.RevokeAllSessions,
+				)
+
+				// Toggle revocation mode (5 requests per minute - requires password re-verification)
+				sessionRoutes.PUT("/revocation-mode",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					sessionsHandler.UpdateRevocationMode,
 				)
 			}
 
