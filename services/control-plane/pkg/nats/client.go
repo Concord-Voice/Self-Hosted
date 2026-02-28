@@ -17,7 +17,7 @@ type Client struct {
 // Connect establishes a connection to the NATS server.
 func Connect(url string) (*Client, error) {
 	nc, err := nats.Connect(url,
-		nats.Name("concord-control-plane"),
+		nats.Name("concordvoice-control-plane"),
 		nats.MaxReconnects(-1),
 		nats.ReconnectWait(nats.DefaultReconnectWait),
 		nats.DisconnectErrHandler(func(_ *nats.Conn, err error) {

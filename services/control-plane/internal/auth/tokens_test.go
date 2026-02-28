@@ -51,7 +51,7 @@ func TestGenerateAccessToken(t *testing.T) {
 	t.Run("token has issuer set", func(t *testing.T) {
 		tokenStr, _ := GenerateAccessToken("user-1", testJWTSecret)
 		claims, _ := ValidateAccessToken(tokenStr, testJWTSecret)
-		assert.Equal(t, "concord-control-plane", claims.Issuer)
+		assert.Equal(t, "concordvoice-control-plane", claims.Issuer)
 	})
 }
 
