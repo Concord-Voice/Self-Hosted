@@ -66,7 +66,7 @@ export function createAuthMiddleware() {
       // Verify JWT signature and expiry
       const decoded = jwt.verify(token, config.jwtSecret, {
         algorithms: ['HS256'],
-        issuer: 'concord-control-plane',
+        issuer: 'concordvoice-control-plane',
       }) as JwtClaims;
 
       if (!decoded.user_id) {

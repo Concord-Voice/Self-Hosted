@@ -1,7 +1,7 @@
 {
-  "name": "@concord/media-plane",
+  "name": "@concordvoice/media-plane",
   "version": "0.1.0",
-  "description": "Concord Media Plane - WebRTC SFU for voice routing",
+  "description": "Concord Voice Media Plane - WebRTC SFU for voice routing",
   "main": "dist/index.js",
   "type": "module",
   "scripts": {
@@ -17,7 +17,7 @@
     "mediasoup",
     "voice"
   ],
-  "author": "Concord Team",
+  "author": "Concord Voice Team",
   "license": "UNLICENSED",
   "private": true,
   "dependencies": {

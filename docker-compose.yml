@@ -2,7 +2,7 @@ services:
   # PostgreSQL Database
   postgres:
     image: postgres:16-alpine
-    container_name: concord-postgres
+    container_name: concordvoice-postgres
     environment:
       POSTGRES_USER: concord
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-concord_dev_password}
@@ -18,12 +18,12 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - concord-network
+      - concordvoice-network
 
   # Redis Cache
   redis:
     image: redis:7-alpine
-    container_name: concord-redis
+    container_name: concordvoice-redis
     command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-concord_dev_redis}
     ports:
       - "6379:6379"
@@ -35,12 +35,12 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - concord-network
+      - concordvoice-network
 
   # NATS Message Broker (for inter-service messaging)
   nats:
     image: nats:2-alpine
-    container_name: concord-nats
+    container_name: concordvoice-nats
     command: "-js -m 8222"
     ports:
       - "4222:4222"  # Client connections
@@ -51,14 +51,14 @@ services:
       timeout: 5s
       retries: 5
     networks:
-      - concord-network
+      - concordvoice-network
 
   # PostgreSQL Admin (optional, for development)
   pgadmin:
     image: dpage/pgadmin4:latest
-    container_name: concord-pgadmin
+    container_name: concordvoice-pgadmin
     environment:
-      PGADMIN_DEFAULT_EMAIL: admin@concord.local
+      PGADMIN_DEFAULT_EMAIL: admin@concordvoice.local
       PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin}
       PGADMIN_CONFIG_SERVER_MODE: 'False'
     ports:
@@ -66,14 +66,14 @@ services:
     depends_on:
       - postgres
     networks:
-      - concord-network
+      - concordvoice-network
     profiles:
       - tools
 
   # Redis Commander (optional, for development)
   redis-commander:
     image: rediscommander/redis-commander:latest
-    container_name: concord-redis-commander
+    container_name: concordvoice-redis-commander
     environment:
       REDIS_HOSTS: local:redis:6379:0:${REDIS_PASSWORD:-concord_dev_redis}
     ports:
@@ -81,7 +81,7 @@ services:
     depends_on:
       - redis
     networks:
-      - concord-network
+      - concordvoice-network
     profiles:
       - tools
 
@@ -90,7 +90,7 @@ services:
     build:
       context: ./services/control-plane
       dockerfile: Dockerfile
-    container_name: concord-control-plane
+    container_name: concordvoice-control-plane
     environment:
       DATABASE_URL: postgres://concord:${POSTGRES_PASSWORD:-concord_dev_password}@postgres:5432/concord?sslmode=disable
       REDIS_URL: redis://:${REDIS_PASSWORD:-concord_dev_redis}@redis:6379
@@ -107,7 +107,7 @@ services:
       nats:
         condition: service_healthy
     networks:
-      - concord-network
+      - concordvoice-network
     profiles:
       - services
 
@@ -116,7 +116,7 @@ services:
     build:
       context: ./services/media-plane
       dockerfile: Dockerfile
-    container_name: concord-media-plane
+    container_name: concordvoice-media-plane
     environment:
       CONTROL_PLANE_URL: http://control-plane:8080
       REDIS_URL: redis://:${REDIS_PASSWORD:-concord_dev_redis}@redis:6379
@@ -137,7 +137,7 @@ services:
       control-plane:
         condition: service_started
     networks:
-      - concord-network
+      - concordvoice-network
     profiles:
       - services
 
@@ -146,7 +146,7 @@ services:
     build:
       context: ./services/licensing-authority
       dockerfile: Dockerfile
-    container_name: concord-licensing-authority
+    container_name: concordvoice-licensing-authority
     environment:
       DATABASE_URL: postgres://concord:${POSTGRES_PASSWORD:-concord_dev_password}@postgres:5432/concord?sslmode=disable
       PRIVATE_KEY_PATH: /app/keys/license_private_key.pem
@@ -159,7 +159,7 @@ services:
     volumes:
       - ./infrastructure/docker/licensing/keys:/app/keys
     networks:
-      - concord-network
+      - concordvoice-network
     profiles:
       - licensing
 
@@ -168,5 +168,5 @@ volumes:
   redis-data:
 
 networks:
-  concord-network:
+  concordvoice-network:
     driver: bridge
