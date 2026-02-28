@@ -50,7 +50,7 @@ type UpdateChannelRequest struct {
 
 // Valid audio quality tier values
 var validAudioQualityTiers = map[string]bool{
-	"voice": true, "standard": true, "high": true, "hifi": true, "studio": true,
+	"minimum": true, "low": true, "moderate": true, "standard": true, "high": true, "hifi": true, "studio": true,
 }
 
 // ListChannels returns all channels in a server
