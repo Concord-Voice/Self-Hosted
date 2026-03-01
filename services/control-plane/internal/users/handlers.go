@@ -619,6 +619,50 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 	})
 }
 
+// SearchUsers searches for users by username or display_name.
+// GET /users/search?q=...
+func (h *Handler) SearchUsers(c *gin.Context) {
+	userID := c.GetString("user_id")
+	query := strings.TrimSpace(c.Query("q"))
+	if query == "" || len(query) < 2 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Search query must be at least 2 characters"})
+		return
+	}
+
+	pattern := "%" + strings.ToLower(query) + "%"
+	rows, err := h.db.Query(`
+		SELECT id, username, display_name, avatar_url
+		FROM users
+		WHERE (LOWER(username) LIKE $1 OR LOWER(COALESCE(display_name, '')) LIKE $1)
+		  AND id != $2
+		LIMIT 20
+	`, pattern, userID)
+	if err != nil {
+		h.log.Error("Failed to search users", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to search users"})
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	type searchResult struct {
+		ID          string  `json:"id"`
+		Username    string  `json:"username"`
+		DisplayName *string `json:"display_name,omitempty"`
+		AvatarURL   *string `json:"avatar_url,omitempty"`
+	}
+
+	results := []searchResult{}
+	for rows.Next() {
+		var r searchResult
+		if err := rows.Scan(&r.ID, &r.Username, &r.DisplayName, &r.AvatarURL); err != nil {
+			continue
+		}
+		results = append(results, r)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"users": results})
+}
+
 // GetPublicKey returns a user's latest public key (for E2EE key wrapping).
 func (h *Handler) GetPublicKey(c *gin.Context) {
 	targetUserID := c.Param("user_id")

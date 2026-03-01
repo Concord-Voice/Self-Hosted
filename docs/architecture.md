@@ -25,7 +25,7 @@ flowchart TB
     end
 
     subgraph Infrastructure
-        PG[("PostgreSQL 16<br/>13 tables")]
+        PG[("PostgreSQL 16<br/>21 tables")]
         RD[("Redis 7<br/>sessions / presence")]
         NATS["NATS<br/>inter-service"]
     end
@@ -104,9 +104,9 @@ flowchart TB
 - Rate limiting
 - Moderation logic
 
-**API**: 54 REST endpoints + 1 WebSocket endpoint across 10 groups (Auth, Users, Sessions, Servers, Channels, Messages, Members, Invites, E2EE, WebSocket). See [API Documentation](./api/README.md) for the full OpenAPI 3.0 spec.
+**API**: 75+ REST endpoints + 1 WebSocket endpoint across 13 groups (Auth, Users, Sessions, Servers, Channels, Messages, Members, Invites, E2EE, WebSocket, Friends, DM Conversations, Voice). See [API Documentation](./api/README.md) for the full OpenAPI 3.0 spec.
 
-**Database Schema** (13+ tables across 23 migrations):
+**Database Schema** (21+ tables across 26 migrations):
 
 ```mermaid
 erDiagram
@@ -205,6 +205,61 @@ erDiagram
         UUID channel_id FK
         UUID user_id FK
     }
+    voice_participants {
+        UUID id PK
+        UUID channel_id FK
+        UUID user_id FK
+        TIMESTAMPTZ joined_at
+    }
+    friendships {
+        UUID id PK
+        UUID requester_id FK
+        UUID addressee_id FK
+        VARCHAR status
+    }
+    dm_conversations {
+        UUID id PK
+        BOOLEAN is_group
+        VARCHAR name
+        BOOLEAN is_encrypted
+        UUID created_by FK
+    }
+    dm_participants {
+        UUID conversation_id PK,FK
+        UUID user_id PK,FK
+        TIMESTAMPTZ joined_at
+    }
+    dm_messages {
+        UUID id PK
+        UUID conversation_id FK
+        UUID user_id FK
+        TEXT content
+        BOOLEAN is_encrypted
+        VARCHAR type
+    }
+    dm_read_states {
+        UUID user_id PK,FK
+        UUID conversation_id PK,FK
+        TIMESTAMPTZ last_read_at
+    }
+    dm_channel_keys {
+        UUID id PK
+        UUID conversation_id FK
+        UUID user_id FK
+        TEXT wrapped_key
+        INTEGER key_version
+    }
+    dm_pending_key_requests {
+        UUID id PK
+        UUID conversation_id FK
+        UUID user_id FK
+    }
+    dm_voice_participants {
+        UUID id PK
+        UUID conversation_id FK
+        UUID user_id FK
+        TIMESTAMPTZ joined_at
+    }
 
     users ||--o| user_keys : "has"
     users ||--o{ public_keys : "has"
@@ -216,6 +271,10 @@ erDiagram
     users ||--o{ channel_keys : "holds"
     users ||--o{ pending_key_requests : "requests"
     users ||--o{ channel_read_states : "tracks"
+    users ||--o{ friendships : "has"
+    users ||--o{ dm_participants : "participates"
+    users ||--o{ dm_messages : "sends"
+    users ||--o{ dm_channel_keys : "holds"
     servers ||--o{ channels : "contains"
     servers ||--o{ server_members : "has"
     servers ||--o{ server_invites : "has"
@@ -224,6 +283,13 @@ erDiagram
     channels ||--o{ channel_read_states : "tracks"
     channels ||--o{ channel_keys : "has"
     channels ||--o{ pending_key_requests : "has"
+    channels ||--o{ voice_participants : "has"
+    dm_conversations ||--o{ dm_participants : "has"
+    dm_conversations ||--o{ dm_messages : "contains"
+    dm_conversations ||--o{ dm_read_states : "tracks"
+    dm_conversations ||--o{ dm_channel_keys : "has"
+    dm_conversations ||--o{ dm_pending_key_requests : "has"
+    dm_conversations ||--o{ dm_voice_participants : "has"
 ```
 
 Channel types: `text`, `voice`, `bulletin`

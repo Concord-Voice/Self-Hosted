@@ -64,6 +64,18 @@ type PresenceUpdate struct {
 	Timestamp int64     `json:"timestamp"` // Unix timestamp
 }
 
+// DMBroadcastMessage represents a message to be sent to all clients subscribed to a DM conversation
+type DMBroadcastMessage struct {
+	// Target DM conversation ID
+	ConversationID uuid.UUID
+
+	// Message to send
+	Data OutgoingMessage
+
+	// Optional: exclude this user from receiving the message
+	ExcludeUser *uuid.UUID
+}
+
 // TypingIndicator represents a typing indicator event
 type TypingIndicator struct {
 	UserID    uuid.UUID `json:"user_id"`

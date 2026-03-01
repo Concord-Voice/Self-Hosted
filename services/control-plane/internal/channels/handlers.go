@@ -1073,5 +1073,284 @@ func (h *Handler) GetPendingKeyRequests(c *gin.Context) {
 		return
 	}
 
+	// Also fetch DM pending key requests
+	dmQuery := `
+		SELECT dpkr.id, dpkr.conversation_id, dpkr.user_id, dpkr.created_at
+		FROM dm_pending_key_requests dpkr
+		INNER JOIN dm_channel_keys dck ON dpkr.conversation_id = dck.conversation_id AND dck.user_id = $1
+		WHERE dpkr.user_id != $1
+		ORDER BY dpkr.created_at ASC
+	`
+	dmRows, dmErr := h.db.Query(dmQuery, userID)
+	if dmErr == nil {
+		defer func() { _ = dmRows.Close() }()
+		for dmRows.Next() {
+			var req pendingRequest
+			if err := dmRows.Scan(&req.ID, &req.ChannelID, &req.UserID, &req.CreatedAt); err != nil {
+				continue
+			}
+			requests = append(requests, req)
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{"pending_requests": requests})
+}
+
+// GetUnifiedKeys resolves a context_id to either a server channel or DM conversation
+// and returns the caller's wrapped key.
+// GET /e2ee/keys/:context_id
+func (h *Handler) GetUnifiedKeys(c *gin.Context) {
+	userID := c.GetString("user_id")
+	contextID := c.Param("context_id")
+
+	if _, err := uuid.Parse(contextID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid context ID"})
+		return
+	}
+
+	// Try server channel first
+	var channelEncrypted bool
+	err := h.db.QueryRow(`
+		SELECT c.is_encrypted FROM channels c
+		INNER JOIN server_members sm ON c.server_id = sm.server_id AND sm.user_id = $2
+		WHERE c.id = $1
+	`, contextID, userID).Scan(&channelEncrypted)
+
+	if err == nil {
+		// Found as server channel
+		if !channelEncrypted {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Channel is not encrypted"})
+			return
+		}
+
+		var key models.ChannelKey
+		err = h.db.QueryRow(
+			`SELECT id, channel_id, user_id, wrapped_key, key_version, created_at
+			 FROM channel_keys
+			 WHERE channel_id = $1 AND user_id = $2
+			 ORDER BY key_version DESC LIMIT 1`,
+			contextID, userID,
+		).Scan(&key.ID, &key.ChannelID, &key.UserID, &key.WrappedKey, &key.KeyVersion, &key.CreatedAt)
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "No encryption key available yet", "pending": true})
+			return
+		} else if err != nil {
+			h.log.Error("Failed to fetch channel key", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch keys"})
+			return
+		}
+
+		c.JSON(http.StatusOK, gin.H{"key": key, "context_type": "channel"})
+		return
+	}
+
+	if err != sql.ErrNoRows {
+		h.log.Error("Failed to check channel", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch keys"})
+		return
+	}
+
+	// Try DM conversation
+	var dmEncrypted bool
+	err = h.db.QueryRow(`
+		SELECT dc.is_encrypted FROM dm_conversations dc
+		INNER JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $2
+		WHERE dc.id = $1
+	`, contextID, userID).Scan(&dmEncrypted)
+
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Context not found or access denied"})
+		return
+	} else if err != nil {
+		h.log.Error("Failed to check DM conversation", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch keys"})
+		return
+	}
+
+	if !dmEncrypted {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Conversation is not encrypted"})
+		return
+	}
+
+	type dmKey struct {
+		ID             string `json:"id"`
+		ConversationID string `json:"conversation_id"`
+		UserID         string `json:"user_id"`
+		WrappedKey     string `json:"wrapped_key"`
+		KeyVersion     int    `json:"key_version"`
+		CreatedAt      string `json:"created_at"`
+	}
+
+	var key dmKey
+	err = h.db.QueryRow(`
+		SELECT id, conversation_id, user_id, wrapped_key, key_version, created_at
+		FROM dm_channel_keys
+		WHERE conversation_id = $1 AND user_id = $2
+		ORDER BY key_version DESC LIMIT 1
+	`, contextID, userID).Scan(&key.ID, &key.ConversationID, &key.UserID, &key.WrappedKey, &key.KeyVersion, &key.CreatedAt)
+
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "No encryption key available yet", "pending": true})
+		return
+	} else if err != nil {
+		h.log.Error("Failed to fetch DM key", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch keys"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"key": key, "context_type": "dm"})
+}
+
+// DistributeUnifiedKeys resolves a context_id and distributes wrapped keys.
+// POST /e2ee/keys/:context_id
+func (h *Handler) DistributeUnifiedKeys(c *gin.Context) {
+	userID := c.GetString("user_id")
+	contextID := c.Param("context_id")
+
+	if _, err := uuid.Parse(contextID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid context ID"})
+		return
+	}
+
+	var req DistributeChannelKeysRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	// Try server channel first
+	var isChannel bool
+	err := h.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM channels c
+			INNER JOIN server_members sm ON c.server_id = sm.server_id AND sm.user_id = $2
+			WHERE c.id = $1 AND c.is_encrypted = TRUE
+		)
+	`, contextID, userID).Scan(&isChannel)
+	if err != nil {
+		h.log.Error("Failed to check channel", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to distribute keys"})
+		return
+	}
+
+	if isChannel {
+		// Delegate to existing channel key distribution logic
+		c.Params = append(c.Params, gin.Param{Key: "id", Value: contextID})
+		h.DistributeChannelKeys(c)
+		return
+	}
+
+	// Try DM conversation
+	var isDM bool
+	err = h.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM dm_conversations dc
+			INNER JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $2
+			WHERE dc.id = $1 AND dc.is_encrypted = TRUE
+		)
+	`, contextID, userID).Scan(&isDM)
+	if err != nil || !isDM {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Context not found or access denied"})
+		return
+	}
+
+	// Distribute DM keys
+	keyVersion := 1
+	_ = h.db.QueryRow(`SELECT COALESCE(MAX(key_version), 0) + 1 FROM dm_channel_keys WHERE conversation_id = $1`, contextID).Scan(&keyVersion)
+
+	distributed := 0
+	for memberUserID, wrappedKey := range req.WrappedKeys {
+		if _, parseErr := uuid.Parse(memberUserID); parseErr != nil {
+			continue
+		}
+
+		result, err := h.db.Exec(`
+			INSERT INTO dm_channel_keys (conversation_id, user_id, wrapped_key, key_version)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (conversation_id, user_id, key_version) DO NOTHING
+		`, contextID, memberUserID, wrappedKey, keyVersion)
+		if err != nil {
+			continue
+		}
+		rowsAffected, _ := result.RowsAffected()
+		if rowsAffected > 0 {
+			_, _ = h.db.Exec(`DELETE FROM dm_pending_key_requests WHERE conversation_id = $1 AND user_id = $2`, contextID, memberUserID)
+
+			if h.hub != nil {
+				if recipientUUID, parseErr := uuid.Parse(memberUserID); parseErr == nil {
+					h.hub.BroadcastToUser(recipientUUID, websocket.OutgoingMessage{
+						Type: "key_delivered",
+						Data: map[string]interface{}{
+							"channel_id": contextID,
+							"user_id":    memberUserID,
+						},
+					})
+				}
+			}
+			distributed++
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"distributed": distributed, "context_type": "dm"})
+}
+
+// RotateKey handles manual seal & rotate for server channel E2EE.
+// POST /channels/:id/rotate-key
+func (h *Handler) RotateKey(c *gin.Context) {
+	userID := c.GetString("user_id")
+	channelID := c.Param("id")
+
+	if _, err := uuid.Parse(channelID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
+		return
+	}
+
+	// Verify user is admin/owner of this channel's server
+	var role string
+	var serverID string
+	err := h.db.QueryRow(`
+		SELECT c.server_id, sm.role FROM channels c
+		INNER JOIN server_members sm ON c.server_id = sm.server_id AND sm.user_id = $2
+		WHERE c.id = $1 AND c.is_encrypted = TRUE
+	`, channelID, userID).Scan(&serverID, &role)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found or not encrypted"})
+		return
+	} else if err != nil {
+		h.log.Error("Failed to check permissions for rotation", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to rotate key"})
+		return
+	}
+
+	if role != "owner" && role != "admin" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Only owners and admins can rotate channel keys"})
+		return
+	}
+
+	// TODO: Rate limit via Redis (3/day basic, 10/day premium per channel). For now, accept all.
+
+	var maxVersion int
+	_ = h.db.QueryRow(`SELECT COALESCE(MAX(key_version), 0) FROM channel_keys WHERE channel_id = $1`, channelID).Scan(&maxVersion)
+
+	h.log.Info("Channel key rotation requested", "channel_id", channelID, "user_id", userID, "current_version", maxVersion)
+
+	// Broadcast key_rotation to all server subscribers
+	if h.hub != nil {
+		if serverUUID, parseErr := uuid.Parse(serverID); parseErr == nil {
+			h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+				Type: "key_rotation",
+				Data: map[string]interface{}{
+					"channel_id":      channelID,
+					"server_id":       serverID,
+					"triggered_by":    userID,
+					"new_key_version": maxVersion + 1,
+				},
+			})
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":         "Key rotation initiated",
+		"new_key_version": maxVersion + 1,
+	})
 }

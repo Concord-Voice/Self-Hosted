@@ -58,6 +58,43 @@ type voiceHeartbeatEvent struct {
 	Timestamp string   `json:"timestamp"`
 }
 
+// roomContext holds the resolved context for a voice room.
+// Either serverID is set (server channel) or isDM is true (DM conversation).
+type roomContext struct {
+	isDM       bool
+	serverID   string
+	serverUUID uuid.UUID
+	convUUID   uuid.UUID
+}
+
+// resolveRoom performs the dual-lookup: tries channels first, falls back to dm_conversations.
+func (s *NATSSubscriber) resolveRoom(channelID string) (*roomContext, error) {
+	var serverID string
+	err := s.db.QueryRow("SELECT server_id FROM channels WHERE id = $1", channelID).Scan(&serverID)
+	if err == nil {
+		serverUUID, parseErr := uuid.Parse(serverID)
+		if parseErr != nil {
+			return nil, parseErr
+		}
+		return &roomContext{isDM: false, serverID: serverID, serverUUID: serverUUID}, nil
+	}
+	if err != sql.ErrNoRows {
+		return nil, err
+	}
+
+	// Not a server channel — try DM conversation
+	var convID string
+	err = s.db.QueryRow("SELECT id FROM dm_conversations WHERE id = $1", channelID).Scan(&convID)
+	if err != nil {
+		return nil, err
+	}
+	convUUID, parseErr := uuid.Parse(convID)
+	if parseErr != nil {
+		return nil, parseErr
+	}
+	return &roomContext{isDM: true, convUUID: convUUID}, nil
+}
+
 // Subscribe registers handlers for all voice NATS subjects.
 func (s *NATSSubscriber) Subscribe() error {
 	if _, err := s.nats.Subscribe("voice.joined", s.handleJoined); err != nil {
@@ -84,43 +121,60 @@ func (s *NATSSubscriber) handleJoined(data []byte) {
 		return
 	}
 
-	// Insert into voice_participants
-	_, err := s.db.Exec(`
-		INSERT INTO voice_participants (channel_id, user_id, joined_at)
-		VALUES ($1, $2, NOW())
-		ON CONFLICT (channel_id, user_id) DO UPDATE SET joined_at = NOW()
-	`, event.ChannelID, event.UserID)
+	ctx, err := s.resolveRoom(event.ChannelID)
 	if err != nil {
-		s.log.Error("Failed to insert voice participant", "error", err, "channel_id", event.ChannelID, "user_id", event.UserID)
+		s.log.Error("Failed to resolve room for voice.joined", "error", err, "channel_id", event.ChannelID)
 		return
 	}
 
-	// Look up the server_id for this channel to broadcast to server subscribers
-	var serverID string
-	if err := s.db.QueryRow("SELECT server_id FROM channels WHERE id = $1", event.ChannelID).Scan(&serverID); err != nil {
-		s.log.Error("Failed to look up server for channel", "error", err, "channel_id", event.ChannelID)
-		return
+	if ctx.isDM {
+		// Insert into dm_voice_participants
+		_, err := s.db.Exec(`
+			INSERT INTO dm_voice_participants (conversation_id, user_id, joined_at)
+			VALUES ($1, $2, NOW())
+			ON CONFLICT (conversation_id, user_id) DO UPDATE SET joined_at = NOW()
+		`, event.ChannelID, event.UserID)
+		if err != nil {
+			s.log.Error("Failed to insert DM voice participant", "error", err, "conversation_id", event.ChannelID, "user_id", event.UserID)
+			return
+		}
+
+		s.hub.BroadcastToDM(ctx.convUUID, websocket.OutgoingMessage{
+			Type: "dm_voice_state_update",
+			Data: map[string]interface{}{
+				"conversation_id": event.ChannelID,
+				"user_id":         event.UserID,
+				"username":        event.Username,
+				"display_name":    event.DisplayName,
+				"action":          "joined",
+			},
+		})
+	} else {
+		// Insert into voice_participants (server channel)
+		_, err := s.db.Exec(`
+			INSERT INTO voice_participants (channel_id, user_id, joined_at)
+			VALUES ($1, $2, NOW())
+			ON CONFLICT (channel_id, user_id) DO UPDATE SET joined_at = NOW()
+		`, event.ChannelID, event.UserID)
+		if err != nil {
+			s.log.Error("Failed to insert voice participant", "error", err, "channel_id", event.ChannelID, "user_id", event.UserID)
+			return
+		}
+
+		s.hub.BroadcastToServer(ctx.serverUUID, websocket.OutgoingMessage{
+			Type: "voice_state_update",
+			Data: map[string]interface{}{
+				"channel_id":   event.ChannelID,
+				"user_id":      event.UserID,
+				"username":     event.Username,
+				"display_name": event.DisplayName,
+				"action":       "joined",
+				"server_id":    ctx.serverID,
+			},
+		})
 	}
 
-	serverUUID, err := uuid.Parse(serverID)
-	if err != nil {
-		return
-	}
-
-	// Broadcast voice_state_update to all server subscribers
-	s.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
-		Type: "voice_state_update",
-		Data: map[string]interface{}{
-			"channel_id":   event.ChannelID,
-			"user_id":      event.UserID,
-			"username":     event.Username,
-			"display_name": event.DisplayName,
-			"action":       "joined",
-			"server_id":    serverID,
-		},
-	})
-
-	s.log.Info("Voice participant joined", "channel_id", event.ChannelID, "user_id", event.UserID)
+	s.log.Info("Voice participant joined", "channel_id", event.ChannelID, "user_id", event.UserID, "is_dm", ctx.isDM)
 }
 
 func (s *NATSSubscriber) handleLeft(data []byte) {
@@ -130,38 +184,46 @@ func (s *NATSSubscriber) handleLeft(data []byte) {
 		return
 	}
 
-	// Delete from voice_participants
-	_, err := s.db.Exec(`
-		DELETE FROM voice_participants WHERE channel_id = $1 AND user_id = $2
-	`, event.ChannelID, event.UserID)
+	ctx, err := s.resolveRoom(event.ChannelID)
 	if err != nil {
-		s.log.Error("Failed to delete voice participant", "error", err, "channel_id", event.ChannelID, "user_id", event.UserID)
+		s.log.Error("Failed to resolve room for voice.left", "error", err, "channel_id", event.ChannelID)
 		return
 	}
 
-	// Look up server_id
-	var serverID string
-	if err := s.db.QueryRow("SELECT server_id FROM channels WHERE id = $1", event.ChannelID).Scan(&serverID); err != nil {
-		s.log.Error("Failed to look up server for channel", "error", err, "channel_id", event.ChannelID)
-		return
+	if ctx.isDM {
+		_, err := s.db.Exec(`DELETE FROM dm_voice_participants WHERE conversation_id = $1 AND user_id = $2`, event.ChannelID, event.UserID)
+		if err != nil {
+			s.log.Error("Failed to delete DM voice participant", "error", err, "conversation_id", event.ChannelID, "user_id", event.UserID)
+			return
+		}
+
+		s.hub.BroadcastToDM(ctx.convUUID, websocket.OutgoingMessage{
+			Type: "dm_voice_state_update",
+			Data: map[string]interface{}{
+				"conversation_id": event.ChannelID,
+				"user_id":         event.UserID,
+				"action":          "left",
+			},
+		})
+	} else {
+		_, err := s.db.Exec(`DELETE FROM voice_participants WHERE channel_id = $1 AND user_id = $2`, event.ChannelID, event.UserID)
+		if err != nil {
+			s.log.Error("Failed to delete voice participant", "error", err, "channel_id", event.ChannelID, "user_id", event.UserID)
+			return
+		}
+
+		s.hub.BroadcastToServer(ctx.serverUUID, websocket.OutgoingMessage{
+			Type: "voice_state_update",
+			Data: map[string]interface{}{
+				"channel_id": event.ChannelID,
+				"user_id":    event.UserID,
+				"action":     "left",
+				"server_id":  ctx.serverID,
+			},
+		})
 	}
 
-	serverUUID, err := uuid.Parse(serverID)
-	if err != nil {
-		return
-	}
-
-	s.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
-		Type: "voice_state_update",
-		Data: map[string]interface{}{
-			"channel_id": event.ChannelID,
-			"user_id":    event.UserID,
-			"action":     "left",
-			"server_id":  serverID,
-		},
-	})
-
-	s.log.Info("Voice participant left", "channel_id", event.ChannelID, "user_id", event.UserID)
+	s.log.Info("Voice participant left", "channel_id", event.ChannelID, "user_id", event.UserID, "is_dm", ctx.isDM)
 }
 
 func (s *NATSSubscriber) handleRoomEmpty(data []byte) {
@@ -171,36 +233,42 @@ func (s *NATSSubscriber) handleRoomEmpty(data []byte) {
 		return
 	}
 
-	// Delete all participants for this channel (safety net)
-	_, err := s.db.Exec(`DELETE FROM voice_participants WHERE channel_id = $1`, event.ChannelID)
+	ctx, err := s.resolveRoom(event.ChannelID)
 	if err != nil {
-		s.log.Error("Failed to clear voice participants", "error", err, "channel_id", event.ChannelID)
-	}
-
-	// Broadcast room_empty so clients clear any stale voice members for this channel.
-	// This is a safety net: handleLeft should have already broadcast individual "left"
-	// events, but NATS message ordering isn't guaranteed across subjects.
-	var serverID string
-	if err := s.db.QueryRow("SELECT server_id FROM channels WHERE id = $1", event.ChannelID).Scan(&serverID); err != nil {
-		s.log.Error("Failed to look up server for channel (room_empty)", "error", err, "channel_id", event.ChannelID)
+		s.log.Error("Failed to resolve room for voice.room_empty", "error", err, "channel_id", event.ChannelID)
 		return
 	}
 
-	serverUUID, err := uuid.Parse(serverID)
-	if err != nil {
-		return
+	if ctx.isDM {
+		_, err := s.db.Exec(`DELETE FROM dm_voice_participants WHERE conversation_id = $1`, event.ChannelID)
+		if err != nil {
+			s.log.Error("Failed to clear DM voice participants", "error", err, "conversation_id", event.ChannelID)
+		}
+
+		s.hub.BroadcastToDM(ctx.convUUID, websocket.OutgoingMessage{
+			Type: "dm_voice_state_update",
+			Data: map[string]interface{}{
+				"conversation_id": event.ChannelID,
+				"action":          "room_empty",
+			},
+		})
+	} else {
+		_, err := s.db.Exec(`DELETE FROM voice_participants WHERE channel_id = $1`, event.ChannelID)
+		if err != nil {
+			s.log.Error("Failed to clear voice participants", "error", err, "channel_id", event.ChannelID)
+		}
+
+		s.hub.BroadcastToServer(ctx.serverUUID, websocket.OutgoingMessage{
+			Type: "voice_state_update",
+			Data: map[string]interface{}{
+				"channel_id": event.ChannelID,
+				"action":     "room_empty",
+				"server_id":  ctx.serverID,
+			},
+		})
 	}
 
-	s.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
-		Type: "voice_state_update",
-		Data: map[string]interface{}{
-			"channel_id": event.ChannelID,
-			"action":     "room_empty",
-			"server_id":  serverID,
-		},
-	})
-
-	s.log.Info("Voice room empty", "channel_id", event.ChannelID)
+	s.log.Info("Voice room empty", "channel_id", event.ChannelID, "is_dm", ctx.isDM)
 }
 
 // handleHeartbeat reconciles voice_participants against the media plane's
@@ -213,8 +281,20 @@ func (s *NATSSubscriber) handleHeartbeat(data []byte) {
 		return
 	}
 
-	// Query current DB participants for this channel
-	rows, err := s.db.Query(`SELECT user_id FROM voice_participants WHERE channel_id = $1`, event.ChannelID)
+	ctx, err := s.resolveRoom(event.ChannelID)
+	if err != nil {
+		s.log.Error("Failed to resolve room for voice.heartbeat", "error", err, "channel_id", event.ChannelID)
+		return
+	}
+
+	// Query current DB participants
+	var participantsQuery string
+	if ctx.isDM {
+		participantsQuery = `SELECT user_id FROM dm_voice_participants WHERE conversation_id = $1`
+	} else {
+		participantsQuery = `SELECT user_id FROM voice_participants WHERE channel_id = $1`
+	}
+	rows, err := s.db.Query(participantsQuery, event.ChannelID)
 	if err != nil {
 		s.log.Error("Failed to query voice_participants for reconciliation", "error", err, "channel_id", event.ChannelID)
 		return
@@ -229,7 +309,6 @@ func (s *NATSSubscriber) handleHeartbeat(data []byte) {
 		}
 	}
 
-	// Nothing in DB — nothing to reconcile
 	if len(dbUsers) == 0 {
 		return
 	}
@@ -240,46 +319,54 @@ func (s *NATSSubscriber) handleHeartbeat(data []byte) {
 		mpUsers[uid] = true
 	}
 
-	// Look up server_id (needed for broadcasts)
-	var serverID string
-	if err := s.db.QueryRow("SELECT server_id FROM channels WHERE id = $1", event.ChannelID).Scan(&serverID); err != nil {
-		s.log.Error("Failed to look up server for channel (heartbeat)", "error", err, "channel_id", event.ChannelID)
-		return
-	}
-	serverUUID, err := uuid.Parse(serverID)
-	if err != nil {
-		return
-	}
-
-	// Find and remove stale DB users (in DB but not in media plane)
+	// Find and remove stale DB users
 	for uid := range dbUsers {
 		if !mpUsers[uid] {
-			_, _ = s.db.Exec(`DELETE FROM voice_participants WHERE channel_id = $1 AND user_id = $2`,
-				event.ChannelID, uid)
-
-			s.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
-				Type: "voice_state_update",
-				Data: map[string]interface{}{
-					"channel_id": event.ChannelID,
-					"user_id":    uid,
-					"action":     "left",
-					"server_id":  serverID,
-				},
-			})
-
-			s.log.Info("Reconciled stale voice participant", "channel_id", event.ChannelID, "user_id", uid)
+			if ctx.isDM {
+				_, _ = s.db.Exec(`DELETE FROM dm_voice_participants WHERE conversation_id = $1 AND user_id = $2`, event.ChannelID, uid)
+				s.hub.BroadcastToDM(ctx.convUUID, websocket.OutgoingMessage{
+					Type: "dm_voice_state_update",
+					Data: map[string]interface{}{
+						"conversation_id": event.ChannelID,
+						"user_id":         uid,
+						"action":          "left",
+					},
+				})
+			} else {
+				_, _ = s.db.Exec(`DELETE FROM voice_participants WHERE channel_id = $1 AND user_id = $2`, event.ChannelID, uid)
+				s.hub.BroadcastToServer(ctx.serverUUID, websocket.OutgoingMessage{
+					Type: "voice_state_update",
+					Data: map[string]interface{}{
+						"channel_id": event.ChannelID,
+						"user_id":    uid,
+						"action":     "left",
+						"server_id":  ctx.serverID,
+					},
+				})
+			}
+			s.log.Info("Reconciled stale voice participant", "channel_id", event.ChannelID, "user_id", uid, "is_dm", ctx.isDM)
 		}
 	}
 
 	// If media plane reports empty room but DB still had entries, broadcast room_empty
 	if len(event.UserIDs) == 0 && len(dbUsers) > 0 {
-		s.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
-			Type: "voice_state_update",
-			Data: map[string]interface{}{
-				"channel_id": event.ChannelID,
-				"action":     "room_empty",
-				"server_id":  serverID,
-			},
-		})
+		if ctx.isDM {
+			s.hub.BroadcastToDM(ctx.convUUID, websocket.OutgoingMessage{
+				Type: "dm_voice_state_update",
+				Data: map[string]interface{}{
+					"conversation_id": event.ChannelID,
+					"action":          "room_empty",
+				},
+			})
+		} else {
+			s.hub.BroadcastToServer(ctx.serverUUID, websocket.OutgoingMessage{
+				Type: "voice_state_update",
+				Data: map[string]interface{}{
+					"channel_id": event.ChannelID,
+					"action":     "room_empty",
+					"server_id":  ctx.serverID,
+				},
+			})
+		}
 	}
 }
