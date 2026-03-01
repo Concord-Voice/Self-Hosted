@@ -5,7 +5,9 @@ import (
 	"database/sql"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/concord/control-plane/internal/invites"
 	"github.com/concord/control-plane/internal/websocket"
 	"github.com/concord/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
@@ -504,4 +506,423 @@ func (h *Handler) BlockUser(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "User blocked"})
+}
+
+// --- Friend Code types ---
+
+// friendCodeResponse represents a friend code in API responses.
+type friendCodeResponse struct {
+	ID         string     `json:"id"`
+	UserID     string     `json:"user_id"`
+	Code       string     `json:"code"`
+	MaxUses    *int       `json:"max_uses"`
+	UseCount   int        `json:"use_count"`
+	ExpiresAt  *time.Time `json:"expires_at,omitempty"`
+	IsRevoked  bool       `json:"is_revoked"`
+	AutoAccept bool       `json:"auto_accept"`
+	CreatedAt  string     `json:"created_at"`
+}
+
+type createFriendCodeRequest struct {
+	MaxUses    *int  `json:"max_uses"`
+	ExpiresIn  *int  `json:"expires_in"` // seconds; nil → default 3600 (1h)
+	AutoAccept *bool `json:"auto_accept"`
+}
+
+// CreateFriendCode generates a new friend code for the caller.
+// POST /friends/codes
+func (h *Handler) CreateFriendCode(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	var req createFriendCodeRequest
+	_ = c.ShouldBindJSON(&req)
+
+	// Apply defaults — max 10 uses, max 1 day
+	var maxUsesPtr *int
+	if req.MaxUses != nil && *req.MaxUses > 0 {
+		maxUses := *req.MaxUses
+		if maxUses > 10 {
+			maxUses = 10
+		}
+		maxUsesPtr = &maxUses
+	} else if req.MaxUses == nil {
+		defaultMax := 1
+		maxUsesPtr = &defaultMax
+	}
+
+	expiresInSec := 3600 // default 1 hour
+	if req.ExpiresIn != nil {
+		expiresInSec = *req.ExpiresIn
+		if expiresInSec < 300 {
+			expiresInSec = 300
+		}
+		if expiresInSec > 86400 {
+			expiresInSec = 86400
+		}
+	}
+	expiresAt := time.Now().UTC().Add(time.Duration(expiresInSec) * time.Second)
+
+	autoAccept := false
+	if req.AutoAccept != nil {
+		autoAccept = *req.AutoAccept
+	}
+
+	// Generate unique code with retry (reuse server invite code generator)
+	for attempts := 0; attempts < 5; attempts++ {
+		code, err := invites.GenerateCode()
+		if err != nil {
+			h.log.Error("Failed to generate friend code", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create friend code"})
+			return
+		}
+
+		var fc friendCodeResponse
+		insertErr := h.db.QueryRow(`
+			INSERT INTO friend_codes (user_id, code, max_uses, expires_at, auto_accept)
+			VALUES ($1, $2, $3, $4, $5)
+			RETURNING id, user_id, code, max_uses, use_count, expires_at, is_revoked, auto_accept, created_at
+		`, userID, code, maxUsesPtr, expiresAt, autoAccept).Scan(
+			&fc.ID, &fc.UserID, &fc.Code, &fc.MaxUses, &fc.UseCount,
+			&fc.ExpiresAt, &fc.IsRevoked, &fc.AutoAccept, &fc.CreatedAt,
+		)
+		if insertErr != nil {
+			continue // unique constraint collision — retry
+		}
+
+		h.log.Info("Friend code created", "user_id", userID, "code", code)
+		c.JSON(http.StatusCreated, gin.H{"friend_code": fc})
+		return
+	}
+
+	h.log.Error("Failed to create unique friend code after retries")
+	c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create friend code"})
+}
+
+// ListFriendCodes returns the caller's non-revoked friend codes.
+// GET /friends/codes
+func (h *Handler) ListFriendCodes(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	rows, err := h.db.Query(`
+		SELECT id, user_id, code, max_uses, use_count, expires_at, is_revoked, auto_accept, created_at
+		FROM friend_codes
+		WHERE user_id = $1 AND is_revoked = FALSE
+		ORDER BY created_at DESC
+	`, userID)
+	if err != nil {
+		h.log.Error("Failed to query friend codes", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch friend codes"})
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	codes := []friendCodeResponse{}
+	for rows.Next() {
+		var fc friendCodeResponse
+		if err := rows.Scan(
+			&fc.ID, &fc.UserID, &fc.Code, &fc.MaxUses, &fc.UseCount,
+			&fc.ExpiresAt, &fc.IsRevoked, &fc.AutoAccept, &fc.CreatedAt,
+		); err != nil {
+			h.log.Error("Failed to scan friend code", "error", err)
+			continue
+		}
+		codes = append(codes, fc)
+	}
+	if err := rows.Err(); err != nil {
+		h.log.Error("Error iterating friend codes", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch friend codes"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"friend_codes": codes})
+}
+
+// RevokeFriendCode soft-revokes a friend code owned by the caller.
+// DELETE /friends/codes/:id
+func (h *Handler) RevokeFriendCode(c *gin.Context) {
+	userID := c.GetString("user_id")
+	codeID := c.Param("id")
+
+	if _, err := uuid.Parse(codeID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid code ID"})
+		return
+	}
+
+	result, err := h.db.Exec(`
+		UPDATE friend_codes SET is_revoked = TRUE
+		WHERE id = $1 AND user_id = $2 AND is_revoked = FALSE
+	`, codeID, userID)
+	if err != nil {
+		h.log.Error("Failed to revoke friend code", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to revoke friend code"})
+		return
+	}
+
+	affected, _ := result.RowsAffected()
+	if affected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Friend code not found or already revoked"})
+		return
+	}
+
+	h.log.Info("Friend code revoked", "code_id", codeID, "user_id", userID)
+	c.JSON(http.StatusOK, gin.H{"message": "Friend code revoked"})
+}
+
+// PreviewFriendCode validates a friend code and returns the owner's profile.
+// Does NOT consume a use.
+// GET /friends/codes/:code
+func (h *Handler) PreviewFriendCode(c *gin.Context) {
+	code := c.Param("code")
+
+	if len(code) != 8 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid friend code format"})
+		return
+	}
+
+	var (
+		ownerID     string
+		username    string
+		displayName *string
+		avatarURL   *string
+		expiresAt   *time.Time
+		isRevoked   bool
+		maxUses     *int
+		useCount    int
+	)
+
+	err := h.db.QueryRow(`
+		SELECT fc.user_id, u.username, u.display_name, u.avatar_url,
+		       fc.expires_at, fc.is_revoked, fc.max_uses, fc.use_count
+		FROM friend_codes fc
+		INNER JOIN users u ON fc.user_id = u.id
+		WHERE fc.code = $1
+	`, code).Scan(
+		&ownerID, &username, &displayName, &avatarURL,
+		&expiresAt, &isRevoked, &maxUses, &useCount,
+	)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Invalid friend code"})
+		return
+	}
+	if err != nil {
+		h.log.Error("Failed to fetch friend code", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch friend code"})
+		return
+	}
+
+	valid := !isRevoked &&
+		(expiresAt == nil || expiresAt.After(time.Now().UTC())) &&
+		(maxUses == nil || *maxUses == 0 || useCount < *maxUses)
+
+	c.JSON(http.StatusOK, gin.H{
+		"user_id":      ownerID,
+		"username":     username,
+		"display_name": displayName,
+		"avatar_url":   avatarURL,
+		"valid":        valid,
+	})
+}
+
+// ClaimFriendCode redeems a friend code to create a friendship.
+// If auto_accept is set on the code, the friendship is created as 'accepted' directly.
+// Otherwise, a pending friend request is created from the claimer to the code owner.
+// POST /friends/codes/:code/claim
+func (h *Handler) ClaimFriendCode(c *gin.Context) {
+	userID := c.GetString("user_id")
+	code := c.Param("code")
+
+	if len(code) != 8 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid friend code format"})
+		return
+	}
+
+	tx, err := h.db.Begin()
+	if err != nil {
+		h.log.Error("Failed to begin transaction", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to claim friend code"})
+		return
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			h.log.Error("Failed to rollback", "error", rbErr)
+		}
+	}()
+
+	// Lock the code row to prevent race conditions on use_count
+	var (
+		codeID     string
+		ownerID    string
+		maxUses    *int
+		useCount   int
+		expiresAt  *time.Time
+		isRevoked  bool
+		autoAccept bool
+	)
+	err = tx.QueryRow(`
+		SELECT id, user_id, max_uses, use_count, expires_at, is_revoked, auto_accept
+		FROM friend_codes
+		WHERE code = $1
+		FOR UPDATE
+	`, code).Scan(&codeID, &ownerID, &maxUses, &useCount, &expiresAt, &isRevoked, &autoAccept)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Invalid friend code"})
+		return
+	}
+	if err != nil {
+		h.log.Error("Failed to query friend code", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to claim friend code"})
+		return
+	}
+
+	// Validate code
+	if isRevoked {
+		c.JSON(http.StatusGone, gin.H{"error": "This friend code has been revoked"})
+		return
+	}
+	if expiresAt != nil && expiresAt.Before(time.Now().UTC()) {
+		c.JSON(http.StatusGone, gin.H{"error": "This friend code has expired"})
+		return
+	}
+	if maxUses != nil && *maxUses > 0 && useCount >= *maxUses {
+		c.JSON(http.StatusGone, gin.H{"error": "This friend code has reached its maximum uses"})
+		return
+	}
+
+	// Can't claim your own code
+	if ownerID == userID {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot claim your own friend code"})
+		return
+	}
+
+	// Check for existing friendship in either direction
+	var existingStatus string
+	err = tx.QueryRow(`
+		SELECT status FROM friendships
+		WHERE (requester_id = $1 AND addressee_id = $2)
+		   OR (requester_id = $2 AND addressee_id = $1)
+	`, userID, ownerID).Scan(&existingStatus)
+	if err == nil {
+		switch existingStatus {
+		case "accepted":
+			c.JSON(http.StatusConflict, gin.H{"error": "Already friends with this user"})
+			return
+		case "pending":
+			c.JSON(http.StatusConflict, gin.H{"error": "Friend request already pending with this user"})
+			return
+		case "blocked":
+			c.JSON(http.StatusForbidden, gin.H{"error": "Cannot add this user as a friend"})
+			return
+		}
+	} else if err != sql.ErrNoRows {
+		h.log.Error("Failed to check existing friendship", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to claim friend code"})
+		return
+	}
+
+	// Create friendship
+	status := "pending"
+	if autoAccept {
+		status = "accepted"
+	}
+
+	var friendshipID, createdAt string
+	err = tx.QueryRow(`
+		INSERT INTO friendships (requester_id, addressee_id, status)
+		VALUES ($1, $2, $3)
+		RETURNING id, created_at
+	`, userID, ownerID, status).Scan(&friendshipID, &createdAt)
+	if err != nil {
+		h.log.Error("Failed to create friendship", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to claim friend code"})
+		return
+	}
+
+	// Increment use count
+	_, err = tx.Exec(`UPDATE friend_codes SET use_count = use_count + 1 WHERE id = $1`, codeID)
+	if err != nil {
+		h.log.Error("Failed to increment use count", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to claim friend code"})
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		h.log.Error("Failed to commit", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to claim friend code"})
+		return
+	}
+
+	h.log.Info("Friend code claimed", "code", code, "claimer", userID, "owner", ownerID, "status", status)
+
+	// Fetch user info for WebSocket notifications and response
+	var claimerUsername string
+	var claimerDisplayName *string
+	var claimerAvatarURL *string
+	_ = h.db.QueryRow(`SELECT username, display_name, avatar_url FROM users WHERE id = $1`, userID).
+		Scan(&claimerUsername, &claimerDisplayName, &claimerAvatarURL)
+
+	var ownerUsername string
+	var ownerDisplayName *string
+	var ownerAvatarURL *string
+	_ = h.db.QueryRow(`SELECT username, display_name, avatar_url FROM users WHERE id = $1`, ownerID).
+		Scan(&ownerUsername, &ownerDisplayName, &ownerAvatarURL)
+
+	// WebSocket notifications
+	if h.hub != nil {
+		if ownerUUID, parseErr := uuid.Parse(ownerID); parseErr == nil {
+			// Always notify code owner that their code was claimed
+			h.hub.BroadcastToUser(ownerUUID, websocket.OutgoingMessage{
+				Type: "friend_code_claimed",
+				Data: map[string]interface{}{
+					"friendship_id": friendshipID,
+					"code_id":       codeID,
+					"status":        status,
+					"user_id":       userID,
+					"username":      claimerUsername,
+					"display_name":  claimerDisplayName,
+					"avatar_url":    claimerAvatarURL,
+					"created_at":    createdAt,
+				},
+			})
+
+			if autoAccept {
+				// Notify claimer that they're now friends
+				if claimerUUID, parseErr2 := uuid.Parse(userID); parseErr2 == nil {
+					h.hub.BroadcastToUser(claimerUUID, websocket.OutgoingMessage{
+						Type: "friend_request_accepted",
+						Data: map[string]interface{}{
+							"id":           friendshipID,
+							"user_id":      ownerID,
+							"username":     ownerUsername,
+							"display_name": ownerDisplayName,
+							"avatar_url":   ownerAvatarURL,
+						},
+					})
+				}
+			} else {
+				// Pending — notify code owner of incoming request
+				h.hub.BroadcastToUser(ownerUUID, websocket.OutgoingMessage{
+					Type: "friend_request_received",
+					Data: map[string]interface{}{
+						"id":                friendshipID,
+						"from_user_id":      userID,
+						"from_username":     claimerUsername,
+						"from_display_name": claimerDisplayName,
+						"from_avatar_url":   claimerAvatarURL,
+						"created_at":        createdAt,
+					},
+				})
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"status":        status,
+		"friendship_id": friendshipID,
+		"user": map[string]interface{}{
+			"user_id":      ownerID,
+			"username":     ownerUsername,
+			"display_name": ownerDisplayName,
+			"avatar_url":   ownerAvatarURL,
+		},
+	})
 }

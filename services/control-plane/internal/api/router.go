@@ -180,6 +180,16 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					usersHandler.SearchUsers,
 				)
+
+				// Privacy settings
+				userRoutes.GET("/me/privacy",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					usersHandler.GetPrivacySettings,
+				)
+				userRoutes.PATCH("/me/privacy",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					usersHandler.UpdatePrivacySettings,
+				)
 			}
 
 			// Session management routes
@@ -482,6 +492,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					dmHandler.CreateGroup,
 				)
 
+				// Get or create personal thread (10 requests per minute)
+				dmRoutes.POST("/personal",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					dmHandler.GetOrCreatePersonalThread,
+				)
+
 				// Get specific DM conversation (30 requests per minute)
 				dmRoutes.GET("/:id",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
@@ -571,6 +587,40 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
 					friendsHandler.BlockUser,
 				)
+
+				// Friend code routes
+				codeRoutes := friendRoutes.Group("/codes")
+				{
+					// Create friend code (10 requests per minute)
+					codeRoutes.POST("",
+						middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+						friendsHandler.CreateFriendCode,
+					)
+
+					// List friend codes (30 requests per minute)
+					codeRoutes.GET("",
+						middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+						friendsHandler.ListFriendCodes,
+					)
+
+					// Revoke friend code (10 requests per minute)
+					codeRoutes.DELETE("/:id",
+						middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+						friendsHandler.RevokeFriendCode,
+					)
+
+					// Preview friend code (30 requests per minute)
+					codeRoutes.GET("/:code",
+						middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+						friendsHandler.PreviewFriendCode,
+					)
+
+					// Claim friend code (10 requests per minute)
+					codeRoutes.POST("/:code/claim",
+						middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+						friendsHandler.ClaimFriendCode,
+					)
+				}
 			}
 		}
 

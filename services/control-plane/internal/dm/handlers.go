@@ -36,6 +36,7 @@ func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, cfg *config.
 type conversationResponse struct {
 	ID           string                 `json:"id"`
 	IsGroup      bool                   `json:"is_group"`
+	IsPersonal   bool                   `json:"is_personal"`
 	Name         *string                `json:"name,omitempty"`
 	IsEncrypted  bool                   `json:"is_encrypted"`
 	Participants []participantResponse  `json:"participants"`
@@ -65,7 +66,7 @@ func (h *Handler) ListConversations(c *gin.Context) {
 
 	// Fetch conversations ordered by last message
 	query := `
-		SELECT dc.id, dc.is_group, dc.name, dc.is_encrypted, dc.created_at,
+		SELECT dc.id, dc.is_group, dc.is_personal, dc.name, dc.is_encrypted, dc.created_at,
 		       dm.content, dm.created_at, dm.user_id, dm.is_encrypted,
 		       (SELECT COUNT(*) FROM dm_messages
 		        WHERE conversation_id = dc.id
@@ -99,7 +100,7 @@ func (h *Handler) ListConversations(c *gin.Context) {
 		var lmContent, lmCreatedAt, lmUserID sql.NullString
 		var lmEncrypted sql.NullBool
 		if err := rows.Scan(
-			&conv.ID, &conv.IsGroup, &conv.Name, &conv.IsEncrypted, &conv.CreatedAt,
+			&conv.ID, &conv.IsGroup, &conv.IsPersonal, &conv.Name, &conv.IsEncrypted, &conv.CreatedAt,
 			&lmContent, &lmCreatedAt, &lmUserID, &lmEncrypted,
 			&conv.UnreadCount,
 		); err != nil {
@@ -199,6 +200,53 @@ func (h *Handler) OpenConversation(c *gin.Context) {
 	if err := h.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, req.UserID).Scan(&exists); err != nil || !exists {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
+	}
+
+	// Privacy enforcement: check if messaging is allowed
+	var areFriends bool
+	_ = h.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM friendships
+			WHERE ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))
+			  AND status = 'accepted'
+		)
+	`, userID, req.UserID).Scan(&areFriends)
+
+	if !areFriends {
+		// Check target's privacy settings (defaults: friends_only=TRUE, server_members=TRUE)
+		var messagesFriendsOnly, messagesServerMembers bool
+		err := h.db.QueryRow(`
+			SELECT messages_friends_only, messages_server_members
+			FROM privacy_settings WHERE user_id = $1
+		`, req.UserID).Scan(&messagesFriendsOnly, &messagesServerMembers)
+		if err == sql.ErrNoRows {
+			messagesFriendsOnly = true
+			messagesServerMembers = true
+		} else if err != nil {
+			h.log.Error("Failed to check privacy settings", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open conversation"})
+			return
+		}
+
+		if messagesFriendsOnly {
+			allowed := false
+			if messagesServerMembers {
+				// Check if they share a server
+				var sharesServer bool
+				_ = h.db.QueryRow(`
+					SELECT EXISTS(
+						SELECT 1 FROM server_members sm1
+						JOIN server_members sm2 ON sm1.server_id = sm2.server_id
+						WHERE sm1.user_id = $1 AND sm2.user_id = $2
+					)
+				`, userID, req.UserID).Scan(&sharesServer)
+				allowed = sharesServer
+			}
+			if !allowed {
+				c.JSON(http.StatusForbidden, gin.H{"error": "privacy_blocked"})
+				return
+			}
+		}
 	}
 
 	// Check for existing 1:1 conversation
@@ -875,6 +923,77 @@ func (h *Handler) GetVoiceParticipants(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"participants": participants})
 }
 
+// --- Personal Thread ---
+
+// GetOrCreatePersonalThread returns the user's personal thread (self-DM), creating it if needed.
+// POST /dm/conversations/personal
+func (h *Handler) GetOrCreatePersonalThread(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	// Check for existing personal thread
+	var existingID string
+	err := h.db.QueryRow(`
+		SELECT dc.id FROM dm_conversations dc
+		JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $1
+		WHERE dc.is_personal = TRUE
+	`, userID).Scan(&existingID)
+
+	if err == nil {
+		conv := h.fetchConversationResponse(existingID, userID)
+		if conv != nil {
+			c.JSON(http.StatusOK, gin.H{"conversation": conv})
+			return
+		}
+	} else if err != sql.ErrNoRows {
+		h.log.Error("Failed to check personal thread", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get personal thread"})
+		return
+	}
+
+	// Create personal thread
+	tx, err := h.db.Begin()
+	if err != nil {
+		h.log.Error("Failed to start transaction", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create personal thread"})
+		return
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			h.log.Error("Failed to rollback transaction", "error", rbErr)
+		}
+	}()
+
+	convID := uuid.New().String()
+	name := "Personal Thread"
+	_, err = tx.Exec(`
+		INSERT INTO dm_conversations (id, is_group, is_personal, name, is_encrypted, created_by)
+		VALUES ($1, FALSE, TRUE, $2, TRUE, $3)
+	`, convID, name, userID)
+	if err != nil {
+		h.log.Error("Failed to create personal thread", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create personal thread"})
+		return
+	}
+
+	_, err = tx.Exec(`INSERT INTO dm_participants (conversation_id, user_id) VALUES ($1, $2)`, convID, userID)
+	if err != nil {
+		h.log.Error("Failed to add personal thread participant", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create personal thread"})
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		h.log.Error("Failed to commit personal thread", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create personal thread"})
+		return
+	}
+
+	h.log.Info("Personal thread created", "conversation_id", convID, "user_id", userID)
+
+	conv := h.fetchConversationResponse(convID, userID)
+	c.JSON(http.StatusCreated, gin.H{"conversation": conv})
+}
+
 // --- Helper methods ---
 
 // isParticipant checks if a user is a participant of a DM conversation.
@@ -892,7 +1011,7 @@ func (h *Handler) fetchConversationResponse(convID, forUserID string) *conversat
 	var lmContent, lmCreatedAt, lmUserID sql.NullString
 	var lmEncrypted sql.NullBool
 	err := h.db.QueryRow(`
-		SELECT dc.id, dc.is_group, dc.name, dc.is_encrypted, dc.created_at,
+		SELECT dc.id, dc.is_group, dc.is_personal, dc.name, dc.is_encrypted, dc.created_at,
 		       dm.content, dm.created_at, dm.user_id, dm.is_encrypted
 		FROM dm_conversations dc
 		LEFT JOIN LATERAL (
@@ -901,7 +1020,7 @@ func (h *Handler) fetchConversationResponse(convID, forUserID string) *conversat
 		) dm ON TRUE
 		WHERE dc.id = $1
 	`, convID).Scan(
-		&conv.ID, &conv.IsGroup, &conv.Name, &conv.IsEncrypted, &conv.CreatedAt,
+		&conv.ID, &conv.IsGroup, &conv.IsPersonal, &conv.Name, &conv.IsEncrypted, &conv.CreatedAt,
 		&lmContent, &lmCreatedAt, &lmUserID, &lmEncrypted,
 	)
 	if err != nil {

@@ -631,10 +631,12 @@ func (h *Handler) SearchUsers(c *gin.Context) {
 
 	pattern := "%" + strings.ToLower(query) + "%"
 	rows, err := h.db.Query(`
-		SELECT id, username, display_name, avatar_url
-		FROM users
-		WHERE (LOWER(username) LIKE $1 OR LOWER(COALESCE(display_name, '')) LIKE $1)
-		  AND id != $2
+		SELECT u.id, u.username, u.display_name, u.avatar_url
+		FROM users u
+		LEFT JOIN privacy_settings ps ON ps.user_id = u.id
+		WHERE (LOWER(u.username) LIKE $1 OR LOWER(COALESCE(u.display_name, '')) LIKE $1)
+		  AND u.id != $2
+		  AND COALESCE(ps.searchable_by_username, FALSE) = TRUE
 		LIMIT 20
 	`, pattern, userID)
 	if err != nil {
@@ -794,4 +796,141 @@ func (h *Handler) UpdatePreferences(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"version": version,
 	})
+}
+
+// --- Privacy Settings ---
+
+// privacySettingsResponse represents the user's privacy settings.
+type privacySettingsResponse struct {
+	MessagesFriendsOnly   bool   `json:"messages_friends_only"`
+	MessagesServerMembers bool   `json:"messages_server_members"`
+	AutoAcceptFriendCodes bool   `json:"auto_accept_friend_codes"`
+	SearchableByUsername  bool   `json:"searchable_by_username"`
+	SearchableByEmail     bool   `json:"searchable_by_email"`
+	SearchableByPhone     bool   `json:"searchable_by_phone"`
+	UpdatedAt             string `json:"updated_at,omitempty"`
+}
+
+// GetPrivacySettings returns the current user's privacy settings.
+// Returns defaults if no settings have been saved yet.
+// GET /users/me/privacy
+func (h *Handler) GetPrivacySettings(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	var ps privacySettingsResponse
+	err := h.db.QueryRow(`
+		SELECT messages_friends_only, messages_server_members, auto_accept_friend_codes,
+		       searchable_by_username, searchable_by_email, searchable_by_phone, updated_at
+		FROM privacy_settings
+		WHERE user_id = $1
+	`, userID).Scan(
+		&ps.MessagesFriendsOnly, &ps.MessagesServerMembers, &ps.AutoAcceptFriendCodes,
+		&ps.SearchableByUsername, &ps.SearchableByEmail, &ps.SearchableByPhone, &ps.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		// Return defaults matching the schema defaults
+		c.JSON(http.StatusOK, gin.H{
+			"privacy": privacySettingsResponse{
+				MessagesFriendsOnly:   true,
+				MessagesServerMembers: true,
+			},
+		})
+		return
+	}
+	if err != nil {
+		h.log.Error("Failed to fetch privacy settings", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch privacy settings"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"privacy": ps})
+}
+
+// updatePrivacyRequest represents a partial update to privacy settings.
+type updatePrivacyRequest struct {
+	MessagesFriendsOnly   *bool `json:"messages_friends_only"`
+	MessagesServerMembers *bool `json:"messages_server_members"`
+	AutoAcceptFriendCodes *bool `json:"auto_accept_friend_codes"`
+	SearchableByUsername  *bool `json:"searchable_by_username"`
+	SearchableByEmail     *bool `json:"searchable_by_email"`
+	SearchableByPhone     *bool `json:"searchable_by_phone"`
+}
+
+// UpdatePrivacySettings updates the current user's privacy settings.
+// Accepts a partial JSON body — only provided fields are updated.
+// PATCH /users/me/privacy
+func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	var req updatePrivacyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	// Build dynamic SET clause for partial update
+	setClauses := []string{}
+	args := []interface{}{userID}
+	argIdx := 2
+
+	if req.MessagesFriendsOnly != nil {
+		setClauses = append(setClauses, fmt.Sprintf("messages_friends_only = $%d", argIdx))
+		args = append(args, *req.MessagesFriendsOnly)
+		argIdx++
+	}
+	if req.MessagesServerMembers != nil {
+		setClauses = append(setClauses, fmt.Sprintf("messages_server_members = $%d", argIdx))
+		args = append(args, *req.MessagesServerMembers)
+		argIdx++
+	}
+	if req.AutoAcceptFriendCodes != nil {
+		setClauses = append(setClauses, fmt.Sprintf("auto_accept_friend_codes = $%d", argIdx))
+		args = append(args, *req.AutoAcceptFriendCodes)
+		argIdx++
+	}
+	if req.SearchableByUsername != nil {
+		setClauses = append(setClauses, fmt.Sprintf("searchable_by_username = $%d", argIdx))
+		args = append(args, *req.SearchableByUsername)
+		argIdx++
+	}
+	if req.SearchableByEmail != nil {
+		setClauses = append(setClauses, fmt.Sprintf("searchable_by_email = $%d", argIdx))
+		args = append(args, *req.SearchableByEmail)
+		argIdx++
+	}
+	if req.SearchableByPhone != nil {
+		setClauses = append(setClauses, fmt.Sprintf("searchable_by_phone = $%d", argIdx))
+		args = append(args, *req.SearchableByPhone)
+		argIdx++
+	}
+
+	if len(setClauses) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No fields to update"})
+		return
+	}
+
+	setClauses = append(setClauses, "updated_at = NOW()")
+
+	// UPSERT: insert with defaults, update only provided fields
+	// #nosec G201 -- Safe: setClauses contains only parameterized assignments
+	query := fmt.Sprintf(`
+		INSERT INTO privacy_settings (user_id) VALUES ($1)
+		ON CONFLICT (user_id) DO UPDATE SET %s
+		RETURNING messages_friends_only, messages_server_members, auto_accept_friend_codes,
+		          searchable_by_username, searchable_by_email, searchable_by_phone, updated_at
+	`, strings.Join(setClauses, ", "))
+
+	var ps privacySettingsResponse
+	err := h.db.QueryRow(query, args...).Scan(
+		&ps.MessagesFriendsOnly, &ps.MessagesServerMembers, &ps.AutoAcceptFriendCodes,
+		&ps.SearchableByUsername, &ps.SearchableByEmail, &ps.SearchableByPhone, &ps.UpdatedAt,
+	)
+	if err != nil {
+		h.log.Error("Failed to update privacy settings", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update privacy settings"})
+		return
+	}
+
+	h.log.Info("Privacy settings updated", "user_id", userID)
+	c.JSON(http.StatusOK, gin.H{"privacy": ps})
 }
