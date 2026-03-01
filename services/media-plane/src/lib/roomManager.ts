@@ -718,6 +718,11 @@ export class RoomManager {
    * decode capabilities. Returns lowercase mimeTypes that every participant
    * with non-null rtpCapabilities can decode.
    * Returns null if <2 participants have capabilities (no constraint needed).
+   *
+   * Floor operates at mimeType level (e.g., "video/h264") — not profile level.
+   * This is intentional: canConsume() handles profile matching, and all modern
+   * browsers decode all profiles within a codec family. Profile-level floor
+   * can be added if a real-world decode failure is observed.
    */
   computeCodecFloor(roomId: string): string[] | null {
     const room = this.rooms.get(roomId);

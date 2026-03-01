@@ -118,9 +118,19 @@ const VIDEO_RTCP_FEEDBACK = [
 // IGNIS insight: 4:2:0 subsampling is sufficient for most use cases. Only
 // text-heavy screenshare benefits from 4:4:4. Default to 4:2:0.
 // ---------------------------------------------------------------------------
-// Explicit preferredPayloadType on every codec to prevent BUNDLE PT collisions.
-// These are identity labels only — codec selection priority is handled client-side.
-// Video PTs use even numbers so mediasoup can auto-assign RTX on the next odd PT.
+// Codec capabilities for the mediasoup router.
+//
+// PT assignment is left to mediasoup's pool allocator (dynamic range 96-127,
+// pool order [100..127, 96..99]).  Manual preferredPayloadType was removed
+// because the pool uses shift()-based RTX allocation — NOT codec_PT+1 — which
+// caused collisions when manual PTs overlapped with auto-assigned RTX PTs.
+//
+// With the current 8 active codecs (1 audio + 7 video), the allocator assigns:
+//   Opus→100, VP8→101 RTX→102, VP9P0→103 RTX→104, VP9P2→105 RTX→106,
+//   H264Base→107 RTX→108, H264Main→109 RTX→110, H264High→111 RTX→112,
+//   AV1→113 RTX→114  (15 of 32 dynamic PTs used)
+//
+// Codec selection priority is handled client-side, not by array order here.
 const mediaCodecs: RouterRtpCodecCapability[] = [
   // ── AUDIO ──────────────────────────────────────────────────────────────
 
@@ -128,7 +138,6 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
   {
     kind: 'audio',
     mimeType: 'audio/opus',
-    preferredPayloadType: 111,
     clockRate: 48000,
     channels: 2,
     parameters: {
@@ -149,37 +158,16 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
   // produce or consume multichannel audio via WebRTC. Commented out to avoid
   // unnecessary SDP bloat. Re-enable if a native audio pipeline is added.
   //
-  // {
-  //   kind: 'audio',
-  //   mimeType: 'audio/multiopus',
-  //   preferredPayloadType: 112,
-  //   clockRate: 48000,
-  //   channels: 6,
-  //   parameters: {
-  //     channel_mapping: '0,4,1,2,3,5',
-  //     num_streams: 4,
-  //     coupled_streams: 2,
-  //   },
-  // },
+  // { kind: 'audio', mimeType: 'audio/multiopus', clockRate: 48000, channels: 6,
+  //   parameters: { channel_mapping: '0,4,1,2,3,5', num_streams: 4, coupled_streams: 2 } },
   //
-  // {
-  //   kind: 'audio',
-  //   mimeType: 'audio/multiopus',
-  //   preferredPayloadType: 113,
-  //   clockRate: 48000,
-  //   channels: 8,
-  //   parameters: {
-  //     channel_mapping: '0,6,1,2,3,4,5,7',
-  //     num_streams: 5,
-  //     coupled_streams: 3,
-  //   },
-  // },
+  // { kind: 'audio', mimeType: 'audio/multiopus', clockRate: 48000, channels: 8,
+  //   parameters: { channel_mapping: '0,6,1,2,3,4,5,7', num_streams: 5, coupled_streams: 3 } },
 
   // ── VIDEO: VP8 — Universal fallback ────────────────────────────────────
   {
     kind: 'video',
     mimeType: 'video/VP8',
-    preferredPayloadType: 96,           // RTX → 97
     clockRate: 90000,
     parameters: {},
     rtcpFeedback: VIDEO_RTCP_FEEDBACK,
@@ -189,7 +177,6 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
   {
     kind: 'video',
     mimeType: 'video/VP9',
-    preferredPayloadType: 98,           // RTX → 99
     clockRate: 90000,
     parameters: {
       'profile-id': 0,
@@ -201,7 +188,6 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
   {
     kind: 'video',
     mimeType: 'video/VP9',
-    preferredPayloadType: 100,          // RTX → 101
     clockRate: 90000,
     parameters: {
       'profile-id': 2,
@@ -213,7 +199,6 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
   {
     kind: 'video',
     mimeType: 'video/H264',
-    preferredPayloadType: 102,          // RTX → 103
     clockRate: 90000,
     parameters: {
       'packetization-mode': 1,
@@ -227,7 +212,6 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
   {
     kind: 'video',
     mimeType: 'video/H264',
-    preferredPayloadType: 104,          // RTX → 105
     clockRate: 90000,
     parameters: {
       'packetization-mode': 1,
@@ -241,7 +225,6 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
   {
     kind: 'video',
     mimeType: 'video/H264',
-    preferredPayloadType: 106,          // RTX → 107
     clockRate: 90000,
     parameters: {
       'packetization-mode': 1,
@@ -256,15 +239,6 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
   // royalty obligations (MPEG LA, HEVC Advance, Access Advance) that
   // require legal review before any implementation. AV1 covers the same
   // use case royalty-free with better compression.
-  //
-  // {
-  //   kind: 'video',
-  //   mimeType: 'video/H265',
-  //   preferredPayloadType: 108,        // RTX → 109
-  //   clockRate: 90000,
-  //   parameters: { 'profile-id': 1, 'level-id': 153 },
-  //   rtcpFeedback: VIDEO_RTCP_FEEDBACK,
-  // },
 
   // ── VIDEO: AV1 — Best compression, SVC capable ────────────────────────
   // Chrome 90+ encode (software libaom), Chrome 113+ improved real-time.
@@ -273,7 +247,6 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
   {
     kind: 'video',
     mimeType: 'video/AV1',
-    preferredPayloadType: 110,          // RTX → next available
     clockRate: 90000,
     parameters: {
       'profile': 0, // Main profile (8-bit)
