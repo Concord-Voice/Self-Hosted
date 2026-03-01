@@ -118,6 +118,9 @@ const VIDEO_RTCP_FEEDBACK = [
 // IGNIS insight: 4:2:0 subsampling is sufficient for most use cases. Only
 // text-heavy screenshare benefits from 4:4:4. Default to 4:2:0.
 // ---------------------------------------------------------------------------
+// Explicit preferredPayloadType on every codec to prevent BUNDLE PT collisions.
+// These are identity labels only — codec selection priority is handled client-side.
+// Video PTs use even numbers so mediasoup can auto-assign RTX on the next odd PT.
 const mediaCodecs: RouterRtpCodecCapability[] = [
   // ── AUDIO ──────────────────────────────────────────────────────────────
 
@@ -125,6 +128,7 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
   {
     kind: 'audio',
     mimeType: 'audio/opus',
+    preferredPayloadType: 111,
     clockRate: 48000,
     channels: 2,
     parameters: {
@@ -138,36 +142,44 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
     },
   },
 
-  // Multiopus 5.1 surround (premium)
-  {
-    kind: 'audio',
-    mimeType: 'audio/multiopus',
-    clockRate: 48000,
-    channels: 6,
-    parameters: {
-      channel_mapping: '0,4,1,2,3,5',
-      num_streams: 4,
-      coupled_streams: 2,
-    },
-  },
-
-  // Multiopus 7.1 surround (premium)
-  {
-    kind: 'audio',
-    mimeType: 'audio/multiopus',
-    clockRate: 48000,
-    channels: 8,
-    parameters: {
-      channel_mapping: '0,6,1,2,3,4,5,7',
-      num_streams: 5,
-      coupled_streams: 3,
-    },
-  },
+  // NOTE: Multiopus (5.1/7.1 surround) is not usable in browser-based clients.
+  // getUserMedia/getDisplayMedia capture mono/stereo only, and WebRTC audio
+  // playback has no path to route multichannel output to surround devices.
+  // mediasoup supports it for native clients, but Electron/Chromium cannot
+  // produce or consume multichannel audio via WebRTC. Commented out to avoid
+  // unnecessary SDP bloat. Re-enable if a native audio pipeline is added.
+  //
+  // {
+  //   kind: 'audio',
+  //   mimeType: 'audio/multiopus',
+  //   preferredPayloadType: 112,
+  //   clockRate: 48000,
+  //   channels: 6,
+  //   parameters: {
+  //     channel_mapping: '0,4,1,2,3,5',
+  //     num_streams: 4,
+  //     coupled_streams: 2,
+  //   },
+  // },
+  //
+  // {
+  //   kind: 'audio',
+  //   mimeType: 'audio/multiopus',
+  //   preferredPayloadType: 113,
+  //   clockRate: 48000,
+  //   channels: 8,
+  //   parameters: {
+  //     channel_mapping: '0,6,1,2,3,4,5,7',
+  //     num_streams: 5,
+  //     coupled_streams: 3,
+  //   },
+  // },
 
   // ── VIDEO: VP8 — Universal fallback ────────────────────────────────────
   {
     kind: 'video',
     mimeType: 'video/VP8',
+    preferredPayloadType: 96,           // RTX → 97
     clockRate: 90000,
     parameters: {},
     rtcpFeedback: VIDEO_RTCP_FEEDBACK,
@@ -177,6 +189,7 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
   {
     kind: 'video',
     mimeType: 'video/VP9',
+    preferredPayloadType: 98,           // RTX → 99
     clockRate: 90000,
     parameters: {
       'profile-id': 0,
@@ -188,6 +201,7 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
   {
     kind: 'video',
     mimeType: 'video/VP9',
+    preferredPayloadType: 100,          // RTX → 101
     clockRate: 90000,
     parameters: {
       'profile-id': 2,
@@ -199,6 +213,7 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
   {
     kind: 'video',
     mimeType: 'video/H264',
+    preferredPayloadType: 102,          // RTX → 103
     clockRate: 90000,
     parameters: {
       'packetization-mode': 1,
@@ -212,6 +227,7 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
   {
     kind: 'video',
     mimeType: 'video/H264',
+    preferredPayloadType: 104,          // RTX → 105
     clockRate: 90000,
     parameters: {
       'packetization-mode': 1,
@@ -225,6 +241,7 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
   {
     kind: 'video',
     mimeType: 'video/H264',
+    preferredPayloadType: 106,          // RTX → 107
     clockRate: 90000,
     parameters: {
       'packetization-mode': 1,
@@ -234,12 +251,16 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
     rtcpFeedback: VIDEO_RTCP_FEEDBACK,
   },
 
-  // NOTE: H265/HEVC is NOT yet in mediasoup's supportedRtpCapabilities
-  // (as of 3.13.x). When mediasoup adds it, uncomment and re-enable.
+  // NOTE: H265/HEVC is NOT usable. mediasoup lacks support (as of 3.13.x),
+  // Chrome/Firefox refuse to ship it in WebRTC, and HEVC carries patent
+  // royalty obligations (MPEG LA, HEVC Advance, Access Advance) that
+  // require legal review before any implementation. AV1 covers the same
+  // use case royalty-free with better compression.
   //
   // {
   //   kind: 'video',
   //   mimeType: 'video/H265',
+  //   preferredPayloadType: 108,        // RTX → 109
   //   clockRate: 90000,
   //   parameters: { 'profile-id': 1, 'level-id': 153 },
   //   rtcpFeedback: VIDEO_RTCP_FEEDBACK,
@@ -252,6 +273,7 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
   {
     kind: 'video',
     mimeType: 'video/AV1',
+    preferredPayloadType: 110,          // RTX → next available
     clockRate: 90000,
     parameters: {
       'profile': 0, // Main profile (8-bit)
