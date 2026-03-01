@@ -19,6 +19,12 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// SessionDisconnector allows forcefully disconnecting WebSocket connections.
+// Defined as an interface to avoid an import cycle (websocket imports auth).
+type SessionDisconnector interface {
+	DisconnectUser(userID uuid.UUID)
+}
+
 // maxUserAgentLength limits User-Agent storage to reduce metadata footprint.
 const maxUserAgentLength = 256
 
@@ -43,15 +49,17 @@ type Handler struct {
 	redis     *redis.Client
 	log       *logger.Logger
 	jwtSecret string
+	hub       SessionDisconnector
 }
 
 // NewHandler creates a new authentication handler.
-func NewHandler(db *sql.DB, redisClient *redis.Client, log *logger.Logger, jwtSecret string) *Handler {
+func NewHandler(db *sql.DB, redisClient *redis.Client, log *logger.Logger, jwtSecret string, hub SessionDisconnector) *Handler {
 	return &Handler{
 		db:        db,
 		redis:     redisClient,
 		log:       log,
 		jwtSecret: jwtSecret,
+		hub:       hub,
 	}
 }
 
@@ -259,6 +267,7 @@ func (h *Handler) Register(c *gin.Context) {
 	c.JSON(http.StatusCreated, gin.H{
 		"access_token":  accessToken,
 		"refresh_token": refreshToken,
+		"session_id":    tokenID,
 		"expires_in":    900, // 15 minutes
 		"remember_me":   true,
 		"user": gin.H{
@@ -477,6 +486,7 @@ func (h *Handler) Login(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"access_token":  accessToken,
 		"refresh_token": refreshToken,
+		"session_id":    tokenID,
 		"expires_in":    900, // 15 minutes
 		"remember_me":   rememberMe,
 		"user":          user.PublicUser(),
@@ -652,6 +662,7 @@ func (h *Handler) Refresh(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"access_token":  accessToken,
 		"refresh_token": newRefreshToken,
+		"session_id":    newTokenID,
 		"expires_in":    900, // 15 minutes
 	})
 }
@@ -683,10 +694,16 @@ func (h *Handler) Logout(c *gin.Context) {
 
 	// Soft-delete: mark session as revoked so it appears in "Past Sessions"
 	tokenHash := HashRefreshToken(refreshToken)
-	_, err = h.db.Exec(`UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_hash = $1`, tokenHash)
-	if err != nil {
-		h.log.Error("Failed to revoke refresh token", "error", err)
-		// Continue anyway
+	var revokedUserID string
+	_ = h.db.QueryRow(`UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_hash = $1 RETURNING user_id`, tokenHash).Scan(&revokedUserID)
+
+	// Force-close any active WebSocket connections for this user.
+	// The session_revoked message is a courtesy — the real enforcement is
+	// TCP connection termination via handleUnregister.
+	if revokedUserID != "" {
+		if uid, parseErr := uuid.Parse(revokedUserID); parseErr == nil {
+			h.hub.DisconnectUser(uid)
+		}
 	}
 
 	// Clear cookie

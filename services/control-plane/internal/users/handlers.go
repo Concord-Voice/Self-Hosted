@@ -612,6 +612,12 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		return
 	}
 
+	// Force-close all WebSocket connections for this user.
+	// Password change invalidates all sessions — the user must re-authenticate.
+	if uid, parseErr := uuid.Parse(userID.(string)); parseErr == nil {
+		h.hub.DisconnectUser(uid)
+	}
+
 	h.log.Info("Password changed with key re-wrap", "user_id", userID)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -901,7 +907,6 @@ func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
 	if req.SearchableByPhone != nil {
 		setClauses = append(setClauses, fmt.Sprintf("searchable_by_phone = $%d", argIdx))
 		args = append(args, *req.SearchableByPhone)
-		argIdx++
 	}
 
 	if len(setClauses) == 0 {

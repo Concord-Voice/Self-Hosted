@@ -14,8 +14,16 @@ import (
 	"github.com/concord/control-plane/internal/models"
 	"github.com/concord/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
+
+// SessionDisconnector allows forcefully disconnecting WebSocket connections.
+// Defined as an interface to avoid coupling to the websocket package.
+type SessionDisconnector interface {
+	DisconnectUser(userID uuid.UUID)
+	DisconnectSession(sessionID string)
+}
 
 // Revocation rate-limiting constants.
 const (
@@ -57,14 +65,16 @@ type Handler struct {
 	db    *sql.DB
 	redis *redis.Client
 	log   *logger.Logger
+	hub   SessionDisconnector
 }
 
 // NewHandler creates a new session handler.
-func NewHandler(db *sql.DB, redis *redis.Client, log *logger.Logger) *Handler {
+func NewHandler(db *sql.DB, redis *redis.Client, log *logger.Logger, hub SessionDisconnector) *Handler {
 	return &Handler{
 		db:    db,
 		redis: redis,
 		log:   log,
+		hub:   hub,
 	}
 }
 
@@ -310,7 +320,7 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 
 	// Verify session exists, belongs to this user, and is not already revoked
 	var sessionExists bool
-	err := h.db.QueryRowContext(ctx,
+	err := h.db.QueryRowContext(ctx, //nolint:gosec // parameterized query — not injectable
 		`SELECT EXISTS(SELECT 1 FROM refresh_tokens WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL)`,
 		sessionID, uid,
 	).Scan(&sessionExists)
@@ -346,7 +356,7 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 	mode := h.getUserRevocationMode(ctx, uid)
 
 	// 4. Determine if password is needed
-	needsPassword := true
+	var needsPassword bool
 	if mode == "simple" && h.hasSimpleAuthWindow(ctx, uid) {
 		// Simple mode with active 5-minute auth window — skip password
 		needsPassword = false
@@ -395,7 +405,7 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 
 	// ── Execute Revocation ──────────────────────────────────────────────
 
-	result, err := h.db.ExecContext(ctx,
+	result, err := h.db.ExecContext(ctx, //nolint:gosec // parameterized query — not injectable
 		`UPDATE refresh_tokens SET revoked_at = NOW() WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL`,
 		sessionID, uid,
 	)
@@ -414,6 +424,9 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 
 	// Record this revoke in the tracking set (slides the 24h window forward)
 	h.recordRevoke(ctx, uid, sessionID)
+
+	// Force-close any active WebSocket connections for this session
+	h.hub.DisconnectSession(sessionID)
 
 	h.log.Info("Session revoked", "user_id", uid, "session_id", sessionID, "password_used", needsPassword)
 
@@ -494,6 +507,12 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 
 	rowsAffected, _ := result.RowsAffected()
 
+	// Force-close ALL active WebSocket connections for this user.
+	// Revoke All is always nuclear — the frontend hardcodes include_current: true.
+	if uidParsed, parseErr := uuid.Parse(uid); parseErr == nil {
+		h.hub.DisconnectUser(uidParsed)
+	}
+
 	// Clear revoke tracking and auth window after bulk revocation
 	h.resetRevokeTracking(ctx, uid)
 
@@ -566,7 +585,7 @@ func (h *Handler) UpdateRevocationMode(c *gin.Context) {
 	// TODO: Verify MFA code when MFA is implemented (req.MFACode)
 
 	// Update the revocation mode in the database
-	_, err := h.db.ExecContext(ctx,
+	_, err := h.db.ExecContext(ctx, //nolint:gosec // parameterized query — not injectable
 		`UPDATE users SET revocation_mode = $1 WHERE id = $2`,
 		req.Mode, uid,
 	)

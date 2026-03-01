@@ -58,8 +58,8 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	}
 
 	// Initialize handlers
-	authHandler := auth.NewHandler(db, redis, log, cfg.JWTSecret)
-	sessionsHandler := sessions.NewHandler(db, redis, log)
+	authHandler := auth.NewHandler(db, redis, log, cfg.JWTSecret, hub)
+	sessionsHandler := sessions.NewHandler(db, redis, log, hub)
 	usersHandler := users.NewHandler(db, log, hub)
 	serversHandler := servers.NewHandler(db, log, hub)
 	channelsHandler := channels.NewHandler(db, log, hub)

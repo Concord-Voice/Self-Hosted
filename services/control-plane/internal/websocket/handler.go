@@ -59,7 +59,7 @@ func NewHandler(hub *Hub, db *sql.DB, redisClient *redis.Client, jwtSecret strin
 // HandleWebSocket upgrades HTTP connections to WebSocket
 func (h *Handler) HandleWebSocket(c *gin.Context) {
 	// Authenticate: prefer ticket-based auth, fall back to JWT for backward compat
-	userID, err := h.authenticateWebSocket(c)
+	userID, sessionID, err := h.authenticateWebSocket(c)
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
@@ -86,6 +86,7 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 	client := &Client{
 		ID:          uuid.New(),
 		UserID:      userID,
+		SessionID:   sessionID,
 		Username:    username,
 		DisplayName: displayName,
 		AvatarURL:   avatarURL,
@@ -104,21 +105,22 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 }
 
 // authenticateWebSocket validates the connection using ticket-based auth (preferred)
-// or falls back to JWT for backward compatibility.
-func (h *Handler) authenticateWebSocket(c *gin.Context) (uuid.UUID, error) {
+// or falls back to JWT for backward compatibility. Returns (userID, sessionID, error).
+// sessionID is only populated for ticket-based auth when the client provided X-Session-ID.
+func (h *Handler) authenticateWebSocket(c *gin.Context) (uuid.UUID, string, error) {
 	// Prefer ticket-based auth (short-lived, single-use, not logged in URLs)
 	if ticket := c.Query("ticket"); ticket != "" {
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 		defer cancel()
-		userIDStr, err := auth.ValidateTicket(ctx, h.redis, ticket)
+		userIDStr, sessionID, err := auth.ValidateTicket(ctx, h.redis, ticket)
 		if err != nil {
-			return uuid.Nil, fmt.Errorf("invalid ticket: %w", err)
+			return uuid.Nil, "", fmt.Errorf("invalid ticket: %w", err)
 		}
 		userID, err := uuid.Parse(userIDStr)
 		if err != nil {
-			return uuid.Nil, fmt.Errorf("invalid user ID in ticket: %w", err)
+			return uuid.Nil, "", fmt.Errorf("invalid user ID in ticket: %w", err)
 		}
-		return userID, nil
+		return userID, sessionID, nil
 	}
 
 	// Fall back to JWT — check Authorization header first, then ?token= query param
@@ -135,7 +137,7 @@ func (h *Handler) authenticateWebSocket(c *gin.Context) (uuid.UUID, error) {
 	}
 
 	if tokenString == "" {
-		return uuid.Nil, fmt.Errorf("no authentication provided")
+		return uuid.Nil, "", fmt.Errorf("no authentication provided")
 	}
 
 	// Parse and validate JWT
@@ -147,7 +149,7 @@ func (h *Handler) authenticateWebSocket(c *gin.Context) (uuid.UUID, error) {
 	})
 
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, "", err
 	}
 
 	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
@@ -156,22 +158,22 @@ func (h *Handler) authenticateWebSocket(c *gin.Context) (uuid.UUID, error) {
 			ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 			defer cancel()
 			if exists, _ := h.redis.Exists(ctx, fmt.Sprintf("blacklist:%s", jti)).Result(); exists > 0 {
-				return uuid.Nil, fmt.Errorf("token has been revoked")
+				return uuid.Nil, "", fmt.Errorf("token has been revoked")
 			}
 		}
 
 		userIDStr, ok := claims["user_id"].(string)
 		if !ok {
-			return uuid.Nil, jwt.ErrTokenInvalidClaims
+			return uuid.Nil, "", jwt.ErrTokenInvalidClaims
 		}
 		userID, err := uuid.Parse(userIDStr)
 		if err != nil {
-			return uuid.Nil, err
+			return uuid.Nil, "", err
 		}
-		return userID, nil
+		return userID, "", nil
 	}
 
-	return uuid.Nil, fmt.Errorf("invalid authentication")
+	return uuid.Nil, "", fmt.Errorf("invalid authentication")
 }
 
 // GetHub returns the hub instance (for external access)

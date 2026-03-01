@@ -67,6 +67,12 @@ type Hub struct {
 	// DM-scoped broadcast messages (sent to all clients subscribed to a DM conversation)
 	dmBroadcast chan DMBroadcastMessage
 
+	// Force-disconnect all clients for a user (server-side session termination)
+	disconnectUser chan uuid.UUID
+
+	// Force-disconnect a specific session (targeted single-session revocation)
+	disconnectSession chan string
+
 	// Shutdown signal
 	done chan struct{}
 }
@@ -90,6 +96,8 @@ func NewHub(db *sql.DB, redisClient *redis.Client) *Hub {
 		userBroadcast:        make(chan UserBroadcastMessage, 256),
 		serverBroadcast:      make(chan ServerBroadcastMessage, 256),
 		dmBroadcast:          make(chan DMBroadcastMessage, 256),
+		disconnectUser:       make(chan uuid.UUID, 16),
+		disconnectSession:    make(chan string, 16),
 		done:                 make(chan struct{}),
 	}
 }
@@ -121,6 +129,12 @@ func (h *Hub) Run() {
 
 		case message := <-h.dmBroadcast:
 			h.handleDMBroadcast(message)
+
+		case userID := <-h.disconnectUser:
+			h.handleDisconnectUser(userID)
+
+		case sessionID := <-h.disconnectSession:
+			h.handleDisconnectSession(sessionID)
 
 		case <-h.done:
 			// Graceful shutdown: close all client connections
@@ -1275,6 +1289,93 @@ func (h *Hub) BroadcastToDM(conversationID uuid.UUID, msg OutgoingMessage) {
 		ConversationID: conversationID,
 		Data:           msg,
 	}
+}
+
+// --- Force-disconnect handlers (server-side session termination) ---
+
+// handleDisconnectUser disconnects ALL WebSocket clients for a user.
+// Sends a courtesy "session_revoked" message before severing each TCP connection.
+// The real enforcement is handleUnregister which closes the Send channel and connection.
+// A rogue client that ignores session_revoked still gets killed at the TCP level.
+func (h *Hub) handleDisconnectUser(userID uuid.UUID) {
+	clientIDs, ok := h.userClients[userID]
+	if !ok {
+		return
+	}
+
+	// Collect clients before modifying the map (handleUnregister mutates it)
+	clients := make([]*Client, 0, len(clientIDs))
+	for clientID := range clientIDs {
+		if client, ok := h.clients[clientID]; ok {
+			clients = append(clients, client)
+		}
+	}
+
+	// Courtesy notification + forceful disconnect
+	revokedMsg, _ := json.Marshal(OutgoingMessage{
+		Type: "session_revoked",
+		Data: map[string]interface{}{"reason": "session_terminated"},
+	})
+	for _, client := range clients {
+		// Best-effort courtesy message (non-blocking)
+		if revokedMsg != nil {
+			select {
+			case client.Send <- revokedMsg:
+			default:
+			}
+		}
+		// Real enforcement: sever TCP connection
+		h.handleUnregister(client)
+	}
+
+	if len(clients) > 0 {
+		log.Printf("Force-disconnected %d client(s) for user %s", len(clients), userID)
+	}
+}
+
+// handleDisconnectSession disconnects WebSocket clients matching a specific session ID.
+// Used for targeted single-session revocation from the sessions management UI.
+func (h *Hub) handleDisconnectSession(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+
+	revokedMsg, _ := json.Marshal(OutgoingMessage{
+		Type: "session_revoked",
+		Data: map[string]interface{}{"reason": "session_revoked"},
+	})
+
+	var count int
+	for _, client := range h.clients {
+		if client.SessionID == sessionID {
+			if revokedMsg != nil {
+				select {
+				case client.Send <- revokedMsg:
+				default:
+				}
+			}
+			h.handleUnregister(client)
+			count++
+		}
+	}
+
+	if count > 0 {
+		log.Printf("Force-disconnected %d client(s) for session %s", count, sessionID)
+	}
+}
+
+// DisconnectUser forces all WebSocket connections for a user to close (thread-safe).
+// Called from HTTP handlers (logout, password change, session revocation) when
+// a token is blacklisted or session is revoked. The server does not trust the
+// client to disconnect itself — this is the authoritative enforcement.
+func (h *Hub) DisconnectUser(userID uuid.UUID) {
+	h.disconnectUser <- userID
+}
+
+// DisconnectSession forces a specific session's WebSocket connections to close (thread-safe).
+// Called from the single-session revocation handler for targeted disconnect.
+func (h *Hub) DisconnectSession(sessionID string) {
+	h.disconnectSession <- sessionID
 }
 
 // handleProfileUpdate refreshes cached user info on the hub's Client objects.

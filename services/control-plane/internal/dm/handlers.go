@@ -261,7 +261,7 @@ func (h *Handler) OpenConversation(c *gin.Context) {
 
 	if err == nil {
 		// Return existing conversation with participants
-		conv := h.fetchConversationResponse(existingID, userID)
+		conv := h.fetchConversationResponse(existingID)
 		if conv != nil {
 			c.JSON(http.StatusOK, gin.H{"conversation": conv})
 			return
@@ -321,7 +321,7 @@ func (h *Handler) OpenConversation(c *gin.Context) {
 	// Notify the other user
 	if h.hub != nil {
 		if targetUUID, parseErr := uuid.Parse(req.UserID); parseErr == nil {
-			conv := h.fetchConversationResponse(convID, req.UserID)
+			conv := h.fetchConversationResponse(convID)
 			if conv != nil {
 				h.hub.BroadcastToUser(targetUUID, websocket.OutgoingMessage{
 					Type: "dm_conversation_created",
@@ -333,7 +333,7 @@ func (h *Handler) OpenConversation(c *gin.Context) {
 		}
 	}
 
-	conv := h.fetchConversationResponse(convID, userID)
+	conv := h.fetchConversationResponse(convID)
 	c.JSON(http.StatusCreated, gin.H{"conversation": conv})
 }
 
@@ -421,7 +421,7 @@ func (h *Handler) CreateGroup(c *gin.Context) {
 	if h.hub != nil {
 		for _, uid := range req.UserIDs {
 			if targetUUID, parseErr := uuid.Parse(uid); parseErr == nil {
-				conv := h.fetchConversationResponse(convID, uid)
+				conv := h.fetchConversationResponse(convID)
 				if conv != nil {
 					h.hub.BroadcastToUser(targetUUID, websocket.OutgoingMessage{
 						Type: "dm_conversation_created",
@@ -434,7 +434,7 @@ func (h *Handler) CreateGroup(c *gin.Context) {
 		}
 	}
 
-	conv := h.fetchConversationResponse(convID, userID)
+	conv := h.fetchConversationResponse(convID)
 	c.JSON(http.StatusCreated, gin.H{"conversation": conv})
 }
 
@@ -455,7 +455,7 @@ func (h *Handler) GetConversation(c *gin.Context) {
 		return
 	}
 
-	conv := h.fetchConversationResponse(convID, userID)
+	conv := h.fetchConversationResponse(convID)
 	if conv == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Conversation not found"})
 		return
@@ -939,7 +939,7 @@ func (h *Handler) GetOrCreatePersonalThread(c *gin.Context) {
 	`, userID).Scan(&existingID)
 
 	if err == nil {
-		conv := h.fetchConversationResponse(existingID, userID)
+		conv := h.fetchConversationResponse(existingID)
 		if conv != nil {
 			c.JSON(http.StatusOK, gin.H{"conversation": conv})
 			return
@@ -990,7 +990,7 @@ func (h *Handler) GetOrCreatePersonalThread(c *gin.Context) {
 
 	h.log.Info("Personal thread created", "conversation_id", convID, "user_id", userID)
 
-	conv := h.fetchConversationResponse(convID, userID)
+	conv := h.fetchConversationResponse(convID)
 	c.JSON(http.StatusCreated, gin.H{"conversation": conv})
 }
 
@@ -1006,7 +1006,7 @@ func (h *Handler) isParticipant(convID, userID string) bool {
 }
 
 // fetchConversationResponse builds a full conversation response with participants.
-func (h *Handler) fetchConversationResponse(convID, forUserID string) *conversationResponse {
+func (h *Handler) fetchConversationResponse(convID string) *conversationResponse {
 	var conv conversationResponse
 	var lmContent, lmCreatedAt, lmUserID sql.NullString
 	var lmEncrypted sql.NullBool
