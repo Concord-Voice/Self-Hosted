@@ -856,10 +856,7 @@ func (h *Handler) AuthorizeVoiceJoin(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"allowed":          true,
 		"media_server_url": h.cfg.MediaPlaneURL,
-		"ice_servers": []map[string]string{
-			{"urls": "stun:stun.l.google.com:19302"},
-			{"urls": "stun:stun1.l.google.com:19302"},
-		},
+		"ice_servers":      h.cfg.ICEServers(userID),
 		"conversation": gin.H{
 			"id":           convID,
 			"is_encrypted": isEncrypted,

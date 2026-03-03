@@ -277,13 +277,9 @@ export const config = {
   // JWT — shared secret for Socket.IO auth (must match control plane)
   jwtSecret: process.env.JWT_SECRET || DEV_JWT_SECRET,
 
-  // ICE servers — returned to clients via control plane /voice/join
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    // Production TURN (coturn or Cloudflare):
-    // { urls: 'turn:turn.concordvoice.chat:3478', username: '...', credential: '...' },
-  ],
+  // ICE servers (STUN/TURN) are managed by the control plane and returned
+  // to clients in the POST /voice/join response with ephemeral HMAC credentials.
+  // See: services/control-plane/pkg/config/turn.go
 
   // WebRTC settings
   rtc: {

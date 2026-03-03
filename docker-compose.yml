@@ -53,6 +53,33 @@ services:
     networks:
       - concordvoice-network
 
+  # TURN/STUN Server (coturn)
+  coturn:
+    image: coturn/coturn:4.6.3-alpine
+    container_name: concordvoice-coturn
+    command: >
+      turnserver
+        -c /etc/coturn/turnserver.conf
+        --static-auth-secret=${TURN_SECRET:-concord_dev_turn_secret}
+        --realm=${TURN_REALM:-concordvoice.chat}
+        --external-ip=${TURN_EXTERNAL_IP:-127.0.0.1}
+    ports:
+      - "3478:3478/tcp"
+      - "3478:3478/udp"
+      - "5349:5349/tcp"
+      - "49152-49252:49152-49252/udp"  # TURN relay range
+    volumes:
+      - ./infrastructure/docker/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+    healthcheck:
+      test: ["CMD", "turnutils_peer", "-L", "127.0.0.1", "-p", "3478"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    networks:
+      - concordvoice-network
+
   # PostgreSQL Admin (optional, for development)
   pgadmin:
     image: dpage/pgadmin4:latest
@@ -96,6 +123,9 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD:-concord_dev_redis}@redis:6379
       NATS_URL: nats://nats:4222
       JWT_SECRET: ${JWT_SECRET:-dev_jwt_secret_change_in_production}
+      TURN_SERVER_HOST: ${TURN_SERVER_HOST:-localhost}
+      TURN_SECRET: ${TURN_SECRET:-concord_dev_turn_secret}
+      TURN_REALM: ${TURN_REALM:-concordvoice.chat}
       PORT: 8080
     ports:
       - "8080:8080"
