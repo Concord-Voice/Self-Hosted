@@ -75,6 +75,12 @@ type Hub struct {
 
 	// Shutdown signal
 	done chan struct{}
+
+	// Debounced online-count broadcasting: instead of hitting DB+Redis on every
+	// presence change, we accumulate affected user IDs and flush after a short
+	// delay so bursts (e.g., many users reconnecting) collapse into one broadcast.
+	onlineCountPending map[uuid.UUID]bool
+	onlineCountTimer   *time.Timer
 }
 
 // NewHub creates a new Hub
@@ -99,12 +105,19 @@ func NewHub(db *sql.DB, redisClient *redis.Client) *Hub {
 		disconnectUser:       make(chan uuid.UUID, 16),
 		disconnectSession:    make(chan string, 16),
 		done:                 make(chan struct{}),
+		onlineCountPending:   make(map[uuid.UUID]bool),
 	}
 }
 
 // Run starts the hub's main loop
 func (h *Hub) Run() {
 	for {
+		// nil channel is never selected; active only when a debounce timer is pending
+		var onlineCountC <-chan time.Time
+		if h.onlineCountTimer != nil {
+			onlineCountC = h.onlineCountTimer.C
+		}
+
 		select {
 		case client := <-h.register:
 			h.handleRegister(client)
@@ -135,6 +148,9 @@ func (h *Hub) Run() {
 
 		case sessionID := <-h.disconnectSession:
 			h.handleDisconnectSession(sessionID)
+
+		case <-onlineCountC:
+			h.flushOnlineCounts()
 
 		case <-h.done:
 			// Graceful shutdown: close all client connections
@@ -1554,24 +1570,63 @@ func (h *Hub) broadcastPresenceToAll(userID uuid.UUID, status string, timestamp 
 		}
 	}
 
-	// After every presence change, recompute and broadcast online counts
-	// for all servers the affected user belongs to.
-	h.broadcastServerOnlineCounts(userID)
+	// Schedule a debounced recomputation of online counts for all servers
+	// the affected user belongs to (batches rapid presence changes).
+	h.scheduleOnlineCountBroadcast(userID)
 }
 
-// broadcastServerOnlineCounts recomputes the visible online member count for
-// every server that userID belongs to, then broadcasts the updated counts to
-// all connected clients. A member is "visible online" if they have an active
+// scheduleOnlineCountBroadcast adds userID to the pending set and starts a
+// 500ms debounce timer (if not already running). When the timer fires, all
+// accumulated user IDs are flushed in a single batched DB+Redis query.
+//
+// Called from within the hub's Run goroutine, so no locking is needed.
+func (h *Hub) scheduleOnlineCountBroadcast(userID uuid.UUID) {
+	h.onlineCountPending[userID] = true
+	if h.onlineCountTimer == nil {
+		h.onlineCountTimer = time.NewTimer(500 * time.Millisecond)
+	}
+}
+
+// flushOnlineCounts recomputes the visible online member count for every server
+// that any pending user belongs to, then broadcasts the updated counts to all
+// connected clients. A member is "visible online" if they have an active
 // WebSocket connection and their status is not "invisible".
 //
-// Called from within the hub's Run goroutine, so h.userClients is safe to read.
-func (h *Hub) broadcastServerOnlineCounts(userID uuid.UUID) {
-	// 1. Get all members for every server the user belongs to (one query).
-	rows, err := h.db.Query(`
-		SELECT sm.server_id, sm.user_id
+// Called from within the hub's Run goroutine when the debounce timer fires.
+func (h *Hub) flushOnlineCounts() {
+	h.onlineCountTimer = nil
+
+	if len(h.onlineCountPending) == 0 {
+		return
+	}
+
+	// Collect all pending user IDs and clear the set.
+	params := make([]interface{}, 0, len(h.onlineCountPending))
+	for uid := range h.onlineCountPending {
+		params = append(params, uid)
+	}
+	clear(h.onlineCountPending)
+
+	// Build parameterized IN clause: $1, $2, …
+	placeholders := make([]byte, 0, len(params)*4)
+	for i := range params {
+		if i > 0 {
+			placeholders = append(placeholders, ',')
+		}
+		placeholders = append(placeholders, []byte(fmt.Sprintf("$%d", i+1))...)
+	}
+
+	// 1. Get all members for every server ANY pending user belongs to (one query).
+	// Placeholders are safe — generated as $1,$2,… from loop index, not user input.
+	query := fmt.Sprintf( //nolint:gosec // G201
+		`SELECT sm.server_id, sm.user_id
 		FROM server_members sm
-		WHERE sm.server_id IN (SELECT server_id FROM server_members WHERE user_id = $1)
-	`, userID)
+		WHERE sm.server_id IN (
+			SELECT DISTINCT server_id FROM server_members WHERE user_id IN (%s)
+		)
+	`, string(placeholders))
+
+	rows, err := h.db.Query(query, params...)
 	if err != nil {
 		log.Printf("Failed to query memberships for online counts: %v", err)
 		return

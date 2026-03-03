@@ -142,9 +142,9 @@ We believe this is **more open** long-term than traditional open core models.
 - ✅ Run it for your hobby project
 
 **You only need a commercial license if:**
-- You're a business using it for commercial purposes
-- You're providing it as a service to customers
-- You're using it to generate revenue
+- You're offering Concord as a hosted service to external customers (competing SaaS)
+- You're embedding Concord in a product you sell to customers
+- Internal team communication (even at a business) is always free to self-host
 
 ---
 

@@ -8,7 +8,7 @@ import (
 	"log"
 	"os"
 
-	"github.com/concord/control-plane/pkg/config"
+	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file"

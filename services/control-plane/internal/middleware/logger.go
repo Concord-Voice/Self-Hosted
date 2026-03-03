@@ -3,7 +3,7 @@ package middleware
 import (
 	"time"
 
-	"github.com/concord/control-plane/pkg/logger"
+	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 )
 

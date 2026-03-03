@@ -4,9 +4,9 @@ import (
 	"database/sql"
 	"encoding/json"
 
-	"github.com/concord/control-plane/internal/websocket"
-	"github.com/concord/control-plane/pkg/logger"
-	natsclient "github.com/concord/control-plane/pkg/nats"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
+	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
+	natsclient "github.com/markdrogersjr/Concord/services/control-plane/pkg/nats"
 	"github.com/google/uuid"
 )
 

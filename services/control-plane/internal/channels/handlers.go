@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"net/http"
 
-	"github.com/concord/control-plane/internal/models"
-	"github.com/concord/control-plane/internal/websocket"
-	"github.com/concord/control-plane/pkg/logger"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
+	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -680,17 +680,20 @@ func (h *Handler) GetUnreadCounts(c *gin.Context) {
 	// For each channel in the server, count messages newer than last_read_at.
 	// If no read state exists, fall back to the user's join date so pre-existing
 	// messages are not counted as unread for first-time members.
+	// Uses JOINs instead of correlated subqueries for better query planning.
 	query := `
 		SELECT ch.id,
 			COUNT(m.id)::int AS unread_count
 		FROM channels ch
+		CROSS JOIN (
+			SELECT joined_at FROM server_members WHERE server_id = $1 AND user_id = $2
+		) sm
+		LEFT JOIN channel_read_states crs
+			ON crs.channel_id = ch.id AND crs.user_id = $2
 		LEFT JOIN messages m
 			ON m.channel_id = ch.id
 			AND m.user_id != $2
-			AND m.created_at > COALESCE(
-				(SELECT last_read_at FROM channel_read_states WHERE user_id = $2 AND channel_id = ch.id),
-				(SELECT joined_at FROM server_members WHERE server_id = $1 AND user_id = $2)
-			)
+			AND m.created_at > COALESCE(crs.last_read_at, sm.joined_at)
 		WHERE ch.server_id = $1
 		GROUP BY ch.id
 	`
@@ -730,18 +733,19 @@ func (h *Handler) GetUnreadCounts(c *gin.Context) {
 func (h *Handler) GetServerUnreadStatus(c *gin.Context) {
 	userID := c.GetString("user_id")
 
+	// Uses a LEFT JOIN to channel_read_states instead of a correlated subquery
+	// so the planner can use a hash/merge join instead of nested-loop per row.
 	query := `
 		SELECT DISTINCT ch.server_id
 		FROM channels ch
 		INNER JOIN server_members sm
 			ON ch.server_id = sm.server_id AND sm.user_id = $1
+		LEFT JOIN channel_read_states crs
+			ON crs.channel_id = ch.id AND crs.user_id = $1
 		INNER JOIN messages m
 			ON m.channel_id = ch.id
 			AND m.user_id != $1
-			AND m.created_at > COALESCE(
-				(SELECT last_read_at FROM channel_read_states WHERE user_id = $1 AND channel_id = ch.id),
-				sm.joined_at
-			)
+			AND m.created_at > COALESCE(crs.last_read_at, sm.joined_at)
 	`
 
 	rows, err := h.db.Query(query, userID)

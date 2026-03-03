@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/concord/control-plane/internal/auth"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
