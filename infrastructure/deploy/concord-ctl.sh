@@ -69,11 +69,8 @@ case "${1:-help}" in
       exit 0
     fi
     echo ""
-    echo "Stopping all services..."
-    cd "$DEPLOY_DIR" && $COMPOSE_CMD down
-    echo ""
-    echo "Removing data volumes..."
-    docker volume rm concordvoice-postgres-data concordvoice-redis-data 2>/dev/null || true
+    echo "Stopping all services and removing volumes..."
+    cd "$DEPLOY_DIR" && $COMPOSE_CMD down -v
     echo ""
     echo "Rebuilding and starting fresh..."
     cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --build
