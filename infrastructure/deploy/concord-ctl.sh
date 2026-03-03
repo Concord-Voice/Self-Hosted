@@ -35,6 +35,12 @@ case "${1:-help}" in
         echo "  ✗ ${name} (port ${port})"
       fi
     done
+    # coturn check — verify STUN port is listening
+    if nc -z -w2 localhost 3478 2>/dev/null; then
+      echo "  ✓ coturn STUN/TURN (${VM_IP}:3478)"
+    else
+      echo "  ✗ coturn STUN/TURN (port 3478)"
+    fi
     ;;
 
   logs)
