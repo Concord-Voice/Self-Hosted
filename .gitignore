@@ -49,13 +49,16 @@ lerna-debug.log*
 .pnpm-debug.log*
 package-lock.json
 !client/desktop/package-lock.json
+!services/media-plane/package-lock.json
 yarn.lock
 pnpm-lock.yaml
 
 # Build Outputs
 dist/
 build/
+!client/desktop/build/
 out/
+client-builds/
 .next/
 .nuxt/
 .cache/
@@ -72,6 +75,7 @@ out/
 go.work
 vendor/
 bin/
+services/control-plane/server
 coverage.txt
 *.prof
 
@@ -174,6 +178,6 @@ aws-exports.js
 *-key.json
 gcloud-service-key.json
 
-# Session storage
-.sessions/
-sessions/
+# Session storage (root-level only, not internal/sessions/)
+/.sessions/
+/sessions/

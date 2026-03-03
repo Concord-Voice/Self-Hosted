@@ -48,6 +48,10 @@ type Client struct {
 	// AvatarURL from database (set at connection time)
 	AvatarURL *string
 
+	// SessionID links this connection to a specific refresh token session
+	// (for targeted session revocation). Empty if not provided.
+	SessionID string
+
 	// The WebSocket connection
 	Conn *websocket.Conn
 

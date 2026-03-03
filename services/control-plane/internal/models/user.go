@@ -15,6 +15,7 @@ type User struct {
 	Bio            *string         `json:"bio,omitempty" db:"bio"`
 	AvatarURL      *string         `json:"avatar_url,omitempty" db:"avatar_url"`
 	HeaderImageURL *string         `json:"header_image_url,omitempty" db:"header_image_url"`
+	ColorScheme    *string         `json:"color_scheme,omitempty" db:"color_scheme"`
 	Links          json.RawMessage `json:"links" db:"links"`
 	EmailVerified  bool            `json:"email_verified" db:"email_verified"`
 	AgeVerified    bool            `json:"age_verified" db:"age_verified"`
@@ -45,6 +46,9 @@ func (u *User) PublicUser() map[string]interface{} {
 	if u.HeaderImageURL != nil {
 		result["header_image_url"] = *u.HeaderImageURL
 	}
+	if u.ColorScheme != nil {
+		result["color_scheme"] = *u.ColorScheme
+	}
 	if len(u.Links) > 0 {
 		result["links"] = u.Links
 	}
@@ -71,6 +75,9 @@ func (u *User) ProfileForOthers() map[string]interface{} {
 	if u.HeaderImageURL != nil {
 		result["header_image_url"] = *u.HeaderImageURL
 	}
+	if u.ColorScheme != nil {
+		result["color_scheme"] = *u.ColorScheme
+	}
 	if len(u.Links) > 0 {
 		result["links"] = u.Links
 	}
@@ -95,6 +102,7 @@ type RefreshToken struct {
 	DeviceName string     `json:"device_name" db:"device_name"`
 	IPAddress  string     `json:"ip_address" db:"ip_address"`
 	UserAgent  string     `json:"user_agent" db:"user_agent"`
+	MachineID  string     `json:"machine_id,omitempty" db:"machine_id"`
 	ExpiresAt  time.Time  `json:"expires_at" db:"expires_at"`
 	CreatedAt  time.Time  `json:"created_at" db:"created_at"`
 	LastUsedAt time.Time  `json:"last_used_at" db:"last_used_at"`
@@ -108,6 +116,7 @@ func (rt *RefreshToken) Session() map[string]interface{} {
 		"id":          rt.ID,
 		"device_name": rt.DeviceName,
 		"ip_address":  rt.IPAddress,
+		"machine_id":  rt.MachineID,
 		"created_at":  rt.CreatedAt,
 		"last_used":   rt.LastUsedAt,
 		"expires_at":  rt.ExpiresAt,

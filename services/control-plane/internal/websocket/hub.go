@@ -40,6 +40,9 @@ type Hub struct {
 	// Used for lightweight unread notifications without full message delivery
 	serverSubscriptions map[uuid.UUID]map[uuid.UUID]bool
 
+	// DM conversation subscriptions (conversation ID -> set of client IDs)
+	dmSubscriptions map[uuid.UUID]map[uuid.UUID]bool
+
 	// Register requests from clients
 	register chan *Client
 
@@ -61,6 +64,15 @@ type Hub struct {
 	// Server-scoped broadcast messages (sent to all clients subscribed to a server)
 	serverBroadcast chan ServerBroadcastMessage
 
+	// DM-scoped broadcast messages (sent to all clients subscribed to a DM conversation)
+	dmBroadcast chan DMBroadcastMessage
+
+	// Force-disconnect all clients for a user (server-side session termination)
+	disconnectUser chan uuid.UUID
+
+	// Force-disconnect a specific session (targeted single-session revocation)
+	disconnectSession chan string
+
 	// Shutdown signal
 	done chan struct{}
 }
@@ -75,6 +87,7 @@ func NewHub(db *sql.DB, redisClient *redis.Client) *Hub {
 		channelSubscriptions: make(map[uuid.UUID]map[uuid.UUID]bool),
 		usernames:            make(map[uuid.UUID]string),
 		serverSubscriptions:  make(map[uuid.UUID]map[uuid.UUID]bool),
+		dmSubscriptions:      make(map[uuid.UUID]map[uuid.UUID]bool),
 		register:             make(chan *Client),
 		unregister:           make(chan *Client),
 		incoming:             make(chan IncomingMessage, 256),
@@ -82,6 +95,9 @@ func NewHub(db *sql.DB, redisClient *redis.Client) *Hub {
 		globalBroadcast:      make(chan OutgoingMessage, 256),
 		userBroadcast:        make(chan UserBroadcastMessage, 256),
 		serverBroadcast:      make(chan ServerBroadcastMessage, 256),
+		dmBroadcast:          make(chan DMBroadcastMessage, 256),
+		disconnectUser:       make(chan uuid.UUID, 16),
+		disconnectSession:    make(chan string, 16),
 		done:                 make(chan struct{}),
 	}
 }
@@ -110,6 +126,15 @@ func (h *Hub) Run() {
 
 		case message := <-h.serverBroadcast:
 			h.handleServerBroadcast(message)
+
+		case message := <-h.dmBroadcast:
+			h.handleDMBroadcast(message)
+
+		case userID := <-h.disconnectUser:
+			h.handleDisconnectUser(userID)
+
+		case sessionID := <-h.disconnectSession:
+			h.handleDisconnectSession(sessionID)
 
 		case <-h.done:
 			// Graceful shutdown: close all client connections
@@ -254,6 +279,14 @@ func (h *Hub) handleUnregister(client *Client) {
 		}
 	}
 
+	// Remove from all DM subscriptions
+	for convID, clients := range h.dmSubscriptions {
+		delete(clients, client.ID)
+		if len(clients) == 0 {
+			delete(h.dmSubscriptions, convID)
+		}
+	}
+
 	remaining := len(h.clients)
 	h.mu.Unlock()
 
@@ -296,6 +329,14 @@ func (h *Hub) handleIncoming(msg IncomingMessage) {
 		h.handleSetStatus(msg)
 	case "server_update":
 		h.handleServerUpdate(msg)
+	case "subscribe_dm":
+		h.handleSubscribeDM(msg)
+	case "unsubscribe_dm":
+		h.handleUnsubscribeDM(msg)
+	case "dm_message":
+		h.handleDMMessage(msg)
+	case "dm_typing":
+		h.handleDMTyping(msg)
 	default:
 		log.Printf("Unknown message type: %s", msg.Type)
 	}
@@ -488,6 +529,31 @@ func (h *Hub) sendError(clientID uuid.UUID, message string) {
 	}
 }
 
+// sendErrorWithData sends an error message with additional structured data to a specific client.
+func (h *Hub) sendErrorWithData(clientID uuid.UUID, errorCode string, extra map[string]interface{}) {
+	client, ok := h.clients[clientID]
+	if !ok {
+		return
+	}
+	data := map[string]interface{}{
+		"message": errorCode,
+		"error":   errorCode,
+	}
+	for k, v := range extra {
+		data[k] = v
+	}
+	errMsg := OutgoingMessage{
+		Type: "error",
+		Data: data,
+	}
+	if raw, err := json.Marshal(errMsg); err == nil {
+		select {
+		case client.Send <- raw:
+		default:
+		}
+	}
+}
+
 // handleMessage handles a chat message: validates, persists to DB, then broadcasts
 func (h *Hub) handleMessage(msg IncomingMessage) {
 	channelID, ok := msg.Data["channel_id"].(string)
@@ -525,6 +591,12 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 
 	isEncrypted, _ := msg.Data["is_encrypted"].(bool)
 
+	// Extract key_version for E2EE messages (defaults to 1 for backward compat)
+	keyVersion := 1
+	if kv, ok := msg.Data["key_version"].(float64); ok && kv > 0 {
+		keyVersion = int(kv)
+	}
+
 	// Encrypted messages are larger due to AES-GCM (IV + auth tag) + base64 encoding.
 	// A 4000-char plaintext can produce up to ~24KB of ciphertext (multi-byte UTF-8 worst case).
 	// Plaintext messages keep the 4000-char limit.
@@ -550,14 +622,36 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		return
 	}
 
+	// Epoch enforcement: reject messages encrypted with a revoked key epoch
+	if isEncrypted && keyVersion > 0 {
+		var epochRevoked bool
+		_ = h.db.QueryRow(
+			`SELECT EXISTS(SELECT 1 FROM key_revocations WHERE channel_id = $1 AND revoked_epoch = $2)`,
+			channelUUID, keyVersion,
+		).Scan(&epochRevoked)
+		if epochRevoked {
+			// Fetch the current (latest) epoch so the client can re-encrypt
+			var currentEpoch int
+			_ = h.db.QueryRow(
+				`SELECT COALESCE(MAX(key_version), 1) FROM channel_keys WHERE channel_id = $1`,
+				channelUUID,
+			).Scan(&currentEpoch)
+			h.sendErrorWithData(msg.ClientID, "epoch_revoked", map[string]interface{}{
+				"current_epoch": currentEpoch,
+				"channel_id":    channelID,
+			})
+			return
+		}
+	}
+
 	// Persist message to database
 	messageID := uuid.New()
 	var createdAt, updatedAt time.Time
 	err = h.db.QueryRow(
-		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
 		 RETURNING created_at, updated_at`,
-		messageID, channelUUID, msg.UserID, content, isEncrypted,
+		messageID, channelUUID, msg.UserID, content, isEncrypted, keyVersion,
 	).Scan(&createdAt, &updatedAt)
 	if err != nil {
 		log.Printf("Failed to persist message: %v", err)
@@ -601,6 +695,7 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 				"avatar_url":   client.AvatarURL,
 				"content":      content,
 				"is_encrypted": isEncrypted,
+				"key_version":  keyVersion,
 				"created_at":   createdAt,
 				"updated_at":   updatedAt,
 			},
@@ -901,6 +996,455 @@ func (h *Hub) BroadcastToUser(userID uuid.UUID, msg OutgoingMessage) {
 		UserID: userID,
 		Data:   msg,
 	}
+}
+
+// --- DM subscription and message handlers ---
+
+// handleSubscribeDM subscribes a client to a DM conversation after verifying participation.
+func (h *Hub) handleSubscribeDM(msg IncomingMessage) {
+	convID, ok := msg.Data["conversation_id"].(string)
+	if !ok {
+		h.sendError(msg.ClientID, "Invalid conversation_id in subscribe_dm message")
+		return
+	}
+
+	convUUID, err := uuid.Parse(convID)
+	if err != nil {
+		h.sendError(msg.ClientID, "Invalid conversation UUID")
+		return
+	}
+
+	client, ok := h.clients[msg.ClientID]
+	if !ok {
+		return
+	}
+
+	// Verify the user is a participant of this DM conversation
+	var isParticipant bool
+	err = h.db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM dm_participants WHERE conversation_id = $1 AND user_id = $2)`,
+		convUUID, client.UserID,
+	).Scan(&isParticipant)
+	if err != nil {
+		log.Printf("Failed to check DM participation: %v", err)
+		h.sendError(msg.ClientID, "Failed to verify DM access")
+		return
+	}
+	if !isParticipant {
+		h.sendError(msg.ClientID, "Not a participant of this conversation")
+		return
+	}
+
+	// Add to DM subscriptions
+	if _, ok := h.dmSubscriptions[convUUID]; !ok {
+		h.dmSubscriptions[convUUID] = make(map[uuid.UUID]bool)
+	}
+	h.dmSubscriptions[convUUID][client.ID] = true
+
+	log.Printf("Client %s subscribed to DM %s", client.ID, convUUID)
+
+	// Send confirmation
+	confirmMsg := OutgoingMessage{
+		Type: "dm_subscribed",
+		Data: map[string]interface{}{
+			"conversation_id": convUUID,
+		},
+	}
+	if data, err := json.Marshal(confirmMsg); err == nil {
+		client.Send <- data
+	}
+}
+
+// handleUnsubscribeDM unsubscribes a client from a DM conversation.
+func (h *Hub) handleUnsubscribeDM(msg IncomingMessage) {
+	convID, ok := msg.Data["conversation_id"].(string)
+	if !ok {
+		return
+	}
+
+	convUUID, err := uuid.Parse(convID)
+	if err != nil {
+		return
+	}
+
+	if clients, ok := h.dmSubscriptions[convUUID]; ok {
+		delete(clients, msg.ClientID)
+		if len(clients) == 0 {
+			delete(h.dmSubscriptions, convUUID)
+		}
+	}
+
+	log.Printf("Client %s unsubscribed from DM %s", msg.ClientID, convUUID)
+}
+
+// handleDMMessage handles a DM chat message: validates, persists, then broadcasts.
+func (h *Hub) handleDMMessage(msg IncomingMessage) {
+	convID, ok := msg.Data["conversation_id"].(string)
+	if !ok {
+		return
+	}
+
+	convUUID, err := uuid.Parse(convID)
+	if err != nil {
+		return
+	}
+
+	// Verify the client is subscribed to this DM conversation
+	client, ok := h.clients[msg.ClientID]
+	if !ok {
+		return
+	}
+	subscribers, hasSubs := h.dmSubscriptions[convUUID]
+	if !hasSubs || !subscribers[client.ID] {
+		h.sendError(msg.ClientID, "Not subscribed to this DM conversation")
+		return
+	}
+
+	// Rate limit
+	if !client.rateLimitAllow() {
+		h.sendError(msg.ClientID, "Rate limit exceeded, please slow down")
+		return
+	}
+
+	// Validate content
+	content, ok := msg.Data["content"].(string)
+	if !ok || content == "" {
+		h.sendError(msg.ClientID, "Message content is required")
+		return
+	}
+
+	isEncrypted, _ := msg.Data["is_encrypted"].(bool)
+	msgType := "user"
+	if t, ok := msg.Data["type"].(string); ok && t == "system" {
+		msgType = "system"
+	}
+
+	// Extract key_version for E2EE messages
+	dmKeyVersion := 1
+	if kv, ok := msg.Data["key_version"].(float64); ok && kv > 0 {
+		dmKeyVersion = int(kv)
+	}
+
+	maxContentLen := 4000
+	if isEncrypted {
+		maxContentLen = 24000
+	}
+	if len(content) > maxContentLen {
+		h.sendError(msg.ClientID, "Message content exceeds maximum length")
+		return
+	}
+
+	// E2EE enforcement: if conversation is encrypted, reject plaintext messages.
+	// Also fetch is_personal so we can include the sender in personal thread broadcasts.
+	var convEncrypted, convPersonal bool
+	encErr := h.db.QueryRow(`SELECT is_encrypted, is_personal FROM dm_conversations WHERE id = $1`, convUUID).Scan(&convEncrypted, &convPersonal)
+	if encErr != nil {
+		log.Printf("Failed to check DM encryption status: %v", encErr)
+		h.sendError(msg.ClientID, "Failed to verify conversation encryption status")
+		return
+	}
+	if convEncrypted && !isEncrypted {
+		h.sendError(msg.ClientID, "Encrypted conversation requires encrypted messages")
+		return
+	}
+
+	// Persist message to database
+	messageID := uuid.New()
+	var createdAt, updatedAt time.Time
+	err = h.db.QueryRow(
+		`INSERT INTO dm_messages (id, conversation_id, user_id, content, is_encrypted, key_version, type, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+		 RETURNING created_at, updated_at`,
+		messageID, convUUID, msg.UserID, content, isEncrypted, dmKeyVersion, msgType,
+	).Scan(&createdAt, &updatedAt)
+	if err != nil {
+		log.Printf("Failed to persist DM message: %v", err)
+		h.sendError(msg.ClientID, "Failed to save message")
+		return
+	}
+
+	// Send dm_message_ack to the sender
+	nonce, _ := msg.Data["nonce"].(string)
+	ackMsg := OutgoingMessage{
+		Type: "dm_message_ack",
+		Data: map[string]interface{}{
+			"nonce":           nonce,
+			"id":              messageID.String(),
+			"conversation_id": convUUID.String(),
+			"created_at":      createdAt,
+			"updated_at":      updatedAt,
+		},
+	}
+	if ackData, ackErr := json.Marshal(ackMsg); ackErr == nil {
+		select {
+		case client.Send <- ackData:
+		default:
+		}
+	}
+
+	// Broadcast dm_message to all DM subscribers except the sender
+	broadcastData := OutgoingMessage{
+		Type: "dm_message",
+		Data: map[string]interface{}{
+			"id":              messageID,
+			"conversation_id": convUUID,
+			"user_id":         msg.UserID,
+			"username":        client.Username,
+			"display_name":    client.DisplayName,
+			"avatar_url":      client.AvatarURL,
+			"content":         content,
+			"is_encrypted":    isEncrypted,
+			"key_version":     dmKeyVersion,
+			"type":            msgType,
+			"created_at":      createdAt,
+			"updated_at":      updatedAt,
+		},
+	}
+
+	// For personal threads (self-DM), include the sender in the broadcast
+	// because they are the only subscriber. For normal DMs, exclude the
+	// sender since they already received the dm_message_ack.
+	var excludeUser *uuid.UUID
+	if !convPersonal {
+		excludeUser = &msg.UserID
+	}
+	h.dmBroadcast <- DMBroadcastMessage{
+		ConversationID: convUUID,
+		ExcludeUser:    excludeUser,
+		Data:           broadcastData,
+	}
+
+	// Send dm_unread_notify to DM participants NOT subscribed to this conversation
+	h.sendDMUnreadNotify(convUUID, msg.UserID)
+}
+
+// sendDMUnreadNotify sends a lightweight notification to DM participants
+// who are not subscribed to the conversation (they don't have it active).
+func (h *Hub) sendDMUnreadNotify(conversationID, senderUserID uuid.UUID) {
+	// Query all participants of this DM conversation
+	rows, err := h.db.Query(`SELECT user_id FROM dm_participants WHERE conversation_id = $1`, conversationID)
+	if err != nil {
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	dmClients := h.dmSubscriptions[conversationID] // may be nil
+
+	notifyMsg := OutgoingMessage{
+		Type: "dm_unread_notify",
+		Data: map[string]interface{}{
+			"conversation_id": conversationID.String(),
+		},
+	}
+	data, err := json.Marshal(notifyMsg)
+	if err != nil {
+		return
+	}
+
+	for rows.Next() {
+		var uid string
+		if err := rows.Scan(&uid); err != nil {
+			continue
+		}
+		participantUUID, err := uuid.Parse(uid)
+		if err != nil || participantUUID == senderUserID {
+			continue
+		}
+
+		// Check if this user has any client subscribed to this DM
+		userClients, ok := h.userClients[participantUUID]
+		if !ok {
+			continue // user not connected
+		}
+
+		// If any of the user's clients are subscribed, they'll get the full message
+		hasSubscribed := false
+		if dmClients != nil {
+			for clientID := range userClients {
+				if dmClients[clientID] {
+					hasSubscribed = true
+					break
+				}
+			}
+		}
+		if hasSubscribed {
+			continue
+		}
+
+		// Send unread notification to all of this user's connected clients
+		for clientID := range userClients {
+			if c, ok := h.clients[clientID]; ok {
+				select {
+				case c.Send <- data:
+				default:
+				}
+			}
+		}
+	}
+}
+
+// handleDMTyping handles typing indicators for DM conversations.
+func (h *Hub) handleDMTyping(msg IncomingMessage) {
+	convID, ok := msg.Data["conversation_id"].(string)
+	if !ok {
+		return
+	}
+
+	convUUID, err := uuid.Parse(convID)
+	if err != nil {
+		return
+	}
+
+	client, ok := h.clients[msg.ClientID]
+	if !ok {
+		return
+	}
+
+	// Verify subscription
+	subscribers, hasSubs := h.dmSubscriptions[convUUID]
+	if !hasSubs || !subscribers[client.ID] {
+		return
+	}
+
+	h.dmBroadcast <- DMBroadcastMessage{
+		ConversationID: convUUID,
+		ExcludeUser:    &msg.UserID,
+		Data: OutgoingMessage{
+			Type: "dm_typing",
+			Data: map[string]interface{}{
+				"conversation_id": convUUID,
+				"user_id":         msg.UserID,
+				"username":        client.Username,
+				"is_typing":       msg.Data["is_typing"],
+			},
+		},
+	}
+}
+
+// handleDMBroadcast sends a message to all subscribers of a DM conversation.
+func (h *Hub) handleDMBroadcast(msg DMBroadcastMessage) {
+	subscribers, ok := h.dmSubscriptions[msg.ConversationID]
+	if !ok {
+		return
+	}
+
+	messageData, err := json.Marshal(msg.Data)
+	if err != nil {
+		log.Printf("Failed to marshal DM broadcast message: %v", err)
+		return
+	}
+
+	for clientID := range subscribers {
+		client, ok := h.clients[clientID]
+		if !ok {
+			continue
+		}
+
+		if msg.ExcludeUser != nil && client.UserID == *msg.ExcludeUser {
+			continue
+		}
+
+		select {
+		case client.Send <- messageData:
+		default:
+			h.handleUnregister(client)
+		}
+	}
+}
+
+// BroadcastToDM sends a message to all clients subscribed to a DM conversation (thread-safe).
+func (h *Hub) BroadcastToDM(conversationID uuid.UUID, msg OutgoingMessage) {
+	h.dmBroadcast <- DMBroadcastMessage{
+		ConversationID: conversationID,
+		Data:           msg,
+	}
+}
+
+// --- Force-disconnect handlers (server-side session termination) ---
+
+// handleDisconnectUser disconnects ALL WebSocket clients for a user.
+// Sends a courtesy "session_revoked" message before severing each TCP connection.
+// The real enforcement is handleUnregister which closes the Send channel and connection.
+// A rogue client that ignores session_revoked still gets killed at the TCP level.
+func (h *Hub) handleDisconnectUser(userID uuid.UUID) {
+	clientIDs, ok := h.userClients[userID]
+	if !ok {
+		return
+	}
+
+	// Collect clients before modifying the map (handleUnregister mutates it)
+	clients := make([]*Client, 0, len(clientIDs))
+	for clientID := range clientIDs {
+		if client, ok := h.clients[clientID]; ok {
+			clients = append(clients, client)
+		}
+	}
+
+	// Courtesy notification + forceful disconnect
+	revokedMsg, _ := json.Marshal(OutgoingMessage{
+		Type: "session_revoked",
+		Data: map[string]interface{}{"reason": "session_terminated"},
+	})
+	for _, client := range clients {
+		// Best-effort courtesy message (non-blocking)
+		if revokedMsg != nil {
+			select {
+			case client.Send <- revokedMsg:
+			default:
+			}
+		}
+		// Real enforcement: sever TCP connection
+		h.handleUnregister(client)
+	}
+
+	if len(clients) > 0 {
+		log.Printf("Force-disconnected %d client(s) for user %s", len(clients), userID)
+	}
+}
+
+// handleDisconnectSession disconnects WebSocket clients matching a specific session ID.
+// Used for targeted single-session revocation from the sessions management UI.
+func (h *Hub) handleDisconnectSession(sessionID string) {
+	if sessionID == "" {
+		return
+	}
+
+	revokedMsg, _ := json.Marshal(OutgoingMessage{
+		Type: "session_revoked",
+		Data: map[string]interface{}{"reason": "session_revoked"},
+	})
+
+	var count int
+	for _, client := range h.clients {
+		if client.SessionID == sessionID {
+			if revokedMsg != nil {
+				select {
+				case client.Send <- revokedMsg:
+				default:
+				}
+			}
+			h.handleUnregister(client)
+			count++
+		}
+	}
+
+	if count > 0 {
+		log.Printf("Force-disconnected %d client(s) for session %s", count, sessionID)
+	}
+}
+
+// DisconnectUser forces all WebSocket connections for a user to close (thread-safe).
+// Called from HTTP handlers (logout, password change, session revocation) when
+// a token is blacklisted or session is revoked. The server does not trust the
+// client to disconnect itself — this is the authoritative enforcement.
+func (h *Hub) DisconnectUser(userID uuid.UUID) {
+	h.disconnectUser <- userID
+}
+
+// DisconnectSession forces a specific session's WebSocket connections to close (thread-safe).
+// Called from the single-session revocation handler for targeted disconnect.
+func (h *Hub) DisconnectSession(sessionID string) {
+	h.disconnectSession <- sessionID
 }
 
 // handleProfileUpdate refreshes cached user info on the hub's Client objects.

@@ -1,10 +1,10 @@
 # Build stage
-FROM node:20-alpine3.21 AS builder
+FROM node:22-alpine AS builder
 
 WORKDIR /app
 
-# Install build dependencies (mediasoup needs Python and build tools)
-RUN apk add --no-cache python3 make g++ linux-headers
+# Install build dependencies (mediasoup needs Python, pip, and build tools)
+RUN apk add --no-cache python3 py3-pip make g++ linux-headers
 
 # Copy package files
 COPY package*.json ./
@@ -17,16 +17,16 @@ COPY . .
 RUN npm run build
 
 # Production stage
-FROM node:20-alpine3.21
+FROM node:22-alpine
 
 WORKDIR /app
 
-# Install runtime dependencies for mediasoup
-RUN apk add --no-cache python3
+# Install runtime dependencies for mediasoup worker build
+RUN apk add --no-cache python3 py3-pip make g++ linux-headers
 
 # Copy package files and install production dependencies
 COPY package*.json ./
-RUN npm ci --only=production
+RUN npm ci --omit=dev
 
 # Copy built application
 COPY --from=builder /app/dist ./dist

@@ -52,6 +52,7 @@ type MemberWithUser struct {
 	Bio            *string `json:"bio,omitempty"`
 	AvatarURL      *string `json:"avatar_url,omitempty"`
 	HeaderImageURL *string `json:"header_image_url,omitempty"`
+	ColorScheme    *string `json:"color_scheme,omitempty"`
 	Role           string  `json:"role"`
 	JoinedAt       string  `json:"joined_at"`
 	LastSeen       *int64  `json:"last_seen,omitempty"`
@@ -91,7 +92,7 @@ func (h *Handler) ListMembers(c *gin.Context) {
 
 	// Get all members of the server with user details
 	query := `
-		SELECT sm.user_id, u.username, u.display_name, u.bio, u.avatar_url, u.header_image_url, sm.role, sm.joined_at
+		SELECT sm.user_id, u.username, u.display_name, u.bio, u.avatar_url, u.header_image_url, u.color_scheme, sm.role, sm.joined_at
 		FROM server_members sm
 		INNER JOIN users u ON sm.user_id = u.id
 		WHERE sm.server_id = $1
@@ -116,6 +117,7 @@ func (h *Handler) ListMembers(c *gin.Context) {
 			&member.Bio,
 			&member.AvatarURL,
 			&member.HeaderImageURL,
+			&member.ColorScheme,
 			&member.Role,
 			&member.JoinedAt,
 		)
@@ -467,15 +469,75 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 	h.log.Info("Member "+action, "server_id", serverID, "target_user", targetUserID, "by_user", userID)
 
 	// Broadcast to server subscribers
-	if serverUUID, err := uuid.Parse(serverID); err == nil {
+	serverUUID, _ := uuid.Parse(serverID)
+	h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+		Type: "member_removed",
+		Data: map[string]interface{}{
+			"server_id": serverID,
+			"user_id":   targetUserID,
+		},
+	})
+
+	// ── CSK rotation trigger (#96): revoke current epoch for all E2EE channels ──
+	h.triggerKeyRevocationsForServer(serverID, targetUserID, userID)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Member " + action + " successfully"})
+}
+
+// triggerKeyRevocationsForServer creates key_revocations records and broadcasts
+// key_revocation events for all E2EE channels in a server. Called after a member
+// is removed so remaining clients rotate to a new epoch the removed user can't decrypt.
+func (h *Handler) triggerKeyRevocationsForServer(serverID, removedUserID, actorID string) {
+	rows, err := h.db.Query(
+		`SELECT c.id, COALESCE(MAX(ck.key_version), 1)
+		 FROM channels c
+		 LEFT JOIN channel_keys ck ON ck.channel_id = c.id
+		 WHERE c.server_id = $1 AND c.is_encrypted = TRUE
+		 GROUP BY c.id`,
+		serverID,
+	)
+	if err != nil {
+		h.log.Error("Failed to query E2EE channels for key revocation", "error", err, "server_id", serverID)
+		return
+	}
+	defer rows.Close()
+
+	serverUUID, _ := uuid.Parse(serverID)
+
+	for rows.Next() {
+		var channelID string
+		var maxEpoch int
+		if err := rows.Scan(&channelID, &maxEpoch); err != nil {
+			h.log.Error("Failed to scan channel for key revocation", "error", err)
+			continue
+		}
+
+		// Insert key_revocations record (ignore conflict if already revoked)
+		_, err := h.db.Exec(
+			`INSERT INTO key_revocations (channel_id, revoked_epoch, successor_epoch, reason, revoked_by)
+			 VALUES ($1, $2, $3, 'member_removal', $4)
+			 ON CONFLICT (channel_id, revoked_epoch) DO NOTHING`,
+			channelID, maxEpoch, maxEpoch+1, actorID,
+		)
+		if err != nil {
+			h.log.Error("Failed to insert key revocation", "error", err, "channel_id", channelID)
+			continue
+		}
+
+		// Broadcast key_revocation to remaining server members
 		h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
-			Type: "member_removed",
+			Type: "key_revocation",
 			Data: map[string]interface{}{
-				"server_id": serverID,
-				"user_id":   targetUserID,
+				"channel_id":      channelID,
+				"server_id":       serverID,
+				"revoked_epoch":   maxEpoch,
+				"new_epoch":       maxEpoch + 1,
+				"reason":          "member_removal",
+				"removed_user_id": removedUserID,
 			},
 		})
 	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Member " + action + " successfully"})
+	h.log.Info("Key revocations triggered for member removal",
+		"server_id", serverID, "removed_user", removedUserID, "actor", actorID)
 }

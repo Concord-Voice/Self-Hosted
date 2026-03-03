@@ -2,15 +2,35 @@
 package sessions
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
 	"net"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/concord/control-plane/internal/auth"
 	"github.com/concord/control-plane/internal/models"
 	"github.com/concord/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
+)
+
+// SessionDisconnector allows forcefully disconnecting WebSocket connections.
+// Defined as an interface to avoid coupling to the websocket package.
+type SessionDisconnector interface {
+	DisconnectUser(userID uuid.UUID)
+	DisconnectSession(sessionID string)
+}
+
+// Revocation rate-limiting constants.
+const (
+	revokeWindowDuration       = 24 * time.Hour
+	revokeTrackingTTL          = 25 * time.Hour
+	simpleAuthWindowTTL        = 5 * time.Minute
+	freeRevokeSessionThreshold = 3 // Must have >= 3 active sessions for a free revoke
 )
 
 // maskIPAddress masks the last octet of an IPv4 address (e.g., "192.168.1.x")
@@ -42,17 +62,114 @@ func maskIPAddress(ip string) string {
 
 // Handler handles session-related requests for managing user authentication sessions.
 type Handler struct {
-	db  *sql.DB
-	log *logger.Logger
+	db    *sql.DB
+	redis *redis.Client
+	log   *logger.Logger
+	hub   SessionDisconnector
 }
 
 // NewHandler creates a new session handler.
-func NewHandler(db *sql.DB, log *logger.Logger) *Handler {
+func NewHandler(db *sql.DB, redis *redis.Client, log *logger.Logger, hub SessionDisconnector) *Handler {
 	return &Handler{
-		db:  db,
-		log: log,
+		db:    db,
+		redis: redis,
+		log:   log,
+		hub:   hub,
 	}
 }
+
+// ── Revocation Policy Helpers ────────────────────────────────────────────────
+
+func revokeTrackingKey(userID string) string {
+	return fmt.Sprintf("session_revokes:%s", userID)
+}
+
+func simpleAuthWindowKey(userID string) string {
+	return fmt.Sprintf("session_revoke_auth:%s", userID)
+}
+
+// countRevokesInWindow prunes expired entries from the tracking set and returns
+// the number of revokes recorded within the current 24-hour rolling window.
+func (h *Handler) countRevokesInWindow(ctx context.Context, userID string) (int64, error) {
+	key := revokeTrackingKey(userID)
+	cutoff := fmt.Sprintf("%f", float64(time.Now().Add(-revokeWindowDuration).Unix()))
+	h.redis.ZRemRangeByScore(ctx, key, "-inf", cutoff)
+	return h.redis.ZCard(ctx, key).Result()
+}
+
+// countActiveSessions returns the number of non-revoked, non-expired sessions for a user.
+func (h *Handler) countActiveSessions(ctx context.Context, userID string) (int, error) {
+	var count int
+	err := h.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > NOW()`,
+		userID,
+	).Scan(&count)
+	return count, err
+}
+
+// recordRevoke adds a revoke entry to the tracking set. Called for ALL revokes
+// (both free and authenticated) so the rolling window slides forward.
+func (h *Handler) recordRevoke(ctx context.Context, userID, sessionID string) {
+	key := revokeTrackingKey(userID)
+	h.redis.ZAdd(ctx, key, redis.Z{
+		Score:  float64(time.Now().Unix()),
+		Member: sessionID,
+	})
+	h.redis.Expire(ctx, key, revokeTrackingTTL)
+}
+
+// hasSimpleAuthWindow checks if the user has an active 5-minute authentication window (Simple mode).
+func (h *Handler) hasSimpleAuthWindow(ctx context.Context, userID string) bool {
+	val, err := h.redis.Get(ctx, simpleAuthWindowKey(userID)).Result()
+	return err == nil && val == "1"
+}
+
+// grantSimpleAuthWindow sets a 5-minute authentication window in Redis.
+func (h *Handler) grantSimpleAuthWindow(ctx context.Context, userID string) {
+	h.redis.Set(ctx, simpleAuthWindowKey(userID), "1", simpleAuthWindowTTL)
+}
+
+// resetRevokeTracking clears both the revoke tracking set and the auth window.
+func (h *Handler) resetRevokeTracking(ctx context.Context, userID string) {
+	h.redis.Del(ctx, revokeTrackingKey(userID))
+	h.redis.Del(ctx, simpleAuthWindowKey(userID))
+}
+
+// getUserRevocationMode fetches the user's revocation_mode from the database.
+// Returns "secure" as the default if the query fails.
+func (h *Handler) getUserRevocationMode(ctx context.Context, userID string) string {
+	var mode string
+	err := h.db.QueryRowContext(ctx, `SELECT revocation_mode FROM users WHERE id = $1`, userID).Scan(&mode)
+	if err != nil {
+		return "secure"
+	}
+	return mode
+}
+
+// passwordRequired determines if authentication is needed for this revoke attempt.
+// With fewer than 3 active sessions, password is always required.
+// With 3+ active sessions, one free revoke per 24h rolling window is allowed.
+func passwordRequired(activeCount int, revokesInWindow int64) bool {
+	if activeCount < freeRevokeSessionThreshold {
+		return true
+	}
+	return revokesInWindow >= 1
+}
+
+// verifyUserPassword fetches the stored Argon2id hash and verifies the provided password.
+func (h *Handler) verifyUserPassword(ctx context.Context, userID, password string) (bool, error) {
+	var passwordHash string
+	if err := h.db.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id = $1`, userID).Scan(&passwordHash); err != nil {
+		return false, fmt.Errorf("failed to fetch password hash: %w", err)
+	}
+	match, err := auth.VerifyPassword(password, passwordHash)
+	if err != nil {
+		return false, fmt.Errorf("password verification error: %w", err)
+	}
+	return match, nil
+}
+
+// ── Handlers ─────────────────────────────────────────────────────────────────
 
 // ListSessions returns all active sessions for the current user
 func (h *Handler) ListSessions(c *gin.Context) {
@@ -72,7 +189,7 @@ func (h *Handler) ListSessions(c *gin.Context) {
 
 	// Fetch active sessions (not revoked, not expired)
 	rows, err := h.db.Query(
-		`SELECT id, token_hash, device_name, ip_address, user_agent, expires_at, created_at, last_used_at, remember_me
+		`SELECT id, token_hash, device_name, ip_address, user_agent, expires_at, created_at, last_used_at, remember_me, COALESCE(machine_id, '')
 		 FROM refresh_tokens
 		 WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > NOW()
 		 ORDER BY last_used_at DESC`,
@@ -98,6 +215,7 @@ func (h *Handler) ListSessions(c *gin.Context) {
 			&session.CreatedAt,
 			&session.LastUsedAt,
 			&session.RememberMe,
+			&session.MachineID,
 		)
 		if err != nil {
 			h.log.Error("Failed to scan session", "error", err)
@@ -109,6 +227,7 @@ func (h *Handler) ListSessions(c *gin.Context) {
 			"device_name": session.DeviceName,
 			"ip_address":  maskIPAddress(session.IPAddress),
 			"user_agent":  session.UserAgent,
+			"machine_id":  session.MachineID,
 			"expires_at":  session.ExpiresAt,
 			"created_at":  session.CreatedAt,
 			"last_used":   session.LastUsedAt,
@@ -171,16 +290,21 @@ func (h *Handler) ListSessions(c *gin.Context) {
 		})
 	}
 
+	// Include the user's revocation mode for the client UI toggle
+	mode := h.getUserRevocationMode(c.Request.Context(), userID.(string))
+
 	c.JSON(http.StatusOK, gin.H{
-		"sessions":      activeSessions,
-		"past_sessions": pastSessions,
-		"total":         len(activeSessions),
+		"sessions":        activeSessions,
+		"past_sessions":   pastSessions,
+		"total":           len(activeSessions),
+		"revocation_mode": mode,
 	})
 }
 
-// RevokeSession revokes a specific session by ID
+// RevokeSession revokes a specific session by ID with server-authoritative
+// rate-limiting policy enforcement. The server independently determines whether
+// password authentication is required — no client claims are trusted.
 func (h *Handler) RevokeSession(c *gin.Context) {
-	// Get user ID from auth middleware
 	userID, exists := c.Get("user_id")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
@@ -193,11 +317,99 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 		return
 	}
 
-	// Soft-delete: mark the session as revoked
-	result, err := h.db.Exec(
+	uid := userID.(string)
+	ctx := c.Request.Context()
+
+	// Verify session exists, belongs to this user, and is not already revoked
+	var sessionExists bool
+	err := h.db.QueryRowContext(ctx, //nolint:gosec // parameterized query — not injectable
+		`SELECT EXISTS(SELECT 1 FROM refresh_tokens WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL)`,
+		sessionID, uid,
+	).Scan(&sessionExists)
+	if err != nil {
+		h.log.Error("Failed to verify session ownership", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to revoke session"})
+		return
+	}
+	if !sessionExists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Session not found"})
+		return
+	}
+
+	// ── Server-Authoritative Policy Checks ──────────────────────────────
+
+	// 1. Count active sessions (SQL — not from client)
+	activeCount, err := h.countActiveSessions(ctx, uid)
+	if err != nil {
+		h.log.Error("Failed to count active sessions", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to revoke session"})
+		return
+	}
+
+	// 2. Count revokes in 24h window (Redis — not from client)
+	revokesInWindow, err := h.countRevokesInWindow(ctx, uid)
+	if err != nil {
+		// Fail secure: require password if Redis is unavailable
+		h.log.Error("Redis error checking revoke window, requiring password", "error", err)
+		revokesInWindow = 999
+	}
+
+	// 3. Fetch user's revocation mode (DB — not from client)
+	mode := h.getUserRevocationMode(ctx, uid)
+
+	// 4. Determine if password is needed
+	var needsPassword bool
+	if mode == "simple" && h.hasSimpleAuthWindow(ctx, uid) {
+		// Simple mode with active 5-minute auth window — skip password
+		needsPassword = false
+	} else {
+		needsPassword = passwordRequired(activeCount, revokesInWindow)
+	}
+
+	// Parse optional password from request body
+	var req struct {
+		Password string `json:"password"` // #nosec G117 -- not a secret field, receives user input for auth verification
+		MFACode  string `json:"mfa_code"` // Framework: accepted but unused until MFA is implemented
+	}
+	if c.ContentType() == "application/json" {
+		_ = c.ShouldBindJSON(&req)
+	}
+
+	if needsPassword {
+		if req.Password == "" {
+			// Password required but not provided — veto with minimal info
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "password_required",
+				"message": "Password verification required to revoke this session",
+			})
+			return
+		}
+
+		// Verify password (Argon2id, constant-time comparison)
+		match, verifyErr := h.verifyUserPassword(ctx, uid, req.Password)
+		if verifyErr != nil {
+			h.log.Error("Password verification failed during session revoke", "error", verifyErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify password"})
+			return
+		}
+		if !match {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Incorrect password"})
+			return
+		}
+
+		// TODO: Verify MFA code when MFA is implemented (req.MFACode)
+
+		// Password verified — grant 5-min auth window if Simple mode
+		if mode == "simple" {
+			h.grantSimpleAuthWindow(ctx, uid)
+		}
+	}
+
+	// ── Execute Revocation ──────────────────────────────────────────────
+
+	result, err := h.db.ExecContext(ctx, //nolint:gosec // parameterized query — not injectable
 		`UPDATE refresh_tokens SET revoked_at = NOW() WHERE id = $1 AND user_id = $2 AND revoked_at IS NULL`,
-		sessionID,
-		userID,
+		sessionID, uid,
 	)
 	if err != nil {
 		h.log.Error("Failed to revoke session", "error", err)
@@ -205,13 +417,20 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 		return
 	}
 
+	// Final SQL-level veto: verify the row was actually updated (race condition guard)
 	rowsAffected, _ := result.RowsAffected()
 	if rowsAffected == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Session not found"})
 		return
 	}
 
-	h.log.Info("Session revoked", "user_id", userID, "session_id", sessionID)
+	// Record this revoke in the tracking set (slides the 24h window forward)
+	h.recordRevoke(ctx, uid, sessionID)
+
+	// Force-close any active WebSocket connections for this session
+	h.hub.DisconnectSession(sessionID)
+
+	h.log.Info("Session revoked", "user_id", uid, "session_id", sessionID, "password_used", needsPassword)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message":    "Session revoked successfully",
@@ -219,8 +438,10 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 	})
 }
 
-// RevokeAllSessions revokes all sessions. By default it preserves the current
-// session; pass ?include_current=true to also revoke the caller's own session.
+// RevokeAllSessions revokes all sessions after verifying the user's password.
+// Requires a JSON body with "password" and optionally "include_current".
+// Password re-verification prevents an attacker with a stolen session from
+// mass-revoking the victim's sessions as a DoS.
 func (h *Handler) RevokeAllSessions(c *gin.Context) {
 	// Get user ID from auth middleware
 	userID, exists := c.Get("user_id")
@@ -229,22 +450,46 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 		return
 	}
 
-	includeCurrent := c.Query("include_current") == "true"
+	// Parse request body for password
+	var req struct {
+		Password       string `json:"password"`       // #nosec G117 -- not a secret field, receives user input for auth verification
+		IncludeCurrent bool   `json:"include_current"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil || req.Password == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required to revoke all sessions"})
+		return
+	}
+
+	uid := userID.(string)
+	ctx := c.Request.Context()
+
+	// Verify password against stored hash
+	match, verifyErr := h.verifyUserPassword(ctx, uid, req.Password)
+	if verifyErr != nil {
+		h.log.Error("Password verification failed", "error", verifyErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify password"})
+		return
+	}
+	if !match {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Incorrect password"})
+		return
+	}
 
 	// Get current session token
-	currentToken, err := c.Cookie("refresh_token")
-	if err != nil {
+	currentToken, cookieErr := c.Cookie("refresh_token")
+	if cookieErr != nil {
 		currentToken = ""
 	}
 
 	var result sql.Result
-	if currentToken != "" && !includeCurrent {
+	var err error
+	if currentToken != "" && !req.IncludeCurrent {
 		currentTokenHash := auth.HashRefreshToken(currentToken)
 		// Revoke all sessions except the current one
 		result, err = h.db.Exec(
 			`UPDATE refresh_tokens SET revoked_at = NOW()
 			 WHERE user_id = $1 AND token_hash != $2 AND revoked_at IS NULL`,
-			userID,
+			uid,
 			currentTokenHash,
 		)
 	} else {
@@ -252,7 +497,7 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 		result, err = h.db.Exec(
 			`UPDATE refresh_tokens SET revoked_at = NOW()
 			 WHERE user_id = $1 AND revoked_at IS NULL`,
-			userID,
+			uid,
 		)
 	}
 
@@ -264,18 +509,102 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 
 	rowsAffected, _ := result.RowsAffected()
 
-	h.log.Info("Sessions revoked", "user_id", userID, "count", rowsAffected, "include_current", includeCurrent)
+	// Force-close ALL active WebSocket connections for this user.
+	// Revoke All is always nuclear — the frontend hardcodes include_current: true.
+	if uidParsed, parseErr := uuid.Parse(uid); parseErr == nil {
+		h.hub.DisconnectUser(uidParsed)
+	}
+
+	// Clear revoke tracking and auth window after bulk revocation
+	h.resetRevokeTracking(ctx, uid)
+
+	h.log.Info("Sessions revoked", "user_id", uid, "count", rowsAffected, "include_current", req.IncludeCurrent)
 
 	message := "All other sessions revoked successfully"
-	if includeCurrent {
+	if req.IncludeCurrent {
 		message = "All sessions revoked successfully"
 		// Clear cookie since current session was also revoked
 		c.SetCookie("refresh_token", "", -1, "/", "", c.Request.TLS != nil, true)
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":          message,
-		"count":            rowsAffected,
-		"include_current":  includeCurrent,
+		"message":         message,
+		"count":           rowsAffected,
+		"include_current": req.IncludeCurrent,
+	})
+}
+
+// UpdateRevocationMode allows users to toggle between "simple" and "secure"
+// revocation modes. Requires password verification (+ MFA when available).
+// This setting is server-authoritative and bypasses the encrypted preferences system.
+func (h *Handler) UpdateRevocationMode(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
+
+	var req struct {
+		Mode     string `json:"mode"`     // "simple" or "secure"
+		Password string `json:"password"` // #nosec G117 -- not a secret field, receives user input for auth verification
+		MFACode  string `json:"mfa_code"` // Framework: accepted but unused until MFA is implemented
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+
+	// Validate mode
+	if req.Mode != "simple" && req.Mode != "secure" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Mode must be 'simple' or 'secure'"})
+		return
+	}
+
+	// Password is always required to change revocation mode
+	if req.Password == "" {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":   "password_required",
+			"message": "Password verification required to change revocation mode",
+		})
+		return
+	}
+
+	uid := userID.(string)
+	ctx := c.Request.Context()
+
+	// Verify password
+	match, verifyErr := h.verifyUserPassword(ctx, uid, req.Password)
+	if verifyErr != nil {
+		h.log.Error("Password verification failed during mode change", "error", verifyErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify password"})
+		return
+	}
+	if !match {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Incorrect password"})
+		return
+	}
+
+	// TODO: Verify MFA code when MFA is implemented (req.MFACode)
+
+	// Update the revocation mode in the database
+	_, err := h.db.ExecContext(ctx, //nolint:gosec // parameterized query — not injectable
+		`UPDATE users SET revocation_mode = $1 WHERE id = $2`,
+		req.Mode, uid,
+	)
+	if err != nil {
+		h.log.Error("Failed to update revocation mode", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update revocation mode"})
+		return
+	}
+
+	// If switching to secure mode, clear any active Simple mode auth window
+	if req.Mode == "secure" {
+		h.redis.Del(ctx, simpleAuthWindowKey(uid))
+	}
+
+	h.log.Info("Revocation mode changed", "user_id", uid, "mode", req.Mode)
+
+	c.JSON(http.StatusOK, gin.H{
+		"revocation_mode": req.Mode,
 	})
 }

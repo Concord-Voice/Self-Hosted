@@ -56,6 +56,12 @@ export class MediasoupService {
   async getOrCreateRouter(roomId: string): Promise<Router> {
     let router = this.routers.get(roomId);
 
+    // Evict stale closed routers (room was destroyed and user is rejoining)
+    if (router && router.closed) {
+      this.routers.delete(roomId);
+      router = undefined;
+    }
+
     if (!router) {
       const worker = this.getNextWorker();
       router = await worker.createRouter({
@@ -68,6 +74,11 @@ export class MediasoupService {
     }
 
     return router;
+  }
+
+  /** Remove a cached router (called when a room is destroyed) */
+  removeRouter(roomId: string): void {
+    this.routers.delete(roomId);
   }
 
   async createWebRtcTransport(roomId: string, direction: 'send' | 'recv'): Promise<WebRtcTransport> {

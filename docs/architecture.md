@@ -25,7 +25,7 @@ flowchart TB
     end
 
     subgraph Infrastructure
-        PG[("PostgreSQL 16<br/>13 tables")]
+        PG[("PostgreSQL 16<br/>21 tables")]
         RD[("Redis 7<br/>sessions / presence")]
         NATS["NATS<br/>inter-service"]
     end
@@ -61,17 +61,21 @@ flowchart TB
 ### Client Layer
 
 #### Desktop Client (Electron + React + TypeScript)
-- **Technology**: Electron, React, TypeScript, WebRTC
+- **Technology**: Electron, React, TypeScript, mediasoup-client, WebRTC
 - **Responsibilities**:
-  - User interface
-  - WebRTC media handling (Opus codec)
-  - Push-to-talk
+  - User interface (browser-inspired layout: server bar, folder bar, channel panel)
+  - WebRTC media handling (Opus codec, 5 quality tiers)
+  - Voice controls (mute/deafen/push-to-talk, audio device selection, per-user volume)
   - Noise suppression
-  - Authentication UI
-  - Channel navigation
+  - Screen sharing (screen/window picker, viewer)
+  - Video calls (camera toggle, video grid)
+  - E2EE message encryption/decryption (AES-256-GCM)
+  - Secure token storage (Electron safeStorage / OS keychain)
+  - 14 Zustand stores for state management
 - **Communication**:
-  - HTTP/WebSocket → Control Plane (signaling, auth, channels)
-  - WebRTC → Media Plane (audio streams)
+  - HTTP/WebSocket → Control Plane (signaling, auth, channels, presence)
+  - Socket.IO → Media Plane (voice signaling)
+  - WebRTC → Media Plane (audio/video streams)
 
 #### Web Client (React + TypeScript)
 - Same as desktop but without Electron wrapper
@@ -100,9 +104,9 @@ flowchart TB
 - Rate limiting
 - Moderation logic
 
-**API**: 54 REST endpoints + 1 WebSocket endpoint across 10 groups (Auth, Users, Sessions, Servers, Channels, Messages, Members, Invites, E2EE, WebSocket). See [API Documentation](./api/README.md) for the full OpenAPI 3.0 spec.
+**API**: 75+ REST endpoints + 1 WebSocket endpoint across 13 groups (Auth, Users, Sessions, Servers, Channels, Messages, Members, Invites, E2EE, WebSocket, Friends, DM Conversations, Voice). See [API Documentation](./api/README.md) for the full OpenAPI 3.0 spec.
 
-**Database Schema** (13 tables across 18 migrations):
+**Database Schema** (21+ tables across 26 migrations):
 
 ```mermaid
 erDiagram
@@ -201,6 +205,61 @@ erDiagram
         UUID channel_id FK
         UUID user_id FK
     }
+    voice_participants {
+        UUID id PK
+        UUID channel_id FK
+        UUID user_id FK
+        TIMESTAMPTZ joined_at
+    }
+    friendships {
+        UUID id PK
+        UUID requester_id FK
+        UUID addressee_id FK
+        VARCHAR status
+    }
+    dm_conversations {
+        UUID id PK
+        BOOLEAN is_group
+        VARCHAR name
+        BOOLEAN is_encrypted
+        UUID created_by FK
+    }
+    dm_participants {
+        UUID conversation_id PK,FK
+        UUID user_id PK,FK
+        TIMESTAMPTZ joined_at
+    }
+    dm_messages {
+        UUID id PK
+        UUID conversation_id FK
+        UUID user_id FK
+        TEXT content
+        BOOLEAN is_encrypted
+        VARCHAR type
+    }
+    dm_read_states {
+        UUID user_id PK,FK
+        UUID conversation_id PK,FK
+        TIMESTAMPTZ last_read_at
+    }
+    dm_channel_keys {
+        UUID id PK
+        UUID conversation_id FK
+        UUID user_id FK
+        TEXT wrapped_key
+        INTEGER key_version
+    }
+    dm_pending_key_requests {
+        UUID id PK
+        UUID conversation_id FK
+        UUID user_id FK
+    }
+    dm_voice_participants {
+        UUID id PK
+        UUID conversation_id FK
+        UUID user_id FK
+        TIMESTAMPTZ joined_at
+    }
 
     users ||--o| user_keys : "has"
     users ||--o{ public_keys : "has"
@@ -212,6 +271,10 @@ erDiagram
     users ||--o{ channel_keys : "holds"
     users ||--o{ pending_key_requests : "requests"
     users ||--o{ channel_read_states : "tracks"
+    users ||--o{ friendships : "has"
+    users ||--o{ dm_participants : "participates"
+    users ||--o{ dm_messages : "sends"
+    users ||--o{ dm_channel_keys : "holds"
     servers ||--o{ channels : "contains"
     servers ||--o{ server_members : "has"
     servers ||--o{ server_invites : "has"
@@ -220,28 +283,37 @@ erDiagram
     channels ||--o{ channel_read_states : "tracks"
     channels ||--o{ channel_keys : "has"
     channels ||--o{ pending_key_requests : "has"
+    channels ||--o{ voice_participants : "has"
+    dm_conversations ||--o{ dm_participants : "has"
+    dm_conversations ||--o{ dm_messages : "contains"
+    dm_conversations ||--o{ dm_read_states : "tracks"
+    dm_conversations ||--o{ dm_channel_keys : "has"
+    dm_conversations ||--o{ dm_pending_key_requests : "has"
+    dm_conversations ||--o{ dm_voice_participants : "has"
 ```
 
 Channel types: `text`, `voice`, `bulletin`
 
-### Media Plane (Node.js + mediasoup)
+### Media Plane (Node.js + mediasoup) ✅ Implemented (Phase 1C)
 
 **Port**: 3000
 **RTC Ports**: 40000-49999 (UDP)
 
 **Tech Stack**:
-- Node.js 20+
-- mediasoup (WebRTC SFU)
+- Node.js 20+ / TypeScript
+- mediasoup v3 (WebRTC SFU)
 - Socket.IO (signaling)
+- NATS (inter-service messaging with Control Plane)
 - Redis (state sharing for multi-instance)
 
 **Responsibilities**:
-- WebRTC media routing (SFU architecture)
+- WebRTC media routing (SFU architecture — no mixing/transcoding)
 - ICE/STUN/TURN handling
-- Audio forwarding (no mixing/transcoding)
-- Room management (mediasoup routers)
-- Transport lifecycle management
+- Audio forwarding with 5 quality tiers (Low 32kbps → Studio 510kbps)
+- Room management (mediasoup routers, 1 per voice channel)
+- Transport lifecycle management (auto-cleanup)
 - Producer/Consumer management
+- NATS event publishing (room state changes, participant join/leave)
 
 **Architecture**:
 ```
@@ -252,14 +324,19 @@ Router (1 per voice channel/room)
 WebRTC Transports (2 per user: send + recv)
     ↓
 Producers (outgoing audio) / Consumers (incoming audio)
+    ↓
+NATS ←→ Control Plane (room state sync, participant events)
 ```
 
 **Socket.IO Events**:
 - `join-room` - User joins voice channel
-- `create-transport` - Create WebRTC transport
+- `leave-room` - User leaves voice channel
+- `create-transport` - Create WebRTC transport (send or recv)
 - `connect-transport` - Connect transport via DTLS
 - `produce` - Start sending audio
 - `consume` - Start receiving audio from producer
+- `set-quality` - Change voice quality tier
+- `toggle-mute` / `toggle-deafen` - Audio state changes
 
 ### Licensing Authority (Go)
 
@@ -459,7 +536,7 @@ For larger self-hosted deployments:
 
 ### Authentication & Authorization
 
-**Current Implementation (Phase 1B complete)**:
+**Current Implementation (Phase 1C complete)**:
 - Email + password with Argon2id hashing
 - Username validation with profanity filtering and leetspeak detection
 - Username format: `username@concordvoice.chat` (federated identity)

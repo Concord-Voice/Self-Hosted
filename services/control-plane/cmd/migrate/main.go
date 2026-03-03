@@ -20,25 +20,29 @@ func main() {
 	var (
 		migrationsPath = flag.String("path", "migrations", "Path to migrations directory")
 		steps          = flag.Int("steps", 0, "Number of migrations to run/rollback (0 = all)")
-		command        = flag.String("command", "", "Migration command: up, down, version, create")
+		command        = flag.String("command", "", "Migration command: up, down, force, version, create")
 		migrationName  = flag.String("name", "", "Name for new migration (used with 'create' command)")
+		forceVersion   = flag.Int("force-version", -1, "Version to force (used with 'force' command)")
 	)
 	flag.Parse()
 
 	if *command == "" {
-		fmt.Println("Usage: migrate -command=<up|down|version|create> [options]")
+		fmt.Println("Usage: migrate -command=<up|down|force|version|create> [options]")
 		fmt.Println("\nCommands:")
 		fmt.Println("  up      - Apply all pending migrations (or use -steps=N for specific count)")
 		fmt.Println("  down    - Rollback migrations (use -steps=N, default=1)")
+		fmt.Println("  force   - Force migration version (fixes dirty state). Use -force-version=N")
 		fmt.Println("  version - Show current migration version")
 		fmt.Println("  create  - Create new migration files (requires -name)")
 		fmt.Println("\nOptions:")
-		fmt.Println("  -path    Path to migrations directory (default: migrations)")
-		fmt.Println("  -steps   Number of migrations to apply/rollback")
-		fmt.Println("  -name    Name for new migration")
+		fmt.Println("  -path           Path to migrations directory (default: migrations)")
+		fmt.Println("  -steps          Number of migrations to apply/rollback")
+		fmt.Println("  -force-version  Version number to force (used with 'force' command)")
+		fmt.Println("  -name           Name for new migration")
 		fmt.Println("\nExamples:")
 		fmt.Println("  migrate -command=up")
 		fmt.Println("  migrate -command=down -steps=1")
+		fmt.Println("  migrate -command=force -force-version=19")
 		fmt.Println("  migrate -command=create -name=add_user_status")
 		os.Exit(1)
 	}
@@ -120,6 +124,15 @@ func main() {
 		} else {
 			fmt.Printf("Rolled back %d migration(s) successfully\n", *steps)
 		}
+
+	case "force":
+		if *forceVersion < 0 {
+			log.Fatal("Force requires -force-version=N (use -1 to reset to no version)")
+		}
+		if err := m.Force(*forceVersion); err != nil {
+			log.Fatalf("Force failed: %v", err)
+		}
+		fmt.Printf("Forced migration version to %d (clean)\n", *forceVersion)
 
 	case "version":
 		version, dirty, err := m.Version()

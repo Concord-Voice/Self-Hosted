@@ -45,7 +45,7 @@ func (h *Handler) GetMe(c *gin.Context) {
 	// Fetch user from database
 	var user models.User
 	err := h.db.QueryRow(
-		`SELECT id, email, username, display_name, bio, avatar_url, header_image_url,
+		`SELECT id, email, username, display_name, bio, avatar_url, header_image_url, color_scheme,
 		        COALESCE(links, '[]'::jsonb),
 		        email_verified, age_verified, e2ee_preference, created_at, updated_at
 		 FROM users WHERE id = $1`,
@@ -58,6 +58,7 @@ func (h *Handler) GetMe(c *gin.Context) {
 		&user.Bio,
 		&user.AvatarURL,
 		&user.HeaderImageURL,
+		&user.ColorScheme,
 		&user.Links,
 		&user.EmailVerified,
 		&user.AgeVerified,
@@ -94,7 +95,7 @@ func (h *Handler) GetPublicProfile(c *gin.Context) {
 
 	var user models.User
 	err := h.db.QueryRow(
-		`SELECT id, email, username, display_name, bio, avatar_url, header_image_url,
+		`SELECT id, email, username, display_name, bio, avatar_url, header_image_url, color_scheme,
 		        COALESCE(links, '[]'::jsonb),
 		        email_verified, age_verified, e2ee_preference, created_at, updated_at
 		 FROM users WHERE id = $1`,
@@ -107,6 +108,7 @@ func (h *Handler) GetPublicProfile(c *gin.Context) {
 		&user.Bio,
 		&user.AvatarURL,
 		&user.HeaderImageURL,
+		&user.ColorScheme,
 		&user.Links,
 		&user.EmailVerified,
 		&user.AgeVerified,
@@ -221,6 +223,7 @@ type UpdateProfileRequest struct {
 	Bio            *string          `json:"bio"`
 	AvatarURL      *string          `json:"avatar_url"`
 	HeaderImageURL *string          `json:"header_image_url"`
+	ColorScheme    *string          `json:"color_scheme"`
 	Links          *json.RawMessage `json:"links"`
 }
 
@@ -378,6 +381,30 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 		argIdx++
 	}
 
+	// Validate and add color_scheme if provided
+	if req.ColorScheme != nil {
+		trimmed := strings.TrimSpace(*req.ColorScheme)
+		if trimmed == "" {
+			// Empty string means clear color scheme
+			setClauses = append(setClauses, fmt.Sprintf("color_scheme = $%d", argIdx))
+			args = append(args, nil)
+		} else {
+			if len(trimmed) > 200 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "color_scheme must be at most 200 characters"})
+				return
+			}
+			// Validate JSON structure
+			var parsed map[string]interface{}
+			if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "color_scheme must be valid JSON"})
+				return
+			}
+			setClauses = append(setClauses, fmt.Sprintf("color_scheme = $%d", argIdx))
+			args = append(args, trimmed)
+		}
+		argIdx++
+	}
+
 	// Nothing to update
 	if len(setClauses) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "No fields to update"})
@@ -392,7 +419,7 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 	// User input is passed through args, not concatenated into SQL string
 	query := fmt.Sprintf(
 		`UPDATE users SET %s WHERE id = $%d
-		 RETURNING id, email, username, display_name, bio, avatar_url, header_image_url,
+		 RETURNING id, email, username, display_name, bio, avatar_url, header_image_url, color_scheme,
 		           COALESCE(links, '[]'::jsonb),
 		           email_verified, age_verified, e2ee_preference, created_at, updated_at`,
 		strings.Join(setClauses, ", "), argIdx,
@@ -408,6 +435,7 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 		&user.Bio,
 		&user.AvatarURL,
 		&user.HeaderImageURL,
+		&user.ColorScheme,
 		&user.Links,
 		&user.EmailVerified,
 		&user.AgeVerified,
@@ -443,6 +471,7 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 				"display_name":     user.DisplayName,
 				"avatar_url":       user.AvatarURL,
 				"header_image_url": user.HeaderImageURL,
+				"color_scheme":     user.ColorScheme,
 			},
 		})
 	}
@@ -583,11 +612,63 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		return
 	}
 
+	// Force-close all WebSocket connections for this user.
+	// Password change invalidates all sessions — the user must re-authenticate.
+	if uid, parseErr := uuid.Parse(userID.(string)); parseErr == nil {
+		h.hub.DisconnectUser(uid)
+	}
+
 	h.log.Info("Password changed with key re-wrap", "user_id", userID)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Password changed successfully",
 	})
+}
+
+// SearchUsers searches for users by username or display_name.
+// GET /users/search?q=...
+func (h *Handler) SearchUsers(c *gin.Context) {
+	userID := c.GetString("user_id")
+	query := strings.TrimSpace(c.Query("q"))
+	if query == "" || len(query) < 2 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Search query must be at least 2 characters"})
+		return
+	}
+
+	pattern := "%" + strings.ToLower(query) + "%"
+	rows, err := h.db.Query(`
+		SELECT u.id, u.username, u.display_name, u.avatar_url
+		FROM users u
+		LEFT JOIN privacy_settings ps ON ps.user_id = u.id
+		WHERE (LOWER(u.username) LIKE $1 OR LOWER(COALESCE(u.display_name, '')) LIKE $1)
+		  AND u.id != $2
+		  AND COALESCE(ps.searchable_by_username, FALSE) = TRUE
+		LIMIT 20
+	`, pattern, userID)
+	if err != nil {
+		h.log.Error("Failed to search users", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to search users"})
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	type searchResult struct {
+		ID          string  `json:"id"`
+		Username    string  `json:"username"`
+		DisplayName *string `json:"display_name,omitempty"`
+		AvatarURL   *string `json:"avatar_url,omitempty"`
+	}
+
+	results := []searchResult{}
+	for rows.Next() {
+		var r searchResult
+		if err := rows.Scan(&r.ID, &r.Username, &r.DisplayName, &r.AvatarURL); err != nil {
+			continue
+		}
+		results = append(results, r)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"users": results})
 }
 
 // GetPublicKey returns a user's latest public key (for E2EE key wrapping).
@@ -721,4 +802,140 @@ func (h *Handler) UpdatePreferences(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"version": version,
 	})
+}
+
+// --- Privacy Settings ---
+
+// privacySettingsResponse represents the user's privacy settings.
+type privacySettingsResponse struct {
+	MessagesFriendsOnly   bool   `json:"messages_friends_only"`
+	MessagesServerMembers bool   `json:"messages_server_members"`
+	AutoAcceptFriendCodes bool   `json:"auto_accept_friend_codes"`
+	SearchableByUsername  bool   `json:"searchable_by_username"`
+	SearchableByEmail     bool   `json:"searchable_by_email"`
+	SearchableByPhone     bool   `json:"searchable_by_phone"`
+	UpdatedAt             string `json:"updated_at,omitempty"`
+}
+
+// GetPrivacySettings returns the current user's privacy settings.
+// Returns defaults if no settings have been saved yet.
+// GET /users/me/privacy
+func (h *Handler) GetPrivacySettings(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	var ps privacySettingsResponse
+	err := h.db.QueryRow(`
+		SELECT messages_friends_only, messages_server_members, auto_accept_friend_codes,
+		       searchable_by_username, searchable_by_email, searchable_by_phone, updated_at
+		FROM privacy_settings
+		WHERE user_id = $1
+	`, userID).Scan(
+		&ps.MessagesFriendsOnly, &ps.MessagesServerMembers, &ps.AutoAcceptFriendCodes,
+		&ps.SearchableByUsername, &ps.SearchableByEmail, &ps.SearchableByPhone, &ps.UpdatedAt,
+	)
+	if err == sql.ErrNoRows {
+		// Return defaults matching the schema defaults
+		c.JSON(http.StatusOK, gin.H{
+			"privacy": privacySettingsResponse{
+				MessagesFriendsOnly:   true,
+				MessagesServerMembers: true,
+			},
+		})
+		return
+	}
+	if err != nil {
+		h.log.Error("Failed to fetch privacy settings", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch privacy settings"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"privacy": ps})
+}
+
+// updatePrivacyRequest represents a partial update to privacy settings.
+type updatePrivacyRequest struct {
+	MessagesFriendsOnly   *bool `json:"messages_friends_only"`
+	MessagesServerMembers *bool `json:"messages_server_members"`
+	AutoAcceptFriendCodes *bool `json:"auto_accept_friend_codes"`
+	SearchableByUsername  *bool `json:"searchable_by_username"`
+	SearchableByEmail     *bool `json:"searchable_by_email"`
+	SearchableByPhone     *bool `json:"searchable_by_phone"`
+}
+
+// UpdatePrivacySettings updates the current user's privacy settings.
+// Accepts a partial JSON body — only provided fields are updated.
+// PATCH /users/me/privacy
+func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	var req updatePrivacyRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	// Build dynamic SET clause for partial update
+	setClauses := []string{}
+	args := []interface{}{userID}
+	argIdx := 2
+
+	if req.MessagesFriendsOnly != nil {
+		setClauses = append(setClauses, fmt.Sprintf("messages_friends_only = $%d", argIdx))
+		args = append(args, *req.MessagesFriendsOnly)
+		argIdx++
+	}
+	if req.MessagesServerMembers != nil {
+		setClauses = append(setClauses, fmt.Sprintf("messages_server_members = $%d", argIdx))
+		args = append(args, *req.MessagesServerMembers)
+		argIdx++
+	}
+	if req.AutoAcceptFriendCodes != nil {
+		setClauses = append(setClauses, fmt.Sprintf("auto_accept_friend_codes = $%d", argIdx))
+		args = append(args, *req.AutoAcceptFriendCodes)
+		argIdx++
+	}
+	if req.SearchableByUsername != nil {
+		setClauses = append(setClauses, fmt.Sprintf("searchable_by_username = $%d", argIdx))
+		args = append(args, *req.SearchableByUsername)
+		argIdx++
+	}
+	if req.SearchableByEmail != nil {
+		setClauses = append(setClauses, fmt.Sprintf("searchable_by_email = $%d", argIdx))
+		args = append(args, *req.SearchableByEmail)
+		argIdx++
+	}
+	if req.SearchableByPhone != nil {
+		setClauses = append(setClauses, fmt.Sprintf("searchable_by_phone = $%d", argIdx))
+		args = append(args, *req.SearchableByPhone)
+	}
+
+	if len(setClauses) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No fields to update"})
+		return
+	}
+
+	setClauses = append(setClauses, "updated_at = NOW()")
+
+	// UPSERT: insert with defaults, update only provided fields
+	// #nosec G201 -- Safe: setClauses contains only parameterized assignments
+	query := fmt.Sprintf(`
+		INSERT INTO privacy_settings (user_id) VALUES ($1)
+		ON CONFLICT (user_id) DO UPDATE SET %s
+		RETURNING messages_friends_only, messages_server_members, auto_accept_friend_codes,
+		          searchable_by_username, searchable_by_email, searchable_by_phone, updated_at
+	`, strings.Join(setClauses, ", "))
+
+	var ps privacySettingsResponse
+	err := h.db.QueryRow(query, args...).Scan(
+		&ps.MessagesFriendsOnly, &ps.MessagesServerMembers, &ps.AutoAcceptFriendCodes,
+		&ps.SearchableByUsername, &ps.SearchableByEmail, &ps.SearchableByPhone, &ps.UpdatedAt,
+	)
+	if err != nil {
+		h.log.Error("Failed to update privacy settings", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update privacy settings"})
+		return
+	}
+
+	h.log.Info("Privacy settings updated", "user_id", userID)
+	c.JSON(http.StatusOK, gin.H{"privacy": ps})
 }

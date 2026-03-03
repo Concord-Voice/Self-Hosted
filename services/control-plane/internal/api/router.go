@@ -8,6 +8,8 @@ import (
 
 	"github.com/concord/control-plane/internal/auth"
 	"github.com/concord/control-plane/internal/channels"
+	"github.com/concord/control-plane/internal/dm"
+	"github.com/concord/control-plane/internal/friends"
 	"github.com/concord/control-plane/internal/invites"
 	"github.com/concord/control-plane/internal/members"
 	"github.com/concord/control-plane/internal/messages"
@@ -15,15 +17,17 @@ import (
 	"github.com/concord/control-plane/internal/servers"
 	"github.com/concord/control-plane/internal/sessions"
 	"github.com/concord/control-plane/internal/users"
+	"github.com/concord/control-plane/internal/voice"
 	"github.com/concord/control-plane/internal/websocket"
 	"github.com/concord/control-plane/pkg/config"
 	"github.com/concord/control-plane/pkg/logger"
+	natsclient "github.com/concord/control-plane/pkg/nats"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 )
 
-// NewRouter creates a new API router and returns the WebSocket hub for lifecycle management.
-func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.Logger) (*gin.Engine, *websocket.Hub) {
+// NewRouter creates a new API router and returns the WebSocket hub and NATS client for lifecycle management.
+func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.Logger) (*gin.Engine, *websocket.Hub, *natsclient.Client) {
 	router := gin.New()
 
 	// Middleware
@@ -44,17 +48,37 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	hub := websocket.NewHub(db, redis)
 	go hub.Run()
 
+	// Initialize NATS (inter-service messaging with media plane)
+	var natsClient *natsclient.Client
+	nc, err := natsclient.Connect(cfg.NATSUrl)
+	if err != nil {
+		log.Warn("NATS connection failed — voice state sync disabled", "error", err)
+	} else {
+		natsClient = nc
+	}
+
 	// Initialize handlers
-	authHandler := auth.NewHandler(db, redis, log, cfg.JWTSecret)
-	sessionsHandler := sessions.NewHandler(db, log)
+	authHandler := auth.NewHandler(db, redis, log, cfg.JWTSecret, hub)
+	sessionsHandler := sessions.NewHandler(db, redis, log, hub)
 	usersHandler := users.NewHandler(db, log, hub)
 	serversHandler := servers.NewHandler(db, log, hub)
 	channelsHandler := channels.NewHandler(db, log, hub)
 	membersHandler := members.NewHandler(db, log, redis, hub)
 	messagesHandler := messages.NewHandler(db, log, hub)
 	invitesHandler := invites.NewHandler(db, log, hub)
+	voiceHandler := voice.NewHandler(db, log, hub, cfg)
+	dmHandler := dm.NewHandler(db, log, hub, cfg)
+	friendsHandler := friends.NewHandler(db, log, hub)
 	wsHandler := websocket.NewHandler(hub, db, redis, cfg.JWTSecret, cfg.AllowedOrigins)
 	wsTicketHandler := auth.NewWSTicketHandler(redis, cfg.JWTSecret)
+
+	// Start NATS voice event subscriber
+	if natsClient != nil {
+		voiceSub := voice.NewNATSSubscriber(db, log, hub, natsClient)
+		if subErr := voiceSub.Subscribe(); subErr != nil {
+			log.Error("Failed to subscribe to voice NATS events", "error", subErr)
+		}
+	}
 
 	// API v1 routes
 	v1 := router.Group("/api/v1")
@@ -143,12 +167,28 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 
 				// Encrypted user preferences (cross-device sync)
 				userRoutes.GET("/me/preferences",
-					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					usersHandler.GetPreferences,
 				)
 				userRoutes.PUT("/me/preferences",
-					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					usersHandler.UpdatePreferences,
+				)
+
+				// Search users by username/display name
+				userRoutes.GET("/search",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					usersHandler.SearchUsers,
+				)
+
+				// Privacy settings
+				userRoutes.GET("/me/privacy",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					usersHandler.GetPrivacySettings,
+				)
+				userRoutes.PATCH("/me/privacy",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					usersHandler.UpdatePrivacySettings,
 				)
 			}
 
@@ -167,10 +207,16 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					sessionsHandler.RevokeSession,
 				)
 
-				// Revoke all other sessions (5 requests per minute - more sensitive)
-				sessionRoutes.DELETE("",
+				// Revoke all sessions (5 requests per minute - requires password re-verification)
+				sessionRoutes.POST("/revoke-all",
 					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
 					sessionsHandler.RevokeAllSessions,
+				)
+
+				// Toggle revocation mode (5 requests per minute - requires password re-verification)
+				sessionRoutes.PUT("/revocation-mode",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					sessionsHandler.UpdateRevocationMode,
 				)
 			}
 
@@ -261,6 +307,30 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					invitesHandler.RevokeInvite,
 				)
 
+				// Channel group routes
+				serverRoutes.GET("/:id/channel-groups",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					channelsHandler.ListChannelGroups,
+				)
+				serverRoutes.POST("/:id/channel-groups",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					channelsHandler.CreateChannelGroup,
+				)
+				serverRoutes.PATCH("/:id/channel-groups/:group_id",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					channelsHandler.UpdateChannelGroup,
+				)
+				serverRoutes.DELETE("/:id/channel-groups/:group_id",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					channelsHandler.DeleteChannelGroup,
+				)
+
+				// Bulk reorder channels (drag-and-drop between groups)
+				serverRoutes.PUT("/:id/channels/reorder",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					channelsHandler.ReorderChannels,
+				)
+
 				// Get unread counts for all channels in a server (30 requests per minute)
 				serverRoutes.GET("/:id/unread",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
@@ -325,6 +395,22 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					channelsHandler.DistributeChannelKeys,
 				)
 
+				// Voice channel routes
+				channelRoutes.GET("/:id/voice/participants",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					voiceHandler.GetParticipants,
+				)
+				channelRoutes.POST("/:id/voice/join",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					voiceHandler.AuthorizeJoin,
+				)
+
+				// Rotate channel encryption key (admin/owner only)
+				channelRoutes.POST("/:id/rotate-key",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					channelsHandler.RotateKey,
+				)
+
 			}
 
 			// E2EE key management routes (separate group to avoid gin /:id wildcard conflict)
@@ -334,6 +420,22 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 				e2eeRoutes.GET("/pending-keys",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					channelsHandler.GetPendingKeyRequests,
+				)
+
+				// Unified key endpoints (resolves server channel vs DM conversation)
+				e2eeRoutes.GET("/keys/:context_id",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					channelsHandler.GetUnifiedKeys,
+				)
+				e2eeRoutes.POST("/keys/:context_id",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					channelsHandler.DistributeUnifiedKeys,
+				)
+
+				// Validate cached key epochs on reconnect (pull-based catch-up for missed revocations)
+				e2eeRoutes.POST("/validate-epochs",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					channelsHandler.ValidateEpochs,
 				)
 			}
 
@@ -374,11 +476,163 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					invitesHandler.GetInviteInfo,
 				)
 			}
+
+			// DM conversation routes
+			dmRoutes := protected.Group("/dm/conversations")
+			{
+				// List user's DM conversations (30 requests per minute)
+				dmRoutes.GET("",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					dmHandler.ListConversations,
+				)
+
+				// Open/get-or-create 1:1 DM conversation (10 requests per minute)
+				dmRoutes.POST("",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					dmHandler.OpenConversation,
+				)
+
+				// Create group DM (10 requests per minute)
+				dmRoutes.POST("/group",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					dmHandler.CreateGroup,
+				)
+
+				// Get or create personal thread (10 requests per minute)
+				dmRoutes.POST("/personal",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					dmHandler.GetOrCreatePersonalThread,
+				)
+
+				// Get specific DM conversation (30 requests per minute)
+				dmRoutes.GET("/:id",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					dmHandler.GetConversation,
+				)
+
+				// Update DM conversation (group name, etc.) (10 requests per minute)
+				dmRoutes.PATCH("/:id",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					dmHandler.UpdateConversation,
+				)
+
+				// Get DM message history (30 requests per minute)
+				dmRoutes.GET("/:id/messages",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					dmHandler.GetMessages,
+				)
+
+				// Mark DM conversation as read (30 requests per minute)
+				dmRoutes.POST("/:id/read",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					dmHandler.MarkRead,
+				)
+
+				// DM E2EE key management
+				dmRoutes.GET("/:id/keys",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					dmHandler.GetKeys,
+				)
+				dmRoutes.POST("/:id/keys",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					dmHandler.DistributeKeys,
+				)
+
+				// DM voice call
+				dmRoutes.POST("/:id/voice/join",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					dmHandler.AuthorizeVoiceJoin,
+				)
+				dmRoutes.GET("/:id/voice/participants",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					dmHandler.GetVoiceParticipants,
+				)
+
+				// Manual seal & rotate DM encryption key (5 per day per conversation)
+				dmRoutes.POST("/:id/rotate-key",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					dmHandler.RotateKey,
+				)
+			}
+
+			// Friends routes
+			friendRoutes := protected.Group("/friends")
+			{
+				// List accepted friends (30 requests per minute)
+				friendRoutes.GET("",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					friendsHandler.ListFriends,
+				)
+
+				// List pending friend requests (30 requests per minute)
+				friendRoutes.GET("/requests",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					friendsHandler.ListRequests,
+				)
+
+				// Send friend request (10 requests per minute)
+				friendRoutes.POST("/request",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					friendsHandler.SendRequest,
+				)
+
+				// Accept/decline friend request (10 requests per minute)
+				friendRoutes.PATCH("/request/:id",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					friendsHandler.RespondRequest,
+				)
+
+				// Remove friend (5 requests per minute)
+				friendRoutes.DELETE("/:user_id",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					friendsHandler.RemoveFriend,
+				)
+
+				// Block user (5 requests per minute)
+				friendRoutes.POST("/:user_id/block",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					friendsHandler.BlockUser,
+				)
+
+				// Friend code routes
+				codeRoutes := friendRoutes.Group("/codes")
+				{
+					// Create friend code (10 requests per minute)
+					codeRoutes.POST("",
+						middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+						friendsHandler.CreateFriendCode,
+					)
+
+					// List friend codes (30 requests per minute)
+					codeRoutes.GET("",
+						middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+						friendsHandler.ListFriendCodes,
+					)
+
+					// Revoke friend code (10 requests per minute)
+					codeRoutes.DELETE("/:id",
+						middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+						friendsHandler.RevokeFriendCode,
+					)
+
+					// Preview friend code (30 requests per minute)
+					codeRoutes.GET("/:code",
+						middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+						friendsHandler.PreviewFriendCode,
+					)
+
+					// Claim friend code (10 requests per minute)
+					codeRoutes.POST("/:code/claim",
+						middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+						friendsHandler.ClaimFriendCode,
+					)
+				}
+			}
 		}
 
 		// WebSocket endpoint (requires JWT authentication via query parameter or header)
 		v1.GET("/ws", wsHandler.HandleWebSocket)
 	}
 
-	return router, hub
+	return router, hub, natsClient
 }

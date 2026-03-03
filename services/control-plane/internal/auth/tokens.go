@@ -38,7 +38,7 @@ func GenerateAccessToken(userID, jwtSecret string) (string, error) {
 			ExpiresAt: jwt.NewNumericDate(now.Add(AccessTokenTTL)),
 			IssuedAt:  jwt.NewNumericDate(now),
 			NotBefore: jwt.NewNumericDate(now),
-			Issuer:    "concord-control-plane",
+			Issuer:    "concordvoice-control-plane",
 		},
 	}
 
