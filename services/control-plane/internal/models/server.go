@@ -74,6 +74,7 @@ type Message struct {
 	UserID      string     `json:"user_id" db:"user_id"`
 	Content     string     `json:"content" db:"content"`
 	IsEncrypted bool       `json:"is_encrypted" db:"is_encrypted"`
+	KeyVersion  int        `json:"key_version" db:"key_version"`
 	EditedAt    *time.Time `json:"edited_at,omitempty" db:"edited_at"`
 	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at" db:"updated_at"`

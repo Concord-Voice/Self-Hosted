@@ -431,6 +431,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					channelsHandler.DistributeUnifiedKeys,
 				)
+
+				// Validate cached key epochs on reconnect (pull-based catch-up for missed revocations)
+				e2eeRoutes.POST("/validate-epochs",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					channelsHandler.ValidateEpochs,
+				)
 			}
 
 			// Message routes

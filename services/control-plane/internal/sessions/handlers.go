@@ -189,7 +189,7 @@ func (h *Handler) ListSessions(c *gin.Context) {
 
 	// Fetch active sessions (not revoked, not expired)
 	rows, err := h.db.Query(
-		`SELECT id, token_hash, device_name, ip_address, user_agent, expires_at, created_at, last_used_at, remember_me
+		`SELECT id, token_hash, device_name, ip_address, user_agent, expires_at, created_at, last_used_at, remember_me, COALESCE(machine_id, '')
 		 FROM refresh_tokens
 		 WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > NOW()
 		 ORDER BY last_used_at DESC`,
@@ -215,6 +215,7 @@ func (h *Handler) ListSessions(c *gin.Context) {
 			&session.CreatedAt,
 			&session.LastUsedAt,
 			&session.RememberMe,
+			&session.MachineID,
 		)
 		if err != nil {
 			h.log.Error("Failed to scan session", "error", err)
@@ -226,6 +227,7 @@ func (h *Handler) ListSessions(c *gin.Context) {
 			"device_name": session.DeviceName,
 			"ip_address":  maskIPAddress(session.IPAddress),
 			"user_agent":  session.UserAgent,
+			"machine_id":  session.MachineID,
 			"expires_at":  session.ExpiresAt,
 			"created_at":  session.CreatedAt,
 			"last_used":   session.LastUsedAt,

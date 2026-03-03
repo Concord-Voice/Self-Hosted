@@ -529,6 +529,31 @@ func (h *Hub) sendError(clientID uuid.UUID, message string) {
 	}
 }
 
+// sendErrorWithData sends an error message with additional structured data to a specific client.
+func (h *Hub) sendErrorWithData(clientID uuid.UUID, errorCode string, extra map[string]interface{}) {
+	client, ok := h.clients[clientID]
+	if !ok {
+		return
+	}
+	data := map[string]interface{}{
+		"message": errorCode,
+		"error":   errorCode,
+	}
+	for k, v := range extra {
+		data[k] = v
+	}
+	errMsg := OutgoingMessage{
+		Type: "error",
+		Data: data,
+	}
+	if raw, err := json.Marshal(errMsg); err == nil {
+		select {
+		case client.Send <- raw:
+		default:
+		}
+	}
+}
+
 // handleMessage handles a chat message: validates, persists to DB, then broadcasts
 func (h *Hub) handleMessage(msg IncomingMessage) {
 	channelID, ok := msg.Data["channel_id"].(string)
@@ -566,6 +591,12 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 
 	isEncrypted, _ := msg.Data["is_encrypted"].(bool)
 
+	// Extract key_version for E2EE messages (defaults to 1 for backward compat)
+	keyVersion := 1
+	if kv, ok := msg.Data["key_version"].(float64); ok && kv > 0 {
+		keyVersion = int(kv)
+	}
+
 	// Encrypted messages are larger due to AES-GCM (IV + auth tag) + base64 encoding.
 	// A 4000-char plaintext can produce up to ~24KB of ciphertext (multi-byte UTF-8 worst case).
 	// Plaintext messages keep the 4000-char limit.
@@ -591,14 +622,36 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		return
 	}
 
+	// Epoch enforcement: reject messages encrypted with a revoked key epoch
+	if isEncrypted && keyVersion > 0 {
+		var epochRevoked bool
+		_ = h.db.QueryRow(
+			`SELECT EXISTS(SELECT 1 FROM key_revocations WHERE channel_id = $1 AND revoked_epoch = $2)`,
+			channelUUID, keyVersion,
+		).Scan(&epochRevoked)
+		if epochRevoked {
+			// Fetch the current (latest) epoch so the client can re-encrypt
+			var currentEpoch int
+			_ = h.db.QueryRow(
+				`SELECT COALESCE(MAX(key_version), 1) FROM channel_keys WHERE channel_id = $1`,
+				channelUUID,
+			).Scan(&currentEpoch)
+			h.sendErrorWithData(msg.ClientID, "epoch_revoked", map[string]interface{}{
+				"current_epoch": currentEpoch,
+				"channel_id":    channelID,
+			})
+			return
+		}
+	}
+
 	// Persist message to database
 	messageID := uuid.New()
 	var createdAt, updatedAt time.Time
 	err = h.db.QueryRow(
-		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
 		 RETURNING created_at, updated_at`,
-		messageID, channelUUID, msg.UserID, content, isEncrypted,
+		messageID, channelUUID, msg.UserID, content, isEncrypted, keyVersion,
 	).Scan(&createdAt, &updatedAt)
 	if err != nil {
 		log.Printf("Failed to persist message: %v", err)
@@ -642,6 +695,7 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 				"avatar_url":   client.AvatarURL,
 				"content":      content,
 				"is_encrypted": isEncrypted,
+				"key_version":  keyVersion,
 				"created_at":   createdAt,
 				"updated_at":   updatedAt,
 			},
@@ -1065,6 +1119,12 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 		msgType = "system"
 	}
 
+	// Extract key_version for E2EE messages
+	dmKeyVersion := 1
+	if kv, ok := msg.Data["key_version"].(float64); ok && kv > 0 {
+		dmKeyVersion = int(kv)
+	}
+
 	maxContentLen := 4000
 	if isEncrypted {
 		maxContentLen = 24000
@@ -1074,9 +1134,10 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 		return
 	}
 
-	// E2EE enforcement: if conversation is encrypted, reject plaintext messages
-	var convEncrypted bool
-	encErr := h.db.QueryRow(`SELECT is_encrypted FROM dm_conversations WHERE id = $1`, convUUID).Scan(&convEncrypted)
+	// E2EE enforcement: if conversation is encrypted, reject plaintext messages.
+	// Also fetch is_personal so we can include the sender in personal thread broadcasts.
+	var convEncrypted, convPersonal bool
+	encErr := h.db.QueryRow(`SELECT is_encrypted, is_personal FROM dm_conversations WHERE id = $1`, convUUID).Scan(&convEncrypted, &convPersonal)
 	if encErr != nil {
 		log.Printf("Failed to check DM encryption status: %v", encErr)
 		h.sendError(msg.ClientID, "Failed to verify conversation encryption status")
@@ -1091,10 +1152,10 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 	messageID := uuid.New()
 	var createdAt, updatedAt time.Time
 	err = h.db.QueryRow(
-		`INSERT INTO dm_messages (id, conversation_id, user_id, content, is_encrypted, type, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+		`INSERT INTO dm_messages (id, conversation_id, user_id, content, is_encrypted, key_version, type, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
 		 RETURNING created_at, updated_at`,
-		messageID, convUUID, msg.UserID, content, isEncrypted, msgType,
+		messageID, convUUID, msg.UserID, content, isEncrypted, dmKeyVersion, msgType,
 	).Scan(&createdAt, &updatedAt)
 	if err != nil {
 		log.Printf("Failed to persist DM message: %v", err)
@@ -1133,15 +1194,23 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 			"avatar_url":      client.AvatarURL,
 			"content":         content,
 			"is_encrypted":    isEncrypted,
+			"key_version":     dmKeyVersion,
 			"type":            msgType,
 			"created_at":      createdAt,
 			"updated_at":      updatedAt,
 		},
 	}
 
+	// For personal threads (self-DM), include the sender in the broadcast
+	// because they are the only subscriber. For normal DMs, exclude the
+	// sender since they already received the dm_message_ack.
+	var excludeUser *uuid.UUID
+	if !convPersonal {
+		excludeUser = &msg.UserID
+	}
 	h.dmBroadcast <- DMBroadcastMessage{
 		ConversationID: convUUID,
-		ExcludeUser:    &msg.UserID,
+		ExcludeUser:    excludeUser,
 		Data:           broadcastData,
 	}
 

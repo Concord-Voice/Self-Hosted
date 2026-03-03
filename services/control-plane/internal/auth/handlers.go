@@ -36,6 +36,14 @@ func truncateUserAgent(ua string) string {
 	return ua
 }
 
+// nilIfEmpty returns nil for empty strings (maps to SQL NULL) or the string pointer.
+func nilIfEmpty(s string) *string {
+	if s == "" {
+		return nil
+	}
+	return &s
+}
+
 // setRefreshCookie sets a refresh_token cookie with secure defaults.
 func setRefreshCookie(c *gin.Context, value string, maxAge int) {
 	secure := c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https"
@@ -236,10 +244,11 @@ func (h *Handler) Register(c *gin.Context) {
 	tokenHash := HashRefreshToken(refreshToken)
 	tokenID := uuid.New().String()
 	expiresAt := time.Now().Add(30 * 24 * time.Hour) // 30 days
+	machineID := c.GetHeader("X-Machine-Id")
 
 	_, err = h.db.Exec(
-		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, remember_me)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, remember_me, machine_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		tokenID,
 		userID,
 		tokenHash,
@@ -248,6 +257,7 @@ func (h *Handler) Register(c *gin.Context) {
 		truncateUserAgent(c.GetHeader("User-Agent")),
 		expiresAt,
 		true, // Registration always defaults to remember_me=true
+		nilIfEmpty(machineID),
 	)
 	if err != nil {
 		h.log.Error("Failed to store refresh token", "error", err)
@@ -423,18 +433,29 @@ func (h *Handler) Login(c *gin.Context) {
 	ipAddress := c.ClientIP()
 	userAgent := truncateUserAgent(c.GetHeader("User-Agent"))
 
-	// Revoke old sessions from the same device+IP to prevent duplicates.
-	// This handles repeated logins from the same client without explicit logout.
-	_, _ = h.db.Exec(
-		`UPDATE refresh_tokens SET revoked_at = NOW()
-		 WHERE user_id = $1 AND ip_address = $2 AND user_agent = $3
-		   AND revoked_at IS NULL`,
-		user.ID, ipAddress, userAgent,
-	)
+	machineID := c.GetHeader("X-Machine-Id")
+
+	// Revoke old sessions from the same device to prevent duplicates.
+	// Prefer machine_id match when available; fall back to IP+UA match.
+	if machineID != "" {
+		_, _ = h.db.Exec(
+			`UPDATE refresh_tokens SET revoked_at = NOW()
+			 WHERE user_id = $1 AND machine_id = $2
+			   AND revoked_at IS NULL`,
+			user.ID, machineID,
+		)
+	} else {
+		_, _ = h.db.Exec(
+			`UPDATE refresh_tokens SET revoked_at = NOW()
+			 WHERE user_id = $1 AND ip_address = $2 AND user_agent = $3
+			   AND revoked_at IS NULL`,
+			user.ID, ipAddress, userAgent,
+		)
+	}
 
 	_, err = h.db.Exec(
-		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, remember_me)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, remember_me, machine_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		tokenID,
 		user.ID,
 		tokenHash,
@@ -443,6 +464,7 @@ func (h *Handler) Login(c *gin.Context) {
 		userAgent,
 		expiresAt,
 		rememberMe,
+		nilIfEmpty(machineID),
 	)
 	if err != nil {
 		h.log.Error("Failed to store refresh token", "error", err)
@@ -520,8 +542,9 @@ func (h *Handler) Refresh(c *gin.Context) {
 
 	// Fetch token from database (exclude revoked sessions)
 	var token models.RefreshToken
+	var storedMachineID sql.NullString
 	err = h.db.QueryRow(
-		`SELECT id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, created_at, last_used_at, remember_me
+		`SELECT id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, created_at, last_used_at, remember_me, COALESCE(machine_id, '')
 		 FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NULL`,
 		tokenHash,
 	).Scan(
@@ -535,23 +558,57 @@ func (h *Handler) Refresh(c *gin.Context) {
 		&token.CreatedAt,
 		&token.LastUsedAt,
 		&token.RememberMe,
+		&storedMachineID,
 	)
+	if storedMachineID.Valid {
+		token.MachineID = storedMachineID.String
+	}
 	if err != nil {
 		if err == sql.ErrNoRows {
-			// Replay detection: check if this token was already used (revoked but exists)
-			var revokedUserID string
+			// Replay detection: check if this token was already used (revoked but exists).
+			// Grace period: if the token was revoked very recently (< 30s), treat it as a
+			// legitimate crash-recovery replay. This covers the case where the client was
+			// killed between the server revoking the old token and the client saving the
+			// new one (e.g. process crash, HMR reload, forced quit).
+			var revokedUserID, revokedIP, revokedUA, revokedMachineID string
+			var revokedAt time.Time
+			var revokedTokenID string
 			revokeErr := h.db.QueryRow(
-				`SELECT user_id FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NOT NULL`,
+				`SELECT id, user_id, revoked_at, ip_address, user_agent, COALESCE(machine_id, '')
+				 FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NOT NULL`,
 				tokenHash,
-			).Scan(&revokedUserID)
+			).Scan(&revokedTokenID, &revokedUserID, &revokedAt, &revokedIP, &revokedUA, &revokedMachineID)
 			if revokeErr == nil && revokedUserID != "" {
-				// Log the anomaly but do NOT revoke all sessions.
-				// Mass revocation is weaponizable as a DoS — an attacker replays
-				// one stolen token and the victim loses all active sessions.
-				// The replayed token is already revoked (single-use rotation).
+				gracePeriod := 30 * time.Second
+				requestIP := c.ClientIP()
+				requestUA := truncateUserAgent(c.GetHeader("User-Agent"))
+				graceRequestMachineID := c.GetHeader("X-Machine-Id")
+				// Postgres INET may return CIDR notation (e.g. "127.0.0.1/32"); strip suffix for comparison
+				storedIP := revokedIP
+				if idx := strings.IndexByte(storedIP, '/'); idx != -1 {
+					storedIP = storedIP[:idx]
+				}
+				// Machine ID must match if both sides have one
+				machineIDOk := revokedMachineID == "" || graceRequestMachineID == "" || revokedMachineID == graceRequestMachineID
+
+				if time.Since(revokedAt) < gracePeriod && storedIP == requestIP && revokedUA == requestUA && machineIDOk {
+					// Within grace period AND same device fingerprint — likely a crash
+					// recovery, not a stolen token replay from a different machine.
+					h.log.Info("Refresh token replay within grace period, recovering session",
+						"user_id", revokedUserID,
+						"revoked_ago_ms", time.Since(revokedAt).Milliseconds(),
+						"ip", requestIP,
+					)
+					h.handleGracePeriodRefresh(c, revokedUserID, revokedTokenID, revokedAt)
+					return
+				}
+				// Outside grace period or different device — genuine stale replay
 				h.log.Warn("Refresh token replay detected, stale token replayed",
 					"user_id", revokedUserID,
 					"token_hash", tokenHash,
+					"same_ip", revokedIP == requestIP,
+					"same_ua", revokedUA == requestUA,
+					"revoked_ago_ms", time.Since(revokedAt).Milliseconds(),
 				)
 			}
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid refresh token"})
@@ -596,6 +653,55 @@ func (h *Handler) Refresh(c *gin.Context) {
 		// presence key exists (online/dnd/invisible) → skip, token stays valid
 	}
 
+	// ── Machine ID theft detection (#89) ───────────────────────────────
+	requestMachineID := c.GetHeader("X-Machine-Id")
+	if token.MachineID != "" && requestMachineID != "" && token.MachineID != requestMachineID {
+		requestIP := c.ClientIP()
+		storedIP := token.IPAddress
+		if idx := strings.IndexByte(storedIP, '/'); idx != -1 {
+			storedIP = storedIP[:idx]
+		}
+
+		if storedIP == requestIP {
+			// Same IP, different machine — pre-MFA: log warning, allow
+			h.log.Warn("Refresh from different machine_id but same IP (pre-MFA: allowing)",
+				"user_id", token.UserID,
+				"stored_machine_id", token.MachineID,
+				"request_machine_id", requestMachineID,
+				"ip", requestIP,
+			)
+		} else {
+			// Different machine AND different IP — HIGH RISK: token theft
+			h.log.Error("TOKEN THEFT DETECTED: different machine_id and different IP",
+				"user_id", token.UserID,
+				"stored_machine_id", token.MachineID,
+				"request_machine_id", requestMachineID,
+				"stored_ip", storedIP,
+				"request_ip", requestIP,
+			)
+
+			// Revoke ALL sessions for this user
+			_, _ = h.db.Exec(
+				`UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`,
+				token.UserID,
+			)
+
+			// Disconnect all WebSocket connections
+			if uid, parseErr := uuid.Parse(token.UserID); parseErr == nil {
+				h.hub.DisconnectUser(uid)
+			}
+
+			// Trigger E2EE key revocation for all encrypted channels
+			h.triggerTheftKeyRevocations(token.UserID)
+
+			c.JSON(http.StatusUnauthorized, gin.H{
+				"error":      "Session terminated: potential token theft detected",
+				"error_code": "session_theft_detected",
+			})
+			return
+		}
+	}
+
 	// Revoke the old refresh token (single-use rotation)
 	_, err = h.db.Exec(
 		`UPDATE refresh_tokens SET revoked_at = NOW(), last_used_at = NOW() WHERE id = $1`,
@@ -621,12 +727,16 @@ func (h *Handler) Refresh(c *gin.Context) {
 		cookieMaxAge = 30 * 24 * 60 * 60
 	}
 
-	// Store new refresh token
+	// Store new refresh token (propagate machine_id from request or stored token)
 	newTokenHash := HashRefreshToken(newRefreshToken)
 	newTokenID := uuid.New().String()
+	propagatedMachineID := requestMachineID
+	if propagatedMachineID == "" {
+		propagatedMachineID = token.MachineID
+	}
 	_, err = h.db.Exec(
-		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, remember_me)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, remember_me, machine_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		newTokenID,
 		token.UserID,
 		newTokenHash,
@@ -635,6 +745,7 @@ func (h *Handler) Refresh(c *gin.Context) {
 		truncateUserAgent(c.GetHeader("User-Agent")),
 		newExpiry,
 		token.RememberMe,
+		nilIfEmpty(propagatedMachineID),
 	)
 
 	// Auto-purge old revoked sessions for this user (> 90 days) to minimize metadata retention
@@ -665,6 +776,170 @@ func (h *Handler) Refresh(c *gin.Context) {
 		"session_id":    newTokenID,
 		"expires_in":    900, // 15 minutes
 	})
+}
+
+// handleGracePeriodRefresh recovers a session when a recently-revoked refresh token
+// is replayed within the grace period. This happens when the client process was killed
+// between the server revoking the old token and the client persisting the new one.
+// We find the successor token (issued during the rotation that revoked the replayed
+// token), revoke it, and issue a fresh token pair — effectively re-rotating.
+func (h *Handler) handleGracePeriodRefresh(c *gin.Context, userID string, revokedTokenID string, revokedAt time.Time) {
+	// Find the successor token: same user, created around the time the replayed token
+	// was revoked (within a small window), and not yet revoked itself.
+	var successor models.RefreshToken
+	var successorMachineID sql.NullString
+	err := h.db.QueryRow(
+		`SELECT id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, created_at, last_used_at, remember_me, COALESCE(machine_id, '')
+		 FROM refresh_tokens
+		 WHERE user_id = $1
+		   AND revoked_at IS NULL
+		   AND created_at >= $2 - INTERVAL '2 seconds'
+		   AND created_at <= $2 + INTERVAL '2 seconds'
+		 ORDER BY created_at DESC
+		 LIMIT 1`,
+		userID, revokedAt,
+	).Scan(
+		&successor.ID,
+		&successor.UserID,
+		&successor.TokenHash,
+		&successor.DeviceName,
+		&successor.IPAddress,
+		&successor.UserAgent,
+		&successor.ExpiresAt,
+		&successor.CreatedAt,
+		&successor.LastUsedAt,
+		&successor.RememberMe,
+		&successorMachineID,
+	)
+	if successorMachineID.Valid {
+		successor.MachineID = successorMachineID.String
+	}
+	if err != nil {
+		// No successor found — can't recover; treat as stale replay
+		h.log.Warn("Grace period replay but no successor token found",
+			"user_id", userID,
+			"revoked_token_id", revokedTokenID,
+		)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid refresh token"})
+		return
+	}
+
+	// Revoke the successor (it was never delivered to the client)
+	_, err = h.db.Exec(
+		`UPDATE refresh_tokens SET revoked_at = NOW(), last_used_at = NOW() WHERE id = $1`,
+		successor.ID,
+	)
+	if err != nil {
+		h.log.Error("Failed to revoke successor token during grace recovery", "error", err)
+	}
+
+	// Generate a fresh refresh token
+	newRefreshToken, err := GenerateRefreshToken()
+	if err != nil {
+		h.log.Error("Failed to generate refresh token during grace recovery", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
+		return
+	}
+
+	// Determine expiry
+	newExpiry := successor.ExpiresAt
+	cookieMaxAge := 0
+	if successor.RememberMe {
+		newExpiry = time.Now().Add(30 * 24 * time.Hour)
+		cookieMaxAge = 30 * 24 * 60 * 60
+	}
+
+	// Store the new token (propagate machine_id)
+	newTokenHash := HashRefreshToken(newRefreshToken)
+	newTokenID := uuid.New().String()
+	graceMachineID := c.GetHeader("X-Machine-Id")
+	if graceMachineID == "" {
+		graceMachineID = successor.MachineID
+	}
+	_, err = h.db.Exec(
+		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, remember_me, machine_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		newTokenID,
+		userID,
+		newTokenHash,
+		successor.DeviceName,
+		c.ClientIP(),
+		truncateUserAgent(c.GetHeader("User-Agent")),
+		newExpiry,
+		successor.RememberMe,
+		nilIfEmpty(graceMachineID),
+	)
+	if err != nil {
+		h.log.Error("Failed to store new refresh token during grace recovery", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
+		return
+	}
+
+	// Set cookie
+	setRefreshCookie(c, newRefreshToken, cookieMaxAge)
+
+	// Generate access token
+	accessToken, err := GenerateAccessToken(userID, h.jwtSecret)
+	if err != nil {
+		h.log.Error("Failed to generate access token during grace recovery", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
+		return
+	}
+
+	h.log.Info("Session recovered via grace period refresh",
+		"user_id", userID,
+		"new_session_id", newTokenID,
+	)
+
+	c.JSON(http.StatusOK, gin.H{
+		"access_token":  accessToken,
+		"refresh_token": newRefreshToken,
+		"session_id":    newTokenID,
+		"expires_in":    900,
+	})
+}
+
+// triggerTheftKeyRevocations inserts key_revocations records for all E2EE channels
+// that the compromised user has access to. This is called when token theft is detected
+// (different machine_id + different IP) because the attacker's session could have
+// fetched wrapped channel keys.
+func (h *Handler) triggerTheftKeyRevocations(userID string) {
+	// Find all encrypted channels the user is a member of (via server membership + channel_keys)
+	rows, err := h.db.Query(
+		`SELECT DISTINCT ck.channel_id, COALESCE(MAX(ck.key_version), 1) AS max_epoch
+		 FROM channel_keys ck
+		 JOIN channels ch ON ch.id = ck.channel_id
+		 WHERE ck.user_id = $1 AND ch.is_encrypted = TRUE
+		 GROUP BY ck.channel_id`,
+		userID,
+	)
+	if err != nil {
+		h.log.Error("Failed to query channels for theft key revocation", "error", err, "user_id", userID)
+		return
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var channelID string
+		var maxEpoch int
+		if err := rows.Scan(&channelID, &maxEpoch); err != nil {
+			h.log.Error("Failed to scan channel for theft key revocation", "error", err)
+			continue
+		}
+
+		// Insert key_revocations record (ignore conflict — may already be revoked)
+		_, err := h.db.Exec(
+			`INSERT INTO key_revocations (channel_id, revoked_epoch, successor_epoch, reason, revoked_by)
+			 VALUES ($1, $2, $3, 'theft_detected', $4)
+			 ON CONFLICT (channel_id, revoked_epoch) DO NOTHING`,
+			channelID, maxEpoch, maxEpoch+1, userID,
+		)
+		if err != nil {
+			h.log.Error("Failed to insert key revocation for theft", "error", err, "channel_id", channelID)
+		}
+	}
+
+	h.log.Info("Key revocations triggered for theft detection", "user_id", userID)
 }
 
 // Logout handles session termination

@@ -547,7 +547,8 @@ func (h *Handler) GetMessages(c *gin.Context) {
 			return
 		}
 		rows, err = h.db.Query(`
-			SELECT m.id, m.conversation_id, m.user_id, m.content, m.is_encrypted, m.type, m.edited_at, m.created_at,
+			SELECT m.id, m.conversation_id, m.user_id, m.content, m.is_encrypted, m.type, COALESCE(m.key_version, 1),
+			       m.edited_at, m.created_at,
 			       u.username, u.display_name, u.avatar_url
 			FROM dm_messages m
 			INNER JOIN users u ON u.id = m.user_id
@@ -558,7 +559,8 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		`, convID, cursor, limit)
 	} else {
 		rows, err = h.db.Query(`
-			SELECT m.id, m.conversation_id, m.user_id, m.content, m.is_encrypted, m.type, m.edited_at, m.created_at,
+			SELECT m.id, m.conversation_id, m.user_id, m.content, m.is_encrypted, m.type, COALESCE(m.key_version, 1),
+			       m.edited_at, m.created_at,
 			       u.username, u.display_name, u.avatar_url
 			FROM dm_messages m
 			INNER JOIN users u ON u.id = m.user_id
@@ -581,6 +583,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		Content        string  `json:"content"`
 		IsEncrypted    bool    `json:"is_encrypted"`
 		Type           string  `json:"type"`
+		KeyVersion     int     `json:"key_version"`
 		EditedAt       *string `json:"edited_at,omitempty"`
 		CreatedAt      string  `json:"created_at"`
 		Username       string  `json:"username"`
@@ -592,7 +595,8 @@ func (h *Handler) GetMessages(c *gin.Context) {
 	for rows.Next() {
 		var m messageResponse
 		if err := rows.Scan(
-			&m.ID, &m.ConversationID, &m.UserID, &m.Content, &m.IsEncrypted, &m.Type, &m.EditedAt, &m.CreatedAt,
+			&m.ID, &m.ConversationID, &m.UserID, &m.Content, &m.IsEncrypted, &m.Type, &m.KeyVersion,
+			&m.EditedAt, &m.CreatedAt,
 			&m.Username, &m.DisplayName, &m.AvatarURL,
 		); err != nil {
 			h.log.Error("Failed to scan DM message", "error", err)

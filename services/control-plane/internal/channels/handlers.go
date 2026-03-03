@@ -3,6 +3,7 @@ package channels
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 
 	"github.com/concord/control-plane/internal/models"
@@ -892,15 +893,31 @@ func (h *Handler) GetChannelKeys(c *gin.Context) {
 		return
 	}
 
-	// Get the caller's wrapped key
+	// Support ?version=N to fetch a specific key version (for decrypting old messages)
 	var key models.ChannelKey
-	err = h.db.QueryRow(
-		`SELECT id, channel_id, user_id, wrapped_key, key_version, created_at
-		 FROM channel_keys
-		 WHERE channel_id = $1 AND user_id = $2
-		 ORDER BY key_version DESC LIMIT 1`,
-		channelID, userID,
-	).Scan(&key.ID, &key.ChannelID, &key.UserID, &key.WrappedKey, &key.KeyVersion, &key.CreatedAt)
+	if versionStr := c.Query("version"); versionStr != "" {
+		var version int
+		if _, scanErr := fmt.Sscanf(versionStr, "%d", &version); scanErr == nil && version > 0 {
+			err = h.db.QueryRow(
+				`SELECT id, channel_id, user_id, wrapped_key, key_version, created_at
+				 FROM channel_keys
+				 WHERE channel_id = $1 AND user_id = $2 AND key_version = $3`,
+				channelID, userID, version,
+			).Scan(&key.ID, &key.ChannelID, &key.UserID, &key.WrappedKey, &key.KeyVersion, &key.CreatedAt)
+		} else {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid version parameter"})
+			return
+		}
+	} else {
+		// Default: latest version
+		err = h.db.QueryRow(
+			`SELECT id, channel_id, user_id, wrapped_key, key_version, created_at
+			 FROM channel_keys
+			 WHERE channel_id = $1 AND user_id = $2
+			 ORDER BY key_version DESC LIMIT 1`,
+			channelID, userID,
+		).Scan(&key.ID, &key.ChannelID, &key.UserID, &key.WrappedKey, &key.KeyVersion, &key.CreatedAt)
+	}
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "No encryption key available yet", "pending": true})
 		return
@@ -916,6 +933,7 @@ func (h *Handler) GetChannelKeys(c *gin.Context) {
 // DistributeChannelKeysRequest represents wrapped keys for new members
 type DistributeChannelKeysRequest struct {
 	WrappedKeys map[string]string `json:"wrapped_keys" binding:"required"` // user_id → wrapped CSK
+	KeyVersion  *int              `json:"key_version,omitempty"`           // Explicit epoch for rotation (must be > current max)
 }
 
 // DistributeChannelKeys stores wrapped channel keys for new members (key distribution).
@@ -969,6 +987,17 @@ func (h *Handler) DistributeChannelKeys(c *gin.Context) {
 		return
 	}
 
+	// Resolve key version: use explicit version if provided and valid, else latest
+	var targetKeyVersion int
+	if req.KeyVersion != nil && *req.KeyVersion > 0 {
+		targetKeyVersion = *req.KeyVersion
+	} else {
+		_ = h.db.QueryRow(
+			`SELECT COALESCE(MAX(key_version), 1) FROM channel_keys WHERE channel_id = $1`,
+			channelID,
+		).Scan(&targetKeyVersion)
+	}
+
 	distributed := 0
 	duplicates := 0
 	for memberUserID, wrappedKey := range req.WrappedKeys {
@@ -976,12 +1005,7 @@ func (h *Handler) DistributeChannelKeys(c *gin.Context) {
 			continue
 		}
 
-		// Get the latest key version for this channel
-		var keyVersion int
-		_ = h.db.QueryRow(
-			`SELECT COALESCE(MAX(key_version), 1) FROM channel_keys WHERE channel_id = $1`,
-			channelID,
-		).Scan(&keyVersion)
+		keyVersion := targetKeyVersion
 
 		// First-response-wins via ON CONFLICT DO NOTHING — no TOCTOU race
 		result, err := h.db.Exec(
@@ -1124,13 +1148,28 @@ func (h *Handler) GetUnifiedKeys(c *gin.Context) {
 		}
 
 		var key models.ChannelKey
-		err = h.db.QueryRow(
-			`SELECT id, channel_id, user_id, wrapped_key, key_version, created_at
-			 FROM channel_keys
-			 WHERE channel_id = $1 AND user_id = $2
-			 ORDER BY key_version DESC LIMIT 1`,
-			contextID, userID,
-		).Scan(&key.ID, &key.ChannelID, &key.UserID, &key.WrappedKey, &key.KeyVersion, &key.CreatedAt)
+		if versionStr := c.Query("version"); versionStr != "" {
+			var version int
+			if _, scanErr := fmt.Sscanf(versionStr, "%d", &version); scanErr == nil && version > 0 {
+				err = h.db.QueryRow(
+					`SELECT id, channel_id, user_id, wrapped_key, key_version, created_at
+					 FROM channel_keys
+					 WHERE channel_id = $1 AND user_id = $2 AND key_version = $3`,
+					contextID, userID, version,
+				).Scan(&key.ID, &key.ChannelID, &key.UserID, &key.WrappedKey, &key.KeyVersion, &key.CreatedAt)
+			} else {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid version parameter"})
+				return
+			}
+		} else {
+			err = h.db.QueryRow(
+				`SELECT id, channel_id, user_id, wrapped_key, key_version, created_at
+				 FROM channel_keys
+				 WHERE channel_id = $1 AND user_id = $2
+				 ORDER BY key_version DESC LIMIT 1`,
+				contextID, userID,
+			).Scan(&key.ID, &key.ChannelID, &key.UserID, &key.WrappedKey, &key.KeyVersion, &key.CreatedAt)
+		}
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "No encryption key available yet", "pending": true})
 			return
@@ -1353,4 +1392,72 @@ func (h *Handler) RotateKey(c *gin.Context) {
 		"message":         "Key rotation initiated",
 		"new_key_version": maxVersion + 1,
 	})
+}
+
+// ValidateEpochs checks if any of the client's cached key epochs have been revoked.
+// Called on reconnect to catch missed key_revocation WebSocket events.
+// POST /api/channels/validate-epochs
+func (h *Handler) ValidateEpochs(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	var req struct {
+		Epochs map[string]int `json:"epochs" binding:"required"` // channel_id → current cached epoch
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	type revocationInfo struct {
+		ChannelID      string `json:"channel_id"`
+		RevokedEpoch   int    `json:"revoked_epoch"`
+		SuccessorEpoch int    `json:"successor_epoch"`
+		Reason         string `json:"reason"`
+	}
+
+	var revocations []revocationInfo
+
+	for channelID, clientEpoch := range req.Epochs {
+		if _, parseErr := uuid.Parse(channelID); parseErr != nil {
+			continue
+		}
+
+		// Verify the user has access to this channel (member of server or DM participant)
+		var hasAccess bool
+		_ = h.db.QueryRow(
+			`SELECT EXISTS(
+				SELECT 1 FROM channels c
+				INNER JOIN server_members sm ON c.server_id = sm.server_id
+				WHERE c.id = $1 AND sm.user_id = $2
+			)`,
+			channelID, userID,
+		).Scan(&hasAccess)
+		if !hasAccess {
+			continue
+		}
+
+		// Check if the client's epoch has been revoked
+		var revokedEpoch, successorEpoch int
+		var reason string
+		err := h.db.QueryRow(
+			`SELECT revoked_epoch, successor_epoch, reason
+			 FROM key_revocations
+			 WHERE channel_id = $1 AND revoked_epoch = $2`,
+			channelID, clientEpoch,
+		).Scan(&revokedEpoch, &successorEpoch, &reason)
+		if err == nil {
+			revocations = append(revocations, revocationInfo{
+				ChannelID:      channelID,
+				RevokedEpoch:   revokedEpoch,
+				SuccessorEpoch: successorEpoch,
+				Reason:         reason,
+			})
+		}
+	}
+
+	if revocations == nil {
+		revocations = []revocationInfo{}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"revocations": revocations})
 }

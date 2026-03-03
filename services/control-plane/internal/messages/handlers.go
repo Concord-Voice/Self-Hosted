@@ -51,6 +51,7 @@ type SendMessageRequest struct {
 	ChannelID   string `json:"channel_id" binding:"required,uuid"`
 	Content     string `json:"content" binding:"required,min=1,max=24000"`
 	IsEncrypted bool   `json:"is_encrypted"`
+	KeyVersion  int    `json:"key_version"`
 }
 
 // UpdateMessageRequest represents a request to update a message.
@@ -115,7 +116,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 	if before != "" {
 		// Get messages before a specific message ID
 		query = `
-			SELECT m.id, m.channel_id, m.user_id, m.content, m.is_encrypted,
+			SELECT m.id, m.channel_id, m.user_id, m.content, m.is_encrypted, COALESCE(m.key_version, 1),
 			       m.edited_at, m.created_at, m.updated_at, u.username, u.display_name, u.avatar_url
 			FROM messages m
 			INNER JOIN users u ON m.user_id = u.id
@@ -128,7 +129,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 	} else {
 		// Get most recent messages
 		query = `
-			SELECT m.id, m.channel_id, m.user_id, m.content, m.is_encrypted,
+			SELECT m.id, m.channel_id, m.user_id, m.content, m.is_encrypted, COALESCE(m.key_version, 1),
 			       m.edited_at, m.created_at, m.updated_at, u.username, u.display_name, u.avatar_url
 			FROM messages m
 			INNER JOIN users u ON m.user_id = u.id
@@ -156,6 +157,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 			&msg.UserID,
 			&msg.Content,
 			&msg.IsEncrypted,
+			&msg.KeyVersion,
 			&msg.EditedAt,
 			&msg.CreatedAt,
 			&msg.UpdatedAt,
@@ -235,11 +237,17 @@ func (h *Handler) SendMessage(c *gin.Context) {
 		return
 	}
 
+	// Resolve key_version (default to 1 if not provided)
+	keyVersion := req.KeyVersion
+	if keyVersion <= 0 {
+		keyVersion = 1
+	}
+
 	// Create message
 	messageID := uuid.New().String()
 	insertQuery := `
-		INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, NOW(), NOW())
+		INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
 		RETURNING created_at, updated_at
 	`
 
@@ -249,8 +257,9 @@ func (h *Handler) SendMessage(c *gin.Context) {
 	message.UserID = userID
 	message.Content = req.Content
 	message.IsEncrypted = req.IsEncrypted
+	message.KeyVersion = keyVersion
 
-	err = h.db.QueryRow(insertQuery, messageID, req.ChannelID, userID, req.Content, req.IsEncrypted).Scan(
+	err = h.db.QueryRow(insertQuery, messageID, req.ChannelID, userID, req.Content, req.IsEncrypted, keyVersion).Scan(
 		&message.CreatedAt,
 		&message.UpdatedAt,
 	)
