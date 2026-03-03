@@ -1,6 +1,6 @@
 # Concord Frequently Asked Questions (FAQ)
 
-**Last Updated:** 2026-02-22
+**Last Updated:** 2026-03-03
 
 This document answers common questions about Concord's licensing, security, development, deployment, and usage.
 
@@ -219,7 +219,7 @@ Yes. We implement industry-standard security practices:
 **Infrastructure:**
 - 🚫 **Rate Limiting:** Redis-based, per-IP and per-user
 - 🛡️ **Pre-commit Hooks:** Prevents committing secrets
-- 🔍 **CI/CD Scanning:** TruffleHog, Trivy, dependency review
+- 🔍 **Pre-commit Scanning:** TruffleHog, Semgrep SAST (CI/CD currently disabled; pre-commit hooks active)
 - 🗄️ **Database:** PostgreSQL with row-level security
 - 🔐 **Redis:** Authentication enabled
 - 🐳 **Docker:** Container isolation
@@ -581,7 +581,7 @@ The desktop Electron app works on laptops/tablets, but no native mobile UI yet.
 | **Source Code** | ❌ Proprietary | ✅ BSL 1.1 (→ AGPL) |
 | **Privacy** | ⚠️ Collects data | ✅ Minimal telemetry |
 | **Business Model** | Nitro subscriptions | À-la-carte + self-host |
-| **Voice Quality** | Good (Opus) | ✅ Hi-Fi (256kbps+, 5 quality tiers) |
+| **Voice Quality** | Good (Opus) | ✅ Hi-Fi (256kbps+, 7 quality tiers) |
 | **Bots** | ✅ Yes | 📋 Planned (Phase 5) |
 
 **Concord's focus:** Privacy, sovereignty, eventual open source.
@@ -808,4 +808,4 @@ If your question isn't answered here:
 
 ---
 
-**Last Updated:** 2026-03-02 | **Version:** 1.2.0
+**Last Updated:** 2026-03-03 | **Version:** 1.3.0

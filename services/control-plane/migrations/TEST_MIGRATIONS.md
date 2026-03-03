@@ -78,7 +78,7 @@ Expected output:
 Checking migration version...
 Building migrate tool...
 ./bin/migrate -command=version
-Current version: 3 (clean)
+Current version: 28 (clean)
 ```
 
 #### Test Rollback
@@ -101,7 +101,7 @@ make migrate-version
 
 Expected output:
 ```
-Current version: 2 (clean)
+Current version: 27 (clean)
 ```
 
 #### Re-apply Migration
@@ -122,19 +122,20 @@ Then run:
 -- List all tables
 \dt
 
--- Expected tables:
--- users
--- user_keys
--- refresh_tokens
--- servers
--- channels
--- server_members
+-- Expected tables (26+ total, including):
+-- users, user_keys, public_keys, refresh_tokens, user_preferences
+-- servers, channels, server_members, server_invites
+-- messages, channel_read_states, channel_keys, pending_key_requests
+-- voice_participants, channel_groups
+-- friendships, friend_codes, privacy_settings
+-- dm_conversations, dm_participants, dm_messages, dm_read_states
+-- dm_channel_keys, dm_pending_key_requests, dm_voice_participants
 -- schema_migrations
 
 -- Check schema_migrations table
 SELECT * FROM schema_migrations;
 
--- Expected: version = 3, dirty = false
+-- Expected: version = 28, dirty = false
 
 -- Verify users table structure
 \d users
@@ -195,10 +196,11 @@ Migrations should run automatically before the server starts.
 Stop the server (Ctrl+C), then:
 
 ```bash
-# Rollback all migrations one by one
-make migrate-down  # Rolls back to version 2
-make migrate-down  # Rolls back to version 1
-make migrate-down  # Rolls back to version 0 (no migrations)
+# Rollback all 28 migrations one by one (repeat 28 times)
+# Each `make migrate-down` rolls back 1 migration
+make migrate-down  # Rolls back to version 27
+make migrate-down  # Rolls back to version 26
+# ... (repeat until version 0)
 
 # Verify
 make migrate-version
@@ -208,6 +210,8 @@ Expected:
 ```
 No migrations applied yet
 ```
+
+> **Tip:** For a full reset, use `docker-compose down -v` to destroy the volume instead of rolling back one-by-one.
 
 ### 8. Verify Clean State
 

@@ -36,21 +36,23 @@ Hub.broadcast -> handleBroadcast() -> writePump() -> WebSocket -> Clients
 ### Endpoint
 
 ```
-GET /api/v1/ws?token=<JWT_TOKEN>
+GET /api/v1/ws?ticket=<SINGLE_USE_TICKET>
 ```
 
 ### Authentication
 
-JWT token can be provided via:
-1. Query parameter: `?token=<JWT>`
-2. Authorization header: `Authorization: Bearer <JWT>`
+WebSocket connections use **ticket-based authentication**:
 
-The token must be a valid access token obtained from the `/api/v1/auth/login` or `/api/v1/auth/refresh` endpoints.
+1. Client calls `POST /api/v1/auth/ws-ticket` with a valid access token to obtain a single-use ticket (30s TTL)
+2. Client connects to `ws://host/api/v1/ws?ticket=<ticket>`
+3. Server validates and consumes the ticket (single-use, prevents replay attacks)
+
+> **Security note:** Raw JWT tokens should NOT be passed in the WebSocket URL. Tickets are single-use and expire in 30 seconds, minimizing the window for interception.
 
 ### Connection Lifecycle
 
-1. **Connect** - Client opens WebSocket with JWT token
-2. **Upgrade** - Server validates JWT and upgrades connection
+1. **Connect** - Client opens WebSocket with single-use ticket
+2. **Upgrade** - Server validates ticket and upgrades connection
 3. **Register** - Client is registered with Hub
 4. **Confirmation** - Server sends `connected` message with client/user IDs
 5. **Subscribe** - Client subscribes to channels
@@ -259,15 +261,16 @@ See [TEST_WEBSOCKET.html](TEST_WEBSOCKET.html) for a manual test client.
 go test -v ./internal/websocket/...
 ```
 
-## Future Enhancements
+## Implementation Status
 
-- [ ] Presence system (online/offline/away status)
-- [ ] Message persistence (save to database)
-- [ ] Message history on subscribe
-- [ ] Read receipts
-- [ ] File upload support
-- [ ] Voice/video signaling
-- [ ] Redis Pub/Sub for multi-instance
-- [ ] Reconnection with message recovery
-- [ ] Compression support
-- [ ] Binary message support
+- [x] Presence system (online/offline status) — ✅ Implemented (Phase 1B)
+- [x] Message persistence (save to database) — ✅ Implemented (Phase 1B)
+- [x] Message history on subscribe — ✅ Implemented via REST pagination
+- [x] Read receipts (channel read states) — ✅ Implemented (Phase 1B)
+- [x] Voice/video signaling — ✅ Implemented via NATS (Phase 1C)
+- [x] Ticket-based authentication — ✅ Implemented (replaces JWT-in-URL)
+- [ ] File upload support — Planned (Phase 2)
+- [ ] Redis Pub/Sub for multi-instance — Planned (Phase 2+)
+- [ ] Reconnection with message recovery — Planned
+- [ ] Compression support — Planned
+- [ ] Binary message support — Planned

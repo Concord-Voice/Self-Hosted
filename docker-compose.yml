@@ -7,6 +7,13 @@ services:
       POSTGRES_USER: concord
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-concord_dev_password}
       POSTGRES_DB: concord
+    # Enable WAL replication so the failover replica on port 5433 can connect.
+    # These settings are lightweight and harmless when no replica is running.
+    command: >
+      postgres
+        -c wal_level=replica
+        -c max_wal_senders=3
+        -c hot_standby=on
     ports:
       - "5432:5432"
     volumes:

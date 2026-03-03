@@ -25,7 +25,7 @@ flowchart TB
     end
 
     subgraph Infrastructure
-        PG[("PostgreSQL 16<br/>21 tables")]
+        PG[("PostgreSQL 16<br/>26+ tables")]
         RD[("Redis 7<br/>sessions / presence")]
         NATS["NATS<br/>inter-service"]
     end
@@ -64,14 +64,14 @@ flowchart TB
 - **Technology**: Electron, React, TypeScript, mediasoup-client, WebRTC
 - **Responsibilities**:
   - User interface (browser-inspired layout: server bar, folder bar, channel panel)
-  - WebRTC media handling (Opus codec, 5 quality tiers)
+  - WebRTC media handling (Opus codec, 7 quality tiers)
   - Voice controls (mute/deafen/push-to-talk, audio device selection, per-user volume)
   - Noise suppression
   - Screen sharing (screen/window picker, viewer)
   - Video calls (camera toggle, video grid)
   - E2EE message encryption/decryption (AES-256-GCM)
   - Secure token storage (Electron safeStorage / OS keychain)
-  - 14 Zustand stores for state management
+  - 19 Zustand stores for state management
 - **Communication**:
   - HTTP/WebSocket → Control Plane (signaling, auth, channels, presence)
   - Socket.IO → Media Plane (voice signaling)
@@ -104,9 +104,9 @@ flowchart TB
 - Rate limiting
 - Moderation logic
 
-**API**: 75+ REST endpoints + 1 WebSocket endpoint across 13 groups (Auth, Users, Sessions, Servers, Channels, Messages, Members, Invites, E2EE, WebSocket, Friends, DM Conversations, Voice). See [API Documentation](./api/README.md) for the full OpenAPI 3.0 spec.
+**API**: 74 REST endpoints + 1 WebSocket endpoint across 13 groups (Auth, Users, Sessions, Servers, Channels, Messages, Members, Invites, E2EE, WebSocket, Friends, DM Conversations, Voice). See [API Documentation](./api/README.md) for the OpenAPI 3.0 spec.
 
-**Database Schema** (21+ tables across 26 migrations):
+**Database Schema** (26+ tables across 28 migrations):
 
 ```mermaid
 erDiagram
@@ -309,7 +309,7 @@ Channel types: `text`, `voice`, `bulletin`
 **Responsibilities**:
 - WebRTC media routing (SFU architecture — no mixing/transcoding)
 - ICE/STUN/TURN handling
-- Audio forwarding with 5 quality tiers (Low 32kbps → Studio 510kbps)
+- Audio forwarding with 7 quality tiers (Minimum 32kbps → Studio 510kbps)
 - Room management (mediasoup routers, 1 per voice channel)
 - Transport lifecycle management (auto-cleanup)
 - Producer/Consumer management
@@ -343,8 +343,8 @@ NATS ←→ Control Plane (room state sync, participant events)
 **Port**: 8082
 
 **Tech Stack**:
-- Go 1.21+
-- PostgreSQL (license records)
+- Go 1.24+
+- PostgreSQL 16 (license records)
 - Ed25519 cryptographic signing
 
 **Responsibilities**:
@@ -730,6 +730,6 @@ US-East US-West   EU-Central APAC
 
 ## Next Steps
 
-- [API Documentation](./api/README.md) — OpenAPI 3.0 spec for all 54 endpoints
+- [API Documentation](./api/README.md) — OpenAPI 3.0 spec for all 74 endpoints
 - [Development Guide](./development.md) — Local setup, running tests
 - [Self-Hosting Guide](./self-hosting.md) — Deployment instructions (planned)
