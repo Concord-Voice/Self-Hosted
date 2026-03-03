@@ -917,7 +917,7 @@ func (h *Handler) triggerTheftKeyRevocations(userID string) {
 		h.log.Error("Failed to query channels for theft key revocation", "error", err, "user_id", userID)
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var channelID string

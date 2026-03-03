@@ -500,7 +500,7 @@ func (h *Handler) triggerKeyRevocationsForServer(serverID, removedUserID, actorI
 		h.log.Error("Failed to query E2EE channels for key revocation", "error", err, "server_id", serverID)
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	serverUUID, _ := uuid.Parse(serverID)
 

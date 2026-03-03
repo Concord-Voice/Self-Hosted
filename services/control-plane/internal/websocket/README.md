@@ -21,7 +21,7 @@ This package implements real-time WebSocket communication for Concord's control 
 
 3. **Handler** - HTTP upgrade and authentication
    - Upgrades HTTP connections to WebSocket
-   - Validates JWT tokens (query param or header)
+   - Validates ticket-based auth (POST /auth/ws-ticket → single-use 30s ticket)
    - Creates and registers new clients
 
 ### Message Flow

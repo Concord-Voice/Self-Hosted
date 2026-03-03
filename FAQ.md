@@ -422,7 +422,7 @@ go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 ```
 
-**Frontend tests** (when available):
+**Frontend tests** (783 tests, 70.28% coverage):
 ```bash
 cd client/desktop
 npm test
@@ -673,7 +673,7 @@ lsof -ti:5173 | xargs kill -9
 
 ### Database migrations aren't running
 
-The migration system uses `golang-migrate/v4` and runs automatically on server startup. There are currently **16 migrations** (000001-000016).
+The migration system uses `golang-migrate/v4` and runs automatically on server startup. There are currently **28 migrations** (000001-000028).
 
 **Check migration status:**
 ```bash
@@ -707,7 +707,7 @@ docker exec -it concord-postgres psql -U concord -d concord -c "SELECT version F
 2. JWT token is valid (not expired)
 3. Browser console for errors
 
-**WebSocket support is in Phase 1B** (in progress). If you're testing pre-Phase 1B code, WebSockets aren't implemented yet.
+WebSocket support is fully implemented with ticket-based authentication. Ensure you obtain a ticket via `POST /api/v1/auth/ws-ticket` before connecting.
 
 ---
 
@@ -790,7 +790,7 @@ npm run dev
 - **Security:** [.github/SECURITY.md](./.github/SECURITY.md) - Security policy
 - **Architecture:** [docs/architecture.md](./docs/architecture.md) - System design
 - **Getting Started:** [docs/GETTING_STARTED.md](./docs/GETTING_STARTED.md) - Setup guide
-- **AI Context:** [AI-CONTEXT.md](./AI-CONTEXT.md) - For AI assistants
+- **AI Context:** [[internal]](.[internal]) - For AI assistants
 
 ---
 
@@ -808,4 +808,4 @@ If your question isn't answered here:
 
 ---
 
-**Last Updated:** 2026-02-22 | **Version:** 1.1.0
+**Last Updated:** 2026-03-02 | **Version:** 1.2.0

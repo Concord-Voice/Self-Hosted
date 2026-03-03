@@ -1,24 +1,12 @@
 import * as mediasoup from 'mediasoup';
 import { config } from '../config/index.js';
 import { logger } from './logger.js';
-import type {
-  Worker,
-  Router,
-  WebRtcTransport,
-  Producer,
-  Consumer,
-  RtpCapabilities,
-  RtpParameters,
-  DtlsParameters,
-} from 'mediasoup/node/lib/types.js';
+import type { Worker, Router } from 'mediasoup/node/lib/types.js';
 
 export class MediasoupService {
   private workers: Worker[] = [];
   private nextWorkerIdx = 0;
   private routers: Map<string, Router> = new Map();
-  private transports: Map<string, { transport: WebRtcTransport; roomId: string }> = new Map();
-  private producers: Map<string, { producer: Producer; roomId: string; userId: string }> = new Map();
-  private consumers: Map<string, Consumer> = new Map();
 
   async init() {
     logger.info('Initializing mediasoup workers', {
@@ -81,116 +69,6 @@ export class MediasoupService {
     this.routers.delete(roomId);
   }
 
-  async createWebRtcTransport(roomId: string, direction: 'send' | 'recv'): Promise<WebRtcTransport> {
-    const router = await this.getOrCreateRouter(roomId);
-
-    const transport = await router.createWebRtcTransport({
-      listenIps: config.mediasoup.webRtcTransport.listenIps,
-      enableUdp: config.mediasoup.webRtcTransport.enableUdp,
-      enableTcp: config.mediasoup.webRtcTransport.enableTcp,
-      preferUdp: config.mediasoup.webRtcTransport.preferUdp,
-    });
-
-    this.transports.set(transport.id, { transport, roomId });
-
-    logger.debug('Created WebRTC transport', {
-      roomId,
-      transportId: transport.id,
-      direction,
-    });
-
-    return transport;
-  }
-
-  async connectTransport(transportId: string, dtlsParameters: DtlsParameters): Promise<void> {
-    const entry = this.transports.get(transportId);
-    if (!entry) {
-      throw new Error('Transport not found');
-    }
-
-    await entry.transport.connect({ dtlsParameters });
-
-    logger.debug('Transport connected', { transportId });
-  }
-
-  async produce(
-    transportId: string,
-    kind: 'audio' | 'video',
-    rtpParameters: RtpParameters,
-    userId: string
-  ): Promise<{ producer: Producer; roomId: string }> {
-    const entry = this.transports.get(transportId);
-    if (!entry) {
-      throw new Error('Transport not found');
-    }
-
-    const producer = await entry.transport.produce({
-      kind,
-      rtpParameters,
-    });
-
-    this.producers.set(producer.id, {
-      producer,
-      roomId: entry.roomId,
-      userId,
-    });
-
-    logger.info('Producer created', {
-      producerId: producer.id,
-      roomId: entry.roomId,
-      userId,
-      kind,
-    });
-
-    return { producer, roomId: entry.roomId };
-  }
-
-  async consume(
-    roomId: string,
-    producerId: string,
-    rtpCapabilities: RtpCapabilities
-  ): Promise<Consumer | null> {
-    const router = this.routers.get(roomId);
-    if (!router) {
-      throw new Error('Router not found for room');
-    }
-
-    const producerEntry = this.producers.get(producerId);
-    if (!producerEntry) {
-      throw new Error('Producer not found');
-    }
-
-    if (!router.canConsume({ producerId, rtpCapabilities })) {
-      logger.warn('Cannot consume', { producerId, roomId });
-      return null;
-    }
-
-    // Find a receive transport for this room (simplified - in production, manage per-user)
-    const recvTransport = Array.from(this.transports.values()).find(
-      (t) => t.roomId === roomId
-    )?.transport;
-
-    if (!recvTransport) {
-      throw new Error('No receive transport available');
-    }
-
-    const consumer = await recvTransport.consume({
-      producerId,
-      rtpCapabilities,
-      paused: false,
-    });
-
-    this.consumers.set(consumer.id, consumer);
-
-    logger.info('Consumer created', {
-      consumerId: consumer.id,
-      producerId,
-      roomId,
-    });
-
-    return consumer;
-  }
-
   getWorkerCount(): number {
     return this.workers.length;
   }
@@ -204,8 +82,5 @@ export class MediasoupService {
 
     this.workers = [];
     this.routers.clear();
-    this.transports.clear();
-    this.producers.clear();
-    this.consumers.clear();
   }
 }

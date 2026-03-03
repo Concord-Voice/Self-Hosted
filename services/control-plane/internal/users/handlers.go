@@ -606,6 +606,19 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		return
 	}
 
+	// Revoke ALL refresh tokens for this user.
+	// Password change invalidates all sessions — attacker with stolen
+	// refresh token must not be able to obtain new access tokens.
+	_, err = tx.Exec(
+		`UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`,
+		userID,
+	)
+	if err != nil {
+		h.log.Error("Failed to revoke refresh tokens", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to change password"})
+		return
+	}
+
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit transaction", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to change password"})

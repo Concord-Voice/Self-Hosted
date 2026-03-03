@@ -175,8 +175,3 @@ func (h *Handler) authenticateWebSocket(c *gin.Context) (uuid.UUID, string, erro
 
 	return uuid.Nil, "", fmt.Errorf("invalid authentication")
 }
-
-// GetHub returns the hub instance (for external access)
-func (h *Handler) GetHub() *Hub {
-	return h.hub
-}

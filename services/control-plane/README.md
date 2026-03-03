@@ -4,43 +4,56 @@ The control plane handles authentication, authorization, server/channel manageme
 
 ## Tech Stack
 
-- **Go** 1.21+
+- **Go** 1.24+
 - **Gin** - HTTP web framework
-- **PostgreSQL** - Primary database
-- **Redis** - Caching and ephemeral state
-- **JWT** - Authentication tokens
-- **WebSocket** - Real-time signaling
+- **PostgreSQL** 16
+- **Redis** 7 - Caching, rate limiting, ephemeral state
+- **NATS** 2.x - Inter-service messaging
+- **JWT** - Authentication tokens (15min access + 30d refresh)
+- **WebSocket** - Real-time signaling (ticket-based auth)
 
 ## Architecture
 
 The control plane is responsible for:
-- User authentication and authorization
+- User authentication (Argon2id, JWT, session management)
+- E2EE key management (RSA-OAEP 4096-bit, AES-256-GCM channel keys)
 - Server and channel CRUD operations
+- Channel groups and ordering
 - Membership and permissions management
-- WebSocket signaling for voice connections
-- Session management and presence
-- Billing and subscription management (future)
-- License validation coordination (future)
+- WebSocket hub (real-time messaging, presence, typing indicators)
+- DM system (conversations, friend codes, privacy controls)
+- Voice coordination via NATS (room signaling with media-plane)
+- Server invites with configurable expiration
+- Message read states and unread tracking
 
 ## Project Structure
 
 ```
 control-plane/
 ├── cmd/
-│   └── server/           # Application entry point
-│       └── main.go
+│   └── server/           # Application entry point (main.go)
 ├── internal/
-│   ├── api/              # HTTP handlers and routes
-│   ├── auth/             # Authentication logic
-│   ├── channels/         # Channel management
-│   ├── database/         # Database connections
-│   ├── middleware/       # HTTP middleware
+│   ├── auth/             # Authentication (Argon2id, JWT, sessions)
+│   ├── channels/         # Channel management and groups
+│   ├── database/         # Database connections and migrations
+│   ├── dm/               # Direct messaging system
+│   ├── friends/          # Friend codes and privacy
+│   ├── invites/          # Server invite system
+│   ├── members/          # Server membership
+│   ├── messages/         # Message CRUD with E2EE enforcement
+│   ├── middleware/        # Auth, rate limiting, CORS
 │   ├── models/           # Data models
-│   └── websocket/        # WebSocket handling
+│   ├── nats/             # NATS inter-service messaging
+│   ├── servers/          # Server CRUD
+│   ├── sessions/         # Session management and device tracking
+│   ├── users/            # User profiles, preferences, privacy
+│   ├── voice/            # Voice coordination (NATS ↔ media-plane)
+│   └── websocket/        # WebSocket hub (messaging, presence, DMs)
 ├── pkg/
 │   ├── config/           # Configuration management
-│   └── logger/           # Logging utilities
-├── migrations/           # Database migrations
+│   └── logger/           # Structured logging
+├── migrations/           # 28 SQL migration pairs (000001-000028)
+├── tests/                # Integration tests (215+ tests)
 ├── Dockerfile
 ├── go.mod
 └── go.sum
@@ -50,9 +63,10 @@ control-plane/
 
 ### Prerequisites
 
-- Go 1.21+
-- PostgreSQL 15+
+- Go 1.24+
+- PostgreSQL 16
 - Redis 7+
+- NATS 2.x
 
 ### Setup
 
@@ -132,31 +146,57 @@ GET /api/v1/users/me (authenticated)
   - Returns current user info
 ```
 
-#### Servers (Phase 1B) 🚧 PLANNED
+#### Servers (Phase 1B) ✅ IMPLEMENTED
 ```
-GET /api/v1/servers (authenticated)
-POST /api/v1/servers (authenticated)
-GET /api/v1/servers/:id (authenticated)
-PATCH /api/v1/servers/:id (authenticated)
-DELETE /api/v1/servers/:id (authenticated)
-```
-
-#### Channels (Phase 1B) 🚧 PLANNED
-```
-POST /api/v1/servers/:server_id/channels (authenticated)
-GET /api/v1/servers/:server_id/channels (authenticated)
-GET /api/v1/channels/:id (authenticated)
-PATCH /api/v1/channels/:id (authenticated)
-DELETE /api/v1/channels/:id (authenticated)
+GET    /api/v1/servers
+POST   /api/v1/servers
+GET    /api/v1/servers/:id
+PATCH  /api/v1/servers/:id
+DELETE /api/v1/servers/:id
 ```
 
-#### WebSocket (Phase 1B) 🚧 PLANNED
+#### Channels (Phase 1B) ✅ IMPLEMENTED
 ```
-GET /api/v1/ws (authenticated)
-  - Real-time messaging
-  - Presence updates
-  - Typing indicators
+POST   /api/v1/servers/:server_id/channels
+GET    /api/v1/servers/:server_id/channels
+GET    /api/v1/channels/:id
+PATCH  /api/v1/channels/:id
+DELETE /api/v1/channels/:id
 ```
+
+#### Messages, Members, Invites (Phase 1B) ✅ IMPLEMENTED
+```
+GET/POST /api/v1/channels/:id/messages
+PATCH/DELETE /api/v1/messages/:id
+POST /api/v1/servers/:id/invites
+POST /api/v1/invites/:code/accept
+GET/POST/PATCH/DELETE /api/v1/servers/:id/members
+```
+
+#### WebSocket (Phase 1B) ✅ IMPLEMENTED
+```
+POST /api/v1/auth/ws-ticket  → obtain single-use ticket (30s TTL)
+GET  /api/v1/ws?ticket=...   → ticket-based auth (no JWT in URL)
+Events: message, typing, presence, dm_message, voice signaling
+```
+
+#### DMs, Friends, Privacy (Phase 1C) ✅ IMPLEMENTED
+```
+GET/POST /api/v1/dm/conversations
+POST /api/v1/dm/conversations/:id/messages
+GET/POST/DELETE /api/v1/friends/codes
+GET/PATCH /api/v1/users/me/privacy
+POST /api/v1/dm/conversations/:id/voice/join|leave|signal
+```
+
+#### Voice & E2EE (Phase 1C) ✅ IMPLEMENTED
+```
+POST /api/v1/voice/join|leave|signal
+GET/POST /api/v1/channels/:id/keys
+POST /api/v1/channels/:id/keys/rotate
+```
+
+**Total: 74 API routes implemented.** See `docs/api/openapi.yaml` for full spec (covers Phase 1B; Phase 1C endpoints pending spec update).
 
 ### Testing
 
@@ -267,37 +307,28 @@ For detailed migration documentation, see [migrations/README.md](migrations/READ
 - created_at
 - expires_at
 
-### Servers (Phase 1B) 🚧
-- id (UUID, PK)
-- name
-- owner_id (FK → users)
-- icon_url (text, nullable)
-- created_at
-- updated_at
+### Servers (Phase 1B) ✅
+- id, name, owner_id, icon_url, header_image_url, created_at, updated_at
 
-### Channels (Phase 1B) 🚧
-- id (UUID, PK)
-- server_id (FK → servers, ON DELETE CASCADE)
-- name
-- type (text: 'text', 'voice', 'announcement')
-- position (integer, default 0)
-- created_at
+### Channels (Phase 1B) ✅
+- id, server_id, name, type (text/voice/announcement), position, is_encrypted, topic, slowmode_seconds, group_id, voice_settings (JSONB)
 
-### Server Members (Phase 1B) 🚧
-- server_id (FK → servers, ON DELETE CASCADE)
-- user_id (FK → users, ON DELETE CASCADE)
-- role (text: 'owner', 'admin', 'member')
-- joined_at
-- PRIMARY KEY (server_id, user_id)
+### Server Members (Phase 1B) ✅
+- server_id, user_id, role (owner/admin/member), joined_at, nickname
 
-### Messages (Phase 1B) 🚧
-- id (UUID, PK)
-- channel_id (FK → channels, ON DELETE CASCADE)
-- user_id (FK → users)
-- content (text, encrypted if is_encrypted=true)
-- is_encrypted (boolean, default false)
-- edited_at (timestamp, nullable)
-- created_at
+### Messages (Phase 1B) ✅
+- id, channel_id, user_id, content, is_encrypted, encrypted_key, key_epoch, edited_at, created_at
+
+### Channel Groups (Phase 1C) ✅
+- id, server_id, name, position, is_collapsed
+
+### DM System (Phase 1C) ✅
+- dm_conversations, dm_participants, dm_messages, dm_read_states, dm_channel_keys, dm_key_recipients, dm_voice_participants, dm_voice_signals
+
+### Additional Tables ✅
+- user_keys, server_invites, channel_keys, channel_key_recipients, channel_read_states, voice_participants, user_preferences, friend_codes, privacy_settings
+
+**28 migrations total** (000001-000028). See `migrations/` for full schema.
 
 ## Current Status
 
@@ -305,29 +336,34 @@ For detailed migration documentation, see [migrations/README.md](migrations/READ
 - [x] User registration with Argon2id password hashing
 - [x] Login with JWT access tokens (15 min) + refresh tokens (30 day)
 - [x] Username validation with profanity filtering and leetspeak detection
-- [x] E2EE public key storage
-- [x] Session management (list/revoke sessions)
+- [x] E2EE key management (RSA-OAEP 4096-bit)
+- [x] Session management (list/revoke, device tracking, machine-ID dedup)
 - [x] Rate limiting (Redis-based, per-IP and per-user)
 - [x] Password strength validation
+- [x] Ticket-based WebSocket authentication (30s single-use)
 
-### Phase 1B: Channels & Text Chat 🚧 IN PROGRESS
-- [ ] Server CRUD operations
-- [ ] Channel CRUD operations
-- [ ] WebSocket real-time messaging
-- [ ] User presence tracking (online/offline/typing)
-- [ ] Message history and pagination
-- [ ] Basic permissions (owner, admin, member)
+### Phase 1B: Channels & Text Chat ✅ COMPLETE
+- [x] Server CRUD with icon and header image uploads
+- [x] Channel CRUD with encryption, topics, slowmode
+- [x] WebSocket real-time messaging with E2EE enforcement
+- [x] User presence tracking (online/offline/typing)
+- [x] Message history, pagination, edit, delete
+- [x] Basic permissions (owner, admin, member)
+- [x] Server invites with configurable expiration
+- [x] Channel read states and unread tracking
+- [x] Channel-level E2EE key management and rotation
 
-### Phase 1C: Voice Communication 📋 PLANNED
-- [ ] WebSocket signaling for voice connections
-- [ ] Integration with Media Plane
+### Phase 1C: Voice & Media ✅ COMPLETE
+- [x] Voice coordination via NATS (join/leave/signal)
+- [x] Channel groups with drag-and-drop ordering
+- [x] DM system (8 tables, conversations, messages, voice calls)
+- [x] Friend codes and privacy controls
+- [x] DM E2EE enforcement
 
 ### Phase 2+: Advanced Features 📋 PLANNED
-- [ ] Billing integration (Stripe)
-- [ ] Advanced permissions system
-- [ ] Audit logging
+- [ ] RBAC/SBAC permissions (#82)
+- [ ] Mute & notifications (#84)
+- [ ] Token theft detection + MFA (#89)
 - [ ] File uploads (S3 + CDN)
 - [ ] Message search
-- [ ] LDAP/SAML integration for enterprise
-- [ ] API rate limiting tiers and quotas
-- [ ] Moderation tools (kick, ban, timeout)
+- [ ] Billing integration (Stripe)

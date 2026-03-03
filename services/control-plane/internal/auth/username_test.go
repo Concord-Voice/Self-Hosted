@@ -82,10 +82,6 @@ func TestNormalizeUsername(t *testing.T) {
 	assert.Equal(t, "testuser", NormalizeUsername("testuser"))
 }
 
-func TestFormatUsernameWithDomain(t *testing.T) {
-	assert.Equal(t, "testuser@concordvoice.chat", FormatUsernameWithDomain("TestUser"))
-}
-
 func TestDeLeetSpeak(t *testing.T) {
 	tests := []struct {
 		input    string

@@ -1,8 +1,8 @@
 # Media Plane Service
 
-**Status:** 📋 PLANNED (Phase 1C - Voice Communication)
+**Status:** ✅ IMPLEMENTED (Phase 1C - Complete)
 
-WebRTC Selective Forwarding Unit (SFU) for routing voice media in Concord.
+WebRTC Selective Forwarding Unit (SFU) for routing voice and video media in Concord.
 
 ## Tech Stack
 
@@ -11,7 +11,9 @@ WebRTC Selective Forwarding Unit (SFU) for routing voice media in Concord.
 - **mediasoup** - WebRTC SFU library
 - **Socket.IO** - WebSocket signaling
 - **Express** - HTTP server
-- **Redis** - State management (future)
+- **Redis** - State management and pub/sub
+- **NATS** - Inter-service messaging with control-plane
+- **JWT** - Authentication (shared secret with control-plane)
 
 ## Architecture
 
@@ -35,12 +37,17 @@ An SFU (Selective Forwarding Unit) forwards media streams without decoding/encod
 ```
 media-plane/
 ├── src/
-│   ├── config/          # Configuration management
+│   ├── config/            # Configuration management
 │   ├── lib/
-│   │   ├── logger.ts   # Winston logger
-│   │   └── mediasoup.ts # Mediasoup service wrapper
-│   ├── types/          # TypeScript type definitions
-│   └── index.ts        # Application entry point
+│   │   ├── logger.ts      # Winston logger
+│   │   ├── mediasoup.ts   # Low-level mediasoup worker/router management
+│   │   ├── roomManager.ts # Room lifecycle, transports, producers, consumers
+│   │   ├── nats.ts        # NATS client for control-plane coordination
+│   │   └── redis.ts       # Redis state management
+│   ├── middleware/
+│   │   └── auth.ts        # JWT + Socket.IO authentication middleware
+│   ├── types/             # TypeScript type definitions
+│   └── index.ts           # Application entry point (Socket.IO event handlers)
 ├── Dockerfile
 ├── package.json
 └── tsconfig.json
@@ -260,13 +267,23 @@ Key metrics to monitor:
 - Verify firewall rules
 - Test with different network types
 
+## Current Features ✅
+
+- [x] Multi-worker mediasoup with round-robin routing
+- [x] RoomManager with per-participant transport tracking
+- [x] Audio/video/screen share producing and consuming
+- [x] AudioLevelObserver for active speaker detection
+- [x] JWT-authenticated Socket.IO connections
+- [x] NATS integration for control-plane voice coordination
+- [x] Redis state management
+- [x] Graceful shutdown with resource cleanup
+- [x] DM voice call support
+
 ## Future Enhancements
 
-- [ ] Redis-based state management for multi-instance
+- [ ] TURN server integration (currently STUN only — fails behind symmetric NATs)
 - [ ] Recording support
-- [ ] Simulcast for video (when added)
-- [ ] Bandwidth estimation
-- [ ] Quality adaptation
-- [ ] E2EE support with client-side mixing
+- [ ] Simulcast for video
+- [ ] Bandwidth estimation and quality adaptation
+- [ ] Multi-instance horizontal scaling
 - [ ] Metrics and monitoring integration
-- [ ] TURN server integration
