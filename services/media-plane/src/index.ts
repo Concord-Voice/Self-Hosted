@@ -262,14 +262,14 @@ async function main() {
     });
 
     // ── consume ──────────────────────────────────────────────────────
-    socket.on('consume', async ({ producerId }, callback) => {
+    socket.on('consume', async ({ producerId, transportId }, callback) => {
       try {
         const roomId = data.roomId;
         if (!roomId) {
           return callback({ error: 'Not in a room' });
         }
 
-        const result = await roomManager.consume(roomId, data.userId, producerId);
+        const result = await roomManager.consume(roomId, data.userId, producerId, transportId);
 
         if (!result) {
           return callback({ error: 'Cannot consume — incompatible codecs' });
@@ -303,6 +303,23 @@ async function main() {
       } catch (error) {
         logger.error('Error resuming consumer', { error, userId: data.userId });
         if (callback) callback({ error: 'Failed to resume consumer' });
+      }
+    });
+
+    // ── pause-consumer ──────────────────────────────────────────────
+    socket.on('pause-consumer', async ({ consumerId }, callback?) => {
+      try {
+        const roomId = data.roomId;
+        if (!roomId) {
+          if (callback) return callback({ error: 'Not in a room' });
+          return;
+        }
+
+        await roomManager.pauseConsumer(roomId, data.userId, consumerId);
+        if (callback) callback({ success: true });
+      } catch (error) {
+        logger.error('Error pausing consumer', { error, userId: data.userId });
+        if (callback) callback({ error: 'Failed to pause consumer' });
       }
     });
 
