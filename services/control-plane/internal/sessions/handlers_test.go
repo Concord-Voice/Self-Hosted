@@ -99,8 +99,10 @@ func TestRevokeSession_Success(t *testing.T) {
 	require.GreaterOrEqual(t, len(sessions), 1)
 	sessionID := sessions[0].(map[string]interface{})["id"].(string)
 
-	// Revoke that session
-	w := ts.DoRequest("DELETE", "/api/v1/sessions/"+sessionID, nil, testhelpers.AuthHeaders(accessToken))
+	// Revoke that session (password required when < 3 active sessions)
+	w := ts.DoRequest("DELETE", "/api/v1/sessions/"+sessionID, map[string]interface{}{
+		"password": "TestPassword123!",
+	}, testhelpers.AuthHeaders(accessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var body map[string]interface{}
