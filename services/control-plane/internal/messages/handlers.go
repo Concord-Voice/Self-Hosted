@@ -177,11 +177,8 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		return
 	}
 
-	// Reverse to get chronological order (oldest first)
-	for i, j := 0, len(messages)-1; i < j; i, j = i+1, j-1 {
-		messages[i], messages[j] = messages[j], messages[i]
-	}
-
+	// Return DESC order (newest first) — consistent with DM message handler.
+	// The client reverses to ASC for chronological display.
 	c.JSON(http.StatusOK, gin.H{
 		"messages": messages,
 		"count":    len(messages),
