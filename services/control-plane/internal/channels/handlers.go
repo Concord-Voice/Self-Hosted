@@ -1255,11 +1255,9 @@ func (h *Handler) DistributeUnifiedKeys(c *gin.Context) {
 		return
 	}
 
-	var req DistributeChannelKeysRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
-		return
-	}
+	// Don't parse the request body yet — route to channel or DM first.
+	// DistributeChannelKeys will parse the body itself; parsing here would
+	// consume the one-shot io.ReadCloser, causing a double-read 400 on delegation.
 
 	// Try server channel first
 	var isChannel bool
@@ -1294,6 +1292,13 @@ func (h *Handler) DistributeUnifiedKeys(c *gin.Context) {
 	`, contextID, userID).Scan(&isDM)
 	if err != nil || !isDM {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Context not found or access denied"})
+		return
+	}
+
+	// Parse body for the DM path (channel path delegates to DistributeChannelKeys which parses it)
+	var req DistributeChannelKeysRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
 
