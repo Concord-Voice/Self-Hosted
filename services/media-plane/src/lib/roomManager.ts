@@ -27,7 +27,8 @@ export interface Participant {
   displayName?: string;
   avatarUrl?: string;
   sendTransport: WebRtcTransport | null;
-  recvTransport: WebRtcTransport | null;
+  /** Multiple recv transports (keyed by transport ID) — supports PiP windows */
+  recvTransports: Map<string, WebRtcTransport>;
   producers: Map<string, { producer: Producer; source: MediaSource; kind: MediaKind }>;
   consumers: Map<string, Consumer>;
   rtpCapabilities: RtpCapabilities | null;
@@ -252,7 +253,7 @@ export class RoomManager {
       displayName,
       avatarUrl,
       sendTransport: null,
-      recvTransport: null,
+      recvTransports: new Map(),
       producers: new Map(),
       consumers: new Map(),
       rtpCapabilities: rtpCapabilities ?? null,
@@ -342,9 +343,10 @@ export class RoomManager {
     if (participant.sendTransport && !participant.sendTransport.closed) {
       participant.sendTransport.close();
     }
-    if (participant.recvTransport && !participant.recvTransport.closed) {
-      participant.recvTransport.close();
+    for (const [, transport] of participant.recvTransports) {
+      if (!transport.closed) transport.close();
     }
+    participant.recvTransports.clear();
 
     room.participants.delete(userId);
 
@@ -404,10 +406,12 @@ export class RoomManager {
       }
       participant.sendTransport = transport;
     } else {
-      if (participant.recvTransport && !participant.recvTransport.closed) {
-        participant.recvTransport.close();
-      }
-      participant.recvTransport = transport;
+      // Multiple recv transports are allowed (main window + PiP windows)
+      participant.recvTransports.set(transport.id, transport);
+      // Clean up map entry when router closes the transport
+      transport.on('routerclose', () => {
+        participant.recvTransports.delete(transport.id);
+      });
     }
 
     // Clean up on transport close
@@ -593,7 +597,8 @@ export class RoomManager {
   async consume(
     roomId: string,
     consumerUserId: string,
-    producerId: string
+    producerId: string,
+    transportId?: string
   ): Promise<{
     id: string;
     producerId: string;
@@ -608,7 +613,11 @@ export class RoomManager {
     const consumer = room.participants.get(consumerUserId);
     if (!consumer) throw new Error('Consumer participant not found');
 
-    if (!consumer.recvTransport) {
+    // Find the recv transport: use specified ID, or fall back to first available
+    const recvTransport = transportId
+      ? consumer.recvTransports.get(transportId)
+      : consumer.recvTransports.values().next().value;
+    if (!recvTransport) {
       throw new Error('No receive transport — create one first');
     }
 
@@ -642,8 +651,8 @@ export class RoomManager {
       return null;
     }
 
-    // Create consumer on the user's own recv transport (the bug fix)
-    const newConsumer = await consumer.recvTransport.consume({
+    // Create consumer on the specified (or default) recv transport
+    const newConsumer = await recvTransport.consume({
       producerId,
       rtpCapabilities: consumer.rtpCapabilities,
       paused: true, // Start paused — client resumes after setup
@@ -690,6 +699,21 @@ export class RoomManager {
 
     await consumer.resume();
     logger.debug('Consumer resumed', { consumerId, roomId, userId });
+  }
+
+  /** Pause a consumer (stops SFU from forwarding RTP, saving bandwidth) */
+  async pauseConsumer(roomId: string, userId: string, consumerId: string): Promise<void> {
+    const room = this.rooms.get(roomId);
+    if (!room) throw new Error('Room not found');
+
+    const participant = room.participants.get(userId);
+    if (!participant) throw new Error('Participant not found');
+
+    const consumer = participant.consumers.get(consumerId);
+    if (!consumer) throw new Error('Consumer not found');
+
+    await consumer.pause();
+    logger.debug('Consumer paused', { consumerId, roomId, userId });
   }
 
   // ─── Query methods ───────────────────────────────────────────────────
@@ -826,7 +850,8 @@ export class RoomManager {
     if (!participant) return null;
 
     if (participant.sendTransport?.id === transportId) return participant.sendTransport;
-    if (participant.recvTransport?.id === transportId) return participant.recvTransport;
+    const recvTransport = participant.recvTransports.get(transportId);
+    if (recvTransport) return recvTransport;
 
     return null;
   }

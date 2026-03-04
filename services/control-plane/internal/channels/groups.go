@@ -4,8 +4,8 @@ import (
 	"database/sql"
 	"net/http"
 
-	"github.com/concord/control-plane/internal/models"
-	"github.com/concord/control-plane/internal/websocket"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )

@@ -125,8 +125,3 @@ func deLeetSpeak(s string) string {
 func NormalizeUsername(username string) string {
 	return strings.ToLower(username)
 }
-
-// FormatUsernameWithDomain formats username with the platform domain
-func FormatUsernameWithDomain(username string) string {
-	return fmt.Sprintf("%s@concordvoice.chat", NormalizeUsername(username))
-}

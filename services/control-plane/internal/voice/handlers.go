@@ -7,9 +7,9 @@ import (
 	"database/sql"
 	"net/http"
 
-	"github.com/concord/control-plane/internal/websocket"
-	"github.com/concord/control-plane/pkg/config"
-	"github.com/concord/control-plane/pkg/logger"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
+	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
+	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -152,10 +152,7 @@ func (h *Handler) AuthorizeJoin(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"allowed":          true,
 		"media_server_url": h.cfg.MediaPlaneURL,
-		"ice_servers": []map[string]string{
-			{"urls": "stun:stun.l.google.com:19302"},
-			{"urls": "stun:stun1.l.google.com:19302"},
-		},
+		"ice_servers":      h.cfg.ICEServers(userID),
 		"channel": gin.H{
 			"id":                 channelID,
 			"name":               channelName,

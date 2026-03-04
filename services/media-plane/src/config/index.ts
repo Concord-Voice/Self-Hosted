@@ -258,6 +258,8 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
 // ---------------------------------------------------------------------------
 // Main configuration
 // ---------------------------------------------------------------------------
+const DEV_JWT_SECRET = 'dev_jwt_secret_change_in_production';
+
 export const config = {
   environment: process.env.ENVIRONMENT || 'development',
   port: parseInt(process.env.PORT || '3000', 10),
@@ -273,15 +275,11 @@ export const config = {
   controlPlaneUrl: process.env.CONTROL_PLANE_URL || 'http://localhost:8080',
 
   // JWT — shared secret for Socket.IO auth (must match control plane)
-  jwtSecret: process.env.JWT_SECRET || 'dev_jwt_secret_change_in_production',
+  jwtSecret: process.env.JWT_SECRET || DEV_JWT_SECRET,
 
-  // ICE servers — returned to clients via control plane /voice/join
-  iceServers: [
-    { urls: 'stun:stun.l.google.com:19302' },
-    { urls: 'stun:stun1.l.google.com:19302' },
-    // Production TURN (coturn or Cloudflare):
-    // { urls: 'turn:turn.concordvoice.chat:3478', username: '...', credential: '...' },
-  ],
+  // ICE servers (STUN/TURN) are managed by the control plane and returned
+  // to clients in the POST /voice/join response with ephemeral HMAC credentials.
+  // See: services/control-plane/pkg/config/turn.go
 
   // WebRTC settings
   rtc: {
@@ -339,6 +337,15 @@ export const config = {
     interval: 300,       // Check every 300ms for snappier feedback
   },
 };
+
+// Production safety guard — mirrors control-plane's config.validate()
+if (config.environment === 'production' && config.jwtSecret === DEV_JWT_SECRET) {
+  console.error(
+    'FATAL: JWT_SECRET must be set to a secure value in production. ' +
+    'The default dev secret is not allowed.'
+  );
+  process.exit(1);
+}
 
 // Re-export mediasoup types for convenience
 import * as mediasoup from 'mediasoup';

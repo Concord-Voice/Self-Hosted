@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/concord/control-plane/internal/models"
-	"github.com/concord/control-plane/internal/websocket"
-	"github.com/concord/control-plane/pkg/logger"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
+	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -500,7 +500,7 @@ func (h *Handler) triggerKeyRevocationsForServer(serverID, removedUserID, actorI
 		h.log.Error("Failed to query E2EE channels for key revocation", "error", err, "server_id", serverID)
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	serverUUID, _ := uuid.Parse(serverID)
 

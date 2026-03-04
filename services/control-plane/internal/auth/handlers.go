@@ -11,9 +11,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/concord/control-plane/internal/middleware"
-	"github.com/concord/control-plane/internal/models"
-	"github.com/concord/control-plane/pkg/logger"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
+	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -434,6 +434,13 @@ func (h *Handler) Login(c *gin.Context) {
 	userAgent := truncateUserAgent(c.GetHeader("User-Agent"))
 
 	machineID := c.GetHeader("X-Machine-Id")
+	h.log.Info("Login: storing refresh token",
+		"token_suffix", refreshToken[len(refreshToken)-8:],
+		"hash_prefix", tokenHash[:16],
+		"remember_me", rememberMe,
+		"machine_id", machineID,
+		"user_id", user.ID,
+	)
 
 	// Revoke old sessions from the same device to prevent duplicates.
 	// Prefer machine_id match when available; fall back to IP+UA match.
@@ -539,6 +546,9 @@ func (h *Handler) Refresh(c *gin.Context) {
 
 	// Hash the token to look it up
 	tokenHash := HashRefreshToken(refreshToken)
+	tokenSuffix := refreshToken[len(refreshToken)-8:]
+	hashPrefix := tokenHash[:16]
+	h.log.Info("Refresh attempt", "token_suffix", tokenSuffix, "hash_prefix", hashPrefix, "machine_id", c.GetHeader("X-Machine-Id"))
 
 	// Fetch token from database (exclude revoked sessions)
 	var token models.RefreshToken
@@ -609,6 +619,12 @@ func (h *Handler) Refresh(c *gin.Context) {
 					"same_ip", revokedIP == requestIP,
 					"same_ua", revokedUA == requestUA,
 					"revoked_ago_ms", time.Since(revokedAt).Milliseconds(),
+				)
+			} else {
+				// Token hash not found anywhere — completely unknown token
+				h.log.Warn("Refresh token not found in database (not active, not revoked)",
+					"token_suffix", tokenSuffix,
+					"hash_prefix", hashPrefix,
 				)
 			}
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid refresh token"})
@@ -734,6 +750,13 @@ func (h *Handler) Refresh(c *gin.Context) {
 	if propagatedMachineID == "" {
 		propagatedMachineID = token.MachineID
 	}
+	h.log.Info("Refresh: rotating token",
+		"old_suffix", tokenSuffix,
+		"new_suffix", newRefreshToken[len(newRefreshToken)-8:],
+		"new_hash_prefix", newTokenHash[:16],
+		"user_id", token.UserID,
+		"remember_me", token.RememberMe,
+	)
 	_, err = h.db.Exec(
 		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, remember_me, machine_id)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
@@ -917,7 +940,7 @@ func (h *Handler) triggerTheftKeyRevocations(userID string) {
 		h.log.Error("Failed to query channels for theft key revocation", "error", err, "user_id", userID)
 		return
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	for rows.Next() {
 		var channelID string

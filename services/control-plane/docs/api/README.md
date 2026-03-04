@@ -60,12 +60,9 @@ Authorization: Bearer <access_token>
 ### Refresh Token
 ```http
 POST /auth/refresh
-Content-Type: application/json
-
-{
-  "refresh_token": "refresh_token"
-}
 ```
+
+> Refresh token is sent automatically via HttpOnly cookie. No request body needed.
 
 ## Users
 
@@ -263,10 +260,25 @@ Authorization: Bearer <access_token>
 
 ## WebSocket
 
+### Obtain Ticket
+```http
+POST /auth/ws-ticket
+Authorization: Bearer <access_token>
+```
+
+**Response:**
+```json
+{
+  "ticket": "single-use-30s-ticket"
+}
+```
+
 ### Connect
 ```
-ws://localhost:8080/api/v1/ws?token=<jwt_token>
+ws://localhost:8080/api/v1/ws?ticket=<ticket>
 ```
+
+> **Note:** WebSocket connections use ticket-based authentication. Obtain a 30-second single-use ticket via `POST /auth/ws-ticket` before connecting. Do NOT pass raw JWT tokens in the URL.
 
 ### Message Types
 

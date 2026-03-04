@@ -7,9 +7,9 @@ import (
 	"net/http"
 	"strconv"
 
-	"github.com/concord/control-plane/internal/models"
-	"github.com/concord/control-plane/internal/websocket"
-	"github.com/concord/control-plane/pkg/logger"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
+	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -241,6 +241,29 @@ func (h *Handler) SendMessage(c *gin.Context) {
 	keyVersion := req.KeyVersion
 	if keyVersion <= 0 {
 		keyVersion = 1
+	}
+
+	// Epoch enforcement: reject messages encrypted with a revoked key epoch
+	if req.IsEncrypted && keyVersion > 0 {
+		var epochRevoked bool
+		_ = h.db.QueryRow(
+			`SELECT EXISTS(SELECT 1 FROM key_revocations WHERE channel_id = $1 AND revoked_epoch = $2)`,
+			req.ChannelID, keyVersion,
+		).Scan(&epochRevoked)
+		if epochRevoked {
+			var currentEpoch int
+			_ = h.db.QueryRow(
+				`SELECT COALESCE(MAX(key_version), 1) FROM channel_keys WHERE channel_id = $1`,
+				req.ChannelID,
+			).Scan(&currentEpoch)
+			c.JSON(http.StatusConflict, gin.H{
+				"error":         "Key epoch has been revoked — re-encrypt with current epoch",
+				"code":          "epoch_revoked",
+				"current_epoch": currentEpoch,
+				"channel_id":    req.ChannelID,
+			})
+			return
+		}
 	}
 
 	// Create message

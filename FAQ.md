@@ -1,6 +1,6 @@
 # Concord Frequently Asked Questions (FAQ)
 
-**Last Updated:** 2026-02-22
+**Last Updated:** 2026-03-03
 
 This document answers common questions about Concord's licensing, security, development, deployment, and usage.
 
@@ -142,9 +142,9 @@ We believe this is **more open** long-term than traditional open core models.
 - ✅ Run it for your hobby project
 
 **You only need a commercial license if:**
-- You're a business using it for commercial purposes
-- You're providing it as a service to customers
-- You're using it to generate revenue
+- You're offering Concord as a hosted service to external customers (competing SaaS)
+- You're embedding Concord in a product you sell to customers
+- Internal team communication (even at a business) is always free to self-host
 
 ---
 
@@ -219,7 +219,7 @@ Yes. We implement industry-standard security practices:
 **Infrastructure:**
 - 🚫 **Rate Limiting:** Redis-based, per-IP and per-user
 - 🛡️ **Pre-commit Hooks:** Prevents committing secrets
-- 🔍 **CI/CD Scanning:** TruffleHog, Trivy, dependency review
+- 🔍 **Pre-commit Scanning:** TruffleHog, Semgrep SAST (CI/CD currently disabled; pre-commit hooks active)
 - 🗄️ **Database:** PostgreSQL with row-level security
 - 🔐 **Redis:** Authentication enabled
 - 🐳 **Docker:** Container isolation
@@ -422,7 +422,7 @@ go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 ```
 
-**Frontend tests** (when available):
+**Frontend tests** (783 tests, 70.28% coverage):
 ```bash
 cd client/desktop
 npm test
@@ -581,7 +581,7 @@ The desktop Electron app works on laptops/tablets, but no native mobile UI yet.
 | **Source Code** | ❌ Proprietary | ✅ BSL 1.1 (→ AGPL) |
 | **Privacy** | ⚠️ Collects data | ✅ Minimal telemetry |
 | **Business Model** | Nitro subscriptions | À-la-carte + self-host |
-| **Voice Quality** | Good (Opus) | ✅ Hi-Fi (256kbps+, 5 quality tiers) |
+| **Voice Quality** | Good (Opus) | ✅ Hi-Fi (256kbps+, 7 quality tiers) |
 | **Bots** | ✅ Yes | 📋 Planned (Phase 5) |
 
 **Concord's focus:** Privacy, sovereignty, eventual open source.
@@ -673,7 +673,7 @@ lsof -ti:5173 | xargs kill -9
 
 ### Database migrations aren't running
 
-The migration system uses `golang-migrate/v4` and runs automatically on server startup. There are currently **16 migrations** (000001-000016).
+The migration system uses `golang-migrate/v4` and runs automatically on server startup. There are currently **28 migrations** (000001-000028).
 
 **Check migration status:**
 ```bash
@@ -707,7 +707,7 @@ docker exec -it concord-postgres psql -U concord -d concord -c "SELECT version F
 2. JWT token is valid (not expired)
 3. Browser console for errors
 
-**WebSocket support is in Phase 1B** (in progress). If you're testing pre-Phase 1B code, WebSockets aren't implemented yet.
+WebSocket support is fully implemented with ticket-based authentication. Ensure you obtain a ticket via `POST /api/v1/auth/ws-ticket` before connecting.
 
 ---
 
@@ -790,7 +790,7 @@ npm run dev
 - **Security:** [.github/SECURITY.md](./.github/SECURITY.md) - Security policy
 - **Architecture:** [docs/architecture.md](./docs/architecture.md) - System design
 - **Getting Started:** [docs/GETTING_STARTED.md](./docs/GETTING_STARTED.md) - Setup guide
-- **AI Context:** [AI-CONTEXT.md](./AI-CONTEXT.md) - For AI assistants
+- **AI Context:** [[internal]](.[internal]) - For AI assistants
 
 ---
 
@@ -808,4 +808,4 @@ If your question isn't answered here:
 
 ---
 
-**Last Updated:** 2026-02-22 | **Version:** 1.1.0
+**Last Updated:** 2026-03-03 | **Version:** 1.3.0

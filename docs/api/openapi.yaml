@@ -55,6 +55,18 @@ tags:
     description: Server invite codes and joining
   - name: E2EE
     description: End-to-end encryption key management
+  - name: Voice
+    description: Voice channel participation and signaling
+  - name: DM
+    description: Direct messages, group DMs, and DM voice calls
+  - name: Friends
+    description: Friend requests, friend list, blocking
+  - name: FriendCodes
+    description: Shareable friend codes for easy connections
+  - name: Privacy
+    description: User privacy settings
+  - name: ChannelGroups
+    description: Channel grouping and reordering within servers
   - name: WebSocket
     description: Real-time WebSocket protocol
 
@@ -1481,6 +1493,1333 @@ paths:
                 $ref: '#/components/schemas/Error'
 
   # ----------------------------------------------------------
+  # VOICE (Phase 1C)
+  # ----------------------------------------------------------
+  /channels/{id}/voice/participants:
+    get:
+      tags: [Voice]
+      summary: List voice channel participants
+      description: |
+        Get the list of users currently connected to this voice channel.
+        Rate limit: 30 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ChannelId'
+      responses:
+        '200':
+          description: Participants list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  participants:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/VoiceParticipant'
+        '403':
+          description: Not a member of this channel's server
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /channels/{id}/voice/join:
+    post:
+      tags: [Voice]
+      summary: Join a voice channel
+      description: |
+        Request permission to join a voice channel and receive media server
+        connection details including ICE servers for NAT traversal.
+        Rate limit: 10 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ChannelId'
+      responses:
+        '200':
+          description: Join approved with connection details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/VoiceJoinResponse'
+        '403':
+          description: Not a member of this channel's server
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /channels/{id}/rotate-key:
+    post:
+      tags: [E2EE]
+      summary: Rotate channel encryption key
+      description: |
+        Initiate a key rotation for an encrypted channel. Increments the
+        key version; members must re-distribute wrapped keys.
+        Rate limit: 10 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ChannelId'
+      responses:
+        '200':
+          description: Key rotation initiated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Key rotation initiated
+                  new_key_version:
+                    type: integer
+        '403':
+          description: Not authorized (must be server owner or admin)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ----------------------------------------------------------
+  # CHANNEL GROUPS (Phase 1C)
+  # ----------------------------------------------------------
+  /servers/{id}/channel-groups:
+    get:
+      tags: [ChannelGroups]
+      summary: List channel groups
+      description: |
+        Get all channel groups for a server, ordered by position.
+        Rate limit: 30 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+      responses:
+        '200':
+          description: Channel groups list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  groups:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ChannelGroup'
+    post:
+      tags: [ChannelGroups]
+      summary: Create a channel group
+      description: |
+        Create a new channel group in a server. Requires owner or admin role.
+        Rate limit: 10 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 3
+                  maxLength: 100
+      responses:
+        '201':
+          description: Channel group created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelGroup'
+        '403':
+          description: Not authorized
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /servers/{id}/channel-groups/{group_id}:
+    patch:
+      tags: [ChannelGroups]
+      summary: Update a channel group
+      description: |
+        Rename a channel group. Requires owner or admin role.
+        Rate limit: 10 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+        - name: group_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [name]
+              properties:
+                name:
+                  type: string
+                  minLength: 3
+                  maxLength: 100
+      responses:
+        '200':
+          description: Channel group updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChannelGroup'
+    delete:
+      tags: [ChannelGroups]
+      summary: Delete a channel group
+      description: |
+        Delete a channel group. Channels in the group become ungrouped.
+        Requires owner or admin role. Rate limit: 5 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+        - name: group_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Channel group deleted
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+
+  /servers/{id}/channels/reorder:
+    put:
+      tags: [ChannelGroups]
+      summary: Reorder channels
+      description: |
+        Batch-update channel positions and group assignments within a server.
+        Requires owner or admin role. Rate limit: 10 requests per minute.
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: '#/components/parameters/ServerId'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [channels]
+              properties:
+                channels:
+                  type: array
+                  items:
+                    type: object
+                    required: [id, position]
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      position:
+                        type: integer
+                      group_id:
+                        type: string
+                        format: uuid
+                        nullable: true
+      responses:
+        '200':
+          description: Channels reordered
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+
+  # ----------------------------------------------------------
+  # DM (Phase 1C)
+  # ----------------------------------------------------------
+  /dm/conversations:
+    get:
+      tags: [DM]
+      summary: List DM conversations
+      description: |
+        Get all DM conversations for the authenticated user, including
+        last message preview and unread count.
+        Rate limit: 30 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Conversations list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  conversations:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DMConversation'
+    post:
+      tags: [DM]
+      summary: Open a 1-on-1 DM conversation
+      description: |
+        Open or get an existing 1-on-1 DM conversation with another user.
+        Returns 200 if conversation already exists, 201 if newly created.
+        Rate limit: 10 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id:
+                  type: string
+                  format: uuid
+      responses:
+        '200':
+          description: Existing conversation returned
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DMConversation'
+        '201':
+          description: New conversation created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DMConversation'
+
+  /dm/conversations/group:
+    post:
+      tags: [DM]
+      summary: Create a group DM
+      description: |
+        Create a group DM conversation with 2-10 participants (including yourself).
+        Rate limit: 10 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_ids]
+              properties:
+                user_ids:
+                  type: array
+                  items:
+                    type: string
+                    format: uuid
+                  minItems: 1
+                  maxItems: 9
+                name:
+                  type: string
+                  nullable: true
+      responses:
+        '201':
+          description: Group DM created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DMConversation'
+
+  /dm/conversations/personal:
+    post:
+      tags: [DM]
+      summary: Create a personal notes conversation
+      description: |
+        Create or get a personal notes conversation (DM with yourself).
+        Rate limit: 10 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Existing personal conversation
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DMConversation'
+        '201':
+          description: New personal conversation created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DMConversation'
+
+  /dm/conversations/{id}:
+    get:
+      tags: [DM]
+      summary: Get a DM conversation
+      description: |
+        Get details of a specific DM conversation.
+        Rate limit: 30 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Conversation UUID
+      responses:
+        '200':
+          description: Conversation details
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DMConversation'
+        '403':
+          description: Not a participant
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    patch:
+      tags: [DM]
+      summary: Update a DM conversation
+      description: |
+        Update conversation settings (e.g., group name).
+        Rate limit: 10 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  nullable: true
+      responses:
+        '200':
+          description: Conversation updated
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+
+  /dm/conversations/{id}/messages:
+    get:
+      tags: [DM]
+      summary: Get DM message history
+      description: |
+        Get messages in a DM conversation with cursor-based pagination.
+        Rate limit: 30 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: before
+          in: query
+          required: false
+          schema:
+            type: string
+            format: uuid
+          description: Cursor — message ID to fetch messages before
+      responses:
+        '200':
+          description: Messages list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  messages:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/DMMessage'
+
+  /dm/conversations/{id}/read:
+    post:
+      tags: [DM]
+      summary: Mark DM conversation as read
+      description: |
+        Mark all messages in a DM conversation as read.
+        Rate limit: 30 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Marked as read
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+
+  /dm/conversations/{id}/keys:
+    get:
+      tags: [DM]
+      summary: Get DM encryption key
+      description: |
+        Get the wrapped E2EE key for a DM conversation.
+        Rate limit: 30 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Wrapped key
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key:
+                    $ref: '#/components/schemas/DMKey'
+    post:
+      tags: [DM]
+      summary: Distribute DM encryption keys
+      description: |
+        Distribute wrapped E2EE keys to DM conversation participants.
+        Rate limit: 10 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [wrapped_keys]
+              properties:
+                wrapped_keys:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: Map of user_id → base64-encoded wrapped key
+                key_version:
+                  type: integer
+      responses:
+        '200':
+          description: Keys distributed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  distributed:
+                    type: integer
+
+  /dm/conversations/{id}/voice/join:
+    post:
+      tags: [DM, Voice]
+      summary: Join DM voice call
+      description: |
+        Join a voice call in a DM conversation.
+        Rate limit: 10 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Voice call joined
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DMVoiceJoinResponse'
+
+  /dm/conversations/{id}/voice/participants:
+    get:
+      tags: [DM, Voice]
+      summary: List DM voice call participants
+      description: |
+        Get participants currently in a DM voice call.
+        Rate limit: 30 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Participants list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  participants:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/VoiceParticipant'
+
+  /dm/conversations/{id}/rotate-key:
+    post:
+      tags: [DM, E2EE]
+      summary: Rotate DM encryption key
+      description: |
+        Initiate key rotation for an encrypted DM conversation.
+        Rate limit: 5 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Key rotation initiated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                    example: Key rotation initiated
+                  new_key_version:
+                    type: integer
+
+  # ----------------------------------------------------------
+  # FRIENDS (Phase 1C)
+  # ----------------------------------------------------------
+  /friends:
+    get:
+      tags: [Friends]
+      summary: List friends
+      description: |
+        Get the authenticated user's friend list.
+        Rate limit: 30 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Friends list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  friends:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Friend'
+
+  /friends/requests:
+    get:
+      tags: [Friends]
+      summary: List friend requests
+      description: |
+        Get all pending friend requests (sent and received).
+        Rate limit: 30 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Friend requests
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  requests:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FriendRequest'
+
+  /friends/request:
+    post:
+      tags: [Friends]
+      summary: Send a friend request
+      description: |
+        Send a friend request by user ID or username. Exactly one of
+        `user_id` or `username` must be provided.
+        Rate limit: 10 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                user_id:
+                  type: string
+                  format: uuid
+                  nullable: true
+                username:
+                  type: string
+                  nullable: true
+      responses:
+        '201':
+          description: Friend request sent
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  id:
+                    type: string
+                    format: uuid
+                  status:
+                    type: string
+                    example: pending
+                  created_at:
+                    type: string
+                    format: date-time
+        '400':
+          description: Invalid request (cannot befriend self, already friends, etc.)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /friends/request/{id}:
+    patch:
+      tags: [Friends]
+      summary: Accept or decline a friend request
+      description: |
+        Respond to a pending friend request.
+        Rate limit: 10 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Friend request UUID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [action]
+              properties:
+                action:
+                  type: string
+                  enum: [accept, decline]
+      responses:
+        '200':
+          description: Request accepted or declined
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+
+  /friends/{user_id}:
+    delete:
+      tags: [Friends]
+      summary: Remove a friend
+      description: |
+        Remove a user from your friend list.
+        Rate limit: 5 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Friend removed
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+
+  /friends/{user_id}/block:
+    post:
+      tags: [Friends]
+      summary: Block a user
+      description: |
+        Block a user. Removes any existing friendship and prevents future requests.
+        Rate limit: 5 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: User blocked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+
+  # ----------------------------------------------------------
+  # FRIEND CODES (Phase 1C)
+  # ----------------------------------------------------------
+  /friends/codes:
+    post:
+      tags: [FriendCodes]
+      summary: Create a friend code
+      description: |
+        Generate a shareable 8-character friend code with optional expiry and use limits.
+        Rate limit: 10 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                max_uses:
+                  type: integer
+                  minimum: 1
+                  maximum: 10
+                  nullable: true
+                  description: Max redemptions (default 1)
+                expires_in:
+                  type: integer
+                  minimum: 300
+                  maximum: 86400
+                  nullable: true
+                  description: Seconds until expiry (default 3600)
+                auto_accept:
+                  type: boolean
+                  description: Auto-accept without confirmation (default false)
+      responses:
+        '201':
+          description: Friend code created
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  friend_code:
+                    $ref: '#/components/schemas/FriendCode'
+    get:
+      tags: [FriendCodes]
+      summary: List your friend codes
+      description: |
+        Get all friend codes created by the authenticated user.
+        Rate limit: 30 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Friend codes list
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  friend_codes:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/FriendCode'
+
+  /friends/codes/{id}:
+    delete:
+      tags: [FriendCodes]
+      summary: Revoke a friend code
+      description: |
+        Revoke a friend code so it can no longer be used.
+        Rate limit: 10 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Friend code UUID
+      responses:
+        '200':
+          description: Friend code revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+
+  /friends/codes/{code}/lookup:
+    get:
+      tags: [FriendCodes]
+      summary: Look up a friend code
+      description: |
+        Preview who a friend code belongs to before claiming it.
+        Rate limit: 30 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 8-character friend code
+      responses:
+        '200':
+          description: Friend code owner info
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user_id:
+                    type: string
+                    format: uuid
+                  username:
+                    type: string
+                  display_name:
+                    type: string
+                    nullable: true
+                  avatar_url:
+                    type: string
+                    nullable: true
+                  valid:
+                    type: boolean
+        '404':
+          description: Invalid or expired code
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  /friends/codes/{code}/claim:
+    post:
+      tags: [FriendCodes]
+      summary: Claim a friend code
+      description: |
+        Redeem a friend code to send (or auto-accept) a friend request.
+        Rate limit: 10 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: code
+          in: path
+          required: true
+          schema:
+            type: string
+          description: 8-character friend code
+      responses:
+        '200':
+          description: Friend code claimed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [pending, accepted]
+                  friendship_id:
+                    type: string
+                    format: uuid
+                  user:
+                    type: object
+                    properties:
+                      user_id:
+                        type: string
+                        format: uuid
+                      username:
+                        type: string
+                      display_name:
+                        type: string
+                        nullable: true
+                      avatar_url:
+                        type: string
+                        nullable: true
+
+  # ----------------------------------------------------------
+  # PRIVACY (Phase 1C)
+  # ----------------------------------------------------------
+  /users/me/privacy:
+    get:
+      tags: [Privacy]
+      summary: Get privacy settings
+      description: |
+        Get the authenticated user's privacy settings.
+        Rate limit: 30 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: Privacy settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  privacy:
+                    $ref: '#/components/schemas/PrivacySettings'
+    patch:
+      tags: [Privacy]
+      summary: Update privacy settings
+      description: |
+        Update one or more privacy settings. Only provided fields are changed.
+        Rate limit: 10 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PrivacySettings'
+      responses:
+        '200':
+          description: Updated privacy settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  privacy:
+                    $ref: '#/components/schemas/PrivacySettings'
+
+  # ----------------------------------------------------------
+  # USER SEARCH & PROFILE (Phase 1C)
+  # ----------------------------------------------------------
+  /users/search:
+    get:
+      tags: [Users]
+      summary: Search users by username
+      description: |
+        Search for users by username prefix. Minimum 2 characters required.
+        Results are filtered by the target user's privacy settings.
+        Rate limit: 30 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+            minLength: 2
+          description: Username search query
+      responses:
+        '200':
+          description: Matching users
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  users:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                          format: uuid
+                        username:
+                          type: string
+                        display_name:
+                          type: string
+                          nullable: true
+                        avatar_url:
+                          type: string
+                          nullable: true
+
+  /users/{user_id}/profile:
+    get:
+      tags: [Users]
+      summary: Get a user's public profile
+      description: |
+        Get another user's public profile including bio, links, and avatar.
+        Rate limit: 30 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: user_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: User profile
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  user:
+                    $ref: '#/components/schemas/UserProfile'
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+
+  # ----------------------------------------------------------
+  # E2EE UNIFIED (Phase 1C)
+  # ----------------------------------------------------------
+  /e2ee/validate-epochs:
+    post:
+      tags: [E2EE]
+      summary: Validate key epochs
+      description: |
+        Validate that the client's key versions (epochs) for channels and DMs
+        are current. Returns validity status and any revocations.
+        Rate limit: 10 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [epochs]
+              properties:
+                epochs:
+                  type: object
+                  additionalProperties:
+                    type: integer
+                  description: Map of context_id → key_version
+      responses:
+        '200':
+          description: Epoch validation results
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid:
+                    type: object
+                    additionalProperties:
+                      type: boolean
+                    description: Map of context_id → is_valid
+                  revocations:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        context_id:
+                          type: string
+                          format: uuid
+                        revoked_epoch:
+                          type: integer
+                        successor_epoch:
+                          type: integer
+
+  /e2ee/keys/{context_id}:
+    get:
+      tags: [E2EE]
+      summary: Get wrapped key for a context
+      description: |
+        Get the wrapped E2EE key for a channel or DM conversation.
+        Rate limit: 30 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: context_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+          description: Channel or DM conversation UUID
+      responses:
+        '200':
+          description: Wrapped key
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  key:
+                    type: object
+                    properties:
+                      id:
+                        type: string
+                        format: uuid
+                      context_id:
+                        type: string
+                        format: uuid
+                      user_id:
+                        type: string
+                        format: uuid
+                      wrapped_key:
+                        type: string
+                        description: Base64-encoded RSA-OAEP wrapped key
+                      key_version:
+                        type: integer
+                      created_at:
+                        type: string
+                        format: date-time
+        '404':
+          description: No key found for this context
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+    post:
+      tags: [E2EE]
+      summary: Distribute keys for a context
+      description: |
+        Distribute wrapped E2EE keys to members of a channel or DM conversation.
+        Rate limit: 10 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: context_id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [wrapped_keys]
+              properties:
+                wrapped_keys:
+                  type: object
+                  additionalProperties:
+                    type: string
+                  description: Map of user_id → base64-encoded wrapped key
+                key_version:
+                  type: integer
+                  nullable: true
+      responses:
+        '200':
+          description: Keys distributed
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  distributed:
+                    type: integer
+
+  # ----------------------------------------------------------
+  # SESSIONS — additional (Phase 1C)
+  # ----------------------------------------------------------
+  /sessions/revoke-all:
+    post:
+      tags: [Sessions]
+      summary: Revoke all sessions
+      description: |
+        Revoke all active sessions for the authenticated user, including the current one.
+        Rate limit: 5 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      responses:
+        '200':
+          description: All sessions revoked
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessMessage'
+
+  /sessions/revocation-mode:
+    put:
+      tags: [Sessions]
+      summary: Set session revocation mode
+      description: |
+        Enable or disable session revocation mode. When enabled, all new sessions
+        are immediately revoked (useful for compromised accounts).
+        Rate limit: 5 requests per minute (user-based).
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [enabled]
+              properties:
+                enabled:
+                  type: boolean
+      responses:
+        '200':
+          description: Revocation mode updated
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  message:
+                    type: string
+                  enabled:
+                    type: boolean
+
+  # ----------------------------------------------------------
   # WEBSOCKET
   # ----------------------------------------------------------
   /ws:
@@ -2211,5 +3550,374 @@ components:
           type: string
           format: date-time
         revoked_at:
+          type: string
+          format: date-time
+
+    # ----------------------------------------------------------
+    # Phase 1C Schemas
+    # ----------------------------------------------------------
+
+    # Voice
+    VoiceParticipant:
+      type: object
+      properties:
+        user_id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        display_name:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          nullable: true
+        is_muted:
+          type: boolean
+        is_deafened:
+          type: boolean
+        is_video_on:
+          type: boolean
+        is_screen_sharing:
+          type: boolean
+        joined_at:
+          type: string
+          format: date-time
+
+    IceServer:
+      type: object
+      properties:
+        urls:
+          type: array
+          items:
+            type: string
+        username:
+          type: string
+          nullable: true
+        credential:
+          type: string
+          nullable: true
+
+    VoiceJoinResponse:
+      type: object
+      properties:
+        allowed:
+          type: boolean
+        media_server_url:
+          type: string
+        ice_servers:
+          type: array
+          items:
+            $ref: '#/components/schemas/IceServer'
+        channel:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            name:
+              type: string
+            server_id:
+              type: string
+              format: uuid
+            is_encrypted:
+              type: boolean
+            audio_quality_tier:
+              type: string
+              nullable: true
+              enum: [minimum, low, moderate, standard, high, hifi, studio]
+
+    DMVoiceJoinResponse:
+      type: object
+      properties:
+        allowed:
+          type: boolean
+        media_server_url:
+          type: string
+        ice_servers:
+          type: array
+          items:
+            $ref: '#/components/schemas/IceServer'
+        conversation:
+          type: object
+          properties:
+            id:
+              type: string
+              format: uuid
+            is_encrypted:
+              type: boolean
+
+    # Channel Groups
+    ChannelGroup:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        server_id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        position:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    # DM
+    DMConversation:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        is_group:
+          type: boolean
+        is_personal:
+          type: boolean
+        name:
+          type: string
+          nullable: true
+        is_encrypted:
+          type: boolean
+        participants:
+          type: array
+          items:
+            type: object
+            properties:
+              user_id:
+                type: string
+                format: uuid
+              username:
+                type: string
+              display_name:
+                type: string
+                nullable: true
+              avatar_url:
+                type: string
+                nullable: true
+        last_message:
+          type: object
+          nullable: true
+          properties:
+            content:
+              type: string
+            user_id:
+              type: string
+              format: uuid
+            created_at:
+              type: string
+              format: date-time
+            is_encrypted:
+              type: boolean
+        unread_count:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    DMMessage:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        conversation_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        content:
+          type: string
+        is_encrypted:
+          type: boolean
+        type:
+          type: string
+        key_version:
+          type: integer
+        edited_at:
+          type: string
+          format: date-time
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        username:
+          type: string
+        display_name:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          nullable: true
+
+    DMKey:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        conversation_id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        wrapped_key:
+          type: string
+          description: Base64-encoded RSA-OAEP wrapped key
+        key_version:
+          type: integer
+        created_at:
+          type: string
+          format: date-time
+
+    # Friends
+    Friend:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        display_name:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    FriendRequest:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        from_user_id:
+          type: string
+          format: uuid
+        from_username:
+          type: string
+        from_display_name:
+          type: string
+          nullable: true
+        from_avatar_url:
+          type: string
+          nullable: true
+        to_user_id:
+          type: string
+          format: uuid
+        to_username:
+          type: string
+        to_display_name:
+          type: string
+          nullable: true
+        to_avatar_url:
+          type: string
+          nullable: true
+        direction:
+          type: string
+          enum: [sent, received]
+        created_at:
+          type: string
+          format: date-time
+
+    FriendCode:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        user_id:
+          type: string
+          format: uuid
+        code:
+          type: string
+          description: 8-character shareable code
+        max_uses:
+          type: integer
+          nullable: true
+        use_count:
+          type: integer
+        expires_at:
+          type: string
+          format: date-time
+          nullable: true
+        is_revoked:
+          type: boolean
+        auto_accept:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    # Privacy
+    PrivacySettings:
+      type: object
+      properties:
+        messages_friends_only:
+          type: boolean
+          description: Only friends can send DMs (default true)
+        messages_server_members:
+          type: boolean
+          description: Server members can send DMs (default true)
+        auto_accept_friend_codes:
+          type: boolean
+          description: Auto-accept friend codes (default false)
+        searchable_by_username:
+          type: boolean
+          description: Appear in username search (default false)
+        searchable_by_email:
+          type: boolean
+          description: Searchable by email (default false)
+        searchable_by_phone:
+          type: boolean
+          description: Searchable by phone (default false)
+        updated_at:
+          type: string
+          format: date-time
+          nullable: true
+
+    # User Profile (public view)
+    UserProfile:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        username:
+          type: string
+        display_name:
+          type: string
+          nullable: true
+        bio:
+          type: string
+          nullable: true
+        avatar_url:
+          type: string
+          nullable: true
+        header_image_url:
+          type: string
+          nullable: true
+        color_scheme:
+          type: string
+          nullable: true
+        links:
+          type: array
+          items:
+            type: string
+        created_at:
           type: string
           format: date-time

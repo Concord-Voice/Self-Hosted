@@ -5,9 +5,9 @@ import (
 	"database/sql"
 	"net/http"
 
-	"github.com/concord/control-plane/internal/websocket"
-	"github.com/concord/control-plane/pkg/config"
-	"github.com/concord/control-plane/pkg/logger"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
+	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
+	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -64,20 +64,19 @@ type lastMessageResponse struct {
 func (h *Handler) ListConversations(c *gin.Context) {
 	userID := c.GetString("user_id")
 
-	// Fetch conversations ordered by last message
+	// Fetch conversations ordered by last message.
+	// Uses a LEFT JOIN to dm_read_states instead of a correlated subquery.
 	query := `
 		SELECT dc.id, dc.is_group, dc.is_personal, dc.name, dc.is_encrypted, dc.created_at,
 		       dm.content, dm.created_at, dm.user_id, dm.is_encrypted,
 		       (SELECT COUNT(*) FROM dm_messages
 		        WHERE conversation_id = dc.id
-		          AND created_at > COALESCE(
-		              (SELECT last_read_at FROM dm_read_states WHERE user_id = $1 AND conversation_id = dc.id),
-		              '1970-01-01'
-		          )
+		          AND created_at > COALESCE(drs.last_read_at, '1970-01-01')
 		          AND user_id != $1
 		       ) AS unread_count
 		FROM dm_conversations dc
 		JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $1
+		LEFT JOIN dm_read_states drs ON drs.conversation_id = dc.id AND drs.user_id = $1
 		LEFT JOIN LATERAL (
 		    SELECT content, created_at, user_id, is_encrypted FROM dm_messages
 		    WHERE conversation_id = dc.id ORDER BY created_at DESC LIMIT 1
@@ -857,10 +856,7 @@ func (h *Handler) AuthorizeVoiceJoin(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"allowed":          true,
 		"media_server_url": h.cfg.MediaPlaneURL,
-		"ice_servers": []map[string]string{
-			{"urls": "stun:stun.l.google.com:19302"},
-			{"urls": "stun:stun1.l.google.com:19302"},
-		},
+		"ice_servers":      h.cfg.ICEServers(userID),
 		"conversation": gin.H{
 			"id":           convID,
 			"is_encrypted": isEncrypted,

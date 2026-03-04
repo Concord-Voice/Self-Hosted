@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/concord/control-plane/internal/auth"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -174,9 +174,4 @@ func (h *Handler) authenticateWebSocket(c *gin.Context) (uuid.UUID, string, erro
 	}
 
 	return uuid.Nil, "", fmt.Errorf("invalid authentication")
-}
-
-// GetHub returns the hub instance (for external access)
-func (h *Handler) GetHub() *Hub {
-	return h.hub
 }

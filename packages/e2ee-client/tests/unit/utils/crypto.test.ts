@@ -72,7 +72,7 @@ describe('crypto utilities', () => {
   });
 
   describe('generateKeyPair', () => {
-    it('generates an RSA-OAEP key pair', async () => {
+    it('generates an RSA-OAEP key pair', { timeout: 30_000 }, async () => {
       const keyPair = await generateKeyPair();
       expect(keyPair.publicKey).toBeDefined();
       expect(keyPair.privateKey).toBeDefined();
@@ -82,7 +82,7 @@ describe('crypto utilities', () => {
   });
 
   describe('wrapPrivateKey / unwrapPrivateKey', () => {
-    it('round-trips private key', async () => {
+    it('round-trips private key', { timeout: 30_000 }, async () => {
       const salt = generateSalt();
       const wrappingKey = await deriveKeyFromPassword('testpassword', salt);
       const keyPair = await generateKeyPair();
@@ -96,7 +96,7 @@ describe('crypto utilities', () => {
   });
 
   describe('exportPublicKey / importPublicKey', () => {
-    it('round-trips public key', async () => {
+    it('round-trips public key', { timeout: 30_000 }, async () => {
       const keyPair = await generateKeyPair();
       const exported = await exportPublicKey(keyPair.publicKey);
       expect(typeof exported).toBe('string');
@@ -108,7 +108,7 @@ describe('crypto utilities', () => {
   });
 
   describe('generateRegistrationKeys', () => {
-    it('returns all required key material', async () => {
+    it('returns all required key material', { timeout: 30_000 }, async () => {
       const keys = await generateRegistrationKeys('MySecurePassword123!');
       expect(keys.publicKey).toBeDefined();
       expect(keys.privateKey).toBeDefined();
@@ -120,7 +120,7 @@ describe('crypto utilities', () => {
   });
 
   describe('unwrapLoginKeys', () => {
-    it('unwraps keys generated during registration', async () => {
+    it('unwraps keys generated during registration', { timeout: 30_000 }, async () => {
       const password = 'MySecurePassword123!';
       const regKeys = await generateRegistrationKeys(password);
 

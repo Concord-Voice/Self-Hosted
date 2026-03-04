@@ -26,6 +26,11 @@ type Config struct {
 	// Media plane
 	MediaPlaneURL string
 
+	// TURN/STUN (coturn)
+	TURNServerHost string // Hostname or IP of the TURN server (e.g. "turn.concordvoice.chat")
+	TURNSecret     string // Shared secret for HMAC ephemeral credentials
+	TURNRealm      string // TURN realm (e.g. "concordvoice.chat")
+
 	// Licensing
 	LicensingAuthorityURL string
 }
@@ -43,6 +48,9 @@ func Load() (*Config, error) {
 		JWTSecret:             getEnv("JWT_SECRET", devJWTSecret),
 		NATSUrl:               getEnv("NATS_URL", "nats://localhost:4222"),
 		MediaPlaneURL:         getEnv("MEDIA_PLANE_URL", "http://localhost:3000"),
+		TURNServerHost:        getEnv("TURN_SERVER_HOST", ""),
+		TURNSecret:            getEnv("TURN_SECRET", ""),
+		TURNRealm:             getEnv("TURN_REALM", "concordvoice.chat"),
 		LicensingAuthorityURL: getEnv("LICENSING_AUTHORITY_URL", "http://localhost:8082"),
 		AllowedOrigins:        parseOrigins(getEnv("ALLOWED_ORIGINS", "http://localhost:3001,http://localhost:3002")),
 	}

@@ -22,7 +22,7 @@ See [SETUP_GITHUB.md](./SETUP_GITHUB.md) for full GitHub collaboration workflow.
 
 ### Optional
 
-- **PostgreSQL** 15+ (if not using Docker)
+- **PostgreSQL** 16+ (if not using Docker)
 - **Redis** 7+ (if not using Docker)
 
 ## Quick Start
@@ -93,7 +93,7 @@ cat > .env << EOF
 PORT=3000
 ANNOUNCED_IP=127.0.0.1
 RTC_MIN_PORT=40000
-RTC_MAX_PORT=40099
+RTC_MAX_PORT=49999
 EOF
 
 # Run the service
@@ -407,9 +407,34 @@ lsof -ti:5432 | xargs kill -9
 | `RTC_MAX_PORT` | `49999` | Max RTC port |
 | `NUM_WORKERS` | `4` | Mediasoup workers |
 
+### STUN/TURN (coturn)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `TURN_EXTERNAL_IP` | (auto-detect) | Public IP for TURN relay |
+| `TURN_SECRET` | (generated) | Shared HMAC secret for ephemeral credentials |
+| `TURN_PORT` | `3478` | STUN/TURN listening port (UDP+TCP) |
+| `TURN_TLS_PORT` | `5349` | STUN/TURN TLS listening port |
+| `TURN_MIN_PORT` | `49152` | Min TURN relay port |
+| `TURN_MAX_PORT` | `49252` | Max TURN relay port |
+
 ### Desktop Client
 
 No environment variables needed for development.
+
+### Failover/Production Ports
+
+These ports are used in staging/production deployments with nginx reverse proxy and database replication:
+
+| Port | Service | Notes |
+|------|---------|-------|
+| 8443 | Control Plane HTTPS | TLS termination via nginx |
+| 3443 | Media Plane HTTPS | TLS termination via nginx |
+| 443 | TURN over TLS | Bypasses restrictive firewalls (corporate, hotel WiFi) |
+| 5433 | PostgreSQL replica | Read replica / hot standby failover |
+| 6380 | Redis Sentinel | Coordinates automatic primary failover |
+| 6222 | NATS cluster routing | Inter-node communication for multi-instance |
+| 8222 | NATS monitoring | HTTP monitoring/metrics endpoint |
 
 ## Troubleshooting
 
@@ -531,7 +556,7 @@ Recommended:
 
 ## Next Steps
 
-- Read [API Documentation](./api/) — OpenAPI 3.0 spec for all 54 endpoints
+- Read [API Documentation](./api/) — OpenAPI 3.0 spec for all 74 endpoints
 - Review [Architecture](./architecture.md) — System diagrams, database ERD, message flows
 - Check [Contributing Guidelines](../CONTRIBUTING.md)
 - Join the major comms platforms for discussions

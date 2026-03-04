@@ -105,6 +105,6 @@ docker-compose up -d postgres redis
 
 ## CI/CD
 
-Tests run automatically on pull requests and pushes to main/develop. See `.github/workflows/ci.yml`.
+> **Note:** The GitHub Actions CI workflow (`.github/workflows/ci.yml`) is currently disabled due to billing issues. Tests are enforced locally via pre-commit hooks. Re-enable CI when billing is resolved.
 
-Coverage threshold: **80%+** enforced in CI.
+Coverage target: **80%+** (current actual: ~62.9%).

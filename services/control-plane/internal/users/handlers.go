@@ -9,10 +9,10 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/concord/control-plane/internal/auth"
-	"github.com/concord/control-plane/internal/models"
-	"github.com/concord/control-plane/internal/websocket"
-	"github.com/concord/control-plane/pkg/logger"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
+	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
@@ -602,6 +602,19 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 	)
 	if err != nil {
 		h.log.Error("Failed to update E2EE keys", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to change password"})
+		return
+	}
+
+	// Revoke ALL refresh tokens for this user.
+	// Password change invalidates all sessions — attacker with stolen
+	// refresh token must not be able to obtain new access tokens.
+	_, err = tx.Exec(
+		`UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`,
+		userID,
+	)
+	if err != nil {
+		h.log.Error("Failed to revoke refresh tokens", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to change password"})
 		return
 	}
