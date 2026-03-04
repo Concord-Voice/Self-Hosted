@@ -73,6 +73,9 @@ type Hub struct {
 	// Force-disconnect a specific session (targeted single-session revocation)
 	disconnectSession chan string
 
+	// Signal to recompute and broadcast server voice counts
+	voiceCountSignal chan struct{}
+
 	// Shutdown signal
 	done chan struct{}
 }
@@ -98,6 +101,7 @@ func NewHub(db *sql.DB, redisClient *redis.Client) *Hub {
 		dmBroadcast:          make(chan DMBroadcastMessage, 256),
 		disconnectUser:       make(chan uuid.UUID, 16),
 		disconnectSession:    make(chan string, 16),
+		voiceCountSignal:     make(chan struct{}, 1),
 		done:                 make(chan struct{}),
 	}
 }
@@ -135,6 +139,9 @@ func (h *Hub) Run() {
 
 		case sessionID := <-h.disconnectSession:
 			h.handleDisconnectSession(sessionID)
+
+		case <-h.voiceCountSignal:
+			h.broadcastServerVoiceCounts()
 
 		case <-h.done:
 			// Graceful shutdown: close all client connections
@@ -236,6 +243,43 @@ func (h *Hub) handleRegister(client *Client) {
 	if data, err := json.Marshal(presenceSnapshot); err == nil {
 		client.Send <- data
 	}
+
+	// Send server voice counts snapshot to the new client
+	go func() {
+		rows, err := h.db.Query(`
+			SELECT c.server_id, COUNT(vp.id)
+			FROM voice_participants vp
+			JOIN channels c ON c.id = vp.channel_id
+			GROUP BY c.server_id
+		`)
+		if err != nil {
+			log.Printf("Failed to query voice counts for new client: %v", err)
+			return
+		}
+		defer func() { _ = rows.Close() }()
+
+		counts := make(map[string]int)
+		for rows.Next() {
+			var serverID string
+			var count int
+			if err := rows.Scan(&serverID, &count); err == nil {
+				counts[serverID] = count
+			}
+		}
+
+		msg := OutgoingMessage{
+			Type: "server_voice_counts",
+			Data: map[string]interface{}{
+				"counts": counts,
+			},
+		}
+		if data, err := json.Marshal(msg); err == nil {
+			select {
+			case client.Send <- data:
+			default:
+			}
+		}
+	}()
 }
 
 // handleUnregister unregisters a client
@@ -1644,4 +1688,46 @@ func (h *Hub) broadcastServerOnlineCounts(userID uuid.UUID) {
 			"counts": counts,
 		},
 	})
+}
+
+// broadcastServerVoiceCounts queries voice_participants to compute per-server
+// voice user counts and broadcasts them to all connected clients.
+func (h *Hub) broadcastServerVoiceCounts() {
+	rows, err := h.db.Query(`
+		SELECT c.server_id, COUNT(vp.id)
+		FROM voice_participants vp
+		JOIN channels c ON c.id = vp.channel_id
+		GROUP BY c.server_id
+	`)
+	if err != nil {
+		log.Printf("Failed to query server voice counts: %v", err)
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	counts := make(map[string]int)
+	for rows.Next() {
+		var serverID string
+		var count int
+		if err := rows.Scan(&serverID, &count); err == nil {
+			counts[serverID] = count
+		}
+	}
+
+	h.handleGlobalBroadcast(OutgoingMessage{
+		Type: "server_voice_counts",
+		Data: map[string]interface{}{
+			"counts": counts,
+		},
+	})
+}
+
+// BroadcastServerVoiceCounts triggers a recompute and broadcast of per-server
+// voice participant counts. Safe to call from any goroutine.
+func (h *Hub) BroadcastServerVoiceCounts() {
+	select {
+	case h.voiceCountSignal <- struct{}{}:
+	default:
+		// Already pending — coalesces rapid bursts
+	}
 }

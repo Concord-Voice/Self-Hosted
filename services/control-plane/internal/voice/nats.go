@@ -175,6 +175,10 @@ func (s *NATSSubscriber) handleJoined(data []byte) {
 	}
 
 	s.log.Info("Voice participant joined", "channel_id", event.ChannelID, "user_id", event.UserID, "is_dm", ctx.isDM)
+
+	if !ctx.isDM {
+		s.hub.BroadcastServerVoiceCounts()
+	}
 }
 
 func (s *NATSSubscriber) handleLeft(data []byte) {
@@ -224,6 +228,10 @@ func (s *NATSSubscriber) handleLeft(data []byte) {
 	}
 
 	s.log.Info("Voice participant left", "channel_id", event.ChannelID, "user_id", event.UserID, "is_dm", ctx.isDM)
+
+	if !ctx.isDM {
+		s.hub.BroadcastServerVoiceCounts()
+	}
 }
 
 func (s *NATSSubscriber) handleRoomEmpty(data []byte) {
@@ -269,6 +277,10 @@ func (s *NATSSubscriber) handleRoomEmpty(data []byte) {
 	}
 
 	s.log.Info("Voice room empty", "channel_id", event.ChannelID, "is_dm", ctx.isDM)
+
+	if !ctx.isDM {
+		s.hub.BroadcastServerVoiceCounts()
+	}
 }
 
 // handleHeartbeat reconciles voice_participants against the media plane's
@@ -320,8 +332,10 @@ func (s *NATSSubscriber) handleHeartbeat(data []byte) {
 	}
 
 	// Find and remove stale DB users
+	removedAny := false
 	for uid := range dbUsers {
 		if !mpUsers[uid] {
+			removedAny = true
 			if ctx.isDM {
 				_, _ = s.db.Exec(`DELETE FROM dm_voice_participants WHERE conversation_id = $1 AND user_id = $2`, event.ChannelID, uid)
 				s.hub.BroadcastToDM(ctx.convUUID, websocket.OutgoingMessage{
@@ -368,5 +382,9 @@ func (s *NATSSubscriber) handleHeartbeat(data []byte) {
 				},
 			})
 		}
+	}
+
+	if !ctx.isDM && removedAny {
+		s.hub.BroadcastServerVoiceCounts()
 	}
 }
