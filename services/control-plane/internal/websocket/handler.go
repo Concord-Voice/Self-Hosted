@@ -41,7 +41,7 @@ func NewHandler(hub *Hub, db *sql.DB, redisClient *redis.Client, jwtSecret strin
 		WriteBufferSize: 1024,
 		CheckOrigin: func(r *http.Request) bool {
 			origin := r.Header.Get("Origin")
-			if origin == "" || origin == "null" {
+			if origin == "" || origin == "null" || origin == "file://" {
 				return true // Allow connections without Origin header (native apps, CLI tools, packaged Electron)
 			}
 			for _, allowed := range h.allowedOrigins {
