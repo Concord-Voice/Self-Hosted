@@ -14,7 +14,8 @@ if [[ -f "${SCRIPT_DIR}/deploy.env.local" ]]; then
   source "${SCRIPT_DIR}/deploy.env.local"
 fi
 
-COMPOSE_CMD="docker compose -f ${DEPLOY_DIR}/docker-compose.yml -f ${DEPLOY_DIR}/docker-compose.staging.yml --profile services"
+COMPOSE_OVERRIDE="${COMPOSE_OVERRIDE:-docker-compose.staging.yml}"
+COMPOSE_CMD="docker compose -f ${DEPLOY_DIR}/docker-compose.yml -f ${DEPLOY_DIR}/${COMPOSE_OVERRIDE} --profile ${COMPOSE_PROFILES:-services}"
 
 case "${1:-help}" in
   status)
