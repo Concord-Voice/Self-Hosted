@@ -70,7 +70,16 @@ async function main() {
   // Initialize Socket.IO
   const io = new SocketIOServer(httpServer, {
     cors: {
-      origin: config.allowedOrigins,
+      origin: (origin, callback) => {
+        // Allow packaged Electron (file://), null origins, and no-origin requests
+        if (!origin || origin === 'null' || origin === 'file://') {
+          return callback(null, true);
+        }
+        if (config.allowedOrigins.includes('*') || config.allowedOrigins.includes(origin)) {
+          return callback(null, true);
+        }
+        callback(new Error(`Origin ${origin} not allowed`));
+      },
       credentials: true,
     },
   });
