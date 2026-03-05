@@ -423,8 +423,10 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 				)
 
 				// Unified key endpoints (resolves server channel vs DM conversation)
+				// GET needs a generous limit — every message decryption requires a key fetch
+				// when the 5-minute client cache expires or on channel switch
 				e2eeRoutes.GET("/keys/:context_id",
-					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					middleware.RateLimitByUser(redis, 120, 1*time.Minute),
 					channelsHandler.GetUnifiedKeys,
 				)
 				e2eeRoutes.POST("/keys/:context_id",
