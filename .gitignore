@@ -181,3 +181,4 @@ gcloud-service-key.json
 # Session storage (root-level only, not internal/sessions/)
 /.sessions/
 /sessions/
+.dev-data/

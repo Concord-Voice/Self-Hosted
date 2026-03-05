@@ -78,10 +78,10 @@ services:
     volumes:
       - ./infrastructure/docker/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
     healthcheck:
-      test: ["CMD", "turnutils_peer", "-L", "127.0.0.1", "-p", "3478"]
-      interval: 30s
+      test: ["CMD", "turnutils_stunclient", "127.0.0.1"]
+      interval: 10s
       timeout: 5s
-      retries: 3
+      retries: 5
       start_period: 5s
     restart: unless-stopped
     networks:
