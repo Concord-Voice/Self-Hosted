@@ -229,6 +229,15 @@ func (h *Handler) verifyUserPassword(ctx context.Context, userID, password strin
 	return auth.VerifyPassword(password, passwordHash)
 }
 
+func containsStr(ss []string, target string) bool {
+	for _, s := range ss {
+		if s == target {
+			return true
+		}
+	}
+	return false
+}
+
 // updateUserMFAFlags recalculates and updates the denormalized mfa_enabled and mfa_methods on users.
 func (h *Handler) updateUserMFAFlags(ctx context.Context, userID string) error {
 	var methods []string
@@ -359,12 +368,29 @@ func (h *Handler) GetStatus(c *gin.Context) {
 	).Scan(&webauthnCount)
 	result["webauthn_credentials"] = webauthnCount
 
-	// Overall
+	// Overall — read denormalized flags, then self-heal if stale
 	var methods, recoveryOnly []string
 	var mfaEnabled, recoveryHardened bool
 	var backupEmail sql.NullString
-	_ = h.db.QueryRowContext(ctx,		`SELECT mfa_enabled, mfa_methods, recovery_only_methods, recovery_hardened, backup_email FROM users WHERE id = $1`, userID,
+	_ = h.db.QueryRowContext(ctx, `SELECT mfa_enabled, mfa_methods, recovery_only_methods, recovery_hardened, backup_email FROM users WHERE id = $1`, userID,
 	).Scan(&mfaEnabled, pq.Array(&methods), pq.Array(&recoveryOnly), &recoveryHardened, &backupEmail)
+
+	// Self-heal: if denormalized flags disagree with actual table data, resync
+	actualTOTP := totpEnabled && totpConfirmed
+	actualWebAuthn := webauthnCount > 0
+	denormTOTP := containsStr(methods, "totp")
+	denormWebAuthn := containsStr(methods, "webauthn")
+	if actualTOTP != denormTOTP || actualWebAuthn != denormWebAuthn {
+		h.log.Warn("MFA flags out of sync, resyncing", "user_id", userID,
+			"actual_totp", actualTOTP, "denorm_totp", denormTOTP,
+			"actual_webauthn", actualWebAuthn, "denorm_webauthn", denormWebAuthn)
+		if syncErr := h.updateUserMFAFlags(ctx, userID); syncErr == nil {
+			// Re-read after sync
+			_ = h.db.QueryRowContext(ctx, `SELECT mfa_enabled, mfa_methods FROM users WHERE id = $1`, userID,
+			).Scan(&mfaEnabled, pq.Array(&methods))
+		}
+	}
+
 	result["mfa_enabled"] = mfaEnabled
 	result["methods"] = methods
 	result["recovery_only_methods"] = recoveryOnly
@@ -605,7 +631,11 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 	var totpExists bool
 	err := h.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM user_mfa_totp WHERE user_id = $1)`, userID).Scan(&totpExists)
 	if err != nil || !totpExists {
-		c.JSON(http.StatusConflict, gin.H{"error": "TOTP is not enabled on this account"})
+		// Row is gone but mfa_methods may still list 'totp' — clean up the denormalized flags
+		if syncErr := h.updateUserMFAFlags(ctx, userID); syncErr != nil {
+			h.log.Error("Failed to sync MFA flags after missing TOTP row", "error", syncErr)
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "TOTP MFA has been disabled"})
 		return
 	}
 
