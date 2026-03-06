@@ -597,6 +597,14 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 		return
 	}
 
+	// Check if TOTP is actually enrolled before proceeding
+	var totpExists bool
+	err := h.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM user_mfa_totp WHERE user_id = $1)`, userID).Scan(&totpExists)
+	if err != nil || !totpExists {
+		c.JSON(http.StatusConflict, gin.H{"error": "TOTP is not enabled on this account"})
+		return
+	}
+
 	// Verify password
 	match, err := h.verifyUserPassword(ctx, userID, req.Password)
 	if err != nil || !match {
@@ -607,7 +615,7 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 	// Verify MFA code
 	valid, err := h.VerifyCode(ctx, userID, req.Code)
 	if err != nil || !valid {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Invalid MFA code"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "Invalid MFA code. Make sure the code hasn't expired."})
 		return
 	}
 
