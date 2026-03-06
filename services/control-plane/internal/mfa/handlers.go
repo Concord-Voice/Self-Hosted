@@ -61,12 +61,14 @@ func (h *Handler) SetLoginCompleter(lc LoginCompleter) {
 
 // ── Verifier Interface Implementation ────────────────────────────────────────
 
+// IsEnabled returns true if the user has any active MFA method.
 func (h *Handler) IsEnabled(ctx context.Context, userID string) bool {
 	var enabled bool
 	err := h.db.QueryRowContext(ctx, `SELECT mfa_enabled FROM users WHERE id = $1`, userID).Scan(&enabled)
 	return err == nil && enabled
 }
 
+// VerifyCode checks a TOTP code or backup code against the user's stored MFA secrets.
 func (h *Handler) VerifyCode(ctx context.Context, userID string, code string) (bool, error) {
 	// Check for WebAuthn inline verification token first (from WebAuthnVerifyInlineFinish)
 	if len(code) > 20 {
@@ -113,6 +115,7 @@ func (h *Handler) VerifyCode(ctx context.Context, userID string, code string) (b
 	return false, nil
 }
 
+// GetEnabledMethods returns the list of active MFA methods for a user.
 func (h *Handler) GetEnabledMethods(ctx context.Context, userID string) ([]string, error) {
 	var methods []string
 	err := h.db.QueryRowContext(ctx, `SELECT mfa_methods FROM users WHERE id = $1`, userID).Scan(pq.Array(&methods))
@@ -331,8 +334,7 @@ func (h *Handler) GetStatus(c *gin.Context) {
 	var totpEnabled, totpConfirmed bool
 	var backupUsed []bool
 	var backupHashes []string
-	err := h.db.QueryRowContext(ctx,
-		`SELECT enabled, confirmed, backup_codes_hash, backup_codes_used FROM user_mfa_totp WHERE user_id = $1`,
+	err := h.db.QueryRowContext(ctx,		`SELECT enabled, confirmed, backup_codes_hash, backup_codes_used FROM user_mfa_totp WHERE user_id = $1`,
 		userID,
 	).Scan(&totpEnabled, &totpConfirmed, pq.Array(&backupHashes), pq.Array(&backupUsed))
 	if err == nil {
@@ -349,8 +351,7 @@ func (h *Handler) GetStatus(c *gin.Context) {
 
 	// WebAuthn credential count
 	var webauthnCount int
-	_ = h.db.QueryRowContext(ctx,
-		`SELECT COUNT(*) FROM user_mfa_webauthn WHERE user_id = $1`, userID,
+	_ = h.db.QueryRowContext(ctx,		`SELECT COUNT(*) FROM user_mfa_webauthn WHERE user_id = $1`, userID,
 	).Scan(&webauthnCount)
 	result["webauthn_credentials"] = webauthnCount
 
@@ -358,8 +359,7 @@ func (h *Handler) GetStatus(c *gin.Context) {
 	var methods, recoveryOnly []string
 	var mfaEnabled, recoveryHardened bool
 	var backupEmail sql.NullString
-	_ = h.db.QueryRowContext(ctx,
-		`SELECT mfa_enabled, mfa_methods, recovery_only_methods, recovery_hardened, backup_email FROM users WHERE id = $1`, userID,
+	_ = h.db.QueryRowContext(ctx,		`SELECT mfa_enabled, mfa_methods, recovery_only_methods, recovery_hardened, backup_email FROM users WHERE id = $1`, userID,
 	).Scan(&mfaEnabled, pq.Array(&methods), pq.Array(&recoveryOnly), &recoveryHardened, &backupEmail)
 	result["mfa_enabled"] = mfaEnabled
 	result["methods"] = methods
@@ -380,7 +380,7 @@ func (h *Handler) TOTPSetup(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	var req struct {
-		Password string `json:"password" binding:"required"`
+		Password string `json:"password" binding:"required"` //nolint:gosec // request field, not a secret
 		MFACode  string `json:"mfa_code"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -394,8 +394,7 @@ func (h *Handler) TOTPSetup(c *gin.Context) {
 
 	// Check if already has confirmed TOTP
 	var existingConfirmed bool
-	checkErr := h.db.QueryRowContext(ctx,
-		`SELECT confirmed FROM user_mfa_totp WHERE user_id = $1`, userID,
+	checkErr := h.db.QueryRowContext(ctx,		`SELECT confirmed FROM user_mfa_totp WHERE user_id = $1`, userID,
 	).Scan(&existingConfirmed)
 	if checkErr == nil && existingConfirmed {
 		c.JSON(http.StatusConflict, gin.H{"error": "TOTP is already enabled. Disable it first to re-enroll."})
@@ -404,8 +403,7 @@ func (h *Handler) TOTPSetup(c *gin.Context) {
 
 	// Get user email for the TOTP issuer label
 	var email string
-	if dbErr := h.db.QueryRowContext(ctx, `SELECT email FROM users WHERE id = $1`, userID).Scan(&email); dbErr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user"})
+	if dbErr := h.db.QueryRowContext(ctx, `SELECT email FROM users WHERE id = $1`, userID).Scan(&email); dbErr != nil {		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user"})
 		return
 	}
 
@@ -426,6 +424,7 @@ func (h *Handler) TOTPSetup(c *gin.Context) {
 	}
 
 	// Upsert (replace pending setup or insert new)
+
 	_, err = h.db.ExecContext(ctx, `
 		INSERT INTO user_mfa_totp (user_id, totp_secret_enc, totp_secret_nonce, enabled, confirmed)
 		VALUES ($1, $2, $3, FALSE, FALSE)
@@ -476,6 +475,7 @@ func (h *Handler) TOTPVerifySetup(c *gin.Context) {
 	// Fetch the pending TOTP secret
 	var secretEnc, secretNonce []byte
 	var enabled bool
+
 	err := h.db.QueryRowContext(ctx,
 		`SELECT totp_secret_enc, totp_secret_nonce, enabled FROM user_mfa_totp WHERE user_id = $1`,
 		userID,
@@ -520,6 +520,7 @@ func (h *Handler) TOTPVerifySetup(c *gin.Context) {
 
 	// Mark as enabled (code verified) but NOT confirmed (backup codes not yet acknowledged)
 	usedFlags := make([]bool, len(hashes))
+
 	_, err = h.db.ExecContext(ctx, `
 		UPDATE user_mfa_totp
 		SET enabled = TRUE, verified_at = NOW(), backup_codes_hash = $1, backup_codes_used = $2, updated_at = NOW()
@@ -547,6 +548,7 @@ func (h *Handler) TOTPConfirmSetup(c *gin.Context) {
 
 	// Verify TOTP is enabled (code verified) but not yet confirmed
 	var enabled, confirmed bool
+
 	err := h.db.QueryRowContext(ctx,
 		`SELECT enabled, confirmed FROM user_mfa_totp WHERE user_id = $1`, userID,
 	).Scan(&enabled, &confirmed)
@@ -564,6 +566,7 @@ func (h *Handler) TOTPConfirmSetup(c *gin.Context) {
 	}
 
 	// Activate MFA
+
 	_, err = h.db.ExecContext(ctx, `
 		UPDATE user_mfa_totp SET confirmed = TRUE, confirmed_at = NOW(), updated_at = NOW() WHERE user_id = $1
 	`, userID)
@@ -586,7 +589,7 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	var req struct {
-		Password string `json:"password" binding:"required"`
+		Password string `json:"password" binding:"required"` //nolint:gosec // request field, not a secret
 		Code     string `json:"code" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -624,7 +627,7 @@ func (h *Handler) RegenerateBackupCodes(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	var req struct {
-		Password string `json:"password" binding:"required"`
+		Password string `json:"password" binding:"required"` //nolint:gosec // request field, not a secret
 		Code     string `json:"code" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -683,7 +686,7 @@ func (h *Handler) WebAuthnRegisterBegin(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	var req struct {
-		Password       string `json:"password" binding:"required"`
+		Password       string `json:"password" binding:"required"` //nolint:gosec // request field, not a secret
 		MFACode        string `json:"mfa_code"`
 		CredentialName string `json:"credential_name"`
 		CredentialType string `json:"credential_type"` // "hardware" or "platform"
@@ -846,7 +849,7 @@ func (h *Handler) WebAuthnListCredentials(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list credentials"})
 		return
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	type credInfo struct {
 		ID             string  `json:"id"`
@@ -885,7 +888,7 @@ func (h *Handler) WebAuthnDeleteCredential(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	var req struct {
-		Password string `json:"password" binding:"required"`
+		Password string `json:"password" binding:"required"` //nolint:gosec // request field, not a secret
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required"})
@@ -919,7 +922,7 @@ func (h *Handler) WebAuthnDeleteCredential(c *gin.Context) {
 	credRows, queryErr := h.db.QueryContext(ctx,
 		`SELECT credential_id FROM user_mfa_webauthn WHERE user_id = $1`, userID)
 	if queryErr == nil {
-		defer credRows.Close()
+		defer credRows.Close() //nolint:errcheck
 		for credRows.Next() {
 			var cid []byte
 			if scanErr := credRows.Scan(&cid); scanErr == nil {
@@ -958,7 +961,7 @@ func (h *Handler) Verify(c *gin.Context) {
 	}
 
 	// Try all purposes — the token itself encodes the purpose
-	var claims *MFAChallengeClaims
+	var claims *ChallengeClaims
 	var purpose ChallengePurpose
 	for _, p := range []ChallengePurpose{PurposeLogin, PurposeSuspiciousRefresh, PurposeMFAUpgrade} {
 		if parsed, err := ValidateChallengeToken(req.ChallengeToken, h.jwtSecret, p); err == nil {
@@ -1215,7 +1218,7 @@ func (h *Handler) buildWebAuthnUser(ctx context.Context, userID string) (*WebAut
 	if err != nil {
 		return nil, fmt.Errorf("fetch credentials: %w", err)
 	}
-	defer rows.Close()
+	defer rows.Close() //nolint:errcheck
 
 	var creds []webauthn.Credential
 	for rows.Next() {
@@ -1230,7 +1233,7 @@ func (h *Handler) buildWebAuthnUser(ctx context.Context, userID string) (*WebAut
 			PublicKey: pubKey,
 			Authenticator: webauthn.Authenticator{
 				AAGUID:    aaguid,
-				SignCount: uint32(signCount),
+				SignCount: uint32(signCount), //nolint:gosec // sign count won't overflow uint32
 			},
 		}
 		for _, t := range transports {
@@ -1259,7 +1262,7 @@ func (h *Handler) SetRecoveryOnly(c *gin.Context) {
 
 	var req struct {
 		Methods  []string `json:"methods"`            // e.g. ["email", "sms"] or [] to clear
-		Password string   `json:"password" binding:"required"`
+		Password string   `json:"password" binding:"required"` //nolint:gosec // request field, not a secret
 		MFACode  string   `json:"mfa_code"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1358,7 +1361,7 @@ func (h *Handler) SetRecoveryHardened(c *gin.Context) {
 
 	var req struct {
 		Enabled  bool   `json:"enabled"`
-		Password string `json:"password" binding:"required"`
+		Password string `json:"password" binding:"required"` //nolint:gosec // request field, not a secret
 		MFACode  string `json:"mfa_code"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -1394,8 +1397,8 @@ func (h *Handler) SetRecoveryHardened(c *gin.Context) {
 
 // generateNumericCode creates a cryptographically random N-digit numeric code.
 func generateNumericCode(digits int) (string, error) {
-	max := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(digits)), nil)
-	n, err := rand.Int(rand.Reader, max)
+	maxVal := new(big.Int).Exp(big.NewInt(10), big.NewInt(int64(digits)), nil)
+	n, err := rand.Int(rand.Reader, maxVal)
 	if err != nil {
 		return "", err
 	}
@@ -1414,7 +1417,7 @@ func (h *Handler) EmailSmsSetup(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	var req struct {
-		Password string   `json:"password" binding:"required"`
+		Password string   `json:"password" binding:"required"` //nolint:gosec // request field, not a secret
 		MFACode  string   `json:"mfa_code"`
 		Methods  []string `json:"methods" binding:"required"` // ["email"], ["sms"], or ["email", "sms"]
 	}

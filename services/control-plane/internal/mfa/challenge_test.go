@@ -71,7 +71,7 @@ func TestValidateChallengeTokenWrongSecret(t *testing.T) {
 
 func TestValidateChallengeTokenExpired(t *testing.T) {
 	// Create a token that's already expired
-	claims := MFAChallengeClaims{
+	claims := ChallengeClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        "test-jti",
 			IssuedAt:  jwt.NewNumericDate(time.Now().Add(-10 * time.Minute)),

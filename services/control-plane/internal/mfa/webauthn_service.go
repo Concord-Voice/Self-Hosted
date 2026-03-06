@@ -37,9 +37,16 @@ type WebAuthnUser struct {
 	Credentials []webauthn.Credential
 }
 
-func (u *WebAuthnUser) WebAuthnID() []byte                         { return u.ID }
-func (u *WebAuthnUser) WebAuthnName() string                       { return u.Name }
-func (u *WebAuthnUser) WebAuthnDisplayName() string                { return u.DisplayName }
+// WebAuthnID implements webauthn.User.
+func (u *WebAuthnUser) WebAuthnID() []byte { return u.ID }
+
+// WebAuthnName implements webauthn.User.
+func (u *WebAuthnUser) WebAuthnName() string { return u.Name }
+
+// WebAuthnDisplayName implements webauthn.User.
+func (u *WebAuthnUser) WebAuthnDisplayName() string { return u.DisplayName }
+
+// WebAuthnCredentials implements webauthn.User.
 func (u *WebAuthnUser) WebAuthnCredentials() []webauthn.Credential { return u.Credentials }
 
 // BeginRegistration starts the WebAuthn credential creation ceremony.

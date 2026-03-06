@@ -185,7 +185,7 @@ func TestVerifyBackupCode(t *testing.T) {
 
 	// Used code is skipped
 	used[2] = true
-	idx, ok = VerifyBackupCode(codes[2], hashes, used)
+	_, ok = VerifyBackupCode(codes[2], hashes, used)
 	if ok {
 		t.Error("used code should not match")
 	}

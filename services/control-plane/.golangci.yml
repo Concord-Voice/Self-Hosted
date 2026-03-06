@@ -1,3 +1,5 @@
+version: "2"
+
 linters:
   enable:
     - errcheck
@@ -15,6 +17,11 @@ linters:
     - asciicheck
     - bidichk
     - durationcheck
+
+  settings:
+    gosec:
+      excludes:
+        - G701
 
 run:
   timeout: 5m

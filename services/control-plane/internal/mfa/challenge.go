@@ -13,14 +13,15 @@ const challengeTTL = 5 * time.Minute
 // ChallengePurpose identifies what the MFA challenge is for.
 type ChallengePurpose string
 
+// MFA challenge purposes.
 const (
 	PurposeLogin             ChallengePurpose = "login"
 	PurposeSuspiciousRefresh ChallengePurpose = "suspicious_refresh"
 	PurposeMFAUpgrade        ChallengePurpose = "mfa_upgrade"
 )
 
-// MFAChallengeClaims are the JWT claims for an MFA challenge token.
-type MFAChallengeClaims struct {
+// ChallengeClaims are the JWT claims for an MFA challenge token.
+type ChallengeClaims struct {
 	jwt.RegisteredClaims
 	UserID  string           `json:"user_id"`
 	Purpose ChallengePurpose `json:"purpose"`
@@ -31,7 +32,7 @@ func GenerateChallengeToken(userID string, purpose ChallengePurpose, jwtSecret s
 	jti := uuid.New().String()
 	now := time.Now()
 
-	claims := MFAChallengeClaims{
+	claims := ChallengeClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        jti,
 			IssuedAt:  jwt.NewNumericDate(now),
@@ -53,8 +54,8 @@ func GenerateChallengeToken(userID string, purpose ChallengePurpose, jwtSecret s
 }
 
 // ValidateChallengeToken validates an MFA challenge token and checks its purpose.
-func ValidateChallengeToken(tokenString, jwtSecret string, expectedPurpose ChallengePurpose) (*MFAChallengeClaims, error) {
-	token, err := jwt.ParseWithClaims(tokenString, &MFAChallengeClaims{}, func(t *jwt.Token) (interface{}, error) {
+func ValidateChallengeToken(tokenString, jwtSecret string, expectedPurpose ChallengePurpose) (*ChallengeClaims, error) {
+	token, err := jwt.ParseWithClaims(tokenString, &ChallengeClaims{}, func(t *jwt.Token) (interface{}, error) {
 		if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, fmt.Errorf("unexpected signing method: %v", t.Header["alg"])
 		}
@@ -64,7 +65,7 @@ func ValidateChallengeToken(tokenString, jwtSecret string, expectedPurpose Chall
 		return nil, fmt.Errorf("parse challenge token: %w", err)
 	}
 
-	claims, ok := token.Claims.(*MFAChallengeClaims)
+	claims, ok := token.Claims.(*ChallengeClaims)
 	if !ok || !token.Valid {
 		return nil, fmt.Errorf("invalid challenge token claims")
 	}
