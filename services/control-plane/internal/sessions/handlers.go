@@ -25,6 +25,13 @@ type SessionDisconnector interface {
 	DisconnectSession(sessionID string)
 }
 
+// MFAVerifier checks MFA status and verifies codes for sensitive operations.
+type MFAVerifier interface {
+	IsEnabled(ctx context.Context, userID string) bool
+	VerifyCode(ctx context.Context, userID string, code string) (bool, error)
+	GetEnabledMethods(ctx context.Context, userID string) ([]string, error)
+}
+
 // Revocation rate-limiting constants.
 const (
 	revokeWindowDuration       = 24 * time.Hour
@@ -62,19 +69,21 @@ func maskIPAddress(ip string) string {
 
 // Handler handles session-related requests for managing user authentication sessions.
 type Handler struct {
-	db    *sql.DB
-	redis *redis.Client
-	log   *logger.Logger
-	hub   SessionDisconnector
+	db          *sql.DB
+	redis       *redis.Client
+	log         *logger.Logger
+	hub         SessionDisconnector
+	mfaVerifier MFAVerifier
 }
 
 // NewHandler creates a new session handler.
-func NewHandler(db *sql.DB, redis *redis.Client, log *logger.Logger, hub SessionDisconnector) *Handler {
+func NewHandler(db *sql.DB, redis *redis.Client, log *logger.Logger, hub SessionDisconnector, mfaVerifier MFAVerifier) *Handler {
 	return &Handler{
-		db:    db,
-		redis: redis,
-		log:   log,
-		hub:   hub,
+		db:          db,
+		redis:       redis,
+		log:         log,
+		hub:         hub,
+		mfaVerifier: mfaVerifier,
 	}
 }
 
@@ -376,30 +385,51 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 	}
 
 	if needsPassword {
-		if req.Password == "" {
-			// Password required but not provided — veto with minimal info
-			c.JSON(http.StatusForbidden, gin.H{
-				"error":   "password_required",
-				"message": "Password verification required to revoke this session",
-			})
+		hasMFA := h.mfaVerifier != nil && h.mfaVerifier.IsEnabled(ctx, uid)
+
+		if hasMFA && req.MFACode != "" {
+			// MFA code provided — use it as the sole authentication factor (replaces password)
+			valid, mfaErr := h.mfaVerifier.VerifyCode(ctx, uid, req.MFACode)
+			if mfaErr != nil {
+				h.log.Error("MFA verification error during session revoke", "error", mfaErr)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "MFA verification failed"})
+				return
+			}
+			if !valid {
+				c.JSON(http.StatusForbidden, gin.H{"error": "Invalid MFA code"})
+				return
+			}
+		} else if req.Password != "" {
+			// Password provided — verify it
+			match, verifyErr := h.verifyUserPassword(ctx, uid, req.Password)
+			if verifyErr != nil {
+				h.log.Error("Password verification failed during session revoke", "error", verifyErr)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify password"})
+				return
+			}
+			if !match {
+				c.JSON(http.StatusForbidden, gin.H{"error": "Incorrect password"})
+				return
+			}
+		} else {
+			// Neither password nor MFA provided — tell client what's needed
+			if hasMFA {
+				methods, _ := h.mfaVerifier.GetEnabledMethods(ctx, uid)
+				c.JSON(http.StatusForbidden, gin.H{
+					"error":   "auth_required",
+					"message": "Authentication required to revoke this session",
+					"methods": methods,
+				})
+			} else {
+				c.JSON(http.StatusForbidden, gin.H{
+					"error":   "password_required",
+					"message": "Password verification required to revoke this session",
+				})
+			}
 			return
 		}
 
-		// Verify password (Argon2id, constant-time comparison)
-		match, verifyErr := h.verifyUserPassword(ctx, uid, req.Password)
-		if verifyErr != nil {
-			h.log.Error("Password verification failed during session revoke", "error", verifyErr)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify password"})
-			return
-		}
-		if !match {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Incorrect password"})
-			return
-		}
-
-		// TODO: Verify MFA code when MFA is implemented (req.MFACode)
-
-		// Password verified — grant 5-min auth window if Simple mode
+		// Verified — grant 5-min auth window if Simple mode
 		if mode == "simple" {
 			h.grantSimpleAuthWindow(ctx, uid)
 		}
@@ -450,28 +480,59 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 		return
 	}
 
-	// Parse request body for password
+	// Parse request body
 	var req struct {
-		Password       string `json:"password"`       // #nosec G117 -- not a secret field, receives user input for auth verification
+		Password       string `json:"password"`        // #nosec G117 -- not a secret field, receives user input for auth verification
+		MFACode        string `json:"mfa_code"`
 		IncludeCurrent bool   `json:"include_current"`
 	}
-	if err := c.ShouldBindJSON(&req); err != nil || req.Password == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required to revoke all sessions"})
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 		return
 	}
 
 	uid := userID.(string)
 	ctx := c.Request.Context()
 
-	// Verify password against stored hash
-	match, verifyErr := h.verifyUserPassword(ctx, uid, req.Password)
-	if verifyErr != nil {
-		h.log.Error("Password verification failed", "error", verifyErr)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify password"})
-		return
-	}
-	if !match {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Incorrect password"})
+	// Authentication: MFA replaces password when enabled
+	hasMFA := h.mfaVerifier != nil && h.mfaVerifier.IsEnabled(ctx, uid)
+
+	if hasMFA && req.MFACode != "" {
+		// MFA code provided — use as sole authentication factor
+		valid, mfaErr := h.mfaVerifier.VerifyCode(ctx, uid, req.MFACode)
+		if mfaErr != nil {
+			h.log.Error("MFA verification error during revoke-all", "error", mfaErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "MFA verification failed"})
+			return
+		}
+		if !valid {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Invalid MFA code"})
+			return
+		}
+	} else if req.Password != "" {
+		// Password provided — verify it
+		match, verifyErr := h.verifyUserPassword(ctx, uid, req.Password)
+		if verifyErr != nil {
+			h.log.Error("Password verification failed", "error", verifyErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify password"})
+			return
+		}
+		if !match {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Incorrect password"})
+			return
+		}
+	} else {
+		// Neither provided
+		if hasMFA {
+			methods, _ := h.mfaVerifier.GetEnabledMethods(ctx, uid)
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "auth_required",
+				"message": "Authentication required to revoke all sessions",
+				"methods": methods,
+			})
+		} else {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required to revoke all sessions"})
+		}
 		return
 	}
 
@@ -560,31 +621,53 @@ func (h *Handler) UpdateRevocationMode(c *gin.Context) {
 		return
 	}
 
-	// Password is always required to change revocation mode
-	if req.Password == "" {
-		c.JSON(http.StatusForbidden, gin.H{
-			"error":   "password_required",
-			"message": "Password verification required to change revocation mode",
-		})
-		return
-	}
-
 	uid := userID.(string)
 	ctx := c.Request.Context()
 
-	// Verify password
-	match, verifyErr := h.verifyUserPassword(ctx, uid, req.Password)
-	if verifyErr != nil {
-		h.log.Error("Password verification failed during mode change", "error", verifyErr)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify password"})
-		return
-	}
-	if !match {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Incorrect password"})
-		return
-	}
+	// Authentication: MFA replaces password when enabled
+	hasMFA := h.mfaVerifier != nil && h.mfaVerifier.IsEnabled(ctx, uid)
 
-	// TODO: Verify MFA code when MFA is implemented (req.MFACode)
+	if hasMFA && req.MFACode != "" {
+		// MFA code provided — use as sole authentication factor
+		valid, mfaErr := h.mfaVerifier.VerifyCode(ctx, uid, req.MFACode)
+		if mfaErr != nil {
+			h.log.Error("MFA verification error during mode change", "error", mfaErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "MFA verification failed"})
+			return
+		}
+		if !valid {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Invalid MFA code"})
+			return
+		}
+	} else if req.Password != "" {
+		// Password provided — verify it
+		match, verifyErr := h.verifyUserPassword(ctx, uid, req.Password)
+		if verifyErr != nil {
+			h.log.Error("Password verification failed during mode change", "error", verifyErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify password"})
+			return
+		}
+		if !match {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Incorrect password"})
+			return
+		}
+	} else {
+		// Neither provided — tell client what's needed
+		if hasMFA {
+			methods, _ := h.mfaVerifier.GetEnabledMethods(ctx, uid)
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "auth_required",
+				"message": "Authentication required to change revocation mode",
+				"methods": methods,
+			})
+		} else {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "password_required",
+				"message": "Password verification required to change revocation mode",
+			})
+		}
+		return
+	}
 
 	// Update the revocation mode in the database
 	_, err := h.db.ExecContext(ctx, //nolint:gosec // parameterized query — not injectable

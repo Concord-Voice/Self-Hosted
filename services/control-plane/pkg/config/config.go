@@ -9,7 +9,8 @@ import (
 	"github.com/joho/godotenv"
 )
 
-const devJWTSecret = "dev_jwt_secret_change_in_production" // #nosec G101 -- Not a real secret, just the default placeholder
+const devJWTSecret = "dev_jwt_secret_change_in_production"       // #nosec G101 -- Not a real secret, just the default placeholder
+const devMFAEncKey = "0000000000000000000000000000000000000000000000000000000000000000" // #nosec G101 -- 32-byte zero key, dev only
 
 // Config holds all configuration for the application
 type Config struct {
@@ -33,6 +34,11 @@ type Config struct {
 
 	// Licensing
 	LicensingAuthorityURL string
+
+	// MFA (TOTP + WebAuthn)
+	MFAEncryptionKey  string // 32-byte hex-encoded AES key for TOTP secret encryption at rest
+	WebAuthnRPID      string // Relying Party ID (domain, e.g. "concordvoice.chat")
+	WebAuthnRPOrigins []string // Allowed origins for WebAuthn (e.g. "https://concordvoice.chat")
 }
 
 // Load reads configuration from environment variables
@@ -53,6 +59,9 @@ func Load() (*Config, error) {
 		TURNRealm:             getEnv("TURN_REALM", "concordvoice.chat"),
 		LicensingAuthorityURL: getEnv("LICENSING_AUTHORITY_URL", "http://localhost:8082"),
 		AllowedOrigins:        parseOrigins(getEnv("ALLOWED_ORIGINS", "http://localhost:3001,http://localhost:3002")),
+		MFAEncryptionKey:      getEnv("MFA_ENCRYPTION_KEY", devMFAEncKey),
+		WebAuthnRPID:          getEnv("WEBAUTHN_RP_ID", "localhost"),
+		WebAuthnRPOrigins:     parseOrigins(getEnv("WEBAUTHN_RP_ORIGINS", "http://localhost:3001")),
 	}
 
 	cfg.validate()
@@ -66,6 +75,10 @@ func (c *Config) validate() {
 	if c.Environment == "production" && c.JWTSecret == devJWTSecret {
 		log.Fatal("FATAL: JWT_SECRET must be set to a secure value in production. " +
 			"The default dev secret is not allowed.")
+	}
+	if c.Environment == "production" && c.MFAEncryptionKey == devMFAEncKey {
+		log.Fatal("FATAL: MFA_ENCRYPTION_KEY must be set to a secure value in production. " +
+			"The default dev key is not allowed. Generate with: openssl rand -hex 32")
 	}
 }
 

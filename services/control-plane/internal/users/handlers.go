@@ -2,6 +2,7 @@
 package users
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -17,19 +18,28 @@ import (
 	"github.com/google/uuid"
 )
 
+// MFAVerifier checks MFA status and verifies codes for sensitive operations.
+type MFAVerifier interface {
+	IsEnabled(ctx context.Context, userID string) bool
+	VerifyCode(ctx context.Context, userID string, code string) (bool, error)
+	GetEnabledMethods(ctx context.Context, userID string) ([]string, error)
+}
+
 // Handler handles user-related requests including profile management and settings.
 type Handler struct {
-	db  *sql.DB
-	log *logger.Logger
-	hub *websocket.Hub
+	db          *sql.DB
+	log         *logger.Logger
+	hub         *websocket.Hub
+	mfaVerifier MFAVerifier
 }
 
 // NewHandler creates a new user handler.
-func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub) *Handler {
+func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, mfaVerifier MFAVerifier) *Handler {
 	return &Handler{
-		db:  db,
-		log: log,
-		hub: hub,
+		db:          db,
+		log:         log,
+		hub:         hub,
+		mfaVerifier: mfaVerifier,
 	}
 }
 
@@ -487,6 +497,7 @@ type ChangePasswordRequest struct {
 	NewPassword         string `json:"new_password" binding:"required"`
 	WrappedPrivateKey   string `json:"wrapped_private_key" binding:"required"`
 	KeyDerivationSalt   string `json:"key_derivation_salt" binding:"required"`
+	MFACode             string `json:"mfa_code"` // Required when MFA is enabled
 }
 
 // ChangePassword changes the current user's password and re-wraps E2EE keys
@@ -542,6 +553,31 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 	if !match {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Current password is incorrect"})
 		return
+	}
+
+	// Verify MFA if user has it enabled
+	ctx := c.Request.Context()
+	uid := userID.(string)
+	if h.mfaVerifier != nil && h.mfaVerifier.IsEnabled(ctx, uid) {
+		if req.MFACode == "" {
+			methods, _ := h.mfaVerifier.GetEnabledMethods(ctx, uid)
+			c.JSON(http.StatusForbidden, gin.H{
+				"error":   "mfa_required",
+				"message": "MFA verification required to change password",
+				"methods": methods,
+			})
+			return
+		}
+		valid, mfaErr := h.mfaVerifier.VerifyCode(ctx, uid, req.MFACode)
+		if mfaErr != nil {
+			h.log.Error("MFA verification error during password change", "error", mfaErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "MFA verification failed"})
+			return
+		}
+		if !valid {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Invalid MFA code"})
+			return
+		}
 	}
 
 	// Validate new password strength
@@ -823,6 +859,8 @@ func (h *Handler) UpdatePreferences(c *gin.Context) {
 type privacySettingsResponse struct {
 	MessagesFriendsOnly   bool   `json:"messages_friends_only"`
 	MessagesServerMembers bool   `json:"messages_server_members"`
+	DMPrivacyLevel        int    `json:"dm_privacy_level"`         // 0=off, 1=friends, 2=friends+server, 3=all
+	DMFriendsOfFriends    bool   `json:"dm_friends_of_friends"`
 	AutoAcceptFriendCodes bool   `json:"auto_accept_friend_codes"`
 	SearchableByUsername  bool   `json:"searchable_by_username"`
 	SearchableByEmail     bool   `json:"searchable_by_email"`
@@ -838,13 +876,13 @@ func (h *Handler) GetPrivacySettings(c *gin.Context) {
 
 	var ps privacySettingsResponse
 	err := h.db.QueryRow(`
-		SELECT messages_friends_only, messages_server_members, auto_accept_friend_codes,
-		       searchable_by_username, searchable_by_email, searchable_by_phone, updated_at
+		SELECT messages_friends_only, messages_server_members, dm_privacy_level, dm_friends_of_friends,
+		       auto_accept_friend_codes, searchable_by_username, searchable_by_email, searchable_by_phone, updated_at
 		FROM privacy_settings
 		WHERE user_id = $1
 	`, userID).Scan(
-		&ps.MessagesFriendsOnly, &ps.MessagesServerMembers, &ps.AutoAcceptFriendCodes,
-		&ps.SearchableByUsername, &ps.SearchableByEmail, &ps.SearchableByPhone, &ps.UpdatedAt,
+		&ps.MessagesFriendsOnly, &ps.MessagesServerMembers, &ps.DMPrivacyLevel, &ps.DMFriendsOfFriends,
+		&ps.AutoAcceptFriendCodes, &ps.SearchableByUsername, &ps.SearchableByEmail, &ps.SearchableByPhone, &ps.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		// Return defaults matching the schema defaults
@@ -852,6 +890,7 @@ func (h *Handler) GetPrivacySettings(c *gin.Context) {
 			"privacy": privacySettingsResponse{
 				MessagesFriendsOnly:   true,
 				MessagesServerMembers: true,
+				DMPrivacyLevel:        2,
 			},
 		})
 		return
@@ -869,6 +908,8 @@ func (h *Handler) GetPrivacySettings(c *gin.Context) {
 type updatePrivacyRequest struct {
 	MessagesFriendsOnly   *bool `json:"messages_friends_only"`
 	MessagesServerMembers *bool `json:"messages_server_members"`
+	DMPrivacyLevel        *int  `json:"dm_privacy_level"`
+	DMFriendsOfFriends    *bool `json:"dm_friends_of_friends"`
 	AutoAcceptFriendCodes *bool `json:"auto_accept_friend_codes"`
 	SearchableByUsername  *bool `json:"searchable_by_username"`
 	SearchableByEmail     *bool `json:"searchable_by_email"`
@@ -900,6 +941,32 @@ func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
 	if req.MessagesServerMembers != nil {
 		setClauses = append(setClauses, fmt.Sprintf("messages_server_members = $%d", argIdx))
 		args = append(args, *req.MessagesServerMembers)
+		argIdx++
+	}
+	if req.DMPrivacyLevel != nil {
+		level := *req.DMPrivacyLevel
+		if level < 0 || level > 3 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "dm_privacy_level must be 0-3"})
+			return
+		}
+		setClauses = append(setClauses, fmt.Sprintf("dm_privacy_level = $%d", argIdx))
+		args = append(args, level)
+		argIdx++
+		// Sync legacy booleans for backward compatibility
+		switch level {
+		case 0: // off
+			setClauses = append(setClauses, "messages_friends_only = TRUE", "messages_server_members = FALSE")
+		case 1: // friends only
+			setClauses = append(setClauses, "messages_friends_only = TRUE", "messages_server_members = FALSE")
+		case 2: // friends + server members
+			setClauses = append(setClauses, "messages_friends_only = TRUE", "messages_server_members = TRUE")
+		case 3: // allow all
+			setClauses = append(setClauses, "messages_friends_only = FALSE", "messages_server_members = TRUE")
+		}
+	}
+	if req.DMFriendsOfFriends != nil {
+		setClauses = append(setClauses, fmt.Sprintf("dm_friends_of_friends = $%d", argIdx))
+		args = append(args, *req.DMFriendsOfFriends)
 		argIdx++
 	}
 	if req.AutoAcceptFriendCodes != nil {
@@ -934,14 +1001,14 @@ func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
 	query := fmt.Sprintf(`
 		INSERT INTO privacy_settings (user_id) VALUES ($1)
 		ON CONFLICT (user_id) DO UPDATE SET %s
-		RETURNING messages_friends_only, messages_server_members, auto_accept_friend_codes,
-		          searchable_by_username, searchable_by_email, searchable_by_phone, updated_at
+		RETURNING messages_friends_only, messages_server_members, dm_privacy_level, dm_friends_of_friends,
+		          auto_accept_friend_codes, searchable_by_username, searchable_by_email, searchable_by_phone, updated_at
 	`, strings.Join(setClauses, ", "))
 
 	var ps privacySettingsResponse
 	err := h.db.QueryRow(query, args...).Scan(
-		&ps.MessagesFriendsOnly, &ps.MessagesServerMembers, &ps.AutoAcceptFriendCodes,
-		&ps.SearchableByUsername, &ps.SearchableByEmail, &ps.SearchableByPhone, &ps.UpdatedAt,
+		&ps.MessagesFriendsOnly, &ps.MessagesServerMembers, &ps.DMPrivacyLevel, &ps.DMFriendsOfFriends,
+		&ps.AutoAcceptFriendCodes, &ps.SearchableByUsername, &ps.SearchableByEmail, &ps.SearchableByPhone, &ps.UpdatedAt,
 	)
 	if err != nil {
 		h.log.Error("Failed to update privacy settings", "error", err)
