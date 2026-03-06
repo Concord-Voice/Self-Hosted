@@ -40,10 +40,13 @@ func SetupTestServer(t *testing.T) *TestServer {
 	redisClient, redisCleanup := SetupTestRedis(t)
 
 	cfg := &config.Config{
-		Environment:    "test",
-		Port:           "0",
-		JWTSecret:      TestJWTSecret,
-		AllowedOrigins: []string{"*"},
+		Environment:       "test",
+		Port:              "0",
+		JWTSecret:         TestJWTSecret,
+		AllowedOrigins:    []string{"*"},
+		MFAEncryptionKey:  "0000000000000000000000000000000000000000000000000000000000000000",
+		WebAuthnRPID:      "localhost",
+		WebAuthnRPOrigins: []string{"http://localhost:3001"},
 	}
 
 	log := logger.New("test")
