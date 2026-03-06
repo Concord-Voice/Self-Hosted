@@ -240,7 +240,7 @@ func containsStr(ss []string, target string) bool {
 
 // updateUserMFAFlags recalculates and updates the denormalized mfa_enabled and mfa_methods on users.
 func (h *Handler) updateUserMFAFlags(ctx context.Context, userID string) error {
-	var methods []string
+	methods := make([]string, 0) // must be non-nil for pq.Array to produce '{}' not NULL
 
 	// Check TOTP
 	var totpActive bool
@@ -384,7 +384,9 @@ func (h *Handler) GetStatus(c *gin.Context) {
 		h.log.Warn("MFA flags out of sync, resyncing", "user_id", userID,
 			"actual_totp", actualTOTP, "denorm_totp", denormTOTP,
 			"actual_webauthn", actualWebAuthn, "denorm_webauthn", denormWebAuthn)
-		if syncErr := h.updateUserMFAFlags(ctx, userID); syncErr == nil {
+		if syncErr := h.updateUserMFAFlags(ctx, userID); syncErr != nil {
+			h.log.Error("Failed to resync MFA flags", "user_id", userID, "error", syncErr)
+		} else {
 			// Re-read after sync
 			_ = h.db.QueryRowContext(ctx, `SELECT mfa_enabled, mfa_methods FROM users WHERE id = $1`, userID,
 			).Scan(&mfaEnabled, pq.Array(&methods))
