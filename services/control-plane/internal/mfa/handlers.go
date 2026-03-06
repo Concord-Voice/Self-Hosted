@@ -89,7 +89,11 @@ func (h *Handler) VerifyCode(ctx context.Context, userID string, code string) (b
 
 	if err == nil && totpEnabled && totpConfirmed {
 		secret, decErr := DecryptSecret(secretEnc, secretNonce, h.encKey)
-		if decErr == nil && ValidateCode(string(secret), code) {
+		if decErr != nil {
+			h.log.Error("TOTP secret decryption failed — likely encryption key mismatch", "user_id", userID, "error", decErr)
+			return false, fmt.Errorf("TOTP secret decryption failed: %w", decErr)
+		}
+		if ValidateCode(string(secret), code) {
 			return true, nil
 		}
 
@@ -614,7 +618,12 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 
 	// Verify MFA code
 	valid, err := h.VerifyCode(ctx, userID, req.Code)
-	if err != nil || !valid {
+	if err != nil {
+		h.log.Error("MFA code verification error during TOTP disable", "user_id", userID, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "MFA verification error. The server may have been restarted with a different encryption key."})
+		return
+	}
+	if !valid {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Invalid MFA code. Make sure the code hasn't expired."})
 		return
 	}
