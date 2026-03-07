@@ -477,6 +477,12 @@ func (h *Handler) TOTPSetup(c *gin.Context) {
 		return
 	}
 
+	// Sync user flags — if re-enrolling, the upsert reset enabled/confirmed
+	// to FALSE so mfa_enabled must be cleared until the new setup completes.
+	if err := h.updateUserMFAFlags(ctx, userID); err != nil {
+		h.log.Error("Failed to sync MFA flags after TOTP re-enrollment", "error", err)
+	}
+
 	c.JSON(http.StatusOK, gin.H{
 		"otpauth_url": key.URL(),
 		"secret":      key.Secret(),
