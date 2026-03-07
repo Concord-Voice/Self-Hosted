@@ -347,7 +347,7 @@ func (h *Handler) GetStatus(c *gin.Context) {
 	var totpEnabled, totpConfirmed bool
 	var backupUsed []bool
 	var backupHashes []string
-	err := h.db.QueryRowContext(ctx,		`SELECT enabled, confirmed, backup_codes_hash, backup_codes_used FROM user_mfa_totp WHERE user_id = $1`,
+	err := h.db.QueryRowContext(ctx, `SELECT enabled, confirmed, backup_codes_hash, backup_codes_used FROM user_mfa_totp WHERE user_id = $1`,
 		userID,
 	).Scan(&totpEnabled, &totpConfirmed, pq.Array(&backupHashes), pq.Array(&backupUsed))
 	if err == nil {
@@ -364,16 +364,14 @@ func (h *Handler) GetStatus(c *gin.Context) {
 
 	// WebAuthn credential count
 	var webauthnCount int
-	_ = h.db.QueryRowContext(ctx,		`SELECT COUNT(*) FROM user_mfa_webauthn WHERE user_id = $1`, userID,
-	).Scan(&webauthnCount)
+	_ = h.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM user_mfa_webauthn WHERE user_id = $1`, userID).Scan(&webauthnCount)
 	result["webauthn_credentials"] = webauthnCount
 
 	// Overall — read denormalized flags, then self-heal if stale
 	var methods, recoveryOnly []string
 	var mfaEnabled, recoveryHardened bool
 	var backupEmail sql.NullString
-	_ = h.db.QueryRowContext(ctx, `SELECT mfa_enabled, mfa_methods, recovery_only_methods, recovery_hardened, backup_email FROM users WHERE id = $1`, userID,
-	).Scan(&mfaEnabled, pq.Array(&methods), pq.Array(&recoveryOnly), &recoveryHardened, &backupEmail)
+	_ = h.db.QueryRowContext(ctx, `SELECT mfa_enabled, mfa_methods, recovery_only_methods, recovery_hardened, backup_email FROM users WHERE id = $1`, userID).Scan(&mfaEnabled, pq.Array(&methods), pq.Array(&recoveryOnly), &recoveryHardened, &backupEmail)
 
 	// Self-heal: if denormalized flags disagree with actual table data, resync
 	actualTOTP := totpEnabled && totpConfirmed
@@ -388,8 +386,7 @@ func (h *Handler) GetStatus(c *gin.Context) {
 			h.log.Error("Failed to resync MFA flags", "user_id", userID, "error", syncErr)
 		} else {
 			// Re-read after sync
-			_ = h.db.QueryRowContext(ctx, `SELECT mfa_enabled, mfa_methods FROM users WHERE id = $1`, userID,
-			).Scan(&mfaEnabled, pq.Array(&methods))
+			_ = h.db.QueryRowContext(ctx, `SELECT mfa_enabled, mfa_methods FROM users WHERE id = $1`, userID).Scan(&mfaEnabled, pq.Array(&methods))
 		}
 	}
 
@@ -426,8 +423,7 @@ func (h *Handler) TOTPSetup(c *gin.Context) {
 
 	// Check if already has confirmed TOTP
 	var existingConfirmed bool
-	checkErr := h.db.QueryRowContext(ctx,		`SELECT confirmed FROM user_mfa_totp WHERE user_id = $1`, userID,
-	).Scan(&existingConfirmed)
+	checkErr := h.db.QueryRowContext(ctx, `SELECT confirmed FROM user_mfa_totp WHERE user_id = $1`, userID).Scan(&existingConfirmed)
 	if checkErr == nil && existingConfirmed {
 		c.JSON(http.StatusConflict, gin.H{"error": "TOTP is already enabled. Disable it first to re-enroll."})
 		return
@@ -435,7 +431,8 @@ func (h *Handler) TOTPSetup(c *gin.Context) {
 
 	// Get user email for the TOTP issuer label
 	var email string
-	if dbErr := h.db.QueryRowContext(ctx, `SELECT email FROM users WHERE id = $1`, userID).Scan(&email); dbErr != nil {		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user"})
+	if dbErr := h.db.QueryRowContext(ctx, `SELECT email FROM users WHERE id = $1`, userID).Scan(&email); dbErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user"})
 		return
 	}
 
@@ -1316,7 +1313,7 @@ func (h *Handler) SetRecoveryOnly(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	var req struct {
-		Methods  []string `json:"methods"`            // e.g. ["email", "sms"] or [] to clear
+		Methods  []string `json:"methods"`                     // e.g. ["email", "sms"] or [] to clear
 		Password string   `json:"password" binding:"required"` //nolint:gosec // request field, not a secret
 		MFACode  string   `json:"mfa_code"`
 	}
@@ -1514,11 +1511,11 @@ func (h *Handler) EmailSmsSetup(c *gin.Context) {
 
 	// Dev mode: return codes in response for on-screen display
 	c.JSON(http.StatusOK, gin.H{
-		"message":      "Verification codes generated (DEV MODE — codes shown on screen)",
-		"dev_codes":    codes,
-		"methods":      req.Methods,
-		"expires_in":   "10 minutes",
-		"dev_mode":     true,
+		"message":    "Verification codes generated (DEV MODE — codes shown on screen)",
+		"dev_codes":  codes,
+		"methods":    req.Methods,
+		"expires_in": "10 minutes",
+		"dev_mode":   true,
 	})
 }
 
