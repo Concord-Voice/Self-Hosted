@@ -3,13 +3,14 @@ package dm
 
 import (
 	"database/sql"
+	"encoding/base64"
 	"net/http"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
 // Handler handles DM-related requests.
@@ -34,15 +35,15 @@ func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, cfg *config.
 
 // conversationResponse represents a DM conversation in API responses.
 type conversationResponse struct {
-	ID           string                 `json:"id"`
-	IsGroup      bool                   `json:"is_group"`
-	IsPersonal   bool                   `json:"is_personal"`
-	Name         *string                `json:"name,omitempty"`
-	IsEncrypted  bool                   `json:"is_encrypted"`
-	Participants []participantResponse  `json:"participants"`
-	LastMessage  *lastMessageResponse   `json:"last_message,omitempty"`
-	UnreadCount  int                    `json:"unread_count"`
-	CreatedAt    string                 `json:"created_at"`
+	ID           string                `json:"id"`
+	IsGroup      bool                  `json:"is_group"`
+	IsPersonal   bool                  `json:"is_personal"`
+	Name         *string               `json:"name,omitempty"`
+	IsEncrypted  bool                  `json:"is_encrypted"`
+	Participants []participantResponse `json:"participants"`
+	LastMessage  *lastMessageResponse  `json:"last_message,omitempty"`
+	UnreadCount  int                   `json:"unread_count"`
+	CreatedAt    string                `json:"created_at"`
 }
 
 type participantResponse struct {
@@ -842,8 +843,8 @@ func (h *Handler) RotateKey(c *gin.Context) {
 		h.broadcastToDMParticipants(convID, userID, websocket.OutgoingMessage{
 			Type: "key_rotation",
 			Data: map[string]interface{}{
-				"channel_id":     convID,
-				"triggered_by":   userID,
+				"channel_id":      convID,
+				"triggered_by":    userID,
 				"new_key_version": maxVersion + 1,
 			},
 		})
@@ -930,15 +931,15 @@ func (h *Handler) GetVoiceParticipants(c *gin.Context) {
 	defer func() { _ = rows.Close() }()
 
 	type voiceParticipant struct {
-		UserID         string `json:"user_id"`
-		Username       string `json:"username"`
-		DisplayName    string `json:"display_name,omitempty"`
-		AvatarURL      string `json:"avatar_url,omitempty"`
-		IsMuted        bool   `json:"is_muted"`
-		IsDeafened     bool   `json:"is_deafened"`
-		IsVideoOn      bool   `json:"is_video_on"`
-		IsScreenSharing bool  `json:"is_screen_sharing"`
-		JoinedAt       string `json:"joined_at"`
+		UserID          string `json:"user_id"`
+		Username        string `json:"username"`
+		DisplayName     string `json:"display_name,omitempty"`
+		AvatarURL       string `json:"avatar_url,omitempty"`
+		IsMuted         bool   `json:"is_muted"`
+		IsDeafened      bool   `json:"is_deafened"`
+		IsVideoOn       bool   `json:"is_video_on"`
+		IsScreenSharing bool   `json:"is_screen_sharing"`
+		JoinedAt        string `json:"joined_at"`
 	}
 
 	participants := []voiceParticipant{}
@@ -1091,6 +1092,157 @@ func (h *Handler) fetchConversationResponse(convID string) *conversationResponse
 	}
 
 	return &conv
+}
+
+// UpdateMessage updates a DM message's content.
+func (h *Handler) UpdateMessage(c *gin.Context) {
+	userID := c.GetString("user_id")
+	convID := c.Param("id")
+	messageID := c.Param("message_id")
+
+	if _, err := uuid.Parse(convID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation ID"})
+		return
+	}
+	if _, err := uuid.Parse(messageID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid message ID"})
+		return
+	}
+
+	if !h.isParticipant(convID, userID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Not a participant"})
+		return
+	}
+
+	var req struct {
+		Content string `json:"content" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	// Check message exists and user is the author
+	var authorID string
+	if err := h.db.QueryRow(`SELECT user_id FROM dm_messages WHERE id = $1 AND conversation_id = $2`, messageID, convID).Scan(&authorID); err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Message not found"})
+		return
+	} else if err != nil {
+		h.log.Error("Failed to check DM message author", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update message"})
+		return
+	}
+
+	if authorID != userID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You can only edit your own messages"})
+		return
+	}
+
+	// E2EE enforcement
+	var isEncrypted bool
+	if err := h.db.QueryRow(`SELECT COALESCE(is_encrypted, false) FROM dm_conversations WHERE id = $1`, convID).Scan(&isEncrypted); err != nil {
+		h.log.Error("Failed to check DM encryption", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update message"})
+		return
+	}
+	if isEncrypted {
+		decoded, err := base64.StdEncoding.DecodeString(req.Content)
+		if err != nil || len(decoded) < 28 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ciphertext format for encrypted conversation"})
+			return
+		}
+	}
+
+	// Update message
+	type msgResult struct {
+		Content     string  `json:"content"`
+		IsEncrypted bool    `json:"is_encrypted"`
+		KeyVersion  int     `json:"key_version"`
+		EditedAt    *string `json:"edited_at"`
+		CreatedAt   string  `json:"created_at"`
+	}
+	var result msgResult
+	err := h.db.QueryRow(`
+		UPDATE dm_messages
+		SET content = $1, edited_at = NOW(), updated_at = NOW()
+		WHERE id = $2 AND conversation_id = $3
+		RETURNING is_encrypted, COALESCE(key_version, 1), edited_at, created_at
+	`, req.Content, messageID, convID).Scan(&result.IsEncrypted, &result.KeyVersion, &result.EditedAt, &result.CreatedAt)
+	if err != nil {
+		h.log.Error("Failed to update DM message", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update message"})
+		return
+	}
+	result.Content = req.Content
+
+	// Broadcast to other participants
+	h.broadcastToDMParticipants(convID, userID, websocket.OutgoingMessage{
+		Type: "dm_message_update",
+		Data: map[string]interface{}{
+			"id":              messageID,
+			"conversation_id": convID,
+			"content":         req.Content,
+			"is_encrypted":    result.IsEncrypted,
+			"key_version":     result.KeyVersion,
+			"edited_at":       result.EditedAt,
+		},
+	})
+
+	c.JSON(http.StatusOK, gin.H{"message": result})
+}
+
+// DeleteMessage deletes a DM message.
+func (h *Handler) DeleteMessage(c *gin.Context) {
+	userID := c.GetString("user_id")
+	convID := c.Param("id")
+	messageID := c.Param("message_id")
+
+	if _, err := uuid.Parse(convID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation ID"})
+		return
+	}
+	if _, err := uuid.Parse(messageID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid message ID"})
+		return
+	}
+
+	if !h.isParticipant(convID, userID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Not a participant"})
+		return
+	}
+
+	// Check message exists and user is the author
+	var authorID string
+	if err := h.db.QueryRow(`SELECT user_id FROM dm_messages WHERE id = $1 AND conversation_id = $2`, messageID, convID).Scan(&authorID); err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Message not found"})
+		return
+	} else if err != nil {
+		h.log.Error("Failed to check DM message author", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete message"})
+		return
+	}
+
+	if authorID != userID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You can only delete your own messages"})
+		return
+	}
+
+	if _, err := h.db.Exec(`DELETE FROM dm_messages WHERE id = $1`, messageID); err != nil {
+		h.log.Error("Failed to delete DM message", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete message"})
+		return
+	}
+
+	// Broadcast to other participants
+	h.broadcastToDMParticipants(convID, userID, websocket.OutgoingMessage{
+		Type: "dm_message_delete",
+		Data: map[string]interface{}{
+			"id":              messageID,
+			"conversation_id": convID,
+		},
+	})
+
+	c.JSON(http.StatusOK, gin.H{"success": true})
 }
 
 // broadcastToDMParticipants sends a WebSocket message to all participants of a DM except the sender.

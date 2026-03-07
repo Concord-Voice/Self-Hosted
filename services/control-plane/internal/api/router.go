@@ -8,6 +8,7 @@ import (
 
 	"encoding/hex"
 
+	"github.com/gin-gonic/gin"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/channels"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/dm"
@@ -25,7 +26,6 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	natsclient "github.com/markdrogersjr/Concord/services/control-plane/pkg/nats"
-	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -647,6 +647,18 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 				dmRoutes.GET("/:id/messages",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					dmHandler.GetMessages,
+				)
+
+				// Edit DM message (10 requests per minute)
+				dmRoutes.PATCH("/:id/messages/:message_id",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					dmHandler.UpdateMessage,
+				)
+
+				// Delete DM message (10 requests per minute)
+				dmRoutes.DELETE("/:id/messages/:message_id",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					dmHandler.DeleteMessage,
 				)
 
 				// Mark DM conversation as read (30 requests per minute)
