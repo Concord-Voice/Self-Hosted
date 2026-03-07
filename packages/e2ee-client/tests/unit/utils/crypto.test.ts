@@ -127,7 +127,8 @@ describe('crypto utilities', () => {
       const privateKey = await unwrapLoginKeys(
         password,
         regKeys.wrappedPrivateKey,
-        regKeys.keyDerivationSalt
+        regKeys.keyDerivationSalt,
+        regKeys.keyDerivationAlg
       );
       expect(privateKey.algorithm.name).toBe('RSA-OAEP');
     });

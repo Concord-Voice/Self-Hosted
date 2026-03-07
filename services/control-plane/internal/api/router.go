@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"time"
 
+	"encoding/hex"
+
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/channels"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/dm"
@@ -13,6 +15,7 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/invites"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/members"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/messages"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/mfa"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/servers"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/sessions"
@@ -57,10 +60,25 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 		natsClient = nc
 	}
 
+	// Initialize MFA handler
+	mfaEncKey, err := hex.DecodeString(cfg.MFAEncryptionKey)
+	if err != nil || len(mfaEncKey) != 32 {
+		log.Fatal("Invalid MFA_ENCRYPTION_KEY: must be 64 hex chars (32 bytes)")
+	}
+	webauthnSvc, err := mfa.NewWebAuthnService(cfg.WebAuthnRPID, "ConcordVoice", cfg.WebAuthnRPOrigins)
+	if err != nil {
+		log.Fatal("Failed to create WebAuthn service", "error", err)
+	}
+	mfaHandler := mfa.NewHandler(db, redis, log, mfaEncKey, cfg.JWTSecret, webauthnSvc, cfg.Environment)
+
 	// Initialize handlers
 	authHandler := auth.NewHandler(db, redis, log, cfg.JWTSecret, hub)
-	sessionsHandler := sessions.NewHandler(db, redis, log, hub)
-	usersHandler := users.NewHandler(db, log, hub)
+
+	// Wire cross-references (breaks circular init dependency)
+	authHandler.SetMFAChecker(mfaHandler)
+	mfaHandler.SetLoginCompleter(authHandler)
+	sessionsHandler := sessions.NewHandler(db, redis, log, hub, mfaHandler)
+	usersHandler := users.NewHandler(db, log, hub, mfaHandler)
 	serversHandler := servers.NewHandler(db, log, hub)
 	channelsHandler := channels.NewHandler(db, log, hub)
 	membersHandler := members.NewHandler(db, log, redis, hub)
@@ -109,6 +127,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 				middleware.RateLimitByIP(redis, 10, 1*time.Minute),
 				authHandler.Logout,
 			)
+
+			// MFA verify (unauthenticated — uses challenge token from login)
+			authRoutes.POST("/mfa/verify",
+				middleware.RateLimitByIP(redis, 10, 15*time.Minute),
+				mfaHandler.Verify,
+			)
 		}
 
 		// Protected routes
@@ -120,6 +144,107 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 				middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 				wsTicketHandler.IssueTicket,
 			)
+
+			// MFA management routes (authenticated)
+			mfaRoutes := protected.Group("/mfa")
+			{
+				mfaRoutes.GET("/status",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					mfaHandler.GetStatus,
+				)
+
+				// TOTP enrollment
+				mfaRoutes.POST("/totp/setup",
+					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
+					mfaHandler.TOTPSetup,
+				)
+				mfaRoutes.POST("/totp/verify-setup",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					mfaHandler.TOTPVerifySetup,
+				)
+				mfaRoutes.POST("/totp/confirm-setup",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					mfaHandler.TOTPConfirmSetup,
+				)
+				mfaRoutes.POST("/totp/disable",
+					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
+					mfaHandler.TOTPDisable,
+				)
+
+				// Backup codes
+				mfaRoutes.POST("/backup-codes/regenerate",
+					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
+					mfaHandler.RegenerateBackupCodes,
+				)
+
+				// WebAuthn credential management
+				mfaRoutes.POST("/webauthn/register/begin",
+					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
+					mfaHandler.WebAuthnRegisterBegin,
+				)
+				mfaRoutes.POST("/webauthn/register/finish",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					mfaHandler.WebAuthnRegisterFinish,
+				)
+				mfaRoutes.GET("/webauthn/credentials",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					mfaHandler.WebAuthnListCredentials,
+				)
+				mfaRoutes.DELETE("/webauthn/credentials/:id",
+					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
+					mfaHandler.WebAuthnDeleteCredential,
+				)
+
+				// WebAuthn inline verify (for MFA verification on protected operations)
+				mfaRoutes.POST("/webauthn/verify-inline/begin",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					mfaHandler.WebAuthnVerifyInlineBegin,
+				)
+				mfaRoutes.POST("/webauthn/verify-inline/finish",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					mfaHandler.WebAuthnVerifyInlineFinish,
+				)
+
+				// Recovery-only method settings
+				mfaRoutes.PUT("/recovery-only",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					mfaHandler.SetRecoveryOnly,
+				)
+
+				// Hardened recovery mode (dual-channel Email+SMS)
+				mfaRoutes.PUT("/recovery-hardened",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					mfaHandler.SetRecoveryHardened,
+				)
+
+				// Email/SMS MFA (dev stub — blocked in production)
+				mfaRoutes.POST("/email-sms/setup",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					mfaHandler.EmailSmsSetup,
+				)
+				mfaRoutes.POST("/email-sms/verify",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					mfaHandler.EmailSmsVerify,
+				)
+				mfaRoutes.POST("/email-sms/disable",
+					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
+					mfaHandler.EmailSmsDisable,
+				)
+				mfaRoutes.GET("/email-sms/status",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					mfaHandler.EmailSmsStatus,
+				)
+
+				// Backup email for recovery
+				mfaRoutes.GET("/backup-email",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					mfaHandler.GetBackupEmail,
+				)
+				mfaRoutes.PUT("/backup-email",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					mfaHandler.SetBackupEmail,
+				)
+			}
 
 			// User routes
 			userRoutes := protected.Group("/users")

@@ -49,7 +49,7 @@ func NewHandler(hub *Hub, db *sql.DB, redisClient *redis.Client, jwtSecret strin
 					return true
 				}
 			}
-			log.Printf("[websocket] Origin rejected: %q (allowed: %v)", origin, h.allowedOrigins)
+			log.Printf("[websocket] Origin rejected: %q (allowed: %v)", origin, h.allowedOrigins) //nolint:gosec // origin is from HTTP header, safe to log
 			return false
 		},
 	}

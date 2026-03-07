@@ -90,6 +90,7 @@ type UserKeys struct {
 	WrappedPrivateKey []byte    `json:"-" db:"wrapped_private_key"` // Never send directly
 	KeyDerivationSalt []byte    `json:"-" db:"key_derivation_salt"` // Never send directly
 	KeyVersion        int       `json:"key_version" db:"key_version"`
+	KeyDerivationAlg  string    `json:"key_derivation_alg" db:"key_derivation_alg"` // "pbkdf2" or "argon2id"
 	CreatedAt         time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt         time.Time `json:"updated_at" db:"updated_at"`
 }

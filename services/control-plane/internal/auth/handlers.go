@@ -25,6 +25,25 @@ type SessionDisconnector interface {
 	DisconnectUser(userID uuid.UUID)
 }
 
+// MFAChecker checks if a user has MFA enabled and returns their methods.
+// Defined as an interface to avoid circular imports (mfa imports auth).
+type MFAChecker interface {
+	IsEnabled(ctx context.Context, userID string) bool
+	GetEnabledMethods(ctx context.Context, userID string) ([]string, error)
+	// GetLoginMethods returns methods eligible for login (excludes recovery-only methods).
+	GetLoginMethods(ctx context.Context, userID string) ([]string, error)
+	// GenerateLoginChallenge creates a challenge token for the two-step login flow.
+	// Returns the signed JWT and the JTI. Stores remember_me in Redis keyed by JTI.
+	GenerateLoginChallenge(ctx context.Context, userID string, rememberMe bool) (token string, jti string, err error)
+	// GenerateUpgradeChallenge creates a challenge token for pre-MFA sessions that
+	// need to verify MFA before continuing. Issues fresh tokens on success.
+	GenerateUpgradeChallenge(ctx context.Context, userID string, rememberMe bool) (token string, jti string, err error)
+	// BeginWebAuthnLogin starts a WebAuthn assertion ceremony and stores session data
+	// in Redis keyed by the challenge JTI. Returns credential request options for the client.
+	// Returns nil options if user has no WebAuthn credentials.
+	BeginWebAuthnLogin(ctx context.Context, userID string, jti string) (options interface{}, err error)
+}
+
 // maxUserAgentLength limits User-Agent storage to reduce metadata footprint.
 const maxUserAgentLength = 256
 
@@ -53,11 +72,12 @@ func setRefreshCookie(c *gin.Context, value string, maxAge int) {
 
 // Handler handles authentication-related requests including registration and login.
 type Handler struct {
-	db        *sql.DB
-	redis     *redis.Client
-	log       *logger.Logger
-	jwtSecret string
-	hub       SessionDisconnector
+	db         *sql.DB
+	redis      *redis.Client
+	log        *logger.Logger
+	jwtSecret  string
+	hub        SessionDisconnector
+	mfaChecker MFAChecker
 }
 
 // NewHandler creates a new authentication handler.
@@ -71,6 +91,11 @@ func NewHandler(db *sql.DB, redisClient *redis.Client, log *logger.Logger, jwtSe
 	}
 }
 
+// SetMFAChecker sets the MFA checker (called after both handlers are initialized to break circular init).
+func (h *Handler) SetMFAChecker(checker MFAChecker) {
+	h.mfaChecker = checker
+}
+
 // RegisterRequest represents registration payload
 type RegisterRequest struct {
 	Email                string `json:"email" binding:"required,email"`
@@ -80,6 +105,7 @@ type RegisterRequest struct {
 	PublicKey            string `json:"public_key" binding:"required"`           // base64 encoded SPKI
 	WrappedPrivateKey    string `json:"wrapped_private_key" binding:"required"` // base64 encoded
 	KeyDerivationSalt    string `json:"key_derivation_salt" binding:"required"` // base64 encoded
+	KeyDerivationAlg     string `json:"key_derivation_alg"`                     // "pbkdf2" or "argon2id"; defaults to "argon2id"
 	E2EEPreference       bool   `json:"e2ee_preference"`
 }
 
@@ -188,12 +214,17 @@ func (h *Handler) Register(c *gin.Context) {
 	}
 
 	// Store E2EE keys (private key wrapped)
+	kdAlg := req.KeyDerivationAlg
+	if kdAlg == "" {
+		kdAlg = "argon2id" // Default for new registrations
+	}
 	_, err = tx.Exec(
-		`INSERT INTO user_keys (user_id, wrapped_private_key, key_derivation_salt)
-		 VALUES ($1, $2, $3)`,
+		`INSERT INTO user_keys (user_id, wrapped_private_key, key_derivation_salt, key_derivation_alg)
+		 VALUES ($1, $2, $3, $4)`,
 		userID,
 		wrappedKey,
 		salt,
+		kdAlg,
 	)
 	if err != nil {
 		h.log.Error("Failed to store user keys", "error", err)
@@ -403,8 +434,66 @@ func (h *Handler) Login(c *gin.Context) {
 	// Clear failed login attempts on success
 	h.clearLoginAttempts(ctx, req.Email)
 
+	// Resolve remember_me preference (default: true for backward compat)
+	rememberMe := true
+	if req.RememberMe != nil {
+		rememberMe = *req.RememberMe
+	}
+
+	// Check if user has MFA enabled — if so, return challenge instead of tokens
+	// Only present login-eligible methods (excludes recovery-only like Email/SMS when flagged)
+	if h.mfaChecker != nil && h.mfaChecker.IsEnabled(ctx, user.ID) {
+		allMethods, _ := h.mfaChecker.GetEnabledMethods(ctx, user.ID)
+		loginMethods, _ := h.mfaChecker.GetLoginMethods(ctx, user.ID)
+		challengeToken, jti, mfaErr := h.mfaChecker.GenerateLoginChallenge(ctx, user.ID, rememberMe)
+		if mfaErr != nil {
+			h.log.Error("Failed to generate MFA challenge", "error", mfaErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Login failed"})
+			return
+		}
+
+		// Compute recovery-only methods (in allMethods but not in loginMethods)
+		loginSet := make(map[string]bool, len(loginMethods))
+		for _, m := range loginMethods {
+			loginSet[m] = true
+		}
+		var recoveryOnly []string
+		for _, m := range allMethods {
+			if !loginSet[m] {
+				recoveryOnly = append(recoveryOnly, m)
+			}
+		}
+
+		h.log.Info("MFA required for login", "user_id", user.ID, "methods", loginMethods)
+		resp := gin.H{
+			"mfa_required":        true,
+			"mfa_challenge_token": challengeToken,
+			"methods":             loginMethods,
+		}
+		if len(recoveryOnly) > 0 {
+			resp["recovery_only_methods"] = recoveryOnly
+		}
+		// If WebAuthn is available, start the assertion ceremony and include options
+		if loginSet["webauthn"] {
+			if opts, err := h.mfaChecker.BeginWebAuthnLogin(ctx, user.ID, jti); err != nil {
+				h.log.Error("Failed to begin WebAuthn login", "error", err)
+			} else if opts != nil {
+				resp["webauthn_options"] = opts
+			}
+		}
+		c.JSON(http.StatusOK, resp)
+		return
+	}
+
+	// No MFA — complete login directly
+	h.CompleteLogin(c, user.ID, rememberMe)
+}
+
+// CompleteLogin issues tokens and creates a session for the given user.
+// Called directly from Login (no MFA) or from the MFA verify handler after successful verification.
+func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) {
 	// Generate access token (JWT, 15 min)
-	accessToken, err := GenerateAccessToken(user.ID, h.jwtSecret)
+	accessToken, err := GenerateAccessToken(userID, h.jwtSecret)
 	if err != nil {
 		h.log.Error("Failed to generate access token", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Login failed"})
@@ -419,59 +508,41 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
-	// Resolve remember_me preference (default: true for backward compat)
-	rememberMe := true
-	if req.RememberMe != nil {
-		rememberMe = *req.RememberMe
-	}
-
 	// Store refresh token in database
 	tokenHash := HashRefreshToken(refreshToken)
 	tokenID := uuid.New().String()
-	expiresAt := time.Now().Add(30 * 24 * time.Hour) // 30 days
+	expiresAt := time.Now().Add(30 * 24 * time.Hour)
 	deviceName := c.GetHeader("X-Device-Name")
 	ipAddress := c.ClientIP()
 	userAgent := truncateUserAgent(c.GetHeader("User-Agent"))
-
 	machineID := c.GetHeader("X-Machine-Id")
-	h.log.Info("Login: storing refresh token",
-		"token_suffix", refreshToken[len(refreshToken)-8:],
+
+	h.log.Info("CompleteLogin: storing refresh token",
 		"hash_prefix", tokenHash[:16],
 		"remember_me", rememberMe,
 		"machine_id", machineID,
-		"user_id", user.ID,
+		"user_id", userID,
 	)
 
-	// Revoke old sessions from the same device to prevent duplicates.
-	// Prefer machine_id match when available; fall back to IP+UA match.
+	// Revoke old sessions from the same device
 	if machineID != "" {
 		_, _ = h.db.Exec(
 			`UPDATE refresh_tokens SET revoked_at = NOW()
-			 WHERE user_id = $1 AND machine_id = $2
-			   AND revoked_at IS NULL`,
-			user.ID, machineID,
+			 WHERE user_id = $1 AND machine_id = $2 AND revoked_at IS NULL`,
+			userID, machineID,
 		)
 	} else {
 		_, _ = h.db.Exec(
 			`UPDATE refresh_tokens SET revoked_at = NOW()
-			 WHERE user_id = $1 AND ip_address = $2 AND user_agent = $3
-			   AND revoked_at IS NULL`,
-			user.ID, ipAddress, userAgent,
+			 WHERE user_id = $1 AND ip_address = $2 AND user_agent = $3 AND revoked_at IS NULL`,
+			userID, ipAddress, userAgent,
 		)
 	}
 
 	_, err = h.db.Exec(
 		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, remember_me, machine_id)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		tokenID,
-		user.ID,
-		tokenHash,
-		deviceName,
-		ipAddress,
-		userAgent,
-		expiresAt,
-		rememberMe,
-		nilIfEmpty(machineID),
+		tokenID, userID, tokenHash, deviceName, ipAddress, userAgent, expiresAt, rememberMe, nilIfEmpty(machineID),
 	)
 	if err != nil {
 		h.log.Error("Failed to store refresh token", "error", err)
@@ -480,49 +551,56 @@ func (h *Handler) Login(c *gin.Context) {
 	}
 
 	// Cookie MaxAge: 30 days if remember_me, session-scoped otherwise
-	cookieMaxAge := 30 * 24 * 60 * 60 // 30 days in seconds
+	cookieMaxAge := 30 * 24 * 60 * 60
 	if !rememberMe {
-		cookieMaxAge = 0 // Session cookie
+		cookieMaxAge = 0
 	}
-
-	// Set refresh token as httpOnly cookie
 	setRefreshCookie(c, refreshToken, cookieMaxAge)
+
+	// Fetch user data
+	var user models.User
+	err = h.db.QueryRow(
+		`SELECT id, email, username, password_hash, display_name, bio, avatar_url, COALESCE(links, '[]'::jsonb),
+		        email_verified, age_verified, e2ee_preference, created_at, updated_at
+		 FROM users WHERE id = $1`, userID,
+	).Scan(
+		&user.ID, &user.Email, &user.Username, &user.PasswordHash,
+		&user.DisplayName, &user.Bio, &user.AvatarURL, &user.Links,
+		&user.EmailVerified, &user.AgeVerified, &user.E2EEPreference,
+		&user.CreatedAt, &user.UpdatedAt,
+	)
+	if err != nil {
+		h.log.Error("Failed to fetch user for login response", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Login failed"})
+		return
+	}
 
 	// Fetch E2EE keys
 	var keys models.UserKeys
 	err = h.db.QueryRow(
-		`SELECT user_id, wrapped_private_key, key_derivation_salt, key_version
-		 FROM user_keys WHERE user_id = $1`,
-		user.ID,
-	).Scan(
-		&keys.UserID,
-		&keys.WrappedPrivateKey,
-		&keys.KeyDerivationSalt,
-		&keys.KeyVersion,
-	)
+		`SELECT user_id, wrapped_private_key, key_derivation_salt, key_version, key_derivation_alg
+		 FROM user_keys WHERE user_id = $1`, userID,
+	).Scan(&keys.UserID, &keys.WrappedPrivateKey, &keys.KeyDerivationSalt, &keys.KeyVersion, &keys.KeyDerivationAlg)
 	if err != nil {
 		h.log.Error("Failed to fetch user keys", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Login failed"})
 		return
 	}
 
-	h.log.Info("User logged in", "user_id", user.ID)
+	h.log.Info("User logged in (MFA verified)", "user_id", userID)
 
-	// Return access token, refresh token, and user data.
-	// The refresh token is returned in both a cookie and the body so that
-	// Electron/native clients (file:// origin) can store it explicitly —
-	// SameSite=Lax cookies are not sent on cross-site POST requests.
 	c.JSON(http.StatusOK, gin.H{
 		"access_token":  accessToken,
 		"refresh_token": refreshToken,
 		"session_id":    tokenID,
-		"expires_in":    900, // 15 minutes
+		"expires_in":    900,
 		"remember_me":   rememberMe,
 		"user":          user.PublicUser(),
 		"e2ee_keys": gin.H{
-			"wrapped_private_key":  base64.StdEncoding.EncodeToString(keys.WrappedPrivateKey),
-			"key_derivation_salt":  base64.StdEncoding.EncodeToString(keys.KeyDerivationSalt),
-			"key_version":          keys.KeyVersion,
+			"wrapped_private_key": base64.StdEncoding.EncodeToString(keys.WrappedPrivateKey),
+			"key_derivation_salt": base64.StdEncoding.EncodeToString(keys.KeyDerivationSalt),
+			"key_version":         keys.KeyVersion,
+			"key_derivation_alg":  keys.KeyDerivationAlg,
 		},
 	})
 }
@@ -679,8 +757,56 @@ func (h *Handler) Refresh(c *gin.Context) {
 		}
 
 		if storedIP == requestIP {
-			// Same IP, different machine — pre-MFA: log warning, allow
-			h.log.Warn("Refresh from different machine_id but same IP (pre-MFA: allowing)",
+			// Same IP, different machine — suspicious but not theft
+			if h.mfaChecker != nil && h.mfaChecker.IsEnabled(c.Request.Context(), token.UserID) {
+				// User has MFA — require verification before allowing
+				ctx := c.Request.Context()
+				allMethods, _ := h.mfaChecker.GetEnabledMethods(ctx, token.UserID)
+				loginMethods, _ := h.mfaChecker.GetLoginMethods(ctx, token.UserID)
+				challengeToken, jti, mfaErr := h.mfaChecker.GenerateLoginChallenge(ctx, token.UserID, token.RememberMe)
+				if mfaErr != nil {
+					h.log.Error("Failed to generate suspicious refresh MFA challenge", "error", mfaErr)
+					// Fall through to allow (graceful degradation)
+				} else {
+					h.log.Warn("Suspicious refresh: different machine_id, same IP — MFA required",
+						"user_id", token.UserID,
+						"stored_machine_id", token.MachineID,
+						"request_machine_id", requestMachineID,
+						"ip", requestIP,
+					)
+					resp := gin.H{
+						"error":              "suspicious_session_mfa",
+						"message":            "Session verification required",
+						"mfa_challenge_token": challengeToken,
+						"methods":            loginMethods,
+					}
+					// Include recovery-only methods so frontend can filter them from the method picker
+					loginSet := make(map[string]bool, len(loginMethods))
+					for _, m := range loginMethods {
+						loginSet[m] = true
+					}
+					var recoveryOnly []string
+					for _, m := range allMethods {
+						if !loginSet[m] {
+							recoveryOnly = append(recoveryOnly, m)
+						}
+					}
+					if len(recoveryOnly) > 0 {
+						resp["recovery_only_methods"] = recoveryOnly
+					}
+					if loginSet["webauthn"] {
+						if opts, werr := h.mfaChecker.BeginWebAuthnLogin(ctx, token.UserID, jti); werr != nil {
+							h.log.Error("Failed to begin WebAuthn login for suspicious refresh", "error", werr)
+						} else if opts != nil {
+							resp["webauthn_options"] = opts
+						}
+					}
+					c.JSON(http.StatusForbidden, resp)
+					return
+				}
+			}
+			// No MFA or challenge generation failed — log warning, allow (graceful degradation)
+			h.log.Warn("Refresh from different machine_id but same IP (no MFA: allowing)",
 				"user_id", token.UserID,
 				"stored_machine_id", token.MachineID,
 				"request_machine_id", requestMachineID,
@@ -715,6 +841,72 @@ func (h *Handler) Refresh(c *gin.Context) {
 				"error_code": "session_theft_detected",
 			})
 			return
+		}
+	}
+
+	// ── Pre-MFA session lock (#89) ────────────────────────────────────
+	// When a user enables MFA, all sessions created before mfa_enabled_at
+	// must pass an MFA challenge on their next refresh. This prevents a
+	// stolen-but-not-yet-used session from bypassing MFA.
+	if h.mfaChecker != nil && h.mfaChecker.IsEnabled(c.Request.Context(), token.UserID) {
+		// Check for bypass (set by MFA verify handler after successful upgrade)
+		bypassKey := fmt.Sprintf("mfa_upgrade_bypass:%s", token.UserID)
+		if h.redis.Exists(c.Request.Context(), bypassKey).Val() > 0 {
+			h.redis.Del(c.Request.Context(), bypassKey)
+			h.log.Info("Pre-MFA session bypass consumed",
+				"user_id", token.UserID,
+			)
+			// Skip the pre-MFA check — user just verified MFA
+		} else {
+			var mfaEnabledAt sql.NullTime
+			_ = h.db.QueryRow(
+				`SELECT mfa_enabled_at FROM users WHERE id = $1`, token.UserID,
+			).Scan(&mfaEnabledAt)
+
+			if mfaEnabledAt.Valid && token.CreatedAt.Before(mfaEnabledAt.Time) {
+				ctx := c.Request.Context()
+				allMethods, _ := h.mfaChecker.GetEnabledMethods(ctx, token.UserID)
+				loginMethods, _ := h.mfaChecker.GetLoginMethods(ctx, token.UserID)
+				challengeToken, jti, mfaErr := h.mfaChecker.GenerateUpgradeChallenge(ctx, token.UserID, token.RememberMe)
+				if mfaErr != nil {
+					h.log.Error("Failed to generate pre-MFA session challenge", "error", mfaErr)
+					// Fall through — don't block the user if challenge generation fails
+				} else {
+					h.log.Info("Pre-MFA session requires MFA verification",
+						"user_id", token.UserID,
+						"session_created", token.CreatedAt,
+						"mfa_enabled_at", mfaEnabledAt.Time,
+					)
+					resp := gin.H{
+						"error":               "mfa_upgrade_required",
+						"message":             "This session was created before MFA was enabled. Please verify your identity.",
+						"mfa_challenge_token": challengeToken,
+						"methods":             loginMethods,
+					}
+					loginSet := make(map[string]bool, len(loginMethods))
+					for _, m := range loginMethods {
+						loginSet[m] = true
+					}
+					var recoveryOnly []string
+					for _, m := range allMethods {
+						if !loginSet[m] {
+							recoveryOnly = append(recoveryOnly, m)
+						}
+					}
+					if len(recoveryOnly) > 0 {
+						resp["recovery_only_methods"] = recoveryOnly
+					}
+					if loginSet["webauthn"] {
+						if opts, werr := h.mfaChecker.BeginWebAuthnLogin(ctx, token.UserID, jti); werr != nil {
+							h.log.Error("Failed to begin WebAuthn login for upgrade", "error", werr)
+						} else if opts != nil {
+							resp["webauthn_options"] = opts
+						}
+					}
+					c.JSON(http.StatusForbidden, resp)
+					return
+				}
+			}
 		}
 	}
 

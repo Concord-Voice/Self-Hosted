@@ -212,25 +212,58 @@ func (h *Handler) OpenConversation(c *gin.Context) {
 	`, userID, req.UserID).Scan(&areFriends)
 
 	if !areFriends {
-		// Check target's privacy settings (defaults: friends_only=TRUE, server_members=TRUE)
-		var messagesFriendsOnly, messagesServerMembers bool
+		// Check target's privacy settings
+		// dm_privacy_level: 0=off, 1=friends, 2=friends+server, 3=all
+		var dmPrivacyLevel int
+		var dmFriendsOfFriends bool
 		err := h.db.QueryRow(`
-			SELECT messages_friends_only, messages_server_members
+			SELECT dm_privacy_level, dm_friends_of_friends
 			FROM privacy_settings WHERE user_id = $1
-		`, req.UserID).Scan(&messagesFriendsOnly, &messagesServerMembers)
+		`, req.UserID).Scan(&dmPrivacyLevel, &dmFriendsOfFriends)
 		if err == sql.ErrNoRows {
-			messagesFriendsOnly = true
-			messagesServerMembers = true
+			dmPrivacyLevel = 2 // default: friends + server members
+			dmFriendsOfFriends = false
 		} else if err != nil {
 			h.log.Error("Failed to check privacy settings", "error", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open conversation"})
 			return
 		}
 
-		if messagesFriendsOnly {
-			allowed := false
-			if messagesServerMembers {
-				// Check if they share a server
+		if dmPrivacyLevel == 0 {
+			// DMs completely disabled
+			c.JSON(http.StatusForbidden, gin.H{"error": "dm_disabled"})
+			return
+		}
+
+		if dmPrivacyLevel < 3 {
+			// Check if they're friends
+			var isFriend bool
+			_ = h.db.QueryRow(`
+				SELECT EXISTS(
+					SELECT 1 FROM friendships
+					WHERE (user_id = $1 AND friend_id = $2) OR (user_id = $2 AND friend_id = $1)
+				)
+			`, userID, req.UserID).Scan(&isFriend)
+
+			allowed := isFriend
+
+			// Check friends-of-friends if enabled and not already allowed
+			if !allowed && dmFriendsOfFriends {
+				var isFoF bool
+				_ = h.db.QueryRow(`
+					SELECT EXISTS(
+						SELECT 1 FROM friendships f1
+						JOIN friendships f2 ON (f1.friend_id = f2.user_id OR f1.friend_id = f2.friend_id)
+						WHERE (f1.user_id = $1 OR f1.friend_id = $1)
+						  AND (f2.user_id = $2 OR f2.friend_id = $2)
+						  AND f1.friend_id != $1 AND f1.friend_id != $2
+					)
+				`, userID, req.UserID).Scan(&isFoF)
+				allowed = isFoF
+			}
+
+			// Check server members if level >= 2 and not already allowed
+			if !allowed && dmPrivacyLevel >= 2 {
 				var sharesServer bool
 				_ = h.db.QueryRow(`
 					SELECT EXISTS(
@@ -241,6 +274,7 @@ func (h *Handler) OpenConversation(c *gin.Context) {
 				`, userID, req.UserID).Scan(&sharesServer)
 				allowed = sharesServer
 			}
+
 			if !allowed {
 				c.JSON(http.StatusForbidden, gin.H{"error": "privacy_blocked"})
 				return
