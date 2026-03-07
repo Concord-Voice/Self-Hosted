@@ -7,11 +7,11 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
 // minCiphertextSize is the minimum base64-decoded size for a valid AES-GCM ciphertext:
@@ -348,7 +348,7 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 		UPDATE messages
 		SET content = $1, edited_at = NOW(), updated_at = NOW()
 		WHERE id = $2
-		RETURNING channel_id, is_encrypted, edited_at, created_at, updated_at
+		RETURNING channel_id, is_encrypted, key_version, edited_at, created_at, updated_at
 	`
 
 	var message models.Message
@@ -359,6 +359,7 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 	err = h.db.QueryRow(updateQuery, req.Content, messageID).Scan(
 		&message.ChannelID,
 		&message.IsEncrypted,
+		&message.KeyVersion,
 		&message.EditedAt,
 		&message.CreatedAt,
 		&message.UpdatedAt,
@@ -378,11 +379,13 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 		h.hub.BroadcastToChannel(channelUUID, websocket.OutgoingMessage{
 			Type: "message_update",
 			Data: map[string]interface{}{
-				"id":         messageID,
-				"channel_id": message.ChannelID,
-				"content":    message.Content,
-				"edited_at":  message.EditedAt,
-				"updated_at": message.UpdatedAt,
+				"id":           messageID,
+				"channel_id":   message.ChannelID,
+				"content":      message.Content,
+				"is_encrypted": message.IsEncrypted,
+				"key_version":  message.KeyVersion,
+				"edited_at":    message.EditedAt,
+				"updated_at":   message.UpdatedAt,
 			},
 		})
 	}
