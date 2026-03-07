@@ -161,7 +161,7 @@ openssl pkey -in private_key.pem -pubout -out public_key.pem
 
 ### Prerequisites
 
-- Go 1.24+
+- Go 1.25+
 - PostgreSQL 16+
 - Private/public key pair (Ed25519 or RSA)
 

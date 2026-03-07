@@ -20,6 +20,10 @@ ehthumbs.db
 Thumbs.db
 *~
 
+# iCloud Drive conflict duplicates (macOS creates "file 2.ext" copies)
+* 2.*
+* 3.*
+
 # IDEs and Editors
 .vscode/
 .idea/

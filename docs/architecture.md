@@ -87,7 +87,7 @@ flowchart TB
 **Port**: 8080
 
 **Tech Stack**:
-- Go 1.24+
+- Go 1.25+
 - Gin web framework
 - PostgreSQL 16 (persistent data)
 - Redis 7 (ephemeral state, sessions, rate limiting)
@@ -343,7 +343,7 @@ NATS ←→ Control Plane (room state sync, participant events)
 **Port**: 8082
 
 **Tech Stack**:
-- Go 1.24+
+- Go 1.25+
 - PostgreSQL 16 (license records)
 - Ed25519 cryptographic signing
 
