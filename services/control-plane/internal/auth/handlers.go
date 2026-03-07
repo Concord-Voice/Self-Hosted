@@ -105,6 +105,7 @@ type RegisterRequest struct {
 	PublicKey            string `json:"public_key" binding:"required"`           // base64 encoded SPKI
 	WrappedPrivateKey    string `json:"wrapped_private_key" binding:"required"` // base64 encoded
 	KeyDerivationSalt    string `json:"key_derivation_salt" binding:"required"` // base64 encoded
+	KeyDerivationAlg     string `json:"key_derivation_alg"`                     // "pbkdf2" or "argon2id"; defaults to "argon2id"
 	E2EEPreference       bool   `json:"e2ee_preference"`
 }
 
@@ -213,12 +214,17 @@ func (h *Handler) Register(c *gin.Context) {
 	}
 
 	// Store E2EE keys (private key wrapped)
+	kdAlg := req.KeyDerivationAlg
+	if kdAlg == "" {
+		kdAlg = "argon2id" // Default for new registrations
+	}
 	_, err = tx.Exec(
-		`INSERT INTO user_keys (user_id, wrapped_private_key, key_derivation_salt)
-		 VALUES ($1, $2, $3)`,
+		`INSERT INTO user_keys (user_id, wrapped_private_key, key_derivation_salt, key_derivation_alg)
+		 VALUES ($1, $2, $3, $4)`,
 		userID,
 		wrappedKey,
 		salt,
+		kdAlg,
 	)
 	if err != nil {
 		h.log.Error("Failed to store user keys", "error", err)
@@ -572,9 +578,9 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) 
 	// Fetch E2EE keys
 	var keys models.UserKeys
 	err = h.db.QueryRow(
-		`SELECT user_id, wrapped_private_key, key_derivation_salt, key_version
+		`SELECT user_id, wrapped_private_key, key_derivation_salt, key_version, key_derivation_alg
 		 FROM user_keys WHERE user_id = $1`, userID,
-	).Scan(&keys.UserID, &keys.WrappedPrivateKey, &keys.KeyDerivationSalt, &keys.KeyVersion)
+	).Scan(&keys.UserID, &keys.WrappedPrivateKey, &keys.KeyDerivationSalt, &keys.KeyVersion, &keys.KeyDerivationAlg)
 	if err != nil {
 		h.log.Error("Failed to fetch user keys", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Login failed"})
@@ -594,6 +600,7 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) 
 			"wrapped_private_key": base64.StdEncoding.EncodeToString(keys.WrappedPrivateKey),
 			"key_derivation_salt": base64.StdEncoding.EncodeToString(keys.KeyDerivationSalt),
 			"key_version":         keys.KeyVersion,
+			"key_derivation_alg":  keys.KeyDerivationAlg,
 		},
 	})
 }

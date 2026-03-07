@@ -152,10 +152,10 @@ func (h *Handler) GetMyKeys(c *gin.Context) {
 
 	var keys models.UserKeys
 	err := h.db.QueryRow(
-		`SELECT user_id, wrapped_private_key, key_derivation_salt, key_version
+		`SELECT user_id, wrapped_private_key, key_derivation_salt, key_version, key_derivation_alg
 		 FROM user_keys WHERE user_id = $1`,
 		userID,
-	).Scan(&keys.UserID, &keys.WrappedPrivateKey, &keys.KeyDerivationSalt, &keys.KeyVersion)
+	).Scan(&keys.UserID, &keys.WrappedPrivateKey, &keys.KeyDerivationSalt, &keys.KeyVersion, &keys.KeyDerivationAlg)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -172,6 +172,7 @@ func (h *Handler) GetMyKeys(c *gin.Context) {
 			"wrapped_private_key": base64.StdEncoding.EncodeToString(keys.WrappedPrivateKey),
 			"key_derivation_salt": base64.StdEncoding.EncodeToString(keys.KeyDerivationSalt),
 			"key_version":         keys.KeyVersion,
+			"key_derivation_alg":  keys.KeyDerivationAlg,
 		},
 	})
 }
@@ -180,6 +181,7 @@ func (h *Handler) GetMyKeys(c *gin.Context) {
 type ReplaceKeysRequest struct {
 	WrappedPrivateKey string `json:"wrapped_private_key" binding:"required"`
 	KeyDerivationSalt string `json:"key_derivation_salt" binding:"required"`
+	KeyDerivationAlg  string `json:"key_derivation_alg"` // "pbkdf2" or "argon2id"
 }
 
 // ReplaceMyKeys replaces the user's E2EE keys (for key recovery after corruption)
@@ -207,11 +209,16 @@ func (h *Handler) ReplaceMyKeys(c *gin.Context) {
 		return
 	}
 
+	kdAlg := req.KeyDerivationAlg
+	if kdAlg == "" {
+		kdAlg = "argon2id"
+	}
+
 	_, err = h.db.Exec(
 		`UPDATE user_keys SET wrapped_private_key = $1, key_derivation_salt = $2,
-		 key_version = key_version + 1, updated_at = NOW()
-		 WHERE user_id = $3`,
-		wrappedKeyBytes, saltBytes, userID,
+		 key_version = key_version + 1, key_derivation_alg = $3, updated_at = NOW()
+		 WHERE user_id = $4`,
+		wrappedKeyBytes, saltBytes, kdAlg, userID,
 	)
 	if err != nil {
 		h.log.Error("Failed to replace E2EE keys", "error", err)
@@ -219,7 +226,7 @@ func (h *Handler) ReplaceMyKeys(c *gin.Context) {
 		return
 	}
 
-	h.log.Info("E2EE keys replaced", "user_id", userID)
+	h.log.Info("E2EE keys replaced", "user_id", userID, "alg", kdAlg)
 
 	c.JSON(http.StatusOK, gin.H{
 		"message": "Keys replaced successfully",
@@ -497,7 +504,8 @@ type ChangePasswordRequest struct {
 	NewPassword         string `json:"new_password" binding:"required"`
 	WrappedPrivateKey   string `json:"wrapped_private_key" binding:"required"`
 	KeyDerivationSalt   string `json:"key_derivation_salt" binding:"required"`
-	MFACode             string `json:"mfa_code"` // Required when MFA is enabled
+	KeyDerivationAlg    string `json:"key_derivation_alg"` // "pbkdf2" or "argon2id"
+	MFACode             string `json:"mfa_code"`           // Required when MFA is enabled
 }
 
 // ChangePassword changes the current user's password and re-wraps E2EE keys
@@ -631,10 +639,15 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 	}
 
 	// Update E2EE keys (re-wrapped with new password)
+	cpKdAlg := req.KeyDerivationAlg
+	if cpKdAlg == "" {
+		cpKdAlg = "argon2id"
+	}
 	_, err = tx.Exec(
-		`UPDATE user_keys SET wrapped_private_key = $1, key_derivation_salt = $2, updated_at = NOW()
-		 WHERE user_id = $3`,
-		wrappedKeyBytes, saltBytes, userID,
+		`UPDATE user_keys SET wrapped_private_key = $1, key_derivation_salt = $2,
+		 key_derivation_alg = $3, updated_at = NOW()
+		 WHERE user_id = $4`,
+		wrappedKeyBytes, saltBytes, cpKdAlg, userID,
 	)
 	if err != nil {
 		h.log.Error("Failed to update E2EE keys", "error", err)
