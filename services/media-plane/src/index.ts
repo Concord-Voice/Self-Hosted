@@ -154,6 +154,24 @@ async function main() {
           e2eeEpoch: result.e2eeEpoch,
         };
 
+        logger.info('Room join response', {
+          roomId,
+          userId: data.userId,
+          existingProducerCount: result.existingProducers.length,
+          participantCount: result.participants.length,
+        });
+
+        logger.debug('Room join existing producers', {
+          roomId,
+          userId: data.userId,
+          existingProducers: result.existingProducers.map(p => ({
+            producerId: p.producerId,
+            userId: p.userId,
+            kind: p.kind,
+            source: p.source,
+          })),
+        });
+
         if (callback) {
           callback(response);
         } else {
@@ -208,6 +226,13 @@ async function main() {
           data.userId,
           direction
         );
+
+        logger.info('Transport created', {
+          transportId: transportOptions.id,
+          roomId,
+          userId: data.userId,
+          direction,
+        });
 
         callback(transportOptions);
       } catch (error) {
@@ -275,14 +300,28 @@ async function main() {
       try {
         const roomId = data.roomId;
         if (!roomId) {
+          logger.warn('Consume rejected — not in a room', { userId: data.userId, producerId });
           return callback({ error: 'Not in a room' });
         }
+
+        logger.info('Consume requested', { roomId, userId: data.userId, producerId, transportId });
 
         const result = await roomManager.consume(roomId, data.userId, producerId, transportId);
 
         if (!result) {
+          logger.warn('Consume failed — incompatible codecs', { roomId, userId: data.userId, producerId });
           return callback({ error: 'Cannot consume — incompatible codecs' });
         }
+
+        logger.info('Consumer created', {
+          consumerId: result.id,
+          producerId: result.producerId,
+          kind: result.kind,
+          source: result.source,
+          producerUserId: result.producerUserId,
+          consumerUserId: data.userId,
+          roomId,
+        });
 
         callback({
           id: result.id,
@@ -293,7 +332,7 @@ async function main() {
           source: result.source,
         });
       } catch (error) {
-        logger.error('Error consuming', { error, userId: data.userId });
+        logger.error('Error consuming', { error, userId: data.userId, producerId });
         callback({ error: 'Failed to consume' });
       }
     });
@@ -308,6 +347,7 @@ async function main() {
         }
 
         await roomManager.resumeConsumer(roomId, data.userId, consumerId);
+        logger.info('Consumer resumed', { roomId, userId: data.userId, consumerId });
         if (callback) callback({ success: true });
       } catch (error) {
         logger.error('Error resuming consumer', { error, userId: data.userId });

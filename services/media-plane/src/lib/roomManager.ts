@@ -617,6 +617,17 @@ export class RoomManager {
     const recvTransport = transportId
       ? consumer.recvTransports.get(transportId)
       : consumer.recvTransports.values().next().value;
+
+    logger.debug('Consume transport lookup', {
+      roomId,
+      consumerUserId,
+      producerId,
+      requestedTransportId: transportId,
+      recvTransportCount: consumer.recvTransports.size,
+      hasRecvTransport: !!recvTransport,
+      hasRtpCapabilities: !!consumer.rtpCapabilities,
+    });
+
     if (!recvTransport) {
       throw new Error('No receive transport — create one first');
     }
