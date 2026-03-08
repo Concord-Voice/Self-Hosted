@@ -544,7 +544,8 @@ async function main() {
     }
   });
 
-  // Broadcast epoch-sync to encrypted rooms every 30s
+  // Broadcast epoch-sync to encrypted rooms every 10s (short interval since
+  // voice calls are latency-sensitive and the message is tiny)
   const epochSyncInterval = setInterval(() => {
     for (const roomId of roomManager.getActiveRoomIds()) {
       const room = roomManager.getRoom(roomId);
@@ -552,7 +553,7 @@ async function main() {
         io.to(roomId).emit('epoch-sync', { epoch: room.e2eeEpoch });
       }
     }
-  }, 30_000);
+  }, 10_000);
 
   // Publish room heartbeat every 30s for control plane reconciliation.
   // Each message contains the authoritative list of users in each room,
