@@ -422,7 +422,7 @@ export class RoomManager {
       });
     });
     transport.on('dtlsstatechange', (dtlsState) => {
-      const level = dtlsState === 'connected' ? 'info' : dtlsState === 'failed' || dtlsState === 'closed' ? 'warn' : 'debug';
+      const level = dtlsState === 'connected' ? 'info' : dtlsState === 'failed' ? 'error' : dtlsState === 'closed' ? 'warn' : 'debug';
       logger.log(level, 'Transport DTLS state change', {
         transportId: transport.id, roomId, userId, direction, dtlsState,
       });
