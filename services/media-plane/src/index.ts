@@ -232,6 +232,7 @@ async function main() {
           roomId,
           userId: data.userId,
           direction,
+          iceCandidates: (transportOptions as { iceCandidates?: Array<{ ip: string; port: number; protocol: string }> }).iceCandidates?.map(c => `${c.protocol}:${c.ip}:${c.port}`),
         });
 
         callback(transportOptions);
@@ -249,10 +250,15 @@ async function main() {
           return callback({ error: 'Not in a room' });
         }
 
+        logger.info('Transport connect requested', {
+          transportId, roomId, userId: data.userId,
+          dtlsRole: dtlsParameters?.role,
+        });
+
         await roomManager.connectTransport(roomId, data.userId, transportId, dtlsParameters);
         callback({ success: true });
       } catch (error) {
-        logger.error('Error connecting transport', { error, userId: data.userId });
+        logger.error('Error connecting transport', { error, userId: data.userId, transportId });
         callback({ error: 'Failed to connect transport' });
       }
     });

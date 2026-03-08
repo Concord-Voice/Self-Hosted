@@ -414,6 +414,20 @@ export class RoomManager {
       });
     }
 
+    // Log ICE/DTLS state transitions for diagnostics
+    transport.on('icestatechange', (iceState) => {
+      const level = iceState === 'completed' ? 'info' : iceState === 'disconnected' || iceState === 'closed' ? 'warn' : 'debug';
+      logger.log(level, 'Transport ICE state change', {
+        transportId: transport.id, roomId, userId, direction, iceState,
+      });
+    });
+    transport.on('dtlsstatechange', (dtlsState) => {
+      const level = dtlsState === 'connected' ? 'info' : dtlsState === 'failed' || dtlsState === 'closed' ? 'warn' : 'debug';
+      logger.log(level, 'Transport DTLS state change', {
+        transportId: transport.id, roomId, userId, direction, dtlsState,
+      });
+    });
+
     // Clean up on transport close
     transport.on('routerclose', () => {
       logger.debug('Transport router closed', { transportId: transport.id, roomId, userId });
@@ -679,12 +693,16 @@ export class RoomManager {
       consumer.consumers.delete(newConsumer.id);
     });
 
-    logger.debug('Consumer created', {
+    logger.info('Consumer created with transport state', {
       consumerId: newConsumer.id,
       producerId,
       consumerUserId,
       producerUserId,
       roomId,
+      kind: newConsumer.kind,
+      recvTransportId: recvTransport.id,
+      iceState: recvTransport.iceState,
+      dtlsState: recvTransport.dtlsState,
     });
 
     return {
