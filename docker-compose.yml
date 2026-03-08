@@ -133,6 +133,7 @@ services:
       TURN_SERVER_HOST: ${TURN_SERVER_HOST:-localhost}
       TURN_SECRET: ${TURN_SECRET:-concord_dev_turn_secret}
       TURN_REALM: ${TURN_REALM:-concordvoice.chat}
+      MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:-}
       PORT: 8080
     ports:
       - "8080:8080"
