@@ -7,14 +7,27 @@ Licensed Work:        Concord Voice
                       The Licensed Work is (c) 2026 Concord Voice LLC
 Additional Use Grant: You may make production use of the Licensed Work,
                       provided such use does not include offering the
-                      Licensed Work to third parties on a hosted or
-                      embedded basis which is competitive with Concord Voice
-                      LLC's products.
+                      Licensed Work to third parties as a multi-tenant
+                      software-as-a-service platform in which a single
+                      deployment of the Licensed Work serves multiple
+                      unrelated customers or organizations.
 
-                      Non-production use is always permitted.
+                      The following uses are expressly permitted:
 
-                      Self-hosting for internal use (personal, educational,
-                      or non-profit) with unlimited users is permitted.
+                      (a) Self-hosting for your organization's or
+                          community's own use, with unlimited users.
+
+                      (b) Offering managed single-tenant hosting of the
+                          Licensed Work to third-party customers, where
+                          each customer's instance is a logically and
+                          operationally separate deployment.
+
+                      (c) Providing installation, configuration, and
+                          maintenance services for third-party deployments
+                          of the Licensed Work.
+
+                      (d) Non-production use, including development,
+                          testing, and evaluation.
 
 Change Date:          2030-02-15
 
