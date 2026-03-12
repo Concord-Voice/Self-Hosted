@@ -51,6 +51,7 @@ type participantResponse struct {
 	Username    string  `json:"username"`
 	DisplayName *string `json:"display_name,omitempty"`
 	AvatarURL   *string `json:"avatar_url,omitempty"`
+	ColorScheme *string `json:"color_scheme,omitempty"`
 }
 
 type lastMessageResponse struct {
@@ -128,7 +129,7 @@ func (h *Handler) ListConversations(c *gin.Context) {
 	if len(convIDs) > 0 {
 		participantMap := make(map[string][]participantResponse)
 		pQuery := `
-			SELECT dp.conversation_id, u.id, u.username, u.display_name, u.avatar_url
+			SELECT dp.conversation_id, u.id, u.username, u.display_name, u.avatar_url, u.color_scheme
 			FROM dm_participants dp
 			INNER JOIN users u ON u.id = dp.user_id
 			WHERE dp.conversation_id = ANY($1::uuid[])
@@ -151,7 +152,7 @@ func (h *Handler) ListConversations(c *gin.Context) {
 			for pRows.Next() {
 				var convID string
 				var p participantResponse
-				if err := pRows.Scan(&convID, &p.UserID, &p.Username, &p.DisplayName, &p.AvatarURL); err != nil {
+				if err := pRows.Scan(&convID, &p.UserID, &p.Username, &p.DisplayName, &p.AvatarURL, &p.ColorScheme); err != nil {
 					continue
 				}
 				participantMap[convID] = append(participantMap[convID], p)
@@ -1072,7 +1073,7 @@ func (h *Handler) fetchConversationResponse(convID string) *conversationResponse
 
 	// Fetch participants
 	pRows, err := h.db.Query(`
-		SELECT u.id, u.username, u.display_name, u.avatar_url
+		SELECT u.id, u.username, u.display_name, u.avatar_url, u.color_scheme
 		FROM dm_participants dp
 		INNER JOIN users u ON u.id = dp.user_id
 		WHERE dp.conversation_id = $1
@@ -1085,7 +1086,7 @@ func (h *Handler) fetchConversationResponse(convID string) *conversationResponse
 	conv.Participants = []participantResponse{}
 	for pRows.Next() {
 		var p participantResponse
-		if err := pRows.Scan(&p.UserID, &p.Username, &p.DisplayName, &p.AvatarURL); err != nil {
+		if err := pRows.Scan(&p.UserID, &p.Username, &p.DisplayName, &p.AvatarURL, &p.ColorScheme); err != nil {
 			continue
 		}
 		conv.Participants = append(conv.Participants, p)
