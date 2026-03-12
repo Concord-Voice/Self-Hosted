@@ -7,11 +7,11 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/invites"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
 // Handler handles friend-related requests.
@@ -37,6 +37,7 @@ type friendResponse struct {
 	Username    string  `json:"username"`
 	DisplayName *string `json:"display_name,omitempty"`
 	AvatarURL   *string `json:"avatar_url,omitempty"`
+	ColorScheme *string `json:"color_scheme,omitempty"`
 	CreatedAt   string  `json:"created_at"`
 }
 
@@ -46,11 +47,11 @@ type friendRequestResponse struct {
 	FromUserID      string  `json:"from_user_id"`
 	FromUsername    string  `json:"from_username"`
 	FromDisplayName *string `json:"from_display_name,omitempty"`
-	FromAvatarURL  *string `json:"from_avatar_url,omitempty"`
+	FromAvatarURL   *string `json:"from_avatar_url,omitempty"`
 	ToUserID        string  `json:"to_user_id"`
 	ToUsername      string  `json:"to_username"`
-	ToDisplayName  *string `json:"to_display_name,omitempty"`
-	ToAvatarURL    *string `json:"to_avatar_url,omitempty"`
+	ToDisplayName   *string `json:"to_display_name,omitempty"`
+	ToAvatarURL     *string `json:"to_avatar_url,omitempty"`
 	Direction       string  `json:"direction"`
 	CreatedAt       string  `json:"created_at"`
 }
@@ -61,7 +62,7 @@ func (h *Handler) ListFriends(c *gin.Context) {
 	userID := c.GetString("user_id")
 
 	query := `
-		SELECT f.id, u.id, u.username, u.display_name, u.avatar_url, f.created_at
+		SELECT f.id, u.id, u.username, u.display_name, u.avatar_url, u.color_scheme, f.created_at
 		FROM friendships f
 		INNER JOIN users u ON u.id = CASE
 			WHEN f.requester_id = $1 THEN f.addressee_id
@@ -83,7 +84,7 @@ func (h *Handler) ListFriends(c *gin.Context) {
 	friends := []friendResponse{}
 	for rows.Next() {
 		var f friendResponse
-		if err := rows.Scan(&f.ID, &f.UserID, &f.Username, &f.DisplayName, &f.AvatarURL, &f.CreatedAt); err != nil {
+		if err := rows.Scan(&f.ID, &f.UserID, &f.Username, &f.DisplayName, &f.AvatarURL, &f.ColorScheme, &f.CreatedAt); err != nil {
 			h.log.Error("Failed to scan friend", "error", err)
 			continue
 		}
