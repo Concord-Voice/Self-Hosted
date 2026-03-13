@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
@@ -14,14 +15,15 @@ import (
 
 // Handler handles invite-related requests.
 type Handler struct {
-	db  *sql.DB
-	log *logger.Logger
-	hub *websocket.Hub
+	db       *sql.DB
+	log      *logger.Logger
+	hub      *websocket.Hub
+	resolver *rbac.Resolver
 }
 
 // NewHandler creates a new invite handler.
-func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub) *Handler {
-	return &Handler{db: db, log: log, hub: hub}
+func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, resolver *rbac.Resolver) *Handler {
+	return &Handler{db: db, log: log, hub: hub, resolver: resolver}
 }
 
 // createInviteRequest is the JSON body for creating an invite.
@@ -37,26 +39,18 @@ type joinServerRequest struct {
 
 // --- helpers ---
 
-func (h *Handler) checkOwnerOrAdmin(c *gin.Context, serverID, userID string) (string, bool) {
-	var role string
-	err := h.db.QueryRow(
-		`SELECT role FROM server_members WHERE server_id = $1 AND user_id = $2`,
-		serverID, userID,
-	).Scan(&role)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this server"})
-		return "", false
-	}
+func (h *Handler) checkInvitePermission(c *gin.Context, serverID, userID string) bool {
+	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermInvite)
 	if err != nil {
-		h.log.Error("Failed to check membership", "error", err)
+		h.log.Error("Failed to check permissions", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Internal error"})
-		return "", false
+		return false
 	}
-	if role != "owner" && role != "admin" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Only owners and admins can manage invites"})
-		return "", false
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		return false
 	}
-	return role, true
+	return true
 }
 
 // CreateInvite generates a new invite code for a server.
@@ -74,7 +68,7 @@ func (h *Handler) CreateInvite(c *gin.Context) {
 	// Allow empty body — defaults apply
 	_ = c.ShouldBindJSON(&req)
 
-	if _, ok := h.checkOwnerOrAdmin(c, serverID, userID); !ok {
+	if !h.checkInvitePermission(c, serverID, userID) {
 		return
 	}
 
@@ -155,7 +149,7 @@ func (h *Handler) ListInvites(c *gin.Context) {
 		return
 	}
 
-	if _, ok := h.checkOwnerOrAdmin(c, serverID, userID); !ok {
+	if !h.checkInvitePermission(c, serverID, userID) {
 		return
 	}
 
@@ -212,7 +206,7 @@ func (h *Handler) RevokeInvite(c *gin.Context) {
 		return
 	}
 
-	if _, ok := h.checkOwnerOrAdmin(c, serverID, userID); !ok {
+	if !h.checkInvitePermission(c, serverID, userID) {
 		return
 	}
 
@@ -299,6 +293,22 @@ func (h *Handler) JoinServer(c *gin.Context) {
 		return
 	}
 
+	// Check if user is banned from this server
+	var isBanned bool
+	err = tx.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM server_bans WHERE server_id = $1 AND user_id = $2)`,
+		invite.ServerID, userID,
+	).Scan(&isBanned)
+	if err != nil {
+		h.log.Error("Failed to check ban status", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to join server"})
+		return
+	}
+	if isBanned {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You are banned from this server"})
+		return
+	}
+
 	// Check if already a member
 	var exists bool
 	err = tx.QueryRow(
@@ -316,15 +326,24 @@ func (h *Handler) JoinServer(c *gin.Context) {
 	}
 
 	// Add member
-	// TODO: [RBAC] Currently grants full access as 'member' role with no restrictions.
-	// When RBAC/SBAC is implemented, new members should receive a configurable default
-	// role with restricted permissions.
 	_, err = tx.Exec(`
 		INSERT INTO server_members (server_id, user_id, role, joined_at)
 		VALUES ($1, $2, 'member', NOW())
 	`, invite.ServerID, userID)
 	if err != nil {
 		h.log.Error("Failed to add member", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to join server"})
+		return
+	}
+
+	// Assign all default roles (including @all) to the new member
+	_, err = tx.Exec(`
+		INSERT INTO member_roles (server_id, user_id, role_id)
+		SELECT $1, $2, id FROM roles
+		WHERE server_id = $1 AND is_default = TRUE
+	`, invite.ServerID, userID)
+	if err != nil {
+		h.log.Error("Failed to assign default roles", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to join server"})
 		return
 	}
@@ -340,11 +359,11 @@ func (h *Handler) JoinServer(c *gin.Context) {
 	// Fetch server details for response
 	var server models.Server
 	err = tx.QueryRow(`
-		SELECT id, name, icon_url, owner_id, e2ee_default, created_at, updated_at
+		SELECT id, name, icon_url, banner_url, owner_id, e2ee_default, allow_embedded_content, created_at, updated_at
 		FROM servers WHERE id = $1
 	`, invite.ServerID).Scan(
-		&server.ID, &server.Name, &server.IconURL, &server.OwnerID,
-		&server.E2EEDefault, &server.CreatedAt, &server.UpdatedAt,
+		&server.ID, &server.Name, &server.IconURL, &server.BannerURL, &server.OwnerID,
+		&server.E2EEDefault, &server.AllowEmbeddedContent, &server.CreatedAt, &server.UpdatedAt,
 	)
 	if err != nil {
 		h.log.Error("Failed to fetch server", "error", err)
@@ -439,22 +458,23 @@ func (h *Handler) GetInviteInfo(c *gin.Context) {
 		expiresAt   *time.Time
 		isRevoked   bool
 		maxUses     *int
-		useCount    int
-		serverName  string
-		serverIcon  *string
-		memberCount int
+		useCount     int
+		serverName   string
+		serverIcon   *string
+		serverBanner *string
+		memberCount  int
 	)
 
 	err := h.db.QueryRow(`
 		SELECT si.server_id, si.expires_at, si.is_revoked, si.max_uses, si.use_count,
-		       s.name, s.icon_url,
+		       s.name, s.icon_url, s.banner_url,
 		       (SELECT COUNT(*) FROM server_members WHERE server_id = s.id)
 		FROM server_invites si
 		INNER JOIN servers s ON si.server_id = s.id
 		WHERE si.code = $1
 	`, code).Scan(
 		&serverID, &expiresAt, &isRevoked, &maxUses, &useCount,
-		&serverName, &serverIcon, &memberCount,
+		&serverName, &serverIcon, &serverBanner, &memberCount,
 	)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Invalid invite code"})
@@ -471,9 +491,10 @@ func (h *Handler) GetInviteInfo(c *gin.Context) {
 		(maxUses == nil || *maxUses == 0 || useCount < *maxUses)
 
 	c.JSON(http.StatusOK, gin.H{
-		"server_name":  serverName,
-		"server_icon":  serverIcon,
-		"member_count": memberCount,
-		"valid":        valid,
+		"server_name":   serverName,
+		"server_icon":   serverIcon,
+		"server_banner": serverBanner,
+		"member_count":  memberCount,
+		"valid":         valid,
 	})
 }

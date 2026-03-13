@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 )
@@ -30,17 +31,19 @@ func isValidCiphertext(content string) bool {
 
 // Handler handles message-related requests
 type Handler struct {
-	db  *sql.DB
-	log *logger.Logger
-	hub *websocket.Hub
+	db       *sql.DB
+	log      *logger.Logger
+	hub      *websocket.Hub
+	resolver *rbac.Resolver
 }
 
 // NewHandler creates a new message handler
-func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub) *Handler {
+func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, resolver *rbac.Resolver) *Handler {
 	return &Handler{
-		db:  db,
-		log: log,
-		hub: hub,
+		db:       db,
+		log:      log,
+		hub:      hub,
+		resolver: resolver,
 	}
 }
 
@@ -87,25 +90,32 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		}
 	}
 
-	// Check if user is a member of the channel's server
-	var isMember bool
-	memberQuery := `
-		SELECT EXISTS(
-			SELECT 1 FROM channels c
-			INNER JOIN server_members sm ON c.server_id = sm.server_id
-			WHERE c.id = $1 AND sm.user_id = $2
-		)
-	`
-
-	err := h.db.QueryRow(memberQuery, channelID, userID).Scan(&isMember)
+	// Check membership and get server ID for RBAC
+	var serverID string
+	err := h.db.QueryRow(`
+		SELECT c.server_id FROM channels c
+		INNER JOIN server_members sm ON c.server_id = sm.server_id
+		WHERE c.id = $1 AND sm.user_id = $2
+	`, channelID, userID).Scan(&serverID)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this channel's server"})
+		return
+	}
 	if err != nil {
 		h.log.Error("Failed to check membership", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch messages"})
 		return
 	}
 
-	if !isMember {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this channel's server"})
+	// Check PermReadMessageHistory (with channelID for SBAC per-channel overrides)
+	hasPerm, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, channelID, rbac.PermReadMessageHistory)
+	if permErr != nil {
+		h.log.Error("Failed to check permissions", "error", permErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch messages"})
+		return
+	}
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions"})
 		return
 	}
 
@@ -117,7 +127,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		// Get messages before a specific message ID
 		query = `
 			SELECT m.id, m.channel_id, m.user_id, m.content, m.is_encrypted, COALESCE(m.key_version, 1),
-			       m.edited_at, m.created_at, m.updated_at, u.username, u.display_name, u.avatar_url
+			       m.embeds_suppressed, m.edited_at, m.created_at, m.updated_at, u.username, u.display_name, u.avatar_url
 			FROM messages m
 			INNER JOIN users u ON m.user_id = u.id
 			WHERE m.channel_id = $1
@@ -130,7 +140,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		// Get most recent messages
 		query = `
 			SELECT m.id, m.channel_id, m.user_id, m.content, m.is_encrypted, COALESCE(m.key_version, 1),
-			       m.edited_at, m.created_at, m.updated_at, u.username, u.display_name, u.avatar_url
+			       m.embeds_suppressed, m.edited_at, m.created_at, m.updated_at, u.username, u.display_name, u.avatar_url
 			FROM messages m
 			INNER JOIN users u ON m.user_id = u.id
 			WHERE m.channel_id = $1
@@ -158,6 +168,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 			&msg.Content,
 			&msg.IsEncrypted,
 			&msg.KeyVersion,
+			&msg.EmbedsSuppressed,
 			&msg.EditedAt,
 			&msg.CreatedAt,
 			&msg.UpdatedAt,
@@ -195,25 +206,35 @@ func (h *Handler) SendMessage(c *gin.Context) {
 		return
 	}
 
-	// Check if user is a member of the channel's server
-	var isMember bool
-	memberQuery := `
-		SELECT EXISTS(
-			SELECT 1 FROM channels c
-			INNER JOIN server_members sm ON c.server_id = sm.server_id
-			WHERE c.id = $1 AND sm.user_id = $2
-		)
-	`
-
-	err := h.db.QueryRow(memberQuery, req.ChannelID, userID).Scan(&isMember)
+	// Check membership, get server ID for RBAC, and fetch server embed policy
+	var serverID string
+	var serverAllowEmbeds bool
+	err := h.db.QueryRow(`
+		SELECT c.server_id, s.allow_embedded_content
+		FROM channels c
+		INNER JOIN server_members sm ON c.server_id = sm.server_id
+		INNER JOIN servers s ON c.server_id = s.id
+		WHERE c.id = $1 AND sm.user_id = $2
+	`, req.ChannelID, userID).Scan(&serverID, &serverAllowEmbeds)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this channel's server"})
+		return
+	}
 	if err != nil {
 		h.log.Error("Failed to check membership", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send message"})
 		return
 	}
 
-	if !isMember {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this channel's server"})
+	// Check PermSendMessages (with channelID for SBAC per-channel overrides)
+	hasPerm, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, req.ChannelID, rbac.PermSendMessages)
+	if permErr != nil {
+		h.log.Error("Failed to check permissions", "error", permErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send message"})
+		return
+	}
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions"})
 		return
 	}
 
@@ -263,11 +284,15 @@ func (h *Handler) SendMessage(c *gin.Context) {
 		}
 	}
 
-	// Create message
+	// Create message — stamp embeds_suppressed based on server policy.
+	// The server is the ONLY entity trusted to set this flag to false (allow).
+	// If server policy is OFF (default), embeds_suppressed = true.
+	embedsSuppressed := !serverAllowEmbeds
+
 	messageID := uuid.New().String()
 	insertQuery := `
-		INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+		INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, embeds_suppressed, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
 		RETURNING created_at, updated_at
 	`
 
@@ -278,8 +303,9 @@ func (h *Handler) SendMessage(c *gin.Context) {
 	message.Content = req.Content
 	message.IsEncrypted = req.IsEncrypted
 	message.KeyVersion = keyVersion
+	message.EmbedsSuppressed = embedsSuppressed
 
-	err = h.db.QueryRow(insertQuery, messageID, req.ChannelID, userID, req.Content, req.IsEncrypted, keyVersion).Scan(
+	err = h.db.QueryRow(insertQuery, messageID, req.ChannelID, userID, req.Content, req.IsEncrypted, keyVersion, embedsSuppressed).Scan(
 		&message.CreatedAt,
 		&message.UpdatedAt,
 	)
@@ -348,7 +374,7 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 		UPDATE messages
 		SET content = $1, edited_at = NOW(), updated_at = NOW()
 		WHERE id = $2
-		RETURNING channel_id, is_encrypted, key_version, edited_at, created_at, updated_at
+		RETURNING channel_id, is_encrypted, key_version, embeds_suppressed, edited_at, created_at, updated_at
 	`
 
 	var message models.Message
@@ -360,6 +386,7 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 		&message.ChannelID,
 		&message.IsEncrypted,
 		&message.KeyVersion,
+		&message.EmbedsSuppressed,
 		&message.EditedAt,
 		&message.CreatedAt,
 		&message.UpdatedAt,
@@ -379,13 +406,14 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 		h.hub.BroadcastToChannel(channelUUID, websocket.OutgoingMessage{
 			Type: "message_update",
 			Data: map[string]interface{}{
-				"id":           messageID,
-				"channel_id":   message.ChannelID,
-				"content":      message.Content,
-				"is_encrypted": message.IsEncrypted,
-				"key_version":  message.KeyVersion,
-				"edited_at":    message.EditedAt,
-				"updated_at":   message.UpdatedAt,
+				"id":                messageID,
+				"channel_id":        message.ChannelID,
+				"content":           message.Content,
+				"is_encrypted":      message.IsEncrypted,
+				"key_version":       message.KeyVersion,
+				"embeds_suppressed":  message.EmbedsSuppressed,
+				"edited_at":         message.EditedAt,
+				"updated_at":        message.UpdatedAt,
 			},
 		})
 	}
@@ -406,16 +434,14 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 
 	// Check if message exists and get author + server info + channel ID
 	var authorID, channelID, serverID string
-	var userRole sql.NullString
 	checkQuery := `
-		SELECT m.user_id, m.channel_id, c.server_id, sm.role
+		SELECT m.user_id, m.channel_id, c.server_id
 		FROM messages m
 		INNER JOIN channels c ON m.channel_id = c.id
-		LEFT JOIN server_members sm ON c.server_id = sm.server_id AND sm.user_id = $2
 		WHERE m.id = $1
 	`
 
-	err := h.db.QueryRow(checkQuery, messageID, userID).Scan(&authorID, &channelID, &serverID, &userRole)
+	err := h.db.QueryRow(checkQuery, messageID).Scan(&authorID, &channelID, &serverID)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Message not found"})
 		return
@@ -425,11 +451,30 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 		return
 	}
 
-	// Check permissions: user must be the author, or owner/admin of the server
-	canDelete := authorID == userID || (userRole.Valid && (userRole.String == "owner" || userRole.String == "admin"))
+	// Author can edit/delete own messages (if they have PermManageOwnMessages).
+	// Others need PermManageAllMessages to delete other people's messages or suppress embeds.
+	canDelete := false
+	if authorID == userID {
+		has, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, channelID, rbac.PermManageOwnMessages)
+		if permErr != nil {
+			h.log.Error("Failed to check PermManageOwnMessages", "error", permErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check permissions"})
+			return
+		}
+		canDelete = has
+	}
+	if !canDelete {
+		has, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, channelID, rbac.PermManageAllMessages)
+		if permErr != nil {
+			h.log.Error("Failed to check PermManageAllMessages", "error", permErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check permissions"})
+			return
+		}
+		canDelete = has
+	}
 
 	if !canDelete {
-		c.JSON(http.StatusForbidden, gin.H{"error": "You can only delete your own messages or be a server admin/owner"})
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
 		return
 	}
 
@@ -458,4 +503,84 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Message deleted successfully"})
+}
+
+// SuppressEmbeds suppresses embedded content on a message (one-way ratchet).
+// Requires PermManageAllMessages. Can only set embeds_suppressed = true, never false.
+// Once suppressed, only the server policy can allow embeds on NEW messages.
+func (h *Handler) SuppressEmbeds(c *gin.Context) {
+	userID := c.GetString("user_id")
+	messageID := c.Param("id")
+
+	// Validate message ID
+	if _, err := uuid.Parse(messageID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid message ID"})
+		return
+	}
+
+	// Get message info for permission check
+	var channelID, serverID string
+	var alreadySuppressed bool
+	checkQuery := `
+		SELECT m.channel_id, c.server_id, m.embeds_suppressed
+		FROM messages m
+		INNER JOIN channels c ON m.channel_id = c.id
+		WHERE m.id = $1
+	`
+
+	err := h.db.QueryRow(checkQuery, messageID).Scan(&channelID, &serverID, &alreadySuppressed)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Message not found"})
+		return
+	} else if err != nil {
+		h.log.Error("Failed to check message for embed suppression", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to suppress embeds"})
+		return
+	}
+
+	// Already suppressed — no-op, return success
+	if alreadySuppressed {
+		c.JSON(http.StatusOK, gin.H{"message": "Embeds already suppressed"})
+		return
+	}
+
+	// Check PermManageAllMessages
+	hasPerm, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, channelID, rbac.PermManageAllMessages)
+	if permErr != nil {
+		h.log.Error("Failed to check permissions", "error", permErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to suppress embeds"})
+		return
+	}
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions"})
+		return
+	}
+
+	// One-way ratchet: suppress only (false → true). Never un-suppress.
+	_, err = h.db.Exec(
+		`UPDATE messages SET embeds_suppressed = TRUE, updated_at = NOW() WHERE id = $1 AND embeds_suppressed = FALSE`,
+		messageID,
+	)
+	if err != nil {
+		h.log.Error("Failed to suppress embeds", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to suppress embeds"})
+		return
+	}
+
+	h.log.Info("Embeds suppressed", "message_id", messageID, "suppressed_by", userID)
+
+	// Broadcast update to channel subscribers so clients hide the embeds
+	channelUUID, parseErr := uuid.Parse(channelID)
+	if parseErr == nil {
+		h.hub.BroadcastToChannel(channelUUID, websocket.OutgoingMessage{
+			Type: "message_update",
+			Data: map[string]interface{}{
+				"id":                messageID,
+				"channel_id":        channelID,
+				"embeds_suppressed": true,
+			},
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Embeds suppressed successfully"})
 }

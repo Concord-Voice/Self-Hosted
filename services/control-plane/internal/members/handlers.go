@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
@@ -18,19 +19,23 @@ import (
 
 // Handler handles member-related requests
 type Handler struct {
-	db    *sql.DB
-	log   *logger.Logger
-	redis *redis.Client
-	hub   *websocket.Hub
+	db       *sql.DB
+	log      *logger.Logger
+	redis    *redis.Client
+	hub      *websocket.Hub
+	resolver *rbac.Resolver
+	audit    *rbac.AuditWriter
 }
 
 // NewHandler creates a new member handler
-func NewHandler(db *sql.DB, log *logger.Logger, redisClient *redis.Client, hub *websocket.Hub) *Handler {
+func NewHandler(db *sql.DB, log *logger.Logger, redisClient *redis.Client, hub *websocket.Hub, resolver *rbac.Resolver, audit *rbac.AuditWriter) *Handler {
 	return &Handler{
-		db:    db,
-		log:   log,
-		redis: redisClient,
-		hub:   hub,
+		db:       db,
+		log:      log,
+		redis:    redisClient,
+		hub:      hub,
+		resolver: resolver,
+		audit:    audit,
 	}
 }
 
@@ -44,18 +49,29 @@ type UpdateMemberRequest struct {
 	Role string `json:"role" binding:"required,oneof=admin member"`
 }
 
+// MemberRoleInfo represents a lightweight role reference for display
+type MemberRoleInfo struct {
+	RoleID             string  `json:"role_id"`
+	RoleName           string  `json:"role_name"`
+	RoleColor          *string `json:"role_color,omitempty"`
+	RoleEmoji          *string `json:"role_emoji,omitempty"`
+	Position           int     `json:"position"`
+	DisplaySeparately  bool    `json:"display_separately"`
+}
+
 // MemberWithUser represents a member with user details
 type MemberWithUser struct {
-	UserID         string  `json:"user_id"`
-	Username       string  `json:"username"`
-	DisplayName    *string `json:"display_name,omitempty"`
-	Bio            *string `json:"bio,omitempty"`
-	AvatarURL      *string `json:"avatar_url,omitempty"`
-	HeaderImageURL *string `json:"header_image_url,omitempty"`
-	ColorScheme    *string `json:"color_scheme,omitempty"`
-	Role           string  `json:"role"`
-	JoinedAt       string  `json:"joined_at"`
-	LastSeen       *int64  `json:"last_seen,omitempty"`
+	UserID         string           `json:"user_id"`
+	Username       string           `json:"username"`
+	DisplayName    *string          `json:"display_name,omitempty"`
+	Bio            *string          `json:"bio,omitempty"`
+	AvatarURL      *string          `json:"avatar_url,omitempty"`
+	HeaderImageURL *string          `json:"header_image_url,omitempty"`
+	ColorScheme    *string          `json:"color_scheme,omitempty"`
+	Role           string           `json:"role"`
+	JoinedAt       string           `json:"joined_at"`
+	LastSeen       *int64           `json:"last_seen,omitempty"`
+	Roles          []MemberRoleInfo `json:"roles"`
 }
 
 // ListMembers returns all members of a server
@@ -154,6 +170,50 @@ func (h *Handler) ListMembers(c *gin.Context) {
 		}
 	}
 
+	// Fetch RBAC roles for all members in this server
+	if len(members) > 0 {
+		roleRows, err := h.db.Query(`
+			SELECT mr.user_id, r.id, r.name, r.color, r.emoji, r.position, r.display_separately
+			FROM member_roles mr
+			INNER JOIN roles r ON mr.role_id = r.id
+			WHERE mr.server_id = $1
+			ORDER BY r.position DESC
+		`, serverID)
+		if err == nil {
+			defer func() { _ = roleRows.Close() }()
+			memberRoleMap := make(map[string][]MemberRoleInfo)
+			for roleRows.Next() {
+				var userID, roleID, roleName string
+				var roleColor, roleEmoji *string
+				var position int
+				var displaySeparately bool
+				if err := roleRows.Scan(&userID, &roleID, &roleName, &roleColor, &roleEmoji, &position, &displaySeparately); err != nil {
+					continue
+				}
+				memberRoleMap[userID] = append(memberRoleMap[userID], MemberRoleInfo{
+					RoleID:            roleID,
+					RoleName:          roleName,
+					RoleColor:         roleColor,
+					RoleEmoji:         roleEmoji,
+					Position:          position,
+					DisplaySeparately: displaySeparately,
+				})
+			}
+			for i := range members {
+				if roles, ok := memberRoleMap[members[i].UserID]; ok {
+					members[i].Roles = roles
+				}
+			}
+		}
+	}
+
+	// Ensure Roles is never null in JSON
+	for i := range members {
+		if members[i].Roles == nil {
+			members[i].Roles = []MemberRoleInfo{}
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{"members": members})
 }
 
@@ -174,25 +234,15 @@ func (h *Handler) AddMember(c *gin.Context) {
 		return
 	}
 
-	// Check if requesting user is owner or admin
-	var role string
-	roleQuery := `
-		SELECT role FROM server_members
-		WHERE server_id = $1 AND user_id = $2
-	`
-
-	err := h.db.QueryRow(roleQuery, serverID, userID).Scan(&role)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this server"})
-		return
-	} else if err != nil {
+	// Check permission to invite members
+	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermInvite)
+	if err != nil {
 		h.log.Error("Failed to check permissions", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add member"})
 		return
 	}
-
-	if role != "owner" && role != "admin" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Only owners and admins can add members"})
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
 		return
 	}
 
@@ -211,9 +261,21 @@ func (h *Handler) AddMember(c *gin.Context) {
 		return
 	}
 
-	// TODO: [RBAC] Currently grants full access as 'member' role with no restrictions.
-	// When RBAC/SBAC is implemented, new members should receive a configurable default
-	// role with restricted permissions.
+	// Check if target user is banned from this server
+	var isBanned bool
+	if err := h.db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM server_bans WHERE server_id = $1 AND user_id = $2)`,
+		serverID, req.UserID,
+	).Scan(&isBanned); err != nil {
+		h.log.Error("Failed to check ban status", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add member"})
+		return
+	}
+	if isBanned {
+		c.JSON(http.StatusForbidden, gin.H{"error": "User is banned from this server"})
+		return
+	}
+
 	insertQuery := `
 		INSERT INTO server_members (server_id, user_id, role, joined_at)
 		VALUES ($1, $2, 'member', NOW())
@@ -235,6 +297,14 @@ func (h *Handler) AddMember(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add member"})
 		return
 	}
+
+	// Assign all default roles (including @all) to the new member
+	_, _ = h.db.Exec(`
+		INSERT INTO member_roles (server_id, user_id, role_id)
+		SELECT $1, $2, id FROM roles
+		WHERE server_id = $1 AND is_default = TRUE
+		ON CONFLICT DO NOTHING
+	`, serverID, req.UserID)
 
 	h.log.Info("Member added", "server_id", serverID, "new_member", req.UserID, "added_by", userID)
 
@@ -263,38 +333,37 @@ func (h *Handler) UpdateMember(c *gin.Context) {
 		return
 	}
 
-	// Get requesting user's role and target user's role
-	var requesterRole, targetRole sql.NullString
-	roleQuery := `
-		SELECT
-			(SELECT role FROM server_members WHERE server_id = $1 AND user_id = $2) as requester_role,
-			(SELECT role FROM server_members WHERE server_id = $1 AND user_id = $3) as target_role
-	`
-
-	err := h.db.QueryRow(roleQuery, serverID, userID, targetUserID).Scan(&requesterRole, &targetRole)
+	// Check permission to assign roles
+	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageRolesAssign)
 	if err != nil {
-		h.log.Error("Failed to check roles", "error", err)
+		h.log.Error("Failed to check permissions", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update member"})
 		return
 	}
-
-	// Check permissions
-	if !requesterRole.Valid {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this server"})
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
 		return
 	}
 
-	if requesterRole.String != "owner" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Only the server owner can change member roles"})
-		return
-	}
-
-	if !targetRole.Valid {
+	// Verify target is a member
+	var targetExists bool
+	_ = h.db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2)`,
+		serverID, targetUserID,
+	).Scan(&targetExists)
+	if !targetExists {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User is not a member of this server"})
 		return
 	}
 
-	if targetRole.String == "owner" {
+	// Cannot change the owner's legacy role
+	var ownerID string
+	if err := h.db.QueryRow(`SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID); err != nil {
+		h.log.Error("Failed to get server owner", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update member"})
+		return
+	}
+	if targetUserID == ownerID {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Cannot change the owner's role"})
 		return
 	}
@@ -340,55 +409,63 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 		return
 	}
 
-	// Get roles
-	var requesterRole, targetRole sql.NullString
-	roleQuery := `
-		SELECT
-			(SELECT role FROM server_members WHERE server_id = $1 AND user_id = $2) as requester_role,
-			(SELECT role FROM server_members WHERE server_id = $1 AND user_id = $3) as target_role
-	`
-
-	err := h.db.QueryRow(roleQuery, serverID, userID, targetUserID).Scan(&requesterRole, &targetRole)
-	if err != nil {
-		h.log.Error("Failed to check roles", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
-		return
-	}
-
-	if !requesterRole.Valid {
+	// Verify both users are members
+	var requesterExists, targetExists bool
+	err := h.db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2)`,
+		serverID, userID,
+	).Scan(&requesterExists)
+	if err != nil || !requesterExists {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this server"})
 		return
 	}
-
-	if !targetRole.Valid {
+	err = h.db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2)`,
+		serverID, targetUserID,
+	).Scan(&targetExists)
+	if err != nil || !targetExists {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User is not a member of this server"})
 		return
 	}
 
-	// Check permissions
+	// Check if target is the server owner (owner cannot be removed)
+	var ownerID string
+	if err := h.db.QueryRow(`SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID); err != nil {
+		h.log.Error("Failed to get server owner", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+		return
+	}
+	isOwner := userID == ownerID
+
 	isSelfRemoval := userID == targetUserID
 
 	if !isSelfRemoval {
-		// Kicking someone else - need to be owner or admin
-		if requesterRole.String != "owner" && requesterRole.String != "admin" {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Only owners and admins can remove members"})
+		// Kicking someone else — need PermKick + role hierarchy check
+		hasPerm, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermKick)
+		if permErr != nil {
+			h.log.Error("Failed to check permissions", "error", permErr)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+			return
+		}
+		if !hasPerm {
+			c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
 			return
 		}
 
 		// Can't kick the owner
-		if targetRole.String == "owner" {
+		if targetUserID == ownerID {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Cannot remove the server owner"})
 			return
 		}
 
-		// Admins can't kick other admins or the owner
-		if requesterRole.String == "admin" && (targetRole.String == "admin" || targetRole.String == "owner") {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Admins cannot remove other admins or the owner"})
+		// Enforce role hierarchy (actor must outrank target)
+		if hierErr := h.resolver.CheckHierarchy(c.Request.Context(), serverID, userID, targetUserID); hierErr != nil {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Cannot remove a member with equal or higher role position"})
 			return
 		}
 	} else {
-		// Self-removal (leaving) - owner can't leave their own server
-		if requesterRole.String == "owner" {
+		// Self-removal (leaving) — owner can't leave their own server
+		if isOwner {
 			c.JSON(http.StatusForbidden, gin.H{"error": "Server owner cannot leave. Delete the server or transfer ownership first."})
 			return
 		}
@@ -482,6 +559,210 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 	h.triggerKeyRevocationsForServer(serverID, targetUserID, userID)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Member " + action + " successfully"})
+}
+
+// BanRequest represents a request to ban a member
+type BanRequest struct {
+	Reason string `json:"reason"`
+}
+
+// BannedMember represents a banned user
+type BannedMember struct {
+	ID           string  `json:"id"`
+	UserID       string  `json:"user_id"`
+	Username     string  `json:"username"`
+	DisplayName  *string `json:"display_name,omitempty"`
+	AvatarURL    *string `json:"avatar_url,omitempty"`
+	BannedBy     *string `json:"banned_by,omitempty"`
+	BannedByName *string `json:"banned_by_name,omitempty"`
+	Reason       *string `json:"reason,omitempty"`
+	CreatedAt    string  `json:"created_at"`
+}
+
+// BanMember bans a member from a server (removes + prevents rejoin)
+func (h *Handler) BanMember(c *gin.Context) {
+	userID := c.GetString("user_id")
+	serverID := c.Param("id")
+	targetUserID := c.Param("user_id")
+
+	if _, err := uuid.Parse(serverID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		return
+	}
+	if _, err := uuid.Parse(targetUserID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return
+	}
+
+	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermBan)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to ban member"})
+		return
+	}
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		return
+	}
+
+	var ownerID string
+	if err := h.db.QueryRow(`SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID); err != nil {
+		h.log.Error("Failed to get server owner", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to ban member"})
+		return
+	}
+	if targetUserID == ownerID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Cannot ban the server owner"})
+		return
+	}
+	if targetUserID == userID {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot ban yourself"})
+		return
+	}
+
+	if hierErr := h.resolver.CheckHierarchy(c.Request.Context(), serverID, userID, targetUserID); hierErr != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Cannot ban a member with equal or higher role position"})
+		return
+	}
+
+	var req BanRequest
+	_ = c.ShouldBindJSON(&req)
+
+	tx, err := h.db.Begin()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to ban member"})
+		return
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			h.log.Error("Failed to rollback", "error", rbErr)
+		}
+	}()
+
+	var reason *string
+	if req.Reason != "" {
+		reason = &req.Reason
+	}
+	_, err = tx.Exec(`
+		INSERT INTO server_bans (server_id, user_id, banned_by, reason)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (server_id, user_id) DO UPDATE SET
+			banned_by = EXCLUDED.banned_by,
+			reason = EXCLUDED.reason,
+			created_at = NOW()
+	`, serverID, targetUserID, userID, reason)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to ban member"})
+		return
+	}
+
+	_, _ = tx.Exec(`DELETE FROM server_members WHERE server_id = $1 AND user_id = $2`, serverID, targetUserID)
+	_, _ = tx.Exec(`DELETE FROM member_roles WHERE server_id = $1 AND user_id = $2`, serverID, targetUserID)
+	_, _ = tx.Exec(`DELETE FROM channel_keys WHERE user_id = $1 AND channel_id IN (SELECT id FROM channels WHERE server_id = $2)`, targetUserID, serverID)
+	_, _ = tx.Exec(`DELETE FROM pending_key_requests WHERE user_id = $1 AND channel_id IN (SELECT id FROM channels WHERE server_id = $2)`, targetUserID, serverID)
+	_, _ = tx.Exec(`DELETE FROM channel_read_states WHERE user_id = $1 AND channel_id IN (SELECT id FROM channels WHERE server_id = $2)`, targetUserID, serverID)
+
+	if err := tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to ban member"})
+		return
+	}
+
+	if h.audit != nil {
+		_ = h.audit.Log(c.Request.Context(), serverID, &userID, "member_banned", "member", &targetUserID, //nolint:errcheck
+			map[string]interface{}{"reason": req.Reason})
+	}
+
+	serverUUID, _ := uuid.Parse(serverID)
+	h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+		Type: "member_removed",
+		Data: map[string]interface{}{
+			"server_id": serverID,
+			"user_id":   targetUserID,
+			"reason":    "banned",
+		},
+	})
+
+	h.triggerKeyRevocationsForServer(serverID, targetUserID, userID)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Member banned"})
+}
+
+// UnbanMember removes a ban from a server
+func (h *Handler) UnbanMember(c *gin.Context) {
+	userID := c.GetString("user_id")
+	serverID := c.Param("id")
+	targetUserID := c.Param("user_id")
+
+	if _, err := uuid.Parse(serverID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		return
+	}
+	if _, err := uuid.Parse(targetUserID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return
+	}
+
+	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermBan)
+	if err != nil || !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		return
+	}
+
+	result, err := h.db.Exec(`DELETE FROM server_bans WHERE server_id = $1 AND user_id = $2`, serverID, targetUserID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to unban member"})
+		return
+	}
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "User is not banned"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Member unbanned"})
+}
+
+// ListBans returns all banned members for a server
+func (h *Handler) ListBans(c *gin.Context) {
+	userID := c.GetString("user_id")
+	serverID := c.Param("id")
+
+	if _, err := uuid.Parse(serverID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		return
+	}
+
+	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermBan)
+	if err != nil || !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		return
+	}
+
+	dbRows, err := h.db.Query(`
+		SELECT sb.id, sb.user_id, u.username, u.display_name, u.avatar_url,
+		       sb.banned_by, bu.username, sb.reason, sb.created_at
+		FROM server_bans sb
+		INNER JOIN users u ON sb.user_id = u.id
+		LEFT JOIN users bu ON sb.banned_by = bu.id
+		WHERE sb.server_id = $1
+		ORDER BY sb.created_at DESC
+	`, serverID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch bans"})
+		return
+	}
+	defer func() { _ = dbRows.Close() }()
+
+	bans := []BannedMember{}
+	for dbRows.Next() {
+		var b BannedMember
+		if err := dbRows.Scan(&b.ID, &b.UserID, &b.Username, &b.DisplayName, &b.AvatarURL,
+			&b.BannedBy, &b.BannedByName, &b.Reason, &b.CreatedAt); err != nil {
+			continue
+		}
+		bans = append(bans, b)
+	}
+
+	c.JSON(http.StatusOK, bans)
 }
 
 // triggerKeyRevocationsForServer creates key_revocations records and broadcasts

@@ -669,18 +669,25 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		return
 	}
 
-	// Server-side encryption enforcement: if channel is E2EE, reject plaintext messages (fail-closed)
+	// Server-side encryption enforcement + embed policy lookup
 	var channelEncrypted bool
-	encErr := h.db.QueryRow(`SELECT is_encrypted FROM channels WHERE id = $1`, channelUUID).Scan(&channelEncrypted)
+	var serverAllowEmbeds bool
+	encErr := h.db.QueryRow(
+		`SELECT c.is_encrypted, s.allow_embedded_content
+		 FROM channels c INNER JOIN servers s ON c.server_id = s.id
+		 WHERE c.id = $1`, channelUUID,
+	).Scan(&channelEncrypted, &serverAllowEmbeds)
 	if encErr != nil {
-		log.Printf("Failed to check channel encryption status: %v", encErr)
-		h.sendError(msg.ClientID, "Failed to verify channel encryption status")
+		log.Printf("Failed to check channel encryption/embed status: %v", encErr)
+		h.sendError(msg.ClientID, "Failed to verify channel status")
 		return
 	}
 	if channelEncrypted && !isEncrypted {
 		h.sendError(msg.ClientID, "E2EE channel requires encrypted messages")
 		return
 	}
+	// Stamp embeds_suppressed based on server policy (server is the only trusted source)
+	embedsSuppressed := !serverAllowEmbeds
 
 	// Epoch enforcement: reject messages encrypted with a revoked key epoch
 	if isEncrypted && keyVersion > 0 {
@@ -704,14 +711,14 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		}
 	}
 
-	// Persist message to database
+	// Persist message to database (embeds_suppressed stamped by server policy)
 	messageID := uuid.New()
 	var createdAt, updatedAt time.Time
 	err = h.db.QueryRow(
-		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, NOW(), NOW())
+		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, embeds_suppressed, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
 		 RETURNING created_at, updated_at`,
-		messageID, channelUUID, msg.UserID, content, isEncrypted, keyVersion,
+		messageID, channelUUID, msg.UserID, content, isEncrypted, keyVersion, embedsSuppressed,
 	).Scan(&createdAt, &updatedAt)
 	if err != nil {
 		log.Printf("Failed to persist message: %v", err)
@@ -747,17 +754,18 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		Data: OutgoingMessage{
 			Type: "message",
 			Data: map[string]interface{}{
-				"id":           messageID,
-				"channel_id":   channelUUID,
-				"user_id":      msg.UserID,
-				"username":     client.Username,
-				"display_name": client.DisplayName,
-				"avatar_url":   client.AvatarURL,
-				"content":      content,
-				"is_encrypted": isEncrypted,
-				"key_version":  keyVersion,
-				"created_at":   createdAt,
-				"updated_at":   updatedAt,
+				"id":                messageID,
+				"channel_id":        channelUUID,
+				"user_id":           msg.UserID,
+				"username":          client.Username,
+				"display_name":      client.DisplayName,
+				"avatar_url":        client.AvatarURL,
+				"content":           content,
+				"is_encrypted":      isEncrypted,
+				"key_version":       keyVersion,
+				"embeds_suppressed": embedsSuppressed,
+				"created_at":        createdAt,
+				"updated_at":        updatedAt,
 			},
 		},
 	}
@@ -1555,10 +1563,11 @@ func (h *Hub) handleServerUpdate(msg IncomingMessage) {
 	// Re-query server info from DB
 	var name string
 	var iconURL *string
+	var bannerURL *string
 	err = h.db.QueryRow(
-		"SELECT name, icon_url FROM servers WHERE id = $1",
+		"SELECT name, icon_url, banner_url FROM servers WHERE id = $1",
 		serverID,
-	).Scan(&name, &iconURL)
+	).Scan(&name, &iconURL, &bannerURL)
 	if err != nil {
 		log.Printf("Failed to refresh server info for %s: %v", serverID, err)
 		return
@@ -1568,9 +1577,10 @@ func (h *Hub) handleServerUpdate(msg IncomingMessage) {
 	broadcastMsg := OutgoingMessage{
 		Type: "server_updated",
 		Data: map[string]interface{}{
-			"server_id": serverID.String(),
-			"name":      name,
-			"icon_url":  iconURL,
+			"server_id":  serverID.String(),
+			"name":       name,
+			"icon_url":   iconURL,
+			"banner_url": bannerURL,
 		},
 	}
 	data, err := json.Marshal(broadcastMsg)

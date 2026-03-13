@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -102,14 +103,15 @@ func (h *Handler) CreateChannelGroup(c *gin.Context) {
 		return
 	}
 
-	// Check owner/admin role
-	role, err := h.getServerRole(serverID, userID)
+	// Check permission to manage channels
+	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageChannels)
 	if err != nil {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this server"})
+		h.log.Error("Failed to check permissions", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create channel group"})
 		return
 	}
-	if role != "owner" && role != "admin" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Only owners and admins can create channel groups"})
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
 		return
 	}
 
@@ -185,9 +187,14 @@ func (h *Handler) UpdateChannelGroup(c *gin.Context) {
 		return
 	}
 
-	role, err := h.getServerRole(serverID, userID)
-	if err != nil || (role != "owner" && role != "admin") {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Only owners and admins can update channel groups"})
+	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageChannels)
+	if err != nil {
+		h.log.Error("Failed to check permissions", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update channel group"})
+		return
+	}
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
 		return
 	}
 
@@ -252,9 +259,14 @@ func (h *Handler) DeleteChannelGroup(c *gin.Context) {
 		return
 	}
 
-	role, err := h.getServerRole(serverID, userID)
-	if err != nil || (role != "owner" && role != "admin") {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Only owners and admins can delete channel groups"})
+	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageChannels)
+	if err != nil {
+		h.log.Error("Failed to check permissions", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete channel group"})
+		return
+	}
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
 		return
 	}
 
@@ -300,9 +312,14 @@ func (h *Handler) ReorderChannels(c *gin.Context) {
 		return
 	}
 
-	role, err := h.getServerRole(serverID, userID)
-	if err != nil || (role != "owner" && role != "admin") {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Only owners and admins can reorder channels"})
+	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageChannels)
+	if err != nil {
+		h.log.Error("Failed to check permissions", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reorder channels"})
+		return
+	}
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
 		return
 	}
 
@@ -354,12 +371,3 @@ func (h *Handler) ReorderChannels(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Channels reordered"})
 }
 
-// getServerRole returns the user's role in a server, or error if not a member
-func (h *Handler) getServerRole(serverID, userID string) (string, error) {
-	var role string
-	err := h.db.QueryRow(
-		`SELECT role FROM server_members WHERE server_id = $1 AND user_id = $2`,
-		serverID, userID,
-	).Scan(&role)
-	return role, err
-}

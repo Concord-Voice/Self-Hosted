@@ -117,16 +117,16 @@ func TestUpdateMember_ChangeRole(t *testing.T) {
 func TestUpdateMember_NotOwner(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "roleown2")
-	admin := ts.CreateTestUser(t, "roleadm")
 	member := ts.CreateTestUser(t, "rolemem2")
+	target := ts.CreateTestUser(t, "roletarget")
 	serverID := ts.CreateTestServer(t, owner.ID, "Role Server 2")
-	ts.AddMemberToServer(t, serverID, admin.ID, "admin")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
+	ts.AddMemberToServer(t, serverID, target.ID, "member")
 
-	// Admin tries to change role — only owner can
-	w := ts.DoRequest("PATCH", "/api/v1/servers/"+serverID+"/members/"+member.ID, map[string]interface{}{
+	// Plain member (no PermManageRolesAssign) tries to change role — expect 403
+	w := ts.DoRequest("PATCH", "/api/v1/servers/"+serverID+"/members/"+target.ID, map[string]interface{}{
 		"role": "admin",
-	}, testhelpers.AuthHeaders(admin.AccessToken))
+	}, testhelpers.AuthHeaders(member.AccessToken))
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }

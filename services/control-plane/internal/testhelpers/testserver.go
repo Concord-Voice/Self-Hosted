@@ -12,6 +12,7 @@ import (
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/api"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
@@ -155,6 +156,26 @@ func (ts *TestServer) CreateTestServer(t *testing.T, ownerID, name string) strin
 		t.Fatalf("testhelpers: failed to add owner to server: %v", err)
 	}
 
+	// Create @all default role with base permissions (RBAC)
+	allRoleID := uuid.New().String()
+	_, err = ts.DB.Exec(
+		`INSERT INTO roles (id, server_id, name, position, permissions, is_default, is_managed)
+		 VALUES ($1, $2, '@all', 0, $3, TRUE, TRUE)`,
+		allRoleID, serverID, int64(rbac.BasePermissions),
+	)
+	if err != nil {
+		t.Fatalf("testhelpers: failed to create @all role: %v", err)
+	}
+
+	// Assign @all role to the owner
+	_, err = ts.DB.Exec(
+		`INSERT INTO member_roles (server_id, user_id, role_id) VALUES ($1, $2, $3)`,
+		serverID, ownerID, allRoleID,
+	)
+	if err != nil {
+		t.Fatalf("testhelpers: failed to assign @all role: %v", err)
+	}
+
 	return serverID
 }
 
@@ -184,6 +205,38 @@ func (ts *TestServer) AddMemberToServer(t *testing.T, serverID, userID, role str
 	)
 	if err != nil {
 		t.Fatalf("testhelpers: failed to add member to server: %v", err)
+	}
+
+	// Assign all default roles (including @all) to the new member
+	_, err = ts.DB.Exec(`
+		INSERT INTO member_roles (server_id, user_id, role_id)
+		SELECT $1, $2, id FROM roles
+		WHERE server_id = $1 AND is_default = TRUE
+		ON CONFLICT DO NOTHING
+	`, serverID, userID)
+	if err != nil {
+		t.Fatalf("testhelpers: failed to assign default roles: %v", err)
+	}
+
+	// Admins need an RBAC role with AdminPermissions (resolver uses roles table, not legacy role column)
+	if role == "admin" {
+		adminRoleID := uuid.New().String()
+		_, err = ts.DB.Exec(
+			`INSERT INTO roles (id, server_id, name, position, permissions, is_default, is_managed)
+			 VALUES ($1, $2, 'admin', 10, $3, FALSE, TRUE)
+			 ON CONFLICT DO NOTHING`,
+			adminRoleID, serverID, int64(rbac.AdminPermissions),
+		)
+		if err != nil {
+			t.Fatalf("testhelpers: failed to create admin role: %v", err)
+		}
+		_, err = ts.DB.Exec(
+			`INSERT INTO member_roles (server_id, user_id, role_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+			serverID, userID, adminRoleID,
+		)
+		if err != nil {
+			t.Fatalf("testhelpers: failed to assign admin role: %v", err)
+		}
 	}
 }
 

@@ -878,6 +878,7 @@ type privacySettingsResponse struct {
 	SearchableByUsername  bool   `json:"searchable_by_username"`
 	SearchableByEmail     bool   `json:"searchable_by_email"`
 	SearchableByPhone     bool   `json:"searchable_by_phone"`
+	AllowEmbeddedContent  bool   `json:"allow_embedded_content"`
 	UpdatedAt             string `json:"updated_at,omitempty"`
 }
 
@@ -890,20 +891,28 @@ func (h *Handler) GetPrivacySettings(c *gin.Context) {
 	var ps privacySettingsResponse
 	err := h.db.QueryRow(`
 		SELECT messages_friends_only, messages_server_members, dm_privacy_level, dm_friends_of_friends,
-		       auto_accept_friend_codes, searchable_by_username, searchable_by_email, searchable_by_phone, updated_at
+		       auto_accept_friend_codes, searchable_by_username, searchable_by_email, searchable_by_phone,
+		       allow_embedded_content, updated_at
 		FROM privacy_settings
 		WHERE user_id = $1
 	`, userID).Scan(
 		&ps.MessagesFriendsOnly, &ps.MessagesServerMembers, &ps.DMPrivacyLevel, &ps.DMFriendsOfFriends,
-		&ps.AutoAcceptFriendCodes, &ps.SearchableByUsername, &ps.SearchableByEmail, &ps.SearchableByPhone, &ps.UpdatedAt,
+		&ps.AutoAcceptFriendCodes, &ps.SearchableByUsername, &ps.SearchableByEmail, &ps.SearchableByPhone,
+		&ps.AllowEmbeddedContent, &ps.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
-		// Return defaults matching the schema defaults
+		// Return full defaults matching the schema defaults (all fields explicit)
 		c.JSON(http.StatusOK, gin.H{
 			"privacy": privacySettingsResponse{
 				MessagesFriendsOnly:   true,
 				MessagesServerMembers: true,
 				DMPrivacyLevel:        2,
+				DMFriendsOfFriends:    false,
+				AutoAcceptFriendCodes: false,
+				SearchableByUsername:  false,
+				SearchableByEmail:     false,
+				SearchableByPhone:     false,
+				AllowEmbeddedContent:  false,
 			},
 		})
 		return
@@ -927,6 +936,7 @@ type updatePrivacyRequest struct {
 	SearchableByUsername  *bool `json:"searchable_by_username"`
 	SearchableByEmail     *bool `json:"searchable_by_email"`
 	SearchableByPhone     *bool `json:"searchable_by_phone"`
+	AllowEmbeddedContent  *bool `json:"allow_embedded_content"`
 }
 
 // UpdatePrivacySettings updates the current user's privacy settings.
@@ -1000,6 +1010,12 @@ func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
 	if req.SearchableByPhone != nil {
 		setClauses = append(setClauses, fmt.Sprintf("searchable_by_phone = $%d", argIdx))
 		args = append(args, *req.SearchableByPhone)
+		argIdx++
+	}
+	if req.AllowEmbeddedContent != nil {
+		setClauses = append(setClauses, fmt.Sprintf("allow_embedded_content = $%d", argIdx))
+		args = append(args, *req.AllowEmbeddedContent)
+		argIdx++ //nolint:ineffassign // keep consistent with other fields for future additions
 	}
 
 	if len(setClauses) == 0 {
@@ -1015,13 +1031,15 @@ func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
 		INSERT INTO privacy_settings (user_id) VALUES ($1)
 		ON CONFLICT (user_id) DO UPDATE SET %s
 		RETURNING messages_friends_only, messages_server_members, dm_privacy_level, dm_friends_of_friends,
-		          auto_accept_friend_codes, searchable_by_username, searchable_by_email, searchable_by_phone, updated_at
+		          auto_accept_friend_codes, searchable_by_username, searchable_by_email, searchable_by_phone,
+		          allow_embedded_content, updated_at
 	`, strings.Join(setClauses, ", "))
 
 	var ps privacySettingsResponse
 	err := h.db.QueryRow(query, args...).Scan(
 		&ps.MessagesFriendsOnly, &ps.MessagesServerMembers, &ps.DMPrivacyLevel, &ps.DMFriendsOfFriends,
-		&ps.AutoAcceptFriendCodes, &ps.SearchableByUsername, &ps.SearchableByEmail, &ps.SearchableByPhone, &ps.UpdatedAt,
+		&ps.AutoAcceptFriendCodes, &ps.SearchableByUsername, &ps.SearchableByEmail, &ps.SearchableByPhone,
+		&ps.AllowEmbeddedContent, &ps.UpdatedAt,
 	)
 	if err != nil {
 		h.log.Error("Failed to update privacy settings", "error", err)

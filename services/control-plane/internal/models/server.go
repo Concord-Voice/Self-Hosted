@@ -5,13 +5,15 @@ import "time"
 
 // Server represents a Concord server (community-style community)
 type Server struct {
-	ID          string    `json:"id" db:"id"`
-	Name        string    `json:"name" db:"name"`
-	IconURL     *string   `json:"icon_url,omitempty" db:"icon_url"`
-	OwnerID     string    `json:"owner_id" db:"owner_id"`
-	E2EEDefault bool      `json:"e2ee_default" db:"e2ee_default"`
-	CreatedAt   time.Time `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
+	ID                   string    `json:"id" db:"id"`
+	Name                 string    `json:"name" db:"name"`
+	IconURL              *string   `json:"icon_url,omitempty" db:"icon_url"`
+	BannerURL            *string   `json:"banner_url,omitempty" db:"banner_url"`
+	OwnerID              string    `json:"owner_id" db:"owner_id"`
+	E2EEDefault          bool      `json:"e2ee_default" db:"e2ee_default"`
+	AllowEmbeddedContent bool      `json:"allow_embedded_content" db:"allow_embedded_content"`
+	CreatedAt            time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // ServerMember represents a user's membership in a server
@@ -52,6 +54,7 @@ type Channel struct {
 	AudioQualityTier *string   `json:"audio_quality_tier,omitempty" db:"audio_quality_tier"` // voice/standard/high/hifi/studio or nil (personal)
 	GroupID              *string   `json:"group_id,omitempty" db:"group_id"`                             // FK to channel_groups; nil = uncategorized
 	LinkedVoiceChannelID *string   `json:"linked_voice_channel_id,omitempty" db:"linked_voice_channel_id"` // Non-nil = hidden text chat for a voice channel
+	SyncPermissions      bool      `json:"sync_permissions" db:"sync_permissions"`                       // Whether channel overrides sync from parent category
 	Position             int       `json:"position" db:"position"`
 	CreatedAt        time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt        time.Time `json:"updated_at" db:"updated_at"`
@@ -69,15 +72,16 @@ type ChannelKey struct {
 
 // Message represents a chat message in a channel
 type Message struct {
-	ID          string     `json:"id" db:"id"`
-	ChannelID   string     `json:"channel_id" db:"channel_id"`
-	UserID      string     `json:"user_id" db:"user_id"`
-	Content     string     `json:"content" db:"content"`
-	IsEncrypted bool       `json:"is_encrypted" db:"is_encrypted"`
-	KeyVersion  int        `json:"key_version" db:"key_version"`
-	EditedAt    *time.Time `json:"edited_at,omitempty" db:"edited_at"`
-	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at" db:"updated_at"`
+	ID               string     `json:"id" db:"id"`
+	ChannelID        string     `json:"channel_id" db:"channel_id"`
+	UserID           string     `json:"user_id" db:"user_id"`
+	Content          string     `json:"content" db:"content"`
+	IsEncrypted      bool       `json:"is_encrypted" db:"is_encrypted"`
+	KeyVersion       int        `json:"key_version" db:"key_version"`
+	EmbedsSuppressed bool       `json:"embeds_suppressed" db:"embeds_suppressed"`
+	EditedAt         *time.Time `json:"edited_at,omitempty" db:"edited_at"`
+	CreatedAt        time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt        time.Time  `json:"updated_at" db:"updated_at"`
 }
 
 // MessageWithUser combines message with user details

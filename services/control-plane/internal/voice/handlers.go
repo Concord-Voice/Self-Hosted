@@ -6,7 +6,9 @@ package voice
 import (
 	"database/sql"
 	"net/http"
+	"strconv"
 
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
@@ -16,19 +18,21 @@ import (
 
 // Handler handles voice-related requests.
 type Handler struct {
-	db  *sql.DB
-	log *logger.Logger
-	hub *websocket.Hub
-	cfg *config.Config
+	db       *sql.DB
+	log      *logger.Logger
+	hub      *websocket.Hub
+	cfg      *config.Config
+	resolver *rbac.Resolver
 }
 
 // NewHandler creates a new voice handler.
-func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, cfg *config.Config) *Handler {
+func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, cfg *config.Config, resolver *rbac.Resolver) *Handler {
 	return &Handler{
-		db:  db,
-		log: log,
-		hub: hub,
-		cfg: cfg,
+		db:       db,
+		log:      log,
+		hub:      hub,
+		cfg:      cfg,
+		resolver: resolver,
 	}
 }
 
@@ -147,12 +151,34 @@ func (h *Handler) AuthorizeJoin(c *gin.Context) {
 		return
 	}
 
+	// Check PermJoinVoice permission (with channelID for SBAC overrides)
+	hasPerm, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, channelID, rbac.PermJoinVoice)
+	if permErr != nil {
+		h.log.Error("Failed to check voice permissions", "error", permErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to authorize"})
+		return
+	}
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions"})
+		return
+	}
+
+	// Get effective permissions for this channel (media plane uses this to enforce
+	// PermSpeak, PermScreenShare, PermMuteMembers, PermDeafenMembers, PermMoveMembers)
+	effectivePerms, permResolveErr := h.resolver.GetEffectivePermissions(c.Request.Context(), serverID, userID, channelID)
+	if permResolveErr != nil {
+		h.log.Error("Failed to resolve effective voice permissions", "error", permResolveErr, "user_id", userID, "channel_id", channelID, "server_id", serverID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to authorize"})
+		return
+	}
+
 	h.log.Info("Voice join authorized", "user_id", userID, "channel_id", channelID, "server_id", serverID)
 
 	c.JSON(http.StatusOK, gin.H{
 		"allowed":          true,
 		"media_server_url": h.cfg.MediaPlaneURL,
 		"ice_servers":      h.cfg.ICEServers(userID),
+		"permissions":      strconv.FormatInt(int64(effectivePerms), 10),
 		"channel": gin.H{
 			"id":                 channelID,
 			"name":               channelName,
@@ -160,5 +186,94 @@ func (h *Handler) AuthorizeJoin(c *gin.Context) {
 			"is_encrypted":       isEncrypted,
 			"audio_quality_tier": audioQualityTier,
 		},
+	})
+}
+
+// AuthorizeVoiceAction checks whether a user has permission to perform a voice
+// moderation action (mute, deafen, move) on a target user. The media plane
+// should call this endpoint before executing moderation commands.
+// POST /channels/:id/voice/authorize-action
+func (h *Handler) AuthorizeVoiceAction(c *gin.Context) {
+	userID := c.GetString("user_id")
+	channelID := c.Param("id")
+
+	if _, err := uuid.Parse(channelID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
+		return
+	}
+
+	var req struct {
+		Action       string `json:"action" binding:"required,oneof=mute deafen move"`
+		TargetUserID string `json:"target_user_id" binding:"required,uuid"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	// Get server ID from channel
+	var serverID string
+	err := h.db.QueryRow(`
+		SELECT c.server_id FROM channels c
+		INNER JOIN server_members sm ON sm.server_id = c.server_id AND sm.user_id = $2
+		WHERE c.id = $1
+	`, channelID, userID).Scan(&serverID)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this server"})
+		return
+	}
+	if err != nil {
+		h.log.Error("Failed to check channel access", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to authorize action"})
+		return
+	}
+
+	// Map action to required permission
+	var perm rbac.Permission
+	switch req.Action {
+	case "mute":
+		perm = rbac.PermMuteMembers
+	case "deafen":
+		perm = rbac.PermDeafenMembers
+	case "move":
+		perm = rbac.PermMoveMembers
+	}
+
+	// Check permission
+	hasPerm, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, channelID, perm)
+	if permErr != nil {
+		h.log.Error("Failed to check voice moderation permission", "error", permErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to authorize action"})
+		return
+	}
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions"})
+		return
+	}
+
+	// Verify target user is a member of this server
+	var targetIsMember bool
+	if err := h.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2)`,
+		serverID, req.TargetUserID).Scan(&targetIsMember); err != nil {
+		h.log.Error("Failed to check target membership", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to authorize action"})
+		return
+	}
+	if !targetIsMember {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Target user is not a member of this server"})
+		return
+	}
+
+	// Hierarchy check: cannot moderate members with equal or higher role
+	if hierErr := h.resolver.CheckHierarchy(c.Request.Context(), serverID, userID, req.TargetUserID); hierErr != nil {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Cannot moderate a member with equal or higher role position"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"allowed":    true,
+		"action":     req.Action,
+		"target_id":  req.TargetUserID,
+		"channel_id": channelID,
 	})
 }

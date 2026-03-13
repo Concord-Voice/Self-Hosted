@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
@@ -15,17 +16,19 @@ import (
 
 // Handler handles channel-related requests
 type Handler struct {
-	db  *sql.DB
-	log *logger.Logger
-	hub *websocket.Hub
+	db       *sql.DB
+	log      *logger.Logger
+	hub      *websocket.Hub
+	resolver *rbac.Resolver
 }
 
 // NewHandler creates a new channel handler
-func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub) *Handler {
+func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, resolver *rbac.Resolver) *Handler {
 	return &Handler{
-		db:  db,
-		log: log,
-		hub: hub,
+		db:       db,
+		log:      log,
+		hub:      hub,
+		resolver: resolver,
 	}
 }
 
@@ -54,7 +57,7 @@ var validAudioQualityTiers = map[string]bool{
 	"minimum": true, "low": true, "moderate": true, "standard": true, "high": true, "hifi": true, "studio": true,
 }
 
-// ListChannels returns all channels in a server
+// ListChannels returns all channels in a server that the user has permission to view.
 func (h *Handler) ListChannels(c *gin.Context) {
 	userID := c.GetString("user_id")
 	serverID := c.Param("id")
@@ -86,9 +89,23 @@ func (h *Handler) ListChannels(c *gin.Context) {
 		return
 	}
 
+	// Get visible channel IDs (RBAC-filtered)
+	visibleIDs, err := h.resolver.GetVisibleChannelIDs(c.Request.Context(), serverID, userID)
+	if err != nil {
+		h.log.Error("Failed to resolve visible channels", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch channels"})
+		return
+	}
+
+	// Build a set for fast lookup
+	visibleSet := make(map[string]bool, len(visibleIDs))
+	for _, id := range visibleIDs {
+		visibleSet[id] = true
+	}
+
 	// Get all channels in the server
 	query := `
-		SELECT id, server_id, name, type, description, emoji, is_encrypted, audio_quality_tier, group_id, linked_voice_channel_id, position, created_at, updated_at
+		SELECT id, server_id, name, type, description, emoji, is_encrypted, audio_quality_tier, group_id, linked_voice_channel_id, sync_permissions, position, created_at, updated_at
 		FROM channels
 		WHERE server_id = $1
 		ORDER BY position ASC, created_at ASC
@@ -116,6 +133,7 @@ func (h *Handler) ListChannels(c *gin.Context) {
 			&channel.AudioQualityTier,
 			&channel.GroupID,
 			&channel.LinkedVoiceChannelID,
+			&channel.SyncPermissions,
 			&channel.Position,
 			&channel.CreatedAt,
 			&channel.UpdatedAt,
@@ -124,7 +142,10 @@ func (h *Handler) ListChannels(c *gin.Context) {
 			h.log.Error("Failed to scan channel", "error", err)
 			continue
 		}
-		channels = append(channels, channel)
+		// Only include channels the user has VIEW permission for
+		if visibleSet[channel.ID] {
+			channels = append(channels, channel)
+		}
 	}
 	if err := rows.Err(); err != nil {
 		h.log.Error("Error iterating channels", "error", err)
@@ -175,25 +196,15 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 		return
 	}
 
-	// Check if user is owner or admin of the server
-	var role string
-	roleQuery := `
-		SELECT role FROM server_members
-		WHERE server_id = $1 AND user_id = $2
-	`
-
-	err := h.db.QueryRow(roleQuery, req.ServerID, userID).Scan(&role)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this server"})
-		return
-	} else if err != nil {
-		h.log.Error("Failed to check membership", "error", err)
+	// Check permission to manage channels
+	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), req.ServerID, userID, "", rbac.PermManageChannels)
+	if err != nil {
+		h.log.Error("Failed to check permissions", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create channel"})
 		return
 	}
-
-	if role != "owner" && role != "admin" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Only owners and admins can create channels"})
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
 		return
 	}
 
@@ -413,7 +424,7 @@ func (h *Handler) GetChannel(c *gin.Context) {
 
 	// Get channel and check if user is a member of the server
 	query := `
-		SELECT c.id, c.server_id, c.name, c.type, c.description, c.emoji, c.is_encrypted, c.audio_quality_tier, c.group_id, c.linked_voice_channel_id, c.position, c.created_at, c.updated_at
+		SELECT c.id, c.server_id, c.name, c.type, c.description, c.emoji, c.is_encrypted, c.audio_quality_tier, c.group_id, c.linked_voice_channel_id, c.sync_permissions, c.position, c.created_at, c.updated_at
 		FROM channels c
 		INNER JOIN server_members sm ON c.server_id = sm.server_id
 		WHERE c.id = $1 AND sm.user_id = $2
@@ -431,6 +442,7 @@ func (h *Handler) GetChannel(c *gin.Context) {
 		&channel.AudioQualityTier,
 		&channel.GroupID,
 		&channel.LinkedVoiceChannelID,
+		&channel.SyncPermissions,
 		&channel.Position,
 		&channel.CreatedAt,
 		&channel.UpdatedAt,
@@ -465,28 +477,27 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 		return
 	}
 
-	// Get channel's server ID and check user's role
+	// Get channel's server ID
 	var serverID string
-	var role string
-	roleQuery := `
-		SELECT c.server_id, sm.role
-		FROM channels c
-		INNER JOIN server_members sm ON c.server_id = sm.server_id
-		WHERE c.id = $1 AND sm.user_id = $2
-	`
-
-	err := h.db.QueryRow(roleQuery, channelID, userID).Scan(&serverID, &role)
+	err := h.db.QueryRow(`SELECT server_id FROM channels WHERE id = $1`, channelID).Scan(&serverID)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found or access denied"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found"})
 		return
 	} else if err != nil {
-		h.log.Error("Failed to check permissions", "error", err)
+		h.log.Error("Failed to look up channel", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update channel"})
 		return
 	}
 
-	if role != "owner" && role != "admin" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Only owners and admins can update channels"})
+	// Check permission to manage channels
+	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageChannels)
+	if err != nil {
+		h.log.Error("Failed to check permissions", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update channel"})
+		return
+	}
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
 		return
 	}
 
@@ -521,7 +532,7 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 			UPDATE channels
 			SET name = $1, type = $2, emoji = $3, audio_quality_tier = $4, group_id = $5, updated_at = NOW()
 			WHERE id = $6
-			RETURNING server_id, emoji, is_encrypted, audio_quality_tier, group_id, linked_voice_channel_id, position, created_at, updated_at
+			RETURNING server_id, emoji, is_encrypted, audio_quality_tier, group_id, linked_voice_channel_id, sync_permissions, position, created_at, updated_at
 		`
 		err = h.db.QueryRow(updateQuery, req.Name, req.Type, req.Emoji, req.AudioQualityTier, groupIDParam, channelID).Scan(
 			&channel.ServerID,
@@ -530,6 +541,7 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 			&channel.AudioQualityTier,
 			&channel.GroupID,
 			&channel.LinkedVoiceChannelID,
+			&channel.SyncPermissions,
 			&channel.Position,
 			&channel.CreatedAt,
 			&channel.UpdatedAt,
@@ -539,7 +551,7 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 			UPDATE channels
 			SET name = $1, type = $2, emoji = $3, audio_quality_tier = $4, updated_at = NOW()
 			WHERE id = $5
-			RETURNING server_id, emoji, is_encrypted, audio_quality_tier, group_id, linked_voice_channel_id, position, created_at, updated_at
+			RETURNING server_id, emoji, is_encrypted, audio_quality_tier, group_id, linked_voice_channel_id, sync_permissions, position, created_at, updated_at
 		`
 		err = h.db.QueryRow(updateQuery, req.Name, req.Type, req.Emoji, req.AudioQualityTier, channelID).Scan(
 			&channel.ServerID,
@@ -548,6 +560,7 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 			&channel.AudioQualityTier,
 			&channel.GroupID,
 			&channel.LinkedVoiceChannelID,
+			&channel.SyncPermissions,
 			&channel.Position,
 			&channel.CreatedAt,
 			&channel.UpdatedAt,
@@ -598,27 +611,27 @@ func (h *Handler) DeleteChannel(c *gin.Context) {
 		return
 	}
 
-	// Get channel's server ID and check user's role
-	var role, serverID string
-	roleQuery := `
-		SELECT c.server_id, sm.role
-		FROM channels c
-		INNER JOIN server_members sm ON c.server_id = sm.server_id
-		WHERE c.id = $1 AND sm.user_id = $2
-	`
-
-	err := h.db.QueryRow(roleQuery, channelID, userID).Scan(&serverID, &role)
+	// Get channel's server ID
+	var serverID string
+	err := h.db.QueryRow(`SELECT server_id FROM channels WHERE id = $1`, channelID).Scan(&serverID)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found or access denied"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found"})
 		return
 	} else if err != nil {
-		h.log.Error("Failed to check permissions", "error", err)
+		h.log.Error("Failed to look up channel", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete channel"})
 		return
 	}
 
-	if role != "owner" && role != "admin" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Only owners and admins can delete channels"})
+	// Check permission to manage channels
+	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageChannels)
+	if err != nil {
+		h.log.Error("Failed to check permissions", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete channel"})
+		return
+	}
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
 		return
 	}
 
@@ -958,15 +971,14 @@ func (h *Handler) DistributeChannelKeys(c *gin.Context) {
 	}
 
 	// Verify the caller is a member and the channel is encrypted
-	var role string
 	var isEncrypted bool
 	err := h.db.QueryRow(
-		`SELECT sm.role, c.is_encrypted
+		`SELECT c.is_encrypted
 		 FROM channels c
 		 INNER JOIN server_members sm ON c.server_id = sm.server_id
 		 WHERE c.id = $1 AND sm.user_id = $2`,
 		channelID, userID,
-	).Scan(&role, &isEncrypted)
+	).Scan(&isEncrypted)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this channel's server"})
 		return
@@ -1353,25 +1365,34 @@ func (h *Handler) RotateKey(c *gin.Context) {
 		return
 	}
 
-	// Verify user is admin/owner of this channel's server
-	var role string
+	// Look up channel's server and verify it's encrypted
 	var serverID string
-	err := h.db.QueryRow(`
-		SELECT c.server_id, sm.role FROM channels c
-		INNER JOIN server_members sm ON c.server_id = sm.server_id AND sm.user_id = $2
-		WHERE c.id = $1 AND c.is_encrypted = TRUE
-	`, channelID, userID).Scan(&serverID, &role)
+	var isEncrypted bool
+	err := h.db.QueryRow(
+		`SELECT server_id, is_encrypted FROM channels WHERE id = $1`, channelID,
+	).Scan(&serverID, &isEncrypted)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found or not encrypted"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found"})
 		return
 	} else if err != nil {
+		h.log.Error("Failed to look up channel for rotation", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to rotate key"})
+		return
+	}
+	if !isEncrypted {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Channel is not encrypted"})
+		return
+	}
+
+	// Check permission to manage crypto rotation
+	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageCryptoRotation)
+	if err != nil {
 		h.log.Error("Failed to check permissions for rotation", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to rotate key"})
 		return
 	}
-
-	if role != "owner" && role != "admin" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Only owners and admins can rotate channel keys"})
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
 		return
 	}
 

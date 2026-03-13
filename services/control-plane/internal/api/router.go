@@ -18,6 +18,7 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/messages"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/mfa"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/servers"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/sessions"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/users"
@@ -71,6 +72,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	}
 	mfaHandler := mfa.NewHandler(db, redis, log, mfaEncKey, cfg.JWTSecret, webauthnSvc, cfg.Environment)
 
+	// Initialize RBAC components (before handlers that depend on resolver)
+	permCache := rbac.NewPermissionCache(redis)
+	rbacResolver := rbac.NewResolver(db, permCache, log)
+	auditWriter := rbac.NewAuditWriter(db, log)
+	rbacHandler := rbac.NewHandler(db, log, redis, hub, rbacResolver, permCache, auditWriter)
+
 	// Initialize handlers
 	authHandler := auth.NewHandler(db, redis, log, cfg.JWTSecret, hub)
 
@@ -79,12 +86,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	mfaHandler.SetLoginCompleter(authHandler)
 	sessionsHandler := sessions.NewHandler(db, redis, log, hub, mfaHandler)
 	usersHandler := users.NewHandler(db, log, hub, mfaHandler)
-	serversHandler := servers.NewHandler(db, log, hub)
-	channelsHandler := channels.NewHandler(db, log, hub)
-	membersHandler := members.NewHandler(db, log, redis, hub)
-	messagesHandler := messages.NewHandler(db, log, hub)
-	invitesHandler := invites.NewHandler(db, log, hub)
-	voiceHandler := voice.NewHandler(db, log, hub, cfg)
+	serversHandler := servers.NewHandler(db, log, hub, rbacResolver)
+	channelsHandler := channels.NewHandler(db, log, hub, rbacResolver)
+	membersHandler := members.NewHandler(db, log, redis, hub, rbacResolver, auditWriter)
+	messagesHandler := messages.NewHandler(db, log, hub, rbacResolver)
+	invitesHandler := invites.NewHandler(db, log, hub, rbacResolver)
+	voiceHandler := voice.NewHandler(db, log, hub, cfg, rbacResolver)
 	dmHandler := dm.NewHandler(db, log, hub, cfg)
 	friendsHandler := friends.NewHandler(db, log, hub)
 	wsHandler := websocket.NewHandler(hub, db, redis, cfg.JWTSecret, cfg.AllowedOrigins)
@@ -414,6 +421,20 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					membersHandler.RemoveMember,
 				)
 
+				// Ban management
+				serverRoutes.POST("/:id/bans/:user_id",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					membersHandler.BanMember,
+				)
+				serverRoutes.DELETE("/:id/bans/:user_id",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					membersHandler.UnbanMember,
+				)
+				serverRoutes.GET("/:id/bans",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					membersHandler.ListBans,
+				)
+
 				// Create invite for server (10 requests per minute)
 				serverRoutes.POST("/:id/invites",
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
@@ -466,6 +487,60 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 				serverRoutes.POST("/:id/read",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					channelsHandler.MarkServerRead,
+				)
+
+				// RBAC: Role management
+				serverRoutes.GET("/:id/roles",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					rbac.RequireMembership(rbacResolver),
+					rbacHandler.ListRoles,
+				)
+				serverRoutes.POST("/:id/roles",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					rbac.RequirePermission(rbacResolver, rbac.PermManageRoles, ""),
+					rbacHandler.CreateRole,
+				)
+				// Register /reorder BEFORE /:role_id to prevent Gin matching "reorder" as a wildcard
+				serverRoutes.PATCH("/:id/roles/reorder",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					rbac.RequirePermission(rbacResolver, rbac.PermManageRoles, ""),
+					rbacHandler.ReorderRoles,
+				)
+				serverRoutes.PATCH("/:id/roles/:role_id",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					rbac.RequirePermission(rbacResolver, rbac.PermManageRoles, ""),
+					rbacHandler.UpdateRole,
+				)
+				serverRoutes.DELETE("/:id/roles/:role_id",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					rbac.RequirePermission(rbacResolver, rbac.PermManageRoles, ""),
+					rbacHandler.DeleteRole,
+				)
+
+				// RBAC: Role assignment
+				serverRoutes.POST("/:id/members/:user_id/roles",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					rbac.RequirePermission(rbacResolver, rbac.PermManageRolesAssign, ""),
+					rbacHandler.AssignRole,
+				)
+				serverRoutes.DELETE("/:id/members/:user_id/roles/:role_id",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					rbac.RequirePermission(rbacResolver, rbac.PermManageRolesAssign, ""),
+					rbacHandler.UnassignRole,
+				)
+
+				// RBAC: Computed server permissions
+				serverRoutes.GET("/:id/permissions",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					rbac.RequireMembership(rbacResolver),
+					rbacHandler.GetMyServerPermissions,
+				)
+
+				// RBAC: Audit log
+				serverRoutes.GET("/:id/audit-log",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					rbac.RequirePermission(rbacResolver, rbac.PermViewAuditLog, ""),
+					rbacHandler.GetAuditLog,
 				)
 			}
 
@@ -529,6 +604,10 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					voiceHandler.AuthorizeJoin,
 				)
+				channelRoutes.POST("/:id/voice/authorize-action",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					voiceHandler.AuthorizeVoiceAction,
+				)
 
 				// Rotate channel encryption key (admin/owner only)
 				channelRoutes.POST("/:id/rotate-key",
@@ -536,6 +615,48 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 					channelsHandler.RotateKey,
 				)
 
+				// RBAC: Channel permission overrides
+				channelRoutes.GET("/:id/overrides",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					rbacHandler.ListChannelOverrides,
+				)
+				channelRoutes.PUT("/:id/overrides",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					rbacHandler.UpsertChannelOverride,
+				)
+				channelRoutes.DELETE("/:id/overrides/:override_id",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					rbacHandler.DeleteChannelOverride,
+				)
+
+				// RBAC: Computed channel permissions
+				channelRoutes.GET("/:id/permissions",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					rbacHandler.GetMyChannelPermissions,
+				)
+
+				// RBAC: Channel permission sync (inherit from parent category)
+				channelRoutes.PUT("/:id/permission-sync",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					rbacHandler.SetChannelPermissionSync,
+				)
+			}
+
+			// Category permission override routes
+			categoryRoutes := protected.Group("/categories")
+			{
+				categoryRoutes.GET("/:id/overrides",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					rbacHandler.ListCategoryOverrides,
+				)
+				categoryRoutes.PUT("/:id/overrides",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					rbacHandler.UpsertCategoryOverride,
+				)
+				categoryRoutes.DELETE("/:id/overrides/:override_id",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					rbacHandler.DeleteCategoryOverride,
+				)
 			}
 
 			// E2EE key management routes (separate group to avoid gin /:id wildcard conflict)
@@ -585,6 +706,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 				messageRoutes.DELETE("/:id",
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					messagesHandler.DeleteMessage,
+				)
+
+				// Suppress embeds on a message (moderator one-way ratchet)
+				messageRoutes.POST("/:id/suppress-embeds",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					messagesHandler.SuppressEmbeds,
 				)
 			}
 
