@@ -271,29 +271,36 @@ func (h *Handler) UpdateRole(c *gin.Context) {
 		return
 	}
 
-	// Hierarchy check: actor can only modify roles below their highest role position
-	var actorMaxPosition int
-	if err := h.db.QueryRow(
-		`SELECT COALESCE(MAX(r.position), 0) FROM member_roles mr INNER JOIN roles r ON mr.role_id = r.id WHERE mr.server_id = $1 AND mr.user_id = $2`,
-		serverID, userID,
-	).Scan(&actorMaxPosition); err != nil {
-		h.log.Error("Failed to get actor role position", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update role"})
-		return
-	}
+	// Fetch server owner — used by hierarchy and escalation bypass checks
 	var ownerID string
 	if err := h.db.QueryRow(`SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID); err != nil {
 		h.log.Error("Failed to get server owner", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update role"})
 		return
 	}
-	if ownerID != userID && rolePosition >= actorMaxPosition {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Cannot modify a role at or above your own position"})
-		return
+	isOwner := ownerID == userID
+
+	// Hierarchy check: actor can only modify roles below their highest role position
+	// Server owner bypasses — owner can modify any role regardless of position
+	if !isOwner {
+		var actorMaxPosition int
+		if err := h.db.QueryRow(
+			`SELECT COALESCE(MAX(r.position), 0) FROM member_roles mr INNER JOIN roles r ON mr.role_id = r.id WHERE mr.server_id = $1 AND mr.user_id = $2`,
+			serverID, userID,
+		).Scan(&actorMaxPosition); err != nil {
+			h.log.Error("Failed to get actor role position", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update role"})
+			return
+		}
+		if rolePosition >= actorMaxPosition {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Cannot modify a role at or above your own position"})
+			return
+		}
 	}
 
 	// Privilege escalation check: if permissions are being changed, new value must be subset of actor's
-	if req.Permissions != nil {
+	// Server owner bypasses — owner can grant any permission including Administrator
+	if !isOwner && req.Permissions != nil {
 		actorPerms, permErr := h.resolver.GetEffectivePermissions(c.Request.Context(), serverID, userID, "")
 		if permErr != nil {
 			h.log.Error("Failed to get actor permissions", "error", permErr)

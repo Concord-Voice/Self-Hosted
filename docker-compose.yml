@@ -125,6 +125,8 @@ services:
       context: ./services/control-plane
       dockerfile: Dockerfile
     container_name: concordvoice-control-plane
+    env_file:
+      - spa.env
     environment:
       DATABASE_URL: postgres://concord:${POSTGRES_PASSWORD:-concord_dev_password}@postgres:5432/concord?sslmode=disable
       REDIS_URL: redis://:${REDIS_PASSWORD:-concord_dev_redis}@redis:6379

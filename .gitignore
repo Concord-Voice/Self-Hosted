@@ -43,6 +43,7 @@ Thumbs.db
 .env.test
 *.env
 !.env.example
+!spa.env
 
 # Node.js
 node_modules/

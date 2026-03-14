@@ -4,6 +4,7 @@ package config
 import (
 	"log"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/joho/godotenv"
@@ -35,6 +36,15 @@ type Config struct {
 	// Licensing
 	LicensingAuthorityURL string
 
+	// Client config (#155 Tier 2 + Tier 3)
+	ClientMinVersion string // Minimum client version allowed (e.g. "0.1.3"); empty = no enforcement
+	FeatureVoice     bool   // Enable voice channels
+	FeatureVideo     bool   // Enable video/screen share
+	FeatureE2EE      bool   // Enable E2EE encryption
+	SpaURL           string // Remote SPA URL for Tier 3 hot updates (e.g. "https://app.concordvoice.chat/v1/"); empty = use bundled
+	SpaIpcContract   int    // Minimum IPC contract version required by the remote SPA; 0 = no remote SPA
+	SpaConfigFile    string // Path to mounted spa.env for hot-reload; empty = static config from env vars
+
 	// MFA (TOTP + WebAuthn)
 	MFAEncryptionKey  string // 32-byte hex-encoded AES key for TOTP secret encryption at rest
 	WebAuthnRPID      string // Relying Party ID (domain, e.g. "concordvoice.chat")
@@ -59,6 +69,13 @@ func Load() (*Config, error) {
 		TURNRealm:             getEnv("TURN_REALM", "concordvoice.chat"),
 		LicensingAuthorityURL: getEnv("LICENSING_AUTHORITY_URL", "http://localhost:8082"),
 		AllowedOrigins:        parseOrigins(getEnv("ALLOWED_ORIGINS", "http://localhost:3001,http://localhost:3002")),
+		ClientMinVersion:      getEnv("CLIENT_MIN_VERSION", ""),
+		FeatureVoice:          getEnv("FEATURE_VOICE", "true") == "true",
+		FeatureVideo:          getEnv("FEATURE_VIDEO", "true") == "true",
+		FeatureE2EE:           getEnv("FEATURE_E2EE", "true") == "true",
+		SpaURL:                getEnv("SPA_URL", ""),
+		SpaIpcContract:        getEnvInt("SPA_IPC_CONTRACT", 0),
+		SpaConfigFile:         getEnv("SPA_CONFIG_FILE", ""),
 		MFAEncryptionKey:      getEnv("MFA_ENCRYPTION_KEY", devMFAEncKey),
 		WebAuthnRPID:          getEnv("WEBAUTHN_RP_ID", "localhost"),
 		WebAuthnRPOrigins:     parseOrigins(getEnv("WEBAUTHN_RP_ORIGINS", "http://localhost:3001")),
@@ -97,6 +114,15 @@ func parseOrigins(raw string) []string {
 func getEnv(key, defaultValue string) string {
 	if value := os.Getenv(key); value != "" {
 		return value
+	}
+	return defaultValue
+}
+
+func getEnvInt(key string, defaultValue int) int {
+	if value := os.Getenv(key); value != "" {
+		if n, err := strconv.Atoi(value); err == nil {
+			return n
+		}
 	}
 	return defaultValue
 }

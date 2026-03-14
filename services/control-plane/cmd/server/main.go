@@ -65,8 +65,11 @@ func main() {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
+	// Initialize hot-reloadable SPA config (reads mounted spa.env when SPA_CONFIG_FILE is set)
+	liveSpa := config.NewLiveSpaConfig(cfg, cfg.SpaConfigFile, 30*time.Second)
+
 	// Initialize router (starts hub, connects NATS, subscribes to voice events)
-	router, hub, natsClient := api.NewRouter(db, redisClient, cfg, log)
+	router, hub, natsClient := api.NewRouter(db, redisClient, cfg, liveSpa, log)
 
 	// Start background cleanup job (reaps expired tokens, stale sessions, orphaned presence)
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
@@ -100,6 +103,9 @@ func main() {
 
 	// Stop background cleanup job
 	cleanupCancel()
+
+	// Stop SPA config file watcher
+	liveSpa.Stop()
 
 	// Graceful shutdown
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)

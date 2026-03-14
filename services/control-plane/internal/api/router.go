@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/channels"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/clientconfig"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/dm"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/friends"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/invites"
@@ -31,7 +32,7 @@ import (
 )
 
 // NewRouter creates a new API router and returns the WebSocket hub and NATS client for lifecycle management.
-func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.Logger) (*gin.Engine, *websocket.Hub, *natsclient.Client) {
+func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, liveSpa *config.LiveSpaConfig, log *logger.Logger) (*gin.Engine, *websocket.Hub, *natsclient.Client) {
 	router := gin.New()
 
 	// Middleware
@@ -96,6 +97,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 	friendsHandler := friends.NewHandler(db, log, hub)
 	wsHandler := websocket.NewHandler(hub, db, redis, cfg.JWTSecret, cfg.AllowedOrigins)
 	wsTicketHandler := auth.NewWSTicketHandler(redis, cfg.JWTSecret)
+	clientConfigHandler := clientconfig.NewHandler(cfg, liveSpa, log)
 
 	// Start NATS voice event subscriber
 	if natsClient != nil {
@@ -141,6 +143,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, log *logger.
 				mfaHandler.Verify,
 			)
 		}
+
+		// Client config (public — pre-auth, clients need this before login)
+		v1.GET("/client/config",
+			middleware.RateLimitByIP(redis, 30, 1*time.Minute),
+			clientConfigHandler.GetConfig,
+		)
 
 		// Protected routes
 		protected := v1.Group("/")
