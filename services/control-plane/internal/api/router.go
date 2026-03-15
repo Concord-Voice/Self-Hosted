@@ -22,6 +22,7 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/servers"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/sessions"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/updates"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/users"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/voice"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
@@ -98,6 +99,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, liveSpa *con
 	wsHandler := websocket.NewHandler(hub, db, redis, cfg.JWTSecret, cfg.AllowedOrigins)
 	wsTicketHandler := auth.NewWSTicketHandler(redis, cfg.JWTSecret)
 	clientConfigHandler := clientconfig.NewHandler(cfg, liveSpa, log)
+	updatesHandler := updates.NewHandler(cfg, log)
 
 	// Start NATS voice event subscriber
 	if natsClient != nil {
@@ -148,6 +150,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, liveSpa *con
 		v1.GET("/client/config",
 			middleware.RateLimitByIP(redis, 30, 1*time.Minute),
 			clientConfigHandler.GetConfig,
+		)
+
+		// Desktop update assets (public — electron-updater needs this pre-auth)
+		v1.GET("/updates/*filename",
+			middleware.RateLimitByIP(redis, 30, 1*time.Minute),
+			updatesHandler.ServeUpdateAsset,
 		)
 
 		// Protected routes

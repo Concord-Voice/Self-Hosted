@@ -45,6 +45,9 @@ type Config struct {
 	SpaIpcContract   int    // Minimum IPC contract version required by the remote SPA; 0 = no remote SPA
 	SpaConfigFile    string // Path to mounted spa.env for hot-reload; empty = static config from env vars
 
+	// Desktop update assets — local directory populated by deploy.sh
+	ReleasesDir string // Path to directory containing release assets; empty disables update endpoint
+
 	// MFA (TOTP + WebAuthn)
 	MFAEncryptionKey  string // 32-byte hex-encoded AES key for TOTP secret encryption at rest
 	WebAuthnRPID      string // Relying Party ID (domain, e.g. "concordvoice.chat")
@@ -76,6 +79,7 @@ func Load() (*Config, error) {
 		SpaURL:                getEnv("SPA_URL", ""),
 		SpaIpcContract:        getEnvInt("SPA_IPC_CONTRACT", 0),
 		SpaConfigFile:         getEnv("SPA_CONFIG_FILE", ""),
+		ReleasesDir:           getEnv("RELEASES_DIR", ""),
 		MFAEncryptionKey:      getEnv("MFA_ENCRYPTION_KEY", devMFAEncKey),
 		WebAuthnRPID:          getEnv("WEBAUTHN_RP_ID", "localhost"),
 		WebAuthnRPOrigins:     parseOrigins(getEnv("WEBAUTHN_RP_ORIGINS", "http://localhost:3001")),
