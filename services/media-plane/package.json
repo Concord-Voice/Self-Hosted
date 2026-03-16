@@ -24,7 +24,7 @@
     "dotenv": "^17.3.1",
     "express": "^5.2.1",
     "jsonwebtoken": "^9.0.3",
-    "mediasoup": "^3.13.6",
+    "mediasoup": "^3.19.18",
     "nats": "^2.29.3",
     "redis": "^4.6.12",
     "socket.io": "^4.6.1",
