@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Concord service management helper
-# Usage: ./concord-ctl.sh [status|logs|restart|rebuild|freshstart|branch|stop]
+# Usage: ./concord-ctl.sh [status|logs|restart|rebuild|freshstart|branch|stop|sync-releases]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -14,8 +14,13 @@ if [[ -f "${SCRIPT_DIR}/deploy.env.local" ]]; then
   source "${SCRIPT_DIR}/deploy.env.local"
 fi
 
+DEPLOY_REPO="${DEPLOY_REPO:-https://github.com/markdrogersjr/Concord.git}"
 COMPOSE_OVERRIDE="${COMPOSE_OVERRIDE:-docker-compose.staging.yml}"
 COMPOSE_CMD="docker compose -f ${DEPLOY_DIR}/docker-compose.yml -f ${DEPLOY_DIR}/${COMPOSE_OVERRIDE} --profile ${COMPOSE_PROFILES:-services}"
+
+# Shared release sync logic
+# shellcheck source=sync-releases.sh
+source "${SCRIPT_DIR}/sync-releases.sh"
 
 case "${1:-help}" in
   status)
@@ -42,6 +47,14 @@ case "${1:-help}" in
     else
       echo "  ✗ coturn STUN/TURN (port 3478)"
     fi
+    # Release sync status
+    echo ""
+    echo "=== Release Sync ==="
+    if [[ -f "${DEPLOY_DIR}/releases/.tag" ]]; then
+      echo "  Cached: $(cat "${DEPLOY_DIR}/releases/.tag") ($(ls "${DEPLOY_DIR}/releases/" 2>/dev/null | wc -l) files)"
+    else
+      echo "  No releases synced"
+    fi
     ;;
 
   logs)
@@ -50,12 +63,16 @@ case "${1:-help}" in
     ;;
 
   restart)
+    echo "Syncing release assets..."
+    sync_releases
     echo "Restarting services..."
     cd "$DEPLOY_DIR" && $COMPOSE_CMD restart
     echo "Done."
     ;;
 
   rebuild)
+    echo "Syncing release assets..."
+    sync_releases
     echo "Rebuilding and restarting..."
     cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --build
     echo "Done."
@@ -73,10 +90,17 @@ case "${1:-help}" in
     echo "Stopping all services and removing volumes..."
     cd "$DEPLOY_DIR" && $COMPOSE_CMD down -v
     echo ""
+    echo "Syncing release assets..."
+    sync_releases
+    echo ""
     echo "Rebuilding and starting fresh..."
     cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --build
     echo ""
     echo "Fresh start complete. All data has been wiped."
+    ;;
+
+  sync-releases)
+    sync_releases
     ;;
 
   branch)
@@ -99,12 +123,13 @@ case "${1:-help}" in
     echo "Usage: $0 <command>"
     echo ""
     echo "Commands:"
-    echo "  status      Show running containers, health checks, current branch"
-    echo "  logs        Tail service logs (pass service name to filter, e.g. 'logs control-plane')"
-    echo "  restart     Restart all services"
-    echo "  rebuild     Force rebuild + restart all services"
-    echo "  freshstart  Wipe all data (DB, Redis) and rebuild from scratch"
-    echo "  branch      Show current deploy branch and git info"
-    echo "  stop        Stop all services"
+    echo "  status         Show running containers, health checks, current branch"
+    echo "  logs           Tail service logs (pass service name to filter, e.g. 'logs control-plane')"
+    echo "  restart        Sync releases + restart all services"
+    echo "  rebuild        Sync releases + force rebuild + restart all services"
+    echo "  freshstart     Wipe all data (DB, Redis), sync releases, rebuild from scratch"
+    echo "  sync-releases  Download latest desktop release assets from GitHub"
+    echo "  branch         Show current deploy branch and git info"
+    echo "  stop           Stop all services"
     ;;
 esac
