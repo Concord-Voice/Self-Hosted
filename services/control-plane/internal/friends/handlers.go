@@ -460,8 +460,50 @@ func (h *Handler) BlockUser(c *gin.Context) {
 		}
 	}
 
-	// Revoke the blocked user's current epoch key in any shared DM conversation
-	// (Preserve History: only delete latest key_version, old epoch keys remain)
+	// Revoke the blocked user's current epoch key in any shared DM conversation.
+	// Step 1: Find shared conversations and their current max epoch.
+	type convEpoch struct {
+		convID   string
+		maxEpoch int
+	}
+	var revocations []convEpoch
+	revokeRows, revokeErr := tx.Query(`
+		SELECT dp1.conversation_id, COALESCE(MAX(dck.key_version), 0)
+		FROM dm_participants dp1
+		INNER JOIN dm_participants dp2 ON dp1.conversation_id = dp2.conversation_id
+		LEFT JOIN dm_channel_keys dck ON dck.conversation_id = dp1.conversation_id
+		WHERE dp1.user_id = $1 AND dp2.user_id = $2
+		GROUP BY dp1.conversation_id
+	`, userID, targetUserID)
+	if revokeErr != nil {
+		h.log.Error("Failed to query shared DM conversations for revocation", "error", revokeErr)
+	}
+	if revokeRows != nil {
+		for revokeRows.Next() {
+			var ce convEpoch
+			if err := revokeRows.Scan(&ce.convID, &ce.maxEpoch); err != nil || ce.maxEpoch == 0 {
+				continue
+			}
+			revocations = append(revocations, ce)
+		}
+		if err := revokeRows.Err(); err != nil {
+			h.log.Error("Error iterating DM revocation rows", "error", err)
+		}
+		_ = revokeRows.Close()
+	}
+
+	// Step 2: Record revocations (ignore conflict if already revoked)
+	for _, ce := range revocations {
+		if _, err := tx.Exec(`
+			INSERT INTO dm_key_revocations (conversation_id, revoked_epoch, successor_epoch, reason, revoked_by)
+			VALUES ($1, $2, $3, 'user_blocked', $4)
+			ON CONFLICT (conversation_id, revoked_epoch) DO NOTHING
+		`, ce.convID, ce.maxEpoch, ce.maxEpoch+1, userID); err != nil {
+			h.log.Error("Failed to record DM key revocation on block", "error", err, "conversation_id", ce.convID)
+		}
+	}
+
+	// Step 3: Delete the blocked user's latest key (preserves history)
 	_, _ = tx.Exec(`
 		DELETE FROM dm_channel_keys
 		WHERE user_id = $2

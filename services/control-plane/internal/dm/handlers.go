@@ -839,6 +839,19 @@ func (h *Handler) RotateKey(c *gin.Context) {
 
 	h.log.Info("DM key rotation requested", "conversation_id", convID, "user_id", userID, "current_version", maxVersion)
 
+	// Record the revocation of the current epoch
+	if maxVersion > 0 {
+		if _, err := h.db.Exec(`
+			INSERT INTO dm_key_revocations (conversation_id, revoked_epoch, successor_epoch, reason, revoked_by)
+			VALUES ($1, $2, $3, 'manual_rotation', $4)
+			ON CONFLICT (conversation_id, revoked_epoch) DO NOTHING
+		`, convID, maxVersion, maxVersion+1, userID); err != nil {
+			h.log.Error("Failed to record DM key revocation", "error", err, "conversation_id", convID)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to rotate key"})
+			return
+		}
+	}
+
 	// Notify all participants to rotate
 	if h.hub != nil {
 		h.broadcastToDMParticipants(convID, userID, websocket.OutgoingMessage{

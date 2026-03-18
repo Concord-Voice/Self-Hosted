@@ -598,6 +598,7 @@ func (h *Hub) sendErrorWithData(clientID uuid.UUID, errorCode string, extra map[
 	data := map[string]interface{}{
 		"message": errorCode,
 		"error":   errorCode,
+		"code":    errorCode,
 	}
 	for k, v := range extra {
 		data[k] = v
@@ -689,20 +690,26 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 	// Stamp embeds_suppressed based on server policy (server is the only trusted source)
 	embedsSuppressed := !serverAllowEmbeds
 
-	// Epoch enforcement: reject messages encrypted with a revoked key epoch
+	// Epoch enforcement: reject messages encrypted with a revoked key epoch (fail-closed)
 	if isEncrypted && keyVersion > 0 {
 		var epochRevoked bool
-		_ = h.db.QueryRow(
+		if err := h.db.QueryRow(
 			`SELECT EXISTS(SELECT 1 FROM key_revocations WHERE channel_id = $1 AND revoked_epoch = $2)`,
 			channelUUID, keyVersion,
-		).Scan(&epochRevoked)
+		).Scan(&epochRevoked); err != nil {
+			log.Printf("Failed to check epoch revocation: %v", err)
+			h.sendError(msg.ClientID, "Failed to verify key epoch")
+			return
+		}
 		if epochRevoked {
 			// Fetch the current (latest) epoch so the client can re-encrypt
-			var currentEpoch int
-			_ = h.db.QueryRow(
+			currentEpoch := 1
+			if err := h.db.QueryRow(
 				`SELECT COALESCE(MAX(key_version), 1) FROM channel_keys WHERE channel_id = $1`,
 				channelUUID,
-			).Scan(&currentEpoch)
+			).Scan(&currentEpoch); err != nil {
+				log.Printf("Failed to fetch current epoch for channel %s: %v", channelID, err)
+			}
 			h.sendErrorWithData(msg.ClientID, "epoch_revoked", map[string]interface{}{
 				"current_epoch": currentEpoch,
 				"channel_id":    channelID,
@@ -1214,6 +1221,34 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 	if convEncrypted && !isEncrypted {
 		h.sendError(msg.ClientID, "Encrypted conversation requires encrypted messages")
 		return
+	}
+
+	// Epoch enforcement: reject DM messages encrypted with a revoked key epoch (fail-closed)
+	if isEncrypted && dmKeyVersion > 0 {
+		var epochRevoked bool
+		if err := h.db.QueryRow(
+			`SELECT EXISTS(SELECT 1 FROM dm_key_revocations WHERE conversation_id = $1 AND revoked_epoch = $2)`,
+			convUUID, dmKeyVersion,
+		).Scan(&epochRevoked); err != nil {
+			log.Printf("Failed to check DM epoch revocation: %v", err)
+			h.sendError(msg.ClientID, "Failed to verify key epoch")
+			return
+		}
+		if epochRevoked {
+			currentEpoch := 1
+			if err := h.db.QueryRow(
+				`SELECT COALESCE(MAX(key_version), 1) FROM dm_channel_keys WHERE conversation_id = $1`,
+				convUUID,
+			).Scan(&currentEpoch); err != nil {
+				log.Printf("Failed to fetch current epoch for DM %s: %v", convID, err)
+			}
+			h.sendErrorWithData(msg.ClientID, "epoch_revoked", map[string]interface{}{
+				"current_epoch":   currentEpoch,
+				"conversation_id": convID,
+				"channel_id":      convID,
+			})
+			return
+		}
 	}
 
 	// Persist message to database

@@ -261,19 +261,25 @@ func (h *Handler) SendMessage(c *gin.Context) {
 		keyVersion = 1
 	}
 
-	// Epoch enforcement: reject messages encrypted with a revoked key epoch
+	// Epoch enforcement: reject messages encrypted with a revoked key epoch (fail-closed)
 	if req.IsEncrypted && keyVersion > 0 {
 		var epochRevoked bool
-		_ = h.db.QueryRow(
+		if err := h.db.QueryRow(
 			`SELECT EXISTS(SELECT 1 FROM key_revocations WHERE channel_id = $1 AND revoked_epoch = $2)`,
 			req.ChannelID, keyVersion,
-		).Scan(&epochRevoked)
+		).Scan(&epochRevoked); err != nil {
+			h.log.Error("Failed to check epoch revocation", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify key epoch"})
+			return
+		}
 		if epochRevoked {
-			var currentEpoch int
-			_ = h.db.QueryRow(
+			currentEpoch := 1
+			if err := h.db.QueryRow(
 				`SELECT COALESCE(MAX(key_version), 1) FROM channel_keys WHERE channel_id = $1`,
 				req.ChannelID,
-			).Scan(&currentEpoch)
+			).Scan(&currentEpoch); err != nil {
+				h.log.Error("Failed to fetch current epoch", "error", err, "channel_id", req.ChannelID)
+			}
 			c.JSON(http.StatusConflict, gin.H{
 				"error":         "Key epoch has been revoked — re-encrypt with current epoch",
 				"code":          "epoch_revoked",
