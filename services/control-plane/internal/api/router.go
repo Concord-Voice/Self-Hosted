@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/channels"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/email"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/clientconfig"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/dm"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/friends"
@@ -80,12 +81,19 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, liveSpa *con
 	auditWriter := rbac.NewAuditWriter(db, log)
 	rbacHandler := rbac.NewHandler(db, log, redis, hub, rbacResolver, permCache, auditWriter)
 
+	// Initialize email service
+	emailSvc := email.NewService(cfg, log)
+
 	// Initialize handlers
 	authHandler := auth.NewHandler(db, redis, log, cfg.JWTSecret, hub)
+	authHandler.SetEmailService(emailSvc)
+	verificationHandler := auth.NewVerificationHandler(db, redis, log, emailSvc, cfg.JWTSecret)
+	authHandler.SetVerificationHandler(verificationHandler)
 
 	// Wire cross-references (breaks circular init dependency)
 	authHandler.SetMFAChecker(mfaHandler)
 	mfaHandler.SetLoginCompleter(authHandler)
+	mfaHandler.SetEmailService(emailSvc)
 	sessionsHandler := sessions.NewHandler(db, redis, log, hub, mfaHandler)
 	usersHandler := users.NewHandler(db, log, hub, mfaHandler)
 	serversHandler := servers.NewHandler(db, log, hub, rbacResolver)
@@ -144,6 +152,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, liveSpa *con
 				middleware.RateLimitByIP(redis, 10, 15*time.Minute),
 				mfaHandler.Verify,
 			)
+
+			// MFA email code delivery (unauthenticated — uses challenge token)
+			authRoutes.POST("/mfa/email/send",
+				middleware.RateLimitByIP(redis, 3, 15*time.Minute),
+				mfaHandler.SendEmailMFACode,
+			)
 		}
 
 		// Client config (public — pre-auth, clients need this before login)
@@ -158,9 +172,40 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, liveSpa *con
 			updatesHandler.ServeUpdateAsset,
 		)
 
-		// Protected routes
-		protected := v1.Group("/")
-		protected.Use(middleware.AuthRequired(cfg.JWTSecret, redis))
+		// Protected routes — split into two tiers:
+		// pendingOK: authenticated but email may be unverified (verification, logout, basic profile)
+		// verified:  authenticated AND email verified (everything else)
+		authRequired := v1.Group("/")
+		authRequired.Use(middleware.AuthRequired(cfg.JWTSecret, redis))
+
+		// ── Pending-OK routes (unverified email allowed) ──────────────
+		{
+			// Email verification endpoints
+			authRequired.POST("/auth/verify-email/send",
+				middleware.RateLimitByUser(redis, 1, 1*time.Minute),
+				verificationHandler.SendCode,
+			)
+			authRequired.POST("/auth/verify-email/confirm",
+				middleware.RateLimitByUser(redis, 5, 15*time.Minute),
+				verificationHandler.ConfirmCode,
+			)
+			authRequired.POST("/auth/verify-email/change-email",
+				middleware.RateLimitByUser(redis, 3, 15*time.Minute),
+				verificationHandler.ChangeEmail,
+			)
+
+			// Note: logout is in the public authRoutes group above (uses refresh token, not Bearer)
+
+			// Basic profile read (needed by frontend to check verification status)
+			authRequired.GET("/users/me",
+				middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+				usersHandler.GetMe,
+			)
+		}
+
+		// ── Verified routes (email must be verified) ──────────────────
+		protected := authRequired.Group("/")
+		protected.Use(middleware.RequireVerifiedEmail())
 		{
 			// WebSocket ticket (short-lived, single-use)
 			protected.POST("/auth/ws-ticket",
@@ -269,14 +314,9 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, liveSpa *con
 				)
 			}
 
-			// User routes
+			// User routes (GET /users/me is in the pendingOK group above)
 			userRoutes := protected.Group("/users")
 			{
-				userRoutes.GET("/me",
-					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
-					usersHandler.GetMe,
-				)
-
 				// Update profile (10 requests per minute)
 				userRoutes.PATCH("/me",
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),

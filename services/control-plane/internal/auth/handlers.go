@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/email"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
@@ -78,6 +79,8 @@ type Handler struct {
 	jwtSecret  string
 	hub        SessionDisconnector
 	mfaChecker MFAChecker
+	emailSvc      *email.Service
+	verifyHandler *VerificationHandler
 }
 
 // NewHandler creates a new authentication handler.
@@ -89,6 +92,16 @@ func NewHandler(db *sql.DB, redisClient *redis.Client, log *logger.Logger, jwtSe
 		jwtSecret: jwtSecret,
 		hub:       hub,
 	}
+}
+
+// SetEmailService sets the email service (called after initialization to avoid circular deps).
+func (h *Handler) SetEmailService(svc *email.Service) {
+	h.emailSvc = svc
+}
+
+// SetVerificationHandler wires the verification handler for use in post-registration code sending.
+func (h *Handler) SetVerificationHandler(vh *VerificationHandler) {
+	h.verifyHandler = vh
 }
 
 // SetMFAChecker sets the MFA checker (called after both handlers are initialized to break circular init).
@@ -255,8 +268,8 @@ func (h *Handler) Register(c *gin.Context) {
 		return
 	}
 
-	// Generate access token (JWT, 15 min)
-	accessToken, err := GenerateAccessToken(userID, h.jwtSecret)
+	// Generate access token (JWT, 15 min) — email NOT yet verified for new registrations
+	accessToken, err := GenerateAccessToken(userID, h.jwtSecret, false)
 	if err != nil {
 		h.log.Error("Failed to generate access token", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create account"})
@@ -301,6 +314,17 @@ func (h *Handler) Register(c *gin.Context) {
 
 	h.log.Info("User registered", "user_id", userID, "username", normalizedUsername)
 
+	// Auto-send verification code (non-blocking — don't fail registration if this fails)
+	if h.verifyHandler != nil {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := h.verifyHandler.GenerateAndSendCode(ctx, userID, normalizedEmail); err != nil {
+				h.log.Error("Failed to send verification code on register", "error", err)
+			}
+		}()
+	}
+
 	// Return access token, refresh token, and user data (same format as login).
 	// The refresh token is returned in both a cookie and the body so that
 	// Electron/native clients (file:// origin) can store it explicitly —
@@ -314,6 +338,8 @@ func (h *Handler) Register(c *gin.Context) {
 		"user": gin.H{
 			"id":              userID,
 			"username":        normalizedUsername,
+			"email":           normalizedEmail,
+			"email_verified":  false,
 			"e2ee_preference": req.E2EEPreference,
 		},
 	})
@@ -492,8 +518,16 @@ func (h *Handler) Login(c *gin.Context) {
 // CompleteLogin issues tokens and creates a session for the given user.
 // Called directly from Login (no MFA) or from the MFA verify handler after successful verification.
 func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) {
+	// Look up email_verified from DB so the JWT claim reflects current state
+	var emailVerified bool
+	if err := h.db.QueryRow(`SELECT email_verified FROM users WHERE id = $1`, userID).Scan(&emailVerified); err != nil {
+		h.log.Error("Failed to look up email_verified for login", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Login failed"})
+		return
+	}
+
 	// Generate access token (JWT, 15 min)
-	accessToken, err := GenerateAccessToken(userID, h.jwtSecret)
+	accessToken, err := GenerateAccessToken(userID, h.jwtSecret, emailVerified)
 	if err != nil {
 		h.log.Error("Failed to generate access token", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Login failed"})
@@ -977,8 +1011,16 @@ func (h *Handler) Refresh(c *gin.Context) {
 	// Set new refresh token cookie
 	setRefreshCookie(c, newRefreshToken, cookieMaxAge)
 
+	// Look up current email_verified so the new JWT reflects DB state
+	var refreshEmailVerified bool
+	if err := h.db.QueryRow(`SELECT email_verified FROM users WHERE id = $1`, token.UserID).Scan(&refreshEmailVerified); err != nil {
+		h.log.Error("Failed to look up email_verified for refresh", "error", err, "user_id", token.UserID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
+		return
+	}
+
 	// Generate new access token
-	accessToken, err := GenerateAccessToken(token.UserID, h.jwtSecret)
+	accessToken, err := GenerateAccessToken(token.UserID, h.jwtSecret, refreshEmailVerified)
 	if err != nil {
 		h.log.Error("Failed to generate access token", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
@@ -1093,8 +1135,16 @@ func (h *Handler) handleGracePeriodRefresh(c *gin.Context, userID string, revoke
 	// Set cookie
 	setRefreshCookie(c, newRefreshToken, cookieMaxAge)
 
+	// Look up current email_verified for grace recovery token
+	var graceEmailVerified bool
+	if err := h.db.QueryRow(`SELECT email_verified FROM users WHERE id = $1`, userID).Scan(&graceEmailVerified); err != nil {
+		h.log.Error("Failed to look up email_verified for grace recovery", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
+		return
+	}
+
 	// Generate access token
-	accessToken, err := GenerateAccessToken(userID, h.jwtSecret)
+	accessToken, err := GenerateAccessToken(userID, h.jwtSecret, graceEmailVerified)
 	if err != nil {
 		h.log.Error("Failed to generate access token during grace recovery", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})

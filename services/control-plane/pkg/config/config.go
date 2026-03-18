@@ -48,6 +48,13 @@ type Config struct {
 	// Desktop update assets — local directory populated by deploy.sh
 	ReleasesDir string // Path to directory containing release assets; empty disables update endpoint
 
+	// SMTP (email verification)
+	SMTPHost     string // SMTP server hostname (e.g. "smtp.protonmail.ch"); empty = dev mode (log codes to stdout)
+	SMTPPort     int    // SMTP server port (default 587 for STARTTLS submission)
+	SMTPUsername string // SMTP authentication username
+	SMTPPassword string // SMTP authentication password // #nosec G101 -- config field, loaded from env
+	SMTPFrom     string // Sender address (e.g. "noreply@concordvoice.chat")
+
 	// MFA (TOTP + WebAuthn)
 	MFAEncryptionKey  string // 32-byte hex-encoded AES key for TOTP secret encryption at rest
 	WebAuthnRPID      string // Relying Party ID (domain, e.g. "concordvoice.chat")
@@ -80,6 +87,11 @@ func Load() (*Config, error) {
 		SpaIpcContract:        getEnvInt("SPA_IPC_CONTRACT", 0),
 		SpaConfigFile:         getEnv("SPA_CONFIG_FILE", ""),
 		ReleasesDir:           getEnv("RELEASES_DIR", ""),
+		SMTPHost:              getEnv("SMTP_HOST", ""),
+		SMTPPort:              getEnvInt("SMTP_PORT", 587),
+		SMTPUsername:          getEnv("SMTP_USERNAME", ""),
+		SMTPPassword:          getEnv("SMTP_PASSWORD", ""), // #nosec G101 -- env var name, not a secret
+		SMTPFrom:              getEnv("SMTP_FROM", "noreply@concordvoice.chat"),
 		MFAEncryptionKey:      getEnv("MFA_ENCRYPTION_KEY", devMFAEncKey),
 		WebAuthnRPID:          getEnv("WEBAUTHN_RP_ID", "localhost"),
 		WebAuthnRPOrigins:     parseOrigins(getEnv("WEBAUTHN_RP_ORIGINS", "http://localhost:3001")),
@@ -96,6 +108,10 @@ func (c *Config) validate() {
 	if c.Environment == "production" && c.JWTSecret == devJWTSecret {
 		log.Fatal("FATAL: JWT_SECRET must be set to a secure value in production. " +
 			"The default dev secret is not allowed.")
+	}
+	if c.Environment == "production" && c.SMTPHost == "" {
+		log.Fatal("FATAL: SMTP_HOST must be set in production. " +
+			"Email verification cannot fall back to dev mode (logging codes to stdout) in production.")
 	}
 	if c.Environment == "production" && c.MFAEncryptionKey == devMFAEncKey {
 		log.Fatal("FATAL: MFA_ENCRYPTION_KEY must be set to a secure value in production. " +

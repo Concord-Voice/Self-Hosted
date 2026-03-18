@@ -163,16 +163,14 @@ func TestReplaceMyKeys_MissingFields(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-// --- Change Password ---
-
-func TestChangePassword_Success(t *testing.T) {
-	ts := setupTS(t)
-
-	// Register via API so password hash is real Argon2id
+// registerAndVerify registers a user via the API (so Argon2id hash is real),
+// then auto-verifies email and returns a verified access token.
+func registerAndVerify(t *testing.T, ts *testhelpers.TestServer, email, username string) string {
+	t.Helper()
 	pub, priv, salt := testhelpers.E2EETestKeys()
 	regW := ts.DoRequest("POST", "/api/v1/auth/register", map[string]interface{}{
-		"email":               "changepw@test.concord.chat",
-		"username":            "changepwuser",
+		"email":               email,
+		"username":            username,
 		"password":            "TestPassword123!",
 		"age_confirmation":    true,
 		"public_key":          pub,
@@ -183,7 +181,18 @@ func TestChangePassword_Success(t *testing.T) {
 
 	var regBody map[string]interface{}
 	testhelpers.ParseJSON(t, regW, &regBody)
-	accessToken := regBody["access_token"].(string)
+	user := regBody["user"].(map[string]interface{})
+	userID := user["id"].(string)
+	return ts.VerifyUserEmail(t, userID)
+}
+
+// --- Change Password ---
+
+func TestChangePassword_Success(t *testing.T) {
+	ts := setupTS(t)
+
+	// Register via API so password hash is real Argon2id, then auto-verify
+	accessToken := registerAndVerify(t, ts, "changepw@test.concord.chat", "changepwuser")
 
 	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
 	w := ts.DoRequest("POST", "/api/v1/users/me/password", map[string]interface{}{
@@ -202,21 +211,7 @@ func TestChangePassword_Success(t *testing.T) {
 func TestChangePassword_WrongCurrentPassword(t *testing.T) {
 	ts := setupTS(t)
 
-	pub, priv, salt := testhelpers.E2EETestKeys()
-	regW := ts.DoRequest("POST", "/api/v1/auth/register", map[string]interface{}{
-		"email":               "wrongpw@test.concord.chat",
-		"username":            "wrongpwuser",
-		"password":            "TestPassword123!",
-		"age_confirmation":    true,
-		"public_key":          pub,
-		"wrapped_private_key": priv,
-		"key_derivation_salt": salt,
-	}, nil)
-	assert.Equal(t, http.StatusCreated, regW.Code)
-
-	var regBody map[string]interface{}
-	testhelpers.ParseJSON(t, regW, &regBody)
-	accessToken := regBody["access_token"].(string)
+	accessToken := registerAndVerify(t, ts, "wrongpw@test.concord.chat", "wrongpwuser")
 
 	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
 	w := ts.DoRequest("POST", "/api/v1/users/me/password", map[string]interface{}{
@@ -232,21 +227,7 @@ func TestChangePassword_WrongCurrentPassword(t *testing.T) {
 func TestChangePassword_SameAsOld(t *testing.T) {
 	ts := setupTS(t)
 
-	pub, priv, salt := testhelpers.E2EETestKeys()
-	regW := ts.DoRequest("POST", "/api/v1/auth/register", map[string]interface{}{
-		"email":               "samepw@test.concord.chat",
-		"username":            "samepwuser",
-		"password":            "TestPassword123!",
-		"age_confirmation":    true,
-		"public_key":          pub,
-		"wrapped_private_key": priv,
-		"key_derivation_salt": salt,
-	}, nil)
-	assert.Equal(t, http.StatusCreated, regW.Code)
-
-	var regBody map[string]interface{}
-	testhelpers.ParseJSON(t, regW, &regBody)
-	accessToken := regBody["access_token"].(string)
+	accessToken := registerAndVerify(t, ts, "samepw@test.concord.chat", "samepwuser")
 
 	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
 	w := ts.DoRequest("POST", "/api/v1/users/me/password", map[string]interface{}{
@@ -262,21 +243,7 @@ func TestChangePassword_SameAsOld(t *testing.T) {
 func TestChangePassword_WeakNewPassword(t *testing.T) {
 	ts := setupTS(t)
 
-	pub, priv, salt := testhelpers.E2EETestKeys()
-	regW := ts.DoRequest("POST", "/api/v1/auth/register", map[string]interface{}{
-		"email":               "weaknewpw@test.concord.chat",
-		"username":            "weaknewpwuser",
-		"password":            "TestPassword123!",
-		"age_confirmation":    true,
-		"public_key":          pub,
-		"wrapped_private_key": priv,
-		"key_derivation_salt": salt,
-	}, nil)
-	assert.Equal(t, http.StatusCreated, regW.Code)
-
-	var regBody map[string]interface{}
-	testhelpers.ParseJSON(t, regW, &regBody)
-	accessToken := regBody["access_token"].(string)
+	accessToken := registerAndVerify(t, ts, "weaknewpw@test.concord.chat", "weaknewpwuser")
 
 	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
 	w := ts.DoRequest("POST", "/api/v1/users/me/password", map[string]interface{}{

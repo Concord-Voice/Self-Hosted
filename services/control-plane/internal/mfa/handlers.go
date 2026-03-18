@@ -3,12 +3,14 @@ package mfa
 import (
 	"context"
 	"crypto/rand"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"math/big"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -16,6 +18,7 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 	"github.com/lib/pq"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/email"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/redis/go-redis/v9"
 )
@@ -35,6 +38,7 @@ type Handler struct {
 	jwtSecret      string
 	webauthn       *WebAuthnService
 	loginCompleter LoginCompleter
+	emailSvc       *email.Service
 	environment    string // "development", "staging", "production"
 }
 
@@ -57,6 +61,11 @@ func NewHandler(db *sql.DB, redisClient *redis.Client, log *logger.Logger, encKe
 // SetLoginCompleter sets the login completer (called after both handlers are initialized).
 func (h *Handler) SetLoginCompleter(lc LoginCompleter) {
 	h.loginCompleter = lc
+}
+
+// SetEmailService sets the email service for email-based MFA delivery.
+func (h *Handler) SetEmailService(svc *email.Service) {
+	h.emailSvc = svc
 }
 
 // ── Verifier Interface Implementation ────────────────────────────────────────
@@ -399,6 +408,12 @@ func (h *Handler) GetStatus(c *gin.Context) {
 	} else {
 		result["backup_email"] = ""
 	}
+
+	// Email/SMS MFA status (stored in Redis)
+	emailEnabled := h.redis.Exists(ctx, fmt.Sprintf("mfa_emailsms_enabled:%s:email", userID)).Val() > 0
+	smsEnabled := h.redis.Exists(ctx, fmt.Sprintf("mfa_emailsms_enabled:%s:sms", userID)).Val() > 0
+	result["email_mfa_enabled"] = emailEnabled
+	result["sms_mfa_enabled"] = smsEnabled
 
 	c.JSON(http.StatusOK, result)
 }
@@ -1099,8 +1114,40 @@ func (h *Handler) Verify(c *gin.Context) {
 		}
 		h.redis.Del(ctx, sessionKey)
 
+	case "email":
+		if req.Code == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Code is required"})
+			return
+		}
+		// Validate 6-digit numeric format
+		code := strings.TrimSpace(req.Code)
+		if len(code) != 6 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Email code must be 6 digits"})
+			return
+		}
+		for _, ch := range code {
+			if ch < '0' || ch > '9' {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Email code must be 6 digits"})
+				return
+			}
+		}
+		req.Code = code
+		// Check code against Redis (stored by SendEmailMFACode)
+		codeKey := fmt.Sprintf("mfa_email_login:%s", claims.ID)
+		stored, err := h.redis.Get(ctx, codeKey).Result()
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "No email code pending. Request a new one."})
+			return
+		}
+		if subtle.ConstantTimeCompare([]byte(req.Code), []byte(stored)) == 1 {
+			verified = true
+			// Only clean up on success — allow retries with the same code
+			h.redis.Del(ctx, codeKey)
+			h.redis.Del(ctx, fmt.Sprintf("mfa_email_sent:%s", claims.ID))
+		}
+
 	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid method. Use 'totp', 'backup_code', or 'webauthn'"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid method. Use 'totp', 'backup_code', 'webauthn', or 'email'"})
 		return
 	}
 
@@ -1160,6 +1207,93 @@ func (h *Handler) Verify(c *gin.Context) {
 			"user_id":  claims.UserID,
 		})
 	}
+}
+
+// ── Email MFA Code Delivery ──────────────────────────────────────────────────
+
+// SendEmailMFACode sends a 6-digit code to the user's email for MFA verification.
+// This is unauthenticated — identity comes from the challenge token.
+// Called by the client when the user selects "email" as their MFA method during login.
+func (h *Handler) SendEmailMFACode(c *gin.Context) {
+	var req struct {
+		ChallengeToken string `json:"mfa_challenge_token" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "mfa_challenge_token is required"})
+		return
+	}
+
+	// Try all purposes — the token encodes which one
+	var claims *ChallengeClaims
+	for _, p := range []ChallengePurpose{PurposeLogin, PurposeSuspiciousRefresh, PurposeMFAUpgrade} {
+		if parsed, err := ValidateChallengeToken(req.ChallengeToken, h.jwtSecret, p); err == nil {
+			claims = parsed
+			break
+		}
+	}
+	if claims == nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired challenge token"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Rate limit: 1 email per challenge JTI
+	sentKey := fmt.Sprintf("mfa_email_sent:%s", claims.ID)
+	if h.redis.Exists(ctx, sentKey).Val() > 0 {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "Email code already sent. Check your inbox or wait for it to expire."})
+		return
+	}
+
+	// Verify user has email MFA enabled
+	enabledKey := fmt.Sprintf("mfa_emailsms_enabled:%s:email", claims.UserID)
+	if h.redis.Exists(ctx, enabledKey).Val() == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Email MFA is not enabled for this account"})
+		return
+	}
+
+	// Look up user's email
+	var userEmail string
+	if err := h.db.QueryRowContext(ctx, `SELECT email FROM users WHERE id = $1`, claims.UserID).Scan(&userEmail); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send code"})
+		return
+	}
+
+	// Generate code
+	code, err := generateNumericCode(6)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate code"})
+		return
+	}
+
+	// Send first, then persist — avoids stale Redis keys if send fails
+	if h.emailSvc != nil {
+		if err := h.emailSvc.SendVerificationCode(userEmail, code); err != nil {
+			h.log.Error("Failed to send MFA email code", "error", err, "user_id", claims.UserID)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send verification email"})
+			return
+		}
+	} else {
+		// Dev mode — log only
+		h.log.Info("DEV MODE — MFA email code", "user_id", claims.UserID, "code", code)
+	}
+
+	// Store code + sent flag in Redis only after successful send
+	codeKey := fmt.Sprintf("mfa_email_login:%s", claims.ID)
+	if err := h.redis.Set(ctx, codeKey, code, 10*time.Minute).Err(); err != nil {
+		h.log.Error("Failed to store MFA email code in Redis", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Code sent but failed to store — request a new one"})
+		return
+	}
+	if err := h.redis.Set(ctx, sentKey, "1", 10*time.Minute).Err(); err != nil {
+		h.log.Error("Failed to store MFA email sent flag in Redis", "error", err)
+		// Code is stored, sent flag failed — non-fatal, user can still verify
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message":    "Verification code sent to your email",
+		"expires_in": 600,
+	})
 }
 
 // ── Inline WebAuthn Verify (for protected operations) ────────────────────────
@@ -1457,14 +1591,10 @@ func generateNumericCode(digits int) (string, error) {
 	return fmt.Sprintf("%0*d", digits, n), nil
 }
 
-// EmailSmsSetup enables email and/or SMS as MFA methods (dev stub).
-// Requires password + MFA (if active). Returns the verification codes on screen (dev only).
+// EmailSmsSetup enables email and/or SMS as MFA methods.
+// Requires password + MFA (if active). Email codes are delivered via the email service;
+// SMS is still dev-only (requires Twilio integration).
 func (h *Handler) EmailSmsSetup(c *gin.Context) {
-	if h.environment == "production" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Email/SMS MFA is not yet available. Requires email/SMS provider integration."})
-		return
-	}
-
 	userID := c.GetString("user_id")
 	ctx := c.Request.Context()
 
@@ -1478,21 +1608,32 @@ func (h *Handler) EmailSmsSetup(c *gin.Context) {
 		return
 	}
 
-	if !h.requirePasswordAndMFA(c, userID, req.Password, req.MFACode) {
-		return
-	}
-
-	// Validate methods
+	// SMS still requires provider integration
 	for _, m := range req.Methods {
+		if m == "sms" && h.environment == "production" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "SMS MFA is not yet available. Requires SMS provider integration."})
+			return
+		}
 		if m != "email" && m != "sms" {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "methods must be 'email' and/or 'sms'"})
 			return
 		}
 	}
 
+	if !h.requirePasswordAndMFA(c, userID, req.Password, req.MFACode) {
+		return
+	}
+
 	// Must already have a "real" MFA method (TOTP or WebAuthn) active
 	if !h.IsEnabled(ctx, userID) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Enable a Standard or higher MFA method first"})
+		return
+	}
+
+	// Look up user's email for delivery
+	var userEmail string
+	if err := h.db.QueryRowContext(ctx, `SELECT email FROM users WHERE id = $1`, userID).Scan(&userEmail); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to look up account email"})
 		return
 	}
 
@@ -1509,23 +1650,37 @@ func (h *Handler) EmailSmsSetup(c *gin.Context) {
 		codes[method] = code
 	}
 
-	// Dev mode: return codes in response for on-screen display
-	c.JSON(http.StatusOK, gin.H{
-		"message":    "Verification codes generated (DEV MODE — codes shown on screen)",
-		"dev_codes":  codes,
+	// Deliver email code via email service
+	if code, ok := codes["email"]; ok && h.emailSvc != nil {
+		if err := h.emailSvc.SendVerificationCode(userEmail, code); err != nil {
+			h.log.Error("Failed to send MFA email code", "error", err, "user_id", userID)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send verification email"})
+			return
+		}
+	}
+
+	resp := gin.H{
+		"message":    "Verification codes sent",
 		"methods":    req.Methods,
 		"expires_in": "10 minutes",
-		"dev_mode":   true,
-	})
+	}
+	// Dev mode: also return SMS codes on screen (email codes are delivered, not shown)
+	if h.environment != "production" {
+		devCodes := make(map[string]string)
+		if smsCode, ok := codes["sms"]; ok {
+			devCodes["sms"] = smsCode
+		}
+		if len(devCodes) > 0 {
+			resp["dev_codes"] = devCodes
+			resp["dev_mode"] = true
+		}
+	}
+	c.JSON(http.StatusOK, resp)
 }
 
 // EmailSmsVerify verifies the email/SMS code(s) and activates the method(s).
 // In hardened mode, both email AND sms codes must be provided and correct.
 func (h *Handler) EmailSmsVerify(c *gin.Context) {
-	if h.environment == "production" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Email/SMS MFA is not yet available"})
-		return
-	}
 
 	userID := c.GetString("user_id")
 	ctx := c.Request.Context()
@@ -1602,10 +1757,6 @@ func (h *Handler) EmailSmsVerify(c *gin.Context) {
 
 // EmailSmsDisable removes email and/or SMS MFA methods.
 func (h *Handler) EmailSmsDisable(c *gin.Context) {
-	if h.environment == "production" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Email/SMS MFA is not yet available"})
-		return
-	}
 
 	userID := c.GetString("user_id")
 	ctx := c.Request.Context()
@@ -1629,13 +1780,8 @@ func (h *Handler) EmailSmsDisable(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Email/SMS MFA methods disabled"})
 }
 
-// EmailSmsStatus returns whether email/sms methods are enabled (dev helper).
+// EmailSmsStatus returns whether email/sms methods are enabled.
 func (h *Handler) EmailSmsStatus(c *gin.Context) {
-	if h.environment == "production" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Email/SMS MFA is not yet available"})
-		return
-	}
-
 	userID := c.GetString("user_id")
 	ctx := c.Request.Context()
 
@@ -1645,7 +1791,6 @@ func (h *Handler) EmailSmsStatus(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"email_enabled": emailEnabled,
 		"sms_enabled":   smsEnabled,
-		"dev_mode":      true,
 	})
 }
 

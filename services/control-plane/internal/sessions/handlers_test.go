@@ -17,7 +17,7 @@ func setupTS(t *testing.T) *testhelpers.TestServer {
 	return testhelpers.SetupTestServer(t)
 }
 
-// Helper: register a user via the API and return access token + refresh cookie.
+// Helper: register a user via the API, auto-verify email, and return access token + refresh cookie.
 func registerAndGetTokens(t *testing.T, ts *testhelpers.TestServer, email, username string) (string, *http.Cookie) {
 	t.Helper()
 	pub, priv, salt := testhelpers.E2EETestKeys()
@@ -34,7 +34,11 @@ func registerAndGetTokens(t *testing.T, ts *testhelpers.TestServer, email, usern
 
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
-	accessToken := body["access_token"].(string)
+
+	// Extract user ID and auto-verify email so tests can hit verified-only endpoints
+	user := body["user"].(map[string]interface{})
+	userID := user["id"].(string)
+	accessToken := ts.VerifyUserEmail(t, userID)
 
 	var refreshCookie *http.Cookie
 	for _, c := range w.Result().Cookies() {

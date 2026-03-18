@@ -80,7 +80,33 @@ func AuthRequired(jwtSecret string, redisClient *redis.Client) gin.HandlerFunc {
 			}
 		}
 
+		// Extract email_verified claim. Tokens issued before this migration
+		// won't have the claim — treat missing as true (backward compat).
+		emailVerified := true
+		if ev, ok := claims["email_verified"].(bool); ok {
+			emailVerified = ev
+		}
+
 		c.Set("user_id", userID)
+		c.Set("email_verified", emailVerified)
+		c.Next()
+	}
+}
+
+// RequireVerifiedEmail returns a middleware that blocks requests from users
+// whose email has not been verified. Must be applied AFTER AuthRequired.
+func RequireVerifiedEmail() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		verified, exists := c.Get("email_verified")
+		v, ok := verified.(bool)
+		if !exists || !ok || !v {
+			c.JSON(http.StatusForbidden, gin.H{
+				"error": "Email verification required",
+				"code":  "EMAIL_NOT_VERIFIED",
+			})
+			c.Abort()
+			return
+		}
 		c.Next()
 	}
 }

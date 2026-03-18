@@ -13,13 +13,13 @@ const testJWTSecret = "test_secret_key"
 
 func TestGenerateAccessToken(t *testing.T) {
 	t.Run("returns non-empty token", func(t *testing.T) {
-		token, err := GenerateAccessToken("user-123", testJWTSecret)
+		token, err := GenerateAccessToken("user-123", testJWTSecret, true)
 		require.NoError(t, err)
 		assert.NotEmpty(t, token)
 	})
 
 	t.Run("token contains correct user_id claim", func(t *testing.T) {
-		tokenStr, err := GenerateAccessToken("user-456", testJWTSecret)
+		tokenStr, err := GenerateAccessToken("user-456", testJWTSecret, true)
 		require.NoError(t, err)
 
 		claims, err := ValidateAccessToken(tokenStr, testJWTSecret)
@@ -28,8 +28,8 @@ func TestGenerateAccessToken(t *testing.T) {
 	})
 
 	t.Run("token has unique JTI", func(t *testing.T) {
-		token1, _ := GenerateAccessToken("user-1", testJWTSecret)
-		token2, _ := GenerateAccessToken("user-1", testJWTSecret)
+		token1, _ := GenerateAccessToken("user-1", testJWTSecret, true)
+		token2, _ := GenerateAccessToken("user-1", testJWTSecret, true)
 
 		claims1, _ := ValidateAccessToken(token1, testJWTSecret)
 		claims2, _ := ValidateAccessToken(token2, testJWTSecret)
@@ -38,7 +38,7 @@ func TestGenerateAccessToken(t *testing.T) {
 	})
 
 	t.Run("token expires in 15 minutes", func(t *testing.T) {
-		tokenStr, err := GenerateAccessToken("user-1", testJWTSecret)
+		tokenStr, err := GenerateAccessToken("user-1", testJWTSecret, true)
 		require.NoError(t, err)
 
 		claims, err := ValidateAccessToken(tokenStr, testJWTSecret)
@@ -49,7 +49,7 @@ func TestGenerateAccessToken(t *testing.T) {
 	})
 
 	t.Run("token has issuer set", func(t *testing.T) {
-		tokenStr, _ := GenerateAccessToken("user-1", testJWTSecret)
+		tokenStr, _ := GenerateAccessToken("user-1", testJWTSecret, true)
 		claims, _ := ValidateAccessToken(tokenStr, testJWTSecret)
 		assert.Equal(t, "concordvoice-control-plane", claims.Issuer)
 	})
@@ -57,14 +57,14 @@ func TestGenerateAccessToken(t *testing.T) {
 
 func TestValidateAccessToken(t *testing.T) {
 	t.Run("valid token returns claims", func(t *testing.T) {
-		tokenStr, _ := GenerateAccessToken("user-123", testJWTSecret)
+		tokenStr, _ := GenerateAccessToken("user-123", testJWTSecret, true)
 		claims, err := ValidateAccessToken(tokenStr, testJWTSecret)
 		require.NoError(t, err)
 		assert.Equal(t, "user-123", claims.UserID)
 	})
 
 	t.Run("wrong secret returns error", func(t *testing.T) {
-		tokenStr, _ := GenerateAccessToken("user-123", testJWTSecret)
+		tokenStr, _ := GenerateAccessToken("user-123", testJWTSecret, true)
 		_, err := ValidateAccessToken(tokenStr, "wrong_secret")
 		assert.ErrorIs(t, err, ErrInvalidToken)
 	})

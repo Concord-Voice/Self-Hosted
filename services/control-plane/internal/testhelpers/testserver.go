@@ -87,10 +87,10 @@ func (ts *TestServer) CreateTestUser(t *testing.T, username string) TestUser {
 	email := username + "@test.concord.chat"
 	normalizedUsername := auth.NormalizeUsername(username)
 
-	// Insert user with pre-computed hash
+	// Insert user with pre-computed hash (email_verified=true for test convenience)
 	_, err := ts.DB.Exec(
-		`INSERT INTO users (id, email, username, password_hash, age_verified, e2ee_preference)
-		 VALUES ($1, $2, $3, $4, true, false)`,
+		`INSERT INTO users (id, email, username, password_hash, age_verified, email_verified, e2ee_preference)
+		 VALUES ($1, $2, $3, $4, true, true, false)`,
 		userID, email, normalizedUsername, TestPasswordHash,
 	)
 	if err != nil {
@@ -121,7 +121,7 @@ func (ts *TestServer) CreateTestUser(t *testing.T, username string) TestUser {
 	}
 
 	// Generate access token
-	accessToken, err := auth.GenerateAccessToken(userID, TestJWTSecret)
+	accessToken, err := auth.GenerateAccessToken(userID, TestJWTSecret, true)
 	if err != nil {
 		t.Fatalf("testhelpers: failed to generate access token: %v", err)
 	}
@@ -133,6 +133,24 @@ func (ts *TestServer) CreateTestUser(t *testing.T, username string) TestUser {
 		Password:    TestPassword,
 		AccessToken: accessToken,
 	}
+}
+
+// VerifyUserEmail marks a user's email as verified in the DB and returns a new
+// access token with email_verified=true. Use this after API-based registration
+// in tests that need to hit verified-only endpoints.
+func (ts *TestServer) VerifyUserEmail(t *testing.T, userID string) string {
+	t.Helper()
+
+	_, err := ts.DB.Exec(`UPDATE users SET email_verified = true WHERE id = $1`, userID)
+	if err != nil {
+		t.Fatalf("testhelpers: failed to verify user email: %v", err)
+	}
+
+	token, err := auth.GenerateAccessToken(userID, TestJWTSecret, true)
+	if err != nil {
+		t.Fatalf("testhelpers: failed to generate verified token: %v", err)
+	}
+	return token
 }
 
 // CreateTestServer creates a server owned by the given user and returns its ID.

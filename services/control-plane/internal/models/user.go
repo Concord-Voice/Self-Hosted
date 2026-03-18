@@ -30,6 +30,7 @@ func (u *User) PublicUser() map[string]interface{} {
 		"id":              u.ID,
 		"email":           u.Email,
 		"username":        u.Username,
+		"email_verified":  u.EmailVerified,
 		"e2ee_preference": u.E2EEPreference,
 		"created_at":      u.CreatedAt,
 		"links":           json.RawMessage("[]"),

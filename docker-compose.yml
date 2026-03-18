@@ -136,6 +136,13 @@ services:
       TURN_SECRET: ${TURN_SECRET:-concord_dev_turn_secret}
       TURN_REALM: ${TURN_REALM:-concordvoice.chat}
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:-}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-noreply@concordvoice.chat}
+      WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
+      WEBAUTHN_RP_ORIGINS: ${WEBAUTHN_RP_ORIGINS:-http://localhost:3001}
       PORT: 8080
     ports:
       - "8080:8080"

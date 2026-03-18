@@ -21,7 +21,8 @@ var (
 
 // Claims represents JWT claims
 type Claims struct {
-	UserID string `json:"user_id"`
+	UserID        string `json:"user_id"`
+	EmailVerified *bool  `json:"email_verified,omitempty"` // nil in pre-migration tokens → treated as true
 	jwt.RegisteredClaims
 }
 
@@ -29,10 +30,13 @@ type Claims struct {
 const AccessTokenTTL = 15 * time.Minute
 
 // GenerateAccessToken creates a short-lived JWT access token with a unique JTI.
-func GenerateAccessToken(userID, jwtSecret string) (string, error) {
+// emailVerified is embedded in the token so downstream middleware can gate routes
+// without a DB query on every request.
+func GenerateAccessToken(userID, jwtSecret string, emailVerified bool) (string, error) {
 	now := time.Now()
 	claims := Claims{
-		UserID: userID,
+		UserID:        userID,
+		EmailVerified: &emailVerified,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        uuid.New().String(),
 			ExpiresAt: jwt.NewNumericDate(now.Add(AccessTokenTTL)),
