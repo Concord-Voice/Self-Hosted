@@ -4,7 +4,7 @@ The control plane handles authentication, authorization, server/channel manageme
 
 ## Tech Stack
 
-- **Go** 1.25+
+- **Go** 1.26.1+
 - **Gin** - HTTP web framework
 - **PostgreSQL** 16
 - **Redis** 7 - Caching, rate limiting, ephemeral state
@@ -63,7 +63,7 @@ control-plane/
 
 ### Prerequisites
 
-- Go 1.25+
+- Go 1.26.1+
 - PostgreSQL 16
 - Redis 7+
 - NATS 2.x
