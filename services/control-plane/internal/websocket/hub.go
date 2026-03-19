@@ -84,6 +84,9 @@ type Hub struct {
 	// delay so bursts (e.g., many users reconnecting) collapse into one broadcast.
 	onlineCountPending map[uuid.UUID]bool
 	onlineCountTimer   *time.Timer
+
+	// Mention permission checker (injected after construction via SetMentionChecker)
+	mentionChecker MentionPermissionChecker
 }
 
 // NewHub creates a new Hub
@@ -111,6 +114,12 @@ func NewHub(db *sql.DB, redisClient *redis.Client) *Hub {
 		done:                 make(chan struct{}),
 		onlineCountPending:   make(map[uuid.UUID]bool),
 	}
+}
+
+// SetMentionChecker injects the RBAC permission checker for mention enforcement.
+// Called after Hub and Resolver are both constructed (breaks circular init dependency).
+func (h *Hub) SetMentionChecker(checker MentionPermissionChecker) {
+	h.mentionChecker = checker
 }
 
 // Run starts the hub's main loop
@@ -658,6 +667,16 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		keyVersion = int(kv)
 	}
 
+	// Extract mention addendum (binary-encoded, ephemeral — never persisted or broadcast)
+	var mentionAddendum *MentionAddendum
+	if metaStr, ok := msg.Data["mention_meta"].(string); ok {
+		mentionAddendum = decodeMentionMeta(metaStr)
+	}
+	// Ensure addendum is wiped when this function returns, regardless of exit path
+	if mentionAddendum != nil {
+		defer mentionAddendum.Wipe()
+	}
+
 	// Encrypted messages are larger due to AES-GCM (IV + auth tag) + base64 encoding.
 	// A 4000-char plaintext can produce up to ~24KB of ciphertext (multi-byte UTF-8 worst case).
 	// Plaintext messages keep the 4000-char limit.
@@ -670,14 +689,15 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		return
 	}
 
-	// Server-side encryption enforcement + embed policy lookup
+	// Server-side encryption enforcement + embed policy + server ID lookup
 	var channelEncrypted bool
 	var serverAllowEmbeds bool
+	var serverUUID uuid.UUID
 	encErr := h.db.QueryRow(
-		`SELECT c.is_encrypted, s.allow_embedded_content
+		`SELECT c.is_encrypted, s.allow_embedded_content, c.server_id
 		 FROM channels c INNER JOIN servers s ON c.server_id = s.id
 		 WHERE c.id = $1`, channelUUID,
-	).Scan(&channelEncrypted, &serverAllowEmbeds)
+	).Scan(&channelEncrypted, &serverAllowEmbeds, &serverUUID)
 	if encErr != nil {
 		log.Printf("Failed to check channel encryption/embed status: %v", encErr)
 		h.sendError(msg.ClientID, "Failed to verify channel status")
@@ -780,13 +800,18 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 	h.broadcast <- broadcastMsg
 
 	// Send lightweight unread_notify to server subscribers NOT subscribed to this channel.
-	// Look up which server this channel belongs to.
-	var serverUUID uuid.UUID
-	err = h.db.QueryRow(`SELECT server_id FROM channels WHERE id = $1`, channelUUID).Scan(&serverUUID)
-	if err != nil {
-		log.Printf("Failed to look up server for channel %s: %v", channelUUID, err)
-	} else {
-		h.sendUnreadNotify(serverUUID, channelUUID, msg.UserID)
+	// serverUUID was already fetched in the encryption/embed query above.
+	h.sendUnreadNotify(serverUUID, channelUUID, msg.UserID)
+
+	// Mention routing: enforce RBAC, resolve targets, send enhanced notifications, wipe.
+	// The addendum is decoded above and deferred for Wipe(). RBAC enforcement uses
+	// the serverUUID already fetched. Mention data is NEVER persisted or broadcast.
+	if mentionAddendum != nil {
+		h.enforceMentionPermissions(
+			serverUUID.String(), msg.UserID.String(), channelUUID.String(),
+			mentionAddendum,
+		)
+		h.routeMentionNotifications(serverUUID, channelUUID, msg.UserID, mentionAddendum)
 	}
 }
 
@@ -1194,6 +1219,19 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 		msgType = "system"
 	}
 
+	// Extract mention addendum (ephemeral — no RBAC in DMs, all participants can mention)
+	var mentionAddendum *MentionAddendum
+	if metaStr, ok := msg.Data["mention_meta"].(string); ok {
+		mentionAddendum = decodeMentionMeta(metaStr)
+	}
+	if mentionAddendum != nil {
+		defer mentionAddendum.Wipe()
+		// DMs don't support @everyone (server-level concept) — strip it
+		mentionAddendum.Everyone = false
+		// DMs don't have roles — strip role mentions
+		mentionAddendum.Roles = nil
+	}
+
 	// Extract key_version for E2EE messages
 	dmKeyVersion := 1
 	if kv, ok := msg.Data["key_version"].(float64); ok && kv > 0 {
@@ -1319,6 +1357,12 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 
 	// Send dm_unread_notify to DM participants NOT subscribed to this conversation
 	h.sendDMUnreadNotify(convUUID, msg.UserID)
+
+	// Mention routing for DMs: no RBAC, just resolve targets and notify.
+	// The addendum is decoded above and deferred for Wipe().
+	if mentionAddendum != nil {
+		h.routeDMMentionNotifications(convUUID, msg.UserID, mentionAddendum)
+	}
 }
 
 // sendDMUnreadNotify sends a lightweight notification to DM participants

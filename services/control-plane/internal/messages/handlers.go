@@ -55,6 +55,7 @@ type SendMessageRequest struct {
 	Content     string `json:"content" binding:"required,min=1,max=24000"`
 	IsEncrypted bool   `json:"is_encrypted"`
 	KeyVersion  int    `json:"key_version"`
+	MentionMeta string `json:"mention_meta,omitempty"` // Accepted but unused — mention routing is WebSocket-only. Field exists so REST clients don't get a 400 for including it.
 }
 
 // UpdateMessageRequest represents a request to update a message.

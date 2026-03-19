@@ -2,11 +2,11 @@
 package api // revive:disable-line:var-naming
 
 import (
+	"context"
 	"database/sql"
+	"encoding/hex"
 	"net/http"
 	"time"
-
-	"encoding/hex"
 
 	"github.com/gin-gonic/gin"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
@@ -33,6 +33,16 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// mentionCheckerAdapter adapts an rbac.Resolver to the websocket.MentionPermissionChecker
+// interface, bridging the rbac.Permission type to int64 without a circular import.
+type mentionCheckerAdapter struct {
+	resolver *rbac.Resolver
+}
+
+func (a *mentionCheckerAdapter) HasMentionPermission(ctx context.Context, serverID, userID, channelID string, permBit int64) (bool, error) {
+	return a.resolver.HasPermission(ctx, serverID, userID, channelID, rbac.Permission(permBit))
+}
+
 // NewRouter creates a new API router and returns the WebSocket hub and NATS client for lifecycle management.
 func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, liveSpa *config.LiveSpaConfig, log *logger.Logger) (*gin.Engine, *websocket.Hub, *natsclient.Client) {
 	router := gin.New()
@@ -53,7 +63,6 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, liveSpa *con
 
 	// Initialize WebSocket hub
 	hub := websocket.NewHub(db, redis)
-	go hub.Run()
 
 	// Initialize NATS (inter-service messaging with media plane)
 	var natsClient *natsclient.Client
@@ -78,6 +87,10 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, liveSpa *con
 	// Initialize RBAC components (before handlers that depend on resolver)
 	permCache := rbac.NewPermissionCache(redis)
 	rbacResolver := rbac.NewResolver(db, permCache, log)
+	hub.SetMentionChecker(&mentionCheckerAdapter{resolver: rbacResolver})
+
+	// Start hub AFTER all dependencies are injected (avoids data race on mentionChecker)
+	go hub.Run()
 	auditWriter := rbac.NewAuditWriter(db, log)
 	rbacHandler := rbac.NewHandler(db, log, redis, hub, rbacResolver, permCache, auditWriter)
 
