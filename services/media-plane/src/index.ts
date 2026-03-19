@@ -289,7 +289,7 @@ async function main() {
           userId: data.userId,
           kind: producerInfo.kind,
           source: producerInfo.source,
-          requiresOptIn: producerInfo.source === 'screen',
+          requiresOptIn: producerInfo.source === 'screen' || producerInfo.source === 'screen-audio',
         });
 
         callback({ id: producerInfo.producerId });

@@ -18,7 +18,7 @@ import { MediasoupService } from './mediasoup.js';
 // ---------------------------------------------------------------------------
 
 /** Media source identifier — matches client-side appData.source */
-export type MediaSource = 'mic' | 'camera' | 'screen';
+export type MediaSource = 'mic' | 'camera' | 'screen' | 'screen-audio';
 
 export interface Participant {
   userId: string;
@@ -509,6 +509,19 @@ export class RoomManager {
       }
     }
 
+    // Validate screen-audio: must be audio kind and participant must have an active screen producer
+    if (source === 'screen-audio') {
+      if (kind !== 'audio') {
+        throw new Error('screen-audio source must be audio kind');
+      }
+      const hasScreenProducer = [...participant.producers.values()].some(
+        (info) => info.source === 'screen'
+      );
+      if (!hasScreenProducer) {
+        throw new Error('screen-audio requires an active screen producer');
+      }
+    }
+
     const producer = await participant.sendTransport.produce({
       kind,
       rtpParameters,
@@ -517,8 +530,9 @@ export class RoomManager {
 
     participant.producers.set(producer.id, { producer, source, kind });
 
-    // Add audio producers to the AudioLevelObserver
-    if (kind === 'audio' && room.audioLevelObserver && !room.audioLevelObserver.closed) {
+    // Add mic audio producers to the AudioLevelObserver (skip screen-audio to
+    // avoid false active-speaker detection from system audio)
+    if (kind === 'audio' && source !== 'screen-audio' && room.audioLevelObserver && !room.audioLevelObserver.closed) {
       try {
         await room.audioLevelObserver.addProducer({ producerId: producer.id });
       } catch (err) {
