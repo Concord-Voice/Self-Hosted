@@ -378,6 +378,25 @@ async function main() {
       }
     });
 
+    // ── close-consumer ──────────────────────────────────────────────
+    // Client-initiated consumer close (e.g. tune-out of screen share).
+    // Frees SFU resources and stops RTP forwarding for this consumer.
+    socket.on('close-consumer', ({ consumerId }, callback?) => {
+      try {
+        const roomId = data.roomId;
+        if (!roomId) {
+          if (callback) return callback({ error: 'Not in a room' });
+          return;
+        }
+
+        roomManager.closeConsumer(roomId, data.userId, consumerId);
+        if (callback) callback({ success: true });
+      } catch (error) {
+        logger.error('Error closing consumer', { error, userId: data.userId });
+        if (callback) callback({ error: 'Failed to close consumer' });
+      }
+    });
+
     // ── pause-producer ───────────────────────────────────────────────
     socket.on('pause-producer', async ({ producerId }, callback?) => {
       try {

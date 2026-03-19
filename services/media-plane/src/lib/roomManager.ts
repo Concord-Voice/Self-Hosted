@@ -509,7 +509,8 @@ export class RoomManager {
       }
     }
 
-    // Validate screen-audio: must be audio kind and participant must have an active screen producer
+    // Validate screen-audio: must be audio kind, participant must have an active screen
+    // producer, and only one screen-audio producer is allowed per participant.
     if (source === 'screen-audio') {
       if (kind !== 'audio') {
         throw new Error('screen-audio source must be audio kind');
@@ -519,6 +520,12 @@ export class RoomManager {
       );
       if (!hasScreenProducer) {
         throw new Error('screen-audio requires an active screen producer');
+      }
+      const hasActiveScreenAudio = [...participant.producers.values()].some(
+        (info) => info.source === 'screen-audio' && !info.producer.closed
+      );
+      if (hasActiveScreenAudio) {
+        throw new Error('Only one active screen-audio producer allowed per participant');
       }
     }
 
@@ -757,6 +764,22 @@ export class RoomManager {
 
     await consumer.pause();
     logger.debug('Consumer paused', { consumerId, roomId, userId });
+  }
+
+  /** Close and remove a consumer (client-initiated, e.g. tune-out of screen share) */
+  closeConsumer(roomId: string, userId: string, consumerId: string): void {
+    const room = this.rooms.get(roomId);
+    if (!room) return;
+
+    const participant = room.participants.get(userId);
+    if (!participant) return;
+
+    const consumer = participant.consumers.get(consumerId);
+    if (!consumer) return;
+
+    if (!consumer.closed) consumer.close();
+    participant.consumers.delete(consumerId);
+    logger.debug('Consumer closed', { consumerId, roomId, userId });
   }
 
   // ─── Query methods ───────────────────────────────────────────────────
