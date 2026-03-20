@@ -361,10 +361,14 @@ func (h *Handler) UpdateRole(c *gin.Context) {
 	for i := 1; i < len(updates); i++ {
 		query += ", " + updates[i]
 	}
-	query += ", updated_at = NOW() WHERE id = $1 AND server_id = $2 RETURNING id"
+	query += ", updated_at = NOW() WHERE id = $1 AND server_id = $2 RETURNING id, server_id, name, color, emoji, position, permissions, is_default, is_managed, mentionable, display_separately, created_at, updated_at"
 
-	var updatedRoleID string
-	err = h.db.QueryRow(query, args...).Scan(&updatedRoleID)
+	var role Role
+	err = h.db.QueryRow(query, args...).Scan(
+		&role.ID, &role.ServerID, &role.Name, &role.Color, &role.Emoji,
+		&role.Position, &role.Permissions, &role.IsDefault, &role.IsManaged,
+		&role.Mentionable, &role.DisplaySeparately, &role.CreatedAt, &role.UpdatedAt,
+	)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Role not found"})
 		return
@@ -397,11 +401,12 @@ func (h *Handler) UpdateRole(c *gin.Context) {
 		Data: map[string]interface{}{
 			"server_id": serverID,
 			"role_id":   roleID,
+			"role":      role,
 		},
 	})
 
 	h.log.Info("Role updated", "role_id", roleID, "server_id", serverID)
-	c.JSON(http.StatusOK, gin.H{"message": "Role updated"})
+	c.JSON(http.StatusOK, gin.H{"role": role})
 }
 
 // DeleteRole deletes a role from a server
