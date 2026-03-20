@@ -388,9 +388,19 @@ async function main() {
           if (callback) return callback({ error: 'Not in a room' });
           return;
         }
+        if (!consumerId) {
+          if (callback) return callback({ error: 'consumerId is required' });
+          return;
+        }
 
-        roomManager.closeConsumer(roomId, data.userId, consumerId);
-        if (callback) callback({ success: true });
+        const closed = roomManager.closeConsumer(roomId, data.userId, consumerId);
+        if (callback) {
+          if (closed) {
+            callback({ success: true });
+          } else {
+            callback({ error: 'Consumer not found' });
+          }
+        }
       } catch (error) {
         logger.error('Error closing consumer', { error, userId: data.userId });
         if (callback) callback({ error: 'Failed to close consumer' });

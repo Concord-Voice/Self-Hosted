@@ -767,19 +767,20 @@ export class RoomManager {
   }
 
   /** Close and remove a consumer (client-initiated, e.g. tune-out of screen share) */
-  closeConsumer(roomId: string, userId: string, consumerId: string): void {
+  closeConsumer(roomId: string, userId: string, consumerId: string): boolean {
     const room = this.rooms.get(roomId);
-    if (!room) return;
+    if (!room) return false;
 
     const participant = room.participants.get(userId);
-    if (!participant) return;
+    if (!participant) return false;
 
     const consumer = participant.consumers.get(consumerId);
-    if (!consumer) return;
+    if (!consumer) return false;
 
     if (!consumer.closed) consumer.close();
     participant.consumers.delete(consumerId);
     logger.debug('Consumer closed', { consumerId, roomId, userId });
+    return true;
   }
 
   // ─── Query methods ───────────────────────────────────────────────────

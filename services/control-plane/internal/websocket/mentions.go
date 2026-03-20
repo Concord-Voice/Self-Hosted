@@ -346,6 +346,21 @@ func (h *Hub) sendMentionNotify(
 	mentionedUsers map[uuid.UUID]bool,
 	isEveryone, isHere bool,
 ) {
+	// Marshal once — payload is identical for all recipients
+	notifyMsg, err := marshalOutgoing(OutgoingMessage{
+		Type: "unread_notify",
+		Data: map[string]interface{}{
+			"channel_id":       channelID.String(),
+			"server_id":        serverID.String(),
+			"mentioned":        true,
+			"mention_everyone": isEveryone,
+			"mention_here":     isHere,
+		},
+	})
+	if err != nil {
+		return
+	}
+
 	channelClients := h.channelSubscriptions[channelID]
 
 	for userID := range mentionedUsers {
@@ -363,22 +378,6 @@ func (h *Hub) sendMentionNotify(
 
 			client, ok := h.clients[clientID]
 			if !ok {
-				continue
-			}
-
-			notifyData := map[string]interface{}{
-				"channel_id":       channelID.String(),
-				"server_id":        serverID.String(),
-				"mentioned":        true,
-				"mention_everyone": isEveryone,
-				"mention_here":     isHere,
-			}
-
-			notifyMsg, err := marshalOutgoing(OutgoingMessage{
-				Type: "unread_notify",
-				Data: notifyData,
-			})
-			if err != nil {
 				continue
 			}
 
@@ -449,6 +448,19 @@ func (h *Hub) routeDMMentionNotifications(
 		return
 	}
 
+	// Marshal once — payload is identical for all recipients
+	notifyMsg, err := marshalOutgoing(OutgoingMessage{
+		Type: "dm_unread_notify",
+		Data: map[string]interface{}{
+			"conversation_id": conversationID.String(),
+			"mentioned":       true,
+			"mention_here":    addendum.Here,
+		},
+	})
+	if err != nil {
+		return
+	}
+
 	dmClients := h.dmSubscriptions[conversationID]
 
 	for userID := range mentionedUserIDs {
@@ -464,20 +476,6 @@ func (h *Hub) routeDMMentionNotifications(
 
 			client, ok := h.clients[clientID]
 			if !ok {
-				continue
-			}
-
-			notifyData := map[string]interface{}{
-				"conversation_id": conversationID.String(),
-				"mentioned":       true,
-				"mention_here":    addendum.Here,
-			}
-
-			notifyMsg, err := marshalOutgoing(OutgoingMessage{
-				Type: "dm_unread_notify",
-				Data: notifyData,
-			})
-			if err != nil {
 				continue
 			}
 
