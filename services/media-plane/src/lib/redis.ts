@@ -144,7 +144,7 @@ export class RedisService {
 
   async close(): Promise<void> {
     if (this.client) {
-      await this.client.quit();
+      await this.client.close();
       logger.info('Redis connection closed');
     }
   }

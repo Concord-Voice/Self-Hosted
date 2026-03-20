@@ -26,7 +26,7 @@
     "jsonwebtoken": "^9.0.3",
     "mediasoup": "^3.19.18",
     "nats": "^2.29.3",
-    "redis": "^4.6.12",
+    "redis": "^5.0.0",
     "socket.io": "^4.6.1",
     "winston": "^3.11.0"
   },
