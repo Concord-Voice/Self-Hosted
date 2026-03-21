@@ -103,11 +103,8 @@ services:
       - "9001"  # Web console (internal only)
     volumes:
       - minio-data:/data
-    healthcheck:
-      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9000/minio/health/ready"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    # No healthcheck — the MinIO image is minimal (no curl/wget/mc).
+    # The control plane handles MinIO readiness via its 15s startup timeout.
     networks:
       - concordvoice-network
 
@@ -184,7 +181,7 @@ services:
       nats:
         condition: service_healthy
       minio:
-        condition: service_healthy
+        condition: service_started
     networks:
       - concordvoice-network
     profiles:
