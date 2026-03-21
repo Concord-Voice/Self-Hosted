@@ -87,6 +87,30 @@ services:
     networks:
       - concordvoice-network
 
+  # MinIO Object Storage (S3-compatible)
+  minio:
+    image: minio/minio:RELEASE.2025-03-12T18-04-18Z
+    container_name: concordvoice-minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-concord}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-concord_dev_minio}
+    # No host ports published in base compose — production layers on top of this file
+    # and Compose merges port lists additively. Use docker-compose.override.yml for
+    # dev host access, or access MinIO via `docker compose exec` / internal network.
+    expose:
+      - "9000"  # S3 API (internal only)
+      - "9001"  # Web console (internal only)
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9000/minio/health/ready"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - concordvoice-network
+
   # PostgreSQL Admin (optional, for development)
   pgadmin:
     image: dpage/pgadmin4:latest
@@ -143,6 +167,12 @@ services:
       SMTP_FROM: ${SMTP_FROM:-noreply@concordvoice.chat}
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
       WEBAUTHN_RP_ORIGINS: ${WEBAUTHN_RP_ORIGINS:-http://localhost:3001}
+      MINIO_ENDPOINT: minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-concord}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-concord_dev_minio}
+      MINIO_USE_SSL: "false"
+      MINIO_BUCKET: ${MINIO_BUCKET:-concord-media}
+      UPLOAD_MAX_SIZE: ${UPLOAD_MAX_SIZE:-26214400}
       PORT: 8080
     ports:
       - "8080:8080"
@@ -152,6 +182,8 @@ services:
       redis:
         condition: service_healthy
       nats:
+        condition: service_healthy
+      minio:
         condition: service_healthy
     networks:
       - concordvoice-network
@@ -213,6 +245,7 @@ services:
 volumes:
   postgres-data:
   redis-data:
+  minio-data:
 
 networks:
   concordvoice-network:

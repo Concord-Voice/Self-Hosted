@@ -332,11 +332,14 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 	// Validate and add avatar_url if provided
 	if req.AvatarURL != nil {
 		if *req.AvatarURL != "" {
-			if !strings.HasPrefix(*req.AvatarURL, "data:image/") {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Avatar must be a valid image data URL"})
+			// Accept this user's exact avatar proxy path (from media upload endpoint) or legacy data URLs
+			expectedAvatarURL := fmt.Sprintf("/api/v1/media/avatars/%s", userID)
+			if *req.AvatarURL != expectedAvatarURL && !strings.HasPrefix(*req.AvatarURL, "data:image/") {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Avatar must be an uploaded avatar URL for this user or an image data URL"})
 				return
 			}
-			if len(*req.AvatarURL) > 500000 {
+			// Legacy data URL size check (object storage URLs are small strings)
+			if strings.HasPrefix(*req.AvatarURL, "data:image/") && len(*req.AvatarURL) > 500000 {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "Avatar data URL must be less than 500KB"})
 				return
 			}
@@ -353,11 +356,14 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 	// Validate and add header_image_url if provided
 	if req.HeaderImageURL != nil {
 		if *req.HeaderImageURL != "" {
-			if !strings.HasPrefix(*req.HeaderImageURL, "data:image/") {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Header image must be a valid image data URL"})
+			// Accept this user's exact banner proxy path (from media upload endpoint) or legacy data URLs
+			expectedBannerURL := fmt.Sprintf("/api/v1/media/banners/%s", userID)
+			if *req.HeaderImageURL != expectedBannerURL && !strings.HasPrefix(*req.HeaderImageURL, "data:image/") {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Header image must be an uploaded banner URL for this user or an image data URL"})
 				return
 			}
-			if len(*req.HeaderImageURL) > 1000000 { // 1MB limit for banner images
+			// Legacy data URL size check
+			if strings.HasPrefix(*req.HeaderImageURL, "data:image/") && len(*req.HeaderImageURL) > 1000000 {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "Header image data URL must be less than 1MB"})
 				return
 			}

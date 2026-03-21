@@ -59,6 +59,14 @@ type Config struct {
 	MFAEncryptionKey  string // 32-byte hex-encoded AES key for TOTP secret encryption at rest
 	WebAuthnRPID      string // Relying Party ID (domain, e.g. "concordvoice.chat")
 	WebAuthnRPOrigins []string // Allowed origins for WebAuthn (e.g. "https://concordvoice.chat")
+
+	// Object Storage (MinIO / S3-compatible)
+	MinIOEndpoint  string // MinIO server endpoint (e.g. "minio:9000")
+	MinIOAccessKey string // MinIO access key (root user)
+	MinIOSecretKey string // MinIO secret key // #nosec G101 -- config field, loaded from env
+	MinIOUseSSL    bool   // Use SSL for MinIO connection
+	MinIOBucket    string // Bucket name for media storage (e.g. "concord-media")
+	UploadMaxSize  int64  // Global max upload size in bytes (default 25 MB)
 }
 
 // Load reads configuration from environment variables
@@ -95,6 +103,12 @@ func Load() (*Config, error) {
 		MFAEncryptionKey:      getEnv("MFA_ENCRYPTION_KEY", devMFAEncKey),
 		WebAuthnRPID:          getEnv("WEBAUTHN_RP_ID", "localhost"),
 		WebAuthnRPOrigins:     parseOrigins(getEnv("WEBAUTHN_RP_ORIGINS", "http://localhost:3001")),
+		MinIOEndpoint:         getEnv("MINIO_ENDPOINT", ""),
+		MinIOAccessKey:        getEnv("MINIO_ACCESS_KEY", "concord"),
+		MinIOSecretKey:        getEnv("MINIO_SECRET_KEY", "concord_dev_minio"), // #nosec G101 -- env var name, not a secret
+		MinIOUseSSL:           getEnv("MINIO_USE_SSL", "false") == "true",
+		MinIOBucket:           getEnv("MINIO_BUCKET", "concord-media"),
+		UploadMaxSize:         getEnvInt64("UPLOAD_MAX_SIZE", 25*1024*1024), // 25 MB default
 	}
 
 	cfg.validate()
@@ -116,6 +130,22 @@ func (c *Config) validate() {
 	if c.Environment == "production" && c.MFAEncryptionKey == devMFAEncKey {
 		log.Fatal("FATAL: MFA_ENCRYPTION_KEY must be set to a secure value in production. " +
 			"The default dev key is not allowed. Generate with: openssl rand -hex 32")
+	}
+	if c.Environment == "production" && c.MinIOSecretKey == "concord_dev_minio" { // #nosec G101 -- env var validation
+		log.Fatal("FATAL: MINIO_SECRET_KEY must be set to a secure value in production. " +
+			"The default dev credential is not allowed.")
+	}
+	if c.Environment == "production" && c.MinIOAccessKey == "" {
+		log.Fatal("FATAL: MINIO_ACCESS_KEY must be set in production.")
+	}
+	if c.Environment == "production" && c.MinIOSecretKey == "" { // #nosec G101 -- env var validation
+		log.Fatal("FATAL: MINIO_SECRET_KEY must be set in production.")
+	}
+	if c.Environment == "production" && c.MinIOEndpoint == "" {
+		log.Fatal("FATAL: MINIO_ENDPOINT must be set in production.")
+	}
+	if c.Environment == "production" && c.MinIOBucket == "" {
+		log.Fatal("FATAL: MINIO_BUCKET must be set in production.")
 	}
 }
 
@@ -141,6 +171,15 @@ func getEnv(key, defaultValue string) string {
 func getEnvInt(key string, defaultValue int) int {
 	if value := os.Getenv(key); value != "" {
 		if n, err := strconv.Atoi(value); err == nil {
+			return n
+		}
+	}
+	return defaultValue
+}
+
+func getEnvInt64(key string, defaultValue int64) int64 {
+	if value := os.Getenv(key); value != "" {
+		if n, err := strconv.ParseInt(value, 10, 64); err == nil {
 			return n
 		}
 	}

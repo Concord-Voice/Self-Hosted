@@ -15,6 +15,7 @@ import (
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/api"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/database"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/storage"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
@@ -60,6 +61,21 @@ func main() {
 		}
 	}()
 
+	// Initialize object storage (MinIO) — optional in dev, required in production.
+	// When MinIO is unavailable, media routes return 503.
+	var storageClient *storage.Client
+	if cfg.MinIOEndpoint != "" {
+		storageClient, err = storage.New(cfg, log)
+		if err != nil {
+			if cfg.Environment == "production" {
+				log.Fatal("Failed to connect to object storage", "error", err)
+			}
+			log.Warn("Object storage unavailable — media endpoints will return 503", "error", err)
+		}
+	} else {
+		log.Info("Object storage not configured (MINIO_ENDPOINT empty) — media endpoints disabled")
+	}
+
 	// Set Gin mode
 	if cfg.Environment == "production" {
 		gin.SetMode(gin.ReleaseMode)
@@ -69,7 +85,7 @@ func main() {
 	liveSpa := config.NewLiveSpaConfig(cfg, cfg.SpaConfigFile, 30*time.Second)
 
 	// Initialize router (starts hub, connects NATS, subscribes to voice events)
-	router, hub, natsClient := api.NewRouter(db, redisClient, cfg, liveSpa, log)
+	router, hub, natsClient := api.NewRouter(db, redisClient, storageClient, cfg, liveSpa, log)
 
 	// Start background cleanup job (reaps expired tokens, stale sessions, orphaned presence)
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())

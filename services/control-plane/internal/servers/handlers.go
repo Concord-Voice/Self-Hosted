@@ -138,9 +138,11 @@ func (h *Handler) CreateServer(c *gin.Context) {
 	}()
 
 	// Validate icon_url if provided
+	// CreateServer: server_id is unknown at this point, so only accept legacy data URLs.
+	// Use UpdateServer with the media upload endpoint after creation.
 	if req.IconURL != nil && *req.IconURL != "" {
 		if !strings.HasPrefix(*req.IconURL, "data:image/") {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon must be a valid image data URL"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon must be a valid image data URL (use UpdateServer for uploaded media URLs)"})
 			return
 		}
 		if len(*req.IconURL) > 500000 {
@@ -149,10 +151,10 @@ func (h *Handler) CreateServer(c *gin.Context) {
 		}
 	}
 
-	// Validate banner_url if provided
+	// Validate banner_url if provided (same restriction as icon_url for CreateServer)
 	if req.BannerURL != nil && *req.BannerURL != "" {
 		if !strings.HasPrefix(*req.BannerURL, "data:image/") {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Banner must be a valid image data URL"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Banner must be a valid image data URL (use UpdateServer for uploaded media URLs)"})
 			return
 		}
 		if len(*req.BannerURL) > 1000000 {
@@ -370,11 +372,12 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 
 	// Validate icon_url if a new value was provided
 	if iconURL != nil && *iconURL != "" {
-		if !strings.HasPrefix(*iconURL, "data:image/") {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon must be a valid image data URL"})
+		expectedIconURL := fmt.Sprintf("/api/v1/media/server-icons/%s", serverID)
+		if *iconURL != expectedIconURL && !strings.HasPrefix(*iconURL, "data:image/") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon must be an uploaded icon URL for this server or an image data URL"})
 			return
 		}
-		if len(*iconURL) > 500000 {
+		if strings.HasPrefix(*iconURL, "data:image/") && len(*iconURL) > 500000 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon data URL must be less than 500KB"})
 			return
 		}
@@ -399,11 +402,12 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 
 	// Validate banner_url if a new value was provided
 	if bannerURL != nil && *bannerURL != "" {
-		if !strings.HasPrefix(*bannerURL, "data:image/") {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Banner must be a valid image data URL"})
+		expectedBannerURL := fmt.Sprintf("/api/v1/media/server-banners/%s", serverID)
+		if *bannerURL != expectedBannerURL && !strings.HasPrefix(*bannerURL, "data:image/") {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Banner must be an uploaded banner URL for this server or an image data URL"})
 			return
 		}
-		if len(*bannerURL) > 1000000 {
+		if strings.HasPrefix(*bannerURL, "data:image/") && len(*bannerURL) > 1000000 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Banner data URL must be less than 1MB"})
 			return
 		}

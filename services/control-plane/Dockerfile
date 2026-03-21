@@ -13,8 +13,9 @@ RUN go mod download
 # Copy source code
 COPY . .
 
-# Build the application
+# Build the application and tools
 RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o main ./cmd/server
+RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o migrate-media ./cmd/migrate-media
 
 # Final stage
 FROM alpine:3.21
@@ -25,8 +26,9 @@ RUN apk --no-cache add ca-certificates
 RUN addgroup -S appuser && adduser -S appuser -G appuser
 WORKDIR /home/appuser
 
-# Copy the binary from builder
+# Copy binaries from builder
 COPY --from=builder /app/main .
+COPY --from=builder /app/migrate-media .
 
 # Copy migrations
 COPY --from=builder /app/migrations ./migrations

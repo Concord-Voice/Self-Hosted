@@ -16,6 +16,7 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/dm"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/friends"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/invites"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/media"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/members"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/messages"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/mfa"
@@ -43,8 +44,9 @@ func (a *mentionCheckerAdapter) HasMentionPermission(ctx context.Context, server
 	return a.resolver.HasPermission(ctx, serverID, userID, channelID, rbac.Permission(permBit))
 }
 
+
 // NewRouter creates a new API router and returns the WebSocket hub and NATS client for lifecycle management.
-func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, liveSpa *config.LiveSpaConfig, log *logger.Logger) (*gin.Engine, *websocket.Hub, *natsclient.Client) {
+func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *config.Config, liveSpa *config.LiveSpaConfig, log *logger.Logger) (*gin.Engine, *websocket.Hub, *natsclient.Client) {
 	router := gin.New()
 
 	// Middleware
@@ -117,6 +119,10 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, liveSpa *con
 	voiceHandler := voice.NewHandler(db, log, hub, cfg, rbacResolver)
 	dmHandler := dm.NewHandler(db, log, hub, cfg)
 	friendsHandler := friends.NewHandler(db, log, hub)
+	var mediaHandler *media.Handler
+	if store != nil {
+		mediaHandler = media.NewHandler(db, store, log, cfg, rbacResolver)
+	}
 	wsHandler := websocket.NewHandler(hub, db, redis, cfg.JWTSecret, cfg.AllowedOrigins)
 	wsTicketHandler := auth.NewWSTicketHandler(redis, cfg.JWTSecret)
 	clientConfigHandler := clientconfig.NewHandler(cfg, liveSpa, log)
@@ -963,6 +969,70 @@ func NewRouter(db *sql.DB, redis *redis.Client, cfg *config.Config, liveSpa *con
 					)
 				}
 			}
+		}
+
+		// Media routes (object storage uploads, proxy, presigned URLs)
+		// Only registered when storage is configured (nil in tests without MinIO)
+		if mediaHandler == nil {
+			protected.Any("/media/*path", func(c *gin.Context) {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Object storage not configured"})
+			})
+		}
+		mediaRoutes := protected.Group("/media")
+		if mediaHandler != nil {
+			// Tier 1 uploads (authenticated, server-processed)
+			mediaRoutes.POST("/upload/avatar",
+				middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+				mediaHandler.UploadAvatar,
+			)
+			mediaRoutes.POST("/upload/banner",
+				middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+				mediaHandler.UploadBanner,
+			)
+			mediaRoutes.POST("/upload/server-icon",
+				middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+				mediaHandler.UploadServerIcon,
+			)
+			mediaRoutes.POST("/upload/server-banner",
+				middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+				mediaHandler.UploadServerBanner,
+			)
+
+			// Tier 2 upload (E2EE attachments — ciphertext stored as-is)
+			mediaRoutes.POST("/upload/attachment",
+				middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+				mediaHandler.UploadAttachment,
+			)
+
+			// Tier 1 proxy (auth-gated, cached)
+			mediaRoutes.GET("/avatars/:user_id",
+				middleware.RateLimitByUser(redis, 60, 1*time.Minute),
+				mediaHandler.ProxyAvatar,
+			)
+			mediaRoutes.GET("/banners/:user_id",
+				middleware.RateLimitByUser(redis, 60, 1*time.Minute),
+				mediaHandler.ProxyBanner,
+			)
+			mediaRoutes.GET("/server-icons/:server_id",
+				middleware.RateLimitByUser(redis, 60, 1*time.Minute),
+				mediaHandler.ProxyServerIcon,
+			)
+			mediaRoutes.GET("/server-banners/:server_id",
+				middleware.RateLimitByUser(redis, 60, 1*time.Minute),
+				mediaHandler.ProxyServerBanner,
+			)
+
+			// Tier 2 proxy download (E2EE attachment — proxied, not presigned)
+			mediaRoutes.GET("/attachments/:file_id",
+				middleware.RateLimitByUser(redis, 60, 1*time.Minute),
+				mediaHandler.DownloadAttachment,
+			)
+
+			// Delete media (uploader only)
+			mediaRoutes.DELETE("/:file_id",
+				middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+				mediaHandler.DeleteMedia,
+			)
 		}
 
 		// WebSocket endpoint (requires JWT authentication via query parameter or header)
