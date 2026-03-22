@@ -3,9 +3,16 @@ package auth
 
 import (
 	"context"
+	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"math/big"
+	"crypto/rand"
 	"net/http"
 	"strconv"
 	"strings"
@@ -26,6 +33,12 @@ type SessionDisconnector interface {
 	DisconnectUser(userID uuid.UUID)
 }
 
+// RecoveryClaims contains the user_id extracted from a validated recovery token.
+type RecoveryClaims struct {
+	UserID string
+	JTI    string
+}
+
 // MFAChecker checks if a user has MFA enabled and returns their methods.
 // Defined as an interface to avoid circular imports (mfa imports auth).
 type MFAChecker interface {
@@ -43,6 +56,10 @@ type MFAChecker interface {
 	// in Redis keyed by the challenge JTI. Returns credential request options for the client.
 	// Returns nil options if user has no WebAuthn credentials.
 	BeginWebAuthnLogin(ctx context.Context, userID string, jti string) (options interface{}, err error)
+	// GenerateRecoveryToken creates a recovery-purpose JWT with a 25-hour TTL.
+	GenerateRecoveryToken(userID string) (token string, jti string, err error)
+	// ValidateRecoveryToken validates a recovery-purpose JWT and returns the claims.
+	ValidateRecoveryToken(tokenString string) (*RecoveryClaims, error)
 }
 
 // maxUserAgentLength limits User-Agent storage to reduce metadata footprint.
@@ -1250,4 +1267,917 @@ func (h *Handler) Logout(c *gin.Context) {
 	setRefreshCookie(c, "", -1)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
+}
+
+// ── Account Recovery Endpoints ──────────────────────────────────────────────
+
+const (
+	recoveryCodeTTL       = 10 * time.Minute // Recovery code expires after 10 minutes
+	recoveryMaxAttempts   = 5                // Max wrong-code attempts before invalidating
+	recoveryTokenUsedTTL  = 25 * time.Hour   // Must match or exceed mfa.recoveryTTL
+)
+
+// recoveryRecord is stored in Redis keyed by "recovery_code:{email}".
+type recoveryRecord struct {
+	CodeHash string `json:"code_hash"`
+	UserID   string `json:"user_id"`
+	Attempts int    `json:"attempts"`
+}
+
+// generateRecoveryCode produces a cryptographically random 6-digit numeric code.
+func generateRecoveryCode() (string, error) {
+	n, err := rand.Int(rand.Reader, big.NewInt(1000000))
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("%06d", n.Int64()), nil
+}
+
+// hashRecoveryCode returns the SHA-256 hex digest of a recovery code.
+func hashRecoveryCode(code string) string {
+	h := sha256.Sum256([]byte(code))
+	return hex.EncodeToString(h[:])
+}
+
+// recoveryRedisKey returns the Redis key for a pending recovery code.
+func recoveryRedisKey(email string) string {
+	return fmt.Sprintf("recovery_code:%s", strings.ToLower(email))
+}
+
+// RecoveryBegin initiates account recovery by sending a verification code to the user's email.
+func (h *Handler) RecoveryBegin(c *gin.Context) {
+	var req struct {
+		Email string `json:"email" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Email is required"})
+		return
+	}
+
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+
+	// Always return 200 to prevent email enumeration
+	successMsg := gin.H{"message": "If an account exists with that email, a recovery code has been sent"}
+
+	// Look up user by email
+	var userID string
+	err := h.db.QueryRow(
+		`SELECT id FROM users WHERE LOWER(email) = LOWER($1)`, email,
+	).Scan(&userID)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// User not found — return success anyway (prevent enumeration)
+			c.JSON(http.StatusOK, successMsg)
+			return
+		}
+		// Real DB error — log it but still return 200 to prevent enumeration
+		h.log.Error("Failed to look up user for recovery", "error", err)
+		c.JSON(http.StatusOK, successMsg)
+		return
+	}
+
+	// Generate 6-digit code
+	code, err := generateRecoveryCode()
+	if err != nil {
+		h.log.Error("Failed to generate recovery code", "error", err)
+		// Fall through to generic 200 — recovery won't proceed but attacker can't distinguish
+		c.JSON(http.StatusOK, successMsg)
+		return
+	}
+
+	// Store SHA-256 hash in Redis
+	record := recoveryRecord{
+		CodeHash: hashRecoveryCode(code),
+		UserID:   userID,
+		Attempts: 0,
+	}
+	data, err := json.Marshal(record)
+	if err != nil {
+		h.log.Error("Failed to marshal recovery record", "error", err)
+		c.JSON(http.StatusOK, successMsg)
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	if err := h.redis.Set(ctx, recoveryRedisKey(email), data, recoveryCodeTTL).Err(); err != nil {
+		h.log.Error("Failed to store recovery code in Redis", "error", err)
+		c.JSON(http.StatusOK, successMsg)
+		return
+	}
+
+	// Send code via email
+	if err := h.emailSvc.SendRecoveryCode(email, code); err != nil {
+		h.log.Error("Failed to send recovery code email", "error", err, "email", email)
+		// Still return success to prevent enumeration — the code is in Redis for retry
+	}
+
+	h.log.Info("Recovery code sent", "email", email)
+	c.JSON(http.StatusOK, successMsg)
+}
+
+// RecoveryVerifyCode validates the recovery code and returns a recovery token plus recovery key data.
+func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
+	var req struct {
+		Email string `json:"email" binding:"required"`
+		Code  string `json:"code" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Email and code are required"})
+		return
+	}
+
+	email := strings.ToLower(strings.TrimSpace(req.Email))
+
+	// Trim whitespace/dashes and validate format
+	code := strings.TrimSpace(strings.ReplaceAll(req.Code, "-", ""))
+	if len(code) != 6 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Recovery code must be 6 digits"})
+		return
+	}
+	for _, ch := range code {
+		if ch < '0' || ch > '9' {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Recovery code must be 6 digits"})
+			return
+		}
+	}
+
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
+	defer cancel()
+
+	redisKey := recoveryRedisKey(email)
+
+	// Fetch stored record
+	data, err := h.redis.Get(ctx, redisKey).Bytes()
+	if err == redis.Nil {
+		// Return the same error shape as a wrong code to prevent email enumeration
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired recovery code", "attempts_remaining": 0})
+		return
+	}
+	if err != nil {
+		h.log.Error("Failed to fetch recovery record from Redis", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery verification failed"})
+		return
+	}
+
+	var record recoveryRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		h.log.Error("Failed to unmarshal recovery record", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery verification failed"})
+		return
+	}
+
+	// Check attempt limit — return the same error shape to prevent enumeration
+	if record.Attempts >= recoveryMaxAttempts {
+		h.redis.Del(ctx, redisKey)
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired recovery code", "attempts_remaining": 0})
+		return
+	}
+
+	// Timing-safe comparison
+	if subtle.ConstantTimeCompare([]byte(hashRecoveryCode(code)), []byte(record.CodeHash)) != 1 {
+		// Increment attempts
+		record.Attempts++
+		updated, _ := json.Marshal(record)
+		ttl := h.redis.TTL(ctx, redisKey).Val()
+		if ttl > 0 {
+			h.redis.Set(ctx, redisKey, updated, ttl)
+		}
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"error":              "Invalid or expired recovery code",
+			"attempts_remaining": 0,
+		})
+		return
+	}
+
+	// Code matches — delete Redis key (single use)
+	h.redis.Del(ctx, redisKey)
+
+	// Generate recovery JWT token
+	if h.mfaChecker == nil {
+		h.log.Error("MFA checker not configured for recovery token generation")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery verification failed"})
+		return
+	}
+	recoveryToken, _, err := h.mfaChecker.GenerateRecoveryToken(record.UserID)
+	if err != nil {
+		h.log.Error("Failed to generate recovery token", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery verification failed"})
+		return
+	}
+
+	// Build response
+	resp := gin.H{
+		"recovery_token": recoveryToken,
+	}
+
+	// Fetch recovery key data
+	var recoveryWrappedPrivateKey, recoveryKeySalt []byte
+	var recoveryWrappedPrefsKey, recoveryPrefsKeySalt []byte
+	err = h.db.QueryRow(
+		`SELECT recovery_wrapped_private_key, recovery_key_salt, recovery_wrapped_prefs_key, recovery_prefs_key_salt
+		 FROM user_recovery_keys WHERE user_id = $1`, record.UserID,
+	).Scan(&recoveryWrappedPrivateKey, &recoveryKeySalt, &recoveryWrappedPrefsKey, &recoveryPrefsKeySalt)
+	if err == nil {
+		resp["has_recovery_key"] = true
+		resp["recovery_wrapped_private_key"] = base64.StdEncoding.EncodeToString(recoveryWrappedPrivateKey)
+		resp["recovery_key_salt"] = base64.StdEncoding.EncodeToString(recoveryKeySalt)
+		if len(recoveryWrappedPrefsKey) > 0 {
+			resp["recovery_wrapped_prefs_key"] = base64.StdEncoding.EncodeToString(recoveryWrappedPrefsKey)
+		}
+		if len(recoveryPrefsKeySalt) > 0 {
+			resp["recovery_prefs_key_salt"] = base64.StdEncoding.EncodeToString(recoveryPrefsKeySalt)
+		}
+	} else if errors.Is(err, sql.ErrNoRows) {
+		resp["has_recovery_key"] = false
+	} else {
+		h.log.Error("Failed to load recovery key data", "error", err, "user_id", record.UserID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery verification failed"})
+		return
+	}
+
+	// Check for trusted devices (Phase B — table may not exist yet)
+	var trustedDeviceCount int
+	err = h.db.QueryRow(`SELECT COUNT(*) FROM trusted_recovery_devices WHERE user_id = $1`, record.UserID).Scan(&trustedDeviceCount)
+	if err != nil {
+		// Table may not exist yet — non-fatal
+		resp["has_trusted_devices"] = false
+	} else {
+		resp["has_trusted_devices"] = trustedDeviceCount > 0
+	}
+
+	// Check for recovery circles (Phase C — table may not exist yet)
+	var recoveryCircleCount int
+	err = h.db.QueryRow(`SELECT COUNT(*) FROM recovery_circles WHERE user_id = $1`, record.UserID).Scan(&recoveryCircleCount)
+	if err != nil {
+		// Table may not exist yet — non-fatal
+		resp["has_recovery_circle"] = false
+	} else {
+		resp["has_recovery_circle"] = recoveryCircleCount > 0
+	}
+
+	h.log.Info("Recovery code verified, token issued", "user_id", record.UserID)
+	c.JSON(http.StatusOK, resp)
+}
+
+// RecoveryResetPassword resets the user's password using a recovery token and re-wrapped keys.
+func (h *Handler) RecoveryResetPassword(c *gin.Context) {
+	var req struct {
+		RecoveryToken            string `json:"recovery_token" binding:"required"`
+		NewPassword              string `json:"new_password" binding:"required"`
+		WrappedPrivateKey        string `json:"wrapped_private_key" binding:"required"`
+		KeyDerivationSalt        string `json:"key_derivation_salt" binding:"required"`
+		KeyDerivationAlg         string `json:"key_derivation_alg" binding:"required"`
+		RecoveryWrappedPrivateKey string `json:"recovery_wrapped_private_key"`
+		RecoveryKeySalt          string `json:"recovery_key_salt"`
+		RecoveryWrappedPrefsKey  string `json:"recovery_wrapped_prefs_key"`
+		RecoveryPrefsKeySalt     string `json:"recovery_prefs_key_salt"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	// Validate recovery token
+	if h.mfaChecker == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery not configured"})
+		return
+	}
+	claims, err := h.mfaChecker.ValidateRecoveryToken(req.RecoveryToken)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired recovery token"})
+		return
+	}
+
+	// Enforce single-use recovery token
+	ctx := c.Request.Context()
+	recoveryUsedKey := fmt.Sprintf("recovery_token_used:%s", claims.JTI)
+	_, err = h.redis.SetArgs(ctx, recoveryUsedKey, "1", redis.SetArgs{TTL: recoveryTokenUsedTTL, Mode: "NX"}).Result()
+	if errors.Is(err, redis.Nil) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Recovery token has already been used"})
+		return
+	}
+	if err != nil {
+		h.log.Error("Failed to check recovery token usage", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process recovery"})
+		return
+	}
+
+	// Validate new password strength
+	if err := ValidatePasswordStrength(req.NewPassword); err != nil {
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Hash new password
+	passwordHash, err := HashPassword(req.NewPassword)
+	if err != nil {
+		h.log.Error("Failed to hash new password", "error", err)
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset password"})
+		return
+	}
+
+	// Decode E2EE key fields
+	wrappedKey, err := base64.StdEncoding.DecodeString(req.WrappedPrivateKey)
+	if err != nil {
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid wrapped_private_key format"})
+		return
+	}
+	kdSalt, err := base64.StdEncoding.DecodeString(req.KeyDerivationSalt)
+	if err != nil {
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid key_derivation_salt format"})
+		return
+	}
+
+	// BEGIN TRANSACTION
+	tx, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
+		h.log.Error("Failed to start transaction", "error", err)
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset password"})
+		return
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			h.log.Error("Failed to rollback transaction", "error", rbErr)
+		}
+	}()
+
+	// 1. Update password
+	_, err = tx.Exec(`UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`, passwordHash, claims.UserID)
+	if err != nil {
+		h.log.Error("Failed to update password", "error", err, "user_id", claims.UserID)
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset password"})
+		return
+	}
+
+	// 2. Update E2EE keys
+	_, err = tx.Exec(`
+		UPDATE user_keys SET wrapped_private_key = $1, key_derivation_salt = $2, key_derivation_alg = $3,
+		       key_version = key_version + 1, updated_at = NOW()
+		WHERE user_id = $4
+	`, wrappedKey, kdSalt, req.KeyDerivationAlg, claims.UserID)
+	if err != nil {
+		h.log.Error("Failed to update user keys", "error", err, "user_id", claims.UserID)
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset password"})
+		return
+	}
+
+	// 3. If recovery key fields provided, upsert recovery key
+	if req.RecoveryWrappedPrivateKey != "" && req.RecoveryKeySalt != "" {
+		recKey, decErr := base64.StdEncoding.DecodeString(req.RecoveryWrappedPrivateKey)
+		if decErr != nil {
+			h.redis.Del(ctx, recoveryUsedKey)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid recovery_wrapped_private_key format"})
+			return
+		}
+		recSalt, decErr := base64.StdEncoding.DecodeString(req.RecoveryKeySalt)
+		if decErr != nil {
+			h.redis.Del(ctx, recoveryUsedKey)
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid recovery_key_salt format"})
+			return
+		}
+
+		var recPrefsKey, recPrefsSalt []byte
+		if req.RecoveryWrappedPrefsKey != "" {
+			recPrefsKey, decErr = base64.StdEncoding.DecodeString(req.RecoveryWrappedPrefsKey)
+			if decErr != nil {
+				h.redis.Del(ctx, recoveryUsedKey)
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid recovery_wrapped_prefs_key format"})
+				return
+			}
+		}
+		if req.RecoveryPrefsKeySalt != "" {
+			recPrefsSalt, decErr = base64.StdEncoding.DecodeString(req.RecoveryPrefsKeySalt)
+			if decErr != nil {
+				h.redis.Del(ctx, recoveryUsedKey)
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid recovery_prefs_key_salt format"})
+				return
+			}
+		}
+
+		_, err = tx.Exec(`
+			INSERT INTO user_recovery_keys (user_id, recovery_wrapped_private_key, recovery_key_salt, recovery_wrapped_prefs_key, recovery_prefs_key_salt)
+			VALUES ($1, $2, $3, $4, $5)
+			ON CONFLICT (user_id) DO UPDATE SET
+				recovery_wrapped_private_key = EXCLUDED.recovery_wrapped_private_key,
+				recovery_key_salt = EXCLUDED.recovery_key_salt,
+				recovery_wrapped_prefs_key = EXCLUDED.recovery_wrapped_prefs_key,
+				recovery_prefs_key_salt = EXCLUDED.recovery_prefs_key_salt,
+				updated_at = NOW()
+		`, claims.UserID, recKey, recSalt, recPrefsKey, recPrefsSalt)
+		if err != nil {
+			h.log.Error("Failed to upsert recovery key", "error", err, "user_id", claims.UserID)
+			h.redis.Del(ctx, recoveryUsedKey)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset password"})
+			return
+		}
+	}
+
+	// 4. Revoke all refresh tokens
+	_, err = tx.Exec(`UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`, claims.UserID)
+	if err != nil {
+		h.log.Error("Failed to revoke refresh tokens", "error", err, "user_id", claims.UserID)
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset password"})
+		return
+	}
+
+	// COMMIT
+	if err := tx.Commit(); err != nil {
+		h.log.Error("Failed to commit transaction", "error", err, "user_id", claims.UserID)
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset password"})
+		return
+	}
+
+	// Disconnect user's WebSocket sessions
+	h.hub.DisconnectUser(uuid.MustParse(claims.UserID))
+
+	h.log.Info("Password reset via recovery", "user_id", claims.UserID)
+	c.JSON(http.StatusOK, gin.H{"message": "Password reset successfully. Please sign in with your new password."})
+}
+
+// RecoveryResetAccount performs a full account reset (new keys, all encrypted data lost).
+func (h *Handler) RecoveryResetAccount(c *gin.Context) {
+	var req struct {
+		RecoveryToken        string `json:"recovery_token" binding:"required"`
+		NewPassword          string `json:"new_password" binding:"required"`
+		WrappedPrivateKey    string `json:"wrapped_private_key" binding:"required"`
+		KeyDerivationSalt    string `json:"key_derivation_salt" binding:"required"`
+		KeyDerivationAlg     string `json:"key_derivation_alg" binding:"required"`
+		PublicKey            string `json:"public_key" binding:"required"`
+		AcknowledgeDataLoss  bool   `json:"acknowledge_data_loss"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	// REQUIRE explicit acknowledgment of data loss
+	if !req.AcknowledgeDataLoss {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "You must acknowledge that all encrypted message history will be permanently lost"})
+		return
+	}
+
+	// Validate recovery token
+	if h.mfaChecker == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery not configured"})
+		return
+	}
+	claims, err := h.mfaChecker.ValidateRecoveryToken(req.RecoveryToken)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired recovery token"})
+		return
+	}
+
+	// Enforce single-use recovery token
+	ctx := c.Request.Context()
+	recoveryUsedKey := fmt.Sprintf("recovery_token_used:%s", claims.JTI)
+	_, err = h.redis.SetArgs(ctx, recoveryUsedKey, "1", redis.SetArgs{TTL: recoveryTokenUsedTTL, Mode: "NX"}).Result()
+	if errors.Is(err, redis.Nil) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Recovery token has already been used"})
+		return
+	}
+	if err != nil {
+		h.log.Error("Failed to check recovery token usage", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process recovery"})
+		return
+	}
+
+	// Validate new password strength
+	if err := ValidatePasswordStrength(req.NewPassword); err != nil {
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Hash new password
+	passwordHash, err := HashPassword(req.NewPassword)
+	if err != nil {
+		h.log.Error("Failed to hash new password", "error", err)
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		return
+	}
+
+	// Decode E2EE key fields
+	wrappedKey, err := base64.StdEncoding.DecodeString(req.WrappedPrivateKey)
+	if err != nil {
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid wrapped_private_key format"})
+		return
+	}
+	kdSalt, err := base64.StdEncoding.DecodeString(req.KeyDerivationSalt)
+	if err != nil {
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid key_derivation_salt format"})
+		return
+	}
+	publicKey, err := base64.StdEncoding.DecodeString(req.PublicKey)
+	if err != nil {
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid public_key format"})
+		return
+	}
+
+	// BEGIN TRANSACTION
+	tx, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
+		h.log.Error("Failed to start transaction", "error", err)
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		return
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			h.log.Error("Failed to rollback transaction", "error", rbErr)
+		}
+	}()
+
+	// 1. Update password
+	_, err = tx.Exec(`UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`, passwordHash, claims.UserID)
+	if err != nil {
+		h.log.Error("Failed to update password", "error", err, "user_id", claims.UserID)
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		return
+	}
+
+	// 2. Update E2EE wrapped private key
+	_, err = tx.Exec(`
+		UPDATE user_keys SET wrapped_private_key = $1, key_derivation_salt = $2, key_derivation_alg = $3,
+		       key_version = key_version + 1, updated_at = NOW()
+		WHERE user_id = $4
+	`, wrappedKey, kdSalt, req.KeyDerivationAlg, claims.UserID)
+	if err != nil {
+		h.log.Error("Failed to update user keys", "error", err, "user_id", claims.UserID)
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		return
+	}
+
+	// 3. Replace public key (new identity)
+	_, err = tx.Exec(`
+		UPDATE public_keys SET public_key = $1, key_version = key_version + 1, created_at = NOW()
+		WHERE user_id = $2
+	`, publicKey, claims.UserID)
+	if err != nil {
+		h.log.Error("Failed to update public key", "error", err, "user_id", claims.UserID)
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		return
+	}
+
+	// 4. Delete recovery keys
+	_, err = tx.Exec(`DELETE FROM user_recovery_keys WHERE user_id = $1`, claims.UserID)
+	if err != nil {
+		h.log.Error("Failed to delete recovery keys", "error", err, "user_id", claims.UserID)
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		return
+	}
+
+	// 5. Delete channel keys (encrypted data is now inaccessible)
+	_, err = tx.Exec(`DELETE FROM channel_keys WHERE user_id = $1`, claims.UserID)
+	if err != nil {
+		h.log.Error("Failed to delete channel keys", "error", err, "user_id", claims.UserID)
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		return
+	}
+
+	// 6. Delete DM channel keys
+	_, err = tx.Exec(`DELETE FROM dm_channel_keys WHERE user_id = $1`, claims.UserID)
+	if err != nil {
+		h.log.Error("Failed to delete DM channel keys", "error", err, "user_id", claims.UserID)
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		return
+	}
+
+	// 7. Revoke all refresh tokens
+	_, err = tx.Exec(`UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`, claims.UserID)
+	if err != nil {
+		h.log.Error("Failed to revoke refresh tokens", "error", err, "user_id", claims.UserID)
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		return
+	}
+
+	// COMMIT
+	if err := tx.Commit(); err != nil {
+		h.log.Error("Failed to commit transaction", "error", err, "user_id", claims.UserID)
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		return
+	}
+
+	// Disconnect user's WebSocket sessions
+	h.hub.DisconnectUser(uuid.MustParse(claims.UserID))
+
+	h.log.Info("Account reset via recovery (data loss acknowledged)", "user_id", claims.UserID)
+	c.JSON(http.StatusOK, gin.H{"message": "Account reset successfully. All encrypted message history has been permanently lost. Please sign in with your new password."})
+}
+
+// ── Trusted Device Recovery Endpoints ───────────────────────────────────────
+
+// CreateDeviceRecoveryRequest initiates a trusted-device recovery request.
+// This is an unauthenticated endpoint — the caller must provide a valid recovery token.
+func (h *Handler) CreateDeviceRecoveryRequest(c *gin.Context) {
+	var req struct {
+		RecoveryToken      string `json:"recovery_token" binding:"required"`
+		EphemeralPublicKey string `json:"ephemeral_public_key" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "recovery_token and ephemeral_public_key are required"})
+		return
+	}
+
+	// Validate recovery token
+	if h.mfaChecker == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery not configured"})
+		return
+	}
+	claims, err := h.mfaChecker.ValidateRecoveryToken(req.RecoveryToken)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired recovery token"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Check user has trusted devices
+	var deviceCount int
+	err = h.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM trusted_recovery_devices WHERE user_id = $1`, claims.UserID,
+	).Scan(&deviceCount)
+	if err != nil {
+		h.log.Error("Failed to check trusted devices", "error", err, "user_id", claims.UserID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create recovery request"})
+		return
+	}
+	if deviceCount == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No trusted devices configured"})
+		return
+	}
+
+	// Base64-decode ephemeral public key
+	ephPubKey, err := base64.StdEncoding.DecodeString(req.EphemeralPublicKey)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ephemeral_public_key format (must be base64)"})
+		return
+	}
+
+	// Insert recovery request with 15-minute expiry
+	var requestID string
+	err = h.db.QueryRowContext(ctx, `
+		INSERT INTO recovery_requests (user_id, recovery_token_jti, ephemeral_public_key, expires_at)
+		VALUES ($1, $2, $3, NOW() + INTERVAL '15 minutes')
+		RETURNING id
+	`, claims.UserID, claims.JTI, ephPubKey).Scan(&requestID)
+	if err != nil {
+		h.log.Error("Failed to create recovery request", "error", err, "user_id", claims.UserID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create recovery request"})
+		return
+	}
+
+	// TODO: Send WebSocket notification to the user's trusted device sessions via
+	// hub.BroadcastToUser(uuid.MustParse(claims.UserID), websocket.OutgoingMessage{
+	//     Type: "recovery_request",
+	//     Data: map[string]interface{}{"request_id": requestID},
+	// })
+	// Currently the auth handler's hub field is a SessionDisconnector interface which
+	// does not expose BroadcastToUser. The client can poll via GET /recovery/device-request/:id
+	// as a fallback until the interface is extended.
+
+	h.log.Info("Device recovery request created", "user_id", claims.UserID, "request_id", requestID)
+	c.JSON(http.StatusOK, gin.H{"request_id": requestID})
+}
+
+// PollDeviceRecoveryRequest polls the status of a trusted-device recovery request.
+// This is an unauthenticated endpoint — the caller must provide a valid recovery token.
+func (h *Handler) PollDeviceRecoveryRequest(c *gin.Context) {
+	requestID := c.Param("id")
+
+	// Prefer Authorization: Bearer header; fall back to query param
+	recoveryToken := ""
+	if authHeader := c.GetHeader("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
+		recoveryToken = strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+	} else {
+		recoveryToken = c.Query("recovery_token")
+	}
+	if recoveryToken == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Recovery token is required (Authorization: Bearer header or recovery_token query parameter)"})
+		return
+	}
+
+	// Validate recovery token
+	if h.mfaChecker == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery not configured"})
+		return
+	}
+	claims, err := h.mfaChecker.ValidateRecoveryToken(recoveryToken)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired recovery token"})
+		return
+	}
+
+	// Fetch the recovery request (JTI-scoped to prevent cross-token access)
+	var status string
+	var encryptedPayload, responderPublicKey []byte
+	var expiresAt time.Time
+	err = h.db.QueryRowContext(c.Request.Context(), `
+		SELECT status, encrypted_payload, responder_public_key, expires_at
+		FROM recovery_requests
+		WHERE id = $1 AND user_id = $2 AND recovery_token_jti = $3
+	`, requestID, claims.UserID, claims.JTI).Scan(&status, &encryptedPayload, &responderPublicKey, &expiresAt)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Recovery request not found"})
+		return
+	}
+
+	// Check if expired
+	if time.Now().After(expiresAt) && status == "pending" {
+		c.JSON(http.StatusOK, gin.H{"status": "expired"})
+		return
+	}
+
+	response := gin.H{"status": status}
+	if status == "approved" && encryptedPayload != nil {
+		response["encrypted_payload"] = base64.StdEncoding.EncodeToString(encryptedPayload)
+	}
+	if status == "approved" && responderPublicKey != nil {
+		response["responder_public_key"] = base64.StdEncoding.EncodeToString(responderPublicKey)
+	}
+
+	c.JSON(http.StatusOK, response)
+}
+
+// ── Social Recovery Request Endpoints ────────────────────────────────────────
+
+// CreateSocialRecoveryRequest creates a social recovery request for Shamir secret sharing.
+// This is an unauthenticated endpoint — the caller provides a valid recovery token.
+func (h *Handler) CreateSocialRecoveryRequest(c *gin.Context) {
+	var req struct {
+		RecoveryToken      string `json:"recovery_token" binding:"required"`
+		EphemeralPublicKey string `json:"ephemeral_public_key" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "recovery_token and ephemeral_public_key are required"})
+		return
+	}
+
+	// Validate recovery token
+	if h.mfaChecker == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery not configured"})
+		return
+	}
+	claims, err := h.mfaChecker.ValidateRecoveryToken(req.RecoveryToken)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired recovery token"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Find user's recovery circle
+	var circleID string
+	var thresholdK int
+	err = h.db.QueryRowContext(ctx,
+		`SELECT id, threshold_k FROM recovery_circles WHERE user_id = $1`, claims.UserID,
+	).Scan(&circleID, &thresholdK)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No social recovery circle configured"})
+		return
+	}
+
+	// Base64-decode ephemeral public key
+	ephPubKey, err := base64.StdEncoding.DecodeString(req.EphemeralPublicKey)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ephemeral_public_key format (must be base64)"})
+		return
+	}
+
+	// Insert social recovery request with 24-hour expiry
+	var requestID string
+	err = h.db.QueryRowContext(ctx, `
+		INSERT INTO recovery_circle_requests (circle_id, user_id, recovery_token_jti, ephemeral_public_key, expires_at)
+		VALUES ($1, $2, $3, $4, NOW() + INTERVAL '24 hours')
+		RETURNING id
+	`, circleID, claims.UserID, claims.JTI, ephPubKey).Scan(&requestID)
+	if err != nil {
+		h.log.Error("Failed to create social recovery request", "error", err, "user_id", claims.UserID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create social recovery request"})
+		return
+	}
+
+	h.log.Info("Social recovery request created", "user_id", claims.UserID, "request_id", requestID, "threshold_k", thresholdK)
+	c.JSON(http.StatusOK, gin.H{"request_id": requestID, "threshold_k": thresholdK})
+}
+
+// PollSocialRecoveryRequest polls the status of a social recovery request.
+// This is an unauthenticated endpoint — the caller provides a valid recovery token.
+func (h *Handler) PollSocialRecoveryRequest(c *gin.Context) {
+	requestID := c.Param("id")
+
+	// Prefer Authorization: Bearer header; fall back to query param
+	recoveryToken := ""
+	if authHeader := c.GetHeader("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
+		recoveryToken = strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+	} else {
+		recoveryToken = c.Query("recovery_token")
+	}
+	if recoveryToken == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Recovery token is required (Authorization: Bearer header or recovery_token query parameter)"})
+		return
+	}
+
+	// Validate recovery token
+	if h.mfaChecker == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery not configured"})
+		return
+	}
+	claims, err := h.mfaChecker.ValidateRecoveryToken(recoveryToken)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired recovery token"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Fetch the social recovery request (JTI-scoped to prevent cross-token access)
+	var status string
+	var sharesReceived, thresholdK int
+	var expiresAt time.Time
+	err = h.db.QueryRowContext(ctx, `
+		SELECT rr.status, rr.shares_received, rc.threshold_k, rr.expires_at
+		FROM recovery_circle_requests rr
+		JOIN recovery_circles rc ON rc.id = rr.circle_id
+		WHERE rr.id = $1 AND rr.user_id = $2 AND rr.recovery_token_jti = $3
+	`, requestID, claims.UserID, claims.JTI).Scan(&status, &sharesReceived, &thresholdK, &expiresAt)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Social recovery request not found"})
+		return
+	}
+
+	// Check if expired
+	if time.Now().After(expiresAt) && status == "pending" {
+		c.JSON(http.StatusOK, gin.H{"status": "expired"})
+		return
+	}
+
+	response := gin.H{
+		"status":          status,
+		"shares_received": sharesReceived,
+		"threshold_k":     thresholdK,
+	}
+
+	// If complete, include all responses
+	if status == "complete" {
+		rows, err := h.db.QueryContext(ctx, `
+			SELECT contact_id, encrypted_share
+			FROM recovery_circle_responses
+			WHERE request_id = $1
+		`, requestID)
+		if err != nil {
+			h.log.Error("Failed to query social recovery responses", "error", err, "request_id", requestID)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load recovery responses"})
+			return
+		}
+		defer func() { _ = rows.Close() }()
+
+		type responseEntry struct {
+			ContactID      string `json:"contact_id"`
+			EncryptedShare string `json:"encrypted_share"`
+		}
+
+		responses := []responseEntry{}
+		for rows.Next() {
+			var r responseEntry
+			var encShare []byte
+			if err := rows.Scan(&r.ContactID, &encShare); err != nil {
+				h.log.Error("Failed to scan social recovery response", "error", err)
+				continue
+			}
+			r.EncryptedShare = base64.StdEncoding.EncodeToString(encShare)
+			responses = append(responses, r)
+		}
+		if err := rows.Err(); err != nil {
+			h.log.Error("Error iterating social recovery responses", "error", err, "request_id", requestID)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load recovery responses"})
+			return
+		}
+
+		response["responses"] = responses
+	}
+
+	c.JSON(http.StatusOK, response)
 }

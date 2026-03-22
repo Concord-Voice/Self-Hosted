@@ -177,6 +177,44 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				middleware.RateLimitByIP(redis, 3, 15*time.Minute),
 				mfaHandler.SendEmailMFACode,
 			)
+
+			// Account recovery (unauthenticated — uses email verification + recovery tokens)
+			authRoutes.POST("/recovery/begin",
+				middleware.RateLimitByIP(redis, 3, 15*time.Minute),
+				authHandler.RecoveryBegin,
+			)
+			authRoutes.POST("/recovery/verify-code",
+				middleware.RateLimitByIP(redis, 5, 15*time.Minute),
+				authHandler.RecoveryVerifyCode,
+			)
+			authRoutes.POST("/recovery/reset-password",
+				middleware.RateLimitByIP(redis, 5, 15*time.Minute),
+				authHandler.RecoveryResetPassword,
+			)
+			authRoutes.POST("/recovery/reset-account",
+				middleware.RateLimitByIP(redis, 3, 15*time.Minute),
+				authHandler.RecoveryResetAccount,
+			)
+
+			// Trusted device recovery (unauthenticated — uses recovery token)
+			authRoutes.POST("/recovery/device-request",
+				middleware.RateLimitByIP(redis, 3, 15*time.Minute),
+				authHandler.CreateDeviceRecoveryRequest,
+			)
+			authRoutes.GET("/recovery/device-request/:id",
+				middleware.RateLimitByIP(redis, 10, 15*time.Minute),
+				authHandler.PollDeviceRecoveryRequest,
+			)
+
+			// Social recovery (unauthenticated — uses recovery token)
+			authRoutes.POST("/recovery/social-request",
+				middleware.RateLimitByIP(redis, 3, 15*time.Minute),
+				authHandler.CreateSocialRecoveryRequest,
+			)
+			authRoutes.GET("/recovery/social-request/:id",
+				middleware.RateLimitByIP(redis, 10, 15*time.Minute),
+				authHandler.PollSocialRecoveryRequest,
+			)
 		}
 
 		// Client config (public — pre-auth, clients need this before login)
@@ -330,6 +368,72 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				mfaRoutes.PUT("/backup-email",
 					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
 					mfaHandler.SetBackupEmail,
+				)
+
+				// Recovery key management
+				mfaRoutes.PUT("/recovery-key",
+					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
+					mfaHandler.StoreRecoveryKey,
+				)
+				mfaRoutes.GET("/recovery-key",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					mfaHandler.GetRecoveryKeyStatus,
+				)
+				mfaRoutes.DELETE("/recovery-key",
+					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
+					mfaHandler.DeleteRecoveryKey,
+				)
+
+				// Trusted device management
+				mfaRoutes.GET("/trusted-devices",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					mfaHandler.ListTrustedDevices,
+				)
+				mfaRoutes.POST("/trusted-devices",
+					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
+					mfaHandler.DesignateTrustedDevice,
+				)
+				mfaRoutes.DELETE("/trusted-devices/:id",
+					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
+					mfaHandler.RemoveTrustedDevice,
+				)
+
+				// Recovery request management (authenticated user responds)
+				mfaRoutes.GET("/recovery-requests",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					mfaHandler.ListRecoveryRequests,
+				)
+				mfaRoutes.POST("/recovery-requests/:id/respond",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					mfaHandler.RespondToRecoveryRequest,
+				)
+
+				// Recovery circle management (Shamir's Secret Sharing)
+				mfaRoutes.GET("/recovery-circle",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					mfaHandler.GetRecoveryCircle,
+				)
+				mfaRoutes.PUT("/recovery-circle",
+					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
+					mfaHandler.UpsertRecoveryCircle,
+				)
+				mfaRoutes.DELETE("/recovery-circle",
+					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
+					mfaHandler.DeleteRecoveryCircle,
+				)
+				mfaRoutes.GET("/recovery-circle/shares",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					mfaHandler.GetMyRecoveryShares,
+				)
+
+				// Social recovery requests (contacts respond)
+				mfaRoutes.GET("/recovery-requests/social",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					mfaHandler.ListSocialRecoveryRequests,
+				)
+				mfaRoutes.POST("/recovery-requests/social/:id/respond",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					mfaHandler.RespondToSocialRecovery,
 				)
 			}
 

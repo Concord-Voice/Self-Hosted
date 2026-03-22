@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"encoding/json"
 	"fmt"
 	"math/big"
@@ -1857,4 +1858,936 @@ func isValidEmail(email string) bool {
 		}
 	}
 	return at > 0 && at < len(email)-1
+}
+
+// ── Recovery Token Methods ──────────────────────────────────────────────────
+
+// GenerateRecoveryToken creates a recovery-purpose JWT with a 25-hour TTL.
+// Implements auth.MFAChecker interface.
+func (h *Handler) GenerateRecoveryToken(userID string) (string, string, error) {
+	return GenerateRecoveryToken(userID, h.jwtSecret)
+}
+
+// ValidateRecoveryToken validates a recovery-purpose JWT and returns the claims.
+// Implements auth.MFAChecker interface.
+func (h *Handler) ValidateRecoveryToken(tokenString string) (*auth.RecoveryClaims, error) {
+	claims, err := ValidateChallengeToken(tokenString, h.jwtSecret, PurposeRecovery)
+	if err != nil {
+		return nil, err
+	}
+	return &auth.RecoveryClaims{UserID: claims.UserID, JTI: claims.ID}, nil
+}
+
+// ── Recovery Key Endpoints ──────────────────────────────────────────────────
+
+// StoreRecoveryKey stores or updates the user's recovery-wrapped private key.
+func (h *Handler) StoreRecoveryKey(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	var req struct {
+		RecoveryWrappedPrivateKey string `json:"recovery_wrapped_private_key" binding:"required"`
+		RecoveryKeySalt          string `json:"recovery_key_salt" binding:"required"`
+		RecoveryWrappedPrefsKey  string `json:"recovery_wrapped_prefs_key"`
+		RecoveryPrefsKeySalt     string `json:"recovery_prefs_key_salt"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "recovery_wrapped_private_key and recovery_key_salt are required"})
+		return
+	}
+
+	// Validate prefs fields are provided together (both or neither)
+	hasPrefsKey := req.RecoveryWrappedPrefsKey != ""
+	hasPrefsSalt := req.RecoveryPrefsKeySalt != ""
+	if hasPrefsKey != hasPrefsSalt {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "recovery_wrapped_prefs_key and recovery_prefs_key_salt must be provided together"})
+		return
+	}
+
+	// Base64-decode all fields
+	wrappedKey, err := base64.StdEncoding.DecodeString(req.RecoveryWrappedPrivateKey)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid recovery_wrapped_private_key format (must be base64)"})
+		return
+	}
+	keySalt, err := base64.StdEncoding.DecodeString(req.RecoveryKeySalt)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid recovery_key_salt format (must be base64)"})
+		return
+	}
+
+	var wrappedPrefsKey, prefsKeySalt []byte
+	if req.RecoveryWrappedPrefsKey != "" {
+		wrappedPrefsKey, err = base64.StdEncoding.DecodeString(req.RecoveryWrappedPrefsKey)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid recovery_wrapped_prefs_key format (must be base64)"})
+			return
+		}
+	}
+	if req.RecoveryPrefsKeySalt != "" {
+		prefsKeySalt, err = base64.StdEncoding.DecodeString(req.RecoveryPrefsKeySalt)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid recovery_prefs_key_salt format (must be base64)"})
+			return
+		}
+	}
+
+	// UPSERT into user_recovery_keys
+	_, err = h.db.ExecContext(c.Request.Context(), `
+		INSERT INTO user_recovery_keys (user_id, recovery_wrapped_private_key, recovery_key_salt, recovery_wrapped_prefs_key, recovery_prefs_key_salt)
+		VALUES ($1, $2, $3, $4, $5)
+		ON CONFLICT (user_id) DO UPDATE SET
+			recovery_wrapped_private_key = EXCLUDED.recovery_wrapped_private_key,
+			recovery_key_salt = EXCLUDED.recovery_key_salt,
+			recovery_wrapped_prefs_key = EXCLUDED.recovery_wrapped_prefs_key,
+			recovery_prefs_key_salt = EXCLUDED.recovery_prefs_key_salt,
+			updated_at = NOW()
+	`, userID, wrappedKey, keySalt, wrappedPrefsKey, prefsKeySalt)
+	if err != nil {
+		h.log.Error("Failed to store recovery key", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to store recovery key"})
+		return
+	}
+
+	h.log.Info("Recovery key stored", "user_id", userID)
+	c.JSON(http.StatusOK, gin.H{"message": "Recovery key stored"})
+}
+
+// GetRecoveryKeyStatus returns whether the user has a recovery key and when it was created.
+func (h *Handler) GetRecoveryKeyStatus(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	var createdAt time.Time
+	err := h.db.QueryRowContext(c.Request.Context(),
+		`SELECT created_at FROM user_recovery_keys WHERE user_id = $1`, userID,
+	).Scan(&createdAt)
+
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// No row found — user has no recovery key
+			c.JSON(http.StatusOK, gin.H{"has_recovery_key": false})
+			return
+		}
+		h.log.Error("Failed to query recovery key status", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check recovery key status"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"has_recovery_key": true,
+		"created_at":       createdAt.Format(time.RFC3339),
+	})
+}
+
+// DeleteRecoveryKey removes the user's recovery key after verifying password and MFA.
+func (h *Handler) DeleteRecoveryKey(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	var req struct {
+		Password string `json:"password" binding:"required"` //nolint:gosec // request field, not a secret
+		MFACode  string `json:"mfa_code"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required"})
+		return
+	}
+
+	if !h.requirePasswordAndMFA(c, userID, req.Password, req.MFACode) {
+		return
+	}
+
+	_, err := h.db.ExecContext(c.Request.Context(),
+		`DELETE FROM user_recovery_keys WHERE user_id = $1`, userID,
+	)
+	if err != nil {
+		h.log.Error("Failed to delete recovery key", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove recovery key"})
+		return
+	}
+
+	h.log.Info("Recovery key removed", "user_id", userID)
+	c.JSON(http.StatusOK, gin.H{"message": "Recovery key removed"})
+}
+
+// ── Trusted Device Recovery Endpoints ───────────────────────────────────────
+
+// ListTrustedDevices returns all trusted recovery devices for the authenticated user.
+func (h *Handler) ListTrustedDevices(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	rows, err := h.db.QueryContext(c.Request.Context(),
+		`SELECT id, device_name, machine_id, designated_at, last_seen_at
+		 FROM trusted_recovery_devices WHERE user_id = $1
+		 ORDER BY designated_at DESC`, userID,
+	)
+	if err != nil {
+		h.log.Error("Failed to list trusted devices", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list trusted devices"})
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	type trustedDevice struct {
+		ID           string     `json:"id"`
+		DeviceName   string     `json:"device_name"`
+		MachineID    string     `json:"machine_id"`
+		DesignatedAt time.Time  `json:"designated_at"`
+		LastSeenAt   *time.Time `json:"last_seen_at"`
+	}
+
+	devices := []trustedDevice{}
+	var scanErr error
+	for rows.Next() {
+		var d trustedDevice
+		if err := rows.Scan(&d.ID, &d.DeviceName, &d.MachineID, &d.DesignatedAt, &d.LastSeenAt); err != nil {
+			h.log.Error("Failed to scan trusted device row", "error", err)
+			scanErr = err
+			break
+		}
+		devices = append(devices, d)
+	}
+	if scanErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list trusted devices"})
+		return
+	}
+	if err := rows.Err(); err != nil {
+		h.log.Error("Error iterating trusted devices", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list trusted devices"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"devices": devices})
+}
+
+// DesignateTrustedDevice designates the current device as a trusted recovery device.
+func (h *Handler) DesignateTrustedDevice(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	var req struct {
+		Password   string `json:"password" binding:"required"` //nolint:gosec // request field, not a secret
+		MFACode    string `json:"mfa_code"`
+		DeviceName string `json:"device_name" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "password and device_name are required"})
+		return
+	}
+
+	if !h.requirePasswordAndMFA(c, userID, req.Password, req.MFACode) {
+		return
+	}
+
+	machineID := c.GetHeader("X-Machine-Id")
+	if machineID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Machine ID required"})
+		return
+	}
+
+	var deviceID string
+	var designatedAt time.Time
+	err := h.db.QueryRowContext(c.Request.Context(), `
+		INSERT INTO trusted_recovery_devices (user_id, device_name, machine_id)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (user_id, machine_id) DO UPDATE SET
+			device_name = EXCLUDED.device_name,
+			designated_at = NOW()
+		RETURNING id, designated_at
+	`, userID, req.DeviceName, machineID).Scan(&deviceID, &designatedAt)
+	if err != nil {
+		h.log.Error("Failed to designate trusted device", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to designate trusted device"})
+		return
+	}
+
+	h.log.Info("Trusted device designated", "user_id", userID, "device_id", deviceID, "machine_id", machineID)
+	c.JSON(http.StatusOK, gin.H{
+		"id":            deviceID,
+		"device_name":   req.DeviceName,
+		"machine_id":    machineID,
+		"designated_at": designatedAt.Format(time.RFC3339),
+	})
+}
+
+// RemoveTrustedDevice removes a trusted recovery device after verifying password and MFA.
+func (h *Handler) RemoveTrustedDevice(c *gin.Context) {
+	userID := c.GetString("user_id")
+	deviceID := c.Param("id")
+
+	var req struct {
+		Password string `json:"password" binding:"required"` //nolint:gosec // request field, not a secret
+		MFACode  string `json:"mfa_code"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required"})
+		return
+	}
+
+	if !h.requirePasswordAndMFA(c, userID, req.Password, req.MFACode) {
+		return
+	}
+
+	result, err := h.db.ExecContext(c.Request.Context(),
+		`DELETE FROM trusted_recovery_devices WHERE id = $1 AND user_id = $2`, deviceID, userID,
+	)
+	if err != nil {
+		h.log.Error("Failed to remove trusted device", "error", err, "user_id", userID, "device_id", deviceID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove trusted device"})
+		return
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Trusted device not found"})
+		return
+	}
+
+	h.log.Info("Trusted device removed", "user_id", userID, "device_id", deviceID)
+	c.JSON(http.StatusOK, gin.H{"message": "Trusted device removed"})
+}
+
+// ListRecoveryRequests returns pending recovery requests for the authenticated user.
+func (h *Handler) ListRecoveryRequests(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	rows, err := h.db.QueryContext(c.Request.Context(), `
+		SELECT id, status, ephemeral_public_key, created_at, expires_at
+		FROM recovery_requests
+		WHERE user_id = $1 AND status = 'pending' AND expires_at > NOW()
+		ORDER BY created_at DESC
+	`, userID)
+	if err != nil {
+		h.log.Error("Failed to list recovery requests", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list recovery requests"})
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	type recoveryRequest struct {
+		ID                 string    `json:"id"`
+		Status             string    `json:"status"`
+		EphemeralPublicKey string    `json:"ephemeral_public_key"`
+		CreatedAt          time.Time `json:"created_at"`
+		ExpiresAt          time.Time `json:"expires_at"`
+	}
+
+	requests := []recoveryRequest{}
+	var scanErr error
+	for rows.Next() {
+		var r recoveryRequest
+		var ephPubKey []byte
+		if err := rows.Scan(&r.ID, &r.Status, &ephPubKey, &r.CreatedAt, &r.ExpiresAt); err != nil {
+			h.log.Error("Failed to scan recovery request row", "error", err)
+			scanErr = err
+			break
+		}
+		r.EphemeralPublicKey = base64.StdEncoding.EncodeToString(ephPubKey)
+		requests = append(requests, r)
+	}
+	if scanErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list recovery requests"})
+		return
+	}
+	if err := rows.Err(); err != nil {
+		h.log.Error("Error iterating recovery requests", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list recovery requests"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"requests": requests})
+}
+
+// RespondToRecoveryRequest allows the authenticated user to approve or reject a recovery request.
+func (h *Handler) RespondToRecoveryRequest(c *gin.Context) {
+	userID := c.GetString("user_id")
+	requestID := c.Param("id")
+
+	var req struct {
+		Action             string `json:"action" binding:"required"`
+		EncryptedPayload   string `json:"encrypted_payload"`
+		ResponderPublicKey string `json:"responder_public_key"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "action is required (approve or reject)"})
+		return
+	}
+
+	if req.Action != "approve" && req.Action != "reject" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "action must be 'approve' or 'reject'"})
+		return
+	}
+
+	// Verify the request belongs to this user and is still pending
+	var requestUserID, status string
+	err := h.db.QueryRowContext(c.Request.Context(),
+		`SELECT user_id, status FROM recovery_requests WHERE id = $1 AND expires_at > NOW()`, requestID,
+	).Scan(&requestUserID, &status)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Recovery request not found"})
+		return
+	}
+
+	if requestUserID != userID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Not authorized to respond to this request"})
+		return
+	}
+
+	if status != "pending" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Request already responded to"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	if req.Action == "approve" {
+		if req.EncryptedPayload == "" || req.ResponderPublicKey == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "encrypted_payload and responder_public_key are required for approval"})
+			return
+		}
+
+		encPayload, decErr := base64.StdEncoding.DecodeString(req.EncryptedPayload)
+		if decErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid encrypted_payload format (must be base64)"})
+			return
+		}
+
+		respPubKey, decErr := base64.StdEncoding.DecodeString(req.ResponderPublicKey)
+		if decErr != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid responder_public_key format (must be base64)"})
+			return
+		}
+
+		_, err = h.db.ExecContext(ctx, `
+			UPDATE recovery_requests
+			SET status = 'approved', encrypted_payload = $1, responder_public_key = $2, responded_at = NOW()
+			WHERE id = $3
+		`, encPayload, respPubKey, requestID)
+	} else {
+		_, err = h.db.ExecContext(ctx, `
+			UPDATE recovery_requests
+			SET status = 'rejected', responded_at = NOW()
+			WHERE id = $1
+		`, requestID)
+	}
+
+	if err != nil {
+		h.log.Error("Failed to respond to recovery request", "error", err, "request_id", requestID, "action", req.Action)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to respond to recovery request"})
+		return
+	}
+
+	statusWord := "approved"
+	if req.Action == "reject" {
+		statusWord = "rejected"
+	}
+	h.log.Info("Recovery request responded", "user_id", userID, "request_id", requestID, "action", req.Action)
+	c.JSON(http.StatusOK, gin.H{"message": "Recovery request " + statusWord})
+}
+
+// ── Social Recovery Circle Endpoints ─────────────────────────────────────────
+
+// GetRecoveryCircle returns the user's social recovery circle configuration.
+func (h *Handler) GetRecoveryCircle(c *gin.Context) {
+	userID := c.GetString("user_id")
+	ctx := c.Request.Context()
+
+	var circleID string
+	var thresholdK, totalSharesN, shareVersion int
+	var createdAt time.Time
+	err := h.db.QueryRowContext(ctx,
+		`SELECT id, threshold_k, total_shares_n, share_version, created_at
+		 FROM recovery_circles WHERE user_id = $1`, userID,
+	).Scan(&circleID, &thresholdK, &totalSharesN, &shareVersion, &createdAt)
+
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			// No circle configured
+			c.JSON(http.StatusOK, gin.H{"has_circle": false})
+			return
+		}
+		h.log.Error("Failed to query recovery circle", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load recovery circle"})
+		return
+	}
+
+	// Query contacts for the current share version
+	rows, err := h.db.QueryContext(ctx, `
+		SELECT DISTINCT cs.contact_id, u.username, u.display_name
+		FROM recovery_circle_shares cs
+		JOIN users u ON u.id = cs.contact_id
+		WHERE cs.circle_id = $1 AND cs.share_version = $2
+	`, circleID, shareVersion)
+	if err != nil {
+		h.log.Error("Failed to query recovery circle contacts", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load recovery circle"})
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	type contact struct {
+		UserID      string `json:"user_id"`
+		Username    string `json:"username"`
+		DisplayName string `json:"display_name"`
+	}
+
+	contacts := []contact{}
+	for rows.Next() {
+		var ct contact
+		var displayName sql.NullString
+		if err := rows.Scan(&ct.UserID, &ct.Username, &displayName); err != nil {
+			h.log.Error("Failed to scan recovery circle contact", "error", err)
+			continue
+		}
+		if displayName.Valid {
+			ct.DisplayName = displayName.String
+		}
+		contacts = append(contacts, ct)
+	}
+	if err := rows.Err(); err != nil {
+		h.log.Error("Error iterating recovery circle contacts", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load recovery circle"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"has_circle":    true,
+		"threshold_k":   thresholdK,
+		"total_shares_n": totalSharesN,
+		"share_version": shareVersion,
+		"created_at":    createdAt,
+		"contacts":      contacts,
+	})
+}
+
+// UpsertRecoveryCircle creates or updates the user's social recovery circle with Shamir shares.
+func (h *Handler) UpsertRecoveryCircle(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	type shareEntry struct {
+		ContactID      string `json:"contact_id" binding:"required"`
+		ShareIndex     int    `json:"share_index" binding:"required"`
+		EncryptedShare string `json:"encrypted_share" binding:"required"`
+	}
+
+	var req struct {
+		Password    string       `json:"password" binding:"required"`
+		MFACode     string       `json:"mfa_code"`
+		ThresholdK  int          `json:"threshold_k" binding:"required"`
+		TotalSharesN int         `json:"total_shares_n" binding:"required"`
+		Shares      []shareEntry `json:"shares" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	// Require password + MFA verification
+	if !h.requirePasswordAndMFA(c, userID, req.Password, req.MFACode) {
+		return
+	}
+
+	// Validate constraints
+	if req.ThresholdK < 2 || req.ThresholdK > req.TotalSharesN || req.TotalSharesN > 7 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "threshold_k must be >= 2 and <= total_shares_n, total_shares_n must be <= 7"})
+		return
+	}
+	if len(req.Shares) != req.TotalSharesN {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Number of shares must equal total_shares_n"})
+		return
+	}
+
+	// Check for duplicate contact_ids and share_indexes
+	contactSet := make(map[string]bool)
+	indexSet := make(map[int]bool)
+	for _, s := range req.Shares {
+		if contactSet[s.ContactID] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Duplicate contact_id in shares"})
+			return
+		}
+		contactSet[s.ContactID] = true
+
+		if indexSet[s.ShareIndex] {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Duplicate share_index in shares"})
+			return
+		}
+		indexSet[s.ShareIndex] = true
+
+		if s.ShareIndex < 1 || s.ShareIndex > req.TotalSharesN {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("share_index must be between 1 and %d", req.TotalSharesN)})
+			return
+		}
+	}
+
+	// Validate contacts: no self-references and all must be accepted friends
+	ctx := c.Request.Context()
+	for _, s := range req.Shares {
+		if s.ContactID == userID {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "You cannot be your own recovery contact"})
+			return
+		}
+
+		var friendCount int
+		err := h.db.QueryRowContext(ctx, `
+			SELECT COUNT(*) FROM friendships
+			WHERE status = 'accepted'
+			AND ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))
+		`, userID, s.ContactID).Scan(&friendCount)
+		if err != nil {
+			h.log.Error("Failed to check friendship for recovery contact", "error", err, "user_id", userID, "contact_id", s.ContactID)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate recovery contacts"})
+			return
+		}
+		if friendCount == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Contact %s is not an accepted friend", s.ContactID)})
+			return
+		}
+	}
+
+	// Decode all encrypted shares upfront
+	type decodedShare struct {
+		ContactID      string
+		ShareIndex     int
+		EncryptedShare []byte
+	}
+	decodedShares := make([]decodedShare, len(req.Shares))
+	for i, s := range req.Shares {
+		encShare, err := base64.StdEncoding.DecodeString(s.EncryptedShare)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid encrypted_share format for share %d (must be base64)", i)})
+			return
+		}
+		decodedShares[i] = decodedShare{
+			ContactID:      s.ContactID,
+			ShareIndex:     s.ShareIndex,
+			EncryptedShare: encShare,
+		}
+	}
+
+	// BEGIN TRANSACTION
+	tx, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
+		h.log.Error("Failed to begin transaction for recovery circle", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to configure recovery circle"})
+		return
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// UPSERT recovery circle
+	var circleID string
+	var shareVersion int
+	err = tx.QueryRowContext(ctx, `
+		INSERT INTO recovery_circles (user_id, threshold_k, total_shares_n)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (user_id) DO UPDATE SET
+			threshold_k = $2,
+			total_shares_n = $3,
+			share_version = recovery_circles.share_version + 1,
+			updated_at = NOW()
+		RETURNING id, share_version
+	`, userID, req.ThresholdK, req.TotalSharesN).Scan(&circleID, &shareVersion)
+	if err != nil {
+		h.log.Error("Failed to upsert recovery circle", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to configure recovery circle"})
+		return
+	}
+
+	// Delete old shares
+	_, err = tx.ExecContext(ctx, `
+		DELETE FROM recovery_circle_shares WHERE circle_id = $1 AND share_version < $2
+	`, circleID, shareVersion)
+	if err != nil {
+		h.log.Error("Failed to delete old shares", "error", err, "circle_id", circleID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to configure recovery circle"})
+		return
+	}
+
+	// Insert new shares
+	for _, s := range decodedShares {
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO recovery_circle_shares (circle_id, contact_id, share_index, encrypted_share, share_version)
+			VALUES ($1, $2, $3, $4, $5)
+		`, circleID, s.ContactID, s.ShareIndex, s.EncryptedShare, shareVersion)
+		if err != nil {
+			h.log.Error("Failed to insert recovery share", "error", err, "circle_id", circleID, "contact_id", s.ContactID)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to configure recovery circle"})
+			return
+		}
+	}
+
+	// COMMIT
+	if err = tx.Commit(); err != nil {
+		h.log.Error("Failed to commit recovery circle transaction", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to configure recovery circle"})
+		return
+	}
+
+	h.log.Info("Recovery circle configured", "user_id", userID, "threshold_k", req.ThresholdK, "total_shares_n", req.TotalSharesN, "share_version", shareVersion)
+	c.JSON(http.StatusOK, gin.H{"message": "Recovery circle configured", "share_version": shareVersion})
+}
+
+// DeleteRecoveryCircle deletes the user's social recovery circle and all shares.
+func (h *Handler) DeleteRecoveryCircle(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	var req struct {
+		Password string `json:"password" binding:"required"`
+		MFACode  string `json:"mfa_code"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "password is required"})
+		return
+	}
+
+	// Require password + MFA verification
+	if !h.requirePasswordAndMFA(c, userID, req.Password, req.MFACode) {
+		return
+	}
+
+	// Delete circle (shares cascade via FK)
+	result, err := h.db.ExecContext(c.Request.Context(),
+		`DELETE FROM recovery_circles WHERE user_id = $1`, userID,
+	)
+	if err != nil {
+		h.log.Error("Failed to delete recovery circle", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete recovery circle"})
+		return
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "No recovery circle found"})
+		return
+	}
+
+	h.log.Info("Recovery circle deleted", "user_id", userID)
+	c.JSON(http.StatusOK, gin.H{"message": "Recovery circle deleted"})
+}
+
+// GetMyRecoveryShares returns shares that other users have assigned to this user as a recovery contact.
+func (h *Handler) GetMyRecoveryShares(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	rows, err := h.db.QueryContext(c.Request.Context(), `
+		SELECT cs.id, cs.circle_id, cs.share_index, cs.encrypted_share, cs.share_version,
+		       rc.user_id AS owner_id, u.username AS owner_username
+		FROM recovery_circle_shares cs
+		JOIN recovery_circles rc ON rc.id = cs.circle_id
+		JOIN users u ON u.id = rc.user_id
+		WHERE cs.contact_id = $1
+	`, userID)
+	if err != nil {
+		h.log.Error("Failed to query recovery shares", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load recovery shares"})
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	type share struct {
+		ID             string `json:"id"`
+		CircleID       string `json:"circle_id"`
+		ShareIndex     int    `json:"share_index"`
+		EncryptedShare string `json:"encrypted_share"`
+		ShareVersion   int    `json:"share_version"`
+		OwnerID        string `json:"owner_id"`
+		OwnerUsername  string `json:"owner_username"`
+	}
+
+	shares := []share{}
+	for rows.Next() {
+		var s share
+		var encShare []byte
+		if err := rows.Scan(&s.ID, &s.CircleID, &s.ShareIndex, &encShare, &s.ShareVersion, &s.OwnerID, &s.OwnerUsername); err != nil {
+			h.log.Error("Failed to scan recovery share row", "error", err)
+			continue
+		}
+		s.EncryptedShare = base64.StdEncoding.EncodeToString(encShare)
+		shares = append(shares, s)
+	}
+	if err := rows.Err(); err != nil {
+		h.log.Error("Error iterating recovery shares", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load recovery shares"})
+		return
+	}
+
+	c.JSON(http.StatusOK, shares)
+}
+
+// ListSocialRecoveryRequests returns pending social recovery requests where this user is a contact.
+func (h *Handler) ListSocialRecoveryRequests(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	rows, err := h.db.QueryContext(c.Request.Context(), `
+		SELECT DISTINCT rr.id, rr.user_id, u.username, u.display_name,
+		       rr.ephemeral_public_key, rr.created_at, rr.expires_at
+		FROM recovery_circle_requests rr
+		JOIN recovery_circles rc ON rc.id = rr.circle_id
+		JOIN recovery_circle_shares cs ON cs.circle_id = rc.id
+		JOIN users u ON u.id = rr.user_id
+		WHERE cs.contact_id = $1 AND rr.status = 'pending' AND rr.expires_at > NOW()
+	`, userID)
+	if err != nil {
+		h.log.Error("Failed to list social recovery requests", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list social recovery requests"})
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	type socialRecoveryRequest struct {
+		ID                 string    `json:"id"`
+		UserID             string    `json:"user_id"`
+		Username           string    `json:"username"`
+		DisplayName        string    `json:"display_name"`
+		EphemeralPublicKey string    `json:"ephemeral_public_key"`
+		CreatedAt          time.Time `json:"created_at"`
+		ExpiresAt          time.Time `json:"expires_at"`
+	}
+
+	requests := []socialRecoveryRequest{}
+	var scanErr error
+	for rows.Next() {
+		var r socialRecoveryRequest
+		var displayName sql.NullString
+		var ephPubKey []byte
+		if err := rows.Scan(&r.ID, &r.UserID, &r.Username, &displayName, &ephPubKey, &r.CreatedAt, &r.ExpiresAt); err != nil {
+			h.log.Error("Failed to scan social recovery request row", "error", err)
+			scanErr = err
+			break
+		}
+		if displayName.Valid {
+			r.DisplayName = displayName.String
+		}
+		r.EphemeralPublicKey = base64.StdEncoding.EncodeToString(ephPubKey)
+		requests = append(requests, r)
+	}
+	if scanErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list social recovery requests"})
+		return
+	}
+	if err := rows.Err(); err != nil {
+		h.log.Error("Error iterating social recovery requests", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list social recovery requests"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"requests": requests})
+}
+
+// RespondToSocialRecovery allows an authenticated contact to submit their re-encrypted share.
+func (h *Handler) RespondToSocialRecovery(c *gin.Context) {
+	userID := c.GetString("user_id")
+	requestID := c.Param("id")
+
+	var req struct {
+		EncryptedShare string `json:"encrypted_share" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "encrypted_share is required"})
+		return
+	}
+
+	// Decode the encrypted share
+	encShare, err := base64.StdEncoding.DecodeString(req.EncryptedShare)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid encrypted_share format (must be base64)"})
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	// Verify this user is a contact for this request's circle, and the request is pending + not expired
+	var status string
+	var circleID string
+	var thresholdK int
+	var expiresAt time.Time
+	err = h.db.QueryRowContext(ctx, `
+		SELECT rr.status, rr.circle_id, rc.threshold_k, rr.expires_at
+		FROM recovery_circle_requests rr
+		JOIN recovery_circles rc ON rc.id = rr.circle_id
+		JOIN recovery_circle_shares cs ON cs.circle_id = rc.id AND cs.contact_id = $1
+		WHERE rr.id = $2
+		LIMIT 1
+	`, userID, requestID).Scan(&status, &circleID, &thresholdK, &expiresAt)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Recovery request not found or you are not a contact"})
+		return
+	}
+
+	if status != "pending" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Recovery request is no longer pending"})
+		return
+	}
+
+	if time.Now().After(expiresAt) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Recovery request has expired"})
+		return
+	}
+
+	// Wrap insert + increment + status check in a single transaction
+	tx, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
+		h.log.Error("Failed to begin transaction for social recovery response", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to submit response"})
+		return
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			h.log.Error("Failed to rollback social recovery response transaction", "error", rbErr)
+		}
+	}()
+
+	// Insert response atomically — ON CONFLICT prevents TOCTOU race
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO recovery_circle_responses (request_id, contact_id, encrypted_share)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (request_id, contact_id) DO NOTHING
+	`, requestID, userID, encShare)
+	if err != nil {
+		h.log.Error("Failed to insert social recovery response", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to submit response"})
+		return
+	}
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "You have already responded to this request"})
+		return
+	}
+
+	// Increment shares_received and check if threshold is met
+	var sharesReceived int
+	err = tx.QueryRowContext(ctx, `
+		UPDATE recovery_circle_requests
+		SET shares_received = shares_received + 1
+		WHERE id = $1
+		RETURNING shares_received
+	`, requestID).Scan(&sharesReceived)
+	if err != nil {
+		h.log.Error("Failed to update shares_received", "error", err, "request_id", requestID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to submit response"})
+		return
+	}
+
+	// If threshold met, mark request as complete
+	if sharesReceived >= thresholdK {
+		_, err = tx.ExecContext(ctx, `
+			UPDATE recovery_circle_requests SET status = 'complete' WHERE id = $1
+		`, requestID)
+		if err != nil {
+			h.log.Error("Failed to mark social recovery request as complete", "error", err, "request_id", requestID)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to submit response"})
+			return
+		}
+	}
+
+	// COMMIT
+	if err := tx.Commit(); err != nil {
+		h.log.Error("Failed to commit social recovery response transaction", "error", err, "request_id", requestID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to submit response"})
+		return
+	}
+
+	h.log.Info("Social recovery response submitted", "request_id", requestID, "contact_id", userID, "shares_received", sharesReceived, "threshold_k", thresholdK)
+	c.JSON(http.StatusOK, gin.H{"message": "Share submitted", "shares_received": sharesReceived, "threshold_met": sharesReceived >= thresholdK})
 }

@@ -62,15 +62,25 @@ func main() {
 	}()
 
 	// Initialize object storage (MinIO) — optional in dev, required in production.
-	// When MinIO is unavailable, media routes return 503.
+	// Retry up to 5 times with backoff to handle startup ordering (MinIO may not be ready yet).
 	var storageClient *storage.Client
 	if cfg.MinIOEndpoint != "" {
-		storageClient, err = storage.New(cfg, log)
-		if err != nil {
-			if cfg.Environment == "production" {
-				log.Fatal("Failed to connect to object storage", "error", err)
+		const maxRetries = 5
+		for attempt := 1; attempt <= maxRetries; attempt++ {
+			storageClient, err = storage.New(cfg, log)
+			if err == nil {
+				break
 			}
-			log.Warn("Object storage unavailable — media endpoints will return 503", "error", err)
+			if attempt == maxRetries {
+				if cfg.Environment == "production" {
+					log.Fatal("Failed to connect to object storage after retries", "error", err, "attempts", maxRetries)
+				}
+				log.Warn("Object storage unavailable — media endpoints will return 503", "error", err)
+			} else {
+				backoff := time.Duration(attempt) * 2 * time.Second
+				log.Warn("Object storage not ready, retrying", "error", err, "attempt", attempt, "backoff", backoff)
+				time.Sleep(backoff)
+			}
 		}
 	} else {
 		log.Info("Object storage not configured (MINIO_ENDPOINT empty) — media endpoints disabled")

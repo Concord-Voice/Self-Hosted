@@ -69,6 +69,56 @@ func TestValidateChallengeTokenWrongSecret(t *testing.T) {
 	}
 }
 
+func TestGenerateRecoveryToken(t *testing.T) {
+	token, jti, err := GenerateRecoveryToken("user-456", testJWTSecret)
+	if err != nil {
+		t.Fatalf("GenerateRecoveryToken failed: %v", err)
+	}
+	if token == "" {
+		t.Error("token is empty")
+	}
+	if jti == "" {
+		t.Error("jti is empty")
+	}
+
+	// Validate with correct purpose
+	claims, err := ValidateChallengeToken(token, testJWTSecret, PurposeRecovery)
+	if err != nil {
+		t.Fatalf("ValidateChallengeToken failed for recovery token: %v", err)
+	}
+	if claims.UserID != "user-456" {
+		t.Errorf("UserID = %q, want %q", claims.UserID, "user-456")
+	}
+	if claims.Purpose != PurposeRecovery {
+		t.Errorf("Purpose = %q, want %q", claims.Purpose, PurposeRecovery)
+	}
+
+	// Verify ~25 hour TTL (should expire between 24h59m and 25h10s from now)
+	expiresIn := time.Until(claims.ExpiresAt.Time)
+	if expiresIn < 24*time.Hour+59*time.Minute || expiresIn > 25*time.Hour+10*time.Second {
+		t.Errorf("recovery token TTL = %v, want ~25 hours", expiresIn)
+	}
+}
+
+func TestRecoveryTokenRejectsWrongPurpose(t *testing.T) {
+	token, _, err := GenerateRecoveryToken("user-456", testJWTSecret)
+	if err != nil {
+		t.Fatalf("GenerateRecoveryToken failed: %v", err)
+	}
+
+	// Login purpose should reject a recovery token
+	_, err = ValidateChallengeToken(token, testJWTSecret, PurposeLogin)
+	if err == nil {
+		t.Error("expected error when validating recovery token with login purpose")
+	}
+
+	// MFA upgrade purpose should also reject
+	_, err = ValidateChallengeToken(token, testJWTSecret, PurposeMFAUpgrade)
+	if err == nil {
+		t.Error("expected error when validating recovery token with mfa_upgrade purpose")
+	}
+}
+
 func TestValidateChallengeTokenExpired(t *testing.T) {
 	// Create a token that's already expired
 	claims := ChallengeClaims{

@@ -18,7 +18,12 @@ const (
 	PurposeLogin             ChallengePurpose = "login"
 	PurposeSuspiciousRefresh ChallengePurpose = "suspicious_refresh"
 	PurposeMFAUpgrade        ChallengePurpose = "mfa_upgrade"
+	PurposeRecovery          ChallengePurpose = "recovery"
 )
+
+// recoveryTTL is the lifetime of recovery tokens. Must exceed the longest recovery
+// flow (social recovery requests expire after 24 hours, device requests after 15 minutes).
+const recoveryTTL = 25 * time.Hour
 
 // ChallengeClaims are the JWT claims for an MFA challenge token.
 type ChallengeClaims struct {
@@ -29,6 +34,16 @@ type ChallengeClaims struct {
 
 // GenerateChallengeToken creates a short-lived, purpose-bound JWT for MFA challenges.
 func GenerateChallengeToken(userID string, purpose ChallengePurpose, jwtSecret string) (string, string, error) {
+	return generateChallengeTokenWithTTL(userID, purpose, jwtSecret, challengeTTL)
+}
+
+// GenerateRecoveryToken creates a recovery-purpose JWT with a longer TTL (25 hours).
+func GenerateRecoveryToken(userID string, jwtSecret string) (string, string, error) {
+	return generateChallengeTokenWithTTL(userID, PurposeRecovery, jwtSecret, recoveryTTL)
+}
+
+// generateChallengeTokenWithTTL creates a purpose-bound JWT with a configurable TTL.
+func generateChallengeTokenWithTTL(userID string, purpose ChallengePurpose, jwtSecret string, ttl time.Duration) (string, string, error) {
 	jti := uuid.New().String()
 	now := time.Now()
 
@@ -36,7 +51,7 @@ func GenerateChallengeToken(userID string, purpose ChallengePurpose, jwtSecret s
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        jti,
 			IssuedAt:  jwt.NewNumericDate(now),
-			ExpiresAt: jwt.NewNumericDate(now.Add(challengeTTL)),
+			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
 			NotBefore: jwt.NewNumericDate(now),
 			Issuer:    "concordvoice-mfa",
 		},

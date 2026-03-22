@@ -20,6 +20,13 @@ import {
   encryptBlob,
   decryptBlob,
   derivePreferencesKey,
+  base58Encode,
+  base58Decode,
+  generateRecoveryKey,
+  parseRecoveryKey,
+  wrapWithRecoveryKey,
+  unwrapWithRecoveryKey,
+  deriveKeyArgon2idExportable,
 } from '@/renderer/utils/crypto';
 
 describe('crypto utilities', () => {
@@ -201,6 +208,124 @@ describe('crypto utilities', () => {
       const decrypted = await decryptBlob<typeof data>(encrypted, key);
       expect(decrypted).toEqual(data);
     });
+  });
+
+  describe('base58Encode / base58Decode', () => {
+    it('round-trips random bytes', () => {
+      const original = crypto.getRandomValues(new Uint8Array(32));
+      const encoded = base58Encode(original);
+      const decoded = base58Decode(encoded);
+      expect(decoded).toEqual(original);
+    });
+
+    it('handles leading zero bytes', () => {
+      const data = new Uint8Array([0, 0, 0, 1, 2, 3]);
+      const encoded = base58Encode(data);
+      const decoded = base58Decode(encoded);
+      expect(decoded).toEqual(data);
+    });
+
+    it('handles empty input', () => {
+      const data = new Uint8Array([]);
+      const encoded = base58Encode(data);
+      expect(encoded).toBe('');
+      const decoded = base58Decode('');
+      expect(decoded).toEqual(data);
+    });
+
+    it('handles single byte', () => {
+      for (const val of [0, 1, 57, 58, 127, 255]) {
+        const data = new Uint8Array([val]);
+        const decoded = base58Decode(base58Encode(data));
+        expect(decoded).toEqual(data);
+      }
+    });
+
+    it('throws on invalid characters', () => {
+      expect(() => base58Decode('0OIl')).toThrow(); // 0, O, I, l are not in base58
+    });
+  });
+
+  describe('generateRecoveryKey / parseRecoveryKey', () => {
+    it('generates a dash-grouped base58 key', () => {
+      const key = generateRecoveryKey();
+      expect(key).toContain('-');
+      // Each group is at most 5 chars
+      const groups = key.split('-');
+      for (const group of groups) {
+        expect(group.length).toBeLessThanOrEqual(5);
+        expect(group.length).toBeGreaterThan(0);
+      }
+    });
+
+    it('parseRecoveryKey strips dashes and decodes to 32 bytes', () => {
+      const key = generateRecoveryKey();
+      const bytes = parseRecoveryKey(key);
+      expect(bytes.length).toBe(32);
+    });
+
+    it('generates unique keys each time', () => {
+      const key1 = generateRecoveryKey();
+      const key2 = generateRecoveryKey();
+      expect(key1).not.toBe(key2);
+    });
+  });
+
+  describe('wrapWithRecoveryKey / unwrapWithRecoveryKey', () => {
+    it('round-trips: wrap then unwrap recovers original PKCS8 bytes', async () => {
+      // Generate an RSA keypair (extractable so we can export PKCS8 for comparison)
+      const keyPair = await generateKeyPair();
+
+      // Wrap with password using the production wrapPrivateKey function
+      const salt = generateSalt();
+      const wrappingKey = await deriveKeyArgon2idExportable('test-password-12!A', salt);
+      const wrappedBuf = await wrapPrivateKey(keyPair.privateKey, wrappingKey);
+      const wrappedBase64 = arrayBufferToBase64(wrappedBuf);
+
+      // wrapWithRecoveryKey now uses unwrapKey (which the wrapping key supports)
+      // so we can pass the wrapping key directly — no re-import needed
+      const recoveryKey = generateRecoveryKey();
+      const { wrappedKey: recoveryWrapped, salt: recoverySalt } = await wrapWithRecoveryKey(
+        wrappedBase64,
+        wrappingKey,
+        recoveryKey
+      );
+
+      // Unwrap with recovery key
+      const recoveredPkcs8 = await unwrapWithRecoveryKey(
+        recoveryWrapped,
+        recoverySalt,
+        recoveryKey
+      );
+
+      // Verify recovered PKCS8 imports as a valid RSA private key
+      const importedKey = await crypto.subtle.importKey(
+        'pkcs8',
+        recoveredPkcs8,
+        { name: 'RSA-OAEP', hash: 'SHA-256' },
+        false,
+        ['decrypt']
+      );
+      expect(importedKey.type).toBe('private');
+    }, 60000);
+
+    it('fails with wrong recovery key', async () => {
+      const keyPair = await generateKeyPair();
+      const salt = generateSalt();
+      const wrappingKey = await deriveKeyArgon2idExportable('test-password-12!A', salt);
+      const wrappedBuf = await wrapPrivateKey(keyPair.privateKey, wrappingKey);
+      const wrappedBase64 = arrayBufferToBase64(wrappedBuf);
+
+      const recoveryKey = generateRecoveryKey();
+      const wrongKey = generateRecoveryKey();
+      const { wrappedKey, salt: recoverySalt } = await wrapWithRecoveryKey(
+        wrappedBase64,
+        wrappingKey,
+        recoveryKey
+      );
+
+      await expect(unwrapWithRecoveryKey(wrappedKey, recoverySalt, wrongKey)).rejects.toThrow();
+    }, 60000);
   });
 
   describe('derivePreferencesKey', () => {

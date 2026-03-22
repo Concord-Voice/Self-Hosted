@@ -20,6 +20,7 @@ import (
 var templateFS embed.FS
 
 var verificationTmpl = template.Must(template.ParseFS(templateFS, "templates/verification.html"))
+var recoveryTmpl = template.Must(template.ParseFS(templateFS, "templates/recovery.html"))
 
 // Service sends emails via SMTP. When SMTPHost is empty (dev mode), codes are
 // logged to stdout instead of sent.
@@ -53,7 +54,6 @@ func (s *Service) SendVerificationCode(to, code string) error {
 		return nil
 	}
 
-	// Render HTML body
 	var body strings.Builder
 	err := verificationTmpl.Execute(&body, map[string]string{
 		"Code": code,
@@ -62,7 +62,6 @@ func (s *Service) SendVerificationCode(to, code string) error {
 		return fmt.Errorf("render email template: %w", err)
 	}
 
-	// Validate and parse email addresses to prevent header/envelope injection
 	fromAddr, err := mail.ParseAddress(s.from)
 	if err != nil {
 		return fmt.Errorf("invalid from address: %w", err)
@@ -72,7 +71,6 @@ func (s *Service) SendVerificationCode(to, code string) error {
 		return fmt.Errorf("invalid to address: %w", err)
 	}
 
-	// Build MIME message using parsed addresses
 	msg := "From: " + fromAddr.String() + "\r\n" +
 		"To: " + toAddr.String() + "\r\n" +
 		"Subject: Your Concord verification code\r\n" +
@@ -81,9 +79,48 @@ func (s *Service) SendVerificationCode(to, code string) error {
 		"\r\n" +
 		body.String()
 
+	return s.sendMail(fromAddr.Address, toAddr.Address, msg)
+}
+
+// SendRecoveryCode sends a 6-digit account recovery code to the given email address.
+func (s *Service) SendRecoveryCode(to, code string) error {
+	if s.devMode {
+		s.log.Info("DEV MODE — account recovery code", "to", to, "code", code)
+		return nil
+	}
+
+	var body strings.Builder
+	err := recoveryTmpl.Execute(&body, map[string]string{
+		"Code": code,
+	})
+	if err != nil {
+		return fmt.Errorf("render recovery template: %w", err)
+	}
+
+	fromAddr, err := mail.ParseAddress(s.from)
+	if err != nil {
+		return fmt.Errorf("invalid from address: %w", err)
+	}
+	toAddr, err := mail.ParseAddress(to)
+	if err != nil {
+		return fmt.Errorf("invalid to address: %w", err)
+	}
+
+	msg := "From: " + fromAddr.String() + "\r\n" +
+		"To: " + toAddr.String() + "\r\n" +
+		"Subject: Your Concord account recovery code\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: text/html; charset=UTF-8\r\n" +
+		"\r\n" +
+		body.String()
+
+	return s.sendMail(fromAddr.Address, toAddr.Address, msg)
+}
+
+// sendMail handles the SMTP connection and message delivery.
+func (s *Service) sendMail(from, to, msg string) error {
 	addr := net.JoinHostPort(s.host, fmt.Sprintf("%d", s.port))
 
-	// Connect with STARTTLS
 	auth := smtp.PlainAuth("", s.username, s.password, s.host)
 	tlsCfg := &tls.Config{ServerName: s.host} // #nosec G402 -- using server name verification
 
@@ -94,32 +131,29 @@ func (s *Service) SendVerificationCode(to, code string) error {
 
 	client, err := smtp.NewClient(conn, s.host)
 	if err != nil {
-		_ = conn.Close() // prevent socket leak if NewClient fails
+		_ = conn.Close()
 		return fmt.Errorf("create SMTP client: %w", err)
 	}
 	defer func() { _ = client.Close() }()
 
-	// Require STARTTLS in production (verification codes are sensitive even without credentials)
 	if ok, _ := client.Extension("STARTTLS"); ok {
 		if err := client.StartTLS(tlsCfg); err != nil {
 			return fmt.Errorf("STARTTLS: %w", err)
 		}
 	} else {
-		return fmt.Errorf("SMTP server does not support STARTTLS — refusing to send verification codes over plaintext")
+		return fmt.Errorf("SMTP server does not support STARTTLS — refusing to send codes over plaintext")
 	}
 
-	// Authenticate if credentials are provided
 	if s.username != "" {
 		if err := client.Auth(auth); err != nil {
 			return fmt.Errorf("SMTP auth: %w", err)
 		}
 	}
 
-	// Send using validated addresses for envelope
-	if err := client.Mail(fromAddr.Address); err != nil {
+	if err := client.Mail(from); err != nil {
 		return fmt.Errorf("SMTP MAIL FROM: %w", err)
 	}
-	if err := client.Rcpt(toAddr.Address); err != nil {
+	if err := client.Rcpt(to); err != nil {
 		return fmt.Errorf("SMTP RCPT TO: %w", err)
 	}
 	w, err := client.Data()
