@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"time"
@@ -383,8 +384,17 @@ func (h *Handler) ConfirmTransfer(c *gin.Context) {
 
 	// Execute the transfer
 	if err := h.executeTransfer(c, serverID, transferID, userID, toUserID); err != nil {
-		h.log.Error("Failed to execute transfer", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to complete transfer"})
+		switch {
+		case errors.Is(err, errTransferAlreadyCompleted):
+			c.JSON(http.StatusConflict, gin.H{"error": "Transfer has already been completed or cancelled"})
+		case errors.Is(err, errToUserNotMember):
+			c.JSON(http.StatusConflict, gin.H{"error": "Target user is no longer a member of this server"})
+		case errors.Is(err, errFromUserNotMember):
+			c.JSON(http.StatusConflict, gin.H{"error": "Current owner membership record is missing"})
+		default:
+			h.log.Error("Failed to execute transfer", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to complete transfer"})
+		}
 		return
 	}
 
@@ -548,8 +558,15 @@ func (h *Handler) ReverseTransfer(c *gin.Context) {
 	})
 }
 
+// Sentinel errors for executeTransfer so callers can map to appropriate HTTP status codes.
+var (
+	errTransferAlreadyCompleted = fmt.Errorf("transfer already completed or cancelled")
+	errFromUserNotMember        = fmt.Errorf("from_user is no longer a member")
+	errToUserNotMember          = fmt.Errorf("to_user is no longer a member")
+)
+
 // executeTransfer atomically transfers ownership from one user to another.
-// Used by both ConfirmTransfer and the auto-complete cleanup job.
+// Lock order: ownership_transfers → servers → server_members (matches cleanup job).
 func (h *Handler) executeTransfer(ctx context.Context, serverID, transferID, fromUserID, toUserID string) error {
 	tx, err := h.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -557,28 +574,7 @@ func (h *Handler) executeTransfer(ctx context.Context, serverID, transferID, fro
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Update server owner
-	if _, err := tx.ExecContext(ctx, `UPDATE servers SET owner_id = $1 WHERE id = $2`, toUserID, serverID); err != nil {
-		return fmt.Errorf("update server owner: %w", err)
-	}
-
-	// Swap legacy roles — verify both users are still members
-	resFrom, err := tx.ExecContext(ctx, `UPDATE server_members SET role = 'member' WHERE server_id = $1 AND user_id = $2`, serverID, fromUserID)
-	if err != nil {
-		return fmt.Errorf("update from_user role: %w", err)
-	}
-	if n, _ := resFrom.RowsAffected(); n == 0 {
-		return fmt.Errorf("from_user %s is no longer a member", fromUserID)
-	}
-	resTo, err := tx.ExecContext(ctx, `UPDATE server_members SET role = 'owner' WHERE server_id = $1 AND user_id = $2`, serverID, toUserID)
-	if err != nil {
-		return fmt.Errorf("update to_user role: %w", err)
-	}
-	if n, _ := resTo.RowsAffected(); n == 0 {
-		return fmt.Errorf("to_user %s is no longer a member", toUserID)
-	}
-
-	// Mark transfer as completed
+	// Step 1: Claim the transfer row FIRST (consistent lock order with cleanup job)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE ownership_transfers
 		SET status = 'completed', completed_at = NOW()
@@ -589,7 +585,28 @@ func (h *Handler) executeTransfer(ctx context.Context, serverID, transferID, fro
 	}
 	rows, _ := res.RowsAffected()
 	if rows == 0 {
-		return fmt.Errorf("transfer already completed or cancelled")
+		return errTransferAlreadyCompleted
+	}
+
+	// Step 2: Update server owner
+	if _, err := tx.ExecContext(ctx, `UPDATE servers SET owner_id = $1 WHERE id = $2`, toUserID, serverID); err != nil {
+		return fmt.Errorf("update server owner: %w", err)
+	}
+
+	// Step 3: Swap legacy roles — verify both users are still members
+	resFrom, err := tx.ExecContext(ctx, `UPDATE server_members SET role = 'member' WHERE server_id = $1 AND user_id = $2`, serverID, fromUserID)
+	if err != nil {
+		return fmt.Errorf("update from_user role: %w", err)
+	}
+	if n, _ := resFrom.RowsAffected(); n == 0 {
+		return errFromUserNotMember
+	}
+	resTo, err := tx.ExecContext(ctx, `UPDATE server_members SET role = 'owner' WHERE server_id = $1 AND user_id = $2`, serverID, toUserID)
+	if err != nil {
+		return fmt.Errorf("update to_user role: %w", err)
+	}
+	if n, _ := resTo.RowsAffected(); n == 0 {
+		return errToUserNotMember
 	}
 
 	if err := tx.Commit(); err != nil {

@@ -356,9 +356,9 @@ func TestConfirmTransfer_TargetLeftServer(t *testing.T) {
 	_, err := ts.DB.Exec(`DELETE FROM server_members WHERE server_id = $1 AND user_id = $2`, serverID, member.ID)
 	require.NoError(t, err)
 
-	// Confirm should fail because target is no longer a member
+	// Confirm should fail because target is no longer a member (409 Conflict)
 	w = ts.DoRequest("POST", "/api/v1/servers/"+serverID+"/transfer-ownership/confirm", nil, testhelpers.AuthHeaders(owner.AccessToken))
-	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Equal(t, http.StatusConflict, w.Code)
 
 	// Verify owner_id did NOT change (rollback)
 	var currentOwnerID string
@@ -568,7 +568,7 @@ func TestAutoCompleteExpiredTransfer(t *testing.T) {
 }
 
 // completeExpiredTransfers mimics the cleanup job logic for testing.
-func completeExpiredTransfers(t *testing.T, db *sql.DB, serverID, fromUserID, toUserID string) {
+func completeExpiredTransfers(t *testing.T, db *sql.DB, _, _, _ string) {
 	t.Helper()
 
 	rows, err := db.QueryContext(context.Background(), `
@@ -671,8 +671,8 @@ func TestTransferInvalidatesPermissionCache(t *testing.T) {
 	// Seed permission cache for both users
 	ownerCacheKey := "perm:" + serverID + ":" + owner.ID
 	memberCacheKey := "perm:" + serverID + ":" + member.ID
-	ts.Redis.Set(ctx, ownerCacheKey, "12345", 5*time.Minute)
-	ts.Redis.Set(ctx, memberCacheKey, "12345", 5*time.Minute)
+	require.NoError(t, ts.Redis.Set(ctx, ownerCacheKey, "12345", 5*time.Minute).Err())
+	require.NoError(t, ts.Redis.Set(ctx, memberCacheKey, "12345", 5*time.Minute).Err())
 
 	// Initiate + confirm
 	w := ts.DoRequest("POST", "/api/v1/servers/"+serverID+"/transfer-ownership", map[string]interface{}{
