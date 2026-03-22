@@ -163,6 +163,86 @@ func TestReplaceMyKeys_MissingFields(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+// --- Username Change Cooldown ---
+
+func TestUpdateMe_UsernameChange_Cooldown(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "cooldownuser")
+
+	// Username was just created, so username_changed_at = NOW(). Change should be blocked.
+	w := ts.DoRequest("PATCH", "/api/v1/users/me", map[string]interface{}{
+		"username": "newcooldownname",
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Contains(t, body["error"], "once per year")
+	assert.NotNil(t, body["username_change_eligible_at"])
+}
+
+func TestUpdateMe_UsernameChange_Allowed(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "allowedchange")
+
+	// Set username_changed_at to 366 days ago to allow change
+	_, err := ts.DB.Exec(
+		`UPDATE users SET username_changed_at = NOW() - INTERVAL '366 days' WHERE id = $1`,
+		user.ID,
+	)
+	assert.NoError(t, err)
+
+	w := ts.DoRequest("PATCH", "/api/v1/users/me", map[string]interface{}{
+		"username": "newallowedname",
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	userData := body["user"].(map[string]interface{})
+	assert.Equal(t, "newallowedname", userData["username"])
+}
+
+func TestUpdateMe_UsernameChange_SameUsername(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "sameusername")
+
+	// Even though on cooldown, submitting the same username should NOT trigger
+	// the cooldown error — it's effectively a no-op since no change occurs.
+	w := ts.DoRequest("PATCH", "/api/v1/users/me", map[string]interface{}{
+		"username": "sameusername",
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	// The handler skips the cooldown check for no-op username submissions,
+	// but since there are no actual changes, it returns 400 "No fields to update".
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "No fields to update", body["error"])
+}
+
+func TestUpdateMe_UsernameWithPeriod(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "periodtest")
+
+	// Allow change by setting cooldown to expired
+	_, err := ts.DB.Exec(
+		`UPDATE users SET username_changed_at = NOW() - INTERVAL '366 days' WHERE id = $1`,
+		user.ID,
+	)
+	assert.NoError(t, err)
+
+	w := ts.DoRequest("PATCH", "/api/v1/users/me", map[string]interface{}{
+		"username": "period.test",
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	userData := body["user"].(map[string]interface{})
+	assert.Equal(t, "period.test", userData["username"])
+}
+
 // registerAndVerify registers a user via the API (so Argon2id hash is real),
 // then auto-verifies email and returns a verified access token.
 func registerAndVerify(t *testing.T, ts *testhelpers.TestServer, email, username string) string {

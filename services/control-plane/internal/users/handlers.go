@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
@@ -57,7 +58,8 @@ func (h *Handler) GetMe(c *gin.Context) {
 	err := h.db.QueryRow(
 		`SELECT id, email, username, display_name, bio, avatar_url, header_image_url, color_scheme,
 		        COALESCE(links, '[]'::jsonb),
-		        email_verified, age_verified, e2ee_preference, created_at, updated_at
+		        email_verified, age_verified, e2ee_preference, created_at, updated_at,
+		        username_changed_at
 		 FROM users WHERE id = $1`,
 		userID,
 	).Scan(
@@ -75,6 +77,7 @@ func (h *Handler) GetMe(c *gin.Context) {
 		&user.E2EEPreference,
 		&user.CreatedAt,
 		&user.UpdatedAt,
+		&user.UsernameChangedAt,
 	)
 
 	if err != nil {
@@ -263,6 +266,10 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 	args := []interface{}{}
 	argIdx := 1
 
+	// Track whether a username change actually occurs (for history recording)
+	var previousUsername string
+	usernameChanged := false
+
 	// Validate and add username if provided
 	if req.Username != nil {
 		trimmed := strings.TrimSpace(*req.Username)
@@ -272,25 +279,62 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 		}
 		normalized := auth.NormalizeUsername(trimmed)
 
-		// Check uniqueness
-		var count int
+		// Fetch current username and cooldown timestamp
+		var currentUsername string
+		var usernameChangedAt time.Time
 		err := h.db.QueryRow(
-			`SELECT COUNT(*) FROM users WHERE username = $1 AND id != $2`,
-			normalized, userID,
-		).Scan(&count)
+			`SELECT username, username_changed_at FROM users WHERE id = $1`,
+			userID,
+		).Scan(&currentUsername, &usernameChangedAt)
 		if err != nil {
-			h.log.Error("Failed to check username uniqueness", "error", err)
+			if err == sql.ErrNoRows {
+				c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+				return
+			}
+			h.log.Error("Failed to check username cooldown", "error", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update profile"})
 			return
 		}
-		if count > 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Username is already taken"})
-			return
-		}
 
-		setClauses = append(setClauses, fmt.Sprintf("username = $%d", argIdx))
-		args = append(args, normalized)
-		argIdx++
+		// Only enforce cooldown and uniqueness if the username is actually changing
+		if normalized != currentUsername {
+			// Enforce 365-day username change cooldown (pre-check for UX error message)
+			cooldownEnd := usernameChangedAt.AddDate(0, 0, 365)
+			if time.Now().Before(cooldownEnd) {
+				c.JSON(http.StatusForbidden, gin.H{
+					"error":                       "You can only change your username once per year",
+					"username_change_eligible_at": cooldownEnd,
+				})
+				return
+			}
+
+			// Check uniqueness
+			var count int
+			err = h.db.QueryRow(
+				`SELECT COUNT(*) FROM users WHERE username = $1 AND id != $2`,
+				normalized, userID,
+			).Scan(&count)
+			if err != nil {
+				h.log.Error("Failed to check username uniqueness", "error", err)
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update profile"})
+				return
+			}
+			if count > 0 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Username is already taken"})
+				return
+			}
+
+			setClauses = append(setClauses, fmt.Sprintf("username = $%d", argIdx))
+			args = append(args, normalized)
+			argIdx++
+
+			// Reset the cooldown timer — uses NOW() in SQL for atomicity
+			setClauses = append(setClauses, "username_changed_at = NOW()")
+
+			previousUsername = currentUsername
+			usernameChanged = true
+		}
+		// If normalized == currentUsername, skip — no-op, no cooldown triggered
 	}
 
 	// Validate and add display_name if provided
@@ -437,15 +481,22 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 	// Always update updated_at
 	setClauses = append(setClauses, "updated_at = NOW()")
 
-	// Build and execute query
-	// #nosec G201 -- Safe: setClauses contains only parameterized assignments (e.g., "email = $1")
-	// User input is passed through args, not concatenated into SQL string
-	query := fmt.Sprintf(
-		`UPDATE users SET %s WHERE id = $%d
+	// Build and execute query. When a username change is requested, the WHERE
+	// clause atomically enforces the 365-day cooldown to prevent races.
+	whereClause := fmt.Sprintf("WHERE id = $%d", argIdx)
+	if usernameChanged {
+		whereClause = fmt.Sprintf(
+			"WHERE id = $%d AND username_changed_at <= NOW() - INTERVAL '365 days'",
+			argIdx,
+		)
+	}
+	query := fmt.Sprintf( // #nosec G201 -- Safe: setClauses are parameterized, whereClause uses $N placeholders
+		`UPDATE users SET %s %s
 		 RETURNING id, email, username, display_name, bio, avatar_url, header_image_url, color_scheme,
 		           COALESCE(links, '[]'::jsonb),
-		           email_verified, age_verified, e2ee_preference, created_at, updated_at`,
-		strings.Join(setClauses, ", "), argIdx,
+		           email_verified, age_verified, e2ee_preference, created_at, updated_at,
+		           username_changed_at`,
+		strings.Join(setClauses, ", "), whereClause,
 	)
 	args = append(args, userID)
 
@@ -465,10 +516,18 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 		&user.E2EEPreference,
 		&user.CreatedAt,
 		&user.UpdatedAt,
+		&user.UsernameChangedAt,
 	)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
+			if usernameChanged {
+				// Atomic WHERE clause blocked the update — concurrent cooldown race
+				c.JSON(http.StatusForbidden, gin.H{
+					"error": "You can only change your username once per year",
+				})
+				return
+			}
 			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 			return
 		}
@@ -480,6 +539,18 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 		h.log.Error("Failed to update profile", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update profile"})
 		return
+	}
+
+	// Record username change in history for audit/abuse tracking
+	if usernameChanged {
+		_, histErr := h.db.Exec(
+			`INSERT INTO username_history (user_id, old_username, new_username) VALUES ($1, $2, $3)`,
+			userID, previousUsername, user.Username,
+		)
+		if histErr != nil {
+			h.log.Error("Failed to record username history", "error", histErr)
+			// Non-fatal — the username change already succeeded
+		}
 	}
 
 	h.log.Info("Profile updated", "user_id", userID)

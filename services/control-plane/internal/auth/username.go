@@ -13,11 +13,11 @@ const (
 )
 
 // Username validation regex
-// Allows: a-z, A-Z, 0-9, underscore, hyphen
-// Must start with alphanumeric, no consecutive special chars
+// Allows: a-z, A-Z, 0-9, period, underscore, hyphen
+// Must start and end with alphanumeric, no consecutive special chars
 var (
-	usernameRegex     = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_-]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$`)
-	consecutiveSpecial = regexp.MustCompile(`[_-]{2,}`)
+	usernameRegex      = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*[a-zA-Z0-9]$|^[a-zA-Z0-9]$`)
+	consecutiveSpecial = regexp.MustCompile(`[._-]{2,}`)
 )
 
 // reservedWords are checked with substring matching to prevent variations like "admin123"
@@ -60,14 +60,14 @@ func ValidateUsername(username string) error {
 		return fmt.Errorf("username must be at most %d characters", MaxUsernameLength)
 	}
 
-	// Format check (alphanumeric, _, -)
+	// Format check (alphanumeric plus periods, underscores, and hyphens)
 	if !usernameRegex.MatchString(username) {
-		return fmt.Errorf("username must start and end with a letter or number, and can only contain letters, numbers, underscores, and hyphens")
+		return fmt.Errorf("username must start and end with a letter or number, and can only contain letters, numbers, periods, underscores, and hyphens")
 	}
 
 	// No consecutive special characters
 	if consecutiveSpecial.MatchString(username) {
-		return fmt.Errorf("username cannot contain consecutive underscores or hyphens")
+		return fmt.Errorf("username cannot contain consecutive special characters (periods, underscores, hyphens)")
 	}
 
 	// Check for blocked words
@@ -83,8 +83,8 @@ func checkBlockedWords(username string) error {
 	// Normalize username (lowercase)
 	normalized := strings.ToLower(username)
 
-	// Remove common separators to catch variations like "bad_word" or "bad-word"
-	stripped := strings.ReplaceAll(strings.ReplaceAll(normalized, "_", ""), "-", "")
+	// Remove common separators to catch variations like "bad_word", "bad-word", or "b.a.d"
+	stripped := strings.ReplaceAll(strings.ReplaceAll(strings.ReplaceAll(normalized, ".", ""), "_", ""), "-", "")
 
 	// Convert leetspeak to normal characters
 	deLeeted := deLeetSpeak(stripped)

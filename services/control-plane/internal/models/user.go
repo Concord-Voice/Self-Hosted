@@ -19,9 +19,10 @@ type User struct {
 	Links          json.RawMessage `json:"links" db:"links"`
 	EmailVerified  bool            `json:"email_verified" db:"email_verified"`
 	AgeVerified    bool            `json:"age_verified" db:"age_verified"`
-	E2EEPreference bool            `json:"e2ee_preference" db:"e2ee_preference"`
-	CreatedAt      time.Time       `json:"created_at" db:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at" db:"updated_at"`
+	E2EEPreference    bool            `json:"e2ee_preference" db:"e2ee_preference"`
+	CreatedAt         time.Time       `json:"created_at" db:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at" db:"updated_at"`
+	UsernameChangedAt *time.Time      `json:"username_changed_at,omitempty" db:"username_changed_at"`
 }
 
 // PublicUser returns user data safe for the authenticated user
@@ -52,6 +53,10 @@ func (u *User) PublicUser() map[string]interface{} {
 	}
 	if len(u.Links) > 0 {
 		result["links"] = u.Links
+	}
+	if u.UsernameChangedAt != nil {
+		result["username_changed_at"] = *u.UsernameChangedAt
+		result["username_change_eligible_at"] = u.UsernameChangedAt.AddDate(0, 0, 365)
 	}
 	return result
 }

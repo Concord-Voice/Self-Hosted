@@ -83,7 +83,7 @@ DROP INDEX IF EXISTS idx_users_status;
 ALTER TABLE users DROP COLUMN IF EXISTS status;
 ```
 
-## Existing Migrations (28 total: 000001–000028)
+## Existing Migrations (000001–000046)
 
 ### Phase 1A — Authentication & E2EE
 | # | Name | Tables/Changes |
@@ -124,6 +124,12 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000026 | dm_system | `dm_conversations`, `dm_participants`, `dm_messages`, `dm_read_states`, `dm_channel_keys`, `dm_pending_key_requests`, `dm_voice_participants` |
 | 000027 | friend_codes_and_privacy | `friendships`, `friend_codes`, `privacy_settings` |
 | 000028 | machine_id_and_key_version | Machine ID tracking, key versioning |
+
+### Phase 2 — Beta Features
+| # | Name | Tables/Changes |
+|---|------|---------------|
+| 000029–000045 | Various | MFA, media files, recovery keys, trusted devices, recovery circles, DM key revocations, etc. |
+| 000046 | username_change_tracking | `username_changed_at` column on users, `username_history` table |
 
 ## Troubleshooting
 
