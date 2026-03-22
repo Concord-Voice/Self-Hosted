@@ -486,16 +486,25 @@ func (h *Handler) ReverseTransfer(c *gin.Context) {
 		return
 	}
 
-	// Swap legacy roles
-	if _, err := tx.ExecContext(c, `UPDATE server_members SET role = 'owner' WHERE server_id = $1 AND user_id = $2`, serverID, fromUserID); err != nil {
+	// Swap legacy roles — verify both users are still members
+	resFrom, err := tx.ExecContext(c, `UPDATE server_members SET role = 'owner' WHERE server_id = $1 AND user_id = $2`, serverID, fromUserID)
+	if err != nil {
 		h.log.Error("Failed to update from_user role for reversal", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse transfer"})
 		return
 	}
-	if _, err := tx.ExecContext(c, `UPDATE server_members SET role = 'member' WHERE server_id = $1 AND user_id = $2`, serverID, toUserID); err != nil {
+	if n, _ := resFrom.RowsAffected(); n == 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "Original owner is no longer a member of this server"})
+		return
+	}
+	resTo, err := tx.ExecContext(c, `UPDATE server_members SET role = 'member' WHERE server_id = $1 AND user_id = $2`, serverID, toUserID)
+	if err != nil {
 		h.log.Error("Failed to update to_user role for reversal", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse transfer"})
 		return
+	}
+	if n, _ := resTo.RowsAffected(); n == 0 {
+		h.log.Warn("Transfer recipient no longer a member during reversal", "to_user_id", toUserID, "server_id", serverID)
 	}
 
 	// Mark transfer as reversed
@@ -553,12 +562,20 @@ func (h *Handler) executeTransfer(ctx context.Context, serverID, transferID, fro
 		return fmt.Errorf("update server owner: %w", err)
 	}
 
-	// Swap legacy roles
-	if _, err := tx.ExecContext(ctx, `UPDATE server_members SET role = 'member' WHERE server_id = $1 AND user_id = $2`, serverID, fromUserID); err != nil {
+	// Swap legacy roles — verify both users are still members
+	resFrom, err := tx.ExecContext(ctx, `UPDATE server_members SET role = 'member' WHERE server_id = $1 AND user_id = $2`, serverID, fromUserID)
+	if err != nil {
 		return fmt.Errorf("update from_user role: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE server_members SET role = 'owner' WHERE server_id = $1 AND user_id = $2`, serverID, toUserID); err != nil {
+	if n, _ := resFrom.RowsAffected(); n == 0 {
+		return fmt.Errorf("from_user %s is no longer a member", fromUserID)
+	}
+	resTo, err := tx.ExecContext(ctx, `UPDATE server_members SET role = 'owner' WHERE server_id = $1 AND user_id = $2`, serverID, toUserID)
+	if err != nil {
 		return fmt.Errorf("update to_user role: %w", err)
+	}
+	if n, _ := resTo.RowsAffected(); n == 0 {
+		return fmt.Errorf("to_user %s is no longer a member", toUserID)
 	}
 
 	// Mark transfer as completed

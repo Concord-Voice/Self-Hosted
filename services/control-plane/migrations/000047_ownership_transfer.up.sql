@@ -22,7 +22,8 @@ CREATE UNIQUE INDEX idx_ownership_transfers_active
     WHERE status = 'pending';
 
 -- Reversal token lookup (only for completed transfers with a token)
-CREATE INDEX idx_ownership_transfers_reversal_token
+-- UNIQUE enforces one-to-one token-to-transfer mapping
+CREATE UNIQUE INDEX idx_ownership_transfers_reversal_token
     ON ownership_transfers(reversal_token)
     WHERE reversal_token IS NOT NULL AND status = 'completed';
 

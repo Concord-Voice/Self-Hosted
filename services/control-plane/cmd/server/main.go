@@ -303,11 +303,20 @@ func completeOwnershipTransfer(ctx context.Context, db *sql.DB, redisClient *red
 	if _, err := tx.ExecContext(ctx, `UPDATE servers SET owner_id = $1 WHERE id = $2`, xfer.toUserID, xfer.serverID); err != nil {
 		return fmt.Errorf("update server owner: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE server_members SET role = 'member' WHERE server_id = $1 AND user_id = $2`, xfer.serverID, xfer.fromUserID); err != nil {
+	// Verify both users are still members before swapping roles
+	resFrom, err := tx.ExecContext(ctx, `UPDATE server_members SET role = 'member' WHERE server_id = $1 AND user_id = $2`, xfer.serverID, xfer.fromUserID)
+	if err != nil {
 		return fmt.Errorf("update from_user role: %w", err)
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE server_members SET role = 'owner' WHERE server_id = $1 AND user_id = $2`, xfer.serverID, xfer.toUserID); err != nil {
+	if n, _ := resFrom.RowsAffected(); n == 0 {
+		return fmt.Errorf("from_user %s is no longer a member", xfer.fromUserID)
+	}
+	resTo, err := tx.ExecContext(ctx, `UPDATE server_members SET role = 'owner' WHERE server_id = $1 AND user_id = $2`, xfer.serverID, xfer.toUserID)
+	if err != nil {
 		return fmt.Errorf("update to_user role: %w", err)
+	}
+	if n, _ := resTo.RowsAffected(); n == 0 {
+		return fmt.Errorf("to_user %s is no longer a member", xfer.toUserID)
 	}
 
 	if err := tx.Commit(); err != nil {
