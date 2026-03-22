@@ -68,7 +68,8 @@ func TruncateAllTables(db *sql.DB) error {
 		messages,
 		server_invites,
 		channel_read_states,
-		user_preferences
+		user_preferences,
+		ownership_transfers
 	CASCADE`)
 	return err
 }
