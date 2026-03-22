@@ -214,6 +214,25 @@ func (h *Handler) ListMembers(c *gin.Context) {
 		}
 	}
 
+	// Mask owner role for non-owner viewers (#244: Hidden Owner Role)
+	// Non-owners see the owner's highest RBAC role name instead of "owner".
+	// Uses owner_id (authoritative) rather than role string to identify the owner.
+	var serverOwnerID string
+	if err := h.db.QueryRowContext(c.Request.Context(), `SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&serverOwnerID); err != nil {
+		h.log.Error("Failed to fetch server owner for role masking", "error", err, "server_id", serverID)
+	} else if userID != serverOwnerID {
+		for i := range members {
+			if members[i].UserID == serverOwnerID && members[i].Role == "owner" {
+				if len(members[i].Roles) > 0 {
+					members[i].Role = members[i].Roles[0].RoleName // highest position (sorted DESC)
+				} else {
+					members[i].Role = "member"
+				}
+				break
+			}
+		}
+	}
+
 	c.JSON(http.StatusOK, gin.H{"members": members})
 }
 

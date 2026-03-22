@@ -21,6 +21,7 @@ var templateFS embed.FS
 
 var verificationTmpl = template.Must(template.ParseFS(templateFS, "templates/verification.html"))
 var recoveryTmpl = template.Must(template.ParseFS(templateFS, "templates/recovery.html"))
+var ownershipTransferTmpl = template.Must(template.ParseFS(templateFS, "templates/ownership_transfer.html"))
 
 // Service sends emails via SMTP. When SMTPHost is empty (dev mode), codes are
 // logged to stdout instead of sent.
@@ -168,6 +169,47 @@ func (s *Service) sendMail(from, to, msg string) error {
 	}
 
 	return client.Quit()
+}
+
+// SendOwnershipTransferNotification sends an ownership transfer notification to the server owner.
+func (s *Service) SendOwnershipTransferNotification(to, serverName, newOwnerUsername, reversalToken string) error {
+	if s.devMode {
+		s.log.Info("DEV MODE — ownership transfer notification",
+			"to", to, "server", serverName, "new_owner", newOwnerUsername, "reversal_token", reversalToken)
+		return nil
+	}
+
+	var body strings.Builder
+	err := ownershipTransferTmpl.Execute(&body, map[string]string{
+		"ServerName":       serverName,
+		"NewOwnerUsername": newOwnerUsername,
+		"ReversalToken":    reversalToken,
+	})
+	if err != nil {
+		return fmt.Errorf("render ownership transfer template: %w", err)
+	}
+
+	fromAddr, err := mail.ParseAddress(s.from)
+	if err != nil {
+		return fmt.Errorf("invalid from address: %w", err)
+	}
+	toAddr, err := mail.ParseAddress(to)
+	if err != nil {
+		return fmt.Errorf("invalid to address: %w", err)
+	}
+
+	// Sanitize server name to prevent SMTP header injection
+	safeServerName := strings.NewReplacer("\r", "", "\n", "").Replace(serverName)
+
+	msg := "From: " + fromAddr.String() + "\r\n" +
+		"To: " + toAddr.String() + "\r\n" +
+		"Subject: Ownership transfer initiated for " + safeServerName + "\r\n" +
+		"MIME-Version: 1.0\r\n" +
+		"Content-Type: text/html; charset=UTF-8\r\n" +
+		"\r\n" +
+		body.String()
+
+	return s.sendMail(fromAddr.Address, toAddr.Address, msg)
 }
 
 // IsDevMode returns true when the service is operating without a real SMTP server.

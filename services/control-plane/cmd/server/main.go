@@ -198,28 +198,36 @@ func runCleanup(ctx context.Context, db *sql.DB, redisClient *redis.Client, hub 
 	}
 
 	// Task 3: Clean stale Redis presence keys
-	// Compare presence:* keys against the authoritative set of connected users from the hub
+	cleanupStalePresence(taskCtx, redisClient, hub, log)
+
+	// Task 4: Auto-complete expired ownership transfers
+	cleanupExpiredTransfers(taskCtx, db, redisClient, hub, log)
+
+	log.Debug("Cleanup completed")
+}
+
+// cleanupStalePresence compares presence:* keys against the authoritative set
+// of connected users from the hub and removes stale entries.
+func cleanupStalePresence(ctx context.Context, redisClient *redis.Client, hub *websocket.Hub, log *logger.Logger) {
 	connectedUsers := hub.GetConnectedUsers()
 	var staleCount int
 	var cursor uint64
 	for {
-		keys, nextCursor, err := redisClient.Scan(taskCtx, cursor, "presence:*", 100).Result()
+		keys, nextCursor, err := redisClient.Scan(ctx, cursor, "presence:*", 100).Result()
 		if err != nil {
 			log.Error("Cleanup: failed to scan presence keys", "error", err)
 			break
 		}
 		for _, key := range keys {
-			// Extract user ID from "presence:<uuid>"
 			uidStr := strings.TrimPrefix(key, "presence:")
 			uid, parseErr := uuid.Parse(uidStr)
 			if parseErr != nil {
-				// Malformed key — remove it
-				redisClient.Del(taskCtx, key)
+				redisClient.Del(ctx, key)
 				staleCount++
 				continue
 			}
 			if !connectedUsers[uid] {
-				redisClient.Del(taskCtx, key)
+				redisClient.Del(ctx, key)
 				staleCount++
 			}
 		}
@@ -231,6 +239,119 @@ func runCleanup(ctx context.Context, db *sql.DB, redisClient *redis.Client, hub 
 	if staleCount > 0 {
 		log.Info("Cleanup: removed stale presence keys", "count", staleCount)
 	}
+}
 
-	log.Debug("Cleanup completed")
+// cleanupExpiredTransfers finds pending ownership transfers past their 24h window
+// and completes them atomically (owner_id + server_members.role swap).
+func cleanupExpiredTransfers(ctx context.Context, db *sql.DB, redisClient *redis.Client, hub *websocket.Hub, log *logger.Logger) {
+	rows, err := db.QueryContext(ctx, `
+		SELECT id, server_id, from_user_id, to_user_id
+		FROM ownership_transfers
+		WHERE status = 'pending' AND expires_at <= NOW()
+	`)
+	if err != nil {
+		log.Error("Cleanup: failed to query expired transfers", "error", err)
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	for rows.Next() {
+		var xfer pendingTransfer
+		if err := rows.Scan(&xfer.id, &xfer.serverID, &xfer.fromUserID, &xfer.toUserID); err != nil {
+			log.Error("Cleanup: failed to scan expired transfer", "error", err)
+			continue
+		}
+		if err := completeOwnershipTransfer(ctx, db, redisClient, hub, xfer); err != nil {
+			log.Error("Cleanup: failed to auto-complete transfer", "error", err,
+				"transfer_id", xfer.id, "server_id", xfer.serverID)
+		} else {
+			log.Info("Cleanup: auto-completed ownership transfer",
+				"transfer_id", xfer.id, "server_id", xfer.serverID,
+				"from_user_id", xfer.fromUserID, "to_user_id", xfer.toUserID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		log.Error("Cleanup: error during expired transfers iteration", "error", err)
+	}
+}
+
+// pendingTransfer holds the fields needed to complete an expired transfer.
+type pendingTransfer struct {
+	id, serverID, fromUserID, toUserID string
+}
+
+// completeOwnershipTransfer atomically transfers server ownership and invalidates caches.
+func completeOwnershipTransfer(ctx context.Context, db *sql.DB, redisClient *redis.Client, hub *websocket.Hub, xfer pendingTransfer) error {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Claim the pending transfer (guards against race with ConfirmTransfer)
+	res, err := tx.ExecContext(ctx, `
+		UPDATE ownership_transfers SET status = 'completed', completed_at = NOW()
+		WHERE id = $1 AND status = 'pending'
+	`, xfer.id)
+	if err != nil {
+		return fmt.Errorf("mark transfer completed: %w", err)
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil // already completed or cancelled
+	}
+
+	if _, err := tx.ExecContext(ctx, `UPDATE servers SET owner_id = $1 WHERE id = $2`, xfer.toUserID, xfer.serverID); err != nil {
+		return fmt.Errorf("update server owner: %w", err)
+	}
+	// Verify both users are still members before swapping roles
+	resFrom, err := tx.ExecContext(ctx, `UPDATE server_members SET role = 'member' WHERE server_id = $1 AND user_id = $2`, xfer.serverID, xfer.fromUserID)
+	if err != nil {
+		return fmt.Errorf("update from_user role: %w", err)
+	}
+	if n, _ := resFrom.RowsAffected(); n == 0 {
+		return fmt.Errorf("from_user %s is no longer a member", xfer.fromUserID)
+	}
+	resTo, err := tx.ExecContext(ctx, `UPDATE server_members SET role = 'owner' WHERE server_id = $1 AND user_id = $2`, xfer.serverID, xfer.toUserID)
+	if err != nil {
+		return fmt.Errorf("update to_user role: %w", err)
+	}
+	if n, _ := resTo.RowsAffected(); n == 0 {
+		return fmt.Errorf("to_user %s is no longer a member", xfer.toUserID)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+
+	// Invalidate permission cache for both users (SCAN + UNLINK)
+	for _, uid := range []string{xfer.fromUserID, xfer.toUserID} {
+		pattern := fmt.Sprintf("perm:%s:%s*", xfer.serverID, uid)
+		iter := redisClient.Scan(ctx, 0, pattern, 100).Iterator()
+		var keys []string
+		for iter.Next(ctx) {
+			keys = append(keys, iter.Val())
+		}
+		if err := iter.Err(); err != nil {
+			return fmt.Errorf("scan permission cache keys for user %s: %w", uid, err)
+		}
+		if len(keys) > 0 {
+			if err := redisClient.Unlink(ctx, keys...).Err(); err != nil {
+				return fmt.Errorf("unlink permission cache keys for user %s: %w", uid, err)
+			}
+		}
+	}
+
+	// Broadcast ownership change
+	if serverUUID, err := uuid.Parse(xfer.serverID); err == nil {
+		hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+			Type: "ownership_transferred",
+			Data: map[string]interface{}{
+				"server_id":    xfer.serverID,
+				"old_owner_id": xfer.fromUserID,
+				"new_owner_id": xfer.toUserID,
+			},
+		})
+	}
+
+	return nil
 }

@@ -21,6 +21,7 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/messages"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/mfa"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/ownership"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/servers"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/sessions"
@@ -120,6 +121,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	voiceHandler := voice.NewHandler(db, log, hub, cfg, rbacResolver)
 	dmHandler := dm.NewHandler(db, log, hub, cfg)
 	friendsHandler := friends.NewHandler(db, log, hub)
+	ownershipHandler := ownership.NewHandler(db, log, hub, redis, permCache, auditWriter, emailSvc, mfaHandler)
 	var mediaHandler *media.Handler
 	if store != nil {
 		mediaHandler = media.NewHandler(db, store, log, cfg, rbacResolver)
@@ -722,7 +724,32 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 					rbac.RequirePermission(rbacResolver, rbac.PermViewAuditLog, ""),
 					rbacHandler.GetAuditLog,
 				)
+
+				// Ownership transfer
+				serverRoutes.POST("/:id/transfer-ownership",
+					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
+					ownershipHandler.InitiateTransfer,
+				)
+				serverRoutes.GET("/:id/transfer-ownership",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					ownershipHandler.GetTransferStatus,
+				)
+				serverRoutes.DELETE("/:id/transfer-ownership",
+					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
+					ownershipHandler.CancelTransfer,
+				)
+				// Register /confirm BEFORE transfer-ownership could match as wildcard
+				serverRoutes.POST("/:id/transfer-ownership/confirm",
+					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
+					ownershipHandler.ConfirmTransfer,
+				)
 			}
+
+			// Ownership transfer reversal (token-based, outside server routes)
+			protected.POST("/ownership/reverse/:token",
+				middleware.RateLimitByUser(redis, 3, 15*time.Minute),
+				ownershipHandler.ReverseTransfer,
+			)
 
 			// Channel routes
 			channelRoutes := protected.Group("/channels")
