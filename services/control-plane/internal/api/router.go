@@ -54,6 +54,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	router.Use(middleware.Logger(log))
 	router.Use(middleware.SecurityHeaders(cfg.Environment))
 	router.Use(middleware.CORS(cfg.AllowedOrigins))
+	router.Use(middleware.ValidateCustomHeaders())
 
 	// Health check
 	router.GET("/health", func(c *gin.Context) {

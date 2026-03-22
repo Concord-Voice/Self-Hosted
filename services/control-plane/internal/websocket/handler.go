@@ -41,8 +41,14 @@ func NewHandler(hub *Hub, db *sql.DB, redisClient *redis.Client, jwtSecret strin
 		WriteBufferSize: 1024,
 		CheckOrigin: func(r *http.Request) bool {
 			origin := r.Header.Get("Origin")
-			if origin == "" || origin == "null" || origin == "file://" {
-				return true // Allow connections without Origin header (native apps, CLI tools, packaged Electron)
+			if origin == "" {
+				return true // Native apps, CLI tools, and Electron omit Origin entirely
+			}
+			// Reject dangerous pseudo-origins before the allowlist loop so
+			// that a wildcard ("*") entry doesn't accidentally accept them.
+			if origin == "null" || strings.HasPrefix(origin, "file:") {
+				log.Printf("[websocket] Origin rejected (unsafe pseudo-origin): %q", origin) //nolint:gosec // origin is from HTTP header, safe to log
+				return false
 			}
 			for _, allowed := range h.allowedOrigins {
 				if allowed == "*" || origin == allowed {
