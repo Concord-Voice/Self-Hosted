@@ -198,9 +198,12 @@ func (s *Service) SendOwnershipTransferNotification(to, serverName, newOwnerUser
 		return fmt.Errorf("invalid to address: %w", err)
 	}
 
+	// Sanitize server name to prevent SMTP header injection
+	safeServerName := strings.NewReplacer("\r", "", "\n", "").Replace(serverName)
+
 	msg := "From: " + fromAddr.String() + "\r\n" +
 		"To: " + toAddr.String() + "\r\n" +
-		"Subject: Ownership transfer initiated for " + serverName + "\r\n" +
+		"Subject: Ownership transfer initiated for " + safeServerName + "\r\n" +
 		"MIME-Version: 1.0\r\n" +
 		"Content-Type: text/html; charset=UTF-8\r\n" +
 		"\r\n" +

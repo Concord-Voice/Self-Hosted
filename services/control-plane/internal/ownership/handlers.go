@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
@@ -169,6 +170,11 @@ func (h *Handler) InitiateTransfer(c *gin.Context) {
 		VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7)
 	`, transferID, serverID, userID, req.TargetUserID, reversalToken, now, expiresAt)
 	if err != nil {
+		// Unique index violation means a concurrent request already created a pending transfer
+		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
+			c.JSON(http.StatusConflict, gin.H{"error": "A transfer is already pending for this server"})
+			return
+		}
 		h.log.Error("Failed to create transfer record", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to initiate transfer"})
 		return
@@ -191,7 +197,7 @@ func (h *Handler) InitiateTransfer(c *gin.Context) {
 	}
 
 	// Audit log
-	h.audit.Log(c, serverID, &userID, "ownership_transfer_initiated", "server", &serverID, map[string]interface{}{
+	_ = h.audit.Log(c, serverID, &userID, "ownership_transfer_initiated", "server", &serverID, map[string]interface{}{
 		"to_user_id": req.TargetUserID,
 		"expires_at": expiresAt.Format(time.RFC3339),
 	})
@@ -223,7 +229,12 @@ func (h *Handler) GetTransferStatus(c *gin.Context) {
 		`SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2)`,
 		serverID, userID,
 	).Scan(&isMember)
-	if err != nil || !isMember {
+	if err != nil {
+		h.log.Error("Failed to verify server membership", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify membership"})
+		return
+	}
+	if !isMember {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this server"})
 		return
 	}
@@ -320,7 +331,7 @@ func (h *Handler) CancelTransfer(c *gin.Context) {
 	}
 
 	// Audit log
-	h.audit.Log(c, serverID, &userID, "ownership_transfer_cancelled", "server", &serverID, nil)
+	_ = h.audit.Log(c, serverID, &userID, "ownership_transfer_cancelled", "server", &serverID, nil)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Transfer cancelled"})
 }
@@ -432,7 +443,7 @@ func (h *Handler) ReverseTransfer(c *gin.Context) {
 
 	var req reverseTransferRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
 		return
 	}
 
@@ -454,6 +465,19 @@ func (h *Handler) ReverseTransfer(c *gin.Context) {
 		return
 	}
 	defer func() { _ = tx.Rollback() }()
+
+	// Guard: verify the server is still owned by the transfer recipient.
+	// If another transfer happened after this one, abort to avoid overwriting.
+	var currentOwnerID string
+	if err := tx.QueryRowContext(c, `SELECT owner_id FROM servers WHERE id = $1 FOR UPDATE`, serverID).Scan(&currentOwnerID); err != nil {
+		h.log.Error("Failed to query current owner for reversal", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse transfer"})
+		return
+	}
+	if currentOwnerID != toUserID {
+		c.JSON(http.StatusConflict, gin.H{"error": "Ownership has changed since this transfer — reversal is no longer possible"})
+		return
+	}
 
 	// Update server owner back to original
 	if _, err := tx.ExecContext(c, `UPDATE servers SET owner_id = $1 WHERE id = $2`, fromUserID, serverID); err != nil {
@@ -504,9 +528,9 @@ func (h *Handler) ReverseTransfer(c *gin.Context) {
 	}
 
 	// Audit log
-	h.audit.Log(c, serverID, &userID, "ownership_transfer_reversed", "server", &serverID, map[string]interface{}{
-		"transfer_id":    transferID,
-		"reversed_from":  toUserID,
+	_ = h.audit.Log(c, serverID, &userID, "ownership_transfer_reversed", "server", &serverID, map[string]interface{}{
+		"transfer_id":   transferID,
+		"reversed_from": toUserID,
 	})
 
 	c.JSON(http.StatusOK, gin.H{
@@ -573,45 +597,12 @@ func (h *Handler) executeTransfer(ctx context.Context, serverID, transferID, fro
 	}
 
 	// Audit log
-	h.audit.Log(bgCtx, serverID, nil, "ownership_transferred", "server", &serverID, map[string]interface{}{
+	_ = h.audit.Log(bgCtx, serverID, nil, "ownership_transferred", "server", &serverID, map[string]interface{}{
 		"from_user_id": fromUserID,
 		"to_user_id":   toUserID,
 	})
 
 	return nil
-}
-
-// CompleteExpiredTransfers finds and auto-completes transfers past their expiry.
-// Called by the periodic cleanup job in cmd/server/main.go.
-func (h *Handler) CompleteExpiredTransfers(ctx context.Context) {
-	rows, err := h.db.QueryContext(ctx, `
-		SELECT id, server_id, from_user_id, to_user_id
-		FROM ownership_transfers
-		WHERE status = 'pending' AND expires_at <= NOW()
-	`)
-	if err != nil {
-		h.log.Error("Failed to query expired transfers", "error", err)
-		return
-	}
-	defer func() { _ = rows.Close() }()
-
-	for rows.Next() {
-		var transferID, serverID, fromUserID, toUserID string
-		if err := rows.Scan(&transferID, &serverID, &fromUserID, &toUserID); err != nil {
-			h.log.Error("Failed to scan expired transfer", "error", err)
-			continue
-		}
-
-		if err := h.executeTransfer(ctx, serverID, transferID, fromUserID, toUserID); err != nil {
-			h.log.Error("Failed to auto-complete expired transfer",
-				"error", err, "transfer_id", transferID, "server_id", serverID)
-			continue
-		}
-
-		h.log.Info("Auto-completed expired ownership transfer",
-			"transfer_id", transferID, "server_id", serverID,
-			"from_user_id", fromUserID, "to_user_id", toUserID)
-	}
 }
 
 // verifyPassword checks the user's password against the stored hash.

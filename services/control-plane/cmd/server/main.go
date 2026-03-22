@@ -270,6 +270,9 @@ func cleanupExpiredTransfers(ctx context.Context, db *sql.DB, redisClient *redis
 				"from_user_id", xfer.fromUserID, "to_user_id", xfer.toUserID)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		log.Error("Cleanup: error during expired transfers iteration", "error", err)
+	}
 }
 
 // pendingTransfer holds the fields needed to complete an expired transfer.
@@ -319,8 +322,13 @@ func completeOwnershipTransfer(ctx context.Context, db *sql.DB, redisClient *red
 		for iter.Next(ctx) {
 			keys = append(keys, iter.Val())
 		}
+		if err := iter.Err(); err != nil {
+			return fmt.Errorf("scan permission cache keys for user %s: %w", uid, err)
+		}
 		if len(keys) > 0 {
-			redisClient.Unlink(ctx, keys...)
+			if err := redisClient.Unlink(ctx, keys...).Err(); err != nil {
+				return fmt.Errorf("unlink permission cache keys for user %s: %w", uid, err)
+			}
 		}
 	}
 
