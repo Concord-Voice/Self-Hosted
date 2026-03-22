@@ -3,10 +3,14 @@ import { describe, it, expect, beforeEach } from 'vitest';
 
 // MediaEncryption is the default export-less class — import directly
 let MediaEncryption: typeof import('@/renderer/services/mediaEncryption').MediaEncryption;
+let deriveFrameKey: typeof import('@/renderer/services/mediaEncryption').deriveFrameKey;
+let ratchetKey: typeof import('@/renderer/services/mediaEncryption').ratchetKey;
 
 beforeEach(async () => {
   const mod = await import('@/renderer/services/mediaEncryption');
   MediaEncryption = mod.MediaEncryption;
+  deriveFrameKey = mod.deriveFrameKey;
+  ratchetKey = mod.ratchetKey;
 });
 
 /** Helper: generate a test AES-256 key (simulates a channel CSK) */
@@ -231,6 +235,135 @@ describe('MediaEncryption', () => {
 
       // Receiver should self-heal by ratcheting from epoch 0 → 3
       await receiver.decryptFrame(frame, 'sender-user-id');
+      expect(new Uint8Array(frame.data)).toEqual(originalData);
+    });
+  });
+
+  describe('Worker-path APIs (initFromKey / addDecryptKeyDirect / setCurrentKeyId)', () => {
+    it('initFromKey enables encryptFrame and sets currentKeyId', async () => {
+      const csk = await generateTestCSK();
+      const key = await deriveFrameKey(csk, 'user-a');
+
+      const enc = new MediaEncryption();
+      enc.initFromKey(key, 5);
+
+      expect(enc.getCurrentKeyId()).toBe(5);
+
+      // Should be able to encrypt
+      const frame = fakeAudioFrame(50);
+      await enc.encryptFrame(frame);
+
+      // Encrypted frame should be larger and have the magic trailer
+      const data = new Uint8Array(frame.data);
+      expect(data.length).toBeGreaterThan(50);
+      expect(data[data.length - 1]).toBe(0xad);
+      expect(data[data.length - 2]).toBe(0xde);
+
+      // keyId in trailer should be 5
+      expect(data[data.length - 15]).toBe(5);
+    });
+
+    it('addDecryptKeyDirect allows decryptFrame for matching keyId', async () => {
+      const csk = await generateTestCSK();
+      const senderKey = await deriveFrameKey(csk, 'sender-x');
+
+      // Sender uses initFromKey (Worker path)
+      const sender = new MediaEncryption();
+      sender.initFromKey(senderKey, 0);
+
+      // Receiver uses addDecryptKeyDirect (Worker path)
+      const receiver = new MediaEncryption();
+      const receiverOwnKey = await deriveFrameKey(csk, 'receiver-y');
+      receiver.initFromKey(receiverOwnKey, 0);
+      receiver.addDecryptKeyDirect('sender-x', 0, senderKey);
+
+      const frame = fakeAudioFrame(50);
+      const originalData = new Uint8Array(frame.data).slice();
+
+      await sender.encryptFrame(frame);
+      await receiver.decryptFrame(frame, 'sender-x');
+
+      expect(new Uint8Array(frame.data)).toEqual(originalData);
+    });
+
+    it('addDecryptKeyDirect at a ratcheted epoch decrypts correctly', async () => {
+      const csk = await generateTestCSK();
+
+      // Sender at epoch 2
+      const sender = new MediaEncryption();
+      await sender.init(csk, 'sender-z');
+      await sender.rotateKeys();
+      await sender.rotateKeys();
+      expect(sender.getCurrentKeyId()).toBe(2);
+
+      // Receiver derives sender key and pre-ratchets to epoch 2, then adds directly
+      let senderKey = await deriveFrameKey(csk, 'sender-z');
+      senderKey = await ratchetKey(senderKey);
+      senderKey = await ratchetKey(senderKey);
+
+      const receiver = new MediaEncryption();
+      const recvKey = await deriveFrameKey(csk, 'receiver-w');
+      receiver.initFromKey(recvKey, 0);
+      receiver.addDecryptKeyDirect('sender-z', 2, senderKey);
+
+      const frame = fakeAudioFrame(60);
+      const originalData = new Uint8Array(frame.data).slice();
+
+      await sender.encryptFrame(frame);
+      await receiver.decryptFrame(frame, 'sender-z');
+
+      expect(new Uint8Array(frame.data)).toEqual(originalData);
+    });
+
+    it('setCurrentKeyId updates epoch without nulling encryptKey', async () => {
+      const csk = await generateTestCSK();
+      const key = await deriveFrameKey(csk, 'user-b');
+
+      const enc = new MediaEncryption();
+      enc.initFromKey(key, 0);
+
+      // Advance epoch via setCurrentKeyId
+      enc.setCurrentKeyId(7);
+      expect(enc.getCurrentKeyId()).toBe(7);
+
+      // encryptFrame should still work (key not nulled)
+      const frame = fakeAudioFrame(40);
+      await enc.encryptFrame(frame);
+
+      const data = new Uint8Array(frame.data);
+      expect(data.length).toBeGreaterThan(40);
+      // keyId in trailer should be 7
+      expect(data[data.length - 15]).toBe(7);
+    });
+
+    it('full Worker-path round-trip: initFromKey + addDecryptKeyDirect + rotation', async () => {
+      const csk = await generateTestCSK();
+      const senderKey = await deriveFrameKey(csk, 'alice');
+      const receiverKey = await deriveFrameKey(csk, 'bob');
+
+      const sender = new MediaEncryption();
+      sender.initFromKey(senderKey, 0);
+
+      const receiver = new MediaEncryption();
+      receiver.initFromKey(receiverKey, 0);
+      receiver.addDecryptKeyDirect('alice', 0, senderKey);
+
+      // Both rotate to epoch 1 (simulating Worker receiving rotateKeys message)
+      await sender.rotateKeys();
+      await receiver.rotateKeys();
+      expect(sender.getCurrentKeyId()).toBe(1);
+      expect(receiver.getCurrentKeyId()).toBe(1);
+
+      const frame = fakeAudioFrame(80);
+      const originalData = new Uint8Array(frame.data).slice();
+
+      await sender.encryptFrame(frame);
+
+      // keyId should be 1
+      const encrypted = new Uint8Array(frame.data);
+      expect(encrypted[encrypted.length - 15]).toBe(1);
+
+      await receiver.decryptFrame(frame, 'alice');
       expect(new Uint8Array(frame.data)).toEqual(originalData);
     });
   });
