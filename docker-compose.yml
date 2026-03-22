@@ -5,7 +5,7 @@ services:
     container_name: concordvoice-postgres
     environment:
       POSTGRES_USER: concord
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-concord_dev_password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set - copy .env.example to .env}
       POSTGRES_DB: concord
     # Enable WAL replication so the failover replica on port 5433 can connect.
     # These settings are lightweight and harmless when no replica is running.
@@ -31,13 +31,13 @@ services:
   redis:
     image: redis:7-alpine
     container_name: concordvoice-redis
-    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-concord_dev_redis}
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set - copy .env.example to .env}
     ports:
       - "6379:6379"
     volumes:
       - redis-data:/data
     healthcheck:
-      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-concord_dev_redis}", "ping"]
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:?}", "ping"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -67,7 +67,7 @@ services:
     command: >
       turnserver
         -c /etc/coturn/turnserver.conf
-        --static-auth-secret=${TURN_SECRET:-concord_dev_turn_secret}
+        --static-auth-secret=${TURN_SECRET:?TURN_SECRET must be set - copy .env.example to .env}
         --realm=${TURN_REALM:-concordvoice.chat}
         --external-ip=${TURN_EXTERNAL_IP:-127.0.0.1}
     ports:
@@ -93,8 +93,8 @@ services:
     container_name: concordvoice-minio
     command: server /data --console-address ":9001"
     environment:
-      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-concord}
-      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-concord_dev_minio}
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set - copy .env.example to .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set - copy .env.example to .env}
     # No host ports published in base compose — production layers on top of this file
     # and Compose merges port lists additively. Use docker-compose.override.yml for
     # dev host access, or access MinIO via `docker compose exec` / internal network.
@@ -130,7 +130,7 @@ services:
     image: rediscommander/redis-commander:latest
     container_name: concordvoice-redis-commander
     environment:
-      REDIS_HOSTS: local:redis:6379:0:${REDIS_PASSWORD:-concord_dev_redis}
+      REDIS_HOSTS: local:redis:6379:0:${REDIS_PASSWORD:?}
     ports:
       - "8081:8081"
     depends_on:
@@ -149,12 +149,12 @@ services:
     env_file:
       - spa.env
     environment:
-      DATABASE_URL: postgres://concord:${POSTGRES_PASSWORD:-concord_dev_password}@postgres:5432/concord?sslmode=disable
-      REDIS_URL: redis://:${REDIS_PASSWORD:-concord_dev_redis}@redis:6379
+      DATABASE_URL: postgres://concord:${POSTGRES_PASSWORD:?}@postgres:5432/concord?sslmode=disable
+      REDIS_URL: redis://:${REDIS_PASSWORD:?}@redis:6379
       NATS_URL: nats://nats:4222
-      JWT_SECRET: ${JWT_SECRET:-dev_jwt_secret_change_in_production}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET must be set - copy .env.example to .env}
       TURN_SERVER_HOST: ${TURN_SERVER_HOST:-localhost}
-      TURN_SECRET: ${TURN_SECRET:-concord_dev_turn_secret}
+      TURN_SECRET: ${TURN_SECRET:?}
       TURN_REALM: ${TURN_REALM:-concordvoice.chat}
       MFA_ENCRYPTION_KEY: ${MFA_ENCRYPTION_KEY:-}
       SMTP_HOST: ${SMTP_HOST:-}
@@ -165,8 +165,8 @@ services:
       WEBAUTHN_RP_ID: ${WEBAUTHN_RP_ID:-localhost}
       WEBAUTHN_RP_ORIGINS: ${WEBAUTHN_RP_ORIGINS:-http://localhost:3001}
       MINIO_ENDPOINT: minio:9000
-      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-concord}
-      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-concord_dev_minio}
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:?}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:?}
       MINIO_USE_SSL: "false"
       MINIO_BUCKET: ${MINIO_BUCKET:-concord-media}
       UPLOAD_MAX_SIZE: ${UPLOAD_MAX_SIZE:-26214400}
@@ -195,9 +195,9 @@ services:
     container_name: concordvoice-media-plane
     environment:
       CONTROL_PLANE_URL: http://control-plane:8080
-      REDIS_URL: redis://:${REDIS_PASSWORD:-concord_dev_redis}@redis:6379
+      REDIS_URL: redis://:${REDIS_PASSWORD:?}@redis:6379
       NATS_URL: nats://nats:4222
-      JWT_SECRET: ${JWT_SECRET:-dev_jwt_secret_change_in_production}
+      JWT_SECRET: ${JWT_SECRET:?}
       RTC_MIN_PORT: 40000
       RTC_MAX_PORT: 49999
       ANNOUNCED_IP: 127.0.0.1
@@ -224,7 +224,7 @@ services:
       dockerfile: Dockerfile
     container_name: concordvoice-licensing-authority
     environment:
-      DATABASE_URL: postgres://concord:${POSTGRES_PASSWORD:-concord_dev_password}@postgres:5432/concord?sslmode=disable
+      DATABASE_URL: postgres://concord:${POSTGRES_PASSWORD:?}@postgres:5432/concord?sslmode=disable
       PRIVATE_KEY_PATH: /app/keys/license_private_key.pem
       PORT: 8082
     ports:

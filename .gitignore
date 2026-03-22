@@ -45,6 +45,9 @@ Thumbs.db
 !.env.example
 !spa.env
 
+# Secret rotation scripts (contain connection string templates)
+scripts/rotate-secrets.sh
+
 # Node.js
 node_modules/
 npm-debug.log*

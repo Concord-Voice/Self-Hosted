@@ -2,6 +2,7 @@
 package config
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"strconv"
@@ -12,6 +13,9 @@ import (
 
 const devJWTSecret = "dev_jwt_secret_change_in_production"       // #nosec G101 -- Not a real secret, just the default placeholder
 const devMFAEncKey = "0000000000000000000000000000000000000000000000000000000000000000" // #nosec G101 -- 32-byte zero key, dev only
+const devDatabaseURL = "postgres://concord:concord_dev_password@localhost:5432/concord?sslmode=disable" // #nosec S6698 -- dev default, guarded by validate()
+const devRedisURL = "redis://:concord_dev_redis@localhost:6379"                                         // #nosec S6698 -- dev default, guarded by validate()
+const devMinIOSecretKey = "concord_dev_minio"                                                           // #nosec G101 -- dev default, guarded by validate()
 
 // Config holds all configuration for the application
 type Config struct {
@@ -77,8 +81,8 @@ func Load() (*Config, error) {
 	cfg := &Config{
 		Environment:           getEnv("ENVIRONMENT", "development"),
 		Port:                  getEnv("PORT", "8080"),
-		DatabaseURL:           getEnv("DATABASE_URL", "postgres://concord:concord_dev_password@localhost:5432/concord?sslmode=disable"),
-		RedisURL:              getEnv("REDIS_URL", "redis://:concord_dev_redis@localhost:6379"),
+		DatabaseURL:           getEnv("DATABASE_URL", devDatabaseURL),
+		RedisURL:              getEnv("REDIS_URL", devRedisURL),
 		JWTSecret:             getEnv("JWT_SECRET", devJWTSecret),
 		NATSUrl:               getEnv("NATS_URL", "nats://localhost:4222"),
 		MediaPlaneURL:         getEnv("MEDIA_PLANE_URL", "http://localhost:3000"),
@@ -105,48 +109,60 @@ func Load() (*Config, error) {
 		WebAuthnRPOrigins:     parseOrigins(getEnv("WEBAUTHN_RP_ORIGINS", "http://localhost:3001")),
 		MinIOEndpoint:         getEnv("MINIO_ENDPOINT", ""),
 		MinIOAccessKey:        getEnv("MINIO_ACCESS_KEY", "concord"),
-		MinIOSecretKey:        getEnv("MINIO_SECRET_KEY", "concord_dev_minio"), // #nosec G101 -- env var name, not a secret
+		MinIOSecretKey:        getEnv("MINIO_SECRET_KEY", devMinIOSecretKey), // #nosec G101 -- env var name, not a secret
 		MinIOUseSSL:           getEnv("MINIO_USE_SSL", "false") == "true",
 		MinIOBucket:           getEnv("MINIO_BUCKET", "concord-media"),
 		UploadMaxSize:         getEnvInt64("UPLOAD_MAX_SIZE", 25*1024*1024), // 25 MB default
 	}
 
-	cfg.validate()
+	if err := cfg.validate(); err != nil {
+		log.Fatal(err)
+	}
 
 	return cfg, nil
 }
 
 // validate checks for dangerous configuration in production environments.
-// Fatally exits if a real JWT_SECRET is not set in production.
-func (c *Config) validate() {
-	if c.Environment == "production" && c.JWTSecret == devJWTSecret {
-		log.Fatal("FATAL: JWT_SECRET must be set to a secure value in production. " +
-			"The default dev secret is not allowed.")
+// Returns an error if required secrets are missing or still set to dev defaults.
+func (c *Config) validate() error {
+	if c.Environment != "production" {
+		return nil
 	}
-	if c.Environment == "production" && c.SMTPHost == "" {
-		log.Fatal("FATAL: SMTP_HOST must be set in production. " +
-			"Email verification cannot fall back to dev mode (logging codes to stdout) in production.")
+
+	// Table-driven production guards — each entry is a condition that must NOT be true.
+	guards := []struct {
+		bad bool   // true when the config value is dangerous for production
+		msg string // error message explaining the problem
+	}{
+		{c.JWTSecret == devJWTSecret,
+			"JWT_SECRET must be set to a secure value in production. The default dev secret is not allowed."},
+		{c.DatabaseURL == devDatabaseURL,
+			"DATABASE_URL must be set to a secure value in production. The default dev connection string is not allowed."},
+		{c.RedisURL == devRedisURL,
+			"REDIS_URL must be set to a secure value in production. The default dev connection string is not allowed."},
+		{c.MFAEncryptionKey == devMFAEncKey,
+			"MFA_ENCRYPTION_KEY must be set to a secure value in production. The default dev key is not allowed. Generate with: openssl rand -hex 32"},
+		{c.MinIOSecretKey == devMinIOSecretKey, // #nosec G101 -- dev default comparison
+			"MINIO_SECRET_KEY must be set to a secure value in production. The default dev credential is not allowed."},
+		{c.SMTPHost == "",
+			"SMTP_HOST must be set in production. Email verification cannot fall back to dev mode (logging codes to stdout) in production."},
+		{c.MinIOAccessKey == "",
+			"MINIO_ACCESS_KEY must be set in production."},
+		{c.MinIOSecretKey == "", // #nosec G101 -- env var validation
+			"MINIO_SECRET_KEY must be set in production."},
+		{c.MinIOEndpoint == "",
+			"MINIO_ENDPOINT must be set in production."},
+		{c.MinIOBucket == "",
+			"MINIO_BUCKET must be set in production."},
 	}
-	if c.Environment == "production" && c.MFAEncryptionKey == devMFAEncKey {
-		log.Fatal("FATAL: MFA_ENCRYPTION_KEY must be set to a secure value in production. " +
-			"The default dev key is not allowed. Generate with: openssl rand -hex 32")
+
+	for _, g := range guards {
+		if g.bad {
+			return fmt.Errorf("FATAL: %s", g.msg)
+		}
 	}
-	if c.Environment == "production" && c.MinIOSecretKey == "concord_dev_minio" { // #nosec G101 -- env var validation
-		log.Fatal("FATAL: MINIO_SECRET_KEY must be set to a secure value in production. " +
-			"The default dev credential is not allowed.")
-	}
-	if c.Environment == "production" && c.MinIOAccessKey == "" {
-		log.Fatal("FATAL: MINIO_ACCESS_KEY must be set in production.")
-	}
-	if c.Environment == "production" && c.MinIOSecretKey == "" { // #nosec G101 -- env var validation
-		log.Fatal("FATAL: MINIO_SECRET_KEY must be set in production.")
-	}
-	if c.Environment == "production" && c.MinIOEndpoint == "" {
-		log.Fatal("FATAL: MINIO_ENDPOINT must be set in production.")
-	}
-	if c.Environment == "production" && c.MinIOBucket == "" {
-		log.Fatal("FATAL: MINIO_BUCKET must be set in production.")
-	}
+
+	return nil
 }
 
 // parseOrigins splits a comma-separated list of origins into a slice.
