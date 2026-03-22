@@ -44,10 +44,16 @@ func NewHandler(hub *Hub, db *sql.DB, redisClient *redis.Client, jwtSecret strin
 			if origin == "" {
 				return true // Native apps, CLI tools, and Electron omit Origin entirely
 			}
-			// Reject dangerous pseudo-origins before the allowlist loop so
-			// that a wildcard ("*") entry doesn't accidentally accept them.
-			if origin == "null" || strings.HasPrefix(origin, "file:") {
-				log.Printf("[websocket] Origin rejected (unsafe pseudo-origin): %q", origin) //nolint:gosec // origin is from HTTP header, safe to log
+			// Allow file:// origin — the packaged Electron desktop client
+			// loads bundled HTML from disk and sends file:// as origin.
+			// WebSocket auth is already validated via ws-ticket.
+			if strings.HasPrefix(origin, "file:") {
+				return true
+			}
+			// Reject "null" pseudo-origin (sandboxed iframes, data: URIs)
+			// before the allowlist loop so a wildcard ("*") doesn't accept it.
+			if origin == "null" {
+				log.Printf("[websocket] Origin rejected (null pseudo-origin)") //nolint:gosec
 				return false
 			}
 			for _, allowed := range h.allowedOrigins {

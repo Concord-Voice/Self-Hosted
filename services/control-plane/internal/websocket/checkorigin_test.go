@@ -20,8 +20,8 @@ func TestCheckOrigin(t *testing.T) {
 	}{
 		{"empty origin (native client)", "", false, true},
 		{"null origin (sandboxed iframe)", "null", true, false},
-		{"file:// origin (local HTML)", "file://", true, false},
-		{"file:///path origin", "file:///etc/passwd", true, false},
+		{"file:// origin (Electron desktop)", "file://", true, true},
+		{"file:///path origin (Electron desktop)", "file:///app/index.html", true, true},
 		{"allowed origin", "https://concordvoice.chat", true, true},
 		{"disallowed origin", "https://evil.com", true, false},
 	}
@@ -49,8 +49,8 @@ func TestCheckOrigin_Wildcard(t *testing.T) {
 	}{
 		{"wildcard + empty origin", "", false, true},
 		{"wildcard + null origin", "null", true, false},
-		{"wildcard + file://", "file://", true, false},
-		{"wildcard + file:///path", "file:///index.html", true, false},
+		{"wildcard + file://", "file://", true, true},
+		{"wildcard + file:///path", "file:///index.html", true, true},
 		{"wildcard + any origin", "https://anything.example.com", true, true},
 	}
 
