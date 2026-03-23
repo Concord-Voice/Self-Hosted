@@ -87,12 +87,14 @@ self.onmessage = (event: MessageEvent<E2EEWorkerMessage>) => {
 };
 
 // ─── RTCRtpScriptTransform handler (frame processing) ─────────────────
+// Use addEventListener — the onrtctransform IDL attribute is not supported
+// in all Chromium/Electron Worker contexts, but the event itself dispatches.
 
-(globalThis as unknown as DedicatedWorkerGlobalScope).onrtctransform = (
-  event: RTCTransformEvent
-) => {
+self.addEventListener('rtctransform', ((event: RTCTransformEvent) => {
   const transformer = event.transformer;
   const opts = transformer.options as E2EETransformOptions;
+
+  log('debug', `E2EE: rtctransform event fired`, { role: opts.role });
 
   if (opts.role === 'encrypt') {
     handleEncrypt(transformer.readable, transformer.writable);
@@ -105,7 +107,7 @@ self.onmessage = (event: MessageEvent<E2EEWorkerMessage>) => {
   } else {
     log('error', 'E2EE: unknown transform role', { role: String(opts.role) });
   }
-};
+}) as EventListener);
 
 // ─── Encrypt pipeline ─────────────────────────────────────────────────
 
