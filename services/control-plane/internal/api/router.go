@@ -125,6 +125,8 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	var mediaHandler *media.Handler
 	if store != nil {
 		mediaHandler = media.NewHandler(db, store, log, cfg, rbacResolver)
+		usersHandler.SetMediaStore(store)
+		serversHandler.SetMediaStore(store)
 	}
 	wsHandler := websocket.NewHandler(hub, db, redis, cfg.JWTSecret, cfg.AllowedOrigins)
 	wsTicketHandler := auth.NewWSTicketHandler(redis, cfg.JWTSecret)

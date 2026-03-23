@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/media"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
@@ -23,6 +24,7 @@ type Handler struct {
 	log      *logger.Logger
 	hub      *websocket.Hub
 	resolver *rbac.Resolver
+	store    media.ObjectDeleter // nil when object storage is not configured
 }
 
 // NewHandler creates a new server handler
@@ -33,6 +35,11 @@ func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, resolver *rb
 		hub:      hub,
 		resolver: resolver,
 	}
+}
+
+// SetMediaStore configures optional object storage for media cleanup on icon/banner removal.
+func (h *Handler) SetMediaStore(store media.ObjectDeleter) {
+	h.store = store
 }
 
 // CreateServerRequest represents a request to create a server
@@ -145,8 +152,8 @@ func (h *Handler) CreateServer(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon must be a valid image data URL (use UpdateServer for uploaded media URLs)"})
 			return
 		}
-		if len(*req.IconURL) > 500000 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon data URL must be less than 500KB"})
+		if len(*req.IconURL) > 1500000 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon image too large (max ~1MB)"})
 			return
 		}
 	}
@@ -157,8 +164,8 @@ func (h *Handler) CreateServer(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Banner must be a valid image data URL (use UpdateServer for uploaded media URLs)"})
 			return
 		}
-		if len(*req.BannerURL) > 1000000 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Banner data URL must be less than 1MB"})
+		if len(*req.BannerURL) > 3000000 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Banner image too large (max ~2MB)"})
 			return
 		}
 	}
@@ -377,8 +384,8 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon must be an uploaded icon URL for this server or an image data URL"})
 			return
 		}
-		if strings.HasPrefix(*iconURL, "data:image/") && len(*iconURL) > 500000 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon data URL must be less than 500KB"})
+		if strings.HasPrefix(*iconURL, "data:image/") && len(*iconURL) > 1500000 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon image too large (max ~1MB)"})
 			return
 		}
 	}
@@ -407,8 +414,8 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Banner must be an uploaded banner URL for this server or an image data URL"})
 			return
 		}
-		if strings.HasPrefix(*bannerURL, "data:image/") && len(*bannerURL) > 1000000 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Banner data URL must be less than 1MB"})
+		if strings.HasPrefix(*bannerURL, "data:image/") && len(*bannerURL) > 3000000 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Banner image too large (max ~2MB)"})
 			return
 		}
 	}
@@ -421,15 +428,24 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 	args := []interface{}{req.Name}
 	argIdx := 2
 
+	// Track media storage keys to clean up after successful DB update
+	var mediaKeysToDelete []string
+
 	if iconURLProvided {
 		setClauses = append(setClauses, fmt.Sprintf("icon_url = $%d", argIdx))
 		args = append(args, iconURL)
 		argIdx++
+		if iconURL == nil {
+			mediaKeysToDelete = append(mediaKeysToDelete, fmt.Sprintf("server-icons/%s", serverID))
+		}
 	}
 	if bannerURLProvided {
 		setClauses = append(setClauses, fmt.Sprintf("banner_url = $%d", argIdx))
 		args = append(args, bannerURL)
 		argIdx++
+		if bannerURL == nil {
+			mediaKeysToDelete = append(mediaKeysToDelete, fmt.Sprintf("server-banners/%s", serverID))
+		}
 	}
 	if req.AllowEmbeddedContent != nil {
 		setClauses = append(setClauses, fmt.Sprintf("allow_embedded_content = $%d", argIdx))
@@ -452,6 +468,11 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 		h.log.Error("Failed to update server", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update server"})
 		return
+	}
+
+	// Clean up orphaned media objects from storage after successful DB update
+	for _, key := range mediaKeysToDelete {
+		media.CleanupObject(c.Request.Context(), h.db, h.store, h.log, key)
 	}
 
 	h.log.Info("Server updated", "server_id", serverID, "user_id", userID)

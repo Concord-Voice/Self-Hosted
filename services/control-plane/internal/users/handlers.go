@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/media"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
@@ -32,6 +33,7 @@ type Handler struct {
 	log         *logger.Logger
 	hub         *websocket.Hub
 	mfaVerifier MFAVerifier
+	store       media.ObjectDeleter // nil when object storage is not configured
 }
 
 // NewHandler creates a new user handler.
@@ -42,6 +44,11 @@ func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, mfaVerifier 
 		hub:         hub,
 		mfaVerifier: mfaVerifier,
 	}
+}
+
+// SetMediaStore configures optional object storage for media cleanup on profile image removal.
+func (h *Handler) SetMediaStore(store media.ObjectDeleter) {
+	h.store = store
 }
 
 // GetMe returns the current user's profile
@@ -270,6 +277,9 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 	var previousUsername string
 	usernameChanged := false
 
+	// Track media storage keys to clean up after successful DB update
+	var mediaKeysToDelete []string
+
 	// Validate and add username if provided
 	if req.Username != nil {
 		trimmed := strings.TrimSpace(*req.Username)
@@ -383,8 +393,8 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 				return
 			}
 			// Legacy data URL size check (object storage URLs are small strings)
-			if strings.HasPrefix(*req.AvatarURL, "data:image/") && len(*req.AvatarURL) > 500000 {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Avatar data URL must be less than 500KB"})
+			if strings.HasPrefix(*req.AvatarURL, "data:image/") && len(*req.AvatarURL) > 1500000 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Avatar image too large (max ~1MB)"})
 				return
 			}
 			setClauses = append(setClauses, fmt.Sprintf("avatar_url = $%d", argIdx))
@@ -393,6 +403,7 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 			// Empty string means remove avatar
 			setClauses = append(setClauses, fmt.Sprintf("avatar_url = $%d", argIdx))
 			args = append(args, nil)
+			mediaKeysToDelete = append(mediaKeysToDelete, fmt.Sprintf("avatars/%s", userID))
 		}
 		argIdx++
 	}
@@ -407,8 +418,8 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 				return
 			}
 			// Legacy data URL size check
-			if strings.HasPrefix(*req.HeaderImageURL, "data:image/") && len(*req.HeaderImageURL) > 1000000 {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Header image data URL must be less than 1MB"})
+			if strings.HasPrefix(*req.HeaderImageURL, "data:image/") && len(*req.HeaderImageURL) > 3000000 {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "Banner image too large (max ~2MB)"})
 				return
 			}
 			setClauses = append(setClauses, fmt.Sprintf("header_image_url = $%d", argIdx))
@@ -417,6 +428,7 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 			// Empty string means remove header image
 			setClauses = append(setClauses, fmt.Sprintf("header_image_url = $%d", argIdx))
 			args = append(args, nil)
+			mediaKeysToDelete = append(mediaKeysToDelete, fmt.Sprintf("banners/%s", userID))
 		}
 		argIdx++
 	}
@@ -539,6 +551,11 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 		h.log.Error("Failed to update profile", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update profile"})
 		return
+	}
+
+	// Clean up orphaned media objects from storage after successful DB update
+	for _, key := range mediaKeysToDelete {
+		media.CleanupObject(c.Request.Context(), h.db, h.store, h.log, key)
 	}
 
 	// Record username change in history for audit/abuse tracking
