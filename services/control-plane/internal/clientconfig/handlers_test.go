@@ -14,7 +14,7 @@ func setupTS(t *testing.T) *testhelpers.TestServer {
 	return testhelpers.SetupTestServer(t)
 }
 
-func TestGetConfig_ReturnsExpectedShape(t *testing.T) {
+func TestGetConfigReturnsExpectedShape(t *testing.T) {
 	ts := setupTS(t)
 
 	w := ts.DoRequest("GET", "/api/v1/client/config", nil, nil)
@@ -41,7 +41,7 @@ func TestGetConfig_ReturnsExpectedShape(t *testing.T) {
 	require.True(t, ok, "turn should be an object")
 }
 
-func TestGetConfig_ReflectsConfigValues(t *testing.T) {
+func TestGetConfigReflectsConfigValues(t *testing.T) {
 	ts := setupTS(t)
 
 	w := ts.DoRequest("GET", "/api/v1/client/config", nil, nil)
@@ -67,7 +67,7 @@ func TestGetConfig_ReflectsConfigValues(t *testing.T) {
 	assert.Nil(t, resp["spaIpcContract"])
 }
 
-func TestGetConfig_NoAuthRequired(t *testing.T) {
+func TestGetConfigNoAuthRequired(t *testing.T) {
 	ts := setupTS(t)
 
 	// Endpoint should work without any auth headers
@@ -75,7 +75,7 @@ func TestGetConfig_NoAuthRequired(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
-func TestGetConfig_EmptyTURNFieldsOmitted(t *testing.T) {
+func TestGetConfigEmptyTURNFieldsOmitted(t *testing.T) {
 	ts := setupTS(t)
 
 	w := ts.DoRequest("GET", "/api/v1/client/config", nil, nil)
@@ -92,7 +92,7 @@ func TestGetConfig_EmptyTURNFieldsOmitted(t *testing.T) {
 	assert.NotContains(t, turn, "realm", "empty realm should be omitted")
 }
 
-func TestGetConfig_SpaFieldsOmittedWhenZero(t *testing.T) {
+func TestGetConfigSpaFieldsOmittedWhenZero(t *testing.T) {
 	ts := setupTS(t)
 
 	w := ts.DoRequest("GET", "/api/v1/client/config", nil, nil)
@@ -106,7 +106,7 @@ func TestGetConfig_SpaFieldsOmittedWhenZero(t *testing.T) {
 	assert.Nil(t, resp["spaIpcContract"], "zero spaIpcContract should be omitted")
 }
 
-func TestGetConfig_ContentTypeJSON(t *testing.T) {
+func TestGetConfigContentTypeJSON(t *testing.T) {
 	ts := setupTS(t)
 
 	w := ts.DoRequest("GET", "/api/v1/client/config", nil, nil)
@@ -116,7 +116,7 @@ func TestGetConfig_ContentTypeJSON(t *testing.T) {
 	assert.Contains(t, ct, "application/json")
 }
 
-func TestGetConfig_FeatureFlagsIndependent(t *testing.T) {
+func TestGetConfigFeatureFlagsIndependent(t *testing.T) {
 	ts := setupTS(t)
 
 	w := ts.DoRequest("GET", "/api/v1/client/config", nil, nil)

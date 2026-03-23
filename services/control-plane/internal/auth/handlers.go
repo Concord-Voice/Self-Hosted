@@ -62,8 +62,17 @@ type MFAChecker interface {
 	ValidateRecoveryToken(tokenString string) (*RecoveryClaims, error)
 }
 
-// maxUserAgentLength limits User-Agent storage to reduce metadata footprint.
-const maxUserAgentLength = 256
+const (
+	// maxUserAgentLength limits User-Agent storage to reduce metadata footprint.
+	maxUserAgentLength = 256
+
+	errMsgInvalidRequestBody      = "Invalid request body"
+	errMsgFailedStartTransaction  = "Failed to start transaction"
+	errMsgFailedRollbackTx        = "Failed to rollback transaction"
+	errMsgFailedCreateAccount     = "Failed to create account"
+	errMsgLoginFailed             = "Login failed"
+	errMsgInvalidCredentials      = "Invalid credentials" //nolint:gosec // G101 false positive: error message text, not a credential
+)
 
 // truncateUserAgent limits the User-Agent string to maxUserAgentLength.
 func truncateUserAgent(ua string) string {
@@ -150,7 +159,7 @@ type LoginRequest struct {
 func (h *Handler) Register(c *gin.Context) {
 	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
 
@@ -176,7 +185,7 @@ func (h *Handler) Register(c *gin.Context) {
 	passwordHash, err := HashPassword(req.Password)
 	if err != nil {
 		h.log.Error("Failed to hash password", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create account"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
 		return
 	}
 
@@ -202,13 +211,13 @@ func (h *Handler) Register(c *gin.Context) {
 	// Start transaction
 	tx, err := h.db.Begin()
 	if err != nil {
-		h.log.Error("Failed to start transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create account"})
+		h.log.Error(errMsgFailedStartTransaction, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
 		return
 	}
 	defer func() {
 		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
-			h.log.Error("Failed to rollback transaction", "error", rbErr)
+			h.log.Error(errMsgFailedRollbackTx, "error", rbErr)
 		}
 	}()
 
@@ -239,7 +248,7 @@ func (h *Handler) Register(c *gin.Context) {
 			c.JSON(http.StatusConflict, gin.H{"error": "Username already taken"})
 			return
 		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create account"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
 		return
 	}
 
@@ -258,7 +267,7 @@ func (h *Handler) Register(c *gin.Context) {
 	)
 	if err != nil {
 		h.log.Error("Failed to store user keys", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create account"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
 		return
 	}
 
@@ -274,14 +283,14 @@ func (h *Handler) Register(c *gin.Context) {
 	)
 	if err != nil {
 		h.log.Error("Failed to store public key", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create account"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
 		return
 	}
 
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create account"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
 		return
 	}
 
@@ -289,7 +298,7 @@ func (h *Handler) Register(c *gin.Context) {
 	accessToken, err := GenerateAccessToken(userID, h.jwtSecret, false)
 	if err != nil {
 		h.log.Error("Failed to generate access token", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create account"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
 		return
 	}
 
@@ -297,7 +306,7 @@ func (h *Handler) Register(c *gin.Context) {
 	refreshToken, err := GenerateRefreshToken()
 	if err != nil {
 		h.log.Error("Failed to generate refresh token", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create account"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
 		return
 	}
 
@@ -322,7 +331,7 @@ func (h *Handler) Register(c *gin.Context) {
 	)
 	if err != nil {
 		h.log.Error("Failed to store refresh token", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create account"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
 		return
 	}
 
@@ -415,7 +424,7 @@ func (h *Handler) clearLoginAttempts(ctx context.Context, email string) {
 func (h *Handler) Login(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
 
@@ -423,7 +432,7 @@ func (h *Handler) Login(c *gin.Context) {
 
 	// Check if account is locked out (generic message — don't reveal lockout)
 	if h.checkLoginLockout(ctx, req.Email) {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
 		return
 	}
 
@@ -453,11 +462,11 @@ func (h *Handler) Login(c *gin.Context) {
 		if err == sql.ErrNoRows {
 			// Record failure even for non-existent accounts (timing-safe)
 			h.recordFailedLogin(ctx, req.Email)
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+			c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
 			return
 		}
 		h.log.Error("Failed to fetch user", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Login failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
 		return
 	}
 
@@ -465,12 +474,12 @@ func (h *Handler) Login(c *gin.Context) {
 	valid, err := VerifyPassword(req.Password, user.PasswordHash)
 	if err != nil {
 		h.log.Error("Failed to verify password", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Login failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
 		return
 	}
 	if !valid {
 		h.recordFailedLogin(ctx, req.Email)
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid credentials"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
 		return
 	}
 
@@ -491,7 +500,7 @@ func (h *Handler) Login(c *gin.Context) {
 		challengeToken, jti, mfaErr := h.mfaChecker.GenerateLoginChallenge(ctx, user.ID, rememberMe)
 		if mfaErr != nil {
 			h.log.Error("Failed to generate MFA challenge", "error", mfaErr)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Login failed"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
 			return
 		}
 
@@ -539,7 +548,7 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) 
 	var emailVerified bool
 	if err := h.db.QueryRow(`SELECT email_verified FROM users WHERE id = $1`, userID).Scan(&emailVerified); err != nil {
 		h.log.Error("Failed to look up email_verified for login", "error", err, "user_id", userID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Login failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
 		return
 	}
 
@@ -547,7 +556,7 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) 
 	accessToken, err := GenerateAccessToken(userID, h.jwtSecret, emailVerified)
 	if err != nil {
 		h.log.Error("Failed to generate access token", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Login failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
 		return
 	}
 
@@ -555,7 +564,7 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) 
 	refreshToken, err := GenerateRefreshToken()
 	if err != nil {
 		h.log.Error("Failed to generate refresh token", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Login failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
 		return
 	}
 
@@ -597,7 +606,7 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) 
 	)
 	if err != nil {
 		h.log.Error("Failed to store refresh token", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Login failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
 		return
 	}
 
@@ -622,7 +631,7 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) 
 	)
 	if err != nil {
 		h.log.Error("Failed to fetch user for login response", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Login failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
 		return
 	}
 
@@ -634,7 +643,7 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) 
 	).Scan(&keys.UserID, &keys.WrappedPrivateKey, &keys.KeyDerivationSalt, &keys.KeyVersion, &keys.KeyDerivationAlg)
 	if err != nil {
 		h.log.Error("Failed to fetch user keys", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Login failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
 		return
 	}
 
@@ -1535,7 +1544,7 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 		RecoveryPrefsKeySalt     string `json:"recovery_prefs_key_salt"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
 
@@ -1597,14 +1606,14 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 	// BEGIN TRANSACTION
 	tx, err := h.db.BeginTx(ctx, nil)
 	if err != nil {
-		h.log.Error("Failed to start transaction", "error", err)
+		h.log.Error(errMsgFailedStartTransaction, "error", err)
 		h.redis.Del(ctx, recoveryUsedKey)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset password"})
 		return
 	}
 	defer func() {
 		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
-			h.log.Error("Failed to rollback transaction", "error", rbErr)
+			h.log.Error(errMsgFailedRollbackTx, "error", rbErr)
 		}
 	}()
 
@@ -1717,7 +1726,7 @@ func (h *Handler) RecoveryResetAccount(c *gin.Context) {
 		AcknowledgeDataLoss  bool   `json:"acknowledge_data_loss"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
 
@@ -1791,14 +1800,14 @@ func (h *Handler) RecoveryResetAccount(c *gin.Context) {
 	// BEGIN TRANSACTION
 	tx, err := h.db.BeginTx(ctx, nil)
 	if err != nil {
-		h.log.Error("Failed to start transaction", "error", err)
+		h.log.Error(errMsgFailedStartTransaction, "error", err)
 		h.redis.Del(ctx, recoveryUsedKey)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
 		return
 	}
 	defer func() {
 		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
-			h.log.Error("Failed to rollback transaction", "error", rbErr)
+			h.log.Error(errMsgFailedRollbackTx, "error", rbErr)
 		}
 	}()
 

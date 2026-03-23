@@ -31,7 +31,7 @@ func registerPayload() map[string]interface{} {
 
 // --- Registration Tests ---
 
-func TestRegister_Success(t *testing.T) {
+func TestRegisterSuccess(t *testing.T) {
 	ts := setupTS(t)
 	w := ts.DoRequest("POST", "/api/v1/auth/register", registerPayload(), nil)
 
@@ -47,7 +47,7 @@ func TestRegister_Success(t *testing.T) {
 	assert.Equal(t, "newuser", user["username"])
 }
 
-func TestRegister_DuplicateEmail(t *testing.T) {
+func TestRegisterDuplicateEmail(t *testing.T) {
 	ts := setupTS(t)
 
 	// First registration
@@ -64,7 +64,7 @@ func TestRegister_DuplicateEmail(t *testing.T) {
 	assert.Contains(t, body["error"], "Email already in use")
 }
 
-func TestRegister_DuplicateUsername(t *testing.T) {
+func TestRegisterDuplicateUsername(t *testing.T) {
 	ts := setupTS(t)
 
 	ts.DoRequest("POST", "/api/v1/auth/register", registerPayload(), nil)
@@ -79,7 +79,7 @@ func TestRegister_DuplicateUsername(t *testing.T) {
 	assert.Contains(t, body["error"], "Username already taken")
 }
 
-func TestRegister_WeakPassword(t *testing.T) {
+func TestRegisterWeakPassword(t *testing.T) {
 	ts := setupTS(t)
 
 	payload := registerPayload()
@@ -89,7 +89,7 @@ func TestRegister_WeakPassword(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestRegister_MissingE2EEKeys(t *testing.T) {
+func TestRegisterMissingE2EEKeys(t *testing.T) {
 	ts := setupTS(t)
 
 	payload := map[string]interface{}{
@@ -103,7 +103,7 @@ func TestRegister_MissingE2EEKeys(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestRegister_NoAgeConfirmation(t *testing.T) {
+func TestRegisterNoAgeConfirmation(t *testing.T) {
 	ts := setupTS(t)
 
 	payload := registerPayload()
@@ -113,7 +113,7 @@ func TestRegister_NoAgeConfirmation(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestRegister_SetsRefreshCookie(t *testing.T) {
+func TestRegisterSetsRefreshCookie(t *testing.T) {
 	ts := setupTS(t)
 	w := ts.DoRequest("POST", "/api/v1/auth/register", registerPayload(), nil)
 
@@ -132,7 +132,7 @@ func TestRegister_SetsRefreshCookie(t *testing.T) {
 
 // --- Login Tests ---
 
-func TestLogin_Success(t *testing.T) {
+func TestLoginSuccess(t *testing.T) {
 	ts := setupTS(t)
 
 	// Register first
@@ -153,7 +153,7 @@ func TestLogin_Success(t *testing.T) {
 	assert.NotNil(t, body["e2ee_keys"])
 }
 
-func TestLogin_WrongPassword(t *testing.T) {
+func TestLoginWrongPassword(t *testing.T) {
 	ts := setupTS(t)
 
 	ts.DoRequest("POST", "/api/v1/auth/register", registerPayload(), nil)
@@ -166,7 +166,7 @@ func TestLogin_WrongPassword(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
-func TestLogin_NonexistentEmail(t *testing.T) {
+func TestLoginNonexistentEmail(t *testing.T) {
 	ts := setupTS(t)
 
 	w := ts.DoRequest("POST", "/api/v1/auth/login", map[string]interface{}{
@@ -179,7 +179,7 @@ func TestLogin_NonexistentEmail(t *testing.T) {
 
 // --- Logout Tests ---
 
-func TestLogout_Success(t *testing.T) {
+func TestLogoutSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "logoutuser")
 
@@ -188,7 +188,7 @@ func TestLogout_Success(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
-func TestLogout_BlacklistsToken(t *testing.T) {
+func TestLogoutBlacklistsToken(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "logoutuser2")
 
@@ -202,14 +202,14 @@ func TestLogout_BlacklistsToken(t *testing.T) {
 
 // --- Protected Route Tests ---
 
-func TestProtectedRoute_NoToken(t *testing.T) {
+func TestProtectedRouteNoToken(t *testing.T) {
 	ts := setupTS(t)
 
 	w := ts.DoRequest("GET", "/api/v1/users/me", nil, nil)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
-func TestProtectedRoute_InvalidToken(t *testing.T) {
+func TestProtectedRouteInvalidToken(t *testing.T) {
 	ts := setupTS(t)
 
 	headers := http.Header{}
@@ -218,7 +218,7 @@ func TestProtectedRoute_InvalidToken(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
-func TestProtectedRoute_ValidToken(t *testing.T) {
+func TestProtectedRouteValidToken(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "validuser")
 
@@ -233,7 +233,7 @@ func TestProtectedRoute_ValidToken(t *testing.T) {
 
 // --- Refresh Tests ---
 
-func TestRefresh_Success(t *testing.T) {
+func TestRefreshSuccess(t *testing.T) {
 	ts := setupTS(t)
 
 	// Register to get a refresh cookie
@@ -265,14 +265,14 @@ func TestRefresh_Success(t *testing.T) {
 	assert.Equal(t, float64(900), body["expires_in"])
 }
 
-func TestRefresh_NoCookie(t *testing.T) {
+func TestRefreshNoCookie(t *testing.T) {
 	ts := setupTS(t)
 
 	w := ts.DoRequest("POST", "/api/v1/auth/refresh", nil, nil)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
-func TestRefresh_InvalidToken(t *testing.T) {
+func TestRefreshInvalidToken(t *testing.T) {
 	ts := setupTS(t)
 
 	req := httptest.NewRequest("POST", "/api/v1/auth/refresh", nil)
@@ -286,7 +286,7 @@ func TestRefresh_InvalidToken(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, rw.Code)
 }
 
-func TestRefresh_RotatesToken(t *testing.T) {
+func TestRefreshRotatesToken(t *testing.T) {
 	ts := setupTS(t)
 
 	// Register
@@ -321,7 +321,7 @@ func TestRefresh_RotatesToken(t *testing.T) {
 
 // --- WS Ticket Tests ---
 
-func TestIssueWSTicket_Success(t *testing.T) {
+func TestIssueWSTicketSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "wsticketuser")
 
@@ -333,7 +333,7 @@ func TestIssueWSTicket_Success(t *testing.T) {
 	assert.NotEmpty(t, body["ticket"])
 }
 
-func TestIssueWSTicket_Unauthorized(t *testing.T) {
+func TestIssueWSTicketUnauthorized(t *testing.T) {
 	ts := setupTS(t)
 
 	w := ts.DoRequest("POST", "/api/v1/auth/ws-ticket", nil, nil)

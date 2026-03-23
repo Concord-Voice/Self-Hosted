@@ -28,33 +28,33 @@ func doHeaders(r *gin.Engine, headers http.Header) *httptest.ResponseRecorder {
 	return w
 }
 
-func TestValidateHeaders_NoHeaders_OK(t *testing.T) {
+func TestValidateHeadersNoHeadersOK(t *testing.T) {
 	w := doHeaders(headersRouter(), nil)
 	assert.Equal(t, 200, w.Code)
 }
 
-func TestValidateHeaders_ValidMachineId(t *testing.T) {
+func TestValidateHeadersValidMachineId(t *testing.T) {
 	h := http.Header{}
 	h.Set("X-Machine-Id", "550e8400-e29b-41d4-a716-446655440000")
 	w := doHeaders(headersRouter(), h)
 	assert.Equal(t, 200, w.Code)
 }
 
-func TestValidateHeaders_InvalidMachineId(t *testing.T) {
+func TestValidateHeadersInvalidMachineId(t *testing.T) {
 	h := http.Header{}
 	h.Set("X-Machine-Id", "not-a-uuid")
 	w := doHeaders(headersRouter(), h)
 	assert.Equal(t, 400, w.Code)
 }
 
-func TestValidateHeaders_DeviceName_Valid(t *testing.T) {
+func TestValidateHeadersDeviceNameValid(t *testing.T) {
 	h := http.Header{}
 	h.Set("X-Device-Name", "Mark's MacBook Pro")
 	w := doHeaders(headersRouter(), h)
 	assert.Equal(t, 200, w.Code)
 }
 
-func TestValidateHeaders_DeviceName_UTF8(t *testing.T) {
+func TestValidateHeadersDeviceNameUTF8(t *testing.T) {
 	// 255 Japanese characters = 765 bytes, should pass character limit
 	h := http.Header{}
 	h.Set("X-Device-Name", strings.Repeat("あ", 255))
@@ -62,21 +62,21 @@ func TestValidateHeaders_DeviceName_UTF8(t *testing.T) {
 	assert.Equal(t, 200, w.Code)
 }
 
-func TestValidateHeaders_DeviceName_TooLong(t *testing.T) {
+func TestValidateHeadersDeviceNameTooLong(t *testing.T) {
 	h := http.Header{}
 	h.Set("X-Device-Name", strings.Repeat("A", 256))
 	w := doHeaders(headersRouter(), h)
 	assert.Equal(t, 400, w.Code)
 }
 
-func TestValidateHeaders_DeviceName_InvalidUTF8(t *testing.T) {
+func TestValidateHeadersDeviceNameInvalidUTF8(t *testing.T) {
 	h := http.Header{}
 	h.Set("X-Device-Name", "bad\xff\xfebytes")
 	w := doHeaders(headersRouter(), h)
 	assert.Equal(t, 400, w.Code)
 }
 
-func TestValidateHeaders_DeviceName_ControlChars(t *testing.T) {
+func TestValidateHeadersDeviceNameControlChars(t *testing.T) {
 	h := http.Header{}
 	h.Set("X-Device-Name", "My\x00Device")
 	w := doHeaders(headersRouter(), h)

@@ -161,6 +161,50 @@ function handleEncrypt(
 
 // ─── Decrypt pipeline ─────────────────────────────────────────────────
 
+/** Attempt self-healing recovery when decrypt drops hit the threshold */
+function attemptRecovery(senderUserId: string, dropCount: number): void {
+  const state = recoveryState.get(senderUserId) || { lastAttempt: 0, inProgress: false };
+  if (state.inProgress || Date.now() - state.lastAttempt <= RECOVERY_COOLDOWN_MS) return;
+
+  state.inProgress = true;
+  state.lastAttempt = Date.now();
+  recoveryState.set(senderUserId, state);
+  log('debug', `E2EE: requesting recovery for ${senderUserId}`);
+  postToMain({ type: 'requestRecovery', senderUserId, dropCount });
+  setTimeout(() => {
+    state.inProgress = false;
+  }, RECOVERY_COOLDOWN_MS);
+}
+
+/** Handle a decryption failure: log, attempt recovery at threshold, flag persistent failures */
+function handleDecryptError(
+  senderUserId: string,
+  dropCount: number,
+  decryptErr: unknown,
+  frameSize: number
+): void {
+  if (dropCount === 1 || dropCount % 100 === 0) {
+    log('warn', `E2EE: dropping frame for ${senderUserId} (dropped: ${dropCount})`, {
+      error:
+        decryptErr instanceof Error
+          ? `${decryptErr.name}: ${decryptErr.message}`
+          : String(decryptErr),
+      frameSize,
+    });
+  }
+
+  if (dropCount === RECOVERY_THRESHOLD) {
+    attemptRecovery(senderUserId, dropCount);
+  }
+
+  if (dropCount === PERSISTENT_FAILURE_THRESHOLD) {
+    log(
+      'error',
+      `E2EE: persistent failure for ${senderUserId} — ${PERSISTENT_FAILURE_THRESHOLD} drops, rejoin may be required`
+    );
+  }
+}
+
 function handleDecrypt(
   readable: ReadableStream<RTCEncodedAudioFrame | RTCEncodedVideoFrame>,
   writable: WritableStream<RTCEncodedAudioFrame | RTCEncodedVideoFrame>,
@@ -187,46 +231,7 @@ function handleDecrypt(
         }
       } catch (decryptErr) {
         dropCount++;
-        if (dropCount === 1 || dropCount % 100 === 0) {
-          log('warn', `E2EE: dropping frame for ${senderUserId} (dropped: ${dropCount})`, {
-            error:
-              decryptErr instanceof Error
-                ? `${decryptErr.name}: ${decryptErr.message}`
-                : String(decryptErr),
-            frameSize: frame.data.byteLength,
-          });
-        }
-
-        // Self-healing: request key re-derivation from main thread
-        if (dropCount === RECOVERY_THRESHOLD) {
-          const state = recoveryState.get(senderUserId) || {
-            lastAttempt: 0,
-            inProgress: false,
-          };
-          if (!state.inProgress && Date.now() - state.lastAttempt > RECOVERY_COOLDOWN_MS) {
-            state.inProgress = true;
-            state.lastAttempt = Date.now();
-            recoveryState.set(senderUserId, state);
-            log('debug', `E2EE: requesting recovery for ${senderUserId}`);
-            postToMain({
-              type: 'requestRecovery',
-              senderUserId,
-              dropCount,
-            });
-            // Main thread will send addDecryptKey when ready
-            // Mark recovery done after cooldown (main thread response is async)
-            setTimeout(() => {
-              state.inProgress = false;
-            }, RECOVERY_COOLDOWN_MS);
-          }
-        }
-
-        if (dropCount === PERSISTENT_FAILURE_THRESHOLD) {
-          log(
-            'error',
-            `E2EE: persistent failure for ${senderUserId} — ${PERSISTENT_FAILURE_THRESHOLD} drops, rejoin may be required`
-          );
-        }
+        handleDecryptError(senderUserId, dropCount, decryptErr, frame.data.byteLength);
       }
     },
   });

@@ -12,7 +12,7 @@ import { Rate, Trend, Counter } from 'k6/metrics';
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
 const WS_URL = __ENV.WS_URL || 'ws://localhost:8080/ws';
 const TEST_EMAIL = __ENV.TEST_EMAIL || 'benchmark@example.com';
-const TEST_PASSWORD = __ENV.TEST_PASSWORD || 'BenchmarkPass123!';
+const TEST_CREDENTIAL = __ENV.TEST_CREDENTIAL || 'BenchmarkPass123!';
 
 const wsConnectLatency = new Trend('ws_connect_latency');
 const wsMessageLatency = new Trend('ws_message_latency');
@@ -53,7 +53,7 @@ export function wsConnection() {
   // Login to get token
   const loginRes = http.post(`${BASE_URL}/api/v1/auth/login`, JSON.stringify({
     email: TEST_EMAIL,
-    password: TEST_PASSWORD,
+    password: TEST_CREDENTIAL,
   }), { headers: { 'Content-Type': 'application/json' } });
 
   if (loginRes.status !== 200) {

@@ -91,7 +91,7 @@ func (ts *TestServer) CreateTestUser(t *testing.T, username string) TestUser {
 	_, err := ts.DB.Exec(
 		`INSERT INTO users (id, email, username, password_hash, age_verified, email_verified, e2ee_preference)
 		 VALUES ($1, $2, $3, $4, true, true, false)`,
-		userID, email, normalizedUsername, TestPasswordHash,
+		userID, email, normalizedUsername, TestAuthHash,
 	)
 	if err != nil {
 		t.Fatalf("testhelpers: failed to create test user: %v", err)
@@ -130,7 +130,7 @@ func (ts *TestServer) CreateTestUser(t *testing.T, username string) TestUser {
 		ID:          userID,
 		Email:       email,
 		Username:    normalizedUsername,
-		Password:    TestPassword,
+		Password:    TestAuthPlaintext,
 		AccessToken: accessToken,
 	}
 }

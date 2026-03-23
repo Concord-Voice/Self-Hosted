@@ -6,7 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestPermission_Has_Basic(t *testing.T) {
+func TestPermissionHasBasic(t *testing.T) {
 	perms := PermViewTextChannels | PermSendMessages
 
 	assert.True(t, perms.Has(PermViewTextChannels))
@@ -15,7 +15,7 @@ func TestPermission_Has_Basic(t *testing.T) {
 	assert.False(t, perms.Has(PermKick))
 }
 
-func TestPermission_Has_AdministratorBypass(t *testing.T) {
+func TestPermissionHasAdministratorBypass(t *testing.T) {
 	perms := PermAdministrator // Only admin bit set
 
 	// Administrator should bypass all permission checks
@@ -27,7 +27,7 @@ func TestPermission_Has_AdministratorBypass(t *testing.T) {
 	assert.True(t, perms.Has(PermManageCryptoRotation))
 }
 
-func TestPermission_Add(t *testing.T) {
+func TestPermissionAdd(t *testing.T) {
 	perms := PermViewTextChannels
 	perms = perms.Add(PermSendMessages)
 
@@ -36,7 +36,7 @@ func TestPermission_Add(t *testing.T) {
 	assert.False(t, perms.Has(PermManageChannels))
 }
 
-func TestPermission_Remove(t *testing.T) {
+func TestPermissionRemove(t *testing.T) {
 	perms := PermViewTextChannels | PermSendMessages | PermManageChannels
 	perms = perms.Remove(PermManageChannels)
 
@@ -45,14 +45,14 @@ func TestPermission_Remove(t *testing.T) {
 	assert.False(t, perms.Has(PermManageChannels))
 }
 
-func TestPermission_Add_Idempotent(t *testing.T) {
+func TestPermissionAddIdempotent(t *testing.T) {
 	perms := PermViewTextChannels
 	perms = perms.Add(PermViewTextChannels) // Adding same perm again
 
 	assert.Equal(t, PermViewTextChannels, perms)
 }
 
-func TestBasePermissions_ContainsExpected(t *testing.T) {
+func TestBasePermissionsContainsExpected(t *testing.T) {
 	// BasePermissions should include all default member permissions
 	assert.True(t, BasePermissions.Has(PermViewTextChannels))
 	assert.True(t, BasePermissions.Has(PermViewVoiceChannels))
@@ -79,7 +79,7 @@ func TestBasePermissions_ContainsExpected(t *testing.T) {
 	assert.False(t, BasePermissions.Has(PermManageDevResources))
 }
 
-func TestModeratorPermissions_ExtendsBase(t *testing.T) {
+func TestModeratorPermissionsExtendsBase(t *testing.T) {
 	// Moderator should have all base permissions
 	assert.True(t, ModeratorPermissions.Has(PermViewTextChannels))
 	assert.True(t, ModeratorPermissions.Has(PermViewVoiceChannels))
@@ -91,7 +91,7 @@ func TestModeratorPermissions_ExtendsBase(t *testing.T) {
 	assert.True(t, ModeratorPermissions.Has(PermMuteMembers))
 }
 
-func TestAdminPermissions_ExtendsModerator(t *testing.T) {
+func TestAdminPermissionsExtendsModerator(t *testing.T) {
 	assert.True(t, AdminPermissions.Has(PermManageChannels))
 	assert.True(t, AdminPermissions.Has(PermManageRoles))
 	assert.True(t, AdminPermissions.Has(PermBan))
@@ -99,7 +99,7 @@ func TestAdminPermissions_ExtendsModerator(t *testing.T) {
 	assert.True(t, AdminPermissions.Has(PermManageDevResources))
 }
 
-func TestOwnerPermissions_ExtendsAdmin(t *testing.T) {
+func TestOwnerPermissionsExtendsAdmin(t *testing.T) {
 	assert.True(t, OwnerPermissions.Has(PermManageServer))
 	assert.True(t, OwnerPermissions.Has(PermManageCryptoRotation))
 
@@ -108,7 +108,7 @@ func TestOwnerPermissions_ExtendsAdmin(t *testing.T) {
 	assert.Equal(t, Permission(0), OwnerPermissions&PermAdministrator, "OwnerPermissions must not contain PermAdministrator bit")
 }
 
-func TestPermissionNames_AllMapped(t *testing.T) {
+func TestPermissionNamesAllMapped(t *testing.T) {
 	// Every defined permission constant should have a name entry
 	allPerms := []Permission{
 		PermManageServer, PermManageRoles, PermManageRolesAssign, PermManageChannels,
@@ -126,7 +126,7 @@ func TestPermissionNames_AllMapped(t *testing.T) {
 	}
 }
 
-func TestPermission_NoBitOverlap(t *testing.T) {
+func TestPermissionNoBitOverlap(t *testing.T) {
 	// Verify no two permissions share the same bit
 	allPerms := []Permission{
 		PermManageServer, PermManageRoles, PermManageRolesAssign, PermManageChannels,

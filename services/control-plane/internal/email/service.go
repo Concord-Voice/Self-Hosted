@@ -23,6 +23,14 @@ var verificationTmpl = template.Must(template.ParseFS(templateFS, "templates/ver
 var recoveryTmpl = template.Must(template.ParseFS(templateFS, "templates/recovery.html"))
 var ownershipTransferTmpl = template.Must(template.ParseFS(templateFS, "templates/ownership_transfer.html"))
 
+const (
+	errInvalidFromAddr = "invalid from address: %w"
+	errInvalidToAddr   = "invalid to address: %w"
+	headerFrom         = "From: "
+	mimeVersion        = "MIME-Version: 1.0\r\n"
+	contentTypeHTML    = "Content-Type: text/html; charset=UTF-8\r\n"
+)
+
 // Service sends emails via SMTP. When SMTPHost is empty (dev mode), codes are
 // logged to stdout instead of sent.
 type Service struct {
@@ -65,18 +73,18 @@ func (s *Service) SendVerificationCode(to, code string) error {
 
 	fromAddr, err := mail.ParseAddress(s.from)
 	if err != nil {
-		return fmt.Errorf("invalid from address: %w", err)
+		return fmt.Errorf(errInvalidFromAddr, err)
 	}
 	toAddr, err := mail.ParseAddress(to)
 	if err != nil {
-		return fmt.Errorf("invalid to address: %w", err)
+		return fmt.Errorf(errInvalidToAddr, err)
 	}
 
-	msg := "From: " + fromAddr.String() + "\r\n" +
+	msg := headerFrom + fromAddr.String() + "\r\n" +
 		"To: " + toAddr.String() + "\r\n" +
 		"Subject: Your Concord verification code\r\n" +
-		"MIME-Version: 1.0\r\n" +
-		"Content-Type: text/html; charset=UTF-8\r\n" +
+		mimeVersion +
+		contentTypeHTML +
 		"\r\n" +
 		body.String()
 
@@ -100,18 +108,18 @@ func (s *Service) SendRecoveryCode(to, code string) error {
 
 	fromAddr, err := mail.ParseAddress(s.from)
 	if err != nil {
-		return fmt.Errorf("invalid from address: %w", err)
+		return fmt.Errorf(errInvalidFromAddr, err)
 	}
 	toAddr, err := mail.ParseAddress(to)
 	if err != nil {
-		return fmt.Errorf("invalid to address: %w", err)
+		return fmt.Errorf(errInvalidToAddr, err)
 	}
 
-	msg := "From: " + fromAddr.String() + "\r\n" +
+	msg := headerFrom + fromAddr.String() + "\r\n" +
 		"To: " + toAddr.String() + "\r\n" +
 		"Subject: Your Concord account recovery code\r\n" +
-		"MIME-Version: 1.0\r\n" +
-		"Content-Type: text/html; charset=UTF-8\r\n" +
+		mimeVersion +
+		contentTypeHTML +
 		"\r\n" +
 		body.String()
 
@@ -191,21 +199,21 @@ func (s *Service) SendOwnershipTransferNotification(to, serverName, newOwnerUser
 
 	fromAddr, err := mail.ParseAddress(s.from)
 	if err != nil {
-		return fmt.Errorf("invalid from address: %w", err)
+		return fmt.Errorf(errInvalidFromAddr, err)
 	}
 	toAddr, err := mail.ParseAddress(to)
 	if err != nil {
-		return fmt.Errorf("invalid to address: %w", err)
+		return fmt.Errorf(errInvalidToAddr, err)
 	}
 
 	// Sanitize server name to prevent SMTP header injection
 	safeServerName := strings.NewReplacer("\r", "", "\n", "").Replace(serverName)
 
-	msg := "From: " + fromAddr.String() + "\r\n" +
+	msg := headerFrom + fromAddr.String() + "\r\n" +
 		"To: " + toAddr.String() + "\r\n" +
 		"Subject: Ownership transfer initiated for " + safeServerName + "\r\n" +
-		"MIME-Version: 1.0\r\n" +
-		"Content-Type: text/html; charset=UTF-8\r\n" +
+		mimeVersion +
+		contentTypeHTML +
 		"\r\n" +
 		body.String()
 

@@ -4,7 +4,7 @@
 //
 // Prerequisites:
 //   - Control-plane running at BASE_URL (default: http://localhost:8080)
-//   - At least one registered user (update TEST_EMAIL/TEST_PASSWORD below)
+//   - At least one registered user (update TEST_EMAIL/TEST_CREDENTIAL below)
 
 import http from 'k6/http';
 import ws from 'k6/ws';
@@ -14,7 +14,7 @@ import { Rate, Trend } from 'k6/metrics';
 // --- Configuration ---
 const BASE_URL = __ENV.BASE_URL || 'http://localhost:8080';
 const TEST_EMAIL = __ENV.TEST_EMAIL || 'benchmark@example.com';
-const TEST_PASSWORD = __ENV.TEST_PASSWORD || 'BenchmarkPass123!';
+const TEST_CREDENTIAL = __ENV.TEST_CREDENTIAL || 'BenchmarkPass123!';
 
 // --- Custom Metrics ---
 const errorRate = new Rate('errors');
@@ -61,7 +61,7 @@ export const options = {
 function login() {
   const res = http.post(`${BASE_URL}/api/v1/auth/login`, JSON.stringify({
     email: TEST_EMAIL,
-    password: TEST_PASSWORD,
+    password: TEST_CREDENTIAL,
   }), { headers: { 'Content-Type': 'application/json' } });
 
   loginLatency.add(res.timings.duration);

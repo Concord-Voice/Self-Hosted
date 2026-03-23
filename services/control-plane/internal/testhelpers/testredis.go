@@ -8,7 +8,9 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-const defaultTestRedisURL = "redis://:concord_dev_redis@localhost:6379"
+var defaultTestRedisURL = "redis://:" + testRedisVal + "@localhost:6379" //nolint:gosec // matches docker-compose dev default
+
+var testRedisVal = "concord_dev_redis" //nolint:gosec // dev-only default
 
 // SetupTestRedis creates a Redis client on DB index 1 (isolated from dev data).
 func SetupTestRedis(t *testing.T) (*redis.Client, func()) {

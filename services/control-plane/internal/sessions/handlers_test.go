@@ -52,7 +52,7 @@ func registerAndGetTokens(t *testing.T, ts *testhelpers.TestServer, email, usern
 
 // --- List Sessions ---
 
-func TestListSessions_Success(t *testing.T) {
+func TestListSessionsSuccess(t *testing.T) {
 	ts := setupTS(t)
 	accessToken, refreshCookie := registerAndGetTokens(t, ts, "sessions1@test.concord.chat", "sessions1")
 
@@ -74,7 +74,7 @@ func TestListSessions_Success(t *testing.T) {
 	assert.NotNil(t, body["total"])
 }
 
-func TestListSessions_Unauthorized(t *testing.T) {
+func TestListSessionsUnauthorized(t *testing.T) {
 	ts := setupTS(t)
 
 	w := ts.DoRequest("GET", "/api/v1/sessions", nil, nil)
@@ -83,7 +83,7 @@ func TestListSessions_Unauthorized(t *testing.T) {
 
 // --- Revoke Session ---
 
-func TestRevokeSession_Success(t *testing.T) {
+func TestRevokeSessionSuccess(t *testing.T) {
 	ts := setupTS(t)
 	accessToken, refreshCookie := registerAndGetTokens(t, ts, "revoke1@test.concord.chat", "revoke1")
 
@@ -114,7 +114,7 @@ func TestRevokeSession_Success(t *testing.T) {
 	assert.Equal(t, "Session revoked successfully", body["message"])
 }
 
-func TestRevokeSession_NotFound(t *testing.T) {
+func TestRevokeSessionNotFound(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "revokenotfound")
 
@@ -124,7 +124,7 @@ func TestRevokeSession_NotFound(t *testing.T) {
 
 // --- Revoke All Sessions ---
 
-func TestRevokeAllSessions_Success(t *testing.T) {
+func TestRevokeAllSessionsSuccess(t *testing.T) {
 	ts := setupTS(t)
 	accessToken, _ := registerAndGetTokens(t, ts, "revokeall@test.concord.chat", "revokeall")
 
@@ -140,7 +140,7 @@ func TestRevokeAllSessions_Success(t *testing.T) {
 	assert.Equal(t, true, body["include_current"])
 }
 
-func TestRevokeAllSessions_ExceptCurrent(t *testing.T) {
+func TestRevokeAllSessionsExceptCurrent(t *testing.T) {
 	ts := setupTS(t)
 	accessToken, refreshCookie := registerAndGetTokens(t, ts, "revokeother@test.concord.chat", "revokeother")
 

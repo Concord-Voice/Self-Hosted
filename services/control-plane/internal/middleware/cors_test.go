@@ -9,6 +9,11 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+const (
+	testOrigin              = "https://concordvoice.chat"
+	headerAccessControlAllowOrigin = "Access-Control-Allow-Origin"
+)
+
 func init() {
 	gin.SetMode(gin.TestMode)
 }
@@ -30,26 +35,26 @@ func doCORS(r *gin.Engine, method, origin string) *httptest.ResponseRecorder {
 	return w
 }
 
-func TestCORS_AllowedOrigin_SetsHeaders(t *testing.T) {
-	r := corsRouter([]string{"https://concordvoice.chat"})
-	w := doCORS(r, "GET", "https://concordvoice.chat")
+func TestCORSAllowedOriginSetsHeaders(t *testing.T) {
+	r := corsRouter([]string{testOrigin})
+	w := doCORS(r, "GET", testOrigin)
 
 	assert.Equal(t, 200, w.Code)
-	assert.Equal(t, "https://concordvoice.chat", w.Header().Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, testOrigin, w.Header().Get(headerAccessControlAllowOrigin))
 	assert.Equal(t, "true", w.Header().Get("Access-Control-Allow-Credentials"))
 	assert.Contains(t, w.Header().Get("Access-Control-Allow-Headers"), "X-Machine-Id")
 }
 
-func TestCORS_EmptyOrigin_NoCORSHeaders(t *testing.T) {
+func TestCORSEmptyOriginNoCORSHeaders(t *testing.T) {
 	r := corsRouter([]string{"*"})
 	w := doCORS(r, "GET", "")
 
 	assert.Equal(t, 200, w.Code)
-	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
+	assert.Empty(t, w.Header().Get(headerAccessControlAllowOrigin))
 	assert.Empty(t, w.Header().Get("Access-Control-Allow-Credentials"))
 }
 
-func TestCORS_NullOrigin_NoCORSHeaders(t *testing.T) {
+func TestCORSNullOriginNoCORSHeaders(t *testing.T) {
 	r := corsRouter([]string{"*"})
 	req := httptest.NewRequest("GET", "/test", nil)
 	req.Header.Set("Origin", "null")
@@ -57,29 +62,29 @@ func TestCORS_NullOrigin_NoCORSHeaders(t *testing.T) {
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, 200, w.Code)
-	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
+	assert.Empty(t, w.Header().Get(headerAccessControlAllowOrigin))
 }
 
-func TestCORS_DisallowedOrigin_NoCORSHeaders(t *testing.T) {
-	r := corsRouter([]string{"https://concordvoice.chat"})
+func TestCORSDisallowedOriginNoCORSHeaders(t *testing.T) {
+	r := corsRouter([]string{testOrigin})
 	w := doCORS(r, "GET", "https://evil.com")
 
 	assert.Equal(t, 200, w.Code)
-	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
+	assert.Empty(t, w.Header().Get(headerAccessControlAllowOrigin))
 }
 
-func TestCORS_Preflight_AllowedOrigin(t *testing.T) {
-	r := corsRouter([]string{"https://concordvoice.chat"})
-	w := doCORS(r, "OPTIONS", "https://concordvoice.chat")
+func TestCORSPreflightAllowedOrigin(t *testing.T) {
+	r := corsRouter([]string{testOrigin})
+	w := doCORS(r, "OPTIONS", testOrigin)
 
 	assert.Equal(t, 204, w.Code)
-	assert.Equal(t, "https://concordvoice.chat", w.Header().Get("Access-Control-Allow-Origin"))
+	assert.Equal(t, testOrigin, w.Header().Get(headerAccessControlAllowOrigin))
 }
 
-func TestCORS_Preflight_EmptyOrigin(t *testing.T) {
+func TestCORSPreflightEmptyOrigin(t *testing.T) {
 	r := corsRouter([]string{"*"})
 	w := doCORS(r, "OPTIONS", "")
 
 	assert.Equal(t, 204, w.Code)
-	assert.Empty(t, w.Header().Get("Access-Control-Allow-Origin"))
+	assert.Empty(t, w.Header().Get(headerAccessControlAllowOrigin))
 }

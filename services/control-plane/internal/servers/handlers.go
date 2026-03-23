@@ -18,6 +18,13 @@ import (
 	"github.com/lib/pq"
 )
 
+const (
+	dataImagePrefix      = "data:image/"
+	errMsgInvalidServerID = "Invalid server ID"
+	errMsgServerNotFound  = "Server not found"
+	errMsgFailedCreate    = "Failed to create server"
+)
+
 // Handler handles server-related requests
 type Handler struct {
 	db       *sql.DB
@@ -135,7 +142,7 @@ func (h *Handler) CreateServer(c *gin.Context) {
 	tx, err := h.db.Begin()
 	if err != nil {
 		h.log.Error("Failed to start transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreate})
 		return
 	}
 	defer func() {
@@ -148,7 +155,7 @@ func (h *Handler) CreateServer(c *gin.Context) {
 	// CreateServer: server_id is unknown at this point, so only accept legacy data URLs.
 	// Use UpdateServer with the media upload endpoint after creation.
 	if req.IconURL != nil && *req.IconURL != "" {
-		if !strings.HasPrefix(*req.IconURL, "data:image/") {
+		if !strings.HasPrefix(*req.IconURL, dataImagePrefix) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon must be a valid image data URL (use UpdateServer for uploaded media URLs)"})
 			return
 		}
@@ -160,7 +167,7 @@ func (h *Handler) CreateServer(c *gin.Context) {
 
 	// Validate banner_url if provided (same restriction as icon_url for CreateServer)
 	if req.BannerURL != nil && *req.BannerURL != "" {
-		if !strings.HasPrefix(*req.BannerURL, "data:image/") {
+		if !strings.HasPrefix(*req.BannerURL, dataImagePrefix) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Banner must be a valid image data URL (use UpdateServer for uploaded media URLs)"})
 			return
 		}
@@ -199,7 +206,7 @@ func (h *Handler) CreateServer(c *gin.Context) {
 	)
 	if err != nil {
 		h.log.Error("Failed to create server", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreate})
 		return
 	}
 
@@ -212,7 +219,7 @@ func (h *Handler) CreateServer(c *gin.Context) {
 	_, err = tx.Exec(memberQuery, serverID, userID)
 	if err != nil {
 		h.log.Error("Failed to add owner as member", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreate})
 		return
 	}
 
@@ -226,7 +233,7 @@ func (h *Handler) CreateServer(c *gin.Context) {
 	_, err = tx.Exec(allRoleQuery, allRoleID, serverID, int64(rbac.BasePermissions))
 	if err != nil {
 		h.log.Error("Failed to create @all role", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreate})
 		return
 	}
 
@@ -238,7 +245,7 @@ func (h *Handler) CreateServer(c *gin.Context) {
 	_, err = tx.Exec(assignRoleQuery, serverID, userID, allRoleID, userID)
 	if err != nil {
 		h.log.Error("Failed to assign @all role to owner", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreate})
 		return
 	}
 
@@ -247,7 +254,7 @@ func (h *Handler) CreateServer(c *gin.Context) {
 	// generation and wrapping when the server's e2ee_default is enabled.
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreate})
 		return
 	}
 
@@ -266,7 +273,7 @@ func (h *Handler) GetServer(c *gin.Context) {
 
 	// Validate server ID
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 
@@ -307,7 +314,7 @@ func (h *Handler) GetServer(c *gin.Context) {
 		&server.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgServerNotFound})
 		return
 	} else if err != nil {
 		h.log.Error("Failed to fetch server", "error", err)
@@ -328,7 +335,7 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 
 	// Validate server ID
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 
@@ -380,11 +387,11 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 	// Validate icon_url if a new value was provided
 	if iconURL != nil && *iconURL != "" {
 		expectedIconURL := fmt.Sprintf("/api/v1/media/server-icons/%s", serverID)
-		if *iconURL != expectedIconURL && !strings.HasPrefix(*iconURL, "data:image/") {
+		if *iconURL != expectedIconURL && !strings.HasPrefix(*iconURL, dataImagePrefix) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon must be an uploaded icon URL for this server or an image data URL"})
 			return
 		}
-		if strings.HasPrefix(*iconURL, "data:image/") && len(*iconURL) > 1500000 {
+		if strings.HasPrefix(*iconURL, dataImagePrefix) && len(*iconURL) > 1500000 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon image too large (max ~1MB)"})
 			return
 		}
@@ -410,11 +417,11 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 	// Validate banner_url if a new value was provided
 	if bannerURL != nil && *bannerURL != "" {
 		expectedBannerURL := fmt.Sprintf("/api/v1/media/server-banners/%s", serverID)
-		if *bannerURL != expectedBannerURL && !strings.HasPrefix(*bannerURL, "data:image/") {
+		if *bannerURL != expectedBannerURL && !strings.HasPrefix(*bannerURL, dataImagePrefix) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Banner must be an uploaded banner URL for this server or an image data URL"})
 			return
 		}
-		if strings.HasPrefix(*bannerURL, "data:image/") && len(*bannerURL) > 3000000 {
+		if strings.HasPrefix(*bannerURL, dataImagePrefix) && len(*bannerURL) > 3000000 {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "Banner image too large (max ~2MB)"})
 			return
 		}
@@ -462,7 +469,7 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 	)
 
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgServerNotFound})
 		return
 	} else if err != nil {
 		h.log.Error("Failed to update server", "error", err)
@@ -504,7 +511,7 @@ func (h *Handler) DeleteServer(c *gin.Context) {
 
 	// Validate server ID
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 
@@ -516,7 +523,7 @@ func (h *Handler) DeleteServer(c *gin.Context) {
 
 	err := h.db.QueryRow(ownerQuery, serverID).Scan(&ownerID)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgServerNotFound})
 		return
 	} else if err != nil {
 		h.log.Error("Failed to check ownership", "error", err)

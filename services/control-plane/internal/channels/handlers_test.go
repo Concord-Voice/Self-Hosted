@@ -24,7 +24,7 @@ func setupWithChannel(t *testing.T) (*testhelpers.TestServer, testhelpers.TestUs
 
 // --- List Channels ---
 
-func TestListChannels_Success(t *testing.T) {
+func TestListChannelsSuccess(t *testing.T) {
 	ts, user, serverID, _ := setupWithChannel(t)
 
 	w := ts.DoRequest("GET", "/api/v1/servers/"+serverID+"/channels", nil, testhelpers.AuthHeaders(user.AccessToken))
@@ -36,7 +36,7 @@ func TestListChannels_Success(t *testing.T) {
 	assert.GreaterOrEqual(t, len(channels), 1)
 }
 
-func TestListChannels_NotMember(t *testing.T) {
+func TestListChannelsNotMember(t *testing.T) {
 	ts, _, serverID, _ := setupWithChannel(t)
 	outsider := ts.CreateTestUser(t, "chanoutsider")
 
@@ -46,7 +46,7 @@ func TestListChannels_NotMember(t *testing.T) {
 
 // --- Create Channel ---
 
-func TestCreateChannel_Success(t *testing.T) {
+func TestCreateChannelSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "createchan")
 	serverID := ts.CreateTestServer(t, user.ID, "Chan Create Server")
@@ -64,7 +64,7 @@ func TestCreateChannel_Success(t *testing.T) {
 	assert.Equal(t, "new-channel", channel["name"])
 }
 
-func TestCreateChannel_NotAdmin(t *testing.T) {
+func TestCreateChannelNotAdmin(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "chanowner2")
 	member := ts.CreateTestUser(t, "chanmember2")
@@ -80,7 +80,7 @@ func TestCreateChannel_NotAdmin(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
-func TestCreateChannel_Encrypted(t *testing.T) {
+func TestCreateChannelEncrypted(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "encrchan")
 	serverID := ts.CreateTestServer(t, user.ID, "Encrypted Server")
@@ -104,7 +104,7 @@ func TestCreateChannel_Encrypted(t *testing.T) {
 
 // --- Get Channel ---
 
-func TestGetChannel_Success(t *testing.T) {
+func TestGetChannelSuccess(t *testing.T) {
 	ts, user, _, channelID := setupWithChannel(t)
 
 	w := ts.DoRequest("GET", "/api/v1/channels/"+channelID, nil, testhelpers.AuthHeaders(user.AccessToken))
@@ -113,7 +113,7 @@ func TestGetChannel_Success(t *testing.T) {
 
 // --- Update Channel ---
 
-func TestUpdateChannel_Success(t *testing.T) {
+func TestUpdateChannelSuccess(t *testing.T) {
 	ts, user, _, channelID := setupWithChannel(t)
 
 	w := ts.DoRequest("PATCH", "/api/v1/channels/"+channelID, map[string]interface{}{
@@ -130,14 +130,14 @@ func TestUpdateChannel_Success(t *testing.T) {
 
 // --- Delete Channel ---
 
-func TestDeleteChannel_AsOwner(t *testing.T) {
+func TestDeleteChannelAsOwner(t *testing.T) {
 	ts, user, _, channelID := setupWithChannel(t)
 
 	w := ts.DoRequest("DELETE", "/api/v1/channels/"+channelID, nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
-func TestDeleteChannel_NotAdmin(t *testing.T) {
+func TestDeleteChannelNotAdmin(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "dchowner")
 	member := ts.CreateTestUser(t, "dchmember")
@@ -151,14 +151,14 @@ func TestDeleteChannel_NotAdmin(t *testing.T) {
 
 // --- Mark Read ---
 
-func TestMarkChannelRead_Success(t *testing.T) {
+func TestMarkChannelReadSuccess(t *testing.T) {
 	ts, user, _, channelID := setupWithChannel(t)
 
 	w := ts.DoRequest("POST", "/api/v1/channels/"+channelID+"/read", nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
-func TestMarkServerRead_Success(t *testing.T) {
+func TestMarkServerReadSuccess(t *testing.T) {
 	ts, user, serverID, _ := setupWithChannel(t)
 
 	w := ts.DoRequest("POST", "/api/v1/servers/"+serverID+"/read", nil, testhelpers.AuthHeaders(user.AccessToken))
@@ -167,14 +167,14 @@ func TestMarkServerRead_Success(t *testing.T) {
 
 // --- Unread Counts ---
 
-func TestGetUnreadCounts_Success(t *testing.T) {
+func TestGetUnreadCountsSuccess(t *testing.T) {
 	ts, user, serverID, _ := setupWithChannel(t)
 
 	w := ts.DoRequest("GET", "/api/v1/servers/"+serverID+"/unread", nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
-func TestGetServerUnreadStatus_Success(t *testing.T) {
+func TestGetServerUnreadStatusSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "unreaduser")
 
@@ -210,7 +210,7 @@ func setupEncryptedChannel(t *testing.T) (*testhelpers.TestServer, testhelpers.T
 	return ts, user, serverID, channelID
 }
 
-func TestGetChannelKeys_Success(t *testing.T) {
+func TestGetChannelKeysSuccess(t *testing.T) {
 	ts, user, _, channelID := setupEncryptedChannel(t)
 
 	w := ts.DoRequest("GET", "/api/v1/channels/"+channelID+"/keys", nil, testhelpers.AuthHeaders(user.AccessToken))
@@ -221,14 +221,14 @@ func TestGetChannelKeys_Success(t *testing.T) {
 	assert.NotNil(t, body["key"])
 }
 
-func TestGetChannelKeys_NotEncrypted(t *testing.T) {
+func TestGetChannelKeysNotEncrypted(t *testing.T) {
 	ts, user, _, channelID := setupWithChannel(t) // plaintext channel
 
 	w := ts.DoRequest("GET", "/api/v1/channels/"+channelID+"/keys", nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestGetChannelKeys_NotMember(t *testing.T) {
+func TestGetChannelKeysNotMember(t *testing.T) {
 	ts, _, _, channelID := setupEncryptedChannel(t)
 	outsider := ts.CreateTestUser(t, "keyoutsider")
 
@@ -236,7 +236,7 @@ func TestGetChannelKeys_NotMember(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
-func TestGetChannelKeys_InvalidChannelID(t *testing.T) {
+func TestGetChannelKeysInvalidChannelID(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "badchid")
 
@@ -244,7 +244,7 @@ func TestGetChannelKeys_InvalidChannelID(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestDistributeChannelKeys_Success(t *testing.T) {
+func TestDistributeChannelKeysSuccess(t *testing.T) {
 	ts, owner, serverID, channelID := setupEncryptedChannel(t)
 
 	// Add a new member to the server
@@ -265,7 +265,7 @@ func TestDistributeChannelKeys_Success(t *testing.T) {
 	assert.Equal(t, float64(0), body["duplicates"])
 }
 
-func TestDistributeChannelKeys_Duplicate(t *testing.T) {
+func TestDistributeChannelKeysDuplicate(t *testing.T) {
 	ts, owner, serverID, channelID := setupEncryptedChannel(t)
 
 	// Add a new member
@@ -293,7 +293,7 @@ func TestDistributeChannelKeys_Duplicate(t *testing.T) {
 	assert.Equal(t, float64(1), body["duplicates"])
 }
 
-func TestDistributeChannelKeys_NotMember(t *testing.T) {
+func TestDistributeChannelKeysNotMember(t *testing.T) {
 	ts, _, _, channelID := setupEncryptedChannel(t)
 	outsider := ts.CreateTestUser(t, "distoutsider")
 
@@ -308,7 +308,7 @@ func TestDistributeChannelKeys_NotMember(t *testing.T) {
 
 // --- Pending Key Requests ---
 
-func TestGetPendingKeyRequests_Empty(t *testing.T) {
+func TestGetPendingKeyRequestsEmpty(t *testing.T) {
 	ts, user, _, _ := setupEncryptedChannel(t)
 
 	w := ts.DoRequest("GET", "/api/v1/e2ee/pending-keys", nil, testhelpers.AuthHeaders(user.AccessToken))

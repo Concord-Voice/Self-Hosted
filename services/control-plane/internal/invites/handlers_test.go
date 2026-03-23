@@ -31,7 +31,7 @@ func createInvite(t *testing.T, ts *testhelpers.TestServer, serverID, token stri
 
 // --- Create Invite ---
 
-func TestCreateInvite_Success(t *testing.T) {
+func TestCreateInviteSuccess(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "invowner")
 	serverID := ts.CreateTestServer(t, owner.ID, "Invite Server")
@@ -48,7 +48,7 @@ func TestCreateInvite_Success(t *testing.T) {
 	assert.Equal(t, float64(5), invite["max_uses"])
 }
 
-func TestCreateInvite_NotAdmin(t *testing.T) {
+func TestCreateInviteNotAdmin(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "invown2")
 	member := ts.CreateTestUser(t, "invmem")
@@ -61,7 +61,7 @@ func TestCreateInvite_NotAdmin(t *testing.T) {
 
 // --- List Invites ---
 
-func TestListInvites_Success(t *testing.T) {
+func TestListInvitesSuccess(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "listinvown")
 	serverID := ts.CreateTestServer(t, owner.ID, "List Invite Server")
@@ -78,7 +78,7 @@ func TestListInvites_Success(t *testing.T) {
 
 // --- Revoke Invite ---
 
-func TestRevokeInvite_Success(t *testing.T) {
+func TestRevokeInviteSuccess(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "revokeown")
 	serverID := ts.CreateTestServer(t, owner.ID, "Revoke Server")
@@ -98,7 +98,7 @@ func TestRevokeInvite_Success(t *testing.T) {
 
 // --- Join Server ---
 
-func TestJoinServer_Success(t *testing.T) {
+func TestJoinServerSuccess(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "joinown")
 	joiner := ts.CreateTestUser(t, "joiner")
@@ -115,7 +115,7 @@ func TestJoinServer_Success(t *testing.T) {
 	assert.NotNil(t, body["server"])
 }
 
-func TestJoinServer_AlreadyMember(t *testing.T) {
+func TestJoinServerAlreadyMember(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "joinown2")
 	serverID := ts.CreateTestServer(t, owner.ID, "Already In Server")
@@ -128,7 +128,7 @@ func TestJoinServer_AlreadyMember(t *testing.T) {
 	assert.Equal(t, http.StatusConflict, w.Code)
 }
 
-func TestJoinServer_InvalidCode(t *testing.T) {
+func TestJoinServerInvalidCode(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "badinvite")
 
@@ -141,7 +141,7 @@ func TestJoinServer_InvalidCode(t *testing.T) {
 
 // --- Get Invite Info ---
 
-func TestGetInviteInfo_Success(t *testing.T) {
+func TestGetInviteInfoSuccess(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "infoown")
 	serverID := ts.CreateTestServer(t, owner.ID, "Info Server")
@@ -156,7 +156,7 @@ func TestGetInviteInfo_Success(t *testing.T) {
 	assert.Equal(t, true, body["valid"])
 }
 
-func TestGetInviteInfo_InvalidCode(t *testing.T) {
+func TestGetInviteInfoInvalidCode(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "infobad")
 

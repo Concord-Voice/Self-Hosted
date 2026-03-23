@@ -27,6 +27,13 @@ import (
 const (
 	transferPendingDuration = 24 * time.Hour
 	reversalWindowDuration  = 24 * time.Hour
+
+	errMsgInvalidServerID      = "Invalid server ID"
+	errMsgServerNotFound       = "Server not found"
+	errMsgFailedQueryOwner     = "Failed to query server owner"
+	errMsgFailedVerifyOwnership = "Failed to verify ownership"
+	errMsgFailedVerifyPassword = "Failed to verify password"
+	errMsgFailedReverseTransfer = "Failed to reverse transfer"
 )
 
 // Handler handles ownership transfer requests.
@@ -78,7 +85,7 @@ func (h *Handler) InitiateTransfer(c *gin.Context) {
 	serverID := c.Param("id")
 
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 
@@ -97,12 +104,12 @@ func (h *Handler) InitiateTransfer(c *gin.Context) {
 	var ownerID string
 	err := h.db.QueryRowContext(c, `SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgServerNotFound})
 		return
 	}
 	if err != nil {
-		h.log.Error("Failed to query server owner", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify ownership"})
+		h.log.Error(errMsgFailedQueryOwner, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyOwnership})
 		return
 	}
 	if ownerID != userID {
@@ -220,7 +227,7 @@ func (h *Handler) GetTransferStatus(c *gin.Context) {
 	serverID := c.Param("id")
 
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 
@@ -282,7 +289,7 @@ func (h *Handler) CancelTransfer(c *gin.Context) {
 	serverID := c.Param("id")
 
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 
@@ -290,12 +297,12 @@ func (h *Handler) CancelTransfer(c *gin.Context) {
 	var ownerID string
 	err := h.db.QueryRowContext(c, `SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgServerNotFound})
 		return
 	}
 	if err != nil {
-		h.log.Error("Failed to query server owner", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify ownership"})
+		h.log.Error(errMsgFailedQueryOwner, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyOwnership})
 		return
 	}
 	if ownerID != userID {
@@ -344,7 +351,7 @@ func (h *Handler) ConfirmTransfer(c *gin.Context) {
 	serverID := c.Param("id")
 
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 
@@ -352,12 +359,12 @@ func (h *Handler) ConfirmTransfer(c *gin.Context) {
 	var ownerID string
 	err := h.db.QueryRowContext(c, `SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Server not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgServerNotFound})
 		return
 	}
 	if err != nil {
-		h.log.Error("Failed to query server owner", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify ownership"})
+		h.log.Error(errMsgFailedQueryOwner, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyOwnership})
 		return
 	}
 	if ownerID != userID {
@@ -471,7 +478,7 @@ func (h *Handler) ReverseTransfer(c *gin.Context) {
 	tx, err := h.db.BeginTx(c, nil)
 	if err != nil {
 		h.log.Error("Failed to begin reversal transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse transfer"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReverseTransfer})
 		return
 	}
 	defer func() { _ = tx.Rollback() }()
@@ -481,7 +488,7 @@ func (h *Handler) ReverseTransfer(c *gin.Context) {
 	var currentOwnerID string
 	if err := tx.QueryRowContext(c, `SELECT owner_id FROM servers WHERE id = $1 FOR UPDATE`, serverID).Scan(&currentOwnerID); err != nil {
 		h.log.Error("Failed to query current owner for reversal", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse transfer"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReverseTransfer})
 		return
 	}
 	if currentOwnerID != toUserID {
@@ -492,7 +499,7 @@ func (h *Handler) ReverseTransfer(c *gin.Context) {
 	// Update server owner back to original
 	if _, err := tx.ExecContext(c, `UPDATE servers SET owner_id = $1 WHERE id = $2`, fromUserID, serverID); err != nil {
 		h.log.Error("Failed to update server owner for reversal", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse transfer"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReverseTransfer})
 		return
 	}
 
@@ -500,7 +507,7 @@ func (h *Handler) ReverseTransfer(c *gin.Context) {
 	resFrom, err := tx.ExecContext(c, `UPDATE server_members SET role = 'owner' WHERE server_id = $1 AND user_id = $2`, serverID, fromUserID)
 	if err != nil {
 		h.log.Error("Failed to update from_user role for reversal", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse transfer"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReverseTransfer})
 		return
 	}
 	if n, _ := resFrom.RowsAffected(); n == 0 {
@@ -510,7 +517,7 @@ func (h *Handler) ReverseTransfer(c *gin.Context) {
 	resTo, err := tx.ExecContext(c, `UPDATE server_members SET role = 'member' WHERE server_id = $1 AND user_id = $2`, serverID, toUserID)
 	if err != nil {
 		h.log.Error("Failed to update to_user role for reversal", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse transfer"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReverseTransfer})
 		return
 	}
 	if n, _ := resTo.RowsAffected(); n == 0 {
@@ -520,13 +527,13 @@ func (h *Handler) ReverseTransfer(c *gin.Context) {
 	// Mark transfer as reversed
 	if _, err := tx.ExecContext(c, `UPDATE ownership_transfers SET status = 'reversed', reversed_at = NOW() WHERE id = $1`, transferID); err != nil {
 		h.log.Error("Failed to mark transfer as reversed", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse transfer"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReverseTransfer})
 		return
 	}
 
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit reversal", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reverse transfer"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReverseTransfer})
 		return
 	}
 
@@ -646,14 +653,14 @@ func (h *Handler) verifyPassword(c *gin.Context, userID, password string) error 
 	err := h.db.QueryRowContext(c, `SELECT password_hash FROM users WHERE id = $1`, userID).Scan(&passwordHash)
 	if err != nil {
 		h.log.Error("Failed to fetch password hash", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify password"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyPassword})
 		return err
 	}
 
 	match, err := auth.VerifyPassword(password, passwordHash)
 	if err != nil {
 		h.log.Error("Failed to verify password", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify password"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyPassword})
 		return err
 	}
 	if !match {

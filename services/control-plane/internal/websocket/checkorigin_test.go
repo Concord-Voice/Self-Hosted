@@ -38,7 +38,7 @@ func TestCheckOrigin(t *testing.T) {
 	}
 }
 
-func TestCheckOrigin_Wildcard(t *testing.T) {
+func TestCheckOriginWildcard(t *testing.T) {
 	h := NewHandler(nil, nil, nil, "", []string{"*"})
 
 	tests := []struct {

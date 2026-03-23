@@ -15,7 +15,7 @@ func setupTS(t *testing.T) *testhelpers.TestServer {
 
 // --- Auth Middleware ---
 
-func TestAuthRequired_ValidToken(t *testing.T) {
+func TestAuthRequiredValidToken(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "authvalid")
 
@@ -23,14 +23,14 @@ func TestAuthRequired_ValidToken(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
-func TestAuthRequired_NoHeader(t *testing.T) {
+func TestAuthRequiredNoHeader(t *testing.T) {
 	ts := setupTS(t)
 
 	w := ts.DoRequest("GET", "/api/v1/users/me", nil, nil)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
-func TestAuthRequired_InvalidFormat(t *testing.T) {
+func TestAuthRequiredInvalidFormat(t *testing.T) {
 	ts := setupTS(t)
 
 	headers := http.Header{}
@@ -39,7 +39,7 @@ func TestAuthRequired_InvalidFormat(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
-func TestAuthRequired_ExpiredToken(t *testing.T) {
+func TestAuthRequiredExpiredToken(t *testing.T) {
 	ts := setupTS(t)
 
 	// Use a hand-crafted expired token
@@ -49,7 +49,7 @@ func TestAuthRequired_ExpiredToken(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
-func TestAuthRequired_BlacklistedToken(t *testing.T) {
+func TestAuthRequiredBlacklistedToken(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "blacklist1")
 
@@ -63,7 +63,7 @@ func TestAuthRequired_BlacklistedToken(t *testing.T) {
 
 // --- Security Headers ---
 
-func TestSecurityHeaders_Present(t *testing.T) {
+func TestSecurityHeadersPresent(t *testing.T) {
 	ts := setupTS(t)
 
 	w := ts.DoRequest("GET", "/health", nil, nil)

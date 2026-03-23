@@ -32,7 +32,7 @@ func seedRecoveryCode(t *testing.T, ts *testhelpers.TestServer, email, code, use
 
 // --- RecoveryBegin Tests ---
 
-func TestRecoveryBegin_ReturnsOKForExistingEmail(t *testing.T) {
+func TestRecoveryBeginReturnsOKForExistingEmail(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "recoveruser1")
 
@@ -46,7 +46,7 @@ func TestRecoveryBegin_ReturnsOKForExistingEmail(t *testing.T) {
 	assert.Contains(t, body["message"], "If an account exists")
 }
 
-func TestRecoveryBegin_ReturnsOKForNonexistentEmail(t *testing.T) {
+func TestRecoveryBeginReturnsOKForNonexistentEmail(t *testing.T) {
 	ts := setupTS(t)
 
 	w := ts.DoRequest("POST", "/api/v1/auth/recovery/begin", map[string]interface{}{
@@ -60,7 +60,7 @@ func TestRecoveryBegin_ReturnsOKForNonexistentEmail(t *testing.T) {
 	assert.Contains(t, body["message"], "If an account exists")
 }
 
-func TestRecoveryBegin_StoresCodeInRedis(t *testing.T) {
+func TestRecoveryBeginStoresCodeInRedis(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "recoveruser2")
 
@@ -83,7 +83,7 @@ func TestRecoveryBegin_StoresCodeInRedis(t *testing.T) {
 
 // --- RecoveryVerifyCode Tests ---
 
-func TestRecoveryVerifyCode_Success(t *testing.T) {
+func TestRecoveryVerifyCodeSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "verifyuser1")
 
@@ -103,7 +103,7 @@ func TestRecoveryVerifyCode_Success(t *testing.T) {
 	assert.Equal(t, false, body["has_recovery_key"])
 }
 
-func TestRecoveryVerifyCode_WrongCode(t *testing.T) {
+func TestRecoveryVerifyCodeWrongCode(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "verifyuser2")
 
@@ -117,7 +117,7 @@ func TestRecoveryVerifyCode_WrongCode(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
-func TestRecoveryVerifyCode_AttemptTracking(t *testing.T) {
+func TestRecoveryVerifyCodeAttemptTracking(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "verifyuser3")
 
@@ -145,7 +145,7 @@ func TestRecoveryVerifyCode_AttemptTracking(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
-func TestRecoveryVerifyCode_DeletesCodeOnSuccess(t *testing.T) {
+func TestRecoveryVerifyCodeDeletesCodeOnSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "verifyuser4")
 
@@ -165,7 +165,7 @@ func TestRecoveryVerifyCode_DeletesCodeOnSuccess(t *testing.T) {
 
 // --- ResetPassword Token Single-Use Tests ---
 
-func TestRecoveryResetPassword_TokenSingleUse(t *testing.T) {
+func TestRecoveryResetPasswordTokenSingleUse(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "resetuser1")
 
@@ -207,7 +207,7 @@ func TestRecoveryResetPassword_TokenSingleUse(t *testing.T) {
 
 // --- ResetAccount Token Single-Use Tests ---
 
-func TestRecoveryResetAccount_TokenSingleUse(t *testing.T) {
+func TestRecoveryResetAccountTokenSingleUse(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "resetuser2")
 
@@ -244,7 +244,7 @@ func TestRecoveryResetAccount_TokenSingleUse(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
-func TestRecoveryResetAccount_RequiresDataLossAcknowledgement(t *testing.T) {
+func TestRecoveryResetAccountRequiresDataLossAcknowledgement(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "resetuser3")
 
@@ -275,7 +275,7 @@ func TestRecoveryResetAccount_RequiresDataLossAcknowledgement(t *testing.T) {
 
 // --- Anti-Enumeration Tests ---
 
-func TestRecoveryBegin_SameResponseForValidAndInvalidEmails(t *testing.T) {
+func TestRecoveryBeginSameResponseForValidAndInvalidEmails(t *testing.T) {
 	ts := setupTS(t)
 	ts.CreateTestUser(t, "enumuser1")
 

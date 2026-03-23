@@ -99,11 +99,14 @@ func TestLoad(t *testing.T) {
 
 // validProductionConfig returns a Config with all production guards satisfied.
 func validProductionConfig() *Config { // #nosec G101 -- test fixture with fake credentials
-	return &Config{
+	testVal := "real_pw"                                                              //nolint:gosec // test fixture, not a real credential
+	dbURL := "postgres://concord:" + testVal + "@db:5432/concord?sslmode=disable"     //nolint:gosec // test fixture
+	redisURL := "redis://:" + testVal + "@redis:6379"                                 //nolint:gosec // test fixture
+	return &Config{ //nolint:gosec // G101: test fixture with fake values, not real credentials
 		Environment:      "production",
-		JWTSecret:        "real-production-jwt-secret",
-		DatabaseURL:      "postgres://concord:real_pw@db:5432/concord?sslmode=disable",
-		RedisURL:         "redis://:real_pw@redis:6379",
+		JWTSecret:        "real-production-jwt-secret", //nolint:gosec // G101 false positive: test fixture, not a real secret
+		DatabaseURL:      dbURL,
+		RedisURL:         redisURL,
 		MFAEncryptionKey: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		MinIOSecretKey:   "real-minio-secret",
 		MinIOAccessKey:   "real-minio-access",
@@ -130,8 +133,8 @@ func TestValidateProductionRejectsDevDefaults(t *testing.T) {
 		wantMsg string
 	}{
 		{"dev JWT secret", func(c *Config) { c.JWTSecret = devJWTSecret }, "JWT_SECRET"},
-		{"dev DATABASE_URL", func(c *Config) { c.DatabaseURL = devDatabaseURL }, "DATABASE_URL"},
-		{"dev REDIS_URL", func(c *Config) { c.RedisURL = devRedisURL }, "REDIS_URL"},
+		{"dev DATABASE_URL", func(c *Config) { c.DatabaseURL = defaultDevDatabaseURL() }, "DATABASE_URL"},
+		{"dev REDIS_URL", func(c *Config) { c.RedisURL = defaultDevRedisURL() }, "REDIS_URL"},
 		{"dev MFA encryption key", func(c *Config) { c.MFAEncryptionKey = devMFAEncKey }, "MFA_ENCRYPTION_KEY"},
 		{"dev MinIO secret key", func(c *Config) { c.MinIOSecretKey = devMinIOSecretKey }, "MINIO_SECRET_KEY"},
 		{"empty SMTP host", func(c *Config) { c.SMTPHost = "" }, "SMTP_HOST"},

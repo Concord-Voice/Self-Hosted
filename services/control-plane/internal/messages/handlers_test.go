@@ -35,7 +35,7 @@ func setupWithMessage(t *testing.T) (*testhelpers.TestServer, testhelpers.TestUs
 
 // --- Send Message ---
 
-func TestSendMessage_Success(t *testing.T) {
+func TestSendMessageSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "sendmsg")
 	serverID := ts.CreateTestServer(t, user.ID, "Send Server")
@@ -54,7 +54,7 @@ func TestSendMessage_Success(t *testing.T) {
 	assert.Equal(t, user.ID, msg["user_id"])
 }
 
-func TestSendMessage_EmptyContent(t *testing.T) {
+func TestSendMessageEmptyContent(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "emptymsg")
 	serverID := ts.CreateTestServer(t, user.ID, "Empty Server")
@@ -68,7 +68,7 @@ func TestSendMessage_EmptyContent(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestSendMessage_NotMember(t *testing.T) {
+func TestSendMessageNotMember(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "msgowner")
 	outsider := ts.CreateTestUser(t, "msgoutsider")
@@ -83,7 +83,7 @@ func TestSendMessage_NotMember(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
-func TestSendMessage_EncryptedChannel_RequiresCiphertext(t *testing.T) {
+func TestSendMessageEncryptedChannelRequiresCiphertext(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "e2eemsg")
 	serverID := ts.CreateTestServer(t, user.ID, "E2EE Server")
@@ -98,7 +98,7 @@ func TestSendMessage_EncryptedChannel_RequiresCiphertext(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestSendMessage_EncryptedChannel_ValidCiphertext(t *testing.T) {
+func TestSendMessageEncryptedChannelValidCiphertext(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "e2eemsg2")
 	serverID := ts.CreateTestServer(t, user.ID, "E2EE Server 2")
@@ -115,7 +115,7 @@ func TestSendMessage_EncryptedChannel_ValidCiphertext(t *testing.T) {
 
 // --- Get Messages ---
 
-func TestGetMessages_Success(t *testing.T) {
+func TestGetMessagesSuccess(t *testing.T) {
 	ts, user, _, channelID, _ := setupWithMessage(t)
 
 	w := ts.DoRequest("GET", "/api/v1/channels/"+channelID+"/messages?limit=50", nil, testhelpers.AuthHeaders(user.AccessToken))
@@ -127,7 +127,7 @@ func TestGetMessages_Success(t *testing.T) {
 	assert.GreaterOrEqual(t, len(messages), 1)
 }
 
-func TestGetMessages_Empty(t *testing.T) {
+func TestGetMessagesEmpty(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "emptymsglist")
 	serverID := ts.CreateTestServer(t, user.ID, "Empty Msg Server")
@@ -142,7 +142,7 @@ func TestGetMessages_Empty(t *testing.T) {
 	assert.Empty(t, messages)
 }
 
-func TestGetMessages_NotMember(t *testing.T) {
+func TestGetMessagesNotMember(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "msglistowner")
 	outsider := ts.CreateTestUser(t, "msglistoutsider")
@@ -153,7 +153,7 @@ func TestGetMessages_NotMember(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
-func TestGetMessages_Pagination(t *testing.T) {
+func TestGetMessagesPagination(t *testing.T) {
 	ts, user, _, channelID, firstMsgID := setupWithMessage(t)
 
 	// Send a second message
@@ -174,7 +174,7 @@ func TestGetMessages_Pagination(t *testing.T) {
 
 // --- Update Message ---
 
-func TestUpdateMessage_Success(t *testing.T) {
+func TestUpdateMessageSuccess(t *testing.T) {
 	ts, user, _, _, msgID := setupWithMessage(t)
 
 	w := ts.DoRequest("PATCH", "/api/v1/messages/"+msgID, map[string]interface{}{
@@ -189,7 +189,7 @@ func TestUpdateMessage_Success(t *testing.T) {
 	assert.NotNil(t, msg["edited_at"])
 }
 
-func TestUpdateMessage_NotAuthor(t *testing.T) {
+func TestUpdateMessageNotAuthor(t *testing.T) {
 	ts, _, serverID, _, msgID := setupWithMessage(t)
 
 	other := ts.CreateTestUser(t, "msgeditor")
@@ -204,14 +204,14 @@ func TestUpdateMessage_NotAuthor(t *testing.T) {
 
 // --- Delete Message ---
 
-func TestDeleteMessage_AsAuthor(t *testing.T) {
+func TestDeleteMessageAsAuthor(t *testing.T) {
 	ts, user, _, _, msgID := setupWithMessage(t)
 
 	w := ts.DoRequest("DELETE", "/api/v1/messages/"+msgID, nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
-func TestDeleteMessage_NotAuthor(t *testing.T) {
+func TestDeleteMessageNotAuthor(t *testing.T) {
 	ts, _, serverID, _, msgID := setupWithMessage(t)
 
 	other := ts.CreateTestUser(t, "msgdeleter")
@@ -221,7 +221,7 @@ func TestDeleteMessage_NotAuthor(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
-func TestDeleteMessage_AsAdmin(t *testing.T) {
+func TestDeleteMessageAsAdmin(t *testing.T) {
 	ts, _, serverID, _, msgID := setupWithMessage(t)
 
 	admin := ts.CreateTestUser(t, "msgadmin")

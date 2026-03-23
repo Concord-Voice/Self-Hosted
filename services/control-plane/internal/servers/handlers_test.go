@@ -15,7 +15,7 @@ func setupTS(t *testing.T) *testhelpers.TestServer {
 
 // --- List Servers ---
 
-func TestListServers_Empty(t *testing.T) {
+func TestListServersEmpty(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "listuser")
 
@@ -28,7 +28,7 @@ func TestListServers_Empty(t *testing.T) {
 	assert.Empty(t, servers)
 }
 
-func TestListServers_WithServers(t *testing.T) {
+func TestListServersWithServers(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "listuser2")
 	ts.CreateTestServer(t, user.ID, "My Server")
@@ -47,7 +47,7 @@ func TestListServers_WithServers(t *testing.T) {
 
 // --- Create Server ---
 
-func TestCreateServer_Success(t *testing.T) {
+func TestCreateServerSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "createuser")
 
@@ -64,7 +64,7 @@ func TestCreateServer_Success(t *testing.T) {
 	assert.Equal(t, "owner", body["role"])
 }
 
-func TestCreateServer_NameTooShort(t *testing.T) {
+func TestCreateServerNameTooShort(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "shortname")
 
@@ -75,7 +75,7 @@ func TestCreateServer_NameTooShort(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestCreateServer_WithE2EEDefault(t *testing.T) {
+func TestCreateServerWithE2EEDefault(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "e2eeserver")
 
@@ -94,7 +94,7 @@ func TestCreateServer_WithE2EEDefault(t *testing.T) {
 
 // --- Get Server ---
 
-func TestGetServer_Success(t *testing.T) {
+func TestGetServerSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "getuser")
 	serverID := ts.CreateTestServer(t, user.ID, "Get Test")
@@ -108,7 +108,7 @@ func TestGetServer_Success(t *testing.T) {
 	assert.Equal(t, "Get Test", server["name"])
 }
 
-func TestGetServer_NotMember(t *testing.T) {
+func TestGetServerNotMember(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "owner1")
 	outsider := ts.CreateTestUser(t, "outsider1")
@@ -120,7 +120,7 @@ func TestGetServer_NotMember(t *testing.T) {
 
 // --- Update Server ---
 
-func TestUpdateServer_AsOwner(t *testing.T) {
+func TestUpdateServerAsOwner(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "updateowner")
 	serverID := ts.CreateTestServer(t, user.ID, "Old Name")
@@ -136,7 +136,7 @@ func TestUpdateServer_AsOwner(t *testing.T) {
 	assert.Equal(t, "New Name", server["name"])
 }
 
-func TestUpdateServer_NotOwnerOrAdmin(t *testing.T) {
+func TestUpdateServerNotOwnerOrAdmin(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "updowner")
 	member := ts.CreateTestUser(t, "updmember")
@@ -152,7 +152,7 @@ func TestUpdateServer_NotOwnerOrAdmin(t *testing.T) {
 
 // --- Delete Server ---
 
-func TestDeleteServer_AsOwner(t *testing.T) {
+func TestDeleteServerAsOwner(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "delowner")
 	serverID := ts.CreateTestServer(t, user.ID, "To Delete")
@@ -165,7 +165,7 @@ func TestDeleteServer_AsOwner(t *testing.T) {
 	assert.NotEqual(t, http.StatusOK, w.Code)
 }
 
-func TestDeleteServer_NotOwner(t *testing.T) {
+func TestDeleteServerNotOwner(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "delnon1")
 	member := ts.CreateTestUser(t, "delnon2")

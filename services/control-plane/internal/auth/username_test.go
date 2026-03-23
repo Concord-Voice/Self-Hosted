@@ -77,7 +77,7 @@ func TestValidateUsername(t *testing.T) {
 	}
 }
 
-func TestValidateUsername_Leetspeak(t *testing.T) {
+func TestValidateUsernameLeetspeak(t *testing.T) {
 	// Leetspeak variations of reserved words should be caught
 	tests := []string{
 		"4dmin",   // a->4 for "admin"

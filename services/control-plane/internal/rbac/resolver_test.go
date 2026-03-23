@@ -22,7 +22,7 @@ func setupResolver(t *testing.T) (*rbac.Resolver, *testhelpers.TestServer) {
 	return resolver, ts
 }
 
-func TestHasPermission_BaseMember(t *testing.T) {
+func TestHasPermissionBaseMember(t *testing.T) {
 	resolver, ts := setupResolver(t)
 	ctx := context.Background()
 
@@ -58,7 +58,7 @@ func TestHasPermission_BaseMember(t *testing.T) {
 	assert.False(t, hasPerm, "base member should not have PermKick")
 }
 
-func TestHasPermission_AdministratorBypass(t *testing.T) {
+func TestHasPermissionAdministratorBypass(t *testing.T) {
 	resolver, ts := setupResolver(t)
 	ctx := context.Background()
 
@@ -94,7 +94,7 @@ func TestHasPermission_AdministratorBypass(t *testing.T) {
 	assert.True(t, hasPerm, "administrator should bypass PermManageCryptoRotation")
 }
 
-func TestHasPermission_OwnerPerms(t *testing.T) {
+func TestHasPermissionOwnerPerms(t *testing.T) {
 	resolver, ts := setupResolver(t)
 	ctx := context.Background()
 
@@ -120,7 +120,7 @@ func TestHasPermission_OwnerPerms(t *testing.T) {
 	assert.False(t, perms.Has(rbac.PermAdministrator), "owner should not have PermAdministrator bit set directly (bypasses via OwnerPermissions)")
 }
 
-func TestHasPermission_NonMember(t *testing.T) {
+func TestHasPermissionNonMember(t *testing.T) {
 	resolver, ts := setupResolver(t)
 	ctx := context.Background()
 
@@ -134,7 +134,7 @@ func TestHasPermission_NonMember(t *testing.T) {
 	assert.False(t, hasPerm, "non-member should not have any permissions")
 }
 
-func TestHasPermission_MultipleRoles_BIT_OR(t *testing.T) {
+func TestHasPermissionMultipleRolesBITOR(t *testing.T) {
 	resolver, ts := setupResolver(t)
 	ctx := context.Background()
 
@@ -193,7 +193,7 @@ func TestHasPermission_MultipleRoles_BIT_OR(t *testing.T) {
 	assert.True(t, hasPerm, "should still have PermViewTextChannels from @all")
 }
 
-func TestHasPermission_ChannelDenyOverride(t *testing.T) {
+func TestHasPermissionChannelDenyOverride(t *testing.T) {
 	resolver, ts := setupResolver(t)
 	ctx := context.Background()
 
@@ -236,7 +236,7 @@ func TestHasPermission_ChannelDenyOverride(t *testing.T) {
 	assert.True(t, hasPerm, "PermViewTextChannels should still work (not denied)")
 }
 
-func TestOwner_ImmuneToChannelDenyOverrides(t *testing.T) {
+func TestOwnerImmuneToChannelDenyOverrides(t *testing.T) {
 	resolver, ts := setupResolver(t)
 	ctx := context.Background()
 

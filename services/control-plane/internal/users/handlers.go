@@ -20,6 +20,14 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	errMsgUserNotFound         = "User not found"
+	errMsgUnauthorized         = "Unauthorized"
+	errMsgFailedUpdateProfile  = "Failed to update profile"
+	errMsgFailedChangePassword = "Failed to change password"
+	dataImagePrefix            = "data:image/"
+)
+
 // MFAVerifier checks MFA status and verifies codes for sensitive operations.
 type MFAVerifier interface {
 	IsEnabled(ctx context.Context, userID string) bool
@@ -56,7 +64,7 @@ func (h *Handler) GetMe(c *gin.Context) {
 	// Get user ID from auth middleware
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgUnauthorized})
 		return
 	}
 
@@ -89,7 +97,7 @@ func (h *Handler) GetMe(c *gin.Context) {
 
 	if err != nil {
 		if err == sql.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": errMsgUserNotFound})
 			return
 		}
 		h.log.Error("Failed to fetch user", "error", err)
@@ -107,7 +115,7 @@ func (h *Handler) GetPublicProfile(c *gin.Context) {
 	// Ensure the requester is authenticated
 	_, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgUnauthorized})
 		return
 	}
 
@@ -139,7 +147,7 @@ func (h *Handler) GetPublicProfile(c *gin.Context) {
 
 	if err != nil {
 		if err == sql.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
+			c.JSON(http.StatusNotFound, gin.H{"error": errMsgUserNotFound})
 			return
 		}
 		h.log.Error("Failed to fetch user profile", "error", err)
@@ -156,7 +164,7 @@ func (h *Handler) GetPublicProfile(c *gin.Context) {
 func (h *Handler) GetMyKeys(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgUnauthorized})
 		return
 	}
 
@@ -198,7 +206,7 @@ type ReplaceKeysRequest struct {
 func (h *Handler) ReplaceMyKeys(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgUnauthorized})
 		return
 	}
 
@@ -254,11 +262,301 @@ type UpdateProfileRequest struct {
 	Links          *json.RawMessage `json:"links"`
 }
 
+// profileUpdateBuilder accumulates SET clauses, arguments, and media keys for
+// the dynamic UPDATE query in UpdateMe. Extracted to reduce cognitive complexity.
+type profileUpdateBuilder struct {
+	setClauses        []string
+	args              []interface{}
+	argIdx            int
+	mediaKeysToDelete []string
+	usernameChanged   bool
+	previousUsername  string
+	extraResponse     map[string]interface{} // additional fields to include in error responses
+}
+
+func newProfileUpdateBuilder() *profileUpdateBuilder {
+	return &profileUpdateBuilder{argIdx: 1}
+}
+
+// addClause appends a parameterized SET clause and its argument.
+func (b *profileUpdateBuilder) addClause(column string, val interface{}) {
+	b.setClauses = append(b.setClauses, fmt.Sprintf("%s = $%d", column, b.argIdx))
+	b.args = append(b.args, val)
+	b.argIdx++
+}
+
+// validateUsername checks cooldown, uniqueness, and appends the username clause.
+// Returns an HTTP status + error message on failure, or 0/"" on success.
+func (h *Handler) validateUsername(b *profileUpdateBuilder, username string, userID interface{}) (int, string) {
+	trimmed := strings.TrimSpace(username)
+	if err := auth.ValidateUsername(trimmed); err != nil {
+		return http.StatusBadRequest, err.Error()
+	}
+	normalized := auth.NormalizeUsername(trimmed)
+
+	var currentUsername string
+	var usernameChangedAt time.Time
+	err := h.db.QueryRow(
+		`SELECT username, username_changed_at FROM users WHERE id = $1`,
+		userID,
+	).Scan(&currentUsername, &usernameChangedAt)
+	if err == sql.ErrNoRows {
+		return http.StatusNotFound, errMsgUserNotFound
+	}
+	if err != nil {
+		h.log.Error("Failed to check username cooldown", "error", err)
+		return http.StatusInternalServerError, errMsgFailedUpdateProfile
+	}
+
+	if normalized == currentUsername {
+		return 0, "" // no-op
+	}
+
+	cooldownEnd := usernameChangedAt.AddDate(0, 0, 365)
+	if time.Now().Before(cooldownEnd) {
+		b.extraResponse = map[string]interface{}{
+			"username_change_eligible_at": cooldownEnd,
+		}
+		return http.StatusForbidden, "You can only change your username once per year"
+	}
+
+	var count int
+	err = h.db.QueryRow(
+		`SELECT COUNT(*) FROM users WHERE username = $1 AND id != $2`,
+		normalized, userID,
+	).Scan(&count)
+	if err != nil {
+		h.log.Error("Failed to check username uniqueness", "error", err)
+		return http.StatusInternalServerError, errMsgFailedUpdateProfile
+	}
+	if count > 0 {
+		return http.StatusBadRequest, "Username is already taken"
+	}
+
+	b.addClause("username", normalized)
+	b.setClauses = append(b.setClauses, "username_changed_at = NOW()")
+	b.previousUsername = currentUsername
+	b.usernameChanged = true
+	return 0, ""
+}
+
+// validateDisplayName validates and appends the display_name clause.
+func validateDisplayName(b *profileUpdateBuilder, displayName string) (int, string) {
+	if len(displayName) > 100 {
+		return http.StatusBadRequest, "Display name must be at most 100 characters"
+	}
+	trimmed := strings.TrimSpace(displayName)
+	var val interface{} = trimmed
+	if trimmed == "" {
+		val = nil
+	}
+	b.addClause("display_name", val)
+	return 0, ""
+}
+
+// validateBio validates and appends the bio clause.
+func validateBio(b *profileUpdateBuilder, bio string) (int, string) {
+	if len(bio) > 500 {
+		return http.StatusBadRequest, "Bio must be at most 500 characters"
+	}
+	trimmed := strings.TrimSpace(bio)
+	var val interface{} = trimmed
+	if trimmed == "" {
+		val = nil
+	}
+	b.addClause("bio", val)
+	return 0, ""
+}
+
+// validateAvatarURL validates and appends the avatar_url clause.
+func validateAvatarURL(b *profileUpdateBuilder, avatarURL string, userID interface{}) (int, string) {
+	if avatarURL == "" {
+		b.addClause("avatar_url", nil)
+		b.mediaKeysToDelete = append(b.mediaKeysToDelete, fmt.Sprintf("avatars/%s", userID))
+		return 0, ""
+	}
+	expectedAvatarURL := fmt.Sprintf("/api/v1/media/avatars/%s", userID)
+	if avatarURL != expectedAvatarURL && !strings.HasPrefix(avatarURL, dataImagePrefix) {
+		return http.StatusBadRequest, "Avatar must be an uploaded avatar URL for this user or an image data URL"
+	}
+	if strings.HasPrefix(avatarURL, dataImagePrefix) && len(avatarURL) > 1500000 {
+		return http.StatusBadRequest, "Avatar image too large (max ~1MB)"
+	}
+	b.addClause("avatar_url", avatarURL)
+	return 0, ""
+}
+
+// validateHeaderImageURL validates and appends the header_image_url clause.
+func validateHeaderImageURL(b *profileUpdateBuilder, headerImageURL string, userID interface{}) (int, string) {
+	if headerImageURL == "" {
+		b.addClause("header_image_url", nil)
+		b.mediaKeysToDelete = append(b.mediaKeysToDelete, fmt.Sprintf("banners/%s", userID))
+		return 0, ""
+	}
+	expectedBannerURL := fmt.Sprintf("/api/v1/media/banners/%s", userID)
+	if headerImageURL != expectedBannerURL && !strings.HasPrefix(headerImageURL, dataImagePrefix) {
+		return http.StatusBadRequest, "Header image must be an uploaded banner URL for this user or an image data URL"
+	}
+	if strings.HasPrefix(headerImageURL, dataImagePrefix) && len(headerImageURL) > 3000000 {
+		return http.StatusBadRequest, "Banner image too large (max ~2MB)"
+	}
+	b.addClause("header_image_url", headerImageURL)
+	return 0, ""
+}
+
+// validateLinks validates and appends the links clause.
+func validateLinks(b *profileUpdateBuilder, raw json.RawMessage) (int, string) {
+	var links []string
+	if err := json.Unmarshal(raw, &links); err != nil {
+		return http.StatusBadRequest, "Links must be an array of strings"
+	}
+	if len(links) > 5 {
+		return http.StatusBadRequest, "Maximum of 5 links allowed"
+	}
+	for _, link := range links {
+		link = strings.TrimSpace(link)
+		if link != "" && !strings.HasPrefix(link, "http://") && !strings.HasPrefix(link, "https://") {
+			return http.StatusBadRequest, "Links must start with http:// or https://"
+		}
+		if len(link) > 500 {
+			return http.StatusBadRequest, "Each link must be at most 500 characters"
+		}
+	}
+	b.addClause("links", string(raw))
+	return 0, ""
+}
+
+// validateColorScheme validates and appends the color_scheme clause.
+func validateColorScheme(b *profileUpdateBuilder, colorScheme string) (int, string) {
+	trimmed := strings.TrimSpace(colorScheme)
+	if trimmed == "" {
+		b.addClause("color_scheme", nil)
+		return 0, ""
+	}
+	if len(trimmed) > 200 {
+		return http.StatusBadRequest, "color_scheme must be at most 200 characters"
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
+		return http.StatusBadRequest, "color_scheme must be valid JSON"
+	}
+	b.addClause("color_scheme", trimmed)
+	return 0, ""
+}
+
+// profileFieldValidator is a validation function that populates the builder
+// and returns an HTTP status + error message on failure, or 0/"" on success.
+type profileFieldValidator func(b *profileUpdateBuilder) (int, string)
+
+// buildProfileFields validates all provided profile fields and populates the builder.
+// Returns an HTTP status + error message on the first validation failure, or 0/"" on success.
+func (h *Handler) buildProfileFields(b *profileUpdateBuilder, req *UpdateProfileRequest, userID interface{}) (int, string) {
+	validators := h.collectProfileValidators(req, userID)
+	for _, v := range validators {
+		if status, msg := v(b); status != 0 {
+			return status, msg
+		}
+	}
+	return 0, ""
+}
+
+// collectProfileValidators returns a validator for each non-nil field in the request.
+func (h *Handler) collectProfileValidators(req *UpdateProfileRequest, userID interface{}) []profileFieldValidator {
+	var validators []profileFieldValidator
+	if req.Username != nil {
+		val := *req.Username
+		validators = append(validators, func(b *profileUpdateBuilder) (int, string) {
+			return h.validateUsername(b, val, userID)
+		})
+	}
+	if req.DisplayName != nil {
+		val := *req.DisplayName
+		validators = append(validators, func(b *profileUpdateBuilder) (int, string) {
+			return validateDisplayName(b, val)
+		})
+	}
+	if req.Bio != nil {
+		val := *req.Bio
+		validators = append(validators, func(b *profileUpdateBuilder) (int, string) {
+			return validateBio(b, val)
+		})
+	}
+	if req.AvatarURL != nil {
+		val := *req.AvatarURL
+		validators = append(validators, func(b *profileUpdateBuilder) (int, string) {
+			return validateAvatarURL(b, val, userID)
+		})
+	}
+	if req.HeaderImageURL != nil {
+		val := *req.HeaderImageURL
+		validators = append(validators, func(b *profileUpdateBuilder) (int, string) {
+			return validateHeaderImageURL(b, val, userID)
+		})
+	}
+	if req.Links != nil {
+		val := *req.Links
+		validators = append(validators, func(b *profileUpdateBuilder) (int, string) {
+			return validateLinks(b, val)
+		})
+	}
+	if req.ColorScheme != nil {
+		val := *req.ColorScheme
+		validators = append(validators, func(b *profileUpdateBuilder) (int, string) {
+			return validateColorScheme(b, val)
+		})
+	}
+	return validators
+}
+
+// executeProfileUpdate runs the UPDATE query and scans the result into a User model.
+func (h *Handler) executeProfileUpdate(b *profileUpdateBuilder, userID interface{}) (*models.User, int, string) {
+	b.setClauses = append(b.setClauses, "updated_at = NOW()")
+
+	whereClause := fmt.Sprintf("WHERE id = $%d", b.argIdx)
+	if b.usernameChanged {
+		whereClause = fmt.Sprintf(
+			"WHERE id = $%d AND username_changed_at <= NOW() - INTERVAL '365 days'",
+			b.argIdx,
+		)
+	}
+	query := fmt.Sprintf( // #nosec G201 -- Safe: setClauses are parameterized, whereClause uses $N placeholders
+		`UPDATE users SET %s %s
+		 RETURNING id, email, username, display_name, bio, avatar_url, header_image_url, color_scheme,
+		           COALESCE(links, '[]'::jsonb),
+		           email_verified, age_verified, e2ee_preference, created_at, updated_at,
+		           username_changed_at`,
+		strings.Join(b.setClauses, ", "), whereClause,
+	)
+	b.args = append(b.args, userID)
+
+	var user models.User
+	err := h.db.QueryRow(query, b.args...).Scan(
+		&user.ID, &user.Email, &user.Username, &user.DisplayName,
+		&user.Bio, &user.AvatarURL, &user.HeaderImageURL, &user.ColorScheme,
+		&user.Links, &user.EmailVerified, &user.AgeVerified, &user.E2EEPreference,
+		&user.CreatedAt, &user.UpdatedAt, &user.UsernameChangedAt,
+	)
+	if err == nil {
+		return &user, 0, ""
+	}
+	if err == sql.ErrNoRows {
+		if b.usernameChanged {
+			return nil, http.StatusForbidden, "You can only change your username once per year"
+		}
+		return nil, http.StatusNotFound, errMsgUserNotFound
+	}
+	if strings.Contains(err.Error(), "users_username_key") {
+		return nil, http.StatusBadRequest, "Username is already taken"
+	}
+	h.log.Error(errMsgFailedUpdateProfile, "error", err)
+	return nil, http.StatusInternalServerError, errMsgFailedUpdateProfile
+}
+
 // UpdateMe updates the current user's profile
 func (h *Handler) UpdateMe(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgUnauthorized})
 		return
 	}
 
@@ -268,301 +566,38 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 		return
 	}
 
-	// Build dynamic update query
-	setClauses := []string{}
-	args := []interface{}{}
-	argIdx := 1
+	b := newProfileUpdateBuilder()
 
-	// Track whether a username change actually occurs (for history recording)
-	var previousUsername string
-	usernameChanged := false
-
-	// Track media storage keys to clean up after successful DB update
-	var mediaKeysToDelete []string
-
-	// Validate and add username if provided
-	if req.Username != nil {
-		trimmed := strings.TrimSpace(*req.Username)
-		if err := auth.ValidateUsername(trimmed); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-			return
+	if status, msg := h.buildProfileFields(b, &req, userID); status != 0 {
+		resp := gin.H{"error": msg}
+		for k, v := range b.extraResponse {
+			resp[k] = v
 		}
-		normalized := auth.NormalizeUsername(trimmed)
-
-		// Fetch current username and cooldown timestamp
-		var currentUsername string
-		var usernameChangedAt time.Time
-		err := h.db.QueryRow(
-			`SELECT username, username_changed_at FROM users WHERE id = $1`,
-			userID,
-		).Scan(&currentUsername, &usernameChangedAt)
-		if err != nil {
-			if err == sql.ErrNoRows {
-				c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
-				return
-			}
-			h.log.Error("Failed to check username cooldown", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update profile"})
-			return
-		}
-
-		// Only enforce cooldown and uniqueness if the username is actually changing
-		if normalized != currentUsername {
-			// Enforce 365-day username change cooldown (pre-check for UX error message)
-			cooldownEnd := usernameChangedAt.AddDate(0, 0, 365)
-			if time.Now().Before(cooldownEnd) {
-				c.JSON(http.StatusForbidden, gin.H{
-					"error":                       "You can only change your username once per year",
-					"username_change_eligible_at": cooldownEnd,
-				})
-				return
-			}
-
-			// Check uniqueness
-			var count int
-			err = h.db.QueryRow(
-				`SELECT COUNT(*) FROM users WHERE username = $1 AND id != $2`,
-				normalized, userID,
-			).Scan(&count)
-			if err != nil {
-				h.log.Error("Failed to check username uniqueness", "error", err)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update profile"})
-				return
-			}
-			if count > 0 {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Username is already taken"})
-				return
-			}
-
-			setClauses = append(setClauses, fmt.Sprintf("username = $%d", argIdx))
-			args = append(args, normalized)
-			argIdx++
-
-			// Reset the cooldown timer — uses NOW() in SQL for atomicity
-			setClauses = append(setClauses, "username_changed_at = NOW()")
-
-			previousUsername = currentUsername
-			usernameChanged = true
-		}
-		// If normalized == currentUsername, skip — no-op, no cooldown triggered
+		c.JSON(status, resp)
+		return
 	}
 
-	// Validate and add display_name if provided
-	if req.DisplayName != nil {
-		if len(*req.DisplayName) > 100 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Display name must be at most 100 characters"})
-			return
-		}
-		var val interface{}
-		trimmed := strings.TrimSpace(*req.DisplayName)
-		if trimmed == "" {
-			val = nil // Clear display name
-		} else {
-			val = trimmed
-		}
-		setClauses = append(setClauses, fmt.Sprintf("display_name = $%d", argIdx))
-		args = append(args, val)
-		argIdx++
-	}
-
-	// Validate and add bio if provided
-	if req.Bio != nil {
-		if len(*req.Bio) > 500 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Bio must be at most 500 characters"})
-			return
-		}
-		var val interface{}
-		trimmed := strings.TrimSpace(*req.Bio)
-		if trimmed == "" {
-			val = nil // Clear bio
-		} else {
-			val = trimmed
-		}
-		setClauses = append(setClauses, fmt.Sprintf("bio = $%d", argIdx))
-		args = append(args, val)
-		argIdx++
-	}
-
-	// Validate and add avatar_url if provided
-	if req.AvatarURL != nil {
-		if *req.AvatarURL != "" {
-			// Accept this user's exact avatar proxy path (from media upload endpoint) or legacy data URLs
-			expectedAvatarURL := fmt.Sprintf("/api/v1/media/avatars/%s", userID)
-			if *req.AvatarURL != expectedAvatarURL && !strings.HasPrefix(*req.AvatarURL, "data:image/") {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Avatar must be an uploaded avatar URL for this user or an image data URL"})
-				return
-			}
-			// Legacy data URL size check (object storage URLs are small strings)
-			if strings.HasPrefix(*req.AvatarURL, "data:image/") && len(*req.AvatarURL) > 1500000 {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Avatar image too large (max ~1MB)"})
-				return
-			}
-			setClauses = append(setClauses, fmt.Sprintf("avatar_url = $%d", argIdx))
-			args = append(args, *req.AvatarURL)
-		} else {
-			// Empty string means remove avatar
-			setClauses = append(setClauses, fmt.Sprintf("avatar_url = $%d", argIdx))
-			args = append(args, nil)
-			mediaKeysToDelete = append(mediaKeysToDelete, fmt.Sprintf("avatars/%s", userID))
-		}
-		argIdx++
-	}
-
-	// Validate and add header_image_url if provided
-	if req.HeaderImageURL != nil {
-		if *req.HeaderImageURL != "" {
-			// Accept this user's exact banner proxy path (from media upload endpoint) or legacy data URLs
-			expectedBannerURL := fmt.Sprintf("/api/v1/media/banners/%s", userID)
-			if *req.HeaderImageURL != expectedBannerURL && !strings.HasPrefix(*req.HeaderImageURL, "data:image/") {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Header image must be an uploaded banner URL for this user or an image data URL"})
-				return
-			}
-			// Legacy data URL size check
-			if strings.HasPrefix(*req.HeaderImageURL, "data:image/") && len(*req.HeaderImageURL) > 3000000 {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Banner image too large (max ~2MB)"})
-				return
-			}
-			setClauses = append(setClauses, fmt.Sprintf("header_image_url = $%d", argIdx))
-			args = append(args, *req.HeaderImageURL)
-		} else {
-			// Empty string means remove header image
-			setClauses = append(setClauses, fmt.Sprintf("header_image_url = $%d", argIdx))
-			args = append(args, nil)
-			mediaKeysToDelete = append(mediaKeysToDelete, fmt.Sprintf("banners/%s", userID))
-		}
-		argIdx++
-	}
-
-	// Validate and add links if provided
-	if req.Links != nil {
-		var links []string
-		if err := json.Unmarshal(*req.Links, &links); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Links must be an array of strings"})
-			return
-		}
-		if len(links) > 5 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Maximum of 5 links allowed"})
-			return
-		}
-		for _, link := range links {
-			link = strings.TrimSpace(link)
-			if link != "" && !strings.HasPrefix(link, "http://") && !strings.HasPrefix(link, "https://") {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Links must start with http:// or https://"})
-				return
-			}
-			if len(link) > 500 {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Each link must be at most 500 characters"})
-				return
-			}
-		}
-		setClauses = append(setClauses, fmt.Sprintf("links = $%d", argIdx))
-		args = append(args, string(*req.Links))
-		argIdx++
-	}
-
-	// Validate and add color_scheme if provided
-	if req.ColorScheme != nil {
-		trimmed := strings.TrimSpace(*req.ColorScheme)
-		if trimmed == "" {
-			// Empty string means clear color scheme
-			setClauses = append(setClauses, fmt.Sprintf("color_scheme = $%d", argIdx))
-			args = append(args, nil)
-		} else {
-			if len(trimmed) > 200 {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "color_scheme must be at most 200 characters"})
-				return
-			}
-			// Validate JSON structure
-			var parsed map[string]interface{}
-			if err := json.Unmarshal([]byte(trimmed), &parsed); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "color_scheme must be valid JSON"})
-				return
-			}
-			setClauses = append(setClauses, fmt.Sprintf("color_scheme = $%d", argIdx))
-			args = append(args, trimmed)
-		}
-		argIdx++
-	}
-
-	// Nothing to update
-	if len(setClauses) == 0 {
+	if len(b.setClauses) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "No fields to update"})
 		return
 	}
 
-	// Always update updated_at
-	setClauses = append(setClauses, "updated_at = NOW()")
-
-	// Build and execute query. When a username change is requested, the WHERE
-	// clause atomically enforces the 365-day cooldown to prevent races.
-	whereClause := fmt.Sprintf("WHERE id = $%d", argIdx)
-	if usernameChanged {
-		whereClause = fmt.Sprintf(
-			"WHERE id = $%d AND username_changed_at <= NOW() - INTERVAL '365 days'",
-			argIdx,
-		)
-	}
-	query := fmt.Sprintf( // #nosec G201 -- Safe: setClauses are parameterized, whereClause uses $N placeholders
-		`UPDATE users SET %s %s
-		 RETURNING id, email, username, display_name, bio, avatar_url, header_image_url, color_scheme,
-		           COALESCE(links, '[]'::jsonb),
-		           email_verified, age_verified, e2ee_preference, created_at, updated_at,
-		           username_changed_at`,
-		strings.Join(setClauses, ", "), whereClause,
-	)
-	args = append(args, userID)
-
-	var user models.User
-	err := h.db.QueryRow(query, args...).Scan(
-		&user.ID,
-		&user.Email,
-		&user.Username,
-		&user.DisplayName,
-		&user.Bio,
-		&user.AvatarURL,
-		&user.HeaderImageURL,
-		&user.ColorScheme,
-		&user.Links,
-		&user.EmailVerified,
-		&user.AgeVerified,
-		&user.E2EEPreference,
-		&user.CreatedAt,
-		&user.UpdatedAt,
-		&user.UsernameChangedAt,
-	)
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			if usernameChanged {
-				// Atomic WHERE clause blocked the update — concurrent cooldown race
-				c.JSON(http.StatusForbidden, gin.H{
-					"error": "You can only change your username once per year",
-				})
-				return
-			}
-			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
-			return
-		}
-		// Check for unique constraint violation (username)
-		if strings.Contains(err.Error(), "users_username_key") {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Username is already taken"})
-			return
-		}
-		h.log.Error("Failed to update profile", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update profile"})
+	user, status, msg := h.executeProfileUpdate(b, userID)
+	if status != 0 {
+		c.JSON(status, gin.H{"error": msg})
 		return
 	}
 
 	// Clean up orphaned media objects from storage after successful DB update
-	for _, key := range mediaKeysToDelete {
+	for _, key := range b.mediaKeysToDelete {
 		media.CleanupObject(c.Request.Context(), h.db, h.store, h.log, key)
 	}
 
 	// Record username change in history for audit/abuse tracking
-	if usernameChanged {
+	if b.usernameChanged {
 		_, histErr := h.db.Exec(
 			`INSERT INTO username_history (user_id, old_username, new_username) VALUES ($1, $2, $3)`,
-			userID, previousUsername, user.Username,
+			userID, b.previousUsername, user.Username,
 		)
 		if histErr != nil {
 			h.log.Error("Failed to record username history", "error", histErr)
@@ -602,11 +637,115 @@ type ChangePasswordRequest struct {
 	MFACode             string `json:"mfa_code"`           // Required when MFA is enabled
 }
 
+// verifyCurrentPassword fetches the user's password hash and checks it against the provided password.
+// Returns the password hash on success, or an HTTP status + error message on failure.
+func (h *Handler) verifyCurrentPassword(userID interface{}, currentPassword string) (string, int, string) {
+	var passwordHash string
+	err := h.db.QueryRow(
+		`SELECT password_hash FROM users WHERE id = $1`,
+		userID,
+	).Scan(&passwordHash)
+	if err == sql.ErrNoRows {
+		return "", http.StatusNotFound, errMsgUserNotFound
+	}
+	if err != nil {
+		h.log.Error("Failed to fetch password hash", "error", err)
+		return "", http.StatusInternalServerError, errMsgFailedChangePassword
+	}
+
+	match, err := auth.VerifyPassword(currentPassword, passwordHash)
+	if err != nil {
+		h.log.Error("Failed to verify password", "error", err)
+		return "", http.StatusInternalServerError, errMsgFailedChangePassword
+	}
+	if !match {
+		return "", http.StatusUnauthorized, "Current password is incorrect"
+	}
+	return passwordHash, 0, ""
+}
+
+// verifyMFAForPasswordChange checks MFA if enabled. Returns an HTTP status + body on failure.
+func (h *Handler) verifyMFAForPasswordChange(c *gin.Context, uid, mfaCode string) (int, gin.H) {
+	ctx := c.Request.Context()
+	if h.mfaVerifier == nil || !h.mfaVerifier.IsEnabled(ctx, uid) {
+		return 0, nil
+	}
+	if mfaCode == "" {
+		methods, _ := h.mfaVerifier.GetEnabledMethods(ctx, uid)
+		return http.StatusForbidden, gin.H{
+			"error":   "mfa_required",
+			"message": "MFA verification required to change password",
+			"methods": methods,
+		}
+	}
+	valid, mfaErr := h.mfaVerifier.VerifyCode(ctx, uid, mfaCode)
+	if mfaErr != nil {
+		h.log.Error("MFA verification error during password change", "error", mfaErr)
+		return http.StatusInternalServerError, gin.H{"error": "MFA verification failed"}
+	}
+	if !valid {
+		return http.StatusForbidden, gin.H{"error": "Invalid MFA code"}
+	}
+	return 0, nil
+}
+
+// validateNewPassword checks strength and ensures it differs from the current password.
+func (h *Handler) validateNewPassword(newPassword, currentHash string) (string, int, string) {
+	if err := auth.ValidatePasswordStrength(newPassword); err != nil {
+		return "", http.StatusBadRequest, err.Error()
+	}
+	sameAsOld, err := auth.VerifyPassword(newPassword, currentHash)
+	if err != nil {
+		h.log.Error("Failed to compare passwords", "error", err)
+		return "", http.StatusInternalServerError, errMsgFailedChangePassword
+	}
+	if sameAsOld {
+		return "", http.StatusBadRequest, "New password must be different from current password"
+	}
+	newHash, err := auth.HashPassword(newPassword)
+	if err != nil {
+		h.log.Error("Failed to hash new password", "error", err)
+		return "", http.StatusInternalServerError, errMsgFailedChangePassword
+	}
+	return newHash, 0, ""
+}
+
+// executePasswordChange runs the transactional password + key update + token revocation.
+func (h *Handler) executePasswordChange(userID interface{}, newHash string, wrappedKeyBytes, saltBytes []byte, kdAlg string) error {
+	tx, err := h.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			h.log.Error("Failed to rollback transaction", "error", rbErr)
+		}
+	}()
+
+	if _, err := tx.Exec(`UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`, newHash, userID); err != nil {
+		return fmt.Errorf("update password: %w", err)
+	}
+	if _, err := tx.Exec(
+		`UPDATE user_keys SET wrapped_private_key = $1, key_derivation_salt = $2,
+		 key_derivation_alg = $3, updated_at = NOW() WHERE user_id = $4`,
+		wrappedKeyBytes, saltBytes, kdAlg, userID,
+	); err != nil {
+		return fmt.Errorf("update E2EE keys: %w", err)
+	}
+	if _, err := tx.Exec(
+		`UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`,
+		userID,
+	); err != nil {
+		return fmt.Errorf("revoke refresh tokens: %w", err)
+	}
+	return tx.Commit()
+}
+
 // ChangePassword changes the current user's password and re-wraps E2EE keys
 func (h *Handler) ChangePassword(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgUnauthorized})
 		return
 	}
 
@@ -616,7 +755,6 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		return
 	}
 
-	// Validate base64 encoding of keys
 	wrappedKeyBytes, err := base64.StdEncoding.DecodeString(req.WrappedPrivateKey)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid wrapped_private_key format"})
@@ -628,157 +766,42 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		return
 	}
 
-	// Fetch current password hash
-	var passwordHash string
-	err = h.db.QueryRow(
-		`SELECT password_hash FROM users WHERE id = $1`,
-		userID,
-	).Scan(&passwordHash)
-
-	if err != nil {
-		if err == sql.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
-			return
-		}
-		h.log.Error("Failed to fetch password hash", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to change password"})
+	passwordHash, status, msg := h.verifyCurrentPassword(userID, req.CurrentPassword)
+	if status != 0 {
+		c.JSON(status, gin.H{"error": msg})
 		return
 	}
 
-	// Verify current password
-	match, err := auth.VerifyPassword(req.CurrentPassword, passwordHash)
-	if err != nil {
-		h.log.Error("Failed to verify password", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to change password"})
-		return
-	}
-	if !match {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Current password is incorrect"})
-		return
-	}
-
-	// Verify MFA if user has it enabled
-	ctx := c.Request.Context()
 	uid := userID.(string)
-	if h.mfaVerifier != nil && h.mfaVerifier.IsEnabled(ctx, uid) {
-		if req.MFACode == "" {
-			methods, _ := h.mfaVerifier.GetEnabledMethods(ctx, uid)
-			c.JSON(http.StatusForbidden, gin.H{
-				"error":   "mfa_required",
-				"message": "MFA verification required to change password",
-				"methods": methods,
-			})
-			return
-		}
-		valid, mfaErr := h.mfaVerifier.VerifyCode(ctx, uid, req.MFACode)
-		if mfaErr != nil {
-			h.log.Error("MFA verification error during password change", "error", mfaErr)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "MFA verification failed"})
-			return
-		}
-		if !valid {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Invalid MFA code"})
-			return
-		}
-	}
-
-	// Validate new password strength
-	if err := auth.ValidatePasswordStrength(req.NewPassword); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+	if mfaStatus, mfaBody := h.verifyMFAForPasswordChange(c, uid, req.MFACode); mfaStatus != 0 {
+		c.JSON(mfaStatus, mfaBody)
 		return
 	}
 
-	// Check new password is different from current
-	sameAsOld, err := auth.VerifyPassword(req.NewPassword, passwordHash)
-	if err != nil {
-		h.log.Error("Failed to compare passwords", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to change password"})
-		return
-	}
-	if sameAsOld {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "New password must be different from current password"})
+	newHash, status, msg := h.validateNewPassword(req.NewPassword, passwordHash)
+	if status != 0 {
+		c.JSON(status, gin.H{"error": msg})
 		return
 	}
 
-	// Hash new password
-	newHash, err := auth.HashPassword(req.NewPassword)
-	if err != nil {
-		h.log.Error("Failed to hash new password", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to change password"})
-		return
+	kdAlg := req.KeyDerivationAlg
+	if kdAlg == "" {
+		kdAlg = "argon2id"
 	}
 
-	// Begin transaction to update both password and E2EE keys atomically
-	tx, err := h.db.Begin()
-	if err != nil {
-		h.log.Error("Failed to begin transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to change password"})
-		return
-	}
-	defer func() {
-		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
-			h.log.Error("Failed to rollback transaction", "error", rbErr)
-		}
-	}()
-
-	// Update password
-	_, err = tx.Exec(
-		`UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
-		newHash, userID,
-	)
-	if err != nil {
-		h.log.Error("Failed to update password", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to change password"})
-		return
-	}
-
-	// Update E2EE keys (re-wrapped with new password)
-	cpKdAlg := req.KeyDerivationAlg
-	if cpKdAlg == "" {
-		cpKdAlg = "argon2id"
-	}
-	_, err = tx.Exec(
-		`UPDATE user_keys SET wrapped_private_key = $1, key_derivation_salt = $2,
-		 key_derivation_alg = $3, updated_at = NOW()
-		 WHERE user_id = $4`,
-		wrappedKeyBytes, saltBytes, cpKdAlg, userID,
-	)
-	if err != nil {
-		h.log.Error("Failed to update E2EE keys", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to change password"})
-		return
-	}
-
-	// Revoke ALL refresh tokens for this user.
-	// Password change invalidates all sessions — attacker with stolen
-	// refresh token must not be able to obtain new access tokens.
-	_, err = tx.Exec(
-		`UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`,
-		userID,
-	)
-	if err != nil {
-		h.log.Error("Failed to revoke refresh tokens", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to change password"})
-		return
-	}
-
-	if err := tx.Commit(); err != nil {
-		h.log.Error("Failed to commit transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to change password"})
+	if err := h.executePasswordChange(userID, newHash, wrappedKeyBytes, saltBytes, kdAlg); err != nil {
+		h.log.Error(errMsgFailedChangePassword, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedChangePassword})
 		return
 	}
 
 	// Force-close all WebSocket connections for this user.
-	// Password change invalidates all sessions — the user must re-authenticate.
-	if uid, parseErr := uuid.Parse(userID.(string)); parseErr == nil {
-		h.hub.DisconnectUser(uid)
+	if parsedUID, parseErr := uuid.Parse(uid); parseErr == nil {
+		h.hub.DisconnectUser(parsedUID)
 	}
 
 	h.log.Info("Password changed with key re-wrap", "user_id", userID)
-
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Password changed successfully",
-	})
+	c.JSON(http.StatusOK, gin.H{"message": "Password changed successfully"})
 }
 
 // SearchUsers searches for users by username or display_name.
@@ -861,7 +884,7 @@ func (h *Handler) GetPublicKey(c *gin.Context) {
 func (h *Handler) GetPreferences(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgUnauthorized})
 		return
 	}
 
@@ -902,7 +925,7 @@ type UpdatePreferencesRequest struct {
 func (h *Handler) UpdatePreferences(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgUnauthorized})
 		return
 	}
 
@@ -1033,6 +1056,60 @@ type updatePrivacyRequest struct {
 	AllowEmbeddedContent  *bool `json:"allow_embedded_content"`
 }
 
+// buildPrivacyClauses constructs the SET clauses for a partial privacy settings update.
+// Returns an HTTP status + error message on validation failure, or 0/"" on success.
+func buildPrivacyClauses(req *updatePrivacyRequest) ([]string, []interface{}, int, string) {
+	var setClauses []string
+	var args []interface{}
+	argIdx := 2 // $1 is reserved for userID
+
+	addBoolClause := func(column string, val *bool) {
+		if val == nil {
+			return
+		}
+		setClauses = append(setClauses, fmt.Sprintf("%s = $%d", column, argIdx))
+		args = append(args, *val)
+		argIdx++
+	}
+
+	addBoolClause("messages_friends_only", req.MessagesFriendsOnly)
+	addBoolClause("messages_server_members", req.MessagesServerMembers)
+
+	if req.DMPrivacyLevel != nil {
+		level := *req.DMPrivacyLevel
+		if level < 0 || level > 3 {
+			return nil, nil, http.StatusBadRequest, "dm_privacy_level must be 0-3"
+		}
+		setClauses = append(setClauses, fmt.Sprintf("dm_privacy_level = $%d", argIdx))
+		args = append(args, level)
+		argIdx++
+		setClauses = append(setClauses, dmPrivacyLegacySync(level)...)
+	}
+
+	addBoolClause("dm_friends_of_friends", req.DMFriendsOfFriends)
+	addBoolClause("auto_accept_friend_codes", req.AutoAcceptFriendCodes)
+	addBoolClause("searchable_by_username", req.SearchableByUsername)
+	addBoolClause("searchable_by_email", req.SearchableByEmail)
+	addBoolClause("searchable_by_phone", req.SearchableByPhone)
+	addBoolClause("allow_embedded_content", req.AllowEmbeddedContent)
+
+	return setClauses, args, 0, ""
+}
+
+// dmPrivacyLegacySync returns the legacy boolean sync clauses for backward compatibility.
+func dmPrivacyLegacySync(level int) []string {
+	switch level {
+	case 0, 1:
+		return []string{"messages_friends_only = TRUE", "messages_server_members = FALSE"}
+	case 2:
+		return []string{"messages_friends_only = TRUE", "messages_server_members = TRUE"}
+	case 3:
+		return []string{"messages_friends_only = FALSE", "messages_server_members = TRUE"}
+	default:
+		return nil
+	}
+}
+
 // UpdatePrivacySettings updates the current user's privacy settings.
 // Accepts a partial JSON body — only provided fields are updated.
 // PATCH /users/me/privacy
@@ -1045,79 +1122,18 @@ func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
 		return
 	}
 
-	// Build dynamic SET clause for partial update
-	setClauses := []string{}
-	args := []interface{}{userID}
-	argIdx := 2
-
-	if req.MessagesFriendsOnly != nil {
-		setClauses = append(setClauses, fmt.Sprintf("messages_friends_only = $%d", argIdx))
-		args = append(args, *req.MessagesFriendsOnly)
-		argIdx++
+	setClauses, extraArgs, status, msg := buildPrivacyClauses(&req)
+	if status != 0 {
+		c.JSON(status, gin.H{"error": msg})
+		return
 	}
-	if req.MessagesServerMembers != nil {
-		setClauses = append(setClauses, fmt.Sprintf("messages_server_members = $%d", argIdx))
-		args = append(args, *req.MessagesServerMembers)
-		argIdx++
-	}
-	if req.DMPrivacyLevel != nil {
-		level := *req.DMPrivacyLevel
-		if level < 0 || level > 3 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "dm_privacy_level must be 0-3"})
-			return
-		}
-		setClauses = append(setClauses, fmt.Sprintf("dm_privacy_level = $%d", argIdx))
-		args = append(args, level)
-		argIdx++
-		// Sync legacy booleans for backward compatibility
-		switch level {
-		case 0: // off
-			setClauses = append(setClauses, "messages_friends_only = TRUE", "messages_server_members = FALSE")
-		case 1: // friends only
-			setClauses = append(setClauses, "messages_friends_only = TRUE", "messages_server_members = FALSE")
-		case 2: // friends + server members
-			setClauses = append(setClauses, "messages_friends_only = TRUE", "messages_server_members = TRUE")
-		case 3: // allow all
-			setClauses = append(setClauses, "messages_friends_only = FALSE", "messages_server_members = TRUE")
-		}
-	}
-	if req.DMFriendsOfFriends != nil {
-		setClauses = append(setClauses, fmt.Sprintf("dm_friends_of_friends = $%d", argIdx))
-		args = append(args, *req.DMFriendsOfFriends)
-		argIdx++
-	}
-	if req.AutoAcceptFriendCodes != nil {
-		setClauses = append(setClauses, fmt.Sprintf("auto_accept_friend_codes = $%d", argIdx))
-		args = append(args, *req.AutoAcceptFriendCodes)
-		argIdx++
-	}
-	if req.SearchableByUsername != nil {
-		setClauses = append(setClauses, fmt.Sprintf("searchable_by_username = $%d", argIdx))
-		args = append(args, *req.SearchableByUsername)
-		argIdx++
-	}
-	if req.SearchableByEmail != nil {
-		setClauses = append(setClauses, fmt.Sprintf("searchable_by_email = $%d", argIdx))
-		args = append(args, *req.SearchableByEmail)
-		argIdx++
-	}
-	if req.SearchableByPhone != nil {
-		setClauses = append(setClauses, fmt.Sprintf("searchable_by_phone = $%d", argIdx))
-		args = append(args, *req.SearchableByPhone)
-		argIdx++
-	}
-	if req.AllowEmbeddedContent != nil {
-		setClauses = append(setClauses, fmt.Sprintf("allow_embedded_content = $%d", argIdx))
-		args = append(args, *req.AllowEmbeddedContent)
-		argIdx++ //nolint:ineffassign // keep consistent with other fields for future additions
-	}
-
 	if len(setClauses) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "No fields to update"})
 		return
 	}
 
 	setClauses = append(setClauses, "updated_at = NOW()")
+	args := append([]interface{}{userID}, extraArgs...)
 
 	// UPSERT: insert with defaults, update only provided fields
 	// #nosec G201 -- Safe: setClauses contains only parameterized assignments

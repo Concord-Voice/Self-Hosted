@@ -15,7 +15,7 @@ func setupTS(t *testing.T) *testhelpers.TestServer {
 
 // --- List Members ---
 
-func TestListMembers_Success(t *testing.T) {
+func TestListMembersSuccess(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "listmemowner")
 	serverID := ts.CreateTestServer(t, owner.ID, "Members Server")
@@ -29,7 +29,7 @@ func TestListMembers_Success(t *testing.T) {
 	assert.Len(t, members, 1) // Just the owner
 }
 
-func TestListMembers_NotMember(t *testing.T) {
+func TestListMembersNotMember(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "listowner2")
 	outsider := ts.CreateTestUser(t, "listoutsider")
@@ -41,7 +41,7 @@ func TestListMembers_NotMember(t *testing.T) {
 
 // --- Add Member ---
 
-func TestAddMember_AsOwner(t *testing.T) {
+func TestAddMemberAsOwner(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "addowner")
 	newMember := ts.CreateTestUser(t, "addmember")
@@ -54,7 +54,7 @@ func TestAddMember_AsOwner(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, w.Code)
 }
 
-func TestAddMember_AsAdmin(t *testing.T) {
+func TestAddMemberAsAdmin(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "addadminown")
 	admin := ts.CreateTestUser(t, "addadmin")
@@ -69,7 +69,7 @@ func TestAddMember_AsAdmin(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, w.Code)
 }
 
-func TestAddMember_AsMember_Forbidden(t *testing.T) {
+func TestAddMemberAsMemberForbidden(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "addmemown")
 	member := ts.CreateTestUser(t, "addmem1")
@@ -84,7 +84,7 @@ func TestAddMember_AsMember_Forbidden(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
-func TestAddMember_AlreadyMember(t *testing.T) {
+func TestAddMemberAlreadyMember(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "dupmemown")
 	member := ts.CreateTestUser(t, "dupmem")
@@ -100,7 +100,7 @@ func TestAddMember_AlreadyMember(t *testing.T) {
 
 // --- Update Member Role ---
 
-func TestUpdateMember_ChangeRole(t *testing.T) {
+func TestUpdateMemberChangeRole(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "roleowner")
 	member := ts.CreateTestUser(t, "rolemember")
@@ -114,7 +114,7 @@ func TestUpdateMember_ChangeRole(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
-func TestUpdateMember_NotOwner(t *testing.T) {
+func TestUpdateMemberNotOwner(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "roleown2")
 	member := ts.CreateTestUser(t, "rolemem2")
@@ -133,7 +133,7 @@ func TestUpdateMember_NotOwner(t *testing.T) {
 
 // --- Remove Member ---
 
-func TestRemoveMember_KickByOwner(t *testing.T) {
+func TestRemoveMemberKickByOwner(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "kickowner")
 	member := ts.CreateTestUser(t, "kickmember")
@@ -144,7 +144,7 @@ func TestRemoveMember_KickByOwner(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
-func TestRemoveMember_SelfLeave(t *testing.T) {
+func TestRemoveMemberSelfLeave(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "leaveowner")
 	member := ts.CreateTestUser(t, "leavemember")
@@ -155,7 +155,7 @@ func TestRemoveMember_SelfLeave(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
-func TestRemoveMember_OwnerCannotLeave(t *testing.T) {
+func TestRemoveMemberOwnerCannotLeave(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "ownleave")
 	serverID := ts.CreateTestServer(t, owner.ID, "Owner Leave Server")
@@ -164,7 +164,7 @@ func TestRemoveMember_OwnerCannotLeave(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
-func TestRemoveMember_MemberCannotKickOthers(t *testing.T) {
+func TestRemoveMemberMemberCannotKickOthers(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "kickown2")
 	member1 := ts.CreateTestUser(t, "kickmem1")

@@ -69,7 +69,7 @@ func TestContentTypeForFile(t *testing.T) {
 	}
 }
 
-func TestServeUpdateAsset_NoReleasesDir(t *testing.T) {
+func TestServeUpdateAssetNoReleasesDir(t *testing.T) {
 	h := newTestHandler("")
 	r := setupRouter(h)
 
@@ -81,7 +81,7 @@ func TestServeUpdateAsset_NoReleasesDir(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "Update proxy not configured")
 }
 
-func TestServeUpdateAsset_InvalidFilename(t *testing.T) {
+func TestServeUpdateAssetInvalidFilename(t *testing.T) {
 	dir := createTestReleasesDir(t)
 	h := newTestHandler(dir)
 	r := setupRouter(h)
@@ -98,7 +98,7 @@ func TestServeUpdateAsset_InvalidFilename(t *testing.T) {
 	}
 }
 
-func TestServeUpdateAsset_NotFound(t *testing.T) {
+func TestServeUpdateAssetNotFound(t *testing.T) {
 	dir := createTestReleasesDir(t)
 	h := newTestHandler(dir)
 	r := setupRouter(h)
@@ -111,7 +111,7 @@ func TestServeUpdateAsset_NotFound(t *testing.T) {
 	assert.Contains(t, w.Body.String(), "Asset not found")
 }
 
-func TestServeUpdateAsset_ServesMetadata(t *testing.T) {
+func TestServeUpdateAssetServesMetadata(t *testing.T) {
 	dir := createTestReleasesDir(t)
 	h := newTestHandler(dir)
 	r := setupRouter(h)
@@ -126,7 +126,7 @@ func TestServeUpdateAsset_ServesMetadata(t *testing.T) {
 	assert.Equal(t, "public, max-age=300", w.Header().Get("Cache-Control"))
 }
 
-func TestServeUpdateAsset_ServesBinary(t *testing.T) {
+func TestServeUpdateAssetServesBinary(t *testing.T) {
 	dir := createTestReleasesDir(t)
 	h := newTestHandler(dir)
 	r := setupRouter(h)
@@ -141,7 +141,7 @@ func TestServeUpdateAsset_ServesBinary(t *testing.T) {
 	assert.Equal(t, "public, max-age=86400", w.Header().Get("Cache-Control"))
 }
 
-func TestServeUpdateAsset_DirectoryTraversal(t *testing.T) {
+func TestServeUpdateAssetDirectoryTraversal(t *testing.T) {
 	dir := createTestReleasesDir(t)
 	// Create a file outside the releases dir to verify it can't be accessed
 	parentFile := filepath.Join(filepath.Dir(dir), "secret.txt")

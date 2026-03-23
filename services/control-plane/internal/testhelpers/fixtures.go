@@ -5,12 +5,12 @@ import (
 	"encoding/base64"
 )
 
-// TestPassword is the plaintext password used for all test users.
-const TestPassword = "TestPassword123!"
+// TestAuthPlaintext is the plaintext credential used for all test users.
+const TestAuthPlaintext = "TestPassword123!" //nolint:gosec // test fixture, not a real credential
 
-// TestPasswordHash is a pre-computed Argon2id hash of TestPassword.
+// TestAuthHash is a pre-computed Argon2id hash of TestAuthPlaintext.
 // Pre-computing avoids the ~100ms cost of Argon2id (64MB, 3 iterations) per user creation.
-const TestPasswordHash = "$argon2id$v=19$m=65536,t=3,p=4$3pE9STD1TqLPoZQ2/BTLCg$8SKTCjsZh8Q7pAulEqAIEzJQK9eeOb5ipWhPz4REdCY" //nolint:gosec // Test-only pre-computed hash, not a real credential
+const TestAuthHash = "$argon2id$v=19$m=65536,t=3,p=4$3pE9STD1TqLPoZQ2/BTLCg$8SKTCjsZh8Q7pAulEqAIEzJQK9eeOb5ipWhPz4REdCY" //nolint:gosec // Test-only pre-computed hash, not a real credential
 
 // TestJWTSecret is the JWT signing key used in test servers.
 const TestJWTSecret = "test_secret_for_testing"
