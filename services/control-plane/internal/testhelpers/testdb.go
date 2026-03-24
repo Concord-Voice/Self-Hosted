@@ -72,7 +72,25 @@ func TruncateAllTables(db *sql.DB) error {
 		server_invites,
 		channel_read_states,
 		user_preferences,
-		ownership_transfers
+		ownership_transfers,
+		friendships,
+		friend_codes,
+		dm_conversations,
+		dm_participants,
+		dm_messages,
+		dm_channel_keys,
+		dm_pending_key_requests,
+		dm_read_states,
+		dm_key_revocations,
+		roles,
+		member_roles,
+		channel_permission_overrides,
+		audit_log,
+		key_revocations,
+		voice_participants,
+		dm_voice_participants,
+		user_mfa_totp,
+		user_mfa_webauthn
 	CASCADE`)
 	return err
 }

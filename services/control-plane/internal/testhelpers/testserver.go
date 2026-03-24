@@ -78,32 +78,15 @@ func AuthHeaders(accessToken string) http.Header {
 	return h
 }
 
-// CreateTestUser inserts a user directly into the database and returns a TestUser
-// with a valid JWT access token. Uses a pre-computed password hash for speed.
-func (ts *TestServer) CreateTestUser(t *testing.T, username string) TestUser {
+// insertE2EEKeys inserts E2EE key material for a test user.
+func (ts *TestServer) insertE2EEKeys(t *testing.T, userID string) {
 	t.Helper()
-
-	userID := uuid.New().String()
-	email := username + "@test.concord.chat"
-	normalizedUsername := auth.NormalizeUsername(username)
-
-	// Insert user with pre-computed hash (email_verified=true for test convenience)
-	_, err := ts.DB.Exec(
-		`INSERT INTO users (id, email, username, password_hash, age_verified, email_verified, e2ee_preference)
-		 VALUES ($1, $2, $3, $4, true, true, false)`,
-		userID, email, normalizedUsername, TestAuthHash,
-	)
-	if err != nil {
-		t.Fatalf("testhelpers: failed to create test user: %v", err)
-	}
-
-	// Insert E2EE keys
 	pubKey, wrappedKey, saltB64 := E2EETestKeys()
 	pubKeyBytes, _ := base64.StdEncoding.DecodeString(pubKey)
 	wrappedKeyBytes, _ := base64.StdEncoding.DecodeString(wrappedKey)
 	saltBytes, _ := base64.StdEncoding.DecodeString(saltB64)
 
-	_, err = ts.DB.Exec(
+	_, err := ts.DB.Exec(
 		`INSERT INTO user_keys (user_id, wrapped_private_key, key_derivation_salt) VALUES ($1, $2, $3)`,
 		userID, wrappedKeyBytes, saltBytes,
 	)
@@ -119,9 +102,29 @@ func (ts *TestServer) CreateTestUser(t *testing.T, username string) TestUser {
 	if err != nil {
 		t.Fatalf("testhelpers: failed to create public key: %v", err)
 	}
+}
 
-	// Generate access token
-	accessToken, err := auth.GenerateAccessToken(userID, TestJWTSecret, true)
+// createTestUserWithVerification inserts a user and returns a TestUser.
+// Shared implementation for CreateTestUser and CreateTestUserUnverified.
+func (ts *TestServer) createTestUserWithVerification(t *testing.T, username string, emailVerified bool) TestUser {
+	t.Helper()
+
+	userID := uuid.New().String()
+	email := username + "@test.concord.chat"
+	normalizedUsername := auth.NormalizeUsername(username)
+
+	_, err := ts.DB.Exec(
+		`INSERT INTO users (id, email, username, password_hash, age_verified, email_verified, e2ee_preference)
+		 VALUES ($1, $2, $3, $4, true, $5, false)`,
+		userID, email, normalizedUsername, TestAuthHash, emailVerified,
+	)
+	if err != nil {
+		t.Fatalf("testhelpers: failed to create test user: %v", err)
+	}
+
+	ts.insertE2EEKeys(t, userID)
+
+	accessToken, err := auth.GenerateAccessToken(userID, TestJWTSecret, emailVerified)
 	if err != nil {
 		t.Fatalf("testhelpers: failed to generate access token: %v", err)
 	}
@@ -133,6 +136,13 @@ func (ts *TestServer) CreateTestUser(t *testing.T, username string) TestUser {
 		Password:    TestAuthPlaintext,
 		AccessToken: accessToken,
 	}
+}
+
+// CreateTestUser inserts a user directly into the database and returns a TestUser
+// with a valid JWT access token. Uses a pre-computed password hash for speed.
+func (ts *TestServer) CreateTestUser(t *testing.T, username string) TestUser {
+	t.Helper()
+	return ts.createTestUserWithVerification(t, username, true)
 }
 
 // VerifyUserEmail marks a user's email as verified in the DB and returns a new
@@ -285,4 +295,123 @@ func ParseJSON(t *testing.T, w *httptest.ResponseRecorder, target interface{}) {
 	if err := json.NewDecoder(w.Body).Decode(target); err != nil {
 		t.Fatalf("testhelpers: failed to parse JSON response: %v", err)
 	}
+}
+
+// CreateTestUserUnverified inserts a user with email_verified=false and returns a
+// TestUser with a JWT that has the email_verified=false claim.
+func (ts *TestServer) CreateTestUserUnverified(t *testing.T, username string) TestUser {
+	t.Helper()
+	return ts.createTestUserWithVerification(t, username, false)
+}
+
+// CreateFriendship inserts a friendship row between two users with the given status.
+func (ts *TestServer) CreateFriendship(t *testing.T, user1ID, user2ID, status string) {
+	t.Helper()
+
+	_, err := ts.DB.Exec(
+		`INSERT INTO friendships (requester_id, addressee_id, status) VALUES ($1, $2, $3)`,
+		user1ID, user2ID, status,
+	)
+	if err != nil {
+		t.Fatalf("testhelpers: failed to create friendship: %v", err)
+	}
+}
+
+// CreateDMConversation creates a DM conversation between two users and returns its ID.
+func (ts *TestServer) CreateDMConversation(t *testing.T, user1ID, user2ID string, isEncrypted bool) string {
+	t.Helper()
+
+	convID := uuid.New().String()
+	_, err := ts.DB.Exec(
+		`INSERT INTO dm_conversations (id, is_group, is_personal, is_encrypted, created_by)
+		 VALUES ($1, false, false, $2, $3)`,
+		convID, isEncrypted, user1ID,
+	)
+	if err != nil {
+		t.Fatalf("testhelpers: failed to create DM conversation: %v", err)
+	}
+
+	_, err = ts.DB.Exec(
+		`INSERT INTO dm_participants (conversation_id, user_id) VALUES ($1, $2), ($1, $3)`,
+		convID, user1ID, user2ID,
+	)
+	if err != nil {
+		t.Fatalf("testhelpers: failed to add DM participants: %v", err)
+	}
+
+	return convID
+}
+
+// SeedDMKey inserts a DM channel key for a user in a conversation at the given version.
+func (ts *TestServer) SeedDMKey(t *testing.T, conversationID, userID string, keyVersion int) {
+	t.Helper()
+
+	wrappedKey := []byte("test-wrapped-key-" + conversationID)
+	_, err := ts.DB.Exec(
+		`INSERT INTO dm_channel_keys (conversation_id, user_id, wrapped_key, key_version)
+		 VALUES ($1, $2, $3, $4)`,
+		conversationID, userID, wrappedKey, keyVersion,
+	)
+	if err != nil {
+		t.Fatalf("testhelpers: failed to seed DM key: %v", err)
+	}
+}
+
+// CreateTestRole creates a custom role in a server and returns the role ID.
+func (ts *TestServer) CreateTestRole(t *testing.T, serverID, name string, position int, permissions int64) string {
+	t.Helper()
+
+	roleID := uuid.New().String()
+	_, err := ts.DB.Exec(
+		`INSERT INTO roles (id, server_id, name, position, permissions, is_default, is_managed)
+		 VALUES ($1, $2, $3, $4, $5, FALSE, FALSE)`,
+		roleID, serverID, name, position, permissions,
+	)
+	if err != nil {
+		t.Fatalf("testhelpers: failed to create test role: %v", err)
+	}
+	return roleID
+}
+
+// AssignRoleToUser assigns an existing role to a user in a server.
+func (ts *TestServer) AssignRoleToUser(t *testing.T, serverID, userID, roleID string) {
+	t.Helper()
+
+	_, err := ts.DB.Exec(
+		`INSERT INTO member_roles (server_id, user_id, role_id) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+		serverID, userID, roleID,
+	)
+	if err != nil {
+		t.Fatalf("testhelpers: failed to assign role to user: %v", err)
+	}
+}
+
+// CreateChannelOverride creates an SBAC channel permission override.
+func (ts *TestServer) CreateChannelOverride(t *testing.T, channelID, targetType, targetID string, allow, deny int64) {
+	t.Helper()
+
+	overrideID := uuid.New().String()
+	_, err := ts.DB.Exec(
+		`INSERT INTO channel_permission_overrides (id, channel_id, target_type, target_id, allow, deny)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		overrideID, channelID, targetType, targetID, allow, deny,
+	)
+	if err != nil {
+		t.Fatalf("testhelpers: failed to create channel override: %v", err)
+	}
+}
+
+// CreateVoiceChannel creates a voice channel in the given server and returns its ID.
+func (ts *TestServer) CreateVoiceChannel(t *testing.T, serverID, name string) string {
+	t.Helper()
+
+	channelID := uuid.New().String()
+	_, err := ts.DB.Exec(
+		`INSERT INTO channels (id, server_id, name, type, is_encrypted) VALUES ($1, $2, $3, 'voice', false)`,
+		channelID, serverID, name,
+	)
+	if err != nil {
+		t.Fatalf("testhelpers: failed to create voice channel: %v", err)
+	}
+	return channelID
 }
