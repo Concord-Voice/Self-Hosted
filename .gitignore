@@ -143,6 +143,9 @@ certs/
 *.avi
 uploads/
 
+# Allow bundled notification sounds
+!client/desktop/public/sounds/*.wav
+
 # Temporary Files
 tmp/
 temp/
