@@ -56,18 +56,13 @@ func NewService(cfg *config.Config, log *logger.Logger) *Service {
 	}
 }
 
-// SendVerificationCode sends a 6-digit verification code to the given email address.
-func (s *Service) SendVerificationCode(to, code string) error {
-	if s.devMode {
-		s.log.Info("DEV MODE — email verification code", "to", to, "code", code)
-		return nil
-	}
+// sendTemplatedEmail renders a template with data, builds the message, and sends it.
+func (s *Service) sendTemplatedEmail(to, subject string, tmpl *template.Template, data interface{}) error {
+	// Sanitize subject to prevent SMTP header injection
+	subject = strings.NewReplacer("\r", "", "\n", "").Replace(subject)
 
 	var body strings.Builder
-	err := verificationTmpl.Execute(&body, map[string]string{
-		"Code": code,
-	})
-	if err != nil {
+	if err := tmpl.Execute(&body, data); err != nil {
 		return fmt.Errorf("render email template: %w", err)
 	}
 
@@ -82,7 +77,7 @@ func (s *Service) SendVerificationCode(to, code string) error {
 
 	msg := headerFrom + fromAddr.String() + "\r\n" +
 		"To: " + toAddr.String() + "\r\n" +
-		"Subject: Your Concord verification code\r\n" +
+		"Subject: " + subject + "\r\n" +
 		mimeVersion +
 		contentTypeHTML +
 		"\r\n" +
@@ -91,39 +86,22 @@ func (s *Service) SendVerificationCode(to, code string) error {
 	return s.sendMail(fromAddr.Address, toAddr.Address, msg)
 }
 
+// SendVerificationCode sends a 6-digit verification code to the given email address.
+func (s *Service) SendVerificationCode(to, code string) error {
+	if s.devMode {
+		s.log.Info("DEV MODE — email verification code", "to", to, "code", code)
+		return nil
+	}
+	return s.sendTemplatedEmail(to, "Your Concord verification code", verificationTmpl, map[string]string{"Code": code})
+}
+
 // SendRecoveryCode sends a 6-digit account recovery code to the given email address.
 func (s *Service) SendRecoveryCode(to, code string) error {
 	if s.devMode {
 		s.log.Info("DEV MODE — account recovery code", "to", to, "code", code)
 		return nil
 	}
-
-	var body strings.Builder
-	err := recoveryTmpl.Execute(&body, map[string]string{
-		"Code": code,
-	})
-	if err != nil {
-		return fmt.Errorf("render recovery template: %w", err)
-	}
-
-	fromAddr, err := mail.ParseAddress(s.from)
-	if err != nil {
-		return fmt.Errorf(errInvalidFromAddr, err)
-	}
-	toAddr, err := mail.ParseAddress(to)
-	if err != nil {
-		return fmt.Errorf(errInvalidToAddr, err)
-	}
-
-	msg := headerFrom + fromAddr.String() + "\r\n" +
-		"To: " + toAddr.String() + "\r\n" +
-		"Subject: Your Concord account recovery code\r\n" +
-		mimeVersion +
-		contentTypeHTML +
-		"\r\n" +
-		body.String()
-
-	return s.sendMail(fromAddr.Address, toAddr.Address, msg)
+	return s.sendTemplatedEmail(to, "Your Concord account recovery code", recoveryTmpl, map[string]string{"Code": code})
 }
 
 // sendMail handles the SMTP connection and message delivery.
@@ -187,37 +165,14 @@ func (s *Service) SendOwnershipTransferNotification(to, serverName, newOwnerUser
 		return nil
 	}
 
-	var body strings.Builder
-	err := ownershipTransferTmpl.Execute(&body, map[string]string{
+	// Sanitize server name to prevent SMTP header injection
+	safeServerName := strings.NewReplacer("\r", "", "\n", "").Replace(serverName)
+
+	return s.sendTemplatedEmail(to, "Ownership transfer initiated for "+safeServerName, ownershipTransferTmpl, map[string]string{
 		"ServerName":       serverName,
 		"NewOwnerUsername": newOwnerUsername,
 		"ReversalToken":    reversalToken,
 	})
-	if err != nil {
-		return fmt.Errorf("render ownership transfer template: %w", err)
-	}
-
-	fromAddr, err := mail.ParseAddress(s.from)
-	if err != nil {
-		return fmt.Errorf(errInvalidFromAddr, err)
-	}
-	toAddr, err := mail.ParseAddress(to)
-	if err != nil {
-		return fmt.Errorf(errInvalidToAddr, err)
-	}
-
-	// Sanitize server name to prevent SMTP header injection
-	safeServerName := strings.NewReplacer("\r", "", "\n", "").Replace(serverName)
-
-	msg := headerFrom + fromAddr.String() + "\r\n" +
-		"To: " + toAddr.String() + "\r\n" +
-		"Subject: Ownership transfer initiated for " + safeServerName + "\r\n" +
-		mimeVersion +
-		contentTypeHTML +
-		"\r\n" +
-		body.String()
-
-	return s.sendMail(fromAddr.Address, toAddr.Address, msg)
 }
 
 // IsDevMode returns true when the service is operating without a real SMTP server.

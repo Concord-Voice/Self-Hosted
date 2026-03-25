@@ -12,6 +12,14 @@ const (
 	urlUsersMe         = "/api/v1/users/me"
 	urlUsersMeKeys     = "/api/v1/users/me/keys"
 	urlUsersMePassword = "/api/v1/users/me/password" //nolint:gosec // G101 false positive: URL path constant, not a credential
+
+	keyUsername          = "username"
+	keyWrappedPrivateKey = "wrapped_private_key"
+	keyKeyDerivationSalt = "key_derivation_salt"
+	keyCurrentPassword   = "current_password" //nolint:gosec // G101 false positive: map key constant, not a credential
+	keyNewPassword       = "new_password"     //nolint:gosec // G101 false positive: map key constant, not a credential
+	methodPatch          = "PATCH"
+	testPassword         = "TestPassword123!" //nolint:gosec // G101 false positive: test credential, not used in production
 )
 
 func setupTS(t *testing.T) *testhelpers.TestServer {
@@ -31,7 +39,7 @@ func TestGetMeSuccess(t *testing.T) {
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
 	userData := body["user"].(map[string]interface{})
-	assert.Equal(t, user.Username, userData["username"])
+	assert.Equal(t, user.Username, userData[keyUsername])
 	assert.Equal(t, user.Email, userData["email"])
 }
 
@@ -48,7 +56,7 @@ func TestUpdateMeSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "updateme")
 
-	w := ts.DoRequest("PATCH", urlUsersMe, map[string]interface{}{
+	w := ts.DoRequest(methodPatch, urlUsersMe, map[string]interface{}{
 		"display_name": "Updated Name",
 		"bio":          "My test bio",
 	}, testhelpers.AuthHeaders(user.AccessToken))
@@ -65,7 +73,7 @@ func TestUpdateMeInvalidAvatar(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "badavatar")
 
-	w := ts.DoRequest("PATCH", urlUsersMe, map[string]interface{}{
+	w := ts.DoRequest(methodPatch, urlUsersMe, map[string]interface{}{
 		"avatar_url": "not-a-data-url",
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
@@ -139,8 +147,8 @@ func TestReplaceMyKeysSuccess(t *testing.T) {
 
 	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
 	w := ts.DoRequest("PUT", urlUsersMeKeys, map[string]interface{}{
-		"wrapped_private_key": newWrapped,
-		"key_derivation_salt": newSalt,
+		keyWrappedPrivateKey: newWrapped,
+		keyKeyDerivationSalt: newSalt,
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -154,8 +162,8 @@ func TestReplaceMyKeysInvalidBase64(t *testing.T) {
 	user := ts.CreateTestUser(t, "badkeysuser")
 
 	w := ts.DoRequest("PUT", urlUsersMeKeys, map[string]interface{}{
-		"wrapped_private_key": "not-valid-base64!!!",
-		"key_derivation_salt": "also-bad!!!",
+		keyWrappedPrivateKey: "not-valid-base64!!!",
+		keyKeyDerivationSalt: "also-bad!!!",
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -176,8 +184,8 @@ func TestUpdateMeUsernameChangeCooldown(t *testing.T) {
 	user := ts.CreateTestUser(t, "cooldownuser")
 
 	// Username was just created, so username_changed_at = NOW(). Change should be blocked.
-	w := ts.DoRequest("PATCH", urlUsersMe, map[string]interface{}{
-		"username": "newcooldownname",
+	w := ts.DoRequest(methodPatch, urlUsersMe, map[string]interface{}{
+		keyUsername: "newcooldownname",
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
@@ -198,15 +206,15 @@ func TestUpdateMeUsernameChangeAllowed(t *testing.T) {
 	)
 	assert.NoError(t, err)
 
-	w := ts.DoRequest("PATCH", urlUsersMe, map[string]interface{}{
-		"username": "newallowedname",
+	w := ts.DoRequest(methodPatch, urlUsersMe, map[string]interface{}{
+		keyUsername: "newallowedname",
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
 	userData := body["user"].(map[string]interface{})
-	assert.Equal(t, "newallowedname", userData["username"])
+	assert.Equal(t, "newallowedname", userData[keyUsername])
 }
 
 func TestUpdateMeUsernameChangeSameUsername(t *testing.T) {
@@ -215,8 +223,8 @@ func TestUpdateMeUsernameChangeSameUsername(t *testing.T) {
 
 	// Even though on cooldown, submitting the same username should NOT trigger
 	// the cooldown error — it's effectively a no-op since no change occurs.
-	w := ts.DoRequest("PATCH", urlUsersMe, map[string]interface{}{
-		"username": "sameusername",
+	w := ts.DoRequest(methodPatch, urlUsersMe, map[string]interface{}{
+		keyUsername: "sameusername",
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	// The handler skips the cooldown check for no-op username submissions,
@@ -238,15 +246,15 @@ func TestUpdateMeUsernameWithPeriod(t *testing.T) {
 	)
 	assert.NoError(t, err)
 
-	w := ts.DoRequest("PATCH", urlUsersMe, map[string]interface{}{
-		"username": "period.test",
+	w := ts.DoRequest(methodPatch, urlUsersMe, map[string]interface{}{
+		keyUsername: "period.test",
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
 	userData := body["user"].(map[string]interface{})
-	assert.Equal(t, "period.test", userData["username"])
+	assert.Equal(t, "period.test", userData[keyUsername])
 }
 
 // registerAndVerify registers a user via the API (so Argon2id hash is real),
@@ -256,12 +264,12 @@ func registerAndVerify(t *testing.T, ts *testhelpers.TestServer, email, username
 	pub, priv, salt := testhelpers.E2EETestKeys()
 	regW := ts.DoRequest("POST", "/api/v1/auth/register", map[string]interface{}{
 		"email":               email,
-		"username":            username,
-		"password":            "TestPassword123!",
+		keyUsername:            username,
+		"password":            testPassword,
 		"age_confirmation":    true,
 		"public_key":          pub,
-		"wrapped_private_key": priv,
-		"key_derivation_salt": salt,
+		keyWrappedPrivateKey: priv,
+		keyKeyDerivationSalt: salt,
 	}, nil)
 	assert.Equal(t, http.StatusCreated, regW.Code)
 
@@ -282,10 +290,10 @@ func TestChangePasswordSuccess(t *testing.T) {
 
 	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
 	w := ts.DoRequest("POST", urlUsersMePassword, map[string]interface{}{
-		"current_password":    "TestPassword123!",
-		"new_password":        "NewStrongPassword456!",
-		"wrapped_private_key": newWrapped,
-		"key_derivation_salt": newSalt,
+		keyCurrentPassword:    testPassword,
+		keyNewPassword:        "NewStrongPassword456!",
+		keyWrappedPrivateKey: newWrapped,
+		keyKeyDerivationSalt: newSalt,
 	}, testhelpers.AuthHeaders(accessToken))
 
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -301,10 +309,10 @@ func TestChangePasswordWrongCurrentPassword(t *testing.T) {
 
 	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
 	w := ts.DoRequest("POST", urlUsersMePassword, map[string]interface{}{
-		"current_password":    "WrongPassword!!!!",
-		"new_password":        "NewStrongPassword456!",
-		"wrapped_private_key": newWrapped,
-		"key_derivation_salt": newSalt,
+		keyCurrentPassword:    "WrongPassword!!!!",
+		keyNewPassword:        "NewStrongPassword456!",
+		keyWrappedPrivateKey: newWrapped,
+		keyKeyDerivationSalt: newSalt,
 	}, testhelpers.AuthHeaders(accessToken))
 
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
@@ -317,10 +325,10 @@ func TestChangePasswordSameAsOld(t *testing.T) {
 
 	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
 	w := ts.DoRequest("POST", urlUsersMePassword, map[string]interface{}{
-		"current_password":    "TestPassword123!",
-		"new_password":        "TestPassword123!",
-		"wrapped_private_key": newWrapped,
-		"key_derivation_salt": newSalt,
+		keyCurrentPassword:    testPassword,
+		keyNewPassword:        testPassword,
+		keyWrappedPrivateKey: newWrapped,
+		keyKeyDerivationSalt: newSalt,
 	}, testhelpers.AuthHeaders(accessToken))
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -333,10 +341,10 @@ func TestChangePasswordWeakNewPassword(t *testing.T) {
 
 	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
 	w := ts.DoRequest("POST", urlUsersMePassword, map[string]interface{}{
-		"current_password":    "TestPassword123!",
-		"new_password":        "weak",
-		"wrapped_private_key": newWrapped,
-		"key_derivation_salt": newSalt,
+		keyCurrentPassword:    testPassword,
+		keyNewPassword:        "weak",
+		keyWrappedPrivateKey: newWrapped,
+		keyKeyDerivationSalt: newSalt,
 	}, testhelpers.AuthHeaders(accessToken))
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)

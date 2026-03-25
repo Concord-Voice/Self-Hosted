@@ -74,7 +74,8 @@ func TestServeUpdateAssetNoReleasesDir(t *testing.T) {
 	r := setupRouter(h)
 
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("GET", "/api/v1/updates/latest-mac.yml", nil)
+	req, err := http.NewRequest("GET", "/api/v1/updates/latest-mac.yml", nil)
+	require.NoError(t, err)
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
@@ -86,15 +87,23 @@ func TestServeUpdateAssetInvalidFilename(t *testing.T) {
 	h := newTestHandler(dir)
 	r := setupRouter(h)
 
-	tests := []string{
-		"/api/v1/updates/../../../etc/passwd",
-		"/api/v1/updates/foo/bar",
+	tests := []struct {
+		path       string
+		expectCode int
+	}{
+		// filepath.Base reduces "../../../etc/passwd" to "passwd" which doesn't exist → 404
+		{"/api/v1/updates/../../../etc/passwd", http.StatusNotFound},
+		// Gin splits "foo/bar" into param "foo/bar", filepath.Base → "bar" which doesn't exist → 404
+		{"/api/v1/updates/foo/bar", http.StatusNotFound},
 	}
-	for _, path := range tests {
+	for _, tt := range tests {
 		w := httptest.NewRecorder()
-		req, _ := http.NewRequest("GET", path, nil)
+		req, err := http.NewRequest("GET", tt.path, nil)
+		require.NoError(t, err)
 		r.ServeHTTP(w, req)
-		assert.Equal(t, http.StatusBadRequest, w.Code, "path: %s", path)
+		// Key assertion: traversal paths never return 200 (no file content leaked)
+		assert.Equal(t, tt.expectCode, w.Code, "path: %s", tt.path)
+		assert.NotEqual(t, http.StatusOK, w.Code, "path should never succeed: %s", tt.path)
 	}
 }
 
@@ -104,7 +113,8 @@ func TestServeUpdateAssetNotFound(t *testing.T) {
 	r := setupRouter(h)
 
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("GET", "/api/v1/updates/nonexistent-file.yml", nil)
+	req, err := http.NewRequest("GET", "/api/v1/updates/nonexistent-file.yml", nil)
+	require.NoError(t, err)
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
@@ -117,7 +127,8 @@ func TestServeUpdateAssetServesMetadata(t *testing.T) {
 	r := setupRouter(h)
 
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("GET", "/api/v1/updates/latest-mac.yml", nil)
+	req, err := http.NewRequest("GET", "/api/v1/updates/latest-mac.yml", nil)
+	require.NoError(t, err)
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -132,7 +143,8 @@ func TestServeUpdateAssetServesBinary(t *testing.T) {
 	r := setupRouter(h)
 
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("GET", "/api/v1/updates/ConcordVoice-0.1.4-macos-arm64.zip", nil)
+	req, err := http.NewRequest("GET", "/api/v1/updates/ConcordVoice-0.1.4-macos-arm64.zip", nil)
+	require.NoError(t, err)
 	r.ServeHTTP(w, req)
 
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -152,7 +164,8 @@ func TestServeUpdateAssetDirectoryTraversal(t *testing.T) {
 	r := setupRouter(h)
 
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("GET", "/api/v1/updates/..%2Fsecret.txt", nil)
+	req, err := http.NewRequest("GET", "/api/v1/updates/..%2Fsecret.txt", nil)
+	require.NoError(t, err)
 	r.ServeHTTP(w, req)
 
 	// Should be blocked (either 400 or 404, never 200)

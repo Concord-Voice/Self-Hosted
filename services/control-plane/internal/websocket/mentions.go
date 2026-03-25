@@ -120,43 +120,55 @@ func (h *Hub) enforceMentionPermissions(
 	ctx, cancel := context.WithTimeout(context.Background(), mentionCtxTimeout)
 	defer cancel()
 
-	// Check @all / @here
-	if addendum.Everyone || addendum.Here {
-		hasPerm, err := h.mentionChecker.HasMentionPermission(ctx, serverID, userID, channelID, permMentionEveryone)
-		if err != nil {
-			log.Printf("Failed to check PermMentionEveryone: %v", err)
-			addendum.Everyone = false
-			addendum.Here = false
-		} else if !hasPerm {
-			addendum.Everyone = false
-			addendum.Here = false
-		}
-	}
+	h.enforceEveryonePerm(ctx, serverID, userID, channelID, addendum)
+	h.enforceUserMentionPerm(ctx, serverID, userID, channelID, addendum)
+	h.enforceRoleMentionPerm(ctx, serverID, userID, channelID, addendum)
+}
 
-	// Check @username mentions
-	if len(addendum.Users) > 0 {
-		hasPerm, err := h.mentionChecker.HasMentionPermission(ctx, serverID, userID, channelID, permMentionUsers)
-		if err != nil {
-			log.Printf("Failed to check PermMentionUsers: %v", err)
-			addendum.Users = nil
-		} else if !hasPerm {
-			addendum.Users = nil
-		}
+// enforceEveryonePerm strips @all/@here if the user lacks PermMentionEveryone.
+func (h *Hub) enforceEveryonePerm(ctx context.Context, serverID, userID, channelID string, addendum *MentionAddendum) {
+	if !addendum.Everyone && !addendum.Here {
+		return
 	}
+	hasPerm, err := h.mentionChecker.HasMentionPermission(ctx, serverID, userID, channelID, permMentionEveryone)
+	if err != nil {
+		log.Printf("Failed to check PermMentionEveryone: %v", err)
+	}
+	if err != nil || !hasPerm {
+		addendum.Everyone = false
+		addendum.Here = false
+	}
+}
 
-	// Check @role mentions
+// enforceUserMentionPerm strips @user mentions if the user lacks PermMentionUsers.
+func (h *Hub) enforceUserMentionPerm(ctx context.Context, serverID, userID, channelID string, addendum *MentionAddendum) {
+	if len(addendum.Users) == 0 {
+		return
+	}
+	hasPerm, err := h.mentionChecker.HasMentionPermission(ctx, serverID, userID, channelID, permMentionUsers)
+	if err != nil {
+		log.Printf("Failed to check PermMentionUsers: %v", err)
+	}
+	if err != nil || !hasPerm {
+		addendum.Users = nil
+	}
+}
+
+// enforceRoleMentionPerm strips @role mentions if the user lacks PermMentionRoles,
+// and filters to only mentionable roles scoped to this server.
+func (h *Hub) enforceRoleMentionPerm(ctx context.Context, serverID, userID, channelID string, addendum *MentionAddendum) {
+	if len(addendum.Roles) == 0 {
+		return
+	}
+	hasPerm, err := h.mentionChecker.HasMentionPermission(ctx, serverID, userID, channelID, permMentionRoles)
+	if err != nil {
+		log.Printf("Failed to check PermMentionRoles: %v", err)
+	}
+	if err != nil || !hasPerm {
+		addendum.Roles = nil
+	}
 	if len(addendum.Roles) > 0 {
-		hasPerm, err := h.mentionChecker.HasMentionPermission(ctx, serverID, userID, channelID, permMentionRoles)
-		if err != nil {
-			log.Printf("Failed to check PermMentionRoles: %v", err)
-			addendum.Roles = nil
-		} else if !hasPerm {
-			addendum.Roles = nil
-		}
-		// Filter to only mentionable roles that belong to this server (#1: scope to server_id)
-		if len(addendum.Roles) > 0 {
-			addendum.Roles = h.filterMentionableRoles(serverID, addendum.Roles)
-		}
+		addendum.Roles = h.filterMentionableRoles(serverID, addendum.Roles)
 	}
 }
 
@@ -248,86 +260,9 @@ func (h *Hub) routeMentionNotifications(
 	// Collect all user IDs that should receive mention notifications
 	mentionedUserIDs := make(map[uuid.UUID]bool)
 
-	// (#2) Direct user mentions — validate against server membership to prevent
-	// a modified client from routing notifications to arbitrary non-member users.
-	if len(addendum.Users) > 0 {
-		rows, err := h.db.Query(
-			`SELECT user_id FROM server_members WHERE server_id = $1 AND user_id = ANY($2::uuid[])`,
-			serverID, uuidArrayParam(addendum.Users),
-		)
-		if err != nil {
-			log.Printf("Failed to validate mentioned users as server members: %v", err)
-		} else {
-			validMembers := make(map[string]bool)
-			for rows.Next() {
-				var uid string
-				if err := rows.Scan(&uid); err == nil {
-					validMembers[uid] = true
-				}
-			}
-			if err := rows.Err(); err != nil {
-				log.Printf("Error iterating server members for mention validation: %v", err)
-			}
-			_ = rows.Close()
-			for _, uid := range addendum.Users {
-				if validMembers[uid] {
-					if parsed, err := uuid.Parse(uid); err == nil && parsed != senderUserID {
-						mentionedUserIDs[parsed] = true
-					}
-				}
-			}
-		}
-	}
-
-	// (#11) Role mentions: batch resolve role membership instead of N+1 queries.
-	// Scoped to the current server via filterMentionableRoles (already applied).
-	if len(addendum.Roles) > 0 {
-		rows, err := h.db.Query(
-			`SELECT DISTINCT mr.user_id FROM member_roles mr
-			 WHERE mr.role_id = ANY($1::uuid[]) AND mr.server_id = $2`,
-			uuidArrayParam(addendum.Roles), serverID,
-		)
-		if err != nil {
-			log.Printf("Failed to batch resolve role members for mention: %v", err)
-		} else {
-			for rows.Next() {
-				var uid string
-				if err := rows.Scan(&uid); err == nil {
-					if parsed, err := uuid.Parse(uid); err == nil && parsed != senderUserID {
-						mentionedUserIDs[parsed] = true
-					}
-				}
-			}
-			if err := rows.Err(); err != nil {
-				log.Printf("Error iterating role members for mention routing: %v", err)
-			}
-			_ = rows.Close()
-		}
-	}
-
-	// @everyone / @here: all server members (for @here, online filtering happens client-side)
-	if addendum.Everyone || addendum.Here {
-		rows, err := h.db.Query(
-			`SELECT user_id FROM server_members WHERE server_id = $1`,
-			serverID,
-		)
-		if err != nil {
-			log.Printf("Failed to resolve server members for @everyone mention: %v", err)
-		} else {
-			for rows.Next() {
-				var uid string
-				if err := rows.Scan(&uid); err == nil {
-					if parsed, err := uuid.Parse(uid); err == nil && parsed != senderUserID {
-						mentionedUserIDs[parsed] = true
-					}
-				}
-			}
-			if err := rows.Err(); err != nil {
-				log.Printf("Error iterating server members for @everyone mention: %v", err)
-			}
-			_ = rows.Close()
-		}
-	}
+	h.resolveDirectUserMentions(serverID, senderUserID, addendum, mentionedUserIDs)
+	h.resolveRoleMentions(serverID, senderUserID, addendum, mentionedUserIDs)
+	h.resolveEveryoneMentions(serverID, senderUserID, addendum, mentionedUserIDs)
 
 	if len(mentionedUserIDs) == 0 {
 		return
@@ -336,6 +271,112 @@ func (h *Hub) routeMentionNotifications(
 	// Send mention-enhanced unread_notify to mentioned users who are connected
 	// but NOT subscribed to the channel (they'll detect it client-side if subscribed)
 	h.sendMentionNotify(serverID, channelID, mentionedUserIDs, addendum.Everyone, addendum.Here)
+}
+
+// resolveDirectUserMentions validates direct @user mentions against server membership
+// to prevent a modified client from routing notifications to arbitrary non-member users.
+func (h *Hub) resolveDirectUserMentions(
+	serverID, senderUserID uuid.UUID,
+	addendum *MentionAddendum,
+	mentionedUserIDs map[uuid.UUID]bool,
+) {
+	if len(addendum.Users) == 0 {
+		return
+	}
+
+	rows, err := h.db.Query(
+		`SELECT user_id FROM server_members WHERE server_id = $1 AND user_id = ANY($2::uuid[])`,
+		serverID, uuidArrayParam(addendum.Users),
+	)
+	if err != nil {
+		log.Printf("Failed to validate mentioned users as server members: %v", err)
+		return
+	}
+	validMembers := make(map[string]bool)
+	for rows.Next() {
+		var uid string
+		if err := rows.Scan(&uid); err == nil {
+			validMembers[uid] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("Error iterating server members for mention validation: %v", err)
+	}
+	_ = rows.Close()
+
+	for _, uid := range addendum.Users {
+		if !validMembers[uid] {
+			continue
+		}
+		parsed, parseErr := uuid.Parse(uid)
+		if parseErr == nil && parsed != senderUserID {
+			mentionedUserIDs[parsed] = true
+		}
+	}
+}
+
+// resolveRoleMentions batch resolves role membership instead of N+1 queries.
+// Scoped to the current server via filterMentionableRoles (already applied).
+func (h *Hub) resolveRoleMentions(
+	serverID, senderUserID uuid.UUID,
+	addendum *MentionAddendum,
+	mentionedUserIDs map[uuid.UUID]bool,
+) {
+	if len(addendum.Roles) == 0 {
+		return
+	}
+
+	rows, err := h.db.Query(
+		`SELECT DISTINCT mr.user_id FROM member_roles mr
+		 WHERE mr.role_id = ANY($1::uuid[]) AND mr.server_id = $2`,
+		uuidArrayParam(addendum.Roles), serverID,
+	)
+	if err != nil {
+		log.Printf("Failed to batch resolve role members for mention: %v", err)
+		return
+	}
+	collectMentionedUsers(rows, senderUserID, mentionedUserIDs, "role members for mention routing")
+}
+
+// resolveEveryoneMentions resolves @everyone / @here: all server members.
+// For @here, online filtering happens client-side.
+func (h *Hub) resolveEveryoneMentions(
+	serverID, senderUserID uuid.UUID,
+	addendum *MentionAddendum,
+	mentionedUserIDs map[uuid.UUID]bool,
+) {
+	if !addendum.Everyone && !addendum.Here {
+		return
+	}
+
+	rows, err := h.db.Query(
+		`SELECT user_id FROM server_members WHERE server_id = $1`,
+		serverID,
+	)
+	if err != nil {
+		log.Printf("Failed to resolve server members for @everyone mention: %v", err)
+		return
+	}
+	collectMentionedUsers(rows, senderUserID, mentionedUserIDs, "server members for @everyone mention")
+}
+
+// collectMentionedUsers scans user_id rows and adds them to the mentionedUserIDs set,
+// excluding the sender. The logContext describes the query source for error logging.
+func collectMentionedUsers(rows interface{ Next() bool; Scan(...interface{}) error; Err() error; Close() error }, senderUserID uuid.UUID, mentionedUserIDs map[uuid.UUID]bool, logContext string) {
+	for rows.Next() {
+		var uid string
+		if err := rows.Scan(&uid); err != nil {
+			continue
+		}
+		parsed, parseErr := uuid.Parse(uid)
+		if parseErr == nil && parsed != senderUserID {
+			mentionedUserIDs[parsed] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("Error iterating %s: %v", logContext, err)
+	}
+	_ = rows.Close()
 }
 
 // sendMentionNotify sends a mention-enhanced unread_notify to specific users.
@@ -364,28 +405,7 @@ func (h *Hub) sendMentionNotify(
 	channelClients := h.channelSubscriptions[channelID]
 
 	for userID := range mentionedUsers {
-		clientIDs, ok := h.userClients[userID]
-		if !ok {
-			continue // user not connected
-		}
-
-		for clientID := range clientIDs {
-			// Skip clients subscribed to the channel — they get the full message
-			// and will detect the mention client-side after decryption
-			if channelClients != nil && channelClients[clientID] {
-				continue
-			}
-
-			client, ok := h.clients[clientID]
-			if !ok {
-				continue
-			}
-
-			select {
-			case client.Send <- notifyMsg:
-			default:
-			}
-		}
+		h.sendToUnsubscribedClients(userID, channelClients, notifyMsg)
 	}
 }
 
@@ -400,8 +420,21 @@ func (h *Hub) routeDMMentionNotifications(
 		return
 	}
 
-	// Resolve conversation participants up front so we can validate direct mentions
-	// against the conversation membership (prevents targeting arbitrary non-participants).
+	participants := h.resolveDMParticipants(conversationID)
+	if len(participants) == 0 {
+		return
+	}
+
+	mentionedUserIDs := h.resolveDMMentionTargets(senderUserID, addendum, participants)
+	if len(mentionedUserIDs) == 0 {
+		return
+	}
+
+	h.sendDMMentionNotify(conversationID, mentionedUserIDs, addendum.Here)
+}
+
+// resolveDMParticipants fetches all participants for a DM conversation.
+func (h *Hub) resolveDMParticipants(conversationID uuid.UUID) map[uuid.UUID]bool {
 	participants := make(map[uuid.UUID]bool)
 	rows, err := h.db.Query(
 		`SELECT user_id FROM dm_participants WHERE conversation_id = $1`,
@@ -409,12 +442,12 @@ func (h *Hub) routeDMMentionNotifications(
 	)
 	if err != nil {
 		log.Printf("Failed to resolve DM participants for mention routing: %v", err)
-		return
+		return participants
 	}
 	for rows.Next() {
 		var uid string
 		if err := rows.Scan(&uid); err == nil {
-			if parsed, err := uuid.Parse(uid); err == nil {
+			if parsed, parseErr := uuid.Parse(uid); parseErr == nil {
 				participants[parsed] = true
 			}
 		}
@@ -423,15 +456,26 @@ func (h *Hub) routeDMMentionNotifications(
 		log.Printf("Error iterating DM participants for mention routing: %v", err)
 	}
 	_ = rows.Close()
+	return participants
+}
 
+// resolveDMMentionTargets collects direct user mentions and @here targets,
+// validating them against conversation participants.
+func (h *Hub) resolveDMMentionTargets(
+	senderUserID uuid.UUID,
+	addendum *MentionAddendum,
+	participants map[uuid.UUID]bool,
+) map[uuid.UUID]bool {
 	mentionedUserIDs := make(map[uuid.UUID]bool)
 
 	// Direct user mentions — only notify actual participants
 	for _, uid := range addendum.Users {
-		if parsed, err := uuid.Parse(uid); err == nil && parsed != senderUserID {
-			if participants[parsed] {
-				mentionedUserIDs[parsed] = true
-			}
+		parsed, parseErr := uuid.Parse(uid)
+		if parseErr != nil || parsed == senderUserID {
+			continue
+		}
+		if participants[parsed] {
+			mentionedUserIDs[parsed] = true
 		}
 	}
 
@@ -444,17 +488,22 @@ func (h *Hub) routeDMMentionNotifications(
 		}
 	}
 
-	if len(mentionedUserIDs) == 0 {
-		return
-	}
+	return mentionedUserIDs
+}
 
-	// Marshal once — payload is identical for all recipients
+// sendDMMentionNotify sends dm_unread_notify to mentioned DM participants
+// who are not subscribed to the conversation.
+func (h *Hub) sendDMMentionNotify(
+	conversationID uuid.UUID,
+	mentionedUsers map[uuid.UUID]bool,
+	isHere bool,
+) {
 	notifyMsg, err := marshalOutgoing(OutgoingMessage{
 		Type: "dm_unread_notify",
 		Data: map[string]interface{}{
 			"conversation_id": conversationID.String(),
 			"mentioned":       true,
-			"mention_here":    addendum.Here,
+			"mention_here":    isHere,
 		},
 	})
 	if err != nil {
@@ -463,26 +512,30 @@ func (h *Hub) routeDMMentionNotifications(
 
 	dmClients := h.dmSubscriptions[conversationID]
 
-	for userID := range mentionedUserIDs {
-		clientIDs, ok := h.userClients[userID]
+	for userID := range mentionedUsers {
+		h.sendToUnsubscribedClients(userID, dmClients, notifyMsg)
+	}
+}
+
+// sendToUnsubscribedClients sends a message to all clients of a user that are NOT
+// in the given subscription set (channelClients or dmClients).
+func (h *Hub) sendToUnsubscribedClients(userID uuid.UUID, subscribedClients map[uuid.UUID]bool, msg []byte) {
+	clientIDs, ok := h.userClients[userID]
+	if !ok {
+		return
+	}
+
+	for clientID := range clientIDs {
+		if subscribedClients != nil && subscribedClients[clientID] {
+			continue
+		}
+		client, ok := h.clients[clientID]
 		if !ok {
 			continue
 		}
-
-		for clientID := range clientIDs {
-			if dmClients != nil && dmClients[clientID] {
-				continue
-			}
-
-			client, ok := h.clients[clientID]
-			if !ok {
-				continue
-			}
-
-			select {
-			case client.Send <- notifyMsg:
-			default:
-			}
+		select {
+		case client.Send <- msg:
+		default:
 		}
 	}
 }

@@ -14,6 +14,26 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	errMsgInvalidServerID = "Invalid server ID"
+	errMsgInvalidChannelID = "Invalid channel ID"
+	errMsgInvalidRequestBody = "Invalid request body"
+	errMsgInsufficientPerms = "insufficient permissions"
+	errMsgNotMemberOfServer = "Not a member of this server"
+	errMsgChannelNotFound = "Channel not found"
+	errMsgChannelNotEncrypted = "Channel is not encrypted"
+	errMsgFailedFetchChannels = "Failed to fetch channels"
+	errMsgFailedCreateChannel = "Failed to create channel"
+	errMsgFailedUpdateChannel = "Failed to update channel"
+	errMsgFailedDeleteChannel = "Failed to delete channel"
+	errMsgFailedCheckMembership = "Failed to check membership"
+	errMsgFailedFetchKeys = "Failed to fetch keys"
+	errMsgFailedFetchUnreadCounts = "Failed to fetch unread counts"
+	errMsgFailedMarkServerRead = "Failed to mark server read"
+	errMsgNoEncryptionKey = "No encryption key available yet"
+)
+
+
 // Handler handles channel-related requests
 type Handler struct {
 	db       *sql.DB
@@ -64,7 +84,7 @@ func (h *Handler) ListChannels(c *gin.Context) {
 
 	// Validate server ID
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 
@@ -79,13 +99,13 @@ func (h *Handler) ListChannels(c *gin.Context) {
 
 	err := h.db.QueryRow(memberQuery, serverID, userID).Scan(&isMember)
 	if err != nil {
-		h.log.Error("Failed to check membership", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch channels"})
+		h.log.Error(errMsgFailedCheckMembership, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchChannels})
 		return
 	}
 
 	if !isMember {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this server"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotMemberOfServer})
 		return
 	}
 
@@ -93,7 +113,7 @@ func (h *Handler) ListChannels(c *gin.Context) {
 	visibleIDs, err := h.resolver.GetVisibleChannelIDs(c.Request.Context(), serverID, userID)
 	if err != nil {
 		h.log.Error("Failed to resolve visible channels", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch channels"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchChannels})
 		return
 	}
 
@@ -114,7 +134,7 @@ func (h *Handler) ListChannels(c *gin.Context) {
 	rows, err := h.db.Query(query, serverID)
 	if err != nil {
 		h.log.Error("Failed to query channels", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch channels"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchChannels})
 		return
 	}
 	defer func() { _ = rows.Close() }()
@@ -149,7 +169,7 @@ func (h *Handler) ListChannels(c *gin.Context) {
 	}
 	if err := rows.Err(); err != nil {
 		h.log.Error("Error iterating channels", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch channels"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchChannels})
 		return
 	}
 
@@ -163,7 +183,7 @@ func (h *Handler) ListChannels(c *gin.Context) {
 	)
 	if err != nil {
 		h.log.Error("Failed to query channel groups", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch channels"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchChannels})
 		return
 	}
 	defer func() { _ = groupRows.Close() }()
@@ -179,7 +199,7 @@ func (h *Handler) ListChannels(c *gin.Context) {
 	}
 	if err := groupRows.Err(); err != nil {
 		h.log.Error("Error iterating channel groups", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch channels"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchChannels})
 		return
 	}
 
@@ -192,7 +212,7 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 
 	var req CreateChannelRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
 
@@ -200,23 +220,15 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), req.ServerID, userID, "", rbac.PermManageChannels)
 	if err != nil {
 		h.log.Error("Failed to check permissions", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create channel"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateChannel})
 		return
 	}
 	if !hasPerm {
-		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
 		return
 	}
 
-	// Determine encryption setting: use request value or fall back to server's e2ee_default
-	isEncrypted := false
-	if req.IsEncrypted != nil {
-		isEncrypted = *req.IsEncrypted
-	} else {
-		var e2eeDefault bool
-		_ = h.db.QueryRow(`SELECT e2ee_default FROM servers WHERE id = $1`, req.ServerID).Scan(&e2eeDefault)
-		isEncrypted = e2eeDefault
-	}
+	isEncrypted := h.resolveEncryption(req)
 
 	// If encrypted, wrapped keys are required
 	if isEncrypted && len(req.WrappedKeys) == 0 {
@@ -228,7 +240,7 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 	tx, err := h.db.Begin()
 	if err != nil {
 		h.log.Error("Failed to start transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create channel"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateChannel})
 		return
 	}
 	defer func() {
@@ -237,24 +249,76 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 		}
 	}()
 
-	// Create channel — place at end of its group (or end of uncategorized)
+	nextPos := h.computeNextPosition(tx, req.ServerID, req.GroupID)
 	channelID := uuid.New().String()
 
-	// Compute next position: max(position) + 1 within the same group
+	channel, err := h.insertChannel(tx, channelID, req, isEncrypted, nextPos)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateChannel})
+		return
+	}
+
+	// Store wrapped channel keys if encrypted
+	if isEncrypted && h.storeWrappedKeys(tx, channelID, req.WrappedKeys) != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to store encryption keys"})
+		return
+	}
+
+	// Auto-create linked text channel for voice channels
+	linkedTextChannel, ltcErr := h.maybeCreateLinkedTextChannel(tx, req, channelID, isEncrypted, nextPos)
+	if ltcErr != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create linked text channel"})
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		h.log.Error("Failed to commit transaction", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateChannel})
+		return
+	}
+
+	h.log.Info("Channel created", "channel_id", channelID, "server_id", req.ServerID, "user_id", userID, "encrypted", isEncrypted)
+
+	h.broadcastChannelCreated(req.ServerID, channel, linkedTextChannel)
+
+	// Return response: voice channels include the linked text channel
+	response := gin.H{"channel": channel}
+	if linkedTextChannel != nil {
+		response["linked_text_channel"] = linkedTextChannel
+	}
+	c.JSON(http.StatusCreated, response)
+}
+
+// resolveEncryption determines if a channel should be encrypted based on
+// the request value or the server's e2ee_default.
+func (h *Handler) resolveEncryption(req CreateChannelRequest) bool {
+	if req.IsEncrypted != nil {
+		return *req.IsEncrypted
+	}
+	var e2eeDefault bool
+	_ = h.db.QueryRow(`SELECT e2ee_default FROM servers WHERE id = $1`, req.ServerID).Scan(&e2eeDefault)
+	return e2eeDefault
+}
+
+// computeNextPosition returns the next position for a channel within a group (or uncategorized).
+func (h *Handler) computeNextPosition(tx *sql.Tx, serverID string, groupID *string) int {
 	var maxPos int
-	if req.GroupID != nil {
+	if groupID != nil {
 		_ = tx.QueryRow(
 			`SELECT COALESCE(MAX(position), -1) FROM channels WHERE server_id = $1 AND group_id = $2`,
-			req.ServerID, *req.GroupID,
+			serverID, *groupID,
 		).Scan(&maxPos)
 	} else {
 		_ = tx.QueryRow(
 			`SELECT COALESCE(MAX(position), -1) FROM channels WHERE server_id = $1 AND group_id IS NULL`,
-			req.ServerID,
+			serverID,
 		).Scan(&maxPos)
 	}
-	nextPos := maxPos + 1
+	return maxPos + 1
+}
 
+// insertChannel creates the primary channel row within a transaction.
+func (h *Handler) insertChannel(tx *sql.Tx, channelID string, req CreateChannelRequest, isEncrypted bool, position int) (models.Channel, error) {
 	insertQuery := `
 		INSERT INTO channels (id, server_id, name, type, emoji, is_encrypted, group_id, position, created_at, updated_at)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
@@ -269,146 +333,141 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 	channel.Emoji = req.Emoji
 	channel.IsEncrypted = isEncrypted
 	channel.GroupID = req.GroupID
-	channel.Position = nextPos
+	channel.Position = position
 
-	err = tx.QueryRow(insertQuery, channelID, req.ServerID, req.Name, req.Type, req.Emoji, isEncrypted, req.GroupID, nextPos).Scan(
+	err := tx.QueryRow(insertQuery, channelID, req.ServerID, req.Name, req.Type, req.Emoji, isEncrypted, req.GroupID, position).Scan(
 		&channel.CreatedAt,
 		&channel.UpdatedAt,
 	)
 	if err != nil {
 		h.log.Error("Failed to create channel", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create channel"})
-		return
+		return channel, err
+	}
+	return channel, nil
+}
+
+// storeWrappedKeys inserts wrapped E2EE keys for a channel within a transaction.
+func (h *Handler) storeWrappedKeys(tx *sql.Tx, channelID string, wrappedKeys map[string]string) error {
+	keyInsert := `
+		INSERT INTO channel_keys (channel_id, user_id, wrapped_key, key_version)
+		VALUES ($1, $2, $3, 1)
+	`
+	for memberUserID, wrappedKey := range wrappedKeys {
+		if _, parseErr := uuid.Parse(memberUserID); parseErr != nil {
+			continue // skip invalid UUIDs
+		}
+		if _, err := tx.Exec(keyInsert, channelID, memberUserID, wrappedKey); err != nil {
+			h.log.Error("Failed to store channel key", "error", err, "user_id", memberUserID)
+			return err
+		}
+	}
+	return nil
+}
+
+// maybeCreateLinkedTextChannel creates a linked text channel for voice channels, or returns nil for other types.
+func (h *Handler) maybeCreateLinkedTextChannel(tx *sql.Tx, req CreateChannelRequest, voiceChannelID string, isEncrypted bool, nextPos int) (*models.Channel, error) {
+	if req.Type != "voice" {
+		return nil, nil
+	}
+	return h.createLinkedTextChannel(tx, req, voiceChannelID, isEncrypted, nextPos+1)
+}
+
+// createLinkedTextChannel creates a linked text channel for a voice channel.
+func (h *Handler) createLinkedTextChannel(tx *sql.Tx, req CreateChannelRequest, voiceChannelID string, isEncrypted bool, position int) (*models.Channel, error) {
+	linkedTextID := uuid.New().String()
+	linkedInsert := `
+		INSERT INTO channels (id, server_id, name, type, is_encrypted, group_id, linked_voice_channel_id, position, created_at, updated_at)
+		VALUES ($1, $2, $3, 'text', $4, $5, $6, $7, NOW(), NOW())
+		RETURNING created_at, updated_at
+	`
+	var ltc models.Channel
+	ltc.ID = linkedTextID
+	ltc.ServerID = req.ServerID
+	ltc.Name = req.Name
+	ltc.Type = "text"
+	ltc.IsEncrypted = isEncrypted
+	ltc.GroupID = req.GroupID
+	ltc.LinkedVoiceChannelID = &voiceChannelID
+	ltc.Position = position
+
+	err := tx.QueryRow(linkedInsert, linkedTextID, req.ServerID, req.Name, isEncrypted, req.GroupID, voiceChannelID, position).Scan(
+		&ltc.CreatedAt,
+		&ltc.UpdatedAt,
+	)
+	if err != nil {
+		h.log.Error("Failed to create linked text channel", "error", err)
+		return nil, err
 	}
 
-	// Store wrapped channel keys if encrypted
+	// If encrypted, copy wrapped keys for the linked text channel too (non-fatal)
 	if isEncrypted {
-		keyInsert := `
-			INSERT INTO channel_keys (channel_id, user_id, wrapped_key, key_version)
-			VALUES ($1, $2, $3, 1)
-		`
-		for memberUserID, wrappedKey := range req.WrappedKeys {
-			if _, parseErr := uuid.Parse(memberUserID); parseErr != nil {
-				continue // skip invalid UUIDs
-			}
-			_, err = tx.Exec(keyInsert, channelID, memberUserID, wrappedKey)
-			if err != nil {
-				h.log.Error("Failed to store channel key", "error", err, "user_id", memberUserID)
-				c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to store encryption keys"})
-				return
-			}
-		}
+		h.storeWrappedKeysNonFatal(tx, linkedTextID, req.WrappedKeys)
 	}
 
-	// Auto-create linked text channel for voice channels
-	var linkedTextChannel *models.Channel
-	if req.Type == "voice" {
-		linkedTextID := uuid.New().String()
-		linkedTextPos := nextPos + 1 // Place right after the voice channel
-		linkedInsert := `
-			INSERT INTO channels (id, server_id, name, type, is_encrypted, group_id, linked_voice_channel_id, position, created_at, updated_at)
-			VALUES ($1, $2, $3, 'text', $4, $5, $6, $7, NOW(), NOW())
-			RETURNING created_at, updated_at
-		`
-		var ltc models.Channel
-		ltc.ID = linkedTextID
-		ltc.ServerID = req.ServerID
-		ltc.Name = req.Name
-		ltc.Type = "text"
-		ltc.IsEncrypted = isEncrypted
-		ltc.GroupID = req.GroupID
-		ltc.LinkedVoiceChannelID = &channelID
-		ltc.Position = linkedTextPos
+	return &ltc, nil
+}
 
-		err = tx.QueryRow(linkedInsert, linkedTextID, req.ServerID, req.Name, isEncrypted, req.GroupID, channelID, linkedTextPos).Scan(
-			&ltc.CreatedAt,
-			&ltc.UpdatedAt,
-		)
-		if err != nil {
-			h.log.Error("Failed to create linked text channel", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create linked text channel"})
-			return
+// storeWrappedKeysNonFatal stores wrapped keys but does not fail on error (keys can be distributed later).
+func (h *Handler) storeWrappedKeysNonFatal(tx *sql.Tx, channelID string, wrappedKeys map[string]string) {
+	keyInsert := `
+		INSERT INTO channel_keys (channel_id, user_id, wrapped_key, key_version)
+		VALUES ($1, $2, $3, 1)
+	`
+	for memberUserID, wrappedKey := range wrappedKeys {
+		if _, parseErr := uuid.Parse(memberUserID); parseErr != nil {
+			continue
 		}
-
-		// If encrypted, copy wrapped keys for the linked text channel too
-		if isEncrypted {
-			keyInsertLinked := `
-				INSERT INTO channel_keys (channel_id, user_id, wrapped_key, key_version)
-				VALUES ($1, $2, $3, 1)
-			`
-			for memberUserID, wrappedKey := range req.WrappedKeys {
-				if _, parseErr := uuid.Parse(memberUserID); parseErr != nil {
-					continue
-				}
-				_, err = tx.Exec(keyInsertLinked, linkedTextID, memberUserID, wrappedKey)
-				if err != nil {
-					h.log.Error("Failed to store linked text channel key", "error", err, "user_id", memberUserID)
-					// Non-fatal — keys can be distributed later
-				}
-			}
+		if _, err := tx.Exec(keyInsert, channelID, memberUserID, wrappedKey); err != nil {
+			h.log.Error("Failed to store linked text channel key", "error", err, "user_id", memberUserID)
 		}
-
-		linkedTextChannel = &ltc
 	}
+}
 
-	if err := tx.Commit(); err != nil {
-		h.log.Error("Failed to commit transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create channel"})
+// broadcastChannelCreated sends channel_created events to server subscribers.
+func (h *Handler) broadcastChannelCreated(serverID string, channel models.Channel, linkedTextChannel *models.Channel) {
+	if h.hub == nil {
+		return
+	}
+	serverUUID, err := uuid.Parse(serverID)
+	if err != nil {
 		return
 	}
 
-	h.log.Info("Channel created", "channel_id", channelID, "server_id", req.ServerID, "user_id", userID, "encrypted", isEncrypted)
+	h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+		Type: "channel_created",
+		Data: map[string]interface{}{
+			"channel": channelToMap(channel),
+		},
+	})
 
-	// Broadcast new channel to server subscribers so other members see it instantly
-	if h.hub != nil {
-		if serverUUID, err := uuid.Parse(req.ServerID); err == nil {
-			h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
-				Type: "channel_created",
-				Data: map[string]interface{}{
-					"channel": map[string]interface{}{
-						"id":           channel.ID,
-						"server_id":    channel.ServerID,
-						"name":         channel.Name,
-						"type":         channel.Type,
-						"emoji":        channel.Emoji,
-						"is_encrypted": channel.IsEncrypted,
-						"group_id":     channel.GroupID,
-						"position":     channel.Position,
-						"created_at":   channel.CreatedAt,
-						"updated_at":   channel.UpdatedAt,
-					},
-				},
-			})
-
-			// Also broadcast the linked text channel creation
-			if linkedTextChannel != nil {
-				h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
-					Type: "channel_created",
-					Data: map[string]interface{}{
-						"channel": map[string]interface{}{
-							"id":                       linkedTextChannel.ID,
-							"server_id":                linkedTextChannel.ServerID,
-							"name":                     linkedTextChannel.Name,
-							"type":                     linkedTextChannel.Type,
-							"is_encrypted":              linkedTextChannel.IsEncrypted,
-							"group_id":                 linkedTextChannel.GroupID,
-							"linked_voice_channel_id":  linkedTextChannel.LinkedVoiceChannelID,
-							"position":                 linkedTextChannel.Position,
-							"created_at":               linkedTextChannel.CreatedAt,
-							"updated_at":               linkedTextChannel.UpdatedAt,
-						},
-					},
-				})
-			}
-		}
-	}
-
-	// Return response: voice channels include the linked text channel
-	response := gin.H{"channel": channel}
 	if linkedTextChannel != nil {
-		response["linked_text_channel"] = linkedTextChannel
+		h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+			Type: "channel_created",
+			Data: map[string]interface{}{
+				"channel": channelToMap(*linkedTextChannel),
+			},
+		})
 	}
-	c.JSON(http.StatusCreated, response)
+}
+
+// channelToMap converts a Channel model to a map for broadcast payloads.
+func channelToMap(ch models.Channel) map[string]interface{} {
+	m := map[string]interface{}{
+		"id":           ch.ID,
+		"server_id":    ch.ServerID,
+		"name":         ch.Name,
+		"type":         ch.Type,
+		"emoji":        ch.Emoji,
+		"is_encrypted": ch.IsEncrypted,
+		"group_id":     ch.GroupID,
+		"position":     ch.Position,
+		"created_at":   ch.CreatedAt,
+		"updated_at":   ch.UpdatedAt,
+	}
+	if ch.LinkedVoiceChannelID != nil {
+		m["linked_voice_channel_id"] = ch.LinkedVoiceChannelID
+	}
+	return m
 }
 
 // GetChannel returns a specific channel
@@ -418,7 +477,7 @@ func (h *Handler) GetChannel(c *gin.Context) {
 
 	// Validate channel ID
 	if _, err := uuid.Parse(channelID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidChannelID})
 		return
 	}
 
@@ -467,13 +526,13 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 
 	// Validate channel ID
 	if _, err := uuid.Parse(channelID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidChannelID})
 		return
 	}
 
 	var req UpdateChannelRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
 
@@ -481,11 +540,11 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 	var serverID string
 	err := h.db.QueryRow(`SELECT server_id FROM channels WHERE id = $1`, channelID).Scan(&serverID)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgChannelNotFound})
 		return
 	} else if err != nil {
 		h.log.Error("Failed to look up channel", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update channel"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateChannel})
 		return
 	}
 
@@ -493,11 +552,11 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageChannels)
 	if err != nil {
 		h.log.Error("Failed to check permissions", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update channel"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateChannel})
 		return
 	}
 	if !hasPerm {
-		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
 		return
 	}
 
@@ -568,11 +627,11 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 	}
 
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgChannelNotFound})
 		return
 	} else if err != nil {
 		h.log.Error("Failed to update channel", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update channel"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateChannel})
 		return
 	}
 
@@ -607,7 +666,7 @@ func (h *Handler) DeleteChannel(c *gin.Context) {
 
 	// Validate channel ID
 	if _, err := uuid.Parse(channelID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidChannelID})
 		return
 	}
 
@@ -615,11 +674,11 @@ func (h *Handler) DeleteChannel(c *gin.Context) {
 	var serverID string
 	err := h.db.QueryRow(`SELECT server_id FROM channels WHERE id = $1`, channelID).Scan(&serverID)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgChannelNotFound})
 		return
 	} else if err != nil {
 		h.log.Error("Failed to look up channel", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete channel"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteChannel})
 		return
 	}
 
@@ -627,11 +686,11 @@ func (h *Handler) DeleteChannel(c *gin.Context) {
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageChannels)
 	if err != nil {
 		h.log.Error("Failed to check permissions", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete channel"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteChannel})
 		return
 	}
 	if !hasPerm {
-		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
 		return
 	}
 
@@ -641,7 +700,7 @@ func (h *Handler) DeleteChannel(c *gin.Context) {
 	_, err = h.db.Exec(deleteQuery, channelID)
 	if err != nil {
 		h.log.Error("Failed to delete channel", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete channel"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteChannel})
 		return
 	}
 
@@ -670,7 +729,7 @@ func (h *Handler) GetUnreadCounts(c *gin.Context) {
 	serverID := c.Param("id")
 
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 
@@ -681,12 +740,12 @@ func (h *Handler) GetUnreadCounts(c *gin.Context) {
 		serverID, userID,
 	).Scan(&isMember)
 	if err != nil {
-		h.log.Error("Failed to check membership", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch unread counts"})
+		h.log.Error(errMsgFailedCheckMembership, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchUnreadCounts})
 		return
 	}
 	if !isMember {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this server"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotMemberOfServer})
 		return
 	}
 
@@ -714,7 +773,7 @@ func (h *Handler) GetUnreadCounts(c *gin.Context) {
 	rows, err := h.db.Query(query, serverID, userID)
 	if err != nil {
 		h.log.Error("Failed to query unread counts", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch unread counts"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchUnreadCounts})
 		return
 	}
 	defer func() { _ = rows.Close() }()
@@ -734,7 +793,7 @@ func (h *Handler) GetUnreadCounts(c *gin.Context) {
 	}
 	if err := rows.Err(); err != nil {
 		h.log.Error("Error iterating unread counts", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch unread counts"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchUnreadCounts})
 		return
 	}
 
@@ -793,7 +852,7 @@ func (h *Handler) MarkChannelRead(c *gin.Context) {
 	channelID := c.Param("id")
 
 	if _, err := uuid.Parse(channelID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidChannelID})
 		return
 	}
 
@@ -813,7 +872,7 @@ func (h *Handler) MarkChannelRead(c *gin.Context) {
 		return
 	}
 	if !isMember {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this server"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotMemberOfServer})
 		return
 	}
 
@@ -839,7 +898,7 @@ func (h *Handler) MarkServerRead(c *gin.Context) {
 	serverID := c.Param("id")
 
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 
@@ -850,12 +909,12 @@ func (h *Handler) MarkServerRead(c *gin.Context) {
 		serverID, userID,
 	).Scan(&isMember)
 	if err != nil {
-		h.log.Error("Failed to check membership", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to mark server read"})
+		h.log.Error(errMsgFailedCheckMembership, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedMarkServerRead})
 		return
 	}
 	if !isMember {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this server"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotMemberOfServer})
 		return
 	}
 
@@ -868,7 +927,7 @@ func (h *Handler) MarkServerRead(c *gin.Context) {
 	)
 	if err != nil {
 		h.log.Error("Failed to mark server read", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to mark server read"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedMarkServerRead})
 		return
 	}
 
@@ -881,7 +940,7 @@ func (h *Handler) GetChannelKeys(c *gin.Context) {
 	channelID := c.Param("id")
 
 	if _, err := uuid.Parse(channelID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidChannelID})
 		return
 	}
 
@@ -906,7 +965,7 @@ func (h *Handler) GetChannelKeys(c *gin.Context) {
 		return
 	}
 	if !isEncrypted {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Channel is not encrypted"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgChannelNotEncrypted})
 		return
 	}
 
@@ -936,7 +995,7 @@ func (h *Handler) GetChannelKeys(c *gin.Context) {
 		).Scan(&key.ID, &key.ChannelID, &key.UserID, &key.WrappedKey, &key.KeyVersion, &key.CreatedAt)
 	}
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "No encryption key available yet", "pending": true})
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgNoEncryptionKey, "pending": true})
 		return
 	} else if err != nil {
 		h.log.Error("Failed to fetch channel key", "error", err)
@@ -960,13 +1019,13 @@ func (h *Handler) DistributeChannelKeys(c *gin.Context) {
 	channelID := c.Param("id")
 
 	if _, err := uuid.Parse(channelID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidChannelID})
 		return
 	}
 
 	var req DistributeChannelKeysRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
 
@@ -988,7 +1047,7 @@ func (h *Handler) DistributeChannelKeys(c *gin.Context) {
 		return
 	}
 	if !isEncrypted {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Channel is not encrypted"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgChannelNotEncrypted})
 		return
 	}
 
@@ -1159,7 +1218,7 @@ func (h *Handler) GetUnifiedKeys(c *gin.Context) {
 	if err == nil {
 		// Found as server channel
 		if !channelEncrypted {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Channel is not encrypted"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": errMsgChannelNotEncrypted})
 			return
 		}
 
@@ -1187,11 +1246,11 @@ func (h *Handler) GetUnifiedKeys(c *gin.Context) {
 			).Scan(&key.ID, &key.ChannelID, &key.UserID, &key.WrappedKey, &key.KeyVersion, &key.CreatedAt)
 		}
 		if err == sql.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "No encryption key available yet", "pending": true})
+			c.JSON(http.StatusNotFound, gin.H{"error": errMsgNoEncryptionKey, "pending": true})
 			return
 		} else if err != nil {
 			h.log.Error("Failed to fetch channel key", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch keys"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchKeys})
 			return
 		}
 
@@ -1201,7 +1260,7 @@ func (h *Handler) GetUnifiedKeys(c *gin.Context) {
 
 	if err != sql.ErrNoRows {
 		h.log.Error("Failed to check channel", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch keys"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchKeys})
 		return
 	}
 
@@ -1218,7 +1277,7 @@ func (h *Handler) GetUnifiedKeys(c *gin.Context) {
 		return
 	} else if err != nil {
 		h.log.Error("Failed to check DM conversation", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch keys"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchKeys})
 		return
 	}
 
@@ -1245,11 +1304,11 @@ func (h *Handler) GetUnifiedKeys(c *gin.Context) {
 	`, contextID, userID).Scan(&key.ID, &key.ConversationID, &key.UserID, &key.WrappedKey, &key.KeyVersion, &key.CreatedAt)
 
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "No encryption key available yet", "pending": true})
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgNoEncryptionKey, "pending": true})
 		return
 	} else if err != nil {
 		h.log.Error("Failed to fetch DM key", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch keys"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchKeys})
 		return
 	}
 
@@ -1310,7 +1369,7 @@ func (h *Handler) DistributeUnifiedKeys(c *gin.Context) {
 	// Parse body for the DM path (channel path delegates to DistributeChannelKeys which parses it)
 	var req DistributeChannelKeysRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
 
@@ -1361,7 +1420,7 @@ func (h *Handler) RotateKey(c *gin.Context) {
 	channelID := c.Param("id")
 
 	if _, err := uuid.Parse(channelID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidChannelID})
 		return
 	}
 
@@ -1372,7 +1431,7 @@ func (h *Handler) RotateKey(c *gin.Context) {
 		`SELECT server_id, is_encrypted FROM channels WHERE id = $1`, channelID,
 	).Scan(&serverID, &isEncrypted)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgChannelNotFound})
 		return
 	} else if err != nil {
 		h.log.Error("Failed to look up channel for rotation", "error", err)
@@ -1380,7 +1439,7 @@ func (h *Handler) RotateKey(c *gin.Context) {
 		return
 	}
 	if !isEncrypted {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Channel is not encrypted"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgChannelNotEncrypted})
 		return
 	}
 
@@ -1392,7 +1451,7 @@ func (h *Handler) RotateKey(c *gin.Context) {
 		return
 	}
 	if !hasPerm {
-		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
 		return
 	}
 
@@ -1434,7 +1493,7 @@ func (h *Handler) ValidateEpochs(c *gin.Context) {
 		Epochs map[string]int `json:"epochs" binding:"required"` // channel_id → current cached epoch
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
 

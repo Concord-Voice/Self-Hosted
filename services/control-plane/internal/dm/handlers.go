@@ -13,6 +13,20 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 )
 
+const (
+	errMsgInvalidConversationID = "Invalid conversation ID"
+	errMsgNotParticipant = "Not a participant"
+	errMsgInvalidRequestBody = "Invalid request body"
+	errMsgFailedOpenConversation = "Failed to open conversation"
+	errMsgFailedCreateGroup = "Failed to create group"
+	errMsgFailedCreatePersonalThread = "Failed to create personal thread"
+	errMsgFailedUpdateConversation = "Failed to update conversation"
+	errMsgFailedUpdateMessage = "Failed to update message"
+	errMsgFailedStartTransaction = "Failed to start transaction"
+	errMsgFailedRollbackTransaction = "Failed to rollback transaction"
+)
+
+
 // Handler handles DM-related requests.
 type Handler struct {
 	db  *sql.DB
@@ -203,7 +217,30 @@ func (h *Handler) OpenConversation(c *gin.Context) {
 		return
 	}
 
-	// Privacy enforcement: check if messaging is allowed
+	if h.enforceDMPrivacy(c, userID, req.UserID) {
+		return
+	}
+
+	// Check for existing 1:1 conversation
+	if h.returnExistingConversation(c, userID, req.UserID) {
+		return
+	}
+
+	convID, err := h.createOneOnOneConversation(userID, req.UserID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedOpenConversation})
+		return
+	}
+
+	h.log.Info("DM conversation created", "conversation_id", convID, "user_id", userID, "target", req.UserID)
+	h.notifyDMCreated(convID, req.UserID)
+
+	conv := h.fetchConversationResponse(convID)
+	c.JSON(http.StatusCreated, gin.H{"conversation": conv})
+}
+
+// enforceDMPrivacy checks privacy settings and returns true if the request was blocked.
+func (h *Handler) enforceDMPrivacy(c *gin.Context, senderID, targetID string) bool {
 	var areFriends bool
 	_ = h.db.QueryRow(`
 		SELECT EXISTS(
@@ -211,80 +248,97 @@ func (h *Handler) OpenConversation(c *gin.Context) {
 			WHERE ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))
 			  AND status = 'accepted'
 		)
-	`, userID, req.UserID).Scan(&areFriends)
+	`, senderID, targetID).Scan(&areFriends)
 
-	if !areFriends {
-		// Check target's privacy settings
-		// dm_privacy_level: 0=off, 1=friends, 2=friends+server, 3=all
-		var dmPrivacyLevel int
-		var dmFriendsOfFriends bool
-		err := h.db.QueryRow(`
-			SELECT dm_privacy_level, dm_friends_of_friends
-			FROM privacy_settings WHERE user_id = $1
-		`, req.UserID).Scan(&dmPrivacyLevel, &dmFriendsOfFriends)
-		if err == sql.ErrNoRows {
-			dmPrivacyLevel = 2 // default: friends + server members
-			dmFriendsOfFriends = false
-		} else if err != nil {
-			h.log.Error("Failed to check privacy settings", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open conversation"})
-			return
-		}
+	if areFriends {
+		return false
+	}
 
-		if dmPrivacyLevel == 0 {
-			// DMs completely disabled
-			c.JSON(http.StatusForbidden, gin.H{"error": "dm_disabled"})
-			return
-		}
+	dmPrivacyLevel, dmFriendsOfFriends, err := h.fetchDMPrivacySettings(targetID)
+	if err != nil {
+		h.log.Error("Failed to check privacy settings", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedOpenConversation})
+		return true
+	}
 
-		if dmPrivacyLevel < 3 {
-			// Check if they're friends
-			var isFriend bool
-			_ = h.db.QueryRow(`
-				SELECT EXISTS(
-					SELECT 1 FROM friendships
-					WHERE (user_id = $1 AND friend_id = $2) OR (user_id = $2 AND friend_id = $1)
-				)
-			`, userID, req.UserID).Scan(&isFriend)
+	if dmPrivacyLevel == 0 {
+		c.JSON(http.StatusForbidden, gin.H{"error": "dm_disabled"})
+		return true
+	}
 
-			allowed := isFriend
+	if dmPrivacyLevel >= 3 {
+		return false // Open to all
+	}
 
-			// Check friends-of-friends if enabled and not already allowed
-			if !allowed && dmFriendsOfFriends {
-				var isFoF bool
-				_ = h.db.QueryRow(`
-					SELECT EXISTS(
-						SELECT 1 FROM friendships f1
-						JOIN friendships f2 ON (f1.friend_id = f2.user_id OR f1.friend_id = f2.friend_id)
-						WHERE (f1.user_id = $1 OR f1.friend_id = $1)
-						  AND (f2.user_id = $2 OR f2.friend_id = $2)
-						  AND f1.friend_id != $1 AND f1.friend_id != $2
-					)
-				`, userID, req.UserID).Scan(&isFoF)
-				allowed = isFoF
-			}
+	if h.isDMAllowedByRelationship(senderID, targetID, dmPrivacyLevel, dmFriendsOfFriends) {
+		return false
+	}
 
-			// Check server members if level >= 2 and not already allowed
-			if !allowed && dmPrivacyLevel >= 2 {
-				var sharesServer bool
-				_ = h.db.QueryRow(`
-					SELECT EXISTS(
-						SELECT 1 FROM server_members sm1
-						JOIN server_members sm2 ON sm1.server_id = sm2.server_id
-						WHERE sm1.user_id = $1 AND sm2.user_id = $2
-					)
-				`, userID, req.UserID).Scan(&sharesServer)
-				allowed = sharesServer
-			}
+	c.JSON(http.StatusForbidden, gin.H{"error": "privacy_blocked"})
+	return true
+}
 
-			if !allowed {
-				c.JSON(http.StatusForbidden, gin.H{"error": "privacy_blocked"})
-				return
-			}
+// fetchDMPrivacySettings fetches the DM privacy level and friends-of-friends flag for a user.
+func (h *Handler) fetchDMPrivacySettings(userID string) (int, bool, error) {
+	var dmPrivacyLevel int
+	var dmFriendsOfFriends bool
+	err := h.db.QueryRow(`
+		SELECT dm_privacy_level, dm_friends_of_friends
+		FROM privacy_settings WHERE user_id = $1
+	`, userID).Scan(&dmPrivacyLevel, &dmFriendsOfFriends)
+	if err == sql.ErrNoRows {
+		return 2, false, nil // Default: friends + server members
+	}
+	return dmPrivacyLevel, dmFriendsOfFriends, err
+}
+
+// isDMAllowedByRelationship checks if DM is allowed based on friendship, FoF, or shared server.
+func (h *Handler) isDMAllowedByRelationship(senderID, targetID string, privacyLevel int, fofEnabled bool) bool {
+	var isFriend bool
+	_ = h.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM friendships
+			WHERE (user_id = $1 AND friend_id = $2) OR (user_id = $2 AND friend_id = $1)
+		)
+	`, senderID, targetID).Scan(&isFriend)
+	if isFriend {
+		return true
+	}
+
+	if fofEnabled {
+		var isFoF bool
+		_ = h.db.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM friendships f1
+				JOIN friendships f2 ON (f1.friend_id = f2.user_id OR f1.friend_id = f2.friend_id)
+				WHERE (f1.user_id = $1 OR f1.friend_id = $1)
+				  AND (f2.user_id = $2 OR f2.friend_id = $2)
+				  AND f1.friend_id != $1 AND f1.friend_id != $2
+			)
+		`, senderID, targetID).Scan(&isFoF)
+		if isFoF {
+			return true
 		}
 	}
 
-	// Check for existing 1:1 conversation
+	if privacyLevel >= 2 {
+		var sharesServer bool
+		_ = h.db.QueryRow(`
+			SELECT EXISTS(
+				SELECT 1 FROM server_members sm1
+				JOIN server_members sm2 ON sm1.server_id = sm2.server_id
+				WHERE sm1.user_id = $1 AND sm2.user_id = $2
+			)
+		`, senderID, targetID).Scan(&sharesServer)
+		return sharesServer
+	}
+
+	return false
+}
+
+// returnExistingConversation checks for an existing 1:1 conversation and returns it if found.
+// Returns true if the response was written (existing conversation found or DB error).
+func (h *Handler) returnExistingConversation(c *gin.Context, userID, targetUserID string) bool {
 	var existingID string
 	err := h.db.QueryRow(`
 		SELECT dc.id FROM dm_conversations dc
@@ -292,84 +346,72 @@ func (h *Handler) OpenConversation(c *gin.Context) {
 		JOIN dm_participants p2 ON p2.conversation_id = dc.id AND p2.user_id = $2
 		WHERE dc.is_group = FALSE
 		LIMIT 1
-	`, userID, req.UserID).Scan(&existingID)
+	`, userID, targetUserID).Scan(&existingID)
 
 	if err == nil {
-		// Return existing conversation with participants
 		conv := h.fetchConversationResponse(existingID)
 		if conv != nil {
 			c.JSON(http.StatusOK, gin.H{"conversation": conv})
-			return
+			return true
 		}
 	} else if err != sql.ErrNoRows {
 		h.log.Error("Failed to check existing DM", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open conversation"})
-		return
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedOpenConversation})
+		return true
 	}
+	return false
+}
 
-	// Create new 1:1 conversation
+// createOneOnOneConversation creates a new 1:1 DM conversation with both participants.
+func (h *Handler) createOneOnOneConversation(userID, targetUserID string) (string, error) {
 	tx, err := h.db.Begin()
 	if err != nil {
-		h.log.Error("Failed to start transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open conversation"})
-		return
+		h.log.Error(errMsgFailedStartTransaction, "error", err)
+		return "", err
 	}
 	defer func() {
 		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
-			h.log.Error("Failed to rollback transaction", "error", rbErr)
+			h.log.Error(errMsgFailedRollbackTransaction, "error", rbErr)
 		}
 	}()
 
 	convID := uuid.New().String()
-	_, err = tx.Exec(`
-		INSERT INTO dm_conversations (id, is_group, is_encrypted, created_by)
-		VALUES ($1, FALSE, TRUE, $2)
-	`, convID, userID)
-	if err != nil {
+	if _, err = tx.Exec(`INSERT INTO dm_conversations (id, is_group, is_encrypted, created_by) VALUES ($1, FALSE, TRUE, $2)`, convID, userID); err != nil {
 		h.log.Error("Failed to create DM conversation", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open conversation"})
-		return
+		return "", err
 	}
-
-	// Add both participants
-	_, err = tx.Exec(`INSERT INTO dm_participants (conversation_id, user_id) VALUES ($1, $2)`, convID, userID)
-	if err != nil {
+	if _, err = tx.Exec(`INSERT INTO dm_participants (conversation_id, user_id) VALUES ($1, $2)`, convID, userID); err != nil {
 		h.log.Error("Failed to add DM participant", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open conversation"})
-		return
+		return "", err
 	}
-	_, err = tx.Exec(`INSERT INTO dm_participants (conversation_id, user_id) VALUES ($1, $2)`, convID, req.UserID)
-	if err != nil {
+	if _, err = tx.Exec(`INSERT INTO dm_participants (conversation_id, user_id) VALUES ($1, $2)`, convID, targetUserID); err != nil {
 		h.log.Error("Failed to add DM participant", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open conversation"})
-		return
+		return "", err
 	}
-
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit DM creation", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to open conversation"})
+		return "", err
+	}
+	return convID, nil
+}
+
+// notifyDMCreated sends a dm_conversation_created WebSocket event to the target user.
+func (h *Handler) notifyDMCreated(convID, targetUserID string) {
+	if h.hub == nil {
 		return
 	}
-
-	h.log.Info("DM conversation created", "conversation_id", convID, "user_id", userID, "target", req.UserID)
-
-	// Notify the other user
-	if h.hub != nil {
-		if targetUUID, parseErr := uuid.Parse(req.UserID); parseErr == nil {
-			conv := h.fetchConversationResponse(convID)
-			if conv != nil {
-				h.hub.BroadcastToUser(targetUUID, websocket.OutgoingMessage{
-					Type: "dm_conversation_created",
-					Data: map[string]interface{}{
-						"conversation": conv,
-					},
-				})
-			}
-		}
+	targetUUID, parseErr := uuid.Parse(targetUserID)
+	if parseErr != nil {
+		return
 	}
-
 	conv := h.fetchConversationResponse(convID)
-	c.JSON(http.StatusCreated, gin.H{"conversation": conv})
+	if conv == nil {
+		return
+	}
+	h.hub.BroadcastToUser(targetUUID, websocket.OutgoingMessage{
+		Type: "dm_conversation_created",
+		Data: map[string]interface{}{"conversation": conv},
+	})
 }
 
 // CreateGroupRequest represents a request to create a group DM.
@@ -414,13 +456,13 @@ func (h *Handler) CreateGroup(c *gin.Context) {
 
 	tx, err := h.db.Begin()
 	if err != nil {
-		h.log.Error("Failed to start transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create group"})
+		h.log.Error(errMsgFailedStartTransaction, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateGroup})
 		return
 	}
 	defer func() {
 		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
-			h.log.Error("Failed to rollback transaction", "error", rbErr)
+			h.log.Error(errMsgFailedRollbackTransaction, "error", rbErr)
 		}
 	}()
 
@@ -431,7 +473,7 @@ func (h *Handler) CreateGroup(c *gin.Context) {
 	`, convID, req.Name, userID)
 	if err != nil {
 		h.log.Error("Failed to create group DM", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create group"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateGroup})
 		return
 	}
 
@@ -439,14 +481,14 @@ func (h *Handler) CreateGroup(c *gin.Context) {
 		_, err = tx.Exec(`INSERT INTO dm_participants (conversation_id, user_id) VALUES ($1, $2)`, convID, uid)
 		if err != nil {
 			h.log.Error("Failed to add group participant", "error", err, "user_id", uid)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create group"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateGroup})
 			return
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit group DM creation", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create group"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateGroup})
 		return
 	}
 
@@ -480,13 +522,13 @@ func (h *Handler) GetConversation(c *gin.Context) {
 	convID := c.Param("id")
 
 	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
 		return
 	}
 
 	// Verify participation
 	if !h.isParticipant(convID, userID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a participant"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
 		return
 	}
 
@@ -511,13 +553,13 @@ func (h *Handler) UpdateConversation(c *gin.Context) {
 	convID := c.Param("id")
 
 	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
 		return
 	}
 
 	var req UpdateConversationRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
 
@@ -529,11 +571,11 @@ func (h *Handler) UpdateConversation(c *gin.Context) {
 		WHERE dc.id = $1
 	`, convID, userID).Scan(&isGroup)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a participant"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
 		return
 	} else if err != nil {
 		h.log.Error("Failed to check conversation", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update conversation"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateConversation})
 		return
 	}
 
@@ -545,7 +587,7 @@ func (h *Handler) UpdateConversation(c *gin.Context) {
 	_, err = h.db.Exec(`UPDATE dm_conversations SET name = $1, updated_at = NOW() WHERE id = $2`, req.Name, convID)
 	if err != nil {
 		h.log.Error("Failed to update conversation", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update conversation"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateConversation})
 		return
 	}
 
@@ -561,12 +603,12 @@ func (h *Handler) GetMessages(c *gin.Context) {
 	convID := c.Param("id")
 
 	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
 		return
 	}
 
 	if !h.isParticipant(convID, userID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a participant"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
 		return
 	}
 
@@ -655,12 +697,12 @@ func (h *Handler) MarkRead(c *gin.Context) {
 	convID := c.Param("id")
 
 	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
 		return
 	}
 
 	if !h.isParticipant(convID, userID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a participant"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
 		return
 	}
 
@@ -687,12 +729,12 @@ func (h *Handler) GetKeys(c *gin.Context) {
 	convID := c.Param("id")
 
 	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
 		return
 	}
 
 	if !h.isParticipant(convID, userID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a participant"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
 		return
 	}
 
@@ -748,18 +790,18 @@ func (h *Handler) DistributeKeys(c *gin.Context) {
 	convID := c.Param("id")
 
 	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
 		return
 	}
 
 	var req DistributeKeysRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
 
 	if !h.isParticipant(convID, userID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a participant"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
 		return
 	}
 
@@ -817,12 +859,12 @@ func (h *Handler) RotateKey(c *gin.Context) {
 	convID := c.Param("id")
 
 	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
 		return
 	}
 
 	if !h.isParticipant(convID, userID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a participant"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
 		return
 	}
 
@@ -879,7 +921,7 @@ func (h *Handler) AuthorizeVoiceJoin(c *gin.Context) {
 	convID := c.Param("id")
 
 	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
 		return
 	}
 
@@ -892,7 +934,7 @@ func (h *Handler) AuthorizeVoiceJoin(c *gin.Context) {
 		WHERE dc.id = $1
 	`, convID, userID).Scan(&isEncrypted)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a participant"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
 		return
 	} else if err != nil {
 		h.log.Error("Failed to check DM participation", "error", err)
@@ -920,12 +962,12 @@ func (h *Handler) GetVoiceParticipants(c *gin.Context) {
 	convID := c.Param("id")
 
 	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
 		return
 	}
 
 	if !h.isParticipant(convID, userID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a participant"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
 		return
 	}
 
@@ -1002,13 +1044,13 @@ func (h *Handler) GetOrCreatePersonalThread(c *gin.Context) {
 	// Create personal thread
 	tx, err := h.db.Begin()
 	if err != nil {
-		h.log.Error("Failed to start transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create personal thread"})
+		h.log.Error(errMsgFailedStartTransaction, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreatePersonalThread})
 		return
 	}
 	defer func() {
 		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
-			h.log.Error("Failed to rollback transaction", "error", rbErr)
+			h.log.Error(errMsgFailedRollbackTransaction, "error", rbErr)
 		}
 	}()
 
@@ -1020,20 +1062,20 @@ func (h *Handler) GetOrCreatePersonalThread(c *gin.Context) {
 	`, convID, name, userID)
 	if err != nil {
 		h.log.Error("Failed to create personal thread", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create personal thread"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreatePersonalThread})
 		return
 	}
 
 	_, err = tx.Exec(`INSERT INTO dm_participants (conversation_id, user_id) VALUES ($1, $2)`, convID, userID)
 	if err != nil {
 		h.log.Error("Failed to add personal thread participant", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create personal thread"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreatePersonalThread})
 		return
 	}
 
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit personal thread", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create personal thread"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreatePersonalThread})
 		return
 	}
 
@@ -1115,7 +1157,7 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 	messageID := c.Param("message_id")
 
 	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
 		return
 	}
 	if _, err := uuid.Parse(messageID); err != nil {
@@ -1124,7 +1166,7 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 	}
 
 	if !h.isParticipant(convID, userID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a participant"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
 		return
 	}
 
@@ -1132,7 +1174,7 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 		Content string `json:"content" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
 
@@ -1143,7 +1185,7 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 		return
 	} else if err != nil {
 		h.log.Error("Failed to check DM message author", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update message"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateMessage})
 		return
 	}
 
@@ -1156,7 +1198,7 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 	var isEncrypted bool
 	if err := h.db.QueryRow(`SELECT COALESCE(is_encrypted, false) FROM dm_conversations WHERE id = $1`, convID).Scan(&isEncrypted); err != nil {
 		h.log.Error("Failed to check DM encryption", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update message"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateMessage})
 		return
 	}
 	if isEncrypted {
@@ -1184,7 +1226,7 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 	`, req.Content, messageID, convID).Scan(&result.IsEncrypted, &result.KeyVersion, &result.EditedAt, &result.CreatedAt)
 	if err != nil {
 		h.log.Error("Failed to update DM message", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update message"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateMessage})
 		return
 	}
 	result.Content = req.Content
@@ -1212,7 +1254,7 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 	messageID := c.Param("message_id")
 
 	if _, err := uuid.Parse(convID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
 		return
 	}
 	if _, err := uuid.Parse(messageID); err != nil {
@@ -1221,7 +1263,7 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 	}
 
 	if !h.isParticipant(convID, userID) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a participant"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
 		return
 	}
 

@@ -25,17 +25,8 @@ type User struct {
 	UsernameChangedAt *time.Time      `json:"username_changed_at,omitempty" db:"username_changed_at"`
 }
 
-// PublicUser returns user data safe for the authenticated user
-func (u *User) PublicUser() map[string]interface{} {
-	result := map[string]interface{}{
-		"id":              u.ID,
-		"email":           u.Email,
-		"username":        u.Username,
-		"email_verified":  u.EmailVerified,
-		"e2ee_preference": u.E2EEPreference,
-		"created_at":      u.CreatedAt,
-		"links":           json.RawMessage("[]"),
-	}
+// addOptionalProfileFields adds the shared optional fields to a profile map.
+func (u *User) addOptionalProfileFields(result map[string]interface{}) {
 	if u.DisplayName != nil {
 		result["display_name"] = *u.DisplayName
 	}
@@ -54,6 +45,20 @@ func (u *User) PublicUser() map[string]interface{} {
 	if len(u.Links) > 0 {
 		result["links"] = u.Links
 	}
+}
+
+// PublicUser returns user data safe for the authenticated user
+func (u *User) PublicUser() map[string]interface{} {
+	result := map[string]interface{}{
+		"id":              u.ID,
+		"email":           u.Email,
+		"username":        u.Username,
+		"email_verified":  u.EmailVerified,
+		"e2ee_preference": u.E2EEPreference,
+		"created_at":      u.CreatedAt,
+		"links":           json.RawMessage("[]"),
+	}
+	u.addOptionalProfileFields(result)
 	if u.UsernameChangedAt != nil {
 		result["username_changed_at"] = *u.UsernameChangedAt
 		result["username_change_eligible_at"] = u.UsernameChangedAt.AddDate(0, 0, 365)
@@ -69,24 +74,7 @@ func (u *User) ProfileForOthers() map[string]interface{} {
 		"created_at": u.CreatedAt,
 		"links":      json.RawMessage("[]"),
 	}
-	if u.DisplayName != nil {
-		result["display_name"] = *u.DisplayName
-	}
-	if u.Bio != nil {
-		result["bio"] = *u.Bio
-	}
-	if u.AvatarURL != nil {
-		result["avatar_url"] = *u.AvatarURL
-	}
-	if u.HeaderImageURL != nil {
-		result["header_image_url"] = *u.HeaderImageURL
-	}
-	if u.ColorScheme != nil {
-		result["color_scheme"] = *u.ColorScheme
-	}
-	if len(u.Links) > 0 {
-		result["links"] = u.Links
-	}
+	u.addOptionalProfileFields(result)
 	return result
 }
 

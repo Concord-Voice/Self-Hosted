@@ -17,6 +17,20 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+const (
+	errMsgInvalidServerID = "Invalid server ID"
+	errMsgInvalidUserID = "Invalid user ID"
+	errMsgInvalidRequestBody = "Invalid request body"
+	errMsgInsufficientPerms = "insufficient permissions"
+	errMsgFailedFetchMembers = "Failed to fetch members"
+	errMsgFailedAddMember = "Failed to add member"
+	errMsgFailedUpdateMember = "Failed to update member"
+	errMsgFailedRemoveMember = "Failed to remove member"
+	errMsgFailedBanMember = "Failed to ban member"
+	errMsgFailedGetServerOwner = "Failed to get server owner"
+)
+
+
 // Handler handles member-related requests
 type Handler struct {
 	db       *sql.DB
@@ -81,7 +95,7 @@ func (h *Handler) ListMembers(c *gin.Context) {
 
 	// Validate server ID
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 
@@ -97,7 +111,7 @@ func (h *Handler) ListMembers(c *gin.Context) {
 	err := h.db.QueryRow(memberQuery, serverID, userID).Scan(&isMember)
 	if err != nil {
 		h.log.Error("Failed to check membership", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch members"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchMembers})
 		return
 	}
 
@@ -107,6 +121,22 @@ func (h *Handler) ListMembers(c *gin.Context) {
 	}
 
 	// Get all members of the server with user details
+	members, err := h.queryServerMembers(serverID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchMembers})
+		return
+	}
+
+	h.populateLastSeen(members)
+	h.populateRBAcRoles(serverID, members)
+	h.ensureRolesNotNil(members)
+	h.maskOwnerRole(c, serverID, userID, members)
+
+	c.JSON(http.StatusOK, gin.H{"members": members})
+}
+
+// queryServerMembers fetches all members of a server with user details.
+func (h *Handler) queryServerMembers(serverID string) ([]MemberWithUser, error) {
 	query := `
 		SELECT sm.user_id, u.username, u.display_name, u.bio, u.avatar_url, u.header_image_url, u.color_scheme, sm.role, sm.joined_at
 		FROM server_members sm
@@ -118,8 +148,7 @@ func (h *Handler) ListMembers(c *gin.Context) {
 	rows, err := h.db.Query(query, serverID)
 	if err != nil {
 		h.log.Error("Failed to query members", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch members"})
-		return
+		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -145,95 +174,113 @@ func (h *Handler) ListMembers(c *gin.Context) {
 	}
 	if err := rows.Err(); err != nil {
 		h.log.Error("Error iterating members", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch members"})
+		return nil, err
+	}
+	return members, nil
+}
+
+// populateLastSeen batch-fetches last_seen timestamps from Redis for all members.
+func (h *Handler) populateLastSeen(members []MemberWithUser) {
+	if len(members) == 0 {
 		return
 	}
-
-	// Batch fetch last_seen timestamps from Redis
-	if len(members) > 0 {
-		keys := make([]string, len(members))
-		for i, m := range members {
-			keys[i] = fmt.Sprintf("last_seen:%s", m.UserID)
+	keys := make([]string, len(members))
+	for i, m := range members {
+		keys[i] = fmt.Sprintf("last_seen:%s", m.UserID)
+	}
+	ctx := context.Background()
+	vals, err := h.redis.MGet(ctx, keys...).Result()
+	if err != nil {
+		return
+	}
+	for i, val := range vals {
+		if val == nil {
+			continue
 		}
-		ctx := context.Background()
-		vals, err := h.redis.MGet(ctx, keys...).Result()
-		if err == nil {
-			for i, val := range vals {
-				if val != nil {
-					if tsStr, ok := val.(string); ok {
-						if ts, parseErr := strconv.ParseInt(tsStr, 10, 64); parseErr == nil {
-							members[i].LastSeen = &ts
-						}
-					}
-				}
-			}
+		tsStr, ok := val.(string)
+		if !ok {
+			continue
+		}
+		ts, parseErr := strconv.ParseInt(tsStr, 10, 64)
+		if parseErr == nil {
+			members[i].LastSeen = &ts
 		}
 	}
+}
 
-	// Fetch RBAC roles for all members in this server
-	if len(members) > 0 {
-		roleRows, err := h.db.Query(`
-			SELECT mr.user_id, r.id, r.name, r.color, r.emoji, r.position, r.display_separately
-			FROM member_roles mr
-			INNER JOIN roles r ON mr.role_id = r.id
-			WHERE mr.server_id = $1
-			ORDER BY r.position DESC
-		`, serverID)
-		if err == nil {
-			defer func() { _ = roleRows.Close() }()
-			memberRoleMap := make(map[string][]MemberRoleInfo)
-			for roleRows.Next() {
-				var userID, roleID, roleName string
-				var roleColor, roleEmoji *string
-				var position int
-				var displaySeparately bool
-				if err := roleRows.Scan(&userID, &roleID, &roleName, &roleColor, &roleEmoji, &position, &displaySeparately); err != nil {
-					continue
-				}
-				memberRoleMap[userID] = append(memberRoleMap[userID], MemberRoleInfo{
-					RoleID:            roleID,
-					RoleName:          roleName,
-					RoleColor:         roleColor,
-					RoleEmoji:         roleEmoji,
-					Position:          position,
-					DisplaySeparately: displaySeparately,
-				})
-			}
-			for i := range members {
-				if roles, ok := memberRoleMap[members[i].UserID]; ok {
-					members[i].Roles = roles
-				}
-			}
+// populateRBAcRoles fetches RBAC roles for all members in a server and attaches them.
+func (h *Handler) populateRBAcRoles(serverID string, members []MemberWithUser) {
+	if len(members) == 0 {
+		return
+	}
+	roleRows, err := h.db.Query(`
+		SELECT mr.user_id, r.id, r.name, r.color, r.emoji, r.position, r.display_separately
+		FROM member_roles mr
+		INNER JOIN roles r ON mr.role_id = r.id
+		WHERE mr.server_id = $1
+		ORDER BY r.position DESC
+	`, serverID)
+	if err != nil {
+		return
+	}
+	defer func() { _ = roleRows.Close() }()
+
+	memberRoleMap := make(map[string][]MemberRoleInfo)
+	for roleRows.Next() {
+		var uid, roleID, roleName string
+		var roleColor, roleEmoji *string
+		var position int
+		var displaySeparately bool
+		if err := roleRows.Scan(&uid, &roleID, &roleName, &roleColor, &roleEmoji, &position, &displaySeparately); err != nil {
+			continue
+		}
+		memberRoleMap[uid] = append(memberRoleMap[uid], MemberRoleInfo{
+			RoleID:            roleID,
+			RoleName:          roleName,
+			RoleColor:         roleColor,
+			RoleEmoji:         roleEmoji,
+			Position:          position,
+			DisplaySeparately: displaySeparately,
+		})
+	}
+	for i := range members {
+		if roles, ok := memberRoleMap[members[i].UserID]; ok {
+			members[i].Roles = roles
 		}
 	}
+}
 
-	// Ensure Roles is never null in JSON
+// ensureRolesNotNil ensures Roles is never null in JSON output.
+func (h *Handler) ensureRolesNotNil(members []MemberWithUser) {
 	for i := range members {
 		if members[i].Roles == nil {
 			members[i].Roles = []MemberRoleInfo{}
 		}
 	}
+}
 
-	// Mask owner role for non-owner viewers (#244: Hidden Owner Role)
-	// Non-owners see the owner's highest RBAC role name instead of "owner".
-	// Uses owner_id (authoritative) rather than role string to identify the owner.
+// maskOwnerRole masks the owner's role for non-owner viewers (#244: Hidden Owner Role).
+// Non-owners see the owner's highest RBAC role name instead of "owner".
+func (h *Handler) maskOwnerRole(c *gin.Context, serverID, viewerUserID string, members []MemberWithUser) {
 	var serverOwnerID string
 	if err := h.db.QueryRowContext(c.Request.Context(), `SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&serverOwnerID); err != nil {
 		h.log.Error("Failed to fetch server owner for role masking", "error", err, "server_id", serverID)
-	} else if userID != serverOwnerID {
-		for i := range members {
-			if members[i].UserID == serverOwnerID && members[i].Role == "owner" {
-				if len(members[i].Roles) > 0 {
-					members[i].Role = members[i].Roles[0].RoleName // highest position (sorted DESC)
-				} else {
-					members[i].Role = "member"
-				}
-				break
-			}
-		}
+		return
 	}
-
-	c.JSON(http.StatusOK, gin.H{"members": members})
+	if viewerUserID == serverOwnerID {
+		return // Owner sees their own "owner" role
+	}
+	for i := range members {
+		if members[i].UserID != serverOwnerID || members[i].Role != "owner" {
+			continue
+		}
+		if len(members[i].Roles) > 0 {
+			members[i].Role = members[i].Roles[0].RoleName // highest position (sorted DESC)
+		} else {
+			members[i].Role = "member"
+		}
+		break
+	}
 }
 
 // AddMember adds a user to a server
@@ -243,13 +290,13 @@ func (h *Handler) AddMember(c *gin.Context) {
 
 	// Validate server ID
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 
 	var req AddMemberRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
 
@@ -257,11 +304,11 @@ func (h *Handler) AddMember(c *gin.Context) {
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermInvite)
 	if err != nil {
 		h.log.Error("Failed to check permissions", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add member"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAddMember})
 		return
 	}
 	if !hasPerm {
-		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
 		return
 	}
 
@@ -271,7 +318,7 @@ func (h *Handler) AddMember(c *gin.Context) {
 	err = h.db.QueryRow(userQuery, req.UserID).Scan(&userExists)
 	if err != nil {
 		h.log.Error("Failed to check user existence", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add member"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAddMember})
 		return
 	}
 
@@ -287,7 +334,7 @@ func (h *Handler) AddMember(c *gin.Context) {
 		serverID, req.UserID,
 	).Scan(&isBanned); err != nil {
 		h.log.Error("Failed to check ban status", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add member"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAddMember})
 		return
 	}
 	if isBanned {
@@ -313,7 +360,7 @@ func (h *Handler) AddMember(c *gin.Context) {
 		return
 	} else if err != nil {
 		h.log.Error("Failed to add member", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add member"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAddMember})
 		return
 	}
 
@@ -338,17 +385,17 @@ func (h *Handler) UpdateMember(c *gin.Context) {
 
 	// Validate IDs
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 	if _, err := uuid.Parse(targetUserID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidUserID})
 		return
 	}
 
 	var req UpdateMemberRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
 
@@ -356,11 +403,11 @@ func (h *Handler) UpdateMember(c *gin.Context) {
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageRolesAssign)
 	if err != nil {
 		h.log.Error("Failed to check permissions", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update member"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateMember})
 		return
 	}
 	if !hasPerm {
-		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
 		return
 	}
 
@@ -378,8 +425,8 @@ func (h *Handler) UpdateMember(c *gin.Context) {
 	// Cannot change the owner's legacy role
 	var ownerID string
 	if err := h.db.QueryRow(`SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID); err != nil {
-		h.log.Error("Failed to get server owner", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update member"})
+		h.log.Error(errMsgFailedGetServerOwner, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateMember})
 		return
 	}
 	if targetUserID == ownerID {
@@ -403,7 +450,7 @@ func (h *Handler) UpdateMember(c *gin.Context) {
 	err = h.db.QueryRow(updateQuery, req.Role, serverID, targetUserID).Scan(&member.JoinedAt)
 	if err != nil {
 		h.log.Error("Failed to update member role", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update member"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateMember})
 		return
 	}
 
@@ -420,11 +467,11 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 
 	// Validate IDs
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 	if _, err := uuid.Parse(targetUserID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidUserID})
 		return
 	}
 
@@ -450,8 +497,8 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 	// Check if target is the server owner (owner cannot be removed)
 	var ownerID string
 	if err := h.db.QueryRow(`SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID); err != nil {
-		h.log.Error("Failed to get server owner", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+		h.log.Error(errMsgFailedGetServerOwner, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveMember})
 		return
 	}
 	isOwner := userID == ownerID
@@ -463,11 +510,11 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 		hasPerm, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermKick)
 		if permErr != nil {
 			h.log.Error("Failed to check permissions", "error", permErr)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveMember})
 			return
 		}
 		if !hasPerm {
-			c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+			c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
 			return
 		}
 
@@ -494,7 +541,7 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 	tx, err := h.db.Begin()
 	if err != nil {
 		h.log.Error("Failed to start transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveMember})
 		return
 	}
 	defer func() {
@@ -508,7 +555,7 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 	_, err = tx.Exec(deleteQuery, serverID, targetUserID)
 	if err != nil {
 		h.log.Error("Failed to remove member", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveMember})
 		return
 	}
 
@@ -521,7 +568,7 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 	_, err = tx.Exec(keysQuery, targetUserID, serverID)
 	if err != nil {
 		h.log.Error("Failed to clean up channel keys", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveMember})
 		return
 	}
 
@@ -534,7 +581,7 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 	_, err = tx.Exec(pendingQuery, targetUserID, serverID)
 	if err != nil {
 		h.log.Error("Failed to clean up pending key requests", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveMember})
 		return
 	}
 
@@ -547,13 +594,13 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 	_, err = tx.Exec(readQuery, targetUserID, serverID)
 	if err != nil {
 		h.log.Error("Failed to clean up read states", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveMember})
 		return
 	}
 
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove member"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveMember})
 		return
 	}
 
@@ -605,28 +652,28 @@ func (h *Handler) BanMember(c *gin.Context) {
 	targetUserID := c.Param("user_id")
 
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 	if _, err := uuid.Parse(targetUserID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidUserID})
 		return
 	}
 
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermBan)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to ban member"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBanMember})
 		return
 	}
 	if !hasPerm {
-		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
 		return
 	}
 
 	var ownerID string
 	if err := h.db.QueryRow(`SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID); err != nil {
-		h.log.Error("Failed to get server owner", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to ban member"})
+		h.log.Error(errMsgFailedGetServerOwner, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBanMember})
 		return
 	}
 	if targetUserID == ownerID {
@@ -648,7 +695,7 @@ func (h *Handler) BanMember(c *gin.Context) {
 
 	tx, err := h.db.Begin()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to ban member"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBanMember})
 		return
 	}
 	defer func() {
@@ -670,7 +717,7 @@ func (h *Handler) BanMember(c *gin.Context) {
 			created_at = NOW()
 	`, serverID, targetUserID, userID, reason)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to ban member"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBanMember})
 		return
 	}
 
@@ -681,7 +728,7 @@ func (h *Handler) BanMember(c *gin.Context) {
 	_, _ = tx.Exec(`DELETE FROM channel_read_states WHERE user_id = $1 AND channel_id IN (SELECT id FROM channels WHERE server_id = $2)`, targetUserID, serverID)
 
 	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to ban member"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBanMember})
 		return
 	}
 
@@ -712,17 +759,17 @@ func (h *Handler) UnbanMember(c *gin.Context) {
 	targetUserID := c.Param("user_id")
 
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 	if _, err := uuid.Parse(targetUserID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidUserID})
 		return
 	}
 
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermBan)
 	if err != nil || !hasPerm {
-		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
 		return
 	}
 
@@ -746,13 +793,13 @@ func (h *Handler) ListBans(c *gin.Context) {
 	serverID := c.Param("id")
 
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermBan)
 	if err != nil || !hasPerm {
-		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
 		return
 	}
 

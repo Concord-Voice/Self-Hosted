@@ -13,6 +13,13 @@ import (
 	"github.com/google/uuid"
 )
 
+const (
+	errMsgInvalidServerID = "Invalid server ID"
+	errMsgInvalidInviteCode = "Invalid invite code"
+	errMsgFailedJoinServer = "Failed to join server"
+)
+
+
 // Handler handles invite-related requests.
 type Handler struct {
 	db       *sql.DB
@@ -60,7 +67,7 @@ func (h *Handler) CreateInvite(c *gin.Context) {
 	serverID := c.Param("id")
 
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 
@@ -145,7 +152,7 @@ func (h *Handler) ListInvites(c *gin.Context) {
 	serverID := c.Param("id")
 
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 
@@ -198,7 +205,7 @@ func (h *Handler) RevokeInvite(c *gin.Context) {
 	inviteID := c.Param("invite_id")
 
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 	if _, err := uuid.Parse(inviteID); err != nil {
@@ -248,7 +255,7 @@ func (h *Handler) JoinServer(c *gin.Context) {
 	tx, err := h.db.Begin()
 	if err != nil {
 		h.log.Error("Failed to begin transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to join server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedJoinServer})
 		return
 	}
 	defer func() {
@@ -270,12 +277,12 @@ func (h *Handler) JoinServer(c *gin.Context) {
 		&invite.IsRevoked, &invite.CreatedAt,
 	)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Invalid invite code"})
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgInvalidInviteCode})
 		return
 	}
 	if err != nil {
 		h.log.Error("Failed to query invite", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to join server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedJoinServer})
 		return
 	}
 
@@ -301,7 +308,7 @@ func (h *Handler) JoinServer(c *gin.Context) {
 	).Scan(&isBanned)
 	if err != nil {
 		h.log.Error("Failed to check ban status", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to join server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedJoinServer})
 		return
 	}
 	if isBanned {
@@ -317,7 +324,7 @@ func (h *Handler) JoinServer(c *gin.Context) {
 	).Scan(&exists)
 	if err != nil {
 		h.log.Error("Failed to check membership", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to join server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedJoinServer})
 		return
 	}
 	if exists {
@@ -332,7 +339,7 @@ func (h *Handler) JoinServer(c *gin.Context) {
 	`, invite.ServerID, userID)
 	if err != nil {
 		h.log.Error("Failed to add member", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to join server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedJoinServer})
 		return
 	}
 
@@ -344,7 +351,7 @@ func (h *Handler) JoinServer(c *gin.Context) {
 	`, invite.ServerID, userID)
 	if err != nil {
 		h.log.Error("Failed to assign default roles", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to join server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedJoinServer})
 		return
 	}
 
@@ -352,7 +359,7 @@ func (h *Handler) JoinServer(c *gin.Context) {
 	_, err = tx.Exec(`UPDATE server_invites SET use_count = use_count + 1 WHERE id = $1`, invite.ID)
 	if err != nil {
 		h.log.Error("Failed to increment use count", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to join server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedJoinServer})
 		return
 	}
 
@@ -367,13 +374,13 @@ func (h *Handler) JoinServer(c *gin.Context) {
 	)
 	if err != nil {
 		h.log.Error("Failed to fetch server", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to join server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedJoinServer})
 		return
 	}
 
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to join server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedJoinServer})
 		return
 	}
 
@@ -449,7 +456,7 @@ func (h *Handler) GetInviteInfo(c *gin.Context) {
 	code := c.Param("code")
 
 	if len(code) != 8 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid invite code"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidInviteCode})
 		return
 	}
 
@@ -477,7 +484,7 @@ func (h *Handler) GetInviteInfo(c *gin.Context) {
 		&serverName, &serverIcon, &serverBanner, &memberCount,
 	)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Invalid invite code"})
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgInvalidInviteCode})
 		return
 	}
 	if err != nil {

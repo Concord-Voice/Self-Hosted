@@ -28,6 +28,12 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 )
 
+const (
+	errMsgAccessDenied = "Access denied"
+	errMsgFailedVerifyAccess = "Failed to verify access"
+)
+
+
 // ObjectStore defines the storage operations required by the media handler.
 // This interface is satisfied by *storage.Client and can be mocked for testing.
 type ObjectStore interface {
@@ -306,7 +312,7 @@ func (h *Handler) DownloadAttachment(c *gin.Context) {
 			return
 		}
 	} else {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgAccessDenied})
 		return
 	}
 
@@ -627,11 +633,11 @@ func (h *Handler) userHasChannelAccess(c *gin.Context, userID, channelID string)
 	var hasAccess bool
 	if err := h.db.QueryRow(query, channelID, userID).Scan(&hasAccess); err != nil {
 		h.log.Error("Failed to check channel access", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify access"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyAccess})
 		return false
 	}
 	if !hasAccess {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgAccessDenied})
 		return false
 	}
 	return true
@@ -643,11 +649,11 @@ func (h *Handler) userHasDMAccess(c *gin.Context, userID, conversationID string)
 	var hasAccess bool
 	if err := h.db.QueryRow(query, conversationID, userID).Scan(&hasAccess); err != nil {
 		h.log.Error("Failed to check DM access", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify access"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyAccess})
 		return false
 	}
 	if !hasAccess {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Access denied"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgAccessDenied})
 		return false
 	}
 	return true
@@ -659,7 +665,7 @@ func (h *Handler) userIsServerMember(c *gin.Context, userID, serverID string) bo
 	var isMember bool
 	if err := h.db.QueryRow(query, serverID, userID).Scan(&isMember); err != nil {
 		h.log.Error("Failed to check server membership", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify access"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyAccess})
 		return false
 	}
 	if !isMember {

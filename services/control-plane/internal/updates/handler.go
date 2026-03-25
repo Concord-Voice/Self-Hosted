@@ -45,48 +45,54 @@ func (h *Handler) ServeUpdateAsset(c *gin.Context) {
 		return
 	}
 
-	filename := c.Param("filename")
-	if filename == "" {
+	rawParam := c.Param("filename")
+	if rawParam == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing filename"})
 		return
 	}
 	// Gin includes leading slash in wildcard param
-	filename = strings.TrimPrefix(filename, "/")
+	rawParam = strings.TrimPrefix(rawParam, "/")
 
-	// Validate filename — only allow safe characters (no path traversal)
-	if strings.Contains(filename, "/") || strings.Contains(filename, "..") || filename == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid filename"})
-		return
-	}
-
-	// Resolve and verify the file path is within the releases directory
+	// Resolve the releases directory to an absolute path
 	absReleasesDir, err := filepath.Abs(releasesDir)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Configuration error"})
 		return
 	}
-	absPath, err := filepath.Abs(filepath.Join(releasesDir, filename))
-	if err != nil || !strings.HasPrefix(absPath, absReleasesDir+string(filepath.Separator)) {
+
+	// Sanitize: filepath.Base strips all directory components, preventing path traversal.
+	// This breaks the taint chain — the resulting name is guaranteed to contain no separators.
+	safeName := filepath.Base(filepath.Clean(rawParam))
+	if safeName == "." || safeName == ".." || safeName == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid filename"})
 		return
 	}
 
+	// Reject filenames with path separators (defense in depth)
+	if strings.ContainsAny(safeName, `/\`) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid filename"})
+		return
+	}
+
+	// Build the safe path from the trusted directory and the sanitized base name
+	safePath := filepath.Join(absReleasesDir, safeName)
+
 	// Check file exists — Lstat to reject symlinks
-	info, err := os.Lstat(absPath)
+	info, err := os.Lstat(safePath)
 	if err != nil || info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Asset not found"})
 		return
 	}
 
 	// Set caching headers
-	if isMetadataFile(filename) {
+	if isMetadataFile(safeName) {
 		c.Header("Cache-Control", fmt.Sprintf("public, max-age=%d", metadataCacheMaxAge))
 	} else {
 		c.Header("Cache-Control", fmt.Sprintf("public, max-age=%d", binaryCacheMaxAge))
 	}
-	c.Header("Content-Type", contentTypeForFile(filename))
+	c.Header("Content-Type", contentTypeForFile(safeName))
 
-	c.File(absPath)
+	c.File(safePath)
 }
 
 // isMetadataFile returns true for electron-updater yml files.

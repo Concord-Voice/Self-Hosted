@@ -29,10 +29,11 @@ type ProcessedImage struct {
 	Height      int
 }
 
-// ProcessImage resizes an image to fit within maxWidth x maxHeight (preserving aspect ratio)
-// and re-encodes it as JPEG for broad compatibility and small file size.
-// Only used for Tier 1 (authenticated) media where the server can see the plaintext.
-func ProcessImage(r io.Reader, maxWidth, maxHeight int) (*ProcessedImage, error) {
+// imageEncoder writes an image to a buffer and returns the content type.
+type imageEncoder func(buf *bytes.Buffer, img image.Image) (string, error)
+
+// processImageWith decodes, resizes, and re-encodes an image using the provided encoder.
+func processImageWith(r io.Reader, maxWidth, maxHeight int, encode imageEncoder) (*ProcessedImage, error) {
 	src, err := safeDecode(r)
 	if err != nil {
 		return nil, err
@@ -42,7 +43,6 @@ func ProcessImage(r io.Reader, maxWidth, maxHeight int) (*ProcessedImage, error)
 	srcW := srcBounds.Dx()
 	srcH := srcBounds.Dy()
 
-	// Calculate target dimensions preserving aspect ratio
 	dstW, dstH := fitDimensions(srcW, srcH, maxWidth, maxHeight)
 
 	// Skip resize if image is already within bounds
@@ -55,52 +55,40 @@ func ProcessImage(r io.Reader, maxWidth, maxHeight int) (*ProcessedImage, error)
 	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
 	draw.CatmullRom.Scale(dst, dst.Bounds(), src, srcBounds, draw.Over, nil)
 
-	// Encode as JPEG (good quality, small size, universal support)
 	var buf bytes.Buffer
-	if err := jpeg.Encode(&buf, dst, &jpeg.Options{Quality: 85}); err != nil {
-		return nil, fmt.Errorf("media: failed to encode processed image: %w", err)
+	contentType, err := encode(&buf, dst)
+	if err != nil {
+		return nil, err
 	}
 
 	return &ProcessedImage{
 		Data:        buf.Bytes(),
-		ContentType: "image/jpeg",
+		ContentType: contentType,
 		Width:       dstW,
 		Height:      dstH,
 	}, nil
 }
 
+// ProcessImage resizes an image to fit within maxWidth x maxHeight (preserving aspect ratio)
+// and re-encodes it as JPEG for broad compatibility and small file size.
+// Only used for Tier 1 (authenticated) media where the server can see the plaintext.
+func ProcessImage(r io.Reader, maxWidth, maxHeight int) (*ProcessedImage, error) {
+	return processImageWith(r, maxWidth, maxHeight, func(buf *bytes.Buffer, img image.Image) (string, error) {
+		if err := jpeg.Encode(buf, img, &jpeg.Options{Quality: 85}); err != nil {
+			return "", fmt.Errorf("media: failed to encode processed image: %w", err)
+		}
+		return "image/jpeg", nil
+	})
+}
+
 // ProcessImagePNG is like ProcessImage but outputs PNG (for cases needing transparency).
 func ProcessImagePNG(r io.Reader, maxWidth, maxHeight int) (*ProcessedImage, error) {
-	src, err := safeDecode(r)
-	if err != nil {
-		return nil, err
-	}
-
-	srcBounds := src.Bounds()
-	srcW := srcBounds.Dx()
-	srcH := srcBounds.Dy()
-
-	dstW, dstH := fitDimensions(srcW, srcH, maxWidth, maxHeight)
-
-	if dstW >= srcW && dstH >= srcH {
-		dstW = srcW
-		dstH = srcH
-	}
-
-	dst := image.NewRGBA(image.Rect(0, 0, dstW, dstH))
-	draw.CatmullRom.Scale(dst, dst.Bounds(), src, srcBounds, draw.Over, nil)
-
-	var buf bytes.Buffer
-	if err := png.Encode(&buf, dst); err != nil {
-		return nil, fmt.Errorf("media: failed to encode processed image as PNG: %w", err)
-	}
-
-	return &ProcessedImage{
-		Data:        buf.Bytes(),
-		ContentType: "image/png",
-		Width:       dstW,
-		Height:      dstH,
-	}, nil
+	return processImageWith(r, maxWidth, maxHeight, func(buf *bytes.Buffer, img image.Image) (string, error) {
+		if err := png.Encode(buf, img); err != nil {
+			return "", fmt.Errorf("media: failed to encode processed image as PNG: %w", err)
+		}
+		return "image/png", nil
+	})
 }
 
 // safeDecode validates image dimensions before full decode to prevent decompression bombs.

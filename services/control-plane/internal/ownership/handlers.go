@@ -28,12 +28,21 @@ const (
 	transferPendingDuration = 24 * time.Hour
 	reversalWindowDuration  = 24 * time.Hour
 
-	errMsgInvalidServerID      = "Invalid server ID"
-	errMsgServerNotFound       = "Server not found"
-	errMsgFailedQueryOwner     = "Failed to query server owner"
+	errMsgInvalidServerID       = "Invalid server ID"
+	errMsgServerNotFound        = "Server not found"
+	errMsgFailedQueryOwner      = "Failed to query server owner"
 	errMsgFailedVerifyOwnership = "Failed to verify ownership"
-	errMsgFailedVerifyPassword = "Failed to verify password"
+	errMsgFailedVerifyPassword  = "Failed to verify password"
 	errMsgFailedReverseTransfer = "Failed to reverse transfer"
+
+	keyServerID    = "server_id"
+	keyUserID      = "user_id"
+	keyToUserID    = "to_user_id"
+	keyFromUserID  = "from_user_id"
+	keyExpiresAt   = "expires_at"
+	keyServer      = "server"
+	keyTransferID  = "transfer_id"
+	keyMessage     = "message"
 )
 
 // Handler handles ownership transfer requests.
@@ -196,27 +205,29 @@ func (h *Handler) InitiateTransfer(c *gin.Context) {
 		h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
 			Type: "ownership_transfer_initiated",
 			Data: map[string]interface{}{
-				"server_id":    serverID,
-				"from_user_id": userID,
-				"to_user_id":   req.TargetUserID,
-				"expires_at":   expiresAt.Format(time.RFC3339),
+				keyServerID:   serverID,
+				keyFromUserID: userID,
+				keyToUserID:   req.TargetUserID,
+				keyExpiresAt:  expiresAt.Format(time.RFC3339),
 			},
 		})
 	}
 
 	// Audit log
-	_ = h.audit.Log(c, serverID, &userID, "ownership_transfer_initiated", "server", &serverID, map[string]interface{}{
-		"to_user_id": req.TargetUserID,
-		"expires_at": expiresAt.Format(time.RFC3339),
-	})
+	if err := h.audit.Log(c, serverID, &userID, "ownership_transfer_initiated", keyServer, &serverID, map[string]interface{}{
+		keyToUserID:  req.TargetUserID,
+		keyExpiresAt: expiresAt.Format(time.RFC3339),
+	}); err != nil {
+		h.log.Error("Failed to write audit log for ownership_transfer_initiated", "error", err, "server_id", serverID)
+	}
 
 	c.JSON(http.StatusCreated, gin.H{
-		"transfer_id":    transferID,
-		"server_id":      serverID,
-		"from_user_id":   userID,
-		"to_user_id":     req.TargetUserID,
-		"status":         "pending",
-		"expires_at":     expiresAt.Format(time.RFC3339),
+		keyTransferID: transferID,
+		keyServerID:   serverID,
+		keyFromUserID: userID,
+		keyToUserID:   req.TargetUserID,
+		"status":      "pending",
+		keyExpiresAt:  expiresAt.Format(time.RFC3339),
 	})
 }
 
@@ -267,16 +278,16 @@ func (h *Handler) GetTransferStatus(c *gin.Context) {
 	}
 
 	resp := gin.H{
-		"transfer_id":  transferID,
+		keyTransferID:  transferID,
 		"status":       status,
 		"requested_at": requestedAt.Format(time.RFC3339),
-		"expires_at":   expiresAt.Format(time.RFC3339),
+		keyExpiresAt:   expiresAt.Format(time.RFC3339),
 	}
 
 	// Only owner and target see the to_user_id
 	if userID == fromUserID || userID == toUserID {
-		resp["from_user_id"] = fromUserID
-		resp["to_user_id"] = toUserID
+		resp[keyFromUserID] = fromUserID
+		resp[keyToUserID] = toUserID
 	}
 
 	c.JSON(http.StatusOK, gin.H{"transfer": resp})
@@ -333,15 +344,17 @@ func (h *Handler) CancelTransfer(c *gin.Context) {
 		h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
 			Type: "ownership_transfer_cancelled",
 			Data: map[string]interface{}{
-				"server_id": serverID,
+				keyServerID: serverID,
 			},
 		})
 	}
 
 	// Audit log
-	_ = h.audit.Log(c, serverID, &userID, "ownership_transfer_cancelled", "server", &serverID, nil)
+	if err := h.audit.Log(c, serverID, &userID, "ownership_transfer_cancelled", keyServer, &serverID, nil); err != nil {
+		h.log.Error("Failed to write audit log for ownership_transfer_cancelled", "error", err, "server_id", serverID)
+	}
 
-	c.JSON(http.StatusOK, gin.H{"message": "Transfer cancelled"})
+	c.JSON(http.StatusOK, gin.H{keyMessage: "Transfer cancelled"})
 }
 
 // ConfirmTransfer completes a pending transfer early (owner confirms).
@@ -406,7 +419,7 @@ func (h *Handler) ConfirmTransfer(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":      "Ownership transferred",
+		keyMessage:   "Ownership transferred",
 		"new_owner_id": toUserID,
 	})
 }
@@ -547,20 +560,22 @@ func (h *Handler) ReverseTransfer(c *gin.Context) {
 		h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
 			Type: "ownership_transfer_reversed",
 			Data: map[string]interface{}{
-				"server_id": serverID,
+				keyServerID: serverID,
 				"owner_id":  fromUserID,
 			},
 		})
 	}
 
 	// Audit log
-	_ = h.audit.Log(c, serverID, &userID, "ownership_transfer_reversed", "server", &serverID, map[string]interface{}{
-		"transfer_id":   transferID,
+	if err := h.audit.Log(c, serverID, &userID, "ownership_transfer_reversed", keyServer, &serverID, map[string]interface{}{
+		keyTransferID:   transferID,
 		"reversed_from": toUserID,
-	})
+	}); err != nil {
+		h.log.Error("Failed to write audit log for ownership_transfer_reversed", "error", err, "server_id", serverID)
+	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":  "Ownership transfer reversed",
+		keyMessage: "Ownership transfer reversed",
 		"owner_id": fromUserID,
 	})
 }
@@ -630,7 +645,7 @@ func (h *Handler) executeTransfer(ctx context.Context, serverID, transferID, fro
 		h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
 			Type: "ownership_transferred",
 			Data: map[string]interface{}{
-				"server_id":    serverID,
+				keyServerID:    serverID,
 				"old_owner_id": fromUserID,
 				"new_owner_id": toUserID,
 			},
@@ -638,10 +653,12 @@ func (h *Handler) executeTransfer(ctx context.Context, serverID, transferID, fro
 	}
 
 	// Audit log
-	_ = h.audit.Log(bgCtx, serverID, nil, "ownership_transferred", "server", &serverID, map[string]interface{}{
-		"from_user_id": fromUserID,
-		"to_user_id":   toUserID,
-	})
+	if err := h.audit.Log(bgCtx, serverID, nil, "ownership_transferred", keyServer, &serverID, map[string]interface{}{
+		keyFromUserID: fromUserID,
+		keyToUserID:   toUserID,
+	}); err != nil {
+		h.log.Error("Failed to write audit log for ownership_transferred", "error", err, "server_id", serverID)
+	}
 
 	return nil
 }

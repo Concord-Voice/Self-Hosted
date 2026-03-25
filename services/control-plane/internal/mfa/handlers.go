@@ -1014,30 +1014,24 @@ func (h *Handler) WebAuthnDeleteCredential(c *gin.Context) {
 
 // ── Shared MFA Verify (Unauthenticated — uses challenge token) ──────────────
 
+// verifyRequest holds the parsed MFA verify request body.
+type verifyRequest struct {
+	ChallengeToken string          `json:"mfa_challenge_token" binding:"required"`
+	Method         string          `json:"method" binding:"required"` // "totp", "backup_code", "webauthn"
+	Code           string          `json:"code"`                      // for totp/backup_code
+	Assertion      json.RawMessage `json:"assertion"`                 // for webauthn
+}
+
 // Verify validates an MFA challenge (TOTP, backup code, or WebAuthn).
 // This endpoint is unauthenticated — identity comes from the challenge token.
 func (h *Handler) Verify(c *gin.Context) {
-	var req struct {
-		ChallengeToken string          `json:"mfa_challenge_token" binding:"required"`
-		Method         string          `json:"method" binding:"required"` // "totp", "backup_code", "webauthn"
-		Code           string          `json:"code"`                      // for totp/backup_code
-		Assertion      json.RawMessage `json:"assertion"`                 // for webauthn
-	}
+	var req verifyRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 		return
 	}
 
-	// Try all purposes — the token itself encodes the purpose
-	var claims *ChallengeClaims
-	var purpose ChallengePurpose
-	for _, p := range []ChallengePurpose{PurposeLogin, PurposeSuspiciousRefresh, PurposeMFAUpgrade} {
-		if parsed, err := ValidateChallengeToken(req.ChallengeToken, h.jwtSecret, p); err == nil {
-			claims = parsed
-			purpose = p
-			break
-		}
-	}
+	claims, purpose := h.parseChallengeToken(req.ChallengeToken)
 	if claims == nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired MFA challenge token"})
 		return
@@ -1060,105 +1054,13 @@ func (h *Handler) Verify(c *gin.Context) {
 		return
 	}
 
-	var verified bool
-
-	switch req.Method {
-	case "totp", "backup_code":
-		if req.Code == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Code is required"})
-			return
-		}
-		valid, err := h.VerifyCode(ctx, claims.UserID, req.Code)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Verification failed"})
-			return
-		}
-		verified = valid
-
-	case "webauthn":
-		if len(req.Assertion) == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Assertion is required for WebAuthn verification"})
-			return
-		}
-
-		// Retrieve the session data stored by BeginWebAuthnLogin
-		sessionKey := fmt.Sprintf("mfa_webauthn_session:%s", claims.ID)
-		sessionJSON, err := h.redis.Get(ctx, sessionKey).Bytes()
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "No WebAuthn session found. Request a new challenge."})
-			return
-		}
-
-		var session webauthn.SessionData
-		if err := json.Unmarshal(sessionJSON, &session); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid WebAuthn session"})
-			return
-		}
-
-		user, err := h.buildWebAuthnUser(ctx, claims.UserID)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify"})
-			return
-		}
-
-		// Use FinishLoginWithBytes since the request body was already consumed by JSON binding
-		credential, err := h.webauthn.FinishLoginWithBytes(user, session, req.Assertion)
-		if err != nil {
-			h.log.Warn("WebAuthn login verification failed", "error", err, "user_id", claims.UserID)
-			verified = false
-		} else {
-			// Update sign count
-			_, _ = h.db.ExecContext(ctx, `
-				UPDATE user_mfa_webauthn SET sign_count = $1, last_used_at = NOW() WHERE credential_id = $2 AND user_id = $3
-			`, credential.Authenticator.SignCount, credential.ID, claims.UserID)
-			verified = true
-		}
-		h.redis.Del(ctx, sessionKey)
-
-	case "email":
-		if req.Code == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Code is required"})
-			return
-		}
-		// Validate 6-digit numeric format
-		code := strings.TrimSpace(req.Code)
-		if len(code) != 6 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Email code must be 6 digits"})
-			return
-		}
-		for _, ch := range code {
-			if ch < '0' || ch > '9' {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Email code must be 6 digits"})
-				return
-			}
-		}
-		req.Code = code
-		// Check code against Redis (stored by SendEmailMFACode)
-		codeKey := fmt.Sprintf("mfa_email_login:%s", claims.ID)
-		stored, err := h.redis.Get(ctx, codeKey).Result()
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "No email code pending. Request a new one."})
-			return
-		}
-		if subtle.ConstantTimeCompare([]byte(req.Code), []byte(stored)) == 1 {
-			verified = true
-			// Only clean up on success — allow retries with the same code
-			h.redis.Del(ctx, codeKey)
-			h.redis.Del(ctx, fmt.Sprintf("mfa_email_sent:%s", claims.ID))
-		}
-
-	default:
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid method. Use 'totp', 'backup_code', 'webauthn', or 'email'"})
-		return
+	verified, responded := h.verifyByMethod(ctx, c, req, claims)
+	if responded {
+		return // Early return already sent a response (e.g. bad request)
 	}
 
 	if !verified {
-		attempts := h.redis.Incr(ctx, attemptsKey).Val()
-		h.redis.Expire(ctx, attemptsKey, 5*time.Minute)
-		if attempts >= 5 {
-			h.redis.Set(ctx, lockoutKey, "1", 15*time.Minute)
-			h.redis.Del(ctx, attemptsKey)
-		}
+		h.recordVerifyFailure(ctx, attemptsKey, lockoutKey)
 		c.JSON(http.StatusForbidden, gin.H{"error": "Invalid MFA code"})
 		return
 	}
@@ -1167,46 +1069,159 @@ func (h *Handler) Verify(c *gin.Context) {
 	h.redis.Set(ctx, usedKey, "1", 10*time.Minute)
 	h.redis.Del(ctx, attemptsKey)
 
-	// Complete the action based on purpose
+	h.completeVerifyPurpose(ctx, c, claims, purpose)
+}
+
+// parseChallengeToken tries all valid purposes and returns the claims and matched purpose.
+func (h *Handler) parseChallengeToken(tokenStr string) (*ChallengeClaims, ChallengePurpose) {
+	for _, p := range []ChallengePurpose{PurposeLogin, PurposeSuspiciousRefresh, PurposeMFAUpgrade} {
+		if parsed, err := ValidateChallengeToken(tokenStr, h.jwtSecret, p); err == nil {
+			return parsed, p
+		}
+	}
+	return nil, ""
+}
+
+// verifyByMethod dispatches verification to the appropriate method handler.
+// Returns (verified, responded) — responded is true if an HTTP response was already written.
+func (h *Handler) verifyByMethod(ctx context.Context, c *gin.Context, req verifyRequest, claims *ChallengeClaims) (bool, bool) {
+	switch req.Method {
+	case "totp", "backup_code":
+		return h.verifyTOTPOrBackup(ctx, c, req.Code, claims.UserID)
+	case "webauthn":
+		return h.verifyWebAuthnChallenge(ctx, c, req.Assertion, claims)
+	case "email":
+		return h.verifyEmailCode(ctx, c, req.Code, claims)
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid method. Use 'totp', 'backup_code', 'webauthn', or 'email'"})
+		return false, true
+	}
+}
+
+// verifyTOTPOrBackup verifies a TOTP or backup code.
+func (h *Handler) verifyTOTPOrBackup(ctx context.Context, c *gin.Context, code, userID string) (bool, bool) {
+	if code == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Code is required"})
+		return false, true
+	}
+	valid, err := h.VerifyCode(ctx, userID, code)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Verification failed"})
+		return false, true
+	}
+	return valid, false
+}
+
+// verifyWebAuthnChallenge verifies a WebAuthn assertion.
+func (h *Handler) verifyWebAuthnChallenge(ctx context.Context, c *gin.Context, assertion json.RawMessage, claims *ChallengeClaims) (bool, bool) {
+	if len(assertion) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Assertion is required for WebAuthn verification"})
+		return false, true
+	}
+
+	sessionKey := fmt.Sprintf("mfa_webauthn_session:%s", claims.ID)
+	sessionJSON, err := h.redis.Get(ctx, sessionKey).Bytes()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No WebAuthn session found. Request a new challenge."})
+		return false, true
+	}
+
+	var session webauthn.SessionData
+	if err := json.Unmarshal(sessionJSON, &session); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid WebAuthn session"})
+		return false, true
+	}
+
+	user, err := h.buildWebAuthnUser(ctx, claims.UserID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify"})
+		return false, true
+	}
+
+	credential, err := h.webauthn.FinishLoginWithBytes(user, session, assertion)
+	if err != nil {
+		h.log.Warn("WebAuthn login verification failed", "error", err, "user_id", claims.UserID)
+		h.redis.Del(ctx, sessionKey)
+		return false, false
+	}
+	if _, err := h.db.ExecContext(ctx, `
+		UPDATE user_mfa_webauthn SET sign_count = $1, last_used_at = NOW() WHERE credential_id = $2 AND user_id = $3
+	`, credential.Authenticator.SignCount, credential.ID, claims.UserID); err != nil {
+		h.log.Error("Failed to update WebAuthn sign count", "error", err, "user_id", claims.UserID)
+	}
+	h.redis.Del(ctx, sessionKey)
+	return true, false
+}
+
+// verifyEmailCode verifies a 6-digit email MFA code.
+func (h *Handler) verifyEmailCode(ctx context.Context, c *gin.Context, rawCode string, claims *ChallengeClaims) (bool, bool) {
+	if rawCode == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Code is required"})
+		return false, true
+	}
+	code := strings.TrimSpace(rawCode)
+	if !isValidEmailCode(code) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Email code must be 6 digits"})
+		return false, true
+	}
+
+	codeKey := fmt.Sprintf("mfa_email_login:%s", claims.ID)
+	stored, err := h.redis.Get(ctx, codeKey).Result()
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No email code pending. Request a new one."})
+		return false, true
+	}
+	if subtle.ConstantTimeCompare([]byte(code), []byte(stored)) != 1 {
+		return false, false
+	}
+	h.redis.Del(ctx, codeKey)
+	h.redis.Del(ctx, fmt.Sprintf("mfa_email_sent:%s", claims.ID))
+	return true, false
+}
+
+// isValidEmailCode checks that a string is exactly 6 ASCII digits.
+func isValidEmailCode(code string) bool {
+	if len(code) != 6 {
+		return false
+	}
+	for _, ch := range code {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+// recordVerifyFailure increments the failure counter and applies lockout if threshold reached.
+func (h *Handler) recordVerifyFailure(ctx context.Context, attemptsKey, lockoutKey string) {
+	attempts := h.redis.Incr(ctx, attemptsKey).Val()
+	h.redis.Expire(ctx, attemptsKey, 5*time.Minute)
+	if attempts >= 5 {
+		h.redis.Set(ctx, lockoutKey, "1", 15*time.Minute)
+		h.redis.Del(ctx, attemptsKey)
+	}
+}
+
+// completeVerifyPurpose performs the action associated with the MFA challenge purpose.
+func (h *Handler) completeVerifyPurpose(ctx context.Context, c *gin.Context, claims *ChallengeClaims, purpose ChallengePurpose) {
 	switch purpose {
 	case PurposeLogin:
 		if h.loginCompleter == nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Login completion not configured"})
 			return
 		}
-		// Retrieve remember_me preference from Redis
 		rememberKey := fmt.Sprintf("mfa_challenge:%s:remember_me", claims.ID)
 		rememberMe := h.redis.Get(ctx, rememberKey).Val() == "1"
 		h.redis.Del(ctx, rememberKey)
-
 		h.loginCompleter.CompleteLogin(c, claims.UserID, rememberMe)
 
-	case PurposeSuspiciousRefresh:
-		// Return success — the client will retry the refresh
-		c.JSON(http.StatusOK, gin.H{
-			"verified": true,
-			"purpose":  string(purpose),
-			"user_id":  claims.UserID,
-		})
-
 	case PurposeMFAUpgrade:
-		// Pre-MFA session verified. Set a short-lived bypass key so the
-		// client's retry of the refresh isn't challenged again. The retry
-		// issues a new token with created_at > mfa_enabled_at.
 		bypassKey := fmt.Sprintf("mfa_upgrade_bypass:%s", claims.UserID)
 		h.redis.Set(ctx, bypassKey, "1", 30*time.Second)
-		c.JSON(http.StatusOK, gin.H{
-			"verified": true,
-			"purpose":  string(purpose),
-			"user_id":  claims.UserID,
-		})
+		c.JSON(http.StatusOK, gin.H{"verified": true, "purpose": string(purpose), "user_id": claims.UserID})
 
 	default:
-		c.JSON(http.StatusOK, gin.H{
-			"verified": true,
-			"purpose":  string(purpose),
-			"user_id":  claims.UserID,
-		})
+		c.JSON(http.StatusOK, gin.H{"verified": true, "purpose": string(purpose), "user_id": claims.UserID})
 	}
 }
 

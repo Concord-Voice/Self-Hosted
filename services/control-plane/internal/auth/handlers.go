@@ -72,6 +72,17 @@ const (
 	errMsgFailedCreateAccount     = "Failed to create account"
 	errMsgLoginFailed             = "Login failed"
 	errMsgInvalidCredentials      = "Invalid credentials" //nolint:gosec // G101 false positive: error message text, not a credential
+	errMsgInvalidRefreshToken     = "Invalid refresh token" //nolint:gosec // G101 false positive: error message text, not a credential
+
+	errFailedCommitTransaction     = "Failed to commit transaction"
+	errInvalidExpiredRecoveryCode  = "Invalid or expired recovery code"
+	errRecoveryVerificationFailed  = "Recovery verification failed"
+	errRecoveryNotConfigured       = "Recovery not configured"
+	errInvalidExpiredRecoveryToken = "Invalid or expired recovery token" //nolint:gosec // G101 false positive: error message, not a credential
+	errFailedResetPwd         = "Failed to reset password" //nolint:gosec // G101 false positive: error message, not a credential
+	errFailedResetAccount          = "Failed to reset account"
+	errFailedCreateRecoveryRequest = "Failed to create recovery request"
+	bearerPrefix                   = "Bearer "
 )
 
 // truncateUserAgent limits the User-Agent string to maxUserAgentLength.
@@ -289,7 +300,7 @@ func (h *Handler) Register(c *gin.Context) {
 
 	// Commit transaction
 	if err := tx.Commit(); err != nil {
-		h.log.Error("Failed to commit transaction", "error", err)
+		h.log.Error(errFailedCommitTransaction, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
 		return
 	}
@@ -670,308 +681,314 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) 
 // If a previously-used token is presented again, the request is rejected and the
 // anomaly is logged. The replayed token is already revoked (single-use rotation).
 func (h *Handler) Refresh(c *gin.Context) {
-	// Get refresh token from cookie first, fall back to X-Refresh-Token header.
-	// Electron/native clients loaded from file:// can't send SameSite=Lax
-	// cookies on cross-site POST requests, so they pass the token via header.
-	refreshToken, err := c.Cookie("refresh_token")
-	if err != nil || refreshToken == "" {
-		refreshToken = c.GetHeader("X-Refresh-Token")
-	}
+	refreshToken := h.extractRefreshToken(c)
 	if refreshToken == "" {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "No refresh token provided"})
 		return
 	}
 
-	// Hash the token to look it up
 	tokenHash := HashRefreshToken(refreshToken)
 	tokenSuffix := refreshToken[len(refreshToken)-8:]
-	hashPrefix := tokenHash[:16]
-	h.log.Info("Refresh attempt", "token_suffix", tokenSuffix, "hash_prefix", hashPrefix, "machine_id", c.GetHeader("X-Machine-Id"))
+	h.log.Info("Refresh attempt", "token_suffix", tokenSuffix, "hash_prefix", tokenHash[:16], "machine_id", c.GetHeader("X-Machine-Id"))
 
-	// Fetch token from database (exclude revoked sessions)
-	var token models.RefreshToken
-	var storedMachineID sql.NullString
-	err = h.db.QueryRow(
-		`SELECT id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, created_at, last_used_at, remember_me, COALESCE(machine_id, '')
-		 FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NULL`,
-		tokenHash,
-	).Scan(
-		&token.ID,
-		&token.UserID,
-		&token.TokenHash,
-		&token.DeviceName,
-		&token.IPAddress,
-		&token.UserAgent,
-		&token.ExpiresAt,
-		&token.CreatedAt,
-		&token.LastUsedAt,
-		&token.RememberMe,
-		&storedMachineID,
-	)
-	if storedMachineID.Valid {
-		token.MachineID = storedMachineID.String
-	}
+	token, err := h.fetchActiveRefreshToken(tokenHash)
 	if err != nil {
-		if err == sql.ErrNoRows {
-			// Replay detection: check if this token was already used (revoked but exists).
-			// Grace period: if the token was revoked very recently (< 30s), treat it as a
-			// legitimate crash-recovery replay. This covers the case where the client was
-			// killed between the server revoking the old token and the client saving the
-			// new one (e.g. process crash, HMR reload, forced quit).
-			var revokedUserID, revokedIP, revokedUA, revokedMachineID string
-			var revokedAt time.Time
-			var revokedTokenID string
-			revokeErr := h.db.QueryRow(
-				`SELECT id, user_id, revoked_at, ip_address, user_agent, COALESCE(machine_id, '')
-				 FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NOT NULL`,
-				tokenHash,
-			).Scan(&revokedTokenID, &revokedUserID, &revokedAt, &revokedIP, &revokedUA, &revokedMachineID)
-			if revokeErr == nil && revokedUserID != "" {
-				gracePeriod := 30 * time.Second
-				requestIP := c.ClientIP()
-				requestUA := truncateUserAgent(c.GetHeader("User-Agent"))
-				graceRequestMachineID := c.GetHeader("X-Machine-Id")
-				// Postgres INET may return CIDR notation (e.g. "127.0.0.1/32"); strip suffix for comparison
-				storedIP := revokedIP
-				if idx := strings.IndexByte(storedIP, '/'); idx != -1 {
-					storedIP = storedIP[:idx]
-				}
-				// Machine ID must match if both sides have one
-				machineIDOk := revokedMachineID == "" || graceRequestMachineID == "" || revokedMachineID == graceRequestMachineID
-
-				if time.Since(revokedAt) < gracePeriod && storedIP == requestIP && revokedUA == requestUA && machineIDOk {
-					// Within grace period AND same device fingerprint — likely a crash
-					// recovery, not a stolen token replay from a different machine.
-					h.log.Info("Refresh token replay within grace period, recovering session",
-						"user_id", revokedUserID,
-						"revoked_ago_ms", time.Since(revokedAt).Milliseconds(),
-						"ip", requestIP,
-					)
-					h.handleGracePeriodRefresh(c, revokedUserID, revokedTokenID, revokedAt)
-					return
-				}
-				// Outside grace period or different device — genuine stale replay
-				h.log.Warn("Refresh token replay detected, stale token replayed",
-					"user_id", revokedUserID,
-					"token_hash", tokenHash,
-					"same_ip", revokedIP == requestIP,
-					"same_ua", revokedUA == requestUA,
-					"revoked_ago_ms", time.Since(revokedAt).Milliseconds(),
-				)
-			} else {
-				// Token hash not found anywhere — completely unknown token
-				h.log.Warn("Refresh token not found in database (not active, not revoked)",
-					"token_suffix", tokenSuffix,
-					"hash_prefix", hashPrefix,
-				)
-			}
-			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid refresh token"})
-			return
-		}
-		h.log.Error("Failed to fetch refresh token", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
+		h.handleRefreshTokenNotFound(c, err, tokenHash, tokenSuffix)
 		return
 	}
 
-	// Check if token is expired
 	if time.Now().After(token.ExpiresAt) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Refresh token expired"})
 		return
 	}
 
-	// Offline-duration expiry: for "Remember Me" tokens, the 30-day timer only
-	// counts while the user is offline. If they're online (including invisible),
-	// the token never expires from inactivity.
-	if token.RememberMe {
-		ctx := context.Background()
-		presenceKey := fmt.Sprintf("presence:%s", token.UserID)
-		_, presenceErr := h.redis.Get(ctx, presenceKey).Result()
-
-		if presenceErr == redis.Nil {
-			// User is offline — check how long
-			lastSeenKey := fmt.Sprintf("last_seen:%s", token.UserID)
-			lastSeenStr, lsErr := h.redis.Get(ctx, lastSeenKey).Result()
-			if lsErr == nil && lastSeenStr != "" {
-				lastSeenUnix, parseErr := strconv.ParseInt(lastSeenStr, 10, 64)
-				if parseErr == nil {
-					offlineDuration := time.Since(time.Unix(lastSeenUnix, 0))
-					if offlineDuration > 30*24*time.Hour {
-						c.JSON(http.StatusUnauthorized, gin.H{
-							"error": "Session expired due to prolonged inactivity",
-						})
-						return
-					}
-				}
-			}
-		}
-		// presence key exists (online/dnd/invisible) → skip, token stays valid
+	if h.checkRememberMeExpiry(c, token) {
+		return
 	}
 
-	// ── Machine ID theft detection (#89) ───────────────────────────────
 	requestMachineID := c.GetHeader("X-Machine-Id")
-	if token.MachineID != "" && requestMachineID != "" && token.MachineID != requestMachineID {
-		requestIP := c.ClientIP()
-		storedIP := token.IPAddress
-		if idx := strings.IndexByte(storedIP, '/'); idx != -1 {
-			storedIP = storedIP[:idx]
-		}
+	if h.checkMachineIDTheft(c, token, requestMachineID) {
+		return
+	}
 
-		if storedIP == requestIP {
-			// Same IP, different machine — suspicious but not theft
-			if h.mfaChecker != nil && h.mfaChecker.IsEnabled(c.Request.Context(), token.UserID) {
-				// User has MFA — require verification before allowing
-				ctx := c.Request.Context()
-				allMethods, _ := h.mfaChecker.GetEnabledMethods(ctx, token.UserID)
-				loginMethods, _ := h.mfaChecker.GetLoginMethods(ctx, token.UserID)
-				challengeToken, jti, mfaErr := h.mfaChecker.GenerateLoginChallenge(ctx, token.UserID, token.RememberMe)
-				if mfaErr != nil {
-					h.log.Error("Failed to generate suspicious refresh MFA challenge", "error", mfaErr)
-					// Fall through to allow (graceful degradation)
-				} else {
-					h.log.Warn("Suspicious refresh: different machine_id, same IP — MFA required",
-						"user_id", token.UserID,
-						"stored_machine_id", token.MachineID,
-						"request_machine_id", requestMachineID,
-						"ip", requestIP,
-					)
-					resp := gin.H{
-						"error":              "suspicious_session_mfa",
-						"message":            "Session verification required",
-						"mfa_challenge_token": challengeToken,
-						"methods":            loginMethods,
-					}
-					// Include recovery-only methods so frontend can filter them from the method picker
-					loginSet := make(map[string]bool, len(loginMethods))
-					for _, m := range loginMethods {
-						loginSet[m] = true
-					}
-					var recoveryOnly []string
-					for _, m := range allMethods {
-						if !loginSet[m] {
-							recoveryOnly = append(recoveryOnly, m)
-						}
-					}
-					if len(recoveryOnly) > 0 {
-						resp["recovery_only_methods"] = recoveryOnly
-					}
-					if loginSet["webauthn"] {
-						if opts, werr := h.mfaChecker.BeginWebAuthnLogin(ctx, token.UserID, jti); werr != nil {
-							h.log.Error("Failed to begin WebAuthn login for suspicious refresh", "error", werr)
-						} else if opts != nil {
-							resp["webauthn_options"] = opts
-						}
-					}
-					c.JSON(http.StatusForbidden, resp)
-					return
-				}
-			}
-			// No MFA or challenge generation failed — log warning, allow (graceful degradation)
-			h.log.Warn("Refresh from different machine_id but same IP (no MFA: allowing)",
-				"user_id", token.UserID,
-				"stored_machine_id", token.MachineID,
-				"request_machine_id", requestMachineID,
-				"ip", requestIP,
-			)
-		} else {
-			// Different machine AND different IP — HIGH RISK: token theft
-			h.log.Error("TOKEN THEFT DETECTED: different machine_id and different IP",
-				"user_id", token.UserID,
-				"stored_machine_id", token.MachineID,
-				"request_machine_id", requestMachineID,
-				"stored_ip", storedIP,
-				"request_ip", requestIP,
-			)
+	if h.checkPreMFASessionLock(c, token) {
+		return
+	}
 
-			// Revoke ALL sessions for this user
-			_, _ = h.db.Exec(
-				`UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`,
-				token.UserID,
-			)
+	h.rotateAndRespond(c, token, tokenSuffix, requestMachineID)
+}
 
-			// Disconnect all WebSocket connections
-			if uid, parseErr := uuid.Parse(token.UserID); parseErr == nil {
-				h.hub.DisconnectUser(uid)
-			}
+// extractRefreshToken gets the refresh token from cookie or X-Refresh-Token header.
+func (h *Handler) extractRefreshToken(c *gin.Context) string {
+	refreshToken, err := c.Cookie("refresh_token")
+	if err != nil || refreshToken == "" {
+		refreshToken = c.GetHeader("X-Refresh-Token")
+	}
+	return refreshToken
+}
 
-			// Trigger E2EE key revocation for all encrypted channels
-			h.triggerTheftKeyRevocations(token.UserID)
+// fetchActiveRefreshToken looks up an active (non-revoked) refresh token by hash.
+func (h *Handler) fetchActiveRefreshToken(tokenHash string) (models.RefreshToken, error) {
+	var token models.RefreshToken
+	var storedMachineID sql.NullString
+	err := h.db.QueryRow(
+		`SELECT id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, created_at, last_used_at, remember_me, COALESCE(machine_id, '')
+		 FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NULL`,
+		tokenHash,
+	).Scan(
+		&token.ID, &token.UserID, &token.TokenHash, &token.DeviceName,
+		&token.IPAddress, &token.UserAgent, &token.ExpiresAt, &token.CreatedAt,
+		&token.LastUsedAt, &token.RememberMe, &storedMachineID,
+	)
+	if storedMachineID.Valid {
+		token.MachineID = storedMachineID.String
+	}
+	return token, err
+}
 
-			c.JSON(http.StatusUnauthorized, gin.H{
-				"error":      "Session terminated: potential token theft detected",
-				"error_code": "session_theft_detected",
-			})
-			return
+// handleRefreshTokenNotFound handles the case where no active refresh token was found.
+// Includes replay detection and grace period recovery.
+func (h *Handler) handleRefreshTokenNotFound(c *gin.Context, err error, tokenHash, tokenSuffix string) {
+	if err != sql.ErrNoRows {
+		h.log.Error("Failed to fetch refresh token", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
+		return
+	}
+
+	// Replay detection: check if this token was already used (revoked but exists)
+	if h.attemptGracePeriodRecovery(c, tokenHash) {
+		return
+	}
+
+	h.log.Warn("Refresh token not found in database (not active, not revoked)",
+		"token_suffix", tokenSuffix, "hash_prefix", tokenHash[:16])
+	c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidRefreshToken})
+}
+
+// attemptGracePeriodRecovery checks if a revoked token is within the grace period for crash recovery.
+// Returns true if recovery was attempted (response already written), false to continue with rejection.
+func (h *Handler) attemptGracePeriodRecovery(c *gin.Context, tokenHash string) bool {
+	var revokedUserID, revokedIP, revokedUA, revokedMachineID string
+	var revokedAt time.Time
+	var revokedTokenID string
+	revokeErr := h.db.QueryRow(
+		`SELECT id, user_id, revoked_at, ip_address, user_agent, COALESCE(machine_id, '')
+		 FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NOT NULL`,
+		tokenHash,
+	).Scan(&revokedTokenID, &revokedUserID, &revokedAt, &revokedIP, &revokedUA, &revokedMachineID)
+	if revokeErr != nil || revokedUserID == "" {
+		return false
+	}
+
+	requestIP := c.ClientIP()
+	requestUA := truncateUserAgent(c.GetHeader("User-Agent"))
+	graceRequestMachineID := c.GetHeader("X-Machine-Id")
+	storedIP := stripCIDR(revokedIP)
+	machineIDOk := revokedMachineID == "" || graceRequestMachineID == "" || revokedMachineID == graceRequestMachineID
+
+	if time.Since(revokedAt) < 30*time.Second && storedIP == requestIP && revokedUA == requestUA && machineIDOk {
+		h.log.Info("Refresh token replay within grace period, recovering session",
+			"user_id", revokedUserID, "revoked_ago_ms", time.Since(revokedAt).Milliseconds(), "ip", requestIP)
+		h.handleGracePeriodRefresh(c, revokedUserID, revokedTokenID, revokedAt)
+		return true
+	}
+
+	h.log.Warn("Refresh token replay detected, stale token replayed",
+		"user_id", revokedUserID, "token_hash", tokenHash,
+		"same_ip", revokedIP == requestIP, "same_ua", revokedUA == requestUA,
+		"revoked_ago_ms", time.Since(revokedAt).Milliseconds())
+	c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidRefreshToken})
+	return true
+}
+
+// stripCIDR removes CIDR notation suffix from an IP address (e.g. "127.0.0.1/32" → "127.0.0.1").
+func stripCIDR(ip string) string {
+	if idx := strings.IndexByte(ip, '/'); idx != -1 {
+		return ip[:idx]
+	}
+	return ip
+}
+
+// checkRememberMeExpiry checks if a remember-me token has expired due to prolonged offline inactivity.
+// Returns true if the response was written (session expired).
+func (h *Handler) checkRememberMeExpiry(c *gin.Context, token models.RefreshToken) bool {
+	if !token.RememberMe {
+		return false
+	}
+	ctx := context.Background()
+	presenceKey := fmt.Sprintf("presence:%s", token.UserID)
+	if _, presenceErr := h.redis.Get(ctx, presenceKey).Result(); presenceErr != redis.Nil {
+		return false // User is online — skip
+	}
+	lastSeenKey := fmt.Sprintf("last_seen:%s", token.UserID)
+	lastSeenStr, lsErr := h.redis.Get(ctx, lastSeenKey).Result()
+	if lsErr != nil || lastSeenStr == "" {
+		return false
+	}
+	lastSeenUnix, parseErr := strconv.ParseInt(lastSeenStr, 10, 64)
+	if parseErr != nil {
+		return false
+	}
+	if time.Since(time.Unix(lastSeenUnix, 0)) > 30*24*time.Hour {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Session expired due to prolonged inactivity"})
+		return true
+	}
+	return false
+}
+
+// checkMachineIDTheft detects machine ID mismatches and handles suspicious/theft scenarios.
+// Returns true if the response was written (blocked or MFA challenge sent).
+func (h *Handler) checkMachineIDTheft(c *gin.Context, token models.RefreshToken, requestMachineID string) bool {
+	if token.MachineID == "" || requestMachineID == "" || token.MachineID == requestMachineID {
+		return false
+	}
+
+	requestIP := c.ClientIP()
+	storedIP := stripCIDR(token.IPAddress)
+
+	if storedIP != requestIP {
+		return h.handleTokenTheft(c, token, requestMachineID, storedIP, requestIP)
+	}
+	return h.handleSuspiciousMachineID(c, token, requestMachineID, requestIP)
+}
+
+// handleTokenTheft handles the case where both machine ID and IP differ — high risk token theft.
+// Always returns true (response is written).
+func (h *Handler) handleTokenTheft(c *gin.Context, token models.RefreshToken, requestMachineID, storedIP, requestIP string) bool {
+	h.log.Error("TOKEN THEFT DETECTED: different machine_id and different IP",
+		"user_id", token.UserID, "stored_machine_id", token.MachineID,
+		"request_machine_id", requestMachineID, "stored_ip", storedIP, "request_ip", requestIP)
+
+	_, _ = h.db.Exec(
+		`UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`,
+		token.UserID)
+
+	if uid, parseErr := uuid.Parse(token.UserID); parseErr == nil {
+		h.hub.DisconnectUser(uid)
+	}
+	h.triggerTheftKeyRevocations(token.UserID)
+
+	c.JSON(http.StatusUnauthorized, gin.H{
+		"error": "Session terminated: potential token theft detected", "error_code": "session_theft_detected"})
+	return true
+}
+
+// handleSuspiciousMachineID handles same-IP but different machine ID — suspicious but not theft.
+// Returns true if the response was written (MFA challenge sent), false to allow.
+func (h *Handler) handleSuspiciousMachineID(c *gin.Context, token models.RefreshToken, requestMachineID, requestIP string) bool {
+	if h.mfaChecker == nil || !h.mfaChecker.IsEnabled(c.Request.Context(), token.UserID) {
+		h.log.Warn("Refresh from different machine_id but same IP (no MFA: allowing)",
+			"user_id", token.UserID, "stored_machine_id", token.MachineID,
+			"request_machine_id", requestMachineID, "ip", requestIP)
+		return false
+	}
+
+	ctx := c.Request.Context()
+	challengeToken, jti, mfaErr := h.mfaChecker.GenerateLoginChallenge(ctx, token.UserID, token.RememberMe)
+	if mfaErr != nil {
+		h.log.Error("Failed to generate suspicious refresh MFA challenge", "error", mfaErr)
+		return false // Graceful degradation — allow
+	}
+
+	h.log.Warn("Suspicious refresh: different machine_id, same IP — MFA required",
+		"user_id", token.UserID, "stored_machine_id", token.MachineID,
+		"request_machine_id", requestMachineID, "ip", requestIP)
+
+	resp := h.buildMFAChallengeResponse("suspicious_session_mfa", "Session verification required", challengeToken, token.UserID, jti)
+	c.JSON(http.StatusForbidden, resp)
+	return true
+}
+
+// checkPreMFASessionLock checks if a pre-MFA session needs an upgrade challenge.
+// Returns true if the response was written (MFA upgrade required).
+func (h *Handler) checkPreMFASessionLock(c *gin.Context, token models.RefreshToken) bool {
+	if h.mfaChecker == nil || !h.mfaChecker.IsEnabled(c.Request.Context(), token.UserID) {
+		return false
+	}
+
+	ctx := c.Request.Context()
+	bypassKey := fmt.Sprintf("mfa_upgrade_bypass:%s", token.UserID)
+	if h.redis.Exists(ctx, bypassKey).Val() > 0 {
+		h.redis.Del(ctx, bypassKey)
+		h.log.Info("Pre-MFA session bypass consumed", "user_id", token.UserID)
+		return false
+	}
+
+	var mfaEnabledAt sql.NullTime
+	_ = h.db.QueryRow(`SELECT mfa_enabled_at FROM users WHERE id = $1`, token.UserID).Scan(&mfaEnabledAt)
+	if !mfaEnabledAt.Valid || !token.CreatedAt.Before(mfaEnabledAt.Time) {
+		return false
+	}
+
+	challengeToken, jti, mfaErr := h.mfaChecker.GenerateUpgradeChallenge(ctx, token.UserID, token.RememberMe)
+	if mfaErr != nil {
+		h.log.Error("Failed to generate pre-MFA session challenge", "error", mfaErr)
+		return false // Don't block on failure
+	}
+
+	h.log.Info("Pre-MFA session requires MFA verification",
+		"user_id", token.UserID, "session_created", token.CreatedAt, "mfa_enabled_at", mfaEnabledAt.Time)
+
+	resp := h.buildMFAChallengeResponse("mfa_upgrade_required",
+		"This session was created before MFA was enabled. Please verify your identity.",
+		challengeToken, token.UserID, jti)
+	c.JSON(http.StatusForbidden, resp)
+	return true
+}
+
+// buildMFAChallengeResponse constructs the common MFA challenge JSON response with
+// methods, recovery-only methods, and optional WebAuthn options.
+func (h *Handler) buildMFAChallengeResponse(errorCode, message, challengeToken, userID, jti string) gin.H {
+	ctx := context.Background()
+	allMethods, _ := h.mfaChecker.GetEnabledMethods(ctx, userID)
+	loginMethods, _ := h.mfaChecker.GetLoginMethods(ctx, userID)
+
+	resp := gin.H{
+		"error":               errorCode,
+		"message":             message,
+		"mfa_challenge_token": challengeToken,
+		"methods":             loginMethods,
+	}
+
+	recoveryOnly := computeRecoveryOnlyMethods(allMethods, loginMethods)
+	if len(recoveryOnly) > 0 {
+		resp["recovery_only_methods"] = recoveryOnly
+	}
+
+	loginSet := make(map[string]bool, len(loginMethods))
+	for _, m := range loginMethods {
+		loginSet[m] = true
+	}
+	if loginSet["webauthn"] {
+		if opts, werr := h.mfaChecker.BeginWebAuthnLogin(ctx, userID, jti); werr != nil {
+			h.log.Error("Failed to begin WebAuthn login", "error", werr)
+		} else if opts != nil {
+			resp["webauthn_options"] = opts
 		}
 	}
 
-	// ── Pre-MFA session lock (#89) ────────────────────────────────────
-	// When a user enables MFA, all sessions created before mfa_enabled_at
-	// must pass an MFA challenge on their next refresh. This prevents a
-	// stolen-but-not-yet-used session from bypassing MFA.
-	if h.mfaChecker != nil && h.mfaChecker.IsEnabled(c.Request.Context(), token.UserID) {
-		// Check for bypass (set by MFA verify handler after successful upgrade)
-		bypassKey := fmt.Sprintf("mfa_upgrade_bypass:%s", token.UserID)
-		if h.redis.Exists(c.Request.Context(), bypassKey).Val() > 0 {
-			h.redis.Del(c.Request.Context(), bypassKey)
-			h.log.Info("Pre-MFA session bypass consumed",
-				"user_id", token.UserID,
-			)
-			// Skip the pre-MFA check — user just verified MFA
-		} else {
-			var mfaEnabledAt sql.NullTime
-			_ = h.db.QueryRow(
-				`SELECT mfa_enabled_at FROM users WHERE id = $1`, token.UserID,
-			).Scan(&mfaEnabledAt)
+	return resp
+}
 
-			if mfaEnabledAt.Valid && token.CreatedAt.Before(mfaEnabledAt.Time) {
-				ctx := c.Request.Context()
-				allMethods, _ := h.mfaChecker.GetEnabledMethods(ctx, token.UserID)
-				loginMethods, _ := h.mfaChecker.GetLoginMethods(ctx, token.UserID)
-				challengeToken, jti, mfaErr := h.mfaChecker.GenerateUpgradeChallenge(ctx, token.UserID, token.RememberMe)
-				if mfaErr != nil {
-					h.log.Error("Failed to generate pre-MFA session challenge", "error", mfaErr)
-					// Fall through — don't block the user if challenge generation fails
-				} else {
-					h.log.Info("Pre-MFA session requires MFA verification",
-						"user_id", token.UserID,
-						"session_created", token.CreatedAt,
-						"mfa_enabled_at", mfaEnabledAt.Time,
-					)
-					resp := gin.H{
-						"error":               "mfa_upgrade_required",
-						"message":             "This session was created before MFA was enabled. Please verify your identity.",
-						"mfa_challenge_token": challengeToken,
-						"methods":             loginMethods,
-					}
-					loginSet := make(map[string]bool, len(loginMethods))
-					for _, m := range loginMethods {
-						loginSet[m] = true
-					}
-					var recoveryOnly []string
-					for _, m := range allMethods {
-						if !loginSet[m] {
-							recoveryOnly = append(recoveryOnly, m)
-						}
-					}
-					if len(recoveryOnly) > 0 {
-						resp["recovery_only_methods"] = recoveryOnly
-					}
-					if loginSet["webauthn"] {
-						if opts, werr := h.mfaChecker.BeginWebAuthnLogin(ctx, token.UserID, jti); werr != nil {
-							h.log.Error("Failed to begin WebAuthn login for upgrade", "error", werr)
-						} else if opts != nil {
-							resp["webauthn_options"] = opts
-						}
-					}
-					c.JSON(http.StatusForbidden, resp)
-					return
-				}
-			}
+// computeRecoveryOnlyMethods returns methods in allMethods but not in loginMethods.
+func computeRecoveryOnlyMethods(allMethods, loginMethods []string) []string {
+	loginSet := make(map[string]bool, len(loginMethods))
+	for _, m := range loginMethods {
+		loginSet[m] = true
+	}
+	var recoveryOnly []string
+	for _, m := range allMethods {
+		if !loginSet[m] {
+			recoveryOnly = append(recoveryOnly, m)
 		}
 	}
+	return recoveryOnly
+}
 
+// rotateAndRespond completes the refresh: revokes the old token, issues a new one, and responds.
+func (h *Handler) rotateAndRespond(c *gin.Context, token models.RefreshToken, tokenSuffix, requestMachineID string) {
 	// Revoke the old refresh token (single-use rotation)
-	_, err = h.db.Exec(
+	_, err := h.db.Exec(
 		`UPDATE refresh_tokens SET revoked_at = NOW(), last_used_at = NOW() WHERE id = $1`,
 		token.ID,
 	)
@@ -979,7 +996,6 @@ func (h *Handler) Refresh(c *gin.Context) {
 		h.log.Error("Failed to revoke old refresh token", "error", err)
 	}
 
-	// Generate new refresh token
 	newRefreshToken, err := GenerateRefreshToken()
 	if err != nil {
 		h.log.Error("Failed to generate refresh token", "error", err)
@@ -987,15 +1003,13 @@ func (h *Handler) Refresh(c *gin.Context) {
 		return
 	}
 
-	// Determine expiry for the new token
 	newExpiry := token.ExpiresAt
 	cookieMaxAge := 0
 	if token.RememberMe {
-		newExpiry = time.Now().Add(30 * 24 * time.Hour) // Rolling 30 days
+		newExpiry = time.Now().Add(30 * 24 * time.Hour)
 		cookieMaxAge = 30 * 24 * 60 * 60
 	}
 
-	// Store new refresh token (propagate machine_id from request or stored token)
 	newTokenHash := HashRefreshToken(newRefreshToken)
 	newTokenID := uuid.New().String()
 	propagatedMachineID := requestMachineID
@@ -1006,38 +1020,28 @@ func (h *Handler) Refresh(c *gin.Context) {
 		"old_suffix", tokenSuffix,
 		"new_suffix", newRefreshToken[len(newRefreshToken)-8:],
 		"new_hash_prefix", newTokenHash[:16],
-		"user_id", token.UserID,
-		"remember_me", token.RememberMe,
-	)
+		"user_id", token.UserID, "remember_me", token.RememberMe)
+
 	_, err = h.db.Exec(
 		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, remember_me, machine_id)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		newTokenID,
-		token.UserID,
-		newTokenHash,
-		token.DeviceName,
-		c.ClientIP(),
-		truncateUserAgent(c.GetHeader("User-Agent")),
-		newExpiry,
-		token.RememberMe,
-		nilIfEmpty(propagatedMachineID),
+		newTokenID, token.UserID, newTokenHash, token.DeviceName,
+		c.ClientIP(), truncateUserAgent(c.GetHeader("User-Agent")),
+		newExpiry, token.RememberMe, nilIfEmpty(propagatedMachineID),
 	)
 
-	// Auto-purge old revoked sessions for this user (> 90 days) to minimize metadata retention
+	// Auto-purge old revoked sessions (> 90 days)
 	_, _ = h.db.Exec(
 		`DELETE FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NOT NULL AND revoked_at < NOW() - INTERVAL '90 days'`,
-		token.UserID,
-	)
+		token.UserID)
 	if err != nil {
 		h.log.Error("Failed to store new refresh token", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
 		return
 	}
 
-	// Set new refresh token cookie
 	setRefreshCookie(c, newRefreshToken, cookieMaxAge)
 
-	// Look up current email_verified so the new JWT reflects DB state
 	var refreshEmailVerified bool
 	if err := h.db.QueryRow(`SELECT email_verified FROM users WHERE id = $1`, token.UserID).Scan(&refreshEmailVerified); err != nil {
 		h.log.Error("Failed to look up email_verified for refresh", "error", err, "user_id", token.UserID)
@@ -1045,7 +1049,6 @@ func (h *Handler) Refresh(c *gin.Context) {
 		return
 	}
 
-	// Generate new access token
 	accessToken, err := GenerateAccessToken(token.UserID, h.jwtSecret, refreshEmailVerified)
 	if err != nil {
 		h.log.Error("Failed to generate access token", "error", err)
@@ -1057,7 +1060,7 @@ func (h *Handler) Refresh(c *gin.Context) {
 		"access_token":  accessToken,
 		"refresh_token": newRefreshToken,
 		"session_id":    newTokenID,
-		"expires_in":    900, // 15 minutes
+		"expires_in":    900,
 	})
 }
 
@@ -1103,7 +1106,7 @@ func (h *Handler) handleGracePeriodRefresh(c *gin.Context, userID string, revoke
 			"user_id", userID,
 			"revoked_token_id", revokedTokenID,
 		)
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid refresh token"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidRefreshToken})
 		return
 	}
 
@@ -1421,26 +1424,26 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 	data, err := h.redis.Get(ctx, redisKey).Bytes()
 	if err == redis.Nil {
 		// Return the same error shape as a wrong code to prevent email enumeration
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired recovery code", "attempts_remaining": 0})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryCode, "attempts_remaining": 0})
 		return
 	}
 	if err != nil {
 		h.log.Error("Failed to fetch recovery record from Redis", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery verification failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
 		return
 	}
 
 	var record recoveryRecord
 	if err := json.Unmarshal(data, &record); err != nil {
 		h.log.Error("Failed to unmarshal recovery record", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery verification failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
 		return
 	}
 
 	// Check attempt limit — return the same error shape to prevent enumeration
 	if record.Attempts >= recoveryMaxAttempts {
 		h.redis.Del(ctx, redisKey)
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired recovery code", "attempts_remaining": 0})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryCode, "attempts_remaining": 0})
 		return
 	}
 
@@ -1454,7 +1457,7 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 			h.redis.Set(ctx, redisKey, updated, ttl)
 		}
 		c.JSON(http.StatusUnauthorized, gin.H{
-			"error":              "Invalid or expired recovery code",
+			"error":              errInvalidExpiredRecoveryCode,
 			"attempts_remaining": 0,
 		})
 		return
@@ -1466,13 +1469,13 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 	// Generate recovery JWT token
 	if h.mfaChecker == nil {
 		h.log.Error("MFA checker not configured for recovery token generation")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery verification failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
 		return
 	}
 	recoveryToken, _, err := h.mfaChecker.GenerateRecoveryToken(record.UserID)
 	if err != nil {
 		h.log.Error("Failed to generate recovery token", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery verification failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
 		return
 	}
 
@@ -1502,7 +1505,7 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 		resp["has_recovery_key"] = false
 	} else {
 		h.log.Error("Failed to load recovery key data", "error", err, "user_id", record.UserID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery verification failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
 		return
 	}
 
@@ -1550,12 +1553,12 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 
 	// Validate recovery token
 	if h.mfaChecker == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery not configured"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryNotConfigured})
 		return
 	}
 	claims, err := h.mfaChecker.ValidateRecoveryToken(req.RecoveryToken)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired recovery token"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryToken})
 		return
 	}
 
@@ -1585,7 +1588,7 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 	if err != nil {
 		h.log.Error("Failed to hash new password", "error", err)
 		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset password"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetPwd})
 		return
 	}
 
@@ -1608,7 +1611,7 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 	if err != nil {
 		h.log.Error(errMsgFailedStartTransaction, "error", err)
 		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset password"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetPwd})
 		return
 	}
 	defer func() {
@@ -1622,7 +1625,7 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 	if err != nil {
 		h.log.Error("Failed to update password", "error", err, "user_id", claims.UserID)
 		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset password"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetPwd})
 		return
 	}
 
@@ -1635,7 +1638,7 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 	if err != nil {
 		h.log.Error("Failed to update user keys", "error", err, "user_id", claims.UserID)
 		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset password"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetPwd})
 		return
 	}
 
@@ -1685,7 +1688,7 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 		if err != nil {
 			h.log.Error("Failed to upsert recovery key", "error", err, "user_id", claims.UserID)
 			h.redis.Del(ctx, recoveryUsedKey)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset password"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetPwd})
 			return
 		}
 	}
@@ -1695,15 +1698,15 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 	if err != nil {
 		h.log.Error("Failed to revoke refresh tokens", "error", err, "user_id", claims.UserID)
 		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset password"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetPwd})
 		return
 	}
 
 	// COMMIT
 	if err := tx.Commit(); err != nil {
-		h.log.Error("Failed to commit transaction", "error", err, "user_id", claims.UserID)
+		h.log.Error(errFailedCommitTransaction, "error", err, "user_id", claims.UserID)
 		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset password"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetPwd})
 		return
 	}
 
@@ -1738,12 +1741,12 @@ func (h *Handler) RecoveryResetAccount(c *gin.Context) {
 
 	// Validate recovery token
 	if h.mfaChecker == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery not configured"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryNotConfigured})
 		return
 	}
 	claims, err := h.mfaChecker.ValidateRecoveryToken(req.RecoveryToken)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired recovery token"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryToken})
 		return
 	}
 
@@ -1773,7 +1776,7 @@ func (h *Handler) RecoveryResetAccount(c *gin.Context) {
 	if err != nil {
 		h.log.Error("Failed to hash new password", "error", err)
 		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
 		return
 	}
 
@@ -1802,7 +1805,7 @@ func (h *Handler) RecoveryResetAccount(c *gin.Context) {
 	if err != nil {
 		h.log.Error(errMsgFailedStartTransaction, "error", err)
 		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
 		return
 	}
 	defer func() {
@@ -1816,7 +1819,7 @@ func (h *Handler) RecoveryResetAccount(c *gin.Context) {
 	if err != nil {
 		h.log.Error("Failed to update password", "error", err, "user_id", claims.UserID)
 		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
 		return
 	}
 
@@ -1829,7 +1832,7 @@ func (h *Handler) RecoveryResetAccount(c *gin.Context) {
 	if err != nil {
 		h.log.Error("Failed to update user keys", "error", err, "user_id", claims.UserID)
 		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
 		return
 	}
 
@@ -1841,7 +1844,7 @@ func (h *Handler) RecoveryResetAccount(c *gin.Context) {
 	if err != nil {
 		h.log.Error("Failed to update public key", "error", err, "user_id", claims.UserID)
 		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
 		return
 	}
 
@@ -1850,7 +1853,7 @@ func (h *Handler) RecoveryResetAccount(c *gin.Context) {
 	if err != nil {
 		h.log.Error("Failed to delete recovery keys", "error", err, "user_id", claims.UserID)
 		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
 		return
 	}
 
@@ -1859,7 +1862,7 @@ func (h *Handler) RecoveryResetAccount(c *gin.Context) {
 	if err != nil {
 		h.log.Error("Failed to delete channel keys", "error", err, "user_id", claims.UserID)
 		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
 		return
 	}
 
@@ -1868,7 +1871,7 @@ func (h *Handler) RecoveryResetAccount(c *gin.Context) {
 	if err != nil {
 		h.log.Error("Failed to delete DM channel keys", "error", err, "user_id", claims.UserID)
 		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
 		return
 	}
 
@@ -1877,15 +1880,15 @@ func (h *Handler) RecoveryResetAccount(c *gin.Context) {
 	if err != nil {
 		h.log.Error("Failed to revoke refresh tokens", "error", err, "user_id", claims.UserID)
 		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
 		return
 	}
 
 	// COMMIT
 	if err := tx.Commit(); err != nil {
-		h.log.Error("Failed to commit transaction", "error", err, "user_id", claims.UserID)
+		h.log.Error(errFailedCommitTransaction, "error", err, "user_id", claims.UserID)
 		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reset account"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
 		return
 	}
 
@@ -1912,12 +1915,12 @@ func (h *Handler) CreateDeviceRecoveryRequest(c *gin.Context) {
 
 	// Validate recovery token
 	if h.mfaChecker == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery not configured"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryNotConfigured})
 		return
 	}
 	claims, err := h.mfaChecker.ValidateRecoveryToken(req.RecoveryToken)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired recovery token"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryToken})
 		return
 	}
 
@@ -1930,7 +1933,7 @@ func (h *Handler) CreateDeviceRecoveryRequest(c *gin.Context) {
 	).Scan(&deviceCount)
 	if err != nil {
 		h.log.Error("Failed to check trusted devices", "error", err, "user_id", claims.UserID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create recovery request"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedCreateRecoveryRequest})
 		return
 	}
 	if deviceCount == 0 {
@@ -1953,8 +1956,8 @@ func (h *Handler) CreateDeviceRecoveryRequest(c *gin.Context) {
 		RETURNING id
 	`, claims.UserID, claims.JTI, ephPubKey).Scan(&requestID)
 	if err != nil {
-		h.log.Error("Failed to create recovery request", "error", err, "user_id", claims.UserID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create recovery request"})
+		h.log.Error(errFailedCreateRecoveryRequest, "error", err, "user_id", claims.UserID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedCreateRecoveryRequest})
 		return
 	}
 
@@ -1978,8 +1981,8 @@ func (h *Handler) PollDeviceRecoveryRequest(c *gin.Context) {
 
 	// Prefer Authorization: Bearer header; fall back to query param
 	recoveryToken := ""
-	if authHeader := c.GetHeader("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
-		recoveryToken = strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+	if authHeader := c.GetHeader("Authorization"); strings.HasPrefix(authHeader, bearerPrefix) {
+		recoveryToken = strings.TrimSpace(strings.TrimPrefix(authHeader, bearerPrefix))
 	} else {
 		recoveryToken = c.Query("recovery_token")
 	}
@@ -1990,12 +1993,12 @@ func (h *Handler) PollDeviceRecoveryRequest(c *gin.Context) {
 
 	// Validate recovery token
 	if h.mfaChecker == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery not configured"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryNotConfigured})
 		return
 	}
 	claims, err := h.mfaChecker.ValidateRecoveryToken(recoveryToken)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired recovery token"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryToken})
 		return
 	}
 
@@ -2046,12 +2049,12 @@ func (h *Handler) CreateSocialRecoveryRequest(c *gin.Context) {
 
 	// Validate recovery token
 	if h.mfaChecker == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery not configured"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryNotConfigured})
 		return
 	}
 	claims, err := h.mfaChecker.ValidateRecoveryToken(req.RecoveryToken)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired recovery token"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryToken})
 		return
 	}
 
@@ -2099,8 +2102,8 @@ func (h *Handler) PollSocialRecoveryRequest(c *gin.Context) {
 
 	// Prefer Authorization: Bearer header; fall back to query param
 	recoveryToken := ""
-	if authHeader := c.GetHeader("Authorization"); strings.HasPrefix(authHeader, "Bearer ") {
-		recoveryToken = strings.TrimSpace(strings.TrimPrefix(authHeader, "Bearer "))
+	if authHeader := c.GetHeader("Authorization"); strings.HasPrefix(authHeader, bearerPrefix) {
+		recoveryToken = strings.TrimSpace(strings.TrimPrefix(authHeader, bearerPrefix))
 	} else {
 		recoveryToken = c.Query("recovery_token")
 	}
@@ -2111,12 +2114,12 @@ func (h *Handler) PollSocialRecoveryRequest(c *gin.Context) {
 
 	// Validate recovery token
 	if h.mfaChecker == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Recovery not configured"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryNotConfigured})
 		return
 	}
 	claims, err := h.mfaChecker.ValidateRecoveryToken(recoveryToken)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid or expired recovery token"})
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryToken})
 		return
 	}
 

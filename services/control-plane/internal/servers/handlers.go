@@ -19,10 +19,13 @@ import (
 )
 
 const (
-	dataImagePrefix      = "data:image/"
+	dataImagePrefix       = "data:image/"
 	errMsgInvalidServerID = "Invalid server ID"
 	errMsgServerNotFound  = "Server not found"
 	errMsgFailedCreate    = "Failed to create server"
+	errMsgFailedFetch     = "Failed to fetch server"
+	errMsgFailedUpdate    = "Failed to update server"
+	errMsgFailedDelete    = "Failed to delete server"
 )
 
 // Handler handles server-related requests
@@ -91,7 +94,7 @@ func (h *Handler) ListServers(c *gin.Context) {
 	rows, err := h.db.Query(query, userID, pq.Array(connectedIDs))
 	if err != nil {
 		h.log.Error("Failed to query servers", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch servers"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetch})
 		return
 	}
 	defer func() { _ = rows.Close() }()
@@ -121,7 +124,7 @@ func (h *Handler) ListServers(c *gin.Context) {
 	}
 	if err := rows.Err(); err != nil {
 		h.log.Error("Error iterating servers", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch servers"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetch})
 		return
 	}
 
@@ -290,7 +293,7 @@ func (h *Handler) GetServer(c *gin.Context) {
 		return
 	} else if err != nil {
 		h.log.Error("Failed to check membership", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetch})
 		return
 	}
 
@@ -318,7 +321,7 @@ func (h *Handler) GetServer(c *gin.Context) {
 		return
 	} else if err != nil {
 		h.log.Error("Failed to fetch server", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetch})
 		return
 	}
 
@@ -349,7 +352,7 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageServer)
 	if err != nil {
 		h.log.Error("Failed to check permissions", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdate})
 		return
 	}
 	if !hasPerm {
@@ -363,80 +366,118 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 		h.log.Warn("Failed to fetch legacy role for UpdateServer response", "error", err, "server_id", serverID, "user_id", userID)
 	}
 
-	// Determine if icon_url was explicitly provided in the request body.
-	// json.RawMessage lets us distinguish:
-	//   nil             → field absent (don't touch icon)
-	//   []byte("null")  → explicitly null (remove icon)
-	//   []byte("\"...\"") → new icon value
-	iconURLProvided := req.IconURL != nil
-	var iconURL *string
-
-	if iconURLProvided {
-		if string(req.IconURL) == "null" {
-			iconURL = nil
-		} else {
-			var url string
-			if err := json.Unmarshal(req.IconURL, &url); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid icon_url format"})
-				return
-			}
-			iconURL = &url
-		}
+	// Parse and validate icon_url / banner_url
+	iconURLProvided, iconURL, iconErr := parseMediaURL(req.IconURL)
+	if iconErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid icon_url format"})
+		return
+	}
+	if err := validateMediaURL(iconURL, fmt.Sprintf("/api/v1/media/server-icons/%s", serverID), 1500000, "Icon"); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 
-	// Validate icon_url if a new value was provided
-	if iconURL != nil && *iconURL != "" {
-		expectedIconURL := fmt.Sprintf("/api/v1/media/server-icons/%s", serverID)
-		if *iconURL != expectedIconURL && !strings.HasPrefix(*iconURL, dataImagePrefix) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon must be an uploaded icon URL for this server or an image data URL"})
-			return
-		}
-		if strings.HasPrefix(*iconURL, dataImagePrefix) && len(*iconURL) > 1500000 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon image too large (max ~1MB)"})
-			return
-		}
+	bannerURLProvided, bannerURL, bannerErr := parseMediaURL(req.BannerURL)
+	if bannerErr != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid banner_url format"})
+		return
+	}
+	if err := validateMediaURL(bannerURL, fmt.Sprintf("/api/v1/media/server-banners/%s", serverID), 3000000, "Banner"); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
 	}
 
-	// Same pattern for banner_url
-	bannerURLProvided := req.BannerURL != nil
-	var bannerURL *string
+	// Build dynamic UPDATE query
+	setClauses, args, argIdx, mediaKeysToDelete := buildUpdateClauses(serverID, req, iconURLProvided, iconURL, bannerURLProvided, bannerURL)
 
-	if bannerURLProvided {
-		if string(req.BannerURL) == "null" {
-			bannerURL = nil
-		} else {
-			var url string
-			if err := json.Unmarshal(req.BannerURL, &url); err != nil {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid banner_url format"})
-				return
-			}
-			bannerURL = &url
-		}
-	}
+	args = append(args, serverID)
+	updateQuery := fmt.Sprintf("UPDATE servers SET %s WHERE id = $%d RETURNING name, icon_url, banner_url, owner_id, e2ee_default, allow_embedded_content, created_at, updated_at", //nolint:gosec // setClauses are hardcoded column names, argIdx is an integer — no injection risk
+		strings.Join(setClauses, ", "), argIdx)
 
-	// Validate banner_url if a new value was provided
-	if bannerURL != nil && *bannerURL != "" {
-		expectedBannerURL := fmt.Sprintf("/api/v1/media/server-banners/%s", serverID)
-		if *bannerURL != expectedBannerURL && !strings.HasPrefix(*bannerURL, dataImagePrefix) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Banner must be an uploaded banner URL for this server or an image data URL"})
-			return
-		}
-		if strings.HasPrefix(*bannerURL, dataImagePrefix) && len(*bannerURL) > 3000000 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Banner image too large (max ~2MB)"})
-			return
-		}
-	}
-
-	// Build dynamic UPDATE query based on which fields were provided
 	var server models.Server
 	server.ID = serverID
+	err = h.db.QueryRow(updateQuery, args...).Scan(
+		&server.Name, &server.IconURL, &server.BannerURL, &server.OwnerID, &server.E2EEDefault, &server.AllowEmbeddedContent, &server.CreatedAt, &server.UpdatedAt,
+	)
 
-	setClauses := []string{"name = $1", "updated_at = NOW()"}
-	args := []interface{}{req.Name}
-	argIdx := 2
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgServerNotFound})
+		return
+	} else if err != nil {
+		h.log.Error("Failed to update server", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdate})
+		return
+	}
 
-	// Track media storage keys to clean up after successful DB update
-	var mediaKeysToDelete []string
+	// Clean up orphaned media objects from storage after successful DB update
+	for _, key := range mediaKeysToDelete {
+		media.CleanupObject(c.Request.Context(), h.db, h.store, h.log, key)
+	}
+
+	h.log.Info("Server updated", "server_id", serverID, "user_id", userID)
+
+	// Broadcast update to server subscribers so members see changes in real time
+	if serverUUID, parseErr := uuid.Parse(serverID); parseErr == nil {
+		h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+			Type: "server_updated",
+			Data: map[string]interface{}{
+				"server_id":              serverID,
+				"name":                   server.Name,
+				"icon_url":               server.IconURL,
+				"banner_url":             server.BannerURL,
+				"allow_embedded_content": server.AllowEmbeddedContent,
+			},
+		})
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"server": server,
+		"role":   role,
+	})
+}
+
+// parseMediaURL parses a json.RawMessage into (provided, *string, error).
+// Returns (false, nil, nil) if the field was absent, (true, nil, nil) for explicit null,
+// or (true, &url, nil) for a non-null value.
+func parseMediaURL(raw json.RawMessage) (provided bool, url *string, err error) {
+	if raw == nil {
+		return false, nil, nil
+	}
+	if string(raw) == "null" {
+		return true, nil, nil
+	}
+	var s string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return true, nil, err
+	}
+	return true, &s, nil
+}
+
+// validateMediaURL validates a media URL (icon or banner) against allowed patterns and size limits.
+// Returns nil if valid or the URL was nil/empty; returns a descriptive error otherwise.
+func validateMediaURL(url *string, expectedPath string, maxDataLen int, label string) error {
+	if url == nil || *url == "" {
+		return nil
+	}
+	if *url != expectedPath && !strings.HasPrefix(*url, dataImagePrefix) {
+		return fmt.Errorf("%s must be an uploaded %s URL for this server or an image data URL", label, strings.ToLower(label))
+	}
+	if strings.HasPrefix(*url, dataImagePrefix) && len(*url) > maxDataLen {
+		return fmt.Errorf("%s image too large", label)
+	}
+	return nil
+}
+
+// buildUpdateClauses constructs the SET clauses, args, and media cleanup keys for UpdateServer.
+func buildUpdateClauses(
+	serverID string,
+	req UpdateServerRequest,
+	iconURLProvided bool, iconURL *string,
+	bannerURLProvided bool, bannerURL *string,
+) (setClauses []string, args []interface{}, argIdx int, mediaKeysToDelete []string) {
+	setClauses = []string{"name = $1", "updated_at = NOW()"}
+	args = []interface{}{req.Name}
+	argIdx = 2
 
 	if iconURLProvided {
 		setClauses = append(setClauses, fmt.Sprintf("icon_url = $%d", argIdx))
@@ -460,48 +501,7 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 		argIdx++
 	}
 
-	args = append(args, serverID)
-	updateQuery := fmt.Sprintf("UPDATE servers SET %s WHERE id = $%d RETURNING name, icon_url, banner_url, owner_id, e2ee_default, allow_embedded_content, created_at, updated_at", //nolint:gosec // setClauses are hardcoded column names, argIdx is an integer — no injection risk
-		strings.Join(setClauses, ", "), argIdx)
-
-	err = h.db.QueryRow(updateQuery, args...).Scan(
-		&server.Name, &server.IconURL, &server.BannerURL, &server.OwnerID, &server.E2EEDefault, &server.AllowEmbeddedContent, &server.CreatedAt, &server.UpdatedAt,
-	)
-
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": errMsgServerNotFound})
-		return
-	} else if err != nil {
-		h.log.Error("Failed to update server", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update server"})
-		return
-	}
-
-	// Clean up orphaned media objects from storage after successful DB update
-	for _, key := range mediaKeysToDelete {
-		media.CleanupObject(c.Request.Context(), h.db, h.store, h.log, key)
-	}
-
-	h.log.Info("Server updated", "server_id", serverID, "user_id", userID)
-
-	// Broadcast update to server subscribers so members see changes in real time
-	if serverUUID, err := uuid.Parse(serverID); err == nil {
-		h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
-			Type: "server_updated",
-			Data: map[string]interface{}{
-				"server_id":              serverID,
-				"name":                   server.Name,
-				"icon_url":               server.IconURL,
-				"banner_url":             server.BannerURL,
-				"allow_embedded_content": server.AllowEmbeddedContent,
-			},
-		})
-	}
-
-	c.JSON(http.StatusOK, gin.H{
-		"server": server,
-		"role":   role,
-	})
+	return setClauses, args, argIdx, mediaKeysToDelete
 }
 
 // DeleteServer deletes a server (owner only)
@@ -527,7 +527,7 @@ func (h *Handler) DeleteServer(c *gin.Context) {
 		return
 	} else if err != nil {
 		h.log.Error("Failed to check ownership", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDelete})
 		return
 	}
 
@@ -542,7 +542,7 @@ func (h *Handler) DeleteServer(c *gin.Context) {
 	_, err = h.db.Exec(deleteQuery, serverID)
 	if err != nil {
 		h.log.Error("Failed to delete server", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete server"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDelete})
 		return
 	}
 

@@ -15,6 +15,21 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 )
 
+const (
+	errMsgInvalidRequestBody = "Invalid request body"
+	errMsgInvalidMessageID = "Invalid message ID"
+	errMsgInsufficientPerms = "Insufficient permissions"
+	errMsgMessageNotFound = "Message not found"
+	errMsgFailedCheckPerms = "Failed to check permissions"
+	errMsgFailedFetchMessages = "Failed to fetch messages"
+	errMsgFailedSendMessage = "Failed to send message"
+	errMsgFailedUpdateMessage = "Failed to update message"
+	errMsgFailedDeleteMessage = "Failed to delete message"
+	errMsgFailedSuppressEmbeds = "Failed to suppress embeds"
+	errMsgInsufficientPermsLower = "insufficient permissions"
+)
+
+
 // minCiphertextSize is the minimum base64-decoded size for a valid AES-GCM ciphertext:
 // 12 bytes IV + 16 bytes auth tag = 28 bytes minimum (empty plaintext).
 const minCiphertextSize = 28
@@ -104,19 +119,19 @@ func (h *Handler) GetMessages(c *gin.Context) {
 	}
 	if err != nil {
 		h.log.Error("Failed to check membership", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch messages"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchMessages})
 		return
 	}
 
 	// Check PermReadMessageHistory (with channelID for SBAC per-channel overrides)
 	hasPerm, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, channelID, rbac.PermReadMessageHistory)
 	if permErr != nil {
-		h.log.Error("Failed to check permissions", "error", permErr)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch messages"})
+		h.log.Error(errMsgFailedCheckPerms, "error", permErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchMessages})
 		return
 	}
 	if !hasPerm {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
 		return
 	}
 
@@ -154,7 +169,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 	rows, err := h.db.Query(query, args...)
 	if err != nil {
 		h.log.Error("Failed to query messages", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch messages"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchMessages})
 		return
 	}
 	defer func() { _ = rows.Close() }()
@@ -185,7 +200,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 	}
 	if err := rows.Err(); err != nil {
 		h.log.Error("Error iterating messages", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch messages"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchMessages})
 		return
 	}
 
@@ -203,7 +218,7 @@ func (h *Handler) SendMessage(c *gin.Context) {
 
 	var req SendMessageRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
 
@@ -223,19 +238,19 @@ func (h *Handler) SendMessage(c *gin.Context) {
 	}
 	if err != nil {
 		h.log.Error("Failed to check membership", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send message"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendMessage})
 		return
 	}
 
 	// Check PermSendMessages (with channelID for SBAC per-channel overrides)
 	hasPerm, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, req.ChannelID, rbac.PermSendMessages)
 	if permErr != nil {
-		h.log.Error("Failed to check permissions", "error", permErr)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send message"})
+		h.log.Error(errMsgFailedCheckPerms, "error", permErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendMessage})
 		return
 	}
 	if !hasPerm {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
 		return
 	}
 
@@ -244,7 +259,7 @@ func (h *Handler) SendMessage(c *gin.Context) {
 	encQuery := `SELECT is_encrypted FROM channels WHERE id = $1`
 	if err := h.db.QueryRow(encQuery, req.ChannelID).Scan(&channelEncrypted); err != nil {
 		h.log.Error("Failed to check channel encryption status", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send message"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendMessage})
 		return
 	}
 	if channelEncrypted && !req.IsEncrypted {
@@ -318,7 +333,7 @@ func (h *Handler) SendMessage(c *gin.Context) {
 	)
 	if err != nil {
 		h.log.Error("Failed to create message", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send message"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendMessage})
 		return
 	}
 
@@ -334,13 +349,13 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 
 	// Validate message ID
 	if _, err := uuid.Parse(messageID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid message ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidMessageID})
 		return
 	}
 
 	var req UpdateMessageRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
 
@@ -350,11 +365,11 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 
 	err := h.db.QueryRow(authorQuery, messageID).Scan(&authorID)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Message not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgMessageNotFound})
 		return
 	} else if err != nil {
 		h.log.Error("Failed to check message author", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update message"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateMessage})
 		return
 	}
 
@@ -368,7 +383,7 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 	encCheckQuery := `SELECT COALESCE(c.is_encrypted, false) FROM messages m INNER JOIN channels c ON m.channel_id = c.id WHERE m.id = $1`
 	if err := h.db.QueryRow(encCheckQuery, messageID).Scan(&msgEncrypted); err != nil {
 		h.log.Error("Failed to check channel encryption for update", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update message"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateMessage})
 		return
 	}
 	if msgEncrypted && !isValidCiphertext(req.Content) {
@@ -401,7 +416,7 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 
 	if err != nil {
 		h.log.Error("Failed to update message", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update message"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateMessage})
 		return
 	}
 
@@ -435,7 +450,7 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 
 	// Validate message ID
 	if _, err := uuid.Parse(messageID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid message ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidMessageID})
 		return
 	}
 
@@ -450,11 +465,11 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 
 	err := h.db.QueryRow(checkQuery, messageID).Scan(&authorID, &channelID, &serverID)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Message not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgMessageNotFound})
 		return
 	} else if err != nil {
 		h.log.Error("Failed to check message permissions", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete message"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteMessage})
 		return
 	}
 
@@ -465,7 +480,7 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 		has, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, channelID, rbac.PermManageOwnMessages)
 		if permErr != nil {
 			h.log.Error("Failed to check PermManageOwnMessages", "error", permErr)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check permissions"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCheckPerms})
 			return
 		}
 		canDelete = has
@@ -474,14 +489,14 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 		has, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, channelID, rbac.PermManageAllMessages)
 		if permErr != nil {
 			h.log.Error("Failed to check PermManageAllMessages", "error", permErr)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check permissions"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCheckPerms})
 			return
 		}
 		canDelete = has
 	}
 
 	if !canDelete {
-		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPermsLower})
 		return
 	}
 
@@ -491,7 +506,7 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 	_, err = h.db.Exec(deleteQuery, messageID)
 	if err != nil {
 		h.log.Error("Failed to delete message", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete message"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteMessage})
 		return
 	}
 
@@ -521,7 +536,7 @@ func (h *Handler) SuppressEmbeds(c *gin.Context) {
 
 	// Validate message ID
 	if _, err := uuid.Parse(messageID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid message ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidMessageID})
 		return
 	}
 
@@ -537,11 +552,11 @@ func (h *Handler) SuppressEmbeds(c *gin.Context) {
 
 	err := h.db.QueryRow(checkQuery, messageID).Scan(&channelID, &serverID, &alreadySuppressed)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Message not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgMessageNotFound})
 		return
 	} else if err != nil {
 		h.log.Error("Failed to check message for embed suppression", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to suppress embeds"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSuppressEmbeds})
 		return
 	}
 
@@ -554,12 +569,12 @@ func (h *Handler) SuppressEmbeds(c *gin.Context) {
 	// Check PermManageAllMessages
 	hasPerm, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, channelID, rbac.PermManageAllMessages)
 	if permErr != nil {
-		h.log.Error("Failed to check permissions", "error", permErr)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to suppress embeds"})
+		h.log.Error(errMsgFailedCheckPerms, "error", permErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSuppressEmbeds})
 		return
 	}
 	if !hasPerm {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
 		return
 	}
 
@@ -570,7 +585,7 @@ func (h *Handler) SuppressEmbeds(c *gin.Context) {
 	)
 	if err != nil {
 		h.log.Error("Failed to suppress embeds", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to suppress embeds"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSuppressEmbeds})
 		return
 	}
 

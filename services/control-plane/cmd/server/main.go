@@ -24,6 +24,11 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+const (
+	logKeyCount    = "count"
+	logKeyServerID = "server_id"
+)
+
 func main() {
 	// Load configuration
 	cfg, err := config.Load()
@@ -183,8 +188,10 @@ func runCleanup(ctx context.Context, db *sql.DB, redisClient *redis.Client, hub 
 		`DELETE FROM refresh_tokens WHERE expires_at < NOW() AND revoked_at IS NULL`)
 	if err != nil {
 		log.Error("Cleanup: failed to purge expired tokens", "error", err)
-	} else if n, _ := res1.RowsAffected(); n > 0 {
-		log.Info("Cleanup: purged expired tokens", "count", n)
+	} else if n, raErr := res1.RowsAffected(); raErr != nil {
+		log.Error("Cleanup: RowsAffected error", "task", "purge_expired_tokens", "error", raErr)
+	} else if n > 0 {
+		log.Info("Cleanup: purged expired tokens", logKeyCount, n)
 	}
 
 	// Task 2: Purge revoked sessions older than 90 days
@@ -193,8 +200,10 @@ func runCleanup(ctx context.Context, db *sql.DB, redisClient *redis.Client, hub 
 		`DELETE FROM refresh_tokens WHERE revoked_at IS NOT NULL AND revoked_at < NOW() - INTERVAL '90 days'`)
 	if err != nil {
 		log.Error("Cleanup: failed to purge old revoked sessions", "error", err)
-	} else if n, _ := res2.RowsAffected(); n > 0 {
-		log.Info("Cleanup: purged old revoked sessions", "count", n)
+	} else if n, raErr := res2.RowsAffected(); raErr != nil {
+		log.Error("Cleanup: RowsAffected error", "task", "purge_revoked_sessions", "error", raErr)
+	} else if n > 0 {
+		log.Info("Cleanup: purged old revoked sessions", logKeyCount, n)
 	}
 
 	// Task 3: Clean stale Redis presence keys
@@ -237,7 +246,7 @@ func cleanupStalePresence(ctx context.Context, redisClient *redis.Client, hub *w
 		}
 	}
 	if staleCount > 0 {
-		log.Info("Cleanup: removed stale presence keys", "count", staleCount)
+		log.Info("Cleanup: removed stale presence keys", logKeyCount, staleCount)
 	}
 }
 
@@ -263,10 +272,10 @@ func cleanupExpiredTransfers(ctx context.Context, db *sql.DB, redisClient *redis
 		}
 		if err := completeOwnershipTransfer(ctx, db, redisClient, hub, xfer); err != nil {
 			log.Error("Cleanup: failed to auto-complete transfer", "error", err,
-				"transfer_id", xfer.id, "server_id", xfer.serverID)
+				"transfer_id", xfer.id, logKeyServerID, xfer.serverID)
 		} else {
 			log.Info("Cleanup: auto-completed ownership transfer",
-				"transfer_id", xfer.id, "server_id", xfer.serverID,
+				"transfer_id", xfer.id, logKeyServerID, xfer.serverID,
 				"from_user_id", xfer.fromUserID, "to_user_id", xfer.toUserID)
 		}
 	}
@@ -346,7 +355,7 @@ func completeOwnershipTransfer(ctx context.Context, db *sql.DB, redisClient *red
 		hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
 			Type: "ownership_transferred",
 			Data: map[string]interface{}{
-				"server_id":    xfer.serverID,
+				logKeyServerID: xfer.serverID,
 				"old_owner_id": xfer.fromUserID,
 				"new_owner_id": xfer.toUserID,
 			},

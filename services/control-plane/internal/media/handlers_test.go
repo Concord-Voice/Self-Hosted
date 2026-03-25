@@ -30,6 +30,25 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 )
 
+const (
+	keyFileType            = "file_type"
+	keyFileID              = "file_id"
+	pathUploadAttachment   = "/api/v1/media/upload/attachment"
+	pathUploadAvatar       = "/api/v1/media/upload/avatar"
+	pathUploadServerIcon   = "/api/v1/media/upload/server-icon"
+	pathAttachmentsPrefix  = "/api/v1/media/attachments/"
+	pathMediaPrefix        = "/api/v1/media/"
+	fileEncryptedBin       = "encrypted.bin"
+	mimeOctetStream        = "application/octet-stream"
+	fileIconPng            = "icon.png"
+	valueNotUUID           = "not-uuid"
+	keyChannelID           = "channel_id"
+	keyServerID            = "server_id"
+	keyConversationID      = "conversation_id"
+	keyMimeType            = "mime_type"
+	fmtAttachmentsKey      = "attachments/%s"
+)
+
 // Pre-computed Argon2id hash of the test credential — avoids 100ms Argon2id cost per user.
 const testAuthHash = "$argon2id$v=19$m=65536,t=3,p=4$3pE9STD1TqLPoZQ2/BTLCg$8SKTCjsZh8Q7pAulEqAIEzJQK9eeOb5ipWhPz4REdCY" //nolint:gosec // test-only pre-computed hash
 
@@ -242,7 +261,7 @@ func TestUploadAvatarSuccess(t *testing.T) {
 	imgData := makePNG(t, 200, 200)
 	body, ct := multipartBody(t, "file", "avatar.png", imgData, nil)
 
-	w := ts.doMultipart(ts.handler.UploadAvatar, "POST", "/api/v1/media/upload/avatar", userID, body, ct)
+	w := ts.doMultipart(ts.handler.UploadAvatar, "POST", pathUploadAvatar, userID, body, ct)
 
 	assert.Equal(t, http.StatusCreated, w.Code)
 	resp := parseBody(t, w)
@@ -256,7 +275,7 @@ func TestUploadAvatarInvalidType(t *testing.T) {
 
 	body, ct := multipartBody(t, "file", "document.pdf", []byte("%PDF-1.4 fake pdf content"), nil)
 
-	w := ts.doMultipart(ts.handler.UploadAvatar, "POST", "/api/v1/media/upload/avatar", userID, body, ct)
+	w := ts.doMultipart(ts.handler.UploadAvatar, "POST", pathUploadAvatar, userID, body, ct)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	resp := parseBody(t, w)
@@ -267,7 +286,7 @@ func TestUploadAvatarMissingFile(t *testing.T) {
 	ts := setupMediaTest(t)
 	userID := ts.createTestUser(t, "nofile")
 
-	req := httptest.NewRequest("POST", "/api/v1/media/upload/avatar", nil)
+	req := httptest.NewRequest("POST", pathUploadAvatar, nil)
 	req.Header.Set("Content-Type", "multipart/form-data; boundary=xxx")
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
@@ -286,7 +305,7 @@ func TestUploadAvatarTooLarge(t *testing.T) {
 	bigData := make([]byte, avatarMaxUpload+1024)
 	body, ct := multipartBody(t, "file", "huge.png", bigData, nil)
 
-	w := ts.doMultipart(ts.handler.UploadAvatar, "POST", "/api/v1/media/upload/avatar", userID, body, ct)
+	w := ts.doMultipart(ts.handler.UploadAvatar, "POST", pathUploadAvatar, userID, body, ct)
 
 	// Rejected by MaxBytesReader (413) or size check (400)
 	assert.True(t, w.Code == http.StatusRequestEntityTooLarge || w.Code == http.StatusBadRequest,
@@ -304,9 +323,9 @@ func TestUploadServerIconNonMember(t *testing.T) {
 	serverID := ts.createTestServer(t, owner, "Icon Server")
 
 	imgData := makePNG(t, 100, 100)
-	body, ct := multipartBody(t, "file", "icon.png", imgData, map[string]string{"server_id": serverID})
+	body, ct := multipartBody(t, "file", fileIconPng, imgData, map[string]string{"server_id": serverID})
 
-	w := ts.doMultipart(ts.handler.UploadServerIcon, "POST", "/api/v1/media/upload/server-icon", outsider, body, ct)
+	w := ts.doMultipart(ts.handler.UploadServerIcon, "POST", pathUploadServerIcon, outsider, body, ct)
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.False(t, ts.store.hasObject(fmt.Sprintf("server-icons/%s", serverID)))
@@ -317,9 +336,9 @@ func TestUploadServerIconMissingServerID(t *testing.T) {
 	owner := ts.createTestUser(t, "iconnoserver")
 
 	imgData := makePNG(t, 100, 100)
-	body, ct := multipartBody(t, "file", "icon.png", imgData, nil)
+	body, ct := multipartBody(t, "file", fileIconPng, imgData, nil)
 
-	w := ts.doMultipart(ts.handler.UploadServerIcon, "POST", "/api/v1/media/upload/server-icon", owner, body, ct)
+	w := ts.doMultipart(ts.handler.UploadServerIcon, "POST", pathUploadServerIcon, owner, body, ct)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
@@ -329,9 +348,9 @@ func TestUploadServerIconInvalidServerID(t *testing.T) {
 	owner := ts.createTestUser(t, "iconbadid")
 
 	imgData := makePNG(t, 100, 100)
-	body, ct := multipartBody(t, "file", "icon.png", imgData, map[string]string{"server_id": "not-a-uuid"})
+	body, ct := multipartBody(t, "file", fileIconPng, imgData, map[string]string{"server_id": "not-a-uuid"})
 
-	w := ts.doMultipart(ts.handler.UploadServerIcon, "POST", "/api/v1/media/upload/server-icon", owner, body, ct)
+	w := ts.doMultipart(ts.handler.UploadServerIcon, "POST", pathUploadServerIcon, owner, body, ct)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
@@ -347,13 +366,13 @@ func TestUploadAttachmentMembershipRequired(t *testing.T) {
 	serverID := ts.createTestServer(t, owner, "Attach Server")
 	channelID := ts.createTestChannel(t, serverID, "general")
 
-	body, ct := multipartBody(t, "file", "encrypted.bin", []byte("ciphertext"), map[string]string{
+	body, ct := multipartBody(t, "file", fileEncryptedBin, []byte("ciphertext"), map[string]string{
 		"channel_id": channelID,
 		"file_type":  "file",
-		"mime_type":  "application/octet-stream",
+		"mime_type":  mimeOctetStream,
 	})
 
-	w := ts.doMultipart(ts.handler.UploadAttachment, "POST", "/api/v1/media/upload/attachment", outsider, body, ct)
+	w := ts.doMultipart(ts.handler.UploadAttachment, "POST", pathUploadAttachment, outsider, body, ct)
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
@@ -364,13 +383,13 @@ func TestUploadAttachmentSuccessChannel(t *testing.T) {
 	serverID := ts.createTestServer(t, owner, "Attach Server 2")
 	channelID := ts.createTestChannel(t, serverID, "uploads")
 
-	body, ct := multipartBody(t, "file", "encrypted.bin", []byte("ciphertext-data"), map[string]string{
+	body, ct := multipartBody(t, "file", fileEncryptedBin, []byte("ciphertext-data"), map[string]string{
 		"channel_id": channelID,
 		"file_type":  "photo",
 		"mime_type":  "image/jpeg",
 	})
 
-	w := ts.doMultipart(ts.handler.UploadAttachment, "POST", "/api/v1/media/upload/attachment", owner, body, ct)
+	w := ts.doMultipart(ts.handler.UploadAttachment, "POST", pathUploadAttachment, owner, body, ct)
 
 	assert.Equal(t, http.StatusCreated, w.Code)
 	resp := parseBody(t, w)
@@ -382,13 +401,13 @@ func TestUploadAttachmentXORBothContexts(t *testing.T) {
 	ts := setupMediaTest(t)
 	user := ts.createTestUser(t, "xorboth")
 
-	body, ct := multipartBody(t, "file", "encrypted.bin", []byte("data"), map[string]string{
+	body, ct := multipartBody(t, "file", fileEncryptedBin, []byte("data"), map[string]string{
 		"channel_id":      uuid.New().String(),
 		"conversation_id": uuid.New().String(),
 		"file_type":       "file",
 	})
 
-	w := ts.doMultipart(ts.handler.UploadAttachment, "POST", "/api/v1/media/upload/attachment", user, body, ct)
+	w := ts.doMultipart(ts.handler.UploadAttachment, "POST", pathUploadAttachment, user, body, ct)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	resp := parseBody(t, w)
@@ -399,11 +418,11 @@ func TestUploadAttachmentXORNeitherContext(t *testing.T) {
 	ts := setupMediaTest(t)
 	user := ts.createTestUser(t, "xorneither")
 
-	body, ct := multipartBody(t, "file", "encrypted.bin", []byte("data"), map[string]string{
+	body, ct := multipartBody(t, "file", fileEncryptedBin, []byte("data"), map[string]string{
 		"file_type": "file",
 	})
 
-	w := ts.doMultipart(ts.handler.UploadAttachment, "POST", "/api/v1/media/upload/attachment", user, body, ct)
+	w := ts.doMultipart(ts.handler.UploadAttachment, "POST", pathUploadAttachment, user, body, ct)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 	resp := parseBody(t, w)
@@ -414,12 +433,12 @@ func TestUploadAttachmentInvalidChannelID(t *testing.T) {
 	ts := setupMediaTest(t)
 	user := ts.createTestUser(t, "badchanid")
 
-	body, ct := multipartBody(t, "file", "encrypted.bin", []byte("data"), map[string]string{
+	body, ct := multipartBody(t, "file", fileEncryptedBin, []byte("data"), map[string]string{
 		"channel_id": "not-a-uuid",
 		"file_type":  "file",
 	})
 
-	w := ts.doMultipart(ts.handler.UploadAttachment, "POST", "/api/v1/media/upload/attachment", user, body, ct)
+	w := ts.doMultipart(ts.handler.UploadAttachment, "POST", pathUploadAttachment, user, body, ct)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
@@ -436,7 +455,7 @@ func TestUploadAttachmentDMSuccess(t *testing.T) {
 		"mime_type":       "audio/mpeg",
 	})
 
-	w := ts.doMultipart(ts.handler.UploadAttachment, "POST", "/api/v1/media/upload/attachment", user1, body, ct)
+	w := ts.doMultipart(ts.handler.UploadAttachment, "POST", pathUploadAttachment, user1, body, ct)
 
 	assert.Equal(t, http.StatusCreated, w.Code)
 	resp := parseBody(t, w)
@@ -455,7 +474,7 @@ func TestUploadAttachmentDMNonParticipant(t *testing.T) {
 		"file_type":       "file",
 	})
 
-	w := ts.doMultipart(ts.handler.UploadAttachment, "POST", "/api/v1/media/upload/attachment", outsider, body, ct)
+	w := ts.doMultipart(ts.handler.UploadAttachment, "POST", pathUploadAttachment, outsider, body, ct)
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
@@ -473,8 +492,8 @@ func TestDownloadAttachmentMembershipRequired(t *testing.T) {
 
 	// Insert file directly
 	fileID := uuid.New().String()
-	storageKey := fmt.Sprintf("attachments/%s", fileID)
-	require.NoError(t, ts.store.PutObject(context.TODO(), storageKey, bytes.NewReader([]byte("data")), 4, "application/octet-stream"))
+	storageKey := fmt.Sprintf(fmtAttachmentsKey, fileID)
+	require.NoError(t, ts.store.PutObject(context.TODO(), storageKey, bytes.NewReader([]byte("data")), 4, mimeOctetStream))
 	_, err := ts.db.Exec(
 		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, channel_id)
 		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 4, $3, true, 1, $4)`,
@@ -483,7 +502,7 @@ func TestDownloadAttachmentMembershipRequired(t *testing.T) {
 	require.NoError(t, err)
 
 	// Outsider tries to download
-	w := ts.doJSON(ts.handler.DownloadAttachment, "GET", "/api/v1/media/attachments/"+fileID, outsider, gin.Params{{Key: "file_id", Value: fileID}})
+	w := ts.doJSON(ts.handler.DownloadAttachment, "GET", pathAttachmentsPrefix+fileID, outsider, gin.Params{{Key: "file_id", Value: fileID}})
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
@@ -495,8 +514,8 @@ func TestDownloadAttachmentSuccess(t *testing.T) {
 	channelID := ts.createTestChannel(t, serverID, "downloads")
 
 	fileID := uuid.New().String()
-	storageKey := fmt.Sprintf("attachments/%s", fileID)
-	require.NoError(t, ts.store.PutObject(context.TODO(), storageKey, bytes.NewReader([]byte("ciphertext")), 10, "application/octet-stream"))
+	storageKey := fmt.Sprintf(fmtAttachmentsKey, fileID)
+	require.NoError(t, ts.store.PutObject(context.TODO(), storageKey, bytes.NewReader([]byte("ciphertext")), 10, mimeOctetStream))
 	_, err := ts.db.Exec(
 		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, channel_id)
 		 VALUES ($1, $2, 'photo', 2, 'image/jpeg', 10, $3, true, 1, $4)`,
@@ -504,10 +523,10 @@ func TestDownloadAttachmentSuccess(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	w := ts.doJSON(ts.handler.DownloadAttachment, "GET", "/api/v1/media/attachments/"+fileID, owner, gin.Params{{Key: "file_id", Value: fileID}})
+	w := ts.doJSON(ts.handler.DownloadAttachment, "GET", pathAttachmentsPrefix+fileID, owner, gin.Params{{Key: "file_id", Value: fileID}})
 
 	assert.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, "application/octet-stream", w.Header().Get("Content-Type"))
+	assert.Equal(t, mimeOctetStream, w.Header().Get("Content-Type"))
 	assert.Equal(t, "image/jpeg", w.Header().Get("X-File-Mime-Type"))
 	assert.Equal(t, "ciphertext", w.Body.String())
 }
@@ -516,7 +535,7 @@ func TestDownloadAttachmentInvalidFileID(t *testing.T) {
 	ts := setupMediaTest(t)
 	user := ts.createTestUser(t, "badfid")
 
-	w := ts.doJSON(ts.handler.DownloadAttachment, "GET", "/api/v1/media/attachments/not-uuid", user, gin.Params{{Key: "file_id", Value: "not-uuid"}})
+	w := ts.doJSON(ts.handler.DownloadAttachment, "GET", "/api/v1/media/attachments/not-uuid", user, gin.Params{{Key: "file_id", Value: valueNotUUID}})
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
@@ -526,7 +545,7 @@ func TestDownloadAttachmentNotFound(t *testing.T) {
 	user := ts.createTestUser(t, "notfound")
 	fakeID := uuid.New().String()
 
-	w := ts.doJSON(ts.handler.DownloadAttachment, "GET", "/api/v1/media/attachments/"+fakeID, user, gin.Params{{Key: "file_id", Value: fakeID}})
+	w := ts.doJSON(ts.handler.DownloadAttachment, "GET", pathAttachmentsPrefix+fakeID, user, gin.Params{{Key: "file_id", Value: fakeID}})
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
@@ -541,8 +560,8 @@ func TestDeleteMediaOwnerOnly(t *testing.T) {
 	other := ts.createTestUser(t, "delother")
 
 	fileID := uuid.New().String()
-	storageKey := fmt.Sprintf("attachments/%s", fileID)
-	require.NoError(t, ts.store.PutObject(context.TODO(), storageKey, bytes.NewReader([]byte("data")), 4, "application/octet-stream"))
+	storageKey := fmt.Sprintf(fmtAttachmentsKey, fileID)
+	require.NoError(t, ts.store.PutObject(context.TODO(), storageKey, bytes.NewReader([]byte("data")), 4, mimeOctetStream))
 	// Use tier 2 since DeleteMedia is restricted to attachments only
 	serverID := ts.createTestServer(t, owner, "Del Server")
 	channelID := ts.createTestChannel(t, serverID, "delchan")
@@ -554,12 +573,12 @@ func TestDeleteMediaOwnerOnly(t *testing.T) {
 	require.NoError(t, err)
 
 	// Other user tries to delete — should get 404 (not their file)
-	w := ts.doJSON(ts.handler.DeleteMedia, "DELETE", "/api/v1/media/"+fileID, other, gin.Params{{Key: "file_id", Value: fileID}})
+	w := ts.doJSON(ts.handler.DeleteMedia, "DELETE", pathMediaPrefix+fileID, other, gin.Params{{Key: "file_id", Value: fileID}})
 	assert.Equal(t, http.StatusNotFound, w.Code)
 	assert.True(t, ts.store.hasObject(storageKey), "object should still exist")
 
 	// Owner deletes — should succeed
-	w = ts.doJSON(ts.handler.DeleteMedia, "DELETE", "/api/v1/media/"+fileID, owner, gin.Params{{Key: "file_id", Value: fileID}})
+	w = ts.doJSON(ts.handler.DeleteMedia, "DELETE", pathMediaPrefix+fileID, owner, gin.Params{{Key: "file_id", Value: fileID}})
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.False(t, ts.store.hasObject(storageKey), "object should be deleted")
 }
@@ -568,7 +587,7 @@ func TestDeleteMediaInvalidID(t *testing.T) {
 	ts := setupMediaTest(t)
 	user := ts.createTestUser(t, "delbadid")
 
-	w := ts.doJSON(ts.handler.DeleteMedia, "DELETE", "/api/v1/media/not-uuid", user, gin.Params{{Key: "file_id", Value: "not-uuid"}})
+	w := ts.doJSON(ts.handler.DeleteMedia, "DELETE", "/api/v1/media/not-uuid", user, gin.Params{{Key: "file_id", Value: valueNotUUID}})
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
@@ -580,7 +599,7 @@ func TestDeleteMediaAlreadyDeleted(t *testing.T) {
 	serverID := ts.createTestServer(t, owner, "DelDouble Server")
 	channelID := ts.createTestChannel(t, serverID, "delchan2")
 	fileID := uuid.New().String()
-	storageKey := fmt.Sprintf("attachments/%s", fileID)
+	storageKey := fmt.Sprintf(fmtAttachmentsKey, fileID)
 	_, err := ts.db.Exec(
 		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, channel_id, deleted_at)
 		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 4, $3, true, 1, $4, NOW())`,
@@ -588,7 +607,7 @@ func TestDeleteMediaAlreadyDeleted(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	w := ts.doJSON(ts.handler.DeleteMedia, "DELETE", "/api/v1/media/"+fileID, owner, gin.Params{{Key: "file_id", Value: fileID}})
+	w := ts.doJSON(ts.handler.DeleteMedia, "DELETE", pathMediaPrefix+fileID, owner, gin.Params{{Key: "file_id", Value: fileID}})
 
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
@@ -609,7 +628,7 @@ func TestProxyAvatarNotFound(t *testing.T) {
 func TestProxyAvatarInvalidID(t *testing.T) {
 	ts := setupMediaTest(t)
 
-	w := ts.doJSON(ts.handler.ProxyAvatar, "GET", "/api/v1/media/avatars/not-uuid", "any", gin.Params{{Key: "user_id", Value: "not-uuid"}})
+	w := ts.doJSON(ts.handler.ProxyAvatar, "GET", "/api/v1/media/avatars/not-uuid", "any", gin.Params{{Key: "user_id", Value: valueNotUUID}})
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }

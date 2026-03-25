@@ -14,6 +14,13 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 )
 
+const (
+	errMsgFailedClaimFriendCode = "Failed to claim friend code"
+	errMsgFailedSendFriendRequest = "Failed to send friend request"
+	errMsgFailedBlockUser = "Failed to block user"
+)
+
+
 // Handler handles friend-related requests.
 type Handler struct {
 	db  *sql.DB
@@ -181,7 +188,7 @@ func (h *Handler) SendRequest(c *gin.Context) {
 			return
 		} else if err != nil {
 			h.log.Error("Failed to look up user by username", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send friend request"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendFriendRequest})
 			return
 		}
 	} else {
@@ -223,7 +230,7 @@ func (h *Handler) SendRequest(c *gin.Context) {
 		}
 	} else if err != sql.ErrNoRows {
 		h.log.Error("Failed to check existing friendship", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send friend request"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendFriendRequest})
 		return
 	}
 
@@ -237,7 +244,7 @@ func (h *Handler) SendRequest(c *gin.Context) {
 	`, userID, targetUserID).Scan(&friendshipID, &createdAt)
 	if err != nil {
 		h.log.Error("Failed to create friend request", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send friend request"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendFriendRequest})
 		return
 	}
 
@@ -432,7 +439,7 @@ func (h *Handler) BlockUser(c *gin.Context) {
 	tx, err := h.db.Begin()
 	if err != nil {
 		h.log.Error("Failed to start transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to block user"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBlockUser})
 		return
 	}
 	defer func() {
@@ -455,7 +462,7 @@ func (h *Handler) BlockUser(c *gin.Context) {
 		`, userID, targetUserID)
 		if err != nil {
 			h.log.Error("Failed to block user", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to block user"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBlockUser})
 			return
 		}
 	}
@@ -520,7 +527,7 @@ func (h *Handler) BlockUser(c *gin.Context) {
 
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit block", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to block user"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBlockUser})
 		return
 	}
 
@@ -782,7 +789,7 @@ func (h *Handler) ClaimFriendCode(c *gin.Context) {
 	tx, err := h.db.Begin()
 	if err != nil {
 		h.log.Error("Failed to begin transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to claim friend code"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedClaimFriendCode})
 		return
 	}
 	defer func() {
@@ -813,7 +820,7 @@ func (h *Handler) ClaimFriendCode(c *gin.Context) {
 	}
 	if err != nil {
 		h.log.Error("Failed to query friend code", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to claim friend code"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedClaimFriendCode})
 		return
 	}
 
@@ -858,7 +865,7 @@ func (h *Handler) ClaimFriendCode(c *gin.Context) {
 		}
 	} else if err != sql.ErrNoRows {
 		h.log.Error("Failed to check existing friendship", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to claim friend code"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedClaimFriendCode})
 		return
 	}
 
@@ -876,7 +883,7 @@ func (h *Handler) ClaimFriendCode(c *gin.Context) {
 	`, userID, ownerID, status).Scan(&friendshipID, &createdAt)
 	if err != nil {
 		h.log.Error("Failed to create friendship", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to claim friend code"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedClaimFriendCode})
 		return
 	}
 
@@ -884,13 +891,13 @@ func (h *Handler) ClaimFriendCode(c *gin.Context) {
 	_, err = tx.Exec(`UPDATE friend_codes SET use_count = use_count + 1 WHERE id = $1`, codeID)
 	if err != nil {
 		h.log.Error("Failed to increment use count", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to claim friend code"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedClaimFriendCode})
 		return
 	}
 
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to claim friend code"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedClaimFriendCode})
 		return
 	}
 

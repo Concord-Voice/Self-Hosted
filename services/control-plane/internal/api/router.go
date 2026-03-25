@@ -35,6 +35,13 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+// Route path constants — extracted to satisfy go:S1192 (no duplicate string literals).
+const (
+	routeTransferOwnership = "/:id/transfer-ownership"
+	routeRecoveryKey       = "/recovery-key"
+	routeRecoveryCircle    = "/recovery-circle"
+)
+
 // mentionCheckerAdapter adapts an rbac.Resolver to the websocket.MentionPermissionChecker
 // interface, bridging the rbac.Permission type to int64 without a circular import.
 type mentionCheckerAdapter struct {
@@ -376,15 +383,15 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				)
 
 				// Recovery key management
-				mfaRoutes.PUT("/recovery-key",
+				mfaRoutes.PUT(routeRecoveryKey,
 					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
 					mfaHandler.StoreRecoveryKey,
 				)
-				mfaRoutes.GET("/recovery-key",
+				mfaRoutes.GET(routeRecoveryKey,
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					mfaHandler.GetRecoveryKeyStatus,
 				)
-				mfaRoutes.DELETE("/recovery-key",
+				mfaRoutes.DELETE(routeRecoveryKey,
 					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
 					mfaHandler.DeleteRecoveryKey,
 				)
@@ -414,15 +421,15 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				)
 
 				// Recovery circle management (Shamir's Secret Sharing)
-				mfaRoutes.GET("/recovery-circle",
+				mfaRoutes.GET(routeRecoveryCircle,
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					mfaHandler.GetRecoveryCircle,
 				)
-				mfaRoutes.PUT("/recovery-circle",
+				mfaRoutes.PUT(routeRecoveryCircle,
 					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
 					mfaHandler.UpsertRecoveryCircle,
 				)
-				mfaRoutes.DELETE("/recovery-circle",
+				mfaRoutes.DELETE(routeRecoveryCircle,
 					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
 					mfaHandler.DeleteRecoveryCircle,
 				)
@@ -728,15 +735,15 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				)
 
 				// Ownership transfer
-				serverRoutes.POST("/:id/transfer-ownership",
+				serverRoutes.POST(routeTransferOwnership,
 					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
 					ownershipHandler.InitiateTransfer,
 				)
-				serverRoutes.GET("/:id/transfer-ownership",
+				serverRoutes.GET(routeTransferOwnership,
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					ownershipHandler.GetTransferStatus,
 				)
-				serverRoutes.DELETE("/:id/transfer-ownership",
+				serverRoutes.DELETE(routeTransferOwnership,
 					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
 					ownershipHandler.CancelTransfer,
 				)

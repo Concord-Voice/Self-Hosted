@@ -13,6 +13,29 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+const (
+	keyChannelID      = "channel_id"
+	keyConversationID = "conversation_id"
+	keyUserID         = "user_id"
+	keyServerID       = "server_id"
+	keyMessage        = "message"
+	keyContent        = "content"
+	keyIsEncrypted    = "is_encrypted"
+	keyKeyVersion     = "key_version"
+	keyCreatedAt      = "created_at"
+	keyUpdatedAt      = "updated_at"
+	keyUsername        = "username"
+	keyIsTyping       = "is_typing"
+	keyStatus         = "status"
+	keyCounts         = "counts"
+	keyNonce          = "nonce"
+	presenceKeyFmt    = "presence:%s"
+	statusOnline      = "online"
+	statusOffline     = "offline"
+	statusInvisible   = "invisible"
+	sessionRevoked    = "session_revoked"
+)
+
 // Hub maintains the set of active clients and broadcasts messages
 type Hub struct {
 	// Database connection for authorization checks
@@ -210,8 +233,8 @@ func (h *Hub) handleRegister(client *Client) {
 	// If this is the user's first connection, broadcast online presence and set Redis
 	if isFirstConnection {
 		ctx := context.Background()
-		h.redis.Set(ctx, fmt.Sprintf("presence:%s", client.UserID), "online", 120*time.Second)
-		h.broadcastPresenceToAll(client.UserID, "online", time.Now().Unix())
+		h.redis.Set(ctx, fmt.Sprintf(presenceKeyFmt, client.UserID), statusOnline, 120*time.Second)
+		h.broadcastPresenceToAll(client.UserID, statusOnline, time.Now().Unix())
 	}
 
 	log.Printf("Client registered: user=%s client=%s total_clients=%d",
@@ -222,7 +245,7 @@ func (h *Hub) handleRegister(client *Client) {
 		Type: "connected",
 		Data: map[string]interface{}{
 			"client_id": client.ID,
-			"user_id":   client.UserID,
+			keyUserID:   client.UserID,
 		},
 	}
 
@@ -240,20 +263,20 @@ func (h *Hub) handleRegister(client *Client) {
 	onlineUserIDs := make([]string, 0, len(h.userClients))
 	for uid := range h.userClients {
 		uidStr := uid.String()
-		status := "online"
-		if val, err := h.redis.Get(ctx, fmt.Sprintf("presence:%s", uid)).Result(); err == nil {
+		status := statusOnline
+		if val, err := h.redis.Get(ctx, fmt.Sprintf(presenceKeyFmt, uid)).Result(); err == nil {
 			status = val
 		}
 		// Invisible users appear as offline to others, but show real status to self
 		visibleStatus := status
-		if status == "invisible" && uid != client.UserID {
-			visibleStatus = "offline"
-		} else if status == "invisible" && uid == client.UserID {
-			// Keep "invisible" so the user knows their own status
-			visibleStatus = "invisible"
+		if status == statusInvisible && uid != client.UserID {
+			visibleStatus = statusOffline
+		} else if status == statusInvisible && uid == client.UserID {
+			// Keep invisible so the user knows their own status
+			visibleStatus = statusInvisible
 		}
 		// Only add to online_user_ids if visible (not invisible to this viewer)
-		if visibleStatus != "offline" {
+		if visibleStatus != statusOffline {
 			onlineUserIDs = append(onlineUserIDs, uidStr)
 		}
 		users = append(users, userPresenceInfo{UserID: uidStr, Status: visibleStatus})
@@ -295,7 +318,7 @@ func (h *Hub) handleRegister(client *Client) {
 		msg := OutgoingMessage{
 			Type: "server_voice_counts",
 			Data: map[string]interface{}{
-				"counts": counts,
+				keyCounts: counts,
 			},
 		}
 		if data, err := json.Marshal(msg); err == nil {
@@ -366,9 +389,9 @@ func (h *Hub) handleUnregister(client *Client) {
 		// User's last client disconnected — update Redis and broadcast offline
 		now := time.Now().Unix()
 		ctx := context.Background()
-		h.redis.Del(ctx, fmt.Sprintf("presence:%s", client.UserID))
+		h.redis.Del(ctx, fmt.Sprintf(presenceKeyFmt, client.UserID))
 		h.redis.Set(ctx, fmt.Sprintf("last_seen:%s", client.UserID), fmt.Sprintf("%d", now), 0)
-		h.broadcastPresenceToAll(client.UserID, "offline", now)
+		h.broadcastPresenceToAll(client.UserID, statusOffline, now)
 	}
 
 	log.Printf("Client unregistered: user=%s client=%s remaining=%d",
@@ -413,7 +436,7 @@ func (h *Hub) handleIncoming(msg IncomingMessage) {
 
 // handleSubscribe subscribes a client to a channel after verifying membership
 func (h *Hub) handleSubscribe(msg IncomingMessage) {
-	channelID, ok := msg.Data["channel_id"].(string)
+	channelID, ok := msg.Data[keyChannelID].(string)
 	if !ok {
 		h.sendError(msg.ClientID, "Invalid channel_id in subscribe message")
 		return
@@ -468,7 +491,7 @@ func (h *Hub) handleSubscribe(msg IncomingMessage) {
 	confirmMsg := OutgoingMessage{
 		Type: "subscribed",
 		Data: map[string]interface{}{
-			"channel_id": channelUUID,
+			keyChannelID: channelUUID,
 		},
 	}
 	if data, err := json.Marshal(confirmMsg); err == nil {
@@ -478,7 +501,7 @@ func (h *Hub) handleSubscribe(msg IncomingMessage) {
 
 // handleUnsubscribe unsubscribes a client from a channel
 func (h *Hub) handleUnsubscribe(msg IncomingMessage) {
-	channelID, ok := msg.Data["channel_id"].(string)
+	channelID, ok := msg.Data[keyChannelID].(string)
 	if !ok {
 		return
 	}
@@ -509,7 +532,7 @@ func (h *Hub) handleUnsubscribe(msg IncomingMessage) {
 
 // handleSubscribeServer subscribes a client to server-level notifications (unread pings)
 func (h *Hub) handleSubscribeServer(msg IncomingMessage) {
-	serverID, ok := msg.Data["server_id"].(string)
+	serverID, ok := msg.Data[keyServerID].(string)
 	if !ok {
 		h.sendError(msg.ClientID, "Invalid server_id in subscribe_server message")
 		return
@@ -553,7 +576,7 @@ func (h *Hub) handleSubscribeServer(msg IncomingMessage) {
 
 // handleUnsubscribeServer unsubscribes a client from server-level notifications
 func (h *Hub) handleUnsubscribeServer(msg IncomingMessage) {
-	serverID, ok := msg.Data["server_id"].(string)
+	serverID, ok := msg.Data[keyServerID].(string)
 	if !ok {
 		return
 	}
@@ -587,7 +610,7 @@ func (h *Hub) sendError(clientID uuid.UUID, message string) {
 	errMsg := OutgoingMessage{
 		Type: "error",
 		Data: map[string]interface{}{
-			"message": message,
+			keyMessage: message,
 		},
 	}
 	if data, err := json.Marshal(errMsg); err == nil {
@@ -605,7 +628,7 @@ func (h *Hub) sendErrorWithData(clientID uuid.UUID, errorCode string, extra map[
 		return
 	}
 	data := map[string]interface{}{
-		"message": errorCode,
+		keyMessage: errorCode,
 		"error":   errorCode,
 		"code":    errorCode,
 	}
@@ -626,7 +649,7 @@ func (h *Hub) sendErrorWithData(clientID uuid.UUID, errorCode string, extra map[
 
 // handleMessage handles a chat message: validates, persists to DB, then broadcasts
 func (h *Hub) handleMessage(msg IncomingMessage) {
-	channelID, ok := msg.Data["channel_id"].(string)
+	channelID, ok := msg.Data[keyChannelID].(string)
 	if !ok {
 		return
 	}
@@ -653,17 +676,17 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 	}
 
 	// Validate content
-	content, ok := msg.Data["content"].(string)
+	content, ok := msg.Data[keyContent].(string)
 	if !ok || content == "" {
 		h.sendError(msg.ClientID, "Message content is required")
 		return
 	}
 
-	isEncrypted, _ := msg.Data["is_encrypted"].(bool)
+	isEncrypted, _ := msg.Data[keyIsEncrypted].(bool)
 
 	// Extract key_version for E2EE messages (defaults to 1 for backward compat)
 	keyVersion := 1
-	if kv, ok := msg.Data["key_version"].(float64); ok && kv > 0 {
+	if kv, ok := msg.Data[keyKeyVersion].(float64); ok && kv > 0 {
 		keyVersion = int(kv)
 	}
 
@@ -732,7 +755,7 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 			}
 			h.sendErrorWithData(msg.ClientID, "epoch_revoked", map[string]interface{}{
 				"current_epoch": currentEpoch,
-				"channel_id":    channelID,
+				keyChannelID:    channelID,
 			})
 			return
 		}
@@ -755,15 +778,15 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 
 	// Send message_ack to the sender with the server-assigned UUID
 	// so the frontend can update the temporary client ID
-	nonce, _ := msg.Data["nonce"].(string)
+	nonce, _ := msg.Data[keyNonce].(string)
 	ackMsg := OutgoingMessage{
 		Type: "message_ack",
 		Data: map[string]interface{}{
-			"nonce":      nonce,
+			keyNonce:     nonce,
 			"id":         messageID.String(),
-			"channel_id": channelUUID.String(),
-			"created_at": createdAt,
-			"updated_at": updatedAt,
+			keyChannelID: channelUUID.String(),
+			keyCreatedAt: createdAt,
+			keyUpdatedAt: updatedAt,
 		},
 	}
 	if ackData, ackErr := json.Marshal(ackMsg); ackErr == nil {
@@ -782,17 +805,17 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 			Type: "message",
 			Data: map[string]interface{}{
 				"id":                messageID,
-				"channel_id":        channelUUID,
-				"user_id":           msg.UserID,
-				"username":          client.Username,
+				keyChannelID:        channelUUID,
+				keyUserID:           msg.UserID,
+				keyUsername:         client.Username,
 				"display_name":      client.DisplayName,
 				"avatar_url":        client.AvatarURL,
-				"content":           content,
-				"is_encrypted":      isEncrypted,
-				"key_version":       keyVersion,
+				keyContent:          content,
+				keyIsEncrypted:      isEncrypted,
+				keyKeyVersion:       keyVersion,
 				"embeds_suppressed": embedsSuppressed,
-				"created_at":        createdAt,
-				"updated_at":        updatedAt,
+				keyCreatedAt:        createdAt,
+				keyUpdatedAt:        updatedAt,
 			},
 		},
 	}
@@ -828,8 +851,8 @@ func (h *Hub) sendUnreadNotify(serverID, channelID, senderUserID uuid.UUID) {
 	notifyMsg := OutgoingMessage{
 		Type: "unread_notify",
 		Data: map[string]interface{}{
-			"channel_id": channelID.String(),
-			"server_id":  serverID.String(),
+			keyChannelID: channelID.String(),
+			keyServerID:  serverID.String(),
 		},
 	}
 	data, err := json.Marshal(notifyMsg)
@@ -862,7 +885,7 @@ func (h *Hub) sendUnreadNotify(serverID, channelID, senderUserID uuid.UUID) {
 
 // handleTyping handles typing indicator
 func (h *Hub) handleTyping(msg IncomingMessage) {
-	channelID, ok := msg.Data["channel_id"].(string)
+	channelID, ok := msg.Data[keyChannelID].(string)
 	if !ok {
 		return
 	}
@@ -888,10 +911,10 @@ func (h *Hub) handleTyping(msg IncomingMessage) {
 		Data: OutgoingMessage{
 			Type: "typing",
 			Data: map[string]interface{}{
-				"channel_id": channelUUID,
-				"user_id":    msg.UserID,
-				"username":   client.Username,
-				"is_typing":  msg.Data["is_typing"],
+				keyChannelID: channelUUID,
+				keyUserID:    msg.UserID,
+				keyUsername:  client.Username,
+				keyIsTyping:  msg.Data[keyIsTyping],
 			},
 		},
 	}
@@ -902,47 +925,47 @@ func (h *Hub) handleTyping(msg IncomingMessage) {
 // handleHeartbeat refreshes the Redis presence TTL for the user
 func (h *Hub) handleHeartbeat(msg IncomingMessage) {
 	ctx := context.Background()
-	key := fmt.Sprintf("presence:%s", msg.UserID)
+	key := fmt.Sprintf(presenceKeyFmt, msg.UserID)
 	// Refresh TTL for any user-set status (don't change the value, just extend the TTL)
 	val, err := h.redis.Get(ctx, key).Result()
 	switch err {
 	case nil:
 		// Extend TTL for any valid status
 		switch val {
-		case "online", "dnd", "invisible":
+		case statusOnline, "dnd", statusInvisible:
 			h.redis.Expire(ctx, key, 120*time.Second)
 		}
 	case redis.Nil:
 		// Key expired or missing — re-set to online if user is still connected
 		if _, ok := h.userClients[msg.UserID]; ok {
-			h.redis.Set(ctx, key, "online", 120*time.Second)
+			h.redis.Set(ctx, key, statusOnline, 120*time.Second)
 		}
 	}
 }
 
 // handleSetStatus allows users to manually set their status (online/dnd/invisible)
 func (h *Hub) handleSetStatus(msg IncomingMessage) {
-	status, ok := msg.Data["status"].(string)
+	status, ok := msg.Data[keyStatus].(string)
 	if !ok {
 		return
 	}
 
 	// Validate status
 	switch status {
-	case "online", "dnd", "invisible":
+	case statusOnline, "dnd", statusInvisible:
 		// valid
 	default:
 		return
 	}
 
 	ctx := context.Background()
-	key := fmt.Sprintf("presence:%s", msg.UserID)
+	key := fmt.Sprintf(presenceKeyFmt, msg.UserID)
 	h.redis.Set(ctx, key, status, 120*time.Second)
 
-	// For invisible, broadcast as "offline" to other users (but store real status in Redis)
+	// For invisible, broadcast as offline to other users (but store real status in Redis)
 	broadcastStatus := status
-	if status == "invisible" {
-		broadcastStatus = "offline"
+	if status == statusInvisible {
+		broadcastStatus = statusOffline
 	}
 	h.broadcastPresenceToAll(msg.UserID, broadcastStatus, time.Now().Unix())
 }
@@ -1102,7 +1125,7 @@ func (h *Hub) BroadcastToUser(userID uuid.UUID, msg OutgoingMessage) {
 
 // handleSubscribeDM subscribes a client to a DM conversation after verifying participation.
 func (h *Hub) handleSubscribeDM(msg IncomingMessage) {
-	convID, ok := msg.Data["conversation_id"].(string)
+	convID, ok := msg.Data[keyConversationID].(string)
 	if !ok {
 		h.sendError(msg.ClientID, "Invalid conversation_id in subscribe_dm message")
 		return
@@ -1147,7 +1170,7 @@ func (h *Hub) handleSubscribeDM(msg IncomingMessage) {
 	confirmMsg := OutgoingMessage{
 		Type: "dm_subscribed",
 		Data: map[string]interface{}{
-			"conversation_id": convUUID,
+			keyConversationID: convUUID,
 		},
 	}
 	if data, err := json.Marshal(confirmMsg); err == nil {
@@ -1157,7 +1180,7 @@ func (h *Hub) handleSubscribeDM(msg IncomingMessage) {
 
 // handleUnsubscribeDM unsubscribes a client from a DM conversation.
 func (h *Hub) handleUnsubscribeDM(msg IncomingMessage) {
-	convID, ok := msg.Data["conversation_id"].(string)
+	convID, ok := msg.Data[keyConversationID].(string)
 	if !ok {
 		return
 	}
@@ -1179,7 +1202,7 @@ func (h *Hub) handleUnsubscribeDM(msg IncomingMessage) {
 
 // handleDMMessage handles a DM chat message: validates, persists, then broadcasts.
 func (h *Hub) handleDMMessage(msg IncomingMessage) {
-	convID, ok := msg.Data["conversation_id"].(string)
+	convID, ok := msg.Data[keyConversationID].(string)
 	if !ok {
 		return
 	}
@@ -1207,13 +1230,13 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 	}
 
 	// Validate content
-	content, ok := msg.Data["content"].(string)
+	content, ok := msg.Data[keyContent].(string)
 	if !ok || content == "" {
 		h.sendError(msg.ClientID, "Message content is required")
 		return
 	}
 
-	isEncrypted, _ := msg.Data["is_encrypted"].(bool)
+	isEncrypted, _ := msg.Data[keyIsEncrypted].(bool)
 	msgType := "user"
 	if t, ok := msg.Data["type"].(string); ok && t == "system" {
 		msgType = "system"
@@ -1234,7 +1257,7 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 
 	// Extract key_version for E2EE messages
 	dmKeyVersion := 1
-	if kv, ok := msg.Data["key_version"].(float64); ok && kv > 0 {
+	if kv, ok := msg.Data[keyKeyVersion].(float64); ok && kv > 0 {
 		dmKeyVersion = int(kv)
 	}
 
@@ -1282,8 +1305,8 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 			}
 			h.sendErrorWithData(msg.ClientID, "epoch_revoked", map[string]interface{}{
 				"current_epoch":   currentEpoch,
-				"conversation_id": convID,
-				"channel_id":      convID,
+				keyConversationID: convID,
+				keyChannelID:      convID,
 			})
 			return
 		}
@@ -1305,15 +1328,15 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 	}
 
 	// Send dm_message_ack to the sender
-	nonce, _ := msg.Data["nonce"].(string)
+	nonce, _ := msg.Data[keyNonce].(string)
 	ackMsg := OutgoingMessage{
 		Type: "dm_message_ack",
 		Data: map[string]interface{}{
-			"nonce":           nonce,
+			keyNonce:          nonce,
 			"id":              messageID.String(),
 			"conversation_id": convUUID.String(),
-			"created_at":      createdAt,
-			"updated_at":      updatedAt,
+			keyCreatedAt:      createdAt,
+			keyUpdatedAt:      updatedAt,
 		},
 	}
 	if ackData, ackErr := json.Marshal(ackMsg); ackErr == nil {
@@ -1328,17 +1351,17 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 		Type: "dm_message",
 		Data: map[string]interface{}{
 			"id":              messageID,
-			"conversation_id": convUUID,
-			"user_id":         msg.UserID,
-			"username":        client.Username,
+			keyConversationID: convUUID,
+			keyUserID:         msg.UserID,
+			keyUsername:       client.Username,
 			"display_name":    client.DisplayName,
 			"avatar_url":      client.AvatarURL,
-			"content":         content,
-			"is_encrypted":    isEncrypted,
-			"key_version":     dmKeyVersion,
+			keyContent:        content,
+			keyIsEncrypted:    isEncrypted,
+			keyKeyVersion:     dmKeyVersion,
 			"type":            msgType,
-			"created_at":      createdAt,
-			"updated_at":      updatedAt,
+			keyCreatedAt:      createdAt,
+			keyUpdatedAt:      updatedAt,
 		},
 	}
 
@@ -1432,7 +1455,7 @@ func (h *Hub) sendDMUnreadNotify(conversationID, senderUserID uuid.UUID) {
 
 // handleDMTyping handles typing indicators for DM conversations.
 func (h *Hub) handleDMTyping(msg IncomingMessage) {
-	convID, ok := msg.Data["conversation_id"].(string)
+	convID, ok := msg.Data[keyConversationID].(string)
 	if !ok {
 		return
 	}
@@ -1459,10 +1482,10 @@ func (h *Hub) handleDMTyping(msg IncomingMessage) {
 		Data: OutgoingMessage{
 			Type: "dm_typing",
 			Data: map[string]interface{}{
-				"conversation_id": convUUID,
-				"user_id":         msg.UserID,
-				"username":        client.Username,
-				"is_typing":       msg.Data["is_typing"],
+				keyConversationID: convUUID,
+				keyUserID:         msg.UserID,
+				keyUsername:       client.Username,
+				keyIsTyping:       msg.Data[keyIsTyping],
 			},
 		},
 	}
@@ -1529,7 +1552,7 @@ func (h *Hub) handleDisconnectUser(userID uuid.UUID) {
 
 	// Courtesy notification + forceful disconnect
 	revokedMsg, _ := json.Marshal(OutgoingMessage{
-		Type: "session_revoked",
+		Type: sessionRevoked,
 		Data: map[string]interface{}{"reason": "session_terminated"},
 	})
 	for _, client := range clients {
@@ -1557,8 +1580,8 @@ func (h *Hub) handleDisconnectSession(sessionID string) {
 	}
 
 	revokedMsg, _ := json.Marshal(OutgoingMessage{
-		Type: "session_revoked",
-		Data: map[string]interface{}{"reason": "session_revoked"},
+		Type: sessionRevoked,
+		Data: map[string]interface{}{"reason": sessionRevoked},
 	})
 
 	var count int
@@ -1581,7 +1604,7 @@ func (h *Hub) handleDisconnectSession(sessionID string) {
 }
 
 // DisconnectUser forces all WebSocket connections for a user to close (thread-safe).
-// Called from HTTP handlers (logout, password change, session revocation) when
+// Called from HTTP handlers (logout, credential change, session revocation) when
 // a token is blacklisted or session is revoked. The server does not trust the
 // client to disconnect itself — this is the authoritative enforcement.
 func (h *Hub) DisconnectUser(userID uuid.UUID) {
@@ -1630,7 +1653,7 @@ func (h *Hub) handleProfileUpdate(msg IncomingMessage) {
 
 // handleServerUpdate re-queries server info from DB and broadcasts to all server subscribers.
 func (h *Hub) handleServerUpdate(msg IncomingMessage) {
-	serverIDStr, ok := msg.Data["server_id"].(string)
+	serverIDStr, ok := msg.Data[keyServerID].(string)
 	if !ok {
 		return
 	}
@@ -1656,7 +1679,7 @@ func (h *Hub) handleServerUpdate(msg IncomingMessage) {
 	broadcastMsg := OutgoingMessage{
 		Type: "server_updated",
 		Data: map[string]interface{}{
-			"server_id":  serverID.String(),
+			keyServerID:  serverID.String(),
 			"name":       name,
 			"icon_url":   iconURL,
 			"banner_url": bannerURL,
@@ -1686,8 +1709,8 @@ func (h *Hub) broadcastPresenceToAll(userID uuid.UUID, status string, timestamp 
 	msg := OutgoingMessage{
 		Type: "presence",
 		Data: map[string]interface{}{
-			"user_id":   userID.String(),
-			"status":    status,
+			keyUserID:   userID.String(),
+			keyStatus:   status,
 			"timestamp": timestamp,
 		},
 	}
@@ -1789,7 +1812,7 @@ func (h *Hub) flushOnlineCounts() {
 	for uid := range allMemberIDs {
 		if _, connected := h.userClients[uid]; connected {
 			connectedUIDs = append(connectedUIDs, uid)
-			redisKeys = append(redisKeys, fmt.Sprintf("presence:%s", uid))
+			redisKeys = append(redisKeys, fmt.Sprintf(presenceKeyFmt, uid))
 		}
 	}
 
@@ -1806,7 +1829,7 @@ func (h *Hub) flushOnlineCounts() {
 				if val == nil {
 					// No key → just connected, treat as online
 					visibleOnline[connectedUIDs[i]] = true
-				} else if s, ok := val.(string); ok && s != "invisible" {
+				} else if s, ok := val.(string); ok && s != statusInvisible {
 					visibleOnline[connectedUIDs[i]] = true
 				}
 			}
@@ -1829,7 +1852,7 @@ func (h *Hub) flushOnlineCounts() {
 	h.handleGlobalBroadcast(OutgoingMessage{
 		Type: "server_online_counts",
 		Data: map[string]interface{}{
-			"counts": counts,
+			keyCounts: counts,
 		},
 	})
 }
@@ -1861,7 +1884,7 @@ func (h *Hub) broadcastServerVoiceCounts() {
 	h.handleGlobalBroadcast(OutgoingMessage{
 		Type: "server_voice_counts",
 		Data: map[string]interface{}{
-			"counts": counts,
+			keyCounts: counts,
 		},
 	})
 }

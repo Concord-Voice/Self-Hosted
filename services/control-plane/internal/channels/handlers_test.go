@@ -8,6 +8,18 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+const (
+	pathChannelsPrefix = "/api/v1/channels/"
+	pathChannels       = "/api/v1/channels"
+	pathServersPrefix  = "/api/v1/servers/"
+	pathKeys           = "/keys"
+	keyServerID        = "server_id"
+	keyWrappedKeys     = "wrapped_keys"
+	keyChannel         = "channel"
+	roleMember         = "member"
+	keyIsEncrypted     = "is_encrypted"
+)
+
 func setupTS(t *testing.T) *testhelpers.TestServer {
 	t.Helper()
 	return testhelpers.SetupTestServer(t)
@@ -27,7 +39,7 @@ func setupWithChannel(t *testing.T) (*testhelpers.TestServer, testhelpers.TestUs
 func TestListChannelsSuccess(t *testing.T) {
 	ts, user, serverID, _ := setupWithChannel(t)
 
-	w := ts.DoRequest("GET", "/api/v1/servers/"+serverID+"/channels", nil, testhelpers.AuthHeaders(user.AccessToken))
+	w := ts.DoRequest("GET", pathServersPrefix+serverID+"/channels", nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var body map[string]interface{}
@@ -40,7 +52,7 @@ func TestListChannelsNotMember(t *testing.T) {
 	ts, _, serverID, _ := setupWithChannel(t)
 	outsider := ts.CreateTestUser(t, "chanoutsider")
 
-	w := ts.DoRequest("GET", "/api/v1/servers/"+serverID+"/channels", nil, testhelpers.AuthHeaders(outsider.AccessToken))
+	w := ts.DoRequest("GET", pathServersPrefix+serverID+"/channels", nil, testhelpers.AuthHeaders(outsider.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
@@ -51,8 +63,8 @@ func TestCreateChannelSuccess(t *testing.T) {
 	user := ts.CreateTestUser(t, "createchan")
 	serverID := ts.CreateTestServer(t, user.ID, "Chan Create Server")
 
-	w := ts.DoRequest("POST", "/api/v1/channels", map[string]interface{}{
-		"server_id": serverID,
+	w := ts.DoRequest("POST", pathChannels, map[string]interface{}{
+		keyServerID: serverID,
 		"name":      "new-channel",
 		"type":      "text",
 	}, testhelpers.AuthHeaders(user.AccessToken))
@@ -60,7 +72,7 @@ func TestCreateChannelSuccess(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, w.Code)
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
-	channel := body["channel"].(map[string]interface{})
+	channel := body[keyChannel].(map[string]interface{})
 	assert.Equal(t, "new-channel", channel["name"])
 }
 
@@ -69,10 +81,10 @@ func TestCreateChannelNotAdmin(t *testing.T) {
 	owner := ts.CreateTestUser(t, "chanowner2")
 	member := ts.CreateTestUser(t, "chanmember2")
 	serverID := ts.CreateTestServer(t, owner.ID, "Not Admin Server")
-	ts.AddMemberToServer(t, serverID, member.ID, "member")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
 
-	w := ts.DoRequest("POST", "/api/v1/channels", map[string]interface{}{
-		"server_id": serverID,
+	w := ts.DoRequest("POST", pathChannels, map[string]interface{}{
+		keyServerID: serverID,
 		"name":      "blocked-channel",
 		"type":      "text",
 	}, testhelpers.AuthHeaders(member.AccessToken))
@@ -85,12 +97,12 @@ func TestCreateChannelEncrypted(t *testing.T) {
 	user := ts.CreateTestUser(t, "encrchan")
 	serverID := ts.CreateTestServer(t, user.ID, "Encrypted Server")
 
-	w := ts.DoRequest("POST", "/api/v1/channels", map[string]interface{}{
-		"server_id":    serverID,
+	w := ts.DoRequest("POST", pathChannels, map[string]interface{}{
+		keyServerID:    serverID,
 		"name":         "encrypted-channel",
 		"type":         "text",
-		"is_encrypted": true,
-		"wrapped_keys": map[string]string{
+		keyIsEncrypted: true,
+		keyWrappedKeys: map[string]string{
 			user.ID: testhelpers.ValidCiphertext(),
 		},
 	}, testhelpers.AuthHeaders(user.AccessToken))
@@ -98,7 +110,7 @@ func TestCreateChannelEncrypted(t *testing.T) {
 	assert.Equal(t, http.StatusCreated, w.Code)
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
-	channel := body["channel"].(map[string]interface{})
+	channel := body[keyChannel].(map[string]interface{})
 	assert.Equal(t, true, channel["is_encrypted"])
 }
 
@@ -107,7 +119,7 @@ func TestCreateChannelEncrypted(t *testing.T) {
 func TestGetChannelSuccess(t *testing.T) {
 	ts, user, _, channelID := setupWithChannel(t)
 
-	w := ts.DoRequest("GET", "/api/v1/channels/"+channelID, nil, testhelpers.AuthHeaders(user.AccessToken))
+	w := ts.DoRequest("GET", pathChannelsPrefix+channelID, nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
@@ -116,7 +128,7 @@ func TestGetChannelSuccess(t *testing.T) {
 func TestUpdateChannelSuccess(t *testing.T) {
 	ts, user, _, channelID := setupWithChannel(t)
 
-	w := ts.DoRequest("PATCH", "/api/v1/channels/"+channelID, map[string]interface{}{
+	w := ts.DoRequest("PATCH", pathChannelsPrefix+channelID, map[string]interface{}{
 		"name": "renamed-channel",
 		"type": "text",
 	}, testhelpers.AuthHeaders(user.AccessToken))
@@ -124,7 +136,7 @@ func TestUpdateChannelSuccess(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
-	channel := body["channel"].(map[string]interface{})
+	channel := body[keyChannel].(map[string]interface{})
 	assert.Equal(t, "renamed-channel", channel["name"])
 }
 
@@ -133,7 +145,7 @@ func TestUpdateChannelSuccess(t *testing.T) {
 func TestDeleteChannelAsOwner(t *testing.T) {
 	ts, user, _, channelID := setupWithChannel(t)
 
-	w := ts.DoRequest("DELETE", "/api/v1/channels/"+channelID, nil, testhelpers.AuthHeaders(user.AccessToken))
+	w := ts.DoRequest("DELETE", pathChannelsPrefix+channelID, nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
@@ -142,10 +154,10 @@ func TestDeleteChannelNotAdmin(t *testing.T) {
 	owner := ts.CreateTestUser(t, "dchowner")
 	member := ts.CreateTestUser(t, "dchmember")
 	serverID := ts.CreateTestServer(t, owner.ID, "Del Chan Server")
-	ts.AddMemberToServer(t, serverID, member.ID, "member")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
 	channelID := ts.CreateTestChannel(t, serverID, "protected", false)
 
-	w := ts.DoRequest("DELETE", "/api/v1/channels/"+channelID, nil, testhelpers.AuthHeaders(member.AccessToken))
+	w := ts.DoRequest("DELETE", pathChannelsPrefix+channelID, nil, testhelpers.AuthHeaders(member.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
@@ -154,14 +166,14 @@ func TestDeleteChannelNotAdmin(t *testing.T) {
 func TestMarkChannelReadSuccess(t *testing.T) {
 	ts, user, _, channelID := setupWithChannel(t)
 
-	w := ts.DoRequest("POST", "/api/v1/channels/"+channelID+"/read", nil, testhelpers.AuthHeaders(user.AccessToken))
+	w := ts.DoRequest("POST", pathChannelsPrefix+channelID+"/read", nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
 func TestMarkServerReadSuccess(t *testing.T) {
 	ts, user, serverID, _ := setupWithChannel(t)
 
-	w := ts.DoRequest("POST", "/api/v1/servers/"+serverID+"/read", nil, testhelpers.AuthHeaders(user.AccessToken))
+	w := ts.DoRequest("POST", pathServersPrefix+serverID+"/read", nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
@@ -170,7 +182,7 @@ func TestMarkServerReadSuccess(t *testing.T) {
 func TestGetUnreadCountsSuccess(t *testing.T) {
 	ts, user, serverID, _ := setupWithChannel(t)
 
-	w := ts.DoRequest("GET", "/api/v1/servers/"+serverID+"/unread", nil, testhelpers.AuthHeaders(user.AccessToken))
+	w := ts.DoRequest("GET", pathServersPrefix+serverID+"/unread", nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
@@ -191,12 +203,12 @@ func setupEncryptedChannel(t *testing.T) (*testhelpers.TestServer, testhelpers.T
 	user := ts.CreateTestUser(t, "e2eeuser")
 	serverID := ts.CreateTestServer(t, user.ID, "E2EE Server")
 
-	w := ts.DoRequest("POST", "/api/v1/channels", map[string]interface{}{
-		"server_id":    serverID,
+	w := ts.DoRequest("POST", pathChannels, map[string]interface{}{
+		keyServerID:    serverID,
 		"name":         "secret-channel",
 		"type":         "text",
-		"is_encrypted": true,
-		"wrapped_keys": map[string]string{
+		keyIsEncrypted: true,
+		keyWrappedKeys: map[string]string{
 			user.ID: testhelpers.ValidCiphertext(),
 		},
 	}, testhelpers.AuthHeaders(user.AccessToken))
@@ -204,7 +216,7 @@ func setupEncryptedChannel(t *testing.T) (*testhelpers.TestServer, testhelpers.T
 
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
-	channel := body["channel"].(map[string]interface{})
+	channel := body[keyChannel].(map[string]interface{})
 	channelID := channel["id"].(string)
 
 	return ts, user, serverID, channelID
@@ -213,7 +225,7 @@ func setupEncryptedChannel(t *testing.T) (*testhelpers.TestServer, testhelpers.T
 func TestGetChannelKeysSuccess(t *testing.T) {
 	ts, user, _, channelID := setupEncryptedChannel(t)
 
-	w := ts.DoRequest("GET", "/api/v1/channels/"+channelID+"/keys", nil, testhelpers.AuthHeaders(user.AccessToken))
+	w := ts.DoRequest("GET", pathChannelsPrefix+channelID+pathKeys, nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var body map[string]interface{}
@@ -224,7 +236,7 @@ func TestGetChannelKeysSuccess(t *testing.T) {
 func TestGetChannelKeysNotEncrypted(t *testing.T) {
 	ts, user, _, channelID := setupWithChannel(t) // plaintext channel
 
-	w := ts.DoRequest("GET", "/api/v1/channels/"+channelID+"/keys", nil, testhelpers.AuthHeaders(user.AccessToken))
+	w := ts.DoRequest("GET", pathChannelsPrefix+channelID+pathKeys, nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
@@ -232,7 +244,7 @@ func TestGetChannelKeysNotMember(t *testing.T) {
 	ts, _, _, channelID := setupEncryptedChannel(t)
 	outsider := ts.CreateTestUser(t, "keyoutsider")
 
-	w := ts.DoRequest("GET", "/api/v1/channels/"+channelID+"/keys", nil, testhelpers.AuthHeaders(outsider.AccessToken))
+	w := ts.DoRequest("GET", pathChannelsPrefix+channelID+pathKeys, nil, testhelpers.AuthHeaders(outsider.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
@@ -249,11 +261,11 @@ func TestDistributeChannelKeysSuccess(t *testing.T) {
 
 	// Add a new member to the server
 	newMember := ts.CreateTestUser(t, "newmember")
-	ts.AddMemberToServer(t, serverID, newMember.ID, "member")
+	ts.AddMemberToServer(t, serverID, newMember.ID, roleMember)
 
 	// Owner distributes key to the new member
-	w := ts.DoRequest("POST", "/api/v1/channels/"+channelID+"/keys", map[string]interface{}{
-		"wrapped_keys": map[string]string{
+	w := ts.DoRequest("POST", pathChannelsPrefix+channelID+pathKeys, map[string]interface{}{
+		keyWrappedKeys: map[string]string{
 			newMember.ID: testhelpers.ValidCiphertext(),
 		},
 	}, testhelpers.AuthHeaders(owner.AccessToken))
@@ -270,18 +282,18 @@ func TestDistributeChannelKeysDuplicate(t *testing.T) {
 
 	// Add a new member
 	newMember := ts.CreateTestUser(t, "dupmember")
-	ts.AddMemberToServer(t, serverID, newMember.ID, "member")
+	ts.AddMemberToServer(t, serverID, newMember.ID, roleMember)
 
 	// Distribute once
-	ts.DoRequest("POST", "/api/v1/channels/"+channelID+"/keys", map[string]interface{}{
-		"wrapped_keys": map[string]string{
+	ts.DoRequest("POST", pathChannelsPrefix+channelID+pathKeys, map[string]interface{}{
+		keyWrappedKeys: map[string]string{
 			newMember.ID: testhelpers.ValidCiphertext(),
 		},
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 
 	// Distribute again — should be duplicate
-	w := ts.DoRequest("POST", "/api/v1/channels/"+channelID+"/keys", map[string]interface{}{
-		"wrapped_keys": map[string]string{
+	w := ts.DoRequest("POST", pathChannelsPrefix+channelID+pathKeys, map[string]interface{}{
+		keyWrappedKeys: map[string]string{
 			newMember.ID: testhelpers.ValidCiphertext(),
 		},
 	}, testhelpers.AuthHeaders(owner.AccessToken))
@@ -297,8 +309,8 @@ func TestDistributeChannelKeysNotMember(t *testing.T) {
 	ts, _, _, channelID := setupEncryptedChannel(t)
 	outsider := ts.CreateTestUser(t, "distoutsider")
 
-	w := ts.DoRequest("POST", "/api/v1/channels/"+channelID+"/keys", map[string]interface{}{
-		"wrapped_keys": map[string]string{
+	w := ts.DoRequest("POST", pathChannelsPrefix+channelID+pathKeys, map[string]interface{}{
+		keyWrappedKeys: map[string]string{
 			outsider.ID: testhelpers.ValidCiphertext(),
 		},
 	}, testhelpers.AuthHeaders(outsider.AccessToken))

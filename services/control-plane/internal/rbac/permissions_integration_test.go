@@ -12,6 +12,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	pathServersPrefix = "/api/v1/servers/"
+	roleMember        = "member"
+	pathMembers       = "/members/"
+	pathBans          = "/bans/"
+	methodDelete      = "DELETE"
+)
+
 // invalidatePermCache clears the Redis permission cache for a user in a server.
 // Required when tests assign roles via direct DB inserts (bypassing handler-level cache invalidation).
 func invalidatePermCache(t *testing.T, ts *testhelpers.TestServer, serverID, userID string) {
@@ -41,7 +49,7 @@ func TestBasePermissions_CompleteAllowedSet(t *testing.T) {
 	owner := ts.CreateTestUser(t, "bpowner")
 	member := ts.CreateTestUser(t, "bpmember")
 	serverID := ts.CreateTestServer(t, owner.ID, "Base Perm Matrix")
-	ts.AddMemberToServer(t, serverID, member.ID, "member")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
 
 	allowed := []struct {
 		name string
@@ -80,7 +88,7 @@ func TestBasePermissions_CompleteDeniedSet(t *testing.T) {
 	owner := ts.CreateTestUser(t, "bdowner")
 	member := ts.CreateTestUser(t, "bdmember")
 	serverID := ts.CreateTestServer(t, owner.ID, "Base Denied Matrix")
-	ts.AddMemberToServer(t, serverID, member.ID, "member")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
 
 	denied := []struct {
 		name string
@@ -121,7 +129,7 @@ func TestModeratorPermissions_GainedOverBase(t *testing.T) {
 	owner := ts.CreateTestUser(t, "mpowner")
 	member := ts.CreateTestUser(t, "mpmember")
 	serverID := ts.CreateTestServer(t, owner.ID, "Mod Perm Matrix")
-	ts.AddMemberToServer(t, serverID, member.ID, "member")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
 
 	modRoleID := ts.CreateTestRole(t, serverID, "Moderator", 5, int64(rbac.ModeratorPermissions))
 	ts.AssignRoleToUser(t, serverID, member.ID, modRoleID)
@@ -178,7 +186,7 @@ func TestAdminPermissions_GainedOverModerator(t *testing.T) {
 	owner := ts.CreateTestUser(t, "apowner")
 	member := ts.CreateTestUser(t, "apmember")
 	serverID := ts.CreateTestServer(t, owner.ID, "Admin Perm Matrix")
-	ts.AddMemberToServer(t, serverID, member.ID, "member")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
 
 	adminRoleID := ts.CreateTestRole(t, serverID, "Admin", 10, int64(rbac.AdminPermissions))
 	ts.AssignRoleToUser(t, serverID, member.ID, adminRoleID)
@@ -264,7 +272,7 @@ func TestSBAC_UserAllowOverridesRoleDeny(t *testing.T) {
 	owner := ts.CreateTestUser(t, "sbacowner1")
 	member := ts.CreateTestUser(t, "sbacmember1")
 	serverID := ts.CreateTestServer(t, owner.ID, "SBAC User Allow")
-	ts.AddMemberToServer(t, serverID, member.ID, "member")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
 	channelID := ts.CreateTestChannel(t, serverID, "restricted", false)
 
 	// Get @all role ID
@@ -297,7 +305,7 @@ func TestSBAC_UserDenyIsFinalAuthority(t *testing.T) {
 	owner := ts.CreateTestUser(t, "sbacowner2")
 	member := ts.CreateTestUser(t, "sbacmember2")
 	serverID := ts.CreateTestServer(t, owner.ID, "SBAC User Deny Final")
-	ts.AddMemberToServer(t, serverID, member.ID, "member")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
 	channelID := ts.CreateTestChannel(t, serverID, "locked-member", false)
 
 	// User-deny SendMessages
@@ -315,7 +323,7 @@ func TestSBAC_AdminBitBypassesOverrides(t *testing.T) {
 	owner := ts.CreateTestUser(t, "sbacowner3")
 	admin := ts.CreateTestUser(t, "sbacadmin3")
 	serverID := ts.CreateTestServer(t, owner.ID, "SBAC Admin Bypass")
-	ts.AddMemberToServer(t, serverID, admin.ID, "member")
+	ts.AddMemberToServer(t, serverID, admin.ID, roleMember)
 	channelID := ts.CreateTestChannel(t, serverID, "admin-test", false)
 
 	// Give admin the PermAdministrator bit
@@ -338,7 +346,7 @@ func TestSBAC_MultipleRolesORd_WithOverride(t *testing.T) {
 	owner := ts.CreateTestUser(t, "sbacowner4")
 	member := ts.CreateTestUser(t, "sbacmember4")
 	serverID := ts.CreateTestServer(t, owner.ID, "SBAC Multi Role")
-	ts.AddMemberToServer(t, serverID, member.ID, "member")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
 
 	// Create two roles with distinct permissions
 	roleA := ts.CreateTestRole(t, serverID, "RoleA", 3, int64(rbac.PermInvite))
@@ -363,16 +371,16 @@ func TestUpdateServer_RequiresManageServer(t *testing.T) {
 	owner := ts.CreateTestUser(t, "srvpowner")
 	member := ts.CreateTestUser(t, "srvpmember")
 	serverID := ts.CreateTestServer(t, owner.ID, "UpdateServer Perm Test")
-	ts.AddMemberToServer(t, serverID, member.ID, "member")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
 
 	body := map[string]interface{}{"name": "Updated Name"}
 
 	// Base member → 403
-	w := ts.DoRequest("PATCH", "/api/v1/servers/"+serverID, body, testhelpers.AuthHeaders(member.AccessToken))
+	w := ts.DoRequest("PATCH", pathServersPrefix+serverID, body, testhelpers.AuthHeaders(member.AccessToken))
 	assert.Equal(t, 403, w.Code, "base member should be denied UpdateServer")
 
 	// Owner → 200
-	w = ts.DoRequest("PATCH", "/api/v1/servers/"+serverID, body, testhelpers.AuthHeaders(owner.AccessToken))
+	w = ts.DoRequest("PATCH", pathServersPrefix+serverID, body, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, 200, w.Code, "owner should be allowed UpdateServer")
 }
 
@@ -381,12 +389,12 @@ func TestCreateRole_RequiresManageRoles(t *testing.T) {
 	owner := ts.CreateTestUser(t, "crpowner")
 	member := ts.CreateTestUser(t, "crpmember")
 	serverID := ts.CreateTestServer(t, owner.ID, "CreateRole Perm Test")
-	ts.AddMemberToServer(t, serverID, member.ID, "member")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
 
 	body := map[string]interface{}{"name": "TestRole", "permissions": "0"}
 
 	// Base member → 403
-	w := ts.DoRequest("POST", "/api/v1/servers/"+serverID+"/roles", body, testhelpers.AuthHeaders(member.AccessToken))
+	w := ts.DoRequest("POST", pathServersPrefix+serverID+"/roles", body, testhelpers.AuthHeaders(member.AccessToken))
 	assert.Equal(t, 403, w.Code, "base member should be denied CreateRole")
 
 	// Give member ManageRoles permission
@@ -395,7 +403,7 @@ func TestCreateRole_RequiresManageRoles(t *testing.T) {
 	invalidatePermCache(t, ts, serverID, member.ID)
 
 	// Now should succeed
-	w = ts.DoRequest("POST", "/api/v1/servers/"+serverID+"/roles", body, testhelpers.AuthHeaders(member.AccessToken))
+	w = ts.DoRequest("POST", pathServersPrefix+serverID+"/roles", body, testhelpers.AuthHeaders(member.AccessToken))
 	assert.Equal(t, 201, w.Code, "member with ManageRoles should be allowed CreateRole")
 }
 
@@ -404,14 +412,14 @@ func TestGetAuditLog_RequiresViewAuditLog(t *testing.T) {
 	owner := ts.CreateTestUser(t, "alowner")
 	member := ts.CreateTestUser(t, "almember")
 	serverID := ts.CreateTestServer(t, owner.ID, "AuditLog Perm Test")
-	ts.AddMemberToServer(t, serverID, member.ID, "member")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
 
 	// Base member → 403
-	w := ts.DoRequest("GET", "/api/v1/servers/"+serverID+"/audit-log", nil, testhelpers.AuthHeaders(member.AccessToken))
+	w := ts.DoRequest("GET", pathServersPrefix+serverID+"/audit-log", nil, testhelpers.AuthHeaders(member.AccessToken))
 	assert.Equal(t, 403, w.Code, "base member should be denied ViewAuditLog")
 
 	// Owner → 200
-	w = ts.DoRequest("GET", "/api/v1/servers/"+serverID+"/audit-log", nil, testhelpers.AuthHeaders(owner.AccessToken))
+	w = ts.DoRequest("GET", pathServersPrefix+serverID+"/audit-log", nil, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, 200, w.Code, "owner should be allowed ViewAuditLog")
 }
 
@@ -420,12 +428,12 @@ func TestCreateInvite_RequiresInvitePermission(t *testing.T) {
 	owner := ts.CreateTestUser(t, "invowner")
 	member := ts.CreateTestUser(t, "invmember")
 	serverID := ts.CreateTestServer(t, owner.ID, "Invite Perm Test")
-	ts.AddMemberToServer(t, serverID, member.ID, "member")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
 
 	body := map[string]interface{}{"max_uses": 10}
 
 	// Base member → 403 (PermInvite not in BasePermissions)
-	w := ts.DoRequest("POST", "/api/v1/servers/"+serverID+"/invites", body, testhelpers.AuthHeaders(member.AccessToken))
+	w := ts.DoRequest("POST", pathServersPrefix+serverID+"/invites", body, testhelpers.AuthHeaders(member.AccessToken))
 	assert.Equal(t, 403, w.Code, "base member should be denied CreateInvite")
 
 	// Give member Invite permission
@@ -433,7 +441,7 @@ func TestCreateInvite_RequiresInvitePermission(t *testing.T) {
 	ts.AssignRoleToUser(t, serverID, member.ID, roleID)
 	invalidatePermCache(t, ts, serverID, member.ID)
 
-	w = ts.DoRequest("POST", "/api/v1/servers/"+serverID+"/invites", body, testhelpers.AuthHeaders(member.AccessToken))
+	w = ts.DoRequest("POST", pathServersPrefix+serverID+"/invites", body, testhelpers.AuthHeaders(member.AccessToken))
 	assert.Equal(t, 201, w.Code, "member with PermInvite should be allowed")
 }
 
@@ -444,35 +452,35 @@ func TestKickMember_RequiresKickAndHierarchy(t *testing.T) {
 	target := ts.CreateTestUser(t, "kicktarget")
 	baseMember := ts.CreateTestUser(t, "kickbase")
 	serverID := ts.CreateTestServer(t, owner.ID, "Kick Perm Test")
-	ts.AddMemberToServer(t, serverID, moderator.ID, "member")
-	ts.AddMemberToServer(t, serverID, target.ID, "member")
-	ts.AddMemberToServer(t, serverID, baseMember.ID, "member")
+	ts.AddMemberToServer(t, serverID, moderator.ID, roleMember)
+	ts.AddMemberToServer(t, serverID, target.ID, roleMember)
+	ts.AddMemberToServer(t, serverID, baseMember.ID, roleMember)
 
 	// Give moderator Kick permission at position 5
 	modRoleID := ts.CreateTestRole(t, serverID, "Mod", 5, int64(rbac.PermKick))
 	ts.AssignRoleToUser(t, serverID, moderator.ID, modRoleID)
 
 	// Base member (no kick perm) → 403
-	w := ts.DoRequest("DELETE", "/api/v1/servers/"+serverID+"/members/"+target.ID, nil, testhelpers.AuthHeaders(baseMember.AccessToken))
+	w := ts.DoRequest("DELETE", pathServersPrefix+serverID+pathMembers+target.ID, nil, testhelpers.AuthHeaders(baseMember.AccessToken))
 	assert.Equal(t, 403, w.Code, "base member without PermKick should be denied")
 
 	// Moderator kicks target member (lower rank) → 200
-	w = ts.DoRequest("DELETE", "/api/v1/servers/"+serverID+"/members/"+target.ID, nil, testhelpers.AuthHeaders(moderator.AccessToken))
+	w = ts.DoRequest("DELETE", pathServersPrefix+serverID+pathMembers+target.ID, nil, testhelpers.AuthHeaders(moderator.AccessToken))
 	assert.Equal(t, 200, w.Code, "moderator should kick lower-ranked member")
 
 	// Re-add target for next test
-	ts.AddMemberToServer(t, serverID, target.ID, "member")
+	ts.AddMemberToServer(t, serverID, target.ID, roleMember)
 
 	// Give target a higher-ranked role
 	highRoleID := ts.CreateTestRole(t, serverID, "HighRank", 10, int64(rbac.PermKick))
 	ts.AssignRoleToUser(t, serverID, target.ID, highRoleID)
 
 	// Moderator (pos 5) tries to kick target (pos 10) → 403 hierarchy violation
-	w = ts.DoRequest("DELETE", "/api/v1/servers/"+serverID+"/members/"+target.ID, nil, testhelpers.AuthHeaders(moderator.AccessToken))
+	w = ts.DoRequest("DELETE", pathServersPrefix+serverID+pathMembers+target.ID, nil, testhelpers.AuthHeaders(moderator.AccessToken))
 	assert.Equal(t, 403, w.Code, "cannot kick higher-ranked member")
 
 	// Owner can kick anyone
-	w = ts.DoRequest("DELETE", "/api/v1/servers/"+serverID+"/members/"+target.ID, nil, testhelpers.AuthHeaders(owner.AccessToken))
+	w = ts.DoRequest("DELETE", pathServersPrefix+serverID+pathMembers+target.ID, nil, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, 200, w.Code, "owner should kick any member")
 }
 
@@ -483,23 +491,23 @@ func TestBanMember_RequiresBanAndHierarchy(t *testing.T) {
 	target := ts.CreateTestUser(t, "bantarget")
 	baseMember := ts.CreateTestUser(t, "banbase")
 	serverID := ts.CreateTestServer(t, owner.ID, "Ban Perm Test")
-	ts.AddMemberToServer(t, serverID, admin.ID, "member")
-	ts.AddMemberToServer(t, serverID, target.ID, "member")
-	ts.AddMemberToServer(t, serverID, baseMember.ID, "member")
+	ts.AddMemberToServer(t, serverID, admin.ID, roleMember)
+	ts.AddMemberToServer(t, serverID, target.ID, roleMember)
+	ts.AddMemberToServer(t, serverID, baseMember.ID, roleMember)
 
 	adminRoleID := ts.CreateTestRole(t, serverID, "Admin", 10, int64(rbac.AdminPermissions))
 	ts.AssignRoleToUser(t, serverID, admin.ID, adminRoleID)
 
 	// Base member → 403
-	w := ts.DoRequest("POST", "/api/v1/servers/"+serverID+"/bans/"+target.ID, nil, testhelpers.AuthHeaders(baseMember.AccessToken))
+	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathBans+target.ID, nil, testhelpers.AuthHeaders(baseMember.AccessToken))
 	assert.Equal(t, 403, w.Code, "base member should be denied BanMember")
 
 	// Admin bans target (lower-ranked member) → 200
-	w = ts.DoRequest("POST", "/api/v1/servers/"+serverID+"/bans/"+target.ID, nil, testhelpers.AuthHeaders(admin.AccessToken))
+	w = ts.DoRequest("POST", pathServersPrefix+serverID+pathBans+target.ID, nil, testhelpers.AuthHeaders(admin.AccessToken))
 	assert.Equal(t, 200, w.Code, "admin should ban lower-ranked member")
 
 	// Admin cannot ban owner → 403 hierarchy
-	w = ts.DoRequest("POST", "/api/v1/servers/"+serverID+"/bans/"+owner.ID, nil, testhelpers.AuthHeaders(admin.AccessToken))
+	w = ts.DoRequest("POST", pathServersPrefix+serverID+pathBans+owner.ID, nil, testhelpers.AuthHeaders(admin.AccessToken))
 	assert.Equal(t, 403, w.Code, "admin should not ban server owner")
 }
 
@@ -514,7 +522,7 @@ func TestCustomRoleWithSinglePermission(t *testing.T) {
 	owner := ts.CreateTestUser(t, "crowner")
 	member := ts.CreateTestUser(t, "crmember")
 	serverID := ts.CreateTestServer(t, owner.ID, "Custom Role Single")
-	ts.AddMemberToServer(t, serverID, member.ID, "member")
+	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
 
 	// Verify member does NOT have PermMentionEveryone initially
 	has, err := resolver.HasPermission(ctx, serverID, member.ID, "", rbac.PermMentionEveryone)

@@ -9,6 +9,14 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	pathFriendsPrefix = "/api/v1/friends/"
+	pathFriends       = "/api/v1/friends"
+	pathFriendRequest = "/api/v1/friends/request"
+	pathBlock         = "/block"
+	statusAccepted    = "accepted"
+)
+
 func setupTS(t *testing.T) *testhelpers.TestServer {
 	t.Helper()
 	return testhelpers.SetupTestServer(t)
@@ -20,9 +28,9 @@ func TestBlockUser_Success(t *testing.T) {
 	ts := setupTS(t)
 	user1 := ts.CreateTestUser(t, "blocker")
 	user2 := ts.CreateTestUser(t, "blocked")
-	ts.CreateFriendship(t, user1.ID, user2.ID, "accepted")
+	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 
-	w := ts.DoRequest("POST", "/api/v1/friends/"+user2.ID+"/block", nil, testhelpers.AuthHeaders(user1.AccessToken))
+	w := ts.DoRequest("POST", pathFriendsPrefix+user2.ID+pathBlock, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	// Verify friendship status changed to blocked
@@ -39,12 +47,12 @@ func TestBlockUser_RecordsRevocation(t *testing.T) {
 	ts := setupTS(t)
 	user1 := ts.CreateTestUser(t, "blocker2")
 	user2 := ts.CreateTestUser(t, "blocked2")
-	ts.CreateFriendship(t, user1.ID, user2.ID, "accepted")
+	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
 	ts.SeedDMKey(t, convID, user1.ID, 1)
 	ts.SeedDMKey(t, convID, user2.ID, 1)
 
-	w := ts.DoRequest("POST", "/api/v1/friends/"+user2.ID+"/block", nil, testhelpers.AuthHeaders(user1.AccessToken))
+	w := ts.DoRequest("POST", pathFriendsPrefix+user2.ID+pathBlock, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	// Verify revocation record
@@ -65,12 +73,12 @@ func TestBlockUser_DeletesBlockedUserKey(t *testing.T) {
 	ts := setupTS(t)
 	user1 := ts.CreateTestUser(t, "blocker3")
 	user2 := ts.CreateTestUser(t, "blocked3")
-	ts.CreateFriendship(t, user1.ID, user2.ID, "accepted")
+	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
 	ts.SeedDMKey(t, convID, user1.ID, 1)
 	ts.SeedDMKey(t, convID, user2.ID, 1)
 
-	w := ts.DoRequest("POST", "/api/v1/friends/"+user2.ID+"/block", nil, testhelpers.AuthHeaders(user1.AccessToken))
+	w := ts.DoRequest("POST", pathFriendsPrefix+user2.ID+pathBlock, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	// Blocked user's key at version 1 should be deleted
@@ -95,10 +103,10 @@ func TestBlockUser_NoDMConversation(t *testing.T) {
 	ts := setupTS(t)
 	user1 := ts.CreateTestUser(t, "blocker4")
 	user2 := ts.CreateTestUser(t, "blocked4")
-	ts.CreateFriendship(t, user1.ID, user2.ID, "accepted")
+	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 
 	// No DM conversation — should still succeed
-	w := ts.DoRequest("POST", "/api/v1/friends/"+user2.ID+"/block", nil, testhelpers.AuthHeaders(user1.AccessToken))
+	w := ts.DoRequest("POST", pathFriendsPrefix+user2.ID+pathBlock, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var status string
@@ -114,7 +122,7 @@ func TestBlockUser_SelfBlock(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "selfblocker")
 
-	w := ts.DoRequest("POST", "/api/v1/friends/"+user.ID+"/block", nil, testhelpers.AuthHeaders(user.AccessToken))
+	w := ts.DoRequest("POST", pathFriendsPrefix+user.ID+pathBlock, nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
@@ -130,7 +138,7 @@ func TestBlockUser_Unauthorized(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "blocker6")
 
-	w := ts.DoRequest("POST", "/api/v1/friends/"+user.ID+"/block", nil, nil)
+	w := ts.DoRequest("POST", pathFriendsPrefix+user.ID+pathBlock, nil, nil)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
 
@@ -140,7 +148,7 @@ func TestBlockUser_NoExistingFriendship(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "blocked7")
 
 	// No existing friendship — should create a blocked one
-	w := ts.DoRequest("POST", "/api/v1/friends/"+user2.ID+"/block", nil, testhelpers.AuthHeaders(user1.AccessToken))
+	w := ts.DoRequest("POST", pathFriendsPrefix+user2.ID+pathBlock, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var status string
@@ -158,9 +166,9 @@ func TestListFriends_Success(t *testing.T) {
 	ts := setupTS(t)
 	user1 := ts.CreateTestUser(t, "listuser1")
 	user2 := ts.CreateTestUser(t, "listuser2")
-	ts.CreateFriendship(t, user1.ID, user2.ID, "accepted")
+	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 
-	w := ts.DoRequest("GET", "/api/v1/friends", nil, testhelpers.AuthHeaders(user1.AccessToken))
+	w := ts.DoRequest("GET", pathFriends, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var body map[string]interface{}
@@ -175,7 +183,7 @@ func TestListFriends_Empty(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "lonelyuser")
 
-	w := ts.DoRequest("GET", "/api/v1/friends", nil, testhelpers.AuthHeaders(user.AccessToken))
+	w := ts.DoRequest("GET", pathFriends, nil, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var body map[string]interface{}
@@ -190,7 +198,7 @@ func TestListFriends_ExcludesBlocked(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "listblock2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, "blocked")
 
-	w := ts.DoRequest("GET", "/api/v1/friends", nil, testhelpers.AuthHeaders(user1.AccessToken))
+	w := ts.DoRequest("GET", pathFriends, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var body map[string]interface{}
@@ -206,7 +214,7 @@ func TestSendRequest_Success(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "sender1")
 	user2 := ts.CreateTestUser(t, "receiver1")
 
-	w := ts.DoRequest("POST", "/api/v1/friends/request", map[string]interface{}{
+	w := ts.DoRequest("POST", pathFriendRequest, map[string]interface{}{
 		"user_id": user2.ID,
 	}, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusCreated, w.Code)
@@ -221,7 +229,7 @@ func TestSendRequest_ToSelf(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "selfsender")
 
-	w := ts.DoRequest("POST", "/api/v1/friends/request", map[string]interface{}{
+	w := ts.DoRequest("POST", pathFriendRequest, map[string]interface{}{
 		"user_id": user.ID,
 	}, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -231,9 +239,9 @@ func TestSendRequest_AlreadyFriends(t *testing.T) {
 	ts := setupTS(t)
 	user1 := ts.CreateTestUser(t, "sender2")
 	user2 := ts.CreateTestUser(t, "receiver2")
-	ts.CreateFriendship(t, user1.ID, user2.ID, "accepted")
+	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 
-	w := ts.DoRequest("POST", "/api/v1/friends/request", map[string]interface{}{
+	w := ts.DoRequest("POST", pathFriendRequest, map[string]interface{}{
 		"user_id": user2.ID,
 	}, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusConflict, w.Code)
@@ -244,7 +252,7 @@ func TestSendRequest_ByUsername(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "sender3")
 	user2 := ts.CreateTestUser(t, "receiver3")
 
-	w := ts.DoRequest("POST", "/api/v1/friends/request", map[string]interface{}{
+	w := ts.DoRequest("POST", pathFriendRequest, map[string]interface{}{
 		"username": user2.Username,
 	}, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusCreated, w.Code)
@@ -307,9 +315,9 @@ func TestRemoveFriend_Success(t *testing.T) {
 	ts := setupTS(t)
 	user1 := ts.CreateTestUser(t, "remover1")
 	user2 := ts.CreateTestUser(t, "removee1")
-	ts.CreateFriendship(t, user1.ID, user2.ID, "accepted")
+	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 
-	w := ts.DoRequest("DELETE", "/api/v1/friends/"+user2.ID, nil, testhelpers.AuthHeaders(user1.AccessToken))
+	w := ts.DoRequest("DELETE", pathFriendsPrefix+user2.ID, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var count int
@@ -326,7 +334,7 @@ func TestRemoveFriend_NotFriends(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "remover2")
 	user2 := ts.CreateTestUser(t, "removee2")
 
-	w := ts.DoRequest("DELETE", "/api/v1/friends/"+user2.ID, nil, testhelpers.AuthHeaders(user1.AccessToken))
+	w := ts.DoRequest("DELETE", pathFriendsPrefix+user2.ID, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusNotFound, w.Code)
 }
 

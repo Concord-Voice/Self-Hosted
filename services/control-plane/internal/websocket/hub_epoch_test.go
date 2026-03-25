@@ -21,6 +21,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+const (
+	msgTypeDM = "dm_message"
+)
+
 // hubTestMigrationsPath resolves the absolute path to the migrations directory
 // using runtime.Caller, matching the pattern in testhelpers/testdb.go.
 func hubTestMigrationsPath() string {
@@ -185,13 +189,13 @@ func TestHandleDMMessageCurrentEpochAccepted(t *testing.T) {
 	setup := setupEpochTest(t, true, true, false)
 
 	msg := IncomingMessage{
-		Type:     "dm_message",
+		Type:     msgTypeDM,
 		UserID:   setup.user1,
 		ClientID: setup.client.ID,
 		Data: map[string]interface{}{
-			"conversation_id": setup.convID,
-			"content":         "hello encrypted",
-			"is_encrypted":    true,
+			keyConversationID: setup.convID,
+			keyContent:         "hello encrypted",
+			keyIsEncrypted:    true,
 			"key_version":     float64(1),
 		},
 	}
@@ -206,13 +210,13 @@ func TestHandleDMMessageRevokedEpochRejected(t *testing.T) {
 	setup := setupEpochTest(t, true, true, true)
 
 	msg := IncomingMessage{
-		Type:     "dm_message",
+		Type:     msgTypeDM,
 		UserID:   setup.user1,
 		ClientID: setup.client.ID,
 		Data: map[string]interface{}{
-			"conversation_id": setup.convID,
-			"content":         "hello with revoked key",
-			"is_encrypted":    true,
+			keyConversationID: setup.convID,
+			keyContent:         "hello with revoked key",
+			keyIsEncrypted:    true,
 			"key_version":     float64(1),
 		},
 	}
@@ -230,13 +234,13 @@ func TestHandleDMMessageEncryptedConvPlaintextRejected(t *testing.T) {
 	setup := setupEpochTest(t, true, true, false)
 
 	msg := IncomingMessage{
-		Type:     "dm_message",
+		Type:     msgTypeDM,
 		UserID:   setup.user1,
 		ClientID: setup.client.ID,
 		Data: map[string]interface{}{
-			"conversation_id": setup.convID,
-			"content":         "plaintext in encrypted conv",
-			"is_encrypted":    false,
+			keyConversationID: setup.convID,
+			keyContent:         "plaintext in encrypted conv",
+			keyIsEncrypted:    false,
 		},
 	}
 
@@ -258,12 +262,12 @@ func TestHandleDMMessageNotSubscribed(t *testing.T) {
 	require.NoError(t, err)
 
 	msg := IncomingMessage{
-		Type:     "dm_message",
+		Type:     msgTypeDM,
 		UserID:   setup.user1,
 		ClientID: setup.client.ID,
 		Data: map[string]interface{}{
-			"conversation_id": otherConvID,
-			"content":         "should fail",
+			keyConversationID: otherConvID,
+			keyContent:         "should fail",
 		},
 	}
 
@@ -279,13 +283,13 @@ func TestHandleDMMessageUnencryptedConvPlaintextAccepted(t *testing.T) {
 	setup := setupEpochTest(t, false, false, false)
 
 	msg := IncomingMessage{
-		Type:     "dm_message",
+		Type:     msgTypeDM,
 		UserID:   setup.user1,
 		ClientID: setup.client.ID,
 		Data: map[string]interface{}{
-			"conversation_id": setup.convID,
-			"content":         "plaintext in unencrypted conv is fine",
-			"is_encrypted":    false,
+			keyConversationID: setup.convID,
+			keyContent:         "plaintext in unencrypted conv is fine",
+			keyIsEncrypted:    false,
 		},
 	}
 
