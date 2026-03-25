@@ -4,11 +4,22 @@ import (
 	"database/sql"
 	"net/http"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
+)
+
+const (
+	errInvalidServerID       = "Invalid server ID"
+	errInvalidRequestBody    = "Invalid request body"
+	errFailedCheckPerms      = "Failed to check permissions"
+	errInsufficientPerms     = "insufficient permissions"
+	errFailedCreateGroup     = "Failed to create channel group"
+	errFailedUpdateGroup     = "Failed to update channel group"
+	errFailedDeleteGroup     = "Failed to delete channel group"
+	errFailedReorderChannels = "Failed to reorder channels"
 )
 
 // CreateChannelGroupRequest represents a request to create a channel group
@@ -30,7 +41,7 @@ type ReorderChannelsRequest struct {
 // ChannelPosition specifies a channel's group and position
 type ChannelPosition struct {
 	ChannelID string  `json:"channel_id" binding:"required,uuid"`
-	GroupID   *string `json:"group_id"`  // nil = uncategorized
+	GroupID   *string `json:"group_id"` // nil = uncategorized
 	Position  int     `json:"position"`
 }
 
@@ -40,7 +51,7 @@ func (h *Handler) ListChannelGroups(c *gin.Context) {
 	serverID := c.Param("id")
 
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errInvalidServerID})
 		return
 	}
 
@@ -93,25 +104,25 @@ func (h *Handler) CreateChannelGroup(c *gin.Context) {
 	serverID := c.Param("id")
 
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errInvalidServerID})
 		return
 	}
 
 	var req CreateChannelGroupRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errInvalidRequestBody})
 		return
 	}
 
 	// Check permission to manage channels
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageChannels)
 	if err != nil {
-		h.log.Error("Failed to check permissions", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create channel group"})
+		h.log.Error(errFailedCheckPerms, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedCreateGroup})
 		return
 	}
 	if !hasPerm {
-		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errInsufficientPerms})
 		return
 	}
 
@@ -131,8 +142,8 @@ func (h *Handler) CreateChannelGroup(c *gin.Context) {
 		groupID, serverID, req.Name, maxPos+1,
 	).Scan(&group.ID, &group.ServerID, &group.Name, &group.Position, &group.CreatedAt, &group.UpdatedAt)
 	if err != nil {
-		h.log.Error("Failed to create channel group", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create channel group"})
+		h.log.Error(errFailedCreateGroup, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedCreateGroup})
 		return
 	}
 
@@ -171,7 +182,7 @@ func (h *Handler) UpdateChannelGroup(c *gin.Context) {
 
 	var req UpdateChannelGroupRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errInvalidRequestBody})
 		return
 	}
 
@@ -183,18 +194,18 @@ func (h *Handler) UpdateChannelGroup(c *gin.Context) {
 		return
 	} else if err != nil {
 		h.log.Error("Failed to fetch group", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update channel group"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedUpdateGroup})
 		return
 	}
 
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageChannels)
 	if err != nil {
-		h.log.Error("Failed to check permissions", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update channel group"})
+		h.log.Error(errFailedCheckPerms, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedUpdateGroup})
 		return
 	}
 	if !hasPerm {
-		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errInsufficientPerms})
 		return
 	}
 
@@ -210,8 +221,8 @@ func (h *Handler) UpdateChannelGroup(c *gin.Context) {
 		req.Name, req.Position, groupID,
 	).Scan(&group.ID, &group.ServerID, &group.Name, &group.Position, &group.CreatedAt, &group.UpdatedAt)
 	if err != nil {
-		h.log.Error("Failed to update channel group", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update channel group"})
+		h.log.Error(errFailedUpdateGroup, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedUpdateGroup})
 		return
 	}
 
@@ -255,26 +266,26 @@ func (h *Handler) DeleteChannelGroup(c *gin.Context) {
 		return
 	} else if err != nil {
 		h.log.Error("Failed to fetch group", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete channel group"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedDeleteGroup})
 		return
 	}
 
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageChannels)
 	if err != nil {
-		h.log.Error("Failed to check permissions", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete channel group"})
+		h.log.Error(errFailedCheckPerms, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedDeleteGroup})
 		return
 	}
 	if !hasPerm {
-		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errInsufficientPerms})
 		return
 	}
 
 	// Delete group (channels get group_id = NULL via ON DELETE SET NULL)
 	_, err = h.db.Exec(`DELETE FROM channel_groups WHERE id = $1`, groupID)
 	if err != nil {
-		h.log.Error("Failed to delete channel group", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to delete channel group"})
+		h.log.Error(errFailedDeleteGroup, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedDeleteGroup})
 		return
 	}
 
@@ -302,31 +313,31 @@ func (h *Handler) ReorderChannels(c *gin.Context) {
 	serverID := c.Param("id")
 
 	if _, err := uuid.Parse(serverID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errInvalidServerID})
 		return
 	}
 
 	var req ReorderChannelsRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errInvalidRequestBody})
 		return
 	}
 
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageChannels)
 	if err != nil {
-		h.log.Error("Failed to check permissions", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reorder channels"})
+		h.log.Error(errFailedCheckPerms, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedReorderChannels})
 		return
 	}
 	if !hasPerm {
-		c.JSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errInsufficientPerms})
 		return
 	}
 
 	tx, err := h.db.Begin()
 	if err != nil {
 		h.log.Error("Failed to start transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reorder channels"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedReorderChannels})
 		return
 	}
 	defer func() {
@@ -343,14 +354,14 @@ func (h *Handler) ReorderChannels(c *gin.Context) {
 		)
 		if err != nil {
 			h.log.Error("Failed to update channel position", "error", err, "channel_id", cp.ChannelID)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reorder channels"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedReorderChannels})
 			return
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit reorder", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to reorder channels"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedReorderChannels})
 		return
 	}
 
@@ -370,4 +381,3 @@ func (h *Handler) ReorderChannels(c *gin.Context) {
 
 	c.JSON(http.StatusOK, gin.H{"message": "Channels reordered"})
 }
-

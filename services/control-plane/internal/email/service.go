@@ -34,13 +34,14 @@ const (
 // Service sends emails via SMTP. When SMTPHost is empty (dev mode), codes are
 // logged to stdout instead of sent.
 type Service struct {
-	host     string
-	port     int
-	username string
-	password string // #nosec G101 -- struct field name, not a secret
-	from     string
-	log      *logger.Logger
-	devMode  bool
+	host      string
+	port      int
+	username  string
+	password  string // #nosec G101 -- struct field name, not a secret
+	from      string
+	log       *logger.Logger
+	devMode   bool
+	tlsConfig *tls.Config // nil = default (verify against system CAs); set in tests only
 }
 
 // NewService creates an email service from the application config.
@@ -109,7 +110,10 @@ func (s *Service) sendMail(from, to, msg string) error {
 	addr := net.JoinHostPort(s.host, fmt.Sprintf("%d", s.port))
 
 	auth := smtp.PlainAuth("", s.username, s.password, s.host)
-	tlsCfg := &tls.Config{ServerName: s.host} // #nosec G402 -- using server name verification
+	tlsCfg := s.tlsConfig
+	if tlsCfg == nil {
+		tlsCfg = &tls.Config{ServerName: s.host} // #nosec G402 -- using server name verification
+	}
 
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)
 	if err != nil {

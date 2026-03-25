@@ -6,8 +6,8 @@ import (
 	"crypto/subtle"
 	"database/sql"
 	"encoding/base64"
-	"errors"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math/big"
 	"net/http"
@@ -22,6 +22,30 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/email"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/redis/go-redis/v9"
+)
+
+// Duplicated string literals extracted for SonarQube S1192 compliance.
+const (
+	// Redis key patterns
+	redisKeyMFAChallengeRememberMe = "mfa_challenge:%s:remember_me"
+	redisKeyEmailSmsEnabled        = "mfa_emailsms_enabled:%s:%s"
+	redisKeyEmailSmsEnabledEmail   = "mfa_emailsms_enabled:%s:email"
+	redisKeyEmailSmsSetup          = "mfa_emailsms_setup:%s:%s"
+	redisKeyWebAuthnReg            = "webauthn_reg:%s"
+
+	// Error messages
+	errMsgPasswordRequired       = "Password is required"
+	errMsgIncorrectPassword      = "Incorrect password"
+	errMsgCodeRequired           = "Code is required"
+	errMsgFailedBackupCodes      = "Failed to generate backup codes"
+	errMsgFailedStartReg         = "Failed to start registration"
+	errMsgInvalidSessionData     = "Invalid session data"
+	errMsgFailedListDevices      = "Failed to list trusted devices"
+	errMsgFailedListRecoveryReqs = "Failed to list recovery requests"
+	errMsgFailedLoadCircle       = "Failed to load recovery circle"
+	errMsgFailedConfigCircle     = "Failed to configure recovery circle"
+	errMsgFailedListSocialReqs   = "Failed to list social recovery requests"
+	errMsgFailedSubmitResponse   = "Failed to submit response"
 )
 
 // LoginCompleter completes the login flow after MFA verification.
@@ -181,7 +205,7 @@ func (h *Handler) GenerateLoginChallenge(ctx context.Context, userID string, rem
 	if rememberMe {
 		rememberVal = "1"
 	}
-	key := fmt.Sprintf("mfa_challenge:%s:remember_me", jti)
+	key := fmt.Sprintf(redisKeyMFAChallengeRememberMe, jti)
 	h.redis.Set(ctx, key, rememberVal, challengeTTL)
 
 	return token, jti, nil
@@ -199,7 +223,7 @@ func (h *Handler) GenerateUpgradeChallenge(ctx context.Context, userID string, r
 	if rememberMe {
 		rememberVal = "1"
 	}
-	key := fmt.Sprintf("mfa_challenge:%s:remember_me", jti)
+	key := fmt.Sprintf(redisKeyMFAChallengeRememberMe, jti)
 	h.redis.Set(ctx, key, rememberVal, challengeTTL)
 
 	return token, jti, nil
@@ -272,7 +296,7 @@ func (h *Handler) updateUserMFAFlags(ctx context.Context, userID string) error {
 
 	// Check Email/SMS (dev stub — tracked via Redis flag)
 	for _, m := range []string{"email", "sms"} {
-		if h.redis.Exists(ctx, fmt.Sprintf("mfa_emailsms_enabled:%s:%s", userID, m)).Val() > 0 {
+		if h.redis.Exists(ctx, fmt.Sprintf(redisKeyEmailSmsEnabled, userID, m)).Val() > 0 {
 			methods = append(methods, m)
 		}
 	}
@@ -317,7 +341,7 @@ func (h *Handler) requirePasswordAndMFA(c *gin.Context, userID, password, mfaCod
 		return false
 	}
 	if !match {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Incorrect password"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgIncorrectPassword})
 		return false
 	}
 
@@ -411,7 +435,7 @@ func (h *Handler) GetStatus(c *gin.Context) {
 	}
 
 	// Email/SMS MFA status (stored in Redis)
-	emailEnabled := h.redis.Exists(ctx, fmt.Sprintf("mfa_emailsms_enabled:%s:email", userID)).Val() > 0
+	emailEnabled := h.redis.Exists(ctx, fmt.Sprintf(redisKeyEmailSmsEnabledEmail, userID)).Val() > 0
 	smsEnabled := h.redis.Exists(ctx, fmt.Sprintf("mfa_emailsms_enabled:%s:sms", userID)).Val() > 0
 	result["email_mfa_enabled"] = emailEnabled
 	result["sms_mfa_enabled"] = smsEnabled
@@ -429,7 +453,7 @@ func (h *Handler) TOTPSetup(c *gin.Context) {
 		MFACode  string `json:"mfa_code"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgPasswordRequired})
 		return
 	}
 
@@ -512,7 +536,7 @@ func (h *Handler) TOTPVerifySetup(c *gin.Context) {
 		Code string `json:"code" binding:"required"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Code is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgCodeRequired})
 		return
 	}
 
@@ -564,8 +588,8 @@ func (h *Handler) TOTPVerifySetup(c *gin.Context) {
 	// Code valid — generate backup codes
 	codes, hashes, err := GenerateBackupCodes()
 	if err != nil {
-		h.log.Error("Failed to generate backup codes", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate backup codes"})
+		h.log.Error(errMsgFailedBackupCodes, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBackupCodes})
 		return
 	}
 
@@ -663,7 +687,7 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 	// Verify password
 	match, err := h.verifyUserPassword(ctx, userID, req.Password)
 	if err != nil || !match {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Incorrect password"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgIncorrectPassword})
 		return
 	}
 
@@ -705,7 +729,7 @@ func (h *Handler) RegenerateBackupCodes(c *gin.Context) {
 
 	match, err := h.verifyUserPassword(ctx, userID, req.Password)
 	if err != nil || !match {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Incorrect password"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgIncorrectPassword})
 		return
 	}
 
@@ -730,7 +754,7 @@ func (h *Handler) RegenerateBackupCodes(c *gin.Context) {
 	// Generate new backup codes
 	codes, hashes, err := GenerateBackupCodes()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate backup codes"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBackupCodes})
 		return
 	}
 
@@ -760,7 +784,7 @@ func (h *Handler) WebAuthnRegisterBegin(c *gin.Context) {
 		CredentialType string `json:"credential_type"` // "hardware" or "platform"
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgPasswordRequired})
 		return
 	}
 
@@ -779,7 +803,7 @@ func (h *Handler) WebAuthnRegisterBegin(c *gin.Context) {
 	`, userID).Scan(&totalCount)
 	if err != nil {
 		h.log.Error("Failed to check credential counts", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start registration"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedStartReg})
 		return
 	}
 	if totalCount >= 10 {
@@ -791,7 +815,7 @@ func (h *Handler) WebAuthnRegisterBegin(c *gin.Context) {
 	user, err := h.buildWebAuthnUser(ctx, userID)
 	if err != nil {
 		h.log.Error("Failed to build WebAuthn user", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start registration"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedStartReg})
 		return
 	}
 
@@ -812,7 +836,7 @@ func (h *Handler) WebAuthnRegisterBegin(c *gin.Context) {
 	creation, session, err := h.webauthn.BeginRegistration(user, regOpts...)
 	if err != nil {
 		h.log.Error("WebAuthn BeginRegistration failed", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to start registration"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedStartReg})
 		return
 	}
 
@@ -829,7 +853,7 @@ func (h *Handler) WebAuthnRegisterBegin(c *gin.Context) {
 		"credential_type": credType,
 	}
 	metaJSON, _ := json.Marshal(meta)
-	h.redis.Set(ctx, fmt.Sprintf("webauthn_reg:%s", userID), metaJSON, 5*time.Minute)
+	h.redis.Set(ctx, fmt.Sprintf(redisKeyWebAuthnReg, userID), metaJSON, 5*time.Minute)
 
 	c.JSON(http.StatusOK, creation)
 }
@@ -840,12 +864,12 @@ func (h *Handler) WebAuthnRegisterFinish(c *gin.Context) {
 	ctx := c.Request.Context()
 
 	// Retrieve session data from Redis
-	metaJSON, err := h.redis.Get(ctx, fmt.Sprintf("webauthn_reg:%s", userID)).Bytes()
+	metaJSON, err := h.redis.Get(ctx, fmt.Sprintf(redisKeyWebAuthnReg, userID)).Bytes()
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "No registration in progress or session expired"})
 		return
 	}
-	h.redis.Del(ctx, fmt.Sprintf("webauthn_reg:%s", userID))
+	h.redis.Del(ctx, fmt.Sprintf(redisKeyWebAuthnReg, userID))
 
 	var meta struct {
 		Session        string `json:"session"`
@@ -853,13 +877,13 @@ func (h *Handler) WebAuthnRegisterFinish(c *gin.Context) {
 		CredentialType string `json:"credential_type"`
 	}
 	if err := json.Unmarshal(metaJSON, &meta); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid session data"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInvalidSessionData})
 		return
 	}
 
 	var session webauthn.SessionData
 	if err := json.Unmarshal([]byte(meta.Session), &session); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid session data"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInvalidSessionData})
 		return
 	}
 
@@ -959,13 +983,13 @@ func (h *Handler) WebAuthnDeleteCredential(c *gin.Context) {
 		Password string `json:"password" binding:"required"` //nolint:gosec // request field, not a secret
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgPasswordRequired})
 		return
 	}
 
 	match, err := h.verifyUserPassword(ctx, userID, req.Password)
 	if err != nil || !match {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Incorrect password"})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgIncorrectPassword})
 		return
 	}
 
@@ -1101,7 +1125,7 @@ func (h *Handler) verifyByMethod(ctx context.Context, c *gin.Context, req verify
 // verifyTOTPOrBackup verifies a TOTP or backup code.
 func (h *Handler) verifyTOTPOrBackup(ctx context.Context, c *gin.Context, code, userID string) (bool, bool) {
 	if code == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Code is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgCodeRequired})
 		return false, true
 	}
 	valid, err := h.VerifyCode(ctx, userID, code)
@@ -1156,7 +1180,7 @@ func (h *Handler) verifyWebAuthnChallenge(ctx context.Context, c *gin.Context, a
 // verifyEmailCode verifies a 6-digit email MFA code.
 func (h *Handler) verifyEmailCode(ctx context.Context, c *gin.Context, rawCode string, claims *ChallengeClaims) (bool, bool) {
 	if rawCode == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Code is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgCodeRequired})
 		return false, true
 	}
 	code := strings.TrimSpace(rawCode)
@@ -1210,7 +1234,7 @@ func (h *Handler) completeVerifyPurpose(ctx context.Context, c *gin.Context, cla
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Login completion not configured"})
 			return
 		}
-		rememberKey := fmt.Sprintf("mfa_challenge:%s:remember_me", claims.ID)
+		rememberKey := fmt.Sprintf(redisKeyMFAChallengeRememberMe, claims.ID)
 		rememberMe := h.redis.Get(ctx, rememberKey).Val() == "1"
 		h.redis.Del(ctx, rememberKey)
 		h.loginCompleter.CompleteLogin(c, claims.UserID, rememberMe)
@@ -1262,7 +1286,7 @@ func (h *Handler) SendEmailMFACode(c *gin.Context) {
 	}
 
 	// Verify user has email MFA enabled
-	enabledKey := fmt.Sprintf("mfa_emailsms_enabled:%s:email", claims.UserID)
+	enabledKey := fmt.Sprintf(redisKeyEmailSmsEnabledEmail, claims.UserID)
 	if h.redis.Exists(ctx, enabledKey).Val() == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Email MFA is not enabled for this account"})
 		return
@@ -1365,7 +1389,7 @@ func (h *Handler) WebAuthnVerifyInlineFinish(c *gin.Context) {
 
 	var session webauthn.SessionData
 	if err := json.Unmarshal(sessionJSON, &session); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Invalid session data"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInvalidSessionData})
 		return
 	}
 
@@ -1468,7 +1492,7 @@ func (h *Handler) SetRecoveryOnly(c *gin.Context) {
 		MFACode  string   `json:"mfa_code"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgPasswordRequired})
 		return
 	}
 
@@ -1567,7 +1591,7 @@ func (h *Handler) SetRecoveryHardened(c *gin.Context) {
 		MFACode  string `json:"mfa_code"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgPasswordRequired})
 		return
 	}
 
@@ -1661,7 +1685,7 @@ func (h *Handler) EmailSmsSetup(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate code"})
 			return
 		}
-		key := fmt.Sprintf("mfa_emailsms_setup:%s:%s", userID, method)
+		key := fmt.Sprintf(redisKeyEmailSmsSetup, userID, method)
 		h.redis.Set(ctx, key, code, 10*time.Minute)
 		codes[method] = code
 	}
@@ -1739,7 +1763,7 @@ func (h *Handler) EmailSmsVerify(c *gin.Context) {
 			return
 		}
 
-		key := fmt.Sprintf("mfa_emailsms_setup:%s:%s", userID, method)
+		key := fmt.Sprintf(redisKeyEmailSmsSetup, userID, method)
 		stored, err := h.redis.Get(ctx, key).Result()
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("No pending %s code. Request a new one.", method)})
@@ -1756,8 +1780,8 @@ func (h *Handler) EmailSmsVerify(c *gin.Context) {
 
 	// Mark methods as enabled in Redis (persistent flag — no expiry)
 	for _, method := range verified {
-		h.redis.Set(ctx, fmt.Sprintf("mfa_emailsms_enabled:%s:%s", userID, method), "1", 0)
-		h.redis.Del(ctx, fmt.Sprintf("mfa_emailsms_setup:%s:%s", userID, method))
+		h.redis.Set(ctx, fmt.Sprintf(redisKeyEmailSmsEnabled, userID, method), "1", 0)
+		h.redis.Del(ctx, fmt.Sprintf(redisKeyEmailSmsSetup, userID, method))
 	}
 
 	// Update denormalized flags
@@ -1779,8 +1803,8 @@ func (h *Handler) EmailSmsDisable(c *gin.Context) {
 
 	// Remove enabled flags
 	for _, m := range []string{"email", "sms"} {
-		h.redis.Del(ctx, fmt.Sprintf("mfa_emailsms_enabled:%s:%s", userID, m))
-		h.redis.Del(ctx, fmt.Sprintf("mfa_emailsms_setup:%s:%s", userID, m))
+		h.redis.Del(ctx, fmt.Sprintf(redisKeyEmailSmsEnabled, userID, m))
+		h.redis.Del(ctx, fmt.Sprintf(redisKeyEmailSmsSetup, userID, m))
 	}
 
 	// Also clear from recovery-only if present
@@ -1801,7 +1825,7 @@ func (h *Handler) EmailSmsStatus(c *gin.Context) {
 	userID := c.GetString("user_id")
 	ctx := c.Request.Context()
 
-	emailEnabled := h.redis.Exists(ctx, fmt.Sprintf("mfa_emailsms_enabled:%s:email", userID)).Val() > 0
+	emailEnabled := h.redis.Exists(ctx, fmt.Sprintf(redisKeyEmailSmsEnabledEmail, userID)).Val() > 0
 	smsEnabled := h.redis.Exists(ctx, fmt.Sprintf("mfa_emailsms_enabled:%s:sms", userID)).Val() > 0
 
 	c.JSON(http.StatusOK, gin.H{
@@ -1901,9 +1925,9 @@ func (h *Handler) StoreRecoveryKey(c *gin.Context) {
 
 	var req struct {
 		RecoveryWrappedPrivateKey string `json:"recovery_wrapped_private_key" binding:"required"`
-		RecoveryKeySalt          string `json:"recovery_key_salt" binding:"required"`
-		RecoveryWrappedPrefsKey  string `json:"recovery_wrapped_prefs_key"`
-		RecoveryPrefsKeySalt     string `json:"recovery_prefs_key_salt"`
+		RecoveryKeySalt           string `json:"recovery_key_salt" binding:"required"`
+		RecoveryWrappedPrefsKey   string `json:"recovery_wrapped_prefs_key"`
+		RecoveryPrefsKeySalt      string `json:"recovery_prefs_key_salt"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "recovery_wrapped_private_key and recovery_key_salt are required"})
@@ -2002,7 +2026,7 @@ func (h *Handler) DeleteRecoveryKey(c *gin.Context) {
 		MFACode  string `json:"mfa_code"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgPasswordRequired})
 		return
 	}
 
@@ -2035,8 +2059,8 @@ func (h *Handler) ListTrustedDevices(c *gin.Context) {
 		 ORDER BY designated_at DESC`, userID,
 	)
 	if err != nil {
-		h.log.Error("Failed to list trusted devices", "error", err, "user_id", userID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list trusted devices"})
+		h.log.Error(errMsgFailedListDevices, "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedListDevices})
 		return
 	}
 	defer func() { _ = rows.Close() }()
@@ -2061,12 +2085,12 @@ func (h *Handler) ListTrustedDevices(c *gin.Context) {
 		devices = append(devices, d)
 	}
 	if scanErr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list trusted devices"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedListDevices})
 		return
 	}
 	if err := rows.Err(); err != nil {
 		h.log.Error("Error iterating trusted devices", "error", err, "user_id", userID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list trusted devices"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedListDevices})
 		return
 	}
 
@@ -2132,7 +2156,7 @@ func (h *Handler) RemoveTrustedDevice(c *gin.Context) {
 		MFACode  string `json:"mfa_code"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Password is required"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgPasswordRequired})
 		return
 	}
 
@@ -2170,8 +2194,8 @@ func (h *Handler) ListRecoveryRequests(c *gin.Context) {
 		ORDER BY created_at DESC
 	`, userID)
 	if err != nil {
-		h.log.Error("Failed to list recovery requests", "error", err, "user_id", userID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list recovery requests"})
+		h.log.Error(errMsgFailedListRecoveryReqs, "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedListRecoveryReqs})
 		return
 	}
 	defer func() { _ = rows.Close() }()
@@ -2198,12 +2222,12 @@ func (h *Handler) ListRecoveryRequests(c *gin.Context) {
 		requests = append(requests, r)
 	}
 	if scanErr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list recovery requests"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedListRecoveryReqs})
 		return
 	}
 	if err := rows.Err(); err != nil {
 		h.log.Error("Error iterating recovery requests", "error", err, "user_id", userID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list recovery requests"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedListRecoveryReqs})
 		return
 	}
 
@@ -2319,7 +2343,7 @@ func (h *Handler) GetRecoveryCircle(c *gin.Context) {
 			return
 		}
 		h.log.Error("Failed to query recovery circle", "error", err, "user_id", userID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load recovery circle"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedLoadCircle})
 		return
 	}
 
@@ -2332,7 +2356,7 @@ func (h *Handler) GetRecoveryCircle(c *gin.Context) {
 	`, circleID, shareVersion)
 	if err != nil {
 		h.log.Error("Failed to query recovery circle contacts", "error", err, "user_id", userID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load recovery circle"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedLoadCircle})
 		return
 	}
 	defer func() { _ = rows.Close() }()
@@ -2358,17 +2382,17 @@ func (h *Handler) GetRecoveryCircle(c *gin.Context) {
 	}
 	if err := rows.Err(); err != nil {
 		h.log.Error("Error iterating recovery circle contacts", "error", err, "user_id", userID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load recovery circle"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedLoadCircle})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"has_circle":    true,
-		"threshold_k":   thresholdK,
+		"has_circle":     true,
+		"threshold_k":    thresholdK,
 		"total_shares_n": totalSharesN,
-		"share_version": shareVersion,
-		"created_at":    createdAt,
-		"contacts":      contacts,
+		"share_version":  shareVersion,
+		"created_at":     createdAt,
+		"contacts":       contacts,
 	})
 }
 
@@ -2383,11 +2407,11 @@ func (h *Handler) UpsertRecoveryCircle(c *gin.Context) {
 	}
 
 	var req struct {
-		Password    string       `json:"password" binding:"required"`
-		MFACode     string       `json:"mfa_code"`
-		ThresholdK  int          `json:"threshold_k" binding:"required"`
-		TotalSharesN int         `json:"total_shares_n" binding:"required"`
-		Shares      []shareEntry `json:"shares" binding:"required"`
+		Password     string       `json:"password" binding:"required"`
+		MFACode      string       `json:"mfa_code"`
+		ThresholdK   int          `json:"threshold_k" binding:"required"`
+		TotalSharesN int          `json:"total_shares_n" binding:"required"`
+		Shares       []shareEntry `json:"shares" binding:"required"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -2481,7 +2505,7 @@ func (h *Handler) UpsertRecoveryCircle(c *gin.Context) {
 	tx, err := h.db.BeginTx(ctx, nil)
 	if err != nil {
 		h.log.Error("Failed to begin transaction for recovery circle", "error", err, "user_id", userID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to configure recovery circle"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedConfigCircle})
 		return
 	}
 	defer func() {
@@ -2505,7 +2529,7 @@ func (h *Handler) UpsertRecoveryCircle(c *gin.Context) {
 	`, userID, req.ThresholdK, req.TotalSharesN).Scan(&circleID, &shareVersion)
 	if err != nil {
 		h.log.Error("Failed to upsert recovery circle", "error", err, "user_id", userID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to configure recovery circle"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedConfigCircle})
 		return
 	}
 
@@ -2515,7 +2539,7 @@ func (h *Handler) UpsertRecoveryCircle(c *gin.Context) {
 	`, circleID, shareVersion)
 	if err != nil {
 		h.log.Error("Failed to delete old shares", "error", err, "circle_id", circleID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to configure recovery circle"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedConfigCircle})
 		return
 	}
 
@@ -2527,7 +2551,7 @@ func (h *Handler) UpsertRecoveryCircle(c *gin.Context) {
 		`, circleID, s.ContactID, s.ShareIndex, s.EncryptedShare, shareVersion)
 		if err != nil {
 			h.log.Error("Failed to insert recovery share", "error", err, "circle_id", circleID, "contact_id", s.ContactID)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to configure recovery circle"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedConfigCircle})
 			return
 		}
 	}
@@ -2535,7 +2559,7 @@ func (h *Handler) UpsertRecoveryCircle(c *gin.Context) {
 	// COMMIT
 	if err = tx.Commit(); err != nil {
 		h.log.Error("Failed to commit recovery circle transaction", "error", err, "user_id", userID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to configure recovery circle"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedConfigCircle})
 		return
 	}
 
@@ -2644,8 +2668,8 @@ func (h *Handler) ListSocialRecoveryRequests(c *gin.Context) {
 		WHERE cs.contact_id = $1 AND rr.status = 'pending' AND rr.expires_at > NOW()
 	`, userID)
 	if err != nil {
-		h.log.Error("Failed to list social recovery requests", "error", err, "user_id", userID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list social recovery requests"})
+		h.log.Error(errMsgFailedListSocialReqs, "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedListSocialReqs})
 		return
 	}
 	defer func() { _ = rows.Close() }()
@@ -2678,12 +2702,12 @@ func (h *Handler) ListSocialRecoveryRequests(c *gin.Context) {
 		requests = append(requests, r)
 	}
 	if scanErr != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list social recovery requests"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedListSocialReqs})
 		return
 	}
 	if err := rows.Err(); err != nil {
 		h.log.Error("Error iterating social recovery requests", "error", err, "user_id", userID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list social recovery requests"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedListSocialReqs})
 		return
 	}
 
@@ -2744,7 +2768,7 @@ func (h *Handler) RespondToSocialRecovery(c *gin.Context) {
 	tx, err := h.db.BeginTx(ctx, nil)
 	if err != nil {
 		h.log.Error("Failed to begin transaction for social recovery response", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to submit response"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSubmitResponse})
 		return
 	}
 	defer func() {
@@ -2761,7 +2785,7 @@ func (h *Handler) RespondToSocialRecovery(c *gin.Context) {
 	`, requestID, userID, encShare)
 	if err != nil {
 		h.log.Error("Failed to insert social recovery response", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to submit response"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSubmitResponse})
 		return
 	}
 	rowsAffected, _ := res.RowsAffected()
@@ -2780,7 +2804,7 @@ func (h *Handler) RespondToSocialRecovery(c *gin.Context) {
 	`, requestID).Scan(&sharesReceived)
 	if err != nil {
 		h.log.Error("Failed to update shares_received", "error", err, "request_id", requestID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to submit response"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSubmitResponse})
 		return
 	}
 
@@ -2791,7 +2815,7 @@ func (h *Handler) RespondToSocialRecovery(c *gin.Context) {
 		`, requestID)
 		if err != nil {
 			h.log.Error("Failed to mark social recovery request as complete", "error", err, "request_id", requestID)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to submit response"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSubmitResponse})
 			return
 		}
 	}
@@ -2799,7 +2823,7 @@ func (h *Handler) RespondToSocialRecovery(c *gin.Context) {
 	// COMMIT
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit social recovery response transaction", "error", err, "request_id", requestID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to submit response"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSubmitResponse})
 		return
 	}
 

@@ -3,6 +3,7 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"database/sql"
@@ -12,18 +13,17 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	"crypto/rand"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/email"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -66,23 +66,35 @@ const (
 	// maxUserAgentLength limits User-Agent storage to reduce metadata footprint.
 	maxUserAgentLength = 256
 
-	errMsgInvalidRequestBody      = "Invalid request body"
-	errMsgFailedStartTransaction  = "Failed to start transaction"
-	errMsgFailedRollbackTx        = "Failed to rollback transaction"
-	errMsgFailedCreateAccount     = "Failed to create account"
-	errMsgLoginFailed             = "Login failed"
-	errMsgInvalidCredentials      = "Invalid credentials" //nolint:gosec // G101 false positive: error message text, not a credential
-	errMsgInvalidRefreshToken     = "Invalid refresh token" //nolint:gosec // G101 false positive: error message text, not a credential
+	errMsgInvalidRequestBody     = "Invalid request body"
+	errMsgFailedStartTransaction = "Failed to start transaction"
+	errMsgFailedRollbackTx       = "Failed to rollback transaction"
+	errMsgFailedCreateAccount    = "Failed to create account"
+	errMsgLoginFailed            = "Login failed"
+	errMsgInvalidCredentials     = "Invalid credentials"   //nolint:gosec // G101 false positive: error message text, not a credential
+	errMsgInvalidRefreshToken    = "Invalid refresh token" //nolint:gosec // G101 false positive: error message text, not a credential
 
 	errFailedCommitTransaction     = "Failed to commit transaction"
 	errInvalidExpiredRecoveryCode  = "Invalid or expired recovery code"
 	errRecoveryVerificationFailed  = "Recovery verification failed"
 	errRecoveryNotConfigured       = "Recovery not configured"
 	errInvalidExpiredRecoveryToken = "Invalid or expired recovery token" //nolint:gosec // G101 false positive: error message, not a credential
-	errFailedResetPwd         = "Failed to reset password" //nolint:gosec // G101 false positive: error message, not a credential
+	errFailedResetPwd              = "Failed to reset password"          //nolint:gosec // G101 false positive: error message, not a credential
 	errFailedResetAccount          = "Failed to reset account"
 	errFailedCreateRecoveryRequest = "Failed to create recovery request"
 	bearerPrefix                   = "Bearer "
+
+	// HTTP header names
+	headerMachineID = "X-Machine-Id"
+	headerUserAgent = "User-Agent"
+
+	// Additional error messages
+	errMsgRefreshFailed      = "Refresh failed"
+	errMsgFailedAccessToken  = "Failed to generate access token"
+	errMsgFailedRefreshToken = "Failed to generate refresh token"
+
+	// Redis key patterns
+	redisKeyLoginLockout = "login_lockout:%s"
 )
 
 // truncateUserAgent limits the User-Agent string to maxUserAgentLength.
@@ -110,12 +122,12 @@ func setRefreshCookie(c *gin.Context, value string, maxAge int) {
 
 // Handler handles authentication-related requests including registration and login.
 type Handler struct {
-	db         *sql.DB
-	redis      *redis.Client
-	log        *logger.Logger
-	jwtSecret  string
-	hub        SessionDisconnector
-	mfaChecker MFAChecker
+	db            *sql.DB
+	redis         *redis.Client
+	log           *logger.Logger
+	jwtSecret     string
+	hub           SessionDisconnector
+	mfaChecker    MFAChecker
 	emailSvc      *email.Service
 	verifyHandler *VerificationHandler
 }
@@ -148,15 +160,15 @@ func (h *Handler) SetMFAChecker(checker MFAChecker) {
 
 // RegisterRequest represents registration payload
 type RegisterRequest struct {
-	Email                string `json:"email" binding:"required,email"`
-	Username             string `json:"username" binding:"required,min=3,max=50"`
-	Password             string `json:"password" binding:"required"`             // #nosec G117 -- False positive: request field, not stored secret
-	AgeConfirmation      bool   `json:"age_confirmation" binding:"required"`
-	PublicKey            string `json:"public_key" binding:"required"`           // base64 encoded SPKI
-	WrappedPrivateKey    string `json:"wrapped_private_key" binding:"required"` // base64 encoded
-	KeyDerivationSalt    string `json:"key_derivation_salt" binding:"required"` // base64 encoded
-	KeyDerivationAlg     string `json:"key_derivation_alg"`                     // "pbkdf2" or "argon2id"; defaults to "argon2id"
-	E2EEPreference       bool   `json:"e2ee_preference"`
+	Email             string `json:"email" binding:"required,email"`
+	Username          string `json:"username" binding:"required,min=3,max=50"`
+	Password          string `json:"password" binding:"required"` // #nosec G117 -- False positive: request field, not stored secret
+	AgeConfirmation   bool   `json:"age_confirmation" binding:"required"`
+	PublicKey         string `json:"public_key" binding:"required"`          // base64 encoded SPKI
+	WrappedPrivateKey string `json:"wrapped_private_key" binding:"required"` // base64 encoded
+	KeyDerivationSalt string `json:"key_derivation_salt" binding:"required"` // base64 encoded
+	KeyDerivationAlg  string `json:"key_derivation_alg"`                     // "pbkdf2" or "argon2id"; defaults to "argon2id"
+	E2EEPreference    bool   `json:"e2ee_preference"`
 }
 
 // LoginRequest represents login payload
@@ -308,7 +320,7 @@ func (h *Handler) Register(c *gin.Context) {
 	// Generate access token (JWT, 15 min) — email NOT yet verified for new registrations
 	accessToken, err := GenerateAccessToken(userID, h.jwtSecret, false)
 	if err != nil {
-		h.log.Error("Failed to generate access token", "error", err)
+		h.log.Error(errMsgFailedAccessToken, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
 		return
 	}
@@ -316,7 +328,7 @@ func (h *Handler) Register(c *gin.Context) {
 	// Generate refresh token (random, 30 days)
 	refreshToken, err := GenerateRefreshToken()
 	if err != nil {
-		h.log.Error("Failed to generate refresh token", "error", err)
+		h.log.Error(errMsgFailedRefreshToken, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
 		return
 	}
@@ -325,7 +337,7 @@ func (h *Handler) Register(c *gin.Context) {
 	tokenHash := HashRefreshToken(refreshToken)
 	tokenID := uuid.New().String()
 	expiresAt := time.Now().Add(30 * 24 * time.Hour) // 30 days
-	machineID := c.GetHeader("X-Machine-Id")
+	machineID := c.GetHeader(headerMachineID)
 
 	_, err = h.db.Exec(
 		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, remember_me, machine_id)
@@ -335,7 +347,7 @@ func (h *Handler) Register(c *gin.Context) {
 		tokenHash,
 		c.GetHeader("X-Device-Name"),
 		c.ClientIP(),
-		truncateUserAgent(c.GetHeader("User-Agent")),
+		truncateUserAgent(c.GetHeader(headerUserAgent)),
 		expiresAt,
 		true, // Registration always defaults to remember_me=true
 		nilIfEmpty(machineID),
@@ -390,7 +402,7 @@ var loginLockoutDurations = []time.Duration{15 * time.Minute, 30 * time.Minute, 
 
 // checkLoginLockout returns true if the account is currently locked out.
 func (h *Handler) checkLoginLockout(ctx context.Context, email string) bool {
-	key := fmt.Sprintf("login_lockout:%s", email)
+	key := fmt.Sprintf(redisKeyLoginLockout, email)
 	if _, err := h.redis.Get(ctx, key).Result(); err == nil {
 		return true // lockout key exists
 	}
@@ -400,7 +412,7 @@ func (h *Handler) checkLoginLockout(ctx context.Context, email string) bool {
 // recordFailedLogin increments the failure counter and applies lockout if threshold is reached.
 func (h *Handler) recordFailedLogin(ctx context.Context, email string) {
 	attemptsKey := fmt.Sprintf("login_attempts:%s", email)
-	lockoutKey := fmt.Sprintf("login_lockout:%s", email)
+	lockoutKey := fmt.Sprintf(redisKeyLoginLockout, email)
 	lockoutCountKey := fmt.Sprintf("login_lockout_count:%s", email)
 
 	count, _ := h.redis.Incr(ctx, attemptsKey).Result()
@@ -426,7 +438,7 @@ func (h *Handler) recordFailedLogin(ctx context.Context, email string) {
 func (h *Handler) clearLoginAttempts(ctx context.Context, email string) {
 	h.redis.Del(ctx,
 		fmt.Sprintf("login_attempts:%s", email),
-		fmt.Sprintf("login_lockout:%s", email),
+		fmt.Sprintf(redisKeyLoginLockout, email),
 		fmt.Sprintf("login_lockout_count:%s", email),
 	)
 }
@@ -566,7 +578,7 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) 
 	// Generate access token (JWT, 15 min)
 	accessToken, err := GenerateAccessToken(userID, h.jwtSecret, emailVerified)
 	if err != nil {
-		h.log.Error("Failed to generate access token", "error", err)
+		h.log.Error(errMsgFailedAccessToken, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
 		return
 	}
@@ -574,7 +586,7 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) 
 	// Generate refresh token (random, 30 days)
 	refreshToken, err := GenerateRefreshToken()
 	if err != nil {
-		h.log.Error("Failed to generate refresh token", "error", err)
+		h.log.Error(errMsgFailedRefreshToken, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
 		return
 	}
@@ -585,8 +597,8 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) 
 	expiresAt := time.Now().Add(30 * 24 * time.Hour)
 	deviceName := c.GetHeader("X-Device-Name")
 	ipAddress := c.ClientIP()
-	userAgent := truncateUserAgent(c.GetHeader("User-Agent"))
-	machineID := c.GetHeader("X-Machine-Id")
+	userAgent := truncateUserAgent(c.GetHeader(headerUserAgent))
+	machineID := c.GetHeader(headerMachineID)
 
 	h.log.Info("CompleteLogin: storing refresh token",
 		"hash_prefix", tokenHash[:16],
@@ -689,7 +701,7 @@ func (h *Handler) Refresh(c *gin.Context) {
 
 	tokenHash := HashRefreshToken(refreshToken)
 	tokenSuffix := refreshToken[len(refreshToken)-8:]
-	h.log.Info("Refresh attempt", "token_suffix", tokenSuffix, "hash_prefix", tokenHash[:16], "machine_id", c.GetHeader("X-Machine-Id"))
+	h.log.Info("Refresh attempt", "token_suffix", tokenSuffix, "hash_prefix", tokenHash[:16], "machine_id", c.GetHeader(headerMachineID))
 
 	token, err := h.fetchActiveRefreshToken(tokenHash)
 	if err != nil {
@@ -706,7 +718,7 @@ func (h *Handler) Refresh(c *gin.Context) {
 		return
 	}
 
-	requestMachineID := c.GetHeader("X-Machine-Id")
+	requestMachineID := c.GetHeader(headerMachineID)
 	if h.checkMachineIDTheft(c, token, requestMachineID) {
 		return
 	}
@@ -751,7 +763,7 @@ func (h *Handler) fetchActiveRefreshToken(tokenHash string) (models.RefreshToken
 func (h *Handler) handleRefreshTokenNotFound(c *gin.Context, err error, tokenHash, tokenSuffix string) {
 	if err != sql.ErrNoRows {
 		h.log.Error("Failed to fetch refresh token", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgRefreshFailed})
 		return
 	}
 
@@ -781,8 +793,8 @@ func (h *Handler) attemptGracePeriodRecovery(c *gin.Context, tokenHash string) b
 	}
 
 	requestIP := c.ClientIP()
-	requestUA := truncateUserAgent(c.GetHeader("User-Agent"))
-	graceRequestMachineID := c.GetHeader("X-Machine-Id")
+	requestUA := truncateUserAgent(c.GetHeader(headerUserAgent))
+	graceRequestMachineID := c.GetHeader(headerMachineID)
 	storedIP := stripCIDR(revokedIP)
 	machineIDOk := revokedMachineID == "" || graceRequestMachineID == "" || revokedMachineID == graceRequestMachineID
 
@@ -998,8 +1010,8 @@ func (h *Handler) rotateAndRespond(c *gin.Context, token models.RefreshToken, to
 
 	newRefreshToken, err := GenerateRefreshToken()
 	if err != nil {
-		h.log.Error("Failed to generate refresh token", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
+		h.log.Error(errMsgFailedRefreshToken, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgRefreshFailed})
 		return
 	}
 
@@ -1026,7 +1038,7 @@ func (h *Handler) rotateAndRespond(c *gin.Context, token models.RefreshToken, to
 		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, remember_me, machine_id)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
 		newTokenID, token.UserID, newTokenHash, token.DeviceName,
-		c.ClientIP(), truncateUserAgent(c.GetHeader("User-Agent")),
+		c.ClientIP(), truncateUserAgent(c.GetHeader(headerUserAgent)),
 		newExpiry, token.RememberMe, nilIfEmpty(propagatedMachineID),
 	)
 
@@ -1036,7 +1048,7 @@ func (h *Handler) rotateAndRespond(c *gin.Context, token models.RefreshToken, to
 		token.UserID)
 	if err != nil {
 		h.log.Error("Failed to store new refresh token", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgRefreshFailed})
 		return
 	}
 
@@ -1045,14 +1057,14 @@ func (h *Handler) rotateAndRespond(c *gin.Context, token models.RefreshToken, to
 	var refreshEmailVerified bool
 	if err := h.db.QueryRow(`SELECT email_verified FROM users WHERE id = $1`, token.UserID).Scan(&refreshEmailVerified); err != nil {
 		h.log.Error("Failed to look up email_verified for refresh", "error", err, "user_id", token.UserID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgRefreshFailed})
 		return
 	}
 
 	accessToken, err := GenerateAccessToken(token.UserID, h.jwtSecret, refreshEmailVerified)
 	if err != nil {
-		h.log.Error("Failed to generate access token", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
+		h.log.Error(errMsgFailedAccessToken, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgRefreshFailed})
 		return
 	}
 
@@ -1123,7 +1135,7 @@ func (h *Handler) handleGracePeriodRefresh(c *gin.Context, userID string, revoke
 	newRefreshToken, err := GenerateRefreshToken()
 	if err != nil {
 		h.log.Error("Failed to generate refresh token during grace recovery", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgRefreshFailed})
 		return
 	}
 
@@ -1138,7 +1150,7 @@ func (h *Handler) handleGracePeriodRefresh(c *gin.Context, userID string, revoke
 	// Store the new token (propagate machine_id)
 	newTokenHash := HashRefreshToken(newRefreshToken)
 	newTokenID := uuid.New().String()
-	graceMachineID := c.GetHeader("X-Machine-Id")
+	graceMachineID := c.GetHeader(headerMachineID)
 	if graceMachineID == "" {
 		graceMachineID = successor.MachineID
 	}
@@ -1150,14 +1162,14 @@ func (h *Handler) handleGracePeriodRefresh(c *gin.Context, userID string, revoke
 		newTokenHash,
 		successor.DeviceName,
 		c.ClientIP(),
-		truncateUserAgent(c.GetHeader("User-Agent")),
+		truncateUserAgent(c.GetHeader(headerUserAgent)),
 		newExpiry,
 		successor.RememberMe,
 		nilIfEmpty(graceMachineID),
 	)
 	if err != nil {
 		h.log.Error("Failed to store new refresh token during grace recovery", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgRefreshFailed})
 		return
 	}
 
@@ -1168,7 +1180,7 @@ func (h *Handler) handleGracePeriodRefresh(c *gin.Context, userID string, revoke
 	var graceEmailVerified bool
 	if err := h.db.QueryRow(`SELECT email_verified FROM users WHERE id = $1`, userID).Scan(&graceEmailVerified); err != nil {
 		h.log.Error("Failed to look up email_verified for grace recovery", "error", err, "user_id", userID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgRefreshFailed})
 		return
 	}
 
@@ -1176,7 +1188,7 @@ func (h *Handler) handleGracePeriodRefresh(c *gin.Context, userID string, revoke
 	accessToken, err := GenerateAccessToken(userID, h.jwtSecret, graceEmailVerified)
 	if err != nil {
 		h.log.Error("Failed to generate access token during grace recovery", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Refresh failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgRefreshFailed})
 		return
 	}
 
@@ -1284,9 +1296,9 @@ func (h *Handler) Logout(c *gin.Context) {
 // ── Account Recovery Endpoints ──────────────────────────────────────────────
 
 const (
-	recoveryCodeTTL       = 10 * time.Minute // Recovery code expires after 10 minutes
-	recoveryMaxAttempts   = 5                // Max wrong-code attempts before invalidating
-	recoveryTokenUsedTTL  = 25 * time.Hour   // Must match or exceed mfa.recoveryTTL
+	recoveryCodeTTL      = 10 * time.Minute // Recovery code expires after 10 minutes
+	recoveryMaxAttempts  = 5                // Max wrong-code attempts before invalidating
+	recoveryTokenUsedTTL = 25 * time.Hour   // Must match or exceed mfa.recoveryTTL
 )
 
 // recoveryRecord is stored in Redis keyed by "recovery_code:{email}".
@@ -1536,15 +1548,15 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 // RecoveryResetPassword resets the user's password using a recovery token and re-wrapped keys.
 func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 	var req struct {
-		RecoveryToken            string `json:"recovery_token" binding:"required"`
-		NewPassword              string `json:"new_password" binding:"required"`
-		WrappedPrivateKey        string `json:"wrapped_private_key" binding:"required"`
-		KeyDerivationSalt        string `json:"key_derivation_salt" binding:"required"`
-		KeyDerivationAlg         string `json:"key_derivation_alg" binding:"required"`
+		RecoveryToken             string `json:"recovery_token" binding:"required"`
+		NewPassword               string `json:"new_password" binding:"required"`
+		WrappedPrivateKey         string `json:"wrapped_private_key" binding:"required"`
+		KeyDerivationSalt         string `json:"key_derivation_salt" binding:"required"`
+		KeyDerivationAlg          string `json:"key_derivation_alg" binding:"required"`
 		RecoveryWrappedPrivateKey string `json:"recovery_wrapped_private_key"`
-		RecoveryKeySalt          string `json:"recovery_key_salt"`
-		RecoveryWrappedPrefsKey  string `json:"recovery_wrapped_prefs_key"`
-		RecoveryPrefsKeySalt     string `json:"recovery_prefs_key_salt"`
+		RecoveryKeySalt           string `json:"recovery_key_salt"`
+		RecoveryWrappedPrefsKey   string `json:"recovery_wrapped_prefs_key"`
+		RecoveryPrefsKeySalt      string `json:"recovery_prefs_key_salt"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
@@ -1720,13 +1732,13 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 // RecoveryResetAccount performs a full account reset (new keys, all encrypted data lost).
 func (h *Handler) RecoveryResetAccount(c *gin.Context) {
 	var req struct {
-		RecoveryToken        string `json:"recovery_token" binding:"required"`
-		NewPassword          string `json:"new_password" binding:"required"`
-		WrappedPrivateKey    string `json:"wrapped_private_key" binding:"required"`
-		KeyDerivationSalt    string `json:"key_derivation_salt" binding:"required"`
-		KeyDerivationAlg     string `json:"key_derivation_alg" binding:"required"`
-		PublicKey            string `json:"public_key" binding:"required"`
-		AcknowledgeDataLoss  bool   `json:"acknowledge_data_loss"`
+		RecoveryToken       string `json:"recovery_token" binding:"required"`
+		NewPassword         string `json:"new_password" binding:"required"`
+		WrappedPrivateKey   string `json:"wrapped_private_key" binding:"required"`
+		KeyDerivationSalt   string `json:"key_derivation_salt" binding:"required"`
+		KeyDerivationAlg    string `json:"key_derivation_alg" binding:"required"`
+		PublicKey           string `json:"public_key" binding:"required"`
+		AcknowledgeDataLoss bool   `json:"acknowledge_data_loss"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})

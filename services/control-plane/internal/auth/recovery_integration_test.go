@@ -237,12 +237,12 @@ func TestRecoveryResetAccountTokenSingleUse(t *testing.T) {
 	pub, wrappedKey, salt := testhelpers.E2EETestKeys()
 
 	resetPayload := map[string]interface{}{
-		"recovery_token":       recoveryToken,
-		"new_password":         testNewPassword,
-		"wrapped_private_key":  wrappedKey,
-		"key_derivation_salt":  salt,
-		"key_derivation_alg":   testKeyDerivationAlg,
-		"public_key":           pub,
+		"recovery_token":        recoveryToken,
+		"new_password":          testNewPassword,
+		"wrapped_private_key":   wrappedKey,
+		"key_derivation_salt":   salt,
+		"key_derivation_alg":    testKeyDerivationAlg,
+		"public_key":            pub,
 		"acknowledge_data_loss": true,
 	}
 
@@ -307,4 +307,151 @@ func TestRecoveryBeginSameResponseForValidAndInvalidEmails(t *testing.T) {
 	testhelpers.ParseJSON(t, w1, &body1)
 	testhelpers.ParseJSON(t, w2, &body2)
 	assert.Equal(t, body1["message"], body2["message"])
+}
+
+// --- RecoveryResetPassword Happy Path ---
+
+func TestRecoveryResetPasswordSuccess(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "resetpwdok")
+
+	// Get recovery token
+	seedRecoveryCode(t, ts, user.Email, "999999", user.ID)
+	w := ts.DoRequest("POST", pathRecoveryVerifyCode, map[string]interface{}{
+		"email": user.Email,
+		"code":  "999999",
+	}, nil)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var verifyBody map[string]interface{}
+	testhelpers.ParseJSON(t, w, &verifyBody)
+	recoveryToken := verifyBody["recovery_token"].(string)
+
+	pub, wrappedKey, salt := testhelpers.E2EETestKeys()
+
+	// Reset password
+	w = ts.DoRequest("POST", pathRecoveryResetPwd, map[string]interface{}{
+		"recovery_token":      recoveryToken,
+		"new_password":        testNewPassword,
+		"wrapped_private_key": wrappedKey,
+		"key_derivation_salt": salt,
+		"key_derivation_alg":  testKeyDerivationAlg,
+		"public_key":          pub,
+	}, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Login with new password should work
+	w = ts.DoRequest("POST", "/api/v1/auth/login", map[string]interface{}{
+		"email":    user.Email,
+		"password": testNewPassword,
+	}, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestRecoveryResetPasswordWeakPassword(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "resetpwdweak")
+
+	seedRecoveryCode(t, ts, user.Email, "888888", user.ID)
+	w := ts.DoRequest("POST", pathRecoveryVerifyCode, map[string]interface{}{
+		"email": user.Email,
+		"code":  "888888",
+	}, nil)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var verifyBody map[string]interface{}
+	testhelpers.ParseJSON(t, w, &verifyBody)
+	recoveryToken := verifyBody["recovery_token"].(string)
+
+	pub, wrappedKey, salt := testhelpers.E2EETestKeys()
+
+	// Weak password should fail
+	w = ts.DoRequest("POST", pathRecoveryResetPwd, map[string]interface{}{
+		"recovery_token":      recoveryToken,
+		"new_password":        "weak",
+		"wrapped_private_key": wrappedKey,
+		"key_derivation_salt": salt,
+		"key_derivation_alg":  testKeyDerivationAlg,
+		"public_key":          pub,
+	}, nil)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestRecoveryResetPasswordInvalidToken(t *testing.T) {
+	ts := setupTS(t)
+
+	pub, wrappedKey, salt := testhelpers.E2EETestKeys()
+
+	w := ts.DoRequest("POST", pathRecoveryResetPwd, map[string]interface{}{
+		"recovery_token":      "invalid-token",
+		"new_password":        testNewPassword,
+		"wrapped_private_key": wrappedKey,
+		"key_derivation_salt": salt,
+		"key_derivation_alg":  testKeyDerivationAlg,
+		"public_key":          pub,
+	}, nil)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+// --- RecoveryResetAccount Happy Path ---
+
+func TestRecoveryResetAccountSuccess(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "resetacctok")
+
+	seedRecoveryCode(t, ts, user.Email, "777777", user.ID)
+	w := ts.DoRequest("POST", pathRecoveryVerifyCode, map[string]interface{}{
+		"email": user.Email,
+		"code":  "777777",
+	}, nil)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var verifyBody map[string]interface{}
+	testhelpers.ParseJSON(t, w, &verifyBody)
+	recoveryToken := verifyBody["recovery_token"].(string)
+
+	pub, wrappedKey, salt := testhelpers.E2EETestKeys()
+
+	w = ts.DoRequest("POST", pathRecoveryResetAcct, map[string]interface{}{
+		"recovery_token":        recoveryToken,
+		"new_password":          testNewPassword,
+		"wrapped_private_key":   wrappedKey,
+		"key_derivation_salt":   salt,
+		"key_derivation_alg":    testKeyDerivationAlg,
+		"public_key":            pub,
+		"acknowledge_data_loss": true,
+	}, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Login with new password
+	w = ts.DoRequest("POST", "/api/v1/auth/login", map[string]interface{}{
+		"email":    user.Email,
+		"password": testNewPassword,
+	}, nil)
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// --- Logout with cookie ---
+
+func TestLogoutWithCookie(t *testing.T) {
+	ts := setupTS(t)
+
+	pub, wrappedKey, salt := testhelpers.E2EETestKeys()
+	w := ts.DoRequest("POST", "/api/v1/auth/register", map[string]interface{}{
+		"email":               "logoutcookie@test.concord.chat",
+		"username":            "logoutcookie",
+		"password":            "TestPassword123!", //nolint:gosec // test credential
+		"age_confirmation":    true,
+		"public_key":          pub,
+		"wrapped_private_key": wrappedKey,
+		"key_derivation_salt": salt,
+	}, nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	var regBody map[string]interface{}
+	testhelpers.ParseJSON(t, w, &regBody)
+	accessToken := regBody["access_token"].(string)
+
+	w = ts.DoRequest("POST", "/api/v1/auth/logout", nil, testhelpers.AuthHeaders(accessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
 }

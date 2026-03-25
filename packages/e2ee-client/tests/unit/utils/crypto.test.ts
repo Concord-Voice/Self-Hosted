@@ -344,4 +344,142 @@ describe('crypto utilities', () => {
       expect(prefsKey.algorithm.name).toBe('AES-GCM');
     });
   });
+
+  // ── Exportable key variants ──
+
+  describe('deriveKeyFromPasswordExportable', () => {
+    it('derives an extractable AES-GCM key', async () => {
+      const { deriveKeyFromPasswordExportable } = await import('@/renderer/utils/crypto');
+      const salt = generateSalt();
+      const key = await deriveKeyFromPasswordExportable('password', salt);
+      expect(key.algorithm.name).toBe('AES-GCM');
+      expect(key.extractable).toBe(true);
+    });
+  });
+
+  describe('derivePreferencesKeyExportable', () => {
+    it('derives an extractable AES-GCM preferences key', async () => {
+      const { derivePreferencesKeyExportable } = await import('@/renderer/utils/crypto');
+      const salt = generateSalt();
+      const key = await derivePreferencesKeyExportable('password', salt);
+      expect(key.algorithm.name).toBe('AES-GCM');
+      expect(key.extractable).toBe(true);
+    });
+  });
+
+  // ── Channel key wrapping ──
+
+  describe('wrapChannelKey / unwrapChannelKey', () => {
+    it('round-trips a channel key through RSA-OAEP wrapping', async () => {
+      const { generateChannelKey, wrapChannelKey, unwrapChannelKey, exportChannelKey } =
+        await import('@/renderer/utils/crypto');
+      const keyPair = await generateKeyPair();
+      const channelKey = await generateChannelKey();
+      const wrapped = await wrapChannelKey(channelKey, keyPair.publicKey);
+      expect(typeof wrapped).toBe('string'); // base64
+
+      const unwrapped = await unwrapChannelKey(wrapped, keyPair.privateKey);
+      // Verify keys produce same raw bytes
+      const origRaw = await exportChannelKey(channelKey);
+      const unwrappedRaw = await exportChannelKey(unwrapped);
+      expect(new Uint8Array(origRaw)).toEqual(new Uint8Array(unwrappedRaw));
+    }, 30000);
+  });
+
+  // ── ECDH shared secret ──
+
+  describe('ECDH operations', () => {
+    it('generates ECDH key pair', async () => {
+      const { generateECDHKeyPair } = await import('@/renderer/utils/crypto');
+      const kp = await generateECDHKeyPair();
+      expect(kp.publicKey.algorithm.name).toBe('ECDH');
+      expect(kp.privateKey.algorithm.name).toBe('ECDH');
+    });
+
+    it('exports and imports ECDH public key', async () => {
+      const { generateECDHKeyPair, exportECDHPublicKey, importECDHPublicKey } =
+        await import('@/renderer/utils/crypto');
+      const kp = await generateECDHKeyPair();
+      const exported = await exportECDHPublicKey(kp.publicKey);
+      expect(typeof exported).toBe('string');
+
+      const imported = await importECDHPublicKey(exported);
+      expect(imported.algorithm.name).toBe('ECDH');
+    });
+
+    it('derives shared secret and encrypts/decrypts', async () => {
+      const {
+        generateECDHKeyPair,
+        deriveSharedSecret,
+        encryptWithSharedSecret,
+        decryptWithSharedSecret,
+      } = await import('@/renderer/utils/crypto');
+
+      const alice = await generateECDHKeyPair();
+      const bob = await generateECDHKeyPair();
+
+      const aliceSecret = await deriveSharedSecret(alice.privateKey, bob.publicKey);
+      const bobSecret = await deriveSharedSecret(bob.privateKey, alice.publicKey);
+
+      // Both should be able to encrypt/decrypt the same data
+      const data = new TextEncoder().encode('hello ECDH');
+      const encrypted = await encryptWithSharedSecret(aliceSecret, data.buffer);
+      const decrypted = await decryptWithSharedSecret(bobSecret, encrypted);
+      const result = new TextDecoder().decode(decrypted);
+      expect(result).toBe('hello ECDH');
+    });
+  });
+
+  // ── Preferences key recovery wrapping ──
+
+  describe('wrapPrefsKeyWithRecoveryKey / unwrapPrefsKeyWithRecoveryKey', () => {
+    it('round-trips preferences key through recovery wrapping', async () => {
+      const {
+        generateRecoveryKey,
+        derivePreferencesKeyExportable,
+        wrapPrefsKeyWithRecoveryKey,
+        unwrapPrefsKeyWithRecoveryKey,
+      } = await import('@/renderer/utils/crypto');
+
+      const salt = generateSalt();
+      const prefsKey = await derivePreferencesKeyExportable('password', salt);
+      const recoveryKey = generateRecoveryKey();
+
+      // Export prefs key to base64 for wrapping
+      const rawPrefs = await crypto.subtle.exportKey('raw', prefsKey);
+      const prefsBase64 = arrayBufferToBase64(rawPrefs);
+
+      const { wrappedKey, salt: wrappingSalt } = await wrapPrefsKeyWithRecoveryKey(
+        prefsBase64,
+        recoveryKey
+      );
+      expect(typeof wrappedKey).toBe('string');
+      expect(typeof wrappingSalt).toBe('string');
+
+      const unwrapped = await unwrapPrefsKeyWithRecoveryKey(wrappedKey, wrappingSalt, recoveryKey);
+      expect(unwrapped.algorithm.name).toBe('AES-GCM');
+    }, 30000);
+  });
+
+  // ── Argon2id preferences key variants ──
+
+  describe('derivePreferencesKeyArgon2id', () => {
+    it('derives an Argon2id preferences key', async () => {
+      const { derivePreferencesKeyArgon2id } = await import('@/renderer/utils/crypto');
+      const salt = generateSalt();
+      const key = await derivePreferencesKeyArgon2id('password', salt);
+      expect(key.algorithm.name).toBe('AES-GCM');
+      expect(key.extractable).toBe(false);
+    }, 60000);
+  });
+
+  describe('derivePreferencesKeyArgon2idExportable', () => {
+    it('derives an extractable Argon2id preferences key', async () => {
+      const { derivePreferencesKeyArgon2idExportable } = await import('@/renderer/utils/crypto');
+      const salt = generateSalt();
+      const key = await derivePreferencesKeyArgon2idExportable('password', salt);
+      expect(key.algorithm.name).toBe('AES-GCM');
+      expect(key.extractable).toBe(true);
+    }, 60000);
+  });
 });

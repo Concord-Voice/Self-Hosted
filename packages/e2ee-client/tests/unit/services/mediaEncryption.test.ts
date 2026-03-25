@@ -15,10 +15,7 @@ beforeEach(async () => {
 
 /** Helper: generate a test AES-256 key (simulates a channel CSK) */
 async function generateTestCSK(): Promise<CryptoKey> {
-  return crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, [
-    'encrypt',
-    'decrypt',
-  ]);
+  return crypto.subtle.generateKey({ name: 'AES-GCM', length: 256 }, true, ['encrypt', 'decrypt']);
 }
 
 /** Helper: build a fake RTCEncodedAudioFrame */
@@ -365,6 +362,157 @@ describe('MediaEncryption', () => {
 
       await receiver.decryptFrame(frame, 'alice');
       expect(new Uint8Array(frame.data)).toEqual(originalData);
+    });
+  });
+
+  describe('debouncedRotateKeys', () => {
+    it('rotates after debounce delay', async () => {
+      const { vi } = await import('vitest');
+      vi.useFakeTimers();
+      try {
+        const csk = await generateTestCSK();
+        const enc = new MediaEncryption();
+        await enc.init(csk, 'user-1');
+        expect(enc.getCurrentKeyId()).toBe(0);
+
+        enc.debouncedRotateKeys();
+
+        // Not yet rotated
+        expect(enc.getCurrentKeyId()).toBe(0);
+
+        // Advance past 2s debounce
+        await vi.advanceTimersByTimeAsync(2500);
+
+        expect(enc.getCurrentKeyId()).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('coalesces rapid calls into single rotation', async () => {
+      const { vi } = await import('vitest');
+      vi.useFakeTimers();
+      try {
+        const csk = await generateTestCSK();
+        const enc = new MediaEncryption();
+        await enc.init(csk, 'user-1');
+
+        // Fire 5 rapid calls
+        for (let i = 0; i < 5; i++) {
+          enc.debouncedRotateKeys();
+        }
+
+        await vi.advanceTimersByTimeAsync(2500);
+
+        // Should have rotated exactly once (not 5 times)
+        expect(enc.getCurrentKeyId()).toBe(1);
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+  });
+
+  describe('catchUpToEpoch', () => {
+    it('catches up from epoch 0 to target', async () => {
+      const csk = await generateTestCSK();
+      const enc = new MediaEncryption();
+      await enc.init(csk, 'user-1');
+      expect(enc.getCurrentKeyId()).toBe(0);
+
+      await enc.catchUpToEpoch(3);
+      expect(enc.getCurrentKeyId()).toBe(3);
+    });
+
+    it('no-op when already at target', async () => {
+      const csk = await generateTestCSK();
+      const enc = new MediaEncryption();
+      await enc.init(csk, 'user-1');
+
+      await enc.catchUpToEpoch(3);
+      expect(enc.getCurrentKeyId()).toBe(3);
+
+      // Calling again with same target should be no-op
+      await enc.catchUpToEpoch(3);
+      expect(enc.getCurrentKeyId()).toBe(3);
+
+      // Calling with lower target should also be no-op
+      await enc.catchUpToEpoch(1);
+      expect(enc.getCurrentKeyId()).toBe(3);
+    });
+
+    it('rejects gap > 100', async () => {
+      const csk = await generateTestCSK();
+      const enc = new MediaEncryption();
+      await enc.init(csk, 'user-1');
+
+      await enc.catchUpToEpoch(101);
+      // Should not have advanced — gap too large
+      expect(enc.getCurrentKeyId()).toBe(0);
+    });
+  });
+
+  describe('destroy', () => {
+    it('clears state and prevents further encryption', async () => {
+      const csk = await generateTestCSK();
+      const enc = new MediaEncryption();
+      await enc.init(csk, 'user-1');
+
+      // Encryption works before destroy
+      const frame = fakeAudioFrame(40);
+      await enc.encryptFrame(frame);
+
+      enc.destroy();
+
+      // Encrypt should fail after destroy
+      const frame2 = fakeAudioFrame(40);
+      await expect(enc.encryptFrame(frame2)).rejects.toThrow('no encrypt key');
+    });
+
+    it('is idempotent', async () => {
+      const csk = await generateTestCSK();
+      const enc = new MediaEncryption();
+      await enc.init(csk, 'user-1');
+
+      enc.destroy();
+      enc.destroy(); // Should not throw
+      expect(enc.getCurrentKeyId()).toBe(0);
+    });
+  });
+
+  describe('addDecryptKeyAtEpoch', () => {
+    it('pre-ratchets key to target epoch', async () => {
+      const csk = await generateTestCSK();
+      const sender = new MediaEncryption();
+      const receiver = new MediaEncryption();
+
+      await sender.init(csk, 'sender');
+      await receiver.init(csk, 'receiver');
+
+      // Rotate sender to epoch 3
+      await sender.rotateKeys();
+      await sender.rotateKeys();
+      await sender.rotateKeys();
+      expect(sender.getCurrentKeyId()).toBe(3);
+
+      // Pre-ratchet receiver's decrypt key for sender to epoch 3
+      await receiver.addDecryptKeyAtEpoch(csk, 'sender', 3);
+
+      // Sender encrypts at epoch 3
+      const frame = fakeAudioFrame(50);
+      await sender.encryptFrame(frame);
+
+      // Receiver should decrypt successfully
+      await receiver.decryptFrame(frame, 'sender');
+    });
+
+    it('falls back to base key when epoch > 100', async () => {
+      const csk = await generateTestCSK();
+      const enc = new MediaEncryption();
+      await enc.init(csk, 'user-1');
+
+      // Should not throw — falls back to addDecryptKey with epoch 0
+      await enc.addDecryptKeyAtEpoch(csk, 'sender', 101);
+      expect(enc.getCurrentKeyId()).toBeGreaterThanOrEqual(0);
     });
   });
 });
