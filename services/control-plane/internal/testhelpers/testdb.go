@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
@@ -41,6 +42,8 @@ func SetupTestDB(t *testing.T) (*sql.DB, func()) {
 
 	db.SetMaxOpenConns(5)
 	db.SetMaxIdleConns(2)
+	db.SetConnMaxLifetime(30 * time.Second)
+	db.SetConnMaxIdleTime(10 * time.Second)
 
 	// Run migrations using absolute path
 	migrationsDir := migrationsPath()

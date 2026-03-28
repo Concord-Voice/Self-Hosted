@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 )
 
 // RequireMembership is middleware that checks if the authenticated user is a member of the server
@@ -18,6 +19,13 @@ func RequireMembership(resolver *Resolver) gin.HandlerFunc {
 
 		if userID == "" || serverID == "" {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+			c.Abort()
+			return
+		}
+
+		// Validate server ID format before querying DB
+		if _, err := uuid.Parse(serverID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 			c.Abort()
 			return
 		}
@@ -51,6 +59,13 @@ func RequirePermission(resolver *Resolver, perm Permission, channelIDParam strin
 
 		if userID == "" || serverID == "" {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Authentication required"})
+			c.Abort()
+			return
+		}
+
+		// Validate server ID format before querying DB
+		if _, err := uuid.Parse(serverID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 			c.Abort()
 			return
 		}

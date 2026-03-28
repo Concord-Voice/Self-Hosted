@@ -31,22 +31,22 @@ import (
 )
 
 const (
-	keyFileType            = "file_type"
-	keyFileID              = "file_id"
-	pathUploadAttachment   = "/api/v1/media/upload/attachment"
-	pathUploadAvatar       = "/api/v1/media/upload/avatar"
-	pathUploadServerIcon   = "/api/v1/media/upload/server-icon"
-	pathAttachmentsPrefix  = "/api/v1/media/attachments/"
-	pathMediaPrefix        = "/api/v1/media/"
-	fileEncryptedBin       = "encrypted.bin"
-	mimeOctetStream        = "application/octet-stream"
-	fileIconPng            = "icon.png"
-	valueNotUUID           = "not-uuid"
-	keyChannelID           = "channel_id"
-	keyServerID            = "server_id"
-	keyConversationID      = "conversation_id"
-	keyMimeType            = "mime_type"
-	fmtAttachmentsKey      = "attachments/%s"
+	keyFileType           = "file_type"
+	keyFileID             = "file_id"
+	pathUploadAttachment  = "/api/v1/media/upload/attachment"
+	pathUploadAvatar      = "/api/v1/media/upload/avatar"
+	pathUploadServerIcon  = "/api/v1/media/upload/server-icon"
+	pathAttachmentsPrefix = "/api/v1/media/attachments/"
+	pathMediaPrefix       = "/api/v1/media/"
+	fileEncryptedBin      = "encrypted.bin"
+	mimeOctetStream       = "application/octet-stream"
+	fileIconPng           = "icon.png"
+	valueNotUUID          = "not-uuid"
+	keyChannelID          = "channel_id"
+	keyServerID           = "server_id"
+	keyConversationID     = "conversation_id"
+	keyMimeType           = "mime_type"
+	fmtAttachmentsKey     = "attachments/%s"
 )
 
 // Pre-computed Argon2id hash of the test credential — avoids 100ms Argon2id cost per user.
@@ -86,6 +86,7 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 		t.Skipf("media_test: database unavailable (skipping integration tests): %v", err)
 	}
 	db.SetMaxOpenConns(5)
+	db.SetMaxIdleConns(2)
 
 	// Run migrations
 	_, thisFile, _, _ := runtime.Caller(0)

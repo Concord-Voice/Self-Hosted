@@ -15,11 +15,10 @@ import (
 )
 
 const (
-	errMsgFailedClaimFriendCode = "Failed to claim friend code"
+	errMsgFailedClaimFriendCode   = "Failed to claim friend code"
 	errMsgFailedSendFriendRequest = "Failed to send friend request"
-	errMsgFailedBlockUser = "Failed to block user"
+	errMsgFailedBlockUser         = "Failed to block user"
 )
-
 
 // Handler handles friend-related requests.
 type Handler struct {
@@ -448,20 +447,27 @@ func (h *Handler) BlockUser(c *gin.Context) {
 		}
 	}()
 
-	// Upsert friendship as blocked
-	_, err = tx.Exec(`
-		INSERT INTO friendships (requester_id, addressee_id, status)
-		VALUES ($1, $2, 'blocked')
-		ON CONFLICT (requester_id, addressee_id) DO UPDATE SET status = 'blocked', updated_at = NOW()
+	// Update any existing friendship row in either direction to blocked.
+	// Must check both directions because the unique constraint is (requester_id, addressee_id)
+	// and a row may exist as (target, user) instead of (user, target).
+	res, err := tx.Exec(`
+		UPDATE friendships SET status = 'blocked', updated_at = NOW()
+		WHERE (requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1)
 	`, userID, targetUserID)
 	if err != nil {
-		// May fail if the reverse direction exists — try that direction
+		h.log.Error(errMsgFailedBlockUser, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBlockUser})
+		return
+	}
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		// No existing friendship — insert a new blocked row
 		_, err = tx.Exec(`
-			UPDATE friendships SET status = 'blocked', updated_at = NOW()
-			WHERE (requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1)
+			INSERT INTO friendships (requester_id, addressee_id, status)
+			VALUES ($1, $2, 'blocked')
 		`, userID, targetUserID)
 		if err != nil {
-			h.log.Error("Failed to block user", "error", err)
+			h.log.Error(errMsgFailedBlockUser, "error", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBlockUser})
 			return
 		}

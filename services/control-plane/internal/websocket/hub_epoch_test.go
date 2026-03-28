@@ -48,6 +48,8 @@ func setupHubTestDB(t *testing.T) *sql.DB {
 	if err := db.Ping(); err != nil {
 		t.Fatalf("hub_epoch_test: failed to ping database: %v", err)
 	}
+	db.SetMaxOpenConns(5)
+	db.SetMaxIdleConns(2)
 
 	// Run migrations using absolute path (robust across working directories)
 	driver, err := postgres.WithInstance(db, &postgres.Config{})
@@ -194,7 +196,7 @@ func TestHandleDMMessageCurrentEpochAccepted(t *testing.T) {
 		ClientID: setup.client.ID,
 		Data: map[string]interface{}{
 			keyConversationID: setup.convID,
-			keyContent:         "hello encrypted",
+			keyContent:        "hello encrypted",
 			keyIsEncrypted:    true,
 			"key_version":     float64(1),
 		},
@@ -215,7 +217,7 @@ func TestHandleDMMessageRevokedEpochRejected(t *testing.T) {
 		ClientID: setup.client.ID,
 		Data: map[string]interface{}{
 			keyConversationID: setup.convID,
-			keyContent:         "hello with revoked key",
+			keyContent:        "hello with revoked key",
 			keyIsEncrypted:    true,
 			"key_version":     float64(1),
 		},
@@ -239,7 +241,7 @@ func TestHandleDMMessageEncryptedConvPlaintextRejected(t *testing.T) {
 		ClientID: setup.client.ID,
 		Data: map[string]interface{}{
 			keyConversationID: setup.convID,
-			keyContent:         "plaintext in encrypted conv",
+			keyContent:        "plaintext in encrypted conv",
 			keyIsEncrypted:    false,
 		},
 	}
@@ -267,7 +269,7 @@ func TestHandleDMMessageNotSubscribed(t *testing.T) {
 		ClientID: setup.client.ID,
 		Data: map[string]interface{}{
 			keyConversationID: otherConvID,
-			keyContent:         "should fail",
+			keyContent:        "should fail",
 		},
 	}
 
@@ -288,7 +290,7 @@ func TestHandleDMMessageUnencryptedConvPlaintextAccepted(t *testing.T) {
 		ClientID: setup.client.ID,
 		Data: map[string]interface{}{
 			keyConversationID: setup.convID,
-			keyContent:         "plaintext in unencrypted conv is fine",
+			keyContent:        "plaintext in unencrypted conv is fine",
 			keyIsEncrypted:    false,
 		},
 	}

@@ -11,12 +11,13 @@ import (
 )
 
 const (
-	pathChannelsPrefix     = "/api/v1/channels/"
-	roleMember             = "member"
-	pathVoiceJoin          = "/voice/join"
+	pathChannelsPrefix       = "/api/v1/channels/"
+	roleMember               = "member"
+	pathVoiceJoin            = "/voice/join"
 	pathVoiceAuthorizeAction = "/voice/authorize-action"
-	keyAction              = "action"
-	keyTargetUserID        = "target_user_id"
+	pathVoiceParticipants    = "/voice/participants"
+	keyAction                = "action"
+	keyTargetUserID          = "target_user_id"
 )
 
 func setupTS(t *testing.T) *testhelpers.TestServer {
@@ -32,7 +33,7 @@ func TestGetParticipants_Success(t *testing.T) {
 	serverID := ts.CreateTestServer(t, owner.ID, "Voice Test Server")
 	channelID := ts.CreateVoiceChannel(t, serverID, "voice-general")
 
-	w := ts.DoRequest("GET", pathChannelsPrefix+channelID+"/voice/participants", nil, testhelpers.AuthHeaders(owner.AccessToken))
+	w := ts.DoRequest("GET", pathChannelsPrefix+channelID+pathVoiceParticipants, nil, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var body map[string]interface{}
@@ -48,7 +49,7 @@ func TestGetParticipants_NotMember(t *testing.T) {
 	serverID := ts.CreateTestServer(t, owner.ID, "Voice NotMember Server")
 	channelID := ts.CreateVoiceChannel(t, serverID, "voice-private")
 
-	w := ts.DoRequest("GET", pathChannelsPrefix+channelID+"/voice/participants", nil, testhelpers.AuthHeaders(outsider.AccessToken))
+	w := ts.DoRequest("GET", pathChannelsPrefix+channelID+pathVoiceParticipants, nil, testhelpers.AuthHeaders(outsider.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
 }
 
@@ -130,7 +131,7 @@ func TestAuthorizeVoiceAction_ValidActions(t *testing.T) {
 			channelID := ts.CreateVoiceChannel(t, serverID, "voice-"+tc.action)
 
 			w := ts.DoRequest("POST", pathChannelsPrefix+channelID+pathVoiceAuthorizeAction, map[string]interface{}{
-				keyAction:         tc.action,
+				keyAction:       tc.action,
 				keyTargetUserID: target.ID,
 			}, testhelpers.AuthHeaders(owner.AccessToken))
 			assert.Equal(t, tc.expectCode, w.Code)
@@ -150,7 +151,7 @@ func TestAuthorizeVoiceAction_NoPermission(t *testing.T) {
 
 	// Base member doesn't have MuteMembers
 	w := ts.DoRequest("POST", pathChannelsPrefix+channelID+pathVoiceAuthorizeAction, map[string]interface{}{
-		keyAction:         "mute",
+		keyAction:       "mute",
 		keyTargetUserID: target.ID,
 	}, testhelpers.AuthHeaders(actor.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
@@ -176,7 +177,7 @@ func TestAuthorizeVoiceAction_HierarchyViolation(t *testing.T) {
 
 	// Mod tries to mute admin → hierarchy violation
 	w := ts.DoRequest("POST", pathChannelsPrefix+channelID+pathVoiceAuthorizeAction, map[string]interface{}{
-		keyAction:         "mute",
+		keyAction:       "mute",
 		keyTargetUserID: admin.ID,
 	}, testhelpers.AuthHeaders(moderator.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
@@ -197,7 +198,7 @@ func TestAuthorizeVoiceAction_WithCustomPermission(t *testing.T) {
 	ts.AssignRoleToUser(t, serverID, actor.ID, muterRoleID)
 
 	w := ts.DoRequest("POST", pathChannelsPrefix+channelID+pathVoiceAuthorizeAction, map[string]interface{}{
-		keyAction:         "mute",
+		keyAction:       "mute",
 		keyTargetUserID: target.ID,
 	}, testhelpers.AuthHeaders(actor.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
