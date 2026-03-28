@@ -83,7 +83,7 @@ DROP INDEX IF EXISTS idx_users_status;
 ALTER TABLE users DROP COLUMN IF EXISTS status;
 ```
 
-## Existing Migrations (000001–000046)
+## Existing Migrations (000001–000047)
 
 ### Phase 1A — Authentication & E2EE
 | # | Name | Tables/Changes |
@@ -125,11 +125,28 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000027 | friend_codes_and_privacy | `friendships`, `friend_codes`, `privacy_settings` |
 | 000028 | machine_id_and_key_version | Machine ID tracking, key versioning |
 
-### Phase 2 — Beta Features
+### Phase 2A — Foundations & Security
 | # | Name | Tables/Changes |
 |---|------|---------------|
-| 000029–000045 | Various | MFA, media files, recovery keys, trusted devices, recovery circles, DM key revocations, etc. |
+| 000029 | mfa | MFA tables (TOTP, WebAuthn) |
+| 000030 | mfa_recovery_columns | MFA recovery code columns |
+| 000031 | backup_email | Backup email for account recovery |
+| 000032 | dm_privacy_level | DM privacy level settings |
+| 000033 | mfa_enabled_at | Timestamp for MFA enablement |
+| 000034 | key_derivation_alg | Key derivation algorithm tracking |
+| 000035 | rbac_system | RBAC roles, permissions, overrides |
+| 000036 | category_overrides | Channel category permission overrides |
+| 000037 | server_banner_url | Server banner/header image URL |
+| 000038 | allow_embedded_content | Embedded content preference |
+| 000039 | embed_suppression | Per-message embed suppression |
+| 000040 | email_verification | Email verification tokens and state |
+| 000041 | dm_key_revocations | DM key epoch revocation tracking |
+| 000042 | create_media_files | `media_files` table (object storage) |
+| 000043 | recovery_keys | Account recovery keys |
+| 000044 | trusted_devices | Trusted device tracking for MFA |
+| 000045 | recovery_circles | Social recovery circles |
 | 000046 | username_change_tracking | `username_changed_at` column on users, `username_history` table |
+| 000047 | ownership_transfer | Server ownership transfer records |
 
 ## Troubleshooting
 

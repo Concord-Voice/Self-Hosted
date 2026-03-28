@@ -1,8 +1,8 @@
-# Concord Architecture
+# Concord Voice Architecture
 
 ## Overview
 
-Concord is a distributed real-time communications platform with clear separation of concerns across three major planes:
+Concord Voice is a distributed real-time communications platform with clear separation of concerns across three major planes:
 
 1. **Client Layer** - User-facing applications
 2. **Control Plane** - Business logic, auth, state management
@@ -25,7 +25,7 @@ flowchart TB
     end
 
     subgraph Infrastructure
-        PG[("PostgreSQL 16<br/>26+ tables")]
+        PG[("PostgreSQL 16<br/>40+ tables")]
         RD[("Redis 7<br/>sessions / presence")]
         NATS["NATS<br/>inter-service"]
     end
@@ -71,7 +71,7 @@ flowchart TB
   - Video calls (camera toggle, video grid)
   - E2EE message encryption/decryption (AES-256-GCM)
   - Secure token storage (Electron safeStorage / OS keychain)
-  - 19 Zustand stores for state management
+  - 24 Zustand stores for state management
 - **Communication**:
   - HTTP/WebSocket → Control Plane (signaling, auth, channels, presence)
   - Socket.IO → Media Plane (voice signaling)
@@ -104,9 +104,9 @@ flowchart TB
 - Rate limiting
 - Moderation logic
 
-**API**: 74 REST endpoints + 1 WebSocket endpoint across 13 groups (Auth, Users, Sessions, Servers, Channels, Messages, Members, Invites, E2EE, WebSocket, Friends, DM Conversations, Voice). See [API Documentation](./api/README.md) for the OpenAPI 3.0 spec.
+**API**: 177 REST endpoints + 1 WebSocket endpoint across 20+ groups (Auth, Users, Sessions, Servers, Channels, Messages, Members, Invites, E2EE, WebSocket, Friends, DM Conversations, Voice, MFA, RBAC, Media, Ownership, Email, Client Config, Updates). See [API Documentation](./api/README.md) for the OpenAPI 3.0 spec.
 
-**Database Schema** (26+ tables across 28 migrations):
+**Database Schema** (40+ tables across 47 migrations):
 
 ```mermaid
 erDiagram
@@ -730,6 +730,6 @@ US-East US-West   EU-Central APAC
 
 ## Next Steps
 
-- [API Documentation](./api/README.md) — OpenAPI 3.0 spec for all 74 endpoints
+- [API Documentation](./api/README.md) — OpenAPI 3.0 spec (partial: 88 operations documented; 177 routes implemented — full spec regeneration planned)
 - [Development Guide](./development.md) — Local setup, running tests
 - [Self-Hosting Guide](./self-hosting.md) — Deployment instructions (planned)

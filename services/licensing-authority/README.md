@@ -2,7 +2,7 @@
 
 **Status:** 📋 PLANNED (Phase 3 - Self-Hosted Deployments)
 
-Cryptographic license generation and validation service for self-hosted Concord deployments.
+Cryptographic license generation and validation service for self-hosted Concord Voice deployments.
 
 ## Overview
 

@@ -1,8 +1,8 @@
-# Concord Frequently Asked Questions (FAQ)
+# Concord Voice Frequently Asked Questions (FAQ)
 
-**Last Updated:** 2026-03-03
+**Last Updated:** 2026-03-27
 
-This document answers common questions about Concord's licensing, security, development, deployment, and usage.
+This document answers common questions about Concord Voice's licensing, security, development, deployment, and usage.
 
 ---
 
@@ -28,14 +28,14 @@ The Business Source License (BSL) is a "source-available" license that allows yo
 - ✅ Self-host with unlimited users (non-commercial)
 
 But **restricts** you from:
-- ❌ Using it to compete with the official Concord service
-- ❌ Offering Concord as a SaaS product to others (without a commercial license)
+- ❌ Using it to compete with the official Concord Voice service
+- ❌ Offering Concord Voice as a SaaS product to others (without a commercial license)
 
 After **4 years**, each version automatically converts to **AGPL-3.0** (fully open source).
 
 ---
 
-### Can I use Concord for free?
+### Can I use Concord Voice for free?
 
 **Yes!** You can:
 - Use the hosted SaaS version at concordvoice.chat
@@ -44,7 +44,7 @@ After **4 years**, each version automatically converts to **AGPL-3.0** (fully op
 
 ---
 
-### Can I self-host Concord for my business?
+### Can I self-host Concord Voice for my business?
 
 **Yes**, with a commercial self-hosted license. Commercial use requires a paid license.
 
@@ -57,7 +57,7 @@ You **don't need a license** if:
 
 ### Can I modify the code?
 
-**Yes!** You can modify Concord for your own use. However:
+**Yes!** You can modify Concord Voice for your own use. However:
 - ✅ Modify for personal self-hosted instance
 - ✅ Contribute improvements back (encouraged!)
 - ❌ Create a competing SaaS service with your modifications
@@ -65,7 +65,7 @@ You **don't need a license** if:
 
 ---
 
-### Can I contribute to Concord?
+### Can I contribute to Concord Voice?
 
 **Absolutely!** We welcome contributions. When you contribute code:
 - Your contributions are licensed under the same BSL 1.1 terms
@@ -84,7 +84,7 @@ You **don't need a license** if:
 
 ### What happens after 4 years?
 
-Each version of Concord becomes **fully open source** under AGPL-3.0 after 4 years:
+Each version of Concord Voice becomes **fully open source** under AGPL-3.0 after 4 years:
 - Anyone can use it for any purpose (including competing services)
 - Modifications must be shared (AGPL copyleft)
 - This ensures long-term sustainability and community ownership
@@ -105,7 +105,7 @@ We chose BSL 1.1 because it:
 
 ---
 
-### Can I fork Concord?
+### Can I fork Concord Voice?
 
 **Yes**, with restrictions:
 - ✅ Fork for personal use
@@ -124,7 +124,7 @@ After 4 years, older versions become AGPL-3.0 and you can fork them for any purp
 - Premium features: Proprietary forever
 - Creates permanent split between free and paid
 
-**BSL 1.1 (Concord's approach):**
+**BSL 1.1 (Concord Voice's approach):**
 - All features: Source-available immediately
 - All code: Becomes fully open source after 4 years
 - No permanent proprietary components
@@ -142,13 +142,13 @@ We believe this is **more open** long-term than traditional open core models.
 - ✅ Run it for your hobby project
 
 **You only need a commercial license if:**
-- You're offering Concord as a hosted service to external customers (competing SaaS)
-- You're embedding Concord in a product you sell to customers
+- You're offering Concord Voice as a hosted service to external customers (competing SaaS)
+- You're embedding Concord Voice in a product you sell to customers
 - Internal team communication (even at a business) is always free to self-host
 
 ---
 
-### Can universities and schools use Concord?
+### Can universities and schools use Concord Voice?
 
 **Yes, completely free!** Educational institutions can:
 - Self-host with unlimited users
@@ -160,7 +160,7 @@ We encourage educational use and welcome academic contributions.
 
 ---
 
-### What if I want to compete with Concord?
+### What if I want to compete with Concord Voice?
 
 Under BSL 1.1, you **cannot** create a competing SaaS service during the initial 4-year period.
 
@@ -173,14 +173,14 @@ We believe 4 years is a fair window to establish the project while ensuring even
 
 ---
 
-### Can I use Concord in my commercial product?
+### Can I use Concord Voice in my commercial product?
 
 **It depends:**
 
 | Use Case | License Required? |
 |----------|-------------------|
 | Internal team communication | No (self-host free) |
-| Selling Concord as a service | Yes (commercial SaaS prohibited) |
+| Selling Concord Voice as a service | Yes (commercial SaaS prohibited) |
 | Embedding in your product (for customers) | Yes (commercial license) |
 | Building integrations/bots | No (complementary services allowed) |
 | Using the API for your business | No (API usage is open) |
@@ -205,7 +205,7 @@ BSL 1.1 balances immediate transparency with sustainable development.
 
 ## 🔒 Security & Privacy
 
-### Is Concord secure?
+### Is Concord Voice secure?
 
 Yes. We implement industry-standard security practices:
 
@@ -219,7 +219,8 @@ Yes. We implement industry-standard security practices:
 **Infrastructure:**
 - 🚫 **Rate Limiting:** Redis-based, per-IP and per-user
 - 🛡️ **Pre-commit Hooks:** Prevents committing secrets
-- 🔍 **Pre-commit Scanning:** TruffleHog, Semgrep SAST (CI/CD currently disabled; pre-commit hooks active)
+- **Pre-commit Scanning:** 20 hooks via Python pre-commit framework (TruffleHog, detect-secrets, golangci-lint, ESLint, etc.)
+- **CI/CD:** GitHub Actions (build.yml) with parallel test + coverage + SonarQube Quality Gate (mandatory)
 - 🗄️ **Database:** PostgreSQL with row-level security
 - 🔐 **Redis:** Authentication enabled
 - 🐳 **Docker:** Container isolation
@@ -228,7 +229,7 @@ Yes. We implement industry-standard security practices:
 
 ### What is End-to-End Encryption (E2EE)?
 
-E2EE means your messages are encrypted on your device before being sent. Only you and the recipient can read them—not even Concord can decrypt them.
+E2EE means your messages are encrypted on your device before being sent. Only you and the recipient can read them—not even Concord Voice can decrypt them.
 
 **How it works:**
 1. Your device generates a unique key pair (public + private keys)
@@ -240,9 +241,9 @@ E2EE means your messages are encrypted on your device before being sent. Only yo
 
 ---
 
-### Can Concord read my messages?
+### Can Concord Voice read my messages?
 
-**For E2EE messages:** No. Messages are encrypted on your device with the recipient's public key. Concord servers only see encrypted ciphertext.
+**For E2EE messages:** No. Messages are encrypted on your device with the recipient's public key. Concord Voice servers only see encrypted ciphertext.
 
 **For non-E2EE messages:** Yes, technically. If you join a non-E2EE server (self-hosted or opted-out), messages are stored in plaintext and server admins can access them.
 
@@ -275,7 +276,7 @@ See [.github/SECURITY.md](./.github/SECURITY.md) for full policy.
 
 ---
 
-### What data does Concord collect?
+### What data does Concord Voice collect?
 
 **Hosted SaaS:**
 - ✅ Email address (for account recovery)
@@ -287,7 +288,7 @@ See [.github/SECURITY.md](./.github/SECURITY.md) for full policy.
 
 **Self-Hosted:**
 - You control all data
-- Concord receives no data from self-hosted instances (except license validation pings)
+- Concord Voice receives no data from self-hosted instances (except license validation pings)
 
 **Telemetry:**
 - Minimal opt-in telemetry for error reporting (planned)
@@ -311,7 +312,7 @@ For now, use a strong unique password (12+ characters) and password manager.
 
 ### What about vendor lock-in?
 
-Concord is designed to **prevent vendor lock-in**:
+Concord Voice is designed to **prevent vendor lock-in**:
 - ✅ Full source code available (audit anytime)
 - ✅ Self-host option (data portability)
 - ✅ Standard protocols (WebRTC, PostgreSQL, Redis)
@@ -489,7 +490,7 @@ npm test
 
 ## 🚀 Deployment & Self-Hosting
 
-### How do I self-host Concord?
+### How do I self-host Concord Voice?
 
 **Status:** Self-hosting documentation coming in Phase 3 (Q4 2026).
 
@@ -530,7 +531,7 @@ Full self-hosting guide with single-command setup coming soon.
 
 ---
 
-### Can I run Concord on Raspberry Pi?
+### Can I run Concord Voice on Raspberry Pi?
 
 **Maybe** - depends on usage:
 - ✅ **Raspberry Pi 4 (4GB+)**: Should work for small groups (<10 users)
@@ -584,7 +585,7 @@ The desktop Electron app works on laptops/tablets, but no native mobile UI yet.
 | **Voice Quality** | Good (Opus) | ✅ Hi-Fi (256kbps+, 7 quality tiers) |
 | **Bots** | ✅ Yes | 📋 Planned (Phase 5) |
 
-**Concord's focus:** Privacy, sovereignty, eventual open source.
+**Concord Voice's focus:** Privacy, sovereignty, eventual open source.
 
 ---
 
@@ -673,7 +674,7 @@ lsof -ti:5173 | xargs kill -9
 
 ### Database migrations aren't running
 
-The migration system uses `golang-migrate/v4` and runs automatically on server startup. There are currently **28 migrations** (000001-000028).
+The migration system uses `golang-migrate/v4` and runs automatically on server startup. There are currently **47 migrations** (000001-000047).
 
 **Check migration status:**
 ```bash

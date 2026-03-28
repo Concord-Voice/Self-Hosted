@@ -1,6 +1,6 @@
 # Development Guide
 
-This guide will help you get Concord running locally for development.
+This guide will help you get Concord Voice running locally for development.
 
 **IMPORTANT:** Before you start developing, install git hooks to prevent committing secrets:
 
@@ -16,9 +16,10 @@ See [SETUP_GITHUB.md](./SETUP_GITHUB.md) for full GitHub collaboration workflow.
 ### Required
 
 - **Node.js** 20+ and npm 10+
-- **Go** 1.24+
+- **Go** 1.26.1+
 - **Docker** and **Docker Compose**
 - **Git**
+- **Python 3** (for `pre-commit` hooks framework and mediasoup build)
 
 ### Optional
 
@@ -556,7 +557,7 @@ Recommended:
 
 ## Next Steps
 
-- Read [API Documentation](./api/) — OpenAPI 3.0 spec for all 74 endpoints
+- Read [API Documentation](./api/) — OpenAPI 3.0 spec (partial: 88 operations documented; 177 routes implemented)
 - Review [Architecture](./architecture.md) — System diagrams, database ERD, message flows
 - Check [Contributing Guidelines](../CONTRIBUTING.md)
 - Join the major comms platforms for discussions

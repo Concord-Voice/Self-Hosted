@@ -2,7 +2,7 @@
 
 **Status:** ✅ IMPLEMENTED (Phase 1C - Complete)
 
-WebRTC Selective Forwarding Unit (SFU) for routing voice and video media in Concord.
+WebRTC Selective Forwarding Unit (SFU) for routing voice and video media in Concord Voice.
 
 ## Tech Stack
 

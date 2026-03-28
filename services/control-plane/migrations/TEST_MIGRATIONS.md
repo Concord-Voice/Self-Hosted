@@ -78,7 +78,7 @@ Expected output:
 Checking migration version...
 Building migrate tool...
 ./bin/migrate -command=version
-Current version: 28 (clean)
+Current version: 47 (clean)
 ```
 
 #### Test Rollback
@@ -101,7 +101,7 @@ make migrate-version
 
 Expected output:
 ```
-Current version: 27 (clean)
+Current version: 46 (clean)
 ```
 
 #### Re-apply Migration
@@ -122,7 +122,7 @@ Then run:
 -- List all tables
 \dt
 
--- Expected tables (26+ total, including):
+-- Expected tables (40+ total, including):
 -- users, user_keys, public_keys, refresh_tokens, user_preferences
 -- servers, channels, server_members, server_invites
 -- messages, channel_read_states, channel_keys, pending_key_requests
@@ -130,12 +130,17 @@ Then run:
 -- friendships, friend_codes, privacy_settings
 -- dm_conversations, dm_participants, dm_messages, dm_read_states
 -- dm_channel_keys, dm_pending_key_requests, dm_voice_participants
+-- mfa_credentials, mfa_recovery_codes, trusted_devices
+-- roles, role_permissions, channel_permission_overrides, category_permission_overrides
+-- media_files, recovery_keys, recovery_circles
+-- email_verifications, dm_key_revocations
+-- username_history, ownership_transfers
 -- schema_migrations
 
 -- Check schema_migrations table
 SELECT * FROM schema_migrations;
 
--- Expected: version = 28, dirty = false
+-- Expected: version = 47, dirty = false
 
 -- Verify users table structure
 \d users
@@ -196,10 +201,10 @@ Migrations should run automatically before the server starts.
 Stop the server (Ctrl+C), then:
 
 ```bash
-# Rollback all 28 migrations one by one (repeat 28 times)
+# Rollback all 47 migrations one by one (repeat 47 times)
 # Each `make migrate-down` rolls back 1 migration
-make migrate-down  # Rolls back to version 27
-make migrate-down  # Rolls back to version 26
+make migrate-down  # Rolls back to version 46
+make migrate-down  # Rolls back to version 45
 # ... (repeat until version 0)
 
 # Verify

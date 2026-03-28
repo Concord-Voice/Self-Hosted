@@ -1,6 +1,6 @@
 # Control Plane Service
 
-The control plane handles authentication, authorization, server/channel management, billing, and user presence for Concord.
+The control plane handles authentication, authorization, server/channel management, billing, and user presence for Concord Voice.
 
 ## Tech Stack
 
@@ -33,27 +33,36 @@ control-plane/
 ├── cmd/
 │   └── server/           # Application entry point (main.go)
 ├── internal/
+│   ├── api/              # API router setup
 │   ├── auth/             # Authentication (Argon2id, JWT, sessions)
 │   ├── channels/         # Channel management and groups
+│   ├── clientconfig/     # Client configuration endpoint
 │   ├── database/         # Database connections and migrations
 │   ├── dm/               # Direct messaging system
+│   ├── email/            # Email verification service
 │   ├── friends/          # Friend codes and privacy
 │   ├── invites/          # Server invite system
+│   ├── media/            # Media file handling (MinIO/S3)
 │   ├── members/          # Server membership
 │   ├── messages/         # Message CRUD with E2EE enforcement
+│   ├── mfa/              # Multi-factor authentication (TOTP, WebAuthn)
 │   ├── middleware/        # Auth, rate limiting, CORS
 │   ├── models/           # Data models
-│   ├── nats/             # NATS inter-service messaging
+│   ├── ownership/        # Server ownership transfer
+│   ├── rbac/             # Role-based access control
 │   ├── servers/          # Server CRUD
 │   ├── sessions/         # Session management and device tracking
+│   ├── storage/          # Object storage abstraction
+│   ├── testhelpers/      # Shared test infrastructure
+│   ├── updates/          # Client update management
 │   ├── users/            # User profiles, preferences, privacy
 │   ├── voice/            # Voice coordination (NATS ↔ media-plane)
 │   └── websocket/        # WebSocket hub (messaging, presence, DMs)
 ├── pkg/
 │   ├── config/           # Configuration management
 │   └── logger/           # Structured logging
-├── migrations/           # 28 SQL migration pairs (000001-000028)
-├── tests/                # Integration tests (215+ tests)
+├── migrations/           # 47 SQL migration pairs (000001-000047)
+├── tests/                # Integration tests (70 test files)
 ├── Dockerfile
 ├── go.mod
 └── go.sum
@@ -196,7 +205,7 @@ GET/POST /api/v1/channels/:id/keys
 POST /api/v1/channels/:id/keys/rotate
 ```
 
-**Total: 74 API routes implemented.** See `docs/api/openapi.yaml` for full spec (covers Phase 1B; Phase 1C endpoints pending spec update).
+**Total: 177 API routes implemented.** See `docs/api/openapi.yaml` for OpenAPI spec (covers partial routes; Phase 2A additions pending spec update).
 
 ### Testing
 
@@ -328,7 +337,7 @@ For detailed migration documentation, see [migrations/README.md](migrations/READ
 ### Additional Tables ✅
 - user_keys, server_invites, channel_keys, channel_key_recipients, channel_read_states, voice_participants, user_preferences, friend_codes, privacy_settings
 
-**28 migrations total** (000001-000028). See `migrations/` for full schema.
+**47 migrations total** (000001-000047). See `migrations/` for full schema.
 
 ## Current Status
 

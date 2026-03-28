@@ -1,10 +1,12 @@
 # API Documentation
 
-OpenAPI 3.0 specification for the Concord Control Plane API.
+OpenAPI 3.0 specification for the Concord Voice Control Plane API.
 
 ## Files
 
-- [openapi.yaml](./openapi.yaml) — Full specification (54 REST endpoints + WebSocket protocol)
+- [openapi.yaml](./openapi.yaml) — OpenAPI spec (88 operations across 66 paths documented)
+
+> **Note:** The spec documents 88 HTTP operations but there are 177 actual API routes in the codebase. Phase 2A additions (MFA, RBAC, media, ownership, email verification, client config, updates) are not yet in the spec. Full regeneration is tracked as a Phase 2B task.
 
 ## Viewing the Spec
 
