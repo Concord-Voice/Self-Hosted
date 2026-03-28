@@ -38,7 +38,7 @@ After **4 years**, each version automatically converts to **AGPL-3.0** (fully op
 ### Can I use Concord Voice for free?
 
 **Yes!** You can:
-- Use the hosted SaaS version at concordvoice.chat
+- Use the hosted SaaS version at [www.concordvoice.com](https://www.concordvoice.com)
 - Self-host for personal use with unlimited users
 - Self-host for non-profit or educational purposes
 
@@ -185,7 +185,7 @@ We believe 4 years is a fair window to establish the project while ensuring even
 | Building integrations/bots | No (complementary services allowed) |
 | Using the API for your business | No (API usage is open) |
 
-**When in doubt**, email licensing@concordvoice.chat for clarification.
+**When in doubt**, email contact-us@concordvoice.com for clarification.
 
 ---
 
@@ -262,7 +262,7 @@ E2EE means your messages are encrypted on your device before being sent. Only yo
    - Click "Report a vulnerability"
    - Fill out the form
 
-2. **Email:** security@concordvoice.chat
+2. **Email:** security@concordvoice.com
    - Use PGP encryption if possible (key available on request)
    - Include "SECURITY" in subject line
 
@@ -776,9 +776,10 @@ npm run dev
 - **Documentation:** [docs/](./docs/)
 - **GitHub Discussions:** [Ask questions](https://github.com/markdrogersjr/Concord/discussions)
 - **GitHub Issues:** [Report bugs](https://github.com/markdrogersjr/Concord/issues)
-- **Security:** security@concordvoice.chat
-- **Licensing:** licensing@concordvoice.chat
-- **General:** (major comms platforms server coming soon)
+- **Security Issues:** security@concordvoice.com
+- **Data Privacy:** privacy@concordvoice.com
+- **General Inquiries:** contact-us@concordvoice.com
+- **Development Team:** dev@concordvoice.com
 
 ---
 
@@ -803,10 +804,11 @@ If your question isn't answered here:
 2. **Check Documentation:** Browse the [docs/](./docs/) folder
 3. **Ask on Discussions:** Start a conversation on GitHub Discussions
 4. **Email Us:**
-   - General: (coming soon)
-   - Licensing: licensing@concordvoice.chat
-   - Security: security@concordvoice.chat
+   - General: contact-us@concordvoice.com
+   - Security: security@concordvoice.com
+   - Privacy: privacy@concordvoice.com
+   - Development: dev@concordvoice.com
 
 ---
 
-**Last Updated:** 2026-03-03 | **Version:** 1.3.0
+**Last Updated:** 2026-03-28 | **Version:** 1.4.0
