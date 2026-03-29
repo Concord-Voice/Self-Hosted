@@ -832,12 +832,12 @@ export class RoomManager {
       for (const c of caps.codecs ?? []) {
         if (c.kind === 'video') videoMimes.add(c.mimeType.toLowerCase());
       }
-      if (!floor) {
-        floor = videoMimes;
-      } else {
+      if (floor) {
         for (const m of floor) {
           if (!videoMimes.has(m)) floor.delete(m);
         }
+      } else {
+        floor = videoMimes;
       }
     }
 
