@@ -86,9 +86,9 @@ export type RoomEventHandler = (event: RoomEvent) => void;
 // ---------------------------------------------------------------------------
 
 export class RoomManager {
-  private rooms: Map<string, Room> = new Map();
-  private mediasoup: MediasoupService;
-  private eventHandlers: RoomEventHandler[] = [];
+  private readonly rooms: Map<string, Room> = new Map();
+  private readonly mediasoup: MediasoupService;
+  private readonly eventHandlers: RoomEventHandler[] = [];
 
   constructor(mediasoup: MediasoupService) {
     this.mediasoup = mediasoup;

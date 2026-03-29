@@ -6,7 +6,7 @@ import type { Worker, Router } from 'mediasoup/node/lib/types.js';
 export class MediasoupService {
   private workers: Worker[] = [];
   private nextWorkerIdx = 0;
-  private routers: Map<string, Router> = new Map();
+  private readonly routers: Map<string, Router> = new Map();
 
   async init() {
     logger.info('Initializing mediasoup workers', {
