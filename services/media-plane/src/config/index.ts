@@ -141,13 +141,13 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
     clockRate: 48000,
     channels: 2,
     parameters: {
-      useinbandfec: 1,        // Forward Error Correction (critical for voice)
-      usedtx: 0,              // DTX off by default; voice tier enables per-producer
+      useinbandfec: 1, // Forward Error Correction (critical for voice)
+      usedtx: 0, // DTX off by default; voice tier enables per-producer
       stereo: 1,
       'sprop-stereo': 1,
       maxplaybackrate: 48000, // Full-band (20 kHz effective)
       maxaveragebitrate: 510000,
-      minptime: 10,           // 10 ms minimum packet time
+      minptime: 10, // 10 ms minimum packet time
     },
   },
 
@@ -249,7 +249,7 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
     mimeType: 'video/AV1',
     clockRate: 90000,
     parameters: {
-      'profile': 0, // Main profile (8-bit)
+      profile: 0, // Main profile (8-bit)
     },
     rtcpFeedback: VIDEO_RTCP_FEEDBACK,
   },
@@ -262,7 +262,7 @@ const DEV_JWT_SECRET = 'dev_jwt_secret_change_in_production';
 
 export const config = {
   environment: process.env.ENVIRONMENT || 'development',
-  port: parseInt(process.env.PORT || '3000', 10),
+  port: Number.parseInt(process.env.PORT || '3000', 10),
 
   // Redis — room state, cross-instance coordination
   // Default includes dev password to match docker-compose and control plane defaults
@@ -284,26 +284,19 @@ export const config = {
   // WebRTC settings
   rtc: {
     announcedIp: process.env.ANNOUNCED_IP || '127.0.0.1',
-    minPort: parseInt(process.env.RTC_MIN_PORT || '40000', 10),
-    maxPort: parseInt(process.env.RTC_MAX_PORT || '49999', 10),
+    minPort: Number.parseInt(process.env.RTC_MIN_PORT || '40000', 10),
+    maxPort: Number.parseInt(process.env.RTC_MAX_PORT || '49999', 10),
   },
 
   // mediasoup settings
   mediasoup: {
-    numWorkers: parseInt(process.env.NUM_WORKERS || '4', 10),
+    numWorkers: Number.parseInt(process.env.NUM_WORKERS || '4', 10),
 
     worker: {
       logLevel: (process.env.MEDIASOUP_LOG_LEVEL || 'warn') as mediasoup.types.WorkerLogLevel,
-      logTags: [
-        'info',
-        'ice',
-        'dtls',
-        'rtp',
-        'srtp',
-        'rtcp',
-      ] as mediasoup.types.WorkerLogTag[],
-      rtcMinPort: parseInt(process.env.RTC_MIN_PORT || '40000', 10),
-      rtcMaxPort: parseInt(process.env.RTC_MAX_PORT || '49999', 10),
+      logTags: ['info', 'ice', 'dtls', 'rtp', 'srtp', 'rtcp'] as mediasoup.types.WorkerLogTag[],
+      rtcMinPort: Number.parseInt(process.env.RTC_MIN_PORT || '40000', 10),
+      rtcMaxPort: Number.parseInt(process.env.RTC_MAX_PORT || '49999', 10),
     },
 
     router: {
@@ -321,20 +314,22 @@ export const config = {
       initialAvailableOutgoingBitrate: 1_000_000, // 1 Mbps initial estimate
       maxIncomingBitrate: 50_000_000, // 50 Mbps cap (supports 4K60)
       enableUdp: true,
-      enableTcp: true,  // TCP fallback for restrictive firewalls
-      preferUdp: true,  // UDP preferred for lower latency
+      enableTcp: true, // TCP fallback for restrictive firewalls
+      preferUdp: true, // UDP preferred for lower latency
     },
   },
 
   // CORS — allowed origins for Socket.IO (env-configurable for LAN/staging)
   allowedOrigins: (process.env.ALLOWED_ORIGINS || 'http://localhost:3001,http://localhost:3002')
-    .split(',').map((s: string) => s.trim()).filter(Boolean),
+    .split(',')
+    .map((s: string) => s.trim())
+    .filter(Boolean),
 
   // Active speaker detection
   audioLevelObserver: {
-    maxEntries: 1,       // Report top 1 speaker
-    threshold: -60,      // dBV threshold (lower = more sensitive)
-    interval: 300,       // Check every 300ms for snappier feedback
+    maxEntries: 1, // Report top 1 speaker
+    threshold: -60, // dBV threshold (lower = more sensitive)
+    interval: 300, // Check every 300ms for snappier feedback
   },
 };
 
@@ -342,7 +337,7 @@ export const config = {
 if (config.environment === 'production' && config.jwtSecret === DEV_JWT_SECRET) {
   console.error(
     'FATAL: JWT_SECRET must be set to a secure value in production. ' +
-    'The default dev secret is not allowed.'
+      'The default dev secret is not allowed.'
   );
   process.exit(1);
 }

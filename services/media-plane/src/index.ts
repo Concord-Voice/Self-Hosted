@@ -1,6 +1,6 @@
 import express from 'express';
 import { Server as SocketIOServer, Socket } from 'socket.io';
-import { createServer } from 'http';
+import { createServer } from 'node:http';
 import { config } from './config/index.js';
 import { logger } from './lib/logger.js';
 import { MediasoupService } from './lib/mediasoup.js';
@@ -118,7 +118,10 @@ async function main() {
           return;
         }
 
-        logger.debug('Channel access validated', { roomId, userId: data.userId });
+        logger.debug('Channel access validated', {
+          roomId,
+          userId: data.userId,
+        });
 
         // Join the room via RoomManager
         const result = await roomManager.joinRoom(
@@ -164,7 +167,7 @@ async function main() {
         logger.debug('Room join existing producers', {
           roomId,
           userId: data.userId,
-          existingProducers: result.existingProducers.map(p => ({
+          existingProducers: result.existingProducers.map((p) => ({
             producerId: p.producerId,
             userId: p.userId,
             kind: p.kind,
@@ -208,7 +211,10 @@ async function main() {
 
         if (callback) callback({ success: true });
       } catch (error) {
-        logger.error('Error updating RTP capabilities', { error, userId: data.userId });
+        logger.error('Error updating RTP capabilities', {
+          error,
+          userId: data.userId,
+        });
         if (callback) callback({ error: 'Failed to update RTP capabilities' });
       }
     });
@@ -221,23 +227,30 @@ async function main() {
           return callback({ error: 'Not in a room' });
         }
 
-        const transportOptions = await roomManager.createTransport(
-          roomId,
-          data.userId,
-          direction
-        );
+        const transportOptions = await roomManager.createTransport(roomId, data.userId, direction);
 
         logger.info('Transport created', {
           transportId: transportOptions.id,
           roomId,
           userId: data.userId,
           direction,
-          iceCandidates: (transportOptions as { iceCandidates?: Array<{ ip: string; port: number; protocol: string }> }).iceCandidates?.map(c => `${c.protocol}:${c.ip}:${c.port}`),
+          iceCandidates: (
+            transportOptions as {
+              iceCandidates?: Array<{
+                ip: string;
+                port: number;
+                protocol: string;
+              }>;
+            }
+          ).iceCandidates?.map((c) => `${c.protocol}:${c.ip}:${c.port}`),
         });
 
         callback(transportOptions);
       } catch (error) {
-        logger.error('Error creating transport', { error, userId: data.userId });
+        logger.error('Error creating transport', {
+          error,
+          userId: data.userId,
+        });
         callback({ error: 'Failed to create transport' });
       }
     });
@@ -251,14 +264,20 @@ async function main() {
         }
 
         logger.info('Transport connect requested', {
-          transportId, roomId, userId: data.userId,
+          transportId,
+          roomId,
+          userId: data.userId,
           dtlsRole: dtlsParameters?.role,
         });
 
         await roomManager.connectTransport(roomId, data.userId, transportId, dtlsParameters);
         callback({ success: true });
       } catch (error) {
-        logger.error('Error connecting transport', { error, userId: data.userId, transportId });
+        logger.error('Error connecting transport', {
+          error,
+          userId: data.userId,
+          transportId,
+        });
         callback({ error: 'Failed to connect transport' });
       }
     });
@@ -295,7 +314,10 @@ async function main() {
         callback({ id: producerInfo.producerId });
       } catch (error) {
         const message = error instanceof Error ? error.message : 'Failed to produce';
-        logger.error('Error producing', { error: message, userId: data.userId });
+        logger.error('Error producing', {
+          error: message,
+          userId: data.userId,
+        });
         // Surface limit errors to client (e.g. "Video participant limit reached (max 25)")
         callback({ error: message });
       }
@@ -306,16 +328,28 @@ async function main() {
       try {
         const roomId = data.roomId;
         if (!roomId) {
-          logger.warn('Consume rejected — not in a room', { userId: data.userId, producerId });
+          logger.warn('Consume rejected — not in a room', {
+            userId: data.userId,
+            producerId,
+          });
           return callback({ error: 'Not in a room' });
         }
 
-        logger.info('Consume requested', { roomId, userId: data.userId, producerId, transportId });
+        logger.info('Consume requested', {
+          roomId,
+          userId: data.userId,
+          producerId,
+          transportId,
+        });
 
         const result = await roomManager.consume(roomId, data.userId, producerId, transportId);
 
         if (!result) {
-          logger.warn('Consume failed — incompatible codecs', { roomId, userId: data.userId, producerId });
+          logger.warn('Consume failed — incompatible codecs', {
+            roomId,
+            userId: data.userId,
+            producerId,
+          });
           return callback({ error: 'Cannot consume — incompatible codecs' });
         }
 
@@ -338,7 +372,11 @@ async function main() {
           source: result.source,
         });
       } catch (error) {
-        logger.error('Error consuming', { error, userId: data.userId, producerId });
+        logger.error('Error consuming', {
+          error,
+          userId: data.userId,
+          producerId,
+        });
         callback({ error: 'Failed to consume' });
       }
     });
@@ -353,7 +391,11 @@ async function main() {
         }
 
         await roomManager.resumeConsumer(roomId, data.userId, consumerId);
-        logger.info('Consumer resumed', { roomId, userId: data.userId, consumerId });
+        logger.info('Consumer resumed', {
+          roomId,
+          userId: data.userId,
+          consumerId,
+        });
         if (callback) callback({ success: true });
       } catch (error) {
         logger.error('Error resuming consumer', { error, userId: data.userId });
@@ -504,7 +546,10 @@ async function main() {
       try {
         await handleLeaveRoom(socket);
       } catch (error) {
-        logger.error('Error during disconnect cleanup', { error, userId: data.userId });
+        logger.error('Error during disconnect cleanup', {
+          error,
+          userId: data.userId,
+        });
       }
     });
   });
@@ -641,7 +686,9 @@ async function main() {
 }
 
 // Start the application
-main().catch((error) => {
+try {
+  await main();
+} catch (error) {
   logger.error('Fatal error during startup', { error });
   process.exit(1);
-});
+}
