@@ -20,10 +20,10 @@ RUN CGO_ENABLED=0 GOOS=linux go build -a -installsuffix cgo -o migrate-media ./c
 # Final stage
 FROM alpine:3.21
 
-RUN apk --no-cache add ca-certificates
+RUN apk --no-cache add ca-certificates \
+    && addgroup -S appuser && adduser -S appuser -G appuser
 
 # Run as non-root user
-RUN addgroup -S appuser && adduser -S appuser -G appuser
 WORKDIR /home/appuser
 
 # Copy binaries from builder
