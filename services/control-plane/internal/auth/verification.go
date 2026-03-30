@@ -21,8 +21,8 @@ import (
 )
 
 const (
-	verifyCodeTTL    = 10 * time.Minute // Code expires after 10 minutes
-	verifyMaxAttempts = 5               // Max wrong-code attempts before invalidating
+	verifyCodeTTL     = 10 * time.Minute // Code expires after 10 minutes
+	verifyMaxAttempts = 5                // Max wrong-code attempts before invalidating
 )
 
 // verificationRecord is stored in Redis keyed by "email_verify:{user_id}".

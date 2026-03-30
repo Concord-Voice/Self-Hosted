@@ -20,9 +20,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
+	_ "github.com/golang-migrate/migrate/v4/source/file" // register file source driver for side effects
 	"github.com/google/uuid"
-	_ "github.com/lib/pq"
+	_ "github.com/lib/pq" // register PostgreSQL driver for side effects
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 

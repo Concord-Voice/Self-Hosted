@@ -17,35 +17,34 @@ import (
 )
 
 const (
-	errMsgInvalidServerID = "Invalid server ID"
-	errMsgInvalidRoleID = "Invalid role ID"
-	errMsgInvalidChannelID = "Invalid channel ID"
-	errMsgInvalidCategoryID = "Invalid category ID"
-	errMsgInvalidRequestBody = "Invalid request body"
+	errMsgInvalidServerID         = "Invalid server ID"
+	errMsgInvalidRoleID           = "Invalid role ID"
+	errMsgInvalidChannelID        = "Invalid channel ID"
+	errMsgInvalidCategoryID       = "Invalid category ID"
+	errMsgInvalidRequestBody      = "Invalid request body"
 	errMsgInsufficientPermissions = "Insufficient permissions"
-	errMsgFailedCheckPermissions = "Failed to check permissions"
-	errMsgRoleNotFound = "Role not found"
-	errMsgChannelNotFound = "Channel not found"
-	errMsgCategoryNotFound = "Category not found"
-	errMsgFailedCreateRole = "Failed to create role"
-	errMsgFailedUpdateRole = "Failed to update role"
-	errMsgFailedDeleteRole = "Failed to delete role"
-	errMsgFailedReorderRoles = "Failed to reorder roles"
-	errMsgFailedAssignRole = "Failed to assign role"
-	errMsgFailedUnassignRole = "Failed to unassign role"
-	errMsgFailedFetchOverrides = "Failed to fetch overrides"
-	errMsgFailedSaveOverride = "Failed to save override"
-	errMsgFailedDeleteOverride = "Failed to delete override"
-	errMsgFailedFetchPermissions = "Failed to fetch permissions"
-	errMsgFailedUpdateSync = "Failed to update sync"
-	errMsgCannotGrantPerms = "Cannot grant permissions you do not have"
-	errMsgFailedGetServerOwner = "Failed to get server owner"
-	errMsgFailedGetActorPosition = "Failed to get actor role position"
-	errMsgFailedQueryRole = "Failed to query role"
-	errMsgFailedQueryChannel = "Failed to query channel"
-	errMsgFailedQueryCategory = "Failed to query category"
+	errMsgFailedCheckPermissions  = "Failed to check permissions"
+	errMsgRoleNotFound            = "Role not found"
+	errMsgChannelNotFound         = "Channel not found"
+	errMsgCategoryNotFound        = "Category not found"
+	errMsgFailedCreateRole        = "Failed to create role"
+	errMsgFailedUpdateRole        = "Failed to update role"
+	errMsgFailedDeleteRole        = "Failed to delete role"
+	errMsgFailedReorderRoles      = "Failed to reorder roles"
+	errMsgFailedAssignRole        = "Failed to assign role"
+	errMsgFailedUnassignRole      = "Failed to unassign role"
+	errMsgFailedFetchOverrides    = "Failed to fetch overrides"
+	errMsgFailedSaveOverride      = "Failed to save override"
+	errMsgFailedDeleteOverride    = "Failed to delete override"
+	errMsgFailedFetchPermissions  = "Failed to fetch permissions"
+	errMsgFailedUpdateSync        = "Failed to update sync"
+	errMsgCannotGrantPerms        = "Cannot grant permissions you do not have"
+	errMsgFailedGetServerOwner    = "Failed to get server owner"
+	errMsgFailedGetActorPosition  = "Failed to get actor role position"
+	errMsgFailedQueryRole         = "Failed to query role"
+	errMsgFailedQueryChannel      = "Failed to query channel"
+	errMsgFailedQueryCategory     = "Failed to query category"
 )
-
 
 // Handler handles RBAC-related HTTP requests
 type Handler struct {
@@ -186,8 +185,8 @@ func (h *Handler) CreateRole(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateRole})
 		return
 	}
-	if Permission(req.Permissions) &^ actorPerms != 0 {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Cannot create a role with permissions you do not have"})
+	if Permission(req.Permissions)&^actorPerms != 0 {
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgCannotGrantPerms})
 		return
 	}
 
@@ -400,7 +399,7 @@ func (h *Handler) checkPermissionEscalation(c *gin.Context, serverID, userID str
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateRole})
 		return true
 	}
-	if Permission(*permissions) &^ actorPerms != 0 {
+	if Permission(*permissions)&^actorPerms != 0 {
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgCannotGrantPerms})
 		return true
 	}
@@ -1115,7 +1114,7 @@ func (h *Handler) UpsertChannelOverride(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCheckPermissions})
 		return
 	}
-	if !actorPerms.Has(PermAdministrator) && Permission(req.Allow) &^ actorPerms != 0 {
+	if !actorPerms.Has(PermAdministrator) && Permission(req.Allow)&^actorPerms != 0 {
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgCannotGrantPerms})
 		return
 	}
@@ -1293,7 +1292,6 @@ func (h *Handler) getCategoryServerID(categoryID string) (string, error) {
 	return serverID, err
 }
 
-
 // ListCategoryOverrides returns all permission overrides for a category
 func (h *Handler) ListCategoryOverrides(c *gin.Context) {
 	userID := c.GetString("user_id")
@@ -1408,7 +1406,7 @@ func (h *Handler) UpsertCategoryOverride(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCheckPermissions})
 		return
 	}
-	if !actorPerms.Has(PermAdministrator) && Permission(req.Allow) &^ actorPerms != 0 {
+	if !actorPerms.Has(PermAdministrator) && Permission(req.Allow)&^actorPerms != 0 {
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgCannotGrantPerms})
 		return
 	}

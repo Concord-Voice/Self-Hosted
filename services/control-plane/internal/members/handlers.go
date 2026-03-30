@@ -8,28 +8,27 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
 const (
-	errMsgInvalidServerID = "Invalid server ID"
-	errMsgInvalidUserID = "Invalid user ID"
-	errMsgInvalidRequestBody = "Invalid request body"
-	errMsgInsufficientPerms = "insufficient permissions"
-	errMsgFailedFetchMembers = "Failed to fetch members"
-	errMsgFailedAddMember = "Failed to add member"
-	errMsgFailedUpdateMember = "Failed to update member"
-	errMsgFailedRemoveMember = "Failed to remove member"
-	errMsgFailedBanMember = "Failed to ban member"
+	errMsgInvalidServerID      = "Invalid server ID"
+	errMsgInvalidUserID        = "Invalid user ID"
+	errMsgInvalidRequestBody   = "Invalid request body"
+	errMsgInsufficientPerms    = "insufficient permissions"
+	errMsgFailedFetchMembers   = "Failed to fetch members"
+	errMsgFailedAddMember      = "Failed to add member"
+	errMsgFailedUpdateMember   = "Failed to update member"
+	errMsgFailedRemoveMember   = "Failed to remove member"
+	errMsgFailedBanMember      = "Failed to ban member"
 	errMsgFailedGetServerOwner = "Failed to get server owner"
 )
-
 
 // Handler handles member-related requests
 type Handler struct {
@@ -65,12 +64,12 @@ type UpdateMemberRequest struct {
 
 // MemberRoleInfo represents a lightweight role reference for display
 type MemberRoleInfo struct {
-	RoleID             string  `json:"role_id"`
-	RoleName           string  `json:"role_name"`
-	RoleColor          *string `json:"role_color,omitempty"`
-	RoleEmoji          *string `json:"role_emoji,omitempty"`
-	Position           int     `json:"position"`
-	DisplaySeparately  bool    `json:"display_separately"`
+	RoleID            string  `json:"role_id"`
+	RoleName          string  `json:"role_name"`
+	RoleColor         *string `json:"role_color,omitempty"`
+	RoleEmoji         *string `json:"role_emoji,omitempty"`
+	Position          int     `json:"position"`
+	DisplaySeparately bool    `json:"display_separately"`
 }
 
 // MemberWithUser represents a member with user details

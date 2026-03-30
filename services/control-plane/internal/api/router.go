@@ -11,9 +11,9 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/channels"
-	"github.com/markdrogersjr/Concord/services/control-plane/internal/email"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/clientconfig"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/dm"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/email"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/friends"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/invites"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/media"
@@ -51,7 +51,6 @@ type mentionCheckerAdapter struct {
 func (a *mentionCheckerAdapter) HasMentionPermission(ctx context.Context, serverID, userID, channelID string, permBit int64) (bool, error) {
 	return a.resolver.HasPermission(ctx, serverID, userID, channelID, rbac.Permission(permBit))
 }
-
 
 // NewRouter creates a new API router and returns the WebSocket hub and NATS client for lifecycle management.
 func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *config.Config, liveSpa *config.LiveSpaConfig, log *logger.Logger) (*gin.Engine, *websocket.Hub, *natsclient.Client) {

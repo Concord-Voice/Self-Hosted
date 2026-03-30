@@ -8,12 +8,12 @@ import (
 	"log"
 	"os"
 
-	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
-	_ "github.com/golang-migrate/migrate/v4/source/file"
-	_ "github.com/joho/godotenv/autoload"
-	_ "github.com/lib/pq"
+	_ "github.com/golang-migrate/migrate/v4/source/file" // register file source driver for side effects
+	_ "github.com/joho/godotenv/autoload"                // register dotenv autoload for side effects
+	_ "github.com/lib/pq"                                // register PostgreSQL driver for side effects
+	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 )
 
 func main() {

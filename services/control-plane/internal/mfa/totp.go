@@ -57,7 +57,7 @@ func ValidateCode(secret, code string) bool {
 
 // EncryptSecret encrypts a TOTP secret using AES-256-GCM.
 // Returns ciphertext and nonce. The encKey must be exactly 32 bytes.
-func EncryptSecret(plaintext []byte, encKey []byte) (ciphertext []byte, nonce []byte, err error) {
+func EncryptSecret(plaintext, encKey []byte) (ciphertext, nonce []byte, err error) {
 	block, err := aes.NewCipher(encKey)
 	if err != nil {
 		return nil, nil, fmt.Errorf("create cipher: %w", err)
@@ -78,7 +78,7 @@ func EncryptSecret(plaintext []byte, encKey []byte) (ciphertext []byte, nonce []
 }
 
 // DecryptSecret decrypts an AES-256-GCM encrypted TOTP secret.
-func DecryptSecret(ciphertext []byte, nonce []byte, encKey []byte) ([]byte, error) {
+func DecryptSecret(ciphertext, nonce, encKey []byte) ([]byte, error) {
 	block, err := aes.NewCipher(encKey)
 	if err != nil {
 		return nil, fmt.Errorf("create cipher: %w", err)

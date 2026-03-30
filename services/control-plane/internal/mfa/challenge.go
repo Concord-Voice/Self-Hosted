@@ -38,7 +38,7 @@ func GenerateChallengeToken(userID string, purpose ChallengePurpose, jwtSecret s
 }
 
 // GenerateRecoveryToken creates a recovery-purpose JWT with a longer TTL (25 hours).
-func GenerateRecoveryToken(userID string, jwtSecret string) (string, string, error) {
+func GenerateRecoveryToken(userID, jwtSecret string) (string, string, error) {
 	return generateChallengeTokenWithTTL(userID, PurposeRecovery, jwtSecret, recoveryTTL)
 }
 

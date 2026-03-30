@@ -6,33 +6,32 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
 const (
-	errMsgInvalidServerID = "Invalid server ID"
-	errMsgInvalidChannelID = "Invalid channel ID"
-	errMsgInvalidRequestBody = "Invalid request body"
-	errMsgInsufficientPerms = "insufficient permissions"
-	errMsgNotMemberOfServer = "Not a member of this server"
-	errMsgChannelNotFound = "Channel not found"
-	errMsgChannelNotEncrypted = "Channel is not encrypted"
-	errMsgFailedFetchChannels = "Failed to fetch channels"
-	errMsgFailedCreateChannel = "Failed to create channel"
-	errMsgFailedUpdateChannel = "Failed to update channel"
-	errMsgFailedDeleteChannel = "Failed to delete channel"
-	errMsgFailedCheckMembership = "Failed to check membership"
-	errMsgFailedFetchKeys = "Failed to fetch keys"
+	errMsgInvalidServerID         = "Invalid server ID"
+	errMsgInvalidChannelID        = "Invalid channel ID"
+	errMsgInvalidRequestBody      = "Invalid request body"
+	errMsgInsufficientPerms       = "insufficient permissions"
+	errMsgNotMemberOfServer       = "Not a member of this server"
+	errMsgChannelNotFound         = "Channel not found"
+	errMsgChannelNotEncrypted     = "Channel is not encrypted"
+	errMsgFailedFetchChannels     = "Failed to fetch channels"
+	errMsgFailedCreateChannel     = "Failed to create channel"
+	errMsgFailedUpdateChannel     = "Failed to update channel"
+	errMsgFailedDeleteChannel     = "Failed to delete channel"
+	errMsgFailedCheckMembership   = "Failed to check membership"
+	errMsgFailedFetchKeys         = "Failed to fetch keys"
 	errMsgFailedFetchUnreadCounts = "Failed to fetch unread counts"
-	errMsgFailedMarkServerRead = "Failed to mark server read"
-	errMsgNoEncryptionKey = "No encryption key available yet"
+	errMsgFailedMarkServerRead    = "Failed to mark server read"
+	errMsgNoEncryptionKey         = "No encryption key available yet"
 )
-
 
 // Handler handles channel-related requests
 type Handler struct {

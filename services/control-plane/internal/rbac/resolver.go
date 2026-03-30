@@ -205,10 +205,10 @@ func (r *Resolver) applyChannelOverrides(ctx context.Context, channelID, userID 
 
 	// Apply overrides in order: base → role allow → role deny → user allow → user deny
 	finalPerms := basePerms
-	finalPerms |= roleAllow  // Add role-allowed permissions
-	finalPerms &^= roleDeny  // Remove role-denied permissions
-	finalPerms |= userAllow  // Add user-allowed permissions
-	finalPerms &^= userDeny  // Remove user-denied permissions (final authority)
+	finalPerms |= roleAllow // Add role-allowed permissions
+	finalPerms &^= roleDeny // Remove role-denied permissions
+	finalPerms |= userAllow // Add user-allowed permissions
+	finalPerms &^= userDeny // Remove user-denied permissions (final authority)
 
 	return finalPerms, nil
 }

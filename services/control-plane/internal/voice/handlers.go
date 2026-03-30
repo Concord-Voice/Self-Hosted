@@ -8,12 +8,12 @@ import (
 	"net/http"
 	"strconv"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
 // Handler handles voice-related requests.
@@ -38,15 +38,15 @@ func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, cfg *config.
 
 // Participant represents a user currently in a voice channel.
 type Participant struct {
-	UserID         string `json:"user_id"`
-	Username       string `json:"username"`
-	DisplayName    string `json:"display_name,omitempty"`
-	AvatarURL      string `json:"avatar_url,omitempty"`
-	IsMuted        bool   `json:"is_muted"`
-	IsDeafened     bool   `json:"is_deafened"`
-	IsVideoOn      bool   `json:"is_video_on"`
-	IsScreenSharing bool  `json:"is_screen_sharing"`
-	JoinedAt       string `json:"joined_at"`
+	UserID          string `json:"user_id"`
+	Username        string `json:"username"`
+	DisplayName     string `json:"display_name,omitempty"`
+	AvatarURL       string `json:"avatar_url,omitempty"`
+	IsMuted         bool   `json:"is_muted"`
+	IsDeafened      bool   `json:"is_deafened"`
+	IsVideoOn       bool   `json:"is_video_on"`
+	IsScreenSharing bool   `json:"is_screen_sharing"`
+	JoinedAt        string `json:"joined_at"`
 }
 
 // GetParticipants returns all users currently in a voice channel.
