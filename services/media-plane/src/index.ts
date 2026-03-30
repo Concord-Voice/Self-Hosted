@@ -623,7 +623,7 @@ async function main() {
   const epochSyncInterval = setInterval(() => {
     for (const roomId of roomManager.getActiveRoomIds()) {
       const room = roomManager.getRoom(roomId);
-      if (room && room.isEncrypted) {
+      if (room?.isEncrypted) {
         io.to(roomId).emit('epoch-sync', { epoch: room.e2eeEpoch });
       }
     }

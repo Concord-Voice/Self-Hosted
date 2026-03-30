@@ -45,7 +45,7 @@ export class MediasoupService {
     let router = this.routers.get(roomId);
 
     // Evict stale closed routers (room was destroyed and user is rejoining)
-    if (router && router.closed) {
+    if (router?.closed) {
       this.routers.delete(roomId);
       router = undefined;
     }

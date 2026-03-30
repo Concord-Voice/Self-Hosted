@@ -64,11 +64,31 @@ export interface TransportOptions {
 // ---------------------------------------------------------------------------
 
 export type RoomEvent =
-  | { type: 'user-joined'; roomId: string; userId: string; username: string; displayName?: string }
+  | {
+      type: 'user-joined';
+      roomId: string;
+      userId: string;
+      username: string;
+      displayName?: string;
+    }
   | { type: 'user-left'; roomId: string; userId: string }
   | { type: 'room-empty'; roomId: string }
-  | { type: 'producer-added'; roomId: string; userId: string; producerId: string; kind: MediaKind; source: MediaSource }
-  | { type: 'producer-removed'; roomId: string; userId: string; producerId: string; kind: MediaKind; source: MediaSource }
+  | {
+      type: 'producer-added';
+      roomId: string;
+      userId: string;
+      producerId: string;
+      kind: MediaKind;
+      source: MediaSource;
+    }
+  | {
+      type: 'producer-removed';
+      roomId: string;
+      userId: string;
+      producerId: string;
+      kind: MediaKind;
+      source: MediaSource;
+    }
   | { type: 'active-speaker'; roomId: string; userId: string; volume: number };
 
 export type RoomEventHandler = (event: RoomEvent) => void;
@@ -104,7 +124,10 @@ export class RoomManager {
       try {
         handler(event);
       } catch (err) {
-        logger.error('Room event handler error', { event: event.type, error: err });
+        logger.error('Room event handler error', {
+          event: event.type,
+          error: err,
+        });
       }
     }
   }
@@ -118,7 +141,9 @@ export class RoomManager {
       // Defensive: if the router was closed (e.g. race between leave and rejoin),
       // discard the stale room and recreate it below.
       if (room.router.closed) {
-        logger.warn('Room has closed router, discarding stale room', { roomId });
+        logger.warn('Room has closed router, discarding stale room', {
+          roomId,
+        });
         this.rooms.delete(roomId);
         room = undefined;
       } else {
@@ -137,7 +162,10 @@ export class RoomManager {
         interval: config.audioLevelObserver.interval,
       });
     } catch (err) {
-      logger.warn('Failed to create AudioLevelObserver', { roomId, error: err });
+      logger.warn('Failed to create AudioLevelObserver', {
+        roomId,
+        error: err,
+      });
     }
 
     room = {
@@ -156,7 +184,7 @@ export class RoomManager {
         if (volumes.length === 0) return;
         const { producer, volume } = volumes[0];
         // Find the participant who owns this producer
-        for (const [, participant] of room!.participants) {
+        for (const [, participant] of room.participants) {
           for (const [, entry] of participant.producers) {
             if (entry.producer.id === producer.id) {
               this.emitEvent({
@@ -227,7 +255,12 @@ export class RoomManager {
   ): Promise<{
     rtpCapabilities: RtpCapabilities;
     existingProducers: ProducerInfo[];
-    participants: Array<{ userId: string; username: string; displayName?: string; avatarUrl?: string }>;
+    participants: Array<{
+      userId: string;
+      username: string;
+      displayName?: string;
+      avatarUrl?: string;
+    }>;
     e2eeEpoch: number;
   }> {
     let room = await this.getOrCreateRoom(roomId);
@@ -415,22 +448,34 @@ export class RoomManager {
     }
 
     // Log ICE/DTLS state transitions for diagnostics
+    const iceLogLevel: Record<string, string> = { completed: 'info', disconnected: 'warn', closed: 'warn' };
+    const dtlsLogLevel: Record<string, string> = { connected: 'info', failed: 'error', closed: 'warn' };
     transport.on('icestatechange', (iceState) => {
-      const level = iceState === 'completed' ? 'info' : iceState === 'disconnected' || iceState === 'closed' ? 'warn' : 'debug';
-      logger.log(level, 'Transport ICE state change', {
-        transportId: transport.id, roomId, userId, direction, iceState,
+      logger.log(iceLogLevel[iceState] || 'debug', 'Transport ICE state change', {
+        transportId: transport.id,
+        roomId,
+        userId,
+        direction,
+        iceState,
       });
     });
     transport.on('dtlsstatechange', (dtlsState) => {
-      const level = dtlsState === 'connected' ? 'info' : dtlsState === 'failed' ? 'error' : dtlsState === 'closed' ? 'warn' : 'debug';
-      logger.log(level, 'Transport DTLS state change', {
-        transportId: transport.id, roomId, userId, direction, dtlsState,
+      logger.log(dtlsLogLevel[dtlsState] || 'debug', 'Transport DTLS state change', {
+        transportId: transport.id,
+        roomId,
+        userId,
+        direction,
+        dtlsState,
       });
     });
 
     // Clean up on transport close
     transport.on('routerclose', () => {
-      logger.debug('Transport router closed', { transportId: transport.id, roomId, userId });
+      logger.debug('Transport router closed', {
+        transportId: transport.id,
+        roomId,
+        userId,
+      });
     });
 
     logger.debug('Transport created', {
@@ -480,7 +525,7 @@ export class RoomManager {
     const participant = room.participants.get(userId);
     if (!participant) throw new Error('Participant not found');
 
-    if (!participant.sendTransport || participant.sendTransport.id !== transportId) {
+    if (participant.sendTransport?.id !== transportId) {
       throw new Error('Send transport not found or mismatch');
     }
 
@@ -539,7 +584,12 @@ export class RoomManager {
 
     // Add mic audio producers to the AudioLevelObserver (skip screen-audio to
     // avoid false active-speaker detection from system audio)
-    if (kind === 'audio' && source !== 'screen-audio' && room.audioLevelObserver && !room.audioLevelObserver.closed) {
+    if (
+      kind === 'audio' &&
+      source !== 'screen-audio' &&
+      room.audioLevelObserver &&
+      !room.audioLevelObserver.closed
+    ) {
       try {
         await room.audioLevelObserver.addProducer({ producerId: producer.id });
       } catch (err) {
@@ -555,7 +605,12 @@ export class RoomManager {
       participant.producers.delete(producer.id);
     });
 
-    const info: ProducerInfo = { producerId: producer.id, userId, kind, source };
+    const info: ProducerInfo = {
+      producerId: producer.id,
+      userId,
+      kind,
+      source,
+    };
 
     logger.info('Producer created', {
       producerId: producer.id,
@@ -596,7 +651,11 @@ export class RoomManager {
   }
 
   /** Close and remove a producer */
-  async closeProducer(roomId: string, userId: string, producerId: string): Promise<MediaSource | null> {
+  async closeProducer(
+    roomId: string,
+    userId: string,
+    producerId: string
+  ): Promise<MediaSource | null> {
     const room = this.rooms.get(roomId);
     if (!room) return null;
 
@@ -618,7 +677,13 @@ export class RoomManager {
       source: entry.source,
     });
 
-    logger.info('Producer closed', { producerId, roomId, userId, kind: entry.kind, source: entry.source });
+    logger.info('Producer closed', {
+      producerId,
+      roomId,
+      userId,
+      kind: entry.kind,
+      source: entry.source,
+    });
     return entry.source;
   }
 
@@ -672,7 +737,11 @@ export class RoomManager {
     }
 
     // Find the producer and its owner
-    let producerEntry: { producer: Producer; source: MediaSource; kind: MediaKind } | null = null;
+    let producerEntry: {
+      producer: Producer;
+      source: MediaSource;
+      kind: MediaKind;
+    } | null = null;
     let producerUserId = '';
     for (const [, participant] of room.participants) {
       const entry = participant.producers.get(producerId);
@@ -688,7 +757,12 @@ export class RoomManager {
     }
 
     // Check if the router can route this producer to this consumer
-    if (!room.router.canConsume({ producerId, rtpCapabilities: consumer.rtpCapabilities })) {
+    if (
+      !room.router.canConsume({
+        producerId,
+        rtpCapabilities: consumer.rtpCapabilities,
+      })
+    ) {
       logger.warn('Cannot consume — incompatible codecs', {
         producerId,
         consumerUserId,

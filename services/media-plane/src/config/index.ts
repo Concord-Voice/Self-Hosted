@@ -344,4 +344,4 @@ if (config.environment === 'production' && config.jwtSecret === DEV_JWT_SECRET) 
 
 // Re-export mediasoup types for convenience
 import * as mediasoup from 'mediasoup';
-export type { mediasoup };
+export type * as mediasoupTypes from 'mediasoup';
