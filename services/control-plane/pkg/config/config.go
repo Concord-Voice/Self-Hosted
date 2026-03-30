@@ -11,9 +11,9 @@ import (
 	"github.com/joho/godotenv"
 )
 
-const devJWTSecret = "dev_jwt_secret_change_in_production"       // #nosec G101 -- Not a real secret, just the default placeholder
+const devJWTSecret = "dev_jwt_secret_change_in_production"                              // #nosec G101 -- Not a real secret, just the default placeholder
 const devMFAEncKey = "0000000000000000000000000000000000000000000000000000000000000000" // #nosec G101 -- 32-byte zero key, dev only
-const devMinIOSecretKey = "concord_dev_minio"                                          // #nosec G101 -- dev default, guarded by validate()
+const devMinIOSecretKey = "concord_dev_minio"                                           // #nosec G101 -- dev default, guarded by validate()
 
 // Development-only connection values. NOT secrets — match docker-compose.yml.
 // validate() rejects these in production.
@@ -69,6 +69,9 @@ type Config struct {
 	// Desktop update assets — local directory populated by deploy.sh
 	ReleasesDir string // Path to directory containing release assets; empty disables update endpoint
 
+	// SPA assets — versioned directories populated by deploy-spa.yml via rsync
+	SpaDir string // Root directory for SPA builds (e.g. "/opt/concord/spa"); empty disables SPA serving
+
 	// SMTP (email verification)
 	SMTPHost     string // SMTP server hostname (e.g. "smtp.protonmail.ch"); empty = dev mode (log codes to stdout)
 	SMTPPort     int    // SMTP server port (default 587 for STARTTLS submission)
@@ -77,8 +80,8 @@ type Config struct {
 	SMTPFrom     string // Sender address (e.g. "noreply@concordvoice.chat")
 
 	// MFA (TOTP + WebAuthn)
-	MFAEncryptionKey  string // 32-byte hex-encoded AES key for TOTP secret encryption at rest
-	WebAuthnRPID      string // Relying Party ID (domain, e.g. "concordvoice.chat")
+	MFAEncryptionKey  string   // 32-byte hex-encoded AES key for TOTP secret encryption at rest
+	WebAuthnRPID      string   // Relying Party ID (domain, e.g. "concordvoice.chat")
 	WebAuthnRPOrigins []string // Allowed origins for WebAuthn (e.g. "https://concordvoice.chat")
 
 	// Object Storage (MinIO / S3-compatible)
@@ -116,6 +119,7 @@ func Load() (*Config, error) {
 		SpaIpcContract:        getEnvInt("SPA_IPC_CONTRACT", 0),
 		SpaConfigFile:         getEnv("SPA_CONFIG_FILE", ""),
 		ReleasesDir:           getEnv("RELEASES_DIR", ""),
+		SpaDir:                getEnv("SPA_DIR", ""),
 		SMTPHost:              getEnv("SMTP_HOST", ""),
 		SMTPPort:              getEnvInt("SMTP_PORT", 587),
 		SMTPUsername:          getEnv("SMTP_USERNAME", ""),

@@ -25,6 +25,7 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/servers"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/sessions"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/spa"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/updates"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/users"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/voice"
@@ -138,6 +139,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	wsTicketHandler := auth.NewWSTicketHandler(redis, cfg.JWTSecret)
 	clientConfigHandler := clientconfig.NewHandler(cfg, liveSpa, log)
 	updatesHandler := updates.NewHandler(cfg, log)
+	spaHandler := spa.NewHandler(cfg.SpaDir, log)
 
 	// Start NATS voice event subscriber
 	if natsClient != nil {
@@ -239,6 +241,15 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 			middleware.RateLimitByIP(redis, 30, 1*time.Minute),
 			updatesHandler.ServeUpdateAsset,
 		)
+
+		// SPA assets (public — served to desktop shells for Tier 3 hot updates)
+		// Cloudflare caches hashed assets (immutable/1yr) and index.html (5min).
+		if cfg.SpaDir != "" {
+			v1.GET("/spa/*filepath",
+				middleware.RateLimitByIP(redis, 60, 1*time.Minute),
+				spaHandler.ServeAsset,
+			)
+		}
 
 		// Protected routes — split into two tiers:
 		// pendingOK: authenticated but email may be unverified (verification, logout, basic profile)
