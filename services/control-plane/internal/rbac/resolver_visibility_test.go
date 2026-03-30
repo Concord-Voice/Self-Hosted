@@ -204,19 +204,19 @@ func TestGetVisibleChannelIDsUserDenyOverridesUserAllow(t *testing.T) {
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
 	ch := ts.CreateTestChannel(t, serverID, "contested-10", false)
 
-	// Get @all role and deny view at role level
-	var allRoleID string
-	err := ts.DB.QueryRow(`SELECT id FROM roles WHERE server_id = $1 AND is_default = TRUE`, serverID).Scan(&allRoleID)
+	// Channel is visible from base permissions (no role overrides)
+	ids, err := resolver.GetVisibleChannelIDs(ctx, serverID, member.ID)
 	require.NoError(t, err)
-	ts.CreateChannelOverride(t, ch, "role", allRoleID, 0, int64(rbac.PermViewTextChannels))
+	assert.Contains(t, ids, ch, "channel should be visible from base permissions")
 
-	// User-allow AND user-deny on the same channel for the same permission
+	// Apply user-allow AND user-deny for the same permission on the same channel.
+	// No role-level deny — isolates the user-allow → user-deny precedence.
 	ts.CreateChannelOverride(t, ch, "user", member.ID,
 		int64(rbac.PermViewTextChannels), // allow
 		int64(rbac.PermViewTextChannels), // deny (final authority)
 	)
 
-	ids, err := resolver.GetVisibleChannelIDs(ctx, serverID, member.ID)
+	ids, err = resolver.GetVisibleChannelIDs(ctx, serverID, member.ID)
 	require.NoError(t, err)
 	assert.NotContains(t, ids, ch, "user-deny should override user-allow (deny is final authority)")
 }
