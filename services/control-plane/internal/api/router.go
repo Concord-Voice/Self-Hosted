@@ -57,8 +57,15 @@ func (a *mentionCheckerAdapter) HasMentionPermission(ctx context.Context, server
 func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *config.Config, liveSpa *config.LiveSpaConfig, log *logger.Logger) (*gin.Engine, *websocket.Hub, *natsclient.Client) {
 	router := gin.New()
 
+	// Trust no proxies by default — ClientIP() uses RemoteAddr only.
+	// In Docker, nginx is the sole reverse proxy and sets X-Real-IP.
+	// This prevents spoofed X-Forwarded-For from bypassing IP-based rate
+	// limits and auth failure bans.
+	router.SetTrustedProxies(nil) //nolint:errcheck // nil arg never errors
+
 	// Middleware
 	router.Use(gin.Recovery())
+	router.Use(middleware.RequestID())
 	router.Use(middleware.Logger(log))
 	router.Use(middleware.SecurityHeaders(cfg.Environment))
 	router.Use(middleware.CORS(cfg.AllowedOrigins))
@@ -152,8 +159,9 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	// API v1 routes
 	v1 := router.Group("/api/v1")
 	{
-		// Auth routes with rate limiting
+		// Auth routes with rate limiting + IP-based auth failure ban check
 		authRoutes := v1.Group("/auth")
+		authRoutes.Use(middleware.AuthBanCheck(redis))
 		{
 			// Register: 5 attempts per 15 minutes (prevent spam account creation)
 			authRoutes.POST("/register",

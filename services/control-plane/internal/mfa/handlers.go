@@ -20,6 +20,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/email"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/redis/go-redis/v9"
 )
@@ -1085,6 +1086,7 @@ func (h *Handler) Verify(c *gin.Context) {
 
 	if !verified {
 		h.recordVerifyFailure(ctx, attemptsKey, lockoutKey)
+		middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
 		c.JSON(http.StatusForbidden, gin.H{"error": "Invalid MFA code"})
 		return
 	}
@@ -1092,6 +1094,7 @@ func (h *Handler) Verify(c *gin.Context) {
 	// Mark challenge as used (single-use)
 	h.redis.Set(ctx, usedKey, "1", 10*time.Minute)
 	h.redis.Del(ctx, attemptsKey)
+	middleware.ClearAuthFailures(ctx, h.redis, c.ClientIP())
 
 	h.completeVerifyPurpose(ctx, c, claims, purpose)
 }

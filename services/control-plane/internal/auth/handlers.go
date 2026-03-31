@@ -485,6 +485,7 @@ func (h *Handler) Login(c *gin.Context) {
 		if err == sql.ErrNoRows {
 			// Record failure even for non-existent accounts (timing-safe)
 			h.recordFailedLogin(ctx, req.Email)
+			middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
 			c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
 			return
 		}
@@ -502,11 +503,13 @@ func (h *Handler) Login(c *gin.Context) {
 	}
 	if !valid {
 		h.recordFailedLogin(ctx, req.Email)
+		middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
 		return
 	}
 
-	// Clear failed login attempts on success
+	// Clear per-email login attempts on success (IP failures are cleared
+	// in CompleteLogin after full auth — including MFA — is done)
 	h.clearLoginAttempts(ctx, req.Email)
 
 	// Resolve remember_me preference (default: true for backward compat)
@@ -669,6 +672,11 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) 
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
 		return
 	}
+
+	// Clear cumulative IP auth failures only after full auth completion
+	// (credentials + MFA if enabled). This prevents resetting the counter
+	// by repeatedly passing the credential step while brute-forcing MFA.
+	middleware.ClearAuthFailures(c.Request.Context(), h.redis, c.ClientIP())
 
 	h.log.Info("User logged in (MFA verified)", "user_id", userID)
 
@@ -1436,6 +1444,7 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 	data, err := h.redis.Get(ctx, redisKey).Bytes()
 	if err == redis.Nil {
 		// Return the same error shape as a wrong code to prevent email enumeration
+		middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryCode, "attempts_remaining": 0})
 		return
 	}
@@ -1455,6 +1464,7 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 	// Check attempt limit — return the same error shape to prevent enumeration
 	if record.Attempts >= recoveryMaxAttempts {
 		h.redis.Del(ctx, redisKey)
+		middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryCode, "attempts_remaining": 0})
 		return
 	}
@@ -1468,6 +1478,7 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 		if ttl > 0 {
 			h.redis.Set(ctx, redisKey, updated, ttl)
 		}
+		middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
 		c.JSON(http.StatusUnauthorized, gin.H{
 			"error":              errInvalidExpiredRecoveryCode,
 			"attempts_remaining": 0,
@@ -1570,6 +1581,7 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 	}
 	claims, err := h.mfaChecker.ValidateRecoveryToken(req.RecoveryToken)
 	if err != nil {
+		middleware.RecordAuthFailure(c.Request.Context(), h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryToken})
 		return
 	}
@@ -1725,6 +1737,7 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 	// Disconnect user's WebSocket sessions
 	h.hub.DisconnectUser(uuid.MustParse(claims.UserID))
 
+	middleware.ClearAuthFailures(ctx, h.redis, c.ClientIP())
 	h.log.Info("Password reset via recovery", "user_id", claims.UserID)
 	c.JSON(http.StatusOK, gin.H{"message": "Password reset successfully. Please sign in with your new password."})
 }
