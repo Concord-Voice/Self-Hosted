@@ -10,14 +10,14 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/api"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -399,6 +399,32 @@ func (ts *TestServer) CreateChannelOverride(t *testing.T, channelID, targetType,
 	if err != nil {
 		t.Fatalf("testhelpers: failed to create channel override: %v", err)
 	}
+}
+
+// CreateTestMessage sends a message to a channel via the API and returns the message ID.
+func (ts *TestServer) CreateTestMessage(t *testing.T, channelID string, user TestUser, content string) string {
+	t.Helper()
+
+	w := ts.DoRequest("POST", "/api/v1/messages", map[string]interface{}{
+		"channel_id": channelID,
+		"content":    content,
+	}, AuthHeaders(user.AccessToken))
+
+	if w.Code != http.StatusCreated {
+		t.Fatalf("testhelpers: CreateTestMessage expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp struct {
+		Message struct {
+			ID string `json:"id"`
+		} `json:"message"`
+	}
+	ParseJSON(t, w, &resp)
+	if resp.Message.ID == "" {
+		t.Fatalf("testhelpers: CreateTestMessage missing or empty message.id in response: %s", w.Body.String())
+	}
+
+	return resp.Message.ID
 }
 
 // CreateVoiceChannel creates a voice channel in the given server and returns its ID.
