@@ -44,20 +44,20 @@ type ChannelGroup struct {
 
 // Channel represents a voice or text channel within a server
 type Channel struct {
-	ID               string    `json:"id" db:"id"`
-	ServerID         string    `json:"server_id" db:"server_id"`
-	Name             string    `json:"name" db:"name"`
-	Description      *string   `json:"description,omitempty" db:"description"`
-	Type             string    `json:"type" db:"type"` // voice, text, bulletin
-	Emoji            *string   `json:"emoji,omitempty" db:"emoji"`                           // Optional custom emoji
-	IsEncrypted      bool      `json:"is_encrypted" db:"is_encrypted"`
-	AudioQualityTier *string   `json:"audio_quality_tier,omitempty" db:"audio_quality_tier"` // voice/standard/high/hifi/studio or nil (personal)
-	GroupID              *string   `json:"group_id,omitempty" db:"group_id"`                             // FK to channel_groups; nil = uncategorized
+	ID                   string    `json:"id" db:"id"`
+	ServerID             string    `json:"server_id" db:"server_id"`
+	Name                 string    `json:"name" db:"name"`
+	Description          *string   `json:"description,omitempty" db:"description"`
+	Type                 string    `json:"type" db:"type"`             // voice, text, bulletin
+	Emoji                *string   `json:"emoji,omitempty" db:"emoji"` // Optional custom emoji
+	IsEncrypted          bool      `json:"is_encrypted" db:"is_encrypted"`
+	AudioQualityTier     *string   `json:"audio_quality_tier,omitempty" db:"audio_quality_tier"`           // voice/standard/high/hifi/studio or nil (personal)
+	GroupID              *string   `json:"group_id,omitempty" db:"group_id"`                               // FK to channel_groups; nil = uncategorized
 	LinkedVoiceChannelID *string   `json:"linked_voice_channel_id,omitempty" db:"linked_voice_channel_id"` // Non-nil = hidden text chat for a voice channel
-	SyncPermissions      bool      `json:"sync_permissions" db:"sync_permissions"`                       // Whether channel overrides sync from parent category
+	SyncPermissions      bool      `json:"sync_permissions" db:"sync_permissions"`                         // Whether channel overrides sync from parent category
 	Position             int       `json:"position" db:"position"`
-	CreatedAt        time.Time `json:"created_at" db:"created_at"`
-	UpdatedAt        time.Time `json:"updated_at" db:"updated_at"`
+	CreatedAt            time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // ChannelKey represents a channel symmetric key wrapped for a specific user
@@ -87,9 +87,10 @@ type Message struct {
 // MessageWithUser combines message with user details
 type MessageWithUser struct {
 	Message
-	Username    string  `json:"username" db:"username"`
-	DisplayName *string `json:"display_name,omitempty" db:"display_name"`
-	AvatarURL   *string `json:"avatar_url,omitempty" db:"avatar_url"`
+	Username    string            `json:"username" db:"username"`
+	DisplayName *string           `json:"display_name,omitempty" db:"display_name"`
+	AvatarURL   *string           `json:"avatar_url,omitempty" db:"avatar_url"`
+	Reactions   []ReactionSummary `json:"reactions,omitempty"`
 }
 
 // ServerInvite represents an invite code for joining a server

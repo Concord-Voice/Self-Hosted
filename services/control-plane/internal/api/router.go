@@ -947,6 +947,18 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					messagesHandler.SuppressEmbeds,
 				)
+
+				// Toggle reaction on a message (30 requests per minute)
+				messageRoutes.PUT("/:id/reactions",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					messagesHandler.ToggleReaction,
+				)
+
+				// Get reactions for a message (30 requests per minute)
+				messageRoutes.GET("/:id/reactions",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					messagesHandler.GetReactions,
+				)
 			}
 
 			// Invite routes (join + preview)

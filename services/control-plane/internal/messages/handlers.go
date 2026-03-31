@@ -16,19 +16,18 @@ import (
 )
 
 const (
-	errMsgInvalidRequestBody = "Invalid request body"
-	errMsgInvalidMessageID = "Invalid message ID"
-	errMsgInsufficientPerms = "Insufficient permissions"
-	errMsgMessageNotFound = "Message not found"
-	errMsgFailedCheckPerms = "Failed to check permissions"
-	errMsgFailedFetchMessages = "Failed to fetch messages"
-	errMsgFailedSendMessage = "Failed to send message"
-	errMsgFailedUpdateMessage = "Failed to update message"
-	errMsgFailedDeleteMessage = "Failed to delete message"
-	errMsgFailedSuppressEmbeds = "Failed to suppress embeds"
+	errMsgInvalidRequestBody     = "Invalid request body"
+	errMsgInvalidMessageID       = "Invalid message ID"
+	errMsgInsufficientPerms      = "Insufficient permissions"
+	errMsgMessageNotFound        = "Message not found"
+	errMsgFailedCheckPerms       = "Failed to check permissions"
+	errMsgFailedFetchMessages    = "Failed to fetch messages"
+	errMsgFailedSendMessage      = "Failed to send message"
+	errMsgFailedUpdateMessage    = "Failed to update message"
+	errMsgFailedDeleteMessage    = "Failed to delete message"
+	errMsgFailedSuppressEmbeds   = "Failed to suppress embeds"
 	errMsgInsufficientPermsLower = "insufficient permissions"
 )
-
 
 // minCiphertextSize is the minimum base64-decoded size for a valid AES-GCM ciphertext:
 // 12 bytes IV + 16 bytes auth tag = 28 bytes minimum (empty plaintext).
@@ -202,6 +201,25 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		h.log.Error("Error iterating messages", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchMessages})
 		return
+	}
+
+	// Batch-load reactions for all fetched messages
+	if len(messages) > 0 {
+		messageIDs := make([]string, len(messages))
+		for i, m := range messages {
+			messageIDs[i] = m.ID
+		}
+		reactionMap, loadErr := loadReactionsForMessages(h.db, messageIDs, userID)
+		if loadErr != nil {
+			h.log.Error("Failed to load reactions", "error", loadErr)
+			// Non-fatal: return messages without reactions
+		} else {
+			for i := range messages {
+				if reactions, ok := reactionMap[messages[i].ID]; ok {
+					messages[i].Reactions = reactions
+				}
+			}
+		}
 	}
 
 	// Return DESC order (newest first) — consistent with DM message handler.
@@ -433,7 +451,7 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 				"content":           message.Content,
 				"is_encrypted":      message.IsEncrypted,
 				"key_version":       message.KeyVersion,
-				"embeds_suppressed":  message.EmbedsSuppressed,
+				"embeds_suppressed": message.EmbedsSuppressed,
 				"edited_at":         message.EditedAt,
 				"updated_at":        message.UpdatedAt,
 			},
