@@ -811,6 +811,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 					messagesHandler.GetMessages,
 				)
 
+				// Get pinned messages for a channel (30 requests per minute)
+				channelRoutes.GET("/:id/pins",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					messagesHandler.GetChannelPins,
+				)
+
 				// Mark channel as read (30 requests per minute)
 				channelRoutes.POST("/:id/read",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
@@ -958,6 +964,18 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				messageRoutes.GET("/:id/reactions",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					messagesHandler.GetReactions,
+				)
+
+				// Pin a message (10 requests per minute)
+				messageRoutes.POST("/:id/pin",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					messagesHandler.PinMessage,
+				)
+
+				// Unpin a message (10 requests per minute)
+				messageRoutes.DELETE("/:id/pin",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					messagesHandler.UnpinMessage,
 				)
 			}
 

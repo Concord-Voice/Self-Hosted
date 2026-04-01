@@ -80,6 +80,8 @@ type Message struct {
 	KeyVersion       int        `json:"key_version" db:"key_version"`
 	EmbedsSuppressed bool       `json:"embeds_suppressed" db:"embeds_suppressed"`
 	ReplyToID        *string    `json:"reply_to_id,omitempty" db:"reply_to_id"`
+	PinnedAt         *time.Time `json:"pinned_at,omitempty" db:"pinned_at"`
+	PinnedBy         *string    `json:"pinned_by,omitempty" db:"pinned_by"`
 	EditedAt         *time.Time `json:"edited_at,omitempty" db:"edited_at"`
 	CreatedAt        time.Time  `json:"created_at" db:"created_at"`
 	UpdatedAt        time.Time  `json:"updated_at" db:"updated_at"`

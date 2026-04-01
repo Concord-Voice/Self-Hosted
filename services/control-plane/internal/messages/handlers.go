@@ -227,7 +227,7 @@ func (h *Handler) queryMessages(channelID, before string, limit int) ([]models.M
 	if before != "" {
 		query = `
 			SELECT m.id, m.channel_id, m.user_id, m.content, m.is_encrypted, COALESCE(m.key_version, 1),
-			       m.embeds_suppressed, m.reply_to_id, m.edited_at, m.created_at, m.updated_at,
+			       m.embeds_suppressed, m.reply_to_id, m.pinned_at, m.pinned_by, m.edited_at, m.created_at, m.updated_at,
 			       u.username, u.display_name, u.avatar_url
 			FROM messages m
 			INNER JOIN users u ON m.user_id = u.id
@@ -240,7 +240,7 @@ func (h *Handler) queryMessages(channelID, before string, limit int) ([]models.M
 	} else {
 		query = `
 			SELECT m.id, m.channel_id, m.user_id, m.content, m.is_encrypted, COALESCE(m.key_version, 1),
-			       m.embeds_suppressed, m.reply_to_id, m.edited_at, m.created_at, m.updated_at,
+			       m.embeds_suppressed, m.reply_to_id, m.pinned_at, m.pinned_by, m.edited_at, m.created_at, m.updated_at,
 			       u.username, u.display_name, u.avatar_url
 			FROM messages m
 			INNER JOIN users u ON m.user_id = u.id
@@ -269,6 +269,8 @@ func (h *Handler) queryMessages(channelID, before string, limit int) ([]models.M
 			&msg.KeyVersion,
 			&msg.EmbedsSuppressed,
 			&msg.ReplyToID,
+			&msg.PinnedAt,
+			&msg.PinnedBy,
 			&msg.EditedAt,
 			&msg.CreatedAt,
 			&msg.UpdatedAt,
