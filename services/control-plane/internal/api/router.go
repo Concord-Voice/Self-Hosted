@@ -817,6 +817,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 					messagesHandler.GetChannelPins,
 				)
 
+				// Bulk message fetch for search backfill (20 requests per minute)
+				channelRoutes.GET("/:id/messages/bulk",
+					middleware.RateLimitByUser(redis, 20, 1*time.Minute),
+					messagesHandler.GetMessagesBulk,
+				)
+
 				// Mark channel as read (30 requests per minute)
 				channelRoutes.POST("/:id/read",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),

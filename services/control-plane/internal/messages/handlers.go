@@ -146,6 +146,54 @@ func parsePagination(c *gin.Context) (limit int, before string, ok bool) {
 	return limit, before, true
 }
 
+// parseBulkPagination is like parsePagination but with a higher default and max limit (200)
+// for the search backfill bulk endpoint.
+func parseBulkPagination(c *gin.Context) (limit int, before string, ok bool) {
+	limit = 200
+	if limitParam := c.Query("limit"); limitParam != "" {
+		if l, err := strconv.Atoi(limitParam); err == nil && l > 0 && l <= 200 {
+			limit = l
+		}
+	}
+	before = c.Query("before")
+	if before != "" {
+		if _, err := uuid.Parse(before); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid 'before' parameter"})
+			return 0, "", false
+		}
+	}
+	return limit, before, true
+}
+
+// GetMessagesBulk returns message history with a larger page size (200) for search backfill.
+func (h *Handler) GetMessagesBulk(c *gin.Context) {
+	userID := c.GetString("user_id")
+	channelID := c.Param("id")
+
+	if _, ok := h.checkChannelAccess(c, channelID, userID); !ok {
+		return
+	}
+
+	limit, before, ok := parseBulkPagination(c)
+	if !ok {
+		return
+	}
+
+	messages, err := h.queryMessages(channelID, before, limit)
+	if err != nil {
+		h.log.Error("Failed to query messages (bulk)", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchMessages})
+		return
+	}
+
+	h.enrichMessages(messages, userID)
+
+	c.JSON(http.StatusOK, gin.H{
+		"messages": messages,
+		"count":    len(messages),
+	})
+}
+
 // enrichMessages batch-loads reactions and replied-to summaries onto messages (non-fatal on failure).
 func (h *Handler) enrichMessages(messages []models.MessageWithUser, userID string) {
 	if len(messages) == 0 {
