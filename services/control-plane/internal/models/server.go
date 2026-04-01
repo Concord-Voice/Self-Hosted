@@ -79,6 +79,7 @@ type Message struct {
 	IsEncrypted      bool       `json:"is_encrypted" db:"is_encrypted"`
 	KeyVersion       int        `json:"key_version" db:"key_version"`
 	EmbedsSuppressed bool       `json:"embeds_suppressed" db:"embeds_suppressed"`
+	ReplyToID        *string    `json:"reply_to_id,omitempty" db:"reply_to_id"`
 	EditedAt         *time.Time `json:"edited_at,omitempty" db:"edited_at"`
 	CreatedAt        time.Time  `json:"created_at" db:"created_at"`
 	UpdatedAt        time.Time  `json:"updated_at" db:"updated_at"`
@@ -91,6 +92,7 @@ type MessageWithUser struct {
 	DisplayName *string           `json:"display_name,omitempty" db:"display_name"`
 	AvatarURL   *string           `json:"avatar_url,omitempty" db:"avatar_url"`
 	Reactions   []ReactionSummary `json:"reactions,omitempty"`
+	RepliedTo   *RepliedToSummary `json:"replied_to,omitempty"`
 }
 
 // ServerInvite represents an invite code for joining a server

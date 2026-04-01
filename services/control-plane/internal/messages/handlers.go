@@ -4,11 +4,13 @@ package messages
 import (
 	"database/sql"
 	"encoding/base64"
+	"errors"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
@@ -27,6 +29,9 @@ const (
 	errMsgFailedDeleteMessage    = "Failed to delete message"
 	errMsgFailedSuppressEmbeds   = "Failed to suppress embeds"
 	errMsgInsufficientPermsLower = "insufficient permissions"
+	errMsgNotMember              = "Not a member of this channel's server"
+	errMsgFailedCheckMembership  = "Failed to check membership"
+	errMsgInvalidCiphertext      = "Invalid ciphertext format for E2EE channel"
 )
 
 // minCiphertextSize is the minimum base64-decoded size for a valid AES-GCM ciphertext:
@@ -65,11 +70,12 @@ func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, resolver *rb
 // Max content length is 24000 to accommodate encrypted messages (AES-GCM + base64 overhead).
 // Plaintext messages are limited to 4000 chars on the client side.
 type SendMessageRequest struct {
-	ChannelID   string `json:"channel_id" binding:"required,uuid"`
-	Content     string `json:"content" binding:"required,min=1,max=24000"`
-	IsEncrypted bool   `json:"is_encrypted"`
-	KeyVersion  int    `json:"key_version"`
-	MentionMeta string `json:"mention_meta,omitempty"` // Accepted but unused — mention routing is WebSocket-only. Field exists so REST clients don't get a 400 for including it.
+	ChannelID   string  `json:"channel_id" binding:"required,uuid"`
+	Content     string  `json:"content" binding:"required,min=1,max=24000"`
+	IsEncrypted bool    `json:"is_encrypted"`
+	KeyVersion  int     `json:"key_version"`
+	ReplyToID   *string `json:"reply_to_id,omitempty"`  // Optional: UUID of message being replied to (must be same channel)
+	MentionMeta string  `json:"mention_meta,omitempty"` // Accepted but unused — mention routing is WebSocket-only. Field exists so REST clients don't get a 400 for including it.
 }
 
 // UpdateMessageRequest represents a request to update a message.
@@ -78,34 +84,20 @@ type UpdateMessageRequest struct {
 	Content string `json:"content" binding:"required,min=1,max=24000"`
 }
 
-// GetMessages returns message history for a channel
-func (h *Handler) GetMessages(c *gin.Context) {
-	userID := c.GetString("user_id")
-	channelID := c.Param("id")
+// isFKViolation returns true if the error is a PostgreSQL foreign key violation (23503).
+func isFKViolation(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Code == "23503"
+}
 
-	// Validate channel ID
+// checkChannelAccess validates channel ID, checks membership, and verifies PermReadMessageHistory.
+// Returns (serverID, ok). On failure, writes the JSON error to c.
+func (h *Handler) checkChannelAccess(c *gin.Context, channelID, userID string) (string, bool) {
 	if _, err := uuid.Parse(channelID); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
-		return
+		return "", false
 	}
 
-	// Pagination parameters
-	limit := 50 // Default limit
-	if limitParam := c.Query("limit"); limitParam != "" {
-		if l, err := strconv.Atoi(limitParam); err == nil && l > 0 && l <= 100 {
-			limit = l
-		}
-	}
-
-	before := c.Query("before") // Message ID to get messages before (for pagination)
-	if before != "" {
-		if _, err := uuid.Parse(before); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid 'before' parameter"})
-			return
-		}
-	}
-
-	// Check membership and get server ID for RBAC
 	var serverID string
 	err := h.db.QueryRow(`
 		SELECT c.server_id FROM channels c
@@ -113,36 +105,130 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		WHERE c.id = $1 AND sm.user_id = $2
 	`, channelID, userID).Scan(&serverID)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this channel's server"})
-		return
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotMember})
+		return "", false
 	}
 	if err != nil {
-		h.log.Error("Failed to check membership", "error", err)
+		h.log.Error(errMsgFailedCheckMembership, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchMessages})
-		return
+		return "", false
 	}
 
-	// Check PermReadMessageHistory (with channelID for SBAC per-channel overrides)
 	hasPerm, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, channelID, rbac.PermReadMessageHistory)
 	if permErr != nil {
 		h.log.Error(errMsgFailedCheckPerms, "error", permErr)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchMessages})
-		return
+		return "", false
 	}
 	if !hasPerm {
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
+		return "", false
+	}
+
+	return serverID, true
+}
+
+// parsePagination extracts and validates limit + before cursor from query params.
+func parsePagination(c *gin.Context) (limit int, before string, ok bool) {
+	limit = 50
+	if limitParam := c.Query("limit"); limitParam != "" {
+		if l, err := strconv.Atoi(limitParam); err == nil && l > 0 && l <= 100 {
+			limit = l
+		}
+	}
+	before = c.Query("before")
+	if before != "" {
+		if _, err := uuid.Parse(before); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid 'before' parameter"})
+			return 0, "", false
+		}
+	}
+	return limit, before, true
+}
+
+// enrichMessages batch-loads reactions and replied-to summaries onto messages (non-fatal on failure).
+func (h *Handler) enrichMessages(messages []models.MessageWithUser, userID string) {
+	if len(messages) == 0 {
+		return
+	}
+	h.attachReactions(messages, userID)
+	h.attachRepliedTo(messages)
+}
+
+// attachReactions batch-loads and attaches reaction summaries to messages.
+func (h *Handler) attachReactions(messages []models.MessageWithUser, userID string) {
+	messageIDs := make([]string, len(messages))
+	for i, m := range messages {
+		messageIDs[i] = m.ID
+	}
+	reactionMap, err := loadReactionsForMessages(h.db, messageIDs, userID)
+	if err != nil {
+		h.log.Error("Failed to load reactions", "error", err)
+		return
+	}
+	for i := range messages {
+		if reactions, ok := reactionMap[messages[i].ID]; ok {
+			messages[i].Reactions = reactions
+		}
+	}
+}
+
+// attachRepliedTo batch-loads and attaches replied-to summaries to messages.
+func (h *Handler) attachRepliedTo(messages []models.MessageWithUser) {
+	replyMap, err := loadRepliedToForMessages(h.db, messages)
+	if err != nil {
+		h.log.Error("Failed to load replied-to summaries", "error", err)
+		return
+	}
+	if replyMap == nil {
+		return
+	}
+	for i := range messages {
+		if summary, ok := replyMap[messages[i].ID]; ok {
+			messages[i].RepliedTo = summary
+		}
+	}
+}
+
+// GetMessages returns message history for a channel
+func (h *Handler) GetMessages(c *gin.Context) {
+	userID := c.GetString("user_id")
+	channelID := c.Param("id")
+
+	if _, ok := h.checkChannelAccess(c, channelID, userID); !ok {
 		return
 	}
 
-	// Build query based on pagination
+	limit, before, ok := parsePagination(c)
+	if !ok {
+		return
+	}
+
+	messages, err := h.queryMessages(channelID, before, limit)
+	if err != nil {
+		h.log.Error("Failed to query messages", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchMessages})
+		return
+	}
+
+	h.enrichMessages(messages, userID)
+
+	c.JSON(http.StatusOK, gin.H{
+		"messages": messages,
+		"count":    len(messages),
+	})
+}
+
+// queryMessages fetches messages for a channel with optional cursor-based pagination.
+func (h *Handler) queryMessages(channelID, before string, limit int) ([]models.MessageWithUser, error) {
 	var query string
 	var args []interface{}
 
 	if before != "" {
-		// Get messages before a specific message ID
 		query = `
 			SELECT m.id, m.channel_id, m.user_id, m.content, m.is_encrypted, COALESCE(m.key_version, 1),
-			       m.embeds_suppressed, m.edited_at, m.created_at, m.updated_at, u.username, u.display_name, u.avatar_url
+			       m.embeds_suppressed, m.reply_to_id, m.edited_at, m.created_at, m.updated_at,
+			       u.username, u.display_name, u.avatar_url
 			FROM messages m
 			INNER JOIN users u ON m.user_id = u.id
 			WHERE m.channel_id = $1
@@ -152,10 +238,10 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		`
 		args = []interface{}{channelID, before, limit}
 	} else {
-		// Get most recent messages
 		query = `
 			SELECT m.id, m.channel_id, m.user_id, m.content, m.is_encrypted, COALESCE(m.key_version, 1),
-			       m.embeds_suppressed, m.edited_at, m.created_at, m.updated_at, u.username, u.display_name, u.avatar_url
+			       m.embeds_suppressed, m.reply_to_id, m.edited_at, m.created_at, m.updated_at,
+			       u.username, u.display_name, u.avatar_url
 			FROM messages m
 			INNER JOIN users u ON m.user_id = u.id
 			WHERE m.channel_id = $1
@@ -167,16 +253,14 @@ func (h *Handler) GetMessages(c *gin.Context) {
 
 	rows, err := h.db.Query(query, args...)
 	if err != nil {
-		h.log.Error("Failed to query messages", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchMessages})
-		return
+		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
 	messages := []models.MessageWithUser{}
 	for rows.Next() {
 		var msg models.MessageWithUser
-		err := rows.Scan(
+		scanErr := rows.Scan(
 			&msg.ID,
 			&msg.ChannelID,
 			&msg.UserID,
@@ -184,6 +268,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 			&msg.IsEncrypted,
 			&msg.KeyVersion,
 			&msg.EmbedsSuppressed,
+			&msg.ReplyToID,
 			&msg.EditedAt,
 			&msg.CreatedAt,
 			&msg.UpdatedAt,
@@ -191,43 +276,136 @@ func (h *Handler) GetMessages(c *gin.Context) {
 			&msg.DisplayName,
 			&msg.AvatarURL,
 		)
-		if err != nil {
-			h.log.Error("Failed to scan message", "error", err)
+		if scanErr != nil {
+			h.log.Error("Failed to scan message row", "error", scanErr)
 			continue
 		}
 		messages = append(messages, msg)
 	}
 	if err := rows.Err(); err != nil {
-		h.log.Error("Error iterating messages", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchMessages})
-		return
+		return nil, err
+	}
+	return messages, nil
+}
+
+// validateReplyToID checks that a reply_to_id is a valid UUID referencing a message
+// in the given channel. Returns the validated pointer and whether to continue.
+// On validation failure, writes the appropriate JSON error to c.
+func (h *Handler) validateReplyToID(c *gin.Context, replyToID *string, channelID string) (*string, bool) {
+	if replyToID == nil || *replyToID == "" {
+		return nil, true
+	}
+	if _, err := uuid.Parse(*replyToID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid reply_to_id"})
+		return nil, false
+	}
+	var replyChannelUUID uuid.UUID
+	err := h.db.QueryRow(`SELECT channel_id FROM messages WHERE id = $1`, *replyToID).Scan(&replyChannelUUID)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Reply target message not found"})
+		return nil, false
+	}
+	if err != nil {
+		h.log.Error("Failed to validate reply_to_id", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendMessage})
+		return nil, false
+	}
+	parsedChannelID, _ := uuid.Parse(channelID)
+	if replyChannelUUID != parsedChannelID {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Reply target must be in the same channel"})
+		return nil, false
+	}
+	return replyToID, true
+}
+
+// checkSendAccess validates membership, PermSendMessages, and fetches the embed policy.
+// Returns (serverID, allowEmbeds, ok). On failure, writes the JSON error to c.
+func (h *Handler) checkSendAccess(c *gin.Context, channelID, userID string) (string, bool, bool) {
+	var serverID string
+	var serverAllowEmbeds bool
+	err := h.db.QueryRow(`
+		SELECT c.server_id, s.allow_embedded_content
+		FROM channels c
+		INNER JOIN server_members sm ON c.server_id = sm.server_id
+		INNER JOIN servers s ON c.server_id = s.id
+		WHERE c.id = $1 AND sm.user_id = $2
+	`, channelID, userID).Scan(&serverID, &serverAllowEmbeds)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotMember})
+		return "", false, false
+	}
+	if err != nil {
+		h.log.Error(errMsgFailedCheckMembership, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendMessage})
+		return "", false, false
 	}
 
-	// Batch-load reactions for all fetched messages
-	if len(messages) > 0 {
-		messageIDs := make([]string, len(messages))
-		for i, m := range messages {
-			messageIDs[i] = m.ID
+	hasPerm, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, channelID, rbac.PermSendMessages)
+	if permErr != nil {
+		h.log.Error(errMsgFailedCheckPerms, "error", permErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendMessage})
+		return "", false, false
+	}
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
+		return "", false, false
+	}
+
+	return serverID, serverAllowEmbeds, true
+}
+
+// enforceE2EE validates encryption requirements and epoch revocation for the channel.
+// Returns (keyVersion, ok). On failure, writes the JSON error to c.
+func (h *Handler) enforceE2EE(c *gin.Context, channelID string, isEncrypted bool, content string, reqKeyVersion int) (int, bool) {
+	var channelEncrypted bool
+	if err := h.db.QueryRow(`SELECT is_encrypted FROM channels WHERE id = $1`, channelID).Scan(&channelEncrypted); err != nil {
+		h.log.Error("Failed to check channel encryption status", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendMessage})
+		return 0, false
+	}
+	if channelEncrypted && !isEncrypted {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "E2EE channel requires encrypted messages"})
+		return 0, false
+	}
+	if channelEncrypted && !isValidCiphertext(content) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidCiphertext})
+		return 0, false
+	}
+
+	keyVersion := reqKeyVersion
+	if keyVersion <= 0 {
+		keyVersion = 1
+	}
+
+	if isEncrypted && keyVersion > 0 {
+		var epochRevoked bool
+		if err := h.db.QueryRow(
+			`SELECT EXISTS(SELECT 1 FROM key_revocations WHERE channel_id = $1 AND revoked_epoch = $2)`,
+			channelID, keyVersion,
+		).Scan(&epochRevoked); err != nil {
+			h.log.Error("Failed to check epoch revocation", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify key epoch"})
+			return 0, false
 		}
-		reactionMap, loadErr := loadReactionsForMessages(h.db, messageIDs, userID)
-		if loadErr != nil {
-			h.log.Error("Failed to load reactions", "error", loadErr)
-			// Non-fatal: return messages without reactions
-		} else {
-			for i := range messages {
-				if reactions, ok := reactionMap[messages[i].ID]; ok {
-					messages[i].Reactions = reactions
-				}
+		if epochRevoked {
+			currentEpoch := 1
+			if err := h.db.QueryRow(
+				`SELECT COALESCE(MAX(key_version), 1) FROM channel_keys WHERE channel_id = $1`,
+				channelID,
+			).Scan(&currentEpoch); err != nil {
+				h.log.Error("Failed to fetch current epoch", "error", err, "channel_id", channelID)
 			}
+			c.JSON(http.StatusConflict, gin.H{
+				"error":         "Key epoch has been revoked — re-encrypt with current epoch",
+				"code":          "epoch_revoked",
+				"current_epoch": currentEpoch,
+				"channel_id":    channelID,
+			})
+			return 0, false
 		}
 	}
 
-	// Return DESC order (newest first) — consistent with DM message handler.
-	// The client reverses to ASC for chronological display.
-	c.JSON(http.StatusOK, gin.H{
-		"messages": messages,
-		"count":    len(messages),
-	})
+	return keyVersion, true
 }
 
 // SendMessage sends a new message to a channel
@@ -240,88 +418,20 @@ func (h *Handler) SendMessage(c *gin.Context) {
 		return
 	}
 
-	// Check membership, get server ID for RBAC, and fetch server embed policy
-	var serverID string
-	var serverAllowEmbeds bool
-	err := h.db.QueryRow(`
-		SELECT c.server_id, s.allow_embedded_content
-		FROM channels c
-		INNER JOIN server_members sm ON c.server_id = sm.server_id
-		INNER JOIN servers s ON c.server_id = s.id
-		WHERE c.id = $1 AND sm.user_id = $2
-	`, req.ChannelID, userID).Scan(&serverID, &serverAllowEmbeds)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this channel's server"})
-		return
-	}
-	if err != nil {
-		h.log.Error("Failed to check membership", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendMessage})
+	_, serverAllowEmbeds, accessOK := h.checkSendAccess(c, req.ChannelID, userID)
+	if !accessOK {
 		return
 	}
 
-	// Check PermSendMessages (with channelID for SBAC per-channel overrides)
-	hasPerm, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, req.ChannelID, rbac.PermSendMessages)
-	if permErr != nil {
-		h.log.Error(errMsgFailedCheckPerms, "error", permErr)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendMessage})
-		return
-	}
-	if !hasPerm {
-		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
+	keyVersion, e2eeOK := h.enforceE2EE(c, req.ChannelID, req.IsEncrypted, req.Content, req.KeyVersion)
+	if !e2eeOK {
 		return
 	}
 
-	// E2EE enforcement: if channel is encrypted, message MUST be encrypted with valid ciphertext
-	var channelEncrypted bool
-	encQuery := `SELECT is_encrypted FROM channels WHERE id = $1`
-	if err := h.db.QueryRow(encQuery, req.ChannelID).Scan(&channelEncrypted); err != nil {
-		h.log.Error("Failed to check channel encryption status", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendMessage})
+	// Validate reply_to_id if provided (must reference a message in the same channel)
+	replyToID, replyOK := h.validateReplyToID(c, req.ReplyToID, req.ChannelID)
+	if !replyOK {
 		return
-	}
-	if channelEncrypted && !req.IsEncrypted {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "E2EE channel requires encrypted messages"})
-		return
-	}
-	if channelEncrypted && !isValidCiphertext(req.Content) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ciphertext format for E2EE channel"})
-		return
-	}
-
-	// Resolve key_version (default to 1 if not provided)
-	keyVersion := req.KeyVersion
-	if keyVersion <= 0 {
-		keyVersion = 1
-	}
-
-	// Epoch enforcement: reject messages encrypted with a revoked key epoch (fail-closed)
-	if req.IsEncrypted && keyVersion > 0 {
-		var epochRevoked bool
-		if err := h.db.QueryRow(
-			`SELECT EXISTS(SELECT 1 FROM key_revocations WHERE channel_id = $1 AND revoked_epoch = $2)`,
-			req.ChannelID, keyVersion,
-		).Scan(&epochRevoked); err != nil {
-			h.log.Error("Failed to check epoch revocation", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify key epoch"})
-			return
-		}
-		if epochRevoked {
-			currentEpoch := 1
-			if err := h.db.QueryRow(
-				`SELECT COALESCE(MAX(key_version), 1) FROM channel_keys WHERE channel_id = $1`,
-				req.ChannelID,
-			).Scan(&currentEpoch); err != nil {
-				h.log.Error("Failed to fetch current epoch", "error", err, "channel_id", req.ChannelID)
-			}
-			c.JSON(http.StatusConflict, gin.H{
-				"error":         "Key epoch has been revoked — re-encrypt with current epoch",
-				"code":          "epoch_revoked",
-				"current_epoch": currentEpoch,
-				"channel_id":    req.ChannelID,
-			})
-			return
-		}
 	}
 
 	// Create message — stamp embeds_suppressed based on server policy.
@@ -331,8 +441,8 @@ func (h *Handler) SendMessage(c *gin.Context) {
 
 	messageID := uuid.New().String()
 	insertQuery := `
-		INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, embeds_suppressed, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+		INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, embeds_suppressed, reply_to_id, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
 		RETURNING created_at, updated_at
 	`
 
@@ -344,12 +454,17 @@ func (h *Handler) SendMessage(c *gin.Context) {
 	message.IsEncrypted = req.IsEncrypted
 	message.KeyVersion = keyVersion
 	message.EmbedsSuppressed = embedsSuppressed
+	message.ReplyToID = replyToID
 
-	err = h.db.QueryRow(insertQuery, messageID, req.ChannelID, userID, req.Content, req.IsEncrypted, keyVersion, embedsSuppressed).Scan(
+	err := h.db.QueryRow(insertQuery, messageID, req.ChannelID, userID, req.Content, req.IsEncrypted, keyVersion, embedsSuppressed, replyToID).Scan(
 		&message.CreatedAt,
 		&message.UpdatedAt,
 	)
 	if err != nil {
+		if isFKViolation(err) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Reply target message not found"})
+			return
+		}
 		h.log.Error("Failed to create message", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendMessage})
 		return
@@ -405,7 +520,7 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 		return
 	}
 	if msgEncrypted && !isValidCiphertext(req.Content) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ciphertext format for E2EE channel"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidCiphertext})
 		return
 	}
 

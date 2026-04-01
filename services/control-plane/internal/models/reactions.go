@@ -34,4 +34,5 @@ type RepliedToSummary struct {
 	DisplayName *string `json:"display_name,omitempty"`
 	Content     string  `json:"content"`
 	IsEncrypted bool    `json:"is_encrypted"`
+	KeyVersion  int     `json:"key_version"`
 }

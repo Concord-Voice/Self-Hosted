@@ -2,6 +2,7 @@ package messages
 
 import (
 	"database/sql"
+	"log"
 	"net/http"
 	"unicode"
 
@@ -388,6 +389,67 @@ func loadReactionsForMessages(db *sql.DB, messageIDs []string, currentUserID str
 			reactionList = append(reactionList, *summaries[key{msgID, emoji}])
 		}
 		result[msgID] = reactionList
+	}
+
+	return result, nil
+}
+
+// collectReplyToIDs returns the distinct reply_to_id values from a slice of messages.
+func collectReplyToIDs(messages []models.MessageWithUser) []string {
+	seen := make(map[string]bool)
+	var ids []string
+	for _, m := range messages {
+		if m.ReplyToID != nil && !seen[*m.ReplyToID] {
+			ids = append(ids, *m.ReplyToID)
+			seen[*m.ReplyToID] = true
+		}
+	}
+	return ids
+}
+
+// loadRepliedToForMessages batch-loads reply-to summaries for messages that have reply_to_id set.
+// Returns a map from the reply message's ID to its replied-to summary. Avoids N+1 queries.
+// Replies whose reply_to_id is nil are ignored. If a replied-to message cannot be found
+// (e.g. it no longer exists or a load error occurred), that reply will not have an entry
+// in the returned map.
+func loadRepliedToForMessages(db *sql.DB, messages []models.MessageWithUser) (map[string]*models.RepliedToSummary, error) {
+	replyIDs := collectReplyToIDs(messages)
+	if len(replyIDs) == 0 {
+		return nil, nil
+	}
+
+	rows, err := db.Query(`
+		SELECT m.id, m.user_id, u.username, u.display_name, m.content, m.is_encrypted, COALESCE(m.key_version, 1)
+		FROM messages m
+		INNER JOIN users u ON m.user_id = u.id
+		WHERE m.id = ANY($1::uuid[])
+	`, pq.Array(replyIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	summaries := make(map[string]*models.RepliedToSummary)
+	for rows.Next() {
+		var s models.RepliedToSummary
+		if err := rows.Scan(&s.ID, &s.UserID, &s.Username, &s.DisplayName, &s.Content, &s.IsEncrypted, &s.KeyVersion); err != nil {
+			log.Printf("Failed to scan replied-to summary row: %v", err)
+			continue
+		}
+		summaries[s.ID] = &s
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Map from the reply message's ID → its replied-to summary
+	result := make(map[string]*models.RepliedToSummary)
+	for _, m := range messages {
+		if m.ReplyToID != nil {
+			if s, ok := summaries[*m.ReplyToID]; ok {
+				result[m.ID] = s
+			}
+		}
 	}
 
 	return result, nil

@@ -4,12 +4,14 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -24,7 +26,7 @@ const (
 	keyKeyVersion     = "key_version"
 	keyCreatedAt      = "created_at"
 	keyUpdatedAt      = "updated_at"
-	keyUsername        = "username"
+	keyUsername       = "username"
 	keyIsTyping       = "is_typing"
 	keyStatus         = "status"
 	keyCounts         = "counts"
@@ -629,8 +631,8 @@ func (h *Hub) sendErrorWithData(clientID uuid.UUID, errorCode string, extra map[
 	}
 	data := map[string]interface{}{
 		keyMessage: errorCode,
-		"error":   errorCode,
-		"code":    errorCode,
+		"error":    errorCode,
+		"code":     errorCode,
 	}
 	for k, v := range extra {
 		data[k] = v
@@ -647,19 +649,228 @@ func (h *Hub) sendErrorWithData(clientID uuid.UUID, errorCode string, extra map[
 	}
 }
 
+// messageInput holds the parsed and validated fields from an incoming WebSocket message.
+type messageInput struct {
+	content         string
+	isEncrypted     bool
+	keyVersion      int
+	mentionAddendum *MentionAddendum
+}
+
+// parseMessageInput extracts and validates content, encryption, key version, and mention
+// addendum from an incoming WebSocket message. Returns nil on validation failure.
+func (h *Hub) parseMessageInput(msg IncomingMessage) *messageInput {
+	content, ok := msg.Data[keyContent].(string)
+	if !ok || content == "" {
+		h.sendError(msg.ClientID, "Message content is required")
+		return nil
+	}
+
+	isEncrypted, _ := msg.Data[keyIsEncrypted].(bool)
+
+	keyVersion := 1
+	if kv, ok := msg.Data[keyKeyVersion].(float64); ok && kv > 0 {
+		keyVersion = int(kv)
+	}
+
+	maxContentLen := 4000
+	if isEncrypted {
+		maxContentLen = 24000
+	}
+	if len(content) > maxContentLen {
+		h.sendError(msg.ClientID, "Message content exceeds maximum length")
+		return nil
+	}
+
+	var mentionAddendum *MentionAddendum
+	if metaStr, ok := msg.Data["mention_meta"].(string); ok {
+		mentionAddendum = decodeMentionMeta(metaStr)
+	}
+
+	return &messageInput{
+		content:         content,
+		isEncrypted:     isEncrypted,
+		keyVersion:      keyVersion,
+		mentionAddendum: mentionAddendum,
+	}
+}
+
+// channelContext holds server-side channel state needed for message persistence.
+type channelContext struct {
+	channelEncrypted  bool
+	serverAllowEmbeds bool
+	serverUUID        uuid.UUID
+}
+
+// fetchChannelContext queries encryption status, embed policy, and server ID for a channel.
+// Returns nil on failure (error already sent to client).
+func (h *Hub) fetchChannelContext(msg IncomingMessage, channelUUID uuid.UUID, isEncrypted bool) *channelContext {
+	var ctx channelContext
+	err := h.db.QueryRow(
+		`SELECT c.is_encrypted, s.allow_embedded_content, c.server_id
+		 FROM channels c INNER JOIN servers s ON c.server_id = s.id
+		 WHERE c.id = $1`, channelUUID,
+	).Scan(&ctx.channelEncrypted, &ctx.serverAllowEmbeds, &ctx.serverUUID)
+	if err != nil {
+		log.Printf("Failed to check channel encryption/embed status: %v", err)
+		h.sendError(msg.ClientID, "Failed to verify channel status")
+		return nil
+	}
+	if ctx.channelEncrypted && !isEncrypted {
+		h.sendError(msg.ClientID, "E2EE channel requires encrypted messages")
+		return nil
+	}
+	return &ctx
+}
+
+// enforceWSEpoch checks that the key epoch is not revoked. Returns false if revoked or on error.
+func (h *Hub) enforceWSEpoch(msg IncomingMessage, channelUUID uuid.UUID, channelID string, isEncrypted bool, keyVersion int) bool {
+	if !isEncrypted || keyVersion <= 0 {
+		return true
+	}
+	var epochRevoked bool
+	if err := h.db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM key_revocations WHERE channel_id = $1 AND revoked_epoch = $2)`,
+		channelUUID, keyVersion,
+	).Scan(&epochRevoked); err != nil {
+		log.Printf("Failed to check epoch revocation: %v", err)
+		h.sendError(msg.ClientID, "Failed to verify key epoch")
+		return false
+	}
+	if epochRevoked {
+		currentEpoch := 1
+		if err := h.db.QueryRow(
+			`SELECT COALESCE(MAX(key_version), 1) FROM channel_keys WHERE channel_id = $1`,
+			channelUUID,
+		).Scan(&currentEpoch); err != nil {
+			log.Printf("Failed to fetch current epoch for channel %s: %v", channelID, err)
+		}
+		h.sendErrorWithData(msg.ClientID, "epoch_revoked", map[string]interface{}{
+			"current_epoch": currentEpoch,
+			keyChannelID:    channelID,
+		})
+		return false
+	}
+	return true
+}
+
+// sendMessageAck sends a message_ack to the sender with the server-assigned UUID.
+func (h *Hub) sendMessageAck(client *Client, nonce string, messageID, channelUUID uuid.UUID, createdAt, updatedAt interface{}, replyToID *string) {
+	ackData := map[string]interface{}{
+		keyNonce:     nonce,
+		"id":         messageID.String(),
+		keyChannelID: channelUUID.String(),
+		keyCreatedAt: createdAt,
+		keyUpdatedAt: updatedAt,
+	}
+	if replyToID != nil {
+		ackData["reply_to_id"] = *replyToID
+	}
+	ackMsg := OutgoingMessage{Type: "message_ack", Data: ackData}
+	if data, err := json.Marshal(ackMsg); err == nil {
+		select {
+		case client.Send <- data:
+		default:
+		}
+	}
+}
+
+// persistMessage inserts a message into the database, returning the generated ID and timestamps.
+// Returns a specific error message string if the insert fails (empty string on success).
+func (h *Hub) persistMessage(
+	channelUUID uuid.UUID, userID uuid.UUID, content string,
+	isEncrypted bool, keyVersion int, embedsSuppressed bool, replyToID *string,
+) (uuid.UUID, time.Time, time.Time, string) {
+	messageID := uuid.New()
+	var createdAt, updatedAt time.Time
+	err := h.db.QueryRow(
+		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, embeds_suppressed, reply_to_id, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+		 RETURNING created_at, updated_at`,
+		messageID, channelUUID, userID, content, isEncrypted, keyVersion, embedsSuppressed, replyToID,
+	).Scan(&createdAt, &updatedAt)
+	if err != nil && isFKViolation(err) {
+		return messageID, createdAt, updatedAt, "Reply target message not found"
+	}
+	if err != nil {
+		log.Printf("Failed to persist message: %v", err)
+		return messageID, createdAt, updatedAt, "Failed to save message"
+	}
+	return messageID, createdAt, updatedAt, ""
+}
+
+// isFKViolation returns true if the error is a PostgreSQL foreign key violation (23503).
+func isFKViolation(err error) bool {
+	var pqErr *pq.Error
+	return errors.As(err, &pqErr) && pqErr.Code == "23503"
+}
+
+// validateReplyToID checks that reply_to_id is a valid UUID referencing a message
+// in the given channel. Returns the validated ID (or nil) and whether to continue.
+func (h *Hub) validateReplyToID(msg IncomingMessage, channelID string) (*string, bool) {
+	rtID, ok := msg.Data["reply_to_id"].(string)
+	if !ok || rtID == "" {
+		return nil, true
+	}
+	if _, parseErr := uuid.Parse(rtID); parseErr != nil {
+		h.sendError(msg.ClientID, "Invalid reply_to_id")
+		return nil, false
+	}
+	var replyChannelUUID uuid.UUID
+	err := h.db.QueryRow(`SELECT channel_id FROM messages WHERE id = $1`, rtID).Scan(&replyChannelUUID)
+	if err == sql.ErrNoRows {
+		h.sendError(msg.ClientID, "Reply target message not found")
+		return nil, false
+	}
+	if err != nil {
+		log.Printf("Failed to validate reply_to_id %s: %v", rtID, err)
+		h.sendError(msg.ClientID, "Failed to validate reply target")
+		return nil, false
+	}
+	parsedChannelID, _ := uuid.Parse(channelID)
+	if replyChannelUUID != parsedChannelID {
+		h.sendError(msg.ClientID, "Reply target must be in the same channel")
+		return nil, false
+	}
+	return &rtID, true
+}
+
+// fetchRepliedToSummary queries the replied-to message for broadcast enrichment.
+func (h *Hub) fetchRepliedToSummary(replyToID string) map[string]interface{} {
+	var id, userID, username, content string
+	var displayName *string
+	var isEncrypted bool
+	var keyVer int
+	err := h.db.QueryRow(`
+		SELECT m.id, m.user_id, u.username, u.display_name, m.content, m.is_encrypted, COALESCE(m.key_version, 1)
+		FROM messages m INNER JOIN users u ON m.user_id = u.id WHERE m.id = $1
+	`, replyToID).Scan(&id, &userID, &username, &displayName, &content, &isEncrypted, &keyVer)
+	if err != nil {
+		return nil
+	}
+	return map[string]interface{}{
+		"id":           id,
+		"user_id":      userID,
+		"username":     username,
+		"display_name": displayName,
+		"content":      content,
+		"is_encrypted": isEncrypted,
+		"key_version":  keyVer,
+	}
+}
+
 // handleMessage handles a chat message: validates, persists to DB, then broadcasts
 func (h *Hub) handleMessage(msg IncomingMessage) {
 	channelID, ok := msg.Data[keyChannelID].(string)
 	if !ok {
 		return
 	}
-
 	channelUUID, err := uuid.Parse(channelID)
 	if err != nil {
 		return
 	}
 
-	// Verify the client is subscribed to this channel
+	// Verify subscription + rate limit
 	client, ok := h.clients[msg.ClientID]
 	if !ok {
 		return
@@ -668,173 +879,92 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		h.sendError(msg.ClientID, "Not subscribed to this channel")
 		return
 	}
-
-	// Rate limit check
 	if !client.rateLimitAllow() {
 		h.sendError(msg.ClientID, "Rate limit exceeded, please slow down")
 		return
 	}
 
-	// Validate content
-	content, ok := msg.Data[keyContent].(string)
-	if !ok || content == "" {
-		h.sendError(msg.ClientID, "Message content is required")
+	// Parse and validate input fields
+	input := h.parseMessageInput(msg)
+	if input == nil {
+		return
+	}
+	if input.mentionAddendum != nil {
+		defer input.mentionAddendum.Wipe()
+	}
+
+	// Encryption enforcement + embed policy
+	chCtx := h.fetchChannelContext(msg, channelUUID, input.isEncrypted)
+	if chCtx == nil {
+		return
+	}
+	if !h.enforceWSEpoch(msg, channelUUID, channelID, input.isEncrypted, input.keyVersion) {
+		return
+	}
+	embedsSuppressed := !chCtx.serverAllowEmbeds
+
+	// Validate optional reply_to_id (same-channel constraint)
+	replyToID, replyOK := h.validateReplyToID(msg, channelID)
+	if !replyOK {
 		return
 	}
 
-	isEncrypted, _ := msg.Data[keyIsEncrypted].(bool)
-
-	// Extract key_version for E2EE messages (defaults to 1 for backward compat)
-	keyVersion := 1
-	if kv, ok := msg.Data[keyKeyVersion].(float64); ok && kv > 0 {
-		keyVersion = int(kv)
-	}
-
-	// Extract mention addendum (binary-encoded, ephemeral — never persisted or broadcast)
-	var mentionAddendum *MentionAddendum
-	if metaStr, ok := msg.Data["mention_meta"].(string); ok {
-		mentionAddendum = decodeMentionMeta(metaStr)
-	}
-	// Ensure addendum is wiped when this function returns, regardless of exit path
-	if mentionAddendum != nil {
-		defer mentionAddendum.Wipe()
-	}
-
-	// Encrypted messages are larger due to AES-GCM (IV + auth tag) + base64 encoding.
-	// A 4000-char plaintext can produce up to ~24KB of ciphertext (multi-byte UTF-8 worst case).
-	// Plaintext messages keep the 4000-char limit.
-	maxContentLen := 4000
-	if isEncrypted {
-		maxContentLen = 24000
-	}
-	if len(content) > maxContentLen {
-		h.sendError(msg.ClientID, "Message content exceeds maximum length")
+	// Persist message
+	messageID, createdAt, updatedAt, persistErr := h.persistMessage(
+		channelUUID, msg.UserID, input.content, input.isEncrypted, input.keyVersion, embedsSuppressed, replyToID,
+	)
+	if persistErr != "" {
+		h.sendError(msg.ClientID, persistErr)
 		return
 	}
 
-	// Server-side encryption enforcement + embed policy + server ID lookup
-	var channelEncrypted bool
-	var serverAllowEmbeds bool
-	var serverUUID uuid.UUID
-	encErr := h.db.QueryRow(
-		`SELECT c.is_encrypted, s.allow_embedded_content, c.server_id
-		 FROM channels c INNER JOIN servers s ON c.server_id = s.id
-		 WHERE c.id = $1`, channelUUID,
-	).Scan(&channelEncrypted, &serverAllowEmbeds, &serverUUID)
-	if encErr != nil {
-		log.Printf("Failed to check channel encryption/embed status: %v", encErr)
-		h.sendError(msg.ClientID, "Failed to verify channel status")
-		return
-	}
-	if channelEncrypted && !isEncrypted {
-		h.sendError(msg.ClientID, "E2EE channel requires encrypted messages")
-		return
-	}
-	// Stamp embeds_suppressed based on server policy (server is the only trusted source)
-	embedsSuppressed := !serverAllowEmbeds
-
-	// Epoch enforcement: reject messages encrypted with a revoked key epoch (fail-closed)
-	if isEncrypted && keyVersion > 0 {
-		var epochRevoked bool
-		if err := h.db.QueryRow(
-			`SELECT EXISTS(SELECT 1 FROM key_revocations WHERE channel_id = $1 AND revoked_epoch = $2)`,
-			channelUUID, keyVersion,
-		).Scan(&epochRevoked); err != nil {
-			log.Printf("Failed to check epoch revocation: %v", err)
-			h.sendError(msg.ClientID, "Failed to verify key epoch")
-			return
-		}
-		if epochRevoked {
-			// Fetch the current (latest) epoch so the client can re-encrypt
-			currentEpoch := 1
-			if err := h.db.QueryRow(
-				`SELECT COALESCE(MAX(key_version), 1) FROM channel_keys WHERE channel_id = $1`,
-				channelUUID,
-			).Scan(&currentEpoch); err != nil {
-				log.Printf("Failed to fetch current epoch for channel %s: %v", channelID, err)
-			}
-			h.sendErrorWithData(msg.ClientID, "epoch_revoked", map[string]interface{}{
-				"current_epoch": currentEpoch,
-				keyChannelID:    channelID,
-			})
-			return
-		}
-	}
-
-	// Persist message to database (embeds_suppressed stamped by server policy)
-	messageID := uuid.New()
-	var createdAt, updatedAt time.Time
-	err = h.db.QueryRow(
-		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, embeds_suppressed, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
-		 RETURNING created_at, updated_at`,
-		messageID, channelUUID, msg.UserID, content, isEncrypted, keyVersion, embedsSuppressed,
-	).Scan(&createdAt, &updatedAt)
-	if err != nil {
-		log.Printf("Failed to persist message: %v", err)
-		h.sendError(msg.ClientID, "Failed to save message")
-		return
-	}
-
-	// Send message_ack to the sender with the server-assigned UUID
-	// so the frontend can update the temporary client ID
+	// Ack to sender
 	nonce, _ := msg.Data[keyNonce].(string)
-	ackMsg := OutgoingMessage{
-		Type: "message_ack",
-		Data: map[string]interface{}{
-			keyNonce:     nonce,
-			"id":         messageID.String(),
-			keyChannelID: channelUUID.String(),
-			keyCreatedAt: createdAt,
-			keyUpdatedAt: updatedAt,
-		},
+	h.sendMessageAck(client, nonce, messageID, channelUUID, createdAt, updatedAt, replyToID)
+
+	// Broadcast to channel subscribers (excluding sender)
+	broadcastData := map[string]interface{}{
+		"id":                messageID,
+		keyChannelID:        channelUUID,
+		keyUserID:           msg.UserID,
+		keyUsername:         client.Username,
+		"display_name":      client.DisplayName,
+		"avatar_url":        client.AvatarURL,
+		keyContent:          input.content,
+		keyIsEncrypted:      input.isEncrypted,
+		keyKeyVersion:       input.keyVersion,
+		"embeds_suppressed": embedsSuppressed,
+		keyCreatedAt:        createdAt,
+		keyUpdatedAt:        updatedAt,
 	}
-	if ackData, ackErr := json.Marshal(ackMsg); ackErr == nil {
-		select {
-		case client.Send <- ackData:
-		default:
+	if replyToID != nil {
+		broadcastData["reply_to_id"] = *replyToID
+		if summary := h.fetchRepliedToSummary(*replyToID); summary != nil {
+			broadcastData["replied_to"] = summary
 		}
 	}
 
-	// Broadcast persisted message to all subscribers except sender
-	// (sender sees the message instantly via optimistic UI)
 	broadcastMsg := BroadcastMessage{
 		ChannelID:   channelUUID,
 		ExcludeUser: &msg.UserID,
 		Data: OutgoingMessage{
 			Type: "message",
-			Data: map[string]interface{}{
-				"id":                messageID,
-				keyChannelID:        channelUUID,
-				keyUserID:           msg.UserID,
-				keyUsername:         client.Username,
-				"display_name":      client.DisplayName,
-				"avatar_url":        client.AvatarURL,
-				keyContent:          content,
-				keyIsEncrypted:      isEncrypted,
-				keyKeyVersion:       keyVersion,
-				"embeds_suppressed": embedsSuppressed,
-				keyCreatedAt:        createdAt,
-				keyUpdatedAt:        updatedAt,
-			},
+			Data: broadcastData,
 		},
 	}
 
 	h.broadcast <- broadcastMsg
 
 	// Send lightweight unread_notify to server subscribers NOT subscribed to this channel.
-	// serverUUID was already fetched in the encryption/embed query above.
-	h.sendUnreadNotify(serverUUID, channelUUID, msg.UserID)
+	h.sendUnreadNotify(chCtx.serverUUID, channelUUID, msg.UserID)
 
 	// Mention routing: enforce RBAC, resolve targets, send enhanced notifications, wipe.
-	// The addendum is decoded above and deferred for Wipe(). RBAC enforcement uses
-	// the serverUUID already fetched. Mention data is NEVER persisted or broadcast.
-	if mentionAddendum != nil {
+	if input.mentionAddendum != nil {
 		h.enforceMentionPermissions(
-			serverUUID.String(), msg.UserID.String(), channelUUID.String(),
-			mentionAddendum,
+			chCtx.serverUUID.String(), msg.UserID.String(), channelUUID.String(),
+			input.mentionAddendum,
 		)
-		h.routeMentionNotifications(serverUUID, channelUUID, msg.UserID, mentionAddendum)
+		h.routeMentionNotifications(chCtx.serverUUID, channelUUID, msg.UserID, input.mentionAddendum)
 	}
 }
 
