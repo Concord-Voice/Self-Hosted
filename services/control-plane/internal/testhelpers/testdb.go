@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -14,6 +15,11 @@ import (
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file" // Required for file:// migration source
 	_ "github.com/lib/pq"
+)
+
+var (
+	migrateOnce sync.Once
+	migrateErr  error
 )
 
 // defaultTestDatabaseURL is used when DATABASE_URL is not set.
@@ -45,9 +51,8 @@ func SetupTestDB(t *testing.T) (*sql.DB, func()) {
 	db.SetConnMaxLifetime(30 * time.Second)
 	db.SetConnMaxIdleTime(10 * time.Second)
 
-	// Run migrations using absolute path
-	migrationsDir := migrationsPath()
-	runMigrations(t, db, migrationsDir)
+	// Migrate once per package binary; cleanup truncation between tests ensures isolation.
+	ensureMigrations(t, db)
 
 	cleanup := func() {
 		if err := TruncateAllTables(db); err != nil {
@@ -109,12 +114,21 @@ func migrationsPath() string {
 	return filepath.Join(filepath.Dir(filename), "..", "..", "migrations")
 }
 
-func runMigrations(t *testing.T, db *sql.DB, migrationsDir string) {
+// ensureMigrations runs migrations exactly once per package binary via sync.Once.
+func ensureMigrations(t *testing.T, db *sql.DB) {
 	t.Helper()
+	migrateOnce.Do(func() {
+		migrateErr = runMigrations(db, migrationsPath())
+	})
+	if migrateErr != nil {
+		t.Fatalf("testhelpers: migration failed: %v", migrateErr)
+	}
+}
 
+func runMigrations(db *sql.DB, migrationsDir string) error {
 	driver, err := postgres.WithInstance(db, &postgres.Config{})
 	if err != nil {
-		t.Fatalf("testhelpers: could not create migration driver: %v", err)
+		return fmt.Errorf("could not create migration driver: %w", err)
 	}
 
 	m, err := migrate.NewWithDatabaseInstance(
@@ -123,10 +137,11 @@ func runMigrations(t *testing.T, db *sql.DB, migrationsDir string) {
 		driver,
 	)
 	if err != nil {
-		t.Fatalf("testhelpers: could not create migrate instance: %v", err)
+		return fmt.Errorf("could not create migrate instance: %w", err)
 	}
 
 	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		t.Fatalf("testhelpers: could not run migrations: %v", err)
+		return fmt.Errorf("could not run migrations: %w", err)
 	}
+	return nil
 }

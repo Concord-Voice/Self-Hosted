@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync"
 	"testing"
 	"time"
 
@@ -21,6 +22,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+var (
+	hubMigrateOnce sync.Once
+	hubMigrateErr  error
+)
+
 const (
 	msgTypeDM = "dm_message"
 )
@@ -32,6 +38,26 @@ func hubTestMigrationsPath() string {
 	// websocket/ is at internal/websocket/hub_epoch_test.go
 	// migrations/ is at migrations/
 	return filepath.Join(filepath.Dir(filename), "..", "..", "migrations")
+}
+
+// hubRunMigrations runs migrations once per package binary via sync.Once.
+// Separated from setupHubTestDB to avoid calling t.Fatalf inside the Once closure.
+func hubRunMigrations(db *sql.DB) error {
+	driver, err := postgres.WithInstance(db, &postgres.Config{})
+	if err != nil {
+		return fmt.Errorf("could not create migration driver: %w", err)
+	}
+	m, err := migrate.NewWithDatabaseInstance(
+		fmt.Sprintf("file://%s", hubTestMigrationsPath()),
+		"postgres", driver,
+	)
+	if err != nil {
+		return fmt.Errorf("could not create migrate instance: %w", err)
+	}
+	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+		return fmt.Errorf("could not run migrations: %w", err)
+	}
+	return nil
 }
 
 // setupHubTestDB creates a real DB connection for hub tests without importing testhelpers (avoids import cycle).
@@ -51,20 +77,12 @@ func setupHubTestDB(t *testing.T) *sql.DB {
 	db.SetMaxOpenConns(5)
 	db.SetMaxIdleConns(2)
 
-	// Run migrations using absolute path (robust across working directories)
-	driver, err := postgres.WithInstance(db, &postgres.Config{})
-	if err != nil {
-		t.Fatalf("hub_epoch_test: could not create migration driver: %v", err)
-	}
-	m, err := migrate.NewWithDatabaseInstance(
-		fmt.Sprintf("file://%s", hubTestMigrationsPath()),
-		"postgres", driver,
-	)
-	if err != nil {
-		t.Fatalf("hub_epoch_test: could not create migrate instance: %v", err)
-	}
-	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		t.Fatalf("hub_epoch_test: could not run migrations: %v", err)
+	// Migrate once per package binary, then truncate for isolation.
+	hubMigrateOnce.Do(func() {
+		hubMigrateErr = hubRunMigrations(db)
+	})
+	if hubMigrateErr != nil {
+		t.Fatalf("hub_epoch_test: migration failed: %v", hubMigrateErr)
 	}
 
 	t.Cleanup(func() {
