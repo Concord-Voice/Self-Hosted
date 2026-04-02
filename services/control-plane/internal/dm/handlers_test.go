@@ -1,6 +1,7 @@
 package dm_test
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"testing"
@@ -10,6 +11,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+const mimeImagePNG = "image/png"
 
 const (
 	pathDMConversationsPrefix = "/api/v1/dm/conversations/"
@@ -1701,4 +1704,133 @@ func TestDeleteMessage_Unauthorized(t *testing.T) {
 
 	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathMsgSlash+msgID, nil, nil)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+// ============================================================================
+// DM Attachment Enrichment Tests (#178)
+// ============================================================================
+
+func insertDMMediaFile(t *testing.T, ts *testhelpers.TestServer, uploaderID, convID, fileType, mimeType string, fileSize int64) string {
+	t.Helper()
+	var fileID string
+	err := ts.DB.QueryRow(
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, conversation_id, created_at)
+		 VALUES (gen_random_uuid(), $1, $2, 2, $3, $4, 'attachments/' || gen_random_uuid(), true, 1, $5, NOW())
+		 RETURNING id`,
+		uploaderID, fileType, mimeType, fileSize, convID,
+	).Scan(&fileID)
+	require.NoError(t, err)
+	return fileID
+}
+
+func insertDMMessageAttachment(t *testing.T, ts *testhelpers.TestServer, messageID, fileID string, position int) {
+	t.Helper()
+	_, err := ts.DB.Exec(
+		`INSERT INTO dm_message_attachments (message_id, file_id, position) VALUES ($1, $2, $3)`,
+		messageID, fileID, position,
+	)
+	require.NoError(t, err)
+}
+
+func TestGetMessagesWithAttachments(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "dmatt1")
+	user2 := ts.CreateTestUser(t, "dmatt2")
+	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+
+	msgID := insertDMMessage(t, ts, convID, user1.ID, "see attached", false)
+	fileID := insertDMMediaFile(t, ts, user1.ID, convID, "photo", mimeImagePNG, 12345)
+	insertDMMessageAttachment(t, ts, msgID, fileID, 0)
+
+	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+pathMessages, nil, testhelpers.AuthHeaders(user1.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body struct {
+		Messages []struct {
+			ID          string `json:"id"`
+			Attachments []struct {
+				ID       string `json:"id"`
+				FileType string `json:"file_type"`
+				MimeType string `json:"mime_type"`
+				FileSize int64  `json:"file_size"`
+			} `json:"attachments"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+
+	var found bool
+	for _, msg := range body.Messages {
+		if msg.ID == msgID {
+			found = true
+			require.Len(t, msg.Attachments, 1)
+			assert.Equal(t, fileID, msg.Attachments[0].ID)
+			assert.Equal(t, "photo", msg.Attachments[0].FileType)
+			assert.Equal(t, mimeImagePNG, msg.Attachments[0].MimeType)
+			assert.Equal(t, int64(12345), msg.Attachments[0].FileSize)
+			break
+		}
+	}
+	assert.True(t, found, "DM message with attachment not found")
+}
+
+func TestGetMessagesWithMultipleAttachmentsOrderedByPosition(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "dmmulti1")
+	user2 := ts.CreateTestUser(t, "dmmulti2")
+	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+
+	msgID := insertDMMessage(t, ts, convID, user1.ID, "multi", false)
+	f1 := insertDMMediaFile(t, ts, user1.ID, convID, "photo", mimeImagePNG, 100)
+	f2 := insertDMMediaFile(t, ts, user1.ID, convID, "file", "application/pdf", 200)
+
+	// Insert in reverse order to verify position sorting
+	insertDMMessageAttachment(t, ts, msgID, f2, 1)
+	insertDMMessageAttachment(t, ts, msgID, f1, 0)
+
+	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+pathMessages, nil, testhelpers.AuthHeaders(user1.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body struct {
+		Messages []struct {
+			ID          string `json:"id"`
+			Attachments []struct {
+				ID string `json:"id"`
+			} `json:"attachments"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+
+	for _, msg := range body.Messages {
+		if msg.ID == msgID {
+			require.Len(t, msg.Attachments, 2)
+			assert.Equal(t, f1, msg.Attachments[0].ID)
+			assert.Equal(t, f2, msg.Attachments[1].ID)
+			return
+		}
+	}
+	t.Fatal("DM message not found")
+}
+
+func TestGetMessagesDMNoAttachments(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "dmnoatt1")
+	user2 := ts.CreateTestUser(t, "dmnoatt2")
+	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+
+	insertDMMessage(t, ts, convID, user1.ID, "plain msg", false)
+
+	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+pathMessages, nil, testhelpers.AuthHeaders(user1.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body struct {
+		Messages []struct {
+			Attachments []struct{ ID string } `json:"attachments"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	require.NotEmpty(t, body.Messages)
+	assert.Empty(t, body.Messages[0].Attachments)
 }

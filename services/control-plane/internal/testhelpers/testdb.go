@@ -93,7 +93,10 @@ func TruncateAllTables(db *sql.DB) error {
 		voice_participants,
 		dm_voice_participants,
 		user_mfa_totp,
-		user_mfa_webauthn
+		user_mfa_webauthn,
+		media_files,
+		message_attachments,
+		dm_message_attachments
 	CASCADE`)
 	return err
 }

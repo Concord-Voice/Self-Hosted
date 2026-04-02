@@ -29,10 +29,10 @@ import (
 )
 
 const (
-	errMsgAccessDenied = "Access denied"
+	errMsgAccessDenied       = "Access denied"
 	errMsgFailedVerifyAccess = "Failed to verify access"
+	errMsgFailedVerifyPerms  = "Failed to verify permissions"
 )
-
 
 // ObjectStore defines the storage operations required by the media handler.
 // This interface is satisfied by *storage.Client and can be mocked for testing.
@@ -212,6 +212,9 @@ func (h *Handler) UploadAttachment(c *gin.Context) {
 			return
 		}
 		if !h.userHasChannelAccess(c, userID, channelID) {
+			return
+		}
+		if !h.checkAttachPermission(c, userID, channelID) {
 			return
 		}
 	}
@@ -675,6 +678,35 @@ func (h *Handler) userIsServerMember(c *gin.Context, userID, serverID string) bo
 	return true
 }
 
+// checkAttachPermission checks if a user has the ATTACH_FILES RBAC permission for a channel.
+func (h *Handler) checkAttachPermission(c *gin.Context, userID, channelID string) bool {
+	// Look up server_id for this channel
+	var serverID string
+	err := h.db.QueryRowContext(c.Request.Context(),
+		`SELECT server_id FROM channels WHERE id = $1`, channelID,
+	).Scan(&serverID)
+	if err != nil {
+		h.log.Error("Failed to look up channel server", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyPerms})
+		return false
+	}
+	if h.resolver == nil {
+		// Fallback to membership-only if no RBAC resolver configured (e.g. tests)
+		return h.userIsServerMember(c, userID, serverID)
+	}
+	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, channelID, rbac.PermAttachFiles)
+	if err != nil {
+		h.log.Error("Failed to check attach permission", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyPerms})
+		return false
+	}
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You don't have permission to attach files in this channel"})
+		return false
+	}
+	return true
+}
+
 // userCanManageServer checks if a user has the manage_server RBAC permission.
 // Used for server icon/banner uploads to match the same gate as UpdateServer.
 func (h *Handler) userCanManageServer(c *gin.Context, userID, serverID string) bool {
@@ -685,7 +717,7 @@ func (h *Handler) userCanManageServer(c *gin.Context, userID, serverID string) b
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageServer)
 	if err != nil {
 		h.log.Error("Failed to check server permission", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify permissions"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyPerms})
 		return false
 	}
 	if !hasPerm {

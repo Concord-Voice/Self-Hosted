@@ -106,7 +106,7 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 	}
 
 	cleanup := func() {
-		tables := []string{"media_files", "dm_participants", "dm_conversations", "channel_keys", "channels", "member_roles", "roles", "server_members", "servers", "public_keys", "user_keys", "users"}
+		tables := []string{"dm_message_attachments", "message_attachments", "media_files", "dm_participants", "dm_conversations", "channel_keys", "channels", "member_roles", "roles", "server_members", "servers", "public_keys", "user_keys", "users"}
 		for _, table := range tables {
 			_, _ = db.Exec(fmt.Sprintf("DELETE FROM %s", table)) //nolint:gosec
 		}

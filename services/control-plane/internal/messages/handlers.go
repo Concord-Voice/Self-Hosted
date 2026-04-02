@@ -201,6 +201,25 @@ func (h *Handler) enrichMessages(messages []models.MessageWithUser, userID strin
 	}
 	h.attachReactions(messages, userID)
 	h.attachRepliedTo(messages)
+	h.attachAttachments(messages)
+}
+
+// attachAttachments batch-loads and attaches file attachment summaries to messages.
+func (h *Handler) attachAttachments(messages []models.MessageWithUser) {
+	messageIDs := make([]string, len(messages))
+	for i, m := range messages {
+		messageIDs[i] = m.ID
+	}
+	attachmentMap, err := loadAttachmentsForMessages(h.db, messageIDs)
+	if err != nil {
+		h.log.Error("Failed to load attachments", "error", err)
+		return
+	}
+	for i := range messages {
+		if attachments, ok := attachmentMap[messages[i].ID]; ok {
+			messages[i].Attachments = attachments
+		}
+	}
 }
 
 // attachReactions batch-loads and attaches reaction summaries to messages.

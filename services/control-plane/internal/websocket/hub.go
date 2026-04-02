@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -655,6 +656,7 @@ type messageInput struct {
 	isEncrypted     bool
 	keyVersion      int
 	mentionAddendum *MentionAddendum
+	attachmentIDs   []string
 }
 
 // parseMessageInput extracts and validates content, encryption, key version, and mention
@@ -687,12 +689,55 @@ func (h *Hub) parseMessageInput(msg IncomingMessage) *messageInput {
 		mentionAddendum = decodeMentionMeta(metaStr)
 	}
 
+	attachmentIDs, attachOK := h.parseAttachmentIDs(msg)
+	if !attachOK {
+		return nil
+	}
+
 	return &messageInput{
 		content:         content,
 		isEncrypted:     isEncrypted,
 		keyVersion:      keyVersion,
 		mentionAddendum: mentionAddendum,
+		attachmentIDs:   attachmentIDs,
 	}
+}
+
+// parseAttachmentIDs extracts and validates attachment_ids from an incoming message.
+// Returns the parsed IDs and true on success; sends an error and returns false on failure.
+func (h *Hub) parseAttachmentIDs(msg IncomingMessage) ([]string, bool) {
+	raw, exists := msg.Data["attachment_ids"]
+	if !exists {
+		return nil, true // key absent — no attachments, valid
+	}
+	rawIDs, ok := raw.([]interface{})
+	if !ok {
+		h.sendError(msg.ClientID, "attachment_ids must be an array")
+		return nil, false
+	}
+	if len(rawIDs) > 5 {
+		h.sendError(msg.ClientID, "Maximum 5 attachments per message")
+		return nil, false
+	}
+	seen := make(map[string]bool, len(rawIDs))
+	ids := make([]string, 0, len(rawIDs))
+	for _, item := range rawIDs {
+		idStr, ok := item.(string)
+		if !ok {
+			h.sendError(msg.ClientID, "Invalid attachment ID format")
+			return nil, false
+		}
+		if _, err := uuid.Parse(idStr); err != nil {
+			h.sendError(msg.ClientID, "Invalid attachment ID")
+			return nil, false
+		}
+		if seen[idStr] {
+			continue // deduplicate
+		}
+		seen[idStr] = true
+		ids = append(ids, idStr)
+	}
+	return ids, true
 }
 
 // channelContext holds server-side channel state needed for message persistence.
@@ -754,25 +799,128 @@ func (h *Hub) enforceWSEpoch(msg IncomingMessage, channelUUID uuid.UUID, channel
 	return true
 }
 
+// messageAck holds the fields for a message_ack response.
+type messageAck struct {
+	Client      *Client
+	Nonce       string
+	MessageID   uuid.UUID
+	ChannelUUID uuid.UUID
+	CreatedAt   interface{}
+	UpdatedAt   interface{}
+	ReplyToID   *string
+	Attachments []models.AttachmentSummary
+}
+
 // sendMessageAck sends a message_ack to the sender with the server-assigned UUID.
-func (h *Hub) sendMessageAck(client *Client, nonce string, messageID, channelUUID uuid.UUID, createdAt, updatedAt interface{}, replyToID *string) {
+func (h *Hub) sendMessageAck(ack messageAck) {
 	ackData := map[string]interface{}{
-		keyNonce:     nonce,
-		"id":         messageID.String(),
-		keyChannelID: channelUUID.String(),
-		keyCreatedAt: createdAt,
-		keyUpdatedAt: updatedAt,
+		keyNonce:     ack.Nonce,
+		"id":         ack.MessageID.String(),
+		keyChannelID: ack.ChannelUUID.String(),
+		keyCreatedAt: ack.CreatedAt,
+		keyUpdatedAt: ack.UpdatedAt,
 	}
-	if replyToID != nil {
-		ackData["reply_to_id"] = *replyToID
+	if ack.ReplyToID != nil {
+		ackData["reply_to_id"] = *ack.ReplyToID
+	}
+	if len(ack.Attachments) > 0 {
+		ackData["attachments"] = ack.Attachments
 	}
 	ackMsg := OutgoingMessage{Type: "message_ack", Data: ackData}
 	if data, err := json.Marshal(ackMsg); err == nil {
 		select {
-		case client.Send <- data:
+		case ack.Client.Send <- data:
 		default:
 		}
 	}
+}
+
+// linkChannelAttachments validates and links attachment file_ids to a channel message.
+func (h *Hub) linkChannelAttachments(messageID uuid.UUID, userID string, attachmentIDs []string, channelID string) []models.AttachmentSummary {
+	return h.linkAttachmentsToTable(attachmentLinkCtx{
+		messageID: messageID, userID: userID, channelID: channelID,
+		insertSQL: `INSERT INTO message_attachments (message_id, file_id, position) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+	}, attachmentIDs)
+}
+
+// linkDMAttachments validates and links attachment file_ids to a DM message.
+func (h *Hub) linkDMAttachments(messageID uuid.UUID, userID string, attachmentIDs []string, conversationID string) []models.AttachmentSummary {
+	return h.linkAttachmentsToTable(attachmentLinkCtx{
+		messageID: messageID, userID: userID, conversationID: conversationID,
+		insertSQL: `INSERT INTO dm_message_attachments (message_id, file_id, position) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING`,
+	}, attachmentIDs)
+}
+
+// attachmentLinkCtx holds the context for linking attachments to a message.
+type attachmentLinkCtx struct {
+	messageID      uuid.UUID
+	userID         string
+	channelID      string
+	conversationID string
+	insertSQL      string
+}
+
+// linkAttachmentsToTable validates and links attachment file_ids using the provided INSERT query.
+func (h *Hub) linkAttachmentsToTable(ctx attachmentLinkCtx, attachmentIDs []string) []models.AttachmentSummary {
+	if len(attachmentIDs) == 0 {
+		return nil
+	}
+
+	var summaries []models.AttachmentSummary
+	for i, fileID := range attachmentIDs {
+		summary, ok := h.validateAndLinkAttachment(ctx, fileID, i)
+		if ok {
+			summaries = append(summaries, summary)
+		}
+	}
+	return summaries
+}
+
+// validateAndLinkAttachment validates a single attachment and links it to a message.
+func (h *Hub) validateAndLinkAttachment(ctx attachmentLinkCtx, fileID string, position int) (models.AttachmentSummary, bool) {
+	var summary models.AttachmentSummary
+	var uploaderID string
+	var fileChannelID, fileConvID *string
+
+	err := h.db.QueryRow(
+		`SELECT uploader_id, file_type, mime_type, file_size, channel_id, conversation_id
+		 FROM media_files WHERE id = $1 AND deleted_at IS NULL`,
+		fileID,
+	).Scan(&uploaderID, &summary.FileType, &summary.MimeType, &summary.FileSize, &fileChannelID, &fileConvID)
+	if err != nil {
+		log.Printf("Attachment %s not found or deleted: %v", fileID, err)
+		return summary, false
+	}
+
+	if !h.verifyAttachmentAccess(fileID, uploaderID, ctx, fileChannelID, fileConvID) {
+		return summary, false
+	}
+
+	_, err = h.db.Exec(ctx.insertSQL, ctx.messageID, fileID, position)
+	if err != nil {
+		log.Printf("Failed to link attachment %s to message %s: %v", fileID, ctx.messageID, err)
+		return summary, false
+	}
+
+	summary.ID = fileID
+	return summary, true
+}
+
+// verifyAttachmentAccess checks that the file is owned by the sender and belongs to the correct channel/conversation.
+func (h *Hub) verifyAttachmentAccess(fileID, uploaderID string, ctx attachmentLinkCtx, fileChannelID, fileConvID *string) bool {
+	if uploaderID != ctx.userID {
+		log.Printf("Attachment %s not owned by user %s", fileID, ctx.userID)
+		return false
+	}
+	if ctx.channelID != "" && (fileChannelID == nil || *fileChannelID != ctx.channelID) {
+		log.Printf("Attachment %s does not belong to channel %s", fileID, ctx.channelID)
+		return false
+	}
+	if ctx.conversationID != "" && (fileConvID == nil || *fileConvID != ctx.conversationID) {
+		log.Printf("Attachment %s does not belong to conversation %s", fileID, ctx.conversationID)
+		return false
+	}
+	return true
 }
 
 // persistMessage inserts a message into the database, returning the generated ID and timestamps.
@@ -859,6 +1007,48 @@ func (h *Hub) fetchRepliedToSummary(replyToID string) map[string]interface{} {
 	}
 }
 
+// messageBroadcastCtx holds the data needed to build a channel message broadcast payload.
+type messageBroadcastCtx struct {
+	messageID        uuid.UUID
+	channelUUID      uuid.UUID
+	userID           uuid.UUID
+	client           *Client
+	input            *messageInput
+	embedsSuppressed bool
+	createdAt        interface{}
+	updatedAt        interface{}
+	replyToID        *string
+	attachments      []models.AttachmentSummary
+}
+
+// buildMessageBroadcast constructs the broadcast data map for a channel message.
+func (h *Hub) buildMessageBroadcast(ctx messageBroadcastCtx) map[string]interface{} {
+	data := map[string]interface{}{
+		"id":                ctx.messageID,
+		keyChannelID:        ctx.channelUUID,
+		keyUserID:           ctx.userID,
+		keyUsername:         ctx.client.Username,
+		"display_name":      ctx.client.DisplayName,
+		"avatar_url":        ctx.client.AvatarURL,
+		keyContent:          ctx.input.content,
+		keyIsEncrypted:      ctx.input.isEncrypted,
+		keyKeyVersion:       ctx.input.keyVersion,
+		"embeds_suppressed": ctx.embedsSuppressed,
+		keyCreatedAt:        ctx.createdAt,
+		keyUpdatedAt:        ctx.updatedAt,
+	}
+	if ctx.replyToID != nil {
+		data["reply_to_id"] = *ctx.replyToID
+		if summary := h.fetchRepliedToSummary(*ctx.replyToID); summary != nil {
+			data["replied_to"] = summary
+		}
+	}
+	if len(ctx.attachments) > 0 {
+		data["attachments"] = ctx.attachments
+	}
+	return data
+}
+
 // handleMessage handles a chat message: validates, persists to DB, then broadcasts
 func (h *Hub) handleMessage(msg IncomingMessage) {
 	channelID, ok := msg.Data[keyChannelID].(string)
@@ -918,42 +1108,34 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		return
 	}
 
+	// Link attachments to message (if any)
+	attachmentSummaries := h.linkChannelAttachments(messageID, msg.UserID.String(), input.attachmentIDs, channelID)
+
 	// Ack to sender
 	nonce, _ := msg.Data[keyNonce].(string)
-	h.sendMessageAck(client, nonce, messageID, channelUUID, createdAt, updatedAt, replyToID)
+	h.sendMessageAck(messageAck{
+		Client:      client,
+		Nonce:       nonce,
+		MessageID:   messageID,
+		ChannelUUID: channelUUID,
+		CreatedAt:   createdAt,
+		UpdatedAt:   updatedAt,
+		ReplyToID:   replyToID,
+		Attachments: attachmentSummaries,
+	})
 
 	// Broadcast to channel subscribers (excluding sender)
-	broadcastData := map[string]interface{}{
-		"id":                messageID,
-		keyChannelID:        channelUUID,
-		keyUserID:           msg.UserID,
-		keyUsername:         client.Username,
-		"display_name":      client.DisplayName,
-		"avatar_url":        client.AvatarURL,
-		keyContent:          input.content,
-		keyIsEncrypted:      input.isEncrypted,
-		keyKeyVersion:       input.keyVersion,
-		"embeds_suppressed": embedsSuppressed,
-		keyCreatedAt:        createdAt,
-		keyUpdatedAt:        updatedAt,
-	}
-	if replyToID != nil {
-		broadcastData["reply_to_id"] = *replyToID
-		if summary := h.fetchRepliedToSummary(*replyToID); summary != nil {
-			broadcastData["replied_to"] = summary
-		}
-	}
-
-	broadcastMsg := BroadcastMessage{
+	broadcastData := h.buildMessageBroadcast(messageBroadcastCtx{
+		messageID: messageID, channelUUID: channelUUID, userID: msg.UserID,
+		client: client, input: input, embedsSuppressed: embedsSuppressed,
+		createdAt: createdAt, updatedAt: updatedAt,
+		replyToID: replyToID, attachments: attachmentSummaries,
+	})
+	h.broadcast <- BroadcastMessage{
 		ChannelID:   channelUUID,
 		ExcludeUser: &msg.UserID,
-		Data: OutgoingMessage{
-			Type: "message",
-			Data: broadcastData,
-		},
+		Data:        OutgoingMessage{Type: "message", Data: broadcastData},
 	}
-
-	h.broadcast <- broadcastMsg
 
 	// Send lightweight unread_notify to server subscribers NOT subscribed to this channel.
 	h.sendUnreadNotify(chCtx.serverUUID, channelUUID, msg.UserID)
@@ -1442,6 +1624,12 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 		}
 	}
 
+	// Parse optional attachment IDs
+	dmAttachmentIDs, attachOK := h.parseAttachmentIDs(msg)
+	if !attachOK {
+		return
+	}
+
 	// Persist message to database
 	messageID := uuid.New()
 	var createdAt, updatedAt time.Time
@@ -1457,17 +1645,24 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 		return
 	}
 
+	// Link attachments to DM message (if any)
+	dmAttachmentSummaries := h.linkDMAttachments(messageID, msg.UserID.String(), dmAttachmentIDs, convID)
+
 	// Send dm_message_ack to the sender
 	nonce, _ := msg.Data[keyNonce].(string)
+	dmAckData := map[string]interface{}{
+		keyNonce:          nonce,
+		"id":              messageID.String(),
+		"conversation_id": convUUID.String(),
+		keyCreatedAt:      createdAt,
+		keyUpdatedAt:      updatedAt,
+	}
+	if len(dmAttachmentSummaries) > 0 {
+		dmAckData["attachments"] = dmAttachmentSummaries
+	}
 	ackMsg := OutgoingMessage{
 		Type: "dm_message_ack",
-		Data: map[string]interface{}{
-			keyNonce:          nonce,
-			"id":              messageID.String(),
-			"conversation_id": convUUID.String(),
-			keyCreatedAt:      createdAt,
-			keyUpdatedAt:      updatedAt,
-		},
+		Data: dmAckData,
 	}
 	if ackData, ackErr := json.Marshal(ackMsg); ackErr == nil {
 		select {
@@ -1477,22 +1672,26 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 	}
 
 	// Broadcast dm_message to all DM subscribers except the sender
+	dmBroadcastData := map[string]interface{}{
+		"id":              messageID,
+		keyConversationID: convUUID,
+		keyUserID:         msg.UserID,
+		keyUsername:       client.Username,
+		"display_name":    client.DisplayName,
+		"avatar_url":      client.AvatarURL,
+		keyContent:        content,
+		keyIsEncrypted:    isEncrypted,
+		keyKeyVersion:     dmKeyVersion,
+		"type":            msgType,
+		keyCreatedAt:      createdAt,
+		keyUpdatedAt:      updatedAt,
+	}
+	if len(dmAttachmentSummaries) > 0 {
+		dmBroadcastData["attachments"] = dmAttachmentSummaries
+	}
 	broadcastData := OutgoingMessage{
 		Type: "dm_message",
-		Data: map[string]interface{}{
-			"id":              messageID,
-			keyConversationID: convUUID,
-			keyUserID:         msg.UserID,
-			keyUsername:       client.Username,
-			"display_name":    client.DisplayName,
-			"avatar_url":      client.AvatarURL,
-			keyContent:        content,
-			keyIsEncrypted:    isEncrypted,
-			keyKeyVersion:     dmKeyVersion,
-			"type":            msgType,
-			keyCreatedAt:      createdAt,
-			keyUpdatedAt:      updatedAt,
-		},
+		Data: dmBroadcastData,
 	}
 
 	// For personal threads (self-DM), include the sender in the broadcast

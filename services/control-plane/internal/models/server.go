@@ -90,11 +90,12 @@ type Message struct {
 // MessageWithUser combines message with user details
 type MessageWithUser struct {
 	Message
-	Username    string            `json:"username" db:"username"`
-	DisplayName *string           `json:"display_name,omitempty" db:"display_name"`
-	AvatarURL   *string           `json:"avatar_url,omitempty" db:"avatar_url"`
-	Reactions   []ReactionSummary `json:"reactions,omitempty"`
-	RepliedTo   *RepliedToSummary `json:"replied_to,omitempty"`
+	Username    string              `json:"username" db:"username"`
+	DisplayName *string             `json:"display_name,omitempty" db:"display_name"`
+	AvatarURL   *string             `json:"avatar_url,omitempty" db:"avatar_url"`
+	Reactions   []ReactionSummary   `json:"reactions,omitempty"`
+	RepliedTo   *RepliedToSummary   `json:"replied_to,omitempty"`
+	Attachments []AttachmentSummary `json:"attachments,omitempty"`
 }
 
 // ServerInvite represents an invite code for joining a server

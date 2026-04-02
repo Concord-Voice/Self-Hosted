@@ -8,24 +8,25 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 )
 
 const (
-	errMsgInvalidConversationID = "Invalid conversation ID"
-	errMsgNotParticipant = "Not a participant"
-	errMsgInvalidRequestBody = "Invalid request body"
-	errMsgFailedOpenConversation = "Failed to open conversation"
-	errMsgFailedCreateGroup = "Failed to create group"
+	errMsgInvalidConversationID      = "Invalid conversation ID"
+	errMsgNotParticipant             = "Not a participant"
+	errMsgInvalidRequestBody         = "Invalid request body"
+	errMsgFailedOpenConversation     = "Failed to open conversation"
+	errMsgFailedCreateGroup          = "Failed to create group"
 	errMsgFailedCreatePersonalThread = "Failed to create personal thread"
-	errMsgFailedUpdateConversation = "Failed to update conversation"
-	errMsgFailedUpdateMessage = "Failed to update message"
-	errMsgFailedStartTransaction = "Failed to start transaction"
-	errMsgFailedRollbackTransaction = "Failed to rollback transaction"
+	errMsgFailedUpdateConversation   = "Failed to update conversation"
+	errMsgFailedUpdateMessage        = "Failed to update message"
+	errMsgFailedStartTransaction     = "Failed to start transaction"
+	errMsgFailedRollbackTransaction  = "Failed to rollback transaction"
 )
-
 
 // Handler handles DM-related requests.
 type Handler struct {
@@ -42,6 +43,44 @@ func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, cfg *config.
 		log: log,
 		hub: hub,
 		cfg: cfg,
+	}
+}
+
+// dmMessageResponse represents a DM message in API responses.
+type dmMessageResponse struct {
+	ID             string                     `json:"id"`
+	ConversationID string                     `json:"conversation_id"`
+	UserID         string                     `json:"user_id"`
+	Content        string                     `json:"content"`
+	IsEncrypted    bool                       `json:"is_encrypted"`
+	Type           string                     `json:"type"`
+	KeyVersion     int                        `json:"key_version"`
+	EditedAt       *string                    `json:"edited_at,omitempty"`
+	CreatedAt      string                     `json:"created_at"`
+	Username       string                     `json:"username"`
+	DisplayName    *string                    `json:"display_name,omitempty"`
+	AvatarURL      *string                    `json:"avatar_url,omitempty"`
+	Attachments    []models.AttachmentSummary `json:"attachments,omitempty"`
+}
+
+// enrichDMAttachments batch-loads and attaches file attachment summaries to DM messages.
+func (h *Handler) enrichDMAttachments(messages []dmMessageResponse) {
+	if len(messages) == 0 {
+		return
+	}
+	msgIDs := make([]string, len(messages))
+	for i, m := range messages {
+		msgIDs[i] = m.ID
+	}
+	attachmentMap, err := h.loadDMAttachments(msgIDs)
+	if err != nil {
+		h.log.Error("Failed to load DM attachments", "error", err)
+		return
+	}
+	for i := range messages {
+		if attachments, ok := attachmentMap[messages[i].ID]; ok {
+			messages[i].Attachments = attachments
+		}
 	}
 }
 
@@ -653,20 +692,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 	}
 	defer func() { _ = rows.Close() }()
 
-	type messageResponse struct {
-		ID             string  `json:"id"`
-		ConversationID string  `json:"conversation_id"`
-		UserID         string  `json:"user_id"`
-		Content        string  `json:"content"`
-		IsEncrypted    bool    `json:"is_encrypted"`
-		Type           string  `json:"type"`
-		KeyVersion     int     `json:"key_version"`
-		EditedAt       *string `json:"edited_at,omitempty"`
-		CreatedAt      string  `json:"created_at"`
-		Username       string  `json:"username"`
-		DisplayName    *string `json:"display_name,omitempty"`
-		AvatarURL      *string `json:"avatar_url,omitempty"`
-	}
+	type messageResponse = dmMessageResponse
 
 	messages := []messageResponse{}
 	for rows.Next() {
@@ -686,6 +712,9 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch messages"})
 		return
 	}
+
+	// Enrich messages with attachment metadata (non-fatal on failure)
+	h.enrichDMAttachments(messages)
 
 	c.JSON(http.StatusOK, gin.H{"messages": messages})
 }
@@ -1318,4 +1347,40 @@ func (h *Handler) broadcastToDMParticipants(convID, excludeUserID string, msg we
 			h.hub.BroadcastToUser(parsed, msg)
 		}
 	}
+}
+
+// loadDMAttachments batch-loads attachment summaries for a set of DM message IDs.
+func (h *Handler) loadDMAttachments(messageIDs []string) (map[string][]models.AttachmentSummary, error) {
+	if len(messageIDs) == 0 {
+		return nil, nil
+	}
+
+	rows, err := h.db.Query(`
+		SELECT ma.message_id, mf.id, mf.file_type, mf.mime_type, mf.file_size
+		FROM dm_message_attachments ma
+		INNER JOIN media_files mf ON ma.file_id = mf.id
+		WHERE ma.message_id = ANY($1::uuid[])
+		  AND mf.deleted_at IS NULL
+		ORDER BY ma.message_id, ma.position
+	`, pq.Array(messageIDs))
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	result := make(map[string][]models.AttachmentSummary)
+	for rows.Next() {
+		var msgID string
+		var a models.AttachmentSummary
+		if err := rows.Scan(&msgID, &a.ID, &a.FileType, &a.MimeType, &a.FileSize); err != nil {
+			return nil, err
+		}
+		result[msgID] = append(result[msgID], a)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return result, nil
 }
