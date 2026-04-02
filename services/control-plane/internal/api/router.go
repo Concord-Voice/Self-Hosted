@@ -41,6 +41,11 @@ const (
 	routeTransferOwnership = "/:id/transfer-ownership"
 	routeRecoveryKey       = "/recovery-key"
 	routeRecoveryCircle    = "/recovery-circle"
+	pathIDMembers          = "/:id/members"
+	pathIDMembersUserID    = "/:id/members/:user_id"
+	pathIDRead             = "/:id/read"
+	pathIDKeys             = "/:id/keys"
+	pathIDOverrides        = "/:id/overrides"
 )
 
 // mentionCheckerAdapter adapts an rbac.Resolver to the websocket.MentionPermissionChecker
@@ -607,25 +612,25 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				)
 
 				// List members in a server (30 requests per minute)
-				serverRoutes.GET("/:id/members",
+				serverRoutes.GET(pathIDMembers,
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					membersHandler.ListMembers,
 				)
 
 				// Add member to server (10 requests per minute)
-				serverRoutes.POST("/:id/members",
+				serverRoutes.POST(pathIDMembers,
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					membersHandler.AddMember,
 				)
 
 				// Update member role (5 requests per minute - sensitive operation)
-				serverRoutes.PATCH("/:id/members/:user_id",
+				serverRoutes.PATCH(pathIDMembersUserID,
 					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
 					membersHandler.UpdateMember,
 				)
 
 				// Remove member from server (5 requests per minute - sensitive operation)
-				serverRoutes.DELETE("/:id/members/:user_id",
+				serverRoutes.DELETE(pathIDMembersUserID,
 					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
 					membersHandler.RemoveMember,
 				)
@@ -693,7 +698,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				)
 
 				// Mark all channels in a server as read (30 requests per minute)
-				serverRoutes.POST("/:id/read",
+				serverRoutes.POST(pathIDRead,
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					channelsHandler.MarkServerRead,
 				)
@@ -824,19 +829,19 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				)
 
 				// Mark channel as read (30 requests per minute)
-				channelRoutes.POST("/:id/read",
+				channelRoutes.POST(pathIDRead,
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					channelsHandler.MarkChannelRead,
 				)
 
 				// Get channel encryption keys (for E2EE channels)
-				channelRoutes.GET("/:id/keys",
+				channelRoutes.GET(pathIDKeys,
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					channelsHandler.GetChannelKeys,
 				)
 
 				// Distribute channel keys to new members (E2EE key distribution)
-				channelRoutes.POST("/:id/keys",
+				channelRoutes.POST(pathIDKeys,
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					channelsHandler.DistributeChannelKeys,
 				)
@@ -862,11 +867,11 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				)
 
 				// RBAC: Channel permission overrides
-				channelRoutes.GET("/:id/overrides",
+				channelRoutes.GET(pathIDOverrides,
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					rbacHandler.ListChannelOverrides,
 				)
-				channelRoutes.PUT("/:id/overrides",
+				channelRoutes.PUT(pathIDOverrides,
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					rbacHandler.UpsertChannelOverride,
 				)
@@ -891,11 +896,11 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 			// Category permission override routes
 			categoryRoutes := protected.Group("/categories")
 			{
-				categoryRoutes.GET("/:id/overrides",
+				categoryRoutes.GET(pathIDOverrides,
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					rbacHandler.ListCategoryOverrides,
 				)
-				categoryRoutes.PUT("/:id/overrides",
+				categoryRoutes.PUT(pathIDOverrides,
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					rbacHandler.UpsertCategoryOverride,
 				)
@@ -1040,6 +1045,28 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 					dmHandler.UpdateConversation,
 				)
 
+				// Group member management (10 requests per minute)
+				dmRoutes.POST(pathIDMembers,
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					dmHandler.AddMember,
+				)
+				dmRoutes.DELETE(pathIDMembers+"/:userId",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					dmHandler.RemoveMember,
+				)
+
+				// Group member role management (10 requests per minute)
+				dmRoutes.PATCH(pathIDMembers+"/:userId",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					dmHandler.UpdateMemberRole,
+				)
+
+				// Delete group DM (5 requests per minute)
+				dmRoutes.DELETE("/:id",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					dmHandler.DeleteGroup,
+				)
+
 				// Get DM message history (30 requests per minute)
 				dmRoutes.GET("/:id/messages",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
@@ -1059,17 +1086,17 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				)
 
 				// Mark DM conversation as read (30 requests per minute)
-				dmRoutes.POST("/:id/read",
+				dmRoutes.POST(pathIDRead,
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					dmHandler.MarkRead,
 				)
 
 				// DM E2EE key management
-				dmRoutes.GET("/:id/keys",
+				dmRoutes.GET(pathIDKeys,
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					dmHandler.GetKeys,
 				)
-				dmRoutes.POST("/:id/keys",
+				dmRoutes.POST(pathIDKeys,
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					dmHandler.DistributeKeys,
 				)
@@ -1192,6 +1219,10 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				middleware.RateLimitByUser(redis, 5, 1*time.Minute),
 				mediaHandler.UploadServerBanner,
 			)
+			mediaRoutes.POST("/upload/dm-icon",
+				middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+				mediaHandler.UploadDMIcon,
+			)
 
 			// Tier 2 upload (E2EE attachments — ciphertext stored as-is)
 			mediaRoutes.POST("/upload/attachment",
@@ -1215,6 +1246,10 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 			mediaRoutes.GET("/server-banners/:server_id",
 				middleware.RateLimitByUser(redis, 60, 1*time.Minute),
 				mediaHandler.ProxyServerBanner,
+			)
+			mediaRoutes.GET("/dm-icons/:conversationId",
+				middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+				mediaHandler.ProxyDMIcon,
 			)
 
 			// Tier 2 proxy download (E2EE attachment — proxied, not presigned)

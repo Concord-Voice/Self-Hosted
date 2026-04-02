@@ -38,6 +38,7 @@ const (
 	pathUploadServerIcon  = "/api/v1/media/upload/server-icon"
 	pathAttachmentsPrefix = "/api/v1/media/attachments/"
 	pathMediaPrefix       = "/api/v1/media/"
+	pathUploadDMIcon      = "/api/v1/media/upload/dm-icon"
 	fileEncryptedBin      = "encrypted.bin"
 	mimeOctetStream       = "application/octet-stream"
 	fileIconPng           = "icon.png"
@@ -47,6 +48,7 @@ const (
 	keyConversationID     = "conversation_id"
 	keyMimeType           = "mime_type"
 	fmtAttachmentsKey     = "attachments/%s"
+	fmtDMIconsKey         = "dm-icons/%s"
 )
 
 // Pre-computed Argon2id hash of the test credential — avoids 100ms Argon2id cost per user.
@@ -349,7 +351,7 @@ func TestUploadServerIconInvalidServerID(t *testing.T) {
 	owner := ts.createTestUser(t, "iconbadid")
 
 	imgData := makePNG(t, 100, 100)
-	body, ct := multipartBody(t, "file", fileIconPng, imgData, map[string]string{"server_id": "not-a-uuid"})
+	body, ct := multipartBody(t, "file", fileIconPng, imgData, map[string]string{"server_id": valueNotUUID})
 
 	w := ts.doMultipart(ts.handler.UploadServerIcon, "POST", pathUploadServerIcon, owner, body, ct)
 
@@ -435,7 +437,7 @@ func TestUploadAttachmentInvalidChannelID(t *testing.T) {
 	user := ts.createTestUser(t, "badchanid")
 
 	body, ct := multipartBody(t, "file", fileEncryptedBin, []byte("data"), map[string]string{
-		"channel_id": "not-a-uuid",
+		"channel_id": valueNotUUID,
 		"file_type":  "file",
 	})
 
@@ -642,9 +644,205 @@ func TestProxyServerIconNonMember(t *testing.T) {
 
 	// Put an icon in the store
 	key := fmt.Sprintf("server-icons/%s", serverID)
-	require.NoError(t, ts.store.PutObject(context.TODO(), key, bytes.NewReader(makePNG(t, 64, 64)), 100, "image/png"))
+	require.NoError(t, ts.store.PutObject(context.TODO(), key, bytes.NewReader(makePNG(t, 64, 64)), 100, mimeImagePNG))
 
 	w := ts.doJSON(ts.handler.ProxyServerIcon, "GET", "/api/v1/media/server-icons/"+serverID, outsider, gin.Params{{Key: "server_id", Value: serverID}})
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+// =====================================================================
+// DM Icon Upload Tests (Group DM Admin Controls)
+// =====================================================================
+
+// createTestGroupDM inserts a group DM conversation with participants and roles.
+func (ts *testSetup) createTestGroupDM(t *testing.T, adminID string, memberIDs ...string) string {
+	t.Helper()
+	convID := uuid.New().String()
+	_, err := ts.db.Exec(
+		`INSERT INTO dm_conversations (id, is_group, is_encrypted, created_by) VALUES ($1, true, true, $2)`,
+		convID, adminID,
+	)
+	require.NoError(t, err)
+	// Insert admin participant
+	_, err = ts.db.Exec(
+		`INSERT INTO dm_participants (conversation_id, user_id, role) VALUES ($1, $2, 'admin')`,
+		convID, adminID,
+	)
+	require.NoError(t, err)
+	// Insert member participants
+	for _, uid := range memberIDs {
+		_, err = ts.db.Exec(
+			`INSERT INTO dm_participants (conversation_id, user_id, role) VALUES ($1, $2, 'member')`,
+			convID, uid,
+		)
+		require.NoError(t, err)
+	}
+	return convID
+}
+
+func TestUploadDMIconNotAdmin(t *testing.T) {
+	ts := setupMediaTest(t)
+	admin := ts.createTestUser(t, "dmiconadmin")
+	member := ts.createTestUser(t, "dmiconmember")
+	convID := ts.createTestGroupDM(t, admin, member)
+
+	imgData := makePNG(t, 100, 100)
+	body, ct := multipartBody(t, "file", fileIconPng, imgData, map[string]string{
+		keyConversationID: convID,
+	})
+
+	// Member (non-admin) tries to upload icon
+	w := ts.doMultipart(ts.handler.UploadDMIcon, "POST", pathUploadDMIcon, member, body, ct)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	resp := parseBody(t, w)
+	assert.Contains(t, resp["error"], "admin")
+}
+
+func TestUploadDMIconNotParticipant(t *testing.T) {
+	ts := setupMediaTest(t)
+	admin := ts.createTestUser(t, "dmiconadm2")
+	member := ts.createTestUser(t, "dmiconmem2")
+	outsider := ts.createTestUser(t, "dmiconout")
+	convID := ts.createTestGroupDM(t, admin, member)
+
+	imgData := makePNG(t, 100, 100)
+	body, ct := multipartBody(t, "file", fileIconPng, imgData, map[string]string{
+		keyConversationID: convID,
+	})
+
+	// Outsider (not a participant) tries to upload icon
+	w := ts.doMultipart(ts.handler.UploadDMIcon, "POST", pathUploadDMIcon, outsider, body, ct)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+func TestUploadDMIconMissingConversationID(t *testing.T) {
+	ts := setupMediaTest(t)
+	admin := ts.createTestUser(t, "dmiconnoid")
+
+	imgData := makePNG(t, 100, 100)
+	// No conversation_id field
+	body, ct := multipartBody(t, "file", fileIconPng, imgData, nil)
+
+	w := ts.doMultipart(ts.handler.UploadDMIcon, "POST", pathUploadDMIcon, admin, body, ct)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	resp := parseBody(t, w)
+	assert.Contains(t, resp["error"], "conversation_id")
+}
+
+func TestProxyDMIconNonParticipant(t *testing.T) {
+	ts := setupMediaTest(t)
+	admin := ts.createTestUser(t, "proxydmadm")
+	member := ts.createTestUser(t, "proxydmmem")
+	outsider := ts.createTestUser(t, "proxydmout")
+	convID := ts.createTestGroupDM(t, admin, member)
+
+	// Put an icon in the store
+	key := fmt.Sprintf(fmtDMIconsKey, convID)
+	require.NoError(t, ts.store.PutObject(context.TODO(), key, bytes.NewReader(makePNG(t, 64, 64)), 100, mimeImagePNG))
+
+	// Outsider tries to access the icon
+	w := ts.doJSON(ts.handler.ProxyDMIcon, "GET", "/api/v1/media/dm-icons/"+convID, outsider, gin.Params{{Key: "conversationId", Value: convID}})
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+func TestUploadDMIconSuccess(t *testing.T) {
+	ts := setupMediaTest(t)
+	admin := ts.createTestUser(t, "dmiconsuc")
+	member := ts.createTestUser(t, "dmiconsucm")
+	convID := ts.createTestGroupDM(t, admin, member)
+
+	imgData := makePNG(t, 100, 100)
+	body, ct := multipartBody(t, "file", fileIconPng, imgData, map[string]string{
+		keyConversationID: convID,
+	})
+
+	w := ts.doMultipart(ts.handler.UploadDMIcon, "POST", pathUploadDMIcon, admin, body, ct)
+
+	assert.Equal(t, http.StatusCreated, w.Code)
+	resp := parseBody(t, w)
+
+	// Verify proxy URL in response
+	expectedURL := fmt.Sprintf("/api/v1/media/dm-icons/%s", convID)
+	assert.Equal(t, expectedURL, resp["url"])
+	assert.NotEmpty(t, resp["file_id"])
+
+	// Verify object stored in MinIO
+	assert.True(t, ts.store.hasObject(fmt.Sprintf(fmtDMIconsKey, convID)))
+
+	// Verify dm_conversations.icon_url was updated in DB
+	var iconURL sql.NullString
+	err := ts.db.QueryRow(`SELECT icon_url FROM dm_conversations WHERE id = $1`, convID).Scan(&iconURL)
+	require.NoError(t, err)
+	assert.True(t, iconURL.Valid, "icon_url should be set")
+	assert.Equal(t, expectedURL, iconURL.String)
+
+	// Verify media_files row was created
+	var count int
+	err = ts.db.QueryRow(
+		`SELECT COUNT(*) FROM media_files WHERE storage_key = $1 AND deleted_at IS NULL`,
+		fmt.Sprintf(fmtDMIconsKey, convID),
+	).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+}
+
+func TestProxyDMIconSuccess(t *testing.T) {
+	ts := setupMediaTest(t)
+	admin := ts.createTestUser(t, "proxydmsuc")
+	member := ts.createTestUser(t, "proxydmsucm")
+	convID := ts.createTestGroupDM(t, admin, member)
+
+	// Put an icon in the store (simulating a prior upload)
+	pngData := makePNG(t, 64, 64)
+	key := fmt.Sprintf(fmtDMIconsKey, convID)
+	require.NoError(t, ts.store.PutObject(context.TODO(), key, bytes.NewReader(pngData), int64(len(pngData)), mimeImagePNG))
+
+	// Admin (participant) proxies the icon
+	w := ts.doJSON(ts.handler.ProxyDMIcon, "GET", "/api/v1/media/dm-icons/"+convID, admin, gin.Params{{Key: "conversationId", Value: convID}})
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, mimeImagePNG, w.Header().Get(hdrContentType))
+	assert.Contains(t, w.Header().Get("Cache-Control"), "max-age=3600")
+	assert.NotEmpty(t, w.Body.Bytes(), "response body should contain image data")
+}
+
+func TestUploadDMIconInvalidConversationID(t *testing.T) {
+	ts := setupMediaTest(t)
+	admin := ts.createTestUser(t, "dmiconbadc")
+
+	imgData := makePNG(t, 100, 100)
+	body, ct := multipartBody(t, "file", fileIconPng, imgData, map[string]string{
+		keyConversationID: valueNotUUID,
+	})
+
+	w := ts.doMultipart(ts.handler.UploadDMIcon, "POST", pathUploadDMIcon, admin, body, ct)
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	resp := parseBody(t, w)
+	assert.Contains(t, resp["error"], "conversation_id")
+}
+
+func TestUploadDMIconNotGroupDM(t *testing.T) {
+	ts := setupMediaTest(t)
+	user1 := ts.createTestUser(t, "dmiconnotgrp1")
+	user2 := ts.createTestUser(t, "dmiconnotgrp2")
+	// Create a 1:1 DM (not a group DM) — is_group = false
+	convID := ts.createTestDMConversation(t, user1, user2)
+
+	imgData := makePNG(t, 100, 100)
+	body, ct := multipartBody(t, "file", fileIconPng, imgData, map[string]string{
+		keyConversationID: convID,
+	})
+
+	// user1 is the creator but it's not a group DM, so userIsDMAdmin returns no rows
+	w := ts.doMultipart(ts.handler.UploadDMIcon, "POST", pathUploadDMIcon, user1, body, ct)
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	resp := parseBody(t, w)
+	assert.Contains(t, resp["error"], "group DM")
 }

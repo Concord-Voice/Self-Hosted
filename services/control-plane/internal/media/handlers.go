@@ -32,6 +32,7 @@ const (
 	errMsgAccessDenied       = "Access denied"
 	errMsgFailedVerifyAccess = "Failed to verify access"
 	errMsgFailedVerifyPerms  = "Failed to verify permissions"
+	purposeDMIcon            = "dm-icon"
 )
 
 // ObjectStore defines the storage operations required by the media handler.
@@ -136,6 +137,13 @@ func (h *Handler) UploadServerIcon(c *gin.Context) {
 func (h *Handler) UploadServerBanner(c *gin.Context) {
 	userID := c.GetString("user_id")
 	h.handleTier1Upload(c, userID, "server-banner", bannerMaxUpload, BannerMaxW, BannerMaxH)
+}
+
+// UploadDMIcon handles group DM icon uploads.
+// POST /api/v1/media/upload/dm-icon
+func (h *Handler) UploadDMIcon(c *gin.Context) {
+	userID := c.GetString("user_id")
+	h.handleTier1Upload(c, userID, purposeDMIcon, iconMaxUpload, IconMaxDim, IconMaxDim)
 }
 
 // UploadAttachment handles E2EE file uploads for chat attachments (Tier 2).
@@ -406,6 +414,24 @@ func (h *Handler) ProxyServerBanner(c *gin.Context) {
 	h.proxyTier1Media(c, fmt.Sprintf("server-banners/%s", serverID))
 }
 
+// ProxyDMIcon serves a group DM's icon through the control plane.
+// GET /api/v1/media/dm-icons/:conversationId
+// Requires JWT + DM membership.
+func (h *Handler) ProxyDMIcon(c *gin.Context) {
+	userID := c.GetString("user_id")
+	conversationID := c.Param("conversationId")
+	if _, err := uuid.Parse(conversationID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation ID"})
+		return
+	}
+
+	if !h.userHasDMAccess(c, userID, conversationID) {
+		return
+	}
+
+	h.proxyTier1Media(c, fmt.Sprintf("dm-icons/%s", conversationID))
+}
+
 // DeleteMedia soft-deletes a media file and removes it from object storage.
 // DELETE /api/v1/media/:file_id
 // Only the uploader can delete their own Tier 2 (attachment) files.
@@ -498,6 +524,23 @@ func (h *Handler) handleTier1Upload(c *gin.Context, userID, purpose string, maxS
 		}
 	}
 
+	// For DM icon uploads, validate conversation_id and check admin role BEFORE processing
+	var conversationID string
+	if purpose == purposeDMIcon {
+		conversationID = c.PostForm("conversation_id")
+		if conversationID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "conversation_id is required"})
+			return
+		}
+		if _, err := uuid.Parse(conversationID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation_id"})
+			return
+		}
+		if !h.userIsDMAdmin(c, userID, conversationID) {
+			return // 403 already sent
+		}
+	}
+
 	// Validate MIME type
 	contentType := header.Header.Get("Content-Type")
 	if contentType == "" || !allowedImageTypes[contentType] {
@@ -552,6 +595,8 @@ func (h *Handler) handleTier1Upload(c *gin.Context, userID, purpose string, maxS
 		storageKey = fmt.Sprintf("server-icons/%s", serverID)
 	case "server-banner":
 		storageKey = fmt.Sprintf("server-banners/%s", serverID)
+	case purposeDMIcon:
+		storageKey = fmt.Sprintf("dm-icons/%s", conversationID)
 	}
 
 	// Upload to object storage
@@ -583,6 +628,19 @@ func (h *Handler) handleTier1Upload(c *gin.Context, userID, purpose string, maxS
 		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to record media metadata"})
 		return
+	}
+
+	// For DM icon uploads, update the conversation's icon_url
+	if purpose == purposeDMIcon {
+		proxyURL := fmt.Sprintf("/api/v1/media/dm-icons/%s", conversationID)
+		if _, dbErr := h.db.Exec(
+			`UPDATE dm_conversations SET icon_url = $1, updated_at = NOW() WHERE id = $2`,
+			proxyURL, conversationID,
+		); dbErr != nil {
+			h.log.Error("Failed to update DM icon URL", "error", dbErr, "conversation_id", conversationID)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update group icon"})
+			return
+		}
 	}
 
 	h.log.Info("Tier 1 image uploaded", "purpose", purpose, "user_id", userID,
@@ -657,6 +715,31 @@ func (h *Handler) userHasDMAccess(c *gin.Context, userID, conversationID string)
 	}
 	if !hasAccess {
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgAccessDenied})
+		return false
+	}
+	return true
+}
+
+// userIsDMAdmin checks if a user is an admin participant in a group DM conversation.
+func (h *Handler) userIsDMAdmin(c *gin.Context, userID, conversationID string) bool {
+	var role string
+	err := h.db.QueryRow(
+		`SELECT dp.role FROM dm_participants dp
+		 JOIN dm_conversations dc ON dc.id = dp.conversation_id
+		 WHERE dp.conversation_id = $1 AND dp.user_id = $2 AND dc.is_group = TRUE`,
+		conversationID, userID,
+	).Scan(&role)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Not a group DM participant"})
+		} else {
+			h.log.Error("Failed to check DM admin", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyAccess})
+		}
+		return false
+	}
+	if role != "admin" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Only group admins can upload icons"})
 		return false
 	}
 	return true

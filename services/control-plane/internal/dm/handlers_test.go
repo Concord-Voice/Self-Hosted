@@ -1834,3 +1834,750 @@ func TestGetMessagesDMNoAttachments(t *testing.T) {
 	require.NotEmpty(t, body.Messages)
 	assert.Empty(t, body.Messages[0].Attachments)
 }
+
+// ============================================================================
+// Helper: createTestGroup creates a group DM via API and returns its ID.
+// ============================================================================
+
+const (
+	pathMembers      = "/members"
+	pathMembersSlash = "/members/"
+)
+
+func createTestGroup(t *testing.T, ts *testhelpers.TestServer, creator testhelpers.TestUser, members ...testhelpers.TestUser) string {
+	t.Helper()
+	userIDs := make([]string, len(members))
+	for i, m := range members {
+		userIDs[i] = m.ID
+	}
+	w := ts.DoRequest("POST", pathDMConversations+pathGroup, map[string]interface{}{
+		"user_ids": userIDs,
+		"name":     "Test Group",
+	}, testhelpers.AuthHeaders(creator.AccessToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	conv := body["conversation"].(map[string]interface{})
+	return conv["id"].(string)
+}
+
+// ============================================================================
+// Piece 2 Tests: Role Awareness
+// ============================================================================
+
+func TestCreateGroupCreatorIsAdmin(t *testing.T) {
+	ts := setupTS(t)
+	creator := ts.CreateTestUser(t, "cadmin1")
+	member1 := ts.CreateTestUser(t, "cadmin2")
+	member2 := ts.CreateTestUser(t, "cadmin3")
+
+	convID := createTestGroup(t, ts, creator, member1, member2)
+
+	// Fetch the conversation and check roles
+	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID, nil, testhelpers.AuthHeaders(creator.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	conv := body["conversation"].(map[string]interface{})
+	participants := conv["participants"].([]interface{})
+	require.Len(t, participants, 3)
+
+	for _, p := range participants {
+		participant := p.(map[string]interface{})
+		if participant["user_id"] == creator.ID {
+			assert.Equal(t, "admin", participant["role"], "creator should be admin")
+		} else {
+			assert.Equal(t, "member", participant["role"], "non-creator should be member")
+		}
+	}
+}
+
+func TestListConversationsIncludesRole(t *testing.T) {
+	ts := setupTS(t)
+	creator := ts.CreateTestUser(t, "listrole1")
+	member := ts.CreateTestUser(t, "listrole2")
+
+	createTestGroup(t, ts, creator, member)
+
+	w := ts.DoRequest("GET", pathDMConversations, nil, testhelpers.AuthHeaders(creator.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	conversations := body["conversations"].([]interface{})
+	require.GreaterOrEqual(t, len(conversations), 1)
+
+	// Find the group conversation
+	for _, c := range conversations {
+		conv := c.(map[string]interface{})
+		if conv["is_group"] == true {
+			participants := conv["participants"].([]interface{})
+			for _, p := range participants {
+				participant := p.(map[string]interface{})
+				assert.Contains(t, []string{"admin", "member"}, participant["role"],
+					"every participant should have a role field")
+			}
+			return
+		}
+	}
+	t.Fatal("group conversation not found in list")
+}
+
+func TestGetConversationIncludesRoleAndCreatedBy(t *testing.T) {
+	ts := setupTS(t)
+	creator := ts.CreateTestUser(t, "getrole1")
+	member := ts.CreateTestUser(t, "getrole2")
+
+	convID := createTestGroup(t, ts, creator, member)
+
+	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID, nil, testhelpers.AuthHeaders(creator.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	conv := body["conversation"].(map[string]interface{})
+
+	assert.Equal(t, creator.ID, conv["created_by"], "created_by should be the creator")
+
+	participants := conv["participants"].([]interface{})
+	for _, p := range participants {
+		participant := p.(map[string]interface{})
+		assert.NotEmpty(t, participant["role"], "role should be present")
+	}
+}
+
+func TestUpdateConversationAdminOnly(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "updadm1")
+	member := ts.CreateTestUser(t, "updadm2")
+
+	convID := createTestGroup(t, ts, admin, member)
+
+	// Admin can rename
+	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID, map[string]interface{}{
+		"name": "Admin Renamed",
+	}, testhelpers.AuthHeaders(admin.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestUpdateConversationMemberForbidden(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "updmfb1")
+	member := ts.CreateTestUser(t, "updmfb2")
+
+	convID := createTestGroup(t, ts, admin, member)
+
+	// Member cannot rename
+	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID, map[string]interface{}{
+		"name": "Member Rename Attempt",
+	}, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+// ============================================================================
+// Piece 3 Tests: Add/Remove Member
+// ============================================================================
+
+func TestAddMemberSuccess(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "addmem1")
+	member := ts.CreateTestUser(t, "addmem2")
+	newUser := ts.CreateTestUser(t, "addmem3")
+
+	convID := createTestGroup(t, ts, admin, member)
+	ts.CreateFriendship(t, admin.ID, newUser.ID, statusAccepted)
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathMembers, map[string]interface{}{
+		"user_id": newUser.ID,
+	}, testhelpers.AuthHeaders(admin.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	conv := body["conversation"].(map[string]interface{})
+	participants := conv["participants"].([]interface{})
+	assert.Len(t, participants, 3, "should now have 3 participants")
+}
+
+func TestAddMemberNotAdmin(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "addna1")
+	member := ts.CreateTestUser(t, "addna2")
+	newUser := ts.CreateTestUser(t, "addna3")
+
+	convID := createTestGroup(t, ts, admin, member)
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathMembers, map[string]interface{}{
+		"user_id": newUser.ID,
+	}, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+func TestAddMemberMaxParticipants(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "addmax0")
+
+	// Create 9 members (total 10 with admin)
+	members := make([]testhelpers.TestUser, 9)
+	for i := 0; i < 9; i++ {
+		members[i] = ts.CreateTestUser(t, fmt.Sprintf("addmax%d", i+1))
+	}
+
+	convID := createTestGroup(t, ts, admin, members...)
+
+	// Try to add an 11th
+	extra := ts.CreateTestUser(t, "addmaxextra")
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathMembers, map[string]interface{}{
+		"user_id": extra.ID,
+	}, testhelpers.AuthHeaders(admin.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Contains(t, body["error"], "10")
+}
+
+func TestAddMemberAlreadyParticipant(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "addalr1")
+	member := ts.CreateTestUser(t, "addalr2")
+
+	convID := createTestGroup(t, ts, admin, member)
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathMembers, map[string]interface{}{
+		"user_id": member.ID,
+	}, testhelpers.AuthHeaders(admin.AccessToken))
+	assert.Equal(t, http.StatusConflict, w.Code)
+}
+
+func TestAddMemberInvalidConversationID(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "addinv1")
+
+	w := ts.DoRequest("POST", "/api/v1/dm/conversations/not-a-uuid/members", map[string]interface{}{
+		"user_id": uuid.New().String(),
+	}, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestAddMemberNotGroup(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "addng1")
+	user2 := ts.CreateTestUser(t, "addng2")
+	newUser := ts.CreateTestUser(t, "addng3")
+	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathMembers, map[string]interface{}{
+		"user_id": newUser.ID,
+	}, testhelpers.AuthHeaders(user1.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestAddMemberTriggersKeyRevocation(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "addrev1")
+	member := ts.CreateTestUser(t, "addrev2")
+	newUser := ts.CreateTestUser(t, "addrev3")
+
+	convID := createTestGroup(t, ts, admin, member)
+	ts.CreateFriendship(t, admin.ID, newUser.ID, statusAccepted)
+
+	// Seed a key so revocation can be recorded
+	ts.SeedDMKey(t, convID, admin.ID, 1)
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathMembers, map[string]interface{}{
+		"user_id": newUser.ID,
+	}, testhelpers.AuthHeaders(admin.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Verify a revocation record was created
+	var count int
+	err := ts.DB.QueryRow(`SELECT COUNT(*) FROM dm_key_revocations WHERE conversation_id = $1 AND reason = 'member_added'`, convID).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "should have one key revocation for member_added")
+}
+
+func TestRemoveMemberAdminRemovesOther(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "rmadm1")
+	member := ts.CreateTestUser(t, "rmadm2")
+	target := ts.CreateTestUser(t, "rmadm3")
+
+	convID := createTestGroup(t, ts, admin, member, target)
+
+	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathMembersSlash+target.ID, nil, testhelpers.AuthHeaders(admin.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Verify target is removed
+	var exists bool
+	err := ts.DB.QueryRow(`SELECT EXISTS(SELECT 1 FROM dm_participants WHERE conversation_id = $1 AND user_id = $2)`, convID, target.ID).Scan(&exists)
+	require.NoError(t, err)
+	assert.False(t, exists, "removed user should no longer be a participant")
+}
+
+func TestRemoveMemberSelfLeave(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "rmself1")
+	member := ts.CreateTestUser(t, "rmself2")
+	leaver := ts.CreateTestUser(t, "rmself3")
+
+	convID := createTestGroup(t, ts, admin, member, leaver)
+
+	// leaver removes themselves
+	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathMembersSlash+leaver.ID, nil, testhelpers.AuthHeaders(leaver.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Verify leaver is removed
+	var exists bool
+	err := ts.DB.QueryRow(`SELECT EXISTS(SELECT 1 FROM dm_participants WHERE conversation_id = $1 AND user_id = $2)`, convID, leaver.ID).Scan(&exists)
+	require.NoError(t, err)
+	assert.False(t, exists, "self-leave user should be removed")
+}
+
+func TestRemoveMemberCannotRemoveCreator(t *testing.T) {
+	ts := setupTS(t)
+	creator := ts.CreateTestUser(t, "rmcr1")
+	member := ts.CreateTestUser(t, "rmcr2")
+
+	convID := createTestGroup(t, ts, creator, member)
+
+	// Promote member to admin so they can try removing creator
+	_, err := ts.DB.Exec(`UPDATE dm_participants SET role = 'admin' WHERE conversation_id = $1 AND user_id = $2`, convID, member.ID)
+	require.NoError(t, err)
+
+	// Member (now admin) tries to remove creator
+	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathMembersSlash+creator.ID, nil, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+func TestRemoveMemberCreatorLeavesTransfersAdmin(t *testing.T) {
+	ts := setupTS(t)
+	creator := ts.CreateTestUser(t, "rmxfer1")
+	member := ts.CreateTestUser(t, "rmxfer2")
+	member2 := ts.CreateTestUser(t, "rmxfer3")
+
+	convID := createTestGroup(t, ts, creator, member, member2)
+
+	// Creator leaves
+	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathMembersSlash+creator.ID, nil, testhelpers.AuthHeaders(creator.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Verify creator is gone
+	var exists bool
+	err := ts.DB.QueryRow(`SELECT EXISTS(SELECT 1 FROM dm_participants WHERE conversation_id = $1 AND user_id = $2)`, convID, creator.ID).Scan(&exists)
+	require.NoError(t, err)
+	assert.False(t, exists, "creator should be removed")
+
+	// Verify new created_by is set
+	var newCreatedBy string
+	err = ts.DB.QueryRow(`SELECT created_by FROM dm_conversations WHERE id = $1`, convID).Scan(&newCreatedBy)
+	require.NoError(t, err)
+	assert.NotEqual(t, creator.ID, newCreatedBy, "created_by should have transferred")
+
+	// Verify the new creator has admin role
+	var newRole string
+	err = ts.DB.QueryRow(`SELECT role FROM dm_participants WHERE conversation_id = $1 AND user_id = $2`, convID, newCreatedBy).Scan(&newRole)
+	require.NoError(t, err)
+	assert.Equal(t, "admin", newRole, "new creator should be admin")
+}
+
+func TestRemoveMemberNotAdminCannotRemoveOther(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "rmnona1")
+	member := ts.CreateTestUser(t, "rmnona2")
+	target := ts.CreateTestUser(t, "rmnona3")
+
+	convID := createTestGroup(t, ts, admin, member, target)
+
+	// member (non-admin) tries to remove target
+	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathMembersSlash+target.ID, nil, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+// ============================================================================
+// Piece 4 Tests: Role Management and Group Deletion
+// ============================================================================
+
+func TestUpdateMemberRolePromoteToAdmin(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "rolpro1")
+	member := ts.CreateTestUser(t, "rolpro2")
+
+	convID := createTestGroup(t, ts, admin, member)
+
+	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMembersSlash+member.ID, map[string]interface{}{
+		"role": "admin",
+	}, testhelpers.AuthHeaders(admin.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "admin", body["role"])
+
+	// Verify in DB
+	var role string
+	err := ts.DB.QueryRow(`SELECT role FROM dm_participants WHERE conversation_id = $1 AND user_id = $2`, convID, member.ID).Scan(&role)
+	require.NoError(t, err)
+	assert.Equal(t, "admin", role)
+}
+
+func TestUpdateMemberRoleDemoteToMember(t *testing.T) {
+	ts := setupTS(t)
+	creator := ts.CreateTestUser(t, "roldem1")
+	promoted := ts.CreateTestUser(t, "roldem2")
+
+	convID := createTestGroup(t, ts, creator, promoted)
+
+	// First promote
+	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMembersSlash+promoted.ID, map[string]interface{}{
+		"role": "admin",
+	}, testhelpers.AuthHeaders(creator.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Then demote
+	w = ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMembersSlash+promoted.ID, map[string]interface{}{
+		"role": "member",
+	}, testhelpers.AuthHeaders(creator.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "member", body["role"])
+}
+
+func TestUpdateMemberRoleCannotDemoteCreator(t *testing.T) {
+	ts := setupTS(t)
+	creator := ts.CreateTestUser(t, "rolndc1")
+	member := ts.CreateTestUser(t, "rolndc2")
+
+	convID := createTestGroup(t, ts, creator, member)
+
+	// Promote member to admin
+	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMembersSlash+member.ID, map[string]interface{}{
+		"role": "admin",
+	}, testhelpers.AuthHeaders(creator.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Member (now admin) tries to demote creator
+	w = ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMembersSlash+creator.ID, map[string]interface{}{
+		"role": "member",
+	}, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+func TestUpdateMemberRoleCannotChangeSelf(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "rolself1")
+	member := ts.CreateTestUser(t, "rolself2")
+
+	convID := createTestGroup(t, ts, admin, member)
+
+	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMembersSlash+admin.ID, map[string]interface{}{
+		"role": "member",
+	}, testhelpers.AuthHeaders(admin.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestUpdateMemberRoleNotAdmin(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "rolna1")
+	member := ts.CreateTestUser(t, "rolna2")
+	target := ts.CreateTestUser(t, "rolna3")
+
+	convID := createTestGroup(t, ts, admin, member, target)
+
+	// Non-admin tries to change role
+	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMembersSlash+target.ID, map[string]interface{}{
+		"role": "admin",
+	}, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+func TestUpdateMemberRoleInvalidRole(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "rolinv1")
+	member := ts.CreateTestUser(t, "rolinv2")
+
+	convID := createTestGroup(t, ts, admin, member)
+
+	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMembersSlash+member.ID, map[string]interface{}{
+		"role": "superadmin",
+	}, testhelpers.AuthHeaders(admin.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestDeleteGroupSuccess(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "delgrp1")
+	member := ts.CreateTestUser(t, "delgrp2")
+
+	convID := createTestGroup(t, ts, admin, member)
+
+	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID, nil, testhelpers.AuthHeaders(admin.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Verify conversation is deleted
+	var exists bool
+	err := ts.DB.QueryRow(`SELECT EXISTS(SELECT 1 FROM dm_conversations WHERE id = $1)`, convID).Scan(&exists)
+	require.NoError(t, err)
+	assert.False(t, exists, "conversation should be deleted")
+
+	// Verify participants are deleted
+	var pCount int
+	err = ts.DB.QueryRow(`SELECT COUNT(*) FROM dm_participants WHERE conversation_id = $1`, convID).Scan(&pCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, pCount, "participants should be deleted")
+}
+
+func TestDeleteGroupNotAdmin(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "delnoa1")
+	member := ts.CreateTestUser(t, "delnoa2")
+
+	convID := createTestGroup(t, ts, admin, member)
+
+	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID, nil, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+
+	// Verify conversation still exists
+	var exists bool
+	err := ts.DB.QueryRow(`SELECT EXISTS(SELECT 1 FROM dm_conversations WHERE id = $1)`, convID).Scan(&exists)
+	require.NoError(t, err)
+	assert.True(t, exists, "conversation should still exist")
+}
+
+func TestDeleteGroupNotGroup(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "delng1")
+	user2 := ts.CreateTestUser(t, "delng2")
+	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+
+	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID, nil, testhelpers.AuthHeaders(user1.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestUpdateMemberRoleInvalidConversationID(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "rolinvc1")
+	targetUser := ts.CreateTestUser(t, "rolinvc2")
+
+	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+notAUUID+pathMembersSlash+targetUser.ID, map[string]interface{}{
+		"role": "admin",
+	}, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Contains(t, body["error"], "Invalid conversation ID")
+}
+
+func TestUpdateMemberRoleTargetNotParticipant(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "roltnp1")
+	member := ts.CreateTestUser(t, "roltnp2")
+	outsider := ts.CreateTestUser(t, "roltnp3")
+
+	convID := createTestGroup(t, ts, admin, member)
+
+	// Try to change role of someone who is not in the group
+	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMembersSlash+outsider.ID, map[string]interface{}{
+		"role": "admin",
+	}, testhelpers.AuthHeaders(admin.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "Target user is not a participant", body["error"])
+}
+
+func TestDeleteGroupInvalidConversationID(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "delinvc1")
+
+	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+notAUUID, nil, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Contains(t, body["error"], "Invalid conversation ID")
+}
+
+const errNotParticipant = "Not a participant"
+
+// --- UpdateMemberRole additional error branch coverage ---
+
+func TestUpdateMemberRoleInvalidTargetUserID(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "roltid1")
+	member := ts.CreateTestUser(t, "roltid2")
+
+	convID := createTestGroup(t, ts, admin, member)
+
+	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMembersSlash+notAUUID, map[string]interface{}{
+		"role": "admin",
+	}, testhelpers.AuthHeaders(admin.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "Invalid user ID", body["error"])
+}
+
+func TestUpdateMemberRoleMissingBody(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "rolmb1")
+	member := ts.CreateTestUser(t, "rolmb2")
+
+	convID := createTestGroup(t, ts, admin, member)
+
+	// Send nil body — ShouldBindJSON should fail
+	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMembersSlash+member.ID, nil, testhelpers.AuthHeaders(admin.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "Invalid request body", body["error"])
+}
+
+func TestUpdateMemberRoleCallerNotParticipant(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "rolcnp1")
+	member := ts.CreateTestUser(t, "rolcnp2")
+	outsider := ts.CreateTestUser(t, "rolcnp3")
+
+	convID := createTestGroup(t, ts, admin, member)
+
+	// Outsider (not in the group) tries to change role
+	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMembersSlash+member.ID, map[string]interface{}{
+		"role": "admin",
+	}, testhelpers.AuthHeaders(outsider.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, errNotParticipant, body["error"])
+}
+
+func TestUpdateMemberRoleNotGroupConversation(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "rolng1")
+	user2 := ts.CreateTestUser(t, "rolng2")
+	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+
+	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMembersSlash+user2.ID, map[string]interface{}{
+		"role": "admin",
+	}, testhelpers.AuthHeaders(user1.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "Cannot change roles in non-group conversations", body["error"])
+}
+
+// --- DeleteGroup additional error branch coverage ---
+
+func TestDeleteGroupCallerNotParticipant(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "delcnp1")
+	member := ts.CreateTestUser(t, "delcnp2")
+	outsider := ts.CreateTestUser(t, "delcnp3")
+
+	convID := createTestGroup(t, ts, admin, member)
+
+	// Outsider (not in the group) tries to delete the group
+	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID, nil, testhelpers.AuthHeaders(outsider.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, errNotParticipant, body["error"])
+
+	// Verify conversation still exists
+	var exists bool
+	err := ts.DB.QueryRow(`SELECT EXISTS(SELECT 1 FROM dm_conversations WHERE id = $1)`, convID).Scan(&exists)
+	require.NoError(t, err)
+	assert.True(t, exists, "conversation should still exist")
+}
+
+func TestDeleteGroupNonExistentConversation(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "delnex1")
+
+	fakeConvID := uuid.New().String()
+	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+fakeConvID, nil, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, errNotParticipant, body["error"])
+}
+
+func TestUpdateMemberRoleNonExistentConversation(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "rolnex1")
+	target := ts.CreateTestUser(t, "rolnex2")
+
+	fakeConvID := uuid.New().String()
+	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+fakeConvID+pathMembersSlash+target.ID, map[string]interface{}{
+		"role": "admin",
+	}, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, errNotParticipant, body["error"])
+}
+
+func TestDeleteGroupVerifiesAllDataDeleted(t *testing.T) {
+	ts := setupTS(t)
+	admin := ts.CreateTestUser(t, "delvad1")
+	member := ts.CreateTestUser(t, "delvad2")
+
+	convID := createTestGroup(t, ts, admin, member)
+
+	// Insert a message so we can verify message deletion too
+	insertDMMessage(t, ts, convID, admin.ID, "hello group", false)
+
+	// Insert a read state
+	_, err := ts.DB.Exec(
+		`INSERT INTO dm_read_states (user_id, conversation_id, last_read_at) VALUES ($1, $2, NOW())`,
+		admin.ID, convID,
+	)
+	require.NoError(t, err)
+
+	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID, nil, testhelpers.AuthHeaders(admin.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "Group deleted", body["message"])
+
+	// Verify messages are deleted
+	var msgCount int
+	err = ts.DB.QueryRow(`SELECT COUNT(*) FROM dm_messages WHERE conversation_id = $1`, convID).Scan(&msgCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, msgCount, "messages should be deleted")
+
+	// Verify read states are deleted
+	var rsCount int
+	err = ts.DB.QueryRow(`SELECT COUNT(*) FROM dm_read_states WHERE conversation_id = $1`, convID).Scan(&rsCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, rsCount, "read states should be deleted")
+
+	// Verify participants are deleted
+	var pCount int
+	err = ts.DB.QueryRow(`SELECT COUNT(*) FROM dm_participants WHERE conversation_id = $1`, convID).Scan(&pCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, pCount, "participants should be deleted")
+
+	// Verify conversation is deleted
+	var exists bool
+	err = ts.DB.QueryRow(`SELECT EXISTS(SELECT 1 FROM dm_conversations WHERE id = $1)`, convID).Scan(&exists)
+	require.NoError(t, err)
+	assert.False(t, exists, "conversation should be deleted")
+}

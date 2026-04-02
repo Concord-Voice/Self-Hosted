@@ -26,6 +26,11 @@ const (
 	errMsgFailedUpdateMessage        = "Failed to update message"
 	errMsgFailedStartTransaction     = "Failed to start transaction"
 	errMsgFailedRollbackTransaction  = "Failed to rollback transaction"
+	errMsgFailedAddMember            = "Failed to add member"
+	errMsgFailedRemoveMember         = "Failed to remove member"
+	errMsgNotAdmin                   = "Only admins can perform this action"
+	errMsgFailedCheckConversation    = "Failed to check conversation"
+	errMsgNotGroupConversation       = "This action is only available for group conversations"
 )
 
 // Handler handles DM-related requests.
@@ -93,6 +98,8 @@ type conversationResponse struct {
 	IsPersonal   bool                  `json:"is_personal"`
 	Name         *string               `json:"name,omitempty"`
 	IsEncrypted  bool                  `json:"is_encrypted"`
+	IconURL      *string               `json:"icon_url,omitempty"`
+	CreatedBy    string                `json:"created_by"`
 	Participants []participantResponse `json:"participants"`
 	LastMessage  *lastMessageResponse  `json:"last_message,omitempty"`
 	UnreadCount  int                   `json:"unread_count"`
@@ -105,6 +112,7 @@ type participantResponse struct {
 	DisplayName *string `json:"display_name,omitempty"`
 	AvatarURL   *string `json:"avatar_url,omitempty"`
 	ColorScheme *string `json:"color_scheme,omitempty"`
+	Role        string  `json:"role"`
 }
 
 type lastMessageResponse struct {
@@ -122,7 +130,7 @@ func (h *Handler) ListConversations(c *gin.Context) {
 	// Fetch conversations ordered by last message.
 	// Uses a LEFT JOIN to dm_read_states instead of a correlated subquery.
 	query := `
-		SELECT dc.id, dc.is_group, dc.is_personal, dc.name, dc.is_encrypted, dc.created_at,
+		SELECT dc.id, dc.is_group, dc.is_personal, dc.name, dc.is_encrypted, dc.icon_url, dc.created_by, dc.created_at,
 		       dm.content, dm.created_at, dm.user_id, dm.is_encrypted,
 		       (SELECT COUNT(*) FROM dm_messages
 		        WHERE conversation_id = dc.id
@@ -154,7 +162,7 @@ func (h *Handler) ListConversations(c *gin.Context) {
 		var lmContent, lmCreatedAt, lmUserID sql.NullString
 		var lmEncrypted sql.NullBool
 		if err := rows.Scan(
-			&conv.ID, &conv.IsGroup, &conv.IsPersonal, &conv.Name, &conv.IsEncrypted, &conv.CreatedAt,
+			&conv.ID, &conv.IsGroup, &conv.IsPersonal, &conv.Name, &conv.IsEncrypted, &conv.IconURL, &conv.CreatedBy, &conv.CreatedAt,
 			&lmContent, &lmCreatedAt, &lmUserID, &lmEncrypted,
 			&conv.UnreadCount,
 		); err != nil {
@@ -182,7 +190,7 @@ func (h *Handler) ListConversations(c *gin.Context) {
 	if len(convIDs) > 0 {
 		participantMap := make(map[string][]participantResponse)
 		pQuery := `
-			SELECT dp.conversation_id, u.id, u.username, u.display_name, u.avatar_url, u.color_scheme
+			SELECT dp.conversation_id, u.id, u.username, u.display_name, u.avatar_url, u.color_scheme, dp.role
 			FROM dm_participants dp
 			INNER JOIN users u ON u.id = dp.user_id
 			WHERE dp.conversation_id = ANY($1::uuid[])
@@ -205,7 +213,7 @@ func (h *Handler) ListConversations(c *gin.Context) {
 			for pRows.Next() {
 				var convID string
 				var p participantResponse
-				if err := pRows.Scan(&convID, &p.UserID, &p.Username, &p.DisplayName, &p.AvatarURL, &p.ColorScheme); err != nil {
+				if err := pRows.Scan(&convID, &p.UserID, &p.Username, &p.DisplayName, &p.AvatarURL, &p.ColorScheme, &p.Role); err != nil {
 					continue
 				}
 				participantMap[convID] = append(participantMap[convID], p)
@@ -517,7 +525,11 @@ func (h *Handler) CreateGroup(c *gin.Context) {
 	}
 
 	for _, uid := range allUserIDs {
-		_, err = tx.Exec(`INSERT INTO dm_participants (conversation_id, user_id) VALUES ($1, $2)`, convID, uid)
+		role := "member"
+		if uid == userID {
+			role = "admin"
+		}
+		_, err = tx.Exec(`INSERT INTO dm_participants (conversation_id, user_id, role) VALUES ($1, $2, $3)`, convID, uid, role)
 		if err != nil {
 			h.log.Error("Failed to add group participant", "error", err, "user_id", uid)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateGroup})
@@ -585,6 +597,11 @@ type UpdateConversationRequest struct {
 	Name *string `json:"name"`
 }
 
+// AddMemberRequest represents a request to add a member to a group DM.
+type AddMemberRequest struct {
+	UserID string `json:"user_id" binding:"required"`
+}
+
 // UpdateConversation updates a group DM's name.
 // PATCH /dm/conversations/:id
 func (h *Handler) UpdateConversation(c *gin.Context) {
@@ -602,24 +619,30 @@ func (h *Handler) UpdateConversation(c *gin.Context) {
 		return
 	}
 
-	// Verify participation and that it's a group
+	// Verify participation, group status, and admin role
 	var isGroup bool
+	var role string
 	err := h.db.QueryRow(`
-		SELECT dc.is_group FROM dm_conversations dc
+		SELECT dc.is_group, dp.role FROM dm_conversations dc
 		JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $2
 		WHERE dc.id = $1
-	`, convID, userID).Scan(&isGroup)
+	`, convID, userID).Scan(&isGroup, &role)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
 		return
 	} else if err != nil {
-		h.log.Error("Failed to check conversation", "error", err)
+		h.log.Error(errMsgFailedCheckConversation, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateConversation})
 		return
 	}
 
 	if !isGroup {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot rename a 1:1 conversation"})
+		return
+	}
+
+	if role != "admin" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Only admins can update group settings"})
 		return
 	}
 
@@ -631,6 +654,403 @@ func (h *Handler) UpdateConversation(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Conversation updated"})
+}
+
+// --- Member Management Endpoints ---
+
+// AddMember adds a user to a group DM conversation.
+// POST /dm/conversations/:id/members
+func (h *Handler) AddMember(c *gin.Context) {
+	userID := c.GetString("user_id")
+	convID := c.Param("id")
+
+	if _, err := uuid.Parse(convID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+		return
+	}
+
+	var req AddMemberRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
+		return
+	}
+
+	if _, err := uuid.Parse(req.UserID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user_id"})
+		return
+	}
+
+	// Verify caller is participant, group status, and admin role
+	isGroup, role, err := h.getParticipantGroupRole(convID, userID)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
+		return
+	} else if err != nil {
+		h.log.Error(errMsgFailedCheckConversation, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAddMember})
+		return
+	}
+
+	if !isGroup {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgNotGroupConversation})
+		return
+	}
+	if role != "admin" {
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotAdmin})
+		return
+	}
+
+	// Check member count limit
+	var count int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM dm_participants WHERE conversation_id = $1`, convID).Scan(&count); err != nil {
+		h.log.Error("Failed to count participants", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAddMember})
+		return
+	}
+	if count >= 10 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Group DM cannot exceed 10 members"})
+		return
+	}
+
+	// Check target user exists
+	var exists bool
+	if err := h.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, req.UserID).Scan(&exists); err != nil {
+		h.log.Error("Failed to check user existence", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAddMember})
+		return
+	}
+	if !exists {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "User not found"})
+		return
+	}
+
+	// Check target not already a participant
+	var alreadyIn bool
+	if err := h.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM dm_participants WHERE conversation_id = $1 AND user_id = $2)`, convID, req.UserID).Scan(&alreadyIn); err != nil {
+		h.log.Error("Failed to check participant", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAddMember})
+		return
+	}
+	if alreadyIn {
+		c.JSON(http.StatusConflict, gin.H{"error": "User is already a participant"})
+		return
+	}
+
+	// Enforce DM privacy (block check)
+	if h.enforceDMPrivacy(c, userID, req.UserID) {
+		return
+	}
+
+	// Begin transaction: insert participant + record key revocation
+	maxVersion, err := h.addMemberTx(convID, req.UserID, userID)
+	if err != nil {
+		h.log.Error("Failed to add member", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAddMember})
+		return
+	}
+
+	// Broadcast events
+	h.broadcastMemberAdded(convID, req.UserID, userID, maxVersion)
+
+	conv := h.fetchConversationResponse(convID)
+	c.JSON(http.StatusOK, gin.H{"conversation": conv})
+}
+
+// addMemberTx inserts a new participant and records key revocation in a transaction.
+// Returns the max key version before revocation.
+func (h *Handler) addMemberTx(convID, targetUserID, callerUserID string) (int, error) {
+	tx, err := h.db.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			h.log.Error(errMsgFailedRollbackTransaction, "error", rbErr)
+		}
+	}()
+
+	if _, err := tx.Exec(`INSERT INTO dm_participants (conversation_id, user_id, role) VALUES ($1, $2, 'member')`, convID, targetUserID); err != nil {
+		return 0, err
+	}
+
+	var maxVersion int
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(key_version), 0) FROM dm_channel_keys WHERE conversation_id = $1`, convID).Scan(&maxVersion); err != nil {
+		return 0, err
+	}
+
+	if maxVersion > 0 {
+		if _, err := tx.Exec(`
+			INSERT INTO dm_key_revocations (conversation_id, revoked_epoch, successor_epoch, reason, revoked_by)
+			VALUES ($1, $2, $3, 'member_added', $4)
+			ON CONFLICT (conversation_id, revoked_epoch) DO NOTHING
+		`, convID, maxVersion, maxVersion+1, callerUserID); err != nil {
+			return 0, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return maxVersion, nil
+}
+
+// broadcastMemberAdded sends WebSocket events for a newly added group DM member.
+func (h *Handler) broadcastMemberAdded(convID, targetUserID, callerUserID string, maxVersion int) {
+	if h.hub == nil {
+		return
+	}
+
+	// Notify existing participants
+	h.broadcastToDMParticipants(convID, "", websocket.OutgoingMessage{
+		Type: "dm_participant_added",
+		Data: map[string]interface{}{
+			"conversation_id": convID,
+			"user_id":         targetUserID,
+			"added_by":        callerUserID,
+		},
+	})
+
+	// Notify the new member with the full conversation
+	if targetUUID, parseErr := uuid.Parse(targetUserID); parseErr == nil {
+		conv := h.fetchConversationResponse(convID)
+		if conv != nil {
+			h.hub.BroadcastToUser(targetUUID, websocket.OutgoingMessage{
+				Type: "dm_conversation_created",
+				Data: map[string]interface{}{
+					"conversation": conv,
+				},
+			})
+		}
+	}
+
+	// Notify all participants of key rotation
+	if maxVersion > 0 {
+		h.broadcastToDMParticipants(convID, "", websocket.OutgoingMessage{
+			Type: "key_rotation",
+			Data: map[string]interface{}{
+				"channel_id":      convID,
+				"triggered_by":    callerUserID,
+				"new_key_version": maxVersion + 1,
+			},
+		})
+	}
+}
+
+// RemoveMember removes a user from a group DM (admin action or self-leave).
+// DELETE /dm/conversations/:id/members/:userId
+func (h *Handler) RemoveMember(c *gin.Context) {
+	userID := c.GetString("user_id")
+	convID := c.Param("id")
+	targetUserID := c.Param("userId")
+
+	if _, err := uuid.Parse(convID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+		return
+	}
+	if _, err := uuid.Parse(targetUserID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		return
+	}
+
+	// Verify caller is participant and get conversation info
+	var isGroup bool
+	var createdBy, role string
+	err := h.db.QueryRow(`
+		SELECT dc.is_group, dc.created_by, dp.role FROM dm_conversations dc
+		JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $2
+		WHERE dc.id = $1
+	`, convID, userID).Scan(&isGroup, &createdBy, &role)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
+		return
+	} else if err != nil {
+		h.log.Error(errMsgFailedCheckConversation, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveMember})
+		return
+	}
+
+	if !isGroup {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgNotGroupConversation})
+		return
+	}
+
+	isSelfLeave := targetUserID == userID
+
+	// Permission check: only admins can remove others
+	if !isSelfLeave && role != "admin" {
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotAdmin})
+		return
+	}
+
+	// If not self-leave, verify target is a participant
+	if !isSelfLeave {
+		var targetExists bool
+		if err := h.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM dm_participants WHERE conversation_id = $1 AND user_id = $2)`, convID, targetUserID).Scan(&targetExists); err != nil {
+			h.log.Error("Failed to check target participant", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveMember})
+			return
+		}
+		if !targetExists {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Target user is not a participant"})
+			return
+		}
+	}
+
+	// Cannot remove the creator unless it's self-leave
+	if targetUserID == createdBy && !isSelfLeave {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Cannot remove the group creator"})
+		return
+	}
+
+	// Execute removal in transaction
+	newCreatorID, maxVersion, err := h.removeMemberTx(convID, targetUserID, createdBy, userID)
+	if err != nil {
+		h.log.Error("Failed to remove member", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveMember})
+		return
+	}
+
+	// Broadcast events
+	h.broadcastMemberRemoved(convID, targetUserID, userID, isSelfLeave, newCreatorID, maxVersion)
+
+	c.JSON(http.StatusOK, gin.H{"message": "Member removed"})
+}
+
+// removeMemberTx removes a participant and handles creator transfer in a transaction.
+// Returns the new creator ID (empty if no transfer) and the max key version.
+func (h *Handler) removeMemberTx(convID, targetUserID, createdBy, callerUserID string) (string, int, error) {
+	tx, err := h.db.Begin()
+	if err != nil {
+		return "", 0, err
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			h.log.Error(errMsgFailedRollbackTransaction, "error", rbErr)
+		}
+	}()
+
+	var newCreatorID string
+
+	// If creator is leaving, transfer ownership
+	if targetUserID == createdBy {
+		newCreatorID, err = h.transferCreator(tx, convID, targetUserID)
+		if err != nil {
+			return "", 0, err
+		}
+	}
+
+	// Remove the participant
+	if _, err := tx.Exec(`DELETE FROM dm_participants WHERE conversation_id = $1 AND user_id = $2`, convID, targetUserID); err != nil {
+		return "", 0, err
+	}
+
+	// Record key revocation
+	var maxVersion int
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(key_version), 0) FROM dm_channel_keys WHERE conversation_id = $1`, convID).Scan(&maxVersion); err != nil {
+		return "", 0, err
+	}
+
+	if maxVersion > 0 {
+		if _, err := tx.Exec(`
+			INSERT INTO dm_key_revocations (conversation_id, revoked_epoch, successor_epoch, reason, revoked_by)
+			VALUES ($1, $2, $3, 'member_removed', $4)
+			ON CONFLICT (conversation_id, revoked_epoch) DO NOTHING
+		`, convID, maxVersion, maxVersion+1, callerUserID); err != nil {
+			return "", 0, err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		return "", 0, err
+	}
+	return newCreatorID, maxVersion, nil
+}
+
+// transferCreator finds a successor and transfers group ownership within the given transaction.
+func (h *Handler) transferCreator(tx *sql.Tx, convID, leavingUserID string) (string, error) {
+	var newCreatorID string
+
+	// Try to find another admin first
+	err := tx.QueryRow(`
+		SELECT user_id FROM dm_participants
+		WHERE conversation_id = $1 AND role = 'admin' AND user_id != $2
+		ORDER BY joined_at ASC LIMIT 1
+	`, convID, leavingUserID).Scan(&newCreatorID)
+
+	if err == sql.ErrNoRows {
+		// Fall back to longest-standing member
+		err = tx.QueryRow(`
+			SELECT user_id FROM dm_participants
+			WHERE conversation_id = $1 AND user_id != $2
+			ORDER BY joined_at ASC LIMIT 1
+		`, convID, leavingUserID).Scan(&newCreatorID)
+	}
+	if err != nil {
+		return "", err
+	}
+
+	if _, err := tx.Exec(`UPDATE dm_conversations SET created_by = $1 WHERE id = $2`, newCreatorID, convID); err != nil {
+		return "", err
+	}
+	if _, err := tx.Exec(`UPDATE dm_participants SET role = 'admin' WHERE conversation_id = $1 AND user_id = $2`, convID, newCreatorID); err != nil {
+		return "", err
+	}
+
+	return newCreatorID, nil
+}
+
+// broadcastMemberRemoved sends WebSocket events for a removed group DM member.
+func (h *Handler) broadcastMemberRemoved(convID, targetUserID, callerUserID string, isSelfLeave bool, newCreatorID string, maxVersion int) {
+	if h.hub == nil {
+		return
+	}
+
+	// Notify remaining participants
+	h.broadcastToDMParticipants(convID, "", websocket.OutgoingMessage{
+		Type: "dm_participant_removed",
+		Data: map[string]interface{}{
+			"conversation_id": convID,
+			"user_id":         targetUserID,
+			"removed_by":      callerUserID,
+			"was_self_leave":  isSelfLeave,
+		},
+	})
+
+	// If admin was transferred, notify about role change
+	if newCreatorID != "" {
+		h.broadcastToDMParticipants(convID, "", websocket.OutgoingMessage{
+			Type: "dm_role_changed",
+			Data: map[string]interface{}{
+				"conversation_id": convID,
+				"user_id":         newCreatorID,
+				"role":            "admin",
+			},
+		})
+	}
+
+	// Notify all participants of key rotation
+	if maxVersion > 0 {
+		h.broadcastToDMParticipants(convID, "", websocket.OutgoingMessage{
+			Type: "key_rotation",
+			Data: map[string]interface{}{
+				"channel_id":      convID,
+				"triggered_by":    callerUserID,
+				"new_key_version": maxVersion + 1,
+			},
+		})
+	}
+}
+
+// getParticipantGroupRole checks if a user is a participant and returns the group status and role.
+func (h *Handler) getParticipantGroupRole(convID, userID string) (bool, string, error) {
+	var isGroup bool
+	var role string
+	err := h.db.QueryRow(`
+		SELECT dc.is_group, dp.role FROM dm_conversations dc
+		JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $2
+		WHERE dc.id = $1
+	`, convID, userID).Scan(&isGroup, &role)
+	return isGroup, role, err
 }
 
 // --- Message Endpoints ---
@@ -1131,7 +1551,7 @@ func (h *Handler) fetchConversationResponse(convID string) *conversationResponse
 	var lmContent, lmCreatedAt, lmUserID sql.NullString
 	var lmEncrypted sql.NullBool
 	err := h.db.QueryRow(`
-		SELECT dc.id, dc.is_group, dc.is_personal, dc.name, dc.is_encrypted, dc.created_at,
+		SELECT dc.id, dc.is_group, dc.is_personal, dc.name, dc.is_encrypted, dc.icon_url, dc.created_by, dc.created_at,
 		       dm.content, dm.created_at, dm.user_id, dm.is_encrypted
 		FROM dm_conversations dc
 		LEFT JOIN LATERAL (
@@ -1140,7 +1560,7 @@ func (h *Handler) fetchConversationResponse(convID string) *conversationResponse
 		) dm ON TRUE
 		WHERE dc.id = $1
 	`, convID).Scan(
-		&conv.ID, &conv.IsGroup, &conv.IsPersonal, &conv.Name, &conv.IsEncrypted, &conv.CreatedAt,
+		&conv.ID, &conv.IsGroup, &conv.IsPersonal, &conv.Name, &conv.IsEncrypted, &conv.IconURL, &conv.CreatedBy, &conv.CreatedAt,
 		&lmContent, &lmCreatedAt, &lmUserID, &lmEncrypted,
 	)
 	if err != nil {
@@ -1157,7 +1577,7 @@ func (h *Handler) fetchConversationResponse(convID string) *conversationResponse
 
 	// Fetch participants
 	pRows, err := h.db.Query(`
-		SELECT u.id, u.username, u.display_name, u.avatar_url, u.color_scheme
+		SELECT u.id, u.username, u.display_name, u.avatar_url, u.color_scheme, dp.role
 		FROM dm_participants dp
 		INNER JOIN users u ON u.id = dp.user_id
 		WHERE dp.conversation_id = $1
@@ -1170,7 +1590,7 @@ func (h *Handler) fetchConversationResponse(convID string) *conversationResponse
 	conv.Participants = []participantResponse{}
 	for pRows.Next() {
 		var p participantResponse
-		if err := pRows.Scan(&p.UserID, &p.Username, &p.DisplayName, &p.AvatarURL, &p.ColorScheme); err != nil {
+		if err := pRows.Scan(&p.UserID, &p.Username, &p.DisplayName, &p.AvatarURL, &p.ColorScheme, &p.Role); err != nil {
 			continue
 		}
 		conv.Participants = append(conv.Participants, p)
