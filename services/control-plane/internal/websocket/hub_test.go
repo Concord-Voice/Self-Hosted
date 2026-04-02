@@ -1418,3 +1418,44 @@ func TestShutdown_ClosesAllClientSendChannels(t *testing.T) {
 		t.Fatal("timed out waiting for shutdown")
 	}
 }
+
+func TestShutdownIdempotent(t *testing.T) {
+	hub := NewHub(nil, nil)
+	go hub.Run()
+
+	// First call shuts down and waits for Run to exit
+	hub.Shutdown()
+
+	// Second call must not panic (close of closed channel) or block
+	require.NotPanics(t, func() {
+		hub.Shutdown()
+	})
+}
+
+func TestBroadcastServerVoiceCountsAfterShutdown(t *testing.T) {
+	hub := NewHub(nil, nil)
+	go hub.Run()
+
+	// Shutdown waits for Run to exit
+	hub.Shutdown()
+
+	// Must not panic or hang — the buffered channel with default clause handles this
+	require.NotPanics(t, func() {
+		hub.BroadcastServerVoiceCounts()
+	})
+}
+
+func TestShutdownStopsRunLoop(t *testing.T) {
+	hub := NewHub(nil, nil)
+	go hub.Run()
+
+	hub.Shutdown()
+
+	// Stopped channel should already be closed since Shutdown waits
+	select {
+	case <-hub.Stopped():
+		// Run goroutine exited — success
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run goroutine did not exit after Shutdown")
+	}
+}

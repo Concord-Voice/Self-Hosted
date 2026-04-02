@@ -62,6 +62,10 @@ func SetupTestServer(t *testing.T) *TestServer {
 		dbCleanup()
 	})
 
+	// Shut down the hub goroutine and wait for Run() to exit BEFORE Redis/DB
+	// are torn down. t.Cleanup runs in LIFO order, so registered-last runs first.
+	t.Cleanup(func() { hub.Shutdown() })
+
 	return &TestServer{
 		Router: router,
 		Hub:    hub,

@@ -105,6 +105,9 @@ type Hub struct {
 	// Shutdown signal
 	done chan struct{}
 
+	// Closed when Run() returns, allowing callers to wait for a clean exit
+	stopped chan struct{}
+
 	// Debounced online-count broadcasting: instead of hitting DB+Redis on every
 	// presence change, we accumulate affected user IDs and flush after a short
 	// delay so bursts (e.g., many users reconnecting) collapse into one broadcast.
@@ -113,6 +116,9 @@ type Hub struct {
 
 	// Mention permission checker (injected after construction via SetMentionChecker)
 	mentionChecker MentionPermissionChecker
+
+	// closeOnce ensures Shutdown is idempotent (safe to call multiple times)
+	closeOnce sync.Once
 }
 
 // NewHub creates a new Hub
@@ -138,6 +144,7 @@ func NewHub(db *sql.DB, redisClient *redis.Client) *Hub {
 		disconnectSession:    make(chan string, 16),
 		voiceCountSignal:     make(chan struct{}, 1),
 		done:                 make(chan struct{}),
+		stopped:              make(chan struct{}),
 		onlineCountPending:   make(map[uuid.UUID]bool),
 	}
 }
@@ -150,6 +157,7 @@ func (h *Hub) SetMentionChecker(checker MentionPermissionChecker) {
 
 // Run starts the hub's main loop
 func (h *Hub) Run() {
+	defer close(h.stopped)
 	for {
 		// nil channel is never selected; active only when a debounce timer is pending
 		var onlineCountC <-chan time.Time
@@ -205,9 +213,18 @@ func (h *Hub) Run() {
 	}
 }
 
-// Shutdown gracefully stops the hub's Run loop and closes all client connections.
+// Shutdown gracefully stops the hub's Run loop, waits for it to exit, and
+// closes all client connections. Safe to call multiple times.
 func (h *Hub) Shutdown() {
-	close(h.done)
+	h.closeOnce.Do(func() {
+		close(h.done)
+	})
+	<-h.stopped
+}
+
+// Stopped returns a channel that is closed when the Run loop has exited.
+func (h *Hub) Stopped() <-chan struct{} {
+	return h.stopped
 }
 
 // handleRegister registers a new client
