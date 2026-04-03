@@ -84,6 +84,8 @@ go.work
 vendor/
 bin/
 services/control-plane/server
+services/control-plane/migrate-media
+client/desktop/Helper
 coverage.txt
 *.prof
 

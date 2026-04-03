@@ -178,7 +178,110 @@ type LoginRequest struct {
 	RememberMe *bool  `json:"remember_me"`                 // nil defaults to true for backward compat
 }
 
-// Register handles user registration
+type registrationData struct {
+	passwordHash string
+	publicKey    []byte
+	wrappedKey   []byte
+	salt         []byte
+}
+
+func (h *Handler) validateRegistration(req *RegisterRequest) error {
+	if !req.AgeConfirmation {
+		return fmt.Errorf("You must be at least 16 years old to create an account")
+	}
+	if err := ValidateUsername(req.Username); err != nil {
+		return err
+	}
+	if err := ValidatePasswordStrength(req.Password); err != nil {
+		return err
+	}
+	return nil
+}
+
+func decodeE2EEKeys(publicKeyB64, wrappedKeyB64, saltB64 string) (publicKey, wrappedKey, salt []byte, err error) {
+	publicKey, err = base64.StdEncoding.DecodeString(publicKeyB64)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("Invalid public key format")
+	}
+	wrappedKey, err = base64.StdEncoding.DecodeString(wrappedKeyB64)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("Invalid wrapped private key format")
+	}
+	salt, err = base64.StdEncoding.DecodeString(saltB64)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("Invalid salt format")
+	}
+	return publicKey, wrappedKey, salt, nil
+}
+
+func (h *Handler) createUserRecord(tx *sql.Tx, req *RegisterRequest, rd *registrationData) (string, error) {
+	normalizedUsername := NormalizeUsername(req.Username)
+	normalizedEmail := strings.ToLower(strings.TrimSpace(req.Email))
+	userID := uuid.New().String()
+
+	_, err := tx.Exec(
+		`INSERT INTO users (id, email, username, password_hash, age_verified, e2ee_preference)
+		 VALUES ($1, $2, $3, $4, $5, $6)`,
+		userID, normalizedEmail, normalizedUsername, rd.passwordHash, true, req.E2EEPreference,
+	)
+	if err != nil {
+		return "", err
+	}
+
+	kdAlg := req.KeyDerivationAlg
+	if kdAlg == "" {
+		kdAlg = "argon2id"
+	}
+	_, err = tx.Exec(
+		`INSERT INTO user_keys (user_id, wrapped_private_key, key_derivation_salt, key_derivation_alg)
+		 VALUES ($1, $2, $3, $4)`,
+		userID, rd.wrappedKey, rd.salt, kdAlg,
+	)
+	if err != nil {
+		return "", fmt.Errorf("keys: %w", err)
+	}
+
+	keyID := uuid.New().String()
+	_, err = tx.Exec(
+		`INSERT INTO public_keys (id, user_id, public_key, key_version)
+		 VALUES ($1, $2, $3, $4)`,
+		keyID, userID, rd.publicKey, 1,
+	)
+	if err != nil {
+		return "", fmt.Errorf("pubkey: %w", err)
+	}
+
+	return userID, nil
+}
+
+func (h *Handler) generateTokenPair(c *gin.Context, userID string, emailVerified bool) (accessToken, refreshToken, tokenID string, err error) {
+	accessToken, err = GenerateAccessToken(userID, h.jwtSecret, emailVerified)
+	if err != nil {
+		return "", "", "", fmt.Errorf("access: %w", err)
+	}
+	refreshToken, err = GenerateRefreshToken()
+	if err != nil {
+		return "", "", "", fmt.Errorf("refresh: %w", err)
+	}
+
+	tokenHash := HashRefreshToken(refreshToken)
+	tokenID = uuid.New().String()
+	expiresAt := time.Now().Add(30 * 24 * time.Hour)
+	machineID := c.GetHeader(headerMachineID)
+
+	_, err = h.db.Exec(
+		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, remember_me, machine_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		tokenID, userID, tokenHash, c.GetHeader("X-Device-Name"),
+		c.ClientIP(), truncateUserAgent(c.GetHeader(headerUserAgent)),
+		expiresAt, true, nilIfEmpty(machineID),
+	)
+	if err != nil {
+		return "", "", "", fmt.Errorf("store: %w", err)
+	}
+	return accessToken, refreshToken, tokenID, nil
+}
+
 func (h *Handler) Register(c *gin.Context) {
 	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -186,25 +289,17 @@ func (h *Handler) Register(c *gin.Context) {
 		return
 	}
 
-	// Validate age confirmation (must be 16+)
-	if !req.AgeConfirmation {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "You must be at least 16 years old to create an account"})
-		return
-	}
-
-	// Validate username
-	if err := ValidateUsername(req.Username); err != nil {
+	if err := h.validateRegistration(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Validate password strength
-	if err := ValidatePasswordStrength(req.Password); err != nil {
+	publicKey, wrappedKey, salt, err := decodeE2EEKeys(req.PublicKey, req.WrappedPrivateKey, req.KeyDerivationSalt)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	// Hash password with Argon2id
 	passwordHash, err := HashPassword(req.Password)
 	if err != nil {
 		h.log.Error("Failed to hash password", "error", err)
@@ -212,26 +307,8 @@ func (h *Handler) Register(c *gin.Context) {
 		return
 	}
 
-	// Decode E2EE keys from base64
-	publicKey, err := base64.StdEncoding.DecodeString(req.PublicKey)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid public key format"})
-		return
-	}
+	rd := &registrationData{passwordHash: passwordHash, publicKey: publicKey, wrappedKey: wrappedKey, salt: salt}
 
-	wrappedKey, err := base64.StdEncoding.DecodeString(req.WrappedPrivateKey)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid wrapped private key format"})
-		return
-	}
-
-	salt, err := base64.StdEncoding.DecodeString(req.KeyDerivationSalt)
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid salt format"})
-		return
-	}
-
-	// Start transaction
 	tx, err := h.db.Begin()
 	if err != nil {
 		h.log.Error(errMsgFailedStartTransaction, "error", err)
@@ -244,145 +321,38 @@ func (h *Handler) Register(c *gin.Context) {
 		}
 	}()
 
-	// Normalize username and email (store lowercase)
-	normalizedUsername := NormalizeUsername(req.Username)
-	normalizedEmail := strings.ToLower(strings.TrimSpace(req.Email))
-
-	// Create user
-	userID := uuid.New().String()
-	_, err = tx.Exec(
-		`INSERT INTO users (id, email, username, password_hash, age_verified, e2ee_preference)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		userID,
-		normalizedEmail,
-		normalizedUsername,
-		passwordHash,
-		true, // Age verified via confirmation
-		req.E2EEPreference,
-	)
+	userID, err := h.createUserRecord(tx, &req, rd)
 	if err != nil {
-		h.log.Error("Failed to create user", "error", err)
-		// Check for duplicate email or username
-		if strings.Contains(err.Error(), "users_email_key") {
-			c.JSON(http.StatusConflict, gin.H{"error": "Email already in use"})
-			return
-		}
-		if strings.Contains(err.Error(), "users_username_key") {
-			c.JSON(http.StatusConflict, gin.H{"error": "Username already taken"})
-			return
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
+		h.respondCreateUserError(c, err)
 		return
 	}
 
-	// Store E2EE keys (private key wrapped)
-	kdAlg := req.KeyDerivationAlg
-	if kdAlg == "" {
-		kdAlg = "argon2id" // Default for new registrations
-	}
-	_, err = tx.Exec(
-		`INSERT INTO user_keys (user_id, wrapped_private_key, key_derivation_salt, key_derivation_alg)
-		 VALUES ($1, $2, $3, $4)`,
-		userID,
-		wrappedKey,
-		salt,
-		kdAlg,
-	)
-	if err != nil {
-		h.log.Error("Failed to store user keys", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
-		return
-	}
-
-	// Store public key
-	keyID := uuid.New().String()
-	_, err = tx.Exec(
-		`INSERT INTO public_keys (id, user_id, public_key, key_version)
-		 VALUES ($1, $2, $3, $4)`,
-		keyID,
-		userID,
-		publicKey,
-		1, // Initial key version
-	)
-	if err != nil {
-		h.log.Error("Failed to store public key", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
-		return
-	}
-
-	// Commit transaction
 	if err := tx.Commit(); err != nil {
 		h.log.Error(errFailedCommitTransaction, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
 		return
 	}
 
-	// Generate access token (JWT, 15 min) — email NOT yet verified for new registrations
-	accessToken, err := GenerateAccessToken(userID, h.jwtSecret, false)
+	accessToken, refreshToken, tokenID, err := h.generateTokenPair(c, userID, false)
 	if err != nil {
-		h.log.Error(errMsgFailedAccessToken, "error", err)
+		h.log.Error("Failed to generate tokens", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
 		return
 	}
 
-	// Generate refresh token (random, 30 days)
-	refreshToken, err := GenerateRefreshToken()
-	if err != nil {
-		h.log.Error(errMsgFailedRefreshToken, "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
-		return
-	}
-
-	// Store refresh token in database
-	tokenHash := HashRefreshToken(refreshToken)
-	tokenID := uuid.New().String()
-	expiresAt := time.Now().Add(30 * 24 * time.Hour) // 30 days
-	machineID := c.GetHeader(headerMachineID)
-
-	_, err = h.db.Exec(
-		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, remember_me, machine_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-		tokenID,
-		userID,
-		tokenHash,
-		c.GetHeader("X-Device-Name"),
-		c.ClientIP(),
-		truncateUserAgent(c.GetHeader(headerUserAgent)),
-		expiresAt,
-		true, // Registration always defaults to remember_me=true
-		nilIfEmpty(machineID),
-	)
-	if err != nil {
-		h.log.Error("Failed to store refresh token", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
-		return
-	}
-
-	// Set refresh token as httpOnly cookie
 	setRefreshCookie(c, refreshToken, 30*24*60*60)
 
+	normalizedUsername := NormalizeUsername(req.Username)
+	normalizedEmail := strings.ToLower(strings.TrimSpace(req.Email))
 	h.log.Info("User registered", "user_id", userID, "username", normalizedUsername)
 
-	// Auto-send verification code (non-blocking — don't fail registration if this fails)
-	if h.verifyHandler != nil {
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := h.verifyHandler.GenerateAndSendCode(ctx, userID, normalizedEmail); err != nil {
-				h.log.Error("Failed to send verification code on register", "error", err)
-			}
-		}()
-	}
+	h.sendVerificationAsync(userID, normalizedEmail)
 
-	// Return access token, refresh token, and user data (same format as login).
-	// The refresh token is returned in both a cookie and the body so that
-	// Electron/native clients (file:// origin) can store it explicitly —
-	// SameSite=Lax cookies are not sent on cross-site POST requests.
 	c.JSON(http.StatusCreated, gin.H{
 		"access_token":  accessToken,
 		"refresh_token": refreshToken,
 		"session_id":    tokenID,
-		"expires_in":    900, // 15 minutes
+		"expires_in":    900,
 		"remember_me":   true,
 		"user": gin.H{
 			"id":              userID,
@@ -392,6 +362,39 @@ func (h *Handler) Register(c *gin.Context) {
 			"e2ee_preference": req.E2EEPreference,
 		},
 	})
+}
+
+func classifyDuplicateError(err error) (int, string) {
+	msg := err.Error()
+	if strings.Contains(msg, "users_email_key") {
+		return http.StatusConflict, "Email already in use"
+	}
+	if strings.Contains(msg, "users_username_key") {
+		return http.StatusConflict, "Username already taken"
+	}
+	return 0, ""
+}
+
+func (h *Handler) respondCreateUserError(c *gin.Context, err error) {
+	h.log.Error("Failed to create user", "error", err)
+	if status, msg := classifyDuplicateError(err); msg != "" {
+		c.JSON(status, gin.H{"error": msg})
+		return
+	}
+	c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
+}
+
+func (h *Handler) sendVerificationAsync(userID, email string) {
+	if h.verifyHandler == nil {
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := h.verifyHandler.GenerateAndSendCode(ctx, userID, email); err != nil {
+			h.log.Error("Failed to send verification code on register", "error", err)
+		}
+	}()
 }
 
 // loginLockoutThreshold is the number of failed attempts before lockout.
@@ -444,6 +447,83 @@ func (h *Handler) clearLoginAttempts(ctx context.Context, email string) {
 }
 
 // Login handles user authentication
+func (h *Handler) lookupUserForLogin(email string) (models.User, error) {
+	var user models.User
+	err := h.db.QueryRow(
+		`SELECT id, email, username, password_hash, display_name, bio, avatar_url, COALESCE(links, '[]'::jsonb),
+		        email_verified, age_verified, e2ee_preference, created_at, updated_at
+		 FROM users WHERE email = $1`,
+		email,
+	).Scan(
+		&user.ID, &user.Email, &user.Username, &user.PasswordHash,
+		&user.DisplayName, &user.Bio, &user.AvatarURL, &user.Links,
+		&user.EmailVerified, &user.AgeVerified, &user.E2EEPreference,
+		&user.CreatedAt, &user.UpdatedAt,
+	)
+	return user, err
+}
+
+func (h *Handler) verifyCredentials(c *gin.Context, ctx context.Context, email, password, passwordHash string) bool {
+	valid, err := VerifyPassword(password, passwordHash)
+	if err != nil {
+		h.log.Error("Failed to verify password", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
+		return false
+	}
+	if !valid {
+		h.recordFailedLogin(ctx, email)
+		middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
+		return false
+	}
+	return true
+}
+
+func (h *Handler) handleMFAChallenge(c *gin.Context, ctx context.Context, userID string, rememberMe bool) {
+	allMethods, _ := h.mfaChecker.GetEnabledMethods(ctx, userID)
+	loginMethods, _ := h.mfaChecker.GetLoginMethods(ctx, userID)
+	challengeToken, jti, mfaErr := h.mfaChecker.GenerateLoginChallenge(ctx, userID, rememberMe)
+	if mfaErr != nil {
+		h.log.Error("Failed to generate MFA challenge", "error", mfaErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
+		return
+	}
+
+	recoveryOnly := computeRecoveryOnlyMethods(allMethods, loginMethods)
+
+	h.log.Info("MFA required for login", "user_id", userID, "methods", loginMethods)
+	resp := gin.H{
+		"mfa_required":        true,
+		"mfa_challenge_token": challengeToken,
+		"methods":             loginMethods,
+	}
+	if len(recoveryOnly) > 0 {
+		resp["recovery_only_methods"] = recoveryOnly
+	}
+	addWebAuthnOptions(h, ctx, resp, loginMethods, userID, jti)
+	c.JSON(http.StatusOK, resp)
+}
+
+func addWebAuthnOptions(h *Handler, ctx context.Context, resp gin.H, loginMethods []string, userID, jti string) {
+	for _, m := range loginMethods {
+		if m == "webauthn" {
+			if opts, err := h.mfaChecker.BeginWebAuthnLogin(ctx, userID, jti); err != nil {
+				h.log.Error("Failed to begin WebAuthn login", "error", err)
+			} else if opts != nil {
+				resp["webauthn_options"] = opts
+			}
+			return
+		}
+	}
+}
+
+func resolveRememberMe(req *LoginRequest) bool {
+	if req.RememberMe != nil {
+		return *req.RememberMe
+	}
+	return true
+}
+
 func (h *Handler) Login(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -453,117 +533,36 @@ func (h *Handler) Login(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	// Check if account is locked out (generic message — don't reveal lockout)
 	if h.checkLoginLockout(ctx, req.Email) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
 		return
 	}
 
-	// Fetch user by email
-	var user models.User
-	err := h.db.QueryRow(
-		`SELECT id, email, username, password_hash, display_name, bio, avatar_url, COALESCE(links, '[]'::jsonb),
-		        email_verified, age_verified, e2ee_preference, created_at, updated_at
-		 FROM users WHERE email = $1`,
-		req.Email,
-	).Scan(
-		&user.ID,
-		&user.Email,
-		&user.Username,
-		&user.PasswordHash,
-		&user.DisplayName,
-		&user.Bio,
-		&user.AvatarURL,
-		&user.Links,
-		&user.EmailVerified,
-		&user.AgeVerified,
-		&user.E2EEPreference,
-		&user.CreatedAt,
-		&user.UpdatedAt,
-	)
-	if err != nil {
-		if err == sql.ErrNoRows {
-			// Record failure even for non-existent accounts (timing-safe)
-			h.recordFailedLogin(ctx, req.Email)
-			middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
-			c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
-			return
-		}
-		h.log.Error("Failed to fetch user", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
-		return
-	}
-
-	// Verify password
-	valid, err := VerifyPassword(req.Password, user.PasswordHash)
-	if err != nil {
-		h.log.Error("Failed to verify password", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
-		return
-	}
-	if !valid {
+	user, err := h.lookupUserForLogin(req.Email)
+	if err == sql.ErrNoRows {
 		h.recordFailedLogin(ctx, req.Email)
 		middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
 		return
 	}
-
-	// Clear per-email login attempts on success (IP failures are cleared
-	// in CompleteLogin after full auth — including MFA — is done)
-	h.clearLoginAttempts(ctx, req.Email)
-
-	// Resolve remember_me preference (default: true for backward compat)
-	rememberMe := true
-	if req.RememberMe != nil {
-		rememberMe = *req.RememberMe
-	}
-
-	// Check if user has MFA enabled — if so, return challenge instead of tokens
-	// Only present login-eligible methods (excludes recovery-only like Email/SMS when flagged)
-	if h.mfaChecker != nil && h.mfaChecker.IsEnabled(ctx, user.ID) {
-		allMethods, _ := h.mfaChecker.GetEnabledMethods(ctx, user.ID)
-		loginMethods, _ := h.mfaChecker.GetLoginMethods(ctx, user.ID)
-		challengeToken, jti, mfaErr := h.mfaChecker.GenerateLoginChallenge(ctx, user.ID, rememberMe)
-		if mfaErr != nil {
-			h.log.Error("Failed to generate MFA challenge", "error", mfaErr)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
-			return
-		}
-
-		// Compute recovery-only methods (in allMethods but not in loginMethods)
-		loginSet := make(map[string]bool, len(loginMethods))
-		for _, m := range loginMethods {
-			loginSet[m] = true
-		}
-		var recoveryOnly []string
-		for _, m := range allMethods {
-			if !loginSet[m] {
-				recoveryOnly = append(recoveryOnly, m)
-			}
-		}
-
-		h.log.Info("MFA required for login", "user_id", user.ID, "methods", loginMethods)
-		resp := gin.H{
-			"mfa_required":        true,
-			"mfa_challenge_token": challengeToken,
-			"methods":             loginMethods,
-		}
-		if len(recoveryOnly) > 0 {
-			resp["recovery_only_methods"] = recoveryOnly
-		}
-		// If WebAuthn is available, start the assertion ceremony and include options
-		if loginSet["webauthn"] {
-			if opts, err := h.mfaChecker.BeginWebAuthnLogin(ctx, user.ID, jti); err != nil {
-				h.log.Error("Failed to begin WebAuthn login", "error", err)
-			} else if opts != nil {
-				resp["webauthn_options"] = opts
-			}
-		}
-		c.JSON(http.StatusOK, resp)
+	if err != nil {
+		h.log.Error("Failed to fetch user", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
 		return
 	}
 
-	// No MFA — complete login directly
+	if !h.verifyCredentials(c, ctx, req.Email, req.Password, user.PasswordHash) {
+		return
+	}
+
+	h.clearLoginAttempts(ctx, req.Email)
+	rememberMe := resolveRememberMe(&req)
+
+	if h.mfaChecker != nil && h.mfaChecker.IsEnabled(ctx, user.ID) {
+		h.handleMFAChallenge(c, ctx, user.ID, rememberMe)
+		return
+	}
+
 	h.CompleteLogin(c, user.ID, rememberMe)
 }
 
@@ -1257,47 +1256,47 @@ func (h *Handler) triggerTheftKeyRevocations(userID string) {
 }
 
 // Logout handles session termination
-func (h *Handler) Logout(c *gin.Context) {
-	// Blacklist the current access token if provided (best-effort)
-	if authHeader := c.GetHeader("Authorization"); authHeader != "" {
-		if parts := strings.SplitN(authHeader, " ", 2); len(parts) == 2 {
-			if claims, err := ValidateAccessToken(parts[1], h.jwtSecret); err == nil && claims.ID != "" {
-				remaining := time.Until(claims.ExpiresAt.Time)
-				ctx := context.Background()
-				if blErr := middleware.BlacklistToken(ctx, h.redis, claims.ID, remaining); blErr != nil {
-					h.log.Error("Failed to blacklist access token", "error", blErr)
-				}
-			}
-		}
+func (h *Handler) blacklistAccessToken(c *gin.Context) {
+	authHeader := c.GetHeader("Authorization")
+	if !strings.HasPrefix(authHeader, bearerPrefix) {
+		return
 	}
+	token := strings.TrimPrefix(authHeader, bearerPrefix)
+	claims, err := ValidateAccessToken(token, h.jwtSecret)
+	if err != nil || claims.ID == "" {
+		return
+	}
+	remaining := time.Until(claims.ExpiresAt.Time)
+	if blErr := middleware.BlacklistToken(context.Background(), h.redis, claims.ID, remaining); blErr != nil {
+		h.log.Error("Failed to blacklist access token", "error", blErr)
+	}
+}
 
-	// Get refresh token from cookie or header
-	refreshToken, err := c.Cookie("refresh_token")
-	if err != nil || refreshToken == "" {
-		refreshToken = c.GetHeader("X-Refresh-Token")
+func (h *Handler) disconnectUserByID(userID string) {
+	if userID == "" {
+		return
 	}
+	if uid, parseErr := uuid.Parse(userID); parseErr == nil {
+		h.hub.DisconnectUser(uid)
+	}
+}
+
+func (h *Handler) Logout(c *gin.Context) {
+	h.blacklistAccessToken(c)
+
+	refreshToken := h.extractRefreshToken(c)
 	if refreshToken == "" {
 		c.JSON(http.StatusOK, gin.H{"message": "Already logged out"})
 		return
 	}
 
-	// Soft-delete: mark session as revoked so it appears in "Past Sessions"
 	tokenHash := HashRefreshToken(refreshToken)
 	var revokedUserID string
 	_ = h.db.QueryRow(`UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_hash = $1 RETURNING user_id`, tokenHash).Scan(&revokedUserID)
 
-	// Force-close any active WebSocket connections for this user.
-	// The session_revoked message is a courtesy — the real enforcement is
-	// TCP connection termination via handleUnregister.
-	if revokedUserID != "" {
-		if uid, parseErr := uuid.Parse(revokedUserID); parseErr == nil {
-			h.hub.DisconnectUser(uid)
-		}
-	}
+	h.disconnectUserByID(revokedUserID)
 
-	// Clear cookie
 	setRefreshCookie(c, "", -1)
-
 	c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
 }
 
@@ -1409,6 +1408,117 @@ func (h *Handler) RecoveryBegin(c *gin.Context) {
 	c.JSON(http.StatusOK, successMsg)
 }
 
+// validateRecoveryCodeFormat normalises and validates a 6-digit recovery code.
+// Returns the cleaned code or an error message.
+func validateRecoveryCodeFormat(raw string) (string, string) {
+	code := strings.TrimSpace(strings.ReplaceAll(raw, "-", ""))
+	if len(code) != 6 {
+		return "", "Recovery code must be 6 digits"
+	}
+	for _, ch := range code {
+		if ch < '0' || ch > '9' {
+			return "", "Recovery code must be 6 digits"
+		}
+	}
+	return code, ""
+}
+
+// fetchRecoveryRecord loads and validates the recovery record from Redis.
+// Returns the record on success. On failure it writes the HTTP response and returns nil.
+func (h *Handler) fetchRecoveryRecord(c *gin.Context, ctx context.Context, redisKey string) *recoveryRecord {
+	data, err := h.redis.Get(ctx, redisKey).Bytes()
+	if err == redis.Nil {
+		middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryCode, "attempts_remaining": 0})
+		return nil
+	}
+	if err != nil {
+		h.log.Error("Failed to fetch recovery record from Redis", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
+		return nil
+	}
+
+	var record recoveryRecord
+	if err := json.Unmarshal(data, &record); err != nil {
+		h.log.Error("Failed to unmarshal recovery record", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
+		return nil
+	}
+
+	if record.Attempts >= recoveryMaxAttempts {
+		h.redis.Del(ctx, redisKey)
+		middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryCode, "attempts_remaining": 0})
+		return nil
+	}
+	return &record
+}
+
+// verifyRecoveryCode does a timing-safe comparison and handles wrong-code bookkeeping.
+// Returns true if the code matches. On mismatch it writes the HTTP response.
+func (h *Handler) verifyRecoveryCode(c *gin.Context, ctx context.Context, code string, record *recoveryRecord, redisKey string) bool {
+	if subtle.ConstantTimeCompare([]byte(hashRecoveryCode(code)), []byte(record.CodeHash)) == 1 {
+		return true
+	}
+	record.Attempts++
+	updated, _ := json.Marshal(record)
+	ttl := h.redis.TTL(ctx, redisKey).Val()
+	if ttl > 0 {
+		h.redis.Set(ctx, redisKey, updated, ttl)
+	}
+	middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
+	c.JSON(http.StatusUnauthorized, gin.H{
+		"error":              errInvalidExpiredRecoveryCode,
+		"attempts_remaining": 0,
+	})
+	return false
+}
+
+// buildVerifyCodeResponse constructs the response for a successful recovery code verification.
+func (h *Handler) buildVerifyCodeResponse(recoveryToken, userID string) (gin.H, error) {
+	resp := gin.H{"recovery_token": recoveryToken}
+
+	var recoveryWrappedPrivateKey, recoveryKeySalt []byte
+	var recoveryWrappedPrefsKey, recoveryPrefsKeySalt []byte
+	err := h.db.QueryRow(
+		`SELECT recovery_wrapped_private_key, recovery_key_salt, recovery_wrapped_prefs_key, recovery_prefs_key_salt
+		 FROM user_recovery_keys WHERE user_id = $1`, userID,
+	).Scan(&recoveryWrappedPrivateKey, &recoveryKeySalt, &recoveryWrappedPrefsKey, &recoveryPrefsKeySalt)
+	if err == nil {
+		resp["has_recovery_key"] = true
+		resp["recovery_wrapped_private_key"] = base64.StdEncoding.EncodeToString(recoveryWrappedPrivateKey)
+		resp["recovery_key_salt"] = base64.StdEncoding.EncodeToString(recoveryKeySalt)
+		if len(recoveryWrappedPrefsKey) > 0 {
+			resp["recovery_wrapped_prefs_key"] = base64.StdEncoding.EncodeToString(recoveryWrappedPrefsKey)
+		}
+		if len(recoveryPrefsKeySalt) > 0 {
+			resp["recovery_prefs_key_salt"] = base64.StdEncoding.EncodeToString(recoveryPrefsKeySalt)
+		}
+	} else if errors.Is(err, sql.ErrNoRows) {
+		resp["has_recovery_key"] = false
+	} else {
+		return nil, err
+	}
+
+	// Trusted devices (table may not exist yet — non-fatal)
+	var trustedDeviceCount int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM trusted_recovery_devices WHERE user_id = $1`, userID).Scan(&trustedDeviceCount); err != nil {
+		resp["has_trusted_devices"] = false
+	} else {
+		resp["has_trusted_devices"] = trustedDeviceCount > 0
+	}
+
+	// Recovery circles (table may not exist yet — non-fatal)
+	var recoveryCircleCount int
+	if err := h.db.QueryRow(`SELECT COUNT(*) FROM recovery_circles WHERE user_id = $1`, userID).Scan(&recoveryCircleCount); err != nil {
+		resp["has_recovery_circle"] = false
+	} else {
+		resp["has_recovery_circle"] = recoveryCircleCount > 0
+	}
+
+	return resp, nil
+}
+
 // RecoveryVerifyCode validates the recovery code and returns a recovery token plus recovery key data.
 func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 	var req struct {
@@ -1421,68 +1531,22 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 	}
 
 	email := strings.ToLower(strings.TrimSpace(req.Email))
-
-	// Trim whitespace/dashes and validate format
-	code := strings.TrimSpace(strings.ReplaceAll(req.Code, "-", ""))
-	if len(code) != 6 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Recovery code must be 6 digits"})
+	code, errMsg := validateRecoveryCodeFormat(req.Code)
+	if errMsg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
 		return
-	}
-	for _, ch := range code {
-		if ch < '0' || ch > '9' {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Recovery code must be 6 digits"})
-			return
-		}
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 5*time.Second)
 	defer cancel()
 
 	redisKey := recoveryRedisKey(email)
-
-	// Fetch stored record
-	data, err := h.redis.Get(ctx, redisKey).Bytes()
-	if err == redis.Nil {
-		// Return the same error shape as a wrong code to prevent email enumeration
-		middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
-		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryCode, "attempts_remaining": 0})
-		return
-	}
-	if err != nil {
-		h.log.Error("Failed to fetch recovery record from Redis", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
+	record := h.fetchRecoveryRecord(c, ctx, redisKey)
+	if record == nil {
 		return
 	}
 
-	var record recoveryRecord
-	if err := json.Unmarshal(data, &record); err != nil {
-		h.log.Error("Failed to unmarshal recovery record", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
-		return
-	}
-
-	// Check attempt limit — return the same error shape to prevent enumeration
-	if record.Attempts >= recoveryMaxAttempts {
-		h.redis.Del(ctx, redisKey)
-		middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
-		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryCode, "attempts_remaining": 0})
-		return
-	}
-
-	// Timing-safe comparison
-	if subtle.ConstantTimeCompare([]byte(hashRecoveryCode(code)), []byte(record.CodeHash)) != 1 {
-		// Increment attempts
-		record.Attempts++
-		updated, _ := json.Marshal(record)
-		ttl := h.redis.TTL(ctx, redisKey).Val()
-		if ttl > 0 {
-			h.redis.Set(ctx, redisKey, updated, ttl)
-		}
-		middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
-		c.JSON(http.StatusUnauthorized, gin.H{
-			"error":              errInvalidExpiredRecoveryCode,
-			"attempts_remaining": 0,
-		})
+	if !h.verifyRecoveryCode(c, ctx, code, record, redisKey) {
 		return
 	}
 
@@ -1502,58 +1566,145 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 		return
 	}
 
-	// Build response
-	resp := gin.H{
-		"recovery_token": recoveryToken,
-	}
-
-	// Fetch recovery key data
-	var recoveryWrappedPrivateKey, recoveryKeySalt []byte
-	var recoveryWrappedPrefsKey, recoveryPrefsKeySalt []byte
-	err = h.db.QueryRow(
-		`SELECT recovery_wrapped_private_key, recovery_key_salt, recovery_wrapped_prefs_key, recovery_prefs_key_salt
-		 FROM user_recovery_keys WHERE user_id = $1`, record.UserID,
-	).Scan(&recoveryWrappedPrivateKey, &recoveryKeySalt, &recoveryWrappedPrefsKey, &recoveryPrefsKeySalt)
-	if err == nil {
-		resp["has_recovery_key"] = true
-		resp["recovery_wrapped_private_key"] = base64.StdEncoding.EncodeToString(recoveryWrappedPrivateKey)
-		resp["recovery_key_salt"] = base64.StdEncoding.EncodeToString(recoveryKeySalt)
-		if len(recoveryWrappedPrefsKey) > 0 {
-			resp["recovery_wrapped_prefs_key"] = base64.StdEncoding.EncodeToString(recoveryWrappedPrefsKey)
-		}
-		if len(recoveryPrefsKeySalt) > 0 {
-			resp["recovery_prefs_key_salt"] = base64.StdEncoding.EncodeToString(recoveryPrefsKeySalt)
-		}
-	} else if errors.Is(err, sql.ErrNoRows) {
-		resp["has_recovery_key"] = false
-	} else {
+	resp, err := h.buildVerifyCodeResponse(recoveryToken, record.UserID)
+	if err != nil {
 		h.log.Error("Failed to load recovery key data", "error", err, "user_id", record.UserID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryVerificationFailed})
 		return
 	}
 
-	// Check for trusted devices (Phase B — table may not exist yet)
-	var trustedDeviceCount int
-	err = h.db.QueryRow(`SELECT COUNT(*) FROM trusted_recovery_devices WHERE user_id = $1`, record.UserID).Scan(&trustedDeviceCount)
-	if err != nil {
-		// Table may not exist yet — non-fatal
-		resp["has_trusted_devices"] = false
-	} else {
-		resp["has_trusted_devices"] = trustedDeviceCount > 0
-	}
-
-	// Check for recovery circles (Phase C — table may not exist yet)
-	var recoveryCircleCount int
-	err = h.db.QueryRow(`SELECT COUNT(*) FROM recovery_circles WHERE user_id = $1`, record.UserID).Scan(&recoveryCircleCount)
-	if err != nil {
-		// Table may not exist yet — non-fatal
-		resp["has_recovery_circle"] = false
-	} else {
-		resp["has_recovery_circle"] = recoveryCircleCount > 0
-	}
-
 	h.log.Info("Recovery code verified, token issued", "user_id", record.UserID)
 	c.JSON(http.StatusOK, resp)
+}
+
+// validateAndConsumeRecoveryToken validates the recovery token via MFA checker and enforces single-use.
+// On success returns the claims and the Redis key used for single-use tracking.
+// On failure writes the HTTP response and returns nil.
+func (h *Handler) validateAndConsumeRecoveryToken(c *gin.Context, tokenStr string, recordAuthFailure bool) (*RecoveryClaims, string) {
+	if h.mfaChecker == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryNotConfigured})
+		return nil, ""
+	}
+	claims, err := h.mfaChecker.ValidateRecoveryToken(tokenStr)
+	if err != nil {
+		if recordAuthFailure {
+			middleware.RecordAuthFailure(c.Request.Context(), h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
+		}
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryToken})
+		return nil, ""
+	}
+
+	ctx := c.Request.Context()
+	recoveryUsedKey := fmt.Sprintf("recovery_token_used:%s", claims.JTI)
+	_, err = h.redis.SetArgs(ctx, recoveryUsedKey, "1", redis.SetArgs{TTL: recoveryTokenUsedTTL, Mode: "NX"}).Result()
+	if errors.Is(err, redis.Nil) {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Recovery token has already been used"})
+		return nil, ""
+	}
+	if err != nil {
+		h.log.Error("Failed to check recovery token usage", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process recovery"})
+		return nil, ""
+	}
+	return claims, recoveryUsedKey
+}
+
+// prepareRecoveryPassword validates password strength, hashes it, and decodes E2EE key fields.
+// On failure writes the HTTP response (and cleans up the Redis used-key) and returns a non-nil error.
+func (h *Handler) prepareRecoveryPassword(c *gin.Context, ctx context.Context, password, wrappedB64, saltB64, recoveryUsedKey string) (string, []byte, []byte, error) {
+	if err := ValidatePasswordStrength(password); err != nil {
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return "", nil, nil, err
+	}
+	passwordHash, err := HashPassword(password)
+	if err != nil {
+		h.log.Error("Failed to hash new password", "error", err)
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetPwd})
+		return "", nil, nil, err
+	}
+	wrappedKey, err := base64.StdEncoding.DecodeString(wrappedB64)
+	if err != nil {
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid wrapped_private_key format"})
+		return "", nil, nil, err
+	}
+	kdSalt, err := base64.StdEncoding.DecodeString(saltB64)
+	if err != nil {
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid key_derivation_salt format"})
+		return "", nil, nil, err
+	}
+	return passwordHash, wrappedKey, kdSalt, nil
+}
+
+// recoveryTxOp is a single SQL statement executed inside a recovery transaction.
+type recoveryTxOp struct {
+	query string
+	args  []interface{}
+	desc  string // human-readable for error logging
+}
+
+// execRecoveryTx runs a series of SQL ops in a transaction. On failure it cleans up
+// the Redis used-key, writes the HTTP response, and returns an error.
+func (h *Handler) execRecoveryTx(c *gin.Context, ctx context.Context, ops []recoveryTxOp, recoveryUsedKey, errMsg string) error {
+	tx, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
+		h.log.Error(errMsgFailedStartTransaction, "error", err)
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsg})
+		return err
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			h.log.Error(errMsgFailedRollbackTx, "error", rbErr)
+		}
+	}()
+
+	for _, op := range ops {
+		if _, err := tx.Exec(op.query, op.args...); err != nil {
+			h.log.Error(op.desc, "error", err)
+			h.redis.Del(ctx, recoveryUsedKey)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsg})
+			return err
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		h.log.Error(errFailedCommitTransaction, "error", err)
+		h.redis.Del(ctx, recoveryUsedKey)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsg})
+		return err
+	}
+	return nil
+}
+
+// decodeOptionalRecoveryKeys decodes optional recovery key fields from base64.
+// Returns decoded bytes and an error message on failure.
+func decodeOptionalRecoveryKeys(wrappedKey, keySalt, wrappedPrefsKey, prefsKeySalt string) (recKey, recSalt, recPrefsKey, recPrefsSalt []byte, errMsg string) {
+	var err error
+	recKey, err = base64.StdEncoding.DecodeString(wrappedKey)
+	if err != nil {
+		return nil, nil, nil, nil, "Invalid recovery_wrapped_private_key format"
+	}
+	recSalt, err = base64.StdEncoding.DecodeString(keySalt)
+	if err != nil {
+		return nil, nil, nil, nil, "Invalid recovery_key_salt format"
+	}
+	if wrappedPrefsKey != "" {
+		recPrefsKey, err = base64.StdEncoding.DecodeString(wrappedPrefsKey)
+		if err != nil {
+			return nil, nil, nil, nil, "Invalid recovery_wrapped_prefs_key format"
+		}
+	}
+	if prefsKeySalt != "" {
+		recPrefsSalt, err = base64.StdEncoding.DecodeString(prefsKeySalt)
+		if err != nil {
+			return nil, nil, nil, nil, "Invalid recovery_prefs_key_salt format"
+		}
+	}
+	return recKey, recSalt, recPrefsKey, recPrefsSalt, ""
 }
 
 // RecoveryResetPassword resets the user's password using a recovery token and re-wrapped keys.
@@ -1574,169 +1725,55 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 		return
 	}
 
-	// Validate recovery token
-	if h.mfaChecker == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryNotConfigured})
-		return
-	}
-	claims, err := h.mfaChecker.ValidateRecoveryToken(req.RecoveryToken)
-	if err != nil {
-		middleware.RecordAuthFailure(c.Request.Context(), h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
-		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryToken})
+	claims, recoveryUsedKey := h.validateAndConsumeRecoveryToken(c, req.RecoveryToken, true)
+	if claims == nil {
 		return
 	}
 
-	// Enforce single-use recovery token
 	ctx := c.Request.Context()
-	recoveryUsedKey := fmt.Sprintf("recovery_token_used:%s", claims.JTI)
-	_, err = h.redis.SetArgs(ctx, recoveryUsedKey, "1", redis.SetArgs{TTL: recoveryTokenUsedTTL, Mode: "NX"}).Result()
-	if errors.Is(err, redis.Nil) {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Recovery token has already been used"})
-		return
-	}
+	passwordHash, wrappedKey, kdSalt, err := h.prepareRecoveryPassword(c, ctx, req.NewPassword, req.WrappedPrivateKey, req.KeyDerivationSalt, recoveryUsedKey)
 	if err != nil {
-		h.log.Error("Failed to check recovery token usage", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process recovery"})
 		return
 	}
 
-	// Validate new password strength
-	if err := ValidatePasswordStrength(req.NewPassword); err != nil {
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+	ops := []recoveryTxOp{
+		{`UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
+			[]interface{}{passwordHash, claims.UserID}, "Failed to update password"},
+		{`UPDATE user_keys SET wrapped_private_key = $1, key_derivation_salt = $2, key_derivation_alg = $3,
+		         key_version = key_version + 1, updated_at = NOW() WHERE user_id = $4`,
+			[]interface{}{wrappedKey, kdSalt, req.KeyDerivationAlg, claims.UserID}, "Failed to update user keys"},
 	}
 
-	// Hash new password
-	passwordHash, err := HashPassword(req.NewPassword)
-	if err != nil {
-		h.log.Error("Failed to hash new password", "error", err)
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetPwd})
-		return
-	}
-
-	// Decode E2EE key fields
-	wrappedKey, err := base64.StdEncoding.DecodeString(req.WrappedPrivateKey)
-	if err != nil {
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid wrapped_private_key format"})
-		return
-	}
-	kdSalt, err := base64.StdEncoding.DecodeString(req.KeyDerivationSalt)
-	if err != nil {
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid key_derivation_salt format"})
-		return
-	}
-
-	// BEGIN TRANSACTION
-	tx, err := h.db.BeginTx(ctx, nil)
-	if err != nil {
-		h.log.Error(errMsgFailedStartTransaction, "error", err)
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetPwd})
-		return
-	}
-	defer func() {
-		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
-			h.log.Error(errMsgFailedRollbackTx, "error", rbErr)
-		}
-	}()
-
-	// 1. Update password
-	_, err = tx.Exec(`UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`, passwordHash, claims.UserID)
-	if err != nil {
-		h.log.Error("Failed to update password", "error", err, "user_id", claims.UserID)
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetPwd})
-		return
-	}
-
-	// 2. Update E2EE keys
-	_, err = tx.Exec(`
-		UPDATE user_keys SET wrapped_private_key = $1, key_derivation_salt = $2, key_derivation_alg = $3,
-		       key_version = key_version + 1, updated_at = NOW()
-		WHERE user_id = $4
-	`, wrappedKey, kdSalt, req.KeyDerivationAlg, claims.UserID)
-	if err != nil {
-		h.log.Error("Failed to update user keys", "error", err, "user_id", claims.UserID)
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetPwd})
-		return
-	}
-
-	// 3. If recovery key fields provided, upsert recovery key
+	// Optional recovery key upsert
 	if req.RecoveryWrappedPrivateKey != "" && req.RecoveryKeySalt != "" {
-		recKey, decErr := base64.StdEncoding.DecodeString(req.RecoveryWrappedPrivateKey)
-		if decErr != nil {
+		recKey, recSalt, recPrefsKey, recPrefsSalt, decErr := decodeOptionalRecoveryKeys(
+			req.RecoveryWrappedPrivateKey, req.RecoveryKeySalt, req.RecoveryWrappedPrefsKey, req.RecoveryPrefsKeySalt)
+		if decErr != "" {
 			h.redis.Del(ctx, recoveryUsedKey)
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid recovery_wrapped_private_key format"})
+			c.JSON(http.StatusBadRequest, gin.H{"error": decErr})
 			return
 		}
-		recSalt, decErr := base64.StdEncoding.DecodeString(req.RecoveryKeySalt)
-		if decErr != nil {
-			h.redis.Del(ctx, recoveryUsedKey)
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid recovery_key_salt format"})
-			return
-		}
-
-		var recPrefsKey, recPrefsSalt []byte
-		if req.RecoveryWrappedPrefsKey != "" {
-			recPrefsKey, decErr = base64.StdEncoding.DecodeString(req.RecoveryWrappedPrefsKey)
-			if decErr != nil {
-				h.redis.Del(ctx, recoveryUsedKey)
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid recovery_wrapped_prefs_key format"})
-				return
-			}
-		}
-		if req.RecoveryPrefsKeySalt != "" {
-			recPrefsSalt, decErr = base64.StdEncoding.DecodeString(req.RecoveryPrefsKeySalt)
-			if decErr != nil {
-				h.redis.Del(ctx, recoveryUsedKey)
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid recovery_prefs_key_salt format"})
-				return
-			}
-		}
-
-		_, err = tx.Exec(`
-			INSERT INTO user_recovery_keys (user_id, recovery_wrapped_private_key, recovery_key_salt, recovery_wrapped_prefs_key, recovery_prefs_key_salt)
-			VALUES ($1, $2, $3, $4, $5)
-			ON CONFLICT (user_id) DO UPDATE SET
-				recovery_wrapped_private_key = EXCLUDED.recovery_wrapped_private_key,
-				recovery_key_salt = EXCLUDED.recovery_key_salt,
-				recovery_wrapped_prefs_key = EXCLUDED.recovery_wrapped_prefs_key,
-				recovery_prefs_key_salt = EXCLUDED.recovery_prefs_key_salt,
-				updated_at = NOW()
-		`, claims.UserID, recKey, recSalt, recPrefsKey, recPrefsSalt)
-		if err != nil {
-			h.log.Error("Failed to upsert recovery key", "error", err, "user_id", claims.UserID)
-			h.redis.Del(ctx, recoveryUsedKey)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetPwd})
-			return
-		}
+		ops = append(ops, recoveryTxOp{
+			`INSERT INTO user_recovery_keys (user_id, recovery_wrapped_private_key, recovery_key_salt, recovery_wrapped_prefs_key, recovery_prefs_key_salt)
+			 VALUES ($1, $2, $3, $4, $5)
+			 ON CONFLICT (user_id) DO UPDATE SET
+			     recovery_wrapped_private_key = EXCLUDED.recovery_wrapped_private_key,
+			     recovery_key_salt = EXCLUDED.recovery_key_salt,
+			     recovery_wrapped_prefs_key = EXCLUDED.recovery_wrapped_prefs_key,
+			     recovery_prefs_key_salt = EXCLUDED.recovery_prefs_key_salt,
+			     updated_at = NOW()`,
+			[]interface{}{claims.UserID, recKey, recSalt, recPrefsKey, recPrefsSalt}, "Failed to upsert recovery key"})
 	}
 
-	// 4. Revoke all refresh tokens
-	_, err = tx.Exec(`UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`, claims.UserID)
-	if err != nil {
-		h.log.Error("Failed to revoke refresh tokens", "error", err, "user_id", claims.UserID)
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetPwd})
+	ops = append(ops, recoveryTxOp{
+		`UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`,
+		[]interface{}{claims.UserID}, "Failed to revoke refresh tokens"})
+
+	if err := h.execRecoveryTx(c, ctx, ops, recoveryUsedKey, errFailedResetPwd); err != nil {
 		return
 	}
 
-	// COMMIT
-	if err := tx.Commit(); err != nil {
-		h.log.Error(errFailedCommitTransaction, "error", err, "user_id", claims.UserID)
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetPwd})
-		return
-	}
-
-	// Disconnect user's WebSocket sessions
 	h.hub.DisconnectUser(uuid.MustParse(claims.UserID))
-
 	middleware.ClearAuthFailures(ctx, h.redis, c.ClientIP())
 	h.log.Info("Password reset via recovery", "user_id", claims.UserID)
 	c.JSON(http.StatusOK, gin.H{"message": "Password reset successfully. Please sign in with your new password."})
@@ -1758,168 +1795,52 @@ func (h *Handler) RecoveryResetAccount(c *gin.Context) {
 		return
 	}
 
-	// REQUIRE explicit acknowledgment of data loss
 	if !req.AcknowledgeDataLoss {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "You must acknowledge that all encrypted message history will be permanently lost"})
 		return
 	}
 
-	// Validate recovery token
-	if h.mfaChecker == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryNotConfigured})
-		return
-	}
-	claims, err := h.mfaChecker.ValidateRecoveryToken(req.RecoveryToken)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryToken})
+	claims, recoveryUsedKey := h.validateAndConsumeRecoveryToken(c, req.RecoveryToken, false)
+	if claims == nil {
 		return
 	}
 
-	// Enforce single-use recovery token
 	ctx := c.Request.Context()
-	recoveryUsedKey := fmt.Sprintf("recovery_token_used:%s", claims.JTI)
-	_, err = h.redis.SetArgs(ctx, recoveryUsedKey, "1", redis.SetArgs{TTL: recoveryTokenUsedTTL, Mode: "NX"}).Result()
-	if errors.Is(err, redis.Nil) {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Recovery token has already been used"})
-		return
-	}
+	passwordHash, wrappedKey, kdSalt, err := h.prepareRecoveryPassword(c, ctx, req.NewPassword, req.WrappedPrivateKey, req.KeyDerivationSalt, recoveryUsedKey)
 	if err != nil {
-		h.log.Error("Failed to check recovery token usage", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process recovery"})
 		return
 	}
 
-	// Validate new password strength
-	if err := ValidatePasswordStrength(req.NewPassword); err != nil {
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
-	}
-
-	// Hash new password
-	passwordHash, err := HashPassword(req.NewPassword)
-	if err != nil {
-		h.log.Error("Failed to hash new password", "error", err)
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
-		return
-	}
-
-	// Decode E2EE key fields
-	wrappedKey, err := base64.StdEncoding.DecodeString(req.WrappedPrivateKey)
-	if err != nil {
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid wrapped_private_key format"})
-		return
-	}
-	kdSalt, err := base64.StdEncoding.DecodeString(req.KeyDerivationSalt)
-	if err != nil {
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid key_derivation_salt format"})
-		return
-	}
-	publicKey, err := base64.StdEncoding.DecodeString(req.PublicKey)
-	if err != nil {
+	publicKey, decErr := base64.StdEncoding.DecodeString(req.PublicKey)
+	if decErr != nil {
 		h.redis.Del(ctx, recoveryUsedKey)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid public_key format"})
 		return
 	}
 
-	// BEGIN TRANSACTION
-	tx, err := h.db.BeginTx(ctx, nil)
-	if err != nil {
-		h.log.Error(errMsgFailedStartTransaction, "error", err)
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
-		return
-	}
-	defer func() {
-		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
-			h.log.Error(errMsgFailedRollbackTx, "error", rbErr)
-		}
-	}()
-
-	// 1. Update password
-	_, err = tx.Exec(`UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`, passwordHash, claims.UserID)
-	if err != nil {
-		h.log.Error("Failed to update password", "error", err, "user_id", claims.UserID)
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
-		return
+	ops := []recoveryTxOp{
+		{`UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2`,
+			[]interface{}{passwordHash, claims.UserID}, "Failed to update password"},
+		{`UPDATE user_keys SET wrapped_private_key = $1, key_derivation_salt = $2, key_derivation_alg = $3,
+		         key_version = key_version + 1, updated_at = NOW() WHERE user_id = $4`,
+			[]interface{}{wrappedKey, kdSalt, req.KeyDerivationAlg, claims.UserID}, "Failed to update user keys"},
+		{`UPDATE public_keys SET public_key = $1, key_version = key_version + 1, created_at = NOW() WHERE user_id = $2`,
+			[]interface{}{publicKey, claims.UserID}, "Failed to update public key"},
+		{`DELETE FROM user_recovery_keys WHERE user_id = $1`,
+			[]interface{}{claims.UserID}, "Failed to delete recovery keys"},
+		{`DELETE FROM channel_keys WHERE user_id = $1`,
+			[]interface{}{claims.UserID}, "Failed to delete channel keys"},
+		{`DELETE FROM dm_channel_keys WHERE user_id = $1`,
+			[]interface{}{claims.UserID}, "Failed to delete DM channel keys"},
+		{`UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`,
+			[]interface{}{claims.UserID}, "Failed to revoke refresh tokens"},
 	}
 
-	// 2. Update E2EE wrapped private key
-	_, err = tx.Exec(`
-		UPDATE user_keys SET wrapped_private_key = $1, key_derivation_salt = $2, key_derivation_alg = $3,
-		       key_version = key_version + 1, updated_at = NOW()
-		WHERE user_id = $4
-	`, wrappedKey, kdSalt, req.KeyDerivationAlg, claims.UserID)
-	if err != nil {
-		h.log.Error("Failed to update user keys", "error", err, "user_id", claims.UserID)
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
+	if err := h.execRecoveryTx(c, ctx, ops, recoveryUsedKey, errFailedResetAccount); err != nil {
 		return
 	}
 
-	// 3. Replace public key (new identity)
-	_, err = tx.Exec(`
-		UPDATE public_keys SET public_key = $1, key_version = key_version + 1, created_at = NOW()
-		WHERE user_id = $2
-	`, publicKey, claims.UserID)
-	if err != nil {
-		h.log.Error("Failed to update public key", "error", err, "user_id", claims.UserID)
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
-		return
-	}
-
-	// 4. Delete recovery keys
-	_, err = tx.Exec(`DELETE FROM user_recovery_keys WHERE user_id = $1`, claims.UserID)
-	if err != nil {
-		h.log.Error("Failed to delete recovery keys", "error", err, "user_id", claims.UserID)
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
-		return
-	}
-
-	// 5. Delete channel keys (encrypted data is now inaccessible)
-	_, err = tx.Exec(`DELETE FROM channel_keys WHERE user_id = $1`, claims.UserID)
-	if err != nil {
-		h.log.Error("Failed to delete channel keys", "error", err, "user_id", claims.UserID)
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
-		return
-	}
-
-	// 6. Delete DM channel keys
-	_, err = tx.Exec(`DELETE FROM dm_channel_keys WHERE user_id = $1`, claims.UserID)
-	if err != nil {
-		h.log.Error("Failed to delete DM channel keys", "error", err, "user_id", claims.UserID)
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
-		return
-	}
-
-	// 7. Revoke all refresh tokens
-	_, err = tx.Exec(`UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`, claims.UserID)
-	if err != nil {
-		h.log.Error("Failed to revoke refresh tokens", "error", err, "user_id", claims.UserID)
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
-		return
-	}
-
-	// COMMIT
-	if err := tx.Commit(); err != nil {
-		h.log.Error(errFailedCommitTransaction, "error", err, "user_id", claims.UserID)
-		h.redis.Del(ctx, recoveryUsedKey)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errFailedResetAccount})
-		return
-	}
-
-	// Disconnect user's WebSocket sessions
 	h.hub.DisconnectUser(uuid.MustParse(claims.UserID))
-
 	h.log.Info("Account reset via recovery (data loss acknowledged)", "user_id", claims.UserID)
 	c.JSON(http.StatusOK, gin.H{"message": "Account reset successfully. All encrypted message history has been permanently lost. Please sign in with your new password."})
 }
@@ -1999,31 +1920,42 @@ func (h *Handler) CreateDeviceRecoveryRequest(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"request_id": requestID})
 }
 
+// extractRecoveryTokenParam extracts a recovery token from the Authorization: Bearer header
+// or the recovery_token query parameter. Returns empty string if not found.
+func extractRecoveryTokenParam(c *gin.Context) string {
+	if authHeader := c.GetHeader("Authorization"); strings.HasPrefix(authHeader, bearerPrefix) {
+		return strings.TrimSpace(strings.TrimPrefix(authHeader, bearerPrefix))
+	}
+	return c.Query("recovery_token")
+}
+
+// validateRecoveryTokenParam extracts, validates, and returns recovery claims.
+// On failure writes the HTTP response and returns nil.
+func (h *Handler) validateRecoveryTokenParam(c *gin.Context) *RecoveryClaims {
+	recoveryToken := extractRecoveryTokenParam(c)
+	if recoveryToken == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Recovery token is required (Authorization: Bearer header or recovery_token query parameter)"})
+		return nil
+	}
+	if h.mfaChecker == nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryNotConfigured})
+		return nil
+	}
+	claims, err := h.mfaChecker.ValidateRecoveryToken(recoveryToken)
+	if err != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryToken})
+		return nil
+	}
+	return claims
+}
+
 // PollDeviceRecoveryRequest polls the status of a trusted-device recovery request.
 // This is an unauthenticated endpoint — the caller must provide a valid recovery token.
 func (h *Handler) PollDeviceRecoveryRequest(c *gin.Context) {
 	requestID := c.Param("id")
 
-	// Prefer Authorization: Bearer header; fall back to query param
-	recoveryToken := ""
-	if authHeader := c.GetHeader("Authorization"); strings.HasPrefix(authHeader, bearerPrefix) {
-		recoveryToken = strings.TrimSpace(strings.TrimPrefix(authHeader, bearerPrefix))
-	} else {
-		recoveryToken = c.Query("recovery_token")
-	}
-	if recoveryToken == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Recovery token is required (Authorization: Bearer header or recovery_token query parameter)"})
-		return
-	}
-
-	// Validate recovery token
-	if h.mfaChecker == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryNotConfigured})
-		return
-	}
-	claims, err := h.mfaChecker.ValidateRecoveryToken(recoveryToken)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryToken})
+	claims := h.validateRecoveryTokenParam(c)
+	if claims == nil {
 		return
 	}
 
@@ -2031,7 +1963,7 @@ func (h *Handler) PollDeviceRecoveryRequest(c *gin.Context) {
 	var status string
 	var encryptedPayload, responderPublicKey []byte
 	var expiresAt time.Time
-	err = h.db.QueryRowContext(c.Request.Context(), `
+	err := h.db.QueryRowContext(c.Request.Context(), `
 		SELECT status, encrypted_payload, responder_public_key, expires_at
 		FROM recovery_requests
 		WHERE id = $1 AND user_id = $2 AND recovery_token_jti = $3
@@ -2120,31 +2052,48 @@ func (h *Handler) CreateSocialRecoveryRequest(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"request_id": requestID, "threshold_k": thresholdK})
 }
 
+// socialRecoveryResponseEntry represents a single guardian's share response.
+type socialRecoveryResponseEntry struct {
+	ContactID      string `json:"contact_id"`
+	EncryptedShare string `json:"encrypted_share"`
+}
+
+// fetchSocialRecoveryResponses loads all guardian share responses for a completed request.
+func (h *Handler) fetchSocialRecoveryResponses(ctx context.Context, requestID string) ([]socialRecoveryResponseEntry, error) {
+	rows, err := h.db.QueryContext(ctx, `
+		SELECT contact_id, encrypted_share
+		FROM recovery_circle_responses
+		WHERE request_id = $1
+	`, requestID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var responses []socialRecoveryResponseEntry
+	for rows.Next() {
+		var r socialRecoveryResponseEntry
+		var encShare []byte
+		if err := rows.Scan(&r.ContactID, &encShare); err != nil {
+			h.log.Error("Failed to scan social recovery response", "error", err)
+			continue
+		}
+		r.EncryptedShare = base64.StdEncoding.EncodeToString(encShare)
+		responses = append(responses, r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return responses, nil
+}
+
 // PollSocialRecoveryRequest polls the status of a social recovery request.
 // This is an unauthenticated endpoint — the caller provides a valid recovery token.
 func (h *Handler) PollSocialRecoveryRequest(c *gin.Context) {
 	requestID := c.Param("id")
 
-	// Prefer Authorization: Bearer header; fall back to query param
-	recoveryToken := ""
-	if authHeader := c.GetHeader("Authorization"); strings.HasPrefix(authHeader, bearerPrefix) {
-		recoveryToken = strings.TrimSpace(strings.TrimPrefix(authHeader, bearerPrefix))
-	} else {
-		recoveryToken = c.Query("recovery_token")
-	}
-	if recoveryToken == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Recovery token is required (Authorization: Bearer header or recovery_token query parameter)"})
-		return
-	}
-
-	// Validate recovery token
-	if h.mfaChecker == nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errRecoveryNotConfigured})
-		return
-	}
-	claims, err := h.mfaChecker.ValidateRecoveryToken(recoveryToken)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": errInvalidExpiredRecoveryToken})
+	claims := h.validateRecoveryTokenParam(c)
+	if claims == nil {
 		return
 	}
 
@@ -2154,7 +2103,7 @@ func (h *Handler) PollSocialRecoveryRequest(c *gin.Context) {
 	var status string
 	var sharesReceived, thresholdK int
 	var expiresAt time.Time
-	err = h.db.QueryRowContext(ctx, `
+	err := h.db.QueryRowContext(ctx, `
 		SELECT rr.status, rr.shares_received, rc.threshold_k, rr.expires_at
 		FROM recovery_circle_requests rr
 		JOIN recovery_circles rc ON rc.id = rr.circle_id
@@ -2165,7 +2114,6 @@ func (h *Handler) PollSocialRecoveryRequest(c *gin.Context) {
 		return
 	}
 
-	// Check if expired
 	if time.Now().After(expiresAt) && status == "pending" {
 		c.JSON(http.StatusOK, gin.H{"status": "expired"})
 		return
@@ -2177,42 +2125,13 @@ func (h *Handler) PollSocialRecoveryRequest(c *gin.Context) {
 		"threshold_k":     thresholdK,
 	}
 
-	// If complete, include all responses
 	if status == "complete" {
-		rows, err := h.db.QueryContext(ctx, `
-			SELECT contact_id, encrypted_share
-			FROM recovery_circle_responses
-			WHERE request_id = $1
-		`, requestID)
+		responses, err := h.fetchSocialRecoveryResponses(ctx, requestID)
 		if err != nil {
-			h.log.Error("Failed to query social recovery responses", "error", err, "request_id", requestID)
+			h.log.Error("Failed to load social recovery responses", "error", err, "request_id", requestID)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load recovery responses"})
 			return
 		}
-		defer func() { _ = rows.Close() }()
-
-		type responseEntry struct {
-			ContactID      string `json:"contact_id"`
-			EncryptedShare string `json:"encrypted_share"`
-		}
-
-		responses := []responseEntry{}
-		for rows.Next() {
-			var r responseEntry
-			var encShare []byte
-			if err := rows.Scan(&r.ContactID, &encShare); err != nil {
-				h.log.Error("Failed to scan social recovery response", "error", err)
-				continue
-			}
-			r.EncryptedShare = base64.StdEncoding.EncodeToString(encShare)
-			responses = append(responses, r)
-		}
-		if err := rows.Err(); err != nil {
-			h.log.Error("Error iterating social recovery responses", "error", err, "request_id", requestID)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load recovery responses"})
-			return
-		}
-
 		response["responses"] = responses
 	}
 

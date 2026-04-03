@@ -25,6 +25,7 @@ const (
 	hdrContentType         = "Content-Type"
 	mimeImagePNG           = "image/png"
 	mimeImageJPEG          = "image/jpeg"
+	testCiphertextData     = "ciphertext-data"
 )
 
 // =====================================================================
@@ -172,7 +173,7 @@ func TestUploadAttachmentMissingFile(t *testing.T) {
 	user := ts.createTestUser(t, "attachnof")
 
 	req := httptest.NewRequest("POST", pathUploadAttachment, nil)
-	req.Header.Set("Content-Type", "multipart/form-data; boundary=xxx")
+	req.Header.Set(hdrContentType, "multipart/form-data; boundary=xxx")
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
 	c.Request = req
@@ -241,7 +242,7 @@ func TestUploadAttachmentDefaultFileType(t *testing.T) {
 	channelID := ts.createTestChannel(t, serverID, "defaultft")
 
 	// Send an invalid file_type; should default to "file"
-	body, ct := multipartBody(t, "file", fileEncryptedBin, []byte("ciphertext-data"), map[string]string{
+	body, ct := multipartBody(t, "file", fileEncryptedBin, []byte(testCiphertextData), map[string]string{
 		keyChannelID: channelID,
 		keyFileType:  "invalid_type",
 	})
@@ -260,7 +261,7 @@ func TestUploadAttachmentDefaultMimeType(t *testing.T) {
 	channelID := ts.createTestChannel(t, serverID, "defaultmime")
 
 	// Do not send mime_type; should default to application/octet-stream
-	body, ct := multipartBody(t, "file", fileEncryptedBin, []byte("ciphertext-data"), map[string]string{
+	body, ct := multipartBody(t, "file", fileEncryptedBin, []byte(testCiphertextData), map[string]string{
 		keyChannelID: channelID,
 	})
 
@@ -636,4 +637,172 @@ func TestIsValidFileType(t *testing.T) {
 	assert.True(t, isValidFileType(FileTypeFile))
 	assert.False(t, isValidFileType("unknown"))
 	assert.False(t, isValidFileType(""))
+}
+
+// =====================================================================
+// Delete: Successful deletion
+// =====================================================================
+
+func TestDeleteMediaSuccess(t *testing.T) {
+	ts := setupMediaTest(t)
+	owner := ts.createTestUser(t, "delsuccess")
+	serverID := ts.createTestServer(t, owner, "Del Success Server")
+	channelID := ts.createTestChannel(t, serverID, "delsuccess")
+
+	fileID := uuid.New().String()
+	storageKey := fmt.Sprintf(fmtAttachmentsKey, fileID)
+	require.NoError(t, ts.store.PutObject(context.TODO(), storageKey, bytes.NewReader([]byte("data")), 4, mimeOctetStream))
+	_, err := ts.db.Exec(
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, channel_id)
+		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 4, $3, true, 1, $4)`,
+		fileID, owner, storageKey, channelID,
+	)
+	require.NoError(t, err)
+
+	w := ts.doJSON(ts.handler.DeleteMedia, "DELETE", pathMediaPrefix+fileID, owner, gin.Params{{Key: "file_id", Value: fileID}})
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	resp := parseBody(t, w)
+	assert.Equal(t, true, resp["deleted"])
+	assert.False(t, ts.store.hasObject(storageKey))
+}
+
+func TestDeleteMediaWrongOwner(t *testing.T) {
+	ts := setupMediaTest(t)
+	owner := ts.createTestUser(t, "delowner")
+	other := ts.createTestUser(t, "delother")
+	serverID := ts.createTestServer(t, owner, "Del Owner Server")
+	channelID := ts.createTestChannel(t, serverID, "delowner")
+
+	fileID := uuid.New().String()
+	storageKey := fmt.Sprintf(fmtAttachmentsKey, fileID)
+	require.NoError(t, ts.store.PutObject(context.TODO(), storageKey, bytes.NewReader([]byte("data")), 4, mimeOctetStream))
+	_, err := ts.db.Exec(
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, channel_id)
+		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 4, $3, true, 1, $4)`,
+		fileID, owner, storageKey, channelID,
+	)
+	require.NoError(t, err)
+
+	w := ts.doJSON(ts.handler.DeleteMedia, "DELETE", pathMediaPrefix+fileID, other, gin.Params{{Key: "file_id", Value: fileID}})
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	assert.True(t, ts.store.hasObject(storageKey))
+}
+
+// =====================================================================
+// Proxy: DM Icon
+// =====================================================================
+
+func TestProxyDMIconInvalidID(t *testing.T) {
+	ts := setupMediaTest(t)
+	user := ts.createTestUser(t, "proxydmbad")
+
+	w := ts.doJSON(ts.handler.ProxyDMIcon, "GET", "/api/v1/media/dm-icons/not-uuid", user, gin.Params{{Key: "conversationId", Value: valueNotUUID}})
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// =====================================================================
+// Tier 1 Upload: Tier1StorageKey variants
+// =====================================================================
+
+func TestTier1StorageKeyAvatar(t *testing.T) {
+	assert.Equal(t, "avatars/u1", tier1StorageKey("avatar", "u1", "", ""))
+}
+
+func TestTier1StorageKeyBanner(t *testing.T) {
+	assert.Equal(t, "banners/u1", tier1StorageKey("banner", "u1", "", ""))
+}
+
+func TestTier1StorageKeyServerIcon(t *testing.T) {
+	assert.Equal(t, "server-icons/s1", tier1StorageKey(purposeServerIcon, "", "s1", ""))
+}
+
+func TestTier1StorageKeyServerBanner(t *testing.T) {
+	assert.Equal(t, "server-banners/s1", tier1StorageKey(purposeServerBanner, "", "s1", ""))
+}
+
+func TestTier1StorageKeyDMIcon(t *testing.T) {
+	assert.Equal(t, "dm-icons/c1", tier1StorageKey(purposeDMIcon, "", "", "c1"))
+}
+
+// =====================================================================
+// Download: Channel success path (exercises streaming)
+// =====================================================================
+
+func TestDownloadAttachmentChannelSuccess(t *testing.T) {
+	ts := setupMediaTest(t)
+	owner := ts.createTestUser(t, "dlchansuc")
+	serverID := ts.createTestServer(t, owner, "DL Chan Server")
+	channelID := ts.createTestChannel(t, serverID, "dlchansuc")
+
+	fileID := uuid.New().String()
+	storageKey := fmt.Sprintf(fmtAttachmentsKey, fileID)
+	payload := []byte("channel-cipher-data")
+	require.NoError(t, ts.store.PutObject(context.TODO(), storageKey, bytes.NewReader(payload), int64(len(payload)), mimeOctetStream))
+	_, err := ts.db.Exec(
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, channel_id)
+		 VALUES ($1, $2, 'file', 2, 'image/jpeg', $3, $4, true, 1, $5)`,
+		fileID, owner, len(payload), storageKey, channelID,
+	)
+	require.NoError(t, err)
+
+	w := ts.doJSON(ts.handler.DownloadAttachment, "GET", pathAttachmentsPrefix+fileID, owner, gin.Params{{Key: "file_id", Value: fileID}})
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, string(payload), w.Body.String())
+	assert.Equal(t, "image/jpeg", w.Header().Get("X-File-Mime-Type"))
+	assert.Equal(t, mimeOctetStream, w.Header().Get(hdrContentType))
+}
+
+// =====================================================================
+// Upload: Store failure paths
+// =====================================================================
+
+func TestUploadAttachmentStoreFailure(t *testing.T) {
+	ts := setupMediaTest(t)
+	owner := ts.createTestUser(t, "attachstorefail")
+	serverID := ts.createTestServer(t, owner, "StoreFail Server")
+	channelID := ts.createTestChannel(t, serverID, "storefail")
+
+	ts.store.putErr = fmt.Errorf("storage unavailable")
+	defer func() { ts.store.putErr = nil }()
+
+	body, ct := multipartBody(t, "file", fileEncryptedBin, []byte(testCiphertextData), map[string]string{
+		keyChannelID: channelID,
+		keyFileType:  "file",
+	})
+
+	w := ts.doMultipart(ts.handler.UploadAttachment, "POST", pathUploadAttachment, owner, body, ct)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	resp := parseBody(t, w)
+	assert.Contains(t, resp["error"], "Failed to store file")
+}
+
+func TestUploadAvatarStoreFailure(t *testing.T) {
+	ts := setupMediaTest(t)
+	userID := ts.createTestUser(t, "avatarstorefail")
+
+	ts.store.putErr = fmt.Errorf("storage unavailable")
+	defer func() { ts.store.putErr = nil }()
+
+	imgData := makePNG(t, 100, 100)
+	body, ct := multipartBody(t, "file", "avatar.png", imgData, nil)
+
+	w := ts.doMultipart(ts.handler.UploadAvatar, "POST", pathUploadAvatar, userID, body, ct)
+
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	resp := parseBody(t, w)
+	assert.Contains(t, resp["error"], "Failed to store image")
+}
+
+// =====================================================================
+// Tier1StorageKey: fallback branch
+// =====================================================================
+
+func TestTier1StorageKeyFallback(t *testing.T) {
+	key := tier1StorageKey("unknown-purpose", "user123", "", "")
+	assert.Equal(t, "media/unknown-purpose/user123", key)
 }

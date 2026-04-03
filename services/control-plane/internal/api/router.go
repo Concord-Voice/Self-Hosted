@@ -140,7 +140,16 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	voiceHandler := voice.NewHandler(db, log, hub, cfg, rbacResolver)
 	dmHandler := dm.NewHandler(db, log, hub, cfg)
 	friendsHandler := friends.NewHandler(db, log, hub)
-	ownershipHandler := ownership.NewHandler(db, log, hub, redis, permCache, auditWriter, emailSvc, mfaHandler)
+	ownershipHandler := ownership.NewHandler(ownership.HandlerDeps{
+		DB:          db,
+		Log:         log,
+		Hub:         hub,
+		Redis:       redis,
+		Cache:       permCache,
+		Audit:       auditWriter,
+		EmailSvc:    emailSvc,
+		MFAVerifier: mfaHandler,
+	})
 	var mediaHandler *media.Handler
 	if store != nil {
 		mediaHandler = media.NewHandler(db, store, log, cfg, rbacResolver)

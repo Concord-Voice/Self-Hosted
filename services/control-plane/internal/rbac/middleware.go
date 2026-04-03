@@ -79,13 +79,13 @@ func RequirePermission(resolver *Resolver, perm Permission, channelIDParam strin
 		// Check permission
 		hasPerm, err := resolver.HasPermission(c.Request.Context(), serverID, userID, channelID, perm)
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check permissions"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCheckPermissions})
 			c.Abort()
 			return
 		}
 
 		if !hasPerm {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Insufficient permissions"})
+			c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPermissions})
 			c.Abort()
 			return
 		}

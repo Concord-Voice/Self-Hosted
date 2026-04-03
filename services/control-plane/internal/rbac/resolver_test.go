@@ -360,4 +360,27 @@ func TestCheckHierarchy(t *testing.T) {
 	require.NoError(t, err)
 	err = resolver.CheckHierarchy(ctx, serverID, highPosMember.ID, owner.ID)
 	assert.ErrorIs(t, err, rbac.ErrHierarchyViolation, "high-position non-admin should not outrank owner")
+
+	// User with explicit PermAdministrator should outrank non-admin members
+	adminUser := ts.CreateTestUser(t, "permadmin7")
+	ts.AddMemberToServer(t, serverID, adminUser.ID, "member")
+	permAdminRoleID := uuid.New().String()
+	_, err = ts.DB.Exec(
+		`INSERT INTO roles (id, server_id, name, position, permissions) VALUES ($1, $2, 'PermAdmin', 5, $3)`,
+		permAdminRoleID, serverID, int64(rbac.PermAdministrator),
+	)
+	require.NoError(t, err)
+	_, err = ts.DB.Exec(
+		`INSERT INTO member_roles (server_id, user_id, role_id) VALUES ($1, $2, $3)`,
+		serverID, adminUser.ID, permAdminRoleID,
+	)
+	require.NoError(t, err)
+
+	// PermAdministrator bypasses position: can moderate base member
+	err = resolver.CheckHierarchy(ctx, serverID, adminUser.ID, member.ID)
+	assert.NoError(t, err, "user with PermAdministrator should outrank base member")
+
+	// PermAdministrator cannot moderate server owner
+	err = resolver.CheckHierarchy(ctx, serverID, adminUser.ID, owner.ID)
+	assert.ErrorIs(t, err, rbac.ErrHierarchyViolation, "PermAdministrator should not outrank server owner")
 }

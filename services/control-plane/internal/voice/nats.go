@@ -4,10 +4,10 @@ import (
 	"database/sql"
 	"encoding/json"
 
+	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	natsclient "github.com/markdrogersjr/Concord/services/control-plane/pkg/nats"
-	"github.com/google/uuid"
 )
 
 // NATSSubscriber listens for voice events from the media plane and
@@ -299,17 +299,39 @@ func (s *NATSSubscriber) handleHeartbeat(data []byte) {
 		return
 	}
 
-	// Query current DB participants
-	var participantsQuery string
-	if ctx.isDM {
-		participantsQuery = `SELECT user_id FROM dm_voice_participants WHERE conversation_id = $1`
-	} else {
-		participantsQuery = `SELECT user_id FROM voice_participants WHERE channel_id = $1`
-	}
-	rows, err := s.db.Query(participantsQuery, event.ChannelID)
+	dbUsers, err := s.collectDBParticipants(event.ChannelID, ctx.isDM)
 	if err != nil {
 		s.log.Error("Failed to query voice_participants for reconciliation", "error", err, "channel_id", event.ChannelID)
 		return
+	}
+	if len(dbUsers) == 0 {
+		return
+	}
+
+	mpUsers := make(map[string]bool)
+	for _, uid := range event.UserIDs {
+		mpUsers[uid] = true
+	}
+
+	removedAny := s.reconcileVoiceParticipants(event.ChannelID, ctx, dbUsers, mpUsers)
+
+	if len(event.UserIDs) == 0 {
+		s.broadcastRoomEmpty(event.ChannelID, ctx)
+	}
+
+	if !ctx.isDM && removedAny {
+		s.hub.BroadcastServerVoiceCounts()
+	}
+}
+
+func (s *NATSSubscriber) collectDBParticipants(channelID string, isDM bool) (map[string]bool, error) {
+	query := `SELECT user_id FROM voice_participants WHERE channel_id = $1`
+	if isDM {
+		query = `SELECT user_id FROM dm_voice_participants WHERE conversation_id = $1`
+	}
+	rows, err := s.db.Query(query, channelID)
+	if err != nil {
+		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
@@ -320,71 +342,67 @@ func (s *NATSSubscriber) handleHeartbeat(data []byte) {
 			dbUsers[uid] = true
 		}
 	}
-
-	if len(dbUsers) == 0 {
-		return
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
+	return dbUsers, nil
+}
 
-	// Build set of media-plane users
-	mpUsers := make(map[string]bool)
-	for _, uid := range event.UserIDs {
-		mpUsers[uid] = true
-	}
-
-	// Find and remove stale DB users
+func (s *NATSSubscriber) reconcileVoiceParticipants(channelID string, ctx *roomContext, dbUsers, mpUsers map[string]bool) bool {
 	removedAny := false
 	for uid := range dbUsers {
-		if !mpUsers[uid] {
-			removedAny = true
-			if ctx.isDM {
-				_, _ = s.db.Exec(`DELETE FROM dm_voice_participants WHERE conversation_id = $1 AND user_id = $2`, event.ChannelID, uid)
-				s.hub.BroadcastToDM(ctx.convUUID, websocket.OutgoingMessage{
-					Type: "dm_voice_state_update",
-					Data: map[string]interface{}{
-						"conversation_id": event.ChannelID,
-						"user_id":         uid,
-						"action":          "left",
-					},
-				})
-			} else {
-				_, _ = s.db.Exec(`DELETE FROM voice_participants WHERE channel_id = $1 AND user_id = $2`, event.ChannelID, uid)
-				s.hub.BroadcastToServer(ctx.serverUUID, websocket.OutgoingMessage{
-					Type: "voice_state_update",
-					Data: map[string]interface{}{
-						"channel_id": event.ChannelID,
-						"user_id":    uid,
-						"action":     "left",
-						"server_id":  ctx.serverID,
-					},
-				})
-			}
-			s.log.Info("Reconciled stale voice participant", "channel_id", event.ChannelID, "user_id", uid, "is_dm", ctx.isDM)
+		if mpUsers[uid] {
+			continue
 		}
+		removedAny = true
+		s.removeStaleParticipant(channelID, uid, ctx)
+		s.log.Info("Reconciled stale voice participant", "channel_id", channelID, "user_id", uid, "is_dm", ctx.isDM)
 	}
+	return removedAny
+}
 
-	// If media plane reports empty room but DB still had entries, broadcast room_empty
-	if len(event.UserIDs) == 0 && len(dbUsers) > 0 {
-		if ctx.isDM {
-			s.hub.BroadcastToDM(ctx.convUUID, websocket.OutgoingMessage{
-				Type: "dm_voice_state_update",
-				Data: map[string]interface{}{
-					"conversation_id": event.ChannelID,
-					"action":          "room_empty",
-				},
-			})
-		} else {
-			s.hub.BroadcastToServer(ctx.serverUUID, websocket.OutgoingMessage{
-				Type: "voice_state_update",
-				Data: map[string]interface{}{
-					"channel_id": event.ChannelID,
-					"action":     "room_empty",
-					"server_id":  ctx.serverID,
-				},
-			})
-		}
+func (s *NATSSubscriber) removeStaleParticipant(channelID, userID string, ctx *roomContext) {
+	if ctx.isDM {
+		_, _ = s.db.Exec(`DELETE FROM dm_voice_participants WHERE conversation_id = $1 AND user_id = $2`, channelID, userID)
+		s.hub.BroadcastToDM(ctx.convUUID, websocket.OutgoingMessage{
+			Type: "dm_voice_state_update",
+			Data: map[string]interface{}{
+				"conversation_id": channelID,
+				"user_id":         userID,
+				"action":          "left",
+			},
+		})
+		return
 	}
+	_, _ = s.db.Exec(`DELETE FROM voice_participants WHERE channel_id = $1 AND user_id = $2`, channelID, userID)
+	s.hub.BroadcastToServer(ctx.serverUUID, websocket.OutgoingMessage{
+		Type: "voice_state_update",
+		Data: map[string]interface{}{
+			"channel_id": channelID,
+			"user_id":    userID,
+			"action":     "left",
+			"server_id":  ctx.serverID,
+		},
+	})
+}
 
-	if !ctx.isDM && removedAny {
-		s.hub.BroadcastServerVoiceCounts()
+func (s *NATSSubscriber) broadcastRoomEmpty(channelID string, ctx *roomContext) {
+	if ctx.isDM {
+		s.hub.BroadcastToDM(ctx.convUUID, websocket.OutgoingMessage{
+			Type: "dm_voice_state_update",
+			Data: map[string]interface{}{
+				"conversation_id": channelID,
+				"action":          "room_empty",
+			},
+		})
+		return
 	}
+	s.hub.BroadcastToServer(ctx.serverUUID, websocket.OutgoingMessage{
+		Type: "voice_state_update",
+		Data: map[string]interface{}{
+			"channel_id": channelID,
+			"action":     "room_empty",
+			"server_id":  ctx.serverID,
+		},
+	})
 }

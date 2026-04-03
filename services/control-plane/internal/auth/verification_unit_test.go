@@ -89,3 +89,20 @@ func TestVerifyMaxAttemptsConstant(t *testing.T) {
 	// Ensure max attempts is 5
 	assert.Equal(t, 5, verifyMaxAttempts)
 }
+
+func TestSanitizeVerificationCode(t *testing.T) {
+	assert.Equal(t, "123456", sanitizeVerificationCode("123456"))
+	assert.Equal(t, "123456", sanitizeVerificationCode(" 123-456 "))
+	assert.Equal(t, "123456", sanitizeVerificationCode("123-456"))
+	assert.Equal(t, "123456", sanitizeVerificationCode("  123456  "))
+}
+
+func TestIsValidVerificationCode(t *testing.T) {
+	assert.True(t, isValidVerificationCode("123456"))
+	assert.True(t, isValidVerificationCode("000000"))
+	assert.False(t, isValidVerificationCode("12345"))
+	assert.False(t, isValidVerificationCode("1234567"))
+	assert.False(t, isValidVerificationCode("12345a"))
+	assert.False(t, isValidVerificationCode("abcdef"))
+	assert.False(t, isValidVerificationCode(""))
+}

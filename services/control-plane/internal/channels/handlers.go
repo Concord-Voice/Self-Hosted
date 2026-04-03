@@ -31,6 +31,8 @@ const (
 	errMsgFailedFetchUnreadCounts = "Failed to fetch unread counts"
 	errMsgFailedMarkServerRead    = "Failed to mark server read"
 	errMsgNoEncryptionKey         = "No encryption key available yet"
+	errMsgFailedDistributeKeys    = "Failed to distribute keys"
+	logMsgFailedCheckPermissions  = "Failed to check permissions"
 )
 
 // Handler handles channel-related requests
@@ -81,34 +83,26 @@ func (h *Handler) ListChannels(c *gin.Context) {
 	userID := c.GetString("user_id")
 	serverID := c.Param("id")
 
-	// Validate server ID
 	if _, err := uuid.Parse(serverID); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
 	}
 
-	// Check if user is a member of the server
 	var isMember bool
-	memberQuery := `
-		SELECT EXISTS(
-			SELECT 1 FROM server_members
-			WHERE server_id = $1 AND user_id = $2
-		)
-	`
-
-	err := h.db.QueryRow(memberQuery, serverID, userID).Scan(&isMember)
+	err := h.db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2)`,
+		serverID, userID,
+	).Scan(&isMember)
 	if err != nil {
 		h.log.Error(errMsgFailedCheckMembership, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchChannels})
 		return
 	}
-
 	if !isMember {
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotMemberOfServer})
 		return
 	}
 
-	// Get visible channel IDs (RBAC-filtered)
 	visibleIDs, err := h.resolver.GetVisibleChannelIDs(c.Request.Context(), serverID, userID)
 	if err != nil {
 		h.log.Error("Failed to resolve visible channels", "error", err)
@@ -116,63 +110,73 @@ func (h *Handler) ListChannels(c *gin.Context) {
 		return
 	}
 
-	// Build a set for fast lookup
 	visibleSet := make(map[string]bool, len(visibleIDs))
 	for _, id := range visibleIDs {
 		visibleSet[id] = true
 	}
 
-	// Get all channels in the server
-	query := `
-		SELECT id, server_id, name, type, description, emoji, is_encrypted, audio_quality_tier, group_id, linked_voice_channel_id, sync_permissions, position, created_at, updated_at
-		FROM channels
-		WHERE server_id = $1
-		ORDER BY position ASC, created_at ASC
-	`
-
-	rows, err := h.db.Query(query, serverID)
+	channels, err := h.queryVisibleChannels(serverID, visibleSet)
 	if err != nil {
-		h.log.Error("Failed to query channels", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchChannels})
 		return
 	}
+
+	groups, err := h.queryChannelGroups(serverID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchChannels})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"channels": channels, "channel_groups": groups})
+}
+
+func (h *Handler) queryVisibleChannels(serverID string, visibleSet map[string]bool) ([]models.Channel, error) {
+	rows, err := h.db.Query(
+		`SELECT id, server_id, name, type, description, emoji, is_encrypted, audio_quality_tier, group_id, linked_voice_channel_id, sync_permissions, position, created_at, updated_at
+		FROM channels
+		WHERE server_id = $1
+		ORDER BY position ASC, created_at ASC`,
+		serverID,
+	)
+	if err != nil {
+		h.log.Error("Failed to query channels", "error", err)
+		return nil, err
+	}
 	defer func() { _ = rows.Close() }()
 
-	channels := []models.Channel{}
+	var channels []models.Channel
 	for rows.Next() {
-		var channel models.Channel
-		err := rows.Scan(
-			&channel.ID,
-			&channel.ServerID,
-			&channel.Name,
-			&channel.Type,
-			&channel.Description,
-			&channel.Emoji,
-			&channel.IsEncrypted,
-			&channel.AudioQualityTier,
-			&channel.GroupID,
-			&channel.LinkedVoiceChannelID,
-			&channel.SyncPermissions,
-			&channel.Position,
-			&channel.CreatedAt,
-			&channel.UpdatedAt,
-		)
-		if err != nil {
-			h.log.Error("Failed to scan channel", "error", err)
+		ch, scanErr := scanChannel(rows)
+		if scanErr != nil {
+			h.log.Error("Failed to scan channel", "error", scanErr)
 			continue
 		}
-		// Only include channels the user has VIEW permission for
-		if visibleSet[channel.ID] {
-			channels = append(channels, channel)
+		if visibleSet[ch.ID] {
+			channels = append(channels, ch)
 		}
 	}
 	if err := rows.Err(); err != nil {
 		h.log.Error("Error iterating channels", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchChannels})
-		return
+		return nil, err
 	}
+	if channels == nil {
+		channels = []models.Channel{}
+	}
+	return channels, nil
+}
 
-	// Also fetch channel groups for this server
+func scanChannel(rows *sql.Rows) (models.Channel, error) {
+	var ch models.Channel
+	err := rows.Scan(
+		&ch.ID, &ch.ServerID, &ch.Name, &ch.Type, &ch.Description,
+		&ch.Emoji, &ch.IsEncrypted, &ch.AudioQualityTier, &ch.GroupID,
+		&ch.LinkedVoiceChannelID, &ch.SyncPermissions, &ch.Position,
+		&ch.CreatedAt, &ch.UpdatedAt,
+	)
+	return ch, err
+}
+
+func (h *Handler) queryChannelGroups(serverID string) ([]models.ChannelGroup, error) {
 	groupRows, err := h.db.Query(
 		`SELECT id, server_id, name, position, created_at, updated_at
 		 FROM channel_groups
@@ -182,12 +186,11 @@ func (h *Handler) ListChannels(c *gin.Context) {
 	)
 	if err != nil {
 		h.log.Error("Failed to query channel groups", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchChannels})
-		return
+		return nil, err
 	}
 	defer func() { _ = groupRows.Close() }()
 
-	groups := []models.ChannelGroup{}
+	var groups []models.ChannelGroup
 	for groupRows.Next() {
 		var g models.ChannelGroup
 		if err := groupRows.Scan(&g.ID, &g.ServerID, &g.Name, &g.Position, &g.CreatedAt, &g.UpdatedAt); err != nil {
@@ -198,11 +201,12 @@ func (h *Handler) ListChannels(c *gin.Context) {
 	}
 	if err := groupRows.Err(); err != nil {
 		h.log.Error("Error iterating channel groups", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchChannels})
-		return
+		return nil, err
 	}
-
-	c.JSON(http.StatusOK, gin.H{"channels": channels, "channel_groups": groups})
+	if groups == nil {
+		groups = []models.ChannelGroup{}
+	}
+	return groups, nil
 }
 
 // CreateChannel creates a new channel in a server
@@ -218,7 +222,7 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 	// Check permission to manage channels
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), req.ServerID, userID, "", rbac.PermManageChannels)
 	if err != nil {
-		h.log.Error("Failed to check permissions", "error", err)
+		h.log.Error(logMsgFailedCheckPermissions, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateChannel})
 		return
 	}
@@ -523,7 +527,6 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 	userID := c.GetString("user_id")
 	channelID := c.Param("id")
 
-	// Validate channel ID
 	if _, err := uuid.Parse(channelID); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidChannelID})
 		return
@@ -535,22 +538,19 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 		return
 	}
 
-	// Get channel's server ID
-	var serverID string
-	err := h.db.QueryRow(`SELECT server_id FROM channels WHERE id = $1`, channelID).Scan(&serverID)
+	serverID, err := h.lookupChannelServerID(channelID)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": errMsgChannelNotFound})
 		return
-	} else if err != nil {
-		h.log.Error("Failed to look up channel", "error", err)
+	}
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateChannel})
 		return
 	}
 
-	// Check permission to manage channels
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageChannels)
 	if err != nil {
-		h.log.Error("Failed to check permissions", "error", err)
+		h.log.Error(logMsgFailedCheckPermissions, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateChannel})
 		return
 	}
@@ -559,103 +559,104 @@ func (h *Handler) UpdateChannel(c *gin.Context) {
 		return
 	}
 
-	// Validate audio quality tier if provided
-	if req.AudioQualityTier != nil && *req.AudioQualityTier != "" {
-		if !validAudioQualityTiers[*req.AudioQualityTier] {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid audio quality tier"})
-			return
-		}
+	if req.AudioQualityTier != nil && *req.AudioQualityTier != "" && !validAudioQualityTiers[*req.AudioQualityTier] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid audio quality tier"})
+		return
 	}
 
-	// Resolve group_id: nil pointer means "don't change" (use existing), non-nil updates it
-	// Empty string (*string pointing to "") = set to NULL (uncategorized)
-	var groupIDParam interface{}
-	if req.GroupID != nil {
-		if *req.GroupID == "" {
-			groupIDParam = nil // SQL NULL = uncategorized
-		} else {
-			groupIDParam = *req.GroupID
-		}
-	}
-
-	// Update channel (is_encrypted is immutable — cannot be changed after creation)
-	var updateQuery string
-	var channel models.Channel
-	channel.ID = channelID
-	channel.Name = req.Name
-	channel.Type = req.Type
-
-	if req.GroupID != nil {
-		updateQuery = `
-			UPDATE channels
-			SET name = $1, type = $2, emoji = $3, audio_quality_tier = $4, group_id = $5, updated_at = NOW()
-			WHERE id = $6
-			RETURNING server_id, emoji, is_encrypted, audio_quality_tier, group_id, linked_voice_channel_id, sync_permissions, position, created_at, updated_at
-		`
-		err = h.db.QueryRow(updateQuery, req.Name, req.Type, req.Emoji, req.AudioQualityTier, groupIDParam, channelID).Scan(
-			&channel.ServerID,
-			&channel.Emoji,
-			&channel.IsEncrypted,
-			&channel.AudioQualityTier,
-			&channel.GroupID,
-			&channel.LinkedVoiceChannelID,
-			&channel.SyncPermissions,
-			&channel.Position,
-			&channel.CreatedAt,
-			&channel.UpdatedAt,
-		)
-	} else {
-		updateQuery = `
-			UPDATE channels
-			SET name = $1, type = $2, emoji = $3, audio_quality_tier = $4, updated_at = NOW()
-			WHERE id = $5
-			RETURNING server_id, emoji, is_encrypted, audio_quality_tier, group_id, linked_voice_channel_id, sync_permissions, position, created_at, updated_at
-		`
-		err = h.db.QueryRow(updateQuery, req.Name, req.Type, req.Emoji, req.AudioQualityTier, channelID).Scan(
-			&channel.ServerID,
-			&channel.Emoji,
-			&channel.IsEncrypted,
-			&channel.AudioQualityTier,
-			&channel.GroupID,
-			&channel.LinkedVoiceChannelID,
-			&channel.SyncPermissions,
-			&channel.Position,
-			&channel.CreatedAt,
-			&channel.UpdatedAt,
-		)
-	}
-
+	channel, err := h.executeChannelUpdate(channelID, req)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": errMsgChannelNotFound})
 		return
-	} else if err != nil {
-		h.log.Error("Failed to update channel", "error", err)
+	}
+	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateChannel})
 		return
 	}
 
 	h.log.Info("Channel updated", "channel_id", channelID, "user_id", userID)
-
-	// Broadcast channel update to server subscribers so other members see the change
-	if h.hub != nil {
-		if serverUUID, err := uuid.Parse(channel.ServerID); err == nil {
-			h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
-				Type: "channel_updated",
-				Data: map[string]interface{}{
-					"channel_id":         channelID,
-					"server_id":          channel.ServerID,
-					"name":               channel.Name,
-					"type":               channel.Type,
-					"emoji":              channel.Emoji,
-					"is_encrypted":       channel.IsEncrypted,
-					"audio_quality_tier": channel.AudioQualityTier,
-					"group_id":           channel.GroupID,
-				},
-			})
-		}
-	}
-
+	h.broadcastChannelUpdated(channel)
 	c.JSON(http.StatusOK, gin.H{"channel": channel})
+}
+
+func (h *Handler) lookupChannelServerID(channelID string) (string, error) {
+	var serverID string
+	err := h.db.QueryRow(`SELECT server_id FROM channels WHERE id = $1`, channelID).Scan(&serverID)
+	if err != nil && err != sql.ErrNoRows {
+		h.log.Error("Failed to look up channel", "error", err)
+	}
+	return serverID, err
+}
+
+func resolveGroupIDParam(groupID *string) interface{} {
+	if groupID == nil {
+		return nil
+	}
+	if *groupID == "" {
+		return nil
+	}
+	return *groupID
+}
+
+func (h *Handler) executeChannelUpdate(channelID string, req UpdateChannelRequest) (models.Channel, error) {
+	var channel models.Channel
+	channel.ID = channelID
+	channel.Name = req.Name
+	channel.Type = req.Type
+
+	var err error
+	if req.GroupID != nil {
+		err = h.db.QueryRow(
+			`UPDATE channels
+			SET name = $1, type = $2, emoji = $3, audio_quality_tier = $4, group_id = $5, updated_at = NOW()
+			WHERE id = $6
+			RETURNING server_id, emoji, is_encrypted, audio_quality_tier, group_id, linked_voice_channel_id, sync_permissions, position, created_at, updated_at`,
+			req.Name, req.Type, req.Emoji, req.AudioQualityTier, resolveGroupIDParam(req.GroupID), channelID,
+		).Scan(
+			&channel.ServerID, &channel.Emoji, &channel.IsEncrypted, &channel.AudioQualityTier,
+			&channel.GroupID, &channel.LinkedVoiceChannelID, &channel.SyncPermissions,
+			&channel.Position, &channel.CreatedAt, &channel.UpdatedAt,
+		)
+	} else {
+		err = h.db.QueryRow(
+			`UPDATE channels
+			SET name = $1, type = $2, emoji = $3, audio_quality_tier = $4, updated_at = NOW()
+			WHERE id = $5
+			RETURNING server_id, emoji, is_encrypted, audio_quality_tier, group_id, linked_voice_channel_id, sync_permissions, position, created_at, updated_at`,
+			req.Name, req.Type, req.Emoji, req.AudioQualityTier, channelID,
+		).Scan(
+			&channel.ServerID, &channel.Emoji, &channel.IsEncrypted, &channel.AudioQualityTier,
+			&channel.GroupID, &channel.LinkedVoiceChannelID, &channel.SyncPermissions,
+			&channel.Position, &channel.CreatedAt, &channel.UpdatedAt,
+		)
+	}
+	if err != nil && err != sql.ErrNoRows {
+		h.log.Error("Failed to update channel", "error", err)
+	}
+	return channel, err
+}
+
+func (h *Handler) broadcastChannelUpdated(channel models.Channel) {
+	if h.hub == nil {
+		return
+	}
+	serverUUID, err := uuid.Parse(channel.ServerID)
+	if err != nil {
+		return
+	}
+	h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+		Type: "channel_updated",
+		Data: map[string]interface{}{
+			"channel_id":         channel.ID,
+			"server_id":          channel.ServerID,
+			"name":               channel.Name,
+			"type":               channel.Type,
+			"emoji":              channel.Emoji,
+			"is_encrypted":       channel.IsEncrypted,
+			"audio_quality_tier": channel.AudioQualityTier,
+			"group_id":           channel.GroupID,
+		},
+	})
 }
 
 // DeleteChannel deletes a channel (owner/admin only)
@@ -684,7 +685,7 @@ func (h *Handler) DeleteChannel(c *gin.Context) {
 	// Check permission to manage channels
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageChannels)
 	if err != nil {
-		h.log.Error("Failed to check permissions", "error", err)
+		h.log.Error(logMsgFailedCheckPermissions, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteChannel})
 		return
 	}
@@ -1028,7 +1029,38 @@ func (h *Handler) DistributeChannelKeys(c *gin.Context) {
 		return
 	}
 
-	// Verify the caller is a member and the channel is encrypted
+	if err := h.verifyChannelEncrypted(channelID, userID); err != nil {
+		h.respondKeyDistError(c, err)
+		return
+	}
+
+	if !h.callerHasChannelKey(channelID, userID) {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You must have the channel key to distribute keys"})
+		return
+	}
+
+	targetKeyVersion := h.resolveTargetKeyVersion(channelID, req.KeyVersion)
+
+	distributed, duplicates := h.distributeChannelKeysToMembers(channelID, req.WrappedKeys, targetKeyVersion)
+
+	h.log.Info("Channel keys distributed",
+		"channel_id", channelID, "by_user", userID,
+		"distributed", distributed, "duplicates", duplicates)
+
+	c.JSON(http.StatusOK, gin.H{
+		"distributed": distributed,
+		"duplicates":  duplicates,
+	})
+}
+
+type keyDistError struct {
+	status  int
+	message string
+}
+
+func (e *keyDistError) Error() string { return e.message }
+
+func (h *Handler) verifyChannelEncrypted(channelID, userID string) error {
 	var isEncrypted bool
 	err := h.db.QueryRow(
 		`SELECT c.is_encrypted
@@ -1038,50 +1070,53 @@ func (h *Handler) DistributeChannelKeys(c *gin.Context) {
 		channelID, userID,
 	).Scan(&isEncrypted)
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this channel's server"})
-		return
-	} else if err != nil {
-		h.log.Error("Failed to check permissions", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to distribute keys"})
-		return
+		return &keyDistError{http.StatusForbidden, "Not a member of this channel's server"}
+	}
+	if err != nil {
+		h.log.Error(logMsgFailedCheckPermissions, "error", err)
+		return &keyDistError{http.StatusInternalServerError, errMsgFailedDistributeKeys}
 	}
 	if !isEncrypted {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgChannelNotEncrypted})
+		return &keyDistError{http.StatusBadRequest, errMsgChannelNotEncrypted}
+	}
+	return nil
+}
+
+func (h *Handler) respondKeyDistError(c *gin.Context, err error) {
+	if kde, ok := err.(*keyDistError); ok {
+		c.JSON(kde.status, gin.H{"error": kde.message})
 		return
 	}
+	c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDistributeKeys})
+}
 
-	// Caller must have their own key (prove they have access to the CSK)
+func (h *Handler) callerHasChannelKey(channelID, userID string) bool {
 	var hasKey bool
 	_ = h.db.QueryRow(
 		`SELECT EXISTS(SELECT 1 FROM channel_keys WHERE channel_id = $1 AND user_id = $2)`,
 		channelID, userID,
 	).Scan(&hasKey)
-	if !hasKey {
-		c.JSON(http.StatusForbidden, gin.H{"error": "You must have the channel key to distribute keys"})
-		return
-	}
+	return hasKey
+}
 
-	// Resolve key version: use explicit version if provided and valid, else latest
-	var targetKeyVersion int
-	if req.KeyVersion != nil && *req.KeyVersion > 0 {
-		targetKeyVersion = *req.KeyVersion
-	} else {
-		_ = h.db.QueryRow(
-			`SELECT COALESCE(MAX(key_version), 1) FROM channel_keys WHERE channel_id = $1`,
-			channelID,
-		).Scan(&targetKeyVersion)
+func (h *Handler) resolveTargetKeyVersion(channelID string, explicitVersion *int) int {
+	if explicitVersion != nil && *explicitVersion > 0 {
+		return *explicitVersion
 	}
+	var v int
+	_ = h.db.QueryRow(
+		`SELECT COALESCE(MAX(key_version), 1) FROM channel_keys WHERE channel_id = $1`,
+		channelID,
+	).Scan(&v)
+	return v
+}
 
-	distributed := 0
-	duplicates := 0
-	for memberUserID, wrappedKey := range req.WrappedKeys {
+func (h *Handler) distributeChannelKeysToMembers(channelID string, wrappedKeys map[string]string, keyVersion int) (distributed, duplicates int) {
+	for memberUserID, wrappedKey := range wrappedKeys {
 		if _, parseErr := uuid.Parse(memberUserID); parseErr != nil {
 			continue
 		}
 
-		keyVersion := targetKeyVersion
-
-		// First-response-wins via ON CONFLICT DO NOTHING — no TOCTOU race
 		result, err := h.db.Exec(
 			`INSERT INTO channel_keys (channel_id, user_id, wrapped_key, key_version)
 			 VALUES ($1, $2, $3, $4)
@@ -1098,35 +1133,31 @@ func (h *Handler) DistributeChannelKeys(c *gin.Context) {
 			continue
 		}
 
-		// Remove pending key request if one exists
 		_, _ = h.db.Exec(
 			`DELETE FROM pending_key_requests WHERE channel_id = $1 AND user_id = $2`,
 			channelID, memberUserID,
 		)
 
-		// Notify the recipient that their key is ready
-		if h.hub != nil {
-			if recipientUUID, parseErr := uuid.Parse(memberUserID); parseErr == nil {
-				h.hub.BroadcastToUser(recipientUUID, websocket.OutgoingMessage{
-					Type: "key_delivered",
-					Data: map[string]interface{}{
-						"channel_id": channelID,
-						"user_id":    memberUserID,
-					},
-				})
-			}
-		}
-
+		h.notifyKeyDelivered(channelID, memberUserID)
 		distributed++
 	}
+	return
+}
 
-	h.log.Info("Channel keys distributed",
-		"channel_id", channelID, "by_user", userID,
-		"distributed", distributed, "duplicates", duplicates)
-
-	c.JSON(http.StatusOK, gin.H{
-		"distributed": distributed,
-		"duplicates":  duplicates,
+func (h *Handler) notifyKeyDelivered(contextID, memberUserID string) {
+	if h.hub == nil {
+		return
+	}
+	recipientUUID, err := uuid.Parse(memberUserID)
+	if err != nil {
+		return
+	}
+	h.hub.BroadcastToUser(recipientUUID, websocket.OutgoingMessage{
+		Type: "key_delivered",
+		Data: map[string]interface{}{
+			"channel_id": contextID,
+			"user_id":    memberUserID,
+		},
 	})
 }
 
@@ -1206,7 +1237,6 @@ func (h *Handler) GetUnifiedKeys(c *gin.Context) {
 		return
 	}
 
-	// Try server channel first
 	var channelEncrypted bool
 	err := h.db.QueryRow(`
 		SELECT c.is_encrypted FROM channels c
@@ -1215,57 +1245,81 @@ func (h *Handler) GetUnifiedKeys(c *gin.Context) {
 	`, contextID, userID).Scan(&channelEncrypted)
 
 	if err == nil {
-		// Found as server channel
-		if !channelEncrypted {
-			c.JSON(http.StatusBadRequest, gin.H{"error": errMsgChannelNotEncrypted})
-			return
-		}
-
-		var key models.ChannelKey
-		if versionStr := c.Query("version"); versionStr != "" {
-			var version int
-			if _, scanErr := fmt.Sscanf(versionStr, "%d", &version); scanErr == nil && version > 0 {
-				err = h.db.QueryRow(
-					`SELECT id, channel_id, user_id, wrapped_key, key_version, created_at
-					 FROM channel_keys
-					 WHERE channel_id = $1 AND user_id = $2 AND key_version = $3`,
-					contextID, userID, version,
-				).Scan(&key.ID, &key.ChannelID, &key.UserID, &key.WrappedKey, &key.KeyVersion, &key.CreatedAt)
-			} else {
-				c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid version parameter"})
-				return
-			}
-		} else {
-			err = h.db.QueryRow(
-				`SELECT id, channel_id, user_id, wrapped_key, key_version, created_at
-				 FROM channel_keys
-				 WHERE channel_id = $1 AND user_id = $2
-				 ORDER BY key_version DESC LIMIT 1`,
-				contextID, userID,
-			).Scan(&key.ID, &key.ChannelID, &key.UserID, &key.WrappedKey, &key.KeyVersion, &key.CreatedAt)
-		}
-		if err == sql.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": errMsgNoEncryptionKey, "pending": true})
-			return
-		} else if err != nil {
-			h.log.Error("Failed to fetch channel key", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchKeys})
-			return
-		}
-
-		c.JSON(http.StatusOK, gin.H{"key": key, "context_type": "channel"})
+		h.getChannelKeyResponse(c, contextID, userID, channelEncrypted)
 		return
 	}
-
 	if err != sql.ErrNoRows {
 		h.log.Error("Failed to check channel", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchKeys})
 		return
 	}
 
-	// Try DM conversation
+	h.getDMKeyResponse(c, contextID, userID)
+}
+
+func (h *Handler) getChannelKeyResponse(c *gin.Context, contextID, userID string, encrypted bool) {
+	if !encrypted {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgChannelNotEncrypted})
+		return
+	}
+
+	key, err := h.fetchChannelKey(contextID, userID, c.Query("version"))
+	if err == errInvalidVersion {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid version parameter"})
+		return
+	}
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgNoEncryptionKey, "pending": true})
+		return
+	}
+	if err != nil {
+		h.log.Error("Failed to fetch channel key", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchKeys})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"key": key, "context_type": "channel"})
+}
+
+var errInvalidVersion = fmt.Errorf("invalid version parameter")
+
+func (h *Handler) fetchChannelKey(channelID, userID, versionStr string) (models.ChannelKey, error) {
+	var key models.ChannelKey
+	if versionStr != "" {
+		var version int
+		if _, scanErr := fmt.Sscanf(versionStr, "%d", &version); scanErr != nil || version <= 0 {
+			return key, errInvalidVersion
+		}
+		err := h.db.QueryRow(
+			`SELECT id, channel_id, user_id, wrapped_key, key_version, created_at
+			 FROM channel_keys
+			 WHERE channel_id = $1 AND user_id = $2 AND key_version = $3`,
+			channelID, userID, version,
+		).Scan(&key.ID, &key.ChannelID, &key.UserID, &key.WrappedKey, &key.KeyVersion, &key.CreatedAt)
+		return key, err
+	}
+	err := h.db.QueryRow(
+		`SELECT id, channel_id, user_id, wrapped_key, key_version, created_at
+		 FROM channel_keys
+		 WHERE channel_id = $1 AND user_id = $2
+		 ORDER BY key_version DESC LIMIT 1`,
+		channelID, userID,
+	).Scan(&key.ID, &key.ChannelID, &key.UserID, &key.WrappedKey, &key.KeyVersion, &key.CreatedAt)
+	return key, err
+}
+
+type dmKey struct {
+	ID             string `json:"id"`
+	ConversationID string `json:"conversation_id"`
+	UserID         string `json:"user_id"`
+	WrappedKey     string `json:"wrapped_key"`
+	KeyVersion     int    `json:"key_version"`
+	CreatedAt      string `json:"created_at"`
+}
+
+func (h *Handler) getDMKeyResponse(c *gin.Context, contextID, userID string) {
 	var dmEncrypted bool
-	err = h.db.QueryRow(`
+	err := h.db.QueryRow(`
 		SELECT dc.is_encrypted FROM dm_conversations dc
 		INNER JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $2
 		WHERE dc.id = $1
@@ -1274,24 +1328,15 @@ func (h *Handler) GetUnifiedKeys(c *gin.Context) {
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Context not found or access denied"})
 		return
-	} else if err != nil {
+	}
+	if err != nil {
 		h.log.Error("Failed to check DM conversation", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchKeys})
 		return
 	}
-
 	if !dmEncrypted {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Conversation is not encrypted"})
 		return
-	}
-
-	type dmKey struct {
-		ID             string `json:"id"`
-		ConversationID string `json:"conversation_id"`
-		UserID         string `json:"user_id"`
-		WrappedKey     string `json:"wrapped_key"`
-		KeyVersion     int    `json:"key_version"`
-		CreatedAt      string `json:"created_at"`
 	}
 
 	var key dmKey
@@ -1305,7 +1350,8 @@ func (h *Handler) GetUnifiedKeys(c *gin.Context) {
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": errMsgNoEncryptionKey, "pending": true})
 		return
-	} else if err != nil {
+	}
+	if err != nil {
 		h.log.Error("Failed to fetch DM key", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchKeys})
 		return
@@ -1329,7 +1375,6 @@ func (h *Handler) DistributeUnifiedKeys(c *gin.Context) {
 	// DistributeChannelKeys will parse the body itself; parsing here would
 	// consume the one-shot io.ReadCloser, causing a double-read 400 on delegation.
 
-	// Try server channel first
 	var isChannel bool
 	err := h.db.QueryRow(`
 		SELECT EXISTS(
@@ -1340,18 +1385,16 @@ func (h *Handler) DistributeUnifiedKeys(c *gin.Context) {
 	`, contextID, userID).Scan(&isChannel)
 	if err != nil {
 		h.log.Error("Failed to check channel", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to distribute keys"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDistributeKeys})
 		return
 	}
 
 	if isChannel {
-		// Delegate to existing channel key distribution logic
 		c.Params = append(c.Params, gin.Param{Key: "id", Value: contextID})
 		h.DistributeChannelKeys(c)
 		return
 	}
 
-	// Try DM conversation
 	var isDM bool
 	err = h.db.QueryRow(`
 		SELECT EXISTS(
@@ -1365,19 +1408,25 @@ func (h *Handler) DistributeUnifiedKeys(c *gin.Context) {
 		return
 	}
 
-	// Parse body for the DM path (channel path delegates to DistributeChannelKeys which parses it)
 	var req DistributeChannelKeysRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
 
-	// Distribute DM keys
+	distributed := h.distributeDMKeys(contextID, req.WrappedKeys)
+	c.JSON(http.StatusOK, gin.H{"distributed": distributed, "context_type": "dm"})
+}
+
+func (h *Handler) distributeDMKeys(conversationID string, wrappedKeys map[string]string) int {
 	keyVersion := 1
-	_ = h.db.QueryRow(`SELECT COALESCE(MAX(key_version), 0) + 1 FROM dm_channel_keys WHERE conversation_id = $1`, contextID).Scan(&keyVersion)
+	_ = h.db.QueryRow(
+		`SELECT COALESCE(MAX(key_version), 0) + 1 FROM dm_channel_keys WHERE conversation_id = $1`,
+		conversationID,
+	).Scan(&keyVersion)
 
 	distributed := 0
-	for memberUserID, wrappedKey := range req.WrappedKeys {
+	for memberUserID, wrappedKey := range wrappedKeys {
 		if _, parseErr := uuid.Parse(memberUserID); parseErr != nil {
 			continue
 		}
@@ -1386,30 +1435,23 @@ func (h *Handler) DistributeUnifiedKeys(c *gin.Context) {
 			INSERT INTO dm_channel_keys (conversation_id, user_id, wrapped_key, key_version)
 			VALUES ($1, $2, $3, $4)
 			ON CONFLICT (conversation_id, user_id, key_version) DO NOTHING
-		`, contextID, memberUserID, wrappedKey, keyVersion)
+		`, conversationID, memberUserID, wrappedKey, keyVersion)
 		if err != nil {
 			continue
 		}
 		rowsAffected, _ := result.RowsAffected()
-		if rowsAffected > 0 {
-			_, _ = h.db.Exec(`DELETE FROM dm_pending_key_requests WHERE conversation_id = $1 AND user_id = $2`, contextID, memberUserID)
-
-			if h.hub != nil {
-				if recipientUUID, parseErr := uuid.Parse(memberUserID); parseErr == nil {
-					h.hub.BroadcastToUser(recipientUUID, websocket.OutgoingMessage{
-						Type: "key_delivered",
-						Data: map[string]interface{}{
-							"channel_id": contextID,
-							"user_id":    memberUserID,
-						},
-					})
-				}
-			}
-			distributed++
+		if rowsAffected == 0 {
+			continue
 		}
-	}
 
-	c.JSON(http.StatusOK, gin.H{"distributed": distributed, "context_type": "dm"})
+		_, _ = h.db.Exec(
+			`DELETE FROM dm_pending_key_requests WHERE conversation_id = $1 AND user_id = $2`,
+			conversationID, memberUserID,
+		)
+		h.notifyKeyDelivered(conversationID, memberUserID)
+		distributed++
+	}
+	return distributed
 }
 
 // RotateKey handles manual seal & rotate for server channel E2EE.

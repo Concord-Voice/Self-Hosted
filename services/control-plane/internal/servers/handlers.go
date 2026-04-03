@@ -8,14 +8,14 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/media"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
-	"github.com/lib/pq"
 )
 
 const (
@@ -131,6 +131,64 @@ func (h *Handler) ListServers(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"servers": servers})
 }
 
+// validateCreateDataURL validates an image data URL for CreateServer.
+// Returns an error string if invalid, or empty string if valid.
+func validateCreateDataURL(url *string, maxLen int, label, sizeHint string) string {
+	if url == nil || *url == "" {
+		return ""
+	}
+	if !strings.HasPrefix(*url, dataImagePrefix) {
+		return label + " must be a valid image data URL (use UpdateServer for uploaded media URLs)"
+	}
+	if len(*url) > maxLen {
+		return label + " image too large (max " + sizeHint + ")"
+	}
+	return ""
+}
+
+// insertServerRow inserts the server row and scans back the timestamps.
+func insertServerRow(tx *sql.Tx, server *models.Server, e2eeDefault bool) error {
+	query := `
+		INSERT INTO servers (id, name, icon_url, banner_url, owner_id, e2ee_default, allow_embedded_content, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, FALSE, NOW(), NOW())
+		RETURNING created_at, updated_at
+	`
+	return tx.QueryRow(query, server.ID, server.Name, server.IconURL, server.BannerURL, server.OwnerID, e2eeDefault).Scan(
+		&server.CreatedAt,
+		&server.UpdatedAt,
+	)
+}
+
+// insertOwnerMembership adds the owner as a server member, creates the @all role, and assigns it.
+func insertOwnerMembership(tx *sql.Tx, serverID, userID string) error {
+	memberQuery := `
+		INSERT INTO server_members (server_id, user_id, role, joined_at)
+		VALUES ($1, $2, 'owner', NOW())
+	`
+	if _, err := tx.Exec(memberQuery, serverID, userID); err != nil {
+		return fmt.Errorf("add owner as member: %w", err)
+	}
+
+	allRoleID := uuid.New().String()
+	allRoleQuery := `
+		INSERT INTO roles (id, server_id, name, position, permissions, is_default, is_managed)
+		VALUES ($1, $2, '@all', 0, $3, TRUE, TRUE)
+	`
+	if _, err := tx.Exec(allRoleQuery, allRoleID, serverID, int64(rbac.BasePermissions)); err != nil {
+		return fmt.Errorf("create @all role: %w", err)
+	}
+
+	assignRoleQuery := `
+		INSERT INTO member_roles (server_id, user_id, role_id, assigned_by)
+		VALUES ($1, $2, $3, $4)
+	`
+	if _, err := tx.Exec(assignRoleQuery, serverID, userID, allRoleID, userID); err != nil {
+		return fmt.Errorf("assign @all role to owner: %w", err)
+	}
+
+	return nil
+}
+
 // CreateServer creates a new server
 func (h *Handler) CreateServer(c *gin.Context) {
 	userID := c.GetString("user_id")
@@ -141,7 +199,15 @@ func (h *Handler) CreateServer(c *gin.Context) {
 		return
 	}
 
-	// Start transaction
+	if errMsg := validateCreateDataURL(req.IconURL, 1500000, "Icon", "~1MB"); errMsg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
+		return
+	}
+	if errMsg := validateCreateDataURL(req.BannerURL, 3000000, "Banner", "~2MB"); errMsg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
+		return
+	}
+
 	tx, err := h.db.Begin()
 	if err != nil {
 		h.log.Error("Failed to start transaction", "error", err)
@@ -154,107 +220,34 @@ func (h *Handler) CreateServer(c *gin.Context) {
 		}
 	}()
 
-	// Validate icon_url if provided
-	// CreateServer: server_id is unknown at this point, so only accept legacy data URLs.
-	// Use UpdateServer with the media upload endpoint after creation.
-	if req.IconURL != nil && *req.IconURL != "" {
-		if !strings.HasPrefix(*req.IconURL, dataImagePrefix) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon must be a valid image data URL (use UpdateServer for uploaded media URLs)"})
-			return
-		}
-		if len(*req.IconURL) > 1500000 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Icon image too large (max ~1MB)"})
-			return
-		}
-	}
-
-	// Validate banner_url if provided (same restriction as icon_url for CreateServer)
-	if req.BannerURL != nil && *req.BannerURL != "" {
-		if !strings.HasPrefix(*req.BannerURL, dataImagePrefix) {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Banner must be a valid image data URL (use UpdateServer for uploaded media URLs)"})
-			return
-		}
-		if len(*req.BannerURL) > 3000000 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Banner image too large (max ~2MB)"})
-			return
-		}
-	}
-
-	// Determine E2EE default (true if not specified)
 	e2eeDefault := true
 	if req.E2EEDefault != nil {
 		e2eeDefault = *req.E2EEDefault
 	}
 
-	// Create server (allow_embedded_content defaults to false — safe default)
 	serverID := uuid.New().String()
-	serverQuery := `
-		INSERT INTO servers (id, name, icon_url, banner_url, owner_id, e2ee_default, allow_embedded_content, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, FALSE, NOW(), NOW())
-		RETURNING created_at, updated_at
-	`
+	server := models.Server{
+		ID:                   serverID,
+		Name:                 req.Name,
+		IconURL:              req.IconURL,
+		BannerURL:            req.BannerURL,
+		OwnerID:              userID,
+		E2EEDefault:          e2eeDefault,
+		AllowEmbeddedContent: false,
+	}
 
-	var server models.Server
-	server.ID = serverID
-	server.Name = req.Name
-	server.IconURL = req.IconURL
-	server.BannerURL = req.BannerURL
-	server.OwnerID = userID
-	server.E2EEDefault = e2eeDefault
-	server.AllowEmbeddedContent = false
-
-	err = tx.QueryRow(serverQuery, serverID, req.Name, req.IconURL, req.BannerURL, userID, e2eeDefault).Scan(
-		&server.CreatedAt,
-		&server.UpdatedAt,
-	)
-	if err != nil {
+	if err := insertServerRow(tx, &server, e2eeDefault); err != nil {
 		h.log.Error("Failed to create server", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreate})
 		return
 	}
 
-	// Add owner as member
-	memberQuery := `
-		INSERT INTO server_members (server_id, user_id, role, joined_at)
-		VALUES ($1, $2, 'owner', NOW())
-	`
-
-	_, err = tx.Exec(memberQuery, serverID, userID)
-	if err != nil {
-		h.log.Error("Failed to add owner as member", "error", err)
+	if err := insertOwnerMembership(tx, serverID, userID); err != nil {
+		h.log.Error("Failed to set up owner membership", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreate})
 		return
 	}
 
-	// Create @all default role with base permissions (RBAC Phase 2A)
-	// This role is auto-assigned to all server members
-	allRoleID := uuid.New().String()
-	allRoleQuery := `
-		INSERT INTO roles (id, server_id, name, position, permissions, is_default, is_managed)
-		VALUES ($1, $2, '@all', 0, $3, TRUE, TRUE)
-	`
-	_, err = tx.Exec(allRoleQuery, allRoleID, serverID, int64(rbac.BasePermissions))
-	if err != nil {
-		h.log.Error("Failed to create @all role", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreate})
-		return
-	}
-
-	// Assign @all role to the owner
-	assignRoleQuery := `
-		INSERT INTO member_roles (server_id, user_id, role_id, assigned_by)
-		VALUES ($1, $2, $3, $4)
-	`
-	_, err = tx.Exec(assignRoleQuery, serverID, userID, allRoleID, userID)
-	if err != nil {
-		h.log.Error("Failed to assign @all role to owner", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreate})
-		return
-	}
-
-	// Commit transaction — no default channels are created at server spawn.
-	// The owner creates channels through the UI, which handles E2EE key
-	// generation and wrapping when the server's e2ee_default is enabled.
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit transaction", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreate})

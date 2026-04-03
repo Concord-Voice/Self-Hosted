@@ -13,6 +13,7 @@ import (
 type mockStore struct {
 	mu      sync.Mutex
 	objects map[string]*mockObject
+	putErr  error // if non-nil, PutObject returns this error
 }
 
 type mockObject struct {
@@ -25,6 +26,9 @@ func newMockStore() *mockStore {
 }
 
 func (m *mockStore) PutObject(_ context.Context, key string, reader io.Reader, _ int64, contentType string) error {
+	if m.putErr != nil {
+		return m.putErr
+	}
 	data, err := io.ReadAll(reader)
 	if err != nil {
 		return err

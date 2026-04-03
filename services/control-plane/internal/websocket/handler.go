@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -120,70 +120,89 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 // or falls back to JWT for backward compatibility. Returns (userID, sessionID, error).
 // sessionID is only populated for ticket-based auth when the client provided X-Session-ID.
 func (h *Handler) authenticateWebSocket(c *gin.Context) (uuid.UUID, string, error) {
-	// Prefer ticket-based auth (short-lived, single-use, not logged in URLs)
 	if ticket := c.Query("ticket"); ticket != "" {
-		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
-		defer cancel()
-		userIDStr, sessionID, err := auth.ValidateTicket(ctx, h.redis, ticket)
-		if err != nil {
-			return uuid.Nil, "", fmt.Errorf("invalid ticket: %w", err)
-		}
-		userID, err := uuid.Parse(userIDStr)
-		if err != nil {
-			return uuid.Nil, "", fmt.Errorf("invalid user ID in ticket: %w", err)
-		}
-		return userID, sessionID, nil
+		return h.authenticateViaTicket(c, ticket)
 	}
 
-	// Fall back to JWT — check Authorization header first, then ?token= query param
-	tokenString := ""
-	if authHeader := c.GetHeader("Authorization"); authHeader != "" {
-		if len(authHeader) > 7 && strings.ToLower(authHeader[0:7]) == "bearer " {
-			tokenString = authHeader[7:]
-		}
-	}
-	if tokenString == "" {
-		// WebSocket connections from browsers can't set custom headers,
-		// so also accept JWT via ?token= query param
-		tokenString = c.Query("token")
-	}
-
+	tokenString := extractBearerToken(c)
 	if tokenString == "" {
 		return uuid.Nil, "", fmt.Errorf("no authentication provided")
 	}
 
-	// Parse and validate JWT
+	return h.authenticateViaJWT(c, tokenString)
+}
+
+func (h *Handler) authenticateViaTicket(c *gin.Context, ticket string) (uuid.UUID, string, error) {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+	defer cancel()
+	userIDStr, sessionID, err := auth.ValidateTicket(ctx, h.redis, ticket)
+	if err != nil {
+		return uuid.Nil, "", fmt.Errorf("invalid ticket: %w", err)
+	}
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		return uuid.Nil, "", fmt.Errorf("invalid user ID in ticket: %w", err)
+	}
+	return userID, sessionID, nil
+}
+
+func extractBearerToken(c *gin.Context) string {
+	if authHeader := c.GetHeader("Authorization"); authHeader != "" {
+		if len(authHeader) > 7 && strings.ToLower(authHeader[0:7]) == "bearer " {
+			return authHeader[7:]
+		}
+	}
+	return c.Query("token")
+}
+
+func (h *Handler) authenticateViaJWT(c *gin.Context, tokenString string) (uuid.UUID, string, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, jwt.ErrSignatureInvalid
 		}
 		return []byte(h.jwtSecret), nil
 	})
-
 	if err != nil {
 		return uuid.Nil, "", err
 	}
 
-	if claims, ok := token.Claims.(jwt.MapClaims); ok && token.Valid {
-		// Check token blacklist (matches AuthRequired middleware behavior)
-		if jti, ok := claims["jti"].(string); ok && jti != "" {
-			ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
-			defer cancel()
-			if exists, _ := h.redis.Exists(ctx, fmt.Sprintf("blacklist:%s", jti)).Result(); exists > 0 {
-				return uuid.Nil, "", fmt.Errorf("token has been revoked")
-			}
-		}
-
-		userIDStr, ok := claims["user_id"].(string)
-		if !ok {
-			return uuid.Nil, "", jwt.ErrTokenInvalidClaims
-		}
-		userID, err := uuid.Parse(userIDStr)
-		if err != nil {
-			return uuid.Nil, "", err
-		}
-		return userID, "", nil
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok || !token.Valid {
+		return uuid.Nil, "", fmt.Errorf("invalid authentication")
 	}
 
-	return uuid.Nil, "", fmt.Errorf("invalid authentication")
+	if err := h.checkTokenBlacklist(c, claims); err != nil {
+		return uuid.Nil, "", err
+	}
+
+	return parseUserIDFromClaims(claims)
+}
+
+func (h *Handler) checkTokenBlacklist(c *gin.Context, claims jwt.MapClaims) error {
+	jti, ok := claims["jti"].(string)
+	if !ok || jti == "" {
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+	defer cancel()
+	exists, err := h.redis.Exists(ctx, fmt.Sprintf("blacklist:%s", jti)).Result()
+	if err != nil {
+		return fmt.Errorf("revocation check unavailable")
+	}
+	if exists > 0 {
+		return fmt.Errorf("token has been revoked")
+	}
+	return nil
+}
+
+func parseUserIDFromClaims(claims jwt.MapClaims) (uuid.UUID, string, error) {
+	userIDStr, ok := claims["user_id"].(string)
+	if !ok {
+		return uuid.Nil, "", jwt.ErrTokenInvalidClaims
+	}
+	userID, err := uuid.Parse(userIDStr)
+	if err != nil {
+		return uuid.Nil, "", err
+	}
+	return userID, "", nil
 }

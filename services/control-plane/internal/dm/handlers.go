@@ -127,8 +127,21 @@ type lastMessageResponse struct {
 func (h *Handler) ListConversations(c *gin.Context) {
 	userID := c.GetString("user_id")
 
-	// Fetch conversations ordered by last message.
-	// Uses a LEFT JOIN to dm_read_states instead of a correlated subquery.
+	conversations, convIDs, err := h.queryConversations(userID)
+	if err != nil {
+		h.log.Error("Failed to query DM conversations", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch conversations"})
+		return
+	}
+
+	if len(convIDs) > 0 {
+		h.attachParticipants(conversations, convIDs)
+	}
+
+	c.JSON(http.StatusOK, gin.H{"conversations": conversations})
+}
+
+func (h *Handler) queryConversations(userID string) ([]conversationResponse, []string, error) {
 	query := `
 		SELECT dc.id, dc.is_group, dc.is_personal, dc.name, dc.is_encrypted, dc.icon_url, dc.created_by, dc.created_at,
 		       dm.content, dm.created_at, dm.user_id, dm.is_encrypted,
@@ -149,86 +162,87 @@ func (h *Handler) ListConversations(c *gin.Context) {
 
 	rows, err := h.db.Query(query, userID)
 	if err != nil {
-		h.log.Error("Failed to query DM conversations", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch conversations"})
-		return
+		return nil, nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
 	conversations := []conversationResponse{}
 	convIDs := []string{}
 	for rows.Next() {
-		var conv conversationResponse
-		var lmContent, lmCreatedAt, lmUserID sql.NullString
-		var lmEncrypted sql.NullBool
-		if err := rows.Scan(
-			&conv.ID, &conv.IsGroup, &conv.IsPersonal, &conv.Name, &conv.IsEncrypted, &conv.IconURL, &conv.CreatedBy, &conv.CreatedAt,
-			&lmContent, &lmCreatedAt, &lmUserID, &lmEncrypted,
-			&conv.UnreadCount,
-		); err != nil {
-			h.log.Error("Failed to scan DM conversation", "error", err)
+		conv, scanErr := h.scanConversationRow(rows)
+		if scanErr != nil {
+			h.log.Error("Failed to scan DM conversation", "error", scanErr)
 			continue
-		}
-		if lmContent.Valid {
-			conv.LastMessage = &lastMessageResponse{
-				Content:     lmContent.String,
-				UserID:      lmUserID.String,
-				CreatedAt:   lmCreatedAt.String,
-				IsEncrypted: lmEncrypted.Bool,
-			}
 		}
 		convIDs = append(convIDs, conv.ID)
 		conversations = append(conversations, conv)
 	}
 	if err := rows.Err(); err != nil {
-		h.log.Error("Error iterating DM conversations", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch conversations"})
-		return
+		return nil, nil, err
 	}
+	return conversations, convIDs, nil
+}
 
-	// Fetch participants for all conversations
-	if len(convIDs) > 0 {
-		participantMap := make(map[string][]participantResponse)
-		pQuery := `
-			SELECT dp.conversation_id, u.id, u.username, u.display_name, u.avatar_url, u.color_scheme, dp.role
-			FROM dm_participants dp
-			INNER JOIN users u ON u.id = dp.user_id
-			WHERE dp.conversation_id = ANY($1::uuid[])
-		`
-		// Build UUID array literal
-		uuidArray := "{"
-		for i, id := range convIDs {
-			if i > 0 {
-				uuidArray += ","
-			}
-			uuidArray += id
-		}
-		uuidArray += "}"
-
-		pRows, err := h.db.Query(pQuery, uuidArray)
-		if err != nil {
-			h.log.Error("Failed to query DM participants", "error", err)
-		} else {
-			defer func() { _ = pRows.Close() }()
-			for pRows.Next() {
-				var convID string
-				var p participantResponse
-				if err := pRows.Scan(&convID, &p.UserID, &p.Username, &p.DisplayName, &p.AvatarURL, &p.ColorScheme, &p.Role); err != nil {
-					continue
-				}
-				participantMap[convID] = append(participantMap[convID], p)
-			}
-		}
-
-		for i := range conversations {
-			conversations[i].Participants = participantMap[conversations[i].ID]
-			if conversations[i].Participants == nil {
-				conversations[i].Participants = []participantResponse{}
-			}
+func (h *Handler) scanConversationRow(rows *sql.Rows) (conversationResponse, error) {
+	var conv conversationResponse
+	var lmContent, lmCreatedAt, lmUserID sql.NullString
+	var lmEncrypted sql.NullBool
+	if err := rows.Scan(
+		&conv.ID, &conv.IsGroup, &conv.IsPersonal, &conv.Name, &conv.IsEncrypted, &conv.IconURL, &conv.CreatedBy, &conv.CreatedAt,
+		&lmContent, &lmCreatedAt, &lmUserID, &lmEncrypted,
+		&conv.UnreadCount,
+	); err != nil {
+		return conv, err
+	}
+	if lmContent.Valid {
+		conv.LastMessage = &lastMessageResponse{
+			Content:     lmContent.String,
+			UserID:      lmUserID.String,
+			CreatedAt:   lmCreatedAt.String,
+			IsEncrypted: lmEncrypted.Bool,
 		}
 	}
+	return conv, nil
+}
 
-	c.JSON(http.StatusOK, gin.H{"conversations": conversations})
+func (h *Handler) attachParticipants(conversations []conversationResponse, convIDs []string) {
+	participantMap := make(map[string][]participantResponse)
+	pQuery := `
+		SELECT dp.conversation_id, u.id, u.username, u.display_name, u.avatar_url, u.color_scheme, dp.role
+		FROM dm_participants dp
+		INNER JOIN users u ON u.id = dp.user_id
+		WHERE dp.conversation_id = ANY($1::uuid[])
+	`
+	uuidArray := "{"
+	for i, id := range convIDs {
+		if i > 0 {
+			uuidArray += ","
+		}
+		uuidArray += id
+	}
+	uuidArray += "}"
+
+	pRows, err := h.db.Query(pQuery, uuidArray)
+	if err != nil {
+		h.log.Error("Failed to query DM participants", "error", err)
+	} else {
+		defer func() { _ = pRows.Close() }()
+		for pRows.Next() {
+			var convID string
+			var p participantResponse
+			if err := pRows.Scan(&convID, &p.UserID, &p.Username, &p.DisplayName, &p.AvatarURL, &p.ColorScheme, &p.Role); err != nil {
+				continue
+			}
+			participantMap[convID] = append(participantMap[convID], p)
+		}
+	}
+
+	for i := range conversations {
+		conversations[i].Participants = participantMap[conversations[i].ID]
+		if conversations[i].Participants == nil {
+			conversations[i].Participants = []participantResponse{}
+		}
+	}
 }
 
 // OpenConversationRequest represents a request to open a 1:1 DM.
@@ -478,34 +492,50 @@ func (h *Handler) CreateGroup(c *gin.Context) {
 		return
 	}
 
-	if len(req.UserIDs) < 1 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "At least one other user is required"})
+	if errMsg := validateGroupMembers(req.UserIDs, userID); errMsg != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
 		return
 	}
 
-	if len(req.UserIDs) > 9 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Group DMs are limited to 10 participants"})
-		return
-	}
-
-	// Validate all user IDs
 	allUserIDs := append([]string{userID}, req.UserIDs...)
-	for _, uid := range req.UserIDs {
-		if _, err := uuid.Parse(uid); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID: " + uid})
-			return
-		}
-		if uid == userID {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot include yourself in user_ids"})
-			return
-		}
+
+	convID, err := h.insertGroupConversation(req.Name, userID, allUserIDs)
+	if err != nil {
+		h.log.Error("Failed to create group DM", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateGroup})
+		return
 	}
 
+	h.log.Info("Group DM created", "conversation_id", convID, "user_id", userID, "members", len(allUserIDs))
+	h.notifyGroupCreated(convID, req.UserIDs)
+
+	conv := h.fetchConversationResponse(convID)
+	c.JSON(http.StatusCreated, gin.H{"conversation": conv})
+}
+
+func validateGroupMembers(userIDs []string, callerID string) string {
+	if len(userIDs) < 1 {
+		return "At least one other user is required"
+	}
+	if len(userIDs) > 9 {
+		return "Group DMs are limited to 10 participants"
+	}
+	for _, uid := range userIDs {
+		if _, err := uuid.Parse(uid); err != nil {
+			return "Invalid user ID: " + uid
+		}
+		if uid == callerID {
+			return "Cannot include yourself in user_ids"
+		}
+	}
+	return ""
+}
+
+func (h *Handler) insertGroupConversation(name *string, creatorID string, allUserIDs []string) (string, error) {
 	tx, err := h.db.Begin()
 	if err != nil {
 		h.log.Error(errMsgFailedStartTransaction, "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateGroup})
-		return
+		return "", err
 	}
 	defer func() {
 		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
@@ -514,56 +544,57 @@ func (h *Handler) CreateGroup(c *gin.Context) {
 	}()
 
 	convID := uuid.New().String()
-	_, err = tx.Exec(`
+	if _, err = tx.Exec(`
 		INSERT INTO dm_conversations (id, is_group, name, is_encrypted, created_by)
 		VALUES ($1, TRUE, $2, TRUE, $3)
-	`, convID, req.Name, userID)
-	if err != nil {
-		h.log.Error("Failed to create group DM", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateGroup})
-		return
+	`, convID, name, creatorID); err != nil {
+		return "", err
 	}
 
-	for _, uid := range allUserIDs {
-		role := "member"
-		if uid == userID {
-			role = "admin"
-		}
-		_, err = tx.Exec(`INSERT INTO dm_participants (conversation_id, user_id, role) VALUES ($1, $2, $3)`, convID, uid, role)
-		if err != nil {
-			h.log.Error("Failed to add group participant", "error", err, "user_id", uid)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateGroup})
-			return
-		}
+	if err := addGroupParticipants(tx, convID, creatorID, allUserIDs); err != nil {
+		return "", err
 	}
 
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit group DM creation", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateGroup})
-		return
+		return "", err
 	}
+	return convID, nil
+}
 
-	h.log.Info("Group DM created", "conversation_id", convID, "user_id", userID, "members", len(allUserIDs))
-
-	// Notify other participants
-	if h.hub != nil {
-		for _, uid := range req.UserIDs {
-			if targetUUID, parseErr := uuid.Parse(uid); parseErr == nil {
-				conv := h.fetchConversationResponse(convID)
-				if conv != nil {
-					h.hub.BroadcastToUser(targetUUID, websocket.OutgoingMessage{
-						Type: "dm_conversation_created",
-						Data: map[string]interface{}{
-							"conversation": conv,
-						},
-					})
-				}
-			}
+func addGroupParticipants(tx *sql.Tx, convID, creatorID string, allUserIDs []string) error {
+	for _, uid := range allUserIDs {
+		role := "member"
+		if uid == creatorID {
+			role = "admin"
+		}
+		if _, err := tx.Exec(`INSERT INTO dm_participants (conversation_id, user_id, role) VALUES ($1, $2, $3)`, convID, uid, role); err != nil {
+			return err
 		}
 	}
+	return nil
+}
 
-	conv := h.fetchConversationResponse(convID)
-	c.JSON(http.StatusCreated, gin.H{"conversation": conv})
+func (h *Handler) notifyGroupCreated(convID string, memberIDs []string) {
+	if h.hub == nil {
+		return
+	}
+	for _, uid := range memberIDs {
+		targetUUID, parseErr := uuid.Parse(uid)
+		if parseErr != nil {
+			continue
+		}
+		conv := h.fetchConversationResponse(convID)
+		if conv == nil {
+			continue
+		}
+		h.hub.BroadcastToUser(targetUUID, websocket.OutgoingMessage{
+			Type: "dm_conversation_created",
+			Data: map[string]interface{}{
+				"conversation": conv,
+			},
+		})
+	}
 }
 
 // GetConversation returns a single conversation with participants.
@@ -1264,41 +1295,48 @@ func (h *Handler) DistributeKeys(c *gin.Context) {
 
 	distributed := 0
 	for memberUserID, wrappedKey := range req.WrappedKeys {
-		if _, parseErr := uuid.Parse(memberUserID); parseErr != nil {
-			continue
-		}
-
-		result, err := h.db.Exec(`
-			INSERT INTO dm_channel_keys (conversation_id, user_id, wrapped_key, key_version)
-			VALUES ($1, $2, $3, $4)
-			ON CONFLICT (conversation_id, user_id, key_version) DO NOTHING
-		`, convID, memberUserID, wrappedKey, keyVersion)
-		if err != nil {
-			h.log.Error("Failed to store DM key", "error", err, "user_id", memberUserID)
-			continue
-		}
-		rowsAffected, _ := result.RowsAffected()
-		if rowsAffected > 0 {
-			// Remove pending request if exists
-			_, _ = h.db.Exec(`DELETE FROM dm_pending_key_requests WHERE conversation_id = $1 AND user_id = $2`, convID, memberUserID)
-
-			// Notify recipient
-			if h.hub != nil {
-				if recipientUUID, parseErr := uuid.Parse(memberUserID); parseErr == nil {
-					h.hub.BroadcastToUser(recipientUUID, websocket.OutgoingMessage{
-						Type: "key_delivered",
-						Data: map[string]interface{}{
-							"channel_id": convID,
-							"user_id":    memberUserID,
-						},
-					})
-				}
-			}
+		if h.distributeKeyToMember(convID, memberUserID, wrappedKey, keyVersion) {
 			distributed++
 		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"distributed": distributed})
+}
+
+func (h *Handler) distributeKeyToMember(convID, memberUserID, wrappedKey string, keyVersion int) bool {
+	if _, parseErr := uuid.Parse(memberUserID); parseErr != nil {
+		return false
+	}
+
+	result, err := h.db.Exec(`
+		INSERT INTO dm_channel_keys (conversation_id, user_id, wrapped_key, key_version)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (conversation_id, user_id, key_version) DO NOTHING
+	`, convID, memberUserID, wrappedKey, keyVersion)
+	if err != nil {
+		h.log.Error("Failed to store DM key", "error", err, "user_id", memberUserID)
+		return false
+	}
+
+	rowsAffected, _ := result.RowsAffected()
+	if rowsAffected == 0 {
+		return false
+	}
+
+	_, _ = h.db.Exec(`DELETE FROM dm_pending_key_requests WHERE conversation_id = $1 AND user_id = $2`, convID, memberUserID)
+
+	if h.hub != nil {
+		if recipientUUID, parseErr := uuid.Parse(memberUserID); parseErr == nil {
+			h.hub.BroadcastToUser(recipientUUID, websocket.OutgoingMessage{
+				Type: "key_delivered",
+				Data: map[string]interface{}{
+					"channel_id": convID,
+					"user_id":    memberUserID,
+				},
+			})
+		}
+	}
+	return true
 }
 
 // RotateKey handles manual seal & rotate for DM forward secrecy.

@@ -12,6 +12,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/mfa"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
 	"github.com/pquerna/otp"
 	"github.com/pquerna/otp/totp"
@@ -70,6 +71,7 @@ const (
 	skipRecoveryReqTable = "recovery_requests table not available: %v" //nolint:gosec // skip message, not a credential
 	invalidBase64        = "not-valid-base64!!!"
 	testUpdatedName      = "Updated Name"
+	testBackupEmail      = "backup@example.com"
 )
 
 func setupTS(t *testing.T) *testhelpers.TestServer {
@@ -449,7 +451,7 @@ func TestSetBackupEmailSuccess(t *testing.T) {
 	user := ts.CreateTestUser(t, "backupgood")
 
 	w := ts.DoRequest("PUT", urlBackupEmail, map[string]interface{}{
-		"email":    "backup@example.com",
+		"email":    testBackupEmail,
 		"password": testPassword,
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
@@ -1378,9 +1380,12 @@ func TestGetRecoveryCircleAfterSetup(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
-	assert.Equal(t, true, body["has_circle"])
+	if !assert.Equal(t, true, body["has_circle"]) {
+		t.Fatalf("Expected has_circle=true, got response: %v", body)
+	}
 	assert.Equal(t, float64(2), body["threshold_k"])
-	contacts := body["contacts"].([]interface{})
+	contacts, ok := body["contacts"].([]interface{})
+	require.True(t, ok, "Expected contacts array in response, got: %v", body)
 	assert.Len(t, contacts, 2)
 }
 
@@ -1655,19 +1660,21 @@ func TestTOTPSetupReEnrollment(t *testing.T) {
 	w := ts.DoRequest("POST", urlTOTPSetup, map[string]interface{}{
 		"password": testPassword,
 	}, auth)
-	assert.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, http.StatusOK, w.Code)
 	var body1 map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body1)
-	secret1 := body1["secret"].(string)
+	secret1, ok := body1["secret"].(string)
+	require.True(t, ok, "Expected secret in first setup response, got: %v", body1)
 
 	// Second setup should succeed (replaces pending unconfirmed setup)
 	w = ts.DoRequest("POST", urlTOTPSetup, map[string]interface{}{
 		"password": testPassword,
 	}, auth)
-	assert.Equal(t, http.StatusOK, w.Code)
+	require.Equal(t, http.StatusOK, w.Code)
 	var body2 map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body2)
-	secret2 := body2["secret"].(string)
+	secret2, ok := body2["secret"].(string)
+	require.True(t, ok, "Expected secret in second setup response, got: %v", body2)
 
 	// New secret should be different from the first
 	assert.NotEqual(t, secret1, secret2)
@@ -2325,7 +2332,7 @@ func TestSetBackupEmailClear(t *testing.T) {
 
 	// Set a backup email first
 	ts.DoRequest("PUT", urlBackupEmail, map[string]interface{}{
-		"email":    "backup@example.com",
+		"email":    testBackupEmail,
 		"password": testPassword,
 	}, auth)
 
@@ -3340,6 +3347,410 @@ func TestRespondToSocialRecoveryMissingShare(t *testing.T) {
 		testhelpers.AuthHeaders(user.AccessToken))
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// --- Pure unit tests for extracted helpers ---
+
+func TestDecodeApprovalPayloadsEmptyFields(t *testing.T) {
+	_, _, errMsg, status := mfa.DecodeApprovalPayloads("", "something")
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Contains(t, errMsg, "required for approval")
+
+	_, _, errMsg, status = mfa.DecodeApprovalPayloads("something", "")
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Contains(t, errMsg, "required for approval")
+}
+
+func TestDecodeApprovalPayloadsBadBase64Payload(t *testing.T) {
+	_, _, errMsg, status := mfa.DecodeApprovalPayloads(invalidBase64, base64.StdEncoding.EncodeToString([]byte("key")))
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Contains(t, errMsg, "encrypted_payload")
+}
+
+func TestDecodeApprovalPayloadsBadBase64PubKey(t *testing.T) {
+	_, _, errMsg, status := mfa.DecodeApprovalPayloads(base64.StdEncoding.EncodeToString([]byte("payload")), invalidBase64)
+	assert.Equal(t, http.StatusBadRequest, status)
+	assert.Contains(t, errMsg, "responder_public_key")
+}
+
+func TestDecodeApprovalPayloadsSuccess(t *testing.T) {
+	enc, pub, errMsg, _ := mfa.DecodeApprovalPayloads(
+		base64.StdEncoding.EncodeToString([]byte("payload")),
+		base64.StdEncoding.EncodeToString([]byte("pubkey")),
+	)
+	assert.Empty(t, errMsg)
+	assert.Equal(t, []byte("payload"), enc)
+	assert.Equal(t, []byte("pubkey"), pub)
+}
+
+func TestValidateCircleConstraints(t *testing.T) {
+	tests := []struct {
+		name      string
+		k, n, len int
+		wantErr   bool
+	}{
+		{"valid 2-of-3", 2, 3, 3, false},
+		{"valid 3-of-5", 3, 5, 5, false},
+		{"k<2", 1, 3, 3, true},
+		{"k>n", 4, 3, 3, true},
+		{"n>7", 2, 8, 8, true},
+		{"len!=n", 2, 3, 2, true},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			errMsg, _ := mfa.ValidateCircleConstraints(tc.k, tc.n, tc.len)
+			if tc.wantErr {
+				assert.NotEmpty(t, errMsg)
+			} else {
+				assert.Empty(t, errMsg)
+			}
+		})
+	}
+}
+
+func TestValidateShareUniqueness(t *testing.T) {
+	tests := []struct {
+		name    string
+		shares  []mfa.CircleShareEntry
+		total   int
+		wantErr string
+	}{
+		{"valid", []mfa.CircleShareEntry{
+			{ContactID: "a", ShareIndex: 1, EncryptedShare: "x"},
+			{ContactID: "b", ShareIndex: 2, EncryptedShare: "y"},
+		}, 2, ""},
+		{"dup contact", []mfa.CircleShareEntry{
+			{ContactID: "a", ShareIndex: 1, EncryptedShare: "x"},
+			{ContactID: "a", ShareIndex: 2, EncryptedShare: "y"},
+		}, 2, "Duplicate contact_id"},
+		{"dup index", []mfa.CircleShareEntry{
+			{ContactID: "a", ShareIndex: 1, EncryptedShare: "x"},
+			{ContactID: "b", ShareIndex: 1, EncryptedShare: "y"},
+		}, 2, "Duplicate share_index"},
+		{"index out of range", []mfa.CircleShareEntry{
+			{ContactID: "a", ShareIndex: 0, EncryptedShare: "x"},
+		}, 1, "share_index must be between"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			errMsg, _ := mfa.ValidateShareUniqueness(tc.shares, tc.total)
+			if tc.wantErr != "" {
+				assert.Contains(t, errMsg, tc.wantErr)
+			} else {
+				assert.Empty(t, errMsg)
+			}
+		})
+	}
+}
+
+func TestDecodeCircleShares(t *testing.T) {
+	validB64 := base64.StdEncoding.EncodeToString([]byte(testShareData))
+
+	t.Run("success", func(t *testing.T) {
+		shares := []mfa.CircleShareEntry{
+			{ContactID: "a", ShareIndex: 1, EncryptedShare: validB64},
+		}
+		decoded, errMsg, _ := mfa.DecodeCircleShares(shares)
+		assert.Empty(t, errMsg)
+		assert.Len(t, decoded, 1)
+		assert.Equal(t, []byte(testShareData), decoded[0].EncryptedShare)
+	})
+
+	t.Run("bad base64", func(t *testing.T) {
+		shares := []mfa.CircleShareEntry{
+			{ContactID: "a", ShareIndex: 1, EncryptedShare: invalidBase64},
+		}
+		_, errMsg, status := mfa.DecodeCircleShares(shares)
+		assert.Equal(t, http.StatusBadRequest, status)
+		assert.Contains(t, errMsg, "Invalid encrypted_share")
+	})
+}
+
+// ValidateHardenedModeCodes tested in handlers_unit_test.go
+
+// --- RespondToRecoveryRequest: Bad base64 in payload ---
+
+func TestRespondToRecoveryRequestBadBase64Payload(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "recreqb64pay")
+
+	ctx := context.Background()
+	requestID := "00000000-0000-0000-0000-000000000020"
+	_, err := ts.DB.ExecContext(ctx, `
+		INSERT INTO recovery_requests (id, user_id, status, created_at, expires_at)
+		VALUES ($1, $2, 'pending', NOW(), NOW() + INTERVAL '15 minutes')
+	`, requestID, user.ID)
+	if err != nil {
+		t.Skipf(skipRecoveryReqTable, err)
+	}
+
+	w := ts.DoRequest("POST", urlRecoveryRequests+"/"+requestID+respondSuffix, map[string]interface{}{
+		"action":               "approve",
+		"encrypted_payload":    invalidBase64,
+		"responder_public_key": base64.StdEncoding.EncodeToString([]byte("key")),
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestRespondToRecoveryRequestBadBase64PubKey(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "recreqb64pk")
+
+	ctx := context.Background()
+	requestID := "00000000-0000-0000-0000-000000000021"
+	_, err := ts.DB.ExecContext(ctx, `
+		INSERT INTO recovery_requests (id, user_id, status, created_at, expires_at)
+		VALUES ($1, $2, 'pending', NOW(), NOW() + INTERVAL '15 minutes')
+	`, requestID, user.ID)
+	if err != nil {
+		t.Skipf(skipRecoveryReqTable, err)
+	}
+
+	w := ts.DoRequest("POST", urlRecoveryRequests+"/"+requestID+respondSuffix, map[string]interface{}{
+		"action":               "approve",
+		"encrypted_payload":    base64.StdEncoding.EncodeToString([]byte("payload")),
+		"responder_public_key": invalidBase64,
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// --- RespondToRecoveryRequest: Missing body ---
+
+func TestRespondToRecoveryRequestNoBody(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "recreqnobody")
+
+	w := ts.DoRequest("POST", urlRecoveryRequests+someIDRespond, nil,
+		testhelpers.AuthHeaders(user.AccessToken))
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// --- ListRecoveryRequests: With pending data ---
+
+func TestListRecoveryRequestsWithData(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "recreqlist")
+
+	ctx := context.Background()
+	requestID := "00000000-0000-0000-0000-000000000030"
+	ephPubKey := []byte("ephemeral-pub-key")
+	_, err := ts.DB.ExecContext(ctx, `
+		INSERT INTO recovery_requests (id, user_id, status, ephemeral_public_key, created_at, expires_at)
+		VALUES ($1, $2, 'pending', $3, NOW(), NOW() + INTERVAL '15 minutes')
+	`, requestID, user.ID, ephPubKey)
+	if err != nil {
+		t.Skipf(skipRecoveryReqTable, err)
+	}
+
+	w := ts.DoRequest("GET", urlRecoveryRequests, nil, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	requests := body["requests"].([]interface{})
+	assert.GreaterOrEqual(t, len(requests), 1)
+	req0 := requests[0].(map[string]interface{})
+	assert.Equal(t, requestID, req0["id"])
+	assert.Equal(t, "pending", req0["status"])
+	assert.NotEmpty(t, req0["ephemeral_public_key"])
+}
+
+// --- ListRecoveryRequests: Expired requests not shown ---
+
+func TestListRecoveryRequestsExpiredNotShown(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "recreqexpd")
+
+	ctx := context.Background()
+	requestID := "00000000-0000-0000-0000-000000000031"
+	_, err := ts.DB.ExecContext(ctx, `
+		INSERT INTO recovery_requests (id, user_id, status, created_at, expires_at)
+		VALUES ($1, $2, 'pending', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '30 minutes')
+	`, requestID, user.ID)
+	if err != nil {
+		t.Skipf(skipRecoveryReqTable, err)
+	}
+
+	w := ts.DoRequest("GET", urlRecoveryRequests, nil, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	requests := body["requests"].([]interface{})
+	// Expired request should not be in results
+	for _, r := range requests {
+		req := r.(map[string]interface{})
+		assert.NotEqual(t, requestID, req["id"])
+	}
+}
+
+// --- WebAuthn: Inline verify begin with no credentials ---
+
+func TestWebAuthnVerifyInlineBeginNoCreds(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "wahnilbnocr")
+
+	w := ts.DoRequest("POST", urlWebAuthnInlineBegin, nil, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Contains(t, body["error"], "No WebAuthn credentials")
+}
+
+// --- WebAuthn: Inline verify finish with no session ---
+
+func TestWebAuthnVerifyInlineFinishNoSession(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "wahnilfinns")
+
+	w := ts.DoRequest("POST", urlWebAuthnInlineFinish, nil, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Contains(t, body["error"], "No verification session")
+}
+
+// --- SetRecoveryOnly: Invalid password rejected ---
+
+func TestSetRecoveryOnlyBadPassword(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "recovbadpw2")
+
+	w := ts.DoRequest("PUT", urlRecoveryOnly, map[string]interface{}{
+		"password": testBadPassword,
+		"methods":  []string{"email"},
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+// --- EmailSmsVerify: Empty codes map ---
+
+func TestEmailSmsVerifyEmptyCodes(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "emsmsempty")
+
+	w := ts.DoRequest("POST", urlEmailSmsVerify, map[string]interface{}{
+		"codes": map[string]string{},
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// --- EmailSmsVerify: Success ---
+
+func TestEmailSmsVerifySuccess(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "emsmsok")
+
+	ctx := context.Background()
+	// Ensure recovery_hardened is false for this test
+	_, _ = ts.DB.ExecContext(ctx, `UPDATE users SET recovery_hardened = FALSE WHERE id = $1`, user.ID)
+	ts.Redis.Set(ctx, fmt.Sprintf(redisEmailSmsSetup, user.ID), "123456", 10*time.Minute)
+
+	w := ts.DoRequest("POST", urlEmailSmsVerify, map[string]interface{}{
+		"codes": map[string]interface{}{"email": "123456"},
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	require.Equal(t, http.StatusOK, w.Code, "Response body: %s", w.Body.String())
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	verified, ok := body["verified"].([]interface{})
+	require.True(t, ok, "Expected verified array, got: %v", body)
+	assert.Contains(t, verified, "email")
+}
+
+// --- EmailSmsVerify: Hardened mode requires both ---
+
+func TestEmailSmsVerifyHardenedRequiresBoth(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "emsmshardreq")
+
+	ctx := context.Background()
+	_, err := ts.DB.ExecContext(ctx, `UPDATE users SET recovery_hardened = TRUE WHERE id = $1`, user.ID)
+	require.NoError(t, err)
+
+	w := ts.DoRequest("POST", urlEmailSmsVerify, map[string]interface{}{
+		"codes": map[string]string{"email": "123456"},
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// --- WebAuthn Register Finish: No body ---
+
+func TestWebAuthnRegisterFinishNoBody(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "wahnfinnobod")
+	auth := testhelpers.AuthHeaders(user.AccessToken)
+
+	w := ts.DoRequest("POST", urlWebAuthnRegFinish, nil, auth)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// --- WebAuthn: List credentials with registered credential ---
+
+func TestWebAuthnListCredentialsWithData(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "wahnlstdata")
+
+	ctx := context.Background()
+	credID := uuid.New().String()
+	_, err := ts.DB.ExecContext(ctx, `
+		INSERT INTO user_mfa_webauthn (id, user_id, credential_id, credential_name, credential_type, public_key, sign_count, created_at)
+		VALUES ($1, $2, $3, $4, 'public-key', $5, 0, NOW())
+	`, credID, user.ID, []byte("fake-cred-id"), testCredName, []byte("fake-pubkey"))
+	if err != nil {
+		t.Skipf("user_mfa_webauthn table not available: %v", err)
+	}
+
+	w := ts.DoRequest("GET", urlWebAuthnCredentials, nil, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	creds, ok := body["credentials"].([]interface{})
+	require.True(t, ok)
+	assert.GreaterOrEqual(t, len(creds), 1)
+}
+
+// --- Backup email: Get empty ---
+
+func TestGetBackupEmailEmpty(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "bkemailmt")
+
+	w := ts.DoRequest("GET", urlBackupEmail, nil, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// --- Backup email: Set valid ---
+
+func TestSetBackupEmailValid(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "bkemailok")
+
+	w := ts.DoRequest("PUT", urlBackupEmail, map[string]interface{}{
+		"email": testBackupEmail,
+	}, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Verify by GET
+	w = ts.DoRequest("GET", urlBackupEmail, nil, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, testBackupEmail, body["backup_email"])
+}
+
+// --- Email/SMS disable ---
+
+func TestEmailSmsDisableSuccess(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "emsmsdis")
+
+	w := ts.DoRequest("POST", urlEmailSmsDisable, nil, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
 }
 
 // --- WebAuthn Register Finish: Expired session ---

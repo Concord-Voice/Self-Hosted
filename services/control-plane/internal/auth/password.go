@@ -13,7 +13,7 @@ import (
 
 var (
 	// ErrInvalidHash indicates the password hash format is invalid.
-	ErrInvalidHash         = errors.New("invalid hash format")
+	ErrInvalidHash = errors.New("invalid hash format")
 	// ErrIncompatibleVersion indicates the Argon2 version is incompatible.
 	ErrIncompatibleVersion = errors.New("incompatible argon2 version")
 )
@@ -163,54 +163,69 @@ func decodeHash(encodedHash string) (*Argon2Params, []byte, []byte, error) {
 	return p, salt, hash, nil
 }
 
+func hasUpperCase(password string) bool {
+	for _, ch := range password {
+		if ch >= 'A' && ch <= 'Z' {
+			return true
+		}
+	}
+	return false
+}
+
+func hasLowerCase(password string) bool {
+	for _, ch := range password {
+		if ch >= 'a' && ch <= 'z' {
+			return true
+		}
+	}
+	return false
+}
+
+func hasDigit(password string) bool {
+	for _, ch := range password {
+		if ch >= '0' && ch <= '9' {
+			return true
+		}
+	}
+	return false
+}
+
+func hasSpecialChar(password string) bool {
+	for _, ch := range password {
+		if ch >= '!' && ch <= '/' || ch >= ':' && ch <= '@' || ch >= '[' && ch <= '`' || ch >= '{' && ch <= '~' {
+			return true
+		}
+	}
+	return false
+}
+
+func countCharTypes(password string) int {
+	types := 0
+	if hasUpperCase(password) {
+		types++
+	}
+	if hasLowerCase(password) {
+		types++
+	}
+	if hasDigit(password) {
+		types++
+	}
+	if hasSpecialChar(password) {
+		types++
+	}
+	return types
+}
+
 // ValidatePasswordStrength checks if password meets minimum requirements
 func ValidatePasswordStrength(password string) error {
 	if len(password) < 12 {
 		return errors.New("password must be at least 12 characters long")
 	}
-
 	if len(password) > 128 {
 		return errors.New("password must be no more than 128 characters")
 	}
-
-	// Check for at least 3 of 4 character types
-	var (
-		hasUpper   bool
-		hasLower   bool
-		hasNumber  bool
-		hasSpecial bool
-	)
-
-	for _, char := range password {
-		switch {
-		case char >= 'A' && char <= 'Z':
-			hasUpper = true
-		case char >= 'a' && char <= 'z':
-			hasLower = true
-		case char >= '0' && char <= '9':
-			hasNumber = true
-		case char >= '!' && char <= '/' || char >= ':' && char <= '@' || char >= '[' && char <= '`' || char >= '{' && char <= '~':
-			hasSpecial = true
-		}
-	}
-
-	types := 0
-	if hasUpper {
-		types++
-	}
-	if hasLower {
-		types++
-	}
-	if hasNumber {
-		types++
-	}
-	if hasSpecial {
-		types++
-	}
-
-	if types < 3 {
+	if countCharTypes(password) < 3 {
 		return errors.New("password must contain at least 3 of the following: uppercase letters, lowercase letters, numbers, special characters")
 	}
-
 	return nil
 }

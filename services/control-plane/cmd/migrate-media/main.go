@@ -101,56 +101,56 @@ func main() {
 	// Migrate user avatars
 	log.Println("--- User Avatars ---")
 	stats := migrateColumn(ctx, db, mc, cfg.MinIOBucket, *dryRun, *batchSize, migrateOpts{
-		table:      "users",
-		column:     "avatar_url",
-		idColumn:   "id",
-		keyPrefix:  "avatars",
-		proxyPath:  "/api/v1/media/avatars",
-		maxW:       media.AvatarMaxDim,
-		maxH:       media.AvatarMaxDim,
-		outputPNG:  true,
+		table:     "users",
+		column:    "avatar_url",
+		idColumn:  "id",
+		keyPrefix: "avatars",
+		proxyPath: "/api/v1/media/avatars",
+		maxW:      media.AvatarMaxDim,
+		maxH:      media.AvatarMaxDim,
+		outputPNG: true,
 	})
 	total.add(stats)
 
 	// Migrate user banners
 	log.Println("--- User Banners ---")
 	stats = migrateColumn(ctx, db, mc, cfg.MinIOBucket, *dryRun, *batchSize, migrateOpts{
-		table:      "users",
-		column:     "header_image_url",
-		idColumn:   "id",
-		keyPrefix:  "banners",
-		proxyPath:  "/api/v1/media/banners",
-		maxW:       media.BannerMaxW,
-		maxH:       media.BannerMaxH,
-		outputPNG:  false,
+		table:     "users",
+		column:    "header_image_url",
+		idColumn:  "id",
+		keyPrefix: "banners",
+		proxyPath: "/api/v1/media/banners",
+		maxW:      media.BannerMaxW,
+		maxH:      media.BannerMaxH,
+		outputPNG: false,
 	})
 	total.add(stats)
 
 	// Migrate server icons
 	log.Println("--- Server Icons ---")
 	stats = migrateColumn(ctx, db, mc, cfg.MinIOBucket, *dryRun, *batchSize, migrateOpts{
-		table:      "servers",
-		column:     "icon_url",
-		idColumn:   "id",
-		keyPrefix:  "server-icons",
-		proxyPath:  "/api/v1/media/server-icons",
-		maxW:       media.IconMaxDim,
-		maxH:       media.IconMaxDim,
-		outputPNG:  true,
+		table:     "servers",
+		column:    "icon_url",
+		idColumn:  "id",
+		keyPrefix: "server-icons",
+		proxyPath: "/api/v1/media/server-icons",
+		maxW:      media.IconMaxDim,
+		maxH:      media.IconMaxDim,
+		outputPNG: true,
 	})
 	total.add(stats)
 
 	// Migrate server banners
 	log.Println("--- Server Banners ---")
 	stats = migrateColumn(ctx, db, mc, cfg.MinIOBucket, *dryRun, *batchSize, migrateOpts{
-		table:      "servers",
-		column:     "banner_url",
-		idColumn:   "id",
-		keyPrefix:  "server-banners",
-		proxyPath:  "/api/v1/media/server-banners",
-		maxW:       media.BannerMaxW,
-		maxH:       media.BannerMaxH,
-		outputPNG:  false,
+		table:     "servers",
+		column:    "banner_url",
+		idColumn:  "id",
+		keyPrefix: "server-banners",
+		proxyPath: "/api/v1/media/server-banners",
+		maxW:      media.BannerMaxW,
+		maxH:      media.BannerMaxH,
+		outputPNG: false,
 	})
 	total.add(stats)
 
@@ -172,7 +172,16 @@ type migrateOpts struct {
 	outputPNG bool // true for avatars/icons (transparency), false for banners (JPEG)
 }
 
+type migrator struct {
+	db        *sql.DB
+	mc        *minio.Client
+	bucket    string
+	dryRun    bool
+	batchSize int
+}
+
 func migrateColumn(ctx context.Context, db *sql.DB, mc *minio.Client, bucket string, dryRun bool, batchSize int, opts migrateOpts) migrationStats {
+	m := &migrator{db: db, mc: mc, bucket: bucket, dryRun: dryRun, batchSize: batchSize}
 	var stats migrationStats
 
 	// Query rows with base64 data URLs (skip already-migrated and NULL)
@@ -183,78 +192,11 @@ func migrateColumn(ctx context.Context, db *sql.DB, mc *minio.Client, bucket str
 	)
 
 	for {
-		rows, err := db.QueryContext(ctx, query, batchSize)
+		batchCount, err := m.migrateBatch(ctx, query, opts, &stats)
 		if err != nil {
-			log.Printf("  ERROR: query failed: %v", err)
-			stats.errored++
 			return stats
 		}
 
-		batchCount := 0
-		for rows.Next() {
-			var id, dataURL string
-			if err := rows.Scan(&id, &dataURL); err != nil {
-				log.Printf("  ERROR: scan failed: %v", err)
-				stats.errored++
-				continue
-			}
-			stats.scanned++
-			batchCount++
-
-			// Decode base64 data URL
-			imgBytes, contentType, err := decodeDataURL(dataURL)
-			if err != nil {
-				log.Printf("  ERROR [%s %s]: failed to decode data URL: %v", opts.table, id, err)
-				stats.errored++
-				continue
-			}
-
-			if dryRun {
-				log.Printf("  WOULD MIGRATE [%s %s]: %s (%d bytes base64 → ~%d bytes raw)",
-					opts.table, id, contentType, len(dataURL), len(imgBytes))
-				stats.migrated++
-				continue
-			}
-
-			// Process image (resize + re-encode)
-			processedData, processedCT, procErr := processForMigration(imgBytes, opts.maxW, opts.maxH, opts.outputPNG)
-			if procErr != nil {
-				log.Printf("  ERROR [%s %s]: failed to process image: %v", opts.table, id, procErr)
-				stats.errored++
-				continue
-			}
-
-			// Upload to MinIO
-			objectKey := fmt.Sprintf("%s/%s", opts.keyPrefix, id)
-			_, err = mc.PutObject(ctx, bucket, objectKey, bytes.NewReader(processedData),
-				int64(len(processedData)), minio.PutObjectOptions{ContentType: processedCT})
-			if err != nil {
-				log.Printf("  ERROR [%s %s]: failed to upload to MinIO: %v", opts.table, id, err)
-				stats.errored++
-				continue
-			}
-
-			// Update database column to proxy URL
-			newURL := fmt.Sprintf("%s/%s", opts.proxyPath, id)
-			// #nosec G201 -- table/column names are hardcoded constants
-			updateQuery := fmt.Sprintf(`UPDATE %s SET %s = $1 WHERE %s = $2`, opts.table, opts.column, opts.idColumn)
-			if _, err := db.ExecContext(ctx, updateQuery, newURL, id); err != nil {
-				log.Printf("  ERROR [%s %s]: failed to update DB: %v", opts.table, id, err)
-				stats.errored++
-				continue
-			}
-
-			log.Printf("  MIGRATED [%s %s]: %d bytes base64 → %d bytes %s → %s",
-				opts.table, id, len(dataURL), len(processedData), processedCT, newURL)
-			stats.migrated++
-		}
-		if err := rows.Err(); err != nil {
-			log.Printf("  ERROR: row iteration failed: %v", err)
-			stats.errored++
-		}
-		_ = rows.Close()
-
-		// If we got fewer rows than the batch size, we're done
 		if batchCount < batchSize {
 			break
 		}
@@ -262,6 +204,81 @@ func migrateColumn(ctx context.Context, db *sql.DB, mc *minio.Client, bucket str
 
 	log.Printf("  Subtotal: %d scanned, %d migrated, %d errors", stats.scanned, stats.migrated, stats.errored)
 	return stats
+}
+
+func (m *migrator) migrateBatch(ctx context.Context, query string, opts migrateOpts, stats *migrationStats) (int, error) {
+	rows, err := m.db.QueryContext(ctx, query, m.batchSize)
+	if err != nil {
+		log.Printf("  ERROR: query failed: %v", err)
+		stats.errored++
+		return 0, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	batchCount := 0
+	for rows.Next() {
+		var id, dataURL string
+		if err := rows.Scan(&id, &dataURL); err != nil {
+			log.Printf("  ERROR: scan failed: %v", err)
+			stats.errored++
+			continue
+		}
+		stats.scanned++
+		batchCount++
+
+		m.migrateRow(ctx, id, dataURL, opts, stats)
+	}
+	if err := rows.Err(); err != nil {
+		log.Printf("  ERROR: row iteration failed: %v", err)
+		stats.errored++
+	}
+
+	return batchCount, nil
+}
+
+func (m *migrator) migrateRow(ctx context.Context, id, dataURL string, opts migrateOpts, stats *migrationStats) {
+	imgBytes, contentType, err := decodeDataURL(dataURL)
+	if err != nil {
+		log.Printf("  ERROR [%s %s]: failed to decode data URL: %v", opts.table, id, err)
+		stats.errored++
+		return
+	}
+
+	if m.dryRun {
+		log.Printf("  WOULD MIGRATE [%s %s]: %s (%d bytes base64 → ~%d bytes raw)",
+			opts.table, id, contentType, len(dataURL), len(imgBytes))
+		stats.migrated++
+		return
+	}
+
+	processedData, processedCT, procErr := processForMigration(imgBytes, opts.maxW, opts.maxH, opts.outputPNG)
+	if procErr != nil {
+		log.Printf("  ERROR [%s %s]: failed to process image: %v", opts.table, id, procErr)
+		stats.errored++
+		return
+	}
+
+	objectKey := fmt.Sprintf("%s/%s", opts.keyPrefix, id)
+	_, err = m.mc.PutObject(ctx, m.bucket, objectKey, bytes.NewReader(processedData),
+		int64(len(processedData)), minio.PutObjectOptions{ContentType: processedCT})
+	if err != nil {
+		log.Printf("  ERROR [%s %s]: failed to upload to MinIO: %v", opts.table, id, err)
+		stats.errored++
+		return
+	}
+
+	newURL := fmt.Sprintf("%s/%s", opts.proxyPath, id)
+	// #nosec G201 -- table/column names are hardcoded constants
+	updateQuery := fmt.Sprintf(`UPDATE %s SET %s = $1 WHERE %s = $2`, opts.table, opts.column, opts.idColumn)
+	if _, err := m.db.ExecContext(ctx, updateQuery, newURL, id); err != nil {
+		log.Printf("  ERROR [%s %s]: failed to update DB: %v", opts.table, id, err)
+		stats.errored++
+		return
+	}
+
+	log.Printf("  MIGRATED [%s %s]: %d bytes base64 → %d bytes %s → %s",
+		opts.table, id, len(dataURL), len(processedData), processedCT, newURL)
+	stats.migrated++
 }
 
 // processForMigration delegates to the media package's processing functions

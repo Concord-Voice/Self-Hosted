@@ -22,6 +22,7 @@ const (
 	pathChannelsPrefix   = "/api/v1/channels/"
 	pathCategoriesPrefix = "/api/v1/categories/"
 	invalidUUID          = "not-a-uuid" //nolint:gosec // test constant, not a credential
+	malformedJSON        = "{bad"
 )
 
 func rolesPath(serverID string) string {
@@ -424,11 +425,11 @@ func TestUpdateRole_HierarchyViolation(t *testing.T) {
 func TestUpdateRole_PrivilegeEscalation_Blocked(t *testing.T) {
 	ts, owner, member, serverID := setupOwnerAndMember(t)
 
-	// Give member ManageRoles at position 5
-	grantPermToUser(t, ts, serverID, member.ID, 5, int64(rbac.PermManageRoles))
-
-	// Create a role below the member's position
+	// Create role first so its position is low
 	roleID := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "LowRole", 0)
+
+	// Give member ManageRoles at position ABOVE the created role
+	grantPermToUser(t, ts, serverID, member.ID, 20, int64(rbac.PermManageRoles))
 
 	// Try to escalate permissions beyond what the member has
 	body := map[string]interface{}{
@@ -1934,4 +1935,873 @@ func TestUpdateRole_ReturnsFullRoleBody(t *testing.T) {
 	assert.Equal(t, "BodyChecked", role["name"])
 	assert.Equal(t, true, role["mentionable"])
 	assert.Equal(t, true, role["display_separately"])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Additional coverage tests
+// ─────────────────────────────────────────────────────────────────────────────
+
+func TestReorderRolesMemberWithPermissionSuccess(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+
+	roleA := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "ReorderMemberA", 0)
+	roleB := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "ReorderMemberB", 0)
+
+	// Grant member a role at position well above the created roles
+	grantPermToUser(t, ts, serverID, member.ID, 20, int64(rbac.PermManageRoles))
+
+	body := map[string]interface{}{
+		"role_ids": []string{roleB, roleA},
+	}
+	w := ts.DoRequest("PATCH", reorderRolesPath(serverID), body, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestReorderRolesPositionExceedsActor(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+
+	grantPermToUser(t, ts, serverID, member.ID, 2, int64(rbac.PermManageRoles))
+
+	// Create 3 roles — reordering 3 roles means positions 0,1,2 assigned
+	// member's max position is 2 so max new position (2) >= actorMaxPosition (2)
+	roleA := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "TooManyA", 0)
+	roleB := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "TooManyB", 0)
+	roleC := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "TooManyC", 0)
+	// Keep them below member's position
+	_, err := ts.DB.Exec(`UPDATE roles SET position = 0 WHERE id IN ($1, $2, $3)`, roleA, roleB, roleC)
+	require.NoError(t, err)
+
+	body := map[string]interface{}{
+		"role_ids": []string{roleA, roleB, roleC},
+	}
+	w := ts.DoRequest("PATCH", reorderRolesPath(serverID), body, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+
+	var resp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &resp)
+	assert.Contains(t, resp["error"], "above your position")
+}
+
+func TestAssignRoleInvalidUserID(t *testing.T) {
+	ts, owner, _, serverID := setupOwnerAndMember(t)
+
+	body := map[string]interface{}{
+		"role_id": uuid.New().String(),
+	}
+	w := ts.DoRequest("POST", assignRolePath(serverID, invalidUUID), body, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestAssignRoleMemberWithPermissionSuccess(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+	target := ts.CreateTestUser(t, "assignperm"+uuid.New().String()[:6])
+	ts.AddMemberToServer(t, serverID, target.ID, "member")
+
+	roleID := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "LowAssignable", 0)
+
+	grantPermToUser(t, ts, serverID, member.ID, 20, int64(rbac.PermManageRolesAssign))
+
+	body := map[string]interface{}{
+		"role_id": roleID,
+	}
+	w := ts.DoRequest("POST", assignRolePath(serverID, target.ID), body, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestUnassignRoleInvalidRoleID(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+
+	w := ts.DoRequest("DELETE", unassignRolePath(serverID, member.ID, invalidUUID), nil, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestUnassignRoleMemberWithPermissionSuccess(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+	target := ts.CreateTestUser(t, "unassignperm"+uuid.New().String()[:6])
+	ts.AddMemberToServer(t, serverID, target.ID, "member")
+
+	roleID := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "UnassignLow", 0)
+
+	grantPermToUser(t, ts, serverID, member.ID, 20, int64(rbac.PermManageRolesAssign))
+	assignBody := map[string]interface{}{"role_id": roleID}
+	w := ts.DoRequest("POST", assignRolePath(serverID, target.ID), assignBody, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	w = ts.DoRequest("DELETE", unassignRolePath(serverID, target.ID, roleID), nil, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestDeleteRoleMemberWithPermissionSuccess(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+
+	roleID := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "MemberDeletes", 0)
+
+	grantPermToUser(t, ts, serverID, member.ID, 20, int64(rbac.PermManageRoles))
+
+	w := ts.DoRequest("DELETE", rolePath(serverID, roleID), nil, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestUpdateRoleMemberWithPermissionUpdatesLowerRole(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+
+	roleID := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "MemberEditable", 0)
+
+	grantPermToUser(t, ts, serverID, member.ID, 20, int64(rbac.PermManageRoles))
+
+	body := map[string]interface{}{
+		"name":        "MemberEdited",
+		"mentionable": true,
+	}
+	w := ts.DoRequest("PATCH", rolePath(serverID, roleID), body, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &resp)
+	role := resp["role"].(map[string]interface{})
+	assert.Equal(t, "MemberEdited", role["name"])
+	assert.Equal(t, true, role["mentionable"])
+}
+
+func TestUpdateRoleInvalidBody(t *testing.T) {
+	ts, owner, _, serverID := setupOwnerAndMember(t)
+
+	roleID := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "InvalidBody", 0)
+
+	w := ts.DoRequest("PATCH", rolePath(serverID, roleID), malformedJSON, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestUpdateRoleEmojiBooleanFields(t *testing.T) {
+	ts, owner, _, serverID := setupOwnerAndMember(t)
+
+	roleID := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "EmojiTest", 0)
+
+	emoji := "🎮"
+	body := map[string]interface{}{
+		"emoji":              emoji,
+		"display_separately": true,
+	}
+	w := ts.DoRequest("PATCH", rolePath(serverID, roleID), body, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &resp)
+	role := resp["role"].(map[string]interface{})
+	assert.Equal(t, emoji, role["emoji"])
+	assert.Equal(t, true, role["display_separately"])
+}
+
+func TestGetMyChannelPermissionsNonMember(t *testing.T) {
+	ts, _, _, serverID := setupOwnerAndMember(t)
+	channelID := ts.CreateTestChannel(t, serverID, "perms-outsider", false)
+	outsider := ts.CreateTestUser(t, "chpermout"+uuid.New().String()[:6])
+
+	w := ts.DoRequest("GET", channelPermissionsPath(channelID), nil, testhelpers.AuthHeaders(outsider.AccessToken))
+	// Non-member hits the resolver error path (no membership → resolver returns error → 500)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+}
+
+func TestUpsertChannelOverrideInvalidChannelID(t *testing.T) {
+	ts, owner, _, _ := setupOwnerAndMember(t)
+
+	body := map[string]interface{}{
+		"target_type": "user",
+		"target_id":   uuid.New().String(),
+		"allow":       0,
+		"deny":        0,
+	}
+	w := ts.DoRequest("PUT", channelOverridesPath(invalidUUID), body, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestListChannelOverridesWithExistingOverrides(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+	channelID := ts.CreateTestChannel(t, serverID, "list-with-overrides", false)
+
+	upsertBody := map[string]interface{}{
+		"target_type": "user",
+		"target_id":   member.ID,
+		"allow":       int64(rbac.PermSendMessages),
+		"deny":        0,
+	}
+	w := ts.DoRequest("PUT", channelOverridesPath(channelID), upsertBody, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	w = ts.DoRequest("GET", channelOverridesPath(channelID), nil, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &resp)
+	overrides := resp["overrides"].([]interface{})
+	assert.Equal(t, 1, len(overrides))
+
+	override := overrides[0].(map[string]interface{})
+	assert.Equal(t, "user", override["target_type"])
+	assert.Equal(t, member.ID, override["target_id"])
+	assert.NotEmpty(t, override["created_at"])
+	assert.NotEmpty(t, override["updated_at"])
+}
+
+func TestListCategoryOverridesWithExistingOverrides(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+	catID := createTestCategory(t, ts, serverID, "list-cat-overrides")
+
+	body := map[string]interface{}{
+		"target_type": "user",
+		"target_id":   member.ID,
+		"allow":       int64(rbac.PermSendMessages),
+		"deny":        0,
+	}
+	w := ts.DoRequest("PUT", categoryOverridesPath(catID), body, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	w = ts.DoRequest("GET", categoryOverridesPath(catID), nil, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &resp)
+	overrides := resp["overrides"].([]interface{})
+	assert.Equal(t, 1, len(overrides))
+
+	override := overrides[0].(map[string]interface{})
+	assert.Equal(t, "user", override["target_type"])
+	assert.NotEmpty(t, override["created_at"])
+}
+
+func TestUpsertCategoryOverrideInvalidBody(t *testing.T) {
+	ts, owner, _, serverID := setupOwnerAndMember(t)
+	catID := createTestCategory(t, ts, serverID, "cat-bad-body")
+
+	w := ts.DoRequest("PUT", categoryOverridesPath(catID), malformedJSON, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestUpsertCategoryOverrideInvalidCategoryID(t *testing.T) {
+	ts, owner, _, _ := setupOwnerAndMember(t)
+
+	body := map[string]interface{}{
+		"target_type": "user",
+		"target_id":   uuid.New().String(),
+		"allow":       0,
+		"deny":        0,
+	}
+	w := ts.DoRequest("PUT", categoryOverridesPath(invalidUUID), body, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestUpsertCategoryOverrideUpsertUpdatesExisting(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+	catID := createTestCategory(t, ts, serverID, "cat-upsert-update")
+
+	body := map[string]interface{}{
+		"target_type": "user",
+		"target_id":   member.ID,
+		"allow":       int64(rbac.PermSendMessages),
+		"deny":        0,
+	}
+	w := ts.DoRequest("PUT", categoryOverridesPath(catID), body, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	body["deny"] = int64(rbac.PermAttachFiles)
+	w = ts.DoRequest("PUT", categoryOverridesPath(catID), body, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	w = ts.DoRequest("GET", categoryOverridesPath(catID), nil, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+	var listResp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &listResp)
+	overrides := listResp["overrides"].([]interface{})
+	assert.Equal(t, 1, len(overrides), "upsert should not create duplicates")
+}
+
+func TestSetChannelPermSyncInvalidBody(t *testing.T) {
+	ts, owner, _, serverID := setupOwnerAndMember(t)
+	channelID := ts.CreateTestChannel(t, serverID, "sync-bad-body", false)
+
+	w := ts.DoRequest("PUT", channelPermSyncPath(channelID), malformedJSON, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestSetChannelPermSyncMemberWithPermissionSuccess(t *testing.T) {
+	ts, _, member, serverID := setupOwnerAndMember(t)
+	catID := createTestCategory(t, ts, serverID, "sync-member-perm")
+	channelID := ts.CreateTestChannel(t, serverID, "sync-member-ch", false)
+	assignChannelToCategory(t, ts, channelID, catID, false)
+
+	grantPermToUser(t, ts, serverID, member.ID, 5, int64(rbac.PermManageChannels))
+
+	body := map[string]interface{}{
+		"sync_permissions": true,
+	}
+	w := ts.DoRequest("PUT", channelPermSyncPath(channelID), body, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestDeleteCategoryOverrideCascadeNoSyncChannels(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+	catID := createTestCategory(t, ts, serverID, "cat-no-sync-cascade")
+	channelID := ts.CreateTestChannel(t, serverID, "unsync-channel", false)
+	assignChannelToCategory(t, ts, channelID, catID, false) // sync=false
+
+	body := map[string]interface{}{
+		"target_type": "user",
+		"target_id":   member.ID,
+		"allow":       int64(rbac.PermSendMessages),
+		"deny":        0,
+	}
+	w := ts.DoRequest("PUT", categoryOverridesPath(catID), body, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var upsertResp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &upsertResp)
+	overrideID := upsertResp["override"].(map[string]interface{})["id"].(string)
+
+	w = ts.DoRequest("DELETE", categoryOverridePath(catID, overrideID), nil, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestListChannelOverridesMemberWithManageChannels(t *testing.T) {
+	ts, _, member, serverID := setupOwnerAndMember(t)
+	channelID := ts.CreateTestChannel(t, serverID, "list-perm", false)
+
+	grantPermToUser(t, ts, serverID, member.ID, 5, int64(rbac.PermManageChannels))
+
+	w := ts.DoRequest("GET", channelOverridesPath(channelID), nil, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestDeleteChannelOverrideMemberWithManageChannels(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+	channelID := ts.CreateTestChannel(t, serverID, "del-member-perm", false)
+
+	grantPermToUser(t, ts, serverID, member.ID, 5, int64(rbac.PermManageChannels))
+
+	upsertBody := map[string]interface{}{
+		"target_type": "user",
+		"target_id":   member.ID,
+		"allow":       int64(rbac.PermSendMessages),
+		"deny":        0,
+	}
+	w := ts.DoRequest("PUT", channelOverridesPath(channelID), upsertBody, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var upsertResp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &upsertResp)
+	overrideID := upsertResp["override"].(map[string]interface{})["id"].(string)
+
+	w = ts.DoRequest("DELETE", channelOverridePath(channelID, overrideID), nil, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestUpsertChannelOverrideMemberWithManageChannels(t *testing.T) {
+	ts, _, member, serverID := setupOwnerAndMember(t)
+	channelID := ts.CreateTestChannel(t, serverID, "upsert-member-perm", false)
+
+	grantPermToUser(t, ts, serverID, member.ID, 5, int64(rbac.PermManageChannels|rbac.PermSendMessages))
+
+	body := map[string]interface{}{
+		"target_type": "user",
+		"target_id":   member.ID,
+		"allow":       int64(rbac.PermSendMessages),
+		"deny":        0,
+	}
+	w := ts.DoRequest("PUT", channelOverridesPath(channelID), body, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestListCategoryOverridesMemberWithManageChannels(t *testing.T) {
+	ts, _, member, serverID := setupOwnerAndMember(t)
+	catID := createTestCategory(t, ts, serverID, "cat-list-perm")
+
+	grantPermToUser(t, ts, serverID, member.ID, 5, int64(rbac.PermManageChannels))
+
+	w := ts.DoRequest("GET", categoryOverridesPath(catID), nil, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestUpsertCategoryOverrideMemberWithManageChannels(t *testing.T) {
+	ts, _, member, serverID := setupOwnerAndMember(t)
+	catID := createTestCategory(t, ts, serverID, "cat-upsert-perm")
+
+	grantPermToUser(t, ts, serverID, member.ID, 5, int64(rbac.PermManageChannels|rbac.PermSendMessages))
+
+	body := map[string]interface{}{
+		"target_type": "user",
+		"target_id":   member.ID,
+		"allow":       int64(rbac.PermSendMessages),
+		"deny":        0,
+	}
+	w := ts.DoRequest("PUT", categoryOverridesPath(catID), body, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestDeleteCategoryOverrideMemberWithManageChannels(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+	catID := createTestCategory(t, ts, serverID, "cat-del-perm")
+
+	grantPermToUser(t, ts, serverID, member.ID, 5, int64(rbac.PermManageChannels))
+
+	body := map[string]interface{}{
+		"target_type": "user",
+		"target_id":   member.ID,
+		"allow":       int64(rbac.PermSendMessages),
+		"deny":        0,
+	}
+	w := ts.DoRequest("PUT", categoryOverridesPath(catID), body, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var upsertResp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &upsertResp)
+	overrideID := upsertResp["override"].(map[string]interface{})["id"].(string)
+
+	w = ts.DoRequest("DELETE", categoryOverridePath(catID, overrideID), nil, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestCreateRoleWithEmoji(t *testing.T) {
+	ts, owner, _, serverID := setupOwnerAndMember(t)
+
+	emoji := "🎯"
+	body := map[string]interface{}{
+		"name":               "EmojiRole",
+		"permissions":        "0",
+		"emoji":              emoji,
+		"display_separately": true,
+	}
+	w := ts.DoRequest("POST", rolesPath(serverID), body, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusCreated, w.Code)
+
+	var resp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &resp)
+	role := resp["role"].(map[string]interface{})
+	assert.Equal(t, emoji, role["emoji"])
+	assert.Equal(t, true, role["display_separately"])
+}
+
+func TestGetAuditLogCustomPagination(t *testing.T) {
+	ts, owner, _, serverID := setupOwnerAndMember(t)
+
+	for i := 0; i < 5; i++ {
+		createRoleViaAPI(t, ts, serverID, owner.AccessToken, fmt.Sprintf("AuditCustom%d", i), 0)
+	}
+
+	w := ts.DoRequest("GET", auditLogPath(serverID)+"?limit=3&offset=1", nil, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &resp)
+	assert.Equal(t, float64(3), resp["limit"])
+	assert.Equal(t, float64(1), resp["offset"])
+	entries := resp["entries"].([]interface{})
+	assert.LessOrEqual(t, len(entries), 3)
+}
+
+func TestGetAuditLogInvalidPaginationUsesDefaults(t *testing.T) {
+	ts, owner, _, serverID := setupOwnerAndMember(t)
+
+	createRoleViaAPI(t, ts, serverID, owner.AccessToken, "AuditDefault", 0)
+
+	w := ts.DoRequest("GET", auditLogPath(serverID)+"?limit=invalid&offset=bad", nil, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &resp)
+	assert.Equal(t, float64(50), resp["limit"])
+	assert.Equal(t, float64(0), resp["offset"])
+}
+
+func TestSetChannelPermSyncDisableSyncWithExistingOverrides(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+	catID := createTestCategory(t, ts, serverID, "sync-disable-existing")
+	channelID := ts.CreateTestChannel(t, serverID, "sync-disable-ch", false)
+	assignChannelToCategory(t, ts, channelID, catID, false)
+
+	catBody := map[string]interface{}{
+		"target_type": "user",
+		"target_id":   member.ID,
+		"allow":       0,
+		"deny":        int64(rbac.PermSendMessages),
+	}
+	w := ts.DoRequest("PUT", categoryOverridesPath(catID), catBody, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	syncBody := map[string]interface{}{"sync_permissions": true}
+	w = ts.DoRequest("PUT", channelPermSyncPath(channelID), syncBody, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Now disable sync
+	syncBody["sync_permissions"] = false
+	w = ts.DoRequest("PUT", channelPermSyncPath(channelID), syncBody, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &resp)
+	assert.Equal(t, false, resp["sync_permissions"])
+}
+
+func TestUpdateRoleMemberUpdatesPermissionsWithinAllowed(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+
+	roleID := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "PermUpdateable", 0)
+
+	// Give member ManageRoles AND Kick — they can grant Kick to the role
+	grantPermToUser(t, ts, serverID, member.ID, 20, int64(rbac.PermManageRoles|rbac.PermKick))
+
+	newPerms := int64(rbac.PermKick)
+	body := map[string]interface{}{
+		"permissions": fmt.Sprintf("%d", newPerms),
+	}
+	w := ts.DoRequest("PATCH", rolePath(serverID, roleID), body, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &resp)
+	role := resp["role"].(map[string]interface{})
+	permStr := role["permissions"].(string)
+	assert.Equal(t, fmt.Sprintf("%d", newPerms), permStr)
+}
+
+func TestGetMyServerPermissionsNonMember(t *testing.T) {
+	ts, _, _, serverID := setupOwnerAndMember(t)
+	outsider := ts.CreateTestUser(t, "srvpermout"+uuid.New().String()[:6])
+
+	w := ts.DoRequest("GET", serverPermissionsPath(serverID), nil, testhelpers.AuthHeaders(outsider.AccessToken))
+	// Non-member is blocked by membership middleware → 403
+	assert.Equal(t, http.StatusForbidden, w.Code)
+}
+
+func TestListRolesMemberCanList(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+
+	// Create multiple roles to trigger iteration
+	createRoleViaAPI(t, ts, serverID, owner.AccessToken, "ListA", 0)
+	createRoleViaAPI(t, ts, serverID, owner.AccessToken, "ListB", 0)
+
+	w := ts.DoRequest("GET", rolesPath(serverID), nil, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	roles := body["roles"].([]interface{})
+	// @all + admin (from AddMemberToServer) + 2 new roles = at least 3
+	assert.GreaterOrEqual(t, len(roles), 3)
+
+	// Verify structure of returned roles
+	for _, r := range roles {
+		role := r.(map[string]interface{})
+		assert.NotEmpty(t, role["id"])
+		assert.NotEmpty(t, role["server_id"])
+		assert.NotEmpty(t, role["name"])
+	}
+}
+
+func TestDeleteRoleMemberDeletesLowerRoleVerifyPosition(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+
+	// Create role first so its position is lower
+	roleID := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "DelByMember", 0)
+
+	// Then give member high position with ManageRoles
+	grantPermToUser(t, ts, serverID, member.ID, 20, int64(rbac.PermManageRoles))
+
+	// Member should be able to delete a role below their position
+	w := ts.DoRequest("DELETE", rolePath(serverID, roleID), nil, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &resp)
+	assert.Equal(t, "Role deleted", resp["message"])
+}
+
+func TestUpsertCategoryOverrideDenyBitsNoEscalation(t *testing.T) {
+	ts, _, member, serverID := setupOwnerAndMember(t)
+	catID := createTestCategory(t, ts, serverID, "cat-deny-bits")
+
+	grantPermToUser(t, ts, serverID, member.ID, 5, int64(rbac.PermManageChannels))
+
+	// Deny bits should be allowed even for permissions the actor doesn't have
+	body := map[string]interface{}{
+		"target_type": "user",
+		"target_id":   member.ID,
+		"allow":       0,
+		"deny":        int64(rbac.PermBan | rbac.PermAdministrator),
+	}
+	w := ts.DoRequest("PUT", categoryOverridesPath(catID), body, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestSetChannelPermSyncEnableSyncNoCategoryOverrides(t *testing.T) {
+	ts, owner, _, serverID := setupOwnerAndMember(t)
+	catID := createTestCategory(t, ts, serverID, "sync-empty-cat")
+	channelID := ts.CreateTestChannel(t, serverID, "sync-empty-ch", false)
+	assignChannelToCategory(t, ts, channelID, catID, false)
+
+	body := map[string]interface{}{
+		"sync_permissions": true,
+	}
+	w := ts.DoRequest("PUT", channelPermSyncPath(channelID), body, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// No category overrides to copy — channel should have no overrides
+	var count int
+	err := ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM channel_permission_overrides WHERE channel_id = $1`, channelID,
+	).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count)
+}
+
+func TestSetChannelPermSyncEnableSyncWithExistingChannelOverrides(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+	catID := createTestCategory(t, ts, serverID, "sync-replace")
+	channelID := ts.CreateTestChannel(t, serverID, "sync-replace-ch", false)
+	assignChannelToCategory(t, ts, channelID, catID, false)
+
+	// Create a channel override directly
+	ts.CreateChannelOverride(t, channelID, "user", member.ID, int64(rbac.PermSendMessages), 0)
+
+	// Create a different category override
+	var allRoleID string
+	err := ts.DB.QueryRow(`SELECT id FROM roles WHERE server_id = $1 AND is_default = TRUE`, serverID).Scan(&allRoleID)
+	require.NoError(t, err)
+
+	catBody := map[string]interface{}{
+		"target_type": "role",
+		"target_id":   allRoleID,
+		"allow":       0,
+		"deny":        int64(rbac.PermAttachFiles),
+	}
+	w := ts.DoRequest("PUT", categoryOverridesPath(catID), catBody, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Enable sync — should replace channel overrides with category overrides
+	body := map[string]interface{}{
+		"sync_permissions": true,
+	}
+	w = ts.DoRequest("PUT", channelPermSyncPath(channelID), body, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Verify: old user override removed, new role override from category present
+	var count int
+	err = ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM channel_permission_overrides WHERE channel_id = $1 AND target_type = 'user'`, channelID,
+	).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 0, count, "old user override should be removed by sync")
+
+	err = ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM channel_permission_overrides WHERE channel_id = $1 AND target_type = 'role'`, channelID,
+	).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "category role override should be synced")
+}
+
+func TestAssignRoleMemberWithPermissionOwnerBypass(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+
+	// Create a high-position role
+	roleID := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "HighAssignOwner", 0)
+	_, err := ts.DB.Exec(`UPDATE roles SET position = 100 WHERE id = $1`, roleID)
+	require.NoError(t, err)
+
+	// Owner can assign any role regardless of position
+	body := map[string]interface{}{
+		"role_id": roleID,
+	}
+	w := ts.DoRequest("POST", assignRolePath(serverID, member.ID), body, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestUnassignRoleOwnerBypassHierarchy(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+
+	roleID := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "HighUnassignOwner", 0)
+	_, err := ts.DB.Exec(`UPDATE roles SET position = 100 WHERE id = $1`, roleID)
+	require.NoError(t, err)
+
+	// Assign it first
+	assignBody := map[string]interface{}{"role_id": roleID}
+	w := ts.DoRequest("POST", assignRolePath(serverID, member.ID), assignBody, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Owner can unassign regardless of position
+	w = ts.DoRequest("DELETE", unassignRolePath(serverID, member.ID, roleID), nil, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestDeleteRoleSuccessMemberThenVerifyGone(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+
+	roleID := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "MemberWillDelete", 0)
+
+	grantPermToUser(t, ts, serverID, member.ID, 20, int64(rbac.PermManageRoles))
+
+	w := ts.DoRequest("DELETE", rolePath(serverID, roleID), nil, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Verify gone via list
+	w = ts.DoRequest("GET", rolesPath(serverID), nil, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &resp)
+	roles := resp["roles"].([]interface{})
+	for _, r := range roles {
+		role := r.(map[string]interface{})
+		assert.NotEqual(t, roleID, role["id"])
+	}
+}
+
+func TestListRolesReturnsAllFields(t *testing.T) {
+	ts, owner, _, serverID := setupOwnerAndMember(t)
+
+	// Create roles with all optional fields
+	color := "#112233"
+	emoji := "🔥"
+	body := map[string]interface{}{
+		"name":               "FullFieldRole",
+		"permissions":        fmt.Sprintf("%d", int64(rbac.PermKick)),
+		"color":              color,
+		"emoji":              emoji,
+		"mentionable":        true,
+		"display_separately": true,
+	}
+	w := ts.DoRequest("POST", rolesPath(serverID), body, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	// List roles and verify fields
+	w = ts.DoRequest("GET", rolesPath(serverID), nil, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &resp)
+	roles := resp["roles"].([]interface{})
+
+	var foundCustom bool
+	for _, r := range roles {
+		role := r.(map[string]interface{})
+		if role["name"] == "FullFieldRole" {
+			foundCustom = true
+			assert.Equal(t, color, role["color"])
+			assert.Equal(t, emoji, role["emoji"])
+			assert.Equal(t, true, role["mentionable"])
+			assert.Equal(t, true, role["display_separately"])
+			assert.Equal(t, false, role["is_default"])
+			assert.Equal(t, false, role["is_managed"])
+			assert.NotEmpty(t, role["id"])
+			assert.NotEmpty(t, role["server_id"])
+			assert.NotEmpty(t, role["created_at"])
+			assert.NotEmpty(t, role["updated_at"])
+		}
+	}
+	assert.True(t, foundCustom, "should find the custom role in list")
+}
+
+func TestGetAuditLogLimitBounds(t *testing.T) {
+	ts, owner, _, serverID := setupOwnerAndMember(t)
+
+	createRoleViaAPI(t, ts, serverID, owner.AccessToken, "AuditBounds", 0)
+
+	// Limit > 100 should be clamped to default 50
+	w := ts.DoRequest("GET", auditLogPath(serverID)+"?limit=200", nil, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &resp)
+	assert.Equal(t, float64(50), resp["limit"])
+
+	// Limit = 0 should be clamped to default 50
+	w = ts.DoRequest("GET", auditLogPath(serverID)+"?limit=0", nil, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+	testhelpers.ParseJSON(t, w, &resp)
+	assert.Equal(t, float64(50), resp["limit"])
+
+	// Negative offset should use default 0
+	w = ts.DoRequest("GET", auditLogPath(serverID)+"?offset=-1", nil, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+	testhelpers.ParseJSON(t, w, &resp)
+	assert.Equal(t, float64(0), resp["offset"])
+}
+
+func TestUpsertChannelOverrideAdminBypassesEscalation(t *testing.T) {
+	ts, _, member, serverID := setupOwnerAndMember(t)
+	channelID := ts.CreateTestChannel(t, serverID, "admin-bypass", false)
+
+	// Give member Administrator
+	grantPermToUser(t, ts, serverID, member.ID, 5, int64(rbac.PermAdministrator))
+
+	// Admin can grant any permission via channel override, even ones they don't have on role
+	body := map[string]interface{}{
+		"target_type": "user",
+		"target_id":   member.ID,
+		"allow":       int64(rbac.PermBan | rbac.PermKick),
+		"deny":        0,
+	}
+	w := ts.DoRequest("PUT", channelOverridesPath(channelID), body, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestUpsertCategoryOverrideAdminBypassesEscalation(t *testing.T) {
+	ts, _, member, serverID := setupOwnerAndMember(t)
+	catID := createTestCategory(t, ts, serverID, "cat-admin-bypass")
+
+	grantPermToUser(t, ts, serverID, member.ID, 5, int64(rbac.PermAdministrator))
+
+	body := map[string]interface{}{
+		"target_type": "user",
+		"target_id":   member.ID,
+		"allow":       int64(rbac.PermBan | rbac.PermKick),
+		"deny":        0,
+	}
+	w := ts.DoRequest("PUT", categoryOverridesPath(catID), body, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestDeleteCategoryOverrideInvalidOverrideID(t *testing.T) {
+	ts, owner, _, serverID := setupOwnerAndMember(t)
+	catID := createTestCategory(t, ts, serverID, "cat-del-inv")
+
+	w := ts.DoRequest("DELETE", categoryOverridePath(catID, invalidUUID), nil, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestReorderRolesInvalidBodyNotJSON(t *testing.T) {
+	ts, owner, _, serverID := setupOwnerAndMember(t)
+
+	w := ts.DoRequest("PATCH", reorderRolesPath(serverID), "{bad", testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestAssignRoleInvalidBodyNotJSON(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+
+	w := ts.DoRequest("POST", assignRolePath(serverID, member.ID), "{bad", testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestDeleteRoleOwnerDeletesHighRole(t *testing.T) {
+	ts, owner, _, serverID := setupOwnerAndMember(t)
+
+	roleID := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "OwnerHighDel", 0)
+	_, err := ts.DB.Exec(`UPDATE roles SET position = 99 WHERE id = $1`, roleID)
+	require.NoError(t, err)
+
+	w := ts.DoRequest("DELETE", rolePath(serverID, roleID), nil, testhelpers.AuthHeaders(owner.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestGetAuditLogMemberWithViewAuditLog(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+
+	grantPermToUser(t, ts, serverID, member.ID, 5, int64(rbac.PermViewAuditLog))
+
+	createRoleViaAPI(t, ts, serverID, owner.AccessToken, "AuditVisible", 0)
+
+	w := ts.DoRequest("GET", auditLogPath(serverID), nil, testhelpers.AuthHeaders(member.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var resp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &resp)
+	entries := resp["entries"].([]interface{})
+	assert.GreaterOrEqual(t, len(entries), 1)
 }

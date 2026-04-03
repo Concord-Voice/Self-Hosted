@@ -1,20 +1,29 @@
 package websocket
 
 import (
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/vmihailenco/msgpack/v5"
+)
+
+const (
+	testServerA = "server-a"
+	testServerB = "server-b"
 )
 
 const notAUUID = "not-a-uuid"
 
 // --- Hub construction tests ---
 
-func TestNewHub_InitializesMaps(t *testing.T) {
+func TestNewHubInitializesMaps(t *testing.T) {
 	hub := NewHub(nil, nil)
 
 	assert.NotNil(t, hub.clients)
@@ -78,7 +87,7 @@ func newTestClient(hub *Hub, userID uuid.UUID) *Client {
 
 // --- handleUnregister tests (no DB/Redis needed for map cleanup) ---
 
-func TestHandleUnregister_RemovesClient(t *testing.T) {
+func TestHandleUnregisterRemovesClient(t *testing.T) {
 	hub := newMinimalHub()
 	userID := uuid.New()
 	client := newTestClient(hub, userID)
@@ -96,7 +105,7 @@ func TestHandleUnregister_RemovesClient(t *testing.T) {
 	assert.True(t, hub.userClients[userID][otherClient.ID], "other client should remain")
 }
 
-func TestHandleUnregister_MultiDevice_KeepsOtherClients(t *testing.T) {
+func TestHandleUnregisterMultiDeviceKeepsOtherClients(t *testing.T) {
 	hub := newMinimalHub()
 	userID := uuid.New()
 	client1 := newTestClient(hub, userID)
@@ -115,7 +124,7 @@ func TestHandleUnregister_MultiDevice_KeepsOtherClients(t *testing.T) {
 	assert.True(t, hub.userClients[userID][client2.ID], "other client should remain in userClients")
 }
 
-func TestHandleUnregister_RemovesFromChannelSubscriptions(t *testing.T) {
+func TestHandleUnregisterRemovesFromChannelSubscriptions(t *testing.T) {
 	hub := newMinimalHub()
 	userID := uuid.New()
 	channelID := uuid.New()
@@ -135,7 +144,7 @@ func TestHandleUnregister_RemovesFromChannelSubscriptions(t *testing.T) {
 	assert.False(t, exists, "channel subscription should be cleaned up when last subscriber disconnects")
 }
 
-func TestHandleUnregister_RemovesFromServerSubscriptions(t *testing.T) {
+func TestHandleUnregisterRemovesFromServerSubscriptions(t *testing.T) {
 	hub := newMinimalHub()
 	userID := uuid.New()
 	serverID := uuid.New()
@@ -153,7 +162,7 @@ func TestHandleUnregister_RemovesFromServerSubscriptions(t *testing.T) {
 	assert.False(t, exists, "server subscription should be cleaned up")
 }
 
-func TestHandleUnregister_RemovesFromDMSubscriptions(t *testing.T) {
+func TestHandleUnregisterRemovesFromDMSubscriptions(t *testing.T) {
 	hub := newMinimalHub()
 	userID := uuid.New()
 	convID := uuid.New()
@@ -171,7 +180,7 @@ func TestHandleUnregister_RemovesFromDMSubscriptions(t *testing.T) {
 	assert.False(t, exists, "DM subscription should be cleaned up")
 }
 
-func TestHandleUnregister_ClosesClientSendChannel(t *testing.T) {
+func TestHandleUnregisterClosesClientSendChannel(t *testing.T) {
 	hub := newMinimalHub()
 	userID := uuid.New()
 	client := newTestClient(hub, userID)
@@ -188,7 +197,7 @@ func TestHandleUnregister_ClosesClientSendChannel(t *testing.T) {
 	assert.False(t, ok, "Send channel should be closed")
 }
 
-func TestHandleUnregister_NonexistentClient(t *testing.T) {
+func TestHandleUnregisterNonexistentClient(t *testing.T) {
 	hub := newMinimalHub()
 	client := newTestClient(hub, uuid.New())
 
@@ -196,7 +205,7 @@ func TestHandleUnregister_NonexistentClient(t *testing.T) {
 	hub.handleUnregister(client)
 }
 
-func TestHandleUnregister_RemovesUsernameCache(t *testing.T) {
+func TestHandleUnregisterRemovesUsernameCache(t *testing.T) {
 	hub := newMinimalHub()
 	userID := uuid.New()
 	client := newTestClient(hub, userID)
@@ -218,7 +227,7 @@ func TestHandleUnregister_RemovesUsernameCache(t *testing.T) {
 
 // --- handleBroadcast tests ---
 
-func TestHandleBroadcast_SendsToSubscribers(t *testing.T) {
+func TestHandleBroadcastSendsToSubscribers(t *testing.T) {
 	hub := newMinimalHub()
 	channelID := uuid.New()
 	user1 := uuid.New()
@@ -248,7 +257,7 @@ func TestHandleBroadcast_SendsToSubscribers(t *testing.T) {
 	assert.Len(t, client2.Send, 1)
 }
 
-func TestHandleBroadcast_ExcludesUser(t *testing.T) {
+func TestHandleBroadcastExcludesUser(t *testing.T) {
 	hub := newMinimalHub()
 	channelID := uuid.New()
 	senderID := uuid.New()
@@ -279,7 +288,7 @@ func TestHandleBroadcast_ExcludesUser(t *testing.T) {
 	assert.Len(t, receiver.Send, 1, "non-excluded user should receive message")
 }
 
-func TestHandleBroadcast_NoSubscribers(t *testing.T) {
+func TestHandleBroadcastNoSubscribers(t *testing.T) {
 	hub := newMinimalHub()
 
 	msg := BroadcastMessage{
@@ -296,7 +305,7 @@ func TestHandleBroadcast_NoSubscribers(t *testing.T) {
 
 // --- handleGlobalBroadcast tests ---
 
-func TestHandleGlobalBroadcast_SendsToAllClients(t *testing.T) {
+func TestHandleGlobalBroadcastSendsToAllClients(t *testing.T) {
 	hub := newMinimalHub()
 	user1 := uuid.New()
 	user2 := uuid.New()
@@ -318,7 +327,7 @@ func TestHandleGlobalBroadcast_SendsToAllClients(t *testing.T) {
 	assert.Len(t, client2.Send, 1)
 }
 
-func TestHandleGlobalBroadcast_NoClients(t *testing.T) {
+func TestHandleGlobalBroadcastNoClients(t *testing.T) {
 	hub := newMinimalHub()
 
 	msg := OutgoingMessage{
@@ -332,7 +341,7 @@ func TestHandleGlobalBroadcast_NoClients(t *testing.T) {
 
 // --- handleServerBroadcast tests ---
 
-func TestHandleServerBroadcast_SendsToSubscribers(t *testing.T) {
+func TestHandleServerBroadcastSendsToSubscribers(t *testing.T) {
 	hub := newMinimalHub()
 	serverID := uuid.New()
 	userID := uuid.New()
@@ -354,7 +363,7 @@ func TestHandleServerBroadcast_SendsToSubscribers(t *testing.T) {
 	assert.Len(t, client.Send, 1)
 }
 
-func TestHandleServerBroadcast_NoSubscribers(t *testing.T) {
+func TestHandleServerBroadcastNoSubscribers(t *testing.T) {
 	hub := newMinimalHub()
 
 	msg := ServerBroadcastMessage{
@@ -371,7 +380,7 @@ func TestHandleServerBroadcast_NoSubscribers(t *testing.T) {
 
 // --- handleUserBroadcast tests ---
 
-func TestHandleUserBroadcast_SendsToAllUserClients(t *testing.T) {
+func TestHandleUserBroadcastSendsToAllUserClients(t *testing.T) {
 	hub := newMinimalHub()
 	userID := uuid.New()
 
@@ -396,7 +405,7 @@ func TestHandleUserBroadcast_SendsToAllUserClients(t *testing.T) {
 	assert.Len(t, client2.Send, 1)
 }
 
-func TestHandleUserBroadcast_ExcludesClient(t *testing.T) {
+func TestHandleUserBroadcastExcludesClient(t *testing.T) {
 	hub := newMinimalHub()
 	userID := uuid.New()
 
@@ -422,7 +431,7 @@ func TestHandleUserBroadcast_ExcludesClient(t *testing.T) {
 	assert.Len(t, client2.Send, 1)
 }
 
-func TestHandleUserBroadcast_UserNotConnected(t *testing.T) {
+func TestHandleUserBroadcastUserNotConnected(t *testing.T) {
 	hub := newMinimalHub()
 
 	msg := UserBroadcastMessage{
@@ -439,7 +448,7 @@ func TestHandleUserBroadcast_UserNotConnected(t *testing.T) {
 
 // --- handleDMBroadcast tests ---
 
-func TestHandleDMBroadcast_SendsToSubscribers(t *testing.T) {
+func TestHandleDMBroadcastSendsToSubscribers(t *testing.T) {
 	hub := newMinimalHub()
 	convID := uuid.New()
 	user1 := uuid.New()
@@ -469,7 +478,7 @@ func TestHandleDMBroadcast_SendsToSubscribers(t *testing.T) {
 	assert.Len(t, client2.Send, 1)
 }
 
-func TestHandleDMBroadcast_ExcludesUser(t *testing.T) {
+func TestHandleDMBroadcastExcludesUser(t *testing.T) {
 	hub := newMinimalHub()
 	convID := uuid.New()
 	senderID := uuid.New()
@@ -500,7 +509,7 @@ func TestHandleDMBroadcast_ExcludesUser(t *testing.T) {
 	assert.Len(t, receiver.Send, 1)
 }
 
-func TestHandleDMBroadcast_NoSubscribers(t *testing.T) {
+func TestHandleDMBroadcastNoSubscribers(t *testing.T) {
 	hub := newMinimalHub()
 
 	msg := DMBroadcastMessage{
@@ -517,7 +526,7 @@ func TestHandleDMBroadcast_NoSubscribers(t *testing.T) {
 
 // --- sendError tests ---
 
-func TestSendError_SendsToClient(t *testing.T) {
+func TestSendErrorSendsToClient(t *testing.T) {
 	hub := newMinimalHub()
 	userID := uuid.New()
 	client := newTestClient(hub, userID)
@@ -534,7 +543,7 @@ func TestSendError_SendsToClient(t *testing.T) {
 	assert.Equal(t, "test error message", msgData["message"])
 }
 
-func TestSendError_ClientNotFound(t *testing.T) {
+func TestSendErrorClientNotFound(t *testing.T) {
 	hub := newMinimalHub()
 	// Should not panic
 	hub.sendError(uuid.New(), "test error")
@@ -542,7 +551,7 @@ func TestSendError_ClientNotFound(t *testing.T) {
 
 // --- sendErrorWithData tests ---
 
-func TestSendErrorWithData_IncludesExtraFields(t *testing.T) {
+func TestSendErrorWithDataIncludesExtraFields(t *testing.T) {
 	hub := newMinimalHub()
 	userID := uuid.New()
 	client := newTestClient(hub, userID)
@@ -566,7 +575,7 @@ func TestSendErrorWithData_IncludesExtraFields(t *testing.T) {
 	assert.Equal(t, "abc-123", msgData["channel_id"])
 }
 
-func TestSendErrorWithData_ClientNotFound(t *testing.T) {
+func TestSendErrorWithDataClientNotFound(t *testing.T) {
 	hub := newMinimalHub()
 	// Should not panic
 	hub.sendErrorWithData(uuid.New(), "test", nil)
@@ -574,7 +583,7 @@ func TestSendErrorWithData_ClientNotFound(t *testing.T) {
 
 // --- handleIncoming routing tests ---
 
-func TestHandleIncoming_UnknownType(t *testing.T) {
+func TestHandleIncomingUnknownType(t *testing.T) {
 	hub := newMinimalHub()
 	msg := IncomingMessage{
 		Type:     "unknown_message_type",
@@ -588,7 +597,7 @@ func TestHandleIncoming_UnknownType(t *testing.T) {
 
 // --- handleUnsubscribe tests ---
 
-func TestHandleUnsubscribe_RemovesFromChannel(t *testing.T) {
+func TestHandleUnsubscribeRemovesFromChannel(t *testing.T) {
 	hub := newMinimalHub()
 	channelID := uuid.New()
 	userID := uuid.New()
@@ -614,7 +623,7 @@ func TestHandleUnsubscribe_RemovesFromChannel(t *testing.T) {
 	assert.False(t, exists, "channel subscription should be cleaned up")
 }
 
-func TestHandleUnsubscribe_InvalidChannelID(t *testing.T) {
+func TestHandleUnsubscribeInvalidChannelID(t *testing.T) {
 	hub := newMinimalHub()
 	client := newTestClient(hub, uuid.New())
 	hub.clients[client.ID] = client
@@ -629,7 +638,7 @@ func TestHandleUnsubscribe_InvalidChannelID(t *testing.T) {
 	hub.handleUnsubscribe(msg)
 }
 
-func TestHandleUnsubscribe_MissingChannelID(t *testing.T) {
+func TestHandleUnsubscribeMissingChannelID(t *testing.T) {
 	hub := newMinimalHub()
 	client := newTestClient(hub, uuid.New())
 	hub.clients[client.ID] = client
@@ -644,7 +653,7 @@ func TestHandleUnsubscribe_MissingChannelID(t *testing.T) {
 	hub.handleUnsubscribe(msg)
 }
 
-func TestHandleUnsubscribe_ClientNotFound(t *testing.T) {
+func TestHandleUnsubscribeClientNotFound(t *testing.T) {
 	hub := newMinimalHub()
 
 	msg := IncomingMessage{
@@ -661,7 +670,7 @@ func TestHandleUnsubscribe_ClientNotFound(t *testing.T) {
 
 // --- handleUnsubscribeServer tests ---
 
-func TestHandleUnsubscribeServer_RemovesFromServer(t *testing.T) {
+func TestHandleUnsubscribeServerRemovesFromServer(t *testing.T) {
 	hub := newMinimalHub()
 	serverID := uuid.New()
 	userID := uuid.New()
@@ -685,7 +694,7 @@ func TestHandleUnsubscribeServer_RemovesFromServer(t *testing.T) {
 	assert.False(t, exists)
 }
 
-func TestHandleUnsubscribeServer_InvalidServerID(t *testing.T) {
+func TestHandleUnsubscribeServerInvalidServerID(t *testing.T) {
 	hub := newMinimalHub()
 	client := newTestClient(hub, uuid.New())
 	hub.clients[client.ID] = client
@@ -700,7 +709,7 @@ func TestHandleUnsubscribeServer_InvalidServerID(t *testing.T) {
 	hub.handleUnsubscribeServer(msg)
 }
 
-func TestHandleUnsubscribeServer_MissingServerID(t *testing.T) {
+func TestHandleUnsubscribeServerMissingServerID(t *testing.T) {
 	hub := newMinimalHub()
 
 	msg := IncomingMessage{
@@ -715,7 +724,7 @@ func TestHandleUnsubscribeServer_MissingServerID(t *testing.T) {
 
 // --- handleUnsubscribeDM tests ---
 
-func TestHandleUnsubscribeDM_RemovesFromDM(t *testing.T) {
+func TestHandleUnsubscribeDMRemovesFromDM(t *testing.T) {
 	hub := newMinimalHub()
 	convID := uuid.New()
 
@@ -737,7 +746,7 @@ func TestHandleUnsubscribeDM_RemovesFromDM(t *testing.T) {
 	assert.False(t, exists)
 }
 
-func TestHandleUnsubscribeDM_InvalidConversationID(t *testing.T) {
+func TestHandleUnsubscribeDMInvalidConversationID(t *testing.T) {
 	hub := newMinimalHub()
 
 	msg := IncomingMessage{
@@ -750,7 +759,7 @@ func TestHandleUnsubscribeDM_InvalidConversationID(t *testing.T) {
 	hub.handleUnsubscribeDM(msg)
 }
 
-func TestHandleUnsubscribeDM_MissingConversationID(t *testing.T) {
+func TestHandleUnsubscribeDMMissingConversationID(t *testing.T) {
 	hub := newMinimalHub()
 
 	msg := IncomingMessage{
@@ -765,7 +774,7 @@ func TestHandleUnsubscribeDM_MissingConversationID(t *testing.T) {
 
 // --- handleDisconnectUser tests ---
 
-func TestHandleDisconnectUser_RemovesTargetedClients(t *testing.T) {
+func TestHandleDisconnectUserRemovesTargetedClients(t *testing.T) {
 	hub := newMinimalHub()
 	targetUserID := uuid.New()
 	otherUserID := uuid.New()
@@ -807,7 +816,7 @@ func TestHandleDisconnectUser_RemovesTargetedClients(t *testing.T) {
 	assert.True(t, exists, "other user's client should be untouched")
 }
 
-func TestHandleDisconnectUser_SendsRevokedMessageToMultipleClients(t *testing.T) {
+func TestHandleDisconnectUserSendsRevokedMessageToMultipleClients(t *testing.T) {
 	hub := newMinimalHub()
 	userID := uuid.New()
 	client1 := newTestClient(hub, userID)
@@ -854,7 +863,7 @@ func TestHandleDisconnectUser_SendsRevokedMessageToMultipleClients(t *testing.T)
 	}
 }
 
-func TestHandleDisconnectUser_UserNotConnected(t *testing.T) {
+func TestHandleDisconnectUserUserNotConnected(t *testing.T) {
 	hub := newMinimalHub()
 	// Should not panic
 	hub.handleDisconnectUser(uuid.New())
@@ -862,7 +871,7 @@ func TestHandleDisconnectUser_UserNotConnected(t *testing.T) {
 
 // --- handleDisconnectSession tests ---
 
-func TestHandleDisconnectSession_DisconnectsMatchingSession(t *testing.T) {
+func TestHandleDisconnectSessionDisconnectsMatchingSession(t *testing.T) {
 	hub := newMinimalHub()
 	userID := uuid.New()
 	sessionID := "session-123"
@@ -884,13 +893,13 @@ func TestHandleDisconnectSession_DisconnectsMatchingSession(t *testing.T) {
 	assert.True(t, exists, "non-matching session client should remain")
 }
 
-func TestHandleDisconnectSession_EmptySessionID(t *testing.T) {
+func TestHandleDisconnectSessionEmptySessionID(t *testing.T) {
 	hub := newMinimalHub()
 	// Should return early
 	hub.handleDisconnectSession("")
 }
 
-func TestHandleDisconnectSession_NoMatchingSessions(t *testing.T) {
+func TestHandleDisconnectSessionNoMatchingSessions(t *testing.T) {
 	hub := newMinimalHub()
 	client := newTestClient(hub, uuid.New())
 	client.SessionID = "some-session"
@@ -906,7 +915,7 @@ func TestHandleDisconnectSession_NoMatchingSessions(t *testing.T) {
 
 // --- sendUnreadNotify tests ---
 
-func TestSendUnreadNotify_SendsToServerSubscribers(t *testing.T) {
+func TestSendUnreadNotifySendsToServerSubscribers(t *testing.T) {
 	hub := newMinimalHub()
 	serverID := uuid.New()
 	channelID := uuid.New()
@@ -939,7 +948,7 @@ func TestSendUnreadNotify_SendsToServerSubscribers(t *testing.T) {
 	assert.Equal(t, "unread_notify", msg["type"])
 }
 
-func TestSendUnreadNotify_SkipsChannelSubscribers(t *testing.T) {
+func TestSendUnreadNotifySkipsChannelSubscribers(t *testing.T) {
 	hub := newMinimalHub()
 	serverID := uuid.New()
 	channelID := uuid.New()
@@ -967,7 +976,7 @@ func TestSendUnreadNotify_SkipsChannelSubscribers(t *testing.T) {
 	assert.Len(t, sender.Send, 0, "sender should not get unread notify")
 }
 
-func TestSendUnreadNotify_NoServerSubscribers(t *testing.T) {
+func TestSendUnreadNotifyNoServerSubscribers(t *testing.T) {
 	hub := newMinimalHub()
 	// Should not panic
 	hub.sendUnreadNotify(uuid.New(), uuid.New(), uuid.New())
@@ -975,7 +984,7 @@ func TestSendUnreadNotify_NoServerSubscribers(t *testing.T) {
 
 // --- handleTyping tests (no DB needed) ---
 
-func TestHandleTyping_NotSubscribed(t *testing.T) {
+func TestHandleTypingNotSubscribed(t *testing.T) {
 	hub := newMinimalHub()
 	channelID := uuid.New()
 	userID := uuid.New()
@@ -1004,7 +1013,7 @@ func TestHandleTyping_NotSubscribed(t *testing.T) {
 	}
 }
 
-func TestHandleTyping_Subscribed(t *testing.T) {
+func TestHandleTypingSubscribed(t *testing.T) {
 	hub := newMinimalHub()
 	channelID := uuid.New()
 	userID := uuid.New()
@@ -1036,7 +1045,7 @@ func TestHandleTyping_Subscribed(t *testing.T) {
 	}
 }
 
-func TestHandleTyping_InvalidChannelID(t *testing.T) {
+func TestHandleTypingInvalidChannelID(t *testing.T) {
 	hub := newMinimalHub()
 	client := newTestClient(hub, uuid.New())
 	hub.clients[client.ID] = client
@@ -1051,7 +1060,7 @@ func TestHandleTyping_InvalidChannelID(t *testing.T) {
 	hub.handleTyping(msg)
 }
 
-func TestHandleTyping_MissingChannelID(t *testing.T) {
+func TestHandleTypingMissingChannelID(t *testing.T) {
 	hub := newMinimalHub()
 
 	msg := IncomingMessage{
@@ -1064,7 +1073,7 @@ func TestHandleTyping_MissingChannelID(t *testing.T) {
 	hub.handleTyping(msg)
 }
 
-func TestHandleTyping_ClientNotFound(t *testing.T) {
+func TestHandleTypingClientNotFound(t *testing.T) {
 	hub := newMinimalHub()
 
 	msg := IncomingMessage{
@@ -1081,7 +1090,7 @@ func TestHandleTyping_ClientNotFound(t *testing.T) {
 
 // --- handleDMTyping tests ---
 
-func TestHandleDMTyping_Subscribed(t *testing.T) {
+func TestHandleDMTypingSubscribed(t *testing.T) {
 	hub := newMinimalHub()
 	convID := uuid.New()
 	userID := uuid.New()
@@ -1112,7 +1121,7 @@ func TestHandleDMTyping_Subscribed(t *testing.T) {
 	}
 }
 
-func TestHandleDMTyping_NotSubscribed(t *testing.T) {
+func TestHandleDMTypingNotSubscribed(t *testing.T) {
 	hub := newMinimalHub()
 	convID := uuid.New()
 	userID := uuid.New()
@@ -1141,7 +1150,7 @@ func TestHandleDMTyping_NotSubscribed(t *testing.T) {
 	}
 }
 
-func TestHandleDMTyping_InvalidConversationID(t *testing.T) {
+func TestHandleDMTypingInvalidConversationID(t *testing.T) {
 	hub := newMinimalHub()
 
 	msg := IncomingMessage{
@@ -1154,7 +1163,7 @@ func TestHandleDMTyping_InvalidConversationID(t *testing.T) {
 	hub.handleDMTyping(msg)
 }
 
-func TestHandleDMTyping_ClientNotFound(t *testing.T) {
+func TestHandleDMTypingClientNotFound(t *testing.T) {
 	hub := newMinimalHub()
 
 	msg := IncomingMessage{
@@ -1171,7 +1180,7 @@ func TestHandleDMTyping_ClientNotFound(t *testing.T) {
 
 // --- handleSetStatus tests (needs Redis; tested for input validation only) ---
 
-func TestHandleSetStatus_InvalidStatus(t *testing.T) {
+func TestHandleSetStatusInvalidStatus(t *testing.T) {
 	hub := newMinimalHub()
 
 	msg := IncomingMessage{
@@ -1186,7 +1195,7 @@ func TestHandleSetStatus_InvalidStatus(t *testing.T) {
 	hub.handleSetStatus(msg)
 }
 
-func TestHandleSetStatus_MissingStatus(t *testing.T) {
+func TestHandleSetStatusMissingStatus(t *testing.T) {
 	hub := newMinimalHub()
 
 	msg := IncomingMessage{
@@ -1217,7 +1226,7 @@ func TestGetConnectedUsers(t *testing.T) {
 	assert.True(t, users[user2])
 }
 
-func TestGetConnectedUsers_Empty(t *testing.T) {
+func TestGetConnectedUsersEmpty(t *testing.T) {
 	hub := newMinimalHub()
 	users := hub.GetConnectedUsers()
 	assert.Empty(t, users)
@@ -1234,14 +1243,14 @@ func TestGetUserClientCount(t *testing.T) {
 	assert.Equal(t, 2, hub.GetUserClientCount(userID))
 }
 
-func TestGetUserClientCount_NotConnected(t *testing.T) {
+func TestGetUserClientCountNotConnected(t *testing.T) {
 	hub := newMinimalHub()
 	assert.Equal(t, 0, hub.GetUserClientCount(uuid.New()))
 }
 
 // --- Public API thread-safe wrappers ---
 
-func TestBroadcastToChannel_QueuesMessage(t *testing.T) {
+func TestBroadcastToChannelQueuesMessage(t *testing.T) {
 	hub := newMinimalHub()
 	channelID := uuid.New()
 	msg := OutgoingMessage{Type: "test", Data: map[string]interface{}{}}
@@ -1257,7 +1266,7 @@ func TestBroadcastToChannel_QueuesMessage(t *testing.T) {
 	}
 }
 
-func TestBroadcastToAll_QueuesMessage(t *testing.T) {
+func TestBroadcastToAllQueuesMessage(t *testing.T) {
 	hub := newMinimalHub()
 	msg := OutgoingMessage{Type: "global_test", Data: map[string]interface{}{}}
 
@@ -1271,7 +1280,7 @@ func TestBroadcastToAll_QueuesMessage(t *testing.T) {
 	}
 }
 
-func TestBroadcastToServer_QueuesMessage(t *testing.T) {
+func TestBroadcastToServerQueuesMessage(t *testing.T) {
 	hub := newMinimalHub()
 	serverID := uuid.New()
 	msg := OutgoingMessage{Type: "server_test", Data: map[string]interface{}{}}
@@ -1287,7 +1296,7 @@ func TestBroadcastToServer_QueuesMessage(t *testing.T) {
 	}
 }
 
-func TestBroadcastToUser_QueuesMessage(t *testing.T) {
+func TestBroadcastToUserQueuesMessage(t *testing.T) {
 	hub := newMinimalHub()
 	userID := uuid.New()
 	msg := OutgoingMessage{Type: "user_test", Data: map[string]interface{}{}}
@@ -1303,7 +1312,7 @@ func TestBroadcastToUser_QueuesMessage(t *testing.T) {
 	}
 }
 
-func TestBroadcastToDM_QueuesMessage(t *testing.T) {
+func TestBroadcastToDMQueuesMessage(t *testing.T) {
 	hub := newMinimalHub()
 	convID := uuid.New()
 	msg := OutgoingMessage{Type: "dm_test", Data: map[string]interface{}{}}
@@ -1319,7 +1328,7 @@ func TestBroadcastToDM_QueuesMessage(t *testing.T) {
 	}
 }
 
-func TestBroadcastServerVoiceCounts_QueuesSignal(t *testing.T) {
+func TestBroadcastServerVoiceCountsQueuesSignal(t *testing.T) {
 	hub := NewHub(nil, nil)
 
 	hub.BroadcastServerVoiceCounts()
@@ -1332,7 +1341,7 @@ func TestBroadcastServerVoiceCounts_QueuesSignal(t *testing.T) {
 	}
 }
 
-func TestBroadcastServerVoiceCounts_CoalescesMultipleSignals(t *testing.T) {
+func TestBroadcastServerVoiceCountsCoalescesMultipleSignals(t *testing.T) {
 	hub := NewHub(nil, nil)
 
 	// Send multiple signals in quick succession
@@ -1358,7 +1367,7 @@ func TestBroadcastServerVoiceCounts_CoalescesMultipleSignals(t *testing.T) {
 
 // --- scheduleOnlineCountBroadcast tests ---
 
-func TestScheduleOnlineCountBroadcast_AddsUserToPending(t *testing.T) {
+func TestScheduleOnlineCountBroadcastAddsUserToPending(t *testing.T) {
 	hub := newMinimalHub()
 	userID := uuid.New()
 
@@ -1371,7 +1380,7 @@ func TestScheduleOnlineCountBroadcast_AddsUserToPending(t *testing.T) {
 	hub.onlineCountTimer.Stop()
 }
 
-func TestScheduleOnlineCountBroadcast_ReusesExistingTimer(t *testing.T) {
+func TestScheduleOnlineCountBroadcastReusesExistingTimer(t *testing.T) {
 	hub := newMinimalHub()
 	user1 := uuid.New()
 	user2 := uuid.New()
@@ -1391,7 +1400,7 @@ func TestScheduleOnlineCountBroadcast_ReusesExistingTimer(t *testing.T) {
 
 // --- Shutdown test ---
 
-func TestShutdown_ClosesAllClientSendChannels(t *testing.T) {
+func TestShutdownClosesAllClientSendChannels(t *testing.T) {
 	hub := NewHub(nil, nil)
 	userID := uuid.New()
 	client := &Client{
@@ -1458,4 +1467,702 @@ func TestShutdownStopsRunLoop(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Run goroutine did not exit after Shutdown")
 	}
+}
+
+// --- isVisibleStatus tests ---
+
+func TestIsVisibleStatus(t *testing.T) {
+	tests := []struct {
+		name string
+		val  interface{}
+		want bool
+	}{
+		{"nil value (just connected)", nil, true},
+		{"online status", "online", true},
+		{"offline status", "offline", true},
+		{"invisible status", "invisible", false},
+		{"empty string", "", true},
+		{"non-string type", 42, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, isVisibleStatus(tt.val))
+		})
+	}
+}
+
+// --- buildPlaceholders tests ---
+
+func TestBuildPlaceholders(t *testing.T) {
+	assert.Equal(t, "$1", buildPlaceholders(1))
+	assert.Equal(t, "$1,$2,$3", buildPlaceholders(3))
+	assert.Equal(t, "", buildPlaceholders(0))
+}
+
+// --- computeServerCounts tests ---
+
+func TestComputeServerCounts(t *testing.T) {
+	hub := newMinimalHub()
+
+	uid1 := uuid.New()
+	uid2 := uuid.New()
+	uid3 := uuid.New()
+
+	serverMembers := map[string][]uuid.UUID{
+		testServerA: {uid1, uid2, uid3},
+		testServerB: {uid2, uid3},
+	}
+	visibleOnline := map[uuid.UUID]bool{
+		uid1: true,
+		uid3: true,
+	}
+
+	counts := hub.computeServerCounts(serverMembers, visibleOnline)
+	assert.Equal(t, 2, counts[testServerA]) // uid1 + uid3
+	assert.Equal(t, 1, counts[testServerB]) // uid3 only
+}
+
+func TestComputeServerCountsNoneOnline(t *testing.T) {
+	hub := newMinimalHub()
+	serverMembers := map[string][]uuid.UUID{
+		testServerA: {uuid.New(), uuid.New()},
+	}
+	counts := hub.computeServerCounts(serverMembers, map[uuid.UUID]bool{})
+	assert.Equal(t, 0, counts[testServerA])
+}
+
+// --- collectPendingUsers tests ---
+
+func TestCollectPendingUsersClearsSet(t *testing.T) {
+	hub := newMinimalHub()
+	uid1 := uuid.New()
+	uid2 := uuid.New()
+	hub.onlineCountPending[uid1] = true
+	hub.onlineCountPending[uid2] = true
+
+	params := hub.collectPendingUsers()
+	assert.Len(t, params, 2)
+	assert.Empty(t, hub.onlineCountPending, "pending set should be cleared")
+}
+
+// --- isFKViolation tests ---
+
+func TestIsFKViolationPostgresForeignKeyError(t *testing.T) {
+	pqErr := &pq.Error{Code: "23503"}
+	assert.True(t, isFKViolation(pqErr))
+}
+
+func TestIsFKViolationOtherPostgresError(t *testing.T) {
+	pqErr := &pq.Error{Code: "23505"} // unique violation
+	assert.False(t, isFKViolation(pqErr))
+}
+
+func TestIsFKViolationNonPostgresError(t *testing.T) {
+	assert.False(t, isFKViolation(errors.New("generic error")))
+}
+
+// --- userHasDMSubscription tests ---
+
+func TestUserHasDMSubscriptionHasSubscribed(t *testing.T) {
+	hub := newMinimalHub()
+	clientID := uuid.New()
+	userClientIDs := map[uuid.UUID]bool{clientID: true}
+	dmClients := map[uuid.UUID]bool{clientID: true}
+
+	assert.True(t, hub.userHasDMSubscription(userClientIDs, dmClients))
+}
+
+func TestUserHasDMSubscriptionNotSubscribed(t *testing.T) {
+	hub := newMinimalHub()
+	clientID := uuid.New()
+	userClientIDs := map[uuid.UUID]bool{clientID: true}
+	dmClients := map[uuid.UUID]bool{uuid.New(): true}
+
+	assert.False(t, hub.userHasDMSubscription(userClientIDs, dmClients))
+}
+
+func TestUserHasDMSubscriptionNilDMClients(t *testing.T) {
+	hub := newMinimalHub()
+	clientID := uuid.New()
+	userClientIDs := map[uuid.UUID]bool{clientID: true}
+
+	assert.False(t, hub.userHasDMSubscription(userClientIDs, nil))
+}
+
+// --- notifyUnsubscribedUser tests ---
+
+func TestNotifyUnsubscribedUserSendsWhenNotSubscribed(t *testing.T) {
+	hub := newMinimalHub()
+	userID := uuid.New()
+	client := newTestClient(hub, userID)
+	hub.clients[client.ID] = client
+	hub.userClients[userID] = map[uuid.UUID]bool{client.ID: true}
+
+	data := []byte(`{"type":"dm_unread_notify"}`)
+	hub.notifyUnsubscribedUser(userID, nil, data)
+
+	select {
+	case msg := <-client.Send:
+		assert.Equal(t, data, msg)
+	default:
+		t.Fatal("expected message to be sent")
+	}
+}
+
+func TestNotifyUnsubscribedUserSkipsWhenSubscribed(t *testing.T) {
+	hub := newMinimalHub()
+	userID := uuid.New()
+	client := newTestClient(hub, userID)
+	hub.clients[client.ID] = client
+	hub.userClients[userID] = map[uuid.UUID]bool{client.ID: true}
+
+	dmClients := map[uuid.UUID]bool{client.ID: true}
+	data := []byte(`{"type":"dm_unread_notify"}`)
+	hub.notifyUnsubscribedUser(userID, dmClients, data)
+
+	select {
+	case <-client.Send:
+		t.Fatal("should not send to subscribed user")
+	default:
+		// expected
+	}
+}
+
+func TestNotifyUnsubscribedUserUserNotConnected(t *testing.T) {
+	hub := newMinimalHub()
+	data := []byte(`{"type":"dm_unread_notify"}`)
+	// Should not panic
+	hub.notifyUnsubscribedUser(uuid.New(), nil, data)
+}
+
+// --- sendToUserClients tests ---
+
+func TestSendToUserClientsMultipleClients(t *testing.T) {
+	hub := newMinimalHub()
+	userID := uuid.New()
+	c1 := newTestClient(hub, userID)
+	c2 := newTestClient(hub, userID)
+	hub.clients[c1.ID] = c1
+	hub.clients[c2.ID] = c2
+
+	clientIDs := map[uuid.UUID]bool{c1.ID: true, c2.ID: true}
+	data := []byte(`{"test":"msg"}`)
+	hub.sendToUserClients(clientIDs, data)
+
+	select {
+	case msg := <-c1.Send:
+		assert.Equal(t, data, msg)
+	default:
+		t.Fatal("c1 should receive message")
+	}
+	select {
+	case msg := <-c2.Send:
+		assert.Equal(t, data, msg)
+	default:
+		t.Fatal("c2 should receive message")
+	}
+}
+
+func TestSendToUserClientsSkipsMissingClient(t *testing.T) {
+	hub := newMinimalHub()
+	missingID := uuid.New()
+	clientIDs := map[uuid.UUID]bool{missingID: true}
+	data := []byte(`{"test":"msg"}`)
+	// Should not panic
+	hub.sendToUserClients(clientIDs, data)
+}
+
+// --- parseDMMentionMeta tests ---
+
+func TestParseDMMentionMetaNoMeta(t *testing.T) {
+	hub := newMinimalHub()
+	msg := IncomingMessage{
+		Data: map[string]interface{}{},
+	}
+	result := hub.parseDMMentionMeta(msg)
+	assert.Nil(t, result)
+}
+
+func TestParseDMMentionMetaInvalidJSON(t *testing.T) {
+	hub := newMinimalHub()
+	msg := IncomingMessage{
+		Data: map[string]interface{}{
+			"mention_meta": "not-valid-json",
+		},
+	}
+	result := hub.parseDMMentionMeta(msg)
+	assert.Nil(t, result)
+}
+
+func TestParseDMMentionMetaSanitizesServerFields(t *testing.T) {
+	hub := newMinimalHub()
+	uid := uuid.New()
+	meta := MentionAddendum{
+		Everyone: true,
+		Users:    []string{uid.String()},
+		Roles:    []string{"admin"},
+	}
+	packed, err := msgpack.Marshal(meta)
+	require.NoError(t, err)
+	encoded := base64.StdEncoding.EncodeToString(packed)
+	msg := IncomingMessage{
+		Data: map[string]interface{}{
+			"mention_meta": encoded,
+		},
+	}
+	result := hub.parseDMMentionMeta(msg)
+	require.NotNil(t, result)
+	assert.False(t, result.Everyone, "Everyone should be cleared for DM")
+	assert.Nil(t, result.Roles, "Roles should be cleared for DM")
+	assert.Equal(t, []string{uid.String()}, result.Users)
+}
+
+// --- validateContentLength tests ---
+
+func TestValidateContentLengthPlaintextOK(t *testing.T) {
+	hub := newMinimalHub()
+	clientID := uuid.New()
+	client := newTestClient(hub, uuid.New())
+	hub.clients[clientID] = client
+
+	assert.True(t, hub.validateContentLength(clientID, "hello", false))
+}
+
+func TestValidateContentLengthPlaintextTooLong(t *testing.T) {
+	hub := newMinimalHub()
+	clientID := uuid.New()
+	client := newTestClient(hub, uuid.New())
+	hub.clients[clientID] = client
+
+	longContent := make([]byte, 4001)
+	for i := range longContent {
+		longContent[i] = 'a'
+	}
+	assert.False(t, hub.validateContentLength(clientID, string(longContent), false))
+}
+
+func TestValidateContentLengthEncryptedHigherLimit(t *testing.T) {
+	hub := newMinimalHub()
+	clientID := uuid.New()
+	client := newTestClient(hub, uuid.New())
+	hub.clients[clientID] = client
+
+	// 5000 chars would fail plaintext but pass encrypted
+	content := make([]byte, 5000)
+	for i := range content {
+		content[i] = 'a'
+	}
+	assert.True(t, hub.validateContentLength(clientID, string(content), true))
+}
+
+// --- handleIncoming routing tests ---
+
+func TestHandleIncomingSubscribeRoute(t *testing.T) {
+	hub := newMinimalHub()
+	clientID := uuid.New()
+	client := newTestClient(hub, uuid.New())
+	hub.clients[clientID] = client
+
+	// subscribe with missing channel_id sends error
+	msg := IncomingMessage{
+		Type:     "subscribe",
+		ClientID: clientID,
+		UserID:   uuid.New(),
+		Data:     map[string]interface{}{},
+	}
+	hub.handleIncoming(msg)
+
+	// Should receive error about invalid channel_id
+	select {
+	case data := <-client.Send:
+		var out OutgoingMessage
+		require.NoError(t, json.Unmarshal(data, &out))
+		assert.Equal(t, "error", out.Type)
+	default:
+		t.Fatal("expected error message")
+	}
+}
+
+func TestHandleIncomingUnsubscribeRoute(t *testing.T) {
+	hub := newMinimalHub()
+	channelID := uuid.New()
+	userID := uuid.New()
+	client := newTestClient(hub, userID)
+	hub.clients[client.ID] = client
+	client.Channels[channelID] = true
+	hub.channelSubscriptions[channelID] = map[uuid.UUID]bool{client.ID: true}
+
+	msg := IncomingMessage{
+		Type:     "unsubscribe",
+		ClientID: client.ID,
+		UserID:   userID,
+		Data: map[string]interface{}{
+			keyChannelID: channelID.String(),
+		},
+	}
+	hub.handleIncoming(msg)
+
+	assert.False(t, client.Channels[channelID])
+}
+
+func TestHandleIncomingSubscribeServerRoute(t *testing.T) {
+	hub := newMinimalHub()
+	clientID := uuid.New()
+	client := newTestClient(hub, uuid.New())
+	hub.clients[clientID] = client
+
+	msg := IncomingMessage{
+		Type:     "subscribe_server",
+		ClientID: clientID,
+		UserID:   uuid.New(),
+		Data:     map[string]interface{}{},
+	}
+	hub.handleIncoming(msg)
+
+	select {
+	case data := <-client.Send:
+		var out OutgoingMessage
+		require.NoError(t, json.Unmarshal(data, &out))
+		assert.Equal(t, "error", out.Type)
+	default:
+		t.Fatal("expected error message for missing server_id")
+	}
+}
+
+func TestHandleIncomingUnsubscribeServerRoute(t *testing.T) {
+	hub := newMinimalHub()
+	userID := uuid.New()
+	client := newTestClient(hub, userID)
+	hub.clients[client.ID] = client
+
+	serverID := uuid.New()
+	hub.serverSubscriptions[serverID] = map[uuid.UUID]bool{client.ID: true}
+
+	msg := IncomingMessage{
+		Type:     "unsubscribe_server",
+		ClientID: client.ID,
+		UserID:   userID,
+		Data: map[string]interface{}{
+			keyServerID: serverID.String(),
+		},
+	}
+	hub.handleIncoming(msg)
+	// Verify removed
+	_, exists := hub.serverSubscriptions[serverID]
+	assert.False(t, exists, "server subscription map should be deleted when empty")
+}
+
+func TestHandleIncomingSubscribeDMRoute(t *testing.T) {
+	hub := newMinimalHub()
+	clientID := uuid.New()
+	client := newTestClient(hub, uuid.New())
+	hub.clients[clientID] = client
+
+	msg := IncomingMessage{
+		Type:     "subscribe_dm",
+		ClientID: clientID,
+		UserID:   uuid.New(),
+		Data:     map[string]interface{}{},
+	}
+	hub.handleIncoming(msg)
+
+	select {
+	case data := <-client.Send:
+		var out OutgoingMessage
+		require.NoError(t, json.Unmarshal(data, &out))
+		assert.Equal(t, "error", out.Type)
+	default:
+		t.Fatal("expected error message for missing conversation_id")
+	}
+}
+
+func TestHandleIncomingUnsubscribeDMRoute(t *testing.T) {
+	hub := newMinimalHub()
+	clientID := uuid.New()
+	client := newTestClient(hub, uuid.New())
+	hub.clients[clientID] = client
+	convID := uuid.New()
+	hub.dmSubscriptions[convID] = map[uuid.UUID]bool{clientID: true}
+
+	msg := IncomingMessage{
+		Type:     "unsubscribe_dm",
+		ClientID: clientID,
+		UserID:   uuid.New(),
+		Data: map[string]interface{}{
+			keyConversationID: convID.String(),
+		},
+	}
+	hub.handleIncoming(msg)
+	assert.False(t, hub.dmSubscriptions[convID][clientID])
+}
+
+func TestHandleIncomingSetStatusRoute(t *testing.T) {
+	hub := newMinimalHub()
+	msg := IncomingMessage{
+		Type:     "set_status",
+		ClientID: uuid.New(),
+		UserID:   uuid.New(),
+		Data:     map[string]interface{}{},
+	}
+	// Missing status — should not panic, just return
+	hub.handleIncoming(msg)
+}
+
+func TestHandleIncomingTypingRoute(t *testing.T) {
+	hub := newMinimalHub()
+	msg := IncomingMessage{
+		Type:     "typing",
+		ClientID: uuid.New(),
+		UserID:   uuid.New(),
+		Data:     map[string]interface{}{},
+	}
+	// Missing channel_id — should not panic, just return
+	hub.handleIncoming(msg)
+}
+
+func TestHandleIncomingDMTypingRoute(t *testing.T) {
+	hub := newMinimalHub()
+	msg := IncomingMessage{
+		Type:     "dm_typing",
+		ClientID: uuid.New(),
+		UserID:   uuid.New(),
+		Data:     map[string]interface{}{},
+	}
+	// Missing conversation_id — should not panic
+	hub.handleIncoming(msg)
+}
+
+func TestHandleIncomingProfileUpdateRouteClientNotFound(t *testing.T) {
+	hub := newMinimalHub()
+	msg := IncomingMessage{
+		Type:     "profile_update",
+		ClientID: uuid.New(), // not registered
+		UserID:   uuid.New(),
+		Data:     map[string]interface{}{},
+	}
+	// Client not found — should return early without panic
+	hub.handleIncoming(msg)
+}
+
+// --- flushOnlineCounts edge cases ---
+
+func TestFlushOnlineCountsEmptyPending(t *testing.T) {
+	hub := newMinimalHub()
+	// Should not panic with nil DB/Redis when pending is empty
+	hub.flushOnlineCounts()
+}
+
+// --- parseDMMessageFields tests ---
+
+func TestParseDMMessageFieldsEmptyContent(t *testing.T) {
+	hub := newMinimalHub()
+	clientID := uuid.New()
+	client := newTestClient(hub, uuid.New())
+	hub.clients[clientID] = client
+
+	msg := IncomingMessage{
+		ClientID: clientID,
+		Data: map[string]interface{}{
+			keyContent: "",
+		},
+	}
+	input, valid := hub.parseDMMessageFields(msg)
+	assert.False(t, valid)
+	assert.Nil(t, input)
+}
+
+func TestParseDMMessageFieldsMissingContent(t *testing.T) {
+	hub := newMinimalHub()
+	clientID := uuid.New()
+	client := newTestClient(hub, uuid.New())
+	hub.clients[clientID] = client
+
+	msg := IncomingMessage{
+		ClientID: clientID,
+		Data:     map[string]interface{}{},
+	}
+	input, valid := hub.parseDMMessageFields(msg)
+	assert.False(t, valid)
+	assert.Nil(t, input)
+}
+
+func TestParseDMMessageFieldsSystemType(t *testing.T) {
+	hub := newMinimalHub()
+	clientID := uuid.New()
+	client := newTestClient(hub, uuid.New())
+	hub.clients[clientID] = client
+
+	msg := IncomingMessage{
+		ClientID: clientID,
+		Data: map[string]interface{}{
+			keyContent:     "system message",
+			keyIsEncrypted: false,
+			"type":         "system",
+		},
+	}
+	input, valid := hub.parseDMMessageFields(msg)
+	assert.True(t, valid)
+	require.NotNil(t, input)
+	assert.Equal(t, "system", input.msgType)
+}
+
+func TestParseDMMessageFieldsCustomKeyVersion(t *testing.T) {
+	hub := newMinimalHub()
+	clientID := uuid.New()
+	client := newTestClient(hub, uuid.New())
+	hub.clients[clientID] = client
+
+	msg := IncomingMessage{
+		ClientID: clientID,
+		Data: map[string]interface{}{
+			keyContent:     "hello",
+			keyIsEncrypted: true,
+			keyKeyVersion:  float64(5),
+		},
+	}
+	input, valid := hub.parseDMMessageFields(msg)
+	assert.True(t, valid)
+	require.NotNil(t, input)
+	assert.Equal(t, 5, input.keyVersion)
+	assert.True(t, input.isEncrypted)
+}
+
+func TestParseDMMessageFieldsDefaultValues(t *testing.T) {
+	hub := newMinimalHub()
+	clientID := uuid.New()
+	client := newTestClient(hub, uuid.New())
+	hub.clients[clientID] = client
+
+	msg := IncomingMessage{
+		ClientID: clientID,
+		Data: map[string]interface{}{
+			keyContent: "hello",
+		},
+	}
+	input, valid := hub.parseDMMessageFields(msg)
+	assert.True(t, valid)
+	require.NotNil(t, input)
+	assert.Equal(t, "user", input.msgType)
+	assert.Equal(t, 1, input.keyVersion)
+	assert.False(t, input.isEncrypted)
+}
+
+// --- validateDMMessage tests ---
+
+func TestValidateDMMessageInvalidConversationID(t *testing.T) {
+	hub := newMinimalHub()
+	msg := IncomingMessage{
+		ClientID: uuid.New(),
+		Data: map[string]interface{}{
+			keyConversationID: "not-a-uuid",
+		},
+	}
+	client, convUUID, input := hub.validateDMMessage(msg)
+	assert.Nil(t, client)
+	assert.Equal(t, uuid.Nil, convUUID)
+	assert.Nil(t, input)
+}
+
+func TestValidateDMMessageMissingConversationID(t *testing.T) {
+	hub := newMinimalHub()
+	msg := IncomingMessage{
+		ClientID: uuid.New(),
+		Data:     map[string]interface{}{},
+	}
+	client, convUUID, input := hub.validateDMMessage(msg)
+	assert.Nil(t, client)
+	assert.Equal(t, uuid.Nil, convUUID)
+	assert.Nil(t, input)
+}
+
+func TestValidateDMMessageClientNotFound(t *testing.T) {
+	hub := newMinimalHub()
+	convID := uuid.New()
+	msg := IncomingMessage{
+		ClientID: uuid.New(),
+		Data: map[string]interface{}{
+			keyConversationID: convID.String(),
+		},
+	}
+	client, convUUID, input := hub.validateDMMessage(msg)
+	assert.Nil(t, client)
+	assert.Equal(t, uuid.Nil, convUUID)
+	assert.Nil(t, input)
+}
+
+func TestValidateDMMessageNotSubscribed(t *testing.T) {
+	hub := newMinimalHub()
+	convID := uuid.New()
+	userID := uuid.New()
+	client := newTestClient(hub, userID)
+	hub.clients[client.ID] = client
+
+	msg := IncomingMessage{
+		ClientID: client.ID,
+		Data: map[string]interface{}{
+			keyConversationID: convID.String(),
+		},
+	}
+	c, convUUID, input := hub.validateDMMessage(msg)
+	assert.Nil(t, c)
+	assert.Equal(t, uuid.Nil, convUUID)
+	assert.Nil(t, input)
+
+	// Verify error was sent
+	select {
+	case data := <-client.Send:
+		var out OutgoingMessage
+		require.NoError(t, json.Unmarshal(data, &out))
+		assert.Equal(t, "error", out.Type)
+	default:
+		t.Fatal("expected error message")
+	}
+}
+
+func TestValidateDMMessageRateLimited(t *testing.T) {
+	hub := newMinimalHub()
+	convID := uuid.New()
+	userID := uuid.New()
+	client := newTestClient(hub, userID)
+	hub.clients[client.ID] = client
+	hub.dmSubscriptions[convID] = map[uuid.UUID]bool{client.ID: true}
+
+	// Exhaust rate limit
+	for i := 0; i < 100; i++ {
+		client.rateLimitAllow()
+	}
+
+	msg := IncomingMessage{
+		ClientID: client.ID,
+		Data: map[string]interface{}{
+			keyConversationID: convID.String(),
+			keyContent:        "hello",
+		},
+	}
+	c, convUUID, input := hub.validateDMMessage(msg)
+	assert.Nil(t, c)
+	assert.Equal(t, uuid.Nil, convUUID)
+	assert.Nil(t, input)
+}
+
+func TestValidateDMMessageValidMessage(t *testing.T) {
+	hub := newMinimalHub()
+	convID := uuid.New()
+	userID := uuid.New()
+	client := newTestClient(hub, userID)
+	hub.clients[client.ID] = client
+	hub.dmSubscriptions[convID] = map[uuid.UUID]bool{client.ID: true}
+
+	msg := IncomingMessage{
+		ClientID: client.ID,
+		Data: map[string]interface{}{
+			keyConversationID: convID.String(),
+			keyContent:        "hello there",
+		},
+	}
+	c, convUUID, input := hub.validateDMMessage(msg)
+	assert.NotNil(t, c)
+	assert.Equal(t, convID, convUUID)
+	require.NotNil(t, input)
+	assert.Equal(t, "hello there", input.content)
 }

@@ -23,6 +23,10 @@ import (
 const (
 	verifyCodeTTL     = 10 * time.Minute // Code expires after 10 minutes
 	verifyMaxAttempts = 5                // Max wrong-code attempts before invalidating
+
+	errMsgFailedSendCode    = "Failed to send verification code"
+	errMsgVerifyFailed      = "Verification failed"
+	errMsgFailedChangeEmail = "Failed to change email"
 )
 
 // verificationRecord is stored in Redis keyed by "email_verify:{user_id}".
@@ -121,7 +125,7 @@ func (vh *VerificationHandler) SendCode(c *gin.Context) {
 	).Scan(&userEmail, &emailVerified)
 	if err != nil {
 		vh.log.Error("Failed to look up user for verification", "error", err, "user_id", userID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send verification code"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendCode})
 		return
 	}
 
@@ -134,8 +138,8 @@ func (vh *VerificationHandler) SendCode(c *gin.Context) {
 	defer cancel()
 
 	if err := vh.GenerateAndSendCode(ctx, userID, userEmail); err != nil {
-		vh.log.Error("Failed to send verification code", "error", err, "user_id", userID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to send verification code"})
+		vh.log.Error(errMsgFailedSendCode, "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendCode})
 		return
 	}
 
@@ -151,6 +155,32 @@ type ConfirmCodeRequest struct {
 	Code string `json:"code" binding:"required"`
 }
 
+func sanitizeVerificationCode(raw string) string {
+	return strings.TrimSpace(strings.ReplaceAll(raw, "-", ""))
+}
+
+func isValidVerificationCode(code string) bool {
+	if len(code) != 6 {
+		return false
+	}
+	for _, ch := range code {
+		if ch < '0' || ch > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func (vh *VerificationHandler) incrementAttempts(ctx context.Context, userID string, record *verificationRecord) int {
+	record.Attempts++
+	updated, _ := json.Marshal(record)
+	ttl := vh.redis.TTL(ctx, redisKey(userID)).Val()
+	if ttl > 0 {
+		vh.redis.Set(ctx, redisKey(userID), updated, ttl)
+	}
+	return verifyMaxAttempts - record.Attempts
+}
+
 // ConfirmCode validates the submitted code and marks the email as verified.
 func (vh *VerificationHandler) ConfirmCode(c *gin.Context) {
 	userID := c.GetString("user_id")
@@ -161,17 +191,10 @@ func (vh *VerificationHandler) ConfirmCode(c *gin.Context) {
 		return
 	}
 
-	// Trim whitespace/dashes and validate format before any Redis lookups
-	code := strings.TrimSpace(strings.ReplaceAll(req.Code, "-", ""))
-	if len(code) != 6 {
+	code := sanitizeVerificationCode(req.Code)
+	if !isValidVerificationCode(code) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Verification code must be 6 digits"})
 		return
-	}
-	for _, ch := range code {
-		if ch < '0' || ch > '9' {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Verification code must be 6 digits"})
-			return
-		}
 	}
 
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 3*time.Second)
@@ -185,34 +208,25 @@ func (vh *VerificationHandler) ConfirmCode(c *gin.Context) {
 	}
 	if err != nil {
 		vh.log.Error("Failed to fetch verification record", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Verification failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgVerifyFailed})
 		return
 	}
 
 	var record verificationRecord
 	if err := json.Unmarshal(data, &record); err != nil {
 		vh.log.Error("Failed to unmarshal verification record", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Verification failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgVerifyFailed})
 		return
 	}
 
-	// Check attempt limit
 	if record.Attempts >= verifyMaxAttempts {
 		vh.redis.Del(ctx, redisKey(userID))
 		c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many attempts. Please request a new code."})
 		return
 	}
 
-	// Timing-safe comparison to prevent side-channel attacks
 	if subtle.ConstantTimeCompare([]byte(hashCode(code)), []byte(record.CodeHash)) != 1 {
-		// Increment attempts
-		record.Attempts++
-		updated, _ := json.Marshal(record)
-		ttl := vh.redis.TTL(ctx, redisKey(userID)).Val()
-		if ttl > 0 {
-			vh.redis.Set(ctx, redisKey(userID), updated, ttl)
-		}
-		remaining := verifyMaxAttempts - record.Attempts
+		remaining := vh.incrementAttempts(ctx, userID, &record)
 		c.JSON(http.StatusBadRequest, gin.H{
 			"error":              "Invalid verification code",
 			"attempts_remaining": remaining,
@@ -220,14 +234,12 @@ func (vh *VerificationHandler) ConfirmCode(c *gin.Context) {
 		return
 	}
 
-	// Code matches — mark the specific email as verified (defense-in-depth:
-	// ensures the email hasn't been changed between code issuance and confirmation)
 	result, err := vh.db.Exec(
 		`UPDATE users SET email_verified = true WHERE id = $1 AND email = $2`, userID, record.Email,
 	)
 	if err != nil {
 		vh.log.Error("Failed to mark email as verified", "error", err, "user_id", userID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Verification failed"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgVerifyFailed})
 		return
 	}
 	rows, _ := result.RowsAffected()
@@ -238,10 +250,8 @@ func (vh *VerificationHandler) ConfirmCode(c *gin.Context) {
 		return
 	}
 
-	// Clean up Redis
 	vh.redis.Del(ctx, redisKey(userID))
 
-	// Issue a new access token with email_verified = true
 	accessToken, err := GenerateAccessToken(userID, vh.jwtSecret, true)
 	if err != nil {
 		vh.log.Error("Failed to generate post-verification token", "error", err)
@@ -281,7 +291,7 @@ func (vh *VerificationHandler) ChangeEmail(c *gin.Context) {
 	).Scan(&emailVerified)
 	if err != nil {
 		vh.log.Error("Failed to check verification status", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to change email"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedChangeEmail})
 		return
 	}
 	if emailVerified {
@@ -296,7 +306,7 @@ func (vh *VerificationHandler) ChangeEmail(c *gin.Context) {
 	).Scan(&exists)
 	if err != nil {
 		vh.log.Error("Failed to check email uniqueness", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to change email"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedChangeEmail})
 		return
 	}
 	if exists {
@@ -310,7 +320,7 @@ func (vh *VerificationHandler) ChangeEmail(c *gin.Context) {
 	)
 	if err != nil {
 		vh.log.Error("Failed to update email", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to change email"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedChangeEmail})
 		return
 	}
 

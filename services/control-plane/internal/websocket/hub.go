@@ -229,28 +229,8 @@ func (h *Hub) Stopped() <-chan struct{} {
 
 // handleRegister registers a new client
 func (h *Hub) handleRegister(client *Client) {
-	h.mu.Lock()
-	h.clients[client.ID] = client
+	isFirstConnection := h.registerClient(client)
 
-	// Track user's clients (multi-device support)
-	if _, ok := h.userClients[client.UserID]; !ok {
-		h.userClients[client.UserID] = make(map[uuid.UUID]bool)
-	}
-	h.userClients[client.UserID][client.ID] = true
-
-	// Cache username for typing indicators
-	if _, cached := h.usernames[client.UserID]; !cached {
-		var username string
-		err := h.db.QueryRow("SELECT username FROM users WHERE id = $1", client.UserID).Scan(&username)
-		if err == nil {
-			h.usernames[client.UserID] = username
-		}
-	}
-
-	isFirstConnection := len(h.userClients[client.UserID]) == 1
-	h.mu.Unlock()
-
-	// If this is the user's first connection, broadcast online presence and set Redis
 	if isFirstConnection {
 		ctx := context.Background()
 		h.redis.Set(ctx, fmt.Sprintf(presenceKeyFmt, client.UserID), statusOnline, 120*time.Second)
@@ -260,7 +240,34 @@ func (h *Hub) handleRegister(client *Client) {
 	log.Printf("Client registered: user=%s client=%s total_clients=%d",
 		client.UserID, client.ID, len(h.clients))
 
-	// Send connection confirmation
+	h.sendConnectedConfirmation(client)
+	h.sendPresenceSnapshot(client)
+	go h.sendVoiceCountsSnapshot(client)
+}
+
+func (h *Hub) registerClient(client *Client) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	h.clients[client.ID] = client
+
+	if _, ok := h.userClients[client.UserID]; !ok {
+		h.userClients[client.UserID] = make(map[uuid.UUID]bool)
+	}
+	h.userClients[client.UserID][client.ID] = true
+
+	if _, cached := h.usernames[client.UserID]; !cached {
+		var username string
+		err := h.db.QueryRow("SELECT username FROM users WHERE id = $1", client.UserID).Scan(&username)
+		if err == nil {
+			h.usernames[client.UserID] = username
+		}
+	}
+
+	return len(h.userClients[client.UserID]) == 1
+}
+
+func (h *Hub) sendConnectedConfirmation(client *Client) {
 	confirmMsg := OutgoingMessage{
 		Type: "connected",
 		Data: map[string]interface{}{
@@ -268,34 +275,34 @@ func (h *Hub) handleRegister(client *Client) {
 			keyUserID:   client.UserID,
 		},
 	}
-
 	if data, err := json.Marshal(confirmMsg); err == nil {
 		client.Send <- data
 	}
+}
 
-	// Send enhanced presence snapshot of all currently online users to the new client
-	ctx := context.Background()
-	type userPresenceInfo struct {
-		UserID string `json:"user_id"`
-		Status string `json:"status"`
+type userPresenceInfo struct {
+	UserID string `json:"user_id"`
+	Status string `json:"status"`
+}
+
+func (h *Hub) resolveVisibleStatus(uid, viewerID uuid.UUID, ctx context.Context) string {
+	status := statusOnline
+	if val, err := h.redis.Get(ctx, fmt.Sprintf(presenceKeyFmt, uid)).Result(); err == nil {
+		status = val
 	}
+	if status == statusInvisible && uid != viewerID {
+		return statusOffline
+	}
+	return status
+}
+
+func (h *Hub) sendPresenceSnapshot(client *Client) {
+	ctx := context.Background()
 	users := make([]userPresenceInfo, 0, len(h.userClients))
 	onlineUserIDs := make([]string, 0, len(h.userClients))
 	for uid := range h.userClients {
 		uidStr := uid.String()
-		status := statusOnline
-		if val, err := h.redis.Get(ctx, fmt.Sprintf(presenceKeyFmt, uid)).Result(); err == nil {
-			status = val
-		}
-		// Invisible users appear as offline to others, but show real status to self
-		visibleStatus := status
-		if status == statusInvisible && uid != client.UserID {
-			visibleStatus = statusOffline
-		} else if status == statusInvisible && uid == client.UserID {
-			// Keep invisible so the user knows their own status
-			visibleStatus = statusInvisible
-		}
-		// Only add to online_user_ids if visible (not invisible to this viewer)
+		visibleStatus := h.resolveVisibleStatus(uid, client.UserID, ctx)
 		if visibleStatus != statusOffline {
 			onlineUserIDs = append(onlineUserIDs, uidStr)
 		}
@@ -311,43 +318,42 @@ func (h *Hub) handleRegister(client *Client) {
 	if data, err := json.Marshal(presenceSnapshot); err == nil {
 		client.Send <- data
 	}
+}
 
-	// Send server voice counts snapshot to the new client
-	go func() {
-		rows, err := h.db.Query(`
-			SELECT c.server_id, COUNT(vp.id)
-			FROM voice_participants vp
-			JOIN channels c ON c.id = vp.channel_id
-			GROUP BY c.server_id
-		`)
-		if err != nil {
-			log.Printf("Failed to query voice counts for new client: %v", err)
-			return
-		}
-		defer func() { _ = rows.Close() }()
+func (h *Hub) sendVoiceCountsSnapshot(client *Client) {
+	rows, err := h.db.Query(`
+		SELECT c.server_id, COUNT(vp.id)
+		FROM voice_participants vp
+		JOIN channels c ON c.id = vp.channel_id
+		GROUP BY c.server_id
+	`)
+	if err != nil {
+		log.Printf("Failed to query voice counts for new client: %v", err)
+		return
+	}
+	defer func() { _ = rows.Close() }()
 
-		counts := make(map[string]int)
-		for rows.Next() {
-			var serverID string
-			var count int
-			if err := rows.Scan(&serverID, &count); err == nil {
-				counts[serverID] = count
-			}
+	counts := make(map[string]int)
+	for rows.Next() {
+		var serverID string
+		var count int
+		if err := rows.Scan(&serverID, &count); err == nil {
+			counts[serverID] = count
 		}
+	}
 
-		msg := OutgoingMessage{
-			Type: "server_voice_counts",
-			Data: map[string]interface{}{
-				keyCounts: counts,
-			},
+	msg := OutgoingMessage{
+		Type: "server_voice_counts",
+		Data: map[string]interface{}{
+			keyCounts: counts,
+		},
+	}
+	if data, err := json.Marshal(msg); err == nil {
+		select {
+		case client.Send <- data:
+		default:
 		}
-		if data, err := json.Marshal(msg); err == nil {
-			select {
-			case client.Send <- data:
-			default:
-			}
-		}
-	}()
+	}
 }
 
 // handleUnregister unregisters a client
@@ -359,54 +365,15 @@ func (h *Hub) handleUnregister(client *Client) {
 		return
 	}
 
-	// Remove from clients map
 	delete(h.clients, client.ID)
-
-	// Remove from user's clients
-	isLastConnection := false
-	if userClients, ok := h.userClients[client.UserID]; ok {
-		delete(userClients, client.ID)
-		if len(userClients) == 0 {
-			delete(h.userClients, client.UserID)
-			delete(h.usernames, client.UserID)
-			isLastConnection = true
-		}
-	}
-
-	// Remove from all channel subscriptions
-	for channelID := range client.Channels {
-		if clients, ok := h.channelSubscriptions[channelID]; ok {
-			delete(clients, client.ID)
-			if len(clients) == 0 {
-				delete(h.channelSubscriptions, channelID)
-			}
-		}
-	}
-
-	// Remove from all server subscriptions
-	for serverID, clients := range h.serverSubscriptions {
-		delete(clients, client.ID)
-		if len(clients) == 0 {
-			delete(h.serverSubscriptions, serverID)
-		}
-	}
-
-	// Remove from all DM subscriptions
-	for convID, clients := range h.dmSubscriptions {
-		delete(clients, client.ID)
-		if len(clients) == 0 {
-			delete(h.dmSubscriptions, convID)
-		}
-	}
-
+	isLastConnection := h.removeUserClient(client)
+	h.removeClientSubscriptions(client)
 	remaining := len(h.clients)
 	h.mu.Unlock()
 
-	// Close send channel
 	close(client.Send)
 
 	if isLastConnection {
-		// User's last client disconnected — update Redis and broadcast offline
 		now := time.Now().Unix()
 		ctx := context.Background()
 		h.redis.Del(ctx, fmt.Sprintf(presenceKeyFmt, client.UserID))
@@ -416,6 +383,43 @@ func (h *Hub) handleUnregister(client *Client) {
 
 	log.Printf("Client unregistered: user=%s client=%s remaining=%d",
 		client.UserID, client.ID, remaining)
+}
+
+func (h *Hub) removeUserClient(client *Client) bool {
+	userClients, ok := h.userClients[client.UserID]
+	if !ok {
+		return false
+	}
+	delete(userClients, client.ID)
+	if len(userClients) == 0 {
+		delete(h.userClients, client.UserID)
+		delete(h.usernames, client.UserID)
+		return true
+	}
+	return false
+}
+
+func (h *Hub) removeClientSubscriptions(client *Client) {
+	for channelID := range client.Channels {
+		h.removeFromSubscriptionMap(h.channelSubscriptions, channelID, client.ID)
+	}
+	for serverID := range h.serverSubscriptions {
+		h.removeFromSubscriptionMap(h.serverSubscriptions, serverID, client.ID)
+	}
+	for convID := range h.dmSubscriptions {
+		h.removeFromSubscriptionMap(h.dmSubscriptions, convID, client.ID)
+	}
+}
+
+func (h *Hub) removeFromSubscriptionMap(m map[uuid.UUID]map[uuid.UUID]bool, key, clientID uuid.UUID) {
+	clients, ok := m[key]
+	if !ok {
+		return
+	}
+	delete(clients, clientID)
+	if len(clients) == 0 {
+		delete(m, key)
+	}
 }
 
 // handleIncoming processes incoming messages from clients
@@ -1529,40 +1533,55 @@ func (h *Hub) handleUnsubscribeDM(msg IncomingMessage) {
 	log.Printf("Client %s unsubscribed from DM %s", msg.ClientID, convUUID)
 }
 
-// handleDMMessage handles a DM chat message: validates, persists, then broadcasts.
-func (h *Hub) handleDMMessage(msg IncomingMessage) {
+// dmMessageInput holds the parsed and validated fields from an incoming DM WebSocket message.
+type dmMessageInput struct {
+	content         string
+	isEncrypted     bool
+	keyVersion      int
+	msgType         string
+	mentionAddendum *MentionAddendum
+	attachmentIDs   []string
+}
+
+func (h *Hub) validateDMMessage(msg IncomingMessage) (*Client, uuid.UUID, *dmMessageInput) {
 	convID, ok := msg.Data[keyConversationID].(string)
 	if !ok {
-		return
+		return nil, uuid.Nil, nil
 	}
-
 	convUUID, err := uuid.Parse(convID)
 	if err != nil {
-		return
+		return nil, uuid.Nil, nil
 	}
 
-	// Verify the client is subscribed to this DM conversation
 	client, ok := h.clients[msg.ClientID]
 	if !ok {
-		return
+		return nil, uuid.Nil, nil
 	}
 	subscribers, hasSubs := h.dmSubscriptions[convUUID]
 	if !hasSubs || !subscribers[client.ID] {
 		h.sendError(msg.ClientID, "Not subscribed to this DM conversation")
-		return
+		return nil, uuid.Nil, nil
 	}
-
-	// Rate limit
 	if !client.rateLimitAllow() {
 		h.sendError(msg.ClientID, "Rate limit exceeded, please slow down")
-		return
+		return nil, uuid.Nil, nil
 	}
 
-	// Validate content
+	input, valid := h.parseDMMessageFields(msg)
+	if !valid {
+		return nil, uuid.Nil, nil
+	}
+
+	return client, convUUID, input
+}
+
+// parseDMMessageFields extracts and validates content, encryption, type,
+// attachments, and mention metadata from a DM message payload.
+func (h *Hub) parseDMMessageFields(msg IncomingMessage) (*dmMessageInput, bool) {
 	content, ok := msg.Data[keyContent].(string)
 	if !ok || content == "" {
 		h.sendError(msg.ClientID, "Message content is required")
-		return
+		return nil, false
 	}
 
 	isEncrypted, _ := msg.Data[keyIsEncrypted].(bool)
@@ -1571,102 +1590,125 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 		msgType = "system"
 	}
 
-	// Extract mention addendum (ephemeral — no RBAC in DMs, all participants can mention)
-	var mentionAddendum *MentionAddendum
-	if metaStr, ok := msg.Data["mention_meta"].(string); ok {
-		mentionAddendum = decodeMentionMeta(metaStr)
-	}
-	if mentionAddendum != nil {
-		defer mentionAddendum.Wipe()
-		// DMs don't support @everyone (server-level concept) — strip it
-		mentionAddendum.Everyone = false
-		// DMs don't have roles — strip role mentions
-		mentionAddendum.Roles = nil
-	}
-
-	// Extract key_version for E2EE messages
-	dmKeyVersion := 1
+	keyVersion := 1
 	if kv, ok := msg.Data[keyKeyVersion].(float64); ok && kv > 0 {
-		dmKeyVersion = int(kv)
+		keyVersion = int(kv)
 	}
 
+	if !h.validateContentLength(msg.ClientID, content, isEncrypted) {
+		return nil, false
+	}
+
+	attachmentIDs, attachOK := h.parseAttachmentIDs(msg)
+	if !attachOK {
+		return nil, false
+	}
+
+	mentionAddendum := h.parseDMMentionMeta(msg)
+
+	return &dmMessageInput{
+		content:         content,
+		isEncrypted:     isEncrypted,
+		keyVersion:      keyVersion,
+		msgType:         msgType,
+		mentionAddendum: mentionAddendum,
+		attachmentIDs:   attachmentIDs,
+	}, true
+}
+
+// validateContentLength checks that the message content does not exceed the
+// allowed length (4000 for plaintext, 24000 for encrypted).
+func (h *Hub) validateContentLength(clientID uuid.UUID, content string, isEncrypted bool) bool {
 	maxContentLen := 4000
 	if isEncrypted {
 		maxContentLen = 24000
 	}
 	if len(content) > maxContentLen {
-		h.sendError(msg.ClientID, "Message content exceeds maximum length")
-		return
+		h.sendError(clientID, "Message content exceeds maximum length")
+		return false
 	}
+	return true
+}
 
-	// E2EE enforcement: if conversation is encrypted, reject plaintext messages.
-	// Also fetch is_personal so we can include the sender in personal thread broadcasts.
-	var convEncrypted, convPersonal bool
+// parseDMMentionMeta extracts and sanitizes mention metadata for DM messages,
+// clearing server-only fields (Everyone, Roles).
+func (h *Hub) parseDMMentionMeta(msg IncomingMessage) *MentionAddendum {
+	metaStr, ok := msg.Data["mention_meta"].(string)
+	if !ok {
+		return nil
+	}
+	mentionAddendum := decodeMentionMeta(metaStr)
+	if mentionAddendum != nil {
+		mentionAddendum.Everyone = false
+		mentionAddendum.Roles = nil
+	}
+	return mentionAddendum
+}
+
+func (h *Hub) enforceDMEncryption(msg IncomingMessage, convUUID uuid.UUID, isEncrypted bool, keyVersion int) (convPersonal bool, ok bool) {
+	var convEncrypted bool
 	encErr := h.db.QueryRow(`SELECT is_encrypted, is_personal FROM dm_conversations WHERE id = $1`, convUUID).Scan(&convEncrypted, &convPersonal)
 	if encErr != nil {
 		log.Printf("Failed to check DM encryption status: %v", encErr)
 		h.sendError(msg.ClientID, "Failed to verify conversation encryption status")
-		return
+		return false, false
 	}
 	if convEncrypted && !isEncrypted {
 		h.sendError(msg.ClientID, "Encrypted conversation requires encrypted messages")
-		return
+		return false, false
 	}
 
-	// Epoch enforcement: reject DM messages encrypted with a revoked key epoch (fail-closed)
-	if isEncrypted && dmKeyVersion > 0 {
-		var epochRevoked bool
-		if err := h.db.QueryRow(
-			`SELECT EXISTS(SELECT 1 FROM dm_key_revocations WHERE conversation_id = $1 AND revoked_epoch = $2)`,
-			convUUID, dmKeyVersion,
-		).Scan(&epochRevoked); err != nil {
-			log.Printf("Failed to check DM epoch revocation: %v", err)
-			h.sendError(msg.ClientID, "Failed to verify key epoch")
-			return
-		}
-		if epochRevoked {
-			currentEpoch := 1
-			if err := h.db.QueryRow(
-				`SELECT COALESCE(MAX(key_version), 1) FROM dm_channel_keys WHERE conversation_id = $1`,
-				convUUID,
-			).Scan(&currentEpoch); err != nil {
-				log.Printf("Failed to fetch current epoch for DM %s: %v", convID, err)
-			}
-			h.sendErrorWithData(msg.ClientID, "epoch_revoked", map[string]interface{}{
-				"current_epoch":   currentEpoch,
-				keyConversationID: convID,
-				keyChannelID:      convID,
-			})
-			return
-		}
+	if !h.enforceDMEpoch(msg, convUUID, isEncrypted, keyVersion) {
+		return false, false
 	}
+	return convPersonal, true
+}
 
-	// Parse optional attachment IDs
-	dmAttachmentIDs, attachOK := h.parseAttachmentIDs(msg)
-	if !attachOK {
-		return
+func (h *Hub) enforceDMEpoch(msg IncomingMessage, convUUID uuid.UUID, isEncrypted bool, keyVersion int) bool {
+	if !isEncrypted || keyVersion <= 0 {
+		return true
 	}
+	var epochRevoked bool
+	if err := h.db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM dm_key_revocations WHERE conversation_id = $1 AND revoked_epoch = $2)`,
+		convUUID, keyVersion,
+	).Scan(&epochRevoked); err != nil {
+		log.Printf("Failed to check DM epoch revocation: %v", err)
+		h.sendError(msg.ClientID, "Failed to verify key epoch")
+		return false
+	}
+	if !epochRevoked {
+		return true
+	}
+	currentEpoch := 1
+	if err := h.db.QueryRow(
+		`SELECT COALESCE(MAX(key_version), 1) FROM dm_channel_keys WHERE conversation_id = $1`,
+		convUUID,
+	).Scan(&currentEpoch); err != nil {
+		log.Printf("Failed to fetch current epoch for DM %s: %v", convUUID, err)
+	}
+	convID := convUUID.String()
+	h.sendErrorWithData(msg.ClientID, "epoch_revoked", map[string]interface{}{
+		"current_epoch":   currentEpoch,
+		keyConversationID: convID,
+		keyChannelID:      convID,
+	})
+	return false
+}
 
-	// Persist message to database
+func (h *Hub) persistDMMessage(convUUID uuid.UUID, userID uuid.UUID, input *dmMessageInput) (uuid.UUID, time.Time, time.Time, error) {
 	messageID := uuid.New()
 	var createdAt, updatedAt time.Time
-	err = h.db.QueryRow(
+	err := h.db.QueryRow(
 		`INSERT INTO dm_messages (id, conversation_id, user_id, content, is_encrypted, key_version, type, created_at, updated_at)
 		 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
 		 RETURNING created_at, updated_at`,
-		messageID, convUUID, msg.UserID, content, isEncrypted, dmKeyVersion, msgType,
+		messageID, convUUID, userID, input.content, input.isEncrypted, input.keyVersion, input.msgType,
 	).Scan(&createdAt, &updatedAt)
-	if err != nil {
-		log.Printf("Failed to persist DM message: %v", err)
-		h.sendError(msg.ClientID, "Failed to save message")
-		return
-	}
+	return messageID, createdAt, updatedAt, err
+}
 
-	// Link attachments to DM message (if any)
-	dmAttachmentSummaries := h.linkDMAttachments(messageID, msg.UserID.String(), dmAttachmentIDs, convID)
-
-	// Send dm_message_ack to the sender
-	nonce, _ := msg.Data[keyNonce].(string)
+func (h *Hub) sendDMMessageAck(client *Client, nonce string, messageID uuid.UUID, convUUID uuid.UUID, createdAt, updatedAt time.Time, attachments []models.AttachmentSummary) {
 	dmAckData := map[string]interface{}{
 		keyNonce:          nonce,
 		"id":              messageID.String(),
@@ -1674,77 +1716,107 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 		keyCreatedAt:      createdAt,
 		keyUpdatedAt:      updatedAt,
 	}
-	if len(dmAttachmentSummaries) > 0 {
-		dmAckData["attachments"] = dmAttachmentSummaries
+	if len(attachments) > 0 {
+		dmAckData["attachments"] = attachments
 	}
-	ackMsg := OutgoingMessage{
-		Type: "dm_message_ack",
-		Data: dmAckData,
-	}
+	ackMsg := OutgoingMessage{Type: "dm_message_ack", Data: dmAckData}
 	if ackData, ackErr := json.Marshal(ackMsg); ackErr == nil {
 		select {
 		case client.Send <- ackData:
 		default:
 		}
 	}
+}
 
-	// Broadcast dm_message to all DM subscribers except the sender
+// dmBroadcastCtx holds the data needed to build a DM message broadcast payload.
+type dmBroadcastCtx struct {
+	messageID    uuid.UUID
+	convUUID     uuid.UUID
+	senderUserID uuid.UUID
+	client       *Client
+	input        *dmMessageInput
+	createdAt    time.Time
+	updatedAt    time.Time
+	attachments  []models.AttachmentSummary
+	convPersonal bool
+}
+
+func (h *Hub) broadcastDMMessage(ctx dmBroadcastCtx) {
 	dmBroadcastData := map[string]interface{}{
-		"id":              messageID,
-		keyConversationID: convUUID,
-		keyUserID:         msg.UserID,
-		keyUsername:       client.Username,
-		"display_name":    client.DisplayName,
-		"avatar_url":      client.AvatarURL,
-		keyContent:        content,
-		keyIsEncrypted:    isEncrypted,
-		keyKeyVersion:     dmKeyVersion,
-		"type":            msgType,
-		keyCreatedAt:      createdAt,
-		keyUpdatedAt:      updatedAt,
+		"id":              ctx.messageID,
+		keyConversationID: ctx.convUUID,
+		keyUserID:         ctx.senderUserID,
+		keyUsername:       ctx.client.Username,
+		"display_name":    ctx.client.DisplayName,
+		"avatar_url":      ctx.client.AvatarURL,
+		keyContent:        ctx.input.content,
+		keyIsEncrypted:    ctx.input.isEncrypted,
+		keyKeyVersion:     ctx.input.keyVersion,
+		"type":            ctx.input.msgType,
+		keyCreatedAt:      ctx.createdAt,
+		keyUpdatedAt:      ctx.updatedAt,
 	}
-	if len(dmAttachmentSummaries) > 0 {
-		dmBroadcastData["attachments"] = dmAttachmentSummaries
-	}
-	broadcastData := OutgoingMessage{
-		Type: "dm_message",
-		Data: dmBroadcastData,
+	if len(ctx.attachments) > 0 {
+		dmBroadcastData["attachments"] = ctx.attachments
 	}
 
-	// For personal threads (self-DM), include the sender in the broadcast
-	// because they are the only subscriber. For normal DMs, exclude the
-	// sender since they already received the dm_message_ack.
 	var excludeUser *uuid.UUID
-	if !convPersonal {
-		excludeUser = &msg.UserID
+	if !ctx.convPersonal {
+		excludeUser = &ctx.senderUserID
 	}
 	h.dmBroadcast <- DMBroadcastMessage{
-		ConversationID: convUUID,
+		ConversationID: ctx.convUUID,
 		ExcludeUser:    excludeUser,
-		Data:           broadcastData,
+		Data:           OutgoingMessage{Type: "dm_message", Data: dmBroadcastData},
+	}
+}
+
+// handleDMMessage handles a DM chat message: validates, persists, then broadcasts.
+func (h *Hub) handleDMMessage(msg IncomingMessage) {
+	client, convUUID, input := h.validateDMMessage(msg)
+	if input == nil {
+		return
+	}
+	if input.mentionAddendum != nil {
+		defer input.mentionAddendum.Wipe()
 	}
 
-	// Send dm_unread_notify to DM participants NOT subscribed to this conversation
+	convPersonal, ok := h.enforceDMEncryption(msg, convUUID, input.isEncrypted, input.keyVersion)
+	if !ok {
+		return
+	}
+
+	messageID, createdAt, updatedAt, err := h.persistDMMessage(convUUID, msg.UserID, input)
+	if err != nil {
+		log.Printf("Failed to persist DM message: %v", err)
+		h.sendError(msg.ClientID, "Failed to save message")
+		return
+	}
+
+	convID := convUUID.String()
+	attachments := h.linkDMAttachments(messageID, msg.UserID.String(), input.attachmentIDs, convID)
+
+	nonce, _ := msg.Data[keyNonce].(string)
+	h.sendDMMessageAck(client, nonce, messageID, convUUID, createdAt, updatedAt, attachments)
+	h.broadcastDMMessage(dmBroadcastCtx{
+		messageID: messageID, convUUID: convUUID, senderUserID: msg.UserID,
+		client: client, input: input, createdAt: createdAt, updatedAt: updatedAt,
+		attachments: attachments, convPersonal: convPersonal,
+	})
 	h.sendDMUnreadNotify(convUUID, msg.UserID)
 
-	// Mention routing for DMs: no RBAC, just resolve targets and notify.
-	// The addendum is decoded above and deferred for Wipe().
-	if mentionAddendum != nil {
-		h.routeDMMentionNotifications(convUUID, msg.UserID, mentionAddendum)
+	if input.mentionAddendum != nil {
+		h.routeDMMentionNotifications(convUUID, msg.UserID, input.mentionAddendum)
 	}
 }
 
 // sendDMUnreadNotify sends a lightweight notification to DM participants
 // who are not subscribed to the conversation (they don't have it active).
 func (h *Hub) sendDMUnreadNotify(conversationID, senderUserID uuid.UUID) {
-	// Query all participants of this DM conversation
-	rows, err := h.db.Query(`SELECT user_id FROM dm_participants WHERE conversation_id = $1`, conversationID)
+	participants, err := h.dmUnreadParticipants(conversationID)
 	if err != nil {
 		return
 	}
-	defer func() { _ = rows.Close() }()
-
-	dmClients := h.dmSubscriptions[conversationID] // may be nil
 
 	notifyMsg := OutgoingMessage{
 		Type: "dm_unread_notify",
@@ -1752,48 +1824,78 @@ func (h *Hub) sendDMUnreadNotify(conversationID, senderUserID uuid.UUID) {
 			"conversation_id": conversationID.String(),
 		},
 	}
-	data, err := json.Marshal(notifyMsg)
-	if err != nil {
+	data, marshalErr := json.Marshal(notifyMsg)
+	if marshalErr != nil {
 		return
 	}
 
+	dmClients := h.dmSubscriptions[conversationID] // may be nil
+
+	for _, uid := range participants {
+		if uid == senderUserID {
+			continue
+		}
+		h.notifyUnsubscribedUser(uid, dmClients, data)
+	}
+}
+
+// dmUnreadParticipants queries all participant UUIDs for a DM conversation.
+func (h *Hub) dmUnreadParticipants(conversationID uuid.UUID) ([]uuid.UUID, error) {
+	rows, err := h.db.Query(`SELECT user_id FROM dm_participants WHERE conversation_id = $1`, conversationID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var participants []uuid.UUID
 	for rows.Next() {
 		var uid string
 		if err := rows.Scan(&uid); err != nil {
 			continue
 		}
-		participantUUID, err := uuid.Parse(uid)
-		if err != nil || participantUUID == senderUserID {
+		parsed, err := uuid.Parse(uid)
+		if err != nil {
 			continue
 		}
+		participants = append(participants, parsed)
+	}
+	return participants, nil
+}
 
-		// Check if this user has any client subscribed to this DM
-		userClients, ok := h.userClients[participantUUID]
-		if !ok {
-			continue // user not connected
+// userHasDMSubscription checks whether any of a user's clients are subscribed
+// to the given DM conversation's client set.
+func (h *Hub) userHasDMSubscription(userClientIDs, dmClients map[uuid.UUID]bool) bool {
+	if dmClients == nil {
+		return false
+	}
+	for clientID := range userClientIDs {
+		if dmClients[clientID] {
+			return true
 		}
+	}
+	return false
+}
 
-		// If any of the user's clients are subscribed, they'll get the full message
-		hasSubscribed := false
-		if dmClients != nil {
-			for clientID := range userClients {
-				if dmClients[clientID] {
-					hasSubscribed = true
-					break
-				}
-			}
-		}
-		if hasSubscribed {
-			continue
-		}
+// notifyUnsubscribedUser sends data to all of a user's connected clients,
+// but only if none of them are already subscribed to the DM conversation.
+func (h *Hub) notifyUnsubscribedUser(uid uuid.UUID, dmClients map[uuid.UUID]bool, data []byte) {
+	userClientIDs, ok := h.userClients[uid]
+	if !ok {
+		return // user not connected
+	}
+	if h.userHasDMSubscription(userClientIDs, dmClients) {
+		return
+	}
+	h.sendToUserClients(userClientIDs, data)
+}
 
-		// Send unread notification to all of this user's connected clients
-		for clientID := range userClients {
-			if c, ok := h.clients[clientID]; ok {
-				select {
-				case c.Send <- data:
-				default:
-				}
+// sendToUserClients sends raw message data to all of a user's connected clients.
+func (h *Hub) sendToUserClients(userClientIDs map[uuid.UUID]bool, data []byte) {
+	for clientID := range userClientIDs {
+		if c, ok := h.clients[clientID]; ok {
+			select {
+			case c.Send <- data:
+			default:
 			}
 		}
 	}
@@ -2102,23 +2204,50 @@ func (h *Hub) flushOnlineCounts() {
 		return
 	}
 
-	// Collect all pending user IDs and clear the set.
+	params := h.collectPendingUsers()
+
+	serverMembers, allMemberIDs, err := h.queryServerMemberships(params)
+	if err != nil || len(serverMembers) == 0 {
+		return
+	}
+
+	visibleOnline := h.resolveVisibleOnline(allMemberIDs)
+
+	counts := h.computeServerCounts(serverMembers, visibleOnline)
+
+	h.handleGlobalBroadcast(OutgoingMessage{
+		Type: "server_online_counts",
+		Data: map[string]interface{}{
+			keyCounts: counts,
+		},
+	})
+}
+
+// collectPendingUsers drains onlineCountPending and returns the user IDs as query params.
+func (h *Hub) collectPendingUsers() []interface{} {
 	params := make([]interface{}, 0, len(h.onlineCountPending))
 	for uid := range h.onlineCountPending {
 		params = append(params, uid)
 	}
 	clear(h.onlineCountPending)
+	return params
+}
 
-	// Build parameterized IN clause: $1, $2, …
-	placeholders := make([]byte, 0, len(params)*4)
-	for i := range params {
+// buildPlaceholders creates a "$1,$2,..." parameterized IN clause for the given params.
+func buildPlaceholders(n int) string {
+	placeholders := make([]byte, 0, n*4)
+	for i := range n {
 		if i > 0 {
 			placeholders = append(placeholders, ',')
 		}
 		placeholders = append(placeholders, []byte(fmt.Sprintf("$%d", i+1))...)
 	}
+	return string(placeholders)
+}
 
-	// 1. Get all members for every server ANY pending user belongs to (one query).
+// queryServerMemberships returns all server->member mappings for servers that any of
+// the given users belong to, plus a set of all unique member IDs.
+func (h *Hub) queryServerMemberships(params []interface{}) (map[string][]uuid.UUID, map[uuid.UUID]bool, error) {
 	// Placeholders are safe — generated as $1,$2,… from loop index, not user input.
 	query := fmt.Sprintf( //nolint:gosec // G201
 		`SELECT sm.server_id, sm.user_id
@@ -2126,16 +2255,15 @@ func (h *Hub) flushOnlineCounts() {
 		WHERE sm.server_id IN (
 			SELECT DISTINCT server_id FROM server_members WHERE user_id IN (%s)
 		)
-	`, string(placeholders))
+	`, buildPlaceholders(len(params)))
 
 	rows, err := h.db.Query(query, params...)
 	if err != nil {
 		log.Printf("Failed to query memberships for online counts: %v", err)
-		return
+		return nil, nil, err
 	}
 	defer func() { _ = rows.Close() }()
 
-	// Group member IDs by server, collect unique member IDs for status checks.
 	serverMembers := make(map[string][]uuid.UUID)
 	allMemberIDs := make(map[uuid.UUID]bool)
 	for rows.Next() {
@@ -2146,13 +2274,12 @@ func (h *Hub) flushOnlineCounts() {
 			allMemberIDs[uid] = true
 		}
 	}
-	if len(serverMembers) == 0 {
-		return
-	}
+	return serverMembers, allMemberIDs, nil
+}
 
-	// 2. Batch-check which members are connected and not invisible.
-	//    Use Redis MGET to fetch all statuses in one round-trip.
-	ctx := context.Background()
+// resolveVisibleOnline determines which member IDs are connected and not invisible,
+// using a single Redis MGET round-trip for status checks.
+func (h *Hub) resolveVisibleOnline(allMemberIDs map[uuid.UUID]bool) map[uuid.UUID]bool {
 	connectedUIDs := make([]uuid.UUID, 0, len(allMemberIDs))
 	redisKeys := make([]string, 0, len(allMemberIDs))
 	for uid := range allMemberIDs {
@@ -2163,26 +2290,40 @@ func (h *Hub) flushOnlineCounts() {
 	}
 
 	visibleOnline := make(map[uuid.UUID]bool, len(connectedUIDs))
-	if len(redisKeys) > 0 {
-		statuses, err := h.redis.MGet(ctx, redisKeys...).Result()
-		if err != nil {
-			// Redis error — fall back to counting all connected as online
-			for _, uid := range connectedUIDs {
-				visibleOnline[uid] = true
-			}
-		} else {
-			for i, val := range statuses {
-				if val == nil {
-					// No key → just connected, treat as online
-					visibleOnline[connectedUIDs[i]] = true
-				} else if s, ok := val.(string); ok && s != statusInvisible {
-					visibleOnline[connectedUIDs[i]] = true
-				}
-			}
-		}
+	if len(redisKeys) == 0 {
+		return visibleOnline
 	}
 
-	// 3. Compute per-server online counts.
+	statuses, err := h.redis.MGet(context.Background(), redisKeys...).Result()
+	if err != nil {
+		// Redis error — fall back to counting all connected as online
+		for _, uid := range connectedUIDs {
+			visibleOnline[uid] = true
+		}
+		return visibleOnline
+	}
+
+	for i, val := range statuses {
+		if isVisibleStatus(val) {
+			visibleOnline[connectedUIDs[i]] = true
+		}
+	}
+	return visibleOnline
+}
+
+// isVisibleStatus returns true if a Redis presence value indicates
+// the user should be counted as visibly online (nil = online, any
+// non-invisible string = online).
+func isVisibleStatus(val interface{}) bool {
+	if val == nil {
+		return true
+	}
+	s, ok := val.(string)
+	return ok && s != statusInvisible
+}
+
+// computeServerCounts tallies the number of visibly-online members per server.
+func (h *Hub) computeServerCounts(serverMembers map[string][]uuid.UUID, visibleOnline map[uuid.UUID]bool) map[string]int {
 	counts := make(map[string]int, len(serverMembers))
 	for sid, members := range serverMembers {
 		count := 0
@@ -2193,14 +2334,7 @@ func (h *Hub) flushOnlineCounts() {
 		}
 		counts[sid] = count
 	}
-
-	// 4. Broadcast to all connected clients.
-	h.handleGlobalBroadcast(OutgoingMessage{
-		Type: "server_online_counts",
-		Data: map[string]interface{}{
-			keyCounts: counts,
-		},
-	})
+	return counts
 }
 
 // broadcastServerVoiceCounts queries voice_participants to compute per-server

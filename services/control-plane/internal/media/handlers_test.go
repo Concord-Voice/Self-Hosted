@@ -40,7 +40,6 @@ const (
 	pathMediaPrefix       = "/api/v1/media/"
 	pathUploadDMIcon      = "/api/v1/media/upload/dm-icon"
 	fileEncryptedBin      = "encrypted.bin"
-	mimeOctetStream       = "application/octet-stream"
 	fileIconPng           = "icon.png"
 	valueNotUUID          = "not-uuid"
 	keyChannelID          = "channel_id"

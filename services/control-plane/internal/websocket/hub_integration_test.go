@@ -3,6 +3,7 @@ package websocket
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -75,7 +76,7 @@ func setupMessageTest(t *testing.T, encrypted bool) *hubTestSetup {
 	}
 }
 
-func TestHandleMessage_PlaintextSuccess(t *testing.T) {
+func TestHandleMessagePlaintextSuccess(t *testing.T) {
 	setup := setupMessageTest(t, false)
 	channelID := setup.convID
 
@@ -100,7 +101,7 @@ func TestHandleMessage_PlaintextSuccess(t *testing.T) {
 	assert.NotEmpty(t, data["id"])
 }
 
-func TestHandleMessage_NotSubscribed(t *testing.T) {
+func TestHandleMessageNotSubscribed(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
 	// Use a channel the client is NOT subscribed to
@@ -124,7 +125,7 @@ func TestHandleMessage_NotSubscribed(t *testing.T) {
 	assert.Contains(t, data[keyMessage], "Not subscribed")
 }
 
-func TestHandleMessage_EmptyContent(t *testing.T) {
+func TestHandleMessageEmptyContent(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
 	msg := IncomingMessage{
@@ -145,7 +146,7 @@ func TestHandleMessage_EmptyContent(t *testing.T) {
 	assert.Contains(t, data[keyMessage], "content is required")
 }
 
-func TestHandleMessage_MissingContent(t *testing.T) {
+func TestHandleMessageMissingContent(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
 	msg := IncomingMessage{
@@ -163,7 +164,7 @@ func TestHandleMessage_MissingContent(t *testing.T) {
 	assert.Equal(t, "error", resp["type"])
 }
 
-func TestHandleMessage_ContentTooLong(t *testing.T) {
+func TestHandleMessageContentTooLong(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
 	longContent := make([]byte, 4001)
@@ -189,7 +190,7 @@ func TestHandleMessage_ContentTooLong(t *testing.T) {
 	assert.Contains(t, data[keyMessage], "maximum length")
 }
 
-func TestHandleMessage_EncryptedContentLongerLimit(t *testing.T) {
+func TestHandleMessageEncryptedContentLongerLimit(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
 	// Encrypted messages allow up to 24000 chars
@@ -216,7 +217,7 @@ func TestHandleMessage_EncryptedContentLongerLimit(t *testing.T) {
 	assert.Equal(t, "message_ack", resp["type"])
 }
 
-func TestHandleMessage_PlaintextInEncryptedChannel(t *testing.T) {
+func TestHandleMessagePlaintextInEncryptedChannel(t *testing.T) {
 	setup := setupMessageTest(t, true) // encrypted channel
 
 	msg := IncomingMessage{
@@ -238,7 +239,7 @@ func TestHandleMessage_PlaintextInEncryptedChannel(t *testing.T) {
 	assert.Contains(t, data[keyMessage], "E2EE")
 }
 
-func TestHandleMessage_InvalidChannelID(t *testing.T) {
+func TestHandleMessageInvalidChannelID(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
 	msg := IncomingMessage{
@@ -255,7 +256,7 @@ func TestHandleMessage_InvalidChannelID(t *testing.T) {
 	setup.hub.handleMessage(msg)
 }
 
-func TestHandleMessage_MissingChannelID(t *testing.T) {
+func TestHandleMessageMissingChannelID(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
 	msg := IncomingMessage{
@@ -269,7 +270,7 @@ func TestHandleMessage_MissingChannelID(t *testing.T) {
 	setup.hub.handleMessage(msg)
 }
 
-func TestHandleMessage_ClientNotFound(t *testing.T) {
+func TestHandleMessageClientNotFound(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
 	msg := IncomingMessage{
@@ -286,7 +287,7 @@ func TestHandleMessage_ClientNotFound(t *testing.T) {
 	setup.hub.handleMessage(msg)
 }
 
-func TestHandleMessage_RateLimitExceeded(t *testing.T) {
+func TestHandleMessageRateLimitExceeded(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
 	// Exhaust rate limit
@@ -311,7 +312,7 @@ func TestHandleMessage_RateLimitExceeded(t *testing.T) {
 	assert.Contains(t, data[keyMessage], "Rate limit")
 }
 
-func TestHandleMessage_BroadcastToOtherSubscribers(t *testing.T) {
+func TestHandleMessageBroadcastToOtherSubscribers(t *testing.T) {
 	setup := setupMessageTest(t, false)
 	channelUUID, _ := uuid.Parse(setup.convID)
 
@@ -358,7 +359,7 @@ func TestHandleMessage_BroadcastToOtherSubscribers(t *testing.T) {
 
 // --- handleSubscribe integration tests ---
 
-func TestHandleSubscribe_Success(t *testing.T) {
+func TestHandleSubscribeSuccess(t *testing.T) {
 	setup := setupMessageTest(t, false)
 	channelUUID, _ := uuid.Parse(setup.convID)
 
@@ -386,7 +387,7 @@ func TestHandleSubscribe_Success(t *testing.T) {
 	assert.True(t, setup.hub.channelSubscriptions[channelUUID][setup.client.ID])
 }
 
-func TestHandleSubscribe_InvalidChannelID(t *testing.T) {
+func TestHandleSubscribeInvalidChannelID(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
 	msg := IncomingMessage{
@@ -404,7 +405,7 @@ func TestHandleSubscribe_InvalidChannelID(t *testing.T) {
 	assert.Equal(t, "error", resp["type"])
 }
 
-func TestHandleSubscribe_MissingChannelID(t *testing.T) {
+func TestHandleSubscribeMissingChannelID(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
 	msg := IncomingMessage{
@@ -420,7 +421,7 @@ func TestHandleSubscribe_MissingChannelID(t *testing.T) {
 	assert.Equal(t, "error", resp["type"])
 }
 
-func TestHandleSubscribe_ClientNotFound(t *testing.T) {
+func TestHandleSubscribeClientNotFound(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
 	msg := IncomingMessage{
@@ -437,7 +438,7 @@ func TestHandleSubscribe_ClientNotFound(t *testing.T) {
 
 // --- handleSubscribeServer integration tests ---
 
-func TestHandleSubscribeServer_Success(t *testing.T) {
+func TestHandleSubscribeServerSuccess(t *testing.T) {
 	setup := setupMessageTest(t, false)
 	serverID := setup.user2 // reused field for serverID
 
@@ -456,7 +457,7 @@ func TestHandleSubscribeServer_Success(t *testing.T) {
 	assert.True(t, setup.hub.serverSubscriptions[serverID][setup.client.ID])
 }
 
-func TestHandleSubscribeServer_InvalidServerID(t *testing.T) {
+func TestHandleSubscribeServerInvalidServerID(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
 	msg := IncomingMessage{
@@ -474,7 +475,7 @@ func TestHandleSubscribeServer_InvalidServerID(t *testing.T) {
 	assert.Equal(t, "error", resp["type"])
 }
 
-func TestHandleSubscribeServer_MissingServerID(t *testing.T) {
+func TestHandleSubscribeServerMissingServerID(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
 	msg := IncomingMessage{
@@ -492,7 +493,7 @@ func TestHandleSubscribeServer_MissingServerID(t *testing.T) {
 
 // --- handleSubscribeDM integration tests ---
 
-func TestHandleSubscribeDM_Success(t *testing.T) {
+func TestHandleSubscribeDMSuccess(t *testing.T) {
 	setup := setupEpochTest(t, false, false, false)
 
 	msg := IncomingMessage{
@@ -515,7 +516,7 @@ func TestHandleSubscribeDM_Success(t *testing.T) {
 	assert.True(t, setup.hub.dmSubscriptions[convUUID][setup.client.ID])
 }
 
-func TestHandleSubscribeDM_NotParticipant(t *testing.T) {
+func TestHandleSubscribeDMNotParticipant(t *testing.T) {
 	setup := setupEpochTest(t, false, false, false)
 
 	// Create a DM conversation the user is NOT part of
@@ -544,7 +545,7 @@ func TestHandleSubscribeDM_NotParticipant(t *testing.T) {
 	assert.Contains(t, data[keyMessage], "Not a participant")
 }
 
-func TestHandleSubscribeDM_InvalidConversationID(t *testing.T) {
+func TestHandleSubscribeDMInvalidConversationID(t *testing.T) {
 	setup := setupEpochTest(t, false, false, false)
 
 	msg := IncomingMessage{
@@ -562,7 +563,7 @@ func TestHandleSubscribeDM_InvalidConversationID(t *testing.T) {
 	assert.Equal(t, "error", resp["type"])
 }
 
-func TestHandleSubscribeDM_MissingConversationID(t *testing.T) {
+func TestHandleSubscribeDMMissingConversationID(t *testing.T) {
 	setup := setupEpochTest(t, false, false, false)
 
 	msg := IncomingMessage{
@@ -580,7 +581,7 @@ func TestHandleSubscribeDM_MissingConversationID(t *testing.T) {
 
 // --- handleDMMessage additional tests ---
 
-func TestHandleDMMessage_EmptyContent(t *testing.T) {
+func TestHandleDMMessageEmptyContent(t *testing.T) {
 	setup := setupEpochTest(t, false, false, false)
 
 	msg := IncomingMessage{
@@ -601,7 +602,7 @@ func TestHandleDMMessage_EmptyContent(t *testing.T) {
 	assert.Contains(t, data[keyMessage], "content is required")
 }
 
-func TestHandleDMMessage_ContentTooLong(t *testing.T) {
+func TestHandleDMMessageContentTooLong(t *testing.T) {
 	setup := setupEpochTest(t, false, false, false)
 
 	longContent := make([]byte, 4001)
@@ -627,7 +628,7 @@ func TestHandleDMMessage_ContentTooLong(t *testing.T) {
 	assert.Contains(t, data[keyMessage], "maximum length")
 }
 
-func TestHandleDMMessage_RateLimitExceeded(t *testing.T) {
+func TestHandleDMMessageRateLimitExceeded(t *testing.T) {
 	setup := setupEpochTest(t, false, false, false)
 
 	setup.client.rateTokens = 0
@@ -651,7 +652,7 @@ func TestHandleDMMessage_RateLimitExceeded(t *testing.T) {
 	assert.Contains(t, data[keyMessage], "Rate limit")
 }
 
-func TestHandleDMMessage_InvalidConversationID(t *testing.T) {
+func TestHandleDMMessageInvalidConversationID(t *testing.T) {
 	setup := setupEpochTest(t, false, false, false)
 
 	msg := IncomingMessage{
@@ -668,7 +669,7 @@ func TestHandleDMMessage_InvalidConversationID(t *testing.T) {
 	setup.hub.handleDMMessage(msg)
 }
 
-func TestHandleDMMessage_MissingConversationID(t *testing.T) {
+func TestHandleDMMessageMissingConversationID(t *testing.T) {
 	setup := setupEpochTest(t, false, false, false)
 
 	msg := IncomingMessage{
@@ -684,7 +685,7 @@ func TestHandleDMMessage_MissingConversationID(t *testing.T) {
 	setup.hub.handleDMMessage(msg)
 }
 
-func TestHandleDMMessage_SystemType(t *testing.T) {
+func TestHandleDMMessageSystemType(t *testing.T) {
 	setup := setupEpochTest(t, false, false, false)
 
 	msg := IncomingMessage{
@@ -704,7 +705,7 @@ func TestHandleDMMessage_SystemType(t *testing.T) {
 	assert.Equal(t, "dm_message_ack", resp["type"])
 }
 
-func TestHandleDMMessage_EncryptedLongerContentAllowed(t *testing.T) {
+func TestHandleDMMessageEncryptedLongerContentAllowed(t *testing.T) {
 	setup := setupEpochTest(t, false, false, false)
 
 	content := make([]byte, 5000)
@@ -729,7 +730,7 @@ func TestHandleDMMessage_EncryptedLongerContentAllowed(t *testing.T) {
 	assert.Equal(t, "dm_message_ack", resp["type"])
 }
 
-func TestHandleDMMessage_BroadcastToSubscribers(t *testing.T) {
+func TestHandleDMMessageBroadcastToSubscribers(t *testing.T) {
 	setup := setupEpochTest(t, false, false, false)
 	convUUID, _ := uuid.Parse(setup.convID)
 
@@ -775,7 +776,7 @@ func TestHandleDMMessage_BroadcastToSubscribers(t *testing.T) {
 
 // --- handleSetStatus with valid statuses (requires Redis) ---
 
-func TestHandleSetStatus_Online(t *testing.T) {
+func TestHandleSetStatusOnline(t *testing.T) {
 	db := setupHubTestDB(t)
 	redisClient := setupHubTestRedis(t)
 	hub := NewHub(db, redisClient)
@@ -808,7 +809,7 @@ func TestHandleSetStatus_Online(t *testing.T) {
 	assert.Equal(t, "online", val)
 }
 
-func TestHandleSetStatus_DND(t *testing.T) {
+func TestHandleSetStatusDND(t *testing.T) {
 	db := setupHubTestDB(t)
 	redisClient := setupHubTestRedis(t)
 	hub := NewHub(db, redisClient)
@@ -839,7 +840,7 @@ func TestHandleSetStatus_DND(t *testing.T) {
 	assert.Equal(t, "dnd", val)
 }
 
-func TestHandleSetStatus_Invisible(t *testing.T) {
+func TestHandleSetStatusInvisible(t *testing.T) {
 	db := setupHubTestDB(t)
 	redisClient := setupHubTestRedis(t)
 	hub := NewHub(db, redisClient)
@@ -885,7 +886,7 @@ func TestHandleSetStatus_Invisible(t *testing.T) {
 
 // --- handleHeartbeat tests (requires Redis) ---
 
-func TestHandleHeartbeat_RefreshesTTL(t *testing.T) {
+func TestHandleHeartbeatRefreshesTTL(t *testing.T) {
 	db := setupHubTestDB(t)
 	redisClient := setupHubTestRedis(t)
 	hub := NewHub(db, redisClient)
@@ -908,7 +909,7 @@ func TestHandleHeartbeat_RefreshesTTL(t *testing.T) {
 	assert.Greater(t, ttl, 100*time.Second)
 }
 
-func TestHandleHeartbeat_MissingKey_ResetsOnline(t *testing.T) {
+func TestHandleHeartbeatMissingKeyResetsOnline(t *testing.T) {
 	db := setupHubTestDB(t)
 	redisClient := setupHubTestRedis(t)
 	hub := NewHub(db, redisClient)
@@ -929,7 +930,7 @@ func TestHandleHeartbeat_MissingKey_ResetsOnline(t *testing.T) {
 	assert.Equal(t, "online", val)
 }
 
-func TestHandleHeartbeat_DND_RefreshesWithoutChangingStatus(t *testing.T) {
+func TestHandleHeartbeatDNDRefreshesWithoutChangingStatus(t *testing.T) {
 	db := setupHubTestDB(t)
 	redisClient := setupHubTestRedis(t)
 	hub := NewHub(db, redisClient)
@@ -956,7 +957,7 @@ func TestHandleHeartbeat_DND_RefreshesWithoutChangingStatus(t *testing.T) {
 
 // --- handleProfileUpdate integration tests ---
 
-func TestHandleProfileUpdate_Success(t *testing.T) {
+func TestHandleProfileUpdateSuccess(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
 	// Update the user's display name in DB
@@ -977,7 +978,7 @@ func TestHandleProfileUpdate_Success(t *testing.T) {
 	assert.Equal(t, newDisplayName, *setup.client.DisplayName)
 }
 
-func TestHandleProfileUpdate_ClientNotFound(t *testing.T) {
+func TestHandleProfileUpdateClientNotFound(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
 	msg := IncomingMessage{
@@ -993,7 +994,7 @@ func TestHandleProfileUpdate_ClientNotFound(t *testing.T) {
 
 // --- handleServerUpdate integration tests ---
 
-func TestHandleServerUpdate_Success(t *testing.T) {
+func TestHandleServerUpdateSuccess(t *testing.T) {
 	setup := setupMessageTest(t, false)
 	serverID := setup.user2 // reused field for serverID
 
@@ -1019,7 +1020,7 @@ func TestHandleServerUpdate_Success(t *testing.T) {
 	assert.Equal(t, "Test Server", data["name"])
 }
 
-func TestHandleServerUpdate_InvalidServerID(t *testing.T) {
+func TestHandleServerUpdateInvalidServerID(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
 	msg := IncomingMessage{
@@ -1035,7 +1036,7 @@ func TestHandleServerUpdate_InvalidServerID(t *testing.T) {
 	setup.hub.handleServerUpdate(msg)
 }
 
-func TestHandleServerUpdate_MissingServerID(t *testing.T) {
+func TestHandleServerUpdateMissingServerID(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
 	msg := IncomingMessage{
@@ -1049,7 +1050,7 @@ func TestHandleServerUpdate_MissingServerID(t *testing.T) {
 	setup.hub.handleServerUpdate(msg)
 }
 
-func TestHandleServerUpdate_NonexistentServer(t *testing.T) {
+func TestHandleServerUpdateNonexistentServer(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
 	fakeServerID := uuid.New()
@@ -1067,7 +1068,7 @@ func TestHandleServerUpdate_NonexistentServer(t *testing.T) {
 	setup.hub.handleServerUpdate(msg)
 }
 
-func TestHandleServerUpdate_NoSubscribers(t *testing.T) {
+func TestHandleServerUpdateNoSubscribers(t *testing.T) {
 	setup := setupMessageTest(t, false)
 	serverID := setup.user2
 
@@ -1115,7 +1116,7 @@ func TestBroadcastPresenceToAll(t *testing.T) {
 
 // --- sendDMUnreadNotify tests ---
 
-func TestSendDMUnreadNotify_SendsToUnsubscribedParticipants(t *testing.T) {
+func TestSendDMUnreadNotifySendsToUnsubscribedParticipants(t *testing.T) {
 	setup := setupEpochTest(t, false, false, false)
 	convUUID, _ := uuid.Parse(setup.convID)
 
@@ -1144,7 +1145,7 @@ func TestSendDMUnreadNotify_SendsToUnsubscribedParticipants(t *testing.T) {
 	}
 }
 
-func TestSendDMUnreadNotify_SkipsSender(t *testing.T) {
+func TestSendDMUnreadNotifySkipsSender(t *testing.T) {
 	setup := setupEpochTest(t, false, false, false)
 	convUUID, _ := uuid.Parse(setup.convID)
 
@@ -1160,7 +1161,7 @@ func TestSendDMUnreadNotify_SkipsSender(t *testing.T) {
 	}
 }
 
-func TestSendDMUnreadNotify_SkipsSubscribedParticipants(t *testing.T) {
+func TestSendDMUnreadNotifySkipsSubscribedParticipants(t *testing.T) {
 	setup := setupEpochTest(t, false, false, false)
 	convUUID, _ := uuid.Parse(setup.convID)
 
@@ -1190,7 +1191,7 @@ func TestSendDMUnreadNotify_SkipsSubscribedParticipants(t *testing.T) {
 
 // --- DisconnectUser / DisconnectSession thread-safe wrappers ---
 
-func TestDisconnectUser_QueuesOnChannel(t *testing.T) {
+func TestDisconnectUserQueuesOnChannel(t *testing.T) {
 	hub := NewHub(nil, nil)
 	userID := uuid.New()
 
@@ -1204,7 +1205,7 @@ func TestDisconnectUser_QueuesOnChannel(t *testing.T) {
 	}
 }
 
-func TestDisconnectSession_QueuesOnChannel(t *testing.T) {
+func TestDisconnectSessionQueuesOnChannel(t *testing.T) {
 	hub := NewHub(nil, nil)
 
 	hub.DisconnectSession("session-abc")
@@ -1219,7 +1220,7 @@ func TestDisconnectSession_QueuesOnChannel(t *testing.T) {
 
 // --- Epoch enforcement in handleMessage ---
 
-func TestHandleMessage_EpochRevoked(t *testing.T) {
+func TestHandleMessageEpochRevoked(t *testing.T) {
 	setup := setupMessageTest(t, true)
 	channelUUID, _ := uuid.Parse(setup.convID)
 
@@ -1255,4 +1256,304 @@ func TestHandleMessage_EpochRevoked(t *testing.T) {
 	data := resp["data"].(map[string]interface{})
 	assert.Equal(t, "epoch_revoked", data["code"])
 	assert.Equal(t, float64(2), data["current_epoch"])
+}
+
+// --- validateReplyToID integration tests ---
+
+func TestValidateReplyToIDNoReply(t *testing.T) {
+	setup := setupMessageTest(t, false)
+
+	msg := IncomingMessage{
+		ClientID: setup.client.ID,
+		Data:     map[string]interface{}{},
+	}
+	replyID, ok := setup.hub.validateReplyToID(msg, setup.convID)
+	assert.True(t, ok)
+	assert.Nil(t, replyID)
+}
+
+func TestValidateReplyToIDEmptyString(t *testing.T) {
+	setup := setupMessageTest(t, false)
+
+	msg := IncomingMessage{
+		ClientID: setup.client.ID,
+		Data: map[string]interface{}{
+			"reply_to_id": "",
+		},
+	}
+	replyID, ok := setup.hub.validateReplyToID(msg, setup.convID)
+	assert.True(t, ok)
+	assert.Nil(t, replyID)
+}
+
+func TestValidateReplyToIDInvalidUUID(t *testing.T) {
+	setup := setupMessageTest(t, false)
+
+	msg := IncomingMessage{
+		ClientID: setup.client.ID,
+		Data: map[string]interface{}{
+			"reply_to_id": "not-a-uuid",
+		},
+	}
+	_, ok := setup.hub.validateReplyToID(msg, setup.convID)
+	assert.False(t, ok)
+
+	resp := readClientMsg(t, setup.client)
+	assert.Equal(t, "error", resp["type"])
+}
+
+func TestValidateReplyToIDMessageNotFound(t *testing.T) {
+	setup := setupMessageTest(t, false)
+
+	msg := IncomingMessage{
+		ClientID: setup.client.ID,
+		Data: map[string]interface{}{
+			"reply_to_id": uuid.New().String(),
+		},
+	}
+	_, ok := setup.hub.validateReplyToID(msg, setup.convID)
+	assert.False(t, ok)
+
+	resp := readClientMsg(t, setup.client)
+	assert.Equal(t, "error", resp["type"])
+}
+
+func TestValidateReplyToIDValidReply(t *testing.T) {
+	setup := setupMessageTest(t, false)
+	channelID := setup.convID
+
+	// Insert a message to reply to
+	replyMsgID := uuid.New()
+	_, err := setup.db.Exec(
+		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, created_at, updated_at) VALUES ($1, $2, $3, $4, false, 1, NOW(), NOW())`,
+		replyMsgID.String(), channelID, setup.user1.String(), "original message",
+	)
+	require.NoError(t, err)
+
+	msg := IncomingMessage{
+		ClientID: setup.client.ID,
+		Data: map[string]interface{}{
+			"reply_to_id": replyMsgID.String(),
+		},
+	}
+	replyID, ok := setup.hub.validateReplyToID(msg, channelID)
+	assert.True(t, ok)
+	require.NotNil(t, replyID)
+	assert.Equal(t, replyMsgID.String(), *replyID)
+}
+
+func TestValidateReplyToIDWrongChannel(t *testing.T) {
+	setup := setupMessageTest(t, false)
+
+	// Insert a message in the real channel
+	replyMsgID := uuid.New()
+	_, err := setup.db.Exec(
+		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, created_at, updated_at) VALUES ($1, $2, $3, $4, false, 1, NOW(), NOW())`,
+		replyMsgID.String(), setup.convID, setup.user1.String(), "original message",
+	)
+	require.NoError(t, err)
+
+	// Try to reply referencing the right message ID but a different channel
+	otherChannelID := uuid.New().String()
+	msg := IncomingMessage{
+		ClientID: setup.client.ID,
+		Data: map[string]interface{}{
+			"reply_to_id": replyMsgID.String(),
+		},
+	}
+	_, ok := setup.hub.validateReplyToID(msg, otherChannelID)
+	assert.False(t, ok)
+
+	resp := readClientMsg(t, setup.client)
+	assert.Equal(t, "error", resp["type"])
+}
+
+// --- resolveVisibleOnline integration tests ---
+
+func TestResolveVisibleOnlineConnectedOnline(t *testing.T) {
+	redisClient := setupHubTestRedis(t)
+	hub := NewHub(nil, redisClient)
+
+	uid := uuid.New()
+	client := newTestClient(hub, uid)
+	hub.clients[client.ID] = client
+	hub.userClients[uid] = map[uuid.UUID]bool{client.ID: true}
+
+	// Set status to online in Redis
+	ctx := context.Background()
+	redisClient.Set(ctx, fmt.Sprintf(presenceKeyFmt, uid), statusOnline, 120*time.Second)
+
+	allMembers := map[uuid.UUID]bool{uid: true}
+	visible := hub.resolveVisibleOnline(allMembers)
+	assert.True(t, visible[uid])
+}
+
+func TestResolveVisibleOnlineInvisibleNotCounted(t *testing.T) {
+	redisClient := setupHubTestRedis(t)
+	hub := NewHub(nil, redisClient)
+
+	uid := uuid.New()
+	client := newTestClient(hub, uid)
+	hub.clients[client.ID] = client
+	hub.userClients[uid] = map[uuid.UUID]bool{client.ID: true}
+
+	// Set status to invisible in Redis
+	ctx := context.Background()
+	redisClient.Set(ctx, fmt.Sprintf(presenceKeyFmt, uid), statusInvisible, 120*time.Second)
+
+	allMembers := map[uuid.UUID]bool{uid: true}
+	visible := hub.resolveVisibleOnline(allMembers)
+	assert.False(t, visible[uid])
+}
+
+func TestResolveVisibleOnlineMissingRedisKey(t *testing.T) {
+	redisClient := setupHubTestRedis(t)
+	hub := NewHub(nil, redisClient)
+
+	uid := uuid.New()
+	client := newTestClient(hub, uid)
+	hub.clients[client.ID] = client
+	hub.userClients[uid] = map[uuid.UUID]bool{client.ID: true}
+
+	// No Redis key — should treat as online
+	allMembers := map[uuid.UUID]bool{uid: true}
+	visible := hub.resolveVisibleOnline(allMembers)
+	assert.True(t, visible[uid])
+}
+
+func TestResolveVisibleOnlineNotConnected(t *testing.T) {
+	redisClient := setupHubTestRedis(t)
+	hub := NewHub(nil, redisClient)
+
+	uid := uuid.New()
+	// uid is NOT in hub.userClients — not connected
+	allMembers := map[uuid.UUID]bool{uid: true}
+	visible := hub.resolveVisibleOnline(allMembers)
+	assert.False(t, visible[uid])
+}
+
+func TestResolveVisibleOnlineEmpty(t *testing.T) {
+	redisClient := setupHubTestRedis(t)
+	hub := NewHub(nil, redisClient)
+
+	visible := hub.resolveVisibleOnline(map[uuid.UUID]bool{})
+	assert.Empty(t, visible)
+}
+
+// --- broadcastServerVoiceCounts integration tests ---
+
+func TestBroadcastServerVoiceCountsEmptyResult(t *testing.T) {
+	db := setupHubTestDB(t)
+	hub := NewHub(db, nil)
+
+	userID := uuid.New()
+	client := newTestClient(hub, userID)
+	hub.clients[client.ID] = client
+
+	hub.broadcastServerVoiceCounts()
+
+	// Should receive server_voice_counts with empty counts
+	resp := readClientMsg(t, client)
+	assert.Equal(t, "server_voice_counts", resp["type"])
+}
+
+// --- sendVoiceCountsSnapshot integration tests ---
+
+func TestSendVoiceCountsSnapshotSuccess(t *testing.T) {
+	db := setupHubTestDB(t)
+	hub := NewHub(db, nil)
+
+	userID := uuid.New()
+	client := newTestClient(hub, userID)
+	hub.clients[client.ID] = client
+
+	hub.sendVoiceCountsSnapshot(client)
+
+	// Should receive server_voice_counts message
+	resp := readClientMsg(t, client)
+	assert.Equal(t, "server_voice_counts", resp["type"])
+}
+
+// --- handleDisconnectUser integration tests ---
+
+func TestHandleDisconnectUserRemovesAllUserClients(t *testing.T) {
+	redisClient := setupHubTestRedis(t)
+	hub := NewHub(nil, redisClient)
+
+	userID := uuid.New()
+	client1 := newTestClient(hub, userID)
+	client2 := newTestClient(hub, userID)
+
+	hub.clients[client1.ID] = client1
+	hub.clients[client2.ID] = client2
+	hub.userClients[userID] = map[uuid.UUID]bool{
+		client1.ID: true,
+		client2.ID: true,
+	}
+
+	// Set presence so last-client unregister path works
+	ctx := context.Background()
+	redisClient.Set(ctx, fmt.Sprintf(presenceKeyFmt, userID), statusOnline, 120*time.Second)
+
+	hub.handleDisconnectUser(userID)
+
+	assert.Empty(t, hub.clients, "all clients should be removed")
+	assert.Empty(t, hub.userClients[userID], "user client map should be empty")
+
+	// Both clients should have received session_revoked
+	for _, c := range []*Client{client1, client2} {
+		select {
+		case data := <-c.Send:
+			var msg map[string]interface{}
+			require.NoError(t, json.Unmarshal(data, &msg))
+			assert.Equal(t, sessionRevoked, msg["type"])
+		default:
+			// Channel may be closed — that's also valid
+		}
+	}
+}
+
+// --- flushOnlineCounts integration test ---
+
+func TestFlushOnlineCountsFullPipeline(t *testing.T) {
+	db := setupHubTestDB(t)
+	redisClient := setupHubTestRedis(t)
+	hub := NewHub(db, redisClient)
+
+	userID := uuid.New()
+	hash := "$argon2id$v=19$m=65536,t=3,p=4$3pE9STD1TqLPoZQ2/BTLCg$8SKTCjsZh8Q7pAulEqAIEzJQK9eeOb5ipWhPz4REdCY" //nolint:gosec
+
+	_, err := db.Exec(`INSERT INTO users (id, email, username, password_hash, age_verified, email_verified) VALUES ($1, $2, $3, $4, true, true)`,
+		userID.String(), "flushcount@test.concord.chat", "flushcount", hash)
+	require.NoError(t, err)
+
+	serverID := uuid.New()
+	_, err = db.Exec(`INSERT INTO servers (id, name, owner_id, e2ee_default, allow_embedded_content) VALUES ($1, $2, $3, false, true)`,
+		serverID.String(), "Count Server", userID.String())
+	require.NoError(t, err)
+
+	_, err = db.Exec(`INSERT INTO server_members (server_id, user_id, role) VALUES ($1, $2, 'owner')`,
+		serverID.String(), userID.String())
+	require.NoError(t, err)
+
+	// Set up connected client
+	client := newTestClient(hub, userID)
+	hub.clients[client.ID] = client
+	hub.userClients[userID] = map[uuid.UUID]bool{client.ID: true}
+
+	// Set presence to online
+	ctx := context.Background()
+	redisClient.Set(ctx, fmt.Sprintf(presenceKeyFmt, userID), statusOnline, 120*time.Second)
+
+	// Mark user as pending
+	hub.onlineCountPending[userID] = true
+
+	hub.flushOnlineCounts()
+
+	// Should receive server_online_counts
+	resp := readClientMsg(t, client)
+	assert.Equal(t, "server_online_counts", resp["type"])
+	data := resp["data"].(map[string]interface{})
+	counts := data[keyCounts].(map[string]interface{})
+	assert.Equal(t, float64(1), counts[serverID.String()])
 }

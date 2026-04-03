@@ -22,75 +22,81 @@ const authError = "Authentication required"
 // are rejected even if they are otherwise valid.
 func AuthRequired(jwtSecret string, redisClient *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		authHeader := c.GetHeader("Authorization")
-		if authHeader == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": authError})
-			c.Abort()
-			return
-		}
-
-		// Extract token from "Bearer <token>"
-		parts := strings.Split(authHeader, " ")
-		if len(parts) != 2 || parts[0] != "Bearer" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": authError})
-			c.Abort()
-			return
-		}
-
-		tokenString := parts[1]
-
-		// Parse and validate token
-		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-			// Validate signing method
-			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-				return nil, jwt.ErrSignatureInvalid
-			}
-			return []byte(jwtSecret), nil
-		})
-
-		if err != nil || !token.Valid {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": authError})
-			c.Abort()
-			return
-		}
-
-		// Extract claims
-		claims, ok := token.Claims.(jwt.MapClaims)
+		tokenString, ok := extractBearerToken(c.GetHeader("Authorization"))
 		if !ok {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": authError})
-			c.Abort()
+			abortUnauthorized(c)
+			return
+		}
+
+		claims, ok := parseAndValidateJWT(tokenString, jwtSecret)
+		if !ok {
+			abortUnauthorized(c)
 			return
 		}
 
 		userID, ok := claims["user_id"].(string)
 		if !ok || userID == "" {
-			c.JSON(http.StatusUnauthorized, gin.H{"error": authError})
-			c.Abort()
+			abortUnauthorized(c)
 			return
 		}
 
-		// Check token blacklist via JTI
-		if jti, ok := claims["jti"].(string); ok && jti != "" {
-			ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
-			defer cancel()
-			if exists, _ := redisClient.Exists(ctx, fmt.Sprintf("blacklist:%s", jti)).Result(); exists > 0 {
-				c.JSON(http.StatusUnauthorized, gin.H{"error": authError})
-				c.Abort()
-				return
-			}
-		}
-
-		// Extract email_verified claim. Tokens issued before this migration
-		// won't have the claim — treat missing as true (backward compat).
-		emailVerified := true
-		if ev, ok := claims["email_verified"].(bool); ok {
-			emailVerified = ev
+		if isTokenBlacklisted(c, redisClient, claims) {
+			abortUnauthorized(c)
+			return
 		}
 
 		c.Set("user_id", userID)
-		c.Set("email_verified", emailVerified)
+		c.Set("email_verified", emailVerifiedFromClaims(claims))
 		c.Next()
 	}
+}
+
+func abortUnauthorized(c *gin.Context) {
+	c.JSON(http.StatusUnauthorized, gin.H{"error": authError})
+	c.Abort()
+}
+
+func extractBearerToken(authHeader string) (string, bool) {
+	parts := strings.Split(authHeader, " ")
+	if len(parts) != 2 || parts[0] != "Bearer" {
+		return "", false
+	}
+	return parts[1], true
+}
+
+func parseAndValidateJWT(tokenString, jwtSecret string) (jwt.MapClaims, bool) {
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, jwt.ErrSignatureInvalid
+		}
+		return []byte(jwtSecret), nil
+	})
+	if err != nil || !token.Valid {
+		return nil, false
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	return claims, ok
+}
+
+func isTokenBlacklisted(c *gin.Context, redisClient *redis.Client, claims jwt.MapClaims) bool {
+	jti, ok := claims["jti"].(string)
+	if !ok || jti == "" {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+	defer cancel()
+	exists, err := redisClient.Exists(ctx, fmt.Sprintf("blacklist:%s", jti)).Result()
+	if err != nil {
+		return true // fail closed: treat as blacklisted when Redis is unavailable
+	}
+	return exists > 0
+}
+
+func emailVerifiedFromClaims(claims jwt.MapClaims) bool {
+	if ev, ok := claims["email_verified"].(bool); ok {
+		return ev
+	}
+	return true
 }
 
 // RequireVerifiedEmail returns a middleware that blocks requests from users

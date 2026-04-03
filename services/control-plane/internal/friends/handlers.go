@@ -161,6 +161,86 @@ type SendRequestBody struct {
 	Username *string `json:"username"`
 }
 
+type resolveResult struct {
+	targetUserID string
+	status       int
+	errMsg       string
+}
+
+func (h *Handler) resolveTargetUserID(req SendRequestBody) resolveResult {
+	if req.UserID != nil {
+		if _, err := uuid.Parse(*req.UserID); err != nil {
+			return resolveResult{status: http.StatusBadRequest, errMsg: "Invalid user_id"}
+		}
+		return resolveResult{targetUserID: *req.UserID}
+	}
+	if req.Username != nil {
+		var targetUserID string
+		err := h.db.QueryRow(`SELECT id FROM users WHERE username = $1`, strings.ToLower(strings.TrimSpace(*req.Username))).Scan(&targetUserID)
+		if err == sql.ErrNoRows {
+			return resolveResult{status: http.StatusNotFound, errMsg: "User not found"}
+		}
+		if err != nil {
+			h.log.Error("Failed to look up user by username", "error", err)
+			return resolveResult{status: http.StatusInternalServerError, errMsg: errMsgFailedSendFriendRequest}
+		}
+		return resolveResult{targetUserID: targetUserID}
+	}
+	return resolveResult{status: http.StatusBadRequest, errMsg: "user_id or username is required"}
+}
+
+func checkExistingFriendship(querier interface {
+	QueryRow(string, ...interface{}) *sql.Row
+}, userID, targetUserID string) (string, error) {
+	var existingStatus string
+	err := querier.QueryRow(`
+		SELECT status FROM friendships
+		WHERE (requester_id = $1 AND addressee_id = $2)
+		   OR (requester_id = $2 AND addressee_id = $1)
+	`, userID, targetUserID).Scan(&existingStatus)
+	return existingStatus, err
+}
+
+func friendshipConflictResponse(status string) (int, string) {
+	switch status {
+	case "accepted":
+		return http.StatusConflict, "Already friends"
+	case "pending":
+		return http.StatusConflict, "Friend request already pending"
+	case "blocked":
+		return http.StatusForbidden, "Cannot send friend request"
+	default:
+		return 0, ""
+	}
+}
+
+func (h *Handler) notifyFriendRequestReceived(targetUserID, friendshipID, userID, createdAt string) {
+	if h.hub == nil {
+		return
+	}
+	addresseeUUID, parseErr := uuid.Parse(targetUserID)
+	if parseErr != nil {
+		return
+	}
+	var senderUsername string
+	var senderDisplayName *string
+	var senderAvatarURL *string
+	_ = h.db.QueryRow(`SELECT username, display_name, avatar_url FROM users WHERE id = $1`, userID).
+		Scan(&senderUsername, &senderDisplayName, &senderAvatarURL)
+
+	h.hub.BroadcastToUser(addresseeUUID, websocket.OutgoingMessage{
+		Type: "friend_request_received",
+		Data: map[string]interface{}{
+			"id":                friendshipID,
+			"from_user_id":      userID,
+			"from_username":     senderUsername,
+			"from_display_name": senderDisplayName,
+			"from_avatar_url":   senderAvatarURL,
+			"created_at":        createdAt,
+		},
+	})
+}
+
 // SendRequest sends a friend request to another user.
 // POST /friends/request
 func (h *Handler) SendRequest(c *gin.Context) {
@@ -172,59 +252,29 @@ func (h *Handler) SendRequest(c *gin.Context) {
 		return
 	}
 
-	// Resolve target user ID
-	var targetUserID string
-	if req.UserID != nil {
-		if _, err := uuid.Parse(*req.UserID); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user_id"})
-			return
-		}
-		targetUserID = *req.UserID
-	} else if req.Username != nil {
-		err := h.db.QueryRow(`SELECT id FROM users WHERE username = $1`, strings.ToLower(strings.TrimSpace(*req.Username))).Scan(&targetUserID)
-		if err == sql.ErrNoRows {
-			c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
-			return
-		} else if err != nil {
-			h.log.Error("Failed to look up user by username", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendFriendRequest})
-			return
-		}
-	} else {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "user_id or username is required"})
+	resolved := h.resolveTargetUserID(req)
+	if resolved.errMsg != "" {
+		c.JSON(resolved.status, gin.H{"error": resolved.errMsg})
 		return
 	}
+	targetUserID := resolved.targetUserID
 
-	// Can't friend yourself
 	if targetUserID == userID {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot send a friend request to yourself"})
 		return
 	}
 
-	// Verify target user exists
 	var exists bool
 	if err := h.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id = $1)`, targetUserID).Scan(&exists); err != nil || !exists {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User not found"})
 		return
 	}
 
-	// Check for existing friendship in either direction
-	var existingStatus string
-	err := h.db.QueryRow(`
-		SELECT status FROM friendships
-		WHERE (requester_id = $1 AND addressee_id = $2)
-		   OR (requester_id = $2 AND addressee_id = $1)
-	`, userID, targetUserID).Scan(&existingStatus)
+	existingStatus, err := checkExistingFriendship(h.db, userID, targetUserID)
 	if err == nil {
-		switch existingStatus {
-		case "accepted":
-			c.JSON(http.StatusConflict, gin.H{"error": "Already friends"})
-			return
-		case "pending":
-			c.JSON(http.StatusConflict, gin.H{"error": "Friend request already pending"})
-			return
-		case "blocked":
-			c.JSON(http.StatusForbidden, gin.H{"error": "Cannot send friend request"})
+		code, msg := friendshipConflictResponse(existingStatus)
+		if code != 0 {
+			c.JSON(code, gin.H{"error": msg})
 			return
 		}
 	} else if err != sql.ErrNoRows {
@@ -233,7 +283,6 @@ func (h *Handler) SendRequest(c *gin.Context) {
 		return
 	}
 
-	// Create friendship
 	var friendshipID string
 	var createdAt string
 	err = h.db.QueryRow(`
@@ -248,30 +297,7 @@ func (h *Handler) SendRequest(c *gin.Context) {
 	}
 
 	h.log.Info("Friend request sent", "from", userID, "to", targetUserID)
-
-	// Notify the addressee via WebSocket
-	if h.hub != nil {
-		if addresseeUUID, parseErr := uuid.Parse(targetUserID); parseErr == nil {
-			// Fetch sender info for the notification
-			var senderUsername string
-			var senderDisplayName *string
-			var senderAvatarURL *string
-			_ = h.db.QueryRow(`SELECT username, display_name, avatar_url FROM users WHERE id = $1`, userID).
-				Scan(&senderUsername, &senderDisplayName, &senderAvatarURL)
-
-			h.hub.BroadcastToUser(addresseeUUID, websocket.OutgoingMessage{
-				Type: "friend_request_received",
-				Data: map[string]interface{}{
-					"id":                friendshipID,
-					"from_user_id":      userID,
-					"from_username":     senderUsername,
-					"from_display_name": senderDisplayName,
-					"from_avatar_url":   senderAvatarURL,
-					"created_at":        createdAt,
-				},
-			})
-		}
-	}
+	h.notifyFriendRequestReceived(targetUserID, friendshipID, userID, createdAt)
 
 	c.JSON(http.StatusCreated, gin.H{
 		"id":         friendshipID,
@@ -283,6 +309,48 @@ func (h *Handler) SendRequest(c *gin.Context) {
 // RespondRequestBody represents a response to a friend request.
 type RespondRequestBody struct {
 	Action string `json:"action" binding:"required"` // accept, decline
+}
+
+func (h *Handler) acceptFriendRequest(c *gin.Context, requestID, userID, requesterID string) {
+	_, err := h.db.Exec(`
+		UPDATE friendships SET status = 'accepted', updated_at = NOW()
+		WHERE id = $1
+	`, requestID)
+	if err != nil {
+		h.log.Error("Failed to accept friend request", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to accept friend request"})
+		return
+	}
+
+	h.log.Info("Friend request accepted", "request_id", requestID, "user_id", userID)
+	h.notifyFriendRequestAccepted(requesterID, requestID, userID)
+	c.JSON(http.StatusOK, gin.H{"message": "Friend request accepted"})
+}
+
+func (h *Handler) notifyFriendRequestAccepted(requesterID, requestID, userID string) {
+	if h.hub == nil {
+		return
+	}
+	requesterUUID, parseErr := uuid.Parse(requesterID)
+	if parseErr != nil {
+		return
+	}
+	var acceptorUsername string
+	var acceptorDisplayName *string
+	var acceptorAvatarURL *string
+	_ = h.db.QueryRow(`SELECT username, display_name, avatar_url FROM users WHERE id = $1`, userID).
+		Scan(&acceptorUsername, &acceptorDisplayName, &acceptorAvatarURL)
+
+	h.hub.BroadcastToUser(requesterUUID, websocket.OutgoingMessage{
+		Type: "friend_request_accepted",
+		Data: map[string]interface{}{
+			"id":           requestID,
+			"user_id":      userID,
+			"username":     acceptorUsername,
+			"display_name": acceptorDisplayName,
+			"avatar_url":   acceptorAvatarURL,
+		},
+	})
 }
 
 // RespondRequest accepts or declines a friend request.
@@ -307,7 +375,6 @@ func (h *Handler) RespondRequest(c *gin.Context) {
 		return
 	}
 
-	// Verify this is a pending request addressed to the caller
 	var requesterID string
 	err := h.db.QueryRow(`
 		SELECT requester_id FROM friendships
@@ -316,61 +383,27 @@ func (h *Handler) RespondRequest(c *gin.Context) {
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Friend request not found"})
 		return
-	} else if err != nil {
+	}
+	if err != nil {
 		h.log.Error("Failed to fetch friend request", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to respond to friend request"})
 		return
 	}
 
 	if req.Action == "accept" {
-		_, err = h.db.Exec(`
-			UPDATE friendships SET status = 'accepted', updated_at = NOW()
-			WHERE id = $1
-		`, requestID)
-		if err != nil {
-			h.log.Error("Failed to accept friend request", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to accept friend request"})
-			return
-		}
-
-		h.log.Info("Friend request accepted", "request_id", requestID, "user_id", userID)
-
-		// Notify the requester
-		if h.hub != nil {
-			if requesterUUID, parseErr := uuid.Parse(requesterID); parseErr == nil {
-				var acceptorUsername string
-				var acceptorDisplayName *string
-				var acceptorAvatarURL *string
-				_ = h.db.QueryRow(`SELECT username, display_name, avatar_url FROM users WHERE id = $1`, userID).
-					Scan(&acceptorUsername, &acceptorDisplayName, &acceptorAvatarURL)
-
-				h.hub.BroadcastToUser(requesterUUID, websocket.OutgoingMessage{
-					Type: "friend_request_accepted",
-					Data: map[string]interface{}{
-						"id":           requestID,
-						"user_id":      userID,
-						"username":     acceptorUsername,
-						"display_name": acceptorDisplayName,
-						"avatar_url":   acceptorAvatarURL,
-					},
-				})
-			}
-		}
-
-		c.JSON(http.StatusOK, gin.H{"message": "Friend request accepted"})
-	} else {
-		// Decline — delete the request
-		_, err = h.db.Exec(`DELETE FROM friendships WHERE id = $1`, requestID)
-		if err != nil {
-			h.log.Error("Failed to decline friend request", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decline friend request"})
-			return
-		}
-
-		h.log.Info("Friend request declined", "request_id", requestID, "user_id", userID)
-
-		c.JSON(http.StatusOK, gin.H{"message": "Friend request declined"})
+		h.acceptFriendRequest(c, requestID, userID, requesterID)
+		return
 	}
+
+	_, err = h.db.Exec(`DELETE FROM friendships WHERE id = $1`, requestID)
+	if err != nil {
+		h.log.Error("Failed to decline friend request", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to decline friend request"})
+		return
+	}
+
+	h.log.Info("Friend request declined", "request_id", requestID, "user_id", userID)
+	c.JSON(http.StatusOK, gin.H{"message": "Friend request declined"})
 }
 
 // RemoveFriend removes a friendship.
@@ -418,6 +451,110 @@ func (h *Handler) RemoveFriend(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Friend removed"})
 }
 
+func executeBlockTx(tx *sql.Tx, userID, targetUserID string) error {
+	res, err := tx.Exec(`
+		UPDATE friendships SET status = 'blocked', updated_at = NOW()
+		WHERE (requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1)
+	`, userID, targetUserID)
+	if err != nil {
+		return err
+	}
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		_, err = tx.Exec(`
+			INSERT INTO friendships (requester_id, addressee_id, status)
+			VALUES ($1, $2, 'blocked')
+		`, userID, targetUserID)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+type convEpoch struct {
+	convID   string
+	maxEpoch int
+}
+
+func (h *Handler) findDMRevocations(tx *sql.Tx, userID, targetUserID string) []convEpoch {
+	revokeRows, revokeErr := tx.Query(`
+		SELECT dp1.conversation_id, COALESCE(MAX(dck.key_version), 0)
+		FROM dm_participants dp1
+		INNER JOIN dm_participants dp2 ON dp1.conversation_id = dp2.conversation_id
+		LEFT JOIN dm_channel_keys dck ON dck.conversation_id = dp1.conversation_id
+		WHERE dp1.user_id = $1 AND dp2.user_id = $2
+		GROUP BY dp1.conversation_id
+	`, userID, targetUserID)
+	if revokeErr != nil {
+		h.log.Error("Failed to query shared DM conversations for revocation", "error", revokeErr)
+		return nil
+	}
+	defer func() { _ = revokeRows.Close() }()
+
+	var revocations []convEpoch
+	for revokeRows.Next() {
+		var ce convEpoch
+		if err := revokeRows.Scan(&ce.convID, &ce.maxEpoch); err != nil || ce.maxEpoch == 0 {
+			continue
+		}
+		revocations = append(revocations, ce)
+	}
+	if err := revokeRows.Err(); err != nil {
+		h.log.Error("Error iterating DM revocation rows", "error", err)
+	}
+	return revocations
+}
+
+func (h *Handler) revokeBlockedDMKeys(tx *sql.Tx, userID, targetUserID string) {
+	revocations := h.findDMRevocations(tx, userID, targetUserID)
+	for _, ce := range revocations {
+		if _, err := tx.Exec(`
+			INSERT INTO dm_key_revocations (conversation_id, revoked_epoch, successor_epoch, reason, revoked_by)
+			VALUES ($1, $2, $3, 'user_blocked', $4)
+			ON CONFLICT (conversation_id, revoked_epoch) DO NOTHING
+		`, ce.convID, ce.maxEpoch, ce.maxEpoch+1, userID); err != nil {
+			h.log.Error("Failed to record DM key revocation on block", "error", err, "conversation_id", ce.convID)
+		}
+	}
+
+	_, _ = tx.Exec(`
+		DELETE FROM dm_channel_keys
+		WHERE user_id = $2
+		  AND conversation_id IN (
+			SELECT dp1.conversation_id FROM dm_participants dp1
+			INNER JOIN dm_participants dp2 ON dp1.conversation_id = dp2.conversation_id
+			WHERE dp1.user_id = $1 AND dp2.user_id = $2
+		  )
+		  AND key_version = (
+			SELECT MAX(key_version) FROM dm_channel_keys dck2
+			WHERE dck2.conversation_id = dm_channel_keys.conversation_id
+		  )
+	`, userID, targetUserID)
+}
+
+func (h *Handler) notifyBlock(userID, targetUserID string) {
+	if h.hub == nil {
+		return
+	}
+	if targetUUID, parseErr := uuid.Parse(targetUserID); parseErr == nil {
+		h.hub.BroadcastToUser(targetUUID, websocket.OutgoingMessage{
+			Type: "friend_removed",
+			Data: map[string]interface{}{
+				"user_id": userID,
+			},
+		})
+	}
+	if blockerUUID, parseErr := uuid.Parse(userID); parseErr == nil {
+		h.hub.BroadcastToUser(blockerUUID, websocket.OutgoingMessage{
+			Type: "key_revocation",
+			Data: map[string]interface{}{
+				"blocked_user_id": targetUserID,
+			},
+		})
+	}
+}
+
 // BlockUser blocks another user. If a friendship exists, it is updated to 'blocked'.
 // If a DM conversation exists, the blocked user's current epoch key is revoked.
 // POST /friends/:user_id/block
@@ -447,89 +584,13 @@ func (h *Handler) BlockUser(c *gin.Context) {
 		}
 	}()
 
-	// Update any existing friendship row in either direction to blocked.
-	// Must check both directions because the unique constraint is (requester_id, addressee_id)
-	// and a row may exist as (target, user) instead of (user, target).
-	res, err := tx.Exec(`
-		UPDATE friendships SET status = 'blocked', updated_at = NOW()
-		WHERE (requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1)
-	`, userID, targetUserID)
-	if err != nil {
+	if err := executeBlockTx(tx, userID, targetUserID); err != nil {
 		h.log.Error(errMsgFailedBlockUser, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBlockUser})
 		return
 	}
-	rowsAffected, _ := res.RowsAffected()
-	if rowsAffected == 0 {
-		// No existing friendship — insert a new blocked row
-		_, err = tx.Exec(`
-			INSERT INTO friendships (requester_id, addressee_id, status)
-			VALUES ($1, $2, 'blocked')
-		`, userID, targetUserID)
-		if err != nil {
-			h.log.Error(errMsgFailedBlockUser, "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBlockUser})
-			return
-		}
-	}
 
-	// Revoke the blocked user's current epoch key in any shared DM conversation.
-	// Step 1: Find shared conversations and their current max epoch.
-	type convEpoch struct {
-		convID   string
-		maxEpoch int
-	}
-	var revocations []convEpoch
-	revokeRows, revokeErr := tx.Query(`
-		SELECT dp1.conversation_id, COALESCE(MAX(dck.key_version), 0)
-		FROM dm_participants dp1
-		INNER JOIN dm_participants dp2 ON dp1.conversation_id = dp2.conversation_id
-		LEFT JOIN dm_channel_keys dck ON dck.conversation_id = dp1.conversation_id
-		WHERE dp1.user_id = $1 AND dp2.user_id = $2
-		GROUP BY dp1.conversation_id
-	`, userID, targetUserID)
-	if revokeErr != nil {
-		h.log.Error("Failed to query shared DM conversations for revocation", "error", revokeErr)
-	}
-	if revokeRows != nil {
-		for revokeRows.Next() {
-			var ce convEpoch
-			if err := revokeRows.Scan(&ce.convID, &ce.maxEpoch); err != nil || ce.maxEpoch == 0 {
-				continue
-			}
-			revocations = append(revocations, ce)
-		}
-		if err := revokeRows.Err(); err != nil {
-			h.log.Error("Error iterating DM revocation rows", "error", err)
-		}
-		_ = revokeRows.Close()
-	}
-
-	// Step 2: Record revocations (ignore conflict if already revoked)
-	for _, ce := range revocations {
-		if _, err := tx.Exec(`
-			INSERT INTO dm_key_revocations (conversation_id, revoked_epoch, successor_epoch, reason, revoked_by)
-			VALUES ($1, $2, $3, 'user_blocked', $4)
-			ON CONFLICT (conversation_id, revoked_epoch) DO NOTHING
-		`, ce.convID, ce.maxEpoch, ce.maxEpoch+1, userID); err != nil {
-			h.log.Error("Failed to record DM key revocation on block", "error", err, "conversation_id", ce.convID)
-		}
-	}
-
-	// Step 3: Delete the blocked user's latest key (preserves history)
-	_, _ = tx.Exec(`
-		DELETE FROM dm_channel_keys
-		WHERE user_id = $2
-		  AND conversation_id IN (
-			SELECT dp1.conversation_id FROM dm_participants dp1
-			INNER JOIN dm_participants dp2 ON dp1.conversation_id = dp2.conversation_id
-			WHERE dp1.user_id = $1 AND dp2.user_id = $2
-		  )
-		  AND key_version = (
-			SELECT MAX(key_version) FROM dm_channel_keys dck2
-			WHERE dck2.conversation_id = dm_channel_keys.conversation_id
-		  )
-	`, userID, targetUserID)
+	h.revokeBlockedDMKeys(tx, userID, targetUserID)
 
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit block", "error", err)
@@ -538,29 +599,7 @@ func (h *Handler) BlockUser(c *gin.Context) {
 	}
 
 	h.log.Info("User blocked", "user_id", userID, "blocked", targetUserID)
-
-	// Notify the blocked user
-	if h.hub != nil {
-		if targetUUID, parseErr := uuid.Parse(targetUserID); parseErr == nil {
-			h.hub.BroadcastToUser(targetUUID, websocket.OutgoingMessage{
-				Type: "friend_removed",
-				Data: map[string]interface{}{
-					"user_id": userID,
-				},
-			})
-		}
-
-		// Notify the blocker to rotate the CSK
-		if blockerUUID, parseErr := uuid.Parse(userID); parseErr == nil {
-			h.hub.BroadcastToUser(blockerUUID, websocket.OutgoingMessage{
-				Type: "key_revocation",
-				Data: map[string]interface{}{
-					"blocked_user_id": targetUserID,
-				},
-			})
-		}
-	}
-
+	h.notifyBlock(userID, targetUserID)
 	c.JSON(http.StatusOK, gin.H{"message": "User blocked"})
 }
 
@@ -585,6 +624,35 @@ type createFriendCodeRequest struct {
 	AutoAccept *bool `json:"auto_accept"`
 }
 
+func resolveMaxUses(input *int) *int {
+	if input == nil {
+		defaultMax := 1
+		return &defaultMax
+	}
+	if *input <= 0 {
+		return nil
+	}
+	maxUses := *input
+	if maxUses > 10 {
+		maxUses = 10
+	}
+	return &maxUses
+}
+
+func resolveExpiresIn(input *int) int {
+	if input == nil {
+		return 3600
+	}
+	sec := *input
+	if sec < 300 {
+		return 300
+	}
+	if sec > 86400 {
+		return 86400
+	}
+	return sec
+}
+
 // CreateFriendCode generates a new friend code for the caller.
 // POST /friends/codes
 func (h *Handler) CreateFriendCode(c *gin.Context) {
@@ -593,37 +661,14 @@ func (h *Handler) CreateFriendCode(c *gin.Context) {
 	var req createFriendCodeRequest
 	_ = c.ShouldBindJSON(&req)
 
-	// Apply defaults — max 10 uses, max 1 day
-	var maxUsesPtr *int
-	if req.MaxUses != nil && *req.MaxUses > 0 {
-		maxUses := *req.MaxUses
-		if maxUses > 10 {
-			maxUses = 10
-		}
-		maxUsesPtr = &maxUses
-	} else if req.MaxUses == nil {
-		defaultMax := 1
-		maxUsesPtr = &defaultMax
-	}
-
-	expiresInSec := 3600 // default 1 hour
-	if req.ExpiresIn != nil {
-		expiresInSec = *req.ExpiresIn
-		if expiresInSec < 300 {
-			expiresInSec = 300
-		}
-		if expiresInSec > 86400 {
-			expiresInSec = 86400
-		}
-	}
-	expiresAt := time.Now().UTC().Add(time.Duration(expiresInSec) * time.Second)
+	maxUsesPtr := resolveMaxUses(req.MaxUses)
+	expiresAt := time.Now().UTC().Add(time.Duration(resolveExpiresIn(req.ExpiresIn)) * time.Second)
 
 	autoAccept := false
 	if req.AutoAccept != nil {
 		autoAccept = *req.AutoAccept
 	}
 
-	// Generate unique code with retry (reuse server invite code generator)
 	for attempts := 0; attempts < 5; attempts++ {
 		code, err := invites.GenerateCode()
 		if err != nil {
@@ -642,7 +687,7 @@ func (h *Handler) CreateFriendCode(c *gin.Context) {
 			&fc.ExpiresAt, &fc.IsRevoked, &fc.AutoAccept, &fc.CreatedAt,
 		)
 		if insertErr != nil {
-			continue // unique constraint collision — retry
+			continue
 		}
 
 		h.log.Info("Friend code created", "user_id", userID, "code", code)
@@ -779,6 +824,157 @@ func (h *Handler) PreviewFriendCode(c *gin.Context) {
 	})
 }
 
+type friendCodeRow struct {
+	codeID     string
+	ownerID    string
+	maxUses    *int
+	useCount   int
+	expiresAt  *time.Time
+	isRevoked  bool
+	autoAccept bool
+}
+
+func lookupFriendCode(tx *sql.Tx, code string) (friendCodeRow, error) {
+	var fc friendCodeRow
+	err := tx.QueryRow(`
+		SELECT id, user_id, max_uses, use_count, expires_at, is_revoked, auto_accept
+		FROM friend_codes
+		WHERE code = $1
+		FOR UPDATE
+	`, code).Scan(&fc.codeID, &fc.ownerID, &fc.maxUses, &fc.useCount, &fc.expiresAt, &fc.isRevoked, &fc.autoAccept)
+	return fc, err
+}
+
+func validateFriendCodeClaim(fc friendCodeRow, userID string) (int, string) {
+	if fc.isRevoked {
+		return http.StatusGone, "This friend code has been revoked"
+	}
+	if fc.expiresAt != nil && fc.expiresAt.Before(time.Now().UTC()) {
+		return http.StatusGone, "This friend code has expired"
+	}
+	if fc.maxUses != nil && *fc.maxUses > 0 && fc.useCount >= *fc.maxUses {
+		return http.StatusGone, "This friend code has reached its maximum uses"
+	}
+	if fc.ownerID == userID {
+		return http.StatusBadRequest, "Cannot claim your own friend code"
+	}
+	return 0, ""
+}
+
+func claimFriendshipConflictResponse(status string) (int, string) {
+	switch status {
+	case "accepted":
+		return http.StatusConflict, "Already friends with this user"
+	case "pending":
+		return http.StatusConflict, "Friend request already pending with this user"
+	case "blocked":
+		return http.StatusForbidden, "Cannot add this user as a friend"
+	default:
+		return 0, ""
+	}
+}
+
+func executeFriendCodeClaim(tx *sql.Tx, userID, ownerID, codeID string, autoAccept bool) (string, string, string, error) {
+	status := "pending"
+	if autoAccept {
+		status = "accepted"
+	}
+
+	var friendshipID, createdAt string
+	err := tx.QueryRow(`
+		INSERT INTO friendships (requester_id, addressee_id, status)
+		VALUES ($1, $2, $3)
+		RETURNING id, created_at
+	`, userID, ownerID, status).Scan(&friendshipID, &createdAt)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	_, err = tx.Exec(`UPDATE friend_codes SET use_count = use_count + 1 WHERE id = $1`, codeID)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	return friendshipID, createdAt, status, nil
+}
+
+type userProfile struct {
+	username    string
+	displayName *string
+	avatarURL   *string
+}
+
+func (h *Handler) fetchUserProfile(userID string) userProfile {
+	var p userProfile
+	_ = h.db.QueryRow(`SELECT username, display_name, avatar_url FROM users WHERE id = $1`, userID).
+		Scan(&p.username, &p.displayName, &p.avatarURL)
+	return p
+}
+
+type claimNotification struct {
+	ownerID      string
+	userID       string
+	friendshipID string
+	codeID       string
+	status       string
+	createdAt    string
+	autoAccept   bool
+	claimer      userProfile
+	owner        userProfile
+}
+
+func (h *Handler) notifyFriendCodeClaimed(n claimNotification) {
+	if h.hub == nil {
+		return
+	}
+	ownerUUID, parseErr := uuid.Parse(n.ownerID)
+	if parseErr != nil {
+		return
+	}
+
+	h.hub.BroadcastToUser(ownerUUID, websocket.OutgoingMessage{
+		Type: "friend_code_claimed",
+		Data: map[string]interface{}{
+			"friendship_id": n.friendshipID,
+			"code_id":       n.codeID,
+			"status":        n.status,
+			"user_id":       n.userID,
+			"username":      n.claimer.username,
+			"display_name":  n.claimer.displayName,
+			"avatar_url":    n.claimer.avatarURL,
+			"created_at":    n.createdAt,
+		},
+	})
+
+	if n.autoAccept {
+		if claimerUUID, parseErr2 := uuid.Parse(n.userID); parseErr2 == nil {
+			h.hub.BroadcastToUser(claimerUUID, websocket.OutgoingMessage{
+				Type: "friend_request_accepted",
+				Data: map[string]interface{}{
+					"id":           n.friendshipID,
+					"user_id":      n.ownerID,
+					"username":     n.owner.username,
+					"display_name": n.owner.displayName,
+					"avatar_url":   n.owner.avatarURL,
+				},
+			})
+		}
+		return
+	}
+
+	h.hub.BroadcastToUser(ownerUUID, websocket.OutgoingMessage{
+		Type: "friend_request_received",
+		Data: map[string]interface{}{
+			"id":                n.friendshipID,
+			"from_user_id":      n.userID,
+			"from_username":     n.claimer.username,
+			"from_display_name": n.claimer.displayName,
+			"from_avatar_url":   n.claimer.avatarURL,
+			"created_at":        n.createdAt,
+		},
+	})
+}
+
 // ClaimFriendCode redeems a friend code to create a friendship.
 // If auto_accept is set on the code, the friendship is created as 'accepted' directly.
 // Otherwise, a pending friend request is created from the claimer to the code owner.
@@ -804,22 +1000,7 @@ func (h *Handler) ClaimFriendCode(c *gin.Context) {
 		}
 	}()
 
-	// Lock the code row to prevent race conditions on use_count
-	var (
-		codeID     string
-		ownerID    string
-		maxUses    *int
-		useCount   int
-		expiresAt  *time.Time
-		isRevoked  bool
-		autoAccept bool
-	)
-	err = tx.QueryRow(`
-		SELECT id, user_id, max_uses, use_count, expires_at, is_revoked, auto_accept
-		FROM friend_codes
-		WHERE code = $1
-		FOR UPDATE
-	`, code).Scan(&codeID, &ownerID, &maxUses, &useCount, &expiresAt, &isRevoked, &autoAccept)
+	fc, err := lookupFriendCode(tx, code)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Invalid friend code"})
 		return
@@ -830,43 +1011,15 @@ func (h *Handler) ClaimFriendCode(c *gin.Context) {
 		return
 	}
 
-	// Validate code
-	if isRevoked {
-		c.JSON(http.StatusGone, gin.H{"error": "This friend code has been revoked"})
-		return
-	}
-	if expiresAt != nil && expiresAt.Before(time.Now().UTC()) {
-		c.JSON(http.StatusGone, gin.H{"error": "This friend code has expired"})
-		return
-	}
-	if maxUses != nil && *maxUses > 0 && useCount >= *maxUses {
-		c.JSON(http.StatusGone, gin.H{"error": "This friend code has reached its maximum uses"})
+	if errCode, errMsg := validateFriendCodeClaim(fc, userID); errCode != 0 {
+		c.JSON(errCode, gin.H{"error": errMsg})
 		return
 	}
 
-	// Can't claim your own code
-	if ownerID == userID {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Cannot claim your own friend code"})
-		return
-	}
-
-	// Check for existing friendship in either direction
-	var existingStatus string
-	err = tx.QueryRow(`
-		SELECT status FROM friendships
-		WHERE (requester_id = $1 AND addressee_id = $2)
-		   OR (requester_id = $2 AND addressee_id = $1)
-	`, userID, ownerID).Scan(&existingStatus)
+	existingStatus, err := checkExistingFriendship(tx, userID, fc.ownerID)
 	if err == nil {
-		switch existingStatus {
-		case "accepted":
-			c.JSON(http.StatusConflict, gin.H{"error": "Already friends with this user"})
-			return
-		case "pending":
-			c.JSON(http.StatusConflict, gin.H{"error": "Friend request already pending with this user"})
-			return
-		case "blocked":
-			c.JSON(http.StatusForbidden, gin.H{"error": "Cannot add this user as a friend"})
+		if respCode, msg := claimFriendshipConflictResponse(existingStatus); respCode != 0 {
+			c.JSON(respCode, gin.H{"error": msg})
 			return
 		}
 	} else if err != sql.ErrNoRows {
@@ -875,28 +1028,9 @@ func (h *Handler) ClaimFriendCode(c *gin.Context) {
 		return
 	}
 
-	// Create friendship
-	status := "pending"
-	if autoAccept {
-		status = "accepted"
-	}
-
-	var friendshipID, createdAt string
-	err = tx.QueryRow(`
-		INSERT INTO friendships (requester_id, addressee_id, status)
-		VALUES ($1, $2, $3)
-		RETURNING id, created_at
-	`, userID, ownerID, status).Scan(&friendshipID, &createdAt)
+	friendshipID, createdAt, status, err := executeFriendCodeClaim(tx, userID, fc.ownerID, fc.codeID, fc.autoAccept)
 	if err != nil {
 		h.log.Error("Failed to create friendship", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedClaimFriendCode})
-		return
-	}
-
-	// Increment use count
-	_, err = tx.Exec(`UPDATE friend_codes SET use_count = use_count + 1 WHERE id = $1`, codeID)
-	if err != nil {
-		h.log.Error("Failed to increment use count", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedClaimFriendCode})
 		return
 	}
@@ -907,78 +1041,30 @@ func (h *Handler) ClaimFriendCode(c *gin.Context) {
 		return
 	}
 
-	h.log.Info("Friend code claimed", "code", code, "claimer", userID, "owner", ownerID, "status", status)
+	h.log.Info("Friend code claimed", "code", code, "claimer", userID, "owner", fc.ownerID, "status", status)
 
-	// Fetch user info for WebSocket notifications and response
-	var claimerUsername string
-	var claimerDisplayName *string
-	var claimerAvatarURL *string
-	_ = h.db.QueryRow(`SELECT username, display_name, avatar_url FROM users WHERE id = $1`, userID).
-		Scan(&claimerUsername, &claimerDisplayName, &claimerAvatarURL)
-
-	var ownerUsername string
-	var ownerDisplayName *string
-	var ownerAvatarURL *string
-	_ = h.db.QueryRow(`SELECT username, display_name, avatar_url FROM users WHERE id = $1`, ownerID).
-		Scan(&ownerUsername, &ownerDisplayName, &ownerAvatarURL)
-
-	// WebSocket notifications
-	if h.hub != nil {
-		if ownerUUID, parseErr := uuid.Parse(ownerID); parseErr == nil {
-			// Always notify code owner that their code was claimed
-			h.hub.BroadcastToUser(ownerUUID, websocket.OutgoingMessage{
-				Type: "friend_code_claimed",
-				Data: map[string]interface{}{
-					"friendship_id": friendshipID,
-					"code_id":       codeID,
-					"status":        status,
-					"user_id":       userID,
-					"username":      claimerUsername,
-					"display_name":  claimerDisplayName,
-					"avatar_url":    claimerAvatarURL,
-					"created_at":    createdAt,
-				},
-			})
-
-			if autoAccept {
-				// Notify claimer that they're now friends
-				if claimerUUID, parseErr2 := uuid.Parse(userID); parseErr2 == nil {
-					h.hub.BroadcastToUser(claimerUUID, websocket.OutgoingMessage{
-						Type: "friend_request_accepted",
-						Data: map[string]interface{}{
-							"id":           friendshipID,
-							"user_id":      ownerID,
-							"username":     ownerUsername,
-							"display_name": ownerDisplayName,
-							"avatar_url":   ownerAvatarURL,
-						},
-					})
-				}
-			} else {
-				// Pending — notify code owner of incoming request
-				h.hub.BroadcastToUser(ownerUUID, websocket.OutgoingMessage{
-					Type: "friend_request_received",
-					Data: map[string]interface{}{
-						"id":                friendshipID,
-						"from_user_id":      userID,
-						"from_username":     claimerUsername,
-						"from_display_name": claimerDisplayName,
-						"from_avatar_url":   claimerAvatarURL,
-						"created_at":        createdAt,
-					},
-				})
-			}
-		}
-	}
+	claimer := h.fetchUserProfile(userID)
+	owner := h.fetchUserProfile(fc.ownerID)
+	h.notifyFriendCodeClaimed(claimNotification{
+		ownerID:      fc.ownerID,
+		userID:       userID,
+		friendshipID: friendshipID,
+		codeID:       fc.codeID,
+		status:       status,
+		createdAt:    createdAt,
+		autoAccept:   fc.autoAccept,
+		claimer:      claimer,
+		owner:        owner,
+	})
 
 	c.JSON(http.StatusOK, gin.H{
 		"status":        status,
 		"friendship_id": friendshipID,
 		"user": map[string]interface{}{
-			"user_id":      ownerID,
-			"username":     ownerUsername,
-			"display_name": ownerDisplayName,
-			"avatar_url":   ownerAvatarURL,
+			"user_id":      fc.ownerID,
+			"username":     owner.username,
+			"display_name": owner.displayName,
+			"avatar_url":   owner.avatarURL,
 		},
 	})
 }

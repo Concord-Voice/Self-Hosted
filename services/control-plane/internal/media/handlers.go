@@ -16,6 +16,7 @@ import (
 	"database/sql"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"strings"
 	"time"
@@ -33,6 +34,10 @@ const (
 	errMsgFailedVerifyAccess = "Failed to verify access"
 	errMsgFailedVerifyPerms  = "Failed to verify permissions"
 	purposeDMIcon            = "dm-icon"
+	purposeServerIcon        = "server-icon"
+	purposeServerBanner      = "server-banner"
+	mimeOctetStream          = "application/octet-stream"
+	headerContentType        = "Content-Type"
 )
 
 // ObjectStore defines the storage operations required by the media handler.
@@ -129,14 +134,14 @@ func (h *Handler) UploadBanner(c *gin.Context) {
 // POST /api/v1/media/upload/server-icon
 func (h *Handler) UploadServerIcon(c *gin.Context) {
 	userID := c.GetString("user_id")
-	h.handleTier1Upload(c, userID, "server-icon", iconMaxUpload, IconMaxDim, IconMaxDim)
+	h.handleTier1Upload(c, userID, purposeServerIcon, iconMaxUpload, IconMaxDim, IconMaxDim)
 }
 
 // UploadServerBanner handles server banner uploads.
 // POST /api/v1/media/upload/server-banner
 func (h *Handler) UploadServerBanner(c *gin.Context) {
 	userID := c.GetString("user_id")
-	h.handleTier1Upload(c, userID, "server-banner", bannerMaxUpload, BannerMaxW, BannerMaxH)
+	h.handleTier1Upload(c, userID, purposeServerBanner, bannerMaxUpload, BannerMaxW, BannerMaxH)
 }
 
 // UploadDMIcon handles group DM icon uploads.
@@ -155,115 +160,36 @@ func (h *Handler) UploadAttachment(c *gin.Context) {
 	// Cap request body size before multipart parsing to prevent memory/disk DoS
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.cfg.UploadMaxSize+4096) // +4KB for multipart headers
 
-	file, header, err := c.Request.FormFile("file")
+	file, header, err := parseAttachmentFile(c, h.cfg.UploadMaxSize)
 	if err != nil {
-		if strings.Contains(err.Error(), "http: request body too large") {
-			c.JSON(http.StatusRequestEntityTooLarge, gin.H{
-				"error":    fmt.Sprintf("File exceeds maximum upload size of %d bytes", h.cfg.UploadMaxSize),
-				"max_size": h.cfg.UploadMaxSize,
-			})
-			return
-		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing file in request"})
-		return
+		return // response already sent
 	}
 	defer func() { _ = file.Close() }()
 
-	// Enforce global upload limit (belt-and-suspenders with MaxBytesReader)
-	if header.Size > h.cfg.UploadMaxSize {
-		c.JSON(http.StatusRequestEntityTooLarge, gin.H{
-			"error":    fmt.Sprintf("File exceeds maximum upload size of %d bytes", h.cfg.UploadMaxSize),
-			"max_size": h.cfg.UploadMaxSize,
-		})
+	fileType, mimeType, keyVersion, ok := validateAttachmentRequest(c)
+	if !ok {
 		return
 	}
 
-	// Client declares the file type for rendering hints (server can't verify — it's ciphertext)
-	fileType := FileType(c.PostForm("file_type"))
-	if !isValidFileType(fileType) {
-		fileType = FileTypeFile
-	}
-
-	// Client provides the MIME type (original, pre-encryption) for rendering hints
-	mimeType := c.PostForm("mime_type")
-	if mimeType == "" {
-		mimeType = "application/octet-stream"
-	}
-
-	// Key version (CSK epoch) for forward secrecy — required for E2EE attachments
-	keyVersionStr := c.PostForm("key_version")
-	keyVersion := 1
-	if keyVersionStr != "" {
-		if v, err := fmt.Sscanf(keyVersionStr, "%d", &keyVersion); err != nil || v != 1 || keyVersion < 1 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "key_version must be a positive integer"})
-			return
-		}
-	}
-
-	// Context (channel_id XOR conversation_id) for access control
-	channelID := c.PostForm("channel_id")
-	conversationID := c.PostForm("conversation_id")
-
-	if channelID == "" && conversationID == "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Either channel_id or conversation_id is required for attachments"})
+	channelID, conversationID, ok := validateAttachmentContext(c, h, userID)
+	if !ok {
 		return
-	}
-	if channelID != "" && conversationID != "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Exactly one of channel_id or conversation_id must be provided"})
-		return
-	}
-
-	// Validate UUID format and verify membership before storing
-	if channelID != "" {
-		if _, err := uuid.Parse(channelID); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel_id"})
-			return
-		}
-		if !h.userHasChannelAccess(c, userID, channelID) {
-			return
-		}
-		if !h.checkAttachPermission(c, userID, channelID) {
-			return
-		}
-	}
-	if conversationID != "" {
-		if _, err := uuid.Parse(conversationID); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation_id"})
-			return
-		}
-		if !h.userHasDMAccess(c, userID, conversationID) {
-			return
-		}
 	}
 
 	fileID := uuid.New().String()
 	storageKey := fmt.Sprintf("attachments/%s", fileID)
 
-	// Store the encrypted blob as-is
-	if err := h.store.PutObject(c.Request.Context(), storageKey, file, header.Size, "application/octet-stream"); err != nil {
+	if err := h.store.PutObject(c.Request.Context(), storageKey, file, header.Size, mimeOctetStream); err != nil {
 		h.log.Error("Failed to store attachment", "error", err, "user_id", userID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to store file"})
 		return
 	}
 
-	// Record metadata in database
-	var chID, convID interface{}
-	if channelID != "" {
-		chID = channelID
-	}
-	if conversationID != "" {
-		convID = conversationID
-	}
-
-	insertQuery := `
-		INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key,
-		                         is_encrypted, key_version, channel_id, conversation_id, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, $8, $9, $10, NOW())
-	`
-	_, err = h.db.Exec(insertQuery, fileID, userID, string(fileType), MediaTierE2EE,
-		mimeType, header.Size, storageKey, keyVersion, chID, convID)
-	if err != nil {
-		// Clean up the stored object on DB failure
+	if err := createAttachmentRecord(h, c, attachmentParams{
+		fileID: fileID, userID: userID, fileType: fileType, mimeType: mimeType,
+		storageKey: storageKey, fileSize: header.Size, keyVersion: keyVersion,
+		channelID: channelID, conversationID: conversationID,
+	}); err != nil {
 		_ = h.store.DeleteObject(c.Request.Context(), storageKey)
 		h.log.Error("Failed to record attachment metadata", "error", err, "user_id", userID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to record file metadata"})
@@ -343,7 +269,7 @@ func (h *Handler) DownloadAttachment(c *gin.Context) {
 	// E2EE attachments are opaque ciphertext — use stored MIME type hint for the
 	// client but serve as octet-stream since the content is encrypted
 	_ = contentType // from storage (application/octet-stream)
-	c.Header("Content-Type", "application/octet-stream")
+	c.Header(headerContentType, mimeOctetStream)
 	c.Header("Content-Length", fmt.Sprintf("%d", fileSize))
 	c.Header("X-File-Mime-Type", mimeType) // original MIME type hint for client-side decryption
 	c.Header("Cache-Control", "private, no-store")
@@ -482,124 +408,32 @@ func (h *Handler) DeleteMedia(c *gin.Context) {
 // It validates the file, processes (resize + re-encode), stores in MinIO,
 // and records metadata in the database.
 func (h *Handler) handleTier1Upload(c *gin.Context, userID, purpose string, maxSize int64, maxW, maxH int) {
-	// Cap request body size before multipart parsing to prevent memory/disk DoS
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxSize+4096) // +4KB for multipart headers
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxSize+4096)
 
-	file, header, err := c.Request.FormFile("file")
+	file, header, err := parseMultipartFile(c, maxSize)
 	if err != nil {
-		if strings.Contains(err.Error(), "http: request body too large") {
-			c.JSON(http.StatusRequestEntityTooLarge, gin.H{
-				"error":    fmt.Sprintf("File exceeds maximum size of %d bytes", maxSize),
-				"max_size": maxSize,
-			})
-			return
-		}
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Missing file in request"})
-		return
+		return // response already sent
 	}
 	defer func() { _ = file.Close() }()
 
-	if header.Size > maxSize {
-		c.JSON(http.StatusRequestEntityTooLarge, gin.H{
-			"error":    fmt.Sprintf("File exceeds maximum size of %d bytes", maxSize),
-			"max_size": maxSize,
-		})
+	serverID, conversationID, ok := validateTier1Context(c, h, userID, purpose)
+	if !ok {
 		return
 	}
 
-	// For server uploads, validate server_id and check manage_server permission BEFORE processing
-	var serverID string
-	if purpose == "server-icon" || purpose == "server-banner" {
-		serverID = c.PostForm("server_id")
-		if serverID == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "server_id is required"})
-			return
-		}
-		if _, err := uuid.Parse(serverID); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server_id"})
-			return
-		}
-		if !h.userCanManageServer(c, userID, serverID) {
-			return // 403 already sent
-		}
-	}
-
-	// For DM icon uploads, validate conversation_id and check admin role BEFORE processing
-	var conversationID string
-	if purpose == purposeDMIcon {
-		conversationID = c.PostForm("conversation_id")
-		if conversationID == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "conversation_id is required"})
-			return
-		}
-		if _, err := uuid.Parse(conversationID); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation_id"})
-			return
-		}
-		if !h.userIsDMAdmin(c, userID, conversationID) {
-			return // 403 already sent
-		}
-	}
-
-	// Validate MIME type
-	contentType := header.Header.Get("Content-Type")
-	if contentType == "" || !allowedImageTypes[contentType] {
-		// Sniff from content if header is missing/wrong
-		buf := make([]byte, 512)
-		n, readErr := file.Read(buf)
-		if readErr != nil && readErr != io.EOF {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read file"})
-			return
-		}
-		if n == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Empty file"})
-			return
-		}
-		contentType = http.DetectContentType(buf[:n])
-		if _, seekErr := file.Seek(0, io.SeekStart); seekErr != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process file"})
-			return
-		}
-	}
-
-	if !allowedImageTypes[contentType] {
-		c.JSON(http.StatusBadRequest, gin.H{
-			"error":         "Invalid image type. Allowed: JPEG, PNG, GIF, WebP",
-			"allowed_types": []string{"image/jpeg", "image/png", "image/gif", "image/webp"},
-		})
+	if !validateImageType(c, file, header) {
 		return
 	}
 
-	// Process (resize + re-encode)
-	// Use PNG output for avatars/icons (may have transparency), JPEG for banners
-	var processed *ProcessedImage
-	if purpose == "banner" || purpose == "server-banner" {
-		processed, err = ProcessImage(file, maxW, maxH)
-	} else {
-		processed, err = ProcessImagePNG(file, maxW, maxH)
-	}
+	processed, err := processImage(file, purpose, maxW, maxH)
 	if err != nil {
 		h.log.Error("Failed to process image", "error", err, "user_id", userID, "purpose", purpose)
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to process image. Ensure the file is a valid image."})
 		return
 	}
 
-	// Determine storage key based on purpose
-	var storageKey string
-	switch purpose {
-	case "avatar":
-		storageKey = fmt.Sprintf("avatars/%s", userID)
-	case "banner":
-		storageKey = fmt.Sprintf("banners/%s", userID)
-	case "server-icon":
-		storageKey = fmt.Sprintf("server-icons/%s", serverID)
-	case "server-banner":
-		storageKey = fmt.Sprintf("server-banners/%s", serverID)
-	case purposeDMIcon:
-		storageKey = fmt.Sprintf("dm-icons/%s", conversationID)
-	}
+	storageKey := tier1StorageKey(purpose, userID, serverID, conversationID)
 
-	// Upload to object storage
 	reader := bytes.NewReader(processed.Data)
 	if err := h.store.PutObject(c.Request.Context(), storageKey, reader, int64(len(processed.Data)), processed.ContentType); err != nil {
 		h.log.Error("Failed to store processed image", "error", err, "user_id", userID, "purpose", purpose)
@@ -607,38 +441,13 @@ func (h *Handler) handleTier1Upload(c *gin.Context, userID, purpose string, maxS
 		return
 	}
 
-	// Record in media_files table
-	fileID := uuid.New().String()
-	fileType := FileTypePhoto
-
-	insertQuery := `
-		INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
-		ON CONFLICT (storage_key) WHERE deleted_at IS NULL
-		DO UPDATE SET uploader_id = EXCLUDED.uploader_id, file_size = EXCLUDED.file_size, mime_type = EXCLUDED.mime_type, updated_at = NOW()
-		RETURNING id
-	`
-	err = h.db.QueryRow(insertQuery, fileID, userID, string(fileType), MediaTierAuthenticated,
-		processed.ContentType, len(processed.Data), storageKey).Scan(&fileID)
+	fileID, err := insertTier1Record(h, c, userID, storageKey, processed)
 	if err != nil {
-		h.log.Error("Failed to record media metadata", "error", err, "user_id", userID)
-		// Clean up the just-uploaded object to avoid orphans in storage
-		if delErr := h.store.DeleteObject(c.Request.Context(), storageKey); delErr != nil {
-			h.log.Error("Failed to delete orphaned media object", "error", delErr, "storage_key", storageKey)
-		}
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to record media metadata"})
-		return
+		return // response already sent
 	}
 
-	// For DM icon uploads, update the conversation's icon_url
 	if purpose == purposeDMIcon {
-		proxyURL := fmt.Sprintf("/api/v1/media/dm-icons/%s", conversationID)
-		if _, dbErr := h.db.Exec(
-			`UPDATE dm_conversations SET icon_url = $1, updated_at = NOW() WHERE id = $2`,
-			proxyURL, conversationID,
-		); dbErr != nil {
-			h.log.Error("Failed to update DM icon URL", "error", dbErr, "conversation_id", conversationID)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update group icon"})
+		if err := updateDMIconURL(h, c, conversationID); err != nil {
 			return
 		}
 	}
@@ -655,6 +464,278 @@ func (h *Handler) handleTier1Upload(c *gin.Context, userID, purpose string, maxS
 		"width":       processed.Width,
 		"height":      processed.Height,
 	})
+}
+
+// --- Extracted helpers for handleTier1Upload ---
+
+func parseMultipartFile(c *gin.Context, maxSize int64) (multipart.File, *multipart.FileHeader, error) {
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		if strings.Contains(err.Error(), "http: request body too large") {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{
+				"error":    fmt.Sprintf("File exceeds maximum size of %d bytes", maxSize),
+				"max_size": maxSize,
+			})
+		} else {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Missing file in request"})
+		}
+		return nil, nil, err
+	}
+	if header.Size > maxSize {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{
+			"error":    fmt.Sprintf("File exceeds maximum size of %d bytes", maxSize),
+			"max_size": maxSize,
+		})
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("file too large")
+	}
+	return file, header, nil
+}
+
+func validateTier1Context(c *gin.Context, h *Handler, userID, purpose string) (serverID, conversationID string, ok bool) {
+	if purpose == purposeServerIcon || purpose == purposeServerBanner {
+		serverID = c.PostForm("server_id")
+		if serverID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "server_id is required"})
+			return "", "", false
+		}
+		if _, err := uuid.Parse(serverID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server_id"})
+			return "", "", false
+		}
+		if !h.userCanManageServer(c, userID, serverID) {
+			return "", "", false
+		}
+	}
+	if purpose == purposeDMIcon {
+		conversationID = c.PostForm("conversation_id")
+		if conversationID == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "conversation_id is required"})
+			return "", "", false
+		}
+		if _, err := uuid.Parse(conversationID); err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation_id"})
+			return "", "", false
+		}
+		if !h.userIsDMAdmin(c, userID, conversationID) {
+			return "", "", false
+		}
+	}
+	return serverID, conversationID, true
+}
+
+func validateImageType(c *gin.Context, file multipart.File, header *multipart.FileHeader) bool {
+	contentType := header.Header.Get(headerContentType)
+	if contentType == "" || !allowedImageTypes[contentType] {
+		buf := make([]byte, 512)
+		n, readErr := file.Read(buf)
+		if readErr != nil && readErr != io.EOF {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to read file"})
+			return false
+		}
+		if n == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Empty file"})
+			return false
+		}
+		contentType = http.DetectContentType(buf[:n])
+		if _, seekErr := file.Seek(0, io.SeekStart); seekErr != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to process file"})
+			return false
+		}
+	}
+	if !allowedImageTypes[contentType] {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error":         "Invalid image type. Allowed: JPEG, PNG, GIF, WebP",
+			"allowed_types": []string{"image/jpeg", "image/png", "image/gif", "image/webp"},
+		})
+		return false
+	}
+	return true
+}
+
+func processImage(file io.Reader, purpose string, maxW, maxH int) (*ProcessedImage, error) {
+	if purpose == "banner" || purpose == purposeServerBanner {
+		return ProcessImage(file, maxW, maxH)
+	}
+	return ProcessImagePNG(file, maxW, maxH)
+}
+
+func tier1StorageKey(purpose, userID, serverID, conversationID string) string {
+	switch purpose {
+	case "avatar":
+		return fmt.Sprintf("avatars/%s", userID)
+	case "banner":
+		return fmt.Sprintf("banners/%s", userID)
+	case purposeServerIcon:
+		return fmt.Sprintf("server-icons/%s", serverID)
+	case purposeServerBanner:
+		return fmt.Sprintf("server-banners/%s", serverID)
+	case purposeDMIcon:
+		return fmt.Sprintf("dm-icons/%s", conversationID)
+	}
+	return fmt.Sprintf("media/%s/%s", purpose, userID)
+}
+
+func insertTier1Record(h *Handler, c *gin.Context, userID, storageKey string, processed *ProcessedImage) (string, error) {
+	fileID := uuid.New().String()
+
+	insertQuery := `
+		INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+		ON CONFLICT (storage_key) WHERE deleted_at IS NULL
+		DO UPDATE SET uploader_id = EXCLUDED.uploader_id, file_size = EXCLUDED.file_size, mime_type = EXCLUDED.mime_type, updated_at = NOW()
+		RETURNING id
+	`
+	err := h.db.QueryRow(insertQuery, fileID, userID, string(FileTypePhoto), MediaTierAuthenticated,
+		processed.ContentType, len(processed.Data), storageKey).Scan(&fileID)
+	if err != nil {
+		h.log.Error("Failed to record media metadata", "error", err, "user_id", userID)
+		if delErr := h.store.DeleteObject(c.Request.Context(), storageKey); delErr != nil {
+			h.log.Error("Failed to delete orphaned media object", "error", delErr, "storage_key", storageKey)
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to record media metadata"})
+		return "", err
+	}
+	return fileID, nil
+}
+
+func updateDMIconURL(h *Handler, c *gin.Context, conversationID string) error {
+	proxyURL := fmt.Sprintf("/api/v1/media/dm-icons/%s", conversationID)
+	if _, dbErr := h.db.Exec(
+		`UPDATE dm_conversations SET icon_url = $1, updated_at = NOW() WHERE id = $2`,
+		proxyURL, conversationID,
+	); dbErr != nil {
+		h.log.Error("Failed to update DM icon URL", "error", dbErr, "conversation_id", conversationID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update group icon"})
+		return dbErr
+	}
+	return nil
+}
+
+// --- Extracted helpers for UploadAttachment ---
+
+func parseAttachmentFile(c *gin.Context, maxSize int64) (multipart.File, *multipart.FileHeader, error) {
+	file, header, err := c.Request.FormFile("file")
+	if err != nil {
+		if strings.Contains(err.Error(), "http: request body too large") {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{
+				"error":    fmt.Sprintf("File exceeds maximum upload size of %d bytes", maxSize),
+				"max_size": maxSize,
+			})
+		} else {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "Missing file in request"})
+		}
+		return nil, nil, err
+	}
+	if header.Size > maxSize {
+		c.JSON(http.StatusRequestEntityTooLarge, gin.H{
+			"error":    fmt.Sprintf("File exceeds maximum upload size of %d bytes", maxSize),
+			"max_size": maxSize,
+		})
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("file too large")
+	}
+	return file, header, nil
+}
+
+func validateAttachmentRequest(c *gin.Context) (fileType FileType, mimeType string, keyVersion int, ok bool) {
+	fileType = FileType(c.PostForm("file_type"))
+	if !isValidFileType(fileType) {
+		fileType = FileTypeFile
+	}
+
+	mimeType = c.PostForm("mime_type")
+	if mimeType == "" {
+		mimeType = mimeOctetStream
+	}
+
+	keyVersion = 1
+	keyVersionStr := c.PostForm("key_version")
+	if keyVersionStr != "" {
+		if v, err := fmt.Sscanf(keyVersionStr, "%d", &keyVersion); err != nil || v != 1 || keyVersion < 1 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "key_version must be a positive integer"})
+			return "", "", 0, false
+		}
+	}
+
+	return fileType, mimeType, keyVersion, true
+}
+
+func validateAttachmentContext(c *gin.Context, h *Handler, userID string) (channelID, conversationID string, ok bool) {
+	channelID = c.PostForm("channel_id")
+	conversationID = c.PostForm("conversation_id")
+
+	if channelID == "" && conversationID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Either channel_id or conversation_id is required for attachments"})
+		return "", "", false
+	}
+	if channelID != "" && conversationID != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Exactly one of channel_id or conversation_id must be provided"})
+		return "", "", false
+	}
+
+	if channelID != "" {
+		if !validateChannelAttachment(c, h, userID, channelID) {
+			return "", "", false
+		}
+	}
+	if conversationID != "" {
+		if !validateDMAttachment(c, h, userID, conversationID) {
+			return "", "", false
+		}
+	}
+
+	return channelID, conversationID, true
+}
+
+func validateChannelAttachment(c *gin.Context, h *Handler, userID, channelID string) bool {
+	if _, err := uuid.Parse(channelID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel_id"})
+		return false
+	}
+	if !h.userHasChannelAccess(c, userID, channelID) {
+		return false
+	}
+	return h.checkAttachPermission(c, userID, channelID)
+}
+
+func validateDMAttachment(c *gin.Context, h *Handler, userID, conversationID string) bool {
+	if _, err := uuid.Parse(conversationID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation_id"})
+		return false
+	}
+	return h.userHasDMAccess(c, userID, conversationID)
+}
+
+type attachmentParams struct {
+	fileID         string
+	userID         string
+	fileType       FileType
+	mimeType       string
+	storageKey     string
+	fileSize       int64
+	keyVersion     int
+	channelID      string
+	conversationID string
+}
+
+func createAttachmentRecord(h *Handler, c *gin.Context, p attachmentParams) error {
+	var chID, convID interface{}
+	if p.channelID != "" {
+		chID = p.channelID
+	}
+	if p.conversationID != "" {
+		convID = p.conversationID
+	}
+
+	insertQuery := `
+		INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key,
+		                         is_encrypted, key_version, channel_id, conversation_id, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, $8, $9, $10, NOW())
+	`
+	_, err := h.db.Exec(insertQuery, p.fileID, p.userID, string(p.fileType), MediaTierE2EE,
+		p.mimeType, p.fileSize, p.storageKey, p.keyVersion, chID, convID)
+	return err
 }
 
 // proxyTier1Media fetches an object from MinIO and streams it to the client
@@ -674,7 +755,7 @@ func (h *Handler) proxyTier1Media(c *gin.Context, key string) {
 
 	// Cache for 1 hour, allow revalidation
 	c.Header("Cache-Control", "private, max-age=3600, must-revalidate")
-	c.Header("Content-Type", contentType)
+	c.Header(headerContentType, contentType)
 	c.Status(http.StatusOK)
 
 	if _, err := io.Copy(c.Writer, obj); err != nil {

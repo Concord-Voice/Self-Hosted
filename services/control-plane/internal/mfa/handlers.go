@@ -1481,6 +1481,42 @@ func (h *Handler) buildWebAuthnUser(ctx context.Context, userID string) (*WebAut
 
 // ── Recovery-Only Methods ─────────────────────────────────────────────────────
 
+// countLoginEligible returns the number of enabled methods not in the recovery-only set.
+func countLoginEligible(enabledMethods, recoveryOnlyMethods []string) int {
+	excluded := make(map[string]bool, len(recoveryOnlyMethods))
+	for _, r := range recoveryOnlyMethods {
+		excluded[r] = true
+	}
+	count := 0
+	for _, m := range enabledMethods {
+		if !excluded[m] {
+			count++
+		}
+	}
+	return count
+}
+
+// filterValidRecoveryOnly returns only those requested methods that are actually enabled.
+func filterValidRecoveryOnly(requested []string, enabled map[string]bool) []string {
+	var valid []string
+	for _, m := range requested {
+		if enabled[m] {
+			valid = append(valid, m)
+		}
+	}
+	return valid
+}
+
+// hasEmailOrSms returns true if the slice contains "email" or "sms".
+func hasEmailOrSms(methods []string) bool {
+	for _, m := range methods {
+		if m == "email" || m == "sms" {
+			return true
+		}
+	}
+	return false
+}
+
 // SetRecoveryOnly updates which MFA methods are restricted to account recovery only.
 // Recovery-only methods can verify identity for recovery flows but are excluded from
 // login and sensitive-operation MFA challenges — like a spare key that unlocks the
@@ -1507,54 +1543,24 @@ func (h *Handler) SetRecoveryOnly(c *gin.Context) {
 		req.Methods = []string{}
 	}
 
-	// Validate: only enabled methods can be set as recovery-only
 	enabledMethods, err := h.GetEnabledMethods(ctx, userID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch MFA status"})
 		return
 	}
-	enabled := make(map[string]bool, len(enabledMethods))
-	for _, m := range enabledMethods {
-		enabled[m] = true
-	}
 
-	// Can't make ALL methods recovery-only — at least one must remain login-eligible
-	loginEligible := 0
-	for _, m := range enabledMethods {
-		isRecoveryOnly := false
-		for _, r := range req.Methods {
-			if r == m {
-				isRecoveryOnly = true
-				break
-			}
-		}
-		if !isRecoveryOnly {
-			loginEligible++
-		}
-	}
-	if loginEligible == 0 && len(enabledMethods) > 0 {
+	if countLoginEligible(enabledMethods, req.Methods) == 0 && len(enabledMethods) > 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "At least one MFA method must remain eligible for login"})
 		return
 	}
 
-	// Filter to only valid (enabled) methods
-	var validRecoveryOnly []string
-	for _, m := range req.Methods {
-		if enabled[m] {
-			validRecoveryOnly = append(validRecoveryOnly, m)
-		}
+	enabled := make(map[string]bool, len(enabledMethods))
+	for _, m := range enabledMethods {
+		enabled[m] = true
 	}
+	validRecoveryOnly := filterValidRecoveryOnly(req.Methods, enabled)
 
-	// If email or sms is being added to recovery-only, auto-enable hardened mode
-	hasEmailSmsRecovery := false
-	for _, m := range validRecoveryOnly {
-		if m == "email" || m == "sms" {
-			hasEmailSmsRecovery = true
-			break
-		}
-	}
-
-	if hasEmailSmsRecovery {
+	if hasEmailOrSms(validRecoveryOnly) {
 		_, err = h.db.ExecContext(ctx,
 			`UPDATE users SET recovery_only_methods = $1, recovery_hardened = TRUE WHERE id = $2`,
 			pq.Array(validRecoveryOnly), userID,
@@ -1571,7 +1577,6 @@ func (h *Handler) SetRecoveryOnly(c *gin.Context) {
 		return
 	}
 
-	// Read back actual hardened state
 	var recoveryHardened bool
 	_ = h.db.QueryRowContext(ctx, `SELECT recovery_hardened FROM users WHERE id = $1`, userID).Scan(&recoveryHardened)
 
@@ -1634,6 +1639,35 @@ func generateNumericCode(digits int) (string, error) {
 	return fmt.Sprintf("%0*d", digits, n), nil
 }
 
+// validateEmailSmsMethods checks that all requested methods are valid and available.
+// Returns (errorMessage, httpStatusCode). Empty errorMessage means OK.
+func (h *Handler) validateEmailSmsMethods(methods []string) (string, int) {
+	for _, m := range methods {
+		if m == "sms" && h.environment == "production" {
+			return "SMS MFA is not yet available. Requires SMS provider integration.", http.StatusForbidden
+		}
+		if m != "email" && m != "sms" {
+			return "methods must be 'email' and/or 'sms'", http.StatusBadRequest
+		}
+	}
+	return "", 0
+}
+
+// generateAndStoreEmailSmsCodes generates codes for each method and stores them in Redis.
+func (h *Handler) generateAndStoreEmailSmsCodes(ctx context.Context, userID string, methods []string) (map[string]string, error) {
+	codes := make(map[string]string)
+	for _, method := range methods {
+		code, err := generateNumericCode(6)
+		if err != nil {
+			return nil, err
+		}
+		key := fmt.Sprintf(redisKeyEmailSmsSetup, userID, method)
+		h.redis.Set(ctx, key, code, 10*time.Minute)
+		codes[method] = code
+	}
+	return codes, nil
+}
+
 // EmailSmsSetup enables email and/or SMS as MFA methods.
 // Requires password + MFA (if active). Email codes are delivered via the email service;
 // SMS is still dev-only (requires Twilio integration).
@@ -1651,49 +1685,32 @@ func (h *Handler) EmailSmsSetup(c *gin.Context) {
 		return
 	}
 
-	// SMS still requires provider integration
-	for _, m := range req.Methods {
-		if m == "sms" && h.environment == "production" {
-			c.JSON(http.StatusForbidden, gin.H{"error": "SMS MFA is not yet available. Requires SMS provider integration."})
-			return
-		}
-		if m != "email" && m != "sms" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "methods must be 'email' and/or 'sms'"})
-			return
-		}
+	if errMsg, status := h.validateEmailSmsMethods(req.Methods); errMsg != "" {
+		c.JSON(status, gin.H{"error": errMsg})
+		return
 	}
 
 	if !h.requirePasswordAndMFA(c, userID, req.Password, req.MFACode) {
 		return
 	}
 
-	// Must already have a "real" MFA method (TOTP or WebAuthn) active
 	if !h.IsEnabled(ctx, userID) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Enable a Standard or higher MFA method first"})
 		return
 	}
 
-	// Look up user's email for delivery
 	var userEmail string
 	if err := h.db.QueryRowContext(ctx, `SELECT email FROM users WHERE id = $1`, userID).Scan(&userEmail); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to look up account email"})
 		return
 	}
 
-	// Generate verification codes and store in Redis
-	codes := make(map[string]string)
-	for _, method := range req.Methods {
-		code, err := generateNumericCode(6)
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate code"})
-			return
-		}
-		key := fmt.Sprintf(redisKeyEmailSmsSetup, userID, method)
-		h.redis.Set(ctx, key, code, 10*time.Minute)
-		codes[method] = code
+	codes, err := h.generateAndStoreEmailSmsCodes(ctx, userID, req.Methods)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate code"})
+		return
 	}
 
-	// Deliver email code via email service
 	if code, ok := codes["email"]; ok && h.emailSvc != nil {
 		if err := h.emailSvc.SendVerificationCode(userEmail, code); err != nil {
 			h.log.Error("Failed to send MFA email code", "error", err, "user_id", userID)
@@ -1707,24 +1724,53 @@ func (h *Handler) EmailSmsSetup(c *gin.Context) {
 		"methods":    req.Methods,
 		"expires_in": "10 minutes",
 	}
-	// Dev mode: also return SMS codes on screen (email codes are delivered, not shown)
 	if h.environment != "production" {
-		devCodes := make(map[string]string)
 		if smsCode, ok := codes["sms"]; ok {
-			devCodes["sms"] = smsCode
-		}
-		if len(devCodes) > 0 {
-			resp["dev_codes"] = devCodes
+			resp["dev_codes"] = map[string]string{"sms": smsCode}
 			resp["dev_mode"] = true
 		}
 	}
 	c.JSON(http.StatusOK, resp)
 }
 
+// ValidateHardenedModeCodes checks that hardened mode requirements are met.
+func ValidateHardenedModeCodes(codes map[string]string) string {
+	if _, hasEmail := codes["email"]; !hasEmail {
+		return "Hardened mode requires both email and SMS codes"
+	}
+	if _, hasSms := codes["sms"]; !hasSms {
+		return "Hardened mode requires both email and SMS codes"
+	}
+	return ""
+}
+
+// verifyEmailSmsCodes validates each code against Redis and returns the verified methods.
+// Returns (verified, errorMessage, httpStatus).
+func (h *Handler) verifyEmailSmsCodes(ctx context.Context, userID string, codes map[string]string) ([]string, string, int) {
+	verified := []string{}
+	for method, code := range codes {
+		if method != "email" && method != "sms" {
+			return nil, fmt.Sprintf("invalid method: %s", method), http.StatusBadRequest
+		}
+
+		key := fmt.Sprintf(redisKeyEmailSmsSetup, userID, method)
+		stored, err := h.redis.Get(ctx, key).Result()
+		if err != nil {
+			return nil, fmt.Sprintf("No pending %s code. Request a new one.", method), http.StatusBadRequest
+		}
+
+		if code != stored {
+			return nil, fmt.Sprintf("Invalid %s code", method), http.StatusForbidden
+		}
+
+		verified = append(verified, method)
+	}
+	return verified, "", 0
+}
+
 // EmailSmsVerify verifies the email/SMS code(s) and activates the method(s).
 // In hardened mode, both email AND sms codes must be provided and correct.
 func (h *Handler) EmailSmsVerify(c *gin.Context) {
-
 	userID := c.GetString("user_id")
 	ctx := c.Request.Context()
 
@@ -1741,53 +1787,29 @@ func (h *Handler) EmailSmsVerify(c *gin.Context) {
 		return
 	}
 
-	// Check if hardened mode requires both
 	var recoveryHardened bool
 	_ = h.db.QueryRowContext(ctx,
 		`SELECT recovery_hardened FROM users WHERE id = $1`, userID,
 	).Scan(&recoveryHardened)
 
 	if recoveryHardened {
-		if _, hasEmail := req.Codes["email"]; !hasEmail {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Hardened mode requires both email and SMS codes"})
-			return
-		}
-		if _, hasSms := req.Codes["sms"]; !hasSms {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Hardened mode requires both email and SMS codes"})
+		if errMsg := ValidateHardenedModeCodes(req.Codes); errMsg != "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": errMsg})
 			return
 		}
 	}
 
-	// Verify each code
-	verified := []string{}
-	for method, code := range req.Codes {
-		if method != "email" && method != "sms" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("invalid method: %s", method)})
-			return
-		}
-
-		key := fmt.Sprintf(redisKeyEmailSmsSetup, userID, method)
-		stored, err := h.redis.Get(ctx, key).Result()
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("No pending %s code. Request a new one.", method)})
-			return
-		}
-
-		if code != stored {
-			c.JSON(http.StatusForbidden, gin.H{"error": fmt.Sprintf("Invalid %s code", method)})
-			return
-		}
-
-		verified = append(verified, method)
+	verified, errMsg, status := h.verifyEmailSmsCodes(ctx, userID, req.Codes)
+	if errMsg != "" {
+		c.JSON(status, gin.H{"error": errMsg})
+		return
 	}
 
-	// Mark methods as enabled in Redis (persistent flag — no expiry)
 	for _, method := range verified {
 		h.redis.Set(ctx, fmt.Sprintf(redisKeyEmailSmsEnabled, userID, method), "1", 0)
 		h.redis.Del(ctx, fmt.Sprintf(redisKeyEmailSmsSetup, userID, method))
 	}
 
-	// Update denormalized flags
 	if err := h.updateUserMFAFlags(ctx, userID); err != nil {
 		h.log.Error("Failed to update MFA flags after email/sms enable", "error", err)
 	}
@@ -2237,6 +2259,42 @@ func (h *Handler) ListRecoveryRequests(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"requests": requests})
 }
 
+// DecodeApprovalPayloads validates and base64-decodes the encrypted_payload and
+// responder_public_key required for an approval action.
+// Returns (encPayload, respPubKey, errorMessage, httpStatus).
+func DecodeApprovalPayloads(encPayloadB64, respPubKeyB64 string) ([]byte, []byte, string, int) {
+	if encPayloadB64 == "" || respPubKeyB64 == "" {
+		return nil, nil, "encrypted_payload and responder_public_key are required for approval", http.StatusBadRequest
+	}
+	encPayload, err := base64.StdEncoding.DecodeString(encPayloadB64)
+	if err != nil {
+		return nil, nil, "Invalid encrypted_payload format (must be base64)", http.StatusBadRequest
+	}
+	respPubKey, err := base64.StdEncoding.DecodeString(respPubKeyB64)
+	if err != nil {
+		return nil, nil, "Invalid responder_public_key format (must be base64)", http.StatusBadRequest
+	}
+	return encPayload, respPubKey, "", 0
+}
+
+// executeRecoveryResponse persists the approve or reject action to the database.
+func (h *Handler) executeRecoveryResponse(ctx context.Context, requestID, action string, encPayload, respPubKey []byte) error {
+	if action == "approve" {
+		_, err := h.db.ExecContext(ctx, `
+			UPDATE recovery_requests
+			SET status = 'approved', encrypted_payload = $1, responder_public_key = $2, responded_at = NOW()
+			WHERE id = $3
+		`, encPayload, respPubKey, requestID)
+		return err
+	}
+	_, err := h.db.ExecContext(ctx, `
+		UPDATE recovery_requests
+		SET status = 'rejected', responded_at = NOW()
+		WHERE id = $1
+	`, requestID)
+	return err
+}
+
 // RespondToRecoveryRequest allows the authenticated user to approve or reject a recovery request.
 func (h *Handler) RespondToRecoveryRequest(c *gin.Context) {
 	userID := c.GetString("user_id")
@@ -2277,40 +2335,19 @@ func (h *Handler) RespondToRecoveryRequest(c *gin.Context) {
 		return
 	}
 
-	ctx := c.Request.Context()
-
+	var encPayload, respPubKey []byte
 	if req.Action == "approve" {
-		if req.EncryptedPayload == "" || req.ResponderPublicKey == "" {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "encrypted_payload and responder_public_key are required for approval"})
+		var errMsg string
+		var httpStatus int
+		encPayload, respPubKey, errMsg, httpStatus = DecodeApprovalPayloads(req.EncryptedPayload, req.ResponderPublicKey)
+		if errMsg != "" {
+			c.JSON(httpStatus, gin.H{"error": errMsg})
 			return
 		}
-
-		encPayload, decErr := base64.StdEncoding.DecodeString(req.EncryptedPayload)
-		if decErr != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid encrypted_payload format (must be base64)"})
-			return
-		}
-
-		respPubKey, decErr := base64.StdEncoding.DecodeString(req.ResponderPublicKey)
-		if decErr != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid responder_public_key format (must be base64)"})
-			return
-		}
-
-		_, err = h.db.ExecContext(ctx, `
-			UPDATE recovery_requests
-			SET status = 'approved', encrypted_payload = $1, responder_public_key = $2, responded_at = NOW()
-			WHERE id = $3
-		`, encPayload, respPubKey, requestID)
-	} else {
-		_, err = h.db.ExecContext(ctx, `
-			UPDATE recovery_requests
-			SET status = 'rejected', responded_at = NOW()
-			WHERE id = $1
-		`, requestID)
 	}
 
-	if err != nil {
+	ctx := c.Request.Context()
+	if err := h.executeRecoveryResponse(ctx, requestID, req.Action, encPayload, respPubKey); err != nil {
 		h.log.Error("Failed to respond to recovery request", "error", err, "request_id", requestID, "action", req.Action)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to respond to recovery request"})
 		return
@@ -2399,72 +2436,60 @@ func (h *Handler) GetRecoveryCircle(c *gin.Context) {
 	})
 }
 
-// UpsertRecoveryCircle creates or updates the user's social recovery circle with Shamir shares.
-func (h *Handler) UpsertRecoveryCircle(c *gin.Context) {
-	userID := c.GetString("user_id")
+// CircleShareEntry is a single share in a recovery circle upsert request.
+type CircleShareEntry struct {
+	ContactID      string `json:"contact_id" binding:"required"`
+	ShareIndex     int    `json:"share_index" binding:"required"`
+	EncryptedShare string `json:"encrypted_share" binding:"required"`
+}
 
-	type shareEntry struct {
-		ContactID      string `json:"contact_id" binding:"required"`
-		ShareIndex     int    `json:"share_index" binding:"required"`
-		EncryptedShare string `json:"encrypted_share" binding:"required"`
-	}
+// CircleDecodedShare holds a share after base64 decoding.
+type CircleDecodedShare struct {
+	ContactID      string
+	ShareIndex     int
+	EncryptedShare []byte
+}
 
-	var req struct {
-		Password     string       `json:"password" binding:"required"`
-		MFACode      string       `json:"mfa_code"`
-		ThresholdK   int          `json:"threshold_k" binding:"required"`
-		TotalSharesN int          `json:"total_shares_n" binding:"required"`
-		Shares       []shareEntry `json:"shares" binding:"required"`
+// ValidateCircleConstraints checks threshold/shares count constraints.
+// Returns (errorMessage, httpStatus). Empty errorMessage means OK.
+func ValidateCircleConstraints(thresholdK, totalSharesN, sharesLen int) (string, int) {
+	if thresholdK < 2 || thresholdK > totalSharesN || totalSharesN > 7 {
+		return "threshold_k must be >= 2 and <= total_shares_n, total_shares_n must be <= 7", http.StatusBadRequest
 	}
+	if sharesLen != totalSharesN {
+		return "Number of shares must equal total_shares_n", http.StatusBadRequest
+	}
+	return "", 0
+}
 
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
-		return
-	}
-
-	// Require password + MFA verification
-	if !h.requirePasswordAndMFA(c, userID, req.Password, req.MFACode) {
-		return
-	}
-
-	// Validate constraints
-	if req.ThresholdK < 2 || req.ThresholdK > req.TotalSharesN || req.TotalSharesN > 7 {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "threshold_k must be >= 2 and <= total_shares_n, total_shares_n must be <= 7"})
-		return
-	}
-	if len(req.Shares) != req.TotalSharesN {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Number of shares must equal total_shares_n"})
-		return
-	}
-
-	// Check for duplicate contact_ids and share_indexes
+// ValidateShareUniqueness checks for duplicate contact_ids, duplicate share_indexes,
+// and out-of-range share indexes. Returns (errorMessage, httpStatus).
+func ValidateShareUniqueness(shares []CircleShareEntry, totalSharesN int) (string, int) {
 	contactSet := make(map[string]bool)
 	indexSet := make(map[int]bool)
-	for _, s := range req.Shares {
+	for _, s := range shares {
 		if contactSet[s.ContactID] {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Duplicate contact_id in shares"})
-			return
+			return "Duplicate contact_id in shares", http.StatusBadRequest
 		}
 		contactSet[s.ContactID] = true
 
 		if indexSet[s.ShareIndex] {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Duplicate share_index in shares"})
-			return
+			return "Duplicate share_index in shares", http.StatusBadRequest
 		}
 		indexSet[s.ShareIndex] = true
 
-		if s.ShareIndex < 1 || s.ShareIndex > req.TotalSharesN {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("share_index must be between 1 and %d", req.TotalSharesN)})
-			return
+		if s.ShareIndex < 1 || s.ShareIndex > totalSharesN {
+			return fmt.Sprintf("share_index must be between 1 and %d", totalSharesN), http.StatusBadRequest
 		}
 	}
+	return "", 0
+}
 
-	// Validate contacts: no self-references and all must be accepted friends
-	ctx := c.Request.Context()
-	for _, s := range req.Shares {
+// validateShareContacts verifies no self-references and all contacts are accepted friends.
+func (h *Handler) validateShareContacts(ctx context.Context, userID string, shares []CircleShareEntry) (string, int) {
+	for _, s := range shares {
 		if s.ContactID == userID {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "You cannot be your own recovery contact"})
-			return
+			return "You cannot be your own recovery contact", http.StatusBadRequest
 		}
 
 		var friendCount int
@@ -2475,41 +2500,38 @@ func (h *Handler) UpsertRecoveryCircle(c *gin.Context) {
 		`, userID, s.ContactID).Scan(&friendCount)
 		if err != nil {
 			h.log.Error("Failed to check friendship for recovery contact", "error", err, "user_id", userID, "contact_id", s.ContactID)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate recovery contacts"})
-			return
+			return "Failed to validate recovery contacts", http.StatusInternalServerError
 		}
 		if friendCount == 0 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Contact %s is not an accepted friend", s.ContactID)})
-			return
+			return fmt.Sprintf("Contact %s is not an accepted friend", s.ContactID), http.StatusBadRequest
 		}
 	}
+	return "", 0
+}
 
-	// Decode all encrypted shares upfront
-	type decodedShare struct {
-		ContactID      string
-		ShareIndex     int
-		EncryptedShare []byte
-	}
-	decodedShares := make([]decodedShare, len(req.Shares))
-	for i, s := range req.Shares {
+// DecodeCircleShares base64-decodes all encrypted shares.
+func DecodeCircleShares(shares []CircleShareEntry) ([]CircleDecodedShare, string, int) {
+	decoded := make([]CircleDecodedShare, len(shares))
+	for i, s := range shares {
 		encShare, err := base64.StdEncoding.DecodeString(s.EncryptedShare)
 		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": fmt.Sprintf("Invalid encrypted_share format for share %d (must be base64)", i)})
-			return
+			return nil, fmt.Sprintf("Invalid encrypted_share format for share %d (must be base64)", i), http.StatusBadRequest
 		}
-		decodedShares[i] = decodedShare{
+		decoded[i] = CircleDecodedShare{
 			ContactID:      s.ContactID,
 			ShareIndex:     s.ShareIndex,
 			EncryptedShare: encShare,
 		}
 	}
+	return decoded, "", 0
+}
 
-	// BEGIN TRANSACTION
+// executeCircleUpsert performs the circle upsert, old-share cleanup, and new-share
+// insertion inside a single transaction. Returns (circleID, shareVersion, error).
+func (h *Handler) executeCircleUpsert(ctx context.Context, userID string, thresholdK, totalSharesN int, shares []CircleDecodedShare) (string, int, error) {
 	tx, err := h.db.BeginTx(ctx, nil)
 	if err != nil {
-		h.log.Error("Failed to begin transaction for recovery circle", "error", err, "user_id", userID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedConfigCircle})
-		return
+		return "", 0, fmt.Errorf("begin tx: %w", err)
 	}
 	defer func() {
 		if err != nil {
@@ -2517,7 +2539,6 @@ func (h *Handler) UpsertRecoveryCircle(c *gin.Context) {
 		}
 	}()
 
-	// UPSERT recovery circle
 	var circleID string
 	var shareVersion int
 	err = tx.QueryRowContext(ctx, `
@@ -2529,39 +2550,80 @@ func (h *Handler) UpsertRecoveryCircle(c *gin.Context) {
 			share_version = recovery_circles.share_version + 1,
 			updated_at = NOW()
 		RETURNING id, share_version
-	`, userID, req.ThresholdK, req.TotalSharesN).Scan(&circleID, &shareVersion)
+	`, userID, thresholdK, totalSharesN).Scan(&circleID, &shareVersion)
 	if err != nil {
-		h.log.Error("Failed to upsert recovery circle", "error", err, "user_id", userID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedConfigCircle})
-		return
+		return "", 0, fmt.Errorf("upsert circle: %w", err)
 	}
 
-	// Delete old shares
 	_, err = tx.ExecContext(ctx, `
 		DELETE FROM recovery_circle_shares WHERE circle_id = $1 AND share_version < $2
 	`, circleID, shareVersion)
 	if err != nil {
-		h.log.Error("Failed to delete old shares", "error", err, "circle_id", circleID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedConfigCircle})
-		return
+		return "", 0, fmt.Errorf("delete old shares: %w", err)
 	}
 
-	// Insert new shares
-	for _, s := range decodedShares {
+	for _, s := range shares {
 		_, err = tx.ExecContext(ctx, `
 			INSERT INTO recovery_circle_shares (circle_id, contact_id, share_index, encrypted_share, share_version)
 			VALUES ($1, $2, $3, $4, $5)
 		`, circleID, s.ContactID, s.ShareIndex, s.EncryptedShare, shareVersion)
 		if err != nil {
-			h.log.Error("Failed to insert recovery share", "error", err, "circle_id", circleID, "contact_id", s.ContactID)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedConfigCircle})
-			return
+			return "", 0, fmt.Errorf("insert share for %s: %w", s.ContactID, err)
 		}
 	}
 
-	// COMMIT
 	if err = tx.Commit(); err != nil {
-		h.log.Error("Failed to commit recovery circle transaction", "error", err, "user_id", userID)
+		return "", 0, fmt.Errorf("commit: %w", err)
+	}
+	return circleID, shareVersion, nil
+}
+
+// UpsertRecoveryCircle creates or updates the user's social recovery circle with Shamir shares.
+func (h *Handler) UpsertRecoveryCircle(c *gin.Context) {
+	userID := c.GetString("user_id")
+
+	var req struct {
+		Password     string             `json:"password" binding:"required"`
+		MFACode      string             `json:"mfa_code"`
+		ThresholdK   int                `json:"threshold_k" binding:"required"`
+		TotalSharesN int                `json:"total_shares_n" binding:"required"`
+		Shares       []CircleShareEntry `json:"shares" binding:"required"`
+	}
+
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request body"})
+		return
+	}
+
+	if !h.requirePasswordAndMFA(c, userID, req.Password, req.MFACode) {
+		return
+	}
+
+	if errMsg, status := ValidateCircleConstraints(req.ThresholdK, req.TotalSharesN, len(req.Shares)); errMsg != "" {
+		c.JSON(status, gin.H{"error": errMsg})
+		return
+	}
+
+	if errMsg, status := ValidateShareUniqueness(req.Shares, req.TotalSharesN); errMsg != "" {
+		c.JSON(status, gin.H{"error": errMsg})
+		return
+	}
+
+	ctx := c.Request.Context()
+	if errMsg, status := h.validateShareContacts(ctx, userID, req.Shares); errMsg != "" {
+		c.JSON(status, gin.H{"error": errMsg})
+		return
+	}
+
+	decodedShares, errMsg, status := DecodeCircleShares(req.Shares)
+	if errMsg != "" {
+		c.JSON(status, gin.H{"error": errMsg})
+		return
+	}
+
+	_, shareVersion, err := h.executeCircleUpsert(ctx, userID, req.ThresholdK, req.TotalSharesN, decodedShares)
+	if err != nil {
+		h.log.Error("Failed to upsert recovery circle", "error", err, "user_id", userID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedConfigCircle})
 		return
 	}
@@ -2717,6 +2779,96 @@ func (h *Handler) ListSocialRecoveryRequests(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"requests": requests})
 }
 
+// socialRecoveryRequestInfo holds the validated state of a social recovery request.
+type socialRecoveryRequestInfo struct {
+	Status     string
+	CircleID   string
+	ThresholdK int
+	ExpiresAt  time.Time
+}
+
+// lookupSocialRecoveryRequest fetches and validates that the request is pending and not expired.
+// Returns (info, errorMessage, httpStatus).
+func (h *Handler) lookupSocialRecoveryRequest(ctx context.Context, userID, requestID string) (*socialRecoveryRequestInfo, string, int) {
+	var info socialRecoveryRequestInfo
+	err := h.db.QueryRowContext(ctx, `
+		SELECT rr.status, rr.circle_id, rc.threshold_k, rr.expires_at
+		FROM recovery_circle_requests rr
+		JOIN recovery_circles rc ON rc.id = rr.circle_id
+		JOIN recovery_circle_shares cs ON cs.circle_id = rc.id AND cs.contact_id = $1
+		WHERE rr.id = $2
+		LIMIT 1
+	`, userID, requestID).Scan(&info.Status, &info.CircleID, &info.ThresholdK, &info.ExpiresAt)
+	if err != nil {
+		return nil, "Recovery request not found or you are not a contact", http.StatusNotFound
+	}
+	if info.Status != "pending" {
+		return nil, "Recovery request is no longer pending", http.StatusBadRequest
+	}
+	if time.Now().After(info.ExpiresAt) {
+		return nil, "Recovery request has expired", http.StatusBadRequest
+	}
+	return &info, "", 0
+}
+
+// executeSocialRecoveryResponse inserts the response, increments shares_received,
+// and marks the request complete if threshold is met — all in one transaction.
+// Returns (sharesReceived, errorMessage, httpStatus).
+func (h *Handler) executeSocialRecoveryResponse(ctx context.Context, requestID, userID string, encShare []byte, thresholdK int) (int, string, int) {
+	tx, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
+		h.log.Error("Failed to begin transaction for social recovery response", "error", err)
+		return 0, errMsgFailedSubmitResponse, http.StatusInternalServerError
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			h.log.Error("Failed to rollback social recovery response transaction", "error", rbErr)
+		}
+	}()
+
+	res, err := tx.ExecContext(ctx, `
+		INSERT INTO recovery_circle_responses (request_id, contact_id, encrypted_share)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (request_id, contact_id) DO NOTHING
+	`, requestID, userID, encShare)
+	if err != nil {
+		h.log.Error("Failed to insert social recovery response", "error", err)
+		return 0, errMsgFailedSubmitResponse, http.StatusInternalServerError
+	}
+	rowsAffected, _ := res.RowsAffected()
+	if rowsAffected == 0 {
+		return 0, "You have already responded to this request", http.StatusConflict
+	}
+
+	var sharesReceived int
+	err = tx.QueryRowContext(ctx, `
+		UPDATE recovery_circle_requests
+		SET shares_received = shares_received + 1
+		WHERE id = $1
+		RETURNING shares_received
+	`, requestID).Scan(&sharesReceived)
+	if err != nil {
+		h.log.Error("Failed to update shares_received", "error", err, "request_id", requestID)
+		return 0, errMsgFailedSubmitResponse, http.StatusInternalServerError
+	}
+
+	if sharesReceived >= thresholdK {
+		_, err = tx.ExecContext(ctx, `
+			UPDATE recovery_circle_requests SET status = 'complete' WHERE id = $1
+		`, requestID)
+		if err != nil {
+			h.log.Error("Failed to mark social recovery request as complete", "error", err, "request_id", requestID)
+			return 0, errMsgFailedSubmitResponse, http.StatusInternalServerError
+		}
+	}
+
+	if err := tx.Commit(); err != nil {
+		h.log.Error("Failed to commit social recovery response transaction", "error", err, "request_id", requestID)
+		return 0, errMsgFailedSubmitResponse, http.StatusInternalServerError
+	}
+	return sharesReceived, "", 0
+}
+
 // RespondToSocialRecovery allows an authenticated contact to submit their re-encrypted share.
 func (h *Handler) RespondToSocialRecovery(c *gin.Context) {
 	userID := c.GetString("user_id")
@@ -2730,7 +2882,6 @@ func (h *Handler) RespondToSocialRecovery(c *gin.Context) {
 		return
 	}
 
-	// Decode the encrypted share
 	encShare, err := base64.StdEncoding.DecodeString(req.EncryptedShare)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid encrypted_share format (must be base64)"})
@@ -2739,97 +2890,18 @@ func (h *Handler) RespondToSocialRecovery(c *gin.Context) {
 
 	ctx := c.Request.Context()
 
-	// Verify this user is a contact for this request's circle, and the request is pending + not expired
-	var status string
-	var circleID string
-	var thresholdK int
-	var expiresAt time.Time
-	err = h.db.QueryRowContext(ctx, `
-		SELECT rr.status, rr.circle_id, rc.threshold_k, rr.expires_at
-		FROM recovery_circle_requests rr
-		JOIN recovery_circles rc ON rc.id = rr.circle_id
-		JOIN recovery_circle_shares cs ON cs.circle_id = rc.id AND cs.contact_id = $1
-		WHERE rr.id = $2
-		LIMIT 1
-	`, userID, requestID).Scan(&status, &circleID, &thresholdK, &expiresAt)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Recovery request not found or you are not a contact"})
+	info, errMsg, status := h.lookupSocialRecoveryRequest(ctx, userID, requestID)
+	if errMsg != "" {
+		c.JSON(status, gin.H{"error": errMsg})
 		return
 	}
 
-	if status != "pending" {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Recovery request is no longer pending"})
+	sharesReceived, errMsg, status := h.executeSocialRecoveryResponse(ctx, requestID, userID, encShare, info.ThresholdK)
+	if errMsg != "" {
+		c.JSON(status, gin.H{"error": errMsg})
 		return
 	}
 
-	if time.Now().After(expiresAt) {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Recovery request has expired"})
-		return
-	}
-
-	// Wrap insert + increment + status check in a single transaction
-	tx, err := h.db.BeginTx(ctx, nil)
-	if err != nil {
-		h.log.Error("Failed to begin transaction for social recovery response", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSubmitResponse})
-		return
-	}
-	defer func() {
-		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
-			h.log.Error("Failed to rollback social recovery response transaction", "error", rbErr)
-		}
-	}()
-
-	// Insert response atomically — ON CONFLICT prevents TOCTOU race
-	res, err := tx.ExecContext(ctx, `
-		INSERT INTO recovery_circle_responses (request_id, contact_id, encrypted_share)
-		VALUES ($1, $2, $3)
-		ON CONFLICT (request_id, contact_id) DO NOTHING
-	`, requestID, userID, encShare)
-	if err != nil {
-		h.log.Error("Failed to insert social recovery response", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSubmitResponse})
-		return
-	}
-	rowsAffected, _ := res.RowsAffected()
-	if rowsAffected == 0 {
-		c.JSON(http.StatusConflict, gin.H{"error": "You have already responded to this request"})
-		return
-	}
-
-	// Increment shares_received and check if threshold is met
-	var sharesReceived int
-	err = tx.QueryRowContext(ctx, `
-		UPDATE recovery_circle_requests
-		SET shares_received = shares_received + 1
-		WHERE id = $1
-		RETURNING shares_received
-	`, requestID).Scan(&sharesReceived)
-	if err != nil {
-		h.log.Error("Failed to update shares_received", "error", err, "request_id", requestID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSubmitResponse})
-		return
-	}
-
-	// If threshold met, mark request as complete
-	if sharesReceived >= thresholdK {
-		_, err = tx.ExecContext(ctx, `
-			UPDATE recovery_circle_requests SET status = 'complete' WHERE id = $1
-		`, requestID)
-		if err != nil {
-			h.log.Error("Failed to mark social recovery request as complete", "error", err, "request_id", requestID)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSubmitResponse})
-			return
-		}
-	}
-
-	// COMMIT
-	if err := tx.Commit(); err != nil {
-		h.log.Error("Failed to commit social recovery response transaction", "error", err, "request_id", requestID)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSubmitResponse})
-		return
-	}
-
-	h.log.Info("Social recovery response submitted", "request_id", requestID, "contact_id", userID, "shares_received", sharesReceived, "threshold_k", thresholdK)
-	c.JSON(http.StatusOK, gin.H{"message": "Share submitted", "shares_received": sharesReceived, "threshold_met": sharesReceived >= thresholdK})
+	h.log.Info("Social recovery response submitted", "request_id", requestID, "contact_id", userID, "shares_received", sharesReceived, "threshold_k", info.ThresholdK)
+	c.JSON(http.StatusOK, gin.H{"message": "Share submitted", "shares_received": sharesReceived, "threshold_met": sharesReceived >= info.ThresholdK})
 }

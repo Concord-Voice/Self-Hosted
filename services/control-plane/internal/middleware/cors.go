@@ -14,33 +14,8 @@ func CORS(allowedOrigins []string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		origin := c.Request.Header.Get("Origin")
 
-		// Non-browser clients omit Origin entirely — let them through
-		// without any CORS headers. The "null" string origin is sent by
-		// sandboxed iframes and data: URLs; never reflect it back.
-		if origin == "" || origin == "null" {
-			if c.Request.Method == "OPTIONS" {
-				c.AbortWithStatus(204)
-				return
-			}
-			c.Next()
-			return
-		}
-
-		// Check if origin is allowed
-		allowed := false
-		for _, allowedOrigin := range allowedOrigins {
-			if allowedOrigin == "*" || origin == allowedOrigin {
-				allowed = true
-				break
-			}
-		}
-
-		if allowed {
-			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
-			c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-			c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Refresh-Token, X-Session-ID, X-Machine-Id, X-Device-Name, X-Request-ID")
-			c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			c.Writer.Header().Set("Access-Control-Max-Age", "86400")
+		if origin != "" && origin != "null" && isOriginAllowed(origin, allowedOrigins) {
+			setCORSHeaders(c, origin)
 		}
 
 		if c.Request.Method == "OPTIONS" {
@@ -50,4 +25,21 @@ func CORS(allowedOrigins []string) gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+func isOriginAllowed(origin string, allowedOrigins []string) bool {
+	for _, ao := range allowedOrigins {
+		if ao == "*" || origin == ao {
+			return true
+		}
+	}
+	return false
+}
+
+func setCORSHeaders(c *gin.Context, origin string) {
+	c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+	c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
+	c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Refresh-Token, X-Session-ID, X-Machine-Id, X-Device-Name, X-Request-ID")
+	c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+	c.Writer.Header().Set("Access-Control-Max-Age", "86400")
 }

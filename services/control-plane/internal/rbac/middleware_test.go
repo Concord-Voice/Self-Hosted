@@ -14,6 +14,7 @@ import (
 )
 
 const pathServersSlash = "/servers/"
+const testUserID = "some-user-id"
 
 func init() {
 	gin.SetMode(gin.TestMode)
@@ -82,7 +83,7 @@ func TestRequireMembershipEmptyServerID(t *testing.T) {
 	// Use a route with empty :id param
 	router := gin.New()
 	router.GET("/servers/:id/test", func(c *gin.Context) {
-		c.Set("user_id", "some-user-id")
+		c.Set("user_id", testUserID)
 		c.Params = gin.Params{{Key: "id", Value: ""}}
 	}, rbac.RequireMembership(resolver), func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
@@ -93,6 +94,13 @@ func TestRequireMembershipEmptyServerID(t *testing.T) {
 	router.ServeHTTP(w, req)
 	// Empty server ID should fail (either 401 or 404 depending on routing)
 	assert.NotEqual(t, http.StatusOK, w.Code)
+}
+
+func TestRequireMembershipInvalidUUID(t *testing.T) {
+	resolver, _ := setupMiddlewareTest(t)
+
+	w := doMiddlewareRequest(rbac.RequireMembership(resolver), testUserID, "not-a-uuid")
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 // --- RequirePermission Tests ---
@@ -147,6 +155,14 @@ func TestRequirePermissionEmptyUserID(t *testing.T) {
 	handler := rbac.RequirePermission(resolver, rbac.PermViewTextChannels, "")
 	w := doPermissionRequest(handler, "", "some-server-id")
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestRequirePermissionInvalidServerUUID(t *testing.T) {
+	resolver, _ := setupMiddlewareTest(t)
+
+	handler := rbac.RequirePermission(resolver, rbac.PermViewTextChannels, "")
+	w := doPermissionRequest(handler, testUserID, "not-a-uuid")
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestRequirePermissionOwnerHasAll(t *testing.T) {

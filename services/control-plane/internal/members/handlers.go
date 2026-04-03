@@ -28,6 +28,7 @@ const (
 	errMsgFailedRemoveMember   = "Failed to remove member"
 	errMsgFailedBanMember      = "Failed to ban member"
 	errMsgFailedGetServerOwner = "Failed to get server owner"
+	errMsgFailedCheckPerms     = "Failed to check permissions"
 )
 
 // Handler handles member-related requests
@@ -302,7 +303,7 @@ func (h *Handler) AddMember(c *gin.Context) {
 	// Check permission to invite members
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermInvite)
 	if err != nil {
-		h.log.Error("Failed to check permissions", "error", err)
+		h.log.Error(errMsgFailedCheckPerms, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAddMember})
 		return
 	}
@@ -401,7 +402,7 @@ func (h *Handler) UpdateMember(c *gin.Context) {
 	// Check permission to assign roles
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageRolesAssign)
 	if err != nil {
-		h.log.Error("Failed to check permissions", "error", err)
+		h.log.Error(errMsgFailedCheckPerms, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateMember})
 		return
 	}
@@ -458,13 +459,85 @@ func (h *Handler) UpdateMember(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"member": member})
 }
 
+func (h *Handler) checkMembership(serverID, userID string) (bool, error) {
+	var exists bool
+	err := h.db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2)`,
+		serverID, userID,
+	).Scan(&exists)
+	return exists, err
+}
+
+func (h *Handler) getServerOwnerID(serverID string) (string, error) {
+	var ownerID string
+	err := h.db.QueryRow(`SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID)
+	return ownerID, err
+}
+
+type removalAuth struct {
+	isSelfRemoval bool
+}
+
+func (h *Handler) authorizeRemoval(c *gin.Context, serverID, userID, targetUserID, ownerID string) (*removalAuth, int, string) {
+	isSelfRemoval := userID == targetUserID
+
+	if isSelfRemoval {
+		if userID == ownerID {
+			return nil, http.StatusForbidden, "Server owner cannot leave. Delete the server or transfer ownership first."
+		}
+		return &removalAuth{isSelfRemoval: true}, 0, ""
+	}
+
+	hasPerm, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermKick)
+	if permErr != nil {
+		h.log.Error(errMsgFailedCheckPerms, "error", permErr)
+		return nil, http.StatusInternalServerError, errMsgFailedRemoveMember
+	}
+	if !hasPerm {
+		return nil, http.StatusForbidden, errMsgInsufficientPerms
+	}
+	if targetUserID == ownerID {
+		return nil, http.StatusForbidden, "Cannot remove the server owner"
+	}
+	if hierErr := h.resolver.CheckHierarchy(c.Request.Context(), serverID, userID, targetUserID); hierErr != nil {
+		return nil, http.StatusForbidden, "Cannot remove a member with equal or higher role position"
+	}
+
+	return &removalAuth{isSelfRemoval: false}, 0, ""
+}
+
+func (h *Handler) execRemovalTx(serverID, targetUserID string) error {
+	tx, err := h.db.Begin()
+	if err != nil {
+		return fmt.Errorf("begin: %w", err)
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			h.log.Error("Failed to rollback transaction", "error", rbErr)
+		}
+	}()
+
+	queries := []struct{ query string }{
+		{`DELETE FROM server_members WHERE server_id = $1 AND user_id = $2`},
+		{`DELETE FROM channel_keys WHERE user_id = $2 AND channel_id IN (SELECT id FROM channels WHERE server_id = $1)`},
+		{`DELETE FROM pending_key_requests WHERE user_id = $2 AND channel_id IN (SELECT id FROM channels WHERE server_id = $1)`},
+		{`DELETE FROM channel_read_states WHERE user_id = $2 AND channel_id IN (SELECT id FROM channels WHERE server_id = $1)`},
+	}
+	for _, q := range queries {
+		if _, err := tx.Exec(q.query, serverID, targetUserID); err != nil {
+			return err
+		}
+	}
+
+	return tx.Commit()
+}
+
 // RemoveMember removes a member from a server (kick or leave)
 func (h *Handler) RemoveMember(c *gin.Context) {
 	userID := c.GetString("user_id")
 	serverID := c.Param("id")
 	targetUserID := c.Param("user_id")
 
-	// Validate IDs
 	if _, err := uuid.Parse(serverID); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
 		return
@@ -474,143 +547,43 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 		return
 	}
 
-	// Verify both users are members
-	var requesterExists, targetExists bool
-	err := h.db.QueryRow(
-		`SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2)`,
-		serverID, userID,
-	).Scan(&requesterExists)
+	requesterExists, err := h.checkMembership(serverID, userID)
 	if err != nil || !requesterExists {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this server"})
 		return
 	}
-	err = h.db.QueryRow(
-		`SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2)`,
-		serverID, targetUserID,
-	).Scan(&targetExists)
+	targetExists, err := h.checkMembership(serverID, targetUserID)
 	if err != nil || !targetExists {
 		c.JSON(http.StatusNotFound, gin.H{"error": "User is not a member of this server"})
 		return
 	}
 
-	// Check if target is the server owner (owner cannot be removed)
-	var ownerID string
-	if err := h.db.QueryRow(`SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID); err != nil {
+	ownerID, err := h.getServerOwnerID(serverID)
+	if err != nil {
 		h.log.Error(errMsgFailedGetServerOwner, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveMember})
 		return
 	}
-	isOwner := userID == ownerID
 
-	isSelfRemoval := userID == targetUserID
-
-	if !isSelfRemoval {
-		// Kicking someone else — need PermKick + role hierarchy check
-		hasPerm, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermKick)
-		if permErr != nil {
-			h.log.Error("Failed to check permissions", "error", permErr)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveMember})
-			return
-		}
-		if !hasPerm {
-			c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
-			return
-		}
-
-		// Can't kick the owner
-		if targetUserID == ownerID {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Cannot remove the server owner"})
-			return
-		}
-
-		// Enforce role hierarchy (actor must outrank target)
-		if hierErr := h.resolver.CheckHierarchy(c.Request.Context(), serverID, userID, targetUserID); hierErr != nil {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Cannot remove a member with equal or higher role position"})
-			return
-		}
-	} else {
-		// Self-removal (leaving) — owner can't leave their own server
-		if isOwner {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Server owner cannot leave. Delete the server or transfer ownership first."})
-			return
-		}
-	}
-
-	// Remove member and clean up related data in a transaction
-	tx, err := h.db.Begin()
-	if err != nil {
-		h.log.Error("Failed to start transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveMember})
+	auth, status, errMsg := h.authorizeRemoval(c, serverID, userID, targetUserID, ownerID)
+	if auth == nil {
+		c.JSON(status, gin.H{"error": errMsg})
 		return
 	}
-	defer func() {
-		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
-			h.log.Error("Failed to rollback transaction", "error", rbErr)
-		}
-	}()
 
-	// Delete the membership
-	deleteQuery := `DELETE FROM server_members WHERE server_id = $1 AND user_id = $2`
-	_, err = tx.Exec(deleteQuery, serverID, targetUserID)
-	if err != nil {
+	if err := h.execRemovalTx(serverID, targetUserID); err != nil {
 		h.log.Error("Failed to remove member", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveMember})
 		return
 	}
 
-	// Revoke E2EE keys — delete all wrapped keys for this user in this server's channels
-	keysQuery := `
-		DELETE FROM channel_keys
-		WHERE user_id = $1
-		  AND channel_id IN (SELECT id FROM channels WHERE server_id = $2)
-	`
-	_, err = tx.Exec(keysQuery, targetUserID, serverID)
-	if err != nil {
-		h.log.Error("Failed to clean up channel keys", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveMember})
-		return
-	}
-
-	// Clean up pending key requests
-	pendingQuery := `
-		DELETE FROM pending_key_requests
-		WHERE user_id = $1
-		  AND channel_id IN (SELECT id FROM channels WHERE server_id = $2)
-	`
-	_, err = tx.Exec(pendingQuery, targetUserID, serverID)
-	if err != nil {
-		h.log.Error("Failed to clean up pending key requests", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveMember})
-		return
-	}
-
-	// Clean up read states
-	readQuery := `
-		DELETE FROM channel_read_states
-		WHERE user_id = $1
-		  AND channel_id IN (SELECT id FROM channels WHERE server_id = $2)
-	`
-	_, err = tx.Exec(readQuery, targetUserID, serverID)
-	if err != nil {
-		h.log.Error("Failed to clean up read states", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveMember})
-		return
-	}
-
-	if err := tx.Commit(); err != nil {
-		h.log.Error("Failed to commit transaction", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveMember})
-		return
-	}
-
 	action := "removed"
-	if isSelfRemoval {
+	if auth.isSelfRemoval {
 		action = "left"
 	}
 
 	h.log.Info("Member "+action, "server_id", serverID, "target_user", targetUserID, "by_user", userID)
 
-	// Broadcast to server subscribers
 	serverUUID, _ := uuid.Parse(serverID)
 	h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
 		Type: "member_removed",
@@ -620,7 +593,6 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 		},
 	})
 
-	// ── CSK rotation trigger (#96): revoke current epoch for all E2EE channels ──
 	h.triggerKeyRevocationsForServer(serverID, targetUserID, userID)
 
 	c.JSON(http.StatusOK, gin.H{"message": "Member " + action + " successfully"})
@@ -642,6 +614,38 @@ type BannedMember struct {
 	BannedByName *string `json:"banned_by_name,omitempty"`
 	Reason       *string `json:"reason,omitempty"`
 	CreatedAt    string  `json:"created_at"`
+}
+
+func (h *Handler) execBanTx(serverID, targetUserID, actorID string, reason *string) error {
+	tx, err := h.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+			h.log.Error("Failed to rollback", "error", rbErr)
+		}
+	}()
+
+	_, err = tx.Exec(`
+		INSERT INTO server_bans (server_id, user_id, banned_by, reason)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (server_id, user_id) DO UPDATE SET
+			banned_by = EXCLUDED.banned_by,
+			reason = EXCLUDED.reason,
+			created_at = NOW()
+	`, serverID, targetUserID, actorID, reason)
+	if err != nil {
+		return err
+	}
+
+	_, _ = tx.Exec(`DELETE FROM server_members WHERE server_id = $1 AND user_id = $2`, serverID, targetUserID)
+	_, _ = tx.Exec(`DELETE FROM member_roles WHERE server_id = $1 AND user_id = $2`, serverID, targetUserID)
+	_, _ = tx.Exec(`DELETE FROM channel_keys WHERE user_id = $1 AND channel_id IN (SELECT id FROM channels WHERE server_id = $2)`, targetUserID, serverID)
+	_, _ = tx.Exec(`DELETE FROM pending_key_requests WHERE user_id = $1 AND channel_id IN (SELECT id FROM channels WHERE server_id = $2)`, targetUserID, serverID)
+	_, _ = tx.Exec(`DELETE FROM channel_read_states WHERE user_id = $1 AND channel_id IN (SELECT id FROM channels WHERE server_id = $2)`, targetUserID, serverID)
+
+	return tx.Commit()
 }
 
 // BanMember bans a member from a server (removes + prevents rejoin)
@@ -669,8 +673,8 @@ func (h *Handler) BanMember(c *gin.Context) {
 		return
 	}
 
-	var ownerID string
-	if err := h.db.QueryRow(`SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID); err != nil {
+	ownerID, err := h.getServerOwnerID(serverID)
+	if err != nil {
 		h.log.Error(errMsgFailedGetServerOwner, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBanMember})
 		return
@@ -692,41 +696,12 @@ func (h *Handler) BanMember(c *gin.Context) {
 	var req BanRequest
 	_ = c.ShouldBindJSON(&req)
 
-	tx, err := h.db.Begin()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBanMember})
-		return
-	}
-	defer func() {
-		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
-			h.log.Error("Failed to rollback", "error", rbErr)
-		}
-	}()
-
 	var reason *string
 	if req.Reason != "" {
 		reason = &req.Reason
 	}
-	_, err = tx.Exec(`
-		INSERT INTO server_bans (server_id, user_id, banned_by, reason)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (server_id, user_id) DO UPDATE SET
-			banned_by = EXCLUDED.banned_by,
-			reason = EXCLUDED.reason,
-			created_at = NOW()
-	`, serverID, targetUserID, userID, reason)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBanMember})
-		return
-	}
 
-	_, _ = tx.Exec(`DELETE FROM server_members WHERE server_id = $1 AND user_id = $2`, serverID, targetUserID)
-	_, _ = tx.Exec(`DELETE FROM member_roles WHERE server_id = $1 AND user_id = $2`, serverID, targetUserID)
-	_, _ = tx.Exec(`DELETE FROM channel_keys WHERE user_id = $1 AND channel_id IN (SELECT id FROM channels WHERE server_id = $2)`, targetUserID, serverID)
-	_, _ = tx.Exec(`DELETE FROM pending_key_requests WHERE user_id = $1 AND channel_id IN (SELECT id FROM channels WHERE server_id = $2)`, targetUserID, serverID)
-	_, _ = tx.Exec(`DELETE FROM channel_read_states WHERE user_id = $1 AND channel_id IN (SELECT id FROM channels WHERE server_id = $2)`, targetUserID, serverID)
-
-	if err := tx.Commit(); err != nil {
+	if err := h.execBanTx(serverID, targetUserID, userID, reason); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedBanMember})
 		return
 	}

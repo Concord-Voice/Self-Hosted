@@ -13,14 +13,14 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/api"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/database"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/storage"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -66,30 +66,7 @@ func main() {
 		}
 	}()
 
-	// Initialize object storage (MinIO) — optional in dev, required in production.
-	// Retry up to 5 times with backoff to handle startup ordering (MinIO may not be ready yet).
-	var storageClient *storage.Client
-	if cfg.MinIOEndpoint != "" {
-		const maxRetries = 5
-		for attempt := 1; attempt <= maxRetries; attempt++ {
-			storageClient, err = storage.New(cfg, log)
-			if err == nil {
-				break
-			}
-			if attempt == maxRetries {
-				if cfg.Environment == "production" {
-					log.Fatal("Failed to connect to object storage after retries", "error", err, "attempts", maxRetries)
-				}
-				log.Warn("Object storage unavailable — media endpoints will return 503", "error", err)
-			} else {
-				backoff := time.Duration(attempt) * 2 * time.Second
-				log.Warn("Object storage not ready, retrying", "error", err, "attempt", attempt, "backoff", backoff)
-				time.Sleep(backoff)
-			}
-		}
-	} else {
-		log.Info("Object storage not configured (MINIO_ENDPOINT empty) — media endpoints disabled")
-	}
+	storageClient := initStorageClient(cfg, log)
 
 	// Set Gin mode
 	if cfg.Environment == "production" {
@@ -155,6 +132,34 @@ func main() {
 	}
 
 	log.Info("Server exited")
+}
+
+func initStorageClient(cfg *config.Config, log *logger.Logger) *storage.Client {
+	if cfg.MinIOEndpoint == "" {
+		log.Info("Object storage not configured (MINIO_ENDPOINT empty) — media endpoints disabled")
+		return nil
+	}
+
+	const maxRetries = 5
+	var client *storage.Client
+	var err error
+	for attempt := 1; attempt <= maxRetries; attempt++ {
+		client, err = storage.New(cfg, log)
+		if err == nil {
+			return client
+		}
+		if attempt < maxRetries {
+			backoff := time.Duration(attempt) * 2 * time.Second
+			log.Warn("Object storage not ready, retrying", "error", err, "attempt", attempt, "backoff", backoff)
+			time.Sleep(backoff)
+			continue
+		}
+		if cfg.Environment == "production" {
+			log.Fatal("Failed to connect to object storage after retries", "error", err, "attempts", maxRetries)
+		}
+		log.Warn("Object storage unavailable — media endpoints will return 503", "error", err)
+	}
+	return nil
 }
 
 // runCleanupJob periodically purges expired tokens, stale sessions, and orphaned
@@ -291,28 +296,57 @@ type pendingTransfer struct {
 
 // completeOwnershipTransfer atomically transfers server ownership and invalidates caches.
 func completeOwnershipTransfer(ctx context.Context, db *sql.DB, redisClient *redis.Client, hub *websocket.Hub, xfer pendingTransfer) error {
+	completed, err := executeTransferTx(ctx, db, xfer)
+	if err != nil {
+		return err
+	}
+	if !completed {
+		return nil
+	}
+
+	for _, uid := range []string{xfer.fromUserID, xfer.toUserID} {
+		if err := invalidatePermissionCache(ctx, redisClient, xfer.serverID, uid); err != nil {
+			return err
+		}
+	}
+
+	broadcastOwnershipChange(hub, xfer)
+
+	return nil
+}
+
+func executeTransferTx(ctx context.Context, db *sql.DB, xfer pendingTransfer) (bool, error) {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin transaction: %w", err)
+		return false, fmt.Errorf("begin transaction: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Claim the pending transfer (guards against race with ConfirmTransfer)
 	res, err := tx.ExecContext(ctx, `
 		UPDATE ownership_transfers SET status = 'completed', completed_at = NOW()
 		WHERE id = $1 AND status = 'pending'
 	`, xfer.id)
 	if err != nil {
-		return fmt.Errorf("mark transfer completed: %w", err)
+		return false, fmt.Errorf("mark transfer completed: %w", err)
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return nil // already completed or cancelled
+		return false, nil
 	}
 
 	if _, err := tx.ExecContext(ctx, `UPDATE servers SET owner_id = $1 WHERE id = $2`, xfer.toUserID, xfer.serverID); err != nil {
-		return fmt.Errorf("update server owner: %w", err)
+		return false, fmt.Errorf("update server owner: %w", err)
 	}
-	// Verify both users are still members before swapping roles
+	if err := swapMemberRoles(ctx, tx, xfer); err != nil {
+		return false, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("commit: %w", err)
+	}
+	return true, nil
+}
+
+func swapMemberRoles(ctx context.Context, tx *sql.Tx, xfer pendingTransfer) error {
 	resFrom, err := tx.ExecContext(ctx, `UPDATE server_members SET role = 'member' WHERE server_id = $1 AND user_id = $2`, xfer.serverID, xfer.fromUserID)
 	if err != nil {
 		return fmt.Errorf("update from_user role: %w", err)
@@ -327,40 +361,38 @@ func completeOwnershipTransfer(ctx context.Context, db *sql.DB, redisClient *red
 	if n, _ := resTo.RowsAffected(); n == 0 {
 		return fmt.Errorf("to_user %s is no longer a member", xfer.toUserID)
 	}
-
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit: %w", err)
-	}
-
-	// Invalidate permission cache for both users (SCAN + UNLINK)
-	for _, uid := range []string{xfer.fromUserID, xfer.toUserID} {
-		pattern := fmt.Sprintf("perm:%s:%s*", xfer.serverID, uid)
-		iter := redisClient.Scan(ctx, 0, pattern, 100).Iterator()
-		var keys []string
-		for iter.Next(ctx) {
-			keys = append(keys, iter.Val())
-		}
-		if err := iter.Err(); err != nil {
-			return fmt.Errorf("scan permission cache keys for user %s: %w", uid, err)
-		}
-		if len(keys) > 0 {
-			if err := redisClient.Unlink(ctx, keys...).Err(); err != nil {
-				return fmt.Errorf("unlink permission cache keys for user %s: %w", uid, err)
-			}
-		}
-	}
-
-	// Broadcast ownership change
-	if serverUUID, err := uuid.Parse(xfer.serverID); err == nil {
-		hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
-			Type: "ownership_transferred",
-			Data: map[string]interface{}{
-				logKeyServerID: xfer.serverID,
-				"old_owner_id": xfer.fromUserID,
-				"new_owner_id": xfer.toUserID,
-			},
-		})
-	}
-
 	return nil
+}
+
+func invalidatePermissionCache(ctx context.Context, redisClient *redis.Client, serverID, userID string) error {
+	pattern := fmt.Sprintf("perm:%s:%s*", serverID, userID)
+	iter := redisClient.Scan(ctx, 0, pattern, 100).Iterator()
+	var keys []string
+	for iter.Next(ctx) {
+		keys = append(keys, iter.Val())
+	}
+	if err := iter.Err(); err != nil {
+		return fmt.Errorf("scan permission cache keys for user %s: %w", userID, err)
+	}
+	if len(keys) > 0 {
+		if err := redisClient.Unlink(ctx, keys...).Err(); err != nil {
+			return fmt.Errorf("unlink permission cache keys for user %s: %w", userID, err)
+		}
+	}
+	return nil
+}
+
+func broadcastOwnershipChange(hub *websocket.Hub, xfer pendingTransfer) {
+	serverUUID, err := uuid.Parse(xfer.serverID)
+	if err != nil {
+		return
+	}
+	hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
+		Type: "ownership_transferred",
+		Data: map[string]interface{}{
+			logKeyServerID: xfer.serverID,
+			"old_owner_id": xfer.fromUserID,
+			"new_owner_id": xfer.toUserID,
+		},
+	})
 }

@@ -44,6 +44,7 @@ const (
 	errMsgFailedQueryRole         = "Failed to query role"
 	errMsgFailedQueryChannel      = "Failed to query channel"
 	errMsgFailedQueryCategory     = "Failed to query category"
+	errMsgFailedGetActorPerms     = "Failed to get actor permissions"
 )
 
 // Handler handles RBAC-related HTTP requests
@@ -181,7 +182,7 @@ func (h *Handler) CreateRole(c *gin.Context) {
 	// Privilege escalation check: new role permissions must be a subset of actor's permissions
 	actorPerms, err := h.resolver.GetEffectivePermissions(c.Request.Context(), serverID, userID, "")
 	if err != nil {
-		h.log.Error("Failed to get actor permissions", "error", err)
+		h.log.Error(errMsgFailedGetActorPerms, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateRole})
 		return
 	}
@@ -395,7 +396,7 @@ func (h *Handler) checkPermissionEscalation(c *gin.Context, serverID, userID str
 	}
 	actorPerms, permErr := h.resolver.GetEffectivePermissions(c.Request.Context(), serverID, userID, "")
 	if permErr != nil {
-		h.log.Error("Failed to get actor permissions", "error", permErr)
+		h.log.Error(errMsgFailedGetActorPerms, "error", permErr)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateRole})
 		return true
 	}
@@ -593,7 +594,6 @@ func (h *Handler) ReorderRoles(c *gin.Context) {
 		return
 	}
 
-	// Defense-in-depth: verify PermManageRoles in handler (also enforced by middleware)
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", PermManageRoles)
 	if err != nil || !hasPerm {
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPermissions})
@@ -606,89 +606,23 @@ func (h *Handler) ReorderRoles(c *gin.Context) {
 		return
 	}
 
-	// Hierarchy check: actor can only reorder roles below their highest position
-	var actorMaxPosition int
-	if err := h.db.QueryRow(
-		`SELECT COALESCE(MAX(r.position), 0) FROM member_roles mr INNER JOIN roles r ON mr.role_id = r.id WHERE mr.server_id = $1 AND mr.user_id = $2`,
-		serverID, userID,
-	).Scan(&actorMaxPosition); err != nil {
-		h.log.Error(errMsgFailedGetActorPosition, "error", err)
+	if h.checkReorderHierarchy(c, serverID, userID, req.RoleIDs) {
+		return
+	}
+
+	if err := h.applyRolePositions(serverID, req.RoleIDs); err != nil {
+		h.log.Error("Failed to apply role positions", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReorderRoles})
 		return
 	}
-	var ownerID string
-	if err := h.db.QueryRow(`SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID); err != nil {
-		h.log.Error(errMsgFailedGetServerOwner, "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReorderRoles})
-		return
-	}
-	if ownerID != userID {
-		// Verify no submitted role is at or above actor's position
-		inClause := ""
-		args := []interface{}{serverID, actorMaxPosition}
-		for i, id := range req.RoleIDs {
-			if i > 0 {
-				inClause += ", "
-			}
-			inClause += "$" + strconv.Itoa(i+3)
-			args = append(args, id)
-		}
-		var violationCount int
-		checkQuery := `SELECT COUNT(*) FROM roles WHERE server_id = $1 AND position >= $2 AND id IN (` + inClause + `)`
-		if err := h.db.QueryRow(checkQuery, args...).Scan(&violationCount); err != nil {
-			h.log.Error("Failed to check role positions", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReorderRoles})
-			return
-		}
-		if violationCount > 0 {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Cannot reorder roles at or above your own position"})
-			return
-		}
-		// Ensure new positions don't exceed actor's level
-		maxNewPosition := len(req.RoleIDs) - 1
-		if maxNewPosition >= actorMaxPosition {
-			c.JSON(http.StatusForbidden, gin.H{"error": "Reorder would create roles at or above your position"})
-			return
-		}
-	}
 
-	// Update positions (array index = new position)
-	// Exclude @all (is_managed) role — its position must stay at 0
-	tx, err := h.db.Begin()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReorderRoles})
-		return
-	}
-	defer tx.Rollback() //nolint:errcheck
-
-	for i, roleID := range req.RoleIDs {
-		position := len(req.RoleIDs) - i - 1 // Reverse order (highest position first)
-		_, err := tx.Exec(
-			`UPDATE roles SET position = $1, updated_at = NOW() WHERE id = $2 AND server_id = $3 AND is_managed = FALSE`,
-			position, roleID, serverID,
-		)
-		if err != nil {
-			h.log.Error("Failed to update role position", "error", err, "role_id", roleID)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReorderRoles})
-			return
-		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to commit reorder"})
-		return
-	}
-
-	// Invalidate cache (hierarchy changed)
 	_ = h.cache.InvalidateServer(c.Request.Context(), serverID)
 
-	// Audit log
 	if h.audit != nil {
 		_ = h.audit.Log(c.Request.Context(), serverID, &userID, "roles_reordered", "role", nil,
 			map[string]interface{}{"new_order": req.RoleIDs})
 	}
 
-	// Broadcast roles_reordered event
 	serverUUID, _ := uuid.Parse(serverID)
 	h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
 		Type: "roles_reordered",
@@ -699,6 +633,82 @@ func (h *Handler) ReorderRoles(c *gin.Context) {
 	})
 
 	c.JSON(http.StatusOK, gin.H{"message": "Roles reordered"})
+}
+
+func (h *Handler) checkReorderHierarchy(c *gin.Context, serverID, userID string, roleIDs []string) bool {
+	var actorMaxPosition int
+	if err := h.db.QueryRow(
+		`SELECT COALESCE(MAX(r.position), 0) FROM member_roles mr INNER JOIN roles r ON mr.role_id = r.id WHERE mr.server_id = $1 AND mr.user_id = $2`,
+		serverID, userID,
+	).Scan(&actorMaxPosition); err != nil {
+		h.log.Error(errMsgFailedGetActorPosition, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReorderRoles})
+		return true
+	}
+
+	var ownerID string
+	if err := h.db.QueryRow(`SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID); err != nil {
+		h.log.Error(errMsgFailedGetServerOwner, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReorderRoles})
+		return true
+	}
+
+	if ownerID == userID {
+		return false
+	}
+
+	if h.checkRolePositionViolations(c, serverID, actorMaxPosition, roleIDs) {
+		return true
+	}
+
+	if len(roleIDs)-1 >= actorMaxPosition {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Reorder would create roles at or above your position"})
+		return true
+	}
+	return false
+}
+
+func (h *Handler) checkRolePositionViolations(c *gin.Context, serverID string, actorMaxPosition int, roleIDs []string) bool {
+	args := []interface{}{serverID, actorMaxPosition}
+	placeholders := make([]string, len(roleIDs))
+	for i, id := range roleIDs {
+		placeholders[i] = "$" + strconv.Itoa(i+3)
+		args = append(args, id)
+	}
+	inClause := strings.Join(placeholders, ", ")
+
+	var violationCount int
+	checkQuery := `SELECT COUNT(*) FROM roles WHERE server_id = $1 AND position >= $2 AND id IN (` + inClause + `)`
+	if err := h.db.QueryRow(checkQuery, args...).Scan(&violationCount); err != nil {
+		h.log.Error("Failed to check role positions", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReorderRoles})
+		return true
+	}
+	if violationCount > 0 {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Cannot reorder roles at or above your own position"})
+		return true
+	}
+	return false
+}
+
+func (h *Handler) applyRolePositions(serverID string, roleIDs []string) error {
+	tx, err := h.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	for i, roleID := range roleIDs {
+		position := len(roleIDs) - i - 1
+		if _, err := tx.Exec(
+			`UPDATE roles SET position = $1, updated_at = NOW() WHERE id = $2 AND server_id = $3 AND is_managed = FALSE`,
+			position, roleID, serverID,
+		); err != nil {
+			return fmt.Errorf("role %s: %w", roleID, err)
+		}
+	}
+
+	return tx.Commit()
 }
 
 // AssignRole assigns a role to a member
@@ -1110,7 +1120,7 @@ func (h *Handler) UpsertChannelOverride(c *gin.Context) {
 	// Administrators bypass this check — they can grant any permission via channel overrides
 	actorPerms, permErr := h.resolver.GetEffectivePermissions(c.Request.Context(), serverID, userID, "")
 	if permErr != nil {
-		h.log.Error("Failed to get actor permissions", "error", permErr)
+		h.log.Error(errMsgFailedGetActorPerms, "error", permErr)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCheckPermissions})
 		return
 	}
@@ -1402,7 +1412,7 @@ func (h *Handler) UpsertCategoryOverride(c *gin.Context) {
 	// Privilege escalation check (same as channel overrides)
 	actorPerms, permErr := h.resolver.GetEffectivePermissions(c.Request.Context(), serverID, userID, "")
 	if permErr != nil {
-		h.log.Error("Failed to get actor permissions", "error", permErr)
+		h.log.Error(errMsgFailedGetActorPerms, "error", permErr)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCheckPermissions})
 		return
 	}
@@ -1572,10 +1582,7 @@ func (h *Handler) SetChannelPermissionSync(c *gin.Context) {
 		return
 	}
 
-	// Get the channel's server_id and group_id
-	var serverID string
-	var groupID *string
-	err := h.db.QueryRow(`SELECT server_id, group_id FROM channels WHERE id = $1`, channelID).Scan(&serverID, &groupID)
+	serverID, groupID, err := h.getChannelSyncInfo(channelID)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": errMsgChannelNotFound})
 		return
@@ -1586,7 +1593,6 @@ func (h *Handler) SetChannelPermissionSync(c *gin.Context) {
 		return
 	}
 
-	// Channel must belong to a category to enable sync
 	if req.SyncPermissions && (groupID == nil || *groupID == "") {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Channel is not in a category"})
 		return
@@ -1603,53 +1609,21 @@ func (h *Handler) SetChannelPermissionSync(c *gin.Context) {
 		return
 	}
 
-	// Update the sync flag
-	_, err = h.db.Exec(`UPDATE channels SET sync_permissions = $1 WHERE id = $2`, req.SyncPermissions, channelID)
-	if err != nil {
+	if _, err = h.db.Exec(`UPDATE channels SET sync_permissions = $1 WHERE id = $2`, req.SyncPermissions, channelID); err != nil {
 		h.log.Error("Failed to update sync flag", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateSync})
 		return
 	}
 
-	// If enabling sync, immediately copy category overrides to the channel
 	if req.SyncPermissions && groupID != nil {
-		tx, txErr := h.db.BeginTx(c.Request.Context(), nil)
-		if txErr != nil {
-			h.log.Error("Failed to begin transaction for syncing channel permissions", "error", txErr)
+		if err := h.copyCategoryOverridesToChannel(c.Request.Context(), channelID, *groupID); err != nil {
+			h.log.Error("Failed to sync category overrides to channel", "error", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateSync})
 			return
 		}
-		defer tx.Rollback() //nolint:errcheck
-
-		// Remove existing channel overrides
-		if _, err := tx.Exec(`DELETE FROM channel_permission_overrides WHERE channel_id = $1`, channelID); err != nil {
-			h.log.Error("Failed to delete existing channel permission overrides", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateSync})
-			return
-		}
-
-		// Copy category overrides to this channel
-		if _, err := tx.Exec(`
-			INSERT INTO channel_permission_overrides (id, channel_id, target_type, target_id, allow, deny)
-			SELECT gen_random_uuid(), $1, target_type, target_id, allow, deny
-			FROM category_permission_overrides
-			WHERE category_id = $2
-		`, channelID, *groupID); err != nil {
-			h.log.Error("Failed to copy category overrides to channel", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateSync})
-			return
-		}
-
-		if err := tx.Commit(); err != nil {
-			h.log.Error("Failed to commit channel sync transaction", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateSync})
-			return
-		}
-
 		_ = h.cache.InvalidateChannel(c.Request.Context(), serverID, channelID)
 	}
 
-	// Audit log
 	if h.audit != nil {
 		chID := channelID
 		_ = h.audit.Log(c.Request.Context(), serverID, &userID, "channel_sync_updated", "channel", &chID,
@@ -1657,6 +1631,36 @@ func (h *Handler) SetChannelPermissionSync(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"sync_permissions": req.SyncPermissions})
+}
+
+func (h *Handler) getChannelSyncInfo(channelID string) (string, *string, error) {
+	var serverID string
+	var groupID *string
+	err := h.db.QueryRow(`SELECT server_id, group_id FROM channels WHERE id = $1`, channelID).Scan(&serverID, &groupID)
+	return serverID, groupID, err
+}
+
+func (h *Handler) copyCategoryOverridesToChannel(ctx context.Context, channelID, categoryID string) error {
+	tx, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM channel_permission_overrides WHERE channel_id = $1`, channelID); err != nil {
+		return fmt.Errorf("delete existing overrides: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO channel_permission_overrides (id, channel_id, target_type, target_id, allow, deny)
+		SELECT gen_random_uuid(), $1, target_type, target_id, allow, deny
+		FROM category_permission_overrides
+		WHERE category_id = $2
+	`, channelID, categoryID); err != nil {
+		return fmt.Errorf("copy category overrides: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 // syncCategoryOverridesToChannels copies all category overrides to synced child channels
