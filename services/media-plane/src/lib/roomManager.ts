@@ -448,8 +448,16 @@ export class RoomManager {
     }
 
     // Log ICE/DTLS state transitions for diagnostics
-    const iceLogLevel: Record<string, string> = { completed: 'info', disconnected: 'warn', closed: 'warn' };
-    const dtlsLogLevel: Record<string, string> = { connected: 'info', failed: 'error', closed: 'warn' };
+    const iceLogLevel: Record<string, string> = {
+      completed: 'info',
+      disconnected: 'warn',
+      closed: 'warn',
+    };
+    const dtlsLogLevel: Record<string, string> = {
+      connected: 'info',
+      failed: 'error',
+      closed: 'warn',
+    };
     transport.on('icestatechange', (iceState) => {
       logger.log(iceLogLevel[iceState] || 'debug', 'Transport ICE state change', {
         transportId: transport.id,
@@ -530,48 +538,18 @@ export class RoomManager {
     }
 
     // Enforce stream limits
-    if (source === 'camera') {
-      let cameraCount = 0;
-      for (const [, p] of room.participants) {
-        for (const [, info] of p.producers) {
-          if (info.source === 'camera') cameraCount++;
-        }
-      }
-      if (cameraCount >= 25) {
-        throw new Error('Video participant limit reached (max 25)');
-      }
+    if (source === 'camera' && this.countProducersBySource(room, 'camera') >= 25) {
+      throw new Error('Video participant limit reached (max 25)');
     }
 
-    if (source === 'screen') {
-      let screenCount = 0;
-      for (const [, p] of room.participants) {
-        for (const [, info] of p.producers) {
-          if (info.source === 'screen') screenCount++;
-        }
-      }
-      if (screenCount >= 5) {
-        throw new Error('Screen share limit reached (max 5)');
-      }
+    if (source === 'screen' && this.countProducersBySource(room, 'screen') >= 5) {
+      throw new Error('Screen share limit reached (max 5)');
     }
 
     // Validate screen-audio: must be audio kind, participant must have an active screen
     // producer, and only one screen-audio producer is allowed per participant.
     if (source === 'screen-audio') {
-      if (kind !== 'audio') {
-        throw new Error('screen-audio source must be audio kind');
-      }
-      const hasScreenProducer = [...participant.producers.values()].some(
-        (info) => info.source === 'screen'
-      );
-      if (!hasScreenProducer) {
-        throw new Error('screen-audio requires an active screen producer');
-      }
-      const hasActiveScreenAudio = [...participant.producers.values()].some(
-        (info) => info.source === 'screen-audio' && !info.producer.closed
-      );
-      if (hasActiveScreenAudio) {
-        throw new Error('Only one active screen-audio producer allowed per participant');
-      }
+      this.validateScreenAudioSource(participant, kind);
     }
 
     const producer = await participant.sendTransport.produce({
@@ -737,24 +715,11 @@ export class RoomManager {
     }
 
     // Find the producer and its owner
-    let producerEntry: {
-      producer: Producer;
-      source: MediaSource;
-      kind: MediaKind;
-    } | null = null;
-    let producerUserId = '';
-    for (const [, participant] of room.participants) {
-      const entry = participant.producers.get(producerId);
-      if (entry) {
-        producerEntry = entry;
-        producerUserId = participant.userId;
-        break;
-      }
-    }
-
-    if (!producerEntry) {
+    const producerResult = this.findProducerInRoom(room, producerId);
+    if (!producerResult) {
       throw new Error('Producer not found in room');
     }
+    const { entry: producerEntry, userId: producerUserId } = producerResult;
 
     // Check if the router can route this producer to this consumer
     if (
@@ -978,6 +943,50 @@ export class RoomManager {
   }
 
   // ─── Private helpers ─────────────────────────────────────────────────
+
+  private countProducersBySource(room: Room, source: MediaSource): number {
+    let count = 0;
+    for (const [, p] of room.participants) {
+      for (const [, info] of p.producers) {
+        if (info.source === source) count++;
+      }
+    }
+    return count;
+  }
+
+  private validateScreenAudioSource(participant: Participant, kind: MediaKind): void {
+    if (kind !== 'audio') {
+      throw new Error('screen-audio source must be audio kind');
+    }
+    const hasScreenProducer = [...participant.producers.values()].some(
+      (info) => info.source === 'screen'
+    );
+    if (!hasScreenProducer) {
+      throw new Error('screen-audio requires an active screen producer');
+    }
+    const hasActiveScreenAudio = [...participant.producers.values()].some(
+      (info) => info.source === 'screen-audio' && !info.producer.closed
+    );
+    if (hasActiveScreenAudio) {
+      throw new Error('Only one active screen-audio producer allowed per participant');
+    }
+  }
+
+  private findProducerInRoom(
+    room: Room,
+    producerId: string
+  ): {
+    entry: { producer: Producer; source: MediaSource; kind: MediaKind };
+    userId: string;
+  } | null {
+    for (const [, participant] of room.participants) {
+      const entry = participant.producers.get(producerId);
+      if (entry) {
+        return { entry, userId: participant.userId };
+      }
+    }
+    return null;
+  }
 
   private findParticipantTransport(
     roomId: string,
