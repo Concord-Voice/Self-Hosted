@@ -197,6 +197,7 @@ services:
     environment:
       CONTROL_PLANE_URL: http://control-plane:8080
       NATS_URL: nats://nats:4222
+      REDIS_URL: redis://:${REDIS_PASSWORD:?}@redis:6379
       JWT_SECRET: ${JWT_SECRET:?}
       RTC_MIN_PORT: 40000
       RTC_MAX_PORT: 49999
@@ -210,8 +211,11 @@ services:
         condition: service_healthy
       control-plane:
         condition: service_started
+      redis:
+        condition: service_healthy
     networks:
       - concordvoice-services
+      - concordvoice-data
     profiles:
       - services
 
