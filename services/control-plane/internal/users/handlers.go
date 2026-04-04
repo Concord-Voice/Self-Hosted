@@ -11,13 +11,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/media"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 )
 
 const (
@@ -519,7 +519,7 @@ func (h *Handler) executeProfileUpdate(b *profileUpdateBuilder, userID interface
 			b.argIdx,
 		)
 	}
-	query := fmt.Sprintf( // #nosec G201 -- Safe: setClauses are parameterized, whereClause uses $N placeholders
+	query := fmt.Sprintf( // #nosec G201 -- Safe: setClauses are parameterized, whereClause uses $N placeholders // nosemgrep:concord-go-sql-sprintf
 		`UPDATE users SET %s %s
 		 RETURNING id, email, username, display_name, bio, avatar_url, header_image_url, color_scheme,
 		           COALESCE(links, '[]'::jsonb),
@@ -629,12 +629,12 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 
 // ChangePasswordRequest represents a request to change password
 type ChangePasswordRequest struct {
-	CurrentPassword     string `json:"current_password" binding:"required"`
-	NewPassword         string `json:"new_password" binding:"required"`
-	WrappedPrivateKey   string `json:"wrapped_private_key" binding:"required"`
-	KeyDerivationSalt   string `json:"key_derivation_salt" binding:"required"`
-	KeyDerivationAlg    string `json:"key_derivation_alg"` // "pbkdf2" or "argon2id"
-	MFACode             string `json:"mfa_code"`           // Required when MFA is enabled
+	CurrentPassword   string `json:"current_password" binding:"required"`
+	NewPassword       string `json:"new_password" binding:"required"`
+	WrappedPrivateKey string `json:"wrapped_private_key" binding:"required"`
+	KeyDerivationSalt string `json:"key_derivation_salt" binding:"required"`
+	KeyDerivationAlg  string `json:"key_derivation_alg"` // "pbkdf2" or "argon2id"
+	MFACode           string `json:"mfa_code"`           // Required when MFA is enabled
 }
 
 // verifyCurrentPassword fetches the user's password hash and checks it against the provided password.
@@ -989,7 +989,7 @@ func (h *Handler) UpdatePreferences(c *gin.Context) {
 type privacySettingsResponse struct {
 	MessagesFriendsOnly   bool   `json:"messages_friends_only"`
 	MessagesServerMembers bool   `json:"messages_server_members"`
-	DMPrivacyLevel        int    `json:"dm_privacy_level"`         // 0=off, 1=friends, 2=friends+server, 3=all
+	DMPrivacyLevel        int    `json:"dm_privacy_level"` // 0=off, 1=friends, 2=friends+server, 3=all
 	DMFriendsOfFriends    bool   `json:"dm_friends_of_friends"`
 	AutoAcceptFriendCodes bool   `json:"auto_accept_friend_codes"`
 	SearchableByUsername  bool   `json:"searchable_by_username"`

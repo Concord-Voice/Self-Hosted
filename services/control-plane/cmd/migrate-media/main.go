@@ -186,7 +186,7 @@ func migrateColumn(ctx context.Context, db *sql.DB, mc *minio.Client, bucket str
 
 	// Query rows with base64 data URLs (skip already-migrated and NULL)
 	// #nosec G201 -- table/column names are hardcoded constants, not user input
-	query := fmt.Sprintf(
+	query := fmt.Sprintf( // nosemgrep:concord-go-sql-sprintf
 		`SELECT %s, %s FROM %s WHERE %s IS NOT NULL AND %s LIKE 'data:image/%%' ORDER BY %s LIMIT $1`,
 		opts.idColumn, opts.column, opts.table, opts.column, opts.column, opts.idColumn,
 	)
@@ -269,7 +269,7 @@ func (m *migrator) migrateRow(ctx context.Context, id, dataURL string, opts migr
 
 	newURL := fmt.Sprintf("%s/%s", opts.proxyPath, id)
 	// #nosec G201 -- table/column names are hardcoded constants
-	updateQuery := fmt.Sprintf(`UPDATE %s SET %s = $1 WHERE %s = $2`, opts.table, opts.column, opts.idColumn)
+	updateQuery := fmt.Sprintf(`UPDATE %s SET %s = $1 WHERE %s = $2`, opts.table, opts.column, opts.idColumn) // nosemgrep:concord-go-sql-sprintf
 	if _, err := m.db.ExecContext(ctx, updateQuery, newURL, id); err != nil {
 		log.Printf("  ERROR [%s %s]: failed to update DB: %v", opts.table, id, err)
 		stats.errored++

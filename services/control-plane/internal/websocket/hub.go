@@ -2249,7 +2249,7 @@ func buildPlaceholders(n int) string {
 // the given users belong to, plus a set of all unique member IDs.
 func (h *Hub) queryServerMemberships(params []interface{}) (map[string][]uuid.UUID, map[uuid.UUID]bool, error) {
 	// Placeholders are safe — generated as $1,$2,… from loop index, not user input.
-	query := fmt.Sprintf( //nolint:gosec // G201
+	query := fmt.Sprintf( //nolint:gosec // G201 // nosemgrep:concord-go-sql-sprintf
 		`SELECT sm.server_id, sm.user_id
 		FROM server_members sm
 		WHERE sm.server_id IN (

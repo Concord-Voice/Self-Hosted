@@ -384,7 +384,7 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 	setClauses, args, argIdx, mediaKeysToDelete := buildUpdateClauses(serverID, req, iconURLProvided, iconURL, bannerURLProvided, bannerURL)
 
 	args = append(args, serverID)
-	updateQuery := fmt.Sprintf("UPDATE servers SET %s WHERE id = $%d RETURNING name, icon_url, banner_url, owner_id, e2ee_default, allow_embedded_content, created_at, updated_at", //nolint:gosec // setClauses are hardcoded column names, argIdx is an integer — no injection risk
+	updateQuery := fmt.Sprintf("UPDATE servers SET %s WHERE id = $%d RETURNING name, icon_url, banner_url, owner_id, e2ee_default, allow_embedded_content, created_at, updated_at", //nolint:gosec // setClauses are hardcoded column names, argIdx is an integer — no injection risk // nosemgrep:concord-go-sql-sprintf
 		strings.Join(setClauses, ", "), argIdx)
 
 	var server models.Server
