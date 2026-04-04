@@ -1116,14 +1116,16 @@ func TestBroadcastPresenceToAll(t *testing.T) {
 
 // --- sendDMUnreadNotify tests ---
 
-// testLastMessage returns a dmUnreadLastMessage fixture for tests.
+// testLastMessage returns a deterministic dmUnreadLastMessage fixture for tests.
+var testLastMessageTime = time.Date(2026, 4, 4, 12, 0, 0, 0, time.UTC)
+
 func testLastMessage() dmUnreadLastMessage {
 	return dmUnreadLastMessage{
-		Content:     "hello from test",
-		UserID:      uuid.New().String(),
-		Username:    "testuser",
-		CreatedAt:   time.Now(),
-		IsEncrypted: false,
+		content:     "hello from test",
+		userID:      "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		username:    "testuser",
+		createdAt:   testLastMessageTime,
+		isEncrypted: false,
 	}
 }
 
@@ -1158,10 +1160,10 @@ func TestSendDMUnreadNotifySendsToUnsubscribedParticipants(t *testing.T) {
 		require.True(t, ok)
 		lm, ok := msgData["last_message"].(map[string]interface{})
 		require.True(t, ok, "last_message must be present in dm_unread_notify")
-		assert.Equal(t, lastMsg.Content, lm["content"])
-		assert.Equal(t, lastMsg.UserID, lm["user_id"])
-		assert.Equal(t, lastMsg.Username, lm["username"])
-		assert.Equal(t, lastMsg.IsEncrypted, lm["is_encrypted"])
+		assert.Equal(t, lastMsg.content, lm["content"])
+		assert.Equal(t, lastMsg.userID, lm["user_id"])
+		assert.Equal(t, lastMsg.username, lm["username"])
+		assert.Equal(t, lastMsg.isEncrypted, lm["is_encrypted"])
 		assert.NotEmpty(t, lm["created_at"])
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("expected dm_unread_notify for unsubscribed participant")

@@ -1546,11 +1546,11 @@ type dmMessageInput struct {
 // dmUnreadLastMessage holds last-message metadata included in dm_unread_notify
 // so that clients can update conversation previews and ordering in real-time.
 type dmUnreadLastMessage struct {
-	Content     string
-	UserID      string
-	Username    string
-	CreatedAt   time.Time
-	IsEncrypted bool
+	content     string
+	userID      string
+	username    string
+	createdAt   time.Time
+	isEncrypted bool
 }
 
 func (h *Hub) validateDMMessage(msg IncomingMessage) (*Client, uuid.UUID, *dmMessageInput) {
@@ -1814,11 +1814,11 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 		attachments: attachments, convPersonal: convPersonal,
 	})
 	h.sendDMUnreadNotify(convUUID, msg.UserID, dmUnreadLastMessage{
-		Content:     input.content,
-		UserID:      msg.UserID.String(),
-		Username:    client.Username,
-		CreatedAt:   createdAt,
-		IsEncrypted: input.isEncrypted,
+		content:     input.content,
+		userID:      msg.UserID.String(),
+		username:    client.Username,
+		createdAt:   createdAt,
+		isEncrypted: input.isEncrypted,
 	})
 
 	if input.mentionAddendum != nil {
@@ -1838,13 +1838,13 @@ func (h *Hub) sendDMUnreadNotify(conversationID, senderUserID uuid.UUID, lastMsg
 	notifyMsg := OutgoingMessage{
 		Type: "dm_unread_notify",
 		Data: map[string]interface{}{
-			"conversation_id": conversationID.String(),
+			keyConversationID: conversationID.String(),
 			"last_message": map[string]interface{}{
-				"content":      lastMsg.Content,
-				"user_id":      lastMsg.UserID,
-				"username":     lastMsg.Username,
-				"created_at":   lastMsg.CreatedAt,
-				"is_encrypted": lastMsg.IsEncrypted,
+				keyContent:     lastMsg.content,
+				keyUserID:      lastMsg.userID,
+				keyUsername:    lastMsg.username,
+				keyCreatedAt:   lastMsg.createdAt,
+				keyIsEncrypted: lastMsg.isEncrypted,
 			},
 		},
 	}
