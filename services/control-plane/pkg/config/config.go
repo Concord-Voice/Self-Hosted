@@ -124,7 +124,7 @@ func Load() (*Config, error) {
 		SMTPPort:              getEnvInt("SMTP_PORT", 587),
 		SMTPUsername:          getEnv("SMTP_USERNAME", ""),
 		SMTPPassword:          getEnv("SMTP_PASSWORD", ""), // #nosec G101 -- env var name, not a secret
-		SMTPFrom:              getEnv("SMTP_FROM", "Concord Voice <noreply@concordvoice.chat>"),
+		SMTPFrom:              getEnv("SMTP_FROM", "Concord Voice <noreply@verify.concordvoice.chat>"),
 		MFAEncryptionKey:      getEnv("MFA_ENCRYPTION_KEY", devMFAEncKey),
 		WebAuthnRPID:          getEnv("WEBAUTHN_RP_ID", "localhost"),
 		WebAuthnRPOrigins:     parseOrigins(getEnv("WEBAUTHN_RP_ORIGINS", "http://localhost:3001")),
