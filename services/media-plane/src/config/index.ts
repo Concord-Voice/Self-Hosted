@@ -1,5 +1,5 @@
 import dotenv from 'dotenv';
-import type { RouterRtpCodecCapability } from 'mediasoup/node/lib/rtpParametersTypes.js';
+import type { RouterRtpCodecCapability } from 'mediasoup/types';
 
 dotenv.config();
 

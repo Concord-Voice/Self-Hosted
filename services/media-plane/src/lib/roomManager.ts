@@ -7,8 +7,8 @@ import type {
   RtpParameters,
   DtlsParameters,
   AudioLevelObserver,
-} from 'mediasoup/node/lib/types.js';
-import type { MediaKind } from 'mediasoup/node/lib/rtpParametersTypes.js';
+  MediaKind,
+} from 'mediasoup/types';
 import { config } from '../config/index.js';
 import { logger } from './logger.js';
 import { MediasoupService } from './mediasoup.js';

@@ -1,7 +1,7 @@
 import * as mediasoup from 'mediasoup';
 import { config } from '../config/index.js';
 import { logger } from './logger.js';
-import type { Worker, Router } from 'mediasoup/node/lib/types.js';
+import type { Worker, Router } from 'mediasoup/types';
 
 export class MediasoupService {
   private workers: Worker[] = [];
