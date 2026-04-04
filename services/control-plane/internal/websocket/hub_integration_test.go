@@ -1116,6 +1116,17 @@ func TestBroadcastPresenceToAll(t *testing.T) {
 
 // --- sendDMUnreadNotify tests ---
 
+// testLastMessage returns a dmUnreadLastMessage fixture for tests.
+func testLastMessage() dmUnreadLastMessage {
+	return dmUnreadLastMessage{
+		Content:     "hello from test",
+		UserID:      uuid.New().String(),
+		Username:    "testuser",
+		CreatedAt:   time.Now(),
+		IsEncrypted: false,
+	}
+}
+
 func TestSendDMUnreadNotifySendsToUnsubscribedParticipants(t *testing.T) {
 	setup := setupEpochTest(t, false, false, false)
 	convUUID, _ := uuid.Parse(setup.convID)
@@ -1133,13 +1144,25 @@ func TestSendDMUnreadNotifySendsToUnsubscribedParticipants(t *testing.T) {
 	setup.hub.clients[client2ID] = client2
 	setup.hub.userClients[setup.user2] = map[uuid.UUID]bool{client2ID: true}
 
-	setup.hub.sendDMUnreadNotify(convUUID, setup.user1)
+	lastMsg := testLastMessage()
+	setup.hub.sendDMUnreadNotify(convUUID, setup.user1, lastMsg)
 
 	select {
 	case data := <-client2.Send:
 		var msg map[string]interface{}
 		require.NoError(t, json.Unmarshal(data, &msg))
 		assert.Equal(t, "dm_unread_notify", msg["type"])
+
+		// Verify last_message is included with correct fields
+		msgData, ok := msg["data"].(map[string]interface{})
+		require.True(t, ok)
+		lm, ok := msgData["last_message"].(map[string]interface{})
+		require.True(t, ok, "last_message must be present in dm_unread_notify")
+		assert.Equal(t, lastMsg.Content, lm["content"])
+		assert.Equal(t, lastMsg.UserID, lm["user_id"])
+		assert.Equal(t, lastMsg.Username, lm["username"])
+		assert.Equal(t, lastMsg.IsEncrypted, lm["is_encrypted"])
+		assert.NotEmpty(t, lm["created_at"])
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("expected dm_unread_notify for unsubscribed participant")
 	}
@@ -1151,7 +1174,7 @@ func TestSendDMUnreadNotifySkipsSender(t *testing.T) {
 
 	// The sender (user1) should NOT receive unread notify
 	// user1's client is already registered
-	setup.hub.sendDMUnreadNotify(convUUID, setup.user1)
+	setup.hub.sendDMUnreadNotify(convUUID, setup.user1, testLastMessage())
 
 	select {
 	case <-setup.client.Send:
@@ -1179,7 +1202,7 @@ func TestSendDMUnreadNotifySkipsSubscribedParticipants(t *testing.T) {
 	setup.hub.userClients[setup.user2] = map[uuid.UUID]bool{client2ID: true}
 	setup.hub.dmSubscriptions[convUUID][client2ID] = true
 
-	setup.hub.sendDMUnreadNotify(convUUID, setup.user1)
+	setup.hub.sendDMUnreadNotify(convUUID, setup.user1, testLastMessage())
 
 	select {
 	case <-client2.Send:

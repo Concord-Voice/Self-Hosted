@@ -1543,6 +1543,16 @@ type dmMessageInput struct {
 	attachmentIDs   []string
 }
 
+// dmUnreadLastMessage holds last-message metadata included in dm_unread_notify
+// so that clients can update conversation previews and ordering in real-time.
+type dmUnreadLastMessage struct {
+	Content     string
+	UserID      string
+	Username    string
+	CreatedAt   time.Time
+	IsEncrypted bool
+}
+
 func (h *Hub) validateDMMessage(msg IncomingMessage) (*Client, uuid.UUID, *dmMessageInput) {
 	convID, ok := msg.Data[keyConversationID].(string)
 	if !ok {
@@ -1803,16 +1813,23 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 		client: client, input: input, createdAt: createdAt, updatedAt: updatedAt,
 		attachments: attachments, convPersonal: convPersonal,
 	})
-	h.sendDMUnreadNotify(convUUID, msg.UserID)
+	h.sendDMUnreadNotify(convUUID, msg.UserID, dmUnreadLastMessage{
+		Content:     input.content,
+		UserID:      msg.UserID.String(),
+		Username:    client.Username,
+		CreatedAt:   createdAt,
+		IsEncrypted: input.isEncrypted,
+	})
 
 	if input.mentionAddendum != nil {
 		h.routeDMMentionNotifications(convUUID, msg.UserID, input.mentionAddendum)
 	}
 }
 
-// sendDMUnreadNotify sends a lightweight notification to DM participants
-// who are not subscribed to the conversation (they don't have it active).
-func (h *Hub) sendDMUnreadNotify(conversationID, senderUserID uuid.UUID) {
+// sendDMUnreadNotify sends a notification to DM participants who are not
+// subscribed to the conversation (they don't have it active). Includes
+// last-message metadata so clients can update previews and ordering.
+func (h *Hub) sendDMUnreadNotify(conversationID, senderUserID uuid.UUID, lastMsg dmUnreadLastMessage) {
 	participants, err := h.dmUnreadParticipants(conversationID)
 	if err != nil {
 		return
@@ -1822,6 +1839,13 @@ func (h *Hub) sendDMUnreadNotify(conversationID, senderUserID uuid.UUID) {
 		Type: "dm_unread_notify",
 		Data: map[string]interface{}{
 			"conversation_id": conversationID.String(),
+			"last_message": map[string]interface{}{
+				"content":      lastMsg.Content,
+				"user_id":      lastMsg.UserID,
+				"username":     lastMsg.Username,
+				"created_at":   lastMsg.CreatedAt,
+				"is_encrypted": lastMsg.IsEncrypted,
+			},
 		},
 	}
 	data, marshalErr := json.Marshal(notifyMsg)
