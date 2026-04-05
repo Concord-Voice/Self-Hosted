@@ -9,7 +9,7 @@ vi.mock('@/config/index.js', () => ({
 }));
 
 // Build mock NATS connection — vi.hoisted ensures these exist before vi.mock runs
-const { mockNc, mockConnect, mockEncode } = vi.hoisted(() => {
+const { mockNc, mockConnect, mockEncode, mockDecode } = vi.hoisted(() => {
   const mockNc = {
     publish: vi.fn(),
     drain: vi.fn().mockResolvedValue(undefined),
@@ -18,15 +18,17 @@ const { mockNc, mockConnect, mockEncode } = vi.hoisted(() => {
         yield { type: 'update', data: {} };
       },
     })),
+    subscribe: vi.fn(),
   };
   const mockConnect = vi.fn().mockResolvedValue(mockNc);
   const mockEncode = vi.fn((data: unknown) => JSON.stringify(data));
-  return { mockNc, mockConnect, mockEncode };
+  const mockDecode = vi.fn((data: unknown) => JSON.parse(data as string));
+  return { mockNc, mockConnect, mockEncode, mockDecode };
 });
 
 vi.mock('nats', () => ({
   connect: (...args: any[]) => mockConnect(...args),
-  JSONCodec: () => ({ encode: mockEncode }),
+  JSONCodec: () => ({ encode: mockEncode, decode: mockDecode }),
 }));
 
 import { NatsService } from '../src/lib/nats.js';
@@ -66,10 +68,7 @@ describe('NatsService', () => {
       service.publish('voice.joined', { channelId: 'ch-1', userId: 'u-1' });
 
       expect(mockEncode).toHaveBeenCalledWith({ channelId: 'ch-1', userId: 'u-1' });
-      expect(mockNc.publish).toHaveBeenCalledWith(
-        'voice.joined',
-        expect.anything()
-      );
+      expect(mockNc.publish).toHaveBeenCalledWith('voice.joined', expect.anything());
     });
 
     it('drops message and logs warning when not connected', () => {
@@ -185,6 +184,74 @@ describe('NatsService', () => {
 
       // active-speaker is handled locally via Socket.IO, not NATS
       expect(mockNc.publish).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('subscribe', () => {
+    it('calls nc.subscribe and processes decoded messages', async () => {
+      await service.connect();
+
+      const messages = [
+        { data: JSON.stringify({ userId: 'u-1', action: 'mute' }) },
+        { data: JSON.stringify({ userId: 'u-2', action: 'deafen' }) },
+      ];
+
+      // Create an async iterable that yields the messages then completes
+      mockNc.subscribe.mockReturnValue({
+        async *[Symbol.asyncIterator]() {
+          for (const msg of messages) {
+            yield msg;
+          }
+        },
+      });
+
+      const handler = vi.fn();
+      service.subscribe('voice.enforcement', handler);
+
+      // Wait for the async iteration to process
+      await vi.waitFor(() => {
+        expect(handler).toHaveBeenCalledTimes(2);
+      });
+
+      expect(mockNc.subscribe).toHaveBeenCalledWith('voice.enforcement');
+      expect(mockDecode).toHaveBeenCalledTimes(2);
+      expect(handler).toHaveBeenCalledWith({ userId: 'u-1', action: 'mute' });
+      expect(handler).toHaveBeenCalledWith({ userId: 'u-2', action: 'deafen' });
+    });
+
+    it('handles decode errors gracefully without crashing', async () => {
+      await service.connect();
+
+      mockNc.subscribe.mockReturnValue({
+        async *[Symbol.asyncIterator]() {
+          yield { data: 'invalid-json' };
+        },
+      });
+
+      mockDecode.mockImplementationOnce(() => {
+        throw new Error('Unexpected token');
+      });
+
+      const handler = vi.fn();
+
+      // Should not throw
+      service.subscribe('voice.enforcement', handler);
+
+      // Wait for async iteration to complete
+      await vi.waitFor(() => {
+        expect(mockDecode).toHaveBeenCalled();
+      });
+
+      expect(handler).not.toHaveBeenCalled();
+    });
+
+    it('is a no-op when not connected (nc is null)', () => {
+      // Don't call connect — nc stays null
+      const handler = vi.fn();
+      service.subscribe('voice.enforcement', handler);
+
+      expect(mockNc.subscribe).not.toHaveBeenCalled();
+      expect(handler).not.toHaveBeenCalled();
     });
   });
 

@@ -8,6 +8,8 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/voice"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // newTestSubscriber creates a NATSSubscriber backed by the test server's DB and Hub.
@@ -581,6 +583,79 @@ func TestHandleHeartbeat_InvalidJSON(t *testing.T) {
 	sub := newTestSubscriber(ts)
 
 	sub.HandleHeartbeat([]byte(`{`))
+}
+
+// ---------------------------------------------------------------------------
+// reEnforceServer / reEnforceDM tests
+// ---------------------------------------------------------------------------
+
+func TestReEnforceServer(t *testing.T) {
+	t.Run("NoPublishWhenNotFlagged", func(t *testing.T) {
+		ts := testhelpers.SetupTestServer(t)
+		sub := newTestSubscriber(ts)
+		user := ts.CreateTestUser(t, "reenforce_noflag_owner")
+		serverID := ts.CreateTestServer(t, user.ID, "ReEnforce NoFlag Server")
+		channelID := ts.CreateVoiceChannel(t, serverID, "voice-reenforce-noflag")
+		sub.ReEnforceServer(serverID, channelID, user.ID)
+	})
+
+	t.Run("QueriesFlagsWhenMuted", func(t *testing.T) {
+		ts := testhelpers.SetupTestServer(t)
+		sub := newTestSubscriber(ts)
+		user := ts.CreateTestUser(t, "reenforce_muted_owner")
+		serverID := ts.CreateTestServer(t, user.ID, "ReEnforce Muted Server")
+		channelID := ts.CreateVoiceChannel(t, serverID, "voice-reenforce-muted")
+		_, err := ts.DB.Exec(`UPDATE server_members SET server_muted = true WHERE server_id = $1 AND user_id = $2`, serverID, user.ID)
+		require.NoError(t, err)
+		sub.ReEnforceServer(serverID, channelID, user.ID)
+	})
+
+	t.Run("HandlesJoinedWithMutedFlag", func(t *testing.T) {
+		ts := testhelpers.SetupTestServer(t)
+		sub := newTestSubscriber(ts)
+		user := ts.CreateTestUser(t, "reenforce_joined_owner")
+		serverID := ts.CreateTestServer(t, user.ID, "ReEnforce Joined Server")
+		channelID := ts.CreateVoiceChannel(t, serverID, "voice-reenforce-joined")
+		_, err := ts.DB.Exec(`UPDATE server_members SET server_muted = true WHERE server_id = $1 AND user_id = $2`, serverID, user.ID)
+		require.NoError(t, err)
+		event := map[string]interface{}{
+			"channelId": channelID, "userId": user.ID, "username": "reenforce_joined_owner",
+			"displayName": "ReEnforce Owner", "timestamp": "2026-04-05T00:00:00Z",
+		}
+		sub.HandleJoined(mustJSON(t, event))
+		assert.True(t, voiceParticipantExists(t, ts.DB, channelID, user.ID))
+	})
+
+	t.Run("InvalidUser", func(t *testing.T) {
+		ts := testhelpers.SetupTestServer(t)
+		sub := newTestSubscriber(ts)
+		user := ts.CreateTestUser(t, "reenforce_invalid_owner")
+		serverID := ts.CreateTestServer(t, user.ID, "ReEnforce Invalid Server")
+		channelID := ts.CreateVoiceChannel(t, serverID, "voice-reenforce-invalid")
+		sub.ReEnforceServer(serverID, channelID, "00000000-0000-0000-0000-000000000099")
+	})
+}
+
+func TestReEnforceDM(t *testing.T) {
+	t.Run("NoPublishWhenNotFlagged", func(t *testing.T) {
+		ts := testhelpers.SetupTestServer(t)
+		sub := newTestSubscriber(ts)
+		user1 := ts.CreateTestUser(t, "reenforce_dm_user1")
+		user2 := ts.CreateTestUser(t, "reenforce_dm_user2")
+		convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+		sub.ReEnforceDM(convID, user1.ID)
+	})
+
+	t.Run("QueriesFlagsWhenMuted", func(t *testing.T) {
+		ts := testhelpers.SetupTestServer(t)
+		sub := newTestSubscriber(ts)
+		user1 := ts.CreateTestUser(t, "reenforce_dm_muted1")
+		user2 := ts.CreateTestUser(t, "reenforce_dm_muted2")
+		convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+		_, err := ts.DB.Exec(`UPDATE dm_participants SET server_muted = true WHERE conversation_id = $1 AND user_id = $2`, convID, user1.ID)
+		require.NoError(t, err)
+		sub.ReEnforceDM(convID, user1.ID)
+	})
 }
 
 // ---------------------------------------------------------------------------

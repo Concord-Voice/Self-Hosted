@@ -86,6 +86,8 @@ type MemberWithUser struct {
 	JoinedAt       string           `json:"joined_at"`
 	LastSeen       *int64           `json:"last_seen,omitempty"`
 	Roles          []MemberRoleInfo `json:"roles"`
+	ServerMuted    bool             `json:"server_muted"`
+	ServerDeafened bool             `json:"server_deafened"`
 }
 
 // ListMembers returns all members of a server
@@ -138,7 +140,8 @@ func (h *Handler) ListMembers(c *gin.Context) {
 // queryServerMembers fetches all members of a server with user details.
 func (h *Handler) queryServerMembers(serverID string) ([]MemberWithUser, error) {
 	query := `
-		SELECT sm.user_id, u.username, u.display_name, u.bio, u.avatar_url, u.header_image_url, u.color_scheme, sm.role, sm.joined_at
+		SELECT sm.user_id, u.username, u.display_name, u.bio, u.avatar_url, u.header_image_url, u.color_scheme,
+		       sm.role, sm.joined_at, sm.server_muted, sm.server_deafened
 		FROM server_members sm
 		INNER JOIN users u ON sm.user_id = u.id
 		WHERE sm.server_id = $1
@@ -165,6 +168,8 @@ func (h *Handler) queryServerMembers(serverID string) ([]MemberWithUser, error) 
 			&member.ColorScheme,
 			&member.Role,
 			&member.JoinedAt,
+			&member.ServerMuted,
+			&member.ServerDeafened,
 		)
 		if err != nil {
 			h.log.Error("Failed to scan member", "error", err)

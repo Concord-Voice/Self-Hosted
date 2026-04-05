@@ -31,3 +31,13 @@ func (s *NATSSubscriber) ResolveRoom(channelID string) (*TestRoomContext, error)
 		ServerID: ctx.serverID,
 	}, nil
 }
+
+// ReEnforceServer exposes reEnforceServer for testing.
+func (s *NATSSubscriber) ReEnforceServer(serverID, channelID, userID string) {
+	s.reEnforceServer(serverID, channelID, userID)
+}
+
+// ReEnforceDM exposes reEnforceDM for testing.
+func (s *NATSSubscriber) ReEnforceDM(channelID, userID string) {
+	s.reEnforceDM(channelID, userID)
+}

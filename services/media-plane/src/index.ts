@@ -87,6 +87,90 @@ async function main() {
   // Socket.IO JWT authentication middleware (A2)
   io.use(createAuthMiddleware());
 
+  // ── NATS subscriptions for enforcement commands from control plane ────
+
+  /** Creates a NATS handler for server-level toggle enforcement (mute/deafen). */
+  function createServerEnforcementHandler(
+    subject: string,
+    applyAction: string,
+    removeAction: string,
+    applyFn: (roomId: string, userId: string) => void | Promise<void>,
+    removeFn: (roomId: string, userId: string) => void | Promise<void>,
+    eventName: string,
+    eventField: string
+  ) {
+    natsService.subscribe(subject, async (natsData) => {
+      const channelId = natsData.channelId as string;
+      const userId = natsData.userId as string;
+      const action = natsData.action as string;
+      if (typeof channelId !== 'string' || typeof userId !== 'string' || typeof action !== 'string') return;
+
+      try {
+        if (action === applyAction) {
+          await applyFn(channelId, userId);
+          io.to(channelId).emit(eventName, { userId, [eventField]: true });
+        } else if (action === removeAction) {
+          await removeFn(channelId, userId);
+          io.to(channelId).emit(eventName, { userId, [eventField]: false });
+        }
+      } catch (err) {
+        logger.error(`Failed to handle ${subject}`, { error: err, channelId, userId, action });
+      }
+    });
+  }
+
+  createServerEnforcementHandler(
+    'voice.enforce.mute',
+    'mute',
+    'unmute',
+    (r, u) => roomManager.serverMuteUser(r, u),
+    (r, u) => roomManager.serverUnmuteUser(r, u),
+    'server-mute-changed',
+    'serverMuted'
+  );
+
+  createServerEnforcementHandler(
+    'voice.enforce.deafen',
+    'deafen',
+    'undeafen',
+    (r, u) => roomManager.serverDeafenUser(r, u),
+    (r, u) => roomManager.serverUndeafenUser(r, u),
+    'server-deafen-changed',
+    'serverDeafened'
+  );
+
+  /** Creates a NATS handler for user-level enforcement (mute/deafen). */
+  function createUserEnforcementHandler(
+    subject: string,
+    applyFn: (roomId: string, userId: string) => void | Promise<void>
+  ) {
+    natsService.subscribe(subject, async (natsData) => {
+      const channelId = natsData.channelId as string;
+      const userId = natsData.userId as string;
+      if (!channelId || !userId) return;
+      if (typeof channelId !== 'string' || typeof userId !== 'string') return;
+
+      try {
+        await applyFn(channelId, userId);
+        const participant = roomManager.getParticipant(channelId, userId);
+        if (participant) {
+          for (const [producerId, entry] of participant.producers) {
+            if (entry.kind === 'audio') {
+              io.to(channelId).emit('producer-paused', { producerId, userId });
+            }
+          }
+        }
+      } catch (err) {
+        logger.error(`Failed to handle ${subject}`, { error: err, channelId, userId });
+      }
+    });
+  }
+
+  createUserEnforcementHandler('voice.user_mute', (r, u) => roomManager.userMuteParticipant(r, u));
+  createUserEnforcementHandler('voice.user_deafen', (r, u) =>
+    roomManager.userDeafenParticipant(r, u)
+  );
+
   // ─── Socket.IO connection handling ───────────────────────────────────
 
   io.on('connection', (socket) => {
@@ -134,6 +218,16 @@ async function main() {
           rtpCapabilities,
           access.isEncrypted
         );
+
+        // Apply server enforcement if the joining user has active enforcement
+        if (access.serverMuted) {
+          await roomManager.serverMuteUser(roomId, data.userId);
+          logger.info('Applied server-mute enforcement on join', { roomId, userId: data.userId });
+        }
+        if (access.serverDeafened) {
+          await roomManager.serverDeafenUser(roomId, data.userId);
+          logger.info('Applied server-deafen enforcement on join', { roomId, userId: data.userId });
+        }
 
         // Join Socket.IO room for broadcasting
         socket.join(roomId);
@@ -301,6 +395,12 @@ async function main() {
           source
         );
 
+        // Auto-pause audio producers for server-muted participants
+        const participant = roomManager.getParticipant(roomId, data.userId);
+        if (participant?.serverMuted && kind === 'audio') {
+          await roomManager.pauseProducer(roomId, data.userId, producerInfo.producerId);
+        }
+
         // Notify other users in the room about the new producer
         // Screen shares require opt-in (Tune In model) — not auto-consumed
         socket.to(roomId).emit('new-producer', {
@@ -388,6 +488,20 @@ async function main() {
         if (!roomId) {
           if (callback) return callback({ error: 'Not in a room' });
           return;
+        }
+
+        // Block resume if server-deafened and this is an audio consumer
+        const participant = roomManager.getParticipant(roomId, data.userId);
+        if (participant?.serverDeafened) {
+          const consumer = participant.consumers.get(consumerId);
+          if (consumer?.kind === 'audio') {
+            if (callback)
+              return callback({
+                error: 'server_deafened',
+                message: 'Server-deafened by moderator',
+              });
+            return;
+          }
         }
 
         await roomManager.resumeConsumer(roomId, data.userId, consumerId);
@@ -480,6 +594,17 @@ async function main() {
         if (!roomId) {
           if (callback) return callback({ error: 'Not in a room' });
           return;
+        }
+
+        // Block resume if server-muted and this is an audio producer
+        const participant = roomManager.getParticipant(roomId, data.userId);
+        if (participant?.serverMuted) {
+          const producerEntry = participant.producers.get(producerId);
+          if (producerEntry?.kind === 'audio') {
+            if (callback)
+              return callback({ error: 'server_muted', message: 'Server-muted by moderator' });
+            return;
+          }
         }
 
         await roomManager.resumeProducer(roomId, data.userId, producerId);

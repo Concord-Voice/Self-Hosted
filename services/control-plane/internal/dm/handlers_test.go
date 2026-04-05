@@ -27,6 +27,10 @@ const (
 	wrappedKey     = "wrapped-key"
 	pathVoiceJoin  = "/voice/join"
 	pathVoiceParts = "/voice/participants"
+	pathUserMute   = "/user-mute"
+	pathMute       = "/mute"
+	pathDeafen     = "/deafen"
+	pathVoiceSlash = "/voice/"
 	pathPersonal   = "/personal"
 	pathMsgSlash   = "/messages/"
 )
@@ -2580,4 +2584,333 @@ func TestDeleteGroupVerifiesAllDataDeleted(t *testing.T) {
 	err = ts.DB.QueryRow(`SELECT EXISTS(SELECT 1 FROM dm_conversations WHERE id = $1)`, convID).Scan(&exists)
 	require.NoError(t, err)
 	assert.False(t, exists, "conversation should be deleted")
+}
+
+// ============================================================================
+// DMUserMute Tests (soft-mute: any participant can mute another)
+// ============================================================================
+
+func TestDMUserMute(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		ts := setupTS(t)
+		userA := ts.CreateTestUser(t, "usrmute1")
+		userB := ts.CreateTestUser(t, "usrmute2")
+		ts.CreateFriendship(t, userA.ID, userB.ID, statusAccepted)
+		convID := ts.CreateDMConversation(t, userA.ID, userB.ID, false)
+
+		// Both users are in voice
+		_, err := ts.DB.Exec(
+			`INSERT INTO dm_voice_participants (conversation_id, user_id, is_muted, is_deafened, is_video_on, is_screen_sharing) VALUES ($1, $2, false, false, false, false)`,
+			convID, userA.ID,
+		)
+		require.NoError(t, err)
+		_, err = ts.DB.Exec(
+			`INSERT INTO dm_voice_participants (conversation_id, user_id, is_muted, is_deafened, is_video_on, is_screen_sharing) VALUES ($1, $2, false, false, false, false)`,
+			convID, userB.ID,
+		)
+		require.NoError(t, err)
+
+		w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+userB.ID+pathUserMute, nil, testhelpers.AuthHeaders(userA.AccessToken))
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		var body map[string]interface{}
+		testhelpers.ParseJSON(t, w, &body)
+		assert.Equal(t, true, body["success"])
+	})
+
+	t.Run("NotParticipant", func(t *testing.T) {
+		ts := setupTS(t)
+		userA := ts.CreateTestUser(t, "usrmutenp1")
+		userB := ts.CreateTestUser(t, "usrmutenp2")
+		outsider := ts.CreateTestUser(t, "usrmutenp3")
+		ts.CreateFriendship(t, userA.ID, userB.ID, statusAccepted)
+		convID := ts.CreateDMConversation(t, userA.ID, userB.ID, false)
+
+		w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+userA.ID+pathUserMute, nil, testhelpers.AuthHeaders(outsider.AccessToken))
+		assert.Equal(t, http.StatusForbidden, w.Code)
+	})
+
+	t.Run("TargetNotInVoice", func(t *testing.T) {
+		ts := setupTS(t)
+		userA := ts.CreateTestUser(t, "usrmuteniv1")
+		userB := ts.CreateTestUser(t, "usrmuteniv2")
+		ts.CreateFriendship(t, userA.ID, userB.ID, statusAccepted)
+		convID := ts.CreateDMConversation(t, userA.ID, userB.ID, false)
+
+		// Only userA is in voice, userB is NOT
+		_, err := ts.DB.Exec(
+			`INSERT INTO dm_voice_participants (conversation_id, user_id, is_muted, is_deafened, is_video_on, is_screen_sharing) VALUES ($1, $2, false, false, false, false)`,
+			convID, userA.ID,
+		)
+		require.NoError(t, err)
+
+		w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+userB.ID+pathUserMute, nil, testhelpers.AuthHeaders(userA.AccessToken))
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
+
+	t.Run("CannotMuteSelf", func(t *testing.T) {
+		ts := setupTS(t)
+		userA := ts.CreateTestUser(t, "usrmuteself1")
+		userB := ts.CreateTestUser(t, "usrmuteself2")
+		ts.CreateFriendship(t, userA.ID, userB.ID, statusAccepted)
+		convID := ts.CreateDMConversation(t, userA.ID, userB.ID, false)
+
+		w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+userA.ID+pathUserMute, nil, testhelpers.AuthHeaders(userA.AccessToken))
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
+}
+
+// ============================================================================
+// DMHardMute Tests (server-mute: group admin only)
+// ============================================================================
+
+func TestDMHardMute(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		ts := setupTS(t)
+		admin := ts.CreateTestUser(t, "hardmute1")
+		member := ts.CreateTestUser(t, "hardmute2")
+
+		convID := createTestGroup(t, ts, admin, member)
+
+		w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+member.ID+pathMute, nil, testhelpers.AuthHeaders(admin.AccessToken))
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		// Verify server_muted flag set in DB
+		var serverMuted bool
+		err := ts.DB.QueryRow(`SELECT server_muted FROM dm_participants WHERE conversation_id = $1 AND user_id = $2`, convID, member.ID).Scan(&serverMuted)
+		require.NoError(t, err)
+		assert.True(t, serverMuted, "server_muted should be true after hard mute")
+	})
+
+	t.Run("NotGroupDM", func(t *testing.T) {
+		ts := setupTS(t)
+		userA := ts.CreateTestUser(t, "hardmutengrp1")
+		userB := ts.CreateTestUser(t, "hardmutengrp2")
+		ts.CreateFriendship(t, userA.ID, userB.ID, statusAccepted)
+		convID := ts.CreateDMConversation(t, userA.ID, userB.ID, false)
+
+		w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+userB.ID+pathMute, nil, testhelpers.AuthHeaders(userA.AccessToken))
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+
+		var body map[string]interface{}
+		testhelpers.ParseJSON(t, w, &body)
+		assert.Equal(t, "Hard enforcement is only available in group DMs", body["error"])
+	})
+
+	t.Run("NotAdmin", func(t *testing.T) {
+		ts := setupTS(t)
+		admin := ts.CreateTestUser(t, "hardmutena1")
+		member := ts.CreateTestUser(t, "hardmutena2")
+		other := ts.CreateTestUser(t, "hardmutena3")
+
+		convID := createTestGroup(t, ts, admin, member, other)
+
+		// member (non-admin) tries to mute other
+		w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+other.ID+pathMute, nil, testhelpers.AuthHeaders(member.AccessToken))
+		assert.Equal(t, http.StatusForbidden, w.Code)
+	})
+
+	t.Run("NotParticipant", func(t *testing.T) {
+		ts := setupTS(t)
+		admin := ts.CreateTestUser(t, "hardmuteout1")
+		member := ts.CreateTestUser(t, "hardmuteout2")
+		outsider := ts.CreateTestUser(t, "hardmuteout3")
+
+		convID := createTestGroup(t, ts, admin, member)
+
+		w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+member.ID+pathMute, nil, testhelpers.AuthHeaders(outsider.AccessToken))
+		assert.Equal(t, http.StatusForbidden, w.Code)
+	})
+}
+
+// ============================================================================
+// DMHardUnmute Tests (remove server-mute: group admin only)
+// ============================================================================
+
+func TestDMHardUnmute(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		ts := setupTS(t)
+		admin := ts.CreateTestUser(t, "hardunmute1")
+		member := ts.CreateTestUser(t, "hardunmute2")
+
+		convID := createTestGroup(t, ts, admin, member)
+
+		// Pre-set server_muted
+		_, err := ts.DB.Exec(`UPDATE dm_participants SET server_muted = true WHERE conversation_id = $1 AND user_id = $2`, convID, member.ID)
+		require.NoError(t, err)
+
+		w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathVoiceSlash+member.ID+pathMute, nil, testhelpers.AuthHeaders(admin.AccessToken))
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		// Verify flag cleared
+		var serverMuted bool
+		err = ts.DB.QueryRow(`SELECT server_muted FROM dm_participants WHERE conversation_id = $1 AND user_id = $2`, convID, member.ID).Scan(&serverMuted)
+		require.NoError(t, err)
+		assert.False(t, serverMuted, "server_muted should be false after unmute")
+	})
+
+	t.Run("CannotUnmuteWhileDeafened", func(t *testing.T) {
+		ts := setupTS(t)
+		admin := ts.CreateTestUser(t, "hardunmutedf1")
+		member := ts.CreateTestUser(t, "hardunmutedf2")
+
+		convID := createTestGroup(t, ts, admin, member)
+
+		// Pre-set both flags (deafen implies mute)
+		_, err := ts.DB.Exec(`UPDATE dm_participants SET server_muted = true, server_deafened = true WHERE conversation_id = $1 AND user_id = $2`, convID, member.ID)
+		require.NoError(t, err)
+
+		w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathVoiceSlash+member.ID+pathMute, nil, testhelpers.AuthHeaders(admin.AccessToken))
+		assert.Equal(t, http.StatusConflict, w.Code)
+
+		var body map[string]interface{}
+		testhelpers.ParseJSON(t, w, &body)
+		assert.Contains(t, body["error"], "Cannot unmute while server-deafened")
+	})
+}
+
+// ============================================================================
+// DMHardDeafen Tests (server-deafen: group admin only, implies mute)
+// ============================================================================
+
+func TestDMHardDeafen(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		ts := setupTS(t)
+		admin := ts.CreateTestUser(t, "harddeaf1")
+		member := ts.CreateTestUser(t, "harddeaf2")
+
+		convID := createTestGroup(t, ts, admin, member)
+
+		w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+member.ID+pathDeafen, nil, testhelpers.AuthHeaders(admin.AccessToken))
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		// Deafen implies mute — both flags should be true
+		var serverMuted, serverDeafened bool
+		err := ts.DB.QueryRow(`SELECT server_muted, server_deafened FROM dm_participants WHERE conversation_id = $1 AND user_id = $2`, convID, member.ID).Scan(&serverMuted, &serverDeafened)
+		require.NoError(t, err)
+		assert.True(t, serverMuted, "server_muted should be true after deafen")
+		assert.True(t, serverDeafened, "server_deafened should be true after deafen")
+	})
+
+	t.Run("NotGroupDM", func(t *testing.T) {
+		ts := setupTS(t)
+		userA := ts.CreateTestUser(t, "harddeafngrp1")
+		userB := ts.CreateTestUser(t, "harddeafngrp2")
+		ts.CreateFriendship(t, userA.ID, userB.ID, statusAccepted)
+		convID := ts.CreateDMConversation(t, userA.ID, userB.ID, false)
+
+		w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+userB.ID+pathDeafen, nil, testhelpers.AuthHeaders(userA.AccessToken))
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
+
+	t.Run("NotAdmin", func(t *testing.T) {
+		ts := setupTS(t)
+		admin := ts.CreateTestUser(t, "harddeafna1")
+		member := ts.CreateTestUser(t, "harddeafna2")
+
+		convID := createTestGroup(t, ts, admin, member)
+
+		w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+admin.ID+pathDeafen, nil, testhelpers.AuthHeaders(member.AccessToken))
+		assert.Equal(t, http.StatusForbidden, w.Code)
+	})
+}
+
+// ============================================================================
+// DMHardUndeafen Tests (remove server-deafen: clears both flags)
+// ============================================================================
+
+func TestDMHardUndeafen(t *testing.T) {
+	t.Run("Success", func(t *testing.T) {
+		ts := setupTS(t)
+		admin := ts.CreateTestUser(t, "hardundeaf1")
+		member := ts.CreateTestUser(t, "hardundeaf2")
+
+		convID := createTestGroup(t, ts, admin, member)
+
+		// Pre-set both flags
+		_, err := ts.DB.Exec(`UPDATE dm_participants SET server_muted = true, server_deafened = true WHERE conversation_id = $1 AND user_id = $2`, convID, member.ID)
+		require.NoError(t, err)
+
+		w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathVoiceSlash+member.ID+pathDeafen, nil, testhelpers.AuthHeaders(admin.AccessToken))
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		// Both flags should be cleared
+		var serverMuted, serverDeafened bool
+		err = ts.DB.QueryRow(`SELECT server_muted, server_deafened FROM dm_participants WHERE conversation_id = $1 AND user_id = $2`, convID, member.ID).Scan(&serverMuted, &serverDeafened)
+		require.NoError(t, err)
+		assert.False(t, serverMuted, "server_muted should be false after undeafen")
+		assert.False(t, serverDeafened, "server_deafened should be false after undeafen")
+	})
+
+	t.Run("NotGroupDM", func(t *testing.T) {
+		ts := setupTS(t)
+		userA := ts.CreateTestUser(t, "hardundeafngrp1")
+		userB := ts.CreateTestUser(t, "hardundeafngrp2")
+		ts.CreateFriendship(t, userA.ID, userB.ID, statusAccepted)
+		convID := ts.CreateDMConversation(t, userA.ID, userB.ID, false)
+
+		w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathVoiceSlash+userB.ID+pathDeafen, nil, testhelpers.AuthHeaders(userA.AccessToken))
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+	})
+
+	t.Run("NotAdmin", func(t *testing.T) {
+		ts := setupTS(t)
+		admin := ts.CreateTestUser(t, "hardundeafna1")
+		member := ts.CreateTestUser(t, "hardundeafna2")
+
+		convID := createTestGroup(t, ts, admin, member)
+
+		w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathVoiceSlash+admin.ID+pathDeafen, nil, testhelpers.AuthHeaders(member.AccessToken))
+		assert.Equal(t, http.StatusForbidden, w.Code)
+	})
+}
+
+// ============================================================================
+// AuthorizeVoiceJoin Enforcement Tests (extended response fields)
+// ============================================================================
+
+func TestAuthorizeVoiceJoinEnforcement(t *testing.T) {
+	t.Run("IncludesEnforcementFlags", func(t *testing.T) {
+		ts := setupTS(t)
+		admin := ts.CreateTestUser(t, "vjoinenf1")
+		member := ts.CreateTestUser(t, "vjoinenf2")
+
+		convID := createTestGroup(t, ts, admin, member)
+
+		// Pre-set server_muted on the joining member
+		_, err := ts.DB.Exec(`UPDATE dm_participants SET server_muted = true WHERE conversation_id = $1 AND user_id = $2`, convID, member.ID)
+		require.NoError(t, err)
+
+		w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceJoin, nil, testhelpers.AuthHeaders(member.AccessToken))
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var body map[string]interface{}
+		testhelpers.ParseJSON(t, w, &body)
+		assert.Equal(t, true, body["allowed"])
+		assert.Equal(t, true, body["server_muted"])
+		assert.Equal(t, false, body["server_deafened"])
+
+		conv := body["conversation"].(map[string]interface{})
+		assert.Equal(t, true, conv["is_group"])
+		assert.Equal(t, "member", conv["caller_role"])
+	})
+
+	t.Run("OneOnOneDefaults", func(t *testing.T) {
+		ts := setupTS(t)
+		userA := ts.CreateTestUser(t, "vjoinenf1on1a")
+		userB := ts.CreateTestUser(t, "vjoinenf1on1b")
+		ts.CreateFriendship(t, userA.ID, userB.ID, statusAccepted)
+		convID := ts.CreateDMConversation(t, userA.ID, userB.ID, false)
+
+		w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceJoin, nil, testhelpers.AuthHeaders(userA.AccessToken))
+		require.Equal(t, http.StatusOK, w.Code)
+
+		var body map[string]interface{}
+		testhelpers.ParseJSON(t, w, &body)
+		assert.Equal(t, false, body["server_muted"])
+		assert.Equal(t, false, body["server_deafened"])
+
+		conv := body["conversation"].(map[string]interface{})
+		assert.Equal(t, false, conv["is_group"])
+	})
 }

@@ -149,6 +149,9 @@ func (s *NATSSubscriber) handleJoined(data []byte) {
 				"action":          "joined",
 			},
 		})
+
+		// Re-enforce DM hard mute/deafen if active (#488)
+		s.reEnforceDM(event.ChannelID, event.UserID)
 	} else {
 		// Insert into voice_participants (server channel)
 		_, err := s.db.Exec(`
@@ -172,6 +175,9 @@ func (s *NATSSubscriber) handleJoined(data []byte) {
 				"server_id":    ctx.serverID,
 			},
 		})
+
+		// Re-enforce server mute/deafen if active (#488)
+		s.reEnforceServer(ctx.serverID, event.ChannelID, event.UserID)
 	}
 
 	s.log.Info("Voice participant joined", "channel_id", event.ChannelID, "user_id", event.UserID, "is_dm", ctx.isDM)
@@ -405,4 +411,55 @@ func (s *NATSSubscriber) broadcastRoomEmpty(channelID string, ctx *roomContext) 
 			"server_id":  ctx.serverID,
 		},
 	})
+}
+
+const (
+	natsSubjectEnforceMute   = "voice.enforce.mute"
+	natsSubjectEnforceDeafen = "voice.enforce.deafen"
+)
+
+// publishEnforcementFlags publishes NATS enforcement commands for active mute/deafen flags.
+func (s *NATSSubscriber) publishEnforcementFlags(channelID, userID, context string, serverMuted, serverDeafened bool) {
+	if s.nats == nil {
+		return
+	}
+	if serverMuted {
+		if err := s.nats.Publish(natsSubjectEnforceMute, map[string]interface{}{
+			"channelId": channelID, "userId": userID, "action": "mute",
+		}); err != nil {
+			s.log.Error("Failed to publish re-enforcement", "error", err, "subject", natsSubjectEnforceMute, "context", context, "user_id", userID)
+		}
+	}
+	if serverDeafened {
+		if err := s.nats.Publish(natsSubjectEnforceDeafen, map[string]interface{}{
+			"channelId": channelID, "userId": userID, "action": "deafen",
+		}); err != nil {
+			s.log.Error("Failed to publish re-enforcement", "error", err, "subject", natsSubjectEnforceDeafen, "context", context, "user_id", userID)
+		}
+	}
+}
+
+// reEnforceServer publishes NATS enforcement commands if a server member has
+// active server_muted or server_deafened flags. Called on voice.joined as a
+// belt-and-suspenders safety net alongside the join authorization response.
+func (s *NATSSubscriber) reEnforceServer(serverID, channelID, userID string) {
+	var serverMuted, serverDeafened bool
+	if err := s.db.QueryRow(`SELECT server_muted, server_deafened FROM server_members WHERE server_id = $1 AND user_id = $2`,
+		serverID, userID).Scan(&serverMuted, &serverDeafened); err != nil {
+		s.log.Error("Failed to query enforcement flags", "error", err, "server_id", serverID, "user_id", userID)
+		return
+	}
+	s.publishEnforcementFlags(channelID, userID, "server", serverMuted, serverDeafened)
+}
+
+// reEnforceDM publishes NATS enforcement commands if a DM participant has
+// active server_muted or server_deafened flags (group DM hard enforcement).
+func (s *NATSSubscriber) reEnforceDM(channelID, userID string) {
+	var serverMuted, serverDeafened bool
+	if err := s.db.QueryRow(`SELECT server_muted, server_deafened FROM dm_participants WHERE conversation_id = $1 AND user_id = $2`,
+		channelID, userID).Scan(&serverMuted, &serverDeafened); err != nil {
+		s.log.Error("Failed to query DM enforcement flags", "error", err, "conversation_id", channelID, "user_id", userID)
+		return
+	}
+	s.publishEnforcementFlags(channelID, userID, "dm", serverMuted, serverDeafened)
 }

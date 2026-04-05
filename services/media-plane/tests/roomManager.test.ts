@@ -105,7 +105,14 @@ describe('RoomManager', () => {
 
       const producer = createMockProducer({ kind: 'audio' });
       transport.produce.mockResolvedValueOnce(producer);
-      await manager.produce('room-1', 'u-1', transport.id, 'audio', createRtpParameters() as any, 'mic');
+      await manager.produce(
+        'room-1',
+        'u-1',
+        transport.id,
+        'audio',
+        createRtpParameters() as any,
+        'mic'
+      );
 
       // u-2 joins and should see u-1's producer
       const result = await manager.joinRoom('room-1', 'u-2', 'sock-2', 'bob');
@@ -165,7 +172,14 @@ describe('RoomManager', () => {
 
       const producer = createMockProducer();
       transport.produce.mockResolvedValueOnce(producer);
-      await manager.produce('room-1', 'u-1', transport.id, 'audio', createRtpParameters() as any, 'mic');
+      await manager.produce(
+        'room-1',
+        'u-1',
+        transport.id,
+        'audio',
+        createRtpParameters() as any,
+        'mic'
+      );
 
       await manager.leaveRoom('room-1', 'u-1');
 
@@ -224,15 +238,15 @@ describe('RoomManager', () => {
     });
 
     it('throws if room not found', async () => {
-      await expect(
-        manager.createTransport('nonexistent', 'u-1', 'send')
-      ).rejects.toThrow('Room not found');
+      await expect(manager.createTransport('nonexistent', 'u-1', 'send')).rejects.toThrow(
+        'Room not found'
+      );
     });
 
     it('throws if participant not found', async () => {
-      await expect(
-        manager.createTransport('room-1', 'unknown', 'send')
-      ).rejects.toThrow('Participant not found');
+      await expect(manager.createTransport('room-1', 'unknown', 'send')).rejects.toThrow(
+        'Participant not found'
+      );
     });
   });
 
@@ -251,9 +265,9 @@ describe('RoomManager', () => {
 
     it('throws if transport not found', async () => {
       await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
-      await expect(
-        manager.connectTransport('room-1', 'u-1', 'bad-id', {} as any)
-      ).rejects.toThrow('Transport not found');
+      await expect(manager.connectTransport('room-1', 'u-1', 'bad-id', {} as any)).rejects.toThrow(
+        'Transport not found'
+      );
     });
   });
 
@@ -277,7 +291,12 @@ describe('RoomManager', () => {
       transport.produce.mockResolvedValueOnce(producer);
 
       const info = await manager.produce(
-        'room-1', 'u-1', transport.id, 'audio', createRtpParameters() as any, 'mic'
+        'room-1',
+        'u-1',
+        transport.id,
+        'audio',
+        createRtpParameters() as any,
+        'mic'
       );
 
       expect(info.producerId).toBe(producer.id);
@@ -291,7 +310,12 @@ describe('RoomManager', () => {
       transport.produce.mockResolvedValueOnce(producer);
 
       await manager.produce(
-        'room-1', 'u-1', transport.id, 'audio', createRtpParameters() as any, 'mic'
+        'room-1',
+        'u-1',
+        transport.id,
+        'audio',
+        createRtpParameters() as any,
+        'mic'
       );
 
       expect(mockRouter._audioLevelObserver.addProducer).toHaveBeenCalledWith({
@@ -304,7 +328,12 @@ describe('RoomManager', () => {
       const screenProducer = createMockProducer({ kind: 'video' });
       transport.produce.mockResolvedValueOnce(screenProducer);
       await manager.produce(
-        'room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'screen'
+        'room-1',
+        'u-1',
+        transport.id,
+        'video',
+        createRtpParameters() as any,
+        'screen'
       );
 
       mockRouter._audioLevelObserver.addProducer.mockClear();
@@ -312,7 +341,12 @@ describe('RoomManager', () => {
       const screenAudioProducer = createMockProducer({ kind: 'audio' });
       transport.produce.mockResolvedValueOnce(screenAudioProducer);
       await manager.produce(
-        'room-1', 'u-1', transport.id, 'audio', createRtpParameters() as any, 'screen-audio'
+        'room-1',
+        'u-1',
+        transport.id,
+        'audio',
+        createRtpParameters() as any,
+        'screen-audio'
       );
 
       expect(mockRouter._audioLevelObserver.addProducer).not.toHaveBeenCalled();
@@ -335,7 +369,14 @@ describe('RoomManager', () => {
       const p = createMockProducer({ kind: 'video' });
       transport.produce.mockResolvedValueOnce(p);
       await expect(
-        manager.produce('room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'camera')
+        manager.produce(
+          'room-1',
+          'u-1',
+          transport.id,
+          'video',
+          createRtpParameters() as any,
+          'camera'
+        )
       ).rejects.toThrow('Video participant limit reached (max 25)');
     });
 
@@ -354,7 +395,14 @@ describe('RoomManager', () => {
       const p = createMockProducer({ kind: 'video' });
       transport.produce.mockResolvedValueOnce(p);
       await expect(
-        manager.produce('room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'screen')
+        manager.produce(
+          'room-1',
+          'u-1',
+          transport.id,
+          'video',
+          createRtpParameters() as any,
+          'screen'
+        )
       ).rejects.toThrow('Screen share limit reached (max 5)');
     });
 
@@ -362,16 +410,37 @@ describe('RoomManager', () => {
       // Add screen producer first
       const sp = createMockProducer({ kind: 'video' });
       transport.produce.mockResolvedValueOnce(sp);
-      await manager.produce('room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'screen');
+      await manager.produce(
+        'room-1',
+        'u-1',
+        transport.id,
+        'video',
+        createRtpParameters() as any,
+        'screen'
+      );
 
       await expect(
-        manager.produce('room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'screen-audio')
+        manager.produce(
+          'room-1',
+          'u-1',
+          transport.id,
+          'video',
+          createRtpParameters() as any,
+          'screen-audio'
+        )
       ).rejects.toThrow('screen-audio source must be audio kind');
     });
 
     it('rejects screen-audio when no screen producer exists', async () => {
       await expect(
-        manager.produce('room-1', 'u-1', transport.id, 'audio', createRtpParameters() as any, 'screen-audio')
+        manager.produce(
+          'room-1',
+          'u-1',
+          transport.id,
+          'audio',
+          createRtpParameters() as any,
+          'screen-audio'
+        )
       ).rejects.toThrow('screen-audio requires an active screen producer');
     });
 
@@ -379,22 +448,50 @@ describe('RoomManager', () => {
       // Screen producer
       const sp = createMockProducer({ kind: 'video' });
       transport.produce.mockResolvedValueOnce(sp);
-      await manager.produce('room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'screen');
+      await manager.produce(
+        'room-1',
+        'u-1',
+        transport.id,
+        'video',
+        createRtpParameters() as any,
+        'screen'
+      );
 
       // First screen-audio
       const sa1 = createMockProducer({ kind: 'audio' });
       transport.produce.mockResolvedValueOnce(sa1);
-      await manager.produce('room-1', 'u-1', transport.id, 'audio', createRtpParameters() as any, 'screen-audio');
+      await manager.produce(
+        'room-1',
+        'u-1',
+        transport.id,
+        'audio',
+        createRtpParameters() as any,
+        'screen-audio'
+      );
 
       // Second screen-audio should fail
       await expect(
-        manager.produce('room-1', 'u-1', transport.id, 'audio', createRtpParameters() as any, 'screen-audio')
+        manager.produce(
+          'room-1',
+          'u-1',
+          transport.id,
+          'audio',
+          createRtpParameters() as any,
+          'screen-audio'
+        )
       ).rejects.toThrow('Only one active screen-audio producer allowed');
     });
 
     it('throws if send transport does not match', async () => {
       await expect(
-        manager.produce('room-1', 'u-1', 'wrong-transport-id', 'audio', createRtpParameters() as any, 'mic')
+        manager.produce(
+          'room-1',
+          'u-1',
+          'wrong-transport-id',
+          'audio',
+          createRtpParameters() as any,
+          'mic'
+        )
       ).rejects.toThrow('Send transport not found or mismatch');
     });
   });
@@ -409,7 +506,12 @@ describe('RoomManager', () => {
       const producer = createMockProducer();
       transport.produce.mockResolvedValueOnce(producer);
       const info = await manager.produce(
-        'room-1', 'u-1', transport.id, 'audio', createRtpParameters() as any, 'mic'
+        'room-1',
+        'u-1',
+        transport.id,
+        'audio',
+        createRtpParameters() as any,
+        'mic'
       );
 
       await manager.pauseProducer('room-1', 'u-1', info.producerId);
@@ -421,9 +523,9 @@ describe('RoomManager', () => {
 
     it('throws if producer not found', async () => {
       await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
-      await expect(
-        manager.pauseProducer('room-1', 'u-1', 'bad-id')
-      ).rejects.toThrow('Producer not found');
+      await expect(manager.pauseProducer('room-1', 'u-1', 'bad-id')).rejects.toThrow(
+        'Producer not found'
+      );
     });
   });
 
@@ -440,7 +542,12 @@ describe('RoomManager', () => {
       const producer = createMockProducer();
       transport.produce.mockResolvedValueOnce(producer);
       const info = await manager.produce(
-        'room-1', 'u-1', transport.id, 'audio', createRtpParameters() as any, 'mic'
+        'room-1',
+        'u-1',
+        transport.id,
+        'audio',
+        createRtpParameters() as any,
+        'mic'
       );
 
       const source = await manager.closeProducer('room-1', 'u-1', info.producerId);
@@ -471,11 +578,24 @@ describe('RoomManager', () => {
       const producer = createMockProducer({ kind: 'audio' });
       sendTransport.produce.mockResolvedValueOnce(producer);
       producerInfo = await manager.produce(
-        'room-1', 'u-1', sendTransport.id, 'audio', createRtpParameters() as any, 'mic'
+        'room-1',
+        'u-1',
+        sendTransport.id,
+        'audio',
+        createRtpParameters() as any,
+        'mic'
       );
 
       // u-2 joins with rtpCapabilities and creates recv transport
-      await manager.joinRoom('room-1', 'u-2', 'sock-2', 'bob', undefined, undefined, createRtpCapabilities() as any);
+      await manager.joinRoom(
+        'room-1',
+        'u-2',
+        'sock-2',
+        'bob',
+        undefined,
+        undefined,
+        createRtpCapabilities() as any
+      );
       const recvTransport = createMockTransport();
       const consumer = createMockConsumer({ producerId: producerInfo.producerId, kind: 'audio' });
       recvTransport.consume.mockResolvedValue(consumer);
@@ -500,11 +620,19 @@ describe('RoomManager', () => {
 
     it('throws when no recv transport exists', async () => {
       // u-3 joins without creating recv transport
-      await manager.joinRoom('room-1', 'u-3', 'sock-3', 'charlie', undefined, undefined, createRtpCapabilities() as any);
+      await manager.joinRoom(
+        'room-1',
+        'u-3',
+        'sock-3',
+        'charlie',
+        undefined,
+        undefined,
+        createRtpCapabilities() as any
+      );
 
-      await expect(
-        manager.consume('room-1', 'u-3', producerInfo.producerId)
-      ).rejects.toThrow('No receive transport');
+      await expect(manager.consume('room-1', 'u-3', producerInfo.producerId)).rejects.toThrow(
+        'No receive transport'
+      );
     });
 
     it('throws when rtpCapabilities not set', async () => {
@@ -514,9 +642,9 @@ describe('RoomManager', () => {
       mockRouter.createWebRtcTransport.mockResolvedValueOnce(recvT);
       await manager.createTransport('room-1', 'u-4', 'recv');
 
-      await expect(
-        manager.consume('room-1', 'u-4', producerInfo.producerId)
-      ).rejects.toThrow('RTP capabilities not set');
+      await expect(manager.consume('room-1', 'u-4', producerInfo.producerId)).rejects.toThrow(
+        'RTP capabilities not set'
+      );
     });
   });
 
@@ -578,10 +706,24 @@ describe('RoomManager', () => {
     });
 
     it('returns intersection of video codecs', async () => {
-      await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice', undefined, undefined,
-        createRtpCapabilities(['video/VP8', 'video/VP9', 'video/H264']) as any);
-      await manager.joinRoom('room-1', 'u-2', 'sock-2', 'bob', undefined, undefined,
-        createRtpCapabilities(['video/VP8', 'video/H264']) as any);
+      await manager.joinRoom(
+        'room-1',
+        'u-1',
+        'sock-1',
+        'alice',
+        undefined,
+        undefined,
+        createRtpCapabilities(['video/VP8', 'video/VP9', 'video/H264']) as any
+      );
+      await manager.joinRoom(
+        'room-1',
+        'u-2',
+        'sock-2',
+        'bob',
+        undefined,
+        undefined,
+        createRtpCapabilities(['video/VP8', 'video/H264']) as any
+      );
 
       const floor = manager.computeCodecFloor('room-1');
 
@@ -591,21 +733,49 @@ describe('RoomManager', () => {
     });
 
     it('normalizes mimeType to lowercase', async () => {
-      await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice', undefined, undefined,
-        createRtpCapabilities(['video/VP8']) as any);
-      await manager.joinRoom('room-1', 'u-2', 'sock-2', 'bob', undefined, undefined,
-        createRtpCapabilities(['video/VP8']) as any);
+      await manager.joinRoom(
+        'room-1',
+        'u-1',
+        'sock-1',
+        'alice',
+        undefined,
+        undefined,
+        createRtpCapabilities(['video/VP8']) as any
+      );
+      await manager.joinRoom(
+        'room-1',
+        'u-2',
+        'sock-2',
+        'bob',
+        undefined,
+        undefined,
+        createRtpCapabilities(['video/VP8']) as any
+      );
 
       const floor = manager.computeCodecFloor('room-1');
       expect(floor).toEqual(['video/vp8']);
     });
 
     it('skips participants with null rtpCapabilities', async () => {
-      await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice', undefined, undefined,
-        createRtpCapabilities(['video/VP8']) as any);
+      await manager.joinRoom(
+        'room-1',
+        'u-1',
+        'sock-1',
+        'alice',
+        undefined,
+        undefined,
+        createRtpCapabilities(['video/VP8']) as any
+      );
       await manager.joinRoom('room-1', 'u-2', 'sock-2', 'bob'); // no capabilities
-      await manager.joinRoom('room-1', 'u-3', 'sock-3', 'charlie', undefined, undefined,
-        createRtpCapabilities(['video/VP8', 'video/VP9']) as any);
+      await manager.joinRoom(
+        'room-1',
+        'u-3',
+        'sock-3',
+        'charlie',
+        undefined,
+        undefined,
+        createRtpCapabilities(['video/VP8', 'video/VP9']) as any
+      );
 
       const floor = manager.computeCodecFloor('room-1');
       expect(floor).toEqual(['video/vp8']);
@@ -616,7 +786,16 @@ describe('RoomManager', () => {
 
   describe('E2EE epoch', () => {
     it('increments epoch on join when room is encrypted', async () => {
-      const result1 = await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice', undefined, undefined, undefined, true);
+      const result1 = await manager.joinRoom(
+        'room-1',
+        'u-1',
+        'sock-1',
+        'alice',
+        undefined,
+        undefined,
+        undefined,
+        true
+      );
       expect(result1.e2eeEpoch).toBe(1);
 
       const result2 = await manager.joinRoom('room-1', 'u-2', 'sock-2', 'bob');
@@ -624,7 +803,16 @@ describe('RoomManager', () => {
     });
 
     it('increments epoch on leave for forward secrecy', async () => {
-      await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice', undefined, undefined, undefined, true);
+      await manager.joinRoom(
+        'room-1',
+        'u-1',
+        'sock-1',
+        'alice',
+        undefined,
+        undefined,
+        undefined,
+        true
+      );
       await manager.joinRoom('room-1', 'u-2', 'sock-2', 'bob');
 
       await manager.leaveRoom('room-1', 'u-1');
@@ -691,7 +879,9 @@ describe('RoomManager', () => {
     });
 
     it('catches handler errors without breaking other handlers', async () => {
-      const badHandler = vi.fn(() => { throw new Error('boom'); });
+      const badHandler = vi.fn(() => {
+        throw new Error('boom');
+      });
       const goodHandler = vi.fn();
       manager.onEvent(badHandler);
       manager.onEvent(goodHandler);
@@ -732,6 +922,308 @@ describe('RoomManager', () => {
       await manager.closeAll();
 
       expect(manager.getActiveRoomIds()).toEqual([]);
+    });
+  });
+
+  // ── Server-enforced mute/deafen ──────────────────────────────────────
+
+  describe('Server-enforced mute/deafen', () => {
+    // Shared helpers for producing and consuming audio
+
+    async function setupProducer(
+      mgr: RoomManager,
+      router: ReturnType<typeof createMockRouter>,
+      roomId: string,
+      userId: string,
+      kind: 'audio' | 'video' = 'audio',
+      source: 'mic' | 'camera' | 'screen' | 'screen-audio' = 'mic'
+    ) {
+      const transport = createMockTransport();
+      router.createWebRtcTransport.mockResolvedValueOnce(transport);
+      await mgr.createTransport(roomId, userId, 'send');
+
+      const producer = createMockProducer({ kind });
+      transport.produce.mockResolvedValueOnce(producer);
+      const info = await mgr.produce(
+        roomId,
+        userId,
+        transport.id,
+        kind,
+        createRtpParameters() as any,
+        source
+      );
+      return { transport, producer, info };
+    }
+
+    async function setupConsumer(
+      mgr: RoomManager,
+      router: ReturnType<typeof createMockRouter>,
+      roomId: string,
+      consumerUserId: string,
+      producerId: string,
+      kind: 'audio' | 'video' = 'audio'
+    ) {
+      const recvTransport = createMockTransport();
+      const consumer = createMockConsumer({ producerId, kind });
+      recvTransport.consume.mockResolvedValue(consumer);
+      router.createWebRtcTransport.mockResolvedValueOnce(recvTransport);
+      await mgr.createTransport(roomId, consumerUserId, 'recv');
+
+      const result = await mgr.consume(roomId, consumerUserId, producerId);
+      return { recvTransport, consumer, result };
+    }
+
+    describe('serverMuteUser', () => {
+      it('should set serverMuted flag and pause audio producers', async () => {
+        await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
+        const { producer } = await setupProducer(manager, mockRouter, 'room-1', 'u-1');
+
+        await manager.serverMuteUser('room-1', 'u-1');
+
+        const participant = manager.getParticipant('room-1', 'u-1');
+        expect(participant?.serverMuted).toBe(true);
+        expect(producer.pause).toHaveBeenCalled();
+      });
+
+      it('should not pause video producers', async () => {
+        await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
+        const { producer } = await setupProducer(
+          manager,
+          mockRouter,
+          'room-1',
+          'u-1',
+          'video',
+          'camera'
+        );
+
+        await manager.serverMuteUser('room-1', 'u-1');
+
+        const participant = manager.getParticipant('room-1', 'u-1');
+        expect(participant?.serverMuted).toBe(true);
+        expect(producer.pause).not.toHaveBeenCalled();
+      });
+
+      it('should be a no-op for non-existent participant', async () => {
+        // Should not throw and participant should remain undefined
+        await manager.serverMuteUser('room-1', 'unknown');
+        expect(manager.getParticipant('room-1', 'unknown')).toBeUndefined();
+      });
+    });
+
+    describe('serverUnmuteUser', () => {
+      it('should clear serverMuted flag without resuming producers', async () => {
+        await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
+        const { producer } = await setupProducer(manager, mockRouter, 'room-1', 'u-1');
+
+        await manager.serverMuteUser('room-1', 'u-1');
+        await manager.serverUnmuteUser('room-1', 'u-1');
+
+        const participant = manager.getParticipant('room-1', 'u-1');
+        expect(participant?.serverMuted).toBe(false);
+        expect(producer.resume).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('serverDeafenUser', () => {
+      it('should set both flags and pause audio producers and consumers', async () => {
+        // u-1 produces audio
+        await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
+        const { producer, info: producerInfo } = await setupProducer(
+          manager,
+          mockRouter,
+          'room-1',
+          'u-1'
+        );
+
+        // u-2 joins, produces audio, and consumes u-1's audio
+        await manager.joinRoom(
+          'room-1',
+          'u-2',
+          'sock-2',
+          'bob',
+          undefined,
+          undefined,
+          createRtpCapabilities() as any
+        );
+        const { producer: u2Producer } = await setupProducer(manager, mockRouter, 'room-1', 'u-2');
+        const { consumer } = await setupConsumer(
+          manager,
+          mockRouter,
+          'room-1',
+          'u-2',
+          producerInfo.producerId
+        );
+
+        await manager.serverDeafenUser('room-1', 'u-2');
+
+        const participant = manager.getParticipant('room-1', 'u-2');
+        expect(participant?.serverMuted).toBe(true);
+        expect(participant?.serverDeafened).toBe(true);
+        expect(u2Producer.pause).toHaveBeenCalled();
+        expect(consumer.pause).toHaveBeenCalled();
+      });
+
+      it('should not pause video consumers', async () => {
+        // u-1 produces video
+        await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
+        const { info: producerInfo } = await setupProducer(
+          manager,
+          mockRouter,
+          'room-1',
+          'u-1',
+          'video',
+          'camera'
+        );
+
+        // u-2 joins and consumes u-1's video
+        await manager.joinRoom(
+          'room-1',
+          'u-2',
+          'sock-2',
+          'bob',
+          undefined,
+          undefined,
+          createRtpCapabilities() as any
+        );
+        const { consumer: videoConsumer } = await setupConsumer(
+          manager,
+          mockRouter,
+          'room-1',
+          'u-2',
+          producerInfo.producerId,
+          'video'
+        );
+
+        await manager.serverDeafenUser('room-1', 'u-2');
+
+        // Video consumer should NOT be paused (deafen only affects audio)
+        expect(videoConsumer.pause).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('serverUndeafenUser', () => {
+      it('should clear both flags without resuming producers or consumers', async () => {
+        // u-1 produces audio
+        await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
+        const { info: producerInfo } = await setupProducer(manager, mockRouter, 'room-1', 'u-1');
+
+        // u-2 joins, produces audio, and consumes u-1's audio
+        await manager.joinRoom(
+          'room-1',
+          'u-2',
+          'sock-2',
+          'bob',
+          undefined,
+          undefined,
+          createRtpCapabilities() as any
+        );
+        const { producer: u2Producer } = await setupProducer(manager, mockRouter, 'room-1', 'u-2');
+        const { consumer } = await setupConsumer(
+          manager,
+          mockRouter,
+          'room-1',
+          'u-2',
+          producerInfo.producerId
+        );
+
+        await manager.serverDeafenUser('room-1', 'u-2');
+        // Reset mock call counts to check that undeafen does NOT call resume
+        u2Producer.resume.mockClear();
+        consumer.resume.mockClear();
+
+        await manager.serverUndeafenUser('room-1', 'u-2');
+
+        const participant = manager.getParticipant('room-1', 'u-2');
+        expect(participant?.serverMuted).toBe(false);
+        expect(participant?.serverDeafened).toBe(false);
+        expect(u2Producer.resume).not.toHaveBeenCalled();
+        expect(consumer.resume).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('userMuteParticipant', () => {
+      it('should pause audio producers without setting server flags', async () => {
+        await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
+        const { producer } = await setupProducer(manager, mockRouter, 'room-1', 'u-1');
+
+        await manager.userMuteParticipant('room-1', 'u-1');
+
+        const participant = manager.getParticipant('room-1', 'u-1');
+        expect(participant?.serverMuted).toBe(false);
+        expect(producer.pause).toHaveBeenCalled();
+      });
+
+      it('should not pause video producers', async () => {
+        await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
+        const { producer } = await setupProducer(
+          manager,
+          mockRouter,
+          'room-1',
+          'u-1',
+          'video',
+          'camera'
+        );
+
+        await manager.userMuteParticipant('room-1', 'u-1');
+
+        expect(producer.pause).not.toHaveBeenCalled();
+      });
+    });
+
+    describe('userDeafenParticipant', () => {
+      it('should pause audio producers and consumers without setting server flags', async () => {
+        // u-1 produces audio
+        await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
+        const { info: producerInfo } = await setupProducer(manager, mockRouter, 'room-1', 'u-1');
+
+        // u-2 joins, produces audio, and consumes u-1's audio
+        await manager.joinRoom(
+          'room-1',
+          'u-2',
+          'sock-2',
+          'bob',
+          undefined,
+          undefined,
+          createRtpCapabilities() as any
+        );
+        const { producer: u2Producer } = await setupProducer(manager, mockRouter, 'room-1', 'u-2');
+        const { consumer } = await setupConsumer(
+          manager,
+          mockRouter,
+          'room-1',
+          'u-2',
+          producerInfo.producerId
+        );
+
+        await manager.userDeafenParticipant('room-1', 'u-2');
+
+        const participant = manager.getParticipant('room-1', 'u-2');
+        expect(participant?.serverMuted).toBe(false);
+        expect(participant?.serverDeafened).toBe(false);
+        expect(u2Producer.pause).toHaveBeenCalled();
+        expect(consumer.pause).toHaveBeenCalled();
+      });
+    });
+
+    describe('enforcement on join', () => {
+      it('should initialize serverMuted and serverDeafened as false', async () => {
+        await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
+
+        const participant = manager.getParticipant('room-1', 'u-1');
+        expect(participant?.serverMuted).toBe(false);
+        expect(participant?.serverDeafened).toBe(false);
+      });
+
+      it('should persist flags after being set', async () => {
+        await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
+
+        await manager.serverMuteUser('room-1', 'u-1');
+        await manager.serverDeafenUser('room-1', 'u-1');
+
+        const participant = manager.getParticipant('room-1', 'u-1');
+        expect(participant?.serverMuted).toBe(true);
+        expect(participant?.serverDeafened).toBe(true);
+      });
     });
   });
 });

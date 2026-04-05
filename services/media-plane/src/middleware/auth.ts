@@ -130,6 +130,8 @@ export interface ChannelAccessResult {
   serverId: string;
   channelName: string;
   isEncrypted: boolean;
+  serverMuted: boolean;
+  serverDeafened: boolean;
   error?: string;
 }
 
@@ -139,12 +141,13 @@ export async function validateChannelAccess(
   token: string
 ): Promise<ChannelAccessResult> {
   try {
-    // Fetch channel details from control plane
+    // Fetch channel details + enforcement flags from control plane voice join endpoint
     const channelRes = await fetch(
-      `${config.controlPlaneUrl}/api/v1/channels/${channelId}`,
+      `${config.controlPlaneUrl}/api/v1/channels/${channelId}/voice/join`,
       {
+        method: 'POST',
         headers: {
-          'Authorization': `Bearer ${token}`,
+          Authorization: `Bearer ${token}`,
           'Content-Type': 'application/json',
         },
       }
@@ -158,6 +161,8 @@ export async function validateChannelAccess(
           serverId: '',
           channelName: '',
           isEncrypted: false,
+          serverMuted: false,
+          serverDeafened: false,
           error: 'Not authorized to access this channel',
         };
       }
@@ -168,6 +173,8 @@ export async function validateChannelAccess(
           serverId: '',
           channelName: '',
           isEncrypted: false,
+          serverMuted: false,
+          serverDeafened: false,
           error: 'Channel not found',
         };
       }
@@ -177,42 +184,38 @@ export async function validateChannelAccess(
         serverId: '',
         channelName: '',
         isEncrypted: false,
+        serverMuted: false,
+        serverDeafened: false,
         error: `Control plane returned ${channelRes.status}`,
       };
     }
 
-    const data = await channelRes.json() as {
+    const responseData = (await channelRes.json()) as {
+      allowed: boolean;
+      media_server_url: string;
+      permissions: string;
+      server_muted: boolean;
+      server_deafened: boolean;
       channel: {
         id: string;
         server_id: string;
         name: string;
-        type: string;
         is_encrypted: boolean;
       };
     };
 
-    const channel = data.channel;
+    const channel = responseData.channel;
 
-    // Verify this is a voice channel
-    if (channel.type !== 'voice') {
-      return {
-        allowed: false,
-        channelId,
-        serverId: channel.server_id,
-        channelName: channel.name,
-        isEncrypted: channel.is_encrypted ?? false,
-        error: 'Not a voice channel',
-      };
-    }
-
-    // The control plane's AuthRequired middleware already validates server membership
-    // via the JWT + channel ownership. If we got a 200, the user has access.
+    // The voice join endpoint validates channel type, membership, and permissions.
+    // If we got a 200 with allowed=true, the user has access.
     return {
       allowed: true,
       channelId: channel.id,
       serverId: channel.server_id,
       channelName: channel.name,
       isEncrypted: channel.is_encrypted ?? false,
+      serverMuted: responseData.server_muted ?? false,
+      serverDeafened: responseData.server_deafened ?? false,
     };
   } catch (err) {
     logger.error('Failed to validate channel access', {
@@ -226,6 +229,8 @@ export async function validateChannelAccess(
       serverId: '',
       channelName: '',
       isEncrypted: false,
+      serverMuted: false,
+      serverDeafened: false,
       error: 'Failed to validate channel access',
     };
   }

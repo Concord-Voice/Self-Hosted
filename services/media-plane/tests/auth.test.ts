@@ -51,7 +51,9 @@ describe('createAuthMiddleware', () => {
 
     middleware(socket as any, next);
 
-    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'Authentication required' }));
+    expect(next).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Authentication required' })
+    );
   });
 
   it('rejects when token is not a string', () => {
@@ -60,7 +62,9 @@ describe('createAuthMiddleware', () => {
 
     middleware(socket as any, next);
 
-    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'Authentication required' }));
+    expect(next).toHaveBeenCalledWith(
+      expect.objectContaining({ message: 'Authentication required' })
+    );
   });
 
   it('rejects when no username is provided', () => {
@@ -177,11 +181,13 @@ describe('validateChannelAccess', () => {
       ok: true,
       json: () =>
         Promise.resolve({
+          allowed: true,
+          server_muted: false,
+          server_deafened: false,
           channel: {
             id: 'ch-1',
             server_id: 'srv-1',
             name: 'General',
-            type: 'voice',
             is_encrypted: true,
           },
         }),
@@ -201,15 +207,19 @@ describe('validateChannelAccess', () => {
       ok: true,
       json: () =>
         Promise.resolve({
-          channel: { id: 'ch-1', server_id: 's', name: 'n', type: 'voice', is_encrypted: false },
+          allowed: true,
+          server_muted: false,
+          server_deafened: false,
+          channel: { id: 'ch-1', server_id: 's', name: 'n', is_encrypted: false },
         }),
     });
 
     await validateChannelAccess('u-1', 'ch-1', 'my-jwt-token');
 
     expect(mockFetch()).toHaveBeenCalledWith(
-      'http://localhost:8080/api/v1/channels/ch-1',
+      'http://localhost:8080/api/v1/channels/ch-1/voice/join',
       expect.objectContaining({
+        method: 'POST',
         headers: expect.objectContaining({
           Authorization: 'Bearer my-jwt-token',
         }),
@@ -253,19 +263,16 @@ describe('validateChannelAccess', () => {
     expect(result.error).toBe('Control plane returned 500');
   });
 
-  it('rejects non-voice channel type', async () => {
+  it('rejects non-voice channel type (control plane returns 400)', async () => {
     mockFetch().mockResolvedValueOnce({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          channel: { id: 'ch-1', server_id: 's', name: 'text-chan', type: 'text', is_encrypted: false },
-        }),
+      ok: false,
+      status: 400,
     });
 
     const result = await validateChannelAccess('u-1', 'ch-1', 'token');
 
     expect(result.allowed).toBe(false);
-    expect(result.error).toBe('Not a voice channel');
+    expect(result.error).toBe('Control plane returned 400');
   });
 
   it('returns denied on network error (fetch throws)', async () => {
@@ -282,7 +289,10 @@ describe('validateChannelAccess', () => {
       ok: true,
       json: () =>
         Promise.resolve({
-          channel: { id: 'ch-1', server_id: 's', name: 'n', type: 'voice' },
+          allowed: true,
+          server_muted: false,
+          server_deafened: false,
+          channel: { id: 'ch-1', server_id: 's', name: 'n' },
         }),
     });
 
@@ -290,5 +300,41 @@ describe('validateChannelAccess', () => {
 
     expect(result.allowed).toBe(true);
     expect(result.isEncrypted).toBe(false);
+  });
+
+  it('defaults serverMuted and serverDeafened to false when not present in response', async () => {
+    mockFetch().mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          allowed: true,
+          channel: { id: 'ch-1', server_id: 's', name: 'n', is_encrypted: false },
+        }),
+    });
+
+    const result = await validateChannelAccess('u-1', 'ch-1', 'token');
+
+    expect(result.allowed).toBe(true);
+    expect(result.serverMuted).toBe(false);
+    expect(result.serverDeafened).toBe(false);
+  });
+
+  it('returns serverMuted and serverDeafened when present in response', async () => {
+    mockFetch().mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          allowed: true,
+          server_muted: true,
+          server_deafened: true,
+          channel: { id: 'ch-1', server_id: 's', name: 'n', is_encrypted: false },
+        }),
+    });
+
+    const result = await validateChannelAccess('u-1', 'ch-1', 'token');
+
+    expect(result.allowed).toBe(true);
+    expect(result.serverMuted).toBe(true);
+    expect(result.serverDeafened).toBe(true);
   });
 });

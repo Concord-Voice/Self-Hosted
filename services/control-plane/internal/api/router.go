@@ -46,6 +46,8 @@ const (
 	pathIDRead             = "/:id/read"
 	pathIDKeys             = "/:id/keys"
 	pathIDOverrides        = "/:id/overrides"
+	routeVoiceMute         = "/:id/voice/:userId/mute"
+	routeVoiceDeafen       = "/:id/voice/:userId/deafen"
 )
 
 // mentionCheckerAdapter adapts an rbac.Resolver to the websocket.MentionPermissionChecker
@@ -137,8 +139,8 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	membersHandler := members.NewHandler(db, log, redis, hub, rbacResolver, auditWriter)
 	messagesHandler := messages.NewHandler(db, log, hub, rbacResolver)
 	invitesHandler := invites.NewHandler(db, log, hub, rbacResolver)
-	voiceHandler := voice.NewHandler(db, log, hub, cfg, rbacResolver)
-	dmHandler := dm.NewHandler(db, log, hub, cfg)
+	voiceHandler := voice.NewHandler(db, log, hub, cfg, rbacResolver, natsClient)
+	dmHandler := dm.NewHandler(db, log, hub, cfg, natsClient)
 	friendsHandler := friends.NewHandler(db, log, hub)
 	ownershipHandler := ownership.NewHandler(ownership.HandlerDeps{
 		DB:          db,
@@ -784,6 +786,32 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
 					ownershipHandler.ConfirmTransfer,
 				)
+
+				// Server-enforced voice moderation (#488)
+				serverRoutes.POST(routeVoiceMute,
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					voiceHandler.ServerMute,
+				)
+				serverRoutes.DELETE(routeVoiceMute,
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					voiceHandler.ServerUnmute,
+				)
+				serverRoutes.POST(routeVoiceDeafen,
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					voiceHandler.ServerDeafen,
+				)
+				serverRoutes.DELETE(routeVoiceDeafen,
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					voiceHandler.ServerUndeafen,
+				)
+				serverRoutes.POST("/:id/voice/:userId/user-mute",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					voiceHandler.UserMute,
+				)
+				serverRoutes.POST("/:id/voice/:userId/user-deafen",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					voiceHandler.UserDeafen,
+				)
 			}
 
 			// Ownership transfer reversal (token-based, outside server routes)
@@ -1118,6 +1146,28 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				dmRoutes.GET("/:id/voice/participants",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					dmHandler.GetVoiceParticipants,
+				)
+
+				// DM voice enforcement (#488)
+				dmRoutes.POST("/:id/voice/:userId/user-mute",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					dmHandler.DMUserMute,
+				)
+				dmRoutes.POST(routeVoiceMute,
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					dmHandler.DMHardMute,
+				)
+				dmRoutes.DELETE(routeVoiceMute,
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					dmHandler.DMHardUnmute,
+				)
+				dmRoutes.POST(routeVoiceDeafen,
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					dmHandler.DMHardDeafen,
+				)
+				dmRoutes.DELETE(routeVoiceDeafen,
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					dmHandler.DMHardUndeafen,
 				)
 
 				// Manual seal & rotate DM encryption key (5 per day per conversation)

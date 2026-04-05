@@ -33,6 +33,8 @@ export interface Participant {
   consumers: Map<string, Consumer>;
   rtpCapabilities: RtpCapabilities | null;
   joinedAt: Date;
+  serverMuted: boolean;
+  serverDeafened: boolean;
 }
 
 export interface Room {
@@ -291,6 +293,8 @@ export class RoomManager {
       consumers: new Map(),
       rtpCapabilities: rtpCapabilities ?? null,
       joinedAt: new Date(),
+      serverMuted: false,
+      serverDeafened: false,
     };
 
     room.participants.set(userId, participant);
@@ -820,6 +824,82 @@ export class RoomManager {
     participant.consumers.delete(consumerId);
     logger.debug('Consumer closed', { consumerId, roomId, userId });
     return true;
+  }
+
+  // ─── Server enforcement (mute/deafen) ────────────────────────────────
+
+  /** Pause all audio producers for a participant */
+  private async pauseAudioProducers(participant: Participant): Promise<void> {
+    for (const [, entry] of participant.producers) {
+      if (entry.kind === 'audio') await entry.producer.pause();
+    }
+  }
+
+  /** Pause all audio consumers for a participant */
+  private async pauseAudioConsumers(participant: Participant): Promise<void> {
+    for (const [, consumer] of participant.consumers) {
+      if (consumer.kind === 'audio') await consumer.pause();
+    }
+  }
+
+  /** Server-mute a participant: pause all audio producers and set flag */
+  async serverMuteUser(roomId: string, userId: string): Promise<void> {
+    const participant = this.getParticipant(roomId, userId);
+    if (!participant) return;
+
+    participant.serverMuted = true;
+    await this.pauseAudioProducers(participant);
+    logger.info('Server-muted user', { roomId, userId });
+  }
+
+  /** Server-unmute a participant: clear flag but do NOT resume producers */
+  async serverUnmuteUser(roomId: string, userId: string): Promise<void> {
+    const participant = this.getParticipant(roomId, userId);
+    if (!participant) return;
+
+    participant.serverMuted = false;
+    logger.info('Server-unmuted user', { roomId, userId });
+  }
+
+  /** Server-deafen a participant: mute + deafen, pause audio producers and consumers */
+  async serverDeafenUser(roomId: string, userId: string): Promise<void> {
+    const participant = this.getParticipant(roomId, userId);
+    if (!participant) return;
+
+    participant.serverDeafened = true;
+    participant.serverMuted = true;
+    await this.pauseAudioProducers(participant);
+    await this.pauseAudioConsumers(participant);
+    logger.info('Server-deafened user', { roomId, userId });
+  }
+
+  /** Server-undeafen a participant: clear deafen and mute flags, do NOT resume anything */
+  async serverUndeafenUser(roomId: string, userId: string): Promise<void> {
+    const participant = this.getParticipant(roomId, userId);
+    if (!participant) return;
+
+    participant.serverDeafened = false;
+    participant.serverMuted = false;
+    logger.info('Server-undeafened user', { roomId, userId });
+  }
+
+  /** User-level mute: pause all audio producers without setting server flags */
+  async userMuteParticipant(roomId: string, userId: string): Promise<void> {
+    const participant = this.getParticipant(roomId, userId);
+    if (!participant) return;
+
+    await this.pauseAudioProducers(participant);
+    logger.info('User-level mute applied', { roomId, userId });
+  }
+
+  /** User-level deafen: pause all audio producers and consumers without setting server flags */
+  async userDeafenParticipant(roomId: string, userId: string): Promise<void> {
+    const participant = this.getParticipant(roomId, userId);
+    if (!participant) return;
+
+    await this.pauseAudioProducers(participant);
+    await this.pauseAudioConsumers(participant);
+    logger.info('User-level deafen applied', { roomId, userId });
   }
 
   // ─── Query methods ───────────────────────────────────────────────────

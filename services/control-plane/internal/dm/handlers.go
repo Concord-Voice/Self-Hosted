@@ -13,6 +13,7 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
+	natsclient "github.com/markdrogersjr/Concord/services/control-plane/pkg/nats"
 )
 
 const (
@@ -31,23 +32,39 @@ const (
 	errMsgNotAdmin                   = "Only admins can perform this action"
 	errMsgFailedCheckConversation    = "Failed to check conversation"
 	errMsgNotGroupConversation       = "This action is only available for group conversations"
+	errMsgInvalidUserID              = "Invalid user ID"
+	errMsgCannotTargetSelf           = "Cannot mute yourself"
+	errMsgTargetNotInVoice           = "Target user is not in this voice call"
+	errMsgFailedCheckParticipation   = "Failed to check DM participation"
+	errMsgFailedAuthorize            = "Failed to authorize"
+	errMsgHardEnforcementGroupOnly   = "Hard enforcement is only available in group DMs"
+	errMsgOnlyAdminCanMute           = "Only group admins can server-mute"
+	errMsgOnlyAdminCanDeafen         = "Only group admins can server-deafen"
+	errMsgOnlyAdminCanUnmute         = "Only group admins can remove server-mute"
+	errMsgOnlyAdminCanUndeafen       = "Only group admins can remove server-deafen"
+	errMsgFailedApplyEnforcement     = "Failed to apply enforcement"
+	errMsgFailedRemoveEnforcement    = "Failed to remove enforcement"
+	errMsgTargetNotParticipant       = "Target is not a participant"
+	errMsgCannotUnmuteWhileDeafened  = "Cannot unmute while server-deafened — remove deafen first"
 )
 
 // Handler handles DM-related requests.
 type Handler struct {
-	db  *sql.DB
-	log *logger.Logger
-	hub *websocket.Hub
-	cfg *config.Config
+	db   *sql.DB
+	log  *logger.Logger
+	hub  *websocket.Hub
+	cfg  *config.Config
+	nats *natsclient.Client
 }
 
 // NewHandler creates a new DM handler.
-func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, cfg *config.Config) *Handler {
+func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, cfg *config.Config, nats *natsclient.Client) *Handler {
 	return &Handler{
-		db:  db,
-		log: log,
-		hub: hub,
-		cfg: cfg,
+		db:   db,
+		log:  log,
+		hub:  hub,
+		cfg:  cfg,
+		nats: nats,
 	}
 }
 
@@ -879,7 +896,7 @@ func (h *Handler) RemoveMember(c *gin.Context) {
 		return
 	}
 	if _, err := uuid.Parse(targetUserID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid user ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidUserID})
 		return
 	}
 
@@ -1412,20 +1429,21 @@ func (h *Handler) AuthorizeVoiceJoin(c *gin.Context) {
 		return
 	}
 
-	// Verify participation
-	var isEncrypted bool
+	// Verify participation and fetch enforcement state
+	var isEncrypted, isGroup, serverMuted, serverDeafened bool
+	var callerRole string
 	err := h.db.QueryRow(`
-		SELECT dc.is_encrypted
+		SELECT dc.is_encrypted, dc.is_group, dp.server_muted, dp.server_deafened, dp.role
 		FROM dm_conversations dc
 		JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $2
 		WHERE dc.id = $1
-	`, convID, userID).Scan(&isEncrypted)
+	`, convID, userID).Scan(&isEncrypted, &isGroup, &serverMuted, &serverDeafened, &callerRole)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
 		return
 	} else if err != nil {
-		h.log.Error("Failed to check DM participation", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to authorize"})
+		h.log.Error(errMsgFailedCheckParticipation, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAuthorize})
 		return
 	}
 
@@ -1435,9 +1453,13 @@ func (h *Handler) AuthorizeVoiceJoin(c *gin.Context) {
 		"allowed":          true,
 		"media_server_url": h.cfg.MediaPlaneURL,
 		"ice_servers":      h.cfg.ICEServers(userID),
+		"server_muted":     serverMuted,
+		"server_deafened":  serverDeafened,
 		"conversation": gin.H{
 			"id":           convID,
 			"is_encrypted": isEncrypted,
+			"is_group":     isGroup,
+			"caller_role":  callerRole,
 		},
 	})
 }
@@ -1841,4 +1863,264 @@ func (h *Handler) loadDMAttachments(messageIDs []string) (map[string][]models.At
 	}
 
 	return result, nil
+}
+
+// ---------------------------------------------------------------------------
+// DM Voice Enforcement (#488)
+// ---------------------------------------------------------------------------
+
+// authorizeDMGroupAdmin validates params, verifies group DM membership, and checks admin role.
+// Returns the conversation ID, target ID, and true if authorization succeeds.
+// Returns empty strings and false (with HTTP error already sent) on failure.
+func (h *Handler) authorizeDMGroupAdmin(c *gin.Context, errMsgNotAdmin string) (convID, targetID string, ok bool) {
+	actorID := c.GetString("user_id")
+	convID = c.Param("id")
+	targetID = c.Param("userId")
+
+	if _, err := uuid.Parse(convID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+		return "", "", false
+	}
+	if _, err := uuid.Parse(targetID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidUserID})
+		return "", "", false
+	}
+
+	var isGroup bool
+	var actorRole string
+	err := h.db.QueryRow(`SELECT dc.is_group, dp.role FROM dm_conversations dc
+		JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $2
+		WHERE dc.id = $1`, convID, actorID).Scan(&isGroup, &actorRole)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
+		return "", "", false
+	}
+	if err != nil {
+		h.log.Error(errMsgFailedCheckParticipation, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAuthorize})
+		return "", "", false
+	}
+	if !isGroup {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgHardEnforcementGroupOnly})
+		return "", "", false
+	}
+	if actorRole != "admin" {
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotAdmin})
+		return "", "", false
+	}
+
+	return convID, targetID, true
+}
+
+// dmIsTargetInVoice checks whether the target is in a DM voice call.
+func (h *Handler) dmIsTargetInVoice(convID, targetID string) bool {
+	var inVoice bool
+	if err := h.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM dm_voice_participants WHERE conversation_id = $1 AND user_id = $2)`,
+		convID, targetID).Scan(&inVoice); err != nil {
+		h.log.Error("Failed to check DM voice status", "error", err, "conversation_id", convID, "target_id", targetID)
+		return false
+	}
+	return inVoice
+}
+
+// dmPublishEnforcement publishes a NATS enforcement message if the target is in DM voice.
+func (h *Handler) dmPublishEnforcement(convID, targetID, subject, action string) {
+	if h.dmIsTargetInVoice(convID, targetID) && h.nats != nil {
+		if err := h.nats.Publish(subject, map[string]interface{}{
+			"channelId": convID, "userId": targetID, "action": action,
+		}); err != nil {
+			h.log.Error("Failed to publish DM enforcement", "error", err, "subject", subject, "action", action, "conversation_id", convID, "target_id", targetID)
+		}
+	}
+}
+
+// dmBroadcastVoiceState sends a dm_voice_state_update WS event to DM participants.
+func (h *Handler) dmBroadcastVoiceState(convID, targetID, action string) {
+	convUUID, _ := uuid.Parse(convID)
+	h.hub.BroadcastToDM(convUUID, websocket.OutgoingMessage{
+		Type: "dm_voice_state_update",
+		Data: map[string]interface{}{
+			"conversation_id": convID, "user_id": targetID, "action": action,
+		},
+	})
+}
+
+// DMUserMute soft-mutes a participant in a DM voice call (user can undo).
+// POST /dm/conversations/:id/voice/:userId/user-mute
+func (h *Handler) DMUserMute(c *gin.Context) {
+	actorID := c.GetString("user_id")
+	convID := c.Param("id")
+	targetID := c.Param("userId")
+
+	if _, err := uuid.Parse(convID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+		return
+	}
+	if _, err := uuid.Parse(targetID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidUserID})
+		return
+	}
+	if actorID == targetID {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgCannotTargetSelf})
+		return
+	}
+
+	// Verify actor is a participant
+	var exists bool
+	if err := h.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM dm_participants WHERE conversation_id = $1 AND user_id = $2)`,
+		convID, actorID).Scan(&exists); err != nil {
+		h.log.Error(errMsgFailedCheckParticipation, "error", err, "conversation_id", convID, "user_id", actorID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCheckParticipation})
+		return
+	}
+	if !exists {
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
+		return
+	}
+
+	// Verify target is in DM voice
+	var targetInVoice bool
+	if err := h.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM dm_voice_participants WHERE conversation_id = $1 AND user_id = $2)`,
+		convID, targetID).Scan(&targetInVoice); err != nil {
+		h.log.Error(errMsgFailedCheckParticipation, "error", err, "conversation_id", convID, "target_id", targetID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCheckParticipation})
+		return
+	}
+	if !targetInVoice {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgTargetNotInVoice})
+		return
+	}
+
+	if h.nats != nil {
+		if err := h.nats.Publish("voice.user_mute", map[string]interface{}{
+			"channelId": convID,
+			"userId":    targetID,
+		}); err != nil {
+			h.log.Error("Failed to publish DM user mute", "error", err, "conversation_id", convID, "target_id", targetID)
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+// DMHardMute server-mutes a participant in a group DM (admin only, user cannot undo).
+// POST /dm/conversations/:id/voice/:userId/mute
+func (h *Handler) DMHardMute(c *gin.Context) {
+	convID, targetID, ok := h.authorizeDMGroupAdmin(c, errMsgOnlyAdminCanMute)
+	if !ok {
+		return
+	}
+
+	// Update enforcement flag
+	result, err := h.db.Exec(`UPDATE dm_participants SET server_muted = true WHERE conversation_id = $1 AND user_id = $2`,
+		convID, targetID)
+	if err != nil {
+		h.log.Error("Failed to set DM server_muted", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedApplyEnforcement})
+		return
+	}
+	if ra, _ := result.RowsAffected(); ra == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgTargetNotParticipant})
+		return
+	}
+
+	h.dmPublishEnforcement(convID, targetID, "voice.enforce.mute", "mute")
+	h.dmBroadcastVoiceState(convID, targetID, "server_muted")
+
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+// DMHardUnmute removes server-mute from a group DM participant (admin only).
+// DELETE /dm/conversations/:id/voice/:userId/mute
+func (h *Handler) DMHardUnmute(c *gin.Context) {
+	convID, targetID, ok := h.authorizeDMGroupAdmin(c, errMsgOnlyAdminCanUnmute)
+	if !ok {
+		return
+	}
+
+	// Check if deafened — cannot unmute while deafened
+	var serverDeafened bool
+	if err := h.db.QueryRow(`SELECT server_deafened FROM dm_participants WHERE conversation_id = $1 AND user_id = $2`,
+		convID, targetID).Scan(&serverDeafened); err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": errMsgTargetNotParticipant})
+			return
+		}
+		h.log.Error("Failed to check deafen state", "error", err, "conversation_id", convID, "target_id", targetID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCheckParticipation})
+		return
+	}
+	if serverDeafened {
+		c.JSON(http.StatusConflict, gin.H{"error": errMsgCannotUnmuteWhileDeafened})
+		return
+	}
+
+	result, execErr := h.db.Exec(`UPDATE dm_participants SET server_muted = false WHERE conversation_id = $1 AND user_id = $2`,
+		convID, targetID)
+	if execErr != nil {
+		h.log.Error("Failed to clear DM server_muted", "error", execErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveEnforcement})
+		return
+	}
+	if ra, _ := result.RowsAffected(); ra == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgTargetNotParticipant})
+		return
+	}
+
+	h.dmPublishEnforcement(convID, targetID, "voice.enforce.mute", "unmute")
+	h.dmBroadcastVoiceState(convID, targetID, "server_unmuted")
+
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+// DMHardDeafen server-deafens a participant in a group DM (admin only).
+// POST /dm/conversations/:id/voice/:userId/deafen
+func (h *Handler) DMHardDeafen(c *gin.Context) {
+	convID, targetID, ok := h.authorizeDMGroupAdmin(c, errMsgOnlyAdminCanDeafen)
+	if !ok {
+		return
+	}
+
+	result, err := h.db.Exec(`UPDATE dm_participants SET server_muted = true, server_deafened = true WHERE conversation_id = $1 AND user_id = $2`,
+		convID, targetID)
+	if err != nil {
+		h.log.Error("Failed to set DM server_deafened", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedApplyEnforcement})
+		return
+	}
+	if ra, _ := result.RowsAffected(); ra == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgTargetNotParticipant})
+		return
+	}
+
+	h.dmPublishEnforcement(convID, targetID, "voice.enforce.deafen", "deafen")
+	h.dmBroadcastVoiceState(convID, targetID, "server_deafened")
+
+	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+// DMHardUndeafen removes server-deafen from a group DM participant (admin only).
+// DELETE /dm/conversations/:id/voice/:userId/deafen
+func (h *Handler) DMHardUndeafen(c *gin.Context) {
+	convID, targetID, ok := h.authorizeDMGroupAdmin(c, errMsgOnlyAdminCanUndeafen)
+	if !ok {
+		return
+	}
+
+	result, err := h.db.Exec(`UPDATE dm_participants SET server_muted = false, server_deafened = false WHERE conversation_id = $1 AND user_id = $2`,
+		convID, targetID)
+	if err != nil {
+		h.log.Error("Failed to clear DM server_deafened", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRemoveEnforcement})
+		return
+	}
+	if ra, _ := result.RowsAffected(); ra == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgTargetNotParticipant})
+		return
+	}
+
+	h.dmPublishEnforcement(convID, targetID, "voice.enforce.deafen", "undeafen")
+	h.dmBroadcastVoiceState(convID, targetID, "server_undeafened")
+
+	c.JSON(http.StatusOK, gin.H{"success": true})
 }

@@ -19,6 +19,7 @@ const jsonCodec = JSONCodec();
 
 export class NatsService {
   private nc: NatsConnection | null = null;
+  private readonly subscriptions: Array<{ unsubscribe(): void }> = [];
 
   async connect(): Promise<void> {
     try {
@@ -121,7 +122,42 @@ export class NatsService {
     };
   }
 
+  /** Subscribe to a NATS subject and call handler with decoded JSON payload */
+  subscribe(
+    subject: string,
+    handler: (data: Record<string, unknown>) => void | Promise<void>
+  ): void {
+    if (!this.nc) {
+      logger.warn('NATS not connected, cannot subscribe', { subject });
+      return;
+    }
+    const sub = this.nc.subscribe(subject);
+    this.subscriptions.push(sub);
+    (async () => {
+      for await (const msg of sub) {
+        try {
+          const decoded = jsonCodec.decode(msg.data) as Record<string, unknown>;
+          handler(decoded);
+        } catch (err) {
+          logger.error('Failed to handle NATS message', { subject, error: err });
+        }
+      }
+    })().catch((err) => {
+      logger.error('NATS subscription error', { subject, error: err });
+    });
+  }
+
   async close(): Promise<void> {
+    // Drain subscriptions before closing
+    for (const sub of this.subscriptions) {
+      try {
+        sub.unsubscribe();
+      } catch {
+        /* already closed */
+      }
+    }
+    this.subscriptions.length = 0;
+
     if (this.nc) {
       await this.nc.drain();
       logger.info('NATS connection closed');
