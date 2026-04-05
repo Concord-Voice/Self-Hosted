@@ -1492,7 +1492,7 @@ func TestSendVoiceCountsSnapshotSuccess(t *testing.T) {
 	client := newTestClient(hub, userID)
 	hub.clients[client.ID] = client
 
-	hub.sendVoiceCountsSnapshot(client)
+	hub.sendVoiceCountsSnapshot(context.Background(), client)
 
 	// Should receive server_voice_counts message
 	resp := readClientMsg(t, client)

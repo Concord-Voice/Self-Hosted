@@ -583,10 +583,6 @@ func setupWSTestServer(t *testing.T, h *Handler, hub *Hub) *httptest.Server {
 	// then srv.Close stops accepting new connections.
 	t.Cleanup(srv.Close)
 	t.Cleanup(func() {
-		// Wait for hub's async registration goroutines (voice count query)
-		// to complete before shutting down. The goroutine at hub.go:316
-		// sends on client.Send which panics if closed during unregister.
-		time.Sleep(500 * time.Millisecond)
 		hub.Shutdown()
 	})
 	return srv
@@ -609,10 +605,6 @@ func TestHandleWebSocketDBLookupFallback(t *testing.T) {
 	conn, resp, err := gorillaWS.DefaultDialer.Dial(wsURL, nil)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
-	// Allow hub's async registration goroutines (voice count query) to
-	// finish before the connection is torn down, avoiding a send-on-closed
-	// channel panic in hub.go handleRegister.
-	time.Sleep(500 * time.Millisecond)
 	_ = conn.Close()
 }
 
@@ -640,10 +632,6 @@ func TestHandleWebSocketDBLookupSuccess(t *testing.T) {
 	conn, resp, err := gorillaWS.DefaultDialer.Dial(wsURL, nil)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
-	// Allow hub's async registration goroutines (voice count query) to
-	// finish before the connection is torn down, avoiding a send-on-closed
-	// channel panic in hub.go handleRegister.
-	time.Sleep(500 * time.Millisecond)
 	_ = conn.Close()
 }
 
@@ -675,9 +663,5 @@ func TestHandleWebSocketTicketAuth(t *testing.T) {
 	conn, resp, err := gorillaWS.DefaultDialer.Dial(wsURL, nil)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
-	// Allow hub's async registration goroutines (voice count query) to
-	// finish before the connection is torn down, avoiding a send-on-closed
-	// channel panic in hub.go handleRegister.
-	time.Sleep(500 * time.Millisecond)
 	_ = conn.Close()
 }

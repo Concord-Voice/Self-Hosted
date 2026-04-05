@@ -203,8 +203,12 @@ func (h *Hub) Run() {
 			h.broadcastServerVoiceCounts()
 
 		case <-h.done:
-			// Graceful shutdown: close all client connections
+			// Graceful shutdown: cancel async work, wait for completion, close connections
 			for _, client := range h.clients {
+				if client.asyncCancel != nil {
+					client.asyncCancel()
+				}
+				client.asyncWg.Wait()
 				close(client.Send)
 			}
 			log.Printf("Hub shut down, closed %d client connections", len(h.clients))
@@ -242,7 +246,13 @@ func (h *Hub) handleRegister(client *Client) {
 
 	h.sendConnectedConfirmation(client)
 	h.sendPresenceSnapshot(client)
-	go h.sendVoiceCountsSnapshot(client)
+	ctx, cancel := context.WithCancel(context.Background())
+	client.asyncCancel = cancel
+	client.asyncWg.Add(1)
+	go func() {
+		defer client.asyncWg.Done()
+		h.sendVoiceCountsSnapshot(ctx, client)
+	}()
 }
 
 func (h *Hub) registerClient(client *Client) bool {
@@ -320,14 +330,17 @@ func (h *Hub) sendPresenceSnapshot(client *Client) {
 	}
 }
 
-func (h *Hub) sendVoiceCountsSnapshot(client *Client) {
-	rows, err := h.db.Query(`
+func (h *Hub) sendVoiceCountsSnapshot(ctx context.Context, client *Client) {
+	rows, err := h.db.QueryContext(ctx, `
 		SELECT c.server_id, COUNT(vp.id)
 		FROM voice_participants vp
 		JOIN channels c ON c.id = vp.channel_id
 		GROUP BY c.server_id
 	`)
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		log.Printf("Failed to query voice counts for new client: %v", err)
 		return
 	}
@@ -371,6 +384,10 @@ func (h *Hub) handleUnregister(client *Client) {
 	remaining := len(h.clients)
 	h.mu.Unlock()
 
+	if client.asyncCancel != nil {
+		client.asyncCancel()
+	}
+	client.asyncWg.Wait()
 	close(client.Send)
 
 	if isLastConnection {

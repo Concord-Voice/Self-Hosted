@@ -2,12 +2,14 @@
 package websocket
 
 import (
+	"context"
 	"encoding/json"
 	"log"
+	"sync"
 	"time"
 
-	"github.com/gorilla/websocket"
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 )
 
 const (
@@ -67,6 +69,12 @@ type Client struct {
 	// Rate limiting: token bucket for chat messages
 	rateTokens   int
 	rateLastFill time.Time
+
+	// asyncWg tracks in-flight async goroutines for this client
+	asyncWg sync.WaitGroup
+
+	// asyncCancel cancels the context passed to async registration goroutines
+	asyncCancel context.CancelFunc
 }
 
 // rateLimitAllow checks the token bucket and returns true if the message is allowed.
