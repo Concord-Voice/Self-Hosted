@@ -33,6 +33,7 @@ Thumbs.db
 .vim/
 *.sublime-project
 *.sublime-workspace
+*.code-workspace
 
 # Environment Variables (CRITICAL - NEVER COMMIT)
 .env
@@ -196,3 +197,4 @@ gcloud-service-key.json
 /.sessions/
 /sessions/
 .dev-data/
+
