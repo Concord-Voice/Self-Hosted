@@ -170,6 +170,7 @@ services:
       MINIO_USE_SSL: "false"
       MINIO_BUCKET: ${MINIO_BUCKET:-concord-media}
       UPLOAD_MAX_SIZE: ${UPLOAD_MAX_SIZE:-26214400}
+      KLIPY_API_KEY: ${KLIPY_API_KEY:-}
       PORT: 8080
     ports:
       - "8080:8080"
