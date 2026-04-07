@@ -77,6 +77,12 @@ func resolveSafePath(baseDir, version, filePath string) (absPath string, basenam
 // ServeAsset handles GET /api/v1/spa/*filepath
 // Expected URL structure: /api/v1/spa/{sha7}/index.html or /api/v1/spa/{sha7}/assets/chunk-abc123.js
 func (h *Handler) ServeAsset(c *gin.Context) {
+	// Override the global default-src 'none' CSP from SecurityHeaders middleware
+	// for every SPA response (success AND error). The SPA's index.html ships its
+	// own CSP meta tag suitable for serving the bundle; leaving the strict header
+	// in place blocks every script and stylesheet in the desktop client.
+	c.Writer.Header().Del("Content-Security-Policy")
+
 	if h.spaDir == "" {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "SPA hosting not configured"})
 		return
@@ -117,13 +123,6 @@ func (h *Handler) ServeAsset(c *gin.Context) {
 		c.Header("Cache-Control", fmt.Sprintf("public, max-age=%d", entryPointMaxAge))
 	}
 	c.Header("Content-Type", contentTypeForSPA(basename))
-
-	// Override the global default-src 'none' CSP from SecurityHeaders middleware:
-	// the SPA's index.html ships its own CSP meta tag that permits the assets it
-	// needs (self scripts/styles, wasm-unsafe-eval, the api/ws origins). Browsers
-	// intersect multiple CSPs, so leaving the strict header in place blocks every
-	// asset and renders an empty window in the desktop client.
-	c.Writer.Header().Del("Content-Security-Policy")
 
 	// Serve via http.Dir (Go's built-in sandboxed filesystem) to satisfy
 	// static analysis — http.Dir prevents path traversal by design.
