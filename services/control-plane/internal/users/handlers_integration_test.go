@@ -768,6 +768,76 @@ func TestUpdatePrivacySettingsMultipleBooleans(t *testing.T) {
 	assert.Equal(t, false, priv["auto_accept_friend_codes"])
 }
 
+func TestGetPrivacySettingsKlipyDefaults(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "privklipydef")
+
+	w := ts.DoRequest("GET", urlUsersMePrivacy, nil, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	priv := body["privacy"].(map[string]interface{})
+	// Privacy-first defaults
+	assert.Equal(t, false, priv["load_gifs_automatically"])
+	assert.Equal(t, false, priv["enable_klipy_proxy"])
+	// Personalization defaults ON because turning it OFF degrades search quality
+	assert.Equal(t, true, priv["share_personalization_with_gif_provider"])
+}
+
+func TestUpdatePrivacySettingsKlipyFields(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "privklipyupd")
+
+	// Seed the row so ON CONFLICT UPDATE fires
+	_, err := ts.DB.Exec(`INSERT INTO privacy_settings (user_id) VALUES ($1) ON CONFLICT DO NOTHING`, user.ID)
+	require.NoError(t, err)
+
+	payload := map[string]interface{}{
+		"load_gifs_automatically":                 true,
+		"enable_klipy_proxy":                      true,
+		"share_personalization_with_gif_provider": false,
+	}
+	w := ts.DoRequest(methodPatch, urlUsersMePrivacy, payload, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	priv := body["privacy"].(map[string]interface{})
+	assert.Equal(t, true, priv["load_gifs_automatically"])
+	assert.Equal(t, true, priv["enable_klipy_proxy"])
+	assert.Equal(t, false, priv["share_personalization_with_gif_provider"])
+}
+
+func TestUpdatePrivacySettingsKlipyPartialUpdate(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "privklipypart")
+
+	_, err := ts.DB.Exec(`INSERT INTO privacy_settings (user_id) VALUES ($1) ON CONFLICT DO NOTHING`, user.ID)
+	require.NoError(t, err)
+
+	// Set all three to non-default values first
+	w := ts.DoRequest(methodPatch, urlUsersMePrivacy, map[string]interface{}{
+		"load_gifs_automatically":                 true,
+		"enable_klipy_proxy":                      true,
+		"share_personalization_with_gif_provider": false,
+	}, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// Now update only one field — the others must keep their previous values
+	w = ts.DoRequest(methodPatch, urlUsersMePrivacy, map[string]interface{}{
+		"enable_klipy_proxy": false,
+	}, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	priv := body["privacy"].(map[string]interface{})
+	assert.Equal(t, true, priv["load_gifs_automatically"], "unchanged field should keep its value")
+	assert.Equal(t, false, priv["enable_klipy_proxy"], "explicitly updated field")
+	assert.Equal(t, false, priv["share_personalization_with_gif_provider"], "unchanged field should keep its value")
+}
+
 func TestUpdatePrivacySettingsDMLevel0LegacySync(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "privdm0")

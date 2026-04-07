@@ -16,6 +16,7 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/email"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/friends"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/invites"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/klipy"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/media"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/members"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/messages"
@@ -532,6 +533,16 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 					usersHandler.UpdatePreferences,
 				)
 
+				// Encrypted saved GIFs (cross-device sync)
+				userRoutes.GET("/me/saved-gifs",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					usersHandler.GetSavedGifs,
+				)
+				userRoutes.PUT("/me/saved-gifs",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					usersHandler.UpdateSavedGifs,
+				)
+
 				// Search users by username/display name
 				userRoutes.GET("/search",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
@@ -1025,6 +1036,34 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					messagesHandler.UnpinMessage,
 				)
+			}
+
+			// KLIPY GIF proxy routes (for Privacy Mode).
+			// Routes only exist when KLIPY_API_KEY is set in the environment;
+			// when the key is empty the entire integration is disabled and these
+			// paths return 404 instead of forwarding to upstream.
+			if cfg.KlipyAPIKey != "" {
+				klipyHandler := klipy.NewHandler(cfg, log)
+				klipyRoutes := protected.Group("/klipy")
+				{
+					// 30/min on the API endpoints (debounced on the client)
+					apiLimiter := middleware.RateLimitByUser(redis, 30, 1*time.Minute)
+					klipyRoutes.GET("/trending", apiLimiter, klipyHandler.Trending)
+					klipyRoutes.GET("/search", apiLimiter, klipyHandler.Search)
+					klipyRoutes.GET("/categories", apiLimiter, klipyHandler.Categories)
+					klipyRoutes.GET("/recent/:customerID", apiLimiter, klipyHandler.Recent)
+					klipyRoutes.DELETE("/recent/:customerID", apiLimiter, klipyHandler.HideRecent)
+					klipyRoutes.GET("/items", apiLimiter, klipyHandler.Items)
+					klipyRoutes.POST("/share/:slug", apiLimiter, klipyHandler.Share)
+					klipyRoutes.POST("/report/:slug", apiLimiter, klipyHandler.Report)
+					klipyRoutes.GET("/randomid", apiLimiter, klipyHandler.RandomID)
+
+					// 120/min on the media proxy (chat scrollback bursts)
+					klipyRoutes.GET("/media",
+						middleware.RateLimitByUser(redis, 120, 1*time.Minute),
+						klipyHandler.Media,
+					)
+				}
 			}
 
 			// Invite routes (join + preview)

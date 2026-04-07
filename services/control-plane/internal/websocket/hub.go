@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/klipy"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/redis/go-redis/v9"
 )
@@ -695,6 +696,7 @@ type messageInput struct {
 	keyVersion      int
 	mentionAddendum *MentionAddendum
 	attachmentIDs   []string
+	gifSlug         *string
 }
 
 // parseMessageInput extracts and validates content, encryption, key version, and mention
@@ -732,13 +734,36 @@ func (h *Hub) parseMessageInput(msg IncomingMessage) *messageInput {
 		return nil
 	}
 
+	gifSlug, gifOK := h.parseGifSlug(msg)
+	if !gifOK {
+		return nil
+	}
+
 	return &messageInput{
 		content:         content,
 		isEncrypted:     isEncrypted,
 		keyVersion:      keyVersion,
 		mentionAddendum: mentionAddendum,
 		attachmentIDs:   attachmentIDs,
+		gifSlug:         gifSlug,
 	}
+}
+
+// parseGifSlug extracts and validates gif_slug from an incoming message.
+// Delegates to klipy.NormalizeSlug + klipy.ValidateSlug so the rules live in
+// exactly one place and empty/whitespace values cleanly round-trip to "no GIF".
+// Returns the parsed slug (or nil) and whether to continue.
+func (h *Hub) parseGifSlug(msg IncomingMessage) (*string, bool) {
+	rawSlug, ok := msg.Data["gif_slug"].(string)
+	if !ok {
+		return nil, true
+	}
+	normalized := klipy.NormalizeSlug(&rawSlug)
+	if !klipy.ValidateSlug(normalized) {
+		h.sendError(msg.ClientID, klipy.SlugValidationError(normalized))
+		return nil, false
+	}
+	return normalized, true
 }
 
 // parseAttachmentIDs extracts and validates attachment_ids from an incoming message.
@@ -846,6 +871,7 @@ type messageAck struct {
 	CreatedAt   interface{}
 	UpdatedAt   interface{}
 	ReplyToID   *string
+	GifSlug     *string
 	Attachments []models.AttachmentSummary
 }
 
@@ -860,6 +886,9 @@ func (h *Hub) sendMessageAck(ack messageAck) {
 	}
 	if ack.ReplyToID != nil {
 		ackData["reply_to_id"] = *ack.ReplyToID
+	}
+	if ack.GifSlug != nil {
+		ackData["gif_slug"] = *ack.GifSlug
 	}
 	if len(ack.Attachments) > 0 {
 		ackData["attachments"] = ack.Attachments
@@ -963,17 +992,26 @@ func (h *Hub) verifyAttachmentAccess(fileID, uploaderID string, ctx attachmentLi
 
 // persistMessage inserts a message into the database, returning the generated ID and timestamps.
 // Returns a specific error message string if the insert fails (empty string on success).
-func (h *Hub) persistMessage(
-	channelUUID uuid.UUID, userID uuid.UUID, content string,
-	isEncrypted bool, keyVersion int, embedsSuppressed bool, replyToID *string,
-) (uuid.UUID, time.Time, time.Time, string) {
+// persistMessageParams holds the fields needed to insert a channel message.
+type persistMessageParams struct {
+	channelUUID      uuid.UUID
+	userID           uuid.UUID
+	content          string
+	isEncrypted      bool
+	keyVersion       int
+	embedsSuppressed bool
+	replyToID        *string
+	gifSlug          *string
+}
+
+func (h *Hub) persistMessage(p persistMessageParams) (uuid.UUID, time.Time, time.Time, string) {
 	messageID := uuid.New()
 	var createdAt, updatedAt time.Time
 	err := h.db.QueryRow(
-		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, embeds_suppressed, reply_to_id, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, embeds_suppressed, reply_to_id, gif_slug, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
 		 RETURNING created_at, updated_at`,
-		messageID, channelUUID, userID, content, isEncrypted, keyVersion, embedsSuppressed, replyToID,
+		messageID, p.channelUUID, p.userID, p.content, p.isEncrypted, p.keyVersion, p.embedsSuppressed, p.replyToID, p.gifSlug,
 	).Scan(&createdAt, &updatedAt)
 	if err != nil && isFKViolation(err) {
 		return messageID, createdAt, updatedAt, "Reply target message not found"
@@ -1056,6 +1094,7 @@ type messageBroadcastCtx struct {
 	createdAt        interface{}
 	updatedAt        interface{}
 	replyToID        *string
+	gifSlug          *string
 	attachments      []models.AttachmentSummary
 }
 
@@ -1080,6 +1119,9 @@ func (h *Hub) buildMessageBroadcast(ctx messageBroadcastCtx) map[string]interfac
 		if summary := h.fetchRepliedToSummary(*ctx.replyToID); summary != nil {
 			data["replied_to"] = summary
 		}
+	}
+	if ctx.gifSlug != nil {
+		data["gif_slug"] = *ctx.gifSlug
 	}
 	if len(ctx.attachments) > 0 {
 		data["attachments"] = ctx.attachments
@@ -1138,9 +1180,11 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 	}
 
 	// Persist message
-	messageID, createdAt, updatedAt, persistErr := h.persistMessage(
-		channelUUID, msg.UserID, input.content, input.isEncrypted, input.keyVersion, embedsSuppressed, replyToID,
-	)
+	messageID, createdAt, updatedAt, persistErr := h.persistMessage(persistMessageParams{
+		channelUUID: channelUUID, userID: msg.UserID, content: input.content,
+		isEncrypted: input.isEncrypted, keyVersion: input.keyVersion,
+		embedsSuppressed: embedsSuppressed, replyToID: replyToID, gifSlug: input.gifSlug,
+	})
 	if persistErr != "" {
 		h.sendError(msg.ClientID, persistErr)
 		return
@@ -1159,6 +1203,7 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		CreatedAt:   createdAt,
 		UpdatedAt:   updatedAt,
 		ReplyToID:   replyToID,
+		GifSlug:     input.gifSlug,
 		Attachments: attachmentSummaries,
 	})
 
@@ -1167,7 +1212,7 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		messageID: messageID, channelUUID: channelUUID, userID: msg.UserID,
 		client: client, input: input, embedsSuppressed: embedsSuppressed,
 		createdAt: createdAt, updatedAt: updatedAt,
-		replyToID: replyToID, attachments: attachmentSummaries,
+		replyToID: replyToID, gifSlug: input.gifSlug, attachments: attachmentSummaries,
 	})
 	h.broadcast <- BroadcastMessage{
 		ChannelID:   channelUUID,
@@ -1558,6 +1603,7 @@ type dmMessageInput struct {
 	msgType         string
 	mentionAddendum *MentionAddendum
 	attachmentIDs   []string
+	gifSlug         *string
 }
 
 // dmUnreadLastMessage holds last-message metadata included in dm_unread_notify
@@ -1631,6 +1677,11 @@ func (h *Hub) parseDMMessageFields(msg IncomingMessage) (*dmMessageInput, bool) 
 		return nil, false
 	}
 
+	gifSlug, gifOK := h.parseGifSlug(msg)
+	if !gifOK {
+		return nil, false
+	}
+
 	mentionAddendum := h.parseDMMentionMeta(msg)
 
 	return &dmMessageInput{
@@ -1640,6 +1691,7 @@ func (h *Hub) parseDMMessageFields(msg IncomingMessage) (*dmMessageInput, bool) 
 		msgType:         msgType,
 		mentionAddendum: mentionAddendum,
 		attachmentIDs:   attachmentIDs,
+		gifSlug:         gifSlug,
 	}, true
 }
 
@@ -1727,29 +1779,44 @@ func (h *Hub) persistDMMessage(convUUID uuid.UUID, userID uuid.UUID, input *dmMe
 	messageID := uuid.New()
 	var createdAt, updatedAt time.Time
 	err := h.db.QueryRow(
-		`INSERT INTO dm_messages (id, conversation_id, user_id, content, is_encrypted, key_version, type, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
+		`INSERT INTO dm_messages (id, conversation_id, user_id, content, is_encrypted, key_version, type, gif_slug, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
 		 RETURNING created_at, updated_at`,
-		messageID, convUUID, userID, input.content, input.isEncrypted, input.keyVersion, input.msgType,
+		messageID, convUUID, userID, input.content, input.isEncrypted, input.keyVersion, input.msgType, input.gifSlug,
 	).Scan(&createdAt, &updatedAt)
 	return messageID, createdAt, updatedAt, err
 }
 
-func (h *Hub) sendDMMessageAck(client *Client, nonce string, messageID uuid.UUID, convUUID uuid.UUID, createdAt, updatedAt time.Time, attachments []models.AttachmentSummary) {
+// dmMessageAckParams holds the fields for a dm_message_ack response.
+type dmMessageAckParams struct {
+	client      *Client
+	nonce       string
+	messageID   uuid.UUID
+	convUUID    uuid.UUID
+	createdAt   time.Time
+	updatedAt   time.Time
+	gifSlug     *string
+	attachments []models.AttachmentSummary
+}
+
+func (h *Hub) sendDMMessageAck(p dmMessageAckParams) {
 	dmAckData := map[string]interface{}{
-		keyNonce:          nonce,
-		"id":              messageID.String(),
-		"conversation_id": convUUID.String(),
-		keyCreatedAt:      createdAt,
-		keyUpdatedAt:      updatedAt,
+		keyNonce:          p.nonce,
+		"id":              p.messageID.String(),
+		"conversation_id": p.convUUID.String(),
+		keyCreatedAt:      p.createdAt,
+		keyUpdatedAt:      p.updatedAt,
 	}
-	if len(attachments) > 0 {
-		dmAckData["attachments"] = attachments
+	if p.gifSlug != nil {
+		dmAckData["gif_slug"] = *p.gifSlug
+	}
+	if len(p.attachments) > 0 {
+		dmAckData["attachments"] = p.attachments
 	}
 	ackMsg := OutgoingMessage{Type: "dm_message_ack", Data: dmAckData}
 	if ackData, ackErr := json.Marshal(ackMsg); ackErr == nil {
 		select {
-		case client.Send <- ackData:
+		case p.client.Send <- ackData:
 		default:
 		}
 	}
@@ -1782,6 +1849,9 @@ func (h *Hub) broadcastDMMessage(ctx dmBroadcastCtx) {
 		"type":            ctx.input.msgType,
 		keyCreatedAt:      ctx.createdAt,
 		keyUpdatedAt:      ctx.updatedAt,
+	}
+	if ctx.input.gifSlug != nil {
+		dmBroadcastData["gif_slug"] = *ctx.input.gifSlug
 	}
 	if len(ctx.attachments) > 0 {
 		dmBroadcastData["attachments"] = ctx.attachments
@@ -1824,7 +1894,10 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 	attachments := h.linkDMAttachments(messageID, msg.UserID.String(), input.attachmentIDs, convID)
 
 	nonce, _ := msg.Data[keyNonce].(string)
-	h.sendDMMessageAck(client, nonce, messageID, convUUID, createdAt, updatedAt, attachments)
+	h.sendDMMessageAck(dmMessageAckParams{
+		client: client, nonce: nonce, messageID: messageID, convUUID: convUUID,
+		createdAt: createdAt, updatedAt: updatedAt, gifSlug: input.gifSlug, attachments: attachments,
+	})
 	h.broadcastDMMessage(dmBroadcastCtx{
 		messageID: messageID, convUUID: convUUID, senderUserID: msg.UserID,
 		client: client, input: input, createdAt: createdAt, updatedAt: updatedAt,

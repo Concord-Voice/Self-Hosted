@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/klipy"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
@@ -76,6 +77,7 @@ type SendMessageRequest struct {
 	KeyVersion  int     `json:"key_version"`
 	ReplyToID   *string `json:"reply_to_id,omitempty"`  // Optional: UUID of message being replied to (must be same channel)
 	MentionMeta string  `json:"mention_meta,omitempty"` // Accepted but unused — mention routing is WebSocket-only. Field exists so REST clients don't get a 400 for including it.
+	GifSlug     *string `json:"gif_slug,omitempty"`     // Optional: KLIPY GIF slug to embed in the message
 }
 
 // UpdateMessageRequest represents a request to update a message.
@@ -503,6 +505,16 @@ func (h *Handler) SendMessage(c *gin.Context) {
 		return
 	}
 
+	// Normalize empty/whitespace gif_slug to nil so an explicit `"gif_slug": ""`
+	// or `"gif_slug": "   "` round-trips to a NULL column ("no GIF attached")
+	// instead of being persisted as an empty string. The migration semantics
+	// reserve NULL for "no GIF" — we never want a non-NULL empty value.
+	gifSlug := klipy.NormalizeSlug(req.GifSlug)
+	if !klipy.ValidateSlug(gifSlug) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": klipy.SlugValidationError(gifSlug)})
+		return
+	}
+
 	// Create message — stamp embeds_suppressed based on server policy.
 	// The server is the ONLY entity trusted to set this flag to false (allow).
 	// If server policy is OFF (default), embeds_suppressed = true.
@@ -510,8 +522,8 @@ func (h *Handler) SendMessage(c *gin.Context) {
 
 	messageID := uuid.New().String()
 	insertQuery := `
-		INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, embeds_suppressed, reply_to_id, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+		INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, embeds_suppressed, reply_to_id, gif_slug, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
 		RETURNING created_at, updated_at
 	`
 
@@ -524,8 +536,9 @@ func (h *Handler) SendMessage(c *gin.Context) {
 	message.KeyVersion = keyVersion
 	message.EmbedsSuppressed = embedsSuppressed
 	message.ReplyToID = replyToID
+	message.GifSlug = gifSlug
 
-	err := h.db.QueryRow(insertQuery, messageID, req.ChannelID, userID, req.Content, req.IsEncrypted, keyVersion, embedsSuppressed, replyToID).Scan(
+	err := h.db.QueryRow(insertQuery, messageID, req.ChannelID, userID, req.Content, req.IsEncrypted, keyVersion, embedsSuppressed, replyToID, gifSlug).Scan(
 		&message.CreatedAt,
 		&message.UpdatedAt,
 	)

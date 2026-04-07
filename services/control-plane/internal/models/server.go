@@ -79,6 +79,7 @@ type Message struct {
 	IsEncrypted      bool       `json:"is_encrypted" db:"is_encrypted"`
 	KeyVersion       int        `json:"key_version" db:"key_version"`
 	EmbedsSuppressed bool       `json:"embeds_suppressed" db:"embeds_suppressed"`
+	GifSlug          *string    `json:"gif_slug,omitempty" db:"gif_slug"`
 	ReplyToID        *string    `json:"reply_to_id,omitempty" db:"reply_to_id"`
 	PinnedAt         *time.Time `json:"pinned_at,omitempty" db:"pinned_at"`
 	PinnedBy         *string    `json:"pinned_by,omitempty" db:"pinned_by"`

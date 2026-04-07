@@ -28,6 +28,10 @@ type FeatureFlags struct {
 	Voice bool `json:"voice"`
 	Video bool `json:"video"`
 	E2EE  bool `json:"e2ee"`
+
+	// KlipyAPIKey is the KLIPY app key for GIF search/sharing.
+	// Empty string means the KLIPY integration is disabled.
+	KlipyAPIKey string `json:"klipyApiKey,omitempty"`
 }
 
 // TURNConfig holds non-secret TURN server info for WebRTC ICE.
@@ -76,9 +80,10 @@ func (h *Handler) GetConfig(c *gin.Context) {
 	resp := Response{
 		MinVersion: h.cfg.ClientMinVersion,
 		FeatureFlags: FeatureFlags{
-			Voice: h.cfg.FeatureVoice,
-			Video: h.cfg.FeatureVideo,
-			E2EE:  h.cfg.FeatureE2EE,
+			Voice:       h.cfg.FeatureVoice,
+			Video:       h.cfg.FeatureVideo,
+			E2EE:        h.cfg.FeatureE2EE,
+			KlipyAPIKey: h.cfg.KlipyAPIKey,
 		},
 		MediaPlaneURL: h.cfg.MediaPlaneURL,
 		TURN: TURNConfig{

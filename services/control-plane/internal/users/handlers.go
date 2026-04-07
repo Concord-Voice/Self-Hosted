@@ -879,9 +879,21 @@ func (h *Handler) GetPublicKey(c *gin.Context) {
 	})
 }
 
-// GetPreferences returns the current user's encrypted preferences blob.
-// Returns { preferences: null } when no preferences exist (first login).
-func (h *Handler) GetPreferences(c *gin.Context) {
+// e2eeBlobConfig describes a single E2EE-encrypted JSON blob endpoint
+// (preferences, saved GIFs, etc.). SQL queries are stored as constants per
+// blob type (no dynamic SQL) so getE2EEBlob/upsertE2EEBlob remain free of
+// string concatenation against table names.
+type e2eeBlobConfig struct {
+	selectSQL     string // SELECT encrypted_data, version, updated_at FROM <table> WHERE user_id = $1
+	upsertSQL     string // INSERT ... ON CONFLICT (user_id) DO UPDATE ... RETURNING version
+	jsonKey       string // e.g. "preferences", "saved_gifs"
+	logLabel      string // e.g. "preferences", "saved gifs"
+	broadcastType string // e.g. "preferences_updated", "saved_gifs_updated"
+}
+
+// getE2EEBlob fetches an opaque encrypted blob for the authenticated user.
+// Returns { <jsonKey>: { encrypted_data, version, updated_at } } or { <jsonKey>: null }.
+func (h *Handler) getE2EEBlob(c *gin.Context, cfg e2eeBlobConfig) {
 	userID, exists := c.Get("user_id")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgUnauthorized})
@@ -891,23 +903,20 @@ func (h *Handler) GetPreferences(c *gin.Context) {
 	var encryptedData string
 	var version int
 	var updatedAt string
-	err := h.db.QueryRow(
-		`SELECT encrypted_data, version, updated_at FROM user_preferences WHERE user_id = $1`,
-		userID,
-	).Scan(&encryptedData, &version, &updatedAt)
+	err := h.db.QueryRow(cfg.selectSQL, userID).Scan(&encryptedData, &version, &updatedAt)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
-			c.JSON(http.StatusOK, gin.H{"preferences": nil})
+			c.JSON(http.StatusOK, gin.H{cfg.jsonKey: nil})
 			return
 		}
-		h.log.Error("Failed to fetch preferences", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch preferences"})
+		h.log.Error("Failed to fetch "+cfg.logLabel, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch " + cfg.logLabel})
 		return
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"preferences": gin.H{
+		cfg.jsonKey: gin.H{
 			"encrypted_data": encryptedData,
 			"version":        version,
 			"updated_at":     updatedAt,
@@ -915,61 +924,50 @@ func (h *Handler) GetPreferences(c *gin.Context) {
 	})
 }
 
-// UpdatePreferencesRequest represents a request to update encrypted preferences
-type UpdatePreferencesRequest struct {
+// EncryptedBlobRequest represents a request to update an E2EE blob (preferences, saved GIFs, etc.).
+type EncryptedBlobRequest struct {
 	EncryptedData string `json:"encrypted_data" binding:"required"`
 }
 
-// UpdatePreferences upserts the current user's encrypted preferences blob.
-// After storing, broadcasts a notification to the user's other connected clients.
-func (h *Handler) UpdatePreferences(c *gin.Context) {
+// upsertE2EEBlob validates an encrypted blob, upserts it for the authenticated user,
+// and broadcasts an update notification via WebSocket to the user's other clients.
+func (h *Handler) upsertE2EEBlob(c *gin.Context, cfg e2eeBlobConfig) {
 	userID, exists := c.Get("user_id")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgUnauthorized})
 		return
 	}
 
-	var req UpdatePreferencesRequest
+	var req EncryptedBlobRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "encrypted_data is required"})
 		return
 	}
 
-	// Validate base64 format
 	if _, err := base64.StdEncoding.DecodeString(req.EncryptedData); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "encrypted_data must be valid base64"})
 		return
 	}
 
-	// Size limit: 64KB of base64 text
 	if len(req.EncryptedData) > 65536 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "encrypted_data exceeds 64KB limit"})
 		return
 	}
 
-	// Upsert preferences
 	var version int
-	err := h.db.QueryRow(
-		`INSERT INTO user_preferences (user_id, encrypted_data, version, updated_at)
-		 VALUES ($1, $2, 1, NOW())
-		 ON CONFLICT (user_id) DO UPDATE
-		 SET encrypted_data = $2, version = user_preferences.version + 1, updated_at = NOW()
-		 RETURNING version`,
-		userID, req.EncryptedData,
-	).Scan(&version)
-
+	err := h.db.QueryRow(cfg.upsertSQL, userID, req.EncryptedData).Scan(&version)
 	if err != nil {
-		h.log.Error("Failed to update preferences", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update preferences"})
+		h.log.Error("Failed to update "+cfg.logLabel, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update " + cfg.logLabel})
 		return
 	}
 
 	// Broadcast to user's other connected clients so they can pull the update
 	if h.hub != nil {
 		if uid, ok := userID.(string); ok {
-			if parsed, err := uuid.Parse(uid); err == nil {
+			if parsed, parseErr := uuid.Parse(uid); parseErr == nil {
 				h.hub.BroadcastToUser(parsed, websocket.OutgoingMessage{
-					Type: "preferences_updated",
+					Type: cfg.broadcastType,
 					Data: map[string]interface{}{
 						"version": version,
 					},
@@ -983,20 +981,60 @@ func (h *Handler) UpdatePreferences(c *gin.Context) {
 	})
 }
 
+var (
+	prefsBlobConfig = e2eeBlobConfig{
+		selectSQL:     `SELECT encrypted_data, version, updated_at FROM user_preferences WHERE user_id = $1`,
+		upsertSQL:     `INSERT INTO user_preferences (user_id, encrypted_data, version, updated_at) VALUES ($1, $2, 1, NOW()) ON CONFLICT (user_id) DO UPDATE SET encrypted_data = $2, version = user_preferences.version + 1, updated_at = NOW() RETURNING version`,
+		jsonKey:       "preferences",
+		logLabel:      "preferences",
+		broadcastType: "preferences_updated",
+	}
+	savedGifsBlobConfig = e2eeBlobConfig{
+		selectSQL:     `SELECT encrypted_data, version, updated_at FROM saved_gifs WHERE user_id = $1`,
+		upsertSQL:     `INSERT INTO saved_gifs (user_id, encrypted_data, version, updated_at) VALUES ($1, $2, 1, NOW()) ON CONFLICT (user_id) DO UPDATE SET encrypted_data = $2, version = saved_gifs.version + 1, updated_at = NOW() RETURNING version`,
+		jsonKey:       "saved_gifs",
+		logLabel:      "saved gifs",
+		broadcastType: "saved_gifs_updated",
+	}
+)
+
+// GetPreferences returns the current user's encrypted preferences blob.
+func (h *Handler) GetPreferences(c *gin.Context) {
+	h.getE2EEBlob(c, prefsBlobConfig)
+}
+
+// UpdatePreferences upserts the current user's encrypted preferences blob.
+func (h *Handler) UpdatePreferences(c *gin.Context) {
+	h.upsertE2EEBlob(c, prefsBlobConfig)
+}
+
+// GetSavedGifs returns the current user's encrypted saved GIFs blob.
+func (h *Handler) GetSavedGifs(c *gin.Context) {
+	h.getE2EEBlob(c, savedGifsBlobConfig)
+}
+
+// UpdateSavedGifs upserts the current user's encrypted saved GIFs blob.
+func (h *Handler) UpdateSavedGifs(c *gin.Context) {
+	h.upsertE2EEBlob(c, savedGifsBlobConfig)
+}
+
 // --- Privacy Settings ---
 
 // privacySettingsResponse represents the user's privacy settings.
 type privacySettingsResponse struct {
-	MessagesFriendsOnly   bool   `json:"messages_friends_only"`
-	MessagesServerMembers bool   `json:"messages_server_members"`
-	DMPrivacyLevel        int    `json:"dm_privacy_level"` // 0=off, 1=friends, 2=friends+server, 3=all
-	DMFriendsOfFriends    bool   `json:"dm_friends_of_friends"`
-	AutoAcceptFriendCodes bool   `json:"auto_accept_friend_codes"`
-	SearchableByUsername  bool   `json:"searchable_by_username"`
-	SearchableByEmail     bool   `json:"searchable_by_email"`
-	SearchableByPhone     bool   `json:"searchable_by_phone"`
-	AllowEmbeddedContent  bool   `json:"allow_embedded_content"`
-	UpdatedAt             string `json:"updated_at,omitempty"`
+	MessagesFriendsOnly                 bool   `json:"messages_friends_only"`
+	MessagesServerMembers               bool   `json:"messages_server_members"`
+	DMPrivacyLevel                      int    `json:"dm_privacy_level"` // 0=off, 1=friends, 2=friends+server, 3=all
+	DMFriendsOfFriends                  bool   `json:"dm_friends_of_friends"`
+	AutoAcceptFriendCodes               bool   `json:"auto_accept_friend_codes"`
+	SearchableByUsername                bool   `json:"searchable_by_username"`
+	SearchableByEmail                   bool   `json:"searchable_by_email"`
+	SearchableByPhone                   bool   `json:"searchable_by_phone"`
+	AllowEmbeddedContent                bool   `json:"allow_embedded_content"`
+	LoadGifsAutomatically               bool   `json:"load_gifs_automatically"`
+	EnableKlipyProxy                    bool   `json:"enable_klipy_proxy"`
+	SharePersonalizationWithGifProvider bool   `json:"share_personalization_with_gif_provider"`
+	UpdatedAt                           string `json:"updated_at,omitempty"`
 }
 
 // GetPrivacySettings returns the current user's privacy settings.
@@ -1009,27 +1047,32 @@ func (h *Handler) GetPrivacySettings(c *gin.Context) {
 	err := h.db.QueryRow(`
 		SELECT messages_friends_only, messages_server_members, dm_privacy_level, dm_friends_of_friends,
 		       auto_accept_friend_codes, searchable_by_username, searchable_by_email, searchable_by_phone,
-		       allow_embedded_content, updated_at
+		       allow_embedded_content, load_gifs_automatically, enable_klipy_proxy,
+		       share_personalization_with_gif_provider, updated_at
 		FROM privacy_settings
 		WHERE user_id = $1
 	`, userID).Scan(
 		&ps.MessagesFriendsOnly, &ps.MessagesServerMembers, &ps.DMPrivacyLevel, &ps.DMFriendsOfFriends,
 		&ps.AutoAcceptFriendCodes, &ps.SearchableByUsername, &ps.SearchableByEmail, &ps.SearchableByPhone,
-		&ps.AllowEmbeddedContent, &ps.UpdatedAt,
+		&ps.AllowEmbeddedContent, &ps.LoadGifsAutomatically, &ps.EnableKlipyProxy,
+		&ps.SharePersonalizationWithGifProvider, &ps.UpdatedAt,
 	)
 	if err == sql.ErrNoRows {
 		// Return full defaults matching the schema defaults (all fields explicit)
 		c.JSON(http.StatusOK, gin.H{
 			"privacy": privacySettingsResponse{
-				MessagesFriendsOnly:   true,
-				MessagesServerMembers: true,
-				DMPrivacyLevel:        2,
-				DMFriendsOfFriends:    false,
-				AutoAcceptFriendCodes: false,
-				SearchableByUsername:  false,
-				SearchableByEmail:     false,
-				SearchableByPhone:     false,
-				AllowEmbeddedContent:  false,
+				MessagesFriendsOnly:                 true,
+				MessagesServerMembers:               true,
+				DMPrivacyLevel:                      2,
+				DMFriendsOfFriends:                  false,
+				AutoAcceptFriendCodes:               false,
+				SearchableByUsername:                false,
+				SearchableByEmail:                   false,
+				SearchableByPhone:                   false,
+				AllowEmbeddedContent:                false,
+				LoadGifsAutomatically:               false,
+				EnableKlipyProxy:                    false,
+				SharePersonalizationWithGifProvider: true,
 			},
 		})
 		return
@@ -1045,15 +1088,18 @@ func (h *Handler) GetPrivacySettings(c *gin.Context) {
 
 // updatePrivacyRequest represents a partial update to privacy settings.
 type updatePrivacyRequest struct {
-	MessagesFriendsOnly   *bool `json:"messages_friends_only"`
-	MessagesServerMembers *bool `json:"messages_server_members"`
-	DMPrivacyLevel        *int  `json:"dm_privacy_level"`
-	DMFriendsOfFriends    *bool `json:"dm_friends_of_friends"`
-	AutoAcceptFriendCodes *bool `json:"auto_accept_friend_codes"`
-	SearchableByUsername  *bool `json:"searchable_by_username"`
-	SearchableByEmail     *bool `json:"searchable_by_email"`
-	SearchableByPhone     *bool `json:"searchable_by_phone"`
-	AllowEmbeddedContent  *bool `json:"allow_embedded_content"`
+	MessagesFriendsOnly                 *bool `json:"messages_friends_only"`
+	MessagesServerMembers               *bool `json:"messages_server_members"`
+	DMPrivacyLevel                      *int  `json:"dm_privacy_level"`
+	DMFriendsOfFriends                  *bool `json:"dm_friends_of_friends"`
+	AutoAcceptFriendCodes               *bool `json:"auto_accept_friend_codes"`
+	SearchableByUsername                *bool `json:"searchable_by_username"`
+	SearchableByEmail                   *bool `json:"searchable_by_email"`
+	SearchableByPhone                   *bool `json:"searchable_by_phone"`
+	AllowEmbeddedContent                *bool `json:"allow_embedded_content"`
+	LoadGifsAutomatically               *bool `json:"load_gifs_automatically"`
+	EnableKlipyProxy                    *bool `json:"enable_klipy_proxy"`
+	SharePersonalizationWithGifProvider *bool `json:"share_personalization_with_gif_provider"`
 }
 
 // buildPrivacyClauses constructs the SET clauses for a partial privacy settings update.
@@ -1092,6 +1138,9 @@ func buildPrivacyClauses(req *updatePrivacyRequest) ([]string, []interface{}, in
 	addBoolClause("searchable_by_email", req.SearchableByEmail)
 	addBoolClause("searchable_by_phone", req.SearchableByPhone)
 	addBoolClause("allow_embedded_content", req.AllowEmbeddedContent)
+	addBoolClause("load_gifs_automatically", req.LoadGifsAutomatically)
+	addBoolClause("enable_klipy_proxy", req.EnableKlipyProxy)
+	addBoolClause("share_personalization_with_gif_provider", req.SharePersonalizationWithGifProvider)
 
 	return setClauses, args, 0, ""
 }
@@ -1142,14 +1191,16 @@ func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
 		ON CONFLICT (user_id) DO UPDATE SET %s
 		RETURNING messages_friends_only, messages_server_members, dm_privacy_level, dm_friends_of_friends,
 		          auto_accept_friend_codes, searchable_by_username, searchable_by_email, searchable_by_phone,
-		          allow_embedded_content, updated_at
+		          allow_embedded_content, load_gifs_automatically, enable_klipy_proxy,
+		          share_personalization_with_gif_provider, updated_at
 	`, strings.Join(setClauses, ", "))
 
 	var ps privacySettingsResponse
 	err := h.db.QueryRow(query, args...).Scan(
 		&ps.MessagesFriendsOnly, &ps.MessagesServerMembers, &ps.DMPrivacyLevel, &ps.DMFriendsOfFriends,
 		&ps.AutoAcceptFriendCodes, &ps.SearchableByUsername, &ps.SearchableByEmail, &ps.SearchableByPhone,
-		&ps.AllowEmbeddedContent, &ps.UpdatedAt,
+		&ps.AllowEmbeddedContent, &ps.LoadGifsAutomatically, &ps.EnableKlipyProxy,
+		&ps.SharePersonalizationWithGifProvider, &ps.UpdatedAt,
 	)
 	if err != nil {
 		h.log.Error("Failed to update privacy settings", "error", err)

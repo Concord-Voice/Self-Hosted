@@ -99,10 +99,10 @@ func TestLoad(t *testing.T) {
 
 // validProductionConfig returns a Config with all production guards satisfied.
 func validProductionConfig() *Config { // #nosec G101 -- test fixture with fake credentials
-	testVal := "real_pw"                                                              //nolint:gosec // test fixture, not a real credential
-	dbURL := "postgres://concord:" + testVal + "@db:5432/concord?sslmode=disable"     //nolint:gosec // test fixture
-	redisURL := "redis://:" + testVal + "@redis:6379"                                 //nolint:gosec // test fixture
-	return &Config{ //nolint:gosec // G101: test fixture with fake values, not real credentials
+	testVal := "real_pw"                                                          //nolint:gosec // test fixture, not a real credential
+	dbURL := "postgres://concord:" + testVal + "@db:5432/concord?sslmode=disable" //nolint:gosec // test fixture
+	redisURL := "redis://:" + testVal + "@redis:6379"                             //nolint:gosec // test fixture
+	return &Config{                                                               //nolint:gosec // G101: test fixture with fake values, not real credentials
 		Environment:      "production",
 		JWTSecret:        "real-production-jwt-secret", //nolint:gosec // G101 false positive: test fixture, not a real secret
 		DatabaseURL:      dbURL,

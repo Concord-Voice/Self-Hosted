@@ -91,6 +91,9 @@ type Config struct {
 	MinIOUseSSL    bool   // Use SSL for MinIO connection
 	MinIOBucket    string // Bucket name for media storage (e.g. "concord-media")
 	UploadMaxSize  int64  // Global max upload size in bytes (default 25 MB)
+
+	// KLIPY GIF integration (optional — empty key disables the feature)
+	KlipyAPIKey string // KLIPY app key; delivered to clients via /client/config
 }
 
 // Load reads configuration from environment variables
@@ -134,6 +137,7 @@ func Load() (*Config, error) {
 		MinIOUseSSL:           getEnv("MINIO_USE_SSL", "false") == "true",
 		MinIOBucket:           getEnv("MINIO_BUCKET", "concord-media"),
 		UploadMaxSize:         getEnvInt64("UPLOAD_MAX_SIZE", 25*1024*1024), // 25 MB default
+		KlipyAPIKey:           getEnv("KLIPY_API_KEY", ""),
 	}
 
 	if err := cfg.validate(); err != nil {

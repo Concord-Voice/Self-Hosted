@@ -13,9 +13,9 @@ import (
 
 // Mention addendum size limits to prevent DoS via oversized blobs.
 const (
-	maxMentionMetaBytes = 4096 // Max base64-encoded length of mention_meta string (checked before decoding)
-	maxMentionUsers     = 50   // Max individual user mentions per message
-	maxMentionRoles     = 10   // Max role mentions per message
+	maxMentionMetaBytes = 4096            // Max base64-encoded length of mention_meta string (checked before decoding)
+	maxMentionUsers     = 50              // Max individual user mentions per message
+	maxMentionRoles     = 10              // Max role mentions per message
 	mentionCtxTimeout   = 3 * time.Second // Timeout for RBAC permission checks
 )
 
@@ -362,7 +362,12 @@ func (h *Hub) resolveEveryoneMentions(
 
 // collectMentionedUsers scans user_id rows and adds them to the mentionedUserIDs set,
 // excluding the sender. The logContext describes the query source for error logging.
-func collectMentionedUsers(rows interface{ Next() bool; Scan(...interface{}) error; Err() error; Close() error }, senderUserID uuid.UUID, mentionedUserIDs map[uuid.UUID]bool, logContext string) {
+func collectMentionedUsers(rows interface {
+	Next() bool
+	Scan(...interface{}) error
+	Err() error
+	Close() error
+}, senderUserID uuid.UUID, mentionedUserIDs map[uuid.UUID]bool, logContext string) {
 	for rows.Next() {
 		var uid string
 		if err := rows.Scan(&uid); err != nil {

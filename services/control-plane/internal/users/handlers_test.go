@@ -9,9 +9,10 @@ import (
 )
 
 const (
-	urlUsersMe         = "/api/v1/users/me"
-	urlUsersMeKeys     = "/api/v1/users/me/keys"
-	urlUsersMePassword = "/api/v1/users/me/password" //nolint:gosec // G101 false positive: URL path constant, not a credential
+	urlUsersMe          = "/api/v1/users/me"
+	urlUsersMeKeys      = "/api/v1/users/me/keys"
+	urlUsersMePassword  = "/api/v1/users/me/password" //nolint:gosec // G101 false positive: URL path constant, not a credential
+	urlUsersMeSavedGifs = "/api/v1/users/me/saved-gifs"
 
 	keyUsername          = "username"
 	keyWrappedPrivateKey = "wrapped_private_key"
@@ -263,11 +264,11 @@ func registerAndVerify(t *testing.T, ts *testhelpers.TestServer, email, username
 	t.Helper()
 	pub, priv, salt := testhelpers.E2EETestKeys()
 	regW := ts.DoRequest("POST", "/api/v1/auth/register", map[string]interface{}{
-		"email":               email,
-		keyUsername:            username,
-		"password":            testPassword,
-		"age_confirmation":    true,
-		"public_key":          pub,
+		"email":              email,
+		keyUsername:          username,
+		"password":           testPassword,
+		"age_confirmation":   true,
+		"public_key":         pub,
 		keyWrappedPrivateKey: priv,
 		keyKeyDerivationSalt: salt,
 	}, nil)
@@ -290,8 +291,8 @@ func TestChangePasswordSuccess(t *testing.T) {
 
 	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
 	w := ts.DoRequest("POST", urlUsersMePassword, map[string]interface{}{
-		keyCurrentPassword:    testPassword,
-		keyNewPassword:        "NewStrongPassword456!",
+		keyCurrentPassword:   testPassword,
+		keyNewPassword:       "NewStrongPassword456!",
 		keyWrappedPrivateKey: newWrapped,
 		keyKeyDerivationSalt: newSalt,
 	}, testhelpers.AuthHeaders(accessToken))
@@ -309,8 +310,8 @@ func TestChangePasswordWrongCurrentPassword(t *testing.T) {
 
 	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
 	w := ts.DoRequest("POST", urlUsersMePassword, map[string]interface{}{
-		keyCurrentPassword:    "WrongPassword!!!!",
-		keyNewPassword:        "NewStrongPassword456!",
+		keyCurrentPassword:   "WrongPassword!!!!",
+		keyNewPassword:       "NewStrongPassword456!",
 		keyWrappedPrivateKey: newWrapped,
 		keyKeyDerivationSalt: newSalt,
 	}, testhelpers.AuthHeaders(accessToken))
@@ -325,8 +326,8 @@ func TestChangePasswordSameAsOld(t *testing.T) {
 
 	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
 	w := ts.DoRequest("POST", urlUsersMePassword, map[string]interface{}{
-		keyCurrentPassword:    testPassword,
-		keyNewPassword:        testPassword,
+		keyCurrentPassword:   testPassword,
+		keyNewPassword:       testPassword,
 		keyWrappedPrivateKey: newWrapped,
 		keyKeyDerivationSalt: newSalt,
 	}, testhelpers.AuthHeaders(accessToken))
@@ -341,11 +342,108 @@ func TestChangePasswordWeakNewPassword(t *testing.T) {
 
 	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
 	w := ts.DoRequest("POST", urlUsersMePassword, map[string]interface{}{
-		keyCurrentPassword:    testPassword,
-		keyNewPassword:        "weak",
+		keyCurrentPassword:   testPassword,
+		keyNewPassword:       "weak",
 		keyWrappedPrivateKey: newWrapped,
 		keyKeyDerivationSalt: newSalt,
 	}, testhelpers.AuthHeaders(accessToken))
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// --- Saved GIFs ---
+
+func TestGetSavedGifsEmpty(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "gifsempty")
+
+	w := ts.DoRequest("GET", urlUsersMeSavedGifs, nil, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Nil(t, body["saved_gifs"])
+}
+
+func TestUpdateSavedGifsSuccess(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "gifssave")
+
+	w := ts.DoRequest("PUT", urlUsersMeSavedGifs, map[string]interface{}{
+		"encrypted_data": "dGVzdCBzYXZlZCBnaWZz",
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, float64(1), body["version"])
+}
+
+func TestGetSavedGifsAfterSave(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "gifsget")
+
+	ts.DoRequest("PUT", urlUsersMeSavedGifs, map[string]interface{}{
+		"encrypted_data": "dGVzdCBzYXZlZCBnaWZz",
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	w := ts.DoRequest("GET", urlUsersMeSavedGifs, nil, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	savedGifs := body["saved_gifs"].(map[string]interface{})
+	assert.Equal(t, "dGVzdCBzYXZlZCBnaWZz", savedGifs["encrypted_data"])
+	assert.Equal(t, float64(1), savedGifs["version"])
+}
+
+func TestUpdateSavedGifsVersionIncrements(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "gifsver")
+
+	ts.DoRequest("PUT", urlUsersMeSavedGifs, map[string]interface{}{
+		"encrypted_data": "dGVzdCBzYXZlZCBnaWZz",
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	w := ts.DoRequest("PUT", urlUsersMeSavedGifs, map[string]interface{}{
+		"encrypted_data": "dXBkYXRlZCBnaWZz",
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, float64(2), body["version"])
+}
+
+func TestUpdateSavedGifsInvalidBase64(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "gifsbad64")
+
+	w := ts.DoRequest("PUT", urlUsersMeSavedGifs, map[string]interface{}{
+		"encrypted_data": "not-valid-base64!!!",
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestUpdateSavedGifsMissingData(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "gifsmissing")
+
+	w := ts.DoRequest("PUT", urlUsersMeSavedGifs, map[string]interface{}{}, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestGetSavedGifsUnauthorized(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("GET", urlUsersMeSavedGifs, nil, nil)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestUpdateSavedGifsUnauthorized(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("PUT", urlUsersMeSavedGifs, map[string]interface{}{
+		"encrypted_data": "dGVzdA==",
+	}, nil)
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
