@@ -94,5 +94,10 @@ func (h *Handler) GetConfig(c *gin.Context) {
 		SpaIpcContract: spaIpcContract,
 	}
 
+	// Never cache /client/config — clients poll this to discover new SPA builds.
+	// A stale CDN/browser cache means a new SPA hot-update sits unseen until the
+	// max-age expires, defeating the entire Tier 3 update mechanism.
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	c.Header("Pragma", "no-cache")
 	c.JSON(http.StatusOK, resp)
 }
