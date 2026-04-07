@@ -118,6 +118,13 @@ func (h *Handler) ServeAsset(c *gin.Context) {
 	}
 	c.Header("Content-Type", contentTypeForSPA(basename))
 
+	// Override the global default-src 'none' CSP from SecurityHeaders middleware:
+	// the SPA's index.html ships its own CSP meta tag that permits the assets it
+	// needs (self scripts/styles, wasm-unsafe-eval, the api/ws origins). Browsers
+	// intersect multiple CSPs, so leaving the strict header in place blocks every
+	// asset and renders an empty window in the desktop client.
+	c.Writer.Header().Del("Content-Security-Policy")
+
 	// Serve via http.Dir (Go's built-in sandboxed filesystem) to satisfy
 	// static analysis — http.Dir prevents path traversal by design.
 	fs := http.Dir(h.spaDir)
