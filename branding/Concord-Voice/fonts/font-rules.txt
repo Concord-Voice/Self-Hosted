@@ -1,0 +1,2 @@
+Logo Font: BaronNeue
+Slogan Font: SourceSans
