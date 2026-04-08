@@ -23,6 +23,7 @@ const (
 	fmtServerBannersKey    = "server-banners/%s"
 	fmtAvatarsKey          = "avatars/%s"
 	hdrContentType         = "Content-Type"
+	hdrCacheControl        = "Cache-Control"
 	mimeImagePNG           = "image/png"
 	mimeImageJPEG          = "image/jpeg"
 	testCiphertextData     = "ciphertext-data"
@@ -350,7 +351,7 @@ func TestDownloadAttachmentDMSuccess(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "dm-cipher", w.Body.String())
 	assert.Equal(t, "text/plain", w.Header().Get("X-File-Mime-Type"))
-	assert.Equal(t, "private, no-store", w.Header().Get("Cache-Control"))
+	assert.Equal(t, "private, no-store", w.Header().Get(hdrCacheControl))
 }
 
 func TestDownloadAttachmentDMNonParticipant(t *testing.T) {
@@ -430,11 +431,15 @@ func TestProxyAvatarSuccess(t *testing.T) {
 	key := fmt.Sprintf(fmtAvatarsKey, userID)
 	require.NoError(t, ts.store.PutObject(context.TODO(), key, bytes.NewReader(makePNG(t, 64, 64)), 100, mimeImagePNG))
 
-	w := ts.doJSON(ts.handler.ProxyAvatar, "GET", "/api/v1/media/avatars/"+userID, userID, gin.Params{{Key: "user_id", Value: userID}})
+	// Public route — invoke without setting user_id in the gin context to
+	// lock in that ProxyAvatar does not depend on auth middleware state.
+	w := ts.doNoAuth(ts.handler.ProxyAvatar, "GET", "/api/v1/media/avatars/"+userID, gin.Params{{Key: "user_id", Value: userID}})
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, mimeImagePNG, w.Header().Get(hdrContentType))
-	assert.Contains(t, w.Header().Get("Cache-Control"), "max-age=3600")
+	// Cloudflare/shared caches must be allowed.
+	assert.Contains(t, w.Header().Get(hdrCacheControl), "public")
+	assert.Contains(t, w.Header().Get(hdrCacheControl), "max-age=3600")
 }
 
 func TestProxyBannerSuccess(t *testing.T) {
@@ -444,10 +449,13 @@ func TestProxyBannerSuccess(t *testing.T) {
 	key := fmt.Sprintf("banners/%s", userID)
 	require.NoError(t, ts.store.PutObject(context.TODO(), key, bytes.NewReader(makePNG(t, 200, 50)), 200, mimeImageJPEG))
 
-	w := ts.doJSON(ts.handler.ProxyBanner, "GET", "/api/v1/media/banners/"+userID, userID, gin.Params{{Key: "user_id", Value: userID}})
+	// Public route — no user_id in context (see TestProxyAvatarSuccess).
+	w := ts.doNoAuth(ts.handler.ProxyBanner, "GET", "/api/v1/media/banners/"+userID, gin.Params{{Key: "user_id", Value: userID}})
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, mimeImageJPEG, w.Header().Get(hdrContentType))
+	assert.Contains(t, w.Header().Get(hdrCacheControl), "public")
+	assert.Contains(t, w.Header().Get(hdrCacheControl), "max-age=3600")
 }
 
 func TestProxyBannerInvalidID(t *testing.T) {
@@ -479,6 +487,9 @@ func TestProxyServerIconSuccess(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, mimeImagePNG, w.Header().Get(hdrContentType))
+	// Membership-gated — must NOT be shared-cacheable.
+	assert.Contains(t, w.Header().Get(hdrCacheControl), "private")
+	assert.NotContains(t, w.Header().Get(hdrCacheControl), "public")
 }
 
 func TestProxyServerIconInvalidID(t *testing.T) {

@@ -38,6 +38,9 @@ const (
 	purposeServerBanner      = "server-banner"
 	mimeOctetStream          = "application/octet-stream"
 	headerContentType        = "Content-Type"
+	headerCacheControl       = "Cache-Control"
+	cacheControlPublic       = "public, max-age=3600, must-revalidate"
+	cacheControlPrivate      = "private, max-age=3600, must-revalidate"
 )
 
 // ObjectStore defines the storage operations required by the media handler.
@@ -272,7 +275,7 @@ func (h *Handler) DownloadAttachment(c *gin.Context) {
 	c.Header(headerContentType, mimeOctetStream)
 	c.Header("Content-Length", fmt.Sprintf("%d", fileSize))
 	c.Header("X-File-Mime-Type", mimeType) // original MIME type hint for client-side decryption
-	c.Header("Cache-Control", "private, no-store")
+	c.Header(headerCacheControl, "private, no-store")
 	c.Status(http.StatusOK)
 
 	if _, err := io.Copy(c.Writer, obj); err != nil {
@@ -282,7 +285,11 @@ func (h *Handler) DownloadAttachment(c *gin.Context) {
 
 // ProxyAvatar serves a user's avatar image through the control plane.
 // GET /api/v1/media/avatars/:user_id
-// Requires valid JWT. Sets cache headers for browser caching.
+//
+// PUBLIC: registered without auth middleware so plain <img> tags can render
+// avatars without an Authorization header. Do not add JWT/membership
+// assumptions to this handler — see router.go for the registration.
+// Response is publicly cacheable (Cloudflare-friendly).
 func (h *Handler) ProxyAvatar(c *gin.Context) {
 	targetUserID := c.Param("user_id")
 	if _, err := uuid.Parse(targetUserID); err != nil {
@@ -290,11 +297,14 @@ func (h *Handler) ProxyAvatar(c *gin.Context) {
 		return
 	}
 
-	h.proxyTier1Media(c, fmt.Sprintf("avatars/%s", targetUserID))
+	h.proxyTier1Media(c, fmt.Sprintf("avatars/%s", targetUserID), true)
 }
 
 // ProxyBanner serves a user's banner/header image through the control plane.
 // GET /api/v1/media/banners/:user_id
+//
+// PUBLIC: registered without auth middleware (same as ProxyAvatar). Do not
+// add JWT/membership assumptions. Response is publicly cacheable.
 func (h *Handler) ProxyBanner(c *gin.Context) {
 	targetUserID := c.Param("user_id")
 	if _, err := uuid.Parse(targetUserID); err != nil {
@@ -302,7 +312,7 @@ func (h *Handler) ProxyBanner(c *gin.Context) {
 		return
 	}
 
-	h.proxyTier1Media(c, fmt.Sprintf("banners/%s", targetUserID))
+	h.proxyTier1Media(c, fmt.Sprintf("banners/%s", targetUserID), true)
 }
 
 // ProxyServerIcon serves a server's icon through the control plane.
@@ -320,7 +330,7 @@ func (h *Handler) ProxyServerIcon(c *gin.Context) {
 		return
 	}
 
-	h.proxyTier1Media(c, fmt.Sprintf("server-icons/%s", serverID))
+	h.proxyTier1Media(c, fmt.Sprintf("server-icons/%s", serverID), false)
 }
 
 // ProxyServerBanner serves a server's banner through the control plane.
@@ -337,7 +347,7 @@ func (h *Handler) ProxyServerBanner(c *gin.Context) {
 		return
 	}
 
-	h.proxyTier1Media(c, fmt.Sprintf("server-banners/%s", serverID))
+	h.proxyTier1Media(c, fmt.Sprintf("server-banners/%s", serverID), false)
 }
 
 // ProxyDMIcon serves a group DM's icon through the control plane.
@@ -355,7 +365,7 @@ func (h *Handler) ProxyDMIcon(c *gin.Context) {
 		return
 	}
 
-	h.proxyTier1Media(c, fmt.Sprintf("dm-icons/%s", conversationID))
+	h.proxyTier1Media(c, fmt.Sprintf("dm-icons/%s", conversationID), false)
 }
 
 // DeleteMedia soft-deletes a media file and removes it from object storage.
@@ -738,9 +748,12 @@ func createAttachmentRecord(h *Handler, c *gin.Context, p attachmentParams) erro
 	return err
 }
 
-// proxyTier1Media fetches an object from MinIO and streams it to the client
-// with appropriate cache headers. Used for avatars, banners, server icons.
-func (h *Handler) proxyTier1Media(c *gin.Context, key string) {
+// proxyTier1Media fetches a Tier 1 media object from MinIO and streams it to
+// the client with appropriate cache headers. Used for avatars, banners,
+// server icons, server banners, and DM icons.
+// If public is true, the response is marked publicly cacheable (Cloudflare /
+// shared caches OK) — only safe for routes registered without auth middleware.
+func (h *Handler) proxyTier1Media(c *gin.Context, key string, public bool) {
 	obj, contentType, err := h.store.GetObject(c.Request.Context(), key)
 	if err != nil {
 		if strings.Contains(err.Error(), "NoSuchKey") || strings.Contains(err.Error(), "not found") {
@@ -753,8 +766,14 @@ func (h *Handler) proxyTier1Media(c *gin.Context, key string) {
 	}
 	defer func() { _ = obj.Close() }()
 
-	// Cache for 1 hour, allow revalidation
-	c.Header("Cache-Control", "private, max-age=3600, must-revalidate")
+	// Cache for 1 hour, allow revalidation. Public avatars/banners use a
+	// shared-cacheable directive so Cloudflare can serve them; membership-gated
+	// assets stay private.
+	if public {
+		c.Header(headerCacheControl, cacheControlPublic)
+	} else {
+		c.Header(headerCacheControl, cacheControlPrivate)
+	}
 	c.Header(headerContentType, contentType)
 	c.Status(http.StatusOK)
 

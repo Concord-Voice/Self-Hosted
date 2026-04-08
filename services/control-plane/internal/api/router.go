@@ -276,6 +276,34 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 			)
 		}
 
+		// Tier 1 user image proxy GETs (public — required so <img> tags can
+		// render without an Authorization header). The opaque user UUID is the
+		// only identifier; avatars/banners are intentionally shareable, so the
+		// previous auth gate added no real protection while breaking rendering.
+		// Uploads + deletes remain authenticated. Rate-limited per IP since
+		// there is no user context.
+		//
+		// NOTE: server-icons, server-banners, and dm-icons stay under the
+		// authenticated group below — their handlers enforce server/DM
+		// membership via c.GetString("user_id"), which only the auth
+		// middleware populates. Making them public would always 403.
+		if mediaHandler != nil {
+			v1.GET("/media/avatars/:user_id",
+				middleware.RateLimitByIP(redis, 120, 1*time.Minute),
+				mediaHandler.ProxyAvatar,
+			)
+			v1.GET("/media/banners/:user_id",
+				middleware.RateLimitByIP(redis, 120, 1*time.Minute),
+				mediaHandler.ProxyBanner,
+			)
+		} else {
+			// Match the protected fallback below so misconfiguration fails
+			// with a clear 503 instead of a 404.
+			v1.Any("/media/*path", func(c *gin.Context) {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "media storage not configured"})
+			})
+		}
+
 		// Protected routes — split into two tiers:
 		// pendingOK: authenticated but email may be unverified (verification, logout, basic profile)
 		// verified:  authenticated AND email verified (everything else)
@@ -1292,12 +1320,11 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 		}
 
 		// Media routes (object storage uploads, proxy, presigned URLs)
-		// Only registered when storage is configured (nil in tests without MinIO)
-		if mediaHandler == nil {
-			protected.Any("/media/*path", func(c *gin.Context) {
-				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Object storage not configured"})
-			})
-		}
+		// Only registered when storage is configured (nil in tests without MinIO).
+		// The misconfig fallback lives on the public v1 group above so a single
+		// `/api/v1/media/*path` wildcard handles every method/path consistently
+		// (registering it on both v1 and protected would collide on the engine
+		// route tree).
 		mediaRoutes := protected.Group("/media")
 		if mediaHandler != nil {
 			// Tier 1 uploads (authenticated, server-processed)
@@ -1328,15 +1355,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				mediaHandler.UploadAttachment,
 			)
 
-			// Tier 1 proxy (auth-gated, cached)
-			mediaRoutes.GET("/avatars/:user_id",
-				middleware.RateLimitByUser(redis, 60, 1*time.Minute),
-				mediaHandler.ProxyAvatar,
-			)
-			mediaRoutes.GET("/banners/:user_id",
-				middleware.RateLimitByUser(redis, 60, 1*time.Minute),
-				mediaHandler.ProxyBanner,
-			)
+			// Tier 1 user avatar/banner proxy GETs are registered as PUBLIC
+			// routes on v1 (above) so plain <img> tags can render them without
+			// an Authorization header. Server icons/banners and DM icons stay
+			// authenticated here because their handlers enforce membership via
+			// the auth-context user_id; the desktop client adds the Bearer
+			// token via fetch + object-URL for these.
 			mediaRoutes.GET("/server-icons/:server_id",
 				middleware.RateLimitByUser(redis, 60, 1*time.Minute),
 				mediaHandler.ProxyServerIcon,

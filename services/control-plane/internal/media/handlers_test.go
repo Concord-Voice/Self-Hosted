@@ -245,6 +245,20 @@ func (ts *testSetup) doJSON(handler gin.HandlerFunc, method, path string, userID
 	return w
 }
 
+// doNoAuth invokes a handler with no user_id in the gin context, simulating a
+// request that hit the public router group (no AuthRequired middleware).
+// Use this to lock in that public handlers (ProxyAvatar/ProxyBanner) do not
+// silently regress to depending on auth context.
+func (ts *testSetup) doNoAuth(handler gin.HandlerFunc, method, path string, params gin.Params) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, nil)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+	c.Params = params
+	handler(c)
+	return w
+}
+
 func parseBody(t *testing.T, w *httptest.ResponseRecorder) map[string]interface{} {
 	t.Helper()
 	var body map[string]interface{}
