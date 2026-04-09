@@ -94,6 +94,9 @@ services:
       - "49152-49252:49152-49252/udp"  # TURN relay range
     volumes:
       - ./infrastructure/docker/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      # Production overrides this volume with /opt/concord/certs/coturn (real cert files
+      # from the certbot deploy hook). In dev, place cert.pem + key.pem in this directory
+      # or use a self-signed cert — coturn will start without TLS if certs are absent.
       - ./infrastructure/docker/coturn/certs:/etc/coturn/certs:ro
     healthcheck:
       test: ["CMD", "turnutils_stunclient", "127.0.0.1"]
