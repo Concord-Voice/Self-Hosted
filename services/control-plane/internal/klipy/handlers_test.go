@@ -18,13 +18,13 @@ import (
 
 const (
 	testAppKey         = "test-app-key-123"
-	pathSearch         = "/klipy/search"
-	pathTrending       = "/klipy/trending"
+	pathSearch         = "/klipy/gifs/search"
+	pathTrending       = "/klipy/gifs/trending"
 	pathMedia          = "/klipy/media"
 	pathMediaURL       = "/klipy/media?url="
-	pathRecentBadSpace = "/klipy/recent/has%20space"
-	pathShareBadSpace  = "/klipy/share/has%20space"
-	pathReportBadSpace = "/klipy/report/has%20space"
+	pathRecentBadSpace = "/klipy/gifs/recent/has%20space"
+	pathShareBadSpace  = "/klipy/gifs/share/has%20space"
+	pathReportBadSpace = "/klipy/gifs/report/has%20space"
 
 	contentTypeHeader = "Content-Type"
 	mimeJSON          = "application/json"
@@ -47,14 +47,14 @@ func newTestHandler(_ *testing.T) *klipy.Handler {
 
 func newRouter(h *klipy.Handler) *gin.Engine {
 	r := gin.New()
-	r.GET("/klipy/trending", h.Trending)
-	r.GET("/klipy/search", h.Search)
-	r.GET("/klipy/categories", h.Categories)
-	r.GET("/klipy/recent/:customerID", h.Recent)
-	r.DELETE("/klipy/recent/:customerID", h.HideRecent)
-	r.GET("/klipy/items", h.Items)
-	r.POST("/klipy/share/:slug", h.Share)
-	r.POST("/klipy/report/:slug", h.Report)
+	r.GET("/klipy/gifs/trending", h.Trending)
+	r.GET("/klipy/gifs/search", h.Search)
+	r.GET("/klipy/gifs/categories", h.Categories)
+	r.GET("/klipy/gifs/recent/:customerID", h.Recent)
+	r.DELETE("/klipy/gifs/recent/:customerID", h.HideRecent)
+	r.GET("/klipy/gifs/items", h.Items)
+	r.POST("/klipy/gifs/share/:slug", h.Share)
+	r.POST("/klipy/gifs/report/:slug", h.Report)
 	r.GET("/klipy/randomid", h.RandomID)
 	r.POST("/klipy/customer-id", h.CustomerID)
 	r.GET("/klipy/media", h.Media)
@@ -346,7 +346,7 @@ func TestProxySearchHappyPath(t *testing.T) {
 func TestProxyCategoriesHappyPath(t *testing.T) {
 	withMockUpstream(t, func(t *testing.T, _ *klipy.Handler, r *gin.Engine) {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest("GET", "/klipy/categories", nil)
+		req := httptest.NewRequest("GET", "/klipy/gifs/categories", nil)
 		r.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Contains(t, w.Body.String(), "Reactions")
@@ -366,7 +366,7 @@ func TestProxyRandomIDHappyPath(t *testing.T) {
 func TestProxyRecentHappyPath(t *testing.T) {
 	withMockUpstream(t, func(t *testing.T, _ *klipy.Handler, r *gin.Engine) {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest("GET", "/klipy/recent/abc123", nil)
+		req := httptest.NewRequest("GET", "/klipy/gifs/recent/abc123", nil)
 		r.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
@@ -375,7 +375,7 @@ func TestProxyRecentHappyPath(t *testing.T) {
 func TestProxyItemsHappyPath(t *testing.T) {
 	withMockUpstream(t, func(t *testing.T, _ *klipy.Handler, r *gin.Engine) {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest("GET", "/klipy/items?slugs=abc", nil)
+		req := httptest.NewRequest("GET", "/klipy/gifs/items?slugs=abc", nil)
 		r.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
@@ -384,7 +384,7 @@ func TestProxyItemsHappyPath(t *testing.T) {
 func TestProxyShareHappyPath(t *testing.T) {
 	withMockUpstream(t, func(t *testing.T, _ *klipy.Handler, r *gin.Engine) {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/klipy/share/test-slug", nil)
+		req := httptest.NewRequest("POST", "/klipy/gifs/share/test-slug", nil)
 		r.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
@@ -393,7 +393,7 @@ func TestProxyShareHappyPath(t *testing.T) {
 func TestProxyReportHappyPath(t *testing.T) {
 	withMockUpstream(t, func(t *testing.T, _ *klipy.Handler, r *gin.Engine) {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest("POST", "/klipy/report/bad-slug", nil)
+		req := httptest.NewRequest("POST", "/klipy/gifs/report/bad-slug", nil)
 		r.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
 	})
@@ -402,7 +402,7 @@ func TestProxyReportHappyPath(t *testing.T) {
 func TestProxyHideRecentHappyPath(t *testing.T) {
 	withMockUpstream(t, func(t *testing.T, _ *klipy.Handler, r *gin.Engine) {
 		w := httptest.NewRecorder()
-		req := httptest.NewRequest("DELETE", "/klipy/recent/abc123", nil)
+		req := httptest.NewRequest("DELETE", "/klipy/gifs/recent/abc123", nil)
 		r.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
 	})

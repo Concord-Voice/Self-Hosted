@@ -1093,14 +1093,18 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				{
 					// 30/min on the API endpoints (debounced on the client)
 					apiLimiter := middleware.RateLimitByUser(redis, 30, 1*time.Minute)
-					klipyRoutes.GET("/trending", apiLimiter, klipyHandler.Trending)
-					klipyRoutes.GET("/search", apiLimiter, klipyHandler.Search)
-					klipyRoutes.GET("/categories", apiLimiter, klipyHandler.Categories)
-					klipyRoutes.GET("/recent/:customerID", apiLimiter, klipyHandler.Recent)
-					klipyRoutes.DELETE("/recent/:customerID", apiLimiter, klipyHandler.HideRecent)
-					klipyRoutes.GET("/items", apiLimiter, klipyHandler.Items)
-					klipyRoutes.POST("/share/:slug", apiLimiter, klipyHandler.Share)
-					klipyRoutes.POST("/report/:slug", apiLimiter, klipyHandler.Report)
+					// GIF list/search/metadata endpoints — nested under /gifs to
+					// match upstream KLIPY API conventions and the client paths
+					// in klipyClient.ts (e.g. `/gifs/trending`, `/gifs/items`).
+					gifRoutes := klipyRoutes.Group("/gifs")
+					gifRoutes.GET("/trending", apiLimiter, klipyHandler.Trending)
+					gifRoutes.GET("/search", apiLimiter, klipyHandler.Search)
+					gifRoutes.GET("/categories", apiLimiter, klipyHandler.Categories)
+					gifRoutes.GET("/recent/:customerID", apiLimiter, klipyHandler.Recent)
+					gifRoutes.DELETE("/recent/:customerID", apiLimiter, klipyHandler.HideRecent)
+					gifRoutes.GET("/items", apiLimiter, klipyHandler.Items)
+					gifRoutes.POST("/share/:slug", apiLimiter, klipyHandler.Share)
+					gifRoutes.POST("/report/:slug", apiLimiter, klipyHandler.Report)
 					klipyRoutes.GET("/randomid", apiLimiter, klipyHandler.RandomID)
 					klipyRoutes.POST("/customer-id", apiLimiter, klipyHandler.CustomerID)
 
