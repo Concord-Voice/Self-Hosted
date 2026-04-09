@@ -71,7 +71,7 @@ services:
   coturn:
     image: coturn/coturn:4.6.3-alpine
     container_name: concordvoice-coturn
-    # TURN_EXTERNAL_IP is REQUIRED. If left unset coturn would advertise
+    # PUBLIC_IP is REQUIRED. If left unset coturn would advertise
     # 127.0.0.1 as the relay address and every relayed media packet would
     # be black-holed — fail loud at startup instead. --cert/--pkey use
     # absolute paths from the mounted cert dir so the DTLS/TLS listeners
@@ -83,8 +83,8 @@ services:
         --static-auth-secret=${TURN_SECRET:?TURN_SECRET must be set - copy .env.example to .env}
         --realm=${TURN_REALM:-concordvoice.chat}
         --listening-ip=0.0.0.0
-        --external-ip=${TURN_EXTERNAL_IP:?TURN_EXTERNAL_IP must be set to the host's public IP}
-        --relay-ip=${TURN_EXTERNAL_IP}
+        --external-ip=${PUBLIC_IP:?PUBLIC_IP must be set to the host's public IP}
+        --relay-ip=${PUBLIC_IP}
         --cert=/etc/coturn/certs/cert.pem
         --pkey=/etc/coturn/certs/key.pem
     ports:
