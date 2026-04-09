@@ -73,6 +73,16 @@ client-builds/
 .cache/
 *.tsbuildinfo
 
+# tsc output alongside source (main-process build emits .js/.d.ts into src/)
+client/desktop/src/shared/**/*.js
+client/desktop/src/shared/**/*.js.map
+client/desktop/src/shared/**/*.d.ts
+client/desktop/src/shared/**/*.d.ts.map
+client/desktop/src/main/**/*.js
+client/desktop/src/main/**/*.js.map
+client/desktop/src/main/**/*.d.ts
+client/desktop/src/main/**/*.d.ts.map
+
 # Go
 *.exe
 *.exe~
