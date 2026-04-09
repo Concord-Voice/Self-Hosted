@@ -269,6 +269,7 @@ func (m *migrator) migrateRow(ctx context.Context, id, dataURL string, opts migr
 
 	newURL := fmt.Sprintf("%s/%s", opts.proxyPath, id)
 	// #nosec G201 -- table/column names are hardcoded constants
+	// nosemgrep: go.lang.security.audit.database.string-formatted-query.string-formatted-query — table/column identifiers come from hardcoded migration opts, values are parameterized
 	updateQuery := fmt.Sprintf(`UPDATE %s SET %s = $1 WHERE %s = $2`, opts.table, opts.column, opts.idColumn) // nosemgrep:concord-go-sql-sprintf
 	if _, err := m.db.ExecContext(ctx, updateQuery, newURL, id); err != nil {
 		log.Printf("  ERROR [%s %s]: failed to update DB: %v", opts.table, id, err)

@@ -1,14 +1,20 @@
 // Package klipy provides HTTP handlers that proxy KLIPY API and media
 // requests through the control-plane. The proxy is used by the desktop
-// client when KLIPY Privacy Mode is enabled — see PrivacySecuritySection.tsx
-// (Enable KLIPY Privacy Mode toggle) and the renderer's gifProvider/klipyClient.ts.
+// client — see PrivacySecuritySection.tsx and the renderer's
+// gifProvider/klipyClient.ts.
 //
 // The proxy is allowed by KLIPY's API ToS (no proxy prohibition exists in
 // their terms). It exists so KLIPY never sees per-user IP addresses or
-// search terms when the user opts in to privacy mode.
+// search terms.
+//
+// As of this package version, GIF media is also fully proxied: the renderer
+// rewrites all KLIPY CDN URLs to /api/v1/klipy/media?url=<encoded> before
+// setting them as <img>/<video> src attributes, so the user's IP is never
+// exposed to KLIPY's CDN. See the Media handler below and
+// klipyClient.ts#rewriteMediaUrl.
 //
 // Compliance notes:
-//   - We never modify URLs returned by KLIPY (ToS-permissive but still good practice).
+//   - We never modify API response bodies returned by KLIPY.
 //   - We never log slugs or search terms in the proxy routes (privacy promise).
 //   - We never cache responses except via standard Cache-Control headers on
 //     media binaries — KLIPY does not require revalidation.
@@ -27,18 +33,23 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 )
 
 const (
 	upstreamTimeout = 10 * time.Second
-	maxQueryLen     = 100
-	maxPerPage      = 50
+	// mediaTimeout is intentionally longer than upstreamTimeout: media binaries
+	// can be several MB and CDN latency varies by geography.
+	mediaTimeout = 30 * time.Second
+	maxQueryLen  = 100
+	maxPerPage   = 50
 
-	headerContentType = "Content-Type"
-	errUpstreamDown   = "GIF service temporarily unavailable"
-	errUpstreamFailed = "GIF service request failed"
+	headerContentType  = "Content-Type"
+	headerCacheControl = "Cache-Control"
+	errUpstreamDown    = "GIF service temporarily unavailable"
+	errUpstreamFailed  = "GIF service request failed"
 )
 
 // klipyAPIBase is the upstream base URL for KLIPY's API. Defined as a package
@@ -46,29 +57,46 @@ const (
 // Production code never reassigns it.
 var klipyAPIBase = "https://api.klipy.com/api/v1"
 
-// allowedMediaHosts is the host whitelist for the media proxy. Any URL whose
-// host does not match one of these patterns is rejected with 400.
-// We use a regexp because KLIPY uses CDN sub-hosts (media0, media1, etc.).
-// Defined as a package variable rather than a regex literal in the function so
-// tests can substitute a more permissive pattern (allowing 127.0.0.1) when
-// validating the proxy logic against an httptest server.
-var allowedMediaHosts = regexp.MustCompile(`^(api|media[0-9]?|content|cdn)\.klipy\.com$`)
+// allowedMediaHosts is the host allowlist for the media proxy. Any URL whose
+// host does not match one of these patterns is rejected with 400. This is the
+// primary SSRF guard — never proxy arbitrary URLs.
+//
+// Covered hosts:
+//   - klipy.com             — bare apex (uncommon but defensive)
+//   - *.klipy.com           — API, media, content, and CDN subdomains
+//   - klipy.io              — bare apex for the .io TLD
+//   - *.klipy.io            — CDN subdomains on the .io TLD
+//
+// We use a regexp because KLIPY uses numbered CDN sub-hosts (media0, media1,
+// etc.). Defined as a package variable rather than a regex literal in the
+// function so tests can substitute a more permissive pattern (allowing
+// 127.0.0.1) when validating the proxy logic against an httptest server.
+var allowedMediaHosts = regexp.MustCompile(`^(klipy\.com|[a-z0-9-]+\.klipy\.com|klipy\.io|[a-z0-9-]+\.klipy\.io)$`)
 
 // Handler holds the dependencies for the KLIPY proxy.
 type Handler struct {
-	cfg    *config.Config
-	log    *logger.Logger
-	client *http.Client
+	cfg         *config.Config
+	log         *logger.Logger
+	client      *http.Client // API proxy (JSON endpoints)
+	mediaClient *http.Client // media proxy (binary streaming, longer timeout)
 }
 
 // NewHandler constructs a KLIPY proxy handler with sane defaults.
-// The shared http.Client uses connection pooling for low overhead per request.
+// Two http.Clients share the same underlying transport (connection pool) but
+// have different timeouts: API calls use a tight 10s deadline while media
+// binaries get 30s to accommodate larger payloads and CDN variance.
 func NewHandler(cfg *config.Config, log *logger.Logger) *Handler {
+	transport := http.DefaultTransport
 	return &Handler{
 		cfg: cfg,
 		log: log,
 		client: &http.Client{
-			Timeout: upstreamTimeout,
+			Timeout:   upstreamTimeout,
+			Transport: transport,
+		},
+		mediaClient: &http.Client{
+			Timeout:   mediaTimeout,
+			Transport: transport,
 		},
 	}
 }
@@ -145,8 +173,30 @@ func (h *Handler) Report(c *gin.Context) {
 }
 
 // RandomID forwards GET /randomid to KLIPY (per-user opaque session ID).
+//
+// Deprecated: kept for compatibility with any in-flight clients. New clients
+// should call CustomerID below, which generates the opaque ID server-side
+// without depending on KLIPY's /randomid endpoint (which is undocumented and
+// occasionally returns 404).
 func (h *Handler) RandomID(c *gin.Context) {
 	h.proxyAPIGet(c, "/randomid", nil)
+}
+
+// CustomerID returns a fresh opaque per-user identifier for KLIPY personalization.
+//
+// KLIPY's customer_id is an opaque, server-defined string — KLIPY does not
+// validate any particular format. We generate a UUID v4 server-side rather
+// than calling KLIPY's undocumented /randomid endpoint (which has been
+// observed returning 404 in production, see QA bug #571 item #15). This
+// preserves the personalization feature without leaving a hard dependency
+// on a third-party endpoint that may disappear, and it removes the need for
+// the client to ever speak directly to api.klipy.com.
+//
+// Auth requirements match the rest of the klipy proxy routes (JWT-protected,
+// rate-limited via the same apiLimiter middleware in router.go).
+func (h *Handler) CustomerID(c *gin.Context) {
+	id := uuid.NewString()
+	c.JSON(http.StatusOK, gin.H{"customer_id": id})
 }
 
 // --- Media proxy ---
@@ -178,7 +228,8 @@ func (h *Handler) Media(c *gin.Context) {
 		return
 	}
 
-	resp, err := h.client.Do(req)
+	// Use the dedicated media client (30s timeout) instead of the API client.
+	resp, err := h.mediaClient.Do(req)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": errUpstreamDown})
 		return
@@ -201,8 +252,14 @@ func (h *Handler) Media(c *gin.Context) {
 	if cl := resp.Header.Get("Content-Length"); cl != "" {
 		c.Header("Content-Length", cl)
 	}
-	// KLIPY ToS does not prohibit caching; the content is static binaries.
-	c.Header("Cache-Control", "public, max-age=86400, immutable")
+	// Use the upstream Cache-Control if present; otherwise apply a conservative
+	// public cache with a 1-hour TTL so CDN bursts are absorbed without risk of
+	// stale content. KLIPY ToS does not prohibit client-side caching.
+	if cc := resp.Header.Get(headerCacheControl); cc != "" {
+		c.Header(headerCacheControl, cc)
+	} else {
+		c.Header(headerCacheControl, "public, max-age=3600")
+	}
 	c.Status(http.StatusOK)
 	if _, copyErr := io.Copy(c.Writer, resp.Body); copyErr != nil && !errors.Is(copyErr, io.EOF) {
 		// Best-effort: client likely disconnected mid-stream. Don't log slugs.

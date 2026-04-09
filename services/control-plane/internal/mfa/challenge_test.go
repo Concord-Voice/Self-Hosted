@@ -134,6 +134,7 @@ func TestValidateChallengeTokenExpired(t *testing.T) {
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	// nosemgrep: go.jwt-go.security.jwt.hardcoded-jwt-key — test fixture, not a real credential
 	signed, err := token.SignedString([]byte(testJWTSecret))
 	if err != nil {
 		t.Fatalf("sign token: %v", err)

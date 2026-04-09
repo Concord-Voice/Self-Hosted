@@ -47,41 +47,86 @@ func isValidEmoji(s string) bool {
 	return hasNonASCII
 }
 
-// lookupMessageContext fetches channel_id and server_id for a message,
-// then verifies the user is a member of that server.
-func (h *Handler) lookupMessageContext(c *gin.Context, messageID, userID string) (channelID, serverID string, ok bool) {
+// messageContext holds the resolved location of a message (server channel or DM)
+// along with the authorization outcome for the requesting user.
+type messageContext struct {
+	channelID      string // server-channel messages
+	serverID       string // server-channel messages
+	conversationID string // DM messages
+	isDM           bool
+}
+
+// lookupMessageContext resolves a message id to its channel/server (for server
+// messages) or DM conversation (for DM messages) and verifies the user is a
+// member of the containing server or a participant in the conversation.
+//
+// On failure it writes the appropriate JSON error to the Gin context and
+// returns ok=false. Returns ok=true with a populated messageContext on success.
+func (h *Handler) lookupMessageContext(c *gin.Context, messageID, userID string) (messageContext, bool) {
+	var ctx messageContext
+
+	// Try server-channel messages first.
 	err := h.db.QueryRow(`
 		SELECT m.channel_id, c.server_id
 		FROM messages m
 		INNER JOIN channels c ON m.channel_id = c.id
 		WHERE m.id = $1
-	`, messageID).Scan(&channelID, &serverID)
-	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": errMsgMessageNotFound})
-		return "", "", false
+	`, messageID).Scan(&ctx.channelID, &ctx.serverID)
+	if err == nil {
+		// Check server membership.
+		var exists bool
+		memErr := h.db.QueryRow(`
+			SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2)
+		`, ctx.serverID, userID).Scan(&exists)
+		if memErr != nil {
+			h.log.Error("Failed to check server membership", "error", memErr, "server_id", ctx.serverID, "user_id", userID)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgReactionFailed})
+			return messageContext{}, false
+		}
+		if !exists {
+			c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this channel's server"})
+			return messageContext{}, false
+		}
+		return ctx, true
 	}
-	if err != nil {
+	if err != sql.ErrNoRows {
 		h.log.Error("Failed to look up message", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgReactionFailed})
-		return "", "", false
+		return messageContext{}, false
 	}
 
-	// Check membership
-	var exists bool
-	err = h.db.QueryRow(`
-		SELECT EXISTS(SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2)
-	`, serverID, userID).Scan(&exists)
-	if err != nil {
-		h.log.Error("Failed to check server membership", "error", err, "server_id", serverID, "user_id", userID)
+	// Fall back to DM messages.
+	dmErr := h.db.QueryRow(`
+		SELECT conversation_id FROM dm_messages WHERE id = $1
+	`, messageID).Scan(&ctx.conversationID)
+	if dmErr == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgMessageNotFound})
+		return messageContext{}, false
+	}
+	if dmErr != nil {
+		h.log.Error("Failed to look up DM message", "error", dmErr)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgReactionFailed})
-		return "", "", false
+		return messageContext{}, false
 	}
-	if !exists {
-		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this channel's server"})
-		return "", "", false
+	ctx.isDM = true
+
+	// Check DM participation.
+	var isParticipant bool
+	partErr := h.db.QueryRow(`
+		SELECT EXISTS(SELECT 1 FROM dm_participants WHERE conversation_id = $1 AND user_id = $2)
+	`, ctx.conversationID, userID).Scan(&isParticipant)
+	if partErr != nil {
+		h.log.Error("Failed to check DM participation", "error", partErr, "conversation_id", ctx.conversationID, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgReactionFailed})
+		return messageContext{}, false
+	}
+	if !isParticipant {
+		// Return 404 rather than 403 to avoid leaking that the conversation/message exists.
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgMessageNotFound})
+		return messageContext{}, false
 	}
 
-	return channelID, serverID, true
+	return ctx, true
 }
 
 // ToggleReaction adds or removes a reaction on a message.
@@ -105,10 +150,16 @@ func (h *Handler) ToggleReaction(c *gin.Context) {
 		return
 	}
 
-	channelID, serverID, ok := h.lookupMessageContext(c, messageID, userID)
+	mctx, ok := h.lookupMessageContext(c, messageID, userID)
 	if !ok {
 		return
 	}
+	if mctx.isDM {
+		// Reactions on DM messages are not yet supported by this endpoint.
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgMessageNotFound})
+		return
+	}
+	channelID, serverID := mctx.channelID, mctx.serverID
 
 	// Check PermSendMessages (reacting is a form of communication)
 	hasPerm, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, channelID, rbac.PermSendMessages)
@@ -249,10 +300,16 @@ func (h *Handler) GetReactions(c *gin.Context) {
 		return
 	}
 
-	channelID, serverID, ok := h.lookupMessageContext(c, messageID, userID)
+	mctx, ok := h.lookupMessageContext(c, messageID, userID)
 	if !ok {
 		return
 	}
+	if mctx.isDM {
+		// Reactions on DM messages are not yet supported by this endpoint.
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgMessageNotFound})
+		return
+	}
+	channelID, serverID := mctx.channelID, mctx.serverID
 
 	// Check PermReadMessageHistory
 	hasPerm, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, channelID, rbac.PermReadMessageHistory)

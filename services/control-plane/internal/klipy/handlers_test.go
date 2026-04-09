@@ -56,8 +56,24 @@ func newRouter(h *klipy.Handler) *gin.Engine {
 	r.POST("/klipy/share/:slug", h.Share)
 	r.POST("/klipy/report/:slug", h.Report)
 	r.GET("/klipy/randomid", h.RandomID)
+	r.POST("/klipy/customer-id", h.CustomerID)
 	r.GET("/klipy/media", h.Media)
 	return r
+}
+
+// CustomerID generates a server-side UUID v4 — verify it returns a non-empty
+// customer_id without making any upstream KLIPY call.
+func TestCustomerIDReturnsUUID(t *testing.T) {
+	h := newTestHandler(t)
+	r := newRouter(h)
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/klipy/customer-id", nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	body := w.Body.String()
+	assert.Contains(t, body, `"customer_id"`)
+	// UUID v4 length is 36 (8-4-4-4-12)
+	assert.Regexp(t, `"customer_id":"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}"`, body)
 }
 
 func TestSearchRequiresQ(t *testing.T) {
@@ -301,6 +317,7 @@ func withMockUpstream(t *testing.T, fn func(t *testing.T, h *klipy.Handler, r *g
 	// Use the httptest server's pre-configured client (skips TLS verify on the
 	// self-signed cert) so the production handler can reach the mock upstream.
 	klipy.SetHTTPClientForTest(h, server.Client())
+	klipy.SetMediaClientForTest(h, server.Client())
 	r := newRouter(h)
 	fn(t, h, r)
 }
@@ -477,3 +494,78 @@ const (
 	errUpstreamDownText   = "GIF service temporarily unavailable"
 	errUpstreamFailedText = "GIF service request failed"
 )
+
+// --- Media handler branch coverage ---
+
+// TestProxyMediaInvalidURL ensures the handler returns 400 when the url
+// parameter is not a valid https URL (e.g. a bare word with no scheme).
+func TestProxyMediaInvalidURL(t *testing.T) {
+	h := newTestHandler(t)
+	r := newRouter(h)
+	w := httptest.NewRecorder()
+	target := url.QueryEscape("not-a-url")
+	req := httptest.NewRequest("GET", pathMediaURL+target, nil)
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "invalid url")
+}
+
+// TestProxyMediaDisallowedHost ensures the handler returns 400 when the url
+// has a valid https scheme but a host not in the allowedMediaHosts whitelist.
+func TestProxyMediaDisallowedHost(t *testing.T) {
+	h := newTestHandler(t)
+	r := newRouter(h)
+	w := httptest.NewRecorder()
+	target := url.QueryEscape("https://evil.com/img.gif")
+	req := httptest.NewRequest("GET", pathMediaURL+target, nil)
+	r.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "host not allowed")
+}
+
+// TestProxyMediaUpstream5xx verifies that a 5xx response from the upstream
+// CDN is translated to a 502 Bad Gateway by our Media handler (matching the
+// behaviour of forwardJSON for API endpoints).
+func TestProxyMediaUpstream5xx(t *testing.T) {
+	upstream := func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte(`upstream error`))
+	}
+	withMockUpstreamHandler(t, upstream, func(t *testing.T, h *klipy.Handler, r *gin.Engine) {
+		// Also wire the media client so the Media handler uses the mock TLS server.
+		server := httptest.NewTLSServer(http.HandlerFunc(upstream))
+		defer server.Close()
+		klipy.SetMediaClientForTest(h, server.Client())
+		// Point allowedMediaHosts at the test server's host so the host check passes.
+		savedHosts := klipy.SetMediaHostsForTest(regexp.MustCompile(`^127\.0\.0\.1(:\d+)?$`))
+		defer klipy.SetMediaHostsForTest(savedHosts)
+
+		mediaURL := server.URL + "/media/test.gif"
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", pathMediaURL+url.QueryEscape(mediaURL), nil)
+		r.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusBadGateway, w.Code)
+		assert.Contains(t, w.Body.String(), errUpstreamDownText)
+	})
+}
+
+// TestProxyMediaUpstream4xx verifies that a 4xx response from the upstream
+// CDN is mirrored back to the client with the same status code (no body).
+func TestProxyMediaUpstream4xx(t *testing.T) {
+	upstream := func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	}
+	withMockUpstreamHandler(t, upstream, func(t *testing.T, h *klipy.Handler, r *gin.Engine) {
+		server := httptest.NewTLSServer(http.HandlerFunc(upstream))
+		defer server.Close()
+		klipy.SetMediaClientForTest(h, server.Client())
+		savedHosts := klipy.SetMediaHostsForTest(regexp.MustCompile(`^127\.0\.0\.1(:\d+)?$`))
+		defer klipy.SetMediaHostsForTest(savedHosts)
+
+		mediaURL := server.URL + "/media/missing.gif"
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", pathMediaURL+url.QueryEscape(mediaURL), nil)
+		r.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusNotFound, w.Code)
+	})
+}

@@ -109,6 +109,7 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 	cleanup := func() {
 		tables := []string{"dm_message_attachments", "message_attachments", "media_files", "dm_participants", "dm_conversations", "channel_keys", "channels", "member_roles", "roles", "server_members", "servers", "public_keys", "user_keys", "users"}
 		for _, table := range tables {
+			// nosemgrep: go.lang.security.audit.database.string-formatted-query.string-formatted-query — test cleanup; table names from hardcoded slice above
 			_, _ = db.Exec(fmt.Sprintf("DELETE FROM %s", table)) //nolint:gosec
 		}
 		_ = db.Close()
@@ -649,7 +650,11 @@ func TestProxyAvatarInvalidID(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestProxyServerIconNonMember(t *testing.T) {
+// TestProxyServerIconPublic asserts that server-icons are now a public Tier 1
+// route (matching avatars/banners after #571). The unguessable UUID is the
+// only identifier; non-members can fetch the bytes via plain <img> tags.
+// Membership-based 403s were removed in commit b31f591.
+func TestProxyServerIconPublic(t *testing.T) {
 	ts := setupMediaTest(t)
 	owner := ts.createTestUser(t, "proxyiconowner")
 	outsider := ts.createTestUser(t, "proxyiconoutsider")
@@ -661,7 +666,7 @@ func TestProxyServerIconNonMember(t *testing.T) {
 
 	w := ts.doJSON(ts.handler.ProxyServerIcon, "GET", "/api/v1/media/server-icons/"+serverID, outsider, gin.Params{{Key: "server_id", Value: serverID}})
 
-	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Equal(t, http.StatusOK, w.Code)
 }
 
 // =====================================================================
@@ -746,7 +751,10 @@ func TestUploadDMIconMissingConversationID(t *testing.T) {
 	assert.Contains(t, resp["error"], "conversation_id")
 }
 
-func TestProxyDMIconNonParticipant(t *testing.T) {
+// TestProxyDMIconPublic asserts dm-icons are now a public Tier 1 route. Group
+// DM members already know the conversation UUID; non-members can't enumerate
+// it. Membership-based 403s were removed in commit b31f591 to fix #571 #12.
+func TestProxyDMIconPublic(t *testing.T) {
 	ts := setupMediaTest(t)
 	admin := ts.createTestUser(t, "proxydmadm")
 	member := ts.createTestUser(t, "proxydmmem")
@@ -757,10 +765,10 @@ func TestProxyDMIconNonParticipant(t *testing.T) {
 	key := fmt.Sprintf(fmtDMIconsKey, convID)
 	require.NoError(t, ts.store.PutObject(context.TODO(), key, bytes.NewReader(makePNG(t, 64, 64)), 100, mimeImagePNG))
 
-	// Outsider tries to access the icon
+	// Outsider can fetch the icon — public route, only the unguessable UUID gates discovery.
 	w := ts.doJSON(ts.handler.ProxyDMIcon, "GET", "/api/v1/media/dm-icons/"+convID, outsider, gin.Params{{Key: "conversationId", Value: convID}})
 
-	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Equal(t, http.StatusOK, w.Code)
 }
 
 func TestUploadDMIconSuccess(t *testing.T) {
@@ -796,6 +804,7 @@ func TestUploadDMIconSuccess(t *testing.T) {
 
 	// Verify media_files row was created
 	var count int
+	// nosemgrep: go.lang.security.audit.database.string-formatted-query.string-formatted-query — query is a string literal; fmt.Sprintf builds the parameterized $1 value, not the SQL
 	err = ts.db.QueryRow(
 		`SELECT COUNT(*) FROM media_files WHERE storage_key = $1 AND deleted_at IS NULL`,
 		fmt.Sprintf(fmtDMIconsKey, convID),

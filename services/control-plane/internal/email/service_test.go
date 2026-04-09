@@ -56,7 +56,7 @@ func selfSignedTLS() *tls.Config {
 	keyDER, _ := x509.MarshalECPrivateKey(key)
 	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
 	cert, _ := tls.X509KeyPair(certPEM, keyPEM)
-	return &tls.Config{Certificates: []tls.Certificate{cert}} //nolint:gosec // test-only self-signed cert
+	return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12} //nolint:gosec // test-only self-signed cert
 }
 
 // mockSMTPServer starts a local SMTP server that supports STARTTLS.
@@ -198,7 +198,7 @@ func newProdService(addr string) *Service {
 		from:      testFrom,
 		log:       logger.New("test"),
 		devMode:   false,
-		tlsConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test-only: self-signed cert
+		tlsConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}, //nolint:gosec // test-only: self-signed cert
 	}
 }
 
@@ -452,7 +452,7 @@ func TestSendMailNoAuth(t *testing.T) {
 		from:      testFrom,
 		log:       logger.New("test"),
 		devMode:   false,
-		tlsConfig: &tls.Config{InsecureSkipVerify: true}, //nolint:gosec // test-only: self-signed cert
+		tlsConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}, //nolint:gosec // test-only: self-signed cert
 	}
 	err := svc.SendVerificationCode(testUserEmail, "123456")
 	require.NoError(t, err)

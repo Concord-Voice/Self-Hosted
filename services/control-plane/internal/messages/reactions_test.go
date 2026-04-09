@@ -304,6 +304,54 @@ func TestGetMessagesNoReactionsOmitsField(t *testing.T) {
 	assert.False(t, hasReactions, "reactions field should be omitted when empty")
 }
 
+// --- DM message reaction tests ---
+
+// TestReactions_DMMessage_Participant_Returns404 verifies that a valid DM
+// participant receives 404 (not 200) when attempting to toggle or fetch
+// reactions on a DM message. DM reactions are intentionally not yet supported;
+// the handler resolves the DM context successfully but then returns 404 because
+// the feature gate is not open. This is distinct from the non-participant case.
+func TestReactions_DMMessage_Participant_Returns404(t *testing.T) {
+	ts := setupTS(t)
+	u1 := ts.CreateTestUser(t, "dmreact_part_a")
+	u2 := ts.CreateTestUser(t, "dmreact_part_b")
+	convID := ts.CreateDMConversation(t, u1.ID, u2.ID, false)
+	msgID := insertDMMessageDirect(t, ts, convID, u1.ID, "react me")
+
+	wPut := ts.DoRequest("PUT", reactURL(msgID), emojiBody("👍"),
+		testhelpers.AuthHeaders(u1.AccessToken))
+	assert.Equal(t, http.StatusNotFound, wPut.Code,
+		"participant should get 404 (DM reactions not supported): %s", wPut.Body.String())
+
+	wGet := ts.DoRequest("GET", reactURL(msgID), nil,
+		testhelpers.AuthHeaders(u1.AccessToken))
+	assert.Equal(t, http.StatusNotFound, wGet.Code,
+		"participant should get 404 on GET reactions (DM reactions not supported): %s", wGet.Body.String())
+}
+
+// TestReactions_DMMessage_NonParticipant_Returns404 verifies the new DM
+// participation check in lookupMessageContext: a user who is not a participant
+// of the DM conversation receives 404 (not 403) to avoid leaking that the
+// conversation or message exists.
+func TestReactions_DMMessage_NonParticipant_Returns404(t *testing.T) {
+	ts := setupTS(t)
+	u1 := ts.CreateTestUser(t, "dmreact_np_a")
+	u2 := ts.CreateTestUser(t, "dmreact_np_b")
+	outsider := ts.CreateTestUser(t, "dmreact_np_c")
+	convID := ts.CreateDMConversation(t, u1.ID, u2.ID, false)
+	msgID := insertDMMessageDirect(t, ts, convID, u1.ID, "secret")
+
+	wPut := ts.DoRequest("PUT", reactURL(msgID), emojiBody("👍"),
+		testhelpers.AuthHeaders(outsider.AccessToken))
+	assert.Equal(t, http.StatusNotFound, wPut.Code,
+		"non-participant should get 404, not 403 (privacy): %s", wPut.Body.String())
+
+	wGet := ts.DoRequest("GET", reactURL(msgID), nil,
+		testhelpers.AuthHeaders(outsider.AccessToken))
+	assert.Equal(t, http.StatusNotFound, wGet.Code,
+		"non-participant should get 404 on GET reactions (privacy): %s", wGet.Body.String())
+}
+
 func TestToggleReactionCascadeOnDelete(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "cascadeuser")

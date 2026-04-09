@@ -132,7 +132,11 @@ func TestGetConfigFeatureFlagsIndependent(t *testing.T) {
 	assert.Equal(t, false, flags["voice"], "voice should be explicitly false")
 	assert.Equal(t, false, flags["video"], "video should be explicitly false")
 	assert.Equal(t, false, flags["e2ee"], "e2ee should be explicitly false")
+	assert.Equal(t, false, flags["gifsEnabled"], "gifsEnabled should be explicitly false when no KLIPY credential is configured")
 
-	// Verify exactly 3 keys — no extra fields leaking
-	assert.Len(t, flags, 3, "featureFlags should have exactly 3 keys")
+	// Verify exactly 4 keys — no extra fields leaking. CRITICALLY: the
+	// raw KLIPY app key must NEVER appear here.
+	assert.Len(t, flags, 4, "featureFlags should have exactly 4 keys")
+	_, hasKey := flags["klipyApiKey"]
+	assert.False(t, hasKey, "klipyApiKey must NEVER be present in /client/config — it would leak the server-side KLIPY app key into the renderer bundle")
 }

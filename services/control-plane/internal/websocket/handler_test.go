@@ -334,6 +334,7 @@ func TestAuthenticateWebSocketExpiredJWT(t *testing.T) {
 		"iat":     jwt.NewNumericDate(now.Add(-2 * time.Hour)),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	// nosemgrep: go.jwt-go.security.jwt.hardcoded-jwt-key — test fixture, not a real credential
 	signed, err := token.SignedString([]byte(testJWTSecret))
 	require.NoError(t, err)
 
@@ -353,6 +354,7 @@ func TestAuthenticateWebSocketJWTMissingUserIDClaim(t *testing.T) {
 		"iat": jwt.NewNumericDate(now),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	// nosemgrep: go.jwt-go.security.jwt.hardcoded-jwt-key — test fixture, not a real credential
 	signed, err := token.SignedString([]byte(testJWTSecret))
 	require.NoError(t, err)
 
@@ -373,6 +375,7 @@ func TestAuthenticateWebSocketJWTInvalidUserIDFormat(t *testing.T) {
 		"iat":     jwt.NewNumericDate(now),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	// nosemgrep: go.jwt-go.security.jwt.hardcoded-jwt-key — test fixture, not a real credential
 	signed, err := token.SignedString([]byte(testJWTSecret))
 	require.NoError(t, err)
 
@@ -543,6 +546,7 @@ func TestAuthenticateWebSocketBlacklistedJWT(t *testing.T) {
 		"iat":     jwt.NewNumericDate(now),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	// nosemgrep: go.jwt-go.security.jwt.hardcoded-jwt-key — test fixture, not a real credential
 	signed, err := token.SignedString([]byte(testJWTSecret))
 	require.NoError(t, err)
 

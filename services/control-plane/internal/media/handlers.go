@@ -317,55 +317,45 @@ func (h *Handler) ProxyBanner(c *gin.Context) {
 
 // ProxyServerIcon serves a server's icon through the control plane.
 // GET /api/v1/media/server-icons/:server_id
-// Requires JWT + server membership.
+// Public: server icons are surfaced via invite links and member lists,
+// and the unguessable UUID gates discovery. Membership check removed
+// so plain <img> tags can render without an Authorization header.
 func (h *Handler) ProxyServerIcon(c *gin.Context) {
-	userID := c.GetString("user_id")
 	serverID := c.Param("server_id")
 	if _, err := uuid.Parse(serverID); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
 		return
 	}
 
-	if !h.userIsServerMember(c, userID, serverID) {
-		return
-	}
-
-	h.proxyTier1Media(c, fmt.Sprintf("server-icons/%s", serverID), false)
+	h.proxyTier1Media(c, fmt.Sprintf("server-icons/%s", serverID), true)
 }
 
 // ProxyServerBanner serves a server's banner through the control plane.
 // GET /api/v1/media/server-banners/:server_id
+// Public for the same reason as ProxyServerIcon.
 func (h *Handler) ProxyServerBanner(c *gin.Context) {
-	userID := c.GetString("user_id")
 	serverID := c.Param("server_id")
 	if _, err := uuid.Parse(serverID); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid server ID"})
 		return
 	}
 
-	if !h.userIsServerMember(c, userID, serverID) {
-		return
-	}
-
-	h.proxyTier1Media(c, fmt.Sprintf("server-banners/%s", serverID), false)
+	h.proxyTier1Media(c, fmt.Sprintf("server-banners/%s", serverID), true)
 }
 
 // ProxyDMIcon serves a group DM's icon through the control plane.
 // GET /api/v1/media/dm-icons/:conversationId
-// Requires JWT + DM membership.
+// Public: the unguessable UUID is the only identifier. Members already
+// know it; non-members can't enumerate it. Membership check removed so
+// plain <img> tags can render without an Authorization header.
 func (h *Handler) ProxyDMIcon(c *gin.Context) {
-	userID := c.GetString("user_id")
 	conversationID := c.Param("conversationId")
 	if _, err := uuid.Parse(conversationID); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid conversation ID"})
 		return
 	}
 
-	if !h.userHasDMAccess(c, userID, conversationID) {
-		return
-	}
-
-	h.proxyTier1Media(c, fmt.Sprintf("dm-icons/%s", conversationID), false)
+	h.proxyTier1Media(c, fmt.Sprintf("dm-icons/%s", conversationID), true)
 }
 
 // DeleteMedia soft-deletes a media file and removes it from object storage.

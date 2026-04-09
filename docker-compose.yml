@@ -48,10 +48,17 @@ services:
   nats:
     image: nats:2-alpine
     container_name: concordvoice-nats
-    command: "-js -m 8222"
+    # -js enables JetStream; -c points at our config which pins store_dir to
+    # /data/jetstream with a 5G max_file cap. The nats-data named volume below
+    # persists JetStream streams across container restarts so we no longer see
+    # the "Temporary storage directory used" warning on startup.
+    command: "-js -c /etc/nats/nats-server.conf -m 8222"
     ports:
       - "4222:4222"  # Client connections
       - "8222:8222"  # HTTP monitoring
+    volumes:
+      - nats-data:/data
+      - ./infrastructure/docker/nats/nats-cluster.conf:/etc/nats/nats-server.conf:ro
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://localhost:8222/healthz"]
       interval: 10s
@@ -64,12 +71,22 @@ services:
   coturn:
     image: coturn/coturn:4.6.3-alpine
     container_name: concordvoice-coturn
+    # TURN_EXTERNAL_IP is REQUIRED. If left unset coturn would advertise
+    # 127.0.0.1 as the relay address and every relayed media packet would
+    # be black-holed — fail loud at startup instead. --cert/--pkey use
+    # absolute paths from the mounted cert dir so the DTLS/TLS listeners
+    # don't fall through to coturn's default CWD lookup (which emits
+    # "cannot find certificate file" + "//turn_server_cert.pem" warnings).
     command: >
       turnserver
         -c /etc/coturn/turnserver.conf
         --static-auth-secret=${TURN_SECRET:?TURN_SECRET must be set - copy .env.example to .env}
         --realm=${TURN_REALM:-concordvoice.chat}
-        --external-ip=${TURN_EXTERNAL_IP:-127.0.0.1}
+        --listening-ip=0.0.0.0
+        --external-ip=${TURN_EXTERNAL_IP:?TURN_EXTERNAL_IP must be set to the host's public IP}
+        --relay-ip=${TURN_EXTERNAL_IP}
+        --cert=/etc/coturn/certs/cert.pem
+        --pkey=/etc/coturn/certs/key.pem
     ports:
       - "3478:3478/tcp"
       - "3478:3478/udp"
@@ -77,6 +94,7 @@ services:
       - "49152-49252:49152-49252/udp"  # TURN relay range
     volumes:
       - ./infrastructure/docker/coturn/turnserver.conf:/etc/coturn/turnserver.conf:ro
+      - ./infrastructure/docker/coturn/certs:/etc/coturn/certs:ro
     healthcheck:
       test: ["CMD", "turnutils_stunclient", "127.0.0.1"]
       interval: 10s
@@ -244,8 +262,13 @@ services:
 
 volumes:
   postgres-data:
+    driver: local
   redis-data:
+    driver: local
   minio-data:
+    driver: local
+  nats-data:
+    driver: local
 
 networks:
   concordvoice-data:

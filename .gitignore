@@ -138,6 +138,12 @@ docker-compose.override.yml
 *.pfx
 keys/
 certs/
+# Track the coturn cert mount point (placeholder + README) so the bind
+# mount in docker-compose.yml succeeds on a fresh clone. Real cert/key
+# files are still ignored by the *.pem / *.key rules above.
+!infrastructure/docker/coturn/certs/
+!infrastructure/docker/coturn/certs/.gitkeep
+!infrastructure/docker/coturn/certs/README.md
 
 # Media Files (for testing)
 *.mp3

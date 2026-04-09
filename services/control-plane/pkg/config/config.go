@@ -92,8 +92,12 @@ type Config struct {
 	MinIOBucket    string // Bucket name for media storage (e.g. "concord-media")
 	UploadMaxSize  int64  // Global max upload size in bytes (default 25 MB)
 
-	// KLIPY GIF integration (optional — empty key disables the feature)
-	KlipyAPIKey string // KLIPY app key; delivered to clients via /client/config
+	// KLIPY GIF integration (optional — empty key disables the feature).
+	// SECURITY: this key is server-side ONLY. It is never delivered to clients.
+	// All KLIPY traffic — API calls and GIF media — is proxied through
+	// /api/v1/klipy/* routes in internal/klipy/handlers.go. The renderer rewrites
+	// media URLs through /api/v1/klipy/media so KLIPY's CDN never sees per-user IPs.
+	KlipyAPIKey string
 }
 
 // Load reads configuration from environment variables

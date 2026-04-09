@@ -112,7 +112,7 @@ func (s *Service) sendMail(from, to, msg string) error {
 	auth := smtp.PlainAuth("", s.username, s.password, s.host)
 	tlsCfg := s.tlsConfig
 	if tlsCfg == nil {
-		tlsCfg = &tls.Config{ServerName: s.host} // #nosec G402 -- using server name verification
+		tlsCfg = &tls.Config{ServerName: s.host, MinVersion: tls.VersionTLS12} // #nosec G402 -- using server name verification
 	}
 
 	conn, err := net.DialTimeout("tcp", addr, 10*time.Second)

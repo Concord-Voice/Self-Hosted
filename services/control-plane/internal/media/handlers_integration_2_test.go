@@ -487,9 +487,8 @@ func TestProxyServerIconSuccess(t *testing.T) {
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, mimeImagePNG, w.Header().Get(hdrContentType))
-	// Membership-gated — must NOT be shared-cacheable.
-	assert.Contains(t, w.Header().Get(hdrCacheControl), "private")
-	assert.NotContains(t, w.Header().Get(hdrCacheControl), "public")
+	// Public Tier 1 (post-#571 #12): shared-cacheable so CDNs can serve it.
+	assert.Contains(t, w.Header().Get(hdrCacheControl), "public")
 }
 
 func TestProxyServerIconInvalidID(t *testing.T) {
@@ -526,7 +525,11 @@ func TestProxyServerBannerInvalidID(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestProxyServerBannerNonMember(t *testing.T) {
+// TestProxyServerBannerPublic asserts server-banners are now a public Tier 1
+// route. See TestProxyServerIconPublic in handlers_test.go for the rationale —
+// the unguessable UUID is the only identifier and they need to render via
+// plain <img> tags. Membership-based 403 was removed in commit b31f591.
+func TestProxyServerBannerPublic(t *testing.T) {
 	ts := setupMediaTest(t)
 	owner := ts.createTestUser(t, "proxysbown")
 	outsider := ts.createTestUser(t, "proxysbout")
@@ -537,7 +540,7 @@ func TestProxyServerBannerNonMember(t *testing.T) {
 
 	w := ts.doJSON(ts.handler.ProxyServerBanner, "GET", pathServerBanners+serverID, outsider, gin.Params{{Key: "server_id", Value: serverID}})
 
-	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.Equal(t, http.StatusOK, w.Code)
 }
 
 func TestProxyServerBannerNotFound(t *testing.T) {

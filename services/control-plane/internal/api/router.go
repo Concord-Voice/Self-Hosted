@@ -283,10 +283,10 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 		// Uploads + deletes remain authenticated. Rate-limited per IP since
 		// there is no user context.
 		//
-		// NOTE: server-icons, server-banners, and dm-icons stay under the
-		// authenticated group below — their handlers enforce server/DM
-		// membership via c.GetString("user_id"), which only the auth
-		// middleware populates. Making them public would always 403.
+		// server-icons, server-banners, and dm-icons are also public Tier 1
+		// media: the unguessable UUID is the only identifier and they need to
+		// render via plain <img> tags without an Authorization header.
+		// Membership checks have been removed from their handlers.
 		if mediaHandler != nil {
 			v1.GET("/media/avatars/:user_id",
 				middleware.RateLimitByIP(redis, 120, 1*time.Minute),
@@ -296,12 +296,29 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				middleware.RateLimitByIP(redis, 120, 1*time.Minute),
 				mediaHandler.ProxyBanner,
 			)
+			v1.GET("/media/server-icons/:server_id",
+				middleware.RateLimitByIP(redis, 120, 1*time.Minute),
+				mediaHandler.ProxyServerIcon,
+			)
+			v1.GET("/media/server-banners/:server_id",
+				middleware.RateLimitByIP(redis, 120, 1*time.Minute),
+				mediaHandler.ProxyServerBanner,
+			)
+			v1.GET("/media/dm-icons/:conversationId",
+				middleware.RateLimitByIP(redis, 60, 1*time.Minute),
+				mediaHandler.ProxyDMIcon,
+			)
 		} else {
 			// Match the protected fallback below so misconfiguration fails
-			// with a clear 503 instead of a 404.
-			v1.Any("/media/*path", func(c *gin.Context) {
+			// with a clear 503 instead of a 404 for all public Tier 1 routes.
+			mediaUnavailable := func(c *gin.Context) {
 				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "media storage not configured"})
-			})
+			}
+			v1.GET("/media/avatars/:user_id", mediaUnavailable)
+			v1.GET("/media/banners/:user_id", mediaUnavailable)
+			v1.GET("/media/server-icons/:server_id", mediaUnavailable)
+			v1.GET("/media/server-banners/:server_id", mediaUnavailable)
+			v1.GET("/media/dm-icons/:conversationId", mediaUnavailable)
 		}
 
 		// Protected routes — split into two tiers:
@@ -1085,6 +1102,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 					klipyRoutes.POST("/share/:slug", apiLimiter, klipyHandler.Share)
 					klipyRoutes.POST("/report/:slug", apiLimiter, klipyHandler.Report)
 					klipyRoutes.GET("/randomid", apiLimiter, klipyHandler.RandomID)
+					klipyRoutes.POST("/customer-id", apiLimiter, klipyHandler.CustomerID)
 
 					// 120/min on the media proxy (chat scrollback bursts)
 					klipyRoutes.GET("/media",
@@ -1355,25 +1373,6 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				mediaHandler.UploadAttachment,
 			)
 
-			// Tier 1 user avatar/banner proxy GETs are registered as PUBLIC
-			// routes on v1 (above) so plain <img> tags can render them without
-			// an Authorization header. Server icons/banners and DM icons stay
-			// authenticated here because their handlers enforce membership via
-			// the auth-context user_id; the desktop client adds the Bearer
-			// token via fetch + object-URL for these.
-			mediaRoutes.GET("/server-icons/:server_id",
-				middleware.RateLimitByUser(redis, 60, 1*time.Minute),
-				mediaHandler.ProxyServerIcon,
-			)
-			mediaRoutes.GET("/server-banners/:server_id",
-				middleware.RateLimitByUser(redis, 60, 1*time.Minute),
-				mediaHandler.ProxyServerBanner,
-			)
-			mediaRoutes.GET("/dm-icons/:conversationId",
-				middleware.RateLimitByUser(redis, 30, 1*time.Minute),
-				mediaHandler.ProxyDMIcon,
-			)
-
 			// Tier 2 proxy download (E2EE attachment — proxied, not presigned)
 			mediaRoutes.GET("/attachments/:file_id",
 				middleware.RateLimitByUser(redis, 60, 1*time.Minute),
@@ -1385,6 +1384,18 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 				mediaHandler.DeleteMedia,
 			)
+		} else {
+			mediaUnavailable503 := func(c *gin.Context) {
+				c.JSON(http.StatusServiceUnavailable, gin.H{"error": "media storage not configured"})
+			}
+			mediaRoutes.POST("/upload/avatar", mediaUnavailable503)
+			mediaRoutes.POST("/upload/banner", mediaUnavailable503)
+			mediaRoutes.POST("/upload/server-icon", mediaUnavailable503)
+			mediaRoutes.POST("/upload/server-banner", mediaUnavailable503)
+			mediaRoutes.POST("/upload/dm-icon", mediaUnavailable503)
+			mediaRoutes.POST("/upload/attachment", mediaUnavailable503)
+			mediaRoutes.GET("/attachments/:file_id", mediaUnavailable503)
+			mediaRoutes.DELETE("/:file_id", mediaUnavailable503)
 		}
 
 		// WebSocket endpoint (requires JWT authentication via query parameter or header)

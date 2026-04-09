@@ -37,3 +37,11 @@ func SetMediaHostsForTest(newPattern *regexp.Regexp) *regexp.Regexp {
 func SetHTTPClientForTest(h *Handler, client *http.Client) {
 	h.client = client
 }
+
+// SetMediaClientForTest replaces a Handler's internal mediaClient with the
+// supplied client. Needed by media-proxy tests so the long-timeout media
+// client also routes to the httptest server.
+// Production code never invokes this.
+func SetMediaClientForTest(h *Handler, client *http.Client) {
+	h.mediaClient = client
+}
