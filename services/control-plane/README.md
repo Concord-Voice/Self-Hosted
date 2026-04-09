@@ -57,12 +57,13 @@ control-plane/
 │   ├── updates/          # Client update management
 │   ├── users/            # User profiles, preferences, privacy
 │   ├── voice/            # Voice coordination (NATS ↔ media-plane)
-│   └── websocket/        # WebSocket hub (messaging, presence, DMs)
+│   ├── websocket/        # WebSocket hub (messaging, presence, DMs)
+│   └── klipy/            # Klipy GIF integration and privacy settings
 ├── pkg/
 │   ├── config/           # Configuration management
 │   └── logger/           # Structured logging
-├── migrations/           # 47 SQL migration pairs (000001-000047)
-├── tests/                # Integration tests (70 test files)
+├── migrations/           # 57 SQL migration pairs (000001-000057)
+├── tests/                # Integration tests (90 test files)
 ├── Dockerfile
 ├── go.mod
 └── go.sum
@@ -205,7 +206,7 @@ GET/POST /api/v1/channels/:id/keys
 POST /api/v1/channels/:id/keys/rotate
 ```
 
-**Total: 177 API routes implemented.** See `docs/api/openapi.yaml` for OpenAPI spec (covers partial routes; Phase 2A additions pending spec update).
+**Total: 217 API routes implemented.** See `docs/api/openapi.yaml` for OpenAPI spec (covers partial routes; Phase 2A additions pending spec update). See also [[internal]](../..[internal]) for canonical project counts.
 
 ### Testing
 
@@ -337,7 +338,7 @@ For detailed migration documentation, see [migrations/README.md](migrations/READ
 ### Additional Tables ✅
 - user_keys, server_invites, channel_keys, channel_key_recipients, channel_read_states, voice_participants, user_preferences, friend_codes, privacy_settings
 
-**47 migrations total** (000001-000047). See `migrations/` for full schema.
+**57 migrations total** (000001-000057). See `migrations/` for full schema.
 
 ## Current Status
 
@@ -369,10 +370,13 @@ For detailed migration documentation, see [migrations/README.md](migrations/READ
 - [x] Friend codes and privacy controls
 - [x] DM E2EE enforcement
 
-### Phase 2+: Advanced Features 📋 PLANNED
-- [ ] RBAC/SBAC permissions (#82)
-- [ ] Mute & notifications (#84)
-- [ ] Token theft detection + MFA (#89)
-- [ ] File uploads (S3 + CDN)
+### Phase 2+: Advanced Features
+
+- [x] RBAC/SBAC permissions (#82) ✅ DONE
+- [x] Token theft detection + MFA (#89) ✅ DONE
+- [x] Klipy GIF integration + privacy settings (#168–#172) ✅ DONE
+- [x] Server mute/deafen (#84 partial) ✅ DONE (migration 000054)
+- [ ] File uploads (S3 + CDN) — partially implemented (`media_files` table, MinIO storage)
 - [ ] Message search
 - [ ] Billing integration (Stripe)
+- [ ] Sentry error tracking (`sentry-go`) — planned follow-up to Electron integration (#586)

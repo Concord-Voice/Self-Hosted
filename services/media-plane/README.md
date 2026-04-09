@@ -281,9 +281,10 @@ Key metrics to monitor:
 
 ## Future Enhancements
 
-- [ ] TURN server integration (currently STUN only — fails behind symmetric NATs)
+- [x] TURN server integration — coturn deployed with TLS (PRs #576, #577)
 - [ ] Recording support
 - [ ] Simulcast for video
 - [ ] Bandwidth estimation and quality adaptation
 - [ ] Multi-instance horizontal scaling
 - [ ] Metrics and monitoring integration
+- [ ] Sentry error tracking (`@sentry/node`) — planned follow-up to Electron integration (#586)

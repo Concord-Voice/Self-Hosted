@@ -78,7 +78,7 @@ Expected output:
 Checking migration version...
 Building migrate tool...
 ./bin/migrate -command=version
-Current version: 47 (clean)
+Current version: 57 (clean)
 ```
 
 #### Test Rollback
@@ -101,7 +101,7 @@ make migrate-version
 
 Expected output:
 ```
-Current version: 46 (clean)
+Current version: 56 (clean)
 ```
 
 #### Re-apply Migration
@@ -140,7 +140,7 @@ Then run:
 -- Check schema_migrations table
 SELECT * FROM schema_migrations;
 
--- Expected: version = 47, dirty = false
+-- Expected: version = 57, dirty = false
 
 -- Verify users table structure
 \d users
@@ -201,7 +201,7 @@ Migrations should run automatically before the server starts.
 Stop the server (Ctrl+C), then:
 
 ```bash
-# Rollback all 47 migrations one by one (repeat 47 times)
+# Rollback all 57 migrations one by one (repeat 57 times)
 # Each `make migrate-down` rolls back 1 migration
 make migrate-down  # Rolls back to version 46
 make migrate-down  # Rolls back to version 45

@@ -1,5 +1,87 @@
 # Concord Voice Architecture
 
+## Quick Overview
+
+> Summary for AI assistants. For detailed diagrams and schema, see the sections below.
+
+### System Overview
+
+Concord Voice is a distributed real-time communications platform with three service planes:
+
+```text
+┌──────────────────────────────────────────────────────────────────┐
+│  Desktop Client (Electron + React + TypeScript)                  │
+│  - ~30 Zustand stores, E2EE via WebCrypto, safeStorage tokens   │
+└──────┬────────────────────────────────┬──────────────────────────┘
+       │ HTTP/WebSocket :8080           │ Socket.IO + WebRTC :3000
+       ▼                                ▼
+┌──────────────────────┐    ┌─────────────────────────────────────┐
+│  Control Plane (Go)  │    │  Media Plane (Node.js + mediasoup)  │
+│  Gin 1.12, 217 routes│    │  WebRTC SFU, Socket.IO signaling    │
+│  Auth, RBAC, chat,   │    │  Voice/video routing, RoomManager   │
+│  WebSocket hub       │    │  1 router per room, transport/user  │
+└──────┬───────┬───────┘    └──────┬──────────────────────────────┘
+       │       │                   │
+       ▼       ▼                   ▼
+┌──────────┐ ┌───────┐      ┌───────┐
+│PostgreSQL│ │ Redis │      │ Redis │
+│ 16 (57   │ │ 7     │      │ 5.0   │
+│ migr's)  │ │       │      │       │
+└──────────┘ └───┬───┘      └───┬───┘
+                 │              │
+                 └──── NATS ────┘
+                   2.x (events)
+```
+
+### Service Responsibilities
+
+#### Control Plane (Go + Gin, port 8080)
+
+- User authentication (JWT access 15min + HttpOnly refresh 30d)
+- Server/channel/member CRUD, RBAC permission enforcement
+- WebSocket hub for real-time messaging and presence
+- DM system (8 tables, E2EE with key-epoch enforcement)
+- MFA (TOTP, WebAuthn), email verification, ownership transfer
+- 217 REST endpoints across 25+ route groups
+
+#### Media Plane (Node.js + mediasoup, port 3000)
+
+- WebRTC SFU for voice and video (Opus codec, 7 quality tiers)
+- Socket.IO signaling for transport negotiation
+- `RoomManager` is authoritative for produce/consume/transport lifecycle
+- NATS integration for participant state events to control plane
+
+#### Desktop Client (Electron 41 + React 19)
+
+- Secure IPC via preload bridge (contextIsolation ON, nodeIntegration OFF)
+- E2EE: AES-256-GCM encryption, RSA-OAEP 4096-bit key wrapping
+- Token storage via Electron safeStorage (OS keychain)
+- ~30 Zustand stores for state management
+- Auto-updater with splash screen, safety checks, rollback
+
+### Data Flow
+
+1. **Authentication:** Client → POST /auth/login → JWT pair → stored in safeStorage
+2. **Messaging:** Client → WebSocket (ticket-auth) → hub routes to channel/DM subscribers
+3. **E2EE:** Client encrypts (AES-256-GCM) → server relays ciphertext → recipient decrypts
+4. **Voice:** Client → Socket.IO signaling → Media Plane (mediasoup SFU) → WebRTC transport → routed audio/video to other clients
+
+### Infrastructure
+
+- **Database:** PostgreSQL 16, 57 migrations, 55+ tables
+- **Cache:** Redis for sessions, presence, RBAC cache, rate limiting
+- **Messaging:** NATS 2.x for inter-service events
+- **CI/CD:** GitHub Actions → SonarQube Quality Gate (≥ 80% coverage)
+- **Security:** 22 pre-commit hooks, SAST (Semgrep), secret detection (gitleaks, TruffleHog)
+- **Deployment:** Docker Compose (base + staging + production overlays)
+
+### Key Design Decisions
+
+- **Privacy-first:** E2EE by default, no server-side plaintext message storage
+- **Hybrid deployment:** Same codebase for SaaS and self-hosted
+- **Defense in depth:** Electron hardening + CSP + pre-commit secrets + SAST + SonarQube
+- **Explicit over implicit:** All error paths handled, all state transitions visible
+
 ## Overview
 
 Concord Voice is a distributed real-time communications platform with clear separation of concerns across three major planes:
@@ -25,7 +107,7 @@ flowchart TB
     end
 
     subgraph Infrastructure
-        PG[("PostgreSQL 16<br/>40+ tables")]
+        PG[("PostgreSQL 16<br/>55+ tables")]
         RD[("Redis 7<br/>sessions / presence")]
         NATS["NATS<br/>inter-service"]
     end
@@ -71,7 +153,8 @@ flowchart TB
   - Video calls (camera toggle, video grid)
   - E2EE message encryption/decryption (AES-256-GCM)
   - Secure token storage (Electron safeStorage / OS keychain)
-  - 24 Zustand stores for state management
+  - ~30 Zustand stores for state management (see `[internal]` for current count)
+  - Error tracking via Sentry (production only; PII/key material scrubbed via `beforeSend`)
 - **Communication**:
   - HTTP/WebSocket → Control Plane (signaling, auth, channels, presence)
   - Socket.IO → Media Plane (voice signaling)
@@ -104,9 +187,9 @@ flowchart TB
 - Rate limiting
 - Moderation logic
 
-**API**: 177 REST endpoints + 1 WebSocket endpoint across 20+ groups (Auth, Users, Sessions, Servers, Channels, Messages, Members, Invites, E2EE, WebSocket, Friends, DM Conversations, Voice, MFA, RBAC, Media, Ownership, Email, Client Config, Updates). See [API Documentation](./api/README.md) for the OpenAPI 3.0 spec.
+**API**: 217 REST endpoints + 1 WebSocket endpoint across 25+ route groups (Auth, Users, Sessions, Servers, Channels, Messages, Members, Invites, E2EE, WebSocket, Friends, DM Conversations, Voice, MFA, RBAC, Media, Ownership, Email, Client Config, Updates). See [API Documentation](./api/README.md) for the OpenAPI 3.0 spec.
 
-**Database Schema** (40+ tables across 47 migrations):
+**Database Schema** (55+ tables across 57 migrations):
 
 ```mermaid
 erDiagram
@@ -697,6 +780,11 @@ US-East US-West   EU-Central APAC
 - Correlation IDs for request tracing
 - Error tracking with stack traces
 
+### Error Tracking (Sentry)
+
+- **Desktop client**: Sentry SDK active in production; PII/key material scrubbed via `beforeSend` before any data leaves the process
+- **Control plane / Media plane**: Sentry integration planned (follow-up issues)
+
 ### Tracing (Jaeger)
 
 - Distributed traces across services
@@ -727,9 +815,10 @@ US-East US-West   EU-Central APAC
 | Cache | Redis | Fast, pub/sub, sessions |
 | Auth | JWT | Stateless, widely supported |
 | Deployment | Kubernetes + Docker | Standard, portable, scalable |
+| GIF Search | Klipy (privacy proxy) | Privacy-preserving GIF integration; tenant key + server-side proxy, no direct client calls to Klipy API |
 
 ## Next Steps
 
-- [API Documentation](./api/README.md) — OpenAPI 3.0 spec (partial: 88 operations documented; 177 routes implemented — full spec regeneration planned)
+- [API Documentation](./api/README.md) — OpenAPI 3.0 spec (partial: 88 operations documented; 217 routes implemented — full spec regeneration planned)
 - [Development Guide](./development.md) — Local setup, running tests
 - [Self-Hosting Guide](./self-hosting.md) — Deployment instructions (planned)

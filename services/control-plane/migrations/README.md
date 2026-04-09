@@ -83,7 +83,7 @@ DROP INDEX IF EXISTS idx_users_status;
 ALTER TABLE users DROP COLUMN IF EXISTS status;
 ```
 
-## Existing Migrations (000001–000047)
+## Existing Migrations (000001–000057)
 
 ### Phase 1A — Authentication & E2EE
 | # | Name | Tables/Changes |
@@ -147,6 +147,21 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000045 | recovery_circles | Social recovery circles |
 | 000046 | username_change_tracking | `username_changed_at` column on users, `username_history` table |
 | 000047 | ownership_transfer | Server ownership transfer records |
+
+### Phase 2B — Chat Enhancements & GIF Integration
+
+| # | Name | Tables/Changes |
+| --- | --- | --- |
+| 000048 | message_reactions | `message_reactions` table |
+| 000049 | message_replies | Reply threading on messages |
+| 000050 | message_pinning | `pinned_messages` table |
+| 000051 | message_attachments | `message_attachments` table |
+| 000052 | attachment_position_unique | Unique constraint on attachment position |
+| 000053 | group_dm_admin_roles | Admin roles for group DMs |
+| 000054 | server_mute_deafen | Server-level mute/deafen state |
+| 000055 | klipy_gif_integration | Klipy GIF integration tables |
+| 000056 | klipy_privacy_settings | Klipy privacy preference settings |
+| 000057 | dm_message_pinning | DM message pinning support |
 
 ## Troubleshooting
 

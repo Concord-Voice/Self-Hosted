@@ -1,6 +1,6 @@
 # Concord Voice Frequently Asked Questions (FAQ)
 
-**Last Updated:** 2026-03-27
+**Last Updated:** 2026-04-09
 
 This document answers common questions about Concord Voice's licensing, security, development, deployment, and usage.
 
@@ -291,22 +291,25 @@ See [.github/SECURITY.md](./.github/SECURITY.md) for full policy.
 - Concord Voice receives no data from self-hosted instances (except license validation pings)
 
 **Telemetry:**
-- Minimal opt-in telemetry for error reporting (planned)
-- Always anonymized and aggregated
-- Clear opt-out mechanism
+
+- Sentry error tracking in the desktop client (production-only; disabled in development)
+- Privacy-first: key material, message content, and PII are never sent to Sentry
+- Aggregated crash and error data only — no user content
 
 ---
 
-### Is two-factor authentication (2FA) supported?
+### Is multi-factor authentication (MFA) supported?
 
-**Status:** Planned for Phase 2 (Q3 2026)
+**Status:** ✅ Implemented (Phase 2A)
 
-**Planned methods:**
+**Supported methods:**
 - TOTP (Google Authenticator, Authy)
-- WebAuthn/FIDO2 (hardware keys like YubiKey)
+- WebAuthn/FIDO2 (hardware security keys like YubiKey, passkeys)
 - Backup codes
+- Recovery circles
+- Trusted devices
 
-For now, use a strong unique password (12+ characters) and password manager.
+MFA is available now. Enable it in your account security settings.
 
 ---
 
@@ -351,7 +354,7 @@ See [docs/GETTING_STARTED.md](./docs/GETTING_STARTED.md) for detailed instructio
 
 **Required:**
 - **Node.js** 20+
-- **Go** 1.24+
+- **Go** 1.26.1+
 - **Docker** & **Docker Compose**
 - **Git**
 
@@ -674,7 +677,7 @@ lsof -ti:5173 | xargs kill -9
 
 ### Database migrations aren't running
 
-The migration system uses `golang-migrate/v4` and runs automatically on server startup. There are currently **47 migrations** (000001-000047).
+The migration system uses `golang-migrate/v4` and runs automatically on server startup. There are currently **57 migrations** (000001-000057) — see [[internal]](.[internal]) for the current count.
 
 **Check migration status:**
 ```bash
@@ -811,4 +814,4 @@ If your question isn't answered here:
 
 ---
 
-**Last Updated:** 2026-03-28 | **Version:** 1.4.0
+**Last Updated:** 2026-04-09 | **Version:** 1.5.0

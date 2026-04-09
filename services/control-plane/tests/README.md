@@ -108,7 +108,7 @@ pkg/
     └── logger_test.go              # Logger tests
 ```
 
-**70 test files total** across 22 packages.
+**90 test files total** across 22 packages.
 
 ## Running Tests
 

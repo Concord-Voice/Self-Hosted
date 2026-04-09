@@ -4,6 +4,141 @@ All notable changes to Concord Voice will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.1.18] - 2026-04-09 (Phase 2B — Sentry Error Tracking)
+
+### Added
+
+- **Sentry Electron integration** — Error tracking for main and renderer processes with fail-closed privacy model; `beforeSend` scrubber drops key material, PII, and console breadcrumbs before transmission (#586)
+- **Docs-reviewer subagent** — Claude Code subagent for automated documentation drift detection with tier classification and `/review-pr` skill dispatch
+
+### Changed
+
+- **Documentation refresh** — AGENTS.md, REVIEW.md, README.md, and docs/architecture.md updated to reflect current Phase 2B state
+
+---
+
+## [0.1.17] - 2026-04-09 (Phase 2B — QA Pass & Infrastructure Hardening)
+
+### Added
+
+- **[internal] counts automation** — `./scripts/update-claude-md-counts.sh` for keeping project stats in sync (#581)
+
+### Changed
+
+- **MCP env var standardization** — Environment variable naming aligned across MCP server configs (#581)
+
+### Fixed
+
+- **KLIPY GIF proxy routes** — Nested `/gifs` path prefix added to match client-side route expectations (#580)
+- **Copilot review feedback** — Addressed review comments from PR #577 (#579)
+- **coturn TLS hardening** — Certificate isolation, `turn.concordvoice.chat` SAN added, certbot deploy hook wired
+- **NATS single-node config** — Corrected NATS configuration; coturn TLS and external-IP wiring fixed
+
+---
+
+## [0.1.16] - 2026-04-08 (Phase 2B — Media Proxy & QA)
+
+### Added
+
+- **Public Tier 1 media proxy** — Unauthenticated access for public media assets (#570)
+
+### Fixed
+
+- **Avatar slot pinning** — Avatar elements pinned to 40×40 px to prevent layout shift (#570)
+- **QA bug pass** — Broad regression sweep covering UI, API, and infrastructure issues (#571)
+
+---
+
+## [0.1.15] - 2026-04-07 (Phase 2B — Klipy GIF Integration)
+
+### Added
+
+- **Klipy GIF integration** — GIF search, picker, and privacy proxy through the control-plane; API key injected via environment variable; disclaimers and branding in About section (#483, #557)
+- **Developer Mode toggle** — DevTools accessible in Alpha builds only via developer mode setting (#567)
+
+### Changed
+
+- **Dependency bumps** — `dotenv`, `@vitest/coverage-istanbul`, `go-webauthn/webauthn`, `@types/node`, build-tooling group (4 packages), testing group (2 packages) (#559, #560, #561, #564, #565)
+
+### Fixed
+
+- **Windows desktop build** — `matrix.arch` substituted directly in `electron-forge make` command to fix cross-platform CI build (#569)
+- **Chat and GIF rendering** — Chat message rendering, GIF display via Klipy, MinIO crop upload, and SPA hot-reload all corrected (#566)
+- **Theme-aware Klipy logos** — Logos respond to active color scheme; public/branding layout restructured
+- **GIF envelope decryption** — Envelope unwrapped on every decrypt path, not only realtime; nested `file.{hd,md,sm}.<format>` rendition shape parsed correctly
+- **SPA CSP headers** — Strict default CSP no longer dropped on every response, only on success paths; SPA bundle directory mounted into control-plane container
+- **GIF picker UX** — Picker interaction, settings accessibility regressions, and test assertions updated
+
+---
+
+## [0.1.14] - 2026-04-06 (Phase 2B — Voice Refactors & RBAC Wiring)
+
+### Changed
+
+- **VoiceAudioSection split** — Component decomposed into focused sub-components for maintainability (#553)
+- **voiceService complexity reduction** — Remaining high-complexity functions in `voiceService` refactored (#552)
+- **E2EE transforms extraction** — E2EE transform and produce helpers extracted to reduce cognitive complexity (#551)
+- **Codec cascade extraction** — Codec cascade selection logic extracted into a dedicated helper (#550)
+
+### Fixed
+
+- **RBAC context menu wiring** — Context menu actions wired to RBAC roles; moderation actions (kick, ban, mute) enabled (#548)
+
+---
+
+## [0.1.13] - 2026-04-04 (Phase 2B — Chat Features, Server Mute/Deafen, Infrastructure)
+
+### Added
+
+- **Server mute/deafen with SFU enforcement** — Server-side mute and deafen state propagated to mediasoup SFU; consumers paused/resumed on enforcement (#488)
+- **Shared `useChatController` hook** — Unified chat container logic (fetch, paginate, decrypt, send) extracted into a reusable hook (#545)
+- **Message reactions** — Emoji reaction add/remove on messages with real-time sync (#169, #459)
+- **Reply/quote messages** — Threaded reply rendering with quoted message preview (#170, #463)
+- **Message pinning** — Pin/unpin messages in channels with pin feed (#171, #465)
+- **E2EE-native message search** — Client-side decrypted search across channel message history (#172, #468)
+- **File and image attachments** — Upload, preview, and download for chat attachments (#178, #470)
+- **Group DM creation and management** — Multi-participant DM groups with admin controls (#208)
+- **Desktop notifications** — System notifications for @mentions and new DMs (#175, #478)
+- **Draft message persistence** — Unsent drafts saved per-channel and restored on revisit (#174, #477)
+- **Keyboard shortcuts system** — Configurable keyboard shortcuts with help overlay (#176, #479)
+- **Global context menu** — Unified context menu system with clipboard support and role assignment (#446)
+- **SPA deployment pipeline** — File server, versioning, and GitHub Actions workflow for hot-update SPA bundles (#429)
+- **Docker network segmentation** — Service isolation, request ID propagation, Redis auth bans (#442)
+- **AI governance framework** — AI-generated code policy, CODEOWNERS, agentic controls, Semgrep SAST, path-scoped [internal] rules, Claude Code skills, custom agents, Copilot prompt templates, MCP project config (#454–#458, #500–#504, #507–#518, #522)
+
+### Changed
+
+- **Message component decomposition** — `Message` component decomposed; shared types extracted for the Phase 2B chat rewrite (#451)
+- **DM thread list real-time updates** — `last_message` included in `dm_unread_notify` events for live thread list refresh (#541)
+- **Dependency bumps** — TypeScript 6.0.2, typescript-eslint 8.58, eslint 10.1, mediasoup, lucide-react 1.7.0, Electron, `@types/node`, `@playwright/test`, Go module group, Actions group, media-plane dev-tooling (#411, #414, #511, #528–#529, #532–#536, #538–#539)
+- **Email infrastructure** — Transactional email migrated from Proton SMTP to Resend; branded templates; `verify.concordvoice.chat` subdomain
+- **CI pipeline hardening** — Semgrep SAST added; quality gates formalized; CI performance optimized with `sync.Once` migrations, test sharding, and caching (#457, #471)
+- **Go and TypeScript complexity reduction** — Cognitive complexity reduced across control-plane handlers and frontend/media-plane code (#418, #419, #498)
+- **DRY modal components** — Shared modal panels extracted to eliminate duplication (#365, #481)
+
+### Fixed
+
+- **DM thread real-time updates** — Last message propagated in unread notify payload to refresh thread list (#541)
+- **Replied-to message decryption** — `replied_to` content decrypted on REST message fetch, not only via WebSocket (#542)
+- **Server role styling isolation** — Server role badge styles no longer bleed into DM message rendering (#543)
+- **Hub test determinism** — `time.Sleep` replaced with deterministic channel-based sync in WebSocket hub tests (#544)
+- **Context menu role assignment** — Role assignment via context menu no longer fails silently (#447)
+- **Voice flaky tests** — Hub goroutine races with test cleanup resolved (#476)
+- **Modal Escape handler** — Nested Escape key handler no longer fires on all stacked modal instances (#480)
+- **Video frame scaling** — Video frames dynamically scale to fill voice chat area (#443)
+- **WebSocket reconnect** — Connection-lost handler replaced page reload with direct WS reconnect (#194, #439)
+- **Accessibility pass** — Semantic HTML, keyboard navigation, ARIA attributes, and UI polish across the app (#380, #427)
+- **nginx security** — H2C smuggling and Host header injection mitigated; shell injection in GitHub Actions CI fixed (#523, #525)
+- **Semgrep findings** — Verified-safe `sql-sprintf` findings suppressed with inline annotations (#524)
+- **Media-plane Redis URL** — Media-plane added to data network with correct Redis URL configured
+
+### Security
+
+- **Nginx hardening** — H2C smuggling vector closed; Host header injection blocked (#525)
+- **GitHub Actions shell injection** — Semgrep-identified injection in CI workflow resolved (#523)
+
+---
+
 ## [0.1.12] - 2026-03-27 (Phase 2A — Foundations & Security)
 
 ### Added
