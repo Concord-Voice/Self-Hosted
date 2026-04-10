@@ -1,23 +1,27 @@
 package channels_test
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"testing"
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
-	pathChannelsPrefix = "/api/v1/channels/"
-	pathChannels       = "/api/v1/channels"
-	pathServersPrefix  = "/api/v1/servers/"
-	pathKeys           = "/keys"
-	keyServerID        = "server_id"
-	keyWrappedKeys     = "wrapped_keys"
-	keyChannel         = "channel"
-	roleMember         = "member"
-	keyIsEncrypted     = "is_encrypted"
+	pathChannelsPrefix     = "/api/v1/channels/"
+	pathChannels           = "/api/v1/channels"
+	pathServersPrefix      = "/api/v1/servers/"
+	pathKeys               = "/keys"
+	keyServerID            = "server_id"
+	keyWrappedKeys         = "wrapped_keys"
+	keyChannel             = "channel"
+	roleMember             = "member"
+	keyIsEncrypted         = "is_encrypted"
+	fmtRateLimitChannelKey = "ratelimit:channel_rotate:%s"
 )
 
 func setupTS(t *testing.T) *testhelpers.TestServer {
@@ -330,4 +334,91 @@ func TestGetPendingKeyRequestsEmpty(t *testing.T) {
 	testhelpers.ParseJSON(t, w, &body)
 	requests := body["pending_requests"].([]interface{})
 	assert.Equal(t, 0, len(requests))
+}
+
+// --- Rate Limiting: RotateKey ---
+
+func TestRotateKeyRateLimitBlocks11th(t *testing.T) {
+	ts, user, _, channelID := setupEncryptedChannel(t)
+
+	// Clear any pre-existing rate limit counter for this channel.
+	ts.Redis.Del(context.Background(), fmt.Sprintf(fmtRateLimitChannelKey, channelID))
+
+	// First 10 calls should succeed.
+	for i := 1; i <= 10; i++ {
+		w := ts.DoRequest("POST", pathChannelsPrefix+channelID+pathRotateKey, nil, testhelpers.AuthHeaders(user.AccessToken))
+		require.Equal(t, http.StatusOK, w.Code, fmt.Sprintf("call %d should succeed", i))
+	}
+
+	// Clear the per-user middleware rate limit key so the 11th request
+	// reaches the handler's per-channel rate limit (not the route middleware).
+	userRLKey := fmt.Sprintf("ratelimit:user:%s:POST:/api/v1/channels/:id/rotate-key", user.ID)
+	ts.Redis.Del(context.Background(), userRLKey)
+
+	// 11th call should be rate-limited by the per-channel limit.
+	w := ts.DoRequest("POST", pathChannelsPrefix+channelID+pathRotateKey, nil, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Contains(t, body, "error")
+	assert.Contains(t, body, "message")
+	assert.Contains(t, body, "retry_after")
+
+	msg, ok := body["message"].(string)
+	require.True(t, ok)
+	assert.Contains(t, msg, "Try again in")
+}
+
+func TestRotateKeyRateLimitIndependentChannels(t *testing.T) {
+	// Use two separate users/servers so the per-user middleware rate limit
+	// (10/min on the route) doesn't interfere with the per-channel test.
+	ts, userA, _, channelA := setupEncryptedChannel(t)
+
+	// Create a second user + server + encrypted channel for independence test.
+	userB := ts.CreateTestUser(t, "ratelimitb")
+	serverB := ts.CreateTestServer(t, userB.ID, "RateLimit B Server")
+	w := ts.DoRequest("POST", pathChannels, map[string]interface{}{
+		keyServerID:    serverB,
+		"name":         "encrypted-b",
+		"type":         "text",
+		keyIsEncrypted: true,
+		keyWrappedKeys: map[string]string{
+			userB.ID: testhelpers.ValidCiphertext(),
+		},
+	}, testhelpers.AuthHeaders(userB.AccessToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	var createBody map[string]interface{}
+	testhelpers.ParseJSON(t, w, &createBody)
+	channelB := createBody[keyChannel].(map[string]interface{})["id"].(string)
+
+	// Clear any pre-existing rate limit counters for these channels.
+	ts.Redis.Del(context.Background(), fmt.Sprintf(fmtRateLimitChannelKey, channelA))
+	ts.Redis.Del(context.Background(), fmt.Sprintf(fmtRateLimitChannelKey, channelB))
+
+	// Exhaust channel A's per-channel limit.
+	for i := 1; i <= 10; i++ {
+		resp := ts.DoRequest("POST", pathChannelsPrefix+channelA+pathRotateKey, nil, testhelpers.AuthHeaders(userA.AccessToken))
+		require.Equal(t, http.StatusOK, resp.Code, fmt.Sprintf("channel A call %d should succeed", i))
+	}
+
+	// Clear the per-user middleware rate limit key so the 11th request
+	// reaches the handler's per-channel rate limit (not the route middleware).
+	userARLKey := fmt.Sprintf("ratelimit:user:%s:POST:/api/v1/channels/:id/rotate-key", userA.ID)
+	ts.Redis.Del(context.Background(), userARLKey)
+
+	// Channel A should be blocked with proper response body.
+	resp := ts.DoRequest("POST", pathChannelsPrefix+channelA+pathRotateKey, nil, testhelpers.AuthHeaders(userA.AccessToken))
+	assert.Equal(t, http.StatusTooManyRequests, resp.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, resp, &body)
+	assert.Contains(t, body, "error")
+	assert.Contains(t, body, "message")
+	assert.Contains(t, body, "retry_after")
+
+	// Channel B (different channel, different user) should still work.
+	resp = ts.DoRequest("POST", pathChannelsPrefix+channelB+pathRotateKey, nil, testhelpers.AuthHeaders(userB.AccessToken))
+	assert.Equal(t, http.StatusOK, resp.Code)
 }

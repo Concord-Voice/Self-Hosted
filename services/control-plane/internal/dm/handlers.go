@@ -4,16 +4,20 @@ package dm
 import (
 	"database/sql"
 	"encoding/base64"
+	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	natsclient "github.com/markdrogersjr/Concord/services/control-plane/pkg/nats"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -50,21 +54,23 @@ const (
 
 // Handler handles DM-related requests.
 type Handler struct {
-	db   *sql.DB
-	log  *logger.Logger
-	hub  *websocket.Hub
-	cfg  *config.Config
-	nats *natsclient.Client
+	db    *sql.DB
+	log   *logger.Logger
+	hub   *websocket.Hub
+	cfg   *config.Config
+	nats  *natsclient.Client
+	redis *redis.Client
 }
 
 // NewHandler creates a new DM handler.
-func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, cfg *config.Config, nats *natsclient.Client) *Handler {
+func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, cfg *config.Config, nats *natsclient.Client, redis *redis.Client) *Handler {
 	return &Handler{
-		db:   db,
-		log:  log,
-		hub:  hub,
-		cfg:  cfg,
-		nats: nats,
+		db:    db,
+		log:   log,
+		hub:   hub,
+		cfg:   cfg,
+		nats:  nats,
+		redis: redis,
 	}
 }
 
@@ -1372,7 +1378,13 @@ func (h *Handler) RotateKey(c *gin.Context) {
 		return
 	}
 
-	// TODO: Rate limit via Redis (5/24h per conversation). For now, accept all.
+	// Per-resource rate limit: 10 rotations per 24h per conversation.
+	// Subscription-tiered limits deferred to issue #603.
+	rateLimitKey := fmt.Sprintf("ratelimit:dm_rotate:%s", convID)
+	if blocked, retryAfter := middleware.IsRateLimited(c.Request.Context(), h.redis, rateLimitKey, 10, 24*time.Hour); blocked {
+		middleware.RespondRateLimited(c, retryAfter, 10)
+		return
+	}
 
 	// Get current max key version
 	var maxVersion int

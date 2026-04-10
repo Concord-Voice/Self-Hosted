@@ -1,6 +1,7 @@
 package dm_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -2913,4 +2914,94 @@ func TestAuthorizeVoiceJoinEnforcement(t *testing.T) {
 		conv := body["conversation"].(map[string]interface{})
 		assert.Equal(t, false, conv["is_group"])
 	})
+}
+
+// --- Rate Limit Tests ---
+
+const fmtRateLimitDMKey = "ratelimit:dm_rotate:%s"
+const fmtUserRLKeyDMRotate = "ratelimit:user:%s:POST:/api/v1/dm/conversations/:id/rotate-key"
+
+func TestDMRotateKeyRateLimitBlocks11th(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "dmrl-user1")
+	user2 := ts.CreateTestUser(t, "dmrl-user2")
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+
+	headers := testhelpers.AuthHeaders(user1.AccessToken)
+	endpoint := pathDMConversationsPrefix + convID + pathRotateKey
+
+	// Clear any pre-existing rate limit counter for this conversation
+	ts.Redis.Del(context.Background(), fmt.Sprintf(fmtRateLimitDMKey, convID))
+
+	// First 10 calls should succeed.
+	for i := 1; i <= 10; i++ {
+		// Clear per-user middleware key every 4 requests (middleware allows 5/min)
+		if i%4 == 0 {
+			userRLKey := fmt.Sprintf(fmtUserRLKeyDMRotate, user1.ID)
+			ts.Redis.Del(context.Background(), userRLKey)
+		}
+		w := ts.DoRequest("POST", endpoint, nil, headers)
+		assert.Equal(t, http.StatusOK, w.Code, "request %d should succeed", i)
+	}
+
+	// Clear per-user middleware key before 11th request
+	userRLKey := fmt.Sprintf(fmtUserRLKeyDMRotate, user1.ID)
+	ts.Redis.Del(context.Background(), userRLKey)
+
+	// 11th should be rate limited by per-conversation limit
+	w := ts.DoRequest("POST", endpoint, nil, headers)
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "Rate limit exceeded", body["error"])
+	assert.Contains(t, body["message"], "Try again in")
+	assert.NotNil(t, body["retry_after"])
+}
+
+func TestDMRotateKeyRateLimitIndependentConversations(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "dmrl-indep1")
+	user2 := ts.CreateTestUser(t, "dmrl-indep2")
+	user3 := ts.CreateTestUser(t, "dmrl-indep3")
+
+	convA := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convB := ts.CreateDMConversation(t, user1.ID, user3.ID, true)
+
+	headers := testhelpers.AuthHeaders(user1.AccessToken)
+
+	// Clear any pre-existing rate limit counters
+	ts.Redis.Del(context.Background(), fmt.Sprintf(fmtRateLimitDMKey, convA))
+	ts.Redis.Del(context.Background(), fmt.Sprintf(fmtRateLimitDMKey, convB))
+
+	// Exhaust conv A's limit
+	for i := 1; i <= 10; i++ {
+		if i%4 == 0 {
+			userRLKey := fmt.Sprintf(fmtUserRLKeyDMRotate, user1.ID)
+			ts.Redis.Del(context.Background(), userRLKey)
+		}
+		w := ts.DoRequest("POST", pathDMConversationsPrefix+convA+pathRotateKey, nil, headers)
+		assert.Equal(t, http.StatusOK, w.Code, "conv A request %d should succeed", i)
+	}
+
+	// Clear per-user middleware key
+	userRLKey := fmt.Sprintf(fmtUserRLKeyDMRotate, user1.ID)
+	ts.Redis.Del(context.Background(), userRLKey)
+
+	// Conv A should now be rate limited
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convA+pathRotateKey, nil, headers)
+	assert.Equal(t, http.StatusTooManyRequests, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "Rate limit exceeded", body["error"])
+	assert.Contains(t, body["message"], "Try again in")
+	assert.NotNil(t, body["retry_after"])
+
+	// Clear per-user middleware key again
+	ts.Redis.Del(context.Background(), userRLKey)
+
+	// Conv B should still work
+	w = ts.DoRequest("POST", pathDMConversationsPrefix+convB+pathRotateKey, nil, headers)
+	assert.Equal(t, http.StatusOK, w.Code, "conv B should still work")
 }

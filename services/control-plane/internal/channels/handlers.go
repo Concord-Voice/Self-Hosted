@@ -5,13 +5,16 @@ import (
 	"database/sql"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
+	"github.com/redis/go-redis/v9"
 )
 
 const (
@@ -41,15 +44,17 @@ type Handler struct {
 	log      *logger.Logger
 	hub      *websocket.Hub
 	resolver *rbac.Resolver
+	redis    *redis.Client
 }
 
 // NewHandler creates a new channel handler
-func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, resolver *rbac.Resolver) *Handler {
+func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, resolver *rbac.Resolver, redis *redis.Client) *Handler {
 	return &Handler{
 		db:       db,
 		log:      log,
 		hub:      hub,
 		resolver: resolver,
+		redis:    redis,
 	}
 }
 
@@ -1496,7 +1501,13 @@ func (h *Handler) RotateKey(c *gin.Context) {
 		return
 	}
 
-	// TODO: Rate limit via Redis (3/day basic, 10/day premium per channel). For now, accept all.
+	// Per-resource rate limit: 10 rotations per 24h per channel.
+	// Subscription-tiered limits deferred to issue #603.
+	rateLimitKey := fmt.Sprintf("ratelimit:channel_rotate:%s", channelID)
+	if blocked, retryAfter := middleware.IsRateLimited(c.Request.Context(), h.redis, rateLimitKey, 10, 24*time.Hour); blocked {
+		middleware.RespondRateLimited(c, retryAfter, 10)
+		return
+	}
 
 	var maxVersion int
 	_ = h.db.QueryRow(`SELECT COALESCE(MAX(key_version), 0) FROM channel_keys WHERE channel_id = $1`, channelID).Scan(&maxVersion)

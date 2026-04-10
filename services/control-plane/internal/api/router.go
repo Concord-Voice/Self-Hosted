@@ -136,12 +136,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	sessionsHandler := sessions.NewHandler(db, redis, log, hub, mfaHandler)
 	usersHandler := users.NewHandler(db, log, hub, mfaHandler)
 	serversHandler := servers.NewHandler(db, log, hub, rbacResolver)
-	channelsHandler := channels.NewHandler(db, log, hub, rbacResolver)
+	channelsHandler := channels.NewHandler(db, log, hub, rbacResolver, redis)
 	membersHandler := members.NewHandler(db, log, redis, hub, rbacResolver, auditWriter)
 	messagesHandler := messages.NewHandler(db, log, hub, rbacResolver)
 	invitesHandler := invites.NewHandler(db, log, hub, rbacResolver)
 	voiceHandler := voice.NewHandler(db, log, hub, cfg, rbacResolver, natsClient)
-	dmHandler := dm.NewHandler(db, log, hub, cfg, natsClient)
+	dmHandler := dm.NewHandler(db, log, hub, cfg, natsClient, redis)
 	friendsHandler := friends.NewHandler(db, log, hub)
 	ownershipHandler := ownership.NewHandler(ownership.HandlerDeps{
 		DB:          db,
