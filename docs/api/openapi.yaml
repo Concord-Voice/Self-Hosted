@@ -1558,7 +1558,7 @@ paths:
       description: |
         Initiate a key rotation for an encrypted channel. Increments the
         key version; members must re-distribute wrapped keys.
-        Rate limit: 10 requests per minute (user-based).
+        Rate limit: 10 requests per 24 hours (per channel, Redis INCR+EXPIRE).
       security:
         - BearerAuth: []
       parameters:
@@ -1582,6 +1582,8 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   # ----------------------------------------------------------
   # CHANNEL GROUPS (Phase 1C)
@@ -2113,7 +2115,7 @@ paths:
       summary: Rotate DM encryption key
       description: |
         Initiate key rotation for an encrypted DM conversation.
-        Rate limit: 5 requests per minute (user-based).
+        Rate limit: 10 requests per 24 hours (per conversation, Redis INCR+EXPIRE).
       security:
         - BearerAuth: []
       parameters:
@@ -2136,6 +2138,8 @@ paths:
                     example: Key rotation initiated
                   new_key_version:
                     type: integer
+        '429':
+          $ref: '#/components/responses/RateLimited'
 
   # ----------------------------------------------------------
   # FRIENDS (Phase 1C)
@@ -2941,11 +2945,32 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
     RateLimited:
-      description: Too many requests
+      description: Too many requests — rate limit exceeded
+      headers:
+        Retry-After:
+          description: Seconds until the rate limit window resets
+          schema:
+            type: integer
+            example: 3600
+        X-RateLimit-Limit:
+          description: Maximum requests allowed in the window
+          schema:
+            type: integer
+            example: 10
+        X-RateLimit-Remaining:
+          description: Requests remaining (always 0 when 429 is returned)
+          schema:
+            type: integer
+            example: 0
+        X-RateLimit-Reset:
+          description: Unix timestamp when the rate limit window resets
+          schema:
+            type: integer
+            example: 1744329600
       content:
         application/json:
           schema:
-            $ref: '#/components/schemas/Error'
+            $ref: '#/components/schemas/RateLimitError'
 
   # ----------------------------------------------------------
   # SCHEMAS
@@ -2959,6 +2984,21 @@ components:
         error:
           type: string
       required: [error]
+
+    RateLimitError:
+      type: object
+      properties:
+        error:
+          type: string
+          example: Rate limit exceeded
+        message:
+          type: string
+          example: Key rotation limit reached. Try again in 23 hours 59 minutes.
+        retry_after:
+          type: integer
+          description: Seconds until the rate limit window resets
+          example: 86340
+      required: [error, message]
 
     SuccessMessage:
       type: object
