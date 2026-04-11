@@ -80,9 +80,9 @@ func TestValidateUsername(t *testing.T) {
 func TestValidateUsernameLeetspeak(t *testing.T) {
 	// Leetspeak variations of reserved words should be caught
 	tests := []string{
-		"4dmin",   // a->4 for "admin"
-		"r00t",    // o->0 for "root"
-		"$y$t3m",  // s->$, e->3 for "system"
+		"4dmin",  // a->4 for "admin"
+		"r00t",   // o->0 for "root"
+		"$y$t3m", // s->$, e->3 for "system"
 	}
 	for _, username := range tests {
 		t.Run(username, func(t *testing.T) {

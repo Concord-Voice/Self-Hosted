@@ -719,7 +719,7 @@ type attachmentParams struct {
 	conversationID string
 }
 
-func createAttachmentRecord(h *Handler, c *gin.Context, p attachmentParams) error {
+func createAttachmentRecord(h *Handler, _ *gin.Context, p attachmentParams) error {
 	var chID, convID interface{}
 	if p.channelID != "" {
 		chID = p.channelID

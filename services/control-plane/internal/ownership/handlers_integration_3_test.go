@@ -87,7 +87,7 @@ func TestInitiateTransferMFAValidCode(t *testing.T) {
 	enableMFAForUser(t, ts, owner.ID)
 
 	// Seed a valid inline MFA token
-	mfaToken := "valid-inline-mfa-token-for-testing-1234"
+	mfaToken := "valid-inline-mfa-token-for-testing-1234" //nolint:gosec // test token, not real credential
 	seedMFAInlineToken(t, ts, owner.ID, mfaToken)
 
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
@@ -158,7 +158,7 @@ func TestReverseTransferMFAValidCode(t *testing.T) {
 	require.NoError(t, err)
 
 	// Seed a valid inline MFA token
-	mfaToken := "valid-inline-mfa-token-for-reversal-1234"
+	mfaToken := "valid-inline-mfa-token-for-reversal-1234" //nolint:gosec // test token, not real credential
 	seedMFAInlineToken(t, ts, owner.ID, mfaToken)
 
 	w = ts.DoRequest("POST", pathOwnershipReverse+reversalToken, map[string]interface{}{

@@ -1146,7 +1146,7 @@ func (h *Handler) distributeChannelKeysToMembers(channelID string, wrappedKeys m
 		h.notifyKeyDelivered(channelID, memberUserID)
 		distributed++
 	}
-	return
+	return distributed, duplicates
 }
 
 func (h *Handler) notifyKeyDelivered(contextID, memberUserID string) {

@@ -187,7 +187,7 @@ type registrationData struct {
 
 func (h *Handler) validateRegistration(req *RegisterRequest) error {
 	if !req.AgeConfirmation {
-		return fmt.Errorf("You must be at least 16 years old to create an account")
+		return fmt.Errorf("You must be at least 16 years old to create an account") //nolint:staticcheck // ST1005: user-facing message rendered directly in UI
 	}
 	if err := ValidateUsername(req.Username); err != nil {
 		return err
@@ -201,15 +201,15 @@ func (h *Handler) validateRegistration(req *RegisterRequest) error {
 func decodeE2EEKeys(publicKeyB64, wrappedKeyB64, saltB64 string) (publicKey, wrappedKey, salt []byte, err error) {
 	publicKey, err = base64.StdEncoding.DecodeString(publicKeyB64)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("Invalid public key format")
+		return nil, nil, nil, fmt.Errorf("Invalid public key format") //nolint:staticcheck // ST1005: user-facing message rendered directly in UI
 	}
 	wrappedKey, err = base64.StdEncoding.DecodeString(wrappedKeyB64)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("Invalid wrapped private key format")
+		return nil, nil, nil, fmt.Errorf("Invalid wrapped private key format") //nolint:staticcheck // ST1005: user-facing message rendered directly in UI
 	}
 	salt, err = base64.StdEncoding.DecodeString(saltB64)
 	if err != nil {
-		return nil, nil, nil, fmt.Errorf("Invalid salt format")
+		return nil, nil, nil, fmt.Errorf("Invalid salt format") //nolint:staticcheck // ST1005: user-facing message rendered directly in UI
 	}
 	return publicKey, wrappedKey, salt, nil
 }
@@ -282,6 +282,7 @@ func (h *Handler) generateTokenPair(c *gin.Context, userID string, emailVerified
 	return accessToken, refreshToken, tokenID, nil
 }
 
+// Register handles new user registration.
 func (h *Handler) Register(c *gin.Context) {
 	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -463,7 +464,7 @@ func (h *Handler) lookupUserForLogin(email string) (models.User, error) {
 	return user, err
 }
 
-func (h *Handler) verifyCredentials(c *gin.Context, ctx context.Context, email, password, passwordHash string) bool {
+func (h *Handler) verifyCredentials(ctx context.Context, c *gin.Context, email, password, passwordHash string) bool {
 	valid, err := VerifyPassword(password, passwordHash)
 	if err != nil {
 		h.log.Error("Failed to verify password", "error", err)
@@ -479,7 +480,7 @@ func (h *Handler) verifyCredentials(c *gin.Context, ctx context.Context, email, 
 	return true
 }
 
-func (h *Handler) handleMFAChallenge(c *gin.Context, ctx context.Context, userID string, rememberMe bool) {
+func (h *Handler) handleMFAChallenge(ctx context.Context, c *gin.Context, userID string, rememberMe bool) {
 	allMethods, _ := h.mfaChecker.GetEnabledMethods(ctx, userID)
 	loginMethods, _ := h.mfaChecker.GetLoginMethods(ctx, userID)
 	challengeToken, jti, mfaErr := h.mfaChecker.GenerateLoginChallenge(ctx, userID, rememberMe)
@@ -500,11 +501,11 @@ func (h *Handler) handleMFAChallenge(c *gin.Context, ctx context.Context, userID
 	if len(recoveryOnly) > 0 {
 		resp["recovery_only_methods"] = recoveryOnly
 	}
-	addWebAuthnOptions(h, ctx, resp, loginMethods, userID, jti)
+	addWebAuthnOptions(ctx, h, resp, loginMethods, userID, jti)
 	c.JSON(http.StatusOK, resp)
 }
 
-func addWebAuthnOptions(h *Handler, ctx context.Context, resp gin.H, loginMethods []string, userID, jti string) {
+func addWebAuthnOptions(ctx context.Context, h *Handler, resp gin.H, loginMethods []string, userID, jti string) {
 	for _, m := range loginMethods {
 		if m == "webauthn" {
 			if opts, err := h.mfaChecker.BeginWebAuthnLogin(ctx, userID, jti); err != nil {
@@ -524,6 +525,7 @@ func resolveRememberMe(req *LoginRequest) bool {
 	return true
 }
 
+// Login authenticates a user and issues access and refresh tokens.
 func (h *Handler) Login(c *gin.Context) {
 	var req LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -551,7 +553,7 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
-	if !h.verifyCredentials(c, ctx, req.Email, req.Password, user.PasswordHash) {
+	if !h.verifyCredentials(ctx, c, req.Email, req.Password, user.PasswordHash) {
 		return
 	}
 
@@ -559,7 +561,7 @@ func (h *Handler) Login(c *gin.Context) {
 	rememberMe := resolveRememberMe(&req)
 
 	if h.mfaChecker != nil && h.mfaChecker.IsEnabled(ctx, user.ID) {
-		h.handleMFAChallenge(c, ctx, user.ID, rememberMe)
+		h.handleMFAChallenge(ctx, c, user.ID, rememberMe)
 		return
 	}
 
@@ -1281,6 +1283,7 @@ func (h *Handler) disconnectUserByID(userID string) {
 	}
 }
 
+// Logout revokes the current session's refresh token and blacklists the access token.
 func (h *Handler) Logout(c *gin.Context) {
 	h.blacklistAccessToken(c)
 
@@ -1425,7 +1428,7 @@ func validateRecoveryCodeFormat(raw string) (string, string) {
 
 // fetchRecoveryRecord loads and validates the recovery record from Redis.
 // Returns the record on success. On failure it writes the HTTP response and returns nil.
-func (h *Handler) fetchRecoveryRecord(c *gin.Context, ctx context.Context, redisKey string) *recoveryRecord {
+func (h *Handler) fetchRecoveryRecord(ctx context.Context, c *gin.Context, redisKey string) *recoveryRecord {
 	data, err := h.redis.Get(ctx, redisKey).Bytes()
 	if err == redis.Nil {
 		middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
@@ -1456,7 +1459,7 @@ func (h *Handler) fetchRecoveryRecord(c *gin.Context, ctx context.Context, redis
 
 // verifyRecoveryCode does a timing-safe comparison and handles wrong-code bookkeeping.
 // Returns true if the code matches. On mismatch it writes the HTTP response.
-func (h *Handler) verifyRecoveryCode(c *gin.Context, ctx context.Context, code string, record *recoveryRecord, redisKey string) bool {
+func (h *Handler) verifyRecoveryCode(ctx context.Context, c *gin.Context, code string, record *recoveryRecord, redisKey string) bool {
 	if subtle.ConstantTimeCompare([]byte(hashRecoveryCode(code)), []byte(record.CodeHash)) == 1 {
 		return true
 	}
@@ -1541,12 +1544,12 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 	defer cancel()
 
 	redisKey := recoveryRedisKey(email)
-	record := h.fetchRecoveryRecord(c, ctx, redisKey)
+	record := h.fetchRecoveryRecord(ctx, c, redisKey)
 	if record == nil {
 		return
 	}
 
-	if !h.verifyRecoveryCode(c, ctx, code, record, redisKey) {
+	if !h.verifyRecoveryCode(ctx, c, code, record, redisKey) {
 		return
 	}
 
@@ -1611,7 +1614,7 @@ func (h *Handler) validateAndConsumeRecoveryToken(c *gin.Context, tokenStr strin
 
 // prepareRecoveryPassword validates password strength, hashes it, and decodes E2EE key fields.
 // On failure writes the HTTP response (and cleans up the Redis used-key) and returns a non-nil error.
-func (h *Handler) prepareRecoveryPassword(c *gin.Context, ctx context.Context, password, wrappedB64, saltB64, recoveryUsedKey string) (string, []byte, []byte, error) {
+func (h *Handler) prepareRecoveryPassword(ctx context.Context, c *gin.Context, password, wrappedB64, saltB64, recoveryUsedKey string) (string, []byte, []byte, error) {
 	if err := ValidatePasswordStrength(password); err != nil {
 		h.redis.Del(ctx, recoveryUsedKey)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -1648,7 +1651,7 @@ type recoveryTxOp struct {
 
 // execRecoveryTx runs a series of SQL ops in a transaction. On failure it cleans up
 // the Redis used-key, writes the HTTP response, and returns an error.
-func (h *Handler) execRecoveryTx(c *gin.Context, ctx context.Context, ops []recoveryTxOp, recoveryUsedKey, errMsg string) error {
+func (h *Handler) execRecoveryTx(ctx context.Context, c *gin.Context, ops []recoveryTxOp, recoveryUsedKey, errMsg string) error {
 	tx, err := h.db.BeginTx(ctx, nil)
 	if err != nil {
 		h.log.Error(errMsgFailedStartTransaction, "error", err)
@@ -1731,7 +1734,7 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	passwordHash, wrappedKey, kdSalt, err := h.prepareRecoveryPassword(c, ctx, req.NewPassword, req.WrappedPrivateKey, req.KeyDerivationSalt, recoveryUsedKey)
+	passwordHash, wrappedKey, kdSalt, err := h.prepareRecoveryPassword(ctx, c, req.NewPassword, req.WrappedPrivateKey, req.KeyDerivationSalt, recoveryUsedKey)
 	if err != nil {
 		return
 	}
@@ -1769,7 +1772,7 @@ func (h *Handler) RecoveryResetPassword(c *gin.Context) {
 		`UPDATE refresh_tokens SET revoked_at = NOW() WHERE user_id = $1 AND revoked_at IS NULL`,
 		[]interface{}{claims.UserID}, "Failed to revoke refresh tokens"})
 
-	if err := h.execRecoveryTx(c, ctx, ops, recoveryUsedKey, errFailedResetPwd); err != nil {
+	if err := h.execRecoveryTx(ctx, c, ops, recoveryUsedKey, errFailedResetPwd); err != nil {
 		return
 	}
 
@@ -1806,7 +1809,7 @@ func (h *Handler) RecoveryResetAccount(c *gin.Context) {
 	}
 
 	ctx := c.Request.Context()
-	passwordHash, wrappedKey, kdSalt, err := h.prepareRecoveryPassword(c, ctx, req.NewPassword, req.WrappedPrivateKey, req.KeyDerivationSalt, recoveryUsedKey)
+	passwordHash, wrappedKey, kdSalt, err := h.prepareRecoveryPassword(ctx, c, req.NewPassword, req.WrappedPrivateKey, req.KeyDerivationSalt, recoveryUsedKey)
 	if err != nil {
 		return
 	}
@@ -1836,7 +1839,7 @@ func (h *Handler) RecoveryResetAccount(c *gin.Context) {
 			[]interface{}{claims.UserID}, "Failed to revoke refresh tokens"},
 	}
 
-	if err := h.execRecoveryTx(c, ctx, ops, recoveryUsedKey, errFailedResetAccount); err != nil {
+	if err := h.execRecoveryTx(ctx, c, ops, recoveryUsedKey, errFailedResetAccount); err != nil {
 		return
 	}
 

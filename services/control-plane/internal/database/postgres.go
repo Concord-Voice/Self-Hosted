@@ -10,7 +10,7 @@ import (
 	"github.com/golang-migrate/migrate/v4"
 	"github.com/golang-migrate/migrate/v4/database/postgres"
 	_ "github.com/golang-migrate/migrate/v4/source/file" // Register file source driver for migrations
-	_ "github.com/lib/pq"                                 // Register PostgreSQL driver
+	_ "github.com/lib/pq"                                // Register PostgreSQL driver
 )
 
 // New creates a new PostgreSQL database connection
@@ -78,4 +78,3 @@ func RunMigrations(db *sql.DB) error {
 
 	return nil
 }
-

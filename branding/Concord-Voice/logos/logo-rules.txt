@@ -1,14 +1,14 @@
 Key
 main-logo: Primary logo form factor
-symbool: Presents just the Moon with Two Stars logo 
+symbol: Presents just the Moon with Two Stars logo
 transparent: Uses a transparent background
 inverted: Reverses color scheme to a 'light mode'
 hires: High Resolution
 vector: Uses vector drawing
 noslogan: Removes the slogan "Own Your Voice" from the logo
 logo-icon: Is for icon-based use cases
-watermark: main-logo rendered at 50% opacity and has a transparent background 
-animated: Fade in graphics of the main-logo 
+watermark: main-logo rendered at 50% opacity and has a transparent background
+animated: Fade in graphics of the main-logo
 favicon: used for different icon use cases, including mobile and webapps
 
 Icon Spacing Rules:

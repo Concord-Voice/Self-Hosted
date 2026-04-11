@@ -29,7 +29,7 @@ const (
 	urlBackupCodesRegen     = "/api/v1/mfa/backup-codes/regenerate"
 	urlWebAuthnRegBegin     = "/api/v1/mfa/webauthn/register/begin"
 	urlWebAuthnRegFinish    = "/api/v1/mfa/webauthn/register/finish"
-	urlWebAuthnCredentials  = "/api/v1/mfa/webauthn/credentials"
+	urlWebAuthnCredentials  = "/api/v1/mfa/webauthn/credentials" //nolint:gosec // test URL constants, not credentials
 	urlEmailSmsSetup        = "/api/v1/mfa/email-sms/setup"
 	urlEmailSmsVerify       = "/api/v1/mfa/email-sms/verify"
 	urlEmailSmsDisable      = "/api/v1/mfa/email-sms/disable"

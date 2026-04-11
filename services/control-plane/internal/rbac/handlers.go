@@ -669,7 +669,8 @@ func (h *Handler) checkReorderHierarchy(c *gin.Context, serverID, userID string,
 }
 
 func (h *Handler) checkRolePositionViolations(c *gin.Context, serverID string, actorMaxPosition int, roleIDs []string) bool {
-	args := []interface{}{serverID, actorMaxPosition}
+	args := make([]interface{}, 0, 2+len(roleIDs))
+	args = append(args, serverID, actorMaxPosition)
 	placeholders := make([]string, len(roleIDs))
 	for i, id := range roleIDs {
 		placeholders[i] = "$" + strconv.Itoa(i+3)

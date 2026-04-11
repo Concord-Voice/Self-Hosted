@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
 	"github.com/gin-gonic/gin"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
 	"github.com/stretchr/testify/assert"
 )
 

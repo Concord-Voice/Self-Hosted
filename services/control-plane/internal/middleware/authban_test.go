@@ -103,7 +103,7 @@ func TestAuthBanCheckFailsOpenOnRedisDown(t *testing.T) {
 	ts := setupTS(t)
 
 	// Close Redis to simulate failure
-	ts.Redis.Close()
+	_ = ts.Redis.Close()
 
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
@@ -133,13 +133,13 @@ func TestAuthBanCheckNilRedisPassesThrough(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
-func TestRecordAuthFailureNilRedisNoOp(t *testing.T) {
+func TestRecordAuthFailureNilRedisNoOp(_ *testing.T) {
 	ctx := context.Background()
 	// Should not panic
 	middleware.RecordAuthFailure(ctx, nil, "10.0.0.6", testBanConfig)
 }
 
-func TestClearAuthFailuresNilRedisNoOp(t *testing.T) {
+func TestClearAuthFailuresNilRedisNoOp(_ *testing.T) {
 	ctx := context.Background()
 	// Should not panic
 	middleware.ClearAuthFailures(ctx, nil, "10.0.0.7")

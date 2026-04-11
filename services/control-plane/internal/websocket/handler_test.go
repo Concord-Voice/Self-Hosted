@@ -624,7 +624,7 @@ func TestHandleWebSocketDBLookupSuccess(t *testing.T) {
 		userID.String(), "wstest@test.concord.chat", "wshandleruser", hash)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		db.Exec(`DELETE FROM users WHERE id = $1`, userID.String()) //nolint:errcheck
+		db.Exec(`DELETE FROM users WHERE id = $1`, userID.String()) //nolint:errcheck,gosec
 	})
 
 	h := NewHandler(hub, db, redisClient, testJWTSecret, []string{"*"})
@@ -651,7 +651,7 @@ func TestHandleWebSocketTicketAuth(t *testing.T) {
 		userID.String(), "wsticket@test.concord.chat", "wsticketuser", hash)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		db.Exec(`DELETE FROM users WHERE id = $1`, userID.String()) //nolint:errcheck
+		db.Exec(`DELETE FROM users WHERE id = $1`, userID.String()) //nolint:errcheck,gosec
 	})
 
 	ticket := "integration-test-ticket"

@@ -337,7 +337,7 @@ func newTestHubWithChecker(checker MentionPermissionChecker) *Hub {
 	return hub
 }
 
-func TestEnforceMentionPermissions_NilAddendum(t *testing.T) {
+func TestEnforceMentionPermissions_NilAddendum(_ *testing.T) {
 	hub := newTestHubWithChecker(&mockMentionChecker{})
 	// Should not panic
 	hub.enforceMentionPermissions("server", "user", "channel", nil)
@@ -436,7 +436,7 @@ func TestEnforceMentionPermissions_ErrorStripsMentions(t *testing.T) {
 	assert.False(t, addendum.Here)
 }
 
-func TestEnforceMentionPermissions_SkipsEmptyFields(t *testing.T) {
+func TestEnforceMentionPermissions_SkipsEmptyFields(_ *testing.T) {
 	// If the addendum has no @everyone/@here and no users/roles,
 	// the individual enforcers should be no-ops without calling the checker.
 	checker := &mockMentionChecker{
@@ -552,7 +552,7 @@ func TestSendToUnsubscribedClients_SendsToUnsubscribed(t *testing.T) {
 	assert.Len(t, client1.Send, 0)
 }
 
-func TestSendToUnsubscribedClients_UserNotConnected(t *testing.T) {
+func TestSendToUnsubscribedClients_UserNotConnected(_ *testing.T) {
 	hub := newTestHubWithChecker(nil)
 	// No panic when user is not connected
 	hub.sendToUnsubscribedClients(uuid.New(), nil, []byte(`{}`))
@@ -575,7 +575,7 @@ func TestSendToUnsubscribedClients_NilSubscribedClients(t *testing.T) {
 	assert.Len(t, client.Send, 1)
 }
 
-func TestSendToUnsubscribedClients_FullSendChannel(t *testing.T) {
+func TestSendToUnsubscribedClients_FullSendChannel(_ *testing.T) {
 	hub := newTestHubWithChecker(nil)
 
 	userID := uuid.New()
@@ -750,13 +750,13 @@ func TestSendDMMentionNotify_SendsToMentionedUsers(t *testing.T) {
 
 // --- routeMentionNotifications edge cases ---
 
-func TestRouteMentionNotifications_NilAddendum(t *testing.T) {
+func TestRouteMentionNotifications_NilAddendum(_ *testing.T) {
 	hub := newTestHubWithChecker(nil)
 	// Should not panic
 	hub.routeMentionNotifications(uuid.New(), uuid.New(), uuid.New(), nil)
 }
 
-func TestRouteMentionNotifications_EmptyAddendum(t *testing.T) {
+func TestRouteMentionNotifications_EmptyAddendum(_ *testing.T) {
 	hub := newTestHubWithChecker(nil)
 	addendum := &MentionAddendum{}
 	// Should not panic
@@ -765,13 +765,13 @@ func TestRouteMentionNotifications_EmptyAddendum(t *testing.T) {
 
 // --- routeDMMentionNotifications edge cases ---
 
-func TestRouteDMMentionNotifications_NilAddendum(t *testing.T) {
+func TestRouteDMMentionNotifications_NilAddendum(_ *testing.T) {
 	hub := newTestHubWithChecker(nil)
 	// Should not panic
 	hub.routeDMMentionNotifications(uuid.New(), uuid.New(), nil)
 }
 
-func TestRouteDMMentionNotifications_EmptyAddendum(t *testing.T) {
+func TestRouteDMMentionNotifications_EmptyAddendum(_ *testing.T) {
 	hub := newTestHubWithChecker(nil)
 	addendum := &MentionAddendum{}
 	// Should not panic

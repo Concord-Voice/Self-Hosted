@@ -20,8 +20,8 @@ type TestUser struct {
 	ID          string
 	Email       string
 	Username    string
-	Password    string      //nolint:gosec // Test struct field, not a credential
-	AccessToken string      //nolint:gosec // Test struct field, not a credential
+	Password    string //nolint:gosec // Test struct field, not a credential
+	AccessToken string //nolint:gosec // Test struct field, not a credential
 }
 
 // E2EETestKeys returns structurally valid but random E2EE key material (base64 encoded).

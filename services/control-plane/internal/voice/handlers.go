@@ -319,9 +319,8 @@ const (
 
 // voiceModContext holds the validated state from authorizeVoiceMod.
 type voiceModContext struct {
-	serverID  string
-	targetID  string
-	channelID string // voice channel if target is in voice, empty otherwise
+	serverID string
+	targetID string
 }
 
 // authorizeVoiceMod validates params, checks membership, permission, and optionally hierarchy.
@@ -346,9 +345,7 @@ func (h *Handler) authorizeVoiceMod(c *gin.Context, perm rbac.Permission, requir
 		return nil
 	}
 
-	if requireHierarchy {
-		// Server-level: hierarchy check handled below
-	} else {
+	if !requireHierarchy {
 		// User-level: self-target guard
 		if actorID == targetID {
 			c.JSON(http.StatusBadRequest, gin.H{"error": errMsgCannotTargetSelf})

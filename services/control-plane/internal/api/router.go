@@ -69,7 +69,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	// In Docker, nginx is the sole reverse proxy and sets X-Real-IP.
 	// This prevents spoofed X-Forwarded-For from bypassing IP-based rate
 	// limits and auth failure bans.
-	router.SetTrustedProxies(nil) //nolint:errcheck // nil arg never errors
+	router.SetTrustedProxies(nil) //nolint:errcheck,gosec // nil arg never errors
 
 	// Middleware
 	router.Use(gin.Recovery())
@@ -1105,7 +1105,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 					gifRoutes.GET("/items", apiLimiter, klipyHandler.Items)
 					gifRoutes.POST("/share/:slug", apiLimiter, klipyHandler.Share)
 					gifRoutes.POST("/report/:slug", apiLimiter, klipyHandler.Report)
-					klipyRoutes.GET("/randomid", apiLimiter, klipyHandler.RandomID)
+					klipyRoutes.GET("/randomid", apiLimiter, klipyHandler.RandomID) //nolint:staticcheck // deprecated but kept for backward compatibility
 					klipyRoutes.POST("/customer-id", apiLimiter, klipyHandler.CustomerID)
 
 					// 120/min on the media proxy (chat scrollback bursts)

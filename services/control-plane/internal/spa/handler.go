@@ -132,7 +132,7 @@ func (h *Handler) ServeAsset(c *gin.Context) {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Asset not found"})
 		return
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
@@ -142,13 +142,13 @@ func (h *Handler) ServeAsset(c *gin.Context) {
 	http.ServeContent(c.Writer, c.Request, basename, info.ModTime(), f.(io.ReadSeeker))
 }
 
-// isValidVersion checks that a version string is safe (alphanumeric + hyphens).
+// isValidVersion checks that a version string is safe (alphanumeric, hyphens, underscores).
 func isValidVersion(v string) bool {
 	if len(v) == 0 || len(v) > 40 {
 		return false
 	}
 	for _, c := range v {
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '-' || c == '_') {
+		if (c < 'a' || c > 'z') && (c < 'A' || c > 'Z') && (c < '0' || c > '9') && c != '-' && c != '_' {
 			return false
 		}
 	}

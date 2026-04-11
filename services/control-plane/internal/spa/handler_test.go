@@ -33,22 +33,22 @@ func setupTestSPA(t *testing.T) string {
 	version := testVersion
 	versionDir := filepath.Join(dir, version)
 	assetsDir := filepath.Join(versionDir, "assets")
-	if err := os.MkdirAll(assetsDir, 0o755); err != nil {
+	if err := os.MkdirAll(assetsDir, 0o750); err != nil {
 		t.Fatal(err)
 	}
 
 	// index.html (entry point — short cache)
-	if err := os.WriteFile(filepath.Join(versionDir, testIndexFile), []byte("<html>SPA</html>"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(versionDir, testIndexFile), []byte("<html>SPA</html>"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	// Hashed JS bundle (long cache)
-	if err := os.WriteFile(filepath.Join(assetsDir, "chunk-abc123.js"), []byte("console.log('spa')"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(assetsDir, "chunk-abc123.js"), []byte("console.log('spa')"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
 	// Hashed CSS (long cache)
-	if err := os.WriteFile(filepath.Join(assetsDir, "index-def456.css"), []byte("body{}"), 0o644); err != nil {
+	if err := os.WriteFile(filepath.Join(assetsDir, "index-def456.css"), []byte("body{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

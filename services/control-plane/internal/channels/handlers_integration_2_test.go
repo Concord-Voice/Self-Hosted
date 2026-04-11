@@ -1192,7 +1192,7 @@ func TestMultipleChannelOperations(t *testing.T) {
 	t.Run("DeleteAllThenListEmpty", func(t *testing.T) {
 		// Create a new server to avoid conflicts with subtests above
 		srvID := ts.CreateTestServer(t, user.ID, "Del All Server")
-		var ids []string
+		ids := make([]string, 0, 2)
 		for _, name := range []string{"chan-a", "chan-b"} {
 			id := ts.CreateTestChannel(t, srvID, name, false)
 			ids = append(ids, id)

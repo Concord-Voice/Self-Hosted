@@ -17,39 +17,39 @@ type Permission int64
 // Server-level permissions (apply server-wide via roles)
 const (
 	// Administrative permissions
-	PermManageServer       Permission = 1 << 0  // Edit server settings, icon, banner
-	PermManageRoles        Permission = 1 << 1  // Create, edit, delete roles
-	PermManageRolesAssign  Permission = 1 << 2  // Assign/unassign roles to members
-	PermManageChannels     Permission = 1 << 3  // Create, edit, delete channels
+	PermManageServer         Permission = 1 << 0 // Edit server settings, icon, banner
+	PermManageRoles          Permission = 1 << 1 // Create, edit, delete roles
+	PermManageRolesAssign    Permission = 1 << 2 // Assign/unassign roles to members
+	PermManageChannels       Permission = 1 << 3 // Create, edit, delete channels
 	PermManageCryptoRotation Permission = 1 << 4 // Manually rotate E2EE keys (CSK)
-	PermViewAuditLog       Permission = 1 << 5  // View permission audit log
+	PermViewAuditLog         Permission = 1 << 5 // View permission audit log
 
 	// Member management permissions
-	PermInvite  Permission = 1 << 6  // Create server invites
-	PermKick    Permission = 1 << 7  // Remove members (temporary)
-	PermBan     Permission = 1 << 8  // Ban members (prevents rejoin)
+	PermInvite Permission = 1 << 6 // Create server invites
+	PermKick   Permission = 1 << 7 // Remove members (temporary)
+	PermBan    Permission = 1 << 8 // Ban members (prevents rejoin)
 
 	// Channel permissions (can be overridden per-channel via SBAC)
-	PermViewTextChannels  Permission = 1 << 10 // See text and bulletin channels in the channel list
-	PermViewVoiceChannels Permission = 1 << 9  // See voice channels in the channel list
-	PermSendMessages      Permission = 1 << 11 // Send text messages in channels
+	PermViewTextChannels   Permission = 1 << 10 // See text and bulletin channels in the channel list
+	PermViewVoiceChannels  Permission = 1 << 9  // See voice channels in the channel list
+	PermSendMessages       Permission = 1 << 11 // Send text messages in channels
 	PermReadMessageHistory Permission = 1 << 12 // Read past messages (vs. only seeing new ones)
 	PermManageOwnMessages  Permission = 1 << 13 // Edit and delete own messages
 	PermManageAllMessages  Permission = 1 << 14 // Delete any message and suppress embeds (moderation)
 	PermPinMessages        Permission = 1 << 15 // Pin or unpin messages in channels
 
 	// Voice permissions
-	PermJoinVoice      Permission = 1 << 16 // Join voice channels
-	PermSpeak          Permission = 1 << 17 // Transmit audio in voice channels
-	PermMuteMembers    Permission = 1 << 18 // Server-mute other members
-	PermDeafenMembers  Permission = 1 << 19 // Server-deafen other members
-	PermMoveMembers    Permission = 1 << 20 // Move members between voice channels
-	PermScreenShare    Permission = 1 << 21 // Share screen in voice channels
-	PermVideo          Permission = 1 << 28 // Enable camera/video in voice channels
+	PermJoinVoice     Permission = 1 << 16 // Join voice channels
+	PermSpeak         Permission = 1 << 17 // Transmit audio in voice channels
+	PermMuteMembers   Permission = 1 << 18 // Server-mute other members
+	PermDeafenMembers Permission = 1 << 19 // Server-deafen other members
+	PermMoveMembers   Permission = 1 << 20 // Move members between voice channels
+	PermScreenShare   Permission = 1 << 21 // Share screen in voice channels
+	PermVideo         Permission = 1 << 28 // Enable camera/video in voice channels
 
 	// Content permissions
-	PermAttachFiles       Permission = 1 << 22 // Upload files and images in channels
-	PermUseExternalEmoji  Permission = 1 << 23 // Use emoji from other servers
+	PermAttachFiles      Permission = 1 << 22 // Upload files and images in channels
+	PermUseExternalEmoji Permission = 1 << 23 // Use emoji from other servers
 
 	// Mention permissions
 	PermMentionEveryone Permission = 1 << 24 // Use @all and @here mentions

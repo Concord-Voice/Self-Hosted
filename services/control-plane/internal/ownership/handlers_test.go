@@ -46,7 +46,7 @@ func TestInitiateTransferSuccess(t *testing.T) {
 
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: member.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 
 	assert.Equal(t, http.StatusCreated, w.Code)
@@ -69,7 +69,7 @@ func TestInitiateTransferNotOwner(t *testing.T) {
 
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: other.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(member.AccessToken))
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
@@ -84,7 +84,7 @@ func TestInitiateTransferWrongPassword(t *testing.T) {
 
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: member.ID,
-		keyPassword:      "WrongPassword999!",
+		keyPassword:     "WrongPassword999!",
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
@@ -98,7 +98,7 @@ func TestInitiateTransferTargetNotMember(t *testing.T) {
 
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: nonMember.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -111,7 +111,7 @@ func TestInitiateTransferTargetIsSelf(t *testing.T) {
 
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: owner.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -129,14 +129,14 @@ func TestInitiateTransferAlreadyPending(t *testing.T) {
 	// First transfer succeeds
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: member1.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
 	// Second transfer should 409
 	w = ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: member2.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, http.StatusConflict, w.Code)
 }
@@ -150,7 +150,7 @@ func TestInitiateTransferUnauthenticated(t *testing.T) {
 
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: member.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, nil)
 
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
@@ -168,7 +168,7 @@ func TestGetTransferStatusPending(t *testing.T) {
 	// Initiate transfer
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: member.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
@@ -194,7 +194,7 @@ func TestGetTransferStatusMemberSeesLimitedInfo(t *testing.T) {
 	// Initiate transfer
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: target.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
@@ -242,7 +242,7 @@ func TestCancelTransferSuccess(t *testing.T) {
 	// Initiate
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: member.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
@@ -268,7 +268,7 @@ func TestCancelTransferNotOwner(t *testing.T) {
 	// Initiate
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: member.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
@@ -298,7 +298,7 @@ func TestConfirmTransferSuccess(t *testing.T) {
 	// Initiate
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: member.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
@@ -336,7 +336,7 @@ func TestConfirmTransferNotOwner(t *testing.T) {
 	// Initiate
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: member.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
@@ -366,7 +366,7 @@ func TestConfirmTransferTargetLeftServer(t *testing.T) {
 	// Initiate
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: member.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
@@ -397,7 +397,7 @@ func TestReverseTransferSuccess(t *testing.T) {
 	// Initiate + confirm
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: member.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
@@ -432,7 +432,7 @@ func TestReverseTransferExpiredWindow(t *testing.T) {
 	// Initiate + confirm
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: member.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
@@ -479,7 +479,7 @@ func TestReverseTransferWrongUser(t *testing.T) {
 	// Initiate + confirm
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: member.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
@@ -558,7 +558,7 @@ func TestAutoCompleteExpiredTransfer(t *testing.T) {
 	// Initiate a transfer
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: member.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
@@ -634,7 +634,7 @@ func TestTransferLifecycleCancelAndReinitiate(t *testing.T) {
 	// Initiate
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: member.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
@@ -645,7 +645,7 @@ func TestTransferLifecycleCancelAndReinitiate(t *testing.T) {
 	// Re-initiate should succeed (no pending transfer)
 	w = ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: member.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, http.StatusCreated, w.Code)
 }
@@ -662,7 +662,7 @@ func TestTransferAuditLogged(t *testing.T) {
 	// Initiate
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: member.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
@@ -696,7 +696,7 @@ func TestTransferInvalidatesPermissionCache(t *testing.T) {
 	// Initiate + confirm
 	w := ts.DoRequest("POST", pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
 		keyTargetUserID: member.ID,
-		keyPassword:      testhelpers.TestAuthPlaintext,
+		keyPassword:     testhelpers.TestAuthPlaintext,
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 

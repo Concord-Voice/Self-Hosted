@@ -2583,7 +2583,7 @@ func (h *Handler) UpsertRecoveryCircle(c *gin.Context) {
 	userID := c.GetString("user_id")
 
 	var req struct {
-		Password     string             `json:"password" binding:"required"`
+		Password     string             `json:"password" binding:"required"` //nolint:gosec // G117: request binding struct, not a credential
 		MFACode      string             `json:"mfa_code"`
 		ThresholdK   int                `json:"threshold_k" binding:"required"`
 		TotalSharesN int                `json:"total_shares_n" binding:"required"`
@@ -2637,7 +2637,7 @@ func (h *Handler) DeleteRecoveryCircle(c *gin.Context) {
 	userID := c.GetString("user_id")
 
 	var req struct {
-		Password string `json:"password" binding:"required"`
+		Password string `json:"password" binding:"required"` //nolint:gosec // G117: request binding struct, not a credential
 		MFACode  string `json:"mfa_code"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {

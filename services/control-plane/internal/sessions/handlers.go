@@ -10,24 +10,23 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
-	"github.com/gin-gonic/gin"
-	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 )
 
 const (
-	errMsgUnauthorized = "Unauthorized"
-	errMsgFailedRevokeSession = "Failed to revoke session"
+	errMsgUnauthorized          = "Unauthorized"
+	errMsgFailedRevokeSession   = "Failed to revoke session"
 	errMsgMFAVerificationFailed = "MFA verification failed"
-	errMsgInvalidMFACode = "Invalid MFA code"
-	errMsgFailedVerifyPassword = "Failed to verify password"
-	errMsgIncorrectPassword = "Incorrect password"
-	errMsgFailedFetchSessions = "Failed to fetch sessions"
+	errMsgInvalidMFACode        = "Invalid MFA code"
+	errMsgFailedVerifyPassword  = "Failed to verify password"
+	errMsgIncorrectPassword     = "Incorrect password"
+	errMsgFailedFetchSessions   = "Failed to fetch sessions"
 )
-
 
 // SessionDisconnector allows forcefully disconnecting WebSocket connections.
 // Defined as an interface to avoid coupling to the websocket package.

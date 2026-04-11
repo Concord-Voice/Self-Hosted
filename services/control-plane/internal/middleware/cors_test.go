@@ -4,13 +4,13 @@ import (
 	"net/http/httptest"
 	"testing"
 
-	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
 	"github.com/gin-gonic/gin"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
 	"github.com/stretchr/testify/assert"
 )
 
 const (
-	testOrigin              = "https://concordvoice.chat"
+	testOrigin                     = "https://concordvoice.chat"
 	headerAccessControlAllowOrigin = "Access-Control-Allow-Origin"
 )
 

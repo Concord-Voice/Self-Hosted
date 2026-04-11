@@ -219,7 +219,7 @@ Yes. We implement industry-standard security practices:
 **Infrastructure:**
 - 🚫 **Rate Limiting:** Redis-based, per-IP and per-user
 - 🛡️ **Pre-commit Hooks:** Prevents committing secrets
-- **Pre-commit Scanning:** 20 hooks via Python pre-commit framework (TruffleHog, detect-secrets, golangci-lint, ESLint, etc.)
+- **Pre-commit Scanning:** 22 hooks via Python pre-commit framework (TruffleHog, detect-secrets, Gitleaks, Semgrep, golangci-lint, ESLint, etc.)
 - **CI/CD:** GitHub Actions (build.yml) with parallel test + coverage + SonarQube Quality Gate (mandatory)
 - 🗄️ **Database:** PostgreSQL with row-level security
 - 🔐 **Redis:** Authentication enabled

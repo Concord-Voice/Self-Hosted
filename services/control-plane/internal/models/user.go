@@ -7,18 +7,18 @@ import (
 
 // User represents a Concord user
 type User struct {
-	ID             string          `json:"id" db:"id"`
-	Email          string          `json:"email" db:"email"`
-	Username       string          `json:"username" db:"username"`
-	PasswordHash   string          `json:"-" db:"password_hash"` // Never send in JSON
-	DisplayName    *string         `json:"display_name,omitempty" db:"display_name"`
-	Bio            *string         `json:"bio,omitempty" db:"bio"`
-	AvatarURL      *string         `json:"avatar_url,omitempty" db:"avatar_url"`
-	HeaderImageURL *string         `json:"header_image_url,omitempty" db:"header_image_url"`
-	ColorScheme    *string         `json:"color_scheme,omitempty" db:"color_scheme"`
-	Links          json.RawMessage `json:"links" db:"links"`
-	EmailVerified  bool            `json:"email_verified" db:"email_verified"`
-	AgeVerified    bool            `json:"age_verified" db:"age_verified"`
+	ID                string          `json:"id" db:"id"`
+	Email             string          `json:"email" db:"email"`
+	Username          string          `json:"username" db:"username"`
+	PasswordHash      string          `json:"-" db:"password_hash"` // Never send in JSON
+	DisplayName       *string         `json:"display_name,omitempty" db:"display_name"`
+	Bio               *string         `json:"bio,omitempty" db:"bio"`
+	AvatarURL         *string         `json:"avatar_url,omitempty" db:"avatar_url"`
+	HeaderImageURL    *string         `json:"header_image_url,omitempty" db:"header_image_url"`
+	ColorScheme       *string         `json:"color_scheme,omitempty" db:"color_scheme"`
+	Links             json.RawMessage `json:"links" db:"links"`
+	EmailVerified     bool            `json:"email_verified" db:"email_verified"`
+	AgeVerified       bool            `json:"age_verified" db:"age_verified"`
 	E2EEPreference    bool            `json:"e2ee_preference" db:"e2ee_preference"`
 	CreatedAt         time.Time       `json:"created_at" db:"created_at"`
 	UpdatedAt         time.Time       `json:"updated_at" db:"updated_at"`

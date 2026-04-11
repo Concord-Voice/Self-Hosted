@@ -12,8 +12,8 @@ import (
 
 // RateLimitConfig defines rate limiting parameters
 type RateLimitConfig struct {
-	Requests int           // Number of requests allowed
-	Window   time.Duration // Time window for the limit
+	Requests int                       // Number of requests allowed
+	Window   time.Duration             // Time window for the limit
 	KeyFunc  func(*gin.Context) string // Function to generate rate limit key
 }
 

@@ -86,7 +86,7 @@ func NewHandler(deps HandlerDeps) *Handler {
 // initiateTransferRequest is the request body for InitiateTransfer.
 type initiateTransferRequest struct {
 	TargetUserID string `json:"target_user_id" binding:"required,uuid"`
-	Password     string `json:"password" binding:"required"`
+	Password     string `json:"password" binding:"required"` //nolint:gosec // G117: request binding field, not a credential
 	MFACode      string `json:"mfa_code"`
 }
 
@@ -356,7 +356,7 @@ func (h *Handler) ConfirmTransfer(c *gin.Context) {
 
 // reverseTransferRequest is the request body for ReverseTransfer.
 type reverseTransferRequest struct {
-	Password string `json:"password" binding:"required"`
+	Password string `json:"password" binding:"required"` //nolint:gosec // G117: request binding field, not a credential
 	MFACode  string `json:"mfa_code"`
 }
 

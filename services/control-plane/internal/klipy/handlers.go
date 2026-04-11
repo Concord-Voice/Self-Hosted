@@ -229,7 +229,7 @@ func (h *Handler) Media(c *gin.Context) {
 	}
 
 	// Use the dedicated media client (30s timeout) instead of the API client.
-	resp, err := h.mediaClient.Do(req)
+	resp, err := h.mediaClient.Do(req) //nolint:gosec // URL validated: scheme=https + host allowlist
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": errUpstreamDown})
 		return
@@ -350,7 +350,7 @@ func (h *Handler) forwardJSON(c *gin.Context, method, upstreamURL string, body i
 	}
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := h.client.Do(req)
+	resp, err := h.client.Do(req) //nolint:gosec // upstreamURL constructed from config base URL, not user input
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": errUpstreamDown})
 		return

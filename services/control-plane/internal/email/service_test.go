@@ -109,9 +109,9 @@ func startMockSMTP(t *testing.T, opts mockSMTPOpts) (addr string, capture *smtpC
 }
 
 func handleSMTPConn(conn net.Conn, tlsCfg *tls.Config, capture *smtpCapture, opts mockSMTPOpts) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	r := bufio.NewReader(conn)
-	write := func(s string) { fmt.Fprintf(conn, "%s\r\n", s) }
+	write := func(s string) { _, _ = fmt.Fprintf(conn, "%s\r\n", s) }
 
 	write("220 localhost ESMTP mock")
 
@@ -144,7 +144,7 @@ func handleSMTPConn(conn net.Conn, tlsCfg *tls.Config, capture *smtpCapture, opt
 			}
 			conn = tlsConn
 			r = bufio.NewReader(conn)
-			write = func(s string) { fmt.Fprintf(conn, "%s\r\n", s) }
+			write = func(s string) { _, _ = fmt.Fprintf(conn, "%s\r\n", s) }
 
 		case strings.HasPrefix(upper, "AUTH"):
 			if opts.rejectAuth {
@@ -189,7 +189,7 @@ func handleSMTPConn(conn net.Conn, tlsCfg *tls.Config, capture *smtpCapture, opt
 func newProdService(addr string) *Service {
 	host, port, _ := net.SplitHostPort(addr)
 	p := 0
-	fmt.Sscanf(port, "%d", &p)
+	_, _ = fmt.Sscanf(port, "%d", &p)
 	return &Service{
 		host:      host,
 		port:      p,
@@ -443,7 +443,7 @@ func TestSendMailNoAuth(t *testing.T) {
 	addr, capture := startMockSMTP(t, mockSMTPOpts{advertiseSTARTTLS: true})
 	host, port, _ := net.SplitHostPort(addr)
 	p := 0
-	fmt.Sscanf(port, "%d", &p)
+	_, _ = fmt.Sscanf(port, "%d", &p)
 	svc := &Service{
 		host:      host,
 		port:      p,

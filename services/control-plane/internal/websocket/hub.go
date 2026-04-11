@@ -247,7 +247,7 @@ func (h *Hub) handleRegister(client *Client) {
 
 	h.sendConnectedConfirmation(client)
 	h.sendPresenceSnapshot(client)
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // cancel stored in client.asyncCancel, called on unregister (lines 210, 389)
 	client.asyncCancel = cancel
 	client.asyncWg.Add(1)
 	go func() {
@@ -296,7 +296,7 @@ type userPresenceInfo struct {
 	Status string `json:"status"`
 }
 
-func (h *Hub) resolveVisibleStatus(uid, viewerID uuid.UUID, ctx context.Context) string {
+func (h *Hub) resolveVisibleStatus(ctx context.Context, uid, viewerID uuid.UUID) string {
 	status := statusOnline
 	if val, err := h.redis.Get(ctx, fmt.Sprintf(presenceKeyFmt, uid)).Result(); err == nil {
 		status = val
@@ -313,7 +313,7 @@ func (h *Hub) sendPresenceSnapshot(client *Client) {
 	onlineUserIDs := make([]string, 0, len(h.userClients))
 	for uid := range h.userClients {
 		uidStr := uid.String()
-		visibleStatus := h.resolveVisibleStatus(uid, client.UserID, ctx)
+		visibleStatus := h.resolveVisibleStatus(ctx, uid, client.UserID)
 		if visibleStatus != statusOffline {
 			onlineUserIDs = append(onlineUserIDs, uidStr)
 		}
