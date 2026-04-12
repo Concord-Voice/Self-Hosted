@@ -31,8 +31,8 @@ import (
 	"github.com/minio/minio-go/v7"
 	"github.com/minio/minio-go/v7/pkg/credentials"
 
-	_ "github.com/joho/godotenv/autoload"
-	_ "github.com/lib/pq"
+	_ "github.com/joho/godotenv/autoload" // auto-load .env into process environment on import
+	_ "github.com/lib/pq"                 // register postgres driver for database/sql
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/media"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"

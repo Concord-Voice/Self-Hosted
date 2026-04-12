@@ -21,6 +21,12 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+const (
+	// headerContentType is the HTTP Content-Type header name, extracted so the
+	// literal is defined once and referenced at every test-helper call site.
+	headerContentType = "Content-Type"
+)
+
 func init() {
 	gin.SetMode(gin.TestMode)
 }
@@ -78,7 +84,7 @@ func SetupTestServer(t *testing.T) *TestServer {
 func AuthHeaders(accessToken string) http.Header {
 	h := http.Header{}
 	h.Set("Authorization", "Bearer "+accessToken)
-	h.Set("Content-Type", "application/json")
+	h.Set(headerContentType, "application/json")
 	return h
 }
 
@@ -284,8 +290,8 @@ func (ts *TestServer) DoRequest(method, path string, body interface{}, headers h
 	if headers != nil {
 		req.Header = headers
 	}
-	if body != nil && req.Header.Get("Content-Type") == "" {
-		req.Header.Set("Content-Type", "application/json")
+	if body != nil && req.Header.Get(headerContentType) == "" {
+		req.Header.Set(headerContentType, "application/json")
 	}
 
 	w := httptest.NewRecorder()

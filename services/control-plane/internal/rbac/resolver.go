@@ -17,6 +17,11 @@ var (
 	ErrHierarchyViolation = errors.New("cannot modify member with equal or higher role position")
 )
 
+const (
+	// errMsgHierarchyCheckFailed is the format string for errors wrapping DB failures in CheckHierarchy.
+	errMsgHierarchyCheckFailed = "hierarchy check failed: %w"
+)
+
 // Resolver computes effective permissions for users by combining RBAC and SBAC layers
 type Resolver struct {
 	db    *sql.DB
@@ -369,7 +374,7 @@ func (r *Resolver) CheckHierarchy(ctx context.Context, serverID, actorID, target
 	// Server owner bypasses hierarchy — owner can moderate anyone
 	var ownerID string
 	if err := r.db.QueryRowContext(ctx, `SELECT owner_id FROM servers WHERE id = $1`, serverID).Scan(&ownerID); err != nil {
-		return fmt.Errorf("hierarchy check failed: %w", err)
+		return fmt.Errorf(errMsgHierarchyCheckFailed, err)
 	}
 	if actorID == ownerID {
 		return nil // Owner outranks everyone
@@ -378,7 +383,7 @@ func (r *Resolver) CheckHierarchy(ctx context.Context, serverID, actorID, target
 	// Check if actor has PermAdministrator (bypasses position-based hierarchy)
 	actorPerms, err := r.computeRolePermissions(ctx, serverID, actorID)
 	if err != nil {
-		return fmt.Errorf("hierarchy check failed: %w", err)
+		return fmt.Errorf(errMsgHierarchyCheckFailed, err)
 	}
 	if actorPerms.Has(PermAdministrator) {
 		// Administrator bypasses hierarchy unless target is also owner
@@ -414,7 +419,7 @@ func (r *Resolver) CheckHierarchy(ctx context.Context, serverID, actorID, target
 
 	var canModify bool
 	if err := r.db.QueryRowContext(ctx, query, serverID, actorID, targetID).Scan(&canModify); err != nil {
-		return fmt.Errorf("hierarchy check failed: %w", err)
+		return fmt.Errorf(errMsgHierarchyCheckFailed, err)
 	}
 
 	if !canModify {
