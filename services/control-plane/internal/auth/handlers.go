@@ -1910,14 +1910,10 @@ func (h *Handler) CreateDeviceRecoveryRequest(c *gin.Context) {
 		return
 	}
 
-	// TODO: Send WebSocket notification to the user's trusted device sessions via
-	// hub.BroadcastToUser(uuid.MustParse(claims.UserID), websocket.OutgoingMessage{
-	//     Type: "recovery_request",
-	//     Data: map[string]interface{}{"request_id": requestID},
-	// })
-	// Currently the auth handler's hub field is a SessionDisconnector interface which
-	// does not expose BroadcastToUser. The client can poll via GET /recovery/device-request/:id
-	// as a fallback until the interface is extended.
+	// NOTE: WebSocket notification to trusted device sessions is deferred.
+	// The auth handler's hub field is a SessionDisconnector interface which
+	// does not expose BroadcastToUser. The client polls via
+	// GET /recovery/device-request/:id as a fallback until the interface is extended.
 
 	h.log.Info("Device recovery request created", "user_id", claims.UserID, "request_id", requestID)
 	c.JSON(http.StatusOK, gin.H{"request_id": requestID})

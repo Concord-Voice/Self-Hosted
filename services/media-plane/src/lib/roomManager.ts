@@ -96,6 +96,31 @@ export type RoomEvent =
 export type RoomEventHandler = (event: RoomEvent) => void;
 
 // ---------------------------------------------------------------------------
+// Pure helpers (extracted to reduce cognitive complexity of computeCodecFloor)
+// ---------------------------------------------------------------------------
+
+/** Extract lowercase video mimeTypes from RTP capabilities. */
+function extractVideoMimeTypes(caps: RtpCapabilities): Set<string> {
+  const mimes = new Set<string>();
+  for (const c of caps.codecs ?? []) {
+    if (c.kind === 'video') mimes.add(c.mimeType.toLowerCase());
+  }
+  return mimes;
+}
+
+/** Compute the intersection of an array of string Sets. */
+function intersectMimeSets(sets: Set<string>[]): Set<string> {
+  if (sets.length === 0) return new Set();
+  const result = new Set(sets[0]);
+  for (let i = 1; i < sets.length; i++) {
+    for (const m of result) {
+      if (!sets[i].has(m)) result.delete(m);
+    }
+  }
+  return result;
+}
+
+// ---------------------------------------------------------------------------
 // RoomManager
 //
 // Manages the lifecycle of voice/video rooms (one per voice channel):
@@ -945,22 +970,9 @@ export class RoomManager {
 
     if (capableParts.length < 2) return null;
 
-    let floor: Set<string> | null = null;
-    for (const caps of capableParts) {
-      const videoMimes = new Set<string>();
-      for (const c of caps.codecs ?? []) {
-        if (c.kind === 'video') videoMimes.add(c.mimeType.toLowerCase());
-      }
-      if (floor) {
-        for (const m of floor) {
-          if (!videoMimes.has(m)) floor.delete(m);
-        }
-      } else {
-        floor = videoMimes;
-      }
-    }
-
-    return floor ? Array.from(floor) : [];
+    const mimeSets = capableParts.map(extractVideoMimeTypes);
+    const floor = intersectMimeSets(mimeSets);
+    return Array.from(floor);
   }
 
   getParticipant(roomId: string, userId: string): Participant | undefined {
