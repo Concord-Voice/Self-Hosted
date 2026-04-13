@@ -1,6 +1,7 @@
 import { createClient, RedisClientType } from 'redis';
 import { config } from '../config/index.js';
 import { logger } from './logger.js';
+import { captureWithTag } from './sentry-helpers.js';
 import type { RoomEvent, RoomEventHandler } from './roomManager.js';
 
 // ---------------------------------------------------------------------------
@@ -25,6 +26,7 @@ export class RedisService {
       this.client = createClient({ url: config.redisUrl });
 
       this.client.on('error', (err) => {
+        captureWithTag(err, 'redis.operation', 'client-error');
         logger.error('Redis client error', { error: err });
       });
 
@@ -35,6 +37,7 @@ export class RedisService {
       await this.client.connect();
       logger.info('Connected to Redis', { url: config.redisUrl });
     } catch (err) {
+      captureWithTag(err, 'redis.operation', 'connect');
       logger.error('Failed to connect to Redis', { error: err });
       throw err;
     }
@@ -56,6 +59,7 @@ export class RedisService {
         .expire(userKey, USER_TTL)
         .exec();
     } catch (err) {
+      captureWithTag(err, 'redis.operation', 'addParticipant');
       logger.error('Redis addParticipant failed', { channelId, userId, error: err });
     }
   }
@@ -68,12 +72,9 @@ export class RedisService {
       const roomKey = `voice:room:${channelId}`;
       const userKey = `voice:user:${userId}`;
 
-      await this.client
-        .multi()
-        .sRem(roomKey, userId)
-        .del(userKey)
-        .exec();
+      await this.client.multi().sRem(roomKey, userId).del(userKey).exec();
     } catch (err) {
+      captureWithTag(err, 'redis.operation', 'removeParticipant');
       logger.error('Redis removeParticipant failed', { channelId, userId, error: err });
     }
   }
@@ -94,6 +95,7 @@ export class RedisService {
         await this.client.del(roomKey);
       }
     } catch (err) {
+      captureWithTag(err, 'redis.operation', 'clearRoom');
       logger.error('Redis clearRoom failed', { channelId, error: err });
     }
   }
@@ -105,6 +107,7 @@ export class RedisService {
     try {
       return await this.client.sMembers(`voice:room:${channelId}`);
     } catch (err) {
+      captureWithTag(err, 'redis.operation', 'getRoomParticipants');
       logger.error('Redis getRoomParticipants failed', { channelId, error: err });
       return [];
     }
@@ -115,8 +118,9 @@ export class RedisService {
     if (!this.client) return null;
 
     try {
-      return await this.client.hGet(`voice:user:${userId}`, 'channelId') ?? null;
+      return (await this.client.hGet(`voice:user:${userId}`, 'channelId')) ?? null;
     } catch (err) {
+      captureWithTag(err, 'redis.operation', 'getUserRoom');
       logger.error('Redis getUserRoom failed', { userId, error: err });
       return null;
     }

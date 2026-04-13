@@ -41,4 +41,4 @@ EXPOSE 3000
 EXPOSE 40000-49999/udp
 
 # Run the application
-CMD ["node", "dist/index.js"]
+CMD ["node", "--import", "./dist/instrument.js", "dist/index.js"]

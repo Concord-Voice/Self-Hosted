@@ -1,6 +1,8 @@
 import * as mediasoup from 'mediasoup';
+import * as Sentry from '@sentry/node';
 import { config } from '../config/index.js';
 import { logger } from './logger.js';
+import { captureWithTag } from './sentry-helpers.js';
 import type { Worker, Router } from 'mediasoup/types';
 
 export class MediasoupService {
@@ -21,7 +23,21 @@ export class MediasoupService {
         rtcMaxPort: config.mediasoup.worker.rtcMaxPort,
       });
 
-      worker.on('died', () => {
+      worker.on('died', async () => {
+        captureWithTag(
+          new Error(`Mediasoup worker ${worker.pid} died`),
+          'mediasoup.event',
+          'worker-died',
+          'fatal'
+        );
+        try {
+          await Sentry.flush(2000);
+        } catch (flushErr) {
+          logger.error('Sentry flush failed after worker death', {
+            pid: worker.pid,
+            error: flushErr,
+          });
+        }
         logger.error('Mediasoup worker died', { pid: worker.pid });
         process.exit(1);
       });

@@ -10,6 +10,8 @@ import { createAuthMiddleware, validateChannelAccess } from './middleware/auth.j
 import type { AuthenticatedSocketData } from './middleware/auth.js';
 import { NatsService } from './lib/nats.js';
 import { RedisService } from './lib/redis.js';
+import * as Sentry from '@sentry/node';
+import { captureWithTag } from './lib/sentry-helpers.js';
 
 async function main() {
   // Create Express app
@@ -67,6 +69,11 @@ async function main() {
     });
   });
 
+  // Sentry Express error handler — catches errors in Express routes and
+  // Socket.IO's HTTP upgrade handshake. Per-event Socket.IO errors
+  // (post-upgrade) still require manual captureWithTag in handlers.
+  Sentry.setupExpressErrorHandler(app);
+
   // Initialize Socket.IO
   const io = new SocketIOServer(httpServer, {
     cors: {
@@ -103,7 +110,8 @@ async function main() {
       const channelId = natsData.channelId as string;
       const userId = natsData.userId as string;
       const action = natsData.action as string;
-      if (typeof channelId !== 'string' || typeof userId !== 'string' || typeof action !== 'string') return;
+      if (typeof channelId !== 'string' || typeof userId !== 'string' || typeof action !== 'string')
+        return;
 
       try {
         if (action === applyAction) {
@@ -114,6 +122,7 @@ async function main() {
           io.to(channelId).emit(eventName, { userId, [eventField]: false });
         }
       } catch (err) {
+        captureWithTag(err, 'nats.subject', subject);
         logger.error(`Failed to handle ${subject}`, { error: err, channelId, userId, action });
       }
     });
@@ -161,6 +170,7 @@ async function main() {
           }
         }
       } catch (err) {
+        captureWithTag(err, 'nats.subject', subject);
         logger.error(`Failed to handle ${subject}`, { error: err, channelId, userId });
       }
     });
@@ -275,6 +285,7 @@ async function main() {
           socket.emit('room-joined', response);
         }
       } catch (error) {
+        captureWithTag(error, 'socket.event', 'join-room');
         logger.error('Error joining room', {
           error: error instanceof Error ? error.message : error,
           stack: error instanceof Error ? error.stack : undefined,
@@ -305,6 +316,7 @@ async function main() {
 
         if (callback) callback({ success: true });
       } catch (error) {
+        captureWithTag(error, 'socket.event', 'update-rtp-capabilities');
         logger.error('Error updating RTP capabilities', {
           error,
           userId: data.userId,
@@ -341,6 +353,7 @@ async function main() {
 
         callback(transportOptions);
       } catch (error) {
+        captureWithTag(error, 'socket.event', 'create-transport');
         logger.error('Error creating transport', {
           error,
           userId: data.userId,
@@ -367,6 +380,7 @@ async function main() {
         await roomManager.connectTransport(roomId, data.userId, transportId, dtlsParameters);
         callback({ success: true });
       } catch (error) {
+        captureWithTag(error, 'socket.event', 'connect-transport');
         logger.error('Error connecting transport', {
           error,
           userId: data.userId,
@@ -413,6 +427,7 @@ async function main() {
 
         callback({ id: producerInfo.producerId });
       } catch (error) {
+        captureWithTag(error, 'socket.event', 'produce');
         const message = error instanceof Error ? error.message : 'Failed to produce';
         logger.error('Error producing', {
           error: message,
@@ -472,6 +487,7 @@ async function main() {
           source: result.source,
         });
       } catch (error) {
+        captureWithTag(error, 'socket.event', 'consume');
         logger.error('Error consuming', {
           error,
           userId: data.userId,
@@ -512,6 +528,7 @@ async function main() {
         });
         if (callback) callback({ success: true });
       } catch (error) {
+        captureWithTag(error, 'socket.event', 'resume-consumer');
         logger.error('Error resuming consumer', { error, userId: data.userId });
         if (callback) callback({ error: 'Failed to resume consumer' });
       }
@@ -529,6 +546,7 @@ async function main() {
         await roomManager.pauseConsumer(roomId, data.userId, consumerId);
         if (callback) callback({ success: true });
       } catch (error) {
+        captureWithTag(error, 'socket.event', 'pause-consumer');
         logger.error('Error pausing consumer', { error, userId: data.userId });
         if (callback) callback({ error: 'Failed to pause consumer' });
       }
@@ -558,6 +576,7 @@ async function main() {
           }
         }
       } catch (error) {
+        captureWithTag(error, 'socket.event', 'close-consumer');
         logger.error('Error closing consumer', { error, userId: data.userId });
         if (callback) callback({ error: 'Failed to close consumer' });
       }
@@ -582,6 +601,7 @@ async function main() {
 
         if (callback) callback({ success: true });
       } catch (error) {
+        captureWithTag(error, 'socket.event', 'pause-producer');
         logger.error('Error pausing producer', { error, userId: data.userId });
         if (callback) callback({ error: 'Failed to pause producer' });
       }
@@ -617,6 +637,7 @@ async function main() {
 
         if (callback) callback({ success: true });
       } catch (error) {
+        captureWithTag(error, 'socket.event', 'resume-producer');
         logger.error('Error resuming producer', { error, userId: data.userId });
         if (callback) callback({ error: 'Failed to resume producer' });
       }
@@ -644,6 +665,7 @@ async function main() {
 
         if (callback) callback({ success: true });
       } catch (error) {
+        captureWithTag(error, 'socket.event', 'close-producer');
         logger.error('Error closing producer', { error, userId: data.userId });
         if (callback) callback({ error: 'Failed to close producer' });
       }
@@ -655,6 +677,7 @@ async function main() {
         await handleLeaveRoom(socket);
         if (callback) callback({ success: true });
       } catch (error) {
+        captureWithTag(error, 'socket.event', 'leave-room');
         logger.error('Error leaving room', { error, userId: data.userId });
         if (callback) callback({ error: 'Failed to leave room' });
       }
@@ -671,6 +694,7 @@ async function main() {
       try {
         await handleLeaveRoom(socket);
       } catch (error) {
+        captureWithTag(error, 'socket.event', 'disconnect');
         logger.error('Error during disconnect cleanup', {
           error,
           userId: data.userId,
@@ -784,6 +808,13 @@ async function main() {
     clearInterval(epochSyncInterval);
     clearInterval(roomHeartbeatInterval);
 
+    // Flush Sentry before tearing down connections
+    try {
+      await Sentry.flush(2000);
+    } catch (err) {
+      logger.warn('Sentry flush failed during shutdown', { error: err });
+    }
+
     // Close all rooms first (notifies participants, publishes NATS events)
     await roomManager.closeAll();
 
@@ -814,6 +845,12 @@ async function main() {
 try {
   await main();
 } catch (error) {
+  Sentry.captureException(error);
+  try {
+    await Sentry.flush(2000);
+  } catch (flushErr) {
+    logger.warn('Sentry flush failed during startup error handling', { error: flushErr });
+  }
   logger.error('Fatal error during startup', { error });
   process.exit(1);
 }

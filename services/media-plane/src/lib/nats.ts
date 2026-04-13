@@ -2,6 +2,7 @@ import { connect, JSONCodec } from 'nats';
 import type { NatsConnection } from 'nats';
 import { config } from '../config/index.js';
 import { logger } from './logger.js';
+import { captureWithTag } from './sentry-helpers.js';
 import type { RoomEvent, RoomEventHandler } from './roomManager.js';
 
 // ---------------------------------------------------------------------------
@@ -41,6 +42,7 @@ export class NatsService {
         }
       })().catch(() => {});
     } catch (err) {
+      captureWithTag(err, 'nats.subject', 'connection');
       logger.error('Failed to connect to NATS', { error: err, server: config.natsUrl });
       throw err;
     }
@@ -56,6 +58,7 @@ export class NatsService {
     try {
       this.nc.publish(subject, jsonCodec.encode(data));
     } catch (err) {
+      captureWithTag(err, 'nats.subject', subject);
       logger.error('Failed to publish NATS message', { subject, error: err });
     }
   }
@@ -139,10 +142,12 @@ export class NatsService {
           const decoded = jsonCodec.decode(msg.data) as Record<string, unknown>;
           handler(decoded);
         } catch (err) {
+          captureWithTag(err, 'nats.subject', subject);
           logger.error('Failed to handle NATS message', { subject, error: err });
         }
       }
     })().catch((err) => {
+      captureWithTag(err, 'nats.subject', subject);
       logger.error('NATS subscription error', { subject, error: err });
     });
   }
