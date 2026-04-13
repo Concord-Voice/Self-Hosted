@@ -14,6 +14,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/klipy"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
+	sentryPkg "github.com/markdrogersjr/Concord/services/control-plane/internal/sentry"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -1017,6 +1018,7 @@ func (h *Hub) persistMessage(p persistMessageParams) (uuid.UUID, time.Time, time
 		return messageID, createdAt, updatedAt, "Reply target message not found"
 	}
 	if err != nil {
+		sentryPkg.CaptureWithTag(err, "websocket.event", "persist-message")
 		log.Printf("Failed to persist message: %v", err)
 		return messageID, createdAt, updatedAt, "Failed to save message"
 	}
@@ -1885,6 +1887,7 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 
 	messageID, createdAt, updatedAt, err := h.persistDMMessage(convUUID, msg.UserID, input)
 	if err != nil {
+		sentryPkg.CaptureWithTag(err, "websocket.event", "persist-dm-message")
 		log.Printf("Failed to persist DM message: %v", err)
 		h.sendError(msg.ClientID, "Failed to save message")
 		return

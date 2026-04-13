@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
+	sentryPkg "github.com/markdrogersjr/Concord/services/control-plane/internal/sentry"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -82,6 +83,7 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 	var displayName *string
 	var avatarURL *string
 	if err := h.db.QueryRow("SELECT username, display_name, avatar_url FROM users WHERE id = $1", userID).Scan(&username, &displayName, &avatarURL); err != nil {
+		sentryPkg.CaptureFromContext(c, err, "websocket.event", "user-lookup")
 		log.Printf("Failed to look up username for user %s: %v", userID, err)
 		username = "Unknown"
 	}
