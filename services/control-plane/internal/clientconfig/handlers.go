@@ -66,6 +66,10 @@ type Response struct {
 	// Shells with a lower contract version fall back to their bundled SPA.
 	// Zero means no remote SPA is available.
 	SpaIpcContract int `json:"spaIpcContract,omitempty"`
+
+	// TelemetryPolicyVersion is the current telemetry collection policy version.
+	// Clients compare this against their locally acknowledged version to trigger re-consent.
+	TelemetryPolicyVersion int `json:"telemetryPolicyVersion"`
 }
 
 // GetConfig returns the current client configuration.
@@ -92,8 +96,9 @@ func (h *Handler) GetConfig(c *gin.Context) {
 			Host:  h.cfg.TURNServerHost,
 			Realm: h.cfg.TURNRealm,
 		},
-		SpaURL:         spaURL,
-		SpaIpcContract: spaIpcContract,
+		SpaURL:                 spaURL,
+		SpaIpcContract:         spaIpcContract,
+		TelemetryPolicyVersion: h.cfg.TelemetryPolicyVersion,
 	}
 
 	// Never cache /client/config — clients poll this to discover new SPA builds.
