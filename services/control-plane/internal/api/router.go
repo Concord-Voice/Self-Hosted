@@ -170,6 +170,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	clientConfigHandler := clientconfig.NewHandler(cfg, liveSpa, log)
 	updatesHandler := updates.NewHandler(cfg, log)
 	spaHandler := spa.NewHandler(cfg.SpaDir, log)
+	privacyHandler := buildPrivacyHandler(cfg, log)
 
 	// Start NATS voice event subscriber
 	if natsClient != nil {
@@ -356,6 +357,21 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 				usersHandler.GetMe,
 			)
+
+			// Privacy endpoints — GDPR Article 17 erasure.
+			// Mounted in the pending-OK tier so users can erase their data
+			// even before email verification completes.
+			privacyRoutes := authRequired.Group("/privacy")
+			{
+				privacyRoutes.POST("/erase-telemetry",
+					middleware.RateLimitByUser(redis, 3, 24*time.Hour),
+					privacyHandler.EraseTelemetry,
+				)
+				privacyRoutes.POST("/erase-account",
+					middleware.RateLimitByUser(redis, 3, 24*time.Hour),
+					privacyHandler.EraseAccount,
+				)
+			}
 		}
 
 		// ── Verified routes (email must be verified) ──────────────────
