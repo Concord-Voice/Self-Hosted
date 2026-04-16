@@ -50,12 +50,17 @@ func TestAdminClient_DeleteEventsForUser_UpstreamError(t *testing.T) {
 }
 
 // Covers the http.NewRequestWithContext error branch by passing a baseURL
-// that cannot be parsed as a valid URL.
+// that cannot be parsed as a valid URL. The returned error must NOT contain
+// the clientId (embedded in the request URL query), even on the parse path —
+// sanitizeTransportError strips the URL from *url.Error so the error chain
+// carries only the operation name and underlying cause.
 func TestAdminClient_DeleteEventsForUser_BuildRequestError(t *testing.T) {
 	client := concordsentry.NewAdminClient("://not a url", testOrgSlug, testProjSlug, testAuthToken)
 	err := client.DeleteEventsForUser(context.Background(), testClientID)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "build request")
+	assert.Contains(t, err.Error(), "delete request")
+	assert.NotContains(t, err.Error(), testClientID,
+		"clientId MUST NEVER appear in the error chain — url.Error includes the full URL by default")
 }
 
 // Covers the io.Copy(io.Discard, resp.Body) body-drain branch by returning a

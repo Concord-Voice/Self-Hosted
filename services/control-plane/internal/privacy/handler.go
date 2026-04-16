@@ -11,6 +11,8 @@ import (
 	"regexp"
 
 	"github.com/gin-gonic/gin"
+
+	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 )
 
 // EventsDeleter is the narrow interface the handler needs. Keeping this as an
@@ -22,11 +24,16 @@ type EventsDeleter interface {
 // Handler exposes the privacy erasure endpoints.
 type Handler struct {
 	sentry EventsDeleter
+	log    *logger.Logger
 }
 
 // NewHandler builds a Handler wired to the given Sentry admin backend.
-func NewHandler(sentry EventsDeleter) *Handler {
-	return &Handler{sentry: sentry}
+// The logger is used to surface upstream-deletion failures so operators
+// can diagnose Sentry API issues that would otherwise be opaque 502s.
+// A nil logger is allowed in tests that do not exercise the failure path;
+// production callers must always pass a non-nil logger.
+func NewHandler(sentry EventsDeleter, log *logger.Logger) *Handler {
+	return &Handler{sentry: sentry, log: log}
 }
 
 type eraseTelemetryRequest struct {
@@ -53,10 +60,43 @@ func (h *Handler) EraseTelemetry(c *gin.Context) {
 		return
 	}
 	if err := h.sentry.DeleteEventsForUser(c.Request.Context(), req.ClientID); err != nil {
+		h.logUpstreamFailure(c, "erase-telemetry", err)
 		c.JSON(http.StatusBadGateway, gin.H{"error": "upstream deletion failed"})
 		return
 	}
 	c.Status(http.StatusNoContent)
+}
+
+// clientIDLeakShape matches the two clientId formats that must never reach a
+// log line: the deterministic 32-hex-char hash and the random-prefixed
+// fallback. Defense-in-depth scrub applied to upstream error messages before
+// they are logged — the upstream admin client is expected to sanitize first,
+// but a regression there must never become a privacy violation.
+//
+// The regex intentionally omits \b anchors: clientIds can appear immediately
+// adjacent to word characters in URL-encoded form (e.g. after "user.id%3A"),
+// and \b would fail to match because the preceding hex byte of the percent-
+// encoded colon is itself a word character. Accepting any 32-hex run is
+// preferable to leaking; the scrub is privacy-critical, not presentation.
+var clientIDLeakShape = regexp.MustCompile(`random-[a-f0-9]{32}|[a-f0-9]{32}`)
+
+// logUpstreamFailure records a Sentry-admin failure at Error level so
+// operators can diagnose token rotation, network, or Sentry API issues
+// that would otherwise surface as opaque 502s. Per
+// [internal]rules/observability.md, the clientId is NEVER logged — only
+// the endpoint name, the user_id set by upstream auth middleware, and a
+// scrubbed form of the typed error. Tolerates a nil logger so unit tests
+// that do not exercise the failure path can construct a Handler without one.
+func (h *Handler) logUpstreamFailure(c *gin.Context, endpoint string, err error) {
+	if h.log == nil {
+		return
+	}
+	scrubbed := clientIDLeakShape.ReplaceAllString(err.Error(), "<redacted-client-id>")
+	h.log.Error("privacy erasure upstream call failed",
+		"endpoint", endpoint,
+		"user_id", c.GetString("user_id"),
+		"error", scrubbed,
+	)
 }
 
 type eraseAccountRequest struct {
@@ -84,6 +124,7 @@ func (h *Handler) EraseAccount(c *gin.Context) {
 			return
 		}
 		if err := h.sentry.DeleteEventsForUser(c.Request.Context(), req.ClientID); err != nil {
+			h.logUpstreamFailure(c, "erase-account", err)
 			c.JSON(http.StatusBadGateway, gin.H{"error": "upstream deletion failed"})
 			return
 		}

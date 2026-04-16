@@ -2,6 +2,7 @@ package sentry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -54,13 +55,13 @@ func (c *AdminClient) DeleteEventsForUser(ctx context.Context, clientID string) 
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodDelete, target, nil)
 	if err != nil {
-		return fmt.Errorf("build request: %w", err)
+		return sanitizeTransportError(err)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 
 	resp, err := c.http.Do(req) //nolint:gosec // URL built from internal config (SENTRY_API_BASE + slugs), not user input
 	if err != nil {
-		return fmt.Errorf("delete request: %w", err)
+		return sanitizeTransportError(err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
@@ -69,4 +70,19 @@ func (c *AdminClient) DeleteEventsForUser(ctx context.Context, clientID string) 
 		return fmt.Errorf("sentry delete returned status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// sanitizeTransportError strips the URL from a *url.Error before wrapping so
+// the clientId embedded in the Sentry bulk-delete query string ("user.id:<id>")
+// never reaches a log via the error chain. Per [internal]rules/observability.md,
+// the clientId is NEVER logged — and net/http's *url.Error.Error() includes
+// the request URL verbatim. We preserve the Op and underlying Err so operators
+// can still diagnose the class of failure (DNS, timeout, TLS, etc.) without
+// exposing the PII-bearing query string.
+func sanitizeTransportError(err error) error {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		return fmt.Errorf("delete request (%s): %w", urlErr.Op, urlErr.Err)
+	}
+	return fmt.Errorf("delete request: %w", err)
 }
