@@ -28,7 +28,7 @@ func TestGetConfigReturnsExpectedShape(t *testing.T) {
 	require.Contains(t, resp, "featureFlags")
 	require.Contains(t, resp, "mediaPlaneUrl")
 	require.Contains(t, resp, "turn")
-	require.Contains(t, resp, "telemetryPolicyVersion")
+	require.NotContains(t, resp, "telemetryPolicyVersion", "field removed from /client/config response")
 
 	// Feature flags should be a nested object with voice/video/e2ee
 	flags, ok := resp["featureFlags"].(map[string]interface{})
@@ -66,9 +66,6 @@ func TestGetConfigReflectsConfigValues(t *testing.T) {
 	// SPA fields omitted when zero-valued (omitempty)
 	assert.Nil(t, resp["spaUrl"])
 	assert.Nil(t, resp["spaIpcContract"])
-
-	// Default telemetry policy version is 0 in zero-value test config
-	assert.Equal(t, float64(0), resp["telemetryPolicyVersion"])
 }
 
 func TestGetConfigNoAuthRequired(t *testing.T) {

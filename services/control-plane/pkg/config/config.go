@@ -66,8 +66,6 @@ type Config struct {
 	SpaIpcContract   int    // Minimum IPC contract version required by the remote SPA; 0 = no remote SPA
 	SpaConfigFile    string // Path to mounted spa.env for hot-reload; empty = static config from env vars
 
-	TelemetryPolicyVersion int // Current telemetry policy version; clients compare against their acknowledged version
-
 	// Desktop update assets — local directory populated by deploy.sh
 	ReleasesDir string // Path to directory containing release assets; empty disables update endpoint
 
@@ -108,43 +106,42 @@ func Load() (*Config, error) {
 	_ = godotenv.Load()
 
 	cfg := &Config{
-		Environment:            getEnv("ENVIRONMENT", "development"),
-		Port:                   getEnv("PORT", "8080"),
-		DatabaseURL:            getEnv("DATABASE_URL", defaultDevDatabaseURL()),
-		RedisURL:               getEnv("REDIS_URL", defaultDevRedisURL()),
-		JWTSecret:              getEnv("JWT_SECRET", devJWTSecret),
-		NATSUrl:                getEnv("NATS_URL", "nats://localhost:4222"),
-		MediaPlaneURL:          getEnv("MEDIA_PLANE_URL", "http://localhost:3000"),
-		TURNServerHost:         getEnv("TURN_SERVER_HOST", ""),
-		TURNSecret:             getEnv("TURN_SECRET", ""),
-		TURNRealm:              getEnv("TURN_REALM", "concordvoice.chat"),
-		LicensingAuthorityURL:  getEnv("LICENSING_AUTHORITY_URL", "http://localhost:8082"),
-		AllowedOrigins:         parseOrigins(getEnv("ALLOWED_ORIGINS", "http://localhost:3001,http://localhost:3002")),
-		ClientMinVersion:       getEnv("CLIENT_MIN_VERSION", ""),
-		FeatureVoice:           getEnv("FEATURE_VOICE", "true") == "true",
-		FeatureVideo:           getEnv("FEATURE_VIDEO", "true") == "true",
-		FeatureE2EE:            getEnv("FEATURE_E2EE", "true") == "true",
-		SpaURL:                 getEnv("SPA_URL", ""),
-		SpaIpcContract:         getEnvInt("SPA_IPC_CONTRACT", 0),
-		TelemetryPolicyVersion: getEnvInt("TELEMETRY_POLICY_VERSION", 1),
-		SpaConfigFile:          getEnv("SPA_CONFIG_FILE", ""),
-		ReleasesDir:            getEnv("RELEASES_DIR", ""),
-		SpaDir:                 getEnv("SPA_DIR", ""),
-		SMTPHost:               getEnv("SMTP_HOST", ""),
-		SMTPPort:               getEnvInt("SMTP_PORT", 587),
-		SMTPUsername:           getEnv("SMTP_USERNAME", ""),
-		SMTPPassword:           getEnv("SMTP_PASSWORD", ""), // #nosec G101 -- env var name, not a secret
-		SMTPFrom:               getEnv("SMTP_FROM", "Concord Voice <noreply@verify.concordvoice.chat>"),
-		MFAEncryptionKey:       getEnv("MFA_ENCRYPTION_KEY", devMFAEncKey),
-		WebAuthnRPID:           getEnv("WEBAUTHN_RP_ID", "localhost"),
-		WebAuthnRPOrigins:      parseOrigins(getEnv("WEBAUTHN_RP_ORIGINS", "http://localhost:3001")),
-		MinIOEndpoint:          getEnv("MINIO_ENDPOINT", ""),
-		MinIOAccessKey:         getEnv("MINIO_ACCESS_KEY", "concord"),
-		MinIOSecretKey:         getEnv("MINIO_SECRET_KEY", devMinIOSecretKey), // #nosec G101 -- env var name, not a secret
-		MinIOUseSSL:            getEnv("MINIO_USE_SSL", "false") == "true",
-		MinIOBucket:            getEnv("MINIO_BUCKET", "concord-media"),
-		UploadMaxSize:          getEnvInt64("UPLOAD_MAX_SIZE", 25*1024*1024), // 25 MB default
-		KlipyAPIKey:            getEnv("KLIPY_API_KEY", ""),
+		Environment:           getEnv("ENVIRONMENT", "development"),
+		Port:                  getEnv("PORT", "8080"),
+		DatabaseURL:           getEnv("DATABASE_URL", defaultDevDatabaseURL()),
+		RedisURL:              getEnv("REDIS_URL", defaultDevRedisURL()),
+		JWTSecret:             getEnv("JWT_SECRET", devJWTSecret),
+		NATSUrl:               getEnv("NATS_URL", "nats://localhost:4222"),
+		MediaPlaneURL:         getEnv("MEDIA_PLANE_URL", "http://localhost:3000"),
+		TURNServerHost:        getEnv("TURN_SERVER_HOST", ""),
+		TURNSecret:            getEnv("TURN_SECRET", ""),
+		TURNRealm:             getEnv("TURN_REALM", "concordvoice.chat"),
+		LicensingAuthorityURL: getEnv("LICENSING_AUTHORITY_URL", "http://localhost:8082"),
+		AllowedOrigins:        parseOrigins(getEnv("ALLOWED_ORIGINS", "http://localhost:3001,http://localhost:3002")),
+		ClientMinVersion:      getEnv("CLIENT_MIN_VERSION", ""),
+		FeatureVoice:          getEnv("FEATURE_VOICE", "true") == "true",
+		FeatureVideo:          getEnv("FEATURE_VIDEO", "true") == "true",
+		FeatureE2EE:           getEnv("FEATURE_E2EE", "true") == "true",
+		SpaURL:                getEnv("SPA_URL", ""),
+		SpaIpcContract:        getEnvInt("SPA_IPC_CONTRACT", 0),
+		SpaConfigFile:         getEnv("SPA_CONFIG_FILE", ""),
+		ReleasesDir:           getEnv("RELEASES_DIR", ""),
+		SpaDir:                getEnv("SPA_DIR", ""),
+		SMTPHost:              getEnv("SMTP_HOST", ""),
+		SMTPPort:              getEnvInt("SMTP_PORT", 587),
+		SMTPUsername:          getEnv("SMTP_USERNAME", ""),
+		SMTPPassword:          getEnv("SMTP_PASSWORD", ""), // #nosec G101 -- env var name, not a secret
+		SMTPFrom:              getEnv("SMTP_FROM", "Concord Voice <noreply@verify.concordvoice.chat>"),
+		MFAEncryptionKey:      getEnv("MFA_ENCRYPTION_KEY", devMFAEncKey),
+		WebAuthnRPID:          getEnv("WEBAUTHN_RP_ID", "localhost"),
+		WebAuthnRPOrigins:     parseOrigins(getEnv("WEBAUTHN_RP_ORIGINS", "http://localhost:3001")),
+		MinIOEndpoint:         getEnv("MINIO_ENDPOINT", ""),
+		MinIOAccessKey:        getEnv("MINIO_ACCESS_KEY", "concord"),
+		MinIOSecretKey:        getEnv("MINIO_SECRET_KEY", devMinIOSecretKey), // #nosec G101 -- env var name, not a secret
+		MinIOUseSSL:           getEnv("MINIO_USE_SSL", "false") == "true",
+		MinIOBucket:           getEnv("MINIO_BUCKET", "concord-media"),
+		UploadMaxSize:         getEnvInt64("UPLOAD_MAX_SIZE", 25*1024*1024), // 25 MB default
+		KlipyAPIKey:           getEnv("KLIPY_API_KEY", ""),
 	}
 
 	if err := cfg.validate(); err != nil {
