@@ -193,6 +193,7 @@ services:
       MINIO_BUCKET: ${MINIO_BUCKET:-concord-media}
       UPLOAD_MAX_SIZE: ${UPLOAD_MAX_SIZE:-26214400}
       KLIPY_API_KEY: ${KLIPY_API_KEY:-}
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-172.19.0.0/16}
       PORT: 8080
     ports:
       - "8080:8080"

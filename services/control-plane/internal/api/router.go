@@ -62,15 +62,27 @@ func (a *mentionCheckerAdapter) HasMentionPermission(ctx context.Context, server
 	return a.resolver.HasPermission(ctx, serverID, userID, channelID, rbac.Permission(permBit))
 }
 
+// configureTrustedProxies applies the CIDR allowlist (validated + defaulted at
+// config Load time, production-guarded) and emits a startup audit log. When a
+// request arrives from a trusted peer, Gin iterates RemoteIPHeaders
+// [X-Forwarded-For, X-Real-IP] in order: for X-Forwarded-For it walks
+// right-to-left skipping trusted hops and returns the first untrusted address;
+// X-Real-IP is tried next if XFF is absent or yields no valid IP. When the
+// peer is untrusted, both headers are ignored and RemoteAddr is returned —
+// preserving anti-spoof semantics.
+func configureTrustedProxies(router *gin.Engine, cfg *config.Config, log *logger.Logger) {
+	if err := router.SetTrustedProxies(cfg.TrustedProxyCIDRs); err != nil {
+		log.Fatal("Failed to configure trusted proxies", "error", err)
+	}
+	log.Info("Trusted proxies configured",
+		"cidrs", cfg.TrustedProxyCIDRs,
+		"count", len(cfg.TrustedProxyCIDRs))
+}
+
 // NewRouter creates a new API router and returns the WebSocket hub and NATS client for lifecycle management.
 func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *config.Config, liveSpa *config.LiveSpaConfig, log *logger.Logger) (*gin.Engine, *websocket.Hub, *natsclient.Client) {
 	router := gin.New()
-
-	// Trust no proxies by default — ClientIP() uses RemoteAddr only.
-	// In Docker, nginx is the sole reverse proxy and sets X-Real-IP.
-	// This prevents spoofed X-Forwarded-For from bypassing IP-based rate
-	// limits and auth failure bans.
-	router.SetTrustedProxies(nil) //nolint:errcheck,gosec // nil arg never errors
+	configureTrustedProxies(router, cfg, log)
 
 	// Middleware
 	router.Use(gin.Recovery())

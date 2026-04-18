@@ -4,6 +4,7 @@ package config
 import (
 	"fmt"
 	"log"
+	"net"
 	"os"
 	"strconv"
 	"strings"
@@ -98,6 +99,13 @@ type Config struct {
 	// /api/v1/klipy/* routes in internal/klipy/handlers.go. The renderer rewrites
 	// media URLs through /api/v1/klipy/media so KLIPY's CDN never sees per-user IPs.
 	KlipyAPIKey string
+
+	// TrustedProxyCIDRs is the allowlist of reverse-proxy CIDRs passed to
+	// gin's SetTrustedProxies so c.ClientIP() resolves the real client IP via
+	// X-Forwarded-For / X-Real-IP. Production MUST set TRUSTED_PROXY_CIDRS —
+	// validate() rejects an empty list in production to prevent silent regression
+	// to returning the proxy address instead of the real client IP.
+	TrustedProxyCIDRs []string
 }
 
 // Load reads configuration from environment variables
@@ -144,6 +152,12 @@ func Load() (*Config, error) {
 		KlipyAPIKey:           getEnv("KLIPY_API_KEY", ""),
 	}
 
+	cidrs, err := computeTrustedProxyCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS"), cfg.Environment)
+	if err != nil {
+		log.Fatalf("FATAL: %v", err)
+	}
+	cfg.TrustedProxyCIDRs = cidrs
+
 	if err := cfg.validate(); err != nil {
 		log.Fatal(err)
 	}
@@ -183,6 +197,8 @@ func (c *Config) validate() error {
 			"MINIO_ENDPOINT must be set in production."},
 		{c.MinIOBucket == "",
 			"MINIO_BUCKET must be set in production."},
+		{len(c.TrustedProxyCIDRs) == 0,
+			"TRUSTED_PROXY_CIDRS must be set in production. Without it, c.ClientIP() returns the reverse-proxy address instead of the real client IP, breaking rate limiting and session audit logs."},
 	}
 
 	for _, g := range guards {
@@ -229,4 +245,57 @@ func getEnvInt64(key string, defaultValue int64) int64 {
 		}
 	}
 	return defaultValue
+}
+
+// defaultTrustedProxyCIDRs returns the dev/CI default for TRUSTED_PROXY_CIDRS.
+// Production MUST override via env var — validate() rejects an empty list in
+// production. The RFC1918 Docker private range (172.16.0.0/12) is used so
+// compose-recreated bridge CIDRs (172.17.0.0/16, 172.19.0.0/16, etc.) remain
+// trusted without re-config. The trust boundary in dev is the docker host
+// itself — an attacker on the same bridge can already do worse than XFF spoof.
+func defaultTrustedProxyCIDRs() string {
+	return "172.16.0.0/12"
+}
+
+// computeTrustedProxyCIDRs returns the effective trusted-proxy CIDR list based
+// on the raw TRUSTED_PROXY_CIDRS env value and the deployment environment.
+//
+// In production, an empty/unset env value returns nil so validate() can enforce
+// the production guard and fail startup — preventing silent deploys against
+// load balancers outside the Docker bridge range.
+//
+// In non-production, an empty/unset env value falls back to the broad RFC1918
+// Docker private range so dev/CI setups work without explicit configuration.
+//
+// A malformed CIDR returns the underlying parse error in all environments.
+func computeTrustedProxyCIDRs(envValue, environment string) ([]string, error) {
+	if envValue == "" {
+		if environment == "production" {
+			return nil, nil
+		}
+		envValue = defaultTrustedProxyCIDRs()
+	}
+	return parseTrustedProxyCIDRs(envValue)
+}
+
+// parseTrustedProxyCIDRs splits a comma-separated list of CIDRs and validates
+// each. Returns an error on any malformed entry — silent skipping could leave
+// the allowlist empty, silently regressing c.ClientIP() to return the reverse-
+// proxy address and breaking IP-based rate limiting / session audit logs.
+//
+// Accepts both IPv4 and IPv6 CIDRs — net.ParseCIDR handles both uniformly.
+func parseTrustedProxyCIDRs(raw string) ([]string, error) {
+	parts := strings.Split(raw, ",")
+	cidrs := make([]string, 0, len(parts))
+	for _, p := range parts {
+		trimmed := strings.TrimSpace(p)
+		if trimmed == "" {
+			continue
+		}
+		if _, _, err := net.ParseCIDR(trimmed); err != nil {
+			return nil, fmt.Errorf("invalid CIDR %q in TRUSTED_PROXY_CIDRS: %w", trimmed, err)
+		}
+		cidrs = append(cidrs, trimmed)
+	}
+	return cidrs, nil
 }
