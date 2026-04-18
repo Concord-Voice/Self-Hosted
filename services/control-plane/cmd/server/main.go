@@ -17,6 +17,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/api"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/database"
 	sentryPkg "github.com/markdrogersjr/Concord/services/control-plane/internal/sentry"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/storage"
@@ -98,6 +99,9 @@ func main() {
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	defer cleanupCancel()
 	go runCleanupJob(cleanupCtx, db, redisClient, hub, log)
+
+	pendingRepo := auth.NewPendingRepo(db)
+	auth.StartPendingCleanupWorker(cleanupCtx, pendingRepo, log, auth.PendingCleanupInterval)
 
 	// Create HTTP server
 	srv := &http.Server{

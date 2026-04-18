@@ -132,9 +132,6 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	// Initialize handlers
 	authHandler := auth.NewHandler(db, redis, log, cfg.JWTSecret, hub)
 	authHandler.SetEmailService(emailSvc)
-	verificationHandler := auth.NewVerificationHandler(db, redis, log, emailSvc, cfg.JWTSecret)
-	authHandler.SetVerificationHandler(verificationHandler)
-
 	// Wire cross-references (breaks circular init dependency)
 	authHandler.SetMFAChecker(mfaHandler)
 	mfaHandler.SetLoginCompleter(authHandler)
@@ -191,6 +188,31 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 			authRoutes.POST("/register",
 				middleware.RateLimitByIP(redis, 5, 15*time.Minute),
 				authHandler.Register,
+			)
+
+			// Register confirm: 10 attempts per 15 minutes (verify email code,
+			// promote pending_registration -> user). See #621.
+			authRoutes.POST("/register/confirm",
+				middleware.RateLimitByIP(redis, 10, 15*time.Minute),
+				authHandler.ConfirmRegistration,
+			)
+
+			// Resend verification code: 20 attempts per 15 minutes. See #621.
+			authRoutes.POST("/register/resend",
+				middleware.RateLimitByIP(redis, 20, 15*time.Minute),
+				authHandler.ResendRegistrationCode,
+			)
+
+			// Change email mid-registration: 10 attempts per 15 minutes. See #621.
+			authRoutes.POST("/register/change-email",
+				middleware.RateLimitByIP(redis, 10, 15*time.Minute),
+				authHandler.ChangeRegistrationEmail,
+			)
+
+			// Abandon pending registration: 20 attempts per 15 minutes. See #621.
+			authRoutes.DELETE("/register/:pending_id",
+				middleware.RateLimitByIP(redis, 20, 15*time.Minute),
+				authHandler.AbandonRegistration,
 			)
 
 			// Login: 10 attempts per 15 minutes (prevent brute force)
@@ -336,20 +358,6 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 
 		// ── Pending-OK routes (unverified email allowed) ──────────────
 		{
-			// Email verification endpoints
-			authRequired.POST("/auth/verify-email/send",
-				middleware.RateLimitByUser(redis, 1, 1*time.Minute),
-				verificationHandler.SendCode,
-			)
-			authRequired.POST("/auth/verify-email/confirm",
-				middleware.RateLimitByUser(redis, 5, 15*time.Minute),
-				verificationHandler.ConfirmCode,
-			)
-			authRequired.POST("/auth/verify-email/change-email",
-				middleware.RateLimitByUser(redis, 3, 15*time.Minute),
-				verificationHandler.ChangeEmail,
-			)
-
 			// Note: logout is in the public authRoutes group above (uses refresh token, not Bearer)
 
 			// Basic profile read (needed by frontend to check verification status)

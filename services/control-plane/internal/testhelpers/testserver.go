@@ -2,6 +2,7 @@ package testhelpers
 
 import (
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -42,6 +43,10 @@ type TestServer struct {
 // SetupTestServer creates a test server backed by a real database and Redis.
 func SetupTestServer(t *testing.T) *TestServer {
 	t.Helper()
+
+	// Ensure handlers that gate test-only behaviour (e.g. writing the plaintext
+	// verification code to Redis) activate correctly in integration tests.
+	t.Setenv("CONCORD_ENV", "test")
 
 	db, dbCleanup := SetupTestDB(t)
 	redisClient, redisCleanup := SetupTestRedis(t)
@@ -435,6 +440,18 @@ func (ts *TestServer) CreateTestMessage(t *testing.T, channelID string, user Tes
 	}
 
 	return resp.Message.ID
+}
+
+// FetchVerificationCode retrieves the plaintext verification code stored in Redis
+// under "test_only:<pendingID>" by the registration handler (only written when
+// CONCORD_ENV=test). Fails the test immediately if the key is absent.
+func FetchVerificationCode(t *testing.T, ts *TestServer, pendingID string) string {
+	t.Helper()
+	code, err := ts.Redis.Get(context.Background(), "test_only:"+pendingID).Result()
+	if err != nil {
+		t.Fatalf("testhelpers: FetchVerificationCode: key test_only:%s not found in Redis: %v", pendingID, err)
+	}
+	return code
 }
 
 // CreateVoiceChannel creates a voice channel in the given server and returns its ID.

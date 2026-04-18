@@ -44,6 +44,7 @@ const (
 // ── Machine-ID Theft Detection ─────────────────────────────────────────────
 
 // registerAndGetRefreshToken registers a user with specific machine-id and returns the refresh token and user id.
+// Uses the two-step new-flow: POST /auth/register → POST /auth/register/confirm.
 func registerAndGetRefreshToken(t *testing.T, ts *testhelpers.TestServer, username, machineID string) (refreshToken, userID string) {
 	t.Helper()
 	pub, priv, salt := testhelpers.E2EETestKeys()
@@ -72,9 +73,72 @@ func registerAndGetRefreshToken(t *testing.T, ts *testhelpers.TestServer, userna
 	ts.Router.ServeHTTP(w, req)
 	require.Equal(t, http.StatusCreated, w.Code)
 
+	var regBody map[string]interface{}
+	testhelpers.ParseJSON(t, w, &regBody)
+	pendingID := regBody["pending_id"].(string)
+
+	// Step 2: confirm with the test-only code stored in Redis.
+	code := testhelpers.FetchVerificationCode(t, ts, pendingID)
+
+	confirmHeaders := http.Header{}
+	confirmHeaders.Set(ctHeader, ctJSON)
+	if machineID != "" {
+		confirmHeaders.Set(headerXMachineID, machineID)
+	}
+	confirmBody, _ := json.Marshal(map[string]string{"pending_id": pendingID, "code": code})
+	req2 := httptest.NewRequest("POST", "/api/v1/auth/register/confirm", strings.NewReader(string(confirmBody)))
+	req2.Header = confirmHeaders
+
+	w2 := httptest.NewRecorder()
+	ts.Router.ServeHTTP(w2, req2)
+	require.Equal(t, http.StatusOK, w2.Code)
+
 	var body map[string]interface{}
-	testhelpers.ParseJSON(t, w, &body)
+	testhelpers.ParseJSON(t, w2, &body)
 	return body["refresh_token"].(string), body["user"].(map[string]interface{})["id"].(string)
+}
+
+// registerAndGetRefreshTokenWithConfirmW is like registerAndGetRefreshToken but also
+// returns the confirm *httptest.ResponseRecorder so callers can inspect cookies.
+func registerAndGetRefreshTokenWithConfirmW(t *testing.T, ts *testhelpers.TestServer, username string) (accessToken, refreshToken string, confirmW *httptest.ResponseRecorder) {
+	t.Helper()
+	pub, priv, salt := testhelpers.E2EETestKeys()
+	email := username + "@test.concord.chat"
+
+	payload := map[string]interface{}{
+		"email":               email,
+		"username":            username,
+		"password":            testhelpers.TestAuthPlaintext,
+		"age_confirmation":    true,
+		"public_key":          pub,
+		"wrapped_private_key": priv,
+		"key_derivation_salt": salt,
+	}
+	jsonBytes, _ := json.Marshal(payload)
+	req := httptest.NewRequest("POST", pathAuthRegister, strings.NewReader(string(jsonBytes)))
+	req.Header.Set(ctHeader, ctJSON)
+
+	w := httptest.NewRecorder()
+	ts.Router.ServeHTTP(w, req)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	var regBody map[string]interface{}
+	testhelpers.ParseJSON(t, w, &regBody)
+	pendingID := regBody["pending_id"].(string)
+
+	code := testhelpers.FetchVerificationCode(t, ts, pendingID)
+
+	confirmBody, _ := json.Marshal(map[string]string{"pending_id": pendingID, "code": code})
+	req2 := httptest.NewRequest("POST", "/api/v1/auth/register/confirm", strings.NewReader(string(confirmBody)))
+	req2.Header.Set(ctHeader, ctJSON)
+
+	confirmW = httptest.NewRecorder()
+	ts.Router.ServeHTTP(confirmW, req2)
+	require.Equal(t, http.StatusOK, confirmW.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, confirmW, &body)
+	return body["access_token"].(string), body["refresh_token"].(string), confirmW //nolint:gosec // G117: response-binding fields
 }
 
 // doRefreshWithMachineID performs a refresh request with a specific machine ID and optional remote IP.
@@ -891,32 +955,18 @@ func TestRecoveryResetAccountDeletesRecoveryKeys(t *testing.T) {
 func TestLogoutWithRefreshCookieRevokesToken(t *testing.T) {
 	ts := setupTS(t)
 
-	pub, priv, salt := testhelpers.E2EETestKeys()
-	w := ts.DoRequest("POST", pathAuthRegister, map[string]interface{}{
-		"email":               "logoutcookierevoke@test.concord.chat",
-		"username":            "logoutcookierevoke",
-		"password":            testhelpers.TestAuthPlaintext,
-		"age_confirmation":    true,
-		"public_key":          pub,
-		"wrapped_private_key": priv,
-		"key_derivation_salt": salt,
-	}, nil)
-	require.Equal(t, http.StatusCreated, w.Code)
+	// Use the two-step flow: register → confirm. Cookies are set by confirm step.
+	accessToken, refreshTokenStr, confirmW := registerAndGetRefreshTokenWithConfirmW(t, ts, "logoutcookierevoke")
 
-	// Extract refresh cookie and token from body
+	// Extract refresh cookie from the confirm response.
 	var refreshCookie *http.Cookie
-	for _, c := range w.Result().Cookies() {
+	for _, c := range confirmW.Result().Cookies() {
 		if c.Name == "refresh_token" {
 			refreshCookie = c
 			break
 		}
 	}
 	require.NotNil(t, refreshCookie)
-
-	var regBody map[string]interface{}
-	testhelpers.ParseJSON(t, w, &regBody)
-	accessToken := regBody["access_token"].(string)
-	refreshTokenStr := regBody["refresh_token"].(string)
 
 	// Logout with both access token and refresh cookie
 	req := httptest.NewRequest("POST", pathAuthLogout, nil)
@@ -1180,28 +1230,15 @@ func TestRecoveryResetAccountInvalidBase64KeySalt(t *testing.T) {
 func TestLogoutWithOnlyRefreshTokenHeader(t *testing.T) {
 	ts := setupTS(t)
 
-	pub, priv, salt := testhelpers.E2EETestKeys()
-	w := ts.DoRequest("POST", pathAuthRegister, map[string]interface{}{
-		"email":               "logoutonlyrefresh@test.concord.chat",
-		"username":            "logoutonlyrefresh",
-		"password":            testhelpers.TestAuthPlaintext,
-		"age_confirmation":    true,
-		"public_key":          pub,
-		"wrapped_private_key": priv,
-		"key_derivation_salt": salt,
-	}, nil)
-	require.Equal(t, http.StatusCreated, w.Code)
-
-	var regBody map[string]interface{}
-	testhelpers.ParseJSON(t, w, &regBody)
-	refreshToken := regBody["refresh_token"].(string)
+	// Use new two-step flow: register → confirm → get refresh token.
+	refreshToken, _ := registerAndGetRefreshToken(t, ts, "logoutonlyrefresh", "")
 
 	// Logout with only X-Refresh-Token header (no Authorization header)
 	headers := http.Header{}
 	headers.Set("X-Refresh-Token", refreshToken)
 	headers.Set(ctHeader, ctJSON)
 
-	w = ts.DoRequest("POST", pathAuthLogout, nil, headers)
+	w := ts.DoRequest("POST", pathAuthLogout, nil, headers)
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
@@ -1223,8 +1260,20 @@ func TestRegisterDefaultsKeyDerivationAlg(t *testing.T) {
 	}, nil)
 	require.Equal(t, http.StatusCreated, w.Code)
 
+	var regBody map[string]interface{}
+	testhelpers.ParseJSON(t, w, &regBody)
+	pendingID := regBody["pending_id"].(string)
+
+	// Step 2: confirm to promote to a real user (key_derivation_alg is set during Promote).
+	code := testhelpers.FetchVerificationCode(t, ts, pendingID)
+	w2 := ts.DoRequest("POST", "/api/v1/auth/register/confirm", map[string]string{
+		"pending_id": pendingID,
+		"code":       code,
+	}, nil)
+	require.Equal(t, http.StatusOK, w2.Code)
+
 	var body map[string]interface{}
-	testhelpers.ParseJSON(t, w, &body)
+	testhelpers.ParseJSON(t, w2, &body)
 	userID := body["user"].(map[string]interface{})["id"].(string)
 
 	// Verify the default alg was stored
@@ -1507,64 +1556,6 @@ func TestRecoveryBeginNormalizesEmail(t *testing.T) {
 	val, err := ts.Redis.Get(context.Background(), key).Result()
 	require.NoError(t, err)
 	assert.NotEmpty(t, val)
-}
-
-// ── Verification edge cases ────────────────────────────────────────────────
-
-func TestSendVerificationCodeEndpoint(t *testing.T) {
-	ts := setupTS(t)
-	// Use unverified user so email verification is actually needed
-	user := ts.CreateTestUserUnverified(t, "sendverify")
-
-	w := ts.DoRequest("POST", "/api/v1/auth/verify-email/send", nil, testhelpers.AuthHeaders(user.AccessToken))
-	assert.Equal(t, http.StatusOK, w.Code)
-}
-
-func TestSendVerificationCodeAlreadyVerified(t *testing.T) {
-	ts := setupTS(t)
-	user := ts.CreateTestUser(t, "sendverifyok")
-
-	w := ts.DoRequest("POST", "/api/v1/auth/verify-email/send", nil, testhelpers.AuthHeaders(user.AccessToken))
-	// Already verified — should reject
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-}
-
-func TestConfirmVerificationCodeInvalid(t *testing.T) {
-	ts := setupTS(t)
-	user := ts.CreateTestUserUnverified(t, "confirmverify")
-
-	w := ts.DoRequest("POST", "/api/v1/auth/verify-email/confirm", map[string]interface{}{
-		"code": "000000",
-	}, testhelpers.AuthHeaders(user.AccessToken))
-	// Should fail — no code was generated or wrong code
-	assert.Contains(t, []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusNotFound}, w.Code)
-}
-
-func TestConfirmVerificationCodeMissingCode(t *testing.T) {
-	ts := setupTS(t)
-	user := ts.CreateTestUserUnverified(t, "confirmnocode")
-
-	w := ts.DoRequest("POST", "/api/v1/auth/verify-email/confirm", map[string]interface{}{}, testhelpers.AuthHeaders(user.AccessToken))
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-}
-
-func TestChangeEmailEndpoint(t *testing.T) {
-	ts := setupTS(t)
-	user := ts.CreateTestUserUnverified(t, "changeemail")
-
-	w := ts.DoRequest("POST", "/api/v1/auth/verify-email/change-email", map[string]interface{}{
-		"new_email": "newemail@test.concord.chat",
-	}, testhelpers.AuthHeaders(user.AccessToken))
-	// Should succeed — sends verification code to new email
-	assert.Equal(t, http.StatusOK, w.Code)
-}
-
-func TestChangeEmailMissingField(t *testing.T) {
-	ts := setupTS(t)
-	user := ts.CreateTestUserUnverified(t, "changeemailmissing")
-
-	w := ts.DoRequest("POST", "/api/v1/auth/verify-email/change-email", map[string]interface{}{}, testhelpers.AuthHeaders(user.AccessToken))
-	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 // ── WS Ticket Edge Cases ───────────────────────────────────────────────────

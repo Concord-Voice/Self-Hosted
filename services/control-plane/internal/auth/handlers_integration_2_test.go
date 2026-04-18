@@ -26,15 +26,16 @@ const (
 	headerXRefreshToken = "X-Refresh-Token" //nolint:gosec // G101 false positive: HTTP header name, not a credential
 	bearerPfx           = "Bearer "
 
-	pathLogout           = "/api/v1/auth/logout"
-	pathRecoverVerify    = "/api/v1/auth/recovery/verify-code"
-	pathRecoverResetPwd  = "/api/v1/auth/recovery/reset-password" //nolint:gosec // G101 false positive: URL path, not a credential
-	pathRecoverResetAcct = "/api/v1/auth/recovery/reset-account"
-	pathRecoverBegin     = "/api/v1/auth/recovery/begin"
-	pathDeviceRequest    = "/api/v1/auth/recovery/device-request"
-	pathSocialRequest    = "/api/v1/auth/recovery/social-request"
-	pathWSTicket         = "/api/v1/auth/ws-ticket"
-	pollSuffix           = "/some-id"
+	pathLogout              = "/api/v1/auth/logout"
+	pathConfirmRegistration = "/api/v1/auth/register/confirm"
+	pathRecoverVerify       = "/api/v1/auth/recovery/verify-code"
+	pathRecoverResetPwd     = "/api/v1/auth/recovery/reset-password" //nolint:gosec // G101 false positive: URL path, not a credential
+	pathRecoverResetAcct    = "/api/v1/auth/recovery/reset-account"
+	pathRecoverBegin        = "/api/v1/auth/recovery/begin"
+	pathDeviceRequest       = "/api/v1/auth/recovery/device-request"
+	pathSocialRequest       = "/api/v1/auth/recovery/social-request"
+	pathWSTicket            = "/api/v1/auth/ws-ticket"
+	pollSuffix              = "/some-id"
 )
 
 // ── Registration Edge Cases ─────────────────────────────────────────────────
@@ -196,7 +197,9 @@ func TestRegisterUsernameTooShort(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestRegisterReturnsSessionID(t *testing.T) {
+func TestRegisterReturnsPendingID(t *testing.T) {
+	// The new registration flow (Task 10 / #621) returns pending_id + email
+	// rather than session tokens. Tokens are issued only after email confirmation.
 	ts := setupTS(t)
 	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
 
@@ -204,12 +207,17 @@ func TestRegisterReturnsSessionID(t *testing.T) {
 
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
-	assert.NotEmpty(t, body["session_id"])
-	assert.NotEmpty(t, body["refresh_token"])
-	assert.Equal(t, true, body["remember_me"])
+	assert.NotEmpty(t, body["pending_id"])
+	assert.NotEmpty(t, body["email"])
+	assert.NotEmpty(t, body["expires_at"])
+	assert.NotEmpty(t, body["code_expires_at"])
+	// Tokens are NOT in the register response — they come from /register/confirm.
+	assert.Nil(t, body["refresh_token"])
+	assert.Nil(t, body["access_token"])
 }
 
-func TestRegisterReturnsUserData(t *testing.T) {
+func TestRegisterReturnsEmail(t *testing.T) {
+	// Replaces TestRegisterReturnsUserData for the new pending-registration flow.
 	ts := setupTS(t)
 	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
 
@@ -217,11 +225,8 @@ func TestRegisterReturnsUserData(t *testing.T) {
 
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
-
-	user := body["user"].(map[string]interface{})
-	assert.Equal(t, "newuser", user["username"])
-	assert.Equal(t, testEmail, user["email"])
-	assert.Equal(t, false, user["email_verified"])
+	assert.Equal(t, testEmail, body["email"])
+	assert.NotEmpty(t, body["pending_id"])
 }
 
 func TestRegisterNormalizesEmail(t *testing.T) {
@@ -241,12 +246,11 @@ func TestRegisterNormalizesEmail(t *testing.T) {
 	// leading/trailing whitespace. We test that any valid registration normalizes.
 	w := ts.DoRequest("POST", pathRegister, payload, nil)
 
-	// If the email passes validation, the stored email should be normalized
+	// If the email passes validation, the returned email should be normalized.
 	if w.Code == http.StatusCreated {
 		var body map[string]interface{}
 		testhelpers.ParseJSON(t, w, &body)
-		user := body["user"].(map[string]interface{})
-		assert.Equal(t, "uppercase@test.concord.chat", user["email"])
+		assert.Equal(t, "uppercase@test.concord.chat", body["email"])
 	}
 }
 
@@ -443,17 +447,12 @@ func TestLogoutNoRefreshToken(t *testing.T) {
 func TestLogoutClearsCookie(t *testing.T) {
 	ts := setupTS(t)
 
-	// Register to get a cookie
-	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
-	require.Equal(t, http.StatusCreated, w.Code)
+	// Register + confirm to get tokens; refresh cookie is set by the confirm step.
+	accessToken, _, confirmW := registerAndConfirmTokens(t, ts, registerPayload())
 
-	var regBody map[string]interface{}
-	testhelpers.ParseJSON(t, w, &regBody)
-	accessToken := regBody["access_token"].(string)
-
-	// Extract the refresh cookie
+	// Extract the refresh cookie from the confirm response.
 	var refreshCookie *http.Cookie
-	for _, c := range w.Result().Cookies() {
+	for _, c := range confirmW.Result().Cookies() {
 		if c.Name == "refresh_token" {
 			refreshCookie = c
 			break
@@ -483,25 +482,15 @@ func TestLogoutClearsCookie(t *testing.T) {
 func TestLogoutRevokesRefreshTokenInDB(t *testing.T) {
 	ts := setupTS(t)
 
-	// Register to get a refresh token
-	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
-	require.Equal(t, http.StatusCreated, w.Code)
-
-	var regBody map[string]interface{}
-	testhelpers.ParseJSON(t, w, &regBody)
-	accessToken := regBody["access_token"].(string)
-	refreshToken := regBody["refresh_token"].(string)
-
-	// Hash the refresh token so we can look it up later
+	accessToken, refreshToken, _ := registerAndConfirmTokens(t, ts, registerPayload())
 	tokenHash := hashToken(refreshToken)
 
-	// Logout with X-Refresh-Token header
 	headers := http.Header{}
 	headers.Set("Authorization", bearerPfx+accessToken)
 	headers.Set(headerXRefreshToken, refreshToken)
 	headers.Set(headerContentType, contentTypeJSON)
 
-	w = ts.DoRequest("POST", pathLogout, nil, headers)
+	w := ts.DoRequest("POST", pathLogout, nil, headers)
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	// Verify the refresh token is revoked in DB
@@ -516,22 +505,14 @@ func TestLogoutRevokesRefreshTokenInDB(t *testing.T) {
 func TestLogoutWithXRefreshTokenHeader(t *testing.T) {
 	ts := setupTS(t)
 
-	// Register to get a refresh token
-	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
-	require.Equal(t, http.StatusCreated, w.Code)
+	accessToken, refreshToken, _ := registerAndConfirmTokens(t, ts, registerPayload())
 
-	var regBody map[string]interface{}
-	testhelpers.ParseJSON(t, w, &regBody)
-	accessToken := regBody["access_token"].(string)
-	refreshToken := regBody["refresh_token"].(string)
-
-	// Logout using X-Refresh-Token header instead of cookie
 	headers := http.Header{}
 	headers.Set("Authorization", bearerPfx+accessToken)
 	headers.Set(headerXRefreshToken, refreshToken)
 	headers.Set(headerContentType, contentTypeJSON)
 
-	w = ts.DoRequest("POST", pathLogout, nil, headers)
+	w := ts.DoRequest("POST", pathLogout, nil, headers)
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var body map[string]interface{}
@@ -544,19 +525,13 @@ func TestLogoutWithXRefreshTokenHeader(t *testing.T) {
 func TestRefreshReturnsNewRefreshTokenAndSessionID(t *testing.T) {
 	ts := setupTS(t)
 
-	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
-	require.Equal(t, http.StatusCreated, w.Code)
+	_, refreshToken, _ := registerAndConfirmTokens(t, ts, registerPayload())
 
-	var regBody map[string]interface{}
-	testhelpers.ParseJSON(t, w, &regBody)
-	refreshToken := regBody["refresh_token"].(string)
-
-	// Refresh using X-Refresh-Token header
 	headers := http.Header{}
 	headers.Set(headerXRefreshToken, refreshToken)
 	headers.Set(headerContentType, contentTypeJSON)
 
-	w = ts.DoRequest("POST", pathRefresh, nil, headers)
+	w := ts.DoRequest("POST", pathRefresh, nil, headers)
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var body map[string]interface{}
@@ -573,20 +548,14 @@ func TestRefreshReturnsNewRefreshTokenAndSessionID(t *testing.T) {
 func TestRefreshRevokesOldTokenInDB(t *testing.T) {
 	ts := setupTS(t)
 
-	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
-	require.Equal(t, http.StatusCreated, w.Code)
-
-	var regBody map[string]interface{}
-	testhelpers.ParseJSON(t, w, &regBody)
-	refreshToken := regBody["refresh_token"].(string)
+	_, refreshToken, _ := registerAndConfirmTokens(t, ts, registerPayload())
 	oldHash := hashToken(refreshToken)
 
-	// Refresh
 	headers := http.Header{}
 	headers.Set(headerXRefreshToken, refreshToken)
 	headers.Set(headerContentType, contentTypeJSON)
 
-	w = ts.DoRequest("POST", pathRefresh, nil, headers)
+	w := ts.DoRequest("POST", pathRefresh, nil, headers)
 	require.Equal(t, http.StatusOK, w.Code)
 
 	// Old token should be revoked in DB
@@ -612,19 +581,14 @@ func TestRefreshEmptyXRefreshTokenHeader(t *testing.T) {
 func TestRefreshNewTokenIsUsable(t *testing.T) {
 	ts := setupTS(t)
 
-	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
-	require.Equal(t, http.StatusCreated, w.Code)
-
-	var regBody map[string]interface{}
-	testhelpers.ParseJSON(t, w, &regBody)
-	refreshToken := regBody["refresh_token"].(string)
+	_, refreshToken, _ := registerAndConfirmTokens(t, ts, registerPayload())
 
 	// First refresh
 	headers := http.Header{}
 	headers.Set(headerXRefreshToken, refreshToken)
 	headers.Set(headerContentType, contentTypeJSON)
 
-	w = ts.DoRequest("POST", pathRefresh, nil, headers)
+	w := ts.DoRequest("POST", pathRefresh, nil, headers)
 	require.Equal(t, http.StatusOK, w.Code)
 
 	var body map[string]interface{}
@@ -643,11 +607,11 @@ func TestRefreshNewTokenIsUsable(t *testing.T) {
 func TestRefreshSetsNewRefreshCookie(t *testing.T) {
 	ts := setupTS(t)
 
-	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
-	require.Equal(t, http.StatusCreated, w.Code)
+	// Register + confirm; refresh cookie is set by the confirm step.
+	_, _, confirmW := registerAndConfirmTokens(t, ts, registerPayload())
 
 	var refreshCookie *http.Cookie
-	for _, c := range w.Result().Cookies() {
+	for _, c := range confirmW.Result().Cookies() {
 		if c.Name == "refresh_token" {
 			refreshCookie = c
 			break
@@ -1297,6 +1261,7 @@ func TestAccessTokenFromRegisterWorks(t *testing.T) {
 	ts := setupTS(t)
 
 	pub, priv, salt := testhelpers.E2EETestKeys()
+	// Step 1: register returns pending_id (no token yet).
 	w := ts.DoRequest("POST", pathRegister, map[string]interface{}{
 		"email":               "regtokentest@test.concord.chat",
 		"username":            "regtokentest",
@@ -1308,11 +1273,23 @@ func TestAccessTokenFromRegisterWorks(t *testing.T) {
 	}, nil)
 	require.Equal(t, http.StatusCreated, w.Code)
 
+	var regBody map[string]interface{}
+	testhelpers.ParseJSON(t, w, &regBody)
+	pendingID := regBody["pending_id"].(string)
+
+	// Step 2: confirm to get access token.
+	code := testhelpers.FetchVerificationCode(t, ts, pendingID)
+	w2 := ts.DoRequest("POST", pathConfirmRegistration, map[string]string{
+		"pending_id": pendingID,
+		"code":       code,
+	}, nil)
+	require.Equal(t, http.StatusOK, w2.Code)
+
 	var body map[string]interface{}
-	testhelpers.ParseJSON(t, w, &body)
+	testhelpers.ParseJSON(t, w2, &body)
 	accessToken := body["access_token"].(string)
 
-	// The token should work for unverified-accessible routes (e.g., /users/me)
+	// The token should work for verified-accessible routes (e.g., /users/me)
 	w = ts.DoRequest("GET", pathUsersMe, nil, testhelpers.AuthHeaders(accessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 }
@@ -1320,19 +1297,14 @@ func TestAccessTokenFromRegisterWorks(t *testing.T) {
 func TestAccessTokenFromRefreshWorks(t *testing.T) {
 	ts := setupTS(t)
 
-	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
-	require.Equal(t, http.StatusCreated, w.Code)
-
-	var regBody map[string]interface{}
-	testhelpers.ParseJSON(t, w, &regBody)
-	refreshToken := regBody["refresh_token"].(string)
+	_, refreshToken, _ := registerAndConfirmTokens(t, ts, registerPayload())
 
 	// Refresh to get a new access token
 	headers := http.Header{}
 	headers.Set(headerXRefreshToken, refreshToken)
 	headers.Set(headerContentType, contentTypeJSON)
 
-	w = ts.DoRequest("POST", pathRefresh, nil, headers)
+	w := ts.DoRequest("POST", pathRefresh, nil, headers)
 	require.Equal(t, http.StatusOK, w.Code)
 
 	var refreshBody map[string]interface{}
@@ -1478,6 +1450,38 @@ func TestRecoveryResetPasswordInvalidRecoveryPrefsSalt(t *testing.T) {
 }
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
+
+// registerAndConfirmTokens performs the two-step registration flow:
+// POST /auth/register → POST /auth/register/confirm.
+// Returns (accessToken, refreshToken, confirmResponseRecorder) so callers can
+// inspect cookies set by the confirm step.
+func registerAndConfirmTokens(t *testing.T, ts *testhelpers.TestServer, payload map[string]interface{}) (accessToken, refreshToken string, confirmW *httptest.ResponseRecorder) {
+	t.Helper()
+
+	w := ts.DoRequest("POST", pathRegister, payload, nil)
+	require.Equal(t, http.StatusCreated, w.Code, "register step failed")
+
+	var regBody map[string]interface{}
+	testhelpers.ParseJSON(t, w, &regBody)
+	pendingID := regBody["pending_id"].(string)
+
+	code := testhelpers.FetchVerificationCode(t, ts, pendingID)
+
+	confirmHeaders := http.Header{}
+	confirmHeaders.Set(headerContentType, contentTypeJSON)
+
+	confirmW = ts.DoRequest("POST", pathConfirmRegistration, map[string]string{
+		"pending_id": pendingID,
+		"code":       code,
+	}, confirmHeaders)
+	require.Equal(t, http.StatusOK, confirmW.Code, "confirm step failed")
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, confirmW, &body)
+	accessToken = body["access_token"].(string)   //nolint:gosec // G117: response-binding field
+	refreshToken = body["refresh_token"].(string) //nolint:gosec // G117: response-binding field
+	return accessToken, refreshToken, confirmW
+}
 
 // hashToken returns the SHA-256 hex digest of a token string.
 func hashToken(token string) string {

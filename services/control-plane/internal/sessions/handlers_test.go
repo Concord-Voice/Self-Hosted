@@ -17,7 +17,7 @@ func setupTS(t *testing.T) *testhelpers.TestServer {
 	return testhelpers.SetupTestServer(t)
 }
 
-// Helper: register a user via the API, auto-verify email, and return access token + refresh cookie.
+// Helper: register a user via the two-step register→confirm flow, and return access token + refresh cookie.
 func registerAndGetTokens(t *testing.T, ts *testhelpers.TestServer, email, username string) (string, *http.Cookie) {
 	t.Helper()
 	pub, priv, salt := testhelpers.E2EETestKeys()
@@ -32,22 +32,33 @@ func registerAndGetTokens(t *testing.T, ts *testhelpers.TestServer, email, usern
 	}, nil)
 	require.Equal(t, http.StatusCreated, w.Code)
 
-	var body map[string]interface{}
-	testhelpers.ParseJSON(t, w, &body)
+	var regBody struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &regBody)
 
-	// Extract user ID and auto-verify email so tests can hit verified-only endpoints
-	user := body["user"].(map[string]interface{})
-	userID := user["id"].(string)
-	accessToken := ts.VerifyUserEmail(t, userID)
+	code := testhelpers.FetchVerificationCode(t, ts, regBody.PendingID)
+
+	w2 := ts.DoRequest("POST", "/api/v1/auth/register/confirm",
+		map[string]string{"pending_id": regBody.PendingID, "code": code}, nil)
+	require.Equal(t, http.StatusOK, w2.Code)
+
+	var confirmBody struct {
+		AccessToken string `json:"access_token"` //nolint:gosec
+		User        struct {
+			ID string `json:"id"`
+		} `json:"user"`
+	}
+	testhelpers.ParseJSON(t, w2, &confirmBody)
 
 	var refreshCookie *http.Cookie
-	for _, c := range w.Result().Cookies() {
+	for _, c := range w2.Result().Cookies() {
 		if c.Name == "refresh_token" {
 			refreshCookie = c
 			break
 		}
 	}
-	return accessToken, refreshCookie
+	return confirmBody.AccessToken, refreshCookie
 }
 
 // --- List Sessions ---

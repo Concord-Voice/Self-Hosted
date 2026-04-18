@@ -81,13 +81,13 @@ func TestVerificationRecordStructure(t *testing.T) {
 }
 
 func TestVerifyCodeTTLConstant(t *testing.T) {
-	// Ensure the TTL constant is reasonable (10 minutes)
-	assert.Equal(t, 10, int(verifyCodeTTL.Minutes()))
+	// VerifyCodeTTLNew (from pending.go) is 2 minutes (#621).
+	assert.Equal(t, 2, int(VerifyCodeTTLNew.Minutes()))
 }
 
 func TestVerifyMaxAttemptsConstant(t *testing.T) {
-	// Ensure max attempts is 5
-	assert.Equal(t, 5, verifyMaxAttempts)
+	// MaxCodeAttempts (from pending.go) is 4 (#621).
+	assert.Equal(t, 4, MaxCodeAttempts)
 }
 
 func TestSanitizeVerificationCode(t *testing.T) {

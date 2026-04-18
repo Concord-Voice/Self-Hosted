@@ -48,20 +48,172 @@ func registerPayload() map[string]interface{} {
 
 // --- Registration Tests ---
 
-func TestRegisterSuccess(t *testing.T) {
+// TestRegisterCreatesPendingNotUser verifies that POST /register creates a
+// pending_registrations row but NOT a users row, and returns a pending_id
+// rather than an access token. See #621.
+func TestRegisterCreatesPendingNotUser(t *testing.T) {
 	ts := setupTS(t)
 	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
 
-	assert.Equal(t, http.StatusCreated, w.Code)
+	require.Equal(t, http.StatusCreated, w.Code)
 
-	var body map[string]interface{}
+	var body struct {
+		PendingID     string `json:"pending_id"`
+		Email         string `json:"email"`
+		ExpiresAt     string `json:"expires_at"`
+		CodeExpiresAt string `json:"code_expires_at"`
+		AccessToken   string `json:"access_token"` //nolint:gosec // G117: asserting this field is absent in the response
+	}
 	testhelpers.ParseJSON(t, w, &body)
-	assert.NotEmpty(t, body["access_token"])
-	assert.Equal(t, float64(900), body["expires_in"])
 
-	user := body["user"].(map[string]interface{})
-	assert.NotEmpty(t, user["id"])
-	assert.Equal(t, "newuser", user["username"])
+	assert.NotEmpty(t, body.PendingID, "response must contain pending_id")
+	assert.NotEmpty(t, body.Email)
+	assert.NotEmpty(t, body.ExpiresAt)
+	assert.NotEmpty(t, body.CodeExpiresAt)
+	assert.Empty(t, body.AccessToken, "no access_token until verification")
+
+	// No user row should exist yet.
+	var userCount int
+	err := ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM users WHERE LOWER(email) = LOWER($1)`,
+		body.Email,
+	).Scan(&userCount)
+	require.NoError(t, err)
+	assert.Equal(t, 0, userCount, "registration must not create users row")
+
+	// Pending row should exist.
+	var pendingCount int
+	err = ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM pending_registrations WHERE id = $1`,
+		body.PendingID,
+	).Scan(&pendingCount)
+	require.NoError(t, err)
+	assert.Equal(t, 1, pendingCount)
+}
+
+// TestRegisterTakeoverByEmailMatch verifies that a second registration with
+// the SAME email+password replaces the earlier pending row (takeover flow).
+func TestRegisterTakeoverByEmailMatch(t *testing.T) {
+	ts := setupTS(t)
+
+	body1 := registerPayload()
+	w1 := ts.DoRequest("POST", pathRegister, body1, nil)
+	require.Equal(t, http.StatusCreated, w1.Code)
+	var first struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w1, &first)
+
+	// Second registration with SAME email + password -> takeover.
+	w2 := ts.DoRequest("POST", pathRegister, body1, nil)
+	require.Equal(t, http.StatusCreated, w2.Code)
+	var second struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w2, &second)
+
+	assert.NotEqual(t, first.PendingID, second.PendingID, "new pending_id issued")
+
+	var count int
+	err := ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM pending_registrations
+		 WHERE LOWER(email) = LOWER($1)`,
+		body1["email"],
+	).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "only one pending for this email")
+}
+
+// TestRegisterTakeoverByUsernameMatch verifies that a second registration with
+// the SAME username + password (but a new email) replaces the earlier pending
+// row via the username-match takeover branch.
+func TestRegisterTakeoverByUsernameMatch(t *testing.T) {
+	ts := setupTS(t)
+
+	body1 := registerPayload()
+	w1 := ts.DoRequest("POST", pathRegister, body1, nil)
+	require.Equal(t, http.StatusCreated, w1.Code)
+	var first struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w1, &first)
+
+	// Second registration: same username + password, DIFFERENT email.
+	body2 := registerPayload()
+	body2["email"] = "different@test.concord.chat"
+	w2 := ts.DoRequest("POST", pathRegister, body2, nil)
+	require.Equal(t, http.StatusCreated, w2.Code)
+	var second struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w2, &second)
+
+	assert.NotEqual(t, first.PendingID, second.PendingID, "new pending_id issued")
+
+	// Exactly one pending row should survive for this username.
+	var count int
+	err := ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM pending_registrations
+		 WHERE LOWER(username) = LOWER($1)`,
+		body1["username"],
+	).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count, "only one pending for this username")
+
+	// The survivor's email should be the second one.
+	var survivingEmail string
+	err = ts.DB.QueryRow(
+		`SELECT email FROM pending_registrations WHERE id = $1`,
+		second.PendingID,
+	).Scan(&survivingEmail)
+	require.NoError(t, err)
+	assert.Equal(t, "different@test.concord.chat", survivingEmail)
+}
+
+// TestRegisterUsernamePendingWrongPasswordRejects verifies a caller who knows
+// a pending username but supplies the wrong password (and a different email)
+// is rejected with ErrUsernameTaken.
+func TestRegisterUsernamePendingWrongPasswordRejects(t *testing.T) {
+	ts := setupTS(t)
+
+	body1 := registerPayload()
+	w1 := ts.DoRequest("POST", pathRegister, body1, nil)
+	require.Equal(t, http.StatusCreated, w1.Code)
+
+	// Same username, different email, wrong password.
+	body2 := registerPayload()
+	body2["email"] = "another@test.concord.chat"
+	body2["password"] = testWrongPassword //nolint:gosec // pragma: allowlist secret -- test credential constant
+	w2 := ts.DoRequest("POST", pathRegister, body2, nil)
+
+	assert.Equal(t, http.StatusConflict, w2.Code)
+	var resp struct {
+		Code string `json:"code"`
+	}
+	testhelpers.ParseJSON(t, w2, &resp)
+	assert.Equal(t, "username_taken", resp.Code)
+}
+
+// TestRegisterEmailPendingWrongPasswordRejects verifies a caller with the
+// wrong password cannot take over an existing pending registration.
+func TestRegisterEmailPendingWrongPasswordRejects(t *testing.T) {
+	ts := setupTS(t)
+
+	body1 := registerPayload()
+	w1 := ts.DoRequest("POST", pathRegister, body1, nil)
+	require.Equal(t, http.StatusCreated, w1.Code)
+
+	body2 := registerPayload()
+	body2["email"] = body1["email"]
+	body2["password"] = "DifferentWrongPassword123!" //nolint:gosec // pragma: allowlist secret -- test credential constant
+	w2 := ts.DoRequest("POST", pathRegister, body2, nil)
+
+	assert.Equal(t, http.StatusConflict, w2.Code)
+	var resp struct {
+		Code string `json:"code"`
+	}
+	testhelpers.ParseJSON(t, w2, &resp)
+	assert.Equal(t, "registration_pending", resp.Code)
 }
 
 func TestRegisterDuplicateEmail(t *testing.T) {
@@ -70,15 +222,19 @@ func TestRegisterDuplicateEmail(t *testing.T) {
 	// First registration
 	ts.DoRequest("POST", pathRegister, registerPayload(), nil)
 
-	// Second with same email, different username
+	// Second with same email, different username, different password -> conflict.
 	payload := registerPayload()
 	payload["username"] = "differentuser"
+	payload["password"] = "AnotherDifferentPass123!" //nolint:gosec // pragma: allowlist secret -- test credential constant
 	w := ts.DoRequest("POST", pathRegister, payload, nil)
 
 	assert.Equal(t, http.StatusConflict, w.Code)
-	var body map[string]interface{}
+	var body struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}
 	testhelpers.ParseJSON(t, w, &body)
-	assert.Contains(t, body["error"], "Email already in use")
+	assert.Equal(t, "registration_pending", body.Code)
 }
 
 func TestRegisterDuplicateUsername(t *testing.T) {
@@ -88,12 +244,56 @@ func TestRegisterDuplicateUsername(t *testing.T) {
 
 	payload := registerPayload()
 	payload["email"] = "different@test.concord.chat"
+	payload["password"] = "YetAnotherDifferentPass123!" //nolint:gosec // pragma: allowlist secret -- test credential constant
 	w := ts.DoRequest("POST", pathRegister, payload, nil)
 
 	assert.Equal(t, http.StatusConflict, w.Code)
-	var body map[string]interface{}
+	var body struct {
+		Code  string `json:"code"`
+		Error string `json:"error"`
+	}
 	testhelpers.ParseJSON(t, w, &body)
-	assert.Contains(t, body["error"], "Username already taken")
+	assert.Equal(t, "username_taken", body.Code)
+}
+
+// TestRegisterRejectsEmailAlreadyInUsersTable exercises the checkUsersUniqueness
+// email-exists branch: a user already promoted into the `users` table blocks
+// re-registration with that email.
+func TestRegisterRejectsEmailAlreadyInUsersTable(t *testing.T) {
+	ts := setupTS(t)
+	existing := ts.CreateTestUser(t, "existinguser")
+
+	payload := registerPayload()
+	payload["email"] = existing.Email
+	payload["username"] = "brandnewuser"
+	w := ts.DoRequest("POST", pathRegister, payload, nil)
+
+	assert.Equal(t, http.StatusConflict, w.Code)
+	var body struct {
+		Code string `json:"code"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "email_already_registered", body.Code)
+}
+
+// TestRegisterRejectsUsernameAlreadyInUsersTable exercises the
+// checkUsersUniqueness username-exists branch: a user already promoted into
+// the `users` table blocks re-registration with that username.
+func TestRegisterRejectsUsernameAlreadyInUsersTable(t *testing.T) {
+	ts := setupTS(t)
+	existing := ts.CreateTestUser(t, "reservedname")
+
+	payload := registerPayload()
+	payload["email"] = "unused-email@test.concord.chat"
+	payload["username"] = existing.Username
+	w := ts.DoRequest("POST", pathRegister, payload, nil)
+
+	assert.Equal(t, http.StatusConflict, w.Code)
+	var body struct {
+		Code string `json:"code"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "username_taken", body.Code)
 }
 
 func TestRegisterWeakPassword(t *testing.T) {
@@ -132,18 +332,30 @@ func TestRegisterNoAgeConfirmation(t *testing.T) {
 
 func TestRegisterSetsRefreshCookie(t *testing.T) {
 	ts := setupTS(t)
-	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
 
-	assert.Equal(t, http.StatusCreated, w.Code)
-	cookies := w.Result().Cookies()
+	// New flow: cookie is set by the confirm step, not the register step.
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	var regBody map[string]interface{}
+	testhelpers.ParseJSON(t, w, &regBody)
+	pendingID := regBody["pending_id"].(string)
+
+	code := testhelpers.FetchVerificationCode(t, ts, pendingID)
+	confirmW := ts.DoRequest("POST", "/api/v1/auth/register/confirm", map[string]string{
+		"pending_id": pendingID,
+		"code":       code,
+	}, nil)
+	require.Equal(t, http.StatusOK, confirmW.Code)
+
 	var refreshCookie *http.Cookie
-	for _, c := range cookies {
+	for _, c := range confirmW.Result().Cookies() {
 		if c.Name == "refresh_token" {
 			refreshCookie = c
 			break
 		}
 	}
-	require.NotNil(t, refreshCookie, "refresh_token cookie should be set")
+	require.NotNil(t, refreshCookie, "refresh_token cookie should be set after confirm")
 	assert.True(t, refreshCookie.HttpOnly)
 }
 
@@ -152,11 +364,20 @@ func TestRegisterSetsRefreshCookie(t *testing.T) {
 func TestLoginSuccess(t *testing.T) {
 	ts := setupTS(t)
 
-	// Register first
-	ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	// Register + confirm so the user exists in the users table (not just pending).
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var regBody map[string]interface{}
+	testhelpers.ParseJSON(t, w, &regBody)
+	pendingID := regBody["pending_id"].(string)
+	code := testhelpers.FetchVerificationCode(t, ts, pendingID)
+	confirmW := ts.DoRequest("POST", "/api/v1/auth/register/confirm", map[string]string{
+		"pending_id": pendingID, "code": code,
+	}, nil)
+	require.Equal(t, http.StatusOK, confirmW.Code)
 
 	// Login
-	w := ts.DoRequest("POST", pathLogin, map[string]interface{}{
+	w = ts.DoRequest("POST", pathLogin, map[string]interface{}{
 		"email":    testEmail,
 		"password": testPassword,
 	}, nil)
@@ -253,13 +474,21 @@ func TestProtectedRouteValidToken(t *testing.T) {
 func TestRefreshSuccess(t *testing.T) {
 	ts := setupTS(t)
 
-	// Register to get a refresh cookie
+	// Register + confirm to get a refresh cookie (cookie is set by confirm step).
 	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
 	require.Equal(t, http.StatusCreated, w.Code)
+	var regBody map[string]interface{}
+	testhelpers.ParseJSON(t, w, &regBody)
+	pendingID := regBody["pending_id"].(string)
+	code := testhelpers.FetchVerificationCode(t, ts, pendingID)
+	confirmW := ts.DoRequest("POST", "/api/v1/auth/register/confirm", map[string]string{
+		"pending_id": pendingID, "code": code,
+	}, nil)
+	require.Equal(t, http.StatusOK, confirmW.Code)
 
-	// Extract refresh_token cookie
+	// Extract refresh_token cookie from confirm response
 	var refreshCookie *http.Cookie
-	for _, c := range w.Result().Cookies() {
+	for _, c := range confirmW.Result().Cookies() {
 		if c.Name == "refresh_token" {
 			refreshCookie = c
 			break
@@ -306,12 +535,20 @@ func TestRefreshInvalidToken(t *testing.T) {
 func TestRefreshRotatesToken(t *testing.T) {
 	ts := setupTS(t)
 
-	// Register
+	// Register + confirm to get a refresh cookie.
 	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
 	require.Equal(t, http.StatusCreated, w.Code)
+	var regBody map[string]interface{}
+	testhelpers.ParseJSON(t, w, &regBody)
+	pendingID := regBody["pending_id"].(string)
+	code := testhelpers.FetchVerificationCode(t, ts, pendingID)
+	confirmW := ts.DoRequest("POST", "/api/v1/auth/register/confirm", map[string]string{
+		"pending_id": pendingID, "code": code,
+	}, nil)
+	require.Equal(t, http.StatusOK, confirmW.Code)
 
 	var firstCookie *http.Cookie
-	for _, c := range w.Result().Cookies() {
+	for _, c := range confirmW.Result().Cookies() {
 		if c.Name == "refresh_token" {
 			firstCookie = c
 			break
@@ -425,13 +662,20 @@ func TestLoginSucceedsAfterFailedAttempts(t *testing.T) {
 func TestRefreshWithXRefreshTokenHeader(t *testing.T) {
 	ts := setupTS(t)
 
-	// Register to get a refresh token
+	// Register + confirm to get a refresh token.
 	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
 	require.Equal(t, http.StatusCreated, w.Code)
-
 	var regBody map[string]interface{}
 	testhelpers.ParseJSON(t, w, &regBody)
-	refreshToken := regBody["refresh_token"].(string)
+	pendingID := regBody["pending_id"].(string)
+	code := testhelpers.FetchVerificationCode(t, ts, pendingID)
+	confirmW := ts.DoRequest("POST", "/api/v1/auth/register/confirm", map[string]string{
+		"pending_id": pendingID, "code": code,
+	}, nil)
+	require.Equal(t, http.StatusOK, confirmW.Code)
+	var confirmBody map[string]interface{}
+	testhelpers.ParseJSON(t, confirmW, &confirmBody)
+	refreshToken := confirmBody["refresh_token"].(string)
 
 	// Use X-Refresh-Token header instead of cookie
 	headers := http.Header{}
@@ -491,6 +735,424 @@ func TestPollSocialRecoveryRequestNotFound(t *testing.T) {
 
 	w := ts.DoRequest("GET", "/api/v1/auth/recovery/social-request/00000000-0000-0000-0000-000000000000", nil, nil)
 	assert.Contains(t, []int{http.StatusNotFound, http.StatusBadRequest}, w.Code)
+}
+
+// --- Confirm Registration Tests ---
+
+func TestConfirmPromotesToUser(t *testing.T) {
+	ts := setupTS(t)
+
+	w := ts.DoRequest("POST", "/api/v1/auth/register", registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+		Email     string `json:"email"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+
+	code := testhelpers.FetchVerificationCode(t, ts, reg.PendingID)
+
+	confirmBody := map[string]string{"pending_id": reg.PendingID, "code": code}
+	w2 := ts.DoRequest("POST", "/api/v1/auth/register/confirm", confirmBody, nil)
+	require.Equal(t, http.StatusOK, w2.Code)
+
+	var ok struct {
+		AccessToken  string `json:"access_token"`  //nolint:gosec // G117: response-binding field, not a credential
+		RefreshToken string `json:"refresh_token"` //nolint:gosec // G117: response-binding field, not a credential
+		User         struct {
+			ID            string `json:"id"`
+			EmailVerified bool   `json:"email_verified"`
+		} `json:"user"`
+	}
+	testhelpers.ParseJSON(t, w2, &ok)
+	require.NotEmpty(t, ok.AccessToken)
+	require.NotEmpty(t, ok.RefreshToken)
+	require.True(t, ok.User.EmailVerified)
+
+	var userCount, pendingCount int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM users WHERE id = $1`, ok.User.ID).Scan(&userCount))
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM pending_registrations WHERE id = $1`, reg.PendingID).Scan(&pendingCount))
+	require.Equal(t, 1, userCount)
+	require.Equal(t, 0, pendingCount)
+}
+
+func TestConfirmInvalidCode(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", "/api/v1/auth/register", registerPayload(), nil)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+
+	w2 := ts.DoRequest("POST", "/api/v1/auth/register/confirm",
+		map[string]string{"pending_id": reg.PendingID, "code": "000000"}, nil) // pragma: allowlist secret
+	require.Equal(t, http.StatusUnauthorized, w2.Code)
+	var resp struct {
+		Code              string `json:"code"`
+		AttemptsRemaining int    `json:"attempts_remaining"`
+	}
+	testhelpers.ParseJSON(t, w2, &resp)
+	require.Equal(t, "invalid_code", resp.Code)
+	require.Equal(t, 3, resp.AttemptsRemaining)
+}
+
+// --- Resend Tests ---
+
+func TestResendRegistrationCode(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", "/api/v1/auth/register", registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+
+	firstCode := testhelpers.FetchVerificationCode(t, ts, reg.PendingID)
+
+	w2 := ts.DoRequest("POST", "/api/v1/auth/register/resend",
+		map[string]string{"pending_id": reg.PendingID}, nil)
+	require.Equal(t, http.StatusOK, w2.Code)
+
+	var body struct {
+		CodeExpiresAt    string `json:"code_expires_at"`
+		ResendsRemaining int    `json:"resends_remaining"`
+	}
+	testhelpers.ParseJSON(t, w2, &body)
+	require.Equal(t, 3, body.ResendsRemaining)
+
+	secondCode := testhelpers.FetchVerificationCode(t, ts, reg.PendingID)
+	require.NotEqual(t, firstCode, secondCode)
+}
+
+func TestResendCooldown(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", "/api/v1/auth/register", registerPayload(), nil)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+
+	w1 := ts.DoRequest("POST", "/api/v1/auth/register/resend",
+		map[string]string{"pending_id": reg.PendingID}, nil)
+	require.Equal(t, http.StatusOK, w1.Code)
+
+	w2 := ts.DoRequest("POST", "/api/v1/auth/register/resend",
+		map[string]string{"pending_id": reg.PendingID}, nil)
+	require.Equal(t, http.StatusTooManyRequests, w2.Code)
+	var body struct {
+		Code string `json:"code"`
+	}
+	testhelpers.ParseJSON(t, w2, &body)
+	require.Equal(t, "cooldown_active", body.Code)
+}
+
+// --- Change Email Tests ---
+
+func TestChangeEmailMidRegistration(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", "/api/v1/auth/register", registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+		Email     string `json:"email"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+
+	newEmail := "corrected-" + strings.ToLower(time.Now().Format("150405")) + "@example.com"
+	w2 := ts.DoRequest("POST", "/api/v1/auth/register/change-email",
+		map[string]string{"pending_id": reg.PendingID, "new_email": newEmail}, nil)
+	require.Equal(t, http.StatusOK, w2.Code)
+
+	var resp struct {
+		Email         string `json:"email"`
+		CodeExpiresAt string `json:"code_expires_at"`
+	}
+	testhelpers.ParseJSON(t, w2, &resp)
+	require.Equal(t, newEmail, resp.Email)
+
+	var count int
+	err := ts.DB.QueryRow(
+		`SELECT resend_count FROM pending_registrations WHERE id = $1`,
+		reg.PendingID).Scan(&count)
+	require.NoError(t, err)
+	require.Equal(t, 0, count)
+}
+
+// --- Abandon Registration Tests ---
+
+func TestAbandonPendingRegistration(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", "/api/v1/auth/register", registerPayload(), nil)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+
+	w2 := ts.DoRequest("DELETE", "/api/v1/auth/register/"+reg.PendingID, nil, nil)
+	require.Equal(t, http.StatusNoContent, w2.Code)
+
+	var count int
+	_ = ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM pending_registrations WHERE id = $1`,
+		reg.PendingID).Scan(&count)
+	require.Equal(t, 0, count)
+
+	w3 := ts.DoRequest("DELETE", "/api/v1/auth/register/"+reg.PendingID, nil, nil)
+	require.Equal(t, http.StatusNotFound, w3.Code)
+}
+
+func TestFullRegistrationFlow(t *testing.T) {
+	ts := setupTS(t)
+
+	w := ts.DoRequest("POST", "/api/v1/auth/register", registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+		Email     string `json:"email"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+
+	w2 := ts.DoRequest("POST", "/api/v1/auth/register/resend",
+		map[string]string{"pending_id": reg.PendingID}, nil)
+	require.Equal(t, http.StatusOK, w2.Code)
+
+	code := testhelpers.FetchVerificationCode(t, ts, reg.PendingID)
+
+	w3 := ts.DoRequest("POST", "/api/v1/auth/register/confirm",
+		map[string]string{"pending_id": reg.PendingID, "code": code}, nil)
+	require.Equal(t, http.StatusOK, w3.Code)
+
+	var promoted struct {
+		AccessToken string `json:"access_token"` //nolint:gosec
+		User        struct {
+			ID            string `json:"id"`
+			EmailVerified bool   `json:"email_verified"`
+		} `json:"user"`
+	}
+	testhelpers.ParseJSON(t, w3, &promoted)
+
+	require.NotEmpty(t, promoted.AccessToken)
+	require.True(t, promoted.User.EmailVerified)
+
+	hdr := http.Header{}
+	hdr.Set("Authorization", "Bearer "+promoted.AccessToken)
+	w4 := ts.DoRequest("GET", "/api/v1/users/me", nil, hdr)
+	require.Equal(t, http.StatusOK, w4.Code)
+
+	var pendingCount, userCount int
+	_ = ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM pending_registrations WHERE id = $1`,
+		reg.PendingID).Scan(&pendingCount)
+	_ = ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM users WHERE id = $1`,
+		promoted.User.ID).Scan(&userCount)
+	require.Equal(t, 0, pendingCount)
+	require.Equal(t, 1, userCount)
+}
+
+// --- ConfirmRegistration error branches ---
+
+func TestConfirmRegistration_InvalidJSON(t *testing.T) {
+	ts := setupTS(t)
+	req := httptest.NewRequest("POST", "/api/v1/auth/register/confirm", strings.NewReader("{bad"))
+	req.Header.Set(headerContentType, contentTypeJSON)
+	w := httptest.NewRecorder()
+	ts.Router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestConfirmRegistration_InvalidCodeFormat(t *testing.T) {
+	ts := setupTS(t)
+	// Register first to get a valid pending_id
+	w := ts.DoRequest("POST", "/api/v1/auth/register", registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+
+	// Code that is not 6 digits
+	w2 := ts.DoRequest("POST", "/api/v1/auth/register/confirm",
+		map[string]string{"pending_id": reg.PendingID, "code": "abc"}, nil)
+	assert.Equal(t, http.StatusBadRequest, w2.Code)
+}
+
+func TestConfirmRegistration_TooManyAttempts(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", "/api/v1/auth/register", registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+
+	// Exhaust all attempts (MaxCodeAttempts = 4)
+	for i := 0; i < 4; i++ {
+		ts.DoRequest("POST", "/api/v1/auth/register/confirm",
+			map[string]string{"pending_id": reg.PendingID, "code": "000000"}, nil) //nolint:gosec // G101 false positive: test value, not a credential
+	}
+
+	// Next attempt should be too_many_attempts
+	w2 := ts.DoRequest("POST", "/api/v1/auth/register/confirm",
+		map[string]string{"pending_id": reg.PendingID, "code": "000000"}, nil) //nolint:gosec // G101 false positive: test value, not a credential
+	assert.Equal(t, http.StatusTooManyRequests, w2.Code)
+	var body struct {
+		Code string `json:"code"`
+	}
+	testhelpers.ParseJSON(t, w2, &body)
+	assert.Equal(t, "too_many_attempts", body.Code)
+}
+
+func TestConfirmRegistration_CodeExpired(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", "/api/v1/auth/register", registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+
+	// Delete the Redis key to simulate expiry
+	ts.Redis.Del(context.Background(), "email_verify:"+reg.PendingID)
+
+	w2 := ts.DoRequest("POST", "/api/v1/auth/register/confirm",
+		map[string]string{"pending_id": reg.PendingID, "code": "123456"}, nil)
+	assert.Equal(t, http.StatusGone, w2.Code)
+	var body struct {
+		Code string `json:"code"`
+	}
+	testhelpers.ParseJSON(t, w2, &body)
+	assert.Equal(t, "code_expired", body.Code)
+}
+
+func TestConfirmRegistration_PendingNotFound(t *testing.T) {
+	ts := setupTS(t)
+	nonexistent := "00000000-0000-0000-0000-000000000000"
+	w := ts.DoRequest("POST", "/api/v1/auth/register/confirm",
+		map[string]string{"pending_id": nonexistent, "code": "123456"}, nil)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	var body struct {
+		Code string `json:"code"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "pending_not_found", body.Code)
+}
+
+// --- ResendRegistrationCode error branches ---
+
+func TestResendRegistrationCode_InvalidJSON(t *testing.T) {
+	ts := setupTS(t)
+	req := httptest.NewRequest("POST", "/api/v1/auth/register/resend", strings.NewReader("{bad"))
+	req.Header.Set(headerContentType, contentTypeJSON)
+	w := httptest.NewRecorder()
+	ts.Router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestResendRegistrationCode_PendingNotFound(t *testing.T) {
+	ts := setupTS(t)
+	nonexistent := "00000000-0000-0000-0000-000000000001"
+	w := ts.DoRequest("POST", "/api/v1/auth/register/resend",
+		map[string]string{"pending_id": nonexistent}, nil)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	var body struct {
+		Code string `json:"code"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "pending_not_found", body.Code)
+}
+
+func TestResendRegistrationCode_ResendsExhausted(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", "/api/v1/auth/register", registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+
+	// Exhaust resends by directly updating the DB (MaxResends = 4)
+	_, err := ts.DB.Exec(
+		`UPDATE pending_registrations SET resend_count = 4, last_resend_at = NOW() - INTERVAL '2 minutes' WHERE id = $1`,
+		reg.PendingID)
+	require.NoError(t, err)
+
+	w2 := ts.DoRequest("POST", "/api/v1/auth/register/resend",
+		map[string]string{"pending_id": reg.PendingID}, nil)
+	assert.Equal(t, http.StatusTooManyRequests, w2.Code)
+	var body struct {
+		Code string `json:"code"`
+	}
+	testhelpers.ParseJSON(t, w2, &body)
+	assert.Equal(t, "resends_exhausted", body.Code)
+}
+
+// --- ChangeRegistrationEmail error branches ---
+
+func TestChangeRegistrationEmail_InvalidJSON(t *testing.T) {
+	ts := setupTS(t)
+	req := httptest.NewRequest("POST", "/api/v1/auth/register/change-email", strings.NewReader("{bad"))
+	req.Header.Set(headerContentType, contentTypeJSON)
+	w := httptest.NewRecorder()
+	ts.Router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestChangeRegistrationEmail_PendingNotFound(t *testing.T) {
+	ts := setupTS(t)
+	nonexistent := "00000000-0000-0000-0000-000000000002"
+	w := ts.DoRequest("POST", "/api/v1/auth/register/change-email",
+		map[string]string{"pending_id": nonexistent, "new_email": "new@example.com"}, nil)
+	assert.Equal(t, http.StatusNotFound, w.Code)
+	var body struct {
+		Code string `json:"code"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "pending_not_found", body.Code)
+}
+
+func TestChangeRegistrationEmail_EmailAlreadyRegistered(t *testing.T) {
+	ts := setupTS(t)
+
+	// Create a confirmed user with a known email
+	existingUser := ts.CreateTestUser(t, "confirmeduser")
+
+	// Start a new registration (username avoids reserved substrings like "mail", "admin", etc.)
+	pub, priv, salt := testhelpers.E2EETestKeys()
+	w := ts.DoRequest("POST", "/api/v1/auth/register", map[string]interface{}{
+		"email":               "pendingreguser@test.concord.chat",
+		"username":            "pendingreguser",
+		"password":            testPassword,
+		"age_confirmation":    true,
+		"public_key":          pub,
+		"wrapped_private_key": priv,
+		"key_derivation_salt": salt,
+	}, nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var reg struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &reg)
+
+	// Try to change email to the already-registered user's email
+	w2 := ts.DoRequest("POST", "/api/v1/auth/register/change-email",
+		map[string]string{"pending_id": reg.PendingID, "new_email": existingUser.Email}, nil)
+	assert.Equal(t, http.StatusConflict, w2.Code)
+	var body struct {
+		Code string `json:"code"`
+	}
+	testhelpers.ParseJSON(t, w2, &body)
+	assert.Equal(t, "email_already_registered", body.Code)
+}
+
+// --- AbandonRegistration error branches ---
+
+func TestAbandonRegistration_InvalidUUID(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("DELETE", "/api/v1/auth/register/not-a-uuid", nil, nil)
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 // --- Helpers ---

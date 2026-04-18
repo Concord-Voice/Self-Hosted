@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"math/big"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -122,14 +123,14 @@ func setRefreshCookie(c *gin.Context, value string, maxAge int) {
 
 // Handler handles authentication-related requests including registration and login.
 type Handler struct {
-	db            *sql.DB
-	redis         *redis.Client
-	log           *logger.Logger
-	jwtSecret     string
-	hub           SessionDisconnector
-	mfaChecker    MFAChecker
-	emailSvc      *email.Service
-	verifyHandler *VerificationHandler
+	db         *sql.DB
+	redis      *redis.Client
+	log        *logger.Logger
+	jwtSecret  string
+	hub        SessionDisconnector
+	mfaChecker MFAChecker
+	emailSvc   *email.Service
+	pending    *PendingRepo
 }
 
 // NewHandler creates a new authentication handler.
@@ -140,17 +141,13 @@ func NewHandler(db *sql.DB, redisClient *redis.Client, log *logger.Logger, jwtSe
 		log:       log,
 		jwtSecret: jwtSecret,
 		hub:       hub,
+		pending:   NewPendingRepo(db),
 	}
 }
 
 // SetEmailService sets the email service (called after initialization to avoid circular deps).
 func (h *Handler) SetEmailService(svc *email.Service) {
 	h.emailSvc = svc
-}
-
-// SetVerificationHandler wires the verification handler for use in post-registration code sending.
-func (h *Handler) SetVerificationHandler(vh *VerificationHandler) {
-	h.verifyHandler = vh
 }
 
 // SetMFAChecker sets the MFA checker (called after both handlers are initialized to break circular init).
@@ -176,13 +173,6 @@ type LoginRequest struct {
 	Email      string `json:"email" binding:"required,email"`
 	Password   string `json:"password" binding:"required"` // #nosec G117 -- False positive: request field, not stored secret
 	RememberMe *bool  `json:"remember_me"`                 // nil defaults to true for backward compat
-}
-
-type registrationData struct {
-	passwordHash string
-	publicKey    []byte
-	wrappedKey   []byte
-	salt         []byte
 }
 
 func (h *Handler) validateRegistration(req *RegisterRequest) error {
@@ -214,46 +204,8 @@ func decodeE2EEKeys(publicKeyB64, wrappedKeyB64, saltB64 string) (publicKey, wra
 	return publicKey, wrappedKey, salt, nil
 }
 
-func (h *Handler) createUserRecord(tx *sql.Tx, req *RegisterRequest, rd *registrationData) (string, error) {
-	normalizedUsername := NormalizeUsername(req.Username)
-	normalizedEmail := strings.ToLower(strings.TrimSpace(req.Email))
-	userID := uuid.New().String()
-
-	_, err := tx.Exec(
-		`INSERT INTO users (id, email, username, password_hash, age_verified, e2ee_preference)
-		 VALUES ($1, $2, $3, $4, $5, $6)`,
-		userID, normalizedEmail, normalizedUsername, rd.passwordHash, true, req.E2EEPreference,
-	)
-	if err != nil {
-		return "", err
-	}
-
-	kdAlg := req.KeyDerivationAlg
-	if kdAlg == "" {
-		kdAlg = "argon2id"
-	}
-	_, err = tx.Exec(
-		`INSERT INTO user_keys (user_id, wrapped_private_key, key_derivation_salt, key_derivation_alg)
-		 VALUES ($1, $2, $3, $4)`,
-		userID, rd.wrappedKey, rd.salt, kdAlg,
-	)
-	if err != nil {
-		return "", fmt.Errorf("keys: %w", err)
-	}
-
-	keyID := uuid.New().String()
-	_, err = tx.Exec(
-		`INSERT INTO public_keys (id, user_id, public_key, key_version)
-		 VALUES ($1, $2, $3, $4)`,
-		keyID, userID, rd.publicKey, 1,
-	)
-	if err != nil {
-		return "", fmt.Errorf("pubkey: %w", err)
-	}
-
-	return userID, nil
-}
-
+// generateTokenPair creates an access+refresh token pair and persists the
+// refresh token. Used by issueSessionTokens and other flows.
 func (h *Handler) generateTokenPair(c *gin.Context, userID string, emailVerified bool) (accessToken, refreshToken, tokenID string, err error) {
 	accessToken, err = GenerateAccessToken(userID, h.jwtSecret, emailVerified)
 	if err != nil {
@@ -282,7 +234,9 @@ func (h *Handler) generateTokenPair(c *gin.Context, userID string, emailVerified
 	return accessToken, refreshToken, tokenID, nil
 }
 
-// Register handles new user registration.
+// Register handles new user registration by creating a pending_registrations row
+// and emailing a verification code. The user is NOT promoted to the users table
+// until ConfirmRegistration succeeds. See #621.
 func (h *Handler) Register(c *gin.Context) {
 	var req RegisterRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -308,94 +262,469 @@ func (h *Handler) Register(c *gin.Context) {
 		return
 	}
 
-	rd := &registrationData{passwordHash: passwordHash, publicKey: publicKey, wrappedKey: wrappedKey, salt: salt}
-
-	tx, err := h.db.Begin()
-	if err != nil {
-		h.log.Error(errMsgFailedStartTransaction, "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
-		return
-	}
-	defer func() {
-		if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
-			h.log.Error(errMsgFailedRollbackTx, "error", rbErr)
-		}
-	}()
-
-	userID, err := h.createUserRecord(tx, &req, rd)
-	if err != nil {
-		h.respondCreateUserError(c, err)
-		return
-	}
-
-	if err := tx.Commit(); err != nil {
-		h.log.Error(errFailedCommitTransaction, "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
-		return
-	}
-
-	accessToken, refreshToken, tokenID, err := h.generateTokenPair(c, userID, false)
-	if err != nil {
-		h.log.Error("Failed to generate tokens", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
-		return
-	}
-
-	setRefreshCookie(c, refreshToken, 30*24*60*60)
-
-	normalizedUsername := NormalizeUsername(req.Username)
 	normalizedEmail := strings.ToLower(strings.TrimSpace(req.Email))
-	h.log.Info("User registered", "user_id", userID, "username", normalizedUsername)
+	normalizedUsername := NormalizeUsername(req.Username)
 
-	h.sendVerificationAsync(userID, normalizedEmail)
+	pendingID, expiresAt, _, err := h.pending.InsertOrTakeover(
+		c.Request.Context(),
+		InsertParams{
+			Email:             normalizedEmail,
+			Username:          normalizedUsername,
+			PasswordHash:      passwordHash,
+			WrappedPrivateKey: wrappedKey,
+			KeyDerivationSalt: salt,
+			KeyDerivationAlg:  req.KeyDerivationAlg,
+			PublicKey:         publicKey,
+			E2EEPreference:    req.E2EEPreference,
+		},
+		req.Password,
+	)
+	if err != nil {
+		h.respondPendingError(c, err)
+		return
+	}
+
+	// Generate + send code synchronously. On failure, roll back the pending
+	// insert so the user can retry cleanly.
+	codeExpires, err := h.sendInitialCode(c.Request.Context(), pendingID, normalizedEmail)
+	if err != nil {
+		if _, delErr := h.pending.Delete(c.Request.Context(), pendingID); delErr != nil {
+			h.log.Error("Failed to roll back pending after email send error", "error", delErr)
+		}
+		h.log.Error("Failed to send verification code", "error", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Failed to send verification code; please retry",
+		})
+		return
+	}
+
+	h.log.Info("Pending registration created",
+		"pending_id", pendingID, "username", normalizedUsername)
 
 	c.JSON(http.StatusCreated, gin.H{
-		"access_token":  accessToken,
-		"refresh_token": refreshToken,
-		"session_id":    tokenID,
+		"pending_id":      pendingID,
+		"email":           normalizedEmail,
+		"expires_at":      expiresAt.UTC().Format(time.RFC3339),
+		"code_expires_at": codeExpires.UTC().Format(time.RFC3339),
+	})
+}
+
+// respondPendingError maps PendingRepo sentinel errors to API responses.
+func (h *Handler) respondPendingError(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, ErrEmailAlreadyRegister):
+		c.JSON(http.StatusConflict, gin.H{
+			"code":  "email_already_registered",
+			"error": "An account with this email exists. Try logging in or recovering your password.",
+		})
+	case errors.Is(err, ErrEmailPending):
+		c.JSON(http.StatusConflict, gin.H{
+			"code":  "registration_pending",
+			"error": "A verification code was already sent to this email. Wait 15 minutes or use the correct password to take over.",
+		})
+	case errors.Is(err, ErrUsernameTaken):
+		c.JSON(http.StatusConflict, gin.H{
+			"code":  "username_taken",
+			"error": "This username is already in use.",
+		})
+	default:
+		h.log.Error("pending registration error", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
+	}
+}
+
+// isTestEnv reports whether the process is running in the integration test
+// environment. Guards test-only side effects like writing plaintext
+// verification codes to Redis under `test_only:<pending_id>`.
+func isTestEnv() bool {
+	return os.Getenv("CONCORD_ENV") == "test"
+}
+
+// sendInitialCode generates a fresh 6-digit code, writes the hash to Redis
+// under email_verify:<pending_id>, and emails it via the verification
+// handler's email service. Returns the code's expiry.
+//
+// When CONCORD_ENV=test, the plaintext code is additionally written to
+// test_only:<pending_id> with the same TTL so integration tests can recover
+// it via testhelpers.FetchVerificationCode without reading real email.
+func (h *Handler) sendInitialCode(ctx context.Context, pendingID, userEmail string) (time.Time, error) {
+	if h.emailSvc == nil {
+		return time.Time{}, fmt.Errorf("email service not configured")
+	}
+
+	code, err := generateCode()
+	if err != nil {
+		return time.Time{}, fmt.Errorf("generate code: %w", err)
+	}
+
+	record := verificationRecord{
+		CodeHash: hashCode(code),
+		Email:    userEmail,
+		Attempts: 0,
+	}
+	raw, err := json.Marshal(record)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("marshal verification record: %w", err)
+	}
+
+	if err := h.redis.Set(ctx, redisKey(pendingID), raw, VerifyCodeTTLNew).Err(); err != nil {
+		return time.Time{}, fmt.Errorf("store code in Redis: %w", err)
+	}
+
+	// Test-only: expose plaintext code for integration tests. Guarded by the
+	// CONCORD_ENV=test env var so this never fires in production.
+	if isTestEnv() {
+		if err := h.redis.Set(ctx, redisKeyTestOnly+pendingID, code, VerifyCodeTTLNew).Err(); err != nil {
+			h.log.Warn("Failed to write test_only code", "error", err)
+		}
+	}
+
+	if err := h.emailSvc.SendVerificationCode(userEmail, code); err != nil {
+		// Best-effort cleanup so a retry starts fresh.
+		_ = h.redis.Del(ctx, redisKey(pendingID)).Err()
+		if isTestEnv() {
+			_ = h.redis.Del(ctx, redisKeyTestOnly+pendingID).Err()
+		}
+		return time.Time{}, fmt.Errorf("send email: %w", err)
+	}
+
+	return time.Now().Add(VerifyCodeTTLNew), nil
+}
+
+const (
+	// redisKeyTestOnly is the Redis key prefix for plaintext verification codes
+	// written in test environments only (CONCORD_ENV=test).
+	redisKeyTestOnly = "test_only:"
+
+	// errMsgInternalError is the generic internal error message returned to clients.
+	errMsgInternalError = "Internal error"
+)
+
+// ConfirmRegistrationRequest is the JSON body for the register/confirm endpoint.
+type ConfirmRegistrationRequest struct {
+	PendingID string `json:"pending_id" binding:"required,uuid"`
+	Code      string `json:"code" binding:"required"`
+}
+
+// ConfirmRegistration validates the email verification code for a pending registration,
+// promotes it to a full user account, and returns tokens. See #621.
+func (h *Handler) ConfirmRegistration(c *gin.Context) {
+	req, sanitized, ok := h.validateConfirmRequest(c)
+	if !ok {
+		return
+	}
+
+	ctx := c.Request.Context()
+
+	if _, err := h.pending.GetByID(ctx, req.PendingID); err != nil {
+		switch {
+		case errors.Is(err, ErrPendingNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"code": "pending_not_found"})
+		case errors.Is(err, ErrPendingExpired):
+			c.JSON(http.StatusGone, gin.H{"code": "pending_expired"})
+		default:
+			h.log.Error("confirm: lookup failed", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
+		}
+		return
+	}
+
+	rec, err := h.fetchVerificationRecord(ctx, c, req.PendingID)
+	if err != nil {
+		return
+	}
+
+	if !h.attemptsGuard(ctx, c, req.PendingID, rec, sanitized) {
+		return
+	}
+
+	userID, err := h.pending.Promote(ctx, req.PendingID)
+	if err != nil {
+		if errors.Is(err, ErrPendingExpired) {
+			c.JSON(http.StatusGone, gin.H{"code": "pending_expired"})
+			return
+		}
+		h.log.Error("confirm: promotion failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
+		return
+	}
+
+	access, refresh, sessionID, err := h.issueSessionTokens(c, userID)
+	if err != nil {
+		return
+	}
+
+	_ = h.redis.Del(ctx, redisKey(req.PendingID)).Err()
+	_ = h.redis.Del(ctx, redisKeyTestOnly+req.PendingID).Err()
+
+	email, username, e2ee, err := h.loadPromotedUser(ctx, userID)
+	if err != nil {
+		h.log.Error("confirm: failed to load promoted user", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
+		return
+	}
+
+	h.writeConfirmSuccess(c, access, refresh, sessionID, confirmedUser{id: userID, email: email, username: username, e2ee: e2ee})
+}
+
+// loadPromotedUser fetches the email, username, and e2ee_preference for a newly
+// promoted user. Extracted to keep ConfirmRegistration within complexity budget.
+func (h *Handler) loadPromotedUser(ctx context.Context, userID string) (email, username string, e2ee bool, err error) {
+	err = h.db.QueryRowContext(ctx,
+		`SELECT email, username, e2ee_preference FROM users WHERE id = $1`,
+		userID).Scan(&email, &username, &e2ee)
+	return
+}
+
+// validateConfirmRequest binds and sanitizes the ConfirmRegistration JSON body.
+// Returns (req, sanitizedCode, true) on success; writes the error response and
+// returns (nil, "", false) on failure.
+func (h *Handler) validateConfirmRequest(c *gin.Context) (*ConfirmRegistrationRequest, string, bool) {
+	var req ConfirmRegistrationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
+		return nil, "", false
+	}
+	sanitized := sanitizeVerificationCode(req.Code)
+	if !isValidVerificationCode(sanitized) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Code must be 6 digits"})
+		return nil, "", false
+	}
+	return &req, sanitized, true
+}
+
+// fetchVerificationRecord retrieves and unmarshals the verification record from
+// Redis. On redis.Nil it writes a 410 code_expired response and returns a non-nil
+// error so the caller can return immediately. Other errors write a 500.
+func (h *Handler) fetchVerificationRecord(ctx context.Context, c *gin.Context, pendingID string) (*verificationRecord, error) {
+	raw, err := h.redis.Get(ctx, redisKey(pendingID)).Result()
+	if errors.Is(err, redis.Nil) {
+		c.JSON(http.StatusGone, gin.H{"code": "code_expired"})
+		return nil, err
+	}
+	if err != nil {
+		h.log.Error("confirm: redis get failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
+		return nil, err
+	}
+	var rec verificationRecord
+	if err := json.Unmarshal([]byte(raw), &rec); err != nil {
+		h.log.Error("confirm: record unmarshal failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
+		return nil, err
+	}
+	return &rec, nil
+}
+
+// attemptsGuard enforces the attempt limit and validates the code in one step.
+// Fix 4: the limit is checked BEFORE incrementing so attempts_remaining is accurate.
+// Fix 5: TTL is guarded against zero/negative so the Redis key always has an expiry.
+// Returns true if the code matched and the caller should proceed; false if a response
+// has already been written (too_many_attempts or invalid_code).
+func (h *Handler) attemptsGuard(ctx context.Context, c *gin.Context, pendingID string, rec *verificationRecord, sanitized string) bool {
+	if rec.Attempts >= MaxCodeAttempts {
+		_ = h.redis.Del(ctx, redisKey(pendingID)).Err()
+		_ = h.redis.Del(ctx, redisKeyTestOnly+pendingID).Err()
+		c.JSON(http.StatusTooManyRequests, gin.H{"code": "too_many_attempts"})
+		return false
+	}
+	rec.Attempts++
+
+	if subtle.ConstantTimeCompare([]byte(hashCode(sanitized)), []byte(rec.CodeHash)) != 1 {
+		newRaw, _ := json.Marshal(rec)
+		// Fix 5: guard against zero/negative TTL so the key always has an expiry.
+		ttl := h.redis.TTL(ctx, redisKey(pendingID)).Val()
+		if ttl <= 0 {
+			ttl = VerifyCodeTTLNew
+		}
+		_ = h.redis.Set(ctx, redisKey(pendingID), newRaw, ttl).Err()
+		c.JSON(http.StatusUnauthorized, gin.H{
+			"code":               "invalid_code",
+			"attempts_remaining": MaxCodeAttempts - rec.Attempts,
+		})
+		return false
+	}
+	return true
+}
+
+// issueSessionTokens generates an access+refresh token pair and sets the refresh
+// cookie. On error it writes a 500 and returns a non-nil error.
+func (h *Handler) issueSessionTokens(c *gin.Context, userID string) (access, refresh, sessionID string, err error) {
+	access, refresh, sessionID, err = h.generateTokenPair(c, userID, true)
+	if err != nil {
+		h.log.Error("confirm: token issuance failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
+		return
+	}
+	setRefreshCookie(c, refresh, 30*24*60*60)
+	return
+}
+
+// confirmedUser bundles the promoted user fields needed for the confirm-success response.
+type confirmedUser struct {
+	id       string
+	email    string
+	username string
+	e2ee     bool
+}
+
+// writeConfirmSuccess writes the 200 JSON response for a successful registration confirmation.
+func (h *Handler) writeConfirmSuccess(c *gin.Context, access, refresh, sessionID string, u confirmedUser) {
+	c.JSON(http.StatusOK, gin.H{
+		"access_token":  access,
+		"refresh_token": refresh,
+		"session_id":    sessionID,
 		"expires_in":    900,
 		"remember_me":   true,
 		"user": gin.H{
-			"id":              userID,
-			"username":        normalizedUsername,
-			"email":           normalizedEmail,
-			"email_verified":  false,
-			"e2ee_preference": req.E2EEPreference,
+			"id":              u.id,
+			"username":        u.username,
+			"email":           u.email,
+			"email_verified":  true,
+			"e2ee_preference": u.e2ee,
 		},
 	})
 }
 
-func classifyDuplicateError(err error) (int, string) {
-	msg := err.Error()
-	if strings.Contains(msg, "users_email_key") {
-		return http.StatusConflict, "Email already in use"
-	}
-	if strings.Contains(msg, "users_username_key") {
-		return http.StatusConflict, "Username already taken"
-	}
-	return 0, ""
+// ResendRegistrationRequest is the JSON body for the register/resend endpoint.
+type ResendRegistrationRequest struct {
+	PendingID string `json:"pending_id" binding:"required,uuid"`
 }
 
-func (h *Handler) respondCreateUserError(c *gin.Context, err error) {
-	h.log.Error("Failed to create user", "error", err)
-	if status, msg := classifyDuplicateError(err); msg != "" {
-		c.JSON(status, gin.H{"error": msg})
+// ResendRegistrationCode re-sends the email verification code for a pending registration.
+// Enforces cooldown and max-resend limits. See #621.
+func (h *Handler) ResendRegistrationCode(c *gin.Context) {
+	var req ResendRegistrationRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
 		return
 	}
-	c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateAccount})
-}
+	ctx := c.Request.Context()
 
-func (h *Handler) sendVerificationAsync(userID, email string) {
-	if h.verifyHandler == nil {
-		return
-	}
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		if err := h.verifyHandler.GenerateAndSendCode(ctx, userID, email); err != nil {
-			h.log.Error("Failed to send verification code on register", "error", err)
+	pending, err := h.pending.GetByID(ctx, req.PendingID)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrPendingNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"code": "pending_not_found"})
+		case errors.Is(err, ErrPendingExpired):
+			c.JSON(http.StatusGone, gin.H{"code": "pending_expired"})
+		default:
+			h.log.Error("resend: lookup failed", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
 		}
-	}()
+		return
+	}
+
+	newCount, err := h.pending.IncrementResend(ctx, pending.ID)
+	if err != nil {
+		switch {
+		case errors.Is(err, ErrResendsExhausted):
+			c.JSON(http.StatusTooManyRequests, gin.H{"code": "resends_exhausted"})
+		case errors.Is(err, ErrResendCooldown):
+			c.JSON(http.StatusTooManyRequests, gin.H{
+				"code":                "cooldown_active",
+				"retry_after_seconds": int(ResendCooldown.Seconds()),
+			})
+		case errors.Is(err, ErrPendingExpired):
+			c.JSON(http.StatusGone, gin.H{"code": "pending_expired"})
+		default:
+			h.log.Error("resend: increment failed", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
+		}
+		return
+	}
+
+	_ = h.redis.Del(ctx, redisKey(pending.ID)).Err()
+	codeExpires, err := h.sendInitialCode(ctx, pending.ID, pending.Email)
+	if err != nil {
+		_ = h.pending.RevertResend(ctx, pending.ID)
+		h.log.Error("resend: email send failed", "error", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Failed to send verification code; please retry",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"code_expires_at":   codeExpires.UTC().Format(time.RFC3339),
+		"resends_remaining": MaxResends - newCount,
+	})
+}
+
+// ChangeRegistrationEmailRequest is the JSON body for the register/change-email endpoint.
+type ChangeRegistrationEmailRequest struct {
+	PendingID string `json:"pending_id" binding:"required,uuid"`
+	NewEmail  string `json:"new_email" binding:"required,email"`
+}
+
+// ChangeRegistrationEmail updates the email on a pending registration, resets the
+// resend counter, and sends a fresh verification code to the new address. See #621.
+func (h *Handler) ChangeRegistrationEmail(c *gin.Context) {
+	var req ChangeRegistrationEmailRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})
+		return
+	}
+	ctx := c.Request.Context()
+
+	if err := h.pending.UpdateEmail(ctx, req.PendingID, req.NewEmail); err != nil {
+		switch {
+		case errors.Is(err, ErrPendingNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"code": "pending_not_found"})
+		case errors.Is(err, ErrPendingExpired):
+			c.JSON(http.StatusGone, gin.H{"code": "pending_expired"})
+		case errors.Is(err, ErrEmailAlreadyRegister):
+			c.JSON(http.StatusConflict, gin.H{"code": "email_already_registered"})
+		case errors.Is(err, ErrEmailPending):
+			c.JSON(http.StatusConflict, gin.H{"code": "registration_pending"})
+		default:
+			h.log.Error("change-email: update failed", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
+		}
+		return
+	}
+
+	_ = h.redis.Del(ctx, redisKey(req.PendingID)).Err()
+	newEmailLower := strings.ToLower(strings.TrimSpace(req.NewEmail))
+	codeExpires, err := h.sendInitialCode(ctx, req.PendingID, newEmailLower)
+	if err != nil {
+		h.log.Error("change-email: send failed", "error", err)
+		c.JSON(http.StatusServiceUnavailable, gin.H{
+			"error": "Failed to send verification code to new email",
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"email":           newEmailLower,
+		"code_expires_at": codeExpires.UTC().Format(time.RFC3339),
+	})
+}
+
+// AbandonRegistration deletes a pending registration by ID, allowing the user to
+// start fresh. Returns 204 on success, 404 if not found. See #621.
+func (h *Handler) AbandonRegistration(c *gin.Context) {
+	pendingID := c.Param("pending_id")
+	if _, err := uuid.Parse(pendingID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid pending_id"})
+		return
+	}
+	ctx := c.Request.Context()
+
+	deleted, err := h.pending.Delete(ctx, pendingID)
+	if err != nil {
+		h.log.Error("abandon: delete failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
+		return
+	}
+	_ = h.redis.Del(ctx, redisKey(pendingID)).Err()
+	_ = h.redis.Del(ctx, redisKeyTestOnly+pendingID).Err()
+
+	if !deleted {
+		c.Status(http.StatusNotFound)
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 // loginLockoutThreshold is the number of failed attempts before lockout.

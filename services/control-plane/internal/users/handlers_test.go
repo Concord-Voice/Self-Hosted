@@ -6,6 +6,7 @@ import (
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 const (
@@ -258,8 +259,8 @@ func TestUpdateMeUsernameWithPeriod(t *testing.T) {
 	assert.Equal(t, "period.test", userData[keyUsername])
 }
 
-// registerAndVerify registers a user via the API (so Argon2id hash is real),
-// then auto-verifies email and returns a verified access token.
+// registerAndVerify registers a user via the two-step register→confirm flow
+// and returns a verified access token.
 func registerAndVerify(t *testing.T, ts *testhelpers.TestServer, email, username string) string {
 	t.Helper()
 	pub, priv, salt := testhelpers.E2EETestKeys()
@@ -272,13 +273,24 @@ func registerAndVerify(t *testing.T, ts *testhelpers.TestServer, email, username
 		keyWrappedPrivateKey: priv,
 		keyKeyDerivationSalt: salt,
 	}, nil)
-	assert.Equal(t, http.StatusCreated, regW.Code)
+	require.Equal(t, http.StatusCreated, regW.Code)
 
-	var regBody map[string]interface{}
+	var regBody struct {
+		PendingID string `json:"pending_id"`
+	}
 	testhelpers.ParseJSON(t, regW, &regBody)
-	user := regBody["user"].(map[string]interface{})
-	userID := user["id"].(string)
-	return ts.VerifyUserEmail(t, userID)
+
+	code := testhelpers.FetchVerificationCode(t, ts, regBody.PendingID)
+
+	w2 := ts.DoRequest("POST", "/api/v1/auth/register/confirm",
+		map[string]string{"pending_id": regBody.PendingID, "code": code}, nil)
+	require.Equal(t, http.StatusOK, w2.Code)
+
+	var confirmBody struct {
+		AccessToken string `json:"access_token"` //nolint:gosec
+	}
+	testhelpers.ParseJSON(t, w2, &confirmBody)
+	return confirmBody.AccessToken
 }
 
 // --- Change Password ---

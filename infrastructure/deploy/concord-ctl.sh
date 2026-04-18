@@ -103,6 +103,48 @@ case "${1:-help}" in
     sync_releases
     ;;
 
+  verify-registration)
+    echo "=== Registration Flow Verification ==="
+    failed=0
+
+    # 1. pending_registrations table exists
+    if docker exec concordvoice-postgres psql -U concord -d concord -Atc \
+         "SELECT 1 FROM information_schema.tables WHERE table_name = 'pending_registrations';" \
+         2>/dev/null | grep -q "1"; then
+      echo "  ✓ pending_registrations table exists"
+    else
+      echo "  ✗ pending_registrations table missing"
+      failed=$((failed + 1))
+    fi
+
+    # 2. No leftover unverified users
+    UNVERIFIED=$(docker exec concordvoice-postgres psql -U concord -d concord -Atc \
+                  "SELECT COUNT(*) FROM users WHERE email_verified = FALSE;" 2>/dev/null)
+    if [[ "$UNVERIFIED" == "0" ]]; then
+      echo "  ✓ no unverified users in users table"
+    else
+      echo "  ✗ ${UNVERIFIED} unverified users still present"
+      failed=$((failed + 1))
+    fi
+
+    # 3. /register endpoint responds (400 expected on empty body)
+    HTTP=$(curl -sf -o /dev/null -w "%{http_code}" \
+             -X POST http://localhost:8080/api/v1/auth/register \
+             -H "Content-Type: application/json" -d '{}' 2>/dev/null || echo "000")
+    if [[ "$HTTP" == "400" ]]; then
+      echo "  ✓ /register endpoint responding (400 on empty body expected)"
+    else
+      echo "  ✗ /register endpoint returned ${HTTP} (expected 400)"
+      failed=$((failed + 1))
+    fi
+
+    if [[ $failed -gt 0 ]]; then
+      echo ""
+      echo "verify-registration: ${failed} check(s) failed"
+      exit 1
+    fi
+    ;;
+
   branch)
     echo "Deploy branch: $(grep '^DEPLOY_BRANCH=' "${SCRIPT_DIR}/deploy.env" | cut -d= -f2)"
     echo "Git branch:    $(cd "$DEPLOY_DIR" && git rev-parse --abbrev-ref HEAD)"
@@ -129,6 +171,7 @@ case "${1:-help}" in
     echo "  rebuild        Sync releases + force rebuild + restart all services"
     echo "  freshstart     Wipe all data (DB, Redis), sync releases, rebuild from scratch"
     echo "  sync-releases  Download latest desktop release assets from GitHub"
+    echo "  verify-registration  Post-deploy smoke test for registration flow"
     echo "  branch         Show current deploy branch and git info"
     echo "  stop           Stop all services"
     ;;

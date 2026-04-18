@@ -436,6 +436,7 @@ func TestRecoveryResetAccountSuccess(t *testing.T) {
 func TestLogoutWithCookie(t *testing.T) {
 	ts := setupTS(t)
 
+	// New flow: register returns pending_id; access token comes from confirm step.
 	pub, wrappedKey, salt := testhelpers.E2EETestKeys()
 	w := ts.DoRequest("POST", "/api/v1/auth/register", map[string]interface{}{
 		"email":               "logoutcookie@test.concord.chat",
@@ -450,7 +451,17 @@ func TestLogoutWithCookie(t *testing.T) {
 
 	var regBody map[string]interface{}
 	testhelpers.ParseJSON(t, w, &regBody)
-	accessToken := regBody["access_token"].(string)
+	pendingID := regBody["pending_id"].(string)
+
+	code := testhelpers.FetchVerificationCode(t, ts, pendingID)
+	confirmW := ts.DoRequest("POST", "/api/v1/auth/register/confirm", map[string]string{
+		"pending_id": pendingID, "code": code,
+	}, nil)
+	require.Equal(t, http.StatusOK, confirmW.Code)
+
+	var confirmBody map[string]interface{}
+	testhelpers.ParseJSON(t, confirmW, &confirmBody)
+	accessToken := confirmBody["access_token"].(string)
 
 	w = ts.DoRequest("POST", "/api/v1/auth/logout", nil, testhelpers.AuthHeaders(accessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
