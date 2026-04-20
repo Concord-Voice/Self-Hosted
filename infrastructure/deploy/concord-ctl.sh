@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Concord service management helper
-# Usage: ./concord-ctl.sh [status|logs|restart|rebuild|freshstart|branch|stop|sync-releases]
+# Usage: ./concord-ctl.sh [status|logs|restart|rebuild|freshstart|sync-releases|verify-registration|docker-clean|branch|stop]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -145,6 +145,42 @@ case "${1:-help}" in
     fi
     ;;
 
+  docker-clean)
+    # Reject unknown arguments loudly — a typo like `--agressive` must not
+    # silently downgrade to conservative mode during incident response.
+    case "${2:-}" in
+      "") AGGRESSIVE=0 ;;
+      --aggressive) AGGRESSIVE=1 ;;
+      *) echo "docker-clean: unknown argument '${2}'. Only --aggressive is supported." >&2; exit 2 ;;
+    esac
+
+    # Timestamp in the banner so week-to-week cron log entries are distinguishable.
+    echo "=== Docker Cleanup — $(date '+%Y-%m-%d %H:%M:%S %Z') ==="
+    echo "Before:"
+    docker system df
+    echo ""
+
+    if [[ $AGGRESSIVE -eq 1 ]]; then
+      echo "Mode: aggressive (no time filter)"
+      docker image prune -af
+      docker builder prune -af
+      # 24h filter gives operators a rollback window on containers they
+      # may have stopped minutes earlier for debugging.
+      docker container prune -f --filter "until=24h"
+    else
+      echo "Mode: conservative (retain last 168h)"
+      docker image prune -af --filter "until=168h"
+      docker builder prune -af --filter "until=168h"
+    fi
+
+    echo ""
+    echo "After:"
+    docker system df
+    # Completion marker so operators/monitoring can grep for successful runs
+    # versus runs that aborted mid-prune via set -euo pipefail.
+    echo "=== Docker Cleanup — completed successfully ==="
+    ;;
+
   branch)
     echo "Deploy branch: $(grep '^DEPLOY_BRANCH=' "${SCRIPT_DIR}/deploy.env" | cut -d= -f2)"
     echo "Git branch:    $(cd "$DEPLOY_DIR" && git rev-parse --abbrev-ref HEAD)"
@@ -172,6 +208,8 @@ case "${1:-help}" in
     echo "  freshstart     Wipe all data (DB, Redis), sync releases, rebuild from scratch"
     echo "  sync-releases  Download latest desktop release assets from GitHub"
     echo "  verify-registration  Post-deploy smoke test for registration flow"
+    echo "  docker-clean   Prune unused images + builder cache (weekly cron target)"
+    echo "                 Add --aggressive to drop 7-day retention + prune stopped containers"
     echo "  branch         Show current deploy branch and git info"
     echo "  stop           Stop all services"
     ;;
