@@ -158,6 +158,7 @@ certs/
 !infrastructure/docker/coturn/certs/.gitkeep
 !infrastructure/docker/coturn/certs/README.md
 
+
 # Media Files (for testing)
 *.mp3
 *.wav
@@ -207,6 +208,12 @@ config.production.json
 .aws/
 *.pem
 aws-exports.js
+
+# Track cert-pinning test fixtures (issue #658). Negation must come AFTER
+# every *.pem rule above (gitignore applies later rules last). These are
+# synthetic self-signed PEMs with zero production value — regenerated via
+# client/desktop/tests/fixtures/pinning/generate.mjs for deterministic tests.
+!client/desktop/tests/fixtures/pinning/*.pem
 
 # Google Cloud
 *-key.json

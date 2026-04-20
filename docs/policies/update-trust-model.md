@@ -50,17 +50,51 @@ This document describes which of those properties each platform verifies, and ho
 
 **Tracked follow-up:** #653 will add a detached-signature scheme (minisign / cosign / GPG — TBD) with the public key baked into the client bundle.
 
+### TLS-layer feed pinning (#658)
+
+On **all platforms**, the HTTPS connection to `https://api.concordvoice.chat/api/v1/updates` is additionally pinned at the TLS layer via SPKI SHA-256 of the server's leaf certificate. This closes the rogue-cert MITM gap described in §Server-side trust boundary below.
+
+**How it works:**
+
+- `client/desktop/src/main/main.ts` installs a `Session.setCertificateVerifyProc` handler inside `app.whenReady()`. The handler is a pure function in `client/desktop/src/main/updatePinning.ts` configured from `updatePinningConfig.ts`.
+- For the pinned hostname (`api.concordvoice.chat`), the handler computes SPKI SHA-256 of the leaf cert's `SubjectPublicKeyInfo` and compares against a primary+fallback pin pair. Dual-pin enables non-emergency rotation.
+- For non-pinned hostnames (self-hosted deployments, staging, localhost), the handler returns `callback(-3)` — Chromium's default cert validation applies, system CA trust works normally.
+- When both pins miss, the handler returns `callback(-2)` (explicit reject) and the renderer shows `UpdateSecurityBanner` directing the user to reinstall from GitHub Releases.
+
+**Why this matters:** A rogue cert obtained from a different public CA for the same CN would pass Chromium's default validation (it chains to a trusted root). It would NOT pass the SPKI pin because the attacker doesn't have Concord's private key. The pin is the only anchor that binds TLS trust to Concord's own keypair.
+
+**Operational contract:**
+
+- Concord obtains the TLS cert via Let's Encrypt on the origin (certbot with `--reuse-key`) and uploads it to CloudFlare via `[internal]upload-cert-to-cloudflare.sh` (a certbot renewal hook). CloudFlare serves the uploaded cert at its edge, preserving the SPKI that clients pin.
+- `--reuse-key` is load-bearing: without it, every 90-day renewal would generate a new keypair, the SPKI would change, and every pinned client would hard-fail on next update check.
+- Rotation (deliberate keypair rotation for compromise or cadence) follows the dual-pin runbook procedure (`[internal]`).
+- Observability: fallback-pin hits emit a Sentry breadcrumb with category `update.pin` and `outcome:'fallback'`; pin misses emit an error breadcrumb plus a deduplicated `captureException` with fingerprint `['cert-pin-miss', hostname]`.
+
+**Implementation references:**
+
+- Module: [`client/desktop/src/main/updatePinning.ts`](../../client/desktop/src/main/updatePinning.ts)
+- Config: [`client/desktop/src/main/updatePinningConfig.ts`](../../client/desktop/src/main/updatePinningConfig.ts)
+- Wiring: [`client/desktop/src/main/main.ts`](../../client/desktop/src/main/main.ts) (inside `app.whenReady()`)
+- Banner: [`client/desktop/src/renderer/components/Updates/UpdateSecurityBanner.tsx`](../../client/desktop/src/renderer/components/Updates/UpdateSecurityBanner.tsx)
+- Design spec: [`[internal]specs/2026-04-20-658-updater-feed-cert-pin-design.md`](../superpowers/specs/2026-04-20-658-updater-feed-cert-pin-design.md)
+- Rotation runbook: [`[internal]`](update-cert-pinning-runbook.md)
+
 ## Server-side trust boundary
 
 The update feed is served at `https://api.concordvoice.chat/api/v1/updates`. Transport protections:
 
 - **Non-HTTPS refused:** `client/desktop/src/main/updater.ts` explicitly refuses to configure the feed with a non-HTTPS `apiBase`.
 - **HTTPS only:** transport encryption + standard Web PKI cert validation on the server host.
+- **TLS-layer feed pinning (#658):** in addition to standard Web PKI validation, clients pin the SPKI SHA-256 of the CloudFlare edge certificate for `api.concordvoice.chat`. See the dedicated subsection under §Per-platform trust model above.
 
-**What HTTPS does NOT guarantee on its own:**
+**What HTTPS + pinning DOES guarantee:**
 
-- That the server host has not been compromised
-- That an attacker with a rogue cert for the host (e.g., via a compromised intermediate CA) cannot MITM
+- An attacker with a rogue cert for the host (e.g., via a compromised intermediate CA) CANNOT MITM the update feed, because the rogue cert's SPKI will not match either pin.
+
+**What HTTPS + pinning does NOT guarantee:**
+
+- That the server host itself has not been compromised (an attacker with root on the origin could serve real malicious updates with a real signed keypair — this is outside pinning's scope; the artifact-level signing layer from #644 is what defends that case).
+- Self-hosted deployments at a different `apiBase`: pinning is SaaS-only; self-hosted deployments use system-CA trust.
 
 Those gaps are why the per-platform trust anchors above are load-bearing — they provide defense in depth.
 
