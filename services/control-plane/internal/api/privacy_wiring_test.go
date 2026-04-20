@@ -33,7 +33,7 @@ func TestBuildPrivacyHandler_NoToken_NonProduction_UsesNoopStub(t *testing.T) {
 	cfg := &config.Config{Environment: "development"}
 	log := logger.New("test")
 
-	h := buildPrivacyHandler(cfg, log)
+	h := buildPrivacyHandler(cfg, nil, log)
 	require.NotNil(t, h)
 	// Handler exists and the underlying admin is the noop stub. We can't assert
 	// the concrete type without exporting, but we can verify the handler is
@@ -49,7 +49,7 @@ func TestBuildPrivacyHandler_WithToken_ConstructsRealClient(t *testing.T) {
 	cfg := &config.Config{Environment: "staging"}
 	log := logger.New("test")
 
-	h := buildPrivacyHandler(cfg, log)
+	h := buildPrivacyHandler(cfg, nil, log)
 	require.NotNil(t, h)
 }
 
@@ -93,7 +93,7 @@ func TestBuildPrivacyHandler_DefaultsApiBase(t *testing.T) {
 	cfg := &config.Config{Environment: "staging"}
 	log := logger.New("test")
 
-	h := buildPrivacyHandler(cfg, log)
+	h := buildPrivacyHandler(cfg, nil, log)
 	assert.NotNil(t, h)
 }
 
@@ -112,7 +112,7 @@ func TestBuildPrivacyHandler_Production_NoDsn_NoToken_DoesNotFatal(t *testing.T)
 	cfg := &config.Config{Environment: "production"}
 	log := logger.New("test")
 
-	h := buildPrivacyHandler(cfg, log)
+	h := buildPrivacyHandler(cfg, nil, log)
 	require.NotNil(t, h)
 }
 
@@ -131,7 +131,7 @@ func TestBuildPrivacyHandler_Production_FullSentryConfig_ConstructsRealClient(t 
 	cfg := &config.Config{Environment: "production"}
 	log := logger.New("test")
 
-	h := buildPrivacyHandler(cfg, log)
+	h := buildPrivacyHandler(cfg, nil, log)
 	require.NotNil(t, h)
 }
 

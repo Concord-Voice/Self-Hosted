@@ -3,6 +3,7 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/url"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/privacy"
 	concordsentry "github.com/markdrogersjr/Concord/services/control-plane/internal/sentry"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/users"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 )
@@ -169,7 +171,7 @@ func (n noopSentryAdmin) DeleteEventsForUser(_ context.Context, _ string) error 
 // All three checks run before any network or filesystem side effects, so
 // a misconfiguration fails the process during the constructor rather than
 // at first request.
-func buildPrivacyHandler(cfg *config.Config, log *logger.Logger) *privacy.Handler {
+func buildPrivacyHandler(cfg *config.Config, db *sql.DB, log *logger.Logger) *privacy.Handler {
 	rawDSN := os.Getenv("SENTRY_DSN_CONTROL")
 	token := os.Getenv("SENTRY_ADMIN_TOKEN")
 	org := os.Getenv("SENTRY_ORG_SLUG")
@@ -209,5 +211,6 @@ func buildPrivacyHandler(cfg *config.Config, log *logger.Logger) *privacy.Handle
 	} else {
 		admin = concordsentry.NewAdminClient(apiBase, org, proj, token)
 	}
-	return privacy.NewHandler(admin, log)
+	account := users.NewAccountService(db, log)
+	return privacy.NewHandler(admin, account, log)
 }

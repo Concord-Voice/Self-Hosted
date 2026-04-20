@@ -67,6 +67,7 @@ func SetupTestDB(t *testing.T) (*sql.DB, func()) {
 // TruncateAllTables removes all data from application tables.
 func TruncateAllTables(db *sql.DB) error {
 	_, err := db.Exec(`TRUNCATE
+		account_deletions,
 		users,
 		user_keys,
 		public_keys,

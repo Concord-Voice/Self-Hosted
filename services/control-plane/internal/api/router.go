@@ -179,7 +179,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	clientConfigHandler := clientconfig.NewHandler(cfg, liveSpa, log)
 	updatesHandler := updates.NewHandler(cfg, log)
 	spaHandler := spa.NewHandler(cfg.SpaDir, log)
-	privacyHandler := buildPrivacyHandler(cfg, log)
+	privacyHandler := buildPrivacyHandler(cfg, db, log)
 
 	// Start NATS voice event subscriber
 	if natsClient != nil {

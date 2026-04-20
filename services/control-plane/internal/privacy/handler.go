@@ -12,6 +12,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/users"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 )
 
@@ -23,17 +24,33 @@ type EventsDeleter interface {
 
 // Handler exposes the privacy erasure endpoints.
 type Handler struct {
-	sentry EventsDeleter
-	log    *logger.Logger
+	sentry  EventsDeleter
+	account users.AccountDeleter
+	log     *logger.Logger
 }
 
-// NewHandler builds a Handler wired to the given Sentry admin backend.
-// The logger is used to surface upstream-deletion failures so operators
-// can diagnose Sentry API issues that would otherwise be opaque 502s.
-// A nil logger is allowed in tests that do not exercise the failure path;
-// production callers must always pass a non-nil logger.
-func NewHandler(sentry EventsDeleter, log *logger.Logger) *Handler {
-	return &Handler{sentry: sentry, log: log}
+// NewHandler builds a Handler wired to the given Sentry admin backend
+// and account-deletion service. The logger is used to surface
+// upstream-deletion and DB failures so operators can diagnose issues
+// that would otherwise be opaque 500/502s.
+//
+// Panics if sentry or account is nil — these are non-nullable
+// dependencies that every handler method dereferences unconditionally;
+// a nil value would surface as an opaque nil-pointer panic on the first
+// request. Panicking at construction makes the mis-wiring obvious at
+// startup rather than in production traffic.
+//
+// A nil logger IS allowed in tests that do not exercise the failure path;
+// production callers must always pass a non-nil logger. The log field is
+// only dereferenced behind a nil-check on the error path.
+func NewHandler(sentry EventsDeleter, account users.AccountDeleter, log *logger.Logger) *Handler {
+	if sentry == nil {
+		panic("privacy.NewHandler: sentry EventsDeleter must not be nil")
+	}
+	if account == nil {
+		panic("privacy.NewHandler: account AccountDeleter must not be nil")
+	}
+	return &Handler{sentry: sentry, account: account, log: log}
 }
 
 type eraseTelemetryRequest struct {
@@ -104,20 +121,34 @@ type eraseAccountRequest struct {
 }
 
 // EraseAccount handles POST /api/v1/privacy/erase-account.
-// If clientId is present, internally calls Sentry delete first, then
-// proceeds with account deletion. Account-deletion logic is intentionally
-// out of scope for this handler — wire to the existing account-deletion
-// flow via a follow-up.
+// Ordering: if clientId is present and well-formed, delete Sentry events
+// FIRST (so a Sentry outage blocks erasure and the user can retry;
+// the reverse order would orphan Sentry events tagged with a deleted
+// user.id). Then perform the atomic DB erasure via the AccountDeleter,
+// which cascades through every user_id-FK table configured with ON DELETE
+// CASCADE and inserts a privacy-safe audit row.
 func (h *Handler) EraseAccount(c *gin.Context) {
+	userID := c.GetString("user_id")
+	// Defense-in-depth: auth middleware is expected to have populated user_id
+	// before this handler runs. If a future routing change exposed this
+	// endpoint behind optional auth, DeleteAccount would attempt a
+	// DELETE WHERE id = '' and the audit row would be written without a
+	// meaningful subject. Fail closed instead.
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "authentication required"})
+		return
+	}
+
 	var req eraseAccountRequest
 	// clientId is optional per spec — accept empty bodies (io.EOF from the
-	// JSON decoder) so clients that have no Sentry events to delete can still
-	// hit this endpoint for account erasure. Matches the established pattern
-	// used by sessions/friends/members/invites handlers.
+	// JSON decoder) so clients that have no Sentry events to delete can
+	// still hit this endpoint for account erasure.
 	if err := c.ShouldBindJSON(&req); err != nil && !errors.Is(err, io.EOF) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
 		return
 	}
+
+	sentryAttempted := false
 	if req.ClientID != "" {
 		if !clientIDShape.MatchString(req.ClientID) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": "invalid clientId format"})
@@ -128,10 +159,23 @@ func (h *Handler) EraseAccount(c *gin.Context) {
 			c.JSON(http.StatusBadGateway, gin.H{"error": "upstream deletion failed"})
 			return
 		}
+		sentryAttempted = true
 	}
-	// Follow-up: #669 tracks wiring to the new users.DeleteAccount service.
-	// Current behavior: 204 after Sentry deletion succeeds (if clientId present)
-	// or 204 immediately (if no clientId). Account deletion is out of scope
-	// for #642 and greenfield work for #669.
+
+	if err := h.account.DeleteAccount(c.Request.Context(), userID, sentryAttempted); err != nil {
+		if errors.Is(err, users.ErrUserNotFound) {
+			c.JSON(http.StatusNotFound, gin.H{"error": "account not found"})
+			return
+		}
+		if h.log != nil {
+			h.log.Error("erase-account: account deletion failed",
+				"user_id", userID,
+				"error", err,
+			)
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "account deletion failed"})
+		return
+	}
+
 	c.Status(http.StatusNoContent)
 }

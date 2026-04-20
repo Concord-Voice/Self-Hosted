@@ -50,11 +50,27 @@ func (s *stubEventsDeleter) DeleteEventsForUser(_ context.Context, clientID stri
 	return nil
 }
 
+// stubAccountDeleter records the last DeleteAccount arguments; used by
+// tests that exercise the NewHandler signature but do not probe deletion
+// behavior (that is covered by handler_integration_test.go against real
+// Postgres).
+type stubAccountDeleter struct {
+	calledWith   string
+	calledSentry bool
+	returnErr    error
+}
+
+func (s *stubAccountDeleter) DeleteAccount(_ context.Context, userID string, sentryAttempted bool) error {
+	s.calledWith = userID
+	s.calledSentry = sentryAttempted
+	return s.returnErr
+}
+
 func TestEraseTelemetry_HappyPath(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	admin := &stubEventsDeleter{}
-	h := privacy.NewHandler(admin, nil)
+	h := privacy.NewHandler(admin, &stubAccountDeleter{}, nil)
 	router.POST(testEraseTelemetry, withUserID(testUserID), h.EraseTelemetry)
 
 	body, _ := json.Marshal(map[string]string{"clientId": testValidClientID})
@@ -71,7 +87,7 @@ func TestEraseTelemetry_Rejects_InvalidClientID(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	admin := &stubEventsDeleter{}
-	h := privacy.NewHandler(admin, nil)
+	h := privacy.NewHandler(admin, &stubAccountDeleter{}, nil)
 	router.POST(testEraseTelemetry, withUserID(testUserID), h.EraseTelemetry)
 
 	body, _ := json.Marshal(map[string]string{"clientId": "not-hex!"})
@@ -90,7 +106,7 @@ func TestEraseTelemetry_Returns502_OnUpstreamFailure(t *testing.T) {
 	admin := &stubEventsDeleter{fail: true}
 	// Pass a real logger so the logUpstreamFailure log.Error path is
 	// exercised (separate from the nil-logger path covered below).
-	h := privacy.NewHandler(admin, logger.New("test"))
+	h := privacy.NewHandler(admin, &stubAccountDeleter{}, logger.New("test"))
 	router.POST(testEraseTelemetry, withUserID(testUserID), h.EraseTelemetry)
 
 	body, _ := json.Marshal(map[string]string{"clientId": testValidClientID})
@@ -117,7 +133,7 @@ func TestEraseTelemetry_UpstreamFailure_NeverLogsClientID(t *testing.T) {
 
 	router := gin.New()
 	admin := &clientIDLeakingDeleter{clientID: sentinelClientID}
-	h := privacy.NewHandler(admin, testLog)
+	h := privacy.NewHandler(admin, &stubAccountDeleter{}, testLog)
 	router.POST(testEraseTelemetry, withUserID(testUserID), h.EraseTelemetry)
 
 	body, _ := json.Marshal(map[string]string{"clientId": sentinelClientID})
@@ -141,7 +157,7 @@ func TestEraseTelemetry_UpstreamFailure_WithoutLogger_DoesNotPanic(t *testing.T)
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	admin := &stubEventsDeleter{fail: true}
-	h := privacy.NewHandler(admin, nil)
+	h := privacy.NewHandler(admin, &stubAccountDeleter{}, nil)
 	router.POST(testEraseTelemetry, withUserID(testUserID), h.EraseTelemetry)
 
 	body, _ := json.Marshal(map[string]string{"clientId": testValidClientID})
@@ -157,7 +173,7 @@ func TestEraseAccount_WithClientID_CallsSentry(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	admin := &stubEventsDeleter{}
-	h := privacy.NewHandler(admin, nil)
+	h := privacy.NewHandler(admin, &stubAccountDeleter{}, nil)
 	router.POST(testEraseAccount, withUserID(testUserID), h.EraseAccount)
 
 	body, _ := json.Marshal(map[string]string{"clientId": testValidClientID})
@@ -174,7 +190,7 @@ func TestEraseAccount_WithoutClientID_Succeeds(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	admin := &stubEventsDeleter{}
-	h := privacy.NewHandler(admin, nil)
+	h := privacy.NewHandler(admin, &stubAccountDeleter{}, nil)
 	router.POST(testEraseAccount, withUserID(testUserID), h.EraseAccount)
 
 	req := httptest.NewRequest(http.MethodPost, testEraseAccount, bytes.NewReader([]byte(`{}`)))
@@ -193,7 +209,7 @@ func TestEraseAccount_AcceptsEmptyBody(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	admin := &stubEventsDeleter{}
-	h := privacy.NewHandler(admin, nil)
+	h := privacy.NewHandler(admin, &stubAccountDeleter{}, nil)
 	router.POST(testEraseAccount, withUserID(testUserID), h.EraseAccount)
 
 	req := httptest.NewRequest(http.MethodPost, testEraseAccount, nil)
@@ -209,7 +225,7 @@ func TestEraseAccount_RejectsInvalidClientID(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
 	admin := &stubEventsDeleter{}
-	h := privacy.NewHandler(admin, nil)
+	h := privacy.NewHandler(admin, &stubAccountDeleter{}, nil)
 	router.POST(testEraseAccount, withUserID(testUserID), h.EraseAccount)
 
 	body, _ := json.Marshal(map[string]string{"clientId": "not-hex!"})
@@ -227,7 +243,7 @@ func TestEraseAccount_UpstreamFailure(t *testing.T) {
 	router := gin.New()
 	admin := &stubEventsDeleter{fail: true}
 	// Real logger exercises logUpstreamFailure's log.Error path.
-	h := privacy.NewHandler(admin, logger.New("test"))
+	h := privacy.NewHandler(admin, &stubAccountDeleter{}, logger.New("test"))
 	router.POST(testEraseAccount, withUserID(testUserID), h.EraseAccount)
 
 	body, _ := json.Marshal(map[string]string{"clientId": testValidClientID})
@@ -246,7 +262,7 @@ func TestEraseTelemetry_DoesNotLogClientID(t *testing.T) {
 	router := gin.New()
 	router.Use(gin.LoggerWithWriter(&buf))
 	admin := &stubEventsDeleter{}
-	h := privacy.NewHandler(admin, nil)
+	h := privacy.NewHandler(admin, &stubAccountDeleter{}, nil)
 	router.POST(testEraseTelemetry, withUserID(testUserID), h.EraseTelemetry)
 
 	const sentinelClientID = "deadbeefcafef00d1122334455667788" // pragma: allowlist secret

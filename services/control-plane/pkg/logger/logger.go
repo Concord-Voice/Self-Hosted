@@ -2,6 +2,7 @@
 package logger
 
 import (
+	"io"
 	"log/slog"
 	"os"
 )
@@ -30,6 +31,17 @@ func New(environment string) *Logger {
 	return &Logger{
 		Logger: slog.New(handler),
 	}
+}
+
+// NewWithWriter constructs a Logger whose output is routed to the given
+// io.Writer. Used by tests to capture log output into a bytes.Buffer for
+// assertion. Mirrors New("development") — pretty text handler at
+// slog.LevelDebug — because that is the environment tests run in.
+func NewWithWriter(w io.Writer) *Logger {
+	handler := slog.NewTextHandler(w, &slog.HandlerOptions{
+		Level: slog.LevelDebug,
+	})
+	return &Logger{Logger: slog.New(handler)}
 }
 
 // With returns a new logger with additional context
