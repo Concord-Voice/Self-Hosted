@@ -129,6 +129,19 @@ describe('MediasoupService', () => {
       expect(worker1.createRouter).toHaveBeenCalledTimes(2); // room-a, room-c
       expect(worker2.createRouter).toHaveBeenCalledTimes(1); // room-b
     });
+
+    it('passes the configured mediaCodecs array to worker.createRouter', async () => {
+      await service.getOrCreateRouter('room-codec-test');
+
+      // Parity with the worker-config test above: asserts the codec config
+      // is forwarded verbatim to mediasoup. Catches accidental future
+      // refactors that filter, transform, or swap the codec list at the
+      // call site. (Type-level concerns are caught by tsc; this is the
+      // runtime wiring guard.)
+      expect(worker1.createRouter).toHaveBeenCalledWith({
+        mediaCodecs: [{ kind: 'audio', mimeType: 'audio/opus', clockRate: 48000, channels: 2 }],
+      });
+    });
   });
 
   describe('removeRouter', () => {

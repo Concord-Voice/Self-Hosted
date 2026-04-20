@@ -3,7 +3,7 @@ import * as Sentry from '@sentry/node';
 import { config } from '../config/index.js';
 import { logger } from './logger.js';
 import { captureWithTag } from './sentry-helpers.js';
-import type { Worker, Router } from 'mediasoup/types';
+import type { Worker, Router, RouterRtpCodecCapability } from 'mediasoup/types';
 
 export class MediasoupService {
   private workers: Worker[] = [];
@@ -18,7 +18,7 @@ export class MediasoupService {
     for (let i = 0; i < config.mediasoup.numWorkers; i++) {
       const worker = await mediasoup.createWorker({
         logLevel: config.mediasoup.worker.logLevel,
-        logTags: config.mediasoup.worker.logTags as any,
+        logTags: config.mediasoup.worker.logTags satisfies mediasoup.types.WorkerLogTag[],
         rtcMinPort: config.mediasoup.worker.rtcMinPort,
         rtcMaxPort: config.mediasoup.worker.rtcMaxPort,
       });
@@ -69,7 +69,7 @@ export class MediasoupService {
     if (!router) {
       const worker = this.getNextWorker();
       router = await worker.createRouter({
-        mediaCodecs: config.mediasoup.router.mediaCodecs as any,
+        mediaCodecs: config.mediasoup.router.mediaCodecs satisfies RouterRtpCodecCapability[],
       });
 
       this.routers.set(roomId, router);
