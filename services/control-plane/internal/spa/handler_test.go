@@ -14,7 +14,7 @@ import (
 const (
 	testVersion     = "abc1234"
 	testIndexFile   = "index.html"
-	spaBasePath     = "/api/v1/spa/"
+	spaBasePath     = "/spa/"
 	headerCacheCtrl = "Cache-Control"
 	headerContType  = "Content-Type"
 	jsContentType   = "application/javascript; charset=utf-8"
@@ -61,7 +61,7 @@ func newTestRouter(spaDir string) *gin.Engine {
 	r := gin.New()
 	r.RedirectTrailingSlash = false
 	r.RedirectFixedPath = false
-	r.GET("/api/v1/spa/*filepath", h.ServeAsset)
+	r.GET("/spa/*filepath", h.ServeAsset)
 	return r
 }
 
@@ -148,7 +148,7 @@ func TestServeAssetInvalidVersion(t *testing.T) {
 	r := newTestRouter(dir)
 
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("GET", "/api/v1/spa/../etc/passwd", nil)
+	req, _ := http.NewRequest("GET", "/spa/../etc/passwd", nil)
 	r.ServeHTTP(w, req)
 
 	if w.Code != http.StatusBadRequest {
@@ -174,7 +174,7 @@ func TestServeAssetEmptySpaDir(t *testing.T) {
 	log := logger.New("test")
 	h := NewHandler("", log)
 	r := gin.New()
-	r.GET("/api/v1/spa/*filepath", h.ServeAsset)
+	r.GET("/spa/*filepath", h.ServeAsset)
 
 	w := httptest.NewRecorder()
 	req, _ := http.NewRequest("GET", spaBasePath+testVersion+"/index.html", nil)
@@ -204,7 +204,7 @@ func TestServeAssetVersionOnly(t *testing.T) {
 	r := newTestRouter(dir)
 
 	w := httptest.NewRecorder()
-	req, _ := http.NewRequest("GET", "/api/v1/spa/abc1234", nil)
+	req, _ := http.NewRequest("GET", "/spa/abc1234", nil)
 	r.ServeHTTP(w, req)
 
 	if w.Code == http.StatusOK {
@@ -241,8 +241,8 @@ func TestServeAssetInvalidVersionFormats(t *testing.T) {
 		path   string
 		wantOK bool
 	}{
-		{"/api/v1/spa/ABC-123_test/index.html", false}, // Valid format but no dir → 404
-		{"/api/v1/spa/abc!def/index.html", false},      // Special chars → 400
+		{"/spa/ABC-123_test/index.html", false}, // Valid format but no dir → 404
+		{"/spa/abc!def/index.html", false},      // Special chars → 400
 	}
 
 	for _, tt := range tests {

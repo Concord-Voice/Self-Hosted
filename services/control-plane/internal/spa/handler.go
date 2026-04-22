@@ -74,8 +74,13 @@ func resolveSafePath(baseDir, version, filePath string) (absPath string, basenam
 	return candidate, filepath.Base(cleanPath), ""
 }
 
-// ServeAsset handles GET /api/v1/spa/*filepath
-// Expected URL structure: /api/v1/spa/{sha7}/index.html or /api/v1/spa/{sha7}/assets/chunk-abc123.js
+// ServeAsset handles GET /spa/*filepath
+// Expected URL structure: /spa/{sha7}/index.html or /spa/{sha7}/assets/chunk-abc123.js
+//
+// This route lives at root (not under /api/v1/) to escape Cloudflare's
+// Free-tier baseline bot-intelligence JSD beacon injection which targets
+// /api/*-shaped paths. See #725 and
+// [internal]specs/2026-04-21-725-post-cutover-design.md.
 func (h *Handler) ServeAsset(c *gin.Context) {
 	// Override the global default-src 'none' CSP from SecurityHeaders middleware
 	// for every SPA response (success AND error). The SPA's index.html ships its

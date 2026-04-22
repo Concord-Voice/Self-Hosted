@@ -181,6 +181,9 @@ func validProductionConfig() *Config { // #nosec G101 -- test fixture with fake 
 		MinIOBucket:       "concord-media",
 		SMTPHost:          "smtp.example.com",
 		TrustedProxyCIDRs: []string{"10.0.0.0/8"},
+		// Satisfy the #725 MEDIA_PLANE_URL production guards: must be set,
+		// must not be the dev default, must not be the root zone.
+		MediaPlaneURL: "https://media.concordvoice.chat",
 	}
 }
 
@@ -267,6 +270,24 @@ func TestValidateProductionRejectsDevDefaults(t *testing.T) {
 		{"empty MinIO endpoint", func(c *Config) { c.MinIOEndpoint = "" }, "MINIO_ENDPOINT"},
 		{"empty MinIO bucket", func(c *Config) { c.MinIOBucket = "" }, "MINIO_BUCKET"},
 		{"empty TRUSTED_PROXY_CIDRS", func(c *Config) { c.TrustedProxyCIDRs = nil }, "TRUSTED_PROXY_CIDRS"},
+		// #725 cross-cutting: MEDIA_PLANE_URL guards. Three classes of failure
+		// should all be rejected by the production validate() pass.
+		//
+		// Class 1 — unset / dev-default:
+		{"empty MEDIA_PLANE_URL", func(c *Config) { c.MediaPlaneURL = "" }, "MEDIA_PLANE_URL"},
+		{"dev-default MEDIA_PLANE_URL", func(c *Config) { c.MediaPlaneURL = "http://localhost:3000" }, "MEDIA_PLANE_URL"},
+		// Class 2 — root-zone exact forms:
+		{"MEDIA_PLANE_URL root https", func(c *Config) { c.MediaPlaneURL = "https://concordvoice.chat" }, "MEDIA_PLANE_URL"},
+		{"MEDIA_PLANE_URL root http", func(c *Config) { c.MediaPlaneURL = "http://concordvoice.chat" }, "MEDIA_PLANE_URL"},
+		// Class 3 — root-zone variants that exact string match would miss.
+		// Per #725 review: Copilot + Seer + 3 subagents independently flagged
+		// that exact-match guards are bypassed by any of these variants.
+		{"MEDIA_PLANE_URL root with trailing slash", func(c *Config) { c.MediaPlaneURL = "https://concordvoice.chat/" }, "MEDIA_PLANE_URL"},
+		{"MEDIA_PLANE_URL root with explicit port", func(c *Config) { c.MediaPlaneURL = "https://concordvoice.chat:443" }, "MEDIA_PLANE_URL"},
+		{"MEDIA_PLANE_URL root with path", func(c *Config) { c.MediaPlaneURL = "https://concordvoice.chat/api" }, "MEDIA_PLANE_URL"},
+		{"MEDIA_PLANE_URL root uppercase", func(c *Config) { c.MediaPlaneURL = "HTTPS://CONCORDVOICE.CHAT" }, "MEDIA_PLANE_URL"},
+		{"MEDIA_PLANE_URL root wss scheme", func(c *Config) { c.MediaPlaneURL = "wss://concordvoice.chat" }, "MEDIA_PLANE_URL"},
+		{"MEDIA_PLANE_URL root with www", func(c *Config) { c.MediaPlaneURL = "https://www.concordvoice.chat" }, "MEDIA_PLANE_URL"},
 	}
 
 	for _, tt := range tests {
@@ -277,6 +298,60 @@ func TestValidateProductionRejectsDevDefaults(t *testing.T) {
 			require.Error(t, err, "expected error for %s", tt.name)
 			assert.True(t, strings.Contains(err.Error(), tt.wantMsg),
 				"expected error to contain %q, got: %v", tt.wantMsg, err)
+		})
+	}
+}
+
+// TestValidateProductionAcceptsMediaSubdomain confirms valid MEDIA_PLANE_URL
+// forms are NOT rejected — regression guard against a future tightening that
+// would reject legitimate media-plane hosts along with the root zone.
+func TestValidateProductionAcceptsMediaSubdomain(t *testing.T) {
+	accepts := []string{
+		"https://media.concordvoice.chat",     // canonical production value
+		"https://media.concordvoice.chat/",    // trailing slash OK on subdomain
+		"https://media.concordvoice.chat:443", // explicit port OK on subdomain
+		"https://other.example.com",           // unrelated host passes (operator override)
+		"http://media.example.com",            // http OK for non-production-hostname variants
+	}
+	for _, v := range accepts {
+		t.Run(v, func(t *testing.T) {
+			cfg := validProductionConfig()
+			cfg.MediaPlaneURL = v
+			assert.NoError(t, cfg.validate(),
+				"%s must be accepted — only the root concordvoice.chat zone is rejected", v)
+		})
+	}
+}
+
+// TestMediaPlaneURLIsRoot covers the helper function directly so future
+// refactors can't regress the host-matching logic without a test failure.
+func TestMediaPlaneURLIsRoot(t *testing.T) {
+	cases := []struct {
+		input string
+		root  bool
+	}{
+		// Root zone — should all be flagged:
+		{"https://concordvoice.chat", true},
+		{"http://concordvoice.chat", true},
+		{"https://concordvoice.chat/", true},
+		{"https://concordvoice.chat:443", true},
+		{"https://concordvoice.chat/api", true},
+		{"HTTPS://CONCORDVOICE.CHAT", true},
+		{"wss://concordvoice.chat", true},
+		{"https://www.concordvoice.chat", true},
+		{"https://WWW.Concordvoice.Chat", true},
+		// Non-root — should all pass:
+		{"https://media.concordvoice.chat", false},
+		{"https://api.concordvoice.chat", false},
+		{"https://turn.concordvoice.chat", false},
+		{"https://example.com", false},
+		{"http://localhost:3000", false}, // dev default, rejected by a different guard
+		{"", false},                      // empty, rejected by a different guard
+		{"not-a-url", false},             // malformed — different guard territory
+	}
+	for _, c := range cases {
+		t.Run(c.input, func(t *testing.T) {
+			assert.Equal(t, c.root, mediaPlaneURLIsRoot(c.input))
 		})
 	}
 }

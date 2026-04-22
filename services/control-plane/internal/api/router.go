@@ -79,6 +79,31 @@ func configureTrustedProxies(router *gin.Engine, cfg *config.Config, log *logger
 		"count", len(cfg.TrustedProxyCIDRs))
 }
 
+// registerSPARoute registers the root-level /spa/* asset handler when SPA
+// serving is enabled. Extracted from NewRouter to keep the latter's cognitive
+// complexity under the SonarQube brain-overload threshold.
+//
+// The route lives at root (not under /api/v1/) to escape Cloudflare's Free-tier
+// baseline bot-intelligence JSD beacon injection which targets /api/*-shaped
+// surfaces. See #725 and
+// [internal]specs/2026-04-21-725-post-cutover-design.md for the full
+// elimination chain. Cloudflare caches hashed assets (immutable/1yr) and
+// index.html (5min).
+//
+// When SpaDir is empty the route is not registered; logs a disabled-notice so
+// operators see a signal if SPA hosting is accidentally unconfigured rather
+// than silent 404s on /spa/* requests.
+func registerSPARoute(router *gin.Engine, cfg *config.Config, redis *redis.Client, spaHandler *spa.Handler, log *logger.Logger) {
+	if cfg.SpaDir == "" {
+		log.Info("SPA serving disabled: SPA_DIR env var is empty. Desktop clients will receive 404 on /spa/* requests. Set SPA_DIR in production to enable Tier 3 hot updates.")
+		return
+	}
+	router.GET("/spa/*filepath",
+		middleware.RateLimitByIP(redis, 60, 1*time.Minute),
+		spaHandler.ServeAsset,
+	)
+}
+
 // NewRouter creates a new API router and returns the WebSocket hub and NATS client for lifecycle management.
 func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *config.Config, liveSpa *config.LiveSpaConfig, log *logger.Logger) (*gin.Engine, *websocket.Hub, *natsclient.Client) {
 	router := gin.New()
@@ -188,6 +213,10 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 			log.Error("Failed to subscribe to voice NATS events", "error", subErr)
 		}
 	}
+
+	// SPA asset serving (Tier 3 hot updates). Extracted from NewRouter to keep
+	// its cognitive complexity under the SonarQube brain-overload threshold.
+	registerSPARoute(router, cfg, redis, spaHandler, log)
 
 	// API v1 routes
 	v1 := router.Group("/api/v1")
@@ -307,15 +336,6 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 			middleware.RateLimitByIP(redis, 30, 1*time.Minute),
 			updatesHandler.ServeUpdateAsset,
 		)
-
-		// SPA assets (public — served to desktop shells for Tier 3 hot updates)
-		// Cloudflare caches hashed assets (immutable/1yr) and index.html (5min).
-		if cfg.SpaDir != "" {
-			v1.GET("/spa/*filepath",
-				middleware.RateLimitByIP(redis, 60, 1*time.Minute),
-				spaHandler.ServeAsset,
-			)
-		}
 
 		// Tier 1 user image proxy GETs (public — required so <img> tags can
 		// render without an Authorization header). The opaque user UUID is the

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -199,6 +200,14 @@ func (c *Config) validate() error {
 			"MINIO_BUCKET must be set in production."},
 		{len(c.TrustedProxyCIDRs) == 0,
 			"TRUSTED_PROXY_CIDRS must be set in production. Without it, c.ClientIP() returns the reverse-proxy address instead of the real client IP, breaking rate limiting and session audit logs."},
+		// #725 review: MEDIA_PLANE_URL guard parity with other dev-default /
+		// unset checks. Rejects empty, dev-default, and root-zone variants.
+		{c.MediaPlaneURL == "",
+			"MEDIA_PLANE_URL must be set in production. Leaving it unset breaks WebRTC signaling."},
+		{c.MediaPlaneURL == "http://localhost:3000",
+			"MEDIA_PLANE_URL must be set to a production value. The dev default http://localhost:3000 is not allowed."},
+		{mediaPlaneURLIsRoot(c.MediaPlaneURL),
+			"MEDIA_PLANE_URL must point to the media subdomain (e.g. https://media.concordvoice.chat), not the root concordvoice.chat. The root zone is DNS-only and 301-redirects through nginx to the .com marketing site, breaking WebRTC signaling. This guard catches variants including trailing slash, explicit port, path suffix, uppercase, and wss:// per #725 review."},
 	}
 
 	for _, g := range guards {
@@ -208,6 +217,33 @@ func (c *Config) validate() error {
 	}
 
 	return nil
+}
+
+// mediaPlaneURLIsRoot returns true when the given MediaPlaneURL resolves
+// to the zone-root host concordvoice.chat (with or without www.). Uses
+// net/url parsing + case-folded host comparison so the following are all
+// caught: trailing slash, explicit :443, path suffix (/api, etc.),
+// uppercase variants, wss:// scheme. The root is DNS-only and 301-
+// redirects through nginx to the .com marketing site, breaking WebRTC
+// signaling — none of these variants are valid production values.
+//
+// Does NOT flag media.concordvoice.chat or any other subdomain. Does NOT
+// flag empty-string — that's the responsibility of a separate "unset"
+// guard in validate(). Does NOT flag parse-failure — malformed URLs are
+// a different class of bug and will fail downstream; here we only want
+// to catch the specific root-host misconfiguration.
+//
+// Per #725 review (Copilot + Seer + 3 subagents).
+func mediaPlaneURLIsRoot(raw string) bool {
+	if raw == "" {
+		return false
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host == "concordvoice.chat" || host == "www.concordvoice.chat"
 }
 
 // parseOrigins splits a comma-separated list of origins into a slice.
