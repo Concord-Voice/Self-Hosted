@@ -9,6 +9,8 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"sync"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -32,12 +34,49 @@ func init() {
 	gin.SetMode(gin.TestMode)
 }
 
+// SyncBuffer is a goroutine-safe wrapper around bytes.Buffer. The structured
+// logger (*slog.Logger) can be used concurrently from handler goroutines, so
+// the writer it points at must serialize writes. Reads are also guarded so
+// CaptureLogs callers don't race against an in-flight request log.
+type SyncBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+// Write appends p to the buffer. Safe to call concurrently.
+func (s *SyncBuffer) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.Write(p)
+}
+
+// String returns the captured log output. Safe to call concurrently with Write.
+func (s *SyncBuffer) String() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.buf.String()
+}
+
+// Reset discards any captured log output. Useful for scoping a test to only
+// the log lines emitted after a particular setup step.
+func (s *SyncBuffer) Reset() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.buf.Reset()
+}
+
 // TestServer wraps a fully-wired Gin router with a real DB and Redis for integration testing.
 type TestServer struct {
 	Router *gin.Engine
 	Hub    *websocket.Hub
 	DB     *sql.DB
 	Redis  *redis.Client
+
+	// logBuf captures all structured-log output emitted by handlers during the
+	// test. It is written alongside os.Stdout via an io.MultiWriter so human
+	// readers of `go test -v` still see log lines. Tests that need to assert
+	// on log contents should use CaptureLogs.
+	logBuf *SyncBuffer
 }
 
 // SetupTestServer creates a test server backed by a real database and Redis.
@@ -61,7 +100,11 @@ func SetupTestServer(t *testing.T) *TestServer {
 		WebAuthnRPOrigins: []string{"http://localhost:3001"},
 	}
 
-	log := logger.New("test")
+	// Route logs through a MultiWriter: humans running `go test -v` still see
+	// output on stdout, while tests that need to audit log contents can reach
+	// the in-memory buffer via CaptureLogs.
+	logBuf := &SyncBuffer{}
+	log := logger.NewWithWriter(io.MultiWriter(os.Stdout, logBuf))
 
 	router, hub, natsClient := api.NewRouter(db, redisClient, nil, cfg, nil, log)
 	if natsClient != nil {
@@ -82,7 +125,30 @@ func SetupTestServer(t *testing.T) *TestServer {
 		Hub:    hub,
 		DB:     db,
 		Redis:  redisClient,
+		logBuf: logBuf,
 	}
+}
+
+// CaptureLogs clears the in-memory log buffer and returns a handle tests can
+// read from via .String() after driving the code under test. Log output is
+// ALSO written to os.Stdout so `go test -v` remains useful for humans.
+//
+// Typical use:
+//
+//	logs := ts.CaptureLogs(t)
+//	ts.DoRequest(...)
+//	require.NotContains(t, logs.String(), "wrapped_key")
+//
+// Intended for tests that assert sensitive material (wrapped keys, tokens,
+// crypto outputs) does NOT reach logs — see [internal]rules/e2ee.md.
+func (ts *TestServer) CaptureLogs(t *testing.T) *SyncBuffer {
+	t.Helper()
+	if ts.logBuf == nil {
+		t.Fatal("testhelpers: CaptureLogs called on a TestServer that was not built by SetupTestServer")
+	}
+	// Reset so only log output from this point forward is captured.
+	ts.logBuf.Reset()
+	return ts.logBuf
 }
 
 // AuthHeaders returns an Authorization header map for the given user.
@@ -369,6 +435,22 @@ func (ts *TestServer) SeedDMKey(t *testing.T, conversationID, userID string, key
 	)
 	if err != nil {
 		t.Fatalf("testhelpers: failed to seed DM key: %v", err)
+	}
+}
+
+// SeedDMKeyRevocation inserts a dm_key_revocations row for testing the
+// REVOKED_EPOCH code path in GetUnifiedKeys. The caller supplies the revoked
+// epoch and successor epoch; reason defaults to "test".
+func (ts *TestServer) SeedDMKeyRevocation(t *testing.T, conversationID string, revokedEpoch, successorEpoch int) {
+	t.Helper()
+
+	_, err := ts.DB.Exec(
+		`INSERT INTO dm_key_revocations (conversation_id, revoked_epoch, successor_epoch, reason)
+		 VALUES ($1, $2, $3, 'test')`,
+		conversationID, revokedEpoch, successorEpoch,
+	)
+	if err != nil {
+		t.Fatalf("testhelpers: failed to seed DM key revocation: %v", err)
 	}
 }
 

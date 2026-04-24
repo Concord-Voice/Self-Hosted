@@ -1,10 +1,16 @@
 package channels_test
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
+	"regexp"
+	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
+	"github.com/markdrogersjr/Concord/services/control-plane/pkg/e2eekeys"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -760,7 +766,7 @@ func TestGetUnifiedKeysAllPaths(t *testing.T) {
 
 		var body map[string]interface{}
 		testhelpers.ParseJSON(t, w, &body)
-		assert.Equal(t, "channel", body["context_type"])
+		assert.Equal(t, "channel", body["kind"])
 		assert.NotNil(t, body["key"])
 	})
 
@@ -791,7 +797,7 @@ func TestGetUnifiedKeysAllPaths(t *testing.T) {
 
 		var body map[string]interface{}
 		testhelpers.ParseJSON(t, w, &body)
-		assert.Equal(t, "channel", body["context_type"])
+		assert.Equal(t, "channel", body["kind"])
 		key := body["key"].(map[string]interface{})
 		assert.Equal(t, float64(1), key["key_version"])
 	})
@@ -810,6 +816,99 @@ func TestGetUnifiedKeysAllPaths(t *testing.T) {
 		w := ts.DoRequest("GET", pathE2EEKeysZero, nil, nil)
 		assert.Equal(t, http.StatusUnauthorized, w.Code)
 	})
+
+	t.Run("EnvelopeShape_Channel_NotEncrypted", func(t *testing.T) {
+		var srvID string
+		err := ts.DB.QueryRow(`SELECT server_id FROM channels WHERE id = $1`, channelID).Scan(&srvID)
+		require.NoError(t, err)
+		plainCh := ts.CreateTestChannel(t, srvID, "plain-env", false)
+
+		w := ts.DoRequest("GET", pathE2EEKeys+plainCh, nil, testhelpers.AuthHeaders(user.AccessToken))
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+
+		rawBytes := w.Body.Bytes()
+		var body e2eekeys.ErrorResponse
+		require.NoError(t, json.Unmarshal(rawBytes, &body))
+		assert.Equal(t, e2eekeys.CodeNotEncrypted, body.Code)
+		assert.Equal(t, e2eekeys.KindChannel, body.Kind)
+		assert.False(t, body.Pending)
+		// Wire-format: omitempty drops the pending key from JSON on terminal codes.
+		var raw map[string]interface{}
+		require.NoError(t, json.Unmarshal(rawBytes, &raw))
+		_, hasPending := raw["pending"]
+		assert.False(t, hasPending, "pending key must be absent from JSON on NOT_ENCRYPTED")
+	})
+
+	t.Run("EnvelopeShape_InvalidContextID", func(t *testing.T) {
+		w := ts.DoRequest("GET", pathE2EEKeys+notAUUID, nil, testhelpers.AuthHeaders(user.AccessToken))
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+
+		rawBytes := w.Body.Bytes()
+		var body e2eekeys.ErrorResponse
+		require.NoError(t, json.Unmarshal(rawBytes, &body))
+		assert.Equal(t, e2eekeys.CodeInvalidRequest, body.Code)
+		assert.Equal(t, e2eekeys.KindUnknown, body.Kind)
+		// Wire-format: omitempty drops the pending key from JSON on INVALID_REQUEST.
+		var raw map[string]interface{}
+		require.NoError(t, json.Unmarshal(rawBytes, &raw))
+		_, hasPending := raw["pending"]
+		assert.False(t, hasPending, "pending key must be absent from JSON on INVALID_REQUEST (bad context id)")
+	})
+
+	t.Run("EnvelopeShape_InvalidVersion", func(t *testing.T) {
+		w := ts.DoRequest("GET", pathE2EEKeys+channelID+"?version=abc", nil, testhelpers.AuthHeaders(user.AccessToken))
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+
+		rawBytes := w.Body.Bytes()
+		var body e2eekeys.ErrorResponse
+		require.NoError(t, json.Unmarshal(rawBytes, &body))
+		assert.Equal(t, e2eekeys.CodeInvalidRequest, body.Code)
+		assert.Equal(t, e2eekeys.KindChannel, body.Kind)
+		// Wire-format: omitempty drops the pending key from JSON on INVALID_REQUEST.
+		var raw map[string]interface{}
+		require.NoError(t, json.Unmarshal(rawBytes, &raw))
+		_, hasPending := raw["pending"]
+		assert.False(t, hasPending, "pending key must be absent from JSON on INVALID_REQUEST (bad version)")
+	})
+
+	t.Run("EnvelopeShape_Channel_NoKeyYet", func(t *testing.T) {
+		w := ts.DoRequest("GET", pathE2EEKeys+channelID+"?version=999", nil, testhelpers.AuthHeaders(user.AccessToken))
+		assert.Equal(t, http.StatusNotFound, w.Code)
+
+		var body e2eekeys.ErrorResponse
+		testhelpers.ParseJSON(t, w, &body)
+		assert.Equal(t, e2eekeys.CodeNoKeyYet, body.Code)
+		assert.Equal(t, e2eekeys.KindChannel, body.Kind)
+		assert.True(t, body.Pending)
+	})
+
+	t.Run("EnvelopeShape_NotMember", func(t *testing.T) {
+		w := ts.DoRequest("GET", pathE2EEKeysZero, nil, testhelpers.AuthHeaders(user.AccessToken))
+		assert.Equal(t, http.StatusNotFound, w.Code)
+
+		rawBytes := w.Body.Bytes()
+		var body e2eekeys.ErrorResponse
+		require.NoError(t, json.Unmarshal(rawBytes, &body))
+		assert.Equal(t, e2eekeys.CodeNotMember, body.Code)
+		assert.Equal(t, e2eekeys.KindUnknown, body.Kind)
+		assert.False(t, body.Pending)
+		// Wire-format: omitempty drops the pending key from JSON on NOT_MEMBER.
+		var raw map[string]interface{}
+		require.NoError(t, json.Unmarshal(rawBytes, &raw))
+		_, hasPending := raw["pending"]
+		assert.False(t, hasPending, "pending key must be absent from JSON on NOT_MEMBER (channel-side)")
+	})
+
+	t.Run("EnvelopeShape_Channel_HappyPath", func(t *testing.T) {
+		w := ts.DoRequest("GET", pathE2EEKeys+channelID, nil, testhelpers.AuthHeaders(user.AccessToken))
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		var body e2eekeys.KeyResponse
+		testhelpers.ParseJSON(t, w, &body)
+		assert.Equal(t, e2eekeys.KindChannel, body.Kind)
+		assert.NotEmpty(t, body.Key.WrappedKey)
+		assert.GreaterOrEqual(t, body.Key.KeyVersion, 1)
+	})
 }
 
 func TestGetUnifiedKeysDM(t *testing.T) {
@@ -827,7 +926,7 @@ func TestGetUnifiedKeysDM(t *testing.T) {
 
 		var body map[string]interface{}
 		testhelpers.ParseJSON(t, w, &body)
-		assert.Equal(t, "dm", body["context_type"])
+		assert.Equal(t, "dm", body["kind"])
 		assert.NotNil(t, body["key"])
 	})
 
@@ -848,6 +947,451 @@ func TestGetUnifiedKeysDM(t *testing.T) {
 		testhelpers.ParseJSON(t, w, &body)
 		assert.Equal(t, true, body["pending"])
 	})
+
+	t.Run("EnvelopeShape_DM_NoKeyYet", func(t *testing.T) {
+		convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+		// No SeedDMKey — no key row exists
+
+		w := ts.DoRequest("GET", pathE2EEKeys+convID, nil, testhelpers.AuthHeaders(user1.AccessToken))
+		assert.Equal(t, http.StatusNotFound, w.Code)
+
+		var body e2eekeys.ErrorResponse
+		testhelpers.ParseJSON(t, w, &body)
+		assert.Equal(t, e2eekeys.CodeNoKeyYet, body.Code)
+		assert.Equal(t, e2eekeys.KindDM, body.Kind)
+		assert.True(t, body.Pending)
+	})
+
+	t.Run("EnvelopeShape_DM_NotMember", func(t *testing.T) {
+		user3 := ts.CreateTestUser(t, "ukdm_outsider")
+		convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+		ts.SeedDMKey(t, convID, user1.ID, 1)
+
+		w := ts.DoRequest("GET", pathE2EEKeys+convID, nil, testhelpers.AuthHeaders(user3.AccessToken))
+		assert.Equal(t, http.StatusNotFound, w.Code)
+
+		rawBytes := w.Body.Bytes()
+		var body e2eekeys.ErrorResponse
+		require.NoError(t, json.Unmarshal(rawBytes, &body))
+		assert.Equal(t, e2eekeys.CodeNotMember, body.Code)
+		assert.Equal(t, e2eekeys.KindUnknown, body.Kind)
+		assert.False(t, body.Pending)
+		// Wire-format: omitempty drops the pending key from JSON on NOT_MEMBER.
+		var raw map[string]interface{}
+		require.NoError(t, json.Unmarshal(rawBytes, &raw))
+		_, hasPending := raw["pending"]
+		assert.False(t, hasPending, "pending key must be absent from JSON on NOT_MEMBER (DM-side)")
+	})
+
+	t.Run("EnvelopeShape_DM_NotEncrypted", func(t *testing.T) {
+		convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+
+		w := ts.DoRequest("GET", pathE2EEKeys+convID, nil, testhelpers.AuthHeaders(user1.AccessToken))
+		assert.Equal(t, http.StatusBadRequest, w.Code)
+
+		rawBytes := w.Body.Bytes()
+		var body e2eekeys.ErrorResponse
+		require.NoError(t, json.Unmarshal(rawBytes, &body))
+		assert.Equal(t, e2eekeys.CodeNotEncrypted, body.Code)
+		assert.Equal(t, e2eekeys.KindDM, body.Kind)
+		// Wire-format: omitempty drops the pending key from JSON on NOT_ENCRYPTED.
+		var raw map[string]interface{}
+		require.NoError(t, json.Unmarshal(rawBytes, &raw))
+		_, hasPending := raw["pending"]
+		assert.False(t, hasPending, "pending key must be absent from JSON on NOT_ENCRYPTED (DM-side)")
+	})
+
+	t.Run("EnvelopeShape_DM_RevokedEpoch", func(t *testing.T) {
+		convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+		ts.SeedDMKey(t, convID, user1.ID, 3)    // caller's current epoch = 3
+		ts.SeedDMKeyRevocation(t, convID, 3, 4) // epoch 3 is revoked, successor is 4
+
+		w := ts.DoRequest("GET", pathE2EEKeys+convID, nil, testhelpers.AuthHeaders(user1.AccessToken))
+		assert.Equal(t, http.StatusNotFound, w.Code)
+
+		// Capture raw JSON first (testhelpers.ParseJSON consumes w.Body via
+		// json.NewDecoder, so subsequent reads would be empty).
+		// Wire-format assertion: omitempty must drop the "pending" key from JSON,
+		// not emit "pending":false. Client parsers rely on key absence as a signal.
+		rawBytes := w.Body.Bytes()
+		var raw map[string]interface{}
+		require.NoError(t, json.Unmarshal(rawBytes, &raw))
+		_, hasPending := raw["pending"]
+		assert.False(t, hasPending, "pending key must be absent from JSON on REVOKED_EPOCH, not false")
+
+		var body e2eekeys.ErrorResponse
+		require.NoError(t, json.Unmarshal(rawBytes, &body))
+		assert.Equal(t, e2eekeys.CodeRevokedEpoch, body.Code)
+		assert.Equal(t, e2eekeys.KindDM, body.Kind)
+		assert.False(t, body.Pending, "revoked epoch must not carry pending:true")
+	})
+
+	t.Run("EnvelopeShape_DM_HappyPath", func(t *testing.T) {
+		convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+		ts.SeedDMKey(t, convID, user1.ID, 1)
+
+		w := ts.DoRequest("GET", pathE2EEKeys+convID, nil, testhelpers.AuthHeaders(user1.AccessToken))
+		assert.Equal(t, http.StatusOK, w.Code)
+
+		var body e2eekeys.KeyResponse
+		testhelpers.ParseJSON(t, w, &body)
+		assert.Equal(t, e2eekeys.KindDM, body.Kind)
+		assert.NotEmpty(t, body.Key.WrappedKey)
+	})
+}
+
+// renameTableStmts maps each table name this test is allowed to rename to its
+// pre-built ALTER TABLE statements. Using a fixed allowlist avoids dynamic
+// string concatenation in SQL — `withRenamedTable` picks statements by map
+// lookup, so no caller-supplied string reaches the query builder.
+var renameTableStmts = map[string]struct {
+	rename string
+	revert string
+}{
+	"channels": {
+		rename: `ALTER TABLE channels RENAME TO channels_hidden_for_test`,
+		revert: `ALTER TABLE channels_hidden_for_test RENAME TO channels`,
+	},
+	"channel_keys": {
+		rename: `ALTER TABLE channel_keys RENAME TO channel_keys_hidden_for_test`,
+		revert: `ALTER TABLE channel_keys_hidden_for_test RENAME TO channel_keys`,
+	},
+	"dm_conversations": {
+		rename: `ALTER TABLE dm_conversations RENAME TO dm_conversations_hidden_for_test`,
+		revert: `ALTER TABLE dm_conversations_hidden_for_test RENAME TO dm_conversations`,
+	},
+	"dm_channel_keys": {
+		rename: `ALTER TABLE dm_channel_keys RENAME TO dm_channel_keys_hidden_for_test`,
+		revert: `ALTER TABLE dm_channel_keys_hidden_for_test RENAME TO dm_channel_keys`,
+	},
+	"dm_key_revocations": {
+		rename: `ALTER TABLE dm_key_revocations RENAME TO dm_key_revocations_hidden_for_test`,
+		revert: `ALTER TABLE dm_key_revocations_hidden_for_test RENAME TO dm_key_revocations`,
+	},
+}
+
+// withRenamedTable temporarily renames a PostgreSQL table so the handler's
+// query against it fails with a relation-not-found error, exercising a
+// non-ErrNoRows failure path. The rename is reverted via defer so the test
+// teardown (which may call TruncateAllTables) still finds the table.
+//
+// The `table` argument selects a pair of pre-built statements from
+// renameTableStmts — no string concatenation hits the query builder, so a
+// future caller cannot introduce SQL injection by passing user-controlled data.
+//
+// Pattern reference: internal/privacy/handler_integration_test.go
+// #TestEraseAccount_DbFails_500 and the existing
+// TestGetUnifiedKeys_DM_DBError_* tests in this file.
+func withRenamedTable(t *testing.T, ts *testhelpers.TestServer, table string, fn func()) {
+	t.Helper()
+	stmts, ok := renameTableStmts[table]
+	require.True(t, ok, "withRenamedTable: %q not in renameTableStmts allowlist", table)
+	_, err := ts.DB.Exec(stmts.rename)
+	require.NoError(t, err, "rename %s", table)
+	defer func() {
+		if _, revertErr := ts.DB.Exec(stmts.revert); revertErr != nil {
+			t.Logf("testhelpers: failed to revert %s rename: %v", table, revertErr)
+		}
+	}()
+	fn()
+}
+
+// TestGetUnifiedKeys_NoWrapKeyInLogs drives every logged branch of
+// GetUnifiedKeys and asserts no wrapped-key bytes, long base64 blobs, or the
+// literal field name "wrapped_key" appear in captured structured logs.
+// Regression guard per [internal]rules/e2ee.md: key material is never logged at
+// any level. Spec reference: [internal]specs for #751, section 10.
+//
+// Covered branches (8 total):
+//  1. Happy path (200)
+//  2. no_channel_key_row (version=999)
+//  3. context_not_found_or_forbidden (zero UUID)
+//  4. channel_check_db_error (rename channels)
+//  5. channel_key_fetch_db_error (rename channel_keys)
+//  6. dm_check_db_error (rename dm_conversations)
+//  7. dm_key_fetch_db_error (rename dm_channel_keys, DM pre-seeded)
+//  8. dm_revocation_check_db_error (rename dm_key_revocations, DM+key seeded)
+func TestGetUnifiedKeys_NoWrapKeyInLogs(t *testing.T) {
+	ts, user, _, channelID := setupEncryptedChannel(t)
+
+	// Seed a DISTINCT, known wrapped-key sentinel into the DB so Check 3 can
+	// assert the exact bytes never surface in log output. We use a long
+	// recognizable string that would stand out in any log line — if a future
+	// refactor accidentally logs `key.WrappedKey`, the substring check below
+	// will fail immediately and identify this test as the reason.
+	sentinelWrappedKey := []byte("SENTINEL-WRAPPED-KEY-THIS-MUST-NEVER-APPEAR-IN-LOGS-XYZZY-001")
+	sentinelB64 := base64.StdEncoding.EncodeToString(sentinelWrappedKey)
+	// channel_keys.wrapped_key is a TEXT column (base64-encoded wrap bytes).
+	// Seed with the base64 string, not the raw []byte — passing []byte to a
+	// TEXT column causes the driver to hex-encode it, which would leave
+	// neither the raw string nor the base64 form in the row and silently
+	// defeat the log-leak regex assertions below.
+	_, err := ts.DB.Exec(
+		`UPDATE channel_keys SET wrapped_key = $1 WHERE channel_id = $2 AND user_id = $3`,
+		sentinelB64, channelID, user.ID,
+	)
+	require.NoError(t, err, "seed sentinel wrapped key")
+
+	// Seed DM fixtures used by the dm_key_fetch_db_error and
+	// dm_revocation_check_db_error branches. The DM key is seeded with a
+	// distinct sentinel so branch 7 / 8 can't accidentally leak it either.
+	partner := ts.CreateTestUser(t, "logwrapdm")
+	ts.CreateFriendship(t, user.ID, partner.ID, "accepted")
+	dmConvID := ts.CreateDMConversation(t, user.ID, partner.ID, true)
+	dmSentinelWrappedKey := []byte("SENTINEL-DM-WRAPPED-KEY-MUST-NEVER-APPEAR-IN-LOGS-XYZZY-002")
+	dmSentinelB64 := base64.StdEncoding.EncodeToString(dmSentinelWrappedKey)
+	ts.SeedDMKey(t, dmConvID, user.ID, 1)
+	_, err = ts.DB.Exec(
+		`UPDATE dm_channel_keys SET wrapped_key = $1 WHERE conversation_id = $2 AND user_id = $3`,
+		dmSentinelB64, dmConvID, user.ID,
+	)
+	require.NoError(t, err, "seed DM sentinel wrapped key")
+
+	logs := ts.CaptureLogs(t)
+
+	// 1. Happy path — 200; handler does NOT currently emit a 2xx log line, but
+	//    we include it so any future success-log addition is covered.
+	w := ts.DoRequest("GET", pathE2EEKeys+channelID, nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, "happy path returned %d: %s", w.Code, w.Body.String())
+
+	// 2. no_channel_key_row — 404 with version=999 (channel exists, version doesn't)
+	w = ts.DoRequest("GET", pathE2EEKeys+channelID+"?version=999", nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusNotFound, w.Code, "version=999 returned %d", w.Code)
+
+	// 3. context_not_found_or_forbidden — 404 on zero UUID (not in channels nor DMs)
+	w = ts.DoRequest("GET", pathE2EEKeysZero, nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusNotFound, w.Code, "zero UUID returned %d", w.Code)
+
+	// 4. channel_check_db_error — rename channels so the initial channel INNER
+	//    JOIN fails with a relation-not-found error (non-ErrNoRows).
+	withRenamedTable(t, ts, "channels", func() {
+		w := ts.DoRequest("GET", pathE2EEKeys+channelID, nil, testhelpers.AuthHeaders(user.AccessToken))
+		require.Equal(t, http.StatusInternalServerError, w.Code,
+			"channel_check_db_error returned %d: %s", w.Code, w.Body.String())
+	})
+
+	// 5. channel_key_fetch_db_error — channels table intact (so channel check
+	//    succeeds) but channel_keys renamed so the follow-up fetch errors.
+	withRenamedTable(t, ts, "channel_keys", func() {
+		w := ts.DoRequest("GET", pathE2EEKeys+channelID, nil, testhelpers.AuthHeaders(user.AccessToken))
+		require.Equal(t, http.StatusInternalServerError, w.Code,
+			"channel_key_fetch_db_error returned %d: %s", w.Code, w.Body.String())
+	})
+
+	// 6. dm_check_db_error — use a fresh UUID (not in channels) so the handler
+	//    falls through to getDMKeyResponse, then rename dm_conversations so the
+	//    DM membership query errors with a non-ErrNoRows failure.
+	freshCtxID := uuid.NewString()
+	withRenamedTable(t, ts, "dm_conversations", func() {
+		w := ts.DoRequest("GET", pathE2EEKeys+freshCtxID, nil, testhelpers.AuthHeaders(user.AccessToken))
+		require.Equal(t, http.StatusInternalServerError, w.Code,
+			"dm_check_db_error returned %d: %s", w.Code, w.Body.String())
+	})
+
+	// 7. dm_key_fetch_db_error — DM exists + encrypted; rename dm_channel_keys
+	//    so the key-fetch SELECT errors after the membership join succeeds.
+	withRenamedTable(t, ts, "dm_channel_keys", func() {
+		w := ts.DoRequest("GET", pathE2EEKeys+dmConvID, nil, testhelpers.AuthHeaders(user.AccessToken))
+		require.Equal(t, http.StatusInternalServerError, w.Code,
+			"dm_key_fetch_db_error returned %d: %s", w.Code, w.Body.String())
+	})
+
+	// 8. dm_revocation_check_db_error — DM + key both present; only the
+	//    dm_key_revocations EXISTS subquery fails.
+	withRenamedTable(t, ts, "dm_key_revocations", func() {
+		w := ts.DoRequest("GET", pathE2EEKeys+dmConvID, nil, testhelpers.AuthHeaders(user.AccessToken))
+		require.Equal(t, http.StatusInternalServerError, w.Code,
+			"dm_revocation_check_db_error returned %d: %s", w.Code, w.Body.String())
+	})
+
+	captured := logs.String()
+
+	// Check 1a: the literal field name "wrapped_key" must not appear in logs.
+	// Guards against someone accidentally adding `"wrapped_key", key.WrappedKey`
+	// to a log call — the string match catches it regardless of whether the
+	// value marshals readably (e.g., `[]byte` or `string`).
+	assert.NotContains(t, captured, "wrapped_key",
+		"captured logs must not contain the wrapped_key field name per [internal]rules/e2ee.md")
+
+	// Check 1b: also guard against the Go field-name form, which could appear
+	// if someone logs the struct directly via `%+v` or similar.
+	assert.NotContains(t, captured, "WrappedKey",
+		"captured logs must not contain the WrappedKey Go field name either")
+
+	// Check 3: the exact sentinel wrapped-key values — both raw string form and
+	// base64 form — must not appear anywhere in logs. (Both channel and DM
+	// sentinels are checked so a leak from either side is caught.)
+	assert.NotContains(t, captured, string(sentinelWrappedKey),
+		"channel sentinel wrapped-key (raw bytes) must not leak to logs")
+	assert.NotContains(t, captured, sentinelB64,
+		"channel sentinel wrapped-key (base64 form) must not leak to logs")
+	assert.NotContains(t, captured, string(dmSentinelWrappedKey),
+		"DM sentinel wrapped-key (raw bytes) must not leak to logs")
+	assert.NotContains(t, captured, dmSentinelB64,
+		"DM sentinel wrapped-key (base64 form) must not leak to logs")
+
+	// Check 2: no long base64-like token appears in log output. A 512-byte
+	// RSA-OAEP output base64s to ~684 chars; even a 32-byte AES raw key base64s
+	// to ~44 chars. A contiguous run of >= 40 base64 chars in logs is highly
+	// suspicious of a wrap-byte leak.
+	re := regexp.MustCompile(`[A-Za-z0-9+/]{40,}={0,2}`)
+	matches := re.FindAllString(captured, -1)
+
+	// Build an explicit per-token allowlist of known-benign long base64-like
+	// substrings. Only matches that are a substring of one of these allowlist
+	// entries pass; anything else is flagged as a potential wrap-byte leak.
+	// This is stricter than the prior inclusion check (which only guarded the
+	// current user's JWT and would silently allow unrelated long base64 runs
+	// that happened to share a prefix with the token).
+	//
+	// Entries:
+	//   - both test users' full JWTs (header.payload.signature, emitted by
+	//     middleware in request-logging breadcrumbs)
+	//   - the JWT components split on '.' so runs of >=40 chars inside a
+	//     single component still pass
+	tokens := []string{user.AccessToken, partner.AccessToken}
+	allowlist := make([]string, 0, len(tokens)*4)
+	allowlist = append(allowlist, tokens...)
+	for _, tok := range tokens {
+		allowlist = append(allowlist, strings.Split(tok, ".")...)
+	}
+
+	var suspicious []string
+	for _, m := range matches {
+		allowed := false
+		for _, entry := range allowlist {
+			if strings.Contains(entry, m) {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			suspicious = append(suspicious, m)
+		}
+	}
+	assert.Empty(t, suspicious,
+		"no long base64-like tokens should appear in logs (potential wrap-byte leak): %v",
+		suspicious)
+}
+
+// ===========================================================================
+// getDMKeyResponse — DB-error branches
+//
+// The three 500-path branches below cannot be exercised by ordinary integration
+// fixtures (no valid request can cause a non-ErrNoRows failure on a healthy
+// Postgres) but they are load-bearing for log correlation: each branch emits a
+// distinct `kind` value that ops uses to distinguish fault categories at the
+// log sink. We simulate transient DB failure by temporarily renaming the
+// relation each branch queries, following the precedent established in
+// internal/privacy/handler_integration_test.go#TestEraseAccount_DbFails_500.
+//
+// Rename preserves attached indexes and constraints, so the deferred reverse
+// rename fully restores schema state without re-running migrations. defer (not
+// t.Cleanup) is used so the reverse rename runs BEFORE SetupTestServer's
+// cleanup, which calls TruncateAllTables and would otherwise fail on a renamed
+// table. Tests run sequentially (-p 1), so the only panic window is a
+// connection-level failure, in which case the whole suite is already
+// compromised.
+// ===========================================================================
+
+// TestGetUnifiedKeys_DM_DBError_Check covers the dm_check_db_error branch
+// when the initial dm_conversations membership query fails with a non-
+// ErrNoRows error (simulated by renaming dm_conversations out from under
+// the handler). The channel check correctly returns ErrNoRows for a fresh
+// UUID, so the handler falls through to getDMKeyResponse and then hits
+// the forced failure on the DM membership SELECT.
+func TestGetUnifiedKeys_DM_DBError_Check(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "dmdberr1")
+
+	// Fresh UUID: not in channels table (so channel check returns ErrNoRows,
+	// and the handler falls through to getDMKeyResponse per handlers.go line
+	// 1261–1275). Also not in dm_conversations — but we're about to rename
+	// that table, so the DM membership query will fail with a relation-not-
+	// found error, not ErrNoRows.
+	ctxID := uuid.NewString()
+
+	_, err := ts.DB.Exec(`ALTER TABLE dm_conversations RENAME TO dm_conversations_hidden_for_test`)
+	require.NoError(t, err)
+	defer func() {
+		if _, revertErr := ts.DB.Exec(`ALTER TABLE dm_conversations_hidden_for_test RENAME TO dm_conversations`); revertErr != nil {
+			t.Logf("testhelpers: failed to revert dm_conversations rename: %v", revertErr)
+		}
+	}()
+
+	w := ts.DoRequest("GET", pathE2EEKeys+ctxID, nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusInternalServerError, w.Code, "body: %s", w.Body.String())
+
+	var body e2eekeys.ErrorResponse
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, e2eekeys.KindUnknown, body.Kind,
+		"dm_check_db_error must envelope Kind=unknown, not leak DB state")
+	// CodeInternalError on generic DB failure; client treats as retryable.
+	assert.Equal(t, e2eekeys.CodeInternalError, body.Code)
+	assert.False(t, body.Pending, "DB errors never set pending:true")
+}
+
+// TestGetUnifiedKeys_DM_DBError_KeyFetch covers the dm_key_fetch_db_error
+// branch: the DM membership query succeeds (encrypted DM exists) but the
+// subsequent dm_channel_keys SELECT fails. Simulated by creating the
+// encrypted DM first, then renaming dm_channel_keys so the key-fetch
+// query errors while the membership join continues to work.
+func TestGetUnifiedKeys_DM_DBError_KeyFetch(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "dmdberr2a")
+	user2 := ts.CreateTestUser(t, "dmdberr2b")
+	ts.CreateFriendship(t, user1.ID, user2.ID, "accepted")
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+
+	_, err := ts.DB.Exec(`ALTER TABLE dm_channel_keys RENAME TO dm_channel_keys_hidden_for_test`)
+	require.NoError(t, err)
+	defer func() {
+		if _, revertErr := ts.DB.Exec(`ALTER TABLE dm_channel_keys_hidden_for_test RENAME TO dm_channel_keys`); revertErr != nil {
+			t.Logf("testhelpers: failed to revert dm_channel_keys rename: %v", revertErr)
+		}
+	}()
+
+	w := ts.DoRequest("GET", pathE2EEKeys+convID, nil, testhelpers.AuthHeaders(user1.AccessToken))
+	require.Equal(t, http.StatusInternalServerError, w.Code, "body: %s", w.Body.String())
+
+	var body e2eekeys.ErrorResponse
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, e2eekeys.KindUnknown, body.Kind,
+		"dm_key_fetch_db_error must envelope Kind=unknown")
+	assert.Equal(t, e2eekeys.CodeInternalError, body.Code)
+	assert.False(t, body.Pending)
+}
+
+// TestGetUnifiedKeys_DM_DBError_RevocationCheck covers the
+// dm_revocation_check_db_error branch added in Task 5. The DM membership
+// and DM key-fetch queries both succeed; only the dm_key_revocations
+// EXISTS subquery fails. Simulated by seeding the DM + key first, then
+// renaming dm_key_revocations so only the revocation check errors.
+func TestGetUnifiedKeys_DM_DBError_RevocationCheck(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "dmdberr3a")
+	user2 := ts.CreateTestUser(t, "dmdberr3b")
+	ts.CreateFriendship(t, user1.ID, user2.ID, "accepted")
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	ts.SeedDMKey(t, convID, user1.ID, 1)
+
+	_, err := ts.DB.Exec(`ALTER TABLE dm_key_revocations RENAME TO dm_key_revocations_hidden_for_test`)
+	require.NoError(t, err)
+	defer func() {
+		if _, revertErr := ts.DB.Exec(`ALTER TABLE dm_key_revocations_hidden_for_test RENAME TO dm_key_revocations`); revertErr != nil {
+			t.Logf("testhelpers: failed to revert dm_key_revocations rename: %v", revertErr)
+		}
+	}()
+
+	w := ts.DoRequest("GET", pathE2EEKeys+convID, nil, testhelpers.AuthHeaders(user1.AccessToken))
+	require.Equal(t, http.StatusInternalServerError, w.Code, "body: %s", w.Body.String())
+
+	var body e2eekeys.ErrorResponse
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, e2eekeys.KindUnknown, body.Kind,
+		"dm_revocation_check_db_error must envelope Kind=unknown")
+	assert.Equal(t, e2eekeys.CodeInternalError, body.Code)
+	assert.False(t, body.Pending)
 }
 
 // ===========================================================================

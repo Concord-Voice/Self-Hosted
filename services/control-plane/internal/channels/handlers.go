@@ -13,6 +13,7 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
+	"github.com/markdrogersjr/Concord/services/control-plane/pkg/e2eekeys"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/redis/go-redis/v9"
 )
@@ -1238,7 +1239,11 @@ func (h *Handler) GetUnifiedKeys(c *gin.Context) {
 	contextID := c.Param("context_id")
 
 	if _, err := uuid.Parse(contextID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid context ID"})
+		c.JSON(http.StatusBadRequest, e2eekeys.ErrorResponse{
+			Error: "Invalid context ID",
+			Code:  e2eekeys.CodeInvalidRequest,
+			Kind:  e2eekeys.KindUnknown,
+		})
 		return
 	}
 
@@ -1254,8 +1259,16 @@ func (h *Handler) GetUnifiedKeys(c *gin.Context) {
 		return
 	}
 	if err != sql.ErrNoRows {
-		h.log.Error("Failed to check channel", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchKeys})
+		h.log.Error("e2ee key fetch: channel check failed",
+			"kind", "channel_check_db_error",
+			"context_id", contextID,
+			"user_id", userID,
+			"error", err)
+		c.JSON(http.StatusInternalServerError, e2eekeys.ErrorResponse{
+			Error: errMsgFailedFetchKeys,
+			Code:  e2eekeys.CodeInternalError,
+			Kind:  e2eekeys.KindUnknown,
+		})
 		return
 	}
 
@@ -1264,26 +1277,58 @@ func (h *Handler) GetUnifiedKeys(c *gin.Context) {
 
 func (h *Handler) getChannelKeyResponse(c *gin.Context, contextID, userID string, encrypted bool) {
 	if !encrypted {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgChannelNotEncrypted})
+		c.JSON(http.StatusBadRequest, e2eekeys.ErrorResponse{
+			Error: errMsgChannelNotEncrypted,
+			Code:  e2eekeys.CodeNotEncrypted,
+			Kind:  e2eekeys.KindChannel,
+		})
 		return
 	}
 
 	key, err := h.fetchChannelKey(contextID, userID, c.Query("version"))
 	if err == errInvalidVersion {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid version parameter"})
+		c.JSON(http.StatusBadRequest, e2eekeys.ErrorResponse{
+			Error: "Invalid version parameter",
+			Code:  e2eekeys.CodeInvalidRequest,
+			Kind:  e2eekeys.KindChannel,
+		})
 		return
 	}
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": errMsgNoEncryptionKey, "pending": true})
+		h.log.Info("e2ee key fetch: no channel key row",
+			"kind", "no_channel_key_row",
+			"context_id", contextID,
+			"user_id", userID,
+			"version", c.Query("version"))
+		c.JSON(http.StatusNotFound, e2eekeys.ErrorResponse{
+			Error:   errMsgNoEncryptionKey,
+			Code:    e2eekeys.CodeNoKeyYet,
+			Kind:    e2eekeys.KindChannel,
+			Pending: true,
+		})
 		return
 	}
 	if err != nil {
-		h.log.Error("Failed to fetch channel key", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchKeys})
+		h.log.Error("e2ee key fetch: channel key query failed",
+			"kind", "channel_key_fetch_db_error",
+			"context_id", contextID,
+			"user_id", userID,
+			"error", err)
+		c.JSON(http.StatusInternalServerError, e2eekeys.ErrorResponse{
+			Error: errMsgFailedFetchKeys,
+			Code:  e2eekeys.CodeInternalError,
+			Kind:  e2eekeys.KindUnknown,
+		})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"key": key, "context_type": "channel"})
+	c.JSON(http.StatusOK, e2eekeys.KeyResponse{
+		Key: e2eekeys.KeyPayload{
+			WrappedKey: key.WrappedKey,
+			KeyVersion: key.KeyVersion,
+		},
+		Kind: e2eekeys.KindChannel,
+	})
 }
 
 var errInvalidVersion = fmt.Errorf("invalid version parameter")
@@ -1331,16 +1376,36 @@ func (h *Handler) getDMKeyResponse(c *gin.Context, contextID, userID string) {
 	`, contextID, userID).Scan(&dmEncrypted)
 
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Context not found or access denied"})
+		h.log.Info("e2ee key fetch: context not found or user not authorized",
+			"kind", "context_not_found_or_forbidden",
+			"context_id", contextID,
+			"user_id", userID)
+		c.JSON(http.StatusNotFound, e2eekeys.ErrorResponse{
+			Error: "Context not found or access denied",
+			Code:  e2eekeys.CodeNotMember,
+			Kind:  e2eekeys.KindUnknown,
+		})
 		return
 	}
 	if err != nil {
-		h.log.Error("Failed to check DM conversation", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchKeys})
+		h.log.Error("e2ee key fetch: DM check failed",
+			"kind", "dm_check_db_error",
+			"context_id", contextID,
+			"user_id", userID,
+			"error", err)
+		c.JSON(http.StatusInternalServerError, e2eekeys.ErrorResponse{
+			Error: errMsgFailedFetchKeys,
+			Code:  e2eekeys.CodeInternalError,
+			Kind:  e2eekeys.KindUnknown,
+		})
 		return
 	}
 	if !dmEncrypted {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Conversation is not encrypted"})
+		c.JSON(http.StatusBadRequest, e2eekeys.ErrorResponse{
+			Error: "Conversation is not encrypted",
+			Code:  e2eekeys.CodeNotEncrypted,
+			Kind:  e2eekeys.KindDM,
+		})
 		return
 	}
 
@@ -1353,16 +1418,76 @@ func (h *Handler) getDMKeyResponse(c *gin.Context, contextID, userID string) {
 	`, contextID, userID).Scan(&key.ID, &key.ConversationID, &key.UserID, &key.WrappedKey, &key.KeyVersion, &key.CreatedAt)
 
 	if err == sql.ErrNoRows {
-		c.JSON(http.StatusNotFound, gin.H{"error": errMsgNoEncryptionKey, "pending": true})
+		h.log.Info("e2ee key fetch: no DM key row",
+			"kind", "no_dm_key_row",
+			"context_id", contextID,
+			"user_id", userID)
+		c.JSON(http.StatusNotFound, e2eekeys.ErrorResponse{
+			Error:   errMsgNoEncryptionKey,
+			Code:    e2eekeys.CodeNoKeyYet,
+			Kind:    e2eekeys.KindDM,
+			Pending: true,
+		})
 		return
 	}
 	if err != nil {
-		h.log.Error("Failed to fetch DM key", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetchKeys})
+		h.log.Error("e2ee key fetch: DM key query failed",
+			"kind", "dm_key_fetch_db_error",
+			"context_id", contextID,
+			"user_id", userID,
+			"error", err)
+		c.JSON(http.StatusInternalServerError, e2eekeys.ErrorResponse{
+			Error: errMsgFailedFetchKeys,
+			Code:  e2eekeys.CodeInternalError,
+			Kind:  e2eekeys.KindUnknown,
+		})
 		return
 	}
 
-	c.JSON(http.StatusOK, gin.H{"key": key, "context_type": "dm"})
+	// Epoch revocation check — if the caller's current key_version appears
+	// in dm_key_revocations as revoked_epoch, return REVOKED_EPOCH so the
+	// client triggers a rekey flow instead of trying to use stale wrap bytes.
+	// Per [internal]rules/e2ee.md: epoch numbers do NOT appear in the response.
+	var revokedExists bool
+	err = h.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM dm_key_revocations
+			WHERE conversation_id = $1 AND revoked_epoch = $2
+		)
+	`, contextID, key.KeyVersion).Scan(&revokedExists)
+	if err != nil {
+		h.log.Error("e2ee key fetch: dm revocation check failed",
+			"kind", "dm_revocation_check_db_error",
+			"context_id", contextID,
+			"user_id", userID,
+			"error", err)
+		c.JSON(http.StatusInternalServerError, e2eekeys.ErrorResponse{
+			Error: errMsgFailedFetchKeys,
+			Code:  e2eekeys.CodeInternalError,
+			Kind:  e2eekeys.KindUnknown,
+		})
+		return
+	}
+	if revokedExists {
+		h.log.Info("e2ee key fetch: dm epoch revoked",
+			"kind", "dm_epoch_revoked",
+			"context_id", contextID,
+			"user_id", userID)
+		c.JSON(http.StatusNotFound, e2eekeys.ErrorResponse{
+			Error: "Key epoch has been revoked; rekey required",
+			Code:  e2eekeys.CodeRevokedEpoch,
+			Kind:  e2eekeys.KindDM,
+		})
+		return
+	}
+
+	c.JSON(http.StatusOK, e2eekeys.KeyResponse{
+		Key: e2eekeys.KeyPayload{
+			WrappedKey: key.WrappedKey,
+			KeyVersion: key.KeyVersion,
+		},
+		Kind: e2eekeys.KindDM,
+	})
 }
 
 // DistributeUnifiedKeys resolves a context_id and distributes wrapped keys.
