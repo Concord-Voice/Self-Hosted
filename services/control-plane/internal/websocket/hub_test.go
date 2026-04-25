@@ -2166,3 +2166,115 @@ func TestValidateDMMessageValidMessage(t *testing.T) {
 	require.NotNil(t, input)
 	assert.Equal(t, "hello there", input.content)
 }
+
+// --- handleConnectionReadyProbe tests ---
+
+func TestHub_ConnectionReadyProbe_EmitsConnectionReady(t *testing.T) {
+	hub := newMinimalHub()
+	client := newTestClient(hub, uuid.New())
+	hub.clients[client.ID] = client
+
+	// Seed channel subscriptions on the client
+	client.Channels[uuid.New()] = true
+	client.Channels[uuid.New()] = true
+	client.Channels[uuid.New()] = true
+
+	// Seed server subscriptions in hub-level map (2 servers)
+	srv1, srv2 := uuid.New(), uuid.New()
+	hub.serverSubscriptions[srv1] = map[uuid.UUID]bool{client.ID: true}
+	hub.serverSubscriptions[srv2] = map[uuid.UUID]bool{client.ID: true, uuid.New(): true}
+
+	// Seed DM subscriptions in hub-level map (1 DM)
+	dm1 := uuid.New()
+	hub.dmSubscriptions[dm1] = map[uuid.UUID]bool{client.ID: true}
+
+	hub.handleConnectionReadyProbe(IncomingMessage{
+		Type:     "connection_ready_probe",
+		Data:     map[string]interface{}{"protocol_version": float64(2)},
+		ClientID: client.ID,
+		UserID:   client.UserID,
+	})
+
+	select {
+	case raw := <-client.Send:
+		var out OutgoingMessage
+		require.NoError(t, json.Unmarshal(raw, &out))
+		assert.Equal(t, "connection_ready", out.Type)
+		assert.Equal(t, float64(2), out.Data["protocol_version"])
+		assert.Equal(t, float64(3), out.Data["subscribed_channels"])
+		assert.Equal(t, float64(2), out.Data["subscribed_servers"])
+		assert.Equal(t, float64(1), out.Data["subscribed_dms"])
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("did not receive connection_ready on client.Send")
+	}
+}
+
+func TestHub_ConnectionReadyProbe_UnknownClient_NoEmission(_ *testing.T) {
+	hub := newMinimalHub()
+	// Do NOT add any client to hub.clients
+
+	// Must not panic on unknown ClientID
+	hub.handleConnectionReadyProbe(IncomingMessage{
+		Type:     "connection_ready_probe",
+		Data:     map[string]interface{}{"protocol_version": float64(2)},
+		ClientID: uuid.New(),
+		UserID:   uuid.New(),
+	})
+	// If we reach here without panic, the handler safely no-op'd. Done.
+}
+
+func TestHub_ConnectionReadyProbe_FullSendBuffer_NoBlock(t *testing.T) {
+	hub := newMinimalHub()
+	client := newTestClient(hub, uuid.New())
+	// Zero-capacity channel with no receiver: sends will always fall through
+	// to the handler's `default` branch in the non-blocking select.
+	client.Send = make(chan []byte)
+	hub.clients[client.ID] = client
+
+	start := time.Now()
+	hub.handleConnectionReadyProbe(IncomingMessage{
+		Type:     "connection_ready_probe",
+		ClientID: client.ID,
+		UserID:   client.UserID,
+	})
+	elapsed := time.Since(start)
+
+	// Handler must return immediately via `default` branch (no blocking send).
+	assert.Less(t, elapsed, 50*time.Millisecond,
+		"handler should return immediately when send buffer is full")
+
+	// Verify the frame was NOT delivered (buffer was full → default branch fired).
+	select {
+	case <-client.Send:
+		t.Fatal("expected no frame on full buffer; default branch should have dropped the send")
+	default:
+		// Expected — no frame delivered.
+	}
+}
+
+// TestHandleIncomingConnectionReadyProbeRoute verifies that the handleIncoming
+// switch dispatches "connection_ready_probe" to handleConnectionReadyProbe,
+// causing a "connection_ready" frame to appear on the client's Send channel.
+// A typo in the case string would cause no frame to be delivered, failing this test.
+func TestHandleIncomingConnectionReadyProbeRoute(t *testing.T) {
+	hub := newMinimalHub()
+	client := newTestClient(hub, uuid.New())
+	hub.clients[client.ID] = client
+
+	msg := IncomingMessage{
+		Type:     "connection_ready_probe",
+		Data:     map[string]interface{}{"protocol_version": float64(2)},
+		ClientID: client.ID,
+		UserID:   client.UserID,
+	}
+	hub.handleIncoming(msg)
+
+	select {
+	case raw := <-client.Send:
+		var out OutgoingMessage
+		require.NoError(t, json.Unmarshal(raw, &out))
+		assert.Equal(t, "connection_ready", out.Type)
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("handleIncoming did not dispatch connection_ready_probe to handler")
+	}
+}

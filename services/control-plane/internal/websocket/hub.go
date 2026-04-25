@@ -292,6 +292,58 @@ func (h *Hub) sendConnectedConfirmation(client *Client) {
 	}
 }
 
+// handleConnectionReadyProbe acknowledges a client's subscribe barrier probe.
+//
+// Because this handler runs on the Hub's single Run() goroutine, any
+// subscribe/subscribe_server/subscribe_dm message queued before the probe is
+// guaranteed to be committed to the subscriber map before this method
+// executes. The emitted connection_ready frame is a definitive signal that
+// the client may safely resume message processing.
+//
+// Backwards compatible: clients that never send the probe never receive the
+// response — behaviour is byte-identical to today for v1 clients.
+func (h *Hub) handleConnectionReadyProbe(msg IncomingMessage) {
+	client, ok := h.clients[msg.ClientID]
+	if !ok {
+		return
+	}
+
+	// Count this client's server subscriptions across the hub-level map.
+	// O(N_servers) per probe but probes fire once per reconnect, not per message.
+	subscribedServers := 0
+	for _, clients := range h.serverSubscriptions {
+		if clients[msg.ClientID] {
+			subscribedServers++
+		}
+	}
+	subscribedDMs := 0
+	for _, clients := range h.dmSubscriptions {
+		if clients[msg.ClientID] {
+			subscribedDMs++
+		}
+	}
+
+	readyMsg := OutgoingMessage{
+		Type: "connection_ready",
+		Data: map[string]interface{}{
+			"subscribed_channels": len(client.Channels),
+			"subscribed_servers":  subscribedServers,
+			"subscribed_dms":      subscribedDMs,
+			"protocol_version":    2,
+		},
+	}
+	if data, err := json.Marshal(readyMsg); err == nil {
+		select {
+		case client.Send <- data:
+		default:
+			// Client send buffer full — log so operators can spot slow consumers.
+			// The client times out after 5s and proceeds best-effort, so this
+			// isn't fatal but is a monitoring signal worth surfacing.
+			log.Printf("[hub] connection_ready dropped for client %s: send buffer full; client will proceed best-effort after 5s timeout", msg.ClientID)
+		}
+	}
+}
+
 type userPresenceInfo struct {
 	UserID string `json:"user_id"`
 	Status string `json:"status"`
@@ -468,6 +520,8 @@ func (h *Hub) handleIncoming(msg IncomingMessage) {
 		h.handleSubscribeDM(msg)
 	case "unsubscribe_dm":
 		h.handleUnsubscribeDM(msg)
+	case "connection_ready_probe":
+		h.handleConnectionReadyProbe(msg)
 	case "dm_message":
 		h.handleDMMessage(msg)
 	case "dm_typing":

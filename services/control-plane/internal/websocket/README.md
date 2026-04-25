@@ -36,7 +36,7 @@ Hub.broadcast -> handleBroadcast() -> writePump() -> WebSocket -> Clients
 ### Endpoint
 
 ```
-GET /api/v1/ws?ticket=<SINGLE_USE_TICKET>
+GET wss://host/api/v1/ws?ticket=<SINGLE_USE_TICKET>
 ```
 
 ### Authentication
@@ -44,7 +44,7 @@ GET /api/v1/ws?ticket=<SINGLE_USE_TICKET>
 WebSocket connections use **ticket-based authentication**:
 
 1. Client calls `POST /api/v1/auth/ws-ticket` with a valid access token to obtain a single-use ticket (30s TTL)
-2. Client connects to `ws://host/api/v1/ws?ticket=<ticket>`
+2. Client connects to `wss://host/api/v1/ws?ticket=<ticket>`
 3. Server validates and consumes the ticket (single-use, prevents replay attacks)
 
 > **Security note:** Raw JWT tokens should NOT be passed in the WebSocket URL. Tickets are single-use and expire in 30 seconds, minimizing the window for interception.
@@ -155,6 +155,52 @@ WebSocket connections use **ticket-based authentication**:
   }
 }
 ```
+
+## Protocol Version 2 — Connection-Ready Barrier
+
+**Shipped:** 2026-04-24 (issue #752)
+
+Version 2 adds a subscribe-barrier handshake to eliminate a race where a
+client's message queue could begin processing before the hub had committed
+its resubscribe frames.
+
+### Client-emitted frame
+
+```json
+{
+  "type": "connection_ready_probe",
+  "data": { "protocol_version": 2 }
+}
+```
+
+Sent by v2 clients after the last `subscribe` / `subscribe_server` /
+`subscribe_dm` frame during a reconnect handshake (or on cold connect).
+
+### Hub-emitted frame
+
+```json
+{
+  "type": "connection_ready",
+  "data": {
+    "subscribed_channels": 12,
+    "protocol_version": 2
+  }
+}
+```
+
+Emitted in response to `connection_ready_probe`. Because the hub's
+`Run()` goroutine processes all incoming frames serially, every
+resubscribe queued before the probe is guaranteed to be committed before
+this response fires — no explicit lock or barrier is needed beyond the
+natural ordering of a single-goroutine consumer.
+
+### Backwards compatibility
+
+- V1 clients never emit the probe — hub never emits the response — identical to pre-v2 behaviour.
+- V2 client against a V1 hub — client times out after 5s, proceeds best-effort. No regression vs pre-v2.
+- V1 client against a V2 hub — hub never emits `connection_ready` (no probe received) — identical to pre-v2 behaviour.
+
+No server-side version negotiation required.
 
 ## Heartbeat Mechanism
 
