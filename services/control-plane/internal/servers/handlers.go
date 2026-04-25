@@ -400,7 +400,8 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 
 	var server models.Server
 	server.ID = serverID
-	err = h.db.QueryRow(updateQuery, args...).Scan(
+	// nosemgrep: go.net.sql.go-vanillasql-format-string-sqli-taint-med-conf.go-vanillasql-format-string-sqli-taint-med-conf,go.net.sql.go-vanillasql-format-string-sqli-taint.go-vanillasql-format-string-sqli-taint
+	err = h.db.QueryRow(updateQuery, args...).Scan( //nolint:gosec // updateQuery composed by buildUpdateClauses: hardcoded column names + integer argIdx via fmt.Sprintf; user values flow only through args... as parameterized $N placeholders. See matching nosemgrep on the fmt.Sprintf above.
 		&server.Name, &server.IconURL, &server.BannerURL, &server.OwnerID, &server.E2EEDefault, &server.AllowEmbeddedContent, &server.CreatedAt, &server.UpdatedAt,
 	)
 
