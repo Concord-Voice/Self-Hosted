@@ -1,13 +1,11 @@
 package privacy_test
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -15,271 +13,142 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/privacy"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/users"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 )
 
-// clientIDLeakingDeleter simulates an upstream admin client whose error
-// string inadvertently contains the clientId (matches the historical
-// shape of a *url.Error wrapping a Sentry bulk-delete URL). Used to
-// verify the handler's defense-in-depth scrub removes it from logs.
-type clientIDLeakingDeleter struct{ clientID string }
-
-func (d *clientIDLeakingDeleter) DeleteEventsForUser(_ context.Context, _ string) error {
-	return errors.New(`Delete "https://sentry.io/api/0/organizations/org/issues/?project=proj&query=user.id%3A` + d.clientID + `": dial tcp: lookup sentry.io: i/o timeout`)
-}
-
-const (
-	testUserID          = "user-1"
-	testEraseTelemetry  = "/erase-telemetry"
-	testEraseAccount    = "/erase-account"
-	testContentTypeHdr  = "Content-Type"
-	testContentTypeJSON = "application/json"
-	testValidClientID   = "abc123def4567890123456789012abcd" // pragma: allowlist secret
-)
-
-type stubEventsDeleter struct {
-	deleted string
-	fail    bool
-}
-
-func (s *stubEventsDeleter) DeleteEventsForUser(_ context.Context, clientID string) error {
-	s.deleted = clientID
-	if s.fail {
-		return assert.AnError
-	}
-	return nil
-}
-
-// stubAccountDeleter records the last DeleteAccount arguments; used by
-// tests that exercise the NewHandler signature but do not probe deletion
-// behavior (that is covered by handler_integration_test.go against real
-// Postgres).
+// stubAccountDeleter implements users.AccountDeleter for unit tests.
+// Configurable to return any error or nil. Records the userID it was
+// called with so tests can assert the handler passed the right value.
 type stubAccountDeleter struct {
-	calledWith   string
-	calledSentry bool
-	returnErr    error
+	err            error
+	called         bool
+	calledWithUser string
 }
 
-func (s *stubAccountDeleter) DeleteAccount(_ context.Context, userID string, sentryAttempted bool) error {
-	s.calledWith = userID
-	s.calledSentry = sentryAttempted
-	return s.returnErr
+func (s *stubAccountDeleter) DeleteAccount(_ context.Context, userID string) error {
+	s.called = true
+	s.calledWithUser = userID
+	return s.err
 }
 
-func TestEraseTelemetry_HappyPath(t *testing.T) {
+// newTestContext returns a Gin context wrapping a recorded response, with
+// the given JSON body and "user_id" set in context (matching auth middleware).
+func newTestContext(t *testing.T, body string, userID string) (*gin.Context, *httptest.ResponseRecorder) {
+	t.Helper()
 	gin.SetMode(gin.TestMode)
-	router := gin.New()
-	admin := &stubEventsDeleter{}
-	h := privacy.NewHandler(admin, &stubAccountDeleter{}, nil)
-	router.POST(testEraseTelemetry, withUserID(testUserID), h.EraseTelemetry)
-
-	body, _ := json.Marshal(map[string]string{"clientId": testValidClientID})
-	req := httptest.NewRequest(http.MethodPost, testEraseTelemetry, bytes.NewReader(body))
-	req.Header.Set(testContentTypeHdr, testContentTypeJSON)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	require.Equal(t, http.StatusNoContent, rec.Code)
-	assert.Equal(t, testValidClientID, admin.deleted)
-}
-
-func TestEraseTelemetry_Rejects_InvalidClientID(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	router := gin.New()
-	admin := &stubEventsDeleter{}
-	h := privacy.NewHandler(admin, &stubAccountDeleter{}, nil)
-	router.POST(testEraseTelemetry, withUserID(testUserID), h.EraseTelemetry)
-
-	body, _ := json.Marshal(map[string]string{"clientId": "not-hex!"})
-	req := httptest.NewRequest(http.MethodPost, testEraseTelemetry, bytes.NewReader(body))
-	req.Header.Set(testContentTypeHdr, testContentTypeJSON)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Empty(t, admin.deleted)
-}
-
-func TestEraseTelemetry_Returns502_OnUpstreamFailure(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	router := gin.New()
-	admin := &stubEventsDeleter{fail: true}
-	// Pass a real logger so the logUpstreamFailure log.Error path is
-	// exercised (separate from the nil-logger path covered below).
-	h := privacy.NewHandler(admin, &stubAccountDeleter{}, logger.New("test"))
-	router.POST(testEraseTelemetry, withUserID(testUserID), h.EraseTelemetry)
-
-	body, _ := json.Marshal(map[string]string{"clientId": testValidClientID})
-	req := httptest.NewRequest(http.MethodPost, testEraseTelemetry, bytes.NewReader(body))
-	req.Header.Set(testContentTypeHdr, testContentTypeJSON)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	assert.Equal(t, http.StatusBadGateway, rec.Code)
-}
-
-// TestEraseTelemetry_UpstreamFailure_NeverLogsClientID pins the
-// [internal]rules/observability.md contract on the error-logging path: even
-// when the upstream admin client returns an error that textually contains
-// the clientId (the historical *url.Error shape where a bulk-delete URL
-// carries the clientId in the query string), the handler's defense-in-depth
-// scrub must strip it before logging.
-func TestEraseTelemetry_UpstreamFailure_NeverLogsClientID(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	const sentinelClientID = "deadbeefcafef00d1122334455667788" // pragma: allowlist secret
-
-	var buf bytes.Buffer
-	testLog := &logger.Logger{Logger: slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))}
-
-	router := gin.New()
-	admin := &clientIDLeakingDeleter{clientID: sentinelClientID}
-	h := privacy.NewHandler(admin, &stubAccountDeleter{}, testLog)
-	router.POST(testEraseTelemetry, withUserID(testUserID), h.EraseTelemetry)
-
-	body, _ := json.Marshal(map[string]string{"clientId": sentinelClientID})
-	req := httptest.NewRequest(http.MethodPost, testEraseTelemetry, bytes.NewReader(body))
-	req.Header.Set(testContentTypeHdr, testContentTypeJSON)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	require.Equal(t, http.StatusBadGateway, rec.Code)
-	out := buf.String()
-	require.Contains(t, out, "privacy erasure upstream call failed", "error must be logged")
-	require.Contains(t, out, "<redacted-client-id>", "handler must replace the clientId with a redaction marker")
-	require.NotContains(t, out, sentinelClientID, "clientId must NEVER appear in the handler's error log")
-}
-
-// TestEraseTelemetry_UpstreamFailure_WithoutLogger_DoesNotPanic pins the
-// contract documented on NewHandler: passing nil for the logger is allowed
-// and must not panic even when the failure path is exercised. This covers
-// the nil-check branch in logUpstreamFailure.
-func TestEraseTelemetry_UpstreamFailure_WithoutLogger_DoesNotPanic(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	router := gin.New()
-	admin := &stubEventsDeleter{fail: true}
-	h := privacy.NewHandler(admin, &stubAccountDeleter{}, nil)
-	router.POST(testEraseTelemetry, withUserID(testUserID), h.EraseTelemetry)
-
-	body, _ := json.Marshal(map[string]string{"clientId": testValidClientID})
-	req := httptest.NewRequest(http.MethodPost, testEraseTelemetry, bytes.NewReader(body))
-	req.Header.Set(testContentTypeHdr, testContentTypeJSON)
-	rec := httptest.NewRecorder()
-
-	require.NotPanics(t, func() { router.ServeHTTP(rec, req) })
-	assert.Equal(t, http.StatusBadGateway, rec.Code)
-}
-
-func TestEraseAccount_WithClientID_CallsSentry(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	router := gin.New()
-	admin := &stubEventsDeleter{}
-	h := privacy.NewHandler(admin, &stubAccountDeleter{}, nil)
-	router.POST(testEraseAccount, withUserID(testUserID), h.EraseAccount)
-
-	body, _ := json.Marshal(map[string]string{"clientId": testValidClientID})
-	req := httptest.NewRequest(http.MethodPost, testEraseAccount, bytes.NewReader(body))
-	req.Header.Set(testContentTypeHdr, testContentTypeJSON)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	assert.Equal(t, http.StatusNoContent, rec.Code)
-	assert.Equal(t, testValidClientID, admin.deleted)
-}
-
-func TestEraseAccount_WithoutClientID_Succeeds(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	router := gin.New()
-	admin := &stubEventsDeleter{}
-	h := privacy.NewHandler(admin, &stubAccountDeleter{}, nil)
-	router.POST(testEraseAccount, withUserID(testUserID), h.EraseAccount)
-
-	req := httptest.NewRequest(http.MethodPost, testEraseAccount, bytes.NewReader([]byte(`{}`)))
-	req.Header.Set(testContentTypeHdr, testContentTypeJSON)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	assert.Equal(t, http.StatusNoContent, rec.Code)
-	assert.Empty(t, admin.deleted)
-}
-
-func TestEraseAccount_AcceptsEmptyBody(t *testing.T) {
-	// Empty body (io.EOF from JSON decoder) is a legitimate request —
-	// clientId is optional and a user with no Sentry events should still
-	// be able to POST for account erasure.
-	gin.SetMode(gin.TestMode)
-	router := gin.New()
-	admin := &stubEventsDeleter{}
-	h := privacy.NewHandler(admin, &stubAccountDeleter{}, nil)
-	router.POST(testEraseAccount, withUserID(testUserID), h.EraseAccount)
-
-	req := httptest.NewRequest(http.MethodPost, testEraseAccount, nil)
-	req.Header.Set(testContentTypeHdr, testContentTypeJSON)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	assert.Equal(t, http.StatusNoContent, rec.Code)
-	assert.Empty(t, admin.deleted)
-}
-
-func TestEraseAccount_RejectsInvalidClientID(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	router := gin.New()
-	admin := &stubEventsDeleter{}
-	h := privacy.NewHandler(admin, &stubAccountDeleter{}, nil)
-	router.POST(testEraseAccount, withUserID(testUserID), h.EraseAccount)
-
-	body, _ := json.Marshal(map[string]string{"clientId": "not-hex!"})
-	req := httptest.NewRequest(http.MethodPost, testEraseAccount, bytes.NewReader(body))
-	req.Header.Set(testContentTypeHdr, testContentTypeJSON)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	assert.Equal(t, http.StatusBadRequest, rec.Code)
-	assert.Empty(t, admin.deleted)
-}
-
-func TestEraseAccount_UpstreamFailure(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	router := gin.New()
-	admin := &stubEventsDeleter{fail: true}
-	// Real logger exercises logUpstreamFailure's log.Error path.
-	h := privacy.NewHandler(admin, &stubAccountDeleter{}, logger.New("test"))
-	router.POST(testEraseAccount, withUserID(testUserID), h.EraseAccount)
-
-	body, _ := json.Marshal(map[string]string{"clientId": testValidClientID})
-	req := httptest.NewRequest(http.MethodPost, testEraseAccount, bytes.NewReader(body))
-	req.Header.Set(testContentTypeHdr, testContentTypeJSON)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	assert.Equal(t, http.StatusBadGateway, rec.Code)
-}
-
-func TestEraseTelemetry_DoesNotLogClientID(t *testing.T) {
-	gin.SetMode(gin.TestMode)
-	var buf bytes.Buffer
-
-	router := gin.New()
-	router.Use(gin.LoggerWithWriter(&buf))
-	admin := &stubEventsDeleter{}
-	h := privacy.NewHandler(admin, &stubAccountDeleter{}, nil)
-	router.POST(testEraseTelemetry, withUserID(testUserID), h.EraseTelemetry)
-
-	const sentinelClientID = "deadbeefcafef00d1122334455667788" // pragma: allowlist secret
-	body, _ := json.Marshal(map[string]string{"clientId": sentinelClientID})
-	req := httptest.NewRequest(http.MethodPost, testEraseTelemetry, bytes.NewReader(body))
-	req.Header.Set(testContentTypeHdr, testContentTypeJSON)
-	rec := httptest.NewRecorder()
-	router.ServeHTTP(rec, req)
-
-	require.Equal(t, http.StatusNoContent, rec.Code)
-	assert.NotContains(t, buf.String(), sentinelClientID,
-		"clientId must never appear in any log output")
-}
-
-func withUserID(userID string) gin.HandlerFunc {
-	return func(c *gin.Context) {
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/privacy/erase-account", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	c.Request = req
+	if userID != "" {
 		c.Set("user_id", userID)
-		c.Next()
 	}
+	return c, w
+}
+
+// TestNewHandler_PanicsOnNilAccount asserts the constructor's documented
+// fail-fast behavior. Mis-wiring a nil dependency must surface at startup,
+// not as an opaque nil-pointer dereference at first request.
+func TestNewHandler_PanicsOnNilAccount(t *testing.T) {
+	require.Panics(t, func() {
+		privacy.NewHandler(nil, logger.New("test"))
+	})
+}
+
+// TestNewHandler_ToleratesNilLogger pins the documented test-only tolerance
+// for a nil logger. The log field is only dereferenced behind a nil-check
+// on the error path, so construction must not panic.
+func TestNewHandler_ToleratesNilLogger(t *testing.T) {
+	stub := &stubAccountDeleter{}
+	require.NotPanics(t, func() {
+		_ = privacy.NewHandler(stub, nil)
+	})
+}
+
+func TestEraseAccount_Returns401WhenUserIDMissing(t *testing.T) {
+	stub := &stubAccountDeleter{}
+	h := privacy.NewHandler(stub, logger.New("test"))
+
+	c, _ := newTestContext(t, `{}`, "")
+	h.EraseAccount(c)
+
+	assert.Equal(t, http.StatusUnauthorized, c.Writer.Status())
+	assert.False(t, stub.called, "DeleteAccount must not run when user_id is missing")
+}
+
+func TestEraseAccount_Returns400OnInvalidJSON(t *testing.T) {
+	stub := &stubAccountDeleter{}
+	h := privacy.NewHandler(stub, logger.New("test"))
+
+	c, _ := newTestContext(t, `{not-json`, "test-user-uuid")
+	h.EraseAccount(c)
+
+	assert.Equal(t, http.StatusBadRequest, c.Writer.Status())
+	assert.False(t, stub.called, "DeleteAccount must not run on invalid body")
+}
+
+func TestEraseAccount_Returns204OnEmptyBody(t *testing.T) {
+	stub := &stubAccountDeleter{}
+	h := privacy.NewHandler(stub, logger.New("test"))
+
+	c, _ := newTestContext(t, ``, "test-user-uuid")
+	h.EraseAccount(c)
+
+	assert.Equal(t, http.StatusNoContent, c.Writer.Status())
+	assert.True(t, stub.called)
+	assert.Equal(t, "test-user-uuid", stub.calledWithUser)
+}
+
+func TestEraseAccount_Returns204OnEmptyJSONBody(t *testing.T) {
+	stub := &stubAccountDeleter{}
+	h := privacy.NewHandler(stub, logger.New("test"))
+
+	c, _ := newTestContext(t, `{}`, "test-user-uuid")
+	h.EraseAccount(c)
+
+	assert.Equal(t, http.StatusNoContent, c.Writer.Status())
+	assert.True(t, stub.called)
+}
+
+func TestEraseAccount_Returns404OnUserNotFound(t *testing.T) {
+	stub := &stubAccountDeleter{err: users.ErrUserNotFound}
+	h := privacy.NewHandler(stub, logger.New("test"))
+
+	c, _ := newTestContext(t, `{}`, "missing-user-uuid")
+	h.EraseAccount(c)
+
+	assert.Equal(t, http.StatusNotFound, c.Writer.Status())
+}
+
+func TestEraseAccount_Returns500OnUnknownError(t *testing.T) {
+	stub := &stubAccountDeleter{err: errors.New("db unavailable")}
+	h := privacy.NewHandler(stub, logger.New("test"))
+
+	c, _ := newTestContext(t, `{}`, "test-user-uuid")
+	h.EraseAccount(c)
+
+	assert.Equal(t, http.StatusInternalServerError, c.Writer.Status())
+}
+
+// TestEraseAccount_IgnoresUnknownClientIdField is the regression guard for
+// the #758 transition window: the desktop client (#757 not yet shipped) may
+// continue to POST {"clientId":"..."} bodies after the server-side handler
+// is Sentry-free. Gin's ShouldBindJSON does not reject unknown fields by
+// default, so the handler must accept the extra field and proceed to the
+// account-deletion path.
+func TestEraseAccount_IgnoresUnknownClientIdField(t *testing.T) {
+	const sentinelClientID = "deadbeefcafef00d1122334455667788" //nolint:gosec // pragma: allowlist secret — test sentinel
+	stub := &stubAccountDeleter{}
+	h := privacy.NewHandler(stub, logger.New("test"))
+
+	body := `{"clientId":"` + sentinelClientID + `"}`
+	c, _ := newTestContext(t, body, "test-user-uuid")
+	h.EraseAccount(c)
+
+	assert.Equal(t, http.StatusNoContent, c.Writer.Status(),
+		"unknown clientId field must be silently ignored — POST returns 204")
+	assert.True(t, stub.called,
+		"DeleteAccount must still be invoked when the body has an extra field")
 }

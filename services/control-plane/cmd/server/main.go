@@ -13,13 +13,11 @@ import (
 	"syscall"
 	"time"
 
-	sentrygo "github.com/getsentry/sentry-go"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/api"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/database"
-	sentryPkg "github.com/markdrogersjr/Concord/services/control-plane/internal/sentry"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/storage"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
@@ -28,9 +26,8 @@ import (
 )
 
 const (
-	logKeyCount     = "count"
-	logKeyServerID  = "server_id"
-	logKeyWorkerJob = "worker.job"
+	logKeyCount    = "count"
+	logKeyServerID = "server_id"
 )
 
 func main() {
@@ -43,17 +40,9 @@ func main() {
 	// Initialize logger
 	log := logger.New(cfg.Environment)
 
-	// Initialize Sentry — must happen early, after config + logger
-	if err := sentryPkg.Init(cfg, log); err != nil {
-		log.Fatal("Sentry init failed", "error", err)
-	}
-	defer sentrygo.Flush(2 * time.Second) //nolint:errcheck // best-effort flush on exit
-
 	// Initialize database
 	db, err := database.New(cfg.DatabaseURL)
 	if err != nil {
-		sentrygo.CaptureException(err)
-		sentrygo.Flush(2 * time.Second) //nolint:errcheck // best-effort before fatal
 		log.Fatal("Failed to connect to database", "error", err)
 	}
 	defer func() {
@@ -64,16 +53,12 @@ func main() {
 
 	// Run migrations
 	if err := database.RunMigrations(db); err != nil {
-		sentrygo.CaptureException(err)
-		sentrygo.Flush(2 * time.Second) //nolint:errcheck // best-effort before fatal
 		log.Fatal("Failed to run migrations", "error", err)
 	}
 
 	// Initialize Redis
 	redisClient, err := database.NewRedisClient(cfg.RedisURL)
 	if err != nil {
-		sentrygo.CaptureException(err)
-		sentrygo.Flush(2 * time.Second) //nolint:errcheck // best-effort before fatal
 		log.Fatal("Failed to connect to Redis", "error", err)
 	}
 	defer func() {
@@ -117,8 +102,6 @@ func main() {
 	go func() {
 		log.Info("Starting Control Plane server", "port", cfg.Port, "env", cfg.Environment)
 		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			sentrygo.CaptureException(err)
-			sentrygo.Flush(2 * time.Second) //nolint:errcheck // best-effort before fatal
 			log.Fatal("Server failed to start", "error", err)
 		}
 	}()
@@ -132,9 +115,6 @@ func main() {
 
 	// Stop background cleanup job
 	cleanupCancel()
-
-	// Flush Sentry before tearing down connections
-	sentrygo.Flush(2 * time.Second) //nolint:errcheck // best-effort
 
 	// Stop SPA config file watcher
 	liveSpa.Stop()
@@ -216,7 +196,6 @@ func runCleanup(ctx context.Context, db *sql.DB, redisClient *redis.Client, hub 
 	res1, err := db.ExecContext(taskCtx,
 		`DELETE FROM refresh_tokens WHERE expires_at < NOW() AND revoked_at IS NULL`)
 	if err != nil {
-		sentryPkg.CaptureWithTag(err, logKeyWorkerJob, "cleanup.expired_tokens")
 		log.Error("Cleanup: failed to purge expired tokens", "error", err)
 	} else if n, raErr := res1.RowsAffected(); raErr != nil {
 		log.Error("Cleanup: RowsAffected error", "task", "purge_expired_tokens", "error", raErr)
@@ -229,7 +208,6 @@ func runCleanup(ctx context.Context, db *sql.DB, redisClient *redis.Client, hub 
 	res2, err := db.ExecContext(taskCtx,
 		`DELETE FROM refresh_tokens WHERE revoked_at IS NOT NULL AND revoked_at < NOW() - INTERVAL '90 days'`)
 	if err != nil {
-		sentryPkg.CaptureWithTag(err, logKeyWorkerJob, "cleanup.revoked_sessions")
 		log.Error("Cleanup: failed to purge old revoked sessions", "error", err)
 	} else if n, raErr := res2.RowsAffected(); raErr != nil {
 		log.Error("Cleanup: RowsAffected error", "task", "purge_revoked_sessions", "error", raErr)
@@ -255,7 +233,6 @@ func cleanupStalePresence(ctx context.Context, redisClient *redis.Client, hub *w
 	for {
 		keys, nextCursor, err := redisClient.Scan(ctx, cursor, "presence:*", 100).Result()
 		if err != nil {
-			sentryPkg.CaptureWithTag(err, logKeyWorkerJob, "cleanup.stale_presence")
 			log.Error("Cleanup: failed to scan presence keys", "error", err)
 			break
 		}
@@ -291,7 +268,6 @@ func cleanupExpiredTransfers(ctx context.Context, db *sql.DB, redisClient *redis
 		WHERE status = 'pending' AND expires_at <= NOW()
 	`)
 	if err != nil {
-		sentryPkg.CaptureWithTag(err, logKeyWorkerJob, "cleanup.expired_transfers")
 		log.Error("Cleanup: failed to query expired transfers", "error", err)
 		return
 	}

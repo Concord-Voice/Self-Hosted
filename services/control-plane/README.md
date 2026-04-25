@@ -389,4 +389,3 @@ For detailed migration documentation, see [migrations/README.md](migrations/READ
 - [ ] File uploads (S3 + CDN) — partially implemented (`media_files` table, MinIO storage)
 - [ ] Message search
 - [ ] Billing integration (Stripe)
-- [ ] Sentry error tracking (`sentry-go`) — planned follow-up to Electron integration (#586)

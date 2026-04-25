@@ -21,12 +21,12 @@ var ErrUserNotFound = errors.New("user not found")
 // Declared here so privacy can import it without pulling the concrete
 // service (and its database handle) into the handler's test surface.
 type AccountDeleter interface {
-	DeleteAccount(ctx context.Context, userID string, sentryAttempted bool) error
+	DeleteAccount(ctx context.Context, userID string) error
 }
 
 // AccountService is the concrete AccountDeleter backed by the primary
-// Postgres pool. It owns its own transaction boundary so callers never
-// hold a connection across a network-bound Sentry call.
+// Postgres pool. It owns its own transaction boundary so the caller
+// never holds a connection across any slow or external operation.
 type AccountService struct {
 	db  *sql.DB
 	log *logger.Logger
@@ -50,8 +50,7 @@ func NewAccountService(db *sql.DB, log *logger.Logger) *AccountService {
 //     check would fire on insert and fail — but a NULL is the intended
 //     post-commit state anyway (the schema's ON DELETE SET NULL would have
 //     nulled it automatically had we ordered INSERT before DELETE). The
-//     audit row captures the deletion event and timestamp; sentry_delete_attempted
-//     records whether Sentry was invoked earlier in the handler.
+//     audit row captures the deletion event and timestamp.
 //  3. COMMIT.
 //
 // The DELETE-then-INSERT ordering makes the retry-after-success path behave
@@ -65,7 +64,6 @@ func NewAccountService(db *sql.DB, log *logger.Logger) *AccountService {
 func (s *AccountService) DeleteAccount(
 	ctx context.Context,
 	userID string,
-	sentryAttempted bool,
 ) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -95,9 +93,7 @@ func (s *AccountService) DeleteAccount(
 	}
 
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO account_deletions (user_id, sentry_delete_attempted)
-		 VALUES (NULL, $1)`,
-		sentryAttempted,
+		`INSERT INTO account_deletions (user_id) VALUES (NULL)`,
 	); err != nil {
 		return fmt.Errorf("delete account: insert audit: %w", err)
 	}

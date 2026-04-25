@@ -10,7 +10,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/websocket"
-	sentryPkg "github.com/markdrogersjr/Concord/services/control-plane/internal/sentry"
 )
 
 const (
@@ -121,7 +120,6 @@ func (c *Client) readPump() {
 		_, message, err := c.Conn.ReadMessage()
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				sentryPkg.CaptureWithTag(err, "websocket.event", "read-pump")
 				log.Printf("WebSocket error: %v", err)
 			}
 			break

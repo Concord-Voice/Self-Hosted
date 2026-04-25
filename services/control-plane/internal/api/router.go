@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"time"
 
-	sentrygin "github.com/getsentry/sentry-go/gin"
 	"github.com/gin-gonic/gin"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/channels"
@@ -111,11 +110,6 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 
 	// Middleware
 	router.Use(gin.Recovery())
-	router.Use(sentrygin.New(sentrygin.Options{
-		Repanic:         true,
-		WaitForDelivery: false,
-		Timeout:         2 * time.Second,
-	}))
 	router.Use(middleware.RequestID())
 	router.Use(middleware.Logger(log))
 	router.Use(middleware.SecurityHeaders(cfg.Environment))
@@ -204,7 +198,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	clientConfigHandler := clientconfig.NewHandler(cfg, liveSpa, log)
 	updatesHandler := updates.NewHandler(cfg, log)
 	spaHandler := spa.NewHandler(cfg.SpaDir, log)
-	privacyHandler := buildPrivacyHandler(cfg, db, log)
+	privacyHandler := buildPrivacyHandler(db, log)
 
 	// Start NATS voice event subscriber
 	if natsClient != nil {
@@ -403,10 +397,6 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 			// even before email verification completes.
 			privacyRoutes := authRequired.Group("/privacy")
 			{
-				privacyRoutes.POST("/erase-telemetry",
-					middleware.RateLimitByUser(redis, 3, 24*time.Hour),
-					privacyHandler.EraseTelemetry,
-				)
 				privacyRoutes.POST("/erase-account",
 					middleware.RateLimitByUser(redis, 3, 24*time.Hour),
 					privacyHandler.EraseAccount,

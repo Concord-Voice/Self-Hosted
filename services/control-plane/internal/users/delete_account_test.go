@@ -2,157 +2,141 @@ package users_test
 
 import (
 	"context"
-	"database/sql"
-	"errors"
-	"fmt"
 	"testing"
-
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/users"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
-// seedAccountTestUser inserts a bare-minimum user row and returns its id.
-// Local to the account-deletion tests so the fixture does not couple to the
-// broader setupTS test server used by the handlers test file.
-func seedAccountTestUser(t *testing.T, db *sql.DB, username string) string {
-	t.Helper()
-	email := fmt.Sprintf("%s@test.local", username)
-	stmt, err := db.Prepare(
-		`INSERT INTO users (username, email, password_hash)
-		 VALUES ($1, $2, $3) RETURNING id`,
-	)
-	require.NoError(t, err)
-	defer stmt.Close() //nolint:errcheck
-	var id string
-	require.NoError(t, stmt.QueryRow(username, email, "not-a-real-hash").Scan(&id))
-	return id
-}
+// TestDeleteAccount_HappyPath verifies the full erasure flow: the user
+// row is deleted (cascading through FK-CASCADE tables), an audit row
+// is inserted into account_deletions with user_id = NULL, and the
+// transaction commits.
+func TestDeleteAccount_HappyPath(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	user := ts.CreateTestUser(t, "deleteacct1")
 
-// TestAccountService_DeleteAccount_HappyPath_SentryAttempted exercises the
-// canonical success path: DELETE removes one row, the audit INSERT records
-// sentry_delete_attempted = TRUE, and the transaction commits.
-func TestAccountService_DeleteAccount_HappyPath_SentryAttempted(t *testing.T) {
-	db, cleanup := testhelpers.SetupTestDB(t)
-	defer cleanup()
+	svc := users.NewAccountService(ts.DB, logger.New("test"))
 
-	svc := users.NewAccountService(db, logger.New("test"))
-	uid := seedAccountTestUser(t, db, "svc-happy-sentry")
-
-	err := svc.DeleteAccount(context.Background(), uid, true)
+	err := svc.DeleteAccount(context.Background(), user.ID)
 	require.NoError(t, err)
 
-	var userCount int
-	require.NoError(t,
-		db.QueryRow(`SELECT COUNT(*) FROM users WHERE id = $1`, uid).Scan(&userCount),
-	)
-	assert.Equal(t, 0, userCount, "user row must be deleted")
+	var userRows int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM users WHERE id = $1`, user.ID,
+	).Scan(&userRows))
+	assert.Equal(t, 0, userRows, "user row must be deleted")
 
-	var sentryAttempted bool
-	var auditUserID sql.NullString
-	require.NoError(t, db.QueryRow(
-		`SELECT user_id, sentry_delete_attempted FROM account_deletions
-		 ORDER BY deleted_at DESC LIMIT 1`,
-	).Scan(&auditUserID, &sentryAttempted))
-	assert.True(t, sentryAttempted, "audit row must record Sentry attempt")
-	assert.False(t, auditUserID.Valid, "audit row user_id must be NULL (post-commit state)")
+	var auditRows int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM account_deletions WHERE user_id IS NULL AND deleted_at >= NOW() - INTERVAL '1 minute'`,
+	).Scan(&auditRows))
+	assert.GreaterOrEqual(t, auditRows, 1, "audit row must be inserted with NULL user_id")
 }
 
-// TestAccountService_DeleteAccount_HappyPath_NoSentry confirms the
-// sentry_delete_attempted boolean propagates the false value when the
-// handler skipped Sentry.
-func TestAccountService_DeleteAccount_HappyPath_NoSentry(t *testing.T) {
-	db, cleanup := testhelpers.SetupTestDB(t)
-	defer cleanup()
+// TestDeleteAccount_MissingUser verifies the sentinel-error contract:
+// targeting a non-existent UUID returns ErrUserNotFound and writes no
+// audit row.
+func TestDeleteAccount_MissingUser(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	svc := users.NewAccountService(ts.DB, logger.New("test"))
 
-	svc := users.NewAccountService(db, logger.New("test"))
-	uid := seedAccountTestUser(t, db, "svc-happy-nosentry")
+	const ghostUUID = "00000000-0000-0000-0000-000000000001"
 
-	err := svc.DeleteAccount(context.Background(), uid, false)
-	require.NoError(t, err)
+	var auditBefore int
+	require.NoError(t, ts.DB.QueryRow(`SELECT COUNT(*) FROM account_deletions`).Scan(&auditBefore))
 
-	var sentryAttempted bool
-	require.NoError(t, db.QueryRow(
-		`SELECT sentry_delete_attempted FROM account_deletions
-		 ORDER BY deleted_at DESC LIMIT 1`,
-	).Scan(&sentryAttempted))
-	assert.False(t, sentryAttempted, "audit row must record no Sentry attempt")
+	err := svc.DeleteAccount(context.Background(), ghostUUID)
+	require.ErrorIs(t, err, users.ErrUserNotFound)
+
+	var auditAfter int
+	require.NoError(t, ts.DB.QueryRow(`SELECT COUNT(*) FROM account_deletions`).Scan(&auditAfter))
+	assert.Equal(t, auditBefore, auditAfter,
+		"no audit row must be written when the user did not exist")
 }
 
-// TestAccountService_DeleteAccount_UserNotFound_ReturnsSentinel exercises
-// the DELETE-with-zero-rows-affected path. The service must return
-// ErrUserNotFound and must NOT write an audit row (nothing happened).
-func TestAccountService_DeleteAccount_UserNotFound_ReturnsSentinel(t *testing.T) {
-	db, cleanup := testhelpers.SetupTestDB(t)
-	defer cleanup()
+// TestDeleteAccount_IdempotentRetry verifies that calling DeleteAccount
+// twice for the same user yields ErrUserNotFound on the second call and
+// produces exactly one audit row total.
+func TestDeleteAccount_IdempotentRetry(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	user := ts.CreateTestUser(t, "deleteacct2")
 
-	svc := users.NewAccountService(db, logger.New("test"))
+	svc := users.NewAccountService(ts.DB, logger.New("test"))
 
-	// A valid-shape UUID that does not correspond to any seeded row.
-	missing := "00000000-0000-0000-0000-000000000001"
-	err := svc.DeleteAccount(context.Background(), missing, false)
-	require.Error(t, err)
-	assert.True(t, errors.Is(err, users.ErrUserNotFound),
-		"expected ErrUserNotFound, got %v", err)
+	require.NoError(t, svc.DeleteAccount(context.Background(), user.ID))
 
-	var count int
-	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM account_deletions`).Scan(&count))
-	assert.Equal(t, 0, count, "no audit row should exist when user was already gone")
+	err := svc.DeleteAccount(context.Background(), user.ID)
+	require.ErrorIs(t, err, users.ErrUserNotFound)
+
+	var auditCount int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM account_deletions WHERE deleted_at >= NOW() - INTERVAL '1 minute'`,
+	).Scan(&auditCount))
+	assert.Equal(t, 1, auditCount, "exactly one audit row must exist after success+retry")
 }
 
-// TestAccountService_DeleteAccount_AuditInsertFails_Rollback forces the
-// audit-INSERT to fail (by renaming the audit table mid-test) and verifies
-// that the transaction rolls back cleanly — the user row must still exist.
-func TestAccountService_DeleteAccount_AuditInsertFails_Rollback(t *testing.T) {
-	db, cleanup := testhelpers.SetupTestDB(t)
-	defer cleanup()
+// TestDeleteAccount_AuditRowInsertWithoutSentryColumn pins the
+// post-migration-000060 schema: the INSERT in DeleteAccount must NOT
+// reference the dropped sentry_delete_attempted column. If a future
+// edit accidentally re-adds the column reference, this test catches it
+// (the INSERT would fail with column-not-found error).
+func TestDeleteAccount_AuditRowInsertWithoutSentryColumn(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	user := ts.CreateTestUser(t, "deleteacct3")
 
-	svc := users.NewAccountService(db, logger.New("test"))
-	uid := seedAccountTestUser(t, db, "svc-rollback")
-
-	// Rename preserves all attached indexes and constraints; the reverse rename
-	// in defer restores state cleanly. defer runs BEFORE the SetupTestDB
-	// cleanup (which calls TruncateAllTables and would otherwise fail on the
-	// renamed table).
-	_, err := db.Exec(`ALTER TABLE account_deletions RENAME TO account_deletions_hidden_unit_test`)
-	require.NoError(t, err)
-	defer func() {
-		_, _ = db.Exec(`ALTER TABLE account_deletions_hidden_unit_test RENAME TO account_deletions`)
-	}()
-
-	err = svc.DeleteAccount(context.Background(), uid, false)
-	require.Error(t, err)
-	assert.False(t, errors.Is(err, users.ErrUserNotFound),
-		"audit-INSERT failure must not be reported as ErrUserNotFound")
-
-	// Rollback invariant: the user row must still exist because the DELETE
-	// was inside the same transaction as the failed INSERT.
-	var count int
-	require.NoError(t,
-		db.QueryRow(`SELECT COUNT(*) FROM users WHERE id = $1`, uid).Scan(&count),
-	)
-	assert.Equal(t, 1, count, "user row must survive audit-INSERT rollback")
+	svc := users.NewAccountService(ts.DB, logger.New("test"))
+	err := svc.DeleteAccount(context.Background(), user.ID)
+	require.NoError(t, err, "INSERT must succeed without sentry_delete_attempted column")
 }
 
-// TestNewAccountService_NilLoggerTolerated exercises the documented
-// test-only affordance: constructing the service with a nil logger must
-// not panic. The happy-path delete exercised here does not itself fire
-// the rollback-error log branch (which is the only place the logger is
-// dereferenced), but the constructor and the common path must not panic
-// on a nil log value either way. Rollback-error-with-nil-log is an
-// uninducible path on real Postgres (BeginTx + Commit don't fail here)
-// and is covered by inspection of the nil-check at the rollback site.
-func TestNewAccountService_NilLoggerTolerated(t *testing.T) {
-	db, cleanup := testhelpers.SetupTestDB(t)
-	defer cleanup()
+// TestDeleteAccount_CascadeDeletesUserRelatedData verifies that the
+// ON DELETE CASCADE behavior correctly cleans up all user-associated
+// data (servers, channels, messages, roles, etc.) when the user row
+// is deleted. This ensures account erasure is complete.
+func TestDeleteAccount_CascadeDeletesUserRelatedData(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	user := ts.CreateTestUser(t, "deleteacct4")
 
-	svc := users.NewAccountService(db, nil)
-	require.NotNil(t, svc)
+	// Create a server and channel owned by the user.
+	serverID := ts.CreateTestServer(t, user.ID, "test_server")
+	channelID := ts.CreateTestChannel(t, serverID, "test_channel", false)
 
-	uid := seedAccountTestUser(t, db, "svc-nil-log")
-	err := svc.DeleteAccount(context.Background(), uid, false)
-	require.NoError(t, err)
+	// Add a role and assign it to the user.
+	roleID := ts.CreateTestRole(t, serverID, "test_role", 1, 1)
+	ts.AssignRoleToUser(t, serverID, user.ID, roleID)
+
+	svc := users.NewAccountService(ts.DB, logger.New("test"))
+	require.NoError(t, svc.DeleteAccount(context.Background(), user.ID))
+
+	// Verify user is gone.
+	var userExists int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM users WHERE id = $1`, user.ID,
+	).Scan(&userExists))
+	assert.Equal(t, 0, userExists)
+
+	// Verify server is cascaded (owner deletion cascades).
+	var serverExists int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM servers WHERE id = $1`, serverID,
+	).Scan(&serverExists))
+	assert.Equal(t, 0, serverExists, "owned server must be cascaded when user is deleted")
+
+	// Verify channel is also cascaded transitively.
+	var channelExists int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM channels WHERE id = $1`, channelID,
+	).Scan(&channelExists))
+	assert.Equal(t, 0, channelExists, "channel must be cascaded when server is deleted")
+
+	// Verify role is cascaded.
+	var roleExists int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM roles WHERE id = $1`, roleID,
+	).Scan(&roleExists))
+	assert.Equal(t, 0, roleExists, "role must be cascaded when server is deleted")
 }

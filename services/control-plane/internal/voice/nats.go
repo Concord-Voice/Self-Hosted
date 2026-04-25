@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 
 	"github.com/google/uuid"
-	sentryPkg "github.com/markdrogersjr/Concord/services/control-plane/internal/sentry"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	natsclient "github.com/markdrogersjr/Concord/services/control-plane/pkg/nats"
@@ -118,14 +117,12 @@ func (s *NATSSubscriber) Subscribe() error {
 func (s *NATSSubscriber) handleJoined(data []byte) {
 	var event voiceJoinedEvent
 	if err := json.Unmarshal(data, &event); err != nil {
-		sentryPkg.CaptureWithTag(err, sentryNatsTag, natsSubjectVoiceJoined)
 		s.log.Error("Failed to unmarshal voice.joined", "error", err)
 		return
 	}
 
 	ctx, err := s.resolveRoom(event.ChannelID)
 	if err != nil {
-		sentryPkg.CaptureWithTag(err, sentryNatsTag, natsSubjectVoiceJoined)
 		s.log.Error("Failed to resolve room for voice.joined", "error", err, "channel_id", event.ChannelID)
 		return
 	}
@@ -138,7 +135,6 @@ func (s *NATSSubscriber) handleJoined(data []byte) {
 			ON CONFLICT (conversation_id, user_id) DO UPDATE SET joined_at = NOW()
 		`, event.ChannelID, event.UserID)
 		if err != nil {
-			sentryPkg.CaptureWithTag(err, sentryNatsTag, natsSubjectVoiceJoined)
 			s.log.Error("Failed to insert DM voice participant", "error", err, "conversation_id", event.ChannelID, "user_id", event.UserID)
 			return
 		}
@@ -194,14 +190,12 @@ func (s *NATSSubscriber) handleJoined(data []byte) {
 func (s *NATSSubscriber) handleLeft(data []byte) {
 	var event voiceLeftEvent
 	if err := json.Unmarshal(data, &event); err != nil {
-		sentryPkg.CaptureWithTag(err, sentryNatsTag, natsSubjectVoiceLeft)
 		s.log.Error("Failed to unmarshal voice.left", "error", err)
 		return
 	}
 
 	ctx, err := s.resolveRoom(event.ChannelID)
 	if err != nil {
-		sentryPkg.CaptureWithTag(err, sentryNatsTag, natsSubjectVoiceLeft)
 		s.log.Error("Failed to resolve room for voice.left", "error", err, "channel_id", event.ChannelID)
 		return
 	}
@@ -209,7 +203,6 @@ func (s *NATSSubscriber) handleLeft(data []byte) {
 	if ctx.isDM {
 		_, err := s.db.Exec(`DELETE FROM dm_voice_participants WHERE conversation_id = $1 AND user_id = $2`, event.ChannelID, event.UserID)
 		if err != nil {
-			sentryPkg.CaptureWithTag(err, sentryNatsTag, natsSubjectVoiceLeft)
 			s.log.Error("Failed to delete DM voice participant", "error", err, "conversation_id", event.ChannelID, "user_id", event.UserID)
 			return
 		}
@@ -225,7 +218,6 @@ func (s *NATSSubscriber) handleLeft(data []byte) {
 	} else {
 		_, err := s.db.Exec(`DELETE FROM voice_participants WHERE channel_id = $1 AND user_id = $2`, event.ChannelID, event.UserID)
 		if err != nil {
-			sentryPkg.CaptureWithTag(err, sentryNatsTag, natsSubjectVoiceLeft)
 			s.log.Error("Failed to delete voice participant", "error", err, "channel_id", event.ChannelID, "user_id", event.UserID)
 			return
 		}
@@ -251,14 +243,12 @@ func (s *NATSSubscriber) handleLeft(data []byte) {
 func (s *NATSSubscriber) handleRoomEmpty(data []byte) {
 	var event voiceRoomEmptyEvent
 	if err := json.Unmarshal(data, &event); err != nil {
-		sentryPkg.CaptureWithTag(err, sentryNatsTag, natsSubjectVoiceRoomEmpty)
 		s.log.Error("Failed to unmarshal voice.room_empty", "error", err)
 		return
 	}
 
 	ctx, err := s.resolveRoom(event.ChannelID)
 	if err != nil {
-		sentryPkg.CaptureWithTag(err, sentryNatsTag, natsSubjectVoiceRoomEmpty)
 		s.log.Error("Failed to resolve room for voice.room_empty", "error", err, "channel_id", event.ChannelID)
 		return
 	}
@@ -266,7 +256,6 @@ func (s *NATSSubscriber) handleRoomEmpty(data []byte) {
 	if ctx.isDM {
 		_, err := s.db.Exec(`DELETE FROM dm_voice_participants WHERE conversation_id = $1`, event.ChannelID)
 		if err != nil {
-			sentryPkg.CaptureWithTag(err, sentryNatsTag, natsSubjectVoiceRoomEmpty)
 			s.log.Error("Failed to clear DM voice participants", "error", err, "conversation_id", event.ChannelID)
 		}
 
@@ -280,7 +269,6 @@ func (s *NATSSubscriber) handleRoomEmpty(data []byte) {
 	} else {
 		_, err := s.db.Exec(`DELETE FROM voice_participants WHERE channel_id = $1`, event.ChannelID)
 		if err != nil {
-			sentryPkg.CaptureWithTag(err, sentryNatsTag, natsSubjectVoiceRoomEmpty)
 			s.log.Error("Failed to clear voice participants", "error", err, "channel_id", event.ChannelID)
 		}
 
@@ -307,21 +295,18 @@ func (s *NATSSubscriber) handleRoomEmpty(data []byte) {
 func (s *NATSSubscriber) handleHeartbeat(data []byte) {
 	var event voiceHeartbeatEvent
 	if err := json.Unmarshal(data, &event); err != nil {
-		sentryPkg.CaptureWithTag(err, sentryNatsTag, natsSubjectVoiceHeartbeat)
 		s.log.Error("Failed to unmarshal voice.heartbeat", "error", err)
 		return
 	}
 
 	ctx, err := s.resolveRoom(event.ChannelID)
 	if err != nil {
-		sentryPkg.CaptureWithTag(err, sentryNatsTag, natsSubjectVoiceHeartbeat)
 		s.log.Error("Failed to resolve room for voice.heartbeat", "error", err, "channel_id", event.ChannelID)
 		return
 	}
 
 	dbUsers, err := s.collectDBParticipants(event.ChannelID, ctx.isDM)
 	if err != nil {
-		sentryPkg.CaptureWithTag(err, sentryNatsTag, natsSubjectVoiceHeartbeat)
 		s.log.Error("Failed to query voice_participants for reconciliation", "error", err, "channel_id", event.ChannelID)
 		return
 	}
@@ -431,9 +416,6 @@ func (s *NATSSubscriber) broadcastRoomEmpty(channelID string, ctx *roomContext) 
 const (
 	natsSubjectEnforceMute   = "voice.enforce.mute"
 	natsSubjectEnforceDeafen = "voice.enforce.deafen"
-
-	// sentryNatsTag is the Sentry tag category for NATS voice event errors.
-	sentryNatsTag = "nats.subject"
 
 	natsSubjectVoiceJoined    = "voice.joined"
 	natsSubjectVoiceLeft      = "voice.left"

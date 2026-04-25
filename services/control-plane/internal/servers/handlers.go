@@ -14,7 +14,6 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/media"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
-	sentryPkg "github.com/markdrogersjr/Concord/services/control-plane/internal/sentry"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 )
@@ -96,7 +95,6 @@ func (h *Handler) ListServers(c *gin.Context) {
 	rows, err := h.db.Query(query, userID, pq.Array(connectedIDs))
 	if err != nil {
 		h.log.Error("Failed to query servers", "error", err)
-		sentryPkg.CaptureFromContext(c, err, sentryTagKey, "servers.ListServers")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetch})
 		return
 	}
@@ -127,7 +125,6 @@ func (h *Handler) ListServers(c *gin.Context) {
 	}
 	if err := rows.Err(); err != nil {
 		h.log.Error("Error iterating servers", "error", err)
-		sentryPkg.CaptureFromContext(c, err, sentryTagKey, "servers.ListServers.rowsErr")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetch})
 		return
 	}
@@ -215,7 +212,6 @@ func (h *Handler) CreateServer(c *gin.Context) {
 	tx, err := h.db.Begin()
 	if err != nil {
 		h.log.Error("Failed to start transaction", "error", err)
-		sentryPkg.CaptureFromContext(c, err, sentryTagKey, "servers.CreateServer.beginTx")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreate})
 		return
 	}
@@ -243,21 +239,18 @@ func (h *Handler) CreateServer(c *gin.Context) {
 
 	if err := insertServerRow(tx, &server, e2eeDefault); err != nil {
 		h.log.Error("Failed to create server", "error", err)
-		sentryPkg.CaptureFromContext(c, err, sentryTagKey, "servers.CreateServer.insertRow")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreate})
 		return
 	}
 
 	if err := insertOwnerMembership(tx, serverID, userID); err != nil {
 		h.log.Error("Failed to set up owner membership", "error", err)
-		sentryPkg.CaptureFromContext(c, err, sentryTagKey, "servers.CreateServer.ownerMembership")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreate})
 		return
 	}
 
 	if err := tx.Commit(); err != nil {
 		h.log.Error("Failed to commit transaction", "error", err)
-		sentryPkg.CaptureFromContext(c, err, sentryTagKey, "servers.CreateServer.commit")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreate})
 		return
 	}
@@ -294,7 +287,6 @@ func (h *Handler) GetServer(c *gin.Context) {
 		return
 	} else if err != nil {
 		h.log.Error("Failed to check membership", "error", err)
-		sentryPkg.CaptureFromContext(c, err, sentryTagKey, "servers.GetServer.checkMembership")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetch})
 		return
 	}
@@ -323,7 +315,6 @@ func (h *Handler) GetServer(c *gin.Context) {
 		return
 	} else if err != nil {
 		h.log.Error("Failed to fetch server", "error", err)
-		sentryPkg.CaptureFromContext(c, err, sentryTagKey, "servers.GetServer.fetchServer")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetch})
 		return
 	}
@@ -355,7 +346,6 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 	hasPerm, err := h.resolver.HasPermission(c.Request.Context(), serverID, userID, "", rbac.PermManageServer)
 	if err != nil {
 		h.log.Error("Failed to check permissions", "error", err)
-		sentryPkg.CaptureFromContext(c, err, sentryTagKey, "servers.UpdateServer.checkPerms")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdate})
 		return
 	}
@@ -410,7 +400,6 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 		return
 	} else if err != nil {
 		h.log.Error("Failed to update server", "error", err)
-		sentryPkg.CaptureFromContext(c, err, sentryTagKey, "servers.UpdateServer.update")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdate})
 		return
 	}
@@ -533,7 +522,6 @@ func (h *Handler) DeleteServer(c *gin.Context) {
 		return
 	} else if err != nil {
 		h.log.Error("Failed to check ownership", "error", err)
-		sentryPkg.CaptureFromContext(c, err, sentryTagKey, "servers.DeleteServer.checkOwnership")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDelete})
 		return
 	}
@@ -549,7 +537,6 @@ func (h *Handler) DeleteServer(c *gin.Context) {
 	_, err = h.db.Exec(deleteQuery, serverID)
 	if err != nil {
 		h.log.Error("Failed to delete server", "error", err)
-		sentryPkg.CaptureFromContext(c, err, sentryTagKey, "servers.DeleteServer.delete")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDelete})
 		return
 	}
