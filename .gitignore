@@ -66,6 +66,7 @@ pnpm-lock.yaml
 dist/
 build/
 !client/desktop/build/
+!client/desktop/tests/unit/build/
 out/
 client-builds/
 .next/

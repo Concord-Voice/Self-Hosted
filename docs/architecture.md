@@ -165,6 +165,19 @@ flowchart TB
 - Progressive Web App (PWA) capabilities
 - Limited platform integration
 
+#### SPA Deploy Lifecycle (ADR-0001)
+
+The SPA bundle and the HTTP handler that serves it are coupled at deploy time but decoupled at build time. Vite's `base: './'` makes all chunks resolve relative to the URL `index.html` was loaded from. The `deploy-spa.yml` workflow uploads the bundle to `/opt/concord/spa/<sha7>/`, writes `spa.env` with `SPA_URL=https://api.concordvoice.chat/spa/<sha7>/index.html` (atomically derived from the same `${SHA7}` env var), and the server's auto-pull picks up the new values within ~60s.
+
+Four invariants enforce the contract:
+
+1. **Build invariant** — `vite.config.ts` keeps `base: './'`. Locked by `vite-base-relative.test.ts`.
+2. **Deploy invariant** — `spa.env` is a generated artifact. `verify-spa-env` workflow runs on every PR with structural + author-attribution checks.
+3. **Runtime safety net** — renderer self-heals on chunk-load failures via two-layer detection (renderer-side `error`/`unhandledrejection` listeners + main-process `did-fail-load`) feeding a shared recovery primitive with R2 retry semantics.
+4. **Documentation invariant** — this section + [`[internal]rules/electron.md`](../[internal]rules/electron.md) link to ADR-0001 so the contract is discoverable through normal architectural-discovery paths.
+
+For the full rationale, see [ADR-0001](adr/0001-spa-deploy-contract.md).
+
 ### Control Plane (Go)
 
 **Port**: 8080
