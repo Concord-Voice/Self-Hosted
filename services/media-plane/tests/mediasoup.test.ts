@@ -2,16 +2,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { createMockWorker } from './mocks/mediasoup.js';
 import './mocks/logger.js';
 
-// Mock Sentry so flush() resolves immediately and doesn't hit the network
-vi.mock('@sentry/node', () => ({
-  flush: vi.fn(() => Promise.resolve()),
-}));
-
-// Mock sentry-helpers so captureWithTag is a no-op in these tests
-vi.mock('@/lib/sentry-helpers.js', () => ({
-  captureWithTag: vi.fn(),
-}));
-
 // Mock mediasoup native module
 const mockCreateWorker = vi.fn();
 vi.mock('mediasoup', () => ({
@@ -81,8 +71,6 @@ describe('MediasoupService', () => {
 
       worker._emit('died');
 
-      // The died handler is async (captureWithTag + Sentry.flush before exit),
-      // so flush the microtask queue before asserting.
       await vi.waitFor(() => {
         expect(process.exit).toHaveBeenCalledWith(1);
       });
