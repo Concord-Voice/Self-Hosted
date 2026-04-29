@@ -84,9 +84,6 @@ client/desktop/src/main/**/*.js.map
 client/desktop/src/main/**/*.d.ts
 client/desktop/src/main/**/*.d.ts.map
 
-# Sentry build-time codegen (DSN baked in at build, not at runtime)
-client/desktop/src/shared/sentry-config.generated.ts
-
 # Go
 *.exe
 *.exe~

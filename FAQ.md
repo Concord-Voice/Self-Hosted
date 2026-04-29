@@ -292,9 +292,7 @@ See [.github/SECURITY.md](./.github/SECURITY.md) for full policy.
 
 **Telemetry:**
 
-- Sentry error tracking in the desktop client (production-only; disabled in development)
-- Privacy-first: key material, message content, and PII are never sent to Sentry
-- Aggregated crash and error data only — no user content
+- No telemetry or crash reporting is collected
 
 ---
 

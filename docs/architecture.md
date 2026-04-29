@@ -154,7 +154,6 @@ flowchart TB
   - E2EE message encryption/decryption (AES-256-GCM)
   - Secure token storage (Electron safeStorage / OS keychain)
   - ~30 Zustand stores for state management (see `[internal]` for current count)
-  - Error tracking via Sentry (production only; PII/key material scrubbed via `beforeSend`)
 - **Communication**:
   - HTTP/WebSocket → Control Plane (signaling, auth, channels, presence)
   - Socket.IO → Media Plane (voice signaling)
@@ -792,11 +791,6 @@ US-East US-West   EU-Central APAC
 - Structured JSON logs in production
 - Correlation IDs for request tracing
 - Error tracking with stack traces
-
-### Error Tracking (Sentry)
-
-- **Desktop client**: Sentry SDK active in production; PII/key material scrubbed via `beforeSend` before any data leaves the process
-- **Control plane / Media plane**: Sentry integration planned (follow-up issues)
 
 ### Tracing (Jaeger)
 

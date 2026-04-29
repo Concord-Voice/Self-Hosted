@@ -26,7 +26,6 @@ const (
 	errMsgFailedFetch     = "Failed to fetch server"
 	errMsgFailedUpdate    = "Failed to update server"
 	errMsgFailedDelete    = "Failed to delete server"
-	sentryTagKey          = "db.operation"
 )
 
 // Handler handles server-related requests

@@ -10,7 +10,7 @@ import (
 )
 
 // buildPrivacyHandler constructs the privacy handler wired to the
-// account-deletion service. Sentry-related wiring was removed in #758;
+// account-deletion service. Telemetry-related wiring was removed in #758 (sub-epic G);
 // the handler now exposes only POST /api/v1/privacy/erase-account.
 func buildPrivacyHandler(db *sql.DB, log *logger.Logger) *privacy.Handler {
 	account := users.NewAccountService(db, log)

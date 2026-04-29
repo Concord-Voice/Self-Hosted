@@ -68,7 +68,7 @@ On **all platforms**, the HTTPS connection to `https://api.concordvoice.chat/api
 - Concord obtains the TLS cert via Let's Encrypt on the origin (certbot with `--reuse-key`) and uploads it to CloudFlare via `[internal]upload-cert-to-cloudflare.sh` (a certbot renewal hook). CloudFlare serves the uploaded cert at its edge, preserving the SPKI that clients pin.
 - `--reuse-key` is load-bearing: without it, every 90-day renewal would generate a new keypair, the SPKI would change, and every pinned client would hard-fail on next update check.
 - Rotation (deliberate keypair rotation for compromise or cadence) follows the dual-pin runbook procedure (`[internal]`).
-- Observability: fallback-pin hits emit a Sentry breadcrumb with category `update.pin` and `outcome:'fallback'`; pin misses emit an error breadcrumb plus a deduplicated `captureException` with fingerprint `['cert-pin-miss', hostname]`.
+- Observability: the current verify proc is wired to `console`, and `updatePinning.ts` emits plain string log lines for pinning events. Operators should expect plain-text console output for fallback-pin usage and pin mismatches; there are currently no structured `category` / `outcome` fields, no `fingerprint` array, and no built-in deduplication.
 
 **Implementation references:**
 

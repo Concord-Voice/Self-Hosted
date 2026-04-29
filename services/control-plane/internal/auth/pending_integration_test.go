@@ -219,7 +219,7 @@ func TestInsertOrTakeover_UsesPolicyTTL(t *testing.T) {
 }
 
 // TestInsertOrTakeover_PendingUsernameCollisionAfterTakeover regresses
-// Sentry Seer comment 3104407314: after an email takeover succeeds, a
+// After an email takeover succeeds, a
 // *different* pending row holding the target username must produce
 // ErrUsernameTaken (to yield a 409) rather than a unique-constraint 500.
 func TestInsertOrTakeover_PendingUsernameCollisionAfterTakeover(t *testing.T) {
