@@ -1211,3 +1211,275 @@ func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
 	h.log.Info("Privacy settings updated", "user_id", userID)
 	c.JSON(http.StatusOK, gin.H{"privacy": ps})
 }
+
+// --- SSO settings endpoints (issue #270) ---
+
+// ListSSOIdentities returns the linked SSO providers for the authenticated user.
+// GET /api/v1/users/me/sso-identities
+func (h *Handler) ListSSOIdentities(c *gin.Context) {
+	userID := c.GetString("user_id")
+	rows, err := h.db.QueryContext(c.Request.Context(),
+		`SELECT provider, provider_email, is_relay_email, created_at, last_used_at
+		 FROM user_sso_identities
+		 WHERE user_id = $1
+		 ORDER BY created_at ASC`, userID)
+	if err != nil {
+		h.log.Error("Failed to list SSO identities", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "db_error"})
+		return
+	}
+	defer func() { _ = rows.Close() }()
+
+	type identity struct {
+		Provider      string     `json:"provider"`
+		ProviderEmail string     `json:"provider_email"`
+		IsRelayEmail  bool       `json:"is_relay_email"`
+		LinkedAt      time.Time  `json:"linked_at"`
+		LastUsedAt    *time.Time `json:"last_used_at"`
+	}
+	out := []identity{}
+	for rows.Next() {
+		var i identity
+		if err := rows.Scan(&i.Provider, &i.ProviderEmail, &i.IsRelayEmail, &i.LinkedAt, &i.LastUsedAt); err != nil {
+			h.log.Error("Failed to scan SSO identity row", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error_code": "scan_error"})
+			return
+		}
+		out = append(out, i)
+	}
+	if err := rows.Err(); err != nil {
+		h.log.Error("Row iteration error listing SSO identities", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "rows_error"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"identities": out})
+}
+
+// GetSecurity returns the authenticated user's SSO-related security flags so
+// the Settings panel can hydrate the toggles on mount instead of defaulting
+// to false. Mirrors the columns PatchSecurity writes to.
+//
+// GET /api/v1/users/me/security
+func (h *Handler) GetSecurity(c *gin.Context) {
+	userID := c.GetString("user_id")
+	var pld, trust bool
+	err := h.db.QueryRowContext(c.Request.Context(),
+		`SELECT password_login_disabled, trust_sso_security FROM users WHERE id = $1`,
+		userID,
+	).Scan(&pld, &trust)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error_code": "user_not_found"})
+		return
+	}
+	if err != nil {
+		h.log.Error("Failed to fetch security flags", "error", err, "user_id", userID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "lookup_failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"password_login_disabled": pld,
+		"trust_sso_security":      trust,
+	})
+}
+
+// patchSecurityRequest is the body of PATCH /api/v1/users/me/security.
+// Pointer fields distinguish "not supplied" from "supplied as false".
+type patchSecurityRequest struct {
+	PasswordLoginDisabled *bool  `json:"password_login_disabled"`
+	TrustSSOSecurity      *bool  `json:"trust_sso_security"`
+	CurrentPassphrase     string `json:"current_passphrase"`
+}
+
+// verifyCurrentPassphrase loads the user's password hash and confirms the
+// supplied passphrase matches. On any failure (lookup miss, lookup error,
+// verify error, mismatch) it writes the appropriate error response to c and
+// returns false; the caller MUST return immediately when this returns false
+// to avoid double-writing the response. Extracted from PatchSecurity to keep
+// that handler under SonarQube's S3776 cognitive-complexity threshold.
+func (h *Handler) verifyCurrentPassphrase(c *gin.Context, userID, plaintext string) bool {
+	var passwordHash string
+	err := h.db.QueryRowContext(c.Request.Context(),
+		`SELECT password_hash FROM users WHERE id = $1`, userID,
+	).Scan(&passwordHash)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "invalid_credentials"})
+		return false
+	}
+	if err != nil {
+		h.log.Error("Failed to fetch password hash for security patch", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "lookup_failed"})
+		return false
+	}
+	match, err := auth.VerifyPassword(plaintext, passwordHash)
+	if err != nil {
+		h.log.Error("Failed to verify passphrase for security patch", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "verify_failed"})
+		return false
+	}
+	if !match {
+		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "invalid_credentials"})
+		return false
+	}
+	return true
+}
+
+// PatchSecurity flips the two SSO-related security flags. Any change requires
+// passphrase confirmation to defend against session-token-replay-driven
+// settings hijack.
+// PATCH /api/v1/users/me/security
+func (h *Handler) PatchSecurity(c *gin.Context) {
+	userID := c.GetString("user_id")
+	var req patchSecurityRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_request"})
+		return
+	}
+	if req.CurrentPassphrase == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "passphrase_required"})
+		return
+	}
+	if !h.verifyCurrentPassphrase(c, userID, req.CurrentPassphrase) {
+		return
+	}
+
+	// Lockout check: if the user is asking to disable password login, ensure
+	// they have at least one SSO identity to fall back on. Otherwise the next
+	// /auth/login attempt would 403 with account_uses_sso → empty providers
+	// list → permanent lockout. This mirrors DeleteSSOIdentity's would_lock_out
+	// gate from the other side: that endpoint refuses to remove the LAST
+	// identity when password is disabled; this endpoint refuses to disable
+	// password when there are NO identities. Together they form a structural
+	// invariant: password OR ≥1 SSO identity, always.
+	if req.PasswordLoginDisabled != nil && *req.PasswordLoginDisabled { // pragma: allowlist secret
+		var ssoCount int64
+		if err := h.db.QueryRowContext(c.Request.Context(),
+			`SELECT COUNT(*) FROM user_sso_identities WHERE user_id = $1`, userID,
+		).Scan(&ssoCount); err != nil {
+			h.log.Error("Failed to count SSO identities for lockout check", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error_code": "lookup_failed"})
+			return
+		}
+		if ssoCount == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error_code": "would_lock_out",
+				"detail":     "Link an SSO provider before disabling password login.",
+			})
+			return
+		}
+	}
+
+	// Build a dynamic UPDATE so we only set provided fields. Column names are
+	// hardcoded literals (not user input); only the values are bound via $N.
+	var sets []string
+	var args []any
+	idx := 1
+	if req.PasswordLoginDisabled != nil { // pragma: allowlist secret
+		sets = append(sets, fmt.Sprintf("password_login_disabled = $%d", idx)) // pragma: allowlist secret
+		args = append(args, *req.PasswordLoginDisabled)
+		idx++
+	}
+	if req.TrustSSOSecurity != nil {
+		sets = append(sets, fmt.Sprintf("trust_sso_security = $%d", idx))
+		args = append(args, *req.TrustSSOSecurity)
+		idx++
+	}
+	if len(sets) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error_code": "no_fields"})
+		return
+	}
+	args = append(args, userID)
+	// Safe: column names in `sets` are hardcoded literals from the if-blocks above;
+	// only values are bound via $N placeholders, including the WHERE id = $idx target.
+	q := fmt.Sprintf( //nolint:gosec // hardcoded column names + integer idx — no injection risk // nosemgrep: go.lang.security.audit.database.string-formatted-query.string-formatted-query,concord-go-sql-sprintf
+		"UPDATE users SET %s WHERE id = $%d",
+		strings.Join(sets, ", "), idx,
+	)
+	// nosemgrep: go.net.sql.go-vanillasql-format-string-sqli-taint-med-conf.go-vanillasql-format-string-sqli-taint-med-conf,go.net.sql.go-vanillasql-format-string-sqli-taint.go-vanillasql-format-string-sqli-taint
+	if _, err := h.db.ExecContext(c.Request.Context(), q, args...); err != nil { //nolint:gosec // q composed above from hardcoded column names + integer idx via fmt.Sprintf; user values flow only through args... as parameterized $N placeholders.
+		h.log.Error("Failed to update security settings", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "update_failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}
+
+// DeleteSSOIdentity unlinks a provider from the authenticated user.
+// Refuses if doing so would leave the user with no authentication method.
+// DELETE /api/v1/users/me/sso-identities/:provider
+//
+// The lockout check + delete run inside a single transaction with SELECT FOR
+// UPDATE on the users row to defend against TOCTOU: without the lock, two
+// concurrent requests could both observe a "still has fallback" state, both
+// pass the wouldHaveAnyAuth gate, and both delete different identities, jointly
+// leaving the user locked out. The row lock serializes the check-and-delete so
+// the second request observes the post-delete state and refuses.
+func (h *Handler) DeleteSSOIdentity(c *gin.Context) {
+	userID := c.GetString("user_id")
+	provider := c.Param("provider")
+
+	ctx := c.Request.Context()
+	tx, err := h.db.BeginTx(ctx, nil)
+	if err != nil {
+		h.log.Error("Failed to begin transaction for SSO identity delete", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "delete_failed"})
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// Lock the users row for the duration of the tx — concurrent
+	// DeleteSSOIdentity / PatchSecurity calls for the same user must serialize
+	// against this lock. The correlated subquery counts identities EXCLUDING
+	// the one being deleted (i.e., the post-delete identity count).
+	var pld bool
+	var identityCount int64
+	err = tx.QueryRowContext(ctx,
+		`SELECT u.password_login_disabled, (
+		    SELECT COUNT(*) FROM user_sso_identities WHERE user_id = u.id AND provider != $2
+		 )
+		 FROM users u WHERE u.id = $1
+		 FOR UPDATE`,
+		userID, provider,
+	).Scan(&pld, &identityCount)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error_code": "user_not_found"})
+		return
+	}
+	if err != nil {
+		h.log.Error("Failed to evaluate lockout check for SSO identity delete", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "lookup_failed"})
+		return
+	}
+	wouldHaveAnyAuth := !pld /* password counts when not disabled */ || identityCount > 0
+	if !wouldHaveAnyAuth {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error_code": "would_lock_out",
+			"detail":     "Set a passphrase first or link another provider before unlinking this one.",
+		})
+		return
+	}
+
+	res, err := tx.ExecContext(ctx,
+		`DELETE FROM user_sso_identities WHERE user_id = $1 AND provider = $2`,
+		userID, provider)
+	if err != nil {
+		h.log.Error("Failed to delete SSO identity", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "delete_failed"})
+		return
+	}
+	rows, err := res.RowsAffected()
+	if err != nil {
+		h.log.Error("Failed to read RowsAffected for SSO identity delete", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "delete_failed"})
+		return
+	}
+	if rows == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error_code": "not_linked"})
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		h.log.Error("Failed to commit SSO identity delete", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "delete_failed"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"ok": true})
+}

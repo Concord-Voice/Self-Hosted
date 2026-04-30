@@ -68,6 +68,7 @@ func SetupTestDB(t *testing.T) (*sql.DB, func()) {
 func TruncateAllTables(db *sql.DB) error {
 	_, err := db.Exec(`TRUNCATE
 		account_deletions,
+		user_sso_identities,
 		users,
 		user_keys,
 		public_keys,

@@ -36,6 +36,27 @@ func defaultDevRedisURL() string {
 	return "redis://:" + devRedisVal + "@localhost:6379"
 }
 
+// GoogleSSOConfig holds Google Sign-In credentials. Empty when SSO is disabled.
+// ClientSecret is treated as sensitive — String() redacts it so logging the
+// struct never prints the secret.
+type GoogleSSOConfig struct {
+	Enabled      bool
+	ClientID     string
+	ClientSecret string // #nosec G117 G101 -- False positive: config field name, actual secret loaded from env
+}
+
+// String renders the config with the secret redacted, suitable for logs.
+// Renders "[empty]" when no secret is set so empty-vs-redacted is unambiguous
+// in operator-facing output.
+func (g GoogleSSOConfig) String() string {
+	secret := "[empty]"
+	if g.ClientSecret != "" {
+		secret = "[REDACTED]"
+	}
+	return fmt.Sprintf("GoogleSSOConfig{Enabled:%t ClientID:%q ClientSecret:%s}",
+		g.Enabled, g.ClientID, secret)
+}
+
 // Config holds all configuration for the application
 type Config struct {
 	Environment string
@@ -107,6 +128,11 @@ type Config struct {
 	// validate() rejects an empty list in production to prevent silent regression
 	// to returning the proxy address instead of the real client IP.
 	TrustedProxyCIDRs []string
+
+	// GoogleSSO holds Google Sign-In credentials (#270). Disabled by default.
+	// Load() returns an error if Enabled=true but credentials are unset, so
+	// misconfiguration is caught at startup in any environment.
+	GoogleSSO GoogleSSOConfig
 }
 
 // Load reads configuration from environment variables
@@ -158,6 +184,19 @@ func Load() (*Config, error) {
 		log.Fatalf("FATAL: %v", err)
 	}
 	cfg.TrustedProxyCIDRs = cidrs
+
+	// Google SSO (#270). Disabled by default. When enabled, both the client
+	// ID and secret must be set — return an error from Load() in any
+	// environment so misconfiguration surfaces at startup instead of failing
+	// on first OAuth callback.
+	cfg.GoogleSSO.Enabled = getEnv("GOOGLE_SSO_ENABLED", "false") == "true"
+	cfg.GoogleSSO.ClientID = os.Getenv("GOOGLE_CLIENT_ID")
+	cfg.GoogleSSO.ClientSecret = os.Getenv("GOOGLE_CLIENT_SECRET")
+	if cfg.GoogleSSO.Enabled {
+		if cfg.GoogleSSO.ClientID == "" || cfg.GoogleSSO.ClientSecret == "" {
+			return nil, fmt.Errorf("GoogleSSO enabled but GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET unset")
+		}
+	}
 
 	if err := cfg.validate(); err != nil {
 		log.Fatal(err)

@@ -199,6 +199,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	updatesHandler := updates.NewHandler(cfg, log)
 	spaHandler := spa.NewHandler(cfg.SpaDir, log)
 	privacyHandler := buildPrivacyHandler(db, log)
+	oauthHandler := buildOAuthHandler(db, redis, cfg, authHandler, log)
 
 	// Start NATS voice event subscriber
 	if natsClient != nil {
@@ -317,6 +318,42 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				middleware.RateLimitByIP(redis, 10, 15*time.Minute),
 				authHandler.PollSocialRecoveryRequest,
 			)
+
+			// SSO endpoints (#270). All four are unauthenticated — the user is
+			// proving identity via the provider, not via an existing Concord
+			// session. Lockout posture matches /auth/login: per-IP rate limits
+			// here, plus AuthBanCheck inherited from the parent group.
+			//
+			// Initiate (10/15min): one click per attempt. Higher than 5 to
+			//   accommodate "user closes the browser tab and retries".
+			// Callback (10/15min): per-attempt POST after the OS browser
+			//   redirect. Same posture as Initiate.
+			// CompleteRegistration (5/15min): user has just chosen a username
+			//   and passphrase; abuse vector is account-spam, so match
+			//   /auth/register's 5/15min ceiling.
+			// CompleteLink (5/15min): password verification for the
+			//   account-link path. Shares the EMAIL-keyed lockout counter via
+			//   AuthAdapter.VerifyPassword, but the per-IP cap prevents a
+			//   distributed-IP attacker from bypassing the email gate.
+			ssoRoutes := authRoutes.Group("/sso")
+			{
+				ssoRoutes.GET("/:provider",
+					middleware.RateLimitByIP(redis, 10, 15*time.Minute),
+					oauthHandler.Initiate,
+				)
+				ssoRoutes.POST("/:provider/callback",
+					middleware.RateLimitByIP(redis, 10, 15*time.Minute),
+					oauthHandler.Callback,
+				)
+				ssoRoutes.POST("/:provider/complete-registration",
+					middleware.RateLimitByIP(redis, 5, 15*time.Minute),
+					oauthHandler.CompleteRegistration,
+				)
+				ssoRoutes.POST("/:provider/complete-link",
+					middleware.RateLimitByIP(redis, 5, 15*time.Minute),
+					oauthHandler.CompleteLink,
+				)
+			}
 		}
 
 		// Client config (public — pre-auth, clients need this before login)
@@ -654,6 +691,24 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				userRoutes.PATCH("/me/privacy",
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					usersHandler.UpdatePrivacySettings,
+				)
+
+				// SSO settings (issue #270)
+				userRoutes.GET("/me/sso-identities",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					usersHandler.ListSSOIdentities,
+				)
+				userRoutes.GET("/me/security",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					usersHandler.GetSecurity,
+				)
+				userRoutes.PATCH("/me/security",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					usersHandler.PatchSecurity,
+				)
+				userRoutes.DELETE("/me/sso-identities/:provider",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					usersHandler.DeleteSSOIdentity,
 				)
 			}
 

@@ -1193,3 +1193,142 @@ func sha256Hex(s string) string {
 func normalizeEmail(e string) string {
 	return strings.ToLower(strings.TrimSpace(e))
 }
+
+// --- SSO Short-Circuit Tests (Task 11 / issue #270) ---
+
+// TestLogin_PasswordDisabled_ReturnsAccountUsesSSO verifies that /login on an
+// SSO-only account returns 403 account_uses_sso with the linked-provider list
+// (instead of 401 invalid_credentials), so the renderer can swap the form for
+// the SSO button.
+func TestLogin_PasswordDisabled_ReturnsAccountUsesSSO(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "ssoonly")
+
+	// Flip the SSO-only flag and link a Google identity.
+	_, err := ts.DB.Exec(`UPDATE users SET password_login_disabled = TRUE WHERE id = $1`, user.ID)
+	require.NoError(t, err)
+	_, err = ts.DB.Exec(
+		`INSERT INTO user_sso_identities (user_id, provider, provider_user_id, provider_email)
+		 VALUES ($1, 'google', 'google-sub-X', $2)`, user.ID, user.Email)
+	require.NoError(t, err)
+
+	w := ts.DoRequest("POST", pathLogin, map[string]interface{}{
+		"email":    user.Email,
+		"password": "any-password-the-user-types", //nolint:gosec // test credential, irrelevant
+	}, nil)
+
+	require.Equal(t, http.StatusForbidden, w.Code)
+	var resp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &resp)
+	assert.Equal(t, "account_uses_sso", resp["error_code"])
+	providers, ok := resp["providers"].([]interface{})
+	require.True(t, ok, "providers field should be a JSON array")
+	assert.Contains(t, providers, "google")
+}
+
+// TestLogin_PasswordDisabled_DoesNotIncrementLockout verifies that the lockout
+// counter is NOT engaged for SSO-only short-circuited responses. Lockout is
+// for password-credential-bruteforce, not user navigation errors.
+//
+// We verify the precise invariant: the per-email Redis keys
+// (login_attempts:<email>, login_lockout_count:<email>) are never created by
+// the SSO short-circuit path. Then we flush the per-IP rate-limit key (which
+// IS expected to engage — it's a separate, IP-scoped defense applied via
+// middleware) and confirm normal login succeeds, proving no per-email lockout
+// was sticky.
+func TestLogin_PasswordDisabled_DoesNotIncrementLockout(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "nolock")
+
+	// Set password_login_disabled = TRUE AND insert an SSO identity so this test // pragma: allowlist secret
+	// exercises the 403 account_uses_sso path (its original intent). Without the
+	// identity row, the new len(providers) == 0 branch in Login() returns 500
+	// sso_account_misconfigured for the data-integrity violation case — that
+	// path is covered by TestLogin_PasswordDisabled_NoIdentities_Returns500.
+	_, err := ts.DB.Exec(`UPDATE users SET password_login_disabled = TRUE WHERE id = $1`, user.ID)
+	require.NoError(t, err)
+	_, err = ts.DB.Exec(
+		`INSERT INTO user_sso_identities (user_id, provider, provider_user_id, provider_email)
+		 VALUES ($1, 'google', 'google-sub-NOLOCK', $2)`, user.ID, user.Email)
+	require.NoError(t, err)
+
+	rctx := context.Background()
+
+	// Hammer /login 5 times — past the 5-attempt lockout threshold for password
+	// failures. If the short-circuit accidentally called recordFailedLogin, we'd
+	// see login_attempts:<email> populated.
+	for i := 0; i < 5; i++ {
+		w := ts.DoRequest("POST", pathLogin, map[string]interface{}{
+			"email":    user.Email,
+			"password": "x", //nolint:gosec // test credential, irrelevant
+		}, nil)
+		require.Equal(t, http.StatusForbidden, w.Code)
+	}
+
+	// Precise invariant: per-email lockout counters MUST NOT exist.
+	attemptsKey := "login_attempts:" + user.Email
+	lockoutKey := "login_lockout:" + user.Email
+	lockoutCountKey := "login_lockout_count:" + user.Email
+	exists, err := ts.Redis.Exists(rctx, attemptsKey, lockoutKey, lockoutCountKey).Result()
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), exists, "SSO short-circuit must not engage per-email lockout counter")
+
+	// Flush the per-IP rate-limit key (separate defense; not the lockout counter)
+	// so we can verify normal login succeeds when the flag is cleared.
+	ts.Redis.Del(rctx, "ratelimit:ip:192.0.2.1:POST:"+pathLogin)
+
+	// Flip the flag back and verify normal login still works.
+	_, err = ts.DB.Exec(`UPDATE users SET password_login_disabled = FALSE WHERE id = $1`, user.ID)
+	require.NoError(t, err)
+
+	w := ts.DoRequest("POST", pathLogin, map[string]interface{}{
+		"email":    user.Email,
+		"password": testhelpers.TestAuthPlaintext,
+	}, nil)
+	require.Equal(t, http.StatusOK, w.Code)
+}
+
+// TestLogin_PasswordDisabled_NoIdentities_Returns500 verifies the
+// data-integrity invariant: if a user has password_login_disabled = TRUE but // pragma: allowlist secret
+// no SSO identity rows, /login returns 500 sso_account_misconfigured (NOT 403
+// account_uses_sso with an empty providers array). The API surface
+// (PatchSecurity, DeleteSSOIdentity) refuses transitions that would create
+// this state, so reaching this branch implies direct DB mutation, a buggy
+// migration, or a race that bypassed the row-lock — all of which are
+// server-side faults the renderer cannot recover from with "try again". A
+// distinct 500 error_code makes the case discoverable in observability and
+// lets the renderer route around the transient-failure UX wording.
+//
+// Also asserts that this path, like the 403 short-circuit, does NOT engage
+// the per-email lockout counter — this is a server fault, not a credential
+// bruteforce signal.
+func TestLogin_PasswordDisabled_NoIdentities_Returns500(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "ssomisconfig")
+
+	// Flip the SSO-only flag WITHOUT inserting any user_sso_identities row.
+	// This is the data-integrity violation we want to surface.
+	_, err := ts.DB.Exec(`UPDATE users SET password_login_disabled = TRUE WHERE id = $1`, user.ID)
+	require.NoError(t, err)
+
+	w := ts.DoRequest("POST", pathLogin, map[string]interface{}{
+		"email":    user.Email,
+		"password": "any-password-the-user-types", //nolint:gosec // test credential, irrelevant
+	}, nil)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code,
+		"empty providers array on password-disabled account must return 500, not 403")
+	var resp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &resp)
+	assert.Equal(t, "sso_account_misconfigured", resp["error_code"])
+	assert.NotContains(t, resp, "providers",
+		"500 sso_account_misconfigured response must not include a providers field — that's the 403 path's contract")
+
+	// Per-email lockout counter MUST NOT be engaged for the integrity-error path.
+	rctx := context.Background()
+	attemptsKey := "login_attempts:" + user.Email
+	exists, err := ts.Redis.Exists(rctx, attemptsKey).Result()
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), exists,
+		"sso_account_misconfigured path must not engage per-email lockout — it's a server fault, not a credential failure")
+}

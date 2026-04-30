@@ -355,3 +355,65 @@ func TestMediaPlaneURLIsRoot(t *testing.T) {
 		})
 	}
 }
+
+// Google SSO config tests (#270 Task 4).
+//
+// The production guard fires on misconfiguration regardless of environment —
+// if SSO is enabled but credentials are missing, Load() returns an error so
+// dev/staging surfaces the bug at startup instead of failing on first login.
+
+func TestGoogleSSOConfig_Disabled_NoFatal(t *testing.T) {
+	t.Setenv("GOOGLE_SSO_ENABLED", "false")
+	t.Setenv("GOOGLE_CLIENT_ID", "")
+	t.Setenv("GOOGLE_CLIENT_SECRET", "")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.False(t, cfg.GoogleSSO.Enabled)
+}
+
+func TestGoogleSSOConfig_EnabledWithCredentials_OK(t *testing.T) {
+	t.Setenv("GOOGLE_SSO_ENABLED", "true")
+	t.Setenv("GOOGLE_CLIENT_ID", "test-client-id.apps.googleusercontent.com")
+	t.Setenv("GOOGLE_CLIENT_SECRET", "test-secret-123") //nolint:gosec // test fixture, not a real secret
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.True(t, cfg.GoogleSSO.Enabled)
+	assert.Equal(t, "test-client-id.apps.googleusercontent.com", cfg.GoogleSSO.ClientID)
+	assert.Equal(t, "test-secret-123", cfg.GoogleSSO.ClientSecret)
+}
+
+func TestGoogleSSOConfig_EnabledMissingCredentials_Error(t *testing.T) {
+	t.Setenv("GOOGLE_SSO_ENABLED", "true")
+	t.Setenv("GOOGLE_CLIENT_ID", "")
+	t.Setenv("GOOGLE_CLIENT_SECRET", "")
+
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "GoogleSSO enabled but GOOGLE_CLIENT_ID")
+}
+
+func TestGoogleSSOConfig_StringRedactsSecret(t *testing.T) {
+	cfg := GoogleSSOConfig{
+		Enabled:      true,
+		ClientID:     "test-client-id",
+		ClientSecret: "should-not-appear", //nolint:gosec // test fixture, not a real secret
+	}
+	str := cfg.String()
+	assert.Contains(t, str, "test-client-id")
+	assert.NotContains(t, str, "should-not-appear")
+	assert.Contains(t, str, "[REDACTED]")
+}
+
+func TestGoogleSSOConfig_StringEmptySecret(t *testing.T) {
+	cfg := GoogleSSOConfig{
+		Enabled:  false,
+		ClientID: "test-client-id",
+		// ClientSecret intentionally empty
+	}
+	str := cfg.String()
+	assert.Contains(t, str, "test-client-id")
+	assert.Contains(t, str, "[empty]")
+	assert.NotContains(t, str, "[REDACTED]")
+}

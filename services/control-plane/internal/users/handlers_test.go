@@ -459,3 +459,319 @@ func TestUpdateSavedGifsUnauthorized(t *testing.T) {
 	}, nil)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }
+
+// --- SSO settings endpoints (Task 12 / issue #270) ---
+
+const (
+	urlUsersMeSSOIdentities = "/api/v1/users/me/sso-identities"
+	urlUsersMeSecurity      = "/api/v1/users/me/security"
+)
+
+// TestListSSOIdentities_ReturnsLinkedProviders verifies that GET
+// /users/me/sso-identities returns the linked-provider list ordered by
+// created_at ASC, with provider, provider_email, is_relay_email, linked_at,
+// and last_used_at fields.
+func TestListSSOIdentities_ReturnsLinkedProviders(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "listuser")
+
+	_, err := ts.DB.Exec(
+		`INSERT INTO user_sso_identities (user_id, provider, provider_user_id, provider_email, last_used_at)
+		 VALUES ($1, 'google', 'g1', $2, NOW() - INTERVAL '3 days')`, user.ID, user.Email)
+	require.NoError(t, err)
+
+	w := ts.DoRequest("GET", urlUsersMeSSOIdentities, nil, testhelpers.AuthHeaders(user.AccessToken))
+
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp struct {
+		Identities []struct {
+			Provider      string `json:"provider"`
+			ProviderEmail string `json:"provider_email"`
+			IsRelayEmail  bool   `json:"is_relay_email"`
+		} `json:"identities"`
+	}
+	testhelpers.ParseJSON(t, w, &resp)
+	require.Len(t, resp.Identities, 1)
+	assert.Equal(t, "google", resp.Identities[0].Provider)
+	assert.Equal(t, user.Email, resp.Identities[0].ProviderEmail)
+}
+
+// TestGetSecurity_ReturnsCurrentFlags verifies that GET /users/me/security
+// returns the user's current password_login_disabled and trust_sso_security
+// flags so the Settings panel can hydrate the toggles on mount.
+func TestGetSecurity_ReturnsCurrentFlags(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "secflags")
+
+	// Default: both flags FALSE for a freshly created user.
+	w := ts.DoRequest("GET", urlUsersMeSecurity, nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp map[string]interface{}
+	testhelpers.ParseJSON(t, w, &resp)
+	assert.Equal(t, false, resp["password_login_disabled"])
+	assert.Equal(t, false, resp["trust_sso_security"])
+
+	// Flip both via direct DB write, re-fetch, verify.
+	_, err := ts.DB.Exec(
+		`UPDATE users SET password_login_disabled = TRUE, trust_sso_security = TRUE WHERE id = $1`, // pragma: allowlist secret
+		user.ID,
+	)
+	require.NoError(t, err)
+
+	w2 := ts.DoRequest("GET", urlUsersMeSecurity, nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusOK, w2.Code)
+	var resp2 map[string]interface{}
+	testhelpers.ParseJSON(t, w2, &resp2)
+	assert.Equal(t, true, resp2["password_login_disabled"])
+	assert.Equal(t, true, resp2["trust_sso_security"])
+}
+
+// TestPatchSecurity_TogglesPasswordLoginDisabled verifies the happy-path:
+// a valid passphrase confirmation flips password_login_disabled to TRUE.
+// The user must have at least one linked SSO identity for the would_lock_out
+// gate to allow the change — otherwise disabling password login would leave
+// the account with no usable login method (see
+// TestPatchSecurity_PasswordLoginDisabled_NoSSOIdentity_Refuses400 below for
+// the negative path).
+func TestPatchSecurity_TogglesPasswordLoginDisabled(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "patchuser")
+
+	// Pre-link a Google identity so the lockout gate permits disabling password login.
+	_, err := ts.DB.Exec(
+		`INSERT INTO user_sso_identities (user_id, provider, provider_user_id, provider_email)
+		 VALUES ($1, 'google', 'patchuser-sub', $2)`, user.ID, user.Email)
+	require.NoError(t, err)
+
+	w := ts.DoRequest(methodPatch, urlUsersMeSecurity, map[string]interface{}{
+		"password_login_disabled": true,
+		"current_passphrase":      testPassword,
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var pld bool
+	require.NoError(t,
+		ts.DB.QueryRow(`SELECT password_login_disabled FROM users WHERE id = $1`, user.ID).Scan(&pld),
+	)
+	assert.True(t, pld)
+}
+
+// TestPatchSecurity_PasswordLoginDisabled_NoSSOIdentity_Refuses400 verifies the
+// would_lock_out gate added to PatchSecurity: a user attempting to disable
+// password login without ANY linked SSO identity must be refused with 400.
+// This is the symmetric defense to DeleteSSOIdentity's would_lock_out check —
+// together they enforce the structural invariant that a user always has at
+// least one usable login method (password OR ≥1 SSO identity).
+func TestPatchSecurity_PasswordLoginDisabled_NoSSOIdentity_Refuses400(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "wouldlockout")
+
+	// No SSO identity linked. password_login_disabled=FALSE by default. // pragma: allowlist secret
+	w := ts.DoRequest(methodPatch, urlUsersMeSecurity, map[string]interface{}{
+		"password_login_disabled": true,
+		"current_passphrase":      testPassword,
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "would_lock_out")
+
+	// Verify the flag was NOT mutated.
+	var pld bool
+	require.NoError(t,
+		ts.DB.QueryRow(`SELECT password_login_disabled FROM users WHERE id = $1`, user.ID).Scan(&pld),
+	)
+	assert.False(t, pld, "would_lock_out refusal must leave password_login_disabled at FALSE")
+}
+
+// TestPatchSecurity_RequiresPassphraseConfirmation verifies that supplying an
+// incorrect passphrase results in 401 invalid_credentials and does NOT mutate
+// the flag — defending against session-token-replay-driven settings hijack.
+func TestPatchSecurity_RequiresPassphraseConfirmation(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "noconf")
+
+	w := ts.DoRequest(methodPatch, urlUsersMeSecurity, map[string]interface{}{
+		"password_login_disabled": true,
+		"current_passphrase":      "wrong-password",
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Contains(t, w.Body.String(), "invalid_credentials")
+
+	// Verify the flag was NOT changed.
+	var pld bool
+	require.NoError(t,
+		ts.DB.QueryRow(`SELECT password_login_disabled FROM users WHERE id = $1`, user.ID).Scan(&pld),
+	)
+	assert.False(t, pld, "incorrect passphrase must not mutate the flag")
+}
+
+// TestDeleteSSOIdentity_RequiresPassphraseIfLastAuthMethod verifies that the
+// lockout-prevention check refuses to delete the last authentication method.
+// The user has password_login_disabled=TRUE and one Google identity — deleting // pragma: allowlist secret
+// it would leave them with no way to log in.
+func TestDeleteSSOIdentity_RequiresPassphraseIfLastAuthMethod(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "lastauth")
+
+	// Configure user as SSO-only with one provider.
+	_, err := ts.DB.Exec(`UPDATE users SET password_login_disabled = TRUE WHERE id = $1`, user.ID)
+	require.NoError(t, err)
+	_, err = ts.DB.Exec(
+		`INSERT INTO user_sso_identities (user_id, provider, provider_user_id, provider_email)
+		 VALUES ($1, 'google', 'g-last', $2)`, user.ID, user.Email)
+	require.NoError(t, err)
+
+	// Attempt to unlink — must fail with would_lock_out.
+	w := ts.DoRequest("DELETE", urlUsersMeSSOIdentities+"/google", nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "would_lock_out")
+
+	// Verify the row was NOT deleted.
+	var count int
+	require.NoError(t,
+		ts.DB.QueryRow(`SELECT COUNT(*) FROM user_sso_identities WHERE user_id = $1 AND provider = 'google'`, user.ID).Scan(&count),
+	)
+	assert.Equal(t, 1, count, "would_lock_out refusal must leave the identity intact")
+}
+
+// TestDeleteSSOIdentity_HappyPath_AllowsUnlinkWithPasswordFallback verifies
+// that a user with password_login_disabled=FALSE can unlink any SSO identity // pragma: allowlist secret
+// because the password remains a valid auth method — wouldHaveAnyAuth=true.
+func TestDeleteSSOIdentity_HappyPath_AllowsUnlinkWithPasswordFallback(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "unlinkok")
+
+	// password_login_disabled defaults to FALSE — user has password fallback. // pragma: allowlist secret
+	_, err := ts.DB.Exec(
+		`INSERT INTO user_sso_identities (user_id, provider, provider_user_id, provider_email)
+		 VALUES ($1, 'google', 'g-unlink', $2)`, user.ID, user.Email)
+	require.NoError(t, err)
+
+	w := ts.DoRequest("DELETE", urlUsersMeSSOIdentities+"/google", nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Contains(t, w.Body.String(), `"ok":true`)
+
+	// Verify the row was deleted.
+	var count int
+	require.NoError(t,
+		ts.DB.QueryRow(`SELECT COUNT(*) FROM user_sso_identities WHERE user_id = $1 AND provider = 'google'`, user.ID).Scan(&count),
+	)
+	assert.Equal(t, 0, count, "successful unlink must remove the identity row")
+}
+
+// TestDeleteSSOIdentity_NotLinked_404 verifies the 404 path when the user
+// requests deletion of a provider that was never linked.
+func TestDeleteSSOIdentity_NotLinked_404(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "notlinked")
+
+	// User has password fallback (default) but no SSO identity linked.
+	w := ts.DoRequest("DELETE", urlUsersMeSSOIdentities+"/google", nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusNotFound, w.Code)
+	assert.Contains(t, w.Body.String(), "not_linked")
+}
+
+// TestPatchSecurity_NoFields_400 verifies that a PATCH with no fields set
+// returns 400 no_fields rather than executing an empty UPDATE — defends
+// against silent no-op writes that would burn passphrase verification.
+func TestPatchSecurity_NoFields_400(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "nofields")
+
+	w := ts.DoRequest(methodPatch, urlUsersMeSecurity, map[string]interface{}{
+		"current_passphrase": testPassword,
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "no_fields")
+}
+
+// TestPatchSecurity_NoPassphrase_401 verifies that omitting current_passphrase
+// returns 401 passphrase_required and does not even read the password hash.
+func TestPatchSecurity_NoPassphrase_401(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "nopass")
+
+	w := ts.DoRequest(methodPatch, urlUsersMeSecurity, map[string]interface{}{
+		"trust_sso_security": true,
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Contains(t, w.Body.String(), "passphrase_required")
+}
+
+// TestPatchSecurity_TrustSSOSecurity_TogglesFlag verifies the second supported
+// field — flips trust_sso_security to TRUE with a valid passphrase. Exercises
+// the second branch of the dynamic UPDATE builder.
+func TestPatchSecurity_TrustSSOSecurity_TogglesFlag(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "trustsso")
+
+	w := ts.DoRequest(methodPatch, urlUsersMeSecurity, map[string]interface{}{
+		"trust_sso_security": true,
+		"current_passphrase": testPassword,
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var trust bool
+	require.NoError(t,
+		ts.DB.QueryRow(`SELECT trust_sso_security FROM users WHERE id = $1`, user.ID).Scan(&trust),
+	)
+	assert.True(t, trust)
+}
+
+// TestPatchSecurity_BothFlags_DynamicUpdateBuilder verifies that supplying
+// BOTH password_login_disabled and trust_sso_security in the same request
+// updates both columns — exercises the multi-field branch of the dynamic
+// UPDATE builder (sets joined with comma).
+func TestPatchSecurity_BothFlags_DynamicUpdateBuilder(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "bothflags")
+
+	// Pre-link an SSO identity so the would_lock_out gate permits the change.
+	_, err := ts.DB.Exec(
+		`INSERT INTO user_sso_identities (user_id, provider, provider_user_id, provider_email)
+		 VALUES ($1, 'google', 'bothflags-sub', $2)`, user.ID, user.Email)
+	require.NoError(t, err)
+
+	w := ts.DoRequest(methodPatch, urlUsersMeSecurity, map[string]interface{}{
+		"password_login_disabled": true,
+		"trust_sso_security":      true,
+		"current_passphrase":      testPassword,
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var pld, trust bool
+	require.NoError(t,
+		ts.DB.QueryRow(
+			`SELECT password_login_disabled, trust_sso_security FROM users WHERE id = $1`, // pragma: allowlist secret
+			user.ID,
+		).Scan(&pld, &trust),
+	)
+	assert.True(t, pld)
+	assert.True(t, trust)
+}
+
+// TestListSSOIdentities_EmptyList_ReturnsEmptyArray verifies that a user
+// with zero linked identities receives a non-nil empty array, not a null —
+// matters for the renderer's `identities.length === 0` empty-state path.
+func TestListSSOIdentities_EmptyList_ReturnsEmptyArray(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "emptyssolist")
+
+	w := ts.DoRequest("GET", urlUsersMeSSOIdentities, nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp struct {
+		Identities []struct {
+			Provider string `json:"provider"`
+		} `json:"identities"`
+	}
+	testhelpers.ParseJSON(t, w, &resp)
+	assert.NotNil(t, resp.Identities, "identities must be a non-nil array even when empty")
+	assert.Len(t, resp.Identities, 0)
+}

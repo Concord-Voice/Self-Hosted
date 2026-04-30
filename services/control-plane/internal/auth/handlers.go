@@ -114,8 +114,12 @@ func nilIfEmpty(s string) *string {
 	return &s
 }
 
-// setRefreshCookie sets a refresh_token cookie with secure defaults.
-func setRefreshCookie(c *gin.Context, value string, maxAge int) {
+// SetRefreshCookie sets a refresh_token cookie with secure defaults
+// (HttpOnly + SameSite=Lax + Secure when TLS is detected). Exported so
+// internal/oauth's SSO handlers can attach the same cookie attributes when
+// they issue a session via the AuthAdapter — keeping cookie semantics
+// uniform across both /auth/login and /auth/sso/* code paths.
+func SetRefreshCookie(c *gin.Context, value string, maxAge int) {
 	secure := c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https"
 	c.SetSameSite(http.SameSiteLaxMode)
 	c.SetCookie("refresh_token", value, maxAge, "/", "", secure, true)
@@ -556,7 +560,7 @@ func (h *Handler) issueSessionTokens(c *gin.Context, userID string) (access, ref
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
 		return
 	}
-	setRefreshCookie(c, refresh, 30*24*60*60)
+	SetRefreshCookie(c, refresh, 30*24*60*60)
 	return
 }
 
@@ -781,14 +785,14 @@ func (h *Handler) lookupUserForLogin(email string) (models.User, error) {
 	var user models.User
 	err := h.db.QueryRow(
 		`SELECT id, email, username, password_hash, display_name, bio, avatar_url, COALESCE(links, '[]'::jsonb),
-		        email_verified, age_verified, e2ee_preference, created_at, updated_at
+		        email_verified, age_verified, e2ee_preference, created_at, updated_at, password_login_disabled
 		 FROM users WHERE email = $1`,
 		email,
 	).Scan(
 		&user.ID, &user.Email, &user.Username, &user.PasswordHash,
 		&user.DisplayName, &user.Bio, &user.AvatarURL, &user.Links,
 		&user.EmailVerified, &user.AgeVerified, &user.E2EEPreference,
-		&user.CreatedAt, &user.UpdatedAt,
+		&user.CreatedAt, &user.UpdatedAt, &user.PasswordLoginDisabled,
 	)
 	return user, err
 }
@@ -882,6 +886,42 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
+	// SSO-only account: surface a helpful error so the renderer can swap the
+	// password form for the SSO button. Does NOT engage the lockout counter —
+	// lockout is for password-credential-bruteforce, not user-error.
+	if user.PasswordLoginDisabled {
+		providers, perr := h.listSSOProviders(ctx, user.ID)
+		if perr != nil {
+			// Differentiate from "no providers linked" (an impossible-state
+			// data integrity issue) so the renderer can render an actionable
+			// "could not load options" message rather than an empty SSO
+			// button list. Returning an empty providers array on transient DB
+			// failure would dead-end the user with no recoverable UX.
+			h.log.Error("Failed to list SSO providers", "error", perr, "user_id", user.ID)
+			c.JSON(http.StatusInternalServerError, gin.H{"error_code": "sso_provider_lookup_failed"})
+			return
+		}
+		if len(providers) == 0 {
+			// Data-integrity violation: password_login_disabled = true with no // pragma: allowlist secret
+			// SSO identities means the user has no working authentication path.
+			// The API surface (PatchSecurity, DeleteSSOIdentity) refuses
+			// transitions that would create this state, so reaching here implies
+			// direct DB mutation, a buggy migration, or a race that bypassed the
+			// row-lock. Surface as 500 with a distinct error_code so observability
+			// captures it and the renderer can render an actionable "contact
+			// support" message (the renderer's defensive isEmpty branch shows
+			// "try again in a moment" wording, which is misleading for a
+			// persistent fault — this branch routes around it via a distinct
+			// error_code that the renderer maps to a contact-support message).
+			h.log.Error("Login dead-end: password disabled but no SSO identities linked",
+				"user_id", user.ID)
+			c.JSON(http.StatusInternalServerError, gin.H{"error_code": "sso_account_misconfigured"})
+			return
+		}
+		c.JSON(http.StatusForbidden, gin.H{"error_code": "account_uses_sso", "providers": providers})
+		return
+	}
+
 	if !h.verifyCredentials(ctx, c, req.Email, req.Password, user.PasswordHash) {
 		return
 	}
@@ -971,19 +1011,19 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) 
 	if !rememberMe {
 		cookieMaxAge = 0
 	}
-	setRefreshCookie(c, refreshToken, cookieMaxAge)
+	SetRefreshCookie(c, refreshToken, cookieMaxAge)
 
 	// Fetch user data
 	var user models.User
 	err = h.db.QueryRow(
 		`SELECT id, email, username, password_hash, display_name, bio, avatar_url, COALESCE(links, '[]'::jsonb),
-		        email_verified, age_verified, e2ee_preference, created_at, updated_at
+		        email_verified, age_verified, e2ee_preference, created_at, updated_at, password_login_disabled
 		 FROM users WHERE id = $1`, userID,
 	).Scan(
 		&user.ID, &user.Email, &user.Username, &user.PasswordHash,
 		&user.DisplayName, &user.Bio, &user.AvatarURL, &user.Links,
 		&user.EmailVerified, &user.AgeVerified, &user.E2EEPreference,
-		&user.CreatedAt, &user.UpdatedAt,
+		&user.CreatedAt, &user.UpdatedAt, &user.PasswordLoginDisabled,
 	)
 	if err != nil {
 		h.log.Error("Failed to fetch user for login response", "error", err)
@@ -1390,7 +1430,7 @@ func (h *Handler) rotateAndRespond(c *gin.Context, token models.RefreshToken, to
 		return
 	}
 
-	setRefreshCookie(c, newRefreshToken, cookieMaxAge)
+	SetRefreshCookie(c, newRefreshToken, cookieMaxAge)
 
 	var refreshEmailVerified bool
 	if err := h.db.QueryRow(`SELECT email_verified FROM users WHERE id = $1`, token.UserID).Scan(&refreshEmailVerified); err != nil {
@@ -1512,7 +1552,7 @@ func (h *Handler) handleGracePeriodRefresh(c *gin.Context, userID string, revoke
 	}
 
 	// Set cookie
-	setRefreshCookie(c, newRefreshToken, cookieMaxAge)
+	SetRefreshCookie(c, newRefreshToken, cookieMaxAge)
 
 	// Look up current email_verified for grace recovery token
 	var graceEmailVerified bool
@@ -1628,7 +1668,7 @@ func (h *Handler) Logout(c *gin.Context) {
 
 	h.disconnectUserByID(revokedUserID)
 
-	setRefreshCookie(c, "", -1)
+	SetRefreshCookie(c, "", -1)
 	c.JSON(http.StatusOK, gin.H{"message": "Logged out successfully"})
 }
 
@@ -2464,4 +2504,30 @@ func (h *Handler) PollSocialRecoveryRequest(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+// listSSOProviders returns the provider names linked to a user, ordered by
+// created_at ASC (earliest-linked first). Used by the /login short-circuit
+// when an account has password_login_disabled=TRUE. // pragma: allowlist secret
+func (h *Handler) listSSOProviders(ctx context.Context, userID string) ([]string, error) {
+	rows, err := h.db.QueryContext(ctx,
+		`SELECT provider FROM user_sso_identities
+		 WHERE user_id = $1 ORDER BY created_at ASC`, userID)
+	if err != nil {
+		return nil, fmt.Errorf("listSSOProviders: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	out := []string{}
+	for rows.Next() {
+		var p string
+		if err := rows.Scan(&p); err != nil {
+			return nil, fmt.Errorf("scan: %w", err)
+		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("rows: %w", err)
+	}
+	return out, nil
 }
