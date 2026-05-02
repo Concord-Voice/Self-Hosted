@@ -11,6 +11,7 @@ import (
 
 const (
 	testOrigin                     = "https://concordvoice.chat"
+	testAppOrigin                  = "app://concord"
 	headerAccessControlAllowOrigin = "Access-Control-Allow-Origin"
 )
 
@@ -86,5 +87,37 @@ func TestCORSPreflightEmptyOrigin(t *testing.T) {
 	w := doCORS(r, "OPTIONS", "")
 
 	assert.Equal(t, 204, w.Code)
+	assert.Empty(t, w.Header().Get(headerAccessControlAllowOrigin))
+}
+
+func TestCORSAppSchemeOriginSetsHeaders(t *testing.T) {
+	r := corsRouter([]string{testAppOrigin})
+	w := doCORS(r, "GET", testAppOrigin)
+
+	assert.Equal(t, 200, w.Code)
+	assert.Equal(t, testAppOrigin, w.Header().Get(headerAccessControlAllowOrigin))
+	assert.Equal(t, "true", w.Header().Get("Access-Control-Allow-Credentials"))
+	assert.Contains(t, w.Header().Get("Access-Control-Allow-Headers"), "X-Machine-Id")
+}
+
+func TestCORSAppSchemePreflightWithCustomHeader(t *testing.T) {
+	r := corsRouter([]string{testAppOrigin})
+	req := httptest.NewRequest("OPTIONS", "/test", nil)
+	req.Header.Set("Origin", testAppOrigin)
+	req.Header.Set("Access-Control-Request-Method", "GET")
+	req.Header.Set("Access-Control-Request-Headers", "x-machine-id")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, 204, w.Code)
+	assert.Equal(t, testAppOrigin, w.Header().Get(headerAccessControlAllowOrigin))
+	assert.Contains(t, w.Header().Get("Access-Control-Allow-Headers"), "X-Machine-Id")
+}
+
+func TestCORSAppSchemeNotInAllowlistRejected(t *testing.T) {
+	r := corsRouter([]string{testOrigin}) // only HTTPS origin allowed
+	w := doCORS(r, "GET", testAppOrigin)
+
+	assert.Equal(t, 200, w.Code)
 	assert.Empty(t, w.Header().Get(headerAccessControlAllowOrigin))
 }
