@@ -676,3 +676,22 @@ func TestAppleSSOConfig_String_RedactsPrivateKey(t *testing.T) {
 	// empty-vs-populated keys without exposing the bytes themselves.
 	assert.Regexp(t, regexp.MustCompile(`REDACTED \d+ bytes`), output, "redaction marker must include byte count")
 }
+
+// TestLoadDefaultAllowedOriginsIncludesAppScheme pins the dev/CI default for
+// ALLOWED_ORIGINS to include the desktop client's app://concord origin
+// alongside the existing localhost dev entries. Production overrides via
+// env var, so this default is purely a non-production safety net — without
+// app://concord in the default, the bundled-SPA fallback path's CORS
+// preflight (Origin: app://concord) is silently rejected in dev/CI (#830).
+//
+// The defensive localhost:3001 assertion guards against accidental
+// regression that would break dev-mode CORS for the Vite dev server.
+func TestLoadDefaultAllowedOriginsIncludesAppScheme(t *testing.T) {
+	t.Setenv("ENVIRONMENT", "development") // skip production guards
+	t.Setenv("ALLOWED_ORIGINS", "")        // unset → use default
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Contains(t, cfg.AllowedOrigins, "app://concord")
+	// Defensive: verify dev defaults still present
+	assert.Contains(t, cfg.AllowedOrigins, "http://localhost:3001")
+}
