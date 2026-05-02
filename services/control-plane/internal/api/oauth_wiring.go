@@ -56,6 +56,27 @@ func buildOAuthHandler(
 		log.Info("Google SSO disabled (GOOGLE_SSO_ENABLED=false)")
 	}
 
+	if cfg.AppleSSO.Enabled {
+		provider, err := oauth.NewAppleProvider(oauth.AppleConfig{
+			ClientID:   cfg.AppleSSO.ClientID,
+			TeamID:     cfg.AppleSSO.TeamID,
+			KeyID:      cfg.AppleSSO.KeyID,
+			PrivateKey: cfg.AppleSSO.PrivateKey,
+			// Fallback only — same rationale as Google above. Each /sso/apple
+			// initiate request supplies the real loopback URI via the
+			// redirect_uri query param, stored in sso_state, replayed at
+			// exchange time per RFC 6749 §4.1.3.
+			RedirectURI: "http://127.0.0.1:0/oauth/callback",
+		})
+		if err != nil {
+			log.Fatal("Failed to construct Apple OAuth provider", "error", err)
+		}
+		registry.Register(provider)
+		log.Info("Apple SSO enabled", "client_id", cfg.AppleSSO.ClientID, "team_id", cfg.AppleSSO.TeamID)
+	} else {
+		log.Info("Apple SSO disabled (APPLE_SSO_ENABLED=false)")
+	}
+
 	return oauth.NewHandler(oauth.HandlerDeps{
 		Registry:    registry,
 		Redis:       redisClient,

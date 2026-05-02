@@ -396,9 +396,20 @@ func buildAuthURLWithRedirect(p Provider, state, nonce, challenge, redirectURI s
 
 // callbackRequest is the JSON body the renderer POSTs after the OS browser
 // hands back ?code&state on the loopback redirect.
+//
+// AppleUserData is populated only by the Apple flow: Apple's first-auth
+// callback delivers a "user" form-encoded field (JSON containing the user's
+// chosen first/last name) that we forward verbatim to the AppleProvider for
+// display-name extraction. Google clients omit the field; encoding/json
+// zero-values it on absence, so the wire format remains backwards-compatible
+// for callers that don't know it exists. Never logged in any error path —
+// the field can carry user-supplied PII (names) and a malicious renderer
+// could fabricate the contents (we treat it as an opaque UX-suggestion blob,
+// not an authoritative identity signal).
 type callbackRequest struct {
-	Code  string `json:"code" binding:"required"`
-	State string `json:"state" binding:"required"`
+	Code          string `json:"code" binding:"required"`
+	State         string `json:"state" binding:"required"`
+	AppleUserData string `json:"apple_user_data,omitempty"`
 }
 
 // callbackBranch identifies which scenario the user fell into after a
@@ -483,11 +494,24 @@ func (h *Handler) Callback(c *gin.Context) {
 	// (including Google) reject the exchange with "redirect_uri_mismatch"
 	// because the constructor-seed URI Concord uses for cfg.RedirectURI is
 	// a placeholder (port :0), not the renderer-chosen ephemeral port.
+	//
+	// Defense-in-depth: cap AppleUserData at 64 KiB to mirror the renderer
+	// loopback's body cap (ssoLoopback.ts MAX_POST_BODY_BYTES). The renderer
+	// is the only intended caller, but a hostile non-renderer caller could
+	// otherwise force the provider to JSON-parse arbitrary input. On overflow
+	// we silently truncate to "" — parseAppleUserData("") returns "" which
+	// is the same legitimate state as Apple's subsequent-auth flow (no name).
+	const maxAppleUserDataBytes = 64 * 1024
+	appleUserData := req.AppleUserData
+	if len(appleUserData) > maxAppleUserDataBytes {
+		appleUserData = ""
+	}
 	info, err := provider.Exchange(c.Request.Context(), ExchangeParams{
-		Code:         req.Code,
-		CodeVerifier: rec.CodeVerifier,
-		Nonce:        rec.Nonce,
-		RedirectURI:  rec.RedirectURI,
+		Code:          req.Code,
+		CodeVerifier:  rec.CodeVerifier,
+		Nonce:         rec.Nonce,
+		RedirectURI:   rec.RedirectURI,
+		AppleUserData: appleUserData,
 	})
 	if err != nil {
 		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "oauth_token_invalid"})
@@ -922,10 +946,10 @@ type completeLinkRequest struct {
 // No DB transaction is needed — only one INSERT happens. The verify+insert+
 // token sequence is not atomic, but the worst-case race (same user invoked
 // twice concurrently) is bounded by the user_sso_identities UNIQUE
-// (provider, provider_user_id) constraint from migration 000061: a second
-// insert fails with sso_identity_insert_failed; harmless beyond a duplicate
-// 500 response on the loser. Token-issuance duplication is also harmless —
-// refresh cookies are valid as a set, not a singleton.
+// (provider, provider_user_id) constraint: a second insert fails with
+// sso_identity_insert_failed; harmless beyond a duplicate 500 response on
+// the loser. Token-issuance duplication is also harmless — refresh cookies
+// are valid as a set, not a singleton.
 func (h *Handler) CompleteLink(c *gin.Context) {
 	var req completeLinkRequest
 	if err := c.ShouldBindJSON(&req); err != nil {

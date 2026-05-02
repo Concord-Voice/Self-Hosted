@@ -2,6 +2,11 @@
 package api
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -11,6 +16,20 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 )
+
+// generateTestApplePEM returns a freshly-generated P-256 ECDSA private key encoded as
+// PKCS8 PEM bytes — the wire format Apple's developer portal exports for .p8 files.
+// Duplicated from internal/oauth/apple_test.go's generateP256PEM and pkg/config's
+// helper; consolidating to a shared internal/testkeys package is tracked as a
+// future cleanup.
+func generateTestApplePEM(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	require.NoError(t, err)
+	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+}
 
 // TestBuildOAuthHandler_GoogleSSODisabled verifies the disabled branch returns
 // a non-nil handler whose registry is empty — every /sso/:provider lookup
@@ -77,9 +96,86 @@ func TestBuildOAuthHandler_Disabled_DoesNotPanic(t *testing.T) {
 
 	cfg := &config.Config{
 		GoogleSSO: config.GoogleSSOConfig{Enabled: false},
+		AppleSSO:  config.AppleSSOConfig{Enabled: false},
 	}
 
 	require.NotPanics(t, func() {
 		_ = buildOAuthHandler(nil, nil, cfg, nil, logger.New("test"))
+	})
+}
+
+// TestBuildOAuthHandler_AppleSSODisabled mirrors the Google-disabled test:
+// when AppleSSO is off, the wiring helper still returns a non-nil handler
+// — every /sso/apple route then 404s with unknown_provider, which is the
+// production posture for any deployment that has not opted into Apple SSO.
+func TestBuildOAuthHandler_AppleSSODisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	log := logger.New("test")
+
+	cfg := &config.Config{
+		Environment: "test",
+		GoogleSSO:   config.GoogleSSOConfig{Enabled: false},
+		AppleSSO:    config.AppleSSOConfig{Enabled: false},
+	}
+
+	h := buildOAuthHandler(nil, nil, cfg, nil, log)
+	require.NotNil(t, h, "buildOAuthHandler must return a non-nil handler when Apple SSO is disabled")
+}
+
+// TestBuildOAuthHandler_AppleSSOEnabled verifies the Apple-enabled branch
+// constructs without panic when all four credentials are present and the
+// PrivateKey is a parseable P-256 PEM. Like the Google-enabled test, the
+// assertion is structural — registry introspection is not exposed by the
+// public Handler surface; behavioral checks happen via Initiate handler
+// tests with a real Redis.
+func TestBuildOAuthHandler_AppleSSOEnabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	log := logger.New("test")
+
+	cfg := &config.Config{
+		Environment: "test",
+		GoogleSSO:   config.GoogleSSOConfig{Enabled: false},
+		AppleSSO: config.AppleSSOConfig{
+			Enabled:    true,
+			ClientID:   "chat.concordvoice.signin",
+			TeamID:     "TEAM123ABC",
+			KeyID:      "KEYID12345",
+			PrivateKey: generateTestApplePEM(t),
+		},
+	}
+
+	require.NotPanics(t, func() {
+		h := buildOAuthHandler(nil, nil, cfg, nil, log)
+		assert.NotNil(t, h, "Apple SSO enabled with valid creds must yield a non-nil handler")
+	})
+}
+
+// TestBuildOAuthHandler_BothProvidersEnabled verifies that Google and Apple
+// can coexist in the same registry. Both blocks register independently;
+// neither's failure mode (log.Fatal on construction error) should affect
+// the other when both are valid.
+func TestBuildOAuthHandler_BothProvidersEnabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	log := logger.New("test")
+
+	cfg := &config.Config{
+		Environment: "test",
+		GoogleSSO: config.GoogleSSOConfig{
+			Enabled:      true,
+			ClientID:     "test-client.apps.googleusercontent.com",
+			ClientSecret: "test-secret-not-real", //nolint:gosec // test fixture
+		},
+		AppleSSO: config.AppleSSOConfig{
+			Enabled:    true,
+			ClientID:   "chat.concordvoice.signin",
+			TeamID:     "TEAM123ABC",
+			KeyID:      "KEYID12345",
+			PrivateKey: generateTestApplePEM(t),
+		},
+	}
+
+	require.NotPanics(t, func() {
+		h := buildOAuthHandler(nil, nil, cfg, nil, log)
+		assert.NotNil(t, h, "both providers enabled must yield a non-nil handler")
 	})
 }

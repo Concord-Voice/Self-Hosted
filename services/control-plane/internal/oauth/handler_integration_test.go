@@ -1457,3 +1457,571 @@ func TestCompleteLink_NewUserBranch_Rejected(t *testing.T) {
 	).Scan(&n))
 	assert.Zero(t, n, "new_user-branch token must not create an SSO identity row")
 }
+
+// ===========================================================================
+// Apple SSO callback integration tests (Task 5 / issue #271)
+//
+// These tests exercise the Callback handler against a real AppleProvider
+// pointed at a fake Apple httptest server (mirroring fakeApple from
+// apple_test.go, which lives in the same oauth_test package). They cover:
+//
+//   - apple_user_data threading from the request body into ExchangeParams
+//   - new-user paths for both real and relay emails
+//   - relay-email no-auto-link safety (spec §9 risk-table invariant)
+//   - real-email auto-link path
+//   - existing-SSO subsequent-auth login path
+//   - /login short-circuit when password_login_disabled=TRUE and only Apple // pragma: allowlist secret
+//     is linked (uses testhelpers.SetupTestServer because /login lives in
+//     internal/auth, not internal/oauth)
+//
+// Helper wiring is Apple-specific. We deliberately do NOT refactor the Google
+// helpers — the two flows have enough provider-specific shape (id_token kind,
+// JWKS endpoint, Issuer claim, response_mode) that side-by-side helpers read
+// more clearly than a parameterized generalization.
+// ===========================================================================
+
+// recordingProvider wraps an oauth.Provider and captures the most recent
+// Exchange call's ExchangeParams. Used by the apple_user_data threading tests
+// so we can assert what the handler passed without depending on side effects
+// the fake Apple HTTP server can observe (the user-data field is consumed
+// inside Provider.Exchange, not on the wire).
+//
+// Safe for concurrent use is not required — each test creates a fresh
+// instance and runs callback requests sequentially within one goroutine.
+type recordingProvider struct {
+	inner      oauth.Provider
+	lastParams oauth.ExchangeParams
+}
+
+func (r *recordingProvider) Name() string { return r.inner.Name() }
+func (r *recordingProvider) AuthorizationURL(state, nonce, codeChallenge string) string {
+	return r.inner.AuthorizationURL(state, nonce, codeChallenge)
+}
+func (r *recordingProvider) Exchange(ctx context.Context, p oauth.ExchangeParams) (*oauth.UserInfo, error) {
+	r.lastParams = p
+	return r.inner.Exchange(ctx, p)
+}
+
+// newSSOAppleCallbackTestRig builds a callback-capable rig with a real
+// AppleProvider pointed at fakeAppleBaseURL (an httptest.Server URL produced
+// by fakeApple, defined in apple_test.go). Behavior mirrors
+// newSSOCallbackTestRig, but the registered provider is "apple" rather than
+// "google", and the AppleProvider's endpoint overrides target the fake.
+//
+// The rig's Recorder field exposes a *recordingProvider wrapper around the
+// AppleProvider; tests that need to verify ExchangeParams threading can
+// inspect rig.Recorder.lastParams after a callback request.
+type ssoAppleCallbackRig struct {
+	Engine   *gin.Engine
+	Redis    redis.Cmdable
+	DB       *sql.DB
+	Handler  *oauth.Handler
+	Adapter  *fakeAuthAdapter
+	Recorder *recordingProvider
+}
+
+func newSSOAppleCallbackTestRig(t *testing.T, fakeAppleBaseURL string) *ssoAppleCallbackRig {
+	t.Helper()
+	adapter := &fakeAuthAdapter{}
+	return newSSOAppleCallbackTestRigWithAuth(t, fakeAppleBaseURL, adapter)
+}
+
+func newSSOAppleCallbackTestRigWithAuth(t *testing.T, fakeAppleBaseURL string, authStub *fakeAuthAdapter) *ssoAppleCallbackRig {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, redisCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(redisCleanup)
+
+	apple, err := oauth.NewAppleProvider(oauth.AppleConfig{
+		ClientID:      testAppleClientID,
+		TeamID:        testAppleTeamID,
+		KeyID:         testAppleKeyID,
+		PrivateKey:    generateP256PEM(t),
+		RedirectURI:   "http://127.0.0.1:0/oauth/callback",
+		AuthEndpoint:  fakeAppleBaseURL + "/auth/authorize",
+		TokenEndpoint: fakeAppleBaseURL + "/auth/token",
+		JWKSEndpoint:  fakeAppleBaseURL + "/auth/keys",
+		Issuer:        "https://appleid.apple.com",
+	})
+	require.NoError(t, err)
+
+	recorder := &recordingProvider{inner: apple}
+	registry := oauth.NewRegistry()
+	registry.Register(recorder)
+
+	h := oauth.NewHandler(oauth.HandlerDeps{
+		Registry:    registry,
+		Redis:       rdb,
+		DB:          db,
+		AuthHandler: authStub,
+	})
+	r := gin.New()
+	g := r.Group("/api/v1/auth/sso")
+	g.GET("/:provider", h.Initiate)
+	g.POST("/:provider/callback", h.Callback)
+	return &ssoAppleCallbackRig{
+		Engine:   r,
+		Redis:    rdb,
+		DB:       db,
+		Handler:  h,
+		Adapter:  authStub,
+		Recorder: recorder,
+	}
+}
+
+// TestHandler_Apple_Callback_ThreadsAppleUserData verifies that an
+// apple_user_data field on the /sso/apple/callback request body propagates
+// into ExchangeParams.AppleUserData when the handler calls provider.Exchange.
+// This is the wire-format leg of the spec's first-auth-name carriage flow.
+func TestHandler_Apple_Callback_ThreadsAppleUserData(t *testing.T) {
+	now := time.Now()
+	server, _ := fakeApple(t, makeAppleClaims(now, nil))
+	defer server.Close()
+
+	rig := newSSOAppleCallbackTestRig(t, server.URL)
+	state := seedRedisState(t, rig.Redis, "apple", "expected-nonce", "verifier-1")
+
+	const userJSON = `{"name":{"firstName":"Jane","lastName":"Doe"},"email":"jane@example.com"}`
+	body, err := json.Marshal(map[string]string{
+		"code":            "good-code",
+		"state":           state,
+		"apple_user_data": userJSON,
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/apple/callback", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	rig.Engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, userJSON, rig.Recorder.lastParams.AppleUserData,
+		"apple_user_data from request body must reach Provider.Exchange via ExchangeParams")
+}
+
+// TestHandler_Apple_OversizeAppleUserData_TruncatedToEmpty verifies the
+// defense-in-depth length cap on the apple_user_data field. The renderer
+// loopback caps POST bodies at 64 KiB (ssoLoopback.ts MAX_POST_BODY_BYTES),
+// but a hostile non-renderer caller could otherwise force the provider to
+// JSON-parse arbitrary input. The handler truncates to "" on overflow, which
+// parseAppleUserData maps to the same legitimate state as Apple's
+// subsequent-auth flow (no name) — graceful degradation rather than reject.
+func TestHandler_Apple_OversizeAppleUserData_TruncatedToEmpty(t *testing.T) {
+	now := time.Now()
+	server, _ := fakeApple(t, makeAppleClaims(now, nil))
+	defer server.Close()
+
+	rig := newSSOAppleCallbackTestRig(t, server.URL)
+	state := seedRedisState(t, rig.Redis, "apple", "expected-nonce", "verifier-oversize")
+
+	// 65 KiB of structurally-valid Apple user JSON (one byte over the 64 KiB cap).
+	oversizeJSON := `{"name":{"firstName":"` + strings.Repeat("A", 65*1024) + `","lastName":"Doe"}}`
+	body, err := json.Marshal(map[string]string{
+		"code":            "good-code",
+		"state":           state,
+		"apple_user_data": oversizeJSON,
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/apple/callback", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	rig.Engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, "", rig.Recorder.lastParams.AppleUserData,
+		"oversize apple_user_data must be truncated to empty before reaching Provider.Exchange")
+}
+
+// TestHandler_Apple_Callback_OmitsAppleUserData_WhenAbsent verifies the
+// subsequent-auth wire shape: the renderer omits apple_user_data (Apple does
+// not re-deliver name on subsequent authentications), and the handler must
+// pass an empty string into ExchangeParams.AppleUserData rather than blowing
+// up on a missing field. encoding/json zero-values absent fields, so this is
+// also the backwards-compatibility test for Google clients (which never send
+// the field).
+func TestHandler_Apple_Callback_OmitsAppleUserData_WhenAbsent(t *testing.T) {
+	now := time.Now()
+	server, _ := fakeApple(t, makeAppleClaims(now, nil))
+	defer server.Close()
+
+	rig := newSSOAppleCallbackTestRig(t, server.URL)
+	state := seedRedisState(t, rig.Redis, "apple", "expected-nonce", "verifier-2")
+
+	body, err := json.Marshal(map[string]string{
+		"code":  "good-code",
+		"state": state,
+		// apple_user_data deliberately omitted
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/apple/callback", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	rig.Engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	assert.Equal(t, "", rig.Recorder.lastParams.AppleUserData,
+		"absent apple_user_data must zero-value to empty string in ExchangeParams")
+}
+
+// TestHandler_Apple_NewUser_RealEmail covers spec §7.1 / Scenario A: a
+// brand-new Apple user with a real (non-relay) email plus first-auth user
+// JSON. End-to-end through Callback + CompleteRegistration:
+//   - response is sso_registration_required
+//   - sso_token Redis payload carries is_relay_email=false
+//   - completing registration INSERTs user_sso_identities with
+//     is_relay_email=FALSE (the column wired in migration 000061)
+func TestHandler_Apple_NewUser_RealEmail(t *testing.T) {
+	now := time.Now()
+	server, _ := fakeApple(t, makeAppleClaims(now, nil))
+	defer server.Close()
+
+	rig := newSSOAppleCallbackTestRig(t, server.URL)
+	rig.Engine.POST("/api/v1/auth/sso/:provider/complete-registration", rig.Handler.CompleteRegistration)
+	state := seedRedisState(t, rig.Redis, "apple", "expected-nonce", "verifier-realemail")
+
+	const userJSON = `{"name":{"firstName":"Jane","lastName":"Doe"},"email":"jane@example.com"}`
+	cbBody, err := json.Marshal(map[string]string{
+		"code":            "good-code",
+		"state":           state,
+		"apple_user_data": userJSON,
+	})
+	require.NoError(t, err)
+	cbReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/apple/callback", bytes.NewReader(cbBody))
+	cbReq.Header.Set("Content-Type", "application/json")
+	w1 := httptest.NewRecorder()
+	rig.Engine.ServeHTTP(w1, cbReq)
+
+	require.Equal(t, http.StatusOK, w1.Code, "body=%s", w1.Body.String())
+	var cbResp map[string]any
+	require.NoError(t, json.NewDecoder(w1.Body).Decode(&cbResp))
+	assert.Equal(t, true, cbResp["sso_registration_required"])
+	assert.Equal(t, "jane@example.com", cbResp["email"])
+	assert.Equal(t, "Jane Doe", cbResp["name"])
+	ssoToken, _ := cbResp["sso_token"].(string)
+	require.NotEmpty(t, ssoToken)
+
+	// Verify the Redis-stored sso_token payload carries is_relay_email=false.
+	// The renderer never sees the payload directly (the token is opaque), but
+	// CompleteRegistration consumes it to populate the user_sso_identities row.
+	raw, err := rig.Redis.Get(context.Background(), "sso_token:"+ssoToken).Bytes()
+	require.NoError(t, err)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(raw, &payload))
+	assert.Equal(t, false, payload["is_relay_email"],
+		"real-email new-user sso_token must carry is_relay_email=false")
+
+	// Step 2 — CompleteRegistration. Verify user_sso_identities row's
+	// is_relay_email column is FALSE.
+	wrap, salt, pub := generateFakeKeyMaterial(t)
+	regBody, err := json.Marshal(map[string]any{
+		"sso_token":           ssoToken,
+		"username":            "janedoe",
+		"password":            "TestPassphrase!12345", // pragma: allowlist secret
+		"wrapped_private_key": wrap,
+		"key_derivation_salt": salt,
+		"public_key":          pub,
+	})
+	require.NoError(t, err)
+	regReq := httptest.NewRequest(http.MethodPost,
+		"/api/v1/auth/sso/apple/complete-registration", bytes.NewReader(regBody))
+	regReq.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	rig.Engine.ServeHTTP(w2, regReq)
+	require.Equal(t, http.StatusCreated, w2.Code, "body=%s", w2.Body.String())
+
+	var isRelay bool
+	require.NoError(t, rig.DB.QueryRow(
+		`SELECT is_relay_email FROM user_sso_identities WHERE provider = 'apple' AND provider_email = $1`,
+		"jane@example.com",
+	).Scan(&isRelay))
+	assert.False(t, isRelay,
+		"user_sso_identities.is_relay_email must be FALSE for a non-relay Apple email")
+}
+
+// TestHandler_Apple_NewUser_RelayEmail covers spec §7.2 / Scenario B: a
+// brand-new Apple user opted into Hide-My-Email, so Apple delivers a relay
+// alias and is_private_email=true. End-to-end through Callback +
+// CompleteRegistration:
+//   - response is sso_registration_required (relay always = new user; never
+//     account-link, even on email collision — that branch is exercised by
+//     TestHandler_Apple_RelayEmail_NoAutoLink below)
+//   - sso_token payload carries is_relay_email=true
+//   - completing registration INSERTs user_sso_identities with
+//     is_relay_email=TRUE
+func TestHandler_Apple_NewUser_RelayEmail(t *testing.T) {
+	now := time.Now()
+	server, _ := fakeApple(t, makeAppleClaims(now, map[string]any{
+		"email":            "opaque-abc@privaterelay.appleid.com",
+		"is_private_email": true,
+	}))
+	defer server.Close()
+
+	rig := newSSOAppleCallbackTestRig(t, server.URL)
+	rig.Engine.POST("/api/v1/auth/sso/:provider/complete-registration", rig.Handler.CompleteRegistration)
+	state := seedRedisState(t, rig.Redis, "apple", "expected-nonce", "verifier-relay")
+
+	cbBody, err := json.Marshal(map[string]string{
+		"code":            "good-code",
+		"state":           state,
+		"apple_user_data": `{"name":{"firstName":"Anon","lastName":""}}`,
+	})
+	require.NoError(t, err)
+	cbReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/apple/callback", bytes.NewReader(cbBody))
+	cbReq.Header.Set("Content-Type", "application/json")
+	w1 := httptest.NewRecorder()
+	rig.Engine.ServeHTTP(w1, cbReq)
+
+	require.Equal(t, http.StatusOK, w1.Code, "body=%s", w1.Body.String())
+	var cbResp map[string]any
+	require.NoError(t, json.NewDecoder(w1.Body).Decode(&cbResp))
+	assert.Equal(t, true, cbResp["sso_registration_required"])
+	assert.Equal(t, "opaque-abc@privaterelay.appleid.com", cbResp["email"])
+	ssoToken, _ := cbResp["sso_token"].(string)
+	require.NotEmpty(t, ssoToken)
+
+	// Verify the Redis sso_token payload's is_relay_email=true.
+	raw, err := rig.Redis.Get(context.Background(), "sso_token:"+ssoToken).Bytes()
+	require.NoError(t, err)
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(raw, &payload))
+	assert.Equal(t, true, payload["is_relay_email"],
+		"relay-email new-user sso_token must carry is_relay_email=true")
+
+	// Step 2 — CompleteRegistration.
+	wrap, salt, pub := generateFakeKeyMaterial(t)
+	regBody, err := json.Marshal(map[string]any{
+		"sso_token":           ssoToken,
+		"username":            "anonrelay",
+		"password":            "TestPassphrase!12345", // pragma: allowlist secret
+		"wrapped_private_key": wrap,
+		"key_derivation_salt": salt,
+		"public_key":          pub,
+	})
+	require.NoError(t, err)
+	regReq := httptest.NewRequest(http.MethodPost,
+		"/api/v1/auth/sso/apple/complete-registration", bytes.NewReader(regBody))
+	regReq.Header.Set("Content-Type", "application/json")
+	w2 := httptest.NewRecorder()
+	rig.Engine.ServeHTTP(w2, regReq)
+	require.Equal(t, http.StatusCreated, w2.Code, "body=%s", w2.Body.String())
+
+	var isRelay bool
+	require.NoError(t, rig.DB.QueryRow(
+		`SELECT is_relay_email FROM user_sso_identities WHERE provider = 'apple' AND provider_email = $1`,
+		"opaque-abc@privaterelay.appleid.com",
+	).Scan(&isRelay))
+	assert.True(t, isRelay,
+		"user_sso_identities.is_relay_email must be TRUE for an Apple privaterelay email")
+}
+
+// TestHandler_Apple_RelayEmail_NoAutoLink covers spec §9 risk-table entry +
+// classifyCallback's IsRelayEmail-aware branch: even when a Concord user
+// happens to share the exact relay address Apple just returned, the handler
+// MUST refuse to auto-link. The user is steered through fresh registration
+// (sso_registration_required), preserving the spec invariant that relay
+// addresses never participate in email-based account linking.
+//
+// The collision is astronomically unlikely in practice (Apple-issued opaque
+// aliases have ~64 bits of entropy in the local part), but the refusal is a
+// defense-in-depth invariant: if Apple ever recycles a relay address that a
+// previous user surrendered, an attacker who claims that recycled address
+// must NOT inherit the previous user's Concord account on email match alone.
+func TestHandler_Apple_RelayEmail_NoAutoLink(t *testing.T) {
+	const sharedRelayEmail = "opaque-collide@privaterelay.appleid.com"
+
+	now := time.Now()
+	server, _ := fakeApple(t, makeAppleClaims(now, map[string]any{
+		"email":            sharedRelayEmail,
+		"is_private_email": true,
+		"sub":              "apple-sub-relay-collide",
+	}))
+	defer server.Close()
+
+	rig := newSSOAppleCallbackTestRig(t, server.URL)
+
+	// Pre-seed a Concord user whose verified email is the same relay address
+	// Apple is about to return. classifyCallback's email-match branch would
+	// fire here for a non-relay email; the IsRelayEmail short-circuit must
+	// suppress it.
+	_ = insertSSOTestUser(t, rig.DB, sharedRelayEmail, "preexisting-relay")
+
+	state := seedRedisState(t, rig.Redis, "apple", "expected-nonce", "verifier-collide")
+
+	cbBody, err := json.Marshal(map[string]string{
+		"code":  "good-code",
+		"state": state,
+	})
+	require.NoError(t, err)
+	cbReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/apple/callback", bytes.NewReader(cbBody))
+	cbReq.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	rig.Engine.ServeHTTP(w, cbReq)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	// Must take the new-user path, NOT the email-match link path.
+	assert.Equal(t, true, resp["sso_registration_required"],
+		"relay email + email collision must produce sso_registration_required, not account_link_available")
+	assert.NotContains(t, resp, "account_link_available",
+		"relay email must never offer account_link_available — spec §9 invariant")
+	assert.NotContains(t, resp, "masked_email",
+		"masked_email is the link-flow signal; must be absent on the new-user path")
+}
+
+// TestHandler_Apple_RealEmail_AutoLink covers the symmetric spec §7.4 /
+// Scenario D path: a verified Concord user already exists with the same
+// non-relay email Apple is asserting. classifyCallback returns
+// branchAccountLink → respondAccountLink issues an account_link_available
+// response with masked_email + sso_token. This is identical in shape to the
+// Google equivalent (TestCallback_EmailMatch_OffersAccountLink) and asserts
+// that the IsRelayEmail short-circuit only fires for relay addresses.
+func TestHandler_Apple_RealEmail_AutoLink(t *testing.T) {
+	now := time.Now()
+	server, _ := fakeApple(t, makeAppleClaims(now, map[string]any{
+		"sub":              "apple-sub-link-real",
+		"email":            "carol@example.test",
+		"is_private_email": false,
+	}))
+	defer server.Close()
+
+	rig := newSSOAppleCallbackTestRig(t, server.URL)
+
+	// Pre-seed a verified Concord user whose email matches what Apple
+	// returns. This is the email-match branch the handler must hit.
+	userID := insertSSOTestUser(t, rig.DB, "carol@example.test", "carol-link")
+	_, err := rig.DB.ExecContext(context.Background(),
+		`UPDATE users SET email_verified = TRUE WHERE id = $1`, userID)
+	require.NoError(t, err)
+
+	state := seedRedisState(t, rig.Redis, "apple", "expected-nonce", "verifier-link-real")
+
+	cbBody, err := json.Marshal(map[string]string{
+		"code":  "good-code",
+		"state": state,
+	})
+	require.NoError(t, err)
+	cbReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/apple/callback", bytes.NewReader(cbBody))
+	cbReq.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	rig.Engine.ServeHTTP(w, cbReq)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, true, resp["account_link_available"],
+		"non-relay email match must offer account_link_available")
+	assert.NotEmpty(t, resp["sso_token"])
+	assert.Equal(t, "c***@example.test", resp["masked_email"])
+	assert.NotContains(t, resp, "sso_registration_required",
+		"email-match branch must NOT produce sso_registration_required")
+}
+
+// TestHandler_Apple_ExistingSSO_Login covers spec §7.3 / Scenario C: a user
+// who has already linked Apple SSO returns for a subsequent sign-in. The
+// (provider, sub) row exists; trust_sso_security=TRUE is set so the handler
+// mints tokens directly rather than serving an MFA challenge. Mirrors
+// TestCallback_ExistingSSO_NoMFA_IssuesTokens.
+//
+// Note: this test asserts only the trust_sso_security=TRUE happy path. The
+// MFA-challenge branch is provider-agnostic (covered by the Google
+// TestCallback_ExistingSSO_RequiresMFA test); reproducing it for Apple would
+// re-test the same handler logic against a structurally-identical fake.
+func TestHandler_Apple_ExistingSSO_Login(t *testing.T) {
+	now := time.Now()
+	server, _ := fakeApple(t, makeAppleClaims(now, map[string]any{
+		"sub":   "apple-sub-existing",
+		"email": "alice-apple@example.test",
+	}))
+	defer server.Close()
+
+	rig := newSSOAppleCallbackTestRig(t, server.URL)
+	userID := insertSSOTestUser(t, rig.DB, "alice-apple@example.test", "alice-apple")
+	_, err := rig.DB.ExecContext(context.Background(),
+		`UPDATE users SET trust_sso_security = TRUE WHERE id = $1`, userID)
+	require.NoError(t, err)
+	_, err = rig.DB.ExecContext(context.Background(),
+		`INSERT INTO user_sso_identities (user_id, provider, provider_user_id, provider_email)
+		 VALUES ($1, 'apple', 'apple-sub-existing', 'alice-apple@example.test')`, userID)
+	require.NoError(t, err)
+
+	state := seedRedisState(t, rig.Redis, "apple", "expected-nonce", "verifier-existing")
+	cbBody, err := json.Marshal(map[string]string{
+		"code":  "good-code",
+		"state": state,
+	})
+	require.NoError(t, err)
+	cbReq := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/apple/callback", bytes.NewReader(cbBody))
+	cbReq.Header.Set("Content-Type", "application/json")
+	cbReq.Header.Set("X-Forwarded-Proto", "https") // mirror Google equivalent for Secure-cookie assertion realism
+	w := httptest.NewRecorder()
+	rig.Engine.ServeHTTP(w, cbReq)
+
+	require.Equal(t, http.StatusOK, w.Code, "body=%s", w.Body.String())
+	var resp map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.NotEmpty(t, resp["access_token"])
+	assert.NotContains(t, resp, "mfa_challenge_token",
+		"trust_sso_security=TRUE must mint tokens directly, not issue an MFA challenge")
+	// Refresh-token cookie attached.
+	cookies := w.Result().Cookies()
+	var foundRefresh bool
+	for _, c := range cookies {
+		if c.Name == "refresh_token" {
+			foundRefresh = true
+			assert.True(t, c.HttpOnly, "refresh_token cookie must be HttpOnly")
+			assert.True(t, c.Secure, "refresh_token cookie must be Secure")
+			assert.Equal(t, 60*60*24*30, c.MaxAge, "refresh_token max-age must be 30 days")
+		}
+	}
+	assert.True(t, foundRefresh, "Set-Cookie: refresh_token must be present")
+
+	// last_used_at should have been bumped by respondExistingSSO's best-effort UPDATE.
+	var lastUsed sql.NullTime
+	require.NoError(t, rig.DB.QueryRow(
+		`SELECT last_used_at FROM user_sso_identities WHERE provider = 'apple' AND provider_user_id = 'apple-sub-existing'`,
+	).Scan(&lastUsed))
+	assert.True(t, lastUsed.Valid, "last_used_at must be set after a successful subsequent login")
+}
+
+// TestHandler_Apple_LoginShortCircuit covers the /login endpoint's SSO-only
+// short-circuit for an account that has only an Apple identity row linked.
+// Mirrors TestLogin_PasswordDisabled_ReturnsAccountUsesSSO (auth package),
+// which exercises the same path with a Google identity. We assert the
+// providers list contains "apple" (regardless of any other providers the
+// account might have, this is a contains-check, not an equality-check).
+//
+// Note: /login lives in internal/auth, NOT internal/oauth. This test uses
+// testhelpers.SetupTestServer to wire the full app router, mirroring how
+// internal/auth/handlers_integration_test.go sets up its short-circuit
+// tests. The oauth_test package can import testhelpers without creating a
+// cycle.
+func TestHandler_Apple_LoginShortCircuit(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	user := ts.CreateTestUser(t, "ssoonlyapple")
+
+	// Flip the SSO-only flag and link an Apple identity.
+	_, err := ts.DB.Exec(`UPDATE users SET password_login_disabled = TRUE WHERE id = $1`, user.ID)
+	require.NoError(t, err)
+	_, err = ts.DB.Exec(
+		`INSERT INTO user_sso_identities (user_id, provider, provider_user_id, provider_email)
+		 VALUES ($1, 'apple', 'apple-sub-shortcircuit', $2)`, user.ID, user.Email)
+	require.NoError(t, err)
+
+	w := ts.DoRequest("POST", "/api/v1/auth/login", map[string]interface{}{
+		"email":    user.Email,
+		"password": "any-password-the-user-types", //nolint:gosec // test credential, irrelevant
+	}, nil)
+
+	require.Equal(t, http.StatusForbidden, w.Code,
+		"password_login_disabled + Apple-only identity must surface 403 account_uses_sso")
+	var resp map[string]interface{}
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
+	assert.Equal(t, "account_uses_sso", resp["error_code"])
+	providers, ok := resp["providers"].([]interface{})
+	require.True(t, ok, "providers field should be a JSON array")
+	assert.Contains(t, providers, "apple",
+		"providers list must include 'apple' when an Apple identity is the only one linked")
+}

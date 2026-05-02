@@ -1,7 +1,14 @@
 package config
 
 import (
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -416,4 +423,256 @@ func TestGoogleSSOConfig_StringEmptySecret(t *testing.T) {
 	assert.Contains(t, str, "test-client-id")
 	assert.Contains(t, str, "[empty]")
 	assert.NotContains(t, str, "[REDACTED]")
+}
+
+// Apple SSO config tests (#271 Task 3).
+//
+// Apple has 4 required env vars (vs Google's 2) and the production guard
+// accumulates ALL missing fields rather than failing on the first.
+// PrivateKey supports two transport formats: literal PEM with \n escapes
+// (for .env files / K8s ConfigMaps) and @/path/to/file (for mounted secrets).
+
+// generateTestApplePEM returns a freshly-generated P-256 ECDSA private key
+// encoded as PKCS8 PEM bytes. Mirrors the helper in internal/oauth/apple_test.go
+// — defined here because that helper lives in package oauth_test, which is not
+// accessible from package config tests.
+func generateTestApplePEM(t *testing.T) []byte {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	require.NoError(t, err)
+	return pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+}
+
+func TestLoad_AppleSSO_Disabled(t *testing.T) {
+	t.Setenv("APPLE_SSO_ENABLED", "false")
+	t.Setenv("APPLE_CLIENT_ID", "")
+	t.Setenv("APPLE_TEAM_ID", "")
+	t.Setenv("APPLE_KEY_ID", "")
+	t.Setenv("APPLE_PRIVATE_KEY", "")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.False(t, cfg.AppleSSO.Enabled)
+	assert.Empty(t, cfg.AppleSSO.PrivateKey)
+}
+
+func TestLoad_AppleSSO_EnabledWithAllFields_LiteralPEM(t *testing.T) {
+	pemBytes := generateTestApplePEM(t)
+	// Simulate .env-style storage: real newlines replaced with literal \n.
+	escaped := strings.ReplaceAll(string(pemBytes), "\n", `\n`)
+
+	t.Setenv("APPLE_SSO_ENABLED", "true")
+	t.Setenv("APPLE_CLIENT_ID", "chat.concordvoice.signin")
+	t.Setenv("APPLE_TEAM_ID", "TEAM123ABC")
+	t.Setenv("APPLE_KEY_ID", "KEYID12345")
+	t.Setenv("APPLE_PRIVATE_KEY", escaped)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.True(t, cfg.AppleSSO.Enabled)
+	assert.Equal(t, "chat.concordvoice.signin", cfg.AppleSSO.ClientID)
+	assert.Equal(t, "TEAM123ABC", cfg.AppleSSO.TeamID)
+	assert.Equal(t, "KEYID12345", cfg.AppleSSO.KeyID)
+
+	// The escape decoder must restore real newlines so PEM parsing works.
+	assert.Contains(t, string(cfg.AppleSSO.PrivateKey), "\n", "loader must convert \\n escapes back to real newlines")
+	assert.NotContains(t, string(cfg.AppleSSO.PrivateKey), `\n`, "loader must remove the literal escape sequence")
+
+	// PEM must round-trip: decode the loaded bytes successfully.
+	block, _ := pem.Decode(cfg.AppleSSO.PrivateKey)
+	require.NotNil(t, block, "loaded PrivateKey must be a valid PEM block")
+	assert.Equal(t, "PRIVATE KEY", block.Type)
+}
+
+func TestLoad_AppleSSO_EnabledWithAllFields_FilePath(t *testing.T) {
+	pemBytes := generateTestApplePEM(t)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "apple_signin.p8")
+	require.NoError(t, os.WriteFile(path, pemBytes, 0o600))
+
+	t.Setenv("APPLE_SSO_ENABLED", "true")
+	t.Setenv("APPLE_CLIENT_ID", "chat.concordvoice.signin")
+	t.Setenv("APPLE_TEAM_ID", "TEAM123ABC")
+	t.Setenv("APPLE_KEY_ID", "KEYID12345")
+	t.Setenv("APPLE_PRIVATE_KEY", "@"+path)
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.True(t, cfg.AppleSSO.Enabled)
+	assert.Equal(t, pemBytes, cfg.AppleSSO.PrivateKey)
+}
+
+func TestLoad_AppleSSO_FilePathNotFound(t *testing.T) {
+	t.Setenv("APPLE_SSO_ENABLED", "true")
+	t.Setenv("APPLE_CLIENT_ID", "chat.concordvoice.signin")
+	t.Setenv("APPLE_TEAM_ID", "TEAM123ABC")
+	t.Setenv("APPLE_KEY_ID", "KEYID12345")
+	t.Setenv("APPLE_PRIVATE_KEY", "@/nonexistent/path/apple_signin.p8")
+
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "APPLE_PRIVATE_KEY file")
+}
+
+// TestLoad_AppleSSO_DisabledIgnoresStaleFilePath pins the operator-friendly
+// behavior where a deployment with APPLE_SSO_ENABLED=false must NOT fail
+// startup on a stale APPLE_PRIVATE_KEY=@/path env var left over from a
+// prior enabled deployment. Apple SSO loading must early-return before
+// touching the filesystem when SSO is disabled.
+func TestLoad_AppleSSO_DisabledIgnoresStaleFilePath(t *testing.T) {
+	t.Setenv("APPLE_SSO_ENABLED", "false")
+	t.Setenv("APPLE_PRIVATE_KEY", "@/nonexistent/path/apple_signin.p8")
+
+	cfg, err := Load()
+	require.NoError(t, err, "disabled Apple SSO must not fail on stale file path env var")
+	assert.False(t, cfg.AppleSSO.Enabled)
+	assert.Empty(t, cfg.AppleSSO.PrivateKey,
+		"PrivateKey must remain empty when SSO is disabled, regardless of env var content")
+}
+
+// TestLoad_AppleSSO_DisabledIgnoresStaleLiteralPEM is the literal-PEM
+// counterpart to the @/path case above. A deployment with disabled Apple
+// SSO and a stale literal-PEM env var must NOT load it into PrivateKey
+// (the field stays empty), matching the disabled-path early-return
+// invariant.
+func TestLoad_AppleSSO_DisabledIgnoresStaleLiteralPEM(t *testing.T) {
+	t.Setenv("APPLE_SSO_ENABLED", "false")
+	t.Setenv("APPLE_PRIVATE_KEY", string(generateTestApplePEM(t)))
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.False(t, cfg.AppleSSO.Enabled)
+	assert.Empty(t, cfg.AppleSSO.PrivateKey,
+		"disabled SSO must not populate PrivateKey from a literal PEM env var")
+}
+
+// TestLoad_AppleSSO_EnabledEmptyAtPrefix_TreatedAsMissing pins the operator-
+// friendly behavior where APPLE_PRIVATE_KEY="@" or "@   " (a malformed
+// at-prefix with empty/whitespace path) is treated as missing rather than
+// passed to os.ReadFile(""), which would surface as a confusing "no such
+// file or directory" error.
+func TestLoad_AppleSSO_EnabledEmptyAtPrefix_TreatedAsMissing(t *testing.T) {
+	t.Setenv("APPLE_SSO_ENABLED", "true")
+	t.Setenv("APPLE_CLIENT_ID", "chat.concordvoice.signin")
+	t.Setenv("APPLE_TEAM_ID", "TEAM123ABC")
+	t.Setenv("APPLE_KEY_ID", "KEYID12345")
+	t.Setenv("APPLE_PRIVATE_KEY", "@   ") // malformed: @-prefix with whitespace path
+
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "APPLE_PRIVATE_KEY",
+		"malformed @-prefix must surface as missing-PrivateKey, not a confusing file-IO error")
+}
+
+func TestLoad_AppleSSO_EnabledMissingClientID(t *testing.T) {
+	t.Setenv("APPLE_SSO_ENABLED", "true")
+	t.Setenv("APPLE_CLIENT_ID", "")
+	t.Setenv("APPLE_TEAM_ID", "TEAM123ABC")
+	t.Setenv("APPLE_KEY_ID", "KEYID12345")
+	t.Setenv("APPLE_PRIVATE_KEY", string(generateTestApplePEM(t)))
+
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "APPLE_CLIENT_ID")
+}
+
+func TestLoad_AppleSSO_EnabledMissingTeamID(t *testing.T) {
+	t.Setenv("APPLE_SSO_ENABLED", "true")
+	t.Setenv("APPLE_CLIENT_ID", "chat.concordvoice.signin")
+	t.Setenv("APPLE_TEAM_ID", "")
+	t.Setenv("APPLE_KEY_ID", "KEYID12345")
+	t.Setenv("APPLE_PRIVATE_KEY", string(generateTestApplePEM(t)))
+
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "APPLE_TEAM_ID")
+}
+
+func TestLoad_AppleSSO_EnabledMissingKeyID(t *testing.T) {
+	t.Setenv("APPLE_SSO_ENABLED", "true")
+	t.Setenv("APPLE_CLIENT_ID", "chat.concordvoice.signin")
+	t.Setenv("APPLE_TEAM_ID", "TEAM123ABC")
+	t.Setenv("APPLE_KEY_ID", "")
+	t.Setenv("APPLE_PRIVATE_KEY", string(generateTestApplePEM(t)))
+
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "APPLE_KEY_ID")
+}
+
+func TestLoad_AppleSSO_EnabledMissingPrivateKey(t *testing.T) {
+	t.Setenv("APPLE_SSO_ENABLED", "true")
+	t.Setenv("APPLE_CLIENT_ID", "chat.concordvoice.signin")
+	t.Setenv("APPLE_TEAM_ID", "TEAM123ABC")
+	t.Setenv("APPLE_KEY_ID", "KEYID12345")
+	t.Setenv("APPLE_PRIVATE_KEY", "")
+
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "APPLE_PRIVATE_KEY")
+}
+
+// TestLoad_AppleSSO_EnabledWhitespaceOnlyPrivateKey_TreatedAsMissing pins
+// the operator-friendly behavior that whitespace-only env values surface as
+// the missing-field error rather than passing through to NewAppleProvider's
+// PEM parser, which would emit a confusing "PEM block decode failed" far
+// from the actual misconfig source.
+func TestLoad_AppleSSO_EnabledWhitespaceOnlyPrivateKey_TreatedAsMissing(t *testing.T) {
+	t.Setenv("APPLE_SSO_ENABLED", "true")
+	t.Setenv("APPLE_CLIENT_ID", "chat.concordvoice.signin")
+	t.Setenv("APPLE_TEAM_ID", "TEAM123ABC")
+	t.Setenv("APPLE_KEY_ID", "KEYID12345")
+	t.Setenv("APPLE_PRIVATE_KEY", "   \t\n  ") // whitespace only
+
+	_, err := Load()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "APPLE_PRIVATE_KEY",
+		"whitespace-only PrivateKey should be treated as missing, not as a literal value to pass through to PEM parsing")
+}
+
+func TestLoad_AppleSSO_EnabledMissingMultiple(t *testing.T) {
+	// ClientID + TeamID set; KeyID + PrivateKey unset → error must mention BOTH.
+	t.Setenv("APPLE_SSO_ENABLED", "true")
+	t.Setenv("APPLE_CLIENT_ID", "chat.concordvoice.signin")
+	t.Setenv("APPLE_TEAM_ID", "TEAM123ABC")
+	t.Setenv("APPLE_KEY_ID", "")
+	t.Setenv("APPLE_PRIVATE_KEY", "")
+
+	_, err := Load()
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Contains(t, msg, "APPLE_KEY_ID", "error must list KeyID as missing")
+	assert.Contains(t, msg, "APPLE_PRIVATE_KEY", "error must list PrivateKey as missing — accumulating guard, not first-fail")
+}
+
+func TestAppleSSOConfig_String_Disabled(t *testing.T) {
+	cfg := AppleSSOConfig{Enabled: false}
+	assert.Equal(t, "AppleSSOConfig{Enabled:false}", cfg.String())
+}
+
+func TestAppleSSOConfig_String_RedactsPrivateKey(t *testing.T) {
+	privKey := generateTestApplePEM(t)
+	cfg := AppleSSOConfig{
+		Enabled:    true,
+		ClientID:   "chat.concordvoice.signin",
+		TeamID:     "TEAM123ABC",
+		KeyID:      "KEYID12345",
+		PrivateKey: privKey,
+	}
+	output := cfg.String()
+
+	// PEM bytes must NEVER appear in the redacted output.
+	assert.NotContains(t, output, string(privKey), "raw PEM bytes must not leak through String()")
+	assert.NotContains(t, output, "PRIVATE KEY", "PEM markers must not leak through String()")
+
+	// Non-secret fields are visible — operators need them for log triage.
+	assert.Contains(t, output, "chat.concordvoice.signin")
+	assert.Contains(t, output, "TEAM123ABC")
+	assert.Contains(t, output, "KEYID12345")
+
+	// Redaction marker includes the byte count so operators can distinguish
+	// empty-vs-populated keys without exposing the bytes themselves.
+	assert.Regexp(t, regexp.MustCompile(`REDACTED \d+ bytes`), output, "redaction marker must include byte count")
 }

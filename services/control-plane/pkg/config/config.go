@@ -57,6 +57,34 @@ func (g GoogleSSOConfig) String() string {
 		g.Enabled, g.ClientID, secret)
 }
 
+// AppleSSOConfig holds Apple Sign-In credentials. Empty when SSO is disabled.
+// PrivateKey is the PEM-encoded contents of the .p8 key file from Apple
+// Developer. Two acceptable env-var formats:
+//
+//	APPLE_PRIVATE_KEY="<inline PEM with BEGIN/END PRIVATE KEY markers, newlines escaped as \n>"
+//	APPLE_PRIVATE_KEY="@/etc/concord/apple_signin.p8"     (file path prefixed with @)
+//
+// String() redacts PrivateKey to never log key material.
+type AppleSSOConfig struct {
+	Enabled  bool
+	ClientID string // Services ID, e.g. "chat.concordvoice.signin"
+	TeamID   string // 10-char Team ID
+	KeyID    string // 10-char Key ID
+	// PrivateKey holds PEM bytes (resolved at load time if @-prefixed).
+	PrivateKey []byte // #nosec G117 G101 -- False positive: config field name, actual key loaded from env
+}
+
+// String renders the config with the private key redacted, suitable for logs.
+// The byte count is included so operators can distinguish empty-vs-populated
+// keys in logs without exposing the key material itself.
+func (a AppleSSOConfig) String() string {
+	if !a.Enabled {
+		return "AppleSSOConfig{Enabled:false}"
+	}
+	return fmt.Sprintf("AppleSSOConfig{Enabled:true ClientID:%q TeamID:%q KeyID:%q PrivateKey:[REDACTED %d bytes]}",
+		a.ClientID, a.TeamID, a.KeyID, len(a.PrivateKey))
+}
+
 // Config holds all configuration for the application
 type Config struct {
 	Environment string
@@ -133,6 +161,13 @@ type Config struct {
 	// Load() returns an error if Enabled=true but credentials are unset, so
 	// misconfiguration is caught at startup in any environment.
 	GoogleSSO GoogleSSOConfig
+
+	// AppleSSO holds Apple Sign-In credentials (#271). Disabled by default.
+	// Load() returns an error if Enabled=true but any of the four required
+	// fields (ClientID, TeamID, KeyID, PrivateKey) is unset, so misconfiguration
+	// is caught at startup in any environment. The error message lists ALL
+	// missing fields at once rather than failing on the first.
+	AppleSSO AppleSSOConfig
 }
 
 // Load reads configuration from environment variables
@@ -198,11 +233,90 @@ func Load() (*Config, error) {
 		}
 	}
 
+	// Apple SSO (#271). Disabled by default. When enabled, all four fields
+	// (ClientID, TeamID, KeyID, PrivateKey) must be set. The production guard
+	// accumulates ALL missing fields rather than failing on the first, so
+	// operators see every problem in one error.
+	if err := loadAppleSSOConfig(cfg); err != nil {
+		return nil, err
+	}
+
 	if err := cfg.validate(); err != nil {
 		log.Fatal(err)
 	}
 
 	return cfg, nil
+}
+
+// loadAppleSSOConfig populates cfg.AppleSSO from environment variables and
+// enforces the production guard. Extracted from Load() to keep that function's
+// cognitive complexity below the 15 SonarQube threshold.
+//
+// PrivateKey accepts two transport formats:
+//   - Literal PEM with \n escapes (.env files / K8s ConfigMaps store
+//     multiline values as single lines; we restore real newlines)
+//   - @/path/to/file.p8 — the contents of the file are read at load time
+//     (preferred for production: file is mounted via secrets manager /
+//     systemd LoadCredential)
+//
+// When Enabled=true, all four fields (ClientID, TeamID, KeyID, PrivateKey)
+// must be set. The production guard accumulates ALL missing fields rather
+// than failing on the first, so operators see every problem in one error.
+//
+// Disabled deployments early-return BEFORE touching the filesystem so that
+// stale APPLE_PRIVATE_KEY=@/path env vars from a prior enabled deployment
+// don't cause startup to fail when SSO has been turned off.
+func loadAppleSSOConfig(cfg *Config) error {
+	cfg.AppleSSO.Enabled = getEnv("APPLE_SSO_ENABLED", "false") == "true"
+	if !cfg.AppleSSO.Enabled {
+		return nil
+	}
+
+	cfg.AppleSSO.ClientID = os.Getenv("APPLE_CLIENT_ID")
+	cfg.AppleSSO.TeamID = os.Getenv("APPLE_TEAM_ID")
+	cfg.AppleSSO.KeyID = os.Getenv("APPLE_KEY_ID")
+
+	rawAppleKey := os.Getenv("APPLE_PRIVATE_KEY")
+	if strings.HasPrefix(rawAppleKey, "@") {
+		// TrimSpace on the after-`@` portion: APPLE_PRIVATE_KEY="@" or
+		// "@   " is treated as missing-PrivateKey and falls through to the
+		// production-guard accumulation below — symmetric with the
+		// whitespace gate on the literal-PEM branch and avoids a confusing
+		// "no such file or directory: \"\"" error from os.ReadFile.
+		path := strings.TrimSpace(strings.TrimPrefix(rawAppleKey, "@"))
+		if path != "" {
+			b, err := os.ReadFile(path) // #nosec G304 G703 -- path is operator-supplied via env var, by design
+			if err != nil {
+				return fmt.Errorf("APPLE_PRIVATE_KEY file: %w", err)
+			}
+			cfg.AppleSSO.PrivateKey = b
+		}
+	} else if strings.TrimSpace(rawAppleKey) != "" {
+		// Literal PEM; allow newline escapes from .env files.
+		// strings.TrimSpace gate ensures whitespace-only env values
+		// (e.g., APPLE_PRIVATE_KEY="   ") are treated as missing rather
+		// than passing through to NewAppleProvider, which would surface
+		// as a confusing PEM-parse error far from the actual misconfig.
+		cfg.AppleSSO.PrivateKey = []byte(strings.ReplaceAll(rawAppleKey, `\n`, "\n"))
+	}
+
+	var missing []string
+	if cfg.AppleSSO.ClientID == "" {
+		missing = append(missing, "APPLE_CLIENT_ID")
+	}
+	if cfg.AppleSSO.TeamID == "" {
+		missing = append(missing, "APPLE_TEAM_ID")
+	}
+	if cfg.AppleSSO.KeyID == "" {
+		missing = append(missing, "APPLE_KEY_ID")
+	}
+	if len(cfg.AppleSSO.PrivateKey) == 0 {
+		missing = append(missing, "APPLE_PRIVATE_KEY")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("AppleSSO enabled but %s unset", strings.Join(missing, ", "))
+	}
+	return nil
 }
 
 // validate checks for dangerous configuration in production environments.
