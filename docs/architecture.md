@@ -395,7 +395,7 @@ Channel types: `text`, `voice`, `bulletin`
 **RTC Ports**: 40000-49999 (UDP)
 
 **Tech Stack**:
-- Node.js 20+ / TypeScript
+- Node.js 24+ / TypeScript
 - mediasoup v3 (WebRTC SFU)
 - Socket.IO (signaling)
 - NATS (inter-service messaging with Control Plane)

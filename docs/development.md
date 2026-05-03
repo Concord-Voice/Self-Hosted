@@ -545,7 +545,7 @@ Recommended:
 
 ### Node.js
 
-- Use Node.js 20+ for better performance
+- Use Node.js 24+ for better performance
 - Enable V8 flags: `--max-old-space-size=4096`
 - Profile with Chrome DevTools
 
