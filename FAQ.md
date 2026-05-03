@@ -1,6 +1,6 @@
 # Concord Voice Frequently Asked Questions (FAQ)
 
-**Last Updated:** 2026-04-09
+**Last Updated:** 2026-05-01
 
 This document answers common questions about Concord Voice's licensing, security, development, deployment, and usage.
 
@@ -22,12 +22,14 @@ This document answers common questions about Concord Voice's licensing, security
 ### What is BSL 1.1?
 
 The Business Source License (BSL) is a "source-available" license that allows you to:
+
 - ✅ View and audit the source code
 - ✅ Use the software for personal, educational, or non-commercial purposes
 - ✅ Modify the code for your own use
 - ✅ Self-host with unlimited users (non-commercial)
 
 But **restricts** you from:
+
 - ❌ Using it to compete with the official Concord Voice service
 - ❌ Offering Concord Voice as a SaaS product to others (without a commercial license)
 
@@ -38,6 +40,7 @@ After **4 years**, each version automatically converts to **AGPL-3.0** (fully op
 ### Can I use Concord Voice for free?
 
 **Yes!** You can:
+
 - Use the hosted SaaS version at [www.concordvoice.com](https://www.concordvoice.com)
 - Self-host for personal use with unlimited users
 - Self-host for non-profit or educational purposes
@@ -49,6 +52,7 @@ After **4 years**, each version automatically converts to **AGPL-3.0** (fully op
 **Yes**, with a commercial self-hosted license. Commercial use requires a paid license.
 
 You **don't need a license** if:
+
 - You're a non-profit organization
 - You're using it for educational purposes
 - You're using it for personal/family use
@@ -58,6 +62,7 @@ You **don't need a license** if:
 ### Can I modify the code?
 
 **Yes!** You can modify Concord Voice for your own use. However:
+
 - ✅ Modify for personal self-hosted instance
 - ✅ Contribute improvements back (encouraged!)
 - ❌ Create a competing SaaS service with your modifications
@@ -68,12 +73,14 @@ You **don't need a license** if:
 ### Can I contribute to Concord Voice?
 
 **Absolutely!** We welcome contributions. When you contribute code:
+
 - Your contributions are licensed under the same BSL 1.1 terms
 - After 4 years, they become AGPL-3.0 (fully open source)
 - You retain copyright to your original work
 - See [.github/CONTRIBUTING.md](./.github/CONTRIBUTING.md) for guidelines
 
 **How to contribute:**
+
 1. Fork the repository
 2. Create a feature branch
 3. Make your changes with tests
@@ -85,11 +92,13 @@ You **don't need a license** if:
 ### What happens after 4 years?
 
 Each version of Concord Voice becomes **fully open source** under AGPL-3.0 after 4 years:
+
 - Anyone can use it for any purpose (including competing services)
 - Modifications must be shared (AGPL copyleft)
 - This ensures long-term sustainability and community ownership
 
 **Example timeline:**
+
 - Version 1.0 released January 2025 → becomes AGPL January 2029
 - Version 2.0 released June 2026 → becomes AGPL June 2030
 
@@ -98,6 +107,7 @@ Each version of Concord Voice becomes **fully open source** under AGPL-3.0 after
 ### Why not just use AGPL or MIT from the start?
 
 We chose BSL 1.1 because it:
+
 - **Protects development investment** - Prevents unfair competition in early years
 - **Ensures eventual openness** - Guarantees full open source after 4 years
 - **Allows transparency** - Source code is available for audit from day one
@@ -108,6 +118,7 @@ We chose BSL 1.1 because it:
 ### Can I fork Concord Voice?
 
 **Yes**, with restrictions:
+
 - ✅ Fork for personal use
 - ✅ Fork to contribute improvements
 - ✅ Fork to self-host for your organization
@@ -120,11 +131,13 @@ After 4 years, older versions become AGPL-3.0 and you can fork them for any purp
 ### What's the difference between BSL and "open core"?
 
 **Traditional Open Core:**
+
 - Core features: Open source (e.g., MIT)
 - Premium features: Proprietary forever
 - Creates permanent split between free and paid
 
 **BSL 1.1 (Concord Voice's approach):**
+
 - All features: Source-available immediately
 - All code: Becomes fully open source after 4 years
 - No permanent proprietary components
@@ -136,12 +149,14 @@ We believe this is **more open** long-term than traditional open core models.
 ### Do I need a license to self-host for my family?
 
 **No!** Personal, family, educational, and small non-commercial use is always free:
+
 - ✅ Set up a server for your gaming group
 - ✅ Use it for your family chat
 - ✅ Deploy it for your school or non-profit
 - ✅ Run it for your hobby project
 
 **You only need a commercial license if:**
+
 - You're offering Concord Voice as a hosted service to external customers (competing SaaS)
 - You're embedding Concord Voice in a product you sell to customers
 - Internal team communication (even at a business) is always free to self-host
@@ -151,6 +166,7 @@ We believe this is **more open** long-term than traditional open core models.
 ### Can universities and schools use Concord Voice?
 
 **Yes, completely free!** Educational institutions can:
+
 - Self-host with unlimited users
 - Modify the code for research
 - Use it for teaching purposes
@@ -165,6 +181,7 @@ We encourage educational use and welcome academic contributions.
 Under BSL 1.1, you **cannot** create a competing SaaS service during the initial 4-year period.
 
 **However:**
+
 - After 4 years, each version becomes AGPL-3.0
 - You can then use older versions to compete freely
 - You can always build a complementary service (bots, plugins, integrations)
@@ -177,13 +194,13 @@ We believe 4 years is a fair window to establish the project while ensuring even
 
 **It depends:**
 
-| Use Case | License Required? |
-|----------|-------------------|
-| Internal team communication | No (self-host free) |
-| Selling Concord Voice as a service | Yes (commercial SaaS prohibited) |
-| Embedding in your product (for customers) | Yes (commercial license) |
-| Building integrations/bots | No (complementary services allowed) |
-| Using the API for your business | No (API usage is open) |
+| Use Case                                  | License Required?                   |
+| ----------------------------------------- | ----------------------------------- |
+| Internal team communication               | No (self-host free)                 |
+| Selling Concord Voice as a service        | Yes (commercial SaaS prohibited)    |
+| Embedding in your product (for customers) | Yes (commercial license)            |
+| Building integrations/bots                | No (complementary services allowed) |
+| Using the API for your business           | No (API usage is open)              |
 
 **When in doubt**, email contact-us@concordvoice.com for clarification.
 
@@ -191,13 +208,13 @@ We believe 4 years is a fair window to establish the project while ensuring even
 
 ### How does BSL 1.1 compare to other licenses?
 
-| License | Source Available? | Can Self-Host? | Can Compete? | Eventually Open? |
-|---------|-------------------|----------------|--------------|------------------|
-| **BSL 1.1** | ✅ Yes | ✅ Yes (free non-commercial) | ❌ No (4 years) | ✅ Yes (AGPL after 4y) |
-| MIT | ✅ Yes | ✅ Yes | ✅ Yes | ✅ Already open |
-| AGPL-3.0 | ✅ Yes | ✅ Yes | ✅ Yes (must share changes) | ✅ Already open |
-| Proprietary | ❌ No | ❌ No | ❌ No | ❌ No |
-| Open Core | ✅ Partial | ⚠️ Partial | ⚠️ Partial | ⚠️ Core only |
+| License     | Source Available? | Can Self-Host?               | Can Compete?                | Eventually Open?       |
+| ----------- | ----------------- | ---------------------------- | --------------------------- | ---------------------- |
+| **BSL 1.1** | ✅ Yes            | ✅ Yes (free non-commercial) | ❌ No (4 years)             | ✅ Yes (AGPL after 4y) |
+| MIT         | ✅ Yes            | ✅ Yes                       | ✅ Yes                      | ✅ Already open        |
+| AGPL-3.0    | ✅ Yes            | ✅ Yes                       | ✅ Yes (must share changes) | ✅ Already open        |
+| Proprietary | ❌ No             | ❌ No                        | ❌ No                       | ❌ No                  |
+| Open Core   | ✅ Partial        | ⚠️ Partial                   | ⚠️ Partial                  | ⚠️ Core only           |
 
 BSL 1.1 balances immediate transparency with sustainable development.
 
@@ -210,13 +227,15 @@ BSL 1.1 balances immediate transparency with sustainable development.
 Yes. We implement industry-standard security practices:
 
 **Cryptography:**
-- 🔐 **E2EE:** RSA-OAEP 4096-bit + AES-GCM encryption
+
+- 🔐 **E2EE:** RSA-OAEP 4096-bit + AES-256-GCM encryption
 - 🔑 **Password Hashing:** Argon2id (OWASP recommended)
 - 🎫 **Tokens:** JWT access tokens (15min) + HttpOnly refresh tokens (30d)
 - 🔐 **Key Derivation:** PBKDF2 600k iterations
 - 🔒 **Transport:** TLS 1.3
 
 **Infrastructure:**
+
 - 🚫 **Rate Limiting:** Redis-based, per-IP and per-user
 - 🛡️ **Pre-commit Hooks:** Prevents committing secrets
 - **Pre-commit Scanning:** 22 hooks via Python pre-commit framework (TruffleHog, detect-secrets, Gitleaks, Semgrep, golangci-lint, ESLint, etc.)
@@ -232,6 +251,7 @@ Yes. We implement industry-standard security practices:
 E2EE means your messages are encrypted on your device before being sent. Only you and the recipient can read them—not even Concord Voice can decrypt them.
 
 **How it works:**
+
 1. Your device generates a unique key pair (public + private keys)
 2. Your private key is encrypted with your password and never leaves your device unencrypted
 3. Messages are encrypted with the recipient's public key
@@ -267,6 +287,7 @@ E2EE means your messages are encrypted on your device before being sent. Only yo
    - Include "SECURITY" in subject line
 
 **Response timeline:**
+
 - 24 hours: Initial acknowledgment
 - 72 hours: Preliminary assessment
 - 7 days: Detailed response and timeline
@@ -279,6 +300,7 @@ See [.github/SECURITY.md](./.github/SECURITY.md) for full policy.
 ### What data does Concord Voice collect?
 
 **Hosted SaaS:**
+
 - ✅ Email address (for account recovery)
 - ✅ Username
 - ✅ Encrypted password (Argon2id hash)
@@ -287,6 +309,7 @@ See [.github/SECURITY.md](./.github/SECURITY.md) for full policy.
 - ❌ **Not collected:** Biometric data, location, message content (E2EE), call recordings
 
 **Self-Hosted:**
+
 - You control all data
 - Concord Voice receives no data from self-hosted instances (except license validation pings)
 
@@ -301,6 +324,7 @@ See [.github/SECURITY.md](./.github/SECURITY.md) for full policy.
 **Status:** ✅ Implemented (Phase 2A)
 
 **Supported methods:**
+
 - TOTP (Google Authenticator, Authy)
 - WebAuthn/FIDO2 (hardware security keys like YubiKey, passkeys)
 - Backup codes
@@ -311,9 +335,18 @@ MFA is available now. Enable it in your account security settings.
 
 ---
 
+### Can I sign in with Google or Apple?
+
+**Status:** ✅ Implemented — both providers shipped (Google via #808, Apple via #824).
+
+The desktop app's Login screen renders both `Sign in with Google` and `Sign in with Apple` buttons (`client/desktop/src/renderer/components/Auth/Login.tsx`, `SSOButton.tsx`), wired through the loopback OAuth flow in `client/desktop/src/main/ssoLoopback.ts`. Apple's privacy-relay email addresses are detected server-side and excluded from auto-link to avoid attaching an existing account to an opaque relay alias.
+
+---
+
 ### What about vendor lock-in?
 
 Concord Voice is designed to **prevent vendor lock-in**:
+
 - ✅ Full source code available (audit anytime)
 - ✅ Self-host option (data portability)
 - ✅ Standard protocols (WebRTC, PostgreSQL, Redis)
@@ -351,12 +384,14 @@ See [docs/GETTING_STARTED.md](./docs/GETTING_STARTED.md) for detailed instructio
 ### What are the prerequisites for development?
 
 **Required:**
+
 - **Node.js** 20+
-- **Go** 1.26.1+
+- **Go** 1.26.2+
 - **Docker** & **Docker Compose**
 - **Git**
 
 **Optional:**
+
 - **PostgreSQL** client (psql) for database inspection
 - **Redis** CLI for cache debugging
 
@@ -383,6 +418,7 @@ See [README.md](./README.md) for full breakdown.
 ### What coding standards should I follow?
 
 **Go (Backend):**
+
 - Use `gofmt` and `golangci-lint`
 - Follow [Effective Go](https://go.dev/doc/effective_go)
 - Handle all errors explicitly
@@ -390,6 +426,7 @@ See [README.md](./README.md) for full breakdown.
 - Keep functions small and focused
 
 **TypeScript (Frontend):**
+
 - Use ESLint and Prettier
 - Follow Airbnb style guide
 - Use TypeScript strict mode
@@ -398,6 +435,7 @@ See [README.md](./README.md) for full breakdown.
 - Use functional components with hooks
 
 **Commit Messages:**
+
 ```bash
 <type>: <description>
 
@@ -415,6 +453,7 @@ See [.github/CONTRIBUTING.md](./.github/CONTRIBUTING.md) for full guidelines.
 ### How do I run tests?
 
 **Backend tests:**
+
 ```bash
 cd services/control-plane
 go test -v ./...
@@ -424,17 +463,21 @@ go test -coverprofile=coverage.out ./...
 go tool cover -html=coverage.out
 ```
 
-**Frontend tests** (783 tests, 70.28% coverage):
+**Frontend tests:**
+
 ```bash
 cd client/desktop
 npm test
 ```
+
+> SonarQube enforces ≥ 80% coverage on new code as a mandatory Quality Gate; see [[internal]](.[internal]) for current test-file counts.
 
 ---
 
 ### How do I create a Pull Request?
 
 1. **Create a branch:**
+
    ```bash
    git checkout -b feature/my-feature
    ```
@@ -445,18 +488,21 @@ npm test
    - Update documentation
 
 3. **Test locally:**
+
    ```bash
    ./scripts/dev-stop.sh
    ./scripts/dev-start.sh --rebuild
    ```
 
 4. **Commit:**
+
    ```bash
    git add .
    git commit -m "feat: add my feature"
    ```
 
 5. **Push and create PR:**
+
    ```bash
    git push origin feature/my-feature
    # Then open a Pull Request on GitHub
@@ -473,6 +519,7 @@ npm test
 ### What should I NOT commit?
 
 **Never commit:**
+
 - ❌ Passwords or API keys
 - ❌ Private keys (.pem, .key)
 - ❌ .env files with secrets
@@ -483,6 +530,7 @@ npm test
 **Git hooks will catch these**, but be careful.
 
 **Always use:**
+
 - ✅ Environment variables
 - ✅ .env.example templates
 - ✅ GitHub Secrets for CI/CD
@@ -493,9 +541,10 @@ npm test
 
 ### How do I self-host Concord Voice?
 
-**Status:** Self-hosting documentation coming in Phase 3 (Q4 2026).
+**Status:** Self-hosting installer is planned for Phase 3 (issue #210); narrative deployment guide tracked at #819.
 
 **Current workaround** (for developers):
+
 ```bash
 # Use Docker Compose for local deployment (from project root)
 docker-compose up -d
@@ -513,12 +562,14 @@ Full self-hosting guide with single-command setup coming soon.
 ### What are the system requirements for self-hosting?
 
 **Minimum (for testing):**
+
 - 2 CPU cores
 - 4 GB RAM
 - 20 GB disk space
 - Docker + Docker Compose
 
 **Recommended (for production):**
+
 - 4 CPU cores
 - 8 GB RAM
 - 100 GB SSD
@@ -527,6 +578,7 @@ Full self-hosting guide with single-command setup coming soon.
 - Reverse proxy with TLS (nginx, Caddy)
 
 **For voice (Media Plane):**
+
 - Add 2 CPU cores per 25 concurrent voice users
 - Add 1 GB RAM per 25 concurrent voice users
 
@@ -535,6 +587,7 @@ Full self-hosting guide with single-command setup coming soon.
 ### Can I run Concord Voice on Raspberry Pi?
 
 **Maybe** - depends on usage:
+
 - ✅ **Raspberry Pi 4 (4GB+)**: Should work for small groups (<10 users)
 - ⚠️ **Raspberry Pi 3**: Marginal, text-only might work
 - ❌ **Voice chat**: Not recommended on Pi due to CPU requirements
@@ -545,11 +598,7 @@ We haven't officially tested Pi deployment, but community reports welcome!
 
 ### What about Kubernetes/cloud deployment?
 
-**Phase 4** (Q1-Q2 2027) will include:
-- Kubernetes manifests
-- Helm charts
-- Multi-region deployment guides
-- Cloud provider templates (AWS, GCP, Azure)
+Kubernetes manifests, Helm charts, and cloud provider templates are not currently shipped. Production deployment uses a single VM via systemd timer + Docker Compose (see `[internal]`).
 
 For now, Docker Compose is the supported method.
 
@@ -560,15 +609,15 @@ For now, Docker Compose is the supported method.
 ### What platforms are supported?
 
 **Current:**
+
 - ✅ **Desktop:** Electron app (Windows, macOS, Linux)
-- 🚧 **Web:** Planned (Q3 2026)
-- 📋 **Mobile:** Planned (Q1 2027)
+- 📋 **Mobile:** Planned (Phase 3, issue #204)
 
 ---
 
 ### Can I use Concord on mobile?
 
-**Not yet.** Mobile apps (iOS + Android) are planned for Phase 4 (Q1 2027).
+**Not yet.** Mobile apps (iOS + Android) are planned for Phase 3 (issue #204).
 
 The desktop Electron app works on laptops/tablets, but no native mobile UI yet.
 
@@ -576,15 +625,15 @@ The desktop Electron app works on laptops/tablets, but no native mobile UI yet.
 
 ### How is Concord different from major comms platforms?
 
-| Feature | major comms platforms | Concord |
-|---------|---------|---------|
-| **E2EE** | ❌ | ✅ Yes |
-| **Self-Hosting** | ❌ | ✅ Yes (Phase 3) |
-| **Source Code** | ❌ Proprietary | ✅ BSL 1.1 (→ AGPL) |
-| **Privacy** | ⚠️ Collects data | ✅ Minimal telemetry |
-| **Business Model** | Nitro subscriptions | À-la-carte + self-host |
-| **Voice Quality** | Good (Opus) | ✅ Hi-Fi (256kbps+, 7 quality tiers) |
-| **Bots** | ✅ Yes | 📋 Planned (Phase 5) |
+| Feature            | major comms platforms             | Concord                              |
+| ------------------ | ------------------- | ------------------------------------ |
+| **E2EE**           | ❌                  | ✅ Yes                               |
+| **Self-Hosting**   | ❌                  | ✅ Yes (Phase 3)                     |
+| **Source Code**    | ❌ Proprietary      | ✅ BSL 1.1 (→ AGPL)                  |
+| **Privacy**        | ⚠️ Collects data    | ✅ No telemetry                      |
+| **Business Model** | Nitro subscriptions | À-la-carte + self-host               |
+| **Voice Quality**  | Good (Opus)         | ✅ Hi-Fi (256kbps+, 7 quality tiers) |
+| **Bots**           | ✅ Yes              | 📋 Planned (post-GA)                 |
 
 **Concord Voice's focus:** Privacy, sovereignty, eventual open source.
 
@@ -595,6 +644,7 @@ The desktop Electron app works on laptops/tablets, but no native mobile UI yet.
 **Status:** ✅ Implemented (Phase 1C, PR #114).
 
 Screen sharing uses WebRTC via the mediasoup SFU. Features include:
+
 - Full-screen and window/tab selection via ScreenSharePicker
 - AV1 codec for screen share (high quality at low bitrate)
 - IGNIS decoder budget system for managing stream limits
@@ -604,30 +654,28 @@ Screen sharing uses WebRTC via the mediasoup SFU. Features include:
 
 ### Can I upload files?
 
-**Status:** Planned for Phase 2 (Q3 2026).
+**Status:** Shipped in the v0.2.0-Beta chat-enhancements series (#168 series), with file & image attachments delivered in [#470](https://github.com/markdrogersjr/Concord/pull/470).
 
-Will support:
-- Image uploads
-- Video uploads
-- General file uploads (with size limits by tier)
-- CDN integration for fast delivery
+Supported uploads:
+
+- Image uploads (with two-tier media access via the MinIO object-storage layer, [#325](https://github.com/markdrogersjr/Concord/pull/325))
+- General file attachments via the chat composer
+- Profile and server image assets (avatars, banners, server icons)
 
 ---
 
 ### Is there a file size limit?
 
-**Planned limits (Phase 2):**
-- **Free tier:** 10 MB per file, 1 GB per month
-- **Premium:** 100 MB per file, 10 GB per month
-- **Server Premium:** Unlimited for server members
+Yes — configurable per-deployment via the `UPLOAD_MAX_SIZE` env var on the control-plane (defaults to 25 MB for general attachments). Profile and server image assets have separate caps (avatars and server icons 5 MB; banners 10 MB) defined in `services/control-plane/internal/media/handlers.go`.
 
 ---
 
 ### Can I create bots?
 
-**Status:** Planned for Phase 5 (Q3-Q4 2027).
+**Status:** Planned for post-GA (no issue tracker entry yet).
 
-Will include:
+Anticipated scope:
+
 - Bot user type
 - Public API with webhooks
 - Bot permission system
@@ -642,11 +690,13 @@ For now, focus is on core chat and voice features.
 ### The dev environment won't start
 
 **Check:**
+
 1. Docker is running: `docker ps`
 2. Ports are free: `lsof -ti:8080` (should be empty)
 3. Logs: `tail -f logs/control-plane.log`
 
 **Fix:**
+
 ```bash
 # Stop everything cleanly
 ./scripts/dev-stop.sh
@@ -660,6 +710,7 @@ For now, focus is on core chat and voice features.
 ### I'm getting "port already in use" errors
 
 **Find and kill the process:**
+
 ```bash
 # For port 8080 (control-plane)
 lsof -ti:8080 | xargs kill -9
@@ -675,27 +726,31 @@ lsof -ti:5173 | xargs kill -9
 
 ### Database migrations aren't running
 
-The migration system uses `golang-migrate/v4` and runs automatically on server startup. There are currently **57 migrations** (000001-000057) — see [[internal]](.[internal]) for the current count.
+The migration system uses `golang-migrate/v4` and runs automatically on server startup. See [[internal]](.[internal]) § Key Counts for the current migration count.
 
 **Check migration status:**
+
 ```bash
 cd services/control-plane
 make migrate-version
 ```
 
 **Run migrations manually:**
+
 ```bash
 cd services/control-plane
 make migrate-up
 ```
 
 **Rollback:**
+
 ```bash
 cd services/control-plane
 make migrate-down
 ```
 
 **If migrations fail**, ensure PostgreSQL is running and accessible:
+
 ```bash
 docker exec -it concord-postgres psql -U concord -d concord -c "SELECT version FROM schema_migrations;"
 ```
@@ -705,6 +760,7 @@ docker exec -it concord-postgres psql -U concord -d concord -c "SELECT version F
 ### WebSocket connection fails
 
 **Check:**
+
 1. Control Plane is running: `curl http://localhost:8080/health`
 2. JWT token is valid (not expired)
 3. Browser console for errors
@@ -716,6 +772,7 @@ WebSocket support is fully implemented with ticket-based authentication. Ensure 
 ### Tests are failing
 
 **For Go tests:**
+
 ```bash
 cd services/control-plane
 
@@ -727,6 +784,7 @@ go test -race ./...
 ```
 
 **For frontend tests:**
+
 ```bash
 cd client/desktop
 
@@ -758,11 +816,13 @@ docker-compose down -v
 ### The Electron app won't open
 
 **Check:**
+
 1. Vite dev server is running: `curl http://localhost:5173`
 2. Node modules installed: `cd client/desktop && npm install`
 3. Console output: Look for errors in terminal
 
 **Rebuild:**
+
 ```bash
 cd client/desktop
 npm run build
@@ -774,6 +834,7 @@ npm run dev
 ### Where can I get help?
 
 **Resources:**
+
 - **Documentation:** [docs/](./docs/)
 - **GitHub Discussions:** [Ask questions](https://github.com/markdrogersjr/Concord/discussions)
 - **GitHub Issues:** [Report bugs](https://github.com/markdrogersjr/Concord/issues)
@@ -812,4 +873,4 @@ If your question isn't answered here:
 
 ---
 
-**Last Updated:** 2026-04-09 | **Version:** 1.5.0
+**Last Updated:** 2026-05-01

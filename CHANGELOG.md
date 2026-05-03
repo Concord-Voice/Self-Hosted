@@ -4,6 +4,155 @@ All notable changes to Concord Voice will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.2.0-Beta] — 2026-XX-XX (Phase 2 — Beta release)
+
+> Release-level rollup of Phase 2A + Phase 2B work. Per-revision detail lives in the `[0.1.12]`–`[0.1.18]` entries below; this entry surfaces the user-visible themes that close the v0.2.0-Beta milestone.
+
+### Added
+
+- **Federated identity — Google SSO** ([#808](https://github.com/markdrogersjr/Concord/pull/808)) — backend OAuth flow for Google sign-in and registration; desktop client integration shipped alongside Apple SSO in [#824](https://github.com/markdrogersjr/Concord/pull/824) (`client/desktop/src/main/ssoLoopback.ts`, `Login.tsx` / `Register.tsx`).
+- **Federated identity — Apple Sign in with Apple** ([#824](https://github.com/markdrogersjr/Concord/pull/824)) — privacy-relay-aware Apple SSO alongside Google.
+- **MFA / WebAuthn authentication** ([#202](https://github.com/markdrogersjr/Concord/pull/202)) — TOTP, WebAuthn/FIDO2, backup codes, recovery circles, trusted devices; closes #89.
+- **Account erasure (GDPR right to be forgotten)** ([#717](https://github.com/markdrogersjr/Concord/pull/717)) — `POST /api/v1/privacy/erase-account` wired to a transactional account-deletion service that cascades across all linked tables; `refresh_tokens.user_id` cascades atomically.
+- **Account recovery** ([#328](https://github.com/markdrogersjr/Concord/pull/328)) — zero-knowledge key recovery flow.
+- **RBAC / SBAC permissions system** ([#242](https://github.com/markdrogersjr/Concord/pull/242)) — granular role-based access control with audit logging; closes #82. Context menu wired to roles in [#548](https://github.com/markdrogersjr/Concord/pull/548).
+- **Object storage on MinIO** ([#325](https://github.com/markdrogersjr/Concord/pull/325)) — user image assets migrated from PostgreSQL to S3-compatible storage with two-tier media access; closes #166.
+- **Server ownership transfer** ([#351](https://github.com/markdrogersjr/Concord/pull/351)) — full lifecycle with MFA, email confirmation, reversal tokens; closes #244.
+- **Email verification on registration** ([#273](https://github.com/markdrogersjr/Concord/pull/273)) — SMTP-based verification; later migrated from Proton SMTP to Resend with branded templates and `verify.concordvoice.chat` subdomain.
+- **Pending registrations** ([#688](https://github.com/markdrogersjr/Concord/pull/688)) — registration creates `pending_registrations` with a 15-minute TTL; closes #527 and #621.
+- **Chat enhancements (#168 series)** — message reactions ([#459](https://github.com/markdrogersjr/Concord/pull/459)), reply / quote ([#463](https://github.com/markdrogersjr/Concord/pull/463)), pinning ([#465](https://github.com/markdrogersjr/Concord/pull/465)), E2EE-native search ([#468](https://github.com/markdrogersjr/Concord/pull/468)), file & image attachments ([#470](https://github.com/markdrogersjr/Concord/pull/470)), draft persistence ([#477](https://github.com/markdrogersjr/Concord/pull/477)), desktop notifications ([#478](https://github.com/markdrogersjr/Concord/pull/478)), keyboard shortcuts ([#479](https://github.com/markdrogersjr/Concord/pull/479)), group DMs ([#472](https://github.com/markdrogersjr/Concord/pull/472)), extended Markdown rendering ([#711](https://github.com/markdrogersjr/Concord/pull/711)).
+- **Klipy GIF integration** ([#557](https://github.com/markdrogersjr/Concord/pull/557)) — GIF search, picker, and privacy proxy through the control-plane; theme-aware logos and disclaimers.
+- **Server-enforced mute and deafen** ([#546](https://github.com/markdrogersjr/Concord/pull/546)) — server-side mute/deafen state propagated to the mediasoup SFU; consumers paused/resumed at SFU level.
+- **@mention notification routing in E2EE channels** ([#310](https://github.com/markdrogersjr/Concord/pull/310)) — server-side mention detection without decryption.
+- **DM key-epoch enforcement** ([#298](https://github.com/markdrogersjr/Concord/pull/298)) — key revocation table and epoch checking in the WebSocket path; closes #122.
+- **Channel-key rotation on member removal** — E2EE forward secrecy for channel keys; closes #96.
+- **Desktop auto-updater** ([#155](https://github.com/markdrogersjr/Concord/pull/155), [#381](https://github.com/markdrogersjr/Concord/pull/381)–[#387](https://github.com/markdrogersjr/Concord/pull/387)) — safe updates with rollback, branded splash screen, fill-progress, error states, position memory, and structured logging.
+- **Server-proxied desktop updates** ([#264](https://github.com/markdrogersjr/Concord/pull/264)) — privacy-first update delivery with no per-client telemetry.
+- **SPA deployment pipeline** ([#429](https://github.com/markdrogersjr/Concord/pull/429)) — file server, versioning, and GitHub Actions workflow for hot-update SPA bundles. SPA deploy contract added in [#773](https://github.com/markdrogersjr/Concord/pull/773) coupling bundle-hash and handler-path.
+- **Bundled-SPA fallback (Option C)** ([#831](https://github.com/markdrogersjr/Concord/pull/831), [#832](https://github.com/markdrogersjr/Concord/pull/832), [#835](https://github.com/markdrogersjr/Concord/pull/835)) — desktop client falls back to the bundled SPA on hot-update failure with the `app://` scheme, an Option C user-facing overlay, and IPC v9.
+- **WebSocket reconnect race fix + subscribe-barrier protocol** ([#769](https://github.com/markdrogersjr/Concord/pull/769)) — closes #752.
+- **Self-hosted coturn STUN/TURN** ([#124](https://github.com/markdrogersjr/Concord/pull/124)) — infrastructure for NAT traversal; cert isolation and `turn.concordvoice.chat` SAN added in [#577](https://github.com/markdrogersjr/Concord/pull/577).
+- **Public Tier-1 media proxy** ([#570](https://github.com/markdrogersjr/Concord/pull/570)) — unauthenticated access for public media assets.
+- **Token theft detection** ([#89](https://github.com/markdrogersjr/Concord/pull/89)) — machine ID + IP binding with automatic revocation. Sessions capture real client IP via trusted-proxy CIDR allowlist in [#702](https://github.com/markdrogersjr/Concord/pull/702).
+- **Proactive token refresh** ([#329](https://github.com/markdrogersjr/Concord/pull/329)) — main-process JWT refresh before expiry; closes #240 and #254.
+- **Profile and identity asset theming** ([#251](https://github.com/markdrogersjr/Concord/pull/251), [#252](https://github.com/markdrogersjr/Concord/pull/252)) — per-user theming, profile cards, DM sidebar cards, avatar theming.
+- **Image crop editors for profile and server images** ([#357](https://github.com/markdrogersjr/Concord/pull/357)).
+- **Username restrictions, period support, yearly change cooldown** ([#330](https://github.com/markdrogersjr/Concord/pull/330)).
+- **OS-level permission management** ([#321](https://github.com/markdrogersjr/Concord/pull/321)) — request, check, and enforce system permissions; closes #197.
+- **Friend requests** ([#203](https://github.com/markdrogersjr/Concord/pull/203)) — accept/decline UI with context menu.
+- **Notification sounds** for chat and voice events ([#375](https://github.com/markdrogersjr/Concord/pull/375), [#394](https://github.com/markdrogersjr/Concord/pull/394)); per-category sound volumes ([#743](https://github.com/markdrogersjr/Concord/pull/743)); DM call sounds with looping ([#554](https://github.com/markdrogersjr/Concord/pull/554)).
+- **Developer Mode toggle** ([#567](https://github.com/markdrogersjr/Concord/pull/567)) — DevTools accessible in Alpha/Beta builds only via the developer mode setting.
+- **Code signing — macOS** ([#641](https://github.com/markdrogersjr/Concord/pull/641)) — Developer ID Application cert wired to sign and notarize macOS builds.
+- **Code signing — Windows** ([#649](https://github.com/markdrogersjr/Concord/pull/649)) — Microsoft Artifact Signing for `Setup.exe`; closes #404.
+- **Docker network segmentation** ([#442](https://github.com/markdrogersjr/Concord/pull/442)) — service isolation, request-ID propagation, Redis auth bans.
+- **CI/CD pipeline** ([#128](https://github.com/markdrogersjr/Concord/pull/128), [#130](https://github.com/markdrogersjr/Concord/pull/130)) — GitHub Actions `build.yml` with parallel test, coverage, and SonarQube; later hardened with Semgrep SAST in [#457](https://github.com/markdrogersjr/Concord/pull/457).
+- **Shai-Hulud 2.0 supply-chain IOC scanner** ([#722](https://github.com/markdrogersjr/Concord/pull/722)) — closes #715; IOC list refreshed in [#781](https://github.com/markdrogersjr/Concord/pull/781).
+- **AI governance framework** ([#454](https://github.com/markdrogersjr/Concord/pull/454)–[#458](https://github.com/markdrogersjr/Concord/pull/458), [#500](https://github.com/markdrogersjr/Concord/pull/500)–[#522](https://github.com/markdrogersjr/Concord/pull/522)) — AI-generated code policy, CODEOWNERS, agentic controls, Semgrep SAST, path-scoped [internal] rules, Claude Code skills, custom agents, Copilot prompt templates, MCP project config.
+
+### Changed
+
+- **React 18 → 19.2.4** ([#181](https://github.com/markdrogersjr/Concord/pull/181)).
+- **react-router-dom 6 → 7.13.1** ([#182](https://github.com/markdrogersjr/Concord/pull/182)).
+- **Zustand 4 → 5.0.12** ([#183](https://github.com/markdrogersjr/Concord/pull/183)).
+- **ESLint → 10 flat config** ([#184](https://github.com/markdrogersjr/Concord/pull/184), [#185](https://github.com/markdrogersjr/Concord/pull/185), [#186](https://github.com/markdrogersjr/Concord/pull/186)).
+- **Vite 7 → 8.0.0** ([#287](https://github.com/markdrogersjr/Concord/pull/287)) plus `@vitejs/plugin-react` 4 → 6.
+- **Go 1.24 → 1.26.1** ([#193](https://github.com/markdrogersjr/Concord/pull/193)) with `govulncheck` hardening.
+- **Electron 33 → 41.x**, **mediasoup 3.13 → 3.19.18**, **mediasoup-client → 3.18.7**, **TypeScript 6.0.2**, **typescript-eslint 8.58**.
+- **E2EE password-derived key** — PBKDF2 → Argon2id client-side ([#117](https://github.com/markdrogersjr/Concord/pull/117)).
+- **macOS notarization** switched to App Store Connect API key ([#826](https://github.com/markdrogersjr/Concord/pull/826)).
+- **Cognitive complexity reduction** across Go control-plane handlers and TypeScript frontend / media-plane ([#418](https://github.com/markdrogersjr/Concord/pull/418), [#419](https://github.com/markdrogersjr/Concord/pull/419), [#498](https://github.com/markdrogersjr/Concord/pull/498), [#505](https://github.com/markdrogersjr/Concord/pull/505), [#550](https://github.com/markdrogersjr/Concord/pull/550)–[#553](https://github.com/markdrogersjr/Concord/pull/553)).
+- **Documentation audit** completed for the v0.2.0-Beta release gate ([#214](https://github.com/markdrogersjr/Concord/issues/214)) — drift inventory at `[internal]2026-05-01-214-doc-audit-drift-inventory.md`; PR-1 verification merged in [#823](https://github.com/markdrogersjr/Concord/pull/823).
+- **MCP server deployment refactored into per-host configs** ([#838](https://github.com/markdrogersjr/Concord/pull/838)) — closes #778. Splits into `.mcp.json` (Claude Code CLI / App via `launchctl setenv`) and `.vscode/mcp.json` (VS Code native MCP via `${input:VAR}` → secret store). Eliminates `launchctl setenv` exposure for VS Code native MCP — OWASP A02 (Security Misconfiguration) win. Policy doc (`docs/policies/mcp-server-policy.md`) rewritten with the three-surface credential taxonomy.
+
+### Removed
+
+- **Sentry telemetry** stripped from all three services ([#770](https://github.com/markdrogersjr/Concord/pull/770) control-plane, [#780](https://github.com/markdrogersjr/Concord/pull/780) media-plane, [#793](https://github.com/markdrogersjr/Concord/pull/793) Electron client) plus a closing sweep through MCP, CI, and rules ([#796](https://github.com/markdrogersjr/Concord/pull/796)). The Sentry MCP server config was finally removed in the per-host MCP cleanup ([#838](https://github.com/markdrogersjr/Concord/pull/838), closing the MCP-config dimension). Closes #610, #614, #672. The integration that landed earlier in the cycle (#586, #622, #623, #668, #682) was reversed once telemetry surfaced zero production logs and forced re-consent friction; project memory `Sentry — being removed` documents the decision.
+- **Postgres MCP server config** removed alongside Sentry MCP ([#838](https://github.com/markdrogersjr/Concord/pull/838)) — unused operationally; final state is 6 servers in `.mcp.json` + 6 in `.vscode/mcp.json`.
+
+### Fixed
+
+- **E2EE channel-key OperationError** with structured diagnostic envelope ([#765](https://github.com/markdrogersjr/Concord/pull/765)).
+- **E2EE voice / video codec collision** — WebRTC BUNDLE misrouting between consumers ([#291](https://github.com/markdrogersjr/Concord/pull/291), [#292](https://github.com/markdrogersjr/Concord/pull/292), [#293](https://github.com/markdrogersjr/Concord/pull/293)).
+- **E2EE Insertable Streams → RTCRtpScriptTransform** migration ([#355](https://github.com/markdrogersjr/Concord/pull/355)).
+- **E2EE key request flood** — session-scoped cache plus CI hardening ([#241](https://github.com/markdrogersjr/Concord/pull/241)).
+- **E2EE frame decryption** recovery and CSK rotation hardening ([#232](https://github.com/markdrogersjr/Concord/pull/232), [#284](https://github.com/markdrogersjr/Concord/pull/284)).
+- **DM key-epoch enforcement, presence sync, and key distribution** ([#298](https://github.com/markdrogersjr/Concord/pull/298)).
+- **Replied-to message decryption** on REST message fetch (not only WebSocket) ([#542](https://github.com/markdrogersjr/Concord/pull/542)).
+- **DM thread real-time preview and reorder** ([#541](https://github.com/markdrogersjr/Concord/pull/541)) — closes #486.
+- **Message editing** in E2EE channels and DMs ([#220](https://github.com/markdrogersjr/Concord/pull/220)).
+- **Voice and video** — black-screen recovery, codec selection, screen-share audio, audio persistence on navigation ([#198](https://github.com/markdrogersjr/Concord/pull/198), [#227](https://github.com/markdrogersjr/Concord/pull/227), [#295](https://github.com/markdrogersjr/Concord/pull/295), [#299](https://github.com/markdrogersjr/Concord/pull/299), [#396](https://github.com/markdrogersjr/Concord/pull/396)).
+- **Hub goroutine races** with test cleanup — flaky voice tests resolved ([#476](https://github.com/markdrogersjr/Concord/pull/476)); deterministic channel-based sync replaced `time.Sleep` in WebSocket hub tests ([#544](https://github.com/markdrogersjr/Concord/pull/544)).
+- **WebSocket reconnect** — connection-lost handler replaced page-reload with direct WS reconnect ([#194](https://github.com/markdrogersjr/Concord/pull/194), [#439](https://github.com/markdrogersjr/Concord/pull/439)).
+- **Postgres "invalid length of startup packet" flood** ([#779](https://github.com/markdrogersjr/Concord/pull/779)) — closes #755.
+- **PiP child window** loads SPA route, not marketing site ([#815](https://github.com/markdrogersjr/Concord/pull/815)) — closes #802.
+- **PiP window signaling and local user identification** ([#415](https://github.com/markdrogersjr/Concord/pull/415)).
+- **Desktop login on bundled SPA fallback** uses `app://` scheme ([#832](https://github.com/markdrogersjr/Concord/pull/832)) — closes #830.
+- **MFA verify response** parsing — `access_token` extracted from `/mfa/verify` ([#814](https://github.com/markdrogersjr/Concord/pull/814)).
+- **electron-updater trust path** hardening on macOS / Windows / CI ([#655](https://github.com/markdrogersjr/Concord/pull/655)).
+- **Build-desktop CI ASAR integrity** verification ([#686](https://github.com/markdrogersjr/Concord/pull/686)) — closes #683.
+- **Preload bundling with esbuild** for sandbox compatibility ([#678](https://github.com/markdrogersjr/Concord/pull/678)).
+- **MFA encryption key wiring** through Docker Compose ([#225](https://github.com/markdrogersjr/Concord/pull/225)).
+- **Klipy GIF media proxy 401** — webRequest auth injection ([#687](https://github.com/markdrogersjr/Concord/pull/687)); proxy routes nested under `/gifs` ([#580](https://github.com/markdrogersjr/Concord/pull/580)).
+- **Klipy GIF rendering** — envelope unwrapped on every decrypt path; nested rendition shape parsed correctly ([#566](https://github.com/markdrogersjr/Concord/pull/566)).
+- **NATS server config and coturn TLS / external-IP** ([#576](https://github.com/markdrogersjr/Concord/pull/576), [#577](https://github.com/markdrogersjr/Concord/pull/577)).
+- **Modal nested Escape handler** firing on all stacked modal instances ([#480](https://github.com/markdrogersjr/Concord/pull/480)).
+- **Server role styling** isolated from DM message rendering ([#543](https://github.com/markdrogersjr/Concord/pull/543)).
+- **Accessibility pass** — semantic HTML, keyboard navigation, ARIA, UI polish ([#380](https://github.com/markdrogersjr/Concord/pull/380), [#427](https://github.com/markdrogersjr/Concord/pull/427), [#482](https://github.com/markdrogersjr/Concord/pull/482)).
+- **Theme markdown syntax help modal and help icon** ([#748](https://github.com/markdrogersjr/Concord/pull/748)).
+- **Cloudflare beacon verification** + `/spa/` nginx route + defensive sentinel ([#766](https://github.com/markdrogersjr/Concord/pull/766)) — closes #750.
+
+### Security
+
+- **`Error.cause` propagation closed** ([#714](https://github.com/markdrogersjr/Concord/pull/714)) — `console.error` / `console.warn` no longer pass raw `Error` arguments through main-process logs; ESLint enforcement and a Vitest regression test added.
+- **Token-fingerprint leaks removed** ([#704](https://github.com/markdrogersjr/Concord/pull/704)) — 10 token-suffix leaks in `tokenManager.ts` removed; ESLint warnings remediated and security rules promoted to error.
+- **External-link scheme tightened** ([#774](https://github.com/markdrogersjr/Concord/pull/774)) — `setWindowOpenHandler` and `will-navigate` restricted to `https:`-only with ESLint drift defense; user-initiated `open-external` IPC retains the broader `http:` / `https:` / `mailto:` policy. Closes #754.
+- **electron-updater TLS certificate pinning** on `api.concordvoice.chat` ([#719](https://github.com/markdrogersjr/Concord/pull/719)).
+- **nginx hardening** — H2C smuggling vector closed; Host header injection blocked ([#525](https://github.com/markdrogersjr/Concord/pull/525)).
+- **GitHub Actions shell injection** resolved (Semgrep) ([#523](https://github.com/markdrogersjr/Concord/pull/523)).
+- **CORS hardening** — null/empty origin rejection, custom header validation ([#259](https://github.com/markdrogersjr/Concord/pull/259)).
+- **Hardcoded dev credentials removed**, production guards added ([#260](https://github.com/markdrogersjr/Concord/pull/260)).
+- **Scanner hardening** — brute-force probe mitigation at infrastructure level ([#153](https://github.com/markdrogersjr/Concord/pull/153)); production infrastructure hardened against vulnerability scanners ([#189](https://github.com/markdrogersjr/Concord/pull/189)).
+- **Dependabot vulnerability fixes** — npm overrides for transitive vulnerabilities ([#289](https://github.com/markdrogersjr/Concord/pull/289), [#314](https://github.com/markdrogersjr/Concord/pull/314)).
+
+### Known Issues
+
+Tracking at time of v0.2.0-Beta release. For the full open-issue list, see [issues](https://github.com/markdrogersjr/Concord/issues).
+
+- **[#817](https://github.com/markdrogersjr/Concord/issues/817) — "No Internet" Retry button stuck after network restore** — after the desktop client trips the no-internet dialog, the Retry button does not visibly progress once connectivity is back; the user must use Exit App to break out and relaunch. Workaround: quit and relaunch the desktop client once the network is restored.
+- **[#807](https://github.com/markdrogersjr/Concord/issues/807) — Markdown rendering correctness in chat** — H1 renders smaller than H2, fenced code blocks parse incorrectly in some inputs, and vertical spacing is heavier than expected. Cosmetic only; message content is preserved. Workaround: none required for delivery; fix tracked for v0.2.x.
+- **[#805](https://github.com/markdrogersjr/Concord/issues/805) — Pinned Messages panel drops media and shows GIFs as raw JSON** — pinned messages with image attachments lose the image; pinned KLIPY GIFs render as the raw envelope text. The original message in the main chat is unaffected. Workaround: scroll to the source message in the channel for the full rendering.
+- **[#804](https://github.com/markdrogersjr/Concord/issues/804) — KLIPY GIF picker hits 429 during normal scrolling** — the shared rate limiter for the GIF media proxy and the API endpoint is too aggressive when ~30 picker tiles fan out simultaneously. Workaround: pause briefly between scrolls in the GIF picker; the limiter resets quickly.
+- **[#803](https://github.com/markdrogersjr/Concord/issues/803) — Member List shows the viewer as Offline** — in Server Settings → Members, the logged-in user appears as Offline (grey dot, "Status: Offline" in the popover) despite an active WebSocket connection. Other members' presence is unaffected. Workaround: none; the viewer's connection is functional, only the self-status badge is misleading.
+- **[#799](https://github.com/markdrogersjr/Concord/issues/799) — Member List "+ Add Role" dropdown clipped inside the card** — the role-picker dropdown is constrained by its container and adds an inner scrollbar instead of overflowing the card. Workaround: scroll inside the Member List card to access roles below the fold.
+- **[#775](https://github.com/markdrogersjr/Concord/issues/775) — `http://` profile links silently fail** — after the external-link tightening in [#774](https://github.com/markdrogersjr/Concord/pull/774), clicking an `http://` link saved on a user's profile produces no visible action; `https://` links work as expected. Workaround: edit the profile link to use `https://`.
+- **[#707](https://github.com/markdrogersjr/Concord/issues/707) — Profile editor loses in-progress edits on background user updates** — `ProfileInfoForm`'s reset effect re-runs on any user object mutation, which can wipe unsaved field edits if the underlying user object refreshes mid-edit. Workaround: save profile changes promptly; avoid leaving the editor open while presence or other user-object events fire.
+
+### Migration from v0.1.0-Alpha
+
+**No end-user breaking changes.** New features (Apple/Google SSO, MFA/WebAuthn, channel-key revocation, server mute/deafen, Klipy GIF integration, DM message pinning, account erasure, bundled-SPA fallback) are additive — existing v0.1.0-Alpha installations continue to work without manual intervention.
+
+**Automatic migrations applied on first connection / first server run:**
+
+- Database schema additions (migrations 000054–000061): server mute/deafen state, Klipy GIF customer IDs, DM message pinning index, pending registrations TTL, account-deletion cascade, removed `sentry_delete_attempted` column, and SSO identities (`is_relay_email` for Apple privacy-relay handling).
+- Refresh-token cascade (migration 000059): `refresh_tokens.user_id` becomes `ON DELETE CASCADE`, which strengthens the atomic-revocation invariant for account erasure (per `[internal]rules/backend.md`).
+- E2EE key derivation: PBKDF2 → Argon2id ([#117](https://github.com/markdrogersjr/Concord/pull/117)) migrates transparently on next login — legacy keys are unwrapped with PBKDF2, re-wrapped with Argon2id, and uploaded to the server. No user action required; migration 000034 adds `key_derivation_alg` tracking.
+- Renderer migrations: existing local data migrates client-side via the standard Zustand `persist` migration path on first launch; no user-visible state loss.
+
+**Behavior changes that may surprise:**
+
+- **External link policy** ([#774](https://github.com/markdrogersjr/Concord/pull/774)): the Electron client's `setWindowOpenHandler` and `will-navigate` now restrict to `https:` only. `http://` URLs in user-supplied profile links (rare; legacy data) are silently denied at the navigation handler — clicking yields no visible action. Tracked as known-issue in #775.
+- **Token revocation on password change**: refresh tokens are now atomically revoked when a user changes their password (was a known gap in Alpha). Active sessions on other devices will be logged out on the next refresh attempt. This is the intended behavior; surfaced here because v0.1.0-Alpha did not enforce it.
+- **Sentry telemetry removed**: zero behavior change to end users (telemetry was opt-in and zero events were captured in production); flagged for transparency.
+
+**For self-hosted operators:**
+
+- Review the migration set `services/control-plane/migrations/` (000054 onward represents the Alpha→Beta delta) for any deployment-specific actions.
+- The MCP server cleanup ([#838](https://github.com/markdrogersjr/Concord/pull/838)) is dev-environment-only — affects contributor tooling, not production deployment. No action required for self-hosted operators.
+- For Apple sign-in support, configure the Apple Sign In credentials per Apple Developer documentation: Team ID, Key ID (with the corresponding `.p8` private key), Services ID, and the loopback redirect URI. Set the corresponding env vars in your control-plane `.env` (see `services/control-plane/internal/oauth/` for the variable names; the source-of-truth is `apple_clientsecret.go`). Without these, the Apple SSO button will be visible but sign-in attempts will fail.
+- macOS code signing now uses App Store Connect API key ([#826](https://github.com/markdrogersjr/Concord/pull/826)) — only relevant if you build your own signed binaries; the public release builds remain Apple Developer ID signed.
+
+---
+
 ## [0.1.18] - 2026-04-09 (Phase 2B — Sentry Error Tracking)
 
 ### Added
