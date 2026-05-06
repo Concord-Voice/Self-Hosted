@@ -369,6 +369,13 @@ func (c *Config) validate() error {
 		}
 	}
 
+	// Non-fatal: warn when production is using the broad RFC1918 fallback
+	// for trusted proxies (the provision-secrets.yml heredoc default). This
+	// is functional but permissive — see broadRFC1918CIDRs() for context.
+	if equalCIDRs(c.TrustedProxyCIDRs, broadRFC1918CIDRs()) {
+		log.Printf("WARNING: TRUSTED_PROXY_CIDRS is the broad RFC1918 fallback (%s). Tighten via GH variable for stricter X-Forwarded-For trust. See [internal]sso-secrets-management.md.", strings.Join(c.TrustedProxyCIDRs, ","))
+	}
+
 	return nil
 }
 
@@ -444,6 +451,31 @@ func getEnvInt64(key string, defaultValue int64) int64 {
 // itself — an attacker on the same bridge can already do worse than XFF spoof.
 func defaultTrustedProxyCIDRs() string {
 	return "172.16.0.0/12"
+}
+
+// broadRFC1918CIDRs returns the conservative fallback used by the
+// provision-secrets workflow when TRUSTED_PROXY_CIDRS is unset. Trusting
+// this entire range in production is operationally safer than failing
+// startup, but it permits any RFC1918 source (including Docker bridge
+// neighbors) to spoof X-Forwarded-For. validate() emits a warning when
+// production lands on this fallback so operators are aware to tighten it
+// via `gh variable set TRUSTED_PROXY_CIDRS --env production --body '<CIDR>'`.
+func broadRFC1918CIDRs() []string {
+	return []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"}
+}
+
+// equalCIDRs returns true if a and b contain the same CIDR strings in
+// the same order. Used by validate() to detect the broad-RFC1918 fallback.
+func equalCIDRs(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
 
 // computeTrustedProxyCIDRs returns the effective trusted-proxy CIDR list based

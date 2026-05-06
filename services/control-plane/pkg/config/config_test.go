@@ -1,11 +1,13 @@
 package config
 
 import (
+	"bytes"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -694,4 +696,103 @@ func TestLoadDefaultAllowedOriginsIncludesAppScheme(t *testing.T) {
 	assert.Contains(t, cfg.AllowedOrigins, "app://concord")
 	// Defensive: verify dev defaults still present
 	assert.Contains(t, cfg.AllowedOrigins, "http://localhost:3001")
+}
+
+// TestLoadAppleSSOConfig_FilePathSyntax verifies that APPLE_PRIVATE_KEY
+// values prefixed with @ are resolved by reading the file at the given
+// path. Closes coverage gap on config.go:280-293.
+func TestLoadAppleSSOConfig_FilePathSyntax(t *testing.T) {
+	tmpFile := filepath.Join(t.TempDir(), "apple.p8")
+	require.NoError(t, os.WriteFile(tmpFile, []byte("test-pem-bytes"), 0o600))
+
+	t.Setenv("APPLE_SSO_ENABLED", "true")
+	t.Setenv("APPLE_CLIENT_ID", "chat.test.signin")
+	t.Setenv("APPLE_TEAM_ID", "TEAM123456")
+	t.Setenv("APPLE_KEY_ID", "KEY1234567")
+	t.Setenv("APPLE_PRIVATE_KEY", "@"+tmpFile)
+
+	cfg := &Config{}
+	require.NoError(t, loadAppleSSOConfig(cfg))
+	assert.Equal(t, []byte("test-pem-bytes"), cfg.AppleSSO.PrivateKey)
+	assert.True(t, cfg.AppleSSO.Enabled)
+	assert.Equal(t, "chat.test.signin", cfg.AppleSSO.ClientID)
+	assert.Equal(t, "TEAM123456", cfg.AppleSSO.TeamID)
+	assert.Equal(t, "KEY1234567", cfg.AppleSSO.KeyID)
+}
+
+// TestLoadAppleSSOConfig_FilePathMissing verifies that a non-existent
+// @/path returns a wrapped fs error rather than silently leaving
+// PrivateKey empty (which would surface later as an opaque PEM-parse
+// error far from the actual misconfig). Closes coverage gap on
+// config.go:289-291.
+func TestLoadAppleSSOConfig_FilePathMissing(t *testing.T) {
+	t.Setenv("APPLE_SSO_ENABLED", "true")
+	t.Setenv("APPLE_CLIENT_ID", "chat.test.signin")
+	t.Setenv("APPLE_TEAM_ID", "TEAM123456")
+	t.Setenv("APPLE_KEY_ID", "KEY1234567")
+	t.Setenv("APPLE_PRIVATE_KEY", "@/nonexistent/path/apple.p8")
+
+	cfg := &Config{}
+	err := loadAppleSSOConfig(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "APPLE_PRIVATE_KEY file:")
+}
+
+// TestLoadAppleSSOConfig_FilePathWhitespaceOnly verifies that
+// APPLE_PRIVATE_KEY="@   " (whitespace after the @-prefix) is treated
+// as a missing-key error rather than being silently passed through.
+// Closes coverage gap on config.go:282-283 (the strings.TrimSpace gate
+// on the after-@ portion).
+func TestLoadAppleSSOConfig_FilePathWhitespaceOnly(t *testing.T) {
+	t.Setenv("APPLE_SSO_ENABLED", "true")
+	t.Setenv("APPLE_CLIENT_ID", "chat.test.signin")
+	t.Setenv("APPLE_TEAM_ID", "TEAM123456")
+	t.Setenv("APPLE_KEY_ID", "KEY1234567")
+	t.Setenv("APPLE_PRIVATE_KEY", "@   ")
+
+	cfg := &Config{}
+	err := loadAppleSSOConfig(cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "APPLE_PRIVATE_KEY")
+	assert.Nil(t, cfg.AppleSSO.PrivateKey)
+}
+
+// TestValidate_WarnsOnBroadRFC1918Fallback verifies that production with
+// the broad RFC1918 fallback for TRUSTED_PROXY_CIDRS does NOT fail
+// startup but emits a warning log line. The test captures the standard
+// log output via a buffer.
+func TestValidate_WarnsOnBroadRFC1918Fallback(t *testing.T) {
+	var buf bytes.Buffer
+	oldFlags := log.Flags()
+	oldOutput := log.Writer()
+	log.SetFlags(0)
+	log.SetOutput(&buf)
+	t.Cleanup(func() {
+		log.SetFlags(oldFlags)
+		log.SetOutput(oldOutput)
+	})
+
+	// Build a config that satisfies all production guards.
+	// Use concatenation for URLs so detect-secrets doesn't flag embedded basic-auth.
+	pw := "pass"                                          //nolint:gosec // test fixture, not a real credential
+	dbURL := "postgres://prod:" + pw + "@db:5432/concord" //nolint:gosec // test fixture
+	redisURL := "redis://:" + pw + "@redis:6379"          //nolint:gosec // test fixture
+	cfg := &Config{                                       //nolint:gosec // G101: test fixture with fake values, not real credentials
+		Environment:       "production",
+		JWTSecret:         "real-secret-not-default", //nolint:gosec // G101 false positive: test fixture
+		DatabaseURL:       dbURL,
+		RedisURL:          redisURL,
+		MFAEncryptionKey:  "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		MinIOAccessKey:    "ak",
+		MinIOSecretKey:    "real-minio-secret",
+		MinIOEndpoint:     "minio:9000",
+		MinIOBucket:       "concord-media",
+		SMTPHost:          "smtp.example.com",
+		TrustedProxyCIDRs: []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"},
+		MediaPlaneURL:     "https://media.concordvoice.chat",
+	}
+
+	err := cfg.validate()
+	require.NoError(t, err)
+	assert.Contains(t, buf.String(), "TRUSTED_PROXY_CIDRS is the broad RFC1918 fallback")
 }
