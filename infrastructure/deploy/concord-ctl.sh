@@ -1,12 +1,14 @@
 #!/usr/bin/env bash
 # Concord service management helper
-# Usage: ./concord-ctl.sh [status|logs|restart|rebuild|freshstart|sync-releases|verify-registration|docker-clean|branch|stop]
+# Usage: ./concord-ctl.sh [status|logs|restart|rebuild|freshstart|sync-releases|verify-registration|docker-clean|stop]
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DEPLOY_DIR="${SCRIPT_DIR}/../.."
 
-# Load config
+# Load runtime config. deploy.env (committed defaults like COMPOSE_OVERRIDE)
+# is read first, then deploy.env.local (machine-specific overrides like
+# VM_IP, DEPLOY_BRANCH) layers on top.
 if [[ -f "${SCRIPT_DIR}/deploy.env" ]]; then
   source "${SCRIPT_DIR}/deploy.env"
 fi
@@ -25,8 +27,14 @@ source "${SCRIPT_DIR}/sync-releases.sh"
 case "${1:-help}" in
   status)
     echo "=== Concord Service Status ==="
-    echo "Branch: $(grep '^DEPLOY_BRANCH=' "${SCRIPT_DIR}/deploy.env" | cut -d= -f2)"
-    echo "Commit: $(cd "$DEPLOY_DIR" && git rev-parse --short HEAD) ($(cd "$DEPLOY_DIR" && git log -1 --format='%s'))"
+    # NOTE: Branch + commit info no longer surfaced — server has no .git/ post-#848.
+    # See `gh api repos/markdrogersjr/Concord/deployments` for deploy history.
+    if [[ -f "${DEPLOY_DIR}/.deploy-meta" ]]; then
+      echo "Last deploy:"
+      cat "${DEPLOY_DIR}/.deploy-meta" | sed 's/^/  /'
+    else
+      echo "Last deploy: (no metadata file — first deploy not yet completed)"
+    fi
     echo ""
     cd "$DEPLOY_DIR" && $COMPOSE_CMD ps
     echo ""
@@ -76,6 +84,70 @@ case "${1:-help}" in
     echo "Rebuilding and restarting..."
     cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --build
     echo "Done."
+    ;;
+
+  validate-config)
+    # §F validation guard — invoke `docker compose config --quiet` to detect
+    # missing env vars BEFORE attempting `up -d --build`. Exits non-zero with
+    # operator-friendly message if interpolation fails.
+    #
+    # Spec ref: 2026-05-06-848-push-based-deploys-design.md §5.4
+    if cd "$DEPLOY_DIR" && $COMPOSE_CMD config --quiet; then
+      echo "  ✓ docker compose config validates"
+    else
+      echo "" >&2
+      echo "  ✗ docker compose config failed — invalid YAML, missing compose file, or missing env var." >&2
+      echo "    See docker output above for the specific failure." >&2
+      echo "    If the error is a missing env var, re-run \`gh workflow run provision-secrets.yml\` to provision." >&2
+      exit 1
+    fi
+    ;;
+
+  wait-healthy)
+    # Server-side health gate for #848 deploy.yml. Wraps the loop pattern
+    # from the now-deleted deploy.sh:117-134 with a CLI flag for timeout.
+    #
+    # Healthy = ALL of:
+    #   - control-plane /health returns 200
+    #   - media-plane /health returns 200
+    #   - coturn STUN port (3478) accepts TCP connection
+    #     (smoke test only — STUN is UDP, but coturn also listens TCP-3478;
+    #      a TCP handshake confirms the daemon is alive but does not validate
+    #      STUN responsiveness. For protocol-level STUN testing use stunclient.)
+    #
+    # Spec ref: 2026-05-06-848-push-based-deploys-design.md §5.4
+    shift  # consume "wait-healthy"
+    TIMEOUT=60
+    while [[ $# -gt 0 ]]; do
+      case "$1" in
+        --timeout) TIMEOUT="$2"; shift 2 ;;
+        --timeout=*) TIMEOUT="${1#--timeout=}"; shift ;;
+        *) echo "wait-healthy: unknown arg '$1'" >&2; exit 2 ;;
+      esac
+    done
+    if ! [[ "$TIMEOUT" =~ ^[0-9]+$ ]]; then
+      echo "wait-healthy: --timeout must be integer seconds, got '$TIMEOUT'" >&2
+      exit 2
+    fi
+    INTERVAL=2
+    DEADLINE=$(( $(date +%s) + TIMEOUT ))
+    cp_ok=0; mp_ok=0; coturn_ok=0
+    while [[ $(date +%s) -lt $DEADLINE ]]; do
+      cp_ok=0; mp_ok=0; coturn_ok=0
+      curl -sf "http://localhost:8080/health" >/dev/null 2>&1 && cp_ok=1
+      curl -sf "http://localhost:3000/health" >/dev/null 2>&1 && mp_ok=1
+      nc -z -w2 localhost 3478 >/dev/null 2>&1 && coturn_ok=1
+      if [[ $cp_ok -eq 1 && $mp_ok -eq 1 && $coturn_ok -eq 1 ]]; then
+        echo "  ✓ all services healthy (control-plane + media-plane + coturn)"
+        exit 0
+      fi
+      sleep "$INTERVAL"
+    done
+    echo "  ✗ wait-healthy timed out after ${TIMEOUT}s" >&2
+    [[ $cp_ok -eq 0 ]] && echo "    control-plane (:8080/health) failed" >&2
+    [[ $mp_ok -eq 0 ]] && echo "    media-plane (:3000/health) failed" >&2
+    [[ $coturn_ok -eq 0 ]] && echo "    coturn STUN (:3478) failed" >&2
+    exit 1
     ;;
 
   freshstart)
@@ -181,14 +253,6 @@ case "${1:-help}" in
     echo "=== Docker Cleanup — completed successfully ==="
     ;;
 
-  branch)
-    echo "Deploy branch: $(grep '^DEPLOY_BRANCH=' "${SCRIPT_DIR}/deploy.env" | cut -d= -f2)"
-    echo "Git branch:    $(cd "$DEPLOY_DIR" && git rev-parse --abbrev-ref HEAD)"
-    echo "Git commit:    $(cd "$DEPLOY_DIR" && git rev-parse --short HEAD)"
-    echo ""
-    echo "To switch: ./switch-branch.sh <branch-name>"
-    ;;
-
   stop)
     echo "Stopping all services..."
     cd "$DEPLOY_DIR" && $COMPOSE_CMD down
@@ -201,16 +265,17 @@ case "${1:-help}" in
     echo "Usage: $0 <command>"
     echo ""
     echo "Commands:"
-    echo "  status         Show running containers, health checks, current branch"
+    echo "  status         Show running containers, health checks, last deploy metadata"
     echo "  logs           Tail service logs (pass service name to filter, e.g. 'logs control-plane')"
     echo "  restart        Sync releases + restart all services"
     echo "  rebuild        Sync releases + force rebuild + restart all services"
+    echo "  validate-config  §F: pre-rebuild guard via 'docker compose config --quiet'"
+    echo "  wait-healthy   Block until all services healthy (--timeout SECONDS, default 60)"
     echo "  freshstart     Wipe all data (DB, Redis), sync releases, rebuild from scratch"
     echo "  sync-releases  Download latest desktop release assets from GitHub"
     echo "  verify-registration  Post-deploy smoke test for registration flow"
     echo "  docker-clean   Prune unused images + builder cache (weekly cron target)"
     echo "                 Add --aggressive to drop 7-day retention + prune stopped containers"
-    echo "  branch         Show current deploy branch and git info"
     echo "  stop           Stop all services"
     ;;
 esac
