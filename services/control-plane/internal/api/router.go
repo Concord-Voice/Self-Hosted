@@ -116,13 +116,11 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	router.Use(middleware.CORS(cfg.AllowedOrigins))
 	router.Use(middleware.ValidateCustomHeaders())
 
-	// Health check
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":  "healthy",
-			"service": "control-plane",
-		})
-	})
+	// Health check (#882: GET + HEAD both 200, so CF probes and monitoring
+	// tools that default to HEAD don't false-negative). Handler is at package
+	// scope (healthHandler below) so router_test.go can call it directly.
+	router.GET("/health", healthHandler)
+	router.HEAD("/health", healthHandler)
 
 	// Initialize WebSocket hub
 	hub := websocket.NewHub(db, redis)
@@ -1514,4 +1512,30 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	}
 
 	return router, hub, natsClient
+}
+
+
+// healthHandler responds with 200 + control-plane health JSON. Registered
+// for both GET and HEAD methods on /health by NewRouter (#882: HEAD support
+// so CF Health Check probes and monitoring tools that default to HEAD don't
+// false-negative on a healthy service).
+//
+// Per RFC 7231 §4.3.2, HEAD responses MUST NOT carry a body. gin's c.JSON
+// writes the body unconditionally, so we skip it for HEAD: c.Status returns
+// the status code without setting Content-Type or any other body-derived
+// headers. RFC 7231 says HEAD "is otherwise identical to GET" but treats
+// that as guidance, not a hard requirement — for a health-check endpoint
+// where clients only consume the status code, the minimal status-only
+// response is sufficient and correct.
+//
+// Package scope (not a closure) so router_test.go can drive it directly.
+func healthHandler(c *gin.Context) {
+	if c.Request.Method == http.MethodHead {
+		c.Status(http.StatusOK)
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "healthy",
+		"service": "control-plane",
+	})
 }

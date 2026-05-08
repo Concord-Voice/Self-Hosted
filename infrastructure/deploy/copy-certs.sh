@@ -66,3 +66,18 @@ if command -v docker >/dev/null 2>&1; then
     fi
   fi
 fi
+
+# ── nginx (host-side reverse proxy) ──────────────────────────────────────────
+# Per #881: nginx config references /etc/letsencrypt/live/${DOMAIN}/fullchain.pem
+# directly (no copy needed). But nginx caches the cert in memory at startup
+# and won't pick up the renewed file until reload. systemctl reload sends
+# SIGHUP, which is graceful — existing connections survive, new ones use the
+# fresh cert. Skip silently if nginx isn't running (e.g., during initial
+# provisioning before nginx is started).
+if systemctl is-active --quiet nginx 2>/dev/null; then
+  if systemctl reload nginx 2>/dev/null; then
+    echo "[copy-certs] nginx reloaded — Let's Encrypt cert refreshed in TLS handshake"
+  else
+    echo "[copy-certs] WARNING: failed to reload nginx — clients will see stale cert until manual reload" >&2
+  fi
+fi
