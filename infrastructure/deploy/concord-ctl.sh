@@ -103,6 +103,107 @@ case "${1:-help}" in
     fi
     ;;
 
+  nginx-reload)
+    # §5.9 (#919): stage the source-of-truth nginx config from
+    # /opt/concord/[internal]nginx/concordvoice.conf into
+    # /etc/nginx/sites-available/concordvoice, validate, and reload nginx.
+    #
+    # Sudoers entry /etc/sudoers.d/concord-deploy (NOPASSWD) permits exactly
+    # three commands for the concord user:
+    #   1. /usr/bin/install -o root -g root -m 0644 .../concordvoice.conf .../concordvoice
+    #   2. /usr/sbin/nginx -t
+    #   3. /bin/systemctl reload nginx
+    #
+    # Sequence:
+    #   a. Stage with install(1) (atomic create + chmod + chown).
+    #   b. nginx -t — fail-fast on syntax error (DOES NOT reload if -t fails).
+    #   c. systemctl reload nginx — graceful reload, no dropped connections.
+    #
+    # Idempotency: re-running with no source change is a no-op at the
+    # filesystem level (install(1) overwrites with byte-identical content)
+    # and at the service level (systemctl reload SIGHUPs nginx workers).
+    #
+    # Spec ref: 2026-05-09-919-spa-deploy-trust-chain-design.md §5.9
+    NGINX_SRC="${DEPLOY_DIR}/[internal]nginx/concordvoice.conf"
+    NGINX_DST="/etc/nginx/sites-available/concordvoice"
+    if [[ ! -f "$NGINX_SRC" ]]; then
+      echo "" >&2
+      echo "  ✗ nginx-reload: source-of-truth config not found at $NGINX_SRC" >&2
+      echo "    Did the rsync of [internal]nginx/ complete? Check deploy.sh logs." >&2
+      exit 1
+    fi
+    echo "  Staging $NGINX_SRC → $NGINX_DST"
+    if ! sudo /usr/bin/install -o root -g root -m 0644 "$NGINX_SRC" "$NGINX_DST"; then
+      echo "" >&2
+      echo "  ✗ nginx-reload: install(1) staging failed (sudoers entry missing or wrong permissions?)" >&2
+      exit 1
+    fi
+    echo "  Validating with nginx -t"
+    if ! sudo /usr/sbin/nginx -t 2>&1; then
+      echo "" >&2
+      echo "  ✗ nginx-reload: nginx -t REJECTED the new config — REFUSING to reload" >&2
+      echo "    Live config is unchanged (sites-enabled/ still points at old sites-available/)." >&2
+      echo "    Inspect $NGINX_DST and re-run after fixing." >&2
+      exit 1
+    fi
+    echo "  Reloading nginx"
+    if ! sudo /bin/systemctl reload nginx; then
+      echo "" >&2
+      echo "  ✗ nginx-reload: systemctl reload nginx failed" >&2
+      exit 1
+    fi
+    echo "  ✓ nginx config staged + validated + reloaded"
+    ;;
+
+  sudoers-sync)
+    # Stage the source-of-truth sudoers file from
+    # /opt/concord/[internal]sudoers.d/concord-deploy into
+    # /etc/sudoers.d/concord-deploy via the narrow CONCORD_SUDOERS_INSTALL
+    # entry. Required because nginx-reload above depends on the sudoers entry
+    # being current — if a deploy ships a new nginx Cmnd_Alias and we haven't
+    # synced sudoers, nginx-reload fails (#919 review finding H1).
+    #
+    # First-time install on a fresh VM: operator runs ONCE manually:
+    #   sudo install -m 0440 -o root -g root \
+    #     /opt/concord/[internal]sudoers.d/concord-deploy \
+    #     /etc/sudoers.d/concord-deploy
+    # After that, this subcommand handles all subsequent updates.
+    SUDOERS_SRC="${SUDOERS_SRC_OVERRIDE:-/opt/concord/[internal]sudoers.d/concord-deploy}"
+    SUDOERS_DEST="/etc/sudoers.d/concord-deploy"
+
+    if [[ ! -f "$SUDOERS_SRC" ]]; then
+      echo "  ✗ sudoers-sync: source-of-truth not found at $SUDOERS_SRC" >&2
+      exit 1
+    fi
+
+    # Validate syntax BEFORE installing. visudo -cf returns non-zero if the
+    # sudoers file would be rejected by sudo at load time. Refusing to
+    # install a broken sudoers file is critical — sudo refuses to load any
+    # file in /etc/sudoers.d/ if any entry is malformed, locking out concord
+    # from the entire sudo surface.
+    if ! visudo -cf "$SUDOERS_SRC" >/dev/null; then
+      echo "  ✗ sudoers-sync: visudo -cf REJECTED $SUDOERS_SRC — refusing to install" >&2
+      exit 1
+    fi
+
+    # If destination exists and is identical, no-op (idempotent).
+    if [[ -f "$SUDOERS_DEST" ]] && cmp -s "$SUDOERS_SRC" "$SUDOERS_DEST"; then
+      echo "  ✓ sudoers-sync: $SUDOERS_DEST already matches source (no-op)"
+      exit 0
+    fi
+
+    if ! sudo -n /usr/bin/install -o root -g root -m 0440 "$SUDOERS_SRC" "$SUDOERS_DEST" 2>/dev/null; then
+      echo "  ✗ sudoers-sync: install(1) staging failed" >&2
+      echo "    Likely cause: bootstrap-install of /etc/sudoers.d/concord-deploy never ran." >&2
+      echo "    First-time install: operator runs ONCE as root:" >&2
+      echo "      sudo install -m 0440 -o root -g root \\" >&2
+      echo "        /opt/concord/[internal]sudoers.d/concord-deploy \\" >&2
+      echo "        /etc/sudoers.d/concord-deploy" >&2
+      exit 1
+    fi
+    echo "  ✓ sudoers-sync: staged $SUDOERS_DEST (mode 0440, owner root:root)"
+    ;;
+
   wait-healthy)
     # Server-side health gate for #848 deploy.yml. Wraps the loop pattern
     # from the now-deleted deploy.sh:117-134 with a CLI flag for timeout.
@@ -270,6 +371,8 @@ case "${1:-help}" in
     echo "  restart        Sync releases + restart all services"
     echo "  rebuild        Sync releases + force rebuild + restart all services"
     echo "  validate-config  §F: pre-rebuild guard via 'docker compose config --quiet'"
+    echo "  nginx-reload   Stage infrastructure/deploy/nginx/concordvoice.conf into /etc/nginx/,"
+    echo "                 validate via 'nginx -t', reload nginx (#919 §5.9)"
     echo "  wait-healthy   Block until all services healthy (--timeout SECONDS, default 60)"
     echo "  freshstart     Wipe all data (DB, Redis), sync releases, rebuild from scratch"
     echo "  sync-releases  Download latest desktop release assets from GitHub"

@@ -166,12 +166,12 @@ flowchart TB
 
 #### SPA Deploy Lifecycle (ADR-0001)
 
-The SPA bundle and the HTTP handler that serves it are coupled at deploy time but decoupled at build time. Vite's `base: './'` makes all chunks resolve relative to the URL `index.html` was loaded from. The `deploy-spa.yml` workflow uploads the bundle to `/opt/concord/spa/<sha7>/`, writes `spa.env` with `SPA_URL=https://api.concordvoice.chat/spa/<sha7>/index.html` (atomically derived from the same `${SHA7}` env var), and the server's auto-pull picks up the new values within ~60s.
+The SPA bundle and the HTTP handler that serves it are coupled at deploy time but decoupled at build time. Vite's `base: './'` makes all chunks resolve relative to the URL `index.html` was loaded from. Post-#919 (PR #922): `main-cd.yml`'s `deploy-spa` job invokes `[internal]deploy-spa.sh`, which uploads the bundle to `/opt/concord/spa/<sha7>/`, writes `spa.env` with `SPA_URL=https://api.concordvoice.chat/spa/<sha7>/index.html` (atomically derived from the same `${SHA7}` env var), and commits + pushes `spa.env` back to main via `secrets.ADMIN_PAT` so the source-of-truth tracks shipped state.
 
 Four invariants enforce the contract:
 
 1. **Build invariant** — `vite.config.ts` keeps `base: './'`. Locked by `vite-base-relative.test.ts`.
-2. **Deploy invariant** — `spa.env` is a generated artifact. `verify-spa-env` workflow runs on every PR with structural + author-attribution checks.
+2. **Deploy invariant** — `spa.env` is a generated artifact. Post-#919 the `Verify spa.env contract` job in `pr-ci.yml` runs `[internal]verify-spa-env.sh --mode=pr` on every PR with structural + author-attribution checks.
 3. **Runtime safety net** — renderer self-heals on chunk-load failures via two-layer detection (renderer-side `error`/`unhandledrejection` listeners + main-process `did-fail-load`) feeding a shared recovery primitive with R2 retry semantics.
 4. **Documentation invariant** — this section + [`[internal]rules/electron.md`](../[internal]rules/electron.md) link to ADR-0001 so the contract is discoverable through normal architectural-discovery paths.
 
