@@ -59,9 +59,9 @@ function deriveStack(err: unknown): string | undefined {
     typeof err === 'object' &&
     err !== null &&
     'stack' in err &&
-    typeof (err as { stack: unknown }).stack === 'string'
+    typeof err.stack === 'string'
   ) {
-    return (err as { stack: string }).stack;
+    return err.stack;
   }
   return undefined;
 }
