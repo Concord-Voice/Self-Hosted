@@ -81,6 +81,10 @@ client-builds/
 .cache/
 *.tsbuildinfo
 
+# Generated at build time by scripts/generate-buildtag.mjs (#920 §5.13) and
+# packaged via forge extraResource. Always regenerated; never hand-edited.
+client/desktop/buildtag.json
+
 # tsc output alongside source (main-process build emits .js/.d.ts into src/)
 client/desktop/src/shared/**/*.js
 client/desktop/src/shared/**/*.js.map
