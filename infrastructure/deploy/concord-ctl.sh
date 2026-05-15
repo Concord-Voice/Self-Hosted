@@ -71,17 +71,20 @@ case "${1:-help}" in
     ;;
 
   restart)
-    echo "Syncing release assets..."
-    sync_releases
+    # #1015: sync_releases no longer auto-called. The sync-releases.yml
+    # workflow is the canonical writer for /opt/concord/releases/.
+    # If you need to refresh release assets, trigger the workflow OR
+    # invoke `concord-ctl.sh sync-releases` (manual recovery).
     echo "Restarting services..."
+    echo "Note: release assets NOT refreshed automatically (#1015). Run 'concord-ctl.sh sync-releases' or trigger sync-releases.yml for a refresh."
     cd "$DEPLOY_DIR" && $COMPOSE_CMD restart
     echo "Done."
     ;;
 
   rebuild)
-    echo "Syncing release assets..."
-    sync_releases
+    # #1015: sync_releases no longer auto-called (see restart case comment).
     echo "Rebuilding and restarting..."
+    echo "Note: release assets NOT refreshed automatically (#1015). Run 'concord-ctl.sh sync-releases' or trigger sync-releases.yml for a refresh."
     cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --build
     echo "Done."
     ;;
@@ -263,10 +266,11 @@ case "${1:-help}" in
     echo "Stopping all services and removing volumes..."
     cd "$DEPLOY_DIR" && $COMPOSE_CMD down -v
     echo ""
-    echo "Syncing release assets..."
-    sync_releases
-    echo ""
+    # #1015: sync_releases no longer auto-called. If the server's
+    # /opt/concord/releases/ is empty or stale, trigger sync-releases.yml
+    # OR run `concord-ctl.sh sync-releases` before invoking freshstart.
     echo "Rebuilding and starting fresh..."
+    echo "Note: release assets NOT refreshed automatically (#1015). Run 'concord-ctl.sh sync-releases' or trigger sync-releases.yml AFTER freshstart completes to populate /opt/concord/releases/."
     cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --build
     echo ""
     echo "Fresh start complete. All data has been wiped."
@@ -368,14 +372,14 @@ case "${1:-help}" in
     echo "Commands:"
     echo "  status         Show running containers, health checks, last deploy metadata"
     echo "  logs           Tail service logs (pass service name to filter, e.g. 'logs control-plane')"
-    echo "  restart        Sync releases + restart all services"
-    echo "  rebuild        Sync releases + force rebuild + restart all services"
+    echo "  restart        Restart all services (no auto-sync since #1015)"
+    echo "  rebuild        Force rebuild + restart all services (no auto-sync since #1015)"
     echo "  validate-config  §F: pre-rebuild guard via 'docker compose config --quiet'"
     echo "  nginx-reload   Stage infrastructure/deploy/nginx/concordvoice.conf into /etc/nginx/,"
     echo "                 validate via 'nginx -t', reload nginx (#919 §5.9)"
     echo "  wait-healthy   Block until all services healthy (--timeout SECONDS, default 60)"
-    echo "  freshstart     Wipe all data (DB, Redis), sync releases, rebuild from scratch"
-    echo "  sync-releases  Download latest desktop release assets from GitHub"
+    echo "  freshstart     Wipe all data (DB, Redis), rebuild from scratch (no auto-sync since #1015)"
+    echo "  sync-releases  Manual operator-recovery — normal sync happens via GitHub Actions sync-releases.yml"
     echo "  verify-registration  Post-deploy smoke test for registration flow"
     echo "  docker-clean   Prune unused images + builder cache (weekly cron target)"
     echo "                 Add --aggressive to drop 7-day retention + prune stopped containers"
