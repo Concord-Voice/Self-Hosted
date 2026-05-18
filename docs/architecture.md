@@ -258,6 +258,7 @@ erDiagram
         TEXT description
         INTEGER position
         BOOLEAN is_encrypted
+        %% is_encrypted: frontend stopped reading/writing in #1024 (E2EE structural); column drop pending #1026
     }
     server_members {
         UUID server_id PK,FK
@@ -271,6 +272,7 @@ erDiagram
         UUID user_id FK
         TEXT content
         BOOLEAN is_encrypted
+        %% is_encrypted: frontend stopped reading/writing in #1024 (E2EE structural); column drop pending #1026
         TIMESTAMPTZ edited_at
     }
     server_invites {
@@ -317,6 +319,7 @@ erDiagram
         BOOLEAN is_group
         VARCHAR name
         BOOLEAN is_encrypted
+        %% is_encrypted: frontend stopped reading/writing in #1024 (E2EE structural); column drop pending #1026
         UUID created_by FK
     }
     dm_participants {
@@ -330,6 +333,7 @@ erDiagram
         UUID user_id FK
         TEXT content
         BOOLEAN is_encrypted
+        %% is_encrypted: frontend stopped reading/writing in #1024 (E2EE structural); column drop pending #1026
         VARCHAR type
     }
     dm_read_states {
@@ -680,7 +684,8 @@ sequenceDiagram
     Note over A,B: Encrypted channel creation
     A->>A: Generate AES-256-GCM channel symmetric key (CSK)
     A->>A: RSA-OAEP wrap CSK with own public key
-    A->>S: POST /channels {is_encrypted: true, wrapped_key}
+    A->>S: POST /channels {wrapped_key}
+    %% Note: is_encrypted field removed from client in #1024; backend (#1025) still accepts it for active v0.1.36 client compatibility during the adoption gate
 
     Note over A,B: New member joins encrypted channel
     B->>S: Join server (via invite)
@@ -695,7 +700,8 @@ sequenceDiagram
 
     Note over A,B: Sending an encrypted message
     A->>A: AES-256-GCM encrypt(CSK, plaintext) → ciphertext
-    A->>S: WS: message {content: ciphertext, is_encrypted: true}
+    A->>S: WS: message {content: ciphertext}
+    %% Note: is_encrypted field removed from client in #1024; backend (#1025) still accepts it for active v0.1.36 client compatibility during the adoption gate
     S->>S: Persist ciphertext (cannot read it)
     S-->>B: WS: message {content: ciphertext}
     B->>B: AES-256-GCM decrypt(CSK, ciphertext) → plaintext
