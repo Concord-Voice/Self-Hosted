@@ -43,7 +43,6 @@ export interface Room {
   audioLevelObserver: AudioLevelObserver | null;
   participants: Map<string, Participant>;
   createdAt: Date;
-  isEncrypted: boolean;
   e2eeEpoch: number;
 }
 
@@ -201,7 +200,6 @@ export class RoomManager {
       audioLevelObserver,
       participants: new Map(),
       createdAt: new Date(),
-      isEncrypted: false,
       e2eeEpoch: 0,
     };
 
@@ -277,8 +275,7 @@ export class RoomManager {
     username: string,
     displayName?: string,
     avatarUrl?: string,
-    rtpCapabilities?: RtpCapabilities,
-    isEncrypted = false
+    rtpCapabilities?: RtpCapabilities
   ): Promise<{
     rtpCapabilities: RtpCapabilities;
     existingProducers: ProducerInfo[];
@@ -324,9 +321,8 @@ export class RoomManager {
 
     room.participants.set(userId, participant);
 
-    // E2EE epoch tracking: mark room as encrypted on first join, increment epoch
-    if (isEncrypted) room.isEncrypted = true;
-    if (room.isEncrypted) room.e2eeEpoch++;
+    // E2EE epoch tracking: increment epoch on every join (forward secrecy)
+    room.e2eeEpoch++;
 
     logger.info('Participant joined room', {
       roomId,
@@ -413,7 +409,7 @@ export class RoomManager {
     room.participants.delete(userId);
 
     // E2EE: increment epoch on leave (forward secrecy)
-    if (room.isEncrypted) room.e2eeEpoch++;
+    room.e2eeEpoch++;
 
     logger.info('Participant left room', {
       roomId,

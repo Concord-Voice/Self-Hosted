@@ -122,14 +122,13 @@ export function createAuthMiddleware() {
 // Queries the control plane API to check server membership — the channel
 // belongs to a server, and the user must be a member of that server.
 //
-// Returns channel metadata including encryption status for E2EE setup.
+// Returns channel metadata and server enforcement flags for the joining user.
 // ---------------------------------------------------------------------------
 export interface ChannelAccessResult {
   allowed: boolean;
   channelId: string;
   serverId: string;
   channelName: string;
-  isEncrypted: boolean;
   serverMuted: boolean;
   serverDeafened: boolean;
   error?: string;
@@ -160,7 +159,6 @@ export async function validateChannelAccess(
           channelId,
           serverId: '',
           channelName: '',
-          isEncrypted: false,
           serverMuted: false,
           serverDeafened: false,
           error: 'Not authorized to access this channel',
@@ -172,7 +170,6 @@ export async function validateChannelAccess(
           channelId,
           serverId: '',
           channelName: '',
-          isEncrypted: false,
           serverMuted: false,
           serverDeafened: false,
           error: 'Channel not found',
@@ -183,7 +180,6 @@ export async function validateChannelAccess(
         channelId,
         serverId: '',
         channelName: '',
-        isEncrypted: false,
         serverMuted: false,
         serverDeafened: false,
         error: `Control plane returned ${channelRes.status}`,
@@ -200,7 +196,6 @@ export async function validateChannelAccess(
         id: string;
         server_id: string;
         name: string;
-        is_encrypted: boolean;
       };
     };
 
@@ -213,7 +208,6 @@ export async function validateChannelAccess(
       channelId: channel.id,
       serverId: channel.server_id,
       channelName: channel.name,
-      isEncrypted: channel.is_encrypted ?? false,
       serverMuted: responseData.server_muted ?? false,
       serverDeafened: responseData.server_deafened ?? false,
     };
@@ -228,7 +222,6 @@ export async function validateChannelAccess(
       channelId,
       serverId: '',
       channelName: '',
-      isEncrypted: false,
       serverMuted: false,
       serverDeafened: false,
       error: 'Failed to validate channel access',

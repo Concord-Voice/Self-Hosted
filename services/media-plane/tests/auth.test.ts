@@ -188,7 +188,6 @@ describe('validateChannelAccess', () => {
             id: 'ch-1',
             server_id: 'srv-1',
             name: 'General',
-            is_encrypted: true,
           },
         }),
     });
@@ -199,7 +198,6 @@ describe('validateChannelAccess', () => {
     expect(result.channelId).toBe('ch-1');
     expect(result.serverId).toBe('srv-1');
     expect(result.channelName).toBe('General');
-    expect(result.isEncrypted).toBe(true);
   });
 
   it('passes Authorization header with bearer token', async () => {
@@ -210,7 +208,7 @@ describe('validateChannelAccess', () => {
           allowed: true,
           server_muted: false,
           server_deafened: false,
-          channel: { id: 'ch-1', server_id: 's', name: 'n', is_encrypted: false },
+          channel: { id: 'ch-1', server_id: 's', name: 'n' },
         }),
     });
 
@@ -284,31 +282,13 @@ describe('validateChannelAccess', () => {
     expect(result.error).toBe('Failed to validate channel access');
   });
 
-  it('defaults isEncrypted to false when not present', async () => {
-    mockFetch().mockResolvedValueOnce({
-      ok: true,
-      json: () =>
-        Promise.resolve({
-          allowed: true,
-          server_muted: false,
-          server_deafened: false,
-          channel: { id: 'ch-1', server_id: 's', name: 'n' },
-        }),
-    });
-
-    const result = await validateChannelAccess('u-1', 'ch-1', 'token');
-
-    expect(result.allowed).toBe(true);
-    expect(result.isEncrypted).toBe(false);
-  });
-
   it('defaults serverMuted and serverDeafened to false when not present in response', async () => {
     mockFetch().mockResolvedValueOnce({
       ok: true,
       json: () =>
         Promise.resolve({
           allowed: true,
-          channel: { id: 'ch-1', server_id: 's', name: 'n', is_encrypted: false },
+          channel: { id: 'ch-1', server_id: 's', name: 'n' },
         }),
     });
 
@@ -327,7 +307,7 @@ describe('validateChannelAccess', () => {
           allowed: true,
           server_muted: true,
           server_deafened: true,
-          channel: { id: 'ch-1', server_id: 's', name: 'n', is_encrypted: false },
+          channel: { id: 'ch-1', server_id: 's', name: 'n' },
         }),
     });
 

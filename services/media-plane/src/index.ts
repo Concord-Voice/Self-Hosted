@@ -222,8 +222,7 @@ async function main() {
           data.username,
           data.displayName,
           data.avatarUrl,
-          rtpCapabilities,
-          access.isEncrypted
+          rtpCapabilities
         );
 
         // Apply server enforcement if the joining user has active enforcement
@@ -253,7 +252,6 @@ async function main() {
           rtpCapabilities: result.rtpCapabilities,
           existingProducers: result.existingProducers,
           participants: result.participants,
-          isEncrypted: access.isEncrypted,
           channelName: access.channelName,
           e2eeEpoch: result.e2eeEpoch,
         };
@@ -750,12 +748,14 @@ async function main() {
     }
   });
 
-  // Broadcast epoch-sync to encrypted rooms every 10s (short interval since
-  // voice calls are latency-sensitive and the message is tiny)
+  // Broadcast epoch-sync to every room every 10s. Under E2EE-everywhere
+  // (#201) every room is encrypted by construction, so this loop has no
+  // per-room encryption gate — the `if (room)` below is a null guard
+  // against race-with-deletion. Short interval keeps voice latency-tolerant.
   const epochSyncInterval = setInterval(() => {
     for (const roomId of roomManager.getActiveRoomIds()) {
       const room = roomManager.getRoom(roomId);
-      if (room?.isEncrypted) {
+      if (room) {
         io.to(roomId).emit('epoch-sync', { epoch: room.e2eeEpoch });
       }
     }

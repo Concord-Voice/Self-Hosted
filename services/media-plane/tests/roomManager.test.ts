@@ -785,34 +785,16 @@ describe('RoomManager', () => {
   // ── E2EE epoch ──────────────────────────────────────────────────────
 
   describe('E2EE epoch', () => {
-    it('increments epoch on join when room is encrypted', async () => {
-      const result1 = await manager.joinRoom(
-        'room-1',
-        'u-1',
-        'sock-1',
-        'alice',
-        undefined,
-        undefined,
-        undefined,
-        true
-      );
+    it('increments epoch on join', async () => {
+      const result1 = await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
       expect(result1.e2eeEpoch).toBe(1);
 
       const result2 = await manager.joinRoom('room-1', 'u-2', 'sock-2', 'bob');
-      expect(result2.e2eeEpoch).toBe(2); // encrypted flag already set on room
+      expect(result2.e2eeEpoch).toBe(2);
     });
 
     it('increments epoch on leave for forward secrecy', async () => {
-      await manager.joinRoom(
-        'room-1',
-        'u-1',
-        'sock-1',
-        'alice',
-        undefined,
-        undefined,
-        undefined,
-        true
-      );
+      await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
       await manager.joinRoom('room-1', 'u-2', 'sock-2', 'bob');
 
       await manager.leaveRoom('room-1', 'u-1');
