@@ -20,7 +20,7 @@ func TestGetMessagesBulkSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "bulkuser")
 	serverID := ts.CreateTestServer(t, user.ID, "Bulk Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	// Create 5 messages
 	for i := 0; i < 5; i++ {
@@ -44,7 +44,7 @@ func TestGetMessagesBulkPagination(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "bulkpaginate")
 	serverID := ts.CreateTestServer(t, user.ID, "BulkPage Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	// Create 3 messages
 	for i := 0; i < 3; i++ {
@@ -69,7 +69,7 @@ func TestGetMessagesBulkNotMember(t *testing.T) {
 	owner := ts.CreateTestUser(t, "bulkowner")
 	outsider := ts.CreateTestUser(t, "bulkoutsider")
 	serverID := ts.CreateTestServer(t, owner.ID, "BulkPrivate Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	w := ts.DoRequest("GET", channelsPrefix+channelID+bulkPath, nil,
 		testhelpers.AuthHeaders(outsider.AccessToken))
@@ -80,7 +80,7 @@ func TestGetMessagesBulkDefaultLimit200(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "bulkdefault")
 	serverID := ts.CreateTestServer(t, user.ID, "BulkDefault Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	// Seed 5 messages via SQL to avoid rate limit
 	for i := 0; i < 5; i++ {

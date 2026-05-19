@@ -136,7 +136,7 @@ func TestResolveRoom_DMConversation(t *testing.T) {
 
 	user1 := ts.CreateTestUser(t, "resolvedm_user1")
 	user2 := ts.CreateTestUser(t, "resolvedm_user2")
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	ctx, err := sub.ResolveRoom(convID)
 	if err != nil {
@@ -193,7 +193,7 @@ func TestHandleJoined_DMConversation(t *testing.T) {
 
 	user1 := ts.CreateTestUser(t, "joineddm_user1")
 	user2 := ts.CreateTestUser(t, "joineddm_user2")
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	event := map[string]interface{}{
 		"channelId": convID,
@@ -294,7 +294,7 @@ func TestHandleLeft_DMConversation(t *testing.T) {
 
 	user1 := ts.CreateTestUser(t, "leftdm_user1")
 	user2 := ts.CreateTestUser(t, "leftdm_user2")
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	// Pre-insert DM participant
 	insertDMVoiceParticipant(t, ts.DB, convID, user1.ID)
@@ -392,7 +392,7 @@ func TestHandleRoomEmpty_DMConversation(t *testing.T) {
 
 	user1 := ts.CreateTestUser(t, "emptydm_user1")
 	user2 := ts.CreateTestUser(t, "emptydm_user2")
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	insertDMVoiceParticipant(t, ts.DB, convID, user1.ID)
 	insertDMVoiceParticipant(t, ts.DB, convID, user2.ID)
@@ -523,7 +523,7 @@ func TestHandleHeartbeat_DMConversation_RemovesStale(t *testing.T) {
 
 	user1 := ts.CreateTestUser(t, "hbdm_user1")
 	user2 := ts.CreateTestUser(t, "hbdm_user2")
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	insertDMVoiceParticipant(t, ts.DB, convID, user1.ID)
 	insertDMVoiceParticipant(t, ts.DB, convID, user2.ID)
@@ -642,7 +642,7 @@ func TestReEnforceDM(t *testing.T) {
 		sub := newTestSubscriber(ts)
 		user1 := ts.CreateTestUser(t, "reenforce_dm_user1")
 		user2 := ts.CreateTestUser(t, "reenforce_dm_user2")
-		convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+		convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 		sub.ReEnforceDM(convID, user1.ID)
 	})
 
@@ -651,7 +651,7 @@ func TestReEnforceDM(t *testing.T) {
 		sub := newTestSubscriber(ts)
 		user1 := ts.CreateTestUser(t, "reenforce_dm_muted1")
 		user2 := ts.CreateTestUser(t, "reenforce_dm_muted2")
-		convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+		convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 		_, err := ts.DB.Exec(`UPDATE dm_participants SET server_muted = true WHERE conversation_id = $1 AND user_id = $2`, convID, user1.ID)
 		require.NoError(t, err)
 		sub.ReEnforceDM(convID, user1.ID)

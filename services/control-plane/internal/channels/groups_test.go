@@ -285,7 +285,7 @@ func TestDeleteChannelGroupInvalidID(t *testing.T) {
 func TestReorderChannelsSuccess(t *testing.T) {
 	ts, user, serverID := setupWithServer(t)
 	groupID := createGroup(t, ts, serverID, "Reorder Group", user.AccessToken)
-	channelID := ts.CreateTestChannel(t, serverID, "reorder-chan", false)
+	channelID := ts.CreateTestChannel(t, serverID, "reorder-chan")
 
 	w := ts.DoRequest("PUT", reorderPath(serverID), map[string]interface{}{
 		"channels": []map[string]interface{}{

@@ -33,7 +33,7 @@ func TestToggleReactionAddSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "reactuser")
 	serverID := ts.CreateTestServer(t, user.ID, "Reaction Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	msgID := ts.CreateTestMessage(t, channelID, user, testContent)
 
 	w := ts.DoRequest("PUT", reactURL(msgID), emojiBody("👍"),
@@ -55,7 +55,7 @@ func TestToggleReactionRemoveSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "toggleuser")
 	serverID := ts.CreateTestServer(t, user.ID, "Toggle Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	msgID := ts.CreateTestMessage(t, channelID, user, testContent)
 
 	// Add reaction
@@ -78,7 +78,7 @@ func TestToggleReactionMultipleEmoji(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "multiemoji")
 	serverID := ts.CreateTestServer(t, user.ID, "Multi Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	msgID := ts.CreateTestMessage(t, channelID, user, testContent)
 
 	w1 := ts.DoRequest("PUT", reactURL(msgID), emojiBody("👍"),
@@ -105,7 +105,7 @@ func TestToggleReactionMultipleUsers(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "reactor1")
 	user2 := ts.CreateTestUser(t, "reactor2")
 	serverID := ts.CreateTestServer(t, user1.ID, "Multi User Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	ts.AddMemberToServer(t, serverID, user2.ID, "member")
 	msgID := ts.CreateTestMessage(t, channelID, user1, "React to me!")
 
@@ -128,7 +128,7 @@ func TestToggleReactionInvalidEmoji(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "bademojiuser")
 	serverID := ts.CreateTestServer(t, user.ID, "Bad Emoji Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	msgID := ts.CreateTestMessage(t, channelID, user, testContent)
 
 	w := ts.DoRequest("PUT", reactURL(msgID), emojiBody("hello"),
@@ -141,7 +141,7 @@ func TestToggleReactionEmptyEmoji(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "emptyemoji")
 	serverID := ts.CreateTestServer(t, user.ID, "Empty Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	msgID := ts.CreateTestMessage(t, channelID, user, testContent)
 
 	w := ts.DoRequest("PUT", reactURL(msgID), emojiBody(""),
@@ -178,7 +178,7 @@ func TestToggleReactionNotMember(t *testing.T) {
 	owner := ts.CreateTestUser(t, "reactowner")
 	outsider := ts.CreateTestUser(t, "reactoutsider")
 	serverID := ts.CreateTestServer(t, owner.ID, "Private Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	msgID := ts.CreateTestMessage(t, channelID, owner, testContent)
 
 	w := ts.DoRequest("PUT", reactURL(msgID), emojiBody("👍"),
@@ -193,7 +193,7 @@ func TestGetReactionsSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "getreactuser")
 	serverID := ts.CreateTestServer(t, user.ID, "GetReact Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	msgID := ts.CreateTestMessage(t, channelID, user, testContent)
 
 	ts.DoRequest("PUT", reactURL(msgID), emojiBody("👍"),
@@ -219,7 +219,7 @@ func TestGetReactionsEmpty(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "noreactuser")
 	serverID := ts.CreateTestServer(t, user.ID, "Empty React Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	msgID := ts.CreateTestMessage(t, channelID, user, "No reactions here")
 
 	w := ts.DoRequest("GET", reactURL(msgID), nil,
@@ -239,7 +239,7 @@ func TestGetReactionsNotMember(t *testing.T) {
 	owner := ts.CreateTestUser(t, "getreactowner")
 	outsider := ts.CreateTestUser(t, "getreactoutsider")
 	serverID := ts.CreateTestServer(t, owner.ID, "Private React Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	msgID := ts.CreateTestMessage(t, channelID, owner, testContent)
 
 	w := ts.DoRequest("GET", reactURL(msgID), nil,
@@ -254,7 +254,7 @@ func TestGetMessagesIncludesReactions(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "msgreactuser")
 	serverID := ts.CreateTestServer(t, user.ID, "MsgReact Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	msgID := ts.CreateTestMessage(t, channelID, user, "React to this!")
 
 	ts.DoRequest("PUT", reactURL(msgID), emojiBody("🎉"),
@@ -285,7 +285,7 @@ func TestGetMessagesNoReactionsOmitsField(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "noreactmsguser")
 	serverID := ts.CreateTestServer(t, user.ID, "NoReact Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	ts.CreateTestMessage(t, channelID, user, "Plain message")
 
 	w := ts.DoRequest("GET", "/api/v1/channels/"+channelID+"/messages", nil,
@@ -315,7 +315,7 @@ func TestReactions_DMMessage_Participant_Returns404(t *testing.T) {
 	ts := setupTS(t)
 	u1 := ts.CreateTestUser(t, "dmreact_part_a")
 	u2 := ts.CreateTestUser(t, "dmreact_part_b")
-	convID := ts.CreateDMConversation(t, u1.ID, u2.ID, false)
+	convID := ts.CreateDMConversation(t, u1.ID, u2.ID)
 	msgID := insertDMMessageDirect(t, ts, convID, u1.ID, "react me")
 
 	wPut := ts.DoRequest("PUT", reactURL(msgID), emojiBody("👍"),
@@ -338,7 +338,7 @@ func TestReactions_DMMessage_NonParticipant_Returns404(t *testing.T) {
 	u1 := ts.CreateTestUser(t, "dmreact_np_a")
 	u2 := ts.CreateTestUser(t, "dmreact_np_b")
 	outsider := ts.CreateTestUser(t, "dmreact_np_c")
-	convID := ts.CreateDMConversation(t, u1.ID, u2.ID, false)
+	convID := ts.CreateDMConversation(t, u1.ID, u2.ID)
 	msgID := insertDMMessageDirect(t, ts, convID, u1.ID, "secret")
 
 	wPut := ts.DoRequest("PUT", reactURL(msgID), emojiBody("👍"),
@@ -356,7 +356,7 @@ func TestToggleReactionCascadeOnDelete(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "cascadeuser")
 	serverID := ts.CreateTestServer(t, user.ID, "Cascade Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	msgID := ts.CreateTestMessage(t, channelID, user, "Delete me")
 
 	ts.DoRequest("PUT", reactURL(msgID), emojiBody("👍"),

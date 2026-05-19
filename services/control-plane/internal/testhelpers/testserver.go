@@ -289,13 +289,15 @@ func (ts *TestServer) CreateTestServer(t *testing.T, ownerID, name string) strin
 }
 
 // CreateTestChannel creates a channel in the given server and returns its ID.
-func (ts *TestServer) CreateTestChannel(t *testing.T, serverID, name string, isEncrypted bool) string {
+// All channels are encrypted under E2EE-everywhere (#201).
+func (ts *TestServer) CreateTestChannel(t *testing.T, serverID, name string) string {
 	t.Helper()
 
 	channelID := uuid.New().String()
+	// Carry-along until #1026 drops the column
 	_, err := ts.DB.Exec(
-		`INSERT INTO channels (id, server_id, name, type, is_encrypted) VALUES ($1, $2, $3, 'text', $4)`,
-		channelID, serverID, name, isEncrypted,
+		`INSERT INTO channels (id, server_id, name, type, is_encrypted) VALUES ($1, $2, $3, 'text', TRUE)`,
+		channelID, serverID, name,
 	)
 	if err != nil {
 		t.Fatalf("testhelpers: failed to create test channel: %v", err)
@@ -399,14 +401,15 @@ func (ts *TestServer) CreateFriendship(t *testing.T, user1ID, user2ID, status st
 }
 
 // CreateDMConversation creates a DM conversation between two users and returns its ID.
-func (ts *TestServer) CreateDMConversation(t *testing.T, user1ID, user2ID string, isEncrypted bool) string {
+// All DMs are encrypted under E2EE-everywhere (#201).
+func (ts *TestServer) CreateDMConversation(t *testing.T, user1ID, user2ID string) string {
 	t.Helper()
 
 	convID := uuid.New().String()
 	_, err := ts.DB.Exec(
-		`INSERT INTO dm_conversations (id, is_group, is_personal, is_encrypted, created_by)
-		 VALUES ($1, false, false, $2, $3)`,
-		convID, isEncrypted, user1ID,
+		`INSERT INTO dm_conversations (id, is_group, is_personal, created_by)
+		 VALUES ($1, false, false, $2)`,
+		convID, user1ID,
 	)
 	if err != nil {
 		t.Fatalf("testhelpers: failed to create DM conversation: %v", err)
@@ -498,30 +501,24 @@ func (ts *TestServer) CreateChannelOverride(t *testing.T, channelID, targetType,
 	}
 }
 
-// CreateTestMessage sends a message to a channel via the API and returns the message ID.
+// CreateTestMessage inserts a message row directly via SQL and returns the message ID.
+// Bypasses the SendMessage API (which enforces ciphertext shape under E2EE-everywhere
+// #201) so callers can supply arbitrary plaintext content for assertion purposes.
 func (ts *TestServer) CreateTestMessage(t *testing.T, channelID string, user TestUser, content string) string {
 	t.Helper()
 
-	w := ts.DoRequest("POST", "/api/v1/messages", map[string]interface{}{
-		"channel_id": channelID,
-		"content":    content,
-	}, AuthHeaders(user.AccessToken))
-
-	if w.Code != http.StatusCreated {
-		t.Fatalf("testhelpers: CreateTestMessage expected 201, got %d: %s", w.Code, w.Body.String())
+	messageID := uuid.New().String()
+	// Carry-along until #1026 drops the column
+	_, err := ts.DB.Exec(
+		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, embeds_suppressed, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, TRUE, 1, FALSE, NOW(), NOW())`,
+		messageID, channelID, user.ID, content,
+	)
+	if err != nil {
+		t.Fatalf("testhelpers: CreateTestMessage failed to insert message: %v", err)
 	}
 
-	var resp struct {
-		Message struct {
-			ID string `json:"id"`
-		} `json:"message"`
-	}
-	ParseJSON(t, w, &resp)
-	if resp.Message.ID == "" {
-		t.Fatalf("testhelpers: CreateTestMessage missing or empty message.id in response: %s", w.Body.String())
-	}
-
-	return resp.Message.ID
+	return messageID
 }
 
 // FetchVerificationCode retrieves the plaintext verification code stored in Redis
@@ -537,12 +534,14 @@ func FetchVerificationCode(t *testing.T, ts *TestServer, pendingID string) strin
 }
 
 // CreateVoiceChannel creates a voice channel in the given server and returns its ID.
+// All channels are encrypted under E2EE-everywhere (#201).
 func (ts *TestServer) CreateVoiceChannel(t *testing.T, serverID, name string) string {
 	t.Helper()
 
 	channelID := uuid.New().String()
+	// Carry-along until #1026 drops the column
 	_, err := ts.DB.Exec(
-		`INSERT INTO channels (id, server_id, name, type, is_encrypted) VALUES ($1, $2, $3, 'voice', false)`,
+		`INSERT INTO channels (id, server_id, name, type, is_encrypted) VALUES ($1, $2, $3, 'voice', TRUE)`,
 		channelID, serverID, name,
 	)
 	if err != nil {

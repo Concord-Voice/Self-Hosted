@@ -59,7 +59,7 @@ func TestGetMessagesReturnsAttachments(t *testing.T) {
 	ts := testhelpers.SetupTestServer(t)
 	user := ts.CreateTestUser(t, "attachuser1")
 	serverID := ts.CreateTestServer(t, user.ID, "AttachServer")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	// Create message and attach a file
 	msgID := insertChannelMessage(t, ts, channelID, user.ID, "check this out")
@@ -100,7 +100,7 @@ func TestGetMessagesNoAttachments(t *testing.T) {
 	ts := testhelpers.SetupTestServer(t)
 	user := ts.CreateTestUser(t, "attachuser2")
 	serverID := ts.CreateTestServer(t, user.ID, "NoAttachServer")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	insertChannelMessage(t, ts, channelID, user.ID, "no files here")
 
@@ -124,7 +124,7 @@ func TestGetMessagesMultipleAttachmentsOrdered(t *testing.T) {
 	ts := testhelpers.SetupTestServer(t)
 	user := ts.CreateTestUser(t, "attachuser3")
 	serverID := ts.CreateTestServer(t, user.ID, "MultiAttachServer")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	msgID := insertChannelMessage(t, ts, channelID, user.ID, "multi attach")
 	file1 := insertMediaFile(t, ts, user.ID, channelID, "photo", mimeImagePNG, 100)
@@ -164,7 +164,7 @@ func TestGetMessagesSoftDeletedAttachmentsExcluded(t *testing.T) {
 	ts := testhelpers.SetupTestServer(t)
 	user := ts.CreateTestUser(t, "attachuser4")
 	serverID := ts.CreateTestServer(t, user.ID, "SoftDelServer")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	msgID := insertChannelMessage(t, ts, channelID, user.ID, "deleted attach")
 	fileID := insertMediaFile(t, ts, user.ID, channelID, "photo", mimeImagePNG, 100)

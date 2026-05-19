@@ -278,7 +278,7 @@ func (h *Handler) GetChannelPins(c *gin.Context) {
 	}
 
 	rows, err := h.db.Query(`
-		SELECT m.id, m.channel_id, m.user_id, m.content, m.is_encrypted, COALESCE(m.key_version, 1),
+		SELECT m.id, m.channel_id, m.user_id, m.content, COALESCE(m.key_version, 1),
 		       m.embeds_suppressed, m.reply_to_id, m.pinned_at, m.pinned_by, m.edited_at, m.created_at, m.updated_at,
 		       u.username, u.display_name, u.avatar_url
 		FROM messages m
@@ -297,7 +297,7 @@ func (h *Handler) GetChannelPins(c *gin.Context) {
 	for rows.Next() {
 		var msg models.MessageWithUser
 		scanErr := rows.Scan(
-			&msg.ID, &msg.ChannelID, &msg.UserID, &msg.Content, &msg.IsEncrypted, &msg.KeyVersion,
+			&msg.ID, &msg.ChannelID, &msg.UserID, &msg.Content, &msg.KeyVersion,
 			&msg.EmbedsSuppressed, &msg.ReplyToID, &msg.PinnedAt, &msg.PinnedBy, &msg.EditedAt,
 			&msg.CreatedAt, &msg.UpdatedAt, &msg.Username, &msg.DisplayName, &msg.AvatarURL,
 		)
@@ -324,7 +324,6 @@ type dmPinnedMessage struct {
 	ConversationID string     `json:"conversation_id"`
 	UserID         string     `json:"user_id"`
 	Content        string     `json:"content"`
-	IsEncrypted    bool       `json:"is_encrypted"`
 	Type           string     `json:"type"`
 	PinnedAt       *time.Time `json:"pinned_at"`
 	PinnedBy       *string    `json:"pinned_by"`
@@ -356,7 +355,7 @@ func (h *Handler) getDMConversationPins(c *gin.Context, conversationID, userID s
 	}
 
 	rows, err := h.db.Query(`
-		SELECT dm.id, dm.conversation_id, dm.user_id, dm.content, dm.is_encrypted, dm.type,
+		SELECT dm.id, dm.conversation_id, dm.user_id, dm.content, dm.type,
 		       dm.pinned_at, dm.pinned_by, dm.edited_at, dm.created_at, dm.updated_at,
 		       u.username, u.display_name, u.avatar_url
 		FROM dm_messages dm
@@ -375,7 +374,7 @@ func (h *Handler) getDMConversationPins(c *gin.Context, conversationID, userID s
 	for rows.Next() {
 		var m dmPinnedMessage
 		if scanErr := rows.Scan(
-			&m.ID, &m.ConversationID, &m.UserID, &m.Content, &m.IsEncrypted, &m.Type,
+			&m.ID, &m.ConversationID, &m.UserID, &m.Content, &m.Type,
 			&m.PinnedAt, &m.PinnedBy, &m.EditedAt, &m.CreatedAt, &m.UpdatedAt,
 			&m.Username, &m.DisplayName, &m.AvatarURL,
 		); scanErr != nil {

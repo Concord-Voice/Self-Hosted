@@ -273,7 +273,7 @@ func TestSBAC_UserAllowOverridesRoleDeny(t *testing.T) {
 	member := ts.CreateTestUser(t, "sbacmember1")
 	serverID := ts.CreateTestServer(t, owner.ID, "SBAC User Allow")
 	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
-	channelID := ts.CreateTestChannel(t, serverID, "restricted", false)
+	channelID := ts.CreateTestChannel(t, serverID, "restricted")
 
 	// Get @all role ID
 	var allRoleID string
@@ -306,7 +306,7 @@ func TestSBAC_UserDenyIsFinalAuthority(t *testing.T) {
 	member := ts.CreateTestUser(t, "sbacmember2")
 	serverID := ts.CreateTestServer(t, owner.ID, "SBAC User Deny Final")
 	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
-	channelID := ts.CreateTestChannel(t, serverID, "locked-member", false)
+	channelID := ts.CreateTestChannel(t, serverID, "locked-member")
 
 	// User-deny SendMessages
 	ts.CreateChannelOverride(t, channelID, "user", member.ID, 0, int64(rbac.PermSendMessages))
@@ -324,7 +324,7 @@ func TestSBAC_AdminBitBypassesOverrides(t *testing.T) {
 	admin := ts.CreateTestUser(t, "sbacadmin3")
 	serverID := ts.CreateTestServer(t, owner.ID, "SBAC Admin Bypass")
 	ts.AddMemberToServer(t, serverID, admin.ID, roleMember)
-	channelID := ts.CreateTestChannel(t, serverID, "admin-test", false)
+	channelID := ts.CreateTestChannel(t, serverID, "admin-test")
 
 	// Give admin the PermAdministrator bit
 	adminRoleID := ts.CreateTestRole(t, serverID, "SuperAdmin", 10, int64(rbac.PermAdministrator))

@@ -1,3 +1,4 @@
+//nolint:revive // var-naming false positive on "api" in v2.10.1 (relaxed in v2.12+)
 package api
 
 import (

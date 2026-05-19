@@ -389,7 +389,7 @@ func TestRemoveMemberCleansUpChannelKeys(t *testing.T) {
 	member := ts.CreateTestUser(t, "keycleanmem")
 
 	serverID := ts.CreateTestServer(t, owner.ID, "KeyCleanServer")
-	channelID := ts.CreateTestChannel(t, serverID, "encrypted-ch", true)
+	channelID := ts.CreateTestChannel(t, serverID, "encrypted-ch")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
 
 	_, err := ts.DB.Exec(
@@ -782,7 +782,7 @@ func TestRemoveMemberCleansUpReadStates(t *testing.T) {
 	member := ts.CreateTestUser(t, "readcleanmem")
 
 	serverID := ts.CreateTestServer(t, owner.ID, "ReadCleanServer")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
 
 	// Seed a read state
@@ -893,7 +893,7 @@ func TestBanMemberTriggersKeyRevocation(t *testing.T) {
 	member := ts.CreateTestUser(t, "bankeymem")
 
 	serverID := ts.CreateTestServer(t, owner.ID, "BanKeyServer")
-	channelID := ts.CreateTestChannel(t, serverID, "encrypted", true)
+	channelID := ts.CreateTestChannel(t, serverID, "encrypted")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
 
 	// Seed a channel key for the member
@@ -926,7 +926,7 @@ func TestRemoveMemberTriggersKeyRevocation(t *testing.T) {
 	member := ts.CreateTestUser(t, "kickkeymem")
 
 	serverID := ts.CreateTestServer(t, owner.ID, "KickKeyServer")
-	channelID := ts.CreateTestChannel(t, serverID, "e2ee-ch", true)
+	channelID := ts.CreateTestChannel(t, serverID, "e2ee-ch")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
 
 	// Seed a channel key

@@ -12,20 +12,19 @@ import (
 )
 
 const (
-	repliesTestContent = "Hello from replies!"
-	sendMessagePath    = "/api/v1/messages"
+	sendMessagePath = "/api/v1/messages"
 )
 
 func TestSendMessageWithReply(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "replyuser")
 	serverID := ts.CreateTestServer(t, user.ID, "Reply Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	originalID := ts.CreateTestMessage(t, channelID, user, "Original message")
 
 	w := ts.DoRequest("POST", sendMessagePath, map[string]interface{}{
 		"channel_id":  channelID,
-		"content":     "This is a reply",
+		"content":     testhelpers.ValidCiphertext(),
 		"reply_to_id": originalID,
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
@@ -46,11 +45,11 @@ func TestSendMessageReplyInvalidUUID(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "badreplyid")
 	serverID := ts.CreateTestServer(t, user.ID, "BadReply Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	w := ts.DoRequest("POST", sendMessagePath, map[string]interface{}{
 		"channel_id":  channelID,
-		"content":     repliesTestContent,
+		"content":     testhelpers.ValidCiphertext(),
 		"reply_to_id": "not-a-uuid",
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
@@ -61,12 +60,12 @@ func TestSendMessageReplyNonexistent(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "missingreply")
 	serverID := ts.CreateTestServer(t, user.ID, "Missing Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	fakeID := "00000000-0000-0000-0000-000000000099"
 	w := ts.DoRequest("POST", sendMessagePath, map[string]interface{}{
 		"channel_id":  channelID,
-		"content":     repliesTestContent,
+		"content":     testhelpers.ValidCiphertext(),
 		"reply_to_id": fakeID,
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
@@ -77,14 +76,14 @@ func TestSendMessageReplyCrossChannel(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "crosschannel")
 	serverID := ts.CreateTestServer(t, user.ID, "Cross Server")
-	channel1 := ts.CreateTestChannel(t, serverID, "channel-1", false)
-	channel2 := ts.CreateTestChannel(t, serverID, "channel-2", false)
+	channel1 := ts.CreateTestChannel(t, serverID, "channel-1")
+	channel2 := ts.CreateTestChannel(t, serverID, "channel-2")
 	msgInChannel1 := ts.CreateTestMessage(t, channel1, user, "In channel 1")
 
 	// Try to reply from channel-2 to a message in channel-1
 	w := ts.DoRequest("POST", sendMessagePath, map[string]interface{}{
 		"channel_id":  channel2,
-		"content":     "Cross-channel reply attempt",
+		"content":     testhelpers.ValidCiphertext(),
 		"reply_to_id": msgInChannel1,
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
@@ -95,12 +94,12 @@ func TestSendMessageReplyEmptyString(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "emptyreply")
 	serverID := ts.CreateTestServer(t, user.ID, "Empty Reply Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	// Empty string reply_to_id should be treated as no reply
 	w := ts.DoRequest("POST", sendMessagePath, map[string]interface{}{
 		"channel_id":  channelID,
-		"content":     repliesTestContent,
+		"content":     testhelpers.ValidCiphertext(),
 		"reply_to_id": "",
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
@@ -119,13 +118,13 @@ func TestGetMessagesWithReplies(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "getreplymsg")
 	serverID := ts.CreateTestServer(t, user.ID, "GetReply Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	originalID := ts.CreateTestMessage(t, channelID, user, "Original")
 
 	// Send a reply
 	ts.DoRequest("POST", sendMessagePath, map[string]interface{}{
 		"channel_id":  channelID,
-		"content":     "Reply to original",
+		"content":     testhelpers.ValidCiphertext(),
 		"reply_to_id": originalID,
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
@@ -158,13 +157,14 @@ func TestGetMessagesReplyToDeleted(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "deletedreply")
 	serverID := ts.CreateTestServer(t, user.ID, "Deleted Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	originalID := ts.CreateTestMessage(t, channelID, user, "Will be deleted")
 
 	// Send a reply
+	replyCiphertext := testhelpers.ValidCiphertext()
 	ts.DoRequest("POST", sendMessagePath, map[string]interface{}{
 		"channel_id":  channelID,
-		"content":     "Reply to soon-deleted",
+		"content":     replyCiphertext,
 		"reply_to_id": originalID,
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
@@ -190,7 +190,7 @@ func TestGetMessagesReplyToDeleted(t *testing.T) {
 		RepliedTo *models.RepliedToSummary `json:"replied_to"`
 	}
 	require.NoError(t, json.Unmarshal(resp.Messages[0], &replyMsg))
-	assert.Equal(t, "Reply to soon-deleted", replyMsg.Content)
+	assert.Equal(t, replyCiphertext, replyMsg.Content)
 	// reply_to_id becomes NULL after original deletion (ON DELETE SET NULL)
 	assert.Nil(t, replyMsg.ReplyToID)
 	assert.Nil(t, replyMsg.RepliedTo)

@@ -25,7 +25,6 @@ const (
 	errMsgInsufficientPerms       = "insufficient permissions"
 	errMsgNotMemberOfServer       = "Not a member of this server"
 	errMsgChannelNotFound         = "Channel not found"
-	errMsgChannelNotEncrypted     = "Channel is not encrypted"
 	errMsgFailedFetchChannels     = "Failed to fetch channels"
 	errMsgFailedCreateChannel     = "Failed to create channel"
 	errMsgFailedUpdateChannel     = "Failed to update channel"
@@ -65,9 +64,8 @@ type CreateChannelRequest struct {
 	Name        string            `json:"name" binding:"required,min=3,max=100"`
 	Type        string            `json:"type" binding:"required,oneof=text voice bulletin"`
 	Emoji       *string           `json:"emoji,omitempty"`        // Optional custom emoji
-	IsEncrypted *bool             `json:"is_encrypted,omitempty"` // Defaults to server's e2ee_default
 	GroupID     *string           `json:"group_id,omitempty"`     // Channel group (category); nil = uncategorized
-	WrappedKeys map[string]string `json:"wrapped_keys,omitempty"` // user_id → wrapped CSK (required if encrypted)
+	WrappedKeys map[string]string `json:"wrapped_keys,omitempty"` // user_id → wrapped CSK (required for all channels)
 }
 
 // UpdateChannelRequest represents a request to update a channel
@@ -138,7 +136,7 @@ func (h *Handler) ListChannels(c *gin.Context) {
 
 func (h *Handler) queryVisibleChannels(serverID string, visibleSet map[string]bool) ([]models.Channel, error) {
 	rows, err := h.db.Query(
-		`SELECT id, server_id, name, type, description, emoji, is_encrypted, audio_quality_tier, group_id, linked_voice_channel_id, sync_permissions, position, created_at, updated_at
+		`SELECT id, server_id, name, type, description, emoji, audio_quality_tier, group_id, linked_voice_channel_id, sync_permissions, position, created_at, updated_at
 		FROM channels
 		WHERE server_id = $1
 		ORDER BY position ASC, created_at ASC`,
@@ -175,7 +173,7 @@ func scanChannel(rows *sql.Rows) (models.Channel, error) {
 	var ch models.Channel
 	err := rows.Scan(
 		&ch.ID, &ch.ServerID, &ch.Name, &ch.Type, &ch.Description,
-		&ch.Emoji, &ch.IsEncrypted, &ch.AudioQualityTier, &ch.GroupID,
+		&ch.Emoji, &ch.AudioQualityTier, &ch.GroupID,
 		&ch.LinkedVoiceChannelID, &ch.SyncPermissions, &ch.Position,
 		&ch.CreatedAt, &ch.UpdatedAt,
 	)
@@ -237,10 +235,8 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 		return
 	}
 
-	isEncrypted := h.resolveEncryption(req)
-
-	// If encrypted, wrapped keys are required
-	if isEncrypted && len(req.WrappedKeys) == 0 {
+	// Under E2EE-everywhere (#201) wrapped keys are always required.
+	if len(req.WrappedKeys) == 0 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Encrypted channels require wrapped keys for all members"})
 		return
 	}
@@ -261,20 +257,20 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 	nextPos := h.computeNextPosition(tx, req.ServerID, req.GroupID)
 	channelID := uuid.New().String()
 
-	channel, err := h.insertChannel(tx, channelID, req, isEncrypted, nextPos)
+	channel, err := h.insertChannel(tx, channelID, req, nextPos)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreateChannel})
 		return
 	}
 
-	// Store wrapped channel keys if encrypted
-	if isEncrypted && h.storeWrappedKeys(tx, channelID, req.WrappedKeys) != nil {
+	// Store wrapped channel keys (always required under E2EE-everywhere)
+	if h.storeWrappedKeys(tx, channelID, req.WrappedKeys) != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to store encryption keys"})
 		return
 	}
 
 	// Auto-create linked text channel for voice channels
-	linkedTextChannel, ltcErr := h.maybeCreateLinkedTextChannel(tx, req, channelID, isEncrypted, nextPos)
+	linkedTextChannel, ltcErr := h.maybeCreateLinkedTextChannel(tx, req, channelID, nextPos)
 	if ltcErr != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create linked text channel"})
 		return
@@ -286,7 +282,7 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 		return
 	}
 
-	h.log.Info("Channel created", "channel_id", channelID, "server_id", req.ServerID, "user_id", userID, "encrypted", isEncrypted)
+	h.log.Info("Channel created", "channel_id", channelID, "server_id", req.ServerID, "user_id", userID)
 
 	h.broadcastChannelCreated(req.ServerID, channel, linkedTextChannel)
 
@@ -296,17 +292,6 @@ func (h *Handler) CreateChannel(c *gin.Context) {
 		response["linked_text_channel"] = linkedTextChannel
 	}
 	c.JSON(http.StatusCreated, response)
-}
-
-// resolveEncryption determines if a channel should be encrypted based on
-// the request value or the server's e2ee_default.
-func (h *Handler) resolveEncryption(req CreateChannelRequest) bool {
-	if req.IsEncrypted != nil {
-		return *req.IsEncrypted
-	}
-	var e2eeDefault bool
-	_ = h.db.QueryRow(`SELECT e2ee_default FROM servers WHERE id = $1`, req.ServerID).Scan(&e2eeDefault)
-	return e2eeDefault
 }
 
 // computeNextPosition returns the next position for a channel within a group (or uncategorized).
@@ -327,10 +312,11 @@ func (h *Handler) computeNextPosition(tx *sql.Tx, serverID string, groupID *stri
 }
 
 // insertChannel creates the primary channel row within a transaction.
-func (h *Handler) insertChannel(tx *sql.Tx, channelID string, req CreateChannelRequest, isEncrypted bool, position int) (models.Channel, error) {
+func (h *Handler) insertChannel(tx *sql.Tx, channelID string, req CreateChannelRequest, position int) (models.Channel, error) {
+	// Carry-along until #1026 drops the column
 	insertQuery := `
 		INSERT INTO channels (id, server_id, name, type, emoji, is_encrypted, group_id, position, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+		VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7, NOW(), NOW())
 		RETURNING created_at, updated_at
 	`
 
@@ -340,11 +326,10 @@ func (h *Handler) insertChannel(tx *sql.Tx, channelID string, req CreateChannelR
 	channel.Name = req.Name
 	channel.Type = req.Type
 	channel.Emoji = req.Emoji
-	channel.IsEncrypted = isEncrypted
 	channel.GroupID = req.GroupID
 	channel.Position = position
 
-	err := tx.QueryRow(insertQuery, channelID, req.ServerID, req.Name, req.Type, req.Emoji, isEncrypted, req.GroupID, position).Scan(
+	err := tx.QueryRow(insertQuery, channelID, req.ServerID, req.Name, req.Type, req.Emoji, req.GroupID, position).Scan(
 		&channel.CreatedAt,
 		&channel.UpdatedAt,
 	)
@@ -374,19 +359,20 @@ func (h *Handler) storeWrappedKeys(tx *sql.Tx, channelID string, wrappedKeys map
 }
 
 // maybeCreateLinkedTextChannel creates a linked text channel for voice channels, or returns nil for other types.
-func (h *Handler) maybeCreateLinkedTextChannel(tx *sql.Tx, req CreateChannelRequest, voiceChannelID string, isEncrypted bool, nextPos int) (*models.Channel, error) {
+func (h *Handler) maybeCreateLinkedTextChannel(tx *sql.Tx, req CreateChannelRequest, voiceChannelID string, nextPos int) (*models.Channel, error) {
 	if req.Type != "voice" {
 		return nil, nil
 	}
-	return h.createLinkedTextChannel(tx, req, voiceChannelID, isEncrypted, nextPos+1)
+	return h.createLinkedTextChannel(tx, req, voiceChannelID, nextPos+1)
 }
 
 // createLinkedTextChannel creates a linked text channel for a voice channel.
-func (h *Handler) createLinkedTextChannel(tx *sql.Tx, req CreateChannelRequest, voiceChannelID string, isEncrypted bool, position int) (*models.Channel, error) {
+func (h *Handler) createLinkedTextChannel(tx *sql.Tx, req CreateChannelRequest, voiceChannelID string, position int) (*models.Channel, error) {
 	linkedTextID := uuid.New().String()
+	// Carry-along until #1026 drops the column
 	linkedInsert := `
 		INSERT INTO channels (id, server_id, name, type, is_encrypted, group_id, linked_voice_channel_id, position, created_at, updated_at)
-		VALUES ($1, $2, $3, 'text', $4, $5, $6, $7, NOW(), NOW())
+		VALUES ($1, $2, $3, 'text', TRUE, $4, $5, $6, NOW(), NOW())
 		RETURNING created_at, updated_at
 	`
 	var ltc models.Channel
@@ -394,12 +380,11 @@ func (h *Handler) createLinkedTextChannel(tx *sql.Tx, req CreateChannelRequest, 
 	ltc.ServerID = req.ServerID
 	ltc.Name = req.Name
 	ltc.Type = "text"
-	ltc.IsEncrypted = isEncrypted
 	ltc.GroupID = req.GroupID
 	ltc.LinkedVoiceChannelID = &voiceChannelID
 	ltc.Position = position
 
-	err := tx.QueryRow(linkedInsert, linkedTextID, req.ServerID, req.Name, isEncrypted, req.GroupID, voiceChannelID, position).Scan(
+	err := tx.QueryRow(linkedInsert, linkedTextID, req.ServerID, req.Name, req.GroupID, voiceChannelID, position).Scan(
 		&ltc.CreatedAt,
 		&ltc.UpdatedAt,
 	)
@@ -408,10 +393,8 @@ func (h *Handler) createLinkedTextChannel(tx *sql.Tx, req CreateChannelRequest, 
 		return nil, err
 	}
 
-	// If encrypted, copy wrapped keys for the linked text channel too (non-fatal)
-	if isEncrypted {
-		h.storeWrappedKeysNonFatal(tx, linkedTextID, req.WrappedKeys)
-	}
+	// Copy wrapped keys for the linked text channel too (non-fatal)
+	h.storeWrappedKeysNonFatal(tx, linkedTextID, req.WrappedKeys)
 
 	return &ltc, nil
 }
@@ -462,16 +445,15 @@ func (h *Handler) broadcastChannelCreated(serverID string, channel models.Channe
 // channelToMap converts a Channel model to a map for broadcast payloads.
 func channelToMap(ch models.Channel) map[string]interface{} {
 	m := map[string]interface{}{
-		"id":           ch.ID,
-		"server_id":    ch.ServerID,
-		"name":         ch.Name,
-		"type":         ch.Type,
-		"emoji":        ch.Emoji,
-		"is_encrypted": ch.IsEncrypted,
-		"group_id":     ch.GroupID,
-		"position":     ch.Position,
-		"created_at":   ch.CreatedAt,
-		"updated_at":   ch.UpdatedAt,
+		"id":         ch.ID,
+		"server_id":  ch.ServerID,
+		"name":       ch.Name,
+		"type":       ch.Type,
+		"emoji":      ch.Emoji,
+		"group_id":   ch.GroupID,
+		"position":   ch.Position,
+		"created_at": ch.CreatedAt,
+		"updated_at": ch.UpdatedAt,
 	}
 	if ch.LinkedVoiceChannelID != nil {
 		m["linked_voice_channel_id"] = ch.LinkedVoiceChannelID
@@ -492,7 +474,7 @@ func (h *Handler) GetChannel(c *gin.Context) {
 
 	// Get channel and check if user is a member of the server
 	query := `
-		SELECT c.id, c.server_id, c.name, c.type, c.description, c.emoji, c.is_encrypted, c.audio_quality_tier, c.group_id, c.linked_voice_channel_id, c.sync_permissions, c.position, c.created_at, c.updated_at
+		SELECT c.id, c.server_id, c.name, c.type, c.description, c.emoji, c.audio_quality_tier, c.group_id, c.linked_voice_channel_id, c.sync_permissions, c.position, c.created_at, c.updated_at
 		FROM channels c
 		INNER JOIN server_members sm ON c.server_id = sm.server_id
 		WHERE c.id = $1 AND sm.user_id = $2
@@ -506,7 +488,6 @@ func (h *Handler) GetChannel(c *gin.Context) {
 		&channel.Type,
 		&channel.Description,
 		&channel.Emoji,
-		&channel.IsEncrypted,
 		&channel.AudioQualityTier,
 		&channel.GroupID,
 		&channel.LinkedVoiceChannelID,
@@ -616,10 +597,10 @@ func (h *Handler) executeChannelUpdate(channelID string, req UpdateChannelReques
 			`UPDATE channels
 			SET name = $1, type = $2, emoji = $3, audio_quality_tier = $4, group_id = $5, updated_at = NOW()
 			WHERE id = $6
-			RETURNING server_id, emoji, is_encrypted, audio_quality_tier, group_id, linked_voice_channel_id, sync_permissions, position, created_at, updated_at`,
+			RETURNING server_id, emoji, audio_quality_tier, group_id, linked_voice_channel_id, sync_permissions, position, created_at, updated_at`,
 			req.Name, req.Type, req.Emoji, req.AudioQualityTier, resolveGroupIDParam(req.GroupID), channelID,
 		).Scan(
-			&channel.ServerID, &channel.Emoji, &channel.IsEncrypted, &channel.AudioQualityTier,
+			&channel.ServerID, &channel.Emoji, &channel.AudioQualityTier,
 			&channel.GroupID, &channel.LinkedVoiceChannelID, &channel.SyncPermissions,
 			&channel.Position, &channel.CreatedAt, &channel.UpdatedAt,
 		)
@@ -628,10 +609,10 @@ func (h *Handler) executeChannelUpdate(channelID string, req UpdateChannelReques
 			`UPDATE channels
 			SET name = $1, type = $2, emoji = $3, audio_quality_tier = $4, updated_at = NOW()
 			WHERE id = $5
-			RETURNING server_id, emoji, is_encrypted, audio_quality_tier, group_id, linked_voice_channel_id, sync_permissions, position, created_at, updated_at`,
+			RETURNING server_id, emoji, audio_quality_tier, group_id, linked_voice_channel_id, sync_permissions, position, created_at, updated_at`,
 			req.Name, req.Type, req.Emoji, req.AudioQualityTier, channelID,
 		).Scan(
-			&channel.ServerID, &channel.Emoji, &channel.IsEncrypted, &channel.AudioQualityTier,
+			&channel.ServerID, &channel.Emoji, &channel.AudioQualityTier,
 			&channel.GroupID, &channel.LinkedVoiceChannelID, &channel.SyncPermissions,
 			&channel.Position, &channel.CreatedAt, &channel.UpdatedAt,
 		)
@@ -658,7 +639,6 @@ func (h *Handler) broadcastChannelUpdated(channel models.Channel) {
 			"name":               channel.Name,
 			"type":               channel.Type,
 			"emoji":              channel.Emoji,
-			"is_encrypted":       channel.IsEncrypted,
 			"audio_quality_tier": channel.AudioQualityTier,
 			"group_id":           channel.GroupID,
 		},
@@ -950,17 +930,16 @@ func (h *Handler) GetChannelKeys(c *gin.Context) {
 		return
 	}
 
-	// Check membership and channel encryption status
+	// Check membership (all channels are encrypted under E2EE-everywhere #201).
 	var isMember bool
-	var isEncrypted bool
 	err := h.db.QueryRow(
 		`SELECT EXISTS(
 			SELECT 1 FROM channels c
 			INNER JOIN server_members sm ON c.server_id = sm.server_id
 			WHERE c.id = $1 AND sm.user_id = $2
-		), (SELECT is_encrypted FROM channels WHERE id = $1)`,
+		)`,
 		channelID, userID,
-	).Scan(&isMember, &isEncrypted)
+	).Scan(&isMember)
 	if err != nil {
 		h.log.Error("Failed to check channel access", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch channel keys"})
@@ -968,10 +947,6 @@ func (h *Handler) GetChannelKeys(c *gin.Context) {
 	}
 	if !isMember {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this channel's server"})
-		return
-	}
-	if !isEncrypted {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgChannelNotEncrypted})
 		return
 	}
 
@@ -1067,23 +1042,22 @@ type keyDistError struct {
 func (e *keyDistError) Error() string { return e.message }
 
 func (h *Handler) verifyChannelEncrypted(channelID, userID string) error {
-	var isEncrypted bool
+	// All channels are encrypted under E2EE-everywhere (#201); only membership check remains.
+	var exists bool
 	err := h.db.QueryRow(
-		`SELECT c.is_encrypted
-		 FROM channels c
-		 INNER JOIN server_members sm ON c.server_id = sm.server_id
-		 WHERE c.id = $1 AND sm.user_id = $2`,
+		`SELECT EXISTS(
+			SELECT 1 FROM channels c
+			INNER JOIN server_members sm ON c.server_id = sm.server_id
+			WHERE c.id = $1 AND sm.user_id = $2
+		)`,
 		channelID, userID,
-	).Scan(&isEncrypted)
-	if err == sql.ErrNoRows {
-		return &keyDistError{http.StatusForbidden, "Not a member of this channel's server"}
-	}
+	).Scan(&exists)
 	if err != nil {
 		h.log.Error(logMsgFailedCheckPermissions, "error", err)
 		return &keyDistError{http.StatusInternalServerError, errMsgFailedDistributeKeys}
 	}
-	if !isEncrypted {
-		return &keyDistError{http.StatusBadRequest, errMsgChannelNotEncrypted}
+	if !exists {
+		return &keyDistError{http.StatusForbidden, "Not a member of this channel's server"}
 	}
 	return nil
 }
@@ -1247,18 +1221,17 @@ func (h *Handler) GetUnifiedKeys(c *gin.Context) {
 		return
 	}
 
-	var channelEncrypted bool
+	// Under E2EE-everywhere (#201) all channels are encrypted; only existence + membership matters.
+	var channelExists bool
 	err := h.db.QueryRow(`
-		SELECT c.is_encrypted FROM channels c
-		INNER JOIN server_members sm ON c.server_id = sm.server_id AND sm.user_id = $2
-		WHERE c.id = $1
-	`, contextID, userID).Scan(&channelEncrypted)
+		SELECT EXISTS(
+			SELECT 1 FROM channels c
+			INNER JOIN server_members sm ON c.server_id = sm.server_id AND sm.user_id = $2
+			WHERE c.id = $1
+		)
+	`, contextID, userID).Scan(&channelExists)
 
-	if err == nil {
-		h.getChannelKeyResponse(c, contextID, userID, channelEncrypted)
-		return
-	}
-	if err != sql.ErrNoRows {
+	if err != nil {
 		h.log.Error("e2ee key fetch: channel check failed",
 			"kind", "channel_check_db_error",
 			"context_id", contextID,
@@ -1271,20 +1244,15 @@ func (h *Handler) GetUnifiedKeys(c *gin.Context) {
 		})
 		return
 	}
+	if channelExists {
+		h.getChannelKeyResponse(c, contextID, userID)
+		return
+	}
 
 	h.getDMKeyResponse(c, contextID, userID)
 }
 
-func (h *Handler) getChannelKeyResponse(c *gin.Context, contextID, userID string, encrypted bool) {
-	if !encrypted {
-		c.JSON(http.StatusBadRequest, e2eekeys.ErrorResponse{
-			Error: errMsgChannelNotEncrypted,
-			Code:  e2eekeys.CodeNotEncrypted,
-			Kind:  e2eekeys.KindChannel,
-		})
-		return
-	}
-
+func (h *Handler) getChannelKeyResponse(c *gin.Context, contextID, userID string) {
 	key, err := h.fetchChannelKey(contextID, userID, c.Query("version"))
 	if err == errInvalidVersion {
 		c.JSON(http.StatusBadRequest, e2eekeys.ErrorResponse{
@@ -1368,25 +1336,16 @@ type dmKey struct {
 }
 
 func (h *Handler) getDMKeyResponse(c *gin.Context, contextID, userID string) {
-	var dmEncrypted bool
+	// Under E2EE-everywhere (#201) all DMs are encrypted; check membership/existence only.
+	var exists bool
 	err := h.db.QueryRow(`
-		SELECT dc.is_encrypted FROM dm_conversations dc
-		INNER JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $2
-		WHERE dc.id = $1
-	`, contextID, userID).Scan(&dmEncrypted)
+		SELECT EXISTS(
+			SELECT 1 FROM dm_conversations dc
+			INNER JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $2
+			WHERE dc.id = $1
+		)
+	`, contextID, userID).Scan(&exists)
 
-	if err == sql.ErrNoRows {
-		h.log.Info("e2ee key fetch: context not found or user not authorized",
-			"kind", "context_not_found_or_forbidden",
-			"context_id", contextID,
-			"user_id", userID)
-		c.JSON(http.StatusNotFound, e2eekeys.ErrorResponse{
-			Error: "Context not found or access denied",
-			Code:  e2eekeys.CodeNotMember,
-			Kind:  e2eekeys.KindUnknown,
-		})
-		return
-	}
 	if err != nil {
 		h.log.Error("e2ee key fetch: DM check failed",
 			"kind", "dm_check_db_error",
@@ -1400,11 +1359,15 @@ func (h *Handler) getDMKeyResponse(c *gin.Context, contextID, userID string) {
 		})
 		return
 	}
-	if !dmEncrypted {
-		c.JSON(http.StatusBadRequest, e2eekeys.ErrorResponse{
-			Error: "Conversation is not encrypted",
-			Code:  e2eekeys.CodeNotEncrypted,
-			Kind:  e2eekeys.KindDM,
+	if !exists {
+		h.log.Info("e2ee key fetch: context not found or user not authorized",
+			"kind", "context_not_found_or_forbidden",
+			"context_id", contextID,
+			"user_id", userID)
+		c.JSON(http.StatusNotFound, e2eekeys.ErrorResponse{
+			Error: "Context not found or access denied",
+			Code:  e2eekeys.CodeNotMember,
+			Kind:  e2eekeys.KindUnknown,
 		})
 		return
 	}
@@ -1510,7 +1473,7 @@ func (h *Handler) DistributeUnifiedKeys(c *gin.Context) {
 		SELECT EXISTS(
 			SELECT 1 FROM channels c
 			INNER JOIN server_members sm ON c.server_id = sm.server_id AND sm.user_id = $2
-			WHERE c.id = $1 AND c.is_encrypted = TRUE
+			WHERE c.id = $1
 		)
 	`, contextID, userID).Scan(&isChannel)
 	if err != nil {
@@ -1530,7 +1493,7 @@ func (h *Handler) DistributeUnifiedKeys(c *gin.Context) {
 		SELECT EXISTS(
 			SELECT 1 FROM dm_conversations dc
 			INNER JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $2
-			WHERE dc.id = $1 AND dc.is_encrypted = TRUE
+			WHERE dc.id = $1
 		)
 	`, contextID, userID).Scan(&isDM)
 	if err != nil || !isDM {
@@ -1595,22 +1558,17 @@ func (h *Handler) RotateKey(c *gin.Context) {
 		return
 	}
 
-	// Look up channel's server and verify it's encrypted
+	// Look up channel's server (all channels are encrypted under E2EE-everywhere #201).
 	var serverID string
-	var isEncrypted bool
 	err := h.db.QueryRow(
-		`SELECT server_id, is_encrypted FROM channels WHERE id = $1`, channelID,
-	).Scan(&serverID, &isEncrypted)
+		`SELECT server_id FROM channels WHERE id = $1`, channelID,
+	).Scan(&serverID)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": errMsgChannelNotFound})
 		return
 	} else if err != nil {
 		h.log.Error("Failed to look up channel for rotation", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to rotate key"})
-		return
-	}
-	if !isEncrypted {
-		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgChannelNotEncrypted})
 		return
 	}
 

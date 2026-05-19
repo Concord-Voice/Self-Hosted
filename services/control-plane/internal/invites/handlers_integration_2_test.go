@@ -397,7 +397,7 @@ func TestJoinServerE2EEKeyRequestsCreated(t *testing.T) {
 	serverID := ts.CreateTestServer(t, owner.ID, "E2EE Join Server")
 
 	// Create an encrypted channel
-	channelID := ts.CreateTestChannel(t, serverID, "encrypted", true)
+	channelID := ts.CreateTestChannel(t, serverID, "encrypted")
 
 	code := createInvite(t, ts, serverID, owner.AccessToken)
 

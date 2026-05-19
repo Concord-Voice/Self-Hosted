@@ -291,7 +291,7 @@ func TestTheftTriggersKeyRevocations(t *testing.T) {
 
 	// Create a server, encrypted channel, and channel key for the user
 	serverID := ts.CreateTestServer(t, userID, "TheftTestServer")
-	channelID := ts.CreateTestChannel(t, serverID, "encrypted-channel", true)
+	channelID := ts.CreateTestChannel(t, serverID, "encrypted-channel")
 
 	// Insert a channel key for the user
 	_, err := ts.DB.Exec(
@@ -863,7 +863,7 @@ func TestRecoveryResetAccountDeletesDMChannelKeys(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "resetdmkeys2")
 
 	// Create a real DM conversation (satisfies FK constraint)
-	convID := ts.CreateDMConversation(t, user.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user.ID, user2.ID)
 	ts.SeedDMKey(t, convID, user.ID, 1)
 
 	recoveryToken := getRecoveryToken2(t, ts, user)

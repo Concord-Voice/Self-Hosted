@@ -974,7 +974,7 @@ func TestRecoveryResetAccountDeletesChannelKeys(t *testing.T) {
 
 	// Create a server and encrypted channel, then seed a channel key
 	serverID := ts.CreateTestServer(t, user.ID, "delkeys-server")
-	channelID := ts.CreateTestChannel(t, serverID, "encrypted-chan", true)
+	channelID := ts.CreateTestChannel(t, serverID, "encrypted-chan")
 
 	_, err := ts.DB.Exec(
 		`INSERT INTO channel_keys (channel_id, user_id, wrapped_key, key_version) VALUES ($1, $2, $3, 1)`,

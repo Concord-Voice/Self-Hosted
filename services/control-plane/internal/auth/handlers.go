@@ -1588,12 +1588,12 @@ func (h *Handler) handleGracePeriodRefresh(c *gin.Context, userID string, revoke
 // (different machine_id + different IP) because the attacker's session could have
 // fetched wrapped channel keys.
 func (h *Handler) triggerTheftKeyRevocations(userID string) {
-	// Find all encrypted channels the user is a member of (via server membership + channel_keys)
+	// Find all channels the user is a member of (all are encrypted under #201)
 	rows, err := h.db.Query(
 		`SELECT DISTINCT ck.channel_id, COALESCE(MAX(ck.key_version), 1) AS max_epoch
 		 FROM channel_keys ck
 		 JOIN channels ch ON ch.id = ck.channel_id
-		 WHERE ck.user_id = $1 AND ch.is_encrypted = TRUE
+		 WHERE ck.user_id = $1
 		 GROUP BY ck.channel_id`,
 		userID,
 	)

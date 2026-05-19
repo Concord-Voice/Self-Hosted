@@ -137,14 +137,13 @@ func (h *Handler) AuthorizeJoin(c *gin.Context) {
 
 	// Fetch channel details + verify membership in one query
 	var channelName, channelType, serverID string
-	var isEncrypted bool
 	var audioQualityTier *string
 	err := h.db.QueryRow(`
-		SELECT c.id, c.name, c.type, c.server_id, c.is_encrypted, c.audio_quality_tier
+		SELECT c.id, c.name, c.type, c.server_id, c.audio_quality_tier
 		FROM channels c
 		INNER JOIN server_members sm ON sm.server_id = c.server_id AND sm.user_id = $2
 		WHERE c.id = $1
-	`, channelID, userID).Scan(&channelID, &channelName, &channelType, &serverID, &isEncrypted, &audioQualityTier)
+	`, channelID, userID).Scan(&channelID, &channelName, &channelType, &serverID, &audioQualityTier)
 
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Channel not found or access denied"})
@@ -203,7 +202,6 @@ func (h *Handler) AuthorizeJoin(c *gin.Context) {
 			"id":                 channelID,
 			"name":               channelName,
 			"server_id":          serverID,
-			"is_encrypted":       isEncrypted,
 			"audio_quality_tier": audioQualityTier,
 		},
 	})

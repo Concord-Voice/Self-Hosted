@@ -184,7 +184,7 @@ func TestRequirePermissionWithChannelIDParam(t *testing.T) {
 	member := ts.CreateTestUser(t, "mwpmember4")
 	serverID := ts.CreateTestServer(t, owner.ID, "Channel Perm Server")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
-	channelID := ts.CreateTestChannel(t, serverID, "test-chan", false)
+	channelID := ts.CreateTestChannel(t, serverID, "test-chan")
 
 	handler := rbac.RequirePermission(resolver, rbac.PermSendMessages, "channel_id")
 
@@ -209,7 +209,7 @@ func TestRequirePermissionChannelDeny(t *testing.T) {
 	member := ts.CreateTestUser(t, "mwpmember5")
 	serverID := ts.CreateTestServer(t, owner.ID, "Channel Deny Server")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
-	channelID := ts.CreateTestChannel(t, serverID, "restricted-chan", false)
+	channelID := ts.CreateTestChannel(t, serverID, "restricted-chan")
 
 	// Get @all role
 	var allRoleID string

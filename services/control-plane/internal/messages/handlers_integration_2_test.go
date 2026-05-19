@@ -34,7 +34,7 @@ func TestGetMessagesInvalidBeforeParam(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "getmsgbadbefore")
 	serverID := ts.CreateTestServer(t, user.ID, "BadBefore Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	w := ts.DoRequest("GET", pathChannels+channelID+"/messages?before=not-a-uuid", nil, testhelpers.AuthHeaders(user.AccessToken))
 
@@ -45,13 +45,13 @@ func TestGetMessagesCustomLimit(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "getmsglimit")
 	serverID := ts.CreateTestServer(t, user.ID, "Limit Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	// Send 3 messages
 	for i := 0; i < 3; i++ {
 		w := ts.DoRequest("POST", pathAPIMessages, map[string]interface{}{
 			"channel_id": channelID,
-			"content":    "Message number " + string(rune('A'+i)),
+			"content":    testhelpers.ValidCiphertext(),
 		}, testhelpers.AuthHeaders(user.AccessToken))
 		require.Equal(t, http.StatusCreated, w.Code)
 	}
@@ -70,7 +70,7 @@ func TestGetMessagesLimitClampedTo100(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "getmsgclamp")
 	serverID := ts.CreateTestServer(t, user.ID, "Clamp Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	// Request with limit=200 (above max of 100) — should be clamped to default 50
 	w := ts.DoRequest("GET", pathChannels+channelID+"/messages?limit=200", nil, testhelpers.AuthHeaders(user.AccessToken))
@@ -83,14 +83,14 @@ func TestGetMessagesWithBeforePagination(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "getmsgpaginate")
 	serverID := ts.CreateTestServer(t, user.ID, "Paginate Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	// Send 3 messages in sequence
 	var msgIDs []string
 	for i := 0; i < 3; i++ {
 		w := ts.DoRequest("POST", pathAPIMessages, map[string]interface{}{
 			"channel_id": channelID,
-			"content":    "Paginated message " + string(rune('A'+i)),
+			"content":    testhelpers.ValidCiphertext(),
 		}, testhelpers.AuthHeaders(user.AccessToken))
 		require.Equal(t, http.StatusCreated, w.Code)
 
@@ -130,7 +130,7 @@ func TestSendMessageMissingContent(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "sendmsgnocont")
 	serverID := ts.CreateTestServer(t, user.ID, "NoCont Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	w := ts.DoRequest("POST", pathAPIMessages, map[string]interface{}{
 		"channel_id": channelID,
@@ -165,13 +165,12 @@ func TestSendMessageE2EEWithInvalidCiphertext(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "sendinvcipher")
 	serverID := ts.CreateTestServer(t, user.ID, "InvCipher Server")
-	channelID := ts.CreateTestChannel(t, serverID, "encrypted", true)
+	channelID := ts.CreateTestChannel(t, serverID, "encrypted")
 
-	// Encrypted flag set but content is not valid base64 ciphertext
+	// Content is not valid base64 ciphertext
 	w := ts.DoRequest("POST", pathAPIMessages, map[string]interface{}{
-		"channel_id":   channelID,
-		"content":      "not-valid-base64-ciphertext",
-		"is_encrypted": true,
+		"channel_id": channelID,
+		"content":    "not-valid-base64-ciphertext",
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -184,13 +183,12 @@ func TestSendMessageE2EEWithKeyVersion(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "sendkeyver")
 	serverID := ts.CreateTestServer(t, user.ID, "KeyVer Server")
-	channelID := ts.CreateTestChannel(t, serverID, "encrypted", true)
+	channelID := ts.CreateTestChannel(t, serverID, "encrypted")
 
 	w := ts.DoRequest("POST", pathAPIMessages, map[string]interface{}{
-		"channel_id":   channelID,
-		"content":      testhelpers.ValidCiphertext(),
-		"is_encrypted": true,
-		"key_version":  2,
+		"channel_id":  channelID,
+		"content":     testhelpers.ValidCiphertext(),
+		"key_version": 2,
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	assert.Equal(t, http.StatusCreated, w.Code)
@@ -204,12 +202,12 @@ func TestSendMessageDefaultKeyVersion(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "senddefkv")
 	serverID := ts.CreateTestServer(t, user.ID, "DefKV Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	// key_version not set — should default to 1
 	w := ts.DoRequest("POST", pathAPIMessages, map[string]interface{}{
 		"channel_id": channelID,
-		"content":    "Default key version",
+		"content":    testhelpers.ValidCiphertext(),
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	assert.Equal(t, http.StatusCreated, w.Code)
@@ -224,11 +222,11 @@ func TestSendMessageEmbedsSuppressedByDefault(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "sendembed")
 	serverID := ts.CreateTestServer(t, user.ID, "Embed Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	w := ts.DoRequest("POST", pathAPIMessages, map[string]interface{}{
 		"channel_id": channelID,
-		"content":    "Test embeds suppressed",
+		"content":    testhelpers.ValidCiphertext(),
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	assert.Equal(t, http.StatusCreated, w.Code)
@@ -301,13 +299,12 @@ func TestUpdateMessageE2EEEnforcement(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "upde2ee")
 	serverID := ts.CreateTestServer(t, user.ID, "UpdateE2EE Server")
-	channelID := ts.CreateTestChannel(t, serverID, "encrypted", true)
+	channelID := ts.CreateTestChannel(t, serverID, "encrypted")
 
 	// Send encrypted message first
 	w := ts.DoRequest("POST", pathAPIMessages, map[string]interface{}{
-		"channel_id":   channelID,
-		"content":      testhelpers.ValidCiphertext(),
-		"is_encrypted": true,
+		"channel_id": channelID,
+		"content":    testhelpers.ValidCiphertext(),
 	}, testhelpers.AuthHeaders(user.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
@@ -331,13 +328,12 @@ func TestUpdateMessageE2EESuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "upde2eesuc")
 	serverID := ts.CreateTestServer(t, user.ID, "UpdateE2EE2 Server")
-	channelID := ts.CreateTestChannel(t, serverID, "encrypted", true)
+	channelID := ts.CreateTestChannel(t, serverID, "encrypted")
 
 	// Send encrypted message
 	w := ts.DoRequest("POST", pathAPIMessages, map[string]interface{}{
-		"channel_id":   channelID,
-		"content":      testhelpers.ValidCiphertext(),
-		"is_encrypted": true,
+		"channel_id": channelID,
+		"content":    testhelpers.ValidCiphertext(),
 	}, testhelpers.AuthHeaders(user.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
@@ -422,7 +418,7 @@ func TestSuppressEmbedsSuccess(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "suppressown")
 	serverID := ts.CreateTestServer(t, owner.ID, "Suppress Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	// Enable embeds on server so message starts with embeds_suppressed=false
 	_, err := ts.DB.Exec(`UPDATE servers SET allow_embedded_content = TRUE WHERE id = $1`, serverID)
@@ -431,7 +427,7 @@ func TestSuppressEmbedsSuccess(t *testing.T) {
 	// Send a message (embeds allowed since server permits)
 	w := ts.DoRequest("POST", pathAPIMessages, map[string]interface{}{
 		"channel_id": channelID,
-		"content":    "Test suppress",
+		"content":    testhelpers.ValidCiphertext(),
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
@@ -473,12 +469,12 @@ func TestSuppressEmbedsAlreadySuppressed(t *testing.T) {
 	ts := setupTS(t)
 	owner := ts.CreateTestUser(t, "suppressdup")
 	serverID := ts.CreateTestServer(t, owner.ID, "SuppressDup Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	// Server has allow_embedded_content=false by default, so embeds_suppressed=true already
 	w := ts.DoRequest("POST", pathAPIMessages, map[string]interface{}{
 		"channel_id": channelID,
-		"content":    "Already suppressed",
+		"content":    testhelpers.ValidCiphertext(),
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
@@ -502,7 +498,7 @@ func TestSuppressEmbedsInsufficientPermissions(t *testing.T) {
 	member := ts.CreateTestUser(t, "suppressperm2")
 	serverID := ts.CreateTestServer(t, owner.ID, "SuppressPerm Server")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	// Enable embeds so we get a non-suppressed message
 	_, err := ts.DB.Exec(`UPDATE servers SET allow_embedded_content = TRUE WHERE id = $1`, serverID)
@@ -511,7 +507,7 @@ func TestSuppressEmbedsInsufficientPermissions(t *testing.T) {
 	// Owner sends a message
 	w := ts.DoRequest("POST", pathAPIMessages, map[string]interface{}{
 		"channel_id": channelID,
-		"content":    "Member cannot suppress this",
+		"content":    testhelpers.ValidCiphertext(),
 	}, testhelpers.AuthHeaders(owner.AccessToken))
 	require.Equal(t, http.StatusCreated, w.Code)
 
@@ -534,7 +530,7 @@ func TestSendMessageRevokedEpochRejected(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "epochrevoked")
 	serverID := ts.CreateTestServer(t, user.ID, "Epoch Server")
-	channelID := ts.CreateTestChannel(t, serverID, "encrypted", true)
+	channelID := ts.CreateTestChannel(t, serverID, "encrypted")
 
 	// Insert a key revocation for epoch 1
 	_, err := ts.DB.Exec(
@@ -545,10 +541,9 @@ func TestSendMessageRevokedEpochRejected(t *testing.T) {
 
 	// Try to send with revoked epoch — should be rejected with 409
 	w := ts.DoRequest("POST", pathAPIMessages, map[string]interface{}{
-		"channel_id":   channelID,
-		"content":      testhelpers.ValidCiphertext(),
-		"is_encrypted": true,
-		"key_version":  1,
+		"channel_id":  channelID,
+		"content":     testhelpers.ValidCiphertext(),
+		"key_version": 1,
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	assert.Equal(t, http.StatusConflict, w.Code)
@@ -568,7 +563,7 @@ func TestGetMessagesReadHistoryDenied(t *testing.T) {
 	member := ts.CreateTestUser(t, "readhistmem")
 	serverID := ts.CreateTestServer(t, owner.ID, "ReadHist Server")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
-	channelID := ts.CreateTestChannel(t, serverID, "restricted", false)
+	channelID := ts.CreateTestChannel(t, serverID, "restricted")
 
 	// Deny ReadMessageHistory for @all role in this channel
 	var allRoleID string
@@ -596,7 +591,7 @@ func TestSendMessagePermissionDenied(t *testing.T) {
 	member := ts.CreateTestUser(t, "sendpermmem")
 	serverID := ts.CreateTestServer(t, owner.ID, "SendPerm Server")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
-	channelID := ts.CreateTestChannel(t, serverID, "readonly", false)
+	channelID := ts.CreateTestChannel(t, serverID, "readonly")
 
 	// Deny SendMessages for @all role in this channel
 	var allRoleID string

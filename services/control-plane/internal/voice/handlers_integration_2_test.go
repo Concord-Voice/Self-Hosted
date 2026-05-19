@@ -127,7 +127,7 @@ func TestAuthorizeJoin_TextChannelRejected(t *testing.T) {
 	owner := ts.CreateTestUser(t, "vjtextowner")
 	serverID := ts.CreateTestServer(t, owner.ID, "VJ TextChannel")
 	// Create a text channel (not voice)
-	textChannelID := ts.CreateTestChannel(t, serverID, "text-general", false)
+	textChannelID := ts.CreateTestChannel(t, serverID, "text-general")
 
 	w := ts.DoRequest("POST", pathChannelsPrefix+textChannelID+pathVoiceJoin, nil, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, http.StatusBadRequest, w.Code)

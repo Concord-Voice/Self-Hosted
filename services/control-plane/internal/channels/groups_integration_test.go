@@ -82,9 +82,9 @@ func TestDeleteChannelGroupAdminMember(t *testing.T) {
 func TestReorderChannelsMultiple(t *testing.T) {
 	ts, user, serverID := setupWithServer(t)
 	groupID := createGroup(t, ts, serverID, "Reorder Group", user.AccessToken)
-	ch1 := ts.CreateTestChannel(t, serverID, "chan-a", false)
-	ch2 := ts.CreateTestChannel(t, serverID, "chan-b", false)
-	ch3 := ts.CreateTestChannel(t, serverID, "chan-c", false)
+	ch1 := ts.CreateTestChannel(t, serverID, "chan-a")
+	ch2 := ts.CreateTestChannel(t, serverID, "chan-b")
+	ch3 := ts.CreateTestChannel(t, serverID, "chan-c")
 
 	w := ts.DoRequest("PUT", reorderPath(serverID), map[string]interface{}{
 		"channels": []map[string]interface{}{
@@ -107,7 +107,7 @@ func TestReorderChannelsMultiple(t *testing.T) {
 
 func TestReorderChannelsNilGroupID(t *testing.T) {
 	ts, user, serverID := setupWithServer(t)
-	ch := ts.CreateTestChannel(t, serverID, "ungrouped-chan", false)
+	ch := ts.CreateTestChannel(t, serverID, "ungrouped-chan")
 
 	// Set group_id to nil (uncategorized)
 	w := ts.DoRequest("PUT", reorderPath(serverID), map[string]interface{}{
@@ -120,7 +120,7 @@ func TestReorderChannelsNilGroupID(t *testing.T) {
 
 func TestReorderChannelsAdminMember(t *testing.T) {
 	ts, user, serverID := setupWithServer(t)
-	ch := ts.CreateTestChannel(t, serverID, "admin-reorder-chan", false)
+	ch := ts.CreateTestChannel(t, serverID, "admin-reorder-chan")
 
 	admin := ts.CreateTestUser(t, "reorderadmin")
 	ts.AddMemberToServer(t, serverID, admin.ID, "admin")

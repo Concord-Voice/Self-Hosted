@@ -4,10 +4,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
+	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	gorillaWS "github.com/gorilla/websocket"
 	"github.com/lib/pq"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1719,40 +1723,41 @@ func TestParseDMMentionMetaSanitizesServerFields(t *testing.T) {
 
 // --- validateContentLength tests ---
 
-func TestValidateContentLengthPlaintextOK(t *testing.T) {
+func TestValidateContentLengthShortContentOK(t *testing.T) {
 	hub := newMinimalHub()
 	clientID := uuid.New()
 	client := newTestClient(hub, uuid.New())
 	hub.clients[clientID] = client
 
-	assert.True(t, hub.validateContentLength(clientID, "hello", false))
+	assert.True(t, hub.validateContentLength(clientID, "hello"))
 }
 
-func TestValidateContentLengthPlaintextTooLong(t *testing.T) {
+func TestValidateContentLengthBelowCiphertextLimitOK(t *testing.T) {
 	hub := newMinimalHub()
 	clientID := uuid.New()
 	client := newTestClient(hub, uuid.New())
 	hub.clients[clientID] = client
 
-	longContent := make([]byte, 4001)
-	for i := range longContent {
-		longContent[i] = 'a'
-	}
-	assert.False(t, hub.validateContentLength(clientID, string(longContent), false))
-}
-
-func TestValidateContentLengthEncryptedHigherLimit(t *testing.T) {
-	hub := newMinimalHub()
-	clientID := uuid.New()
-	client := newTestClient(hub, uuid.New())
-	hub.clients[clientID] = client
-
-	// 5000 chars would fail plaintext but pass encrypted
+	// All content is encrypted under E2EE-everywhere; the 24000 ciphertext cap applies.
 	content := make([]byte, 5000)
 	for i := range content {
 		content[i] = 'a'
 	}
-	assert.True(t, hub.validateContentLength(clientID, string(content), true))
+	assert.True(t, hub.validateContentLength(clientID, string(content)))
+}
+
+func TestValidateContentLengthAboveCiphertextLimitRejected(t *testing.T) {
+	hub := newMinimalHub()
+	clientID := uuid.New()
+	client := newTestClient(hub, uuid.New())
+	hub.clients[clientID] = client
+
+	// 24001 bytes exceeds the encrypted-ciphertext cap.
+	content := make([]byte, 24001)
+	for i := range content {
+		content[i] = 'a'
+	}
+	assert.False(t, hub.validateContentLength(clientID, string(content)))
 }
 
 // --- handleIncoming routing tests ---
@@ -1995,9 +2000,9 @@ func TestParseDMMessageFieldsSystemType(t *testing.T) {
 	msg := IncomingMessage{
 		ClientID: clientID,
 		Data: map[string]interface{}{
-			keyContent:     "system message",
-			keyIsEncrypted: false,
-			"type":         "system",
+			keyContent:    "system message",
+			keyKeyVersion: float64(1),
+			"type":        "system",
 		},
 	}
 	input, valid := hub.parseDMMessageFields(msg)
@@ -2015,19 +2020,17 @@ func TestParseDMMessageFieldsCustomKeyVersion(t *testing.T) {
 	msg := IncomingMessage{
 		ClientID: clientID,
 		Data: map[string]interface{}{
-			keyContent:     "hello",
-			keyIsEncrypted: true,
-			keyKeyVersion:  float64(5),
+			keyContent:    "hello",
+			keyKeyVersion: float64(5),
 		},
 	}
 	input, valid := hub.parseDMMessageFields(msg)
 	assert.True(t, valid)
 	require.NotNil(t, input)
 	assert.Equal(t, 5, input.keyVersion)
-	assert.True(t, input.isEncrypted)
 }
 
-func TestParseDMMessageFieldsDefaultValues(t *testing.T) {
+func TestParseDMMessageFieldsDefaultMsgType(t *testing.T) {
 	hub := newMinimalHub()
 	clientID := uuid.New()
 	client := newTestClient(hub, uuid.New())
@@ -2036,7 +2039,8 @@ func TestParseDMMessageFieldsDefaultValues(t *testing.T) {
 	msg := IncomingMessage{
 		ClientID: clientID,
 		Data: map[string]interface{}{
-			keyContent: "hello",
+			keyContent:    "hello",
+			keyKeyVersion: float64(1),
 		},
 	}
 	input, valid := hub.parseDMMessageFields(msg)
@@ -2044,7 +2048,6 @@ func TestParseDMMessageFieldsDefaultValues(t *testing.T) {
 	require.NotNil(t, input)
 	assert.Equal(t, "user", input.msgType)
 	assert.Equal(t, 1, input.keyVersion)
-	assert.False(t, input.isEncrypted)
 }
 
 // --- validateDMMessage tests ---
@@ -2158,6 +2161,7 @@ func TestValidateDMMessageValidMessage(t *testing.T) {
 		Data: map[string]interface{}{
 			keyConversationID: convID.String(),
 			keyContent:        "hello there",
+			keyKeyVersion:     float64(1),
 		},
 	}
 	c, convUUID, input := hub.validateDMMessage(msg)
@@ -2277,4 +2281,173 @@ func TestHandleIncomingConnectionReadyProbeRoute(t *testing.T) {
 	case <-time.After(100 * time.Millisecond):
 		t.Fatal("handleIncoming did not dispatch connection_ready_probe to handler")
 	}
+}
+
+// TestHub_RejectsEnvelopeMissingKeyVersion_Returns4400 verifies the new
+// envelope validator (#1025): an incoming "message" frame whose Data lacks
+// key_version triggers validateEnvelope → rejectEnvelope, which writes a
+// websocket close frame with code 4400 and reason
+// "missing_or_invalid_key_version". The test wires a real WebSocket
+// connection via httptest so the close frame is observable.
+func TestHub_RejectsEnvelopeMissingKeyVersion_Returns4400(t *testing.T) {
+	hub := newMinimalHub()
+
+	userID := uuid.New()
+	channelUUID := uuid.New()
+
+	// Subscribe the (yet-to-be-registered) client's channel so the message
+	// reaches parseMessageInput (and the envelope validator) rather than
+	// short-circuiting on "Not subscribed".
+	hub.channelSubscriptions[channelUUID] = map[uuid.UUID]bool{}
+
+	// Set up a Gin route that upgrades the connection and wires the resulting
+	// Client into the hub map so handleMessage can find it. We don't run
+	// hub.Run() — the test calls handleMessage synchronously after the
+	// upgrade so the close frame fires before the request handler returns.
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+
+	upgrader := gorillaWS.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin:     func(_ *http.Request) bool { return true },
+	}
+
+	clientReady := make(chan *Client, 1)
+	router.GET("/ws", func(c *gin.Context) {
+		conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
+		if err != nil {
+			t.Errorf("upgrade failed: %v", err)
+			return
+		}
+		client := &Client{
+			ID:       uuid.New(),
+			UserID:   userID,
+			Username: "test-envelope-reject",
+			Conn:     conn,
+			Hub:      hub,
+			Send:     make(chan []byte, 8),
+			Channels: map[uuid.UUID]bool{channelUUID: true},
+		}
+		hub.clients[client.ID] = client
+		hub.channelSubscriptions[channelUUID][client.ID] = true
+		clientReady <- client
+
+		// Park the goroutine until the test closes the connection so the
+		// close frame written by rejectEnvelope has a live socket on which
+		// to arrive.
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	})
+
+	srv := httptest.NewServer(router)
+	t.Cleanup(srv.Close)
+
+	wsURL := "ws" + srv.URL[4:] + "/ws"
+	conn, resp, err := gorillaWS.DefaultDialer.Dial(wsURL, nil)
+	require.NoError(t, err)
+	require.Equal(t, http.StatusSwitchingProtocols, resp.StatusCode)
+	defer func() { _ = conn.Close() }()
+
+	// Wait for server-side client registration before dispatching the
+	// synthetic IncomingMessage.
+	var client *Client
+	select {
+	case client = <-clientReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for client registration")
+	}
+
+	// Synthetic message envelope WITHOUT key_version — this is exactly the
+	// shape that the new validator (#1025) is meant to reject.
+	msg := IncomingMessage{
+		Type:     "message",
+		UserID:   userID,
+		ClientID: client.ID,
+		Data: map[string]interface{}{
+			keyChannelID: channelUUID.String(),
+			keyContent:   "ciphertext that lacks key_version",
+		},
+	}
+	hub.handleMessage(msg)
+
+	// Expect the next inbound frame on the client side to be a close frame
+	// with code 4400 and the documented reason string.
+	_ = conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, _, readErr := conn.ReadMessage()
+	require.Error(t, readErr, "expected connection to close")
+
+	var closeErr *gorillaWS.CloseError
+	require.True(t, errors.As(readErr, &closeErr),
+		"expected *websocket.CloseError, got %T: %v", readErr, readErr)
+	assert.Equal(t, 4400, closeErr.Code)
+	assert.Equal(t, "missing_or_invalid_key_version", closeErr.Text)
+}
+
+// TestValidateEnvelope_TableDriven covers all four rejection branches of
+// validateEnvelope (#1025). The close-frame integration test above only
+// exercises the "missing key_version" branch. This table-driven unit test
+// adds explicit coverage for the float64-below-1, int-below-1, and
+// non-numeric-type branches so future refactors that "simplify" the switch
+// (e.g., collapsing into kv > 0 and losing the type assertion) regress
+// loudly rather than silently accepting `key_version: "1"` or similar.
+func TestValidateEnvelope_TableDriven(t *testing.T) {
+	tests := []struct {
+		name      string
+		data      map[string]interface{}
+		wantError bool
+	}{
+		{"missing_key_version_field", map[string]interface{}{keyContent: "x"}, true},
+		{"float64_zero", map[string]interface{}{keyKeyVersion: float64(0)}, true},
+		{"float64_negative", map[string]interface{}{keyKeyVersion: float64(-1)}, true},
+		{"float64_valid_one", map[string]interface{}{keyKeyVersion: float64(1)}, false},
+		{"float64_valid_high", map[string]interface{}{keyKeyVersion: float64(99)}, false},
+		{"int_zero", map[string]interface{}{keyKeyVersion: 0}, true},
+		{"int_negative", map[string]interface{}{keyKeyVersion: -5}, true},
+		{"int_valid", map[string]interface{}{keyKeyVersion: 3}, false},
+		{"string_value", map[string]interface{}{keyKeyVersion: "1"}, true},
+		{"bool_value", map[string]interface{}{keyKeyVersion: true}, true},
+		{"nil_value", map[string]interface{}{keyKeyVersion: nil}, true},
+		{"map_value", map[string]interface{}{keyKeyVersion: map[string]interface{}{"x": 1}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := &IncomingMessage{Data: tt.data}
+			err := validateEnvelope(msg)
+			if tt.wantError {
+				assert.ErrorIs(t, err, errMissingKeyVersion)
+			} else {
+				assert.NoError(t, err)
+			}
+		})
+	}
+}
+
+// TestParseDMMessageFields_RejectsEnvelopeMissingKeyVersion verifies the
+// DM-send wiring (#1025): parseDMMessageFields invokes validateEnvelope
+// before any DB work and returns (nil, false) when the envelope lacks
+// key_version. The channel-send wiring is covered by
+// TestHub_RejectsEnvelopeMissingKeyVersion_Returns4400 above; this test
+// closes the gap so a future refactor that detaches the DM path from the
+// validator regresses loudly.
+func TestParseDMMessageFields_RejectsEnvelopeMissingKeyVersion(t *testing.T) {
+	hub := newMinimalHub()
+	clientID := uuid.New()
+	client := newTestClient(hub, uuid.New())
+	hub.clients[clientID] = client
+
+	msg := IncomingMessage{
+		ClientID: clientID,
+		UserID:   uuid.New(),
+		Data: map[string]interface{}{
+			keyContent: "ciphertext that lacks key_version",
+			// intentionally NO key_version
+		},
+	}
+	input, valid := hub.parseDMMessageFields(msg)
+	assert.Nil(t, input)
+	assert.False(t, valid)
 }

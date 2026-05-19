@@ -94,10 +94,9 @@ func TestCreateChannelEdgeCases(t *testing.T) {
 
 	t.Run("EncryptedWithoutKeys", func(t *testing.T) {
 		w := ts.DoRequest("POST", pathChannels, map[string]interface{}{
-			keyServerID:    serverID,
-			"name":         "enc-no-keys",
-			"type":         "text",
-			keyIsEncrypted: true,
+			keyServerID: serverID,
+			"name":      "enc-no-keys",
+			"type":      "text",
 		}, testhelpers.AuthHeaders(user.AccessToken))
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
@@ -125,6 +124,9 @@ func TestCreateChannelEdgeCases(t *testing.T) {
 			keyServerID: serverID,
 			"name":      "voice-room",
 			"type":      "voice",
+			keyWrappedKeys: map[string]string{
+				user.ID: testhelpers.ValidCiphertext(),
+			},
 		}, testhelpers.AuthHeaders(user.AccessToken))
 		assert.Equal(t, http.StatusCreated, w.Code)
 
@@ -154,6 +156,9 @@ func TestCreateChannelEdgeCases(t *testing.T) {
 			"name":      "grouped-channel",
 			"type":      "text",
 			"group_id":  groupID,
+			keyWrappedKeys: map[string]string{
+				user.ID: testhelpers.ValidCiphertext(),
+			},
 		}, testhelpers.AuthHeaders(user.AccessToken))
 		assert.Equal(t, http.StatusCreated, w.Code)
 
@@ -168,6 +173,9 @@ func TestCreateChannelEdgeCases(t *testing.T) {
 			keyServerID: serverID,
 			"name":      "announcements",
 			"type":      "bulletin",
+			keyWrappedKeys: map[string]string{
+				user.ID: testhelpers.ValidCiphertext(),
+			},
 		}, testhelpers.AuthHeaders(user.AccessToken))
 		assert.Equal(t, http.StatusCreated, w.Code)
 
@@ -183,6 +191,9 @@ func TestCreateChannelEdgeCases(t *testing.T) {
 			"name":      "emoji-channel",
 			"type":      "text",
 			"emoji":     "rocket",
+			keyWrappedKeys: map[string]string{
+				user.ID: testhelpers.ValidCiphertext(),
+			},
 		}, testhelpers.AuthHeaders(user.AccessToken))
 		assert.Equal(t, http.StatusCreated, w.Code)
 
@@ -207,6 +218,9 @@ func TestCreateChannelPermissions(t *testing.T) {
 			keyServerID: serverID,
 			"name":      "admin-channel",
 			"type":      "text",
+			keyWrappedKeys: map[string]string{
+				admin.ID: testhelpers.ValidCiphertext(),
+			},
 		}, testhelpers.AuthHeaders(admin.AccessToken))
 		assert.Equal(t, http.StatusCreated, w.Code)
 	})
@@ -303,6 +317,9 @@ func TestUpdateChannelEdgeCases(t *testing.T) {
 			keyServerID: serverID,
 			"name":      "voice-aqt",
 			"type":      "voice",
+			keyWrappedKeys: map[string]string{
+				user.ID: testhelpers.ValidCiphertext(),
+			},
 		}, testhelpers.AuthHeaders(user.AccessToken))
 		require.Equal(t, http.StatusCreated, w.Code)
 		var createBody map[string]interface{}
@@ -374,7 +391,7 @@ func TestUpdateChannelEdgeCases(t *testing.T) {
 	})
 
 	t.Run("ChangeType", func(t *testing.T) {
-		newCh := ts.CreateTestChannel(t, serverID, "type-change-ch", false)
+		newCh := ts.CreateTestChannel(t, serverID, "type-change-ch")
 		w := ts.DoRequest("PATCH", pathChannelsPrefix+newCh, map[string]interface{}{
 			"name": "now-voice",
 			"type": "voice",
@@ -394,7 +411,7 @@ func TestUpdateChannelAsAdmin(t *testing.T) {
 	admin := ts.CreateTestUser(t, "ucadm")
 	serverID := ts.CreateTestServer(t, owner.ID, "Admin Update Server")
 	ts.AddMemberToServer(t, serverID, admin.ID, "admin")
-	channelID := ts.CreateTestChannel(t, serverID, "admin-update-target", false)
+	channelID := ts.CreateTestChannel(t, serverID, "admin-update-target")
 
 	w := ts.DoRequest("PATCH", pathChannelsPrefix+channelID, map[string]interface{}{
 		"name": "admin-updated",
@@ -426,7 +443,7 @@ func TestDeleteChannelEdgeCases(t *testing.T) {
 	})
 
 	t.Run("ThenGetReturnsNotFound", func(t *testing.T) {
-		ch := ts.CreateTestChannel(t, serverID, "deleteme", false)
+		ch := ts.CreateTestChannel(t, serverID, "deleteme")
 		w := ts.DoRequest("DELETE", pathChannelsPrefix+ch, nil, testhelpers.AuthHeaders(user.AccessToken))
 		assert.Equal(t, http.StatusOK, w.Code)
 
@@ -441,7 +458,7 @@ func TestDeleteChannelAsAdmin(t *testing.T) {
 	admin := ts.CreateTestUser(t, "dcadm")
 	serverID := ts.CreateTestServer(t, owner.ID, "Admin Delete Server")
 	ts.AddMemberToServer(t, serverID, admin.ID, "admin")
-	channelID := ts.CreateTestChannel(t, serverID, "admin-delete-target", false)
+	channelID := ts.CreateTestChannel(t, serverID, "admin-delete-target")
 
 	w := ts.DoRequest("DELETE", pathChannelsPrefix+channelID, nil, testhelpers.AuthHeaders(admin.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -575,16 +592,6 @@ func TestDistributeChannelKeysEdgeCases(t *testing.T) {
 		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
 
-	t.Run("NotEncrypted", func(t *testing.T) {
-		plainCh := ts.CreateTestChannel(t, serverID, "plain-for-dist", false)
-		w := ts.DoRequest("POST", pathChannelsPrefix+plainCh+pathKeys, map[string]interface{}{
-			keyWrappedKeys: map[string]string{
-				owner.ID: testhelpers.ValidCiphertext(),
-			},
-		}, testhelpers.AuthHeaders(owner.AccessToken))
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-	})
-
 	t.Run("NoOwnKey", func(t *testing.T) {
 		// New member has no key yet — cannot distribute
 		newMember := ts.CreateTestUser(t, "dknoown")
@@ -676,12 +683,6 @@ func TestRotateKeyAllPaths(t *testing.T) {
 	t.Run("NotFound", func(t *testing.T) {
 		w := ts.DoRequest("POST", pathChannelsPrefix+zeroUUID+pathRotateKey, nil, testhelpers.AuthHeaders(user.AccessToken))
 		assert.Equal(t, http.StatusNotFound, w.Code)
-	})
-
-	t.Run("NotEncrypted", func(t *testing.T) {
-		plainCh := ts.CreateTestChannel(t, serverID, "plain-for-rotate", false)
-		w := ts.DoRequest("POST", pathChannelsPrefix+plainCh+pathRotateKey, nil, testhelpers.AuthHeaders(user.AccessToken))
-		assert.Equal(t, http.StatusBadRequest, w.Code)
 	})
 
 	t.Run("NotAdmin", func(t *testing.T) {
@@ -780,17 +781,6 @@ func TestGetUnifiedKeysAllPaths(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, w.Code)
 	})
 
-	t.Run("ChannelNotEncrypted", func(t *testing.T) {
-		// Get the server ID from the encrypted channel so we create the plain channel in the same server
-		var srvID string
-		err := ts.DB.QueryRow(`SELECT server_id FROM channels WHERE id = $1`, channelID).Scan(&srvID)
-		require.NoError(t, err)
-		plainCh := ts.CreateTestChannel(t, srvID, "plain-unified", false)
-
-		w := ts.DoRequest("GET", pathE2EEKeys+plainCh, nil, testhelpers.AuthHeaders(user.AccessToken))
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-	})
-
 	t.Run("ChannelWithVersion", func(t *testing.T) {
 		w := ts.DoRequest("GET", pathE2EEKeys+channelID+"?version=1", nil, testhelpers.AuthHeaders(user.AccessToken))
 		assert.Equal(t, http.StatusOK, w.Code)
@@ -815,28 +805,6 @@ func TestGetUnifiedKeysAllPaths(t *testing.T) {
 	t.Run("NoAuth", func(t *testing.T) {
 		w := ts.DoRequest("GET", pathE2EEKeysZero, nil, nil)
 		assert.Equal(t, http.StatusUnauthorized, w.Code)
-	})
-
-	t.Run("EnvelopeShape_Channel_NotEncrypted", func(t *testing.T) {
-		var srvID string
-		err := ts.DB.QueryRow(`SELECT server_id FROM channels WHERE id = $1`, channelID).Scan(&srvID)
-		require.NoError(t, err)
-		plainCh := ts.CreateTestChannel(t, srvID, "plain-env", false)
-
-		w := ts.DoRequest("GET", pathE2EEKeys+plainCh, nil, testhelpers.AuthHeaders(user.AccessToken))
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-
-		rawBytes := w.Body.Bytes()
-		var body e2eekeys.ErrorResponse
-		require.NoError(t, json.Unmarshal(rawBytes, &body))
-		assert.Equal(t, e2eekeys.CodeNotEncrypted, body.Code)
-		assert.Equal(t, e2eekeys.KindChannel, body.Kind)
-		assert.False(t, body.Pending)
-		// Wire-format: omitempty drops the pending key from JSON on terminal codes.
-		var raw map[string]interface{}
-		require.NoError(t, json.Unmarshal(rawBytes, &raw))
-		_, hasPending := raw["pending"]
-		assert.False(t, hasPending, "pending key must be absent from JSON on NOT_ENCRYPTED")
 	})
 
 	t.Run("EnvelopeShape_InvalidContextID", func(t *testing.T) {
@@ -918,7 +886,7 @@ func TestGetUnifiedKeysDM(t *testing.T) {
 	ts.CreateFriendship(t, user1.ID, user2.ID, "accepted")
 
 	t.Run("DMSuccess", func(t *testing.T) {
-		convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+		convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 		ts.SeedDMKey(t, convID, user1.ID, 1)
 
 		w := ts.DoRequest("GET", pathE2EEKeys+convID, nil, testhelpers.AuthHeaders(user1.AccessToken))
@@ -930,15 +898,8 @@ func TestGetUnifiedKeysDM(t *testing.T) {
 		assert.NotNil(t, body["key"])
 	})
 
-	t.Run("DMNotEncrypted", func(t *testing.T) {
-		convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
-
-		w := ts.DoRequest("GET", pathE2EEKeys+convID, nil, testhelpers.AuthHeaders(user1.AccessToken))
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-	})
-
 	t.Run("DMNoKey", func(t *testing.T) {
-		convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+		convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 		w := ts.DoRequest("GET", pathE2EEKeys+convID, nil, testhelpers.AuthHeaders(user1.AccessToken))
 		assert.Equal(t, http.StatusNotFound, w.Code)
@@ -949,7 +910,7 @@ func TestGetUnifiedKeysDM(t *testing.T) {
 	})
 
 	t.Run("EnvelopeShape_DM_NoKeyYet", func(t *testing.T) {
-		convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+		convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 		// No SeedDMKey — no key row exists
 
 		w := ts.DoRequest("GET", pathE2EEKeys+convID, nil, testhelpers.AuthHeaders(user1.AccessToken))
@@ -964,7 +925,7 @@ func TestGetUnifiedKeysDM(t *testing.T) {
 
 	t.Run("EnvelopeShape_DM_NotMember", func(t *testing.T) {
 		user3 := ts.CreateTestUser(t, "ukdm_outsider")
-		convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+		convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 		ts.SeedDMKey(t, convID, user1.ID, 1)
 
 		w := ts.DoRequest("GET", pathE2EEKeys+convID, nil, testhelpers.AuthHeaders(user3.AccessToken))
@@ -983,26 +944,8 @@ func TestGetUnifiedKeysDM(t *testing.T) {
 		assert.False(t, hasPending, "pending key must be absent from JSON on NOT_MEMBER (DM-side)")
 	})
 
-	t.Run("EnvelopeShape_DM_NotEncrypted", func(t *testing.T) {
-		convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
-
-		w := ts.DoRequest("GET", pathE2EEKeys+convID, nil, testhelpers.AuthHeaders(user1.AccessToken))
-		assert.Equal(t, http.StatusBadRequest, w.Code)
-
-		rawBytes := w.Body.Bytes()
-		var body e2eekeys.ErrorResponse
-		require.NoError(t, json.Unmarshal(rawBytes, &body))
-		assert.Equal(t, e2eekeys.CodeNotEncrypted, body.Code)
-		assert.Equal(t, e2eekeys.KindDM, body.Kind)
-		// Wire-format: omitempty drops the pending key from JSON on NOT_ENCRYPTED.
-		var raw map[string]interface{}
-		require.NoError(t, json.Unmarshal(rawBytes, &raw))
-		_, hasPending := raw["pending"]
-		assert.False(t, hasPending, "pending key must be absent from JSON on NOT_ENCRYPTED (DM-side)")
-	})
-
 	t.Run("EnvelopeShape_DM_RevokedEpoch", func(t *testing.T) {
-		convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+		convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 		ts.SeedDMKey(t, convID, user1.ID, 3)    // caller's current epoch = 3
 		ts.SeedDMKeyRevocation(t, convID, 3, 4) // epoch 3 is revoked, successor is 4
 
@@ -1027,7 +970,7 @@ func TestGetUnifiedKeysDM(t *testing.T) {
 	})
 
 	t.Run("EnvelopeShape_DM_HappyPath", func(t *testing.T) {
-		convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+		convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 		ts.SeedDMKey(t, convID, user1.ID, 1)
 
 		w := ts.DoRequest("GET", pathE2EEKeys+convID, nil, testhelpers.AuthHeaders(user1.AccessToken))
@@ -1137,7 +1080,7 @@ func TestGetUnifiedKeys_NoWrapKeyInLogs(t *testing.T) {
 	// distinct sentinel so branch 7 / 8 can't accidentally leak it either.
 	partner := ts.CreateTestUser(t, "logwrapdm")
 	ts.CreateFriendship(t, user.ID, partner.ID, "accepted")
-	dmConvID := ts.CreateDMConversation(t, user.ID, partner.ID, true)
+	dmConvID := ts.CreateDMConversation(t, user.ID, partner.ID)
 	dmSentinelWrappedKey := []byte("SENTINEL-DM-WRAPPED-KEY-MUST-NEVER-APPEAR-IN-LOGS-XYZZY-002")
 	dmSentinelB64 := base64.StdEncoding.EncodeToString(dmSentinelWrappedKey)
 	ts.SeedDMKey(t, dmConvID, user.ID, 1)
@@ -1341,7 +1284,7 @@ func TestGetUnifiedKeys_DM_DBError_KeyFetch(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "dmdberr2a")
 	user2 := ts.CreateTestUser(t, "dmdberr2b")
 	ts.CreateFriendship(t, user1.ID, user2.ID, "accepted")
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	_, err := ts.DB.Exec(`ALTER TABLE dm_channel_keys RENAME TO dm_channel_keys_hidden_for_test`)
 	require.NoError(t, err)
@@ -1372,7 +1315,7 @@ func TestGetUnifiedKeys_DM_DBError_RevocationCheck(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "dmdberr3a")
 	user2 := ts.CreateTestUser(t, "dmdberr3b")
 	ts.CreateFriendship(t, user1.ID, user2.ID, "accepted")
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	ts.SeedDMKey(t, convID, user1.ID, 1)
 
 	_, err := ts.DB.Exec(`ALTER TABLE dm_key_revocations RENAME TO dm_key_revocations_hidden_for_test`)
@@ -1440,7 +1383,7 @@ func TestDistributeUnifiedKeysDM(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "dukdm1")
 	user2 := ts.CreateTestUser(t, "dukdm2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, "accepted")
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("POST", pathE2EEKeys+convID, map[string]interface{}{
 		keyWrappedKeys: map[string]string{
@@ -1492,10 +1435,9 @@ func TestEncryptedChannelFullFlow(t *testing.T) {
 
 	// 1. Owner creates encrypted channel with their own key
 	w := ts.DoRequest("POST", pathChannels, map[string]interface{}{
-		keyServerID:    serverID,
-		"name":         "encrypted-flow",
-		"type":         "text",
-		keyIsEncrypted: true,
+		keyServerID: serverID,
+		"name":      "encrypted-flow",
+		"type":      "text",
 		keyWrappedKeys: map[string]string{
 			owner.ID: testhelpers.ValidCiphertext(),
 		},
@@ -1553,10 +1495,9 @@ func TestCreateEncryptedVoiceChannelWithLinkedText(t *testing.T) {
 	serverID := ts.CreateTestServer(t, user.ID, "Enc Voice Server")
 
 	w := ts.DoRequest("POST", pathChannels, map[string]interface{}{
-		keyServerID:    serverID,
-		"name":         "encrypted-voice",
-		"type":         "voice",
-		keyIsEncrypted: true,
+		keyServerID: serverID,
+		"name":      "encrypted-voice",
+		"type":      "voice",
 		keyWrappedKeys: map[string]string{
 			user.ID: testhelpers.ValidCiphertext(),
 		},
@@ -1568,12 +1509,11 @@ func TestCreateEncryptedVoiceChannelWithLinkedText(t *testing.T) {
 
 	channel := body[keyChannel].(map[string]interface{})
 	assert.Equal(t, "voice", channel["type"])
-	assert.Equal(t, true, channel["is_encrypted"])
 
-	// Linked text channel should also be encrypted
+	// Linked text channel exists
 	assert.NotNil(t, body["linked_text_channel"])
 	ltc := body["linked_text_channel"].(map[string]interface{})
-	assert.Equal(t, true, ltc["is_encrypted"])
+	assert.Equal(t, "text", ltc["type"])
 }
 
 // ===========================================================================
@@ -1582,9 +1522,9 @@ func TestCreateEncryptedVoiceChannelWithLinkedText(t *testing.T) {
 
 func TestReorderChannelsAdditional(t *testing.T) {
 	ts, user, serverID := setupWithServer(t)
-	ch1 := ts.CreateTestChannel(t, serverID, "reorder-a", false)
-	ch2 := ts.CreateTestChannel(t, serverID, "reorder-b", false)
-	ch3 := ts.CreateTestChannel(t, serverID, "reorder-c", false)
+	ch1 := ts.CreateTestChannel(t, serverID, "reorder-a")
+	ch2 := ts.CreateTestChannel(t, serverID, "reorder-b")
+	ch3 := ts.CreateTestChannel(t, serverID, "reorder-c")
 	groupID := createGroup(t, ts, serverID, "Reorder Target", user.AccessToken)
 
 	t.Run("MultipleChannels", func(t *testing.T) {
@@ -1682,6 +1622,9 @@ func TestChannelGroupsAdditional(t *testing.T) {
 			"name":      "survivor-channel",
 			"type":      "text",
 			"group_id":  groupID,
+			keyWrappedKeys: map[string]string{
+				owner.ID: testhelpers.ValidCiphertext(),
+			},
 		}, testhelpers.AuthHeaders(owner.AccessToken))
 		require.Equal(t, http.StatusCreated, w.Code)
 		var createBody map[string]interface{}
@@ -1719,6 +1662,9 @@ func TestMultipleChannelOperations(t *testing.T) {
 				keyServerID: serverID,
 				"name":      name,
 				"type":      "text",
+				keyWrappedKeys: map[string]string{
+					user.ID: testhelpers.ValidCiphertext(),
+				},
 			}, testhelpers.AuthHeaders(user.AccessToken))
 			assert.Equal(t, http.StatusCreated, w.Code)
 		}
@@ -1738,7 +1684,7 @@ func TestMultipleChannelOperations(t *testing.T) {
 		srvID := ts.CreateTestServer(t, user.ID, "Del All Server")
 		ids := make([]string, 0, 2)
 		for _, name := range []string{"chan-a", "chan-b"} {
-			id := ts.CreateTestChannel(t, srvID, name, false)
+			id := ts.CreateTestChannel(t, srvID, name)
 			ids = append(ids, id)
 		}
 

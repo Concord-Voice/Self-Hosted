@@ -1514,7 +1514,6 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	return router, hub, natsClient
 }
 
-
 // healthHandler responds with 200 + control-plane health JSON. Registered
 // for both GET and HEAD methods on /health by NewRouter (#882: HEAD support
 // so CF Health Check probes and monitoring tools that default to HEAD don't

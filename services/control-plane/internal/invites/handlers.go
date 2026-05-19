@@ -222,7 +222,7 @@ func (h *Handler) createPendingKeyRequests(serverID, userID string) {
 		INSERT INTO pending_key_requests (channel_id, user_id)
 		SELECT c.id, $1
 		FROM channels c
-		WHERE c.server_id = $2 AND c.is_encrypted = TRUE
+		WHERE c.server_id = $2
 		ON CONFLICT (channel_id, user_id) DO NOTHING
 		RETURNING channel_id
 	`, userID, serverID)

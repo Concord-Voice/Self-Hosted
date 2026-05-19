@@ -201,7 +201,7 @@ func TestHasPermissionChannelDenyOverride(t *testing.T) {
 	member := ts.CreateTestUser(t, "member6")
 	serverID := ts.CreateTestServer(t, owner.ID, "SBAC Test Server")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
-	channelID := ts.CreateTestChannel(t, serverID, "announcements", false)
+	channelID := ts.CreateTestChannel(t, serverID, "announcements")
 
 	// Verify member has PermSendMessages at server level
 	hasPerm, err := resolver.HasPermission(ctx, serverID, member.ID, "", rbac.PermSendMessages)
@@ -242,7 +242,7 @@ func TestOwnerImmuneToChannelDenyOverrides(t *testing.T) {
 
 	owner := ts.CreateTestUser(t, "owner8")
 	serverID := ts.CreateTestServer(t, owner.ID, "Owner SBAC Immunity Test")
-	channelID := ts.CreateTestChannel(t, serverID, "restricted", false)
+	channelID := ts.CreateTestChannel(t, serverID, "restricted")
 
 	// Get the @all role ID
 	var allRoleID string

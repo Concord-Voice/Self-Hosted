@@ -18,11 +18,11 @@ func setupWithMessage(t *testing.T) (*testhelpers.TestServer, testhelpers.TestUs
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "msguser")
 	serverID := ts.CreateTestServer(t, user.ID, "Message Test Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	w := ts.DoRequest("POST", "/api/v1/messages", map[string]interface{}{
 		"channel_id": channelID,
-		"content":    "Hello from tests!",
+		"content":    testhelpers.ValidCiphertext(),
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	var body map[string]interface{}
@@ -39,18 +39,19 @@ func TestSendMessageSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "sendmsg")
 	serverID := ts.CreateTestServer(t, user.ID, "Send Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
+	ciphertext := testhelpers.ValidCiphertext()
 	w := ts.DoRequest("POST", "/api/v1/messages", map[string]interface{}{
 		"channel_id": channelID,
-		"content":    "Test message content",
+		"content":    ciphertext,
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	assert.Equal(t, http.StatusCreated, w.Code)
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
 	msg := body["message"].(map[string]interface{})
-	assert.Equal(t, "Test message content", msg["content"])
+	assert.Equal(t, ciphertext, msg["content"])
 	assert.Equal(t, user.ID, msg["user_id"])
 }
 
@@ -58,7 +59,7 @@ func TestSendMessageEmptyContent(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "emptymsg")
 	serverID := ts.CreateTestServer(t, user.ID, "Empty Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	w := ts.DoRequest("POST", "/api/v1/messages", map[string]interface{}{
 		"channel_id": channelID,
@@ -73,7 +74,7 @@ func TestSendMessageNotMember(t *testing.T) {
 	owner := ts.CreateTestUser(t, "msgowner")
 	outsider := ts.CreateTestUser(t, "msgoutsider")
 	serverID := ts.CreateTestServer(t, owner.ID, "Msg Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	w := ts.DoRequest("POST", "/api/v1/messages", map[string]interface{}{
 		"channel_id": channelID,
@@ -87,9 +88,10 @@ func TestSendMessageEncryptedChannelRequiresCiphertext(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "e2eemsg")
 	serverID := ts.CreateTestServer(t, user.ID, "E2EE Server")
-	channelID := ts.CreateTestChannel(t, serverID, "encrypted", true)
+	channelID := ts.CreateTestChannel(t, serverID, "encrypted")
 
-	// Sending plaintext to encrypted channel should fail
+	// All channels require ciphertext under E2EE-everywhere (#201).
+	// Plaintext content should fail base64 + minimum-size validation.
 	w := ts.DoRequest("POST", "/api/v1/messages", map[string]interface{}{
 		"channel_id": channelID,
 		"content":    "plaintext message",
@@ -102,12 +104,11 @@ func TestSendMessageEncryptedChannelValidCiphertext(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "e2eemsg2")
 	serverID := ts.CreateTestServer(t, user.ID, "E2EE Server 2")
-	channelID := ts.CreateTestChannel(t, serverID, "encrypted", true)
+	channelID := ts.CreateTestChannel(t, serverID, "encrypted")
 
 	w := ts.DoRequest("POST", "/api/v1/messages", map[string]interface{}{
-		"channel_id":   channelID,
-		"content":      testhelpers.ValidCiphertext(),
-		"is_encrypted": true,
+		"channel_id": channelID,
+		"content":    testhelpers.ValidCiphertext(),
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	assert.Equal(t, http.StatusCreated, w.Code)
@@ -131,7 +132,7 @@ func TestGetMessagesEmpty(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "emptymsglist")
 	serverID := ts.CreateTestServer(t, user.ID, "Empty Msg Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	w := ts.DoRequest("GET", "/api/v1/channels/"+channelID+"/messages?limit=50", nil, testhelpers.AuthHeaders(user.AccessToken))
 
@@ -147,7 +148,7 @@ func TestGetMessagesNotMember(t *testing.T) {
 	owner := ts.CreateTestUser(t, "msglistowner")
 	outsider := ts.CreateTestUser(t, "msglistoutsider")
 	serverID := ts.CreateTestServer(t, owner.ID, "Private Msg Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	w := ts.DoRequest("GET", "/api/v1/channels/"+channelID+"/messages?limit=50", nil, testhelpers.AuthHeaders(outsider.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
@@ -159,7 +160,7 @@ func TestGetMessagesPagination(t *testing.T) {
 	// Send a second message
 	ts.DoRequest("POST", "/api/v1/messages", map[string]interface{}{
 		"channel_id": channelID,
-		"content":    "Second message",
+		"content":    testhelpers.ValidCiphertext(),
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	// Get messages before the first message
@@ -177,15 +178,16 @@ func TestGetMessagesPagination(t *testing.T) {
 func TestUpdateMessageSuccess(t *testing.T) {
 	ts, user, _, _, msgID := setupWithMessage(t)
 
+	ciphertext := testhelpers.ValidCiphertext()
 	w := ts.DoRequest("PATCH", "/api/v1/messages/"+msgID, map[string]interface{}{
-		"content": "Edited content",
+		"content": ciphertext,
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
 	msg := body["message"].(map[string]interface{})
-	assert.Equal(t, "Edited content", msg["content"])
+	assert.Equal(t, ciphertext, msg["content"])
 	assert.NotNil(t, msg["edited_at"])
 }
 

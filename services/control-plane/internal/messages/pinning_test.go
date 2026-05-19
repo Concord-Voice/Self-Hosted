@@ -24,7 +24,7 @@ func TestPinMessageSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "pinuser")
 	serverID := ts.CreateTestServer(t, user.ID, "Pin Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	msgID := ts.CreateTestMessage(t, channelID, user, "Pin this!")
 
 	w := ts.DoRequest("POST", pinAPIMsg+msgID+pinPath, nil,
@@ -43,7 +43,7 @@ func TestPinMessageAlreadyPinned(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "pinidempotent")
 	serverID := ts.CreateTestServer(t, user.ID, "Pin2 Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	msgID := ts.CreateTestMessage(t, channelID, user, "Pin me twice")
 
 	// Pin first time
@@ -86,7 +86,7 @@ func TestPinMessageNotMember(t *testing.T) {
 	owner := ts.CreateTestUser(t, "pinowner")
 	outsider := ts.CreateTestUser(t, "pinoutsider")
 	serverID := ts.CreateTestServer(t, owner.ID, "PinPrivate Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	msgID := ts.CreateTestMessage(t, channelID, owner, "Secret pin")
 
 	w := ts.DoRequest("POST", pinAPIMsg+msgID+pinPath, nil,
@@ -98,7 +98,7 @@ func TestPinMessageLimitReached(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "pinlimit")
 	serverID := ts.CreateTestServer(t, user.ID, "PinLimit Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	// Seed 50 pinned messages directly via SQL to avoid rate limiting
 	for i := 0; i < 50; i++ {
@@ -123,7 +123,7 @@ func TestUnpinMessageSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "unpinuser")
 	serverID := ts.CreateTestServer(t, user.ID, "Unpin Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	msgID := ts.CreateTestMessage(t, channelID, user, "Unpin me")
 
 	// Pin first
@@ -145,7 +145,7 @@ func TestUnpinMessageAlreadyUnpinned(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "unpinidempotent")
 	serverID := ts.CreateTestServer(t, user.ID, "Unpin2 Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	msgID := ts.CreateTestMessage(t, channelID, user, "Never pinned")
 
 	w := ts.DoRequest("DELETE", pinAPIMsg+msgID+pinPath, nil,
@@ -174,7 +174,7 @@ func TestGetChannelPinsSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "getpinsuser")
 	serverID := ts.CreateTestServer(t, user.ID, "GetPins Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	// Create and pin 3 messages
 	for i := 0; i < 3; i++ {
@@ -204,7 +204,7 @@ func TestGetChannelPinsEmpty(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "nopinsuser")
 	serverID := ts.CreateTestServer(t, user.ID, "NoPins Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	w := ts.DoRequest("GET", pinAPICh+channelID+pinsPath, nil,
 		testhelpers.AuthHeaders(user.AccessToken))
@@ -224,7 +224,7 @@ func TestGetChannelPinsNotMember(t *testing.T) {
 	owner := ts.CreateTestUser(t, "pinsowner")
 	outsider := ts.CreateTestUser(t, "pinsoutsider")
 	serverID := ts.CreateTestServer(t, owner.ID, "PinsPrivate Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 
 	w := ts.DoRequest("GET", pinAPICh+channelID+pinsPath, nil,
 		testhelpers.AuthHeaders(outsider.AccessToken))
@@ -235,7 +235,7 @@ func TestGetMessagesPinnedFieldsIncluded(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "pinnedfields")
 	serverID := ts.CreateTestServer(t, user.ID, "PinnedFields Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	msgID := ts.CreateTestMessage(t, channelID, user, "Pin and fetch")
 
 	// Pin the message

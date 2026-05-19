@@ -103,7 +103,7 @@ func TestDeleteAccount_CascadeDeletesUserRelatedData(t *testing.T) {
 
 	// Create a server and channel owned by the user.
 	serverID := ts.CreateTestServer(t, user.ID, "test_server")
-	channelID := ts.CreateTestChannel(t, serverID, "test_channel", false)
+	channelID := ts.CreateTestChannel(t, serverID, "test_channel")
 
 	// Add a role and assign it to the user.
 	roleID := ts.CreateTestRole(t, serverID, "test_role", 1, 1)

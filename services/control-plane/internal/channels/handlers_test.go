@@ -20,7 +20,6 @@ const (
 	keyWrappedKeys         = "wrapped_keys"
 	keyChannel             = "channel"
 	roleMember             = "member"
-	keyIsEncrypted         = "is_encrypted"
 	fmtRateLimitChannelKey = "ratelimit:channel_rotate:%s"
 )
 
@@ -34,7 +33,7 @@ func setupWithChannel(t *testing.T) (*testhelpers.TestServer, testhelpers.TestUs
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "chanuser")
 	serverID := ts.CreateTestServer(t, user.ID, "Channel Test Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	return ts, user, serverID, channelID
 }
 
@@ -71,6 +70,9 @@ func TestCreateChannelSuccess(t *testing.T) {
 		keyServerID: serverID,
 		"name":      "new-channel",
 		"type":      "text",
+		keyWrappedKeys: map[string]string{
+			user.ID: testhelpers.ValidCiphertext(),
+		},
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	assert.Equal(t, http.StatusCreated, w.Code)
@@ -102,10 +104,9 @@ func TestCreateChannelEncrypted(t *testing.T) {
 	serverID := ts.CreateTestServer(t, user.ID, "Encrypted Server")
 
 	w := ts.DoRequest("POST", pathChannels, map[string]interface{}{
-		keyServerID:    serverID,
-		"name":         "encrypted-channel",
-		"type":         "text",
-		keyIsEncrypted: true,
+		keyServerID: serverID,
+		"name":      "encrypted-channel",
+		"type":      "text",
 		keyWrappedKeys: map[string]string{
 			user.ID: testhelpers.ValidCiphertext(),
 		},
@@ -115,7 +116,7 @@ func TestCreateChannelEncrypted(t *testing.T) {
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
 	channel := body[keyChannel].(map[string]interface{})
-	assert.Equal(t, true, channel["is_encrypted"])
+	assert.Equal(t, "encrypted-channel", channel["name"])
 }
 
 // --- Get Channel ---
@@ -159,7 +160,7 @@ func TestDeleteChannelNotAdmin(t *testing.T) {
 	member := ts.CreateTestUser(t, "dchmember")
 	serverID := ts.CreateTestServer(t, owner.ID, "Del Chan Server")
 	ts.AddMemberToServer(t, serverID, member.ID, roleMember)
-	channelID := ts.CreateTestChannel(t, serverID, "protected", false)
+	channelID := ts.CreateTestChannel(t, serverID, "protected")
 
 	w := ts.DoRequest("DELETE", pathChannelsPrefix+channelID, nil, testhelpers.AuthHeaders(member.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
@@ -208,10 +209,9 @@ func setupEncryptedChannel(t *testing.T) (*testhelpers.TestServer, testhelpers.T
 	serverID := ts.CreateTestServer(t, user.ID, "E2EE Server")
 
 	w := ts.DoRequest("POST", pathChannels, map[string]interface{}{
-		keyServerID:    serverID,
-		"name":         "secret-channel",
-		"type":         "text",
-		keyIsEncrypted: true,
+		keyServerID: serverID,
+		"name":      "secret-channel",
+		"type":      "text",
 		keyWrappedKeys: map[string]string{
 			user.ID: testhelpers.ValidCiphertext(),
 		},
@@ -235,13 +235,6 @@ func TestGetChannelKeysSuccess(t *testing.T) {
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
 	assert.NotNil(t, body["key"])
-}
-
-func TestGetChannelKeysNotEncrypted(t *testing.T) {
-	ts, user, _, channelID := setupWithChannel(t) // plaintext channel
-
-	w := ts.DoRequest("GET", pathChannelsPrefix+channelID+pathKeys, nil, testhelpers.AuthHeaders(user.AccessToken))
-	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
 func TestGetChannelKeysNotMember(t *testing.T) {
@@ -379,10 +372,9 @@ func TestRotateKeyRateLimitIndependentChannels(t *testing.T) {
 	userB := ts.CreateTestUser(t, "ratelimitb")
 	serverB := ts.CreateTestServer(t, userB.ID, "RateLimit B Server")
 	w := ts.DoRequest("POST", pathChannels, map[string]interface{}{
-		keyServerID:    serverB,
-		"name":         "encrypted-b",
-		"type":         "text",
-		keyIsEncrypted: true,
+		keyServerID: serverB,
+		"name":      "encrypted-b",
+		"type":      "text",
 		keyWrappedKeys: map[string]string{
 			userB.ID: testhelpers.ValidCiphertext(),
 		},

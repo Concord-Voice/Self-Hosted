@@ -84,7 +84,7 @@ func TestBlockUser_RecordsRevocation(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "blocker2")
 	user2 := ts.CreateTestUser(t, "blocked2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	ts.SeedDMKey(t, convID, user1.ID, 1)
 	ts.SeedDMKey(t, convID, user2.ID, 1)
 
@@ -110,7 +110,7 @@ func TestBlockUser_DeletesBlockedUserKey(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "blocker3")
 	user2 := ts.CreateTestUser(t, "blocked3")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	ts.SeedDMKey(t, convID, user1.ID, 1)
 	ts.SeedDMKey(t, convID, user2.ID, 1)
 

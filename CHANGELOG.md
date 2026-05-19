@@ -153,6 +153,16 @@ Tracking at time of v0.2.0-Beta release. For the full open-issue list, see [issu
 
 ---
 
+## [0.1.37] — 2026-05-19 (E2EE-everywhere completion)
+
+### Changed
+
+- **Backend stops emitting `is_encrypted` field across API and WebSocket envelopes** ([#1042](https://github.com/markdrogersjr/Concord/pull/1042)) — the field is now structural (every room/channel is encrypted under [#201](https://github.com/markdrogersjr/Concord/issues/201)). Inbound WebSocket envelopes lacking `key_version >= 1` are rejected via close frame 4400 `missing_or_invalid_key_version`.
+- **Frontend stops reading `is_encrypted`** ([#1031](https://github.com/markdrogersjr/Concord/pull/1031)) — Child A of the #201 epic; included in v0.1.36 main HEAD but first released here.
+- **Media-plane removes `is_encrypted` field + documents SRTP-mandatory** ([#1032](https://github.com/markdrogersjr/Concord/pull/1032)) — Child D of #201; first released in v0.1.37.
+
+---
+
 ## [0.1.18] - 2026-04-09 (Phase 2B — Sentry Error Tracking)
 
 ### Added

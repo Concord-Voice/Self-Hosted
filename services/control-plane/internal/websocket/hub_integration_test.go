@@ -85,9 +85,10 @@ func TestHandleMessagePlaintextSuccess(t *testing.T) {
 		UserID:   setup.user1,
 		ClientID: setup.client.ID,
 		Data: map[string]interface{}{
-			keyChannelID: channelID,
-			keyContent:   "Hello, world!",
-			keyNonce:     "nonce-123",
+			keyChannelID:  channelID,
+			keyContent:    "Hello, world!",
+			keyKeyVersion: float64(1),
+			keyNonce:      "nonce-123",
 		},
 	}
 
@@ -167,7 +168,8 @@ func TestHandleMessageMissingContent(t *testing.T) {
 func TestHandleMessageContentTooLong(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
-	longContent := make([]byte, 4001)
+	// Content > 24000 ciphertext cap under E2EE-everywhere (#201).
+	longContent := make([]byte, 24001)
 	for i := range longContent {
 		longContent[i] = 'a'
 	}
@@ -177,8 +179,9 @@ func TestHandleMessageContentTooLong(t *testing.T) {
 		UserID:   setup.user1,
 		ClientID: setup.client.ID,
 		Data: map[string]interface{}{
-			keyChannelID: setup.convID,
-			keyContent:   string(longContent),
+			keyChannelID:  setup.convID,
+			keyContent:    string(longContent),
+			keyKeyVersion: float64(1),
 		},
 	}
 
@@ -193,7 +196,7 @@ func TestHandleMessageContentTooLong(t *testing.T) {
 func TestHandleMessageEncryptedContentLongerLimit(t *testing.T) {
 	setup := setupMessageTest(t, false)
 
-	// Encrypted messages allow up to 24000 chars
+	// 5000 chars is well below the 24000 ciphertext cap under E2EE-everywhere.
 	longContent := make([]byte, 5000)
 	for i := range longContent {
 		longContent[i] = 'a'
@@ -204,9 +207,9 @@ func TestHandleMessageEncryptedContentLongerLimit(t *testing.T) {
 		UserID:   setup.user1,
 		ClientID: setup.client.ID,
 		Data: map[string]interface{}{
-			keyChannelID:   setup.convID,
-			keyContent:     string(longContent),
-			keyIsEncrypted: true,
+			keyChannelID:  setup.convID,
+			keyContent:    string(longContent),
+			keyKeyVersion: float64(1),
 		},
 	}
 
@@ -215,28 +218,6 @@ func TestHandleMessageEncryptedContentLongerLimit(t *testing.T) {
 	// Should succeed (5000 < 24000)
 	resp := readClientMsg(t, setup.client)
 	assert.Equal(t, "message_ack", resp["type"])
-}
-
-func TestHandleMessagePlaintextInEncryptedChannel(t *testing.T) {
-	setup := setupMessageTest(t, true) // encrypted channel
-
-	msg := IncomingMessage{
-		Type:     "message",
-		UserID:   setup.user1,
-		ClientID: setup.client.ID,
-		Data: map[string]interface{}{
-			keyChannelID:   setup.convID,
-			keyContent:     "plaintext in encrypted channel",
-			keyIsEncrypted: false,
-		},
-	}
-
-	setup.hub.handleMessage(msg)
-
-	resp := readClientMsg(t, setup.client)
-	assert.Equal(t, "error", resp["type"])
-	data := resp["data"].(map[string]interface{})
-	assert.Contains(t, data[keyMessage], "E2EE")
 }
 
 func TestHandleMessageInvalidChannelID(t *testing.T) {
@@ -335,8 +316,9 @@ func TestHandleMessageBroadcastToOtherSubscribers(t *testing.T) {
 		UserID:   setup.user1,
 		ClientID: setup.client.ID,
 		Data: map[string]interface{}{
-			keyChannelID: setup.convID,
-			keyContent:   "broadcast test",
+			keyChannelID:  setup.convID,
+			keyContent:    "broadcast test",
+			keyKeyVersion: float64(1),
 		},
 	}
 
@@ -605,7 +587,8 @@ func TestHandleDMMessageEmptyContent(t *testing.T) {
 func TestHandleDMMessageContentTooLong(t *testing.T) {
 	setup := setupEpochTest(t, false, false, false)
 
-	longContent := make([]byte, 4001)
+	// Content > 24000 ciphertext cap under E2EE-everywhere (#201).
+	longContent := make([]byte, 24001)
 	for i := range longContent {
 		longContent[i] = 'a'
 	}
@@ -617,6 +600,7 @@ func TestHandleDMMessageContentTooLong(t *testing.T) {
 		Data: map[string]interface{}{
 			keyConversationID: setup.convID,
 			keyContent:        string(longContent),
+			"key_version":     float64(1),
 		},
 	}
 
@@ -695,6 +679,7 @@ func TestHandleDMMessageSystemType(t *testing.T) {
 		Data: map[string]interface{}{
 			keyConversationID: setup.convID,
 			keyContent:        "system message",
+			"key_version":     float64(1),
 			"type":            "system",
 		},
 	}
@@ -720,7 +705,7 @@ func TestHandleDMMessageEncryptedLongerContentAllowed(t *testing.T) {
 		Data: map[string]interface{}{
 			keyConversationID: setup.convID,
 			keyContent:        string(content),
-			keyIsEncrypted:    true,
+			"key_version":     float64(1),
 		},
 	}
 
@@ -755,6 +740,7 @@ func TestHandleDMMessageBroadcastToSubscribers(t *testing.T) {
 		Data: map[string]interface{}{
 			keyConversationID: setup.convID,
 			keyContent:        "dm broadcast test",
+			"key_version":     float64(1),
 		},
 	}
 
@@ -1121,11 +1107,10 @@ var testLastMessageTime = time.Date(2026, 4, 4, 12, 0, 0, 0, time.UTC)
 
 func testLastMessage() dmUnreadLastMessage {
 	return dmUnreadLastMessage{
-		content:     "hello from test",
-		userID:      "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
-		username:    "testuser",
-		createdAt:   testLastMessageTime,
-		isEncrypted: false,
+		content:   "hello from test",
+		userID:    "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+		username:  "testuser",
+		createdAt: testLastMessageTime,
 	}
 }
 
@@ -1163,7 +1148,6 @@ func TestSendDMUnreadNotifySendsToUnsubscribedParticipants(t *testing.T) {
 		assert.Equal(t, lastMsg.content, lm["content"])
 		assert.Equal(t, lastMsg.userID, lm["user_id"])
 		assert.Equal(t, lastMsg.username, lm["username"])
-		assert.Equal(t, lastMsg.isEncrypted, lm["is_encrypted"])
 		assert.NotEmpty(t, lm["created_at"])
 	case <-time.After(500 * time.Millisecond):
 		t.Fatal("expected dm_unread_notify for unsubscribed participant")
@@ -1267,10 +1251,9 @@ func TestHandleMessageEpochRevoked(t *testing.T) {
 		UserID:   setup.user1,
 		ClientID: setup.client.ID,
 		Data: map[string]interface{}{
-			keyChannelID:   setup.convID,
-			keyContent:     "encrypted with revoked epoch",
-			keyIsEncrypted: true,
-			keyKeyVersion:  float64(1),
+			keyChannelID:  setup.convID,
+			keyContent:    "encrypted with revoked epoch",
+			keyKeyVersion: float64(1),
 		},
 	}
 

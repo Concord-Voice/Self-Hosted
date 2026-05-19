@@ -818,7 +818,7 @@ func (h *Handler) triggerKeyRevocationsForServer(serverID, removedUserID, actorI
 		`SELECT c.id, COALESCE(MAX(ck.key_version), 1)
 		 FROM channels c
 		 LEFT JOIN channel_keys ck ON ck.channel_id = c.id
-		 WHERE c.server_id = $1 AND c.is_encrypted = TRUE
+		 WHERE c.server_id = $1
 		 GROUP BY c.id`,
 		serverID,
 	)

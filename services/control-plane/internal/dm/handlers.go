@@ -80,7 +80,6 @@ type dmMessageResponse struct {
 	ConversationID string                     `json:"conversation_id"`
 	UserID         string                     `json:"user_id"`
 	Content        string                     `json:"content"`
-	IsEncrypted    bool                       `json:"is_encrypted"`
 	Type           string                     `json:"type"`
 	KeyVersion     int                        `json:"key_version"`
 	EditedAt       *string                    `json:"edited_at,omitempty"`
@@ -120,7 +119,6 @@ type conversationResponse struct {
 	IsGroup      bool                  `json:"is_group"`
 	IsPersonal   bool                  `json:"is_personal"`
 	Name         *string               `json:"name,omitempty"`
-	IsEncrypted  bool                  `json:"is_encrypted"`
 	IconURL      *string               `json:"icon_url,omitempty"`
 	CreatedBy    string                `json:"created_by"`
 	Participants []participantResponse `json:"participants"`
@@ -139,10 +137,9 @@ type participantResponse struct {
 }
 
 type lastMessageResponse struct {
-	Content     string `json:"content"`
-	UserID      string `json:"user_id"`
-	CreatedAt   string `json:"created_at"`
-	IsEncrypted bool   `json:"is_encrypted"`
+	Content   string `json:"content"`
+	UserID    string `json:"user_id"`
+	CreatedAt string `json:"created_at"`
 }
 
 // ListConversations returns the caller's DM conversations with last message preview.
@@ -166,8 +163,8 @@ func (h *Handler) ListConversations(c *gin.Context) {
 
 func (h *Handler) queryConversations(userID string) ([]conversationResponse, []string, error) {
 	query := `
-		SELECT dc.id, dc.is_group, dc.is_personal, dc.name, dc.is_encrypted, dc.icon_url, dc.created_by, dc.created_at,
-		       dm.content, dm.created_at, dm.user_id, dm.is_encrypted,
+		SELECT dc.id, dc.is_group, dc.is_personal, dc.name, dc.icon_url, dc.created_by, dc.created_at,
+		       dm.content, dm.created_at, dm.user_id,
 		       (SELECT COUNT(*) FROM dm_messages
 		        WHERE conversation_id = dc.id
 		          AND created_at > COALESCE(drs.last_read_at, '1970-01-01')
@@ -177,7 +174,7 @@ func (h *Handler) queryConversations(userID string) ([]conversationResponse, []s
 		JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $1
 		LEFT JOIN dm_read_states drs ON drs.conversation_id = dc.id AND drs.user_id = $1
 		LEFT JOIN LATERAL (
-		    SELECT content, created_at, user_id, is_encrypted FROM dm_messages
+		    SELECT content, created_at, user_id FROM dm_messages
 		    WHERE conversation_id = dc.id ORDER BY created_at DESC LIMIT 1
 		) dm ON TRUE
 		ORDER BY COALESCE(dm.created_at, dc.created_at) DESC
@@ -209,20 +206,18 @@ func (h *Handler) queryConversations(userID string) ([]conversationResponse, []s
 func (h *Handler) scanConversationRow(rows *sql.Rows) (conversationResponse, error) {
 	var conv conversationResponse
 	var lmContent, lmCreatedAt, lmUserID sql.NullString
-	var lmEncrypted sql.NullBool
 	if err := rows.Scan(
-		&conv.ID, &conv.IsGroup, &conv.IsPersonal, &conv.Name, &conv.IsEncrypted, &conv.IconURL, &conv.CreatedBy, &conv.CreatedAt,
-		&lmContent, &lmCreatedAt, &lmUserID, &lmEncrypted,
+		&conv.ID, &conv.IsGroup, &conv.IsPersonal, &conv.Name, &conv.IconURL, &conv.CreatedBy, &conv.CreatedAt,
+		&lmContent, &lmCreatedAt, &lmUserID,
 		&conv.UnreadCount,
 	); err != nil {
 		return conv, err
 	}
 	if lmContent.Valid {
 		conv.LastMessage = &lastMessageResponse{
-			Content:     lmContent.String,
-			UserID:      lmUserID.String,
-			CreatedAt:   lmCreatedAt.String,
-			IsEncrypted: lmEncrypted.Bool,
+			Content:   lmContent.String,
+			UserID:    lmUserID.String,
+			CreatedAt: lmCreatedAt.String,
 		}
 	}
 	return conv, nil
@@ -460,7 +455,7 @@ func (h *Handler) createOneOnOneConversation(userID, targetUserID string) (strin
 	}()
 
 	convID := uuid.New().String()
-	if _, err = tx.Exec(`INSERT INTO dm_conversations (id, is_group, is_encrypted, created_by) VALUES ($1, FALSE, TRUE, $2)`, convID, userID); err != nil {
+	if _, err = tx.Exec(`INSERT INTO dm_conversations (id, is_group, created_by) VALUES ($1, FALSE, $2)`, convID, userID); err != nil {
 		h.log.Error("Failed to create DM conversation", "error", err)
 		return "", err
 	}
@@ -568,8 +563,8 @@ func (h *Handler) insertGroupConversation(name *string, creatorID string, allUse
 
 	convID := uuid.New().String()
 	if _, err = tx.Exec(`
-		INSERT INTO dm_conversations (id, is_group, name, is_encrypted, created_by)
-		VALUES ($1, TRUE, $2, TRUE, $3)
+		INSERT INTO dm_conversations (id, is_group, name, created_by)
+		VALUES ($1, TRUE, $2, $3)
 	`, convID, name, creatorID); err != nil {
 		return "", err
 	}
@@ -1137,7 +1132,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 			return
 		}
 		rows, err = h.db.Query(`
-			SELECT m.id, m.conversation_id, m.user_id, m.content, m.is_encrypted, m.type, COALESCE(m.key_version, 1),
+			SELECT m.id, m.conversation_id, m.user_id, m.content, m.type, COALESCE(m.key_version, 1),
 			       m.edited_at, m.created_at,
 			       u.username, u.display_name, u.avatar_url
 			FROM dm_messages m
@@ -1149,7 +1144,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		`, convID, cursor, limit)
 	} else {
 		rows, err = h.db.Query(`
-			SELECT m.id, m.conversation_id, m.user_id, m.content, m.is_encrypted, m.type, COALESCE(m.key_version, 1),
+			SELECT m.id, m.conversation_id, m.user_id, m.content, m.type, COALESCE(m.key_version, 1),
 			       m.edited_at, m.created_at,
 			       u.username, u.display_name, u.avatar_url
 			FROM dm_messages m
@@ -1172,7 +1167,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 	for rows.Next() {
 		var m messageResponse
 		if err := rows.Scan(
-			&m.ID, &m.ConversationID, &m.UserID, &m.Content, &m.IsEncrypted, &m.Type, &m.KeyVersion,
+			&m.ID, &m.ConversationID, &m.UserID, &m.Content, &m.Type, &m.KeyVersion,
 			&m.EditedAt, &m.CreatedAt,
 			&m.Username, &m.DisplayName, &m.AvatarURL,
 		); err != nil {
@@ -1241,13 +1236,14 @@ func (h *Handler) GetKeys(c *gin.Context) {
 		return
 	}
 
-	var isEncrypted bool
-	if err := h.db.QueryRow(`SELECT is_encrypted FROM dm_conversations WHERE id = $1`, convID).Scan(&isEncrypted); err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Conversation not found"})
+	// Existence check (all DMs are encrypted under E2EE-everywhere #201).
+	var exists bool
+	if err := h.db.QueryRow(`SELECT EXISTS(SELECT 1 FROM dm_conversations WHERE id = $1)`, convID).Scan(&exists); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch keys"})
 		return
 	}
-	if !isEncrypted {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Conversation is not encrypted"})
+	if !exists {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Conversation not found"})
 		return
 	}
 
@@ -1442,14 +1438,14 @@ func (h *Handler) AuthorizeVoiceJoin(c *gin.Context) {
 	}
 
 	// Verify participation and fetch enforcement state
-	var isEncrypted, isGroup, serverMuted, serverDeafened bool
+	var isGroup, serverMuted, serverDeafened bool
 	var callerRole string
 	err := h.db.QueryRow(`
-		SELECT dc.is_encrypted, dc.is_group, dp.server_muted, dp.server_deafened, dp.role
+		SELECT dc.is_group, dp.server_muted, dp.server_deafened, dp.role
 		FROM dm_conversations dc
 		JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $2
 		WHERE dc.id = $1
-	`, convID, userID).Scan(&isEncrypted, &isGroup, &serverMuted, &serverDeafened, &callerRole)
+	`, convID, userID).Scan(&isGroup, &serverMuted, &serverDeafened, &callerRole)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
 		return
@@ -1468,10 +1464,9 @@ func (h *Handler) AuthorizeVoiceJoin(c *gin.Context) {
 		"server_muted":     serverMuted,
 		"server_deafened":  serverDeafened,
 		"conversation": gin.H{
-			"id":           convID,
-			"is_encrypted": isEncrypted,
-			"is_group":     isGroup,
-			"caller_role":  callerRole,
+			"id":          convID,
+			"is_group":    isGroup,
+			"caller_role": callerRole,
 		},
 	})
 }
@@ -1578,8 +1573,8 @@ func (h *Handler) GetOrCreatePersonalThread(c *gin.Context) {
 	convID := uuid.New().String()
 	name := "Personal Thread"
 	_, err = tx.Exec(`
-		INSERT INTO dm_conversations (id, is_group, is_personal, name, is_encrypted, created_by)
-		VALUES ($1, FALSE, TRUE, $2, TRUE, $3)
+		INSERT INTO dm_conversations (id, is_group, is_personal, name, created_by)
+		VALUES ($1, FALSE, TRUE, $2, $3)
 	`, convID, name, userID)
 	if err != nil {
 		h.log.Error("Failed to create personal thread", "error", err)
@@ -1621,29 +1616,27 @@ func (h *Handler) isParticipant(convID, userID string) bool {
 func (h *Handler) fetchConversationResponse(convID string) *conversationResponse {
 	var conv conversationResponse
 	var lmContent, lmCreatedAt, lmUserID sql.NullString
-	var lmEncrypted sql.NullBool
 	err := h.db.QueryRow(`
-		SELECT dc.id, dc.is_group, dc.is_personal, dc.name, dc.is_encrypted, dc.icon_url, dc.created_by, dc.created_at,
-		       dm.content, dm.created_at, dm.user_id, dm.is_encrypted
+		SELECT dc.id, dc.is_group, dc.is_personal, dc.name, dc.icon_url, dc.created_by, dc.created_at,
+		       dm.content, dm.created_at, dm.user_id
 		FROM dm_conversations dc
 		LEFT JOIN LATERAL (
-		    SELECT content, created_at, user_id, is_encrypted FROM dm_messages
+		    SELECT content, created_at, user_id FROM dm_messages
 		    WHERE conversation_id = dc.id ORDER BY created_at DESC LIMIT 1
 		) dm ON TRUE
 		WHERE dc.id = $1
 	`, convID).Scan(
-		&conv.ID, &conv.IsGroup, &conv.IsPersonal, &conv.Name, &conv.IsEncrypted, &conv.IconURL, &conv.CreatedBy, &conv.CreatedAt,
-		&lmContent, &lmCreatedAt, &lmUserID, &lmEncrypted,
+		&conv.ID, &conv.IsGroup, &conv.IsPersonal, &conv.Name, &conv.IconURL, &conv.CreatedBy, &conv.CreatedAt,
+		&lmContent, &lmCreatedAt, &lmUserID,
 	)
 	if err != nil {
 		return nil
 	}
 	if lmContent.Valid {
 		conv.LastMessage = &lastMessageResponse{
-			Content:     lmContent.String,
-			UserID:      lmUserID.String,
-			CreatedAt:   lmCreatedAt.String,
-			IsEncrypted: lmEncrypted.Bool,
+			Content:   lmContent.String,
+			UserID:    lmUserID.String,
+			CreatedAt: lmCreatedAt.String,
 		}
 	}
 
@@ -1715,36 +1708,27 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 		return
 	}
 
-	// E2EE enforcement
-	var isEncrypted bool
-	if err := h.db.QueryRow(`SELECT COALESCE(is_encrypted, false) FROM dm_conversations WHERE id = $1`, convID).Scan(&isEncrypted); err != nil {
-		h.log.Error("Failed to check DM encryption", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateMessage})
+	// E2EE enforcement — all DMs are encrypted under #201; require ciphertext shape unconditionally.
+	decoded, err := base64.StdEncoding.DecodeString(req.Content)
+	if err != nil || len(decoded) < 28 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ciphertext format for encrypted conversation"})
 		return
-	}
-	if isEncrypted {
-		decoded, err := base64.StdEncoding.DecodeString(req.Content)
-		if err != nil || len(decoded) < 28 {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid ciphertext format for encrypted conversation"})
-			return
-		}
 	}
 
 	// Update message
 	type msgResult struct {
-		Content     string  `json:"content"`
-		IsEncrypted bool    `json:"is_encrypted"`
-		KeyVersion  int     `json:"key_version"`
-		EditedAt    *string `json:"edited_at"`
-		CreatedAt   string  `json:"created_at"`
+		Content    string  `json:"content"`
+		KeyVersion int     `json:"key_version"`
+		EditedAt   *string `json:"edited_at"`
+		CreatedAt  string  `json:"created_at"`
 	}
 	var result msgResult
-	err := h.db.QueryRow(`
+	err = h.db.QueryRow(`
 		UPDATE dm_messages
 		SET content = $1, edited_at = NOW(), updated_at = NOW()
 		WHERE id = $2 AND conversation_id = $3
-		RETURNING is_encrypted, COALESCE(key_version, 1), edited_at, created_at
-	`, req.Content, messageID, convID).Scan(&result.IsEncrypted, &result.KeyVersion, &result.EditedAt, &result.CreatedAt)
+		RETURNING COALESCE(key_version, 1), edited_at, created_at
+	`, req.Content, messageID, convID).Scan(&result.KeyVersion, &result.EditedAt, &result.CreatedAt)
 	if err != nil {
 		h.log.Error("Failed to update DM message", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateMessage})
@@ -1759,7 +1743,6 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 			"id":              messageID,
 			"conversation_id": convID,
 			"content":         req.Content,
-			"is_encrypted":    result.IsEncrypted,
 			"key_version":     result.KeyVersion,
 			"edited_at":       result.EditedAt,
 		},

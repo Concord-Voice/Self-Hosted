@@ -48,9 +48,8 @@ type Channel struct {
 	ServerID             string    `json:"server_id" db:"server_id"`
 	Name                 string    `json:"name" db:"name"`
 	Description          *string   `json:"description,omitempty" db:"description"`
-	Type                 string    `json:"type" db:"type"`             // voice, text, bulletin
-	Emoji                *string   `json:"emoji,omitempty" db:"emoji"` // Optional custom emoji
-	IsEncrypted          bool      `json:"is_encrypted" db:"is_encrypted"`
+	Type                 string    `json:"type" db:"type"`                                                 // voice, text, bulletin
+	Emoji                *string   `json:"emoji,omitempty" db:"emoji"`                                     // Optional custom emoji
 	AudioQualityTier     *string   `json:"audio_quality_tier,omitempty" db:"audio_quality_tier"`           // voice/standard/high/hifi/studio or nil (personal)
 	GroupID              *string   `json:"group_id,omitempty" db:"group_id"`                               // FK to channel_groups; nil = uncategorized
 	LinkedVoiceChannelID *string   `json:"linked_voice_channel_id,omitempty" db:"linked_voice_channel_id"` // Non-nil = hidden text chat for a voice channel
@@ -76,7 +75,6 @@ type Message struct {
 	ChannelID        string     `json:"channel_id" db:"channel_id"`
 	UserID           string     `json:"user_id" db:"user_id"`
 	Content          string     `json:"content" db:"content"`
-	IsEncrypted      bool       `json:"is_encrypted" db:"is_encrypted"`
 	KeyVersion       int        `json:"key_version" db:"key_version"`
 	EmbedsSuppressed bool       `json:"embeds_suppressed" db:"embeds_suppressed"`
 	GifSlug          *string    `json:"gif_slug,omitempty" db:"gif_slug"`

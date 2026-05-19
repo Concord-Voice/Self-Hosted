@@ -33,7 +33,7 @@ func TestPinMessage_DM_HappyPath(t *testing.T) {
 	ts := setupTS(t)
 	u1 := ts.CreateTestUser(t, "dmpin_a")
 	u2 := ts.CreateTestUser(t, "dmpin_b")
-	convID := ts.CreateDMConversation(t, u1.ID, u2.ID, false)
+	convID := ts.CreateDMConversation(t, u1.ID, u2.ID)
 	msgID := insertDMMessageDirect(t, ts, convID, u1.ID, "please pin me")
 
 	w := ts.DoRequest("POST", pinAPIMsg+msgID+pinPath, nil,
@@ -63,7 +63,7 @@ func TestPinMessage_DM_NonParticipant_404(t *testing.T) {
 	u1 := ts.CreateTestUser(t, "dmpin_np_a")
 	u2 := ts.CreateTestUser(t, "dmpin_np_b")
 	outsider := ts.CreateTestUser(t, "dmpin_np_c")
-	convID := ts.CreateDMConversation(t, u1.ID, u2.ID, false)
+	convID := ts.CreateDMConversation(t, u1.ID, u2.ID)
 	msgID := insertDMMessageDirect(t, ts, convID, u1.ID, "private")
 
 	w := ts.DoRequest("POST", pinAPIMsg+msgID+pinPath, nil,
@@ -84,7 +84,7 @@ func TestPinMessage_DM_AlreadyPinned_Idempotent(t *testing.T) {
 	ts := setupTS(t)
 	u1 := ts.CreateTestUser(t, "dmpin_idem_a")
 	u2 := ts.CreateTestUser(t, "dmpin_idem_b")
-	convID := ts.CreateDMConversation(t, u1.ID, u2.ID, false)
+	convID := ts.CreateDMConversation(t, u1.ID, u2.ID)
 	msgID := insertDMMessageDirect(t, ts, convID, u1.ID, "twice")
 
 	// First pin
@@ -105,7 +105,7 @@ func TestUnpinMessage_DM_HappyPath(t *testing.T) {
 	ts := setupTS(t)
 	u1 := ts.CreateTestUser(t, "dmunpin_a")
 	u2 := ts.CreateTestUser(t, "dmunpin_b")
-	convID := ts.CreateDMConversation(t, u1.ID, u2.ID, false)
+	convID := ts.CreateDMConversation(t, u1.ID, u2.ID)
 	msgID := insertDMMessageDirect(t, ts, convID, u1.ID, "pin then unpin")
 
 	// Pin
@@ -137,7 +137,7 @@ func TestUnpinMessage_DM_AlreadyUnpinned(t *testing.T) {
 	ts := setupTS(t)
 	u1 := ts.CreateTestUser(t, "dmunpin_idem_a")
 	u2 := ts.CreateTestUser(t, "dmunpin_idem_b")
-	convID := ts.CreateDMConversation(t, u1.ID, u2.ID, false)
+	convID := ts.CreateDMConversation(t, u1.ID, u2.ID)
 	msgID := insertDMMessageDirect(t, ts, convID, u1.ID, "never pinned")
 
 	w := ts.DoRequest("DELETE", pinAPIMsg+msgID+pinPath, nil,
@@ -154,7 +154,7 @@ func TestUnpinMessage_DM_NonParticipant_404(t *testing.T) {
 	u1 := ts.CreateTestUser(t, "dmunpin_np_a")
 	u2 := ts.CreateTestUser(t, "dmunpin_np_b")
 	outsider := ts.CreateTestUser(t, "dmunpin_np_c")
-	convID := ts.CreateDMConversation(t, u1.ID, u2.ID, false)
+	convID := ts.CreateDMConversation(t, u1.ID, u2.ID)
 	msgID := insertDMMessageDirect(t, ts, convID, u1.ID, "x")
 
 	// Pin as participant.
@@ -173,7 +173,7 @@ func TestGetChannelPins_DM_ReturnsPins(t *testing.T) {
 	ts := setupTS(t)
 	u1 := ts.CreateTestUser(t, "dmgetpins_a")
 	u2 := ts.CreateTestUser(t, "dmgetpins_b")
-	convID := ts.CreateDMConversation(t, u1.ID, u2.ID, false)
+	convID := ts.CreateDMConversation(t, u1.ID, u2.ID)
 
 	// Create three messages, pin two of them.
 	msg1 := insertDMMessageDirect(t, ts, convID, u1.ID, "pinned one")
@@ -213,7 +213,7 @@ func TestGetChannelPins_DM_NonParticipant_404(t *testing.T) {
 	u1 := ts.CreateTestUser(t, "dmgetpins_np_a")
 	u2 := ts.CreateTestUser(t, "dmgetpins_np_b")
 	outsider := ts.CreateTestUser(t, "dmgetpins_np_c")
-	convID := ts.CreateDMConversation(t, u1.ID, u2.ID, false)
+	convID := ts.CreateDMConversation(t, u1.ID, u2.ID)
 
 	w := ts.DoRequest("GET", pinAPICh+convID+pinsPath, nil,
 		testhelpers.AuthHeaders(outsider.AccessToken))
@@ -225,7 +225,7 @@ func TestGetChannelPins_DM_Empty(t *testing.T) {
 	ts := setupTS(t)
 	u1 := ts.CreateTestUser(t, "dmgetpins_empty_a")
 	u2 := ts.CreateTestUser(t, "dmgetpins_empty_b")
-	convID := ts.CreateDMConversation(t, u1.ID, u2.ID, false)
+	convID := ts.CreateDMConversation(t, u1.ID, u2.ID)
 	_ = insertDMMessageDirect(t, ts, convID, u1.ID, "hi")
 
 	w := ts.DoRequest("GET", pinAPICh+convID+pinsPath, nil,
@@ -247,7 +247,7 @@ func TestLookupMessageContext_ServerStillWorks(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "lookup_server_ok")
 	serverID := ts.CreateTestServer(t, user.ID, "Regression Server")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	msgID := ts.CreateTestMessage(t, channelID, user, "still works")
 
 	w := ts.DoRequest("POST", pinAPIMsg+msgID+pinPath, nil,
@@ -259,7 +259,7 @@ func TestPinMessage_DM_LimitReached(t *testing.T) {
 	ts := setupTS(t)
 	u1 := ts.CreateTestUser(t, "dmpin_limit_a")
 	u2 := ts.CreateTestUser(t, "dmpin_limit_b")
-	convID := ts.CreateDMConversation(t, u1.ID, u2.ID, false)
+	convID := ts.CreateDMConversation(t, u1.ID, u2.ID)
 
 	// Seed 50 already-pinned DM messages directly.
 	for i := 0; i < 50; i++ {
@@ -302,7 +302,7 @@ func TestReactions_DMMessage_Returns404(t *testing.T) {
 	ts := setupTS(t)
 	u1 := ts.CreateTestUser(t, "dmreact_a")
 	u2 := ts.CreateTestUser(t, "dmreact_b")
-	convID := ts.CreateDMConversation(t, u1.ID, u2.ID, false)
+	convID := ts.CreateDMConversation(t, u1.ID, u2.ID)
 	msgID := insertDMMessageDirect(t, ts, convID, u1.ID, "emoji me")
 
 	body := map[string]interface{}{"emoji": "👍"}
@@ -330,7 +330,7 @@ func TestUnpinMessage_NotMember_403(t *testing.T) {
 	owner := ts.CreateTestUser(t, "unpinowner")
 	outsider := ts.CreateTestUser(t, "unpinoutsider")
 	serverID := ts.CreateTestServer(t, owner.ID, "UnpinPriv")
-	channelID := ts.CreateTestChannel(t, serverID, "general", false)
+	channelID := ts.CreateTestChannel(t, serverID, "general")
 	msgID := ts.CreateTestMessage(t, channelID, owner, "hi")
 
 	// Pin as owner.

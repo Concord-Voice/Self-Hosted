@@ -476,7 +476,7 @@ func loadRepliedToForMessages(db *sql.DB, messages []models.MessageWithUser) (ma
 	}
 
 	rows, err := db.Query(`
-		SELECT m.id, m.user_id, u.username, u.display_name, m.content, m.is_encrypted, COALESCE(m.key_version, 1)
+		SELECT m.id, m.user_id, u.username, u.display_name, m.content, COALESCE(m.key_version, 1)
 		FROM messages m
 		INNER JOIN users u ON m.user_id = u.id
 		WHERE m.id = ANY($1::uuid[])
@@ -489,7 +489,7 @@ func loadRepliedToForMessages(db *sql.DB, messages []models.MessageWithUser) (ma
 	summaries := make(map[string]*models.RepliedToSummary)
 	for rows.Next() {
 		var s models.RepliedToSummary
-		if err := rows.Scan(&s.ID, &s.UserID, &s.Username, &s.DisplayName, &s.Content, &s.IsEncrypted, &s.KeyVersion); err != nil {
+		if err := rows.Scan(&s.ID, &s.UserID, &s.Username, &s.DisplayName, &s.Content, &s.KeyVersion); err != nil {
 			log.Printf("Failed to scan replied-to summary row: %v", err)
 			continue
 		}

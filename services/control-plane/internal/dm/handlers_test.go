@@ -73,7 +73,7 @@ func TestRotateKey_Success(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "rotator1")
 	user2 := ts.CreateTestUser(t, "rotator2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	ts.SeedDMKey(t, convID, user1.ID, 1)
 	ts.SeedDMKey(t, convID, user2.ID, 1)
 
@@ -90,7 +90,7 @@ func TestRotateKey_RecordsRevocation(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "rotator3")
 	user2 := ts.CreateTestUser(t, "rotator4")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	ts.SeedDMKey(t, convID, user1.ID, 1)
 	ts.SeedDMKey(t, convID, user2.ID, 1)
 
@@ -116,7 +116,7 @@ func TestRotateKey_NoExistingKeys(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "rotator5")
 	user2 := ts.CreateTestUser(t, "rotator6")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	// No keys seeded — maxVersion = 0
 
 	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathRotateKey, nil, testhelpers.AuthHeaders(user1.AccessToken))
@@ -139,7 +139,7 @@ func TestRotateKey_NotParticipant(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "rotator8")
 	outsider := ts.CreateTestUser(t, "outsider1")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathRotateKey, nil, testhelpers.AuthHeaders(outsider.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
@@ -158,7 +158,7 @@ func TestRotateKey_MultipleRotations(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "multirot1")
 	user2 := ts.CreateTestUser(t, "multirot2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	ts.SeedDMKey(t, convID, user1.ID, 1)
 
 	// First rotation
@@ -200,7 +200,7 @@ func TestListConversations_Success(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "listdm1")
 	user2 := ts.CreateTestUser(t, "listdm2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("GET", pathDMConversations, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -229,7 +229,7 @@ func TestListConversations_IncludesParticipants(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "listpart1")
 	user2 := ts.CreateTestUser(t, "listpart2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("GET", pathDMConversations, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	require.Equal(t, http.StatusOK, w.Code)
@@ -249,7 +249,7 @@ func TestListConversations_WithLastMessage(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "listlm1")
 	user2 := ts.CreateTestUser(t, "listlm2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	insertDMMessage(t, ts, convID, user1.ID, "hello there", false)
 
@@ -272,7 +272,7 @@ func TestListConversations_UnreadCount(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "unread1")
 	user2 := ts.CreateTestUser(t, "unread2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	// user2 sends 3 messages (unread for user1)
 	insertDMMessage(t, ts, convID, user2.ID, "msg1", false)
@@ -297,8 +297,8 @@ func TestListConversations_MultipleConversations(t *testing.T) {
 	user3 := ts.CreateTestUser(t, "listmulti3")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 	ts.CreateFriendship(t, user1.ID, user3.ID, statusAccepted)
-	ts.CreateDMConversation(t, user1.ID, user2.ID, false)
-	ts.CreateDMConversation(t, user1.ID, user3.ID, false)
+	ts.CreateDMConversation(t, user1.ID, user2.ID)
+	ts.CreateDMConversation(t, user1.ID, user3.ID)
 
 	w := ts.DoRequest("GET", pathDMConversations, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	require.Equal(t, http.StatusOK, w.Code)
@@ -326,7 +326,7 @@ func TestGetConversation_Success(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "getdm1")
 	user2 := ts.CreateTestUser(t, "getdm2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -345,7 +345,7 @@ func TestGetConversation_NotParticipant(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "getdm4")
 	outsider := ts.CreateTestUser(t, "getdm5")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID, nil, testhelpers.AuthHeaders(outsider.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
@@ -368,28 +368,12 @@ func TestGetConversation_NonexistentID(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code) // Not participant of nonexistent conv
 }
 
-func TestGetConversation_IncludesEncryptedFlag(t *testing.T) {
-	ts := setupTS(t)
-	user1 := ts.CreateTestUser(t, "getenc1")
-	user2 := ts.CreateTestUser(t, "getenc2")
-	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
-
-	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID, nil, testhelpers.AuthHeaders(user1.AccessToken))
-	require.Equal(t, http.StatusOK, w.Code)
-
-	var body map[string]interface{}
-	testhelpers.ParseJSON(t, w, &body)
-	conv := body["conversation"].(map[string]interface{})
-	assert.Equal(t, true, conv["is_encrypted"])
-}
-
 func TestGetConversation_Unauthorized(t *testing.T) {
 	ts := setupTS(t)
 	user1 := ts.CreateTestUser(t, "getdmunauth1")
 	user2 := ts.CreateTestUser(t, "getdmunauth2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID, nil, nil)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
@@ -746,7 +730,7 @@ func TestUpdateConversation_CannotRenameOneOnOne(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "upconv1on1a")
 	user2 := ts.CreateTestUser(t, "upconv1on1b")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID, map[string]interface{}{
 		"name": "New Name",
@@ -840,7 +824,7 @@ func TestGetMessages_Success(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "getmsg1")
 	user2 := ts.CreateTestUser(t, "getmsg2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	insertDMMessage(t, ts, convID, user1.ID, "hello", false)
 	insertDMMessage(t, ts, convID, user2.ID, "hi there", false)
@@ -859,7 +843,7 @@ func TestGetMessages_Empty(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "getmsge1")
 	user2 := ts.CreateTestUser(t, "getmsge2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+pathMessages, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -876,7 +860,7 @@ func TestGetMessages_NotParticipant(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "getmsgnp2")
 	outsider := ts.CreateTestUser(t, "getmsgnp3")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+pathMessages, nil, testhelpers.AuthHeaders(outsider.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
@@ -895,7 +879,7 @@ func TestGetMessages_CursorPagination(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "getmsgcur1")
 	user2 := ts.CreateTestUser(t, "getmsgcur2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	// Insert some messages
 	insertDMMessage(t, ts, convID, user1.ID, "msg1", false)
@@ -918,7 +902,7 @@ func TestGetMessages_InvalidCursor(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "getmsgbadc1")
 	user2 := ts.CreateTestUser(t, "getmsgbadc2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+"/messages?before=not-a-uuid", nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -929,7 +913,7 @@ func TestGetMessages_MessageFields(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "getmsgfields1")
 	user2 := ts.CreateTestUser(t, "getmsgfields2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	insertDMMessage(t, ts, convID, user1.ID, "test content", false)
 
@@ -946,7 +930,6 @@ func TestGetMessages_MessageFields(t *testing.T) {
 	assert.Equal(t, convID, msg["conversation_id"])
 	assert.Equal(t, user1.ID, msg["user_id"])
 	assert.Equal(t, "test content", msg["content"])
-	assert.Equal(t, false, msg["is_encrypted"])
 	assert.Equal(t, "text", msg["type"])
 	assert.NotEmpty(t, msg["created_at"])
 	assert.NotEmpty(t, msg["username"])
@@ -957,7 +940,7 @@ func TestGetMessages_Unauthorized(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "getmsgunauth1")
 	user2 := ts.CreateTestUser(t, "getmsgunauth2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+pathMessages, nil, nil)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
@@ -972,7 +955,7 @@ func TestMarkRead_Success(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "markread1")
 	user2 := ts.CreateTestUser(t, "markread2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+"/read", nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -987,7 +970,7 @@ func TestMarkRead_Idempotent(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "markread3")
 	user2 := ts.CreateTestUser(t, "markread4")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	// Mark read twice — should succeed both times (UPSERT)
 	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+"/read", nil, testhelpers.AuthHeaders(user1.AccessToken))
@@ -1003,7 +986,7 @@ func TestMarkRead_NotParticipant(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "markreadnp2")
 	outsider := ts.CreateTestUser(t, "markreadnp3")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+"/read", nil, testhelpers.AuthHeaders(outsider.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
@@ -1022,7 +1005,7 @@ func TestMarkRead_ResetsUnreadCount(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "markreadreset1")
 	user2 := ts.CreateTestUser(t, "markreadreset2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	// user2 sends messages
 	insertDMMessage(t, ts, convID, user2.ID, "unread1", false)
@@ -1059,7 +1042,7 @@ func TestGetKeys_Success(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "getkeys1")
 	user2 := ts.CreateTestUser(t, "getkeys2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	ts.SeedDMKey(t, convID, user1.ID, 1)
 
 	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+"/keys", nil, testhelpers.AuthHeaders(user1.AccessToken))
@@ -1073,27 +1056,12 @@ func TestGetKeys_Success(t *testing.T) {
 	assert.Equal(t, float64(1), key["key_version"])
 }
 
-func TestGetKeys_NotEncrypted(t *testing.T) {
-	ts := setupTS(t)
-	user1 := ts.CreateTestUser(t, "getkeysnenc1")
-	user2 := ts.CreateTestUser(t, "getkeysnenc2")
-	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false) // not encrypted
-
-	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+"/keys", nil, testhelpers.AuthHeaders(user1.AccessToken))
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-
-	var body map[string]interface{}
-	testhelpers.ParseJSON(t, w, &body)
-	assert.Contains(t, body["error"], "not encrypted")
-}
-
 func TestGetKeys_NoKeysYet(t *testing.T) {
 	ts := setupTS(t)
 	user1 := ts.CreateTestUser(t, "getkeysnone1")
 	user2 := ts.CreateTestUser(t, "getkeysnone2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	// No keys seeded
 
 	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+"/keys", nil, testhelpers.AuthHeaders(user1.AccessToken))
@@ -1110,7 +1078,7 @@ func TestGetKeys_NotParticipant(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "getkeysnp2")
 	outsider := ts.CreateTestUser(t, "getkeysnp3")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+"/keys", nil, testhelpers.AuthHeaders(outsider.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
@@ -1129,7 +1097,7 @@ func TestGetKeys_ReturnsLatestVersion(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "getkeyslat1")
 	user2 := ts.CreateTestUser(t, "getkeyslat2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	ts.SeedDMKey(t, convID, user1.ID, 1)
 	ts.SeedDMKey(t, convID, user1.ID, 2)
 	ts.SeedDMKey(t, convID, user1.ID, 3)
@@ -1152,7 +1120,7 @@ func TestDistributeKeys_Success(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "distkeys1")
 	user2 := ts.CreateTestUser(t, "distkeys2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+"/keys", map[string]interface{}{
 		"wrapped_keys": map[string]string{
@@ -1172,7 +1140,7 @@ func TestDistributeKeys_WithExplicitVersion(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "distkeyver1")
 	user2 := ts.CreateTestUser(t, "distkeyver2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	keyVersion := 5
 	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+"/keys", map[string]interface{}{
@@ -1194,7 +1162,7 @@ func TestDistributeKeys_NotParticipant(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "distkeysnp2")
 	outsider := ts.CreateTestUser(t, "distkeysnp3")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+"/keys", map[string]interface{}{
 		"wrapped_keys": map[string]string{
@@ -1221,7 +1189,7 @@ func TestDistributeKeys_InvalidRequestBody(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "distkeysbad1")
 	user2 := ts.CreateTestUser(t, "distkeysbad2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+"/keys", map[string]interface{}{}, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -1232,7 +1200,7 @@ func TestDistributeKeys_DuplicateKeyVersionSkipped(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "distkeysdup1")
 	user2 := ts.CreateTestUser(t, "distkeysdup2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	// Distribute once
 	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+"/keys", map[string]interface{}{
@@ -1262,7 +1230,7 @@ func TestDistributeKeys_InvalidMemberUUID(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "distkeysbaduuid1")
 	user2 := ts.CreateTestUser(t, "distkeysbaduuid2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	// Invalid member UUID should be silently skipped
 	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+"/keys", map[string]interface{}{
@@ -1286,7 +1254,7 @@ func TestAuthorizeVoiceJoin_Success(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "voice1")
 	user2 := ts.CreateTestUser(t, "voice2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceJoin, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -1305,7 +1273,7 @@ func TestAuthorizeVoiceJoin_EncryptedConversation(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "voiceenc1")
 	user2 := ts.CreateTestUser(t, "voiceenc2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceJoin, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -1313,7 +1281,7 @@ func TestAuthorizeVoiceJoin_EncryptedConversation(t *testing.T) {
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
 	conv := body["conversation"].(map[string]interface{})
-	assert.Equal(t, true, conv["is_encrypted"])
+	assert.Equal(t, convID, conv["id"])
 }
 
 func TestAuthorizeVoiceJoin_NotParticipant(t *testing.T) {
@@ -1322,7 +1290,7 @@ func TestAuthorizeVoiceJoin_NotParticipant(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "voicenp2")
 	outsider := ts.CreateTestUser(t, "voicenp3")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceJoin, nil, testhelpers.AuthHeaders(outsider.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
@@ -1354,7 +1322,7 @@ func TestGetVoiceParticipants_EmptyList(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "getvp1")
 	user2 := ts.CreateTestUser(t, "getvp2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+pathVoiceParts, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -1370,7 +1338,7 @@ func TestGetVoiceParticipants_WithParticipant(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "getvpwith1")
 	user2 := ts.CreateTestUser(t, "getvpwith2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	// Insert a voice participant directly
 	_, err := ts.DB.Exec(
@@ -1398,7 +1366,7 @@ func TestGetVoiceParticipants_NotParticipant(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "getvpnp2")
 	outsider := ts.CreateTestUser(t, "getvpnp3")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+pathVoiceParts, nil, testhelpers.AuthHeaders(outsider.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
@@ -1474,18 +1442,19 @@ func TestUpdateMessage_Success(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "updatemsg1")
 	user2 := ts.CreateTestUser(t, "updatemsg2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	msgID := insertDMMessage(t, ts, convID, user1.ID, "original text", false)
 
+	editedCiphertext := testhelpers.ValidCiphertext()
 	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMsgSlash+msgID, map[string]interface{}{
-		"content": "edited text",
+		"content": editedCiphertext,
 	}, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
 	msg := body["message"].(map[string]interface{})
-	assert.Equal(t, "edited text", msg["content"])
+	assert.Equal(t, editedCiphertext, msg["content"])
 	assert.NotNil(t, msg["edited_at"], "edited_at should be set")
 }
 
@@ -1494,7 +1463,7 @@ func TestUpdateMessage_NotAuthor(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "updatemsgna1")
 	user2 := ts.CreateTestUser(t, "updatemsgna2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	msgID := insertDMMessage(t, ts, convID, user1.ID, "user1's message", false)
 
 	// user2 tries to edit user1's message
@@ -1514,7 +1483,7 @@ func TestUpdateMessage_NotParticipant(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "updatemsgnp2")
 	outsider := ts.CreateTestUser(t, "updatemsgnp3")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	msgID := insertDMMessage(t, ts, convID, user1.ID, "message", false)
 
 	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMsgSlash+msgID, map[string]interface{}{
@@ -1539,7 +1508,7 @@ func TestUpdateMessage_InvalidMessageID(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "updatemsginv2a")
 	user2 := ts.CreateTestUser(t, "updatemsginv2b")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+"/messages/not-a-uuid", map[string]interface{}{
 		"content": "edited",
@@ -1552,7 +1521,7 @@ func TestUpdateMessage_MessageNotFound(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "updatemsgnotf1")
 	user2 := ts.CreateTestUser(t, "updatemsgnotf2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	fakeMsgID := uuid.New().String()
 
 	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMsgSlash+fakeMsgID, map[string]interface{}{
@@ -1566,7 +1535,7 @@ func TestUpdateMessage_MissingContent(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "updatemsgnocon1")
 	user2 := ts.CreateTestUser(t, "updatemsgnocon2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	msgID := insertDMMessage(t, ts, convID, user1.ID, "original", false)
 
 	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMsgSlash+msgID, map[string]interface{}{}, testhelpers.AuthHeaders(user1.AccessToken))
@@ -1578,7 +1547,7 @@ func TestUpdateMessage_EncryptedConversation_ValidCiphertext(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "updatemsgenc1")
 	user2 := ts.CreateTestUser(t, "updatemsgenc2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	ciphertext := testhelpers.ValidCiphertext()
 	msgID := insertDMMessage(t, ts, convID, user1.ID, ciphertext, true)
@@ -1595,7 +1564,7 @@ func TestUpdateMessage_EncryptedConversation_InvalidCiphertext(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "updatemsgencinv1")
 	user2 := ts.CreateTestUser(t, "updatemsgencinv2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	ciphertext := testhelpers.ValidCiphertext()
 	msgID := insertDMMessage(t, ts, convID, user1.ID, ciphertext, true)
@@ -1620,7 +1589,7 @@ func TestDeleteMessage_Success(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "delmsg1")
 	user2 := ts.CreateTestUser(t, "delmsg2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	msgID := insertDMMessage(t, ts, convID, user1.ID, "to be deleted", false)
 
 	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathMsgSlash+msgID, nil, testhelpers.AuthHeaders(user1.AccessToken))
@@ -1642,7 +1611,7 @@ func TestDeleteMessage_NotAuthor(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "delmsgna1")
 	user2 := ts.CreateTestUser(t, "delmsgna2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	msgID := insertDMMessage(t, ts, convID, user1.ID, "user1's msg", false)
 
 	// user2 tries to delete user1's message
@@ -1660,7 +1629,7 @@ func TestDeleteMessage_NotParticipant(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "delmsgnp2")
 	outsider := ts.CreateTestUser(t, "delmsgnp3")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	msgID := insertDMMessage(t, ts, convID, user1.ID, "message", false)
 
 	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathMsgSlash+msgID, nil, testhelpers.AuthHeaders(outsider.AccessToken))
@@ -1681,7 +1650,7 @@ func TestDeleteMessage_InvalidMessageID(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "delmsginv2a")
 	user2 := ts.CreateTestUser(t, "delmsginv2b")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+"/messages/not-a-uuid", nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -1692,7 +1661,7 @@ func TestDeleteMessage_MessageNotFound(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "delmsgnotf1")
 	user2 := ts.CreateTestUser(t, "delmsgnotf2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	fakeMsgID := uuid.New().String()
 
 	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathMsgSlash+fakeMsgID, nil, testhelpers.AuthHeaders(user1.AccessToken))
@@ -1704,7 +1673,7 @@ func TestDeleteMessage_Unauthorized(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "delmsgunauth1")
 	user2 := ts.CreateTestUser(t, "delmsgunauth2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 	msgID := insertDMMessage(t, ts, convID, user1.ID, "msg", false)
 
 	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathMsgSlash+msgID, nil, nil)
@@ -1742,7 +1711,7 @@ func TestGetMessagesWithAttachments(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "dmatt1")
 	user2 := ts.CreateTestUser(t, "dmatt2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	msgID := insertDMMessage(t, ts, convID, user1.ID, "see attached", false)
 	fileID := insertDMMediaFile(t, ts, user1.ID, convID, "photo", mimeImagePNG, 12345)
@@ -1784,7 +1753,7 @@ func TestGetMessagesWithMultipleAttachmentsOrderedByPosition(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "dmmulti1")
 	user2 := ts.CreateTestUser(t, "dmmulti2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	msgID := insertDMMessage(t, ts, convID, user1.ID, "multi", false)
 	f1 := insertDMMediaFile(t, ts, user1.ID, convID, "photo", mimeImagePNG, 100)
@@ -1823,7 +1792,7 @@ func TestGetMessagesDMNoAttachments(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "dmnoatt1")
 	user2 := ts.CreateTestUser(t, "dmnoatt2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	insertDMMessage(t, ts, convID, user1.ID, "plain msg", false)
 
@@ -2073,7 +2042,7 @@ func TestAddMemberNotGroup(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "addng2")
 	newUser := ts.CreateTestUser(t, "addng3")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathMembers, map[string]interface{}{
 		"user_id": newUser.ID,
@@ -2359,7 +2328,7 @@ func TestDeleteGroupNotGroup(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "delng1")
 	user2 := ts.CreateTestUser(t, "delng2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -2472,7 +2441,7 @@ func TestUpdateMemberRoleNotGroupConversation(t *testing.T) {
 	user1 := ts.CreateTestUser(t, "rolng1")
 	user2 := ts.CreateTestUser(t, "rolng2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, false)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMembersSlash+user2.ID, map[string]interface{}{
 		"role": "admin",
@@ -2597,7 +2566,7 @@ func TestDMUserMute(t *testing.T) {
 		userA := ts.CreateTestUser(t, "usrmute1")
 		userB := ts.CreateTestUser(t, "usrmute2")
 		ts.CreateFriendship(t, userA.ID, userB.ID, statusAccepted)
-		convID := ts.CreateDMConversation(t, userA.ID, userB.ID, false)
+		convID := ts.CreateDMConversation(t, userA.ID, userB.ID)
 
 		// Both users are in voice
 		_, err := ts.DB.Exec(
@@ -2625,7 +2594,7 @@ func TestDMUserMute(t *testing.T) {
 		userB := ts.CreateTestUser(t, "usrmutenp2")
 		outsider := ts.CreateTestUser(t, "usrmutenp3")
 		ts.CreateFriendship(t, userA.ID, userB.ID, statusAccepted)
-		convID := ts.CreateDMConversation(t, userA.ID, userB.ID, false)
+		convID := ts.CreateDMConversation(t, userA.ID, userB.ID)
 
 		w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+userA.ID+pathUserMute, nil, testhelpers.AuthHeaders(outsider.AccessToken))
 		assert.Equal(t, http.StatusForbidden, w.Code)
@@ -2636,7 +2605,7 @@ func TestDMUserMute(t *testing.T) {
 		userA := ts.CreateTestUser(t, "usrmuteniv1")
 		userB := ts.CreateTestUser(t, "usrmuteniv2")
 		ts.CreateFriendship(t, userA.ID, userB.ID, statusAccepted)
-		convID := ts.CreateDMConversation(t, userA.ID, userB.ID, false)
+		convID := ts.CreateDMConversation(t, userA.ID, userB.ID)
 
 		// Only userA is in voice, userB is NOT
 		_, err := ts.DB.Exec(
@@ -2654,7 +2623,7 @@ func TestDMUserMute(t *testing.T) {
 		userA := ts.CreateTestUser(t, "usrmuteself1")
 		userB := ts.CreateTestUser(t, "usrmuteself2")
 		ts.CreateFriendship(t, userA.ID, userB.ID, statusAccepted)
-		convID := ts.CreateDMConversation(t, userA.ID, userB.ID, false)
+		convID := ts.CreateDMConversation(t, userA.ID, userB.ID)
 
 		w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+userA.ID+pathUserMute, nil, testhelpers.AuthHeaders(userA.AccessToken))
 		assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -2688,7 +2657,7 @@ func TestDMHardMute(t *testing.T) {
 		userA := ts.CreateTestUser(t, "hardmutengrp1")
 		userB := ts.CreateTestUser(t, "hardmutengrp2")
 		ts.CreateFriendship(t, userA.ID, userB.ID, statusAccepted)
-		convID := ts.CreateDMConversation(t, userA.ID, userB.ID, false)
+		convID := ts.CreateDMConversation(t, userA.ID, userB.ID)
 
 		w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+userB.ID+pathMute, nil, testhelpers.AuthHeaders(userA.AccessToken))
 		assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -2798,7 +2767,7 @@ func TestDMHardDeafen(t *testing.T) {
 		userA := ts.CreateTestUser(t, "harddeafngrp1")
 		userB := ts.CreateTestUser(t, "harddeafngrp2")
 		ts.CreateFriendship(t, userA.ID, userB.ID, statusAccepted)
-		convID := ts.CreateDMConversation(t, userA.ID, userB.ID, false)
+		convID := ts.CreateDMConversation(t, userA.ID, userB.ID)
 
 		w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceSlash+userB.ID+pathDeafen, nil, testhelpers.AuthHeaders(userA.AccessToken))
 		assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -2848,7 +2817,7 @@ func TestDMHardUndeafen(t *testing.T) {
 		userA := ts.CreateTestUser(t, "hardundeafngrp1")
 		userB := ts.CreateTestUser(t, "hardundeafngrp2")
 		ts.CreateFriendship(t, userA.ID, userB.ID, statusAccepted)
-		convID := ts.CreateDMConversation(t, userA.ID, userB.ID, false)
+		convID := ts.CreateDMConversation(t, userA.ID, userB.ID)
 
 		w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathVoiceSlash+userB.ID+pathDeafen, nil, testhelpers.AuthHeaders(userA.AccessToken))
 		assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -2901,7 +2870,7 @@ func TestAuthorizeVoiceJoinEnforcement(t *testing.T) {
 		userA := ts.CreateTestUser(t, "vjoinenf1on1a")
 		userB := ts.CreateTestUser(t, "vjoinenf1on1b")
 		ts.CreateFriendship(t, userA.ID, userB.ID, statusAccepted)
-		convID := ts.CreateDMConversation(t, userA.ID, userB.ID, false)
+		convID := ts.CreateDMConversation(t, userA.ID, userB.ID)
 
 		w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceJoin, nil, testhelpers.AuthHeaders(userA.AccessToken))
 		require.Equal(t, http.StatusOK, w.Code)
@@ -2925,7 +2894,7 @@ func TestDMRotateKeyRateLimitBlocks11th(t *testing.T) {
 	ts := setupTS(t)
 	user1 := ts.CreateTestUser(t, "dmrl-user1")
 	user2 := ts.CreateTestUser(t, "dmrl-user2")
-	convID := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	headers := testhelpers.AuthHeaders(user1.AccessToken)
 	endpoint := pathDMConversationsPrefix + convID + pathRotateKey
@@ -2965,8 +2934,8 @@ func TestDMRotateKeyRateLimitIndependentConversations(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "dmrl-indep2")
 	user3 := ts.CreateTestUser(t, "dmrl-indep3")
 
-	convA := ts.CreateDMConversation(t, user1.ID, user2.ID, true)
-	convB := ts.CreateDMConversation(t, user1.ID, user3.ID, true)
+	convA := ts.CreateDMConversation(t, user1.ID, user2.ID)
+	convB := ts.CreateDMConversation(t, user1.ID, user3.ID)
 
 	headers := testhelpers.AuthHeaders(user1.AccessToken)
 

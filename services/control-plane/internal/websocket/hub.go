@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/gorilla/websocket"
 	"github.com/lib/pq"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/klipy"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
@@ -24,7 +25,6 @@ const (
 	keyServerID       = "server_id"
 	keyMessage        = "message"
 	keyContent        = "content"
-	keyIsEncrypted    = "is_encrypted"
 	keyKeyVersion     = "key_version"
 	keyCreatedAt      = "created_at"
 	keyUpdatedAt      = "updated_at"
@@ -746,14 +746,73 @@ func (h *Hub) sendErrorWithData(clientID uuid.UUID, errorCode string, extra map[
 // messageInput holds the parsed and validated fields from an incoming WebSocket message.
 type messageInput struct {
 	content         string
-	isEncrypted     bool
 	keyVersion      int
 	mentionAddendum *MentionAddendum
 	attachmentIDs   []string
 	gifSlug         *string
 }
 
-// parseMessageInput extracts and validates content, encryption, key version, and mention
+// errMissingKeyVersion is returned by validateEnvelope when an incoming
+// WebSocket message lacks a positive integer key_version field. Under
+// E2EE-everywhere (#201), every message envelope MUST carry a key version
+// for the receiving client to identify the wrapping epoch.
+var errMissingKeyVersion = errors.New("missing or invalid key_version")
+
+// validateEnvelope returns errMissingKeyVersion if the incoming message's
+// Data map lacks key_version or carries a non-positive / non-integer
+// value. Called from both the channel-send and DM-send paths before any
+// DB work. On failure, the caller MUST send close frame 4400
+// "missing_or_invalid_key_version" and disconnect.
+func validateEnvelope(msg *IncomingMessage) error {
+	raw, ok := msg.Data[keyKeyVersion]
+	if !ok {
+		return errMissingKeyVersion
+	}
+	switch v := raw.(type) {
+	case float64:
+		if v < 1 {
+			return errMissingKeyVersion
+		}
+	case int:
+		if v < 1 {
+			return errMissingKeyVersion
+		}
+	default:
+		return errMissingKeyVersion
+	}
+	return nil
+}
+
+// rejectEnvelope writes the 4400 close frame to the client's WebSocket
+// connection and logs the rejection. Used by parseMessageInput and
+// parseDMMessageFields when validateEnvelope reports a missing or invalid
+// key_version. Per [internal]rules/observability.md, the log emits only
+// user_id (UUID, not PII) and the raw key_version value rendered safely
+// via %q with a 64-char cap — never key material. The bounded rendering
+// and %q quoting defend against log-size DoS and log-injection (newlines
+// or control characters in client-supplied bytes).
+func (h *Hub) rejectEnvelope(msg IncomingMessage) {
+	rawKV := fmt.Sprintf("%v", msg.Data[keyKeyVersion])
+	if len(rawKV) > 64 {
+		rawKV = rawKV[:64] + "..."
+	}
+	log.Printf("ws envelope rejected user_id=%s reason=missing_or_invalid_key_version key_version=%q",
+		msg.UserID, rawKV)
+	client, ok := h.clients[msg.ClientID]
+	if !ok {
+		return
+	}
+	if client.Conn == nil {
+		// Defensive: unit tests construct Clients with a buffered Send channel
+		// instead of a real WebSocket connection, so Conn may be nil. In
+		// production, Conn is always non-nil (set during the upgrade handshake).
+		return
+	}
+	closeMsg := websocket.FormatCloseMessage(4400, "missing_or_invalid_key_version")
+	_ = client.Conn.WriteControl(websocket.CloseMessage, closeMsg, time.Now().Add(writeWait))
+}
+
+// parseMessageInput extracts and validates content, key version, and mention
 // addendum from an incoming WebSocket message. Returns nil on validation failure.
 func (h *Hub) parseMessageInput(msg IncomingMessage) *messageInput {
 	content, ok := msg.Data[keyContent].(string)
@@ -762,18 +821,18 @@ func (h *Hub) parseMessageInput(msg IncomingMessage) *messageInput {
 		return nil
 	}
 
-	isEncrypted, _ := msg.Data[keyIsEncrypted].(bool)
+	if err := validateEnvelope(&msg); err != nil {
+		h.rejectEnvelope(msg)
+		return nil
+	}
 
 	keyVersion := 1
 	if kv, ok := msg.Data[keyKeyVersion].(float64); ok && kv > 0 {
 		keyVersion = int(kv)
 	}
 
-	maxContentLen := 4000
-	if isEncrypted {
-		maxContentLen = 24000
-	}
-	if len(content) > maxContentLen {
+	// All channels are encrypted under E2EE-everywhere (#201); allow ciphertext-length payloads.
+	if len(content) > 24000 {
 		h.sendError(msg.ClientID, "Message content exceeds maximum length")
 		return nil
 	}
@@ -795,7 +854,6 @@ func (h *Hub) parseMessageInput(msg IncomingMessage) *messageInput {
 
 	return &messageInput{
 		content:         content,
-		isEncrypted:     isEncrypted,
 		keyVersion:      keyVersion,
 		mentionAddendum: mentionAddendum,
 		attachmentIDs:   attachmentIDs,
@@ -859,35 +917,31 @@ func (h *Hub) parseAttachmentIDs(msg IncomingMessage) ([]string, bool) {
 
 // channelContext holds server-side channel state needed for message persistence.
 type channelContext struct {
-	channelEncrypted  bool
 	serverAllowEmbeds bool
 	serverUUID        uuid.UUID
 }
 
-// fetchChannelContext queries encryption status, embed policy, and server ID for a channel.
+// fetchChannelContext queries embed policy and server ID for a channel.
 // Returns nil on failure (error already sent to client).
-func (h *Hub) fetchChannelContext(msg IncomingMessage, channelUUID uuid.UUID, isEncrypted bool) *channelContext {
+// All channels are encrypted under E2EE-everywhere (#201).
+func (h *Hub) fetchChannelContext(msg IncomingMessage, channelUUID uuid.UUID) *channelContext {
 	var ctx channelContext
 	err := h.db.QueryRow(
-		`SELECT c.is_encrypted, s.allow_embedded_content, c.server_id
+		`SELECT s.allow_embedded_content, c.server_id
 		 FROM channels c INNER JOIN servers s ON c.server_id = s.id
 		 WHERE c.id = $1`, channelUUID,
-	).Scan(&ctx.channelEncrypted, &ctx.serverAllowEmbeds, &ctx.serverUUID)
+	).Scan(&ctx.serverAllowEmbeds, &ctx.serverUUID)
 	if err != nil {
-		log.Printf("Failed to check channel encryption/embed status: %v", err)
+		log.Printf("Failed to check channel embed status: %v", err)
 		h.sendError(msg.ClientID, "Failed to verify channel status")
-		return nil
-	}
-	if ctx.channelEncrypted && !isEncrypted {
-		h.sendError(msg.ClientID, "E2EE channel requires encrypted messages")
 		return nil
 	}
 	return &ctx
 }
 
 // enforceWSEpoch checks that the key epoch is not revoked. Returns false if revoked or on error.
-func (h *Hub) enforceWSEpoch(msg IncomingMessage, channelUUID uuid.UUID, channelID string, isEncrypted bool, keyVersion int) bool {
-	if !isEncrypted || keyVersion <= 0 {
+func (h *Hub) enforceWSEpoch(msg IncomingMessage, channelUUID uuid.UUID, channelID string, keyVersion int) bool {
+	if keyVersion <= 0 {
 		return true
 	}
 	var epochRevoked bool
@@ -1051,7 +1105,6 @@ type persistMessageParams struct {
 	channelUUID      uuid.UUID
 	userID           uuid.UUID
 	content          string
-	isEncrypted      bool
 	keyVersion       int
 	embedsSuppressed bool
 	replyToID        *string
@@ -1061,11 +1114,12 @@ type persistMessageParams struct {
 func (h *Hub) persistMessage(p persistMessageParams) (uuid.UUID, time.Time, time.Time, string) {
 	messageID := uuid.New()
 	var createdAt, updatedAt time.Time
+	// Carry-along until #1026 drops the column
 	err := h.db.QueryRow(
 		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, embeds_suppressed, reply_to_id, gif_slug, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+		 VALUES ($1, $2, $3, $4, TRUE, $5, $6, $7, $8, NOW(), NOW())
 		 RETURNING created_at, updated_at`,
-		messageID, p.channelUUID, p.userID, p.content, p.isEncrypted, p.keyVersion, p.embedsSuppressed, p.replyToID, p.gifSlug,
+		messageID, p.channelUUID, p.userID, p.content, p.keyVersion, p.embedsSuppressed, p.replyToID, p.gifSlug,
 	).Scan(&createdAt, &updatedAt)
 	if err != nil && isFKViolation(err) {
 		return messageID, createdAt, updatedAt, "Reply target message not found"
@@ -1117,12 +1171,11 @@ func (h *Hub) validateReplyToID(msg IncomingMessage, channelID string) (*string,
 func (h *Hub) fetchRepliedToSummary(replyToID string) map[string]interface{} {
 	var id, userID, username, content string
 	var displayName *string
-	var isEncrypted bool
 	var keyVer int
 	err := h.db.QueryRow(`
-		SELECT m.id, m.user_id, u.username, u.display_name, m.content, m.is_encrypted, COALESCE(m.key_version, 1)
+		SELECT m.id, m.user_id, u.username, u.display_name, m.content, COALESCE(m.key_version, 1)
 		FROM messages m INNER JOIN users u ON m.user_id = u.id WHERE m.id = $1
-	`, replyToID).Scan(&id, &userID, &username, &displayName, &content, &isEncrypted, &keyVer)
+	`, replyToID).Scan(&id, &userID, &username, &displayName, &content, &keyVer)
 	if err != nil {
 		return nil
 	}
@@ -1132,7 +1185,6 @@ func (h *Hub) fetchRepliedToSummary(replyToID string) map[string]interface{} {
 		"username":     username,
 		"display_name": displayName,
 		"content":      content,
-		"is_encrypted": isEncrypted,
 		"key_version":  keyVer,
 	}
 }
@@ -1162,7 +1214,6 @@ func (h *Hub) buildMessageBroadcast(ctx messageBroadcastCtx) map[string]interfac
 		"display_name":      ctx.client.DisplayName,
 		"avatar_url":        ctx.client.AvatarURL,
 		keyContent:          ctx.input.content,
-		keyIsEncrypted:      ctx.input.isEncrypted,
 		keyKeyVersion:       ctx.input.keyVersion,
 		"embeds_suppressed": ctx.embedsSuppressed,
 		keyCreatedAt:        ctx.createdAt,
@@ -1217,12 +1268,12 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		defer input.mentionAddendum.Wipe()
 	}
 
-	// Encryption enforcement + embed policy
-	chCtx := h.fetchChannelContext(msg, channelUUID, input.isEncrypted)
+	// Embed policy + epoch enforcement (all channels are encrypted under #201)
+	chCtx := h.fetchChannelContext(msg, channelUUID)
 	if chCtx == nil {
 		return
 	}
-	if !h.enforceWSEpoch(msg, channelUUID, channelID, input.isEncrypted, input.keyVersion) {
+	if !h.enforceWSEpoch(msg, channelUUID, channelID, input.keyVersion) {
 		return
 	}
 	embedsSuppressed := !chCtx.serverAllowEmbeds
@@ -1236,7 +1287,7 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 	// Persist message
 	messageID, createdAt, updatedAt, persistErr := h.persistMessage(persistMessageParams{
 		channelUUID: channelUUID, userID: msg.UserID, content: input.content,
-		isEncrypted: input.isEncrypted, keyVersion: input.keyVersion,
+		keyVersion:       input.keyVersion,
 		embedsSuppressed: embedsSuppressed, replyToID: replyToID, gifSlug: input.gifSlug,
 	})
 	if persistErr != "" {
@@ -1652,7 +1703,6 @@ func (h *Hub) handleUnsubscribeDM(msg IncomingMessage) {
 // dmMessageInput holds the parsed and validated fields from an incoming DM WebSocket message.
 type dmMessageInput struct {
 	content         string
-	isEncrypted     bool
 	keyVersion      int
 	msgType         string
 	mentionAddendum *MentionAddendum
@@ -1663,11 +1713,10 @@ type dmMessageInput struct {
 // dmUnreadLastMessage holds last-message metadata included in dm_unread_notify
 // so that clients can update conversation previews and ordering in real-time.
 type dmUnreadLastMessage struct {
-	content     string
-	userID      string
-	username    string
-	createdAt   time.Time
-	isEncrypted bool
+	content   string
+	userID    string
+	username  string
+	createdAt time.Time
 }
 
 func (h *Hub) validateDMMessage(msg IncomingMessage) (*Client, uuid.UUID, *dmMessageInput) {
@@ -1702,7 +1751,7 @@ func (h *Hub) validateDMMessage(msg IncomingMessage) (*Client, uuid.UUID, *dmMes
 	return client, convUUID, input
 }
 
-// parseDMMessageFields extracts and validates content, encryption, type,
+// parseDMMessageFields extracts and validates content, type,
 // attachments, and mention metadata from a DM message payload.
 func (h *Hub) parseDMMessageFields(msg IncomingMessage) (*dmMessageInput, bool) {
 	content, ok := msg.Data[keyContent].(string)
@@ -1711,7 +1760,11 @@ func (h *Hub) parseDMMessageFields(msg IncomingMessage) (*dmMessageInput, bool) 
 		return nil, false
 	}
 
-	isEncrypted, _ := msg.Data[keyIsEncrypted].(bool)
+	if err := validateEnvelope(&msg); err != nil {
+		h.rejectEnvelope(msg)
+		return nil, false
+	}
+
 	msgType := "user"
 	if t, ok := msg.Data["type"].(string); ok && t == "system" {
 		msgType = "system"
@@ -1722,7 +1775,7 @@ func (h *Hub) parseDMMessageFields(msg IncomingMessage) (*dmMessageInput, bool) 
 		keyVersion = int(kv)
 	}
 
-	if !h.validateContentLength(msg.ClientID, content, isEncrypted) {
+	if !h.validateContentLength(msg.ClientID, content) {
 		return nil, false
 	}
 
@@ -1740,7 +1793,6 @@ func (h *Hub) parseDMMessageFields(msg IncomingMessage) (*dmMessageInput, bool) 
 
 	return &dmMessageInput{
 		content:         content,
-		isEncrypted:     isEncrypted,
 		keyVersion:      keyVersion,
 		msgType:         msgType,
 		mentionAddendum: mentionAddendum,
@@ -1750,13 +1802,10 @@ func (h *Hub) parseDMMessageFields(msg IncomingMessage) (*dmMessageInput, bool) 
 }
 
 // validateContentLength checks that the message content does not exceed the
-// allowed length (4000 for plaintext, 24000 for encrypted).
-func (h *Hub) validateContentLength(clientID uuid.UUID, content string, isEncrypted bool) bool {
-	maxContentLen := 4000
-	if isEncrypted {
-		maxContentLen = 24000
-	}
-	if len(content) > maxContentLen {
+// allowed length. All messages are encrypted under E2EE-everywhere (#201),
+// so the 24000-byte ciphertext cap applies.
+func (h *Hub) validateContentLength(clientID uuid.UUID, content string) bool {
+	if len(content) > 24000 {
 		h.sendError(clientID, "Message content exceeds maximum length")
 		return false
 	}
@@ -1778,27 +1827,24 @@ func (h *Hub) parseDMMentionMeta(msg IncomingMessage) *MentionAddendum {
 	return mentionAddendum
 }
 
-func (h *Hub) enforceDMEncryption(msg IncomingMessage, convUUID uuid.UUID, isEncrypted bool, keyVersion int) (convPersonal bool, ok bool) {
-	var convEncrypted bool
-	encErr := h.db.QueryRow(`SELECT is_encrypted, is_personal FROM dm_conversations WHERE id = $1`, convUUID).Scan(&convEncrypted, &convPersonal)
+// enforceDMEncryption fetches conversation metadata and verifies epoch validity.
+// All DMs are encrypted under E2EE-everywhere (#201).
+func (h *Hub) enforceDMEncryption(msg IncomingMessage, convUUID uuid.UUID, keyVersion int) (convPersonal bool, ok bool) {
+	encErr := h.db.QueryRow(`SELECT is_personal FROM dm_conversations WHERE id = $1`, convUUID).Scan(&convPersonal)
 	if encErr != nil {
-		log.Printf("Failed to check DM encryption status: %v", encErr)
-		h.sendError(msg.ClientID, "Failed to verify conversation encryption status")
-		return false, false
-	}
-	if convEncrypted && !isEncrypted {
-		h.sendError(msg.ClientID, "Encrypted conversation requires encrypted messages")
+		log.Printf("Failed to check DM conversation status: %v", encErr)
+		h.sendError(msg.ClientID, "Failed to verify conversation status")
 		return false, false
 	}
 
-	if !h.enforceDMEpoch(msg, convUUID, isEncrypted, keyVersion) {
+	if !h.enforceDMEpoch(msg, convUUID, keyVersion) {
 		return false, false
 	}
 	return convPersonal, true
 }
 
-func (h *Hub) enforceDMEpoch(msg IncomingMessage, convUUID uuid.UUID, isEncrypted bool, keyVersion int) bool {
-	if !isEncrypted || keyVersion <= 0 {
+func (h *Hub) enforceDMEpoch(msg IncomingMessage, convUUID uuid.UUID, keyVersion int) bool {
+	if keyVersion <= 0 {
 		return true
 	}
 	var epochRevoked bool
@@ -1832,11 +1878,12 @@ func (h *Hub) enforceDMEpoch(msg IncomingMessage, convUUID uuid.UUID, isEncrypte
 func (h *Hub) persistDMMessage(convUUID uuid.UUID, userID uuid.UUID, input *dmMessageInput) (uuid.UUID, time.Time, time.Time, error) {
 	messageID := uuid.New()
 	var createdAt, updatedAt time.Time
+	// Carry-along until #1026 drops the column
 	err := h.db.QueryRow(
 		`INSERT INTO dm_messages (id, conversation_id, user_id, content, is_encrypted, key_version, type, gif_slug, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
+		 VALUES ($1, $2, $3, $4, TRUE, $5, $6, $7, NOW(), NOW())
 		 RETURNING created_at, updated_at`,
-		messageID, convUUID, userID, input.content, input.isEncrypted, input.keyVersion, input.msgType, input.gifSlug,
+		messageID, convUUID, userID, input.content, input.keyVersion, input.msgType, input.gifSlug,
 	).Scan(&createdAt, &updatedAt)
 	return messageID, createdAt, updatedAt, err
 }
@@ -1898,7 +1945,6 @@ func (h *Hub) broadcastDMMessage(ctx dmBroadcastCtx) {
 		"display_name":    ctx.client.DisplayName,
 		"avatar_url":      ctx.client.AvatarURL,
 		keyContent:        ctx.input.content,
-		keyIsEncrypted:    ctx.input.isEncrypted,
 		keyKeyVersion:     ctx.input.keyVersion,
 		"type":            ctx.input.msgType,
 		keyCreatedAt:      ctx.createdAt,
@@ -1932,7 +1978,7 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 		defer input.mentionAddendum.Wipe()
 	}
 
-	convPersonal, ok := h.enforceDMEncryption(msg, convUUID, input.isEncrypted, input.keyVersion)
+	convPersonal, ok := h.enforceDMEncryption(msg, convUUID, input.keyVersion)
 	if !ok {
 		return
 	}
@@ -1958,11 +2004,10 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 		attachments: attachments, convPersonal: convPersonal,
 	})
 	h.sendDMUnreadNotify(convUUID, msg.UserID, dmUnreadLastMessage{
-		content:     input.content,
-		userID:      msg.UserID.String(),
-		username:    client.Username,
-		createdAt:   createdAt,
-		isEncrypted: input.isEncrypted,
+		content:   input.content,
+		userID:    msg.UserID.String(),
+		username:  client.Username,
+		createdAt: createdAt,
 	})
 
 	if input.mentionAddendum != nil {
@@ -1984,11 +2029,10 @@ func (h *Hub) sendDMUnreadNotify(conversationID, senderUserID uuid.UUID, lastMsg
 		Data: map[string]interface{}{
 			keyConversationID: conversationID.String(),
 			"last_message": map[string]interface{}{
-				keyContent:     lastMsg.content,
-				keyUserID:      lastMsg.userID,
-				keyUsername:    lastMsg.username,
-				keyCreatedAt:   lastMsg.createdAt,
-				keyIsEncrypted: lastMsg.isEncrypted,
+				keyContent:   lastMsg.content,
+				keyUserID:    lastMsg.userID,
+				keyUsername:  lastMsg.username,
+				keyCreatedAt: lastMsg.createdAt,
 			},
 		},
 	}

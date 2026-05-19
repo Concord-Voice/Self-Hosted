@@ -73,7 +73,6 @@ func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, resolver *rb
 type SendMessageRequest struct {
 	ChannelID   string  `json:"channel_id" binding:"required,uuid"`
 	Content     string  `json:"content" binding:"required,min=1,max=24000"`
-	IsEncrypted bool    `json:"is_encrypted"`
 	KeyVersion  int     `json:"key_version"`
 	ReplyToID   *string `json:"reply_to_id,omitempty"`  // Optional: UUID of message being replied to (must be same channel)
 	MentionMeta string  `json:"mention_meta,omitempty"` // Accepted but unused — mention routing is WebSocket-only. Field exists so REST clients don't get a 400 for including it.
@@ -295,7 +294,7 @@ func (h *Handler) queryMessages(channelID, before string, limit int) ([]models.M
 
 	if before != "" {
 		query = `
-			SELECT m.id, m.channel_id, m.user_id, m.content, m.is_encrypted, COALESCE(m.key_version, 1),
+			SELECT m.id, m.channel_id, m.user_id, m.content, COALESCE(m.key_version, 1),
 			       m.embeds_suppressed, m.reply_to_id, m.pinned_at, m.pinned_by, m.edited_at, m.created_at, m.updated_at,
 			       u.username, u.display_name, u.avatar_url
 			FROM messages m
@@ -308,7 +307,7 @@ func (h *Handler) queryMessages(channelID, before string, limit int) ([]models.M
 		args = []interface{}{channelID, before, limit}
 	} else {
 		query = `
-			SELECT m.id, m.channel_id, m.user_id, m.content, m.is_encrypted, COALESCE(m.key_version, 1),
+			SELECT m.id, m.channel_id, m.user_id, m.content, COALESCE(m.key_version, 1),
 			       m.embeds_suppressed, m.reply_to_id, m.pinned_at, m.pinned_by, m.edited_at, m.created_at, m.updated_at,
 			       u.username, u.display_name, u.avatar_url
 			FROM messages m
@@ -334,7 +333,6 @@ func (h *Handler) queryMessages(channelID, before string, limit int) ([]models.M
 			&msg.ChannelID,
 			&msg.UserID,
 			&msg.Content,
-			&msg.IsEncrypted,
 			&msg.KeyVersion,
 			&msg.EmbedsSuppressed,
 			&msg.ReplyToID,
@@ -425,20 +423,11 @@ func (h *Handler) checkSendAccess(c *gin.Context, channelID, userID string) (str
 	return serverID, serverAllowEmbeds, true
 }
 
-// enforceE2EE validates encryption requirements and epoch revocation for the channel.
+// enforceE2EE validates ciphertext shape and epoch revocation for the channel.
+// All channels are encrypted under E2EE-everywhere (#201).
 // Returns (keyVersion, ok). On failure, writes the JSON error to c.
-func (h *Handler) enforceE2EE(c *gin.Context, channelID string, isEncrypted bool, content string, reqKeyVersion int) (int, bool) {
-	var channelEncrypted bool
-	if err := h.db.QueryRow(`SELECT is_encrypted FROM channels WHERE id = $1`, channelID).Scan(&channelEncrypted); err != nil {
-		h.log.Error("Failed to check channel encryption status", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendMessage})
-		return 0, false
-	}
-	if channelEncrypted && !isEncrypted {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "E2EE channel requires encrypted messages"})
-		return 0, false
-	}
-	if channelEncrypted && !isValidCiphertext(content) {
+func (h *Handler) enforceE2EE(c *gin.Context, channelID string, content string, reqKeyVersion int) (int, bool) {
+	if !isValidCiphertext(content) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidCiphertext})
 		return 0, false
 	}
@@ -448,32 +437,30 @@ func (h *Handler) enforceE2EE(c *gin.Context, channelID string, isEncrypted bool
 		keyVersion = 1
 	}
 
-	if isEncrypted && keyVersion > 0 {
-		var epochRevoked bool
+	var epochRevoked bool
+	if err := h.db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM key_revocations WHERE channel_id = $1 AND revoked_epoch = $2)`,
+		channelID, keyVersion,
+	).Scan(&epochRevoked); err != nil {
+		h.log.Error("Failed to check epoch revocation", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify key epoch"})
+		return 0, false
+	}
+	if epochRevoked {
+		currentEpoch := 1
 		if err := h.db.QueryRow(
-			`SELECT EXISTS(SELECT 1 FROM key_revocations WHERE channel_id = $1 AND revoked_epoch = $2)`,
-			channelID, keyVersion,
-		).Scan(&epochRevoked); err != nil {
-			h.log.Error("Failed to check epoch revocation", "error", err)
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify key epoch"})
-			return 0, false
+			`SELECT COALESCE(MAX(key_version), 1) FROM channel_keys WHERE channel_id = $1`,
+			channelID,
+		).Scan(&currentEpoch); err != nil {
+			h.log.Error("Failed to fetch current epoch", "error", err, "channel_id", channelID)
 		}
-		if epochRevoked {
-			currentEpoch := 1
-			if err := h.db.QueryRow(
-				`SELECT COALESCE(MAX(key_version), 1) FROM channel_keys WHERE channel_id = $1`,
-				channelID,
-			).Scan(&currentEpoch); err != nil {
-				h.log.Error("Failed to fetch current epoch", "error", err, "channel_id", channelID)
-			}
-			c.JSON(http.StatusConflict, gin.H{
-				"error":         "Key epoch has been revoked — re-encrypt with current epoch",
-				"code":          "epoch_revoked",
-				"current_epoch": currentEpoch,
-				"channel_id":    channelID,
-			})
-			return 0, false
-		}
+		c.JSON(http.StatusConflict, gin.H{
+			"error":         "Key epoch has been revoked — re-encrypt with current epoch",
+			"code":          "epoch_revoked",
+			"current_epoch": currentEpoch,
+			"channel_id":    channelID,
+		})
+		return 0, false
 	}
 
 	return keyVersion, true
@@ -494,7 +481,7 @@ func (h *Handler) SendMessage(c *gin.Context) {
 		return
 	}
 
-	keyVersion, e2eeOK := h.enforceE2EE(c, req.ChannelID, req.IsEncrypted, req.Content, req.KeyVersion)
+	keyVersion, e2eeOK := h.enforceE2EE(c, req.ChannelID, req.Content, req.KeyVersion)
 	if !e2eeOK {
 		return
 	}
@@ -521,9 +508,10 @@ func (h *Handler) SendMessage(c *gin.Context) {
 	embedsSuppressed := !serverAllowEmbeds
 
 	messageID := uuid.New().String()
+	// Carry-along until #1026 drops the column
 	insertQuery := `
 		INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, embeds_suppressed, reply_to_id, gif_slug, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+		VALUES ($1, $2, $3, $4, TRUE, $5, $6, $7, $8, NOW(), NOW())
 		RETURNING created_at, updated_at
 	`
 
@@ -532,13 +520,12 @@ func (h *Handler) SendMessage(c *gin.Context) {
 	message.ChannelID = req.ChannelID
 	message.UserID = userID
 	message.Content = req.Content
-	message.IsEncrypted = req.IsEncrypted
 	message.KeyVersion = keyVersion
 	message.EmbedsSuppressed = embedsSuppressed
 	message.ReplyToID = replyToID
 	message.GifSlug = gifSlug
 
-	err := h.db.QueryRow(insertQuery, messageID, req.ChannelID, userID, req.Content, req.IsEncrypted, keyVersion, embedsSuppressed, replyToID, gifSlug).Scan(
+	err := h.db.QueryRow(insertQuery, messageID, req.ChannelID, userID, req.Content, keyVersion, embedsSuppressed, replyToID, gifSlug).Scan(
 		&message.CreatedAt,
 		&message.UpdatedAt,
 	)
@@ -593,15 +580,8 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 		return
 	}
 
-	// E2EE enforcement: if the message was originally encrypted, updates must also be encrypted
-	var msgEncrypted bool
-	encCheckQuery := `SELECT COALESCE(c.is_encrypted, false) FROM messages m INNER JOIN channels c ON m.channel_id = c.id WHERE m.id = $1`
-	if err := h.db.QueryRow(encCheckQuery, messageID).Scan(&msgEncrypted); err != nil {
-		h.log.Error("Failed to check channel encryption for update", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateMessage})
-		return
-	}
-	if msgEncrypted && !isValidCiphertext(req.Content) {
+	// E2EE enforcement — all messages are encrypted under #201; require ciphertext shape unconditionally.
+	if !isValidCiphertext(req.Content) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidCiphertext})
 		return
 	}
@@ -611,7 +591,7 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 		UPDATE messages
 		SET content = $1, edited_at = NOW(), updated_at = NOW()
 		WHERE id = $2
-		RETURNING channel_id, is_encrypted, key_version, embeds_suppressed, edited_at, created_at, updated_at
+		RETURNING channel_id, key_version, embeds_suppressed, edited_at, created_at, updated_at
 	`
 
 	var message models.Message
@@ -621,7 +601,6 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 
 	err = h.db.QueryRow(updateQuery, req.Content, messageID).Scan(
 		&message.ChannelID,
-		&message.IsEncrypted,
 		&message.KeyVersion,
 		&message.EmbedsSuppressed,
 		&message.EditedAt,
@@ -646,7 +625,6 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 				"id":                messageID,
 				"channel_id":        message.ChannelID,
 				"content":           message.Content,
-				"is_encrypted":      message.IsEncrypted,
 				"key_version":       message.KeyVersion,
 				"embeds_suppressed": message.EmbedsSuppressed,
 				"edited_at":         message.EditedAt,

@@ -231,7 +231,7 @@ func (h *Handler) DownloadAttachment(c *gin.Context) {
 	var channelID, conversationID *string
 
 	query := `SELECT storage_key, mime_type, file_size, channel_id, conversation_id FROM media_files
-	          WHERE id = $1 AND deleted_at IS NULL AND media_tier = 2 AND is_encrypted = TRUE`
+	          WHERE id = $1 AND deleted_at IS NULL AND media_tier = 2`
 	err := h.db.QueryRow(query, fileID).Scan(&storageKey, &mimeType, &fileSize, &channelID, &conversationID)
 	if err == sql.ErrNoRows {
 		c.JSON(http.StatusNotFound, gin.H{"error": "File not found"})
@@ -728,6 +728,7 @@ func createAttachmentRecord(h *Handler, _ *gin.Context, p attachmentParams) erro
 		convID = p.conversationID
 	}
 
+	// Carry-along until #1026 drops the column
 	insertQuery := `
 		INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key,
 		                         is_encrypted, key_version, channel_id, conversation_id, created_at)

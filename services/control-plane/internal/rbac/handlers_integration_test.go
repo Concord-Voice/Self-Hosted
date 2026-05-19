@@ -957,7 +957,7 @@ func TestGetAuditLog_InvalidServerID(t *testing.T) {
 
 func TestListChannelOverrides_Success(t *testing.T) {
 	ts, owner, _, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "override-test", false)
+	channelID := ts.CreateTestChannel(t, serverID, "override-test")
 
 	w := ts.DoRequest("GET", channelOverridesPath(channelID), nil, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -970,7 +970,7 @@ func TestListChannelOverrides_Success(t *testing.T) {
 
 func TestListChannelOverrides_BaseMember_Forbidden(t *testing.T) {
 	ts, _, member, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "override-forbidden", false)
+	channelID := ts.CreateTestChannel(t, serverID, "override-forbidden")
 
 	w := ts.DoRequest("GET", channelOverridesPath(channelID), nil, testhelpers.AuthHeaders(member.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
@@ -992,7 +992,7 @@ func TestListChannelOverrides_InvalidChannelID(t *testing.T) {
 
 func TestUpsertChannelOverride_Success(t *testing.T) {
 	ts, owner, member, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "upsert-test", false)
+	channelID := ts.CreateTestChannel(t, serverID, "upsert-test")
 
 	body := map[string]interface{}{
 		"target_type": "user",
@@ -1012,7 +1012,7 @@ func TestUpsertChannelOverride_Success(t *testing.T) {
 
 func TestUpsertChannelOverride_RoleTarget(t *testing.T) {
 	ts, owner, _, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "upsert-role-test", false)
+	channelID := ts.CreateTestChannel(t, serverID, "upsert-role-test")
 
 	// Get @all role ID
 	var allRoleID string
@@ -1031,7 +1031,7 @@ func TestUpsertChannelOverride_RoleTarget(t *testing.T) {
 
 func TestUpsertChannelOverride_UpsertUpdatesExisting(t *testing.T) {
 	ts, owner, member, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "upsert-update", false)
+	channelID := ts.CreateTestChannel(t, serverID, "upsert-update")
 
 	body := map[string]interface{}{
 		"target_type": "user",
@@ -1059,7 +1059,7 @@ func TestUpsertChannelOverride_UpsertUpdatesExisting(t *testing.T) {
 
 func TestUpsertChannelOverride_BaseMember_Forbidden(t *testing.T) {
 	ts, _, member, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "upsert-forbidden", false)
+	channelID := ts.CreateTestChannel(t, serverID, "upsert-forbidden")
 
 	body := map[string]interface{}{
 		"target_type": "user",
@@ -1073,7 +1073,7 @@ func TestUpsertChannelOverride_BaseMember_Forbidden(t *testing.T) {
 
 func TestUpsertChannelOverride_PrivilegeEscalation_Blocked(t *testing.T) {
 	ts, _, member, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "upsert-escalation", false)
+	channelID := ts.CreateTestChannel(t, serverID, "upsert-escalation")
 
 	// Give member ManageChannels (required for override) but NOT PermBan
 	grantPermToUser(t, ts, serverID, member.ID, 5, int64(rbac.PermManageChannels))
@@ -1094,7 +1094,7 @@ func TestUpsertChannelOverride_PrivilegeEscalation_Blocked(t *testing.T) {
 
 func TestUpsertChannelOverride_DenyBitsNoEscalationCheck(t *testing.T) {
 	ts, _, member, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "deny-no-escalation", false)
+	channelID := ts.CreateTestChannel(t, serverID, "deny-no-escalation")
 
 	// Give member ManageChannels only
 	grantPermToUser(t, ts, serverID, member.ID, 5, int64(rbac.PermManageChannels))
@@ -1112,7 +1112,7 @@ func TestUpsertChannelOverride_DenyBitsNoEscalationCheck(t *testing.T) {
 
 func TestUpsertChannelOverride_InvalidBody(t *testing.T) {
 	ts, owner, _, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "invalid-body", false)
+	channelID := ts.CreateTestChannel(t, serverID, "invalid-body")
 
 	tests := []struct {
 		name string
@@ -1168,7 +1168,7 @@ func TestUpsertChannelOverride_ChannelNotFound(t *testing.T) {
 
 func TestDeleteChannelOverride_Success(t *testing.T) {
 	ts, owner, member, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "delete-override", false)
+	channelID := ts.CreateTestChannel(t, serverID, "delete-override")
 
 	// Create an override first
 	upsertBody := map[string]interface{}{
@@ -1196,7 +1196,7 @@ func TestDeleteChannelOverride_Success(t *testing.T) {
 
 func TestDeleteChannelOverride_NotFound(t *testing.T) {
 	ts, owner, _, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "del-override-nf", false)
+	channelID := ts.CreateTestChannel(t, serverID, "del-override-nf")
 
 	w := ts.DoRequest("DELETE", channelOverridePath(channelID, uuid.New().String()), nil, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, http.StatusNotFound, w.Code)
@@ -1204,7 +1204,7 @@ func TestDeleteChannelOverride_NotFound(t *testing.T) {
 
 func TestDeleteChannelOverride_BaseMember_Forbidden(t *testing.T) {
 	ts, owner, member, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "del-override-403", false)
+	channelID := ts.CreateTestChannel(t, serverID, "del-override-403")
 
 	// Create override as owner
 	upsertBody := map[string]interface{}{
@@ -1234,7 +1234,7 @@ func TestDeleteChannelOverride_InvalidIDs(t *testing.T) {
 
 	// Invalid override ID
 	_, owner2, _, sid := setupOwnerAndMember(t)
-	chID := ts.CreateTestChannel(t, sid, "del-inv-override", false)
+	chID := ts.CreateTestChannel(t, sid, "del-inv-override")
 	w = ts.DoRequest("DELETE", channelOverridePath(chID, invalidUUID), nil, testhelpers.AuthHeaders(owner2.AccessToken))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
@@ -1252,7 +1252,7 @@ func TestDeleteChannelOverride_ChannelNotFound(t *testing.T) {
 
 func TestGetMyChannelPermissions_Success(t *testing.T) {
 	ts, owner, _, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "perms-test", false)
+	channelID := ts.CreateTestChannel(t, serverID, "perms-test")
 
 	w := ts.DoRequest("GET", channelPermissionsPath(channelID), nil, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -1265,7 +1265,7 @@ func TestGetMyChannelPermissions_Success(t *testing.T) {
 
 func TestGetMyChannelPermissions_WithOverride(t *testing.T) {
 	ts, owner, member, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "perms-override", false)
+	channelID := ts.CreateTestChannel(t, serverID, "perms-override")
 
 	// Deny SendMessages for member in this channel
 	upsertBody := map[string]interface{}{
@@ -1432,7 +1432,7 @@ func TestUpsertCategoryOverride_NotFound(t *testing.T) {
 func TestUpsertCategoryOverride_SyncsToChlid(t *testing.T) {
 	ts, owner, member, serverID := setupOwnerAndMember(t)
 	catID := createTestCategory(t, ts, serverID, "cat-sync")
-	channelID := ts.CreateTestChannel(t, serverID, "synced-channel", false)
+	channelID := ts.CreateTestChannel(t, serverID, "synced-channel")
 	assignChannelToCategory(t, ts, channelID, catID, true)
 
 	// Create a category override
@@ -1485,7 +1485,7 @@ func TestDeleteCategoryOverride_Success(t *testing.T) {
 func TestDeleteCategoryOverride_CascadesToSyncedChannels(t *testing.T) {
 	ts, owner, member, serverID := setupOwnerAndMember(t)
 	catID := createTestCategory(t, ts, serverID, "cat-cascade-del")
-	channelID := ts.CreateTestChannel(t, serverID, "cascaded-channel", false)
+	channelID := ts.CreateTestChannel(t, serverID, "cascaded-channel")
 	assignChannelToCategory(t, ts, channelID, catID, true)
 
 	// Create category override (which syncs to child)
@@ -1574,7 +1574,7 @@ func TestDeleteCategoryOverride_InvalidIDs(t *testing.T) {
 func TestSetChannelPermSync_EnableSync(t *testing.T) {
 	ts, owner, member, serverID := setupOwnerAndMember(t)
 	catID := createTestCategory(t, ts, serverID, "sync-enable")
-	channelID := ts.CreateTestChannel(t, serverID, "sync-test", false)
+	channelID := ts.CreateTestChannel(t, serverID, "sync-test")
 	assignChannelToCategory(t, ts, channelID, catID, false)
 
 	// Create a category override first
@@ -1610,7 +1610,7 @@ func TestSetChannelPermSync_EnableSync(t *testing.T) {
 func TestSetChannelPermSync_DisableSync(t *testing.T) {
 	ts, owner, _, serverID := setupOwnerAndMember(t)
 	catID := createTestCategory(t, ts, serverID, "sync-disable")
-	channelID := ts.CreateTestChannel(t, serverID, "sync-off", false)
+	channelID := ts.CreateTestChannel(t, serverID, "sync-off")
 	assignChannelToCategory(t, ts, channelID, catID, true)
 
 	body := map[string]interface{}{
@@ -1626,7 +1626,7 @@ func TestSetChannelPermSync_DisableSync(t *testing.T) {
 
 func TestSetChannelPermSync_NoCategoryReject(t *testing.T) {
 	ts, owner, _, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "no-category", false)
+	channelID := ts.CreateTestChannel(t, serverID, "no-category")
 
 	// Channel not in any category — enabling sync should fail
 	body := map[string]interface{}{
@@ -1643,7 +1643,7 @@ func TestSetChannelPermSync_NoCategoryReject(t *testing.T) {
 func TestSetChannelPermSync_BaseMember_Forbidden(t *testing.T) {
 	ts, _, member, serverID := setupOwnerAndMember(t)
 	catID := createTestCategory(t, ts, serverID, "sync-forbidden")
-	channelID := ts.CreateTestChannel(t, serverID, "sync-403", false)
+	channelID := ts.CreateTestChannel(t, serverID, "sync-403")
 	assignChannelToCategory(t, ts, channelID, catID, false)
 
 	body := map[string]interface{}{
@@ -1720,7 +1720,7 @@ func TestRBACFlow_CreateAssignVerifyPermissions(t *testing.T) {
 
 func TestRBACFlow_ChannelOverrideAffectsPermissions(t *testing.T) {
 	ts, owner, member, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "flow-override", false)
+	channelID := ts.CreateTestChannel(t, serverID, "flow-override")
 
 	// 1. Member should have SendMessages in this channel (from BasePermissions)
 	w := ts.DoRequest("GET", channelPermissionsPath(channelID), nil, testhelpers.AuthHeaders(member.AccessToken))
@@ -1804,7 +1804,7 @@ func TestAuditLog_RecordsRoleLifecycle(t *testing.T) {
 
 func TestAuditLog_RecordsChannelOverrideLifecycle(t *testing.T) {
 	ts, owner, member, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "audit-override", false)
+	channelID := ts.CreateTestChannel(t, serverID, "audit-override")
 
 	// Create override
 	overrideBody := map[string]interface{}{
@@ -2094,7 +2094,7 @@ func TestUpdateRoleEmojiBooleanFields(t *testing.T) {
 
 func TestGetMyChannelPermissionsNonMember(t *testing.T) {
 	ts, _, _, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "perms-outsider", false)
+	channelID := ts.CreateTestChannel(t, serverID, "perms-outsider")
 	outsider := ts.CreateTestUser(t, "chpermout"+uuid.New().String()[:6])
 
 	w := ts.DoRequest("GET", channelPermissionsPath(channelID), nil, testhelpers.AuthHeaders(outsider.AccessToken))
@@ -2117,7 +2117,7 @@ func TestUpsertChannelOverrideInvalidChannelID(t *testing.T) {
 
 func TestListChannelOverridesWithExistingOverrides(t *testing.T) {
 	ts, owner, member, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "list-with-overrides", false)
+	channelID := ts.CreateTestChannel(t, serverID, "list-with-overrides")
 
 	upsertBody := map[string]interface{}{
 		"target_type": "user",
@@ -2217,7 +2217,7 @@ func TestUpsertCategoryOverrideUpsertUpdatesExisting(t *testing.T) {
 
 func TestSetChannelPermSyncInvalidBody(t *testing.T) {
 	ts, owner, _, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "sync-bad-body", false)
+	channelID := ts.CreateTestChannel(t, serverID, "sync-bad-body")
 
 	w := ts.DoRequest("PUT", channelPermSyncPath(channelID), malformedJSON, testhelpers.AuthHeaders(owner.AccessToken))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
@@ -2226,7 +2226,7 @@ func TestSetChannelPermSyncInvalidBody(t *testing.T) {
 func TestSetChannelPermSyncMemberWithPermissionSuccess(t *testing.T) {
 	ts, _, member, serverID := setupOwnerAndMember(t)
 	catID := createTestCategory(t, ts, serverID, "sync-member-perm")
-	channelID := ts.CreateTestChannel(t, serverID, "sync-member-ch", false)
+	channelID := ts.CreateTestChannel(t, serverID, "sync-member-ch")
 	assignChannelToCategory(t, ts, channelID, catID, false)
 
 	grantPermToUser(t, ts, serverID, member.ID, 5, int64(rbac.PermManageChannels))
@@ -2241,7 +2241,7 @@ func TestSetChannelPermSyncMemberWithPermissionSuccess(t *testing.T) {
 func TestDeleteCategoryOverrideCascadeNoSyncChannels(t *testing.T) {
 	ts, owner, member, serverID := setupOwnerAndMember(t)
 	catID := createTestCategory(t, ts, serverID, "cat-no-sync-cascade")
-	channelID := ts.CreateTestChannel(t, serverID, "unsync-channel", false)
+	channelID := ts.CreateTestChannel(t, serverID, "unsync-channel")
 	assignChannelToCategory(t, ts, channelID, catID, false) // sync=false
 
 	body := map[string]interface{}{
@@ -2263,7 +2263,7 @@ func TestDeleteCategoryOverrideCascadeNoSyncChannels(t *testing.T) {
 
 func TestListChannelOverridesMemberWithManageChannels(t *testing.T) {
 	ts, _, member, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "list-perm", false)
+	channelID := ts.CreateTestChannel(t, serverID, "list-perm")
 
 	grantPermToUser(t, ts, serverID, member.ID, 5, int64(rbac.PermManageChannels))
 
@@ -2273,7 +2273,7 @@ func TestListChannelOverridesMemberWithManageChannels(t *testing.T) {
 
 func TestDeleteChannelOverrideMemberWithManageChannels(t *testing.T) {
 	ts, owner, member, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "del-member-perm", false)
+	channelID := ts.CreateTestChannel(t, serverID, "del-member-perm")
 
 	grantPermToUser(t, ts, serverID, member.ID, 5, int64(rbac.PermManageChannels))
 
@@ -2296,7 +2296,7 @@ func TestDeleteChannelOverrideMemberWithManageChannels(t *testing.T) {
 
 func TestUpsertChannelOverrideMemberWithManageChannels(t *testing.T) {
 	ts, _, member, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "upsert-member-perm", false)
+	channelID := ts.CreateTestChannel(t, serverID, "upsert-member-perm")
 
 	grantPermToUser(t, ts, serverID, member.ID, 5, int64(rbac.PermManageChannels|rbac.PermSendMessages))
 
@@ -2414,7 +2414,7 @@ func TestGetAuditLogInvalidPaginationUsesDefaults(t *testing.T) {
 func TestSetChannelPermSyncDisableSyncWithExistingOverrides(t *testing.T) {
 	ts, owner, member, serverID := setupOwnerAndMember(t)
 	catID := createTestCategory(t, ts, serverID, "sync-disable-existing")
-	channelID := ts.CreateTestChannel(t, serverID, "sync-disable-ch", false)
+	channelID := ts.CreateTestChannel(t, serverID, "sync-disable-ch")
 	assignChannelToCategory(t, ts, channelID, catID, false)
 
 	catBody := map[string]interface{}{
@@ -2534,7 +2534,7 @@ func TestUpsertCategoryOverrideDenyBitsNoEscalation(t *testing.T) {
 func TestSetChannelPermSyncEnableSyncNoCategoryOverrides(t *testing.T) {
 	ts, owner, _, serverID := setupOwnerAndMember(t)
 	catID := createTestCategory(t, ts, serverID, "sync-empty-cat")
-	channelID := ts.CreateTestChannel(t, serverID, "sync-empty-ch", false)
+	channelID := ts.CreateTestChannel(t, serverID, "sync-empty-ch")
 	assignChannelToCategory(t, ts, channelID, catID, false)
 
 	body := map[string]interface{}{
@@ -2555,7 +2555,7 @@ func TestSetChannelPermSyncEnableSyncNoCategoryOverrides(t *testing.T) {
 func TestSetChannelPermSyncEnableSyncWithExistingChannelOverrides(t *testing.T) {
 	ts, owner, member, serverID := setupOwnerAndMember(t)
 	catID := createTestCategory(t, ts, serverID, "sync-replace")
-	channelID := ts.CreateTestChannel(t, serverID, "sync-replace-ch", false)
+	channelID := ts.CreateTestChannel(t, serverID, "sync-replace-ch")
 	assignChannelToCategory(t, ts, channelID, catID, false)
 
 	// Create a channel override directly
@@ -2725,7 +2725,7 @@ func TestGetAuditLogLimitBounds(t *testing.T) {
 
 func TestUpsertChannelOverrideAdminBypassesEscalation(t *testing.T) {
 	ts, _, member, serverID := setupOwnerAndMember(t)
-	channelID := ts.CreateTestChannel(t, serverID, "admin-bypass", false)
+	channelID := ts.CreateTestChannel(t, serverID, "admin-bypass")
 
 	// Give member Administrator
 	grantPermToUser(t, ts, serverID, member.ID, 5, int64(rbac.PermAdministrator))

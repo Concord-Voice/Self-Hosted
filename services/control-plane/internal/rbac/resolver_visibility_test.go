@@ -22,7 +22,7 @@ func TestGetVisibleChannelIDsOwnerSeesAll(t *testing.T) {
 
 	owner := ts.CreateTestUser(t, "visowner1")
 	serverID := ts.CreateTestServer(t, owner.ID, "Visibility Server 1")
-	ch1 := ts.CreateTestChannel(t, serverID, chanText1, false)
+	ch1 := ts.CreateTestChannel(t, serverID, chanText1)
 	ch2 := ts.CreateVoiceChannel(t, serverID, chanVoice1)
 
 	ids, err := resolver.GetVisibleChannelIDs(ctx, serverID, owner.ID)
@@ -39,7 +39,7 @@ func TestGetVisibleChannelIDsNonMemberSeesNone(t *testing.T) {
 	owner := ts.CreateTestUser(t, "visowner2")
 	outsider := ts.CreateTestUser(t, "visoutsider2")
 	serverID := ts.CreateTestServer(t, owner.ID, "Visibility Server 2")
-	ts.CreateTestChannel(t, serverID, chanText1, false)
+	ts.CreateTestChannel(t, serverID, chanText1)
 
 	ids, err := resolver.GetVisibleChannelIDs(ctx, serverID, outsider.ID)
 	require.NoError(t, err)
@@ -54,7 +54,7 @@ func TestGetVisibleChannelIDsBaseMemberSeesAll(t *testing.T) {
 	member := ts.CreateTestUser(t, "vismember3")
 	serverID := ts.CreateTestServer(t, owner.ID, "Visibility Server 3")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
-	ch1 := ts.CreateTestChannel(t, serverID, chanText1, false)
+	ch1 := ts.CreateTestChannel(t, serverID, chanText1)
 	ch2 := ts.CreateVoiceChannel(t, serverID, chanVoice1)
 
 	ids, err := resolver.GetVisibleChannelIDs(ctx, serverID, member.ID)
@@ -71,8 +71,8 @@ func TestGetVisibleChannelIDsDenyHidesChannel(t *testing.T) {
 	member := ts.CreateTestUser(t, "vismember4")
 	serverID := ts.CreateTestServer(t, owner.ID, "Visibility Server 4")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
-	chVisible := ts.CreateTestChannel(t, serverID, "visible", false)
-	chHidden := ts.CreateTestChannel(t, serverID, "hidden", false)
+	chVisible := ts.CreateTestChannel(t, serverID, "visible")
+	chHidden := ts.CreateTestChannel(t, serverID, "hidden")
 
 	// Get @all role
 	var allRoleID string
@@ -96,7 +96,7 @@ func TestGetVisibleChannelIDsDenyVoiceHidesVoiceChannel(t *testing.T) {
 	member := ts.CreateTestUser(t, "vismember5")
 	serverID := ts.CreateTestServer(t, owner.ID, "Visibility Server 5")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
-	chText := ts.CreateTestChannel(t, serverID, "text-chan", false)
+	chText := ts.CreateTestChannel(t, serverID, "text-chan")
 	chVoice := ts.CreateVoiceChannel(t, serverID, "voice-chan")
 
 	// Get @all role
@@ -126,7 +126,7 @@ func TestGetVisibleChannelIDsAdminSeesAll(t *testing.T) {
 	adminRoleID := ts.CreateTestRole(t, serverID, "Admin", 10, int64(rbac.PermAdministrator))
 	ts.AssignRoleToUser(t, serverID, admin.ID, adminRoleID)
 
-	ch1 := ts.CreateTestChannel(t, serverID, chanText1, false)
+	ch1 := ts.CreateTestChannel(t, serverID, chanText1)
 	ch2 := ts.CreateVoiceChannel(t, serverID, chanVoice1)
 
 	ids, err := resolver.GetVisibleChannelIDs(ctx, serverID, admin.ID)
@@ -157,7 +157,7 @@ func TestGetVisibleChannelIDsUserAllowOverridesRoleDeny(t *testing.T) {
 	member := ts.CreateTestUser(t, "vismember8")
 	serverID := ts.CreateTestServer(t, owner.ID, "Visibility Server 8")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
-	ch := ts.CreateTestChannel(t, serverID, "restricted", false)
+	ch := ts.CreateTestChannel(t, serverID, "restricted")
 
 	// Get @all role
 	var allRoleID string
@@ -182,8 +182,8 @@ func TestGetVisibleChannelIDsUserDenyHidesChannel(t *testing.T) {
 	member := ts.CreateTestUser(t, "vismember9")
 	serverID := ts.CreateTestServer(t, owner.ID, "Visibility Server 9")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
-	chVisible := ts.CreateTestChannel(t, serverID, "visible-9", false)
-	chHidden := ts.CreateTestChannel(t, serverID, "hidden-9", false)
+	chVisible := ts.CreateTestChannel(t, serverID, "visible-9")
+	chHidden := ts.CreateTestChannel(t, serverID, "hidden-9")
 
 	// User-deny PermViewTextChannels on hidden channel
 	ts.CreateChannelOverride(t, chHidden, "user", member.ID, 0, int64(rbac.PermViewTextChannels))
@@ -202,7 +202,7 @@ func TestGetVisibleChannelIDsUserDenyOverridesUserAllow(t *testing.T) {
 	member := ts.CreateTestUser(t, "vismember10")
 	serverID := ts.CreateTestServer(t, owner.ID, "Visibility Server 10")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
-	ch := ts.CreateTestChannel(t, serverID, "contested-10", false)
+	ch := ts.CreateTestChannel(t, serverID, "contested-10")
 
 	// Channel is visible from base permissions (no role overrides)
 	ids, err := resolver.GetVisibleChannelIDs(ctx, serverID, member.ID)
@@ -229,7 +229,7 @@ func TestGetVisibleChannelIDsMultipleRoleOverridesBITOR(t *testing.T) {
 	member := ts.CreateTestUser(t, "vismember11")
 	serverID := ts.CreateTestServer(t, owner.ID, "Visibility Server 11")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
-	ch := ts.CreateTestChannel(t, serverID, "multi-role-11", false)
+	ch := ts.CreateTestChannel(t, serverID, "multi-role-11")
 
 	// Strip PermViewTextChannels from @all base permissions so visibility
 	// depends entirely on channel overrides
@@ -264,7 +264,7 @@ func TestGetVisibleChannelIDsRoleAllowGrantsVisibility(t *testing.T) {
 	member := ts.CreateTestUser(t, "vismember12")
 	serverID := ts.CreateTestServer(t, owner.ID, "Visibility Server 12")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
-	ch := ts.CreateTestChannel(t, serverID, "regrant-12", false)
+	ch := ts.CreateTestChannel(t, serverID, "regrant-12")
 
 	// Strip PermViewTextChannels from @all base permissions so the member
 	// has no view bit in their base perms
@@ -298,8 +298,8 @@ func TestGetVisibleChannelIDsNoViewPermsSeesNothing(t *testing.T) {
 	member := ts.CreateTestUser(t, "vismember13")
 	serverID := ts.CreateTestServer(t, owner.ID, "Visibility Server 13")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
-	chText1 := ts.CreateTestChannel(t, serverID, "text-13a", false)
-	chText2 := ts.CreateTestChannel(t, serverID, "text-13b", false)
+	chText1 := ts.CreateTestChannel(t, serverID, "text-13a")
+	chText2 := ts.CreateTestChannel(t, serverID, "text-13b")
 	chVoice := ts.CreateVoiceChannel(t, serverID, "voice-13")
 
 	// Get @all role
@@ -326,8 +326,8 @@ func TestGetVisibleChannelIDsTextVisibleVoiceHidden(t *testing.T) {
 	member := ts.CreateTestUser(t, "vismember14")
 	serverID := ts.CreateTestServer(t, owner.ID, "Visibility Server 14")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
-	chText1 := ts.CreateTestChannel(t, serverID, "text-14a", false)
-	chText2 := ts.CreateTestChannel(t, serverID, "text-14b", false)
+	chText1 := ts.CreateTestChannel(t, serverID, "text-14a")
+	chText2 := ts.CreateTestChannel(t, serverID, "text-14b")
 	chVoice1 := ts.CreateVoiceChannel(t, serverID, "voice-14a")
 	chVoice2 := ts.CreateVoiceChannel(t, serverID, "voice-14b")
 
@@ -357,8 +357,8 @@ func TestGetVisibleChannelIDsVoiceVisibleTextHidden(t *testing.T) {
 	member := ts.CreateTestUser(t, "vismember15")
 	serverID := ts.CreateTestServer(t, owner.ID, "Visibility Server 15")
 	ts.AddMemberToServer(t, serverID, member.ID, "member")
-	chText1 := ts.CreateTestChannel(t, serverID, "text-15a", false)
-	chText2 := ts.CreateTestChannel(t, serverID, "text-15b", false)
+	chText1 := ts.CreateTestChannel(t, serverID, "text-15a")
+	chText2 := ts.CreateTestChannel(t, serverID, "text-15b")
 	chVoice1 := ts.CreateVoiceChannel(t, serverID, "voice-15a")
 	chVoice2 := ts.CreateVoiceChannel(t, serverID, "voice-15b")
 
@@ -393,7 +393,7 @@ func TestGetVisibleChannelIDsAdminIgnoresDenyOverrides(t *testing.T) {
 	adminRoleID := ts.CreateTestRole(t, serverID, "Admin-16", 10, int64(rbac.PermAdministrator))
 	ts.AssignRoleToUser(t, serverID, admin.ID, adminRoleID)
 
-	ch1 := ts.CreateTestChannel(t, serverID, "text-16", false)
+	ch1 := ts.CreateTestChannel(t, serverID, "text-16")
 	ch2 := ts.CreateVoiceChannel(t, serverID, "voice-16")
 
 	// Get @all role
