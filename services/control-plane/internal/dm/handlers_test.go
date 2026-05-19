@@ -42,12 +42,12 @@ func setupTS(t *testing.T) *testhelpers.TestServer {
 }
 
 // insertDMMessage inserts a DM message directly into the database and returns its ID.
-func insertDMMessage(t *testing.T, ts *testhelpers.TestServer, convID, userID, content string, isEncrypted bool) string {
+func insertDMMessage(t *testing.T, ts *testhelpers.TestServer, convID, userID, content string) string {
 	t.Helper()
 	msgID := uuid.New().String()
 	_, err := ts.DB.Exec(
-		`INSERT INTO dm_messages (id, conversation_id, user_id, content, is_encrypted, type) VALUES ($1, $2, $3, $4, $5, 'text')`,
-		msgID, convID, userID, content, isEncrypted,
+		`INSERT INTO dm_messages (id, conversation_id, user_id, content, type) VALUES ($1, $2, $3, $4, 'text')`,
+		msgID, convID, userID, content,
 	)
 	require.NoError(t, err, "failed to insert DM message")
 	return msgID
@@ -251,7 +251,7 @@ func TestListConversations_WithLastMessage(t *testing.T) {
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
-	insertDMMessage(t, ts, convID, user1.ID, "hello there", false)
+	insertDMMessage(t, ts, convID, user1.ID, "hello there")
 
 	w := ts.DoRequest("GET", pathDMConversations, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	require.Equal(t, http.StatusOK, w.Code)
@@ -275,9 +275,9 @@ func TestListConversations_UnreadCount(t *testing.T) {
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	// user2 sends 3 messages (unread for user1)
-	insertDMMessage(t, ts, convID, user2.ID, "msg1", false)
-	insertDMMessage(t, ts, convID, user2.ID, "msg2", false)
-	insertDMMessage(t, ts, convID, user2.ID, "msg3", false)
+	insertDMMessage(t, ts, convID, user2.ID, "msg1")
+	insertDMMessage(t, ts, convID, user2.ID, "msg2")
+	insertDMMessage(t, ts, convID, user2.ID, "msg3")
 
 	w := ts.DoRequest("GET", pathDMConversations, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	require.Equal(t, http.StatusOK, w.Code)
@@ -826,8 +826,8 @@ func TestGetMessages_Success(t *testing.T) {
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
-	insertDMMessage(t, ts, convID, user1.ID, "hello", false)
-	insertDMMessage(t, ts, convID, user2.ID, "hi there", false)
+	insertDMMessage(t, ts, convID, user1.ID, "hello")
+	insertDMMessage(t, ts, convID, user2.ID, "hi there")
 
 	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+pathMessages, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -882,9 +882,9 @@ func TestGetMessages_CursorPagination(t *testing.T) {
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	// Insert some messages
-	insertDMMessage(t, ts, convID, user1.ID, "msg1", false)
-	insertDMMessage(t, ts, convID, user1.ID, "msg2", false)
-	cursorMsgID := insertDMMessage(t, ts, convID, user1.ID, "msg3", false)
+	insertDMMessage(t, ts, convID, user1.ID, "msg1")
+	insertDMMessage(t, ts, convID, user1.ID, "msg2")
+	cursorMsgID := insertDMMessage(t, ts, convID, user1.ID, "msg3")
 
 	// Fetch messages before the cursor
 	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+"/messages?before="+cursorMsgID, nil, testhelpers.AuthHeaders(user1.AccessToken))
@@ -915,7 +915,7 @@ func TestGetMessages_MessageFields(t *testing.T) {
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
-	insertDMMessage(t, ts, convID, user1.ID, "test content", false)
+	insertDMMessage(t, ts, convID, user1.ID, "test content")
 
 	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+pathMessages, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	require.Equal(t, http.StatusOK, w.Code)
@@ -1008,8 +1008,8 @@ func TestMarkRead_ResetsUnreadCount(t *testing.T) {
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	// user2 sends messages
-	insertDMMessage(t, ts, convID, user2.ID, "unread1", false)
-	insertDMMessage(t, ts, convID, user2.ID, "unread2", false)
+	insertDMMessage(t, ts, convID, user2.ID, "unread1")
+	insertDMMessage(t, ts, convID, user2.ID, "unread2")
 
 	// Verify unread count > 0
 	w := ts.DoRequest("GET", pathDMConversations, nil, testhelpers.AuthHeaders(user1.AccessToken))
@@ -1443,7 +1443,7 @@ func TestUpdateMessage_Success(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "updatemsg2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
-	msgID := insertDMMessage(t, ts, convID, user1.ID, "original text", false)
+	msgID := insertDMMessage(t, ts, convID, user1.ID, "original text")
 
 	editedCiphertext := testhelpers.ValidCiphertext()
 	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMsgSlash+msgID, map[string]interface{}{
@@ -1464,7 +1464,7 @@ func TestUpdateMessage_NotAuthor(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "updatemsgna2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
-	msgID := insertDMMessage(t, ts, convID, user1.ID, "user1's message", false)
+	msgID := insertDMMessage(t, ts, convID, user1.ID, "user1's message")
 
 	// user2 tries to edit user1's message
 	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMsgSlash+msgID, map[string]interface{}{
@@ -1484,7 +1484,7 @@ func TestUpdateMessage_NotParticipant(t *testing.T) {
 	outsider := ts.CreateTestUser(t, "updatemsgnp3")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
-	msgID := insertDMMessage(t, ts, convID, user1.ID, "message", false)
+	msgID := insertDMMessage(t, ts, convID, user1.ID, "message")
 
 	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMsgSlash+msgID, map[string]interface{}{
 		"content": "hacked",
@@ -1536,12 +1536,16 @@ func TestUpdateMessage_MissingContent(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "updatemsgnocon2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
-	msgID := insertDMMessage(t, ts, convID, user1.ID, "original", false)
+	msgID := insertDMMessage(t, ts, convID, user1.ID, "original")
 
 	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMsgSlash+msgID, map[string]interface{}{}, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+// Under E2EE-everywhere (#201) every DM conversation is encrypted by
+// construction; the "_EncryptedConversation_" name preserves the test's
+// historical intent (validate ciphertext shape) rather than describing
+// a runtime branch.
 func TestUpdateMessage_EncryptedConversation_ValidCiphertext(t *testing.T) {
 	ts := setupTS(t)
 	user1 := ts.CreateTestUser(t, "updatemsgenc1")
@@ -1550,7 +1554,7 @@ func TestUpdateMessage_EncryptedConversation_ValidCiphertext(t *testing.T) {
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	ciphertext := testhelpers.ValidCiphertext()
-	msgID := insertDMMessage(t, ts, convID, user1.ID, ciphertext, true)
+	msgID := insertDMMessage(t, ts, convID, user1.ID, ciphertext)
 
 	newCiphertext := testhelpers.ValidCiphertext()
 	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMsgSlash+msgID, map[string]interface{}{
@@ -1559,6 +1563,7 @@ func TestUpdateMessage_EncryptedConversation_ValidCiphertext(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 }
 
+// See sibling test above for the "_EncryptedConversation_" naming rationale (#201).
 func TestUpdateMessage_EncryptedConversation_InvalidCiphertext(t *testing.T) {
 	ts := setupTS(t)
 	user1 := ts.CreateTestUser(t, "updatemsgencinv1")
@@ -1567,7 +1572,7 @@ func TestUpdateMessage_EncryptedConversation_InvalidCiphertext(t *testing.T) {
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
 	ciphertext := testhelpers.ValidCiphertext()
-	msgID := insertDMMessage(t, ts, convID, user1.ID, ciphertext, true)
+	msgID := insertDMMessage(t, ts, convID, user1.ID, ciphertext)
 
 	// Plaintext in encrypted conversation should be rejected
 	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMsgSlash+msgID, map[string]interface{}{
@@ -1590,7 +1595,7 @@ func TestDeleteMessage_Success(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "delmsg2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
-	msgID := insertDMMessage(t, ts, convID, user1.ID, "to be deleted", false)
+	msgID := insertDMMessage(t, ts, convID, user1.ID, "to be deleted")
 
 	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathMsgSlash+msgID, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -1612,7 +1617,7 @@ func TestDeleteMessage_NotAuthor(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "delmsgna2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
-	msgID := insertDMMessage(t, ts, convID, user1.ID, "user1's msg", false)
+	msgID := insertDMMessage(t, ts, convID, user1.ID, "user1's msg")
 
 	// user2 tries to delete user1's message
 	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathMsgSlash+msgID, nil, testhelpers.AuthHeaders(user2.AccessToken))
@@ -1630,7 +1635,7 @@ func TestDeleteMessage_NotParticipant(t *testing.T) {
 	outsider := ts.CreateTestUser(t, "delmsgnp3")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
-	msgID := insertDMMessage(t, ts, convID, user1.ID, "message", false)
+	msgID := insertDMMessage(t, ts, convID, user1.ID, "message")
 
 	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathMsgSlash+msgID, nil, testhelpers.AuthHeaders(outsider.AccessToken))
 	assert.Equal(t, http.StatusForbidden, w.Code)
@@ -1674,7 +1679,7 @@ func TestDeleteMessage_Unauthorized(t *testing.T) {
 	user2 := ts.CreateTestUser(t, "delmsgunauth2")
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
-	msgID := insertDMMessage(t, ts, convID, user1.ID, "msg", false)
+	msgID := insertDMMessage(t, ts, convID, user1.ID, "msg")
 
 	w := ts.DoRequest("DELETE", pathDMConversationsPrefix+convID+pathMsgSlash+msgID, nil, nil)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
@@ -1688,8 +1693,8 @@ func insertDMMediaFile(t *testing.T, ts *testhelpers.TestServer, uploaderID, con
 	t.Helper()
 	var fileID string
 	err := ts.DB.QueryRow(
-		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, conversation_id, created_at)
-		 VALUES (gen_random_uuid(), $1, $2, 2, $3, $4, 'attachments/' || gen_random_uuid(), true, 1, $5, NOW())
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, key_version, conversation_id, created_at)
+		 VALUES (gen_random_uuid(), $1, $2, 2, $3, $4, 'attachments/' || gen_random_uuid(), 1, $5, NOW())
 		 RETURNING id`,
 		uploaderID, fileType, mimeType, fileSize, convID,
 	).Scan(&fileID)
@@ -1713,7 +1718,7 @@ func TestGetMessagesWithAttachments(t *testing.T) {
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
-	msgID := insertDMMessage(t, ts, convID, user1.ID, "see attached", false)
+	msgID := insertDMMessage(t, ts, convID, user1.ID, "see attached")
 	fileID := insertDMMediaFile(t, ts, user1.ID, convID, "photo", mimeImagePNG, 12345)
 	insertDMMessageAttachment(t, ts, msgID, fileID, 0)
 
@@ -1755,7 +1760,7 @@ func TestGetMessagesWithMultipleAttachmentsOrderedByPosition(t *testing.T) {
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
-	msgID := insertDMMessage(t, ts, convID, user1.ID, "multi", false)
+	msgID := insertDMMessage(t, ts, convID, user1.ID, "multi")
 	f1 := insertDMMediaFile(t, ts, user1.ID, convID, "photo", mimeImagePNG, 100)
 	f2 := insertDMMediaFile(t, ts, user1.ID, convID, "file", "application/pdf", 200)
 
@@ -1794,7 +1799,7 @@ func TestGetMessagesDMNoAttachments(t *testing.T) {
 	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
 	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
 
-	insertDMMessage(t, ts, convID, user1.ID, "plain msg", false)
+	insertDMMessage(t, ts, convID, user1.ID, "plain msg")
 
 	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+pathMessages, nil, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -2515,7 +2520,7 @@ func TestDeleteGroupVerifiesAllDataDeleted(t *testing.T) {
 	convID := createTestGroup(t, ts, admin, member)
 
 	// Insert a message so we can verify message deletion too
-	insertDMMessage(t, ts, convID, admin.ID, "hello group", false)
+	insertDMMessage(t, ts, convID, admin.ID, "hello group")
 
 	// Insert a read state
 	_, err := ts.DB.Exec(

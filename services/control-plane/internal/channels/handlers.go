@@ -313,10 +313,9 @@ func (h *Handler) computeNextPosition(tx *sql.Tx, serverID string, groupID *stri
 
 // insertChannel creates the primary channel row within a transaction.
 func (h *Handler) insertChannel(tx *sql.Tx, channelID string, req CreateChannelRequest, position int) (models.Channel, error) {
-	// Carry-along until #1026 drops the column
 	insertQuery := `
-		INSERT INTO channels (id, server_id, name, type, emoji, is_encrypted, group_id, position, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, TRUE, $6, $7, NOW(), NOW())
+		INSERT INTO channels (id, server_id, name, type, emoji, group_id, position, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
 		RETURNING created_at, updated_at
 	`
 
@@ -369,10 +368,9 @@ func (h *Handler) maybeCreateLinkedTextChannel(tx *sql.Tx, req CreateChannelRequ
 // createLinkedTextChannel creates a linked text channel for a voice channel.
 func (h *Handler) createLinkedTextChannel(tx *sql.Tx, req CreateChannelRequest, voiceChannelID string, position int) (*models.Channel, error) {
 	linkedTextID := uuid.New().String()
-	// Carry-along until #1026 drops the column
 	linkedInsert := `
-		INSERT INTO channels (id, server_id, name, type, is_encrypted, group_id, linked_voice_channel_id, position, created_at, updated_at)
-		VALUES ($1, $2, $3, 'text', TRUE, $4, $5, $6, NOW(), NOW())
+		INSERT INTO channels (id, server_id, name, type, group_id, linked_voice_channel_id, position, created_at, updated_at)
+		VALUES ($1, $2, $3, 'text', $4, $5, $6, NOW(), NOW())
 		RETURNING created_at, updated_at
 	`
 	var ltc models.Channel

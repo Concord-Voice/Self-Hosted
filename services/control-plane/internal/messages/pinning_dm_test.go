@@ -19,8 +19,8 @@ func insertDMMessageDirect(t *testing.T, ts *testhelpers.TestServer, convID, use
 	t.Helper()
 	msgID := uuid.New().String()
 	_, err := ts.DB.Exec(
-		`INSERT INTO dm_messages (id, conversation_id, user_id, content, is_encrypted, type)
-		 VALUES ($1, $2, $3, $4, false, 'user')`,
+		`INSERT INTO dm_messages (id, conversation_id, user_id, content, type)
+		 VALUES ($1, $2, $3, $4, 'user')`,
 		msgID, convID, userID, content,
 	)
 	require.NoError(t, err, "failed to insert DM message")
@@ -264,8 +264,8 @@ func TestPinMessage_DM_LimitReached(t *testing.T) {
 	// Seed 50 already-pinned DM messages directly.
 	for i := 0; i < 50; i++ {
 		_, err := ts.DB.Exec(
-			`INSERT INTO dm_messages (id, conversation_id, user_id, content, is_encrypted, type, pinned_at, pinned_by)
-			 VALUES (gen_random_uuid(), $1, $2, 'seeded', false, 'user', NOW(), $2)`,
+			`INSERT INTO dm_messages (id, conversation_id, user_id, content, type, pinned_at, pinned_by)
+			 VALUES (gen_random_uuid(), $1, $2, 'seeded', 'user', NOW(), $2)`,
 			convID, u1.ID,
 		)
 		require.NoError(t, err)

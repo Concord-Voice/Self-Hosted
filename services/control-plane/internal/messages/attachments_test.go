@@ -22,8 +22,8 @@ func insertMediaFile(t *testing.T, ts *testhelpers.TestServer, uploaderID, chann
 	t.Helper()
 	var fileID string
 	err := ts.DB.QueryRow(
-		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, channel_id, created_at)
-		 VALUES (gen_random_uuid(), $1, $2, 2, $3, $4, 'attachments/' || gen_random_uuid(), true, 1, $5, NOW())
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, key_version, channel_id, created_at)
+		 VALUES (gen_random_uuid(), $1, $2, 2, $3, $4, 'attachments/' || gen_random_uuid(), 1, $5, NOW())
 		 RETURNING id`,
 		uploaderID, fileType, mimeType, fileSize, channelID,
 	).Scan(&fileID)
@@ -46,8 +46,8 @@ func insertChannelMessage(t *testing.T, ts *testhelpers.TestServer, channelID, u
 	t.Helper()
 	var msgID string
 	err := ts.DB.QueryRow(
-		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, embeds_suppressed, created_at, updated_at)
-		 VALUES (gen_random_uuid(), $1, $2, $3, false, 1, false, NOW(), NOW())
+		`INSERT INTO messages (id, channel_id, user_id, content, key_version, embeds_suppressed, created_at, updated_at)
+		 VALUES (gen_random_uuid(), $1, $2, $3, 1, false, NOW(), NOW())
 		 RETURNING id`,
 		channelID, userID, content,
 	).Scan(&msgID)

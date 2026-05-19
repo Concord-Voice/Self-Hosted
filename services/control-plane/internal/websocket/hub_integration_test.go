@@ -14,7 +14,7 @@ import (
 
 // --- handleMessage integration tests (require DB) ---
 
-func setupMessageTest(t *testing.T, encrypted bool) *hubTestSetup {
+func setupMessageTest(t *testing.T) *hubTestSetup {
 	t.Helper()
 
 	db := setupHubTestDB(t)
@@ -41,8 +41,8 @@ func setupMessageTest(t *testing.T, encrypted bool) *hubTestSetup {
 
 	// Create channel
 	channelID := uuid.New()
-	_, err = db.Exec(`INSERT INTO channels (id, server_id, name, type, is_encrypted) VALUES ($1, $2, $3, 'text', $4)`,
-		channelID.String(), serverID.String(), "general", encrypted)
+	_, err = db.Exec(`INSERT INTO channels (id, server_id, name, type) VALUES ($1, $2, $3, 'text')`,
+		channelID.String(), serverID.String(), "general")
 	require.NoError(t, err)
 
 	clientID := uuid.New()
@@ -77,7 +77,7 @@ func setupMessageTest(t *testing.T, encrypted bool) *hubTestSetup {
 }
 
 func TestHandleMessagePlaintextSuccess(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 	channelID := setup.convID
 
 	msg := IncomingMessage{
@@ -103,7 +103,7 @@ func TestHandleMessagePlaintextSuccess(t *testing.T) {
 }
 
 func TestHandleMessageNotSubscribed(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	// Use a channel the client is NOT subscribed to
 	otherChannelID := uuid.New()
@@ -127,7 +127,7 @@ func TestHandleMessageNotSubscribed(t *testing.T) {
 }
 
 func TestHandleMessageEmptyContent(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	msg := IncomingMessage{
 		Type:     "message",
@@ -148,7 +148,7 @@ func TestHandleMessageEmptyContent(t *testing.T) {
 }
 
 func TestHandleMessageMissingContent(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	msg := IncomingMessage{
 		Type:     "message",
@@ -166,7 +166,7 @@ func TestHandleMessageMissingContent(t *testing.T) {
 }
 
 func TestHandleMessageContentTooLong(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	// Content > 24000 ciphertext cap under E2EE-everywhere (#201).
 	longContent := make([]byte, 24001)
@@ -193,8 +193,11 @@ func TestHandleMessageContentTooLong(t *testing.T) {
 	assert.Contains(t, data[keyMessage], "maximum length")
 }
 
+// Under E2EE-everywhere (#201) all message content is ciphertext; the
+// "_Encrypted_" qualifier in the name is a pre-#201 vestige. The test
+// remains a length-cap regression check at 5000 bytes.
 func TestHandleMessageEncryptedContentLongerLimit(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	// 5000 chars is well below the 24000 ciphertext cap under E2EE-everywhere.
 	longContent := make([]byte, 5000)
@@ -221,7 +224,7 @@ func TestHandleMessageEncryptedContentLongerLimit(t *testing.T) {
 }
 
 func TestHandleMessageInvalidChannelID(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	msg := IncomingMessage{
 		Type:     "message",
@@ -238,7 +241,7 @@ func TestHandleMessageInvalidChannelID(t *testing.T) {
 }
 
 func TestHandleMessageMissingChannelID(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	msg := IncomingMessage{
 		Type:     "message",
@@ -252,7 +255,7 @@ func TestHandleMessageMissingChannelID(t *testing.T) {
 }
 
 func TestHandleMessageClientNotFound(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	msg := IncomingMessage{
 		Type:     "message",
@@ -269,7 +272,7 @@ func TestHandleMessageClientNotFound(t *testing.T) {
 }
 
 func TestHandleMessageRateLimitExceeded(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	// Exhaust rate limit
 	setup.client.rateTokens = 0
@@ -294,7 +297,7 @@ func TestHandleMessageRateLimitExceeded(t *testing.T) {
 }
 
 func TestHandleMessageBroadcastToOtherSubscribers(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 	channelUUID, _ := uuid.Parse(setup.convID)
 
 	// Add a second user/client subscribed to the same channel
@@ -342,7 +345,7 @@ func TestHandleMessageBroadcastToOtherSubscribers(t *testing.T) {
 // --- handleSubscribe integration tests ---
 
 func TestHandleSubscribeSuccess(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 	channelUUID, _ := uuid.Parse(setup.convID)
 
 	// Remove from current subscriptions to test subscribing
@@ -370,7 +373,7 @@ func TestHandleSubscribeSuccess(t *testing.T) {
 }
 
 func TestHandleSubscribeInvalidChannelID(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	msg := IncomingMessage{
 		Type:     "subscribe",
@@ -388,7 +391,7 @@ func TestHandleSubscribeInvalidChannelID(t *testing.T) {
 }
 
 func TestHandleSubscribeMissingChannelID(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	msg := IncomingMessage{
 		Type:     "subscribe",
@@ -404,7 +407,7 @@ func TestHandleSubscribeMissingChannelID(t *testing.T) {
 }
 
 func TestHandleSubscribeClientNotFound(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	msg := IncomingMessage{
 		Type:     "subscribe",
@@ -421,7 +424,7 @@ func TestHandleSubscribeClientNotFound(t *testing.T) {
 // --- handleSubscribeServer integration tests ---
 
 func TestHandleSubscribeServerSuccess(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 	serverID := setup.user2 // reused field for serverID
 
 	msg := IncomingMessage{
@@ -440,7 +443,7 @@ func TestHandleSubscribeServerSuccess(t *testing.T) {
 }
 
 func TestHandleSubscribeServerInvalidServerID(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	msg := IncomingMessage{
 		Type:     "subscribe_server",
@@ -458,7 +461,7 @@ func TestHandleSubscribeServerInvalidServerID(t *testing.T) {
 }
 
 func TestHandleSubscribeServerMissingServerID(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	msg := IncomingMessage{
 		Type:     "subscribe_server",
@@ -476,7 +479,7 @@ func TestHandleSubscribeServerMissingServerID(t *testing.T) {
 // --- handleSubscribeDM integration tests ---
 
 func TestHandleSubscribeDMSuccess(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 
 	msg := IncomingMessage{
 		Type:     "subscribe_dm",
@@ -499,11 +502,11 @@ func TestHandleSubscribeDMSuccess(t *testing.T) {
 }
 
 func TestHandleSubscribeDMNotParticipant(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 
 	// Create a DM conversation the user is NOT part of
 	otherConvID := uuid.New()
-	_, err := setup.db.Exec(`INSERT INTO dm_conversations (id, is_group, is_personal, is_encrypted, created_by) VALUES ($1, false, false, false, $2)`,
+	_, err := setup.db.Exec(`INSERT INTO dm_conversations (id, is_group, is_personal, created_by) VALUES ($1, false, false, $2)`,
 		otherConvID.String(), setup.user2.String())
 	require.NoError(t, err)
 	_, err = setup.db.Exec(`INSERT INTO dm_participants (conversation_id, user_id) VALUES ($1, $2)`,
@@ -528,7 +531,7 @@ func TestHandleSubscribeDMNotParticipant(t *testing.T) {
 }
 
 func TestHandleSubscribeDMInvalidConversationID(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 
 	msg := IncomingMessage{
 		Type:     "subscribe_dm",
@@ -546,7 +549,7 @@ func TestHandleSubscribeDMInvalidConversationID(t *testing.T) {
 }
 
 func TestHandleSubscribeDMMissingConversationID(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 
 	msg := IncomingMessage{
 		Type:     "subscribe_dm",
@@ -564,7 +567,7 @@ func TestHandleSubscribeDMMissingConversationID(t *testing.T) {
 // --- handleDMMessage additional tests ---
 
 func TestHandleDMMessageEmptyContent(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 
 	msg := IncomingMessage{
 		Type:     "dm_message",
@@ -585,7 +588,7 @@ func TestHandleDMMessageEmptyContent(t *testing.T) {
 }
 
 func TestHandleDMMessageContentTooLong(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 
 	// Content > 24000 ciphertext cap under E2EE-everywhere (#201).
 	longContent := make([]byte, 24001)
@@ -613,7 +616,7 @@ func TestHandleDMMessageContentTooLong(t *testing.T) {
 }
 
 func TestHandleDMMessageRateLimitExceeded(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 
 	setup.client.rateTokens = 0
 	setup.client.rateLastFill = time.Now()
@@ -637,7 +640,7 @@ func TestHandleDMMessageRateLimitExceeded(t *testing.T) {
 }
 
 func TestHandleDMMessageInvalidConversationID(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 
 	msg := IncomingMessage{
 		Type:     "dm_message",
@@ -654,7 +657,7 @@ func TestHandleDMMessageInvalidConversationID(t *testing.T) {
 }
 
 func TestHandleDMMessageMissingConversationID(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 
 	msg := IncomingMessage{
 		Type:     "dm_message",
@@ -670,7 +673,7 @@ func TestHandleDMMessageMissingConversationID(t *testing.T) {
 }
 
 func TestHandleDMMessageSystemType(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 
 	msg := IncomingMessage{
 		Type:     "dm_message",
@@ -691,7 +694,7 @@ func TestHandleDMMessageSystemType(t *testing.T) {
 }
 
 func TestHandleDMMessageEncryptedLongerContentAllowed(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 
 	content := make([]byte, 5000)
 	for i := range content {
@@ -716,7 +719,7 @@ func TestHandleDMMessageEncryptedLongerContentAllowed(t *testing.T) {
 }
 
 func TestHandleDMMessageBroadcastToSubscribers(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	convUUID, _ := uuid.Parse(setup.convID)
 
 	// Add user2 as a subscriber
@@ -944,7 +947,7 @@ func TestHandleHeartbeatDNDRefreshesWithoutChangingStatus(t *testing.T) {
 // --- handleProfileUpdate integration tests ---
 
 func TestHandleProfileUpdateSuccess(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	// Update the user's display name in DB
 	newDisplayName := "Updated Name"
@@ -965,7 +968,7 @@ func TestHandleProfileUpdateSuccess(t *testing.T) {
 }
 
 func TestHandleProfileUpdateClientNotFound(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	msg := IncomingMessage{
 		Type:     "profile_update",
@@ -981,7 +984,7 @@ func TestHandleProfileUpdateClientNotFound(t *testing.T) {
 // --- handleServerUpdate integration tests ---
 
 func TestHandleServerUpdateSuccess(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 	serverID := setup.user2 // reused field for serverID
 
 	// Add client as server subscriber
@@ -1007,7 +1010,7 @@ func TestHandleServerUpdateSuccess(t *testing.T) {
 }
 
 func TestHandleServerUpdateInvalidServerID(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	msg := IncomingMessage{
 		Type:     "server_update",
@@ -1023,7 +1026,7 @@ func TestHandleServerUpdateInvalidServerID(t *testing.T) {
 }
 
 func TestHandleServerUpdateMissingServerID(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	msg := IncomingMessage{
 		Type:     "server_update",
@@ -1037,7 +1040,7 @@ func TestHandleServerUpdateMissingServerID(t *testing.T) {
 }
 
 func TestHandleServerUpdateNonexistentServer(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	fakeServerID := uuid.New()
 
@@ -1055,7 +1058,7 @@ func TestHandleServerUpdateNonexistentServer(t *testing.T) {
 }
 
 func TestHandleServerUpdateNoSubscribers(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 	serverID := setup.user2
 
 	// Remove all subscribers
@@ -1115,7 +1118,7 @@ func testLastMessage() dmUnreadLastMessage {
 }
 
 func TestSendDMUnreadNotifySendsToUnsubscribedParticipants(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	convUUID, _ := uuid.Parse(setup.convID)
 
 	// user2 is a participant but NOT subscribed to the DM
@@ -1155,7 +1158,7 @@ func TestSendDMUnreadNotifySendsToUnsubscribedParticipants(t *testing.T) {
 }
 
 func TestSendDMUnreadNotifySkipsSender(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	convUUID, _ := uuid.Parse(setup.convID)
 
 	// The sender (user1) should NOT receive unread notify
@@ -1171,7 +1174,7 @@ func TestSendDMUnreadNotifySkipsSender(t *testing.T) {
 }
 
 func TestSendDMUnreadNotifySkipsSubscribedParticipants(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	convUUID, _ := uuid.Parse(setup.convID)
 
 	// user2 is a participant AND subscribed to the DM
@@ -1230,7 +1233,7 @@ func TestDisconnectSessionQueuesOnChannel(t *testing.T) {
 // --- Epoch enforcement in handleMessage ---
 
 func TestHandleMessageEpochRevoked(t *testing.T) {
-	setup := setupMessageTest(t, true)
+	setup := setupMessageTest(t)
 	channelUUID, _ := uuid.Parse(setup.convID)
 
 	// Seed a channel key and revocation
@@ -1269,7 +1272,7 @@ func TestHandleMessageEpochRevoked(t *testing.T) {
 // --- validateReplyToID integration tests ---
 
 func TestValidateReplyToIDNoReply(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	msg := IncomingMessage{
 		ClientID: setup.client.ID,
@@ -1281,7 +1284,7 @@ func TestValidateReplyToIDNoReply(t *testing.T) {
 }
 
 func TestValidateReplyToIDEmptyString(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	msg := IncomingMessage{
 		ClientID: setup.client.ID,
@@ -1295,7 +1298,7 @@ func TestValidateReplyToIDEmptyString(t *testing.T) {
 }
 
 func TestValidateReplyToIDInvalidUUID(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	msg := IncomingMessage{
 		ClientID: setup.client.ID,
@@ -1311,7 +1314,7 @@ func TestValidateReplyToIDInvalidUUID(t *testing.T) {
 }
 
 func TestValidateReplyToIDMessageNotFound(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	msg := IncomingMessage{
 		ClientID: setup.client.ID,
@@ -1327,13 +1330,13 @@ func TestValidateReplyToIDMessageNotFound(t *testing.T) {
 }
 
 func TestValidateReplyToIDValidReply(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 	channelID := setup.convID
 
 	// Insert a message to reply to
 	replyMsgID := uuid.New()
 	_, err := setup.db.Exec(
-		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, created_at, updated_at) VALUES ($1, $2, $3, $4, false, 1, NOW(), NOW())`,
+		`INSERT INTO messages (id, channel_id, user_id, content, key_version, created_at, updated_at) VALUES ($1, $2, $3, $4, 1, NOW(), NOW())`,
 		replyMsgID.String(), channelID, setup.user1.String(), "original message",
 	)
 	require.NoError(t, err)
@@ -1351,12 +1354,12 @@ func TestValidateReplyToIDValidReply(t *testing.T) {
 }
 
 func TestValidateReplyToIDWrongChannel(t *testing.T) {
-	setup := setupMessageTest(t, false)
+	setup := setupMessageTest(t)
 
 	// Insert a message in the real channel
 	replyMsgID := uuid.New()
 	_, err := setup.db.Exec(
-		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, created_at, updated_at) VALUES ($1, $2, $3, $4, false, 1, NOW(), NOW())`,
+		`INSERT INTO messages (id, channel_id, user_id, content, key_version, created_at, updated_at) VALUES ($1, $2, $3, $4, 1, NOW(), NOW())`,
 		replyMsgID.String(), setup.convID, setup.user1.String(), "original message",
 	)
 	require.NoError(t, err)

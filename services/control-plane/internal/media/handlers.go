@@ -728,11 +728,10 @@ func createAttachmentRecord(h *Handler, _ *gin.Context, p attachmentParams) erro
 		convID = p.conversationID
 	}
 
-	// Carry-along until #1026 drops the column
 	insertQuery := `
 		INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key,
-		                         is_encrypted, key_version, channel_id, conversation_id, created_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, $8, $9, $10, NOW())
+		                         key_version, channel_id, conversation_id, created_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW())
 	`
 	_, err := h.db.Exec(insertQuery, p.fileID, p.userID, string(p.fileType), MediaTierE2EE,
 		p.mimeType, p.fileSize, p.storageKey, p.keyVersion, chID, convID)

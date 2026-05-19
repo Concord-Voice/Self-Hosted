@@ -294,9 +294,8 @@ func (ts *TestServer) CreateTestChannel(t *testing.T, serverID, name string) str
 	t.Helper()
 
 	channelID := uuid.New().String()
-	// Carry-along until #1026 drops the column
 	_, err := ts.DB.Exec(
-		`INSERT INTO channels (id, server_id, name, type, is_encrypted) VALUES ($1, $2, $3, 'text', TRUE)`,
+		`INSERT INTO channels (id, server_id, name, type) VALUES ($1, $2, $3, 'text')`,
 		channelID, serverID, name,
 	)
 	if err != nil {
@@ -508,10 +507,9 @@ func (ts *TestServer) CreateTestMessage(t *testing.T, channelID string, user Tes
 	t.Helper()
 
 	messageID := uuid.New().String()
-	// Carry-along until #1026 drops the column
 	_, err := ts.DB.Exec(
-		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, embeds_suppressed, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, TRUE, 1, FALSE, NOW(), NOW())`,
+		`INSERT INTO messages (id, channel_id, user_id, content, key_version, embeds_suppressed, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, 1, FALSE, NOW(), NOW())`,
 		messageID, channelID, user.ID, content,
 	)
 	if err != nil {
@@ -539,9 +537,8 @@ func (ts *TestServer) CreateVoiceChannel(t *testing.T, serverID, name string) st
 	t.Helper()
 
 	channelID := uuid.New().String()
-	// Carry-along until #1026 drops the column
 	_, err := ts.DB.Exec(
-		`INSERT INTO channels (id, server_id, name, type, is_encrypted) VALUES ($1, $2, $3, 'voice', TRUE)`,
+		`INSERT INTO channels (id, server_id, name, type) VALUES ($1, $2, $3, 'voice')`,
 		channelID, serverID, name,
 	)
 	if err != nil {

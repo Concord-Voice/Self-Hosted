@@ -340,8 +340,8 @@ func TestDownloadAttachmentDMSuccess(t *testing.T) {
 	storageKey := fmt.Sprintf(fmtAttachmentsKey, fileID)
 	require.NoError(t, ts.store.PutObject(context.TODO(), storageKey, bytes.NewReader([]byte("dm-cipher")), 9, mimeOctetStream))
 	_, err := ts.db.Exec(
-		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, conversation_id)
-		 VALUES ($1, $2, 'file', 2, 'text/plain', 9, $3, true, 1, $4)`,
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, key_version, conversation_id)
+		 VALUES ($1, $2, 'file', 2, 'text/plain', 9, $3, 1, $4)`,
 		fileID, user1, storageKey, convID,
 	)
 	require.NoError(t, err)
@@ -365,8 +365,8 @@ func TestDownloadAttachmentDMNonParticipant(t *testing.T) {
 	storageKey := fmt.Sprintf(fmtAttachmentsKey, fileID)
 	require.NoError(t, ts.store.PutObject(context.TODO(), storageKey, bytes.NewReader([]byte("dm-secret")), 9, mimeOctetStream))
 	_, err := ts.db.Exec(
-		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, conversation_id)
-		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 9, $3, true, 1, $4)`,
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, key_version, conversation_id)
+		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 9, $3, 1, $4)`,
 		fileID, user1, storageKey, convID,
 	)
 	require.NoError(t, err)
@@ -387,8 +387,8 @@ func TestDownloadAttachmentStorageMissing(t *testing.T) {
 	storageKey := fmt.Sprintf(fmtAttachmentsKey, fileID)
 	// Do NOT put the object in the store — only insert metadata
 	_, err := ts.db.Exec(
-		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, channel_id)
-		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 6, $3, true, 1, $4)`,
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, key_version, channel_id)
+		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 6, $3, 1, $4)`,
 		fileID, owner, storageKey, channelID,
 	)
 	require.NoError(t, err)
@@ -409,8 +409,8 @@ func TestDownloadAttachmentSoftDeleted(t *testing.T) {
 	fileID := uuid.New().String()
 	storageKey := fmt.Sprintf(fmtAttachmentsKey, fileID)
 	_, err := ts.db.Exec(
-		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, channel_id, deleted_at)
-		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 4, $3, true, 1, $4, NOW())`,
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, key_version, channel_id, deleted_at)
+		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 4, $3, 1, $4, NOW())`,
 		fileID, owner, storageKey, channelID,
 	)
 	require.NoError(t, err)
@@ -586,8 +586,8 @@ func TestDeleteMediaTier1Rejected(t *testing.T) {
 	storageKey := fmt.Sprintf(fmtAvatarsKey, owner)
 	require.NoError(t, ts.store.PutObject(context.TODO(), storageKey, bytes.NewReader(makePNG(t, 64, 64)), 100, mimeImagePNG))
 	_, err := ts.db.Exec(
-		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted)
-		 VALUES ($1, $2, 'photo', 1, 'image/png', 100, $3, false)`,
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key)
+		 VALUES ($1, $2, 'photo', 1, 'image/png', 100, $3)`,
 		fileID, owner, storageKey,
 	)
 	require.NoError(t, err)
@@ -667,8 +667,8 @@ func TestDeleteMediaSuccess(t *testing.T) {
 	storageKey := fmt.Sprintf(fmtAttachmentsKey, fileID)
 	require.NoError(t, ts.store.PutObject(context.TODO(), storageKey, bytes.NewReader([]byte("data")), 4, mimeOctetStream))
 	_, err := ts.db.Exec(
-		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, channel_id)
-		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 4, $3, true, 1, $4)`,
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, key_version, channel_id)
+		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 4, $3, 1, $4)`,
 		fileID, owner, storageKey, channelID,
 	)
 	require.NoError(t, err)
@@ -692,8 +692,8 @@ func TestDeleteMediaWrongOwner(t *testing.T) {
 	storageKey := fmt.Sprintf(fmtAttachmentsKey, fileID)
 	require.NoError(t, ts.store.PutObject(context.TODO(), storageKey, bytes.NewReader([]byte("data")), 4, mimeOctetStream))
 	_, err := ts.db.Exec(
-		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, channel_id)
-		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 4, $3, true, 1, $4)`,
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, key_version, channel_id)
+		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 4, $3, 1, $4)`,
 		fileID, owner, storageKey, channelID,
 	)
 	require.NoError(t, err)
@@ -756,8 +756,8 @@ func TestDownloadAttachmentChannelSuccess(t *testing.T) {
 	payload := []byte("channel-cipher-data")
 	require.NoError(t, ts.store.PutObject(context.TODO(), storageKey, bytes.NewReader(payload), int64(len(payload)), mimeOctetStream))
 	_, err := ts.db.Exec(
-		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, channel_id)
-		 VALUES ($1, $2, 'file', 2, 'image/jpeg', $3, $4, true, 1, $5)`,
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, key_version, channel_id)
+		 VALUES ($1, $2, 'file', 2, 'image/jpeg', $3, $4, 1, $5)`,
 		fileID, owner, len(payload), storageKey, channelID,
 	)
 	require.NoError(t, err)

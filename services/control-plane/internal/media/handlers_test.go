@@ -109,7 +109,7 @@ func setupTestDB(t *testing.T) (*sql.DB, func()) {
 	cleanup := func() {
 		tables := []string{"dm_message_attachments", "message_attachments", "media_files", "dm_participants", "dm_conversations", "channel_keys", "channels", "member_roles", "roles", "server_members", "servers", "public_keys", "user_keys", "users"}
 		for _, table := range tables {
-			// nosemgrep: go.lang.security.audit.database.string-formatted-query.string-formatted-query — test cleanup; table names from hardcoded slice above
+			// nosemgrep: go.lang.security.audit.database.string-formatted-query.string-formatted-query,go.lang.security.audit.sqli.gosql-sqli.gosql-sqli — test cleanup; table names from hardcoded slice above
 			_, _ = db.Exec(fmt.Sprintf("DELETE FROM %s", table)) //nolint:gosec
 		}
 		_ = db.Close()
@@ -168,7 +168,7 @@ func (ts *testSetup) createTestChannel(t *testing.T, serverID, name string) stri
 	t.Helper()
 	channelID := uuid.New().String()
 	_, err := ts.db.Exec(
-		`INSERT INTO channels (id, server_id, name, type, is_encrypted) VALUES ($1, $2, $3, 'text', true)`,
+		`INSERT INTO channels (id, server_id, name, type) VALUES ($1, $2, $3, 'text')`,
 		channelID, serverID, name,
 	)
 	require.NoError(t, err)
@@ -180,7 +180,7 @@ func (ts *testSetup) createTestDMConversation(t *testing.T, user1, user2 string)
 	t.Helper()
 	convID := uuid.New().String()
 	_, err := ts.db.Exec(
-		`INSERT INTO dm_conversations (id, is_group, is_encrypted, created_by) VALUES ($1, false, true, $2)`,
+		`INSERT INTO dm_conversations (id, is_group, created_by) VALUES ($1, false, $2)`,
 		convID, user1,
 	)
 	require.NoError(t, err)
@@ -512,8 +512,8 @@ func TestDownloadAttachmentMembershipRequired(t *testing.T) {
 	storageKey := fmt.Sprintf(fmtAttachmentsKey, fileID)
 	require.NoError(t, ts.store.PutObject(context.TODO(), storageKey, bytes.NewReader([]byte("data")), 4, mimeOctetStream))
 	_, err := ts.db.Exec(
-		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, channel_id)
-		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 4, $3, true, 1, $4)`,
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, key_version, channel_id)
+		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 4, $3, 1, $4)`,
 		fileID, owner, storageKey, channelID,
 	)
 	require.NoError(t, err)
@@ -534,8 +534,8 @@ func TestDownloadAttachmentSuccess(t *testing.T) {
 	storageKey := fmt.Sprintf(fmtAttachmentsKey, fileID)
 	require.NoError(t, ts.store.PutObject(context.TODO(), storageKey, bytes.NewReader([]byte("ciphertext")), 10, mimeOctetStream))
 	_, err := ts.db.Exec(
-		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, channel_id)
-		 VALUES ($1, $2, 'photo', 2, 'image/jpeg', 10, $3, true, 1, $4)`,
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, key_version, channel_id)
+		 VALUES ($1, $2, 'photo', 2, 'image/jpeg', 10, $3, 1, $4)`,
 		fileID, owner, storageKey, channelID,
 	)
 	require.NoError(t, err)
@@ -583,8 +583,8 @@ func TestDeleteMediaOwnerOnly(t *testing.T) {
 	serverID := ts.createTestServer(t, owner, "Del Server")
 	channelID := ts.createTestChannel(t, serverID, "delchan")
 	_, err := ts.db.Exec(
-		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, channel_id)
-		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 4, $3, true, 1, $4)`,
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, key_version, channel_id)
+		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 4, $3, 1, $4)`,
 		fileID, owner, storageKey, channelID,
 	)
 	require.NoError(t, err)
@@ -618,8 +618,8 @@ func TestDeleteMediaAlreadyDeleted(t *testing.T) {
 	fileID := uuid.New().String()
 	storageKey := fmt.Sprintf(fmtAttachmentsKey, fileID)
 	_, err := ts.db.Exec(
-		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, key_version, channel_id, deleted_at)
-		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 4, $3, true, 1, $4, NOW())`,
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, key_version, channel_id, deleted_at)
+		 VALUES ($1, $2, 'file', 2, 'application/octet-stream', 4, $3, 1, $4, NOW())`,
 		fileID, owner, storageKey, channelID,
 	)
 	require.NoError(t, err)
@@ -678,7 +678,7 @@ func (ts *testSetup) createTestGroupDM(t *testing.T, adminID string, memberIDs .
 	t.Helper()
 	convID := uuid.New().String()
 	_, err := ts.db.Exec(
-		`INSERT INTO dm_conversations (id, is_group, is_encrypted, created_by) VALUES ($1, true, true, $2)`,
+		`INSERT INTO dm_conversations (id, is_group, created_by) VALUES ($1, true, $2)`,
 		convID, adminID,
 	)
 	require.NoError(t, err)

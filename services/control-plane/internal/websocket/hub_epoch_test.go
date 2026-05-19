@@ -134,7 +134,7 @@ type hubTestSetup struct {
 	user2  uuid.UUID
 }
 
-func setupEpochTest(t *testing.T, encrypted, seedKey, seedRevocation bool) *hubTestSetup {
+func setupEpochTest(t *testing.T, seedKey, seedRevocation bool) *hubTestSetup {
 	t.Helper()
 
 	db := setupHubTestDB(t)
@@ -154,8 +154,8 @@ func setupEpochTest(t *testing.T, encrypted, seedKey, seedRevocation bool) *hubT
 
 	convUUID := uuid.New()
 	convID := convUUID.String()
-	_, err = db.Exec(`INSERT INTO dm_conversations (id, is_group, is_personal, is_encrypted, created_by) VALUES ($1, false, false, $2, $3)`,
-		convID, encrypted, user1ID.String())
+	_, err = db.Exec(`INSERT INTO dm_conversations (id, is_group, is_personal, created_by) VALUES ($1, false, false, $2)`,
+		convID, user1ID.String())
 	require.NoError(t, err)
 	_, err = db.Exec(`INSERT INTO dm_participants (conversation_id, user_id) VALUES ($1, $2), ($1, $3)`,
 		convID, user1ID.String(), user2ID.String())
@@ -214,7 +214,7 @@ func readClientMsg(t *testing.T, client *Client) map[string]interface{} {
 }
 
 func TestHandleDMMessageCurrentEpochAccepted(t *testing.T) {
-	setup := setupEpochTest(t, true, true, false)
+	setup := setupEpochTest(t, true, false)
 
 	msg := IncomingMessage{
 		Type:     msgTypeDM,
@@ -234,7 +234,7 @@ func TestHandleDMMessageCurrentEpochAccepted(t *testing.T) {
 }
 
 func TestHandleDMMessageRevokedEpochRejected(t *testing.T) {
-	setup := setupEpochTest(t, true, true, true)
+	setup := setupEpochTest(t, true, true)
 
 	msg := IncomingMessage{
 		Type:     msgTypeDM,
@@ -257,11 +257,11 @@ func TestHandleDMMessageRevokedEpochRejected(t *testing.T) {
 }
 
 func TestHandleDMMessageNotSubscribed(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 
 	otherConvID := uuid.New().String()
 	_, err := setup.db.Exec(
-		`INSERT INTO dm_conversations (id, is_group, is_personal, is_encrypted, created_by) VALUES ($1, false, false, false, $2)`,
+		`INSERT INTO dm_conversations (id, is_group, is_personal, created_by) VALUES ($1, false, false, $2)`,
 		otherConvID, setup.user1.String())
 	require.NoError(t, err)
 
@@ -293,7 +293,7 @@ func TestHandleDMMessageNotSubscribed(t *testing.T) {
 // imply the system accepts plaintext DMs in production — it only asserts
 // the WS validator's specific contract.
 func TestHandleDMMessagePlaintextAcceptedWithKeyVersion(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 
 	msg := IncomingMessage{
 		Type:     msgTypeDM,

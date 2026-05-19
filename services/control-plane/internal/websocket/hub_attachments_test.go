@@ -18,7 +18,7 @@ const (
 // --- parseAttachmentIDs tests ---
 
 func TestParseAttachmentIDsNone(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	msg := IncomingMessage{
 		ClientID: setup.client.ID,
 		UserID:   setup.user1,
@@ -31,7 +31,7 @@ func TestParseAttachmentIDsNone(t *testing.T) {
 }
 
 func TestParseAttachmentIDsValid(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	id1 := uuid.New().String()
 	id2 := uuid.New().String()
 	msg := IncomingMessage{
@@ -50,7 +50,7 @@ func TestParseAttachmentIDsValid(t *testing.T) {
 }
 
 func TestParseAttachmentIDsTooMany(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	sixIDs := make([]interface{}, 6)
 	for i := range sixIDs {
 		sixIDs[i] = uuid.New().String()
@@ -73,7 +73,7 @@ func TestParseAttachmentIDsTooMany(t *testing.T) {
 }
 
 func TestParseAttachmentIDsInvalidUUID(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	msg := IncomingMessage{
 		ClientID: setup.client.ID,
 		UserID:   setup.user1,
@@ -88,7 +88,7 @@ func TestParseAttachmentIDsInvalidUUID(t *testing.T) {
 }
 
 func TestParseAttachmentIDsInvalidType(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	msg := IncomingMessage{
 		ClientID: setup.client.ID,
 		UserID:   setup.user1,
@@ -105,7 +105,7 @@ func TestParseAttachmentIDsInvalidType(t *testing.T) {
 // --- verifyAttachmentAccess tests ---
 
 func TestVerifyAttachmentAccessOwnerMismatch(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	ok := setup.hub.verifyAttachmentAccess(testFileID, "other-user", attachmentLinkCtx{
 		userID: setup.user1.String(),
 	}, nil, nil)
@@ -113,7 +113,7 @@ func TestVerifyAttachmentAccessOwnerMismatch(t *testing.T) {
 }
 
 func TestVerifyAttachmentAccessChannelMismatch(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	wrongChannel := "wrong-channel-id"
 	ok := setup.hub.verifyAttachmentAccess(testFileID, setup.user1.String(), attachmentLinkCtx{
 		userID:    setup.user1.String(),
@@ -123,7 +123,7 @@ func TestVerifyAttachmentAccessChannelMismatch(t *testing.T) {
 }
 
 func TestVerifyAttachmentAccessConversationMismatch(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	wrongConv := "wrong-conv-id"
 	ok := setup.hub.verifyAttachmentAccess(testFileID, setup.user1.String(), attachmentLinkCtx{
 		userID:         setup.user1.String(),
@@ -133,7 +133,7 @@ func TestVerifyAttachmentAccessConversationMismatch(t *testing.T) {
 }
 
 func TestVerifyAttachmentAccessValid(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	expectedChannel := "ch-1"
 	ok := setup.hub.verifyAttachmentAccess(testFileID, setup.user1.String(), attachmentLinkCtx{
 		userID:    setup.user1.String(),
@@ -143,7 +143,7 @@ func TestVerifyAttachmentAccessValid(t *testing.T) {
 }
 
 func TestVerifyAttachmentAccessNilChannelOnFile(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	ok := setup.hub.verifyAttachmentAccess(testFileID, setup.user1.String(), attachmentLinkCtx{
 		userID:    setup.user1.String(),
 		channelID: "expected-channel",
@@ -154,7 +154,7 @@ func TestVerifyAttachmentAccessNilChannelOnFile(t *testing.T) {
 // --- buildMessageBroadcast tests ---
 
 func TestBuildMessageBroadcastBasic(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	msgID := uuid.New()
 	chID := uuid.New()
 
@@ -177,7 +177,7 @@ func TestBuildMessageBroadcastBasic(t *testing.T) {
 }
 
 func TestBuildMessageBroadcastWithAttachments(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	msgID := uuid.New()
 	chID := uuid.New()
 	attachments := []models.AttachmentSummary{
@@ -203,7 +203,7 @@ func TestBuildMessageBroadcastWithAttachments(t *testing.T) {
 }
 
 func TestBuildMessageBroadcastWithReply(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	msgID := uuid.New()
 	chID := uuid.New()
 	replyID := uuid.New().String()
@@ -225,7 +225,7 @@ func TestBuildMessageBroadcastWithReply(t *testing.T) {
 // --- sendMessageAck with attachments ---
 
 func TestSendMessageAckWithAttachments(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	msgID := uuid.New()
 	chID := uuid.New()
 	attachments := []models.AttachmentSummary{
@@ -257,7 +257,7 @@ func TestSendMessageAckWithAttachments(t *testing.T) {
 }
 
 func TestSendMessageAckWithoutAttachments(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	msgID := uuid.New()
 	chID := uuid.New()
 
@@ -279,7 +279,7 @@ func TestSendMessageAckWithoutAttachments(t *testing.T) {
 // --- linkAttachmentsToTable with empty list ---
 
 func TestLinkAttachmentsToTableEmpty(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	result := setup.hub.linkAttachmentsToTable(attachmentLinkCtx{
 		messageID: uuid.New(),
 		userID:    setup.user1.String(),
@@ -289,7 +289,7 @@ func TestLinkAttachmentsToTableEmpty(t *testing.T) {
 }
 
 func TestLinkAttachmentsToTableEmptySlice(t *testing.T) {
-	setup := setupEpochTest(t, false, false, false)
+	setup := setupEpochTest(t, false, false)
 	result := setup.hub.linkAttachmentsToTable(attachmentLinkCtx{
 		messageID: uuid.New(),
 		userID:    setup.user1.String(),

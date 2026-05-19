@@ -97,8 +97,8 @@ func TestCleanupObjectSuccessSoftDeletesRow(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = db.ExecContext(ctx,
-		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted)
-		 VALUES (gen_random_uuid(), $1, 'photo', 1, 'image/jpeg', 1024, $2, false)`,
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key)
+		 VALUES (gen_random_uuid(), $1, 'photo', 1, 'image/jpeg', 1024, $2)`,
 		userID, storageKey,
 	)
 	require.NoError(t, err)
@@ -135,8 +135,8 @@ func TestCleanupObjectAlreadyDeletedIsIdempotent(t *testing.T) {
 
 	// Row already soft-deleted — WHERE deleted_at IS NULL won't match it
 	_, err = db.ExecContext(ctx,
-		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, is_encrypted, deleted_at)
-		 VALUES (gen_random_uuid(), $1, 'photo', 1, 'image/jpeg', 1024, $2, false, NOW())`,
+		`INSERT INTO media_files (id, uploader_id, file_type, media_tier, mime_type, file_size, storage_key, deleted_at)
+		 VALUES (gen_random_uuid(), $1, 'photo', 1, 'image/jpeg', 1024, $2, NOW())`,
 		userID, storageKey,
 	)
 	require.NoError(t, err)

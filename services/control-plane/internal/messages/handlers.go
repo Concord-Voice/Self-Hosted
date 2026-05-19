@@ -508,10 +508,9 @@ func (h *Handler) SendMessage(c *gin.Context) {
 	embedsSuppressed := !serverAllowEmbeds
 
 	messageID := uuid.New().String()
-	// Carry-along until #1026 drops the column
 	insertQuery := `
-		INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, embeds_suppressed, reply_to_id, gif_slug, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, TRUE, $5, $6, $7, $8, NOW(), NOW())
+		INSERT INTO messages (id, channel_id, user_id, content, key_version, embeds_suppressed, reply_to_id, gif_slug, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
 		RETURNING created_at, updated_at
 	`
 

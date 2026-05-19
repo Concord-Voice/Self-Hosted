@@ -1114,10 +1114,9 @@ type persistMessageParams struct {
 func (h *Hub) persistMessage(p persistMessageParams) (uuid.UUID, time.Time, time.Time, string) {
 	messageID := uuid.New()
 	var createdAt, updatedAt time.Time
-	// Carry-along until #1026 drops the column
 	err := h.db.QueryRow(
-		`INSERT INTO messages (id, channel_id, user_id, content, is_encrypted, key_version, embeds_suppressed, reply_to_id, gif_slug, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, TRUE, $5, $6, $7, $8, NOW(), NOW())
+		`INSERT INTO messages (id, channel_id, user_id, content, key_version, embeds_suppressed, reply_to_id, gif_slug, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())
 		 RETURNING created_at, updated_at`,
 		messageID, p.channelUUID, p.userID, p.content, p.keyVersion, p.embedsSuppressed, p.replyToID, p.gifSlug,
 	).Scan(&createdAt, &updatedAt)
@@ -1878,10 +1877,9 @@ func (h *Hub) enforceDMEpoch(msg IncomingMessage, convUUID uuid.UUID, keyVersion
 func (h *Hub) persistDMMessage(convUUID uuid.UUID, userID uuid.UUID, input *dmMessageInput) (uuid.UUID, time.Time, time.Time, error) {
 	messageID := uuid.New()
 	var createdAt, updatedAt time.Time
-	// Carry-along until #1026 drops the column
 	err := h.db.QueryRow(
-		`INSERT INTO dm_messages (id, conversation_id, user_id, content, is_encrypted, key_version, type, gif_slug, created_at, updated_at)
-		 VALUES ($1, $2, $3, $4, TRUE, $5, $6, $7, NOW(), NOW())
+		`INSERT INTO dm_messages (id, conversation_id, user_id, content, key_version, type, gif_slug, created_at, updated_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, NOW(), NOW())
 		 RETURNING created_at, updated_at`,
 		messageID, convUUID, userID, input.content, input.keyVersion, input.msgType, input.gifSlug,
 	).Scan(&createdAt, &updatedAt)
