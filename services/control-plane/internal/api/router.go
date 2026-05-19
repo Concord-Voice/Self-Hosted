@@ -22,6 +22,7 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/messages"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/mfa"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/notifications"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/ownership"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/servers"
@@ -175,6 +176,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	voiceHandler := voice.NewHandler(db, log, hub, cfg, rbacResolver, natsClient)
 	dmHandler := dm.NewHandler(db, log, hub, cfg, natsClient, redis)
 	friendsHandler := friends.NewHandler(db, log, hub)
+	notificationsHandler := notifications.NewHandler(db, log)
 	ownershipHandler := ownership.NewHandler(ownership.HandlerDeps{
 		DB:          db,
 		Log:         log,
@@ -875,6 +877,14 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 					channelsHandler.MarkServerRead,
 				)
 
+				// Get the caller's mute preferences for this server (the server
+				// itself plus any channel-level prefs for channels in it).
+				// 30 requests per minute matches the unread-states sibling.
+				serverRoutes.GET("/:id/mute-states",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					notificationsHandler.GetServerMuteStates,
+				)
+
 				// RBAC: Role management
 				serverRoutes.GET("/:id/roles",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
@@ -1443,6 +1453,25 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 						friendsHandler.ClaimFriendCode,
 					)
 				}
+			}
+
+			// Notification preferences (per-server / per-channel / per-DM mutes)
+			notificationRoutes := protected.Group("/notifications")
+			{
+				// Hydrate every mute pref for the caller (called once on app
+				// boot to populate the renderer's notificationPrefsStore).
+				notificationRoutes.GET("/preferences",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					notificationsHandler.ListPreferences,
+				)
+
+				// Upsert a single mute pref. Body: {target_type, target_id,
+				// muted, muted_until?}. Rate limit matches the per-action
+				// mute UI rhythm — bulk toggles are rare.
+				notificationRoutes.PUT("/mute",
+					middleware.RateLimitByUser(redis, 60, 1*time.Minute),
+					notificationsHandler.SetMute,
+				)
 			}
 		}
 
