@@ -6,8 +6,9 @@ WORKDIR /app
 # Install build dependencies (mediasoup needs Python, pip, and build tools)
 RUN apk add --no-cache python3 py3-pip make g++ linux-headers
 
-# Copy package files
+# stubs/ must precede npm ci — package.json overrides node-domexception → ./stubs/node-domexception
 COPY package*.json ./
+COPY stubs ./stubs
 RUN npm ci
 
 # Copy source code
@@ -25,7 +26,10 @@ WORKDIR /app
 RUN apk add --no-cache python3 py3-pip make g++ linux-headers
 
 # Copy package files and install production dependencies
+# stubs/ must precede npm ci — package.json overrides node-domexception → ./stubs/node-domexception
+# stubs/ must persist in the final image — npm creates a relative symlink resolved at runtime by fetch-blob
 COPY package*.json ./
+COPY stubs ./stubs
 RUN npm ci --omit=dev
 
 # Copy built application
