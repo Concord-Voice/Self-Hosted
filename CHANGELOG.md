@@ -153,13 +153,34 @@ Tracking at time of v0.2.0-Beta release. For the full open-issue list, see [issu
 
 ---
 
-## [0.1.37] — 2026-05-19 (E2EE-everywhere completion)
+## [0.1.39] — 2026-05-20 (Release-pipeline fix + v0.1.36–v0.1.38 catch-up)
+
+> First desktop release published via the workflow since v0.1.34 (2026-05-02).
+> v0.1.35 was published manually by the operator on 2026-05-09; v0.1.36, v0.1.37,
+> and v0.1.38 were bumped in `package.json` on `main` but never received GitHub
+> Releases due to a workflow regression — see "Fixed" below. `gh release list`
+> confirms no tags exist for those three versions. v0.1.39 bundles the accumulated
+> v0.1.36–v0.1.38 content with the workflow fix that ships it.
+
+### Fixed
+
+- **Desktop release workflow no longer cascade-skips on `push:main`** — PR #889 (merged 2026-05-08) introduced a `pr-paths-filter` job to support PR smoke-testing. That job carries `if: github.event_name == 'pull_request'` and is `skipped` on push events. The downstream `release` job did not opt out of GHA's transitive-skip semantics with `always()`, causing every release-bearing push to main since 2026-05-08 to skip the `Create release` step despite all six platform builds succeeding. Fixed by adding `always()` with explicit `.result == 'success'` checks on the direct upstream needs, plus the original `should_release == 'true'` gate.
 
 ### Changed
 
-- **Backend stops emitting `is_encrypted` field across API and WebSocket envelopes** ([#1042](https://github.com/markdrogersjr/Concord/pull/1042)) — the field is now structural (every room/channel is encrypted under [#201](https://github.com/markdrogersjr/Concord/issues/201)). Inbound WebSocket envelopes lacking `key_version >= 1` are rejected via close frame 4400 `missing_or_invalid_key_version`.
-- **Frontend stops reading `is_encrypted`** ([#1031](https://github.com/markdrogersjr/Concord/pull/1031)) — Child A of the #201 epic; included in v0.1.36 main HEAD but first released here.
-- **Media-plane removes `is_encrypted` field + documents SRTP-mandatory** ([#1032](https://github.com/markdrogersjr/Concord/pull/1032)) — Child D of #201; first released in v0.1.37.
+- **Product display name normalized to "Concord Voice"** (was "ConcordVoice"; commit 72b98f1a) — affects the macOS Dock label, Windows registry display name, and Linux desktop-entry name in the packaged builds.
+- **Company name normalized to "Concord Voice LLC"** (commit 21accce5) — License + About-screen attribution; aligns with the Windows Authenticode signer CN already pinned in `eslint.config.mjs` and the Windows signature verification step.
+- **Per-target notification mute preferences** ([#985](https://github.com/markdrogersjr/Concord/pull/985)) — closes [#84](https://github.com/markdrogersjr/Concord/issues/84); independent mute toggles for messages vs voice on a per-server/per-DM basis.
+
+### Changed (carried over from unshipped v0.1.36–v0.1.38)
+
+- **Backend stops emitting `is_encrypted` field across API and WebSocket envelopes** ([#1042](https://github.com/markdrogersjr/Concord/pull/1042)) — the field is now structural (every room/channel is encrypted under [#201](https://github.com/markdrogersjr/Concord/issues/201)). Inbound WebSocket envelopes lacking `key_version >= 1` are rejected via close frame 4400 `missing_or_invalid_key_version`. Landed on main in the v0.1.37 bump; first released here.
+- **Frontend stops reading `is_encrypted`** ([#1031](https://github.com/markdrogersjr/Concord/pull/1031)) — Child A of the #201 epic; landed on main in the v0.1.36 bump; first released here.
+- **Media-plane removes `is_encrypted` field + documents SRTP-mandatory** ([#1032](https://github.com/markdrogersjr/Concord/pull/1032)) — Child D of #201; landed on main in the v0.1.37 bump; first released here.
+
+### Fixed (carried over from unshipped v0.1.36–v0.1.38)
+
+- **WebSocket first-attempt drop is now silent + WS auth ticket redacted from console** ([#1046](https://github.com/markdrogersjr/Concord/pull/1046)) — noisy reconnect log on the very first connection has been quieted; auth ticket no longer surfaces in DevTools console. Landed on main in the v0.1.38 bump; first released here.
 
 ---
 
