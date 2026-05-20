@@ -1223,9 +1223,10 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 					klipyRoutes.GET("/randomid", apiLimiter, klipyHandler.RandomID) //nolint:staticcheck // deprecated but kept for backward compatibility
 					klipyRoutes.POST("/customer-id", apiLimiter, klipyHandler.CustomerID)
 
-					// 120/min on the media proxy (chat scrollback bursts)
+					// 300/min on the media proxy (chat scrollback bursts + GIF picker fresh scroll).
+					// See #804 for the analysis of scroll-page burst patterns.
 					klipyRoutes.GET("/media",
-						middleware.RateLimitByUser(redis, 120, 1*time.Minute),
+						middleware.RateLimitByUser(redis, 300, 1*time.Minute),
 						klipyHandler.Media,
 					)
 				}

@@ -16,6 +16,14 @@
 // Compliance notes:
 //   - We never modify API response bodies returned by KLIPY.
 //   - We never log slugs or search terms in the proxy routes (privacy promise).
+//     Reachable upstream error paths (network failure, upstream 5xx, upstream
+//     4xx) log only: route (gin pattern), method, host (bounded by
+//     allowedMediaHosts), and status code / error class. This is enough to
+//     detect credential-rotation outages and KLIPY CDN issues without leaking
+//     user content interest or the upstream app_key (#804). The
+//     http.NewRequestWithContext error branches are intentionally NOT logged
+//     — they are structurally unreachable (hardcoded method + validated URL)
+//     and would only count against new-code coverage without operational value.
 //   - We never cache responses except via standard Cache-Control headers on
 //     media binaries — KLIPY does not require revalidation.
 //   - We never present KLIPY as a support contact (Section 1).
@@ -99,6 +107,25 @@ func NewHandler(cfg *config.Config, log *logger.Logger) *Handler {
 			Transport: transport,
 		},
 	}
+}
+
+// sanitizedNetErr returns the underlying network error string from a *url.Error
+// without leaking the URL. *url.Error.Error() formats as `Op "URL": Err`, where
+// URL carries the upstream app_key (forwardJSON) or slug (Media handler) —
+// both of which the privacy promise requires we never log. Unwrapping to
+// urlErr.Err gives the operator-actionable cause (e.g., "dial tcp 127.0.0.1:1:
+// connect: connection refused") without the privacy-sensitive URL.
+//
+// If err is not a *url.Error or has no wrapped Err, falls back to err.Error().
+// In that fallback case, the caller is responsible for ensuring the error does
+// not embed a URL — currently only network-stack errors from http.Client.Do
+// route through this helper, and those are always *url.Error in practice.
+func sanitizedNetErr(err error) string {
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) && urlErr.Err != nil {
+		return urlErr.Err.Error()
+	}
+	return err.Error()
 }
 
 // --- API endpoint proxies ---
@@ -222,6 +249,10 @@ func (h *Handler) Media(c *gin.Context) {
 		return
 	}
 
+	// http.NewRequestWithContext is structurally unreachable as an error path
+	// here — the method is hardcoded GET and parsed.String() canonicalizes a
+	// URL that already passed url.Parse + the host allowlist. Defensive code
+	// stays for future-proofing but is intentionally not logged or tested.
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, parsed.String(), nil)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": errUpstreamDown})
@@ -231,16 +262,28 @@ func (h *Handler) Media(c *gin.Context) {
 	// Use the dedicated media client (30s timeout) instead of the API client.
 	resp, err := h.mediaClient.Do(req) //nolint:gosec // URL validated: scheme=https + host allowlist
 	if err != nil {
+		h.log.Warn("klipy media: upstream request failed",
+			"host", parsed.Host,
+			"error", sanitizedNetErr(err))
 		c.JSON(http.StatusBadGateway, gin.H{"error": errUpstreamDown})
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 500 {
+		h.log.Warn("klipy media: upstream 5xx",
+			"host", parsed.Host,
+			"status", resp.StatusCode)
 		c.JSON(http.StatusBadGateway, gin.H{"error": errUpstreamDown})
 		return
 	}
 	if resp.StatusCode >= 400 {
+		// 4xx is the credential-rotation indicator (KLIPY rejecting app_key →
+		// typically 401/403). Logging surfaces this to operators without
+		// leaking the slug/URL.
+		h.log.Warn("klipy media: upstream 4xx",
+			"host", parsed.Host,
+			"status", resp.StatusCode)
 		c.Status(resp.StatusCode)
 		return
 	}
@@ -343,6 +386,10 @@ func (h *Handler) buildUpstreamURL(path string, c *gin.Context, allowedParams []
 // client. JSON content type is preserved; rate limit + auth headers are stripped
 // to avoid leaking the app_key in error envelopes.
 func (h *Handler) forwardJSON(c *gin.Context, method, upstreamURL string, body io.Reader) {
+	// http.NewRequestWithContext is structurally unreachable as an error path
+	// here — all callers pass an internal-controlled method constant and a
+	// upstreamURL built from the validated config base URL. Defensive code
+	// stays for future-proofing but is intentionally not logged or tested.
 	req, err := http.NewRequestWithContext(c.Request.Context(), method, upstreamURL, body)
 	if err != nil {
 		c.JSON(http.StatusBadGateway, gin.H{"error": errUpstreamDown})
@@ -352,19 +399,35 @@ func (h *Handler) forwardJSON(c *gin.Context, method, upstreamURL string, body i
 
 	resp, err := h.client.Do(req) //nolint:gosec // upstreamURL constructed from config base URL, not user input
 	if err != nil {
+		h.log.Warn("klipy api: upstream request failed",
+			"route", c.FullPath(),
+			"method", method,
+			"error", sanitizedNetErr(err))
 		c.JSON(http.StatusBadGateway, gin.H{"error": errUpstreamDown})
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode >= 500 {
+		h.log.Warn("klipy api: upstream 5xx",
+			"route", c.FullPath(),
+			"method", method,
+			"status", resp.StatusCode)
 		c.JSON(http.StatusBadGateway, gin.H{"error": errUpstreamDown})
 		return
 	}
 	if resp.StatusCode >= 400 {
+		// 4xx is the credential-rotation indicator (KLIPY rejecting app_key →
+		// typically 401/403). Logging surfaces this to operators without
+		// leaking the slug/URL/search term.
+		//
 		// Mirror the status but never forward the upstream error body — KLIPY's
 		// error envelopes can echo the URL (and therefore the app_key) and we
 		// must not leak that to the client. Surface a generic message instead.
+		h.log.Warn("klipy api: upstream 4xx",
+			"route", c.FullPath(),
+			"method", method,
+			"status", resp.StatusCode)
 		c.JSON(resp.StatusCode, gin.H{"error": errUpstreamFailed})
 		return
 	}

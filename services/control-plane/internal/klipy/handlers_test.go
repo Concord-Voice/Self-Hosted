@@ -1,6 +1,7 @@
 package klipy_test
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -421,7 +422,49 @@ func TestProxyMediaHappyPath(t *testing.T) {
 		r.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusOK, w.Code)
 		assert.Equal(t, "image/gif", w.Header().Get(contentTypeHeader))
-		assert.NotEmpty(t, w.Header().Get("Cache-Control"))
+		// The shared withMockUpstream mock at handlers_test.go's /media/ branch
+		// does NOT set Cache-Control on upstream, so the handler's default
+		// branch at klipy/handlers.go:260-262 must fire and apply the
+		// conservative 1-hour public cache. This is load-bearing for the
+		// Chromium HTTP cache that absorbs repeat-view scroll bursts (#804);
+		// a future refactor that removed the else-branch would silently
+		// re-introduce the rate-limit pressure the higher /media limit is
+		// designed to relieve.
+		assert.Equal(t, "public, max-age=3600", w.Header().Get("Cache-Control"))
+	})
+}
+
+// TestProxyMediaPassesThroughUpstreamCacheControl verifies the OTHER branch of
+// klipy/handlers.go:255-262: when upstream provides a Cache-Control header,
+// the handler MUST forward it unchanged rather than apply the default. This
+// preserves CDN-controlled caching when KLIPY (or the underlying CDN) signals
+// stricter or different cache semantics than our default.
+//
+// Together with TestProxyMediaHappyPath, this exercises both branches of the
+// Cache-Control branch in the Media handler.
+func TestProxyMediaPassesThroughUpstreamCacheControl(t *testing.T) {
+	const upstreamCacheControl = "public, max-age=300, immutable"
+	upstream := func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set(contentTypeHeader, "image/gif")
+		w.Header().Set("Cache-Control", upstreamCacheControl)
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("GIF89a\x00\x00"))
+	}
+	withMockUpstreamHandler(t, upstream, func(t *testing.T, h *klipy.Handler, r *gin.Engine) {
+		server := httptest.NewTLSServer(http.HandlerFunc(upstream))
+		defer server.Close()
+		klipy.SetMediaClientForTest(h, server.Client())
+		savedHosts := klipy.SetMediaHostsForTest(regexp.MustCompile(`^127\.0\.0\.1(:\d+)?$`))
+		defer klipy.SetMediaHostsForTest(savedHosts)
+
+		mediaURL := server.URL + "/media/passthrough.gif"
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", pathMediaURL+url.QueryEscape(mediaURL), nil)
+		r.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code)
+		// The handler MUST forward the upstream value verbatim, not overwrite
+		// it with the default.
+		assert.Equal(t, upstreamCacheControl, w.Header().Get("Cache-Control"))
 	})
 }
 
@@ -568,4 +611,208 @@ func TestProxyMediaUpstream4xx(t *testing.T) {
 		r.ServeHTTP(w, req)
 		assert.Equal(t, http.StatusNotFound, w.Code)
 	})
+}
+
+// --- Upstream-error observability (#804 silent-failure mitigation) ---
+
+// newHandlerWithLogCapture builds a klipy.Handler whose logger writes to the
+// returned bytes.Buffer instead of stdout, so tests can assert that error
+// paths emit structured logs AND respect the privacy promise (no slugs, no
+// search terms, no full upstream URLs).
+//
+// Used only by upstream-error observability tests. Other tests use
+// newTestHandler with the stdout logger.
+func newHandlerWithLogCapture(_ *testing.T) (*klipy.Handler, *bytes.Buffer) {
+	gin.SetMode(gin.TestMode)
+	cfg := &config.Config{KlipyAPIKey: testAppKey}
+	buf := &bytes.Buffer{}
+	log := logger.NewWithWriter(buf)
+	return klipy.NewHandler(cfg, log), buf
+}
+
+// TestProxyMediaLogsUpstream5xxWithoutLeakingURL asserts that the Media
+// handler's 5xx-upstream branch emits a structured log entry containing the
+// host and status code but NOT the slug-bearing path component of the
+// upstream URL. This is the regression-catch for the silent-failure surface
+// identified during #804 review: pre-existing code at handlers.go's Media
+// handler swallowed upstream errors with no log, so a KLIPY credential
+// rotation (returning 401/403) would surface only as "GIF picker is broken"
+// to users with no server-side signal for operators.
+//
+// Privacy invariant: log output must not contain "secret-slug" (the slug
+// embedded in the test URL), the full mediaURL, or any URL-decoded path
+// component beyond the bounded host.
+func TestProxyMediaLogsUpstream5xxWithoutLeakingURL(t *testing.T) {
+	const slug = "secret-slug-do-not-leak-12345"
+	upstream := func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(upstream))
+	defer server.Close()
+
+	h, logBuf := newHandlerWithLogCapture(t)
+	klipy.SetMediaClientForTest(h, server.Client())
+	savedHosts := klipy.SetMediaHostsForTest(regexp.MustCompile(`^127\.0\.0\.1(:\d+)?$`))
+	defer klipy.SetMediaHostsForTest(savedHosts)
+
+	r := newRouter(h)
+	mediaURL := server.URL + "/media/" + slug + ".gif"
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", pathMediaURL+url.QueryEscape(mediaURL), nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusBadGateway, w.Code)
+
+	logOut := logBuf.String()
+	// Affirmative checks: the log must surface the failure to operators.
+	assert.Contains(t, logOut, "klipy media: upstream 5xx",
+		"5xx upstream must emit a structured log so credential-rotation outages are visible to operators")
+	assert.Contains(t, logOut, "status=500",
+		"log must include the upstream status code")
+	assert.Contains(t, logOut, "host=127.0.0.1",
+		"log must include the (allowlisted) upstream host for operator triage")
+	// Privacy invariants: the slug and full URL must NEVER appear in logs.
+	assert.NotContains(t, logOut, slug,
+		"PRIVACY VIOLATION: upstream slug leaked into log output")
+	assert.NotContains(t, logOut, "/media/secret-slug",
+		"PRIVACY VIOLATION: upstream path leaked into log output")
+}
+
+// TestProxyMediaLogsUpstream4xxWithoutLeakingURL is the credential-rotation
+// indicator path: KLIPY returns 401/403 when the proxy's app_key is rejected.
+// This must be logged so operators detect the outage; the slug must not leak.
+func TestProxyMediaLogsUpstream4xxWithoutLeakingURL(t *testing.T) {
+	const slug = "another-secret-slug-xyz"
+	upstream := func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(upstream))
+	defer server.Close()
+
+	h, logBuf := newHandlerWithLogCapture(t)
+	klipy.SetMediaClientForTest(h, server.Client())
+	savedHosts := klipy.SetMediaHostsForTest(regexp.MustCompile(`^127\.0\.0\.1(:\d+)?$`))
+	defer klipy.SetMediaHostsForTest(savedHosts)
+
+	r := newRouter(h)
+	mediaURL := server.URL + "/media/" + slug + ".gif"
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", pathMediaURL+url.QueryEscape(mediaURL), nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusForbidden, w.Code)
+
+	logOut := logBuf.String()
+	assert.Contains(t, logOut, "klipy media: upstream 4xx")
+	assert.Contains(t, logOut, "status=403")
+	assert.Contains(t, logOut, "host=127.0.0.1")
+	assert.NotContains(t, logOut, slug,
+		"PRIVACY VIOLATION: upstream slug leaked into log output on 4xx")
+}
+
+// TestProxyAPILogsUpstream4xxWithoutLeakingSearchQuery is the analogous test
+// for the forwardJSON helper (used by /gifs/search, /gifs/trending, etc.).
+// The 4xx branch must log status + route + method but NOT the search term
+// (privacy promise — searches are not logged).
+func TestProxyAPILogsUpstream4xxWithoutLeakingSearchQuery(t *testing.T) {
+	const sensitiveQuery = "DO-NOT-LEAK-search-term-9999"
+	upstream := func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte(`{"error":"app_key invalid"}`))
+	}
+	server := httptest.NewTLSServer(http.HandlerFunc(upstream))
+	defer server.Close()
+
+	originalBase := klipy.SetAPIBaseForTest(server.URL)
+	defer klipy.SetAPIBaseForTest(originalBase)
+
+	h, logBuf := newHandlerWithLogCapture(t)
+	klipy.SetHTTPClientForTest(h, server.Client())
+	r := newRouter(h)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", pathSearch+"?q="+url.QueryEscape(sensitiveQuery), nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+
+	logOut := logBuf.String()
+	// Affirmative: route + method + status surface to operators.
+	assert.Contains(t, logOut, "klipy api: upstream 4xx",
+		"4xx upstream must emit a structured log (credential-rotation indicator)")
+	assert.Contains(t, logOut, "status=401")
+	assert.Contains(t, logOut, "method=GET")
+	// Privacy invariant: search term must NEVER appear.
+	assert.NotContains(t, logOut, sensitiveQuery,
+		"PRIVACY VIOLATION: search query leaked into log output")
+	assert.NotContains(t, logOut, "DO-NOT-LEAK",
+		"PRIVACY VIOLATION: search-term substring leaked into log output")
+}
+
+// TestProxyAPILogsUpstreamNetworkFailureWithoutLeakingURL covers the
+// `h.client.Do` error branch in forwardJSON: when the upstream KLIPY API is
+// unreachable (DNS failure, connection refused, TLS error), the handler must
+// emit a structured Warn log AND must NOT leak the search query into the log.
+//
+// We trigger the network failure by pointing klipyAPIBase at an unreachable
+// host (TCP port 1 is reliably refused on localhost) so client.Do returns
+// a connection error.
+func TestProxyAPILogsUpstreamNetworkFailureWithoutLeakingURL(t *testing.T) {
+	const sensitiveQuery = "NETWORK-FAIL-search-leak-check"
+
+	// Unreachable upstream: TCP port 1 reliably yields connection-refused.
+	originalBase := klipy.SetAPIBaseForTest("http://127.0.0.1:1")
+	defer klipy.SetAPIBaseForTest(originalBase)
+
+	h, logBuf := newHandlerWithLogCapture(t)
+	r := newRouter(h)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", pathSearch+"?q="+url.QueryEscape(sensitiveQuery), nil)
+	r.ServeHTTP(w, req)
+	// Network failure must surface to clients as 502 Bad Gateway.
+	require.Equal(t, http.StatusBadGateway, w.Code)
+
+	logOut := logBuf.String()
+	// Affirmative: the log surfaces the failure to operators.
+	assert.Contains(t, logOut, "klipy api: upstream request failed",
+		"network failure must emit a structured log so connectivity outages are visible to operators")
+	assert.Contains(t, logOut, "method=GET")
+	// Privacy invariant: search term must NEVER appear, even via the error string.
+	assert.NotContains(t, logOut, sensitiveQuery,
+		"PRIVACY VIOLATION: search query leaked into log output on network failure")
+	assert.NotContains(t, logOut, "NETWORK-FAIL",
+		"PRIVACY VIOLATION: search-term substring leaked via error.Error()")
+}
+
+// TestProxyMediaLogsUpstreamNetworkFailureWithoutLeakingURL is the matching
+// test for the Media handler's `mediaClient.Do` error branch. Triggers a
+// connection failure by closing the mock upstream before the request fires.
+func TestProxyMediaLogsUpstreamNetworkFailureWithoutLeakingURL(t *testing.T) {
+	const slug = "network-fail-slug-do-not-leak"
+
+	// Start a mock server, capture its URL, then close it BEFORE making the
+	// request. The closed server's URL still parses cleanly and passes the
+	// host allowlist, but mediaClient.Do will get connection-refused.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	closedURL := server.URL
+	server.Close()
+
+	h, logBuf := newHandlerWithLogCapture(t)
+	klipy.SetMediaClientForTest(h, &http.Client{Timeout: 1}) // 1ns timeout — guaranteed network-level failure
+	savedHosts := klipy.SetMediaHostsForTest(regexp.MustCompile(`^127\.0\.0\.1(:\d+)?$`))
+	defer klipy.SetMediaHostsForTest(savedHosts)
+
+	r := newRouter(h)
+	mediaURL := closedURL + "/media/" + slug + ".gif"
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", pathMediaURL+url.QueryEscape(mediaURL), nil)
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusBadGateway, w.Code)
+
+	logOut := logBuf.String()
+	assert.Contains(t, logOut, "klipy media: upstream request failed",
+		"network failure must emit a structured log")
+	assert.Contains(t, logOut, "host=127.0.0.1")
+	assert.NotContains(t, logOut, slug,
+		"PRIVACY VIOLATION: slug leaked into log output on network failure")
 }
