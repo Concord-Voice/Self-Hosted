@@ -36,8 +36,16 @@ else
   LIVE="/etc/letsencrypt/live/${DOMAIN}"
 fi
 
-# Sanity check — exit silently if the expected files don't exist
+# Sanity check — cert files don't exist yet.
+#
+# Legitimate during initial provisioning: provision-production.sh invokes the
+# deploy hook manually before certbot has issued the first cert. Exit 0 is
+# correct (no error, nothing to do). The stderr line leaves a forensic trail
+# so an operator investigating "why did the cert renew but coturn still has
+# the old cert?" can grep journalctl and see WHY the hook short-circuited
+# (helps catch RENEWED_LINEAGE typos, filesystem-full anomalies, etc.).
 if [[ ! -f "${LIVE}/fullchain.pem" || ! -f "${LIVE}/privkey.pem" ]]; then
+  echo "[copy-certs] skipping — cert files not found at ${LIVE} (expected during initial provisioning before first certbot run)" >&2
   exit 0
 fi
 
@@ -62,7 +70,8 @@ if command -v docker >/dev/null 2>&1; then
     if docker restart concordvoice-coturn >/dev/null 2>&1; then
       echo "[copy-certs] concordvoice-coturn restarted"
     else
-      echo "[copy-certs] WARNING: failed to restart concordvoice-coturn — restart manually to load new certs" >&2
+      echo "[copy-certs] ERROR: failed to restart concordvoice-coturn — restart manually to load new certs" >&2
+      exit 1
     fi
   fi
 fi
@@ -76,8 +85,9 @@ fi
 # provisioning before nginx is started).
 if systemctl is-active --quiet nginx 2>/dev/null; then
   if systemctl reload nginx 2>/dev/null; then
-    echo "[copy-certs] nginx reloaded — Let's Encrypt cert refreshed in TLS handshake"
+    echo "[copy-certs] nginx reloaded — new TLS handshakes will serve the renewed cert"
   else
-    echo "[copy-certs] WARNING: failed to reload nginx — clients will see stale cert until manual reload" >&2
+    echo "[copy-certs] ERROR: failed to reload nginx — clients will see stale cert until manual reload" >&2
+    exit 1
   fi
 fi
