@@ -342,6 +342,22 @@ if (config.environment === 'production' && config.jwtSecret === DEV_JWT_SECRET) 
   process.exit(1);
 }
 
+// Production safety guard — reject wildcard '*' in ALLOWED_ORIGINS when paired
+// with Socket.IO's credentials: true. CWE-942: a wildcard credentialed origin
+// allows cross-origin Socket.IO hijack against authenticated sessions. The
+// runtime origin gate (originGate.ts) and control-plane CORS both pass '*'
+// through for parity; this is a config-load guard to reject the foot-gun before
+// the server starts accepting connections.
+if (config.environment === 'production' && config.allowedOrigins.includes('*')) {
+  console.error(
+    "FATAL: ALLOWED_ORIGINS may not contain '*' in production. " +
+      'Socket.IO is configured with credentials: true; a wildcard origin would ' +
+      'permit cross-origin hijack against authenticated sessions. ' +
+      'Set ALLOWED_ORIGINS to an explicit comma-separated list of allowed origins.'
+  );
+  process.exit(1);
+}
+
 // Re-export mediasoup types for convenience
 import * as mediasoup from 'mediasoup';
 export type * as mediasoupTypes from 'mediasoup';

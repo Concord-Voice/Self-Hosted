@@ -11,6 +11,7 @@ import type { AuthenticatedSocketData } from './middleware/auth.js';
 import { NatsService } from './lib/nats.js';
 import { RedisService } from './lib/redis.js';
 import { createExpressErrorHandler } from './lib/expressErrorHandler.js';
+import { createOriginGate } from './lib/originGate.js';
 
 async function main() {
   // Create Express app
@@ -76,16 +77,7 @@ async function main() {
   // Initialize Socket.IO
   const io = new SocketIOServer(httpServer, {
     cors: {
-      origin: (origin, callback) => {
-        // Allow packaged Electron (file://), null origins, and no-origin requests
-        if (!origin || origin === 'null' || origin === 'file://') {
-          return callback(null, true);
-        }
-        if (config.allowedOrigins.includes('*') || config.allowedOrigins.includes(origin)) {
-          return callback(null, true);
-        }
-        callback(new Error(`Origin ${origin} not allowed`));
-      },
+      origin: createOriginGate(config.allowedOrigins),
       credentials: true,
     },
   });
