@@ -1138,6 +1138,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					channelsHandler.DistributeUnifiedKeys,
 				)
+				// Re-enrollment trigger for missing-wrap recovery (#1023). Inserts a pending
+				// row idempotently so peers can fulfill via DistributeUnifiedKeys.
+				e2eeRoutes.POST("/keys/:context_id/rewrap",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					channelsHandler.RequestRewrap,
+				)
 
 				// Validate cached key epochs on reconnect (pull-based catch-up for missed revocations)
 				e2eeRoutes.POST("/validate-epochs",

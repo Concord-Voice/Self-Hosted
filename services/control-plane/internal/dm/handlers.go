@@ -1304,12 +1304,23 @@ func (h *Handler) DistributeKeys(c *gin.Context) {
 		return
 	}
 
-	// Determine key version
+	// Determine key version.
+	//
+	// CRITICAL: the fallback MUST be MAX (not MAX+1). Peer-fulfillment wraps
+	// the EXISTING cached CSK, so the inserted row belongs at the existing
+	// epoch — tagging it at MAX+1 would tie the wrap to a version no
+	// historical message references, breaking decryption of history for
+	// the recovering/onboarding user. Rotation paths pass an explicit
+	// key_version. New conversations default to version 1. See #1023 /
+	// PR #1080.
 	keyVersion := 1
-	if req.KeyVersion != nil {
+	if req.KeyVersion != nil && *req.KeyVersion > 0 {
 		keyVersion = *req.KeyVersion
 	} else {
-		_ = h.db.QueryRow(`SELECT COALESCE(MAX(key_version), 0) + 1 FROM dm_channel_keys WHERE conversation_id = $1`, convID).Scan(&keyVersion)
+		_ = h.db.QueryRow(`SELECT COALESCE(MAX(key_version), 1) FROM dm_channel_keys WHERE conversation_id = $1`, convID).Scan(&keyVersion)
+		if keyVersion == 0 {
+			keyVersion = 1
+		}
 	}
 
 	distributed := 0

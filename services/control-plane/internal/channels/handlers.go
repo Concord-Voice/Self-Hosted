@@ -35,6 +35,11 @@ const (
 	errMsgFailedMarkServerRead    = "Failed to mark server read"
 	errMsgNoEncryptionKey         = "No encryption key available yet"
 	errMsgFailedDistributeKeys    = "Failed to distribute keys"
+	errMsgInvalidContextID        = "Invalid context ID"
+	errMsgFailedProcessRewrap     = "Failed to process rewrap request"
+	errMsgFailedEnrollRewrap      = "Failed to enroll rewrap request"
+	errMsgContextNotFound         = "Context not found"
+	errMsgNotMemberOrParticipant  = "Not a member or participant"
 	logMsgFailedCheckPermissions  = "Failed to check permissions"
 )
 
@@ -1205,6 +1210,11 @@ func (h *Handler) GetPendingKeyRequests(c *gin.Context) {
 
 // GetUnifiedKeys resolves a context_id to either a server channel or DM conversation
 // and returns the caller's wrapped key.
+//
+// Side effect: on the 404 NO_KEY_YET path (key row missing), auto-enrolls the
+// caller into pending_key_requests / dm_pending_key_requests so peers can
+// fulfill via DistributeUnifiedKeys (#1023). Idempotent via ON CONFLICT DO NOTHING.
+//
 // GET /e2ee/keys/:context_id
 func (h *Handler) GetUnifiedKeys(c *gin.Context) {
 	userID := c.GetString("user_id")
@@ -1212,7 +1222,7 @@ func (h *Handler) GetUnifiedKeys(c *gin.Context) {
 
 	if _, err := uuid.Parse(contextID); err != nil {
 		c.JSON(http.StatusBadRequest, e2eekeys.ErrorResponse{
-			Error: "Invalid context ID",
+			Error: errMsgInvalidContextID,
 			Code:  e2eekeys.CodeInvalidRequest,
 			Kind:  e2eekeys.KindUnknown,
 		})
@@ -1250,6 +1260,213 @@ func (h *Handler) GetUnifiedKeys(c *gin.Context) {
 	h.getDMKeyResponse(c, contextID, userID)
 }
 
+// enrollPending inserts an idempotent (context, user) row into the pending
+// table corresponding to the kind. Returns true if a new row was inserted,
+// false if the insert was a duplicate (silent enrollment).
+//
+// Uses pre-written parameterized SQL strings selected by a switch on the
+// kind argument — no fmt.Sprintf, no string concatenation. Per
+// [internal]rules/backend.md, SQL statements must be parameterized with
+// $1, $2; this helper preserves that rule while still presenting a single
+// call shape to enrollChannelRewrap / enrollDMRewrap and the
+// getChannelKeyResponse / getDMKeyResponse auto-enroll paths.
+//
+// Used by RequestRewrap (explicit POST /rewrap path) and by
+// getChannelKeyResponse / getDMKeyResponse (auto-enroll on 404 path).
+// Logging is delegated to callers — they have different log contexts.
+func (h *Handler) enrollPending(kind, contextID, userID string) (inserted bool, err error) {
+	var query string
+	switch kind {
+	case "channel":
+		query = `INSERT INTO pending_key_requests (channel_id, user_id)
+		         VALUES ($1, $2)
+		         ON CONFLICT (channel_id, user_id) DO NOTHING`
+	case "dm":
+		query = `INSERT INTO dm_pending_key_requests (conversation_id, user_id)
+		         VALUES ($1, $2)
+		         ON CONFLICT (conversation_id, user_id) DO NOTHING`
+	default:
+		return false, fmt.Errorf("enrollPending: unknown kind %q", kind)
+	}
+	result, execErr := h.db.Exec(query, contextID, userID)
+	if execErr != nil {
+		return false, execErr
+	}
+	rows, _ := result.RowsAffected()
+	return rows > 0, nil
+}
+
+// RequestRewrap enrolls the caller into the peer-fulfillment queue for a
+// missing channel/DM key. Idempotent: ON CONFLICT DO NOTHING.
+// POST /api/v1/e2ee/keys/:context_id/rewrap
+//
+// Security (per [internal]rules/e2ee.md):
+//   - Takes NO request body. Server uses existing peer-fulfillment flow
+//     which relies on ALREADY-STORED pubkeys; no client-supplied pubkey
+//     is ever consumed.
+//   - RBAC before any DB write: server member (channel) or DM participant.
+//   - Rate-limited per-user at the route layer (10/min).
+//   - Logs context_id, user_id, action only. No key material.
+//
+// The channel vs DM branches are extracted into enrollChannelRewrap and
+// enrollDMRewrap helpers to keep cognitive complexity under the SonarQube
+// threshold of 15 (S3776) and eliminate Block B duplication between the
+// two enrollment paths.
+func (h *Handler) RequestRewrap(c *gin.Context) {
+	userID := c.GetString("user_id")
+	contextID := c.Param("context_id")
+
+	if _, err := uuid.Parse(contextID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidContextID})
+		return
+	}
+
+	// Resolve channel vs DM
+	var isChannel bool
+	err := h.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM channels c
+			INNER JOIN server_members sm ON c.server_id = sm.server_id AND sm.user_id = $2
+			WHERE c.id = $1
+		)
+	`, contextID, userID).Scan(&isChannel)
+	if err != nil {
+		h.log.Error("re_wrap_request: channel check failed",
+			"kind", "re_wrap_check_db_error",
+			"context_id", contextID,
+			"user_id", userID,
+			"error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedProcessRewrap})
+		return
+	}
+
+	if isChannel {
+		h.enrollChannelRewrap(c, contextID, userID)
+		return
+	}
+
+	h.enrollDMRewrap(c, contextID, userID)
+}
+
+// enrollChannelRewrap handles the channel half of RequestRewrap: inserts a row
+// into pending_key_requests (idempotent via ON CONFLICT DO NOTHING) and emits
+// the structured log + 202 response.
+//
+// Extracted from RequestRewrap to keep cognitive complexity under the SonarQube
+// S3776 threshold of 15 and eliminate code duplication with enrollDMRewrap.
+func (h *Handler) enrollChannelRewrap(c *gin.Context, contextID, userID string) {
+	inserted, enrollErr := h.enrollPending("channel", contextID, userID)
+	if enrollErr != nil {
+		h.log.Error("re_wrap_request: channel enrollment insert failed",
+			"kind", "re_wrap_insert_db_error",
+			"context_id", contextID,
+			"user_id", userID,
+			"error", enrollErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedEnrollRewrap})
+		return
+	}
+	h.emitEnrollResult(c, contextID, userID, "channel", inserted)
+}
+
+// enrollDMRewrap handles the DM half of RequestRewrap: verifies participation,
+// distinguishes unknown-context (404) from non-participant (403), and inserts
+// into dm_pending_key_requests on success.
+//
+// Extracted from RequestRewrap to keep cognitive complexity under the SonarQube
+// S3776 threshold of 15 and eliminate code duplication with enrollChannelRewrap.
+func (h *Handler) enrollDMRewrap(c *gin.Context, contextID, userID string) {
+	var isDMParticipant bool
+	err := h.db.QueryRow(`
+		SELECT EXISTS(
+			SELECT 1 FROM dm_conversations dc
+			INNER JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $2
+			WHERE dc.id = $1
+		)
+	`, contextID, userID).Scan(&isDMParticipant)
+	if err != nil {
+		h.log.Error("re_wrap_request: dm check failed",
+			"kind", "re_wrap_check_db_error",
+			"context_id", contextID,
+			"user_id", userID,
+			"error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedProcessRewrap})
+		return
+	}
+
+	if !isDMParticipant {
+		h.respondNotMemberOrUnknown(c, contextID, userID)
+		return
+	}
+
+	inserted, enrollErr := h.enrollPending("dm", contextID, userID)
+	if enrollErr != nil {
+		h.log.Error("re_wrap_request: dm enrollment insert failed",
+			"kind", "re_wrap_insert_db_error",
+			"context_id", contextID,
+			"user_id", userID,
+			"error", enrollErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedEnrollRewrap})
+		return
+	}
+	h.emitEnrollResult(c, contextID, userID, "dm", inserted)
+}
+
+// emitEnrollResult writes the structured log line corresponding to whether
+// the insert happened (re_wrap_enrolled vs re_wrap_already_enrolled) and
+// sends the 202 response. Extracted to deduplicate the symmetric tails of
+// enrollChannelRewrap and enrollDMRewrap (SonarQube duplication threshold).
+func (h *Handler) emitEnrollResult(c *gin.Context, contextID, userID, contextKind string, inserted bool) {
+	if inserted {
+		h.log.Info("re_wrap_enrolled",
+			"kind", "re_wrap_enrolled",
+			"context_id", contextID,
+			"user_id", userID,
+			"context_kind", contextKind)
+	} else {
+		h.log.Info("re_wrap_already_enrolled",
+			"kind", "re_wrap_already_enrolled",
+			"context_id", contextID,
+			"user_id", userID,
+			"context_kind", contextKind)
+	}
+	c.JSON(http.StatusAccepted, gin.H{"enrolled": true, "kind": contextKind})
+}
+
+// respondNotMemberOrUnknown distinguishes "context doesn't exist" (404) from
+// "caller isn't a member or participant" (403) when neither the channel-member
+// nor DM-participant checks matched. Extracted so enrollDMRewrap stays under
+// the cognitive-complexity threshold (S3776).
+func (h *Handler) respondNotMemberOrUnknown(c *gin.Context, contextID, userID string) {
+	var contextExists bool
+	ceErr := h.db.QueryRow(`
+		SELECT EXISTS(SELECT 1 FROM channels WHERE id = $1)
+		OR EXISTS(SELECT 1 FROM dm_conversations WHERE id = $1)
+	`, contextID).Scan(&contextExists)
+	if ceErr != nil {
+		// error field included for incident triage; per observability.md this is not key material.
+		h.log.Error("re_wrap_request: context existence check failed",
+			"kind", "re_wrap_check_db_error",
+			"context_id", contextID,
+			"user_id", userID,
+			"error", ceErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedProcessRewrap})
+		return
+	}
+	if !contextExists {
+		h.log.Info("re_wrap_request: unknown context",
+			"kind", "re_wrap_unknown_context",
+			"context_id", contextID,
+			"user_id", userID)
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgContextNotFound})
+		return
+	}
+	h.log.Info("re_wrap_request: not member or participant",
+		"kind", "re_wrap_not_member",
+		"context_id", contextID,
+		"user_id", userID)
+	c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotMemberOrParticipant})
+}
+
 func (h *Handler) getChannelKeyResponse(c *gin.Context, contextID, userID string) {
 	key, err := h.fetchChannelKey(contextID, userID, c.Query("version"))
 	if err == errInvalidVersion {
@@ -1261,6 +1478,26 @@ func (h *Handler) getChannelKeyResponse(c *gin.Context, contextID, userID string
 		return
 	}
 	if err == sql.ErrNoRows {
+		// Auto-enroll caller into pending_key_requests (#1023 — missing-wrap recovery).
+		// Idempotent via ON CONFLICT DO NOTHING. Complement to POST /rewrap
+		// (RequestRewrap): gives immediate enrollment without requiring a second
+		// round-trip from the client.
+		inserted, enrollErr := h.enrollPending("channel", contextID, userID)
+		if enrollErr != nil {
+			// Log but don't fail the request — the 404+pending response is the
+			// contract; auto-enroll is a defense-in-depth side effect.
+			h.log.Error("auto-enroll pending channel insert failed",
+				"kind", "auto_enroll_insert_db_error",
+				"context_id", contextID,
+				"user_id", userID,
+				"error", enrollErr)
+		} else if inserted {
+			h.log.Info("auto-enrolled pending channel request",
+				"kind", "enroll_pending_channel",
+				"context_id", contextID,
+				"user_id", userID)
+		}
+
 		h.log.Info("e2ee key fetch: no channel key row",
 			"kind", "no_channel_key_row",
 			"context_id", contextID,
@@ -1379,6 +1616,22 @@ func (h *Handler) getDMKeyResponse(c *gin.Context, contextID, userID string) {
 	`, contextID, userID).Scan(&key.ID, &key.ConversationID, &key.UserID, &key.WrappedKey, &key.KeyVersion, &key.CreatedAt)
 
 	if err == sql.ErrNoRows {
+		// Auto-enroll caller into dm_pending_key_requests (#1023).
+		// Mirror of getChannelKeyResponse auto-enroll path.
+		inserted, enrollErr := h.enrollPending("dm", contextID, userID)
+		if enrollErr != nil {
+			h.log.Error("auto-enroll pending dm insert failed",
+				"kind", "auto_enroll_insert_db_error",
+				"context_id", contextID,
+				"user_id", userID,
+				"error", enrollErr)
+		} else if inserted {
+			h.log.Info("auto-enrolled pending dm request",
+				"kind", "enroll_pending_dm",
+				"context_id", contextID,
+				"user_id", userID)
+		}
+
 		h.log.Info("e2ee key fetch: no DM key row",
 			"kind", "no_dm_key_row",
 			"context_id", contextID,
@@ -1458,7 +1711,7 @@ func (h *Handler) DistributeUnifiedKeys(c *gin.Context) {
 	contextID := c.Param("context_id")
 
 	if _, err := uuid.Parse(contextID); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid context ID"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidContextID})
 		return
 	}
 
@@ -1505,16 +1758,40 @@ func (h *Handler) DistributeUnifiedKeys(c *gin.Context) {
 		return
 	}
 
-	distributed := h.distributeDMKeys(contextID, req.WrappedKeys)
+	distributed := h.distributeDMKeys(contextID, req.WrappedKeys, req.KeyVersion)
 	c.JSON(http.StatusOK, gin.H{"distributed": distributed, "context_type": "dm"})
 }
 
-func (h *Handler) distributeDMKeys(conversationID string, wrappedKeys map[string]string) int {
-	keyVersion := 1
+// resolveTargetKeyVersionDM mirrors resolveTargetKeyVersion for DM conversations.
+// Returns the explicit version if the caller provided one > 0 (rotation path);
+// otherwise returns the EXISTING max version so peer-fulfilled wraps of the
+// cached CSK get tagged at the same epoch as established participants. For a
+// brand-new conversation with no key rows, returns 1.
+//
+// CRITICAL: this MUST NOT compute MAX+1 on the fallback path. Stamping a peer
+// fulfillment at a new version would break history decryption — the recovering
+// user would get a row tagged at a version no historical message references.
+// See PR #1080 / issue #1023.
+func (h *Handler) resolveTargetKeyVersionDM(conversationID string, explicitVersion *int) int {
+	if explicitVersion != nil && *explicitVersion > 0 {
+		return *explicitVersion
+	}
+	var v int
 	_ = h.db.QueryRow(
-		`SELECT COALESCE(MAX(key_version), 0) + 1 FROM dm_channel_keys WHERE conversation_id = $1`,
+		`SELECT COALESCE(MAX(key_version), 1) FROM dm_channel_keys WHERE conversation_id = $1`,
 		conversationID,
-	).Scan(&keyVersion)
+	).Scan(&v)
+	if v == 0 {
+		// COALESCE returns 1 when MAX is NULL (no rows), but defend against
+		// Scan leaving v at its zero value on driver error — keep the
+		// invariant "version >= 1" by clamping.
+		v = 1
+	}
+	return v
+}
+
+func (h *Handler) distributeDMKeys(conversationID string, wrappedKeys map[string]string, explicitVersion *int) int {
+	keyVersion := h.resolveTargetKeyVersionDM(conversationID, explicitVersion)
 
 	distributed := 0
 	for memberUserID, wrappedKey := range wrappedKeys {

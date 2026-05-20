@@ -1245,6 +1245,64 @@ func TestDistributeKeys_InvalidMemberUUID(t *testing.T) {
 	assert.Equal(t, float64(0), body["distributed"])
 }
 
+// TestDistributeKeys_NewConversationStartsAtVersion1 verifies that the legacy
+// DM key distribution endpoint defaults to version 1 for a brand-new
+// conversation with no existing keys.
+func TestDistributeKeys_NewConversationStartsAtVersion1(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "lgdmnew1")
+	user2 := ts.CreateTestUser(t, "lgdmnew2")
+	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+"/keys", map[string]interface{}{
+		"wrapped_keys": map[string]string{
+			user2.ID: "wrapped-key-newconv",
+		},
+	}, testhelpers.AuthHeaders(user1.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var version int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT key_version FROM dm_channel_keys WHERE conversation_id = $1 AND user_id = $2`,
+		convID, user2.ID,
+	).Scan(&version))
+	assert.Equal(t, 1, version,
+		"first key in a new conversation should be version 1, not MAX+1")
+}
+
+// TestDistributeKeys_PeerFulfillmentPreservesVersion is the legacy-endpoint
+// regression test for the same bug fixed on the unified endpoint
+// (PR #1080 / #1023). When the caller does NOT pass an explicit key_version,
+// the server must preserve the EXISTING key_version on peer fulfillment, not
+// stamp MAX+1.
+func TestDistributeKeys_PeerFulfillmentPreservesVersion(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "lgdmpfa")
+	user2 := ts.CreateTestUser(t, "lgdmpfb")
+	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
+
+	// Seed user1 at version 1 (simulates established participant).
+	ts.SeedDMKey(t, convID, user1.ID, 1)
+
+	// user1 peer-fulfills the wrap for user2 with no explicit version.
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+"/keys", map[string]interface{}{
+		"wrapped_keys": map[string]string{
+			user2.ID: "wrapped-key-peer",
+		},
+	}, testhelpers.AuthHeaders(user1.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var version int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT key_version FROM dm_channel_keys WHERE conversation_id = $1 AND user_id = $2`,
+		convID, user2.ID,
+	).Scan(&version))
+	assert.Equal(t, 1, version,
+		"peer-fulfilled wrap on legacy endpoint must preserve existing key_version (1), not stamp MAX+1 (2)")
+}
+
 // ============================================================================
 // AuthorizeVoiceJoin Tests
 // ============================================================================

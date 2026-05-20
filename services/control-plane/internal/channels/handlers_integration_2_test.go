@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -1398,6 +1399,166 @@ func TestDistributeUnifiedKeysDM(t *testing.T) {
 	assert.Equal(t, float64(1), body["distributed"])
 }
 
+// queryDMKeyVersion returns the key_version of the row in dm_channel_keys for
+// a given (conversation, user). Fails the test if no row exists.
+func queryDMKeyVersion(t *testing.T, ts *testhelpers.TestServer, conversationID, userID string) int {
+	t.Helper()
+	var version int
+	err := ts.DB.QueryRow(
+		`SELECT key_version FROM dm_channel_keys WHERE conversation_id = $1 AND user_id = $2`,
+		conversationID, userID,
+	).Scan(&version)
+	require.NoError(t, err, "expected dm_channel_keys row for (%s, %s)", conversationID, userID)
+	return version
+}
+
+// TestDistributeUnifiedKeysDM_NewConversationStartsAtVersion1 verifies that the
+// first peer-fulfilled wrap for a brand-new DM conversation lands at
+// key_version=1. This is the baseline behavior pre- and post-fix.
+func TestDistributeUnifiedKeysDM_NewConversationStartsAtVersion1(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "dmnewv1a")
+	user2 := ts.CreateTestUser(t, "dmnewv1b")
+	ts.CreateFriendship(t, user1.ID, user2.ID, "accepted")
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
+
+	w := ts.DoRequest("POST", pathE2EEKeys+convID, map[string]interface{}{
+		keyWrappedKeys: map[string]string{
+			user2.ID: testhelpers.ValidCiphertext(),
+		},
+	}, testhelpers.AuthHeaders(user1.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	assert.Equal(t, 1, queryDMKeyVersion(t, ts, convID, user2.ID),
+		"first key in a new DM conversation should be version 1")
+}
+
+// TestDistributeUnifiedKeysDM_PeerFulfillmentPreservesVersion is the regression
+// test for the bug fixed in PR #1080: when a peer wraps the current CSK for
+// a recovering or newly-joining user, the inserted row MUST be tagged at the
+// EXISTING key_version, not MAX+1. Otherwise the recovering user receives a
+// wrap at a version no historical message references, breaking history
+// decryption.
+func TestDistributeUnifiedKeysDM_PeerFulfillmentPreservesVersion(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "dmpfa")
+	user2 := ts.CreateTestUser(t, "dmpfb")
+	ts.CreateFriendship(t, user1.ID, user2.ID, "accepted")
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
+
+	// Seed user1 at version 1 (simulates established participant).
+	ts.SeedDMKey(t, convID, user1.ID, 1)
+
+	// user1 peer-fulfills the CSK wrap for user2 (the recovering/onboarding
+	// participant). The client did NOT pass an explicit key_version in the
+	// body; the server must default to the EXISTING version (1), NOT MAX+1
+	// (which would be 2).
+	w := ts.DoRequest("POST", pathE2EEKeys+convID, map[string]interface{}{
+		keyWrappedKeys: map[string]string{
+			user2.ID: testhelpers.ValidCiphertext(),
+		},
+	}, testhelpers.AuthHeaders(user1.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	assert.Equal(t, 1, queryDMKeyVersion(t, ts, convID, user2.ID),
+		"peer-fulfilled wrap must preserve the existing key_version (1), not stamp MAX+1 (2)")
+}
+
+// TestDistributeUnifiedKeysDM_ExplicitVersionRotation verifies the rotation
+// path: when the caller passes an explicit key_version (typically MAX+1 from
+// the rotation broadcast), the server inserts at that version.
+func TestDistributeUnifiedKeysDM_ExplicitVersionRotation(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "dmrotA")
+	user2 := ts.CreateTestUser(t, "dmrotB")
+	ts.CreateFriendship(t, user1.ID, user2.ID, "accepted")
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
+
+	// Seed both participants at version 1.
+	ts.SeedDMKey(t, convID, user1.ID, 1)
+	ts.SeedDMKey(t, convID, user2.ID, 1)
+
+	// Rotation: client passes key_version: 2 explicitly.
+	explicitVersion := 2
+	w := ts.DoRequest("POST", pathE2EEKeys+convID, map[string]interface{}{
+		keyWrappedKeys: map[string]string{
+			user1.ID: testhelpers.ValidCiphertext(),
+			user2.ID: testhelpers.ValidCiphertext(),
+		},
+		"key_version": explicitVersion,
+	}, testhelpers.AuthHeaders(user1.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, float64(2), body["distributed"])
+
+	// Each user should have BOTH a version 1 and version 2 row.
+	var v1Count, v2Count int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM dm_channel_keys WHERE conversation_id = $1 AND key_version = 1`,
+		convID,
+	).Scan(&v1Count))
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM dm_channel_keys WHERE conversation_id = $1 AND key_version = 2`,
+		convID,
+	).Scan(&v2Count))
+	assert.Equal(t, 2, v1Count, "seeded version 1 rows should be intact")
+	assert.Equal(t, 2, v2Count, "rotation inserts at explicit key_version=2")
+}
+
+// TestDistributeUnifiedKeysDM_RecoveryAfterRotation verifies the cross-product
+// bug: a recovery happens AFTER a rotation. The conversation has rows at
+// version 2 (current), and a user recovers their wrap. The peer wrap must
+// land at version 2 (current MAX), not version 3 (MAX+1).
+func TestDistributeUnifiedKeysDM_RecoveryAfterRotation(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "dmrecA")
+	user2 := ts.CreateTestUser(t, "dmrecB")
+	ts.CreateFriendship(t, user1.ID, user2.ID, "accepted")
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
+
+	// Simulate post-rotation state: both at v1, user1 at v2 (user2 missing v2 wrap).
+	ts.SeedDMKey(t, convID, user1.ID, 1)
+	ts.SeedDMKey(t, convID, user2.ID, 1)
+	ts.SeedDMKey(t, convID, user1.ID, 2)
+
+	// user1 peer-fulfills the recovery for user2 with no explicit version.
+	// MAX(key_version) is 2; the server must insert user2's wrap at version 2
+	// (the existing/current epoch), NOT at version 3.
+	w := ts.DoRequest("POST", pathE2EEKeys+convID, map[string]interface{}{
+		keyWrappedKeys: map[string]string{
+			user2.ID: testhelpers.ValidCiphertext(),
+		},
+	}, testhelpers.AuthHeaders(user1.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// user2 now has both v1 and v2 wraps.
+	var versions []int
+	rows, err := ts.DB.Query(
+		`SELECT key_version FROM dm_channel_keys WHERE conversation_id = $1 AND user_id = $2 ORDER BY key_version`,
+		convID, user2.ID,
+	)
+	require.NoError(t, err)
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var v int
+		require.NoError(t, rows.Scan(&v))
+		versions = append(versions, v)
+	}
+	require.NoError(t, rows.Err())
+	assert.Equal(t, []int{1, 2}, versions,
+		"recovery wrap must land at current MAX version (2), preserving access to history")
+
+	// And there must NOT be a phantom version-3 row.
+	var v3Count int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM dm_channel_keys WHERE conversation_id = $1 AND key_version = 3`,
+		convID,
+	).Scan(&v3Count))
+	assert.Equal(t, 0, v3Count, "no phantom MAX+1 row should be created on peer fulfillment")
+}
+
 // ===========================================================================
 // Get Pending Key Requests — edge cases
 // ===========================================================================
@@ -1701,4 +1862,101 @@ func TestMultipleChannelOperations(t *testing.T) {
 		channels := body["channels"].([]interface{})
 		assert.Empty(t, channels)
 	})
+}
+
+// ===========================================================================
+// Concurrent contention — rewrap idempotency (#1023)
+// ===========================================================================
+
+func TestRequestRewrapConcurrentSameUserSameContext(t *testing.T) {
+	ts, user, _, channelID := setupEncryptedChannel(t)
+
+	const N = 8
+	var wg sync.WaitGroup
+	statuses := make([]int, N)
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func(idx int) {
+			defer wg.Done()
+			w := ts.DoRequest("POST", "/api/v1/e2ee/keys/"+channelID+"/rewrap", nil,
+				testhelpers.AuthHeaders(user.AccessToken))
+			statuses[idx] = w.Code
+		}(i)
+	}
+	wg.Wait()
+
+	// All requests succeed (rate-limit allows up to 10/min; we send 8)
+	for i, code := range statuses {
+		assert.Equal(t, http.StatusAccepted, code, "concurrent request %d", i)
+	}
+
+	// Exactly one row
+	var count int
+	err := ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM pending_key_requests WHERE channel_id = $1 AND user_id = $2`,
+		channelID, user.ID,
+	).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+}
+
+func TestGetUnifiedKeysAutoEnrollConcurrent(t *testing.T) {
+	ts := setupTS(t)
+	userA := ts.CreateTestUser(t, "autoenrconcA")
+	userB := ts.CreateTestUser(t, "autoenrconcB")
+	conversationID := ts.CreateDMConversation(t, userA.ID, userB.ID)
+	_ = userB
+
+	const N = 6
+	var wg sync.WaitGroup
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			w := ts.DoRequest("GET", "/api/v1/e2ee/keys/"+conversationID, nil,
+				testhelpers.AuthHeaders(userA.AccessToken))
+			// All N concurrent GETs return 404+pending; we only check status here.
+			assert.Equal(t, http.StatusNotFound, w.Code)
+		}()
+	}
+	wg.Wait()
+
+	var count int
+	err := ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM dm_pending_key_requests WHERE conversation_id = $1 AND user_id = $2`,
+		conversationID, userA.ID,
+	).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
+}
+
+func TestAutoEnrollAndRequestRewrapRaceConverge(t *testing.T) {
+	ts := setupTS(t)
+	userA := ts.CreateTestUser(t, "raceA")
+	userB := ts.CreateTestUser(t, "raceB")
+	conversationID := ts.CreateDMConversation(t, userA.ID, userB.ID)
+	_ = userB
+
+	// One GET (triggers auto-enroll) and one POST /rewrap concurrently.
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		ts.DoRequest("GET", "/api/v1/e2ee/keys/"+conversationID, nil,
+			testhelpers.AuthHeaders(userA.AccessToken))
+	}()
+	go func() {
+		defer wg.Done()
+		ts.DoRequest("POST", "/api/v1/e2ee/keys/"+conversationID+"/rewrap", nil,
+			testhelpers.AuthHeaders(userA.AccessToken))
+	}()
+	wg.Wait()
+
+	var count int
+	err := ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM dm_pending_key_requests WHERE conversation_id = $1 AND user_id = $2`,
+		conversationID, userA.ID,
+	).Scan(&count)
+	require.NoError(t, err)
+	assert.Equal(t, 1, count)
 }
