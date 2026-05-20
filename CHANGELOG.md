@@ -153,6 +153,24 @@ Tracking at time of v0.2.0-Beta release. For the full open-issue list, see [issu
 
 ---
 
+## [0.1.40] — 2026-05-20 (Linux build hotfix)
+
+> v0.1.39 was bumped in `package.json` on `main` but never received a GitHub
+> Release: the `build-desktop.yml` build matrix had Linux build failures (see
+> "Fixed" below), so the `release:` job correctly skipped per ADR-0004
+> Invariant 1 (`needs.build.result == 'success'` gate). v0.1.40 carries the
+> full v0.1.39 release content plus the Linux build fix.
+
+### Fixed
+
+- **Linux build no longer fails at `@reforged/maker-appimage` packaging** — commit [21accce5](https://github.com/markdrogersjr/Concord/commit/21accce5) ("Change company name to 'Concord Voice LLC'") silently bundled an unrelated `packagerConfig.executableName` rename from `'concord-voice'` to `'Concord Voice'` alongside its legitimate company-name updates. With executableName changed to `'Concord Voice'`, the packaged Linux binary became `Concord-Voice-linux-<arch>/Concord Voice` (with a space), but the Linux makers' `bin: 'concord-voice'` option still performed a literal-string file lookup for `concord-voice`, failing with `"Could not find executable 'concord-voice' in packaged application"` ([run 26148494680](https://github.com/markdrogersjr/Concord/actions/runs/26148494680)). The bug sat latent on `main` for ~6 hours while the cascade-skip regression (since-fixed by [#1077](https://github.com/markdrogersjr/Concord/pull/1077)) was still suppressing the build matrix, and surfaced on the first `push:main` after the cascade-skip fix shipped — exactly the verification path documented in [ADR-0004]([internal]0004-desktop-release-contract.md) Invariant 3. Fixed by making `executableName` per-platform: Linux falls back to kebab-case `'concord-voice'` (matching the maker `bin:` lookup and debian-policy §5.6.7), while macOS / Windows retain the proper-name format `'Concord Voice'` (visible in Activity Monitor, Task Manager, and crash reports).
+
+### Changed
+
+- **Test guard for the Linux ↔ display-name asymmetry is now platform-conditional** — `packagingIdentity.test.ts` updates the `executableName` literal-value assertion and the `Linux maker bin intentionally diverges from executableName` asymmetry-guard to branch on `process.platform`. On Linux test runners (CI's ubuntu-latest), the asymmetry guard returns early because the per-platform conditional in `forge.config.ts` makes Linux's `executableName` legitimately equal to `bin`; on macOS/Windows, the guard still asserts the deliberate divergence.
+
+---
+
 ## [0.1.39] — 2026-05-20 (Release-pipeline fix + v0.1.36–v0.1.38 catch-up)
 
 > First desktop release published via the workflow since v0.1.34 (2026-05-02).
