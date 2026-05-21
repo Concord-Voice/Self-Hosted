@@ -68,11 +68,12 @@ func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, resolver *rb
 }
 
 // SendMessageRequest represents a request to send a message.
-// Max content length is 24000 to accommodate encrypted messages (AES-GCM + base64 overhead).
-// Plaintext messages are limited to 4000 chars on the client side.
+// Max content length is 65536 bytes (64 KiB) of ciphertext — sized for a future
+// 10,240-char paid-tier message under worst-case CJK UTF-8 (3 bytes/char) plus
+// AES-GCM + base64 envelope, with ~60% headroom for envelope evolution.
 type SendMessageRequest struct {
 	ChannelID   string  `json:"channel_id" binding:"required,uuid"`
-	Content     string  `json:"content" binding:"required,min=1,max=24000"`
+	Content     string  `json:"content" binding:"required,min=1,max=65536"`
 	KeyVersion  int     `json:"key_version"`
 	ReplyToID   *string `json:"reply_to_id,omitempty"`  // Optional: UUID of message being replied to (must be same channel)
 	MentionMeta string  `json:"mention_meta,omitempty"` // Accepted but unused — mention routing is WebSocket-only. Field exists so REST clients don't get a 400 for including it.
@@ -80,9 +81,9 @@ type SendMessageRequest struct {
 }
 
 // UpdateMessageRequest represents a request to update a message.
-// Max content length is 24000 to accommodate encrypted messages.
+// Max content length is 65536 bytes (64 KiB) — matches SendMessageRequest.
 type UpdateMessageRequest struct {
-	Content string `json:"content" binding:"required,min=1,max=24000"`
+	Content string `json:"content" binding:"required,min=1,max=65536"`
 }
 
 // isFKViolation returns true if the error is a PostgreSQL foreign key violation (23503).

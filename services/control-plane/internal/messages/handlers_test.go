@@ -2,6 +2,7 @@ package messages_test
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
@@ -231,4 +232,46 @@ func TestDeleteMessageAsAdmin(t *testing.T) {
 
 	w := ts.DoRequest("DELETE", "/api/v1/messages/"+msgID, nil, testhelpers.AuthHeaders(admin.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestSendMessageContentLength_AcceptsAt65536(t *testing.T) {
+	// Verifies the Gin binding:"max=65536" tag accepts a 65,536-char Content
+	// through the full HTTP request → handler → validator path. Boundary test
+	// for the message-length-policy cap raise (24000 → 65536).
+	// Mirrors TestSendMessageSuccess: requires server membership so the request
+	// reaches the DB insert, confirming HTTP 201 rather than stopping at
+	// membership or ciphertext checks.
+	//
+	// Content: 65536 Base64 chars ("A" repeated) decodes to 49152 bytes of raw
+	// data (all zeros), which satisfies isValidCiphertext's ≥28-byte floor.
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "maxlenmsg")
+	serverID := ts.CreateTestServer(t, user.ID, "MaxLen Server")
+	channelID := ts.CreateTestChannel(t, serverID, "general")
+
+	w := ts.DoRequest("POST", "/api/v1/messages", map[string]interface{}{
+		"channel_id": channelID,
+		"content":    strings.Repeat("A", 65536),
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	assert.Equal(t, http.StatusCreated, w.Code)
+}
+
+func TestSendMessageContentLength_RejectsAt65537(t *testing.T) {
+	// Verifies the Gin binding:"max=65536" tag rejects a 65,537-char Content
+	// through the full HTTP request → handler → validator path. Boundary test
+	// for the message-length-policy cap raise (24000 → 65536).
+	// Mirrors TestSendMessageEmptyContent: ShouldBindJSON returns an error before
+	// the membership check is reached, so HTTP 400 fires on the validator alone.
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "overlenmsg")
+	serverID := ts.CreateTestServer(t, user.ID, "OverLen Server")
+	channelID := ts.CreateTestChannel(t, serverID, "general")
+
+	w := ts.DoRequest("POST", "/api/v1/messages", map[string]interface{}{
+		"channel_id": channelID,
+		"content":    strings.Repeat("A", 65537),
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	assert.Equal(t, http.StatusBadRequest, w.Code)
 }

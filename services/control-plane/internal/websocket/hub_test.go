@@ -1738,7 +1738,7 @@ func TestValidateContentLengthBelowCiphertextLimitOK(t *testing.T) {
 	client := newTestClient(hub, uuid.New())
 	hub.clients[clientID] = client
 
-	// All content is encrypted under E2EE-everywhere; the 24000 ciphertext cap applies.
+	// All content is encrypted under E2EE-everywhere; the 65536 ciphertext cap applies.
 	content := make([]byte, 5000)
 	for i := range content {
 		content[i] = 'a'
@@ -1752,8 +1752,8 @@ func TestValidateContentLengthAboveCiphertextLimitRejected(t *testing.T) {
 	client := newTestClient(hub, uuid.New())
 	hub.clients[clientID] = client
 
-	// 24001 bytes exceeds the encrypted-ciphertext cap.
-	content := make([]byte, 24001)
+	// 65537 bytes exceeds the encrypted-ciphertext cap.
+	content := make([]byte, 65537)
 	for i := range content {
 		content[i] = 'a'
 	}

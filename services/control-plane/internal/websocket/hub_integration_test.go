@@ -168,8 +168,8 @@ func TestHandleMessageMissingContent(t *testing.T) {
 func TestHandleMessageContentTooLong(t *testing.T) {
 	setup := setupMessageTest(t)
 
-	// Content > 24000 ciphertext cap under E2EE-everywhere (#201).
-	longContent := make([]byte, 24001)
+	// Content > 65536 ciphertext cap under E2EE-everywhere (#201).
+	longContent := make([]byte, 65537)
 	for i := range longContent {
 		longContent[i] = 'a'
 	}
@@ -199,7 +199,7 @@ func TestHandleMessageContentTooLong(t *testing.T) {
 func TestHandleMessageEncryptedContentLongerLimit(t *testing.T) {
 	setup := setupMessageTest(t)
 
-	// 5000 chars is well below the 24000 ciphertext cap under E2EE-everywhere.
+	// 5000 chars is well below the 65536 ciphertext cap under E2EE-everywhere.
 	longContent := make([]byte, 5000)
 	for i := range longContent {
 		longContent[i] = 'a'
@@ -218,7 +218,7 @@ func TestHandleMessageEncryptedContentLongerLimit(t *testing.T) {
 
 	setup.hub.handleMessage(msg)
 
-	// Should succeed (5000 < 24000)
+	// Should succeed (5000 < 65536)
 	resp := readClientMsg(t, setup.client)
 	assert.Equal(t, "message_ack", resp["type"])
 }
@@ -590,8 +590,8 @@ func TestHandleDMMessageEmptyContent(t *testing.T) {
 func TestHandleDMMessageContentTooLong(t *testing.T) {
 	setup := setupEpochTest(t, false, false)
 
-	// Content > 24000 ciphertext cap under E2EE-everywhere (#201).
-	longContent := make([]byte, 24001)
+	// Content > 65536 ciphertext cap under E2EE-everywhere (#201).
+	longContent := make([]byte, 65537)
 	for i := range longContent {
 		longContent[i] = 'a'
 	}
@@ -1567,4 +1567,64 @@ func TestFlushOnlineCountsFullPipeline(t *testing.T) {
 	data := resp["data"].(map[string]interface{})
 	counts := data[keyCounts].(map[string]interface{})
 	assert.Equal(t, float64(1), counts[serverID.String()])
+}
+
+// TestHandleMessageAcceptsCiphertextAt65536 verifies the hub accepts content
+// of exactly 65536 bytes (the new ciphertext cap). Boundary test for the
+// message-length-policy cap raise from 24000 to 65536.
+func TestHandleMessageAcceptsCiphertextAt65536(t *testing.T) {
+	setup := setupMessageTest(t)
+
+	// Exactly 65536 bytes — at the cap boundary, must be accepted.
+	content := make([]byte, 65536)
+	for i := range content {
+		content[i] = 'a'
+	}
+
+	msg := IncomingMessage{
+		Type:     "message",
+		UserID:   setup.user1,
+		ClientID: setup.client.ID,
+		Data: map[string]interface{}{
+			keyChannelID:  setup.convID,
+			keyContent:    string(content),
+			keyKeyVersion: float64(1),
+		},
+	}
+
+	setup.hub.handleMessage(msg)
+
+	// Should succeed (65536 == cap, not > cap)
+	resp := readClientMsg(t, setup.client)
+	assert.Equal(t, "message_ack", resp["type"])
+}
+
+// TestHandleMessageRejectsCiphertextAt65537 verifies the hub rejects content
+// of 65537 bytes via the len(content) > 65536 check.
+func TestHandleMessageRejectsCiphertextAt65537(t *testing.T) {
+	setup := setupMessageTest(t)
+
+	// 65537 bytes — one byte over the cap, must be rejected.
+	content := make([]byte, 65537)
+	for i := range content {
+		content[i] = 'a'
+	}
+
+	msg := IncomingMessage{
+		Type:     "message",
+		UserID:   setup.user1,
+		ClientID: setup.client.ID,
+		Data: map[string]interface{}{
+			keyChannelID:  setup.convID,
+			keyContent:    string(content),
+			keyKeyVersion: float64(1),
+		},
+	}
+
+	setup.hub.handleMessage(msg)
+
+	resp := readClientMsg(t, setup.client)
+	assert.Equal(t, "error", resp["type"])
+	data := resp["data"].(map[string]interface{})
+	assert.Contains(t, data[keyMessage], "maximum length")
 }

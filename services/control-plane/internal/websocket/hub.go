@@ -832,7 +832,7 @@ func (h *Hub) parseMessageInput(msg IncomingMessage) *messageInput {
 	}
 
 	// All channels are encrypted under E2EE-everywhere (#201); allow ciphertext-length payloads.
-	if len(content) > 24000 {
+	if len(content) > 65536 {
 		h.sendError(msg.ClientID, "Message content exceeds maximum length")
 		return nil
 	}
@@ -1802,9 +1802,11 @@ func (h *Hub) parseDMMessageFields(msg IncomingMessage) (*dmMessageInput, bool) 
 
 // validateContentLength checks that the message content does not exceed the
 // allowed length. All messages are encrypted under E2EE-everywhere (#201),
-// so the 24000-byte ciphertext cap applies.
+// so the 65536-byte (64 KiB) ciphertext cap applies. Sized for the future
+// 10,240-char paid-tier message under worst-case CJK UTF-8 + AES-GCM envelope,
+// with ~60% envelope evolution headroom.
 func (h *Hub) validateContentLength(clientID uuid.UUID, content string) bool {
-	if len(content) > 24000 {
+	if len(content) > 65536 {
 		h.sendError(clientID, "Message content exceeds maximum length")
 		return false
 	}
