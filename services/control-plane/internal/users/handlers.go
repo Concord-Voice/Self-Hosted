@@ -1,4 +1,5 @@
 // Package users provides handlers for user profile management and settings.
+// diagnostic: trigger touch for #1110 baseline measurement (reverted in PR 3)
 package users
 
 import (
