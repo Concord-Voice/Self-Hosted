@@ -12,7 +12,6 @@ import { NatsService } from './lib/nats.js';
 import { RedisService } from './lib/redis.js';
 import { createExpressErrorHandler } from './lib/expressErrorHandler.js';
 import { createOriginGate } from './lib/originGate.js';
-// diagnostic: trigger touch for #1110 baseline measurement (reverted in PR 3)
 
 async function main() {
   // Create Express app
