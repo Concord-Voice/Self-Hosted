@@ -17,23 +17,27 @@ COPY . .
 # Build TypeScript
 RUN npm run build
 
-# Production stage
+# Drop dev deps after build, then verify the `file:` override symlink survived prune.
+# Defense against future npm versions changing prune semantics in a way that
+# would silently break the node-domexception override (per #1083 → #1097).
+RUN npm prune --omit=dev \
+ && test -L node_modules/node-domexception \
+ && test -d node_modules/node-domexception/ \
+ && npm ls node-domexception
+
+# Production stage — NO compilation toolchain.
+# mediasoup-worker (native ELF) was compiled in the builder stage above.
+# node_modules carries the worker binary + pruned prod deps + the node-domexception override symlink.
+# stubs/ must persist at runtime — fetch-blob resolves the symlink at require time.
+# See [internal]rules/media-plane.md "Docker Build Context Invariant" for the discipline.
 FROM node:24-alpine
 
 WORKDIR /app
 
-# Install runtime dependencies for mediasoup worker build
-RUN apk add --no-cache python3 py3-pip make g++ linux-headers
-
-# Copy package files and install production dependencies
-# stubs/ must precede npm ci — package.json overrides node-domexception → ./stubs/node-domexception
-# stubs/ must persist in the final image — npm creates a relative symlink resolved at runtime by fetch-blob
-COPY package*.json ./
-COPY stubs ./stubs
-RUN npm ci --omit=dev
-
-# Copy built application
+COPY --from=builder /app/node_modules ./node_modules
 COPY --from=builder /app/dist ./dist
+COPY --from=builder /app/stubs ./stubs
+COPY --from=builder /app/package*.json ./
 
 # Run as non-root user
 RUN addgroup -S appuser && adduser -S appuser -G appuser
