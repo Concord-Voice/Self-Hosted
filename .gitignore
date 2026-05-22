@@ -34,6 +34,9 @@ Thumbs.db
 !.vscode/mcp.json
 !.vscode/extensions.json
 .idea/
+# Allow the file types this investigation produces (CSV summary, shell runner,
+# markdown findings, per-iteration test logs, grep-output text files). Avoids
+# per-file allowlist churn as Phases 3-7 add more findings + logs.
 *.swp
 *.swo
 *.swn
@@ -135,6 +138,11 @@ logs/
 npm-debug.log*
 yarn-debug.log*
 pnpm-debug.log*
+
+# Re-allow per-iteration test logs from the #605 investigation measurement
+# directory. The global `*.log` rule above hides them by default; this
+# negation restores trackability for the audit-trail logs that ship with
+# the investigation report.
 
 # Testing
 coverage/
