@@ -372,7 +372,7 @@ cd Concord
 ./scripts/install-git-hooks.sh
 
 # 3. Start everything (Docker + services + client)
-./scripts/dev-start.sh
+./scripts/concord-dev.sh up
 
 # That's it! The app will open in Electron
 ```
@@ -490,8 +490,8 @@ npm test
 3. **Test locally:**
 
    ```bash
-   ./scripts/dev-stop.sh
-   ./scripts/dev-start.sh --rebuild
+   ./scripts/concord-dev.sh down
+   ./scripts/concord-dev.sh rebuild
    ```
 
 4. **Commit:**
@@ -550,7 +550,7 @@ npm test
 docker-compose up -d
 
 # Or use the dev script for the full stack
-./scripts/dev-start.sh
+./scripts/concord-dev.sh up
 
 # Access at http://localhost:8080
 ```
@@ -699,10 +699,10 @@ For now, focus is on core chat and voice features.
 
 ```bash
 # Stop everything cleanly
-./scripts/dev-stop.sh
+./scripts/concord-dev.sh down
 
 # Start fresh
-./scripts/dev-start.sh --rebuild
+./scripts/concord-dev.sh rebuild
 ```
 
 ---
@@ -719,7 +719,7 @@ lsof -ti:8080 | xargs kill -9
 lsof -ti:5173 | xargs kill -9
 
 # Then restart
-./scripts/dev-start.sh
+./scripts/concord-dev.sh up
 ```
 
 ---
@@ -802,13 +802,13 @@ npm test
 
 ```bash
 # Stop services
-./scripts/dev-stop.sh
+./scripts/concord-dev.sh down
 
 # Remove Docker volumes (from project root)
 docker-compose down -v
 
 # Restart
-./scripts/dev-start.sh
+./scripts/concord-dev.sh up
 ```
 
 ---
