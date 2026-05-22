@@ -727,6 +727,21 @@ verb_freshstart() {
 
   verb_down --force >/dev/null 2>&1 || true
   compose down -v >/dev/null 2>&1 || true
+  # `compose down -v` only removes containers belonging to the current compose
+  # project (`concordvoice-dev` per docker-compose.dev.yml `name:` directive).
+  # `container_name:` in docker-compose.yml uses GLOBAL Docker names — not
+  # project-prefixed — so orphans from a prior project (e.g., users migrating
+  # from the pre-#1113 `dev-start.sh` which had no `name:` and defaulted to
+  # `concord`) survive `compose down` and then conflict during `up` with
+  # `Error response from daemon: Conflict. The container name "..." is already
+  # in use`. Force-remove by literal name; missing containers are a no-op.
+  docker rm -f \
+    concordvoice-postgres \
+    concordvoice-redis \
+    concordvoice-nats \
+    concordvoice-coturn \
+    concordvoice-minio \
+    >/dev/null 2>&1 || true
   rm -rf "$PROJECT_ROOT/.dev-data" 2>/dev/null || true
   verb_up
 }
