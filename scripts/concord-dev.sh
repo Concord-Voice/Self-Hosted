@@ -368,8 +368,29 @@ _up_media_plane() {
   # Install if --no-rebuild was NOT passed, OR if node_modules is missing
   # (fresh-checkout case — CI smoke + first-time developer).
   if [[ "$no_rebuild" -eq 0 || ! -d node_modules ]]; then
-    [[ "$QUIET" -eq 0 ]] && echo -e "${YELLOW}🔧 npm install (media-plane)${NC}"
-    npm install >/dev/null
+    [[ "$QUIET" -eq 0 ]] && echo -e "${YELLOW}🔧 npm install (media-plane, two-pass)${NC}"
+    # Two-pass install defeats the mediasoup-postinstall ordering race
+    # documented in `[internal]rules/media-plane.md` "Docker Build Context
+    # Invariant" section.
+    #
+    # On a fresh checkout with no `node_modules/`, the standard `npm install`
+    # runs postinstall scripts concurrently with dependency installation, so
+    # mediasoup's postinstall (`node npm-scripts.mjs postinstall`) can fire
+    # BEFORE npm has wired the `node-domexception` file:./stubs override
+    # symlink. mediasoup's hook then imports something that pulls fetch-blob,
+    # which imports node-domexception, and ERR_MODULE_NOT_FOUND aborts the
+    # whole install. Locally-warm caches mask this because the symlink
+    # persists across runs.
+    #
+    # Pass 1 (`--ignore-scripts`): resolve all deps + create override
+    # symlinks, defer ALL lifecycle scripts.
+    # Pass 2 (`npm rebuild`): re-run install hooks in a context where every
+    # override target is already in place.
+    #
+    # Cost: ~3-5s extra on fresh `rm -rf node_modules`; zero cost on warm
+    # cache (both passes short-circuit when deps + symlinks are current).
+    npm install --ignore-scripts >/dev/null
+    npm rebuild >/dev/null
   fi
 
   # Use npx tsx directly (not via npm run) so the PID file tracks tsx, not npm.
