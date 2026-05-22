@@ -52,6 +52,17 @@ const (
 	errMsgCannotUnmuteWhileDeafened  = "Cannot unmute while server-deafened — remove deafen first"
 )
 
+// dm_privacy_level enum values (matches migration 000032_dm_privacy_level.up.sql).
+// Replaces magic-number comparisons (0, 1, 2, 3) flagged during /enhanced-pr-review
+// on PR #1151. The legacy boolean columns (messages_friends_only / messages_server_members)
+// from migration 000027 still exist in the table but are superseded by dm_privacy_level.
+const (
+	dmPrivacyOff              = 0 // DMs disabled — no one can DM the user
+	dmPrivacyFriendsOnly      = 1 // Friends (and friends-of-friends if enabled), no server-share fallback
+	dmPrivacyFriendsAndServer = 2 // Friends + shared-server members; minimum level at which server fallback is allowed
+	dmPrivacyOpenToAll        = 3 // Anyone may DM
+)
+
 // Handler handles DM-related requests.
 type Handler struct {
 	db    *sql.DB
@@ -321,13 +332,18 @@ func (h *Handler) OpenConversation(c *gin.Context) {
 // enforceDMPrivacy checks privacy settings and returns true if the request was blocked.
 func (h *Handler) enforceDMPrivacy(c *gin.Context, senderID, targetID string) bool {
 	var areFriends bool
-	_ = h.db.QueryRow(`
+	err := h.db.QueryRow(`
 		SELECT EXISTS(
 			SELECT 1 FROM friendships
 			WHERE ((requester_id = $1 AND addressee_id = $2) OR (requester_id = $2 AND addressee_id = $1))
 			  AND status = 'accepted'
 		)
 	`, senderID, targetID).Scan(&areFriends)
+	if err != nil {
+		h.log.Error("Failed to check friendship", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedOpenConversation})
+		return true
+	}
 
 	if areFriends {
 		return false
@@ -340,16 +356,22 @@ func (h *Handler) enforceDMPrivacy(c *gin.Context, senderID, targetID string) bo
 		return true
 	}
 
-	if dmPrivacyLevel == 0 {
+	if dmPrivacyLevel == dmPrivacyOff {
 		c.JSON(http.StatusForbidden, gin.H{"error": "dm_disabled"})
 		return true
 	}
 
-	if dmPrivacyLevel >= 3 {
+	if dmPrivacyLevel >= dmPrivacyOpenToAll {
 		return false // Open to all
 	}
 
-	if h.isDMAllowedByRelationship(senderID, targetID, dmPrivacyLevel, dmFriendsOfFriends) {
+	allowed, err := h.isDMAllowedByRelationship(senderID, targetID, dmPrivacyLevel, dmFriendsOfFriends)
+	if err != nil {
+		h.log.Error("Failed to check DM relationship", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedOpenConversation})
+		return true
+	}
+	if allowed {
 		return false
 	}
 
@@ -371,48 +393,55 @@ func (h *Handler) fetchDMPrivacySettings(userID string) (int, bool, error) {
 	return dmPrivacyLevel, dmFriendsOfFriends, err
 }
 
-// isDMAllowedByRelationship checks if DM is allowed based on friendship, FoF, or shared server.
-func (h *Handler) isDMAllowedByRelationship(senderID, targetID string, privacyLevel int, fofEnabled bool) bool {
-	var isFriend bool
-	_ = h.db.QueryRow(`
-		SELECT EXISTS(
-			SELECT 1 FROM friendships
-			WHERE (user_id = $1 AND friend_id = $2) OR (user_id = $2 AND friend_id = $1)
-		)
-	`, senderID, targetID).Scan(&isFriend)
-	if isFriend {
-		return true
-	}
-
+// isDMAllowedByRelationship checks if DM is allowed based on friends-of-friends
+// or shared-server relationship. The direct-friend case is already handled
+// upstream by enforceDMPrivacy at the call site, so this function covers only
+// the remaining paths. Returns (allowed, error) — callers MUST propagate the
+// error per [internal]rules/backend.md errcheck discipline.
+func (h *Handler) isDMAllowedByRelationship(senderID, targetID string, privacyLevel int, fofEnabled bool) (bool, error) {
 	if fofEnabled {
 		var isFoF bool
-		_ = h.db.QueryRow(`
-			SELECT EXISTS(
-				SELECT 1 FROM friendships f1
-				JOIN friendships f2 ON (f1.friend_id = f2.user_id OR f1.friend_id = f2.friend_id)
-				WHERE (f1.user_id = $1 OR f1.friend_id = $1)
-				  AND (f2.user_id = $2 OR f2.friend_id = $2)
-				  AND f1.friend_id != $1 AND f1.friend_id != $2
+		err := h.db.QueryRow(`
+			WITH sender_friends AS (
+				SELECT CASE WHEN requester_id = $1 THEN addressee_id ELSE requester_id END AS friend_id
+				FROM friendships
+				WHERE (requester_id = $1 OR addressee_id = $1) AND status = 'accepted'
+			),
+			target_friends AS (
+				SELECT CASE WHEN requester_id = $2 THEN addressee_id ELSE requester_id END AS friend_id
+				FROM friendships
+				WHERE (requester_id = $2 OR addressee_id = $2) AND status = 'accepted'
+			)
+			SELECT EXISTS (
+				SELECT 1 FROM sender_friends sf
+				JOIN target_friends tf ON sf.friend_id = tf.friend_id
+				WHERE sf.friend_id != $1 AND sf.friend_id != $2
 			)
 		`, senderID, targetID).Scan(&isFoF)
+		if err != nil {
+			return false, fmt.Errorf("check friends-of-friends: %w", err)
+		}
 		if isFoF {
-			return true
+			return true, nil
 		}
 	}
 
-	if privacyLevel >= 2 {
+	if privacyLevel >= dmPrivacyFriendsAndServer {
 		var sharesServer bool
-		_ = h.db.QueryRow(`
+		err := h.db.QueryRow(`
 			SELECT EXISTS(
 				SELECT 1 FROM server_members sm1
 				JOIN server_members sm2 ON sm1.server_id = sm2.server_id
 				WHERE sm1.user_id = $1 AND sm2.user_id = $2
 			)
 		`, senderID, targetID).Scan(&sharesServer)
-		return sharesServer
+		if err != nil {
+			return false, fmt.Errorf("check shared server: %w", err)
+		}
+		return sharesServer, nil
 	}
 
-	return false
+	return false, nil
 }
 
 // returnExistingConversation checks for an existing 1:1 conversation and returns it if found.

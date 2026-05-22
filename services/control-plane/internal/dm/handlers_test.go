@@ -20,6 +20,7 @@ const (
 	pathDMConversations       = "/api/v1/dm/conversations"
 	pathRotateKey             = "/rotate-key"
 	statusAccepted            = "accepted"
+	statusPending             = "pending"
 
 	notAUUID       = "not-a-uuid"
 	fmtExpected2xx = "expected 200 or 201, got %d"
@@ -551,6 +552,226 @@ func TestOpenConversation_OpenToAll(t *testing.T) {
 	}, testhelpers.AuthHeaders(user1.AccessToken))
 	assert.True(t, w.Code == http.StatusOK || w.Code == http.StatusCreated,
 		fmtExpected2xx, w.Code)
+}
+
+// TestOpenConversation_FoFAllowed verifies that the friends-of-friends privacy
+// path correctly allows a DM when sender and target share a mutual friend.
+// Reproduction test for #1142 — FAILS against the broken FoF query that
+// references non-existent user_id/friend_id columns; PASSES after the fix.
+func TestOpenConversation_FoFAllowed(t *testing.T) {
+	ts := setupTS(t)
+	sender := ts.CreateTestUser(t, "fofsender1")
+	mutual := ts.CreateTestUser(t, "fofmutual1")
+	target := ts.CreateTestUser(t, "foftarget1")
+	// sender ↔ mutual and mutual ↔ target are both accepted friendships.
+	ts.CreateFriendship(t, sender.ID, mutual.ID, statusAccepted)
+	ts.CreateFriendship(t, mutual.ID, target.ID, statusAccepted)
+	// Target accepts friends + server members AND friends-of-friends.
+	setDMPrivacy(t, ts, target.ID, 2, true)
+
+	w := ts.DoRequest("POST", pathDMConversations, map[string]interface{}{
+		"user_id": target.ID,
+	}, testhelpers.AuthHeaders(sender.AccessToken))
+	assert.True(t, w.Code == http.StatusOK || w.Code == http.StatusCreated,
+		fmtExpected2xx, w.Code)
+}
+
+// TestOpenConversation_FoFBlocked_NoMutualFriend verifies that when no mutual
+// friend exists, a friends-only-with-FoF target correctly blocks the DM.
+// Guards against an overly-permissive FoF query regression.
+func TestOpenConversation_FoFBlocked_NoMutualFriend(t *testing.T) {
+	ts := setupTS(t)
+	sender := ts.CreateTestUser(t, "fofnoblock1")
+	target := ts.CreateTestUser(t, "fofnotarget1")
+	// No friendship and no mutual friend between sender and target.
+	// Target allows friends + FoF only, no server fallback (level 1).
+	setDMPrivacy(t, ts, target.ID, 1, true)
+
+	w := ts.DoRequest("POST", pathDMConversations, map[string]interface{}{
+		"user_id": target.ID,
+	}, testhelpers.AuthHeaders(sender.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "privacy_blocked", body["error"])
+}
+
+// TestOpenConversation_FoFDisabled_SharedServerFallback verifies that when FoF
+// is disabled, the shared-server fallback path still allows the DM. Guards
+// against a refactor that entangles FoF and server-share paths.
+func TestOpenConversation_FoFDisabled_SharedServerFallback(t *testing.T) {
+	ts := setupTS(t)
+	sender := ts.CreateTestUser(t, "foffb1")
+	target := ts.CreateTestUser(t, "foffb2")
+	// No friendship, no mutual friend; share a server.
+	serverID := ts.CreateTestServer(t, sender.ID, "FoF Fallback Server")
+	ts.AddMemberToServer(t, serverID, target.ID, "member")
+	// Target allows friends + server members, no FoF (level 2).
+	setDMPrivacy(t, ts, target.ID, 2, false)
+
+	w := ts.DoRequest("POST", pathDMConversations, map[string]interface{}{
+		"user_id": target.ID,
+	}, testhelpers.AuthHeaders(sender.AccessToken))
+	assert.True(t, w.Code == http.StatusOK || w.Code == http.StatusCreated,
+		fmtExpected2xx, w.Code)
+}
+
+// TestOpenConversation_FoFPendingStatusIgnored verifies that a friendship row
+// with status='pending' does NOT count as an accepted FoF connection. Guards
+// against a future refactor that drops the status='accepted' filter from
+// the FoF query.
+func TestOpenConversation_FoFPendingStatusIgnored(t *testing.T) {
+	ts := setupTS(t)
+	sender := ts.CreateTestUser(t, "fofpend1")
+	mutual := ts.CreateTestUser(t, "fofpend2")
+	target := ts.CreateTestUser(t, "fofpend3")
+	// sender ↔ mutual is accepted, but mutual ↔ target is only pending.
+	ts.CreateFriendship(t, sender.ID, mutual.ID, statusAccepted)
+	ts.CreateFriendship(t, mutual.ID, target.ID, statusPending)
+	// Target allows friends + FoF, no server fallback (level 1).
+	setDMPrivacy(t, ts, target.ID, 1, true)
+
+	w := ts.DoRequest("POST", pathDMConversations, map[string]interface{}{
+		"user_id": target.ID,
+	}, testhelpers.AuthHeaders(sender.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "privacy_blocked", body["error"])
+}
+
+// TestOpenConversation_FoFAllowed_Level1 verifies that the FoF path runs at
+// privacy level 1 (friends-only, no server fallback) when fofEnabled=true.
+// Guards against a future regression that gates FoF behind privacyLevel>=2.
+// The sole existing positive-FoF coverage (TestOpenConversation_FoFAllowed)
+// uses level=2; without this test, breaking FoF at level=1 would go unnoticed.
+func TestOpenConversation_FoFAllowed_Level1(t *testing.T) {
+	ts := setupTS(t)
+	sender := ts.CreateTestUser(t, "foflv1sender")
+	mutual := ts.CreateTestUser(t, "foflv1mutual")
+	target := ts.CreateTestUser(t, "foflv1target")
+	// sender ↔ mutual and mutual ↔ target are both accepted friendships.
+	ts.CreateFriendship(t, sender.ID, mutual.ID, statusAccepted)
+	ts.CreateFriendship(t, mutual.ID, target.ID, statusAccepted)
+	// Target allows friends-only + FoF (level 1, no server fallback).
+	setDMPrivacy(t, ts, target.ID, 1, true)
+
+	w := ts.DoRequest("POST", pathDMConversations, map[string]interface{}{
+		"user_id": target.ID,
+	}, testhelpers.AuthHeaders(sender.AccessToken))
+	assert.True(t, w.Code == http.StatusOK || w.Code == http.StatusCreated,
+		fmtExpected2xx, w.Code)
+}
+
+// TestOpenConversation_FoFSenderSidePendingIgnored is the symmetric companion
+// to TestOpenConversation_FoFPendingStatusIgnored. The latter covers the
+// target-side status filter; this one covers the sender-side filter. If the
+// status='accepted' predicate is dropped from EITHER CTE in the FoF query,
+// only the test pinning that side catches the regression.
+func TestOpenConversation_FoFSenderSidePendingIgnored(t *testing.T) {
+	ts := setupTS(t)
+	sender := ts.CreateTestUser(t, "fofspend1")
+	mutual := ts.CreateTestUser(t, "fofspend2")
+	target := ts.CreateTestUser(t, "fofspend3")
+	// sender ↔ mutual is pending (sender-side edge not yet accepted),
+	// mutual ↔ target is accepted. Without status='accepted' filter on the
+	// sender-side CTE, this would false-positively grant FoF.
+	ts.CreateFriendship(t, sender.ID, mutual.ID, statusPending)
+	ts.CreateFriendship(t, mutual.ID, target.ID, statusAccepted)
+	// Target allows friends + FoF, no server fallback (level 1).
+	setDMPrivacy(t, ts, target.ID, 1, true)
+
+	w := ts.DoRequest("POST", pathDMConversations, map[string]interface{}{
+		"user_id": target.ID,
+	}, testhelpers.AuthHeaders(sender.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code)
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "privacy_blocked", body["error"])
+}
+
+// TestOpenConversation_FriendshipsQueryError_FailsClosed verifies that when
+// the `friendships` query inside enforceDMPrivacy errors (simulated here by
+// renaming the table so the query returns "relation does not exist"), the
+// handler responds with HTTP 500 — i.e., fail-CLOSED — instead of silently
+// swallowing the error and falling through to "not a friend." This is the
+// behavioral regression guard for the line-325 errcheck fix that closed
+// the same class of fail-OPEN bug as the original #1142.
+//
+// t.Cleanup runs in LIFO order, so the rename-back runs BEFORE the harness's
+// TruncateAllTables cleanup — TruncateAllTables sees the table back at its
+// original name and runs normally.
+func TestOpenConversation_FriendshipsQueryError_FailsClosed(t *testing.T) {
+	ts := setupTS(t)
+	sender := ts.CreateTestUser(t, "frienderr1")
+	target := ts.CreateTestUser(t, "frienderr2")
+	// Privacy level is irrelevant — the friendship pre-check runs first
+	// and triggers the error path before any privacy logic.
+	setDMPrivacy(t, ts, target.ID, 1, false)
+
+	// Rename the friendships table so the EXISTS query returns
+	// "relation \"friendships\" does not exist" — a non-nil error from Scan.
+	_, err := ts.DB.Exec("ALTER TABLE friendships RENAME TO friendships_dberrtest")
+	require.NoError(t, err, "failed to rename friendships table for fault injection")
+	t.Cleanup(func() {
+		// Surface rename-back failures explicitly — silently swallowing them
+		// would leave the table renamed for the rest of the package run, and
+		// every subsequent test would fail with confusing "relation does not
+		// exist" errors that don't point at this cleanup. t.Errorf (not
+		// t.Fatalf) marks the test failed but allows other cleanups to run.
+		if _, err := ts.DB.Exec("ALTER TABLE friendships_dberrtest RENAME TO friendships"); err != nil {
+			t.Errorf("cleanup: failed to rename friendships back to original: %v", err)
+		}
+	})
+
+	w := ts.DoRequest("POST", pathDMConversations, map[string]interface{}{
+		"user_id": target.ID,
+	}, testhelpers.AuthHeaders(sender.AccessToken))
+	assert.Equal(t, http.StatusInternalServerError, w.Code,
+		"friendships-query error must fail-CLOSED with 500, not silently allow the DM")
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "Failed to open conversation", body["error"])
+}
+
+// TestOpenConversation_ServerMembersQueryError_FailsClosed verifies the
+// shared-server fallback path (inside isDMAllowedByRelationship) fails-CLOSED
+// on DB error rather than silently returning "doesn't share a server."
+// Setup arranges: non-friend sender, target with dm_privacy_level=2 and FoF
+// disabled, so execution reaches the server_members query at the bottom
+// of the function. Renaming the server_members table makes that query error.
+func TestOpenConversation_ServerMembersQueryError_FailsClosed(t *testing.T) {
+	ts := setupTS(t)
+	sender := ts.CreateTestUser(t, "srverr1")
+	target := ts.CreateTestUser(t, "srverr2")
+	// No friendship between sender and target.
+	// Target allows friends + server members (level 2), no FoF — forces
+	// the shared-server fallback path inside isDMAllowedByRelationship.
+	setDMPrivacy(t, ts, target.ID, 2, false)
+
+	_, err := ts.DB.Exec("ALTER TABLE server_members RENAME TO server_members_dberrtest")
+	require.NoError(t, err, "failed to rename server_members table for fault injection")
+	t.Cleanup(func() {
+		// See TestOpenConversation_FriendshipsQueryError_FailsClosed cleanup
+		// comment: surface rename-back failures rather than silently swallow.
+		if _, err := ts.DB.Exec("ALTER TABLE server_members_dberrtest RENAME TO server_members"); err != nil {
+			t.Errorf("cleanup: failed to rename server_members back to original: %v", err)
+		}
+	})
+
+	w := ts.DoRequest("POST", pathDMConversations, map[string]interface{}{
+		"user_id": target.ID,
+	}, testhelpers.AuthHeaders(sender.AccessToken))
+	assert.Equal(t, http.StatusInternalServerError, w.Code,
+		"server_members-query error must fail-CLOSED with 500")
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "Failed to open conversation", body["error"])
 }
 
 func TestOpenConversation_Unauthorized(t *testing.T) {
