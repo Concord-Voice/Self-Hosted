@@ -526,6 +526,16 @@ sequenceDiagram
     WS-->>B: message_delete {id}
 ```
 
+> **Client-side dispatch validation (PR #1184, closes #709).** Every inbound
+> envelope is validated by `WebSocketEventSchema` (a zod 4 discriminated
+> union over `type`, 54 variants) before any per-handler dispatch fires in
+> `client/desktop/src/renderer/services/websocketService.ts`. Failed
+> envelopes are dropped with a PII-scrubbed structural log
+> (`scrubZodIssues` strips received values) and `connectionStore.wireViolationCount`
+> is incremented. This is the trust boundary for server-supplied data;
+> handlers in `useWebSocketMessages.ts` operate on already-narrowed
+> `Extract<WebSocketEvent, { type: 'foo' }>` payloads.
+
 ### Joining a Voice Channel
 
 ```
