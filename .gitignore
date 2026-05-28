@@ -34,6 +34,8 @@ Thumbs.db
 !.vscode/mcp.json
 !.vscode/extensions.json
 .idea/
+# #1211 dep-refresh analysis artifacts (post-hoc reconstruction of the
+# upstream audit + upgrade-analysis that fed the issue body).
 # Allow the file types this investigation produces (CSV summary, shell runner,
 # markdown findings, per-iteration test logs, grep-output text files). Avoids
 # per-file allowlist churn as Phases 3-7 add more findings + logs.
