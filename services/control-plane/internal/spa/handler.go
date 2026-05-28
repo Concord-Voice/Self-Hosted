@@ -77,10 +77,14 @@ func resolveSafePath(baseDir, version, filePath string) (absPath string, basenam
 // ServeAsset handles GET /spa/*filepath
 // Expected URL structure: /spa/{sha7}/index.html or /spa/{sha7}/assets/chunk-abc123.js
 //
-// This route lives at root (not under /api/v1/) to escape Cloudflare's
-// Free-tier baseline bot-intelligence JSD beacon injection which targets
-// /api/*-shaped paths. See #725 and
-// [internal]specs/2026-04-21-725-post-cutover-design.md.
+// This route originally lived at root (not under /api/v1/) per #725 to dodge
+// Cloudflare's path-heuristic JSD beacon injection on /api/*. The 2026-05-11
+// regression (#917 Tier 2) showed the heuristic had expanded to /spa/*,
+// making the path-based escape no longer load-bearing. As of 2026-05-13 the
+// JSD beacon is disabled zone-wide via Super Bot Fight Mode → JavaScript
+// Detections on the Pro plan (PR #970). The /spa/* path choice is preserved
+// as a stable URL contract for the desktop client's spaLoader, but its
+// original anti-injection rationale is now historical.
 func (h *Handler) ServeAsset(c *gin.Context) {
 	// Override the global default-src 'none' CSP from SecurityHeaders middleware
 	// for every SPA response (success AND error). The SPA's index.html ships its
@@ -132,6 +136,7 @@ func (h *Handler) ServeAsset(c *gin.Context) {
 	// Serve via http.Dir (Go's built-in sandboxed filesystem) to satisfy
 	// static analysis — http.Dir prevents path traversal by design.
 	fs := http.Dir(h.spaDir)
+	// nosemgrep: go.gin.path-traversal.gin-path-traversal-taint.gin-path-traversal-taint — defended by http.Dir sandbox (line above) + resolveSafePath validation (called earlier in ServeAsset); see [internal]semgrep-false-positive-register.md
 	f, err := fs.Open(path.Join(parts[0], filepath.ToSlash(parts[1])))
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Asset not found"})
