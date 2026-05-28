@@ -50,6 +50,7 @@ const (
 	errMsgFailedRemoveEnforcement    = "Failed to remove enforcement"
 	errMsgTargetNotParticipant       = "Target is not a participant"
 	errMsgCannotUnmuteWhileDeafened  = "Cannot unmute while server-deafened — remove deafen first"
+	errMsgFailedDistributeKeys       = "Failed to distribute keys"
 )
 
 // dm_privacy_level enum values (matches migration 000032_dm_privacy_level.up.sql).
@@ -1346,7 +1347,12 @@ func (h *Handler) DistributeKeys(c *gin.Context) {
 	if req.KeyVersion != nil && *req.KeyVersion > 0 {
 		keyVersion = *req.KeyVersion
 	} else {
-		_ = h.db.QueryRow(`SELECT COALESCE(MAX(key_version), 1) FROM dm_channel_keys WHERE conversation_id = $1`, convID).Scan(&keyVersion)
+		err := h.db.QueryRow(`SELECT COALESCE(MAX(key_version), 1) FROM dm_channel_keys WHERE conversation_id = $1`, convID).Scan(&keyVersion)
+		if err != nil {
+			h.log.Error("Failed to fetch DM key version", "error", err, "conversation_id", convID)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDistributeKeys})
+			return
+		}
 		if keyVersion == 0 {
 			keyVersion = 1
 		}
@@ -1377,12 +1383,19 @@ func (h *Handler) distributeKeyToMember(convID, memberUserID, wrappedKey string,
 		return false
 	}
 
-	rowsAffected, _ := result.RowsAffected()
+	rowsAffected, err := result.RowsAffected()
+	if err != nil {
+		h.log.Error("Failed to read RowsAffected after key insert", "error", err, "conversation_id", convID, "user_id", memberUserID)
+		return false
+	}
 	if rowsAffected == 0 {
 		return false
 	}
 
-	_, _ = h.db.Exec(`DELETE FROM dm_pending_key_requests WHERE conversation_id = $1 AND user_id = $2`, convID, memberUserID)
+	if _, err := h.db.Exec(`DELETE FROM dm_pending_key_requests WHERE conversation_id = $1 AND user_id = $2`, convID, memberUserID); err != nil {
+		// Cleanup is best-effort: the key was already inserted into dm_channel_keys above.
+		h.log.Warn("Failed to clear pending key request after distribution", "error", err, "conversation_id", convID, "user_id", memberUserID)
+	}
 
 	if h.hub != nil {
 		if recipientUUID, parseErr := uuid.Parse(memberUserID); parseErr == nil {

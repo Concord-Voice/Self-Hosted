@@ -1524,6 +1524,151 @@ func TestDistributeKeys_PeerFulfillmentPreservesVersion(t *testing.T) {
 		"peer-fulfilled wrap on legacy endpoint must preserve existing key_version (1), not stamp MAX+1 (2)")
 }
 
+// TestDistributeKeys_KeyVersionQueryError_FailsClosed verifies that when the
+// keyVersion lookup query inside DistributeKeys errors (simulated here by
+// renaming dm_channel_keys so the SELECT returns "relation does not exist"),
+// the handler responds with HTTP 500 — i.e., fail-CLOSED — instead of silently
+// falling through to keyVersion=1 and stamping the wrong key epoch.
+//
+// This is the behavioral regression guard for the line-1349 errcheck fix.
+// Without the fix, a DB error here silently defaults keyVersion to 1, which
+// for an established conversation corrupts the E2EE key-epoch tracking
+// because peer-fulfillment is supposed to wrap the EXISTING cached CSK at
+// MAX, not stamp a wrong version-1 row (see #1023 / PR #1080 / spec D1).
+//
+// t.Cleanup runs in LIFO order, so the rename-back runs BEFORE the harness's
+// TruncateAllTables cleanup — TruncateAllTables sees the table back at its
+// original name and runs normally.
+func TestDistributeKeys_KeyVersionQueryError_FailsClosed(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "distkeyverr1")
+	user2 := ts.CreateTestUser(t, "distkeyverr2")
+	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
+
+	// Rename dm_channel_keys so the COALESCE(MAX(key_version), 1) lookup
+	// inside DistributeKeys errors with "relation does not exist" — a
+	// non-nil error from Scan.
+	_, err := ts.DB.Exec("ALTER TABLE dm_channel_keys RENAME TO dm_channel_keys_dberrtest")
+	require.NoError(t, err, "failed to rename dm_channel_keys for fault injection")
+	t.Cleanup(func() {
+		// Surface rename-back failures explicitly — silently swallowing them
+		// would leave the table renamed for the rest of the package run, and
+		// every subsequent test would fail with confusing "relation does not
+		// exist" errors that don't point at this cleanup. t.Errorf (not
+		// t.Fatalf) marks the test failed but allows other cleanups to run.
+		if _, err := ts.DB.Exec("ALTER TABLE dm_channel_keys_dberrtest RENAME TO dm_channel_keys"); err != nil {
+			t.Errorf("cleanup: failed to rename dm_channel_keys back to original: %v", err)
+		}
+	})
+
+	// Request without explicit key_version forces the SELECT MAX path.
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+"/keys", map[string]interface{}{
+		"wrapped_keys": map[string]string{
+			user2.ID: wrappedKey,
+		},
+	}, testhelpers.AuthHeaders(user1.AccessToken))
+	assert.Equal(t, http.StatusInternalServerError, w.Code,
+		"key_version query error must fail-CLOSED with 500, not silently stamp keyVersion=1")
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "Failed to distribute keys", body["error"])
+}
+
+// TestDistributeKeys_PendingDeleteError_DoesNotFailDistribution verifies the
+// log-and-continue contract for the DELETE cleanup inside distributeKeyToMember
+// (handlers.go:1391). The cleanup is best-effort — the channel key was already
+// inserted into dm_channel_keys before the DELETE runs, so a cleanup failure
+// must NOT cause the handler to report distribution as failed.
+//
+// Setup: seed a pending-key-request row for the recipient. After the request,
+// that row should be DELETEd by distributeKeyToMember. If we rename
+// dm_pending_key_requests mid-test, the DELETE errors silently (pre-fix) or
+// logs a Warn (post-fix). Either way, the observable post-condition is:
+//   - HTTP 200 + distributed == 1 (key insert succeeded)
+//   - Seeded pending row still exists after rename-back
+//   - dm_channel_keys contains the wrapped key (insert happened before
+//     DELETE failure path)
+//
+// This is a COVERAGE test, not a TDD test — it passes both pre- and post-fix.
+// Its purpose is to exercise the new error-handling branch added by the fix
+// (so it counts toward the 80% new-code Quality Gate) and to lock in the
+// log-and-continue contract as a regression guard against future scope-creep
+// converting this to fail-CLOSED.
+//
+// Implicitly covers Site 3 (RowsAffected) on the HAPPY path: the INSERT
+// returns RowsAffected=1, the new (rowsAffected, err := ...) line executes
+// with err=nil, and the function falls through to the DELETE. Site 3's
+// ERROR branch is by-design untested per spec D3 (RowsAffected only errors
+// on driver-state corruption, not portably fault-injectable).
+func TestDistributeKeys_PendingDeleteError_DoesNotFailDistribution(t *testing.T) {
+	ts := setupTS(t)
+	user1 := ts.CreateTestUser(t, "distkeypend1")
+	user2 := ts.CreateTestUser(t, "distkeypend2")
+	ts.CreateFriendship(t, user1.ID, user2.ID, statusAccepted)
+	convID := ts.CreateDMConversation(t, user1.ID, user2.ID)
+
+	// Seed a pending key request for user2 so the DELETE has a row to target.
+	_, err := ts.DB.Exec(
+		`INSERT INTO dm_pending_key_requests (conversation_id, user_id) VALUES ($1, $2)`,
+		convID, user2.ID,
+	)
+	require.NoError(t, err, "failed to seed dm_pending_key_requests row")
+
+	// Rename dm_pending_key_requests so the DELETE inside distributeKeyToMember
+	// errors with "relation does not exist".
+	_, err = ts.DB.Exec("ALTER TABLE dm_pending_key_requests RENAME TO dm_pending_key_requests_dberrtest")
+	require.NoError(t, err, "failed to rename dm_pending_key_requests for fault injection")
+	t.Cleanup(func() {
+		// See TestDistributeKeys_KeyVersionQueryError_FailsClosed cleanup
+		// comment: surface rename-back failures rather than silently swallow.
+		if _, err := ts.DB.Exec("ALTER TABLE dm_pending_key_requests_dberrtest RENAME TO dm_pending_key_requests"); err != nil {
+			t.Errorf("cleanup: failed to rename dm_pending_key_requests back to original: %v", err)
+		}
+	})
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+"/keys", map[string]interface{}{
+		"wrapped_keys": map[string]string{
+			user2.ID: wrappedKey,
+		},
+		"key_version": 1,
+	}, testhelpers.AuthHeaders(user1.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code,
+		"DELETE-cleanup error must NOT fail the handler — key was already distributed")
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, float64(1), body["distributed"],
+		"distributed count should reflect successful key insert despite cleanup failure")
+
+	// Verify the key was actually inserted into dm_channel_keys — confirms the
+	// "insert happened before DELETE failure" sequencing rather than relying on
+	// distributed==1 as a proxy. If the INSERT had silently failed and the
+	// DELETE failure was the only path-error, distributed would still be 0,
+	// but a future regression could flip those semantics.
+	var keyRowCount int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM dm_channel_keys WHERE conversation_id = $1 AND user_id = $2`,
+		convID, user2.ID,
+	).Scan(&keyRowCount))
+	assert.Equal(t, 1, keyRowCount,
+		"dm_channel_keys should contain the wrapped key — insert succeeded before DELETE failure path")
+
+	// Verify the seeded pending row STILL exists — proves the DELETE failed
+	// silently (pre-fix) or was logged-and-skipped (post-fix). Either way, the
+	// log-and-continue contract holds. NOTE: t.Cleanup runs LATER (after this
+	// test function returns), so at this assertion point the table is still
+	// renamed; we query the renamed name (dm_pending_key_requests_dberrtest).
+	var rowCount int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM dm_pending_key_requests_dberrtest WHERE conversation_id = $1 AND user_id = $2`,
+		convID, user2.ID,
+	).Scan(&rowCount))
+	assert.Equal(t, 1, rowCount,
+		"seeded pending row should still exist (DELETE failed; cleanup is log-and-continue)")
+}
+
 // ============================================================================
 // AuthorizeVoiceJoin Tests
 // ============================================================================
