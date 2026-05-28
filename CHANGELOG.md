@@ -68,6 +68,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Sentry telemetry** stripped from all three services ([#770](https://github.com/markdrogersjr/Concord/pull/770) control-plane, [#780](https://github.com/markdrogersjr/Concord/pull/780) media-plane, [#793](https://github.com/markdrogersjr/Concord/pull/793) Electron client) plus a closing sweep through MCP, CI, and rules ([#796](https://github.com/markdrogersjr/Concord/pull/796)). The Sentry MCP server config was finally removed in the per-host MCP cleanup ([#838](https://github.com/markdrogersjr/Concord/pull/838), closing the MCP-config dimension). Closes #610, #614, #672. The integration that landed earlier in the cycle (#586, #622, #623, #668, #682) was reversed once telemetry surfaced zero production logs and forced re-consent friction; project memory `Sentry — being removed` documents the decision.
 - **Postgres MCP server config** removed alongside Sentry MCP ([#838](https://github.com/markdrogersjr/Concord/pull/838)) — unused operationally; final state is 6 servers in `.mcp.json` + 6 in `.vscode/mcp.json`.
+- **Deprecated `WebSocketMessage` source-compat type alias** removed from `client/desktop/src/renderer/services/websocketService.ts` ([#1185](https://github.com/markdrogersjr/Concord/issues/1185)) — the discriminated-union migration ([#709](https://github.com/markdrogersjr/Concord/issues/709) / PR [#1184](https://github.com/markdrogersjr/Concord/pull/1184)) made the shim unused. `WebSocketEvent` remains the canonical name.
 
 ### Fixed
 
