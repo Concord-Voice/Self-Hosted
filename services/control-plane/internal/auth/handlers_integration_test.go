@@ -522,6 +522,7 @@ func TestRefreshInvalidToken(t *testing.T) {
 	ts := setupTS(t)
 
 	req := httptest.NewRequest("POST", pathRefresh, nil)
+	//nolint:gosec // G124: test fixture intentionally uses an unsafe cookie to exercise refresh-token rejection; security attrs irrelevant to the test (sibling Semgrep suppression on next line).
 	// nosemgrep: go.lang.security.audit.net.cookie-missing-httponly.cookie-missing-httponly, go.lang.security.audit.net.cookie-missing-secure.cookie-missing-secure
 	req.AddCookie(&http.Cookie{Name: "refresh_token", Value: "totally-invalid-token"})
 	req.Header.Set(headerContentType, contentTypeJSON)

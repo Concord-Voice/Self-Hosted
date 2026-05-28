@@ -974,7 +974,7 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) 
 	machineID := c.GetHeader(headerMachineID)
 
 	h.log.Info("CompleteLogin: storing refresh token",
-		"hash_prefix", tokenHash[:16],
+		"request_id", c.GetString(middleware.RequestIDContextKey),
 		"remember_me", rememberMe,
 		"machine_id", machineID,
 		"user_id", userID,
@@ -1078,12 +1078,11 @@ func (h *Handler) Refresh(c *gin.Context) {
 	}
 
 	tokenHash := HashRefreshToken(refreshToken)
-	tokenSuffix := refreshToken[len(refreshToken)-8:]
-	h.log.Info("Refresh attempt", "token_suffix", tokenSuffix, "hash_prefix", tokenHash[:16], "machine_id", c.GetHeader(headerMachineID))
+	h.log.Info("Refresh attempt", "request_id", c.GetString(middleware.RequestIDContextKey), "machine_id", c.GetHeader(headerMachineID))
 
 	token, err := h.fetchActiveRefreshToken(tokenHash)
 	if err != nil {
-		h.handleRefreshTokenNotFound(c, err, tokenHash, tokenSuffix)
+		h.handleRefreshTokenNotFound(c, err, tokenHash)
 		return
 	}
 
@@ -1105,7 +1104,7 @@ func (h *Handler) Refresh(c *gin.Context) {
 		return
 	}
 
-	h.rotateAndRespond(c, token, tokenSuffix, requestMachineID)
+	h.rotateAndRespond(c, token, requestMachineID)
 }
 
 // extractRefreshToken gets the refresh token from cookie or X-Refresh-Token header.
@@ -1138,7 +1137,7 @@ func (h *Handler) fetchActiveRefreshToken(tokenHash string) (models.RefreshToken
 
 // handleRefreshTokenNotFound handles the case where no active refresh token was found.
 // Includes replay detection and grace period recovery.
-func (h *Handler) handleRefreshTokenNotFound(c *gin.Context, err error, tokenHash, tokenSuffix string) {
+func (h *Handler) handleRefreshTokenNotFound(c *gin.Context, err error, tokenHash string) {
 	if err != sql.ErrNoRows {
 		h.log.Error("Failed to fetch refresh token", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgRefreshFailed})
@@ -1151,7 +1150,7 @@ func (h *Handler) handleRefreshTokenNotFound(c *gin.Context, err error, tokenHas
 	}
 
 	h.log.Warn("Refresh token not found in database (not active, not revoked)",
-		"token_suffix", tokenSuffix, "hash_prefix", tokenHash[:16])
+		"request_id", c.GetString(middleware.RequestIDContextKey))
 	c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidRefreshToken})
 }
 
@@ -1184,7 +1183,8 @@ func (h *Handler) attemptGracePeriodRecovery(c *gin.Context, tokenHash string) b
 	}
 
 	h.log.Warn("Refresh token replay detected, stale token replayed",
-		"user_id", revokedUserID, "token_hash", tokenHash,
+		"request_id", c.GetString(middleware.RequestIDContextKey),
+		"user_id", revokedUserID,
 		"same_ip", revokedIP == requestIP, "same_ua", revokedUA == requestUA,
 		"revoked_ago_ms", time.Since(revokedAt).Milliseconds())
 	c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidRefreshToken})
@@ -1376,7 +1376,7 @@ func computeRecoveryOnlyMethods(allMethods, loginMethods []string) []string {
 }
 
 // rotateAndRespond completes the refresh: revokes the old token, issues a new one, and responds.
-func (h *Handler) rotateAndRespond(c *gin.Context, token models.RefreshToken, tokenSuffix, requestMachineID string) {
+func (h *Handler) rotateAndRespond(c *gin.Context, token models.RefreshToken, requestMachineID string) {
 	// Revoke the old refresh token (single-use rotation)
 	_, err := h.db.Exec(
 		`UPDATE refresh_tokens SET revoked_at = NOW(), last_used_at = NOW() WHERE id = $1`,
@@ -1407,9 +1407,7 @@ func (h *Handler) rotateAndRespond(c *gin.Context, token models.RefreshToken, to
 		propagatedMachineID = token.MachineID
 	}
 	h.log.Info("Refresh: rotating token",
-		"old_suffix", tokenSuffix,
-		"new_suffix", newRefreshToken[len(newRefreshToken)-8:],
-		"new_hash_prefix", newTokenHash[:16],
+		"request_id", c.GetString(middleware.RequestIDContextKey),
 		"user_id", token.UserID, "remember_me", token.RememberMe)
 
 	_, err = h.db.Exec(
