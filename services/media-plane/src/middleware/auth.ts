@@ -134,23 +134,41 @@ export interface ChannelAccessResult {
   error?: string;
 }
 
+/**
+ * RoomKind discriminates server-channel rooms from DM-conversation rooms.
+ * Sourced from socket.handshake.auth.room_kind in the SFU connection
+ * (per #1209 plan task C1 + spec §6.5). The renderer-side voiceService
+ * sets this field at Socket.IO handshake time based on joinType.
+ *
+ * 'channel' (default) → hit /api/v1/channels/{id}/voice/join
+ * 'dm'                → hit /api/v1/dm/conversations/{id}/voice/authorize (G7)
+ */
+export type RoomKind = 'channel' | 'dm';
+
 export async function validateChannelAccess(
   userId: string,
   channelId: string,
-  token: string
+  token: string,
+  roomKind: RoomKind = 'channel'
 ): Promise<ChannelAccessResult> {
   try {
-    // Fetch channel details + enforcement flags from control plane voice join endpoint
-    const channelRes = await fetch(
-      `${config.controlPlaneUrl}/api/v1/channels/${channelId}/voice/join`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-      }
-    );
+    // Route to the appropriate control-plane endpoint based on room kind.
+    // The two endpoints have different response shapes (server-channel
+    // join returns full channel + enforcement state; DM authorize returns
+    // only { authorized, is_group }). Both serve the same purpose:
+    // defense-in-depth re-validation of the user's access to the room.
+    const endpoint =
+      roomKind === 'dm'
+        ? `${config.controlPlaneUrl}/api/v1/dm/conversations/${channelId}/voice/authorize`
+        : `${config.controlPlaneUrl}/api/v1/channels/${channelId}/voice/join`;
+
+    const channelRes = await fetch(endpoint, {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+      },
+    });
 
     if (!channelRes.ok) {
       if (channelRes.status === 401 || channelRes.status === 403) {
@@ -183,6 +201,34 @@ export async function validateChannelAccess(
         serverMuted: false,
         serverDeafened: false,
         error: `Control plane returned ${channelRes.status}`,
+      };
+    }
+
+    // Response shape differs by room kind:
+    //   server channel join → { allowed, channel: {id, server_id, name}, server_muted, server_deafened, ... }
+    //   DM authorize        → { authorized, is_group }
+    // Both indicate access success, but DM responses don't carry server-channel-specific
+    // metadata (serverId, channelName, enforcement flags). For DM rooms those fields
+    // default to empty/false in the returned ChannelAccessResult.
+    if (roomKind === 'dm') {
+      const dmResponse = (await channelRes.json()) as {
+        authorized: boolean;
+        is_group: boolean;
+      };
+      const allowed = dmResponse.authorized === true;
+      return {
+        allowed,
+        channelId,
+        serverId: '',
+        channelName: '',
+        serverMuted: false,
+        serverDeafened: false,
+        // Surface a specific reason when the control-plane returned 200
+        // with authorized=false (rare — the 401/403/404 branches above
+        // are the usual failure path). Without this the join-room handler
+        // falls back to a generic 'Access denied' and the failure cause
+        // is obscured (Copilot #1231 cycle-4 finding).
+        ...(allowed ? {} : { error: 'DM voice join not authorized' }),
       };
     }
 

@@ -1,10 +1,12 @@
 package voice
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 
 	"github.com/google/uuid"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/dm"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	natsclient "github.com/markdrogersjr/Concord/services/control-plane/pkg/nats"
@@ -254,6 +256,16 @@ func (s *NATSSubscriber) handleRoomEmpty(data []byte) {
 	}
 
 	if ctx.isDM {
+		// Insert the completed call_event row BEFORE the DELETE so the
+		// helper can read the in-flight dm_voice_participants. Per spec
+		// section 6.1 edge case "Call-event insert on hang-up failure":
+		// best-effort; failure logged, doesn't block the room-cleanup.
+		// #1209 plan task B7 Part 1.
+		if err := dm.InsertCompletedCallEventForDMRoom(context.Background(), s.db, ctx.convUUID); err != nil {
+			s.log.Error("Failed to insert completed call_event row",
+				"error", err, "conversation_id", event.ChannelID)
+		}
+
 		_, err := s.db.Exec(`DELETE FROM dm_voice_participants WHERE conversation_id = $1`, event.ChannelID)
 		if err != nil {
 			s.log.Error("Failed to clear DM voice participants", "error", err, "conversation_id", event.ChannelID)

@@ -8,7 +8,9 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/dm"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
+	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -3402,4 +3404,552 @@ func TestDMRotateKeyRateLimitIndependentConversations(t *testing.T) {
 	// Conv B should still work
 	w = ts.DoRequest("POST", pathDMConversationsPrefix+convB+pathRotateKey, nil, headers)
 	assert.Equal(t, http.StatusOK, w.Code, "conv B should still work")
+}
+
+// ─── RingDMCall tests (#1209, plan Task B3) ──────────────────────────────
+
+const pathVoiceRing = "/voice/ring"
+
+func TestRingDMCall_Success(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "ring_caller")
+	callee := ts.CreateTestUser(t, "ring_callee")
+	convID := ts.CreateDMConversation(t, caller.ID, callee.ID)
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceRing, nil, testhelpers.AuthHeaders(caller.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var body map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.NotEmpty(t, body["ring_id"], "ring_id present")
+	assert.NotEmpty(t, body["ring_started_at"], "ring_started_at present")
+
+	calleeIDs, ok := body["ringing_user_ids"].([]interface{})
+	require.True(t, ok, "ringing_user_ids is an array")
+	require.Len(t, calleeIDs, 1, "DM 1:1 has exactly one callee")
+	assert.Equal(t, callee.ID, calleeIDs[0])
+
+	// pendingDMCalls populated
+	convUUID := uuid.MustParse(convID)
+	assert.True(t, dm.PendingDMCallExistsForTest(convUUID), "pendingDMCalls populated after Ring")
+}
+
+func TestRingDMCall_NonParticipant_Returns403(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	owner := ts.CreateTestUser(t, "ring_owner")
+	other := ts.CreateTestUser(t, "ring_other")
+	outsider := ts.CreateTestUser(t, "ring_outsider")
+	convID := ts.CreateDMConversation(t, owner.ID, other.ID) // outsider is NOT in this conv
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceRing, nil, testhelpers.AuthHeaders(outsider.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code, "non-participant gets 403; body: %s", w.Body.String())
+
+	convUUID := uuid.MustParse(convID)
+	assert.False(t, dm.PendingDMCallExistsForTest(convUUID), "no ring created on failed auth")
+}
+
+func TestRingDMCall_AlreadyRinging_Returns409(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "ring_caller_2")
+	callee := ts.CreateTestUser(t, "ring_callee_2")
+	convID := ts.CreateDMConversation(t, caller.ID, callee.ID)
+	headers := testhelpers.AuthHeaders(caller.AccessToken)
+
+	// First ring succeeds
+	w1 := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceRing, nil, headers)
+	require.Equal(t, http.StatusOK, w1.Code)
+
+	// Reset per-user rate-limit so the second call isnt blocked by middleware
+	ts.Redis.Del(context.Background(), fmt.Sprintf("ratelimit:user:%s", caller.ID))
+
+	// Second ring on same conv returns 409 with existing_ring metadata
+	w2 := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceRing, nil, headers)
+	require.Equal(t, http.StatusConflict, w2.Code, "body: %s", w2.Body.String())
+
+	var body map[string]interface{}
+	require.NoError(t, json.Unmarshal(w2.Body.Bytes(), &body))
+	assert.Equal(t, "already ringing", body["error"])
+
+	existing, ok := body["existing_ring"].(map[string]interface{})
+	require.True(t, ok, "existing_ring object present")
+	assert.Equal(t, caller.ID, existing["caller_user_id"])
+	assert.NotEmpty(t, existing["ring_id"])
+	assert.NotEmpty(t, existing["ring_started_at"])
+}
+
+func TestRingDMCall_InvalidConvID_Returns400(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "ring_caller_3")
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+"not-a-uuid"+pathVoiceRing, nil, testhelpers.AuthHeaders(caller.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// ─── DeclineDMCall tests (#1209, plan Task B4) ───────────────────────────
+
+const pathVoiceDecline = "/voice/decline"
+
+// ringForTest is a small test helper that POSTs /voice/ring as the given
+// user and asserts 200. Returns the convID for chaining into subsequent
+// decline/cancel requests.
+func ringForTest(t *testing.T, ts *testhelpers.TestServer, caller testhelpers.TestUser, convID string) {
+	t.Helper()
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceRing, nil, testhelpers.AuthHeaders(caller.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, "ring setup failed; body: %s", w.Body.String())
+}
+
+func TestDeclineDMCall_DM1on1_EndsCallAndClearsRing(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "decl_caller")
+	callee := ts.CreateTestUser(t, "decl_callee")
+	convID := ts.CreateDMConversation(t, caller.ID, callee.ID)
+
+	ringForTest(t, ts, caller, convID)
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceDecline, nil, testhelpers.AuthHeaders(callee.AccessToken))
+	require.Equal(t, http.StatusNoContent, w.Code, "body: %s", w.Body.String())
+
+	// DM 1:1: sole-callee decline = all-declined → ring should be cleared
+	convUUID := uuid.MustParse(convID)
+	assert.False(t, dm.PendingDMCallExistsForTest(convUUID), "ring cleared after sole-callee decline")
+}
+
+func TestDeclineDMCall_NoActiveRing_Returns404(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	owner := ts.CreateTestUser(t, "decl_owner_404")
+	other := ts.CreateTestUser(t, "decl_other_404")
+	convID := ts.CreateDMConversation(t, owner.ID, other.ID)
+
+	// No ring started — decline should 404
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceDecline, nil, testhelpers.AuthHeaders(other.AccessToken))
+	assert.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+}
+
+func TestDeclineDMCall_CallerCannotDeclineOwnRing(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "decl_caller_self")
+	callee := ts.CreateTestUser(t, "decl_callee_self")
+	convID := ts.CreateDMConversation(t, caller.ID, callee.ID)
+
+	ringForTest(t, ts, caller, convID)
+
+	// Caller tries to decline their own ring → 403 (not in ringing set)
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceDecline, nil, testhelpers.AuthHeaders(caller.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+
+	// Ring still active
+	convUUID := uuid.MustParse(convID)
+	assert.True(t, dm.PendingDMCallExistsForTest(convUUID), "ring should still be active after invalid decline")
+}
+
+func TestDeclineDMCall_NonParticipant_Returns403(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "decl_caller_np")
+	callee := ts.CreateTestUser(t, "decl_callee_np")
+	outsider := ts.CreateTestUser(t, "decl_outsider")
+	convID := ts.CreateDMConversation(t, caller.ID, callee.ID)
+
+	ringForTest(t, ts, caller, convID)
+
+	// Outsider (not in conv) tries to decline → 403
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceDecline, nil, testhelpers.AuthHeaders(outsider.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+
+	convUUID := uuid.MustParse(convID)
+	assert.True(t, dm.PendingDMCallExistsForTest(convUUID), "ring untouched by outsider decline attempt")
+}
+
+// ─── CancelDMCall + insertCallEvent tests (#1209, plan Task B5) ──────────
+
+const pathVoiceCancel = "/voice/cancel"
+
+// fetchLatestCallEvent returns the most-recent call_event row for a
+// conversation. Parses the JSONB payload into a generic map so tests
+// can assert on individual fields regardless of Postgres' JSONB
+// pretty-printing whitespace.
+func fetchLatestCallEvent(t *testing.T, ts *testhelpers.TestServer, convID string) (dbType string, payload map[string]interface{}, found bool) {
+	t.Helper()
+	var payloadJSON string
+	err := ts.DB.QueryRow(`
+		SELECT type, COALESCE(call_event_payload::text, '')
+		FROM dm_messages
+		WHERE conversation_id = $1 AND type = 'call_event'
+		ORDER BY created_at DESC LIMIT 1
+	`, convID).Scan(&dbType, &payloadJSON)
+	if err != nil {
+		return "", nil, false
+	}
+	payload = make(map[string]interface{})
+	if err := json.Unmarshal([]byte(payloadJSON), &payload); err != nil {
+		t.Fatalf("failed to unmarshal call_event_payload JSON: %v\nraw: %s", err, payloadJSON)
+	}
+	return dbType, payload, true
+}
+
+func TestCancelDMCall_Success(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "canc_caller")
+	callee := ts.CreateTestUser(t, "canc_callee")
+	convID := ts.CreateDMConversation(t, caller.ID, callee.ID)
+
+	ringForTest(t, ts, caller, convID)
+
+	// Reset rate-limit so the cancel call isnt blocked
+	ts.Redis.Del(context.Background(), fmt.Sprintf("ratelimit:user:%s", caller.ID))
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceCancel, nil, testhelpers.AuthHeaders(caller.AccessToken))
+	require.Equal(t, http.StatusNoContent, w.Code, "body: %s", w.Body.String())
+
+	// Ring cleared
+	convUUID := uuid.MustParse(convID)
+	assert.False(t, dm.PendingDMCallExistsForTest(convUUID), "ring cleared after caller-cancel")
+
+	// Call event row written with status=canceled (verifies insertCallEvent
+	// helper integration end-to-end)
+	dbType, payload, found := fetchLatestCallEvent(t, ts, convID)
+	require.True(t, found, "call_event row inserted")
+	assert.Equal(t, "call_event", dbType)
+	assert.Equal(t, "canceled", payload["status"])
+	assert.Equal(t, caller.ID, payload["caller_user_id"])
+}
+
+func TestCancelDMCall_NotCaller_Returns403(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "canc_caller_2")
+	callee := ts.CreateTestUser(t, "canc_callee_2")
+	convID := ts.CreateDMConversation(t, caller.ID, callee.ID)
+
+	ringForTest(t, ts, caller, convID)
+
+	// Callee tries to cancel (should /decline instead) → 403
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceCancel, nil, testhelpers.AuthHeaders(callee.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+
+	// Ring still active
+	convUUID := uuid.MustParse(convID)
+	assert.True(t, dm.PendingDMCallExistsForTest(convUUID), "ring untouched by non-caller cancel")
+}
+
+func TestCancelDMCall_NoRing_Returns404(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "canc_caller_3")
+	callee := ts.CreateTestUser(t, "canc_callee_3")
+	convID := ts.CreateDMConversation(t, caller.ID, callee.ID)
+
+	// No ring → 404
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceCancel, nil, testhelpers.AuthHeaders(caller.AccessToken))
+	assert.Equal(t, http.StatusNotFound, w.Code, "body: %s", w.Body.String())
+}
+
+// ─── AuthorizeDMVoiceForMediaPlane tests (#1209, plan Task B6 / G7) ──────
+
+const pathVoiceAuthorize = "/voice/authorize"
+
+func TestAuthorizeDMVoiceForMediaPlane_Member_Returns200(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+
+	user := ts.CreateTestUser(t, "g7_member")
+	other := ts.CreateTestUser(t, "g7_other")
+	convID := ts.CreateDMConversation(t, user.ID, other.ID)
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceAuthorize, nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var body map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, true, body["authorized"])
+	assert.Equal(t, false, body["is_group"], "DM 1:1 = not group")
+}
+
+func TestAuthorizeDMVoiceForMediaPlane_NonMember_Returns403(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+
+	owner := ts.CreateTestUser(t, "g7_owner")
+	other := ts.CreateTestUser(t, "g7_other_2")
+	outsider := ts.CreateTestUser(t, "g7_outsider")
+	convID := ts.CreateDMConversation(t, owner.ID, other.ID) // outsider NOT in conv
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceAuthorize, nil, testhelpers.AuthHeaders(outsider.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code, "body: %s", w.Body.String())
+
+	var body map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Equal(t, false, body["authorized"])
+}
+
+func TestAuthorizeDMVoiceForMediaPlane_InvalidConvID_Returns400(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+
+	user := ts.CreateTestUser(t, "g7_user_400")
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+"not-a-uuid"+pathVoiceAuthorize, nil, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// ─── HandleUserDisconnect tests (#1209, plan Task B7 Part 2) ─────────────
+
+func TestHandleUserDisconnect_CancelsCallerInitiatedRings(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "disc_caller")
+	callee := ts.CreateTestUser(t, "disc_callee")
+	convID := ts.CreateDMConversation(t, caller.ID, callee.ID)
+
+	ringForTest(t, ts, caller, convID)
+
+	// Simulate the caller's WS disconnect via the canceler that the hub
+	// would invoke. The dmHandler is constructed during SetupTestServer
+	// router init; we test the HandleUserDisconnect path directly with
+	// a freshly-constructed Handler (the test ts.Hub + ts.DB are the
+	// authoritative path that production wires).
+	h := dm.NewHandler(ts.DB, logger.New("test"), ts.Hub, nil, nil, ts.Redis)
+
+	callerUUID := uuid.MustParse(caller.ID)
+	h.HandleUserDisconnect(callerUUID)
+
+	// Ring cleared
+	convUUID := uuid.MustParse(convID)
+	assert.False(t, dm.PendingDMCallExistsForTest(convUUID), "ring cleared after caller disconnect")
+
+	// Canceled call_event inserted
+	dbType, payload, found := fetchLatestCallEvent(t, ts, convID)
+	require.True(t, found, "call_event row inserted on caller disconnect")
+	assert.Equal(t, "call_event", dbType)
+	assert.Equal(t, "canceled", payload["status"])
+}
+
+func TestHandleUserDisconnect_IgnoresNonCallerDisconnects(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "disc_caller_2")
+	callee := ts.CreateTestUser(t, "disc_callee_2")
+	convID := ts.CreateDMConversation(t, caller.ID, callee.ID)
+
+	ringForTest(t, ts, caller, convID)
+
+	h := dm.NewHandler(ts.DB, logger.New("test"), ts.Hub, nil, nil, ts.Redis)
+
+	// Simulate the CALLEE disconnecting — should NOT cancel the ring
+	calleeUUID := uuid.MustParse(callee.ID)
+	h.HandleUserDisconnect(calleeUUID)
+
+	convUUID := uuid.MustParse(convID)
+	assert.True(t, dm.PendingDMCallExistsForTest(convUUID), "ring untouched by non-caller disconnect")
+}
+
+// ─── InsertCompletedCallEventForDMRoom tests (#1209, plan Task B7 Part 1) ─
+
+func TestInsertCompletedCallEventForDMRoom_HappyPath(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+
+	caller := ts.CreateTestUser(t, "comp_caller")
+	callee := ts.CreateTestUser(t, "comp_callee")
+	convID := ts.CreateDMConversation(t, caller.ID, callee.ID)
+
+	// Simulate a live call: two dm_voice_participants rows with caller
+	// joining first (used as the "caller" in the call_event payload).
+	_, err := ts.DB.Exec(`
+		INSERT INTO dm_voice_participants (conversation_id, user_id, joined_at)
+		VALUES ($1, $2, NOW() - INTERVAL '30 seconds'), ($1, $3, NOW() - INTERVAL '25 seconds')
+	`, convID, caller.ID, callee.ID)
+	require.NoError(t, err)
+
+	convUUID := uuid.MustParse(convID)
+	err = dm.InsertCompletedCallEventForDMRoom(context.Background(), ts.DB, convUUID)
+	require.NoError(t, err)
+
+	dbType, payload, found := fetchLatestCallEvent(t, ts, convID)
+	require.True(t, found, "call_event row inserted on room empty")
+	assert.Equal(t, "call_event", dbType)
+	assert.Equal(t, "completed", payload["status"])
+	assert.Equal(t, caller.ID, payload["caller_user_id"], "earliest-joined user is the 'caller'")
+
+	// Duration should be ~30 seconds (allow a few seconds of test slack)
+	durF, ok := payload["duration_seconds"].(float64)
+	require.True(t, ok, "duration_seconds is a number; got %T", payload["duration_seconds"])
+	assert.InDelta(t, 30.0, durF, 10.0, "duration ~ 30s (test slack ±10s)")
+
+	participants, ok := payload["participant_user_ids"].([]interface{})
+	require.True(t, ok)
+	assert.Len(t, participants, 2)
+}
+
+func TestInsertCompletedCallEventForDMRoom_NoParticipants_NoOp(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+
+	caller := ts.CreateTestUser(t, "comp_caller_none")
+	callee := ts.CreateTestUser(t, "comp_callee_none")
+	convID := ts.CreateDMConversation(t, caller.ID, callee.ID)
+
+	// No dm_voice_participants rows — graceful no-op
+	convUUID := uuid.MustParse(convID)
+	err := dm.InsertCompletedCallEventForDMRoom(context.Background(), ts.DB, convUUID)
+	assert.NoError(t, err, "no participants is a graceful no-op, not an error")
+
+	_, _, found := fetchLatestCallEvent(t, ts, convID)
+	assert.False(t, found, "no call_event row inserted when no participants")
+}
+
+func TestDeclineDMCall_InsertsDeclinedCallEvent(t *testing.T) {
+	// Verifies the all-declined branch of DeclineDMCall now wires through
+	// to insertCallEvent (replaces the TODO from plan task B4 with the
+	// B5 helper).
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "decl_ce_caller")
+	callee := ts.CreateTestUser(t, "decl_ce_callee")
+	convID := ts.CreateDMConversation(t, caller.ID, callee.ID)
+
+	ringForTest(t, ts, caller, convID)
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceDecline, nil, testhelpers.AuthHeaders(callee.AccessToken))
+	require.Equal(t, http.StatusNoContent, w.Code)
+
+	// DM 1:1: sole-callee decline triggers all-declined path → call_event inserted
+	dbType, payload, found := fetchLatestCallEvent(t, ts, convID)
+	require.True(t, found, "call_event row inserted on all-declined")
+	assert.Equal(t, "call_event", dbType)
+	assert.Equal(t, "declined", payload["status"])
+
+	participants, ok := payload["participant_user_ids"].([]interface{})
+	require.True(t, ok, "participant_user_ids is an array")
+	require.NotEmpty(t, participants)
+	// Should contain the decliner (callee)
+	foundDecliner := false
+	for _, p := range participants {
+		if p == callee.ID {
+			foundDecliner = true
+			break
+		}
+	}
+	assert.True(t, foundDecliner, "participant list includes the decliner; got: %v", participants)
+}
+
+// TestAuthorizeVoiceJoin_CalleeAccept_ClearsRing exercises the accept-path
+// branch added in #1231 review (Gitar G1): when a callee POSTs /voice/join
+// and a PendingCall exists for the conversation, the handler atomically
+// clears it and (in production) broadcasts dm_voice_call_canceled with
+// canceled_by='someone_accepted'. We assert the ring-clear side effect
+// since the broadcast goes through the in-memory hub.
+func TestAuthorizeVoiceJoin_CalleeAccept_ClearsRing(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "auth_accept_caller")
+	callee := ts.CreateTestUser(t, "auth_accept_callee")
+	convID := ts.CreateDMConversation(t, caller.ID, callee.ID)
+
+	ringForTest(t, ts, caller, convID)
+	convUUID := uuid.MustParse(convID)
+	require.True(t, dm.PendingDMCallExistsForTest(convUUID), "ring exists before accept")
+
+	// Callee POSTs /voice/join — the accept-path branch should clear the ring.
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+"/voice/join", nil, testhelpers.AuthHeaders(callee.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, "callee auth succeeds; body: %s", w.Body.String())
+
+	assert.False(t, dm.PendingDMCallExistsForTest(convUUID), "ring cleared after callee accept")
+}
+
+// TestAuthorizeVoiceJoin_CallerSelf_DoesNotClearRing verifies the
+// caller-self defense: if the original caller (ring.CallerUserID) hits
+// /voice/join, the accept-path branch must NOT fire (caller is allowed
+// to authorize their own ring without claiming "I accepted").
+func TestAuthorizeVoiceJoin_CallerSelf_DoesNotClearRing(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "auth_selfauth_caller")
+	callee := ts.CreateTestUser(t, "auth_selfauth_callee")
+	convID := ts.CreateDMConversation(t, caller.ID, callee.ID)
+
+	ringForTest(t, ts, caller, convID)
+	convUUID := uuid.MustParse(convID)
+	require.True(t, dm.PendingDMCallExistsForTest(convUUID))
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+"/voice/join", nil, testhelpers.AuthHeaders(caller.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	assert.True(t, dm.PendingDMCallExistsForTest(convUUID), "ring NOT cleared when caller self-auths")
+}
+
+// TestOnRingTimeout_BroadcastsAndInsertsMissedEvent invokes onRingTimeout
+// directly via the test export (no real timer wait). Covers the
+// broadcast + insertCallEvent path that was previously 0% covered.
+func TestOnRingTimeout_BroadcastsAndInsertsMissedEvent(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "timeout_caller")
+	callee := ts.CreateTestUser(t, "timeout_callee")
+	convID := ts.CreateDMConversation(t, caller.ID, callee.ID)
+
+	convUUID := uuid.MustParse(convID)
+	callerUUID := uuid.MustParse(caller.ID)
+	calleeUUID := uuid.MustParse(callee.ID)
+	ring := dm.NewPendingCallForTest(convUUID, callerUUID, []uuid.UUID{calleeUUID})
+	dm.StoreRingForTest(convUUID, ring)
+
+	h := dm.NewHandler(ts.DB, logger.New("test"), ts.Hub, nil, nil, ts.Redis)
+	dm.HandlerOnRingTimeoutForTest(h, convUUID, ring)
+
+	assert.False(t, dm.PendingDMCallExistsForTest(convUUID), "ring cleared after timeout")
+
+	dbType, payload, found := fetchLatestCallEvent(t, ts, convID)
+	require.True(t, found, "missed call_event row inserted on timeout")
+	assert.Equal(t, "call_event", dbType)
+	assert.Equal(t, "missed", payload["status"])
+}
+
+// TestOnRingTimeout_OrphanedTimer_NoOp verifies the defensive branch
+// when a different ring is now in pendingDMCalls (the timer fired for
+// an old ring after a new ring was inserted). The handler must NOT
+// broadcast and must NOT delete the newer ring.
+func TestOnRingTimeout_OrphanedTimer_NoOp(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "orphan_caller")
+	callee := ts.CreateTestUser(t, "orphan_callee")
+	convID := ts.CreateDMConversation(t, caller.ID, callee.ID)
+
+	convUUID := uuid.MustParse(convID)
+	callerUUID := uuid.MustParse(caller.ID)
+	calleeUUID := uuid.MustParse(callee.ID)
+
+	// First ring (stale): won't be in the map at timeout time.
+	staleRing := dm.NewPendingCallForTest(convUUID, callerUUID, []uuid.UUID{calleeUUID})
+	// Active ring: currently in the map.
+	activeRing := dm.NewPendingCallForTest(convUUID, callerUUID, []uuid.UUID{calleeUUID})
+	dm.StoreRingForTest(convUUID, activeRing)
+
+	h := dm.NewHandler(ts.DB, logger.New("test"), ts.Hub, nil, nil, ts.Redis)
+	dm.HandlerOnRingTimeoutForTest(h, convUUID, staleRing)
+
+	// Active ring still present (orphaned timer should not have deleted it).
+	assert.True(t, dm.PendingDMCallExistsForTest(convUUID), "active ring preserved when orphaned timer fires")
 }

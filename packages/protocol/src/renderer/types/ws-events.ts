@@ -688,7 +688,7 @@ export const FriendCodeClaimedSchema = z.object({
   }),
 });
 
-// ──────────── Voice (2 events) — Task A6 ──────────────────────────────
+// ──────────── Voice (6 events) — Task A6 + #1209 DM ring ──────────────
 
 /**
  * `voice_state_update` — server-channel voice state.
@@ -720,6 +720,80 @@ export const DMVoiceStateUpdateSchema = z.object({
     user_id: UUID.optional(),
     username: z.string().optional(),
     display_name: z.string().optional(),
+  }),
+});
+
+/**
+ * `dm_voice_call_invited` — DM voice call ring invitation (#1209).
+ * Server emitter: `services/control-plane/internal/dm/handlers.go`
+ * (RingDMCall — broadcasts directly via hub.BroadcastToUser per ringing
+ * user ID, no NATS fanout in single-replica mode per spec §6.3).
+ * Sent to callees when caller hits POST /dm/conversations/{id}/voice/ring.
+ */
+export const DMVoiceCallInvitedSchema = z.object({
+  type: z.literal('dm_voice_call_invited'),
+  data: z.object({
+    conversation_id: UUID,
+    is_group: z.boolean(),
+    caller: z.object({
+      user_id: UUID,
+      username: z.string(),
+      display_name: z.string().optional(),
+      avatar_url: z.string().optional(),
+    }),
+    ring_id: UUID,
+    ring_started_at: ISOTimestamp,
+    ring_timeout_seconds: z.number().int().positive(),
+  }),
+});
+
+/**
+ * `dm_voice_call_canceled` — DM voice call ring canceled (#1209).
+ * Server emitter: `services/control-plane/internal/dm/handlers.go`
+ * (CancelDMCall + AuthorizeVoiceJoin accept-path + onRingTimeout via
+ * hub.BroadcastToDM). Sent to all participants when:
+ *   - caller hits POST /voice/cancel ('caller')
+ *   - all callees have declined ('all_declined')
+ *   - any callee accepts, ring auto-cancels for others ('someone_accepted')
+ *   - server-side error ('server_error')
+ */
+export const DMVoiceCallCanceledSchema = z.object({
+  type: z.literal('dm_voice_call_canceled'),
+  data: z.object({
+    conversation_id: UUID,
+    ring_id: UUID,
+    canceled_by: z.enum(['caller', 'all_declined', 'someone_accepted', 'server_error']),
+  }),
+});
+
+/**
+ * `dm_voice_call_declined` — single callee declined the ring (#1209).
+ * Server emitter: `services/control-plane/internal/dm/handlers.go`
+ * (DeclineDMCall via hub.BroadcastToUser to the caller).
+ * Sent ONLY to the caller (not other callees).
+ * For DM 1:1: this is the terminal decline. For groups (#1219): the caller's
+ * tally UI updates; ring may continue for other callees.
+ */
+export const DMVoiceCallDeclinedSchema = z.object({
+  type: z.literal('dm_voice_call_declined'),
+  data: z.object({
+    conversation_id: UUID,
+    ring_id: UUID,
+    decliner_user_id: UUID,
+  }),
+});
+
+/**
+ * `dm_voice_call_timed_out` — ring timeout fired with no accept (#1209).
+ * Server emitter: `services/control-plane/internal/dm/handlers.go`
+ * (onRingTimeout via hub.BroadcastToDM). Sent to all participants when
+ * the 45s ring-timeout timer expires without anyone accepting.
+ */
+export const DMVoiceCallTimedOutSchema = z.object({
+  type: z.literal('dm_voice_call_timed_out'),
+  data: z.object({
+    conversation_id: UUID,
+    ring_id: UUID,
   }),
 });
 
@@ -1155,9 +1229,13 @@ export const WebSocketEventSchema = z.discriminatedUnion('type', [
   FriendRemovedSchema,
   FriendCodeClaimedSchema,
 
-  // Voice (2)
+  // Voice (6)
   VoiceStateUpdateSchema,
   DMVoiceStateUpdateSchema,
+  DMVoiceCallInvitedSchema,
+  DMVoiceCallCanceledSchema,
+  DMVoiceCallDeclinedSchema,
+  DMVoiceCallTimedOutSchema,
 
   // Presence (5)
   PresenceSchema,
@@ -1196,7 +1274,7 @@ export const WebSocketEventSchema = z.discriminatedUnion('type', [
   ConnectedSchema,
   ConnectionReadySchema,
 ]);
-// TOTAL: 54 schemas
+// TOTAL: 58 schemas (54 from A3-A7, + 4 DM voice ring from #1209)
 
 // ════════════════════════════════════════════════════════════════════════
 // 5. Derived types
@@ -1243,6 +1321,10 @@ export type FriendRequestPayload = z.infer<typeof FriendRequestPayloadSchema>;
 // Voice
 export type VoiceStateUpdatePayload = z.infer<typeof VoiceStateUpdateSchema>['data'];
 export type DMVoiceStateUpdatePayload = z.infer<typeof DMVoiceStateUpdateSchema>['data'];
+export type DMVoiceCallInvitedPayload = z.infer<typeof DMVoiceCallInvitedSchema>['data'];
+export type DMVoiceCallCanceledPayload = z.infer<typeof DMVoiceCallCanceledSchema>['data'];
+export type DMVoiceCallDeclinedPayload = z.infer<typeof DMVoiceCallDeclinedSchema>['data'];
+export type DMVoiceCallTimedOutPayload = z.infer<typeof DMVoiceCallTimedOutSchema>['data'];
 
 // Presence
 export type PresencePayload = z.infer<typeof PresenceSchema>['data'];

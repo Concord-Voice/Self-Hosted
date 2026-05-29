@@ -118,9 +118,22 @@ type Hub struct {
 	// Mention permission checker (injected after construction via SetMentionChecker)
 	mentionChecker MentionPermissionChecker
 
+	// DM voice ring canceller (injected after construction via
+	// SetDMRingCanceller). When the user's LAST WS connection drops,
+	// the hub invokes this to clean up any caller-initiated DM voice
+	// rings the user has in flight. Avoids the "callee rings forever
+	// until 45s timeout" UX after caller crash. Per #1209 plan task B7
+	// Part 2.
+	dmRingCanceller DMRingCanceller
+
 	// closeOnce ensures Shutdown is idempotent (safe to call multiple times)
 	closeOnce sync.Once
 }
+
+// DMRingCanceller is the signature for the DM voice ring cleanup callback
+// invoked from handleUnregister when a user's last WS connection drops.
+// The dm.Handler.HandleUserDisconnect method satisfies this type.
+type DMRingCanceller func(userID uuid.UUID)
 
 // NewHub creates a new Hub
 func NewHub(db *sql.DB, redisClient *redis.Client) *Hub {
@@ -154,6 +167,15 @@ func NewHub(db *sql.DB, redisClient *redis.Client) *Hub {
 // Called after Hub and Resolver are both constructed (breaks circular init dependency).
 func (h *Hub) SetMentionChecker(checker MentionPermissionChecker) {
 	h.mentionChecker = checker
+}
+
+// SetDMRingCanceller injects the DM voice ring cleanup callback invoked
+// from handleUnregister on a user's last-WS-connection-drop. Called after
+// Hub and dm.Handler are both constructed. If never called, last-connection
+// drops are a no-op for DM ring cleanup (callees observe the 45s ring
+// timeout as the recovery path — degraded but functional).
+func (h *Hub) SetDMRingCanceller(c DMRingCanceller) {
+	h.dmRingCanceller = c
 }
 
 // Run starts the hub's main loop
@@ -449,6 +471,14 @@ func (h *Hub) handleUnregister(client *Client) {
 		h.redis.Del(ctx, fmt.Sprintf(presenceKeyFmt, client.UserID))
 		h.redis.Set(ctx, fmt.Sprintf("last_seen:%s", client.UserID), fmt.Sprintf("%d", now), 0)
 		h.broadcastPresenceToAll(client.UserID, statusOffline, now)
+
+		// Cancel any DM voice rings this user initiated (#1209 B7 Part 2).
+		// Invoke async to avoid blocking handleUnregister on what is
+		// best-effort cleanup. If the callback isn't wired (test/dev),
+		// nil-check skips silently.
+		if h.dmRingCanceller != nil {
+			go h.dmRingCanceller(client.UserID)
+		}
 	}
 
 	log.Printf("Client unregistered: user=%s client=%s remaining=%d",

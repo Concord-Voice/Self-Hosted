@@ -59,6 +59,32 @@ func TestSetMentionChecker(t *testing.T) {
 	assert.NotNil(t, hub.mentionChecker)
 }
 
+// TestSetDMRingCanceller verifies the DM ring cleanup callback is stored
+// and that subsequent SetDMRingCanceller calls overwrite the previous
+// callback (last writer wins) — matches the SetMentionChecker pattern.
+func TestSetDMRingCanceller(t *testing.T) {
+	hub := NewHub(nil, nil)
+	assert.Nil(t, hub.dmRingCanceller)
+
+	called := uuid.Nil
+	canceller := func(userID uuid.UUID) { called = userID }
+	hub.SetDMRingCanceller(canceller)
+	assert.NotNil(t, hub.dmRingCanceller)
+
+	// Confirm the stored callback is actually the one we set (invoke it).
+	uid := uuid.New()
+	hub.dmRingCanceller(uid)
+	assert.Equal(t, uid, called)
+
+	// Last writer wins.
+	called2 := uuid.Nil
+	canceller2 := func(userID uuid.UUID) { called2 = userID }
+	hub.SetDMRingCanceller(canceller2)
+	uid2 := uuid.New()
+	hub.dmRingCanceller(uid2)
+	assert.Equal(t, uid2, called2)
+}
+
 // --- newMinimalHub creates a hub with only the maps needed for unit testing
 // (no DB/Redis, channels are nil-safe).
 func newMinimalHub() *Hub {

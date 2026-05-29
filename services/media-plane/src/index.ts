@@ -185,9 +185,22 @@ async function main() {
     // Server responds with: room-joined event containing router caps, existing producers, participants
     socket.on('join-room', async ({ roomId, rtpCapabilities }, callback?) => {
       try {
-        // Validate channel access via control plane
+        // Validate channel access via control plane. Room kind is a
+        // routing hint from the renderer's Socket.IO handshake (per
+        // #1209 plan C1 + spec §6.5): 'channel' hits the server-channel
+        // voice-join endpoint; 'dm' hits the DM authorize endpoint
+        // (G7 defense-in-depth). Only the userId in `data` comes from
+        // the verified JWT (see createAuthMiddleware); the display
+        // fields (username/displayName/avatarUrl) currently flow from
+        // socket.handshake.auth and are documented as a known
+        // client-supplied gap in [internal]rules/media-plane.md.
+        // room_kind is the same shape: a client-supplied routing hint
+        // that doesn't grant any privilege beyond which control-plane
+        // endpoint is consulted for authorization.
         const token = socket.handshake.auth.token;
-        const access = await validateChannelAccess(data.userId, roomId, token);
+        const roomKind: 'channel' | 'dm' =
+          socket.handshake.auth.room_kind === 'dm' ? 'dm' : 'channel';
+        const access = await validateChannelAccess(data.userId, roomId, token, roomKind);
 
         if (!access.allowed) {
           logger.warn('Channel access denied', {

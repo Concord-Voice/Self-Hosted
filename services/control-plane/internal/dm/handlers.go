@@ -2,6 +2,7 @@
 package dm
 
 import (
+	"context"
 	"database/sql"
 	"encoding/base64"
 	"fmt"
@@ -37,6 +38,8 @@ const (
 	errMsgFailedCheckConversation    = "Failed to check conversation"
 	errMsgNotGroupConversation       = "This action is only available for group conversations"
 	errMsgInvalidUserID              = "Invalid user ID"
+	errMsgInvalidCallerID            = "Invalid caller ID"
+	errMsgAlreadyRinging             = "already ringing"
 	errMsgCannotTargetSelf           = "Cannot mute yourself"
 	errMsgTargetNotInVoice           = "Target user is not in this voice call"
 	errMsgFailedCheckParticipation   = "Failed to check DM participation"
@@ -1508,6 +1511,40 @@ func (h *Handler) AuthorizeVoiceJoin(c *gin.Context) {
 		return
 	}
 
+	// Accept-path coordination (Gitar #1231 finding G1, #1209 spec §6.1):
+	// when a CALLEE (not the original ring caller) authorizes a DM voice join
+	// while a pendingDMCall exists for this conversation, that's the signal
+	// to consummate the ring — clear it, stop the timeout timer, and broadcast
+	// dm_voice_call_canceled with canceled_by='someone_accepted' so the caller's
+	// state machine transitions out of outgoing-ringing and calls joinChannel
+	// itself (see handleCallCanceled in client/desktop/.../callStateMachine.ts).
+	// Without this hop, the caller stalls in outgoing-ringing until the 45s
+	// timeout fires even though the callee already joined the room.
+	convUUID, parseConvErr := uuid.Parse(convID)
+	userUUID, parseUserErr := uuid.Parse(userID)
+	if parseConvErr == nil && parseUserErr == nil {
+		if storedAny, loaded := pendingDMCalls.Load(convUUID); loaded {
+			if ring, ok := storedAny.(*PendingCall); ok && ring.CallerUserID != userUUID {
+				// Atomically delete only if THIS exact ring is still stored.
+				// sync.Map.CompareAndDelete (Go 1.20+) eliminates the race
+				// window of LoadAndDelete-then-conditional-Store
+				// (Gitar #1231 cycle-2 finding).
+				if pendingDMCalls.CompareAndDelete(convUUID, ring) {
+					ring.MarkAccepted(userUUID)
+					ring.StopTimer()
+					h.hub.BroadcastToDM(convUUID, websocket.OutgoingMessage{
+						Type: "dm_voice_call_canceled",
+						Data: map[string]interface{}{
+							"conversation_id": convUUID.String(),
+							"ring_id":         ring.RingID.String(),
+							"canceled_by":     "someone_accepted",
+						},
+					})
+				}
+			}
+		}
+	}
+
 	h.log.Info("DM voice join authorized", "user_id", userID, "conversation_id", convID)
 
 	c.JSON(http.StatusOK, gin.H{
@@ -2171,4 +2208,558 @@ func (h *Handler) DMHardUndeafen(c *gin.Context) {
 	h.dmBroadcastVoiceState(convID, targetID, "server_undeafened")
 
 	c.JSON(http.StatusOK, gin.H{"success": true})
+}
+
+// ─── DM voice call ring (#1209) ──────────────────────────────────────────
+//
+// RingDMCall + DeclineDMCall + CancelDMCall + AuthorizeDMVoiceForMediaPlane
+// implement the server-authoritative DM voice-call ring layer per spec
+// [internal]specs/2026-05-27-1209-dm-group-voice-calls-design.md §6.1.
+// State machinery: voicering.go. Broadcasts: direct hub.BroadcastToUser /
+// hub.BroadcastToDM (single-replica per spec §5.4; multi-replica migration
+// path documented in §5.5).
+
+// DefaultRingTimeoutSeconds is the wall-clock budget the callee has to
+// accept or decline an incoming DM voice call before the server-side
+// timer fires dm_voice_call_timed_out. 45s matches the spec §6.1 default.
+const DefaultRingTimeoutSeconds = 45
+
+// callerInfoFor fetches the minimal user-identity payload broadcast in the
+// dm_voice_call_invited WS event so callees can render IncomingCallBanner.
+// Returns DisplayName / AvatarURL as empty strings (NOT NULL) when the
+// columns are NULL; the WS schema marks both fields as .optional().
+func (h *Handler) callerInfoFor(userID string) (map[string]interface{}, error) {
+	var username, displayName, avatarURL string
+	err := h.db.QueryRow(`
+		SELECT username, COALESCE(display_name, ''), COALESCE(avatar_url, '')
+		FROM users WHERE id = $1
+	`, userID).Scan(&username, &displayName, &avatarURL)
+	if err != nil {
+		return nil, err
+	}
+	info := map[string]interface{}{
+		"user_id":  userID,
+		"username": username,
+	}
+	if displayName != "" {
+		info["display_name"] = displayName
+	}
+	if avatarURL != "" {
+		info["avatar_url"] = avatarURL
+	}
+	return info, nil
+}
+
+// fetchDMCalleesExcluding returns the user IDs of all dm_participants for
+// the conversation EXCEPT the given exclude user. Used by RingDMCall to
+// build the ringing-user-ids set (everyone in the conv minus the caller).
+func (h *Handler) fetchDMCalleesExcluding(convID, excludeUserID string) ([]uuid.UUID, error) {
+	rows, err := h.db.Query(`
+		SELECT user_id FROM dm_participants
+		WHERE conversation_id = $1 AND user_id != $2
+	`, convID, excludeUserID)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	callees := []uuid.UUID{}
+	for rows.Next() {
+		var uid uuid.UUID
+		if err := rows.Scan(&uid); err != nil {
+			return nil, err
+		}
+		callees = append(callees, uid)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return callees, nil
+}
+
+// RingDMCall initiates a DM voice call ring. POST /api/v1/dm/conversations/:id/voice/ring.
+//
+// Validates caller ∈ dm_participants. Creates pendingDMCalls[convID] entry,
+// broadcasts dm_voice_call_invited to each ringing user via hub.BroadcastToUser,
+// arms the 45-second timeout timer, returns ring metadata.
+//
+// Returns 409 Conflict if a ring is already in flight for the conversation
+// (per spec §6.1 already-ringing edge case). The renderer can offer a "join
+// the existing call" affordance based on the returned existing_ring metadata
+// (group follow-up #1219 wires that UX; #1209 returns the metadata anyway).
+func (h *Handler) RingDMCall(c *gin.Context) {
+	callerIDStr := c.GetString("user_id")
+	convIDStr := c.Param("id")
+
+	convUUID, err := uuid.Parse(convIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+		return
+	}
+	callerUUID, err := uuid.Parse(callerIDStr)
+	if err != nil {
+		// Shouldn't happen — auth middleware injects valid UUIDs — but be defensive.
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidCallerID})
+		return
+	}
+
+	if !h.isParticipant(convIDStr, callerIDStr) {
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
+		return
+	}
+
+	// Early-exit for the optimistic-conflict case so DB queries are skipped on
+	// the common "already ringing" path. The atomic LoadOrStore below is the
+	// authoritative race-safe claim — this Load is purely a fast-path.
+	if existingAny, loaded := pendingDMCalls.Load(convUUID); loaded {
+		if existing, ok := existingAny.(*PendingCall); ok {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": errMsgAlreadyRinging,
+				"existing_ring": gin.H{
+					"caller_user_id":  existing.CallerUserID.String(),
+					"ring_id":         existing.RingID.String(),
+					"ring_started_at": existing.RingStartedAt.Format(time.RFC3339),
+				},
+			})
+			return
+		}
+	}
+
+	callees, err := h.fetchDMCalleesExcluding(convIDStr, callerIDStr)
+	if err != nil {
+		h.log.Error("Failed to fetch DM callees for ring", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAuthorize})
+		return
+	}
+	if len(callees) == 0 {
+		// Personal-DM (self only) — no one to ring. Treat as a no-op error.
+		c.JSON(http.StatusBadRequest, gin.H{"error": "no callees in this conversation"})
+		return
+	}
+
+	callerInfo, err := h.callerInfoFor(callerIDStr)
+	if err != nil {
+		h.log.Error("Failed to fetch caller info for ring", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAuthorize})
+		return
+	}
+
+	// Race-safe atomic claim (Gitar #1231 finding G2): construct the ring,
+	// then LoadOrStore. If another concurrent /ring won the claim, return 409
+	// with the OTHER ring's metadata. This collapses the Load-then-Store
+	// window where two concurrent requests could both pass the Load check
+	// before either Stores.
+	ring := newPendingCall(convUUID, callerUUID, callees, time.Duration(DefaultRingTimeoutSeconds)*time.Second)
+	if existingAny, loaded := pendingDMCalls.LoadOrStore(convUUID, ring); loaded {
+		if existing, ok := existingAny.(*PendingCall); ok {
+			c.JSON(http.StatusConflict, gin.H{
+				"error": errMsgAlreadyRinging,
+				"existing_ring": gin.H{
+					"caller_user_id":  existing.CallerUserID.String(),
+					"ring_id":         existing.RingID.String(),
+					"ring_started_at": existing.RingStartedAt.Format(time.RFC3339),
+				},
+			})
+			return
+		}
+		// Existing entry exists but is somehow not a *PendingCall — refuse
+		// to overwrite; respond 409 generically.
+		c.JSON(http.StatusConflict, gin.H{"error": errMsgAlreadyRinging})
+		return
+	}
+
+	// Arm the timeout BEFORE broadcasting so a fast callee response doesnt
+	// race the timer-arm. The timer callback is idempotent (checks ring
+	// is still in pendingDMCalls before broadcasting).
+	ring.StartTimer(time.Duration(DefaultRingTimeoutSeconds)*time.Second, func() {
+		h.onRingTimeout(convUUID, ring)
+	})
+
+	// Broadcast dm_voice_call_invited to each callee (single-replica direct
+	// hub broadcast per spec §6.3 — no NATS fanout needed today).
+	invitedPayload := map[string]interface{}{
+		"conversation_id":      convUUID.String(),
+		"is_group":             false, // always false for #1209 DM 1:1; #1219 computes from participants
+		"caller":               callerInfo,
+		"ring_id":              ring.RingID.String(),
+		"ring_started_at":      ring.RingStartedAt.UTC().Format(time.RFC3339),
+		"ring_timeout_seconds": DefaultRingTimeoutSeconds,
+	}
+	for _, calleeID := range callees {
+		h.hub.BroadcastToUser(calleeID, websocket.OutgoingMessage{
+			Type: "dm_voice_call_invited",
+			Data: invitedPayload,
+		})
+	}
+
+	h.log.Info("DM voice call ring initiated",
+		"conversation_id", convIDStr,
+		"caller_user_id", callerIDStr,
+		"ring_id", ring.RingID.String(),
+		"callee_count", len(callees),
+	)
+
+	// Response: minimal ring metadata the caller's renderer uses to track
+	// its outgoing-ringing state.
+	calleesAsStrings := make([]string, len(callees))
+	for i, u := range callees {
+		calleesAsStrings[i] = u.String()
+	}
+	c.JSON(http.StatusOK, gin.H{
+		"ring_id":          ring.RingID.String(),
+		"ring_started_at":  ring.RingStartedAt.UTC().Format(time.RFC3339),
+		"ringing_user_ids": calleesAsStrings,
+	})
+}
+
+// onRingTimeout fires when the ring-timeout timer expires without anyone
+// accepting. Idempotent: if pendingDMCalls no longer contains this exact
+// ring (because accept/decline/cancel already cleared it), no-op.
+//
+// For #1209 this broadcasts dm_voice_call_timed_out to all participants
+// AND inserts a missed-call event row via insertCallEvent (best-effort —
+// failure logs and proceeds; the ring-timeout cleanup is the load-bearing
+// part). The missed-row INSERT lands at the end of this function.
+func (h *Handler) onRingTimeout(convUUID uuid.UUID, ring *PendingCall) {
+	// Atomic race-safe delete (Copilot #1231 cycle-3 finding): CompareAndDelete
+	// returns true only if THIS exact ring is still stored. If false: either
+	// the entry was cleared by accept/decline/cancel, OR a newer ring has
+	// replaced this one (orphaned-timer case). Both branches are a quiet
+	// no-op for this timer firing.
+	if !pendingDMCalls.CompareAndDelete(convUUID, ring) {
+		return
+	}
+
+	h.hub.BroadcastToDM(convUUID, websocket.OutgoingMessage{
+		Type: "dm_voice_call_timed_out",
+		Data: map[string]interface{}{
+			"conversation_id": convUUID.String(),
+			"ring_id":         ring.RingID.String(),
+		},
+	})
+	h.log.Info("DM voice call ring timed out",
+		"conversation_id", convUUID.String(),
+		"ring_id", ring.RingID.String(),
+	)
+	// Insert missed-call event row (best-effort per spec §6.1 edge cases;
+	// failure logged but doesn't block the ring-timeout cleanup).
+	if err := h.insertCallEvent(context.Background(), convUUID, callEventMissed(ring)); err != nil {
+		h.log.Error("Failed to insert missed call_event row",
+			"error", err,
+			"conversation_id", convUUID.String(),
+			"ring_id", ring.RingID.String(),
+		)
+	}
+}
+
+// DeclineDMCall handles a callee declining a DM voice call ring.
+// POST /api/v1/dm/conversations/:id/voice/decline.
+//
+// Validates the user is a currently-ringing callee for this conversation
+// (membership check is implicit: only ringing callees are in the
+// PendingCall.RingingUserIDs set). Always broadcasts dm_voice_call_declined
+// to the caller (supports the per-decliner tally UI in #1219 group calls).
+// If this decline empties the ringing set with nobody accepted (the only
+// path that can hit this for DM 1:1 — single callee declining), broadcasts
+// dm_voice_call_canceled with canceled_by='all_declined' and clears the
+// pending ring.
+//
+// Per spec §6.1: returns 404 when no ring is pending, 403 when the user
+// is in the conversation but not currently ringing (already declined /
+// accepted, or never was a callee — e.g., the caller themselves).
+//
+// Per spec §3.4 / §4 axis C: per-decliner cancellation. Each decline only
+// removes that decliner's ring; ring continues for others. Group-call tally
+// progress event (dm_voice_call_decline_progress) is deferred to #1219.
+func (h *Handler) DeclineDMCall(c *gin.Context) {
+	declinerIDStr := c.GetString("user_id")
+	convIDStr := c.Param("id")
+
+	convUUID, err := uuid.Parse(convIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+		return
+	}
+	declinerUUID, err := uuid.Parse(declinerIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidCallerID})
+		return
+	}
+
+	storedAny, loaded := pendingDMCalls.Load(convUUID)
+	if !loaded {
+		c.JSON(http.StatusNotFound, gin.H{"error": "no active ring for this conversation"})
+		return
+	}
+	ring, ok := storedAny.(*PendingCall)
+	if !ok {
+		// Defensive: pendingDMCalls is only ever written with *PendingCall
+		// values (RingDMCall is the sole writer). Match the RingDMCall
+		// posture so a future sentinel-using code path doesn't crash this
+		// handler via ring.mu.Lock on a nil interface (Copilot #1231
+		// cycle-4 finding).
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAuthorize})
+		return
+	}
+
+	// Ringing-callee check: the decliner must be in the ringing set. This
+	// implicitly enforces dm_participants membership (only members were
+	// added to RingingUserIDs at /ring time) AND prevents the caller from
+	// declining their own call (they're not in RingingUserIDs).
+	ring.mu.Lock()
+	_, isRinging := ring.RingingUserIDs[declinerUUID]
+	ring.mu.Unlock()
+	if !isRinging {
+		c.JSON(http.StatusForbidden, gin.H{"error": "not a ringing callee for this call"})
+		return
+	}
+
+	ring.MarkDeclined(declinerUUID)
+
+	// Always notify caller of this decline (supports group tally in #1219).
+	h.hub.BroadcastToUser(ring.CallerUserID, websocket.OutgoingMessage{
+		Type: "dm_voice_call_declined",
+		Data: map[string]interface{}{
+			"conversation_id":  convUUID.String(),
+			"ring_id":          ring.RingID.String(),
+			"decliner_user_id": declinerUUID.String(),
+		},
+	})
+
+	// If all callees have declined (nobody accepted), end the call entirely.
+	if ring.IsFullyDeclined() {
+		ring.StopTimer()
+		// Atomic race-safe delete: only clears pendingDMCalls if THIS exact
+		// ring is still the stored value. sync.Map.CompareAndDelete is
+		// strictly atomic — eliminates the LoadAndDelete→Store race window
+		// where a new ring could be inserted between the two operations
+		// (Gitar #1231 cycle-2 finding).
+		pendingDMCalls.CompareAndDelete(convUUID, ring)
+		h.hub.BroadcastToDM(convUUID, websocket.OutgoingMessage{
+			Type: "dm_voice_call_canceled",
+			Data: map[string]interface{}{
+				"conversation_id": convUUID.String(),
+				"ring_id":         ring.RingID.String(),
+				"canceled_by":     "all_declined",
+			},
+		})
+		h.log.Info("DM voice call ring ended (all callees declined)",
+			"conversation_id", convUUID.String(),
+			"ring_id", ring.RingID.String(),
+		)
+		// Insert declined-call event row (best-effort).
+		if err := h.insertCallEvent(c.Request.Context(), convUUID, callEventDeclined(ring)); err != nil {
+			h.log.Error("Failed to insert declined call_event row",
+				"error", err,
+				"conversation_id", convUUID.String(),
+				"ring_id", ring.RingID.String(),
+			)
+		}
+	} else {
+		h.log.Info("DM voice call: callee declined",
+			"conversation_id", convUUID.String(),
+			"ring_id", ring.RingID.String(),
+			"decliner_user_id", declinerUUID.String(),
+		)
+	}
+
+	c.Status(http.StatusNoContent)
+}
+
+// CancelDMCall lets the caller cancel their own ring before any callee
+// has accepted. POST /api/v1/dm/conversations/:id/voice/cancel.
+//
+// Per spec §6.1: only the ring INITIATOR (CallerUserID) is authorized to
+// cancel via this endpoint. A callee who doesn't want the call should hit
+// /decline instead. Returns 204 on success, 404 if no ring is pending,
+// 403 if the user is in the conversation but isn't the ring initiator.
+//
+// Broadcasts dm_voice_call_canceled with canceled_by='caller' to the
+// conversation, clears pendingDMCalls, and inserts a canceled-status
+// call_event row.
+func (h *Handler) CancelDMCall(c *gin.Context) {
+	callerIDStr := c.GetString("user_id")
+	convIDStr := c.Param("id")
+
+	convUUID, err := uuid.Parse(convIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+		return
+	}
+	callerUUID, err := uuid.Parse(callerIDStr)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidCallerID})
+		return
+	}
+
+	storedAny, loaded := pendingDMCalls.Load(convUUID)
+	if !loaded {
+		c.JSON(http.StatusNotFound, gin.H{"error": "no active ring for this conversation"})
+		return
+	}
+	ring, ok := storedAny.(*PendingCall)
+	if !ok {
+		// Defensive — same posture as DeclineDMCall above (Copilot #1231
+		// cycle-4 finding). Prevents nil-deref panic on ring.CallerUserID.
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAuthorize})
+		return
+	}
+
+	if ring.CallerUserID != callerUUID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "only the ring initiator can cancel"})
+		return
+	}
+
+	ring.StopTimer()
+	// Atomic race-safe delete via sync.Map.CompareAndDelete — clears the
+	// entry only if THIS exact ring is still stored, eliminating the
+	// LoadAndDelete→Store race window (Gitar #1231 cycle-2 finding).
+	pendingDMCalls.CompareAndDelete(convUUID, ring)
+
+	h.hub.BroadcastToDM(convUUID, websocket.OutgoingMessage{
+		Type: "dm_voice_call_canceled",
+		Data: map[string]interface{}{
+			"conversation_id": convUUID.String(),
+			"ring_id":         ring.RingID.String(),
+			"canceled_by":     "caller",
+		},
+	})
+
+	if err := h.insertCallEvent(c.Request.Context(), convUUID, callEventCanceled(ring)); err != nil {
+		h.log.Error("Failed to insert canceled call_event row",
+			"error", err,
+			"conversation_id", convUUID.String(),
+			"ring_id", ring.RingID.String(),
+		)
+	}
+
+	h.log.Info("DM voice call ring canceled by caller",
+		"conversation_id", convUUID.String(),
+		"ring_id", ring.RingID.String(),
+		"caller_user_id", callerIDStr,
+	)
+
+	c.Status(http.StatusNoContent)
+}
+
+// AuthorizeDMVoiceForMediaPlane is the G7 defense-in-depth auth re-check
+// endpoint per spec §6.5. Called BY THE MEDIA-PLANE (not the renderer)
+// when an SFU client connects with roomId == conversation_id; the
+// media-plane forwards the user's JWT and this endpoint validates the
+// user is in dm_participants.
+//
+// POST /api/v1/dm/conversations/:id/voice/authorize.
+//
+// Pure auth re-check; no state mutation. The renderer-facing voice-join
+// endpoint (AuthorizeVoiceJoin) still does its own authorization at the
+// user-facing surface; this endpoint is the second check at the SFU
+// boundary that closes the G7 gap (media-plane previously had no DM-aware
+// auth path and effectively trusted the renderer's join response unchecked).
+//
+// Returns 200 + {authorized: true, is_group: bool} for members; 403 for
+// non-members. The minimal metadata helps the media-plane decide whether
+// to enable group-call-specific features (deferred to #1219).
+func (h *Handler) AuthorizeDMVoiceForMediaPlane(c *gin.Context) {
+	userID := c.GetString("user_id")
+	convID := c.Param("id")
+
+	if _, err := uuid.Parse(convID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidConversationID})
+		return
+	}
+
+	var isGroup bool
+	err := h.db.QueryRow(`
+		SELECT dc.is_group
+		FROM dm_conversations dc
+		JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $2
+		WHERE dc.id = $1
+	`, convID, userID).Scan(&isGroup)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusForbidden, gin.H{"authorized": false, "error": errMsgNotParticipant})
+		return
+	} else if err != nil {
+		h.log.Error("Failed to check DM voice authorization (G7)", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAuthorize})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"authorized": true,
+		"is_group":   isGroup,
+	})
+}
+
+// HandleUserDisconnect cleans up DM voice rings the user has initiated
+// when their last WebSocket connection drops. Invoked by the hub's
+// handleUnregister via the DMRingCanceller callback wired at startup
+// (see SetDMRingCanceller in router.go).
+//
+// Per spec §6.1 edge case "Caller WS disconnect mid-ring": iterate
+// pendingDMCalls; for each entry where CallerUserID matches the
+// disconnecting user, stop the timer, clear the map entry, broadcast
+// dm_voice_call_canceled with canceled_by='caller' to the conversation,
+// and insert a canceled-status call_event row.
+//
+// Implementation detail: invoked in a goroutine from the hub so blocking
+// here doesn't stall the hub's handleUnregister loop. Iterates the
+// sync.Map which is safe under concurrent reads.
+func (h *Handler) HandleUserDisconnect(userID uuid.UUID) {
+	// Defense-in-depth: this runs in a goroutine spawned by the websocket hub
+	// (see hub.handleUnregister); a panic here would kill the entire
+	// control-plane process. Recover + log so the cleanup is best-effort.
+	defer func() {
+		if r := recover(); r != nil {
+			h.log.Error("DM ring cleanup panic recovered",
+				"panic", r,
+				"user_id", userID.String(),
+			)
+		}
+	}()
+
+	pendingDMCalls.Range(func(key, value interface{}) bool {
+		ring, ok := value.(*PendingCall)
+		if !ok {
+			return true
+		}
+		if ring.CallerUserID != userID {
+			return true
+		}
+		convUUID, ok := key.(uuid.UUID)
+		if !ok {
+			return true
+		}
+
+		// Atomic race-safe delete via sync.Map.CompareAndDelete — clears the
+		// entry only if THIS exact ring is still stored (Gitar #1231 cycle-2
+		// finding). Returns false if the value has changed; in that case the
+		// ring we're acting on has already been replaced or cleared by some
+		// other handler, so we skip the broadcast.
+		if !pendingDMCalls.CompareAndDelete(convUUID, ring) {
+			return true
+		}
+
+		ring.StopTimer()
+		h.hub.BroadcastToDM(convUUID, websocket.OutgoingMessage{
+			Type: "dm_voice_call_canceled",
+			Data: map[string]interface{}{
+				"conversation_id": convUUID.String(),
+				"ring_id":         ring.RingID.String(),
+				"canceled_by":     "caller",
+			},
+		})
+		if err := h.insertCallEvent(context.Background(), convUUID, callEventCanceled(ring)); err != nil {
+			h.log.Error("Failed to insert canceled call_event row on WS disconnect",
+				"error", err,
+				"conversation_id", convUUID.String(),
+				"ring_id", ring.RingID.String(),
+				"user_id", userID.String(),
+			)
+		}
+		h.log.Info("DM voice call ring canceled by caller WS disconnect",
+			"conversation_id", convUUID.String(),
+			"ring_id", ring.RingID.String(),
+			"user_id", userID.String(),
+		)
+		return true
+	})
 }

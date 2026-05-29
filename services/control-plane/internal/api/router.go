@@ -175,6 +175,10 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	invitesHandler := invites.NewHandler(db, log, hub, rbacResolver)
 	voiceHandler := voice.NewHandler(db, log, hub, cfg, rbacResolver, natsClient)
 	dmHandler := dm.NewHandler(db, log, hub, cfg, natsClient, redis)
+	// Wire DM voice ring cleanup-on-disconnect (#1209 plan task B7 Part 2).
+	// When a user's last WS connection drops, the hub invokes
+	// HandleUserDisconnect to cancel any rings they initiated.
+	hub.SetDMRingCanceller(dmHandler.HandleUserDisconnect)
 	friendsHandler := friends.NewHandler(db, log, hub)
 	notificationsHandler := notifications.NewHandler(db, log)
 	ownershipHandler := ownership.NewHandler(ownership.HandlerDeps{
@@ -1353,6 +1357,36 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				dmRoutes.POST("/:id/voice/join",
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					dmHandler.AuthorizeVoiceJoin,
+				)
+				// DM voice call ring (#1209) — server-authoritative
+				// signaling per spec §6.1. Rate-limit matches /voice/join
+				// (10/min/user) to bound any ring-spam attack surface.
+				dmRoutes.POST("/:id/voice/ring",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					dmHandler.RingDMCall,
+				)
+				// Callee declines a ringing call. Higher rate limit (30/min)
+				// because legitimate group calls (#1219) may emit several
+				// declines in quick succession when multiple callees decline.
+				dmRoutes.POST("/:id/voice/decline",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					dmHandler.DeclineDMCall,
+				)
+				// Caller cancels their own ring before any callee accepts.
+				// Same rate limit as /ring (10/min/user) since a single
+				// user can only initiate one ring per conversation at a time.
+				dmRoutes.POST("/:id/voice/cancel",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					dmHandler.CancelDMCall,
+				)
+				// G7 defense-in-depth: media-plane calls this to re-check
+				// DM auth at the SFU boundary. Higher rate limit (60/min)
+				// because the media-plane calls it on every SFU
+				// reconnection (transport renegotiation, ICE restart, etc.)
+				// and a single legitimate call can produce several reconnects.
+				dmRoutes.POST("/:id/voice/authorize",
+					middleware.RateLimitByUser(redis, 60, 1*time.Minute),
+					dmHandler.AuthorizeDMVoiceForMediaPlane,
 				)
 				dmRoutes.GET("/:id/voice/participants",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),

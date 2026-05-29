@@ -37,9 +37,13 @@ import {
   FriendRequestAcceptedSchema,
   FriendRemovedSchema,
   FriendCodeClaimedSchema,
-  // Voice (2)
+  // Voice (6)
   VoiceStateUpdateSchema,
   DMVoiceStateUpdateSchema,
+  DMVoiceCallInvitedSchema,
+  DMVoiceCallCanceledSchema,
+  DMVoiceCallDeclinedSchema,
+  DMVoiceCallTimedOutSchema,
   // Presence (5)
   PresenceSchema,
   PresenceSnapshotSchema,
@@ -412,6 +416,77 @@ describe('ws-events schemas — happy path (one per event)', () => {
         conversation_id: UUID_A,
         action: 'joined',
         user_id: UUID_B,
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  // ── DM voice call ring (4 events) — #1209 ──────────────────────────
+
+  it('DMVoiceCallInvitedSchema accepts a canonical invited envelope', () => {
+    const result = DMVoiceCallInvitedSchema.safeParse({
+      type: 'dm_voice_call_invited',
+      data: {
+        conversation_id: UUID_A,
+        is_group: false,
+        caller: {
+          user_id: UUID_B,
+          username: 'alice',
+          display_name: 'Alice Chen',
+          avatar_url: 'https://example.com/a.png',
+        },
+        ring_id: UUID_C,
+        ring_started_at: ISO_NOW,
+        ring_timeout_seconds: 45,
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('DMVoiceCallCanceledSchema accepts each canceled_by variant', () => {
+    for (const reason of ['caller', 'all_declined', 'someone_accepted', 'server_error'] as const) {
+      const result = DMVoiceCallCanceledSchema.safeParse({
+        type: 'dm_voice_call_canceled',
+        data: {
+          conversation_id: UUID_A,
+          ring_id: UUID_C,
+          canceled_by: reason,
+        },
+      });
+      expect(result.success, `canceled_by=${reason}`).toBe(true);
+    }
+  });
+
+  it('DMVoiceCallCanceledSchema rejects unknown canceled_by value', () => {
+    const result = DMVoiceCallCanceledSchema.safeParse({
+      type: 'dm_voice_call_canceled',
+      data: {
+        conversation_id: UUID_A,
+        ring_id: UUID_C,
+        canceled_by: 'unknown_reason',
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('DMVoiceCallDeclinedSchema accepts a canonical declined envelope', () => {
+    const result = DMVoiceCallDeclinedSchema.safeParse({
+      type: 'dm_voice_call_declined',
+      data: {
+        conversation_id: UUID_A,
+        ring_id: UUID_C,
+        decliner_user_id: UUID_B,
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('DMVoiceCallTimedOutSchema accepts a canonical timeout envelope', () => {
+    const result = DMVoiceCallTimedOutSchema.safeParse({
+      type: 'dm_voice_call_timed_out',
+      data: {
+        conversation_id: UUID_A,
+        ring_id: UUID_C,
       },
     });
     expect(result.success).toBe(true);

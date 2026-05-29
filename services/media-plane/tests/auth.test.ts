@@ -317,4 +317,70 @@ describe('validateChannelAccess', () => {
     expect(result.serverMuted).toBe(true);
     expect(result.serverDeafened).toBe(true);
   });
+
+  // ── DM-path tests (#1209, plan task C1 / G7 fix) ──────────────────────
+
+  it('routes to DM authorize endpoint when roomKind=dm', async () => {
+    mockFetch().mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ authorized: true, is_group: false }),
+    });
+
+    const result = await validateChannelAccess('u-1', 'conv-1', 'jwt-token', 'dm');
+
+    expect(result.allowed).toBe(true);
+    expect(result.channelId).toBe('conv-1');
+    // DM rooms don't carry server-channel metadata
+    expect(result.serverId).toBe('');
+    expect(result.channelName).toBe('');
+    expect(mockFetch()).toHaveBeenCalledWith(
+      'http://localhost:8080/api/v1/dm/conversations/conv-1/voice/authorize',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          Authorization: 'Bearer jwt-token',
+        }),
+      })
+    );
+  });
+
+  it('routes to server-channel endpoint when roomKind omitted (backward compat)', async () => {
+    mockFetch().mockResolvedValueOnce({
+      ok: true,
+      json: () =>
+        Promise.resolve({
+          allowed: true,
+          server_muted: false,
+          server_deafened: false,
+          channel: { id: 'ch-1', server_id: 's', name: 'n' },
+        }),
+    });
+
+    await validateChannelAccess('u-1', 'ch-1', 'token'); // no roomKind arg
+
+    expect(mockFetch()).toHaveBeenCalledWith(
+      'http://localhost:8080/api/v1/channels/ch-1/voice/join',
+      expect.anything()
+    );
+  });
+
+  it('returns denied for 403 from DM authorize endpoint (non-member)', async () => {
+    mockFetch().mockResolvedValueOnce({ ok: false, status: 403 });
+
+    const result = await validateChannelAccess('outsider-id', 'conv-1', 'token', 'dm');
+
+    expect(result.allowed).toBe(false);
+    expect(result.error).toBe('Not authorized to access this channel');
+  });
+
+  it('returns denied when DM authorize endpoint returns 200 but authorized=false', async () => {
+    mockFetch().mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({ authorized: false, is_group: false }),
+    });
+
+    const result = await validateChannelAccess('outsider-id', 'conv-1', 'token', 'dm');
+
+    expect(result.allowed).toBe(false);
+  });
 });
