@@ -1,10 +1,7 @@
 # Build stage
-FROM node:24-alpine AS builder
+FROM ghcr.io/markdrogersjr/node-buildtools:24-alpine-2026-05-28@sha256:a53963b772b7a3e09d1d82bf4fac9fd775350a45d94430527bdf76f8729a3fc2 AS builder
 
 WORKDIR /app
-
-# Install build dependencies (mediasoup needs Python, pip, and build tools)
-RUN apk add --no-cache python3 py3-pip make g++ linux-headers
 
 # stubs/ must precede npm ci — package.json overrides node-domexception → ./stubs/node-domexception
 COPY package*.json ./
