@@ -287,3 +287,12 @@ Key metrics to monitor:
 - [ ] Bandwidth estimation and quality adaptation
 - [ ] Multi-instance horizontal scaling
 - [ ] Metrics and monitoring integration
+
+## CI
+
+Two media-plane Docker build verification jobs run on every PR touching `services/media-plane/**`:
+
+- **Tier-1 `Media Plane / Docker build (cache-warm)`** — fast feedback (~4 min on cache hit). Uses BuildKit's GHA cache backend (`type=gha,mode=max`). Defends application logic correctness; cache miss on `package-lock.json` or `Dockerfile` change is expected. See [ADR-0006 §"Tier 1"](../../[internal]0006-cache-tier-split.md).
+- **Tier-2 `Media Plane / Docker build (cache-cold)`** — defense-in-depth (~19 min). Catches file-`COPY`-order regressions and postinstall failures invisible to cache-warm CI. See [ADR-0006 §"Tier 2"](../../[internal]0006-cache-tier-split.md) and [`[internal]rules/media-plane.md`](../../[internal]rules/media-plane.md) §"Docker Build Context Invariant".
+
+Both jobs run `docker build` + three smokes (toolchain-absent assert, mediasoup worker-spawn check, image size log). The cache-warm job's success metric (≥85% cache hit rate on lockfile-unchanged PRs over a 2-week window) is measured per spec [`[internal]specs/2026-05-28-1167-cache-warm-mediaplane-design.md`](../../[internal]specs/2026-05-28-1167-cache-warm-mediaplane-design.md) §6.5 by the script at `[internal]artifacts/1167-measurements/measure-hit-rate.sh`.
