@@ -9,10 +9,12 @@ import (
 	"encoding/pem"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -755,6 +757,175 @@ func TestLoadAppleSSOConfig_FilePathWhitespaceOnly(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "APPLE_PRIVATE_KEY")
 	assert.Nil(t, cfg.AppleSSO.PrivateKey)
+}
+
+// TestParseAttestationTokenTTL_Default verifies the default "2h" TTL parses correctly.
+func TestParseAttestationTokenTTL_Default(t *testing.T) {
+	require.Equal(t, 2*time.Hour, parseAttestationTokenTTL("2h"))
+}
+
+// TestParseAttestationTokenTTL_TooShort uses the os/exec self-invocation pattern
+// to test that parseAttestationTokenTTL calls log.Fatalf on out-of-range values.
+// The function is expected to terminate the process; we re-exec the test binary
+// with an env flag to trigger the fatal path inside a child process.
+func TestParseAttestationTokenTTL_TooShort(t *testing.T) {
+	if os.Getenv("BE_CRASHER") == "1" {
+		parseAttestationTokenTTL("10m")
+		return
+	}
+	// os.Executable returns the path to the running test binary — not user input.
+	testBin, err := os.Executable()
+	require.NoError(t, err)
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command — testBin is os.Executable() (the running test binary path), not user-controlled input; self-invocation pattern for testing log.Fatalf
+	cmd := exec.Command(testBin, "-test.run=TestParseAttestationTokenTTL_TooShort") //nolint:gosec // G204: same rationale
+	cmd.Env = append(os.Environ(), "BE_CRASHER=1")
+	err = cmd.Run()
+	require.Error(t, err, "expected fatal exit on too-short TTL")
+}
+
+// TestParseAttestationPruneInterval_Default verifies the default "6h" interval
+// parses correctly. Per finding #18 of #1264 review: the cleanup pruner now
+// runs at this cadence by default.
+func TestParseAttestationPruneInterval_Default(t *testing.T) {
+	require.Equal(t, 6*time.Hour, parseAttestationPruneInterval("6h"))
+}
+
+// TestParseAttestationPruneInterval_AcceptsBounds verifies the [1h, 24h] range
+// boundaries are inclusive.
+func TestParseAttestationPruneInterval_AcceptsBounds(t *testing.T) {
+	require.Equal(t, 1*time.Hour, parseAttestationPruneInterval("1h"))
+	require.Equal(t, 24*time.Hour, parseAttestationPruneInterval("24h"))
+}
+
+// TestParseAttestationPruneInterval_TooShort uses the os/exec self-invocation
+// pattern to test that parseAttestationPruneInterval calls log.Fatalf on
+// out-of-range input.
+func TestParseAttestationPruneInterval_TooShort(t *testing.T) {
+	if os.Getenv("BE_CRASHER") == "1" {
+		parseAttestationPruneInterval("10m")
+		return
+	}
+	testBin, err := os.Executable()
+	require.NoError(t, err)
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command — testBin is os.Executable() (the running test binary path), not user-controlled input; self-invocation pattern for testing log.Fatalf
+	cmd := exec.Command(testBin, "-test.run=TestParseAttestationPruneInterval_TooShort") //nolint:gosec // G204: same rationale
+	cmd.Env = append(os.Environ(), "BE_CRASHER=1")
+	err = cmd.Run()
+	require.Error(t, err, "expected fatal exit on too-short prune interval")
+}
+
+// TestParseAttestationPruneInterval_TooLong covers the upper-bound guard.
+func TestParseAttestationPruneInterval_TooLong(t *testing.T) {
+	if os.Getenv("BE_CRASHER") == "1" {
+		parseAttestationPruneInterval("48h")
+		return
+	}
+	testBin, err := os.Executable()
+	require.NoError(t, err)
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command — testBin is os.Executable() (the running test binary path), not user-controlled input; self-invocation pattern for testing log.Fatalf
+	cmd := exec.Command(testBin, "-test.run=TestParseAttestationPruneInterval_TooLong") //nolint:gosec // G204: same rationale
+	cmd.Env = append(os.Environ(), "BE_CRASHER=1")
+	err = cmd.Run()
+	require.Error(t, err, "expected fatal exit on too-long prune interval")
+}
+
+// TestParseAttestationPruneInterval_Invalid covers the parse-failure path.
+func TestParseAttestationPruneInterval_Invalid(t *testing.T) {
+	if os.Getenv("BE_CRASHER") == "1" {
+		parseAttestationPruneInterval("not-a-duration")
+		return
+	}
+	testBin, err := os.Executable()
+	require.NoError(t, err)
+	// nosemgrep: go.lang.security.audit.dangerous-exec-command.dangerous-exec-command — testBin is os.Executable() (the running test binary path), not user-controlled input; self-invocation pattern for testing log.Fatalf
+	cmd := exec.Command(testBin, "-test.run=TestParseAttestationPruneInterval_Invalid") //nolint:gosec // G204: same rationale
+	cmd.Env = append(os.Environ(), "BE_CRASHER=1")
+	err = cmd.Run()
+	require.Error(t, err, "expected fatal exit on invalid duration")
+}
+
+// TestValidate_RequireAttestation_MissingAudience verifies that enabling client
+// attestation without an OIDC audience returns a descriptive error.
+// Uses validateAttestation() directly to avoid needing a fully-populated
+// production Config (which would require satisfying all other production guards).
+func TestValidate_RequireAttestation_MissingAudience(t *testing.T) {
+	cfg := &Config{RequireClientAttestation: true, OIDCAudience: ""}
+	err := cfg.validateAttestation()
+	require.ErrorContains(t, err, "ATTESTATION_OIDC_AUDIENCE")
+}
+
+// validAttestationConfig returns the minimum set of attestation fields that
+// satisfy validateAttestation when RequireClientAttestation=true. Tests
+// mutate one field at a time to assert each per-axis production guard fires.
+func validAttestationConfig() *Config {
+	return &Config{
+		Environment:              "development", // bypass the production issuer check
+		RequireClientAttestation: true,
+		OIDCIssuer:               "https://token.actions.githubusercontent.com",
+		OIDCAudience:             "https://api.concordvoice.chat",
+		OIDCSubjectPrefix:        "repo:markdrogersjr/Concord:",
+		OIDCSPAWorkflow:          "main-cd.yml",
+		OIDCSPARef:               "refs/heads/main",
+		OIDCBinaryWorkflow:       "build-desktop.yml",
+		OIDCBinaryRef:            "refs/heads/main",
+	}
+}
+
+// TestValidateAttestation_DisabledSkipsAllChecks verifies the
+// RequireClientAttestation=false early-return.
+func TestValidateAttestation_DisabledSkipsAllChecks(t *testing.T) {
+	cfg := &Config{RequireClientAttestation: false}
+	require.NoError(t, cfg.validateAttestation())
+}
+
+// TestValidateAttestation_HappyPath verifies the success branch — all per-axis
+// fields populated.
+func TestValidateAttestation_HappyPath(t *testing.T) {
+	require.NoError(t, validAttestationConfig().validateAttestation())
+}
+
+// TestValidateAttestation_ProductionIssuerCheck covers the production-only
+// guard that ATTESTATION_OIDC_ISSUER MUST be the canonical GitHub URL.
+func TestValidateAttestation_ProductionIssuerCheck(t *testing.T) {
+	cfg := validAttestationConfig()
+	cfg.Environment = "production"
+	cfg.OIDCIssuer = "https://attacker.example.com"
+	err := cfg.validateAttestation()
+	require.ErrorContains(t, err, "canonical GitHub issuer in production")
+}
+
+// TestValidateAttestation_MissingSPAWorkflow covers the SPA-axis workflow
+// guard.
+func TestValidateAttestation_MissingSPAWorkflow(t *testing.T) {
+	cfg := validAttestationConfig()
+	cfg.OIDCSPAWorkflow = ""
+	err := cfg.validateAttestation()
+	require.ErrorContains(t, err, "ATTESTATION_OIDC_SPA_WORKFLOW")
+}
+
+// TestValidateAttestation_MissingSPARef covers the SPA-axis ref guard.
+func TestValidateAttestation_MissingSPARef(t *testing.T) {
+	cfg := validAttestationConfig()
+	cfg.OIDCSPARef = ""
+	err := cfg.validateAttestation()
+	require.ErrorContains(t, err, "ATTESTATION_OIDC_SPA_REF")
+}
+
+// TestValidateAttestation_MissingBinaryWorkflow covers the binary-axis
+// workflow guard.
+func TestValidateAttestation_MissingBinaryWorkflow(t *testing.T) {
+	cfg := validAttestationConfig()
+	cfg.OIDCBinaryWorkflow = ""
+	err := cfg.validateAttestation()
+	require.ErrorContains(t, err, "ATTESTATION_OIDC_BINARY_WORKFLOW")
+}
+
+// TestValidateAttestation_MissingBinaryRef covers the binary-axis ref guard.
+func TestValidateAttestation_MissingBinaryRef(t *testing.T) {
+	cfg := validAttestationConfig()
+	cfg.OIDCBinaryRef = ""
+	err := cfg.validateAttestation()
+	require.ErrorContains(t, err, "ATTESTATION_OIDC_BINARY_REF")
 }
 
 // TestValidate_WarnsOnBroadRFC1918Fallback verifies that production with

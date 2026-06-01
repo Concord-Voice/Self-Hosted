@@ -39,7 +39,7 @@ func isOriginAllowed(origin string, allowedOrigins []string) bool {
 func setCORSHeaders(c *gin.Context, origin string) {
 	c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
 	c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-	c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Refresh-Token, X-Session-ID, X-Machine-Id, X-Device-Name, X-Request-ID")
+	c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Requested-With, X-Refresh-Token, X-Session-ID, X-Machine-Id, X-Device-Name, X-Request-ID, X-Attestation-Token")
 	c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 	c.Writer.Header().Set("Access-Control-Max-Age", "86400")
 }

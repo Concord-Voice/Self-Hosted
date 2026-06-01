@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/joho/godotenv"
 )
@@ -150,6 +151,23 @@ type Config struct {
 	// media URLs through /api/v1/klipy/media so KLIPY's CDN never sees per-user IPs.
 	KlipyAPIKey string
 
+	// Client attestation (#677)
+	RequireClientAttestation bool          // Gate authenticated routes on signed-client attestation
+	AttestationTokenTTL      time.Duration // Lifetime of issued attestation tokens; range 30m-24h
+	AttestationPruneInterval time.Duration // Cadence for retention pruning (release_binaries + release_spas); range 1h-24h
+	OIDCIssuer               string        // GitHub Actions OIDC issuer (typically token.actions.githubusercontent.com)
+	OIDCAudience             string        // Expected OIDC audience claim
+	OIDCSubjectPrefix        string        // Required OIDC sub prefix (e.g. "repo:markdrogersjr/Concord:")
+	// Per-axis OIDC binding (W1, #677 reconciliation). The SPA publish path
+	// and binary publish path are issued from DIFFERENT GitHub Actions
+	// workflows (main-cd.yml vs build-desktop.yml). Each axis is bound to
+	// its own (Workflow, Ref) pair so an OIDC token minted by one workflow
+	// cannot satisfy the other axis's publish handler.
+	OIDCSPAWorkflow    string // Required workflow path for /publish/spa (e.g. "main-cd.yml")
+	OIDCSPARef         string // Required ref for /publish/spa (e.g. "refs/heads/main")
+	OIDCBinaryWorkflow string // Required workflow path for /publish/binary (e.g. "build-desktop.yml")
+	OIDCBinaryRef      string // Required ref for /publish/binary (e.g. "refs/heads/main")
+
 	// TrustedProxyCIDRs is the allowlist of reverse-proxy CIDRs passed to
 	// gin's SetTrustedProxies so c.ClientIP() resolves the real client IP via
 	// X-Forwarded-For / X-Real-IP. Production MUST set TRUSTED_PROXY_CIDRS —
@@ -176,42 +194,52 @@ func Load() (*Config, error) {
 	_ = godotenv.Load()
 
 	cfg := &Config{
-		Environment:           getEnv("ENVIRONMENT", "development"),
-		Port:                  getEnv("PORT", "8080"),
-		DatabaseURL:           getEnv("DATABASE_URL", defaultDevDatabaseURL()),
-		RedisURL:              getEnv("REDIS_URL", defaultDevRedisURL()),
-		JWTSecret:             getEnv("JWT_SECRET", devJWTSecret),
-		NATSUrl:               getEnv("NATS_URL", "nats://localhost:4222"),
-		MediaPlaneURL:         getEnv("MEDIA_PLANE_URL", "http://localhost:3000"),
-		TURNServerHost:        getEnv("TURN_SERVER_HOST", ""),
-		TURNSecret:            getEnv("TURN_SECRET", ""),
-		TURNRealm:             getEnv("TURN_REALM", "concordvoice.chat"),
-		LicensingAuthorityURL: getEnv("LICENSING_AUTHORITY_URL", "http://localhost:8082"),
-		AllowedOrigins:        parseOrigins(getEnv("ALLOWED_ORIGINS", "http://localhost:3001,http://localhost:3002,app://concord")),
-		ClientMinVersion:      getEnv("CLIENT_MIN_VERSION", ""),
-		FeatureVoice:          getEnv("FEATURE_VOICE", "true") == "true",
-		FeatureVideo:          getEnv("FEATURE_VIDEO", "true") == "true",
-		FeatureE2EE:           getEnv("FEATURE_E2EE", "true") == "true",
-		SpaURL:                getEnv("SPA_URL", ""),
-		SpaIpcContract:        getEnvInt("SPA_IPC_CONTRACT", 0),
-		SpaConfigFile:         getEnv("SPA_CONFIG_FILE", ""),
-		ReleasesDir:           getEnv("RELEASES_DIR", ""),
-		SpaDir:                getEnv("SPA_DIR", ""),
-		SMTPHost:              getEnv("SMTP_HOST", ""),
-		SMTPPort:              getEnvInt("SMTP_PORT", 587),
-		SMTPUsername:          getEnv("SMTP_USERNAME", ""),
-		SMTPPassword:          getEnv("SMTP_PASSWORD", ""), // #nosec G101 -- env var name, not a secret
-		SMTPFrom:              getEnv("SMTP_FROM", "Concord Voice <noreply@verify.concordvoice.chat>"),
-		MFAEncryptionKey:      getEnv("MFA_ENCRYPTION_KEY", devMFAEncKey),
-		WebAuthnRPID:          getEnv("WEBAUTHN_RP_ID", "localhost"),
-		WebAuthnRPOrigins:     parseOrigins(getEnv("WEBAUTHN_RP_ORIGINS", "http://localhost:3001")),
-		MinIOEndpoint:         getEnv("MINIO_ENDPOINT", ""),
-		MinIOAccessKey:        getEnv("MINIO_ACCESS_KEY", "concord"),
-		MinIOSecretKey:        getEnv("MINIO_SECRET_KEY", devMinIOSecretKey), // #nosec G101 -- env var name, not a secret
-		MinIOUseSSL:           getEnv("MINIO_USE_SSL", "false") == "true",
-		MinIOBucket:           getEnv("MINIO_BUCKET", "concord-media"),
-		UploadMaxSize:         getEnvInt64("UPLOAD_MAX_SIZE", 25*1024*1024), // 25 MB default
-		KlipyAPIKey:           getEnv("KLIPY_API_KEY", ""),
+		Environment:              getEnv("ENVIRONMENT", "development"),
+		Port:                     getEnv("PORT", "8080"),
+		DatabaseURL:              getEnv("DATABASE_URL", defaultDevDatabaseURL()),
+		RedisURL:                 getEnv("REDIS_URL", defaultDevRedisURL()),
+		JWTSecret:                getEnv("JWT_SECRET", devJWTSecret),
+		NATSUrl:                  getEnv("NATS_URL", "nats://localhost:4222"),
+		MediaPlaneURL:            getEnv("MEDIA_PLANE_URL", "http://localhost:3000"),
+		TURNServerHost:           getEnv("TURN_SERVER_HOST", ""),
+		TURNSecret:               getEnv("TURN_SECRET", ""),
+		TURNRealm:                getEnv("TURN_REALM", "concordvoice.chat"),
+		LicensingAuthorityURL:    getEnv("LICENSING_AUTHORITY_URL", "http://localhost:8082"),
+		AllowedOrigins:           parseOrigins(getEnv("ALLOWED_ORIGINS", "http://localhost:3001,http://localhost:3002,app://concord")),
+		ClientMinVersion:         getEnv("CLIENT_MIN_VERSION", ""),
+		FeatureVoice:             getEnv("FEATURE_VOICE", "true") == "true",
+		FeatureVideo:             getEnv("FEATURE_VIDEO", "true") == "true",
+		FeatureE2EE:              getEnv("FEATURE_E2EE", "true") == "true",
+		SpaURL:                   getEnv("SPA_URL", ""),
+		SpaIpcContract:           getEnvInt("SPA_IPC_CONTRACT", 0),
+		SpaConfigFile:            getEnv("SPA_CONFIG_FILE", ""),
+		ReleasesDir:              getEnv("RELEASES_DIR", ""),
+		SpaDir:                   getEnv("SPA_DIR", ""),
+		SMTPHost:                 getEnv("SMTP_HOST", ""),
+		SMTPPort:                 getEnvInt("SMTP_PORT", 587),
+		SMTPUsername:             getEnv("SMTP_USERNAME", ""),
+		SMTPPassword:             getEnv("SMTP_PASSWORD", ""), // #nosec G101 -- env var name, not a secret
+		SMTPFrom:                 getEnv("SMTP_FROM", "Concord Voice <noreply@verify.concordvoice.chat>"),
+		MFAEncryptionKey:         getEnv("MFA_ENCRYPTION_KEY", devMFAEncKey),
+		WebAuthnRPID:             getEnv("WEBAUTHN_RP_ID", "localhost"),
+		WebAuthnRPOrigins:        parseOrigins(getEnv("WEBAUTHN_RP_ORIGINS", "http://localhost:3001")),
+		MinIOEndpoint:            getEnv("MINIO_ENDPOINT", ""),
+		MinIOAccessKey:           getEnv("MINIO_ACCESS_KEY", "concord"),
+		MinIOSecretKey:           getEnv("MINIO_SECRET_KEY", devMinIOSecretKey), // #nosec G101 -- env var name, not a secret
+		MinIOUseSSL:              getEnv("MINIO_USE_SSL", "false") == "true",
+		MinIOBucket:              getEnv("MINIO_BUCKET", "concord-media"),
+		UploadMaxSize:            getEnvInt64("UPLOAD_MAX_SIZE", 25*1024*1024), // 25 MB default
+		KlipyAPIKey:              getEnv("KLIPY_API_KEY", ""),
+		RequireClientAttestation: getEnv("REQUIRE_CLIENT_ATTESTATION", "false") == "true",
+		AttestationTokenTTL:      parseAttestationTokenTTL(getEnv("ATTESTATION_TOKEN_TTL", "2h")),
+		AttestationPruneInterval: parseAttestationPruneInterval(getEnv("ATTESTATION_PRUNE_INTERVAL", "6h")),
+		OIDCIssuer:               getEnv("ATTESTATION_OIDC_ISSUER", "https://token.actions.githubusercontent.com"),
+		OIDCAudience:             getEnv("ATTESTATION_OIDC_AUDIENCE", ""),
+		OIDCSubjectPrefix:        getEnv("ATTESTATION_OIDC_SUBJECT_PREFIX", "repo:markdrogersjr/Concord:"),
+		OIDCSPAWorkflow:          getEnv("ATTESTATION_OIDC_SPA_WORKFLOW", "main-cd.yml"),
+		OIDCSPARef:               getEnv("ATTESTATION_OIDC_SPA_REF", "refs/heads/main"),
+		OIDCBinaryWorkflow:       getEnv("ATTESTATION_OIDC_BINARY_WORKFLOW", "build-desktop.yml"),
+		OIDCBinaryRef:            getEnv("ATTESTATION_OIDC_BINARY_REF", "refs/heads/main"),
 	}
 
 	cidrs, err := computeTrustedProxyCIDRs(os.Getenv("TRUSTED_PROXY_CIDRS"), cfg.Environment)
@@ -376,6 +404,44 @@ func (c *Config) validate() error {
 		log.Printf("WARNING: TRUSTED_PROXY_CIDRS is the broad RFC1918 fallback (%s). Tighten via GH variable for stricter X-Forwarded-For trust. See [internal]sso-secrets-management.md.", strings.Join(c.TrustedProxyCIDRs, ","))
 	}
 
+	if err := c.validateAttestation(); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+// validateAttestation checks attestation-specific production guards.
+// Extracted from validate() to keep cognitive complexity below the SonarQube
+// threshold and to allow isolated unit testing of the new block.
+//
+// W1 (per-axis OIDC config): the four OIDC*Workflow / OIDC*Ref fields are
+// individually validated. Each axis MUST have both a Workflow and a Ref
+// configured when attestation is required — operator may have overridden the
+// non-empty defaults with empty env values, which would silently disable the
+// axis-binding check at the OIDC layer.
+func (c *Config) validateAttestation() error {
+	if !c.RequireClientAttestation {
+		return nil
+	}
+	if c.OIDCAudience == "" {
+		return fmt.Errorf("ATTESTATION_OIDC_AUDIENCE must be set when REQUIRE_CLIENT_ATTESTATION=true")
+	}
+	if c.Environment == "production" && c.OIDCIssuer != "https://token.actions.githubusercontent.com" {
+		return fmt.Errorf("ATTESTATION_OIDC_ISSUER must be the canonical GitHub issuer in production")
+	}
+	if c.OIDCSPAWorkflow == "" {
+		return fmt.Errorf("ATTESTATION_OIDC_SPA_WORKFLOW must be set when REQUIRE_CLIENT_ATTESTATION=true")
+	}
+	if c.OIDCSPARef == "" {
+		return fmt.Errorf("ATTESTATION_OIDC_SPA_REF must be set when REQUIRE_CLIENT_ATTESTATION=true")
+	}
+	if c.OIDCBinaryWorkflow == "" {
+		return fmt.Errorf("ATTESTATION_OIDC_BINARY_WORKFLOW must be set when REQUIRE_CLIENT_ATTESTATION=true")
+	}
+	if c.OIDCBinaryRef == "" {
+		return fmt.Errorf("ATTESTATION_OIDC_BINARY_REF must be set when REQUIRE_CLIENT_ATTESTATION=true")
+	}
 	return nil
 }
 
@@ -519,4 +585,35 @@ func parseTrustedProxyCIDRs(raw string) ([]string, error) {
 		cidrs = append(cidrs, trimmed)
 	}
 	return cidrs, nil
+}
+
+// parseAttestationTokenTTL parses the ATTESTATION_TOKEN_TTL env value and
+// validates it is within the allowed range [30m, 24h]. Calls log.Fatalf on
+// parse failure or out-of-range input so misconfiguration is caught at startup.
+func parseAttestationTokenTTL(s string) time.Duration {
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		log.Fatalf("FATAL: ATTESTATION_TOKEN_TTL invalid: %v", err)
+	}
+	if d < 30*time.Minute || d > 24*time.Hour {
+		log.Fatalf("FATAL: ATTESTATION_TOKEN_TTL must be between 30m and 24h, got %s", d)
+	}
+	return d
+}
+
+// parseAttestationPruneInterval parses the ATTESTATION_PRUNE_INTERVAL env value
+// and validates it is within the allowed range [1h, 24h]. Calls log.Fatalf on
+// parse failure or out-of-range input. Per ADR-0010 D9 (retention pruning) the
+// pruner runs on this cadence; an interval shorter than 1h is wasteful (rows
+// don't accumulate that quickly) and longer than 24h defeats the purpose of
+// the bounded growth invariant.
+func parseAttestationPruneInterval(s string) time.Duration {
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		log.Fatalf("FATAL: ATTESTATION_PRUNE_INTERVAL invalid: %v", err)
+	}
+	if d < time.Hour || d > 24*time.Hour {
+		log.Fatalf("FATAL: ATTESTATION_PRUNE_INTERVAL must be between 1h and 24h, got %s", d)
+	}
+	return d
 }

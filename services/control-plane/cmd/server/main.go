@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/api"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/attestation"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/database"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/storage"
@@ -87,6 +88,15 @@ func main() {
 
 	pendingRepo := auth.NewPendingRepo(db)
 	auth.StartPendingCleanupWorker(cleanupCtx, pendingRepo, log, auth.PendingCleanupInterval)
+
+	// Start attestation registry retention pruner (#677, ADR-0010 D9).
+	// Periodically prunes release_binaries (keeps current MAJOR.MINOR + last
+	// two patches of prior MINOR) and release_spas (60-day window) so the
+	// registry doesn't grow unbounded. Interval is configurable via
+	// ATTESTATION_PRUNE_INTERVAL (default 6h, range 1h-24h).
+	attestRepo := attestation.NewRepository(db)
+	attestCleanup := attestation.NewCleanup(attestRepo, log)
+	go attestCleanup.Run(cleanupCtx, cfg.AttestationPruneInterval)
 
 	// Create HTTP server
 	srv := &http.Server{

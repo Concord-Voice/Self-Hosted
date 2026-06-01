@@ -21,6 +21,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/attestation"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/email"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
@@ -1651,6 +1652,16 @@ func (h *Handler) disconnectUserByID(userID string) {
 }
 
 // Logout revokes the current session's refresh token and blacklists the access token.
+//
+// Attestation cleanup is tied to the refresh-token revocation rather than the
+// client-supplied X-Session-ID header. The /auth/logout route is rate-limited
+// only (not behind AuthRequired) and X-Session-ID is not cross-checked against
+// the bearer's session — an attacker could otherwise POST with arbitrary
+// X-Session-ID and silently wipe another session's attestation tokens (sibling
+// of #1142/#1154; finding #15 of the #1264 review). Driving cleanup off the
+// `refresh_tokens.id` we just revoked closes the gap: only an attacker who
+// already possesses the victim's refresh token can trigger the wipe, and they
+// could already terminate the victim's session by other means at that point.
 func (h *Handler) Logout(c *gin.Context) {
 	h.blacklistAccessToken(c)
 
@@ -1661,8 +1672,24 @@ func (h *Handler) Logout(c *gin.Context) {
 	}
 
 	tokenHash := HashRefreshToken(refreshToken)
-	var revokedUserID string
-	_ = h.db.QueryRow(`UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_hash = $1 RETURNING user_id`, tokenHash).Scan(&revokedUserID)
+	var revokedUserID, revokedSessionID string
+	_ = h.db.QueryRow(
+		`UPDATE refresh_tokens SET revoked_at = NOW() WHERE token_hash = $1 RETURNING user_id, id`,
+		tokenHash,
+	).Scan(&revokedUserID, &revokedSessionID)
+
+	// Free this session's attestation tokens proactively so they don't outlive
+	// the session in Redis. Orphan attestation keys are harmless (they bind a
+	// session_id that no longer exists), but the explicit cleanup avoids
+	// up-to-2h of dead state. Per ADR-0010 (#677). Drives off revokedSessionID
+	// rather than c.GetHeader("X-Session-ID") so an attacker can't target
+	// arbitrary sessions for cleanup. revokedSessionID is empty when the
+	// UPDATE matched no row (e.g., already-revoked refresh token) — in that
+	// case the cleanup is a no-op, which is correct: there's no live session
+	// to clean up.
+	if revokedSessionID != "" {
+		attestation.CleanupTokensForSession(c.Request.Context(), h.redis, h.log, revokedSessionID)
+	}
 
 	h.disconnectUserByID(revokedUserID)
 

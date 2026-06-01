@@ -205,6 +205,14 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	privacyHandler := buildPrivacyHandler(db, log)
 	oauthHandler := buildOAuthHandler(db, redis, cfg, authHandler, log)
 
+	// Client attestation (#677, ADR-0010). When REQUIRE_CLIENT_ATTESTATION=false
+	// (self-hosted default), we still wire the surface so the verify endpoint
+	// is callable but the RequireAttestation middleware is a pass-through.
+	// When true, the OIDC verifier is constructed eagerly and a failed
+	// discovery (network down at startup) is treated as fatal — that matches
+	// the fail-closed posture required by D2.
+	attestationHandler := buildAttestationHandler(db, redis, natsClient, cfg, log)
+
 	// Start NATS voice event subscriber
 	if natsClient != nil {
 		voiceSub := voice.NewNATSSubscriber(db, log, hub, natsClient)
@@ -417,11 +425,43 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 			v1.GET("/media/dm-icons/:conversationId", mediaUnavailable)
 		}
 
+		// Client attestation routes (#677). Verify takes the configured TTL via
+		// closure since gin.HandlerFunc has a fixed signature.
+		v1.POST("/attestation/verify",
+			middleware.AuthRequired(cfg.JWTSecret, redis),
+			func(c *gin.Context) { attestationHandler.Verify(c, cfg.AttestationTokenTTL) },
+		)
+		// Internal CI publish endpoints (Y1 split — #677 R3 reconciliation).
+		// Two axes, two endpoints, each with its own OIDC-authed shape:
+		//
+		//   /publish/spa     — body {spa_version, html_hash}, posted by main-cd.yml
+		//   /publish/binary  — body {version, platform, cert_hash}, posted by build-desktop.yml
+		//
+		// Both share the same OIDC verifier (workflow ref / audience / subject).
+		// Authentication is delegated to each handler — no upstream auth middleware.
+		//
+		// NOTE: revoke endpoint is intentionally deferred until an admin-auth
+		// middleware exists; the handler is built and tested but not wired
+		// (operators can revoke via direct DB + Redis until then).
+		v1.POST("/internal/attestation/publish/spa", attestationHandler.PublishSPA)
+		v1.POST("/internal/attestation/publish/binary", attestationHandler.PublishBinary)
+
 		// Protected routes — split into two tiers:
 		// pendingOK: authenticated but email may be unverified (verification, logout, basic profile)
 		// verified:  authenticated AND email verified (everything else)
+		//
+		// RequireAttestation is layered AFTER AuthRequired so the user_id is in
+		// context when the attestation gate runs (per the middleware's contract
+		// at internal/middleware/attestation.go). When cfg.RequireClientAttestation
+		// is false (self-hosted default) the gate is a pass-through no-op, so
+		// existing routes are unaffected. When true (hosted concordvoice.chat
+		// deployment), every authenticated route is gated on a valid signed
+		// attestation token bound to (session_id, machine_id). Per ADR-0010 and
+		// finding #BLOCK-1 of the #1264 review (the middleware was previously
+		// defined and unit-tested but never registered on any route).
 		authRequired := v1.Group("/")
 		authRequired.Use(middleware.AuthRequired(cfg.JWTSecret, redis))
+		authRequired.Use(middleware.RequireAttestation(cfg.RequireClientAttestation, redis, log))
 
 		// ── Pending-OK routes (unverified email allowed) ──────────────
 		{

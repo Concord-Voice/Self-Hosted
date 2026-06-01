@@ -103,7 +103,9 @@ func TruncateAllTables(db *sql.DB) error {
 		user_mfa_webauthn,
 		media_files,
 		message_attachments,
-		dm_message_attachments
+		dm_message_attachments,
+		release_binaries,
+		release_spas
 	CASCADE`)
 	return err
 }

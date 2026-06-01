@@ -520,6 +520,118 @@ func TestLogoutWithXRefreshTokenHeader(t *testing.T) {
 	assert.Contains(t, body["message"], "Logged out successfully")
 }
 
+// TestLogout_AttackerCannotWipeArbitrarySessionAttestation is the security
+// regression test for finding #15 of the #1264 review.
+//
+// Prior implementation: Logout called attestation.CleanupTokensForSession
+// using c.GetHeader("X-Session-ID") — a client-supplied value never
+// cross-checked against the bearer. An attacker holding their own valid
+// refresh token could POST /auth/logout with the victim's X-Session-ID
+// header and wipe the victim's attestation tokens (sibling of #1142 /
+// #1154 — client-supplied identity gating a privileged side-effect).
+//
+// Fixed posture: cleanup drives off `refresh_tokens.id` of the row we just
+// revoked, via UPDATE ... RETURNING user_id, id. The header is never read.
+//
+// This test:
+//  1. Registers a "victim" user; seeds an attestation token at
+//     attestation:<victim-session-id>:<machine-id>.
+//  2. Registers an "attacker" user; the attacker holds their own valid
+//     refresh token.
+//  3. Attacker POSTs /auth/logout with X-Session-ID = <victim-session-id>
+//     and their own refresh token.
+//  4. Asserts the attacker's session is revoked AND the victim's
+//     attestation token is STILL PRESENT (pre-fix would have wiped it).
+//
+// sessionIDForRefreshToken returns the refresh_tokens.id (a.k.a. session_id
+// in the API responses) for a given refresh token. Used by finding-#15
+// security regression tests so we can read the session ID without
+// re-decoding the confirm response body (which `registerAndConfirmTokens`
+// has already drained via json.Decoder).
+func sessionIDForRefreshToken(t *testing.T, ts *testhelpers.TestServer, refreshToken string) string {
+	t.Helper()
+	h := sha256.Sum256([]byte(refreshToken))
+	tokenHash := hex.EncodeToString(h[:])
+	var sessionID string
+	err := ts.DB.QueryRow(
+		`SELECT id FROM refresh_tokens WHERE token_hash = $1`, tokenHash,
+	).Scan(&sessionID)
+	require.NoError(t, err)
+	return sessionID
+}
+
+func TestLogout_AttackerCannotWipeArbitrarySessionAttestation(t *testing.T) {
+	ts := setupTS(t)
+	ctx := context.Background()
+
+	// Step 1: victim registers + has an attestation token in Redis.
+	_, victimRefreshToken, _ := registerAndConfirmTokens(t, ts, registerPayload())
+	victimSessionID := sessionIDForRefreshToken(t, ts, victimRefreshToken)
+	require.NotEmpty(t, victimSessionID)
+
+	victimAttestationKey := "attestation:" + victimSessionID + ":m-victim-machine"
+	require.NoError(t, ts.Redis.Set(ctx, victimAttestationKey, `{"token":"victim-att-token","version":"0.2.7"}`, time.Hour).Err())
+
+	// Step 2: attacker registers separately.
+	attackerPayload := registerPayload()
+	attackerPayload["username"] = "attackerbob"
+	attackerPayload["email"] = "attacker@test.concord.chat"
+	attackerAccessToken, attackerRefreshToken, _ := registerAndConfirmTokens(t, ts, attackerPayload)
+	require.NotEmpty(t, attackerAccessToken)
+	require.NotEmpty(t, attackerRefreshToken)
+
+	// Step 3: attacker POSTs /auth/logout with the VICTIM's X-Session-ID
+	// but the ATTACKER's own refresh token + access token.
+	headers := http.Header{}
+	headers.Set("Authorization", bearerPfx+attackerAccessToken)
+	headers.Set(headerXRefreshToken, attackerRefreshToken)
+	headers.Set("X-Session-ID", victimSessionID) // <-- ATTACK
+	headers.Set(headerContentType, contentTypeJSON)
+
+	w := ts.DoRequest("POST", pathLogout, nil, headers)
+	assert.Equal(t, http.StatusOK, w.Code, "logout response: %s", w.Body.String())
+
+	// Step 4: victim's attestation token MUST still be present. Pre-fix the
+	// header-driven cleanup would have wiped it.
+	val, err := ts.Redis.Get(ctx, victimAttestationKey).Result()
+	require.NoError(t, err, "victim's attestation token must NOT have been deleted by the attacker")
+	require.Contains(t, val, "victim-att-token",
+		"victim's stored attestation record must be intact after attacker's cross-session logout attempt")
+}
+
+// TestLogout_DrivesAttestationCleanupOffRevokedSession asserts the positive
+// half of the finding #15 fix: a legitimate logout DOES clean up the
+// authenticated user's own attestation tokens. The cleanup is driven by
+// `refresh_tokens.id` returned from the UPDATE — NOT the X-Session-ID
+// header — so even if the header is absent the cleanup still fires.
+func TestLogout_DrivesAttestationCleanupOffRevokedSession(t *testing.T) {
+	ts := setupTS(t)
+	ctx := context.Background()
+
+	accessToken, refreshToken, _ := registerAndConfirmTokens(t, ts, registerPayload())
+	sessionID := sessionIDForRefreshToken(t, ts, refreshToken)
+	require.NotEmpty(t, sessionID)
+
+	// Seed an attestation token for this session.
+	attestationKey := "attestation:" + sessionID + ":m-user-machine"
+	require.NoError(t, ts.Redis.Set(ctx, attestationKey, `{"token":"my-att-token","version":"0.2.7"}`, time.Hour).Err())
+
+	// Logout WITHOUT the X-Session-ID header. The header-driven implementation
+	// would have left the attestation token in place; the fixed implementation
+	// (UPDATE ... RETURNING id) cleans it up off the revoked refresh token.
+	headers := http.Header{}
+	headers.Set("Authorization", bearerPfx+accessToken)
+	headers.Set(headerXRefreshToken, refreshToken)
+	headers.Set(headerContentType, contentTypeJSON)
+
+	w := ts.DoRequest("POST", pathLogout, nil, headers)
+	assert.Equal(t, http.StatusOK, w.Code)
+
+	// The attestation token MUST be gone.
+	_, err := ts.Redis.Get(ctx, attestationKey).Result()
+	require.Error(t, err, "expected the attestation token to be deleted by logout cleanup")
+}
+
 // ── Refresh Edge Cases ──────────────────────────────────────────────────────
 
 func TestRefreshReturnsNewRefreshTokenAndSessionID(t *testing.T) {
