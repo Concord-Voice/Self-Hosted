@@ -19,54 +19,64 @@ This document answers common questions about Concord Voice's licensing, security
 
 ## 📜 Licensing & Legal
 
-### What is BSL 1.1?
+### What is CVSL 1.0?
 
-The Business Source License (BSL) is a "source-available" license that allows you to:
+The Concord Voice Source License 1.0 (CVSL) is a custom source-available license — structurally inspired by the Functional Source License 1.1 (FSL) and the Business Source License 1.1 (BSL) — that allows you to:
 
 - ✅ View and audit the source code
-- ✅ Use the software for personal, educational, or non-commercial purposes
-- ✅ Modify the code for your own use
-- ✅ Self-host with unlimited users (non-commercial)
+- ✅ Use the software for personal or non-profit purposes, free of charge
+- ✅ Modify the code for your own use within those purposes
+- ✅ Self-host with unlimited users (personal or non-profit)
 
 But **restricts** you from:
 
-- ❌ Using it to compete with the official Concord Voice service
-- ❌ Offering Concord Voice as a SaaS product to others (without a commercial license)
+- ❌ Using it to compete with Concord Voice or the hosted Concord Voice service
+- ❌ Self-hosting for for-profit or governmental use without a commercial license
+- ❌ Misrepresenting the software as your own original work
+- ❌ Using it in violation of export-control or economic-sanctions laws
 
-After **4 years**, each version automatically converts to **AGPL-3.0** (fully open source).
+After **the Change Date** (February 15, 2030, or the fourth anniversary of a specific version's first public release, whichever comes first), each version automatically converts to **AGPL-3.0-or-later** (fully open source).
+
+See the full text in [LICENSE](./LICENSE).
 
 ---
 
 ### Can I use Concord Voice for free?
 
-**Yes!** You can:
+**Yes!** You can use Concord Voice for free if any of these apply:
 
-- Use the hosted SaaS version at [www.concordvoice.com](https://www.concordvoice.com)
-- Self-host for personal use with unlimited users
-- Self-host for non-profit or educational purposes
+- You're an **individual** using it for personal, non-commercial purposes (homelab, family, hobby)
+- You're a **non-profit organization** (501(c)(3) or foreign equivalent), educational institution, or public-research organization
+- You're using the **hosted SaaS** at [www.concordvoice.com](https://www.concordvoice.com) (subject to its [Terms of Service](./docs/legal/terms-of-service.md))
+
+If you're a **for-profit business** or **governmental entity** that wants to self-host, you need a commercial license. See [Commercial Licensing](./docs/legal/commercial-license.md).
 
 ---
 
 ### Can I self-host Concord Voice for my business?
 
-**Yes**, with a commercial self-hosted license. Commercial use requires a paid license.
+**Yes**, with a commercial self-hosted license. For-profit and governmental self-hosting is governed by the **Enterprise** track (single server or custom) or the **MSP & OEM** track (Fleet 10/25/50/100+ for resellers and hosting providers).
 
-You **don't need a license** if:
+You **don't need a license** if you're:
 
-- You're a non-profit organization
-- You're using it for educational purposes
-- You're using it for personal/family use
+- A non-profit organization (501(c)(3) or foreign equivalent)
+- An educational institution
+- An individual using it for personal/family use
+
+See [docs/legal/commercial-license.md](./docs/legal/commercial-license.md) for program details.
 
 ---
 
 ### Can I modify the code?
 
-**Yes!** You can modify Concord Voice for your own use. However:
+**Yes!** You can modify Concord Voice for your own use, subject to the License terms:
 
-- ✅ Modify for personal self-hosted instance
+- ✅ Modify for personal self-hosted instance (Personal Use)
+- ✅ Modify for non-profit deployment (Non-Profit Use)
+- ✅ Modify under a commercial license (Enterprise or MSP & OEM)
 - ✅ Contribute improvements back (encouraged!)
-- ❌ Create a competing SaaS service with your modifications
-- ❌ Sell modified versions as a service
+- ❌ Create a competing platform with your modifications (Competing Use prohibition)
+- ❌ Distribute modified versions as your own original work (anti-impersonation)
 
 ---
 
@@ -74,10 +84,11 @@ You **don't need a license** if:
 
 **Absolutely!** We welcome contributions. When you contribute code:
 
-- Your contributions are licensed under the same BSL 1.1 terms
-- After 4 years, they become AGPL-3.0 (fully open source)
+- Your contributions are licensed under the same CVSL 1.0 terms
+- On the Change Date, they become AGPL-3.0-or-later (fully open source)
 - You retain copyright to your original work
-- See [.github/CONTRIBUTING.md](./.github/CONTRIBUTING.md) for guidelines
+- For substantial contributions, we may request a Contributor License Agreement (CLA)
+- See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines
 
 **How to contribute:**
 
@@ -89,29 +100,31 @@ You **don't need a license** if:
 
 ---
 
-### What happens after 4 years?
+### What happens on the Change Date (February 15, 2030)?
 
-Each version of Concord Voice becomes **fully open source** under AGPL-3.0 after 4 years:
+On the applicable Change Date, each version of Concord Voice becomes additionally licensed under **AGPL-3.0-or-later**:
 
-- Anyone can use it for any purpose (including competing services)
-- Modifications must be shared (AGPL copyleft)
+- Anyone can use that version for any purpose (including competing services)
+- Modifications must be shared (AGPL network-copyleft)
 - This ensures long-term sustainability and community ownership
 
-**Example timeline:**
-
-- Version 1.0 released January 2025 → becomes AGPL January 2029
-- Version 2.0 released June 2026 → becomes AGPL June 2030
+**Per-version timing.** Each version has its own Change Date, calculated as the earlier of (a) February 15, 2030 or (b) the fourth anniversary of that version's first public release under the License. Versions released before February 2026 reach AGPL on their fourth anniversary; versions released after February 2026 all converge on 2030-02-15.
 
 ---
 
-### Why not just use AGPL or MIT from the start?
+### Why a custom license? Why not just use FSL, Polyform, AGPL, or MIT?
 
-We chose BSL 1.1 because it:
+We chose CVSL 1.0 because it combines properties no off-the-shelf license offered cleanly:
 
-- **Protects development investment** - Prevents unfair competition in early years
-- **Ensures eventual openness** - Guarantees full open source after 4 years
-- **Allows transparency** - Source code is available for audit from day one
-- **Supports sustainability** - Enables us to build a business while staying open
+- **Protects development investment** — Competing Use prohibition prevents free-riding while we build the platform
+- **Free for the right users** — Personal and non-profit use is free, indefinitely, with no quotas or limits
+- **Commercial path for everyone else** — For-profit and government use require a license, with clear self-serve and negotiated tiers
+- **Ensures eventual openness** — Guarantees full open source under AGPL-3.0-or-later on the Change Date
+- **Transparent from day one** — Source code is available for security audit immediately
+- **Anti-impersonation built in** — Explicit protection against forks presenting Concord Voice as their own work
+- **Sanctions and interop compliance** — Built-in OFAC/EU/UK/UN sanctions clauses and DMCA § 1201(f) reverse-engineering carve-out
+
+CVSL is structurally inspired by the Functional Source License 1.1 (Sentry) and the Business Source License 1.1 (MariaDB), but is a distinct license authored specifically for Concord Voice's model.
 
 ---
 
@@ -119,16 +132,18 @@ We chose BSL 1.1 because it:
 
 **Yes**, with restrictions:
 
-- ✅ Fork for personal use
-- ✅ Fork to contribute improvements
-- ✅ Fork to self-host for your organization
-- ❌ Fork to create a competing SaaS service (until 4 years pass)
+- ✅ Fork for personal use (Personal Use)
+- ✅ Fork to contribute improvements back
+- ✅ Fork to self-host for your non-profit organization
+- ✅ Fork to self-host for your commercial organization (with a commercial license)
+- ❌ Fork to create a competing platform (Competing Use prohibition)
+- ❌ Fork to distribute under a different brand without permission (anti-impersonation)
 
-After 4 years, older versions become AGPL-3.0 and you can fork them for any purpose.
+After the Change Date, the converted version may be used under AGPL-3.0-or-later for any purpose, including competing services.
 
 ---
 
-### What's the difference between BSL and "open core"?
+### What's the difference between CVSL and "open core"?
 
 **Traditional Open Core:**
 
@@ -136,30 +151,33 @@ After 4 years, older versions become AGPL-3.0 and you can fork them for any purp
 - Premium features: Proprietary forever
 - Creates permanent split between free and paid
 
-**BSL 1.1 (Concord Voice's approach):**
+**CVSL 1.0 (Concord Voice's approach):**
 
 - All features: Source-available immediately
-- All code: Becomes fully open source after 4 years
-- No permanent proprietary components
+- All code: Becomes fully open source on the Change Date (AGPL-3.0-or-later)
+- Commercial use requires a license, but **the entire codebase is the same** — there is no proprietary core or premium-only fork
 
-We believe this is **more open** long-term than traditional open core models.
+We believe this is **more open** long-term than traditional open core models, while preserving a sustainable business path.
 
 ---
 
 ### Do I need a license to self-host for my family?
 
-**No!** Personal, family, educational, and small non-commercial use is always free:
+**No!** Personal, family, educational, and non-profit use is always free:
 
 - ✅ Set up a server for your gaming group
 - ✅ Use it for your family chat
-- ✅ Deploy it for your school or non-profit
+- ✅ Deploy it for your school, college, or non-profit
 - ✅ Run it for your hobby project
 
-**You only need a commercial license if:**
+**You need a commercial license if:**
 
-- You're offering Concord Voice as a hosted service to external customers (competing SaaS)
-- You're embedding Concord Voice in a product you sell to customers
-- Internal team communication (even at a business) is always free to self-host
+- You're a for-profit business self-hosting for internal use
+- You're a governmental agency or state-owned enterprise self-hosting
+- You're offering Concord Voice as a hosted or managed service to third-party customers (Enterprise + MSP/OEM tracks)
+- You're embedding Concord Voice in a commercial product you sell to customers
+
+For-profit internal-team self-hosting requires a commercial license under CVSL 1.0.
 
 ---
 
@@ -170,23 +188,23 @@ We believe this is **more open** long-term than traditional open core models.
 - Self-host with unlimited users
 - Modify the code for research
 - Use it for teaching purposes
-- No license required
+- No commercial license required
 
-We encourage educational use and welcome academic contributions.
+Educational institutions qualify under Non-Profit Use in CVSL 1.0. We encourage educational use and welcome academic contributions.
 
 ---
 
 ### What if I want to compete with Concord Voice?
 
-Under BSL 1.1, you **cannot** create a competing SaaS service during the initial 4-year period.
+Under CVSL 1.0, you **cannot** use Concord Voice (or any modification or derivative) to develop, market, distribute, host, or operate a product or service that competes with Concord Voice or the hosted Concord Voice service. This Competing Use prohibition is in effect for the duration of the License.
 
 **However:**
 
-- After 4 years, each version becomes AGPL-3.0
-- You can then use older versions to compete freely
-- You can always build a complementary service (bots, plugins, integrations)
+- After the Change Date (2030-02-15 or per-version 4-year anniversary), the version becomes AGPL-3.0-or-later, and you can use that version to compete freely
+- You can always build complementary services (bots, plugins, integrations) that don't substitute for the platform
+- The MSP & OEM track is **not** a Competing Use — partners reselling Concord Voice under license are operating within the framework, not competing with it
 
-We believe 4 years is a fair window to establish the project while ensuring eventual full openness.
+If you're unsure whether your intended use is a Competing Use, contact contact-us@concordvoice.com before deploying.
 
 ---
 
@@ -196,27 +214,30 @@ We believe 4 years is a fair window to establish the project while ensuring even
 
 | Use Case                                  | License Required?                   |
 | ----------------------------------------- | ----------------------------------- |
-| Internal team communication               | No (self-host free)                 |
-| Selling Concord Voice as a service        | Yes (commercial SaaS prohibited)    |
-| Embedding in your product (for customers) | Yes (commercial license)            |
+| Internal team communication (for-profit)  | **Yes** (Enterprise license)        |
+| Internal team communication (non-profit)  | No (Non-Profit Use)                 |
+| Hosting Concord Voice for your customers  | **Yes** (MSP & OEM license — authorized resellers are NOT a Competing Use) |
+| Embedding in your product (for customers) | **Yes** (MSP & OEM with Livery)     |
 | Building integrations/bots                | No (complementary services allowed) |
-| Using the API for your business           | No (API usage is open)              |
+| Using the hosted SaaS API                 | Subject to [Terms of Service](./docs/legal/terms-of-service.md) |
 
-**When in doubt**, email contact-us@concordvoice.com for clarification.
+**When in doubt**, email contact-us@concordvoice.com for clarification, or see the full [commercial license program documentation](./docs/legal/commercial-license.md).
 
 ---
 
-### How does BSL 1.1 compare to other licenses?
+### How does CVSL 1.0 compare to other licenses?
 
-| License     | Source Available? | Can Self-Host?               | Can Compete?                | Eventually Open?       |
-| ----------- | ----------------- | ---------------------------- | --------------------------- | ---------------------- |
-| **BSL 1.1** | ✅ Yes            | ✅ Yes (free non-commercial) | ❌ No (4 years)             | ✅ Yes (AGPL after 4y) |
-| MIT         | ✅ Yes            | ✅ Yes                       | ✅ Yes                      | ✅ Already open        |
-| AGPL-3.0    | ✅ Yes            | ✅ Yes                       | ✅ Yes (must share changes) | ✅ Already open        |
-| Proprietary | ❌ No             | ❌ No                        | ❌ No                       | ❌ No                  |
-| Open Core   | ✅ Partial        | ⚠️ Partial                   | ⚠️ Partial                  | ⚠️ Core only           |
+| License      | Source Available? | Can Self-Host?                                                         | Can Compete?                       | Eventually Open?                    |
+| ------------ | ----------------- | ---------------------------------------------------------------------- | ---------------------------------- | ----------------------------------- |
+| **CVSL 1.0** | ✅ Yes            | ✅ Personal/non-profit free; commercial license for for-profit/government | ❌ No (until Change Date 2030-02-15) | ✅ Yes (AGPL-3.0-or-later)         |
+| MIT          | ✅ Yes            | ✅ Yes                                                                 | ✅ Yes                             | ✅ Already open                     |
+| AGPL-3.0     | ✅ Yes            | ✅ Yes                                                                 | ✅ Yes (must share changes)        | ✅ Already open                     |
+| BSL 1.1      | ✅ Yes            | ✅ Yes (no commercial-status restriction)                              | ❌ Multi-tenant SaaS resale only   | ✅ Yes (after Change Date)          |
+| FSL 1.1      | ✅ Yes            | ✅ Yes (any internal use)                                              | ❌ No (Competing Use prohibition)  | ✅ Yes (typically 2 years; varies by FSL variant) |
+| Proprietary  | ❌ No             | ❌ No                                                                  | ❌ No                              | ❌ No                                |
+| Open Core    | ✅ Partial        | ⚠️ Partial                                                             | ⚠️ Partial                         | ⚠️ Core only                        |
 
-BSL 1.1 balances immediate transparency with sustainable development.
+CVSL 1.0 balances immediate transparency, sustainable development, free use for the right users (personal and non-profit), and eventual full openness.
 
 ---
 
@@ -629,7 +650,7 @@ The desktop Electron app works on laptops/tablets, but no native mobile UI yet.
 | ------------------ | ------------------- | ------------------------------------ |
 | **E2EE**           | ❌                  | ✅ Yes                               |
 | **Self-Hosting**   | ❌                  | ✅ Yes (Phase 3)                     |
-| **Source Code**    | ❌ Proprietary      | ✅ BSL 1.1 (→ AGPL)                  |
+| **Source Code**    | ❌ Proprietary      | ✅ CVSL 1.0 (→ AGPL-3.0)             |
 | **Privacy**        | ⚠️ Collects data    | ✅ No telemetry                      |
 | **Business Model** | Nitro subscriptions | À-la-carte + self-host               |
 | **Voice Quality**  | Good (Opus)         | ✅ Hi-Fi (256kbps+, 7 quality tiers) |

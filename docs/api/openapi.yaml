@@ -28,7 +28,8 @@ info:
     name: Concord
     url: https://github.com/markdrogersjr/Concord
   license:
-    name: BSL 1.1
+    name: CVSL 1.0
+    url: https://github.com/markdrogersjr/Concord/blob/main/LICENSE
 
 servers:
   - url: http://localhost:8080/api/v1

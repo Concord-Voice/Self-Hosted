@@ -2,7 +2,7 @@
 # DOCUMENTATION FILES - ALWAYS COMMIT (DO NOT IGNORE)
 # ============================================================================
 # The following files SHOULD be tracked in git:
-# - LICENSE (BSL 1.1 license file)
+# - LICENSE (CVSL 1.0 license file)
 # - README.md, [internal], ROADMAP.md, FAQ.md, AI-CONTEXT.md
 # - docs/*.md (all documentation)
 # - docs/archive/*.md (archived legacy documentation)
