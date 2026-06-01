@@ -2889,6 +2889,9 @@ paths:
         | `member_removed` | `server_id`, `user_id` | Member left/kicked |
         | `key_delivered` | `channel_id`, `user_id` | E2EE key now available |
         | `key_needed` | `server_id`, `user_id`, `channel_ids[]` | Key distribution needed |
+        | `friend_request_received` | `id`, `from_user_id`, `from_username`, `from_display_name`, `from_avatar_url`, `to_user_id`, `to_username`, `to_display_name`, `to_avatar_url`, `created_at` | Incoming friend request, sent to the addressee. `to_*` added in #981 so the client renders in real time without a REST refetch. |
+        | `friend_request_accepted` | `id`, `user_id`, `username`, `display_name`, `avatar_url` | A sent request was accepted, sent to the original requester. |
+        | `friend_code_claimed` | `friendship_id`, `code_id`, `status`, `user_id`, `username`, `display_name`, `avatar_url`, `created_at` | A friend code was redeemed, sent to the code owner. |
         | `error` | `message` | Error |
       responses:
         '101':

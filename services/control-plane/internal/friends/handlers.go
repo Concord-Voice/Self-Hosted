@@ -222,22 +222,28 @@ func (h *Handler) notifyFriendRequestReceived(targetUserID, friendshipID, userID
 	if parseErr != nil {
 		return
 	}
-	var senderUsername string
-	var senderDisplayName *string
-	var senderAvatarURL *string
-	_ = h.db.QueryRow(`SELECT username, display_name, avatar_url FROM users WHERE id = $1`, userID).
-		Scan(&senderUsername, &senderDisplayName, &senderAvatarURL)
+	var sender userProfile
+	if err := h.db.QueryRow(`SELECT username, display_name, avatar_url FROM users WHERE id = $1`, userID).
+		Scan(&sender.username, &sender.displayName, &sender.avatarURL); err != nil {
+		h.log.Error("notifyFriendRequestReceived: failed to load sender profile", "error", err)
+	}
+
+	// Addressee (recipient) profile. The client's friend_request_received handler
+	// bails without to_user_id/to_username (#981), and because that check is a
+	// truthiness test (useWebSocketMessages.ts), an empty to_username is dropped
+	// too. If the addressee profile can't be loaded, skip the broadcast rather than
+	// emit a payload the client is guaranteed to discard. (to_user_id is the parsed
+	// targetUserID and is always present; to_username is the field that can be empty.)
+	var addressee userProfile
+	if err := h.db.QueryRow(`SELECT username, display_name, avatar_url FROM users WHERE id = $1`, targetUserID).
+		Scan(&addressee.username, &addressee.displayName, &addressee.avatarURL); err != nil {
+		h.log.Error("notifyFriendRequestReceived: failed to load addressee profile", "error", err)
+		return
+	}
 
 	h.hub.BroadcastToUser(addresseeUUID, websocket.OutgoingMessage{
 		Type: "friend_request_received",
-		Data: map[string]interface{}{
-			"id":                friendshipID,
-			"from_user_id":      userID,
-			"from_username":     senderUsername,
-			"from_display_name": senderDisplayName,
-			"from_avatar_url":   senderAvatarURL,
-			"created_at":        createdAt,
-		},
+		Data: friendRequestReceivedData(friendshipID, userID, sender, targetUserID, addressee, createdAt),
 	})
 }
 
@@ -338,8 +344,10 @@ func (h *Handler) notifyFriendRequestAccepted(requesterID, requestID, userID str
 	var acceptorUsername string
 	var acceptorDisplayName *string
 	var acceptorAvatarURL *string
-	_ = h.db.QueryRow(`SELECT username, display_name, avatar_url FROM users WHERE id = $1`, userID).
-		Scan(&acceptorUsername, &acceptorDisplayName, &acceptorAvatarURL)
+	if err := h.db.QueryRow(`SELECT username, display_name, avatar_url FROM users WHERE id = $1`, userID).
+		Scan(&acceptorUsername, &acceptorDisplayName, &acceptorAvatarURL); err != nil {
+		h.log.Error("notifyFriendRequestAccepted: failed to load acceptor profile", "error", err)
+	}
 
 	h.hub.BroadcastToUser(requesterUUID, websocket.OutgoingMessage{
 		Type: "friend_request_accepted",
@@ -906,9 +914,35 @@ type userProfile struct {
 
 func (h *Handler) fetchUserProfile(userID string) userProfile {
 	var p userProfile
-	_ = h.db.QueryRow(`SELECT username, display_name, avatar_url FROM users WHERE id = $1`, userID).
-		Scan(&p.username, &p.displayName, &p.avatarURL)
+	// Per [internal]rules/backend.md (#1142/#1154): never silently discard a query
+	// error. A failed lookup leaves p.username == "", which the friend_request_received
+	// emitters treat as a skip signal (the client drops an empty to_username, #981).
+	// Log the error only — never profile values (observability.md).
+	if err := h.db.QueryRow(`SELECT username, display_name, avatar_url FROM users WHERE id = $1`, userID).
+		Scan(&p.username, &p.displayName, &p.avatarURL); err != nil {
+		h.log.Error("fetchUserProfile: failed to load profile", "error", err)
+	}
 	return p
+}
+
+// friendRequestReceivedData builds the friend_request_received WS payload shared by
+// both emit sites (SendRequest and the friend-code-claim path). It is pure (no DB,
+// no hub) so the from_*/to_* wire shape can be unit-tested directly — that WS↔REST
+// shape contract is exactly what drifted in #981, and the unit test guards it from
+// regressing again. The client requires to_user_id and to_username.
+func friendRequestReceivedData(friendshipID, fromUserID string, from userProfile, toUserID string, to userProfile, createdAt string) map[string]interface{} {
+	return map[string]interface{}{
+		"id":                friendshipID,
+		"from_user_id":      fromUserID,
+		"from_username":     from.username,
+		"from_display_name": from.displayName,
+		"from_avatar_url":   from.avatarURL,
+		"to_user_id":        toUserID,
+		"to_username":       to.username,
+		"to_display_name":   to.displayName,
+		"to_avatar_url":     to.avatarURL,
+		"created_at":        createdAt,
+	}
 }
 
 type claimNotification struct {
@@ -962,16 +996,16 @@ func (h *Handler) notifyFriendCodeClaimed(n claimNotification) {
 		return
 	}
 
+	// owner profile is fetched upstream via fetchUserProfile; an empty username means
+	// that lookup failed (username is NOT NULL). The client drops a friend_request_received
+	// with an empty to_username (#981), so skip rather than emit a payload it will discard.
+	if n.owner.username == "" {
+		h.log.Warn("notifyFriendCodeClaimed: empty owner username; skipping friend_request_received broadcast")
+		return
+	}
 	h.hub.BroadcastToUser(ownerUUID, websocket.OutgoingMessage{
 		Type: "friend_request_received",
-		Data: map[string]interface{}{
-			"id":                n.friendshipID,
-			"from_user_id":      n.userID,
-			"from_username":     n.claimer.username,
-			"from_display_name": n.claimer.displayName,
-			"from_avatar_url":   n.claimer.avatarURL,
-			"created_at":        n.createdAt,
-		},
+		Data: friendRequestReceivedData(n.friendshipID, n.userID, n.claimer, n.ownerID, n.owner, n.createdAt),
 	})
 }
 
