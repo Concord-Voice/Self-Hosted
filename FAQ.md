@@ -644,15 +644,15 @@ The desktop Electron app works on laptops/tablets, but no native mobile UI yet.
 
 ---
 
-### How is Concord different from major comms platforms?
+### How is Concord different from mainstream chat platforms?
 
-| Feature            | major comms platforms             | Concord                              |
-| ------------------ | ------------------- | ------------------------------------ |
-| **E2EE**           | ❌                  | ✅ Yes                               |
-| **Self-Hosting**   | ❌                  | ✅ Yes (Phase 3)                     |
-| **Source Code**    | ❌ Proprietary      | ✅ CVSL 1.0 (→ AGPL-3.0)             |
-| **Privacy**        | ⚠️ Collects data    | ✅ No telemetry                      |
-| **Business Model** | Nitro subscriptions | À-la-carte + self-host               |
+| Feature            | Mainstream platforms | Concord                             |
+| ------------------ | -------------------- | ----------------------------------- |
+| **E2EE**           | ❌                   | ✅ Yes                              |
+| **Self-Hosting**   | ❌                   | ✅ Yes (Phase 3)                    |
+| **Source Code**    | ❌ Proprietary       | ✅ CVSL 1.0 (→ AGPL-3.0)            |
+| **Privacy**        | ⚠️ Collects data     | ✅ No telemetry                     |
+| **Business Model** | Subscription upsells | À-la-carte + self-host              |
 | **Voice Quality**  | Good (Opus)         | ✅ Hi-Fi (256kbps+, 7 quality tiers) |
 | **Bots**           | ✅ Yes              | 📋 Planned (post-GA)                 |
 
