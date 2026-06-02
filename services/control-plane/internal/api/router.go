@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -102,6 +103,47 @@ func registerSPARoute(router *gin.Engine, cfg *config.Config, redis *redis.Clien
 		middleware.RateLimitByIP(redis, 60, 1*time.Minute),
 		spaHandler.ServeAsset,
 	)
+}
+
+// testEnvAuthFlowCap is the per-IP auth-flow rate-limit cap applied when the
+// control-plane runs under the e2e/integration test profile (CONCORD_ENV=test).
+// Set far above any plausible e2e suite size — the Playwright suite drives ~18
+// UI registrations AND a login per backend spec from a single CI IP (see #1274)
+// — while staying bounded (not unlimited) to retain a sanity ceiling against a
+// runaway test loop.
+const testEnvAuthFlowCap = 10000
+
+// authFlowTestRateLimit returns the per-IP request cap for an auth-flow route
+// (POST /register, /register/confirm, /login). Under CONCORD_ENV=test it relaxes
+// the cap to testEnvAuthFlowCap; otherwise it returns prodCap unchanged, so
+// production rate limits are untouched.
+//
+// Why this exists: the Playwright e2e suite cannot share one authenticated
+// session across specs — the access token is held in-memory only and the
+// refresh token never enters the renderer (see client/desktop/src/renderer/
+// services/apiClient.ts), and e2eeService initializes during the real LOGIN
+// flow (registration does NOT init it) — so each backend spec registers a fresh
+// user AND logs in. From one CI IP this exceeds the production caps (5/15min
+// register, 10/15min login) keyed by ratelimit:ip:<ip>:<method>:<path>. Relaxing
+// only these auth-flow routes under the existing test gate is the least-invasive
+// fix. Rate-limit behavior itself is owned by middleware unit tests, not the
+// e2e suite. See #1274 and [internal]0011-playwright-e2e-rate-limit-test-gate.md.
+func authFlowTestRateLimit(prodCap int) int {
+	if isE2ETestEnv() {
+		return testEnvAuthFlowCap
+	}
+	return prodCap
+}
+
+// isE2ETestEnv reports whether the control-plane runs under the e2e/integration
+// test profile (CONCORD_ENV=test). It mirrors the gate used by auth.isTestEnv()
+// (which writes plaintext verification codes to Redis under test_only:<id> for
+// test recovery). Kept as a local mirror rather than exporting the auth helper,
+// to leave the security-sensitive auth package's API surface unchanged.
+// CONCORD_ENV is never "test" in production, so anything gated on this is a
+// structural no-op in prod.
+func isE2ETestEnv() bool {
+	return os.Getenv("CONCORD_ENV") == "test"
 }
 
 // NewRouter creates a new API router and returns the WebSocket hub and NATS client for lifecycle management.
@@ -232,16 +274,21 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 		authRoutes := v1.Group("/auth")
 		authRoutes.Use(middleware.AuthBanCheck(redis))
 		{
-			// Register: 5 attempts per 15 minutes (prevent spam account creation)
+			// Register: 5 attempts per 15 minutes in production (prevent spam
+			// account creation). Relaxed under CONCORD_ENV=test so the Playwright
+			// e2e suite's ~18 single-IP registrations don't trip the cap. See
+			// #1274 and authFlowTestRateLimit().
 			authRoutes.POST("/register",
-				middleware.RateLimitByIP(redis, 5, 15*time.Minute),
+				middleware.RateLimitByIP(redis, authFlowTestRateLimit(5), 15*time.Minute),
 				authHandler.Register,
 			)
 
 			// Register confirm: 10 attempts per 15 minutes (verify email code,
-			// promote pending_registration -> user). See #621.
+			// promote pending_registration -> user). See #621. Relaxed under
+			// CONCORD_ENV=test alongside /register — the e2e suite also drives
+			// ~18 confirmations. See #1274.
 			authRoutes.POST("/register/confirm",
-				middleware.RateLimitByIP(redis, 10, 15*time.Minute),
+				middleware.RateLimitByIP(redis, authFlowTestRateLimit(10), 15*time.Minute),
 				authHandler.ConfirmRegistration,
 			)
 
@@ -263,9 +310,13 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				authHandler.AbandonRegistration,
 			)
 
-			// Login: 10 attempts per 15 minutes (prevent brute force)
+			// Login: 10 attempts per 15 minutes in production (prevent brute force).
+			// Relaxed under CONCORD_ENV=test — the e2e suite's registerAndLogin
+			// helper logs in once per backend spec (to initialize e2eeService,
+			// which registration does not), exceeding 10/15min from one CI IP.
+			// See #1274.
 			authRoutes.POST("/login",
-				middleware.RateLimitByIP(redis, 10, 15*time.Minute),
+				middleware.RateLimitByIP(redis, authFlowTestRateLimit(10), 15*time.Minute),
 				authHandler.Login,
 			)
 
