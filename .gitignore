@@ -252,3 +252,6 @@ snapshots/
 # flow per #1136). These files are per-developer, per-branch authorizations
 # for the protect-sensitive.sh hook — accidentally committing one would
 # leak authorization to all clones. Keep transient.
+
+# Superpowers brainstorm visual-companion artifacts (local only)
+.superpowers/
