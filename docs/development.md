@@ -557,7 +557,7 @@ Recommended:
 
 ## Next Steps
 
-- Read [API Documentation](./api/) — OpenAPI 3.0 spec (partial: 88 operations documented; 217 routes implemented)
+- Read [API Documentation](./api/) — OpenAPI 3.0 spec (partial: 88 operations documented; 269 routes implemented)
 - Review [Architecture](./architecture.md) — System diagrams, database ERD, message flows
 - Check [Contributing Guidelines](../CONTRIBUTING.md)
 - Join the major comms platforms for discussions

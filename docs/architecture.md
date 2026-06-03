@@ -17,7 +17,7 @@ Concord Voice is a distributed real-time communications platform with three serv
        ▼                                ▼
 ┌──────────────────────┐    ┌─────────────────────────────────────┐
 │  Control Plane (Go)  │    │  Media Plane (Node.js + mediasoup)  │
-│  Gin 1.12, 217 routes│    │  WebRTC SFU, Socket.IO signaling    │
+│  Gin 1.12, 269 routes│    │  WebRTC SFU, Socket.IO signaling    │
 │  Auth, RBAC, chat,   │    │  Voice/video routing, RoomManager   │
 │  WebSocket hub       │    │  1 router per room, transport/user  │
 └──────┬───────┬───────┘    └──────┬──────────────────────────────┘
@@ -42,7 +42,7 @@ Concord Voice is a distributed real-time communications platform with three serv
 - WebSocket hub for real-time messaging and presence
 - DM system (8 tables, E2EE with key-epoch enforcement)
 - MFA (TOTP, WebAuthn), email verification, ownership transfer
-- 217 REST endpoints across 25+ route groups
+- 269 REST endpoints across 25+ route groups
 
 #### Media Plane (Node.js + mediasoup, port 3000)
 
@@ -199,7 +199,7 @@ For the full rationale, see [ADR-0001](adr/0001-spa-deploy-contract.md).
 - Rate limiting
 - Moderation logic
 
-**API**: 217 REST endpoints + 1 WebSocket endpoint across 25+ route groups (Auth, Users, Sessions, Servers, Channels, Messages, Members, Invites, E2EE, WebSocket, Friends, DM Conversations, Voice, MFA, RBAC, Media, Ownership, Email, Client Config, Updates). See [API Documentation](./api/README.md) for the OpenAPI 3.0 spec.
+**API**: 269 REST endpoints + 1 WebSocket endpoint across 25+ route groups (Auth, Users, Sessions, Servers, Channels, Messages, Members, Invites, E2EE, WebSocket, Friends, DM Conversations, Voice, MFA, RBAC, Media, Ownership, Email, Client Config, Updates). See [API Documentation](./api/README.md) for the OpenAPI 3.0 spec.
 
 **Database Schema** (55+ tables across 57 migrations):
 
@@ -842,6 +842,6 @@ US-East US-West   EU-Central APAC
 
 ## Next Steps
 
-- [API Documentation](./api/README.md) — OpenAPI 3.0 spec (partial: 88 operations documented; 217 routes implemented — full spec regeneration planned)
+- [API Documentation](./api/README.md) — OpenAPI 3.0 spec (partial: 88 operations documented; 269 routes implemented — full spec regeneration planned)
 - [Development Guide](./development.md) — Local setup, running tests
 - [Self-Hosting Guide](./self-hosting.md) — Deployment instructions (planned)

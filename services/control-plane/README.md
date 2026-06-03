@@ -216,7 +216,7 @@ GET/POST /api/v1/channels/:id/keys
 POST /api/v1/channels/:id/keys/rotate
 ```
 
-**Total: 217 API routes implemented.** See `docs/api/openapi.yaml` for OpenAPI spec (covers partial routes; Phase 2A additions pending spec update). See also [[internal]](../..[internal]) for canonical project counts.
+**API routes:** the canonical count lives in [[internal]](../..[internal]) Key Counts. See `docs/api/openapi.yaml` for the OpenAPI spec (covers partial routes; Phase 2A additions pending spec update).
 
 ### Testing
 
