@@ -11,7 +11,7 @@ Concord Voice is a distributed real-time communications platform with three serv
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
 │  Desktop Client (Electron + React + TypeScript)                  │
-│  - ~30 Zustand stores, E2EE via WebCrypto, safeStorage tokens   │
+│  - ~36 Zustand stores, E2EE via WebCrypto, safeStorage tokens   │
 └──────┬────────────────────────────────┬──────────────────────────┘
        │ HTTP/WebSocket :8080           │ Socket.IO + WebRTC :3000
        ▼                                ▼
@@ -25,7 +25,7 @@ Concord Voice is a distributed real-time communications platform with three serv
        ▼       ▼                   ▼
 ┌──────────┐ ┌───────┐      ┌───────┐
 │PostgreSQL│ │ Redis │      │ Redis │
-│ 16 (57   │ │ 7     │      │ 5.0   │
+│ 16 (66   │ │ 7     │      │ 5.0   │
 │ migr's)  │ │       │      │       │
 └──────────┘ └───┬───┘      └───┬───┘
                  │              │
@@ -51,12 +51,12 @@ Concord Voice is a distributed real-time communications platform with three serv
 - `RoomManager` is authoritative for produce/consume/transport lifecycle
 - NATS integration for participant state events to control plane
 
-#### Desktop Client (Electron 41 + React 19)
+#### Desktop Client (Electron 42 + React 19)
 
 - Secure IPC via preload bridge (contextIsolation ON, nodeIntegration OFF)
 - E2EE: AES-256-GCM encryption, RSA-OAEP 4096-bit key wrapping
 - Token storage via Electron safeStorage (OS keychain)
-- ~30 Zustand stores for state management
+- ~36 Zustand stores for state management
 - Auto-updater with splash screen, safety checks, rollback
 
 ### Data Flow
@@ -68,7 +68,7 @@ Concord Voice is a distributed real-time communications platform with three serv
 
 ### Infrastructure
 
-- **Database:** PostgreSQL 16, 57 migrations, 55+ tables
+- **Database:** PostgreSQL 16, 66 migrations, 55+ tables
 - **Cache:** Redis for sessions, presence, RBAC cache, rate limiting
 - **Messaging:** NATS 2.x for inter-service events
 - **CI/CD:** GitHub Actions → SonarQube Quality Gate (≥ 80% coverage)
@@ -153,7 +153,7 @@ flowchart TB
   - Video calls (camera toggle, video grid)
   - E2EE message encryption/decryption (AES-256-GCM)
   - Secure token storage (Electron safeStorage / OS keychain)
-  - ~30 Zustand stores for state management (see `[internal]` for current count)
+  - Zustand stores for state management (see `[internal]` Key Counts for the current count)
 - **Communication**:
   - HTTP/WebSocket → Control Plane (signaling, auth, channels, presence)
   - Socket.IO → Media Plane (voice signaling)
@@ -182,7 +182,7 @@ For the full rationale, see [ADR-0001](adr/0001-spa-deploy-contract.md).
 **Port**: 8080
 
 **Tech Stack**:
-- Go 1.26.1+
+- Go 1.26.4+
 - Gin web framework
 - PostgreSQL 16 (persistent data)
 - Redis 7 (ephemeral state, sessions, rate limiting)
@@ -201,7 +201,7 @@ For the full rationale, see [ADR-0001](adr/0001-spa-deploy-contract.md).
 
 **API**: 269 REST endpoints + 1 WebSocket endpoint across 25+ route groups (Auth, Users, Sessions, Servers, Channels, Messages, Members, Invites, E2EE, WebSocket, Friends, DM Conversations, Voice, MFA, RBAC, Media, Ownership, Email, Client Config, Updates). See [API Documentation](./api/README.md) for the OpenAPI 3.0 spec.
 
-**Database Schema** (55+ tables across 57 migrations):
+**Database Schema** (55+ tables across 66 migrations):
 
 ```mermaid
 erDiagram
@@ -442,7 +442,7 @@ NATS ←→ Control Plane (room state sync, participant events)
 **Port**: 8082
 
 **Tech Stack**:
-- Go 1.26.1+
+- Go 1.26.4+
 - PostgreSQL 16 (license records)
 - Ed25519 cryptographic signing
 
