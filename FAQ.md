@@ -299,7 +299,7 @@ E2EE means your messages are encrypted on your device before being sent. Only yo
 **Preferred methods:**
 
 1. **GitHub Security Advisories (Recommended)**
-   - Go to [Security tab](https://github.com/markdrogersjr/Concord/security/advisories)
+   - Go to [Security tab](internal development reference omitted)
    - Click "Report a vulnerability"
    - Fill out the form
 
@@ -386,8 +386,8 @@ If we shut down or change direction, you can always self-host.
 
 ```bash
 # 1. Clone the repository
-git clone https://github.com/markdrogersjr/Concord.git
-cd Concord
+git clone https://github.com/Concord-Voice/Self-Hosted.git
+cd Concord-Voice-Alpha
 
 # 2. Install git hooks (prevents committing secrets)
 ./scripts/install-git-hooks.sh
@@ -675,11 +675,11 @@ Screen sharing uses WebRTC via the mediasoup SFU. Features include:
 
 ### Can I upload files?
 
-**Status:** Shipped in the v0.2.0-Beta chat-enhancements series (#168 series), with file & image attachments delivered in [#470](https://github.com/markdrogersjr/Concord/pull/470).
+**Status:** Shipped in the v0.2.0-Beta chat-enhancements series (#168 series), with file & image attachments delivered in [#470](internal development reference omitted).
 
 Supported uploads:
 
-- Image uploads (with two-tier media access via the MinIO object-storage layer, [#325](https://github.com/markdrogersjr/Concord/pull/325))
+- Image uploads (with two-tier media access via the MinIO object-storage layer, [#325](internal development reference omitted))
 - General file attachments via the chat composer
 - Profile and server image assets (avatars, banners, server icons)
 
@@ -857,8 +857,8 @@ npm run dev
 **Resources:**
 
 - **Documentation:** [docs/](./docs/)
-- **GitHub Discussions:** [Ask questions](https://github.com/markdrogersjr/Concord/discussions)
-- **GitHub Issues:** [Report bugs](https://github.com/markdrogersjr/Concord/issues)
+- **GitHub Discussions:** [Ask questions](internal development reference omitted)
+- **GitHub Issues:** [Report bugs](internal development reference omitted)
 - **Security Issues:** security@concordvoice.com
 - **Data Privacy:** privacy@concordvoice.com
 - **General Inquiries:** contact-us@concordvoice.com
