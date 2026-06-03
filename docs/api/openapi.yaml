@@ -26,10 +26,10 @@ info:
   version: 1.0.0
   contact:
     name: Concord
-    url: https://github.com/markdrogersjr/Concord
+    url: https://github.com/Concord-Voice/Self-Hosted
   license:
     name: CVSL 1.0
-    url: https://github.com/markdrogersjr/Concord/blob/main/LICENSE
+    url: internal development reference omitted
 
 servers:
   - url: http://localhost:8080/api/v1

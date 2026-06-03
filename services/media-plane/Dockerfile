@@ -29,7 +29,7 @@ RUN npm prune --omit=dev \
 # See [internal]rules/media-plane.md "Docker Build Context Invariant" for the discipline.
 FROM node:24-alpine
 
-LABEL org.opencontainers.image.source="https://github.com/markdrogersjr/Concord"
+LABEL org.opencontainers.image.source="https://github.com/Concord-Voice/Self-Hosted"
 LABEL org.opencontainers.image.description="Concord Voice media-plane (mediasoup SFU)"
 LABEL org.opencontainers.image.licenses="LicenseRef-CVSL-1.0"
 

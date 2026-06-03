@@ -16,7 +16,7 @@ if [[ -f "${SCRIPT_DIR}/deploy.env.local" ]]; then
   source "${SCRIPT_DIR}/deploy.env.local"
 fi
 
-DEPLOY_REPO="${DEPLOY_REPO:-https://github.com/markdrogersjr/Concord.git}"
+DEPLOY_REPO="${DEPLOY_REPO:-https://github.com/Concord-Voice/Self-Hosted.git}"
 COMPOSE_OVERRIDE="${COMPOSE_OVERRIDE:-docker-compose.staging.yml}"
 COMPOSE_CMD="docker compose -f ${DEPLOY_DIR}/docker-compose.yml -f ${DEPLOY_DIR}/${COMPOSE_OVERRIDE} --profile ${COMPOSE_PROFILES:-services}"
 
@@ -28,7 +28,7 @@ case "${1:-help}" in
   status)
     echo "=== Concord Service Status ==="
     # NOTE: Branch + commit info no longer surfaced — server has no .git/ post-#848.
-    # See `gh api repos/markdrogersjr/Concord/deployments` for deploy history.
+    # See `gh api repos/Concord-Voice/Concord-Voice-Alpha/deployments` for deploy history.
     if [[ -f "${DEPLOY_DIR}/.deploy-meta" ]]; then
       echo "Last deploy:"
       cat "${DEPLOY_DIR}/.deploy-meta" | sed 's/^/  /'
