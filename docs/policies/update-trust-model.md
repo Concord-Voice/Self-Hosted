@@ -122,4 +122,4 @@ Step 4 catches the concrete threat of a tampered manifest between sign and publi
 
 - [`[internal]specs/2026-04-15-644-update-trust-hardening-design.md`](../superpowers/specs/2026-04-15-644-update-trust-hardening-design.md) — design spec
 - [`[internal]specs/2026-04-14-403-macos-code-signing-design.md`](../superpowers/specs/2026-04-14-403-macos-code-signing-design.md) — macOS as-shipped design
-- [`SECURITY.md`](../../SECURITY.md) — vulnerability reporting policy
+- [`SECURITY.md`](../../.github/SECURITY.md) — vulnerability reporting policy

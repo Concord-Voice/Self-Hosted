@@ -88,7 +88,7 @@ See [docs/legal/commercial-license.md](./docs/legal/commercial-license.md) for p
 - On the Change Date, they become AGPL-3.0-or-later (fully open source)
 - You retain copyright to your original work
 - For substantial contributions, we may request a Contributor License Agreement (CLA)
-- See [CONTRIBUTING.md](./CONTRIBUTING.md) for guidelines
+- See [CONTRIBUTING.md](./.github/CONTRIBUTING.md) for guidelines
 
 **How to contribute:**
 
