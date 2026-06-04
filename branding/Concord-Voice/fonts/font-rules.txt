@@ -1,2 +1,2 @@
-Logo Font: BaronNeue
+Logo Font: Droidiga
 Slogan Font: SourceSans
