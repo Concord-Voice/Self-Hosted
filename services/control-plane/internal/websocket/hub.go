@@ -556,7 +556,7 @@ func (h *Hub) handleIncoming(msg IncomingMessage) {
 	case "dm_typing":
 		h.handleDMTyping(msg)
 	default:
-		log.Printf("Unknown message type: %s", msg.Type)
+		log.Printf("Unknown message type: %s", sanitizeLogValue(msg.Type))
 	}
 }
 
@@ -1093,7 +1093,7 @@ func (h *Hub) validateAndLinkAttachment(ctx attachmentLinkCtx, fileID string, po
 		fileID,
 	).Scan(&uploaderID, &summary.FileType, &summary.MimeType, &summary.FileSize, &fileChannelID, &fileConvID)
 	if err != nil {
-		log.Printf("Attachment %s not found or deleted: %v", fileID, err)
+		log.Printf("Attachment %s not found or deleted: %v", sanitizeLogValue(fileID), err)
 		return summary, false
 	}
 
@@ -1103,7 +1103,7 @@ func (h *Hub) validateAndLinkAttachment(ctx attachmentLinkCtx, fileID string, po
 
 	_, err = h.db.Exec(ctx.insertSQL, ctx.messageID, fileID, position)
 	if err != nil {
-		log.Printf("Failed to link attachment %s to message %s: %v", fileID, ctx.messageID, err)
+		log.Printf("Failed to link attachment %s to message %s: %v", sanitizeLogValue(fileID), ctx.messageID, err)
 		return summary, false
 	}
 
@@ -1114,15 +1114,15 @@ func (h *Hub) validateAndLinkAttachment(ctx attachmentLinkCtx, fileID string, po
 // verifyAttachmentAccess checks that the file is owned by the sender and belongs to the correct channel/conversation.
 func (h *Hub) verifyAttachmentAccess(fileID, uploaderID string, ctx attachmentLinkCtx, fileChannelID, fileConvID *string) bool {
 	if uploaderID != ctx.userID {
-		log.Printf("Attachment %s not owned by user %s", fileID, ctx.userID)
+		log.Printf("Attachment %s not owned by user %s", sanitizeLogValue(fileID), sanitizeLogValue(ctx.userID))
 		return false
 	}
 	if ctx.channelID != "" && (fileChannelID == nil || *fileChannelID != ctx.channelID) {
-		log.Printf("Attachment %s does not belong to channel %s", fileID, ctx.channelID)
+		log.Printf("Attachment %s does not belong to channel %s", sanitizeLogValue(fileID), sanitizeLogValue(ctx.channelID))
 		return false
 	}
 	if ctx.conversationID != "" && (fileConvID == nil || *fileConvID != ctx.conversationID) {
-		log.Printf("Attachment %s does not belong to conversation %s", fileID, ctx.conversationID)
+		log.Printf("Attachment %s does not belong to conversation %s", sanitizeLogValue(fileID), sanitizeLogValue(ctx.conversationID))
 		return false
 	}
 	return true
@@ -2289,7 +2289,7 @@ func (h *Hub) handleDisconnectSession(sessionID string) {
 	}
 
 	if count > 0 {
-		log.Printf("Force-disconnected %d client(s) for session %s", count, sessionID)
+		log.Printf("Force-disconnected %d client(s) for session %s", count, sanitizeLogValue(sessionID))
 	}
 }
 
