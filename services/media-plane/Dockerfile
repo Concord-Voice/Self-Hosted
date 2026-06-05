@@ -1,5 +1,5 @@
 # Build stage
-FROM ghcr.io/markdrogersjr/node-buildtools:24-alpine-2026-05-28@sha256:a53963b772b7a3e09d1d82bf4fac9fd775350a45d94430527bdf76f8729a3fc2 AS builder
+FROM ghcr.io/concord-voice/node-buildtools:24-alpine-2026-06-04@sha256:27bf28e3754c513fedf6c5dcee5ba22949c5276a206d31d779bc304024c10eda AS builder
 
 WORKDIR /app
 
