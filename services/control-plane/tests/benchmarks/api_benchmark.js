@@ -7,8 +7,7 @@
 //   - At least one registered user (update TEST_EMAIL/TEST_CREDENTIAL below)
 
 import http from 'k6/http';
-import ws from 'k6/ws';
-import { check, sleep } from 'k6';
+import { sleep } from 'k6';
 import { Rate, Trend } from 'k6/metrics';
 
 // --- Configuration ---
