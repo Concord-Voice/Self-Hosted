@@ -2,6 +2,7 @@ package klipy
 
 import (
 	"net/http"
+	"net/netip"
 	"regexp"
 )
 
@@ -44,4 +45,13 @@ func SetHTTPClientForTest(h *Handler, client *http.Client) {
 // Production code never invokes this.
 func SetMediaClientForTest(h *Handler, client *http.Client) {
 	h.mediaClient = client
+}
+
+// SetEgressGuardForTest swaps the dial-time egress predicate, returning a
+// restore func. Tests use it to dial httptest servers (which bind 127.0.0.1,
+// otherwise denied by isDeniedEgressIP). Production code never invokes this.
+func SetEgressGuardForTest(fn func(netip.Addr) bool) func() {
+	old := egressGuard
+	egressGuard = fn
+	return func() { egressGuard = old }
 }

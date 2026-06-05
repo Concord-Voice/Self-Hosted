@@ -33,11 +33,14 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"regexp"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -94,7 +97,7 @@ type Handler struct {
 // have different timeouts: API calls use a tight 10s deadline while media
 // binaries get 30s to accommodate larger payloads and CDN variance.
 func NewHandler(cfg *config.Config, log *logger.Logger) *Handler {
-	transport := http.DefaultTransport
+	transport := newGuardedTransport()
 	return &Handler{
 		cfg: cfg,
 		log: log,
@@ -105,8 +108,85 @@ func NewHandler(cfg *config.Config, log *logger.Logger) *Handler {
 		mediaClient: &http.Client{
 			Timeout:   mediaTimeout,
 			Transport: transport,
+			// Layer A (SSRF #1361): re-validate scheme+host on every redirect hop.
+			// mediaClient only — it is the sole user-supplied-URL surface.
+			CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+				return validateRedirectTarget(req)
+			},
 		},
 	}
+}
+
+// --- SSRF egress guard (#1361) ---
+
+// Egress-guard sentinels. Both remain errors.Is-matchable through the *url.Error
+// / *net.OpError wrapping that net/http applies to Client.Do errors.
+var (
+	errEgressBlocked   = errors.New("klipy egress: destination IP not permitted")
+	errRedirectBlocked = errors.New("klipy egress: redirect target not permitted")
+)
+
+// cgnatPrefix is RFC6598 carrier-grade-NAT space (100.64.0.0/10), commonly used
+// for cloud internal networks and NOT covered by netip.Addr.IsPrivate.
+var cgnatPrefix = netip.MustParsePrefix("100.64.0.0/10")
+
+// siteLocalV6 is deprecated IPv6 site-local space (fec0::/10, RFC 3879). It is
+// NOT matched by netip.Addr.IsPrivate (which covers only fc00::/7 ULA) nor by
+// the link-local predicates, yet may still route on legacy internal networks.
+var siteLocalV6 = netip.MustParsePrefix("fec0::/10")
+
+// isDeniedEgressIP reports whether dialing addr would reach a non-public
+// destination: loopback, RFC1918/ULA private, link-local (incl. 169.254.169.254
+// cloud metadata), any multicast, unspecified, CGNAT, or deprecated IPv6
+// site-local. Unmap normalizes IPv4-mapped IPv6 (e.g. ::ffff:169.254.169.254)
+// so mapped forms cannot bypass the predicates. IsMulticast subsumes the
+// link-local-multicast class and adds admin/global-scoped multicast.
+func isDeniedEgressIP(addr netip.Addr) bool {
+	addr = addr.Unmap()
+	if addr.IsLoopback() || addr.IsPrivate() || addr.IsLinkLocalUnicast() ||
+		addr.IsMulticast() || addr.IsUnspecified() {
+		return true
+	}
+	return cgnatPrefix.Contains(addr) || siteLocalV6.Contains(addr)
+}
+
+// egressGuard is the active egress predicate. It is a package var (not a direct
+// call to isDeniedEgressIP) so SetEgressGuardForTest can relax it — httptest
+// servers bind to 127.0.0.1, which the production guard denies.
+var egressGuard = isDeniedEgressIP
+
+// validateRedirectTarget re-applies the media-proxy URL policy (https + host
+// allowlist) on every redirect hop. The handler validates only hop 0; without
+// this, an allowlisted host could 302 the proxy to an arbitrary destination.
+func validateRedirectTarget(req *http.Request) error {
+	if req.URL.Scheme != "https" || !allowedMediaHosts.MatchString(req.URL.Host) {
+		return errRedirectBlocked
+	}
+	return nil
+}
+
+// newGuardedTransport clones the default transport and installs a dial-time
+// egress guard. Dialer.Control fires after DNS resolution and before connect, on
+// the actual dialed IP, so it defends both redirect-SSRF and DNS-rebinding with
+// no TOCTOU window. Cloning preserves ForceAttemptHTTP2 (h2 via ALPN) and gives
+// the two klipy clients their own connection pool.
+func newGuardedTransport() *http.Transport {
+	tr := http.DefaultTransport.(*http.Transport).Clone()
+	tr.DialContext = (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control: func(_, address string, _ syscall.RawConn) error {
+			ap, err := netip.ParseAddrPort(address)
+			if err != nil {
+				return fmt.Errorf("klipy egress: unparseable dial address: %w", err)
+			}
+			if egressGuard(ap.Addr()) {
+				return errEgressBlocked
+			}
+			return nil
+		},
+	}).DialContext
+	return tr
 }
 
 // sanitizedNetErr returns the underlying network error string from a *url.Error
@@ -260,7 +340,7 @@ func (h *Handler) Media(c *gin.Context) {
 	}
 
 	// Use the dedicated media client (30s timeout) instead of the API client.
-	resp, err := h.mediaClient.Do(req) //nolint:gosec // URL validated: scheme=https + host allowlist
+	resp, err := h.mediaClient.Do(req) //nolint:gosec // URL validated: scheme=https + host allowlist; egress guarded per-hop redirect + dial-time IP denylist (#1361)
 	if err != nil {
 		h.log.Warn("klipy media: upstream request failed",
 			"host", parsed.Host,
@@ -397,7 +477,7 @@ func (h *Handler) forwardJSON(c *gin.Context, method, upstreamURL string, body i
 	}
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := h.client.Do(req) //nolint:gosec // upstreamURL constructed from config base URL, not user input
+	resp, err := h.client.Do(req) //nolint:gosec // upstreamURL from config base URL, not user input; dial-time IP egress guard (#1361)
 	if err != nil {
 		h.log.Warn("klipy api: upstream request failed",
 			"route", c.FullPath(),
