@@ -166,7 +166,7 @@ flowchart TB
 
 #### SPA Deploy Lifecycle (ADR-0001)
 
-The SPA bundle and the HTTP handler that serves it are coupled at deploy time but decoupled at build time. Vite's `base: './'` makes all chunks resolve relative to the URL `index.html` was loaded from. Post-#919 (PR #922): `main-cd.yml`'s `deploy-spa` job invokes `[internal]deploy-spa.sh`, which uploads the bundle to `/opt/concord/spa/<sha7>/`, writes `spa.env` with `SPA_URL=https://api.concordvoice.chat/spa/<sha7>/index.html` (atomically derived from the same `${SHA7}` env var), and commits + pushes `spa.env` back to main as `github-actions[bot]` (via `GITHUB_TOKEN`, authorized by the Default Branch Ruleset's `Integration: always` bypass; #852) so the source-of-truth tracks shipped state.
+The SPA bundle and the HTTP handler that serves it are coupled at deploy time but decoupled at build time. Vite's `base: './'` makes all chunks resolve relative to the URL `index.html` was loaded from. Post-#919 (PR #922): `main-cd.yml`'s `deploy-spa` job invokes `[internal]deploy-spa.sh`, which uploads the bundle to `/opt/concord/spa/<sha7>/`, writes `spa.env` with `SPA_URL=https://api.concordvoice.chat/spa/<sha7>/index.html` (atomically derived from the same `${SHA7}` env var), and commits + pushes `spa.env` back to main via a short-lived **Concord CI Bot** GitHub App installation token (Contents:write, per [ADR-0014](adr/0014-github-app-deploy-tokens.md); the App is an `Integration: always` bypass actor on the org-level "Default Branch Ruleset" and replaced `secrets.ADMIN_PAT` for this consumer — `GITHUB_TOKEN` is not a valid ruleset bypass actor, so a custom installed App is required) so the source-of-truth tracks shipped state.
 
 Four invariants enforce the contract:
 
