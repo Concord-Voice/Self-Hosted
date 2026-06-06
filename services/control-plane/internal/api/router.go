@@ -28,7 +28,6 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/servers"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/sessions"
-	"github.com/markdrogersjr/Concord/services/control-plane/internal/spa"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/updates"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/users"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/voice"
@@ -78,31 +77,6 @@ func configureTrustedProxies(router *gin.Engine, cfg *config.Config, log *logger
 	log.Info("Trusted proxies configured",
 		"cidrs", cfg.TrustedProxyCIDRs,
 		"count", len(cfg.TrustedProxyCIDRs))
-}
-
-// registerSPARoute registers the root-level /spa/* asset handler when SPA
-// serving is enabled. Extracted from NewRouter to keep the latter's cognitive
-// complexity under the SonarQube brain-overload threshold.
-//
-// The route lives at root (not under /api/v1/) to escape Cloudflare's Free-tier
-// baseline bot-intelligence JSD beacon injection which targets /api/*-shaped
-// surfaces. See #725 and
-// [internal]specs/2026-04-21-725-post-cutover-design.md for the full
-// elimination chain. Cloudflare caches hashed assets (immutable/1yr) and
-// index.html (5min).
-//
-// When SpaDir is empty the route is not registered; logs a disabled-notice so
-// operators see a signal if SPA hosting is accidentally unconfigured rather
-// than silent 404s on /spa/* requests.
-func registerSPARoute(router *gin.Engine, cfg *config.Config, redis *redis.Client, spaHandler *spa.Handler, log *logger.Logger) {
-	if cfg.SpaDir == "" {
-		log.Info("SPA serving disabled: SPA_DIR env var is empty. Desktop clients will receive 404 on /spa/* requests. Set SPA_DIR in production to enable Tier 3 hot updates.")
-		return
-	}
-	router.GET("/spa/*filepath",
-		middleware.RateLimitByIP(redis, 60, 1*time.Minute),
-		spaHandler.ServeAsset,
-	)
 }
 
 // testEnvAuthFlowCap is the per-IP auth-flow rate-limit cap applied when the
@@ -243,7 +217,6 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	wsTicketHandler := auth.NewWSTicketHandler(redis, cfg.JWTSecret)
 	clientConfigHandler := clientconfig.NewHandler(cfg, liveSpa, log)
 	updatesHandler := updates.NewHandler(cfg, log)
-	spaHandler := spa.NewHandler(cfg.SpaDir, log)
 	privacyHandler := buildPrivacyHandler(db, log)
 	oauthHandler := buildOAuthHandler(db, redis, cfg, authHandler, log)
 
@@ -262,10 +235,6 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 			log.Error("Failed to subscribe to voice NATS events", "error", subErr)
 		}
 	}
-
-	// SPA asset serving (Tier 3 hot updates). Extracted from NewRouter to keep
-	// its cognitive complexity under the SonarQube brain-overload threshold.
-	registerSPARoute(router, cfg, redis, spaHandler, log)
 
 	// API v1 routes
 	v1 := router.Group("/api/v1")

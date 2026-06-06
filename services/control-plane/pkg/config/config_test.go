@@ -109,6 +109,14 @@ func TestLoad(t *testing.T) {
 	})
 }
 
+func TestLoad_AllowedOriginsDefault_IncludesSpaPagesOrigin(t *testing.T) {
+	t.Setenv("ALLOWED_ORIGINS", "") // force default
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Contains(t, cfg.AllowedOrigins, "https://spa.concordvoice.chat",
+		"Pages SPA origin must be in the default ALLOWED_ORIGINS (T4a, #976)")
+}
+
 func TestLoadTrustedProxyCIDRs(t *testing.T) {
 	// Pin ENVIRONMENT=development in every sub-test so Load() doesn't hit the
 	// production guards (and fatally exit on unrelated missing prod config)

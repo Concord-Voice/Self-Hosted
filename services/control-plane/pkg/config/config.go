@@ -121,9 +121,6 @@ type Config struct {
 	// Desktop update assets — local directory populated by deploy.sh
 	ReleasesDir string // Path to directory containing release assets; empty disables update endpoint
 
-	// SPA assets — versioned directories populated by deploy-spa.yml via rsync
-	SpaDir string // Root directory for SPA builds (e.g. "/opt/concord/spa"); empty disables SPA serving
-
 	// SMTP (email verification)
 	SMTPHost     string // SMTP server hostname (e.g. "smtp.protonmail.ch"); empty = dev mode (log codes to stdout)
 	SMTPPort     int    // SMTP server port (default 587 for STARTTLS submission)
@@ -205,7 +202,7 @@ func Load() (*Config, error) {
 		TURNSecret:               getEnv("TURN_SECRET", ""),
 		TURNRealm:                getEnv("TURN_REALM", "concordvoice.chat"),
 		LicensingAuthorityURL:    getEnv("LICENSING_AUTHORITY_URL", "http://localhost:8082"),
-		AllowedOrigins:           parseOrigins(getEnv("ALLOWED_ORIGINS", "http://localhost:3001,http://localhost:3002,app://concord")),
+		AllowedOrigins:           parseOrigins(getEnv("ALLOWED_ORIGINS", "http://localhost:3001,http://localhost:3002,app://concord,https://spa.concordvoice.chat")),
 		ClientMinVersion:         getEnv("CLIENT_MIN_VERSION", ""),
 		FeatureVoice:             getEnv("FEATURE_VOICE", "true") == "true",
 		FeatureVideo:             getEnv("FEATURE_VIDEO", "true") == "true",
@@ -214,7 +211,6 @@ func Load() (*Config, error) {
 		SpaIpcContract:           getEnvInt("SPA_IPC_CONTRACT", 0),
 		SpaConfigFile:            getEnv("SPA_CONFIG_FILE", ""),
 		ReleasesDir:              getEnv("RELEASES_DIR", ""),
-		SpaDir:                   getEnv("SPA_DIR", ""),
 		SMTPHost:                 getEnv("SMTP_HOST", ""),
 		SMTPPort:                 getEnvInt("SMTP_PORT", 587),
 		SMTPUsername:             getEnv("SMTP_USERNAME", ""),

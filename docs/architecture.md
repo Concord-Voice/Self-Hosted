@@ -164,18 +164,20 @@ flowchart TB
 - Progressive Web App (PWA) capabilities
 - Limited platform integration
 
-#### SPA Deploy Lifecycle (ADR-0001)
+#### SPA Deploy Lifecycle (ADR-0001, ADR-0015)
 
-The SPA bundle and the HTTP handler that serves it are coupled at deploy time but decoupled at build time. Vite's `base: './'` makes all chunks resolve relative to the URL `index.html` was loaded from. Post-#919 (PR #922): `main-cd.yml`'s `deploy-spa` job invokes `[internal]deploy-spa.sh`, which uploads the bundle to `/opt/concord/spa/<sha7>/`, writes `spa.env` with `SPA_URL=https://api.concordvoice.chat/spa/<sha7>/index.html` (atomically derived from the same `${SHA7}` env var), and commits + pushes `spa.env` back to main via a short-lived **Concord CI Bot** GitHub App installation token (Contents:write, per [ADR-0014](adr/0014-github-app-deploy-tokens.md); the App is an `Integration: always` bypass actor on the org-level "Default Branch Ruleset" and replaced `secrets.ADMIN_PAT` for this consumer — `GITHUB_TOKEN` is not a valid ruleset bypass actor, so a custom installed App is required) so the source-of-truth tracks shipped state.
+The SPA bundle is served by **Cloudflare Pages** at the CONSTANT URL `https://spa.concordvoice.chat/index.html` — post-#976 / [ADR-0015](adr/0015-spa-serving-decouple.md), serving is decoupled from the Go control-plane. The per-deploy SHA no longer appears in the URL (the old `/opt/concord/spa/<sha7>/` directory and the Go `/spa/*` handler that served it are deleted); Pages publishes each deployment atomically and serves the latest at the constant host. The bundle stays decoupled from its serving origin at build time: Vite's `base: './'` makes all chunks resolve relative to the URL `index.html` was loaded from.
+
+`main-cd.yml`'s `deploy-spa` job invokes `[internal]deploy-spa.sh`, which `wrangler pages deploy`s the renderer bundle to Cloudflare Pages, writes `spa.env` with the constant `SPA_URL` (the per-deploy SHA is recorded as the `SPA_VERSION` annotation only, never in the URL), and commits + pushes `spa.env` back to main via a short-lived **Concord CI Bot** GitHub App installation token (Contents:write, per [ADR-0014](adr/0014-github-app-deploy-tokens.md); the App is an `Integration: always` bypass actor on the org-level "Default Branch Ruleset" and replaced `secrets.ADMIN_PAT` for this consumer — `GITHUB_TOKEN` is not a valid ruleset bypass actor, so a custom installed App is required) so the source-of-truth tracks shipped state.
 
 Four invariants enforce the contract:
 
 1. **Build invariant** — `vite.config.ts` keeps `base: './'`. Locked by `vite-base-relative.test.ts`.
-2. **Deploy invariant** — `spa.env` is a generated artifact. Post-#919 the `Verify spa.env contract` job in `pr-ci.yml` runs `[internal]verify-spa-env.sh --mode=pr` on every PR with structural + author-attribution checks.
+2. **Deploy invariant** — `spa.env` is a generated artifact. The `Verify spa.env contract` job in `pr-ci.yml` runs `[internal]verify-spa-env.sh --mode=pr` on every PR with structural + author-attribution checks. The single committed `spa.env` is bind-mounted into the control-plane container as a single file, so `deploy-spa.sh` rsyncs it with `--inplace` (writes the existing inode rather than atomic-rename to a new one) to avoid the stale-inode `spaUrl` class fixed by #1315.
 3. **Runtime safety net** — renderer self-heals on chunk-load failures via two-layer detection (renderer-side `error`/`unhandledrejection` listeners + main-process `did-fail-load`) feeding a shared recovery primitive with R2 retry semantics.
-4. **Documentation invariant** — this section + [`[internal]rules/electron.md`](../[internal]rules/electron.md) link to ADR-0001 so the contract is discoverable through normal architectural-discovery paths.
+4. **Documentation invariant** — this section + [`[internal]rules/electron.md`](../[internal]rules/electron.md) link to both [ADR-0001](adr/0001-spa-deploy-contract.md) and [ADR-0015](adr/0015-spa-serving-decouple.md) so the contract is discoverable through normal architectural-discovery paths.
 
-For the full rationale, see [ADR-0001](adr/0001-spa-deploy-contract.md).
+For the deploy-contract rationale see [ADR-0001](adr/0001-spa-deploy-contract.md); for the decision that moved serving from the Go control-plane to Cloudflare Pages see [ADR-0015](adr/0015-spa-serving-decouple.md).
 
 ### Control Plane (Go)
 
