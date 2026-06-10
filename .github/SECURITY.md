@@ -287,6 +287,7 @@ These documents describe the technical implementation of Concord Voice's securit
 - [`docs/policies/ai-generated-code-policy.md`](../docs/policies/ai-generated-code-policy.md) — AI-generated code governance and constraints
 - [`docs/policies/agentic-ai-controls.md`](../docs/policies/agentic-ai-controls.md) — agentic-AI execution safety controls
 - [`[internal]incident-response-key-compromise.md`](../[internal]incident-response-key-compromise.md) — incident response playbook for cryptographic key / credential compromise
+- [`[internal]macos-cert-compromise.md`](../[internal]macos-cert-compromise.md) — Apple Developer ID signing-cert compromise + rotation (completes #645)
 
 ---
 
