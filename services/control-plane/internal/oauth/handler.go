@@ -18,6 +18,7 @@ import (
 	"github.com/redis/go-redis/v9"
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
+	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 )
 
 // HandlerDeps wires the SSO endpoints. Consumed by api/routes wiring.
@@ -30,6 +31,13 @@ type HandlerDeps struct {
 	// Typed as an interface (AuthAdapter) so tests can stub it without
 	// pulling in the full *auth.Handler dependency graph.
 	AuthHandler AuthAdapter
+	// Log receives structured SSO audit events (apple_client_secret_minted).
+	// Nil-safe: audit emission is skipped when unset (test rigs); production
+	// wiring (buildOAuthHandler) always sets it.
+	Log *logger.Logger
+	// AuditIPKey keys the HMAC that pseudonymizes client IPs in audit events.
+	// HKDF-derived from JWTSecret at wiring time — see buildOAuthHandler.
+	AuditIPKey []byte
 }
 
 // AuthAdapter is the subset of internal/auth.Handler methods this package needs.
@@ -119,7 +127,13 @@ const (
 // All fields are required for the callback handler to validate the response
 // and complete the code exchange.
 type ssoStateRecord struct {
-	Provider     string    `json:"provider"`
+	Provider string `json:"provider"`
+	// State duplicates the record's own key suffix so the client-secret
+	// broker (#972) can constant-time-compare a request-supplied state
+	// against a server-held copy instead of trusting key-lookup semantics.
+	// Records written before this field existed decode as "" and fail the
+	// broker's comparison closed.
+	State        string    `json:"state"`
 	Nonce        string    `json:"nonce"`
 	CodeVerifier string    `json:"code_verifier"`
 	RedirectURI  string    `json:"redirect_uri"`
@@ -315,6 +329,7 @@ func (h *Handler) Initiate(c *gin.Context) {
 
 	rec := ssoStateRecord{
 		Provider:     providerName,
+		State:        state,
 		Nonce:        nonce,
 		CodeVerifier: verifier,
 		RedirectURI:  redirectURI,

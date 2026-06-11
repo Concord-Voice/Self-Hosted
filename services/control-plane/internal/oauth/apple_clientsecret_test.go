@@ -4,6 +4,8 @@ import (
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"fmt"
 	"sync"
 	"testing"
@@ -166,4 +168,90 @@ func TestAppleClientSecret_ConcurrentSigning(t *testing.T) {
 		unique[tok] = struct{}{}
 	}
 	assert.Equal(t, 1, len(unique), "expected exactly one unique JWT across %d goroutines, got %d", goroutines, len(unique))
+}
+
+// TestBrokerClientSecret_FreshSixtySecondJWT verifies the broker path mints a
+// 60-second JWT on every call from its dedicated signer instance — never the
+// Exchange path's long-TTL cached signer (#972 spec F1).
+func TestBrokerClientSecret_FreshSixtySecondJWT(t *testing.T) {
+	key := generateTestKey(t)
+	provider := newTestAppleProviderWithKey(t, key)
+
+	now := time.Date(2026, 6, 11, 8, 0, 0, 0, time.UTC)
+	tok, err := provider.BrokerClientSecret(now)
+	require.NoError(t, err)
+	require.NotEmpty(t, tok)
+
+	parsed, err := jwt.Parse(tok, func(jt *jwt.Token) (interface{}, error) {
+		if _, ok := jt.Method.(*jwt.SigningMethodECDSA); !ok {
+			return nil, fmt.Errorf("expected ECDSA signing method, got %T", jt.Method)
+		}
+		return &key.PublicKey, nil
+	}, jwt.WithoutClaimsValidation())
+	require.NoError(t, err)
+	require.True(t, parsed.Valid)
+
+	assert.Equal(t, "ES256", parsed.Header["alg"])
+	assert.Equal(t, testKeyID, parsed.Header["kid"])
+
+	claims, ok := parsed.Claims.(jwt.MapClaims)
+	require.True(t, ok)
+	assert.Equal(t, testTeamID, claims["iss"])
+	assert.Equal(t, testClientID, claims["sub"])
+	assert.Equal(t, "https://appleid.apple.com", claims["aud"])
+
+	iat := int64(claims["iat"].(float64))
+	exp := int64(claims["exp"].(float64))
+	assert.Equal(t, int64(60), exp-iat, "broker JWTs must live exactly 60s")
+	assert.Equal(t, now.Unix(), iat)
+}
+
+// TestBrokerClientSecret_DistinctFromExchangeSigner pins the two-instance
+// property: minting a broker secret must not pollute the Exchange signer's
+// cache, and vice versa (their TTLs differ by three orders of magnitude).
+func TestBrokerClientSecret_DistinctFromExchangeSigner(t *testing.T) {
+	key := generateTestKey(t)
+	provider := newTestAppleProviderWithKey(t, key)
+
+	now := time.Date(2026, 6, 11, 8, 0, 0, 0, time.UTC)
+	brokerTok, err := provider.BrokerClientSecret(now)
+	require.NoError(t, err)
+
+	exchangeTok, err := provider.clientSecret.signed(now)
+	require.NoError(t, err)
+
+	brokerExp := jwtExpiry(t, brokerTok, key)
+	exchangeExp := jwtExpiry(t, exchangeTok, key)
+	assert.Equal(t, now.Add(60*time.Second).Unix(), brokerExp)
+	assert.Equal(t, now.Add(90*24*time.Hour).Unix(), exchangeExp)
+}
+
+// jwtExpiry parses tok with key's public half and returns its exp claim.
+func jwtExpiry(t *testing.T, tok string, key *ecdsa.PrivateKey) int64 {
+	t.Helper()
+	parsed, err := jwt.Parse(tok, func(_ *jwt.Token) (interface{}, error) {
+		return &key.PublicKey, nil
+	}, jwt.WithoutClaimsValidation())
+	require.NoError(t, err)
+	claims := parsed.Claims.(jwt.MapClaims)
+	return int64(claims["exp"].(float64))
+}
+
+// newTestAppleProviderWithKey builds a real AppleProvider around a generated
+// P-256 key, PEM-encoding it the way Apple's .p8 export does.
+func newTestAppleProviderWithKey(t *testing.T, key *ecdsa.PrivateKey) *AppleProvider {
+	t.Helper()
+	der, err := x509.MarshalPKCS8PrivateKey(key)
+	require.NoError(t, err)
+	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
+	provider, err := NewAppleProvider(AppleConfig{
+		ClientID:        testClientID,
+		TeamID:          testTeamID,
+		KeyID:           testKeyID,
+		PrivateKey:      pemBytes,
+		RedirectURI:     "http://127.0.0.1:0/oauth/callback",
+		ClientSecretTTL: 90 * 24 * time.Hour,
+	})
+	require.NoError(t, err)
+	return provider
 }

@@ -367,6 +367,10 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 			//   account-link path. Shares the EMAIL-keyed lockout counter via
 			//   AuthAdapter.VerifyPassword, but the per-IP cap prevents a
 			//   distributed-IP attacker from bypassing the email gate.
+			// SignAppleClientSecret (5/1min): per-mint broker for the
+			//   client-driven Apple exchange (#971/#972). Tighter window —
+			//   each legitimate login needs exactly one mint; 5/min absorbs
+			//   retries while capping signing-oracle abuse (CWE-307).
 			ssoRoutes := authRoutes.Group("/sso")
 			{
 				ssoRoutes.GET("/:provider",
@@ -384,6 +388,10 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				ssoRoutes.POST("/:provider/complete-link",
 					middleware.RateLimitByIP(redis, 5, 15*time.Minute),
 					oauthHandler.CompleteLink,
+				)
+				ssoRoutes.POST("/:provider/sign-client-secret",
+					middleware.RateLimitByIP(redis, 5, time.Minute),
+					oauthHandler.SignAppleClientSecret,
 				)
 			}
 		}

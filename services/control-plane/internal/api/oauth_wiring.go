@@ -2,13 +2,16 @@
 package api
 
 import (
+	"crypto/sha256"
 	"database/sql"
+	"io"
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/oauth"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/crypto/hkdf"
 )
 
 // buildOAuthHandler constructs the SSO endpoints handler. When
@@ -77,10 +80,24 @@ func buildOAuthHandler(
 		log.Info("Apple SSO disabled (APPLE_SSO_ENABLED=false)")
 	}
 
+	// auditIPKey pseudonymizes client IPs in SSO audit events. Derived (never
+	// reused raw) from JWTSecret via HKDF with a distinct info string so the
+	// audit purpose is cryptographically separated from token signing — and no
+	// new env var / deployment surface is introduced (#972 spec, F5).
+	auditIPKey := make([]byte, 32)
+	if _, err := io.ReadFull(
+		hkdf.New(sha256.New, []byte(cfg.JWTSecret), nil, []byte("concord/audit-ip-pseudonym/v1")),
+		auditIPKey,
+	); err != nil {
+		log.Fatal("Failed to derive SSO audit IP key", "error", err)
+	}
+
 	return oauth.NewHandler(oauth.HandlerDeps{
 		Registry:    registry,
 		Redis:       redisClient,
 		DB:          db,
 		AuthHandler: authHandler,
+		Log:         log,
+		AuditIPKey:  auditIPKey,
 	})
 }

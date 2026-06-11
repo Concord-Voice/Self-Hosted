@@ -22,6 +22,14 @@ const appleIssuer = "https://appleid.apple.com"
 // keeping the ~50µs ES256 sign cost amortised across concurrent requests.
 const clientSecretReuseGrace = 60 * time.Second // pragma: allowlist secret -- duration constant, not a credential
 
+// brokerClientSecretTTL is the lifetime of client-secret JWTs minted for the
+// client-driven exchange path (epic #971 / #972): the minimum useful window
+// for the desktop client to complete its single /auth/token POST to Apple.
+// At this TTL the signer's reuse cache never hits (the cache condition needs
+// more than clientSecretReuseGrace of remaining life), so every broker call
+// re-signs — the desired fresh-JWT-per-call property.
+const brokerClientSecretTTL = 60 * time.Second // pragma: allowlist secret -- duration constant, not a credential
+
 // appleClientSecretSigner signs Apple client-secret JWTs using ES256 and caches
 // the result for reuse within clientSecretReuseGrace of the token's expiry.
 // Safe for concurrent use via an internal mutex.

@@ -2025,3 +2025,30 @@ func TestHandler_Apple_LoginShortCircuit(t *testing.T) {
 	assert.Contains(t, providers, "apple",
 		"providers list must include 'apple' when an Apple identity is the only one linked")
 }
+
+// TestInitiate_EmbedsStateInRecord pins the #972 contract: the sso_state
+// record carries its own state value so the broker endpoint can perform a
+// constant-time equality check against a server-held copy (spec F3).
+func TestInitiate_EmbedsStateInRecord(t *testing.T) {
+	r, rdb, _ := newSSOTestRig(t)
+
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/auth/sso/google?redirect_uri="+url.QueryEscape("http://127.0.0.1:51620/oauth/callback"), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var resp struct {
+		State string `json:"state"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.NotEmpty(t, resp.State)
+
+	raw, err := rdb.Get(context.Background(), "sso_state:"+resp.State).Bytes()
+	require.NoError(t, err)
+	var rec struct {
+		State string `json:"state"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &rec))
+	assert.Equal(t, resp.State, rec.State, "record must embed its own state value")
+}

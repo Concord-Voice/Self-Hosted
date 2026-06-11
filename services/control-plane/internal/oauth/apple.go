@@ -80,6 +80,7 @@ type AppleProvider struct {
 	cfg          AppleConfig
 	httpClient   *http.Client
 	clientSecret *appleClientSecretSigner
+	brokerSecret *appleClientSecretSigner
 	clock        func() time.Time
 
 	jwksMu    sync.RWMutex
@@ -135,11 +136,13 @@ func NewAppleProvider(cfg AppleConfig) (*AppleProvider, error) {
 	}
 
 	signer := newAppleClientSecretSigner(cfg.TeamID, cfg.ClientID, cfg.KeyID, priv, cfg.ClientSecretTTL)
+	brokerSigner := newAppleClientSecretSigner(cfg.TeamID, cfg.ClientID, cfg.KeyID, priv, brokerClientSecretTTL)
 
 	return &AppleProvider{
 		cfg:          cfg,
 		httpClient:   httpClient,
 		clientSecret: signer,
+		brokerSecret: brokerSigner,
 		clock:        clock,
 	}, nil
 }
@@ -186,7 +189,22 @@ func (a *AppleProvider) AuthorizationURL(state, nonce, codeChallenge string) str
 	return a.cfg.AuthEndpoint + "?" + q.Encode()
 }
 
-// Exchange completes the Apple OAuth code exchange:
+// BrokerClientSecret returns a freshly-signed 60-second client-secret JWT for
+// the client-driven exchange path (epic #971 / #972). It uses a dedicated
+// signer instance: the Exchange path's signer carries a long TTL (90 days in
+// production) plus a reuse cache, both of which would be wrong to hand to
+// clients. See the #972 spec, finding F1.
+func (a *AppleProvider) BrokerClientSecret(now time.Time) (string, error) {
+	return a.brokerSecret.signed(now)
+}
+
+// Exchange completes the Apple OAuth code exchange.
+//
+// NOTE: the server-side exchange path is superseded by the client-driven
+// architecture (epic #971). Retained as a test-covered fixture until #974
+// lands, then removed. Do not add new production callers.
+//
+// The exchange:
 //  1. signs (or reuses cached) ES256 client_secret JWT
 //  2. POSTs to /auth/token with code, code_verifier, client_id, client_secret, redirect_uri
 //  3. validates the returned id_token signature against Apple's JWKS
