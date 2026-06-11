@@ -86,6 +86,25 @@ func (a AppleSSOConfig) String() string {
 		a.ClientID, a.TeamID, a.KeyID, len(a.PrivateKey))
 }
 
+// CloudflareKVBridgeConfig holds the Workers KV write credentials for the
+// apple-sso-bridge state→port mapping (#973). Disabled by default; the
+// feature ships dark until the client-driven Apple flow (#974) consumes it.
+type CloudflareKVBridgeConfig struct {
+	Enabled     bool
+	AccountID   string
+	NamespaceID string
+	APIToken    string
+}
+
+// String redacts the API token.
+func (c CloudflareKVBridgeConfig) String() string {
+	if !c.Enabled {
+		return "CloudflareKVBridgeConfig{Enabled:false}"
+	}
+	return fmt.Sprintf("CloudflareKVBridgeConfig{Enabled:true AccountID:%q NamespaceID:%q APIToken:[REDACTED %d bytes]}",
+		c.AccountID, c.NamespaceID, len(c.APIToken))
+}
+
 // Config holds all configuration for the application
 type Config struct {
 	Environment string
@@ -183,6 +202,12 @@ type Config struct {
 	// is caught at startup in any environment. The error message lists ALL
 	// missing fields at once rather than failing on the first.
 	AppleSSO AppleSSOConfig
+
+	// CloudflareKVBridge holds the Workers KV write credentials for the
+	// apple-sso-bridge state→port mapping (#973). Disabled by default;
+	// Load() returns an error if Enabled=true but any required field is
+	// unset, listing ALL missing fields at once.
+	CloudflareKVBridge CloudflareKVBridgeConfig
 }
 
 // Load reads configuration from environment variables
@@ -265,6 +290,13 @@ func Load() (*Config, error) {
 		return nil, err
 	}
 
+	// Cloudflare KV bridge (#973). Disabled by default. When enabled, all
+	// three credential fields must be set; the error lists every missing
+	// field at once (mirrors the AppleSSO gate).
+	if err := loadCloudflareKVBridgeConfig(cfg); err != nil {
+		return nil, err
+	}
+
 	if err := cfg.validate(); err != nil {
 		log.Fatal(err)
 	}
@@ -339,6 +371,34 @@ func loadAppleSSOConfig(cfg *Config) error {
 	}
 	if len(missing) > 0 {
 		return fmt.Errorf("AppleSSO enabled but %s unset", strings.Join(missing, ", "))
+	}
+	return nil
+}
+
+// loadCloudflareKVBridgeConfig populates cfg.CloudflareKVBridge. Mirrors the
+// AppleSSO gate: disabled => zero-value group; enabled => every field
+// required, all missing fields reported at once.
+func loadCloudflareKVBridgeConfig(cfg *Config) error {
+	cfg.CloudflareKVBridge.Enabled = getEnv("CLOUDFLARE_KV_BRIDGE_ENABLED", "false") == "true"
+	if !cfg.CloudflareKVBridge.Enabled {
+		return nil
+	}
+	cfg.CloudflareKVBridge.AccountID = getEnv("CLOUDFLARE_ACCOUNT_ID", "")
+	cfg.CloudflareKVBridge.NamespaceID = getEnv("CLOUDFLARE_KV_NAMESPACE_ID", "")
+	cfg.CloudflareKVBridge.APIToken = getEnv("CLOUDFLARE_KV_API_TOKEN", "")
+
+	var missing []string
+	if cfg.CloudflareKVBridge.AccountID == "" {
+		missing = append(missing, "CLOUDFLARE_ACCOUNT_ID")
+	}
+	if cfg.CloudflareKVBridge.NamespaceID == "" {
+		missing = append(missing, "CLOUDFLARE_KV_NAMESPACE_ID")
+	}
+	if cfg.CloudflareKVBridge.APIToken == "" {
+		missing = append(missing, "CLOUDFLARE_KV_API_TOKEN")
+	}
+	if len(missing) > 0 {
+		return fmt.Errorf("CLOUDFLARE_KV_BRIDGE_ENABLED=true but %s unset", strings.Join(missing, ", "))
 	}
 	return nil
 }

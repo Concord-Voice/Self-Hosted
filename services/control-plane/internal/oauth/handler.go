@@ -31,6 +31,10 @@ type HandlerDeps struct {
 	// Typed as an interface (AuthAdapter) so tests can stub it without
 	// pulling in the full *auth.Handler dependency graph.
 	AuthHandler AuthAdapter
+	// CFKV publishes state→loopback-port mappings to the apple-sso-bridge
+	// Workers KV namespace (#973). Nil when the bridge is disabled — the
+	// write is skipped and Apple SSO continues on its pre-bridge path.
+	CFKV StatePortPutter
 	// Log receives structured SSO audit events (apple_client_secret_minted).
 	// Nil-safe: audit emission is skipped when unset (test rigs); production
 	// wiring (buildOAuthHandler) always sets it.
@@ -110,6 +114,17 @@ const (
 	// PKCE RFC 7636 recommendation (32 bytes after base64url encoding).
 	entropyBytes = 32
 )
+
+// StatePortPutter is the seam to the Cloudflare KV bridge client; satisfied
+// by *cfkv.Client. Interface lives here so tests stub it without importing
+// the real client.
+type StatePortPutter interface {
+	Put(ctx context.Context, key, value string, ttlSeconds int) error
+}
+
+// bridgeStateTTLSeconds keeps the KV entry's lifetime aligned with the Redis
+// sso_state record (spec F1 — the user may spend minutes at Apple's login).
+var bridgeStateTTLSeconds = int(stateTTL / time.Second)
 
 // sso_token "branch" discriminator values — the JSON field that distinguishes
 // new-user-registration tokens from account-link tokens. Centralized here so
@@ -320,6 +335,23 @@ func (h *Handler) Initiate(c *gin.Context) {
 		return
 	}
 
+	// Bridge precondition (#973): validateLoopbackRedirect guarantees
+	// scheme/host/path but not an explicit port, and the apple-sso-bridge
+	// cannot relay without one. Validate BEFORE the state record is written
+	// so a rejected redirect leaves no orphan sso_state entry in Redis.
+	var bridgePort string
+	if providerName == "apple" && h.deps.CFKV != nil {
+		parsed, err := url.Parse(redirectURI)
+		if err != nil || parsed.Port() == "" {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error_code": "invalid_redirect_uri",
+				"detail":     "explicit loopback port required for apple",
+			})
+			return
+		}
+		bridgePort = parsed.Port()
+	}
+
 	state := randomString(entropyBytes)
 	nonce := randomString(entropyBytes)
 	verifier := randomString(entropyBytes)
@@ -344,6 +376,19 @@ func (h *Handler) Initiate(c *gin.Context) {
 	if err := h.deps.Redis.Set(c.Request.Context(), stateKeyPrefix+state, payload, stateTTL).Err(); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "redis_unavailable"})
 		return
+	}
+
+	// Publish state→loopback-port for the apple-sso-bridge Worker (#973).
+	// Apple-only: Google's loopback redirect works without a bridge. The
+	// port was validated and captured before the state record was written
+	// (see the bridge precondition above). Fail loud — a missing mapping
+	// would otherwise surface minutes later as a dead "session expired"
+	// page after the user typed their Apple credentials (spec F3).
+	if providerName == "apple" && h.deps.CFKV != nil {
+		if err := h.deps.CFKV.Put(c.Request.Context(), state, bridgePort, bridgeStateTTLSeconds); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error_code": "bridge_unavailable"})
+			return
+		}
 	}
 
 	c.JSON(http.StatusOK, gin.H{"auth_url": authURL, "state": state})

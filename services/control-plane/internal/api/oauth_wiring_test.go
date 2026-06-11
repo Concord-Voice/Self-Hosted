@@ -179,3 +179,42 @@ func TestBuildOAuthHandler_BothProvidersEnabled(t *testing.T) {
 		assert.NotNil(t, h, "both providers enabled must yield a non-nil handler")
 	})
 }
+
+// TestBuildOAuthHandler_CloudflareKVBridgeEnabled exercises the enabled
+// branch of the KV-bridge wiring (#973): a real cfkv client is constructed
+// and stored on HandlerDeps without panicking. Behavioral coverage of the
+// bridge write itself lives in internal/oauth's Initiate integration tests;
+// this pins the construction path.
+func TestBuildOAuthHandler_CloudflareKVBridgeEnabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	log := logger.New("test")
+
+	cfg := &config.Config{
+		Environment: "test",
+		CloudflareKVBridge: config.CloudflareKVBridgeConfig{
+			Enabled:     true,
+			AccountID:   "acct-test",
+			NamespaceID: "ns-test",
+			APIToken:    "tok-test",
+		},
+	}
+
+	h := buildOAuthHandler(nil, nil, cfg, nil, log)
+	require.NotNil(t, h, "buildOAuthHandler must construct with the KV bridge enabled")
+}
+
+// TestBuildOAuthHandler_CloudflareKVBridgeDisabled pins the disabled branch
+// (nil putter — Initiate's apple path must no-op, covered behaviorally in
+// internal/oauth tests).
+func TestBuildOAuthHandler_CloudflareKVBridgeDisabled(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	log := logger.New("test")
+
+	cfg := &config.Config{
+		Environment:        "test",
+		CloudflareKVBridge: config.CloudflareKVBridgeConfig{Enabled: false},
+	}
+
+	h := buildOAuthHandler(nil, nil, cfg, nil, log)
+	require.NotNil(t, h)
+}

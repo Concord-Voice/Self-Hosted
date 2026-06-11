@@ -7,6 +7,7 @@ import (
 	"io"
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/cfkv"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/oauth"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
@@ -80,6 +81,23 @@ func buildOAuthHandler(
 		log.Info("Apple SSO disabled (APPLE_SSO_ENABLED=false)")
 	}
 
+	// Cloudflare KV bridge (#973): publishes apple state→loopback-port
+	// mappings for the apple-sso-bridge Worker. Typed-nil trap: only assign
+	// through the interface variable inside the Enabled branch — a bare
+	// `var kvBridge oauth.StatePortPutter` is a true nil interface, whereas
+	// assigning `(*cfkv.Client)(nil)` would defeat the handler's nil check.
+	var kvBridge oauth.StatePortPutter
+	if cfg.CloudflareKVBridge.Enabled {
+		kvBridge = cfkv.New(
+			cfg.CloudflareKVBridge.AccountID,
+			cfg.CloudflareKVBridge.NamespaceID,
+			cfg.CloudflareKVBridge.APIToken,
+		)
+		log.Info("Cloudflare KV bridge enabled (apple-sso-bridge)")
+	} else {
+		log.Info("Cloudflare KV bridge disabled (CLOUDFLARE_KV_BRIDGE_ENABLED=false)")
+	}
+
 	// auditIPKey pseudonymizes client IPs in SSO audit events. Derived (never
 	// reused raw) from JWTSecret via HKDF with a distinct info string so the
 	// audit purpose is cryptographically separated from token signing — and no
@@ -97,6 +115,7 @@ func buildOAuthHandler(
 		Redis:       redisClient,
 		DB:          db,
 		AuthHandler: authHandler,
+		CFKV:        kvBridge,
 		Log:         log,
 		AuditIPKey:  auditIPKey,
 	})

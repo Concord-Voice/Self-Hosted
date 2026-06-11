@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -2024,6 +2025,127 @@ func TestHandler_Apple_LoginShortCircuit(t *testing.T) {
 	require.True(t, ok, "providers field should be a JSON array")
 	assert.Contains(t, providers, "apple",
 		"providers list must include 'apple' when an Apple identity is the only one linked")
+}
+
+// ===========================================================================
+// Cloudflare KV bridge tests (#973)
+// ===========================================================================
+
+// recordingPutter implements the CFKV seam, capturing calls.
+type recordingPutter struct {
+	mu    sync.Mutex
+	calls []putterCall
+	err   error
+}
+type putterCall struct {
+	Key, Value string
+	TTL        int
+}
+
+func (r *recordingPutter) Put(_ context.Context, key, value string, ttl int) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls = append(r.calls, putterCall{key, value, ttl})
+	return r.err
+}
+
+// newSSOTestRigWithCFKV mirrors newSSOTestRig but registers BOTH google and
+// apple fake providers (Initiate only calls AuthorizationURL + Name on the
+// provider, so the registry_test.go fake suffices) and wires the CFKV seam.
+// Also returns the rig's Redis client so tests can assert on state keys.
+func newSSOTestRigWithCFKV(t *testing.T, putter oauth.StatePortPutter) (*gin.Engine, *redis.Client) {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	rdb, cleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(cleanup)
+
+	registry := oauth.NewRegistry()
+	registry.Register(&fakeProvider{name: "google"})
+	registry.Register(&fakeProvider{name: "apple"})
+
+	h := oauth.NewHandler(oauth.HandlerDeps{
+		Registry: registry,
+		Redis:    rdb,
+		CFKV:     putter,
+	})
+	r := gin.New()
+	g := r.Group("/api/v1/auth/sso")
+	g.GET("/:provider", h.Initiate)
+	return r, rdb
+}
+
+// initiateRequest performs GET /api/v1/auth/sso/<provider>?redirect_uri=<uri>
+// — the same request-building shape as TestInitiate_StoresStateInRedis.
+func initiateRequest(t *testing.T, r *gin.Engine, provider, redirectURI string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet,
+		"/api/v1/auth/sso/"+provider+"?redirect_uri="+url.QueryEscape(redirectURI), nil)
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+// TestInitiate_AppleWritesBridgeMapping pins the #973 contract: apple
+// initiates publish state→port to the bridge KV with the stateTTL-aligned
+// TTL; google initiates do not touch the bridge; bridge failure is loud.
+func TestInitiate_AppleWritesBridgeMapping(t *testing.T) {
+	putter := &recordingPutter{}
+	rig, _ := newSSOTestRigWithCFKV(t, putter)
+
+	w := initiateRequest(t, rig, "apple", "http://127.0.0.1:51620/oauth/callback")
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp struct {
+		State string `json:"state"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+
+	require.Len(t, putter.calls, 1)
+	assert.Equal(t, resp.State, putter.calls[0].Key)
+	assert.Equal(t, "51620", putter.calls[0].Value)
+	assert.Equal(t, 600, putter.calls[0].TTL)
+}
+
+func TestInitiate_GoogleDoesNotTouchBridge(t *testing.T) {
+	putter := &recordingPutter{}
+	rig, _ := newSSOTestRigWithCFKV(t, putter)
+	w := initiateRequest(t, rig, "google", "http://127.0.0.1:51620/oauth/callback")
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Empty(t, putter.calls)
+}
+
+func TestInitiate_BridgeFailureIsLoud(t *testing.T) {
+	putter := &recordingPutter{err: fmt.Errorf("cf down")}
+	rig, _ := newSSOTestRigWithCFKV(t, putter)
+	w := initiateRequest(t, rig, "apple", "http://127.0.0.1:51620/oauth/callback")
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Contains(t, w.Body.String(), "bridge_unavailable")
+}
+
+func TestInitiate_NilBridgeIsNoop(t *testing.T) {
+	rig, _ := newSSOTestRigWithCFKV(t, nil)
+	w := initiateRequest(t, rig, "apple", "http://127.0.0.1:51620/oauth/callback")
+	assert.Equal(t, http.StatusOK, w.Code)
+}
+
+// TestInitiate_ApplePortlessRedirectRejected pins the bridge precondition:
+// validateLoopbackRedirect tolerates a portless loopback URI, but the bridge
+// cannot relay without an explicit port — Initiate must fail fast with 400
+// rather than let the flow die minutes later at the Worker (spec F3).
+func TestInitiate_ApplePortlessRedirectRejected(t *testing.T) {
+	putter := &recordingPutter{}
+	rig, rdb := newSSOTestRigWithCFKV(t, putter)
+
+	w := initiateRequest(t, rig, "apple", "http://127.0.0.1/oauth/callback")
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+	assert.Contains(t, w.Body.String(), "invalid_redirect_uri")
+	assert.Empty(t, putter.calls, "no KV write may happen for a rejected redirect")
+
+	// The precondition runs BEFORE the state record is written: a rejected
+	// redirect must not orphan an sso_state entry (the rig's Redis is a
+	// dedicated, flushed test DB, so any key here came from this request).
+	keys, err := rdb.Keys(context.Background(), "sso_state:*").Result()
+	require.NoError(t, err)
+	assert.Empty(t, keys, "rejected redirect must not orphan an sso_state record")
 }
 
 // TestInitiate_EmbedsStateInRecord pins the #972 contract: the sso_state

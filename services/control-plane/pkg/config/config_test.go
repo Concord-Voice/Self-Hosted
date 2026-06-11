@@ -975,3 +975,89 @@ func TestValidate_WarnsOnBroadRFC1918Fallback(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, buf.String(), "TRUSTED_PROXY_CIDRS is the broad RFC1918 fallback")
 }
+
+// Cloudflare KV bridge config tests (#973).
+//
+// Mirrors the AppleSSO gate shape: disabled => zero-value group; enabled =>
+// all three credential fields required, every missing field reported at once.
+
+func TestLoad_CloudflareKVBridge_Disabled(t *testing.T) {
+	t.Setenv("CLOUDFLARE_KV_BRIDGE_ENABLED", "false")
+	t.Setenv("CLOUDFLARE_ACCOUNT_ID", "")
+	t.Setenv("CLOUDFLARE_KV_NAMESPACE_ID", "")
+	t.Setenv("CLOUDFLARE_KV_API_TOKEN", "")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.False(t, cfg.CloudflareKVBridge.Enabled)
+	assert.Empty(t, cfg.CloudflareKVBridge.APIToken)
+}
+
+func TestLoad_CloudflareKVBridge_DefaultIsDisabled(t *testing.T) {
+	t.Setenv("CLOUDFLARE_KV_BRIDGE_ENABLED", "")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.False(t, cfg.CloudflareKVBridge.Enabled)
+}
+
+func TestLoad_CloudflareKVBridge_EnabledWithAllFields(t *testing.T) {
+	t.Setenv("CLOUDFLARE_KV_BRIDGE_ENABLED", "true")
+	t.Setenv("CLOUDFLARE_ACCOUNT_ID", "acct-123")
+	t.Setenv("CLOUDFLARE_KV_NAMESPACE_ID", "ns-456")
+	t.Setenv("CLOUDFLARE_KV_API_TOKEN", "test-token-789")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.True(t, cfg.CloudflareKVBridge.Enabled)
+	assert.Equal(t, "acct-123", cfg.CloudflareKVBridge.AccountID)
+	assert.Equal(t, "ns-456", cfg.CloudflareKVBridge.NamespaceID)
+	assert.Equal(t, "test-token-789", cfg.CloudflareKVBridge.APIToken)
+}
+
+func TestLoad_CloudflareKVBridge_EnabledMissingAllFields_ListsEveryName(t *testing.T) {
+	t.Setenv("CLOUDFLARE_KV_BRIDGE_ENABLED", "true")
+	t.Setenv("CLOUDFLARE_ACCOUNT_ID", "")
+	t.Setenv("CLOUDFLARE_KV_NAMESPACE_ID", "")
+	t.Setenv("CLOUDFLARE_KV_API_TOKEN", "")
+
+	_, err := Load()
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Contains(t, msg, "CLOUDFLARE_ACCOUNT_ID", "error must list AccountID as missing")
+	assert.Contains(t, msg, "CLOUDFLARE_KV_NAMESPACE_ID", "error must list NamespaceID as missing")
+	assert.Contains(t, msg, "CLOUDFLARE_KV_API_TOKEN", "error must list APIToken as missing — accumulating guard, not first-fail")
+}
+
+func TestLoad_CloudflareKVBridge_EnabledMissingToken_OnlyTokenListed(t *testing.T) {
+	t.Setenv("CLOUDFLARE_KV_BRIDGE_ENABLED", "true")
+	t.Setenv("CLOUDFLARE_ACCOUNT_ID", "acct-123")
+	t.Setenv("CLOUDFLARE_KV_NAMESPACE_ID", "ns-456")
+	t.Setenv("CLOUDFLARE_KV_API_TOKEN", "")
+
+	_, err := Load()
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Contains(t, msg, "CLOUDFLARE_KV_API_TOKEN")
+	assert.NotContains(t, msg, "CLOUDFLARE_ACCOUNT_ID,", "present fields must not be listed as missing")
+}
+
+func TestCloudflareKVBridgeConfig_String_Disabled(t *testing.T) {
+	cfg := CloudflareKVBridgeConfig{Enabled: false}
+	assert.Equal(t, "CloudflareKVBridgeConfig{Enabled:false}", cfg.String())
+}
+
+func TestCloudflareKVBridgeConfig_String_RedactsToken(t *testing.T) {
+	cfg := CloudflareKVBridgeConfig{
+		Enabled:     true,
+		AccountID:   "acct-123",
+		NamespaceID: "ns-456",
+		APIToken:    "super-secret-cf-token",
+	}
+	output := cfg.String()
+
+	assert.NotContains(t, output, "super-secret-cf-token", "token must never leak through String()")
+	assert.Contains(t, output, "acct-123")
+	assert.Contains(t, output, "ns-456")
+	assert.Contains(t, output, "REDACTED")
+}
