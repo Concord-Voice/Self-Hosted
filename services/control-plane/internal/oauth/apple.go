@@ -10,7 +10,6 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
-	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -28,15 +27,8 @@ import (
 // roles in the protocol.
 const (
 	appleAuthEndpoint    = "https://appleid.apple.com/auth/authorize"
-	appleTokenEndpoint   = "https://appleid.apple.com/auth/token" // #nosec G101 -- public OIDC endpoint URL, not a credential
 	appleJWKSEndpoint    = "https://appleid.apple.com/auth/keys"
 	applePrivateRelayDom = "privaterelay.appleid.com"
-
-	// defaultAppleClientSecretTTL is the default lifetime of a freshly-signed
-	// client_secret JWT. Apple's hard cap is 6 months (15777000 seconds);
-	// 90 days is operationally conservative — well under the cap, low rotation
-	// noise, comfortably longer than typical service uptime.
-	defaultAppleClientSecretTTL = 90 * 24 * time.Hour // pragma: allowlist secret -- duration constant, not a credential
 )
 
 // AppleConfig is the constructor input for AppleProvider. Mirrored on
@@ -51,15 +43,9 @@ type AppleConfig struct {
 
 	// Endpoint overrides default to Apple's production URLs when empty.
 	// Tests point these at httptest.Server.
-	AuthEndpoint  string
-	TokenEndpoint string
-	JWKSEndpoint  string
-	Issuer        string
-
-	// ClientSecretTTL is how long a freshly-signed client_secret JWT is valid
-	// for. Apple caps at 6 months. Default: 90 days. Tests inject shorter
-	// values to exercise rotation.
-	ClientSecretTTL time.Duration
+	AuthEndpoint string
+	JWKSEndpoint string
+	Issuer       string
 
 	// Clock is injectable for deterministic tests. Defaults to time.Now.
 	Clock func() time.Time
@@ -79,7 +65,6 @@ var _ Provider = (*AppleProvider)(nil)
 type AppleProvider struct {
 	cfg          AppleConfig
 	httpClient   *http.Client
-	clientSecret *appleClientSecretSigner
 	brokerSecret *appleClientSecretSigner
 	clock        func() time.Time
 
@@ -114,17 +99,11 @@ func NewAppleProvider(cfg AppleConfig) (*AppleProvider, error) {
 	if cfg.AuthEndpoint == "" {
 		cfg.AuthEndpoint = appleAuthEndpoint
 	}
-	if cfg.TokenEndpoint == "" {
-		cfg.TokenEndpoint = appleTokenEndpoint
-	}
 	if cfg.JWKSEndpoint == "" {
 		cfg.JWKSEndpoint = appleJWKSEndpoint
 	}
 	if cfg.Issuer == "" {
 		cfg.Issuer = appleIssuer
-	}
-	if cfg.ClientSecretTTL == 0 {
-		cfg.ClientSecretTTL = defaultAppleClientSecretTTL // pragma: allowlist secret -- duration constant, not a credential
 	}
 	clock := cfg.Clock
 	if clock == nil {
@@ -135,13 +114,11 @@ func NewAppleProvider(cfg AppleConfig) (*AppleProvider, error) {
 		httpClient = &http.Client{Timeout: 10 * time.Second}
 	}
 
-	signer := newAppleClientSecretSigner(cfg.TeamID, cfg.ClientID, cfg.KeyID, priv, cfg.ClientSecretTTL)
 	brokerSigner := newAppleClientSecretSigner(cfg.TeamID, cfg.ClientID, cfg.KeyID, priv, brokerClientSecretTTL)
 
 	return &AppleProvider{
 		cfg:          cfg,
 		httpClient:   httpClient,
-		clientSecret: signer,
 		brokerSecret: brokerSigner,
 		clock:        clock,
 	}, nil
@@ -198,61 +175,15 @@ func (a *AppleProvider) BrokerClientSecret(now time.Time) (string, error) {
 	return a.brokerSecret.signed(now)
 }
 
-// Exchange completes the Apple OAuth code exchange.
-//
-// NOTE: the server-side exchange path is superseded by the client-driven
-// architecture (epic #971). Retained as a test-covered fixture until #974
-// lands, then removed. Do not add new production callers.
-//
-// The exchange:
-//  1. signs (or reuses cached) ES256 client_secret JWT
-//  2. POSTs to /auth/token with code, code_verifier, client_id, client_secret, redirect_uri
-//  3. validates the returned id_token signature against Apple's JWKS
-//  4. checks iss, aud, exp, nonce, nonce_supported claims
-//  5. parses optional first-auth user JSON for display name
-//  6. detects relay-email via domain match OR is_private_email claim
-func (a *AppleProvider) Exchange(ctx context.Context, params ExchangeParams) (*UserInfo, error) {
-	redirectURI := a.cfg.RedirectURI
-	if params.RedirectURI != "" {
-		redirectURI = params.RedirectURI
-	}
-
-	secret, err := a.clientSecret.signed(a.clock())
-	if err != nil {
-		return nil, fmt.Errorf("oauth/apple: client_secret JWT: %w", err)
-	}
-
-	tokens, err := a.exchangeCode(ctx, params.Code, params.CodeVerifier, redirectURI, secret)
-	if err != nil {
-		return nil, fmt.Errorf("oauth/apple: code exchange: %w", err)
-	}
-
-	claims, err := a.validateIDToken(ctx, tokens.IDToken, params.Nonce)
-	if err != nil {
-		return nil, fmt.Errorf("oauth/apple: id_token validation: %w", err)
-	}
-
-	// First-auth-name extraction. Apple sends user JSON only on first auth
-	// for this Services ID; subsequent auths leave AppleUserData == "".
-	name := parseAppleUserData(params.AppleUserData)
-
-	email := claims.Email
-	// bool() conversion: appleClaims.IsPrivateEmail / EmailVerified are
-	// appleBool (custom type with underlying bool) to tolerate Apple's
-	// quirk of serializing these as JSON strings on some endpoints.
-	// Convert here at the consuming boundary so downstream APIs see a
-	// regular bool.
-	isRelay := isAppleRelayEmail(email, bool(claims.IsPrivateEmail))
-
-	return &UserInfo{
-		Provider:       "apple",
-		ProviderUserID: claims.Subject,
-		Email:          email,
-		EmailVerified:  bool(claims.EmailVerified),
-		Name:           name,
-		AvatarURL:      "", // Apple does not provide avatars.
-		IsRelayEmail:   isRelay,
-	}, nil
+// Exchange is retired for Apple (#974): the desktop main process drives the
+// code exchange end-to-end and the server re-verifies the resulting id_token
+// at AppleSession (apple_session.go). The method remains only because the
+// Provider interface requires it for Google's still-server-driven flow
+// (until #975) — any caller reaching it is mis-wired and must fail loudly at
+// runtime. The compile-time `var _ Provider = (*AppleProvider)(nil)` check
+// stays intact.
+func (a *AppleProvider) Exchange(_ context.Context, _ ExchangeParams) (*UserInfo, error) {
+	return nil, errors.New("oauth/apple: server-side exchange retired (#974); use POST /auth/sso/apple/session")
 }
 
 // isAppleRelayEmail returns true when either the domain matches Apple's relay
@@ -264,50 +195,6 @@ func isAppleRelayEmail(email string, isPrivate bool) bool {
 		return true
 	}
 	return strings.HasSuffix(strings.ToLower(email), "@"+applePrivateRelayDom)
-}
-
-// appleTokenResponse is the subset of /auth/token's JSON body we consume.
-type appleTokenResponse struct {
-	IDToken string `json:"id_token"`
-	// Apple also returns access_token, refresh_token, token_type, expires_in.
-	// Concord uses the id_token only for OIDC identity.
-}
-
-func (a *AppleProvider) exchangeCode(ctx context.Context, code, codeVerifier, redirectURI, clientSecret string) (*appleTokenResponse, error) {
-	form := url.Values{}
-	form.Set("grant_type", "authorization_code")
-	form.Set("code", code)
-	form.Set("code_verifier", codeVerifier)
-	form.Set("client_id", a.cfg.ClientID)
-	form.Set("client_secret", clientSecret)
-	form.Set("redirect_uri", redirectURI)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.cfg.TokenEndpoint, strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := a.httpClient.Do(req) //nolint:gosec // TokenEndpoint set from trusted config (env or hardcoded default)
-	if err != nil {
-		return nil, fmt.Errorf("HTTP: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, body)
-	}
-
-	var out appleTokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("decode token response: %w", err)
-	}
-	if out.IDToken == "" {
-		return nil, errors.New("token response missing id_token")
-	}
-	return &out, nil
 }
 
 // appleBool unmarshals a JSON value that Apple may serialize as either a

@@ -206,37 +206,6 @@ func TestBrokerClientSecret_FreshSixtySecondJWT(t *testing.T) {
 	assert.Equal(t, now.Unix(), iat)
 }
 
-// TestBrokerClientSecret_DistinctFromExchangeSigner pins the two-instance
-// property: minting a broker secret must not pollute the Exchange signer's
-// cache, and vice versa (their TTLs differ by three orders of magnitude).
-func TestBrokerClientSecret_DistinctFromExchangeSigner(t *testing.T) {
-	key := generateTestKey(t)
-	provider := newTestAppleProviderWithKey(t, key)
-
-	now := time.Date(2026, 6, 11, 8, 0, 0, 0, time.UTC)
-	brokerTok, err := provider.BrokerClientSecret(now)
-	require.NoError(t, err)
-
-	exchangeTok, err := provider.clientSecret.signed(now)
-	require.NoError(t, err)
-
-	brokerExp := jwtExpiry(t, brokerTok, key)
-	exchangeExp := jwtExpiry(t, exchangeTok, key)
-	assert.Equal(t, now.Add(60*time.Second).Unix(), brokerExp)
-	assert.Equal(t, now.Add(90*24*time.Hour).Unix(), exchangeExp)
-}
-
-// jwtExpiry parses tok with key's public half and returns its exp claim.
-func jwtExpiry(t *testing.T, tok string, key *ecdsa.PrivateKey) int64 {
-	t.Helper()
-	parsed, err := jwt.Parse(tok, func(_ *jwt.Token) (interface{}, error) {
-		return &key.PublicKey, nil
-	}, jwt.WithoutClaimsValidation())
-	require.NoError(t, err)
-	claims := parsed.Claims.(jwt.MapClaims)
-	return int64(claims["exp"].(float64))
-}
-
 // newTestAppleProviderWithKey builds a real AppleProvider around a generated
 // P-256 key, PEM-encoding it the way Apple's .p8 export does.
 func newTestAppleProviderWithKey(t *testing.T, key *ecdsa.PrivateKey) *AppleProvider {
@@ -245,12 +214,11 @@ func newTestAppleProviderWithKey(t *testing.T, key *ecdsa.PrivateKey) *AppleProv
 	require.NoError(t, err)
 	pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
 	provider, err := NewAppleProvider(AppleConfig{
-		ClientID:        testClientID,
-		TeamID:          testTeamID,
-		KeyID:           testKeyID,
-		PrivateKey:      pemBytes,
-		RedirectURI:     "http://127.0.0.1:0/oauth/callback",
-		ClientSecretTTL: 90 * 24 * time.Hour,
+		ClientID:    testClientID,
+		TeamID:      testTeamID,
+		KeyID:       testKeyID,
+		PrivateKey:  pemBytes,
+		RedirectURI: "http://127.0.0.1:0/oauth/callback",
 	})
 	require.NoError(t, err)
 	return provider

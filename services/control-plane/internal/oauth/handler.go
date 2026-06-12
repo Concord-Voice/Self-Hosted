@@ -11,6 +11,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -137,6 +138,12 @@ const (
 	ssoBranchNewUser     = "new_user"
 	ssoBranchAccountLink = "account_link"
 )
+
+// maxAppleUserDataBytes caps the apple_user_data field on both Callback and
+// AppleSession — mirrors the renderer loopback's body cap (ssoLoopback.ts
+// MAX_POST_BODY_BYTES). Oversize input silently truncates to "", which is the
+// same legitimate state as Apple's subsequent-auth flow (no name).
+const maxAppleUserDataBytes = 64 * 1024
 
 // ssoStateRecord is the JSON payload stored in Redis under sso_state:<state>.
 // All fields are required for the callback handler to validate the response
@@ -335,27 +342,24 @@ func (h *Handler) Initiate(c *gin.Context) {
 		return
 	}
 
-	// Bridge precondition (#973): validateLoopbackRedirect guarantees
-	// scheme/host/path but not an explicit port, and the apple-sso-bridge
-	// cannot relay without one. Validate BEFORE the state record is written
-	// so a rejected redirect leaves no orphan sso_state entry in Redis.
-	var bridgePort string
-	if providerName == "apple" && h.deps.CFKV != nil {
-		parsed, err := url.Parse(redirectURI)
-		if err != nil || parsed.Port() == "" {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error_code": "invalid_redirect_uri",
-				"detail":     "explicit loopback port required for apple",
-			})
-			return
-		}
-		bridgePort = parsed.Port()
+	clientChallenge, ok := h.initiateClientChallenge(c, providerName)
+	if !ok {
+		return
+	}
+
+	bridgePort, ok := h.initiateBridgePort(c, providerName, redirectURI)
+	if !ok {
+		return
 	}
 
 	state := randomString(entropyBytes)
 	nonce := randomString(entropyBytes)
-	verifier := randomString(entropyBytes)
-	challenge := pkceS256(verifier)
+	verifier := ""
+	challenge := clientChallenge
+	if providerName != "apple" {
+		verifier = randomString(entropyBytes)
+		challenge = pkceS256(verifier)
+	}
 
 	authURL := buildAuthURLWithRedirect(provider, state, nonce, challenge, redirectURI)
 
@@ -383,7 +387,8 @@ func (h *Handler) Initiate(c *gin.Context) {
 	// port was validated and captured before the state record was written
 	// (see the bridge precondition above). Fail loud — a missing mapping
 	// would otherwise surface minutes later as a dead "session expired"
-	// page after the user typed their Apple credentials (spec F3).
+	// page after the user typed their Apple credentials (spec F3). Runs
+	// before the apple response below so a bridge failure surfaces here.
 	if providerName == "apple" && h.deps.CFKV != nil {
 		if err := h.deps.CFKV.Put(c.Request.Context(), state, bridgePort, bridgeStateTTLSeconds); err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error_code": "bridge_unavailable"})
@@ -391,7 +396,59 @@ func (h *Handler) Initiate(c *gin.Context) {
 		}
 	}
 
+	if providerName == "apple" {
+		// The desktop main process binds the id_token's nonce claim locally
+		// (jose verify, spec step 5) before POSTing /session — it needs the
+		// expected value. The server re-verifies against rec.Nonce regardless
+		// (CWE-345 defense in depth), so exposing the nonce grants nothing an
+		// attacker could use without also holding the state record.
+		c.JSON(http.StatusOK, gin.H{"auth_url": authURL, "state": state, "nonce": nonce})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{"auth_url": authURL, "state": state})
+}
+
+// initiateClientChallenge enforces the provider-split PKCE ownership contract
+// (#974): apple is client-driven — the DESKTOP generates the verifier and
+// supplies only the S256 challenge; the server never sees the verifier
+// (CodeVerifier stored as ""). Google remains server-driven until #975, so a
+// client-supplied challenge there is a contract error, not a silently-accepted
+// dual mode (spec R4). On violation it writes the 400 response and returns
+// ok=false.
+func (h *Handler) initiateClientChallenge(c *gin.Context, providerName string) (string, bool) {
+	clientChallenge := c.Query("code_challenge")
+	if providerName == "apple" {
+		if !codeChallengePattern.MatchString(clientChallenge) {
+			c.JSON(http.StatusBadRequest, gin.H{"error_code": "code_challenge_required"})
+			return "", false
+		}
+	} else if clientChallenge != "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error_code": "code_challenge_not_supported"})
+		return "", false
+	}
+	return clientChallenge, true
+}
+
+// initiateBridgePort validates the bridge precondition (#973):
+// validateLoopbackRedirect guarantees scheme/host/path but not an explicit
+// port, and the apple-sso-bridge cannot relay without one. Initiate calls this
+// BEFORE the state record is written so a rejected redirect leaves no orphan
+// sso_state entry in Redis. Non-apple providers (and a nil CFKV) pass through
+// with an empty port. On violation it writes the 400 response and returns
+// ok=false.
+func (h *Handler) initiateBridgePort(c *gin.Context, providerName, redirectURI string) (string, bool) {
+	if providerName != "apple" || h.deps.CFKV == nil {
+		return "", true
+	}
+	parsed, err := url.Parse(redirectURI)
+	if err != nil || parsed.Port() == "" {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error_code": "invalid_redirect_uri",
+			"detail":     "explicit loopback port required for apple",
+		})
+		return "", false
+	}
+	return parsed.Port(), true
 }
 
 // validateLoopbackRedirect enforces RFC 8252 §7.3 — desktop app SSO must use a
@@ -436,6 +493,12 @@ func pkceS256(verifier string) string {
 	return base64.RawURLEncoding.EncodeToString(h[:])
 }
 
+// codeChallengePattern bounds the client-supplied PKCE S256 code_challenge
+// (#974, RFC 7636 §4.2): base64url charset, 43–128 chars. An S256 challenge
+// is exactly 43 chars (SHA-256, base64url-unpadded); the upper bound
+// tolerates future hash agility without admitting unbounded input.
+var codeChallengePattern = regexp.MustCompile(`^[A-Za-z0-9_-]{43,128}$`)
+
 // buildAuthURLWithRedirect overrides redirect_uri at request time so that
 // concurrent OAuth attempts from different ephemeral loopback ports do not
 // share a single provider-config value. The provider builds the canonical
@@ -457,15 +520,16 @@ func buildAuthURLWithRedirect(p Provider, state, nonce, challenge, redirectURI s
 // callbackRequest is the JSON body the renderer POSTs after the OS browser
 // hands back ?code&state on the loopback redirect.
 //
-// AppleUserData is populated only by the Apple flow: Apple's first-auth
-// callback delivers a "user" form-encoded field (JSON containing the user's
-// chosen first/last name) that we forward verbatim to the AppleProvider for
-// display-name extraction. Google clients omit the field; encoding/json
-// zero-values it on absence, so the wire format remains backwards-compatible
-// for callers that don't know it exists. Never logged in any error path —
-// the field can carry user-supplied PII (names) and a malicious renderer
-// could fabricate the contents (we treat it as an opaque UX-suggestion blob,
-// not an authoritative identity signal).
+// AppleUserData is LEGACY here: apple POSTs to Callback are 410-gated since
+// #974, so the field survives only for wire-format stability of the google
+// path (which never populates it). The apple first-auth "user" JSON (the
+// user's chosen first/last name) now travels via
+// appleSessionRequest.AppleUserData on POST /session. Google clients omit
+// the field; encoding/json zero-values it on absence, so the wire format
+// remains backwards-compatible for callers that don't know it exists. Never
+// logged in any error path — the field can carry user-supplied PII (names)
+// and a malicious renderer could fabricate the contents (we treat it as an
+// opaque UX-suggestion blob, not an authoritative identity signal).
 type callbackRequest struct {
 	Code          string `json:"code" binding:"required"`
 	State         string `json:"state" binding:"required"`
@@ -506,6 +570,16 @@ func (h *Handler) Callback(c *gin.Context) {
 	provider, err := h.deps.Registry.Get(providerName)
 	if err != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error_code": "unknown_provider"})
+		return
+	}
+
+	// #974 (R5): the server-side Apple code exchange is retired — the desktop
+	// drives the exchange and posts the verified id_token to AppleSession.
+	// 410 Gone (not 404): the route existed and is deliberately withdrawn; an
+	// old client landing here is a version-skew signal, not a typo. Gate sits
+	// after Registry.Get so apple-disabled deployments still 404.
+	if providerName == "apple" {
+		c.JSON(http.StatusGone, gin.H{"error_code": "apple_callback_retired"})
 		return
 	}
 
@@ -561,7 +635,6 @@ func (h *Handler) Callback(c *gin.Context) {
 	// otherwise force the provider to JSON-parse arbitrary input. On overflow
 	// we silently truncate to "" — parseAppleUserData("") returns "" which
 	// is the same legitimate state as Apple's subsequent-auth flow (no name).
-	const maxAppleUserDataBytes = 64 * 1024
 	appleUserData := req.AppleUserData
 	if len(appleUserData) > maxAppleUserDataBytes {
 		appleUserData = ""

@@ -371,6 +371,10 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 			//   client-driven Apple exchange (#971/#972). Tighter window —
 			//   each legitimate login needs exactly one mint; 5/min absorbs
 			//   retries while capping signing-oracle abuse (CWE-307).
+			// AppleSession (10/15min): terminal step of the client-driven
+			//   Apple exchange (#974) — server-side re-verification of the
+			//   desktop-posted id_token. Callback parity by design: it
+			//   replaces Callback for apple, one POST per attempt.
 			ssoRoutes := authRoutes.Group("/sso")
 			{
 				ssoRoutes.GET("/:provider",
@@ -392,6 +396,10 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				ssoRoutes.POST("/:provider/sign-client-secret",
 					middleware.RateLimitByIP(redis, 5, time.Minute),
 					oauthHandler.SignAppleClientSecret,
+				)
+				ssoRoutes.POST("/:provider/session",
+					middleware.RateLimitByIP(redis, 10, 15*time.Minute),
+					oauthHandler.AppleSession,
 				)
 			}
 		}
