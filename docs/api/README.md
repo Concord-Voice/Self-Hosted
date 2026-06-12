@@ -4,9 +4,9 @@ OpenAPI 3.0 specification for the Concord Voice Control Plane API.
 
 ## Files
 
-- [openapi.yaml](./openapi.yaml) — OpenAPI spec (88 documented ops across 66 paths)
+- [openapi.yaml](./openapi.yaml) — OpenAPI spec (232 documented ops across 187 paths — full live-route coverage, drift-gated)
 
-> **Note:** The spec documents 88 HTTP operations but there are 269 actual API routes in the codebase. Phase 2A additions (MFA, RBAC, media, ownership, email verification, client config, updates) are not yet in the spec. Full regeneration is tracked as a Phase 2B task.
+> **Drift gate (#822):** the spec is kept in lockstep with `services/control-plane/internal/api/router.go` by `scripts/api/check-openapi-coverage.sh` (pr-ci `verify-openapi-coverage` job) — CI fails when a route is added/removed without a matching spec edit, in either direction. Inventory tooling: `scripts/api/extract-routes.py` (`--list` / `--missing` / `--stale` / `--check`).
 
 ## Viewing the Spec
 
