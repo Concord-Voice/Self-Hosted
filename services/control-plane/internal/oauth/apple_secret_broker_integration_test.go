@@ -281,9 +281,6 @@ type failingBrokerProvider struct{ fail bool }
 
 func (f *failingBrokerProvider) Name() string                           { return "apple" }
 func (f *failingBrokerProvider) AuthorizationURL(_, _, _ string) string { return "https://fake/auth" }
-func (f *failingBrokerProvider) Exchange(_ context.Context, _ oauth.ExchangeParams) (*oauth.UserInfo, error) {
-	return nil, fmt.Errorf("fake provider: Exchange not implemented")
-}
 func (f *failingBrokerProvider) BrokerClientSecret(_ time.Time) (string, error) {
 	if f.fail {
 		return "", fmt.Errorf("simulated signer failure")

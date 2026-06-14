@@ -19,8 +19,8 @@ import (
 )
 
 // newDualProviderInitiateRig wires Initiate with BOTH providers registered so
-// the provider-split PKCE contract (#974, spec R4) is pinned from one rig:
-// apple REQUIRES a client-supplied code_challenge; google REJECTS one.
+// the PKCE contract is pinned from one rig: both apple and google REQUIRE a
+// client-supplied code_challenge (#974/#975).
 func newDualProviderInitiateRig(t *testing.T) (*gin.Engine, *redis.Client) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -28,9 +28,8 @@ func newDualProviderInitiateRig(t *testing.T) (*gin.Engine, *redis.Client) {
 	t.Cleanup(cleanup)
 
 	google, err := oauth.NewGoogleProvider(oauth.GoogleConfig{
-		ClientID:     "test-client.apps.googleusercontent.com",
-		ClientSecret: "test-secret", // pragma: allowlist secret
-		RedirectURI:  "http://127.0.0.1:0/oauth/callback",
+		ClientID:    "test-client.apps.googleusercontent.com",
+		RedirectURI: "http://127.0.0.1:0/oauth/callback",
 	})
 	require.NoError(t, err)
 	apple, err := oauth.NewAppleProvider(oauth.AppleConfig{
@@ -123,30 +122,66 @@ func TestInitiate_Apple_EmbedsClientChallenge_ReturnsNonce_EmptyVerifier(t *test
 	assert.Empty(t, rec.CodeVerifier, "apple records must store NO verifier — the client owns it (#974)")
 }
 
-func TestInitiate_Google_RejectsClientChallenge(t *testing.T) {
+// TestInitiate_Google_RequiresCodeChallenge mirrors TestInitiate_Apple_RequiresCodeChallenge:
+// after #975 google is also client-driven, so a missing/malformed challenge
+// returns 400 code_challenge_required (identical to apple's gate).
+func TestInitiate_Google_RequiresCodeChallenge(t *testing.T) {
 	r, _ := newDualProviderInitiateRig(t)
-	w := getInitiate(r, "google", strings.Repeat("a", 43))
-	require.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "code_challenge_not_supported")
+
+	cases := map[string]string{
+		"absent":      "",
+		"too_short":   strings.Repeat("a", 42),
+		"too_long":    strings.Repeat("a", 129),
+		"bad_charset": strings.Repeat("a", 42) + "+",
+	}
+	for name, challenge := range cases {
+		t.Run(name, func(t *testing.T) {
+			w := getInitiate(r, "google", challenge)
+			require.Equal(t, http.StatusBadRequest, w.Code)
+			assert.Contains(t, w.Body.String(), "code_challenge_required")
+		})
+	}
 }
 
-func TestInitiate_Google_ContractFrozen_NoNonce_ServerVerifier(t *testing.T) {
+// TestInitiate_Google_EmbedsClientChallenge_ReturnsNonce_EmptyVerifier mirrors
+// TestInitiate_Apple_EmbedsClientChallenge_ReturnsNonce_EmptyVerifier: after
+// #975 google returns nonce + embeds the CLIENT challenge in the auth URL and
+// stores an empty CodeVerifier (the client owns the verifier).
+func TestInitiate_Google_EmbedsClientChallenge_ReturnsNonce_EmptyVerifier(t *testing.T) {
 	r, rdb := newDualProviderInitiateRig(t)
-	w := getInitiate(r, "google", "")
+	challenge := strings.Repeat("b", 43)
+
+	w := getInitiate(r, "google", challenge)
 	require.Equal(t, http.StatusOK, w.Code)
 
-	var resp map[string]any
+	var resp struct {
+		AuthURL string `json:"auth_url"`
+		State   string `json:"state"`
+		Nonce   string `json:"nonce"`
+	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
-	_, hasNonce := resp["nonce"]
-	assert.False(t, hasNonce, "google response shape is frozen until #975 — no nonce field")
+	require.NotEmpty(t, resp.AuthURL)
+	require.NotEmpty(t, resp.State)
+	require.NotEmpty(t, resp.Nonce, "google initiate must return nonce for desktop id_token binding (#975)")
 
-	state, _ := resp["state"].(string)
-	require.NotEmpty(t, state)
-	raw, err := rdb.Get(context.Background(), "sso_state:"+state).Bytes()
+	parsed, err := url.Parse(resp.AuthURL)
+	require.NoError(t, err)
+	q := parsed.Query()
+	assert.Equal(t, challenge, q.Get("code_challenge"),
+		"authorize URL must embed the CLIENT-supplied challenge, not a server-generated one")
+	assert.Equal(t, "S256", q.Get("code_challenge_method"))
+
+	raw, err := rdb.Get(context.Background(), "sso_state:"+resp.State).Bytes()
 	require.NoError(t, err)
 	var rec struct {
+		Provider     string `json:"provider"`
+		State        string `json:"state"`
+		Nonce        string `json:"nonce"`
 		CodeVerifier string `json:"code_verifier"`
 	}
 	require.NoError(t, json.Unmarshal(raw, &rec))
-	assert.NotEmpty(t, rec.CodeVerifier, "google keeps the server-side verifier until #975")
+	assert.Equal(t, "google", rec.Provider)
+	assert.Equal(t, resp.State, rec.State)
+	assert.Equal(t, resp.Nonce, rec.Nonce, "record nonce must match the response nonce")
+	assert.Empty(t, rec.CodeVerifier, "google records must store NO verifier — the client owns it (#975)")
 }

@@ -39,7 +39,7 @@ type AppleConfig struct {
 	TeamID      string // 10-char Apple Developer Team ID
 	KeyID       string // 10-char Apple Sign-In Key ID
 	PrivateKey  []byte // #nosec G117 G101 -- False positive: config field name, actual key loaded from env (.p8 PEM bytes)
-	RedirectURI string // per-request loopback URI (overridable via ExchangeParams)
+	RedirectURI string // per-request loopback URI supplied at Initiate time
 
 	// Endpoint overrides default to Apple's production URLs when empty.
 	// Tests point these at httptest.Server.
@@ -173,17 +173,6 @@ func (a *AppleProvider) AuthorizationURL(state, nonce, codeChallenge string) str
 // clients. See the #972 spec, finding F1.
 func (a *AppleProvider) BrokerClientSecret(now time.Time) (string, error) {
 	return a.brokerSecret.signed(now)
-}
-
-// Exchange is retired for Apple (#974): the desktop main process drives the
-// code exchange end-to-end and the server re-verifies the resulting id_token
-// at AppleSession (apple_session.go). The method remains only because the
-// Provider interface requires it for Google's still-server-driven flow
-// (until #975) — any caller reaching it is mis-wired and must fail loudly at
-// runtime. The compile-time `var _ Provider = (*AppleProvider)(nil)` check
-// stays intact.
-func (a *AppleProvider) Exchange(_ context.Context, _ ExchangeParams) (*UserInfo, error) {
-	return nil, errors.New("oauth/apple: server-side exchange retired (#974); use POST /auth/sso/apple/session")
 }
 
 // isAppleRelayEmail returns true when either the domain matches Apple's relay

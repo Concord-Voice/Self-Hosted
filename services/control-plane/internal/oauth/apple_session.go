@@ -1,6 +1,7 @@
 package oauth
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
@@ -23,12 +24,14 @@ type appleSessionRequest struct {
 	AppleUserData string `json:"apple_user_data,omitempty"`
 }
 
-// AppleSession implements POST /api/v1/auth/sso/:provider/session (#974) —
-// the terminal server step of the client-driven Apple exchange.
+// ProviderSession implements POST /api/v1/auth/sso/:provider/session —
+// the terminal server step of the client-driven OAuth exchange for supported
+// providers (apple, google). Renamed from AppleSession (#975: widened to google).
 //
 // Flow:
-//  1. Provider gate: apple-only until #975 migrates Google (404 otherwise,
-//     broker parity).
+//  1. Provider gate: apple|google only (404 for unknown providers, broker
+//     parity). Type-switch on the concrete provider type gates per-provider
+//     id_token verification without adding a new interface method.
 //  2. State validation — error class `invalid_state` (401): record lookup,
 //     GET-then-DEL one-shot (Callback parity; GETDEL is the tracked
 //     hardening), constant-time compare against the record-embedded copy
@@ -37,29 +40,22 @@ type appleSessionRequest struct {
 //     key earlier in the flow — independent keys, compatible orderings.
 //  3. id_token verification — error class `invalid_id_token` (401): the
 //     existing #271 verifier (signature via JWKS with RS256-only keyfunc,
-//     iss/aud/exp/iat, nonce binding against rec.Nonce, nonce_supported).
-//     The two 401 classes exist because the client remediation differs
+//     iss/aud/exp/iat, nonce binding against rec.Nonce, nonce_supported for
+//     apple). The two 401 classes exist because the client remediation differs
 //     (restart the flow vs never-retry-this-token); WHICH check failed
 //     within a class stays opaque.
 //  4. Email-verified gate (403, Callback parity).
-//  5. parseAppleUserData + isAppleRelayEmail → UserInfo (the helpers the
-//     retired Exchange consumed), then classifyCallback + the existing
-//     respond* terminal step — byte-identical response shapes, so the
-//     renderer's register/link/MFA paths are untouched.
-func (h *Handler) AppleSession(c *gin.Context) {
-	if c.Param("provider") != "apple" {
+//  5. Provider-specific UserInfo construction, then classifyCallback + the
+//     existing respond* terminal step — byte-identical response shapes, so
+//     the renderer's register/link/MFA paths are untouched.
+func (h *Handler) ProviderSession(c *gin.Context) {
+	providerName := c.Param("provider")
+	if providerName != "apple" && providerName != "google" {
 		c.JSON(http.StatusNotFound, gin.H{"error_code": "unknown_provider"})
 		return
 	}
-	provider, err := h.deps.Registry.Get("apple")
+	provider, err := h.deps.Registry.Get(providerName)
 	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error_code": "unknown_provider"})
-		return
-	}
-	apple, ok := provider.(*AppleProvider)
-	if !ok {
-		// A registered "apple" that is not the concrete AppleProvider has no
-		// validateIDToken — treat as unconfigured rather than 500.
 		c.JSON(http.StatusNotFound, gin.H{"error_code": "unknown_provider"})
 		return
 	}
@@ -92,34 +88,27 @@ func (h *Handler) AppleSession(c *gin.Context) {
 		return
 	}
 	// Provider names are not secret material — plain equality is correct.
-	if rec.Provider != "apple" {
+	if rec.Provider != providerName {
 		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "invalid_state"})
 		return
 	}
 
-	claims, err := apple.validateIDToken(ctx, req.IDToken, rec.Nonce)
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "invalid_id_token"})
+	// Per-provider id_token verification via concrete type-assertion.
+	// This avoids adding Exchange (or a new interface method) for what is
+	// purely server-side re-verification of a client-minted token.
+	var info *UserInfo
+	var ok bool
+	switch p := provider.(type) {
+	case *AppleProvider:
+		info, ok = h.appleSessionUserInfo(ctx, c, p, &req, rec.Nonce)
+	case *GoogleProvider:
+		info, ok = h.googleSessionUserInfo(ctx, c, p, rec.Nonce, req.IDToken)
+	default:
+		c.JSON(http.StatusNotFound, gin.H{"error_code": "unknown_provider"})
 		return
 	}
-
-	if !bool(claims.EmailVerified) {
-		c.JSON(http.StatusForbidden, gin.H{"error_code": "oauth_email_unverified"})
+	if !ok {
 		return
-	}
-
-	appleUserData := req.AppleUserData
-	if len(appleUserData) > maxAppleUserDataBytes {
-		appleUserData = ""
-	}
-	info := &UserInfo{
-		Provider:       "apple",
-		ProviderUserID: claims.Subject,
-		Email:          claims.Email,
-		EmailVerified:  bool(claims.EmailVerified),
-		Name:           parseAppleUserData(appleUserData),
-		AvatarURL:      "", // Apple does not provide avatars.
-		IsRelayEmail:   isAppleRelayEmail(claims.Email, bool(claims.IsPrivateEmail)),
 	}
 
 	switch h.classifyCallback(ctx, info) {
@@ -130,4 +119,53 @@ func (h *Handler) AppleSession(c *gin.Context) {
 	default: // branchNewUser
 		h.respondNewUser(c, info)
 	}
+}
+
+// appleSessionUserInfo verifies the Apple id_token and builds UserInfo, writing
+// the error response and returning ok=false on any failure.
+func (h *Handler) appleSessionUserInfo(ctx context.Context, c *gin.Context, p *AppleProvider, req *appleSessionRequest, nonce string) (*UserInfo, bool) {
+	claims, vErr := p.validateIDToken(ctx, req.IDToken, nonce)
+	if vErr != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "invalid_id_token"})
+		return nil, false
+	}
+	if !bool(claims.EmailVerified) {
+		c.JSON(http.StatusForbidden, gin.H{"error_code": "oauth_email_unverified"})
+		return nil, false
+	}
+	appleUserData := req.AppleUserData
+	if len(appleUserData) > maxAppleUserDataBytes {
+		appleUserData = ""
+	}
+	return &UserInfo{
+		Provider:       "apple",
+		ProviderUserID: claims.Subject,
+		Email:          claims.Email,
+		EmailVerified:  bool(claims.EmailVerified),
+		Name:           parseAppleUserData(appleUserData),
+		AvatarURL:      "",
+		IsRelayEmail:   isAppleRelayEmail(claims.Email, bool(claims.IsPrivateEmail)),
+	}, true
+}
+
+// googleSessionUserInfo verifies the Google id_token and builds UserInfo.
+func (h *Handler) googleSessionUserInfo(ctx context.Context, c *gin.Context, p *GoogleProvider, nonce, idToken string) (*UserInfo, bool) {
+	claims, vErr := p.validateIDToken(ctx, idToken, nonce)
+	if vErr != nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "invalid_id_token"})
+		return nil, false
+	}
+	if !claims.EmailVerified {
+		c.JSON(http.StatusForbidden, gin.H{"error_code": "oauth_email_unverified"})
+		return nil, false
+	}
+	return &UserInfo{
+		Provider:       "google",
+		ProviderUserID: claims.Sub,
+		Email:          claims.Email,
+		EmailVerified:  claims.EmailVerified,
+		Name:           claims.Name,
+		AvatarURL:      claims.Picture,
+		IsRelayEmail:   false,
+	}, true
 }

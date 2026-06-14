@@ -28,12 +28,11 @@ import (
 // (Enabled=false). A NewGoogleProvider failure here is fatal because it
 // means a previously-validated config has somehow regressed — keep loud.
 //
-// The seed RedirectURI is a fallback used only when ExchangeParams.RedirectURI
-// is empty. Each /sso/google initiate request supplies the real loopback URI
-// (via redirect_uri query param), which gets stored in the sso_state record
-// and replayed at exchange time so the auth and token requests match per
-// RFC 6749 §4.1.3. This lets concurrent OAuth attempts on different
-// ephemeral loopback ports coexist without server-side reconfiguration.
+// The seed RedirectURI is a fallback — each /sso/:provider initiate request
+// supplies the real loopback URI (via redirect_uri query param), stored in the
+// sso_state record and included in the auth URL per RFC 6749 §4.1.3. This
+// lets concurrent OAuth attempts on different ephemeral loopback ports coexist
+// without server-side reconfiguration.
 func buildOAuthHandler(
 	db *sql.DB,
 	redisClient *redis.Client,
@@ -44,11 +43,10 @@ func buildOAuthHandler(
 	registry := oauth.NewRegistry()
 	if cfg.GoogleSSO.Enabled {
 		provider, err := oauth.NewGoogleProvider(oauth.GoogleConfig{
-			ClientID:     cfg.GoogleSSO.ClientID,
-			ClientSecret: cfg.GoogleSSO.ClientSecret,
+			ClientID: cfg.GoogleSSO.ClientID,
 			// Fallback only — the constructor requires a non-empty RedirectURI,
-			// but every production request overrides via ExchangeParams.RedirectURI
-			// from the sso_state record. See doc comment above.
+			// but every production request supplies the real loopback URI via
+			// redirect_uri query param (stored in sso_state). See doc comment above.
 			RedirectURI: "http://127.0.0.1:0/oauth/callback",
 		})
 		if err != nil {

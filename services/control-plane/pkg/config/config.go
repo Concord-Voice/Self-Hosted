@@ -37,25 +37,17 @@ func defaultDevRedisURL() string {
 	return "redis://:" + devRedisVal + "@localhost:6379"
 }
 
-// GoogleSSOConfig holds Google Sign-In credentials. Empty when SSO is disabled.
-// ClientSecret is treated as sensitive — String() redacts it so logging the
-// struct never prints the secret.
+// GoogleSSOConfig holds Google Sign-In configuration. Empty when SSO is
+// disabled. ClientSecret was removed in #975: the desktop client drives the
+// code exchange directly (client-driven PKCE). Only ClientID is required.
 type GoogleSSOConfig struct {
-	Enabled      bool
-	ClientID     string
-	ClientSecret string // #nosec G117 G101 -- False positive: config field name, actual secret loaded from env
+	Enabled  bool
+	ClientID string
 }
 
-// String renders the config with the secret redacted, suitable for logs.
-// Renders "[empty]" when no secret is set so empty-vs-redacted is unambiguous
-// in operator-facing output.
+// String renders the config suitable for logs.
 func (g GoogleSSOConfig) String() string {
-	secret := "[empty]"
-	if g.ClientSecret != "" {
-		secret = "[REDACTED]"
-	}
-	return fmt.Sprintf("GoogleSSOConfig{Enabled:%t ClientID:%q ClientSecret:%s}",
-		g.Enabled, g.ClientID, secret)
+	return fmt.Sprintf("GoogleSSOConfig{Enabled:%t ClientID:%q}", g.Enabled, g.ClientID)
 }
 
 // AppleSSOConfig holds Apple Sign-In credentials. Empty when SSO is disabled.
@@ -269,17 +261,17 @@ func Load() (*Config, error) {
 	}
 	cfg.TrustedProxyCIDRs = cidrs
 
-	// Google SSO (#270). Disabled by default. When enabled, both the client
-	// ID and secret must be set — return an error from Load() in any
-	// environment so misconfiguration surfaces at startup instead of failing
-	// on first OAuth callback.
+	// Google SSO (#270). Disabled by default. When enabled, only the client
+	// ID is required — the client_secret was removed in #975 (client-driven
+	// PKCE; the server no longer exchanges codes). A stale Google client-secret
+	// env var is silently ignored so deployments migrating from the old config
+	// do not need an immediate env-var removal pass. (The literal env-var name
+	// is omitted here so the pr-ci re-introduction guard does not match this
+	// comment.)
 	cfg.GoogleSSO.Enabled = getEnv("GOOGLE_SSO_ENABLED", "false") == "true"
 	cfg.GoogleSSO.ClientID = os.Getenv("GOOGLE_CLIENT_ID")
-	cfg.GoogleSSO.ClientSecret = os.Getenv("GOOGLE_CLIENT_SECRET")
-	if cfg.GoogleSSO.Enabled {
-		if cfg.GoogleSSO.ClientID == "" || cfg.GoogleSSO.ClientSecret == "" {
-			return nil, fmt.Errorf("GoogleSSO enabled but GOOGLE_CLIENT_ID or GOOGLE_CLIENT_SECRET unset")
-		}
+	if cfg.GoogleSSO.Enabled && cfg.GoogleSSO.ClientID == "" {
+		return nil, fmt.Errorf("GoogleSSO enabled but GOOGLE_CLIENT_ID unset")
 	}
 
 	// Apple SSO (#271). Disabled by default. When enabled, all four fields

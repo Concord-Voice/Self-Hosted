@@ -3,7 +3,6 @@ package oauth
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -93,7 +92,7 @@ type AuthAdapter interface {
 	ValidatePasswordStrength(password string) error
 }
 
-// Handler serves the four SSO endpoints (Initiate, Callback, Link, Complete).
+// Handler serves the SSO endpoints (Initiate, ProviderSession, Link, Complete).
 type Handler struct {
 	deps HandlerDeps
 }
@@ -107,7 +106,7 @@ const (
 	// ssoTokenKeyPrefix namespaces the short-lived sso_token issued after
 	// successful provider exchange (consumed by the link-or-complete step).
 	ssoTokenKeyPrefix = "sso_token:" // #nosec G101 -- key prefix, not a credential
-	// stateTTL bounds how long an in-flight Initiate->Callback can take.
+	// stateTTL bounds how long an in-flight Initiate->Session can take.
 	stateTTL = 10 * time.Minute
 	// ssoTokenTTL bounds the link-or-complete window after callback.
 	ssoTokenTTL = 5 * time.Minute
@@ -354,12 +353,11 @@ func (h *Handler) Initiate(c *gin.Context) {
 
 	state := randomString(entropyBytes)
 	nonce := randomString(entropyBytes)
+	// Both apple and google are client-driven after #974/#975: the desktop
+	// generates the verifier and supplies only the S256 challenge. The server
+	// never sees the verifier (CodeVerifier stored as "").
 	verifier := ""
 	challenge := clientChallenge
-	if providerName != "apple" {
-		verifier = randomString(entropyBytes)
-		challenge = pkceS256(verifier)
-	}
 
 	authURL := buildAuthURLWithRedirect(provider, state, nonce, challenge, redirectURI)
 
@@ -396,34 +394,23 @@ func (h *Handler) Initiate(c *gin.Context) {
 		}
 	}
 
-	if providerName == "apple" {
-		// The desktop main process binds the id_token's nonce claim locally
-		// (jose verify, spec step 5) before POSTing /session — it needs the
-		// expected value. The server re-verifies against rec.Nonce regardless
-		// (CWE-345 defense in depth), so exposing the nonce grants nothing an
-		// attacker could use without also holding the state record.
-		c.JSON(http.StatusOK, gin.H{"auth_url": authURL, "state": state, "nonce": nonce})
-		return
-	}
-	c.JSON(http.StatusOK, gin.H{"auth_url": authURL, "state": state})
+	// All client-driven providers (apple, google after #974/#975) return the
+	// nonce so the desktop can bind the id_token locally before POSTing
+	// /session. The server re-verifies against rec.Nonce regardless
+	// (CWE-345 defense in depth), so exposing the nonce grants nothing an
+	// attacker could use without also holding the state record.
+	c.JSON(http.StatusOK, gin.H{"auth_url": authURL, "state": state, "nonce": nonce})
 }
 
-// initiateClientChallenge enforces the provider-split PKCE ownership contract
-// (#974): apple is client-driven — the DESKTOP generates the verifier and
-// supplies only the S256 challenge; the server never sees the verifier
-// (CodeVerifier stored as ""). Google remains server-driven until #975, so a
-// client-supplied challenge there is a contract error, not a silently-accepted
-// dual mode (spec R4). On violation it writes the 400 response and returns
-// ok=false.
-func (h *Handler) initiateClientChallenge(c *gin.Context, providerName string) (string, bool) {
+// initiateClientChallenge enforces the client-driven PKCE ownership contract
+// (#974/#975): ALL providers are client-driven — the DESKTOP generates the
+// verifier and supplies only the S256 challenge; the server never sees the
+// verifier (CodeVerifier stored as ""). On a missing/malformed challenge it
+// writes the 400 response and returns ok=false.
+func (h *Handler) initiateClientChallenge(c *gin.Context, _ string) (string, bool) {
 	clientChallenge := c.Query("code_challenge")
-	if providerName == "apple" {
-		if !codeChallengePattern.MatchString(clientChallenge) {
-			c.JSON(http.StatusBadRequest, gin.H{"error_code": "code_challenge_required"})
-			return "", false
-		}
-	} else if clientChallenge != "" {
-		c.JSON(http.StatusBadRequest, gin.H{"error_code": "code_challenge_not_supported"})
+	if !codeChallengePattern.MatchString(clientChallenge) {
+		c.JSON(http.StatusBadRequest, gin.H{"error_code": "code_challenge_required"})
 		return "", false
 	}
 	return clientChallenge, true
@@ -486,13 +473,6 @@ func randomString(nBytes int) string {
 	return base64.RawURLEncoding.EncodeToString(b)
 }
 
-// pkceS256 computes the PKCE S256 code_challenge per RFC 7636: SHA256 of the
-// verifier, base64url-encoded without padding.
-func pkceS256(verifier string) string {
-	h := sha256.Sum256([]byte(verifier))
-	return base64.RawURLEncoding.EncodeToString(h[:])
-}
-
 // codeChallengePattern bounds the client-supplied PKCE S256 code_challenge
 // (#974, RFC 7636 §4.2): base64url charset, 43–128 chars. An S256 challenge
 // is exactly 43 chars (SHA-256, base64url-unpadded); the upper bound
@@ -517,27 +497,8 @@ func buildAuthURLWithRedirect(p Provider, state, nonce, challenge, redirectURI s
 	return parsed.String()
 }
 
-// callbackRequest is the JSON body the renderer POSTs after the OS browser
-// hands back ?code&state on the loopback redirect.
-//
-// AppleUserData is LEGACY here: apple POSTs to Callback are 410-gated since
-// #974, so the field survives only for wire-format stability of the google
-// path (which never populates it). The apple first-auth "user" JSON (the
-// user's chosen first/last name) now travels via
-// appleSessionRequest.AppleUserData on POST /session. Google clients omit
-// the field; encoding/json zero-values it on absence, so the wire format
-// remains backwards-compatible for callers that don't know it exists. Never
-// logged in any error path — the field can carry user-supplied PII (names)
-// and a malicious renderer could fabricate the contents (we treat it as an
-// opaque UX-suggestion blob, not an authoritative identity signal).
-type callbackRequest struct {
-	Code          string `json:"code" binding:"required"`
-	State         string `json:"state" binding:"required"`
-	AppleUserData string `json:"apple_user_data,omitempty"`
-}
-
 // callbackBranch identifies which scenario the user fell into after a
-// successful provider exchange. The four-way classification is documented in
+// successful provider exchange. The three-way classification is documented in
 // the design spec's §4.4 / §7.
 type callbackBranch int
 
@@ -546,128 +507,6 @@ const (
 	branchExistingSSO                       // (provider, sub) is already linked.
 	branchAccountLink                       // No SSO link, but verified email matches a user.
 )
-
-// Callback handles POST /api/v1/auth/sso/:provider/callback.
-//
-// Flow:
-//  1. Validate state (single-use, CSRF/replay defense).
-//  2. Exchange the code at the provider; validate the id_token end-to-end.
-//  3. If the provider asserts email_verified=false, refuse (403).
-//  4. Otherwise, classify and respond:
-//     - existing-SSO  → access/refresh OR mfa_challenge_token
-//     - email-match   → account_link_available + sso_token + masked_email
-//     - new-user      → sso_registration_required + sso_token + email
-//
-// Error responses use stable error_code strings the renderer can map to UX.
-// Underlying errors are deliberately not surfaced to the response body.
-func (h *Handler) Callback(c *gin.Context) {
-	providerName := c.Param("provider")
-	if providerName == "" {
-		// Fallback for hard-coded route /sso/google (in case routes are wired
-		// without a path parameter during incremental rollout).
-		providerName = "google"
-	}
-	provider, err := h.deps.Registry.Get(providerName)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error_code": "unknown_provider"})
-		return
-	}
-
-	// #974 (R5): the server-side Apple code exchange is retired — the desktop
-	// drives the exchange and posts the verified id_token to AppleSession.
-	// 410 Gone (not 404): the route existed and is deliberately withdrawn; an
-	// old client landing here is a version-skew signal, not a typo. Gate sits
-	// after Registry.Get so apple-disabled deployments still 404.
-	if providerName == "apple" {
-		c.JSON(http.StatusGone, gin.H{"error_code": "apple_callback_retired"})
-		return
-	}
-
-	var req callbackRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_request"})
-		return
-	}
-
-	// 1. State lookup + single-use deletion (CSRF / replay defense).
-	//
-	// NB: this is Get-then-Del, not atomic. Two concurrent callbacks for the
-	// same state could both observe the value before either deletes; both
-	// would consume it. Acceptable for Phase A v1 — no exploitable surface
-	// without first observing the auth code, which itself requires the
-	// loopback redirect. Future hardening: switch to GETDEL (Redis 6.2+).
-	stateKey := stateKeyPrefix + req.State
-	raw, err := h.deps.Redis.Get(c.Request.Context(), stateKey).Bytes()
-	if err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error_code": "oauth_state_invalid"})
-		return
-	}
-	// Best-effort delete; the state is already read so a delete failure does
-	// not enable replay within this request. A subsequent request that races
-	// us will observe a TTL'd-out key once Redis expires it.
-	_, _ = h.deps.Redis.Del(c.Request.Context(), stateKey).Result()
-
-	var rec ssoStateRecord
-	if err := json.Unmarshal(raw, &rec); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error_code": "oauth_state_invalid"})
-		return
-	}
-	// Defense in depth: state stored for "google" must not be reused on a
-	// hypothetical /apple/callback path. The :provider path-param scopes the
-	// route, but a misrouted request would otherwise still find a stored rec.
-	if rec.Provider != providerName {
-		c.JSON(http.StatusBadRequest, gin.H{"error_code": "oauth_state_invalid"})
-		return
-	}
-
-	// 2. Token exchange + id_token validation.
-	//
-	// rec.RedirectURI is the per-request loopback URI captured at Initiate
-	// time. Replaying it here keeps the redirect_uri at /authorize and
-	// /token identical, satisfying RFC 6749 §4.1.3. Without this, providers
-	// (including Google) reject the exchange with "redirect_uri_mismatch"
-	// because the constructor-seed URI Concord uses for cfg.RedirectURI is
-	// a placeholder (port :0), not the renderer-chosen ephemeral port.
-	//
-	// Defense-in-depth: cap AppleUserData at 64 KiB to mirror the renderer
-	// loopback's body cap (ssoLoopback.ts MAX_POST_BODY_BYTES). The renderer
-	// is the only intended caller, but a hostile non-renderer caller could
-	// otherwise force the provider to JSON-parse arbitrary input. On overflow
-	// we silently truncate to "" — parseAppleUserData("") returns "" which
-	// is the same legitimate state as Apple's subsequent-auth flow (no name).
-	appleUserData := req.AppleUserData
-	if len(appleUserData) > maxAppleUserDataBytes {
-		appleUserData = ""
-	}
-	info, err := provider.Exchange(c.Request.Context(), ExchangeParams{
-		Code:          req.Code,
-		CodeVerifier:  rec.CodeVerifier,
-		Nonce:         rec.Nonce,
-		RedirectURI:   rec.RedirectURI,
-		AppleUserData: appleUserData,
-	})
-	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "oauth_token_invalid"})
-		return
-	}
-
-	// 3. Provider-side email-verified gate. The link/login branches assume the
-	// provider has done the email-control check; refuse if it has not.
-	if !info.EmailVerified {
-		c.JSON(http.StatusForbidden, gin.H{"error_code": "oauth_email_unverified"})
-		return
-	}
-
-	// 4. Branch on user lookup.
-	switch h.classifyCallback(c.Request.Context(), info) {
-	case branchExistingSSO:
-		h.respondExistingSSO(c, info)
-	case branchAccountLink:
-		h.respondAccountLink(c, info)
-	default: // branchNewUser
-		h.respondNewUser(c, info)
-	}
-}
 
 // classifyCallback decides which scenario applies to the resolved UserInfo.
 // Order matters: an existing SSO link wins over an email match (a previously

@@ -1,7 +1,6 @@
 package oauth_test
 
 import (
-	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -194,15 +193,4 @@ func TestAppleProvider_AuthorizationURL_Shape(t *testing.T) {
 	assert.Equal(t, "nonce-xyz", q.Get("nonce"))
 	assert.Equal(t, "challenge-pkce", q.Get("code_challenge"))
 	assert.Equal(t, "S256", q.Get("code_challenge_method"))
-}
-
-// TestAppleProvider_Exchange_RetiredStub pins the #974 loud-stub contract:
-// the method exists only for Provider interface compliance (Google still
-// needs Exchange until #975); any caller reaching it is mis-wired.
-func TestAppleProvider_Exchange_RetiredStub(t *testing.T) {
-	p := newTestAppleProvider(t)
-	info, err := p.Exchange(context.Background(), oauth.ExchangeParams{Code: "any"})
-	require.Error(t, err)
-	assert.Nil(t, info)
-	assert.Contains(t, err.Error(), "retired (#974)")
 }

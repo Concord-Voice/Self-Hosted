@@ -1191,265 +1191,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SSOError'
-  /auth/sso/{provider}/callback:
-    post:
-      tags:
-      - Auth
-      summary: Complete the SSO provider exchange
-      description: 'Exchange the authorization code (single-use state, PKCE) and classify the outcome:
-        existing SSO sign-in
-
-        (tokens or MFA challenge), account-link offer, or new-user registration handoff. Rate limit: 10
-        requests per 15 minutes (IP-based).
-
-        '
-      operationId: ssoCallback
-      security: []
-      parameters:
-      - name: provider
-        in: path
-        required: true
-        schema:
-          type: string
-          enum:
-          - google
-          - apple
-        description: SSO provider name
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-              - code
-              - state
-              properties:
-                code:
-                  type: string
-                  description: Authorization code from the provider redirect
-                state:
-                  type: string
-                  description: State value returned by the initiate step
-                apple_user_data:
-                  type: string
-                  description: Apple-only opaque "user" blob from the first-auth callback (display-name
-                    suggestion)
-      responses:
-        '200':
-          description: 'Exchange succeeded — one of four shapes: existing-SSO session (`access_token`
-            + refresh cookie),
-
-            existing-SSO MFA challenge, account-link offer, or new-user registration handoff.
-
-            '
-          content:
-            application/json:
-              schema:
-                oneOf:
-                - type: object
-                  description: Existing SSO identity — session issued
-                  properties:
-                    access_token:
-                      type: string
-                - type: object
-                  description: Existing SSO identity — MFA required
-                  properties:
-                    mfa_challenge_token:
-                      type: string
-                    methods:
-                      type: array
-                      items:
-                        type: string
-                    recovery_only_methods:
-                      type: array
-                      items:
-                        type: string
-                    webauthn_options:
-                      type: object
-                - type: object
-                  description: Verified email matches an existing account
-                  properties:
-                    account_link_available:
-                      type: boolean
-                    sso_token:
-                      type: string
-                    masked_email:
-                      type: string
-                - type: object
-                  description: New user — registration required
-                  properties:
-                    sso_registration_required:
-                      type: boolean
-                    sso_token:
-                      type: string
-                    email:
-                      type: string
-                    name:
-                      type: string
-          headers:
-            Set-Cookie:
-              description: HttpOnly refresh token cookie (session-issued branch only)
-              schema:
-                type: string
-        '400':
-          description: Invalid body (`invalid_request`) or invalid/replayed state (`oauth_state_invalid`)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SSOError'
-        '401':
-          description: Provider token exchange or id_token validation failed (`oauth_token_invalid`)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SSOError'
-        '403':
-          description: Provider reports the email as unverified (`oauth_email_unverified`)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SSOError'
-        '404':
-          description: Unknown provider
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SSOError'
-        '429':
-          $ref: '#/components/responses/RateLimited'
-  /auth/sso/{provider}/session:
-    post:
-      tags:
-      - Auth
-      summary: Complete the client-driven Apple SSO exchange
-      description: 'Apple-only (#974). The desktop main process performs the Apple
-        code→id_token exchange itself and POSTs the resulting id_token here; the
-        server re-verifies it (JWKS signature, iss/aud/exp/iat, nonce binding via
-        single-use state), enforces the email-verified gate, and classifies the
-        outcome through the same machinery as `/callback` — so the response shapes
-        are byte-identical. Google continues to use `/callback` until #975. Rate
-        limit: 10 requests per 15 minutes (IP-based).
-
-        '
-      operationId: ssoAppleSession
-      security: []
-      parameters:
-      - name: provider
-        in: path
-        required: true
-        schema:
-          type: string
-          enum:
-          - apple
-        description: SSO provider — only `apple` is wired for this endpoint; any
-          other value returns 404 `unknown_provider`.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-              - id_token
-              - state
-              properties:
-                id_token:
-                  type: string
-                  description: The Apple-issued id_token the desktop exchanged and
-                    locally verified; re-verified server-side.
-                state:
-                  type: string
-                  description: Single-use state value returned by the initiate step
-                apple_user_data:
-                  type: string
-                  description: Apple-only opaque "user" blob from the first-auth
-                    callback (display-name suggestion); dropped if over the size cap.
-      responses:
-        '200':
-          description: 'Verification succeeded — one of four shapes (identical to
-            `/callback`): existing-SSO session (`access_token` + refresh cookie),
-            existing-SSO MFA challenge, account-link offer, or new-user registration
-            handoff.
-
-            '
-          content:
-            application/json:
-              schema:
-                oneOf:
-                - type: object
-                  description: Existing SSO identity — session issued
-                  properties:
-                    access_token:
-                      type: string
-                - type: object
-                  description: Existing SSO identity — MFA required
-                  properties:
-                    mfa_challenge_token:
-                      type: string
-                    methods:
-                      type: array
-                      items:
-                        type: string
-                    recovery_only_methods:
-                      type: array
-                      items:
-                        type: string
-                    webauthn_options:
-                      type: object
-                - type: object
-                  description: Verified email matches an existing account
-                  properties:
-                    account_link_available:
-                      type: boolean
-                    sso_token:
-                      type: string
-                    masked_email:
-                      type: string
-                - type: object
-                  description: New user — registration required
-                  properties:
-                    sso_registration_required:
-                      type: boolean
-                    sso_token:
-                      type: string
-                    email:
-                      type: string
-                    name:
-                      type: string
-          headers:
-            Set-Cookie:
-              description: HttpOnly refresh token cookie (session-issued branch only)
-              schema:
-                type: string
-        '400':
-          description: Malformed body or oversized state (`invalid_request`)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SSOError'
-        '401':
-          description: Invalid/replayed/provider-mismatched state (`invalid_state`)
-            or id_token verification failure — signature, claims, or nonce binding
-            (`invalid_id_token`)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SSOError'
-        '403':
-          description: The verified id_token reports the email as unverified (`oauth_email_unverified`)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SSOError'
-        '404':
-          description: Unknown or non-apple provider (`unknown_provider`)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SSOError'
-        '429':
-          $ref: '#/components/responses/RateLimited'
   /auth/sso/{provider}/complete-link:
     post:
       tags:
@@ -1583,16 +1324,16 @@ paths:
     post:
       tags:
       - Auth
-      summary: Create a session from a client-verified Apple id_token
-      description: 'Terminal server step of the client-driven Apple exchange (#974): the desktop main
-        process completes the Apple code exchange itself and posts the resulting id_token for
-        server-side re-verification (signature via JWKS, iss/aud/exp/iat, nonce binding against the
-        single-use state record) — the server never trusts client-side verification. Response shapes
-        are byte-identical to the callback classify branches. Apple-only until #975 migrates Google
-        (404 for other providers). Rate limit: 10 requests per 15 minutes (IP-based).
+      summary: Create a session from a client-verified Apple or Google id_token
+      description: 'Terminal server step of the client-driven OAuth exchange (apple #974, google #975):
+        the desktop main process completes the provider code exchange itself and posts the resulting
+        id_token for server-side re-verification (signature via JWKS, iss/aud/exp/iat, nonce binding
+        against the single-use state record) — the server never trusts client-side verification.
+        Response shapes are identical across providers. Accepts apple or google; 404 for any other
+        provider. Rate limit: 10 requests per 15 minutes (IP-based).
 
         '
-      operationId: ssoAppleSession
+      operationId: ssoProviderSession
       security: []
       parameters:
       - name: provider
@@ -1602,7 +1343,8 @@ paths:
           type: string
           enum:
           - apple
-        description: Apple-only (the route 404s for any other provider until #975)
+          - google
+        description: apple or google (404 for any other provider)
       requestBody:
         required: true
         content:
@@ -1615,7 +1357,7 @@ paths:
               properties:
                 id_token:
                   type: string
-                  description: Apple id_token obtained by the desktop-driven code exchange
+                  description: Provider id_token (apple or google) obtained by the desktop-driven code exchange
                 state:
                   type: string
                   description: Single-use state value returned by the initiate step

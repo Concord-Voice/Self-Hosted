@@ -358,8 +358,6 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 			//
 			// Initiate (10/15min): one click per attempt. Higher than 5 to
 			//   accommodate "user closes the browser tab and retries".
-			// Callback (10/15min): per-attempt POST after the OS browser
-			//   redirect. Same posture as Initiate.
 			// CompleteRegistration (5/15min): user has just chosen a username
 			//   and passphrase; abuse vector is account-spam, so match
 			//   /auth/register's 5/15min ceiling.
@@ -371,19 +369,14 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 			//   client-driven Apple exchange (#971/#972). Tighter window —
 			//   each legitimate login needs exactly one mint; 5/min absorbs
 			//   retries while capping signing-oracle abuse (CWE-307).
-			// AppleSession (10/15min): terminal step of the client-driven
-			//   Apple exchange (#974) — server-side re-verification of the
-			//   desktop-posted id_token. Callback parity by design: it
-			//   replaces Callback for apple, one POST per attempt.
+			// ProviderSession (10/15min): terminal step of the client-driven
+			//   exchange for all providers (#974 apple, #975 google). Callback
+			//   route removed in #975 — all providers are now client-driven.
 			ssoRoutes := authRoutes.Group("/sso")
 			{
 				ssoRoutes.GET("/:provider",
 					middleware.RateLimitByIP(redis, 10, 15*time.Minute),
 					oauthHandler.Initiate,
-				)
-				ssoRoutes.POST("/:provider/callback",
-					middleware.RateLimitByIP(redis, 10, 15*time.Minute),
-					oauthHandler.Callback,
 				)
 				ssoRoutes.POST("/:provider/complete-registration",
 					middleware.RateLimitByIP(redis, 5, 15*time.Minute),
@@ -399,7 +392,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				)
 				ssoRoutes.POST("/:provider/session",
 					middleware.RateLimitByIP(redis, 10, 15*time.Minute),
-					oauthHandler.AppleSession,
+					oauthHandler.ProviderSession,
 				)
 			}
 		}

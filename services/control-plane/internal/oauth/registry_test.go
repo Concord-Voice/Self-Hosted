@@ -1,7 +1,6 @@
 package oauth_test
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -14,9 +13,6 @@ type fakeProvider struct{ name string }
 
 func (f *fakeProvider) Name() string                           { return f.name }
 func (f *fakeProvider) AuthorizationURL(_, _, _ string) string { return "https://fake/auth" }
-func (f *fakeProvider) Exchange(_ context.Context, _ oauth.ExchangeParams) (*oauth.UserInfo, error) {
-	return &oauth.UserInfo{Provider: f.name}, nil
-}
 
 func TestRegistry_RegisterAndGet(t *testing.T) {
 	r := oauth.NewRegistry()

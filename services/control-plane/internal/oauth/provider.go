@@ -3,8 +3,6 @@
 // callers consult the Registry by provider name.
 package oauth
 
-import "context"
-
 // Provider abstracts an OAuth/OIDC identity provider.
 type Provider interface {
 	// Name returns the provider key stored in user_sso_identities.provider
@@ -15,35 +13,10 @@ type Provider interface {
 	// state, nonce, codeChallenge are caller-generated CSRF/replay/PKCE values.
 	AuthorizationURL(state, nonce, codeChallenge string) string
 
-	// Exchange completes the OAuth code exchange. Implementations MUST:
-	// (1) exchange the code at the provider's /token endpoint,
-	// (2) validate the id_token signature against the provider's JWKS,
-	// (3) verify the iss, aud, exp, and nonce claims (nonce must equal params.Nonce),
-	// (4) return normalized user info, or an error if any step fails.
-	// The interface does not enforce these steps; full responsibility lies with the implementation.
-	Exchange(ctx context.Context, params ExchangeParams) (*UserInfo, error)
-}
-
-// ExchangeParams holds inputs for completing an OAuth exchange.
-type ExchangeParams struct {
-	Code         string // authorization code from callback query
-	CodeVerifier string // PKCE verifier matching codeChallenge sent at init
-	Nonce        string // expected id_token nonce claim
-
-	// RedirectURI is the per-request loopback URI the client supplied at
-	// Initiate time. Per RFC 6749 §4.1.3, the redirect_uri at the /token
-	// exchange MUST exactly match the redirect_uri used to build the
-	// authorization URL — providers reject any mismatch with
-	// "redirect_uri_mismatch". Concord's Initiate handler stores the actual
-	// loopback URI (with the renderer-chosen ephemeral port) in the
-	// sso_state record; Callback replays it here. Empty falls back to the
-	// constructor seed (e.g., GoogleProvider.cfg.RedirectURI).
-	RedirectURI string
-
-	// AppleUserData is the raw "user" JSON from Apple's first-auth callback.
-	// Empty for Google; documented here so the Google implementation can
-	// ignore it cleanly.
-	AppleUserData string
+	// Exchange removed (#975): both providers are now client-driven; the
+	// desktop main process performs the code exchange and id_token verification
+	// locally, then POSTs the verified id_token to POST /auth/sso/:provider/session.
+	// id_token verification happens at /session via the concrete provider type.
 }
 
 // UserInfo is the normalized identity returned by all providers.

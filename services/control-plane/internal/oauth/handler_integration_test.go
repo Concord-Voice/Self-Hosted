@@ -16,7 +16,6 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
@@ -37,9 +36,8 @@ func newSSOTestRig(t *testing.T) (*gin.Engine, *redis.Client, *oauth.Handler) {
 	t.Cleanup(cleanup)
 
 	provider, err := oauth.NewGoogleProvider(oauth.GoogleConfig{
-		ClientID:     "test-client.apps.googleusercontent.com",
-		ClientSecret: "test-secret", // pragma: allowlist secret
-		RedirectURI:  "http://127.0.0.1:0/oauth/callback",
+		ClientID:    "test-client.apps.googleusercontent.com",
+		RedirectURI: "http://127.0.0.1:0/oauth/callback",
 	})
 	require.NoError(t, err)
 	registry := oauth.NewRegistry()
@@ -58,8 +56,10 @@ func newSSOTestRig(t *testing.T) (*gin.Engine, *redis.Client, *oauth.Handler) {
 func TestInitiate_StoresStateInRedis(t *testing.T) {
 	r, rdb, _ := newSSOTestRig(t)
 
+	// After #975, google is client-driven — a code_challenge is required.
+	challenge := strings.Repeat("c", 43)
 	req := httptest.NewRequest(http.MethodGet,
-		"/api/v1/auth/sso/google?redirect_uri=http%3A%2F%2F127.0.0.1%3A65000%2Foauth%2Fcallback", nil)
+		"/api/v1/auth/sso/google?redirect_uri=http%3A%2F%2F127.0.0.1%3A65000%2Foauth%2Fcallback&code_challenge="+challenge, nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -68,12 +68,14 @@ func TestInitiate_StoresStateInRedis(t *testing.T) {
 	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
 	require.NotEmpty(t, resp["auth_url"])
 	require.NotEmpty(t, resp["state"])
+	require.NotEmpty(t, resp["nonce"], "google /initiate must return nonce after #975")
 
 	stored, err := rdb.Get(context.Background(), "sso_state:"+resp["state"]).Result()
 	require.NoError(t, err)
 	assert.Contains(t, stored, `"provider":"google"`)
 	assert.Contains(t, stored, `"nonce":`)
-	assert.Contains(t, stored, `"code_verifier":`)
+	// After #975 google is client-driven: code_verifier stored as empty string.
+	assert.Contains(t, stored, `"code_verifier":""`)
 
 	ttl, err := rdb.TTL(context.Background(), "sso_state:"+resp["state"]).Result()
 	require.NoError(t, err)
@@ -82,8 +84,10 @@ func TestInitiate_StoresStateInRedis(t *testing.T) {
 
 func TestInitiate_AuthURLEmbedsState(t *testing.T) {
 	r, _, _ := newSSOTestRig(t)
+	// After #975, google is client-driven — supply a valid code_challenge.
+	challenge := strings.Repeat("d", 43)
 	req := httptest.NewRequest(http.MethodGet,
-		"/api/v1/auth/sso/google?redirect_uri=http%3A%2F%2F127.0.0.1%3A65000%2Foauth%2Fcallback", nil)
+		"/api/v1/auth/sso/google?redirect_uri=http%3A%2F%2F127.0.0.1%3A65000%2Foauth%2Fcallback&code_challenge="+challenge, nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 
@@ -95,7 +99,8 @@ func TestInitiate_AuthURLEmbedsState(t *testing.T) {
 	require.NoError(t, err)
 	q := parsed.Query()
 	assert.Equal(t, resp["state"], q.Get("state"))
-	assert.NotEmpty(t, q.Get("code_challenge"))
+	// After #975 google embeds the CLIENT-supplied challenge (not a server-generated one).
+	assert.Equal(t, challenge, q.Get("code_challenge"))
 	assert.Equal(t, "S256", q.Get("code_challenge_method"))
 	// redirect_uri must be overridden to the request-time loopback URI.
 	assert.Equal(t, "http://127.0.0.1:65000/oauth/callback", q.Get("redirect_uri"))
@@ -129,16 +134,27 @@ func TestInitiate_UnknownProvider(t *testing.T) {
 	require.Equal(t, http.StatusNotFound, w.Code)
 }
 
+// TestCallback_RouteRemoved_Returns404 pins the #975 retirement: the server-side
+// Google Callback route is removed. Any client still hitting /:provider/callback
+// gets a 404 from Gin (route not registered). Old desktop clients that haven't
+// updated will see this; the correct path is /:provider/session (#974/#975).
+func TestCallback_RouteRemoved_Returns404(t *testing.T) {
+	r, _, _ := newSSOTestRig(t) // does NOT register a callback route
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/callback",
+		strings.NewReader(`{"code":"x","state":"y"}`))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	require.Equal(t, http.StatusNotFound, w.Code)
+}
+
 // ===========================================================================
-// Callback tests
+// CompleteRegistration and CompleteLink shared rig (Callback removed in #975)
 // ===========================================================================
 
-// ssoCallbackRig wires a real DB + Redis behind a Gin router with the Callback
-// route registered. Adapted to the project's actual testhelpers surface
-// (SetupTestDB / SetupTestRedis are package-level; CreateTestUser is a
-// TestServer method, not a free function — so we manage user inserts inline
-// to stay in this package without taking a dependency on the full app
-// router that SetupTestServer would build).
+// ssoCallbackRig wires a real DB + Redis behind a Gin router. Used by
+// CompleteRegistration and CompleteLink tests. The name is preserved for
+// continuity; the Callback route itself was removed in #975.
 type ssoCallbackRig struct {
 	Engine  *gin.Engine
 	Redis   redis.Cmdable
@@ -152,7 +168,7 @@ type ssoCallbackRig struct {
 	Adapter *fakeAuthAdapter
 }
 
-// newSSOCallbackTestRig builds a callback-capable rig pointing at fakeGoogle.
+// newSSOCallbackTestRig builds a rig for CompleteRegistration/CompleteLink tests.
 // Endpoint overrides on GoogleConfig let the provider talk to httptest.
 // Defaults the auth adapter to a passing stub.
 func newSSOCallbackTestRig(t *testing.T, fakeGoogleBaseURL string) *ssoCallbackRig {
@@ -165,7 +181,8 @@ func newSSOCallbackTestRig(t *testing.T, fakeGoogleBaseURL string) *ssoCallbackR
 
 // newSSOCallbackTestRigWithAuth allows callers to inject a custom auth
 // adapter (e.g., one configured to return errors) so the handler's
-// error-recovery paths can be exercised.
+// error-recovery paths can be exercised. The Callback route is NOT
+// registered — it was removed in #975.
 func newSSOCallbackTestRigWithAuth(t *testing.T, fakeGoogleBaseURL string, authStub oauth.AuthAdapter) *ssoCallbackRig {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
@@ -176,12 +193,10 @@ func newSSOCallbackTestRigWithAuth(t *testing.T, fakeGoogleBaseURL string, authS
 	t.Cleanup(redisCleanup)
 
 	provider, err := oauth.NewGoogleProvider(oauth.GoogleConfig{
-		ClientID:      "test-client.apps.googleusercontent.com",
-		ClientSecret:  "test-secret", // pragma: allowlist secret
-		RedirectURI:   "http://127.0.0.1:0/oauth/callback",
-		TokenEndpoint: fakeGoogleBaseURL + "/token",
-		JWKSEndpoint:  fakeGoogleBaseURL + "/jwks",
-		Issuer:        "https://accounts.google.com",
+		ClientID:     "test-client.apps.googleusercontent.com",
+		RedirectURI:  "http://127.0.0.1:0/oauth/callback",
+		JWKSEndpoint: fakeGoogleBaseURL + "/jwks",
+		Issuer:       "https://accounts.google.com",
 	})
 	require.NoError(t, err)
 	registry := oauth.NewRegistry()
@@ -196,25 +211,7 @@ func newSSOCallbackTestRigWithAuth(t *testing.T, fakeGoogleBaseURL string, authS
 	r := gin.New()
 	g := r.Group("/api/v1/auth/sso")
 	g.GET("/:provider", h.Initiate)
-	g.POST("/:provider/callback", h.Callback)
 	return &ssoCallbackRig{Engine: r, Redis: rdb, DB: db, Handler: h}
-}
-
-// seedRedisState writes an sso_state record whose nonce/code_verifier
-// match the in-test JWT, returning the state value to send in the callback.
-func seedRedisState(t *testing.T, rdb redis.Cmdable, provider, nonce, codeVerifier string) string {
-	t.Helper()
-	state := "test-state-" + provider + "-" + nonce
-	rec, err := json.Marshal(map[string]any{
-		"provider":      provider,
-		"nonce":         nonce,
-		"code_verifier": codeVerifier,
-		"redirect_uri":  "http://127.0.0.1:0/oauth/callback",
-		"created_at":    time.Now().UTC().Format(time.RFC3339),
-	})
-	require.NoError(t, err)
-	require.NoError(t, rdb.Set(context.Background(), "sso_state:"+state, rec, 10*time.Minute).Err())
-	return state
 }
 
 // insertSSOTestUser inserts a minimal users row (no E2EE keys) sufficient for
@@ -311,420 +308,6 @@ func (f *fakeAuthAdapter) ValidatePasswordStrength(_ string) error {
 		return fmt.Errorf("password must contain at least 3 character classes")
 	}
 	return nil
-}
-
-// TestCallback_NewUser_ReturnsSSORegistrationRequired covers Scenario A: the
-// provider asserts a new (provider, sub) and the email does not match any
-// existing verified user. Expect sso_registration_required + opaque sso_token.
-func TestCallback_NewUser_ReturnsSSORegistrationRequired(t *testing.T) {
-	now := time.Now()
-	server, _, _ := fakeGoogle(t, jwt.MapClaims{
-		"iss":            "https://accounts.google.com",
-		"aud":            "test-client.apps.googleusercontent.com",
-		"sub":            "google-sub-newuser",
-		"email":          "newuser@example.test",
-		"email_verified": true,
-		"name":           "New User",
-		"picture":        "https://example/pic",
-		"nonce":          "stored-nonce",
-		"iat":            now.Unix(),
-		"exp":            now.Add(time.Hour).Unix(),
-	})
-	defer server.Close()
-
-	rig := newSSOCallbackTestRig(t, server.URL)
-	state := seedRedisState(t, rig.Redis, "google", "stored-nonce", "v1")
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/callback",
-		strings.NewReader(`{"code":"good-code","state":"`+state+`"}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	rig.Engine.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusOK, w.Code)
-	var resp map[string]any
-	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-	assert.Equal(t, true, resp["sso_registration_required"])
-	assert.NotEmpty(t, resp["sso_token"])
-	assert.Equal(t, "newuser@example.test", resp["email"])
-}
-
-// TestCallback_ExistingSSO_NoMFA_IssuesTokens covers Scenario B+: the user has
-// linked SSO and trust_sso_security=TRUE — issue access + refresh directly.
-func TestCallback_ExistingSSO_NoMFA_IssuesTokens(t *testing.T) {
-	now := time.Now()
-	server, _, _ := fakeGoogle(t, jwt.MapClaims{
-		"iss": "https://accounts.google.com", "aud": "test-client.apps.googleusercontent.com",
-		"sub": "google-sub-existing", "email": "alice@example.test", "email_verified": true,
-		"nonce": "stored-nonce-2",
-		"iat":   now.Unix(), "exp": now.Add(time.Hour).Unix(),
-	})
-	defer server.Close()
-
-	rig := newSSOCallbackTestRig(t, server.URL)
-	userID := insertSSOTestUser(t, rig.DB, "alice@example.test", "alice")
-	_, err := rig.DB.ExecContext(context.Background(),
-		`UPDATE users SET trust_sso_security = TRUE WHERE id = $1`, userID)
-	require.NoError(t, err)
-	_, err = rig.DB.ExecContext(context.Background(),
-		`INSERT INTO user_sso_identities (user_id, provider, provider_user_id, provider_email)
-		 VALUES ($1, 'google', 'google-sub-existing', 'alice@example.test')`, userID)
-	require.NoError(t, err)
-
-	state := seedRedisState(t, rig.Redis, "google", "stored-nonce-2", "v2")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/callback",
-		strings.NewReader(`{"code":"good","state":"`+state+`"}`))
-	req.Header.Set("Content-Type", "application/json")
-	// X-Forwarded-Proto: https mirrors production where the request reaches Gin
-	// via Cloudflare → reverse-proxy. auth.SetRefreshCookie reads this header
-	// (httptest.NewRequest has no TLS state) to decide the cookie's Secure flag,
-	// so this is what makes the Secure assertion below realistic.
-	req.Header.Set("X-Forwarded-Proto", "https")
-	w := httptest.NewRecorder()
-	rig.Engine.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusOK, w.Code)
-	var resp map[string]any
-	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-	assert.NotEmpty(t, resp["access_token"])
-	assert.NotContains(t, resp, "mfa_challenge_token")
-	// Refresh-token cookie must be set on the response.
-	cookies := w.Result().Cookies()
-	var foundRefresh bool
-	for _, c := range cookies {
-		if c.Name == "refresh_token" {
-			foundRefresh = true
-			assert.True(t, c.HttpOnly, "refresh_token cookie must be HttpOnly")
-			assert.True(t, c.Secure, "refresh_token cookie must be Secure")
-			assert.Equal(t, 60*60*24*30, c.MaxAge, "refresh_token max-age must be 30 days")
-		}
-	}
-	assert.True(t, foundRefresh, "Set-Cookie: refresh_token must be present")
-}
-
-// TestCallback_ExistingSSO_RequiresMFA covers Scenario B-: the user has
-// linked SSO but trust_sso_security=FALSE — issue an MFA challenge instead.
-func TestCallback_ExistingSSO_RequiresMFA(t *testing.T) {
-	now := time.Now()
-	server, _, _ := fakeGoogle(t, jwt.MapClaims{
-		"iss": "https://accounts.google.com", "aud": "test-client.apps.googleusercontent.com",
-		"sub": "google-sub-mfa", "email": "bob@example.test", "email_verified": true,
-		"nonce": "stored-nonce-mfa",
-		"iat":   now.Unix(), "exp": now.Add(time.Hour).Unix(),
-	})
-	defer server.Close()
-
-	rig := newSSOCallbackTestRig(t, server.URL)
-	userID := insertSSOTestUser(t, rig.DB, "bob@example.test", "bob")
-	// trust_sso_security defaults FALSE — leave it.
-	_, err := rig.DB.ExecContext(context.Background(),
-		`INSERT INTO user_sso_identities (user_id, provider, provider_user_id, provider_email)
-		 VALUES ($1, 'google', 'google-sub-mfa', 'bob@example.test')`, userID)
-	require.NoError(t, err)
-
-	state := seedRedisState(t, rig.Redis, "google", "stored-nonce-mfa", "v3")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/callback",
-		strings.NewReader(`{"code":"good","state":"`+state+`"}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	rig.Engine.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusOK, w.Code)
-	var resp map[string]any
-	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-	assert.NotEmpty(t, resp["mfa_challenge_token"])
-	// methods array drives the MFAChallengeModal layout; without it the renderer
-	// has no way to choose between TOTP / WebAuthn / etc. The fakeAuthAdapter
-	// returns ["totp"] in the happy path; assert it surfaces verbatim.
-	methodsAny, ok := resp["methods"].([]any)
-	require.True(t, ok, "response must include a methods array")
-	require.Len(t, methodsAny, 1)
-	assert.Equal(t, "totp", methodsAny[0])
-	assert.NotContains(t, resp, "access_token")
-}
-
-// TestCallback_ExistingSSO_TrustSSOFalse_NoMFAEnrolled_IssuesTokens covers the
-// trust_sso_security=FALSE + no-MFA-enrolled fall-through: the adapter returns
-// mfaEnabled=false and respondExistingSSO must mint tokens directly rather
-// than serving an unverifiable challenge token. Without this branch, a user
-// with the pessimistic trust posture but no enrolled MFA would deadlock at
-// SSO sign-in.
-func TestCallback_ExistingSSO_TrustSSOFalse_NoMFAEnrolled_IssuesTokens(t *testing.T) {
-	now := time.Now()
-	server, _, _ := fakeGoogle(t, jwt.MapClaims{
-		"iss": "https://accounts.google.com", "aud": "test-client.apps.googleusercontent.com",
-		"sub": "google-sub-no-mfa", "email": "carol@example.test", "email_verified": true,
-		"nonce": "stored-nonce-no-mfa",
-		"iat":   now.Unix(), "exp": now.Add(time.Hour).Unix(),
-	})
-	defer server.Close()
-
-	rig := newSSOCallbackTestRig(t, server.URL)
-	rig.Adapter.MFANotEnabled = true
-	userID := insertSSOTestUser(t, rig.DB, "carol@example.test", "carol")
-	// trust_sso_security defaults FALSE — leave it. Adapter signals "no MFA enrolled".
-	_, err := rig.DB.ExecContext(context.Background(),
-		`INSERT INTO user_sso_identities (user_id, provider, provider_user_id, provider_email)
-		 VALUES ($1, 'google', 'google-sub-no-mfa', 'carol@example.test')`, userID)
-	require.NoError(t, err)
-
-	state := seedRedisState(t, rig.Redis, "google", "stored-nonce-no-mfa", "v3")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/callback",
-		strings.NewReader(`{"code":"good","state":"`+state+`"}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	rig.Engine.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusOK, w.Code)
-	var resp map[string]any
-	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-	assert.NotEmpty(t, resp["access_token"], "no-MFA-enrolled fall-through must mint tokens directly")
-	assert.NotContains(t, resp, "mfa_challenge_token", "must NOT issue an unverifiable challenge")
-}
-
-// TestCallback_EmailMatch_OffersAccountLink covers Scenario C: a verified
-// existing user has the same email as the SSO identity, but no SSO link
-// exists yet — return account_link_available + opaque sso_token + masked
-// email so the renderer can prompt for password to confirm ownership.
-func TestCallback_EmailMatch_OffersAccountLink(t *testing.T) {
-	now := time.Now()
-	server, _, _ := fakeGoogle(t, jwt.MapClaims{
-		"iss": "https://accounts.google.com", "aud": "test-client.apps.googleusercontent.com",
-		"sub": "google-sub-link", "email": "carol@example.test", "email_verified": true,
-		"nonce": "stored-nonce-link",
-		"iat":   now.Unix(), "exp": now.Add(time.Hour).Unix(),
-	})
-	defer server.Close()
-
-	rig := newSSOCallbackTestRig(t, server.URL)
-	userID := insertSSOTestUser(t, rig.DB, "carol@example.test", "carol")
-	_, err := rig.DB.ExecContext(context.Background(),
-		`UPDATE users SET email_verified = TRUE WHERE id = $1`, userID)
-	require.NoError(t, err)
-
-	state := seedRedisState(t, rig.Redis, "google", "stored-nonce-link", "v4")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/callback",
-		strings.NewReader(`{"code":"good","state":"`+state+`"}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	rig.Engine.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusOK, w.Code)
-	var resp map[string]any
-	require.NoError(t, json.NewDecoder(w.Body).Decode(&resp))
-	assert.Equal(t, true, resp["account_link_available"])
-	assert.NotEmpty(t, resp["sso_token"])
-	assert.Equal(t, "c***@example.test", resp["masked_email"])
-}
-
-// TestCallback_EmailUnverified_Forbidden covers the defensive path: provider
-// asserts email_verified=false. Concord refuses to act on unverified emails.
-func TestCallback_EmailUnverified_Forbidden(t *testing.T) {
-	now := time.Now()
-	server, _, _ := fakeGoogle(t, jwt.MapClaims{
-		"iss": "https://accounts.google.com", "aud": "test-client.apps.googleusercontent.com",
-		"sub": "google-sub-unv", "email": "dan@example.test", "email_verified": false,
-		"nonce": "stored-nonce-unv",
-		"iat":   now.Unix(), "exp": now.Add(time.Hour).Unix(),
-	})
-	defer server.Close()
-
-	rig := newSSOCallbackTestRig(t, server.URL)
-	state := seedRedisState(t, rig.Redis, "google", "stored-nonce-unv", "v5")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/callback",
-		strings.NewReader(`{"code":"good","state":"`+state+`"}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	rig.Engine.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusForbidden, w.Code)
-	assert.Contains(t, w.Body.String(), "oauth_email_unverified")
-}
-
-// TestCallback_StateInvalid covers the defensive path: the supplied state
-// has no record in Redis (forged state, expired, or already-deleted).
-func TestCallback_StateInvalid(t *testing.T) {
-	rig := newSSOCallbackTestRig(t, "http://unused")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/callback",
-		strings.NewReader(`{"code":"good","state":"never-seen-before"}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	rig.Engine.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "oauth_state_invalid")
-}
-
-// TestCallback_StateReplayRejected covers single-use enforcement: a state
-// value that was already consumed by a prior callback must be rejected.
-func TestCallback_StateReplayRejected(t *testing.T) {
-	now := time.Now()
-	server, _, _ := fakeGoogle(t, jwt.MapClaims{
-		"iss": "https://accounts.google.com", "aud": "test-client.apps.googleusercontent.com",
-		"sub": "google-sub-replay", "email": "e@example.test", "email_verified": true,
-		"nonce": "stored-nonce-replay",
-		"iat":   now.Unix(), "exp": now.Add(time.Hour).Unix(),
-	})
-	defer server.Close()
-
-	rig := newSSOCallbackTestRig(t, server.URL)
-	state := seedRedisState(t, rig.Redis, "google", "stored-nonce-replay", "v6")
-
-	body := `{"code":"good","state":"` + state + `"}`
-	req1 := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/callback", strings.NewReader(body))
-	req1.Header.Set("Content-Type", "application/json")
-	w1 := httptest.NewRecorder()
-	rig.Engine.ServeHTTP(w1, req1)
-	require.Equal(t, http.StatusOK, w1.Code) // first use
-
-	req2 := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/callback", strings.NewReader(body))
-	req2.Header.Set("Content-Type", "application/json")
-	w2 := httptest.NewRecorder()
-	rig.Engine.ServeHTTP(w2, req2)
-	require.Equal(t, http.StatusBadRequest, w2.Code) // second use — state already consumed
-	assert.Contains(t, w2.Body.String(), "oauth_state_invalid")
-}
-
-// TestCallback_InvalidJSONReturns400 covers the binding-failure path: the
-// request body is not valid JSON, so c.ShouldBindJSON fails before any
-// state lookup or token exchange.
-func TestCallback_InvalidJSONReturns400(t *testing.T) {
-	rig := newSSOCallbackTestRig(t, "http://unused")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/callback",
-		strings.NewReader(`not-json`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	rig.Engine.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "invalid_request")
-}
-
-// TestCallback_UnknownProviderReturns404 covers the registry-miss path: the
-// request lands on /apple/callback but no Apple provider is registered.
-func TestCallback_UnknownProviderReturns404(t *testing.T) {
-	rig := newSSOCallbackTestRig(t, "http://unused")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/apple/callback",
-		strings.NewReader(`{"code":"x","state":"y"}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	rig.Engine.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusNotFound, w.Code)
-	assert.Contains(t, w.Body.String(), "unknown_provider")
-}
-
-// TestCallback_StateProviderMismatch covers the per-provider scoping check:
-// state stored under provider="google" must not be honored on a callback
-// route bound to a different provider name.
-func TestCallback_StateProviderMismatch(t *testing.T) {
-	rig := newSSOCallbackTestRig(t, "http://unused")
-
-	// Seed a state record claiming provider="apple" — the route is /google/callback.
-	state := seedRedisState(t, rig.Redis, "apple", "n", "v")
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/callback",
-		strings.NewReader(`{"code":"x","state":"`+state+`"}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	rig.Engine.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusBadRequest, w.Code)
-	assert.Contains(t, w.Body.String(), "oauth_state_invalid")
-}
-
-// TestCallback_TokenExchangeError covers the provider.Exchange failure
-// path: the fake Google JWT carries the wrong nonce, causing id_token
-// validation to fail. The handler must return 401 oauth_token_invalid
-// without leaking the underlying validation error to the response body.
-func TestCallback_TokenExchangeError(t *testing.T) {
-	now := time.Now()
-	server, _, _ := fakeGoogle(t, jwt.MapClaims{
-		"iss": "https://accounts.google.com", "aud": "test-client.apps.googleusercontent.com",
-		"sub": "x", "email": "x@example.test", "email_verified": true,
-		"nonce": "wrong-nonce", // does not match the stored nonce below
-		"iat":   now.Unix(), "exp": now.Add(time.Hour).Unix(),
-	})
-	defer server.Close()
-
-	rig := newSSOCallbackTestRig(t, server.URL)
-	state := seedRedisState(t, rig.Redis, "google", "expected-nonce", "v")
-
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/callback",
-		strings.NewReader(`{"code":"x","state":"`+state+`"}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	rig.Engine.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusUnauthorized, w.Code)
-	assert.Contains(t, w.Body.String(), "oauth_token_invalid")
-	// Negative assertions: the underlying nonce-mismatch error text must not
-	// leak. The response carries the stable error_code only.
-	assert.NotContains(t, w.Body.String(), "nonce")
-}
-
-// TestCallback_ExistingSSO_AccessTokenFails covers the IssueAccessAndRefresh
-// failure branch: the auth adapter returns an error after a successful
-// classify-as-existingSSO. Handler must return 500 token_issuance_failed.
-func TestCallback_ExistingSSO_AccessTokenFails(t *testing.T) {
-	now := time.Now()
-	server, _, _ := fakeGoogle(t, jwt.MapClaims{
-		"iss": "https://accounts.google.com", "aud": "test-client.apps.googleusercontent.com",
-		"sub": "google-sub-token-fail", "email": "frank@example.test", "email_verified": true,
-		"nonce": "stored-nonce-tokenfail",
-		"iat":   now.Unix(), "exp": now.Add(time.Hour).Unix(),
-	})
-	defer server.Close()
-
-	rig := newSSOCallbackTestRigWithAuth(t, server.URL, &fakeAuthAdapter{IssueAccessFail: true})
-	userID := insertSSOTestUser(t, rig.DB, "frank@example.test", "frank")
-	_, err := rig.DB.ExecContext(context.Background(),
-		`UPDATE users SET trust_sso_security = TRUE WHERE id = $1`, userID)
-	require.NoError(t, err)
-	_, err = rig.DB.ExecContext(context.Background(),
-		`INSERT INTO user_sso_identities (user_id, provider, provider_user_id, provider_email)
-		 VALUES ($1, 'google', 'google-sub-token-fail', 'frank@example.test')`, userID)
-	require.NoError(t, err)
-
-	state := seedRedisState(t, rig.Redis, "google", "stored-nonce-tokenfail", "v7")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/callback",
-		strings.NewReader(`{"code":"good","state":"`+state+`"}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	rig.Engine.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusInternalServerError, w.Code)
-	assert.Contains(t, w.Body.String(), "token_issuance_failed")
-}
-
-// TestCallback_ExistingSSO_MFAChallengeFails covers the IssueMFAChallenge
-// failure branch when trust_sso_security=FALSE.
-func TestCallback_ExistingSSO_MFAChallengeFails(t *testing.T) {
-	now := time.Now()
-	server, _, _ := fakeGoogle(t, jwt.MapClaims{
-		"iss": "https://accounts.google.com", "aud": "test-client.apps.googleusercontent.com",
-		"sub": "google-sub-mfa-fail", "email": "gina@example.test", "email_verified": true,
-		"nonce": "stored-nonce-mfafail",
-		"iat":   now.Unix(), "exp": now.Add(time.Hour).Unix(),
-	})
-	defer server.Close()
-
-	rig := newSSOCallbackTestRigWithAuth(t, server.URL, &fakeAuthAdapter{IssueMFAFail: true})
-	userID := insertSSOTestUser(t, rig.DB, "gina@example.test", "gina")
-	_, err := rig.DB.ExecContext(context.Background(),
-		`INSERT INTO user_sso_identities (user_id, provider, provider_user_id, provider_email)
-		 VALUES ($1, 'google', 'google-sub-mfa-fail', 'gina@example.test')`, userID)
-	require.NoError(t, err)
-
-	state := seedRedisState(t, rig.Redis, "google", "stored-nonce-mfafail", "v8")
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/callback",
-		strings.NewReader(`{"code":"good","state":"`+state+`"}`))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	rig.Engine.ServeHTTP(w, req)
-
-	require.Equal(t, http.StatusInternalServerError, w.Code)
-	assert.Contains(t, w.Body.String(), "mfa_challenge_failed")
 }
 
 // ===========================================================================
@@ -1555,15 +1138,13 @@ func newSSOTestRigWithCFKV(t *testing.T, putter oauth.StatePortPutter) (*gin.Eng
 
 // initiateRequest performs GET /api/v1/auth/sso/<provider>?redirect_uri=<uri>
 // — the same request-building shape as TestInitiate_StoresStateInRedis.
-// Apple initiates carry a syntactically valid S256 code_challenge: the #974
-// provider-split PKCE contract rejects apple initiates without one, and the
-// #973 bridge tests exercise behavior downstream of that gate.
+// All providers (apple + google after #974/#975) require a syntactically valid
+// S256 code_challenge: the client-driven PKCE contract rejects initiates
+// without one, and the #973 bridge tests exercise behavior downstream of that gate.
 func initiateRequest(t *testing.T, r *gin.Engine, provider, redirectURI string) *httptest.ResponseRecorder {
 	t.Helper()
-	target := "/api/v1/auth/sso/" + provider + "?redirect_uri=" + url.QueryEscape(redirectURI)
-	if provider == "apple" {
-		target += "&code_challenge=" + strings.Repeat("c", 43)
-	}
+	target := "/api/v1/auth/sso/" + provider + "?redirect_uri=" + url.QueryEscape(redirectURI) +
+		"&code_challenge=" + strings.Repeat("c", 43)
 	req := httptest.NewRequest(http.MethodGet, target, nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -1639,8 +1220,10 @@ func TestInitiate_ApplePortlessRedirectRejected(t *testing.T) {
 func TestInitiate_EmbedsStateInRecord(t *testing.T) {
 	r, rdb, _ := newSSOTestRig(t)
 
+	// After #975 google is client-driven — code_challenge is required.
 	req := httptest.NewRequest(http.MethodGet,
-		"/api/v1/auth/sso/google?redirect_uri="+url.QueryEscape("http://127.0.0.1:51620/oauth/callback"), nil)
+		"/api/v1/auth/sso/google?redirect_uri="+url.QueryEscape("http://127.0.0.1:51620/oauth/callback")+
+			"&code_challenge="+strings.Repeat("e", 43), nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)

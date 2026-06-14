@@ -159,17 +159,15 @@ func newAppleSessionRig(t *testing.T, withRateLimit bool) *appleSessionRig {
 		AuthHandler: adapter,
 	})
 	r := gin.New()
-	handlers := []gin.HandlerFunc{h.AppleSession}
+	handlers := []gin.HandlerFunc{h.ProviderSession}
 	if withRateLimit {
 		handlers = []gin.HandlerFunc{
 			middleware.RateLimitByIP(rdb, 10, 15*time.Minute),
-			h.AppleSession,
+			h.ProviderSession,
 		}
 	}
 	r.POST(fmt.Sprintf(appleSessionPath, ":provider"), handlers...)
-	// Callback registered alongside so Task 3's 410 gate is testable from
-	// the same apple-registered rig.
-	r.POST("/api/v1/auth/sso/:provider/callback", h.Callback)
+	// Callback route is NOT registered — it was removed in #975.
 	return &appleSessionRig{Engine: r, Redis: rdb, DB: db, Adapter: adapter, JWKS: jwks}
 }
 
@@ -481,18 +479,14 @@ func TestAppleSession_EmailUnverified_Forbidden(t *testing.T) {
 // ───────────────────────── request / provider gates ─────────────────────────
 
 func TestAppleSession_ProviderGates(t *testing.T) {
-	rig := newAppleSessionRig(t, false)
-
-	t.Run("google_404_until_975", func(t *testing.T) {
-		w := postAppleSession(rig, "google", map[string]any{"id_token": "x", "state": "y"})
-		require.Equal(t, http.StatusNotFound, w.Code)
-		assert.Contains(t, w.Body.String(), "unknown_provider")
-	})
+	// google_404_until_975 subtest removed: google is now supported by
+	// ProviderSession (#975). Google session coverage lives in
+	// google_session_integration_test.go.
 
 	t.Run("apple_unregistered_404", func(t *testing.T) {
 		h := oauth.NewHandler(oauth.HandlerDeps{Registry: oauth.NewRegistry()})
 		r := gin.New()
-		r.POST(fmt.Sprintf(appleSessionPath, ":provider"), h.AppleSession)
+		r.POST(fmt.Sprintf(appleSessionPath, ":provider"), h.ProviderSession)
 		req := httptest.NewRequest(http.MethodPost, fmt.Sprintf(appleSessionPath, "apple"),
 			strings.NewReader(`{"id_token":"x","state":"y"}`))
 		req.Header.Set("Content-Type", "application/json")
@@ -530,16 +524,20 @@ func TestAppleSession_RateLimited(t *testing.T) {
 		"11th request within the window must trip the 10/15min Callback-parity limit")
 }
 
-// ───────────────────────── Callback retirement (#974 R5) ─────────────────────────
+// ───────────────────────── Callback retirement (#974/#975) ───────────────────────
 
-func TestCallback_Apple_Retired410(t *testing.T) {
-	rig := newAppleSessionRig(t, false) // apple IS registered — the gate, not the registry, must fire
+// TestCallback_Retired_Returns404 pins the #975 retirement: the /:provider/callback
+// route is removed entirely (both apple and google). Gin returns 404 — no handler
+// exists. The prior #974 apple 410-gate lived inside h.Callback; since the route
+// itself is gone, clients get 404 regardless of provider.
+func TestCallback_Retired_Returns404(t *testing.T) {
+	rig := newAppleSessionRig(t, false)
 	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/apple/callback",
 		strings.NewReader(`{"code":"any-code","state":"any-state"}`))
 	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	rig.Engine.ServeHTTP(w, req)
 
-	require.Equal(t, http.StatusGone, w.Code)
-	assert.Contains(t, w.Body.String(), "apple_callback_retired")
+	require.Equal(t, http.StatusNotFound, w.Code,
+		"/:provider/callback route removed in #975 — Gin returns 404")
 }

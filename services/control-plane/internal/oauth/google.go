@@ -7,11 +7,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"math/big"
 	"net/http"
 	"net/url"
-	"strings"
 	"sync"
 	"time"
 
@@ -21,16 +19,19 @@ import (
 // GoogleConfig is the constructor input for GoogleProvider.
 // Mirrored on pkg/config/GoogleSSOConfig but kept package-local so callers
 // pass exactly what GoogleProvider needs and nothing more.
+//
+// ClientSecret was removed in #975: the desktop client performs the code
+// exchange directly (client-driven PKCE), so the server never needs the
+// Google OAuth client secret.
 type GoogleConfig struct {
-	ClientID     string
-	ClientSecret string // #nosec G117 G101 -- False positive: config field name, actual secret loaded from env
-	RedirectURI  string
+	ClientID    string
+	RedirectURI string
 
 	// Endpoint overrides (default to Google's production URLs when empty).
-	// Tests point these at httptest.Server.
-	TokenEndpoint string
-	JWKSEndpoint  string
-	Issuer        string
+	// Tests point these at httptest.Server. TokenEndpoint was removed in #975:
+	// the server no longer exchanges codes (client-driven PKCE).
+	JWKSEndpoint string
+	Issuer       string
 
 	// HTTPClient is optional; defaults to a 10s-timeout client whose Transport
 	// is the standard http.DefaultTransport (TLS verification enabled).
@@ -41,11 +42,12 @@ type GoogleConfig struct {
 }
 
 const (
-	googleAuthEndpoint = "https://accounts.google.com/o/oauth2/v2/auth"
-	// #nosec G101 -- False positive: public OAuth endpoint URL, not a credential.
-	defaultTokenEndpoint = "https://oauth2.googleapis.com/token"
-	defaultJWKSEndpoint  = "https://www.googleapis.com/oauth2/v3/certs"
-	defaultIssuer        = "https://accounts.google.com"
+	googleAuthEndpoint  = "https://accounts.google.com/o/oauth2/v2/auth"
+	defaultJWKSEndpoint = "https://www.googleapis.com/oauth2/v3/certs"
+	defaultIssuer       = "https://accounts.google.com"
+	// Google also mints id_tokens with the bare issuer form; accepted alongside
+	// defaultIssuer (parity with the desktop verifier — #975 review L1).
+	bareGoogleIssuer = "accounts.google.com"
 )
 
 // Compile-time check that *GoogleProvider implements Provider.
@@ -65,14 +67,8 @@ func NewGoogleProvider(cfg GoogleConfig) (*GoogleProvider, error) {
 	if cfg.ClientID == "" {
 		return nil, fmt.Errorf("oauth/google: ClientID is required")
 	}
-	if cfg.ClientSecret == "" {
-		return nil, fmt.Errorf("oauth/google: ClientSecret is required")
-	}
 	if cfg.RedirectURI == "" {
 		return nil, fmt.Errorf("oauth/google: RedirectURI is required")
-	}
-	if cfg.TokenEndpoint == "" {
-		cfg.TokenEndpoint = defaultTokenEndpoint
 	}
 	if cfg.JWKSEndpoint == "" {
 		cfg.JWKSEndpoint = defaultJWKSEndpoint
@@ -105,80 +101,6 @@ func (g *GoogleProvider) AuthorizationURL(state, nonce, codeChallenge string) st
 	return googleAuthEndpoint + "?" + q.Encode()
 }
 
-// Exchange performs the code-exchange + id_token validation flow.
-func (g *GoogleProvider) Exchange(ctx context.Context, params ExchangeParams) (*UserInfo, error) {
-	// Per RFC 6749 §4.1.3, the redirect_uri sent here MUST equal the
-	// redirect_uri used to build the authorization URL. The handler builds
-	// the auth URL with the per-request loopback URI (chosen ephemeral port
-	// in the renderer), stores it in the sso_state record, and replays it
-	// via params.RedirectURI. Fall back to the constructor seed only when
-	// callers omit the param — production paths always set it.
-	redirectURI := g.cfg.RedirectURI
-	if params.RedirectURI != "" {
-		redirectURI = params.RedirectURI
-	}
-	tokens, err := g.exchangeCode(ctx, params.Code, params.CodeVerifier, redirectURI)
-	if err != nil {
-		return nil, fmt.Errorf("oauth/google: code exchange: %w", err)
-	}
-	claims, err := g.validateIDToken(ctx, tokens.IDToken, params.Nonce)
-	if err != nil {
-		return nil, fmt.Errorf("oauth/google: id_token validation: %w", err)
-	}
-	return &UserInfo{
-		Provider:       "google",
-		ProviderUserID: claims.Sub,
-		Email:          claims.Email,
-		EmailVerified:  claims.EmailVerified,
-		Name:           claims.Name,
-		AvatarURL:      claims.Picture,
-		IsRelayEmail:   false,
-	}, nil
-}
-
-type googleTokenResponse struct {
-	IDToken string `json:"id_token"`
-	// Note: Google also returns access_token, expires_in, and token_type.
-	// We do not retain them — Concord uses the id_token only for OIDC identity.
-}
-
-func (g *GoogleProvider) exchangeCode(ctx context.Context, code, codeVerifier, redirectURI string) (*googleTokenResponse, error) {
-	form := url.Values{}
-	form.Set("grant_type", "authorization_code")
-	form.Set("code", code)
-	form.Set("code_verifier", codeVerifier)
-	form.Set("client_id", g.cfg.ClientID)
-	form.Set("client_secret", g.cfg.ClientSecret)
-	form.Set("redirect_uri", redirectURI)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, g.cfg.TokenEndpoint, strings.NewReader(form.Encode()))
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := g.httpClient.Do(req) //nolint:gosec // TokenEndpoint set from trusted config (env or hardcoded default)
-	if err != nil {
-		return nil, fmt.Errorf("HTTP: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("status %d: %s", resp.StatusCode, body)
-	}
-
-	var out googleTokenResponse
-	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
-		return nil, fmt.Errorf("decode token response: %w", err)
-	}
-	if out.IDToken == "" {
-		return nil, errors.New("token response missing id_token")
-	}
-	return &out, nil
-}
-
 type googleClaims struct {
 	Sub           string `json:"sub"`
 	Email         string `json:"email"`
@@ -192,7 +114,6 @@ type googleClaims struct {
 // validateIDToken verifies signature, iss, aud, exp, and nonce.
 func (g *GoogleProvider) validateIDToken(ctx context.Context, idToken, expectedNonce string) (*googleClaims, error) {
 	parser := jwt.NewParser(
-		jwt.WithIssuer(g.cfg.Issuer),
 		jwt.WithAudience(g.cfg.ClientID),
 		jwt.WithExpirationRequired(),
 	)
@@ -213,18 +134,35 @@ func (g *GoogleProvider) validateIDToken(ctx context.Context, idToken, expectedN
 			return nil, fmt.Errorf("id_token exp: %w", err)
 		case errors.Is(err, jwt.ErrTokenInvalidAudience):
 			return nil, fmt.Errorf("id_token aud: %w", err)
-		case errors.Is(err, jwt.ErrTokenInvalidIssuer):
-			return nil, fmt.Errorf("id_token iss: %w", err)
 		}
 		return nil, err
 	}
 	if !tok.Valid {
 		return nil, errors.New("id_token invalid")
 	}
+	// Issuer: golang-jwt v5's WithIssuer is single-valued, but Google mints
+	// id_tokens with either the canonical "https://accounts.google.com" or the
+	// historical bare "accounts.google.com". Accept both (parity with the
+	// desktop verifier's GOOGLE_ISSUERS) so the server re-verification never
+	// rejects a token the client accepted (#975 review L1). Fails closed.
+	if !g.issuerAccepted(claims.Issuer) {
+		return nil, fmt.Errorf("id_token iss: unexpected issuer %q", claims.Issuer)
+	}
 	if claims.Nonce != expectedNonce {
 		return nil, fmt.Errorf("id_token nonce mismatch: got %q expected %q", claims.Nonce, expectedNonce)
 	}
 	return claims, nil
+}
+
+// issuerAccepted reports whether iss is a valid Google id_token issuer. When the
+// production default issuer is configured, both the canonical and bare forms are
+// accepted (parity with the desktop verifier); a test/override issuer matches
+// exactly. Always fails closed for any other value.
+func (g *GoogleProvider) issuerAccepted(iss string) bool {
+	if iss == g.cfg.Issuer {
+		return true
+	}
+	return g.cfg.Issuer == defaultIssuer && iss == bareGoogleIssuer
 }
 
 // JWKS cache (1h TTL).

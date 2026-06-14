@@ -391,50 +391,61 @@ func TestGoogleSSOConfig_Disabled_NoFatal(t *testing.T) {
 	assert.False(t, cfg.GoogleSSO.Enabled)
 }
 
-func TestGoogleSSOConfig_EnabledWithCredentials_OK(t *testing.T) {
+func TestGoogleSSOConfig_EnabledWithClientID_OK(t *testing.T) {
 	t.Setenv("GOOGLE_SSO_ENABLED", "true")
 	t.Setenv("GOOGLE_CLIENT_ID", "test-client-id.apps.googleusercontent.com")
-	t.Setenv("GOOGLE_CLIENT_SECRET", "test-secret-123") //nolint:gosec // test fixture, not a real secret
+	// GOOGLE_CLIENT_SECRET removed in #975; stale values are silently ignored.
 
 	cfg, err := Load()
 	require.NoError(t, err)
 	assert.True(t, cfg.GoogleSSO.Enabled)
 	assert.Equal(t, "test-client-id.apps.googleusercontent.com", cfg.GoogleSSO.ClientID)
-	assert.Equal(t, "test-secret-123", cfg.GoogleSSO.ClientSecret)
 }
 
-func TestGoogleSSOConfig_EnabledMissingCredentials_Error(t *testing.T) {
+func TestGoogleSSOConfig_EnabledMissingClientID_Error(t *testing.T) {
 	t.Setenv("GOOGLE_SSO_ENABLED", "true")
 	t.Setenv("GOOGLE_CLIENT_ID", "")
-	t.Setenv("GOOGLE_CLIENT_SECRET", "")
 
 	_, err := Load()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "GoogleSSO enabled but GOOGLE_CLIENT_ID")
 }
 
-func TestGoogleSSOConfig_StringRedactsSecret(t *testing.T) {
+func TestGoogleSSOConfig_String(t *testing.T) {
 	cfg := GoogleSSOConfig{
-		Enabled:      true,
-		ClientID:     "test-client-id",
-		ClientSecret: "should-not-appear", //nolint:gosec // test fixture, not a real secret
+		Enabled:  true,
+		ClientID: "test-client-id",
 	}
 	str := cfg.String()
 	assert.Contains(t, str, "test-client-id")
-	assert.NotContains(t, str, "should-not-appear")
-	assert.Contains(t, str, "[REDACTED]")
+	// ClientSecret removed in #975 — String() no longer includes a secret field.
+	assert.NotContains(t, str, "ClientSecret")
+	assert.NotContains(t, str, "[REDACTED]")
+	assert.NotContains(t, str, "[empty]")
 }
 
-func TestGoogleSSOConfig_StringEmptySecret(t *testing.T) {
-	cfg := GoogleSSOConfig{
-		Enabled:  false,
-		ClientID: "test-client-id",
-		// ClientSecret intentionally empty
-	}
-	str := cfg.String()
-	assert.Contains(t, str, "test-client-id")
-	assert.Contains(t, str, "[empty]")
-	assert.NotContains(t, str, "[REDACTED]")
+// TestLoad_GoogleSSO_NoClientSecretRequired verifies that enabling Google SSO
+// with only a client_id (no client_secret) loads successfully after #975
+// removed server-side code exchange. GOOGLE_CLIENT_SECRET is now ignored.
+func TestLoad_GoogleSSO_NoClientSecretRequired(t *testing.T) {
+	t.Setenv("GOOGLE_SSO_ENABLED", "true")
+	t.Setenv("GOOGLE_CLIENT_ID", "cid.apps.googleusercontent.com")
+	t.Setenv("GOOGLE_CLIENT_SECRET", "") // explicitly empty/unset — must not error
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.True(t, cfg.GoogleSSO.Enabled)
+	assert.Equal(t, "cid.apps.googleusercontent.com", cfg.GoogleSSO.ClientID)
+}
+
+// TestLoad_GoogleSSO_StaleSecretTolerated verifies that a stale
+// GOOGLE_CLIENT_SECRET env var (e.g., left over before the #975 migration)
+// is silently ignored — Load() must not error on its presence.
+func TestLoad_GoogleSSO_StaleSecretTolerated(t *testing.T) {
+	t.Setenv("GOOGLE_SSO_ENABLED", "true")
+	t.Setenv("GOOGLE_CLIENT_ID", "cid")
+	t.Setenv("GOOGLE_CLIENT_SECRET", "orphan-value") // present but ignored
+	_, err := Load()
+	require.NoError(t, err)
 }
 
 // Apple SSO config tests (#271 Task 3).
