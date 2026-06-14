@@ -255,3 +255,8 @@ snapshots/
 
 # Superpowers brainstorm visual-companion artifacts (local only)
 .superpowers/
+
+# ZAP API DAST local-run scan output (#1465) — CI consumes it in-job only
+/reports/
+# Python bytecode from the .zap/ DAST helpers (#1465)
+.zap/__pycache__/

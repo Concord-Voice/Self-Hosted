@@ -841,8 +841,11 @@ paths:
     post:
       tags:
       - Auth
-      summary: Register a new user
-      description: 'Create a new user account with E2EE key material.
+      summary: Register a new user (creates a pending registration)
+      description: 'Start registration with E2EE key material. Creates a PENDING registration
+        (#621, migration 000058) — the account is only promoted to a full user after the emailed
+        verification code is submitted to /auth/register/confirm, which is the endpoint that
+        returns tokens.
 
         Rate limit: 5 requests per 15 minutes (IP-based).
 
@@ -855,34 +858,25 @@ paths:
               $ref: '#/components/schemas/RegisterRequest'
       responses:
         '201':
-          description: User created successfully
+          description: Pending registration created; verification code emailed
           content:
             application/json:
               schema:
                 type: object
                 properties:
-                  access_token:
+                  pending_id:
                     type: string
-                  expires_in:
-                    type: integer
-                    example: 900
-                  remember_me:
-                    type: boolean
-                  user:
-                    type: object
-                    properties:
-                      id:
-                        type: string
-                        format: uuid
-                      username:
-                        type: string
-                      e2ee_preference:
-                        type: boolean
-          headers:
-            Set-Cookie:
-              description: HttpOnly refresh token cookie
-              schema:
-                type: string
+                    format: uuid
+                  email:
+                    type: string
+                    format: email
+                  expires_at:
+                    type: string
+                    format: date-time
+                    description: Pending-registration expiry (15-minute TTL)
+                  code_expires_at:
+                    type: string
+                    format: date-time
         '400':
           $ref: '#/components/responses/BadRequest'
         '409':
@@ -1579,6 +1573,133 @@ paths:
                 $ref: '#/components/schemas/SSOError'
         '409':
           description: Email or username already taken (`email_taken` / `username_taken`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+  /auth/sso/{provider}/session:
+    post:
+      tags:
+      - Auth
+      summary: Create a session from a client-verified Apple id_token
+      description: 'Terminal server step of the client-driven Apple exchange (#974): the desktop main
+        process completes the Apple code exchange itself and posts the resulting id_token for
+        server-side re-verification (signature via JWKS, iss/aud/exp/iat, nonce binding against the
+        single-use state record) — the server never trusts client-side verification. Response shapes
+        are byte-identical to the callback classify branches. Apple-only until #975 migrates Google
+        (404 for other providers). Rate limit: 10 requests per 15 minutes (IP-based).
+
+        '
+      operationId: ssoAppleSession
+      security: []
+      parameters:
+      - name: provider
+        in: path
+        required: true
+        schema:
+          type: string
+          enum:
+          - apple
+        description: Apple-only (the route 404s for any other provider until #975)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - id_token
+              - state
+              properties:
+                id_token:
+                  type: string
+                  description: Apple id_token obtained by the desktop-driven code exchange
+                state:
+                  type: string
+                  description: Single-use state value returned by the initiate step
+                apple_user_data:
+                  type: string
+                  description: Apple-only opaque "user" blob from the first-auth callback (display-name
+                    suggestion)
+      responses:
+        '200':
+          description: 'Verification succeeded — one of four shapes (callback parity): existing-SSO
+            session (`access_token` + refresh cookie), existing-SSO MFA challenge, account-link offer,
+            or new-user registration handoff.
+
+            '
+          content:
+            application/json:
+              schema:
+                oneOf:
+                - type: object
+                  description: Existing SSO identity — session issued
+                  properties:
+                    access_token:
+                      type: string
+                - type: object
+                  description: Existing SSO identity — MFA required
+                  properties:
+                    mfa_challenge_token:
+                      type: string
+                    methods:
+                      type: array
+                      items:
+                        type: string
+                    recovery_only_methods:
+                      type: array
+                      items:
+                        type: string
+                    webauthn_options:
+                      type: object
+                - type: object
+                  description: Verified email matches an existing account
+                  properties:
+                    account_link_available:
+                      type: boolean
+                    sso_token:
+                      type: string
+                    masked_email:
+                      type: string
+                - type: object
+                  description: New user — registration required
+                  properties:
+                    sso_registration_required:
+                      type: boolean
+                    sso_token:
+                      type: string
+                    email:
+                      type: string
+                    name:
+                      type: string
+          headers:
+            Set-Cookie:
+              description: HttpOnly refresh token cookie (session-issued branch only)
+              schema:
+                type: string
+        '400':
+          description: Invalid body or oversized state (`invalid_request`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
+        '401':
+          description: State validation failed (`invalid_state` — restart the flow) or id_token verification
+            failed (`invalid_id_token` — never retry this token)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
+        '403':
+          description: Apple reports the email as unverified (`oauth_email_unverified`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
+        '404':
+          description: Unknown or non-Apple provider (`unknown_provider`)
           content:
             application/json:
               schema:
