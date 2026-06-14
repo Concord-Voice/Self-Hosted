@@ -283,7 +283,7 @@ func (h *Handler) AuthorizeVoiceAction(c *gin.Context) {
 	}
 
 	// Hierarchy check: cannot moderate members with equal or higher role
-	if hierErr := h.resolver.CheckHierarchy(c.Request.Context(), serverID, userID, req.TargetUserID); hierErr != nil {
+	if h.resolver.CheckHierarchy(c.Request.Context(), serverID, userID, req.TargetUserID) != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgHierarchyViolation})
 		return
 	}

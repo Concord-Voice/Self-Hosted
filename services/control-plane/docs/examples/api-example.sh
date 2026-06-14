@@ -3,6 +3,7 @@
 # This script demonstrates the basic API flow
 
 API_URL="http://localhost:8080/api/v1"
+CONTENT_TYPE_JSON="Content-Type: application/json"
 
 echo "=== Concord API Example ==="
 echo
@@ -10,7 +11,7 @@ echo
 # 1. Register a new user
 echo "1. Registering new user..."
 REGISTER_RESPONSE=$(curl -s -X POST "$API_URL/auth/register" \
-  -H "Content-Type: application/json" \
+  -H "$CONTENT_TYPE_JSON" \
   -d '{
     "email": "test@example.com",
     "username": "testuser",
@@ -25,7 +26,7 @@ echo
 echo "2. Creating a server..."
 SERVER_RESPONSE=$(curl -s -X POST "$API_URL/servers" \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
+  -H "$CONTENT_TYPE_JSON" \
   -d '{
     "name": "Test Server",
     "icon_url": "https://example.com/icon.png"
@@ -39,7 +40,7 @@ echo
 echo "3. Creating a channel..."
 CHANNEL_RESPONSE=$(curl -s -X POST "$API_URL/channels" \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
+  -H "$CONTENT_TYPE_JSON" \
   -d "{
     \"server_id\": \"$SERVER_ID\",
     \"name\": \"general\",
@@ -55,7 +56,7 @@ echo
 echo "4. Sending a message..."
 MESSAGE_RESPONSE=$(curl -s -X POST "$API_URL/messages" \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
-  -H "Content-Type: application/json" \
+  -H "$CONTENT_TYPE_JSON" \
   -d "{
     \"channel_id\": \"$CHANNEL_ID\",
     \"content\": \"Hello, Concord!\",

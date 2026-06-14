@@ -225,7 +225,7 @@
                     const msg = JSON.parse(event.data);
                     handleMessage(msg);
                 } catch (err) {
-                    addMessage(`Invalid message: ${event.data}`, 'error');
+                    addMessage(`Invalid message: ${event.data} (${err.message})`, 'error');
                 }
             };
 
@@ -260,15 +260,17 @@
                     addMessage(`✅ Subscribed to channel: ${msg.data.channel_id}`, 'system');
                     break;
 
-                case 'message':
+                case 'message': {
                     const content = JSON.stringify(msg.data.content);
                     addMessage(`📨 Message from ${msg.data.user_id} in ${msg.data.channel_id}: ${content}`, 'received');
                     break;
+                }
 
-                case 'typing':
+                case 'typing': {
                     const status = msg.data.is_typing ? 'typing' : 'stopped typing';
                     addMessage(`⌨️  ${msg.data.user_id} is ${status} in ${msg.data.channel_id}`, 'received');
                     break;
+                }
 
                 default:
                     addMessage(`📥 Received: ${JSON.stringify(msg)}`, 'received');

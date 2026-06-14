@@ -234,7 +234,7 @@ func (h *Handler) createPendingKeyRequests(serverID, userID string) {
 	var pendingChannels []string
 	for rows.Next() {
 		var chID string
-		if sErr := rows.Scan(&chID); sErr == nil {
+		if rows.Scan(&chID) == nil {
 			pendingChannels = append(pendingChannels, chID)
 		}
 	}

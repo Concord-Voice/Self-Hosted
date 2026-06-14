@@ -472,7 +472,7 @@ func (h *Handler) TOTPSetup(c *gin.Context) {
 
 	// Get user email for the TOTP issuer label
 	var email string
-	if dbErr := h.db.QueryRowContext(ctx, `SELECT email FROM users WHERE id = $1`, userID).Scan(&email); dbErr != nil {
+	if h.db.QueryRowContext(ctx, `SELECT email FROM users WHERE id = $1`, userID).Scan(&email) != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch user"})
 		return
 	}
@@ -1018,7 +1018,7 @@ func (h *Handler) WebAuthnDeleteCredential(c *gin.Context) {
 		defer credRows.Close() //nolint:errcheck
 		for credRows.Next() {
 			var cid []byte
-			if scanErr := credRows.Scan(&cid); scanErr == nil {
+			if credRows.Scan(&cid) == nil {
 				remainingIDs = append(remainingIDs, cid)
 			}
 		}

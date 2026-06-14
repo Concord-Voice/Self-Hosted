@@ -504,7 +504,7 @@ func (h *Handler) authorizeRemoval(c *gin.Context, serverID, userID, targetUserI
 	if targetUserID == ownerID {
 		return nil, http.StatusForbidden, "Cannot remove the server owner"
 	}
-	if hierErr := h.resolver.CheckHierarchy(c.Request.Context(), serverID, userID, targetUserID); hierErr != nil {
+	if h.resolver.CheckHierarchy(c.Request.Context(), serverID, userID, targetUserID) != nil {
 		return nil, http.StatusForbidden, "Cannot remove a member with equal or higher role position"
 	}
 
@@ -693,7 +693,7 @@ func (h *Handler) BanMember(c *gin.Context) {
 		return
 	}
 
-	if hierErr := h.resolver.CheckHierarchy(c.Request.Context(), serverID, userID, targetUserID); hierErr != nil {
+	if h.resolver.CheckHierarchy(c.Request.Context(), serverID, userID, targetUserID) != nil {
 		c.JSON(http.StatusForbidden, gin.H{"error": "Cannot ban a member with equal or higher role position"})
 		return
 	}
