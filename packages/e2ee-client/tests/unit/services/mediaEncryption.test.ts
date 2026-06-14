@@ -46,7 +46,6 @@ describe('MediaEncryption', () => {
       await receiver.init(csk, 'receiver-user-id');
       await receiver.addDecryptKey(csk, 'sender-user-id');
 
-      const original = new Uint8Array(fakeAudioFrame(50).data).slice();
       const frame = fakeAudioFrame(50);
       // Copy original data for comparison
       const originalData = new Uint8Array(frame.data).slice();
