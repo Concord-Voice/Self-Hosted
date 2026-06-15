@@ -153,7 +153,7 @@ The desktop client is the only shipping client. Source: `client/desktop/`.
 - **Responsibilities:** browser-inspired UI (server bar, channel panel), WebRTC media handling (Opus, 7 quality tiers), voice controls (mute/deafen/PTT, device selection, per-user volume), screen sharing, video calls, E2EE encrypt/decrypt via `e2eeService` (`encryptForChannel` / `decryptForChannel`), secure token storage via `safeStorage`. *(This list is non-exhaustive — the renderer also carries TTS (`ttsService.ts`), keyboard-shortcut customization, OS-permission management (`permissionManager.ts`, macOS screen-recording/mic TCC), and a startup splash window.)*
 - **Security posture:** `contextIsolation` ON and `nodeIntegration` OFF unconditionally; no `@electron/remote`. `sandbox` (and `webSecurity`) are ON in packaged builds (`sandbox: isPackaged` in `browserWindowConfig.ts`) and off in dev/unpackaged runs. IPC handlers that reach privileged side effects validate the sender frame via `isPermittedFrameUrl` (`src/main/ipc/frameValidation.ts`). See [`[internal]rules/electron.md`](../[internal]rules/electron.md).
 - **Token storage:** the refresh token and E2EE session keys are persisted by `tokenManager.ts` via Electron `safeStorage` (OS keychain — Keychain / DPAPI / libsecret) to `secure-token.dat` / `secure-e2ee.dat` under the pinned userData dir. The access token is **memory-only** (never persisted to disk); it is returned to the renderer via IPC and also cached in main-process memory (`cachedAccessToken`) for proactive refresh.
-- **Path identity:** `pinUserDataPath.ts` pins `userData` to `<appData>/ConcordVoice` as `main.ts`'s first import, decoupling the machine path-identity from the mutable display name (see [ADR-0011](adr/0011-desktop-app-naming-and-update-cache.md)).
+- **Path identity:** `pinUserDataPath.ts` pins `userData` to `<appData>/ConcordVoice` as `main.ts`'s first import, decoupling the machine path-identity from the mutable display name (see [ADR-0020](adr/0020-desktop-app-naming-and-update-cache.md)).
 - **Communication:** HTTP/WebSocket → Control Plane; Socket.IO → Media Plane (signaling); WebRTC (DTLS-SRTP carrying E2EE frames) → Media Plane (audio/video).
 
 #### SPA Deploy Lifecycle (ADR-0001, ADR-0015)
@@ -178,7 +178,7 @@ The SPA hot-update path above is distinct from the **binary** auto-update path t
 - **`updater.ts`** — `electron-updater` wiring with `autoDownload = false` (the download is a deliberate, user-gated step, not silent) and prerelease opt-in gating. It pins the certificate chain by monkey-patching `verifyUpdateCodeSignature` to require the Microsoft Trusted Signing intermediate (`updatePinning.ts` / `updatePinningConfig.ts`).
 - **`verifyWindowsSignature.ts`** — independent Authenticode signature verification of the downloaded Windows installer.
 - **`updateSafety.ts`** — update-safety gating (refuses unsafe transitions) before an update is applied.
-- **`userDataMigration.ts`** — migrates the userData tree across versions, tied to the path-identity pinning in [ADR-0011](adr/0011-desktop-app-naming-and-update-cache.md).
+- **`userDataMigration.ts`** — migrates the userData tree across versions, tied to the path-identity pinning in [ADR-0020](adr/0020-desktop-app-naming-and-update-cache.md).
 
 Manifests + signed installers are served from the control-plane `updates` package (`GET /api/v1/updates/*`); the trust decisions (signature + cert-chain + safety) all happen client-side in the main process. This is also defended at the transport layer by TLS pinning on `electron-updater`.
 
