@@ -10,12 +10,15 @@ echo
 
 # 1. Register a new user
 echo "1. Registering new user..."
+# Substitute a password that meets the complexity policy (>=8 chars with
+# upper, lower, digit, and symbol). This is an example placeholder — never
+# commit real credentials.
 REGISTER_RESPONSE=$(curl -s -X POST "$API_URL/auth/register" \
   -H "$CONTENT_TYPE_JSON" \
   -d '{
     "email": "test@example.com",
     "username": "testuser",
-    "password": "Test123!"
+    "password": "<REPLACE_WITH_A_STRONG_PASSWORD>"
   }')
 
 echo "$REGISTER_RESPONSE" | jq '.'
