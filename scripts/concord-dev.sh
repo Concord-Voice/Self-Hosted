@@ -63,6 +63,8 @@ Verbs:
   validate-config     Validate base + dev compose overlay
   dev-code [email]    Print the latest dev-mode email verification code from the
                       control-plane log (empty SMTP_HOST = codes logged, not emailed)
+  console | repl      Interactive REPL: a concord> prompt that runs any verb
+                      above without re-invoking this script each time
 
 Global options (apply to any verb):
   --verbose           Echo docker/build commands to stderr
@@ -76,6 +78,17 @@ main() {
   parse_global_flags "$@"
   local verb="${POSITIONAL[0]:-help}"
   set -- "${POSITIONAL[@]:1}"  # shift past verb
+  dispatch_verb "$verb" "$@"
+}
+
+# dispatch_verb() — route one verb + its args to the matching handler. Shared by
+# main() (one-shot CLI) and verb_console() (interactive REPL) so the verb list
+# lives in exactly ONE place. Returns the verb's exit status; an unknown verb
+# prints usage and returns 1 (main propagates it as the process exit code; the
+# REPL tolerates it and keeps the prompt alive).
+dispatch_verb() {
+  local verb="${1:-help}"
+  shift || true
 
   case "$verb" in
     up)              verb_up "$@" ;;
@@ -87,11 +100,12 @@ main() {
     freshstart)      verb_freshstart "$@" ;;
     validate-config) verb_validate_config "$@" ;;
     dev-code)        verb_dev_code "$@" ;;
+    console|repl)    verb_console "$@" ;;
     help|-h|--help)  usage ;;
     *)
       echo "Unknown verb: $verb" >&2
       usage >&2
-      exit 1
+      return 1
       ;;
   esac
 }
@@ -822,6 +836,83 @@ verb_dev_code() {
   else
     printf '%s\n' "$code"
   fi
+}
+
+# console_prompt() — the REPL prompt. Deliberately trivial (no per-prompt docker
+# probe) so the prompt is instant.
+console_prompt() {
+  printf '%b' "${GREEN}concord${NC}> "
+}
+
+# console_help() — list the commands available inside the REPL.
+console_help() {
+  cat <<'HELP'
+Commands (same as the CLI verbs):
+  up | down | status | logs | restart | rebuild | freshstart
+  validate-config | dev-code [email]
+REPL builtins:
+  help | ?      Show this list
+  clear         Clear the screen
+  exit | quit   Leave the console (Ctrl-D also works)
+Verb flags work too, e.g.  logs control-plane -n 50
+HELP
+}
+
+# console_repl() — the interactive dispatch loop. Reads one command per line and
+# routes it through dispatch_verb until exit/quit/EOF. Each verb runs in a
+# subshell with errexit disabled, so a failing command (or a `cd` inside a verb)
+# returns cleanly to the prompt instead of ending the session. Factored out of
+# verb_console() so tests can drive it with piped (non-TTY) input. The TTY check
+# keeps readline (-e) + the prompt for humans while letting tests feed stdin.
+console_repl() {
+  local line args interactive=0
+  [[ -t 0 ]] && interactive=1
+  while true; do
+    if [[ "$interactive" -eq 1 ]]; then
+      IFS= read -e -r -p "$(console_prompt)" line || { echo; break; }
+    else
+      IFS= read -r line || break
+    fi
+    # Trim surrounding whitespace.
+    line="${line#"${line%%[![:space:]]*}"}"
+    line="${line%"${line##*[![:space:]]}"}"
+    [[ -z "$line" ]] && continue
+    [[ "$interactive" -eq 1 ]] && { history -s "$line" 2>/dev/null || true; }
+    case "$line" in
+      exit|quit) return 0 ;;
+      # `|| true` so a builtin failing under set -e (e.g. `clear` with an unset
+      # TERM) returns to the prompt instead of killing the session (Gitar #1534).
+      help|'?')  console_help || true ;;
+      clear)     command clear || true ;;
+      *)
+        read -ra args <<< "$line"
+        # Subshell + `set +e`: isolate a verb's failure and any `cd` it does, so
+        # the loop survives and the next command starts from a clean cwd.
+        ( set +e; dispatch_verb "${args[@]}" ) || true
+        ;;
+    esac
+  done
+  return 0
+}
+
+# verb_console() — launch the interactive REPL. Refuses a non-interactive stdin
+# (so it never blocks in CI/pipes with no input), prints a short banner, and
+# installs a SIGINT trap so Ctrl-C aborts the running command and returns to the
+# prompt instead of killing the session. NOTE: Ctrl-C at an idle prompt still
+# exits the loop (v1 limitation) — use `exit`/Ctrl-D to leave deliberately.
+verb_console() {
+  if [[ ! -t 0 ]]; then
+    echo -e "${RED}✗${NC} 'console' needs an interactive terminal (stdin is not a TTY)." >&2
+    return 2
+  fi
+  [[ "$QUIET" -eq 0 ]] && echo -e "${BLUE}Concord dev console${NC} — type ${GREEN}help${NC} for commands, ${GREEN}exit${NC} to leave."
+  # Ctrl-C during a running verb kills that verb's subshell (default INT there)
+  # while this trap keeps the parent loop alive and reprints a clean line.
+  trap 'echo' INT
+  console_repl
+  local rc=$?
+  trap - INT
+  return "$rc"
 }
 
 # ── Source-vs-execute guard ────────────────────────────────────────────
