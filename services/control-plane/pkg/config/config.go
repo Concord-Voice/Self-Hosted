@@ -275,8 +275,8 @@ func Load() (*Config, error) {
 		UploadMaxSize:            getEnvInt64("UPLOAD_MAX_SIZE", 25*1024*1024), // 25 MB default
 		KlipyAPIKey:              getEnv("KLIPY_API_KEY", ""),
 		GitHubFeedback: GitHubFeedbackConfig{
-			Token: getEnv("GITHUB_FEEDBACK_TOKEN", ""), // #nosec G101 -- env var name, not a secret
-			Repo:  getEnv("GITHUB_FEEDBACK_REPO", ""),
+			Token: getEnv("FEEDBACK_PAT", ""), // #nosec G101 -- env var name, not a secret
+			Repo:  getEnv("FEEDBACK_REPO", ""),
 		},
 		RequireClientAttestation: getEnv("REQUIRE_CLIENT_ATTESTATION", "false") == "true",
 		AttestationTokenTTL:      parseAttestationTokenTTL(getEnv("ATTESTATION_TOKEN_TTL", "2h")),
@@ -477,9 +477,9 @@ func (c *Config) validate() error {
 		// AND the repo slug; either alone is a misconfiguration that
 		// silently degrades to the log-only stub.
 		{c.GitHubFeedback.Token == "",
-			"GITHUB_FEEDBACK_TOKEN must be set in production. Without it the feedback handler falls back to a log-only stub and no GitHub issues are filed. Generate a fine-scoped PAT with `issues:write` on the feedback repo only."},
+			"FEEDBACK_PAT must be set in production. Without it the feedback handler falls back to a log-only stub and no GitHub issues are filed. Generate a fine-scoped PAT with `issues:write` on the feedback repo only."},
 		{c.GitHubFeedback.Repo == "",
-			"GITHUB_FEEDBACK_REPO must be set in production. Format: 'owner/repo' (e.g. 'Concord-Voice/Concord-Voice-Feedback')."},
+			"FEEDBACK_REPO must be set in production. Format: 'owner/repo' (e.g. 'Concord-Voice/Concord-Voice-Feedback')."},
 	}
 
 	for _, g := range guards {

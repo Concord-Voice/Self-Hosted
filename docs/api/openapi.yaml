@@ -4436,7 +4436,7 @@ paths:
         client that bypasses the client-side scrub.
 
 
-        Dev / self-hosted: when GITHUB_FEEDBACK_TOKEN is empty the handler logs the
+        Dev / self-hosted: when FEEDBACK_PAT is empty the handler logs the
         assembled issue body and returns `{dev: true}` without filing a real issue.
 
 
@@ -4544,7 +4544,7 @@ paths:
                   dev:
                     type: boolean
                     description: True when the server logged the issue body instead
-                      of filing it (GITHUB_FEEDBACK_TOKEN unset).
+                      of filing it (FEEDBACK_PAT unset).
         '400':
           description: Invalid request body (missing required field, oversize, or
             unknown type)

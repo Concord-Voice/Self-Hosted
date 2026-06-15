@@ -316,8 +316,8 @@ func TestValidateProductionRejectsDevDefaults(t *testing.T) {
 		{"MEDIA_PLANE_URL root with www", func(c *Config) { c.MediaPlaneURL = "https://www.concordvoice.chat" }, "MEDIA_PLANE_URL"},
 		// #158 — feedback handler production guards. Either field empty must
 		// fatal-exit; same shape as the other "empty X in production" rows.
-		{"empty GITHUB_FEEDBACK_TOKEN", func(c *Config) { c.GitHubFeedback.Token = "" }, "GITHUB_FEEDBACK_TOKEN"},
-		{"empty GITHUB_FEEDBACK_REPO", func(c *Config) { c.GitHubFeedback.Repo = "" }, "GITHUB_FEEDBACK_REPO"},
+		{"empty FEEDBACK_PAT", func(c *Config) { c.GitHubFeedback.Token = "" }, "FEEDBACK_PAT"},
+		{"empty FEEDBACK_REPO", func(c *Config) { c.GitHubFeedback.Repo = "" }, "FEEDBACK_REPO"},
 	}
 
 	for _, tt := range tests {

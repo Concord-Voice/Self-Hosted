@@ -199,7 +199,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	friendsHandler := friends.NewHandler(db, log, hub)
 
 	// Feedback (#158): bug-report / feature-request → GitHub issues on the
-	// dedicated feedback repo. Dev stub: when GITHUB_FEEDBACK_TOKEN is empty,
+	// dedicated feedback repo. Dev stub: when FEEDBACK_PAT is empty,
 	// NewClient is skipped and the handler logs the assembled issue body
 	// instead of POSTing to GitHub. Production guard in config.go fatal-exits
 	// before we ever reach here with empty values.
