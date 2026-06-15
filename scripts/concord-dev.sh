@@ -265,13 +265,53 @@ pre_flight_checks() {
   fi
 }
 
-# bootstrap_env() — copy .env.example → .env if .env missing.
+# bootstrap_env() — copy .env.example → .env if .env missing; otherwise warn
+# (non-fatally) about keys an existing .env lacks vs .env.example.
 bootstrap_env() {
-  if [[ ! -f "$PROJECT_ROOT/.env" && -f "$PROJECT_ROOT/.env.example" ]]; then
-    cp "$PROJECT_ROOT/.env.example" "$PROJECT_ROOT/.env"
-    chmod 600 "$PROJECT_ROOT/.env"
+  local env="$PROJECT_ROOT/.env" example="$PROJECT_ROOT/.env.example"
+  if [[ ! -f "$env" && -f "$example" ]]; then
+    cp "$example" "$env"
+    chmod 600 "$env"
     [[ "$QUIET" -eq 0 ]] && echo -e "${GREEN}✓${NC} Created .env from .env.example"
+    return 0
   fi
+  # Existing .env: surface keys it's missing vs .env.example before they fail at `up`.
+  env_drift_warn "$env" "$example"
+}
+
+# env_drift_warn() — print a non-fatal WARNING listing keys that .env.example
+# defines but the given .env is missing. Compares KEY NAMES only — never reads
+# or prints values (secret hygiene, per [internal]rules/observability.md). Catches
+# the case where a months-old .env predates a newly-required compose var (the
+# PUBLIC_IP papercut), which otherwise surfaces only as a cryptic compose
+# interpolation error at `up`. Suppressed under --quiet.
+# Usage: env_drift_warn <env-path> <example-path>
+env_drift_warn() {
+  local env="$1" example="$2"
+  [[ "$QUIET" -eq 1 ]] && return 0
+  [[ -f "$env" && -f "$example" ]] || return 0
+  # Match ONLY plain column-0 `KEY=` lines — exactly what Docker Compose's
+  # env-file parser reads (it does NOT honor an `export ` prefix or leading
+  # whitespace). Keeping the check column-0-only keeps it aligned with the actual
+  # consumer: an `export KEY=` / indented key in .env is unreadable by compose,
+  # so it is correctly treated as ABSENT and still warns. Tolerating those forms
+  # would make this checker more permissive than compose and mask the exact
+  # interpolation failure it exists to catch. Values never match `^...=`, so no
+  # secret value reaches the diff. (Gitar #1550 — do NOT loosen to accept
+  # export/indented keys; that misaligns the check from compose.)
+  local missing
+  missing="$(comm -23 \
+    <(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "$example" | sed 's/=$//' | sort -u) \
+    <(grep -oE '^[A-Za-z_][A-Za-z0-9_]*=' "$env"     | sed 's/=$//' | sort -u) 2>/dev/null || true)"
+  [[ -n "$missing" ]] || return 0
+  {
+    echo -e "${YELLOW}⚠${NC}  Your .env is missing keys that .env.example defines:"
+    # shellcheck disable=SC2086 -- intentional word-split: one key per line
+    printf '     %s\n' $missing
+    echo "    Add them from .env.example before 'up' — a required one (e.g. PUBLIC_IP)"
+    echo "    otherwise fails with a cryptic compose interpolation error, not this hint."
+  } >&2
+  return 0
 }
 
 # ── Verbs ──────────────────────────────────────────────────────────────
