@@ -15,7 +15,6 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/clientconfig"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/dm"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/email"
-	"github.com/markdrogersjr/Concord/services/control-plane/internal/feedback"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/friends"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/invites"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/klipy"
@@ -197,18 +196,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	// HandleUserDisconnect to cancel any rings they initiated.
 	hub.SetDMRingCanceller(dmHandler.HandleUserDisconnect)
 	friendsHandler := friends.NewHandler(db, log, hub)
-
-	// Feedback (#158): bug-report / feature-request → GitHub issues on the
-	// dedicated feedback repo. Dev stub: when FEEDBACK_PAT is empty,
-	// NewClient is skipped and the handler logs the assembled issue body
-	// instead of POSTing to GitHub. Production guard in config.go fatal-exits
-	// before we ever reach here with empty values.
-	var feedbackGitHub feedback.GitHubIssueCreator
-	if cfg.GitHubFeedback.Token != "" && cfg.GitHubFeedback.Repo != "" {
-		feedbackGitHub = feedback.NewClient(cfg.GitHubFeedback.Token, cfg.GitHubFeedback.Repo)
-	}
-	feedbackHandler := feedback.NewHandler(log, feedbackGitHub)
-
+	feedbackHandler := buildFeedbackHandler(cfg, log)
 	notificationsHandler := notifications.NewHandler(db, log)
 	ownershipHandler := ownership.NewHandler(ownership.HandlerDeps{
 		DB:          db,
