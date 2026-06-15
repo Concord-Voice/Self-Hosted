@@ -61,6 +61,8 @@ Verbs:
   rebuild             Stop + start with rebuild (go build + npm install)
   freshstart          Wipe all data (DB, Redis, client data) and start fresh
   validate-config     Validate base + dev compose overlay
+  dev-code [email]    Print the latest dev-mode email verification code from the
+                      control-plane log (empty SMTP_HOST = codes logged, not emailed)
 
 Global options (apply to any verb):
   --verbose           Echo docker/build commands to stderr
@@ -84,6 +86,7 @@ main() {
     rebuild)         verb_rebuild "$@" ;;
     freshstart)      verb_freshstart "$@" ;;
     validate-config) verb_validate_config "$@" ;;
+    dev-code)        verb_dev_code "$@" ;;
     help|-h|--help)  usage ;;
     *)
       echo "Unknown verb: $verb" >&2
@@ -755,6 +758,69 @@ verb_validate_config() {
     echo "    See docker output above for the specific failure." >&2
     echo "    If a required env var is missing, run: cp .env.example .env" >&2
     return 1
+  fi
+}
+
+# verb_dev_code() — print the most recent email verification code the
+# control-plane logged in dev mode. When SMTP_HOST is empty the email service
+# logs codes instead of sending them (services/control-plane/internal/email/
+# service.go:92), so registration works locally without a real inbox; this
+# surfaces the latest code without grepping the log by hand. An optional
+# [email] arg filters to codes sent to that recipient. Read-only.
+verb_dev_code() {
+  local email_filter=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -h|--help)
+        echo "Usage: $0 dev-code [email]"
+        echo "  Print the most recent dev-mode email verification code from the"
+        echo "  control-plane log. Pass an email to filter to that recipient."
+        return 0
+        ;;
+      -*) echo "verb_dev_code: unknown option '$1'" >&2; return 2 ;;
+      *)  email_filter="$1"; shift ;;
+    esac
+  done
+
+  local log="$LOG_DIR/control-plane.log"
+  if [[ ! -f "$log" ]]; then
+    echo -e "${RED}✗${NC} No control-plane log at $log — is the stack up? Run: $0 up" >&2
+    return 1
+  fi
+
+  # Dev-mode codes are logged as:
+  #   ... msg="DEV MODE — email verification code" to=<email> code=<digits>
+  # Match the ASCII-safe substrings ('DEV MODE', 'verification') to dodge
+  # em-dash encoding hazards, and `|| true` so a no-match doesn't trip set -e.
+  local matches
+  matches="$(grep -F 'DEV MODE' "$log" 2>/dev/null | grep -F 'verification' || true)"
+  if [[ -n "$email_filter" ]]; then
+    # Exact whitespace-delimited field match: slog emits `to=<email>` as a single
+    # token, so match the field exactly rather than a loose substring — a filter
+    # of `a@b.com` must not also match `a@b.com.evil` (Gitar review, #1533). awk
+    # exits 0 with no output on no-match, so no `|| true` is needed.
+    matches="$(printf '%s\n' "$matches" | awk -v want="to=$email_filter" \
+      '{ for (i = 1; i <= NF; i++) if ($i == want) { print; break } }')"
+  fi
+
+  local line
+  line="$(printf '%s\n' "$matches" | grep -E 'code=' | tail -1 || true)"
+  if [[ -z "$line" ]]; then
+    local who=""
+    [[ -n "$email_filter" ]] && who=" for '$email_filter'"
+    echo -e "${YELLOW}⚠${NC} No dev-mode verification code found${who} in $log." >&2
+    [[ -z "$email_filter" ]] && echo "    Register in the client first — the code is logged here in dev mode." >&2
+    return 1
+  fi
+
+  local code to
+  code="$(printf '%s\n' "$line" | sed -nE 's/.*code="?([0-9]+).*/\1/p' | tail -1)"
+  to="$(printf '%s\n' "$line" | sed -nE 's/.*to="?([^"[:space:]]+).*/\1/p' | tail -1)"
+
+  if [[ "$QUIET" -eq 0 ]]; then
+    echo -e "${GREEN}✓${NC} Latest dev verification code: ${BLUE}${code}${NC}  (to: ${to})"
+  else
+    printf '%s\n' "$code"
   fi
 }
 
