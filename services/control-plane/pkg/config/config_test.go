@@ -203,6 +203,10 @@ func validProductionConfig() *Config { // #nosec G101 -- test fixture with fake 
 		// Satisfy the #725 MEDIA_PLANE_URL production guards: must be set,
 		// must not be the dev default, must not be the root zone.
 		MediaPlaneURL: "https://media.concordvoice.chat",
+		// #158 — feedback handler. Production requires both fields; empty
+		// either is a fatal-exit per the guards added on this branch.
+		GitHubFeedbackToken: "ghp_real_production_pat", //nolint:gosec // G101 false positive: test fixture, not a real PAT
+		GitHubFeedbackRepo:  "Concord-Voice/Concord-Voice-Feedback",
 	}
 }
 
@@ -307,6 +311,10 @@ func TestValidateProductionRejectsDevDefaults(t *testing.T) {
 		{"MEDIA_PLANE_URL root uppercase", func(c *Config) { c.MediaPlaneURL = "HTTPS://CONCORDVOICE.CHAT" }, "MEDIA_PLANE_URL"},
 		{"MEDIA_PLANE_URL root wss scheme", func(c *Config) { c.MediaPlaneURL = "wss://concordvoice.chat" }, "MEDIA_PLANE_URL"},
 		{"MEDIA_PLANE_URL root with www", func(c *Config) { c.MediaPlaneURL = "https://www.concordvoice.chat" }, "MEDIA_PLANE_URL"},
+		// #158 — feedback handler production guards. Either field empty must
+		// fatal-exit; same shape as the other "empty X in production" rows.
+		{"empty GITHUB_FEEDBACK_TOKEN", func(c *Config) { c.GitHubFeedbackToken = "" }, "GITHUB_FEEDBACK_TOKEN"},
+		{"empty GITHUB_FEEDBACK_REPO", func(c *Config) { c.GitHubFeedbackRepo = "" }, "GITHUB_FEEDBACK_REPO"},
 	}
 
 	for _, tt := range tests {
@@ -980,6 +988,9 @@ func TestValidate_WarnsOnBroadRFC1918Fallback(t *testing.T) {
 		SMTPHost:          "smtp.example.com",
 		TrustedProxyCIDRs: []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"},
 		MediaPlaneURL:     "https://media.concordvoice.chat",
+		// #158 — feedback handler production guards.
+		GitHubFeedbackToken: "ghp_real_production_pat", //nolint:gosec // G101 false positive: test fixture
+		GitHubFeedbackRepo:  "Concord-Voice/Concord-Voice-Feedback",
 	}
 
 	err := cfg.validate()
