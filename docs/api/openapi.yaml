@@ -4440,7 +4440,7 @@ paths:
         assembled issue body and returns `{dev: true}` without filing a real issue.
 
 
-        Rate limit: 3 requests per hour per user.
+        Rate limit: 10 requests per hour per user.
 
         '
       operationId: submitFeedback

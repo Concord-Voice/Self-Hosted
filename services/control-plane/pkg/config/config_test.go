@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/x509"
 	"encoding/pem"
+	"fmt"
 	"log"
 	"os"
 	"os/exec"
@@ -205,8 +206,10 @@ func validProductionConfig() *Config { // #nosec G101 -- test fixture with fake 
 		MediaPlaneURL: "https://media.concordvoice.chat",
 		// #158 — feedback handler. Production requires both fields; empty
 		// either is a fatal-exit per the guards added on this branch.
-		GitHubFeedbackToken: "ghp_real_production_pat", //nolint:gosec // G101 false positive: test fixture, not a real PAT
-		GitHubFeedbackRepo:  "Concord-Voice/Concord-Voice-Feedback",
+		GitHubFeedback: GitHubFeedbackConfig{ //nolint:gosec // G101: test fixture with fake PAT, not a real credential
+			Token: "ghp_real_production_pat", // #nosec G101 -- test fixture, not a real PAT
+			Repo:  "Concord-Voice/Concord-Voice-Feedback",
+		},
 	}
 }
 
@@ -313,8 +316,8 @@ func TestValidateProductionRejectsDevDefaults(t *testing.T) {
 		{"MEDIA_PLANE_URL root with www", func(c *Config) { c.MediaPlaneURL = "https://www.concordvoice.chat" }, "MEDIA_PLANE_URL"},
 		// #158 — feedback handler production guards. Either field empty must
 		// fatal-exit; same shape as the other "empty X in production" rows.
-		{"empty GITHUB_FEEDBACK_TOKEN", func(c *Config) { c.GitHubFeedbackToken = "" }, "GITHUB_FEEDBACK_TOKEN"},
-		{"empty GITHUB_FEEDBACK_REPO", func(c *Config) { c.GitHubFeedbackRepo = "" }, "GITHUB_FEEDBACK_REPO"},
+		{"empty GITHUB_FEEDBACK_TOKEN", func(c *Config) { c.GitHubFeedback.Token = "" }, "GITHUB_FEEDBACK_TOKEN"},
+		{"empty GITHUB_FEEDBACK_REPO", func(c *Config) { c.GitHubFeedback.Repo = "" }, "GITHUB_FEEDBACK_REPO"},
 	}
 
 	for _, tt := range tests {
@@ -989,13 +992,53 @@ func TestValidate_WarnsOnBroadRFC1918Fallback(t *testing.T) {
 		TrustedProxyCIDRs: []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16"},
 		MediaPlaneURL:     "https://media.concordvoice.chat",
 		// #158 — feedback handler production guards.
-		GitHubFeedbackToken: "ghp_real_production_pat", //nolint:gosec // G101 false positive: test fixture
-		GitHubFeedbackRepo:  "Concord-Voice/Concord-Voice-Feedback",
+		GitHubFeedback: GitHubFeedbackConfig{ //nolint:gosec // G101: test fixture with fake PAT
+			Token: "ghp_real_production_pat", // #nosec G101 -- test fixture, not a real PAT
+			Repo:  "Concord-Voice/Concord-Voice-Feedback",
+		},
 	}
 
 	err := cfg.validate()
 	require.NoError(t, err)
 	assert.Contains(t, buf.String(), "TRUSTED_PROXY_CIDRS is the broad RFC1918 fallback")
+}
+
+// GitHub Feedback config tests (#158).
+//
+// PR #1547 review: the PAT must never leak through %+v dumps anywhere.
+// Mirrors the AppleSSO / CloudflareKVBridge redacting-String pattern.
+
+func TestGitHubFeedbackConfig_String_Redacts_Token(t *testing.T) {
+	cfg := GitHubFeedbackConfig{ //nolint:gosec // G101: test fixture with fake PAT
+		Token: "ghp_1234567890abcdef1234567890abcdef12345678", // #nosec G101 -- test fixture, not a real PAT
+		Repo:  "Concord-Voice/Concord-Voice-Feedback",
+	}
+	s := cfg.String()
+	assert.NotContains(t, s, "ghp_1234567890abcdef1234567890abcdef12345678",
+		"PAT must NEVER appear in String() output")
+	assert.Contains(t, s, "[REDACTED")
+	assert.Contains(t, s, "Concord-Voice/Concord-Voice-Feedback",
+		"Repo slug is non-sensitive and SHOULD appear in String() for diagnostics")
+}
+
+func TestGitHubFeedbackConfig_String_UnsetTokenSentinel(t *testing.T) {
+	cfg := GitHubFeedbackConfig{Token: "", Repo: "owner/repo"}
+	s := cfg.String()
+	assert.Contains(t, s, "[unset]")
+	assert.NotContains(t, s, "REDACTED",
+		"empty token should render as [unset], not [REDACTED 0 bytes]")
+}
+
+func TestGitHubFeedbackConfig_String_FormatV_DoesNotLeak(t *testing.T) {
+	cfg := GitHubFeedbackConfig{ //nolint:gosec // G101: test fixture with fake PAT
+		Token: "ghp_sensitive_pat_value_zzzzzzzzzzzzzzzzzz", // #nosec G101 -- test fixture, not a real PAT
+		Repo:  "owner/repo",
+	}
+	// The whole point: %+v on a Config containing GitHubFeedbackConfig
+	// must invoke the redacting String() method, never print the raw
+	// struct field.
+	out := fmt.Sprintf("%+v", cfg)
+	assert.NotContains(t, out, "ghp_sensitive_pat_value_zzzzzzzzzzzzzzzzzz")
 }
 
 // Cloudflare KV bridge config tests (#973).

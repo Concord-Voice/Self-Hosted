@@ -78,6 +78,26 @@ func (a AppleSSOConfig) String() string {
 		a.ClientID, a.TeamID, a.KeyID, len(a.PrivateKey))
 }
 
+// GitHubFeedbackConfig holds the feedback handler's GitHub REST credentials
+// (#158). Bundled so the Token field can be redacted via String().
+type GitHubFeedbackConfig struct {
+	// Token is a fine-scoped PAT with `issues:write` on the feedback-only
+	// repo. Never logged — redacted by String() below. #nosec G101 -- type field name, not a secret.
+	Token string
+	// Repo is the `owner/repo` slug (e.g. "Concord-Voice/Concord-Voice-Feedback").
+	Repo string
+}
+
+// String redacts the PAT. Mirrors the AppleSSO / CloudflareKVBridge
+// pattern: any `%+v` dump of Config in a log line, error wrap, or debug
+// pass-through prints the byte length of the token, never the token bytes.
+func (c GitHubFeedbackConfig) String() string {
+	if c.Token == "" {
+		return fmt.Sprintf("GitHubFeedbackConfig{Token:[unset] Repo:%q}", c.Repo)
+	}
+	return fmt.Sprintf("GitHubFeedbackConfig{Token:[REDACTED %d bytes] Repo:%q}", len(c.Token), c.Repo)
+}
+
 // CloudflareKVBridgeConfig holds the Workers KV write credentials for the
 // apple-sso-bridge state→port mapping (#973). Disabled by default; the
 // feature ships dark until the client-driven Apple flow (#974) consumes it.
@@ -201,18 +221,16 @@ type Config struct {
 	// unset, listing ALL missing fields at once.
 	CloudflareKVBridge CloudflareKVBridgeConfig
 
-	// GitHubFeedbackToken is a fine-scoped PAT with `issues:write` on the
-	// feedback-only repo named by GitHubFeedbackRepo. Used by the feedback
-	// handler (#158) to file bug reports / feature requests as GitHub
-	// issues. Empty disables the GitHub call — handlers.go falls back to
-	// a log-only stub (dev / self-hosted convenience). validate() rejects
-	// empty in production.
-	GitHubFeedbackToken string
-
-	// GitHubFeedbackRepo is the `owner/repo` slug feedback issues are filed
-	// against (e.g. "Concord-Voice/Concord-Voice-Feedback"). Required when
-	// GitHubFeedbackToken is set. validate() rejects empty in production.
-	GitHubFeedbackRepo string
+	// GitHubFeedback holds the feedback handler's GitHub REST credentials
+	// (#158). Token is a fine-scoped PAT with `issues:write` on the
+	// feedback-only repo named by Repo. Empty fields disable the GitHub
+	// call — handlers.go falls back to a log-only stub (dev / self-hosted
+	// convenience). validate() rejects empty either field in production.
+	// Bundled as a struct (mirroring AppleSSO / CloudflareKVBridge) so the
+	// String() method below redacts the PAT — preventing accidental
+	// leakage via %+v dumps anywhere in the codebase. Per the security
+	// review on PR #1547.
+	GitHubFeedback GitHubFeedbackConfig
 }
 
 // Load reads configuration from environment variables
@@ -256,8 +274,10 @@ func Load() (*Config, error) {
 		MinIOBucket:              getEnv("MINIO_BUCKET", "concord-media"),
 		UploadMaxSize:            getEnvInt64("UPLOAD_MAX_SIZE", 25*1024*1024), // 25 MB default
 		KlipyAPIKey:              getEnv("KLIPY_API_KEY", ""),
-		GitHubFeedbackToken:      getEnv("GITHUB_FEEDBACK_TOKEN", ""), // #nosec G101 -- env var name, not a secret
-		GitHubFeedbackRepo:       getEnv("GITHUB_FEEDBACK_REPO", ""),
+		GitHubFeedback: GitHubFeedbackConfig{
+			Token: getEnv("GITHUB_FEEDBACK_TOKEN", ""), // #nosec G101 -- env var name, not a secret
+			Repo:  getEnv("GITHUB_FEEDBACK_REPO", ""),
+		},
 		RequireClientAttestation: getEnv("REQUIRE_CLIENT_ATTESTATION", "false") == "true",
 		AttestationTokenTTL:      parseAttestationTokenTTL(getEnv("ATTESTATION_TOKEN_TTL", "2h")),
 		AttestationPruneInterval: parseAttestationPruneInterval(getEnv("ATTESTATION_PRUNE_INTERVAL", "6h")),
@@ -456,9 +476,9 @@ func (c *Config) validate() error {
 		// for self-hosted / dev. In production we require BOTH the token
 		// AND the repo slug; either alone is a misconfiguration that
 		// silently degrades to the log-only stub.
-		{c.GitHubFeedbackToken == "",
+		{c.GitHubFeedback.Token == "",
 			"GITHUB_FEEDBACK_TOKEN must be set in production. Without it the feedback handler falls back to a log-only stub and no GitHub issues are filed. Generate a fine-scoped PAT with `issues:write` on the feedback repo only."},
-		{c.GitHubFeedbackRepo == "",
+		{c.GitHubFeedback.Repo == "",
 			"GITHUB_FEEDBACK_REPO must be set in production. Format: 'owner/repo' (e.g. 'Concord-Voice/Concord-Voice-Feedback')."},
 	}
 

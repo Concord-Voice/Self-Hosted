@@ -204,8 +204,8 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	// instead of POSTing to GitHub. Production guard in config.go fatal-exits
 	// before we ever reach here with empty values.
 	var feedbackGitHub feedback.GitHubIssueCreator
-	if cfg.GitHubFeedbackToken != "" && cfg.GitHubFeedbackRepo != "" {
-		feedbackGitHub = feedback.NewClient(cfg.GitHubFeedbackToken, cfg.GitHubFeedbackRepo)
+	if cfg.GitHubFeedback.Token != "" && cfg.GitHubFeedback.Repo != "" {
+		feedbackGitHub = feedback.NewClient(cfg.GitHubFeedback.Token, cfg.GitHubFeedback.Repo)
 	}
 	feedbackHandler := feedback.NewHandler(log, feedbackGitHub)
 
@@ -538,12 +538,15 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 			)
 
 			// Feedback (#158): bug report / feature request submission. Rate
-			// limit is intentionally aggressive (3/hour/user) because abuse
-			// here translates into spam on the public-ish feedback repo's
-			// issue tracker. Bug + feature share the same bucket on
-			// purpose — they hit the same downstream surface.
+			// limit is 10/hour/user — bumped from the original 3/hour per
+			// Gitar finding on PR #1547. `RateLimitByUser` increments the
+			// counter BEFORE the handler runs, so failed validations also
+			// burn quota; 10/hour leaves enough slack for honest users to
+			// recover from client-side typos / mistakes while still capping
+			// spam on the public-ish feedback repo. Bug + feature share the
+			// same bucket on purpose — same downstream surface.
 			protected.POST("/feedback",
-				middleware.RateLimitByUser(redis, 3, 1*time.Hour),
+				middleware.RateLimitByUser(redis, 10, 1*time.Hour),
 				feedbackHandler.Submit,
 			)
 

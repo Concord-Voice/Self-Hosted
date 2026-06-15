@@ -2,6 +2,7 @@ package feedback
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -18,10 +19,23 @@ const (
 	// MaxRequestBytes to keep the budget predictable.
 	maxTitleBytes       = 200
 	maxDescriptionBytes = 8000
-	maxLogsBytes        = 80_000 // ring buffer is 500 entries; this caps the dump
+	maxCategoryBytes    = 200
+	// maxLogsBytes is the per-field cap on the diagnostic log dump that
+	// the client may submit. Lowered from 80_000 to 40_000 (Gitar
+	// finding, PR #1547) so the assembled GitHub issue body stays under
+	// maxBodyBytes for typical max-payload bug reports — GitHub's REST
+	// API rejects issue creation when the body exceeds ~65,536 chars.
+	maxLogsBytes = 40_000
+	// maxBodyBytes is a hard cap on the assembled GitHub issue body.
+	// Stays comfortably under GitHub's 65,536-char limit to leave room
+	// for unexpected expansion (markdown rendering, escape sequences).
+	// `buildIssue` truncates the logs tail when this cap would be
+	// exceeded — never silently submits an oversize body that GitHub
+	// would reject with 422.
+	maxBodyBytes = 60_000
 
 	// MaxRequestBytes is the total POST body size cap enforced at decode
-	// time. Anything larger triggers a 413 before we touch JSON parsing.
+	// time. Anything larger triggers 413 before we touch JSON parsing.
 	MaxRequestBytes = 128 * 1024
 )
 
@@ -45,13 +59,13 @@ type submitRequest struct {
 }
 
 type diagnostics struct {
-	AppVersion      string     `json:"appVersion"`
-	Platform        string     `json:"platform"`
-	MachineIDPrefix string     `json:"machineIdPrefix"`
-	GPU             *gpuInfo   `json:"gpu,omitempty"`
+	AppVersion      string       `json:"appVersion"`
+	Platform        string       `json:"platform"`
+	MachineIDPrefix string       `json:"machineIdPrefix"`
+	GPU             *gpuInfo     `json:"gpu,omitempty"`
 	Display         *displayInfo `json:"display,omitempty"`
-	ConnectionPhase string     `json:"connectionPhase"`
-	Logs            string     `json:"logs"`
+	ConnectionPhase string       `json:"connectionPhase"`
+	Logs            string       `json:"logs"`
 }
 
 type gpuInfo struct {
@@ -101,7 +115,9 @@ func NewHandler(log *logger.Logger, github GitHubIssueCreator) *Handler {
 
 // Submit handles POST /api/v1/feedback. Requires the AuthRequired
 // middleware upstream so `user_id` is on the Gin context. Rate limit is
-// enforced upstream via middleware.RateLimitByUser(redis, 3, 1*time.Hour).
+// enforced upstream via middleware.RateLimitByUser(redis, 10, 1*time.Hour) —
+// raised from 3/hour per Gitar finding to reduce false lockouts from
+// validation typos while still capping spam.
 func (h *Handler) Submit(c *gin.Context) {
 	userID := c.GetString("user_id")
 	if userID == "" {
@@ -110,11 +126,20 @@ func (h *Handler) Submit(c *gin.Context) {
 	}
 
 	// Size cap before we touch JSON parsing — protects the parser and
-	// prevents large-body resource burn from a misbehaving client.
+	// prevents large-body resource burn from a misbehaving client. When the
+	// cap is exceeded, ShouldBindJSON below surfaces an *http.MaxBytesError
+	// which we translate to HTTP 413 (not the generic 400) so the client
+	// can distinguish "your payload is too big" from "your payload is
+	// malformed."
 	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, MaxRequestBytes)
 
 	var req submitRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		var maxBytesErr *http.MaxBytesError
+		if errors.As(err, &maxBytesErr) {
+			c.JSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body too large"})
+			return
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request body"})
 		return
 	}
@@ -124,13 +149,24 @@ func (h *Handler) Submit(c *gin.Context) {
 		return
 	}
 
-	// Sanitize user-supplied free-text fields. The user's own title /
-	// description are scrubbed too — they can legitimately paste a
-	// stack trace, a path, or an email into the description, and that
-	// must not survive to the public-ish GitHub issue.
+	// Defense-in-depth PII re-sanitization. The threat model is a
+	// compromised client that bypasses the renderer-side scrub at
+	// services/logBufferService.ts — the server is the LAST line before
+	// content reaches a public-ish GitHub issue, so every free-text
+	// string the client sends gets scrubbed here, not just Logs.
+	// (Gitar / @security-reviewer finding, PR #1547.)
 	req.Title = Sanitize(req.Title)
 	req.Description = Sanitize(req.Description)
+	req.Category = Sanitize(req.Category)
 	if req.Diagnostics != nil {
+		req.Diagnostics.AppVersion = Sanitize(req.Diagnostics.AppVersion)
+		req.Diagnostics.Platform = Sanitize(req.Diagnostics.Platform)
+		req.Diagnostics.MachineIDPrefix = Sanitize(req.Diagnostics.MachineIDPrefix)
+		req.Diagnostics.ConnectionPhase = Sanitize(req.Diagnostics.ConnectionPhase)
+		if req.Diagnostics.GPU != nil {
+			req.Diagnostics.GPU.Vendor = Sanitize(req.Diagnostics.GPU.Vendor)
+			req.Diagnostics.GPU.Renderer = Sanitize(req.Diagnostics.GPU.Renderer)
+		}
 		req.Diagnostics.Logs = Sanitize(req.Diagnostics.Logs)
 	}
 
@@ -191,10 +227,89 @@ func validate(req *submitRequest) error {
 	if len(desc) > maxDescriptionBytes {
 		return fmt.Errorf("description exceeds %d bytes", maxDescriptionBytes)
 	}
+	// Category is optional, but when present must be bounded — the wire
+	// schema (openapi.yaml /feedback) describes it as free-text for now;
+	// #160 (Feature Request panel) will narrow it to a fixed enum.
+	if len(req.Category) > maxCategoryBytes {
+		return fmt.Errorf("category exceeds %d bytes", maxCategoryBytes)
+	}
 	if req.Diagnostics != nil && len(req.Diagnostics.Logs) > maxLogsBytes {
 		return fmt.Errorf("logs exceed %d bytes", maxLogsBytes)
 	}
 	return nil
+}
+
+// neutralizeAutolinks inserts a zero-width space (U+200B) after Markdown
+// control characters that the GitHub issue renderer would otherwise expand
+// into autolinks or embedded content:
+//
+//   - `@username` / `@org/team` — notification spam (PII enumeration via
+//     mentions, harassment via team-pings)
+//   - `![alt](url)` — image embed; loads attacker-controlled URL with the
+//     triager's browser when the issue is viewed (referrer leak + IP probe)
+//   - `#123` — backlinks to unrelated issues/PRs in the feedback repo
+//
+// ZWSP is invisible in the rendered issue but breaks the autolink trigger
+// pattern. Backtick / code-fence escapes are handled separately in
+// writeDiagnostics — the logs block uses a dynamic fence length.
+//
+// (Gitar / @security-reviewer finding, PR #1547.)
+func neutralizeAutolinks(s string) string {
+	const zwsp = "\u200b"
+	if !strings.ContainsAny(s, "@!#") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s) + 16)
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		b.WriteByte(c)
+		switch c {
+		case '@':
+			// Always neutralize — any `@`-prefixed token autolinks.
+			b.WriteString(zwsp)
+		case '!':
+			// Only the `![` image syntax is dangerous; bare `!` is fine.
+			if i+1 < len(s) && s[i+1] == '[' {
+				b.WriteString(zwsp)
+			}
+		case '#':
+			// `#123` / `#GH-123` / `#username/repo#123` all autolink.
+			// Conservative: ZWSP when followed by an alphanumeric char.
+			if i+1 < len(s) {
+				next := s[i+1]
+				if isAlphanumeric(next) {
+					b.WriteString(zwsp)
+				}
+			}
+		}
+	}
+	return b.String()
+}
+
+func isAlphanumeric(c byte) bool {
+	return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+}
+
+// longestBacktickRun returns the length of the longest run of consecutive
+// backticks in s. Used by writeDiagnostics to choose a code-fence length
+// that exceeds any backtick sequence in the user-supplied logs — so the
+// content cannot escape the fence and inject markdown / HTML into the
+// surrounding issue body.
+func longestBacktickRun(s string) int {
+	maxRun := 0
+	cur := 0
+	for i := 0; i < len(s); i++ {
+		if s[i] == '`' {
+			cur++
+			if cur > maxRun {
+				maxRun = cur
+			}
+		} else {
+			cur = 0
+		}
+	}
+	return maxRun
 }
 
 // buildIssue assembles the GitHub issue title/body/labels from the
@@ -207,50 +322,94 @@ func validate(req *submitRequest) error {
 // issue body's user-visible content (GitHub issues are public-ish; the body
 // IS visible to anyone with repo read access, hence the dedicated feedback
 // repo per the architectural decision recorded in the PR body).
+//
+// User-supplied free text (Title, Description, Category) is passed through
+// `neutralizeAutolinks` so @-mentions, image embeds, and #-issue-refs are
+// rendered visibly but do NOT trigger GitHub's autolink expansions.
+//
+// If the assembled body would exceed `maxBodyBytes`, the logs section is
+// truncated from the start (keeping the most recent log lines) until the
+// body fits. The truncation is marked inline so triagers know it happened.
 func buildIssue(req *submitRequest, userID string) (title, body string, labels []string) {
 	var b strings.Builder
 
 	switch req.Type {
 	case reportTypeBug:
-		title = "[Bug Report] " + req.Title
+		title = "[Bug Report] " + neutralizeAutolinks(req.Title)
 		labels = []string{"type: bug"}
 		fmt.Fprintf(&b, "**Reported by:** user `%s` (internal ID)\n", userID)
 		if req.Diagnostics != nil {
-			fmt.Fprintf(&b, "**App Version:** %s\n", req.Diagnostics.AppVersion)
-			fmt.Fprintf(&b, "**Platform:** %s\n", req.Diagnostics.Platform)
+			fmt.Fprintf(&b, "**App Version:** %s\n", neutralizeAutolinks(req.Diagnostics.AppVersion))
+			fmt.Fprintf(&b, "**Platform:** %s\n", neutralizeAutolinks(req.Diagnostics.Platform))
 		}
 		b.WriteString("\n## Description\n\n")
-		b.WriteString(req.Description)
+		b.WriteString(neutralizeAutolinks(req.Description))
 		if req.Diagnostics != nil {
 			writeDiagnostics(&b, req.Diagnostics)
 		}
 
 	case reportTypeFeature:
-		title = "[Feature Request] " + req.Title
+		title = "[Feature Request] " + neutralizeAutolinks(req.Title)
 		labels = []string{"type: feature"}
 		fmt.Fprintf(&b, "**Requested by:** user `%s` (internal ID)\n", userID)
 		if req.Category != "" {
-			fmt.Fprintf(&b, "**Category:** %s\n", req.Category)
+			fmt.Fprintf(&b, "**Category:** %s\n", neutralizeAutolinks(req.Category))
 		}
 		b.WriteString("\n## Description\n\n")
-		b.WriteString(req.Description)
+		b.WriteString(neutralizeAutolinks(req.Description))
 	}
 
 	body = b.String()
+	if len(body) > maxBodyBytes {
+		body = truncateBody(body)
+	}
 	return title, body, labels
+}
+
+// truncateBody applies a tail-only truncation when the assembled body would
+// exceed GitHub's issue-body cap. It keeps the first maxBodyBytes-N bytes
+// (the header + description) and a marker noting that the diagnostic logs
+// were truncated. Returns a body of at most maxBodyBytes bytes.
+//
+// This is a belt-and-suspenders guard against the case where Description +
+// metadata + a max-size Logs section overruns maxBodyBytes; in practice the
+// per-field caps + writeDiagnostics's own log-tail truncation keep the body
+// well under the limit. The marker is markdown that renders cleanly.
+func truncateBody(body string) string {
+	const marker = "\n\n_... (body truncated to fit GitHub issue-body limit) ..._\n"
+	if len(body) <= maxBodyBytes {
+		return body
+	}
+	keep := maxBodyBytes - len(marker)
+	if keep < 0 {
+		keep = 0
+	}
+	return body[:keep] + marker
 }
 
 // writeDiagnostics emits the optional "Diagnostics" section in the bug-report
 // body. Only fields the client provided are rendered; missing optional fields
 // (GPU, display) are silently omitted rather than rendered as "unknown".
+//
+// User-supplied free-text inside metadata bullets is rendered after
+// `neutralizeAutolinks` so a hostile client cannot smuggle `@org` or `![pwn]`
+// payloads through (e.g.) the GPU vendor string.
+//
+// The logs block uses a fence whose length exceeds any backtick run in the
+// content, so the user-supplied logs cannot escape the fenced code block to
+// inject markdown into the surrounding body.
 func writeDiagnostics(b *strings.Builder, d *diagnostics) {
 	b.WriteString("\n\n## Diagnostics\n\n")
-	fmt.Fprintf(b, "- **Machine ID prefix:** `%s`\n", d.MachineIDPrefix)
-	fmt.Fprintf(b, "- **Connection phase:** %s\n", d.ConnectionPhase)
+	fmt.Fprintf(b, "- **Machine ID prefix:** `%s`\n", neutralizeAutolinks(d.MachineIDPrefix))
+	fmt.Fprintf(b, "- **Connection phase:** %s\n", neutralizeAutolinks(d.ConnectionPhase))
 	if d.GPU != nil {
-		fmt.Fprintf(b, "- **GPU:** %s / %s\n", d.GPU.Vendor, d.GPU.Renderer)
+		fmt.Fprintf(b, "- **GPU:** %s / %s\n",
+			neutralizeAutolinks(d.GPU.Vendor),
+			neutralizeAutolinks(d.GPU.Renderer))
 	}
 	if d.Display != nil {
+		// Display dimensions are integer/float types — no markdown-injection
+		// surface here, so they don't go through neutralizeAutolinks.
 		fmt.Fprintf(b, "- **Display:** %dx%d @ %.2fx", d.Display.Width, d.Display.Height, d.Display.ScaleFactor)
 		if d.Display.RefreshRate > 0 {
 			fmt.Fprintf(b, " (%.0fHz)", d.Display.RefreshRate)
@@ -258,8 +417,17 @@ func writeDiagnostics(b *strings.Builder, d *diagnostics) {
 		b.WriteString("\n")
 	}
 	if d.Logs != "" {
-		b.WriteString("\n### Recent logs (sanitized)\n\n```\n")
+		fenceLen := longestBacktickRun(d.Logs) + 1
+		if fenceLen < 3 {
+			fenceLen = 3
+		}
+		fence := strings.Repeat("`", fenceLen)
+		b.WriteString("\n### Recent logs (sanitized)\n\n")
+		b.WriteString(fence)
+		b.WriteString("\n")
 		b.WriteString(d.Logs)
-		b.WriteString("\n```\n")
+		b.WriteString("\n")
+		b.WriteString(fence)
+		b.WriteString("\n")
 	}
 }
