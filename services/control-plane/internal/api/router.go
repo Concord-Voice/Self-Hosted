@@ -15,6 +15,7 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/clientconfig"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/dm"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/email"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/feedback"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/friends"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/invites"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/klipy"
@@ -196,6 +197,18 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	// HandleUserDisconnect to cancel any rings they initiated.
 	hub.SetDMRingCanceller(dmHandler.HandleUserDisconnect)
 	friendsHandler := friends.NewHandler(db, log, hub)
+
+	// Feedback (#158): bug-report / feature-request → GitHub issues on the
+	// dedicated feedback repo. Dev stub: when GITHUB_FEEDBACK_TOKEN is empty,
+	// NewClient is skipped and the handler logs the assembled issue body
+	// instead of POSTing to GitHub. Production guard in config.go fatal-exits
+	// before we ever reach here with empty values.
+	var feedbackGitHub feedback.GitHubIssueCreator
+	if cfg.GitHubFeedbackToken != "" && cfg.GitHubFeedbackRepo != "" {
+		feedbackGitHub = feedback.NewClient(cfg.GitHubFeedbackToken, cfg.GitHubFeedbackRepo)
+	}
+	feedbackHandler := feedback.NewHandler(log, feedbackGitHub)
+
 	notificationsHandler := notifications.NewHandler(db, log)
 	ownershipHandler := ownership.NewHandler(ownership.HandlerDeps{
 		DB:          db,
@@ -522,6 +535,16 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 			protected.POST("/auth/ws-ticket",
 				middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 				wsTicketHandler.IssueTicket,
+			)
+
+			// Feedback (#158): bug report / feature request submission. Rate
+			// limit is intentionally aggressive (3/hour/user) because abuse
+			// here translates into spam on the public-ish feedback repo's
+			// issue tracker. Bug + feature share the same bucket on
+			// purpose — they hit the same downstream surface.
+			protected.POST("/feedback",
+				middleware.RateLimitByUser(redis, 3, 1*time.Hour),
+				feedbackHandler.Submit,
 			)
 
 			// MFA management routes (authenticated)

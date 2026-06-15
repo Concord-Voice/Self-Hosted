@@ -200,6 +200,19 @@ type Config struct {
 	// Load() returns an error if Enabled=true but any required field is
 	// unset, listing ALL missing fields at once.
 	CloudflareKVBridge CloudflareKVBridgeConfig
+
+	// GitHubFeedbackToken is a fine-scoped PAT with `issues:write` on the
+	// feedback-only repo named by GitHubFeedbackRepo. Used by the feedback
+	// handler (#158) to file bug reports / feature requests as GitHub
+	// issues. Empty disables the GitHub call — handlers.go falls back to
+	// a log-only stub (dev / self-hosted convenience). validate() rejects
+	// empty in production.
+	GitHubFeedbackToken string
+
+	// GitHubFeedbackRepo is the `owner/repo` slug feedback issues are filed
+	// against (e.g. "Concord-Voice/Concord-Voice-Feedback"). Required when
+	// GitHubFeedbackToken is set. validate() rejects empty in production.
+	GitHubFeedbackRepo string
 }
 
 // Load reads configuration from environment variables
@@ -243,6 +256,8 @@ func Load() (*Config, error) {
 		MinIOBucket:              getEnv("MINIO_BUCKET", "concord-media"),
 		UploadMaxSize:            getEnvInt64("UPLOAD_MAX_SIZE", 25*1024*1024), // 25 MB default
 		KlipyAPIKey:              getEnv("KLIPY_API_KEY", ""),
+		GitHubFeedbackToken:      getEnv("GITHUB_FEEDBACK_TOKEN", ""), // #nosec G101 -- env var name, not a secret
+		GitHubFeedbackRepo:       getEnv("GITHUB_FEEDBACK_REPO", ""),
 		RequireClientAttestation: getEnv("REQUIRE_CLIENT_ATTESTATION", "false") == "true",
 		AttestationTokenTTL:      parseAttestationTokenTTL(getEnv("ATTESTATION_TOKEN_TTL", "2h")),
 		AttestationPruneInterval: parseAttestationPruneInterval(getEnv("ATTESTATION_PRUNE_INTERVAL", "6h")),
@@ -437,6 +452,14 @@ func (c *Config) validate() error {
 			"MEDIA_PLANE_URL must be set to a production value. The dev default http://localhost:3000 is not allowed."},
 		{mediaPlaneURLIsRoot(c.MediaPlaneURL),
 			"MEDIA_PLANE_URL must point to the media subdomain (e.g. https://media.concordvoice.chat), not the root concordvoice.chat. The root zone is DNS-only and 301-redirects through nginx to the .com marketing site, breaking WebRTC signaling. This guard catches variants including trailing slash, explicit port, path suffix, uppercase, and wss:// per #725 review."},
+		// #158 — feedback handler. The dev-stub path (empty token) is fine
+		// for self-hosted / dev. In production we require BOTH the token
+		// AND the repo slug; either alone is a misconfiguration that
+		// silently degrades to the log-only stub.
+		{c.GitHubFeedbackToken == "",
+			"GITHUB_FEEDBACK_TOKEN must be set in production. Without it the feedback handler falls back to a log-only stub and no GitHub issues are filed. Generate a fine-scoped PAT with `issues:write` on the feedback repo only."},
+		{c.GitHubFeedbackRepo == "",
+			"GITHUB_FEEDBACK_REPO must be set in production. Format: 'owner/repo' (e.g. 'Concord-Voice/Concord-Voice-Feedback')."},
 	}
 
 	for _, g := range guards {
