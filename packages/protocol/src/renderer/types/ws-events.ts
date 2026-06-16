@@ -803,9 +803,13 @@ export const DMVoiceCallTimedOutSchema = z.object({
  * `presence` — peer presence transition (online/offline/dnd/invisible).
  * Server emitter: `services/control-plane/internal/websocket/hub.go:2370`.
  *
- * See #803: this schema doesn't fix the Offline-status bug (root cause is the
- * server's deliberate offline-for-invisible behavior + client self-skip);
- * the schema locks the shape against drift.
+ * #803 (self-user shows Offline despite connected) is fixed in the
+ * `presence_snapshot` handler (useWebSocketMessages.ts), which reconciles the
+ * self-user's status from the self-aware snapshot into memberStore.selfStatus.
+ * The `presence` self-skip in that handler stays correct: this broadcast
+ * carries raw status (the server emits 'offline' for invisible users) and is
+ * NOT self-aware, so it must not override the local selfStatus. This schema
+ * locks the shape against drift.
  */
 export const PresenceSchema = z.object({
   type: z.literal('presence'),
