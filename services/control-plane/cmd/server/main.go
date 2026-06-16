@@ -19,7 +19,9 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/attestation"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/database"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/storage"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/voice"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
@@ -97,6 +99,14 @@ func main() {
 	attestRepo := attestation.NewRepository(db)
 	attestCleanup := attestation.NewCleanup(attestRepo, log)
 	go attestCleanup.Run(cleanupCtx, cfg.AttestationPruneInterval)
+
+	// Start the temporary-SBAC orphan-sweep backstop (#487 D3). The presence-bound
+	// grant lifetime is primarily enforced by the voice.left + heartbeat triggers;
+	// this daily sweep revokes any temp grant whose holder is no longer in the
+	// channel but whose override survived a missed trigger (e.g., a restart between
+	// leave and revoke). Its resolver shares the same Redis-backed permission cache.
+	sweepResolver := rbac.NewResolver(db, rbac.NewPermissionCache(redisClient), log)
+	voice.StartTempGrantSweepWorker(cleanupCtx, db, log, hub, sweepResolver, natsClient, voice.DefaultTempGrantSweepInterval)
 
 	// Create HTTP server
 	srv := &http.Server{

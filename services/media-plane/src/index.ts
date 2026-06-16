@@ -13,6 +13,7 @@ import { NatsService } from './lib/nats.js';
 import { RedisService } from './lib/redis.js';
 import { createExpressErrorHandler } from './lib/expressErrorHandler.js';
 import { createOriginGate } from './lib/originGate.js';
+import { handleForceDisconnect } from './lib/forceDisconnect.js';
 
 async function main() {
   // Create Express app
@@ -183,6 +184,22 @@ async function main() {
   createUserEnforcementHandler('voice.user_deafen', (r, u) =>
     roomManager.userDeafenParticipant(r, u)
   );
+
+  // ── Force-disconnect (temporary-SBAC access revocation, #487 P3) ──────
+  // Control plane publishes voice.enforce.disconnect {channelId, userId} when a
+  // moved user's temporary channel access is revoked. We evict the live peer via
+  // RoomManager.leaveRoom (which emits user-left -> voice.left over NATS).
+  natsService.subscribe('voice.enforce.disconnect', async (natsData) => {
+    const channelId = natsData.channelId as string;
+    const userId = natsData.userId as string;
+    if (typeof channelId !== 'string' || typeof userId !== 'string') return;
+
+    try {
+      await handleForceDisconnect(roomManager, io, channelId, userId);
+    } catch (err) {
+      logger.error('Failed to handle voice.enforce.disconnect', { error: err, channelId, userId });
+    }
+  });
 
   // ─── Socket.IO connection handling ───────────────────────────────────
 

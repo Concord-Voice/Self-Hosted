@@ -10,6 +10,7 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/keyrotation"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
@@ -39,6 +40,7 @@ type Handler struct {
 	hub      *websocket.Hub
 	resolver *rbac.Resolver
 	audit    *rbac.AuditWriter
+	rotator  *keyrotation.Rotator
 }
 
 // NewHandler creates a new member handler
@@ -50,6 +52,7 @@ func NewHandler(db *sql.DB, log *logger.Logger, redisClient *redis.Client, hub *
 		hub:      hub,
 		resolver: resolver,
 		audit:    audit,
+		rotator:  keyrotation.NewRotator(db, log, hub),
 	}
 }
 
@@ -813,6 +816,12 @@ func (h *Handler) ListBans(c *gin.Context) {
 // triggerKeyRevocationsForServer creates key_revocations records and broadcasts
 // key_revocation events for all E2EE channels in a server. Called after a member
 // is removed so remaining clients rotate to a new epoch the removed user can't decrypt.
+//
+// It iterates the server's channels and delegates each channel's rotation to the
+// shared keyrotation.Rotator core (RevokeChannelKeyEpoch), passing removedUserID so
+// the broadcast payload preserves the member-removal shape. The same Rotator backs
+// single-channel rotations in the voice package (temporary-SBAC access revocation,
+// #487 P2) — the rotation SQL + broadcast lives in ONE place (internal/keyrotation).
 func (h *Handler) triggerKeyRevocationsForServer(serverID, removedUserID, actorID string) {
 	rows, err := h.db.Query(
 		`SELECT c.id, COALESCE(MAX(ck.key_version), 1)
@@ -838,32 +847,19 @@ func (h *Handler) triggerKeyRevocationsForServer(serverID, removedUserID, actorI
 			continue
 		}
 
-		// Insert key_revocations record (ignore conflict if already revoked)
-		_, err := h.db.Exec(
-			`INSERT INTO key_revocations (channel_id, revoked_epoch, successor_epoch, reason, revoked_by)
-			 VALUES ($1, $2, $3, 'member_removal', $4)
-			 ON CONFLICT (channel_id, revoked_epoch) DO NOTHING`,
-			channelID, maxEpoch, maxEpoch+1, actorID,
-		)
-		if err != nil {
-			h.log.Error("Failed to insert key revocation", "error", err, "channel_id", channelID)
-			continue
-		}
-
-		// Broadcast key_revocation to remaining server members
-		h.hub.BroadcastToServer(serverUUID, websocket.OutgoingMessage{
-			Type: "key_revocation",
-			Data: map[string]interface{}{
-				"channel_id":      channelID,
-				"server_id":       serverID,
-				"revoked_epoch":   maxEpoch,
-				"new_epoch":       maxEpoch + 1,
-				"reason":          "member_removal",
-				"removed_user_id": removedUserID,
-			},
-		})
+		// Per-channel rotation with the member-removal payload shape.
+		h.rotator.RevokeChannelKeyEpoch(serverID, serverUUID, channelID, maxEpoch, "member_removal", actorID, removedUserID)
 	}
 
 	h.log.Info("Key revocations triggered for member removal",
 		"server_id", serverID, "removed_user", removedUserID, "actor", actorID)
+}
+
+// triggerKeyRevocationForChannel rotates the CSK epoch for ONE channel and broadcasts
+// key_revocation to the remaining members. Thin delegation to the shared
+// keyrotation.Rotator (the broadcast omits removed_user_id, which is specific to the
+// member-removal path). Retained as a package-local method so existing members
+// internal tests keep exercising the rotation path through the handler.
+func (h *Handler) triggerKeyRevocationForChannel(channelID, reason, actorID string) {
+	h.rotator.TriggerForChannel(channelID, reason, actorID)
 }

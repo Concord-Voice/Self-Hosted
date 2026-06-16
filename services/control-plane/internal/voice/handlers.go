@@ -4,6 +4,7 @@
 package voice
 
 import (
+	"context"
 	"database/sql"
 	"net/http"
 	"strconv"
@@ -19,23 +20,29 @@ import (
 
 // Handler handles voice-related requests.
 type Handler struct {
-	db       *sql.DB
-	log      *logger.Logger
-	hub      *websocket.Hub
-	cfg      *config.Config
-	resolver *rbac.Resolver
-	nats     *natsclient.Client
+	db        *sql.DB
+	log       *logger.Logger
+	hub       *websocket.Hub
+	cfg       *config.Config
+	resolver  *rbac.Resolver
+	nats      *natsclient.Client
+	audit     *rbac.AuditWriter
+	tempGrant *tempGrantManager
 }
 
-// NewHandler creates a new voice handler.
-func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, cfg *config.Config, resolver *rbac.Resolver, nats *natsclient.Client) *Handler {
+// NewHandler creates a new voice handler. audit may be nil (the move audit entry is
+// then skipped — used by lightweight test constructions); production wiring passes
+// the shared rbac.AuditWriter so hierarchy-crossing moves are recorded (#487 §6.1).
+func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, cfg *config.Config, resolver *rbac.Resolver, nats *natsclient.Client, audit *rbac.AuditWriter) *Handler {
 	return &Handler{
-		db:       db,
-		log:      log,
-		hub:      hub,
-		cfg:      cfg,
-		resolver: resolver,
-		nats:     nats,
+		db:        db,
+		log:       log,
+		hub:       hub,
+		cfg:       cfg,
+		resolver:  resolver,
+		nats:      nats,
+		audit:     audit,
+		tempGrant: newTempGrantManager(db, log, hub, resolver, nats),
 	}
 }
 
@@ -299,20 +306,21 @@ func (h *Handler) AuthorizeVoiceAction(c *gin.Context) {
 // --- Server-enforced voice moderation ---
 
 const (
-	errMsgInvalidChannelID   = "Invalid channel ID"
-	errMsgInvalidServerID    = "Invalid server ID"
-	errMsgInvalidUserID      = "Invalid user ID"
-	errMsgNotMember          = "Not a member of this server"
-	errMsgFetchParticipants  = "Failed to fetch participants"
-	errMsgFailedAuthorize    = "Failed to authorize"
-	errMsgFailedAuthAction   = "Failed to authorize action"
-	errMsgInsufficientPerms  = "Insufficient permissions"
-	errMsgFailedCheckPerms   = "Failed to check permissions"
-	errMsgFailedCheckMember  = "Failed to check membership"
-	errMsgTargetNotMember    = "Target user is not a member of this server"
-	errMsgHierarchyViolation = "Cannot moderate a member with equal or higher role position"
-	errMsgTargetNotInVoice   = "Target user is not in a voice channel"
-	errMsgCannotTargetSelf   = "Cannot target yourself"
+	errMsgInvalidChannelID       = "Invalid channel ID"
+	errMsgInvalidServerID        = "Invalid server ID"
+	errMsgInvalidUserID          = "Invalid user ID"
+	errMsgNotMember              = "Not a member of this server"
+	errMsgFetchParticipants      = "Failed to fetch participants"
+	errMsgFailedAuthorize        = "Failed to authorize"
+	errMsgFailedRevokeTempAccess = "Failed to revoke temporary access"
+	errMsgFailedAuthAction       = "Failed to authorize action"
+	errMsgInsufficientPerms      = "Insufficient permissions"
+	errMsgFailedCheckPerms       = "Failed to check permissions"
+	errMsgFailedCheckMember      = "Failed to check membership"
+	errMsgTargetNotMember        = "Target user is not a member of this server"
+	errMsgHierarchyViolation     = "Cannot moderate a member with equal or higher role position"
+	errMsgTargetNotInVoice       = "Target user is not in a voice channel"
+	errMsgCannotTargetSelf       = "Cannot target yourself"
 )
 
 // voiceModContext holds the validated state from authorizeVoiceMod.
@@ -595,4 +603,344 @@ func (h *Handler) UserMute(c *gin.Context) {
 // POST /servers/:id/voice/:userId/user-deafen
 func (h *Handler) UserDeafen(c *gin.Context) {
 	h.userLevelAction(c, rbac.PermDeafenMembers, "voice.user_deafen", "deafen", "User deafen command sent", "Failed to deafen user")
+}
+
+// --- Force-disconnect (#487 P3) ---
+
+// ServerDisconnect force-disconnects a member from whatever voice channel they
+// are currently in within the server. Unlike /move (the single ADR-0023
+// hierarchy exception), disconnect RESPECTS hierarchy: a moderator cannot
+// disconnect a member with an equal-or-higher role position. It requires the
+// Move Members permission and the target must currently be in a voice channel
+// in this server (else 409). The action publishes voice.enforce.disconnect so
+// the media plane closes the peer's transports; the resulting voice.left NATS
+// event drives any temp-grant cleanup automatically (revokeTempGrantIfHeld), so
+// this handler does NOT duplicate that cleanup.
+//
+// POST /servers/:id/voice/:userId/disconnect
+func (h *Handler) ServerDisconnect(c *gin.Context) {
+	ctx := h.authorizeVoiceMod(c, rbac.PermMoveMembers, true)
+	if ctx == nil {
+		return
+	}
+
+	channelID, findErr := h.findVoiceChannel(ctx.serverID, ctx.targetID)
+	if findErr != nil {
+		h.log.Error("disconnect: find current voice channel", "error", findErr, "server_id", ctx.serverID, "target_id", ctx.targetID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to disconnect member"})
+		return
+	}
+	if channelID == "" {
+		c.JSON(http.StatusConflict, gin.H{"error": errMsgTargetNotInVoice})
+		return
+	}
+
+	// Publish the force-disconnect command. The media plane closes the peer's
+	// transports and emits voice.left, which (via the NATSSubscriber) updates DB
+	// state and triggers revokeTempGrantIfHeld — no duplicate cleanup here.
+	h.publishEnforcement(natsSubjectEnforceDisconnect, channelID, ctx.targetID, "disconnect")
+
+	c.JSON(http.StatusOK, gin.H{"disconnected": true})
+}
+
+// --- Moderator temp-grant revoke (#487 Scope C) ---
+
+const errMsgInvalidChannelIDBody = "Invalid channel_id"
+
+// tempAccessRevokeRequest is the RevokeTempAccess request body.
+type tempAccessRevokeRequest struct {
+	ChannelID string `json:"channel_id" binding:"required,uuid"`
+}
+
+// RevokeTempAccess lets a moderator revoke a move-granted temporary SBAC grant
+// while the target is still in the VC (#487 Scope C edge case). It converges on
+// the single revokeTemporaryChannelAccess path (delete temp override, purge the
+// user's channel_keys + pending requests, rotate the channel CSK,
+// force-disconnect the live peer, broadcast channel_access_revoked). Authorize
+// with Move Members + hierarchy (this is a moderation action, NOT the move
+// exception). If no temporary grant exists for (user, channel) the revoke is a
+// no-op and returns 200 {revoked:false}.
+//
+// DELETE /servers/:id/voice/:userId/temp-access  body {channel_id}
+func (h *Handler) RevokeTempAccess(c *gin.Context) {
+	ctx := h.authorizeVoiceMod(c, rbac.PermMoveMembers, true)
+	if ctx == nil {
+		return
+	}
+
+	var req tempAccessRevokeRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidChannelIDBody})
+		return
+	}
+
+	reqCtx := c.Request.Context()
+
+	// Scope the body channel_id to the path server: authorizeVoiceMod authorized the
+	// actor for :id only, so a temp grant in a DIFFERENT server must not be revocable
+	// here (cross-server IDOR guard — Gitar finding). Reuses the ServerMove scope helper;
+	// temp grants are only ever issued on voice channels, so isVoiceChannelInServer is exact.
+	inServer, scopeErr := h.isVoiceChannelInServer(reqCtx, req.ChannelID, ctx.serverID)
+	if scopeErr != nil {
+		h.log.Error("temp-access revoke: channel-scope check", "error", scopeErr, "channel_id", req.ChannelID, "server_id", ctx.serverID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRevokeTempAccess})
+		return
+	}
+	if !inServer {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgTargetNotVoiceInSrv})
+		return
+	}
+
+	// Probe first so the response can report whether a temp grant actually existed.
+	held, probeErr := h.tempGrant.hasTemporaryGrant(reqCtx, req.ChannelID, ctx.targetID)
+	if probeErr != nil {
+		h.log.Error("temp-access revoke: hasTemporaryGrant probe", "error", probeErr, "channel_id", req.ChannelID, "target_id", ctx.targetID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRevokeTempAccess})
+		return
+	}
+	if !held {
+		// No temp grant (permanent grant or none) → no-op, never touch a permanent grant.
+		c.JSON(http.StatusOK, gin.H{"revoked": false})
+		return
+	}
+
+	actorID := c.GetString("user_id")
+	if err := h.tempGrant.revokeTemporaryChannelAccess(reqCtx, ctx.serverID, req.ChannelID, ctx.targetID, actorID); err != nil {
+		h.log.Error("temp-access revoke", "error", err, "channel_id", req.ChannelID, "target_id", ctx.targetID, "server_id", ctx.serverID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedRevokeTempAccess})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"revoked": true})
+}
+
+// --- Move (#487 Scope B) ---
+
+const (
+	errMsgInvalidTargetChannel = "Invalid target_channel_id"
+	errMsgTargetNotVoiceInSrv  = "target is not a voice channel in this server"
+	errMsgAlreadyInTarget      = "user is already in the target channel"
+	errMsgMovePrep             = "Failed to prepare move"
+	auditActionVoiceMoved      = "voice_member_moved"
+)
+
+// moveRequest is the ServerMove request body.
+type moveRequest struct {
+	TargetChannelID string `json:"target_channel_id" binding:"required,uuid"`
+}
+
+// ServerMove relocates a user to another voice channel in the same server (#487
+// Scope B). It is the SINGLE sanctioned requireHierarchy=false voice action:
+//
+//	DELIBERATE HIERARCHY EXCEPTION (ADR-0023): MOVE_MEMBERS bypasses CheckHierarchy
+//	so a designated organizer can move anyone — including higher roles and the owner
+//	— between same-server voice channels. Worst case is annoyance, not privilege
+//	escalation (no data access, no kick/ban, server-scoped, target must already be
+//	in voice). Hierarchy-crossing moves are audit-logged. The rbac-reviewer must
+//	treat any OTHER requireHierarchy=false voice action as a finding. See #487.
+//
+// POST /servers/:id/voice/:userId/move  body {target_channel_id}
+func (h *Handler) ServerMove(c *gin.Context) {
+	actorID := c.GetString("user_id")
+	serverID := c.Param("id")
+	targetID := c.Param("userId")
+
+	req, ok := h.parseMoveRequest(c, serverID, targetID)
+	if !ok {
+		return
+	}
+
+	selfMove := actorID == targetID
+
+	// Self-move: any user may relocate themselves; no permission, no hierarchy,
+	// no temp grant (they can already see channels they're allowed to join).
+	if !selfMove && !h.authorizeMove(c, serverID, actorID) {
+		return
+	}
+
+	fromChannelID, ok := h.resolveMoveSource(c, serverID, targetID, req.TargetChannelID)
+	if !ok {
+		return
+	}
+
+	if !selfMove && !h.prepareModeratedMove(c, serverID, actorID, targetID, fromChannelID, req.TargetChannelID) {
+		return
+	}
+
+	h.signalMove(serverID, targetID, fromChannelID, req.TargetChannelID)
+	c.JSON(http.StatusOK, gin.H{"moved": true})
+}
+
+// parseMoveRequest validates the path params + JSON body of a move request. It
+// writes the 400 response and returns ok=false on any malformed input.
+func (h *Handler) parseMoveRequest(c *gin.Context, serverID, targetID string) (moveRequest, bool) {
+	var req moveRequest
+	if _, err := uuid.Parse(serverID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
+		return req, false
+	}
+	if _, err := uuid.Parse(targetID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidUserID})
+		return req, false
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidTargetChannel})
+		return req, false
+	}
+	return req, true
+}
+
+// authorizeMove checks server membership + PermMoveMembers for a moderated
+// (non-self) move. It writes the appropriate error response and returns false
+// when the actor is not authorized.
+//
+//	DELIBERATE HIERARCHY EXCEPTION (ADR-0023): requireHierarchy=false — the perm
+//	check below is NOT followed by a CheckHierarchy gate, so a designated organizer
+//	can move anyone (including higher roles and the owner) between same-server voice
+//	channels. This is the SINGLE sanctioned requireHierarchy=false voice action;
+//	the rbac-reviewer must treat any OTHER requireHierarchy=false voice action as a
+//	finding. Hierarchy-crossing moves are audit-logged (see prepareModeratedMove).
+//	See #487 and the ServerMove doc comment above.
+func (h *Handler) authorizeMove(c *gin.Context, serverID, actorID string) bool {
+	if !h.checkMembership(c, serverID, actorID) {
+		return false
+	}
+	hasPerm, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, actorID, "", rbac.PermMoveMembers)
+	if permErr != nil {
+		h.log.Error(errMsgFailedCheckPerms, "error", permErr, "permission", rbac.PermMoveMembers)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCheckPerms})
+		return false
+	}
+	if !hasPerm {
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
+		return false
+	}
+	return true
+}
+
+// resolveMoveSource validates the target channel (voice type, in this server) and
+// resolves the user's current voice channel. It writes the error response and
+// returns ok=false on any validation failure (400/409/500). On success it returns
+// the user's current ("from") channel id.
+func (h *Handler) resolveMoveSource(c *gin.Context, serverID, targetID, targetChannelID string) (string, bool) {
+	reqCtx := c.Request.Context()
+
+	// Validate the target channel: voice type AND in this server.
+	isVoice, vErr := h.isVoiceChannelInServer(reqCtx, targetChannelID, serverID)
+	if vErr != nil {
+		h.log.Error("move: target channel lookup", "error", vErr, "target_channel_id", targetChannelID, "server_id", serverID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMovePrep})
+		return "", false
+	}
+	if !isVoice {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgTargetNotVoiceInSrv})
+		return "", false
+	}
+
+	// The target user must currently be in a voice channel in this server.
+	fromChannelID, findErr := h.findVoiceChannel(serverID, targetID)
+	if findErr != nil {
+		h.log.Error("move: find current voice channel", "error", findErr, "server_id", serverID, "target_id", targetID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMovePrep})
+		return "", false
+	}
+	if fromChannelID == "" {
+		c.JSON(http.StatusConflict, gin.H{"error": errMsgTargetNotInVoice})
+		return "", false
+	}
+	if fromChannelID == targetChannelID {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgAlreadyInTarget})
+		return "", false
+	}
+	return fromChannelID, true
+}
+
+// prepareModeratedMove performs the moderated-move side effects before signaling:
+// audit a hierarchy-crossing move and grant temporary destination access if the
+// target cannot already join. It writes the error response and returns false on a
+// failed join-permission check or grant. Self-moves never reach here.
+func (h *Handler) prepareModeratedMove(c *gin.Context, serverID, actorID, targetID, fromChannelID, targetChannelID string) bool {
+	reqCtx := c.Request.Context()
+
+	// GRANT BEFORE SIGNAL (ordering load-bearing — the client's subsequent
+	// AuthorizeJoin checks PermJoinVoice). Only grant if the target cannot
+	// already join the destination (avoids polluting overrides for users who
+	// already have role-based access). grantTemporaryChannelAccess never
+	// downgrades a permanent grant.
+	canJoin, joinErr := h.resolver.HasPermission(reqCtx, serverID, targetID, targetChannelID, rbac.PermJoinVoice)
+	if joinErr != nil {
+		h.log.Error("move: target join-permission check", "error", joinErr, "target_id", targetID, "target_channel_id", targetChannelID)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMovePrep})
+		return false
+	}
+	if !canJoin {
+		if grantErr := h.tempGrant.grantTemporaryChannelAccess(reqCtx, serverID, targetChannelID, targetID); grantErr != nil {
+			h.log.Error("move: temp grant", "error", grantErr, "target_id", targetID, "target_channel_id", targetChannelID)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMovePrep})
+			return false
+		}
+	}
+
+	// Audit a move that crosses hierarchy (target outranks-or-equals actor). Done
+	// AFTER the grant succeeds (finding #6) so an authorized-but-failed-to-prepare
+	// move does NOT emit a voice_member_moved audit row for a move that never
+	// happened.
+	h.auditMoveIfCrossesHierarchy(reqCtx, serverID, actorID, targetID, fromChannelID, targetChannelID)
+
+	return true
+}
+
+// signalMove directs the moved client to leave+rejoin (D2 client-cooperative).
+// The voice.left/voice.joined NATS events then refresh every sidebar.
+func (h *Handler) signalMove(serverID, targetID, fromChannelID, targetChannelID string) {
+	targetUUID, parseErr := uuid.Parse(targetID)
+	if parseErr != nil {
+		h.log.Error("move: invalid target UUID for directed broadcast", "error", parseErr, "target_id", targetID)
+		return
+	}
+	h.hub.BroadcastToUser(targetUUID, websocket.OutgoingMessage{
+		Type: "voice_move",
+		Data: map[string]interface{}{
+			"user_id":         targetID,
+			"from_channel_id": fromChannelID,
+			"to_channel_id":   targetChannelID,
+			"server_id":       serverID,
+		},
+	})
+}
+
+// isVoiceChannelInServer reports whether channelID is a voice channel belonging to
+// serverID. channelID is already UUID-validated by the request binding
+// (target_channel_id binding:"required,uuid"), so no parse guard is needed here.
+func (h *Handler) isVoiceChannelInServer(ctx context.Context, channelID, serverID string) (bool, error) {
+	var exists bool
+	err := h.db.QueryRowContext(ctx,
+		`SELECT EXISTS(SELECT 1 FROM channels WHERE id = $1 AND server_id = $2 AND type = 'voice')`,
+		channelID, serverID).Scan(&exists)
+	if err != nil {
+		return false, err
+	}
+	return exists, nil
+}
+
+// auditMoveIfCrossesHierarchy writes an audit_log entry when a move crosses role
+// hierarchy — i.e., the target outranks or equals the actor (CheckHierarchy returns
+// non-nil). Best-effort: a failed audit write is logged but does NOT block the move
+// (the move is already authorized by PermMoveMembers). Self-moves never reach here.
+func (h *Handler) auditMoveIfCrossesHierarchy(ctx context.Context, serverID, actorID, targetID, fromChannelID, toChannelID string) {
+	if h.resolver.CheckHierarchy(ctx, serverID, actorID, targetID) == nil {
+		return // actor outranks target → ordinary move, no audit needed
+	}
+	if h.audit == nil {
+		return
+	}
+	actor := actorID
+	target := targetID
+	if err := h.audit.Log(ctx, serverID, &actor, auditActionVoiceMoved, "member", &target, map[string]interface{}{
+		"from_channel_id":   fromChannelID,
+		"to_channel_id":     toChannelID,
+		"hierarchy_crossed": true,
+	}); err != nil {
+		h.log.Error("move: audit log", "error", err, "server_id", serverID, "target_id", targetID)
+	}
 }

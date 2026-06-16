@@ -384,3 +384,36 @@ func TestCheckHierarchy(t *testing.T) {
 	err = resolver.CheckHierarchy(ctx, serverID, adminUser.ID, owner.ID)
 	assert.ErrorIs(t, err, rbac.ErrHierarchyViolation, "PermAdministrator should not outrank server owner")
 }
+
+// TestResolver_InvalidateChannel_DelegatesToCache verifies the public
+// Resolver.InvalidateChannel passthrough (#487) clears the channel-scoped
+// permission cache entries that GetEffectivePermissions populates. The voice
+// package relies on this after a temporary-SBAC grant/revoke.
+func TestResolver_InvalidateChannel_DelegatesToCache(t *testing.T) {
+	resolver, ts := setupResolver(t)
+	ctx := context.Background()
+
+	owner := ts.CreateTestUser(t, "ownerInv")
+	member := ts.CreateTestUser(t, "memberInv")
+	serverID := ts.CreateTestServer(t, owner.ID, "Invalidate Test Server")
+	ts.AddMemberToServer(t, serverID, member.ID, "member")
+	channelID := ts.CreateTestChannel(t, serverID, "voice-room")
+
+	// Populate the channel-scoped cache entry for this user.
+	_, err := resolver.GetEffectivePermissions(ctx, serverID, member.ID, channelID)
+	require.NoError(t, err)
+
+	// The cache key is "perm:{serverID}:{userID}:{channelID}" — assert it exists.
+	cacheKey := "perm:" + serverID + ":" + member.ID + ":" + channelID
+	existsBefore, err := ts.Redis.Exists(ctx, cacheKey).Result()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), existsBefore, "channel-scoped permission should be cached after GetEffectivePermissions")
+
+	// Invalidate via the public passthrough.
+	require.NoError(t, resolver.InvalidateChannel(ctx, serverID, channelID))
+
+	// The channel-scoped key for this (server, *, channel) must be cleared.
+	existsAfter, err := ts.Redis.Exists(ctx, cacheKey).Result()
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), existsAfter, "InvalidateChannel should clear the channel-scoped cache entry")
+}

@@ -12,7 +12,7 @@
  * arrives from the server), while `chat.ts` defines APPLICATION models (what
  * stores hold). Handlers in useWebSocketMessages.ts transform wire → app.
  *
- * 54 schemas total: 52 subscriber events (handled via wsService.on) + 2
+ * 56 schemas total: 54 subscriber events (handled via wsService.on) + 2
  * envelope-only events (connected, connection_ready) consumed internally
  * by wsService.handleMessage's switch — both must be in the union so that
  * the post-safeParse code accesses message.data fields without `as` casts.
@@ -708,6 +708,44 @@ export const VoiceStateUpdateSchema = z.object({
 });
 
 /**
+ * `voice_move` — directed signal telling the target client to relocate to
+ * another voice channel in the same server (#487 Scope B). Server emits this
+ * via `hub.BroadcastToUser` from `internal/voice/handlers.go` `ServerMove`,
+ * AFTER granting any temporary SBAC override on the destination channel
+ * (grant-before-signal ordering is load-bearing — the client's subsequent
+ * `AuthorizeJoin` checks `PermJoinVoice`). All four fields are server-emitted
+ * and required.
+ */
+export const VoiceMoveSchema = z.object({
+  type: z.literal('voice_move'),
+  data: z.object({
+    user_id: UUID,
+    from_channel_id: UUID,
+    to_channel_id: UUID,
+    server_id: UUID,
+  }),
+});
+
+/**
+ * `channel_access_revoked` — directed signal telling the affected user that a
+ * (temporary) channel grant was revoked (#487 P4). Server emits this via
+ * `hub.BroadcastToUser` from `internal/voice/temp_grants.go`
+ * `revokeTemporaryChannelAccess`. The renderer removes the channel from the
+ * sidebar, purges cached messages for it, invalidates the cached channel key,
+ * and leaves voice if currently in that channel. Distinct from `member_removed`
+ * (whole server) and `channel_deleted` (whole channel). `reason` is a stable
+ * identifier string, e.g. 'temp_access_revoked'.
+ */
+export const ChannelAccessRevokedSchema = z.object({
+  type: z.literal('channel_access_revoked'),
+  data: z.object({
+    channel_id: UUID,
+    server_id: UUID,
+    reason: z.string(),
+  }),
+});
+
+/**
  * `dm_voice_state_update` — DM call voice state.
  * Server emitter: `services/control-plane/internal/voice/nats.go:143`
  * (NATS-fanout; also nats.go:211 and nats.go:263 for other DM voice transitions).
@@ -1198,7 +1236,7 @@ export const ConnectionReadySchema = z.object({
 });
 
 // ════════════════════════════════════════════════════════════════════════
-// 4. The discriminated union (54 schemas: 52 subscriber + 2 envelope)
+// 4. The discriminated union (56 schemas: 54 subscriber + 2 envelope)
 // ════════════════════════════════════════════════════════════════════════
 
 export const WebSocketEventSchema = z.discriminatedUnion('type', [
@@ -1233,8 +1271,10 @@ export const WebSocketEventSchema = z.discriminatedUnion('type', [
   FriendRemovedSchema,
   FriendCodeClaimedSchema,
 
-  // Voice (6)
+  // Voice (8)
   VoiceStateUpdateSchema,
+  VoiceMoveSchema,
+  ChannelAccessRevokedSchema,
   DMVoiceStateUpdateSchema,
   DMVoiceCallInvitedSchema,
   DMVoiceCallCanceledSchema,
@@ -1278,7 +1318,7 @@ export const WebSocketEventSchema = z.discriminatedUnion('type', [
   ConnectedSchema,
   ConnectionReadySchema,
 ]);
-// TOTAL: 58 schemas (54 from A3-A7, + 4 DM voice ring from #1209)
+// TOTAL: 60 schemas (54 from A3-A7, + 4 DM voice ring from #1209, + 2 from #487)
 
 // ════════════════════════════════════════════════════════════════════════
 // 5. Derived types
@@ -1324,6 +1364,8 @@ export type FriendRequestPayload = z.infer<typeof FriendRequestPayloadSchema>;
 
 // Voice
 export type VoiceStateUpdatePayload = z.infer<typeof VoiceStateUpdateSchema>['data'];
+export type VoiceMovePayload = z.infer<typeof VoiceMoveSchema>['data'];
+export type ChannelAccessRevokedPayload = z.infer<typeof ChannelAccessRevokedSchema>['data'];
 export type DMVoiceStateUpdatePayload = z.infer<typeof DMVoiceStateUpdateSchema>['data'];
 export type DMVoiceCallInvitedPayload = z.infer<typeof DMVoiceCallInvitedSchema>['data'];
 export type DMVoiceCallCanceledPayload = z.infer<typeof DMVoiceCallCanceledSchema>['data'];

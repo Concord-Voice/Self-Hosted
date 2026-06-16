@@ -218,6 +218,14 @@ func (r *Resolver) applyChannelOverrides(ctx context.Context, channelID, userID 
 	return finalPerms, nil
 }
 
+// InvalidateChannel clears cached permission entries for every user in a channel.
+// It is a thin public passthrough to the cache's InvalidateChannel (cache.go), used by
+// the voice package after a temporary-SBAC grant/revoke so that the next permission
+// resolution reflects the changed override (#487).
+func (r *Resolver) InvalidateChannel(ctx context.Context, serverID, channelID string) error {
+	return r.cache.InvalidateChannel(ctx, serverID, channelID)
+}
+
 // GetVisibleChannelIDs returns a list of channel IDs that the user can view.
 // Visibility is type-aware: text/bulletin channels require PermViewTextChannels,
 // voice channels require PermViewVoiceChannels. This allows RBAC roles (and SBAC

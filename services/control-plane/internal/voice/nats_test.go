@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/voice"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
@@ -13,10 +14,13 @@ import (
 )
 
 // newTestSubscriber creates a NATSSubscriber backed by the test server's DB and Hub.
-// The NATS client is nil because tests call handler methods directly.
+// The NATS client is nil because tests call handler methods directly. A real resolver
+// (backed by the test DB/Redis) is supplied so the #487 temp-SBAC cleanup path is
+// exercised end-to-end.
 func newTestSubscriber(ts *testhelpers.TestServer) *voice.NATSSubscriber {
 	log := logger.New("test")
-	return voice.NewNATSSubscriber(ts.DB, log, ts.Hub, nil)
+	resolver := rbac.NewResolver(ts.DB, rbac.NewPermissionCache(ts.Redis), log)
+	return voice.NewNATSSubscriber(ts.DB, log, ts.Hub, nil, resolver)
 }
 
 // countVoiceParticipants returns the number of rows in voice_participants for a channel.
@@ -666,7 +670,7 @@ func TestNewNATSSubscriber(t *testing.T) {
 	ts := testhelpers.SetupTestServer(t)
 	log := logger.New("test")
 
-	sub := voice.NewNATSSubscriber(ts.DB, log, ts.Hub, nil)
+	sub := voice.NewNATSSubscriber(ts.DB, log, ts.Hub, nil, nil)
 	if sub == nil {
 		t.Fatal("NewNATSSubscriber returned nil")
 	}

@@ -7,6 +7,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/dm"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	natsclient "github.com/markdrogersjr/Concord/services/control-plane/pkg/nats"
@@ -15,19 +16,23 @@ import (
 // NATSSubscriber listens for voice events from the media plane and
 // updates the database + broadcasts WebSocket messages to clients.
 type NATSSubscriber struct {
-	db   *sql.DB
-	log  *logger.Logger
-	hub  *websocket.Hub
-	nats *natsclient.Client
+	db        *sql.DB
+	log       *logger.Logger
+	hub       *websocket.Hub
+	nats      *natsclient.Client
+	tempGrant *tempGrantManager
 }
 
-// NewNATSSubscriber creates a new NATS subscriber for voice events.
-func NewNATSSubscriber(db *sql.DB, log *logger.Logger, hub *websocket.Hub, nats *natsclient.Client) *NATSSubscriber {
+// NewNATSSubscriber creates a new NATS subscriber for voice events. The resolver is
+// required so the subscriber can drive temporary-SBAC cleanup (#487 P1) on
+// voice.left / heartbeat stale-removal through the shared tempGrantManager.
+func NewNATSSubscriber(db *sql.DB, log *logger.Logger, hub *websocket.Hub, nats *natsclient.Client, resolver *rbac.Resolver) *NATSSubscriber {
 	return &NATSSubscriber{
-		db:   db,
-		log:  log,
-		hub:  hub,
-		nats: nats,
+		db:        db,
+		log:       log,
+		hub:       hub,
+		nats:      nats,
+		tempGrant: newTempGrantManager(db, log, hub, resolver, nats),
 	}
 }
 
@@ -233,6 +238,13 @@ func (s *NATSSubscriber) handleLeft(data []byte) {
 				"server_id":  ctx.serverID,
 			},
 		})
+
+		// #487 T8 cleanup trigger: if the leaver held a temporary SBAC grant on this
+		// channel, converge on the single cleanup path (revoke override + rotate CSK +
+		// force-disconnect + notify). System-triggered, so actorID is "". This is the
+		// explicit graceful-leave path, so respectGrace=false — an intentional leave is
+		// authoritative regardless of how recently the grant was issued.
+		s.revokeTempGrantIfHeld(ctx.serverID, event.ChannelID, event.UserID, false)
 	}
 
 	s.log.Info("Voice participant left", "channel_id", event.ChannelID, "user_id", event.UserID, "is_dm", ctx.isDM)
@@ -402,6 +414,50 @@ func (s *NATSSubscriber) removeStaleParticipant(channelID, userID string, ctx *r
 			"server_id":  ctx.serverID,
 		},
 	})
+
+	// #487 T8 cleanup trigger (crash / network-loss path): server-authoritative
+	// reconciliation revokes a stale temp-grant holder's override too. respectGrace=true
+	// (finding #7): a heartbeat that races a fresh grant→join must NOT revoke a grant
+	// younger than the 60s grace window. The heartbeat UserIDs is socket-transport-level
+	// ground truth, so a genuine miss past 60s is a real disconnect and still revokes;
+	// the grace is narrow defense-in-depth covering only the grant→join window.
+	s.revokeTempGrantIfHeld(ctx.serverID, channelID, userID, true)
+}
+
+// revokeTempGrantIfHeld is the #487 T8 cleanup-trigger guard shared by the
+// voice.left handler and the heartbeat stale-removal path. It cheaply checks
+// whether the departing user holds a temporary SBAC grant on the channel and, only
+// if so, drives the single revoke convergence point (revoke override + CSK rotation
+// + force-disconnect + directed notify). The common no-temp-grant case short-
+// circuits after the EXISTS probe so plain leaves stay cheap. actorID is "" because
+// these triggers are system-initiated (no human moderator) — the rotator stores
+// revoked_by as NULL.
+//
+// respectGrace=true (heartbeat reconcile path only, finding #7) additionally
+// requires the grant be past a 60s grace window, so a brand-new grant whose
+// voice.joined event has not yet landed in voice_participants is not revoked by a
+// heartbeat that races the join. The voice.left graceful-leave path passes
+// respectGrace=false: an explicit leave is authoritative regardless of grant age,
+// and the moderator-revoke endpoint never goes through this guard at all.
+func (s *NATSSubscriber) revokeTempGrantIfHeld(serverID, channelID, userID string, respectGrace bool) {
+	ctx := context.Background()
+	var held bool
+	var err error
+	if respectGrace {
+		held, err = s.tempGrant.hasTemporaryGrantPastGrace(ctx, channelID, userID)
+	} else {
+		held, err = s.tempGrant.hasTemporaryGrant(ctx, channelID, userID)
+	}
+	if err != nil {
+		s.log.Error("temp-grant cleanup: hasTemporaryGrant probe", "error", err, "channel_id", channelID, "user_id", userID)
+		return
+	}
+	if !held {
+		return
+	}
+	if err := s.tempGrant.revokeTemporaryChannelAccess(ctx, serverID, channelID, userID, ""); err != nil {
+		s.log.Error("temp-grant cleanup: revoke", "error", err, "channel_id", channelID, "user_id", userID)
+	}
 }
 
 func (s *NATSSubscriber) broadcastRoomEmpty(channelID string, ctx *roomContext) {
@@ -426,14 +482,26 @@ func (s *NATSSubscriber) broadcastRoomEmpty(channelID string, ctx *roomContext) 
 }
 
 const (
-	natsSubjectEnforceMute   = "voice.enforce.mute"
-	natsSubjectEnforceDeafen = "voice.enforce.deafen"
+	natsSubjectEnforceMute       = "voice.enforce.mute"
+	natsSubjectEnforceDeafen     = "voice.enforce.deafen"
+	natsSubjectEnforceDisconnect = "voice.enforce.disconnect"
 
 	natsSubjectVoiceJoined    = "voice.joined"
 	natsSubjectVoiceLeft      = "voice.left"
 	natsSubjectVoiceRoomEmpty = "voice.room_empty"
 	natsSubjectVoiceHeartbeat = "voice.heartbeat"
 )
+
+// publishForceDisconnect publishes a voice.enforce.disconnect command so the
+// media plane closes that peer's transports and removes it from the room (#487
+// P3). Revoking VIEW/CONNECT does NOT eject an already-connected peer, so this
+// is the authoritative ejection path used by temporary-SBAC access revocation.
+// Delegates to the shared tempGrantManager so the publish primitive lives in one
+// place (the manager is also driven from the REST Handler's moderator-revoke
+// endpoint, DELETE /servers/:id/voice/:userId/temp-access — RevokeTempAccess).
+func (s *NATSSubscriber) publishForceDisconnect(channelID, userID string) {
+	s.tempGrant.publishForceDisconnect(channelID, userID)
+}
 
 // publishEnforcementFlags publishes NATS enforcement commands for active mute/deafen flags.
 func (s *NATSSubscriber) publishEnforcementFlags(channelID, userID, context string, serverMuted, serverDeafened bool) {

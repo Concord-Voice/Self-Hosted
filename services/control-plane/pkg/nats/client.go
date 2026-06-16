@@ -51,6 +51,19 @@ func (c *Client) Publish(subject string, data interface{}) error {
 	return c.conn.Publish(subject, payload)
 }
 
+// Flush blocks until the server has processed all buffered messages and
+// subscription interest from this connection. It closes the well-known NATS race
+// where a Subscribe followed by an immediate Publish on a different connection can
+// miss the message because the subscription interest has not yet propagated to the
+// server. Callers (notably integration tests that subscribe-then-publish) should
+// Flush after Subscribe to make the subscription deterministically active.
+func (c *Client) Flush() error {
+	if c.conn == nil {
+		return nil
+	}
+	return c.conn.Flush()
+}
+
 // Close drains and closes the NATS connection.
 func (c *Client) Close() {
 	if c.conn != nil {

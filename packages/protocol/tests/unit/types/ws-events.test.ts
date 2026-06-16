@@ -1,7 +1,7 @@
 /**
  * ws-events.test.ts — zod schema coverage for the WebSocket wire contract.
  *
- * 4 describe-blocks: happy path (54), rejection (15), discriminator (3), PII scrubber (4).
+ * 4 describe-blocks: happy path (56), rejection (17), discriminator (3), PII scrubber (4).
  *
  * @see client/desktop/src/renderer/types/ws-events.ts
  * @see [internal]specs/2026-05-23-709-ws-discriminated-union-design.md §6
@@ -37,8 +37,10 @@ import {
   FriendRequestAcceptedSchema,
   FriendRemovedSchema,
   FriendCodeClaimedSchema,
-  // Voice (6)
+  // Voice (8)
   VoiceStateUpdateSchema,
+  VoiceMoveSchema,
+  ChannelAccessRevokedSchema,
   DMVoiceStateUpdateSchema,
   DMVoiceCallInvitedSchema,
   DMVoiceCallCanceledSchema,
@@ -404,6 +406,31 @@ describe('ws-events schemas — happy path (one per event)', () => {
         channel_id: UUID_A,
         action: 'joined',
         user_id: UUID_B,
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('VoiceMoveSchema accepts a canonical voice-move envelope', () => {
+    const result = VoiceMoveSchema.safeParse({
+      type: 'voice_move',
+      data: {
+        user_id: UUID_A,
+        from_channel_id: UUID_B,
+        to_channel_id: UUID_C,
+        server_id: UUID_A,
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('ChannelAccessRevokedSchema accepts a canonical access-revoked envelope', () => {
+    const result = ChannelAccessRevokedSchema.safeParse({
+      type: 'channel_access_revoked',
+      data: {
+        channel_id: UUID_A,
+        server_id: UUID_B,
+        reason: 'temp_access_revoked',
       },
     });
     expect(result.success).toBe(true);
@@ -894,6 +921,31 @@ describe('ws-events schemas — rejection cases', () => {
       data: {
         channel_id: UUID_A,
         action: 'teleported', // not in VoiceActionSchema
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('VoiceMoveSchema rejects missing to_channel_id', () => {
+    const result = VoiceMoveSchema.safeParse({
+      type: 'voice_move',
+      data: {
+        user_id: UUID_A,
+        from_channel_id: UUID_B,
+        // no to_channel_id
+        server_id: UUID_C,
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('ChannelAccessRevokedSchema rejects missing reason', () => {
+    const result = ChannelAccessRevokedSchema.safeParse({
+      type: 'channel_access_revoked',
+      data: {
+        channel_id: UUID_A,
+        server_id: UUID_B,
+        // no reason
       },
     });
     expect(result.success).toBe(false);

@@ -10120,6 +10120,137 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /servers/{id}/voice/{userId}/disconnect:
+    post:
+      tags:
+      - Voice
+      summary: Force-disconnect a member from voice
+      description: 'Force-disconnect a member from whatever voice channel they are currently in
+        within the server. A `voice.enforce.disconnect` command is published to the media plane,
+        which closes the peer''s transports; the resulting `voice.left` event drives any temporary
+        SBAC grant cleanup automatically.
+
+        Unlike `/move`, disconnect ENFORCES role hierarchy: it requires the Move Members
+        permission AND the target must be strictly lower in role position than the caller. The
+        target must currently be in a voice channel in this server.
+
+        Rate limit: 10 requests per minute (user-based).
+
+        '
+      operationId: voiceServerDisconnect
+      security:
+      - BearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/ServerId'
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: Target user UUID
+      responses:
+        '200':
+          description: Member disconnected
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  disconnected:
+                    type: boolean
+        '400':
+          description: Invalid server or user ID
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Not a member of this server, insufficient permissions (Move Members required),
+            or hierarchy violation (target has equal or higher role position)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Target user is not currently in a voice channel
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /servers/{id}/voice/{userId}/move:
+    post:
+      tags:
+      - Voice
+      summary: Move a member to another voice channel
+      description: 'Relocate a member to a different voice channel in the same server. A
+        `voice_move` WebSocket event is sent to the target user''s client(s), which gracefully
+        leave their current channel and join the target. If the target cannot otherwise see the
+        destination, a temporary scoped SBAC grant (VIEW + CONNECT + SPEAK) is created before
+        signalling and auto-revoked on departure (with channel-key rotation).
+
+        Authorization: a caller may always move themselves (no permission required). Moving
+        another member requires the Move Members permission and — by deliberate design
+        (ADR-0023) — does NOT enforce role hierarchy: a Move Members holder may move any member,
+        including higher roles and the server owner. Hierarchy-crossing moves are recorded in
+        the audit log.
+
+        Rate limit: 10 requests per minute (user-based).
+
+        '
+      operationId: voiceServerMove
+      security:
+      - BearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/ServerId'
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: Target user UUID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - target_channel_id
+              properties:
+                target_channel_id:
+                  type: string
+                  format: uuid
+                  description: Destination voice channel UUID (a voice channel in the same server)
+      responses:
+        '200':
+          description: Member moved
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  moved:
+                    type: boolean
+        '400':
+          description: Invalid server/user/channel ID, target is not a voice channel in this server, or target equals the current channel
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Not a member of this server, or insufficient permissions (Move Members required to move another user)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: Target user is not currently in a voice channel
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /servers/{id}/voice/{userId}/mute:
     post:
       tags:
@@ -10227,6 +10358,76 @@ paths:
                 $ref: '#/components/schemas/Error'
         '404':
           description: Target user is not a member of this server
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /servers/{id}/voice/{userId}/temp-access:
+    delete:
+      tags:
+      - Voice
+      summary: Revoke a member's temporary voice-channel access
+      description: 'Revoke a move-granted temporary scoped SBAC grant (VIEW + CONNECT + SPEAK)
+        for a member on a specific voice channel while they are still connected (#487 Scope C).
+        The temporary override is deleted, the member''s wrapped channel key and any pending key
+        request are purged, the channel CSK is rotated, the live peer is force-disconnected, and
+        a `channel_access_revoked` WebSocket event is sent to the member.
+
+        If no TEMPORARY grant exists for the (user, channel) pair the call is a no-op and returns
+        `revoked: false`; a permanent override is never touched.
+
+        Requires the Move Members permission; the target must be strictly lower in role hierarchy
+        than the caller (this is a moderation action — it does NOT inherit the move endpoint''s
+        hierarchy exception).
+
+        Rate limit: 10 requests per minute (user-based).
+
+        '
+      operationId: voiceRevokeTempAccess
+      security:
+      - BearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/ServerId'
+      - name: userId
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: Target user UUID
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - channel_id
+              properties:
+                channel_id:
+                  type: string
+                  format: uuid
+                  description: Voice channel UUID whose temporary grant should be revoked
+      responses:
+        '200':
+          description: 'Revoke result. `revoked: true` when a temporary grant was removed;
+            `revoked: false` when there was no temporary grant to revoke (no-op).'
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  revoked:
+                    type: boolean
+        '400':
+          description: Invalid server/user ID, or missing/invalid channel_id in the body
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Not a member of this server, insufficient permissions (Move Members required),
+            or hierarchy violation (target has equal or higher role position)
           content:
             application/json:
               schema:

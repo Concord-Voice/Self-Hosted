@@ -50,6 +50,9 @@ const (
 	pathIDOverrides        = "/:id/overrides"
 	routeVoiceMute         = "/:id/voice/:userId/mute"
 	routeVoiceDeafen       = "/:id/voice/:userId/deafen"
+	routeVoiceMove         = "/:id/voice/:userId/move"
+	routeVoiceDisconnect   = "/:id/voice/:userId/disconnect"
+	routeVoiceTempAccess   = "/:id/voice/:userId/temp-access"
 )
 
 // mentionCheckerAdapter adapts an rbac.Resolver to the websocket.MentionPermissionChecker
@@ -189,7 +192,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	membersHandler := members.NewHandler(db, log, redis, hub, rbacResolver, auditWriter)
 	messagesHandler := messages.NewHandler(db, log, hub, rbacResolver)
 	invitesHandler := invites.NewHandler(db, log, hub, rbacResolver)
-	voiceHandler := voice.NewHandler(db, log, hub, cfg, rbacResolver, natsClient)
+	voiceHandler := voice.NewHandler(db, log, hub, cfg, rbacResolver, natsClient, auditWriter)
 	dmHandler := dm.NewHandler(db, log, hub, cfg, natsClient, redis)
 	// Wire DM voice ring cleanup-on-disconnect (#1209 plan task B7 Part 2).
 	// When a user's last WS connection drops, the hub invokes
@@ -231,7 +234,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 
 	// Start NATS voice event subscriber
 	if natsClient != nil {
-		voiceSub := voice.NewNATSSubscriber(db, log, hub, natsClient)
+		voiceSub := voice.NewNATSSubscriber(db, log, hub, natsClient, rbacResolver)
 		if subErr := voiceSub.Subscribe(); subErr != nil {
 			log.Error("Failed to subscribe to voice NATS events", "error", subErr)
 		}
@@ -1069,6 +1072,24 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				serverRoutes.POST("/:id/voice/:userId/user-deafen",
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					voiceHandler.UserDeafen,
+				)
+				// Move a member to another voice channel (#487 Scope B). Same
+				// per-user rate limit as the mute/deafen moderation routes.
+				serverRoutes.POST(routeVoiceMove,
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					voiceHandler.ServerMove,
+				)
+				// Force-disconnect a member from voice (#487 P3). Same per-user
+				// rate limit as the mute/deafen/move moderation routes.
+				serverRoutes.POST(routeVoiceDisconnect,
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					voiceHandler.ServerDisconnect,
+				)
+				// Revoke a move-granted temporary SBAC grant while the target is
+				// still in the VC (#487 Scope C). Same per-user rate limit.
+				serverRoutes.DELETE(routeVoiceTempAccess,
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					voiceHandler.RevokeTempAccess,
 				)
 			}
 
