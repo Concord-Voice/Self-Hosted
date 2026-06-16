@@ -45,6 +45,7 @@ func TestIsMetadataFile(t *testing.T) {
 	assert.True(t, isMetadataFile("latest-linux-arm64.yml"))
 	assert.False(t, isMetadataFile("ConcordVoice-0.1.4-macos-arm64.zip"))
 	assert.False(t, isMetadataFile("latest-mac.zip"))
+	assert.False(t, isMetadataFile("ConcordVoice-0.1.59-macos-arm64.zip.blockmap"))
 	assert.False(t, isMetadataFile(""))
 }
 
@@ -60,6 +61,7 @@ func TestContentTypeForFile(t *testing.T) {
 		{"concord-voice-0.1.4-linux-x64.rpm", "application/x-rpm"},
 		{"ConcordVoice-0.1.4-linux-x64.AppImage", "application/x-executable"},
 		{"ConcordVoice-0.1.4-windows-x64-full.nupkg", "application/octet-stream"},
+		{"ConcordVoice-0.1.59-macos-arm64.zip.blockmap", "application/octet-stream"},
 		{"unknown-file.bin", "application/octet-stream"},
 	}
 	for _, tt := range tests {
@@ -150,6 +152,30 @@ func TestServeUpdateAssetServesBinary(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, "fake-zip-data", w.Body.String())
 	assert.Equal(t, "application/zip", w.Header().Get("Content-Type"))
+	assert.Equal(t, "public, max-age=86400", w.Header().Get("Cache-Control"))
+}
+
+// TestServeUpdateAssetServesBlockmap locks the #1292 AC wire contract end-to-end
+// (HTTP 200, application/octet-stream, 24h binary cache, body round-trip) through
+// the real ServeUpdateAsset handler — mirroring TestServeUpdateAssetServesBinary
+// for the double-extension .zip.blockmap name. The pure-helper assertions in
+// TestContentTypeForFile/TestIsMetadataFile cover the branch logic; this covers
+// the serve path (filepath.Base/Clean + os.Lstat) for the double-extension name.
+func TestServeUpdateAssetServesBlockmap(t *testing.T) {
+	dir := createTestReleasesDir(t)
+	const blockmapName = "ConcordVoice-0.1.4-macos-arm64.zip.blockmap"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, blockmapName), []byte("fake-blockmap-bytes"), 0600))
+	h := newTestHandler(dir)
+	r := setupRouter(h)
+
+	w := httptest.NewRecorder()
+	req, err := http.NewRequest("GET", "/api/v1/updates/"+blockmapName, nil)
+	require.NoError(t, err)
+	r.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, "fake-blockmap-bytes", w.Body.String())
+	assert.Equal(t, "application/octet-stream", w.Header().Get("Content-Type"))
 	assert.Equal(t, "public, max-age=86400", w.Header().Get("Cache-Control"))
 }
 
