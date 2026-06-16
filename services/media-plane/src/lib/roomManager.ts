@@ -44,6 +44,12 @@ export interface Room {
   participants: Map<string, Participant>;
   createdAt: Date;
   e2eeEpoch: number;
+  /**
+   * Per-source count of producers that have passed the cap check but are not
+   * yet recorded in `participant.producers` (in-flight across the `produce()`
+   * await). Load-bearing for TOCTOU-safe cap enforcement — see `produce()`.
+   */
+  pendingProducerCounts: Map<MediaSource, number>;
 }
 
 export interface ProducerInfo {
@@ -51,6 +57,33 @@ export interface ProducerInfo {
   userId: string;
   kind: MediaKind;
   source: MediaSource;
+}
+
+/** Absolute per-room camera-producer ceiling — hard upper bound, not tier-tunable. */
+export const ABSOLUTE_VIDEO_PUBLISHER_CEILING = 25;
+
+/** Per-room concurrent screen-share producer cap (unchanged from the original hardcoded 5). */
+export const SCREEN_PRODUCER_CAP = 5;
+
+/**
+ * Resolve the per-room concurrent camera-producer cap.
+ *
+ * TODO(#1294): when the entitlement resolver (#1521) + /voice/join tier
+ * plumbing (#1300) land, read the room/owner subscription tier here and return
+ * the paid value for paid rooms. Until then every room resolves to the free
+ * default, which is correct for the Beta window (no paid users exist pre-Beta).
+ *
+ * Clamped at BOTH ends: the upper bound is ABSOLUTE_VIDEO_PUBLISHER_CEILING, so
+ * the free cap can only ever be a stricter floor and never raise the global
+ * ceiling; the lower bound is 1, so a future #1294 tier value of 0/negative —
+ * which does NOT flow through config's fail-safe parsePositiveIntEnv — can never
+ * disable the cap (Math.min(0, 25) = 0 would reject every camera produce, a DoS).
+ */
+export function resolveVideoPublisherCap(
+  _room: Room,
+  freeCap: number = config.freeVideoPublisherCap
+): number {
+  return Math.max(1, Math.min(freeCap, ABSOLUTE_VIDEO_PUBLISHER_CEILING));
 }
 
 export interface TransportOptions {
@@ -201,6 +234,7 @@ export class RoomManager {
       participants: new Map(),
       createdAt: new Date(),
       e2eeEpoch: 0,
+      pendingProducerCounts: new Map(),
     };
 
     // Wire up active speaker events
@@ -562,28 +596,59 @@ export class RoomManager {
       throw new Error('Send transport not found or mismatch');
     }
 
-    // Enforce stream limits
-    if (source === 'camera' && this.countProducersBySource(room, 'camera') >= 25) {
-      throw new Error('Video participant limit reached (max 25)');
-    }
-
-    if (source === 'screen' && this.countProducersBySource(room, 'screen') >= 5) {
-      throw new Error('Screen share limit reached (max 5)');
-    }
-
-    // Validate screen-audio: must be audio kind, participant must have an active screen
-    // producer, and only one screen-audio producer is allowed per participant.
+    // Validate screen-audio first: must be audio kind, participant must have an
+    // active screen producer, and only one screen-audio producer is allowed per
+    // participant. Ordered before the generic kind/source check so a video-kind
+    // screen-audio mislabel gets the specific "must be audio kind" message.
     if (source === 'screen-audio') {
       this.validateScreenAudioSource(participant, kind);
     }
 
-    const producer = await participant.sendTransport.produce({
-      kind,
-      rtpParameters,
-      appData: { source, userId },
-    });
+    // Validate the client-declared source. It selects which per-room cap applies,
+    // so it is security-load-bearing (#1539): a video stream mislabeled as
+    // 'mic'/'screen-audio' would otherwise dodge the camera cap entirely. Every
+    // video producer must be a capped video source (camera/screen); every audio
+    // producer must be an audio source (mic/screen-audio). The legit client only
+    // ever emits these kind/source pairings (voiceService.ts). Static message —
+    // never interpolate the client-supplied source into the error/log (CWE-117).
+    const allowedSources: MediaSource[] =
+      kind === 'video' ? ['camera', 'screen'] : ['mic', 'screen-audio'];
+    if (!allowedSources.includes(source)) {
+      throw new Error('Invalid media source for producer kind');
+    }
+
+    // Enforce per-room concurrent-producer caps (camera: tier-resolved free
+    // default 8; screen: SCREEN_PRODUCER_CAP). TOCTOU-safe (#1539 review): the
+    // producer is only recorded in participant.producers AFTER the await below,
+    // so a bare synchronous count check lets concurrent produce() calls all pass
+    // against a stale count and overrun the cap. We reserve a slot synchronously
+    // — the check + reservation run with no intervening await, so concurrent
+    // invocations observe each other's reservations — and release it once the
+    // producer is recorded or if produce() fails.
+    const producerCap = this.resolveProducerCap(room, source);
+    if (producerCap !== null) {
+      const pending = room.pendingProducerCounts.get(source) ?? 0;
+      if (this.countProducersBySource(room, source) + pending >= producerCap) {
+        throw new Error(this.capExceededMessage(source, producerCap));
+      }
+      room.pendingProducerCounts.set(source, pending + 1);
+    }
+
+    let producer: Producer;
+    try {
+      producer = await participant.sendTransport.produce({
+        kind,
+        rtpParameters,
+        appData: { source, userId },
+      });
+    } catch (err) {
+      this.releaseProducerReservation(room, source, producerCap);
+      throw err;
+    }
 
     participant.producers.set(producer.id, { producer, source, kind });
+    // Release the reservation: the producer is now counted via participant.producers.
+    this.releaseProducerReservation(room, source, producerCap);
 
     // Add mic audio producers to the AudioLevelObserver (skip screen-audio to
     // avoid false active-speaker detection from system audio)
@@ -1031,6 +1096,27 @@ export class RoomManager {
   }
 
   // ─── Private helpers ─────────────────────────────────────────────────
+
+  /** Per-room concurrent-producer cap for a capped source, or null if uncapped. */
+  private resolveProducerCap(room: Room, source: MediaSource): number | null {
+    if (source === 'camera') return resolveVideoPublisherCap(room);
+    if (source === 'screen') return SCREEN_PRODUCER_CAP;
+    return null; // mic, screen-audio — no count cap
+  }
+
+  /** Human-readable cap-exceeded message for a capped source (server-side ints only). */
+  private capExceededMessage(source: MediaSource, cap: number): string {
+    return source === 'camera'
+      ? `Video participant limit reached (max ${cap})`
+      : `Screen share limit reached (max ${cap})`;
+  }
+
+  /** Release a previously-reserved producer slot (no-op for uncapped sources). */
+  private releaseProducerReservation(room: Room, source: MediaSource, cap: number | null): void {
+    if (cap === null) return;
+    const pending = room.pendingProducerCounts.get(source) ?? 0;
+    room.pendingProducerCounts.set(source, Math.max(0, pending - 1));
+  }
 
   private countProducersBySource(room: Room, source: MediaSource): number {
     let count = 0;

@@ -158,6 +158,28 @@ describe('config', () => {
     });
   });
 
+  // ── freeVideoPublisherCap ───────────────────────────────────────────
+
+  describe('freeVideoPublisherCap', () => {
+    it('defaults to 8 when env unset', async () => {
+      const { config } = await loadConfig();
+      expect(config.freeVideoPublisherCap).toBe(8);
+    });
+
+    it('reads a valid positive integer from FREE_VIDEO_PUBLISHER_CAP', async () => {
+      const { config } = await loadConfig({ FREE_VIDEO_PUBLISHER_CAP: '12' });
+      expect(config.freeVideoPublisherCap).toBe(12);
+    });
+
+    it.each([['abc'], ['0'], ['-5'], ['']])(
+      'falls back to 8 for invalid value %j',
+      async (raw) => {
+        const { config } = await loadConfig({ FREE_VIDEO_PUBLISHER_CAP: raw });
+        expect(config.freeVideoPublisherCap).toBe(8);
+      }
+    );
+  });
+
   // ── Production Guard ────────────────────────────────────────────────
 
   describe('production guard', () => {

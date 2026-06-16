@@ -260,9 +260,26 @@ const mediaCodecs: RouterRtpCodecCapability[] = [
 // ---------------------------------------------------------------------------
 const DEV_JWT_SECRET = 'dev_jwt_secret_change_in_production';
 
+/**
+ * Parse a positive-integer env var with a safe fallback. Returns `fallback`
+ * when the value is missing, non-numeric, or < 1 — a config typo must never
+ * crash the SFU or zero-out an operational limit. (Non-secret operational int:
+ * no production fatal-exit guard needed, unlike the JWT-secret pattern.)
+ */
+function parsePositiveIntEnv(raw: string | undefined, fallback: number): number {
+  const n = Number.parseInt(raw ?? '', 10);
+  return Number.isFinite(n) && n >= 1 ? n : fallback;
+}
+
 export const config = {
   environment: process.env.ENVIRONMENT || 'development',
   port: Number.parseInt(process.env.PORT || '3000', 10),
+
+  // Free-tier per-room concurrent camera-producer cap (#1539). P0 capacity
+  // guardrail: bounds SFU egress fan-out so one free user can't saturate a box.
+  // TODO(#1294): paid tier raises this to the absolute ceiling once the
+  // entitlement resolver lands; until then all rooms use this free default.
+  freeVideoPublisherCap: parsePositiveIntEnv(process.env.FREE_VIDEO_PUBLISHER_CAP, 8),
 
   // Redis — room state, cross-instance coordination
   // Default includes dev password to match docker-compose and control plane defaults

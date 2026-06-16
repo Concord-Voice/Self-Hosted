@@ -17,6 +17,7 @@ vi.mock('mediasoup', () => ({
 // Mock config
 vi.mock('@/config/index.js', () => ({
   config: {
+    freeVideoPublisherCap: 8,
     mediasoup: {
       webRtcTransport: {
         listenIps: [{ ip: '0.0.0.0', announcedIp: '127.0.0.1' }],
@@ -35,7 +36,11 @@ vi.mock('@/config/index.js', () => ({
   },
 }));
 
-import { RoomManager } from '../src/lib/roomManager.js';
+import {
+  RoomManager,
+  resolveVideoPublisherCap,
+  ABSOLUTE_VIDEO_PUBLISHER_CEILING,
+} from '../src/lib/roomManager.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -352,9 +357,9 @@ describe('RoomManager', () => {
       expect(mockRouter._audioLevelObserver.addProducer).not.toHaveBeenCalled();
     });
 
-    it('enforces camera limit (max 25)', async () => {
-      // Add 25 camera producers across multiple participants
-      for (let i = 0; i < 25; i++) {
+    it('enforces camera limit (free cap = 8 from config mock)', async () => {
+      // Add 8 camera producers across multiple participants
+      for (let i = 0; i < 8; i++) {
         const uid = `u-cam-${i}`;
         await manager.joinRoom('room-1', uid, `sock-${i + 100}`, `user${i}`);
         const t = createMockTransport();
@@ -365,7 +370,7 @@ describe('RoomManager', () => {
         await manager.produce('room-1', uid, t.id, 'video', createRtpParameters() as any, 'camera');
       }
 
-      // 26th should fail
+      // 9th should fail
       const p = createMockProducer({ kind: 'video' });
       transport.produce.mockResolvedValueOnce(p);
       await expect(
@@ -377,7 +382,94 @@ describe('RoomManager', () => {
           createRtpParameters() as any,
           'camera'
         )
-      ).rejects.toThrow('Video participant limit reached (max 25)');
+      ).rejects.toThrow('Video participant limit reached (max 8)');
+    });
+
+    it('rejects the 9th camera producer (free cap = 8) and keeps the 8 allowed', async () => {
+      for (let i = 0; i < 8; i++) {
+        transport.produce.mockResolvedValueOnce(
+          createMockProducer({ kind: 'video', id: `cam-${i}` })
+        );
+        await manager.produce(
+          'room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'camera'
+        );
+      }
+
+      await expect(
+        manager.produce(
+          'room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'camera'
+        )
+      ).rejects.toThrow('Video participant limit reached (max 8)');
+    });
+
+    it('does not apply the camera cap to screen producers', async () => {
+      // Seed 8 cameras (at the camera cap) ...
+      for (let i = 0; i < 8; i++) {
+        transport.produce.mockResolvedValueOnce(
+          createMockProducer({ kind: 'video', id: `cam-${i}` })
+        );
+        await manager.produce(
+          'room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'camera'
+        );
+      }
+      // ... a screen producer still succeeds (separate limit of 5).
+      transport.produce.mockResolvedValueOnce(createMockProducer({ kind: 'video', id: 'scr-0' }));
+      const info = await manager.produce(
+        'room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'screen'
+      );
+      expect(info.source).toBe('screen');
+    });
+
+    it('enforces the camera cap under a concurrent produce burst (TOCTOU-safe, #1539)', async () => {
+      // produce() yields the event loop at the await; without a synchronous slot
+      // reservation, N concurrent calls would all pass the count check against a
+      // stale (pre-record) count and overrun the cap. Fire cap+1 calls WITHOUT
+      // awaiting individually so their synchronous reservation sections interleave.
+      // (This test FAILS against the pre-reservation code — it is the regression
+      // lock for the Gitar/security-review TOCTOU finding.)
+      let pid = 0;
+      transport.produce.mockImplementation(async () =>
+        createMockProducer({ kind: 'video', id: `burst-cam-${pid++}` })
+      );
+      const results = await Promise.allSettled(
+        Array.from({ length: 9 }, () =>
+          manager.produce(
+            'room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'camera'
+          )
+        )
+      );
+      const fulfilled = results.filter((r) => r.status === 'fulfilled');
+      const rejected = results.filter(
+        (r): r is PromiseRejectedResult => r.status === 'rejected'
+      );
+      // Exactly the cap is admitted; the surplus is rejected — the cap holds.
+      expect(fulfilled.length).toBe(8);
+      expect(rejected.length).toBe(1);
+      expect(rejected[0].reason.message).toContain('Video participant limit reached (max 8)');
+    });
+
+    it('rejects a video producer with a non-video source (anti-mislabel, #1539)', async () => {
+      await expect(
+        manager.produce(
+          'room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'mic'
+        )
+      ).rejects.toThrow('Invalid media source for producer kind');
+    });
+
+    it('rejects an audio producer with a video source', async () => {
+      await expect(
+        manager.produce(
+          'room-1', 'u-1', transport.id, 'audio', createRtpParameters() as any, 'camera'
+        )
+      ).rejects.toThrow('Invalid media source for producer kind');
+    });
+
+    it('rejects an unknown source string', async () => {
+      await expect(
+        manager.produce(
+          'room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'bogus' as never
+        )
+      ).rejects.toThrow('Invalid media source for producer kind');
     });
 
     it('enforces screen share limit (max 5)', async () => {
@@ -1207,5 +1299,31 @@ describe('RoomManager', () => {
         expect(participant?.serverDeafened).toBe(true);
       });
     });
+  });
+});
+
+describe('resolveVideoPublisherCap', () => {
+  const room = {} as any; // room is unused until the #1294 tier-seam lands
+
+  it('returns the free cap when below the absolute ceiling', () => {
+    expect(resolveVideoPublisherCap(room, 8)).toBe(8);
+    expect(resolveVideoPublisherCap(room, 3)).toBe(3);
+  });
+
+  it('clamps to the absolute ceiling (25)', () => {
+    expect(resolveVideoPublisherCap(room, 100)).toBe(ABSOLUTE_VIDEO_PUBLISHER_CEILING);
+    expect(ABSOLUTE_VIDEO_PUBLISHER_CEILING).toBe(25);
+  });
+
+  it('defaults the free cap from config (8) when omitted', () => {
+    expect(resolveVideoPublisherCap(room)).toBe(8);
+  });
+
+  it('clamps a zero/negative free cap up to 1 (never disables the cap — #1294 seam guard)', () => {
+    // A future #1294 tier value bypasses config.parsePositiveIntEnv, so the
+    // resolver must defend its own lower bound: Math.min(0, 25) = 0 would make
+    // `count >= 0` always true and reject every camera produce (a DoS).
+    expect(resolveVideoPublisherCap(room, 0)).toBe(1);
+    expect(resolveVideoPublisherCap(room, -5)).toBe(1);
   });
 });
