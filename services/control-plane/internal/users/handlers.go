@@ -195,14 +195,29 @@ func (h *Handler) GetMyKeys(c *gin.Context) {
 	})
 }
 
-// ReplaceKeysRequest represents a request to replace E2EE keys
+// errMsgFailedReplaceKeys is the generic 500 message returned for any failure
+// of the key-replacement transaction (begin / apply / commit).
+const errMsgFailedReplaceKeys = "Failed to replace keys"
+
+// ReplaceKeysRequest represents a request to replace (reset) E2EE keys.
+// Resetting is a destructive, acknowledged operation: it rotates the public
+// key and discards all wrapped channel/DM keys (see replaceKeyMaterialTx).
+// Because it is destructive, it requires step-up re-authentication
+// (current_password + MFA when enabled), mirroring ChangePassword (#1293).
 type ReplaceKeysRequest struct {
-	WrappedPrivateKey string `json:"wrapped_private_key" binding:"required"`
-	KeyDerivationSalt string `json:"key_derivation_salt" binding:"required"`
-	KeyDerivationAlg  string `json:"key_derivation_alg"` // "pbkdf2" or "argon2id"
+	WrappedPrivateKey   string `json:"wrapped_private_key" binding:"required"`
+	KeyDerivationSalt   string `json:"key_derivation_salt" binding:"required"`
+	KeyDerivationAlg    string `json:"key_derivation_alg"`
+	PublicKey           string `json:"public_key" binding:"required"`
+	CurrentPassword     string `json:"current_password" binding:"required"`
+	MFACode             string `json:"mfa_code"` // Required when MFA is enabled
+	AcknowledgeDataLoss bool   `json:"acknowledge_data_loss"`
 }
 
-// ReplaceMyKeys replaces the user's E2EE keys (for key recovery after corruption)
+// ReplaceMyKeys resets the user's E2EE identity to a new keypair. It atomically
+// rotates user_keys + public_keys and clears stale wrapped channel/DM keys, so
+// the new private key always matches the published public key (#1293). Gated on
+// acknowledge_data_loss because all prior encrypted history becomes unreadable.
 func (h *Handler) ReplaceMyKeys(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
@@ -210,45 +225,111 @@ func (h *Handler) ReplaceMyKeys(c *gin.Context) {
 		return
 	}
 
-	var req ReplaceKeysRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "wrapped_private_key and key_derivation_salt are required"})
+	req, wrappedKeyBytes, saltBytes, publicKeyBytes, ok := parseReplaceKeysRequest(c)
+	if !ok {
 		return
 	}
 
-	wrappedKeyBytes, err := base64.StdEncoding.DecodeString(req.WrappedPrivateKey)
+	// Step-up re-authentication: this is a destructive, irreversible operation
+	// (it purges all of the user's wrapped channel/DM keys and rotates the
+	// public key). A valid access token + acknowledgment is not enough — require
+	// the current password and MFA when enabled, mirroring ChangePassword, so a
+	// stolen access token alone cannot destroy a victim's E2EE history (#1293).
+	if !h.verifyResetStepUp(c, userID, req.CurrentPassword, req.MFACode) {
+		return
+	}
+
+	tx, err := h.db.Begin()
+	if err != nil {
+		h.log.Error("Failed to begin key replacement tx", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReplaceKeys})
+		return
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			if rbErr := tx.Rollback(); rbErr != nil && rbErr != sql.ErrTxDone {
+				h.log.Error("Failed to roll back key replacement tx", "error", rbErr)
+			}
+		}
+	}()
+
+	if err := replaceKeyMaterialTx(tx, userID, wrappedKeyBytes, saltBytes, req.KeyDerivationAlg, publicKeyBytes); err != nil {
+		h.log.Error("Failed to replace E2EE key material", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReplaceKeys})
+		return
+	}
+
+	if err := tx.Commit(); err != nil {
+		h.log.Error("Failed to commit key replacement", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReplaceKeys})
+		return
+	}
+	committed = true
+
+	h.log.Info("E2EE keys replaced (atomic reset)", "user_id", userID, "alg", req.KeyDerivationAlg)
+	c.JSON(http.StatusOK, gin.H{"message": "Keys replaced successfully. Encrypted message history was reset."})
+}
+
+// parseReplaceKeysRequest binds and validates a ReplaceKeysRequest, writing the
+// appropriate 4xx response and returning ok=false on any failure. Extracted from
+// ReplaceMyKeys to keep that handler under the cognitive-complexity threshold.
+func parseReplaceKeysRequest(c *gin.Context) (req ReplaceKeysRequest, wrapped, salt, publicKey []byte, ok bool) {
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "wrapped_private_key, key_derivation_salt, public_key and current_password are required"})
+		return req, nil, nil, nil, false
+	}
+
+	if !req.AcknowledgeDataLoss {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "You must acknowledge that all encrypted message history will be permanently lost"})
+		return req, nil, nil, nil, false
+	}
+
+	wrapped, err := base64.StdEncoding.DecodeString(req.WrappedPrivateKey)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid wrapped_private_key format"})
-		return
+		return req, nil, nil, nil, false
 	}
-	saltBytes, err := base64.StdEncoding.DecodeString(req.KeyDerivationSalt)
+	salt, err = base64.StdEncoding.DecodeString(req.KeyDerivationSalt)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid key_derivation_salt format"})
-		return
+		return req, nil, nil, nil, false
 	}
-
-	kdAlg := req.KeyDerivationAlg
-	if kdAlg == "" {
-		kdAlg = "argon2id"
-	}
-
-	_, err = h.db.Exec(
-		`UPDATE user_keys SET wrapped_private_key = $1, key_derivation_salt = $2,
-		 key_version = key_version + 1, key_derivation_alg = $3, updated_at = NOW()
-		 WHERE user_id = $4`,
-		wrappedKeyBytes, saltBytes, kdAlg, userID,
-	)
+	publicKey, err = base64.StdEncoding.DecodeString(req.PublicKey)
 	if err != nil {
-		h.log.Error("Failed to replace E2EE keys", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to replace keys"})
-		return
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid public_key format"})
+		return req, nil, nil, nil, false
 	}
 
-	h.log.Info("E2EE keys replaced", "user_id", userID, "alg", kdAlg)
+	if req.KeyDerivationAlg == "" {
+		req.KeyDerivationAlg = "argon2id"
+	}
+	return req, wrapped, salt, publicKey, true
+}
 
-	c.JSON(http.StatusOK, gin.H{
-		"message": "Keys replaced successfully",
-	})
+// verifyResetStepUp re-authenticates the caller for the destructive key reset:
+// current password + MFA when enabled, reusing the same helpers as
+// ChangePassword. It writes the appropriate response and returns false on any
+// failure. Defeats the stolen-access-token threat on this data-loss path (#1293).
+func (h *Handler) verifyResetStepUp(c *gin.Context, userID interface{}, currentPassword, mfaCode string) bool {
+	// Fail closed if user_id is not a string: otherwise the comma-ok form would
+	// yield "" and verifyMFAForPasswordChange would treat MFA as disabled,
+	// silently skipping the step-up on this destructive path (Gitar review).
+	uid, ok := userID.(string)
+	if !ok {
+		h.log.Error("user_id is not a string; refusing key reset", "type", fmt.Sprintf("%T", userID))
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReplaceKeys})
+		return false
+	}
+	if _, status, errMsg := h.verifyCurrentPassword(uid, currentPassword); status != 0 {
+		c.JSON(status, gin.H{"error": errMsg})
+		return false
+	}
+	if status, body := h.verifyMFAForPasswordChange(c, uid, mfaCode); status != 0 {
+		c.JSON(status, body)
+		return false
+	}
+	return true
 }
 
 // UpdateProfileRequest represents a request to update profile fields

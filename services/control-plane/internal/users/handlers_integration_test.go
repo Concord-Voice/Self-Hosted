@@ -403,11 +403,14 @@ func TestReplaceMyKeysWithAlgorithm(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "replkeysalg")
 
-	_, wrappedKey, salt := testhelpers.E2EETestKeys()
+	pubKey, wrappedKey, salt := testhelpers.E2EETestKeys()
 	payload := map[string]interface{}{
-		keyWrappedPrivateKey: wrappedKey,
-		keyKeyDerivationSalt: salt,
-		"key_derivation_alg": "pbkdf2",
+		keyWrappedPrivateKey:    wrappedKey,
+		keyKeyDerivationSalt:    salt,
+		"key_derivation_alg":    "argon2id",
+		"public_key":            pubKey,
+		"acknowledge_data_loss": true,
+		keyCurrentPassword:      user.Password,
 	}
 	w := ts.DoRequest("PUT", urlUsersMeKeys, payload, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -417,6 +420,216 @@ func TestReplaceMyKeysUnauthorized(t *testing.T) {
 	ts := setupTS(t)
 	w := ts.DoRequest("PUT", urlUsersMeKeys, nil, nil)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+func TestReplaceMyKeysRequiresAcknowledgeDataLoss(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "replnoack")
+
+	pubKey, wrappedKey, salt := testhelpers.E2EETestKeys()
+	payload := map[string]interface{}{
+		keyWrappedPrivateKey: wrappedKey,
+		keyKeyDerivationSalt: salt,
+		"public_key":         pubKey,
+		keyCurrentPassword:   user.Password,
+		// acknowledge_data_loss omitted => false. current_password is supplied so
+		// the binding:required check passes and the acknowledge_data_loss gate is
+		// the specific validation that produces the 400.
+	}
+	w := ts.DoRequest("PUT", urlUsersMeKeys, payload, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestReplaceMyKeysRequiresPublicKey(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "replnopub")
+
+	_, wrappedKey, salt := testhelpers.E2EETestKeys()
+	payload := map[string]interface{}{
+		keyWrappedPrivateKey:    wrappedKey,
+		keyKeyDerivationSalt:    salt,
+		"acknowledge_data_loss": true,
+		keyCurrentPassword:      user.Password,
+		// public_key omitted => binding:"required" fails. current_password is
+		// supplied so public_key is the only missing required field.
+	}
+	w := ts.DoRequest("PUT", urlUsersMeKeys, payload, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestReplaceMyKeysInvalidPublicKeyBase64(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "replbadpub")
+
+	_, wrappedKey, salt := testhelpers.E2EETestKeys()
+	payload := map[string]interface{}{
+		keyWrappedPrivateKey:    wrappedKey,
+		keyKeyDerivationSalt:    salt,
+		"public_key":            invalidBase64,
+		"acknowledge_data_loss": true,
+		keyCurrentPassword:      user.Password,
+		// current_password is supplied so binding passes and the public_key
+		// base64 decode is the specific validation that produces the 400.
+	}
+	w := ts.DoRequest("PUT", urlUsersMeKeys, payload, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// The core #1293 invariant: after a reset, user_keys and public_keys are
+// consistent, GetPublicKey returns the submitted key, and stale wrapped keys
+// for the user are gone.
+func TestReplaceMyKeysKeepsPublicKeyConsistent(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "replconsist")
+
+	pubKey, wrappedKey, salt := testhelpers.E2EETestKeys()
+	payload := map[string]interface{}{
+		keyWrappedPrivateKey:    wrappedKey,
+		keyKeyDerivationSalt:    salt,
+		"key_derivation_alg":    "argon2id",
+		"public_key":            pubKey,
+		"acknowledge_data_loss": true,
+		keyCurrentPassword:      user.Password,
+	}
+	w := ts.DoRequest("PUT", urlUsersMeKeys, payload, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// user_keys.key_version == public_keys.key_version
+	var ukVersion, pkVersion int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT key_version FROM user_keys WHERE user_id = $1`, user.ID).Scan(&ukVersion))
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT key_version FROM public_keys WHERE user_id = $1 ORDER BY key_version DESC LIMIT 1`, user.ID).Scan(&pkVersion))
+	assert.Equal(t, ukVersion, pkVersion, "user_keys and public_keys versions must match after reset")
+
+	// GetPublicKey returns the public key whose private counterpart the client holds.
+	gw := ts.DoRequest("GET", pathPublicKey(user.ID), nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusOK, gw.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, gw, &body)
+	assert.Equal(t, pubKey, body["public_key"], "GetPublicKey must return the just-submitted public key")
+}
+
+// Defense-in-depth: if no public_keys row exists for the user, the UPDATE
+// affects 0 rows and the whole reset rolls back (user_keys unchanged).
+func TestReplaceMyKeysRollsBackWhenNoPublicKeyRow(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "replnopkrow")
+
+	var beforeVersion int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT key_version FROM user_keys WHERE user_id = $1`, user.ID).Scan(&beforeVersion))
+
+	_, err := ts.DB.Exec(`DELETE FROM public_keys WHERE user_id = $1`, user.ID)
+	require.NoError(t, err)
+
+	pubKey, wrappedKey, salt := testhelpers.E2EETestKeys()
+	payload := map[string]interface{}{
+		keyWrappedPrivateKey:    wrappedKey,
+		keyKeyDerivationSalt:    salt,
+		"public_key":            pubKey,
+		"acknowledge_data_loss": true,
+		keyCurrentPassword:      user.Password,
+	}
+	w := ts.DoRequest("PUT", urlUsersMeKeys, payload, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+
+	var afterVersion int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT key_version FROM user_keys WHERE user_id = $1`, user.ID).Scan(&afterVersion))
+	assert.Equal(t, beforeVersion, afterVersion, "user_keys must be unchanged after rollback")
+}
+
+// Step-up auth (#1293): current_password is binding:"required", so a payload
+// that omits it is rejected at binding time with 400 — before any DB work.
+func TestReplaceMyKeysRequiresCurrentPassword(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "replnocurpw")
+
+	pubKey, wrappedKey, salt := testhelpers.E2EETestKeys()
+	payload := map[string]interface{}{
+		keyWrappedPrivateKey:    wrappedKey,
+		keyKeyDerivationSalt:    salt,
+		"public_key":            pubKey,
+		"acknowledge_data_loss": true,
+		// current_password omitted => binding:"required" fails
+	}
+	w := ts.DoRequest("PUT", urlUsersMeKeys, payload, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// Step-up auth (#1293): a fully valid payload with the WRONG current_password
+// is rejected by verifyResetStepUp → verifyCurrentPassword with 401, before the
+// destructive key-replacement transaction runs.
+func TestReplaceMyKeysWrongCurrentPassword(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "replwrongpw")
+
+	pubKey, wrappedKey, salt := testhelpers.E2EETestKeys()
+	payload := map[string]interface{}{
+		keyWrappedPrivateKey:    wrappedKey,
+		keyKeyDerivationSalt:    salt,
+		"public_key":            pubKey,
+		"acknowledge_data_loss": true,
+		keyCurrentPassword:      "WrongPassword!!!!",
+	}
+	w := ts.DoRequest("PUT", urlUsersMeKeys, payload, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+// The load-bearing DELETE half of the #1293 invariant: a successful reset must
+// purge every wrapped channel/DM key for the user (they were encrypted to the
+// now-rotated public key and are unreadable). Seed one channel_keys row and one
+// dm_channel_keys row, perform a successful reset, then assert both are gone.
+func TestReplaceMyKeysClearsChannelKeys(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "replclearkeys")
+	other := ts.CreateTestUser(t, "replclearpeer")
+
+	// Seed a channel_keys row. channel_keys.channel_id FKs channels(id), which
+	// FKs servers(id) — create the parent rows via the testhelpers.
+	serverID := ts.CreateTestServer(t, user.ID, "replclear-server")
+	channelID := ts.CreateTestChannel(t, serverID, "replclear-channel")
+	_, err := ts.DB.Exec(
+		`INSERT INTO channel_keys (channel_id, user_id, wrapped_key, key_version)
+		 VALUES ($1, $2, $3, 1)`,
+		channelID, user.ID, []byte("test-wrapped-channel-key"),
+	)
+	require.NoError(t, err)
+
+	// Seed a dm_channel_keys row via the DM conversation + key helpers.
+	convID := ts.CreateDMConversation(t, user.ID, other.ID)
+	ts.SeedDMKey(t, convID, user.ID, 1)
+
+	// Sanity: both rows exist before the reset.
+	var preChannel, preDM int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT count(*) FROM channel_keys WHERE user_id = $1`, user.ID).Scan(&preChannel))
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT count(*) FROM dm_channel_keys WHERE user_id = $1`, user.ID).Scan(&preDM))
+	require.Equal(t, 1, preChannel, "precondition: one channel_keys row seeded")
+	require.Equal(t, 1, preDM, "precondition: one dm_channel_keys row seeded")
+
+	// Perform a successful reset with a full valid payload incl. current_password.
+	pubKey, wrappedKey, salt := testhelpers.E2EETestKeys()
+	payload := map[string]interface{}{
+		keyWrappedPrivateKey:    wrappedKey,
+		keyKeyDerivationSalt:    salt,
+		"public_key":            pubKey,
+		"acknowledge_data_loss": true,
+		keyCurrentPassword:      user.Password,
+	}
+	w := ts.DoRequest("PUT", urlUsersMeKeys, payload, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// After: both the channel_keys and dm_channel_keys rows must be cleared.
+	var postChannel, postDM int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT count(*) FROM channel_keys WHERE user_id = $1`, user.ID).Scan(&postChannel))
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT count(*) FROM dm_channel_keys WHERE user_id = $1`, user.ID).Scan(&postDM))
+	assert.Equal(t, 0, postChannel, "channel_keys must be cleared after reset")
+	assert.Equal(t, 0, postDM, "dm_channel_keys must be cleared after reset")
 }
 
 // ── ChangePassword (extended) ────────────────────────────────────────────────

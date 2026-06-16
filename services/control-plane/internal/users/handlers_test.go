@@ -147,16 +147,19 @@ func TestReplaceMyKeysSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "replacekeysuser")
 
-	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
+	newPub, newWrapped, newSalt := testhelpers.E2EETestKeys()
 	w := ts.DoRequest("PUT", urlUsersMeKeys, map[string]interface{}{
-		keyWrappedPrivateKey: newWrapped,
-		keyKeyDerivationSalt: newSalt,
+		keyWrappedPrivateKey:    newWrapped,
+		keyKeyDerivationSalt:    newSalt,
+		"public_key":            newPub,
+		"acknowledge_data_loss": true,
+		keyCurrentPassword:      user.Password,
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	assert.Equal(t, http.StatusOK, w.Code)
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
-	assert.Equal(t, "Keys replaced successfully", body["message"])
+	assert.Equal(t, "Keys replaced successfully. Encrypted message history was reset.", body["message"])
 }
 
 func TestReplaceMyKeysInvalidBase64(t *testing.T) {
