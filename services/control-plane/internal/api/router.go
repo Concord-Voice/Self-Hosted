@@ -196,6 +196,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	// HandleUserDisconnect to cancel any rings they initiated.
 	hub.SetDMRingCanceller(dmHandler.HandleUserDisconnect)
 	friendsHandler := friends.NewHandler(db, log, hub)
+	feedbackHandler := buildFeedbackHandler(cfg, log)
 	notificationsHandler := notifications.NewHandler(db, log)
 	ownershipHandler := ownership.NewHandler(ownership.HandlerDeps{
 		DB:          db,
@@ -522,6 +523,19 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 			protected.POST("/auth/ws-ticket",
 				middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 				wsTicketHandler.IssueTicket,
+			)
+
+			// Feedback (#158): bug report / feature request submission. Rate
+			// limit is 10/hour/user — bumped from the original 3/hour per
+			// Gitar finding on PR #1547. `RateLimitByUser` increments the
+			// counter BEFORE the handler runs, so failed validations also
+			// burn quota; 10/hour leaves enough slack for honest users to
+			// recover from client-side typos / mistakes while still capping
+			// spam on the public-ish feedback repo. Bug + feature share the
+			// same bucket on purpose — same downstream surface.
+			protected.POST("/feedback",
+				middleware.RateLimitByUser(redis, 10, 1*time.Hour),
+				feedbackHandler.Submit,
 			)
 
 			// MFA management routes (authenticated)
