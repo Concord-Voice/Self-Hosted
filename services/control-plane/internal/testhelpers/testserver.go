@@ -425,6 +425,39 @@ func (ts *TestServer) CreateDMConversation(t *testing.T, user1ID, user2ID string
 	return convID
 }
 
+// CreateGroupDMConversation creates an is_group=TRUE DM conversation with the
+// given members (first = owner/creator) and returns the conversation ID.
+// All DMs are encrypted under E2EE-everywhere (#201).
+func (ts *TestServer) CreateGroupDMConversation(t *testing.T, memberIDs ...string) string {
+	t.Helper()
+
+	if len(memberIDs) == 0 {
+		t.Fatalf("testhelpers: CreateGroupDMConversation requires at least one member")
+	}
+
+	convID := uuid.New().String()
+	_, err := ts.DB.Exec(
+		`INSERT INTO dm_conversations (id, is_group, is_personal, created_by)
+		 VALUES ($1, true, false, $2)`,
+		convID, memberIDs[0],
+	)
+	if err != nil {
+		t.Fatalf("testhelpers: failed to create group DM conversation: %v", err)
+	}
+
+	for _, m := range memberIDs {
+		_, err = ts.DB.Exec(
+			`INSERT INTO dm_participants (conversation_id, user_id) VALUES ($1, $2)`,
+			convID, m,
+		)
+		if err != nil {
+			t.Fatalf("testhelpers: failed to add group DM participant %s: %v", m, err)
+		}
+	}
+
+	return convID
+}
+
 // SeedDMKey inserts a DM channel key for a user in a conversation at the given version.
 func (ts *TestServer) SeedDMKey(t *testing.T, conversationID, userID string, keyVersion int) {
 	t.Helper()

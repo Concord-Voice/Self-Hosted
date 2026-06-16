@@ -115,6 +115,25 @@ func newTestClient(hub *Hub, userID uuid.UUID) *Client {
 	}
 }
 
+// --- IsUserOnline / MarkUserOnlineForTest tests ---
+
+func TestHub_IsUserOnline(t *testing.T) {
+	h := newMinimalHub()
+	uid := uuid.New()
+	assert.False(t, h.IsUserOnline(uid))
+	cid := uuid.New()
+	h.userClients[uid] = map[uuid.UUID]bool{cid: true} // direct registration, matches existing hub tests
+	assert.True(t, h.IsUserOnline(uid))
+}
+
+func TestHub_MarkUserOnlineForTest(t *testing.T) {
+	h := newMinimalHub()
+	uid := uuid.New()
+	assert.False(t, h.IsUserOnline(uid))
+	h.MarkUserOnlineForTest(uid)
+	assert.True(t, h.IsUserOnline(uid))
+}
+
 // --- handleUnregister tests (no DB/Redis needed for map cleanup) ---
 
 func TestHandleUnregisterRemovesClient(t *testing.T) {

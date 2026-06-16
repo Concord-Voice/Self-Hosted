@@ -139,3 +139,25 @@ func TestCallEventDeclined(t *testing.T) {
 		wg.Wait()
 	})
 }
+
+// TestCallEventDeclined_GroupListsAllDecliners locks the N-generic decliner
+// list for groups with MORE than two decliners (#1219 B4). The existing
+// TestCallEventDeclined covers exactly two decliners; this proves the builder
+// scales to an arbitrary group size (caller + 3 decliners = 4 participants).
+func TestCallEventDeclined_GroupListsAllDecliners(t *testing.T) {
+	caller := uuid.New()
+	d1, d2, d3 := uuid.New(), uuid.New(), uuid.New()
+	ring := &PendingCall{
+		RingID:          uuid.New(),
+		CallerUserID:    caller,
+		RingStartedAt:   time.Now(),
+		DeclinedUserIDs: map[uuid.UUID]struct{}{d1: {}, d2: {}, d3: {}},
+		mu:              sync.Mutex{},
+	}
+
+	p := callEventDeclined(ring)
+
+	assert.Equal(t, CallEventDeclined, p.Status)
+	require.Len(t, p.ParticipantUserIDs, 4, "caller + 3 decliners")
+	assert.ElementsMatch(t, []uuid.UUID{caller, d1, d2, d3}, p.ParticipantUserIDs)
+}

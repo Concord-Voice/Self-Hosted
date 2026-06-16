@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"time"
@@ -91,18 +92,19 @@ func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, cfg *config.
 
 // dmMessageResponse represents a DM message in API responses.
 type dmMessageResponse struct {
-	ID             string                     `json:"id"`
-	ConversationID string                     `json:"conversation_id"`
-	UserID         string                     `json:"user_id"`
-	Content        string                     `json:"content"`
-	Type           string                     `json:"type"`
-	KeyVersion     int                        `json:"key_version"`
-	EditedAt       *string                    `json:"edited_at,omitempty"`
-	CreatedAt      string                     `json:"created_at"`
-	Username       string                     `json:"username"`
-	DisplayName    *string                    `json:"display_name,omitempty"`
-	AvatarURL      *string                    `json:"avatar_url,omitempty"`
-	Attachments    []models.AttachmentSummary `json:"attachments,omitempty"`
+	ID               string                     `json:"id"`
+	ConversationID   string                     `json:"conversation_id"`
+	UserID           string                     `json:"user_id"`
+	Content          string                     `json:"content"`
+	Type             string                     `json:"type"`
+	CallEventPayload json.RawMessage            `json:"call_event_payload,omitempty"`
+	KeyVersion       int                        `json:"key_version"`
+	EditedAt         *string                    `json:"edited_at,omitempty"`
+	CreatedAt        string                     `json:"created_at"`
+	Username         string                     `json:"username"`
+	DisplayName      *string                    `json:"display_name,omitempty"`
+	AvatarURL        *string                    `json:"avatar_url,omitempty"`
+	Attachments      []models.AttachmentSummary `json:"attachments,omitempty"`
 }
 
 // enrichDMAttachments batch-loads and attaches file attachment summaries to DM messages.
@@ -1165,7 +1167,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 			return
 		}
 		rows, err = h.db.Query(`
-			SELECT m.id, m.conversation_id, m.user_id, m.content, m.type, COALESCE(m.key_version, 1),
+			SELECT m.id, m.conversation_id, m.user_id, m.content, m.type, m.call_event_payload, COALESCE(m.key_version, 1),
 			       m.edited_at, m.created_at,
 			       u.username, u.display_name, u.avatar_url
 			FROM dm_messages m
@@ -1177,7 +1179,7 @@ func (h *Handler) GetMessages(c *gin.Context) {
 		`, convID, cursor, limit)
 	} else {
 		rows, err = h.db.Query(`
-			SELECT m.id, m.conversation_id, m.user_id, m.content, m.type, COALESCE(m.key_version, 1),
+			SELECT m.id, m.conversation_id, m.user_id, m.content, m.type, m.call_event_payload, COALESCE(m.key_version, 1),
 			       m.edited_at, m.created_at,
 			       u.username, u.display_name, u.avatar_url
 			FROM dm_messages m
@@ -1199,13 +1201,17 @@ func (h *Handler) GetMessages(c *gin.Context) {
 	messages := []messageResponse{}
 	for rows.Next() {
 		var m messageResponse
+		var callEventRaw []byte
 		if err := rows.Scan(
-			&m.ID, &m.ConversationID, &m.UserID, &m.Content, &m.Type, &m.KeyVersion,
+			&m.ID, &m.ConversationID, &m.UserID, &m.Content, &m.Type, &callEventRaw, &m.KeyVersion,
 			&m.EditedAt, &m.CreatedAt,
 			&m.Username, &m.DisplayName, &m.AvatarURL,
 		); err != nil {
 			h.log.Error("Failed to scan DM message", "error", err)
 			continue
+		}
+		if len(callEventRaw) > 0 {
+			m.CallEventPayload = json.RawMessage(callEventRaw)
 		}
 		messages = append(messages, m)
 	}
@@ -2250,6 +2256,23 @@ func (h *Handler) callerInfoFor(userID string) (map[string]interface{}, error) {
 	return info, nil
 }
 
+// dmVoiceInvitedData builds the `data` map broadcast in the dm_voice_call_invited
+// WS event. Extracted from RingDMCall (#1219 B3) so the is_group emission is
+// unit-testable without the hub — the invite is published on the unexported
+// userBroadcast channel and is_group is absent from the HTTP response, so it
+// cannot be observed from package dm_test. `caller` is the map returned by
+// callerInfoFor (user_id, username, optional display_name/avatar_url).
+func dmVoiceInvitedData(convID uuid.UUID, isGroup bool, caller map[string]interface{}, ring *PendingCall, timeoutSeconds int) map[string]interface{} {
+	return map[string]interface{}{
+		"conversation_id":      convID.String(),
+		"is_group":             isGroup,
+		"caller":               caller,
+		"ring_id":              ring.RingID.String(),
+		"ring_started_at":      ring.RingStartedAt.UTC().Format(time.RFC3339),
+		"ring_timeout_seconds": timeoutSeconds,
+	}
+}
+
 // fetchDMCalleesExcluding returns the user IDs of all dm_participants for
 // the conversation EXCEPT the given exclude user. Used by RingDMCall to
 // build the ringing-user-ids set (everyone in the conv minus the caller).
@@ -2274,6 +2297,48 @@ func (h *Handler) fetchDMCalleesExcluding(convID, excludeUserID string) ([]uuid.
 		return nil, err
 	}
 	return callees, nil
+}
+
+// filterOnlineCallees returns the subset of callees with at least one live WS
+// client (#1219 B2, decision G1), keeping offline group members out of the
+// caller's ringing tally. It reuses the input slice's backing array.
+func (h *Handler) filterOnlineCallees(callees []uuid.UUID) []uuid.UUID {
+	online := callees[:0]
+	for _, callee := range callees {
+		if h.hub.IsUserOnline(callee) {
+			online = append(online, callee)
+		}
+	}
+	return online
+}
+
+// writeRingConflict writes the 409 Conflict response for a ring already in
+// flight on the conversation. When existingAny is a *PendingCall the response
+// carries that ring's metadata so the renderer can offer a "join existing
+// call" affordance (group follow-up #1219); otherwise a generic 409.
+func writeRingConflict(c *gin.Context, existingAny any) {
+	existing, ok := existingAny.(*PendingCall)
+	if !ok {
+		c.JSON(http.StatusConflict, gin.H{"error": errMsgAlreadyRinging})
+		return
+	}
+	c.JSON(http.StatusConflict, gin.H{
+		"error": errMsgAlreadyRinging,
+		"existing_ring": gin.H{
+			"caller_user_id":  existing.CallerUserID.String(),
+			"ring_id":         existing.RingID.String(),
+			"ring_started_at": existing.RingStartedAt.Format(time.RFC3339),
+		},
+	})
+}
+
+// uuidsToStrings converts a slice of UUIDs to their canonical string form.
+func uuidsToStrings(ids []uuid.UUID) []string {
+	out := make([]string, len(ids))
+	for i, id := range ids {
+		out[i] = id.String()
+	}
+	return out
 }
 
 // RingDMCall initiates a DM voice call ring. POST /api/v1/dm/conversations/:id/voice/ring.
@@ -2311,17 +2376,8 @@ func (h *Handler) RingDMCall(c *gin.Context) {
 	// the common "already ringing" path. The atomic LoadOrStore below is the
 	// authoritative race-safe claim — this Load is purely a fast-path.
 	if existingAny, loaded := pendingDMCalls.Load(convUUID); loaded {
-		if existing, ok := existingAny.(*PendingCall); ok {
-			c.JSON(http.StatusConflict, gin.H{
-				"error": errMsgAlreadyRinging,
-				"existing_ring": gin.H{
-					"caller_user_id":  existing.CallerUserID.String(),
-					"ring_id":         existing.RingID.String(),
-					"ring_started_at": existing.RingStartedAt.Format(time.RFC3339),
-				},
-			})
-			return
-		}
+		writeRingConflict(c, existingAny)
+		return
 	}
 
 	callees, err := h.fetchDMCalleesExcluding(convIDStr, callerIDStr)
@@ -2334,6 +2390,27 @@ func (h *Handler) RingDMCall(c *gin.Context) {
 		// Personal-DM (self only) — no one to ring. Treat as a no-op error.
 		c.JSON(http.StatusBadRequest, gin.H{"error": "no callees in this conversation"})
 		return
+	}
+
+	// Fetch is_group: drives both the presence-aware group ring filter (#1219 B2)
+	// and the dm_voice_call_invited is_group emission (#1219 B3).
+	var isGroup bool
+	if err := h.db.QueryRow(`SELECT is_group FROM dm_conversations WHERE id = $1`, convUUID).Scan(&isGroup); err != nil {
+		h.log.Error("Failed to fetch is_group for ring", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedAuthorize})
+		return
+	}
+
+	// Presence-aware group ring filter (#1219 B2, decision G1): for group DMs,
+	// ring only callees with at least one live WS client so offline members
+	// don't pollute the caller's ringing tally for 45s. 1:1 is unchanged —
+	// offline 1:1 callees still ring (no-op at delivery) per #1209 behavior.
+	if isGroup {
+		callees = h.filterOnlineCallees(callees)
+		if len(callees) == 0 {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "no online members to call"})
+			return
+		}
 	}
 
 	callerInfo, err := h.callerInfoFor(callerIDStr)
@@ -2350,20 +2427,7 @@ func (h *Handler) RingDMCall(c *gin.Context) {
 	// before either Stores.
 	ring := newPendingCall(convUUID, callerUUID, callees, time.Duration(DefaultRingTimeoutSeconds)*time.Second)
 	if existingAny, loaded := pendingDMCalls.LoadOrStore(convUUID, ring); loaded {
-		if existing, ok := existingAny.(*PendingCall); ok {
-			c.JSON(http.StatusConflict, gin.H{
-				"error": errMsgAlreadyRinging,
-				"existing_ring": gin.H{
-					"caller_user_id":  existing.CallerUserID.String(),
-					"ring_id":         existing.RingID.String(),
-					"ring_started_at": existing.RingStartedAt.Format(time.RFC3339),
-				},
-			})
-			return
-		}
-		// Existing entry exists but is somehow not a *PendingCall — refuse
-		// to overwrite; respond 409 generically.
-		c.JSON(http.StatusConflict, gin.H{"error": errMsgAlreadyRinging})
+		writeRingConflict(c, existingAny)
 		return
 	}
 
@@ -2375,15 +2439,10 @@ func (h *Handler) RingDMCall(c *gin.Context) {
 	})
 
 	// Broadcast dm_voice_call_invited to each callee (single-replica direct
-	// hub broadcast per spec §6.3 — no NATS fanout needed today).
-	invitedPayload := map[string]interface{}{
-		"conversation_id":      convUUID.String(),
-		"is_group":             false, // always false for #1209 DM 1:1; #1219 computes from participants
-		"caller":               callerInfo,
-		"ring_id":              ring.RingID.String(),
-		"ring_started_at":      ring.RingStartedAt.UTC().Format(time.RFC3339),
-		"ring_timeout_seconds": DefaultRingTimeoutSeconds,
-	}
+	// hub broadcast per spec §6.3 — no NATS fanout needed today). is_group is
+	// the conversation's real value (#1219 B3) so callees can distinguish a
+	// group ring from a 1:1 ring.
+	invitedPayload := dmVoiceInvitedData(convUUID, isGroup, callerInfo, ring, DefaultRingTimeoutSeconds)
 	for _, calleeID := range callees {
 		h.hub.BroadcastToUser(calleeID, websocket.OutgoingMessage{
 			Type: "dm_voice_call_invited",
@@ -2400,14 +2459,10 @@ func (h *Handler) RingDMCall(c *gin.Context) {
 
 	// Response: minimal ring metadata the caller's renderer uses to track
 	// its outgoing-ringing state.
-	calleesAsStrings := make([]string, len(callees))
-	for i, u := range callees {
-		calleesAsStrings[i] = u.String()
-	}
 	c.JSON(http.StatusOK, gin.H{
 		"ring_id":          ring.RingID.String(),
 		"ring_started_at":  ring.RingStartedAt.UTC().Format(time.RFC3339),
-		"ringing_user_ids": calleesAsStrings,
+		"ringing_user_ids": uuidsToStrings(callees),
 	})
 }
 

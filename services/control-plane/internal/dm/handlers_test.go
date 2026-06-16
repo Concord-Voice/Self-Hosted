@@ -1158,6 +1158,30 @@ func TestGetMessages_MessageFields(t *testing.T) {
 	assert.NotEmpty(t, msg["username"])
 }
 
+func TestGetMessages_IncludesCallEventPayload(t *testing.T) {
+	ts := setupTS(t)
+	caller := ts.CreateTestUser(t, "cep-caller")
+	other := ts.CreateTestUser(t, "cep-other")
+	ts.CreateFriendship(t, caller.ID, other.ID, statusAccepted)
+	convID := ts.CreateDMConversation(t, caller.ID, other.ID)
+
+	payload := `{"status":"completed","participant_user_ids":["` + caller.ID + `","` + other.ID + `"],"duration_seconds":42,"started_at":"2026-06-15T00:00:00Z"}`
+	_, err := ts.DB.Exec(`INSERT INTO dm_messages (id, conversation_id, user_id, content, type, call_event_payload, created_at)
+		VALUES (gen_random_uuid(), $1, $2, '', 'call_event', $3, NOW())`, convID, caller.ID, payload)
+	require.NoError(t, err)
+
+	w := ts.DoRequest("GET", pathDMConversationsPrefix+convID+pathMessages, nil, testhelpers.AuthHeaders(caller.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var body struct {
+		Messages []map[string]json.RawMessage `json:"messages"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	require.Len(t, body.Messages, 1)
+	assert.JSONEq(t, `"call_event"`, string(body.Messages[0]["type"]))
+	assert.Contains(t, string(body.Messages[0]["call_event_payload"]), `"status":"completed"`)
+}
+
 func TestGetMessages_Unauthorized(t *testing.T) {
 	ts := setupTS(t)
 	user1 := ts.CreateTestUser(t, "getmsgunauth1")
@@ -3493,6 +3517,49 @@ func TestRingDMCall_InvalidConvID_Returns400(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
+func TestRingDMCall_Group_ExcludesOfflineCallees(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "rg-caller")
+	online := ts.CreateTestUser(t, "rg-online")
+	offline := ts.CreateTestUser(t, "rg-offline")
+	convID := ts.CreateGroupDMConversation(t, caller.ID, online.ID, offline.ID)
+	ts.Hub.MarkUserOnlineForTest(uuid.MustParse(caller.ID))
+	ts.Hub.MarkUserOnlineForTest(uuid.MustParse(online.ID)) // offline is NOT marked
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceRing, nil, testhelpers.AuthHeaders(caller.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
+
+	var body struct {
+		RingingUserIDs []string `json:"ringing_user_ids"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Contains(t, body.RingingUserIDs, online.ID)
+	assert.NotContains(t, body.RingingUserIDs, offline.ID)
+}
+
+func TestRingDMCall_Group_AllOffline_Returns400(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "rg-caller-alloff")
+	b := ts.CreateTestUser(t, "rg-b-alloff")
+	cc := ts.CreateTestUser(t, "rg-c-alloff")
+	convID := ts.CreateGroupDMConversation(t, caller.ID, b.ID, cc.ID)
+	ts.Hub.MarkUserOnlineForTest(uuid.MustParse(caller.ID)) // only caller online; B and C offline
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceRing, nil, testhelpers.AuthHeaders(caller.AccessToken))
+	require.Equal(t, http.StatusBadRequest, w.Code, "body: %s", w.Body.String())
+
+	var body map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Contains(t, body["error"], "no online members")
+
+	convUUID := uuid.MustParse(convID)
+	assert.False(t, dm.PendingDMCallExistsForTest(convUUID), "no ring created when all callees offline")
+}
+
 // ─── DeclineDMCall tests (#1209, plan Task B4) ───────────────────────────
 
 const pathVoiceDecline = "/voice/decline"
@@ -3522,6 +3589,56 @@ func TestDeclineDMCall_DM1on1_EndsCallAndClearsRing(t *testing.T) {
 	// DM 1:1: sole-callee decline = all-declined → ring should be cleared
 	convUUID := uuid.MustParse(convID)
 	assert.False(t, dm.PendingDMCallExistsForTest(convUUID), "ring cleared after sole-callee decline")
+}
+
+func TestDeclineDMCall_Group_RingPersistsUntilLastDecline(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "gd-caller")
+	b := ts.CreateTestUser(t, "gd-b")
+	cc := ts.CreateTestUser(t, "gd-c")
+	convID := ts.CreateGroupDMConversation(t, caller.ID, b.ID, cc.ID)
+	for _, u := range []string{caller.ID, b.ID, cc.ID} {
+		ts.Hub.MarkUserOnlineForTest(uuid.MustParse(u))
+	}
+
+	ringForTest(t, ts, caller, convID)
+	convUUID := uuid.MustParse(convID)
+
+	// B declines → ring still exists (C still ringing).
+	w1 := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceDecline, nil, testhelpers.AuthHeaders(b.AccessToken))
+	require.Equal(t, http.StatusNoContent, w1.Code, "body: %s", w1.Body.String())
+	assert.True(t, dm.PendingDMCallExistsForTest(convUUID), "ring persists after first group decline")
+
+	// C declines → all callees declined → ring cleared.
+	w2 := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceDecline, nil, testhelpers.AuthHeaders(cc.AccessToken))
+	require.Equal(t, http.StatusNoContent, w2.Code, "body: %s", w2.Body.String())
+	assert.False(t, dm.PendingDMCallExistsForTest(convUUID), "ring cleared after all callees decline")
+}
+
+func TestJoinDMCall_Group_AcceptClearsRingForRemaining(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "gj-caller")
+	b := ts.CreateTestUser(t, "gj-b")
+	cc := ts.CreateTestUser(t, "gj-c")
+	convID := ts.CreateGroupDMConversation(t, caller.ID, b.ID, cc.ID)
+	for _, u := range []string{caller.ID, b.ID, cc.ID} {
+		ts.Hub.MarkUserOnlineForTest(uuid.MustParse(u))
+	}
+
+	ringForTest(t, ts, caller, convID)
+	convUUID := uuid.MustParse(convID)
+	require.True(t, dm.PendingDMCallExistsForTest(convUUID), "ring exists before accept")
+
+	// B (a callee, not the caller) accepts via /voice/join → the accept-path
+	// branch clears the ring for ALL remaining callees (C), N-generically.
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceJoin, nil, testhelpers.AuthHeaders(b.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, "callee accept succeeds; body: %s", w.Body.String())
+
+	assert.False(t, dm.PendingDMCallExistsForTest(convUUID), "ring cleared for remaining callees after one accept")
 }
 
 func TestDeclineDMCall_NoActiveRing_Returns404(t *testing.T) {

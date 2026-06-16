@@ -143,3 +143,19 @@ func TestPendingCall_TimerLifecycle(t *testing.T) {
 		}
 	})
 }
+
+func TestDMVoiceInvitedData_IsGroup(t *testing.T) {
+	caller := map[string]interface{}{"user_id": uuid.New().String(), "username": "alice"}
+	ring := &PendingCall{RingID: uuid.New(), RingStartedAt: time.Now()}
+	convID := uuid.New()
+
+	groupData := dmVoiceInvitedData(convID, true, caller, ring, 45)
+	assert.Equal(t, true, groupData["is_group"])
+	assert.Equal(t, convID.String(), groupData["conversation_id"])
+	assert.Equal(t, caller, groupData["caller"])
+	assert.Equal(t, ring.RingID.String(), groupData["ring_id"])
+	assert.Equal(t, 45, groupData["ring_timeout_seconds"])
+
+	oneToOne := dmVoiceInvitedData(convID, false, caller, ring, 45)
+	assert.Equal(t, false, oneToOne["is_group"])
+}

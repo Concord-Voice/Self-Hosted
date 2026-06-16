@@ -12223,6 +12223,37 @@ components:
                 type: string
               file_size:
                 type: integer
+        call_event_payload:
+          type: object
+          nullable: true
+          description: >-
+            Present only when `type` is `call_event` (a persisted voice-call
+            outcome row). Carries the call's terminal-state summary; omitted for
+            ordinary messages. For group calls, `participant_user_ids` lists
+            everyone who actually joined.
+          properties:
+            ring_id:
+              type: string
+              format: uuid
+            caller_user_id:
+              type: string
+              format: uuid
+            participant_user_ids:
+              type: array
+              items:
+                type: string
+                format: uuid
+            started_at:
+              type: string
+              format: date-time
+            ended_at:
+              type: string
+              format: date-time
+            status:
+              type: string
+              enum: [completed, missed, declined, canceled]
+            duration_seconds:
+              type: integer
     DMKey:
       type: object
       properties:

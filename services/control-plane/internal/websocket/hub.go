@@ -1561,6 +1561,26 @@ func (h *Hub) GetUserClientCount(userID uuid.UUID) int {
 	return 0
 }
 
+// IsUserOnline reports whether the user has at least one live WS client on
+// this (single-replica) control-plane. Authoritative per spec §5.4.
+func (h *Hub) IsUserOnline(userID uuid.UUID) bool {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.userClients[userID]) > 0
+}
+
+// MarkUserOnlineForTest registers a synthetic client so unit/integration
+// tests in OTHER packages (e.g. internal/dm) can make a user appear online
+// to IsUserOnline without a real WS upgrade. Test-only; not used in prod.
+func (h *Hub) MarkUserOnlineForTest(userID uuid.UUID) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.userClients[userID] == nil {
+		h.userClients[userID] = make(map[uuid.UUID]bool)
+	}
+	h.userClients[userID][uuid.New()] = true
+}
+
 // handleGlobalBroadcast sends a message to all connected clients
 func (h *Hub) handleGlobalBroadcast(msg OutgoingMessage) {
 	data, err := json.Marshal(msg)

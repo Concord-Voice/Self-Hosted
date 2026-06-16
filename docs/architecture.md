@@ -353,7 +353,7 @@ erDiagram
         UUID conversation_id FK
         UUID user_id FK
         TEXT content "ciphertext"
-        VARCHAR type "incl. call-event"
+        VARCHAR type "incl. call_event"
         UUID pinned_by FK
         JSONB call_event_payload
     }
@@ -420,7 +420,7 @@ erDiagram
 | Compliance | `audit_log` (000035); `account_deletions` (000059) |
 | Attestation | `release_binaries`, `release_spas` (000066) |
 
-> Notable schema history: group-DM admin roles added `dm_participants.role` (`admin`/`member`) + `dm_conversations.icon_url` (000053); `dm_messages` gained a `call-event` type + `call_event_payload` JSONB (000064), and the transient `kind` column was dropped in favor of `type` (000065); `account_deletions.sentry_delete_attempted` was dropped (000060) when Sentry was removed; `key_revocations.revoked_by` was changed to `ON DELETE SET NULL` (000059) so account erasure isn't blocked.
+> Notable schema history: group-DM admin roles added `dm_participants.role` (`admin`/`member`) + `dm_conversations.icon_url` (000053); `dm_messages` gained a `call_event` type + `call_event_payload` JSONB (000064), and the transient `kind` column was dropped in favor of `type` (000065); `account_deletions.sentry_delete_attempted` was dropped (000060) when Sentry was removed; `key_revocations.revoked_by` was changed to `ON DELETE SET NULL` (000059) so account erasure isn't blocked.
 
 ### Media Plane (Node.js + mediasoup) ✅ Implemented
 
@@ -557,7 +557,7 @@ Audio is forwarded as-is (SFU, no transcoding) for low latency; frames are E2EE 
 
 ### DM Voice Calls & Ringing
 
-DM 1:1 / group calls have a distinct **ring lifecycle** from server-channel voice. The control-plane `dm` package (`voicering.go`, `call_events.go`) drives ring → accept / decline / cancel / timeout over WebSocket + routes under `/api/v1/dm/conversations` (`…/voice/ring`, `…/voice/decline`, `…/voice/cancel`). Call outcomes are persisted as `dm_messages` rows with `type = 'call-event'` and a `call_event_payload` JSONB (migrations 000064–000065), so the call history renders inline in the DM timeline. The media path itself reuses the same mediasoup SFU + `dm_voice_participants` as channel voice.
+DM 1:1 / group calls have a distinct **ring lifecycle** from server-channel voice. The control-plane `dm` package (`voicering.go`, `call_events.go`) drives ring → accept / decline / cancel / timeout over WebSocket + routes under `/api/v1/dm/conversations` (`…/voice/ring`, `…/voice/decline`, `…/voice/cancel`). Call outcomes are persisted as `dm_messages` rows with `type = 'call_event'` and a `call_event_payload` JSONB (migrations 000064–000065), so the call history renders inline in the DM timeline. The media path itself reuses the same mediasoup SFU + `dm_voice_participants` as channel voice.
 
 ### Server Mute / Deafen
 
