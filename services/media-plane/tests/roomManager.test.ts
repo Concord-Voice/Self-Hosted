@@ -391,13 +391,23 @@ describe('RoomManager', () => {
           createMockProducer({ kind: 'video', id: `cam-${i}` })
         );
         await manager.produce(
-          'room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'camera'
+          'room-1',
+          'u-1',
+          transport.id,
+          'video',
+          createRtpParameters() as any,
+          'camera'
         );
       }
 
       await expect(
         manager.produce(
-          'room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'camera'
+          'room-1',
+          'u-1',
+          transport.id,
+          'video',
+          createRtpParameters() as any,
+          'camera'
         )
       ).rejects.toThrow('Video participant limit reached (max 8)');
     });
@@ -409,13 +419,23 @@ describe('RoomManager', () => {
           createMockProducer({ kind: 'video', id: `cam-${i}` })
         );
         await manager.produce(
-          'room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'camera'
+          'room-1',
+          'u-1',
+          transport.id,
+          'video',
+          createRtpParameters() as any,
+          'camera'
         );
       }
       // ... a screen producer still succeeds (separate limit of 5).
       transport.produce.mockResolvedValueOnce(createMockProducer({ kind: 'video', id: 'scr-0' }));
       const info = await manager.produce(
-        'room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'screen'
+        'room-1',
+        'u-1',
+        transport.id,
+        'video',
+        createRtpParameters() as any,
+        'screen'
       );
       expect(info.source).toBe('screen');
     });
@@ -434,14 +454,17 @@ describe('RoomManager', () => {
       const results = await Promise.allSettled(
         Array.from({ length: 9 }, () =>
           manager.produce(
-            'room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'camera'
+            'room-1',
+            'u-1',
+            transport.id,
+            'video',
+            createRtpParameters() as any,
+            'camera'
           )
         )
       );
       const fulfilled = results.filter((r) => r.status === 'fulfilled');
-      const rejected = results.filter(
-        (r): r is PromiseRejectedResult => r.status === 'rejected'
-      );
+      const rejected = results.filter((r): r is PromiseRejectedResult => r.status === 'rejected');
       // Exactly the cap is admitted; the surplus is rejected — the cap holds.
       expect(fulfilled.length).toBe(8);
       expect(rejected.length).toBe(1);
@@ -450,16 +473,19 @@ describe('RoomManager', () => {
 
     it('rejects a video producer with a non-video source (anti-mislabel, #1539)', async () => {
       await expect(
-        manager.produce(
-          'room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'mic'
-        )
+        manager.produce('room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'mic')
       ).rejects.toThrow('Invalid media source for producer kind');
     });
 
     it('rejects an audio producer with a video source', async () => {
       await expect(
         manager.produce(
-          'room-1', 'u-1', transport.id, 'audio', createRtpParameters() as any, 'camera'
+          'room-1',
+          'u-1',
+          transport.id,
+          'audio',
+          createRtpParameters() as any,
+          'camera'
         )
       ).rejects.toThrow('Invalid media source for producer kind');
     });
@@ -467,7 +493,12 @@ describe('RoomManager', () => {
     it('rejects an unknown source string', async () => {
       await expect(
         manager.produce(
-          'room-1', 'u-1', transport.id, 'video', createRtpParameters() as any, 'bogus' as never
+          'room-1',
+          'u-1',
+          transport.id,
+          'video',
+          createRtpParameters() as any,
+          'bogus' as never
         )
       ).rejects.toThrow('Invalid media source for producer kind');
     });
@@ -927,6 +958,53 @@ describe('RoomManager', () => {
       expect(stats.totalParticipants).toBe(2);
       expect(stats.totalProducers).toBe(0);
       expect(stats.totalConsumers).toBe(0);
+    });
+
+    it('collectMetricsSample counts publishers by source and gathers recv-transport egress (#1553)', async () => {
+      await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
+      const p = manager.getRoom('room-1')!.participants.get('u-1')!;
+      p.producers.set('pc', {
+        producer: createMockProducer({ kind: 'video' }) as any,
+        source: 'camera',
+        kind: 'video',
+      });
+      p.producers.set('ps', {
+        producer: createMockProducer({ kind: 'video' }) as any,
+        source: 'screen',
+        kind: 'video',
+      });
+      p.producers.set('pm', {
+        producer: createMockProducer({ kind: 'audio' }) as any,
+        source: 'mic',
+        kind: 'audio',
+      });
+      p.recvTransports.set(
+        't-1',
+        createMockTransport({ getStats: vi.fn().mockResolvedValue([{ bytesSent: 5000 }]) }) as any
+      );
+
+      const sample = await manager.collectMetricsSample();
+      expect(sample.publishers).toEqual({ camera: 1, screen: 1 });
+      expect(sample.activeByKind).toEqual({ audio: 1, webcam: 1, screenshare: 1 });
+      expect(sample.perRoomVideoPublishers).toEqual([2]);
+      expect(sample.egressBytesByTransport.get('t-1')).toBe(5000);
+      expect(sample.liveTransportIds.has('t-1')).toBe(true);
+    });
+
+    it('collectMetricsSample keeps a getStats-failed transport LIVE but omits its bytes (#1553)', async () => {
+      await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
+      const p = manager.getRoom('room-1')!.participants.get('u-1')!;
+      p.recvTransports.set(
+        't-bad',
+        createMockTransport({ getStats: vi.fn().mockRejectedValue(new Error('closing')) }) as any
+      );
+
+      const sample = await manager.collectMetricsSample();
+      // omitted from egress bytes (getStats threw) ...
+      expect(sample.egressBytesByTransport.has('t-bad')).toBe(false);
+      // ... but still reported LIVE, so the accumulator won't prune + re-count it from zero.
+      expect(sample.liveTransportIds.has('t-bad')).toBe(true);
+      expect(sample.publishers).toEqual({ camera: 0, screen: 0 });
     });
 
     it('getActiveRoomIds returns all room IDs', async () => {

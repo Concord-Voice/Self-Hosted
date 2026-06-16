@@ -12,6 +12,7 @@ import type {
 import { config } from '../config/index.js';
 import { logger } from './logger.js';
 import { MediasoupService } from './mediasoup.js';
+import type { MetricsSample } from './mediaMetrics.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -1084,6 +1085,94 @@ export class RoomManager {
       totalProducers,
       totalConsumers,
     };
+  }
+
+  /**
+   * Walk live rooms and gather one measurement sample (#1553). The impure mediasoup
+   * boundary (producer counts + recv-transport egress bytes) — fed to MediaMetrics,
+   * which does the pure accumulation. getStats() failures per transport are swallowed
+   * so sampling never throws into the heartbeat.
+   */
+  async collectMetricsSample(): Promise<MetricsSample> {
+    const counts = { camera: 0, screen: 0, audio: 0, webcam: 0, screenshare: 0 };
+    const egressBytesByTransport = new Map<string, number>();
+    const liveTransportIds = new Set<string>();
+    const perRoomVideoPublishers: number[] = [];
+    const egressTasks: Promise<void>[] = [];
+
+    for (const [, room] of this.rooms) {
+      let roomVideo = 0;
+      for (const [, p] of room.participants) {
+        roomVideo += RoomManager.countParticipantSources(p, counts);
+        for (const [tid, transport] of p.recvTransports) {
+          liveTransportIds.add(tid); // every live recv transport, regardless of getStats success
+          egressTasks.push(
+            RoomManager.gatherTransportEgress(tid, transport, egressBytesByTransport)
+          );
+        }
+      }
+      perRoomVideoPublishers.push(roomVideo);
+    }
+    // Concurrent getStats — sampling latency is the slowest call, not the sum (#1553 review).
+    await Promise.all(egressTasks);
+
+    return {
+      publishers: { camera: counts.camera, screen: counts.screen },
+      activeByKind: { audio: counts.audio, webcam: counts.webcam, screenshare: counts.screenshare },
+      egressBytesByTransport,
+      liveTransportIds,
+      perRoomVideoPublishers,
+    };
+  }
+
+  /** Tally a participant's producers into `counts`; returns its video-publisher count. */
+  private static countParticipantSources(
+    p: Participant,
+    counts: { camera: number; screen: number; audio: number; webcam: number; screenshare: number }
+  ): number {
+    let video = 0;
+    for (const [, entry] of p.producers) {
+      switch (entry.source) {
+        case 'camera':
+          counts.camera++;
+          counts.webcam++;
+          video++;
+          break;
+        case 'screen':
+          counts.screen++;
+          counts.screenshare++;
+          video++;
+          break;
+        case 'mic':
+        case 'screen-audio':
+          counts.audio++;
+          break;
+      }
+    }
+    return video;
+  }
+
+  /**
+   * Sum one recv transport's egress `bytesSent` into `out`. On a transient/closing
+   * getStats() error the transport is OMITTED from `out` (but the caller keeps it in
+   * `liveTransportIds`, so the accumulator does not prune + re-count it from zero).
+   */
+  private static async gatherTransportEgress(
+    tid: string,
+    transport: WebRtcTransport,
+    out: Map<string, number>
+  ): Promise<void> {
+    try {
+      const stats = await transport.getStats();
+      let bytesSent = 0;
+      for (const s of stats) {
+        const b = (s as { bytesSent?: number }).bytesSent;
+        if (typeof b === 'number') bytesSent += b;
+      }
+      out.set(tid, bytesSent);
+    } catch {
+      // transient/closing — omit; never throw into the heartbeat
+    }
   }
 
   /** Close all rooms (graceful shutdown) */

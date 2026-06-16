@@ -6,6 +6,7 @@ import { logger } from './lib/logger.js';
 import { MediasoupService } from './lib/mediasoup.js';
 import { RoomManager } from './lib/roomManager.js';
 import type { MediaSource } from './lib/roomManager.js';
+import { MediaMetrics } from './lib/mediaMetrics.js';
 import { createAuthMiddleware, validateChannelAccess } from './middleware/auth.js';
 import type { AuthenticatedSocketData } from './middleware/auth.js';
 import { NatsService } from './lib/nats.js';
@@ -47,6 +48,8 @@ async function main() {
 
   // Initialize RoomManager
   const roomManager = new RoomManager(mediasoupService);
+  // #1553 measurement counters — accumulated from heartbeat samples, surfaced on /health.
+  const mediaMetrics = new MediaMetrics();
 
   // Wire up room events
   roomManager.onEvent((event) => {
@@ -55,7 +58,16 @@ async function main() {
   roomManager.onEvent(natsService.createRoomEventHandler());
   roomManager.onEvent(redisService.createRoomEventHandler());
 
-  // Health check endpoint (enhanced — A8)
+  // Health check endpoint (enhanced — A8).
+  //
+  // INTERNAL endpoint (accepted-risk, #1553 review): nginx proxies ONLY `/socket.io/`
+  // to the media-plane publicly (infrastructure/deploy/nginx/concordvoice.conf); the
+  // PUBLIC health probe that external monitors hit is control-plane:8080/health. This
+  // route is reached only via localhost:3000 (deploy cron + concord-ctl). The #1553
+  // `metrics` field below therefore surfaces capacity counters to OPS callers, not the
+  // public internet — and carries aggregate numbers only (no PII/IDs/keys; verified by
+  // the security review). Do NOT add per-room/per-user breakdowns here without revisiting
+  // this exposure note.
   app.get('/health', (_req, res) => {
     const stats = roomManager.getStats();
     res.json({
@@ -66,6 +78,8 @@ async function main() {
       totalParticipants: stats.totalParticipants,
       totalProducers: stats.totalProducers,
       totalConsumers: stats.totalConsumers,
+      // #1553 measurement counters (aggregate-only; no PII/IDs/keys).
+      metrics: mediaMetrics.getSnapshot(),
     });
   });
 
@@ -769,7 +783,8 @@ async function main() {
   // Publish room heartbeat every 30s for control plane reconciliation.
   // Each message contains the authoritative list of users in each room,
   // allowing the control plane to delete stale voice_participants rows.
-  const roomHeartbeatInterval = setInterval(() => {
+  let metricsSampling = false; // re-entrancy guard for the async metrics block below
+  const roomHeartbeatInterval = setInterval(async () => {
     for (const roomId of roomManager.getActiveRoomIds()) {
       const room = roomManager.getRoom(roomId);
       if (!room) continue;
@@ -778,6 +793,23 @@ async function main() {
         userIds: Array.from(room.participants.keys()),
         timestamp: new Date().toISOString(),
       });
+    }
+    // #1553 measurement: sample live rooms, accumulate, emit aggregate-only ops log
+    // (structural metadata only — no userIds/PII/keys, per [internal]rules/observability.md).
+    // The try/catch keeps the async heartbeat from ever throwing into the timer (degrade,
+    // don't crash); the metricsSampling guard skips a tick if the prior sampling is still
+    // running so two ticks never interleave ingest() on shared state (#1553 review).
+    if (!metricsSampling) {
+      metricsSampling = true;
+      try {
+        const sample = await roomManager.collectMetricsSample();
+        mediaMetrics.ingest(sample, 30);
+        logger.info('media-metrics', mediaMetrics.getSnapshot());
+      } catch (err) {
+        logger.error('media-metrics sampling failed', { error: err });
+      } finally {
+        metricsSampling = false;
+      }
     }
   }, 30_000);
 
