@@ -15,6 +15,7 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/clientconfig"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/dm"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/email"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/feedback"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/friends"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/invites"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/klipy"
@@ -528,16 +529,36 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				wsTicketHandler.IssueTicket,
 			)
 
-			// Feedback (#158): bug report / feature request submission. Rate
-			// limit is 10/hour/user — bumped from the original 3/hour per
-			// Gitar finding on PR #1547. `RateLimitByUser` increments the
-			// counter BEFORE the handler runs, so failed validations also
-			// burn quota; 10/hour leaves enough slack for honest users to
-			// recover from client-side typos / mistakes while still capping
-			// spam on the public-ish feedback repo. Bug + feature share the
-			// same bucket on purpose — same downstream surface.
+			// Feedback (#158): bug report / feature request submission. This
+			// is the one privileged-PAT write to a PUBLIC GitHub repo, so the
+			// rate limiters are the SOLE velocity controls — they fail CLOSED
+			// (a Redis blip must not remove the flood cap). Two layers:
+			//   1. RateLimitByUserFailClosed — per-user 10/hour. Fail-closed
+			//      variant of RateLimitByUser; 503 (not allow) on Redis error.
+			//      Runs FIRST so a single account's over-quota requests are
+			//      rejected here BEFORE they can touch the global counter,
+			//      bounding any one account's contribution to the aggregate to
+			//      its own 10/hour.
+			//   2. GlobalRateLimit — aggregate cap across ALL users
+			//      (ratelimit:global:feedback) so N Sybil accounts can't
+			//      multiply the public-tracker flood ceiling by N. 429 over
+			//      cap, 503 on Redis error. Runs SECOND, counting only requests
+			//      that already passed the per-user gate.
+			// ORDER IS LOAD-BEARING: with the global limiter first, one
+			// account's per-user-REJECTED requests would still INCR the global
+			// counter and could drive it to the cap, locking out every other
+			// user — a single-account DoS (Gitar + security-reviewer finding on
+			// PR #1591). Per-user-first closes that while preserving the
+			// Sybil-defense intent (N accounts each add at most 10). Do NOT
+			// swap these back.
+			// 10/hour/user was bumped from the original 3/hour per a Gitar
+			// finding; the counter increments BEFORE the handler runs, so
+			// failed validations also burn quota; 10/hour leaves slack for
+			// honest users to recover from client-side typos while still
+			// capping spam. Bug + feature share the same bucket on purpose.
 			protected.POST("/feedback",
-				middleware.RateLimitByUser(redis, 10, 1*time.Hour),
+				middleware.RateLimitByUserFailClosed(redis, 10, 1*time.Hour),
+				feedback.GlobalRateLimit(redis),
 				feedbackHandler.Submit,
 			)
 

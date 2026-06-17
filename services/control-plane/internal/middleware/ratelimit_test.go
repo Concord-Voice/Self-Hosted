@@ -10,6 +10,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -252,4 +253,75 @@ func TestMaxIntFunc(t *testing.T) {
 	req.RemoteAddr = "10.0.0.50:1234"
 	router.ServeHTTP(w, req)
 	assert.Equal(t, "0", w.Header().Get(headerRateLimitRem))
+}
+
+// --- RateLimitByUserFailClosed Tests (#158) ---
+
+// deadRedis returns a redis client pointed at a closed port so Incr errors,
+// simulating a Redis backend outage without a mock. No retries / short dial
+// timeout keep the failure fast and deterministic.
+func deadRedis() *redis.Client {
+	return redis.NewClient(&redis.Options{
+		Addr:        "127.0.0.1:1",
+		DialTimeout: 100 * time.Millisecond,
+		MaxRetries:  -1,
+	})
+}
+
+func TestRateLimitByUserFailClosed_AllowsUnderLimit(t *testing.T) {
+	ts := setupTS(t)
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET(pathUserRateTest, func(c *gin.Context) {
+		c.Set("user_id", "user-fc-under")
+	}, middleware.RateLimitByUserFailClosed(ts.Redis, 3, 1*time.Minute), func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	for i := 0; i < 3; i++ {
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("GET", pathUserRateTest, nil)
+		router.ServeHTTP(w, req)
+		assert.Equal(t, http.StatusOK, w.Code, "request %d should pass under the limit", i+1)
+	}
+}
+
+// Fail-closed: a Redis backend error must REJECT (503), not allow.
+func TestRateLimitByUserFailClosed_RejectsOnRedisError(t *testing.T) {
+	rdb := deadRedis()
+	defer func() { _ = rdb.Close() }()
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET(pathUserRateTest, func(c *gin.Context) {
+		c.Set("user_id", "user-fc-err")
+	}, middleware.RateLimitByUserFailClosed(rdb, 10, 1*time.Hour), func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", pathUserRateTest, nil)
+	router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code, "fail-closed: Redis error must reject the request")
+}
+
+// Regression: the default RateLimitByUser MUST keep failing OPEN on a Redis
+// error (availability-first). This locks the asymmetry that Fix #1 introduces.
+func TestRateLimitByUser_FailsOpenOnRedisError(t *testing.T) {
+	rdb := deadRedis()
+	defer func() { _ = rdb.Close() }()
+
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	router.GET(pathUserRateTest, func(c *gin.Context) {
+		c.Set("user_id", "user-fo-err")
+	}, middleware.RateLimitByUser(rdb, 10, 1*time.Hour), func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{"status": "ok"})
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", pathUserRateTest, nil)
+	router.ServeHTTP(w, req)
+	assert.Equal(t, http.StatusOK, w.Code, "fail-open: Redis error must still allow the request")
 }

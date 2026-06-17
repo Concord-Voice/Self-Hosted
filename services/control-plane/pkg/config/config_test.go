@@ -386,6 +386,100 @@ func TestMediaPlaneURLIsRoot(t *testing.T) {
 	}
 }
 
+// ─── Feedback config (#158, PR #1547 Fix 6) ───────────────────────────────
+
+// Load TrimSpaces FEEDBACK_PAT / FEEDBACK_REPO — a trailing newline on the PAT
+// corrupts the Authorization header and a stray-whitespace repo slug yields
+// per-request 502s. Run in development so the production guards don't fire.
+func TestLoad_FeedbackFieldsAreTrimmed(t *testing.T) {
+	t.Setenv("ENVIRONMENT", "development")
+	t.Setenv("FEEDBACK_PAT", "  ghp_trim_me\n") //nolint:gosec // test fixture, not a real PAT
+	t.Setenv("FEEDBACK_REPO", "\tConcord-Voice/Concord-Voice-Feedback \n")
+
+	cfg, err := Load()
+	require.NoError(t, err)
+	assert.Equal(t, "ghp_trim_me", cfg.GitHubFeedback.Token,
+		"FEEDBACK_PAT must be TrimSpace'd at Load")
+	assert.Equal(t, "Concord-Voice/Concord-Voice-Feedback", cfg.GitHubFeedback.Repo,
+		"FEEDBACK_REPO must be TrimSpace'd at Load")
+}
+
+// A malformed FEEDBACK_REPO fails validate() in production — mirrors the
+// rigor of the MEDIA_PLANE_URL guard (parse-then-validate, not empty-only).
+func TestValidateProductionRejectsMalformedFeedbackRepo(t *testing.T) {
+	tests := []struct {
+		name string
+		repo string
+	}{
+		{"no slash", "ownerrepo"},
+		{"empty owner segment", "/repo"},
+		{"empty repo segment", "owner/"},
+		{"both segments empty", "/"},
+		{"embedded space", "owner /repo"},
+		{"interior whitespace in repo", "owner/re po"},
+		{"extra path segment", "owner/repo/extra"},
+		{"trailing newline (untrimmed)", "owner/repo\n"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := validProductionConfig()
+			cfg.GitHubFeedback.Repo = tt.repo
+			err := cfg.validate()
+			require.Error(t, err, "expected error for malformed repo %q", tt.repo)
+			assert.Contains(t, err.Error(), "FEEDBACK_REPO",
+				"error must name the offending field")
+		})
+	}
+}
+
+// A valid owner/repo slug passes validate() in production (regression guard so
+// the shape check doesn't reject legitimate values).
+func TestValidateProductionAcceptsValidFeedbackRepo(t *testing.T) {
+	accepts := []string{
+		"Concord-Voice/Concord-Voice-Feedback",
+		"owner/repo",
+		"a/b",
+		"org.with.dots/repo_with-mix.123",
+	}
+	for _, repo := range accepts {
+		t.Run(repo, func(t *testing.T) {
+			cfg := validProductionConfig()
+			cfg.GitHubFeedback.Repo = repo
+			assert.NoError(t, cfg.validate(), "valid slug %q must be accepted", repo)
+		})
+	}
+}
+
+// feedbackRepoHasValidShape unit coverage — happy path + every rejection case.
+func TestFeedbackRepoHasValidShape(t *testing.T) {
+	cases := []struct {
+		input string
+		valid bool
+	}{
+		// Valid:
+		{"owner/repo", true},
+		{"Concord-Voice/Concord-Voice-Feedback", true},
+		{"a/b", true},
+		{"org.with.dots/repo_with-mix.123", true},
+		// Invalid:
+		{"", false},
+		{"ownerrepo", false},
+		{"/repo", false},
+		{"owner/", false},
+		{"/", false},
+		{"owner/repo/extra", false},
+		{"owner /repo", false},
+		{"owner/re po", false},
+		{"owner/repo\n", false},
+		{" owner/repo", false},
+	}
+	for _, c := range cases {
+		t.Run(c.input, func(t *testing.T) {
+			assert.Equal(t, c.valid, feedbackRepoHasValidShape(c.input))
+		})
+	}
+}
+
 // Google SSO config tests (#270 Task 4).
 //
 // The production guard fires on misconfiguration regardless of environment —

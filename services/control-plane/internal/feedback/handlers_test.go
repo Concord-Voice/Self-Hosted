@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
@@ -182,12 +184,14 @@ func TestSubmit_BugReport_AssemblesIssueShape(t *testing.T) {
 	assert.Equal(t, "[Bug Report] Crash on send", call.Title)
 	assert.Equal(t, []string{"type: bug"}, call.Labels)
 	assert.Contains(t, call.Body, "user `user-42`")
-	assert.Contains(t, call.Body, "**App Version:** 0.1.60")
-	assert.Contains(t, call.Body, "**Platform:** darwin")
+	// Metadata values are wrapped in inline code spans (post-#1547 Fix 2/4/5).
+	assert.Contains(t, call.Body, "**App Version:** `0.1.60`")
+	assert.Contains(t, call.Body, "**Platform:** `darwin`")
 	assert.Contains(t, call.Body, "## Description")
 	assert.Contains(t, call.Body, "Steps to reproduce")
 	assert.Contains(t, call.Body, "## Diagnostics")
-	assert.Contains(t, call.Body, "Apple / M1 Pro")
+	assert.Contains(t, call.Body, "`Apple` / `M1 Pro`")
+	// Display dimensions are not user free-text — rendered raw, not fenced.
 	assert.Contains(t, call.Body, "3024x1964")
 	assert.Contains(t, call.Body, "Recent logs (sanitized)")
 }
@@ -210,7 +214,7 @@ func TestSubmit_FeatureRequest_AssemblesIssueShape(t *testing.T) {
 	assert.Equal(t, "[Feature Request] Add dark high-contrast preset", call.Title)
 	assert.Equal(t, []string{"type: feature"}, call.Labels)
 	assert.Contains(t, call.Body, "user `user-9`")
-	assert.Contains(t, call.Body, "**Category:** Improvement to Existing Feature")
+	assert.Contains(t, call.Body, "**Category:** `Improvement to Existing Feature`")
 	assert.NotContains(t, call.Body, "## Diagnostics", "feature requests must not emit diagnostics section")
 }
 
@@ -317,10 +321,13 @@ func TestSubmit_SanitizesAllDiagnosticsFields(t *testing.T) {
 	assert.NotContains(t, body, "2001:db8:abcd")
 }
 
-// Markdown @-mentions, image embeds, and #-issue-refs are neutralized so
-// a hostile client cannot ping arbitrary GitHub users / exfil triagers'
-// browsing data via image embeds. ZWSP (U+200B) is invisible in the
-// rendered issue but breaks the autolink trigger.
+// Markdown @-mentions and #-issue-refs in the TITLE are neutralized via ZWSP
+// so a hostile client cannot ping arbitrary GitHub users. The title is
+// title-context (GitHub renders no markdown links/HTML there), so ZWSP is the
+// right tool for the `@`/`#` autolinks that DO fire in titles. (Post-#1547
+// Fixes 2/4/5: BODY free-text is now code-fenced instead — see
+// TestSubmit_DescriptionInjectionRenderedInert — so the body assertions here
+// changed from "ZWSP present" to "inert via fence".)
 func TestSubmit_NeutralizesMarkdownAutolinks(t *testing.T) {
 	gh := &fakeGitHub{}
 	h := newTestHandler(gh)
@@ -339,15 +346,17 @@ func TestSubmit_NeutralizesMarkdownAutolinks(t *testing.T) {
 	// to a triager but won't autolink. We assert by checking the ZWSP is
 	// present immediately after `@`.
 	assert.Contains(t, gh.calls[0].Title, "@\u200bConcord-Voice/security")
-	// Description: `#1547` becomes `#\u200b1547`, and `![pwn]` becomes
-	// `!\u200b[pwn]` (the `!` is preserved but the image syntax broken).
-	assert.Contains(t, gh.calls[0].Body, "#\u200b1547")
-	assert.Contains(t, gh.calls[0].Body, "!\u200b[pwn](https://attacker.example/?u=1)")
+	// Body: the image-embed + masked-link payload is now inert inside a code
+	// fence \u2014 the `](` trigger must NOT be present and the description block
+	// opens with a fence. (Stronger than the old ZWSP-in-`![` neutralization,
+	// which left the masked `](url)` link live.)
+	assertNoActiveMarkup(t, gh.calls[0].Body)
+	assert.Contains(t, gh.calls[0].Body, "## Description\n\n```")
 }
 
-// Markdown autolink neutralization also applies to free-text diagnostics
-// fields (a compromised client could place autolink payloads in e.g. the
-// GPU vendor string to bypass title/description neutralization).
+// Injection payloads in free-text diagnostics fields (a compromised client
+// could place them in e.g. the GPU vendor string) are rendered inert via the
+// inline code span \u2014 superseding the old GPU-vendor ZWSP neutralization.
 func TestSubmit_NeutralizesMarkdownInDiagnostics(t *testing.T) {
 	gh := &fakeGitHub{}
 	h := newTestHandler(gh)
@@ -362,13 +371,17 @@ func TestSubmit_NeutralizesMarkdownInDiagnostics(t *testing.T) {
 			"platform":        "darwin",
 			"machineIdPrefix": "4c33734c",
 			"connectionPhase": "stable",
-			"gpu":             map[string]string{"vendor": "@evil-team payload", "renderer": "M1"},
+			"gpu":             map[string]string{"vendor": "@evil-team [x](https://evil.example)", "renderer": "M1"},
 			"logs":            "",
 		},
 	})
 	require.Equal(t, http.StatusOK, w.Code)
 	require.Len(t, gh.calls, 1)
-	assert.Contains(t, gh.calls[0].Body, "@\u200bevil-team")
+	body := gh.calls[0].Body
+	// The vendor value is inside an inline code span (rendered verbatim, no
+	// autolink / no live masked link).
+	assert.Contains(t, body, "- **GPU:** `")
+	assertNoActiveMarkup(t, body)
 }
 
 // User-supplied logs containing backtick runs cannot escape the fenced
@@ -461,6 +474,257 @@ func TestSubmit_AssembledBodyStaysUnderGitHubLimit(t *testing.T) {
 	assert.LessOrEqual(t, len(gh.calls[0].Body), maxBodyBytes,
 		"assembled body %d bytes exceeds maxBodyBytes %d — would be rejected by GitHub",
 		len(gh.calls[0].Body), maxBodyBytes)
+}
+
+// ─── Public-repo injection hardening (PR #1547 Fixes 2/4/5) ───────────────
+
+// injectionPayloads are the four user-controlled sequences that MUST NOT
+// render as an active link / image / raw HTML in the produced issue body.
+// Each appears in BOTH a multi-line free-text field (Description) and a short
+// metadata field (GPU vendor) below.
+var injectionPayloads = []struct {
+	name    string
+	payload string
+}{
+	{"masked markdown link", "[pwn](https://evil.example)"},
+	{"raw anchor html", `<a href="https://evil.example">x</a>`},
+	{"raw img html", `<img src="https://evil.example/p.gif">`},
+	{"bare url", "https://evil.example/track"},
+}
+
+// onlyBackticks reports whether trimmed line is a non-empty run of only
+// backtick characters (a fenced-code-block delimiter line).
+func onlyBackticks(line string) bool {
+	t := strings.TrimSpace(line)
+	if t == "" {
+		return false
+	}
+	for _, r := range t {
+		if r != '`' {
+			return false
+		}
+	}
+	return true
+}
+
+// stripCodeRegions removes every fenced code block (a ``` delimiter line, its
+// contents, and the closing delimiter line) and every inline code span
+// (`...`, any backtick-run length) from s, modelling how GitHub treats their
+// contents as inert literal text. What remains is the "live markdown" —
+// anything that WOULD be parsed as links/HTML/autolinks. The injection
+// assertions check that no trigger survives into this residue, which is the
+// actual security property (payloads MAY appear verbatim inside a fence/span —
+// that is the whole point).
+//
+// Go's regexp (RE2) has no backreferences, so fenced blocks are stripped with
+// a line-state toggle rather than a `\1`-style same-length match; inline spans
+// are then stripped longest-run-first.
+func stripCodeRegions(s string) string {
+	// 1. Strip fenced code blocks via a line-by-line in/out toggle. Any line
+	//    that is purely backticks toggles fenced state; lines inside a fence
+	//    (and the delimiter lines themselves) are dropped.
+	var out []string
+	inFence := false
+	for _, line := range strings.Split(s, "\n") {
+		if onlyBackticks(line) {
+			inFence = !inFence
+			continue // drop the delimiter line itself
+		}
+		if inFence {
+			continue // drop fenced content
+		}
+		out = append(out, line)
+	}
+	s = strings.Join(out, "\n")
+	// 2. Strip inline code spans: a run of N backticks ... next run of N.
+	//    Longest runs first so a longer span isn't mis-split by a nested
+	//    shorter run. The upper bound is the longest backtick run present in s:
+	//    inlineCode emits a fence of longestBacktickRun(value)+1, which exceeds
+	//    3 when the wrapped value itself contains a 3+-backtick run, so a fixed
+	//    {3,2,1} would miss those — derive the bound dynamically.
+	for n := longestBacktickRun(s); n >= 1; n-- {
+		fence := strings.Repeat("`", n)
+		spanRE := regexp.MustCompile("(?s)" + regexp.QuoteMeta(fence) + ".*?" + regexp.QuoteMeta(fence))
+		s = spanRE.ReplaceAllString(s, "")
+	}
+	return s
+}
+
+// assertNoActiveMarkup asserts no parseable active markup survives outside the
+// code fences/spans. The raw injection bytes MAY appear verbatim inside a
+// fence/span (rendered as literal text); what must NOT survive into the
+// fence-stripped residue is any markup trigger: a masked-link `](`, raw
+// `<a `/`<img ` HTML, or a bare autolinked `https://` URL.
+func assertNoActiveMarkup(t *testing.T, body string) {
+	t.Helper()
+	live := stripCodeRegions(body)
+	assert.NotContains(t, live, "](", "masked-link trigger `](` must not survive outside a code fence/span")
+	assert.NotContains(t, live, "<a ", "raw <a ...> anchor must not survive outside a code fence/span")
+	assert.NotContains(t, live, "<img ", "raw <img ...> must not survive outside a code fence/span")
+	assert.NotContains(t, live, "https://", "bare URL must not survive outside a code fence/span (would autolink)")
+}
+
+// Description containing each injection payload must be rendered inert (inside
+// a fenced code block), so none parse as active markup.
+func TestSubmit_DescriptionInjectionRenderedInert(t *testing.T) {
+	for _, p := range injectionPayloads {
+		t.Run(p.name, func(t *testing.T) {
+			gh := &fakeGitHub{}
+			h := newTestHandler(gh)
+			r := newTestEngine(t, h, "user-1")
+
+			w := doPost(t, r, map[string]interface{}{
+				"type":        "bug",
+				"title":       "T",
+				"description": "before " + p.payload + " after",
+			})
+			require.Equal(t, http.StatusOK, w.Code)
+			require.Len(t, gh.calls, 1)
+			body := gh.calls[0].Body
+
+			assertNoActiveMarkup(t, body)
+			// The payload bytes are preserved verbatim inside the fence so
+			// triagers can still read what was submitted; only the surrounding
+			// text and the fence opener are asserted directly.
+			assert.Contains(t, body, "before ")
+			assert.Contains(t, body, " after")
+			// A fenced code block opens the Description section.
+			assert.Contains(t, body, "## Description\n\n```")
+		})
+	}
+}
+
+// A metadata field (GPU vendor) containing each injection payload must be
+// rendered inert (inside an inline code span), so none parse as active markup.
+func TestSubmit_MetadataInjectionRenderedInert(t *testing.T) {
+	for _, p := range injectionPayloads {
+		t.Run(p.name, func(t *testing.T) {
+			gh := &fakeGitHub{}
+			h := newTestHandler(gh)
+			r := newTestEngine(t, h, "user-1")
+
+			w := doPost(t, r, map[string]interface{}{
+				"type":        "bug",
+				"title":       "T",
+				"description": "D",
+				"diagnostics": map[string]interface{}{
+					"appVersion":      "v1.0",
+					"platform":        "darwin",
+					"machineIdPrefix": "4c33734c",
+					"connectionPhase": "stable",
+					"gpu":             map[string]string{"vendor": p.payload, "renderer": "M1"},
+					"logs":            "",
+				},
+			})
+			require.Equal(t, http.StatusOK, w.Code)
+			require.Len(t, gh.calls, 1)
+			body := gh.calls[0].Body
+
+			assertNoActiveMarkup(t, body)
+			// The GPU bullet is present and the value is wrapped in a code span.
+			assert.Contains(t, body, "- **GPU:** `")
+		})
+	}
+}
+
+// A metadata value containing a backtick run must not be able to terminate its
+// own inline code span early — the span fence must exceed the longest run.
+func TestSubmit_MetadataBacktickCannotEscapeSpan(t *testing.T) {
+	gh := &fakeGitHub{}
+	h := newTestHandler(gh)
+	r := newTestEngine(t, h, "user-1")
+
+	// Vendor contains a single backtick then a masked-link attempt. A naive
+	// single-backtick span would close at the first backtick and expose the
+	// `](` trigger; inlineCode must pick a 2+-backtick span.
+	w := doPost(t, r, map[string]interface{}{
+		"type":        "bug",
+		"title":       "T",
+		"description": "D",
+		"diagnostics": map[string]interface{}{
+			"appVersion":      "v1.0",
+			"platform":        "darwin",
+			"machineIdPrefix": "4c33734c",
+			"connectionPhase": "stable",
+			"gpu":             map[string]string{"vendor": "x`y[pwn](https://evil.example)", "renderer": "M1"},
+			"logs":            "",
+		},
+	})
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Len(t, gh.calls, 1)
+	assertNoActiveMarkup(t, gh.calls[0].Body)
+}
+
+// The Description is now fenced (Fix 2) — a bare `@mention` / `#123` inside it
+// is inert by virtue of the code fence, NOT ZWSP insertion. The Title still
+// uses neutralizeAutolinks (title-context), so the existing Title autolink
+// assertion in TestSubmit_NeutralizesMarkdownAutolinks remains valid.
+func TestSubmit_DescriptionFencedNotZWSP(t *testing.T) {
+	gh := &fakeGitHub{}
+	h := newTestHandler(gh)
+	r := newTestEngine(t, h, "user-1")
+
+	w := doPost(t, r, map[string]interface{}{
+		"type":        "bug",
+		"title":       "T",
+		"description": "ping @someone and ref #1547",
+	})
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Len(t, gh.calls, 1)
+	body := gh.calls[0].Body
+	// The literal text survives verbatim inside the fence (no ZWSP injected
+	// into the body free-text any more).
+	zwsp := string(rune(0x200b)) // U+200B ZERO WIDTH SPACE, built without a literal char
+	assert.Contains(t, body, "ping @someone and ref #1547")
+	assert.NotContains(t, body, "@"+zwsp+"someone", "body free-text must be fenced, not ZWSP-mangled")
+	assert.Contains(t, body, "## Description\n\n```")
+}
+
+// ─── Rune-aware truncation (PR #1547 Fix 8) ───────────────────────────────
+
+// Adversarial @-heavy input run through neutralizeAutolinks expands each `@`
+// into `@`+ZWSP (a 3-byte multi-byte rune). When such expanded content overruns
+// maxBodyBytes, truncateBody's slice point can land mid-ZWSP — the regression
+// truncateBody (Fix 8) walks back to a rune boundary. We construct the
+// post-neutralization body directly (the realistic source of multi-byte
+// inflation, mirroring how neutralizeAutolinks inflates @-heavy strings) and
+// assert the result is valid UTF-8 and still marked.
+func TestTruncateBody_AtHeavyZWSPInflation(t *testing.T) {
+	// 40k '@' chars → after neutralizeAutolinks each becomes '@' followed by a
+	// 3-byte ZWSP (U+200B), ~160k bytes total: well past maxBodyBytes, densely
+	// packed with the multi-byte rune so the cut point is virtually guaranteed
+	// to fall inside a rune.
+	atHeavy := neutralizeAutolinks(strings.Repeat("@", 40_000))
+	body := "header\n\n" + atHeavy
+	require.Greater(t, len(body), maxBodyBytes, "precondition: body must overrun maxBodyBytes")
+
+	out := truncateBody(body)
+
+	assert.LessOrEqual(t, len(out), maxBodyBytes, "truncated body must respect maxBodyBytes")
+	assert.True(t, utf8.ValidString(out), "truncated body must be valid UTF-8 — no rune split into U+FFFD")
+	assert.False(t, strings.ContainsRune(out, '�'), "truncated body must not contain U+FFFD replacement char")
+	assert.True(t, strings.HasSuffix(out, "..._\n"), "truncated body must end with the truncation marker")
+}
+
+// truncateBody unit: a multi-byte rune straddling the keep boundary is walked
+// back so the slice never splits it (happy-path: under-cap is a no-op; error/
+// edge-path: over-cap with a rune at the boundary stays valid).
+func TestTruncateBody_RuneBoundary(t *testing.T) {
+	t.Run("under cap is unchanged", func(t *testing.T) {
+		in := "short body"
+		assert.Equal(t, in, truncateBody(in))
+	})
+
+	t.Run("over cap with rune at boundary stays valid UTF-8", func(t *testing.T) {
+		// Build a body of all 3-byte ZWSPs longer than maxBodyBytes so the
+		// keep boundary is virtually guaranteed to fall inside a rune.
+		zwsp := string(rune(0x200b))             // U+200B, built without a literal char
+		in := strings.Repeat(zwsp, maxBodyBytes) // 3*maxBodyBytes bytes
+		out := truncateBody(in)
+		assert.LessOrEqual(t, len(out), maxBodyBytes)
+		assert.True(t, utf8.ValidString(out), "must be valid UTF-8 after rune-boundary walk-back")
+		assert.True(t, strings.HasSuffix(out, "..._\n"))
+	})
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────

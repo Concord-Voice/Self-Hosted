@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gin-gonic/gin"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
@@ -250,8 +251,17 @@ func validate(req *submitRequest) error {
 //   - `#123` — backlinks to unrelated issues/PRs in the feedback repo
 //
 // ZWSP is invisible in the rendered issue but breaks the autolink trigger
-// pattern. Backtick / code-fence escapes are handled separately in
-// writeDiagnostics — the logs block uses a dynamic fence length.
+// pattern.
+//
+// SCOPE (post-#1547 review, Fixes 2/4/5): this is applied ONLY to the issue
+// TITLE. GitHub does not render markdown links or raw HTML in issue titles, so
+// masked links / `<a>` / `<img>` / bare URLs are inert there by GitHub's own
+// title-context rules — but `@name` and `#123` autolinks DO still fire in
+// titles, which is what this defuses. Every user-controlled BODY field is now
+// rendered inert by code-fencing instead (fencedBlock for multi-line text,
+// inlineCode for short metadata), which is strictly stronger than ZWSP
+// insertion — see those helpers. Do NOT route body fields back through this:
+// ZWSP does not inert a masked link `[t](u)` or raw HTML, fencing does.
 //
 // (Gitar / @security-reviewer finding, PR #1547.)
 func neutralizeAutolinks(s string) string {
@@ -312,6 +322,67 @@ func longestBacktickRun(s string) int {
 	return maxRun
 }
 
+// fenceOf returns a backtick run of at least minLen and strictly longer than
+// the longest backtick run inside s, so user-supplied content cannot escape
+// the fence. minLen is the CommonMark floor for the context: 3 for fenced code
+// BLOCKS, 1 for inline code SPANS.
+func fenceOf(s string, minLen int) string {
+	fenceLen := longestBacktickRun(s) + 1
+	if fenceLen < minLen {
+		fenceLen = minLen
+	}
+	return strings.Repeat("`", fenceLen)
+}
+
+// fencedBlock writes a fenced code block around multi-line user-controlled
+// free text (Description, Logs). The fence length exceeds any backtick run in
+// `content` (CommonMark floor 3 for blocks), so the content renders verbatim
+// and cannot break out to inject markdown links, raw HTML (`<a>`/`<img>`), or
+// autolinked bare URLs into the surrounding issue body. The fence is written
+// on its own lines so a content payload cannot fuse with the opening/closing
+// delimiters.
+func fencedBlock(b *strings.Builder, content string) {
+	fence := fenceOf(content, 3)
+	b.WriteString(fence)
+	b.WriteString("\n")
+	b.WriteString(content)
+	b.WriteString("\n")
+	b.WriteString(fence)
+	b.WriteString("\n")
+}
+
+// inlineCode wraps a SHORT, single-value user-controlled metadata string
+// (Category, GPU vendor/renderer, App Version, Platform, Machine ID prefix,
+// Connection phase) in an inline code span. Inside a code span GitHub renders
+// the bytes verbatim: a masked link `[t](u)`, raw `<a>`/`<img>` HTML, an
+// `@mention`, an `#issue` ref, and a bare `https://` URL are all inert — none
+// parse as active markdown/HTML/autolink. The span delimiter length exceeds
+// any backtick run in `s` so the value cannot terminate its own span early.
+// A leading/trailing space is added when the value itself starts/ends with a
+// backtick (CommonMark inline-code padding rule) so the fence isn't absorbed.
+//
+// This SUPERSEDES neutralizeAutolinks for body metadata fields — fencing is
+// strictly stronger (it inerts masked links / raw HTML / bare URLs that ZWSP
+// insertion does not). neutralizeAutolinks is retained only for the issue
+// TITLE, which is title-context (GitHub renders no markdown links/HTML there,
+// but `#123` and `@name` autolinks still fire). (#158 review, PR #1547 —
+// Fixes 2/4/5.)
+func inlineCode(s string) string {
+	// Collapse CR/LF to spaces first: an inline span lives on one logical line,
+	// and a blank line (\n\n) would otherwise terminate the span's paragraph
+	// and let the trailing delimiter render literally — re-exposing the content
+	// to the parser. Short metadata values are single-line by nature; this also
+	// hardens against newline-injection from a hostile client.
+	s = strings.ReplaceAll(s, "\r", " ")
+	s = strings.ReplaceAll(s, "\n", " ")
+	fence := fenceOf(s, 1)
+	pad := ""
+	if strings.HasPrefix(s, "`") || strings.HasSuffix(s, "`") {
+		pad = " "
+	}
+	return fence + pad + s + pad + fence
+}
+
 // buildIssue assembles the GitHub issue title/body/labels from the
 // (already-validated, already-sanitized) request.
 //
@@ -323,13 +394,22 @@ func longestBacktickRun(s string) int {
 // IS visible to anyone with repo read access, hence the dedicated feedback
 // repo per the architectural decision recorded in the PR body).
 //
-// User-supplied free text (Title, Description, Category) is passed through
-// `neutralizeAutolinks` so @-mentions, image embeds, and #-issue-refs are
-// rendered visibly but do NOT trigger GitHub's autolink expansions.
+// User-supplied free text reaches a PUBLIC repo, so every user field is
+// rendered INERT — no masked link `[t](u)`, raw HTML `<a>`/`<img>`, or bare
+// URL is ever interpreted:
+//   - The multi-line Description (and Logs, in writeDiagnostics) is emitted in
+//     a dynamic-length fenced code block via fencedBlock.
+//   - Short metadata values (App Version, Platform, Category, plus the
+//     diagnostics fields) are wrapped in inline code spans via inlineCode.
 //
-// If the assembled body would exceed `maxBodyBytes`, the logs section is
-// truncated from the start (keeping the most recent log lines) until the
-// body fits. The truncation is marked inline so triagers know it happened.
+// The issue TITLE is title-context — GitHub renders no markdown links/HTML in
+// titles — so it keeps neutralizeAutolinks, which still defuses the `#123`
+// issue-ref and `@name` autolinks that DO fire in titles.
+//
+// If the assembled body would exceed `maxBodyBytes`, truncateBody does a
+// rune-boundary-aware head-keep (header + the start of the Description block),
+// dropping the remainder. The truncation is marked inline so triagers know it
+// happened.
 func buildIssue(req *submitRequest, userID string) (title, body string, labels []string) {
 	var b strings.Builder
 
@@ -339,11 +419,11 @@ func buildIssue(req *submitRequest, userID string) (title, body string, labels [
 		labels = []string{"type: bug"}
 		fmt.Fprintf(&b, "**Reported by:** user `%s` (internal ID)\n", userID)
 		if req.Diagnostics != nil {
-			fmt.Fprintf(&b, "**App Version:** %s\n", neutralizeAutolinks(req.Diagnostics.AppVersion))
-			fmt.Fprintf(&b, "**Platform:** %s\n", neutralizeAutolinks(req.Diagnostics.Platform))
+			fmt.Fprintf(&b, "**App Version:** %s\n", inlineCode(req.Diagnostics.AppVersion))
+			fmt.Fprintf(&b, "**Platform:** %s\n", inlineCode(req.Diagnostics.Platform))
 		}
 		b.WriteString("\n## Description\n\n")
-		b.WriteString(neutralizeAutolinks(req.Description))
+		fencedBlock(&b, req.Description)
 		if req.Diagnostics != nil {
 			writeDiagnostics(&b, req.Diagnostics)
 		}
@@ -353,10 +433,10 @@ func buildIssue(req *submitRequest, userID string) (title, body string, labels [
 		labels = []string{"type: feature"}
 		fmt.Fprintf(&b, "**Requested by:** user `%s` (internal ID)\n", userID)
 		if req.Category != "" {
-			fmt.Fprintf(&b, "**Category:** %s\n", neutralizeAutolinks(req.Category))
+			fmt.Fprintf(&b, "**Category:** %s\n", inlineCode(req.Category))
 		}
 		b.WriteString("\n## Description\n\n")
-		b.WriteString(neutralizeAutolinks(req.Description))
+		fencedBlock(&b, req.Description)
 	}
 
 	body = b.String()
@@ -366,15 +446,23 @@ func buildIssue(req *submitRequest, userID string) (title, body string, labels [
 	return title, body, labels
 }
 
-// truncateBody applies a tail-only truncation when the assembled body would
-// exceed GitHub's issue-body cap. It keeps the first maxBodyBytes-N bytes
-// (the header + description) and a marker noting that the diagnostic logs
-// were truncated. Returns a body of at most maxBodyBytes bytes.
+// truncateBody applies a blunt HEAD-keep truncation when the assembled body
+// would exceed GitHub's issue-body cap: it keeps the first maxBodyBytes-N
+// bytes (the header + the start of whatever section follows — Description and,
+// for bug reports, the Diagnostics/Logs that trail it) and appends a marker
+// noting that the body was truncated. Returns a body of at most maxBodyBytes
+// bytes. This is a head-keep, NOT a within-logs tail-keep — the whole tail
+// (including the closing log fence) is simply dropped.
 //
 // This is a belt-and-suspenders guard against the case where Description +
 // metadata + a max-size Logs section overruns maxBodyBytes; in practice the
-// per-field caps + writeDiagnostics's own log-tail truncation keep the body
-// well under the limit. The marker is markdown that renders cleanly.
+// per-field caps keep the body well under the limit. The marker is markdown
+// that renders cleanly.
+//
+// The keep point is walked back to a UTF-8 rune boundary before slicing, so a
+// multi-byte rune at the cut (e.g. the 3-byte ZWSP that neutralizeAutolinks
+// inserts, or any non-ASCII user input) is never split into an invalid byte
+// sequence that GitHub would render as U+FFFD. (#158 review, PR #1547 — Fix 8.)
 func truncateBody(body string) string {
 	const marker = "\n\n_... (body truncated to fit GitHub issue-body limit) ..._\n"
 	if len(body) <= maxBodyBytes {
@@ -384,6 +472,11 @@ func truncateBody(body string) string {
 	if keep < 0 {
 		keep = 0
 	}
+	// Walk `keep` back until it lands on a rune boundary so we never slice
+	// through the middle of a multi-byte UTF-8 sequence.
+	for keep > 0 && !utf8.RuneStart(body[keep]) {
+		keep--
+	}
 	return body[:keep] + marker
 }
 
@@ -391,25 +484,28 @@ func truncateBody(body string) string {
 // body. Only fields the client provided are rendered; missing optional fields
 // (GPU, display) are silently omitted rather than rendered as "unknown".
 //
-// User-supplied free-text inside metadata bullets is rendered after
-// `neutralizeAutolinks` so a hostile client cannot smuggle `@org` or `![pwn]`
-// payloads through (e.g.) the GPU vendor string.
+// Every user-supplied free-text metadata value is wrapped in an inline code
+// span via inlineCode so a hostile client cannot smuggle a masked link
+// `[t](u)`, raw HTML `<a>`/`<img>`, an `@org` mention, a `#123` ref, or a bare
+// URL through (e.g.) the GPU vendor string — inside a code span none of those
+// parse. The span fence length exceeds any backtick run in the value, so the
+// value cannot terminate its own span early.
 //
-// The logs block uses a fence whose length exceeds any backtick run in the
-// content, so the user-supplied logs cannot escape the fenced code block to
-// inject markdown into the surrounding body.
+// The logs block uses fencedBlock — a fence whose length exceeds any backtick
+// run in the content — so the user-supplied logs cannot escape the fenced code
+// block to inject markdown/HTML into the surrounding body.
 func writeDiagnostics(b *strings.Builder, d *diagnostics) {
 	b.WriteString("\n\n## Diagnostics\n\n")
-	fmt.Fprintf(b, "- **Machine ID prefix:** `%s`\n", neutralizeAutolinks(d.MachineIDPrefix))
-	fmt.Fprintf(b, "- **Connection phase:** %s\n", neutralizeAutolinks(d.ConnectionPhase))
+	fmt.Fprintf(b, "- **Machine ID prefix:** %s\n", inlineCode(d.MachineIDPrefix))
+	fmt.Fprintf(b, "- **Connection phase:** %s\n", inlineCode(d.ConnectionPhase))
 	if d.GPU != nil {
 		fmt.Fprintf(b, "- **GPU:** %s / %s\n",
-			neutralizeAutolinks(d.GPU.Vendor),
-			neutralizeAutolinks(d.GPU.Renderer))
+			inlineCode(d.GPU.Vendor),
+			inlineCode(d.GPU.Renderer))
 	}
 	if d.Display != nil {
 		// Display dimensions are integer/float types — no markdown-injection
-		// surface here, so they don't go through neutralizeAutolinks.
+		// surface here, so they don't go through inlineCode.
 		fmt.Fprintf(b, "- **Display:** %dx%d @ %.2fx", d.Display.Width, d.Display.Height, d.Display.ScaleFactor)
 		if d.Display.RefreshRate > 0 {
 			fmt.Fprintf(b, " (%.0fHz)", d.Display.RefreshRate)
@@ -417,17 +513,7 @@ func writeDiagnostics(b *strings.Builder, d *diagnostics) {
 		b.WriteString("\n")
 	}
 	if d.Logs != "" {
-		fenceLen := longestBacktickRun(d.Logs) + 1
-		if fenceLen < 3 {
-			fenceLen = 3
-		}
-		fence := strings.Repeat("`", fenceLen)
 		b.WriteString("\n### Recent logs (sanitized)\n\n")
-		b.WriteString(fence)
-		b.WriteString("\n")
-		b.WriteString(d.Logs)
-		b.WriteString("\n")
-		b.WriteString(fence)
-		b.WriteString("\n")
+		fencedBlock(b, d.Logs)
 	}
 }

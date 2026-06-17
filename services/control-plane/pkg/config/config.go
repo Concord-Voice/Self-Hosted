@@ -239,44 +239,48 @@ func Load() (*Config, error) {
 	_ = godotenv.Load()
 
 	cfg := &Config{
-		Environment:              getEnv("ENVIRONMENT", "development"),
-		Port:                     getEnv("PORT", "8080"),
-		DatabaseURL:              getEnv("DATABASE_URL", defaultDevDatabaseURL()),
-		RedisURL:                 getEnv("REDIS_URL", defaultDevRedisURL()),
-		JWTSecret:                getEnv("JWT_SECRET", devJWTSecret),
-		NATSUrl:                  getEnv("NATS_URL", "nats://localhost:4222"),
-		MediaPlaneURL:            getEnv("MEDIA_PLANE_URL", "http://localhost:3000"),
-		TURNServerHost:           getEnv("TURN_SERVER_HOST", ""),
-		TURNSecret:               getEnv("TURN_SECRET", ""),
-		TURNRealm:                getEnv("TURN_REALM", "concordvoice.chat"),
-		LicensingAuthorityURL:    getEnv("LICENSING_AUTHORITY_URL", "http://localhost:8082"),
-		AllowedOrigins:           parseOrigins(getEnv("ALLOWED_ORIGINS", "http://localhost:3001,http://localhost:3002,app://concord,https://spa.concordvoice.chat")),
-		ClientMinVersion:         getEnv("CLIENT_MIN_VERSION", ""),
-		FeatureVoice:             getEnv("FEATURE_VOICE", "true") == "true",
-		FeatureVideo:             getEnv("FEATURE_VIDEO", "true") == "true",
-		FeatureE2EE:              getEnv("FEATURE_E2EE", "true") == "true",
-		SpaURL:                   getEnv("SPA_URL", ""),
-		SpaIpcContract:           getEnvInt("SPA_IPC_CONTRACT", 0),
-		SpaConfigFile:            getEnv("SPA_CONFIG_FILE", ""),
-		ReleasesDir:              getEnv("RELEASES_DIR", ""),
-		SMTPHost:                 getEnv("SMTP_HOST", ""),
-		SMTPPort:                 getEnvInt("SMTP_PORT", 587),
-		SMTPUsername:             getEnv("SMTP_USERNAME", ""),
-		SMTPPassword:             getEnv("SMTP_PASSWORD", ""), // #nosec G101 -- env var name, not a secret
-		SMTPFrom:                 getEnv("SMTP_FROM", "Concord Voice <noreply@verify.concordvoice.chat>"),
-		MFAEncryptionKey:         getEnv("MFA_ENCRYPTION_KEY", devMFAEncKey),
-		WebAuthnRPID:             getEnv("WEBAUTHN_RP_ID", "localhost"),
-		WebAuthnRPOrigins:        parseOrigins(getEnv("WEBAUTHN_RP_ORIGINS", "http://localhost:3001")),
-		MinIOEndpoint:            getEnv("MINIO_ENDPOINT", ""),
-		MinIOAccessKey:           getEnv("MINIO_ACCESS_KEY", "concord"),
-		MinIOSecretKey:           getEnv("MINIO_SECRET_KEY", devMinIOSecretKey), // #nosec G101 -- env var name, not a secret
-		MinIOUseSSL:              getEnv("MINIO_USE_SSL", "false") == "true",
-		MinIOBucket:              getEnv("MINIO_BUCKET", "concord-media"),
-		UploadMaxSize:            getEnvInt64("UPLOAD_MAX_SIZE", 25*1024*1024), // 25 MB default
-		KlipyAPIKey:              getEnv("KLIPY_API_KEY", ""),
+		Environment:           getEnv("ENVIRONMENT", "development"),
+		Port:                  getEnv("PORT", "8080"),
+		DatabaseURL:           getEnv("DATABASE_URL", defaultDevDatabaseURL()),
+		RedisURL:              getEnv("REDIS_URL", defaultDevRedisURL()),
+		JWTSecret:             getEnv("JWT_SECRET", devJWTSecret),
+		NATSUrl:               getEnv("NATS_URL", "nats://localhost:4222"),
+		MediaPlaneURL:         getEnv("MEDIA_PLANE_URL", "http://localhost:3000"),
+		TURNServerHost:        getEnv("TURN_SERVER_HOST", ""),
+		TURNSecret:            getEnv("TURN_SECRET", ""),
+		TURNRealm:             getEnv("TURN_REALM", "concordvoice.chat"),
+		LicensingAuthorityURL: getEnv("LICENSING_AUTHORITY_URL", "http://localhost:8082"),
+		AllowedOrigins:        parseOrigins(getEnv("ALLOWED_ORIGINS", "http://localhost:3001,http://localhost:3002,app://concord,https://spa.concordvoice.chat")),
+		ClientMinVersion:      getEnv("CLIENT_MIN_VERSION", ""),
+		FeatureVoice:          getEnv("FEATURE_VOICE", "true") == "true",
+		FeatureVideo:          getEnv("FEATURE_VIDEO", "true") == "true",
+		FeatureE2EE:           getEnv("FEATURE_E2EE", "true") == "true",
+		SpaURL:                getEnv("SPA_URL", ""),
+		SpaIpcContract:        getEnvInt("SPA_IPC_CONTRACT", 0),
+		SpaConfigFile:         getEnv("SPA_CONFIG_FILE", ""),
+		ReleasesDir:           getEnv("RELEASES_DIR", ""),
+		SMTPHost:              getEnv("SMTP_HOST", ""),
+		SMTPPort:              getEnvInt("SMTP_PORT", 587),
+		SMTPUsername:          getEnv("SMTP_USERNAME", ""),
+		SMTPPassword:          getEnv("SMTP_PASSWORD", ""), // #nosec G101 -- env var name, not a secret
+		SMTPFrom:              getEnv("SMTP_FROM", "Concord Voice <noreply@verify.concordvoice.chat>"),
+		MFAEncryptionKey:      getEnv("MFA_ENCRYPTION_KEY", devMFAEncKey),
+		WebAuthnRPID:          getEnv("WEBAUTHN_RP_ID", "localhost"),
+		WebAuthnRPOrigins:     parseOrigins(getEnv("WEBAUTHN_RP_ORIGINS", "http://localhost:3001")),
+		MinIOEndpoint:         getEnv("MINIO_ENDPOINT", ""),
+		MinIOAccessKey:        getEnv("MINIO_ACCESS_KEY", "concord"),
+		MinIOSecretKey:        getEnv("MINIO_SECRET_KEY", devMinIOSecretKey), // #nosec G101 -- env var name, not a secret
+		MinIOUseSSL:           getEnv("MINIO_USE_SSL", "false") == "true",
+		MinIOBucket:           getEnv("MINIO_BUCKET", "concord-media"),
+		UploadMaxSize:         getEnvInt64("UPLOAD_MAX_SIZE", 25*1024*1024), // 25 MB default
+		KlipyAPIKey:           getEnv("KLIPY_API_KEY", ""),
 		GitHubFeedback: GitHubFeedbackConfig{
-			Token: getEnv("FEEDBACK_PAT", ""), // #nosec G101 -- env var name, not a secret
-			Repo:  getEnv("FEEDBACK_REPO", ""),
+			// TrimSpace both fields: a trailing newline on the PAT (the common
+			// copy-paste / secret-store artifact) corrupts the
+			// "Bearer <token>" Authorization header and a stray-whitespace repo
+			// slug yields per-request 502s from GitHub. (#158 review, PR #1547.)
+			Token: strings.TrimSpace(getEnv("FEEDBACK_PAT", "")), // #nosec G101 -- env var name, not a secret
+			Repo:  strings.TrimSpace(getEnv("FEEDBACK_REPO", "")),
 		},
 		RequireClientAttestation: getEnv("REQUIRE_CLIENT_ATTESTATION", "false") == "true",
 		AttestationTokenTTL:      parseAttestationTokenTTL(getEnv("ATTESTATION_TOKEN_TTL", "2h")),
@@ -480,6 +484,15 @@ func (c *Config) validate() error {
 			"FEEDBACK_PAT must be set in production. Without it the feedback handler falls back to a log-only stub and no GitHub issues are filed. Generate a fine-scoped PAT with `issues:write` on the feedback repo only."},
 		{c.GitHubFeedback.Repo == "",
 			"FEEDBACK_REPO must be set in production. Format: 'owner/repo' (e.g. 'Concord-Voice/Concord-Voice-Feedback')."},
+		// Shape-validate the slug — a malformed FEEDBACK_REPO (missing slash,
+		// empty segment, embedded whitespace, extra path component) builds a
+		// bad GitHub issues URL and yields per-request 502s rather than a
+		// fatal-exit at startup. Mirrors the rigor of the MEDIA_PLANE_URL
+		// guard above (parse-then-validate, not just an empty check).
+		// (#158 review, PR #1547.) The empty case is caught by the row above,
+		// so this only fires for non-empty-but-malformed values.
+		{c.GitHubFeedback.Repo != "" && !feedbackRepoHasValidShape(c.GitHubFeedback.Repo),
+			"FEEDBACK_REPO must be a valid 'owner/repo' slug (exactly one '/', both segments non-empty, no whitespace). Example: 'Concord-Voice/Concord-Voice-Feedback'."},
 	}
 
 	for _, g := range guards {
@@ -561,6 +574,29 @@ func mediaPlaneURLIsRoot(raw string) bool {
 	}
 	host := strings.ToLower(u.Hostname())
 	return host == "concordvoice.chat" || host == "www.concordvoice.chat"
+}
+
+// feedbackRepoHasValidShape reports whether raw is a well-formed GitHub
+// `owner/repo` slug: exactly one '/', both segments non-empty, and no
+// whitespace anywhere. The control-plane interpolates this into the issues
+// REST URL (`/repos/<slug>/issues`); a malformed value would 404/502 on every
+// submission instead of failing loudly at startup. Caller is expected to TrimSpace
+// the value at Load time, but we also reject any interior whitespace here so a
+// slug like "owner /repo" cannot slip through. (#158 review, PR #1547.)
+func feedbackRepoHasValidShape(raw string) bool {
+	if strings.ContainsAny(raw, " \t\r\n") {
+		return false
+	}
+	owner, repo, found := strings.Cut(raw, "/")
+	if !found {
+		return false
+	}
+	// strings.Cut splits on the FIRST '/'; a second '/' would land in repo,
+	// so reject any remaining slash to enforce "exactly one".
+	if owner == "" || repo == "" || strings.Contains(repo, "/") {
+		return false
+	}
+	return true
 }
 
 // parseOrigins splits a comma-separated list of origins into a slice.

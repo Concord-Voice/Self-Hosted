@@ -15,6 +15,27 @@ type RateLimitConfig struct {
 	Requests int                       // Number of requests allowed
 	Window   time.Duration             // Time window for the limit
 	KeyFunc  func(*gin.Context) string // Function to generate rate limit key
+	// FailClosed, when true, rejects the request (503) if the Redis backend
+	// errors, instead of failing open. Use for privileged-write routes where
+	// the limiter is the SOLE velocity control (e.g. feedback issue creation
+	// against a PUBLIC repo via a privileged PAT — #158). Default false
+	// preserves the fail-open posture for availability-first routes.
+	FailClosed bool
+}
+
+// rateLimitIPKey builds the per-IP rate-limit Redis key.
+func rateLimitIPKey(c *gin.Context) string {
+	return fmt.Sprintf("ratelimit:ip:%s:%s:%s", c.ClientIP(), c.Request.Method, c.FullPath())
+}
+
+// rateLimitUserKey builds the per-user rate-limit Redis key, falling back to
+// the per-IP key when the request is unauthenticated.
+func rateLimitUserKey(c *gin.Context) string {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		return rateLimitIPKey(c)
+	}
+	return fmt.Sprintf("ratelimit:user:%v:%s:%s", userID, c.Request.Method, c.FullPath())
 }
 
 // RateLimitByIP creates a rate limiter based on IP address
@@ -22,9 +43,7 @@ func RateLimitByIP(redis *redis.Client, requests int, window time.Duration) gin.
 	config := RateLimitConfig{
 		Requests: requests,
 		Window:   window,
-		KeyFunc: func(c *gin.Context) string {
-			return fmt.Sprintf("ratelimit:ip:%s:%s:%s", c.ClientIP(), c.Request.Method, c.FullPath())
-		},
+		KeyFunc:  rateLimitIPKey,
 	}
 	return rateLimit(redis, config)
 }
@@ -34,14 +53,24 @@ func RateLimitByUser(redis *redis.Client, requests int, window time.Duration) gi
 	config := RateLimitConfig{
 		Requests: requests,
 		Window:   window,
-		KeyFunc: func(c *gin.Context) string {
-			userID, exists := c.Get("user_id")
-			if !exists {
-				// Fall back to IP if user not authenticated
-				return fmt.Sprintf("ratelimit:ip:%s:%s:%s", c.ClientIP(), c.Request.Method, c.FullPath())
-			}
-			return fmt.Sprintf("ratelimit:user:%v:%s:%s", userID, c.Request.Method, c.FullPath())
-		},
+		KeyFunc:  rateLimitUserKey,
+	}
+	return rateLimit(redis, config)
+}
+
+// RateLimitByUserFailClosed is RateLimitByUser with fail-CLOSED semantics: a
+// Redis backend error rejects the request (503) rather than allowing it. Use
+// ONLY for privileged-write routes where the limiter is the single velocity
+// control and an open floodgate is worse than a brief outage — e.g.
+// POST /api/v1/feedback, which creates issues in a PUBLIC repo via a privileged
+// PAT (#158). All other routes keep the fail-open RateLimitByUser to favor
+// availability.
+func RateLimitByUserFailClosed(redis *redis.Client, requests int, window time.Duration) gin.HandlerFunc {
+	config := RateLimitConfig{
+		Requests:   requests,
+		Window:     window,
+		FailClosed: true,
+		KeyFunc:    rateLimitUserKey,
 	}
 	return rateLimit(redis, config)
 }
@@ -55,7 +84,16 @@ func rateLimit(redis *redis.Client, config RateLimitConfig) gin.HandlerFunc {
 		// Increment counter
 		count, err := redis.Incr(ctx, key).Result()
 		if err != nil {
-			// If Redis is down, fail open (allow request) to prevent total outage
+			if config.FailClosed {
+				// Privileged-write route: the limiter is the only velocity cap,
+				// so a Redis outage must NOT open the floodgate (#158). Reject.
+				c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+					"error":   "service unavailable",
+					"message": "rate-limit backend unavailable; please retry shortly",
+				})
+				return
+			}
+			// Default: fail open (allow request) to prevent total outage
 			c.Next()
 			return
 		}
