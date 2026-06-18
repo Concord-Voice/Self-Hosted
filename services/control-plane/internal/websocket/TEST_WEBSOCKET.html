@@ -105,8 +105,8 @@
 
     <div class="section">
         <h2>Connection</h2>
-        <input type="text" id="wsUrl" placeholder="WebSocket URL" value="ws://localhost:8080/api/v1/ws">
-        <textarea id="jwtToken" placeholder="Paste your JWT token here (from login response)" rows="3"></textarea>
+        <input type="text" id="wsUrl" aria-label="WebSocket URL" placeholder="WebSocket URL" value="ws://localhost:8080/api/v1/ws">
+        <textarea id="jwtToken" aria-label="JWT token" placeholder="Paste your JWT token here (from login response)" rows="3"></textarea>
         <div>
             <button id="connectBtn" onclick="connect()">Connect</button>
             <button id="disconnectBtn" onclick="disconnect()" disabled>Disconnect</button>
@@ -122,7 +122,7 @@
 
     <div class="section">
         <h2>Channel Subscription</h2>
-        <input type="text" id="channelId" placeholder="Channel UUID">
+        <input type="text" id="channelId" aria-label="Channel UUID to subscribe to" placeholder="Channel UUID">
         <div>
             <button onclick="subscribe()" id="subscribeBtn" disabled>Subscribe</button>
             <button onclick="unsubscribe()" id="unsubscribeBtn" disabled>Unsubscribe</button>
@@ -131,14 +131,14 @@
 
     <div class="section">
         <h2>Send Message</h2>
-        <input type="text" id="messageChannel" placeholder="Channel UUID">
-        <textarea id="messageContent" placeholder="Message content" rows="2"></textarea>
+        <input type="text" id="messageChannel" aria-label="Channel UUID to send the message to" placeholder="Channel UUID">
+        <textarea id="messageContent" aria-label="Message content" placeholder="Message content" rows="2"></textarea>
         <button onclick="sendMessage()" id="sendBtn" disabled>Send Message</button>
     </div>
 
     <div class="section">
         <h2>Typing Indicator</h2>
-        <input type="text" id="typingChannel" placeholder="Channel UUID">
+        <input type="text" id="typingChannel" aria-label="Channel UUID for typing indicator" placeholder="Channel UUID">
         <div>
             <button onclick="sendTyping(true)" id="typingStartBtn" disabled>Start Typing</button>
             <button onclick="sendTyping(false)" id="typingStopBtn" disabled>Stop Typing</button>

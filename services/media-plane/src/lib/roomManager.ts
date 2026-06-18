@@ -69,7 +69,7 @@ export const SCREEN_PRODUCER_CAP = 5;
 /**
  * Resolve the per-room concurrent camera-producer cap.
  *
- * TODO(#1294): when the entitlement resolver (#1521) + /voice/join tier
+ * Tier-seam (#1294): when the entitlement resolver (#1521) + /voice/join tier
  * plumbing (#1300) land, read the room/owner subscription tier here and return
  * the paid value for paid rooms. Until then every room resolves to the free
  * default, which is correct for the Beta window (no paid users exist pre-Beta).
