@@ -3,7 +3,7 @@ module github.com/markdrogersjr/Concord/services/control-plane
 go 1.26.4
 
 require (
-	github.com/coreos/go-oidc/v3 v3.18.0
+	github.com/coreos/go-oidc/v3 v3.19.0
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-webauthn/webauthn v0.17.4
 	github.com/golang-jwt/jwt/v5 v5.3.1
