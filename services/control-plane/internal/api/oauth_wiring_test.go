@@ -69,8 +69,8 @@ func TestBuildOAuthHandler_GoogleSSOEnabled(t *testing.T) {
 	cfg := &config.Config{
 		Environment: "test",
 		GoogleSSO: config.GoogleSSOConfig{
-			Enabled:      true,
-			ClientID:     "test-client.apps.googleusercontent.com",
+			Enabled:  true,
+			ClientID: "test-client.apps.googleusercontent.com",
 			// ClientSecret removed in #975 — server no longer exchanges codes
 		},
 	}
@@ -161,8 +161,8 @@ func TestBuildOAuthHandler_BothProvidersEnabled(t *testing.T) {
 	cfg := &config.Config{
 		Environment: "test",
 		GoogleSSO: config.GoogleSSOConfig{
-			Enabled:      true,
-			ClientID:     "test-client.apps.googleusercontent.com",
+			Enabled:  true,
+			ClientID: "test-client.apps.googleusercontent.com",
 			// ClientSecret removed in #975 — server no longer exchanges codes
 		},
 		AppleSSO: config.AppleSSOConfig{

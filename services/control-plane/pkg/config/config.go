@@ -105,7 +105,7 @@ type CloudflareKVBridgeConfig struct {
 	Enabled     bool
 	AccountID   string
 	NamespaceID string
-	APIToken    string
+	APIToken    string // #nosec G117 -- False positive: config field name, not a secret literal; struct has no JSON tags (never serialized) and String() redacts it.
 }
 
 // String redacts the API token.

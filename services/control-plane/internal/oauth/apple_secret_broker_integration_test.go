@@ -119,7 +119,7 @@ func TestSignClientSecret_HappyPath(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 
 	var resp struct {
-		ClientSecret string `json:"client_secret"`
+		ClientSecret string `json:"client_secret"` // #nosec G117 -- False positive: test-only struct deserializing the broker response to assert on it.
 		ExpiresIn    int    `json:"expires_in"`
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))

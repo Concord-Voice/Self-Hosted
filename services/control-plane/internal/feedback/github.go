@@ -84,7 +84,7 @@ func (c *Client) CreateIssue(ctx context.Context, req IssueRequest) (*IssueRespo
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("User-Agent", "concord-feedback-bot")
 
-	resp, err := c.httpClient.Do(httpReq)
+	resp, err := c.httpClient.Do(httpReq) // #nosec G704 -- False positive: host is c.baseURL (trusted GitHub API base from config) and repoSlug is operator-configured; user content is in the POST body, not the URL.
 	if err != nil {
 		return nil, fmt.Errorf("github: transport: %w", err)
 	}

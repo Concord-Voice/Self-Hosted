@@ -63,7 +63,7 @@ func (c *Client) Put(ctx context.Context, key, value string, ttlSeconds int) err
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	req.Header.Set("Content-Type", "text/plain")
 
-	resp, err := c.http.Do(req)
+	resp, err := c.http.Do(req) // #nosec G704 -- False positive: host is c.baseURL (trusted Cloudflare API base from config); path segments are url.PathEscape'd. No user-controlled host.
 	if err != nil {
 		return fmt.Errorf("cfkv: put: %w", err)
 	}
