@@ -316,6 +316,13 @@ export const config = {
       rtcMaxPort: Number.parseInt(process.env.RTC_MAX_PORT || '49999', 10),
     },
 
+    // Header extensions are NOT declared here — mediasoup advertises its built-in
+    // supported set (incl. `urn:ietf:params:rtp-hdrext:ssrc-audio-level`, RFC 6464)
+    // implicitly via getSupportedRtpCapabilities(). That audio-level extension is
+    // load-bearing: under E2EE it is the ONLY cleartext loudness signal the
+    // AudioLevelObserver (active-speaker detection / audio last-N, #1544) can read.
+    // Do NOT add a headerExtensions filter that drops it. Locked by
+    // tests/audioLevelHeaderExtension.test.ts (#1543).
     router: {
       mediaCodecs,
     },
