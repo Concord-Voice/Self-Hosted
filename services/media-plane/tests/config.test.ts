@@ -51,9 +51,7 @@ describe('config', () => {
     it('has all 7 quality tiers', async () => {
       const { AUDIO_QUALITY_TIERS } = await loadConfig();
       const tiers = Object.keys(AUDIO_QUALITY_TIERS);
-      expect(tiers).toEqual([
-        'minimum', 'low', 'moderate', 'standard', 'high', 'hifi', 'studio',
-      ]);
+      expect(tiers).toEqual(['minimum', 'low', 'moderate', 'standard', 'high', 'hifi', 'studio']);
     });
 
     it('has ascending bitrates', async () => {
@@ -107,7 +105,9 @@ describe('config', () => {
 
     it('all video codecs have rtcpFeedback', async () => {
       const { config } = await loadConfig();
-      const videoCodecs = config.mediasoup.router.mediaCodecs.filter((c: any) => c.kind === 'video');
+      const videoCodecs = config.mediasoup.router.mediaCodecs.filter(
+        (c: any) => c.kind === 'video'
+      );
       for (const codec of videoCodecs) {
         expect(codec.rtcpFeedback).toBeDefined();
         expect(codec.rtcpFeedback.length).toBeGreaterThan(0);
@@ -171,13 +171,39 @@ describe('config', () => {
       expect(config.freeVideoPublisherCap).toBe(12);
     });
 
-    it.each([['abc'], ['0'], ['-5'], ['']])(
-      'falls back to 8 for invalid value %j',
-      async (raw) => {
-        const { config } = await loadConfig({ FREE_VIDEO_PUBLISHER_CAP: raw });
-        expect(config.freeVideoPublisherCap).toBe(8);
-      }
-    );
+    it.each([['abc'], ['0'], ['-5'], ['']])('falls back to 8 for invalid value %j', async (raw) => {
+      const { config } = await loadConfig({ FREE_VIDEO_PUBLISHER_CAP: raw });
+      expect(config.freeVideoPublisherCap).toBe(8);
+    });
+  });
+
+  // ── audio last-N config (#1544) ─────────────────────────────────────
+
+  describe('audio last-N config (#1544)', () => {
+    it('defaults freeAudioLastN to 8', async () => {
+      const { config } = await loadConfig();
+      expect(config.freeAudioLastN).toBe(8);
+    });
+
+    it('defaults audioLastNHoldMs to 2500', async () => {
+      const { config } = await loadConfig();
+      expect(config.audioLastNHoldMs).toBe(2500);
+    });
+
+    it('reads a valid positive integer from FREE_AUDIO_LAST_N', async () => {
+      const { config } = await loadConfig({ FREE_AUDIO_LAST_N: '12' });
+      expect(config.freeAudioLastN).toBe(12);
+    });
+
+    it('clamps an out-of-range AUDIO_LAST_N_HOLD_MS to 10000', async () => {
+      const { config } = await loadConfig({ AUDIO_LAST_N_HOLD_MS: '999999' });
+      expect(config.audioLastNHoldMs).toBe(10_000);
+    });
+
+    it('clamps a too-small AUDIO_LAST_N_HOLD_MS to 500', async () => {
+      const { config } = await loadConfig({ AUDIO_LAST_N_HOLD_MS: '100' });
+      expect(config.audioLastNHoldMs).toBe(500);
+    });
   });
 
   // ── Production Guard ────────────────────────────────────────────────

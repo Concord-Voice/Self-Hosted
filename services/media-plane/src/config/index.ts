@@ -281,6 +281,16 @@ export const config = {
   // entitlement resolver lands; until then all rooms use this free default.
   freeVideoPublisherCap: parsePositiveIntEnv(process.env.FREE_VIDEO_PUBLISHER_CAP, 8),
 
+  // Audio last-N (#1544): free default forwarded-speaker cap. Tier-aware paid
+  // value (16) deferred behind the #1294 seam, exactly like freeVideoPublisherCap.
+  freeAudioLastN: parsePositiveIntEnv(process.env.FREE_AUDIO_LAST_N, 8),
+  // Leave-hysteresis hold (ms) before a silent speaker is paused — clamped to a
+  // sane range so a bad env value can't disable hysteresis or pin speakers forever.
+  audioLastNHoldMs: Math.max(
+    500,
+    Math.min(10_000, parsePositiveIntEnv(process.env.AUDIO_LAST_N_HOLD_MS, 2500))
+  ),
+
   // Redis — room state, cross-instance coordination
   // Default includes dev password to match docker-compose and control plane defaults
   redisUrl: process.env.REDIS_URL || 'redis://:concord_dev_redis@localhost:6379',

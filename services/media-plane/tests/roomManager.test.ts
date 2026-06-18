@@ -18,6 +18,8 @@ vi.mock('mediasoup', () => ({
 vi.mock('@/config/index.js', () => ({
   config: {
     freeVideoPublisherCap: 8,
+    freeAudioLastN: 8,
+    audioLastNHoldMs: 2500,
     mediasoup: {
       webRtcTransport: {
         listenIps: [{ ip: '0.0.0.0', announcedIp: '127.0.0.1' }],
@@ -40,6 +42,8 @@ import {
   RoomManager,
   resolveVideoPublisherCap,
   ABSOLUTE_VIDEO_PUBLISHER_CEILING,
+  resolveAudioLastN,
+  ABSOLUTE_AUDIO_LAST_N_CEILING,
 } from '../src/lib/roomManager.js';
 
 // ---------------------------------------------------------------------------
@@ -1380,6 +1384,160 @@ describe('RoomManager', () => {
   });
 });
 
+// ---------------------------------------------------------------------------
+// Audio last-N security guard (#1544)
+// ---------------------------------------------------------------------------
+
+describe('resumeConsumer last-N guard (#1544)', () => {
+  let rm: RoomManager;
+  let router: ReturnType<typeof createMockRouter>;
+
+  /**
+   * Build a room with a producer (u-1) + a subscriber (u-2) who has one audio
+   * consumer with a deterministic id 'c-audio'. Reuses the mediasoup mock
+   * factories — same scaffolding the mute/deafen + cap tests use.
+   */
+  async function setupRoomWithAudioConsumer(): Promise<{
+    rm: RoomManager;
+    room: import('../src/lib/roomManager.js').Room;
+    userId: string;
+    consumer: ReturnType<typeof createMockConsumer>;
+  }> {
+    router = createMockRouter();
+    rm = new RoomManager(createMockMediasoupService(router) as any);
+
+    // u-1 produces mic audio.
+    await rm.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
+    const sendTransport = createMockTransport();
+    router.createWebRtcTransport.mockResolvedValueOnce(sendTransport);
+    await rm.createTransport('room-1', 'u-1', 'send');
+    const producer = createMockProducer({ kind: 'audio', id: 'p-mic' });
+    sendTransport.produce.mockResolvedValueOnce(producer);
+    const producerInfo = await rm.produce(
+      'room-1',
+      'u-1',
+      sendTransport.id,
+      'audio',
+      createRtpParameters() as any,
+      'mic'
+    );
+
+    // u-2 subscribes to u-1's audio with a deterministic consumer id.
+    await rm.joinRoom(
+      'room-1',
+      'u-2',
+      'sock-2',
+      'bob',
+      undefined,
+      undefined,
+      createRtpCapabilities() as any
+    );
+    const recvTransport = createMockTransport();
+    const consumer = createMockConsumer({
+      id: 'c-audio',
+      producerId: producerInfo.producerId,
+      kind: 'audio',
+    });
+    recvTransport.consume.mockResolvedValue(consumer);
+    router.createWebRtcTransport.mockResolvedValueOnce(recvTransport);
+    await rm.createTransport('room-1', 'u-2', 'recv');
+    await rm.consume('room-1', 'u-2', producerInfo.producerId);
+
+    const room = rm.getRoom('room-1')!;
+    return { rm, room, userId: 'u-2', consumer };
+  }
+
+  function getConsumer(
+    room: import('../src/lib/roomManager.js').Room,
+    userId: string,
+    consumerId: string
+  ) {
+    return room.participants.get(userId)!.consumers.get(consumerId) as any;
+  }
+
+  it('refuses to resume a consumer in lastNPausedConsumers (client cannot bypass the cap)', async () => {
+    const { rm, room, userId } = await setupRoomWithAudioConsumer();
+    room.lastNPausedConsumers.add('c-audio');
+    const consumer = getConsumer(room, userId, 'c-audio');
+    await rm.resumeConsumer(room.id, userId, 'c-audio');
+    expect(consumer.resume).not.toHaveBeenCalled(); // guard held
+  });
+
+  it('honors resume for a consumer whose speaker IS in the top-N (not in the last-N set)', async () => {
+    const { rm, room, userId, consumer } = await setupRoomWithAudioConsumer();
+    // Consume-time init starts a non-top-N mic consumer last-N-paused. Admit the
+    // speaker into the top-N via a 'volumes' tick — applyLastNDelta clears its
+    // consumer from lastNPausedConsumers (and resumes it). The subsequent client
+    // resumeConsumer is now honored (top-N audio is resumable).
+    router._audioLevelObserver._emit('volumes', [{ producer: { id: 'p-mic' }, volume: -20 }]);
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(room.lastNPausedConsumers.has('c-audio')).toBe(false); // cleared by admit
+    consumer.resume.mockClear(); // ignore the last-N admit resume; test the client path
+
+    await rm.resumeConsumer(room.id, userId, 'c-audio');
+    expect(consumer.resume).toHaveBeenCalledOnce();
+  });
+
+  it('never pauses the PRODUCER across an admit -> evict cycle (only consumers)', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(0);
+      const { room, consumer } = await setupRoomWithAudioConsumer();
+      const observer = router._audioLevelObserver;
+
+      // The mic producer's own mock — assert last-N never touches it.
+      const producerEntry = room.participants.get('u-1')!.producers.get('p-mic')!;
+      const producerMock = producerEntry.producer as any;
+
+      // Admit p-mic into the top-N at t=0 (delta.added → resume its consumer,
+      // clear it from the paused set).
+      observer._emit('volumes', [{ producer: { id: 'p-mic' }, volume: -20 }]);
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(room.activeSpeakers.current().has('p-mic')).toBe(true);
+
+      // Advance past the hysteresis hold (2500ms) and go silent → evict p-mic
+      // (delta.removed → PAUSE its consumer, re-add to the paused set).
+      vi.setSystemTime(2500 + 1);
+      observer._emit('silence');
+      await Promise.resolve();
+      await Promise.resolve();
+
+      // The cap acts on the CONSUMER only; the PRODUCER is never paused by last-N.
+      expect(producerMock.pause).not.toHaveBeenCalled();
+      expect(consumer.pause).toHaveBeenCalled();
+      expect(room.lastNPausedConsumers.has('c-audio')).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does NOT resume a SERVER-DEAFENED subscriber when its speaker enters top-N (no moderation bypass)', async () => {
+    const { rm, room, userId, consumer } = await setupRoomWithAudioConsumer();
+    // Server-deafen u-2 (a moderation control) → all their audio consumers paused.
+    await rm.serverDeafenUser(room.id, userId);
+    consumer.resume.mockClear();
+    // p-mic enters the top-N — last-N would normally resume u-2's consumer.
+    router._audioLevelObserver._emit('volumes', [{ producer: { id: 'p-mic' }, volume: -20 }]);
+    await Promise.resolve();
+    await Promise.resolve();
+    // Server-deafen is server-enforced: last-N must NOT resume it (else the
+    // deafened user receives audio — a moderation bypass).
+    expect(consumer.resume).not.toHaveBeenCalled();
+    // The consumer is still cleared from the last-N set (its producer is top-N);
+    // the deafen pause holds, and server-undeafen + client resume restores it.
+    expect(room.lastNPausedConsumers.has('c-audio')).toBe(false);
+  });
+
+  it('closeConsumer removes the consumer from lastNPausedConsumers (no leak)', async () => {
+    const { rm, room, userId } = await setupRoomWithAudioConsumer();
+    room.lastNPausedConsumers.add('c-audio');
+    rm.closeConsumer(room.id, userId, 'c-audio');
+    expect(room.lastNPausedConsumers.has('c-audio')).toBe(false);
+  });
+});
+
 describe('resolveVideoPublisherCap', () => {
   const room = {} as any; // room is unused until the #1294 tier-seam lands
 
@@ -1403,5 +1561,18 @@ describe('resolveVideoPublisherCap', () => {
     // `count >= 0` always true and reject every camera produce (a DoS).
     expect(resolveVideoPublisherCap(room, 0)).toBe(1);
     expect(resolveVideoPublisherCap(room, -5)).toBe(1);
+  });
+});
+
+describe('resolveAudioLastN (#1544)', () => {
+  it('returns the free default (8) for Beta', () => {
+    expect(resolveAudioLastN(undefined, 8)).toBe(8);
+  });
+  it('clamps above the absolute ceiling', () => {
+    expect(resolveAudioLastN(undefined, 999)).toBe(ABSOLUTE_AUDIO_LAST_N_CEILING);
+  });
+  it('floors at 1 (a 0/negative tier value cannot disable the cap)', () => {
+    expect(resolveAudioLastN(undefined, 0)).toBe(1);
+    expect(resolveAudioLastN(undefined, -5)).toBe(1);
   });
 });

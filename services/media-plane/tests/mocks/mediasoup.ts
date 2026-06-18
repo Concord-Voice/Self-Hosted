@@ -51,8 +51,10 @@ export function createMockConsumer(overrides: Record<string, unknown> = {}) {
     rtpParameters: {},
     producerId: '',
     closed: false,
-    pause: vi.fn(),
-    resume: vi.fn(),
+    // pause/resume return resolved promises (mediasoup's real API is async — the
+    // last-N applyLastNDelta path calls `.catch()` on the returned promise).
+    pause: vi.fn(() => Promise.resolve()),
+    resume: vi.fn(() => Promise.resolve()),
     close: vi.fn(),
     on: emitter.on,
     _emit: emitter.emit,
@@ -66,7 +68,9 @@ export function createMockTransport(overrides: Record<string, unknown> = {}) {
   return {
     id,
     iceParameters: { usernameFragment: 'test', ice: 'mock-credential' },
-    iceCandidates: [{ foundation: '1', priority: 1, ip: '127.0.0.1', port: 5000, type: 'host', protocol: 'udp' }],
+    iceCandidates: [
+      { foundation: '1', priority: 1, ip: '127.0.0.1', port: 5000, type: 'host', protocol: 'udp' },
+    ],
     dtlsParameters: { fingerprints: [{ algorithm: 'sha-256', value: 'AA:BB:CC' }], role: 'auto' },
     iceState: 'new',
     dtlsState: 'new',

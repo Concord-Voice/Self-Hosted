@@ -13,6 +13,8 @@ import { config } from '../config/index.js';
 import { logger } from './logger.js';
 import { MediasoupService } from './mediasoup.js';
 import type { MetricsSample } from './mediaMetrics.js';
+import { ActiveSpeakerSet } from './activeSpeakerSet.js';
+import type { ActiveSpeakerDelta } from './activeSpeakerSet.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -51,6 +53,12 @@ export interface Room {
    * await). Load-bearing for TOCTOU-safe cap enforcement — see `produce()`.
    */
   pendingProducerCounts: Map<MediaSource, number>;
+  /** Audio last-N (#1544): the N-slot active-speaker decision unit. */
+  activeSpeakers: ActiveSpeakerSet;
+  /** Consumer IDs the SFU has paused for audio last-N — the resumeConsumer guard set. */
+  lastNPausedConsumers: Set<string>;
+  /** Mic-producer IDs (last-N managed set; screen-audio excluded). */
+  micProducerIds: Set<string>;
 }
 
 export interface ProducerInfo {
@@ -85,6 +93,29 @@ export function resolveVideoPublisherCap(
   freeCap: number = config.freeVideoPublisherCap
 ): number {
   return Math.max(1, Math.min(freeCap, ABSOLUTE_VIDEO_PUBLISHER_CEILING));
+}
+
+/** Absolute per-room audio last-N ceiling — hard upper bound, not tier-tunable. */
+export const ABSOLUTE_AUDIO_LAST_N_CEILING = 16;
+
+/**
+ * Resolve the per-room audio last-N forwarded-speaker cap.
+ *
+ * TODO(#1294): when the entitlement resolver (#1521) + /voice/join tier plumbing
+ * (#1300) land, read room/owner tier here and return the paid value (16). Until
+ * then every room resolves to the free default — correct for Beta (no paid users
+ * pre-Beta), mirroring resolveVideoPublisherCap.
+ *
+ * `room` is optional because the cap is resolved at room-creation time, BEFORE
+ * the Room object exists (the observer must be sized first). It is unused today
+ * (tier deferred); when tier lands, pass the room/owner tier in instead.
+ *
+ * Clamped at BOTH ends: ceiling stops a tier value raising the global bound; the
+ * floor of 1 stops a future #1294 tier value of 0/negative — which bypasses
+ * config's fail-safe parsePositiveIntEnv — from disabling the cap.
+ */
+export function resolveAudioLastN(_room?: Room, freeN: number = config.freeAudioLastN): number {
+  return Math.max(1, Math.min(freeN, ABSOLUTE_AUDIO_LAST_N_CEILING));
 }
 
 export interface TransportOptions {
@@ -213,11 +244,15 @@ export class RoomManager {
 
     const router = await this.mediasoup.getOrCreateRouter(roomId);
 
+    // Audio last-N (#1544): resolve the forwarded-speaker cap (free 8 for Beta;
+    // tier deferred). The observer is sized to N so `volumes` surfaces the top-N.
+    const lastN = resolveAudioLastN();
+
     // Create AudioLevelObserver for active speaker detection
     let audioLevelObserver: AudioLevelObserver | null = null;
     try {
       audioLevelObserver = await router.createAudioLevelObserver({
-        maxEntries: config.audioLevelObserver.maxEntries,
+        maxEntries: lastN,
         threshold: config.audioLevelObserver.threshold,
         interval: config.audioLevelObserver.interval,
       });
@@ -236,27 +271,36 @@ export class RoomManager {
       createdAt: new Date(),
       e2eeEpoch: 0,
       pendingProducerCounts: new Map(),
+      activeSpeakers: new ActiveSpeakerSet(lastN, config.audioLastNHoldMs),
+      lastNPausedConsumers: new Set(),
+      micProducerIds: new Set(),
     };
 
     // Wire up active speaker events
     if (audioLevelObserver) {
       audioLevelObserver.on('volumes', (volumes: Array<{ producer: Producer; volume: number }>) => {
-        if (volumes.length === 0) return;
-        const { producer, volume } = volumes[0];
-        // Find the participant who owns this producer
-        for (const [, participant] of room.participants) {
-          for (const [, entry] of participant.producers) {
-            if (entry.producer.id === producer.id) {
-              this.emitEvent({
-                type: 'active-speaker',
-                roomId,
-                userId: participant.userId,
-                volume,
-              });
-              return;
+        // Preserve the single-speaker UI broadcast (loudest = volumes[0]).
+        if (volumes.length > 0) {
+          const { producer, volume } = volumes[0];
+          // Find the participant who owns this producer
+          for (const [, participant] of room.participants) {
+            for (const [, entry] of participant.producers) {
+              if (entry.producer.id === producer.id) {
+                this.emitEvent({
+                  type: 'active-speaker',
+                  roomId,
+                  userId: participant.userId,
+                  volume,
+                });
+                break;
+              }
             }
           }
         }
+        // Drive last-N from the full ranked top-N.
+        const ranked = volumes.map((v) => v.producer.id);
+        const delta = room.activeSpeakers.update(ranked, Date.now());
+        this.applyLastNDelta(room, delta);
       });
 
       // Clear active speaker when everyone stops talking
@@ -267,6 +311,8 @@ export class RoomManager {
           userId: '',
           volume: -Infinity,
         });
+        const delta = room.activeSpeakers.update([], Date.now());
+        this.applyLastNDelta(room, delta);
       });
     }
 
@@ -421,6 +467,7 @@ export class RoomManager {
     // Close all producers (also removes from AudioLevelObserver)
     for (const [producerId, entry] of participant.producers) {
       if (!entry.producer.closed) entry.producer.close();
+      this.removeMicProducer(room, producerId);
       this.emitEvent({
         type: 'producer-removed',
         roomId,
@@ -659,6 +706,9 @@ export class RoomManager {
       room.audioLevelObserver &&
       !room.audioLevelObserver.closed
     ) {
+      // Audio last-N (#1544): track this as a last-N-managed mic producer so the
+      // observed set matches exactly the producers driving the active-speaker set.
+      room.micProducerIds.add(producer.id);
       try {
         await room.audioLevelObserver.addProducer({ producerId: producer.id });
       } catch (err) {
@@ -672,6 +722,7 @@ export class RoomManager {
     // Clean up when producer closes
     producer.on('transportclose', () => {
       participant.producers.delete(producer.id);
+      this.removeMicProducer(room, producer.id);
     });
 
     const info: ProducerInfo = {
@@ -736,6 +787,7 @@ export class RoomManager {
 
     if (!entry.producer.closed) entry.producer.close();
     participant.producers.delete(producerId);
+    this.removeMicProducer(room, producerId);
 
     this.emitEvent({
       type: 'producer-removed',
@@ -836,12 +888,27 @@ export class RoomManager {
 
     consumer.consumers.set(newConsumer.id, newConsumer);
 
+    // Audio last-N (#1544): if this is a MIC audio consumer whose producer is not
+    // currently in the top-N, start it last-N-paused (it was created paused:true)
+    // so the client's unconditional resume is refused by the guard until the
+    // speaker enters the top-N. Screen-audio (not a mic producer) and video are
+    // never managed.
+    if (
+      newConsumer.kind === 'audio' &&
+      room.micProducerIds.has(producerId) &&
+      !room.activeSpeakers.current().has(producerId)
+    ) {
+      room.lastNPausedConsumers.add(newConsumer.id);
+    }
+
     // Clean up on close
     newConsumer.on('transportclose', () => {
       consumer.consumers.delete(newConsumer.id);
+      room.lastNPausedConsumers.delete(newConsumer.id);
     });
     newConsumer.on('producerclose', () => {
       consumer.consumers.delete(newConsumer.id);
+      room.lastNPausedConsumers.delete(newConsumer.id);
     });
 
     logger.info('Consumer created with transport state', {
@@ -877,6 +944,17 @@ export class RoomManager {
     const consumer = participant.consumers.get(consumerId);
     if (!consumer) throw new Error('Consumer not found');
 
+    // Audio last-N (#1544) enforcement boundary: a consumer the SFU has paused
+    // for last-N must NOT be resumed on a client request — that is the egress-cap
+    // bypass. The server's own last-N resume path clears the set first.
+    if (room.lastNPausedConsumers.has(consumerId)) {
+      logger.debug('Refusing client resume of last-N-paused consumer', {
+        consumerId,
+        roomId,
+        userId,
+      });
+      return;
+    }
     await consumer.resume();
     logger.debug('Consumer resumed', { consumerId, roomId, userId });
   }
@@ -909,6 +987,9 @@ export class RoomManager {
 
     if (!consumer.closed) consumer.close();
     participant.consumers.delete(consumerId);
+    // Explicit close does NOT fire the consumer's transportclose/producerclose
+    // handlers, so clean up the last-N guard set here too (else the entry leaks).
+    room.lastNPausedConsumers.delete(consumerId);
     logger.debug('Consumer closed', { consumerId, roomId, userId });
     return true;
   }
@@ -926,6 +1007,52 @@ export class RoomManager {
   private async pauseAudioConsumers(participant: Participant): Promise<void> {
     for (const [, consumer] of participant.consumers) {
       if (consumer.kind === 'audio') await consumer.pause();
+    }
+  }
+
+  /**
+   * Apply an active-speaker delta: pause each subscriber's audio consumers for
+   * producers that just left the top-N, resume those that just entered. The
+   * `lastNPausedConsumers` Set is mutated SYNCHRONOUSLY (before any await) so the
+   * resumeConsumer guard's view is always consistent under overlapping ticks;
+   * the mediasoup pause/resume calls reconcile toward it idempotently.
+   * The PRODUCER is never paused — only consumers.
+   */
+  private applyLastNDelta(room: Room, delta: ActiveSpeakerDelta): void {
+    for (const producerId of delta.removed) this.setAudioForwarding(room, producerId, false);
+    for (const producerId of delta.added) this.setAudioForwarding(room, producerId, true);
+  }
+
+  /**
+   * Pause (forward=false) or resume (forward=true) every subscriber's audio
+   * consumer for `producerId`. `lastNPausedConsumers` (the resumeConsumer guard's
+   * source of truth) is mutated SYNCHRONOUSLY before the async pause/resume so the
+   * guard's view stays consistent under overlapping observer ticks. The PRODUCER
+   * is never touched — only consumers.
+   */
+  private setAudioForwarding(room: Room, producerId: string, forward: boolean): void {
+    for (const [, participant] of room.participants) {
+      for (const [consumerId, consumer] of participant.consumers) {
+        if (consumer.kind !== 'audio' || consumer.producerId !== producerId) continue;
+        if (forward) {
+          room.lastNPausedConsumers.delete(consumerId); // no longer last-N-paused (producer is top-N)
+          // Server-deafen is a server-ENFORCED moderation control: a deafened
+          // subscriber must not receive audio regardless of client behavior.
+          // Last-N must NOT resume their consumer (that would bypass the deafen).
+          // The deafen pause holds; on server-undeafen the client's resume — now
+          // allowed by the guard since this consumer is out of lastNPausedConsumers —
+          // restores forwarding.
+          if (participant.serverDeafened) continue;
+          consumer
+            .resume()
+            .catch((err) => logger.warn('last-N resume failed', { consumerId, error: err }));
+        } else {
+          room.lastNPausedConsumers.add(consumerId); // add BEFORE pause
+          consumer
+            .pause()
+            .catch((err) => logger.warn('last-N pause failed', { consumerId, error: err }));
+        }
+      }
     }
   }
 
@@ -1205,6 +1332,18 @@ export class RoomManager {
     if (cap === null) return;
     const pending = room.pendingProducerCounts.get(source) ?? 0;
     room.pendingProducerCounts.set(source, Math.max(0, pending - 1));
+  }
+
+  /**
+   * Audio last-N (#1544) producer-close cleanup: drop a removed producer from the
+   * active-speaker decision set and the last-N-managed mic set. Idempotent and
+   * safe to call for ANY producer removal — `remove`/`delete` are no-ops for
+   * producers that were never mic-tracked (camera/screen/screen-audio), so every
+   * producer-removal flow routes through it unconditionally.
+   */
+  private removeMicProducer(room: Room, producerId: string): void {
+    room.activeSpeakers.remove(producerId);
+    room.micProducerIds.delete(producerId);
   }
 
   private countProducersBySource(room: Room, source: MediaSource): number {
