@@ -35,14 +35,21 @@ import (
 // asserts email_verified=true; the Callback handler refuses otherwise),
 // but we re-read in case the user later flips a flag via a recovery flow.
 func (h *Handler) IssueAccessAndRefresh(ctx context.Context, userID string) (accessToken, refreshToken string, err error) {
-	var emailVerified bool
+	var emailVerified, disabled bool
 	if err := h.db.QueryRowContext(ctx,
-		`SELECT email_verified FROM users WHERE id = $1`, userID,
-	).Scan(&emailVerified); err != nil {
+		`SELECT email_verified, disabled FROM users WHERE id = $1`, userID,
+	).Scan(&emailVerified, &disabled); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return "", "", fmt.Errorf("user %s not found", userID)
 		}
-		return "", "", fmt.Errorf("lookup email_verified: %w", err)
+		return "", "", fmt.Errorf("lookup user state: %w", err)
+	}
+	// Gate the SSO mint path on the terminal disable (#1623), so a disabled user
+	// cannot establish a session via SSO — symmetric with the password Login /
+	// CompleteLogin gate and the refresh gate. (AuthRequired's denylist also
+	// backstops any access derived from a token, but we must not mint one.)
+	if disabled {
+		return "", "", ErrAccountDisabled
 	}
 
 	accessToken, err = GenerateAccessToken(userID, h.jwtSecret, emailVerified)

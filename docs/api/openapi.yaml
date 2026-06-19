@@ -53,6 +53,8 @@ servers:
 - url: https://api.concordvoice.chat/api/v1
   description: Production
 tags:
+- name: Age Verification
+  description: Identity-blind age-verification claim ingest (#1623, ADR-0025)
 - name: Auth
   description: Registration, login, token management, logout
 - name: Users
@@ -92,6 +94,135 @@ tags:
 - name: Notifications
 - name: Platform
 paths:
+  /age/claim:
+    put:
+      tags:
+      - Age Verification
+      summary: Submit signed age-verification claim
+      operationId: submitAgeClaim
+      description: 'Identity-blind age-verification claim ingest (#1623, ADR-0025).
+
+        Accepts a client RSA-PSS-signed claim carrying only booleans (valid_age 16+,
+        nsfw_auth 18+) and a jurisdiction_obligation integer; no DOB, age value,
+        jurisdiction name, or location is ever accepted or stored. The server
+        reconstructs the canonical signing bytes from the authenticated request and
+        verifies the signature against the user''s current public_keys entry; enforces
+        an asymmetric freshness window + single-use nonce; persists one row per user;
+        and on valid_age=false atomically and terminally disables the account.
+
+        user_id is taken from the bearer token, never the body. The disabled-check runs
+        before signature verification, so a disabled account can never submit a claim.
+
+        Rate limit: 5 requests per minute (user-based). Requires a verified email.
+
+        '
+      security:
+      - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - canonical_version
+              - valid_age
+              - nsfw_auth
+              - jurisdiction_obligation
+              - nonce
+              - timestamp
+              - key_version
+              - client_version
+              - signature
+              properties:
+                canonical_version:
+                  type: integer
+                  description: Must equal 1 (the only supported canonical form); authenticated inside the signed bytes.
+                  example: 1
+                valid_age:
+                  type: boolean
+                  description: True if the user is 16+. False atomically and terminally disables the account.
+                nsfw_auth:
+                  type: boolean
+                  description: True if the user is 18+ (NSFW-eligible).
+                jurisdiction_obligation:
+                  type: integer
+                  description: Jurisdiction obligation level, 0..2. No jurisdiction name is stored.
+                  minimum: 0
+                  maximum: 2
+                nonce:
+                  type: string
+                  description: Single-use nonce, exactly 64 lowercase-hex chars (32 bytes).
+                  pattern: '^[0-9a-f]{64}$'
+                timestamp:
+                  type: integer
+                  format: int64
+                  description: Unix seconds. Accepted within now-300s..now+30s.
+                key_version:
+                  type: integer
+                  description: The public_keys key_version the claim was signed under; must match the user's current version.
+                client_version:
+                  type: string
+                  description: Client version string, 1..32 chars from [0-9A-Za-z.+-].
+                  example: 0.2.0
+                signature:
+                  type: string
+                  description: Base64 RSA-PSS (salt length = 32) signature over the v1 canonical form.
+      responses:
+        '200':
+          description: Claim accepted (and, on valid_age=false, account disabled)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  valid_age:
+                    type: boolean
+                  nsfw_auth:
+                    type: boolean
+                  jurisdiction_obligation:
+                    type: integer
+                  last_change:
+                    type: string
+                    format: date-time
+        '400':
+          description: 'Malformed body or field-shape violation (error_code: malformed)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
+        '401':
+          description: 'Missing/invalid bearer token (error_code: unauthenticated)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
+        '403':
+          description: 'Caller already disabled (error_code: account_disabled)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
+        '409':
+          description: 'Nonce already used (error_code: replayed_nonce)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
+        '422':
+          description: 'no_signing_key / stale_key_version / invalid_signature / stale_timestamp'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: 'Redis/DB unavailable on a fail-closed check (error_code: unavailable)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
   /attestation/verify:
     post:
       tags:

@@ -32,6 +32,14 @@ type User struct {
 	// by lookupUserForLogin so POST /api/v1/auth/login can short-circuit with
 	// HTTP 403 account_uses_sso instead of returning 401 invalid_credentials.
 	PasswordLoginDisabled bool `json:"-" db:"password_login_disabled"`
+
+	// Disabled is the soft-disable flag set terminally by the age-verification
+	// enforcement path (migration 000069, #1623) when a client-signed claim
+	// reports valid_age=false. Loaded by lookupUserForLogin / fetchActiveRefreshToken
+	// so login and refresh fail closed with HTTP 403 account_disabled, and mirrored
+	// into the Redis user_disabled:<id> denylist for immediate mid-session effect.
+	// Never serialized to clients (json:"-").
+	Disabled bool `json:"-" db:"disabled"`
 }
 
 // addOptionalProfileFields adds the shared optional fields to a profile map.

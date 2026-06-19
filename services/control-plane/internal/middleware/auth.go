@@ -3,6 +3,7 @@ package middleware
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"net/http"
 	"strings"
@@ -45,6 +46,16 @@ func AuthRequired(jwtSecret string, redisClient *redis.Client) gin.HandlerFunc {
 			return
 		}
 
+		// Immediate-effect user-disabled denylist (#1623): a per-user key set
+		// synchronously by the age-verification terminal-disable path. SAME
+		// fail-closed posture as the token blacklist above — reject on a present
+		// key OR on a Redis error. Source of truth is users.disabled; the key is
+		// persistent (no TTL) and rebuilt at startup (RebuildDisabledDenylist).
+		if isUserDisabled(c, redisClient, userID) {
+			abortAccountDisabled(c)
+			return
+		}
+
 		c.Set("user_id", userID)
 		c.Set("email_verified", emailVerifiedFromClaims(claims))
 		c.Next()
@@ -54,6 +65,56 @@ func AuthRequired(jwtSecret string, redisClient *redis.Client) gin.HandlerFunc {
 func abortUnauthorized(c *gin.Context) {
 	c.JSON(http.StatusUnauthorized, gin.H{"error": authError})
 	c.Abort()
+}
+
+func abortAccountDisabled(c *gin.Context) {
+	c.JSON(http.StatusForbidden, gin.H{"error_code": "account_disabled"})
+	c.Abort()
+}
+
+// UserDisabledKey is the immediate-effect denylist key — the SINGLE source of truth for
+// the "user_disabled:<id>" prefix. Both the age-claim disable path (the writer) and this
+// middleware (the reader) call it, so the writer and reader can never drift apart and
+// silently break the denylist.
+func UserDisabledKey(userID string) string { return "user_disabled:" + userID }
+
+// isUserDisabled mirrors isTokenBlacklisted's fail-closed posture: a present key OR a
+// Redis error rejects the request (#1623). A disabled user keeps no usable access
+// token past the next request even though the JWT itself is still cryptographically valid.
+func isUserDisabled(c *gin.Context, redisClient *redis.Client, userID string) bool {
+	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+	defer cancel()
+	exists, err := redisClient.Exists(ctx, UserDisabledKey(userID)).Result()
+	if err != nil {
+		return true // fail closed
+	}
+	return exists > 0
+}
+
+// RebuildDisabledDenylist repopulates the user_disabled:<id> keys from the source of
+// truth (users.disabled = TRUE), using the partial index idx_users_disabled. Call at
+// process start and on Redis reconnect: a Redis flush degrades enforcement to the
+// login/refresh DB gates until the rebuild runs (bounded — a live access token lasts
+// <= 15 min), then the rebuild closes the gap. Returns an error; the caller logs it.
+func RebuildDisabledDenylist(ctx context.Context, db *sql.DB, redisClient *redis.Client) error {
+	rows, err := db.QueryContext(ctx, `SELECT id FROM users WHERE disabled = TRUE`)
+	if err != nil {
+		return fmt.Errorf("rebuild disabled denylist: query: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var id string
+		if scanErr := rows.Scan(&id); scanErr != nil {
+			return fmt.Errorf("rebuild disabled denylist: scan: %w", scanErr)
+		}
+		if setErr := redisClient.Set(ctx, UserDisabledKey(id), "1", 0).Err(); setErr != nil {
+			return fmt.Errorf("rebuild disabled denylist: set: %w", setErr)
+		}
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		return fmt.Errorf("rebuild disabled denylist: rows: %w", rowsErr)
+	}
+	return nil
 }
 
 func extractBearerToken(authHeader string) (string, bool) {

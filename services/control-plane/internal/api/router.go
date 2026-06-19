@@ -233,6 +233,10 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	// the fail-closed posture required by D2.
 	attestationHandler := buildAttestationHandler(db, redis, natsClient, cfg, log)
 
+	// Age-verification claim handler (#1623). hub satisfies age.SessionDisconnector
+	// for the terminal-disable live-session kick on valid_age=false.
+	ageHandler := buildAgeHandler(db, redis, hub, log)
+
 	// Start NATS voice event subscriber
 	if natsClient != nil {
 		voiceSub := voice.NewNATSSubscriber(db, log, hub, natsClient, rbacResolver)
@@ -527,6 +531,14 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 			protected.POST("/auth/ws-ticket",
 				middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 				wsTicketHandler.IssueTicket,
+			)
+
+			// Age-verification claim ingest (#1623). Identity-blind: stores only
+			// booleans + a jurisdiction integer, verifies the client RSA-PSS
+			// signature, and terminally disables the account on valid_age=false.
+			protected.PUT("/age/claim",
+				middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+				ageHandler.SubmitClaim,
 			)
 
 			// Feedback (#158): bug report / feature request submission. This

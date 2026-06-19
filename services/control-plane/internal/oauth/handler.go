@@ -577,6 +577,25 @@ func (h *Handler) respondNewUser(c *gin.Context, info *UserInfo) {
 	})
 }
 
+// handleSSOIssueError maps an IssueAccessAndRefresh error to the correct HTTP
+// response and reports whether it wrote one. Every SSO token-mint site shares
+// this mapping, so it lives in one place: a terminally-disabled account
+// (auth.ErrAccountDisabled, #1623) becomes 403 account_disabled; any other
+// error becomes a generic 500 token_issuance_failed with no SQL/internal detail
+// echoed to the client. Callers MUST return when it reports true; on false the
+// mint succeeded and the caller writes its own (site-specific) success body.
+func handleSSOIssueError(c *gin.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, auth.ErrAccountDisabled) {
+		c.JSON(http.StatusForbidden, gin.H{"error_code": "account_disabled"})
+		return true
+	}
+	c.JSON(http.StatusInternalServerError, gin.H{"error_code": "token_issuance_failed"})
+	return true
+}
+
 // respondExistingSSO issues either a full session (access + refresh cookie)
 // or an MFA challenge token, depending on trust_sso_security. last_used_at
 // is bumped best-effort regardless.
@@ -622,8 +641,7 @@ func (h *Handler) respondExistingSSO(c *gin.Context, info *UserInfo) {
 		if !mfaEnabled {
 			// Same trust posture as the trustSSO branch below — fall through.
 			access, refresh, err := h.deps.AuthHandler.IssueAccessAndRefresh(ctx, userID)
-			if err != nil {
-				c.JSON(http.StatusInternalServerError, gin.H{"error_code": "token_issuance_failed"})
+			if handleSSOIssueError(c, err) {
 				return
 			}
 			auth.SetRefreshCookie(c, refresh, 60*60*24*30)
@@ -645,8 +663,7 @@ func (h *Handler) respondExistingSSO(c *gin.Context, info *UserInfo) {
 	}
 
 	access, refresh, err := h.deps.AuthHandler.IssueAccessAndRefresh(ctx, userID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "token_issuance_failed"})
+	if handleSSOIssueError(c, err) {
 		return
 	}
 	// 30-day rolling refresh-token cookie matches the project-wide auth
@@ -855,8 +872,7 @@ func (h *Handler) CompleteRegistration(c *gin.Context) {
 	}
 
 	access, refresh, err := h.deps.AuthHandler.IssueAccessAndRefresh(ctx, userID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "token_issuance_failed"})
+	if handleSSOIssueError(c, err) {
 		return
 	}
 	// 30-day rolling refresh-token cookie matches the project-wide auth
@@ -970,8 +986,7 @@ func (h *Handler) CompleteLink(c *gin.Context) {
 	}
 
 	access, refresh, err := h.deps.AuthHandler.IssueAccessAndRefresh(ctx, info.TargetUserID)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "token_issuance_failed"})
+	if handleSSOIssueError(c, err) {
 		return
 	}
 	// 30-day rolling refresh-token cookie — same invariant as Callback /

@@ -19,6 +19,7 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/attestation"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/database"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/storage"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/voice"
@@ -69,6 +70,14 @@ func main() {
 			log.Error("Error closing Redis client", "error", err)
 		}
 	}()
+
+	// Repopulate the user-disabled denylist from the DB source of truth (#1623):
+	// closes the window after a Redis flush where the immediate-effect mid-session
+	// gate would otherwise miss already-disabled accounts until their next
+	// login/refresh. Non-fatal — the login/refresh DB gates still hold if it errors.
+	if rebuildErr := middleware.RebuildDisabledDenylist(context.Background(), db, redisClient); rebuildErr != nil {
+		log.Error("Failed to rebuild user-disabled denylist", "error", rebuildErr)
+	}
 
 	storageClient := initStorageClient(cfg, log)
 

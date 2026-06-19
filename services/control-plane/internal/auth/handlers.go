@@ -786,14 +786,14 @@ func (h *Handler) lookupUserForLogin(email string) (models.User, error) {
 	var user models.User
 	err := h.db.QueryRow(
 		`SELECT id, email, username, password_hash, display_name, bio, avatar_url, COALESCE(links, '[]'::jsonb),
-		        email_verified, age_verified, e2ee_preference, created_at, updated_at, password_login_disabled
+		        email_verified, age_verified, e2ee_preference, created_at, updated_at, password_login_disabled, disabled
 		 FROM users WHERE email = $1`,
 		email,
 	).Scan(
 		&user.ID, &user.Email, &user.Username, &user.PasswordHash,
 		&user.DisplayName, &user.Bio, &user.AvatarURL, &user.Links,
 		&user.EmailVerified, &user.AgeVerified, &user.E2EEPreference,
-		&user.CreatedAt, &user.UpdatedAt, &user.PasswordLoginDisabled,
+		&user.CreatedAt, &user.UpdatedAt, &user.PasswordLoginDisabled, &user.Disabled,
 	)
 	return user, err
 }
@@ -927,6 +927,15 @@ func (h *Handler) Login(c *gin.Context) {
 		return
 	}
 
+	// Age-verification terminal disable (#1623): block disabled accounts AFTER the
+	// credential check, so disabled status is never revealed to an unauthenticated
+	// prober. CompleteLogin re-checks this (closing the disable-between-MFA-challenge
+	// -and-verify race for MFA accounts).
+	if user.Disabled {
+		c.JSON(http.StatusForbidden, gin.H{"error_code": "account_disabled"})
+		return
+	}
+
 	h.clearLoginAttempts(ctx, req.Email)
 	rememberMe := resolveRememberMe(&req)
 
@@ -941,11 +950,20 @@ func (h *Handler) Login(c *gin.Context) {
 // CompleteLogin issues tokens and creates a session for the given user.
 // Called directly from Login (no MFA) or from the MFA verify handler after successful verification.
 func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) {
-	// Look up email_verified from DB so the JWT claim reflects current state
+	// Look up email_verified + disabled. email_verified feeds the JWT claim;
+	// disabled gates token issuance here so a terminal age-disable (#1623) that
+	// landed DURING an MFA challenge blocks completion before any token is minted
+	// (the disable/MFA-window race). This runs on every CompleteLogin path (direct
+	// and post-MFA-verify), so it backs the Login-handler gate symmetrically.
 	var emailVerified bool
-	if err := h.db.QueryRow(`SELECT email_verified FROM users WHERE id = $1`, userID).Scan(&emailVerified); err != nil {
+	var disabled bool
+	if err := h.db.QueryRow(`SELECT email_verified, disabled FROM users WHERE id = $1`, userID).Scan(&emailVerified, &disabled); err != nil {
 		h.log.Error("Failed to look up email_verified for login", "error", err, "user_id", userID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
+		return
+	}
+	if disabled {
+		c.JSON(http.StatusForbidden, gin.H{"error_code": "account_disabled"})
 		return
 	}
 
@@ -1121,9 +1139,13 @@ func (h *Handler) extractRefreshToken(c *gin.Context) string {
 func (h *Handler) fetchActiveRefreshToken(tokenHash string) (models.RefreshToken, error) {
 	var token models.RefreshToken
 	var storedMachineID sql.NullString
+	// JOIN users + u.disabled = FALSE so a disabled account's token is treated as
+	// not-found (#1623). All selected columns are rt.-qualified after the JOIN.
 	err := h.db.QueryRow(
-		`SELECT id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, created_at, last_used_at, remember_me, COALESCE(machine_id, '')
-		 FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NULL`,
+		`SELECT rt.id, rt.user_id, rt.token_hash, rt.device_name, rt.ip_address, rt.user_agent, rt.expires_at, rt.created_at, rt.last_used_at, rt.remember_me, COALESCE(rt.machine_id, '')
+		 FROM refresh_tokens rt
+		 JOIN users u ON u.id = rt.user_id
+		 WHERE rt.token_hash = $1 AND rt.revoked_at IS NULL AND u.disabled = FALSE`,
 		tokenHash,
 	).Scan(
 		&token.ID, &token.UserID, &token.TokenHash, &token.DeviceName,
@@ -1177,6 +1199,18 @@ func (h *Handler) attemptGracePeriodRecovery(c *gin.Context, tokenHash string) b
 	machineIDOk := revokedMachineID == "" || graceRequestMachineID == "" || revokedMachineID == graceRequestMachineID
 
 	if time.Since(revokedAt) < 30*time.Second && storedIP == requestIP && revokedUA == requestUA && machineIDOk {
+		// #1623: never grace-recover a disabled account. The terminal-disable tx
+		// revokes the token, which routes here within the 30s grace window;
+		// recovering would re-mint tokens for a disabled user, bypassing the gate
+		// (this path is not covered by the rotateAndRespond conditional INSERT).
+		// Fail closed on a lookup error — deny rather than recover.
+		var graceDisabled bool
+		if derr := h.db.QueryRow(`SELECT disabled FROM users WHERE id = $1`, revokedUserID).Scan(&graceDisabled); derr != nil || graceDisabled {
+			h.log.Warn("Grace recovery denied: account disabled or lookup failed",
+				"user_id", revokedUserID, "lookup_failed", derr != nil)
+			c.JSON(http.StatusForbidden, gin.H{"error_code": "account_disabled"})
+			return true
+		}
 		h.log.Info("Refresh token replay within grace period, recovering session",
 			"user_id", revokedUserID, "revoked_ago_ms", time.Since(revokedAt).Milliseconds(), "ip", requestIP)
 		h.handleGracePeriodRefresh(c, revokedUserID, revokedTokenID, revokedAt)
@@ -1411,9 +1445,15 @@ func (h *Handler) rotateAndRespond(c *gin.Context, token models.RefreshToken, re
 		"request_id", c.GetString(middleware.RequestIDContextKey),
 		"user_id", token.UserID, "remember_me", token.RememberMe)
 
-	_, err = h.db.Exec(
+	// Conditional INSERT (#1623): mint the new token ONLY if the account is not
+	// disabled. This is the atomic close of the disable/refresh race — if the
+	// terminal-disable tx committed between fetchActiveRefreshToken and here, the
+	// EXISTS guard fails and no live token is minted (TOCTOU-free, unlike a
+	// SELECT-then-INSERT). The old token was already revoked above.
+	res, err := h.db.Exec(
 		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, remember_me, machine_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
+		 WHERE EXISTS (SELECT 1 FROM users WHERE id = $2 AND disabled = FALSE)`,
 		newTokenID, token.UserID, newTokenHash, token.DeviceName,
 		c.ClientIP(), truncateUserAgent(c.GetHeader(headerUserAgent)),
 		newExpiry, token.RememberMe, nilIfEmpty(propagatedMachineID),
@@ -1426,6 +1466,12 @@ func (h *Handler) rotateAndRespond(c *gin.Context, token models.RefreshToken, re
 	if err != nil {
 		h.log.Error("Failed to store new refresh token", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgRefreshFailed})
+		return
+	}
+	// 0 rows => the EXISTS guard failed => account disabled (or a RowsAffected
+	// failure => fail closed). Refuse; the old token is already revoked.
+	if affected, raErr := res.RowsAffected(); raErr != nil || affected == 0 {
+		c.JSON(http.StatusForbidden, gin.H{"error_code": "account_disabled"})
 		return
 	}
 
@@ -1531,9 +1577,14 @@ func (h *Handler) handleGracePeriodRefresh(c *gin.Context, userID string, revoke
 	if graceMachineID == "" {
 		graceMachineID = successor.MachineID
 	}
-	_, err = h.db.Exec(
+	// Conditional INSERT mirroring rotateAndRespond (#1623): the caller
+	// attemptGracePeriodRecovery already gates on users.disabled, but that is a
+	// SELECT-then-act; the EXISTS guard makes the grace mint atomically race-safe so
+	// a disable committing between that check and this INSERT cannot mint a live token.
+	res, err := h.db.Exec(
 		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at, remember_me, machine_id)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+		 SELECT $1, $2, $3, $4, $5, $6, $7, $8, $9
+		 WHERE EXISTS (SELECT 1 FROM users WHERE id = $2 AND disabled = FALSE)`,
 		newTokenID,
 		userID,
 		newTokenHash,
@@ -1547,6 +1598,11 @@ func (h *Handler) handleGracePeriodRefresh(c *gin.Context, userID string, revoke
 	if err != nil {
 		h.log.Error("Failed to store new refresh token during grace recovery", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgRefreshFailed})
+		return
+	}
+	if affected, raErr := res.RowsAffected(); raErr != nil || affected == 0 {
+		// 0 rows => account disabled (or RowsAffected failed => fail closed).
+		c.JSON(http.StatusForbidden, gin.H{"error_code": "account_disabled"})
 		return
 	}
 
