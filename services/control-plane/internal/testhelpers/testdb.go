@@ -106,7 +106,10 @@ func TruncateAllTables(db *sql.DB) error {
 		message_attachments,
 		dm_message_attachments,
 		release_binaries,
-		release_spas
+		release_spas,
+		subscriptions,
+		redemption_codes,
+		code_redemptions
 	CASCADE`)
 	return err
 }

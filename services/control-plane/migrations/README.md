@@ -83,7 +83,7 @@ DROP INDEX IF EXISTS idx_users_status;
 ALTER TABLE users DROP COLUMN IF EXISTS status;
 ```
 
-## Existing Migrations (000001–000057)
+## Existing Migrations (000001–000072)
 
 ### Phase 1A — Authentication & E2EE
 | # | Name | Tables/Changes |
@@ -162,6 +162,26 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000055 | klipy_gif_integration | Klipy GIF integration tables |
 | 000056 | klipy_privacy_settings | Klipy privacy preference settings |
 | 000057 | dm_message_pinning | DM message pinning support |
+
+### Phase 2B (cont.) — Registration, Privacy, DM, Attestation & Entitlements
+
+| # | Name | Tables/Changes |
+| --- | --- | --- |
+| 000058 | pending_registrations | `pending_registrations` (email-verification holding) |
+| 000059 | account_deletions_and_cascade_fix | `account_deletions` + refresh_tokens ON DELETE CASCADE fix |
+| 000060 | drop_sentry_delete_attempted_column | Drop `sentry_delete_attempted` column |
+| 000061 | user_sso_identities | `user_sso_identities` + users SSO columns |
+| 000062 | remove_is_encrypted | Drop `is_encrypted` (E2EE-everywhere, #201) |
+| 000063 | create_notification_preferences | `notification_preferences` |
+| 000064 | dm_messages_call_event_kind | `dm_messages.kind` (call-event) |
+| 000065 | dm_messages_call_event_use_type_column | `dm_messages.type` call-event column |
+| 000066 | client_attestation_registry | Client attestation registry |
+| 000067 | temp_sbac_overrides | Temporary SBAC channel_permission_overrides |
+| 000068 | drop_servers_e2ee_default | Drop per-server `e2ee_default` opt-out (E2EE-everywhere residual, #1655) |
+| 000069 | age_verification | Age-verification signed-claim records (ADR-0025, #1653) |
+| 000070 | subscriptions | `subscriptions` (one active per user) — entitlements foundation #1295 |
+| 000071 | redemption_codes | `redemption_codes` registry (hashed, single-use/promo) #1295 |
+| 000072 | code_redemptions | `code_redemptions` ledger (UNIQUE(code_id,user_id)) #1295 |
 
 ## Troubleshooting
 
