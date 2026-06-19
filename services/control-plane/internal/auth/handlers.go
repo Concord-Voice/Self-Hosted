@@ -170,7 +170,6 @@ type RegisterRequest struct {
 	WrappedPrivateKey string `json:"wrapped_private_key" binding:"required"` // base64 encoded
 	KeyDerivationSalt string `json:"key_derivation_salt" binding:"required"` // base64 encoded
 	KeyDerivationAlg  string `json:"key_derivation_alg"`                     // "pbkdf2" or "argon2id"; defaults to "argon2id"
-	E2EEPreference    bool   `json:"e2ee_preference"`
 }
 
 // LoginRequest represents login payload
@@ -280,7 +279,6 @@ func (h *Handler) Register(c *gin.Context) {
 			KeyDerivationSalt: salt,
 			KeyDerivationAlg:  req.KeyDerivationAlg,
 			PublicKey:         publicKey,
-			E2EEPreference:    req.E2EEPreference,
 		},
 		req.Password,
 	)
@@ -462,22 +460,22 @@ func (h *Handler) ConfirmRegistration(c *gin.Context) {
 	_ = h.redis.Del(ctx, redisKey(req.PendingID)).Err()
 	_ = h.redis.Del(ctx, redisKeyTestOnly+req.PendingID).Err()
 
-	email, username, e2ee, err := h.loadPromotedUser(ctx, userID)
+	email, username, err := h.loadPromotedUser(ctx, userID)
 	if err != nil {
 		h.log.Error("confirm: failed to load promoted user", "error", err, "user_id", userID)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgInternalError})
 		return
 	}
 
-	h.writeConfirmSuccess(c, access, refresh, sessionID, confirmedUser{id: userID, email: email, username: username, e2ee: e2ee})
+	h.writeConfirmSuccess(c, access, refresh, sessionID, confirmedUser{id: userID, email: email, username: username})
 }
 
-// loadPromotedUser fetches the email, username, and e2ee_preference for a newly
-// promoted user. Extracted to keep ConfirmRegistration within complexity budget.
-func (h *Handler) loadPromotedUser(ctx context.Context, userID string) (email, username string, e2ee bool, err error) {
+// loadPromotedUser fetches the email and username for a newly promoted user.
+// Extracted to keep ConfirmRegistration within complexity budget.
+func (h *Handler) loadPromotedUser(ctx context.Context, userID string) (email, username string, err error) {
 	err = h.db.QueryRowContext(ctx,
-		`SELECT email, username, e2ee_preference FROM users WHERE id = $1`,
-		userID).Scan(&email, &username, &e2ee)
+		`SELECT email, username FROM users WHERE id = $1`,
+		userID).Scan(&email, &username)
 	return
 }
 
@@ -570,7 +568,6 @@ type confirmedUser struct {
 	id       string
 	email    string
 	username string
-	e2ee     bool
 }
 
 // writeConfirmSuccess writes the 200 JSON response for a successful registration confirmation.
@@ -582,11 +579,10 @@ func (h *Handler) writeConfirmSuccess(c *gin.Context, access, refresh, sessionID
 		"expires_in":    900,
 		"remember_me":   true,
 		"user": gin.H{
-			"id":              u.id,
-			"username":        u.username,
-			"email":           u.email,
-			"email_verified":  true,
-			"e2ee_preference": u.e2ee,
+			"id":             u.id,
+			"username":       u.username,
+			"email":          u.email,
+			"email_verified": true,
 		},
 	})
 }
@@ -786,13 +782,13 @@ func (h *Handler) lookupUserForLogin(email string) (models.User, error) {
 	var user models.User
 	err := h.db.QueryRow(
 		`SELECT id, email, username, password_hash, display_name, bio, avatar_url, COALESCE(links, '[]'::jsonb),
-		        email_verified, age_verified, e2ee_preference, created_at, updated_at, password_login_disabled, disabled
+		        email_verified, age_verified, created_at, updated_at, password_login_disabled, disabled
 		 FROM users WHERE email = $1`,
 		email,
 	).Scan(
 		&user.ID, &user.Email, &user.Username, &user.PasswordHash,
 		&user.DisplayName, &user.Bio, &user.AvatarURL, &user.Links,
-		&user.EmailVerified, &user.AgeVerified, &user.E2EEPreference,
+		&user.EmailVerified, &user.AgeVerified,
 		&user.CreatedAt, &user.UpdatedAt, &user.PasswordLoginDisabled, &user.Disabled,
 	)
 	return user, err
@@ -1036,12 +1032,12 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) 
 	var user models.User
 	err = h.db.QueryRow(
 		`SELECT id, email, username, password_hash, display_name, bio, avatar_url, COALESCE(links, '[]'::jsonb),
-		        email_verified, age_verified, e2ee_preference, created_at, updated_at, password_login_disabled
+		        email_verified, age_verified, created_at, updated_at, password_login_disabled
 		 FROM users WHERE id = $1`, userID,
 	).Scan(
 		&user.ID, &user.Email, &user.Username, &user.PasswordHash,
 		&user.DisplayName, &user.Bio, &user.AvatarURL, &user.Links,
-		&user.EmailVerified, &user.AgeVerified, &user.E2EEPreference,
+		&user.EmailVerified, &user.AgeVerified,
 		&user.CreatedAt, &user.UpdatedAt, &user.PasswordLoginDisabled,
 	)
 	if err != nil {

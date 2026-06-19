@@ -305,7 +305,6 @@ For detailed migration documentation, see [migrations/README.md](migrations/READ
 - username (unique, lowercase)
 - password_hash (Argon2id)
 - age_confirmed (boolean)
-- e2ee_preference (boolean)
 - created_at
 - updated_at
 
@@ -331,13 +330,13 @@ For detailed migration documentation, see [migrations/README.md](migrations/READ
 - id, name, owner_id, icon_url, header_image_url, created_at, updated_at
 
 ### Channels (Phase 1B) ✅
-- id, server_id, name, type (text/voice/announcement), position, is_encrypted, topic, slowmode_seconds, group_id, voice_settings (JSONB)
+- id, server_id, name, type (text/voice/announcement), position, topic, slowmode_seconds, group_id, voice_settings (JSONB)
 
 ### Server Members (Phase 1B) ✅
 - server_id, user_id, role (owner/admin/member), joined_at, nickname
 
 ### Messages (Phase 1B) ✅
-- id, channel_id, user_id, content, is_encrypted, encrypted_key, key_epoch, edited_at, created_at
+- id, channel_id, user_id, content, encrypted_key, key_epoch, edited_at, created_at
 
 ### Channel Groups (Phase 1C) ✅
 - id, server_id, name, position, is_collapsed

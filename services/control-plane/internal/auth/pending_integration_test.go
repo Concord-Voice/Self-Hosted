@@ -20,10 +20,10 @@ func TestPendingCleanupDeletesExpired(t *testing.T) {
 		INSERT INTO pending_registrations
 		(id, email, username, password_hash, wrapped_private_key,
 		 key_derivation_salt, key_derivation_alg, public_key,
-		 e2ee_preference, age_verified, resend_count, expires_at)
+		 age_verified, resend_count, expires_at)
 		VALUES (gen_random_uuid(), 'expired@test.com', 'expiredu',
 		 'hash', '\x00', '\x00', 'argon2id', '\x00',
-		 TRUE, TRUE, 0, NOW() - INTERVAL '1 minute')
+		 TRUE, 0, NOW() - INTERVAL '1 minute')
 	`)
 	require.NoError(t, err)
 
@@ -47,10 +47,10 @@ func TestStartPendingCleanupWorker_DeletesExpiredOnTick(t *testing.T) {
 		INSERT INTO pending_registrations
 		(id, email, username, password_hash, wrapped_private_key,
 		 key_derivation_salt, key_derivation_alg, public_key,
-		 e2ee_preference, age_verified, resend_count, expires_at)
+		 age_verified, resend_count, expires_at)
 		VALUES (gen_random_uuid(), 'worker@test.concord.chat', 'workertest',
 		 'h', '\x00', '\x00', 'argon2id', '\x00',
-		 TRUE, TRUE, 0, NOW() - INTERVAL '1 minute')
+		 TRUE, 0, NOW() - INTERVAL '1 minute')
 	`)
 	require.NoError(t, err)
 
@@ -100,10 +100,10 @@ func TestStartPendingCleanupWorker_DeletesOnTick(t *testing.T) {
 		INSERT INTO pending_registrations
 		(id, email, username, password_hash, wrapped_private_key,
 		 key_derivation_salt, key_derivation_alg, public_key,
-		 e2ee_preference, age_verified, resend_count, expires_at)
+		 age_verified, resend_count, expires_at)
 		VALUES (gen_random_uuid(), 'tickworker@test.concord.chat', 'tickworker',
 		 'h', '\x00', '\x00', 'argon2id', '\x00',
-		 TRUE, TRUE, 0, NOW() - INTERVAL '1 minute')
+		 TRUE, 0, NOW() - INTERVAL '1 minute')
 	`)
 	require.NoError(t, err)
 
@@ -132,7 +132,6 @@ func insertPendingParams(t *testing.T, email, username, rawPassword string) auth
 		KeyDerivationSalt: []byte{0x02},
 		KeyDerivationAlg:  "argon2id",
 		PublicKey:         []byte{0x03},
-		E2EEPreference:    true,
 	}
 }
 

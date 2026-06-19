@@ -45,7 +45,10 @@ func TestGetMeReturnsAllFields(t *testing.T) {
 	assert.Equal(t, user.Username, u[keyUsername])
 	assert.NotEmpty(t, u["email"])
 	assert.NotNil(t, u["created_at"])
-	assert.NotNil(t, u["e2ee_preference"])
+	// Regression (#1648): the vestigial e2ee_preference field was removed
+	// end-to-end. The GET /users/me profile response must not carry it.
+	_, hasE2EE := u["e2ee_preference"]
+	assert.False(t, hasE2EE, "e2ee_preference removed in #1648; must not appear in GET /users/me")
 }
 
 // ── GetPublicProfile ─────────────────────────────────────────────────────────

@@ -88,8 +88,8 @@ func TestCleanupObjectSuccessSoftDeletesRow(t *testing.T) {
 
 	userID := uuid.New().String()
 	_, err := db.ExecContext(ctx,
-		`INSERT INTO users (id, email, username, password_hash, age_verified, email_verified, e2ee_preference)
-		 VALUES ($1, $2, $3, 'hash', true, true, false)`,
+		`INSERT INTO users (id, email, username, password_hash, age_verified, email_verified)
+		 VALUES ($1, $2, $3, 'hash', true, true)`,
 		userID,
 		userID+"@test.concord.chat",
 		"cleanupuser"+userID[:8],
@@ -125,8 +125,8 @@ func TestCleanupObjectAlreadyDeletedIsIdempotent(t *testing.T) {
 
 	userID := uuid.New().String()
 	_, err := db.ExecContext(ctx,
-		`INSERT INTO users (id, email, username, password_hash, age_verified, email_verified, e2ee_preference)
-		 VALUES ($1, $2, $3, 'hash', true, true, false)`,
+		`INSERT INTO users (id, email, username, password_hash, age_verified, email_verified)
+		 VALUES ($1, $2, $3, 'hash', true, true)`,
 		userID,
 		userID+"@test.concord.chat",
 		"cleanupuser2"+userID[:8],

@@ -195,8 +195,8 @@ func (ts *TestServer) createTestUserWithVerification(t *testing.T, username stri
 	normalizedUsername := auth.NormalizeUsername(username)
 
 	_, err := ts.DB.Exec(
-		`INSERT INTO users (id, email, username, password_hash, age_verified, email_verified, e2ee_preference)
-		 VALUES ($1, $2, $3, $4, true, $5, false)`,
+		`INSERT INTO users (id, email, username, password_hash, age_verified, email_verified)
+		 VALUES ($1, $2, $3, $4, true, $5)`,
 		userID, email, normalizedUsername, TestAuthHash, emailVerified,
 	)
 	if err != nil {

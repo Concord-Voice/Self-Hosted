@@ -61,8 +61,8 @@ func insertAdapterUser(t *testing.T, rig *adapterRig, email, username, password 
 
 	userID := uuid.New().String()
 	_, err = rig.DB.ExecContext(context.Background(),
-		`INSERT INTO users (id, email, username, password_hash, age_verified, email_verified, e2ee_preference)
-		 VALUES ($1, $2, $3, $4, true, true, false)`,
+		`INSERT INTO users (id, email, username, password_hash, age_verified, email_verified)
+		 VALUES ($1, $2, $3, $4, true, true)`,
 		userID, email, username, hash,
 	)
 	require.NoError(t, err)

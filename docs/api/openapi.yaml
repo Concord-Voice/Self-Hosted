@@ -1132,8 +1132,6 @@ paths:
                         format: email
                       email_verified:
                         type: boolean
-                      e2ee_preference:
-                        type: boolean
           headers:
             Set-Cookie:
               description: HttpOnly refresh token cookie
@@ -11638,9 +11636,6 @@ components:
         key_derivation_salt:
           type: string
           description: Base64-encoded 16-byte PBKDF2 salt
-        e2ee_preference:
-          type: boolean
-          default: true
     LoginRequest:
       type: object
       required:
@@ -11887,8 +11882,6 @@ components:
         email_verified:
           type: boolean
         age_verified:
-          type: boolean
-        e2ee_preference:
           type: boolean
         created_at:
           type: string

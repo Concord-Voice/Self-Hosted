@@ -73,7 +73,7 @@ func (h *Handler) GetMe(c *gin.Context) {
 	err := h.db.QueryRow(
 		`SELECT id, email, username, display_name, bio, avatar_url, header_image_url, color_scheme,
 		        COALESCE(links, '[]'::jsonb),
-		        email_verified, age_verified, e2ee_preference, created_at, updated_at,
+		        email_verified, age_verified, created_at, updated_at,
 		        username_changed_at
 		 FROM users WHERE id = $1`,
 		userID,
@@ -89,7 +89,6 @@ func (h *Handler) GetMe(c *gin.Context) {
 		&user.Links,
 		&user.EmailVerified,
 		&user.AgeVerified,
-		&user.E2EEPreference,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 		&user.UsernameChangedAt,
@@ -125,7 +124,7 @@ func (h *Handler) GetPublicProfile(c *gin.Context) {
 	err := h.db.QueryRow(
 		`SELECT id, email, username, display_name, bio, avatar_url, header_image_url, color_scheme,
 		        COALESCE(links, '[]'::jsonb),
-		        email_verified, age_verified, e2ee_preference, created_at, updated_at
+		        email_verified, age_verified, created_at, updated_at
 		 FROM users WHERE id = $1`,
 		targetUserID,
 	).Scan(
@@ -140,7 +139,6 @@ func (h *Handler) GetPublicProfile(c *gin.Context) {
 		&user.Links,
 		&user.EmailVerified,
 		&user.AgeVerified,
-		&user.E2EEPreference,
 		&user.CreatedAt,
 		&user.UpdatedAt,
 	)
@@ -604,7 +602,7 @@ func (h *Handler) executeProfileUpdate(b *profileUpdateBuilder, userID interface
 		`UPDATE users SET %s %s
 		 RETURNING id, email, username, display_name, bio, avatar_url, header_image_url, color_scheme,
 		           COALESCE(links, '[]'::jsonb),
-		           email_verified, age_verified, e2ee_preference, created_at, updated_at,
+		           email_verified, age_verified, created_at, updated_at,
 		           username_changed_at`,
 		strings.Join(b.setClauses, ", "), whereClause,
 	)
@@ -614,7 +612,7 @@ func (h *Handler) executeProfileUpdate(b *profileUpdateBuilder, userID interface
 	err := h.db.QueryRow(query, b.args...).Scan(
 		&user.ID, &user.Email, &user.Username, &user.DisplayName,
 		&user.Bio, &user.AvatarURL, &user.HeaderImageURL, &user.ColorScheme,
-		&user.Links, &user.EmailVerified, &user.AgeVerified, &user.E2EEPreference,
+		&user.Links, &user.EmailVerified, &user.AgeVerified,
 		&user.CreatedAt, &user.UpdatedAt, &user.UsernameChangedAt,
 	)
 	if err == nil {

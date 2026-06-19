@@ -138,8 +138,8 @@ func (ts *testSetup) createTestUser(t *testing.T, username string) string {
 	t.Helper()
 	userID := uuid.New().String()
 	_, err := ts.db.Exec(
-		`INSERT INTO users (id, email, username, password_hash, age_verified, email_verified, e2ee_preference)
-		 VALUES ($1, $2, $3, $4, true, true, false)`,
+		`INSERT INTO users (id, email, username, password_hash, age_verified, email_verified)
+		 VALUES ($1, $2, $3, $4, true, true)`,
 		userID, username+"@test.local", username, testAuthHash,
 	)
 	require.NoError(t, err)

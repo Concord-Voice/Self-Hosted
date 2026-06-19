@@ -19,7 +19,6 @@ type User struct {
 	Links             json.RawMessage `json:"links" db:"links"`
 	EmailVerified     bool            `json:"email_verified" db:"email_verified"`
 	AgeVerified       bool            `json:"age_verified" db:"age_verified"`
-	E2EEPreference    bool            `json:"e2ee_preference" db:"e2ee_preference"`
 	CreatedAt         time.Time       `json:"created_at" db:"created_at"`
 	UpdatedAt         time.Time       `json:"updated_at" db:"updated_at"`
 	UsernameChangedAt *time.Time      `json:"username_changed_at,omitempty" db:"username_changed_at"`
@@ -67,13 +66,12 @@ func (u *User) addOptionalProfileFields(result map[string]interface{}) {
 // PublicUser returns user data safe for the authenticated user
 func (u *User) PublicUser() map[string]interface{} {
 	result := map[string]interface{}{
-		"id":              u.ID,
-		"email":           u.Email,
-		"username":        u.Username,
-		"email_verified":  u.EmailVerified,
-		"e2ee_preference": u.E2EEPreference,
-		"created_at":      u.CreatedAt,
-		"links":           json.RawMessage("[]"),
+		"id":             u.ID,
+		"email":          u.Email,
+		"username":       u.Username,
+		"email_verified": u.EmailVerified,
+		"created_at":     u.CreatedAt,
+		"links":          json.RawMessage("[]"),
 	}
 	u.addOptionalProfileFields(result)
 	if u.UsernameChangedAt != nil {

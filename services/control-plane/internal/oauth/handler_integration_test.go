@@ -221,8 +221,8 @@ func insertSSOTestUser(t *testing.T, db *sql.DB, email, username string) string 
 	t.Helper()
 	userID := uuid.New().String()
 	_, err := db.ExecContext(context.Background(),
-		`INSERT INTO users (id, email, username, password_hash, age_verified, email_verified, e2ee_preference)
-		 VALUES ($1, $2, $3, $4, true, true, false)`,
+		`INSERT INTO users (id, email, username, password_hash, age_verified, email_verified)
+		 VALUES ($1, $2, $3, $4, true, true)`,
 		userID, email, username, "$argon2id$placeholder", // pragma: allowlist secret
 	)
 	require.NoError(t, err)

@@ -33,7 +33,6 @@ func baseUser() User {
 		ColorScheme:    strPtr("dark"),
 		Links:          json.RawMessage(`[{"label":"GitHub","url":"https://github.com"}]`),
 		EmailVerified:  true,
-		E2EEPreference: true,
 		CreatedAt:      time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
 		UpdatedAt:      time.Date(2026, 1, 2, 0, 0, 0, 0, time.UTC),
 	}
@@ -49,7 +48,6 @@ func TestPublicUserIncludesAllFields(t *testing.T) {
 	assert.Equal(t, "test@example.com", pub["email"])
 	assert.Equal(t, "testuser", pub["username"])
 	assert.Equal(t, true, pub["email_verified"])
-	assert.Equal(t, true, pub["e2ee_preference"])
 	assert.Equal(t, testUsername, pub["display_name"])
 	assert.Equal(t, testBio, pub["bio"])
 	assert.Equal(t, testAvatarURL, pub["avatar_url"])
@@ -58,6 +56,11 @@ func TestPublicUserIncludesAllFields(t *testing.T) {
 	assert.NotNil(t, pub["links"])
 	assert.NotNil(t, pub["username_changed_at"])
 	assert.NotNil(t, pub["username_change_eligible_at"])
+	// Regression (#1648): the vestigial e2ee_preference field was removed from
+	// the User model and PublicUser serialization. The profile/login responses
+	// (which surface PublicUser) must never carry it again.
+	_, hasE2EE := pub["e2ee_preference"]
+	assert.False(t, hasE2EE, "e2ee_preference removed in #1648; must not appear in PublicUser")
 }
 
 func TestPublicUserOmitsPasswordHash(t *testing.T) {
@@ -100,8 +103,6 @@ func TestProfileForOthersExcludesEmail(t *testing.T) {
 
 	_, hasEmail := prof["email"]
 	assert.False(t, hasEmail, "email should not be in ProfileForOthers")
-	_, hasE2EE := prof["e2ee_preference"]
-	assert.False(t, hasE2EE, "e2ee_preference should not be in ProfileForOthers")
 }
 
 func TestProfileForOthersIncludesOptionalFields(t *testing.T) {

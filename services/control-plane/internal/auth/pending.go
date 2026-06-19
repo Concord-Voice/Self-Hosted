@@ -41,7 +41,6 @@ type PendingRegistration struct {
 	KeyDerivationSalt []byte
 	KeyDerivationAlg  string
 	PublicKey         []byte
-	E2EEPreference    bool
 	AgeVerified       bool
 	ResendCount       int
 	LastResendAt      *time.Time
@@ -66,7 +65,6 @@ type InsertParams struct {
 	KeyDerivationSalt []byte
 	KeyDerivationAlg  string
 	PublicKey         []byte
-	E2EEPreference    bool
 }
 
 // locateEmailTakeover checks if a pending row exists for the given email. If found,
@@ -250,8 +248,8 @@ func (r *PendingRepo) InsertOrTakeover(
 	if err = tx.QueryRowContext(ctx,
 		`INSERT INTO pending_registrations
 			(id, email, username, password_hash, wrapped_private_key, key_derivation_salt,
-			 key_derivation_alg, public_key, e2ee_preference, age_verified, resend_count, expires_at)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, 0, $10)
+			 key_derivation_alg, public_key, age_verified, resend_count, expires_at)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, 0, $9)
 		RETURNING expires_at`,
 		newID,
 		params.Email,
@@ -261,7 +259,6 @@ func (r *PendingRepo) InsertOrTakeover(
 		params.KeyDerivationSalt,
 		kdAlg,
 		params.PublicKey,
-		params.E2EEPreference,
 		time.Now().Add(PendingRegistrationTTL),
 	).Scan(&expiresAt); err != nil {
 		return "", time.Time{}, "", err
@@ -282,7 +279,7 @@ func (r *PendingRepo) GetByID(ctx context.Context, id string) (*PendingRegistrat
 
 	err := r.db.QueryRowContext(ctx,
 		`SELECT id, email, username, password_hash, wrapped_private_key, key_derivation_salt,
-		        key_derivation_alg, public_key, e2ee_preference, age_verified,
+		        key_derivation_alg, public_key, age_verified,
 		        resend_count, last_resend_at, expires_at, created_at
 		   FROM pending_registrations
 		  WHERE id = $1`,
@@ -290,7 +287,7 @@ func (r *PendingRepo) GetByID(ctx context.Context, id string) (*PendingRegistrat
 	).Scan(
 		&p.ID, &p.Email, &p.Username, &p.PasswordHash,
 		&p.WrappedPrivateKey, &p.KeyDerivationSalt, &p.KeyDerivationAlg, &p.PublicKey,
-		&p.E2EEPreference, &p.AgeVerified,
+		&p.AgeVerified,
 		&p.ResendCount, &lastResendAt, &p.ExpiresAt, &p.CreatedAt,
 	)
 	if err != nil {
@@ -456,7 +453,7 @@ func (r *PendingRepo) Promote(ctx context.Context, id string) (userID string, er
 	var lastResendAt sql.NullTime
 	if err = tx.QueryRowContext(ctx,
 		`SELECT id, email, username, password_hash, wrapped_private_key, key_derivation_salt,
-		        key_derivation_alg, public_key, e2ee_preference, age_verified,
+		        key_derivation_alg, public_key, age_verified,
 		        resend_count, last_resend_at, expires_at, created_at
 		   FROM pending_registrations
 		  WHERE id = $1
@@ -465,7 +462,7 @@ func (r *PendingRepo) Promote(ctx context.Context, id string) (userID string, er
 	).Scan(
 		&p.ID, &p.Email, &p.Username, &p.PasswordHash,
 		&p.WrappedPrivateKey, &p.KeyDerivationSalt, &p.KeyDerivationAlg, &p.PublicKey,
-		&p.E2EEPreference, &p.AgeVerified,
+		&p.AgeVerified,
 		&p.ResendCount, &lastResendAt, &p.ExpiresAt, &p.CreatedAt,
 	); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -481,9 +478,9 @@ func (r *PendingRepo) Promote(ctx context.Context, id string) (userID string, er
 	// Step 2: insert into users
 	newUserID := uuid.New().String()
 	if _, err = tx.ExecContext(ctx,
-		`INSERT INTO users (id, email, username, password_hash, email_verified, age_verified, e2ee_preference)
-		 VALUES ($1, $2, $3, $4, TRUE, TRUE, $5)`,
-		newUserID, p.Email, p.Username, p.PasswordHash, p.E2EEPreference,
+		`INSERT INTO users (id, email, username, password_hash, email_verified, age_verified)
+		 VALUES ($1, $2, $3, $4, TRUE, TRUE)`,
+		newUserID, p.Email, p.Username, p.PasswordHash,
 	); err != nil {
 		return "", err
 	}

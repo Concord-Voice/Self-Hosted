@@ -83,7 +83,7 @@ DROP INDEX IF EXISTS idx_users_status;
 ALTER TABLE users DROP COLUMN IF EXISTS status;
 ```
 
-## Existing Migrations (000001–000072)
+## Existing Migrations (000001–000073)
 
 ### Phase 1A — Authentication & E2EE
 | # | Name | Tables/Changes |
@@ -182,6 +182,7 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000070 | subscriptions | `subscriptions` (one active per user) — entitlements foundation #1295 |
 | 000071 | redemption_codes | `redemption_codes` registry (hashed, single-use/promo) #1295 |
 | 000072 | code_redemptions | `code_redemptions` ledger (UNIQUE(code_id,user_id)) #1295 |
+| 000073 | drop_users_e2ee_preference | Drop per-user `e2ee_preference` from users + pending_registrations (E2EE-everywhere residual, #1648) |
 
 ## Troubleshooting
 
