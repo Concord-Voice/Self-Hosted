@@ -248,9 +248,9 @@ func Load() (*Config, error) {
 		MediaPlaneURL:         getEnv("MEDIA_PLANE_URL", "http://localhost:3000"),
 		TURNServerHost:        getEnv("TURN_SERVER_HOST", ""),
 		TURNSecret:            getEnv("TURN_SECRET", ""),
-		TURNRealm:             getEnv("TURN_REALM", "concordvoice.chat"),
+		TURNRealm:             getEnv("TURN_REALM", "localhost"),
 		LicensingAuthorityURL: getEnv("LICENSING_AUTHORITY_URL", "http://localhost:8082"),
-		AllowedOrigins:        parseOrigins(getEnv("ALLOWED_ORIGINS", "http://localhost:3001,http://localhost:3002,app://concord,https://spa.concordvoice.chat")),
+		AllowedOrigins:        parseOrigins(getEnv("ALLOWED_ORIGINS", "http://localhost:3001,http://localhost:3002,app://concord")),
 		ClientMinVersion:      getEnv("CLIENT_MIN_VERSION", ""),
 		FeatureVoice:          getEnv("FEATURE_VOICE", "true") == "true",
 		FeatureVideo:          getEnv("FEATURE_VIDEO", "true") == "true",
@@ -263,7 +263,7 @@ func Load() (*Config, error) {
 		SMTPPort:              getEnvInt("SMTP_PORT", 587),
 		SMTPUsername:          getEnv("SMTP_USERNAME", ""),
 		SMTPPassword:          getEnv("SMTP_PASSWORD", ""), // #nosec G101 -- env var name, not a secret
-		SMTPFrom:              getEnv("SMTP_FROM", "Concord Voice <noreply@verify.concordvoice.chat>"),
+		SMTPFrom:              getEnv("SMTP_FROM", "Concord Voice <noreply@example.com>"),
 		MFAEncryptionKey:      getEnv("MFA_ENCRYPTION_KEY", devMFAEncKey),
 		WebAuthnRPID:          getEnv("WEBAUTHN_RP_ID", "localhost"),
 		WebAuthnRPOrigins:     parseOrigins(getEnv("WEBAUTHN_RP_ORIGINS", "http://localhost:3001")),
@@ -475,7 +475,7 @@ func (c *Config) validate() error {
 		{c.MediaPlaneURL == "http://localhost:3000",
 			"MEDIA_PLANE_URL must be set to a production value. The dev default http://localhost:3000 is not allowed."},
 		{mediaPlaneURLIsRoot(c.MediaPlaneURL),
-			"MEDIA_PLANE_URL must point to the media subdomain (e.g. https://media.concordvoice.chat), not the root concordvoice.chat. The root zone is DNS-only and 301-redirects through nginx to the .com marketing site, breaking WebRTC signaling. This guard catches variants including trailing slash, explicit port, path suffix, uppercase, and wss:// per #725 review."},
+			"MEDIA_PLANE_URL must point to a dedicated media subdomain (e.g. https://media.example.com), not the bare apex domain. This guard catches variants including trailing slash, explicit port, path suffix, uppercase, and wss://."},
 		// #158 — feedback handler. The dev-stub path (empty token) is fine
 		// for self-hosted / dev. In production we require BOTH the token
 		// AND the repo slug; either alone is a misconfiguration that
@@ -505,7 +505,7 @@ func (c *Config) validate() error {
 	// for trusted proxies (the provision-secrets.yml heredoc default). This
 	// is functional but permissive — see broadRFC1918CIDRs() for context.
 	if equalCIDRs(c.TrustedProxyCIDRs, broadRFC1918CIDRs()) {
-		log.Printf("WARNING: TRUSTED_PROXY_CIDRS is the broad RFC1918 fallback (%s). Tighten via GH variable for stricter X-Forwarded-For trust. See [internal]sso-secrets-management.md.", strings.Join(c.TrustedProxyCIDRs, ","))
+		log.Printf("WARNING: TRUSTED_PROXY_CIDRS is the broad RFC1918 fallback (%s). Tighten the TRUSTED_PROXY_CIDRS allowlist for stricter X-Forwarded-For trust.", strings.Join(c.TrustedProxyCIDRs, ","))
 	}
 
 	if err := c.validateAttestation(); err != nil {
@@ -550,20 +550,18 @@ func (c *Config) validateAttestation() error {
 }
 
 // mediaPlaneURLIsRoot returns true when the given MediaPlaneURL resolves
-// to the zone-root host concordvoice.chat (with or without www.). Uses
-// net/url parsing + case-folded host comparison so the following are all
-// caught: trailing slash, explicit :443, path suffix (/api, etc.),
-// uppercase variants, wss:// scheme. The root is DNS-only and 301-
-// redirects through nginx to the .com marketing site, breaking WebRTC
-// signaling — none of these variants are valid production values.
+// to the apex zone host (with or without www.). Uses net/url parsing +
+// case-folded host comparison so the following are all caught: trailing
+// slash, explicit :443, path suffix (/api, etc.), uppercase variants,
+// wss:// scheme. The apex host is not a valid media-plane endpoint —
+// the media plane must be reached on its own dedicated subdomain — so
+// none of these variants are valid production values.
 //
-// Does NOT flag media.concordvoice.chat or any other subdomain. Does NOT
-// flag empty-string — that's the responsibility of a separate "unset"
-// guard in validate(). Does NOT flag parse-failure — malformed URLs are
-// a different class of bug and will fail downstream; here we only want
-// to catch the specific root-host misconfiguration.
-//
-// Per #725 review (Copilot + Seer + 3 subagents).
+// Does NOT flag a media subdomain or any other subdomain. Does NOT flag
+// empty-string — that's the responsibility of a separate "unset" guard
+// in validate(). Does NOT flag parse-failure — malformed URLs are a
+// different class of bug and will fail downstream; here we only want to
+// catch the specific apex-host misconfiguration.
 func mediaPlaneURLIsRoot(raw string) bool {
 	if raw == "" {
 		return false

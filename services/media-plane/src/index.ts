@@ -62,14 +62,13 @@ async function main() {
 
   // Health check endpoint (enhanced — A8).
   //
-  // INTERNAL endpoint (accepted-risk, #1553 review): nginx proxies ONLY `/socket.io/`
-  // to the media-plane publicly (infrastructure/deploy/nginx/concordvoice.conf); the
-  // PUBLIC health probe that external monitors hit is control-plane:8080/health. This
-  // route is reached only via localhost:3000 (deploy cron + concord-ctl). The #1553
-  // `metrics` field below therefore surfaces capacity counters to OPS callers, not the
-  // public internet — and carries aggregate numbers only (no PII/IDs/keys; verified by
-  // the security review). Do NOT add per-room/per-user breakdowns here without revisiting
-  // this exposure note.
+  // INTERNAL endpoint: intended to be reachable only on the local interface
+  // (e.g. localhost:3000) by local/dev ops tooling and health/liveness checks,
+  // not exposed to the public internet by the reverse proxy in a typical
+  // deployment. The `metrics` field below therefore surfaces capacity counters
+  // to operators only — and carries aggregate numbers only (no PII/IDs/keys).
+  // Do NOT add per-room/per-user breakdowns here without revisiting this
+  // exposure note.
   app.get('/health', (_req, res) => {
     const stats = roomManager.getStats();
     res.json({
@@ -224,8 +223,7 @@ async function main() {
         // (G7 defense-in-depth). Only the userId in `data` comes from
         // the verified JWT (see createAuthMiddleware); the display
         // fields (username/displayName/avatarUrl) currently flow from
-        // socket.handshake.auth and are documented as a known
-        // client-supplied gap in [internal]rules/media-plane.md.
+        // socket.handshake.auth and are a known client-supplied gap.
         // room_kind is the same shape: a client-supplied routing hint
         // that doesn't grant any privilege beyond which control-plane
         // endpoint is consulted for authorization.
@@ -825,7 +823,7 @@ async function main() {
       });
     }
     // #1553 measurement: sample live rooms, accumulate, emit aggregate-only ops log
-    // (structural metadata only — no userIds/PII/keys, per [internal]rules/observability.md).
+    // (structural metadata only — no userIds/PII/keys, per the logging-discipline rule).
     // The try/catch keeps the async heartbeat from ever throwing into the timer (degrade,
     // don't crash); the metricsSampling guard skips a tick if the prior sampling is still
     // running so two ticks never interleave ingest() on shared state (#1553 review).

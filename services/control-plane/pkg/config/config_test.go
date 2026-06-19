@@ -110,12 +110,25 @@ func TestLoad(t *testing.T) {
 	})
 }
 
-func TestLoad_AllowedOriginsDefault_IncludesSpaPagesOrigin(t *testing.T) {
-	t.Setenv("ALLOWED_ORIGINS", "") // force default
+// TestLoad_AllowedOriginsDefault_OmitsHostedSpaOrigin pins the post-#1664
+// public-mirror sanitization: the hosted Pages SPA origin is NOT a code
+// default anymore. The default carries only neutral dev/test/CI origins
+// (localhost + app://concord); production supplies the real remote-SPA
+// origin via the ALLOWED_ORIGINS env var (provisioned by the canonical
+// writer). Keeping the hosted subdomain out of the source default is a
+// public-mirror leak-prevention requirement — the leak-check guard
+// (scripts/check-public-mirror-leaks.sh) regression-locks the source side;
+// this test regression-locks the runtime default.
+func TestLoad_AllowedOriginsDefault_OmitsHostedSpaOrigin(t *testing.T) {
+	t.Setenv("ENVIRONMENT", "development") // skip production guards
+	t.Setenv("ALLOWED_ORIGINS", "")        // force default
 	cfg, err := Load()
 	require.NoError(t, err)
-	assert.Contains(t, cfg.AllowedOrigins, "https://spa.concordvoice.chat",
-		"Pages SPA origin must be in the default ALLOWED_ORIGINS (T4a, #976)")
+	assert.NotContains(t, cfg.AllowedOrigins, "https://spa.concordvoice.chat",
+		"hosted Pages SPA origin must NOT be a code default (set via env in production; #1664 mirror sanitization)")
+	// Positive: the neutral dev/test/CI origins remain.
+	assert.Contains(t, cfg.AllowedOrigins, "app://concord")
+	assert.Contains(t, cfg.AllowedOrigins, "http://localhost:3001")
 }
 
 func TestLoadTrustedProxyCIDRs(t *testing.T) {
@@ -1104,11 +1117,11 @@ func TestValidate_WarnsOnBroadRFC1918Fallback(t *testing.T) {
 
 func TestGitHubFeedbackConfig_String_Redacts_Token(t *testing.T) {
 	cfg := GitHubFeedbackConfig{ //nolint:gosec // G101: test fixture with fake PAT
-		Token: "ghp_1234567890abcdef1234567890abcdef12345678", // #nosec G101 -- test fixture, not a real PAT
+		Token: "ghp_1234567890abcdef1234567890abcdef12345678", // #nosec G101 -- test fixture, not a real PAT // pragma: allowlist secret
 		Repo:  "Concord-Voice/Concord-Voice-Feedback",
 	}
 	s := cfg.String()
-	assert.NotContains(t, s, "ghp_1234567890abcdef1234567890abcdef12345678",
+	assert.NotContains(t, s, "ghp_1234567890abcdef1234567890abcdef12345678", // pragma: allowlist secret
 		"PAT must NEVER appear in String() output")
 	assert.Contains(t, s, "[REDACTED")
 	assert.Contains(t, s, "Concord-Voice/Concord-Voice-Feedback",
@@ -1125,14 +1138,14 @@ func TestGitHubFeedbackConfig_String_UnsetTokenSentinel(t *testing.T) {
 
 func TestGitHubFeedbackConfig_String_FormatV_DoesNotLeak(t *testing.T) {
 	cfg := GitHubFeedbackConfig{ //nolint:gosec // G101: test fixture with fake PAT
-		Token: "ghp_sensitive_pat_value_zzzzzzzzzzzzzzzzzz", // #nosec G101 -- test fixture, not a real PAT
+		Token: "ghp_sensitive_pat_value_zzzzzzzzzzzzzzzzzz", // #nosec G101 -- test fixture, not a real PAT // pragma: allowlist secret
 		Repo:  "owner/repo",
 	}
 	// The whole point: %+v on a Config containing GitHubFeedbackConfig
 	// must invoke the redacting String() method, never print the raw
 	// struct field.
 	out := fmt.Sprintf("%+v", cfg)
-	assert.NotContains(t, out, "ghp_sensitive_pat_value_zzzzzzzzzzzzzzzzzz")
+	assert.NotContains(t, out, "ghp_sensitive_pat_value_zzzzzzzzzzzzzzzzzz") // pragma: allowlist secret
 }
 
 // Cloudflare KV bridge config tests (#973).

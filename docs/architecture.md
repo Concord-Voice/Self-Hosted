@@ -151,34 +151,34 @@ The desktop client is the only shipping client. Source: `client/desktop/`.
   - `shared/` — three cross-process modules: `clientBehavior.ts` (window close/minimize routing), `spaIpcTypes.ts` (self-heal IPC contract), `spaUrlPattern.ts` (the shared SPA chunk-URL regex; the legacy `SPA_URL_PATTERN` was removed by #1657 in favor of runtime base-dir matching).
   - `constants/` — typed constants + build-time generators (e.g. `updateEndpoint.mts`), included in the Istanbul coverage set.
 - **Responsibilities:** browser-inspired UI (server bar, channel panel), WebRTC media handling (Opus, 7 quality tiers), voice controls (mute/deafen/PTT, device selection, per-user volume), screen sharing, video calls, E2EE encrypt/decrypt via `e2eeService` (`encryptForChannel` / `decryptForChannel`), secure token storage via `safeStorage`. *(This list is non-exhaustive — the renderer also carries TTS (`ttsService.ts`), keyboard-shortcut customization, OS-permission management (`permissionManager.ts`, macOS screen-recording/mic TCC), and a startup splash window.)*
-- **Security posture:** `contextIsolation` ON and `nodeIntegration` OFF unconditionally; no `@electron/remote`. `sandbox` (and `webSecurity`) are ON in packaged builds (`sandbox: isPackaged` in `browserWindowConfig.ts`) and off in dev/unpackaged runs. IPC handlers that reach privileged side effects validate the sender frame via `isPermittedFrameUrl` (`src/main/ipc/frameValidation.ts`). See [`[internal]rules/electron.md`](../[internal]rules/electron.md).
+- **Security posture:** `contextIsolation` ON and `nodeIntegration` OFF unconditionally; no `@electron/remote`. `sandbox` (and `webSecurity`) are ON in packaged builds (`sandbox: isPackaged` in `browserWindowConfig.ts`) and off in dev/unpackaged runs. IPC handlers that reach privileged side effects validate the sender frame via `isPermittedFrameUrl` (`src/main/ipc/frameValidation.ts`).
 - **Token storage:** the refresh token and E2EE session keys are persisted by `tokenManager.ts` via Electron `safeStorage` (OS keychain — Keychain / DPAPI / libsecret) to `secure-token.dat` / `secure-e2ee.dat` under the pinned userData dir. The access token is **memory-only** (never persisted to disk); it is returned to the renderer via IPC and also cached in main-process memory (`cachedAccessToken`) for proactive refresh.
-- **Path identity:** `pinUserDataPath.ts` pins `userData` to `<appData>/ConcordVoice` as `main.ts`'s first import, decoupling the machine path-identity from the mutable display name (see [ADR-0020](adr/0020-desktop-app-naming-and-update-cache.md)).
+- **Path identity:** `pinUserDataPath.ts` pins `userData` to `<appData>/ConcordVoice` as `main.ts`'s first import, decoupling the machine path-identity from the mutable display name.
 - **Communication:** HTTP/WebSocket → Control Plane; Socket.IO → Media Plane (signaling); WebRTC (DTLS-SRTP carrying E2EE frames) → Media Plane (audio/video).
 
 #### SPA Deploy Lifecycle (ADR-0001, ADR-0015)
 
-The SPA bundle is served by **Cloudflare Pages** at the CONSTANT URL `https://spa.concordvoice.chat/index.html` — post-#976 / [ADR-0015](adr/0015-spa-serving-decouple.md), serving is decoupled from the Go control-plane. The per-deploy SHA no longer appears in the URL; Pages publishes each deployment atomically and serves the latest at the constant host. The bundle stays decoupled from its serving origin at build time: Vite's `base: './'` makes all chunks resolve relative to the URL `index.html` was loaded from.
+The SPA bundle is served by **Cloudflare Pages** at the CONSTANT URL `https://spa.concordvoice.chat/index.html`; serving is decoupled from the Go control-plane. The per-deploy SHA no longer appears in the URL; Pages publishes each deployment atomically and serves the latest at the constant host. The bundle stays decoupled from its serving origin at build time: Vite's `base: './'` makes all chunks resolve relative to the URL `index.html` was loaded from.
 
-`main-cd.yml`'s `deploy-spa` job invokes `[internal]deploy-spa.sh`, which `wrangler pages deploy`s the renderer bundle to Cloudflare Pages, writes `spa.env` with the constant `SPA_URL` (the per-deploy SHA is recorded as the `SPA_VERSION` annotation only, never in the URL), and commits + pushes `spa.env` back to main via a short-lived **Concord CI Bot** GitHub App installation token (Contents:write, per [ADR-0014](adr/0014-github-app-deploy-tokens.md)).
+The deploy pipeline `wrangler pages deploy`s the renderer bundle to Cloudflare Pages, writes `spa.env` with the constant `SPA_URL` (the per-deploy SHA is recorded as the `SPA_VERSION` annotation only, never in the URL), and commits + pushes `spa.env` back to main via a short-lived, least-privilege (Contents:write) GitHub App installation token.
 
 Four invariants enforce the contract:
 
 1. **Build invariant** — `vite.config.ts` keeps `base: './'`. Locked by `vite-base-relative.test.ts`.
-2. **Deploy invariant** — `spa.env` is a generated artifact. The `Verify spa.env contract` job in `pr-ci.yml` runs `[internal]verify-spa-env.sh --mode=pr`. The committed `spa.env` is bind-mounted into the control-plane container as a single file, so `deploy-spa.sh` rsyncs it with `--inplace` (writes the existing inode rather than atomic-rename to a new one) to avoid the stale-inode `spaUrl` class fixed by #1315.
+2. **Deploy invariant** — `spa.env` is a generated artifact, verified by a CI contract check. The committed `spa.env` is bind-mounted into the control-plane container as a single file, so the deploy step rsyncs it with `--inplace` (writes the existing inode rather than atomic-rename to a new one) to avoid a stale-inode `spaUrl` class of bug.
 3. **Runtime safety net** — the renderer self-heals on chunk-load failures via two-layer detection (renderer-side listeners in `spaSelfHealClient.ts` + main-process `did-fail-load` in `spaSelfHeal.ts` / `spaSelfHealMainFrame.ts`) feeding a shared recovery primitive with R2 retry.
-4. **Bundled fallback** — when `spaLoader.ts`'s `resolveSpaSource()` cannot validate the remote SPA (HTTPS + IPC-contract checks fail), it falls back to `mode: 'bundled'`, loading `app://concord/index.html` from the asar bundle. The `app://` scheme is registered privileged (`standard`/`secure`/`supportFetchAPI`/`corsEnabled`) in `main.ts` and resolved by `appProtocol.ts` (host check + path-traversal rejection). See [`[internal]rules/electron.md`](../[internal]rules/electron.md) §"`app://` scheme".
+4. **Bundled fallback** — when `spaLoader.ts`'s `resolveSpaSource()` cannot validate the remote SPA (HTTPS + IPC-contract checks fail), it falls back to `mode: 'bundled'`, loading `app://concord/index.html` from the asar bundle. The `app://` scheme is registered privileged (`standard`/`secure`/`supportFetchAPI`/`corsEnabled`) in `main.ts` and resolved by `appProtocol.ts` (host check + path-traversal rejection).
 
-For the deploy-contract rationale see [ADR-0001](adr/0001-spa-deploy-contract.md); for the move from the Go control-plane to Cloudflare Pages see [ADR-0015](adr/0015-spa-serving-decouple.md).
+The deploy-contract rationale and the move from the Go control-plane to Cloudflare Pages are captured in the project's architecture decision records.
 
 #### Desktop Auto-Update Trust Model
 
-The SPA hot-update path above is distinct from the **binary** auto-update path that ships new Electron app versions. The latter is a security-critical, signature-verified pipeline in `src/main/` (see [`docs/policies/update-trust-model.md`](policies/update-trust-model.md) and [ADR-0004](adr/0004-desktop-release-contract.md)):
+The SPA hot-update path above is distinct from the **binary** auto-update path that ships new Electron app versions. The latter is a security-critical, signature-verified pipeline in `src/main/` (see the [update trust model](policies/update-trust-model.md)):
 
 - **`updater.ts`** — `electron-updater` wiring with `autoDownload = false` (the download is a deliberate, user-gated step, not silent) and prerelease opt-in gating. It pins the certificate chain by monkey-patching `verifyUpdateCodeSignature` to require the Microsoft Trusted Signing intermediate (`updatePinning.ts` / `updatePinningConfig.ts`).
 - **`verifyWindowsSignature.ts`** — independent Authenticode signature verification of the downloaded Windows installer.
 - **`updateSafety.ts`** — update-safety gating (refuses unsafe transitions) before an update is applied.
-- **`userDataMigration.ts`** — migrates the userData tree across versions, tied to the path-identity pinning in [ADR-0020](adr/0020-desktop-app-naming-and-update-cache.md).
+- **`userDataMigration.ts`** — migrates the userData tree across versions, tied to the path-identity pinning described above.
 
 Manifests + signed installers are served from the control-plane `updates` package (`GET /api/v1/updates/*`); the trust decisions (signature + cert-chain + safety) all happen client-side in the main process. This is also defended at the transport layer by TLS pinning on `electron-updater`.
 
@@ -225,11 +225,11 @@ Manifests + signed installers are served from the control-plane `updates` packag
 
 **Responsibilities:** authentication; server/channel CRUD; membership + RBAC; user presence; WebSocket signaling and message relay; E2EE ciphertext relay (the server never decrypts); MFA; SSO; account erasure; object storage; client attestation; rate limiting.
 
-**API:** ~213 route registrations (REST handlers + the single `/ws` upgrade endpoint) across 20+ route groups (`/auth`, `/auth/sso`, `/mfa`, `/users`, `/sessions`, `/servers`, `/channels`, `/categories`, `/e2ee`, `/messages`, `/dm/conversations`, `/friends`, `/invites`, `/voice`, `/media`, `/notifications`, `/privacy`, `/klipy`, `/updates`, `/ws`). The Klipy routes register only when `KLIPY_API_KEY` is set; some media routes register a 503 fallback when object storage is unconfigured. See [API Documentation](./api/README.md). (Authoritative count: [internal] "Key Counts", via `scripts/update-claude-md-counts.sh`.)
+**API:** ~213 route registrations (REST handlers + the single `/ws` upgrade endpoint) across 20+ route groups (`/auth`, `/auth/sso`, `/mfa`, `/users`, `/sessions`, `/servers`, `/channels`, `/categories`, `/e2ee`, `/messages`, `/dm/conversations`, `/friends`, `/invites`, `/voice`, `/media`, `/notifications`, `/privacy`, `/klipy`, `/updates`, `/ws`). The Klipy routes register only when `KLIPY_API_KEY` is set; some media routes register a 503 fallback when object storage is unconfigured. See [API Documentation](./api/README.md). (Route counts are maintained by a repo count-generator script and may drift slightly from this document between audits.)
 
 **E2EE relay (zero-knowledge):** the server relays ciphertext and never decrypts. On the REST path, `messages` handlers (`internal/messages/handlers.go`) validate ciphertext structurally (`isValidCiphertext` — base64 + ≥28-byte decoded length) and enforce epoch revocation (`enforceE2EE`). On the WebSocket path, the hub validates the envelope (`validateEnvelope` — `key_version` present, length cap) and enforces epochs (`enforceWSEpoch` in `internal/websocket/hub.go`); it stores the `content` column verbatim. The E2EE-everywhere posture (#201) removed all per-row `is_encrypted` flags (migration 000062) — encryption is structural, not a runtime branch.
 
-**Outbound SSRF egress guard:** the Klipy media proxy (`internal/klipy/handlers.go`) is the reference SSRF-hardened outbound surface. A cloned transport installs `net.Dialer.Control` running `isDeniedEgressIP` (post-DNS, pre-connect — defends redirect-SSRF + DNS-rebinding with no TOCTOU window; denies loopback / private / ULA / link-local / multicast / CGNAT / deprecated site-local, after `Unmap()`), and `http.Client.CheckRedirect` re-validates scheme + host against `allowedMediaHosts` on every hop. See [`[internal]rules/backend.md`](../[internal]rules/backend.md) §"Outbound-request SSRF egress guard".
+**Outbound SSRF egress guard:** the Klipy media proxy (`internal/klipy/handlers.go`) is the reference SSRF-hardened outbound surface. A cloned transport installs `net.Dialer.Control` running `isDeniedEgressIP` (post-DNS, pre-connect — defends redirect-SSRF + DNS-rebinding with no TOCTOU window; denies loopback / private / ULA / link-local / multicast / CGNAT / deprecated site-local, after `Unmap()`), and `http.Client.CheckRedirect` re-validates scheme + host against `allowedMediaHosts` on every hop.
 
 **WebSocket hub** (`internal/websocket/hub.go`): a single `Run()` goroutine owns the subscription maps (`clients`, `userClients`, `channelSubscriptions`, `serverSubscriptions`, `dmSubscriptions`) and drains buffered broadcast channels. `handleIncoming` dispatches inbound frames by `type` (subscribe, message, typing, presence, DM variants, …); outbound fan-out is `BroadcastToChannel` / `BroadcastToServer` / `BroadcastToUser` / `BroadcastToDM` / `BroadcastToAll`.
 
@@ -426,7 +426,7 @@ erDiagram
 
 **Port**: 3000 · **RTC ports**: 40000–40099/UDP (dev), 40000–41999/UDP (production) · Source: `services/media-plane/`
 
-**Tech Stack:** Node.js 24, mediasoup 3.20, Socket.IO 4.8, NATS 2.x, `redis` (node-redis) client 6.x connecting to the shared Redis 7 server. The builder stage uses a custom GHCR base image (`ghcr.io/concord-voice/node-buildtools`, digest-pinned) — see [`[internal]rules/media-plane.md`](../[internal]rules/media-plane.md).
+**Tech Stack:** Node.js 24, mediasoup 3.20, Socket.IO 4.8, NATS 2.x, `redis` (node-redis) client 6.x connecting to the shared Redis 7 server. The builder stage uses a custom GHCR base image (`ghcr.io/concord-voice/node-buildtools`, digest-pinned) that pre-bakes the mediasoup native-compile toolchain.
 
 **Responsibilities:** WebRTC media routing (SFU — no mixing/transcoding); Opus audio with 7 quality tiers; per-room router management; transport/producer/consumer lifecycle; server-mute/deafen enforcement; NATS event publishing. The SFU forwards opaque, E2EE-encrypted RTP frames (see [Media E2EE](#media-e2ee-frame-encryption)).
 
@@ -435,7 +435,7 @@ erDiagram
 - `MediasoupService` (`src/lib/mediasoup.ts`) owns **workers and routers only** — `init()` creates the worker pool, `getOrCreateRouter(roomId)` / `removeRouter(roomId)` manage one router per room. It holds no participant state.
 - `RoomManager` (`src/lib/roomManager.ts`) is **authoritative for everything else** — `joinRoom` / `leaveRoom`, `createTransport`, `connectTransport`, `produce` / `consume`, producer/consumer pause/resume/close, and the server-mute/deafen methods. `MediasoupService` is injected as a dependency. The `Room` struct carries `{ id, router, audioLevelObserver, participants, createdAt, e2eeEpoch }` — **no `isEncrypted` field**.
 
-**Transport encryption is structurally mandatory.** All transports are created via `router.createWebRtcTransport` (DTLS-SRTP by construction); there is no `createPlainRtpTransport` path and no per-room encryption flag anywhere in `src/`. The `e2eeEpoch` counter increments unconditionally on every join/leave for forward-secrecy signaling. See [`[internal]rules/media-plane.md`](../[internal]rules/media-plane.md) §"SRTP Is Structurally Mandatory".
+**Transport encryption is structurally mandatory.** All transports are created via `router.createWebRtcTransport` (DTLS-SRTP by construction); there is no `createPlainRtpTransport` path and no per-room encryption flag anywhere in `src/`. The `e2eeEpoch` counter increments unconditionally on every join/leave for forward-secrecy signaling.
 
 **Origin gate.** The Socket.IO `cors.origin` callback (`src/lib/originGate.ts`) maintains semantic parity with the control-plane CORS middleware: no-Origin → allow; `'null'` / `'file://'` → reject (case-insensitive, whitespace-tolerant); allowlist or `'*'` → allow; else reject. A production guard in `src/config/index.ts` fatal-exits if `ALLOWED_ORIGINS` contains `'*'` while `ENVIRONMENT=production` (CWE-942).
 
@@ -592,11 +592,11 @@ sequenceDiagram
     Note over S: New messages use epoch N+1;<br/>removed member cannot derive CSK'
 ```
 
-Server channels (`channel_keys` / `key_revocations`) and DMs (`dm_channel_keys` / `dm_key_revocations`) use parallel epoch ledgers. The `CHECK(successor_epoch > revoked_epoch)` constraint is present on `dm_key_revocations` (migration 000041); on `key_revocations` the constraint was added only in a re-declaration (000035) that is a no-op once the table exists from 000028, so it may be absent on already-migrated databases. See [`[internal]rules/e2ee.md`](../[internal]rules/e2ee.md) and the [Key-Compromise IR Playbook](runbooks/incident-response-key-compromise.md).
+Server channels (`channel_keys` / `key_revocations`) and DMs (`dm_channel_keys` / `dm_key_revocations`) use parallel epoch ledgers. The `CHECK(successor_epoch > revoked_epoch)` constraint is present on `dm_key_revocations` (migration 000041); on `key_revocations` the constraint was added only in a re-declaration (000035) that is a no-op once the table exists from 000028, so it may be absent on already-migrated databases.
 
 ### Account Erasure Cascade
 
-`POST /api/v1/privacy/erase-account` (the `privacy` package → `users.DeleteAccount`) runs a single transaction: `DELETE FROM users WHERE id = $1`. Every user-owned table FKs `users(id) ON DELETE CASCADE`, so refresh tokens, keys, memberships, messages, and DM data are removed atomically — strictly stronger than the soft-revoke in `ChangePassword` (no token residue). A NULL-`user_id` audit row is written to `account_deletions`. See [`[internal]rules/backend.md`](../[internal]rules/backend.md) §"Auth & Security".
+`POST /api/v1/privacy/erase-account` (the `privacy` package → `users.DeleteAccount`) runs a single transaction: `DELETE FROM users WHERE id = $1`. Every user-owned table FKs `users(id) ON DELETE CASCADE`, so refresh tokens, keys, memberships, messages, and DM data are removed atomically — strictly stronger than the soft-revoke in `ChangePassword` (no token residue). A NULL-`user_id` audit row is written to `account_deletions`.
 
 ### Runtime Client Configuration
 
@@ -627,9 +627,9 @@ The Cloudflare proxy in front of `api.concordvoice.chat` is load-bearing for the
 
 ### Self-Hosted (Docker Compose)
 
-The same `docker-compose.yml` (base) + `docker-compose.production.yml` (overlay) runs the full stack on a single server. Production-required variables use fail-loud `${VAR:?msg}` interpolation so a misconfiguration fails at `docker compose config` time rather than at runtime (see [`[internal]rules/deployment.md`](../[internal]rules/deployment.md)).
+The same `docker-compose.yml` (base) + `docker-compose.production.yml` (overlay) runs the full stack on a single server. Production-required variables use fail-loud `${VAR:?msg}` interpolation so a misconfiguration fails at `docker compose config` time rather than at runtime.
 
-**Requirements:** 4+ CPU cores, 8+ GB RAM, 50+ GB storage, public IP for WebRTC, UDP 40000–41999 open. The `coturn` service provides STUN/TURN with TLS (cert provisioning via the certbot deploy hook `infrastructure/deploy/copy-certs.sh`).
+**Requirements:** 4+ CPU cores, 8+ GB RAM, 50+ GB storage, public IP for WebRTC, UDP 40000–41999 open. The `coturn` service provides STUN/TURN with TLS (cert provisioning via a certbot deploy hook).
 
 Dev/test services (`pgadmin`, `redis-commander`) are gated behind the `tools` compose profile; `licensing-authority` behind the `licensing` profile (not production-active).
 
@@ -644,7 +644,7 @@ Dev/test services (`pgadmin`, `redis-commander`) are gated behind the `tools` co
 - **SSO (implemented):** OAuth 2.0 / OIDC for Google and Apple (`internal/oauth/`; auth-side integration in `internal/auth/oauth_adapter.go`).
 - **RBAC:** `internal/rbac/` resolves effective permissions from `server_members` / `member_roles` joined to `roles` (a `permissions` BIGINT bitfield, `BIT_OR`-aggregated) plus channel/category overrides (`channel_permission_overrides` / `category_permission_overrides`), enforced by `RequireMembership` / `RequirePermission` middleware, cached in Redis, and audited to `audit_log`.
 - **Rate limiting:** Redis-based, per-IP and per-user (`internal/middleware/`).
-- **Client attestation:** server- and client-side. The client (`src/main/attestationService.ts` + `attestationSignals.ts`) collects device/build signals, POSTs them to obtain a short-lived `attestation_token` (cached until expiry), and presents it to gated routes; failures surface via `attestationFailureStore`. The server (`internal/attestation/`) verifies tokens and gates authenticated routes when enabled (fail-closed on Redis error); release provenance is recorded in `release_spas` / `release_binaries` (migration 000066). See [ADR-0010](adr/0010-client-attestation.md).
+- **Client attestation:** server- and client-side. The client (`src/main/attestationService.ts` + `attestationSignals.ts`) collects device/build signals, POSTs them to obtain a short-lived `attestation_token` (cached until expiry), and presents it to gated routes; failures surface via `attestationFailureStore`. The server (`internal/attestation/`) verifies tokens and gates authenticated routes when enabled (fail-closed on Redis error); release provenance is recorded in `release_spas` / `release_binaries` (migration 000066).
 
 ### Transport & Media Security
 
@@ -702,7 +702,7 @@ sequenceDiagram
 
 ## Logging Discipline
 
-Concord has **no telemetry, tracing, or metrics pipeline** — there is no Prometheus, Loki, Grafana, Jaeger, or Sentry (Sentry was removed entirely on 2026-04-22; the `account_deletions.sentry_delete_attempted` column was dropped in migration 000060). What remains is *logging hygiene*: services emit structured logs to stdout, governed by [`[internal]rules/observability.md`](../[internal]rules/observability.md).
+Concord has **no telemetry, tracing, or metrics pipeline** — there is no Prometheus, Loki, Grafana, Jaeger, or Sentry (Sentry was removed entirely on 2026-04-22; the `account_deletions.sentry_delete_attempted` column was dropped in migration 000060). What remains is *logging hygiene*: services emit structured logs to stdout, governed by a logging-discipline rule.
 
 Core logging rules (enforced by lint + AST regression tests, not convention):
 
@@ -748,8 +748,6 @@ Concord/
 | Auth | JWT + HttpOnly refresh | Stateless access, revocable refresh |
 | GIF search | Klipy (privacy proxy) | Tenant key + SSRF-guarded server-side proxy; no direct client calls |
 
-**Architecture Decision Records** (`[internal]`): 0001 SPA deploy contract · 0002 Actions-as-SoT deploys · 0003 E2EE-always · 0004 Desktop release contract · 0005 Runner sizing · 0006 CI cache-tier split · 0007 Epic authoritative-design pattern · 0008 macOS install UX · 0009 SPA workflow-chain architecture · 0010 Client attestation **and** DMG signing/notarization (two ADRs share the 0010 number) · 0011 Desktop app naming **and** Playwright e2e gate (two ADRs share the 0011 number) · 0012 Public/private repo split · 0013 Runner-tier selection · 0014 GitHub App deploy tokens · 0015 SPA-serving decouple. (Cite ADRs by filename, not number — 0010 and 0011 are each used twice.)
-
 ## Planned / Not Yet Implemented
 
 These describe intended future work — **not** current architecture. They are kept here so contributors can distinguish shipped reality from roadmap.
@@ -757,7 +755,7 @@ These describe intended future work — **not** current architecture. They are k
 - **Licensing Authority** (Go, port 8082) — signed-license generation/validation and periodic check-ins for self-hosted instances. Directory exists but is profile-gated out of production (Phase 3).
 - **Web client (PWA)** — a browser client sharing renderer code with the desktop app. Not built; the desktop client is the only shipping client.
 - **Kubernetes / multi-region** — Helm charts, horizontal pod autoscaling, geographic DNS routing, and read-replica fan-out for a multi-region SaaS. Current production is a single-VM Docker Compose deployment.
-- **`messages`-table partitioning** — declarative hash-partitioning by `channel_id` is specified but deliberately **not** implemented; it is gated on concrete trigger criteria (query p99 > 100ms, any channel > 100k messages, or > 10M rows with observed bloat). See [`[internal]rules/migrations.md`](../[internal]rules/migrations.md) §"When to Partition Large Tables". Earliest candidate: v1.2.0.
+- **`messages`-table partitioning** — declarative hash-partitioning by `channel_id` is specified but deliberately **not** implemented; it is gated on concrete trigger criteria (query p99 > 100ms, any channel > 100k messages, or > 10M rows with observed bloat). Earliest candidate: v1.2.0.
 - **Performance SLOs** — no formal latency/capacity targets are published yet; figures should be measured before they are documented (the previous version of this section contained aspirational numbers that were never instrumented).
 - **Enterprise SSO** (LDAP, SAML 2.0) and additional disaster-recovery automation are tracked for later releases.
 
@@ -765,4 +763,3 @@ These describe intended future work — **not** current architecture. They are k
 
 - [API Documentation](./api/README.md) — OpenAPI 3.0 spec (partial; full regeneration tracked separately)
 - [Development Guide](./development.md) — local setup, running tests
-- [[internal]](..[internal]) — project ground truth and current Key Counts
