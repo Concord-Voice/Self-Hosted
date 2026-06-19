@@ -14,6 +14,7 @@ import { RedisService } from './lib/redis.js';
 import { createExpressErrorHandler } from './lib/expressErrorHandler.js';
 import { createOriginGate } from './lib/originGate.js';
 import { handleForceDisconnect } from './lib/forceDisconnect.js';
+import { handleSetDeafen } from './lib/setDeafen.js';
 
 async function main() {
   // Create Express app
@@ -665,35 +666,14 @@ async function main() {
 
     // ── set-deafen (#685) ─────────────────────────────────────────────
     // Self-deafen is a client-side choice (the client pauses its own incoming
-    // audio consumers locally). This event records the authoritative flag on the
-    // room participant and notifies the rest of the room so their sidebar can show
-    // the deafen state — mirroring the self-mute `pause-producer` → `producer-paused`
-    // flow. Distinct from the moderator `voice.enforce.deafen` NATS path.
+    // audio consumers locally). Records the authoritative flag on the room
+    // participant and notifies the rest of the room so their sidebar reflects it —
+    // mirroring the self-mute `pause-producer` → `producer-paused` flow. Distinct
+    // from the moderator `voice.enforce.deafen` NATS path. Logic lives in
+    // lib/setDeafen.ts (unit-tested; mirrors the forceDisconnect extraction).
     socket.on('set-deafen', ({ isDeafened }: { isDeafened?: unknown }, callback?) => {
-      try {
-        const roomId = data.roomId;
-        if (!roomId) {
-          if (callback) return callback({ error: 'Not in a room' });
-          return;
-        }
-        if (typeof isDeafened !== 'boolean') {
-          if (callback) return callback({ error: 'invalid_payload' });
-          return;
-        }
-
-        roomManager.setParticipantDeafen(roomId, data.userId, isDeafened);
-
-        // Notify others in the room
-        socket.to(roomId).emit('participant-deafen-changed', {
-          userId: data.userId,
-          isDeafened,
-        });
-
-        if (callback) callback({ success: true });
-      } catch (error) {
-        logger.error('Error setting deafen state', { error, userId: data.userId });
-        if (callback) callback({ error: 'Failed to set deafen state' });
-      }
+      const result = handleSetDeafen(roomManager, socket, data.roomId, data.userId, isDeafened);
+      if (callback) callback(result);
     });
 
     // ── close-producer ───────────────────────────────────────────────
