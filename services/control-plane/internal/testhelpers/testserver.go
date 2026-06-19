@@ -250,7 +250,7 @@ func (ts *TestServer) CreateTestServer(t *testing.T, ownerID, name string) strin
 
 	serverID := uuid.New().String()
 	_, err := ts.DB.Exec(
-		`INSERT INTO servers (id, name, owner_id, e2ee_default) VALUES ($1, $2, $3, false)`,
+		`INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)`,
 		serverID, name, ownerID,
 	)
 	if err != nil {

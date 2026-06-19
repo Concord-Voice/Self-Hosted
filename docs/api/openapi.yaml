@@ -1517,144 +1517,6 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/SSOError'
-  /auth/sso/{provider}/session:
-    post:
-      tags:
-      - Auth
-      summary: Terminal step of the client-driven Apple SSO exchange
-      description: 'Verify an Apple `id_token` produced by the desktop main process''s
-        client-driven code exchange (#974) and classify the outcome — existing-SSO
-        session (tokens or MFA), account-link offer, or new-user registration handoff.
-
-
-        Only `provider=apple` is accepted. Authorized by a valid, unconsumed `sso_state`
-        (one-shot). The server NEVER trusts client-side id_token verification (CWE-345
-        defense in depth) — it re-verifies the JWS via the cached Apple JWKS, and re-runs
-        the iss / aud / exp / iat / nonce checks.
-
-
-        Response shapes are byte-identical to `POST /auth/sso/{provider}/callback`,
-        so the renderer''s register / link / MFA paths are untouched.
-
-
-        Rate limit: 10 requests per 15 minutes (IP-based).
-
-        '
-      operationId: ssoAppleSession
-      security: []
-      parameters:
-      - name: provider
-        in: path
-        required: true
-        schema:
-          type: string
-          enum:
-          - apple
-        description: Must be `apple` — other providers return 404
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              type: object
-              required:
-              - id_token
-              - state
-              properties:
-                id_token:
-                  type: string
-                  description: Apple-issued id_token from the desktop main process's
-                    code exchange
-                state:
-                  type: string
-                  description: State value from the initiate step (max 256 chars)
-                apple_user_data:
-                  type: string
-                  description: Apple-only opaque "user" blob from the first-auth step
-                    (display-name suggestion). Treated as opaque; never logged. Truncated
-                    to empty when oversize.
-      responses:
-        '200':
-          description: 'Verification succeeded — one of four shapes: existing-SSO session
-            (`access_token` + refresh cookie), existing-SSO MFA challenge, account-link
-            offer, or new-user registration handoff. Shape matches `POST /auth/sso/{provider}/callback`.'
-          content:
-            application/json:
-              schema:
-                oneOf:
-                - type: object
-                  description: Existing SSO identity — session issued
-                  properties:
-                    access_token:
-                      type: string
-                - type: object
-                  description: Existing SSO identity — MFA required
-                  properties:
-                    mfa_challenge_token:
-                      type: string
-                    methods:
-                      type: array
-                      items:
-                        type: string
-                    recovery_only_methods:
-                      type: array
-                      items:
-                        type: string
-                    webauthn_options:
-                      type: object
-                - type: object
-                  description: Verified email matches an existing account
-                  properties:
-                    account_link_available:
-                      type: boolean
-                    sso_token:
-                      type: string
-                    masked_email:
-                      type: string
-                - type: object
-                  description: New user — registration required
-                  properties:
-                    sso_registration_required:
-                      type: boolean
-                    sso_token:
-                      type: string
-                    email:
-                      type: string
-                    name:
-                      type: string
-          headers:
-            Set-Cookie:
-              description: HttpOnly refresh token cookie (session-issued branch only)
-              schema:
-                type: string
-        '400':
-          description: Invalid body (`invalid_request`)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SSOError'
-        '401':
-          description: Invalid / expired / replayed state (`invalid_state`) or id_token
-            verification failed (`invalid_id_token`). The two classes are kept distinct
-            because the client remediation differs (restart the flow vs never-retry-this-token).
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SSOError'
-        '403':
-          description: Apple reports the email as unverified (`oauth_email_unverified`)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SSOError'
-        '404':
-          description: Unknown or non-apple provider (`unknown_provider`)
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/SSOError'
-        '429':
-          $ref: '#/components/responses/RateLimited'
   /auth/ws-ticket:
     post:
       tags:
@@ -11739,10 +11601,6 @@ components:
           type: string
           nullable: true
           description: Data URL (max 500KB)
-        e2ee_default:
-          type: boolean
-          default: true
-          description: Whether new channels are encrypted by default
     UpdateServerRequest:
       type: object
       required:
@@ -11932,8 +11790,6 @@ components:
         owner_id:
           type: string
           format: uuid
-        e2ee_default:
-          type: boolean
         created_at:
           type: string
           format: date-time

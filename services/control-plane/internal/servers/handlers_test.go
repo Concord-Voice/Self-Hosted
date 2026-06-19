@@ -75,13 +75,15 @@ func TestCreateServerNameTooShort(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestCreateServerWithE2EEDefault(t *testing.T) {
+// TestCreateServerResponseHasNoE2EEDefault locks the #1647 removal: the
+// per-server e2ee_default opt-out is gone end-to-end (E2EE-everywhere is a
+// structural invariant), so the create response must no longer echo the field.
+func TestCreateServerResponseHasNoE2EEDefault(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "e2eeserver")
 
 	w := ts.DoRequest("POST", "/api/v1/servers", map[string]interface{}{
-		"name":         "Encrypted Server",
-		"e2ee_default": true,
+		"name": "Encrypted Server",
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	assert.Equal(t, http.StatusCreated, w.Code)
@@ -89,7 +91,8 @@ func TestCreateServerWithE2EEDefault(t *testing.T) {
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
 	server := body["server"].(map[string]interface{})
-	assert.Equal(t, true, server["e2ee_default"])
+	_, hasField := server["e2ee_default"]
+	assert.False(t, hasField, "create response must not echo the removed e2ee_default field")
 }
 
 // --- Get Server ---

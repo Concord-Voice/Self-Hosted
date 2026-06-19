@@ -54,10 +54,9 @@ func (h *Handler) SetMediaStore(store media.ObjectDeleter) {
 
 // CreateServerRequest represents a request to create a server
 type CreateServerRequest struct {
-	Name        string  `json:"name" binding:"required,min=3,max=100"`
-	IconURL     *string `json:"icon_url"`
-	BannerURL   *string `json:"banner_url"`
-	E2EEDefault *bool   `json:"e2ee_default,omitempty"` // Defaults to true if not specified
+	Name      string  `json:"name" binding:"required,min=3,max=100"`
+	IconURL   *string `json:"icon_url"`
+	BannerURL *string `json:"banner_url"`
 }
 
 // UpdateServerRequest represents a request to update a server.
@@ -82,7 +81,7 @@ func (h *Handler) ListServers(c *gin.Context) {
 	}
 
 	query := `
-		SELECT s.id, s.name, s.icon_url, s.banner_url, s.owner_id, s.e2ee_default, s.allow_embedded_content, s.created_at, s.updated_at, sm.role,
+		SELECT s.id, s.name, s.icon_url, s.banner_url, s.owner_id, s.allow_embedded_content, s.created_at, s.updated_at, sm.role,
 			(SELECT COUNT(*) FROM server_members WHERE server_id = s.id) AS member_count,
 			(SELECT COUNT(*) FROM server_members WHERE server_id = s.id AND user_id = ANY($2::uuid[])) AS online_count
 		FROM servers s
@@ -108,7 +107,6 @@ func (h *Handler) ListServers(c *gin.Context) {
 			&server.IconURL,
 			&server.BannerURL,
 			&server.OwnerID,
-			&server.E2EEDefault,
 			&server.AllowEmbeddedContent,
 			&server.CreatedAt,
 			&server.UpdatedAt,
@@ -147,13 +145,13 @@ func validateCreateDataURL(url *string, maxLen int, label, sizeHint string) stri
 }
 
 // insertServerRow inserts the server row and scans back the timestamps.
-func insertServerRow(tx *sql.Tx, server *models.Server, e2eeDefault bool) error {
+func insertServerRow(tx *sql.Tx, server *models.Server) error {
 	query := `
-		INSERT INTO servers (id, name, icon_url, banner_url, owner_id, e2ee_default, allow_embedded_content, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5, $6, FALSE, NOW(), NOW())
+		INSERT INTO servers (id, name, icon_url, banner_url, owner_id, allow_embedded_content, created_at, updated_at)
+		VALUES ($1, $2, $3, $4, $5, FALSE, NOW(), NOW())
 		RETURNING created_at, updated_at
 	`
-	return tx.QueryRow(query, server.ID, server.Name, server.IconURL, server.BannerURL, server.OwnerID, e2eeDefault).Scan(
+	return tx.QueryRow(query, server.ID, server.Name, server.IconURL, server.BannerURL, server.OwnerID).Scan(
 		&server.CreatedAt,
 		&server.UpdatedAt,
 	)
@@ -220,11 +218,6 @@ func (h *Handler) CreateServer(c *gin.Context) {
 		}
 	}()
 
-	e2eeDefault := true
-	if req.E2EEDefault != nil {
-		e2eeDefault = *req.E2EEDefault
-	}
-
 	serverID := uuid.New().String()
 	server := models.Server{
 		ID:                   serverID,
@@ -232,11 +225,10 @@ func (h *Handler) CreateServer(c *gin.Context) {
 		IconURL:              req.IconURL,
 		BannerURL:            req.BannerURL,
 		OwnerID:              userID,
-		E2EEDefault:          e2eeDefault,
 		AllowEmbeddedContent: false,
 	}
 
-	if err := insertServerRow(tx, &server, e2eeDefault); err != nil {
+	if err := insertServerRow(tx, &server); err != nil {
 		h.log.Error("Failed to create server", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedCreate})
 		return
@@ -293,7 +285,7 @@ func (h *Handler) GetServer(c *gin.Context) {
 	// Get server details
 	var server models.Server
 	serverQuery := `
-		SELECT id, name, icon_url, banner_url, owner_id, e2ee_default, allow_embedded_content, created_at, updated_at
+		SELECT id, name, icon_url, banner_url, owner_id, allow_embedded_content, created_at, updated_at
 		FROM servers
 		WHERE id = $1
 	`
@@ -304,7 +296,6 @@ func (h *Handler) GetServer(c *gin.Context) {
 		&server.IconURL,
 		&server.BannerURL,
 		&server.OwnerID,
-		&server.E2EEDefault,
 		&server.AllowEmbeddedContent,
 		&server.CreatedAt,
 		&server.UpdatedAt,
@@ -384,14 +375,14 @@ func (h *Handler) UpdateServer(c *gin.Context) {
 	setClauses, args, argIdx, mediaKeysToDelete := buildUpdateClauses(serverID, req, iconURLProvided, iconURL, bannerURLProvided, bannerURL)
 
 	args = append(args, serverID)
-	updateQuery := fmt.Sprintf("UPDATE servers SET %s WHERE id = $%d RETURNING name, icon_url, banner_url, owner_id, e2ee_default, allow_embedded_content, created_at, updated_at", //nolint:gosec // setClauses are hardcoded column names, argIdx is an integer — no injection risk // nosemgrep:concord-go-sql-sprintf
+	updateQuery := fmt.Sprintf("UPDATE servers SET %s WHERE id = $%d RETURNING name, icon_url, banner_url, owner_id, allow_embedded_content, created_at, updated_at", //nolint:gosec // setClauses are hardcoded column names, argIdx is an integer — no injection risk // nosemgrep:concord-go-sql-sprintf
 		strings.Join(setClauses, ", "), argIdx)
 
 	var server models.Server
 	server.ID = serverID
 	// nosemgrep: go.net.sql.go-vanillasql-format-string-sqli-taint-med-conf.go-vanillasql-format-string-sqli-taint-med-conf,go.net.sql.go-vanillasql-format-string-sqli-taint.go-vanillasql-format-string-sqli-taint
 	err = h.db.QueryRow(updateQuery, args...).Scan( //nolint:gosec // updateQuery composed by buildUpdateClauses: hardcoded column names + integer argIdx via fmt.Sprintf; user values flow only through args... as parameterized $N placeholders. See matching nosemgrep on the fmt.Sprintf above.
-		&server.Name, &server.IconURL, &server.BannerURL, &server.OwnerID, &server.E2EEDefault, &server.AllowEmbeddedContent, &server.CreatedAt, &server.UpdatedAt,
+		&server.Name, &server.IconURL, &server.BannerURL, &server.OwnerID, &server.AllowEmbeddedContent, &server.CreatedAt, &server.UpdatedAt,
 	)
 
 	if err == sql.ErrNoRows {

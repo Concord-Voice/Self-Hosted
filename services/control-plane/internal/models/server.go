@@ -10,7 +10,6 @@ type Server struct {
 	IconURL              *string   `json:"icon_url,omitempty" db:"icon_url"`
 	BannerURL            *string   `json:"banner_url,omitempty" db:"banner_url"`
 	OwnerID              string    `json:"owner_id" db:"owner_id"`
-	E2EEDefault          bool      `json:"e2ee_default" db:"e2ee_default"`
 	AllowEmbeddedContent bool      `json:"allow_embedded_content" db:"allow_embedded_content"`
 	CreatedAt            time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt            time.Time `json:"updated_at" db:"updated_at"`

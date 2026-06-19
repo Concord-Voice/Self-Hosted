@@ -151,7 +151,7 @@ func (ts *testSetup) createTestServer(t *testing.T, ownerID, name string) string
 	t.Helper()
 	serverID := uuid.New().String()
 	_, err := ts.db.Exec(
-		`INSERT INTO servers (id, name, owner_id, e2ee_default) VALUES ($1, $2, $3, false)`,
+		`INSERT INTO servers (id, name, owner_id) VALUES ($1, $2, $3)`,
 		serverID, name, ownerID,
 	)
 	require.NoError(t, err)

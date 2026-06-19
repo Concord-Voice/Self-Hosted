@@ -31,7 +31,7 @@ func setupMessageTest(t *testing.T) *hubTestSetup {
 
 	// Create server
 	serverID := uuid.New()
-	_, err = db.Exec(`INSERT INTO servers (id, name, owner_id, e2ee_default, allow_embedded_content) VALUES ($1, $2, $3, false, true)`,
+	_, err = db.Exec(`INSERT INTO servers (id, name, owner_id, allow_embedded_content) VALUES ($1, $2, $3, true)`,
 		serverID.String(), "Test Server", userID.String())
 	require.NoError(t, err)
 
@@ -1646,7 +1646,7 @@ func TestFlushOnlineCountsFullPipeline(t *testing.T) {
 	require.NoError(t, err)
 
 	serverID := uuid.New()
-	_, err = db.Exec(`INSERT INTO servers (id, name, owner_id, e2ee_default, allow_embedded_content) VALUES ($1, $2, $3, false, true)`,
+	_, err = db.Exec(`INSERT INTO servers (id, name, owner_id, allow_embedded_content) VALUES ($1, $2, $3, true)`,
 		serverID.String(), "Count Server", userID.String())
 	require.NoError(t, err)
 

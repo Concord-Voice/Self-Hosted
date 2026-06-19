@@ -478,11 +478,11 @@ func (h *Handler) lookupInvite(tx *sql.Tx, code string) (models.ServerInvite, er
 func (h *Handler) fetchServer(tx *sql.Tx, serverID string) (models.Server, error) {
 	var server models.Server
 	err := tx.QueryRow(`
-		SELECT id, name, icon_url, banner_url, owner_id, e2ee_default, allow_embedded_content, created_at, updated_at
+		SELECT id, name, icon_url, banner_url, owner_id, allow_embedded_content, created_at, updated_at
 		FROM servers WHERE id = $1
 	`, serverID).Scan(
 		&server.ID, &server.Name, &server.IconURL, &server.BannerURL, &server.OwnerID,
-		&server.E2EEDefault, &server.AllowEmbeddedContent, &server.CreatedAt, &server.UpdatedAt,
+		&server.AllowEmbeddedContent, &server.CreatedAt, &server.UpdatedAt,
 	)
 	return server, err
 }

@@ -124,39 +124,6 @@ func TestCreateServerWithTooLargeBanner(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, w.Code)
 }
 
-func TestCreateServerE2EEDefaultFalse(t *testing.T) {
-	ts := setupTS(t)
-	user := ts.CreateTestUser(t, "e2eefalsesrv")
-
-	e2eeDefault := false
-	w := ts.DoRequest("POST", pathServers, map[string]interface{}{
-		"name":         "Unencrypted Server",
-		"e2ee_default": e2eeDefault,
-	}, testhelpers.AuthHeaders(user.AccessToken))
-
-	assert.Equal(t, http.StatusCreated, w.Code)
-	var body map[string]interface{}
-	testhelpers.ParseJSON(t, w, &body)
-	server := body["server"].(map[string]interface{})
-	assert.Equal(t, false, server["e2ee_default"])
-}
-
-func TestCreateServerE2EEDefaultOmitted(t *testing.T) {
-	ts := setupTS(t)
-	user := ts.CreateTestUser(t, "e2eeomitsrv")
-
-	w := ts.DoRequest("POST", pathServers, map[string]interface{}{
-		"name": "Default E2EE Server",
-	}, testhelpers.AuthHeaders(user.AccessToken))
-
-	assert.Equal(t, http.StatusCreated, w.Code)
-	var body map[string]interface{}
-	testhelpers.ParseJSON(t, w, &body)
-	server := body["server"].(map[string]interface{})
-	// When e2ee_default is omitted, it defaults to true
-	assert.Equal(t, true, server["e2ee_default"])
-}
-
 func TestCreateServerOwnerAddedAsMember(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "createownermem")
