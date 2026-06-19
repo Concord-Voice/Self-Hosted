@@ -893,32 +893,35 @@ func TestUpdatePrivacySettingsSuccess(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "privupd")
 
-	// First PATCH creates the row via INSERT (no conflict) — DB defaults apply.
-	// Second PATCH triggers the ON CONFLICT UPDATE path that actually sets the value.
+	// Regression lock for #1674: a SINGLE PATCH on a fresh user (no pre-existing
+	// privacy_settings row) MUST persist the submitted value. The prior UPSERT
+	// (INSERT (user_id) VALUES ($1) ON CONFLICT DO UPDATE) silently dropped
+	// first-write values because the no-conflict INSERT skipped the SET clause;
+	// this test previously masked that with a two-PATCH workaround.
 	payload := map[string]interface{}{
 		"searchable_by_username": true,
 	}
 	w := ts.DoRequest(methodPatch, urlUsersMePrivacy, payload, testhelpers.AuthHeaders(user.AccessToken))
 	assert.Equal(t, http.StatusOK, w.Code)
 
-	// Second call updates the existing row
-	w = ts.DoRequest(methodPatch, urlUsersMePrivacy, payload, testhelpers.AuthHeaders(user.AccessToken))
-	assert.Equal(t, http.StatusOK, w.Code)
-
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
 	priv := body["privacy"].(map[string]interface{})
-	assert.Equal(t, true, priv["searchable_by_username"])
+	assert.Equal(t, true, priv["searchable_by_username"], "response must reflect the submitted value")
+
+	// Verify the value actually persisted in the DB (not just echoed in the response).
+	var persisted bool
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT searchable_by_username FROM privacy_settings WHERE user_id = $1`, user.ID,
+	).Scan(&persisted))
+	assert.True(t, persisted, "first PATCH must persist to the DB, not leave defaults")
 }
 
 func TestUpdatePrivacySettingsDMPrivacyLevel(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "privdm")
 
-	// Seed the privacy_settings row first so the ON CONFLICT UPDATE path fires
-	_, err := ts.DB.Exec(`INSERT INTO privacy_settings (user_id) VALUES ($1) ON CONFLICT DO NOTHING`, user.ID)
-	require.NoError(t, err)
-
+	// Single PATCH on a fresh user (no seed) — first write must persist (#1674).
 	payload := map[string]interface{}{
 		"dm_privacy_level": 1,
 	}

@@ -1263,26 +1263,48 @@ func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
 	setClauses = append(setClauses, "updated_at = NOW()")
 	args := append([]interface{}{userID}, extraArgs...)
 
-	// UPSERT: insert with defaults, update only provided fields
-	// #nosec G201 -- Safe: setClauses contains only parameterized assignments
-	query := fmt.Sprintf(`
-		INSERT INTO privacy_settings (user_id) VALUES ($1)
-		ON CONFLICT (user_id) DO UPDATE SET %s
-		RETURNING messages_friends_only, messages_server_members, dm_privacy_level, dm_friends_of_friends,
-		          auto_accept_friend_codes, searchable_by_username, searchable_by_email, searchable_by_phone,
-		          allow_embedded_content, load_gifs_automatically, enable_klipy_proxy,
-		          share_personalization_with_gif_provider, updated_at
-	`, strings.Join(setClauses, ", "))
-
+	// Two-step UPSERT in a transaction so a FIRST write persists (#1674). A single
+	// `INSERT (user_id) VALUES ($1) ON CONFLICT DO UPDATE SET ...` drops the
+	// provided values on a fresh user: the INSERT succeeds with defaults, so there
+	// is no conflict and the SET clause never runs. Instead: ensure the row exists
+	// (DO NOTHING), then UPDATE the provided columns. The UPDATE applies all
+	// setClauses — parameterized $N assignments AND fixed legacy literal clauses
+	// from dmPrivacyLegacySync — verbatim. The DB work runs in a closure so the
+	// failure response (and its message) is written in exactly one place.
 	var ps privacySettingsResponse
-	err := h.db.QueryRow(query, args...).Scan(
-		&ps.MessagesFriendsOnly, &ps.MessagesServerMembers, &ps.DMPrivacyLevel, &ps.DMFriendsOfFriends,
-		&ps.AutoAcceptFriendCodes, &ps.SearchableByUsername, &ps.SearchableByEmail, &ps.SearchableByPhone,
-		&ps.AllowEmbeddedContent, &ps.LoadGifsAutomatically, &ps.EnableKlipyProxy,
-		&ps.SharePersonalizationWithGifProvider, &ps.UpdatedAt,
-	)
-	if err != nil {
-		h.log.Error("Failed to update privacy settings", "error", err)
+	txErr := func() error {
+		tx, err := h.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }() // no-op once Commit succeeds
+
+		if _, err := tx.Exec(`INSERT INTO privacy_settings (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING`, userID); err != nil {
+			return err
+		}
+
+		// #nosec G201 -- Safe: setClauses contains only parameterized ($N) assignments and fixed legacy literal clauses; no user value is interpolated
+		query := fmt.Sprintf(`
+			UPDATE privacy_settings SET %s WHERE user_id = $1
+			RETURNING messages_friends_only, messages_server_members, dm_privacy_level, dm_friends_of_friends,
+			          auto_accept_friend_codes, searchable_by_username, searchable_by_email, searchable_by_phone,
+			          allow_embedded_content, load_gifs_automatically, enable_klipy_proxy,
+			          share_personalization_with_gif_provider, updated_at
+		`, strings.Join(setClauses, ", "))
+
+		if err := tx.QueryRow(query, args...).Scan(
+			&ps.MessagesFriendsOnly, &ps.MessagesServerMembers, &ps.DMPrivacyLevel, &ps.DMFriendsOfFriends,
+			&ps.AutoAcceptFriendCodes, &ps.SearchableByUsername, &ps.SearchableByEmail, &ps.SearchableByPhone,
+			&ps.AllowEmbeddedContent, &ps.LoadGifsAutomatically, &ps.EnableKlipyProxy,
+			&ps.SharePersonalizationWithGifProvider, &ps.UpdatedAt,
+		); err != nil {
+			return err
+		}
+
+		return tx.Commit()
+	}()
+	if txErr != nil {
+		h.log.Error("Failed to update privacy settings", "error", txErr)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update privacy settings"})
 		return
 	}
