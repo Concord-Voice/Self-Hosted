@@ -130,6 +130,41 @@ describe('RoomManager', () => {
     });
   });
 
+  describe('Self-deafen (#685)', () => {
+    it('setParticipantDeafen sets the isDeafened flag', async () => {
+      await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
+      manager.setParticipantDeafen('room-1', 'u-1', true);
+      expect(manager.getParticipant('room-1', 'u-1')?.isDeafened).toBe(true);
+    });
+
+    it('setParticipantDeafen clears the isDeafened flag', async () => {
+      await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
+      manager.setParticipantDeafen('room-1', 'u-1', true);
+      manager.setParticipantDeafen('room-1', 'u-1', false);
+      expect(manager.getParticipant('room-1', 'u-1')?.isDeafened).toBe(false);
+    });
+
+    it('setParticipantDeafen is a no-op for an unknown participant', async () => {
+      await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
+      expect(() => manager.setParticipantDeafen('room-1', 'ghost', true)).not.toThrow();
+      expect(manager.getParticipant('room-1', 'ghost')).toBeUndefined();
+    });
+
+    it('joinRoom snapshot defaults isDeafened to false', async () => {
+      const result = await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
+      expect(result.participants[0].isDeafened).toBe(false);
+    });
+
+    it('joinRoom snapshot carries an existing self-deafen (late joiner sees it)', async () => {
+      await manager.joinRoom('room-1', 'u-1', 'sock-1', 'alice');
+      manager.setParticipantDeafen('room-1', 'u-1', true);
+
+      const result = await manager.joinRoom('room-1', 'u-2', 'sock-2', 'bob');
+      const alice = result.participants.find((p) => p.userId === 'u-1');
+      expect(alice?.isDeafened).toBe(true);
+    });
+  });
+
   describe('joinRoom — reconnection', () => {
     it('cleans up old session when same userId rejoins', async () => {
       await manager.joinRoom('room-1', 'u-1', 'sock-old', 'alice');

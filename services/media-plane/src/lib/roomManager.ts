@@ -38,6 +38,13 @@ export interface Participant {
   joinedAt: Date;
   serverMuted: boolean;
   serverDeafened: boolean;
+  /**
+   * Self-deafen (#685) — the user chose to silence incoming audio. Client-driven
+   * via the `set-deafen` socket event and broadcast to the room as
+   * `participant-deafen-changed`. Distinct from `serverDeafened`, which is
+   * moderator-enforced over NATS (`voice.enforce.deafen`).
+   */
+  isDeafened: boolean;
 }
 
 export interface Room {
@@ -365,6 +372,7 @@ export class RoomManager {
       username: string;
       displayName?: string;
       avatarUrl?: string;
+      isDeafened: boolean;
     }>;
     e2eeEpoch: number;
   }> {
@@ -398,6 +406,7 @@ export class RoomManager {
       joinedAt: new Date(),
       serverMuted: false,
       serverDeafened: false,
+      isDeafened: false,
     };
 
     room.participants.set(userId, participant);
@@ -440,6 +449,7 @@ export class RoomManager {
       username: p.username,
       displayName: p.displayName,
       avatarUrl: p.avatarUrl,
+      isDeafened: p.isDeafened,
     }));
 
     return {
@@ -1095,6 +1105,20 @@ export class RoomManager {
     participant.serverDeafened = false;
     participant.serverMuted = false;
     logger.info('Server-undeafened user', { roomId, userId });
+  }
+
+  /**
+   * Self-deafen (#685): record the participant's self-chosen deafen state so the
+   * room snapshot and the `participant-deafen-changed` broadcast carry it. Deafen
+   * silences INCOMING audio, which the client handles by pausing its own consumers
+   * locally — so unlike `serverDeafenUser` there is no server-side producer/consumer
+   * op here; this only tracks the authoritative flag for other participants' UIs.
+   */
+  setParticipantDeafen(roomId: string, userId: string, isDeafened: boolean): void {
+    const participant = this.getParticipant(roomId, userId);
+    if (!participant) return;
+    participant.isDeafened = isDeafened;
+    logger.info('User-level deafen state changed', { roomId, userId, isDeafened });
   }
 
   /** User-level mute: pause all audio producers without setting server flags */
