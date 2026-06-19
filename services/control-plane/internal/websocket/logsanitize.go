@@ -8,10 +8,13 @@ import "strings"
 // form the CodeQL go/log-injection sanitizer model recognizes — and any remaining
 // C0 control characters plus DEL are dropped for defense-in-depth.
 //
-// Apply it to wire-derived string values logged via the stdlib logger. Values
-// that are uuid.UUID (whose String() is structurally hex-only) or that are
-// already escaped via the %q verb do not need it. See #1365 and
-// [internal]rules/observability.md ("Logging Discipline").
+// Apply it to wire-derived string values logged via the stdlib logger. uuid.UUID
+// values are NOT exempt: although String() is structurally hex-only, the type-based
+// exemption was retired (PR #1645) because CodeQL go/log-injection does not honor it
+// and a future type change to string would silently drop a required sanitize call —
+// wrap as sanitizeLogValue(id.String()). Values already escaped via the %q verb still
+// do not need it (output-encoding guarantee, distinct from type reasoning). See #1365,
+// #1645, #1656, and [internal]rules/observability.md ("Logging Discipline").
 func sanitizeLogValue(s string) string {
 	s = strings.ReplaceAll(s, "\n", "")
 	s = strings.ReplaceAll(s, "\r", "")

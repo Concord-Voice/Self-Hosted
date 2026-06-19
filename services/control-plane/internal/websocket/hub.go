@@ -15,6 +15,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/klipy"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/presence"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -383,9 +384,29 @@ func (h *Hub) resolveVisibleStatus(ctx context.Context, uid, viewerID uuid.UUID)
 
 func (h *Hub) sendPresenceSnapshot(client *Client) {
 	ctx := context.Background()
-	users := make([]userPresenceInfo, 0, len(h.userClients))
-	onlineUserIDs := make([]string, 0, len(h.userClients))
+	// #47: only include users the viewer is permitted to see. The viewer's own
+	// audience (friends + optional-FoF + shared-server peers) is the visibility
+	// set: friendship and server-membership are symmetric, so a user U is in the
+	// viewer's audience iff the viewer is in U's audience for those relations.
+	// (FoF is asymmetric; FoF-only contacts surface via the live broadcast rather
+	// than the on-connect snapshot — a deliberate, documented narrowing, not a
+	// leak.) One bounded query — no per-user N×M fan-out.
+	visible := map[uuid.UUID]bool{}
+	if h.db != nil { // production always has a DB; nil only in DB-free unit hubs
+		if aud, err := presence.ComputePresenceAudience(ctx, h.db, client.UserID); err != nil {
+			log.Printf("[hub] snapshot audience computation failed for %s; sending self-only snapshot: %v", sanitizeLogValue(client.UserID.String()), err)
+		} else {
+			visible = aud
+		}
+	}
+	visible[client.UserID] = true // the viewer always sees their own presence
+
+	users := make([]userPresenceInfo, 0, len(visible))
+	onlineUserIDs := make([]string, 0, len(visible))
 	for uid := range h.userClients {
+		if !visible[uid] {
+			continue
+		}
 		uidStr := uid.String()
 		visibleStatus := h.resolveVisibleStatus(ctx, uid, client.UserID)
 		if visibleStatus != statusOffline {
@@ -2414,25 +2435,54 @@ func (h *Hub) handleServerUpdate(msg IncomingMessage) {
 	}
 }
 
-// broadcastPresenceToAll sends a presence update to all connected clients
+// broadcastPresenceToAll sends userID's presence to that user's audience only —
+// accepted friends, optional friends-of-friends, and shared-server peers
+// (internal/presence.ComputePresenceAudience) — plus the sender's own connected
+// devices (self / multi-device sync). Base presence is NEVER fanned to
+// non-audience clients (#47: closes the base online-status leak).
+//
+// The status is uniform across recipients (invisible is resolved to "offline"
+// by callers — handleSetStatus; register/unregister pass online/offline), so it
+// is marshaled once.
+//
+// Concurrency: this runs on the hub Run goroutine and performs the (bounded,
+// indexed) audience query synchronously — consistent with the spec's on-demand
+// audience model and keeping all hub-map access race-free on the Run goroutine.
+// If presence churn makes this query a Run-loop latency concern, move the
+// computation off-goroutine with a connected-clients snapshot (follow-up).
 func (h *Hub) broadcastPresenceToAll(userID uuid.UUID, status string, timestamp int64) {
-	msg := OutgoingMessage{
+	if h.db == nil {
+		// No DB (e.g. a unit-test hub exercising client-map cleanup only): the
+		// audience cannot be computed, so fail closed and skip the broadcast.
+		// Production always has a DB (NewHub requires it).
+		h.scheduleOnlineCountBroadcast(userID)
+		return
+	}
+	audience, err := presence.ComputePresenceAudience(context.Background(), h.db, userID)
+	if err != nil {
+		// Fail closed: never fan out base presence when the audience cannot be
+		// computed — no leak to unauthorized viewers.
+		log.Printf("[hub] presence audience computation failed for %s; suppressing broadcast: %v", sanitizeLogValue(userID.String()), err)
+		h.scheduleOnlineCountBroadcast(userID)
+		return
+	}
+	audience[userID] = true // the sender's own devices always receive (not a leak)
+
+	data, err := json.Marshal(OutgoingMessage{
 		Type: "presence",
 		Data: map[string]interface{}{
 			keyUserID:   userID.String(),
 			keyStatus:   status,
 			"timestamp": timestamp,
 		},
-	}
-	data, err := json.Marshal(msg)
+	})
 	if err != nil {
 		log.Printf("Failed to marshal presence message: %v", err)
 		return
 	}
-	for _, client := range h.clients {
-		select {
-		case client.Send <- data:
-		default:
+	for viewerID := range audience {
+		if clientSet, ok := h.userClients[viewerID]; ok {
+			h.sendToUserClients(clientSet, data)
 		}
 	}
 

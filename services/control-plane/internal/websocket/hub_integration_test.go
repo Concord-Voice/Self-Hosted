@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -1081,26 +1082,132 @@ func TestHandleServerUpdateNoSubscribers(t *testing.T) {
 
 // --- broadcastPresenceToAll tests ---
 
+// --- #47 base-presence audience-filtering helpers (inlined: the websocket
+// package's own tests cannot import internal/testhelpers — that package imports
+// websocket, which would be a test import cycle). ---
+
+func presenceTestUser(t *testing.T, db *sql.DB) uuid.UUID {
+	t.Helper()
+	id := uuid.New()
+	_, err := db.Exec(
+		`INSERT INTO users (id, email, username, password_hash, age_verified, email_verified)
+		 VALUES ($1, $2 || '@presence.test', 'p_' || left($2, 8), 'x', true, true)`,
+		id, id.String(),
+	)
+	require.NoError(t, err)
+	return id
+}
+
+func presenceTestFriendship(t *testing.T, db *sql.DB, a, b uuid.UUID) {
+	t.Helper()
+	_, err := db.Exec(
+		`INSERT INTO friendships (requester_id, addressee_id, status) VALUES ($1, $2, 'accepted')`,
+		a, b,
+	)
+	require.NoError(t, err)
+}
+
+func presenceTestServerWithMembers(t *testing.T, db *sql.DB, owner uuid.UUID, members ...uuid.UUID) {
+	t.Helper()
+	srv := uuid.New()
+	_, err := db.Exec(`INSERT INTO servers (id, name, owner_id) VALUES ($1, 's_' || left($2, 8), $3)`, srv, srv.String(), owner)
+	require.NoError(t, err)
+	for _, m := range members {
+		_, merr := db.Exec(`INSERT INTO server_members (server_id, user_id) VALUES ($1, $2)`, srv, m)
+		require.NoError(t, merr)
+	}
+}
+
 func TestBroadcastPresenceToAll(t *testing.T) {
 	db := setupHubTestDB(t)
 	redisClient := setupHubTestRedis(t)
 	hub := NewHub(db, redisClient)
 
-	userID := uuid.New()
-	client := &Client{
-		ID:     uuid.New(),
-		UserID: uuid.New(), // different user receiving the broadcast
-		Send:   make(chan []byte, 10),
-	}
-	hub.clients[client.ID] = client
+	// #47: base presence is audience-filtered. A friend receives the broadcast;
+	// an unrelated user must NOT (regression-locks the closed leak — previously
+	// this test asserted an unrelated user DID receive it).
+	sender := presenceTestUser(t, db)
+	friend := presenceTestUser(t, db)
+	stranger := presenceTestUser(t, db)
+	presenceTestFriendship(t, db, sender, friend)
 
-	hub.broadcastPresenceToAll(userID, "online", time.Now().Unix())
+	friendClient := &Client{ID: uuid.New(), UserID: friend, Send: make(chan []byte, 10)}
+	strangerClient := &Client{ID: uuid.New(), UserID: stranger, Send: make(chan []byte, 10)}
+	hub.clients[friendClient.ID] = friendClient
+	hub.clients[strangerClient.ID] = strangerClient
+	hub.userClients[friend] = map[uuid.UUID]bool{friendClient.ID: true}
+	hub.userClients[stranger] = map[uuid.UUID]bool{strangerClient.ID: true}
 
-	resp := readClientMsg(t, client)
+	hub.broadcastPresenceToAll(sender, "online", time.Now().Unix())
+
+	resp := readClientMsg(t, friendClient)
 	assert.Equal(t, "presence", resp["type"])
 	data := resp["data"].(map[string]interface{})
-	assert.Equal(t, userID.String(), data[keyUserID])
+	assert.Equal(t, sender.String(), data[keyUserID])
 	assert.Equal(t, "online", data[keyStatus])
+
+	select {
+	case <-strangerClient.Send:
+		t.Fatal("#47 leak: an unrelated user received a base presence broadcast")
+	default:
+	}
+}
+
+// TestBroadcastPresenceToAll_SharedServerPeerReceives locks the server-membership
+// arm of the audience: a peer who shares a server with the sender receives the
+// broadcast even without a friendship.
+func TestBroadcastPresenceToAll_SharedServerPeerReceives(t *testing.T) {
+	db := setupHubTestDB(t)
+	redisClient := setupHubTestRedis(t)
+	hub := NewHub(db, redisClient)
+
+	sender := presenceTestUser(t, db)
+	peer := presenceTestUser(t, db)
+	presenceTestServerWithMembers(t, db, sender, sender, peer)
+
+	peerClient := &Client{ID: uuid.New(), UserID: peer, Send: make(chan []byte, 10)}
+	hub.clients[peerClient.ID] = peerClient
+	hub.userClients[peer] = map[uuid.UUID]bool{peerClient.ID: true}
+
+	hub.broadcastPresenceToAll(sender, "online", time.Now().Unix())
+
+	resp := readClientMsg(t, peerClient)
+	assert.Equal(t, "presence", resp["type"])
+	assert.Equal(t, sender.String(), resp["data"].(map[string]interface{})[keyUserID])
+}
+
+// TestSendPresenceSnapshotExcludesNonAudience locks the snapshot path: a
+// connecting viewer's presence_snapshot includes a friend but NOT an unrelated
+// connected user.
+func TestSendPresenceSnapshotExcludesNonAudience(t *testing.T) {
+	db := setupHubTestDB(t)
+	redisClient := setupHubTestRedis(t)
+	hub := NewHub(db, redisClient)
+
+	viewer := presenceTestUser(t, db)
+	friend := presenceTestUser(t, db)
+	stranger := presenceTestUser(t, db)
+	presenceTestFriendship(t, db, viewer, friend)
+
+	friendClient := &Client{ID: uuid.New(), UserID: friend, Send: make(chan []byte, 10)}
+	strangerClient := &Client{ID: uuid.New(), UserID: stranger, Send: make(chan []byte, 10)}
+	hub.clients[friendClient.ID] = friendClient
+	hub.clients[strangerClient.ID] = strangerClient
+	hub.userClients[friend] = map[uuid.UUID]bool{friendClient.ID: true}
+	hub.userClients[stranger] = map[uuid.UUID]bool{strangerClient.ID: true}
+
+	viewerClient := &Client{ID: uuid.New(), UserID: viewer, Send: make(chan []byte, 10)}
+	hub.sendPresenceSnapshot(viewerClient)
+
+	resp := readClientMsg(t, viewerClient)
+	assert.Equal(t, "presence_snapshot", resp["type"])
+	rawUsers := resp["data"].(map[string]interface{})["users"].([]interface{})
+	ids := map[string]bool{}
+	for _, u := range rawUsers {
+		ids[u.(map[string]interface{})["user_id"].(string)] = true
+	}
+	assert.True(t, ids[friend.String()], "friend should appear in the viewer's snapshot")
+	assert.False(t, ids[stranger.String()], "#47 leak: an unrelated user appeared in the viewer's snapshot")
 }
 
 // --- sendDMUnreadNotify tests ---
