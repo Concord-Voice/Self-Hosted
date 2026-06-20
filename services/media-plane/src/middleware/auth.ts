@@ -9,6 +9,7 @@ import { logger } from '../lib/logger.js';
 // ---------------------------------------------------------------------------
 interface JwtClaims {
   user_id: string;
+  tier?: string;
   jti?: string;
   iss?: string;
   iat?: number;
@@ -23,6 +24,7 @@ interface JwtClaims {
 export interface AuthenticatedSocketData {
   userId: string;
   username: string;
+  tier: string;
   displayName?: string;
   avatarUrl?: string;
   roomId?: string;
@@ -79,6 +81,11 @@ export function createAuthMiddleware() {
       // Attach authenticated user data to socket
       const socketData = socket.data as AuthenticatedSocketData;
       socketData.userId = decoded.user_id;
+      // Entitlement tier rides the signed JWT claim (control-plane auth.Claims.Tier).
+      // Absent or blank → 'free' (fail-closed). Consumption at the join/enforcement
+      // boundary is #1300/#1542; here we only plumb it onto socket.data.
+      socketData.tier =
+        typeof decoded.tier === 'string' && decoded.tier ? decoded.tier : 'free';
       socketData.username = username;
       socketData.displayName = typeof displayName === 'string' ? displayName : undefined;
       socketData.avatarUrl = typeof avatarUrl === 'string' ? avatarUrl : undefined;

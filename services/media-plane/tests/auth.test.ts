@@ -106,6 +106,39 @@ describe('createAuthMiddleware', () => {
     expect(socket.data.avatarUrl).toBe('https://example.com/avatar.png');
   });
 
+  it('populates socket.data.tier from the JWT tier claim', () => {
+    const token = signToken({ user_id: 'u-1', tier: 'premium' });
+    const socket = createMockSocket({ token, username: 'alice' });
+    const next = vi.fn();
+
+    middleware(socket as any, next);
+
+    expect(next).toHaveBeenCalledWith(); // no error
+    expect(socket.data.tier).toBe('premium');
+  });
+
+  it('defaults socket.data.tier to free when the tier claim is absent', () => {
+    const token = signToken({ user_id: 'u-1' });
+    const socket = createMockSocket({ token, username: 'alice' });
+    const next = vi.fn();
+
+    middleware(socket as any, next);
+
+    expect(next).toHaveBeenCalledWith();
+    expect(socket.data.tier).toBe('free');
+  });
+
+  it('defaults socket.data.tier to free when the tier claim is blank', () => {
+    const token = signToken({ user_id: 'u-1', tier: '' });
+    const socket = createMockSocket({ token, username: 'alice' });
+    const next = vi.fn();
+
+    middleware(socket as any, next);
+
+    expect(next).toHaveBeenCalledWith();
+    expect(socket.data.tier).toBe('free');
+  });
+
   it('ignores non-string displayName and avatarUrl', () => {
     const token = signToken({ user_id: 'u-1' });
     const socket = createMockSocket({

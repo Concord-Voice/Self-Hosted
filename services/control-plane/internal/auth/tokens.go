@@ -23,6 +23,7 @@ var (
 type Claims struct {
 	UserID        string `json:"user_id"`
 	EmailVerified *bool  `json:"email_verified,omitempty"` // nil in pre-migration tokens → treated as true
+	Tier          string `json:"tier,omitempty"`           // "free" | "premium"; omitempty → absent in pre-entitlement tokens, read as free
 	jwt.RegisteredClaims
 }
 
@@ -30,13 +31,23 @@ type Claims struct {
 const AccessTokenTTL = 15 * time.Minute
 
 // GenerateAccessToken creates a short-lived JWT access token with a unique JTI.
-// emailVerified is embedded in the token so downstream middleware can gate routes
-// without a DB query on every request.
-func GenerateAccessToken(userID, jwtSecret string, emailVerified bool) (string, error) {
+// emailVerified and the optional entitlement tier are embedded so downstream
+// middleware (control-plane) and the media-plane JWT verifier can gate without a
+// DB query on every request.
+//
+// tier is variadic for backward compatibility: callers that omit it — or pass an
+// empty value — issue a tier-less claim (omitempty drops it from the wire), which
+// downstream readers treat as "free" (fail-closed). Only the first value is used.
+func GenerateAccessToken(userID, jwtSecret string, emailVerified bool, tier ...string) (string, error) {
 	now := time.Now()
+	t := ""
+	if len(tier) > 0 {
+		t = tier[0]
+	}
 	claims := Claims{
 		UserID:        userID,
 		EmailVerified: &emailVerified,
+		Tier:          t,
 		RegisteredClaims: jwt.RegisteredClaims{
 			ID:        uuid.New().String(),
 			ExpiresAt: jwt.NewNumericDate(now.Add(AccessTokenTTL)),

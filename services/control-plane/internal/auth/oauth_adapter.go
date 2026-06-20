@@ -52,7 +52,8 @@ func (h *Handler) IssueAccessAndRefresh(ctx context.Context, userID string) (acc
 		return "", "", ErrAccountDisabled
 	}
 
-	accessToken, err = GenerateAccessToken(userID, h.jwtSecret, emailVerified)
+	tier := h.entCache.GetTier(ctx, userID)
+	accessToken, err = GenerateAccessToken(userID, h.jwtSecret, emailVerified, tier)
 	if err != nil {
 		return "", "", fmt.Errorf("access: %w", err)
 	}

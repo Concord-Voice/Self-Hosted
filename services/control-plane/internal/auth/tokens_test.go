@@ -97,6 +97,36 @@ func TestValidateAccessToken(t *testing.T) {
 	})
 }
 
+func TestGenerateAccessToken_EmbedsTierClaim(t *testing.T) {
+	tokenStr, err := GenerateAccessToken("user-1", testJWTSecret, true, "premium")
+	require.NoError(t, err)
+
+	claims, err := ValidateAccessToken(tokenStr, testJWTSecret)
+	require.NoError(t, err)
+	assert.Equal(t, "premium", claims.Tier)
+	assert.Equal(t, "user-1", claims.UserID)
+}
+
+func TestGenerateAccessToken_OmittedTierIsEmpty(t *testing.T) {
+	// Variadic tier omitted → claim absent (omitempty) → parses back to "".
+	tokenStr, err := GenerateAccessToken("user-1", testJWTSecret, true)
+	require.NoError(t, err)
+
+	claims, err := ValidateAccessToken(tokenStr, testJWTSecret)
+	require.NoError(t, err)
+	assert.Equal(t, "", claims.Tier)
+}
+
+func TestGenerateAccessToken_EmptyTierOmittedFromClaim(t *testing.T) {
+	// Explicit empty tier also yields an absent claim (omitempty), read as free.
+	tokenStr, err := GenerateAccessToken("user-1", testJWTSecret, true, "")
+	require.NoError(t, err)
+
+	claims, err := ValidateAccessToken(tokenStr, testJWTSecret)
+	require.NoError(t, err)
+	assert.Equal(t, "", claims.Tier)
+}
+
 func TestGenerateRefreshToken(t *testing.T) {
 	t.Run("returns non-empty token", func(t *testing.T) {
 		token, err := GenerateRefreshToken()

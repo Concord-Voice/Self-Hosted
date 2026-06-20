@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/attestation"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/email"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/entitlements"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
@@ -136,6 +137,7 @@ type Handler struct {
 	mfaChecker MFAChecker
 	emailSvc   *email.Service
 	pending    *PendingRepo
+	entCache   *entitlements.Cache
 }
 
 // NewHandler creates a new authentication handler.
@@ -147,6 +149,7 @@ func NewHandler(db *sql.DB, redisClient *redis.Client, log *logger.Logger, jwtSe
 		jwtSecret: jwtSecret,
 		hub:       hub,
 		pending:   NewPendingRepo(db),
+		entCache:  entitlements.NewCache(redisClient, db),
 	}
 }
 
@@ -211,7 +214,8 @@ func decodeE2EEKeys(publicKeyB64, wrappedKeyB64, saltB64 string) (publicKey, wra
 // generateTokenPair creates an access+refresh token pair and persists the
 // refresh token. Used by issueSessionTokens and other flows.
 func (h *Handler) generateTokenPair(c *gin.Context, userID string, emailVerified bool) (accessToken, refreshToken, tokenID string, err error) {
-	accessToken, err = GenerateAccessToken(userID, h.jwtSecret, emailVerified)
+	tier := h.entCache.GetTier(c.Request.Context(), userID)
+	accessToken, err = GenerateAccessToken(userID, h.jwtSecret, emailVerified, tier)
 	if err != nil {
 		return "", "", "", fmt.Errorf("access: %w", err)
 	}
@@ -964,7 +968,8 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool) 
 	}
 
 	// Generate access token (JWT, 15 min)
-	accessToken, err := GenerateAccessToken(userID, h.jwtSecret, emailVerified)
+	tier := h.entCache.GetTier(c.Request.Context(), userID)
+	accessToken, err := GenerateAccessToken(userID, h.jwtSecret, emailVerified, tier)
 	if err != nil {
 		h.log.Error(errMsgFailedAccessToken, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
@@ -1480,7 +1485,8 @@ func (h *Handler) rotateAndRespond(c *gin.Context, token models.RefreshToken, re
 		return
 	}
 
-	accessToken, err := GenerateAccessToken(token.UserID, h.jwtSecret, refreshEmailVerified)
+	tier := h.entCache.GetTier(c.Request.Context(), token.UserID)
+	accessToken, err := GenerateAccessToken(token.UserID, h.jwtSecret, refreshEmailVerified, tier)
 	if err != nil {
 		h.log.Error(errMsgFailedAccessToken, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgRefreshFailed})
@@ -1614,7 +1620,8 @@ func (h *Handler) handleGracePeriodRefresh(c *gin.Context, userID string, revoke
 	}
 
 	// Generate access token
-	accessToken, err := GenerateAccessToken(userID, h.jwtSecret, graceEmailVerified)
+	tier := h.entCache.GetTier(c.Request.Context(), userID)
+	accessToken, err := GenerateAccessToken(userID, h.jwtSecret, graceEmailVerified, tier)
 	if err != nil {
 		h.log.Error("Failed to generate access token during grace recovery", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgRefreshFailed})
