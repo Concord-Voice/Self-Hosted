@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/lib/pq"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/entitlements"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/media"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
@@ -30,20 +31,22 @@ const (
 
 // Handler handles server-related requests
 type Handler struct {
-	db       *sql.DB
-	log      *logger.Logger
-	hub      *websocket.Hub
-	resolver *rbac.Resolver
-	store    media.ObjectDeleter // nil when object storage is not configured
+	db          *sql.DB
+	log         *logger.Logger
+	hub         *websocket.Hub
+	resolver    *rbac.Resolver
+	serverTiers entitlements.ServerTierResolver // server-axis tier resolution (#1521)
+	store       media.ObjectDeleter             // nil when object storage is not configured
 }
 
 // NewHandler creates a new server handler
-func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, resolver *rbac.Resolver) *Handler {
+func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, resolver *rbac.Resolver, serverTiers entitlements.ServerTierResolver) *Handler {
 	return &Handler{
-		db:       db,
-		log:      log,
-		hub:      hub,
-		resolver: resolver,
+		db:          db,
+		log:         log,
+		hub:         hub,
+		resolver:    resolver,
+		serverTiers: serverTiers,
 	}
 }
 
@@ -313,6 +316,41 @@ func (h *Handler) GetServer(c *gin.Context) {
 		"server": server,
 		"role":   role,
 	})
+}
+
+// GetServerEntitlements returns the server-axis entitlement set for a server.
+// GET /api/v1/servers/:id/entitlements — members only.
+//
+// Today every server resolves to Groundspeed (free) via the inert Mach hook
+// (#1521); the response shape is stable so the client can gate server-scoped
+// features on it now and the Mach values flip on with no client change when
+// server subscriptions ship (v1.0 / #211).
+func (h *Handler) GetServerEntitlements(c *gin.Context) {
+	userID := c.GetString("user_id")
+	serverID := c.Param("id")
+
+	if _, err := uuid.Parse(serverID); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidServerID})
+		return
+	}
+
+	// Members only — mirror GetServer's membership gate.
+	var role string
+	err := h.db.QueryRow(
+		`SELECT role FROM server_members WHERE server_id = $1 AND user_id = $2`,
+		serverID, userID,
+	).Scan(&role)
+	if err == sql.ErrNoRows {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Not a member of this server"})
+		return
+	} else if err != nil {
+		h.log.Error("Failed to check membership", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedFetch})
+		return
+	}
+
+	ent := entitlements.ForServer(h.serverTiers.GetServerTier(c.Request.Context(), serverID))
+	c.JSON(http.StatusOK, gin.H{"entitlement": ent})
 }
 
 // UpdateServer updates a server's details

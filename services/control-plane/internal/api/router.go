@@ -188,9 +188,10 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	mfaHandler.SetLoginCompleter(authHandler)
 	mfaHandler.SetEmailService(emailSvc)
 	entCache := entitlements.NewCache(redis, db)
+	serverEntCache := entitlements.NewServerCache(redis, db)
 	sessionsHandler := sessions.NewHandler(db, redis, log, hub, mfaHandler)
 	usersHandler := users.NewHandler(db, log, hub, mfaHandler, entCache)
-	serversHandler := servers.NewHandler(db, log, hub, rbacResolver)
+	serversHandler := servers.NewHandler(db, log, hub, rbacResolver, serverEntCache)
 	channelsHandler := channels.NewHandler(db, log, hub, rbacResolver, redis)
 	membersHandler := members.NewHandler(db, log, redis, hub, rbacResolver, auditWriter)
 	messagesHandler := messages.NewHandler(db, log, hub, rbacResolver)
@@ -908,6 +909,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				serverRoutes.GET("/:id",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 					serversHandler.GetServer,
+				)
+
+				// Get a server's entitlement set (server-axis, #1521; 30/min)
+				serverRoutes.GET("/:id/entitlements",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					serversHandler.GetServerEntitlements,
 				)
 
 				// Update server (10 requests per minute)

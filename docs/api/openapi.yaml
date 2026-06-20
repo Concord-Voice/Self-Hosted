@@ -8711,6 +8711,62 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /servers/{id}/entitlements:
+    get:
+      tags:
+      - Servers
+      summary: Get a server's entitlement set
+      description: 'Get the server-axis entitlement set (Groundspeed free / Mach
+        boosted) for a server. Members only. Every server resolves to Groundspeed
+        today; the Mach tier ships with server subscriptions (v1.0).
+
+        Rate limit: 30 requests per minute.
+
+        '
+      security:
+      - BearerAuth: []
+      parameters:
+      - $ref: '#/components/parameters/ServerId'
+      responses:
+        '200':
+          description: Server entitlement set
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  entitlement:
+                    type: object
+                    properties:
+                      Tier:
+                        type: string
+                        enum:
+                        - groundspeed
+                        - mach
+                      MaxServerCustomEmoji:
+                        type: integer
+                      MaxServerStickers:
+                        type: integer
+                      MaxServerStoragePoolBytes:
+                        type: integer
+                        format: int64
+                        description: -1 sentinel = limit not yet decided (do not enforce)
+                      UnlockServerAudioQualityCaps:
+                        type: boolean
+                      UnlockServerVideoQualityCaps:
+                        type: boolean
+        '400':
+          description: Invalid server ID
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Not a member of this server
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /servers/{id}/audit-log:
     get:
       tags:
