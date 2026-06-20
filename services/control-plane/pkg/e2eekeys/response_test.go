@@ -46,7 +46,6 @@ func TestCodeAndKind_StringConstants(t *testing.T) {
 	assert.Equal(t, "NOT_MEMBER", string(e2eekeys.CodeNotMember))
 	assert.Equal(t, "NO_KEY_YET", string(e2eekeys.CodeNoKeyYet))
 	assert.Equal(t, "REVOKED_EPOCH", string(e2eekeys.CodeRevokedEpoch))
-	assert.Equal(t, "NOT_ENCRYPTED", string(e2eekeys.CodeNotEncrypted))
 	assert.Equal(t, "INVALID_REQUEST", string(e2eekeys.CodeInvalidRequest))
 	assert.Equal(t, "INTERNAL_ERROR", string(e2eekeys.CodeInternalError))
 	assert.Equal(t, "channel", string(e2eekeys.KindChannel))

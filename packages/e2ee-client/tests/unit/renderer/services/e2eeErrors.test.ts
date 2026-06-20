@@ -30,7 +30,6 @@ describe('E2EEKeyUnavailableError', () => {
     'NOT_MEMBER',
     'NO_KEY_YET',
     'REVOKED_EPOCH',
-    'NOT_ENCRYPTED',
     'INVALID_REQUEST',
     'INTERNAL_ERROR',
     'MALFORMED_PAYLOAD',
@@ -54,7 +53,6 @@ describe('isPendingKeyError', () => {
   it.each([
     'NOT_MEMBER',
     'REVOKED_EPOCH',
-    'NOT_ENCRYPTED',
     'INVALID_REQUEST',
     'INTERNAL_ERROR',
     'MALFORMED_PAYLOAD',
@@ -104,13 +102,6 @@ describe('classifyError', () => {
     expect(c.uxMessage).toContain("don't have access");
   });
 
-  it('NOT_ENCRYPTED is terminal with channel-not-encrypted copy', () => {
-    const c = classifyError(new E2EEKeyUnavailableError('NOT_ENCRYPTED'));
-    expect(c.retryable).toBe(false);
-    expect(c.triggerRekey).toBe(false);
-    expect(c.uxMessage).toContain("isn't encrypted");
-  });
-
   it('MALFORMED_PAYLOAD is terminal with retry hint', () => {
     const c = classifyError(new E2EEKeyUnavailableError('MALFORMED_PAYLOAD'));
     expect(c.retryable).toBe(false);
@@ -131,15 +122,24 @@ describe('classifyError', () => {
     expect(c.triggerRekey).toBe(false);
   });
 
-  it.each<E2EEKeyErrorCode>([
-    'NOT_MEMBER',
-    'NOT_ENCRYPTED',
-    'MALFORMED_PAYLOAD',
-    'INVALID_REQUEST',
-  ])('%s is terminal and does not trigger rekey (table)', (code) => {
-    const c = classifyError(new E2EEKeyUnavailableError(code));
+  it.each<E2EEKeyErrorCode>(['NOT_MEMBER', 'MALFORMED_PAYLOAD', 'INVALID_REQUEST'])(
+    '%s is terminal and does not trigger rekey (table)',
+    (code) => {
+      const c = classifyError(new E2EEKeyUnavailableError(code));
+      expect(c.retryable).toBe(false);
+      expect(c.triggerRekey).toBe(false);
+    }
+  );
+
+  it('typed error with an out-of-union code falls to the fail-closed default (terminal, generic copy)', () => {
+    // Codes can be retired server-side (e.g. the per-channel "not encrypted"
+    // code removed in #1650). A stray code outside the union must still
+    // classify terminal via the `default:` branch, never return undefined.
+    const retiredCode: string = 'LEGACY_REMOVED_CODE';
+    const c = classifyError(new E2EEKeyUnavailableError(retiredCode as E2EEKeyErrorCode));
     expect(c.retryable).toBe(false);
     expect(c.triggerRekey).toBe(false);
+    expect(c.uxMessage).toBe('Unable to send message');
   });
 
   it('non-typed Error classifies as retryable (preserves network-retry behavior)', () => {

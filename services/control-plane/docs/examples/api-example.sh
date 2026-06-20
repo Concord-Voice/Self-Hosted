@@ -62,8 +62,7 @@ MESSAGE_RESPONSE=$(curl -s -X POST "$API_URL/messages" \
   -H "$CONTENT_TYPE_JSON" \
   -d "{
     \"channel_id\": \"$CHANNEL_ID\",
-    \"content\": \"Hello, Concord!\",
-    \"is_encrypted\": false
+    \"content\": \"Hello, Concord!\"
   }")
 
 echo "$MESSAGE_RESPONSE" | jq '.'

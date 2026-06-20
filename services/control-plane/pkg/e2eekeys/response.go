@@ -35,14 +35,12 @@ type Code string
 //   - CodeRevokedEpoch: caller's epoch appears in dm_key_revocations (DM path
 //     only — server-channel revocation uses a separate ledger and does not
 //     currently emit this code)
-//   - CodeNotEncrypted: the context is not E2EE
 //   - CodeInvalidRequest: malformed UUID or version parameter
 //   - CodeInternalError: server-side 500 (e.g., DB error); client may retry
 const (
 	CodeNotMember      Code = "NOT_MEMBER"
 	CodeNoKeyYet       Code = "NO_KEY_YET"
 	CodeRevokedEpoch   Code = "REVOKED_EPOCH"
-	CodeNotEncrypted   Code = "NOT_ENCRYPTED"
 	CodeInvalidRequest Code = "INVALID_REQUEST"
 	CodeInternalError  Code = "INTERNAL_ERROR"
 )
