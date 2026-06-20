@@ -4,7 +4,7 @@ All notable changes to Concord Voice will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [0.2.0-Beta] — 2026-XX-XX (Phase 2 — Beta release)
+## [0.2.0-Beta] — 2026-06-20 (Phase 2 — Beta release)
 
 > Release-level rollup of Phase 2A + Phase 2B work. Per-revision detail lives in the `[0.1.12]`–`[0.1.18]` entries below; this entry surfaces the user-visible themes that close the v0.2.0-Beta milestone.
 
