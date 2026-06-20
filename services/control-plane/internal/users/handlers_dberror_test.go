@@ -24,7 +24,8 @@ func TestUpdatePrivacySettingsDBError(t *testing.T) {
 	db, cleanup := testhelpers.SetupTestDB(t)
 	cleanup() // close the pool immediately so tx.Begin() fails
 
-	h := users.NewHandler(db, logger.NewWithWriter(io.Discard), nil, nil)
+	// nil tier resolver is safe: UpdatePrivacySettings never resolves entitlements (#1298).
+	h := users.NewHandler(db, logger.NewWithWriter(io.Discard), nil, nil, nil)
 
 	gin.SetMode(gin.TestMode)
 	w := httptest.NewRecorder()

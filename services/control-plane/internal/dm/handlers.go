@@ -1781,7 +1781,9 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 	}
 
 	var req struct {
-		Content string `json:"content" binding:"required"`
+		// max=65536 = the single hard ciphertext ceiling (= the subscribed worst
+		// case), flat for everyone; matches messages/hub.go. Boy-scout fix (#1298).
+		Content string `json:"content" binding:"required,max=65536"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequestBody})

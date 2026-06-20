@@ -7,6 +7,14 @@ import (
 	"log"
 )
 
+// TierResolver resolves a user's current subscription tier. *Cache satisfies it
+// (Redis read-through, fail-closed to free). Consumers (users/media handlers)
+// depend on this interface so enforcement logic can be tested with a stub,
+// without a live Redis.
+type TierResolver interface {
+	GetTier(ctx context.Context, userID string) string
+}
+
 // ResolveTier returns the user's current tier from the subscriptions source of
 // truth. It fails closed to TierFree on no live row OR any error (least
 // privilege) — a DB hiccup can never escalate a user to premium. The returned

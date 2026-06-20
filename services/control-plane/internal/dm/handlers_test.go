@@ -2,9 +2,11 @@ package dm_test
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/google/uuid"
@@ -65,6 +67,40 @@ func setDMPrivacy(t *testing.T, ts *testhelpers.TestServer, userID string, level
 		ON CONFLICT (user_id) DO UPDATE SET dm_privacy_level = $2, dm_friends_of_friends = $3
 	`, userID, level, fof)
 	require.NoError(t, err, "failed to set DM privacy")
+}
+
+// TestUpdateMessage_RejectsOverCiphertextCap locks the max=65536 binding (#1298):
+// a DM-edit body over the single hard ciphertext ceiling is rejected at bind time.
+func TestUpdateMessage_RejectsOverCiphertextCap(t *testing.T) {
+	ts := setupTS(t)
+	u1 := ts.CreateTestUser(t, "dmcapauthor")
+	u2 := ts.CreateTestUser(t, "dmcappeer")
+	ts.CreateFriendship(t, u1.ID, u2.ID, statusAccepted)
+	convID := ts.CreateDMConversation(t, u1.ID, u2.ID)
+	msgID := insertDMMessage(t, ts, convID, u1.ID, "original")
+
+	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMsgSlash+msgID,
+		map[string]interface{}{"content": strings.Repeat("x", 65537)},
+		testhelpers.AuthHeaders(u1.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// TestUpdateMessage_AcceptsWithinCap confirms the max=65536 binding does not
+// over-reject a legitimate within-cap edit (valid ciphertext shape).
+func TestUpdateMessage_AcceptsWithinCap(t *testing.T) {
+	ts := setupTS(t)
+	u1 := ts.CreateTestUser(t, "dmokauthor")
+	u2 := ts.CreateTestUser(t, "dmokpeer")
+	ts.CreateFriendship(t, u1.ID, u2.ID, statusAccepted)
+	convID := ts.CreateDMConversation(t, u1.ID, u2.ID)
+	msgID := insertDMMessage(t, ts, convID, u1.ID, "original")
+
+	// Valid ciphertext shape (base64 decoding to >= 28 bytes), well within the cap.
+	content := base64.StdEncoding.EncodeToString(make([]byte, 48))
+	w := ts.DoRequest("PATCH", pathDMConversationsPrefix+convID+pathMsgSlash+msgID,
+		map[string]interface{}{"content": content},
+		testhelpers.AuthHeaders(u1.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
 }
 
 // ============================================================================

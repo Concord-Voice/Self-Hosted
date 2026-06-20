@@ -24,6 +24,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/entitlements"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
@@ -64,9 +65,10 @@ const (
 // Tier 1 profile image raw upload limits (before processing).
 // These are purpose-specific, not type-specific — kept small because
 // the server resizes everything down anyway.
+// avatarMaxUpload and bannerMaxUpload are replaced by entitlement-resolved limits
+// in UploadAvatar/UploadBanner (#1298); bannerMaxUpload is kept for server assets.
 const (
-	avatarMaxUpload = 5 * 1024 * 1024  // 5 MB
-	bannerMaxUpload = 10 * 1024 * 1024 // 10 MB
+	bannerMaxUpload = 10 * 1024 * 1024 // 10 MB — server-banner/dm-icon (server assets, not user-tier-gated)
 	iconMaxUpload   = 5 * 1024 * 1024  // 5 MB
 )
 
@@ -103,16 +105,18 @@ type Handler struct {
 	log      *logger.Logger
 	cfg      *config.Config
 	resolver *rbac.Resolver
+	tiers    entitlements.TierResolver
 }
 
 // NewHandler creates a new media handler.
-func NewHandler(db *sql.DB, store ObjectStore, log *logger.Logger, cfg *config.Config, resolver *rbac.Resolver) *Handler {
+func NewHandler(db *sql.DB, store ObjectStore, log *logger.Logger, cfg *config.Config, resolver *rbac.Resolver, tiers entitlements.TierResolver) *Handler {
 	return &Handler{
 		db:       db,
 		store:    store,
 		log:      log,
 		cfg:      cfg,
 		resolver: resolver,
+		tiers:    tiers,
 	}
 }
 
@@ -123,14 +127,16 @@ func NewHandler(db *sql.DB, store ObjectStore, log *logger.Logger, cfg *config.C
 // Returns the storage key for use in profile updates.
 func (h *Handler) UploadAvatar(c *gin.Context) {
 	userID := c.GetString("user_id")
-	h.handleTier1Upload(c, userID, "avatar", avatarMaxUpload, AvatarMaxDim, AvatarMaxDim)
+	ent := entitlements.For(h.tiers.GetTier(c.Request.Context(), userID))
+	h.handleTier1Upload(c, userID, "avatar", ent.MaxAvatarBytes, AvatarMaxDim, AvatarMaxDim)
 }
 
 // UploadBanner handles banner/header image uploads.
 // POST /api/v1/media/upload/banner
 func (h *Handler) UploadBanner(c *gin.Context) {
 	userID := c.GetString("user_id")
-	h.handleTier1Upload(c, userID, "banner", bannerMaxUpload, BannerMaxW, BannerMaxH)
+	ent := entitlements.For(h.tiers.GetTier(c.Request.Context(), userID))
+	h.handleTier1Upload(c, userID, "banner", ent.MaxBannerBytes, BannerMaxW, BannerMaxH)
 }
 
 // UploadServerIcon handles server icon uploads.
@@ -159,11 +165,12 @@ func (h *Handler) UploadDMIcon(c *gin.Context) {
 // The file body is pre-encrypted ciphertext — the server stores it as-is.
 func (h *Handler) UploadAttachment(c *gin.Context) {
 	userID := c.GetString("user_id")
+	ent := entitlements.For(h.tiers.GetTier(c.Request.Context(), userID))
 
 	// Cap request body size before multipart parsing to prevent memory/disk DoS
-	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, h.cfg.UploadMaxSize+4096) // +4KB for multipart headers
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, ent.MaxAttachmentBytes+4096) // +4KB for multipart headers
 
-	file, header, err := parseAttachmentFile(c, h.cfg.UploadMaxSize)
+	file, header, err := parseAttachmentFile(c, ent.MaxAttachmentBytes)
 	if err != nil {
 		return // response already sent
 	}

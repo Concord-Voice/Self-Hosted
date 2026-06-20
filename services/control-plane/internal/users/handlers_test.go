@@ -1,7 +1,10 @@
 package users_test
 
 import (
+	"context"
+	"encoding/base64"
 	"net/http"
+	"strings"
 	"testing"
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
@@ -196,7 +199,8 @@ func TestUpdateMeUsernameChangeCooldown(t *testing.T) {
 	assert.Equal(t, http.StatusForbidden, w.Code)
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, w, &body)
-	assert.Contains(t, body["error"], "once per year")
+	// Free tier cadence is 365 days; the message is now interval-aware (#1298).
+	assert.Contains(t, body["error"], "once every 365 days")
 	assert.NotNil(t, body["username_change_eligible_at"])
 }
 
@@ -220,6 +224,84 @@ func TestUpdateMeUsernameChangeAllowed(t *testing.T) {
 	testhelpers.ParseJSON(t, w, &body)
 	userData := body["user"].(map[string]interface{})
 	assert.Equal(t, "newallowedname", userData[keyUsername])
+}
+
+// grantPremium inserts an active premium subscription and clears the cached tier
+// (login during CreateTestUser may have cached the then-free tier). Server
+// enforcement reads the subscriptions table via the entitlements cache (#1298).
+func grantPremium(t *testing.T, ts *testhelpers.TestServer, userID string) {
+	t.Helper()
+	_, err := ts.DB.Exec(
+		`INSERT INTO subscriptions (user_id, tier, status, source) VALUES ($1, 'premium', 'active', 'code')`,
+		userID,
+	)
+	require.NoError(t, err)
+	require.NoError(t, ts.Redis.Del(context.Background(), "ent:"+userID).Err())
+}
+
+// TestUpdateMeUsernameChangePremiumFasterCadence: at 100 days since last change, a
+// premium user (91d cadence) is allowed where a free user (365d) would be blocked.
+func TestUpdateMeUsernameChangePremiumFasterCadence(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "premcadence")
+	_, err := ts.DB.Exec(
+		`UPDATE users SET username_changed_at = NOW() - INTERVAL '100 days' WHERE id = $1`, user.ID)
+	require.NoError(t, err)
+	grantPremium(t, ts, user.ID)
+
+	w := ts.DoRequest(methodPatch, urlUsersMe, map[string]interface{}{
+		keyUsername: "premchanged",
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	assert.Equal(t, http.StatusOK, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	userData := body["user"].(map[string]interface{})
+	assert.Equal(t, "premchanged", userData[keyUsername])
+}
+
+// TestUpdateMeUsernameChangeFreeBlockedAt100Days: a free user at 100 days is still
+// blocked (365d cadence) — the fail-closed baseline when no subscription exists.
+func TestUpdateMeUsernameChangeFreeBlockedAt100Days(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "freecadence")
+	_, err := ts.DB.Exec(
+		`UPDATE users SET username_changed_at = NOW() - INTERVAL '100 days' WHERE id = $1`, user.ID)
+	require.NoError(t, err)
+
+	w := ts.DoRequest(methodPatch, urlUsersMe, map[string]interface{}{
+		keyUsername: "freechanged",
+	}, testhelpers.AuthHeaders(user.AccessToken))
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Contains(t, body["error"], "365 days")
+}
+
+// TestUpdateMeAvatarDataURLCappedAtFreeForAllTiers: inline data-URL avatars are
+// broadcast verbatim to every client (UpdateMe -> BroadcastToAll), so the inline cap is
+// the FREE value (1 MiB) for ALL tiers — a >1 MiB data-URL is rejected even for premium.
+// Premium's 5 MiB allowance applies on the MinIO upload path (covered in media tests),
+// which broadcasts a storage key, not the blob (#1298 review — Gitar amplification guard).
+func TestUpdateMeAvatarDataURLCappedAtFreeForAllTiers(t *testing.T) {
+	ts := setupTS(t)
+	// base64 payload encoding ~1.5 MiB raw: over the free 1 MiB inline cap.
+	big := "data:image/png;base64," + strings.Repeat("A", base64.StdEncoding.EncodedLen(1572864))
+
+	freeUser := ts.CreateTestUser(t, "freeavatardata")
+	wFree := ts.DoRequest(methodPatch, urlUsersMe, map[string]interface{}{
+		"avatar_url": big,
+	}, testhelpers.AuthHeaders(freeUser.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, wFree.Code, "free rejects >1 MiB inline data-URL")
+
+	premUser := ts.CreateTestUser(t, "premavatardata")
+	grantPremium(t, ts, premUser.ID)
+	wPrem := ts.DoRequest(methodPatch, urlUsersMe, map[string]interface{}{
+		"avatar_url": big,
+	}, testhelpers.AuthHeaders(premUser.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, wPrem.Code,
+		"premium inline data-URL ALSO capped at free (broadcast-amplification guard)")
 }
 
 func TestUpdateMeUsernameChangeSameUsername(t *testing.T) {

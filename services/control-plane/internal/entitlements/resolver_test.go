@@ -37,6 +37,14 @@ func insertSub(t *testing.T, ts *testhelpers.TestServer, userID, tier, status st
 	require.NoError(t, err)
 }
 
+func TestCache_SatisfiesTierResolver(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	var r entitlements.TierResolver = entitlements.NewCache(ts.Redis, ts.DB)
+	uid := insertUser(t, ts)
+	insertSub(t, ts, uid, "premium", "active", nil)
+	assert.Equal(t, "premium", r.GetTier(context.Background(), uid))
+}
+
 func TestResolveTier_ActivePremium(t *testing.T) {
 	ts := testhelpers.SetupTestServer(t)
 	uid := insertUser(t, ts)

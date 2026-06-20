@@ -26,9 +26,16 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/entitlements"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 )
+
+// freeTierStub satisfies entitlements.TierResolver and always returns TierFree.
+// Used by tests that do not need tier-dependent enforcement (pre-Task 3/4 tests).
+type freeTierStub struct{}
+
+func (freeTierStub) GetTier(context.Context, string) string { return entitlements.TierFree }
 
 const (
 	keyFileType           = "file_type"
@@ -129,7 +136,7 @@ func setupMediaTest(t *testing.T) *testSetup {
 		UploadMaxSize: 25 * 1024 * 1024, // 25 MB
 	}
 
-	h := NewHandler(db, store, log, cfg, nil)
+	h := NewHandler(db, store, log, cfg, nil, freeTierStub{})
 	return &testSetup{handler: h, store: store, db: db}
 }
 
@@ -318,8 +325,10 @@ func TestUploadAvatarTooLarge(t *testing.T) {
 	ts := setupMediaTest(t)
 	userID := ts.createTestUser(t, "bigavatar")
 
-	// Create a body that exceeds avatarMaxUpload (5 MB)
-	bigData := make([]byte, avatarMaxUpload+1024)
+	// Create a body that exceeds the free-tier MaxAvatarBytes (1 MiB).
+	// setupMediaTest uses freeTierStub so the limit is entitlements.TierFree (1 MiB).
+	const freeAvatarLimit = 1 * 1024 * 1024 // matches entitlements.freeEntitlement.MaxAvatarBytes
+	bigData := make([]byte, freeAvatarLimit+1024)
 	body, ct := multipartBody(t, "file", "huge.png", bigData, nil)
 
 	w := ts.doMultipart(ts.handler.UploadAvatar, "POST", pathUploadAvatar, userID, body, ct)
@@ -868,3 +877,104 @@ func TestUploadDMIconNotGroupDM(t *testing.T) {
 	resp := parseBody(t, w)
 	assert.Contains(t, resp["error"], "group DM")
 }
+
+// =====================================================================
+// Tier-gate: Attachment size (#1298)
+// =====================================================================
+
+// makeMultipartFile builds a multipart body with a synthetic "file" field of
+// exactly nBytes of random-ish data. Returns body + content-type.
+func makeMultipartFile(t *testing.T, nBytes int) (*bytes.Buffer, string) {
+	t.Helper()
+	data := make([]byte, nBytes)
+	// fill with non-zero pattern so multipart reader can't short-circuit
+	for i := range data {
+		data[i] = byte(i % 251)
+	}
+	return multipartBody(t, "file", "payload.bin", data, map[string]string{
+		"channel_id": "00000000-0000-0000-0000-000000000001",
+		"file_type":  "file",
+		"mime_type":  mimeOctetStream,
+	})
+}
+
+// doAttachmentUpload builds a handler with the given tier stub and calls UploadAttachment.
+func doAttachmentUpload(t *testing.T, h *Handler, body *bytes.Buffer, ct string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest("POST", pathUploadAttachment, body)
+	req.Header.Set("Content-Type", ct)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+	c.Set("user_id", "00000000-0000-0000-0000-000000000001")
+	h.UploadAttachment(c)
+	return w
+}
+
+// TestUploadAttachment_PremiumAllowsLargerThanFree confirms a premium user can
+// upload 30 MiB (> free 25 MiB, < premium 512 MiB) — should NOT get 413.
+func TestUploadAttachment_PremiumAllowsLargerThanFree(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	cfg := &config.Config{UploadMaxSize: 25 * 1024 * 1024}
+	premium := NewHandler(db, nil, logger.New("test"), cfg, nil, tierStub{entitlements.TierPremium})
+	body, ct := makeMultipartFile(t, 30*1024*1024) // 30 MiB
+	w := doAttachmentUpload(t, premium, body, ct)
+	assert.NotEqual(t, http.StatusRequestEntityTooLarge, w.Code, "premium accepts 30 MiB")
+}
+
+// TestUploadAttachment_FreeRejectsOverLimit confirms a free user uploading 30 MiB
+// (> free 25 MiB) gets 413 Request Entity Too Large.
+func TestUploadAttachment_FreeRejectsOverLimit(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	cfg := &config.Config{UploadMaxSize: 25 * 1024 * 1024}
+	free := NewHandler(db, nil, logger.New("test"), cfg, nil, tierStub{entitlements.TierFree})
+	body, ct := makeMultipartFile(t, 30*1024*1024) // 30 MiB > free 25 MiB
+	w := doAttachmentUpload(t, free, body, ct)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code, "free rejects 30 MiB")
+}
+
+// =====================================================================
+// Tier-gate: Avatar/Banner MinIO upload size (#1298)
+// =====================================================================
+
+// doImageUpload builds a multipart body of nBytes and invokes the given handler func.
+func doImageUpload(t *testing.T, handlerFunc gin.HandlerFunc, nBytes int) *httptest.ResponseRecorder {
+	t.Helper()
+	data := make([]byte, nBytes)
+	body, ct := multipartBody(t, "file", "img.png", data, nil)
+	req := httptest.NewRequest("POST", "/", body)
+	req.Header.Set("Content-Type", ct)
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = req
+	c.Set("user_id", "00000000-0000-0000-0000-000000000001")
+	handlerFunc(c)
+	return w
+}
+
+// TestUploadAvatar_FreeCapsAtOneMiB: 2 MiB > free 1 MiB → 413.
+func TestUploadAvatar_FreeCapsAtOneMiB(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	cfg := &config.Config{}
+	free := NewHandler(db, nil, logger.New("test"), cfg, nil, tierStub{entitlements.TierFree})
+	w := doImageUpload(t, free.UploadAvatar, 2*1024*1024)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
+}
+
+// TestUploadBanner_FreeCapsAtTwoMiB: 3 MiB > free 2 MiB → 413.
+func TestUploadBanner_FreeCapsAtTwoMiB(t *testing.T) {
+	db, cleanup := setupTestDB(t)
+	defer cleanup()
+	cfg := &config.Config{}
+	free := NewHandler(db, nil, logger.New("test"), cfg, nil, tierStub{entitlements.TierFree})
+	w := doImageUpload(t, free.UploadBanner, 3*1024*1024)
+	assert.Equal(t, http.StatusRequestEntityTooLarge, w.Code)
+}
+
+// tierStub satisfies entitlements.TierResolver with a configurable tier.
+type tierStub struct{ tier string }
+
+func (s tierStub) GetTier(context.Context, string) string { return s.tier }

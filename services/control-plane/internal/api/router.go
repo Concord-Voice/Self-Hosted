@@ -15,6 +15,7 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/clientconfig"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/dm"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/email"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/entitlements"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/feedback"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/friends"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/invites"
@@ -186,8 +187,9 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	authHandler.SetMFAChecker(mfaHandler)
 	mfaHandler.SetLoginCompleter(authHandler)
 	mfaHandler.SetEmailService(emailSvc)
+	entCache := entitlements.NewCache(redis, db)
 	sessionsHandler := sessions.NewHandler(db, redis, log, hub, mfaHandler)
-	usersHandler := users.NewHandler(db, log, hub, mfaHandler)
+	usersHandler := users.NewHandler(db, log, hub, mfaHandler, entCache)
 	serversHandler := servers.NewHandler(db, log, hub, rbacResolver)
 	channelsHandler := channels.NewHandler(db, log, hub, rbacResolver, redis)
 	membersHandler := members.NewHandler(db, log, redis, hub, rbacResolver, auditWriter)
@@ -214,7 +216,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	})
 	var mediaHandler *media.Handler
 	if store != nil {
-		mediaHandler = media.NewHandler(db, store, log, cfg, rbacResolver)
+		mediaHandler = media.NewHandler(db, store, log, cfg, rbacResolver, entCache)
 		usersHandler.SetMediaStore(store)
 		serversHandler.SetMediaStore(store)
 	}

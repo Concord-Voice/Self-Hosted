@@ -14,6 +14,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/entitlements"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/media"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
@@ -41,16 +42,18 @@ type Handler struct {
 	log         *logger.Logger
 	hub         *websocket.Hub
 	mfaVerifier MFAVerifier
-	store       media.ObjectDeleter // nil when object storage is not configured
+	tiers       entitlements.TierResolver // resolves the acting user's subscription tier (#1298)
+	store       media.ObjectDeleter       // nil when object storage is not configured
 }
 
 // NewHandler creates a new user handler.
-func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, mfaVerifier MFAVerifier) *Handler {
+func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, mfaVerifier MFAVerifier, tiers entitlements.TierResolver) *Handler {
 	return &Handler{
 		db:          db,
 		log:         log,
 		hub:         hub,
 		mfaVerifier: mfaVerifier,
+		tiers:       tiers,
 	}
 }
 
@@ -349,8 +352,13 @@ type profileUpdateBuilder struct {
 	argIdx            int
 	mediaKeysToDelete []string
 	usernameChanged   bool
-	previousUsername  string
-	extraResponse     map[string]interface{} // additional fields to include in error responses
+	// usernameChangeInterval is the tier-resolved cadence (#1298). Set in
+	// validateUsername before usernameChanged is flipped true, and reused by
+	// executeProfileUpdate's SQL WHERE so the precheck and the authoritative
+	// double-enforcement use one identical value (no TOCTOU between reads).
+	usernameChangeInterval time.Duration
+	previousUsername       string
+	extraResponse          map[string]interface{} // additional fields to include in error responses
 }
 
 func newProfileUpdateBuilder() *profileUpdateBuilder {
@@ -364,9 +372,16 @@ func (b *profileUpdateBuilder) addClause(column string, val interface{}) {
 	b.argIdx++
 }
 
+// usernameCadenceMsg renders the tier-aware username cooldown message (#1298).
+// The interval is tier-dependent (365d free / 91d premium), so the message can no
+// longer hardcode "once per year".
+func usernameCadenceMsg(interval time.Duration) string {
+	return fmt.Sprintf("You can only change your username once every %d days", int(interval/(24*time.Hour)))
+}
+
 // validateUsername checks cooldown, uniqueness, and appends the username clause.
 // Returns an HTTP status + error message on failure, or 0/"" on success.
-func (h *Handler) validateUsername(b *profileUpdateBuilder, username string, userID interface{}) (int, string) {
+func (h *Handler) validateUsername(b *profileUpdateBuilder, username string, userID interface{}, ent entitlements.Entitlement) (int, string) {
 	trimmed := strings.TrimSpace(username)
 	if err := auth.ValidateUsername(trimmed); err != nil {
 		return http.StatusBadRequest, err.Error()
@@ -391,12 +406,12 @@ func (h *Handler) validateUsername(b *profileUpdateBuilder, username string, use
 		return 0, "" // no-op
 	}
 
-	cooldownEnd := usernameChangedAt.AddDate(0, 0, 365)
+	cooldownEnd := usernameChangedAt.Add(ent.UsernameChangeInterval)
 	if time.Now().Before(cooldownEnd) {
 		b.extraResponse = map[string]interface{}{
 			"username_change_eligible_at": cooldownEnd,
 		}
-		return http.StatusForbidden, "You can only change your username once per year"
+		return http.StatusForbidden, usernameCadenceMsg(ent.UsernameChangeInterval)
 	}
 
 	var count int
@@ -415,6 +430,7 @@ func (h *Handler) validateUsername(b *profileUpdateBuilder, username string, use
 	b.addClause("username", normalized)
 	b.setClauses = append(b.setClauses, "username_changed_at = NOW()")
 	b.previousUsername = currentUsername
+	b.usernameChangeInterval = ent.UsernameChangeInterval // SQL double-enforcement reuses this exact value
 	b.usernameChanged = true
 	return 0, ""
 }
@@ -447,6 +463,27 @@ func validateBio(b *profileUpdateBuilder, bio string) (int, string) {
 	return 0, ""
 }
 
+// dataURLHeaderSlack budgets the "data:image/<type>;base64," prefix length.
+const dataURLHeaderSlack = 64
+
+// maxDataURLLen converts an entitlement byte limit into a data-URL string-length
+// bound (base64 inflates ~4/3). Both the inline data-URL caps below and the MinIO
+// upload path derive from the entitlements source, so neither is a magic number (#1298).
+func maxDataURLLen(maxBytes int64) int {
+	return base64.StdEncoding.EncodedLen(int(maxBytes)) + dataURLHeaderSlack
+}
+
+// Inline data-URL profile images are broadcast VERBATIM to every connected client
+// (UpdateMe -> hub.BroadcastToAll embeds avatar_url/header_image_url), so the inline
+// size ceiling is pinned to the FREE entitlement for ALL tiers. A premium user's larger
+// allowance is honored only on the MinIO upload path (UploadAvatar/UploadBanner), which
+// broadcasts a storage KEY rather than the blob. Pinning the inline cap closes the
+// broadcast-amplification surface a per-tier inline cap would open (#1298 review, Gitar).
+var (
+	inlineDataURLAvatarMax = entitlements.For(entitlements.TierFree).MaxAvatarBytes
+	inlineDataURLBannerMax = entitlements.For(entitlements.TierFree).MaxBannerBytes
+)
+
 // validateAvatarURL validates and appends the avatar_url clause.
 func validateAvatarURL(b *profileUpdateBuilder, avatarURL string, userID interface{}) (int, string) {
 	if avatarURL == "" {
@@ -458,8 +495,8 @@ func validateAvatarURL(b *profileUpdateBuilder, avatarURL string, userID interfa
 	if avatarURL != expectedAvatarURL && !strings.HasPrefix(avatarURL, dataImagePrefix) {
 		return http.StatusBadRequest, "Avatar must be an uploaded avatar URL for this user or an image data URL"
 	}
-	if strings.HasPrefix(avatarURL, dataImagePrefix) && len(avatarURL) > 1500000 {
-		return http.StatusBadRequest, "Avatar image too large (max ~1MB)"
+	if strings.HasPrefix(avatarURL, dataImagePrefix) && len(avatarURL) > maxDataURLLen(inlineDataURLAvatarMax) {
+		return http.StatusBadRequest, "Inline avatar image too large — upload larger images via the avatar upload endpoint"
 	}
 	b.addClause("avatar_url", avatarURL)
 	return 0, ""
@@ -476,8 +513,8 @@ func validateHeaderImageURL(b *profileUpdateBuilder, headerImageURL string, user
 	if headerImageURL != expectedBannerURL && !strings.HasPrefix(headerImageURL, dataImagePrefix) {
 		return http.StatusBadRequest, "Header image must be an uploaded banner URL for this user or an image data URL"
 	}
-	if strings.HasPrefix(headerImageURL, dataImagePrefix) && len(headerImageURL) > 3000000 {
-		return http.StatusBadRequest, "Banner image too large (max ~2MB)"
+	if strings.HasPrefix(headerImageURL, dataImagePrefix) && len(headerImageURL) > maxDataURLLen(inlineDataURLBannerMax) {
+		return http.StatusBadRequest, "Inline header image too large — upload larger images via the banner upload endpoint"
 	}
 	b.addClause("header_image_url", headerImageURL)
 	return 0, ""
@@ -529,8 +566,8 @@ type profileFieldValidator func(b *profileUpdateBuilder) (int, string)
 
 // buildProfileFields validates all provided profile fields and populates the builder.
 // Returns an HTTP status + error message on the first validation failure, or 0/"" on success.
-func (h *Handler) buildProfileFields(b *profileUpdateBuilder, req *UpdateProfileRequest, userID interface{}) (int, string) {
-	validators := h.collectProfileValidators(req, userID)
+func (h *Handler) buildProfileFields(b *profileUpdateBuilder, req *UpdateProfileRequest, userID interface{}, ent entitlements.Entitlement) (int, string) {
+	validators := h.collectProfileValidators(req, userID, ent)
 	for _, v := range validators {
 		if status, msg := v(b); status != 0 {
 			return status, msg
@@ -540,12 +577,12 @@ func (h *Handler) buildProfileFields(b *profileUpdateBuilder, req *UpdateProfile
 }
 
 // collectProfileValidators returns a validator for each non-nil field in the request.
-func (h *Handler) collectProfileValidators(req *UpdateProfileRequest, userID interface{}) []profileFieldValidator {
+func (h *Handler) collectProfileValidators(req *UpdateProfileRequest, userID interface{}, ent entitlements.Entitlement) []profileFieldValidator {
 	var validators []profileFieldValidator
 	if req.Username != nil {
 		val := *req.Username
 		validators = append(validators, func(b *profileUpdateBuilder) (int, string) {
-			return h.validateUsername(b, val, userID)
+			return h.validateUsername(b, val, userID, ent)
 		})
 	}
 	if req.DisplayName != nil {
@@ -593,9 +630,13 @@ func (h *Handler) executeProfileUpdate(b *profileUpdateBuilder, userID interface
 
 	whereClause := fmt.Sprintf("WHERE id = $%d", b.argIdx)
 	if b.usernameChanged {
+		// Tier double-enforcement: the cadence is parameterized (no SQL literal),
+		// using $argIdx for the id and $argIdx+1 for the cadence in SECONDS appended
+		// below. Seconds (not days) keeps this authoritative SQL bound provably identical
+		// to the exact-Duration precheck for any interval granularity (#1298 review, Gitar).
 		whereClause = fmt.Sprintf(
-			"WHERE id = $%d AND username_changed_at <= NOW() - INTERVAL '365 days'",
-			b.argIdx,
+			"WHERE id = $%d AND username_changed_at <= NOW() - make_interval(secs => $%d)",
+			b.argIdx, b.argIdx+1,
 		)
 	}
 	query := fmt.Sprintf( // #nosec G201 -- Safe: setClauses are parameterized, whereClause uses $N placeholders // nosemgrep:concord-go-sql-sprintf
@@ -607,6 +648,11 @@ func (h *Handler) executeProfileUpdate(b *profileUpdateBuilder, userID interface
 		strings.Join(b.setClauses, ", "), whereClause,
 	)
 	b.args = append(b.args, userID)
+	if b.usernameChanged {
+		// $argIdx+1: tier cadence in whole seconds, matching make_interval(secs => $N)
+		// above and the exact-Duration precheck in validateUsername.
+		b.args = append(b.args, int64(b.usernameChangeInterval.Seconds()))
+	}
 
 	var user models.User
 	err := h.db.QueryRow(query, b.args...).Scan(
@@ -620,7 +666,7 @@ func (h *Handler) executeProfileUpdate(b *profileUpdateBuilder, userID interface
 	}
 	if err == sql.ErrNoRows {
 		if b.usernameChanged {
-			return nil, http.StatusForbidden, "You can only change your username once per year"
+			return nil, http.StatusForbidden, usernameCadenceMsg(b.usernameChangeInterval)
 		}
 		return nil, http.StatusNotFound, errMsgUserNotFound
 	}
@@ -647,7 +693,10 @@ func (h *Handler) UpdateMe(c *gin.Context) {
 
 	b := newProfileUpdateBuilder()
 
-	if status, msg := h.buildProfileFields(b, &req, userID); status != 0 {
+	// Resolve the acting user's entitlement set once (server-authoritative, fail-closed
+	// to free on any cache/DB error) and thread it through the field validators (#1298).
+	ent := entitlements.For(h.tiers.GetTier(c.Request.Context(), c.GetString("user_id")))
+	if status, msg := h.buildProfileFields(b, &req, userID, ent); status != 0 {
 		resp := gin.H{"error": msg}
 		for k, v := range b.extraResponse {
 			resp[k] = v
