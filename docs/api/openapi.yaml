@@ -4412,6 +4412,28 @@ paths:
                           type: integer
                         successor_epoch:
                           type: integer
+  /entitlements:
+    get:
+      tags:
+      - Platform
+      summary: Get current entitlement capability set
+      description: 'Returns the authenticated user''s entitlement capability set (the
+        free/premium feature limits) so the client can gate UX locally with zero
+        per-action server calls. The tier resolves from the subscriptions source of
+        truth via a Redis read-through cache and fails closed to the free set on any
+        resolve error, so this endpoint always returns 200 with a valid set.
+
+        '
+      operationId: getEntitlements
+      security:
+      - BearerAuth: []
+      responses:
+        '200':
+          description: The authenticated user's entitlement capability set
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Entitlement'
   /feedback:
     post:
       tags:
@@ -11659,6 +11681,84 @@ components:
           schema:
             $ref: '#/components/schemas/Error'
   schemas:
+    Entitlement:
+      type: object
+      description: 'Capability set for one subscription tier — the single source of
+        the free/premium feature limits, defined server-side and shipped to the client
+        as data so client UX gating and server enforcement reference identical values.'
+      properties:
+        tier:
+          type: string
+          description: Subscription tier ('free' or 'premium')
+          example: free
+        allowCustomScheme:
+          type: boolean
+          description: Whether the user may select a custom color scheme
+        allowedAudioTiers:
+          type: array
+          items:
+            type: string
+          description: Permitted Opus audio quality tiers
+        minPtimeMs:
+          type: integer
+          description: Minimum Opus frame ptime in milliseconds
+        allowMusicMode:
+          type: boolean
+        maxAudioLastN:
+          type: integer
+          description: Per-room audio last-N active-speaker forwarding cap (room-owner-scoped)
+        maxVideoHeight:
+          type: integer
+        maxVideoFps:
+          type: integer
+        maxVideoPixelRate:
+          type: integer
+          format: int64
+          description: width*height*fps ceiling
+        maxManualBitrateBps:
+          type: integer
+        maxWebcamPublishers:
+          type: integer
+          description: Per-room camera publisher cap (room-owner-scoped)
+        maxScreensharePublishers:
+          type: integer
+          description: Per-room screen-share publisher cap (room-owner-scoped)
+        maxMessageChars:
+          type: integer
+        maxAttachmentBytes:
+          type: integer
+          format: int64
+        maxAvatarBytes:
+          type: integer
+          format: int64
+        maxBannerBytes:
+          type: integer
+          format: int64
+        allowAnimatedProfile:
+          type: boolean
+        usernameChangeIntervalSeconds:
+          type: integer
+          format: int64
+          description: Minimum interval between username changes, in seconds
+      required:
+      - tier
+      - allowCustomScheme
+      - allowedAudioTiers
+      - minPtimeMs
+      - allowMusicMode
+      - maxAudioLastN
+      - maxVideoHeight
+      - maxVideoFps
+      - maxVideoPixelRate
+      - maxManualBitrateBps
+      - maxWebcamPublishers
+      - maxScreensharePublishers
+      - maxMessageChars
+      - maxAttachmentBytes
+      - maxAvatarBytes
+      - maxBannerBytes
+      - allowAnimatedProfile
+      - usernameChangeIntervalSeconds
     Error:
       type: object
       properties:

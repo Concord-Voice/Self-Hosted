@@ -12,9 +12,15 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-type fakeDisconnector struct{ called []uuid.UUID }
+type fakeNotifier struct {
+	disconnected []uuid.UUID
+	broadcasts   []entitlements.EntitlementDTO
+}
 
-func (f *fakeDisconnector) DisconnectUser(id uuid.UUID) { f.called = append(f.called, id) }
+func (f *fakeNotifier) DisconnectUser(id uuid.UUID) { f.disconnected = append(f.disconnected, id) }
+func (f *fakeNotifier) BroadcastEntitlements(_ uuid.UUID, dto entitlements.EntitlementDTO) {
+	f.broadcasts = append(f.broadcasts, dto)
+}
 
 func TestIsDowngrade(t *testing.T) {
 	assert.True(t, entitlements.IsDowngrade("premium", "free"))
@@ -31,15 +37,18 @@ func TestOnTierChange_DowngradeInvalidatesAndDisconnects(t *testing.T) {
 	ctx := context.Background()
 	require.NoError(t, cache.SetTier(ctx, uid, "premium"))
 
-	disc := &fakeDisconnector{}
+	disc := &fakeNotifier{}
 	require.NoError(t, entitlements.OnTierChange(ctx, cache, disc, uuid.MustParse(uid), "premium", "free"))
 
 	// cache invalidated
 	_, err := ts.Redis.Get(ctx, "ent:"+uid).Result()
 	assert.ErrorIs(t, err, redis.Nil)
 	// disconnect fired
-	require.Len(t, disc.called, 1)
-	assert.Equal(t, uid, disc.called[0].String())
+	require.Len(t, disc.disconnected, 1)
+	assert.Equal(t, uid, disc.disconnected[0].String())
+	// entitlements_changed pushed with the NEW (free) set
+	require.Len(t, disc.broadcasts, 1)
+	assert.Equal(t, "free", disc.broadcasts[0].Tier)
 }
 
 func TestOnTierChange_UpgradeInvalidatesNoDisconnect(t *testing.T) {
@@ -49,10 +58,25 @@ func TestOnTierChange_UpgradeInvalidatesNoDisconnect(t *testing.T) {
 	ctx := context.Background()
 	require.NoError(t, cache.SetTier(ctx, uid, "free"))
 
-	disc := &fakeDisconnector{}
+	disc := &fakeNotifier{}
 	require.NoError(t, entitlements.OnTierChange(ctx, cache, disc, uuid.MustParse(uid), "free", "premium"))
 
-	assert.Empty(t, disc.called, "upgrade must not disconnect")
+	assert.Empty(t, disc.disconnected, "upgrade must not disconnect")
+}
+
+func TestOnTierChange_PushesNewEntitlementsOnEveryChange(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	uid := insertUser(t, ts)
+	cache := entitlements.NewCache(ts.Redis, ts.DB)
+	ctx := context.Background()
+	require.NoError(t, cache.SetTier(ctx, uid, "free"))
+
+	n := &fakeNotifier{}
+	require.NoError(t, entitlements.OnTierChange(ctx, cache, n, uuid.MustParse(uid), "free", "premium"))
+
+	require.Len(t, n.broadcasts, 1, "every change pushes entitlements_changed")
+	assert.Equal(t, "premium", n.broadcasts[0].Tier)
+	assert.Empty(t, n.disconnected, "upgrade must not disconnect")
 }
 
 func TestOnTierChange_NilDisconnectorTolerated(t *testing.T) {
@@ -74,10 +98,13 @@ func TestOnTierChange_DowngradeDisconnectsEvenIfInvalidateFails(t *testing.T) {
 	defer func() { _ = down.Close() }()
 	cache := entitlements.NewCache(down, ts.DB)
 
-	disc := &fakeDisconnector{}
+	disc := &fakeNotifier{}
 	err := entitlements.OnTierChange(context.Background(), cache, disc, uuid.MustParse(uid), "premium", "free")
 
 	require.Error(t, err, "the invalidate error must still be surfaced")
-	require.Len(t, disc.called, 1, "downgrade disconnect must fire despite the invalidate error")
-	assert.Equal(t, uid, disc.called[0].String())
+	require.Len(t, disc.disconnected, 1, "downgrade disconnect must fire despite the invalidate error")
+	assert.Equal(t, uid, disc.disconnected[0].String())
+	// BroadcastEntitlements does not touch Redis, so the push still records.
+	require.Len(t, disc.broadcasts, 1)
+	assert.Equal(t, "free", disc.broadcasts[0].Tier)
 }

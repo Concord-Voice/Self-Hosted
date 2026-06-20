@@ -239,6 +239,10 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	// for the terminal-disable live-session kick on valid_age=false.
 	ageHandler := buildAgeHandler(db, redis, hub, log)
 
+	// Entitlement capability set handler (#1297). Owns its own read-through Cache
+	// (NOT borrowed from auth.Handler — internal/auth is a protected path).
+	entitlementsHandler := entitlements.NewHTTPHandler(db, redis, log)
+
 	// Start NATS voice event subscriber
 	if natsClient != nil {
 		voiceSub := voice.NewNATSSubscriber(db, log, hub, natsClient, rbacResolver)
@@ -512,6 +516,10 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 				usersHandler.GetMe,
 			)
+
+			// Entitlement capability set (client UX source; #1297). Auth-required;
+			// fails closed to the free set on any resolve error.
+			authRequired.GET("/entitlements", entitlementsHandler.Get)
 
 			// Privacy endpoints — GDPR Article 17 erasure.
 			// Mounted in the pending-OK tier so users can erase their data

@@ -80,6 +80,7 @@ import {
   ConnectionReadySchema,
   // Union + scrubber
   WebSocketEventSchema,
+  EntitlementsChangedSchema,
   scrubZodIssues,
 } from '@/renderer/types/ws-events';
 
@@ -1151,6 +1152,46 @@ describe('scrubZodIssues — PII safety', () => {
         expect(typeof issue.message).toBe('string');
       }
     }
+  });
+});
+
+const validEntitlements = {
+  type: 'entitlements_changed',
+  data: {
+    tier: 'free',
+    allowCustomScheme: false,
+    allowedAudioTiers: ['minimum', 'low', 'moderate', 'standard'],
+    minPtimeMs: 20,
+    allowMusicMode: false,
+    maxAudioLastN: 8,
+    maxVideoHeight: 1080,
+    maxVideoFps: 60,
+    maxVideoPixelRate: 62208000,
+    maxManualBitrateBps: 5000000,
+    maxWebcamPublishers: 8,
+    maxScreensharePublishers: 1,
+    maxMessageChars: 5120,
+    maxAttachmentBytes: 26214400,
+    maxAvatarBytes: 1048576,
+    maxBannerBytes: 2097152,
+    allowAnimatedProfile: false,
+    usernameChangeIntervalSeconds: 31536000,
+  },
+};
+
+describe('EntitlementsChangedSchema', () => {
+  it('accepts a valid full DTO', () => {
+    expect(EntitlementsChangedSchema.safeParse(validEntitlements).success).toBe(true);
+  });
+  it('rejects a missing required field', () => {
+    const { maxMessageChars, ...rest } = validEntitlements.data;
+    const bad = { type: 'entitlements_changed', data: rest };
+    expect(EntitlementsChangedSchema.safeParse(bad).success).toBe(false);
+  });
+  it('rejects a wrong type literal', () => {
+    expect(
+      EntitlementsChangedSchema.safeParse({ ...validEntitlements, type: 'nope' }).success
+    ).toBe(false);
   });
 });
 

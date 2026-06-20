@@ -12,7 +12,7 @@
  * arrives from the server), while `chat.ts` defines APPLICATION models (what
  * stores hold). Handlers in useWebSocketMessages.ts transform wire → app.
  *
- * 56 schemas total: 54 subscriber events (handled via wsService.on) + 2
+ * 63 schemas total: 61 subscriber events (handled via wsService.on) + 2
  * envelope-only events (connected, connection_ready) consumed internally
  * by wsService.handleMessage's switch — both must be in the union so that
  * the post-safeParse code accesses message.data fields without `as` casts.
@@ -1207,6 +1207,40 @@ export const SavedGifsUpdatedSchema = z.object({
   }),
 });
 
+// ──────────── Entitlements (1) — #1297 ─────────────────
+
+/**
+ * `entitlements_changed` — server pushes the full capability set on any tier
+ * change (upgrade/lateral live-update; downgrade also triggers session_revoked).
+ * Server emitter: entitlements.OnTierChange via the api.EntitlementNotifier
+ * adapter (services/control-plane/internal/api/entitlements_wiring.go) →
+ * hub.BroadcastToUser. Wire shape = EntitlementDTO
+ * (services/control-plane/internal/entitlements/dto.go) — keep in lockstep.
+ */
+export const EntitlementsChangedSchema = z.object({
+  type: z.literal('entitlements_changed'),
+  data: z.object({
+    tier: z.string(),
+    allowCustomScheme: z.boolean(),
+    allowedAudioTiers: z.array(z.string()),
+    minPtimeMs: z.number().int(),
+    allowMusicMode: z.boolean(),
+    maxAudioLastN: z.number().int(),
+    maxVideoHeight: z.number().int(),
+    maxVideoFps: z.number().int(),
+    maxVideoPixelRate: z.number().int(),
+    maxManualBitrateBps: z.number().int(),
+    maxWebcamPublishers: z.number().int(),
+    maxScreensharePublishers: z.number().int(),
+    maxMessageChars: z.number().int(),
+    maxAttachmentBytes: z.number().int(),
+    maxAvatarBytes: z.number().int(),
+    maxBannerBytes: z.number().int(),
+    allowAnimatedProfile: z.boolean(),
+    usernameChangeIntervalSeconds: z.number().int(),
+  }),
+});
+
 // ──────────── System + envelope (5 events) — Task A11 ─────────────────
 
 /**
@@ -1277,7 +1311,7 @@ export const ConnectionReadySchema = z.object({
 });
 
 // ════════════════════════════════════════════════════════════════════════
-// 4. The discriminated union (58 schemas: 56 subscriber + 2 envelope)
+// 4. The discriminated union (63 schemas: 61 subscriber + 2 envelope)
 // ════════════════════════════════════════════════════════════════════════
 
 export const WebSocketEventSchema = z.discriminatedUnion('type', [
@@ -1356,6 +1390,9 @@ export const WebSocketEventSchema = z.discriminatedUnion('type', [
   PreferencesUpdatedSchema,
   SavedGifsUpdatedSchema,
 
+  // Entitlements (1)
+  EntitlementsChangedSchema,
+
   // System + envelope (5: 3 subscriber + 2 envelope-only)
   SubscribedSchema,
   ErrorSchema,
@@ -1363,7 +1400,7 @@ export const WebSocketEventSchema = z.discriminatedUnion('type', [
   ConnectedSchema,
   ConnectionReadySchema,
 ]);
-// TOTAL: 60 schemas (54 from A3-A7, + 4 DM voice ring from #1209, + 2 from #487)
+// TOTAL: 63 schemas (60 base + rich_presence ×2 #1233 + entitlements_changed #1297)
 
 // ════════════════════════════════════════════════════════════════════════
 // 5. Derived types
@@ -1451,6 +1488,9 @@ export type KeyDeliveredPayload = z.infer<typeof KeyDeliveredSchema>['data'];
 // Preferences sync
 export type PreferencesUpdatedPayload = z.infer<typeof PreferencesUpdatedSchema>['data'];
 export type SavedGifsUpdatedPayload = z.infer<typeof SavedGifsUpdatedSchema>['data'];
+
+// Entitlements
+export type EntitlementsChangedPayload = z.infer<typeof EntitlementsChangedSchema>['data'];
 
 // System + envelope
 export type SubscribedPayload = z.infer<typeof SubscribedSchema>['data'];
