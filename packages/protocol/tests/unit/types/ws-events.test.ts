@@ -1153,3 +1153,95 @@ describe('scrubZodIssues — PII safety', () => {
     }
   });
 });
+
+// ────────────────────────────────────────────────────────────────────────
+// 5. Rich Presence — Custom Text Status (#1233)
+// ────────────────────────────────────────────────────────────────────────
+
+describe('Rich Presence — custom_text', () => {
+  it('accepts a valid rich_presence_update for custom_text', () => {
+    const result = WebSocketEventSchema.safeParse({
+      type: 'rich_presence_update',
+      data: {
+        user_id: UUID_A,
+        category: 'custom_text',
+        payload: { emoji: '🎧', text: 'Heads down' },
+        updated_at: 1,
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('accepts custom_text with no emoji (emoji optional)', () => {
+    const result = WebSocketEventSchema.safeParse({
+      type: 'rich_presence_update',
+      data: {
+        user_id: UUID_A,
+        category: 'custom_text',
+        payload: { text: 'Out till Friday' },
+        updated_at: 2,
+      },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects custom_text over 140 characters', () => {
+    const result = WebSocketEventSchema.safeParse({
+      type: 'rich_presence_update',
+      data: {
+        user_id: UUID_A,
+        category: 'custom_text',
+        payload: { text: 'x'.repeat(141) },
+        updated_at: 3,
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an empty custom_text (min 1)', () => {
+    const result = WebSocketEventSchema.safeParse({
+      type: 'rich_presence_update',
+      data: {
+        user_id: UUID_A,
+        category: 'custom_text',
+        payload: { text: '' },
+        updated_at: 4,
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an emoji over 32 characters', () => {
+    const result = WebSocketEventSchema.safeParse({
+      type: 'rich_presence_update',
+      data: {
+        user_id: UUID_A,
+        category: 'custom_text',
+        payload: { text: 'hi', emoji: 'x'.repeat(33) },
+        updated_at: 5,
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects an unknown rich-presence category', () => {
+    const result = WebSocketEventSchema.safeParse({
+      type: 'rich_presence_update',
+      data: {
+        user_id: UUID_A,
+        category: 'not_a_category',
+        payload: { text: 'hi' },
+        updated_at: 6,
+      },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts a rich_presence_clear for custom_text', () => {
+    const result = WebSocketEventSchema.safeParse({
+      type: 'rich_presence_clear',
+      data: { user_id: UUID_A, category: 'custom_text' },
+    });
+    expect(result.success).toBe(true);
+  });
+});

@@ -816,6 +816,16 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 					usersHandler.UpdatePrivacySettings,
 				)
 
+				// Presence settings — custom text status (issue #1233)
+				userRoutes.GET("/me/presence-settings",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					usersHandler.GetPresenceSettings,
+				)
+				userRoutes.PATCH("/me/presence-settings",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					usersHandler.UpdatePresenceSettings,
+				)
+
 				// SSO settings (issue #270)
 				userRoutes.GET("/me/sso-identities",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),

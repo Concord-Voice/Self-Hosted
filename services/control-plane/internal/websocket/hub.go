@@ -424,6 +424,11 @@ func (h *Hub) sendPresenceSnapshot(client *Client) {
 	if data, err := json.Marshal(presenceSnapshot); err == nil {
 		client.Send <- data
 	}
+
+	// #1233 Task B4: also send the custom text of every user the connecting
+	// viewer is permitted to see (audience-filtered per each sender's tier).
+	// risk: privacy — non-audience senders are excluded; see sendCustomTextSnapshot.
+	h.sendCustomTextSnapshot(ctx, client)
 }
 
 func (h *Hub) sendVoiceCountsSnapshot(ctx context.Context, client *Client) {

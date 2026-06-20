@@ -914,6 +914,47 @@ export const ProfileUpdatedSchema = z.object({
   }),
 });
 
+// ──────────── Rich Presence — Custom Text Status (#1233, 2 events) ────
+// Minimal framework slice: only the custom_text category is wired end-to-end.
+// The category enum lists the full taxonomy for forward-compatibility; other
+// categories' payload schemas are added when those features land. Custom text is
+// DB-persistent + audience-filtered server-side (risk: privacy) — see
+// [internal]specs/2026-06-18-1233-custom-text-status-design.md §5.
+export const RichPresenceCategorySchema = z.enum([
+  'server_voice',
+  'private_call',
+  'games',
+  'music',
+  'streaming',
+  'browser',
+  'productivity',
+  'creator',
+  'custom_text',
+]);
+
+export const CustomTextPresencePayloadSchema = z.object({
+  emoji: z.string().max(32).optional(),
+  text: z.string().min(1).max(140),
+});
+
+export const RichPresenceUpdateSchema = z.object({
+  type: z.literal('rich_presence_update'),
+  data: z.object({
+    user_id: UUID,
+    category: RichPresenceCategorySchema,
+    payload: CustomTextPresencePayloadSchema,
+    updated_at: z.number().int().positive(),
+  }),
+});
+
+export const RichPresenceClearSchema = z.object({
+  type: z.literal('rich_presence_clear'),
+  data: z.object({
+    user_id: UUID,
+    category: RichPresenceCategorySchema,
+  }),
+});
+
 // ──────────── Channel + server lifecycle (12 events) — Task A8 ────────
 
 /**
@@ -1236,7 +1277,7 @@ export const ConnectionReadySchema = z.object({
 });
 
 // ════════════════════════════════════════════════════════════════════════
-// 4. The discriminated union (56 schemas: 54 subscriber + 2 envelope)
+// 4. The discriminated union (58 schemas: 56 subscriber + 2 envelope)
 // ════════════════════════════════════════════════════════════════════════
 
 export const WebSocketEventSchema = z.discriminatedUnion('type', [
@@ -1287,6 +1328,10 @@ export const WebSocketEventSchema = z.discriminatedUnion('type', [
   ServerOnlineCountsSchema,
   ServerVoiceCountsSchema,
   ProfileUpdatedSchema,
+
+  // Rich Presence — Custom Text (#1233)
+  RichPresenceUpdateSchema,
+  RichPresenceClearSchema,
 
   // Channel + server lifecycle (12)
   MemberJoinedSchema,
@@ -1378,6 +1423,11 @@ export type PresenceSnapshotPayload = z.infer<typeof PresenceSnapshotSchema>['da
 export type ServerOnlineCountsPayload = z.infer<typeof ServerOnlineCountsSchema>['data'];
 export type ServerVoiceCountsPayload = z.infer<typeof ServerVoiceCountsSchema>['data'];
 export type ProfileUpdatedPayload = z.infer<typeof ProfileUpdatedSchema>['data'];
+
+// Rich Presence — Custom Text (#1233)
+export type RichPresenceUpdatePayload = z.infer<typeof RichPresenceUpdateSchema>['data'];
+export type RichPresenceClearPayload = z.infer<typeof RichPresenceClearSchema>['data'];
+export type CustomTextPresencePayload = z.infer<typeof CustomTextPresencePayloadSchema>;
 
 // Channel + server lifecycle
 export type MemberJoinedPayload = z.infer<typeof MemberJoinedSchema>['data'];

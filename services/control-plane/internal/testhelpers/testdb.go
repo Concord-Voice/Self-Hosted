@@ -109,7 +109,8 @@ func TruncateAllTables(db *sql.DB) error {
 		release_spas,
 		subscriptions,
 		redemption_codes,
-		code_redemptions
+		code_redemptions,
+		user_presence_settings
 	CASCADE`)
 	return err
 }

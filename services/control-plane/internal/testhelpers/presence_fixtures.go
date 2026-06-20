@@ -83,3 +83,16 @@ func SetFriendsOfFriends(t *testing.T, db *sql.DB, userID uuid.UUID, enabled boo
 	)
 	require.NoError(t, err)
 }
+
+// SetCustomTextTier upserts the user's custom_text_tier (0=Off, 1=Friends,
+// 2=Servers) into user_presence_settings. Other columns carry NOT NULL DEFAULTs
+// or are nullable, so the minimal insert is valid.
+func SetCustomTextTier(t *testing.T, db *sql.DB, userID uuid.UUID, tier int) {
+	t.Helper()
+	_, err := db.Exec(
+		`INSERT INTO user_presence_settings (user_id, custom_text_tier) VALUES ($1, $2)
+		 ON CONFLICT (user_id) DO UPDATE SET custom_text_tier = EXCLUDED.custom_text_tier`,
+		userID, tier,
+	)
+	require.NoError(t, err)
+}

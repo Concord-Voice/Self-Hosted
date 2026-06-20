@@ -10932,6 +10932,93 @@ paths:
                 properties:
                   privacy:
                     $ref: '#/components/schemas/PrivacySettings'
+  /users/me/presence-settings:
+    get:
+      tags:
+      - Presence
+      summary: Get presence (custom status) settings
+      description: 'Get the authenticated user''s rich-presence settings (custom-text
+        status tier + value). Returns defaults (tier 0, null text/emoji) if unset.
+
+        Rate limit: 30 requests per minute (user-based).
+
+        '
+      security:
+      - BearerAuth: []
+      responses:
+        '200':
+          description: Presence settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  custom_text_tier:
+                    type: integer
+                    enum:
+                    - 0
+                    - 1
+                    - 2
+                    description: 0=Off, 1=Friends, 2=Servers
+                  custom_text:
+                    type: string
+                    nullable: true
+                    maxLength: 140
+                  custom_text_emoji:
+                    type: string
+                    nullable: true
+                    maxLength: 32
+    patch:
+      tags:
+      - Presence
+      summary: Update presence (custom status) settings
+      description: 'Update the custom-text status tier and/or value. Only provided
+        fields are changed; an empty custom_text or custom_text_emoji clears it (stored
+        NULL). The server fans the change out to the permitted tier audience.
+
+        Rate limit: 10 requests per minute (user-based).
+
+        '
+      security:
+      - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                custom_text_tier:
+                  type: integer
+                  enum:
+                  - 0
+                  - 1
+                  - 2
+                custom_text:
+                  type: string
+                  maxLength: 140
+                custom_text_emoji:
+                  type: string
+                  maxLength: 32
+      responses:
+        '200':
+          description: Updated presence settings
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  custom_text_tier:
+                    type: integer
+                  custom_text:
+                    type: string
+                    nullable: true
+                  custom_text_emoji:
+                    type: string
+                    nullable: true
+        '400':
+          description: Invalid tier (must be 0, 1, or 2), custom_text over 140 characters,
+            or custom_text_emoji over 32 characters
   /users/me/saved-gifs:
     get:
       tags:
