@@ -13183,19 +13183,10 @@ components:
         featureFlags:
           type: object
           properties:
-            voice:
-              type: boolean
-            video:
-              type: boolean
-            e2ee:
-              type: boolean
             gifsEnabled:
               type: boolean
               description: True when the server-side KLIPY GIF proxy is configured
           required:
-          - voice
-          - video
-          - e2ee
           - gifsEnabled
         mediaPlaneUrl:
           type: string

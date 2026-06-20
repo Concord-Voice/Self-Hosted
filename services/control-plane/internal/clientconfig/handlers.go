@@ -25,10 +25,6 @@ func NewHandler(cfg *config.Config, liveSpa *config.LiveSpaConfig, log *logger.L
 
 // FeatureFlags represents toggleable client features.
 type FeatureFlags struct {
-	Voice bool `json:"voice"`
-	Video bool `json:"video"`
-	E2EE  bool `json:"e2ee"`
-
 	// GifsEnabled signals whether the KLIPY GIF integration is available
 	// (i.e. the server is configured with a KLIPY app key). The key itself
 	// is NEVER sent to clients — all KLIPY traffic must go through the
@@ -82,9 +78,6 @@ func (h *Handler) GetConfig(c *gin.Context) {
 	resp := Response{
 		MinVersion: h.cfg.ClientMinVersion,
 		FeatureFlags: FeatureFlags{
-			Voice:       h.cfg.FeatureVoice,
-			Video:       h.cfg.FeatureVideo,
-			E2EE:        h.cfg.FeatureE2EE,
 			GifsEnabled: h.cfg.KlipyAPIKey != "",
 		},
 		MediaPlaneURL: h.cfg.MediaPlaneURL,

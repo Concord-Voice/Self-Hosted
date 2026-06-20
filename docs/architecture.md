@@ -600,7 +600,7 @@ Server channels (`channel_keys` / `key_revocations`) and DMs (`dm_channel_keys` 
 
 ### Runtime Client Configuration
 
-The desktop client discovers its runtime config — it is **not** hardcoded. `clientConfigService.ts` polls the public (pre-auth) `GET /api/v1/client/config` (`internal/clientconfig`) every ~5 minutes for: `minVersion` (a client-gate enforced regardless of auth state), server-toggled `featureFlags` (voice / video / e2ee / gifs), the **media-plane URL**, **TURN** host/realm, the `spaUrl`, and `spaIpcContract`. This is how the media-plane and TURN endpoints reach the client; the `gifsEnabled` flag mirrors the server-side `KLIPY_API_KEY` gate.
+The desktop client discovers its runtime config — it is **not** hardcoded. `clientConfigService.ts` polls the public (pre-auth) `GET /api/v1/client/config` (`internal/clientconfig`) every ~5 minutes for: `minVersion` (a client-gate enforced regardless of auth state), server-toggled `featureFlags` (currently `gifsEnabled` only — the inert `voice`/`video`/`e2ee` members were removed under #1649), the **media-plane URL**, **TURN** host/realm, the `spaUrl`, and `spaIpcContract`. This is how the media-plane and TURN endpoints reach the client; the `gifsEnabled` flag mirrors the server-side `KLIPY_API_KEY` gate.
 
 ## Deployment Models
 

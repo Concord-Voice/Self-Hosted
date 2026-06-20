@@ -30,12 +30,14 @@ func TestGetConfigReturnsExpectedShape(t *testing.T) {
 	require.Contains(t, resp, "turn")
 	require.NotContains(t, resp, "telemetryPolicyVersion", "field removed from /client/config response")
 
-	// Feature flags should be a nested object with voice/video/e2ee
+	// Feature flags is a nested object with only the live gifsEnabled member.
+	// voice/video/e2ee were removed as inert under #1649 (e2ee per E2EE-everywhere #201).
 	flags, ok := resp["featureFlags"].(map[string]interface{})
 	require.True(t, ok, "featureFlags should be an object")
-	assert.Contains(t, flags, "voice")
-	assert.Contains(t, flags, "video")
-	assert.Contains(t, flags, "e2ee")
+	assert.Contains(t, flags, "gifsEnabled")
+	assert.NotContains(t, flags, "e2ee", "e2ee flag removed — encryption is structural under #201")
+	assert.NotContains(t, flags, "voice", "voice flag removed as inert (#1649)")
+	assert.NotContains(t, flags, "video", "video flag removed as inert (#1649)")
 
 	// TURN should be a nested object (fields may be omitted when empty)
 	_, ok = resp["turn"].(map[string]interface{})
@@ -51,14 +53,12 @@ func TestGetConfigReflectsConfigValues(t *testing.T) {
 	var resp map[string]interface{}
 	testhelpers.ParseJSON(t, w, &resp)
 
-	// Default test config: no min version, features enabled by default in config.Load()
-	// but test config uses zero-value Config{} so features default to false
+	// Default test config: no min version; test config uses zero-value Config{}
+	// so KlipyAPIKey is empty → gifsEnabled is false.
 	assert.Equal(t, "", resp["minVersion"])
 
 	flags := resp["featureFlags"].(map[string]interface{})
-	assert.Equal(t, false, flags["voice"])
-	assert.Equal(t, false, flags["video"])
-	assert.Equal(t, false, flags["e2ee"])
+	assert.Equal(t, false, flags["gifsEnabled"])
 
 	// Default media plane URL is empty in test config
 	assert.Equal(t, "", resp["mediaPlaneUrl"])
@@ -128,16 +128,13 @@ func TestGetConfigFeatureFlagsIndependent(t *testing.T) {
 
 	flags := resp["featureFlags"].(map[string]interface{})
 
-	// Test config has all flags at zero value (false) — verify each is
-	// independently false rather than missing
-	assert.Equal(t, false, flags["voice"], "voice should be explicitly false")
-	assert.Equal(t, false, flags["video"], "video should be explicitly false")
-	assert.Equal(t, false, flags["e2ee"], "e2ee should be explicitly false")
+	// After #1649 the only featureFlags member is gifsEnabled. Test config has
+	// KlipyAPIKey empty → gifsEnabled is explicitly false rather than missing.
 	assert.Equal(t, false, flags["gifsEnabled"], "gifsEnabled should be explicitly false when no KLIPY credential is configured")
 
-	// Verify exactly 4 keys — no extra fields leaking. CRITICALLY: the
+	// Verify exactly 1 key — no extra fields leaking. CRITICALLY: the
 	// raw KLIPY app key must NEVER appear here.
-	assert.Len(t, flags, 4, "featureFlags should have exactly 4 keys")
+	assert.Len(t, flags, 1, "featureFlags should have exactly 1 key (gifsEnabled) after #1649")
 	_, hasKey := flags["klipyApiKey"]
 	assert.False(t, hasKey, "klipyApiKey must NEVER be present in /client/config — it would leak the server-side KLIPY app key into the renderer bundle")
 }

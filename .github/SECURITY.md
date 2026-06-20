@@ -67,7 +67,7 @@ Include:
 
 1. **Keep Updated**: Always use the latest version
 2. **Strong Passwords**: Minimum 12 characters, mixed case, numbers, symbols
-3. **Enable E2EE**: Keep end-to-end encryption enabled for sensitive conversations
+3. **End-to-End Encryption**: All conversations are end-to-end encrypted by default — there is no setting to disable it (see [ADR-0003](../[internal]0003-e2ee-always.md))
 4. **Verify Identity**: Verify server identity when connecting to self-hosted instances
 5. **Secure Your Keys**: Back up encryption keys securely
 
