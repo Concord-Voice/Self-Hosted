@@ -196,8 +196,17 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	membersHandler := members.NewHandler(db, log, redis, hub, rbacResolver, auditWriter)
 	messagesHandler := messages.NewHandler(db, log, hub, rbacResolver)
 	invitesHandler := invites.NewHandler(db, log, hub, rbacResolver)
-	voiceHandler := voice.NewHandler(db, log, hub, cfg, rbacResolver, natsClient, auditWriter)
-	dmHandler := dm.NewHandler(db, log, hub, cfg, natsClient, redis)
+	voiceHandler := voice.NewHandler(voice.HandlerDeps{
+		DB:       db,
+		Log:      log,
+		Hub:      hub,
+		Cfg:      cfg,
+		Resolver: rbacResolver,
+		NATS:     natsClient,
+		Audit:    auditWriter,
+		EntCache: entCache,
+	})
+	dmHandler := dm.NewHandler(db, log, hub, cfg, natsClient, redis, entCache)
 	// Wire DM voice ring cleanup-on-disconnect (#1209 plan task B7 Part 2).
 	// When a user's last WS connection drops, the hub invokes
 	// HandleUserDisconnect to cancel any rings they initiated.
