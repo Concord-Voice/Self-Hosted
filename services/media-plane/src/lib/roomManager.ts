@@ -1024,9 +1024,15 @@ export class RoomManager {
     // so the client's unconditional resume is refused by the guard until the
     // speaker enters the top-N. Screen-audio (not a mic producer) and video are
     // never managed.
+    //
+    // #1742: only seed paused when the room is GENUINELY over the cap. When every
+    // mic publisher fits under N, last-N is a no-op (see applyLastNDelta), so a
+    // fresh joiner must hear from the first frame — seeding it paused would clip
+    // the opening of the first words. The count is server-authoritative.
     if (
       newConsumer.kind === 'audio' &&
       room.micProducerIds.has(producerId) &&
+      room.micProducerIds.size > resolveAudioLastN(room) &&
       !room.activeSpeakers.current().has(producerId)
     ) {
       room.lastNPausedConsumers.add(newConsumer.id);
@@ -1150,8 +1156,46 @@ export class RoomManager {
    * The PRODUCER is never paused — only consumers.
    */
   private applyLastNDelta(room: Room, delta: ActiveSpeakerDelta): void {
+    // #1742: last-N is a capacity/DoS guardrail for rooms LARGER than the
+    // forwarded-speaker cap. When every mic publisher already fits under N,
+    // applying the cap is pure regression — the evict-on-silence pause/resume
+    // churn loses the leading frames of each utterance during the resume gap,
+    // producing Opus PLC crackle. So when the room is at/under the cap, never
+    // pause, and drain any consumer left paused from a prior over-cap window
+    // (resume-on-shrink). The count is server-authoritative (no new trust
+    // surface). The over-cap path below is unchanged: the #1544/#1632
+    // enforcement invariants only apply when the room genuinely exceeds N.
+    if (room.micProducerIds.size <= resolveAudioLastN(room)) {
+      this.drainLastNPaused(room);
+      return;
+    }
     for (const producerId of delta.removed) this.setAudioForwarding(room, producerId, false);
     for (const producerId of delta.added) this.setAudioForwarding(room, producerId, true);
+  }
+
+  /**
+   * #1742: resume every consumer currently last-N-paused, because last-N no
+   * longer applies (the room is at/under the cap — either always was, or just
+   * shrank back). `lastNPausedConsumers` is mutated SYNCHRONOUSLY before the
+   * async resume, mirroring setAudioForwarding's TOCTOU discipline so the
+   * resumeConsumer guard's view stays consistent under overlapping observer
+   * ticks. A server-deafened subscriber is cleared from the set (last-N no
+   * longer owns its pause) but is NOT resumed — the deafen pause must hold
+   * (moderation is not bypassed); server-undeafen + the client resume restores
+   * it, exactly as in setAudioForwarding's resume branch.
+   */
+  private drainLastNPaused(room: Room): void {
+    if (room.lastNPausedConsumers.size === 0) return;
+    for (const [, participant] of room.participants) {
+      for (const [consumerId, consumer] of participant.consumers) {
+        if (!room.lastNPausedConsumers.has(consumerId)) continue;
+        room.lastNPausedConsumers.delete(consumerId); // delete BEFORE resume
+        if (participant.serverDeafened) continue;
+        consumer
+          .resume()
+          .catch((err) => logger.warn('last-N drain resume failed', { consumerId, error: err }));
+      }
+    }
   }
 
   /**
@@ -1653,6 +1697,16 @@ export class RoomManager {
   private removeMicProducer(room: Room, producerId: string): void {
     room.activeSpeakers.remove(producerId);
     room.micProducerIds.delete(producerId);
+    // #1742: a publisher leaving can drop the room from over-cap back to <= N.
+    // Drive the resume-on-shrink drain from the leave EVENT here — this is the
+    // convergence point every producer-removal flow routes through — rather than
+    // waiting for the next AudioLevelObserver tick. Otherwise a consumer that was
+    // last-N-paused while the room was over-cap stays paused until the next
+    // 'volumes'/'silence' event (which may not fire if the room has gone quiet).
+    // The guard mirrors applyLastNDelta: drain only once the room fits under N.
+    if (room.micProducerIds.size <= resolveAudioLastN(room)) {
+      this.drainLastNPaused(room);
+    }
   }
 
   private countProducersBySource(room: Room, source: MediaSource): number {

@@ -300,19 +300,12 @@ describe('RoomManager', () => {
 
     it('caps the SEND transport with the FREE tier maxManualBitrateBps (5 Mbps)', async () => {
       // u-free joins with the free entitlement (5_000_000 bps).
-      await manager.joinRoom(
-        'room-1',
-        'u-free',
-        'sock-free',
-        { username: 'free' },
-        undefined,
-        {
-          tier: 'free',
-          allowedAudioTiers: ['minimum', 'low', 'moderate', 'standard'],
-          minPtimeMs: 20,
-          maxManualBitrateBps: 5_000_000,
-        }
-      );
+      await manager.joinRoom('room-1', 'u-free', 'sock-free', { username: 'free' }, undefined, {
+        tier: 'free',
+        allowedAudioTiers: ['minimum', 'low', 'moderate', 'standard'],
+        minPtimeMs: 20,
+        maxManualBitrateBps: 5_000_000,
+      });
       const transport = createMockTransport();
       mockRouter.createWebRtcTransport.mockResolvedValueOnce(transport);
 
@@ -324,19 +317,12 @@ describe('RoomManager', () => {
     });
 
     it('caps the SEND transport with the PREMIUM tier maxManualBitrateBps (10 Mbps)', async () => {
-      await manager.joinRoom(
-        'room-1',
-        'u-prem',
-        'sock-prem',
-        { username: 'prem' },
-        undefined,
-        {
-          tier: 'premium',
-          allowedAudioTiers: ['minimum', 'low', 'moderate', 'standard', 'high', 'hifi', 'studio'],
-          minPtimeMs: 10,
-          maxManualBitrateBps: 10_000_000,
-        }
-      );
+      await manager.joinRoom('room-1', 'u-prem', 'sock-prem', { username: 'prem' }, undefined, {
+        tier: 'premium',
+        allowedAudioTiers: ['minimum', 'low', 'moderate', 'standard', 'high', 'hifi', 'studio'],
+        minPtimeMs: 10,
+        maxManualBitrateBps: 10_000_000,
+      });
       const transport = createMockTransport();
       mockRouter.createWebRtcTransport.mockResolvedValueOnce(transport);
 
@@ -346,19 +332,12 @@ describe('RoomManager', () => {
     });
 
     it('does NOT apply the per-user cap to the RECV transport (keeps the global default)', async () => {
-      await manager.joinRoom(
-        'room-1',
-        'u-free',
-        'sock-free',
-        { username: 'free' },
-        undefined,
-        {
-          tier: 'free',
-          allowedAudioTiers: ['minimum', 'low', 'moderate', 'standard'],
-          minPtimeMs: 20,
-          maxManualBitrateBps: 5_000_000,
-        }
-      );
+      await manager.joinRoom('room-1', 'u-free', 'sock-free', { username: 'free' }, undefined, {
+        tier: 'free',
+        allowedAudioTiers: ['minimum', 'low', 'moderate', 'standard'],
+        minPtimeMs: 20,
+        maxManualBitrateBps: 5_000_000,
+      });
       const transport = createMockTransport();
       mockRouter.createWebRtcTransport.mockResolvedValueOnce(transport);
 
@@ -781,19 +760,12 @@ describe('RoomManager', () => {
       mockRouter.createWebRtcTransport.mockResolvedValueOnce(freeTransport);
       await manager.createTransport('room-1', 'u-1', 'send');
 
-      await manager.joinRoom(
-        'room-1',
-        'u-prem',
-        'sock-prem',
-        { username: 'prem' },
-        undefined,
-        {
-          tier: 'premium',
-          allowedAudioTiers: ['minimum', 'low', 'moderate', 'standard', 'high', 'hifi', 'studio'],
-          minPtimeMs: 10,
-          maxManualBitrateBps: 10_000_000,
-        }
-      );
+      await manager.joinRoom('room-1', 'u-prem', 'sock-prem', { username: 'prem' }, undefined, {
+        tier: 'premium',
+        allowedAudioTiers: ['minimum', 'low', 'moderate', 'standard', 'high', 'hifi', 'studio'],
+        minPtimeMs: 10,
+        maxManualBitrateBps: 10_000_000,
+      });
       premiumTransport = createMockTransport();
       mockRouter.createWebRtcTransport.mockResolvedValueOnce(premiumTransport);
       await manager.createTransport('room-1', 'u-prem', 'send');
@@ -1782,6 +1754,19 @@ describe('resumeConsumer last-N guard (#1544)', () => {
     return room.participants.get(userId)!.consumers.get(consumerId) as any;
   }
 
+  /**
+   * #1742: last-N only ENGAGES when the room exceeds the cap. Inflate the
+   * server-authoritative mic-publisher count past N (with filler ids, so we
+   * don't stand up N real producers) so the evict/admit path genuinely
+   * pauses/resumes consumers. In a room at/under N last-N is a no-op — that path
+   * has its own dedicated suite (`audio last-N small-room no-op (#1742)`).
+   */
+  function makeRoomOverCap(room: import('../src/lib/roomManager.js').Room): void {
+    while (room.micProducerIds.size <= resolveAudioLastN(room)) {
+      room.micProducerIds.add(`filler-${room.micProducerIds.size}`);
+    }
+  }
+
   it('refuses to resume a consumer in lastNPausedConsumers (client cannot bypass the cap)', async () => {
     const { rm, room, userId } = await setupRoomWithAudioConsumer();
     room.lastNPausedConsumers.add('c-audio');
@@ -1806,11 +1791,15 @@ describe('resumeConsumer last-N guard (#1544)', () => {
     expect(consumer.resume).toHaveBeenCalledOnce();
   });
 
-  it('never pauses the PRODUCER across an admit -> evict cycle (only consumers)', async () => {
+  it('never pauses the PRODUCER across an admit -> evict cycle, only consumers (over-cap room)', async () => {
     vi.useFakeTimers();
     try {
       vi.setSystemTime(0);
       const { room, consumer } = await setupRoomWithAudioConsumer();
+      // #1742: last-N only engages over the cap; push the room over N so the
+      // evict path genuinely pauses a consumer (the invariant under test). In a
+      // room at/under N this whole cycle is a no-op — see the #1742 suite.
+      makeRoomOverCap(room);
       const observer = router._audioLevelObserver;
 
       // The mic producer's own mock — assert last-N never touches it.
@@ -1840,12 +1829,17 @@ describe('resumeConsumer last-N guard (#1544)', () => {
     }
   });
 
-  it('does NOT resume a SERVER-DEAFENED subscriber when its speaker enters top-N (no moderation bypass)', async () => {
+  it('does NOT resume a SERVER-DEAFENED subscriber when its speaker enters top-N (no moderation bypass, over-cap room)', async () => {
     const { rm, room, userId, consumer } = await setupRoomWithAudioConsumer();
+    // #1742: only meaningful over the cap, where last-N's admit path runs.
+    makeRoomOverCap(room);
+    // Simulate c-audio already last-N-paused (its speaker was out of the top-N),
+    // so the admit below genuinely reaches the resume branch the deafen blocks.
+    room.lastNPausedConsumers.add('c-audio');
     // Server-deafen u-2 (a moderation control) → all their audio consumers paused.
     await rm.serverDeafenUser(room.id, userId);
     consumer.resume.mockClear();
-    // p-mic enters the top-N — last-N would normally resume u-2's consumer.
+    // p-mic enters the top-N — last-N's admit would normally resume u-2's consumer.
     router._audioLevelObserver._emit('volumes', [{ producer: { id: 'p-mic' }, volume: -20 }]);
     await Promise.resolve();
     await Promise.resolve();
@@ -1862,6 +1856,239 @@ describe('resumeConsumer last-N guard (#1544)', () => {
     room.lastNPausedConsumers.add('c-audio');
     rm.closeConsumer(room.id, userId, 'c-audio');
     expect(room.lastNPausedConsumers.has('c-audio')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Audio last-N small-room no-op regression (#1742)
+//
+// Regression for the voice-crackle report: in a room whose mic-publisher count
+// is at or under the forwarded-speaker cap (N), last-N MUST be a structural
+// no-op — no mic consumer is ever paused, and a fresh consumer is never seeded
+// last-N-paused. The cap is a DoS guardrail for rooms LARGER than N; applying it
+// to a room that already fits under N is pure regression: the evict-on-silence
+// pause/resume churn loses the leading frames of each new utterance during the
+// resume gap → Opus PLC crackle (the user-reported symptom).
+// ---------------------------------------------------------------------------
+
+describe('audio last-N small-room no-op (#1742)', () => {
+  /**
+   * Build a small room: u-1 publishes mic audio 'p-mic'; u-2 subscribes with a
+   * deterministic consumer id 'c-audio'. micProducerIds.size === 1, well under
+   * the free cap N=8 — last-N should never engage. Mirrors the #1544 guard
+   * suite's scaffolding.
+   */
+  async function setupSmallRoom(opts: { overCap?: boolean } = {}): Promise<{
+    rm: RoomManager;
+    room: import('../src/lib/roomManager.js').Room;
+    router: ReturnType<typeof createMockRouter>;
+    consumer: ReturnType<typeof createMockConsumer>;
+  }> {
+    const router = createMockRouter();
+    const rm = new RoomManager(createMockMediasoupService(router) as any);
+
+    // u-1 publishes mic audio.
+    await rm.joinRoom('room-1', 'u-1', 'sock-1', { username: 'alice' });
+    const sendTransport = createMockTransport();
+    router.createWebRtcTransport.mockResolvedValueOnce(sendTransport);
+    await rm.createTransport('room-1', 'u-1', 'send');
+    const producer = createMockProducer({ kind: 'audio', id: 'p-mic' });
+    sendTransport.produce.mockResolvedValueOnce(producer);
+    const producerInfo = await rm.produce(
+      'room-1',
+      'u-1',
+      sendTransport.id,
+      'audio',
+      createRtpParameters() as any,
+      'mic'
+    );
+
+    const room = rm.getRoom('room-1')!;
+    // #1742: optionally simulate an over-cap room BEFORE the consume so the
+    // consume-time last-N seed exercises its over-cap branch.
+    if (opts.overCap) {
+      while (room.micProducerIds.size <= resolveAudioLastN(room)) {
+        room.micProducerIds.add(`filler-${room.micProducerIds.size}`);
+      }
+    }
+
+    // u-2 subscribes to u-1's mic with a deterministic consumer id.
+    await rm.joinRoom(
+      'room-1',
+      'u-2',
+      'sock-2',
+      { username: 'bob' },
+      createRtpCapabilities() as any
+    );
+    const recvTransport = createMockTransport();
+    const consumer = createMockConsumer({
+      id: 'c-audio',
+      producerId: producerInfo.producerId,
+      kind: 'audio',
+    });
+    recvTransport.consume.mockResolvedValue(consumer);
+    router.createWebRtcTransport.mockResolvedValueOnce(recvTransport);
+    await rm.createTransport('room-1', 'u-2', 'recv');
+    await rm.consume('room-1', 'u-2', producerInfo.producerId);
+
+    return { rm, room, router, consumer };
+  }
+
+  it('does not seed a fresh mic consumer as last-N-paused when the room is at/under the cap', async () => {
+    const { room } = await setupSmallRoom();
+    // micProducerIds (1) <= resolveAudioLastN (8): everyone fits under the cap,
+    // so a fresh joiner's consumer must NOT start last-N-paused (it must hear
+    // from the first frame). Pre-fix the consume-time seed pauses it because the
+    // producer is not yet in the (empty) top-N.
+    expect(room.micProducerIds.size).toBeLessThanOrEqual(resolveAudioLastN(room));
+    expect(room.lastNPausedConsumers.has('c-audio')).toBe(false);
+  });
+
+  it('never pauses a mic consumer across a speak/silence cycle when the room is at/under the cap', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.setSystemTime(0);
+      const { room, router, consumer } = await setupSmallRoom();
+      const observer = router._audioLevelObserver;
+
+      // Two full speak → (past-hold) silence → speak cycles, mirroring real
+      // back-and-forth conversation in a 2-person call. Each silence advances
+      // past the 2500ms hysteresis hold so ActiveSpeakerSet evicts the speaker.
+      for (let cycle = 0; cycle < 2; cycle++) {
+        observer._emit('volumes', [{ producer: { id: 'p-mic' }, volume: -20 }]);
+        await Promise.resolve();
+        await Promise.resolve();
+
+        vi.setSystemTime(2500 * (cycle + 1) + (cycle + 1));
+        observer._emit('silence');
+        await Promise.resolve();
+        await Promise.resolve();
+      }
+
+      // A room that already fits under N must never pause a consumer. Pre-fix the
+      // evict-on-silence path pauses c-audio on every conversational silence
+      // boundary → the reported per-utterance crackle.
+      expect(consumer.pause).not.toHaveBeenCalled();
+      expect(room.lastNPausedConsumers.has('c-audio')).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('resumes a last-N-paused consumer once the room shrinks back to/under the cap (no stuck-silent participant)', async () => {
+    const { room, router, consumer } = await setupSmallRoom();
+    const observer = router._audioLevelObserver;
+
+    // Simulate the consumer having been last-N-paused during a prior over-cap
+    // window: push the count over N and mark/pause the consumer as the over-cap
+    // path would have.
+    while (room.micProducerIds.size <= resolveAudioLastN(room)) {
+      room.micProducerIds.add(`filler-${room.micProducerIds.size}`);
+    }
+    room.lastNPausedConsumers.add('c-audio');
+    await consumer.pause();
+    consumer.resume.mockClear();
+
+    // A second consumer that is NOT last-N-paused (e.g. an already-active mic or
+    // a screen-audio consumer): the drain must leave it untouched — it only
+    // resumes consumers it itself paused for last-N.
+    const otherConsumer = createMockConsumer({
+      id: 'c-other',
+      producerId: 'p-other',
+      kind: 'audio',
+    });
+    room.participants.get('u-2')!.consumers.set('c-other', otherConsumer as any);
+
+    // The room shrinks back to <= N (publishers left).
+    room.micProducerIds.clear();
+    room.micProducerIds.add('p-mic');
+    expect(room.micProducerIds.size).toBeLessThanOrEqual(resolveAudioLastN(room));
+
+    // Observer-tick drain path (backstop): an AudioLevelObserver tick drives
+    // applyLastNDelta → the small-room no-op branch, which drains the paused set
+    // and resumes the consumer. (The producer-close path — removeMicProducer —
+    // is the primary, event-driven trigger, covered by its own test below.)
+    observer._emit('silence');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(room.lastNPausedConsumers.has('c-audio')).toBe(false);
+    expect(consumer.resume).toHaveBeenCalled();
+    // The non-paused consumer is not touched by the drain.
+    expect(otherConsumer.resume).not.toHaveBeenCalled();
+  });
+
+  it('still seeds a fresh mic consumer last-N-paused when the room is over the cap (#1544/#1632 enforcement preserved)', async () => {
+    const { room } = await setupSmallRoom({ overCap: true });
+    expect(room.micProducerIds.size).toBeGreaterThan(resolveAudioLastN(room));
+    // Over the cap + the producer not yet in the (empty) top-N → the consumer is
+    // seeded last-N-paused so the client's unconditional resume is refused until
+    // the speaker enters the top-N (the egress cap still holds for large rooms).
+    expect(room.lastNPausedConsumers.has('c-audio')).toBe(true);
+  });
+
+  it('drains on shrink but does NOT resume a SERVER-DEAFENED subscriber (moderation not bypassed)', async () => {
+    const { rm, room, router, consumer } = await setupSmallRoom();
+    const observer = router._audioLevelObserver;
+
+    // Over-cap window: the consumer is last-N-paused.
+    while (room.micProducerIds.size <= resolveAudioLastN(room)) {
+      room.micProducerIds.add(`filler-${room.micProducerIds.size}`);
+    }
+    room.lastNPausedConsumers.add('c-audio');
+    // Moderation: server-deafen the subscriber.
+    await rm.serverDeafenUser(room.id, 'u-2');
+    consumer.resume.mockClear();
+
+    // Room shrinks back to <= N → the drain path runs on the next tick.
+    room.micProducerIds.clear();
+    room.micProducerIds.add('p-mic');
+    observer._emit('silence');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    // The consumer is cleared from the last-N set (last-N no longer owns it)…
+    expect(room.lastNPausedConsumers.has('c-audio')).toBe(false);
+    // …but it is NOT resumed — the deafen pause must hold (moderation control).
+    expect(consumer.resume).not.toHaveBeenCalled();
+  });
+
+  it('resumes a last-N-paused consumer when a publisher leaves and the room drops to <= N (event-driven, no observer tick)', async () => {
+    const { rm, room, router, consumer } = await setupSmallRoom();
+
+    // Add a second real publisher u-3 (p-extra) so closing it shrinks the room
+    // without tearing down c-audio (which subscribes to u-1's p-mic).
+    await rm.joinRoom('room-1', 'u-3', 'sock-3', { username: 'carol' });
+    const sendTransport3 = createMockTransport();
+    router.createWebRtcTransport.mockResolvedValueOnce(sendTransport3);
+    await rm.createTransport('room-1', 'u-3', 'send');
+    const producer3 = createMockProducer({ kind: 'audio', id: 'p-extra' });
+    sendTransport3.produce.mockResolvedValueOnce(producer3);
+    await rm.produce(
+      'room-1',
+      'u-3',
+      sendTransport3.id,
+      'audio',
+      createRtpParameters() as any,
+      'mic'
+    );
+
+    // Push the room over the cap and mark/pause c-audio as the over-cap path would.
+    while (room.micProducerIds.size <= resolveAudioLastN(room)) {
+      room.micProducerIds.add(`filler-${room.micProducerIds.size}`);
+    }
+    room.lastNPausedConsumers.add('c-audio');
+    await consumer.pause();
+    consumer.resume.mockClear();
+
+    // A DIFFERENT publisher leaves → closeProducer routes through removeMicProducer,
+    // which drops the room to <= N. The drain must fire from THIS leave event with
+    // NO AudioLevelObserver tick (the #1742 event-driven shrink-recovery path).
+    await rm.closeProducer('room-1', 'u-3', 'p-extra');
+
+    expect(room.micProducerIds.size).toBeLessThanOrEqual(resolveAudioLastN(room));
+    expect(room.lastNPausedConsumers.has('c-audio')).toBe(false);
+    expect(consumer.resume).toHaveBeenCalled();
   });
 });
 
