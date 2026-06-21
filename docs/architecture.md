@@ -269,7 +269,7 @@ erDiagram
         VARCHAR display_name
     }
     user_keys {
-        UUID user_id PK_FK
+        UUID user_id PK, FK
         BYTEA wrapped_private_key
         BYTEA key_derivation_salt
         INTEGER key_version
@@ -293,8 +293,8 @@ erDiagram
         UUID linked_voice_channel_id FK
     }
     server_members {
-        UUID server_id PK_FK
-        UUID user_id PK_FK
+        UUID server_id PK, FK
+        UUID user_id PK, FK
     }
     roles {
         UUID id PK
@@ -344,8 +344,8 @@ erDiagram
         UUID created_by FK
     }
     dm_participants {
-        UUID conversation_id PK_FK
-        UUID user_id PK_FK
+        UUID conversation_id PK, FK
+        UUID user_id PK, FK
         VARCHAR role "admin or member"
     }
     dm_messages {
@@ -589,7 +589,7 @@ sequenceDiagram
     A->>A: Generate CSK' at epoch N+1
     A->>S: Distribute wrapped CSK' to remaining members
     A->>S: Record key_revocations {revoked_epoch: N, successor_epoch: N+1}
-    Note over S: New messages use epoch N+1;<br/>removed member cannot derive CSK'
+    Note over S: New messages use epoch N+1<br/>removed member cannot derive CSK'
 ```
 
 Server channels (`channel_keys` / `key_revocations`) and DMs (`dm_channel_keys` / `dm_key_revocations`) use parallel epoch ledgers. The `CHECK(successor_epoch > revoked_epoch)` constraint is present on `dm_key_revocations` (migration 000041); on `key_revocations` the constraint was added only in a re-declaration (000035) that is a no-op once the table exists from 000028, so it may be absent on already-migrated databases.
@@ -676,7 +676,7 @@ sequenceDiagram
     S->>S: Create pending_key_requests rows
     S-->>A: WS key_needed {server_id, user_id, channel_ids}
     A->>S: GET /api/v1/users/{B}/public-key
-    A->>A: Unwrap CSK with own private key; re-wrap with B's public key
+    A->>A: Unwrap CSK with own private key, re-wrap with B's public key
     A->>S: POST /api/v1/channels/{id}/keys {user_id: B, wrapped_key}
     S-->>B: WS key_delivered {channel_id}
 
