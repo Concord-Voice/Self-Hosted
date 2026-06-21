@@ -1207,6 +1207,18 @@ export const SavedGifsUpdatedSchema = z.object({
   }),
 });
 
+/**
+ * `friend_organization_updated` — same shape as saved_gifs_updated; trigger to re-fetch
+ * the encrypted friend-organization (categories) blob (#324). Server emitter shares the
+ * common broadcast path with `broadcastType = "friend_organization_updated"`.
+ */
+export const FriendOrganizationUpdatedSchema = z.object({
+  type: z.literal('friend_organization_updated'),
+  data: z.object({
+    version: z.number().int().positive(),
+  }),
+});
+
 // ──────────── Entitlements (1) — #1297 ─────────────────
 
 /**
@@ -1386,9 +1398,10 @@ export const WebSocketEventSchema = z.discriminatedUnion('type', [
   KeyRevocationSchema,
   KeyDeliveredSchema,
 
-  // Preferences sync (2)
+  // Preferences sync (3)
   PreferencesUpdatedSchema,
   SavedGifsUpdatedSchema,
+  FriendOrganizationUpdatedSchema,
 
   // Entitlements (1)
   EntitlementsChangedSchema,
@@ -1488,6 +1501,9 @@ export type KeyDeliveredPayload = z.infer<typeof KeyDeliveredSchema>['data'];
 // Preferences sync
 export type PreferencesUpdatedPayload = z.infer<typeof PreferencesUpdatedSchema>['data'];
 export type SavedGifsUpdatedPayload = z.infer<typeof SavedGifsUpdatedSchema>['data'];
+export type FriendOrganizationUpdatedPayload = z.infer<
+  typeof FriendOrganizationUpdatedSchema
+>['data'];
 
 // Entitlements
 export type EntitlementsChangedPayload = z.infer<typeof EntitlementsChangedSchema>['data'];

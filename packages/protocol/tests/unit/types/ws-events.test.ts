@@ -72,6 +72,7 @@ import {
   // Preferences sync (2)
   PreferencesUpdatedSchema,
   SavedGifsUpdatedSchema,
+  FriendOrganizationUpdatedSchema,
   // System + envelope (5)
   SubscribedSchema,
   ErrorSchema,
@@ -778,6 +779,14 @@ describe('ws-events schemas — happy path (one per event)', () => {
     expect(result.success).toBe(true);
   });
 
+  it('FriendOrganizationUpdatedSchema accepts a canonical envelope', () => {
+    const result = FriendOrganizationUpdatedSchema.safeParse({
+      type: 'friend_organization_updated',
+      data: { version: 1 },
+    });
+    expect(result.success).toBe(true);
+  });
+
   // ──────────── System + envelope (5) ──────────────────────────────────
 
   it('SubscribedSchema accepts a canonical subscribe-ack envelope', () => {
@@ -1007,6 +1016,14 @@ describe('ws-events schemas — rejection cases', () => {
   it('PreferencesUpdatedSchema rejects version=0 (must be positive)', () => {
     const result = PreferencesUpdatedSchema.safeParse({
       type: 'preferences_updated',
+      data: { version: 0 },
+    });
+    expect(result.success).toBe(false);
+  });
+
+  it('FriendOrganizationUpdatedSchema rejects version=0 (must be positive)', () => {
+    const result = FriendOrganizationUpdatedSchema.safeParse({
+      type: 'friend_organization_updated',
       data: { version: 0 },
     });
     expect(result.success).toBe(false);

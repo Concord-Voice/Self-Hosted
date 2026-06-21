@@ -10902,6 +10902,78 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /users/me/friend-organization:
+    get:
+      tags:
+      - Users
+      summary: Get friend organization
+      operationId: getFriendOrganization
+      description: 'Retrieve the client-encrypted friend-organization blob (categories,
+        assignments, and section order) for cross-device sync. Zero-knowledge: the
+        server stores only opaque ciphertext.
+
+        Rate limit: 30 requests per minute (user-based).
+
+        '
+      security:
+      - BearerAuth: []
+      responses:
+        '200':
+          description: Friend organization blob (null if not set)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  friend_organization:
+                    nullable: true
+                    type: object
+                    properties:
+                      encrypted_data:
+                        type: string
+                        description: Base64-encoded AES-256-GCM ciphertext
+                      version:
+                        type: integer
+                      updated_at:
+                        type: string
+                        format: date-time
+        '429':
+          $ref: '#/components/responses/RateLimited'
+    put:
+      tags:
+      - Users
+      summary: Update friend organization
+      operationId: updateFriendOrganization
+      description: 'Store the client-encrypted friend-organization blob (base64, max
+        64KB). Broadcasts `friend_organization_updated` to the user''s other connected
+        clients.
+
+        Rate limit: 10 requests per minute (user-based).
+
+        '
+      security:
+      - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/EncryptedBlobRequest'
+      responses:
+        '200':
+          description: Friend organization blob stored
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  version:
+                    type: integer
+                    description: New blob version after the upsert
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '429':
+          $ref: '#/components/responses/RateLimited'
   /users/me/preferences:
     get:
       tags:

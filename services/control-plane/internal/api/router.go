@@ -811,6 +811,16 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 					usersHandler.UpdateSavedGifs,
 				)
 
+				// Encrypted friend organization (categories, zero-knowledge, cross-device sync) — #324
+				userRoutes.GET("/me/friend-organization",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					usersHandler.GetFriendOrganization,
+				)
+				userRoutes.PUT("/me/friend-organization",
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+					usersHandler.UpdateFriendOrganization,
+				)
+
 				// Search users by username/display name
 				userRoutes.GET("/search",
 					middleware.RateLimitByUser(redis, 30, 1*time.Minute),

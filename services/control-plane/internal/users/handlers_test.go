@@ -17,6 +17,7 @@ const (
 	urlUsersMeKeys      = "/api/v1/users/me/keys"
 	urlUsersMePassword  = "/api/v1/users/me/password" //nolint:gosec // G101 false positive: URL path constant, not a credential
 	urlUsersMeSavedGifs = "/api/v1/users/me/saved-gifs"
+	urlUsersMeFriendOrg = "/api/v1/users/me/friend-organization"
 
 	keyUsername          = "username"
 	keyWrappedPrivateKey = "wrapped_private_key"
@@ -543,6 +544,49 @@ func TestUpdateSavedGifsUnauthorized(t *testing.T) {
 		"encrypted_data": "dGVzdA==",
 	}, nil)
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
+}
+
+// --- Friend Organization (encrypted blob, #324) ---
+
+func TestUpdateFriendOrganizationSuccess(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "friendorgok")
+	w := ts.DoRequest("PUT", urlUsersMeFriendOrg, map[string]interface{}{
+		"encrypted_data": "dGVzdCBmcmllbmQgb3Jn",
+	}, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, float64(1), body["version"])
+}
+
+func TestUpdateFriendOrganizationInvalidBase64(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "friendorgbad64")
+	w := ts.DoRequest("PUT", urlUsersMeFriendOrg, map[string]interface{}{
+		"encrypted_data": "not-valid-base64!!!",
+	}, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestUpdateFriendOrganizationOversize(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "friendorgbig")
+	big := base64.StdEncoding.EncodeToString(make([]byte, 50000)) // >64KB base64
+	w := ts.DoRequest("PUT", urlUsersMeFriendOrg, map[string]interface{}{
+		"encrypted_data": big,
+	}, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestGetFriendOrganizationEmpty(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "friendorgempty")
+	w := ts.DoRequest("GET", urlUsersMeFriendOrg, nil, testhelpers.AuthHeaders(user.AccessToken))
+	assert.Equal(t, http.StatusOK, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Nil(t, body["friend_organization"]) // sql.ErrNoRows → {"friend_organization": nil}
 }
 
 // --- SSO settings endpoints (Task 12 / issue #270) ---

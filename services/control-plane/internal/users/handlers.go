@@ -1124,6 +1124,13 @@ var (
 		logLabel:      "saved gifs",
 		broadcastType: "saved_gifs_updated",
 	}
+	friendOrgBlobConfig = e2eeBlobConfig{
+		selectSQL:     `SELECT encrypted_data, version, updated_at FROM friend_organization WHERE user_id = $1`,
+		upsertSQL:     `INSERT INTO friend_organization (user_id, encrypted_data, version, updated_at) VALUES ($1, $2, 1, NOW()) ON CONFLICT (user_id) DO UPDATE SET encrypted_data = $2, version = friend_organization.version + 1, updated_at = NOW() RETURNING version`,
+		jsonKey:       "friend_organization",
+		logLabel:      "friend organization",
+		broadcastType: "friend_organization_updated",
+	}
 )
 
 // GetPreferences returns the current user's encrypted preferences blob.
@@ -1144,6 +1151,16 @@ func (h *Handler) GetSavedGifs(c *gin.Context) {
 // UpdateSavedGifs upserts the current user's encrypted saved GIFs blob.
 func (h *Handler) UpdateSavedGifs(c *gin.Context) {
 	h.upsertE2EEBlob(c, savedGifsBlobConfig)
+}
+
+// GetFriendOrganization returns the current user's encrypted friend-organization blob.
+func (h *Handler) GetFriendOrganization(c *gin.Context) {
+	h.getE2EEBlob(c, friendOrgBlobConfig)
+}
+
+// UpdateFriendOrganization upserts the current user's encrypted friend-organization blob.
+func (h *Handler) UpdateFriendOrganization(c *gin.Context) {
+	h.upsertE2EEBlob(c, friendOrgBlobConfig)
 }
 
 // --- Privacy Settings ---
