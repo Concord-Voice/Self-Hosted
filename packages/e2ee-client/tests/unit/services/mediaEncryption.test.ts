@@ -1,16 +1,18 @@
 // @vitest-environment node
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 // MediaEncryption is the default export-less class — import directly
 let MediaEncryption: typeof import('@/renderer/services/mediaEncryption').MediaEncryption;
 let deriveFrameKey: typeof import('@/renderer/services/mediaEncryption').deriveFrameKey;
 let ratchetKey: typeof import('@/renderer/services/mediaEncryption').ratchetKey;
+let setMediaDiagEnabled: typeof import('@/renderer/services/mediaEncryption').setMediaDiagEnabled;
 
 beforeEach(async () => {
   const mod = await import('@/renderer/services/mediaEncryption');
   MediaEncryption = mod.MediaEncryption;
   deriveFrameKey = mod.deriveFrameKey;
   ratchetKey = mod.ratchetKey;
+  setMediaDiagEnabled = mod.setMediaDiagEnabled;
 });
 
 /** Helper: generate a test AES-256 key (simulates a channel CSK) */
@@ -33,6 +35,21 @@ function fakeVideoFrame(size: number): RTCEncodedVideoFrame {
   const view = new Uint8Array(buf);
   for (let i = 0; i < size; i++) view[i] = (i + 0x10) & 0xff;
   return { data: buf, type: 'delta' } as unknown as RTCEncodedVideoFrame;
+}
+
+/**
+ * #1742 DIAG test helper: a frame carrying a valid magic trailer (0xDE 0xAD) but
+ * a chosen headerBytes value, to drive decryptFrame's magic-present passthrough
+ * branches (bad-header / small-cipher) without real encryption.
+ */
+function makeFrameWithTrailer(size: number, headerBytes: number): RTCEncodedAudioFrame {
+  const buf = new ArrayBuffer(size);
+  const v = new Uint8Array(buf);
+  for (let i = 0; i < size; i++) v[i] = i & 0xff;
+  v[size - 16] = headerBytes; // trailer headerBytes field
+  v[size - 2] = 0xde; // magic
+  v[size - 1] = 0xad;
+  return { data: buf } as unknown as RTCEncodedAudioFrame;
 }
 
 describe('MediaEncryption', () => {
@@ -512,6 +529,73 @@ describe('MediaEncryption', () => {
       // Should not throw — falls back to addDecryptKey with epoch 0
       await enc.addDecryptKeyAtEpoch(csk, 'sender', 101);
       expect(enc.getCurrentKeyId()).toBeGreaterThanOrEqual(0);
+    });
+  });
+
+  // #1742 DIAGNOSTIC instrumentation (temporary — remove with the instrumentation)
+  describe('#1742 diagnostics (opt-in instrumentation)', () => {
+    afterEach(() => setMediaDiagEnabled(false)); // never leak the flag across tests
+
+    it('is inert when disabled — emits no E2EE-DIAG output', async () => {
+      setMediaDiagEnabled(false);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const csk = await generateTestCSK();
+      const sender = new MediaEncryption();
+      await sender.init(csk, 'u-1');
+      await sender.encryptFrame(fakeAudioFrame(2)); // tiny frame would log if enabled
+      const receiver = new MediaEncryption();
+      await receiver.addDecryptKey(csk, 'u-1');
+      await receiver.decryptFrame(fakeAudioFrame(10), 'u-1'); // passthrough would log if enabled
+      const diagCalls = warn.mock.calls.filter((c) => String(c[0]).includes('E2EE-DIAG'));
+      expect(diagCalls).toHaveLength(0);
+      warn.mockRestore();
+    });
+
+    it('logs encode sizes + every decrypt passthrough branch when enabled', async () => {
+      setMediaDiagEnabled(true);
+      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
+      const csk = await generateTestCSK();
+      const sender = new MediaEncryption();
+      const receiver = new MediaEncryption();
+      await sender.init(csk, 'u-1');
+      await receiver.addDecryptKey(csk, 'u-1');
+
+      // encrypt: tiny (DTX-like) + normal → covers the encrypt diag block + summary
+      await sender.encryptFrame(fakeAudioFrame(2));
+      const roundTrip = fakeAudioFrame(80);
+      await sender.encryptFrame(roundTrip);
+      await receiver.decryptFrame(roundTrip, 'u-1'); // decTotal/decOk path
+
+      // all four silent passthrough branches:
+      await receiver.decryptFrame(fakeAudioFrame(10), 'u-1'); // too-small (<33)
+      await receiver.decryptFrame(fakeAudioFrame(50), 'u-1'); // no-magic
+      await receiver.decryptFrame(makeFrameWithTrailer(40, 99), 'u-1'); // bad-header (99 > 10)
+      await receiver.decryptFrame(makeFrameWithTrailer(40, 10), 'u-1'); // small-cipher (14 < 16)
+
+      const diagCalls = warn.mock.calls.filter((c) => String(c[0]).includes('E2EE-DIAG'));
+      // Each passthrough branch must increment its OWN distinct counter — this is
+      // the per-branch observability the 5 s summary surfaces, and we are about
+      // to depend on it to localize #1742. The sampled log LINE is rate-limited
+      // (only n===1 or every 250th passthrough), so assert the distinct counters
+      // rather than the sampled lines — a regression that silences 3 of the 4
+      // branches must fail this test, not pass it (Gitar, PR #1776).
+      const diag = (
+        receiver as unknown as {
+          diag: {
+            ptTooSmall: number;
+            ptNoMagic: number;
+            ptBadHeader: number;
+            ptSmallCipher: number;
+          };
+        }
+      ).diag;
+      expect(diag.ptTooSmall).toBe(1);
+      expect(diag.ptNoMagic).toBe(1);
+      expect(diag.ptBadHeader).toBe(1);
+      expect(diag.ptSmallCipher).toBe(1);
+      // …and the rate-limited sampler still emitted at least the first line.
+      expect(diagCalls.length).toBeGreaterThan(0);
+      warn.mockRestore();
     });
   });
 });

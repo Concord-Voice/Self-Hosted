@@ -9,7 +9,7 @@
  * triggers an `rtctransform` event here with { readable, writable } streams.
  */
 
-import { MediaEncryption } from '../services/mediaEncryption';
+import { MediaEncryption, setMediaDiagEnabled } from '../services/mediaEncryption';
 import type { E2EEWorkerMessage, E2EEMainMessage, E2EETransformOptions } from './e2eeProtocol';
 
 const encryption = new MediaEncryption();
@@ -76,6 +76,14 @@ self.onmessage = (event: MessageEvent<E2EEWorkerMessage>) => {
             error: err instanceof Error ? err.message : String(err),
           });
         });
+      break;
+
+    case 'setDiag':
+      // #1742 DIAG (temporary): enable this worker instance's media-frame
+      // diagnostics. The flag is forwarded from the main thread because the
+      // worker cannot read localStorage. Remove with the instrumentation.
+      setMediaDiagEnabled(msg.enabled);
+      log('debug', 'E2EE Worker: media diag set', { enabled: msg.enabled });
       break;
 
     case 'destroy':
