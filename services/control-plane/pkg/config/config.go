@@ -228,6 +228,21 @@ type Config struct {
 	// leakage via %+v dumps anywhere in the codebase. Per the security
 	// review on PR #1547.
 	GitHubFeedback GitHubFeedbackConfig
+
+	// RedemptionAdminToken gates the admin code-generation HTTP endpoint
+	// (POST /api/v1/admin/redemption/codes, #1303). It is a config-provisioned
+	// shared secret — the INTERIM issuer-authz primitive, because no
+	// platform-admin RBAC role exists in the codebase (Role is per-server only:
+	// server_members.role ∈ {owner,admin,member}). The handler compares the
+	// X-Admin-Token header against this value with crypto/subtle.
+	// ConstantTimeCompare. Empty DISABLES the HTTP generation endpoint (503) —
+	// a safe default for dev / self-hosted; the CLI issuer path (direct DB
+	// access) is unaffected. validate() fatal-exits ONLY when the token is SET
+	// but weak (<32 chars); an UNSET token is allowed (incl. in production — it
+	// just disables the HTTP endpoint, CLI issuance still works). Never logged.
+	// FLAGGED for review: replace with a real platform-admin role + portal
+	// (deferred follow-on epic, spec §10). #nosec G117 -- config field name.
+	RedemptionAdminToken string // #nosec G117 -- config field name, secret loaded from env
 }
 
 // Load reads configuration from environment variables
@@ -276,6 +291,11 @@ func Load() (*Config, error) {
 			Token: strings.TrimSpace(getEnv("FEEDBACK_PAT", "")), // #nosec G101 -- env var name, not a secret
 			Repo:  strings.TrimSpace(getEnv("FEEDBACK_REPO", "")),
 		},
+		// Redemption issuer-authz shared secret (#1303). TrimSpace defends the
+		// common trailing-newline secret-store artifact (a stray byte would make
+		// the constant-time compare always fail). Empty disables the HTTP gen
+		// endpoint; production guard enforces it when generation is enabled.
+		RedemptionAdminToken:     strings.TrimSpace(getEnv("REDEMPTION_ADMIN_TOKEN", "")), // #nosec G101 -- env var name, not a secret
 		RequireClientAttestation: getEnv("REQUIRE_CLIENT_ATTESTATION", "false") == "true",
 		AttestationTokenTTL:      parseAttestationTokenTTL(getEnv("ATTESTATION_TOKEN_TTL", "2h")),
 		AttestationPruneInterval: parseAttestationPruneInterval(getEnv("ATTESTATION_PRUNE_INTERVAL", "6h")),
@@ -487,6 +507,13 @@ func (c *Config) validate() error {
 		// so this only fires for non-empty-but-malformed values.
 		{c.GitHubFeedback.Repo != "" && !feedbackRepoHasValidShape(c.GitHubFeedback.Repo),
 			"FEEDBACK_REPO must be a valid 'owner/repo' slug (exactly one '/', both segments non-empty, no whitespace). Example: 'Concord-Voice/Concord-Voice-Feedback'."},
+		// #1303 — redemption admin token. An UNSET token is allowed in
+		// production (it simply disables the HTTP code-generation endpoint;
+		// codes can still be issued via the CLI). But a SET-yet-weak token is a
+		// foot-gun on a privileged paid-entitlement-minting surface, so we
+		// require ≥32 chars when present. Generate with: openssl rand -hex 32.
+		{c.RedemptionAdminToken != "" && len(c.RedemptionAdminToken) < 32,
+			"REDEMPTION_ADMIN_TOKEN must be ≥32 chars when set (it gates the admin code-generation endpoint). Generate with: openssl rand -hex 32. Leave it unset to disable the HTTP generation endpoint (CLI issuance still works)."},
 	}
 
 	for _, g := range guards {

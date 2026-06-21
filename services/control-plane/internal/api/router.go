@@ -244,6 +244,15 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	// (NOT borrowed from auth.Handler — internal/auth is a protected path).
 	entitlementsHandler := entitlements.NewHTTPHandler(db, redis, log)
 
+	// Redemption engine + issuer (#1303). The first LIVE caller of the
+	// entitlements.OnTierChange convergence point: a premium code grant
+	// invalidates the user's tier cache and pushes entitlements_changed via the
+	// EntitlementNotifier (built here from the hub + the shared entCache). The
+	// admin generation endpoint is gated by REDEMPTION_ADMIN_TOKEN; empty
+	// disables it (503).
+	redemptionEntNotifier := NewEntitlementNotifier(hub, log)
+	redemptionHandler := buildRedemptionHandler(db, entCache, redemptionEntNotifier, cfg, log)
+
 	// Start NATS voice event subscriber
 	if natsClient != nil {
 		voiceSub := voice.NewNATSSubscriber(db, log, hub, natsClient, rbacResolver)
@@ -593,6 +602,37 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				feedback.GlobalRateLimit(redis),
 				feedbackHandler.Submit,
 			)
+
+			// Redemption (#1303). POST /api/v1/redeem — generic code redemption
+			// for the authenticated user. Two rate-limit layers bound abuse +
+			// enumeration: per-user (10/min) AND per-IP (20/min). The per-IP
+			// layer caps a single host enumerating across many accounts; the
+			// 130-bit code entropy makes guessing infeasible even unthrottled,
+			// so these are anti-abuse, not the primary defense. Failed attempts
+			// are logged PII-safe by the handler (outcome category + sanitized
+			// user_id only — never the code value/hash).
+			protected.POST("/redeem",
+				middleware.RateLimitByUser(redis, 10, 1*time.Minute),
+				middleware.RateLimitByIP(redis, 20, 1*time.Minute),
+				redemptionHandler.Redeem,
+			)
+
+			// Admin code generation (#1303). POST /api/v1/admin/redemption/codes.
+			// Gated by AdminGate (X-Admin-Token shared secret, constant-time
+			// compared) BEFORE the handler runs — the INTERIM issuer-authz
+			// primitive (no platform-admin RBAC role exists; see
+			// redemption.Handler.AdminGate + the PR description's flagged gap).
+			// REDEMPTION_ADMIN_TOKEN empty → AdminGate returns 503 (endpoint
+			// disabled; CLI issuance still works). Rate-limited per-user as a
+			// belt-and-suspenders cap on the privileged surface.
+			adminRedemption := protected.Group("/admin/redemption")
+			adminRedemption.Use(redemptionHandler.AdminGate())
+			{
+				adminRedemption.POST("/codes",
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					redemptionHandler.Generate,
+				)
+			}
 
 			// MFA management routes (authenticated)
 			mfaRoutes := protected.Group("/mfa")

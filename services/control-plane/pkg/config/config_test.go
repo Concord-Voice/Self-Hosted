@@ -236,6 +236,31 @@ func TestValidateProductionPassesWithValidConfig(t *testing.T) {
 	assert.NoError(t, cfg.validate())
 }
 
+// TestValidateRedemptionAdminToken covers the #1303 issuer-authz token guard:
+// unset is allowed (endpoint disabled), a ≥32-char token is allowed, and a
+// set-but-too-short token is a fatal-exit.
+func TestValidateRedemptionAdminToken(t *testing.T) {
+	t.Run("unset is allowed (HTTP gen endpoint disabled)", func(t *testing.T) {
+		cfg := validProductionConfig()
+		cfg.RedemptionAdminToken = ""
+		assert.NoError(t, cfg.validate())
+	})
+
+	t.Run("valid 32+ char token allowed", func(t *testing.T) {
+		cfg := validProductionConfig()
+		cfg.RedemptionAdminToken = "0123456789abcdef0123456789abcdef" //nolint:gosec // 32-char test fixture // pragma: allowlist secret
+		assert.NoError(t, cfg.validate())
+	})
+
+	t.Run("short token is fatal", func(t *testing.T) {
+		cfg := validProductionConfig()
+		cfg.RedemptionAdminToken = "too-short"
+		err := cfg.validate()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "REDEMPTION_ADMIN_TOKEN")
+	})
+}
+
 func TestParseTrustedProxyCIDRs(t *testing.T) {
 	t.Run("empty input returns empty slice", func(t *testing.T) {
 		cidrs, err := parseTrustedProxyCIDRs("")
