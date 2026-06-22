@@ -161,6 +161,28 @@ type Config struct {
 	WebAuthnRPID      string   // Relying Party ID (domain, e.g. "concordvoice.chat")
 	WebAuthnRPOrigins []string // Allowed origins for WebAuthn (e.g. "https://concordvoice.chat")
 
+	// Admin console (#1688). AdminConsoleEnabled gates the entire platform-admin
+	// auth surface: when false (the default), the /admin routes are NOT mounted
+	// and the admin WebAuthn config is not required. #1688 ships the auth backend
+	// DORMANT — the console UI (#1691) and network gating (#1692/#1693) flip this
+	// on once the surface is ready, at which point validate() requires a real RP
+	// config in production. This keeps an unexposed feature from either breaking
+	// prod deploys (a hard-required var the FEEDBACK_PAT #1547 outage class) or
+	// exposing inert public auth endpoints before the console exists.
+	AdminConsoleEnabled bool
+
+	// Admin WebAuthn — the platform-admin console's DEDICATED relying party,
+	// deliberately separate from the user-facing WebAuthnRP* above so an admin
+	// hardware key and a user passkey can never cross-validate (a shared RP would
+	// let one act for the other). Non-secret: these are public RP identifiers and
+	// an AAGUID allow-list, so no String() redaction is needed. Required in
+	// production ONLY when AdminConsoleEnabled is true (validate() fatal-exits if
+	// enabled with an unset/localhost RP_ID, empty origins, OR an empty AAGUID
+	// allow-list — checkAAGUID is fail-closed, so empty would brick enrollment).
+	AdminWebAuthnRPID           string   // Admin Relying Party ID (e.g. "admin.concordvoice.chat")
+	AdminWebAuthnRPOrigins      []string // Allowed origins for the admin RP
+	AdminWebAuthnAllowedAAGUIDs []string // Allow-listed authenticator AAGUIDs (e.g. approved YubiKey models)
+
 	// Object Storage (MinIO / S3-compatible)
 	MinIOEndpoint  string // MinIO server endpoint (e.g. "minio:9000")
 	MinIOAccessKey string // MinIO access key (root user)
@@ -276,13 +298,20 @@ func Load() (*Config, error) {
 		MFAEncryptionKey:      getEnv("MFA_ENCRYPTION_KEY", devMFAEncKey),
 		WebAuthnRPID:          getEnv("WEBAUTHN_RP_ID", "localhost"),
 		WebAuthnRPOrigins:     parseOrigins(getEnv("WEBAUTHN_RP_ORIGINS", "http://localhost:3001")),
-		MinIOEndpoint:         getEnv("MINIO_ENDPOINT", ""),
-		MinIOAccessKey:        getEnv("MINIO_ACCESS_KEY", "concord"),
-		MinIOSecretKey:        getEnv("MINIO_SECRET_KEY", devMinIOSecretKey), // #nosec G101 -- env var name, not a secret
-		MinIOUseSSL:           getEnv("MINIO_USE_SSL", "false") == "true",
-		MinIOBucket:           getEnv("MINIO_BUCKET", "concord-media"),
-		UploadMaxSize:         getEnvInt64("UPLOAD_MAX_SIZE", 25*1024*1024), // 25 MB default
-		KlipyAPIKey:           getEnv("KLIPY_API_KEY", ""),
+		// Admin console (#1688) — dormant by default; the dev RP defaults point at
+		// https-localhost (the console requires Secure for the __Host- session
+		// cookie); the allowed-AAGUIDs default is empty (operator opts in to the gate).
+		AdminConsoleEnabled:         getEnv("ADMIN_CONSOLE_ENABLED", "false") == "true",
+		AdminWebAuthnRPID:           getEnv("ADMIN_WEBAUTHN_RP_ID", "localhost"),
+		AdminWebAuthnRPOrigins:      parseOrigins(getEnv("ADMIN_WEBAUTHN_RP_ORIGINS", "https://localhost:8443")),
+		AdminWebAuthnAllowedAAGUIDs: parseOrigins(getEnv("ADMIN_WEBAUTHN_ALLOWED_AAGUIDS", "")),
+		MinIOEndpoint:               getEnv("MINIO_ENDPOINT", ""),
+		MinIOAccessKey:              getEnv("MINIO_ACCESS_KEY", "concord"),
+		MinIOSecretKey:              getEnv("MINIO_SECRET_KEY", devMinIOSecretKey), // #nosec G101 -- env var name, not a secret
+		MinIOUseSSL:                 getEnv("MINIO_USE_SSL", "false") == "true",
+		MinIOBucket:                 getEnv("MINIO_BUCKET", "concord-media"),
+		UploadMaxSize:               getEnvInt64("UPLOAD_MAX_SIZE", 25*1024*1024), // 25 MB default
+		KlipyAPIKey:                 getEnv("KLIPY_API_KEY", ""),
 		GitHubFeedback: GitHubFeedbackConfig{
 			// TrimSpace both fields: a trailing newline on the PAT (the common
 			// copy-paste / secret-store artifact) corrupts the
@@ -507,6 +536,22 @@ func (c *Config) validate() error {
 		// so this only fires for non-empty-but-malformed values.
 		{c.GitHubFeedback.Repo != "" && !feedbackRepoHasValidShape(c.GitHubFeedback.Repo),
 			"FEEDBACK_REPO must be a valid 'owner/repo' slug (exactly one '/', both segments non-empty, no whitespace). Example: 'Concord-Voice/Concord-Voice-Feedback'."},
+		// #1688 — admin WebAuthn relying party. Guarded ONLY when the admin console
+		// is enabled (ADMIN_CONSOLE_ENABLED=true): #1688 ships the surface dormant,
+		// so an un-enabled console requires no admin config (avoids breaking prod
+		// deploys with a not-yet-needed var). When enabled, the console is a browser
+		// RP; an empty OR still-default-"localhost" RP ID, or an empty origin set,
+		// silently mis-scopes every admin ceremony — so both are required and the
+		// dev default must be overridden. ADMIN_WEBAUTHN_ALLOWED_AAGUIDS is ALSO
+		// required when enabled: checkAAGUID is fail-closed (an empty list rejects
+		// every authenticator), so an enabled console with no AAGUIDs would silently
+		// brick enrollment — guard it loudly at startup instead (Gitar #1703).
+		{c.AdminConsoleEnabled && (c.AdminWebAuthnRPID == "" || c.AdminWebAuthnRPID == "localhost"),
+			"ADMIN_WEBAUTHN_RP_ID must be set to a real admin host in production when ADMIN_CONSOLE_ENABLED=true (not the 'localhost' dev default). The admin console's WebAuthn relying party must not share the user-facing WEBAUTHN_RP_ID."},
+		{c.AdminConsoleEnabled && len(c.AdminWebAuthnRPOrigins) == 0,
+			"ADMIN_WEBAUTHN_RP_ORIGINS must be set in production when ADMIN_CONSOLE_ENABLED=true. Without it the admin WebAuthn ceremony rejects every origin. Example: 'https://admin.concordvoice.chat'."},
+		{c.AdminConsoleEnabled && len(c.AdminWebAuthnAllowedAAGUIDs) == 0,
+			"ADMIN_WEBAUTHN_ALLOWED_AAGUIDS must list at least one authenticator AAGUID in production when ADMIN_CONSOLE_ENABLED=true. checkAAGUID is fail-closed — an empty list rejects every enrollment, bricking the console. Configure the approved YubiKey AAGUIDs (coordinate with #558)."},
 		// #1303 — redemption admin token. An UNSET token is allowed in
 		// production (it simply disables the HTTP code-generation endpoint;
 		// codes can still be issued via the CLI). But a SET-yet-weak token is a

@@ -1813,6 +1813,12 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 		v1.GET("/ws", wsHandler.HandleWebSocket)
 	}
 
+	// Platform-admin auth surface (#1688) — mounted at the top-level `/admin`
+	// group, fully isolated from the user `/api/v1` JWT path (separate WebAuthn
+	// RP, opaque Redis sessions, append-only audit, AdminAuthRequired middleware).
+	// Host/path gating of this surface is #1692/#1693.
+	wireAdminRoutes(router, db, redis, cfg, log)
+
 	return router, hub, natsClient
 }
 

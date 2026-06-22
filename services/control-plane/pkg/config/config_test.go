@@ -223,6 +223,12 @@ func validProductionConfig() *Config { // #nosec G101 -- test fixture with fake 
 			Token: "ghp_real_production_pat", // #nosec G101 -- test fixture, not a real PAT
 			Repo:  "Concord-Voice/Concord-Voice-Feedback",
 		},
+		// #1688 — admin WebAuthn relying party. When the console is enabled,
+		// production requires RP_ID, ≥1 origin, AND a non-empty AAGUID allow-list
+		// (checkAAGUID is fail-closed; empty would brick enrollment).
+		AdminWebAuthnRPID:           "admin.concordvoice.chat",
+		AdminWebAuthnRPOrigins:      []string{"https://admin.concordvoice.chat"},
+		AdminWebAuthnAllowedAAGUIDs: []string{"ee882879-721c-4913-9775-3dfcce97072a"},
 	}
 }
 
@@ -1128,6 +1134,10 @@ func TestValidate_WarnsOnBroadRFC1918Fallback(t *testing.T) {
 			Token: "ghp_real_production_pat", // #nosec G101 -- test fixture, not a real PAT
 			Repo:  "Concord-Voice/Concord-Voice-Feedback",
 		},
+		// #1688 — admin WebAuthn production guards.
+		AdminWebAuthnRPID:           "admin.concordvoice.chat",
+		AdminWebAuthnRPOrigins:      []string{"https://admin.concordvoice.chat"},
+		AdminWebAuthnAllowedAAGUIDs: []string{"ee882879-721c-4913-9775-3dfcce97072a"},
 	}
 
 	err := cfg.validate()
