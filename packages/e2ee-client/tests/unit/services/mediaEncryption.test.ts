@@ -1,18 +1,16 @@
 // @vitest-environment node
-import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { describe, it, expect, beforeEach } from 'vitest';
 
 // MediaEncryption is the default export-less class — import directly
 let MediaEncryption: typeof import('@/renderer/services/mediaEncryption').MediaEncryption;
 let deriveFrameKey: typeof import('@/renderer/services/mediaEncryption').deriveFrameKey;
 let ratchetKey: typeof import('@/renderer/services/mediaEncryption').ratchetKey;
-let setMediaDiagEnabled: typeof import('@/renderer/services/mediaEncryption').setMediaDiagEnabled;
 
 beforeEach(async () => {
   const mod = await import('@/renderer/services/mediaEncryption');
   MediaEncryption = mod.MediaEncryption;
   deriveFrameKey = mod.deriveFrameKey;
   ratchetKey = mod.ratchetKey;
-  setMediaDiagEnabled = mod.setMediaDiagEnabled;
 });
 
 /** Helper: generate a test AES-256 key (simulates a channel CSK) */
@@ -35,21 +33,6 @@ function fakeVideoFrame(size: number): RTCEncodedVideoFrame {
   const view = new Uint8Array(buf);
   for (let i = 0; i < size; i++) view[i] = (i + 0x10) & 0xff;
   return { data: buf, type: 'delta' } as unknown as RTCEncodedVideoFrame;
-}
-
-/**
- * #1742 DIAG test helper: a frame carrying a valid magic trailer (0xDE 0xAD) but
- * a chosen headerBytes value, to drive decryptFrame's magic-present passthrough
- * branches (bad-header / small-cipher) without real encryption.
- */
-function makeFrameWithTrailer(size: number, headerBytes: number): RTCEncodedAudioFrame {
-  const buf = new ArrayBuffer(size);
-  const v = new Uint8Array(buf);
-  for (let i = 0; i < size; i++) v[i] = i & 0xff;
-  v[size - 16] = headerBytes; // trailer headerBytes field
-  v[size - 2] = 0xde; // magic
-  v[size - 1] = 0xad;
-  return { data: buf } as unknown as RTCEncodedAudioFrame;
 }
 
 describe('MediaEncryption', () => {
@@ -531,71 +514,99 @@ describe('MediaEncryption', () => {
       expect(enc.getCurrentKeyId()).toBeGreaterThanOrEqual(0);
     });
   });
+});
 
-  // #1742 DIAGNOSTIC instrumentation (temporary — remove with the instrumentation)
-  describe('#1742 diagnostics (opt-in instrumentation)', () => {
-    afterEach(() => setMediaDiagEnabled(false)); // never leak the flag across tests
+// Regression for #1742: an empty (0-byte) DTX frame used to encrypt to exactly
+// 32 bytes, which the decrypt `< 33` too-small guard misclassified as
+// unencrypted and fed to the Opus decoder undeciphered — the receiver-side
+// garble-during-silence. The fix passes empty frames through unchanged.
+describe('MediaEncryption — #1742 empty DTX frame passthrough', () => {
+  it('passes an empty (0-byte) frame through unchanged on encrypt (never the 32-byte blob)', async () => {
+    const csk = await generateTestCSK();
+    const sender = new MediaEncryption();
+    await sender.init(csk, 'sender-user-id');
 
-    it('is inert when disabled — emits no E2EE-DIAG output', async () => {
-      setMediaDiagEnabled(false);
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-      const csk = await generateTestCSK();
-      const sender = new MediaEncryption();
-      await sender.init(csk, 'u-1');
-      await sender.encryptFrame(fakeAudioFrame(2)); // tiny frame would log if enabled
-      const receiver = new MediaEncryption();
-      await receiver.addDecryptKey(csk, 'u-1');
-      await receiver.decryptFrame(fakeAudioFrame(10), 'u-1'); // passthrough would log if enabled
-      const diagCalls = warn.mock.calls.filter((c) => String(c[0]).includes('E2EE-DIAG'));
-      expect(diagCalls).toHaveLength(0);
-      warn.mockRestore();
-    });
+    const frame = fakeAudioFrame(0);
+    await sender.encryptFrame(frame);
 
-    it('logs encode sizes + every decrypt passthrough branch when enabled', async () => {
-      setMediaDiagEnabled(true);
-      const warn = vi.spyOn(console, 'warn').mockImplementation(() => undefined);
-      const csk = await generateTestCSK();
-      const sender = new MediaEncryption();
-      const receiver = new MediaEncryption();
-      await sender.init(csk, 'u-1');
-      await receiver.addDecryptKey(csk, 'u-1');
+    // Must stay 0 bytes — the pre-fix bug produced exactly 32 bytes here.
+    expect(frame.data.byteLength).toBe(0);
+  });
 
-      // encrypt: tiny (DTX-like) + normal → covers the encrypt diag block + summary
-      await sender.encryptFrame(fakeAudioFrame(2));
-      const roundTrip = fakeAudioFrame(80);
-      await sender.encryptFrame(roundTrip);
-      await receiver.decryptFrame(roundTrip, 'u-1'); // decTotal/decOk path
+  it('round-trips an empty frame as empty (decoder sees DTX silence, not garble)', async () => {
+    const csk = await generateTestCSK();
+    const sender = new MediaEncryption();
+    const receiver = new MediaEncryption();
+    await sender.init(csk, 'sender-user-id');
+    await receiver.init(csk, 'receiver-user-id');
+    await receiver.addDecryptKey(csk, 'sender-user-id');
 
-      // all four silent passthrough branches:
-      await receiver.decryptFrame(fakeAudioFrame(10), 'u-1'); // too-small (<33)
-      await receiver.decryptFrame(fakeAudioFrame(50), 'u-1'); // no-magic
-      await receiver.decryptFrame(makeFrameWithTrailer(40, 99), 'u-1'); // bad-header (99 > 10)
-      await receiver.decryptFrame(makeFrameWithTrailer(40, 10), 'u-1'); // small-cipher (14 < 16)
+    const frame = fakeAudioFrame(0);
+    await sender.encryptFrame(frame);
+    await receiver.decryptFrame(frame, 'sender-user-id');
 
-      const diagCalls = warn.mock.calls.filter((c) => String(c[0]).includes('E2EE-DIAG'));
-      // Each passthrough branch must increment its OWN distinct counter — this is
-      // the per-branch observability the 5 s summary surfaces, and we are about
-      // to depend on it to localize #1742. The sampled log LINE is rate-limited
-      // (only n===1 or every 250th passthrough), so assert the distinct counters
-      // rather than the sampled lines — a regression that silences 3 of the 4
-      // branches must fail this test, not pass it (Gitar, PR #1776).
-      const diag = (
-        receiver as unknown as {
-          diag: {
-            ptTooSmall: number;
-            ptNoMagic: number;
-            ptBadHeader: number;
-            ptSmallCipher: number;
-          };
-        }
-      ).diag;
-      expect(diag.ptTooSmall).toBe(1);
-      expect(diag.ptNoMagic).toBe(1);
-      expect(diag.ptBadHeader).toBe(1);
-      expect(diag.ptSmallCipher).toBe(1);
-      // …and the rate-limited sampler still emitted at least the first line.
-      expect(diagCalls.length).toBeGreaterThan(0);
-      warn.mockRestore();
-    });
+    expect(frame.data.byteLength).toBe(0);
+  });
+
+  it('still round-trips a 1-byte audio frame (boundary just above empty)', async () => {
+    const csk = await generateTestCSK();
+    const sender = new MediaEncryption();
+    const receiver = new MediaEncryption();
+    await sender.init(csk, 'sender-user-id');
+    await receiver.init(csk, 'receiver-user-id');
+    await receiver.addDecryptKey(csk, 'sender-user-id');
+
+    const frame = fakeAudioFrame(1);
+    const original = new Uint8Array(frame.data).slice();
+    await sender.encryptFrame(frame);
+    // 1-byte input encrypts to 33 bytes (>= the guard) — must decrypt, not pass through.
+    await receiver.decryptFrame(frame, 'sender-user-id');
+    expect(new Uint8Array(frame.data)).toEqual(original);
+  });
+
+  it('stores the ACTUAL header length in the trailer (closes the sub-header video boundary, H5)', async () => {
+    const csk = await generateTestCSK();
+    const sender = new MediaEncryption();
+    const receiver = new MediaEncryption();
+    await sender.init(csk, 'sender-user-id');
+    await receiver.init(csk, 'receiver-user-id');
+    await receiver.addDecryptKey(csk, 'sender-user-id');
+
+    // A 1-byte video frame: getUnencryptedBytes()=2 but only 1 byte exists, so
+    // the trailer must record the actual header length (1), not the static 2 —
+    // else the decrypt header/ciphertext split overruns and the frame is
+    // mis-passed-through instead of decrypted.
+    const frame = fakeVideoFrame(1);
+    const original = new Uint8Array(frame.data).slice();
+    await sender.encryptFrame(frame);
+
+    const enc = new Uint8Array(frame.data);
+    expect(enc[enc.length - 16]).toBe(1); // headerBytes field = actual header length
+
+    await receiver.decryptFrame(frame, 'sender-user-id');
+    expect(new Uint8Array(frame.data)).toEqual(original);
+  });
+
+  it('does NOT consume an IV-counter value for a skipped empty frame (no nonce gap)', async () => {
+    // Security invariant: the empty-frame early return must stay ABOVE the
+    // frameCounter++ in encryptFrame, so a skipped 0-byte frame consumes no
+    // GCM nonce counter. This regression-locks that ordering against a future
+    // refactor that moves the guard below the counter increment.
+    const csk = await generateTestCSK();
+    const sender = new MediaEncryption();
+    await sender.init(csk, 'sender-user-id');
+
+    const empty = fakeAudioFrame(0);
+    await sender.encryptFrame(empty); // must not advance the counter
+    expect(empty.data.byteLength).toBe(0);
+
+    const real = fakeAudioFrame(50);
+    await sender.encryptFrame(real);
+    const enc = new Uint8Array(real.data);
+    // Trailer IV = bytes [-14, -2); its first 4 bytes are the big-endian counter.
+    const ivStart = enc.length - 14;
+    const counter =
+      (enc[ivStart] << 24) | (enc[ivStart + 1] << 16) | (enc[ivStart + 2] << 8) | enc[ivStart + 3];
+    expect(counter).toBe(0); // first real frame still uses counter 0
   });
 });

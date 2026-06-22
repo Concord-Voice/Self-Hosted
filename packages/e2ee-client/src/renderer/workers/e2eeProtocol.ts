@@ -10,10 +10,6 @@ export type E2EEWorkerMessage =
   | { type: 'addDecryptKey'; senderUserId: string; keyId: number; key: CryptoKey }
   | { type: 'rotateKeys' }
   | { type: 'catchUpToEpoch'; targetEpoch: number }
-  // #1742 DIAG (temporary): the worker owns its own MediaEncryption instance with
-  // a separate module scope and no localStorage access, so the main thread must
-  // forward the opt-in diagnostic flag explicitly. Remove with the instrumentation.
-  | { type: 'setDiag'; enabled: boolean }
   | { type: 'destroy' };
 
 // ─── Worker → Main Thread ────────────────────────────────────────────
