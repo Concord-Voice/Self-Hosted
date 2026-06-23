@@ -24,6 +24,19 @@ COMPOSE_CMD="docker compose -f ${DEPLOY_DIR}/docker-compose.yml -f ${DEPLOY_DIR}
 # shellcheck source=sync-releases.sh
 source "${SCRIPT_DIR}/sync-releases.sh"
 
+dump_health_diagnostics() {
+  echo "" >&2
+  echo "=== docker compose ps (safe fields) ===" >&2
+  if ! (cd "$DEPLOY_DIR" && $COMPOSE_CMD ps --all --format 'table {{.Service}}\t{{.State}}\t{{.Health}}\t{{.ExitCode}}') >&2; then
+    echo "  ⚠ failed to collect docker compose ps" >&2
+  fi
+
+  echo "" >&2
+  echo "=== docker compose logs ===" >&2
+  echo "  omitted from CI diagnostics; runtime logs may contain host-side secrets" >&2
+  echo "  use 'concord-ctl.sh logs <service>' on the host for manual incident diagnostics" >&2
+}
+
 case "${1:-help}" in
   status)
     echo "=== Concord Service Status ==="
@@ -322,6 +335,7 @@ case "${1:-help}" in
     [[ $cp_ok -eq 0 ]] && echo "    control-plane (:8080/health) failed" >&2
     [[ $mp_ok -eq 0 ]] && echo "    media-plane (:3000/health) failed" >&2
     [[ $coturn_ok -eq 0 ]] && echo "    coturn STUN (:3478) failed" >&2
+    dump_health_diagnostics
     exit 1
     ;;
 
