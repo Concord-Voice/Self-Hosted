@@ -148,6 +148,8 @@ case "${1:-help}" in
     ADMIN_RENDER_DIR="${DEPLOY_DIR}/[internal]nginx/.rendered"
     ADMIN_RENDER="${ADMIN_RENDER_DIR}/concord-admin.conf"
     ADMIN_DST="/etc/nginx/conf.d/concord-admin.conf"
+    ADMIN_ORIGIN_CERT="${ADMIN_ORIGIN_CERT:-/etc/nginx/cloudflare/origin.pem}"
+    ADMIN_ORIGIN_KEY="${ADMIN_ORIGIN_KEY:-/etc/nginx/cloudflare/origin.key}"
     CONCORD_ENV_FILE="${CONCORD_ENV_FILE:-/opt/concord/.env}"
     read_concord_env() {
       local key="$1"
@@ -158,22 +160,35 @@ case "${1:-help}" in
     admin_enabled="$(read_concord_env ADMIN_CONSOLE_ENABLED)"
     admin_domain="$(read_concord_env ADMIN_WEBAUTHN_RP_ID)"
     if [[ "$admin_enabled" == "true" && -n "$admin_domain" ]]; then
-      if [[ ! -f "$ADMIN_TMPL" ]]; then
+      if [[ ! -e "$ADMIN_ORIGIN_CERT" || ! -e "$ADMIN_ORIGIN_KEY" ]]; then
+        echo "  ⚠ admin vhost requested but Cloudflare Origin Certificate files are missing:" >&2
+        echo "    cert: $ADMIN_ORIGIN_CERT" >&2
+        echo "    key:  $ADMIN_ORIGIN_KEY" >&2
+        echo "    Keeping admin closed; install the cert/key and rerun deploy to enable it." >&2
+        # ponytail: fail closed but keep service deploys green; hard-fail here if admin availability becomes deploy-critical.
+        echo "  Removing disabled admin vhost $ADMIN_DST"
+        if ! sudo /bin/rm -f "$ADMIN_DST"; then
+          echo "" >&2
+          echo "  ✗ nginx-reload: admin vhost removal failed (sudoers entry missing or wrong permissions?)" >&2
+          exit 1
+        fi
+      elif [[ ! -f "$ADMIN_TMPL" ]]; then
         echo "" >&2
         echo "  ✗ nginx-reload: admin template not found at $ADMIN_TMPL" >&2
         exit 1
-      fi
-      mkdir -p "$ADMIN_RENDER_DIR"
-      if ! ADMIN_DOMAIN="$admin_domain" envsubst '${ADMIN_DOMAIN}' < "$ADMIN_TMPL" > "$ADMIN_RENDER"; then
-        echo "" >&2
-        echo "  ✗ nginx-reload: failed to render admin vhost template" >&2
-        exit 1
-      fi
-      echo "  Staging admin vhost $ADMIN_RENDER → $ADMIN_DST"
-      if ! sudo /usr/bin/install -o root -g root -m 0644 "$ADMIN_RENDER" "$ADMIN_DST"; then
-        echo "" >&2
-        echo "  ✗ nginx-reload: admin vhost install failed (sudoers entry missing or wrong permissions?)" >&2
-        exit 1
+      else
+        mkdir -p "$ADMIN_RENDER_DIR"
+        if ! ADMIN_DOMAIN="$admin_domain" envsubst '${ADMIN_DOMAIN}' < "$ADMIN_TMPL" > "$ADMIN_RENDER"; then
+          echo "" >&2
+          echo "  ✗ nginx-reload: failed to render admin vhost template" >&2
+          exit 1
+        fi
+        echo "  Staging admin vhost $ADMIN_RENDER → $ADMIN_DST"
+        if ! sudo /usr/bin/install -o root -g root -m 0644 "$ADMIN_RENDER" "$ADMIN_DST"; then
+          echo "" >&2
+          echo "  ✗ nginx-reload: admin vhost install failed (sudoers entry missing or wrong permissions?)" >&2
+          exit 1
+        fi
       fi
     else
       echo "  Removing disabled admin vhost $ADMIN_DST"
