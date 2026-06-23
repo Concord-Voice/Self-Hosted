@@ -109,18 +109,22 @@ case "${1:-help}" in
   nginx-reload)
     # §5.9 (#919): stage the source-of-truth nginx config from
     # /opt/concord/[internal]nginx/concordvoice.conf into
-    # /etc/nginx/sites-available/concordvoice, validate, and reload nginx.
+    # /etc/nginx/sites-available/concordvoice, validate, and reload/start nginx.
     #
-    # Sudoers entry /etc/sudoers.d/concord-deploy (NOPASSWD) permits exactly
-    # three commands for the concord user:
+    # Sudoers entry /etc/sudoers.d/concord-deploy (NOPASSWD) permits these
+    # command shapes for the concord user:
     #   1. /usr/bin/install -o root -g root -m 0644 .../concordvoice.conf .../concordvoice
     #   2. /usr/sbin/nginx -t
     #   3. /bin/systemctl reload nginx
+    #   4. /bin/systemctl start nginx (only after nginx -t passes and reload
+    #      shows nginx is inactive)
     #
     # Sequence:
     #   a. Stage with install(1) (atomic create + chmod + chown).
     #   b. nginx -t — fail-fast on syntax error (DOES NOT reload if -t fails).
     #   c. systemctl reload nginx — graceful reload, no dropped connections.
+    #   d. If reload fails because nginx is inactive, start nginx from the same
+    #      syntax-validated config.
     #
     # Idempotency: re-running with no source change is a no-op at the
     # filesystem level (install(1) overwrites with byte-identical content)
@@ -208,12 +212,21 @@ case "${1:-help}" in
       exit 1
     fi
     echo "  Reloading nginx"
-    if ! sudo /bin/systemctl reload nginx; then
+    if sudo /bin/systemctl reload nginx; then
+      echo "  ✓ nginx config staged + validated + reloaded"
+    elif systemctl is-active --quiet nginx; then
       echo "" >&2
       echo "  ✗ nginx-reload: systemctl reload nginx failed" >&2
       exit 1
+    else
+      echo "  nginx service is inactive; starting nginx"
+      if ! sudo /bin/systemctl start nginx; then
+        echo "" >&2
+        echo "  ✗ nginx-reload: systemctl start nginx failed" >&2
+        exit 1
+      fi
+      echo "  ✓ nginx config staged + validated + started"
     fi
-    echo "  ✓ nginx config staged + validated + reloaded"
     ;;
 
   sudoers-sync)
