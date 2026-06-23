@@ -141,6 +141,49 @@ case "${1:-help}" in
       echo "  ✗ nginx-reload: install(1) staging failed (sudoers entry missing or wrong permissions?)" >&2
       exit 1
     fi
+    # #1692: render/remove the admin-console vhost from runtime env. The
+    # codename host stays out of git; ADMIN_WEBAUTHN_RP_ID in /opt/concord/.env
+    # is the deploy-time source, and only ${ADMIN_DOMAIN} is envsubst-expanded.
+    ADMIN_TMPL="${DEPLOY_DIR}/[internal]nginx/admin-console.conf.template"
+    ADMIN_RENDER_DIR="${DEPLOY_DIR}/[internal]nginx/.rendered"
+    ADMIN_RENDER="${ADMIN_RENDER_DIR}/concord-admin.conf"
+    ADMIN_DST="/etc/nginx/conf.d/concord-admin.conf"
+    CONCORD_ENV_FILE="${CONCORD_ENV_FILE:-/opt/concord/.env}"
+    read_concord_env() {
+      local key="$1"
+      if [[ -f "$CONCORD_ENV_FILE" ]]; then
+        grep -E "^${key}=" "$CONCORD_ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "'\"" || true
+      fi
+    }
+    admin_enabled="$(read_concord_env ADMIN_CONSOLE_ENABLED)"
+    admin_domain="$(read_concord_env ADMIN_WEBAUTHN_RP_ID)"
+    if [[ "$admin_enabled" == "true" && -n "$admin_domain" ]]; then
+      if [[ ! -f "$ADMIN_TMPL" ]]; then
+        echo "" >&2
+        echo "  ✗ nginx-reload: admin template not found at $ADMIN_TMPL" >&2
+        exit 1
+      fi
+      mkdir -p "$ADMIN_RENDER_DIR"
+      if ! ADMIN_DOMAIN="$admin_domain" envsubst '${ADMIN_DOMAIN}' < "$ADMIN_TMPL" > "$ADMIN_RENDER"; then
+        echo "" >&2
+        echo "  ✗ nginx-reload: failed to render admin vhost template" >&2
+        exit 1
+      fi
+      echo "  Staging admin vhost $ADMIN_RENDER → $ADMIN_DST"
+      if ! sudo /usr/bin/install -o root -g root -m 0644 "$ADMIN_RENDER" "$ADMIN_DST"; then
+        echo "" >&2
+        echo "  ✗ nginx-reload: admin vhost install failed (sudoers entry missing or wrong permissions?)" >&2
+        exit 1
+      fi
+    else
+      echo "  Removing disabled admin vhost $ADMIN_DST"
+      if ! sudo /bin/rm -f "$ADMIN_DST"; then
+        echo "" >&2
+        echo "  ✗ nginx-reload: admin vhost removal failed (sudoers entry missing or wrong permissions?)" >&2
+        exit 1
+      fi
+    fi
+
     echo "  Validating with nginx -t"
     if ! sudo /usr/sbin/nginx -t 2>&1; then
       echo "" >&2
