@@ -79,6 +79,8 @@ export interface Participant {
   allowedAudioTiers: string[];
   /** Minimum opus ptime (ms) this user may produce at (free 20, premium 10). */
   minPtimeMs: number;
+  /** Media E2EE frame crypto format this participant joined with. */
+  mediaFrameCryptoVersion: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -130,6 +132,8 @@ export interface Room {
   participants: Map<string, Participant>;
   createdAt: Date;
   e2eeEpoch: number;
+  /** Room-wide media E2EE frame crypto format. Null until first participant joins. */
+  mediaFrameCryptoVersion: number | null;
   /**
    * Per-source count of producers that have passed the cap check but are not
    * yet recorded in `participant.producers` (in-flight across the `produce()`
@@ -165,6 +169,19 @@ export const SCREEN_PRODUCER_CAP = 5;
 
 /** Per-sender keyframe request cooldown; mirrors the client-side E2EE recovery cooldown. */
 export const KEYFRAME_REQUEST_COOLDOWN_MS = 5000;
+
+/** AES-256-GCM media-frame format. v1 was the legacy AES-128-GCM frame key. */
+export const SUPPORTED_MEDIA_FRAME_CRYPTO_VERSION = 2;
+
+export function parseMediaFrameCryptoVersion(value: unknown): number {
+  if (value !== SUPPORTED_MEDIA_FRAME_CRYPTO_VERSION) {
+    const received = typeof value === 'undefined' ? 'missing' : String(value);
+    throw new Error(
+      `Unsupported media frame crypto version ${received}; expected ${SUPPORTED_MEDIA_FRAME_CRYPTO_VERSION}`
+    );
+  }
+  return value;
+}
 
 /**
  * Resolve the per-room concurrent camera-producer cap.
@@ -365,6 +382,7 @@ export class RoomManager {
       participants: new Map(),
       createdAt: new Date(),
       e2eeEpoch: 0,
+      mediaFrameCryptoVersion: null,
       pendingProducerCounts: new Map(),
       activeSpeakers: new ActiveSpeakerSet(lastN, config.audioLastNHoldMs),
       lastNPausedConsumers: new Set(),
@@ -452,10 +470,12 @@ export class RoomManager {
     userId: string,
     socketId: string,
     identity: { username: string; displayName?: string; avatarUrl?: string },
-    rtpCapabilities?: RtpCapabilities,
-    entitlement?: MediaEntitlement
+    rtpCapabilities: RtpCapabilities | undefined,
+    entitlement: MediaEntitlement | undefined,
+    mediaFrameCryptoVersion: unknown
   ): Promise<{
     rtpCapabilities: RtpCapabilities;
+    mediaFrameCryptoVersion: number;
     existingProducers: ProducerInfo[];
     participants: Array<{
       userId: string;
@@ -466,6 +486,7 @@ export class RoomManager {
     }>;
     e2eeEpoch: number;
   }> {
+    const parsedMediaFrameCryptoVersion = parseMediaFrameCryptoVersion(mediaFrameCryptoVersion);
     const { username, displayName, avatarUrl } = identity;
     let room = await this.getOrCreateRoom(roomId);
 
@@ -481,6 +502,14 @@ export class RoomManager {
       await this.leaveRoom(roomId, userId);
       // Room may have been closed if user was the only participant — re-create
       room = await this.getOrCreateRoom(roomId);
+    }
+
+    if (room.mediaFrameCryptoVersion === null) {
+      room.mediaFrameCryptoVersion = parsedMediaFrameCryptoVersion;
+    } else if (room.mediaFrameCryptoVersion !== parsedMediaFrameCryptoVersion) {
+      throw new Error(
+        `Media frame crypto version mismatch: room=${room.mediaFrameCryptoVersion}, join=${parsedMediaFrameCryptoVersion}`
+      );
     }
 
     // Per-user media caps (#1300): from the parsed control-plane entitlement,
@@ -508,6 +537,7 @@ export class RoomManager {
       maxManualBitrateBps: ent.maxManualBitrateBps,
       allowedAudioTiers: [...ent.allowedAudioTiers],
       minPtimeMs: ent.minPtimeMs,
+      mediaFrameCryptoVersion: parsedMediaFrameCryptoVersion,
     };
 
     room.participants.set(userId, participant);
@@ -557,6 +587,7 @@ export class RoomManager {
 
     return {
       rtpCapabilities: room.router.rtpCapabilities,
+      mediaFrameCryptoVersion: room.mediaFrameCryptoVersion,
       existingProducers,
       participants,
       e2eeEpoch: room.e2eeEpoch,
