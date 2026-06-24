@@ -339,6 +339,26 @@ describe('RoomManager', () => {
       expect(leftEvent![0].userId).toBe('u-1');
     });
 
+    it('emits user-left with the authoritative post-leave E2EE epoch', async () => {
+      const handler = vi.fn();
+      manager.onEvent(handler);
+
+      await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
+      await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-2', 'sock-2', { username: 'bob' });
+
+      await manager.leaveRoom('room-1', 'u-1');
+
+      const leftEvent = handler.mock.calls.find((c: any[]) => c[0].type === 'user-left');
+      expect(leftEvent?.[0]).toEqual(
+        expect.objectContaining({
+          type: 'user-left',
+          roomId: 'room-1',
+          userId: 'u-1',
+          e2eeEpoch: 3,
+        })
+      );
+    });
+
     it('closes room and emits room-empty when last participant leaves', async () => {
       const handler = vi.fn();
       manager.onEvent(handler);

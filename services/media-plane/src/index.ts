@@ -857,9 +857,6 @@ async function main() {
       return;
     }
 
-    // Notify others before cleanup
-    socket.to(roomId).emit('user-left', { userId });
-
     // Clean up via RoomManager (closes transports, producers, consumers)
     await roomManager.leaveRoom(roomId, userId);
 
@@ -891,6 +888,13 @@ async function main() {
         userId: event.userId,
         kind: event.kind,
         source: event.source,
+      });
+    }
+
+    if (event.type === 'user-left') {
+      io.to(event.roomId).except(event.socketId).emit('user-left', {
+        userId: event.userId,
+        e2eeEpoch: event.e2eeEpoch,
       });
     }
 

@@ -247,7 +247,7 @@ export type RoomEvent =
       displayName?: string;
       e2eeEpoch: number;
     }
-  | { type: 'user-left'; roomId: string; userId: string }
+  | { type: 'user-left'; roomId: string; userId: string; socketId: string; e2eeEpoch: number }
   | { type: 'room-empty'; roomId: string }
   | {
       type: 'producer-added';
@@ -623,7 +623,13 @@ export class RoomManager {
       remainingParticipants: room.participants.size,
     });
 
-    this.emitEvent({ type: 'user-left', roomId, userId });
+    this.emitEvent({
+      type: 'user-left',
+      roomId,
+      userId,
+      socketId: participant.socketId,
+      e2eeEpoch: room.e2eeEpoch,
+    });
 
     // Tear down room if empty
     if (room.participants.size === 0) {

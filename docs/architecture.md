@@ -27,7 +27,7 @@ Concord Voice is a distributed real-time communications platform with three serv
        ▼       ▼                   ▼
 ┌──────────┐ ┌───────┐      ┌───────┐
 │PostgreSQL│ │ Redis │      │ Redis │
-│ 16 (66   │ │ 7     │      │ 7     │
+│ 16 (78   │ │ 7     │      │ 7     │
 │ migr's)  │ │       │      │       │
 └──────────┘ └───┬───┘      └───┬───┘
                  │              │
@@ -44,7 +44,7 @@ Concord Voice is a distributed real-time communications platform with three serv
 - WebSocket hub for real-time messaging and presence
 - DM system (8 tables, E2EE with key-epoch enforcement)
 - MFA (TOTP, WebAuthn), email verification, ownership transfer
-- ~213 route registrations (REST + the `/ws` upgrade) across 20+ route groups
+- 232 route registrations (REST + the `/ws` upgrade) across 20+ route groups
 
 #### Media Plane (Node.js + mediasoup, port 3000)
 
@@ -225,7 +225,7 @@ Manifests + signed installers are served from the control-plane `updates` packag
 
 **Responsibilities:** authentication; server/channel CRUD; membership + RBAC; user presence; WebSocket signaling and message relay; E2EE ciphertext relay (the server never decrypts); MFA; SSO; account erasure; object storage; client attestation; rate limiting.
 
-**API:** ~213 route registrations (REST handlers + the single `/ws` upgrade endpoint) across 20+ route groups (`/auth`, `/auth/sso`, `/mfa`, `/users`, `/sessions`, `/servers`, `/channels`, `/categories`, `/e2ee`, `/messages`, `/dm/conversations`, `/friends`, `/invites`, `/voice`, `/media`, `/notifications`, `/privacy`, `/klipy`, `/updates`, `/ws`). The Klipy routes register only when `KLIPY_API_KEY` is set; some media routes register a 503 fallback when object storage is unconfigured. See [API Documentation](./api/README.md). (Route counts are maintained by a repo count-generator script and may drift slightly from this document between audits.)
+**API:** 232 route registrations (REST handlers + the single `/ws` upgrade endpoint) across 20+ route groups (`/auth`, `/auth/sso`, `/mfa`, `/users`, `/sessions`, `/servers`, `/channels`, `/categories`, `/e2ee`, `/messages`, `/dm/conversations`, `/friends`, `/invites`, `/voice`, `/media`, `/notifications`, `/privacy`, `/klipy`, `/updates`, `/ws`). The Klipy routes register only when `KLIPY_API_KEY` is set; some media routes register a 503 fallback when object storage is unconfigured. See [API Documentation](./api/README.md). (Route counts are maintained by a repo count-generator script and may drift slightly from this document between audits.)
 
 **E2EE relay (zero-knowledge):** the server relays ciphertext and never decrypts. On the REST path, `messages` handlers (`internal/messages/handlers.go`) validate ciphertext structurally (`isValidCiphertext` — base64 + ≥28-byte decoded length) and enforce epoch revocation (`enforceE2EE`). On the WebSocket path, the hub validates the envelope (`validateEnvelope` — `key_version` present, length cap) and enforces epochs (`enforceWSEpoch` in `internal/websocket/hub.go`); it stores the `content` column verbatim. The E2EE-everywhere posture (#201) removed all per-row `is_encrypted` flags (migration 000062) — encryption is structural, not a runtime branch.
 
@@ -750,7 +750,7 @@ Concord/
 │   ├── src/shared/           # Cross-process types (clientBehavior, spaIpcTypes, spaUrlPattern)
 │   └── src/constants/        # Typed constants + build-time generators
 ├── services/
-│   ├── control-plane/        # Go backend (internal/ has 30 packages; migrations/)
+│   ├── control-plane/        # Go backend (internal/ has 38 packages; migrations/)
 │   ├── media-plane/          # Node.js mediasoup WebRTC SFU (src/lib/ RoomManager, mediasoup)
 │   └── licensing-authority/  # Planned (Phase 3) — profile-gated, not production-active
 ├── infrastructure/

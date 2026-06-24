@@ -726,26 +726,24 @@ describe('MediaEncryption — #1742 empty DTX frame passthrough', () => {
     expect(new Uint8Array(frame.data)).toEqual(original);
   });
 
-  it('does NOT consume an IV-counter value for a skipped empty frame (no nonce gap)', async () => {
-    // Security invariant: the empty-frame early return must stay ABOVE the
-    // frameCounter++ in encryptFrame, so a skipped 0-byte frame consumes no
-    // GCM nonce counter. This regression-locks that ordering against a future
-    // refactor that moves the guard below the counter increment.
+  it('uses a fully random 96-bit GCM IV for encrypted frames', async () => {
+    // Security invariant: empty-frame early return must stay above IV
+    // generation, and real encrypted frames request the full 96-bit GCM nonce
+    // from WebCrypto rather than combining a counter prefix with random suffix.
     const csk = await generateTestCSK();
     const sender = new MediaEncryption();
     await sender.init(csk, 'sender-user-id');
+    const randomSpy = vi.spyOn(crypto, 'getRandomValues');
 
     const empty = fakeAudioFrame(0);
     await sender.encryptFrame(empty); // must not advance the counter
     expect(empty.data.byteLength).toBe(0);
+    expect(randomSpy).not.toHaveBeenCalled();
 
     const real = fakeAudioFrame(50);
     await sender.encryptFrame(real);
-    const enc = new Uint8Array(real.data);
-    // Trailer IV = bytes [-14, -2); its first 4 bytes are the big-endian counter.
-    const ivStart = enc.length - 14;
-    const counter =
-      (enc[ivStart] << 24) | (enc[ivStart + 1] << 16) | (enc[ivStart + 2] << 8) | enc[ivStart + 3];
-    expect(counter).toBe(0); // first real frame still uses counter 0
+    expect(randomSpy).toHaveBeenCalledTimes(1);
+    expect((randomSpy.mock.calls[0][0] as Uint8Array).byteLength).toBe(12);
+    randomSpy.mockRestore();
   });
 });
