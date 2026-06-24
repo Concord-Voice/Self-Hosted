@@ -13,13 +13,13 @@ Concord Voice is a distributed real-time communications platform with three serv
 ```text
 ┌──────────────────────────────────────────────────────────────────┐
 │  Desktop Client (Electron + React + TypeScript)                  │
-│  - 36 Zustand stores, E2EE via WebCrypto, safeStorage tokens    │
+│  - 41 Zustand stores, E2EE via WebCrypto, safeStorage tokens    │
 └──────┬────────────────────────────────┬──────────────────────────┘
        │ HTTP/WebSocket :8080           │ Socket.IO + WebRTC :3000
        ▼                                ▼
 ┌──────────────────────┐    ┌─────────────────────────────────────┐
 │  Control Plane (Go)  │    │  Media Plane (Node.js + mediasoup)  │
-│  Gin 1.12, 213 routes│    │  WebRTC SFU, Socket.IO signaling    │
+│  Gin 1.12, 232 routes│    │  WebRTC SFU, Socket.IO signaling    │
 │  Auth, RBAC, chat,   │    │  Voice/video routing, RoomManager   │
 │  WebSocket hub       │    │  1 router per room, transport/user  │
 └──────┬───────┬───────┘    └──────┬──────────────────────────────┘
@@ -59,7 +59,7 @@ Concord Voice is a distributed real-time communications platform with three serv
 - Secure IPC via preload bridge (contextIsolation ON, nodeIntegration OFF)
 - E2EE: AES-256-GCM message encryption, RSA-OAEP 4096-bit key wrapping
 - Token storage via Electron safeStorage (OS keychain)
-- 36 Zustand stores for state management
+- 41 Zustand stores for state management
 - Adaptive renderer load: remote SPA (Cloudflare Pages) with bundled `app://` fallback
 
 ### Data Flow
@@ -147,7 +147,7 @@ The desktop client is the only shipping client. Source: `client/desktop/`.
 - **Process layout** (`client/desktop/src/` has five top-level source dirs):
   - `main/` — Electron main process: `BrowserWindow` creation, `app://` scheme registration, IPC dispatch, updater wiring, quit lifecycle (`main.ts`); secure token persistence (`tokenManager.ts`); adaptive renderer loading (`spaLoader.ts`); the `app://` resolver (`appProtocol.ts`); device fingerprint (`machineId.ts`); userData path pinning (`pinUserDataPath.ts`); auto-update trust chain (`updater.ts`, `updateSafety.ts`, `verifyWindowsSignature.ts`).
   - `preload/preload.ts` — the single `contextBridge` bridge exposing a minimal typed `window.electron` API.
-  - `renderer/` — the React SPA: `stores/` (36 Zustand stores), `services/` (singletons incl. `e2eeService.ts`, `mediaEncryption.ts`, `searchService.ts`, WebSocket, API client, voice), `components/`, `hooks/`, `types/ws-events.ts` (zod WS schema).
+  - `renderer/` — the React SPA: `stores/` (41 Zustand stores), `services/` (singletons incl. `e2eeService.ts`, `mediaEncryption.ts`, `searchService.ts`, WebSocket, API client, voice), `components/`, `hooks/`, `types/ws-events.ts` (zod WS schema).
   - `shared/` — three cross-process modules: `clientBehavior.ts` (window close/minimize routing), `spaIpcTypes.ts` (self-heal IPC contract), `spaUrlPattern.ts` (the shared SPA chunk-URL regex; the legacy `SPA_URL_PATTERN` was removed by #1657 in favor of runtime base-dir matching).
   - `constants/` — typed constants + build-time generators (e.g. `updateEndpoint.mts`), included in the Istanbul coverage set.
 - **Responsibilities:** browser-inspired UI (server bar, channel panel), WebRTC media handling (Opus, 7 quality tiers), voice controls (mute/deafen/PTT, device selection, per-user volume), screen sharing, video calls, E2EE encrypt/decrypt via `e2eeService` (`encryptForChannel` / `decryptForChannel`), secure token storage via `safeStorage`. *(This list is non-exhaustive — the renderer also carries TTS (`ttsService.ts`), keyboard-shortcut customization, OS-permission management (`permissionManager.ts`, macOS screen-recording/mic TCC), and a startup splash window.)*
@@ -470,9 +470,9 @@ The admin console is a **separate identity domain** — it never shares state wi
 
 Voice and **video frames are end-to-end encrypted above the SFU** — the media plane never sees plaintext media. This is a separate layer from transport DTLS-SRTP (which terminates *at* the SFU). Implementation: `client/desktop/src/renderer/services/mediaEncryption.ts` (+ `voiceE2eeTransforms.ts`):
 
-- **Cipher:** per-frame **AES-128-GCM** applied via WebRTC **Insertable Streams** before frames leave the sender — `RTCRtpScriptTransform` (Web Worker) on Chromium 129+, `createEncodedStreams` (main thread) on the legacy path.
+- **Cipher:** per-frame **AES-256-GCM** applied via WebRTC **Insertable Streams** before frames leave the sender — `RTCRtpScriptTransform` (Web Worker) on Chromium 129+, `createEncodedStreams` (main thread) on the legacy path.
 - **Frame keys:** derived `HKDF-SHA256(channelCSK, salt="concord-voice-e2ee", info=senderUserId)` from the **same channel CSK** used for text messages — so media encryption shares the `channel_keys` / `key_revocations` epoch ledger and rotates on member join/leave (with a short overlap window), and ratchets via `HKDF(oldKey, "concord-e2ee-ratchet")`.
-- **Framing:** a trailing `0xDE 0xAD` magic + self-describing header bytes distinguish encrypted frames and survive BUNDLE payload-type collisions; AES-GCM is used **without** AAD (intentional — the header travels in the clear). A self-healing decrypt-recovery pipeline handles transient key-rotation gaps.
+- **Framing and fail-closed receive:** a trailing `0xDE 0xAD` magic + self-describing header bytes distinguish encrypted frames and survive BUNDLE payload-type collisions; AES-GCM is used **without** AAD (intentional — the header travels in the clear). Receivers reject every non-empty frame without the E2EE magic trailer, while allowing empty DTX/control frames. If a decrypt transform cannot attach, `voiceService` closes the consumer before store routing or server resume; attached transforms drop undecryptable frames and use self-healing recovery for transient key-rotation gaps.
 - **Video keyframe recovery:** when the receiver detects a missing or stale media decrypt key, `voiceService` pre-installs target-epoch decrypt keys for active participants, catches the worker up to the server epoch, and emits `request-keyframe { senderUserId }` for the affected video sender. The media plane validates requester/sender membership, finds the matching video consumers, and calls mediasoup `consumer.requestKeyFrame()` under the 5s per-sender cooldown.
 - **Media plane is blind by design:** no frame-crypto code exists in `services/media-plane/src/`; the SFU forwards opaque encrypted RTP payloads.
 

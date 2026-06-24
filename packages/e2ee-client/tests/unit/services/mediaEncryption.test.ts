@@ -202,30 +202,41 @@ describe('MediaEncryption', () => {
   });
 
   describe('rejection paths', () => {
-    it('passes through frames without magic trailer', async () => {
+    it('rejects non-empty frames without magic trailer', async () => {
       const csk = await generateTestCSK();
       const me = new MediaEncryption();
       await me.init(csk, 'user-id');
       await me.addDecryptKey(csk, 'sender-id');
 
       const frame = fakeAudioFrame(50);
+
+      await expect(me.decryptFrame(frame, 'sender-id')).rejects.toThrow(
+        'unencrypted media frame received'
+      );
+    });
+
+    it('passes through empty frames', async () => {
+      const csk = await generateTestCSK();
+      const me = new MediaEncryption();
+      await me.init(csk, 'user-id');
+
+      const frame = fakeAudioFrame(0);
       const originalData = new Uint8Array(frame.data).slice();
 
-      // No encryption → no magic trailer → should pass through unchanged
       await me.decryptFrame(frame, 'sender-id');
       expect(new Uint8Array(frame.data)).toEqual(originalData);
     });
 
-    it('passes through frames that are too small', async () => {
+    it('rejects non-empty too-small frames without magic trailer', async () => {
       const csk = await generateTestCSK();
       const me = new MediaEncryption();
       await me.init(csk, 'user-id');
 
       const frame = fakeAudioFrame(10);
-      const originalData = new Uint8Array(frame.data).slice();
 
-      await me.decryptFrame(frame, 'sender-id');
-      expect(new Uint8Array(frame.data)).toEqual(originalData);
+      await expect(me.decryptFrame(frame, 'sender-id')).rejects.toThrow(
+        'unencrypted media frame received'
+      );
     });
 
     it('rejects too-small frames that carry the E2EE magic trailer', async () => {
@@ -330,6 +341,17 @@ describe('MediaEncryption', () => {
   });
 
   describe('Worker-path APIs (initFromKey / addDecryptKeyDirect / setCurrentKeyId)', () => {
+    it('derives and ratchets 256-bit AES-GCM frame keys', async () => {
+      const csk = await generateTestCSK();
+      const key = await deriveFrameKey(csk, 'user-a');
+      const ratcheted = await ratchetKey(key);
+
+      expect(key.algorithm.name).toBe('AES-GCM');
+      expect((key.algorithm as AesKeyAlgorithm).length).toBe(256);
+      expect(ratcheted.algorithm.name).toBe('AES-GCM');
+      expect((ratcheted.algorithm as AesKeyAlgorithm).length).toBe(256);
+    });
+
     it('initFromKey enables encryptFrame and sets currentKeyId', async () => {
       const csk = await generateTestCSK();
       const key = await deriveFrameKey(csk, 'user-a');
