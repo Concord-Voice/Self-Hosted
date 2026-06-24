@@ -173,9 +173,24 @@ export const KEYFRAME_REQUEST_COOLDOWN_MS = 5000;
 /** AES-256-GCM media-frame format. v1 was the legacy AES-128-GCM frame key. */
 export const SUPPORTED_MEDIA_FRAME_CRYPTO_VERSION = 2;
 
+function formatMediaFrameCryptoVersion(value: unknown): string {
+  if (value === undefined) return 'missing';
+  if (value === null) return 'null';
+  if (
+    typeof value === 'string' ||
+    typeof value === 'number' ||
+    typeof value === 'boolean' ||
+    typeof value === 'bigint'
+  ) {
+    return `${value}`;
+  }
+  if (Array.isArray(value)) return 'array';
+  return typeof value;
+}
+
 export function parseMediaFrameCryptoVersion(value: unknown): number {
   if (value !== SUPPORTED_MEDIA_FRAME_CRYPTO_VERSION) {
-    const received = typeof value === 'undefined' ? 'missing' : String(value);
+    const received = formatMediaFrameCryptoVersion(value);
     throw new Error(
       `Unsupported media frame crypto version ${received}; expected ${SUPPORTED_MEDIA_FRAME_CRYPTO_VERSION}`
     );
@@ -1280,7 +1295,10 @@ export class RoomManager {
 
     const maxSpatialLayer = this.maxCameraSpatialLayerForParticipant(participant);
     const effectiveLayers = clampCameraLayerDemand(parsed.value, maxSpatialLayer);
-    room.cameraLayerDemands.set(parsed.value.consumerId, storedDemand(parsed.value, maxSpatialLayer));
+    room.cameraLayerDemands.set(
+      parsed.value.consumerId,
+      storedDemand(parsed.value, maxSpatialLayer)
+    );
     this.recomputeCameraLayeringGate(room);
     const consumerType = (consumer as { type?: unknown }).type;
     if (consumerType === 'simulcast' || consumerType === 'svc') {
