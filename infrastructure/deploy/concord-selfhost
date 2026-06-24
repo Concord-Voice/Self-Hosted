@@ -1,0 +1,98 @@
+#!/usr/bin/env bash
+# Concord Voice — self-hosted operator CLI (#1616).
+# Day-2 lifecycle/monitoring for a self-hosted instance. Thin wrapper over the
+# production compose stack. Operator analogue of concord-ctl.sh, minus the
+# Actions-pipeline verbs (sync-releases, verify-registration, sudoers-sync, nginx-reload).
+#
+# Usage: ./infrastructure/deploy/concord-selfhost <verb> [args]
+#   Run from the repo root (compose auto-loads ./.env). Migrations auto-run at startup.
+#
+# Exit codes: 0 ok | 1 runtime / unknown verb
+set -euo pipefail
+
+# ── Constants ──────────────────────────────────────────────────────────
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+readonly PROJECT_ROOT
+
+readonly RED='\033[0;31m'
+readonly GREEN='\033[0;32m'
+readonly NC='\033[0m'
+
+# Production compose stack: base + production overlay + services profile.
+# Verified against docker-compose.yml / docker-compose.production.yml in the repo.
+COMPOSE_FILES=(
+  "-f" "$PROJECT_ROOT/docker-compose.yml"
+  "-f" "$PROJECT_ROOT/docker-compose.production.yml"
+  "--profile" "services"
+)
+
+# Reserved for a richer per-service status in a follow-up (#1616 scope).
+# ponytail: expand status verb to iterate SERVICES for per-container health loop.
+# shellcheck disable=SC2034  # SERVICES is reserved for the follow-up status loop
+readonly SERVICES=(control-plane media-plane postgres redis nats minio coturn)
+
+# ── Helpers ────────────────────────────────────────────────────────────
+
+# compose ARGS... — invoke docker compose with the production file set.
+compose() { docker compose "${COMPOSE_FILES[@]}" "$@"; }
+
+usage() {
+  cat <<'USAGE'
+concord-selfhost — self-hosted operator CLI
+
+Usage: ./infrastructure/deploy/concord-selfhost <verb> [args]
+
+Verbs:
+  up           build + start the full stack (docker compose up -d --build)
+  down         stop AND remove containers + network (docker compose down)
+  stop         pause containers, leave them in place (docker compose stop)
+  status       per-service container state (docker compose ps)
+  logs [svc]   tail logs; optional service name to filter
+  health       probe control-plane /api/v1/client/config (expect HTTP 200)
+  --help       show this help
+
+Run from the repo root. The .env in the repo root is auto-loaded by compose.
+Migrations run automatically at control-plane startup.
+USAGE
+}
+
+verb_health() {
+  local code
+  code="$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 5 \
+    http://localhost:8080/api/v1/client/config 2>/dev/null || echo 000)"
+  if [[ "$code" == "200" ]]; then
+    echo -e "${GREEN}✓ control-plane healthy (HTTP 200)${NC}"
+  else
+    echo -e "${RED}✗ control-plane unhealthy (HTTP $code)${NC}" >&2
+    return 1
+  fi
+}
+
+# ── Verb dispatch ──────────────────────────────────────────────────────
+
+main() {
+  case "${1:-}" in
+    up)         compose up -d --build ;;
+    down)       compose down ;;
+    stop)       compose stop ;;
+    status)     compose ps ;;
+    logs)       shift; compose logs -f "$@" ;;
+    health)     verb_health ;;
+    --help|-h|"") usage ;;
+    *)
+      echo -e "${RED}unknown verb: $1${NC}" >&2
+      usage >&2
+      return 1
+      ;;
+  esac
+}
+
+# ── Source-vs-execute guard ────────────────────────────────────────────
+# Tests do `source concord-selfhost` to call helpers without running main.
+
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi
