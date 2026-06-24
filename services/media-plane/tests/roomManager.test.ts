@@ -101,7 +101,9 @@ describe('RoomManager', () => {
 
   describe('joinRoom', () => {
     it('creates a new room and returns rtpCapabilities', async () => {
-      const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
+      const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', {
+        username: 'alice',
+      });
 
       expect(result.rtpCapabilities).toBeDefined();
       expect(result.existingProducers).toEqual([]);
@@ -111,7 +113,9 @@ describe('RoomManager', () => {
 
     it('reuses existing room on second join', async () => {
       await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
-      const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-2', 'sock-2', { username: 'bob' });
+      const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-2', 'sock-2', {
+        username: 'bob',
+      });
 
       expect(mockMediasoup.getOrCreateRouter).toHaveBeenCalledTimes(1);
       expect(result.participants).toHaveLength(2);
@@ -125,7 +129,9 @@ describe('RoomManager', () => {
       const newRouter = createMockRouter();
       mockMediasoup.getOrCreateRouter.mockResolvedValue(newRouter);
 
-      const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-2', 'sock-2', { username: 'bob' });
+      const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-2', 'sock-2', {
+        username: 'bob',
+      });
       expect(result.rtpCapabilities).toBe(newRouter.rtpCapabilities);
     });
 
@@ -149,13 +155,17 @@ describe('RoomManager', () => {
       );
 
       // u-2 joins and should see u-1's producer
-      const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-2', 'sock-2', { username: 'bob' });
+      const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-2', 'sock-2', {
+        username: 'bob',
+      });
       expect(result.existingProducers).toHaveLength(1);
       expect(result.existingProducers[0].userId).toBe('u-1');
     });
 
     it('seeds the room media-frame crypto version from the first participant', async () => {
-      const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
+      const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', {
+        username: 'alice',
+      });
 
       expect(result.mediaFrameCryptoVersion).toBe(SUPPORTED_MEDIA_FRAME_CRYPTO_VERSION);
       expect(manager.getRoom('room-1')?.mediaFrameCryptoVersion).toBe(
@@ -247,10 +257,25 @@ describe('RoomManager', () => {
         SUPPORTED_MEDIA_FRAME_CRYPTO_VERSION
       );
       expect(() => parseMediaFrameCryptoVersion(undefined)).toThrow(
-        'Unsupported media frame crypto version'
+        'Unsupported media frame crypto version missing'
       );
       expect(() => parseMediaFrameCryptoVersion(1)).toThrow(
-        'Unsupported media frame crypto version'
+        'Unsupported media frame crypto version 1'
+      );
+      expect(() => parseMediaFrameCryptoVersion(null)).toThrow(
+        'Unsupported media frame crypto version null'
+      );
+      expect(() => parseMediaFrameCryptoVersion('2')).toThrow(
+        'Unsupported media frame crypto version 2'
+      );
+      expect(() => parseMediaFrameCryptoVersion(false)).toThrow(
+        'Unsupported media frame crypto version false'
+      );
+      expect(() => parseMediaFrameCryptoVersion([])).toThrow(
+        'Unsupported media frame crypto version array'
+      );
+      expect(() => parseMediaFrameCryptoVersion({ version: 2 })).toThrow(
+        'Unsupported media frame crypto version object'
       );
     });
   });
@@ -276,7 +301,9 @@ describe('RoomManager', () => {
     });
 
     it('joinRoom snapshot defaults isDeafened to false', async () => {
-      const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
+      const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', {
+        username: 'alice',
+      });
       expect(result.participants[0].isDeafened).toBe(false);
     });
 
@@ -284,7 +311,9 @@ describe('RoomManager', () => {
       await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
       manager.setParticipantDeafen('room-1', 'u-1', true);
 
-      const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-2', 'sock-2', { username: 'bob' });
+      const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-2', 'sock-2', {
+        username: 'bob',
+      });
       const alice = result.participants.find((p) => p.userId === 'u-1');
       expect(alice?.isDeafened).toBe(true);
     });
@@ -304,7 +333,9 @@ describe('RoomManager', () => {
       await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
       manager.setParticipantTestingStatus('room-1', 'u-1', true);
 
-      const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-2', 'sock-2', { username: 'bob' });
+      const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-2', 'sock-2', {
+        username: 'bob',
+      });
       const alice = result.participants.find((p) => p.userId === 'u-1');
       expect(alice?.isTesting).toBe(true);
     });
@@ -312,8 +343,12 @@ describe('RoomManager', () => {
 
   describe('joinRoom — reconnection', () => {
     it('cleans up old session when same userId rejoins', async () => {
-      await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-old', { username: 'alice' });
-      const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-new', { username: 'alice' });
+      await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-old', {
+        username: 'alice',
+      });
+      const result = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-new', {
+        username: 'alice',
+      });
 
       // Should have exactly 1 participant (the new session)
       expect(result.participants).toHaveLength(1);
@@ -473,12 +508,20 @@ describe('RoomManager', () => {
 
     it('caps the SEND transport with the FREE tier maxManualBitrateBps (5 Mbps)', async () => {
       // u-free joins with the free entitlement (5_000_000 bps).
-      await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-free', 'sock-free', { username: 'free' }, undefined, {
-        tier: 'free',
-        allowedAudioTiers: ['minimum', 'low', 'moderate', 'standard'],
-        minPtimeMs: 20,
-        maxManualBitrateBps: 5_000_000,
-      });
+      await joinRoomWithSupportedCrypto(
+        manager,
+        'room-1',
+        'u-free',
+        'sock-free',
+        { username: 'free' },
+        undefined,
+        {
+          tier: 'free',
+          allowedAudioTiers: ['minimum', 'low', 'moderate', 'standard'],
+          minPtimeMs: 20,
+          maxManualBitrateBps: 5_000_000,
+        }
+      );
       const transport = createMockTransport();
       mockRouter.createWebRtcTransport.mockResolvedValueOnce(transport);
 
@@ -490,12 +533,20 @@ describe('RoomManager', () => {
     });
 
     it('caps the SEND transport with the PREMIUM tier maxManualBitrateBps (10 Mbps)', async () => {
-      await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-prem', 'sock-prem', { username: 'prem' }, undefined, {
-        tier: 'premium',
-        allowedAudioTiers: ['minimum', 'low', 'moderate', 'standard', 'high', 'hifi', 'studio'],
-        minPtimeMs: 10,
-        maxManualBitrateBps: 10_000_000,
-      });
+      await joinRoomWithSupportedCrypto(
+        manager,
+        'room-1',
+        'u-prem',
+        'sock-prem',
+        { username: 'prem' },
+        undefined,
+        {
+          tier: 'premium',
+          allowedAudioTiers: ['minimum', 'low', 'moderate', 'standard', 'high', 'hifi', 'studio'],
+          minPtimeMs: 10,
+          maxManualBitrateBps: 10_000_000,
+        }
+      );
       const transport = createMockTransport();
       mockRouter.createWebRtcTransport.mockResolvedValueOnce(transport);
 
@@ -505,12 +556,20 @@ describe('RoomManager', () => {
     });
 
     it('does NOT apply the per-user cap to the RECV transport (keeps the global default)', async () => {
-      await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-free', 'sock-free', { username: 'free' }, undefined, {
-        tier: 'free',
-        allowedAudioTiers: ['minimum', 'low', 'moderate', 'standard'],
-        minPtimeMs: 20,
-        maxManualBitrateBps: 5_000_000,
-      });
+      await joinRoomWithSupportedCrypto(
+        manager,
+        'room-1',
+        'u-free',
+        'sock-free',
+        { username: 'free' },
+        undefined,
+        {
+          tier: 'free',
+          allowedAudioTiers: ['minimum', 'low', 'moderate', 'standard'],
+          minPtimeMs: 20,
+          maxManualBitrateBps: 5_000_000,
+        }
+      );
       const transport = createMockTransport();
       mockRouter.createWebRtcTransport.mockResolvedValueOnce(transport);
 
@@ -662,7 +721,9 @@ describe('RoomManager', () => {
       // Add 8 camera producers across multiple participants
       for (let i = 0; i < 8; i++) {
         const uid = `u-cam-${i}`;
-        await joinRoomWithSupportedCrypto(manager, 'room-1', uid, `sock-${i + 100}`, { username: `user${i}` });
+        await joinRoomWithSupportedCrypto(manager, 'room-1', uid, `sock-${i + 100}`, {
+          username: `user${i}`,
+        });
         const t = createMockTransport();
         mockRouter.createWebRtcTransport.mockResolvedValueOnce(t);
         await manager.createTransport('room-1', uid, 'send');
@@ -807,7 +868,9 @@ describe('RoomManager', () => {
     it('enforces screen share limit (max 5)', async () => {
       for (let i = 0; i < 5; i++) {
         const uid = `u-scr-${i}`;
-        await joinRoomWithSupportedCrypto(manager, 'room-1', uid, `sock-${i + 200}`, { username: `user${i}` });
+        await joinRoomWithSupportedCrypto(manager, 'room-1', uid, `sock-${i + 200}`, {
+          username: `user${i}`,
+        });
         const t = createMockTransport();
         mockRouter.createWebRtcTransport.mockResolvedValueOnce(t);
         await manager.createTransport('room-1', uid, 'send');
@@ -933,12 +996,20 @@ describe('RoomManager', () => {
       mockRouter.createWebRtcTransport.mockResolvedValueOnce(freeTransport);
       await manager.createTransport('room-1', 'u-1', 'send');
 
-      await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-prem', 'sock-prem', { username: 'prem' }, undefined, {
-        tier: 'premium',
-        allowedAudioTiers: ['minimum', 'low', 'moderate', 'standard', 'high', 'hifi', 'studio'],
-        minPtimeMs: 10,
-        maxManualBitrateBps: 10_000_000,
-      });
+      await joinRoomWithSupportedCrypto(
+        manager,
+        'room-1',
+        'u-prem',
+        'sock-prem',
+        { username: 'prem' },
+        undefined,
+        {
+          tier: 'premium',
+          allowedAudioTiers: ['minimum', 'low', 'moderate', 'standard', 'high', 'hifi', 'studio'],
+          minPtimeMs: 10,
+          maxManualBitrateBps: 10_000_000,
+        }
+      );
       premiumTransport = createMockTransport();
       mockRouter.createWebRtcTransport.mockResolvedValueOnce(premiumTransport);
       await manager.createTransport('room-1', 'u-prem', 'send');
@@ -1213,7 +1284,8 @@ describe('RoomManager', () => {
       );
 
       // u-2 joins with rtpCapabilities and creates recv transport
-      await joinRoomWithSupportedCrypto(manager,
+      await joinRoomWithSupportedCrypto(
+        manager,
         'room-1',
         'u-2',
         'sock-2',
@@ -1244,7 +1316,8 @@ describe('RoomManager', () => {
 
     it('throws when no recv transport exists', async () => {
       // u-3 joins without creating recv transport
-      await joinRoomWithSupportedCrypto(manager,
+      await joinRoomWithSupportedCrypto(
+        manager,
         'room-1',
         'u-3',
         'sock-3',
@@ -1303,7 +1376,8 @@ describe('RoomManager', () => {
 
     async function ensureParticipant(userId: string, videoCodecs?: string[]) {
       if (manager.getParticipant('room-1', userId)) return;
-      await joinRoomWithSupportedCrypto(manager,
+      await joinRoomWithSupportedCrypto(
+        manager,
         'room-1',
         userId,
         `sock-${userId}`,
@@ -1346,8 +1420,9 @@ describe('RoomManager', () => {
     it('rejects a consumer not owned by the caller', async () => {
       await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
 
-      await expect(manager.setPreferredCameraLayers('room-1', 'u-1', validLayerDemand('missing')))
-        .rejects.toThrow('Consumer not found');
+      await expect(
+        manager.setPreferredCameraLayers('room-1', 'u-1', validLayerDemand('missing'))
+      ).rejects.toThrow('Consumer not found');
     });
 
     it('clamps and applies preferred layers for an owned camera consumer', async () => {
@@ -1656,8 +1731,11 @@ describe('RoomManager', () => {
 
   describe('requestKeyFrame', () => {
     async function setupVideoProducer() {
-      await joinRoomWithSupportedCrypto(manager, 'room-1', 'sender', 'sock-sender', { username: 'sender' });
-      await joinRoomWithSupportedCrypto(manager,
+      await joinRoomWithSupportedCrypto(manager, 'room-1', 'sender', 'sock-sender', {
+        username: 'sender',
+      });
+      await joinRoomWithSupportedCrypto(
+        manager,
         'room-1',
         'viewer',
         'sock-viewer',
@@ -1704,7 +1782,9 @@ describe('RoomManager', () => {
     });
 
     it('rejects an unknown sender', async () => {
-      await joinRoomWithSupportedCrypto(manager, 'room-1', 'viewer', 'sock-viewer', { username: 'viewer' });
+      await joinRoomWithSupportedCrypto(manager, 'room-1', 'viewer', 'sock-viewer', {
+        username: 'viewer',
+      });
       const requestKeyFrame = (manager as any).requestKeyFrame;
       expect(requestKeyFrame).toBeTypeOf('function');
 
@@ -1733,8 +1813,12 @@ describe('RoomManager', () => {
     });
 
     it('does not cooldown no-op requests without an active video producer', async () => {
-      await joinRoomWithSupportedCrypto(manager, 'room-1', 'viewer', 'sock-viewer', { username: 'viewer' });
-      await joinRoomWithSupportedCrypto(manager, 'room-1', 'sender', 'sock-sender', { username: 'sender' });
+      await joinRoomWithSupportedCrypto(manager, 'room-1', 'viewer', 'sock-viewer', {
+        username: 'viewer',
+      });
+      await joinRoomWithSupportedCrypto(manager, 'room-1', 'sender', 'sock-sender', {
+        username: 'sender',
+      });
       const room = manager.getRoom('room-1')!;
       const requestKeyFrame = (manager as any).requestKeyFrame;
 
@@ -1791,14 +1875,16 @@ describe('RoomManager', () => {
     });
 
     it('returns intersection of video codecs', async () => {
-      await joinRoomWithSupportedCrypto(manager,
+      await joinRoomWithSupportedCrypto(
+        manager,
         'room-1',
         'u-1',
         'sock-1',
         { username: 'alice' },
         createRtpCapabilities(['video/VP8', 'video/VP9', 'video/H264']) as any
       );
-      await joinRoomWithSupportedCrypto(manager,
+      await joinRoomWithSupportedCrypto(
+        manager,
         'room-1',
         'u-2',
         'sock-2',
@@ -1814,14 +1900,16 @@ describe('RoomManager', () => {
     });
 
     it('normalizes mimeType to lowercase', async () => {
-      await joinRoomWithSupportedCrypto(manager,
+      await joinRoomWithSupportedCrypto(
+        manager,
         'room-1',
         'u-1',
         'sock-1',
         { username: 'alice' },
         createRtpCapabilities(['video/VP8']) as any
       );
-      await joinRoomWithSupportedCrypto(manager,
+      await joinRoomWithSupportedCrypto(
+        manager,
         'room-1',
         'u-2',
         'sock-2',
@@ -1834,7 +1922,8 @@ describe('RoomManager', () => {
     });
 
     it('skips participants with null rtpCapabilities', async () => {
-      await joinRoomWithSupportedCrypto(manager,
+      await joinRoomWithSupportedCrypto(
+        manager,
         'room-1',
         'u-1',
         'sock-1',
@@ -1842,7 +1931,8 @@ describe('RoomManager', () => {
         createRtpCapabilities(['video/VP8']) as any
       );
       await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-2', 'sock-2', { username: 'bob' }); // no capabilities
-      await joinRoomWithSupportedCrypto(manager,
+      await joinRoomWithSupportedCrypto(
+        manager,
         'room-1',
         'u-3',
         'sock-3',
@@ -1859,10 +1949,14 @@ describe('RoomManager', () => {
 
   describe('E2EE epoch', () => {
     it('increments epoch on join', async () => {
-      const result1 = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
+      const result1 = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', {
+        username: 'alice',
+      });
       expect(result1.e2eeEpoch).toBe(1);
 
-      const result2 = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-2', 'sock-2', { username: 'bob' });
+      const result2 = await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-2', 'sock-2', {
+        username: 'bob',
+      });
       expect(result2.e2eeEpoch).toBe(2);
     });
 
@@ -2093,7 +2187,9 @@ describe('RoomManager', () => {
 
     describe('serverMuteUser', () => {
       it('should set serverMuted flag and pause audio producers', async () => {
-        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
+        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', {
+          username: 'alice',
+        });
         const { producer } = await setupProducer(manager, mockRouter, 'room-1', 'u-1');
 
         await manager.serverMuteUser('room-1', 'u-1');
@@ -2104,7 +2200,9 @@ describe('RoomManager', () => {
       });
 
       it('should not pause video producers', async () => {
-        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
+        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', {
+          username: 'alice',
+        });
         const { producer } = await setupProducer(
           manager,
           mockRouter,
@@ -2130,7 +2228,9 @@ describe('RoomManager', () => {
 
     describe('serverUnmuteUser', () => {
       it('should clear serverMuted flag without resuming producers', async () => {
-        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
+        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', {
+          username: 'alice',
+        });
         const { producer } = await setupProducer(manager, mockRouter, 'room-1', 'u-1');
 
         await manager.serverMuteUser('room-1', 'u-1');
@@ -2145,7 +2245,9 @@ describe('RoomManager', () => {
     describe('serverDeafenUser', () => {
       it('should set both flags and pause audio producers and consumers', async () => {
         // u-1 produces audio
-        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
+        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', {
+          username: 'alice',
+        });
         const { producer, info: producerInfo } = await setupProducer(
           manager,
           mockRouter,
@@ -2154,7 +2256,8 @@ describe('RoomManager', () => {
         );
 
         // u-2 joins, produces audio, and consumes u-1's audio
-        await joinRoomWithSupportedCrypto(manager,
+        await joinRoomWithSupportedCrypto(
+          manager,
           'room-1',
           'u-2',
           'sock-2',
@@ -2181,7 +2284,9 @@ describe('RoomManager', () => {
 
       it('should not pause video consumers', async () => {
         // u-1 produces video
-        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
+        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', {
+          username: 'alice',
+        });
         const { info: producerInfo } = await setupProducer(
           manager,
           mockRouter,
@@ -2192,7 +2297,8 @@ describe('RoomManager', () => {
         );
 
         // u-2 joins and consumes u-1's video
-        await joinRoomWithSupportedCrypto(manager,
+        await joinRoomWithSupportedCrypto(
+          manager,
           'room-1',
           'u-2',
           'sock-2',
@@ -2218,11 +2324,14 @@ describe('RoomManager', () => {
     describe('serverUndeafenUser', () => {
       it('should clear both flags without resuming producers or consumers', async () => {
         // u-1 produces audio
-        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
+        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', {
+          username: 'alice',
+        });
         const { info: producerInfo } = await setupProducer(manager, mockRouter, 'room-1', 'u-1');
 
         // u-2 joins, produces audio, and consumes u-1's audio
-        await joinRoomWithSupportedCrypto(manager,
+        await joinRoomWithSupportedCrypto(
+          manager,
           'room-1',
           'u-2',
           'sock-2',
@@ -2255,7 +2364,9 @@ describe('RoomManager', () => {
 
     describe('userMuteParticipant', () => {
       it('should pause audio producers without setting server flags', async () => {
-        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
+        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', {
+          username: 'alice',
+        });
         const { producer } = await setupProducer(manager, mockRouter, 'room-1', 'u-1');
 
         await manager.userMuteParticipant('room-1', 'u-1');
@@ -2266,7 +2377,9 @@ describe('RoomManager', () => {
       });
 
       it('should not pause video producers', async () => {
-        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
+        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', {
+          username: 'alice',
+        });
         const { producer } = await setupProducer(
           manager,
           mockRouter,
@@ -2285,11 +2398,14 @@ describe('RoomManager', () => {
     describe('userDeafenParticipant', () => {
       it('should pause audio producers and consumers without setting server flags', async () => {
         // u-1 produces audio
-        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
+        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', {
+          username: 'alice',
+        });
         const { info: producerInfo } = await setupProducer(manager, mockRouter, 'room-1', 'u-1');
 
         // u-2 joins, produces audio, and consumes u-1's audio
-        await joinRoomWithSupportedCrypto(manager,
+        await joinRoomWithSupportedCrypto(
+          manager,
           'room-1',
           'u-2',
           'sock-2',
@@ -2317,7 +2433,9 @@ describe('RoomManager', () => {
 
     describe('enforcement on join', () => {
       it('should initialize serverMuted and serverDeafened as false', async () => {
-        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
+        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', {
+          username: 'alice',
+        });
 
         const participant = manager.getParticipant('room-1', 'u-1');
         expect(participant?.serverMuted).toBe(false);
@@ -2325,7 +2443,9 @@ describe('RoomManager', () => {
       });
 
       it('should persist flags after being set', async () => {
-        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', { username: 'alice' });
+        await joinRoomWithSupportedCrypto(manager, 'room-1', 'u-1', 'sock-1', {
+          username: 'alice',
+        });
 
         await manager.serverMuteUser('room-1', 'u-1');
         await manager.serverDeafenUser('room-1', 'u-1');
@@ -2377,7 +2497,8 @@ describe('resumeConsumer last-N guard (#1544)', () => {
     );
 
     // u-2 subscribes to u-1's audio with a deterministic consumer id.
-    await joinRoomWithSupportedCrypto(rm,
+    await joinRoomWithSupportedCrypto(
+      rm,
       'room-1',
       'u-2',
       'sock-2',
@@ -2566,7 +2687,8 @@ describe('audio last-N small-room no-op (#1742)', () => {
     }
 
     // u-2 subscribes to u-1's mic with a deterministic consumer id.
-    await joinRoomWithSupportedCrypto(rm,
+    await joinRoomWithSupportedCrypto(
+      rm,
       'room-1',
       'u-2',
       'sock-2',
