@@ -487,14 +487,46 @@ _up_clients() {
     exit 3
   fi
 
+  # Resolve the Electron binary once and launch it DIRECTLY (not via `npx`):
+  # concurrent `npx electron` invocations contend on the shared npx cache and
+  # silently fail to spawn clients 2..N (empty log, no window) — the cause of
+  # "only 1 client launched". The resolved path also makes $! the real Electron
+  # main PID, so the per-client .pid files are accurate and `down` can stop them.
+  local electron_bin
+  electron_bin="$(node -p "require('electron')" 2>/dev/null)"
+  if [[ -z "$electron_bin" || ! -x "$electron_bin" ]]; then
+    echo -e "${RED}✗${NC} Could not resolve Electron binary (node -p \"require('electron')\")" >&2
+    exit 3
+  fi
+
+  # Synthetic camera/mic is ON BY DEFAULT for the dev harness. Every client gets a
+  # fake A/V device (a deterministic moving test pattern + beep) so video E2EE is
+  # testable with VISIBLE content end-to-end, all N clients can publish without
+  # contending for the one real camera, and there is NO macOS Camera/Screen-
+  # Recording TCC prompt (the unsigned dev Electron binary's TCC grants are
+  # unreliable). This is a laptop-only test harness, so synthetic media is the
+  # sane default; opt out to use the REAL camera/mic/screen with:
+  #     CONCORD_DEV_FAKE_MEDIA=0 ./scripts/concord-dev.sh up ...
+  local media_flags=()
+  if [[ "${CONCORD_DEV_FAKE_MEDIA:-1}" == "1" ]]; then
+    media_flags=(--use-fake-device-for-media-stream --use-fake-ui-for-media-stream)
+    [[ "$QUIET" -eq 0 ]] && echo -e "  ${BLUE}🎥 synthetic camera/mic ON (default — set CONCORD_DEV_FAKE_MEDIA=0 for real devices)${NC}"
+  fi
+
   for i in $(seq 1 "$num_clients"); do
+    # Per-client isolation via --user-data-dir. This only works because
+    # pinUserDataPath() (src/main/pinUserDataPath.ts) honors an explicit
+    # --user-data-dir and skips the <appData>/ConcordVoice pin in that case.
+    # (HOME isolation does NOT work on macOS: app.getPath('appData') resolves via
+    # the Cocoa API to the real home and ignores $HOME, so all instances would
+    # collide on one userData + one single-instance lock — only 1 client survives.)
     local user_data="$PROJECT_ROOT/.dev-data/client-$i"
     mkdir -p "$user_data"
-    NODE_ENV=development nohup npx electron . --user-data-dir="$user_data" \
+    NODE_ENV=development nohup "$electron_bin" . --user-data-dir="$user_data" "${media_flags[@]}" \
       > "$LOG_DIR/desktop-client-$i.log" 2>&1 &
     echo $! > "$LOG_DIR/desktop-client-$i.pid"
     [[ "$QUIET" -eq 0 ]] && echo -e "  ${GREEN}→${NC} Client $i: PID $! (data: $user_data)"
-    sleep 1
+    sleep 2
   done
 
   cd "$PROJECT_ROOT"
