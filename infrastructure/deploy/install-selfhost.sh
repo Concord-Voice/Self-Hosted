@@ -393,9 +393,9 @@ provision_tls() {
     local)
       # Self-signed needs no nginx/webroot — safe to provision now.
       if [[ -n "${CFG_PUBLIC_IP:-}" ]]; then
-        bash "$pc" local --host "$CFG_DOMAIN" --ip "$CFG_PUBLIC_IP" || true
+        bash "$pc" local --host "$CFG_DOMAIN" --ip "$CFG_PUBLIC_IP"
       else
-        bash "$pc" local --host "$CFG_DOMAIN" || true
+        bash "$pc" local --host "$CFG_DOMAIN"
       fi
       ;;
     letsencrypt)
