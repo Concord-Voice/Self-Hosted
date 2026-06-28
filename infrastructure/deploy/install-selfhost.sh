@@ -197,6 +197,16 @@ validate_smtp_port() {
   return 0
 }
 
+# validate_tls_mode MODE — one of letsencrypt|local|import (TLS provisioning
+# mode handed to provision-cert.sh; #1617). A CLI/wizard choice, never an .env
+# var (DR-1: no config.go consumer, no 5-surface discipline).
+validate_tls_mode() {
+  case "${1:-}" in
+    letsencrypt|local|import) return 0 ;;
+    *) echo -e "${RED}invalid TLS mode: ${1:-} (letsencrypt|local|import)${NC}" >&2; return 1 ;;
+  esac
+}
+
 # warn_public_ip IP — non-fatal advisory for an empty/private/NAT PUBLIC_IP.
 warn_public_ip() {
   local ip="${1:-}"
@@ -212,6 +222,7 @@ warn_public_ip() {
 # per-prompt validation would catch but the --env-file path otherwise would not.
 validate_collected_config() {
   validate_domain "${CFG_DOMAIN:-}" || exit 1
+  validate_tls_mode "${CFG_TLS_MODE:-letsencrypt}" || exit 1
   validate_cidrs "${CFG_TRUSTED_CIDRS:-}" || exit 1
   validate_smtp_port "${CFG_SMTP_PORT:-}" || exit 1
   warn_public_ip "${CFG_PUBLIC_IP:-}"
@@ -246,7 +257,7 @@ load_answers() {
     val="${line#*=}"
     printf -v "$key" '%s' "$val"
   done <"$f"
-  : "${CFG_FEEDBACK_ENABLED:=no}" "${CFG_TURN_REALM:=${CFG_DOMAIN:-}}"
+  : "${CFG_FEEDBACK_ENABLED:=no}" "${CFG_TURN_REALM:=${CFG_DOMAIN:-}}" "${CFG_TLS_MODE:=letsencrypt}"
   validate_domain "${CFG_DOMAIN:-}" || return 1
 }
 
@@ -272,6 +283,11 @@ collect_config() {
   echo -e "${BLUE}Concord Voice self-hosted install${NC}"
   CFG_DOMAIN="$(ask 'Primary domain (apex, e.g. example.com)')"
   validate_domain "$CFG_DOMAIN" || exit 1
+  CFG_TLS_MODE="$(ask 'TLS mode (letsencrypt recommended / local / import)' letsencrypt)"
+  validate_tls_mode "$CFG_TLS_MODE" || exit 1
+  if [[ "$CFG_TLS_MODE" == local ]]; then
+    echo -e "${YELLOW}⚠ 'local' self-signed has NO MITM protection on untrusted networks — trusted LAN/homelab only. Use 'letsencrypt' for any internet-reachable host.${NC}" >&2
+  fi
   CFG_TURN_REALM="$(ask 'TURN realm' "$CFG_DOMAIN")"
   CFG_PUBLIC_IP="$(ask 'Public IP (blank = auto-detect)' "$(detect_public_ip)")"
   echo -e "Object storage: bundled MinIO (external BYO-S3 is a deferred follow-up)."
@@ -361,14 +377,54 @@ render_nginx() {
   echo -e "${GREEN}✓ rendered nginx vhost -> $NGINX_OUT${NC} (run: sudo cp it into /etc/nginx/... then nginx -t)"
 }
 
+# ── TLS cert provisioning (#1617) ────────────────────────────────────────────
+
+# provision_tls — invoke provision-cert.sh for the selected mode. Mode is a
+# wizard answer / CLI arg, NEVER written to .env (DR-1). Root-only; skipped
+# when SELFHOST_SKIP_CERT=1 (CI/tests, or operator deferring cert setup).
+# PROVISION_CERT is overridable for tests (default: the sibling script).
+provision_tls() {
+  if [[ "${SELFHOST_SKIP_CERT:-0}" == 1 ]]; then
+    echo -e "${YELLOW}⚠ skipping cert provisioning (SELFHOST_SKIP_CERT=1) — run provision-cert.sh manually.${NC}" >&2
+    return 0
+  fi
+  local pc="${PROVISION_CERT:-$SCRIPT_DIR/provision-cert.sh}"
+  case "${CFG_TLS_MODE:-letsencrypt}" in
+    local)
+      # Self-signed needs no nginx/webroot — safe to provision now.
+      if [[ -n "${CFG_PUBLIC_IP:-}" ]]; then
+        bash "$pc" local --host "$CFG_DOMAIN" --ip "$CFG_PUBLIC_IP" || true
+      else
+        bash "$pc" local --host "$CFG_DOMAIN" || true
+      fi
+      ;;
+    letsencrypt)
+      # DEFERRED (not auto-run): certbot --webroot needs the rendered nginx vhost
+      # installed and serving /var/www/html on port 80 — which the operator does
+      # AFTER this wizard (summary steps 2-3). Running certbot now would fail the
+      # ACME HTTP-01 challenge. Unlike provision-production.sh (which bootstraps
+      # ufw/webroot/nginx-on-80 before delegating), the installer does not. Print
+      # the exact command to run once nginx is up.
+      echo -e "${YELLOW}⚠ letsencrypt: run AFTER installing the nginx vhost + opening port 80 (steps below):${NC}" >&2
+      echo -e "${YELLOW}    sudo $pc letsencrypt --domain $CFG_DOMAIN --email ${CFG_SMTP_FROM:-admin@$CFG_DOMAIN}${NC}" >&2
+      ;;
+    import)
+      echo -e "${YELLOW}⚠ import mode: provide your PEM pair, then run:${NC}" >&2
+      echo -e "${YELLOW}    sudo $pc import --cert <cert.pem> --key <key.pem> --host $CFG_DOMAIN${NC}" >&2
+      ;;
+  esac
+}
+
 # ── Summary ────────────────────────────────────────────────────────────────────
 
 print_summary() {
   # shellcheck disable=SC2028
   echo -e "
 ${GREEN}Install configured.${NC} Next steps:
-  1. Get TLS certs (ACME recommended — a working desktop client needs a publicly-trusted cert).
-     See docs/runbooks/selfhost-quickstart.md for certbot + self-signed guidance.
+  1. TLS certs (mode '${CFG_TLS_MODE:-letsencrypt}'): 'local' self-signed is provisioned now;
+     'letsencrypt' and 'import' are DEFERRED — run the printed provision-cert.sh command
+     AFTER installing the nginx vhost + opening port 80 (steps 2-3 below). Self-signed
+     'local' is trusted-LAN-only (no MITM protection). Guide: docs/runbooks/self-hosted-tls.md
   2. Install the rendered nginx vhost:
        sudo cp $NGINX_OUT /etc/nginx/conf.d/ && sudo nginx -t && sudo systemctl reload nginx
   3. Open firewall ports (UFW):
@@ -406,6 +462,7 @@ main() {
   run_preflight
   write_env_file
   render_nginx
+  provision_tls
   print_summary
 }
 
