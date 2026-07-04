@@ -4,6 +4,23 @@ All notable changes to Concord Voice will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.2.23] — 2026-07-04
+
+### Added
+
+- **Manage your subscription in the app** ([#2043](internal development reference omitted)) — a new Settings ▸ Subscription page lets you redeem a code and see your current plan and status at a glance.
+- **Audio and video quality that follows your plan** ([#2042](internal development reference omitted), [#2039](internal development reference omitted), [#2038](internal development reference omitted)) — call quality, per-room camera and screenshare limits, and server capabilities now track your tier. When bandwidth gets tight, the app sheds webcam before screenshare before audio, so voice stays clear.
+- **Higher limits for subscribers** ([#2040](internal development reference omitted)) — how many servers you can create and how deep you can search now scale with your subscription.
+- **Smoother GIFs, safely** ([#2041](internal development reference omitted)) — the GIF pipeline preserves animation while guarding against maliciously oversized files.
+
+### Fixed
+
+- **Single sign-on no longer times out mid-signup** ([#2047](internal development reference omitted)) — SSO registration now gets a proper 15-minute token window and recovers gracefully if it expires, instead of stranding you partway through.
+
+### Changed
+
+- **Behind-the-scenes CI, supply-chain hardening, and dependency upkeep** ([#2049](internal development reference omitted), [#2046](internal development reference omitted), [#2036](internal development reference omitted), [#2035](internal development reference omitted)) — tighter least-privilege on the release workflows, a security-patched build toolchain, and routine dependency refreshes.
+
 ## [0.2.22] — 2026-07-02
 
 ### Added
