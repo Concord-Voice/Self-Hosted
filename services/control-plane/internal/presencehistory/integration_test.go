@@ -272,37 +272,168 @@ func TestDisableAndDeleteIsIdempotentAndPristineSafe(t *testing.T) {
 }
 
 func TestDisableConvergesWithStatusWriter(t *testing.T) {
-	ts := testhelpers.SetupTestServer(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	disclosure := BuildDisclosure(DisclosureOptions{InstanceType: "saas"})
-	service := NewService(ts.DB, disclosure, true)
-	user := ts.CreateTestUser(t, "history_disable_writer")
-	userID := uuid.MustParse(user.ID)
-	enableThroughService(t, service, disclosure, userID, 30)
+	t.Run("writer first", func(t *testing.T) {
+		db, cleanup := testhelpers.SetupTestDB(t)
+		defer cleanup()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		disclosure := BuildDisclosure(DisclosureOptions{InstanceType: "saas"})
+		service := NewService(db, disclosure, true)
+		userID := testhelpers.CreateUser(t, db)
+		enableThroughService(t, service, disclosure, userID, 30)
 
-	writer, err := ts.DB.BeginTx(ctx, nil)
-	require.NoError(t, err)
-	require.NoError(t, service.repository.RecordCustomTextTransition(ctx, writer, userID,
-		CustomTextState{}, CustomTextState{Text: "racing"}))
-	done := make(chan error, 1)
-	go func() { done <- service.DisableAndDelete(ctx, userID) }()
-	select {
-	case early := <-done:
-		require.Failf(t, "disable bypassed writer lock", "result: %v", early)
-	case <-time.After(100 * time.Millisecond):
+		writer, err := db.BeginTx(ctx, nil)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			if rollbackErr := writer.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+				t.Errorf("rollback writer-first transaction: %v", rollbackErr)
+			}
+		})
+		require.NoError(t, service.RecordCustomTextTransition(ctx, writer, userID,
+			CustomTextState{}, CustomTextState{Text: "racing"}))
+		writerPID := historyBackendPID(ctx, t, writer)
+
+		disableDone := make(chan error, 1)
+		go func() { disableDone <- service.DisableAndDelete(ctx, userID) }()
+		_ = waitForHistoryBlockedBackend(ctx, t, db, writerPID)
+
+		require.NoError(t, writer.Commit())
+		require.NoError(t, receiveHistoryOperation(ctx, t, disableDone))
+		assert.Zero(t, historyRowCount(t, db, userID))
+	})
+
+	t.Run("disable first", func(t *testing.T) {
+		db, cleanup := testhelpers.SetupTestDB(t)
+		defer cleanup()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		disclosure := BuildDisclosure(DisclosureOptions{InstanceType: "saas"})
+		service := NewService(db, disclosure, true)
+		userID := testhelpers.CreateUser(t, db)
+		enableThroughService(t, service, disclosure, userID, 30)
+		require.NoError(t, recordHistoryTransitionAndCommit(
+			ctx,
+			service,
+			db,
+			userID,
+			CustomTextState{},
+			CustomTextState{Text: "before disable"},
+		))
+
+		historyBlocker, err := db.BeginTx(ctx, nil)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			if rollbackErr := historyBlocker.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+				t.Errorf("rollback disable-first blocker: %v", rollbackErr)
+			}
+		})
+		var lockedID uuid.UUID
+		require.NoError(t, historyBlocker.QueryRowContext(ctx, `
+			SELECT id
+			FROM presence_history
+			WHERE sender_id = $1
+			FOR UPDATE
+		`, userID).Scan(&lockedID))
+		blockerPID := historyBackendPID(ctx, t, historyBlocker)
+
+		disableDone := make(chan error, 1)
+		go func() { disableDone <- service.DisableAndDelete(ctx, userID) }()
+		disablePID := waitForHistoryBlockedBackend(ctx, t, db, blockerPID)
+
+		writerDone := make(chan error, 1)
+		go func() {
+			writerDone <- recordHistoryTransitionAndCommit(
+				ctx,
+				service,
+				db,
+				userID,
+				CustomTextState{Text: "before disable"},
+				CustomTextState{Text: "after disable"},
+			)
+		}()
+		_ = waitForHistoryBlockedBackend(ctx, t, db, disablePID)
+
+		require.NoError(t, historyBlocker.Commit())
+		require.NoError(t, receiveHistoryOperation(ctx, t, disableDone))
+		require.NoError(t, receiveHistoryOperation(ctx, t, writerDone))
+		assert.Zero(t, historyRowCount(t, db, userID))
+	})
+}
+
+func historyBackendPID(ctx context.Context, t *testing.T, tx *sql.Tx) int {
+	t.Helper()
+	var pid int
+	require.NoError(t, tx.QueryRowContext(ctx, `SELECT pg_backend_pid()`).Scan(&pid))
+	return pid
+}
+
+func waitForHistoryBlockedBackend(
+	ctx context.Context,
+	t *testing.T,
+	db *sql.DB,
+	blockerPID int,
+) int {
+	t.Helper()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		var blockedPID int
+		err := db.QueryRowContext(ctx, `
+			SELECT COALESCE((
+				SELECT activity.pid
+				FROM pg_stat_activity AS activity
+				WHERE $1::INTEGER = ANY(pg_blocking_pids(activity.pid))
+				  AND activity.pid <> pg_backend_pid()
+				ORDER BY activity.pid
+				LIMIT 1
+			), 0)
+		`, blockerPID).Scan(&blockedPID)
+		if err != nil {
+			t.Fatalf("observe blocked activity history backend: %v", err)
+		}
+		if blockedPID != 0 {
+			return blockedPID
+		}
+		select {
+		case <-ctx.Done():
+			t.Fatalf("activity history lock waiter was not observed: %v", ctx.Err())
+		case <-ticker.C:
+		}
 	}
-	require.NoError(t, writer.Commit())
-	require.NoError(t, <-done)
-	assert.Zero(t, historyRowCount(t, ts.DB, userID))
+}
 
-	require.NoError(t, service.DisableAndDelete(ctx, userID))
-	tx, err := ts.DB.BeginTx(ctx, nil)
-	require.NoError(t, err)
-	require.NoError(t, service.repository.RecordCustomTextTransition(ctx, tx, userID,
-		CustomTextState{}, CustomTextState{Text: "after disable"}))
-	require.NoError(t, tx.Commit())
-	assert.Zero(t, historyRowCount(t, ts.DB, userID))
+func recordHistoryTransitionAndCommit(
+	ctx context.Context,
+	service *Service,
+	db *sql.DB,
+	userID uuid.UUID,
+	before CustomTextState,
+	after CustomTextState,
+) (returnErr error) {
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			returnErr = errors.Join(returnErr, rollbackErr)
+		}
+	}()
+	if err := service.RecordCustomTextTransition(ctx, tx, userID, before, after); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func receiveHistoryOperation(ctx context.Context, t *testing.T, result <-chan error) error {
+	t.Helper()
+	select {
+	case err := <-result:
+		return err
+	case <-ctx.Done():
+		t.Fatalf("activity history operation did not finish: %v", ctx.Err())
+		return nil
+	}
 }
 
 func TestHistoryListPrunesExactCutoffAndValidatesOptions(t *testing.T) {

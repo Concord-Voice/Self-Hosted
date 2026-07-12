@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 )
 
 const (
@@ -68,12 +69,24 @@ type SettingsRow struct {
 type Repository struct {
 	db         *sql.DB
 	disclosure DisclosureState
+	log        *logger.Logger
 }
 
 // NewRepository constructs an Activity History repository for one process's
 // immutable startup disclosure.
 func NewRepository(db *sql.DB, disclosure DisclosureState) *Repository {
-	return &Repository{db: db, disclosure: cloneDisclosure(disclosure)}
+	return newRepositoryWithLogger(db, disclosure, logger.New("production"))
+}
+
+func newRepositoryWithLogger(
+	db *sql.DB,
+	disclosure DisclosureState,
+	log *logger.Logger,
+) *Repository {
+	if log == nil {
+		log = logger.New("production")
+	}
+	return &Repository{db: db, disclosure: cloneDisclosure(disclosure), log: log}
 }
 
 func cloneDisclosure(disclosure DisclosureState) DisclosureState {
@@ -86,7 +99,11 @@ func cloneDisclosure(disclosure DisclosureState) DisclosureState {
 }
 
 // List returns only the requested sender's unexpired intervals.
-func (r *Repository) List(ctx context.Context, senderID uuid.UUID, options ListOptions) (HistoryPage, error) {
+func (r *Repository) List(
+	ctx context.Context,
+	senderID uuid.UUID,
+	options ListOptions,
+) (HistoryPage, error) {
 	limit := options.Limit
 	if limit == 0 {
 		limit = defaultPageLimit
@@ -127,18 +144,24 @@ func (r *Repository) List(ctx context.Context, senderID uuid.UUID, options ListO
 	if err != nil {
 		return HistoryPage{}, fmt.Errorf("list activity history: %w", err)
 	}
-	defer func() { _ = rows.Close() }()
 
 	items := make([]HistoryItem, 0, limit+1)
+	unsupportedCount := 0
 	for rows.Next() {
 		item, err := scanHistoryItem(rows)
 		if err != nil {
-			return HistoryPage{}, err
+			return HistoryPage{}, closeListRowsWithError(rows, err)
+		}
+		if item.Status == ItemStatusUnsupported {
+			unsupportedCount++
 		}
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
-		return HistoryPage{}, fmt.Errorf("list activity history rows: %w", err)
+		return HistoryPage{}, closeListRowsWithError(
+			rows,
+			fmt.Errorf("list activity history rows: %w", err),
+		)
 	}
 
 	hasMore := len(items) > limit
@@ -150,11 +173,32 @@ func (r *Repository) List(ctx context.Context, senderID uuid.UUID, options ListO
 		last := items[len(items)-1]
 		encoded, err := EncodeCursor(PageCursor{Version: 1, RecordedAt: last.RecordedAt, ID: last.ID})
 		if err != nil {
-			return HistoryPage{}, fmt.Errorf("encode activity history page boundary: %w", err)
+			return HistoryPage{}, closeListRowsWithError(
+				rows,
+				fmt.Errorf("encode activity history page boundary: %w", err),
+			)
 		}
 		page.NextCursor = &encoded
 	}
+	if err := rows.Close(); err != nil {
+		return HistoryPage{}, fmt.Errorf("close activity history rows: %w", err)
+	}
+	if unsupportedCount > 0 {
+		r.log.Warn(
+			"stored activity payload is unsupported",
+			"operation", "activity_history_read",
+			"error_class", "unsupported_stored_payload",
+			"unsupported_count", unsupportedCount,
+		)
+	}
 	return page, nil
+}
+
+func closeListRowsWithError(rows *sql.Rows, cause error) error {
+	if closeErr := rows.Close(); closeErr != nil {
+		return errors.Join(cause, fmt.Errorf("close activity history rows: %w", closeErr))
+	}
+	return cause
 }
 
 type rowScanner interface {
