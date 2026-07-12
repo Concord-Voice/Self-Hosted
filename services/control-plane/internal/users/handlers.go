@@ -10,7 +10,6 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -20,6 +19,7 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/entitlements"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/media"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/presencehistory"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/websocket"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 )
@@ -31,23 +31,11 @@ const (
 	errMsgFailedChangePassword  = "Failed to change password"
 	errMsgMFAVerificationFailed = "MFA verification failed"
 	dataImagePrefix             = "data:image/"
-	customStatusLockStripes     = 256
 )
 
 // MFAVerifier checks MFA status and verifies codes for sensitive operations.
 type MFAVerifier interface {
 	VerifyCodeTx(ctx context.Context, tx *sql.Tx, userID string, code string) (bool, error)
-}
-
-type presenceOverrideBroadcaster interface {
-	BroadcastCustomText(uuid.UUID, int, *websocket.CustomTextPayload)
-	BroadcastToUser(uuid.UUID, websocket.OutgoingMessage)
-	BroadcastCustomTextAudienceDelta(
-		uuid.UUID,
-		map[uuid.UUID]bool,
-		map[uuid.UUID]bool,
-		*websocket.CustomTextPayload,
-	)
 }
 
 type customTextResetBroadcaster interface {
@@ -58,69 +46,17 @@ type sessionDisconnector interface {
 	DisconnectUser(uuid.UUID)
 }
 
-// customStatusCoordinator serializes Custom Status persistence and synchronous
-// fan-out for one sender. The production implementation remains the bounded
-// 256-stripe mutex coordinator; the interface is private so deterministic
-// handler-level concurrency tests can observe queueing without exposing a
-// production API.
-type customStatusCoordinator interface {
-	WithSender(uuid.UUID, func())
-}
-
-type stripedCustomStatusCoordinator struct {
-	locks *[customStatusLockStripes]sync.Mutex
-}
-
-func (c *stripedCustomStatusCoordinator) WithSender(senderID uuid.UUID, fn func()) {
-	lock := customStatusLock(c.locks, senderID)
-	lock.Lock()
-	defer lock.Unlock()
-	fn()
-}
-
 // Handler handles user-related requests including profile management and settings.
 type Handler struct {
-	db                          *sql.DB
-	log                         *logger.Logger
-	hub                         *websocket.Hub
-	presenceOverrideBroadcaster presenceOverrideBroadcaster
-	customTextResetBroadcaster  customTextResetBroadcaster
-	sessionDisconnector         sessionDisconnector
-	customStatusLocks           [customStatusLockStripes]sync.Mutex
-	customStatusCoordinator     customStatusCoordinator
-	mfaVerifier                 MFAVerifier
-	tiers                       entitlements.TierResolver // resolves the acting user's subscription tier (#1298)
-	store                       media.ObjectDeleter       // nil when object storage is not configured
-}
-
-func (h *Handler) customStatusLock(senderID uuid.UUID) *sync.Mutex {
-	return customStatusLock(&h.customStatusLocks, senderID)
-}
-
-func customStatusLock(locks *[customStatusLockStripes]sync.Mutex, senderID uuid.UUID) *sync.Mutex {
-	const (
-		fnvOffset32 = uint32(2166136261)
-		fnvPrime32  = uint32(16777619)
-	)
-	hash := fnvOffset32
-	for _, part := range senderID {
-		hash ^= uint32(part)
-		hash *= fnvPrime32
-	}
-	return &locks[int(hash%customStatusLockStripes)]
-}
-
-func (h *Handler) withCustomStatusSender(senderID uuid.UUID, fn func()) {
-	if h.customStatusCoordinator != nil {
-		h.customStatusCoordinator.WithSender(senderID, fn)
-		return
-	}
-	// Preserve safe zero-value behavior for narrow unit tests that construct a
-	// Handler literal instead of going through NewHandler.
-	lock := h.customStatusLock(senderID)
-	lock.Lock()
-	defer lock.Unlock()
-	fn()
+	db                         *sql.DB
+	log                        *logger.Logger
+	hub                        *websocket.Hub
+	presenceHistory            *presencehistory.Service
+	customTextResetBroadcaster customTextResetBroadcaster
+	sessionDisconnector        sessionDisconnector
+	mfaVerifier                MFAVerifier
+	tiers                      entitlements.TierResolver // resolves the acting user's subscription tier (#1298)
+	store                      media.ObjectDeleter       // nil when object storage is not configured
 }
 
 // NewHandler creates a new user handler.
@@ -132,13 +68,17 @@ func NewHandler(db *sql.DB, log *logger.Logger, hub *websocket.Hub, mfaVerifier 
 		mfaVerifier: mfaVerifier,
 		tiers:       tiers,
 	}
-	h.customStatusCoordinator = &stripedCustomStatusCoordinator{locks: &h.customStatusLocks}
 	if hub != nil {
-		h.presenceOverrideBroadcaster = hub
 		h.customTextResetBroadcaster = hub
 		h.sessionDisconnector = hub
 	}
 	return h
+}
+
+// SetPresenceHistory injects the one concrete service shared by Custom Status
+// writers, acknowledged delivery, reconciliation, and reconnect snapshots.
+func (h *Handler) SetPresenceHistory(service *presencehistory.Service) {
+	h.presenceHistory = service
 }
 
 // SetMediaStore configures optional object storage for media cleanup on profile image removal.
@@ -326,7 +266,11 @@ func (h *Handler) ReplaceMyKeys(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgUnauthorized})
 		return
 	}
-	h.withCustomStatusSender(senderID, func() {
+	if h.presenceHistory == nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error": errMsgFailedReplaceKeys})
+		return
+	}
+	err = h.presenceHistory.WithReadySender(c.Request.Context(), senderID, func() error {
 		h.replaceMyKeysCoordinated(
 			c,
 			userID,
@@ -336,7 +280,11 @@ func (h *Handler) ReplaceMyKeys(c *gin.Context) {
 			saltBytes,
 			publicKeyBytes,
 		)
+		return nil
 	})
+	if err != nil && !c.Writer.Written() {
+		h.respondPresenceWriterFailure(c, errMsgFailedReplaceKeys, err)
+	}
 }
 
 func (h *Handler) replaceMyKeysCoordinated(

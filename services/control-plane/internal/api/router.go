@@ -27,6 +27,7 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/notifications"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/ownership"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/presencehistory"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/servercapabilities"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/servers"
@@ -160,6 +161,15 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 
 	// Initialize WebSocket hub
 	hub := websocket.NewHub(db, redis)
+	presenceHistoryService := presencehistory.NewService(
+		db,
+		presencehistory.DisclosureState{},
+		false,
+	)
+	if err := presenceHistoryService.BindDelivery(hub); err != nil {
+		log.Fatal("Failed to bind Custom Status delivery", "error_class", "delivery_binding")
+	}
+	hub.SetPresenceHistoryService(presenceHistoryService)
 
 	// Initialize NATS (inter-service messaging with media plane)
 	var natsClient *natsclient.Client
@@ -215,6 +225,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	serverEntCache := entitlements.NewServerCacheForInstance(redis, db, cfg.InstanceType)
 	sessionsHandler := sessions.NewHandler(db, redis, log, hub, mfaHandler)
 	usersHandler := users.NewHandler(db, log, hub, mfaHandler, entCache)
+	usersHandler.SetPresenceHistory(presenceHistoryService)
 	serversHandler := servers.NewHandler(db, log, hub, rbacResolver, entCache, serverEntCache)
 	channelsHandler := channels.NewHandler(db, log, hub, rbacResolver, redis, serverEntCache)
 	membersHandler := members.NewHandler(db, log, redis, hub, rbacResolver, auditWriter)

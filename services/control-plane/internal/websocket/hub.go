@@ -80,8 +80,6 @@ type Hub struct {
 	customTextDeliveryBroadcaster   func(context.Context, *Client, []byte) error
 	customTextDeliveryBeforeEnqueue func()
 	customTextClientDisconnect      func(*Client) error
-	customTextDeliveryLocks         [customTextDeliveryLockStripes]sync.Mutex
-	customTextDeliveryCoordinator   customTextDeliveryCoordinator
 
 	// Registered clients (client ID -> Client)
 	clients map[uuid.UUID]*Client

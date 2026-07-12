@@ -16,6 +16,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/presencehistory"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/users"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/stretchr/testify/assert"
@@ -57,12 +58,37 @@ func (*ambiguousKeyResetCommitConn) ExecContext(
 func (c *ambiguousKeyResetCommitConn) QueryContext(
 	_ context.Context,
 	query string,
-	_ []driver.NamedValue,
+	args []driver.NamedValue,
 ) (driver.Rows, error) {
+	if strings.Contains(query, "SELECT id FROM users") {
+		return &singleValueRow{column: "id", value: args[0].Value}, nil
+	}
+	if strings.Contains(query, "user_presence_settings") ||
+		strings.Contains(query, "presence_settings_pending_operations") {
+		return &singleValueRow{column: "empty", empty: true}, nil
+	}
 	if strings.Contains(query, "mfa_enabled") {
 		return &singleMFAStateRow{}, nil
 	}
 	return &singlePasswordHashRow{passwordHash: c.passwordHash}, nil
+}
+
+type singleValueRow struct {
+	column    string
+	value     driver.Value
+	empty     bool
+	delivered bool
+}
+
+func (r *singleValueRow) Columns() []string { return []string{r.column} }
+func (r *singleValueRow) Close() error      { return nil }
+func (r *singleValueRow) Next(values []driver.Value) error {
+	if r.empty || r.delivered {
+		return io.EOF
+	}
+	r.delivered = true
+	values[0] = r.value
+	return nil
 }
 
 type ambiguousKeyResetCommitTx struct{}
@@ -136,6 +162,9 @@ func TestReplaceMyKeysCommitAmbiguityClearsAndDisconnectsFailClosed(t *testing.T
 
 	observer := &keyResetFailClosedObserver{}
 	handler := users.NewHandler(db, logger.NewWithWriter(io.Discard), nil, nil, nil)
+	service := presencehistory.NewService(db, presencehistory.DisclosureState{}, false)
+	require.NoError(t, service.BindDelivery(immediatePresenceDelivery{}))
+	handler.SetPresenceHistory(service)
 	users.SetCustomTextResetBroadcasterForTest(handler, observer)
 	users.SetKeyResetSessionDisconnectorForTest(handler, observer)
 

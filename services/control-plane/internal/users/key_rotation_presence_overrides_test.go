@@ -15,6 +15,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/auth"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/mfa"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/presencehistory"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/users"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
@@ -152,7 +153,7 @@ func TestReplaceMyKeysRejectsPasswordThatBecameStaleWhileWaitingForUserLock(t *t
 			  AND wait_event_type = 'Lock'
 			  AND (
 				query LIKE '%UPDATE user_keys SET wrapped_private_key%'
-				OR query LIKE '%SELECT password_hash FROM users WHERE id = $1 FOR NO KEY UPDATE%'
+				OR query LIKE '%FOR NO KEY UPDATE%'
 			  )
 		`).Scan(&waiting)
 		return queryErr == nil && waiting > 0
@@ -498,17 +499,6 @@ func TestChangePasswordMFAReauthenticationUsesLockedTransactionConnection(t *tes
 	require.Equal(t, http.StatusOK, w.Code, "%s\n%s", w.Body.String(), requestLogs.String())
 }
 
-type keyRotationCoordinator struct {
-	calls    int
-	senderID uuid.UUID
-}
-
-func (c *keyRotationCoordinator) WithSender(senderID uuid.UUID, fn func()) {
-	c.calls++
-	c.senderID = senderID
-	fn()
-}
-
 type postCommitResetClearer struct {
 	db                    *sql.DB
 	calls                 int
@@ -536,9 +526,10 @@ func TestReplaceMyKeysCoordinatesAndClearsCustomTextAfterCommit(t *testing.T) {
 	target := ts.CreateTestUser(t, "replacepresencecleartarget")
 	seedPresenceOverrideStateForKeyRotation(t, ts, user.ID, target.ID)
 	handler := users.NewHandler(ts.DB, logger.NewWithWriter(io.Discard), nil, nil, nil)
-	coordinator := &keyRotationCoordinator{}
+	service := presencehistory.NewService(ts.DB, presencehistory.DisclosureState{}, false)
+	require.NoError(t, service.BindDelivery(immediatePresenceDelivery{}))
+	handler.SetPresenceHistory(service)
 	clearer := &postCommitResetClearer{db: ts.DB}
-	users.SetCustomStatusCoordinatorForTest(handler, coordinator)
 	users.SetCustomTextResetBroadcasterForTest(handler, clearer)
 
 	publicKey, wrappedKey, salt := testhelpers.E2EETestKeys()
@@ -560,10 +551,74 @@ func TestReplaceMyKeysCoordinatesAndClearsCustomTextAfterCommit(t *testing.T) {
 	handler.ReplaceMyKeys(c)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, 1, coordinator.calls)
-	assert.Equal(t, uuid.MustParse(user.ID), coordinator.senderID)
 	assert.Equal(t, 1, clearer.calls)
 	assert.Equal(t, uuid.MustParse(user.ID), clearer.senderID)
 	assert.Zero(t, clearer.preferenceCountAtCall, "clear must run after reset transaction commits")
 	assert.Zero(t, clearer.tierAtCall, "visibility must already be Off when clear is sent")
+}
+
+func TestReplaceMyKeysPresenceGateFailureClassification(t *testing.T) {
+	t.Run("unbound delivery is retryable", func(t *testing.T) {
+		db, _ := testhelpers.SetupTestDB(t)
+		handler := users.NewHandler(db, logger.NewWithWriter(io.Discard), nil, nil, nil)
+		handler.SetPresenceHistory(presencehistory.NewService(db, presencehistory.DisclosureState{}, false))
+
+		response := invokeReplaceMyKeysForPresenceGate(handler, uuid.New())
+		assert.Equal(t, http.StatusServiceUnavailable, response.Code)
+	})
+
+	t.Run("database readiness failure is internal", func(t *testing.T) {
+		db, cleanup := testhelpers.SetupTestDB(t)
+		cleanup()
+		handler := users.NewHandler(db, logger.NewWithWriter(io.Discard), nil, nil, nil)
+		service := presencehistory.NewService(db, presencehistory.DisclosureState{}, false)
+		require.NoError(t, service.BindDelivery(immediatePresenceDelivery{}))
+		handler.SetPresenceHistory(service)
+
+		response := invokeReplaceMyKeysForPresenceGate(handler, uuid.New())
+		assert.Equal(t, http.StatusInternalServerError, response.Code)
+	})
+
+	t.Run("pending grace is retryable with retry after", func(t *testing.T) {
+		db, _ := testhelpers.SetupTestDB(t)
+		senderID := testhelpers.CreateUser(t, db)
+		operationID := uuid.New()
+		_, err := db.Exec(`
+			INSERT INTO user_presence_settings (
+				user_id, presence_settings_version, presence_settings_operation_id
+			) VALUES ($1, 1, $2)
+		`, senderID, operationID)
+		require.NoError(t, err)
+		_, err = db.Exec(`
+			INSERT INTO presence_settings_pending_operations (
+				user_id, operation_id, prior_settings_version, created_at, reconcile_after
+			) VALUES ($1, $2, 0, clock_timestamp(), clock_timestamp() + INTERVAL '30 seconds')
+		`, senderID, operationID)
+		require.NoError(t, err)
+		handler := users.NewHandler(db, logger.NewWithWriter(io.Discard), nil, nil, nil)
+		service := presencehistory.NewService(db, presencehistory.DisclosureState{}, false)
+		require.NoError(t, service.BindDelivery(immediatePresenceDelivery{}))
+		handler.SetPresenceHistory(service)
+
+		response := invokeReplaceMyKeysForPresenceGate(handler, senderID)
+		assert.Equal(t, http.StatusServiceUnavailable, response.Code)
+		assert.NotEmpty(t, response.Header().Get("Retry-After"))
+	})
+}
+
+func invokeReplaceMyKeysForPresenceGate(handler *users.Handler, senderID uuid.UUID) *httptest.ResponseRecorder {
+	body := bytes.NewBufferString(`{
+		"wrapped_private_key":"a2V5",
+		"key_derivation_salt":"c2FsdA==",
+		"public_key":"cHVibGlj",
+		"current_password":"CurrentPassword123!",
+		"acknowledge_data_loss":true
+	}`)
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
+	c.Set("user_id", senderID.String())
+	c.Request = httptest.NewRequest(http.MethodPut, urlUsersMeKeys, body)
+	c.Request.Header.Set("Content-Type", "application/json")
+	handler.ReplaceMyKeys(c)
+	return response
 }

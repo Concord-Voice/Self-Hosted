@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"log"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -21,7 +20,6 @@ import (
 const customTextCategory = "custom_text"
 
 const (
-	customTextDeliveryLockStripes  = 256
 	customTextResetAudienceTimeout = 3 * time.Second
 )
 
@@ -34,44 +32,13 @@ var (
 	ErrCustomTextDeliveryBroadcaster = errors.New("custom status delivery broadcaster failed")
 )
 
-type customTextDeliveryCoordinator interface {
-	WithSender(uuid.UUID, func())
-}
-
-func customTextDeliveryLock(
-	locks *[customTextDeliveryLockStripes]sync.Mutex,
-	senderID uuid.UUID,
-) *sync.Mutex {
-	const (
-		fnvOffset32 = uint32(2166136261)
-		fnvPrime32  = uint32(16777619)
-	)
-	hash := fnvOffset32
-	for _, part := range senderID {
-		hash ^= uint32(part)
-		hash *= fnvPrime32
-	}
-	return &locks[int(hash%customTextDeliveryLockStripes)]
-}
-
-func (h *Hub) withCustomTextDelivery(senderID uuid.UUID, fn func()) {
-	if h.customTextDeliveryCoordinator != nil {
-		h.customTextDeliveryCoordinator.WithSender(senderID, fn)
-		return
-	}
-	lock := customTextDeliveryLock(&h.customTextDeliveryLocks, senderID)
-	lock.Lock()
-	defer lock.Unlock()
-	fn()
-}
-
 // CustomTextPayload is the wire payload for a custom-text rich-presence update.
 // It mirrors CustomTextPresencePayloadSchema in ws-events.ts: `text` is required
 // and non-empty (1..140 code points, enforced at the REST write boundary and the
 // DB CHECK); `emoji` is optional (omitted when empty so it round-trips to "no
 // emoji" on the client, where the zod field is `.optional()`).
 //
-// A nil *CustomTextPayload at the BroadcastCustomText boundary means CLEAR — the
+// A nil *CustomTextPayload at a prepared delivery boundary means CLEAR — the
 // user turned custom text off or wrote an empty string — emitted as a
 // rich_presence_clear frame, never an update with empty text.
 type CustomTextPayload struct {
@@ -346,87 +313,6 @@ func (h *Hub) disconnectAllCustomTextClients(ctx context.Context) error {
 	return nil
 }
 
-// BroadcastCustomText fans senderID's custom-text status out to exactly the
-// audience permitted to see it — risk: privacy. A non-nil payload is an UPDATE
-// (rich_presence_update) delivered to the new tier-audience (computed by
-// presence.ComputeCustomTextAudience: 0=Off→∅, 1=Friends→friends+FoF,
-// 2=Servers→+shared-server peers; plus the sender's own devices for self-sync). A
-// nil payload is a CLEAR. EITHER way, viewers in the PRIOR (oldTier) audience but
-// NOT the new one are sent a rich_presence_clear so a stale status never lingers
-// on someone who lost permission (#1233, Gitar review). The handler reads oldTier
-// before the UPSERT (the DB now holds the new tier). Up to two frames are
-// marshaled (a clear, plus an update when payload != nil); each is delivered once
-// per viewer.
-//
-// Fail-closed: if either audience cannot be computed (DB error) NOTHING is sent.
-// Only a fixed operation name and error class are logged; sender identifiers and
-// custom-text values are never logged ([internal]rules/observability.md "No PII").
-//
-// Concurrency: this compatibility path is invoked synchronously on the HTTP
-// handler goroutine, not on the Hub Run goroutine. Its legacy broadcasts and
-// audience deltas share the Hub-local coordinator. Typed delivery does not
-// acquire that coordinator, and reconnect snapshots serialize on the concrete
-// presencehistory.Service gate shared with writers. Hub-map reads are guarded
-// by h.mu.RLock; DB audience queries run first, outside the hub lock.
-func (h *Hub) BroadcastCustomText(senderID uuid.UUID, oldTier int, payload *CustomTextPayload) {
-	if h.db == nil {
-		// No DB (DB-free unit hub): fail closed and skip. Production always has a
-		// DB (NewHub requires it).
-		return
-	}
-	h.withCustomTextDelivery(senderID, func() {
-		h.broadcastCustomText(senderID, oldTier, payload)
-	})
-}
-
-func (h *Hub) broadcastCustomText(senderID uuid.UUID, oldTier int, payload *CustomTextPayload) {
-	newAud, oldAud, err := h.customTextAudiences(context.Background(), senderID, oldTier, payload)
-	if err != nil {
-		log.Printf("[hub] custom-text audience computation failed; suppressing broadcast: %T", err)
-		return // fail closed
-	}
-
-	clearData, err := marshalCustomTextFrame(senderID, nil) // rich_presence_clear frame
-	if err != nil {
-		log.Printf("[hub] failed to marshal custom-text clear: %T", err)
-		return
-	}
-	var updateData []byte
-	if payload != nil {
-		updateData, err = marshalCustomTextFrame(senderID, payload) // rich_presence_update frame
-		if err != nil {
-			log.Printf("[hub] failed to marshal custom-text frame: %T", err)
-			return
-		}
-	}
-
-	// Viewers who left the audience (oldAud \ newAud) get a clear.
-	excluded := make(map[uuid.UUID]bool)
-	for viewerID := range oldAud {
-		if !newAud[viewerID] {
-			excluded[viewerID] = true
-		}
-	}
-
-	h.mu.RLock()
-	defer h.mu.RUnlock()
-	if payload != nil {
-		h.sendToUsers(newAud, updateData)
-	}
-	h.sendPrivacyClearToUsers(excluded, clearData)
-}
-
-// BroadcastCustomTextAudienceDelta applies an already-computed authorization
-// change without rebroadcasting to viewers who remain in the audience. Viewers
-// in oldAudience but not newAudience receive a clear; viewers newly added receive
-// the current update only when payload is non-nil. The sender is never part of
-// this delta because their own display is unchanged by recipient exceptions.
-func (h *Hub) BroadcastCustomTextAudienceDelta(senderID uuid.UUID, oldAudience, newAudience map[uuid.UUID]bool, payload *CustomTextPayload) {
-	h.withCustomTextDelivery(senderID, func() {
-		h.broadcastCustomTextAudienceDelta(senderID, oldAudience, newAudience, payload)
-	})
-}
-
 // ClearCustomTextForPresenceAudience sends a privacy-critical clear only to the
 // sender's conservative base presence audience. Destructive key resets force
 // the Custom Status tier Off and delete materialized exceptions before fan-out,
@@ -440,106 +326,22 @@ func (h *Hub) ClearCustomTextForPresenceAudience(senderID uuid.UUID) {
 	if h.db == nil {
 		return
 	}
-	h.withCustomTextDelivery(senderID, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), customTextResetAudienceTimeout)
-		defer cancel()
-		audience, err := presence.ComputePresenceAudience(ctx, h.db, senderID)
-		if err != nil {
-			log.Printf("[hub] reset custom-text audience computation failed; suppressing clear: %T", err)
-			return
-		}
-		data, err := marshalCustomTextFrame(senderID, nil)
-		if err != nil {
-			log.Printf("[hub] failed to marshal reset custom-text clear: %T", err)
-			return
-		}
-
-		h.mu.RLock()
-		defer h.mu.RUnlock()
-		h.sendPrivacyClearToUsers(audience, data)
-	})
-}
-
-func customTextAudienceDifference(senderID uuid.UUID, audience, otherAudience map[uuid.UUID]bool) map[uuid.UUID]bool {
-	difference := make(map[uuid.UUID]bool)
-	for viewerID := range audience {
-		if viewerID != senderID && !otherAudience[viewerID] {
-			difference[viewerID] = true
-		}
+	ctx, cancel := context.WithTimeout(context.Background(), customTextResetAudienceTimeout)
+	defer cancel()
+	audience, err := presence.ComputePresenceAudience(ctx, h.db, senderID)
+	if err != nil {
+		log.Printf("[hub] reset custom-text audience computation failed; suppressing clear: %T", err)
+		return
 	}
-	return difference
-}
-
-func (h *Hub) broadcastCustomTextAudienceDelta(senderID uuid.UUID, oldAudience, newAudience map[uuid.UUID]bool, payload *CustomTextPayload) {
-	removed := customTextAudienceDifference(senderID, oldAudience, newAudience)
-	added := customTextAudienceDifference(senderID, newAudience, oldAudience)
-
-	var clearData []byte
-	if len(removed) > 0 {
-		var err error
-		clearData, err = marshalCustomTextFrame(senderID, nil)
-		if err != nil {
-			log.Printf("[hub] failed to marshal presence audience-delta clear: %T", err)
-			return
-		}
+	data, err := marshalCustomTextFrame(senderID, nil)
+	if err != nil {
+		log.Printf("[hub] failed to marshal reset custom-text clear: %T", err)
+		return
 	}
 
-	var updateData []byte
-	if payload != nil && len(added) > 0 {
-		var err error
-		updateData, err = marshalCustomTextFrame(senderID, payload)
-		if err != nil {
-			log.Printf("[hub] failed to marshal presence audience-delta update: %T", err)
-			return
-		}
-	}
-
-	h.deliverCustomTextAudienceDelta(removed, added, clearData, updateData)
-}
-
-func (h *Hub) deliverCustomTextAudienceDelta(removed, added map[uuid.UUID]bool, clearData, updateData []byte) {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
-	// Privacy clears must be enqueued before newly authorized updates so the
-	// delta preserves the caller's clear-then-update delivery phase ordering.
-	if len(clearData) > 0 {
-		h.sendPrivacyClearToUsers(removed, clearData)
-	}
-	if len(updateData) > 0 {
-		h.sendToUsers(added, updateData)
-	}
-}
-
-// customTextAudiences computes the post-change (newAud) and prior (oldAud)
-// custom-text audiences for a settings change, each including the sender's own
-// devices (self-sync). newAud is empty on a CLEAR (payload == nil). A non-nil
-// error means a DB failure — the caller MUST fail closed (send nothing). Runs
-// OUTSIDE the hub lock (DB I/O).
-func (h *Hub) customTextAudiences(ctx context.Context, senderID uuid.UUID, oldTier int, payload *CustomTextPayload) (newAud, oldAud map[uuid.UUID]bool, err error) {
-	newAud = map[uuid.UUID]bool{}
-	if payload != nil {
-		newAud, err = presence.ComputeCustomTextAudience(ctx, h.db, senderID)
-		if err != nil {
-			return nil, nil, err
-		}
-		newAud[senderID] = true
-	}
-	oldAud, err = presence.ComputeCustomTextAudienceForTier(ctx, h.db, senderID, oldTier)
-	if err != nil {
-		return nil, nil, err
-	}
-	oldAud[senderID] = true
-	return newAud, oldAud, nil
-}
-
-// sendToUsers delivers data to every connected client of each user in users. The
-// caller MUST hold h.mu (R)Lock — it reads h.userClients / h.clients.
-func (h *Hub) sendToUsers(users map[uuid.UUID]bool, data []byte) {
-	for userID := range users {
-		if clientSet, ok := h.userClients[userID]; ok {
-			h.sendToUserClients(clientSet, data)
-		}
-	}
+	h.sendPrivacyClearToUsers(audience, data)
 }
 
 // sendPrivacyClearToUsers enqueues authorization-revocation frames only when a
@@ -665,7 +467,7 @@ func (h *Hub) sendCustomTextSnapshot(ctx context.Context, client *Client) {
 			return
 		}
 		if senderID == client.UserID {
-			continue // self is delivered via the live BroadcastCustomText self-sync, not the snapshot of others
+			continue // self is delivered via acknowledged writer self-sync, not the snapshot of others
 		}
 		err := h.presenceHistoryService.WithSender(ctx, senderID, func() error {
 			return h.sendCustomTextSnapshotCandidate(ctx, client, senderID)

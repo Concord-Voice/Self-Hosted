@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"reflect"
 	"time"
 
@@ -83,13 +84,19 @@ func nilDelivery(delivery Delivery) bool {
 
 func (s *Service) boundDelivery() (Delivery, error) {
 	if s == nil {
-		return nil, errors.New("presence history service unavailable")
+		return nil, &ServiceError{
+			Status: http.StatusServiceUnavailable,
+			Code:   "activity_history_delivery_unavailable",
+		}
 	}
 	s.deliveryMu.RLock()
 	delivery := s.delivery
 	s.deliveryMu.RUnlock()
 	if nilDelivery(delivery) {
-		return nil, errors.New("presence history delivery unavailable")
+		return nil, &ServiceError{
+			Status: http.StatusServiceUnavailable,
+			Code:   "activity_history_delivery_unavailable",
+		}
 	}
 	return delivery, nil
 }

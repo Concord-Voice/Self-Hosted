@@ -189,18 +189,6 @@ func awaitClientMessageType(t *testing.T, client *Client, messageType string) ma
 	}
 }
 
-type observingCustomTextDeliveryCoordinator struct {
-	mu       sync.Mutex
-	attempts chan uuid.UUID
-}
-
-func (c *observingCustomTextDeliveryCoordinator) WithSender(senderID uuid.UUID, fn func()) {
-	c.attempts <- senderID
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	fn()
-}
-
 func setupCustomTextHub(t *testing.T) (*Hub, *sql.DB) {
 	t.Helper()
 	db := setupHubTestDB(t)
@@ -214,242 +202,6 @@ func setupCustomTextHub(t *testing.T) (*Hub, *sql.DB) {
 // privacy lock. Sender at Friends tier (1): a friend RECEIVES the update; a
 // shared-server-only peer (NOT a friend) does NOT (Friends tier excludes
 // server-only peers); a stranger does NOT.
-func TestBroadcastCustomText_FriendsTier_AudienceVsNonAudience(t *testing.T) {
-	hub, db := setupCustomTextHub(t)
-
-	sender := insertCTUser(t, db, "ctsender")
-	friend := insertCTUser(t, db, "ctfriend")
-	serverPeer := insertCTUser(t, db, "ctserverpeer")
-	stranger := insertCTUser(t, db, "ctstranger")
-
-	// sender is friends with `friend`, shares a server with `serverPeer`, has no
-	// relation to `stranger`. Tier 1 (Friends) ⇒ only friend (+ FoF) is audience.
-	makeFriends(t, db, sender, friend)
-	shareServer(t, db, sender, sender, serverPeer)
-	setCustomText(t, db, sender, 1, "focusing", "🎯")
-
-	friendClient := connectClient(hub, friend)
-	serverPeerClient := connectClient(hub, serverPeer)
-	strangerClient := connectClient(hub, stranger)
-
-	hub.BroadcastCustomText(sender, 1, &CustomTextPayload{Text: "focusing", Emoji: "🎯"})
-
-	// Audience member (friend) RECEIVES the update.
-	msg := readClientMsg(t, friendClient)
-	assert.Equal(t, "rich_presence_update", msg["type"])
-	data := msg["data"].(map[string]interface{})
-	assert.Equal(t, sender.String(), data["user_id"])
-	assert.Equal(t, "custom_text", data["category"])
-	payload := data["payload"].(map[string]interface{})
-	assert.Equal(t, "focusing", payload["text"])
-	assert.Equal(t, "🎯", payload["emoji"])
-
-	// PRIVACY LOCK: a shared-server-only peer is NOT in a Friends-tier audience.
-	assertNoMessage(t, serverPeerClient)
-	// PRIVACY LOCK: a stranger is NOT in the audience.
-	assertNoMessage(t, strangerClient)
-}
-
-// TestBroadcastCustomText_ServersTier_IncludesServerPeer verifies that at tier 2
-// (Servers) a shared-server peer DOES receive the update — proving the tier is
-// honored, not hardcoded to Friends. A stranger still does NOT.
-func TestBroadcastCustomText_ServersTier_IncludesServerPeer(t *testing.T) {
-	hub, db := setupCustomTextHub(t)
-
-	sender := insertCTUser(t, db, "ctsender2")
-	serverPeer := insertCTUser(t, db, "ctserverpeer2")
-	stranger := insertCTUser(t, db, "ctstranger2")
-
-	shareServer(t, db, sender, sender, serverPeer)
-	setCustomText(t, db, sender, 2, "in a meeting", "")
-
-	serverPeerClient := connectClient(hub, serverPeer)
-	strangerClient := connectClient(hub, stranger)
-
-	hub.BroadcastCustomText(sender, 2, &CustomTextPayload{Text: "in a meeting"})
-
-	msg := readClientMsg(t, serverPeerClient)
-	assert.Equal(t, "rich_presence_update", msg["type"])
-	data := msg["data"].(map[string]interface{})
-	payload := data["payload"].(map[string]interface{})
-	assert.Equal(t, "in a meeting", payload["text"])
-	_, hasEmoji := payload["emoji"]
-	assert.False(t, hasEmoji, "emoji omitted when empty (matches optional() zod field)")
-
-	// PRIVACY LOCK: stranger still excluded even at Servers tier.
-	assertNoMessage(t, strangerClient)
-}
-
-// TestBroadcastCustomText_Clear emits rich_presence_clear to the audience when
-// the payload is nil (user turned custom text off / cleared the text).
-func TestBroadcastCustomText_Clear(t *testing.T) {
-	hub, db := setupCustomTextHub(t)
-
-	sender := insertCTUser(t, db, "ctclearsender")
-	friend := insertCTUser(t, db, "ctclearfriend")
-	stranger := insertCTUser(t, db, "ctclearstranger")
-
-	makeFriends(t, db, sender, friend)
-	// Tier 1 keeps the friend in the audience for the clear frame.
-	setCustomText(t, db, sender, 1, "was here", "")
-
-	friendClient := connectClient(hub, friend)
-	strangerClient := connectClient(hub, stranger)
-
-	hub.BroadcastCustomText(sender, 1, nil) // nil ⇒ clear (sender was at tier 1)
-
-	msg := readClientMsg(t, friendClient)
-	assert.Equal(t, "rich_presence_clear", msg["type"])
-	data := msg["data"].(map[string]interface{})
-	assert.Equal(t, sender.String(), data["user_id"])
-	assert.Equal(t, "custom_text", data["category"])
-	_, hasPayload := data["payload"]
-	assert.False(t, hasPayload, "clear frame carries no payload")
-
-	// PRIVACY LOCK: a non-audience user gets no clear frame either.
-	assertNoMessage(t, strangerClient)
-}
-
-func TestBroadcastCustomText_ExcludedViewerReceivesNoRepeatedClear(t *testing.T) {
-	hub, db := setupCustomTextHub(t)
-	sender := insertCTUser(t, db, "ctexcludededitsender")
-	excluded := insertCTUser(t, db, "ctexcludededitviewer")
-	makeFriends(t, db, sender, excluded)
-	setCustomText(t, db, sender, 1, "old private status", "")
-	excludeCustomTextViewer(t, db, sender, excluded)
-	excludedClient := connectClient(hub, excluded)
-
-	newText := "new private status"
-	updateCustomText(t, db, sender, 1, &newText, nil)
-	hub.BroadcastCustomText(sender, 1, &CustomTextPayload{Text: newText})
-
-	assertNoMessage(t, excludedClient)
-}
-
-func TestBroadcastCustomText_ExcludedViewerReceivesNoClearWhenStatusClears(t *testing.T) {
-	hub, db := setupCustomTextHub(t)
-	sender := insertCTUser(t, db, "ctexcludedclearsender")
-	excluded := insertCTUser(t, db, "ctexcludedclearviewer")
-	makeFriends(t, db, sender, excluded)
-	setCustomText(t, db, sender, 1, "private status", "")
-	excludeCustomTextViewer(t, db, sender, excluded)
-	excludedClient := connectClient(hub, excluded)
-
-	updateCustomText(t, db, sender, 1, nil, nil)
-	hub.BroadcastCustomText(sender, 1, nil)
-
-	assertNoMessage(t, excludedClient)
-}
-
-// TestBroadcastCustomText_SenderSelfReceives confirms the sender's own connected
-// devices receive their status (self-sync), like broadcastPresenceToAll.
-func TestBroadcastCustomText_SenderSelfReceives(t *testing.T) {
-	hub, db := setupCustomTextHub(t)
-
-	sender := insertCTUser(t, db, "ctselfsender")
-	setCustomText(t, db, sender, 1, "solo status", "")
-
-	selfClient := connectClient(hub, sender)
-
-	hub.BroadcastCustomText(sender, 1, &CustomTextPayload{Text: "solo status"})
-
-	msg := readClientMsg(t, selfClient)
-	assert.Equal(t, "rich_presence_update", msg["type"])
-	data := msg["data"].(map[string]interface{})
-	assert.Equal(t, sender.String(), data["user_id"])
-}
-
-func TestBroadcastCustomTextAudienceDelta_SendsOnlySetDifferences(t *testing.T) {
-	hub := dbFreeHub()
-	sender := uuid.New()
-	removed := uuid.New()
-	unchanged := uuid.New()
-	added := uuid.New()
-
-	removedClient := connectClient(hub, removed)
-	unchangedClient := connectClient(hub, unchanged)
-	addedClient := connectClient(hub, added)
-	senderClient := connectClient(hub, sender)
-
-	oldAudience := map[uuid.UUID]bool{removed: true, unchanged: true, sender: true}
-	newAudience := map[uuid.UUID]bool{unchanged: true, added: true}
-	hub.BroadcastCustomTextAudienceDelta(sender, oldAudience, newAudience, &CustomTextPayload{Text: "current status"})
-
-	removedMessage := readClientMsg(t, removedClient)
-	require.Equal(t, "rich_presence_clear", removedMessage["type"])
-	removedData := removedMessage["data"].(map[string]interface{})
-	require.Equal(t, sender.String(), removedData["user_id"])
-	require.Equal(t, "custom_text", removedData["category"])
-
-	addedMessage := readClientMsg(t, addedClient)
-	require.Equal(t, "rich_presence_update", addedMessage["type"])
-	addedData := addedMessage["data"].(map[string]interface{})
-	require.Equal(t, sender.String(), addedData["user_id"])
-	payload := addedData["payload"].(map[string]interface{})
-	require.Equal(t, "current status", payload["text"])
-
-	assertNoMessage(t, unchangedClient)
-	assertNoMessage(t, senderClient)
-}
-
-func TestBroadcastCustomTextAudienceDelta_NilPayloadClearsOnlyRemovals(t *testing.T) {
-	hub := dbFreeHub()
-	sender := uuid.New()
-	removed := uuid.New()
-	added := uuid.New()
-
-	removedClient := connectClient(hub, removed)
-	addedClient := connectClient(hub, added)
-
-	hub.BroadcastCustomTextAudienceDelta(
-		sender,
-		map[uuid.UUID]bool{removed: true},
-		map[uuid.UUID]bool{added: true},
-		nil,
-	)
-
-	removedMessage := readClientMsg(t, removedClient)
-	require.Equal(t, "rich_presence_clear", removedMessage["type"])
-	assertNoMessage(t, addedClient)
-}
-
-func TestBroadcastCustomTextAudienceDelta_FullQueuePreservesQueuedFrame(t *testing.T) {
-	hub := dbFreeHub()
-	sender := uuid.New()
-	removed := uuid.New()
-	client := connectClient(hub, removed)
-	client.Send = make(chan []byte, 1)
-	queuedUpdate, err := marshalCustomTextFrame(sender, &CustomTextPayload{Text: "stale"})
-	require.NoError(t, err)
-	client.Send <- queuedUpdate
-
-	hub.BroadcastCustomTextAudienceDelta(
-		sender,
-		map[uuid.UUID]bool{removed: true},
-		map[uuid.UUID]bool{},
-		nil,
-	)
-
-	assert.Equal(t, queuedUpdate, <-client.Send)
-}
-
-func TestBroadcastCustomText_FullQueuePreservesQueuedFrame(t *testing.T) {
-	hub, db := setupCustomTextHub(t)
-	sender := insertCTUser(t, db, "ctprioritysender")
-	viewer := insertCTUser(t, db, "ctpriorityviewer")
-	makeFriends(t, db, sender, viewer)
-	setCustomText(t, db, sender, 1, "private", "")
-	client := connectClient(hub, viewer)
-	client.Send = make(chan []byte, 1)
-	queuedUpdate, err := marshalCustomTextFrame(sender, &CustomTextPayload{Text: "stale"})
-	require.NoError(t, err)
-	client.Send <- queuedUpdate
-
-	hub.BroadcastCustomText(sender, 1, nil)
-
-	assert.Equal(t, queuedUpdate, <-client.Send)
-}
-
 func TestEnqueuePrivacyCritical_FullQueueNeverDequeuesExistingFrame(t *testing.T) {
 	queuedUpdate, err := marshalCustomTextFrame(uuid.New(), &CustomTextPayload{Text: "stale"})
 	require.NoError(t, err)
@@ -889,31 +641,23 @@ func TestSendCustomTextSnapshot_SharedGateOrdersOldSnapshotBeforeNewerClearUpdat
 	assert.Equal(t, "new committed state", newPayload["text"])
 }
 
-func TestClearCustomTextForPresenceAudience_SenderCoordinatesScopedPrivacyClear(t *testing.T) {
+func TestClearCustomTextForPresenceAudience_ScopesClearToBaseAudience(t *testing.T) {
 	hub, db := setupCustomTextHub(t)
 	sender := insertCTUser(t, db, "ctscopedclearsender")
-	viewerA := insertCTUser(t, db, "ctscopedclearviewera")
-	viewerB := insertCTUser(t, db, "ctscopedclearviewerb")
-	makeFriends(t, db, sender, viewerA)
-	senderClient := connectClient(hub, sender)
-	viewerAClient := connectClient(hub, viewerA)
-	viewerBClient := connectClient(hub, viewerB)
-	coordinator := &observingCustomTextDeliveryCoordinator{
-		attempts: make(chan uuid.UUID, 1),
-	}
-	hub.customTextDeliveryCoordinator = coordinator
+	viewer := insertCTUser(t, db, "ctscopedclearviewer")
+	unrelated := insertCTUser(t, db, "ctscopedclearunrelated")
+	makeFriends(t, db, sender, viewer)
+	viewerClient := connectClient(hub, viewer)
+	unrelatedClient := connectClient(hub, unrelated)
 
 	hub.ClearCustomTextForPresenceAudience(sender)
 
-	assert.Equal(t, sender, awaitCustomTextSignal(t, coordinator.attempts))
-	message := readClientMsg(t, viewerAClient)
+	message := readClientMsg(t, viewerClient)
 	assert.Equal(t, "rich_presence_clear", message["type"])
-	data, ok := message["data"].(map[string]interface{})
-	require.True(t, ok)
+	data := message["data"].(map[string]interface{})
 	assert.Equal(t, sender.String(), data["user_id"])
 	assert.Equal(t, "custom_text", data["category"])
-	assertNoMessage(t, senderClient)
-	assertNoMessage(t, viewerBClient)
+	assertNoMessage(t, unrelatedClient)
 }
 
 func TestClearCustomTextForPresenceAudience_DatabaseWaitIsBounded(t *testing.T) {
@@ -1096,38 +840,6 @@ func closedDBHub(t *testing.T) (*Hub, uuid.UUID, uuid.UUID) {
 // TestBroadcastCustomText_NilDB_NoPanicNoSend covers the `h.db == nil` guard in
 // BroadcastCustomText (lines 53-58): a DB-free hub must return without panicking
 // and deliver nothing.
-func TestBroadcastCustomText_NilDB_NoPanicNoSend(t *testing.T) {
-	hub := dbFreeHub()
-	sender := uuid.New()
-	selfClient := connectClient(hub, sender)
-
-	// Must not panic; must send nothing (audience uncomputable ⇒ fail closed).
-	assert.NotPanics(t, func() {
-		hub.BroadcastCustomText(sender, 1, &CustomTextPayload{Text: "no db"})
-	})
-	assertNoMessage(t, selfClient)
-}
-
-// TestBroadcastCustomText_ClosedDB_FailsClosed covers the audience-computation
-// error branch (lines 61-67): when ComputeCustomTextAudience errors (closed DB),
-// the frame is fanned out to no one. No panic, no leak.
-func TestBroadcastCustomText_ClosedDB_FailsClosed(t *testing.T) {
-	hub, sender, viewer := closedDBHub(t)
-
-	viewerClient := connectClient(hub, viewer)
-	selfClient := connectClient(hub, sender)
-
-	assert.NotPanics(t, func() {
-		hub.BroadcastCustomText(sender, 2, &CustomTextPayload{Text: "should not leak"})
-	})
-
-	// PRIVACY LOCK: audience error ⇒ nobody receives, not even the sender's self.
-	assertNoMessage(t, viewerClient)
-	assertNoMessage(t, selfClient)
-}
-
-// TestSendCustomTextSnapshot_NilDB_NoPanicNoSend covers the `h.db == nil` guard
-// in sendCustomTextSnapshot (lines 134-136).
 func TestSendCustomTextSnapshot_NilDB_NoPanicNoSend(t *testing.T) {
 	hub := dbFreeHub()
 	viewer := uuid.New()
@@ -1222,61 +934,4 @@ func TestSendCustomTextSnapshot_SendBufferFull(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("sendCustomTextSnapshot blocked instead of taking the default drop branch")
 	}
-}
-
-// TestBroadcastCustomText_TierNarrowed_ClearsExcluded is the #1233/Gitar privacy
-// regression lock: narrowing Servers(2)->Friends(1) must send rich_presence_clear
-// to a viewer who was only a shared-server peer (in the OLD audience, not the
-// new), while the friend (in both) gets the update. Without the oldTier delta the
-// stale status would linger on the excluded peer until reconnect.
-func TestBroadcastCustomText_TierNarrowed_ClearsExcluded(t *testing.T) {
-	hub, db := setupCustomTextHub(t)
-
-	sender := insertCTUser(t, db, "ctnarrowsender")
-	friend := insertCTUser(t, db, "ctnarrowfriend")
-	serverPeer := insertCTUser(t, db, "ctnarrowpeer")
-
-	makeFriends(t, db, sender, friend)
-	shareServer(t, db, sender, sender, serverPeer)
-	// DB holds the NEW tier (Friends=1) + text; oldTier passed as 2 (Servers).
-	setCustomText(t, db, sender, 1, "narrowed", "")
-
-	friendClient := connectClient(hub, friend)
-	serverPeerClient := connectClient(hub, serverPeer)
-
-	hub.BroadcastCustomText(sender, 2, &CustomTextPayload{Text: "narrowed"})
-
-	// Friend (in both old and new audience) receives the update.
-	fm := readClientMsg(t, friendClient)
-	assert.Equal(t, "rich_presence_update", fm["type"])
-
-	// PRIVACY LOCK: the server-only peer left the audience (Servers->Friends) and
-	// MUST be cleared, not left showing the stale status.
-	pm := readClientMsg(t, serverPeerClient)
-	assert.Equal(t, "rich_presence_clear", pm["type"])
-	pdata := pm["data"].(map[string]interface{})
-	assert.Equal(t, sender.String(), pdata["user_id"])
-	assert.Equal(t, "custom_text", pdata["category"])
-}
-
-// TestBroadcastCustomText_TurnedOff_ClearsPriorAudience: turning custom text off
-// (new tier 0 => nil payload) must clear the PRIOR (oldTier) audience — #1233/Gitar.
-func TestBroadcastCustomText_TurnedOff_ClearsPriorAudience(t *testing.T) {
-	hub, db := setupCustomTextHub(t)
-
-	sender := insertCTUser(t, db, "ctoffsender")
-	friend := insertCTUser(t, db, "ctofffriend")
-
-	makeFriends(t, db, sender, friend)
-	// DB now holds tier 0 (off); oldTier passed as 1 (Friends).
-	setCustomText(t, db, sender, 0, "", "")
-
-	friendClient := connectClient(hub, friend)
-
-	hub.BroadcastCustomText(sender, 1, nil) // turned off => clear the prior audience
-
-	fm := readClientMsg(t, friendClient)
-	assert.Equal(t, "rich_presence_clear", fm["type"])
-	fdata := fm["data"].(map[string]interface{})
-	assert.Equal(t, sender.String(), fdata["user_id"])
 }
