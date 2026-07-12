@@ -178,12 +178,33 @@ func forbiddenPrivacyTerm(value string) string {
 		"expiresat",
 		"createdat",
 		"updatedat",
+		"operationid",
 	} {
 		if strings.Contains(normalized, term) {
 			return term
 		}
 	}
 	return ""
+}
+
+func TestLogEmissionPrivacyGuardRejectsOperationIDButAllowsOperationClass(t *testing.T) {
+	const source = `package fixture
+
+func unsafe(log logger, operationID string) {
+	log.Info("unsafe", "operation_id", operationID)
+}
+
+func safe(log logger) {
+	log.Info("safe", "operation", "presence_reconciliation")
+}
+`
+	violations, err := scanPresenceHistoryLogSource("fixture.go", source)
+	if err != nil {
+		t.Fatalf("scan fixture: %v", err)
+	}
+	if len(violations) != 1 {
+		t.Fatalf("got %d violations, want 1: %#v", len(violations), violations)
+	}
 }
 
 func aggregateName(value string) bool {

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"regexp"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -53,6 +54,13 @@ type Service struct {
 	activationEnabled bool
 	senderGates       senderGateSet
 	readCommitState   func(context.Context, uuid.UUID) (audienceCommitState, error)
+	readClaimState    func(context.Context, uuid.UUID) (audienceCommitState, error)
+	deliveryMu        sync.RWMutex
+	delivery          Delivery
+	transactionMu     sync.RWMutex
+	transactionHooks  TransactionTestHooks
+	deliveryTimeout   time.Duration
+	reconcileInterval time.Duration
 }
 
 // NewService constructs a self-only Activity History service.
@@ -64,7 +72,79 @@ func NewService(db *sql.DB, disclosure DisclosureState, activationEnabled bool) 
 		disclosure:        immutableDisclosure,
 		activationEnabled: activationEnabled,
 		senderGates:       newSenderGateSet(),
+		deliveryTimeout:   5 * time.Second,
+		reconcileInterval: 5 * time.Second,
 	}
+}
+
+// TransactionTestHooks injects database/sql transaction faults in tests. Empty
+// functions retain the production behavior.
+type TransactionTestHooks struct {
+	Begin            func(context.Context, *sql.TxOptions) (*sql.Tx, error)
+	Commit           func(*sql.Tx) error
+	Rollback         func(*sql.Tx) error
+	RecordTransition func(context.Context, *sql.Tx, uuid.UUID, CustomTextState, CustomTextState) error
+	DeleteClaim      func(context.Context, *sql.Tx, uuid.UUID, uuid.UUID) (sql.Result, error)
+}
+
+// SetTransactionTestHooks replaces transaction functions until the returned
+// restore function is called. It is intended only for deterministic tests.
+func (s *Service) SetTransactionTestHooks(hooks TransactionTestHooks) func() {
+	if s == nil {
+		return func() {}
+	}
+	s.transactionMu.Lock()
+	previous := s.transactionHooks
+	s.transactionHooks = hooks
+	s.transactionMu.Unlock()
+	return func() {
+		s.transactionMu.Lock()
+		s.transactionHooks = previous
+		s.transactionMu.Unlock()
+	}
+}
+
+// BeginTx starts a Service-owned transaction so callers and reconciliation use
+// the same production and fault-injection boundary.
+func (s *Service) BeginTx(ctx context.Context, options *sql.TxOptions) (*sql.Tx, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("presence history transaction database unavailable")
+	}
+	s.transactionMu.RLock()
+	begin := s.transactionHooks.Begin
+	s.transactionMu.RUnlock()
+	if begin != nil {
+		return begin(ctx, options)
+	}
+	return s.db.BeginTx(ctx, options)
+}
+
+// CommitTx commits through the Service-owned transaction boundary.
+func (s *Service) CommitTx(tx *sql.Tx) error {
+	if s == nil || tx == nil {
+		return errors.New("presence history commit transaction unavailable")
+	}
+	s.transactionMu.RLock()
+	commit := s.transactionHooks.Commit
+	s.transactionMu.RUnlock()
+	if commit != nil {
+		return commit(tx)
+	}
+	return tx.Commit()
+}
+
+// RollbackTx rolls back through the Service-owned transaction boundary.
+func (s *Service) RollbackTx(tx *sql.Tx) error {
+	if s == nil || tx == nil {
+		return errors.New("presence history rollback transaction unavailable")
+	}
+	s.transactionMu.RLock()
+	rollback := s.transactionHooks.Rollback
+	s.transactionMu.RUnlock()
+	if rollback != nil {
+		return rollback(tx)
+	}
+	return tx.Rollback()
 }
 
 // RecordCustomTextTransition forwards the typed recorder contract through the
@@ -81,6 +161,12 @@ func (s *Service) RecordCustomTextTransition(
 	}
 	if tx == nil {
 		return errors.New("activity history recorder transaction unavailable")
+	}
+	s.transactionMu.RLock()
+	record := s.transactionHooks.RecordTransition
+	s.transactionMu.RUnlock()
+	if record != nil {
+		return record(ctx, tx, userID, before, after)
 	}
 	return s.repository.RecordCustomTextTransition(ctx, tx, userID, before, after)
 }

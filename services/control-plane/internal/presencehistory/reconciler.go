@@ -1,0 +1,793 @@
+package presencehistory
+
+import (
+	"context"
+	"database/sql"
+	"errors"
+	"fmt"
+	"math"
+	"reflect"
+	"time"
+
+	"github.com/google/uuid"
+)
+
+const maxReconcileBatch = 1000
+
+// ReconcileStats contains aggregate-only outcomes for one bounded pass.
+type ReconcileStats struct {
+	DiscoveredCount  int
+	ResolvedCount    int
+	ProvenCount      int
+	CompensatedCount int
+	RetainedCount    int
+	FailedCount      int
+}
+
+type pendingOperationRow struct {
+	ID             uuid.UUID
+	PriorVersion   int64
+	ReconcileAfter time.Time
+}
+
+type lockedPresenceSettings struct {
+	Version     int64
+	OperationID uuid.NullUUID
+	Tier        int
+	Text        sql.NullString
+	Emoji       sql.NullString
+}
+
+type reconcileResult struct {
+	resolved    bool
+	proven      bool
+	compensated bool
+	retained    bool
+}
+
+type claimCommitState uint8
+
+const (
+	claimCommitUnresolved claimCommitState = iota
+	claimCommitConfirmed
+	claimCommitQuarantined
+)
+
+// BindDelivery binds the one process-local typed delivery adapter.
+func (s *Service) BindDelivery(delivery Delivery) error {
+	if s == nil || nilDelivery(delivery) {
+		return errors.New("presence history delivery unavailable")
+	}
+	s.deliveryMu.Lock()
+	defer s.deliveryMu.Unlock()
+	if !nilDelivery(s.delivery) {
+		return errors.New("presence history delivery already bound")
+	}
+	s.delivery = delivery
+	return nil
+}
+
+func nilDelivery(delivery Delivery) bool {
+	if delivery == nil {
+		return true
+	}
+	value := reflect.ValueOf(delivery)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+func (s *Service) boundDelivery() (Delivery, error) {
+	if s == nil {
+		return nil, errors.New("presence history service unavailable")
+	}
+	s.deliveryMu.RLock()
+	delivery := s.delivery
+	s.deliveryMu.RUnlock()
+	if nilDelivery(delivery) {
+		return nil, errors.New("presence history delivery unavailable")
+	}
+	return delivery, nil
+}
+
+// WithReadySender retains one sender gate through reconciliation and work.
+func (s *Service) WithReadySender(ctx context.Context, senderID uuid.UUID, work func() error) error {
+	if s == nil || s.db == nil || senderID == uuid.Nil || work == nil {
+		return errors.New("presence history ready sender unavailable")
+	}
+	if _, err := s.boundDelivery(); err != nil {
+		return err
+	}
+	return s.WithSender(ctx, senderID, func() error {
+		if _, err := s.reconcileSenderAlreadyGated(ctx, senderID); err != nil {
+			return err
+		}
+		return work()
+	})
+}
+
+// ClaimAndDeliver holds canonical database locks until exact delivery is
+// acknowledged, removes only the matching marker, and then commits.
+func (s *Service) ClaimAndDeliver(ctx context.Context, plan DeliveryPlan) (returnErr error) {
+	delivery, err := s.validateDeliveryPlan(plan)
+	if err != nil {
+		return err
+	}
+	tx, err := s.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin presence delivery claim: %w", err)
+	}
+	if tx == nil {
+		return errors.New("begin presence delivery claim: missing transaction")
+	}
+	defer s.joinTransactionRollback(tx, "presence_delivery_claim", &returnErr)
+
+	if err := lockUser(ctx, tx, plan.SenderID); err != nil {
+		return err
+	}
+	settings, err := lockPresenceSettings(ctx, tx, plan.SenderID)
+	if err != nil {
+		return err
+	}
+	pending, err := lockPendingRow(ctx, tx, plan.SenderID)
+	if err != nil {
+		return err
+	}
+	if !settings.OperationID.Valid || settings.OperationID.UUID != plan.OperationID ||
+		pending.ID != plan.OperationID {
+		return errors.New("presence delivery claim marker mismatch")
+	}
+
+	deliveryCtx, cancel := context.WithTimeout(ctx, s.effectiveDeliveryTimeout())
+	ack, deliveryErr := delivery.DeliverCustomText(deliveryCtx, plan)
+	cancel()
+	if deliveryErr != nil {
+		return s.failExactClaim(ctx, plan, deliveryErr)
+	}
+	if ack.OperationID != plan.OperationID {
+		return s.failExactClaim(ctx, plan, errors.New("presence delivery acknowledgement mismatch"))
+	}
+	result, err := s.deleteClaimedPending(ctx, tx, plan.SenderID, plan.OperationID)
+	if err != nil {
+		return s.failExactClaim(ctx, plan, fmt.Errorf("delete claimed presence operation: %w", err))
+	}
+	if err := requireOneAffected(result, "delete claimed presence operation"); err != nil {
+		return s.failExactClaim(ctx, plan, err)
+	}
+	if err := s.CommitTx(tx); err != nil {
+		return s.resolveClaimCommitError(ctx, tx, plan, pending, err)
+	}
+	return nil
+}
+
+func (s *Service) resolveClaimCommitError(
+	ctx context.Context,
+	tx *sql.Tx,
+	plan DeliveryPlan,
+	pending pendingOperationRow,
+	commitErr error,
+) error {
+	cause := fmt.Errorf("commit presence delivery claim: %w", commitErr)
+	rollbackErr := s.RollbackTx(tx)
+	if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+		cause = errors.Join(cause, fmt.Errorf("rollback presence delivery claim: %w", rollbackErr))
+	}
+	switch s.classifyClaimCommit(ctx, plan) {
+	case claimCommitConfirmed:
+		return cause
+	case claimCommitQuarantined:
+		return s.failExactClaim(ctx, plan, cause)
+	default:
+		restoreErr := s.ensureClaimQuarantine(ctx, plan, pending)
+		if restoreErr != nil {
+			cause = errors.Join(cause, fmt.Errorf("restore presence delivery quarantine: %w", restoreErr))
+		}
+		return s.failExactClaim(ctx, plan, cause)
+	}
+}
+
+func (s *Service) classifyClaimCommit(ctx context.Context, plan DeliveryPlan) claimCommitState {
+	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), commitReadbackTimeout)
+	defer cancel()
+	readState := s.readClaimState
+	if readState == nil {
+		readState = s.readAudienceCommitState
+	}
+	state, err := readState(readCtx, plan.SenderID)
+	if err != nil {
+		return claimCommitUnresolved
+	}
+	settingsMatch := state.SettingsExists && uuidPointerEqual(state.OperationID, &plan.OperationID)
+	if settingsMatch && state.PendingOperationID == nil {
+		return claimCommitConfirmed
+	}
+	if settingsMatch && uuidPointerEqual(state.PendingOperationID, &plan.OperationID) {
+		return claimCommitQuarantined
+	}
+	if !state.UserExists {
+		return claimCommitConfirmed
+	}
+	return claimCommitUnresolved
+}
+
+func (s *Service) ensureClaimQuarantine(
+	ctx context.Context,
+	plan DeliveryPlan,
+	prior pendingOperationRow,
+) (returnErr error) {
+	repairCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), commitReadbackTimeout)
+	defer cancel()
+	tx, err := s.BeginTx(repairCtx, nil)
+	if err != nil {
+		return err
+	}
+	if tx == nil {
+		return errors.New("missing quarantine repair transaction")
+	}
+	defer s.joinTransactionRollback(tx, "presence_claim_quarantine_repair", &returnErr)
+	needsInsert, err := inspectClaimQuarantine(repairCtx, tx, plan, prior)
+	if err != nil || !needsInsert {
+		return err
+	}
+	if err := s.insertClaimQuarantine(repairCtx, tx, plan, prior); err != nil {
+		return err
+	}
+	return s.commitClaimQuarantineRepair(repairCtx, tx, plan)
+}
+
+func inspectClaimQuarantine(
+	ctx context.Context,
+	tx *sql.Tx,
+	plan DeliveryPlan,
+	prior pendingOperationRow,
+) (bool, error) {
+	if err := lockUser(ctx, tx, plan.SenderID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return false, nil
+		}
+		return false, err
+	}
+	settings, err := lockPresenceSettings(ctx, tx, plan.SenderID)
+	if err != nil {
+		return false, err
+	}
+	pending, pendingErr := lockPendingRow(ctx, tx, plan.SenderID)
+	if pendingErr == nil {
+		if pending.ID == plan.OperationID ||
+			(settings.OperationID.Valid && settings.OperationID.UUID == pending.ID) {
+			return false, nil
+		}
+		return false, errors.New("quarantine repair found inconsistent pending marker")
+	}
+	if !errors.Is(pendingErr, sql.ErrNoRows) {
+		return false, pendingErr
+	}
+	if settings.OperationID.Valid && settings.OperationID.UUID != plan.OperationID &&
+		settings.Version > prior.PriorVersion {
+		return false, nil
+	}
+	if !settings.OperationID.Valid || settings.OperationID.UUID != plan.OperationID {
+		return false, errors.New("quarantine repair settings marker is uncertain")
+	}
+	return true, nil
+}
+
+func (s *Service) insertClaimQuarantine(
+	ctx context.Context,
+	tx *sql.Tx,
+	plan DeliveryPlan,
+	prior pendingOperationRow,
+) error {
+	var now time.Time
+	if err := tx.QueryRowContext(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+		return fmt.Errorf("read quarantine repair clock: %w", err)
+	}
+	_, err := tx.ExecContext(ctx, `
+		INSERT INTO presence_settings_pending_operations (
+			user_id, operation_id, prior_settings_version, created_at, reconcile_after
+		) VALUES ($1, $2, $3, $4, $5)
+	`, plan.SenderID, plan.OperationID, prior.PriorVersion, now, now.Add(s.effectiveReconcileInterval()))
+	if err != nil {
+		return fmt.Errorf("restore pending presence operation: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) commitClaimQuarantineRepair(
+	ctx context.Context,
+	tx *sql.Tx,
+	plan DeliveryPlan,
+) error {
+	if err := s.CommitTx(tx); err != nil {
+		rollbackErr := s.RollbackTx(tx)
+		if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			return errors.Join(
+				fmt.Errorf("commit pending presence repair: %w", err),
+				fmt.Errorf("rollback pending presence repair: %w", rollbackErr),
+			)
+		}
+		if s.classifyClaimCommit(ctx, plan) == claimCommitQuarantined {
+			return nil
+		}
+		return fmt.Errorf("commit pending presence repair: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) deleteClaimedPending(
+	ctx context.Context,
+	tx *sql.Tx,
+	senderID uuid.UUID,
+	operationID uuid.UUID,
+) (sql.Result, error) {
+	s.transactionMu.RLock()
+	deleteClaim := s.transactionHooks.DeleteClaim
+	s.transactionMu.RUnlock()
+	if deleteClaim != nil {
+		return deleteClaim(ctx, tx, senderID, operationID)
+	}
+	return tx.ExecContext(ctx, `
+		DELETE FROM presence_settings_pending_operations
+		WHERE user_id = $1 AND operation_id = $2
+	`, senderID, operationID)
+}
+
+func (s *Service) validateDeliveryPlan(plan DeliveryPlan) (Delivery, error) {
+	if s == nil || s.db == nil || s.repository == nil {
+		return nil, errors.New("presence history claim unavailable")
+	}
+	if plan.OperationID == uuid.Nil || plan.SenderID == uuid.Nil ||
+		(plan.Mode != DeliveryExactDelta && plan.Mode != DeliveryConservativeReset) {
+		return nil, errors.New("invalid presence delivery claim")
+	}
+	return s.boundDelivery()
+}
+
+func (s *Service) failExactClaim(ctx context.Context, plan DeliveryPlan, cause error) error {
+	if plan.Mode != DeliveryExactDelta {
+		return cause
+	}
+	resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.effectiveDeliveryTimeout())
+	defer cancel()
+	if err := s.EmergencyReset(resetCtx, plan); err != nil {
+		return errors.Join(cause, fmt.Errorf("emergency presence reset: %w", err))
+	}
+	return cause
+}
+
+// EmergencyReset performs a marker-preserving conservative safety delivery.
+func (s *Service) EmergencyReset(ctx context.Context, plan DeliveryPlan) error {
+	if plan.OperationID == uuid.Nil || plan.SenderID == uuid.Nil {
+		return errors.New("invalid emergency presence reset")
+	}
+	delivery, err := s.boundDelivery()
+	if err != nil {
+		return err
+	}
+	plan.Mode = DeliveryConservativeReset
+	deliveryCtx, cancel := context.WithTimeout(ctx, s.effectiveDeliveryTimeout())
+	defer cancel()
+	ack, err := delivery.DeliverCustomText(deliveryCtx, plan)
+	if err != nil {
+		return err
+	}
+	if ack.OperationID != plan.OperationID {
+		return errors.New("emergency presence reset acknowledgement mismatch")
+	}
+	return nil
+}
+
+func (s *Service) effectiveDeliveryTimeout() time.Duration {
+	if s.deliveryTimeout <= 0 {
+		return 5 * time.Second
+	}
+	return s.deliveryTimeout
+}
+
+// ReconcilePending processes one bounded snapshot of eligible markers.
+func (s *Service) ReconcilePending(ctx context.Context, limit int) (ReconcileStats, error) {
+	runStart := time.Now()
+	if s == nil || s.db == nil || s.repository == nil {
+		return ReconcileStats{}, errors.New("presence reconciliation unavailable")
+	}
+	if _, err := s.boundDelivery(); err != nil {
+		return ReconcileStats{}, err
+	}
+	if limit < 1 || limit > maxReconcileBatch {
+		return ReconcileStats{}, errors.New("invalid presence reconciliation limit")
+	}
+	senderIDs, err := s.discoverPending(ctx, limit)
+	if err != nil {
+		stats := ReconcileStats{FailedCount: 1}
+		s.logReconcileStats(stats, time.Since(runStart))
+		return stats, err
+	}
+	stats := ReconcileStats{DiscoveredCount: len(senderIDs)}
+	var passErr error
+	for _, senderID := range senderIDs {
+		result, reconcileErr := s.reconcileOne(ctx, senderID)
+		addReconcileResult(&stats, result, reconcileErr)
+		if reconcileErr != nil {
+			passErr = errors.Join(passErr, reconcileErr)
+		}
+	}
+	s.logReconcileStats(stats, time.Since(runStart))
+	return stats, passErr
+}
+
+func (s *Service) discoverPending(ctx context.Context, limit int) ([]uuid.UUID, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT user_id
+		FROM presence_settings_pending_operations
+		WHERE reconcile_after <= clock_timestamp()
+		ORDER BY user_id
+		LIMIT $1
+	`, limit)
+	if err != nil {
+		return nil, fmt.Errorf("discover pending presence operations: %w", err)
+	}
+	ids := make([]uuid.UUID, 0, limit)
+	for rows.Next() {
+		var senderID uuid.UUID
+		if err := rows.Scan(&senderID); err != nil {
+			return nil, closeListRowsWithError(rows, fmt.Errorf("scan pending presence operation: %w", err))
+		}
+		ids = append(ids, senderID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, closeListRowsWithError(rows, fmt.Errorf("read pending presence operations: %w", err))
+	}
+	if err := rows.Close(); err != nil {
+		return nil, fmt.Errorf("close pending presence operations: %w", err)
+	}
+	return ids, nil
+}
+
+func (s *Service) reconcileOne(ctx context.Context, senderID uuid.UUID) (reconcileResult, error) {
+	var result reconcileResult
+	err := s.WithSender(ctx, senderID, func() error {
+		var err error
+		result, err = s.reconcileSenderAlreadyGated(ctx, senderID)
+		return err
+	})
+	if err != nil && result == (reconcileResult{}) {
+		result.retained = true
+	}
+	return result, err
+}
+
+func addReconcileResult(stats *ReconcileStats, result reconcileResult, err error) {
+	if result.resolved {
+		stats.ResolvedCount++
+	}
+	if result.proven {
+		stats.ProvenCount++
+	}
+	if result.compensated {
+		stats.CompensatedCount++
+	}
+	if result.retained {
+		stats.RetainedCount++
+	}
+	if err != nil {
+		stats.FailedCount++
+	}
+}
+
+func (s *Service) logReconcileStats(stats ReconcileStats, duration time.Duration) {
+	if s.repository == nil || s.repository.log == nil {
+		return
+	}
+	s.repository.log.Info(
+		"pending presence reconciliation completed",
+		"operation", "presence_reconciliation",
+		"discovered_count", stats.DiscoveredCount,
+		"resolved_count", stats.ResolvedCount,
+		"proven_count", stats.ProvenCount,
+		"compensated_count", stats.CompensatedCount,
+		"retained_count", stats.RetainedCount,
+		"failed_count", stats.FailedCount,
+		"duration_ms", duration.Milliseconds(),
+	)
+}
+
+// RunPendingReconciler retries eligible markers every five seconds until the
+// cleanup context is canceled. Startup reconciliation remains explicit.
+func (s *Service) RunPendingReconciler(ctx context.Context) {
+	interval := s.reconcileInterval
+	if interval <= 0 {
+		interval = 5 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			_, _ = s.ReconcilePending(ctx, maxReconcileBatch)
+		}
+	}
+}
+
+func (s *Service) reconcileSenderAlreadyGated(
+	ctx context.Context,
+	senderID uuid.UUID,
+) (result reconcileResult, returnErr error) {
+	tx, err := s.BeginTx(ctx, nil)
+	if err != nil {
+		return reconcileResult{retained: true}, fmt.Errorf("begin presence reconciliation: %w", err)
+	}
+	if tx == nil {
+		return reconcileResult{retained: true}, errors.New("begin presence reconciliation: missing transaction")
+	}
+	defer s.joinTransactionRollback(tx, "presence_reconciliation", &returnErr)
+
+	settings, pending, alreadyResolved, err := lockReconcileState(ctx, tx, senderID)
+	if alreadyResolved {
+		return reconcileResult{resolved: true, proven: true}, nil
+	}
+	if err != nil {
+		return reconcileResult{retained: true}, err
+	}
+	var now time.Time
+	if err := tx.QueryRowContext(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
+		return reconcileResult{retained: true}, fmt.Errorf("read presence reconciliation clock: %w", err)
+	}
+	if pending.ReconcileAfter.After(now) {
+		return reconcileResult{retained: true}, pendingOperationError(pending, now)
+	}
+	return s.reconcileLockedPending(ctx, tx, senderID, settings, pending, now)
+}
+
+func lockReconcileState(
+	ctx context.Context,
+	tx *sql.Tx,
+	senderID uuid.UUID,
+) (lockedPresenceSettings, pendingOperationRow, bool, error) {
+	if err := lockUser(ctx, tx, senderID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return lockedPresenceSettings{}, pendingOperationRow{}, true, nil
+		}
+		return lockedPresenceSettings{}, pendingOperationRow{}, false, err
+	}
+	settings, settingsErr := lockPresenceSettings(ctx, tx, senderID)
+	pending, pendingErr := lockPendingRow(ctx, tx, senderID)
+	if errors.Is(pendingErr, sql.ErrNoRows) {
+		return lockedPresenceSettings{}, pendingOperationRow{}, true, nil
+	}
+	if pendingErr != nil {
+		return lockedPresenceSettings{}, pendingOperationRow{}, false, pendingErr
+	}
+	if settingsErr != nil {
+		return lockedPresenceSettings{}, pendingOperationRow{}, false, settingsErr
+	}
+	return settings, pending, false, nil
+}
+
+func pendingOperationError(pending pendingOperationRow, now time.Time) *ServiceError {
+	return &ServiceError{
+		Status:     503,
+		Code:       "presence_operation_pending",
+		RetryAfter: ceilRetryAfter(pending.ReconcileAfter.Sub(now)),
+	}
+}
+
+func (s *Service) reconcileLockedPending(
+	ctx context.Context,
+	tx *sql.Tx,
+	senderID uuid.UUID,
+	settings lockedPresenceSettings,
+	pending pendingOperationRow,
+	now time.Time,
+) (reconcileResult, error) {
+	if !settings.OperationID.Valid || settings.OperationID.UUID != pending.ID {
+		return s.resolveProvenNonmatching(ctx, tx, senderID, settings, pending)
+	}
+	if pending.PriorVersion == math.MaxInt64 || settings.Version != pending.PriorVersion+1 {
+		return reconcileResult{retained: true}, errors.New("pending presence operation version is uncertain")
+	}
+	if settings.Version == math.MaxInt64 {
+		return reconcileResult{retained: true}, errors.New("presence settings version exhausted")
+	}
+	if settings.Tier == 0 && !settings.Text.Valid && !settings.Emoji.Valid {
+		if err := s.RollbackTx(tx); err != nil && !errors.Is(err, sql.ErrTxDone) {
+			return reconcileResult{retained: true}, fmt.Errorf("release compensated presence locks: %w", err)
+		}
+		err := s.ClaimAndDeliver(ctx, DeliveryPlan{
+			Mode:        DeliveryConservativeReset,
+			OperationID: pending.ID,
+			SenderID:    senderID,
+		})
+		if err != nil {
+			return reconcileResult{retained: true}, err
+		}
+		return reconcileResult{resolved: true}, nil
+	}
+	return s.compensateAndClaim(ctx, tx, senderID, settings, pending, now)
+}
+
+func lockPresenceSettings(
+	ctx context.Context,
+	tx *sql.Tx,
+	senderID uuid.UUID,
+) (lockedPresenceSettings, error) {
+	var settings lockedPresenceSettings
+	err := tx.QueryRowContext(ctx, `
+		SELECT presence_settings_version,
+		       presence_settings_operation_id,
+		       custom_text_tier,
+		       custom_text,
+		       custom_text_emoji
+		FROM user_presence_settings
+		WHERE user_id = $1
+		FOR UPDATE
+	`, senderID).Scan(
+		&settings.Version,
+		&settings.OperationID,
+		&settings.Tier,
+		&settings.Text,
+		&settings.Emoji,
+	)
+	if err != nil {
+		return lockedPresenceSettings{}, fmt.Errorf("lock presence reconciliation settings: %w", err)
+	}
+	return settings, nil
+}
+
+func lockPendingRow(
+	ctx context.Context,
+	tx *sql.Tx,
+	senderID uuid.UUID,
+) (pendingOperationRow, error) {
+	var pending pendingOperationRow
+	err := tx.QueryRowContext(ctx, `
+		SELECT operation_id, prior_settings_version, reconcile_after
+		FROM presence_settings_pending_operations
+		WHERE user_id = $1
+		FOR UPDATE
+	`, senderID).Scan(&pending.ID, &pending.PriorVersion, &pending.ReconcileAfter)
+	if errors.Is(err, sql.ErrNoRows) {
+		return pendingOperationRow{}, sql.ErrNoRows
+	}
+	if err != nil {
+		return pendingOperationRow{}, fmt.Errorf("lock pending presence reconciliation: %w", err)
+	}
+	return pending, nil
+}
+
+func (s *Service) resolveProvenNonmatching(
+	ctx context.Context,
+	tx *sql.Tx,
+	senderID uuid.UUID,
+	settings lockedPresenceSettings,
+	pending pendingOperationRow,
+) (reconcileResult, error) {
+	rollbackProven := settings.Version == pending.PriorVersion
+	superseded := settings.Version > pending.PriorVersion &&
+		settings.OperationID.Valid && settings.OperationID.UUID != pending.ID
+	if !rollbackProven && !superseded {
+		return reconcileResult{retained: true}, errors.New("pending presence operation proof is uncertain")
+	}
+	result, err := tx.ExecContext(ctx, `
+		DELETE FROM presence_settings_pending_operations
+		WHERE user_id = $1 AND operation_id = $2
+	`, senderID, pending.ID)
+	if err != nil {
+		return reconcileResult{retained: true}, fmt.Errorf("delete proven pending presence operation: %w", err)
+	}
+	if err := requireOneAffected(result, "delete proven pending presence operation"); err != nil {
+		return reconcileResult{retained: true}, err
+	}
+	if err := s.CommitTx(tx); err != nil {
+		return reconcileResult{retained: true}, fmt.Errorf("commit proven presence reconciliation: %w", err)
+	}
+	return reconcileResult{resolved: true, proven: true}, nil
+}
+
+func (s *Service) compensateAndClaim(
+	ctx context.Context,
+	tx *sql.Tx,
+	senderID uuid.UUID,
+	settings lockedPresenceSettings,
+	pending pendingOperationRow,
+	now time.Time,
+) (reconcileResult, error) {
+	operationID := uuid.New()
+	retryAfter := now.Add(s.effectiveReconcileInterval())
+	result, err := tx.ExecContext(ctx, `
+		UPDATE presence_settings_pending_operations
+		SET operation_id = $3,
+		    prior_settings_version = $4,
+		    created_at = $5,
+		    reconcile_after = $6
+		WHERE user_id = $1 AND operation_id = $2
+	`, senderID, pending.ID, operationID, settings.Version, now, retryAfter)
+	if err != nil {
+		return reconcileResult{retained: true}, fmt.Errorf("replace compensated presence operation: %w", err)
+	}
+	if err := requireOneAffected(result, "replace compensated presence operation"); err != nil {
+		return reconcileResult{retained: true}, err
+	}
+	result, err = tx.ExecContext(ctx, `
+		UPDATE user_presence_settings
+		SET custom_text_tier = 0,
+		    custom_text = NULL,
+		    custom_text_emoji = NULL,
+		    presence_settings_version = $2,
+		    presence_settings_operation_id = $3,
+		    updated_at = $4
+		WHERE user_id = $1
+	`, senderID, settings.Version+1, operationID, now)
+	if err != nil {
+		return reconcileResult{retained: true}, fmt.Errorf("store compensated presence reset: %w", err)
+	}
+	if err := requireOneAffected(result, "store compensated presence reset"); err != nil {
+		return reconcileResult{retained: true}, err
+	}
+	before := normalizeCustomTextState(CustomTextState{
+		Text:  nullableString(settings.Text),
+		Emoji: nullableString(settings.Emoji),
+	})
+	if err := s.RecordCustomTextTransition(ctx, tx, senderID, before, CustomTextState{}); err != nil {
+		return reconcileResult{retained: true}, fmt.Errorf("record compensated presence reset: %w", err)
+	}
+	priorID := pending.ID
+	operation := AudienceOperation{
+		ID:               operationID,
+		SenderID:         senderID,
+		PriorVersion:     settings.Version,
+		Version:          settings.Version + 1,
+		PriorOperationID: &priorID,
+		Before:           before,
+		BeforeTier:       settings.Tier,
+	}
+	if err := s.CommitTx(tx); err != nil {
+		rollbackErr := s.RollbackTx(tx)
+		if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			return reconcileResult{retained: true}, errors.Join(
+				fmt.Errorf("commit compensated presence reset: %w", err),
+				fmt.Errorf("rollback compensated presence reset: %w", rollbackErr),
+			)
+		}
+		if s.ClassifyAudienceCommit(ctx, operation) != CommitConfirmed {
+			return reconcileResult{retained: true}, fmt.Errorf("commit compensated presence reset: %w", err)
+		}
+	}
+	claimErr := s.ClaimAndDeliver(ctx, DeliveryPlan{
+		Mode:        DeliveryConservativeReset,
+		OperationID: operationID,
+		SenderID:    senderID,
+	})
+	if claimErr != nil {
+		return reconcileResult{compensated: true, retained: true}, claimErr
+	}
+	return reconcileResult{resolved: true, compensated: true}, nil
+}
+
+func (s *Service) effectiveReconcileInterval() time.Duration {
+	if s.reconcileInterval <= 0 {
+		return 5 * time.Second
+	}
+	return s.reconcileInterval
+}
+
+func (s *Service) joinTransactionRollback(tx *sql.Tx, operation string, returnErr *error) {
+	rollbackErr := s.RollbackTx(tx)
+	if rollbackErr == nil || errors.Is(rollbackErr, sql.ErrTxDone) {
+		return
+	}
+	*returnErr = errors.Join(*returnErr, fmt.Errorf("rollback %s: %w", operation, rollbackErr))
+	if s.repository == nil || s.repository.log == nil {
+		return
+	}
+	s.repository.log.Warn(
+		"presence reconciliation rollback failed",
+		"operation", operation,
+		"error_class", "rollback_failure",
+		"rollback_count", 1,
+	)
+}

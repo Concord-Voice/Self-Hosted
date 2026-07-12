@@ -20,7 +20,20 @@ type plannedCustomTextRecorder interface {
 	) error
 }
 
+type plannedPresenceReconciler interface {
+	BindDelivery(presencehistory.Delivery) error
+	WithReadySender(context.Context, uuid.UUID, func() error) error
+	ClaimAndDeliver(context.Context, presencehistory.DeliveryPlan) error
+	EmergencyReset(context.Context, presencehistory.DeliveryPlan) error
+	ReconcilePending(context.Context, int) (presencehistory.ReconcileStats, error)
+	RunPendingReconciler(context.Context)
+	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
+	CommitTx(*sql.Tx) error
+	RollbackTx(*sql.Tx) error
+}
+
 var _ plannedCustomTextRecorder = (*presencehistory.Service)(nil)
+var _ plannedPresenceReconciler = (*presencehistory.Service)(nil)
 
 func TestServiceRecorderFailsClosedWithoutConstruction(t *testing.T) {
 	var service *presencehistory.Service
