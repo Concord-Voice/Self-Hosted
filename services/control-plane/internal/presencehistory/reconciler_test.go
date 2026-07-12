@@ -384,6 +384,166 @@ func TestClaimAndDeliverUnresolvedCommitRestoresQuarantineBeforeReset(t *testing
 	assert.Equal(t, DeliveryConservativeReset, plans[1].Mode)
 }
 
+func TestClaimAndDeliverCompletedSupersessionSkipsStaleEmergencyReset(t *testing.T) {
+	t.Run("primary readback", func(t *testing.T) {
+		testClaimAndDeliverCompletedSupersession(t, false)
+	})
+	t.Run("repair inspection after readback failure", func(t *testing.T) {
+		testClaimAndDeliverCompletedSupersession(t, true)
+	})
+}
+
+func testClaimAndDeliverCompletedSupersession(t *testing.T, failPrimaryReadback bool) {
+	t.Helper()
+	db, cleanup := testhelpers.SetupTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	senderID := testhelpers.CreateUser(t, db)
+	operationA := uuid.New()
+	seedTask8Pending(t, db, senderID, operationA, operationA, 0, true, CustomTextState{Text: "old"})
+	delivery := &task8Delivery{}
+	serviceA := NewService(db, DisclosureState{}, false)
+	serviceB := NewService(db, DisclosureState{}, false)
+	require.NoError(t, serviceA.BindDelivery(delivery))
+	require.NoError(t, serviceB.BindDelivery(delivery))
+
+	readbackEntered := make(chan struct{})
+	supersessionFinished := make(chan struct{})
+	serviceA.readClaimState = func(ctx context.Context, senderID uuid.UUID) (audienceCommitState, error) {
+		close(readbackEntered)
+		<-supersessionFinished
+		if failPrimaryReadback {
+			return audienceCommitState{}, errors.New("forced primary readback failure")
+		}
+		return serviceA.readAudienceCommitState(ctx, senderID)
+	}
+	restore := serviceA.SetTransactionTestHooks(TransactionTestHooks{Commit: func(tx *sql.Tx) error {
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		return errors.New("ambiguous committed claim A")
+	}})
+	defer restore()
+
+	claimADone := make(chan error, 1)
+	go func() {
+		claimADone <- serviceA.WithSender(ctx, senderID, func() error {
+			return serviceA.ClaimAndDeliver(ctx, DeliveryPlan{
+				Mode: DeliveryExactDelta, OperationID: operationA, SenderID: senderID,
+				Payload: &CustomTextState{Text: "old"},
+			})
+		})
+	}()
+	task8Receive(t, readbackEntered, "claim A did not reach ambiguous commit readback")
+
+	operationB, errB := task8CompleteSupersedingOperation(ctx, serviceB, senderID, OrdinaryAudienceWrite)
+	close(supersessionFinished)
+	require.NoError(t, errB)
+	errA := task8ReceiveError(t, claimADone, "claim A did not finish after supersession")
+	require.ErrorContains(t, errA, "ambiguous committed claim A")
+	assert.Equal(t, 0, task8PendingCount(t, db, senderID))
+
+	plans := delivery.snapshot()
+	require.Len(t, plans, 2, "completed supersession B must not be followed by stale conservative reset A")
+	assert.Equal(t, operationA, plans[0].OperationID)
+	assert.Equal(t, DeliveryExactDelta, plans[0].Mode)
+	assert.Equal(t, operationB.ID, plans[1].OperationID)
+	assert.Equal(t, DeliveryExactDelta, plans[1].Mode)
+}
+
+func TestClaimAndDeliverRepairCommitSupersessionSkipsStaleEmergencyReset(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	senderID := testhelpers.CreateUser(t, db)
+	operationA := uuid.New()
+	seedTask8Pending(t, db, senderID, operationA, operationA, 0, true, CustomTextState{Text: "old"})
+	delivery := &task8Delivery{}
+	serviceA := NewService(db, DisclosureState{}, false)
+	serviceB := NewService(db, DisclosureState{}, false)
+	require.NoError(t, serviceA.BindDelivery(delivery))
+	require.NoError(t, serviceB.BindDelivery(delivery))
+
+	repairReadbackEntered := make(chan struct{})
+	supersessionFinished := make(chan struct{})
+	readCount := 0
+	serviceA.readClaimState = func(ctx context.Context, senderID uuid.UUID) (audienceCommitState, error) {
+		readCount++
+		if readCount == 1 {
+			return audienceCommitState{}, errors.New("forced primary readback failure")
+		}
+		close(repairReadbackEntered)
+		<-supersessionFinished
+		return serviceA.readAudienceCommitState(ctx, senderID)
+	}
+	restore := serviceA.SetTransactionTestHooks(TransactionTestHooks{Commit: func(tx *sql.Tx) error {
+		if err := tx.Commit(); err != nil {
+			return err
+		}
+		return errors.New("ambiguous committed transaction A")
+	}})
+	defer restore()
+
+	claimADone := make(chan error, 1)
+	go func() {
+		claimADone <- serviceA.WithSender(ctx, senderID, func() error {
+			return serviceA.ClaimAndDeliver(ctx, DeliveryPlan{
+				Mode: DeliveryExactDelta, OperationID: operationA, SenderID: senderID,
+				Payload: &CustomTextState{Text: "old"},
+			})
+		})
+	}()
+	task8Receive(t, repairReadbackEntered, "claim A did not reach repair-commit readback")
+
+	operationB, errB := task8CompleteSupersedingOperation(ctx, serviceB, senderID, ForcedSecurityClear)
+	close(supersessionFinished)
+	require.NoError(t, errB)
+	errA := task8ReceiveError(t, claimADone, "claim A did not finish after repair-commit supersession")
+	require.ErrorContains(t, errA, "ambiguous committed transaction A")
+	assert.Equal(t, 0, task8PendingCount(t, db, senderID))
+
+	plans := delivery.snapshot()
+	require.Len(t, plans, 2, "repair-commit supersession B must not be followed by stale conservative reset A")
+	assert.Equal(t, operationA, plans[0].OperationID)
+	assert.Equal(t, DeliveryExactDelta, plans[0].Mode)
+	assert.Equal(t, operationB.ID, plans[1].OperationID)
+	assert.Equal(t, DeliveryExactDelta, plans[1].Mode)
+}
+
+func task8CompleteSupersedingOperation(
+	ctx context.Context,
+	service *Service,
+	senderID uuid.UUID,
+	mode OperationMode,
+) (operation AudienceOperation, returnErr error) {
+	err := service.WithSender(ctx, senderID, func() error {
+		tx, err := service.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		operation, err = service.BeginAudienceOperation(ctx, tx, senderID, mode)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.ExecContext(ctx, `
+			UPDATE user_presence_settings
+			SET custom_text_tier = 2, custom_text = 'new', custom_text_emoji = NULL
+			WHERE user_id = $1
+		`, senderID); err != nil {
+			return err
+		}
+		if err := service.CommitTx(tx); err != nil {
+			return err
+		}
+		return service.ClaimAndDeliver(ctx, DeliveryPlan{
+			Mode: DeliveryExactDelta, OperationID: operation.ID, SenderID: senderID,
+			Payload: &CustomTextState{Text: "new"},
+		})
+	})
+	return operation, err
+}
+
 func TestClaimAndDeliverFailsClosedForMissingTransactionAndDeletedAccount(t *testing.T) {
 	t.Run("missing transaction", func(t *testing.T) {
 		db, cleanup := testhelpers.SetupTestDB(t)

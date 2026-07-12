@@ -51,6 +51,7 @@ const (
 	claimCommitUnresolved claimCommitState = iota
 	claimCommitConfirmed
 	claimCommitQuarantined
+	claimCommitSuperseded
 )
 
 // BindDelivery binds the one process-local typed delivery adapter.
@@ -175,21 +176,28 @@ func (s *Service) resolveClaimCommitError(
 	if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
 		cause = errors.Join(cause, fmt.Errorf("rollback presence delivery claim: %w", rollbackErr))
 	}
-	switch s.classifyClaimCommit(ctx, plan) {
-	case claimCommitConfirmed:
+	switch s.classifyClaimCommit(ctx, plan, pending) {
+	case claimCommitConfirmed, claimCommitSuperseded:
 		return cause
 	case claimCommitQuarantined:
 		return s.failExactClaim(ctx, plan, cause)
 	default:
-		restoreErr := s.ensureClaimQuarantine(ctx, plan, pending)
+		repairState, restoreErr := s.ensureClaimQuarantine(ctx, plan, pending)
 		if restoreErr != nil {
 			cause = errors.Join(cause, fmt.Errorf("restore presence delivery quarantine: %w", restoreErr))
+		}
+		if repairState == claimCommitConfirmed || repairState == claimCommitSuperseded {
+			return cause
 		}
 		return s.failExactClaim(ctx, plan, cause)
 	}
 }
 
-func (s *Service) classifyClaimCommit(ctx context.Context, plan DeliveryPlan) claimCommitState {
+func (s *Service) classifyClaimCommit(
+	ctx context.Context,
+	plan DeliveryPlan,
+	prior pendingOperationRow,
+) claimCommitState {
 	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), commitReadbackTimeout)
 	defer cancel()
 	readState := s.readClaimState
@@ -210,6 +218,11 @@ func (s *Service) classifyClaimCommit(ctx context.Context, plan DeliveryPlan) cl
 	if !state.UserExists {
 		return claimCommitConfirmed
 	}
+	if state.SettingsExists && state.PendingOperationID == nil &&
+		state.OperationID != nil && *state.OperationID != plan.OperationID &&
+		state.Version > prior.PriorVersion {
+		return claimCommitSuperseded
+	}
 	return claimCommitUnresolved
 }
 
@@ -217,25 +230,25 @@ func (s *Service) ensureClaimQuarantine(
 	ctx context.Context,
 	plan DeliveryPlan,
 	prior pendingOperationRow,
-) (returnErr error) {
+) (repairState claimCommitState, returnErr error) {
 	repairCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), commitReadbackTimeout)
 	defer cancel()
 	tx, err := s.BeginTx(repairCtx, nil)
 	if err != nil {
-		return err
+		return claimCommitUnresolved, err
 	}
 	if tx == nil {
-		return errors.New("missing quarantine repair transaction")
+		return claimCommitUnresolved, errors.New("missing quarantine repair transaction")
 	}
 	defer s.joinTransactionRollback(tx, "presence_claim_quarantine_repair", &returnErr)
-	needsInsert, err := inspectClaimQuarantine(repairCtx, tx, plan, prior)
+	repairState, needsInsert, err := inspectClaimQuarantine(repairCtx, tx, plan, prior)
 	if err != nil || !needsInsert {
-		return err
+		return repairState, err
 	}
 	if err := s.insertClaimQuarantine(repairCtx, tx, plan, prior); err != nil {
-		return err
+		return claimCommitUnresolved, err
 	}
-	return s.commitClaimQuarantineRepair(repairCtx, tx, plan)
+	return s.commitClaimQuarantineRepair(repairCtx, tx, plan, prior)
 }
 
 func inspectClaimQuarantine(
@@ -243,36 +256,36 @@ func inspectClaimQuarantine(
 	tx *sql.Tx,
 	plan DeliveryPlan,
 	prior pendingOperationRow,
-) (bool, error) {
+) (claimCommitState, bool, error) {
 	if err := lockUser(ctx, tx, plan.SenderID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return false, nil
+			return claimCommitConfirmed, false, nil
 		}
-		return false, err
+		return claimCommitUnresolved, false, err
 	}
 	settings, err := lockPresenceSettings(ctx, tx, plan.SenderID)
 	if err != nil {
-		return false, err
+		return claimCommitUnresolved, false, err
 	}
 	pending, pendingErr := lockPendingRow(ctx, tx, plan.SenderID)
 	if pendingErr == nil {
 		if pending.ID == plan.OperationID ||
 			(settings.OperationID.Valid && settings.OperationID.UUID == pending.ID) {
-			return false, nil
+			return claimCommitQuarantined, false, nil
 		}
-		return false, errors.New("quarantine repair found inconsistent pending marker")
+		return claimCommitUnresolved, false, errors.New("quarantine repair found inconsistent pending marker")
 	}
 	if !errors.Is(pendingErr, sql.ErrNoRows) {
-		return false, pendingErr
+		return claimCommitUnresolved, false, pendingErr
 	}
 	if settings.OperationID.Valid && settings.OperationID.UUID != plan.OperationID &&
 		settings.Version > prior.PriorVersion {
-		return false, nil
+		return claimCommitSuperseded, false, nil
 	}
 	if !settings.OperationID.Valid || settings.OperationID.UUID != plan.OperationID {
-		return false, errors.New("quarantine repair settings marker is uncertain")
+		return claimCommitUnresolved, false, errors.New("quarantine repair settings marker is uncertain")
 	}
-	return true, nil
+	return claimCommitUnresolved, true, nil
 }
 
 func (s *Service) insertClaimQuarantine(
@@ -300,21 +313,24 @@ func (s *Service) commitClaimQuarantineRepair(
 	ctx context.Context,
 	tx *sql.Tx,
 	plan DeliveryPlan,
-) error {
+	prior pendingOperationRow,
+) (claimCommitState, error) {
 	if err := s.CommitTx(tx); err != nil {
 		rollbackErr := s.RollbackTx(tx)
 		if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-			return errors.Join(
+			return claimCommitUnresolved, errors.Join(
 				fmt.Errorf("commit pending presence repair: %w", err),
 				fmt.Errorf("rollback pending presence repair: %w", rollbackErr),
 			)
 		}
-		if s.classifyClaimCommit(ctx, plan) == claimCommitQuarantined {
-			return nil
+		state := s.classifyClaimCommit(ctx, plan, prior)
+		if state == claimCommitConfirmed || state == claimCommitQuarantined ||
+			state == claimCommitSuperseded {
+			return state, nil
 		}
-		return fmt.Errorf("commit pending presence repair: %w", err)
+		return claimCommitUnresolved, fmt.Errorf("commit pending presence repair: %w", err)
 	}
-	return nil
+	return claimCommitQuarantined, nil
 }
 
 func (s *Service) deleteClaimedPending(
