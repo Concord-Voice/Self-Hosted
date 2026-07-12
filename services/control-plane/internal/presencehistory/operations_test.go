@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
+	testhelpers "github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers/testdb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

@@ -8,13 +8,12 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestRecordCustomTextTransitionIntervals(t *testing.T) {
-	ts := testhelpers.SetupTestServer(t)
+	ts := setupPresenceHistoryTestServer(t)
 	ctx := context.Background()
 	disclosure := BuildDisclosure(DisclosureOptions{InstanceType: "saas"})
 	repository := NewRepository(ts.DB, disclosure)
@@ -158,7 +157,7 @@ func TestRecordCustomTextTransitionIntervals(t *testing.T) {
 }
 
 func TestRecordCustomTextTransitionPausesStaleOrUnavailableDisclosure(t *testing.T) {
-	ts := testhelpers.SetupTestServer(t)
+	ts := setupPresenceHistoryTestServer(t)
 	ctx := context.Background()
 	current := BuildDisclosure(DisclosureOptions{InstanceType: "saas"})
 
@@ -226,7 +225,7 @@ func TestRecordCustomTextTransitionPausesStaleOrUnavailableDisclosure(t *testing
 }
 
 func TestRecordCustomTextTransitionLockDelayUsesPostLockClock(t *testing.T) {
-	ts := testhelpers.SetupTestServer(t)
+	ts := setupPresenceHistoryTestServer(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	disclosure := BuildDisclosure(DisclosureOptions{InstanceType: "saas"})

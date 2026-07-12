@@ -12,7 +12,6 @@ import (
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -60,7 +59,7 @@ func TestHandlerStrictSettingsDecoder(t *testing.T) {
 
 func TestHandlerSelfOnlyRoutesAndNoStoreHistory(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	ts := testhelpers.SetupTestServer(t)
+	ts := setupPresenceHistoryTestServer(t)
 	disclosure := BuildDisclosure(DisclosureOptions{InstanceType: "saas"})
 	service := NewService(ts.DB, disclosure, true)
 	user := ts.CreateTestUser(t, "history_handler")
@@ -97,7 +96,7 @@ func TestHandlerSelfOnlyRoutesAndNoStoreHistory(t *testing.T) {
 
 func TestHandlerInvalidCursorLimitDeleteAndGenericErrors(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	ts := testhelpers.SetupTestServer(t)
+	ts := setupPresenceHistoryTestServer(t)
 	user := ts.CreateTestUser(t, "history_handler_errors")
 	userID := uuid.MustParse(user.ID)
 	service := NewService(ts.DB, BuildDisclosure(DisclosureOptions{InstanceType: "saas"}), true)
@@ -134,7 +133,7 @@ func TestHandlerInvalidCursorLimitDeleteAndGenericErrors(t *testing.T) {
 
 func TestHandlerPatchAndMissingSubject(t *testing.T) {
 	gin.SetMode(gin.TestMode)
-	ts := testhelpers.SetupTestServer(t)
+	ts := setupPresenceHistoryTestServer(t)
 	disclosure := BuildDisclosure(DisclosureOptions{InstanceType: "saas"})
 	service := NewService(ts.DB, disclosure, true)
 	user := ts.CreateTestUser(t, "history_handler_patch")

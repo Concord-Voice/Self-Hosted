@@ -9,13 +9,13 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
+	testhelpers "github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers/testdb"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 func TestSettingsDefaultReadDoesNotCreateRow(t *testing.T) {
-	ts := testhelpers.SetupTestServer(t)
+	ts := setupPresenceHistoryTestServer(t)
 	disclosure := BuildDisclosure(DisclosureOptions{InstanceType: "saas"})
 	service := NewService(ts.DB, disclosure, true)
 	user := ts.CreateTestUser(t, "history_settings_default")
@@ -36,7 +36,7 @@ func TestSettingsDefaultReadDoesNotCreateRow(t *testing.T) {
 }
 
 func TestSettingsUnavailableDisclosureReadRemainsAvailableForDeletion(t *testing.T) {
-	ts := testhelpers.SetupTestServer(t)
+	ts := setupPresenceHistoryTestServer(t)
 	service := NewService(ts.DB, BuildDisclosure(DisclosureOptions{InstanceType: "self-hosted"}), true)
 	user := ts.CreateTestUser(t, "history_settings_unavailable")
 
@@ -47,7 +47,7 @@ func TestSettingsUnavailableDisclosureReadRemainsAvailableForDeletion(t *testing
 }
 
 func TestSettingsEnableRequiresCurrentExplicitConsent(t *testing.T) {
-	ts := testhelpers.SetupTestServer(t)
+	ts := setupPresenceHistoryTestServer(t)
 	disclosure := BuildDisclosure(DisclosureOptions{InstanceType: "saas"})
 	user := ts.CreateTestUser(t, "history_enable")
 	userID := uuid.MustParse(user.ID)
@@ -145,7 +145,7 @@ func TestSettingsEnableRequiresCurrentExplicitConsent(t *testing.T) {
 }
 
 func TestRetentionUpdateDeletesExpiredWithoutResurrection(t *testing.T) {
-	ts := testhelpers.SetupTestServer(t)
+	ts := setupPresenceHistoryTestServer(t)
 	ctx := context.Background()
 	disclosure := BuildDisclosure(DisclosureOptions{InstanceType: "saas"})
 	service := NewService(ts.DB, disclosure, true)
@@ -185,7 +185,7 @@ func TestRetentionUpdateDeletesExpiredWithoutResurrection(t *testing.T) {
 }
 
 func TestRetentionReconsentRules(t *testing.T) {
-	ts := testhelpers.SetupTestServer(t)
+	ts := setupPresenceHistoryTestServer(t)
 	ctx := context.Background()
 	disclosure := BuildDisclosure(DisclosureOptions{InstanceType: "saas"})
 	service := NewService(ts.DB, disclosure, true)
@@ -228,7 +228,7 @@ func TestRetentionReconsentRules(t *testing.T) {
 }
 
 func TestDisableAndDeleteIsIdempotentAndPristineSafe(t *testing.T) {
-	ts := testhelpers.SetupTestServer(t)
+	ts := setupPresenceHistoryTestServer(t)
 	ctx := context.Background()
 	disclosure := BuildDisclosure(DisclosureOptions{InstanceType: "saas"})
 	service := NewService(ts.DB, disclosure, true)
@@ -437,7 +437,7 @@ func receiveHistoryOperation(ctx context.Context, t *testing.T, result <-chan er
 }
 
 func TestHistoryListPrunesExactCutoffAndValidatesOptions(t *testing.T) {
-	ts := testhelpers.SetupTestServer(t)
+	ts := setupPresenceHistoryTestServer(t)
 	service := NewService(ts.DB, BuildDisclosure(DisclosureOptions{InstanceType: "saas"}), true)
 	user := ts.CreateTestUser(t, "history_service_list")
 	userID := uuid.MustParse(user.ID)

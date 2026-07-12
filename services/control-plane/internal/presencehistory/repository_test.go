@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -154,7 +153,7 @@ func (r *repositoryRowsCloseRows) deliver(
 }
 
 func TestRepositoryPaginationAndSafeDecoding(t *testing.T) {
-	ts := testhelpers.SetupTestServer(t)
+	ts := setupPresenceHistoryTestServer(t)
 	ctx := context.Background()
 	repository := NewRepository(ts.DB, BuildDisclosure(DisclosureOptions{InstanceType: "saas"}))
 	user := ts.CreateTestUser(t, "history_pagination")
@@ -207,7 +206,7 @@ func TestRepositoryPaginationAndSafeDecoding(t *testing.T) {
 }
 
 func TestRepositoryFullTerminalPageHasNoCursor(t *testing.T) {
-	ts := testhelpers.SetupTestServer(t)
+	ts := setupPresenceHistoryTestServer(t)
 	repository := NewRepository(ts.DB, BuildDisclosure(DisclosureOptions{InstanceType: "saas"}))
 	user := ts.CreateTestUser(t, "history_terminal")
 	userID := uuid.MustParse(user.ID)
@@ -224,7 +223,7 @@ func TestRepositoryFullTerminalPageHasNoCursor(t *testing.T) {
 }
 
 func TestRepositoryExpirySelfScopeAndUnsupportedPayloads(t *testing.T) {
-	ts := testhelpers.SetupTestServer(t)
+	ts := setupPresenceHistoryTestServer(t)
 	var logOutput bytes.Buffer
 	repository := newRepositoryWithLogger(
 		ts.DB,
@@ -303,7 +302,7 @@ func TestNewRepositoryWithLoggerDefaultsNilLogger(t *testing.T) {
 }
 
 func TestRepositoryAccountDeletionCascadesHistory(t *testing.T) {
-	ts := testhelpers.SetupTestServer(t)
+	ts := setupPresenceHistoryTestServer(t)
 	user := ts.CreateTestUser(t, "history_repo_cascade")
 	userID := uuid.MustParse(user.ID)
 	now := time.Now().UTC().Add(-time.Minute).Truncate(time.Microsecond)

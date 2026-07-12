@@ -15,7 +15,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/lib/pq"
-	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
+	testhelpers "github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers/testdb"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
