@@ -51,6 +51,8 @@ type Service struct {
 	repository        *Repository
 	disclosure        DisclosureState
 	activationEnabled bool
+	senderGates       senderGateSet
+	readCommitState   func(context.Context, uuid.UUID) (audienceCommitState, error)
 }
 
 // NewService constructs a self-only Activity History service.
@@ -61,7 +63,26 @@ func NewService(db *sql.DB, disclosure DisclosureState, activationEnabled bool) 
 		repository:        NewRepository(db, immutableDisclosure),
 		disclosure:        immutableDisclosure,
 		activationEnabled: activationEnabled,
+		senderGates:       newSenderGateSet(),
 	}
+}
+
+// RecordCustomTextTransition forwards the typed recorder contract through the
+// concrete service injected into production writers.
+func (s *Service) RecordCustomTextTransition(
+	ctx context.Context,
+	tx *sql.Tx,
+	userID uuid.UUID,
+	before CustomTextState,
+	after CustomTextState,
+) error {
+	if s == nil || s.repository == nil {
+		return errors.New("activity history recorder unavailable")
+	}
+	if tx == nil {
+		return errors.New("activity history recorder transaction unavailable")
+	}
+	return s.repository.RecordCustomTextTransition(ctx, tx, userID, before, after)
 }
 
 // GetSettings reads defaults without creating a settings row.
