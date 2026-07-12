@@ -18,6 +18,7 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/klipy"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/presence"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/presencehistory"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/singleflight"
 )
@@ -64,11 +65,23 @@ type Hub struct {
 	// Deterministic test seam invoked after a custom-text snapshot authorizes a
 	// viewer but before it enqueues the frame. Nil in production.
 	customTextSnapshotBeforeEnqueue func(senderID, viewerID uuid.UUID)
+	// Deterministic test seam invoked after the bounded candidate query and
+	// before any sender gate is acquired. Nil in production.
+	customTextSnapshotAfterCandidates func()
 	// Deterministic test seam invoked after the snapshot reads the sender's
 	// payload but before it computes the audience. Nil in production.
 	customTextSnapshotAfterStateRead func(senderID, viewerID uuid.UUID)
-	customTextDeliveryLocks          [customTextDeliveryLockStripes]sync.Mutex
-	customTextDeliveryCoordinator    customTextDeliveryCoordinator
+	// The same concrete service instance is injected into writers and the Hub.
+	// Snapshots use its sender gate; typed delivery never reacquires that gate.
+	presenceHistoryService *presencehistory.Service
+	// Per-Hub test seams for deterministic delivery failures and cancellation.
+	// Nil uses the production JSON marshaler, queue broadcaster, and socket close.
+	customTextFrameMarshaler        func(uuid.UUID, *CustomTextPayload) ([]byte, error)
+	customTextDeliveryBroadcaster   func(context.Context, *Client, []byte) error
+	customTextDeliveryBeforeEnqueue func()
+	customTextClientDisconnect      func(*Client) error
+	customTextDeliveryLocks         [customTextDeliveryLockStripes]sync.Mutex
+	customTextDeliveryCoordinator   customTextDeliveryCoordinator
 
 	// Registered clients (client ID -> Client)
 	clients map[uuid.UUID]*Client
@@ -282,6 +295,12 @@ func NewHub(db *sql.DB, redisClient *redis.Client) *Hub {
 	}
 }
 
+// SetPresenceHistoryService binds the concrete service shared by Custom Status
+// writers and reconnect snapshots. Runtime wiring calls this before Run.
+func (h *Hub) SetPresenceHistoryService(service *presencehistory.Service) {
+	h.presenceHistoryService = service
+}
+
 // SetMentionChecker injects the RBAC permission checker for mention enforcement.
 // Called after Hub and Resolver are both constructed (breaks circular init dependency).
 func (h *Hub) SetMentionChecker(checker MentionPermissionChecker) {
@@ -401,15 +420,27 @@ func (h *Hub) Run() {
 			h.applyVoiceCountCatchup(c)
 
 		case <-h.done:
-			// Graceful shutdown: cancel async work, wait for completion, close connections
-			for _, client := range h.clients {
+			// Unpublish clients under the same lock held by typed delivery before
+			// closing their queues. A delivery already holding RLock completes
+			// first; a later delivery sees no connected target.
+			h.mu.Lock()
+			clients := make([]*Client, 0, len(h.clients))
+			for clientID, client := range h.clients {
+				clients = append(clients, client)
+				delete(h.clients, clientID)
+			}
+			clear(h.userClients)
+			h.mu.Unlock()
+
+			// Graceful shutdown: cancel async work, wait for completion, close connections.
+			for _, client := range clients {
 				if client.asyncCancel != nil {
 					client.asyncCancel()
 				}
 				client.asyncWg.Wait()
 				close(client.Send)
 			}
-			log.Printf("Hub shut down, closed %d client connections", len(h.clients))
+			log.Printf("Hub shut down, closed %d client connections", len(clients))
 			return
 		}
 	}
@@ -452,11 +483,15 @@ func (h *Hub) handleRegister(client *Client) {
 	log.Printf("Client registered: user=%s client=%s total_clients=%d",
 		sanitizeLogValue(client.UserID.String()), sanitizeLogValue(client.ID.String()), len(h.clients))
 
-	h.sendConnectedConfirmation(client)
-	h.sendPresenceSnapshot(client)
 	ctx, cancel := context.WithCancel(context.Background()) //nolint:gosec // cancel stored in client.asyncCancel, called by Run shutdown and handleUnregister
 	client.asyncCancel = cancel
-	client.asyncWg.Add(1)
+	h.sendConnectedConfirmation(client)
+	h.sendPresenceSnapshot(client)
+	client.asyncWg.Add(2)
+	go func() {
+		defer client.asyncWg.Done()
+		h.sendCustomTextSnapshot(ctx, client)
+	}()
 	go func() {
 		defer client.asyncWg.Done()
 		h.sendVoiceCountsSnapshot(ctx, client)
@@ -647,10 +682,6 @@ func (h *Hub) sendPresenceSnapshot(client *Client) {
 	}
 	client.Send <- data
 
-	// #1233 Task B4: also send the custom text of every user the connecting
-	// viewer is permitted to see (audience-filtered per each sender's tier).
-	// risk: privacy — non-audience senders are excluded; see sendCustomTextSnapshot.
-	h.sendCustomTextSnapshot(ctx, client)
 }
 
 func (h *Hub) sendVoiceCountsSnapshot(ctx context.Context, client *Client) {

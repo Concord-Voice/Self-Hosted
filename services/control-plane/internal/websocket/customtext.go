@@ -4,12 +4,15 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"log"
 	"sync"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/presence"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/presencehistory"
 )
 
 // customTextCategory is the rich-presence category string for custom text. It
@@ -20,6 +23,15 @@ const customTextCategory = "custom_text"
 const (
 	customTextDeliveryLockStripes  = 256
 	customTextResetAudienceTimeout = 3 * time.Second
+)
+
+var (
+	// ErrCustomTextDeliveryPlan identifies a malformed or unsupported prepared plan.
+	ErrCustomTextDeliveryPlan = errors.New("invalid custom status delivery plan")
+	// ErrCustomTextDeliveryMarshal identifies frame construction failures.
+	ErrCustomTextDeliveryMarshal = errors.New("custom status delivery marshal failed")
+	// ErrCustomTextDeliveryBroadcaster identifies queue or disconnect failures.
+	ErrCustomTextDeliveryBroadcaster = errors.New("custom status delivery broadcaster failed")
 )
 
 type customTextDeliveryCoordinator interface {
@@ -67,6 +79,273 @@ type CustomTextPayload struct {
 	Text  string `json:"text"`
 }
 
+// DeliverCustomText synchronously applies a prepared Custom Status delivery
+// plan and acknowledges only after every connected target has been enqueued or
+// disconnected. The caller already owns presencehistory.Service.WithSender;
+// this adapter performs no database work and never reacquires that gate.
+func (h *Hub) DeliverCustomText(
+	ctx context.Context,
+	plan presencehistory.DeliveryPlan,
+) (presencehistory.DeliveryAck, error) {
+	if err := ctx.Err(); err != nil {
+		return presencehistory.DeliveryAck{}, err
+	}
+	if plan.OperationID == uuid.Nil {
+		return presencehistory.DeliveryAck{}, fmt.Errorf(
+			"%w: operation ID is required",
+			ErrCustomTextDeliveryPlan,
+		)
+	}
+
+	disconnected := make(map[*Client]bool)
+	switch plan.Mode {
+	case presencehistory.DeliveryExactDelta:
+		if plan.SenderID == uuid.Nil {
+			return presencehistory.DeliveryAck{}, fmt.Errorf(
+				"%w: exact delivery requires sender",
+				ErrCustomTextDeliveryPlan,
+			)
+		}
+		if customTextRecipientCount(plan.UpdateRecipients) > 0 && plan.Payload == nil {
+			return presencehistory.DeliveryAck{}, fmt.Errorf(
+				"%w: update recipients require payload",
+				ErrCustomTextDeliveryPlan,
+			)
+		}
+		if err := h.deliverExactCustomText(ctx, plan, disconnected); err != nil {
+			return presencehistory.DeliveryAck{}, err
+		}
+	case presencehistory.DeliveryConservativeReset:
+		if plan.ClearRecipients == nil && plan.UpdateRecipients == nil {
+			if err := h.disconnectAllCustomTextClients(ctx); err != nil {
+				return presencehistory.DeliveryAck{}, err
+			}
+			return presencehistory.DeliveryAck{OperationID: plan.OperationID}, nil
+		}
+		recipients := customTextRecipientUnion(plan.ClearRecipients, plan.UpdateRecipients)
+		if plan.SenderID == uuid.Nil && len(recipients) > 0 {
+			return presencehistory.DeliveryAck{}, fmt.Errorf(
+				"%w: prepared recipients require sender",
+				ErrCustomTextDeliveryPlan,
+			)
+		}
+		if plan.SenderID != uuid.Nil {
+			recipients[plan.SenderID] = true
+		}
+		clearData, err := h.marshalCustomTextDeliveryFrame(plan.SenderID, nil)
+		if err != nil {
+			return presencehistory.DeliveryAck{}, err
+		}
+		if err := h.deliverCustomTextToUsers(ctx, recipients, clearData, disconnected); err != nil {
+			return presencehistory.DeliveryAck{}, err
+		}
+		if err := h.deliverCustomTextOverrideMetadata(ctx, plan, disconnected); err != nil {
+			return presencehistory.DeliveryAck{}, err
+		}
+	default:
+		return presencehistory.DeliveryAck{}, fmt.Errorf(
+			"%w: unsupported mode",
+			ErrCustomTextDeliveryPlan,
+		)
+	}
+
+	return presencehistory.DeliveryAck{OperationID: plan.OperationID}, nil
+}
+
+func (h *Hub) deliverExactCustomText(
+	ctx context.Context,
+	plan presencehistory.DeliveryPlan,
+	disconnected map[*Client]bool,
+) error {
+	var clearData []byte
+	if customTextRecipientCount(plan.ClearRecipients) > 0 {
+		var err error
+		clearData, err = h.marshalCustomTextDeliveryFrame(plan.SenderID, nil)
+		if err != nil {
+			return err
+		}
+	}
+
+	var updateData []byte
+	if customTextRecipientCount(plan.UpdateRecipients) > 0 {
+		payload := &CustomTextPayload{
+			Text:  plan.Payload.Text,
+			Emoji: plan.Payload.Emoji,
+		}
+		var err error
+		updateData, err = h.marshalCustomTextDeliveryFrame(plan.SenderID, payload)
+		if err != nil {
+			return err
+		}
+	}
+
+	if len(clearData) > 0 {
+		if err := h.deliverCustomTextToUsers(ctx, plan.ClearRecipients, clearData, disconnected); err != nil {
+			return err
+		}
+	}
+	if len(updateData) > 0 {
+		if err := h.deliverCustomTextToUsers(ctx, plan.UpdateRecipients, updateData, disconnected); err != nil {
+			return err
+		}
+	}
+	return h.deliverCustomTextOverrideMetadata(ctx, plan, disconnected)
+}
+
+func (h *Hub) deliverCustomTextOverrideMetadata(
+	ctx context.Context,
+	plan presencehistory.DeliveryPlan,
+	disconnected map[*Client]bool,
+) error {
+	if plan.OverrideVersion == nil {
+		return nil
+	}
+	data, err := json.Marshal(OutgoingMessage{
+		Type: "presence_overrides_updated",
+		Data: map[string]interface{}{
+			"category": customTextCategory,
+			"version":  *plan.OverrideVersion,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("%w: %w", ErrCustomTextDeliveryMarshal, err)
+	}
+	return h.deliverCustomTextToUsers(
+		ctx,
+		map[uuid.UUID]bool{plan.SenderID: true},
+		data,
+		disconnected,
+	)
+}
+
+func (h *Hub) marshalCustomTextDeliveryFrame(
+	senderID uuid.UUID,
+	payload *CustomTextPayload,
+) ([]byte, error) {
+	marshal := h.customTextFrameMarshaler
+	if marshal == nil {
+		marshal = marshalCustomTextFrame
+	}
+	data, err := marshal(senderID, payload)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrCustomTextDeliveryMarshal, err)
+	}
+	return data, nil
+}
+
+func customTextRecipientCount(recipients map[uuid.UUID]bool) int {
+	count := 0
+	for _, included := range recipients {
+		if included {
+			count++
+		}
+	}
+	return count
+}
+
+func customTextRecipientUnion(recipientSets ...map[uuid.UUID]bool) map[uuid.UUID]bool {
+	union := make(map[uuid.UUID]bool)
+	for _, recipients := range recipientSets {
+		for userID, included := range recipients {
+			if included {
+				union[userID] = true
+			}
+		}
+	}
+	return union
+}
+
+func (h *Hub) deliverCustomTextToUsers(
+	ctx context.Context,
+	recipients map[uuid.UUID]bool,
+	data []byte,
+	disconnected map[*Client]bool,
+) error {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for userID, included := range recipients {
+		if !included {
+			continue
+		}
+		for clientID := range h.userClients[userID] {
+			client, connected := h.clients[clientID]
+			if !connected {
+				continue
+			}
+			if disconnected[client] {
+				continue
+			}
+			wasDisconnected, err := h.deliverCustomTextToClient(ctx, client, data)
+			if err != nil {
+				return err
+			}
+			if wasDisconnected {
+				disconnected[client] = true
+			}
+		}
+	}
+	return nil
+}
+
+func (h *Hub) deliverCustomTextToClient(
+	ctx context.Context,
+	client *Client,
+	data []byte,
+) (bool, error) {
+	if h.customTextDeliveryBeforeEnqueue != nil {
+		h.customTextDeliveryBeforeEnqueue()
+	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	if h.customTextDeliveryBroadcaster != nil {
+		if err := h.customTextDeliveryBroadcaster(ctx, client, data); err != nil {
+			return false, fmt.Errorf("%w: %w", ErrCustomTextDeliveryBroadcaster, err)
+		}
+		return false, nil
+	}
+	select {
+	case client.Send <- data:
+		return false, nil
+	default:
+	}
+	if err := h.disconnectCustomTextClient(client); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (h *Hub) disconnectCustomTextClient(client *Client) error {
+	disconnect := h.customTextClientDisconnect
+	if disconnect != nil {
+		if err := disconnect(client); err != nil {
+			return fmt.Errorf("%w: %w", ErrCustomTextDeliveryBroadcaster, err)
+		}
+		return nil
+	}
+	if client.Conn == nil {
+		return nil
+	}
+	if err := client.Conn.Close(); err != nil {
+		return fmt.Errorf("%w: %w", ErrCustomTextDeliveryBroadcaster, err)
+	}
+	return nil
+}
+
+func (h *Hub) disconnectAllCustomTextClients(ctx context.Context) error {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	for _, client := range h.clients {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if err := h.disconnectCustomTextClient(client); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 // BroadcastCustomText fans senderID's custom-text status out to exactly the
 // audience permitted to see it — risk: privacy. A non-nil payload is an UPDATE
 // (rich_presence_update) delivered to the new tier-audience (computed by
@@ -80,15 +359,15 @@ type CustomTextPayload struct {
 // per viewer.
 //
 // Fail-closed: if either audience cannot be computed (DB error) NOTHING is sent.
-// Only metadata is logged (sanitized sender UUID); the custom text VALUE is never
-// logged ([internal]rules/observability.md "No PII").
+// Only a fixed operation name and error class are logged; sender identifiers and
+// custom-text values are never logged ([internal]rules/observability.md "No PII").
 //
-// Concurrency: invoked synchronously on the HTTP handler goroutine while the
-// users Handler holds its per-sender Custom Status coordinator, not on the hub
-// Run goroutine. Live broadcasts, audience deltas, and reconnect snapshots use
-// the same Hub sender-delivery coordinator so a delayed frame cannot overwrite
-// newer delivered state. Hub-map reads are guarded by h.mu.RLock; DB audience
-// queries run first, outside the hub lock.
+// Concurrency: this compatibility path is invoked synchronously on the HTTP
+// handler goroutine, not on the Hub Run goroutine. Its legacy broadcasts and
+// audience deltas share the Hub-local coordinator. Typed delivery does not
+// acquire that coordinator, and reconnect snapshots serialize on the concrete
+// presencehistory.Service gate shared with writers. Hub-map reads are guarded
+// by h.mu.RLock; DB audience queries run first, outside the hub lock.
 func (h *Hub) BroadcastCustomText(senderID uuid.UUID, oldTier int, payload *CustomTextPayload) {
 	if h.db == nil {
 		// No DB (DB-free unit hub): fail closed and skip. Production always has a
@@ -103,20 +382,20 @@ func (h *Hub) BroadcastCustomText(senderID uuid.UUID, oldTier int, payload *Cust
 func (h *Hub) broadcastCustomText(senderID uuid.UUID, oldTier int, payload *CustomTextPayload) {
 	newAud, oldAud, err := h.customTextAudiences(context.Background(), senderID, oldTier, payload)
 	if err != nil {
-		log.Printf("[hub] custom-text audience computation failed for %s; suppressing broadcast: %v", sanitizeLogValue(senderID.String()), err)
+		log.Printf("[hub] custom-text audience computation failed; suppressing broadcast: %T", err)
 		return // fail closed
 	}
 
 	clearData, err := marshalCustomTextFrame(senderID, nil) // rich_presence_clear frame
 	if err != nil {
-		log.Printf("[hub] failed to marshal custom-text clear for %s: %v", sanitizeLogValue(senderID.String()), err)
+		log.Printf("[hub] failed to marshal custom-text clear: %T", err)
 		return
 	}
 	var updateData []byte
 	if payload != nil {
 		updateData, err = marshalCustomTextFrame(senderID, payload) // rich_presence_update frame
 		if err != nil {
-			log.Printf("[hub] failed to marshal custom-text frame for %s: %v", sanitizeLogValue(senderID.String()), err)
+			log.Printf("[hub] failed to marshal custom-text frame: %T", err)
 			return
 		}
 	}
@@ -166,14 +445,12 @@ func (h *Hub) ClearCustomTextForPresenceAudience(senderID uuid.UUID) {
 		defer cancel()
 		audience, err := presence.ComputePresenceAudience(ctx, h.db, senderID)
 		if err != nil {
-			log.Printf("[hub] reset custom-text audience computation failed for %s; suppressing clear: %v",
-				sanitizeLogValue(senderID.String()), err)
+			log.Printf("[hub] reset custom-text audience computation failed; suppressing clear: %T", err)
 			return
 		}
 		data, err := marshalCustomTextFrame(senderID, nil)
 		if err != nil {
-			log.Printf("[hub] failed to marshal reset custom-text clear for %s: %v",
-				sanitizeLogValue(senderID.String()), err)
+			log.Printf("[hub] failed to marshal reset custom-text clear: %T", err)
 			return
 		}
 
@@ -202,7 +479,7 @@ func (h *Hub) broadcastCustomTextAudienceDelta(senderID uuid.UUID, oldAudience, 
 		var err error
 		clearData, err = marshalCustomTextFrame(senderID, nil)
 		if err != nil {
-			log.Printf("[hub] failed to marshal presence audience-delta clear for %s: %v", sanitizeLogValue(senderID.String()), err)
+			log.Printf("[hub] failed to marshal presence audience-delta clear: %T", err)
 			return
 		}
 	}
@@ -212,7 +489,7 @@ func (h *Hub) broadcastCustomTextAudienceDelta(senderID uuid.UUID, oldAudience, 
 		var err error
 		updateData, err = marshalCustomTextFrame(senderID, payload)
 		if err != nil {
-			log.Printf("[hub] failed to marshal presence audience-delta update for %s: %v", sanitizeLogValue(senderID.String()), err)
+			log.Printf("[hub] failed to marshal presence audience-delta update: %T", err)
 			return
 		}
 	}
@@ -360,98 +637,131 @@ func marshalCustomTextFrame(senderID uuid.UUID, payload *CustomTextPayload) ([]b
 // users. Fail-closed per candidate: a candidate whose audience errors is skipped,
 // never optimistically included.
 //
-// Called from sendPresenceSnapshot on the Hub Run goroutine. Each candidate's
-// final authorization read + enqueue is serialized with post-commit audience
-// deltas for that sender, so a stale snapshot update cannot follow a revocation.
+// Called from the client's tracked async registration lifecycle, never the Hub
+// Run goroutine. Each candidate's final authorization read + enqueue holds the
+// same concrete presencehistory.Service sender gate as writers, so a stale
+// snapshot update cannot follow a newer committed delivery.
 func (h *Hub) sendCustomTextSnapshot(ctx context.Context, client *Client) {
-	if h.db == nil {
+	if h.db == nil || h.presenceHistoryService == nil {
 		return // DB-free unit hub: nothing to snapshot, fail-safe
 	}
 
 	candidates, err := h.customTextCandidates(ctx)
 	if err != nil {
+		if ctx.Err() != nil {
+			return
+		}
 		// Fail closed: if the candidate set can't be read, send no custom-text
 		// snapshot rather than risk an unfiltered emission. Metadata only.
-		log.Printf("[hub] custom-text snapshot candidate query failed for viewer %s: %v", sanitizeLogValue(client.UserID.String()), err)
+		log.Printf("[hub] custom-text snapshot candidate query failed: %T", err)
 		return
+	}
+	if h.customTextSnapshotAfterCandidates != nil {
+		h.customTextSnapshotAfterCandidates()
 	}
 
 	for _, senderID := range candidates {
+		if err := ctx.Err(); err != nil {
+			return
+		}
 		if senderID == client.UserID {
 			continue // self is delivered via the live BroadcastCustomText self-sync, not the snapshot of others
 		}
-		h.withCustomTextDelivery(senderID, func() {
-			h.sendCustomTextSnapshotCandidate(ctx, client, senderID)
+		err := h.presenceHistoryService.WithSender(ctx, senderID, func() error {
+			return h.sendCustomTextSnapshotCandidate(ctx, client, senderID)
 		})
+		if err != nil {
+			if ctx.Err() != nil {
+				return
+			}
+			log.Printf("[hub] custom-text snapshot candidate failed: %T", err)
+		}
 	}
 }
 
-func (h *Hub) sendCustomTextSnapshotCandidate(ctx context.Context, client *Client, senderID uuid.UUID) {
+func (h *Hub) sendCustomTextSnapshotCandidate(
+	ctx context.Context,
+	client *Client,
+	senderID uuid.UUID,
+) (returnErr error) {
 	tx, err := h.db.BeginTx(ctx, &sql.TxOptions{
 		Isolation: sql.LevelRepeatableRead,
 		ReadOnly:  true,
 	})
 	if err != nil {
-		log.Printf("[hub] custom-text snapshot transaction failed for sender %s viewer %s: %v",
-			sanitizeLogValue(senderID.String()), sanitizeLogValue(client.UserID.String()), err)
-		return
+		return fmt.Errorf("begin Custom Status snapshot transaction: %w", err)
 	}
-	defer func() { _ = tx.Rollback() }()
+	defer func() {
+		rollbackErr := tx.Rollback()
+		if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			returnErr = errors.Join(
+				returnErr,
+				fmt.Errorf("rollback Custom Status snapshot transaction: %w", rollbackErr),
+			)
+		}
+	}()
 
 	var tier int
 	var text, emoji sql.NullString
 	err = tx.QueryRowContext(ctx, `
-		SELECT custom_text_tier, custom_text, custom_text_emoji
-		FROM user_presence_settings
-		WHERE user_id = $1
+		SELECT settings.custom_text_tier,
+		       settings.custom_text,
+		       settings.custom_text_emoji
+		FROM user_presence_settings AS settings
+		WHERE settings.user_id = $1
+		  AND NOT EXISTS (
+		      SELECT 1
+		      FROM presence_settings_pending_operations AS pending
+		      WHERE pending.user_id = settings.user_id
+		  )
 	`, senderID).Scan(&tier, &text, &emoji)
-	if err == sql.ErrNoRows {
-		return
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
 	}
 	if err != nil {
-		log.Printf("[hub] custom-text snapshot current-state query failed for sender %s viewer %s: %v",
-			sanitizeLogValue(senderID.String()), sanitizeLogValue(client.UserID.String()), err)
-		return
+		return fmt.Errorf("read Custom Status snapshot state: %w", err)
 	}
 	if h.customTextSnapshotAfterStateRead != nil {
 		h.customTextSnapshotAfterStateRead(senderID, client.UserID)
 	}
 	if tier <= 0 || !text.Valid || text.String == "" {
-		return
+		return nil
 	}
 
 	audience, audErr := presence.ComputeCustomTextAudience(ctx, tx, senderID)
 	if audErr != nil {
-		// Fail closed for this candidate only; never optimistically include.
-		log.Printf("[hub] custom-text snapshot audience failed for sender %s viewer %s: %v",
-			sanitizeLogValue(senderID.String()), sanitizeLogValue(client.UserID.String()), audErr)
-		return
+		return fmt.Errorf("authorize Custom Status snapshot: %w", audErr)
 	}
 	if !audience[client.UserID] {
-		return // viewer is NOT in this user's custom-text audience — exclude (privacy lock)
+		return nil // viewer is NOT in this user's custom-text audience — exclude (privacy lock)
 	}
 	if err := tx.Commit(); err != nil {
-		log.Printf("[hub] custom-text snapshot transaction commit failed for sender %s viewer %s: %v",
-			sanitizeLogValue(senderID.String()), sanitizeLogValue(client.UserID.String()), err)
-		return
+		return fmt.Errorf("commit Custom Status snapshot transaction: %w", err)
 	}
 
 	payload := &CustomTextPayload{Text: text.String}
 	if emoji.Valid {
 		payload.Emoji = emoji.String
 	}
-	data, mErr := marshalCustomTextFrame(senderID, payload)
+	marshal := h.customTextFrameMarshaler
+	if marshal == nil {
+		marshal = marshalCustomTextFrame
+	}
+	data, mErr := marshal(senderID, payload)
 	if mErr != nil {
-		log.Printf("[hub] custom-text snapshot marshal failed for sender %s: %v", sanitizeLogValue(senderID.String()), mErr)
-		return
+		return fmt.Errorf("marshal Custom Status snapshot frame: %w", mErr)
 	}
 	if h.customTextSnapshotBeforeEnqueue != nil {
 		h.customTextSnapshotBeforeEnqueue(senderID, client.UserID)
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 	select {
 	case client.Send <- data:
 	default:
 	}
+	return nil
 }
 
 // customTextCandidates returns every user with custom text set AND tier > 0 —
@@ -459,18 +769,29 @@ func (h *Hub) sendCustomTextSnapshotCandidate(ctx context.Context, client *Clien
 // viewer. The current tier, text, and emoji are deliberately re-read inside the
 // per-sender delivery coordinator before authorization and enqueue; the outer
 // query never captures a payload that could become stale while waiting.
-func (h *Hub) customTextCandidates(ctx context.Context) ([]uuid.UUID, error) {
+func (h *Hub) customTextCandidates(
+	ctx context.Context,
+) (out []uuid.UUID, returnErr error) {
 	rows, err := h.db.QueryContext(ctx, `
-		SELECT user_id
-		FROM user_presence_settings
-		WHERE custom_text_tier > 0 AND custom_text IS NOT NULL
+		SELECT settings.user_id
+		FROM user_presence_settings AS settings
+		WHERE settings.custom_text_tier > 0
+		  AND settings.custom_text IS NOT NULL
+		  AND NOT EXISTS (
+		      SELECT 1
+		      FROM presence_settings_pending_operations AS pending
+		      WHERE pending.user_id = settings.user_id
+		  )
 	`)
 	if err != nil {
 		return nil, err
 	}
-	defer func() { _ = rows.Close() }()
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			returnErr = errors.Join(returnErr, fmt.Errorf("close Custom Status snapshot candidates: %w", closeErr))
+		}
+	}()
 
-	var out []uuid.UUID
 	for rows.Next() {
 		var senderID uuid.UUID
 		if err := rows.Scan(&senderID); err != nil {
@@ -478,5 +799,8 @@ func (h *Hub) customTextCandidates(ctx context.Context) ([]uuid.UUID, error) {
 		}
 		out = append(out, senderID)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
 }
