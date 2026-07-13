@@ -25,11 +25,21 @@ import (
 
 var errForcedAmbiguousRecoveryCommit = errors.New("forced ambiguous recovery commit")
 
-type recordingRecoveryResetHub struct {
+type recoveryForcedEventRecorder struct {
 	events []string
+	plans  []presencehistory.DeliveryPlan
 }
 
-func (h *recordingRecoveryResetHub) DisconnectUser(uuid.UUID) {
+func (h *recoveryForcedEventRecorder) DeliverCustomText(
+	_ context.Context,
+	plan presencehistory.DeliveryPlan,
+) (presencehistory.DeliveryAck, error) {
+	h.plans = append(h.plans, plan)
+	h.events = append(h.events, "delivery_ack")
+	return presencehistory.DeliveryAck{OperationID: plan.OperationID}, nil
+}
+
+func (h *recoveryForcedEventRecorder) DisconnectUser(uuid.UUID) {
 	h.events = append(h.events, "disconnect")
 }
 
@@ -133,10 +143,9 @@ func TestRecoveryCommitAmbiguityConsumesTokenAndAcknowledgesForcedClear(t *testi
 			seedRecoveryCommitKeyRows(t, db, senderID)
 			rdb := setupAuthAttemptRedis(t)
 			claims := &RecoveryClaims{UserID: senderID.String(), JTI: uuid.NewString()}
-			hub := &recordingRecoveryResetHub{}
-			delivery := &recoveryCommitDelivery{}
+			observer := &recoveryForcedEventRecorder{}
 			service := presencehistory.NewService(db, presencehistory.DisclosureState{}, false)
-			require.NoError(t, service.BindDelivery(delivery))
+			require.NoError(t, service.BindDelivery(observer))
 			commitCalls := 0
 			restore := service.SetTransactionTestHooks(presencehistory.TransactionTestHooks{
 				Commit: func(tx *sql.Tx) error {
@@ -153,7 +162,7 @@ func TestRecoveryCommitAmbiguityConsumesTokenAndAcknowledgesForcedClear(t *testi
 				db:              db,
 				redis:           rdb,
 				log:             logger.NewWithWriter(io.Discard),
-				hub:             hub,
+				hub:             observer,
 				mfaChecker:      &ambiguousRecoveryMFAChecker{claims: claims},
 				presenceHistory: service,
 			}
@@ -170,10 +179,10 @@ func TestRecoveryCommitAmbiguityConsumesTokenAndAcknowledgesForcedClear(t *testi
 			).Result()
 			require.NoError(t, err)
 			assert.Equal(t, int64(1), exists)
-			require.Len(t, delivery.plans, 1)
-			assert.Equal(t, presencehistory.DeliveryConservativeReset, delivery.plans[0].Mode)
-			assert.Equal(t, senderID, delivery.plans[0].SenderID)
-			assert.Equal(t, []string{"disconnect"}, hub.events)
+			require.Len(t, observer.plans, 1)
+			assert.Equal(t, presencehistory.DeliveryConservativeReset, observer.plans[0].Mode)
+			assert.Equal(t, senderID, observer.plans[0].SenderID)
+			assert.Equal(t, []string{"delivery_ack", "disconnect"}, observer.events)
 			var pending int
 			require.NoError(t, db.QueryRow(
 				`SELECT COUNT(*) FROM presence_settings_pending_operations WHERE user_id = $1`, senderID,
@@ -206,7 +215,7 @@ func TestRecoveryCommitAmbiguityClassifiesOutcomesAndConsumesToken(t *testing.T)
 				rdb := setupAuthAttemptRedis(t)
 				claims := &RecoveryClaims{UserID: senderID.String(), JTI: uuid.NewString()}
 				delivery := &recoveryCommitDelivery{}
-				hub := &recordingRecoveryResetHub{}
+				hub := &recoveryForcedEventRecorder{}
 
 				serviceDB := db
 				if test.outcome == presencehistory.ForcedClearUnresolved {
@@ -299,7 +308,7 @@ func TestRecoveryForcedClearArchivesHistoryBeforeSuccess(t *testing.T) {
 			rdb := setupAuthAttemptRedis(t)
 			claims := &RecoveryClaims{UserID: senderID.String(), JTI: uuid.NewString()}
 			delivery := &recoveryCommitDelivery{}
-			hub := &recordingRecoveryResetHub{}
+			hub := &recoveryForcedEventRecorder{}
 			service := newRecoveryForcedService(t, db, delivery)
 			handler := newRecoveryForcedHandler(db, rdb, hub, service, claims)
 
@@ -340,7 +349,7 @@ func TestRecoveryForcedClearRecorderFailureReleasesTokenAndRollsBack(t *testing.
 				},
 			})
 			t.Cleanup(restore)
-			handler := newRecoveryForcedHandler(db, rdb, &recordingRecoveryResetHub{}, service, claims)
+			handler := newRecoveryForcedHandler(db, rdb, &recoveryForcedEventRecorder{}, service, claims)
 
 			response := invokeRecoveryForcedFlow(test, handler)
 			assert.Equal(t, http.StatusInternalServerError, response.Code)
@@ -371,7 +380,7 @@ func TestRecoveryForcedClearDeliveryFailureKeepsTokenAndQuarantine(t *testing.T)
 			rdb := setupAuthAttemptRedis(t)
 			claims := &RecoveryClaims{UserID: senderID.String(), JTI: uuid.NewString()}
 			delivery := &recoveryCommitDelivery{err: errors.New("recovery delivery unavailable")}
-			hub := &recordingRecoveryResetHub{}
+			hub := &recoveryForcedEventRecorder{}
 			service := newRecoveryForcedService(t, db, delivery)
 			handler := newRecoveryForcedHandler(db, rdb, hub, service, claims)
 

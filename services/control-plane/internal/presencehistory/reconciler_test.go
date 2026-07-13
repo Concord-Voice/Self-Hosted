@@ -866,6 +866,52 @@ func TestClaimForcedClearStaleEnqueueOrdering(t *testing.T) {
 	assert.Equal(t, []string{"old-update", "new-clear"}, delivery.snapshot())
 }
 
+func TestForcedClearWinsBeforeStaleClaimEnqueueOrdering(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	senderID := testhelpers.CreateUser(t, db)
+	oldOperationID := uuid.New()
+	seedTask8Pending(
+		t, db, senderID, oldOperationID, oldOperationID, 0, true,
+		CustomTextState{Text: "old"},
+	)
+	delivery := &task8Delivery{}
+	claimService := NewService(db, DisclosureState{}, false)
+	forcedService := NewService(db, DisclosureState{}, false)
+	require.NoError(t, claimService.BindDelivery(delivery))
+	require.NoError(t, forcedService.BindDelivery(delivery))
+
+	forcedTx, err := forcedService.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = forcedTx.Rollback() }()
+	forced, err := forcedService.BeginForcedSecurityClear(ctx, forcedTx, senderID)
+	require.NoError(t, err)
+	require.NoError(t, forcedService.CommitTx(forcedTx))
+	assert.Equal(t, forced.Operation.ID, task8PendingMarker(t, db, senderID))
+
+	err = claimService.ClaimAndDeliver(ctx, DeliveryPlan{
+		Mode: DeliveryExactDelta, OperationID: oldOperationID, SenderID: senderID,
+		Payload: &CustomTextState{Text: "old"},
+	})
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "marker mismatch")
+	assert.Empty(t, delivery.snapshot(), "stale ordinary claim must not enqueue an old update")
+	assert.Equal(t, forced.Operation.ID, task8PendingMarker(t, db, senderID))
+
+	require.NoError(t, forcedService.ClaimAndDeliver(ctx, forced.Plan))
+	plans := delivery.snapshot()
+	require.Len(t, plans, 1)
+	assert.Equal(t, DeliveryConservativeReset, plans[0].Mode)
+	assert.Equal(t, forced.Operation.ID, plans[0].OperationID)
+	assert.Equal(t, 0, task8PendingCount(t, db, senderID))
+	_, marker, tier, text, emoji := task8SettingsState(t, db, senderID)
+	assert.Equal(t, forced.Operation.ID, marker)
+	assert.Zero(t, tier)
+	assert.False(t, text.Valid)
+	assert.False(t, emoji.Valid)
+}
+
 func TestReconcilePendingCompensatesLiveMarkerThenClaimsDelivery(t *testing.T) {
 	db, cleanup := testhelpers.SetupTestDB(t)
 	defer cleanup()
