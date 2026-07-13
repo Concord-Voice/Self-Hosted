@@ -417,27 +417,32 @@ func (w *RetentionWorker) Run(ctx context.Context) {
 		wait = waitForRetention
 	}
 
-	for {
-		stats, err := sweep(ctx)
-		if err != nil {
-			if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-				return
-			}
-			w.logFailure(stats, classifyCleanupError(err))
-			if !wait(ctx, retentionRetryInterval) {
-				return
-			}
-			continue
-		}
-		w.logSuccess(stats)
-		delay := retentionInterval
-		if stats.ExpiredRowsRemain {
-			delay = retentionRetryInterval
-		}
-		if !wait(ctx, delay) {
-			return
-		}
+	for w.runPass(ctx, sweep, wait) {
 	}
+}
+
+func (w *RetentionWorker) runPass(
+	ctx context.Context,
+	sweep func(context.Context) (SweepStats, error),
+	wait func(context.Context, time.Duration) bool,
+) bool {
+	stats, err := sweep(ctx)
+	if err != nil {
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
+			return false
+		}
+		w.logFailure(stats, classifyCleanupError(err))
+		return wait(ctx, retentionRetryInterval)
+	}
+	w.logSuccess(stats)
+	return wait(ctx, retentionDelay(stats))
+}
+
+func retentionDelay(stats SweepStats) time.Duration {
+	if stats.ExpiredRowsRemain {
+		return retentionRetryInterval
+	}
+	return retentionInterval
 }
 
 func (w *RetentionWorker) logSuccess(stats SweepStats) {
