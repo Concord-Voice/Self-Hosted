@@ -197,6 +197,45 @@ validate_smtp_port() {
   return 0
 }
 
+# validate_https_privacy_url URL — lowercase absolute HTTPS with a real host,
+# no userinfo, and an optional valid TCP port. Mirrors the managed workflow.
+validate_https_privacy_url() {
+  local url="${1:-}" authority host port
+  [[ -n "$url" && "$url" == https://* && "$url" != *[[:space:]]* ]] || return 1
+  authority="${url#https://}"
+  authority="${authority%%[/?#]*}"
+  [[ -n "$authority" && "$authority" != *@* && "$authority" != *\\* ]] || return 1
+  # ponytail: reject bracketed literal hosts; add an IP parser if raw IPv6
+  # privacy-policy URLs become a real operator requirement.
+  [[ "$authority" != \[* && "$authority" != *:*:* ]] || return 1
+  host="${authority%%:*}"
+  [[ "$host" =~ ^[A-Za-z0-9]([A-Za-z0-9.-]*[A-Za-z0-9])?$ \
+     && "$host" != *..* && "$host" != *.-* && "$host" != *-.* ]] || return 1
+  if [[ "$authority" == *:* ]]; then
+    port="${authority#*:}"
+    [[ "$port" =~ ^[0-9]{1,5}$ ]] || return 1
+    (( 10#$port >= 1 && 10#$port <= 65535 )) || return 1
+  fi
+}
+
+# validate_activity_history_disclosure OPERATOR URL — both values are optional,
+# so an unconfigured self-host remains visibly unavailable. A non-empty privacy
+# URL must be absolute HTTPS. Values are single-line because they cross a dotenv
+# boundary; arbitrary printable punctuation in the operator name is preserved.
+validate_activity_history_disclosure() {
+  local operator="${1:-}" url="${2:-}"
+  if [[ "$operator" == *$'\n'* || "$operator" == *$'\r'* \
+     || "$url" == *$'\n'* || "$url" == *$'\r'* ]]; then
+    echo -e "${RED}Activity History disclosure values must be single-line${NC}" >&2
+    return 1
+  fi
+  [[ -z "$url" ]] && return 0
+  validate_https_privacy_url "$url" || {
+    echo -e "${RED}Activity History privacy URL must be absolute HTTPS with a valid hostname${NC}" >&2
+    return 1
+  }
+}
+
 # validate_tls_mode MODE — one of letsencrypt|local|import (TLS provisioning
 # mode handed to provision-cert.sh; #1617). A CLI/wizard choice, never an .env
 # var (DR-1: no config.go consumer, no 5-surface discipline).
@@ -225,6 +264,9 @@ validate_collected_config() {
   validate_tls_mode "${CFG_TLS_MODE:-letsencrypt}" || exit 1
   validate_cidrs "${CFG_TRUSTED_CIDRS:-}" || exit 1
   validate_smtp_port "${CFG_SMTP_PORT:-}" || exit 1
+  validate_activity_history_disclosure \
+    "${CFG_ACTIVITY_HISTORY_OPERATOR_NAME:-}" \
+    "${CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL:-}" || exit 1
   warn_public_ip "${CFG_PUBLIC_IP:-}"
 }
 
@@ -257,7 +299,9 @@ load_answers() {
     val="${line#*=}"
     printf -v "$key" '%s' "$val"
   done <"$f"
-  : "${CFG_FEEDBACK_ENABLED:=no}" "${CFG_TURN_REALM:=${CFG_DOMAIN:-}}" "${CFG_TLS_MODE:=letsencrypt}"
+  : "${CFG_FEEDBACK_ENABLED:=no}" "${CFG_TURN_REALM:=${CFG_DOMAIN:-}}" \
+    "${CFG_TLS_MODE:=letsencrypt}" "${CFG_ACTIVITY_HISTORY_OPERATOR_NAME:=}" \
+    "${CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL:=}"
   validate_domain "${CFG_DOMAIN:-}" || return 1
 }
 
@@ -297,6 +341,8 @@ collect_config() {
   CFG_SMTP_PASS="$(ask_secret 'SMTP password')"
   CFG_SMTP_FROM="$(ask 'SMTP from address' "noreply@$CFG_DOMAIN")"
   CFG_TRUSTED_CIDRS="$(ask 'Trusted proxy CIDRs' '172.16.0.0/12,10.0.0.0/8')"
+  CFG_ACTIVITY_HISTORY_OPERATOR_NAME="$(ask 'Activity History operator name (optional)')"
+  CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL="$(ask 'Activity History privacy policy URL (optional, HTTPS)')"
   CFG_FEEDBACK_ENABLED="$(ask 'Enable in-app feedback (posts to a GitHub repo)? yes/no' no)"
   if [[ "$CFG_FEEDBACK_ENABLED" == yes ]]; then
     CFG_FEEDBACK_REPO="$(ask 'Feedback repo (owner/repo)')"
@@ -305,6 +351,28 @@ collect_config() {
 }
 
 # ── .env writer ────────────────────────────────────────────────────────────────
+
+# compose_dotenv_quote VALUE — Compose double-quoted dotenv literal. Encode one
+# character at a time so adjacent backslashes/quotes cannot interact through
+# Bash replacement semantics. Compose uses $$ for a literal dollar inside a
+# double-quoted value; backslash and double quote use their standard escapes.
+compose_dotenv_quote() {
+  local value="${1:-}" encoded="" char i
+  if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
+    echo "Compose dotenv values must be single-line" >&2
+    return 1
+  fi
+  for ((i = 0; i < ${#value}; i++)); do
+    char="${value:i:1}"
+    case "$char" in
+      \\) encoded+="\\\\" ;;
+      \") encoded+="\\\"" ;;
+      '$') encoded+="\$\$" ;;
+      *) encoded+="$char" ;;
+    esac
+  done
+  printf '"%s"' "$encoded"
+}
 
 # write_env_file — write repo-root .env (compose auto-loads it). chmod 600.
 # Logs var NAMES only, never values (observability rule — no secret values to stdout/log).
@@ -357,10 +425,16 @@ write_env_file() {
     echo "SMTP_FROM=${CFG_SMTP_FROM:-noreply@${CFG_DOMAIN}}"
     echo "FEEDBACK_REPO=${feedback_repo}"
     echo "FEEDBACK_PAT=${feedback_pat}"
+    echo "ACTIVITY_HISTORY_CLUSTER_ENABLED=false"
+    echo "CONTROL_PLANE_REPLICA_COUNT=1"
+    printf 'ACTIVITY_HISTORY_OPERATOR_NAME=%s\n' \
+      "$(compose_dotenv_quote "${CFG_ACTIVITY_HISTORY_OPERATOR_NAME:-}")"
+    printf 'ACTIVITY_HISTORY_PRIVACY_POLICY_URL=%s\n' \
+      "$(compose_dotenv_quote "${CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL:-}")"
   } >"$ENV_OUT"
   chmod 600 "$ENV_OUT"
   # Log var names only — never values (risk: security / observability rule).
-  echo -e "${GREEN}✓ wrote $ENV_OUT${NC} (vars: INSTANCE_TYPE DOMAIN PUBLIC_IP POSTGRES_PASSWORD REDIS_PASSWORD JWT_SECRET MFA_ENCRYPTION_KEY TURN_SECRET TURN_REALM MINIO_ROOT_USER MINIO_ROOT_PASSWORD MINIO_BUCKET TRUSTED_PROXY_CIDRS SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM FEEDBACK_REPO FEEDBACK_PAT)"
+  echo -e "${GREEN}✓ wrote $ENV_OUT${NC} (vars: INSTANCE_TYPE DOMAIN PUBLIC_IP POSTGRES_PASSWORD REDIS_PASSWORD JWT_SECRET MFA_ENCRYPTION_KEY TURN_SECRET TURN_REALM MINIO_ROOT_USER MINIO_ROOT_PASSWORD MINIO_BUCKET TRUSTED_PROXY_CIDRS SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM FEEDBACK_REPO FEEDBACK_PAT ACTIVITY_HISTORY_CLUSTER_ENABLED CONTROL_PLANE_REPLICA_COUNT ACTIVITY_HISTORY_OPERATOR_NAME ACTIVITY_HISTORY_PRIVACY_POLICY_URL)"
 }
 
 # ── nginx render ───────────────────────────────────────────────────────────────

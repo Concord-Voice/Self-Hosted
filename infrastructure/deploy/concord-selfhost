@@ -16,6 +16,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly SCRIPT_DIR
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
 readonly PROJECT_ROOT
+CONCORD_CTL="${CONCORD_CTL_OVERRIDE:-$SCRIPT_DIR/concord-ctl.sh}"
+readonly CONCORD_CTL
 
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
@@ -39,6 +41,21 @@ readonly SERVICES=(control-plane media-plane postgres redis nats minio coturn)
 # compose ARGS... — invoke docker compose with the production file set.
 compose() { docker compose "${COMPOSE_FILES[@]}" "$@"; }
 
+# guarded_ctl ARGS... — reuse the canonical rollout/rollback state machine in
+# a strictly-attested self-host mode. The root installer .env is the sole
+# canonical writer; concord-ctl still compares it with rendered production
+# Compose and refuses a managed-style deploy.env.local rollout writer.
+guarded_ctl() {
+  if [[ ! -x "$CONCORD_CTL" ]]; then
+    echo -e "${RED}guarded concord-ctl.sh is missing or not executable${NC}" >&2
+    return 1
+  fi
+  ACTIVITY_HISTORY_CONTRACT_MODE=selfhost \
+    COMPOSE_OVERRIDE=docker-compose.production.yml \
+    COMPOSE_PROFILES=services \
+    "$CONCORD_CTL" "$@"
+}
+
 usage() {
   cat <<'USAGE'
 concord-selfhost — self-hosted operator CLI
@@ -46,7 +63,11 @@ concord-selfhost — self-hosted operator CLI
 Usage: ./infrastructure/deploy/concord-selfhost <verb> [args]
 
 Verbs:
-  up           build + start the full stack (docker compose up -d --build)
+  up           guarded build + start; refuses implicit first activation
+  activity-history-activate --confirm-drained
+               explicitly activate from a fully drained control-plane set
+  activity-history-rollback --confirm-drained --old-image <digest> [--downgrade-schema]
+               guarded disable/checkpoint/immutable old-image rollback
   down         stop AND remove containers + network (docker compose down)
   stop         pause containers, leave them in place (docker compose stop)
   status       per-service container state (docker compose ps)
@@ -75,7 +96,15 @@ verb_health() {
 
 main() {
   case "${1:-}" in
-    up)         compose up -d --build ;;
+    up)         guarded_ctl rebuild ;;
+    activity-history-activate)
+      shift
+      guarded_ctl activity-history-activate "$@"
+      ;;
+    activity-history-rollback)
+      shift
+      guarded_ctl activity-history-rollback "$@"
+      ;;
     down)       compose down ;;
     stop)       compose stop ;;
     status)     compose ps ;;

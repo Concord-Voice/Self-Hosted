@@ -43,13 +43,40 @@ const (
 	activityHistoryStartupTimeout = 30 * time.Second
 )
 
+type controlPlaneSubcommandRunners struct {
+	admin           func([]string) int
+	activityHistory func([]string) int
+}
+
+func dispatchControlPlaneSubcommand(args []string) (int, bool) {
+	return dispatchControlPlaneSubcommandWithRunners(args, controlPlaneSubcommandRunners{
+		admin:           admin.RunAdminCtl,
+		activityHistory: presencehistory.RunAdminCtl,
+	})
+}
+
+func dispatchControlPlaneSubcommandWithRunners(
+	args []string,
+	runners controlPlaneSubcommandRunners,
+) (int, bool) {
+	if len(args) < 2 {
+		return 0, false
+	}
+	switch args[1] {
+	case "admin":
+		return runners.admin(args[2:]), true
+	case "activity-history":
+		return runners.activityHistory(args[2:]), true
+	default:
+		return 0, false
+	}
+}
+
 func main() {
-	// Admin CLI subcommand dispatch (#1688): `control-plane admin <verb>` runs the
-	// adminctl provisioning tooling (bootstrap / enroll / reset-enrollment) instead
-	// of booting the server. Invoked out-of-band via `docker exec` for first-admin
-	// provisioning and break-glass recovery — see the admin-auth design spec.
-	if len(os.Args) > 1 && os.Args[1] == "admin" {
-		os.Exit(admin.RunAdminCtl(os.Args[2:]))
+	// Maintenance subcommands are dispatched before ordinary configuration or
+	// serving dependencies are initialized.
+	if code, handled := dispatchControlPlaneSubcommand(os.Args); handled {
+		os.Exit(code)
 	}
 
 	// Load configuration
