@@ -35,6 +35,8 @@ fi
 # writers and the effective rendered Compose config to agree.
 ACTIVITY_HISTORY_DEPLOY_WRITER_GATE="${ACTIVITY_HISTORY_CLUSTER_ENABLED-}"
 ACTIVITY_HISTORY_DEPLOY_WRITER_REPLICAS="${CONTROL_PLANE_REPLICA_COUNT-}"
+ACTIVITY_HISTORY_DEPLOY_WRITER_OPERATOR_NAME="${ACTIVITY_HISTORY_OPERATOR_NAME-}"
+ACTIVITY_HISTORY_DEPLOY_WRITER_PRIVACY_POLICY_URL="${ACTIVITY_HISTORY_PRIVACY_POLICY_URL-}"
 
 ACTIVITY_HISTORY_CONTRACT_MODE="${ACTIVITY_HISTORY_REQUESTED_CONTRACT_MODE:-managed}"
 if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
@@ -179,7 +181,15 @@ activity_history_read_root_value() {
 
 activity_history_render_contract() {
   local rendered parsed
-  if ! rendered="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD config --format json 2>/dev/null)"; then
+  # Resolve the root .env contract independently of deploy.env.local. The
+  # latter is sourced for concord-ctl settings, and inherited shell values
+  # otherwise override Compose's root dotenv values during rendering.
+  if ! rendered="$(cd "$DEPLOY_DIR" && env \
+      -u ACTIVITY_HISTORY_CLUSTER_ENABLED \
+      -u CONTROL_PLANE_REPLICA_COUNT \
+      -u ACTIVITY_HISTORY_OPERATOR_NAME \
+      -u ACTIVITY_HISTORY_PRIVACY_POLICY_URL \
+      $COMPOSE_CMD config --format json 2>/dev/null)"; then
     echo "activity-history: failed to render Compose configuration" >&2
     return 1
   fi
@@ -192,20 +202,25 @@ try:
         environment = dict(item.split("=", 1) for item in environment)
     gate = str(environment["ACTIVITY_HISTORY_CLUSTER_ENABLED"])
     replicas = str(environment["CONTROL_PLANE_REPLICA_COUNT"])
+    operator_name = str(environment["ACTIVITY_HISTORY_OPERATOR_NAME"])
+    privacy_policy_url = str(environment["ACTIVITY_HISTORY_PRIVACY_POLICY_URL"])
     instance_type = str(environment.get("INSTANCE_TYPE", ""))
     image = str(service["image"])
-    if any("\n" in value or "\t" in value for value in (gate, replicas, instance_type, image)):
+    values = (gate, replicas, image, instance_type, operator_name, privacy_policy_url)
+    if any(any(ord(char) < 32 or ord(char) == 127 for char in value) for value in values):
         raise ValueError("invalid control character")
-    print("\t".join((gate, replicas, image, instance_type)))
+    print("\x1f".join(values))
 except (KeyError, TypeError, ValueError, json.JSONDecodeError):
     sys.exit(1)
 ' <<<"$rendered" 2>/dev/null)"; then
     echo "activity-history: rendered Compose contract is missing or invalid" >&2
     return 1
   fi
-  IFS=$'\t' read -r ACTIVITY_HISTORY_RENDERED_GATE \
+  IFS=$'\x1f' read -r ACTIVITY_HISTORY_RENDERED_GATE \
     ACTIVITY_HISTORY_RENDERED_REPLICAS ACTIVITY_HISTORY_RENDERED_IMAGE \
-    ACTIVITY_HISTORY_RENDERED_INSTANCE_TYPE <<<"$parsed"
+    ACTIVITY_HISTORY_RENDERED_INSTANCE_TYPE \
+    ACTIVITY_HISTORY_RENDERED_OPERATOR_NAME \
+    ACTIVITY_HISTORY_RENDERED_PRIVACY_POLICY_URL <<<"$parsed"
   if [[ ! "$ACTIVITY_HISTORY_RENDERED_GATE" =~ ^(true|false)$ \
      || ! "$ACTIVITY_HISTORY_RENDERED_REPLICAS" =~ ^[1-9][0-9]*$ \
      || -z "$ACTIVITY_HISTORY_RENDERED_IMAGE" \
@@ -220,7 +235,9 @@ activity_history_load_contract() {
   local mode="${ACTIVITY_HISTORY_CONTRACT_MODE:-managed}"
   local deploy_file="${SCRIPT_DIR}/deploy.env.local"
   if ! root_gate="$(activity_history_read_root_value ACTIVITY_HISTORY_CLUSTER_ENABLED)" \
-     || ! root_replicas="$(activity_history_read_root_value CONTROL_PLANE_REPLICA_COUNT)"; then
+     || ! root_replicas="$(activity_history_read_root_value CONTROL_PLANE_REPLICA_COUNT)" \
+     || [[ "$(grep -cE '^ACTIVITY_HISTORY_OPERATOR_NAME=' "${DEPLOY_DIR}/.env" 2>/dev/null || true)" != 1 ]] \
+     || [[ "$(grep -cE '^ACTIVITY_HISTORY_PRIVACY_POLICY_URL=' "${DEPLOY_DIR}/.env" 2>/dev/null || true)" != 1 ]]; then
     echo "activity-history: canonical root .env contract is missing or duplicated" >&2
     return 1
   fi
@@ -233,7 +250,9 @@ activity_history_load_contract() {
     managed)
       if [[ ! -f "$deploy_file" \
          || "$(grep -cE '^ACTIVITY_HISTORY_CLUSTER_ENABLED=' "$deploy_file" 2>/dev/null || true)" != 1 \
-         || "$(grep -cE '^CONTROL_PLANE_REPLICA_COUNT=' "$deploy_file" 2>/dev/null || true)" != 1 ]]; then
+         || "$(grep -cE '^CONTROL_PLANE_REPLICA_COUNT=' "$deploy_file" 2>/dev/null || true)" != 1 \
+         || "$(grep -cE '^ACTIVITY_HISTORY_OPERATOR_NAME=' "$deploy_file" 2>/dev/null || true)" != 1 \
+         || "$(grep -cE '^ACTIVITY_HISTORY_PRIVACY_POLICY_URL=' "$deploy_file" 2>/dev/null || true)" != 1 ]]; then
         echo "activity-history: canonical deploy.env.local contract is missing or duplicated" >&2
         return 1
       fi
@@ -281,6 +300,12 @@ activity_history_load_contract() {
     echo "activity-history: rendered Compose rollout contract disagrees with canonical writers" >&2
     return 1
   fi
+  if [[ "$mode" == managed \
+     && ( "$ACTIVITY_HISTORY_DEPLOY_WRITER_OPERATOR_NAME" != "$ACTIVITY_HISTORY_RENDERED_OPERATOR_NAME" \
+       || "$ACTIVITY_HISTORY_DEPLOY_WRITER_PRIVACY_POLICY_URL" != "$ACTIVITY_HISTORY_RENDERED_PRIVACY_POLICY_URL" ) ]]; then
+    echo "activity-history: canonical disclosure writers disagree; rerun provision-secrets" >&2
+    return 1
+  fi
 }
 
 ACTIVITY_HISTORY_DAEMON_IDS=()
@@ -299,8 +324,9 @@ activity_history_refresh_daemon_ids() {
   return 0
 }
 
-activity_history_container_gate_is_true() {
-  local container_id="$1" container_env gate_count
+activity_history_container_gate_matches() {
+  local container_id="$1" expected="$2" container_env gate_count
+  [[ "$expected" =~ ^(true|false)$ ]] || return 1
   if ! container_env="$(docker inspect --format '{{range .Config.Env}}{{println .}}{{end}}' \
       "$container_id" 2>/dev/null)"; then
     echo "activity-history: failed to inspect the running control-plane contract" >&2
@@ -308,7 +334,16 @@ activity_history_container_gate_is_true() {
   fi
   gate_count="$(grep -cE '^ACTIVITY_HISTORY_CLUSTER_ENABLED=' <<<"$container_env" || true)"
   [[ "$gate_count" == 1 ]] \
-    && grep -qxF 'ACTIVITY_HISTORY_CLUSTER_ENABLED=true' <<<"$container_env"
+    && grep -qxF "ACTIVITY_HISTORY_CLUSTER_ENABLED=$expected" <<<"$container_env"
+}
+
+activity_history_container_image_matches() {
+  local container_id="$1" expected="$2" actual
+  if ! actual="$(docker inspect --format '{{.Config.Image}}' "$container_id" 2>/dev/null)"; then
+    echo "activity-history: failed to inspect the running control-plane image" >&2
+    return 1
+  fi
+  [[ -n "$expected" && "$actual" == "$expected" ]]
 }
 
 activity_history_routine_guard() {
@@ -320,7 +355,7 @@ activity_history_routine_guard() {
   fi
   activity_history_refresh_daemon_ids || return 1
   if [[ ${#ACTIVITY_HISTORY_DAEMON_IDS[@]} -ne 1 ]] \
-     || ! activity_history_container_gate_is_true "${ACTIVITY_HISTORY_DAEMON_IDS[0]:-}"; then
+     || ! activity_history_container_gate_matches "${ACTIVITY_HISTORY_DAEMON_IDS[0]:-}" true; then
     echo "activity-history: routine deployment cannot perform first activation or repair ambiguous state" >&2
     echo "Run concord-ctl.sh activity-history-activate --confirm-drained after draining traffic." >&2
     return 1
@@ -434,7 +469,11 @@ activity_history_finish_rollback_start() {
     return 1
   fi
   if ! activity_history_refresh_daemon_ids \
-     || [[ ${#ACTIVITY_HISTORY_DAEMON_IDS[@]} -ne 1 ]]; then
+     || [[ ${#ACTIVITY_HISTORY_DAEMON_IDS[@]} -ne 1 ]] \
+     || ! activity_history_container_image_matches \
+       "${ACTIVITY_HISTORY_DAEMON_IDS[0]:-}" "$ACTIVITY_HISTORY_ROLLBACK_CHECKPOINT_IMAGE" \
+     || ! activity_history_container_gate_matches \
+       "${ACTIVITY_HISTORY_DAEMON_IDS[0]:-}" false; then
     activity_history_stop_control_plane >/dev/null 2>&1 || true
     echo "activity-history: rollback post-start invariant failed; checkpoint retained for exact retry" >&2
     return 1
@@ -472,7 +511,7 @@ activity_history_activate() {
   fi
   if ! activity_history_refresh_daemon_ids \
      || [[ ${#ACTIVITY_HISTORY_DAEMON_IDS[@]} -ne 1 ]] \
-     || ! activity_history_container_gate_is_true "${ACTIVITY_HISTORY_DAEMON_IDS[0]:-}"; then
+     || ! activity_history_container_gate_matches "${ACTIVITY_HISTORY_DAEMON_IDS[0]:-}" true; then
     activity_history_stop_control_plane >/dev/null 2>&1 || true
     echo "activity-history: activation post-start invariant failed; control-plane stopped" >&2
     return 1

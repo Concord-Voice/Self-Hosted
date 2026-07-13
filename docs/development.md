@@ -567,7 +567,7 @@ Recommended:
 
 ## Next Steps
 
-- Read [API Documentation](./api/) — OpenAPI 3.0 spec (partial: 88 operations documented; 269 routes implemented)
+- Read [API Documentation](./api/) — OpenAPI 3.0 specification with full live-route coverage enforced by `scripts/api/check-openapi-coverage.sh`
 - Review [Architecture](./architecture.md) — System diagrams, database ERD, message flows
 - Check [Contributing Guidelines](../.github/CONTRIBUTING.md)
 - Join the major comms platforms for discussions

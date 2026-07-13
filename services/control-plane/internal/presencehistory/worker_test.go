@@ -265,12 +265,15 @@ func TestRetentionSweepSkipsLockedRowsAndRecoversOnNextPass(t *testing.T) {
 	stats, err := newTestRetentionWorker(db).Sweep(ctx)
 	require.NoError(t, err, "FOR UPDATE SKIP LOCKED must avoid blocking on a claimed row")
 	assert.Zero(t, stats.RowsDeleted)
+	assert.True(t, stats.ExpiredRowsRemain,
+		"a successful-but-contended sweep must request the capped retry cadence")
 	assert.True(t, workerHistoryIDExists(t, db, expiredID))
 	require.NoError(t, blocker.Rollback())
 
 	stats, err = newTestRetentionWorker(db).Sweep(context.Background())
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), stats.RowsDeleted)
+	assert.False(t, stats.ExpiredRowsRemain)
 	assert.False(t, workerHistoryIDExists(t, db, expiredID))
 }
 
@@ -495,8 +498,8 @@ func TestRetentionWorkerLockOrderWithWriterAndPatch(t *testing.T) {
 
 func TestRetentionWorkerRunStartupCadenceRetryAlertRecoveryAndCancellation(t *testing.T) {
 	var output bytes.Buffer
-	waits := make(chan time.Duration, 4)
-	releases := make(chan struct{}, 3)
+	waits := make(chan time.Duration, 5)
+	releases := make(chan struct{}, 4)
 	done := make(chan struct{})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -511,6 +514,11 @@ func TestRetentionWorkerRunStartupCadenceRetryAlertRecoveryAndCancellation(t *te
 			case 2:
 				return SweepStats{Duration: 2 * time.Second},
 					errors.New("database detail with 00000000-0000-0000-0000-000000000123")
+			case 3:
+				return SweepStats{
+					Duration:          250 * time.Millisecond,
+					ExpiredRowsRemain: true,
+				}, nil
 			default:
 				return SweepStats{
 					Duration:         3 * time.Second,
@@ -544,8 +552,11 @@ func TestRetentionWorkerRunStartupCadenceRetryAlertRecoveryAndCancellation(t *te
 	releases <- struct{}{}
 	assert.Equal(t, retentionRetryInterval, receiveDuration(t, waits, "failure did not schedule capped retry"))
 	releases <- struct{}{}
+	assert.Equal(t, retentionRetryInterval,
+		receiveDuration(t, waits, "successful contention did not schedule capped retry"))
+	releases <- struct{}{}
 	assert.Equal(t, retentionInterval, receiveDuration(t, waits, "recovery did not restore daily cadence"))
-	assert.Equal(t, int32(3), calls.Load(), "Run must execute at startup and recover after a retry")
+	assert.Equal(t, int32(4), calls.Load(), "Run must execute at startup and recover after retries")
 
 	cancel()
 	receiveSignal(t, done, "Run did not stop after cancellation")
@@ -553,6 +564,7 @@ func TestRetentionWorkerRunStartupCadenceRetryAlertRecoveryAndCancellation(t *te
 	assert.Contains(t, logs, "operation=activity_cleanup")
 	assert.Contains(t, logs, "error_class=database")
 	assert.Contains(t, logs, "oldest_expired_age=25h0m0s")
+	assert.Contains(t, logs, "expired_rows_remain=true")
 	assert.Contains(t, logs, "level=WARN", "an oldest-expired age over 24 hours must alert")
 	assert.NotContains(t, logs, "00000000-0000-0000-0000-000000000123",
 		"raw database details and identifiers must not be logged")

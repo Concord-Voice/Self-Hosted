@@ -515,6 +515,7 @@ func (h *Hub) sendCustomTextSnapshotCandidate(
 	if err != nil {
 		return fmt.Errorf("begin Custom Status snapshot transaction: %w", err)
 	}
+	defer tx.Rollback() //nolint:errcheck
 	defer mergeCustomTextSnapshotRollback(tx, &returnErr)
 
 	payload, authorized, err := h.readCustomTextSnapshotCandidate(ctx, tx, client.UserID, senderID)

@@ -22,11 +22,12 @@ const (
 
 // SweepStats contains aggregate, account-independent cleanup measurements.
 type SweepStats struct {
-	Duration         time.Duration
-	OwnerBatchCount  int
-	BatchCount       int
-	RowsDeleted      int64
-	OldestExpiredAge time.Duration
+	Duration          time.Duration
+	OwnerBatchCount   int
+	BatchCount        int
+	RowsDeleted       int64
+	OldestExpiredAge  time.Duration
+	ExpiredRowsRemain bool
 }
 
 type retentionWorkerHooks struct {
@@ -81,9 +82,32 @@ func (w *RetentionWorker) Sweep(ctx context.Context) (stats SweepStats, returnEr
 			return stats, err
 		}
 		if deleted == 0 {
+			remaining, err := w.hasExpiredRows(ctx)
+			if err != nil {
+				return stats, err
+			}
+			stats.ExpiredRowsRemain = remaining
 			return stats, nil
 		}
 	}
+}
+
+func (w *RetentionWorker) hasExpiredRows(ctx context.Context) (bool, error) {
+	var remaining bool
+	if err := w.db.QueryRowContext(ctx, `
+		WITH cutoff AS MATERIALIZED (
+			SELECT clock_timestamp() AS observed
+		)
+		SELECT EXISTS (
+			SELECT 1
+			FROM presence_history
+			CROSS JOIN cutoff
+			WHERE expires_at <= cutoff.observed
+		)
+	`).Scan(&remaining); err != nil {
+		return false, fmt.Errorf("check remaining expired activity rows: %w", err)
+	}
+	return remaining, nil
 }
 
 func (w *RetentionWorker) sweepExpiredPass(ctx context.Context, stats *SweepStats) (int64, error) {
@@ -210,6 +234,7 @@ func (w *RetentionWorker) deleteExpiredOwnerBatch(
 	if err != nil {
 		return 0, fmt.Errorf("begin activity cleanup owner: %w", err)
 	}
+	defer tx.Rollback() //nolint:errcheck
 	committed := false
 	defer mergeRetentionRollback(tx, &committed, &returnErr)
 
@@ -405,7 +430,11 @@ func (w *RetentionWorker) Run(ctx context.Context) {
 			continue
 		}
 		w.logSuccess(stats)
-		if !wait(ctx, retentionInterval) {
+		delay := retentionInterval
+		if stats.ExpiredRowsRemain {
+			delay = retentionRetryInterval
+		}
+		if !wait(ctx, delay) {
 			return
 		}
 	}
@@ -421,6 +450,7 @@ func (w *RetentionWorker) logSuccess(stats SweepStats) {
 			"batch_count", stats.BatchCount,
 			"rows_deleted_count", stats.RowsDeleted,
 			"oldest_expired_age", stats.OldestExpiredAge,
+			"expired_rows_remain", stats.ExpiredRowsRemain,
 		)
 		return
 	}
@@ -432,6 +462,7 @@ func (w *RetentionWorker) logSuccess(stats SweepStats) {
 		"batch_count", stats.BatchCount,
 		"rows_deleted_count", stats.RowsDeleted,
 		"oldest_expired_age", stats.OldestExpiredAge,
+		"expired_rows_remain", stats.ExpiredRowsRemain,
 	)
 }
 
@@ -445,6 +476,7 @@ func (w *RetentionWorker) logFailure(stats SweepStats, errorClass string) {
 		"batch_count", stats.BatchCount,
 		"rows_deleted_count", stats.RowsDeleted,
 		"oldest_expired_age", stats.OldestExpiredAge,
+		"expired_rows_remain", stats.ExpiredRowsRemain,
 	)
 }
 
