@@ -1,5 +1,14 @@
 # Concord Voice Architecture
 
+## Aggregate operations metrics
+
+Optional operations metrics use an isolated `ops-agent` as the sole Docker
+socket owner. The agent and media plane publish HMAC-signed, scalar-only v1
+snapshots over fixed NATS subjects. The control plane validates and stores raw
+samples for 24 hours plus hourly rollups for eight days. No user, room, server,
+address, hostname, or free-form Docker metadata is persisted. Collection failure
+degrades only this signal path. See [ADR-0030](adr/0030-aggregate-operations-metrics-boundary.md).
+
 > **Last audited:** 2026-06-10 — counts and code references verified against `main` at this date via `scripts/update-claude-md-counts.sh` and a per-plane source sweep with adversarial claim-by-claim re-verification (issue #587). Cite file paths + symbol names rather than line numbers so this document resists drift.
 
 ## Quick Overview
@@ -212,6 +221,7 @@ Packaged clients fetch binary update manifests + signed installers from the publ
 | `models`        | Shared Go struct types                                                                       |
 | `notifications` | Notification mute preferences (per-server/channel/DM)                                        |
 | `oauth`         | OAuth 2.0 / OIDC provider integrations for SSO (Google, Apple)                               |
+| `opsmetrics`    | Closed-schema aggregate host, service, control, and media metrics collection and retention   |
 | `ownership`     | Server ownership transfer: initiate, confirm, cancel, reverse                                |
 | `presencehistory` | Opt-in self-only activity ledger, disclosure, retention, reconciliation, and admin controls |
 | `privacy`       | GDPR Article 17 account-erasure endpoint                                                     |
@@ -432,14 +442,15 @@ erDiagram
 | -------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Auth / registration  | `pending_registrations` (000058)                                                                                                                                                                                                                                                                              |
 | MFA / recovery       | `user_mfa_totp`, `user_mfa_webauthn` (000029); `user_recovery_keys` (000043); `trusted_recovery_devices`, `recovery_requests` (000044); `recovery_circles`, `recovery_circle_shares`, `recovery_circle_requests`, `recovery_circle_responses` (000045)                                                        |
-| Profile / prefs      | `user_preferences` (000016); `privacy_settings` (000027); `username_history` (000046); `saved_gifs` (000055); `notification_preferences` (000063, polymorphic target); `user_presence_settings` (000074, eight Activity History fields added by 000086); `friend_organization` (000075); `presence_override_preferences`, `user_presence_overrides` (000084); `presence_settings_pending_operations` (000086) |
-| Activity history    | `presence_history` (000086, category-neutral self-owned interval ledger)                                                                                                                                                                                                                                     |
+| Profile / prefs      | `user_preferences` (000016); `privacy_settings` (000027); `username_history` (000046); `saved_gifs` (000055); `notification_preferences` (000063, polymorphic target); `user_presence_settings` (000074, eight Activity History fields added by 000087); `friend_organization` (000075); `presence_override_preferences`, `user_presence_overrides` (000084); `presence_settings_pending_operations` (000087) |
+| Activity history    | `presence_history` (000087, category-neutral self-owned interval ledger)                                                                                                                                                                                                                                     |
 | Voice                | `voice_participants` (000020); `dm_voice_participants` (000026)                                                                                                                                                                                                                                               |
 | Media                | `media_files` (000042)                                                                                                                                                                                                                                                                                        |
 | Social / server-mgmt | `friend_codes` (000027); `server_invites` (000009); `ownership_transfers` (000047)                                                                                                                                                                                                                            |
 | Compliance           | `audit_log` (000035); `account_deletions` (000059)                                                                                                                                                                                                                                                            |
 | Attestation          | `release_binaries`, `release_spas` (000066)                                                                                                                                                                                                                                                                   |
 | Admin console        | `admin_users`, `admin_webauthn_credentials`, `admin_audit_log` (000077) — sessions are Redis-backed (opaque sids), not a table                                                                                                                                                                                |
+| Operations metrics   | `ops_metric_samples`, `ops_metric_rollups` (000086) — opaque node ID, fixed key, timestamp, and scalar values only                                                                                                                                                                                         |
 
 > Notable schema history: group-DM admin roles added `dm_participants.role` (`admin`/`member`) + `dm_conversations.icon_url` (000053); `dm_messages` gained a `call_event` type + `call_event_payload` JSONB (000064), and the transient `kind` column was dropped in favor of `type` (000065); `account_deletions.sentry_delete_attempted` was dropped (000060) when Sentry was removed; `key_revocations.revoked_by` was changed to `ON DELETE SET NULL` (000059) so account erasure isn't blocked.
 
@@ -572,7 +583,7 @@ Within one control-plane process, live Custom Status updates, audience deltas, d
 
 ### Activity History
 
-Activity History is a separate, explicit-opt-in, server-readable ledger owned by `internal/presencehistory`. Migration 000086 adds eight history/version fields to `user_presence_settings`, a category-neutral `presence_history` interval table, and `presence_settings_pending_operations` for durable delivery reconciliation. The storage taxonomy has nine categories, but only the typed `custom_text` payload-version-1 adapter currently records and returns a payload; the taxonomy does not imply that every category has a runtime producer.
+Activity History is a separate, explicit-opt-in, server-readable ledger owned by `internal/presencehistory`. Migration 000087 adds eight history/version fields to `user_presence_settings`, a category-neutral `presence_history` interval table, and `presence_settings_pending_operations` for durable delivery reconciliation. The storage taxonomy has nine categories, but only the typed `custom_text` payload-version-1 adapter currently records and returns a payload; the taxonomy does not imply that every category has a runtime producer.
 
 Audience-affecting Custom Status and recipient-exception mutations use the canonical lock order `users -> settings -> pending -> recipient exceptions -> history`. Their applicable settings/history/version changes, exact operation marker, and any pending quarantine commit atomically before HTTP success; resulting WebSocket delivery acknowledges that exact operation ID. Activity History enable, retention, and deletion use separate `presencehistory` transactions and do not synthesize WebSocket delivery markers. While a pending row exists, that sender is suppressed from live Custom Status fan-out and reconnect snapshots; one bounded per-sender coordinator serializes mutation delivery and snapshot reads within the process.
 
@@ -693,10 +704,11 @@ Desktop client
                                                      ├── Redis 7
                                                      ├── NATS 2.x
                                                      ├── MinIO (object storage)
+                                                     ├── ops-agent (aggregate host/container metrics)
                                                      └── coturn (STUN/TURN, TLS)
 ```
 
-The Cloudflare proxy in front of `api.concordvoice.chat` is load-bearing for the updates cache and rate limiting (it must stay proxied, not DNS-only). The 3-Dockerfile production-active stack is postgres (`infrastructure/docker/postgres/Dockerfile`), control-plane, and media-plane; built via `docker compose -f docker-compose.yml -f docker-compose.production.yml --profile services build`.
+The Cloudflare proxy in front of `api.concordvoice.chat` is load-bearing for the updates cache and rate limiting (it must stay proxied, not DNS-only). The 4-Dockerfile production-active stack is postgres (`infrastructure/docker/postgres/Dockerfile`), control-plane, media-plane, and the isolated ops-agent; built via `docker compose -f docker-compose.yml -f docker-compose.production.yml --profile services build`.
 
 ### Self-Hosted (Docker Compose)
 
@@ -767,7 +779,7 @@ sequenceDiagram
 
 ### Data Privacy
 
-- **No telemetry pipeline** (see [Logging Discipline](#logging-discipline)).
+- **No third-party telemetry or tracing pipeline.** The narrow internal operations-metrics path stores only fixed aggregate scalars under ADR-0030 (see [Logging Discipline](#logging-discipline)).
 - No voice-content retention (SFU forwards, never records; frames are E2EE end-to-end).
 - E2EE-everywhere: the server stores only ciphertext for messages, DMs, and synced user-state blobs (preferences, saved GIFs).
 - **GDPR Article 17 erasure** is implemented (`POST /api/v1/privacy/erase-account`, atomic cascade).
@@ -775,7 +787,7 @@ sequenceDiagram
 
 ## Logging Discipline
 
-Concord has **no telemetry, tracing, or metrics pipeline** — there is no Prometheus, Loki, Grafana, Jaeger, or Sentry (Sentry was removed entirely on 2026-04-22; the `account_deletions.sentry_delete_attempted` column was dropped in migration 000060). What remains is _logging hygiene_: services emit structured logs to stdout, governed by a logging-discipline rule.
+Concord has **no third-party telemetry, tracing, or general-purpose metrics stack** — there is no Prometheus, Loki, Grafana, Jaeger, or Sentry (Sentry was removed entirely on 2026-04-22; the `account_deletions.sentry_delete_attempted` column was dropped in migration 000060). ADR-0030 adds a narrow internal operations-metrics path limited to fixed aggregate scalars, with no identity or arbitrary-label dimensions. Separately, services emit structured logs to stdout under the logging-discipline rule.
 
 Core logging rules (enforced by lint + AST regression tests, not convention):
 

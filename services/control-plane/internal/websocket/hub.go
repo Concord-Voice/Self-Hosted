@@ -17,6 +17,7 @@ import (
 	"github.com/lib/pq"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/klipy"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/models"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/opsmetrics"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/presence"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/presencehistory"
 	"github.com/redis/go-redis/v9"
@@ -58,6 +59,9 @@ type Hub struct {
 
 	// Redis client for presence persistence
 	redis *redis.Client
+
+	// Optional aggregate counter sink. Nil keeps metrics-disabled behavior inert.
+	opsCounter OpsCounter
 
 	// Mutex protecting maps accessed from outside the Run goroutine
 	mu sync.RWMutex
@@ -201,6 +205,11 @@ type Hub struct {
 	closeOnce sync.Once
 }
 
+// OpsCounter is the optional aggregate counter sink used after committed writes.
+type OpsCounter interface {
+	Increment(opsmetrics.MetricKey)
+}
+
 // DMRingCanceller is the signature for the DM voice ring cleanup callback
 // invoked from handleUnregister when a user's last WS connection drops.
 // The dm.Handler.HandleUserDisconnect method satisfies this type.
@@ -259,8 +268,8 @@ type channelDeliveryResult struct {
 }
 
 // NewHub creates a new Hub
-func NewHub(db *sql.DB, redisClient *redis.Client) *Hub {
-	return &Hub{
+func NewHub(db *sql.DB, redisClient *redis.Client, opsCounters ...OpsCounter) *Hub {
+	hub := &Hub{
 		db:                       db,
 		redis:                    redisClient,
 		clients:                  make(map[uuid.UUID]*Client),
@@ -291,6 +300,20 @@ func NewHub(db *sql.DB, redisClient *redis.Client) *Hub {
 		stopped:                  make(chan struct{}),
 		onlineCountPending:       make(map[uuid.UUID]bool),
 	}
+	if len(opsCounters) > 0 {
+		hub.opsCounter = opsCounters[0]
+	}
+	return hub
+}
+
+// ConnectionCount returns the current number of registered WebSocket clients.
+func (h *Hub) ConnectionCount() int {
+	if h == nil {
+		return 0
+	}
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	return len(h.clients)
 }
 
 // SetPresenceHistoryService binds the concrete service shared by Custom Status
@@ -2161,6 +2184,9 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		h.sendError(msg.ClientID, persistErr)
 		return
 	}
+	if h.opsCounter != nil {
+		h.opsCounter.Increment(opsmetrics.MetricChannelMessagesTotal)
+	}
 
 	// Link attachments to message (if any)
 	attachmentSummaries := h.linkChannelAttachments(messageID, msg.UserID.String(), input.attachmentIDs, channelID)
@@ -3173,6 +3199,9 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 		log.Printf("Failed to persist DM message: %v", err)
 		h.sendError(msg.ClientID, "Failed to save message")
 		return
+	}
+	if input.msgType == "user" && h.opsCounter != nil {
+		h.opsCounter.Increment(opsmetrics.MetricDMMessagesTotal)
 	}
 
 	convID := convUUID.String()

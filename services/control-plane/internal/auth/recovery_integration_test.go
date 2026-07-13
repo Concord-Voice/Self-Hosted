@@ -91,12 +91,12 @@ func setupRecoverySMTPFailureTS(t *testing.T, closeDelay time.Duration) *testhel
 		cfg.ActivityHistoryClusterEnabled,
 	)
 	// Dependency cleanup is registered first so LIFO execution shuts down Hub,
-	// then NATS, before Redis/DB.
+	// then operations metrics and NATS, before Redis/DB.
 	t.Cleanup(func() {
 		redisCleanup()
 		dbCleanup()
 	})
-	router, hub, natsClient, err := api.NewRouter(
+	router, hub, natsClient, opsRuntime, err := api.NewRouter(
 		db,
 		redisClient,
 		nil,
@@ -109,6 +109,7 @@ func setupRecoverySMTPFailureTS(t *testing.T, closeDelay time.Duration) *testhel
 	if natsClient != nil {
 		t.Cleanup(func() { natsClient.Close() })
 	}
+	t.Cleanup(func() { require.NoError(t, opsRuntime.Stop(context.Background())) })
 	t.Cleanup(func() { hub.Shutdown() })
 
 	return &testhelpers.TestServer{

@@ -4,496 +4,209 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"net/url"
 	"os"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"sort"
 	"strings"
 	"testing"
-	"time"
 
-	"github.com/google/uuid"
 	"github.com/lib/pq"
-	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/opsmetrics"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-func TestMigration000086_UpDownReUp(t *testing.T) {
-	ts := testhelpers.SetupTestServer(t)
+const opsMetricsTestDatabaseURL = "OPS_METRICS_TEST_DATABASE_URL"
+
+var migration000086MetricLiteral = regexp.MustCompile(`'(?:host|service|http|websocket|channel|dm|ops|media)_[a-z0-9_]+'`)
+
+func TestMigration000086_FilesAndSchemaLock(t *testing.T) {
+	up := migration000086SQL(t, "up")
+	down := migration000086SQL(t, "down")
+	readme := migration000086ReadFile(t, filepath.Join("..", "..", "migrations", "README.md"))
+
+	assert.Contains(t, up, "CREATE TABLE ops_metric_samples")
+	assert.Contains(t, up, "CREATE TABLE ops_metric_rollups")
+	assert.Contains(t, up, "USING BRIN (ts)")
+	assert.Contains(t, up, "ops_metric_samples_metric_key_check")
+	assert.Contains(t, up, "ops_metric_rollups_metric_key_check")
+	assert.Contains(t, up, "ops_metric_samples_node_id_check")
+	assert.Contains(t, up, "ops_metric_rollups_node_id_check")
+	assert.Contains(t, up, "ops_metric_samples_value_finite_check")
+	assert.Contains(t, up, "ops_metric_rollups_values_finite_check")
+	assert.Contains(t, up, "date_trunc('hour', bucket_start, 'UTC')")
+	assert.Equal(t, migration000086CatalogKeys(), migration000086MetricKeys(up))
+
+	rollupsDrop := strings.Index(down, "DROP TABLE IF EXISTS ops_metric_rollups")
+	samplesDrop := strings.Index(down, "DROP TABLE IF EXISTS ops_metric_samples")
+	require.NotEqual(t, -1, rollupsDrop)
+	require.NotEqual(t, -1, samplesDrop)
+	assert.Less(t, rollupsDrop, samplesDrop, "down migration must drop rollups before samples")
+	assert.Contains(t, readme, "| 000086 | ops_metrics | Aggregate-only operations samples and hourly rollups (#1689) |")
+}
+
+func TestMigration000086_IntegrationSchemaConstraintsAndSymmetry(t *testing.T) {
+	db := migration000086OpenIsolatedDB(t)
 	ctx := context.Background()
+	down := migration000086SQL(t, "down")
+	up := migration000086SQL(t, "up")
 
-	historyExists := migration000086TableExists(t, ts.DB, "presence_history")
-	pendingExists := migration000086TableExists(t, ts.DB, "presence_settings_pending_operations")
-	assert.True(t, historyExists, "up migration must create presence_history")
-	assert.True(t, pendingExists, "up migration must create presence_settings_pending_operations")
-	if !historyExists || !pendingExists {
-		return
+	_, err := db.ExecContext(ctx, down)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, cleanupErr := db.ExecContext(context.Background(), down)
+		assert.NoError(t, cleanupErr)
+		assert.NoError(t, db.Close())
+	})
+
+	_, err = db.ExecContext(ctx, up)
+	require.NoError(t, err)
+
+	assert.Equal(t, []string{
+		"metric_key:text:NO",
+		"node_id:text:NO",
+		"ts:timestamp with time zone:NO",
+		"value:double precision:NO",
+	}, migration000086Columns(t, db, "ops_metric_samples"))
+	assert.Equal(t, []string{
+		"avg_value:double precision:NO",
+		"bucket_start:timestamp with time zone:NO",
+		"last_value:double precision:NO",
+		"max_value:double precision:NO",
+		"metric_key:text:NO",
+		"min_value:double precision:NO",
+		"node_id:text:NO",
+		"sample_count:integer:NO",
+	}, migration000086Columns(t, db, "ops_metric_rollups"))
+	assert.Equal(t, "node_id,metric_key,ts", migration000086PrimaryKey(t, db, "ops_metric_samples"))
+	assert.Equal(t, "node_id,metric_key,bucket_start", migration000086PrimaryKey(t, db, "ops_metric_rollups"))
+	assert.Equal(t, migration000086CatalogKeys(), migration000086ConstraintKeys(t, db, "ops_metric_samples_metric_key_check"))
+	assert.Equal(t, migration000086CatalogKeys(), migration000086ConstraintKeys(t, db, "ops_metric_rollups_metric_key_check"))
+
+	var indexMethod string
+	require.NoError(t, db.QueryRowContext(ctx, `
+		SELECT access_method.amname
+		FROM pg_class AS index_relation
+		JOIN pg_am AS access_method ON access_method.oid = index_relation.relam
+		WHERE index_relation.relname = 'idx_ops_metric_samples_ts_brin'
+	`).Scan(&indexMethod))
+	assert.Equal(t, "brin", indexMethod)
+
+	const validNodeID = "cvn_aaaaaaaaaaaaaaaa"
+	_, err = db.ExecContext(ctx, `
+		INSERT INTO ops_metric_samples (node_id, metric_key, ts, value)
+		VALUES ($1, $2, '2026-07-12T20:00:00Z', 12.5)
+	`, validNodeID, opsmetrics.MetricHostCPUPercent)
+	require.NoError(t, err)
+
+	for _, testCase := range []struct {
+		name       string
+		nodeID     string
+		metricKey  string
+		value      string
+		constraint string
+	}{
+		{name: "uuid node", nodeID: "550e8400-e29b-41d4-a716-446655440000", metricKey: string(opsmetrics.MetricHostCPUPercent), value: "1", constraint: "ops_metric_samples_node_id_check"},
+		{name: "ip node", nodeID: "192.0.2.10", metricKey: string(opsmetrics.MetricHostCPUPercent), value: "1", constraint: "ops_metric_samples_node_id_check"},
+		{name: "hostname node", nodeID: "api.concordvoice.chat", metricKey: string(opsmetrics.MetricHostCPUPercent), value: "1", constraint: "ops_metric_samples_node_id_check"},
+		{name: "unknown metric", nodeID: validNodeID, metricKey: "custom_metric", value: "1", constraint: "ops_metric_samples_metric_key_check"},
+		{name: "nan value", nodeID: validNodeID, metricKey: string(opsmetrics.MetricHostCPUPercent), value: "NaN", constraint: "ops_metric_samples_value_finite_check"},
+		{name: "infinite value", nodeID: validNodeID, metricKey: string(opsmetrics.MetricHostCPUPercent), value: "Infinity", constraint: "ops_metric_samples_value_finite_check"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, insertErr := db.ExecContext(ctx, `
+				INSERT INTO ops_metric_samples (node_id, metric_key, ts, value)
+				VALUES ($1, $2, '2026-07-12T20:01:00Z', $3::DOUBLE PRECISION)
+			`, testCase.nodeID, testCase.metricKey, testCase.value)
+			migration000086RequireConstraint(t, insertErr, testCase.constraint)
+		})
 	}
 
-	for _, column := range migration000086SettingsColumns {
-		assert.True(t, migration000086ColumnExists(t, ts.DB, "user_presence_settings", column),
-			"up migration must add %s", column)
+	for _, testCase := range []struct {
+		name        string
+		nodeID      string
+		metricKey   string
+		bucketStart string
+		minValue    string
+		maxValue    string
+		avgValue    string
+		lastValue   string
+		sampleCount int
+		constraint  string
+	}{
+		{name: "invalid node", nodeID: "api.concordvoice.chat", metricKey: string(opsmetrics.MetricHostCPUPercent), bucketStart: "2026-07-12T20:00:00Z", minValue: "1", maxValue: "1", avgValue: "1", lastValue: "1", sampleCount: 1, constraint: "ops_metric_rollups_node_id_check"},
+		{name: "unknown metric", nodeID: validNodeID, metricKey: "custom_metric", bucketStart: "2026-07-12T20:00:00Z", minValue: "1", maxValue: "1", avgValue: "1", lastValue: "1", sampleCount: 1, constraint: "ops_metric_rollups_metric_key_check"},
+		{name: "unaligned bucket", nodeID: validNodeID, metricKey: string(opsmetrics.MetricHostCPUPercent), bucketStart: "2026-07-12T20:01:00Z", minValue: "1", maxValue: "1", avgValue: "1", lastValue: "1", sampleCount: 1, constraint: "ops_metric_rollups_bucket_start_check"},
+		{name: "non-finite value", nodeID: validNodeID, metricKey: string(opsmetrics.MetricHostCPUPercent), bucketStart: "2026-07-12T20:00:00Z", minValue: "NaN", maxValue: "NaN", avgValue: "NaN", lastValue: "NaN", sampleCount: 1, constraint: "ops_metric_rollups_values_finite_check"},
+		{name: "invalid value order", nodeID: validNodeID, metricKey: string(opsmetrics.MetricHostCPUPercent), bucketStart: "2026-07-12T20:00:00Z", minValue: "3", maxValue: "4", avgValue: "2", lastValue: "3", sampleCount: 1, constraint: "ops_metric_rollups_value_order_check"},
+		{name: "empty sample count", nodeID: validNodeID, metricKey: string(opsmetrics.MetricHostCPUPercent), bucketStart: "2026-07-12T20:00:00Z", minValue: "1", maxValue: "1", avgValue: "1", lastValue: "1", sampleCount: 0, constraint: "ops_metric_rollups_sample_count_check"},
+	} {
+		t.Run("rollup "+testCase.name, func(t *testing.T) {
+			_, insertErr := db.ExecContext(ctx, `
+				INSERT INTO ops_metric_rollups (
+					node_id, metric_key, bucket_start, min_value, max_value,
+					avg_value, last_value, sample_count
+				) VALUES ($1, $2, $3::TIMESTAMPTZ, $4::DOUBLE PRECISION,
+					$5::DOUBLE PRECISION, $6::DOUBLE PRECISION,
+					$7::DOUBLE PRECISION, $8)
+			`, testCase.nodeID, testCase.metricKey, testCase.bucketStart,
+				testCase.minValue, testCase.maxValue, testCase.avgValue,
+				testCase.lastValue, testCase.sampleCount)
+			migration000086RequireConstraint(t, insertErr, testCase.constraint)
+		})
 	}
 
-	downSQL := migration000086SQL(t, "down")
-	migration000086RequireOrderedDown(t, downSQL)
-	_, err := ts.DB.ExecContext(ctx, downSQL)
-	require.NoError(t, err, "down migration must remove dependent tables before settings columns")
-	assert.False(t, migration000086TableExists(t, ts.DB, "presence_settings_pending_operations"))
-	assert.False(t, migration000086TableExists(t, ts.DB, "presence_history"))
-	for _, column := range migration000086SettingsColumns {
-		assert.False(t, migration000086ColumnExists(t, ts.DB, "user_presence_settings", column),
-			"down migration must remove %s", column)
-	}
-
-	_, err = ts.DB.ExecContext(ctx, migration000086SQL(t, "up"))
-	require.NoError(t, err, "up migration must re-apply after a clean rollback")
-	assert.True(t, migration000086TableExists(t, ts.DB, "presence_history"))
-	assert.True(t, migration000086TableExists(t, ts.DB, "presence_settings_pending_operations"))
-	for _, column := range migration000086SettingsColumns {
-		assert.True(t, migration000086ColumnExists(t, ts.DB, "user_presence_settings", column),
-			"re-applied migration must restore %s", column)
-	}
+	_, err = db.ExecContext(ctx, down)
+	require.NoError(t, err)
+	assert.False(t, migration000086TableExists(t, db, "ops_metric_samples"))
+	assert.False(t, migration000086TableExists(t, db, "ops_metric_rollups"))
+	_, err = db.ExecContext(ctx, up)
+	require.NoError(t, err, "migration must re-apply after rollback")
 }
 
-func TestMigration000086_ConstraintsIndexesDefaultsAndCascades(t *testing.T) {
-	ts := testhelpers.SetupTestServer(t)
-	ctx := context.Background()
-
-	t.Run("settings defaults", func(t *testing.T) {
-		user := ts.CreateTestUser(t, "presence_history_defaults")
-		_, err := ts.DB.ExecContext(ctx,
-			`INSERT INTO user_presence_settings (user_id) VALUES ($1)`, user.ID)
-		require.NoError(t, err)
-
-		var (
-			settingsVersion int64
-			operationID     sql.NullString
-			enabled         bool
-			retentionDays   int16
-			consentVersion  sql.NullInt64
-			consentHash     sql.NullString
-			consentedAt     sql.NullTime
-			reconsent       bool
-		)
-		require.NoError(t, ts.DB.QueryRowContext(ctx, `
-			SELECT presence_settings_version,
-			       presence_settings_operation_id::TEXT,
-			       activity_history_enabled,
-			       activity_history_retention_days,
-			       activity_history_consent_version,
-			       activity_history_consent_copy_hash,
-			       activity_history_consented_at,
-			       activity_history_reconsent_required
-			FROM user_presence_settings
-			WHERE user_id = $1
-		`, user.ID).Scan(
-			&settingsVersion,
-			&operationID,
-			&enabled,
-			&retentionDays,
-			&consentVersion,
-			&consentHash,
-			&consentedAt,
-			&reconsent,
-		))
-		assert.Zero(t, settingsVersion)
-		assert.False(t, operationID.Valid)
-		assert.False(t, enabled)
-		assert.Equal(t, int16(30), retentionDays)
-		assert.False(t, consentVersion.Valid)
-		assert.False(t, consentHash.Valid)
-		assert.False(t, consentedAt.Valid)
-		assert.False(t, reconsent)
-	})
-
-	t.Run("retention choices", func(t *testing.T) {
-		user := ts.CreateTestUser(t, "presence_history_retention")
-		_, err := ts.DB.ExecContext(ctx,
-			`INSERT INTO user_presence_settings (user_id) VALUES ($1)`, user.ID)
-		require.NoError(t, err)
-
-		for _, days := range []int{7, 30, 90, 365} {
-			_, err = ts.DB.ExecContext(ctx, `
-				UPDATE user_presence_settings
-				SET activity_history_retention_days = $2
-				WHERE user_id = $1
-			`, user.ID, days)
-			require.NoErrorf(t, err, "retention %d must be accepted", days)
-		}
-		for _, days := range []int{-1, 0, 6, 8, 29, 31, 89, 91, 364, 366} {
-			_, err = ts.DB.ExecContext(ctx, `
-				UPDATE user_presence_settings
-				SET activity_history_retention_days = $2
-				WHERE user_id = $1
-			`, user.ID, days)
-			migration000086RequireConstraint(t, err, "user_presence_settings_history_retention_check")
-		}
-	})
-
-	t.Run("settings version and consent invariants", func(t *testing.T) {
-		valid := ts.CreateTestUser(t, "presence_history_valid_consent")
-		_, err := ts.DB.ExecContext(ctx, `
-			INSERT INTO user_presence_settings (
-				user_id,
-				activity_history_enabled,
-				activity_history_consent_version,
-				activity_history_consent_copy_hash,
-				activity_history_consented_at
-			) VALUES ($1, TRUE, 1, $2, clock_timestamp())
-		`, valid.ID, strings.Repeat("a", 64))
-		require.NoError(t, err, "complete current consent must be accepted")
-
-		negativeVersion := ts.CreateTestUser(t, "presence_history_negative_version")
-		_, err = ts.DB.ExecContext(ctx, `
-			INSERT INTO user_presence_settings (user_id, presence_settings_version)
-			VALUES ($1, -1)
-		`, negativeVersion.ID)
-		migration000086RequireConstraint(t, err, "user_presence_settings_version_nonnegative")
-
-		for _, tc := range []struct {
-			name           string
-			consentVersion any
-			hash           any
-			consentedAt    any
-			reconsent      bool
-			constraint     string
-		}{
-			{
-				name: "null consent version", consentVersion: nil, hash: strings.Repeat("b", 64),
-				consentedAt: time.Now().UTC(), constraint: "user_presence_settings_history_consent_check",
-			},
-			{
-				name: "zero consent version", consentVersion: 0, hash: strings.Repeat("b", 64),
-				consentedAt: time.Now().UTC(), constraint: "user_presence_settings_history_consent_check",
-			},
-			{
-				name: "missing hash", consentVersion: 1, hash: nil,
-				consentedAt: time.Now().UTC(), constraint: "user_presence_settings_history_consent_check",
-			},
-			{
-				name: "missing timestamp", consentVersion: 1, hash: strings.Repeat("b", 64),
-				consentedAt: nil, constraint: "user_presence_settings_history_consent_check",
-			},
-			{
-				name: "enabled while reconsent required", consentVersion: 1, hash: strings.Repeat("b", 64),
-				consentedAt: time.Now().UTC(), reconsent: true,
-				constraint: "user_presence_settings_history_consent_check",
-			},
-			{
-				name: "uppercase hash", consentVersion: 1, hash: strings.Repeat("A", 64),
-				consentedAt: time.Now().UTC(), constraint: "user_presence_settings_history_hash_check",
-			},
-			{
-				name: "short hash", consentVersion: 1, hash: strings.Repeat("b", 63),
-				consentedAt: time.Now().UTC(), constraint: "user_presence_settings_history_hash_check",
-			},
-		} {
-			t.Run(tc.name, func(t *testing.T) {
-				user := ts.CreateTestUser(t, "presence_history_"+strings.ReplaceAll(tc.name, " ", "_"))
-				_, err := ts.DB.ExecContext(ctx, `
-					INSERT INTO user_presence_settings (
-						user_id,
-						activity_history_enabled,
-						activity_history_consent_version,
-						activity_history_consent_copy_hash,
-						activity_history_consented_at,
-						activity_history_reconsent_required
-					) VALUES ($1, TRUE, $2, $3, $4, $5)
-				`, user.ID, tc.consentVersion, tc.hash, tc.consentedAt, tc.reconsent)
-				migration000086RequireConstraint(t, err, tc.constraint)
-			})
-		}
-
-		disabledWithConsent := ts.CreateTestUser(t, "presence_history_disabled_with_consent")
-		_, err = ts.DB.ExecContext(ctx, `
-			INSERT INTO user_presence_settings (
-				user_id,
-				activity_history_enabled,
-				activity_history_consent_version,
-				activity_history_consent_copy_hash,
-				activity_history_consented_at
-			) VALUES ($1, FALSE, 1, $2, clock_timestamp())
-		`, disabledWithConsent.ID, strings.Repeat("c", 64))
-		migration000086RequireConstraint(t, err, "user_presence_settings_history_consent_check")
-
-		disabledReconsent := ts.CreateTestUser(t, "presence_history_disabled_reconsent")
-		_, err = ts.DB.ExecContext(ctx, `
-			INSERT INTO user_presence_settings (
-				user_id,
-				activity_history_reconsent_required
-			) VALUES ($1, TRUE)
-		`, disabledReconsent.ID)
-		require.NoError(t, err, "a disabled quarantined row may require reconsent without accepted-consent metadata")
-	})
-
-	t.Run("history taxonomy payload and time constraints", func(t *testing.T) {
-		user := ts.CreateTestUser(t, "presence_history_categories")
-		now := time.Now().UTC().Truncate(time.Microsecond)
-		for _, category := range []string{
-			"server_voice",
-			"private_call",
-			"games",
-			"music",
-			"streaming",
-			"browser",
-			"productivity",
-			"creator",
-			"custom_text",
-		} {
-			err := migration000086InsertHistory(
-				ts.DB, user.ID, category, 1, `{"value":"test"}`, now, now, now, now.Add(24*time.Hour),
-			)
-			require.NoErrorf(t, err, "category %q must be accepted", category)
-		}
-
-		err := migration000086InsertHistory(
-			ts.DB, user.ID, "unknown", 1, `{"value":"test"}`, now, now, now, now.Add(24*time.Hour),
-		)
-		migration000086RequireConstraint(t, err, "presence_history_category_check")
-
-		err = migration000086InsertHistory(
-			ts.DB, user.ID, "custom_text", 1, `["not-an-object"]`, now, now, now, now.Add(24*time.Hour),
-		)
-		migration000086RequireConstraint(t, err, "presence_history_payload_object_check")
-
-		err = migration000086InsertHistory(
-			ts.DB, user.ID, "custom_text", 0, `{"value":"test"}`, now, now, now, now.Add(24*time.Hour),
-		)
-		migration000086RequireConstraint(t, err, "presence_history_payload_version_positive")
-
-		err = migration000086InsertHistory(
-			ts.DB, user.ID, "custom_text", 1, `{"value":"test"}`, now, now.Add(-time.Second), now, now.Add(24*time.Hour),
-		)
-		migration000086RequireConstraint(t, err, "presence_history_ended_at_check")
-
-		err = migration000086InsertHistory(
-			ts.DB, user.ID, "custom_text", 1, `{"value":"test"}`, now, now, now, now,
-		)
-		migration000086RequireConstraint(t, err, "presence_history_expires_at_check")
-
-		maxPayload := `{"value":"` + strings.Repeat("x", 4083) + `"}`
-		var payloadBytes int
-		require.NoError(t, ts.DB.QueryRowContext(ctx,
-			`SELECT octet_length($1::JSONB::TEXT)`, maxPayload,
-		).Scan(&payloadBytes))
-		require.Equal(t, 4096, payloadBytes, "fixture must exercise the exact 4 KiB JSONB boundary")
-		require.NoError(t, migration000086InsertHistory(
-			ts.DB, user.ID, "custom_text", 1, maxPayload, now, now, now, now.Add(24*time.Hour),
-		))
-
-		overPayload := `{"value":"` + strings.Repeat("x", 4084) + `"}`
-		require.NoError(t, ts.DB.QueryRowContext(ctx,
-			`SELECT octet_length($1::JSONB::TEXT)`, overPayload,
-		).Scan(&payloadBytes))
-		require.Equal(t, 4097, payloadBytes)
-		err = migration000086InsertHistory(
-			ts.DB, user.ID, "custom_text", 1, overPayload, now, now, now, now.Add(24*time.Hour),
-		)
-		migration000086RequireConstraint(t, err, "presence_history_payload_size_check")
-	})
-
-	t.Run("one open interval per sender and category", func(t *testing.T) {
-		user := ts.CreateTestUser(t, "presence_history_one_open")
-		now := time.Now().UTC().Truncate(time.Microsecond)
-		require.NoError(t, migration000086InsertHistory(
-			ts.DB, user.ID, "custom_text", 1, `{"value":"first"}`, now, nil, now, now.Add(24*time.Hour),
-		))
-		err := migration000086InsertHistory(
-			ts.DB, user.ID, "custom_text", 1, `{"value":"second"}`, now, nil, now, now.Add(24*time.Hour),
-		)
-		migration000086RequireConstraint(t, err, "idx_presence_history_one_open")
-	})
-
-	t.Run("pending operation constraints and database timestamps", func(t *testing.T) {
-		user := ts.CreateTestUser(t, "presence_history_pending")
-		operationID := uuid.NewString()
-		_, err := ts.DB.ExecContext(ctx, `
-			INSERT INTO presence_settings_pending_operations (
-				user_id, operation_id, prior_settings_version
-			) VALUES ($1, $2, 0)
-		`, user.ID, operationID)
-		require.NoError(t, err)
-
-		var createdAt, reconcileAfter time.Time
-		require.NoError(t, ts.DB.QueryRowContext(ctx, `
-			SELECT created_at, reconcile_after
-			FROM presence_settings_pending_operations
-			WHERE user_id = $1
-		`, user.ID).Scan(&createdAt, &reconcileAfter))
-		delay := reconcileAfter.Sub(createdAt)
-		assert.GreaterOrEqual(t, delay, 30*time.Second)
-		assert.Less(t, delay, 31*time.Second)
-
-		_, err = ts.DB.ExecContext(ctx, `
-			INSERT INTO presence_settings_pending_operations (
-				user_id, operation_id, prior_settings_version
-			) VALUES ($1, $2, 0)
-		`, user.ID, uuid.NewString())
-		migration000086RequireConstraint(t, err, "presence_settings_pending_operations_pkey")
-
-		duplicateOperationUser := ts.CreateTestUser(t, "presence_history_pending_duplicate_operation")
-		_, err = ts.DB.ExecContext(ctx, `
-			INSERT INTO presence_settings_pending_operations (
-				user_id, operation_id, prior_settings_version
-			) VALUES ($1, $2, 0)
-		`, duplicateOperationUser.ID, operationID)
-		migration000086RequireConstraint(t, err, "presence_settings_pending_operations_operation_id_key")
-
-		negativeVersionUser := ts.CreateTestUser(t, "presence_history_pending_negative")
-		_, err = ts.DB.ExecContext(ctx, `
-			INSERT INTO presence_settings_pending_operations (
-				user_id, operation_id, prior_settings_version
-			) VALUES ($1, $2, -1)
-		`, negativeVersionUser.ID, uuid.NewString())
-		migration000086RequireConstraint(t, err, "presence_settings_pending_operations_prior_version_check")
-
-		badTimeUser := ts.CreateTestUser(t, "presence_history_pending_bad_time")
-		_, err = ts.DB.ExecContext(ctx, `
-			INSERT INTO presence_settings_pending_operations (
-				user_id,
-				operation_id,
-				prior_settings_version,
-				created_at,
-				reconcile_after
-			) VALUES ($1, $2, 0, $3, $3)
-		`, badTimeUser.ID, uuid.NewString(), time.Now().UTC())
-		migration000086RequireConstraint(t, err, "presence_settings_pending_operations_reconcile_check")
-
-		assert.Equal(t, "user_id", migration000086PrimaryKeyColumns(t, ts.DB,
-			"presence_settings_pending_operations"))
-		assert.Equal(t,
-			"user_id,operation_id,prior_settings_version,created_at,reconcile_after",
-			migration000086Columns(t, ts.DB, "presence_settings_pending_operations"),
-			"pending-operation storage must contain no status, exception, or history payload",
-		)
-	})
-
-	t.Run("indexes and cascades", func(t *testing.T) {
-		assert.Equal(t, "id", migration000086PrimaryKeyColumns(t, ts.DB, "presence_history"))
-		assert.Equal(t, "c", migration000086ForeignKeyDeleteAction(
-			t, ts.DB, "presence_history", "presence_history_sender_id_fkey"))
-		assert.Equal(t, "c", migration000086ForeignKeyDeleteAction(
-			t, ts.DB, "presence_settings_pending_operations",
-			"presence_settings_pending_operations_user_id_fkey"))
-
-		oneOpen := migration000086IndexDefinition(t, ts.DB, "idx_presence_history_one_open")
-		assert.Contains(t, oneOpen, "CREATE UNIQUE INDEX")
-		assert.Contains(t, oneOpen, "(sender_id, category)")
-		assert.Contains(t, oneOpen, "WHERE (ended_at IS NULL)")
-
-		senderPage := migration000086IndexDefinition(t, ts.DB, "idx_presence_history_sender_page")
-		assert.Contains(t, senderPage, "(sender_id, recorded_at DESC, id DESC)")
-		expiry := migration000086IndexDefinition(t, ts.DB, "idx_presence_history_expiry")
-		assert.Contains(t, expiry, "(expires_at, id)")
-
-		user := ts.CreateTestUser(t, "presence_history_cascade")
-		_, err := ts.DB.ExecContext(ctx,
-			`INSERT INTO user_presence_settings (user_id) VALUES ($1)`, user.ID)
-		require.NoError(t, err)
-		now := time.Now().UTC().Truncate(time.Microsecond)
-		require.NoError(t, migration000086InsertHistory(
-			ts.DB, user.ID, "custom_text", 1, `{"value":"test"}`, now, nil, now, now.Add(24*time.Hour),
-		))
-		_, err = ts.DB.ExecContext(ctx, `
-			INSERT INTO presence_settings_pending_operations (
-				user_id, operation_id, prior_settings_version
-			) VALUES ($1, $2, 0)
-		`, user.ID, uuid.NewString())
-		require.NoError(t, err)
-
-		_, err = ts.DB.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, user.ID)
-		require.NoError(t, err)
-		assert.Zero(t, migration000086RowCount(t, ts.DB,
-			`SELECT COUNT(*) FROM user_presence_settings WHERE user_id = $1`, user.ID))
-		assert.Zero(t, migration000086RowCount(t, ts.DB,
-			`SELECT COUNT(*) FROM presence_history WHERE sender_id = $1`, user.ID))
-		assert.Zero(t, migration000086RowCount(t, ts.DB,
-			`SELECT COUNT(*) FROM presence_settings_pending_operations WHERE user_id = $1`, user.ID))
-	})
-}
-
-var migration000086SettingsColumns = []string{
-	"presence_settings_version",
-	"presence_settings_operation_id",
-	"activity_history_enabled",
-	"activity_history_retention_days",
-	"activity_history_consent_version",
-	"activity_history_consent_copy_hash",
-	"activity_history_consented_at",
-	"activity_history_reconsent_required",
-}
-
-func migration000086InsertHistory(
-	db *sql.DB,
-	senderID string,
-	category string,
-	payloadVersion int,
-	payload string,
-	startedAt time.Time,
-	endedAt any,
-	recordedAt time.Time,
-	expiresAt time.Time,
-) error {
-	_, err := db.ExecContext(context.Background(), `
-		INSERT INTO presence_history (
-			id,
-			sender_id,
-			category,
-			payload_version,
-			payload,
-			started_at,
-			ended_at,
-			recorded_at,
-			expires_at
-		) VALUES ($1, $2, $3, $4, $5::JSONB, $6, $7, $8, $9)
-	`, uuid.NewString(), senderID, category, payloadVersion, payload,
-		startedAt, endedAt, recordedAt, expiresAt)
-	return err
-}
-
-func migration000086TableExists(t *testing.T, db *sql.DB, table string) bool {
+func migration000086OpenIsolatedDB(t *testing.T) *sql.DB {
 	t.Helper()
 
-	qualifiedTable, ok := map[string]string{
-		"presence_history":                     "public.presence_history",
-		"presence_settings_pending_operations": "public.presence_settings_pending_operations",
-	}[table]
-	require.True(t, ok, "unexpected migration table %q", table)
-	var relation sql.NullString
-	require.NoError(t, db.QueryRow(`SELECT to_regclass($1)`, qualifiedTable).Scan(&relation))
-	return relation.Valid
+	databaseURL := os.Getenv(opsMetricsTestDatabaseURL)
+	if databaseURL == "" {
+		t.Skipf("%s is unset; skipping isolated PostgreSQL migration test", opsMetricsTestDatabaseURL)
+	}
+	parsed, err := url.Parse(databaseURL)
+	require.NoError(t, err)
+	require.Contains(t, strings.TrimPrefix(parsed.Path, "/"), "opsmetrics", "database name must identify an isolated opsmetrics database")
+
+	db, err := sql.Open("postgres", databaseURL)
+	require.NoError(t, err)
+	require.NoError(t, db.Ping())
+	return db
 }
 
-func migration000086ColumnExists(t *testing.T, db *sql.DB, table, column string) bool {
+func migration000086Columns(t *testing.T, db *sql.DB, table string) []string {
 	t.Helper()
 
-	var exists bool
-	require.NoError(t, db.QueryRow(`
-		SELECT EXISTS (
-			SELECT 1
-			FROM information_schema.columns
-			WHERE table_schema = 'public'
-				AND table_name = $1
-				AND column_name = $2
-		)
-	`, table, column).Scan(&exists))
-	return exists
-}
-
-func migration000086Columns(t *testing.T, db *sql.DB, table string) string {
-	t.Helper()
-
-	var columns string
-	require.NoError(t, db.QueryRow(`
-		SELECT string_agg(column_name, ',' ORDER BY ordinal_position)
+	rows, err := db.Query(`
+		SELECT column_name, data_type, is_nullable
 		FROM information_schema.columns
 		WHERE table_schema = 'public' AND table_name = $1
-	`, table).Scan(&columns))
+		ORDER BY column_name
+	`, table)
+	require.NoError(t, err)
+	defer func() { assert.NoError(t, rows.Close()) }()
+
+	var columns []string
+	for rows.Next() {
+		var name, dataType, nullable string
+		require.NoError(t, rows.Scan(&name, &dataType, &nullable))
+		columns = append(columns, name+":"+dataType+":"+nullable)
+	}
+	require.NoError(t, rows.Err())
 	return columns
 }
 
-func migration000086PrimaryKeyColumns(t *testing.T, db *sql.DB, table string) string {
+func migration000086PrimaryKey(t *testing.T, db *sql.DB, table string) string {
 	t.Helper()
 
 	var columns string
@@ -501,45 +214,49 @@ func migration000086PrimaryKeyColumns(t *testing.T, db *sql.DB, table string) st
 		SELECT string_agg(attribute.attname, ',' ORDER BY key_column.ordinality)
 		FROM pg_constraint AS constraint_definition
 		JOIN pg_class AS relation ON relation.oid = constraint_definition.conrelid
-		JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
 		CROSS JOIN LATERAL unnest(constraint_definition.conkey)
 			WITH ORDINALITY AS key_column(attnum, ordinality)
 		JOIN pg_attribute AS attribute
 			ON attribute.attrelid = relation.oid AND attribute.attnum = key_column.attnum
-		WHERE namespace.nspname = 'public'
-			AND relation.relname = $1
-			AND constraint_definition.contype = 'p'
+		WHERE relation.relname = $1 AND constraint_definition.contype = 'p'
 	`, table).Scan(&columns))
 	return columns
 }
 
-func migration000086ForeignKeyDeleteAction(t *testing.T, db *sql.DB, table, constraint string) string {
-	t.Helper()
-
-	var action string
-	require.NoError(t, db.QueryRow(`
-		SELECT constraint_definition.confdeltype::TEXT
-		FROM pg_constraint AS constraint_definition
-		JOIN pg_class AS relation ON relation.oid = constraint_definition.conrelid
-		JOIN pg_namespace AS namespace ON namespace.oid = relation.relnamespace
-		WHERE namespace.nspname = 'public'
-			AND relation.relname = $1
-			AND constraint_definition.conname = $2
-			AND constraint_definition.contype = 'f'
-	`, table, constraint).Scan(&action))
-	return action
-}
-
-func migration000086IndexDefinition(t *testing.T, db *sql.DB, index string) string {
+func migration000086ConstraintKeys(t *testing.T, db *sql.DB, constraint string) []string {
 	t.Helper()
 
 	var definition string
 	require.NoError(t, db.QueryRow(`
-		SELECT indexdef
-		FROM pg_indexes
-		WHERE schemaname = 'public' AND indexname = $1
-	`, index).Scan(&definition))
-	return definition
+		SELECT pg_get_constraintdef(oid)
+		FROM pg_constraint
+		WHERE conname = $1
+	`, constraint).Scan(&definition))
+	return migration000086MetricKeys(definition)
+}
+
+func migration000086MetricKeys(contents string) []string {
+	matches := migration000086MetricLiteral.FindAllString(contents, -1)
+	keys := make(map[string]struct{}, len(matches))
+	for _, match := range matches {
+		keys[strings.Trim(match, "'")] = struct{}{}
+	}
+	result := make([]string, 0, len(keys))
+	for key := range keys {
+		result = append(result, key)
+	}
+	sort.Strings(result)
+	return result
+}
+
+func migration000086CatalogKeys() []string {
+	definitions := opsmetrics.Catalog()
+	keys := make([]string, 0, len(definitions))
+	for _, definition := range definitions {
+		keys = append(keys, string(definition.Key))
+	}
+	sort.Strings(keys)
+	return keys
 }
 
 func migration000086RequireConstraint(t *testing.T, err error, name string) {
@@ -551,40 +268,26 @@ func migration000086RequireConstraint(t *testing.T, err error, name string) {
 	assert.Equal(t, name, pqErr.Constraint)
 }
 
-func migration000086RowCount(t *testing.T, db *sql.DB, query string, arg string) int {
+func migration000086TableExists(t *testing.T, db *sql.DB, table string) bool {
 	t.Helper()
 
-	var count int
-	require.NoError(t, db.QueryRow(query, arg).Scan(&count))
-	return count
-}
-
-func migration000086RequireOrderedDown(t *testing.T, contents string) {
-	t.Helper()
-
-	steps := []string{
-		"DROP TABLE presence_settings_pending_operations",
-		"DROP TABLE presence_history",
-		"DROP CONSTRAINT user_presence_settings_history_consent_check",
-		"DROP COLUMN activity_history_reconsent_required",
-	}
-	previous := -1
-	for _, step := range steps {
-		position := strings.Index(contents, step)
-		require.NotEqualf(t, -1, position, "down migration must contain %q", step)
-		assert.Greater(t, position, previous, "down migration step %q is out of order", step)
-		previous = position
-	}
+	var relation sql.NullString
+	require.NoError(t, db.QueryRow(`SELECT to_regclass('public.' || $1)`, table).Scan(&relation))
+	return relation.Valid
 }
 
 func migration000086SQL(t *testing.T, direction string) string {
 	t.Helper()
+	return migration000086ReadFile(t, filepath.Join("..", "..", "migrations", "000086_ops_metrics."+direction+".sql"))
+}
+
+func migration000086ReadFile(t *testing.T, relativePath string) string {
+	t.Helper()
 
 	_, filename, _, ok := runtime.Caller(0)
 	require.True(t, ok, "resolve migration test path")
-	path := filepath.Join(filepath.Dir(filename), "..", "..", "migrations",
-		"000086_presence_history."+direction+".sql")
-	// #nosec G304 -- path is constructed from runtime.Caller and a fixed migration filename.
+	path := filepath.Join(filepath.Dir(filename), relativePath)
+	// #nosec G304 -- path is based on runtime.Caller and fixed test-owned filenames.
 	contents, err := os.ReadFile(path)
 	require.NoError(t, err)
 	return string(contents)

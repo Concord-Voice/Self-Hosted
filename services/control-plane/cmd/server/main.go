@@ -134,12 +134,13 @@ func main() {
 	cleanupCtx, cleanupCancel := context.WithCancel(context.Background())
 	defer cleanupCancel()
 	retentionWorker := presencehistory.NewRetentionWorker(db, log)
+	var opsMetricsRuntime *api.OpsMetricsRuntime
 	runtime, startupErr := startActivityHistoryRuntime(activityHistoryRuntimeDependencies{
 		startupContext:      context.Background(),
 		workerContext:       cleanupCtx,
 		reconcileDisclosure: presenceHistoryService.ReconcileStaleDisclosure,
 		bindRouter: func() (*gin.Engine, *websocket.Hub, *natsclient.Client, error) {
-			return api.NewRouter(
+			router, hub, natsClient, metricsRuntime, routerErr := api.NewRouter(
 				db,
 				redisClient,
 				storageClient,
@@ -148,6 +149,11 @@ func main() {
 				log,
 				presenceHistoryService,
 			)
+			if routerErr != nil {
+				return nil, nil, nil, routerErr
+			}
+			opsMetricsRuntime = metricsRuntime
+			return router, hub, natsClient, nil
 		},
 		reconcilePending: presenceHistoryService.ReconcilePending,
 		pendingWorker:    presenceHistoryService.RunPendingReconciler,
@@ -242,6 +248,7 @@ func main() {
 		func() error { return srv.Shutdown(ctx) },
 		waitActivityHistoryWorkers,
 		func() { hub.Shutdown() },
+		func() error { return opsMetricsRuntime.Stop(ctx) },
 		func() {
 			if natsClient != nil {
 				natsClient.Close()
@@ -258,12 +265,15 @@ func main() {
 func shutdownControlPlane(
 	stopBackground func(),
 	shutdownHTTP func() error,
-	waitActivityWorkers, shutdownHub, closeNATS func(),
+	waitActivityWorkers, shutdownHub func(),
+	shutdownMetrics func() error,
+	closeNATS func(),
 ) error {
 	stopBackground()
 	shutdownErr := shutdownHTTP()
 	waitActivityWorkers()
 	shutdownHub()
+	shutdownErr = errors.Join(shutdownErr, shutdownMetrics())
 	closeNATS()
 	return shutdownErr
 }

@@ -153,7 +153,7 @@ func runAdminCtlEnvironment(ctx context.Context, environment adminCtlEnvironment
 				if err := ctx.Err(); err != nil {
 					return err
 				}
-				return database.ExactDowngradeMigration86(environment.databaseURL)
+				return database.ExactDowngradeMigration87(environment.databaseURL)
 			},
 		},
 		stdout: os.Stdout,
@@ -327,7 +327,7 @@ func executeAdminCtlDowngrade(ctx context.Context, deps adminCtlDependencies) in
 		return 1
 	}
 	writeAdminCtl(deps.stdout,
-		"activity-history downgrade-schema status=success enabled_remaining=%d history_remaining=%d pending_remaining=%d migration_version=85\n",
+		"activity-history downgrade-schema status=success enabled_remaining=%d history_remaining=%d pending_remaining=%d migration_version=86\n",
 		remaining.enabled, remaining.history, remaining.pending,
 	)
 	return 0
@@ -790,7 +790,7 @@ func readAdminCtlPendingState(ctx context.Context, tx *sql.Tx, result *adminCtlP
 }
 
 func validateAdminCtlPreflight(result adminCtlPreflightResult) error {
-	if result.migrationDirty || result.migrationVersion < 86 {
+	if result.migrationDirty || result.migrationVersion < 87 {
 		return errors.New("activity history migration is not clean and current")
 	}
 	if result.requiredTables != adminCtlRequiredTables || result.requiredColumns != adminCtlRequiredColumns {

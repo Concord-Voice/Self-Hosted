@@ -115,13 +115,13 @@ func SetupTestServer(t *testing.T) *TestServer {
 	disclosure := presencehistory.BuildDisclosure(presencehistory.DisclosureOptions{InstanceType: "saas"})
 	presenceHistoryService := presencehistory.NewService(db, disclosure, true)
 
-	// Register dependency cleanup first so LIFO execution closes Hub, then NATS,
-	// before Redis/DB.
+	// Register dependency cleanup first so LIFO execution closes Hub, then
+	// operations metrics and NATS, before Redis/DB.
 	t.Cleanup(func() {
 		redisCleanup()
 		dbCleanup()
 	})
-	router, hub, natsClient, err := api.NewRouter(
+	router, hub, natsClient, opsRuntime, err := api.NewRouter(
 		db, redisClient, nil, cfg, nil, log, presenceHistoryService,
 	)
 	if err != nil {
@@ -130,9 +130,14 @@ func SetupTestServer(t *testing.T) *TestServer {
 	if natsClient != nil {
 		t.Cleanup(func() { natsClient.Close() })
 	}
+	t.Cleanup(func() {
+		if err := opsRuntime.Stop(context.Background()); err != nil {
+			t.Errorf("stop operations metrics runtime: %v", err)
+		}
+	})
 
-	// Shut down the hub goroutine and wait for Run() to exit BEFORE Redis/DB
-	// are torn down. t.Cleanup runs in LIFO order, so registered-last runs first.
+	// Shut down the hub goroutine before operations metrics, NATS, Redis, and DB.
+	// t.Cleanup runs in LIFO order, so registered-last runs first.
 	t.Cleanup(func() { hub.Shutdown() })
 
 	return &TestServer{

@@ -16,14 +16,14 @@ import (
 
 const (
 	exactDowngradeSourceURL = "file://migrations"
-	exactDowngradeFrom      = 86
-	exactDowngradeTo        = 85
+	exactDowngradeFrom      = 87
+	exactDowngradeTo        = 86
 	postgresPoolOwner       = "PostgreSQL pool"
 )
 
 var (
-	errExactDowngradeStartState = errors.New("exact downgrade requires clean migration version 86")
-	errExactDowngradeFinalState = errors.New("exact downgrade did not finish at clean migration version 85")
+	errExactDowngradeStartState = errors.New("exact downgrade requires clean migration version 87")
+	errExactDowngradeFinalState = errors.New("exact downgrade did not finish at clean migration version 86")
 )
 
 type exactMigration interface {
@@ -37,7 +37,7 @@ type exactDowngradeDependencies struct {
 	newMigrate   func(source.Driver, migratedatabase.Driver) (exactMigration, error)
 }
 
-type exactVersion86Driver struct {
+type exactVersion87Driver struct {
 	migratedatabase.Driver
 }
 
@@ -46,17 +46,17 @@ type ownedMigrationDatabase struct {
 	pool *sql.DB
 }
 
-// ExactDowngradeMigration86 opens an isolated migration connection, applies
-// only migration 86's down file, and verifies the resulting clean version 85.
-func ExactDowngradeMigration86(databaseURL string) error {
-	return runExactDowngradeMigration86(databaseURL, exactDowngradeDependencies{
+// ExactDowngradeMigration87 opens an isolated migration connection, applies
+// only migration 87's down file, and verifies the resulting clean version 86.
+func ExactDowngradeMigration87(databaseURL string) error {
+	return runExactDowngradeMigration87(databaseURL, exactDowngradeDependencies{
 		openDatabase: openDedicatedMigrationDatabase,
 		openSource:   source.Open,
 		newMigrate:   newExactMigration,
 	})
 }
 
-func runExactDowngradeMigration86(databaseURL string, deps exactDowngradeDependencies) (resultErr error) {
+func runExactDowngradeMigration87(databaseURL string, deps exactDowngradeDependencies) (resultErr error) {
 	databaseDriver, err := deps.openDatabase(databaseURL)
 	if err != nil {
 		return fmt.Errorf("open dedicated migration database: %w", err)
@@ -70,7 +70,7 @@ func runExactDowngradeMigration86(databaseURL string, deps exactDowngradeDepende
 		)
 	}
 
-	guardedDriver := &exactVersion86Driver{Driver: databaseDriver}
+	guardedDriver := &exactVersion87Driver{Driver: databaseDriver}
 	migration, err := deps.newMigrate(sourceDriver, guardedDriver)
 	if err != nil {
 		return errors.Join(
@@ -89,12 +89,12 @@ func runExactDowngradeMigration86(databaseURL string, deps exactDowngradeDepende
 	}()
 
 	if err := migration.Steps(-1); err != nil {
-		return fmt.Errorf("run exact migration 86 downgrade: %w", err)
+		return fmt.Errorf("run exact migration 87 downgrade: %w", err)
 	}
 	return verifyExactDowngrade(databaseDriver)
 }
 
-func (d *exactVersion86Driver) Version() (int, bool, error) {
+func (d *exactVersion87Driver) Version() (int, bool, error) {
 	version, dirty, err := d.Driver.Version()
 	if err != nil {
 		return version, dirty, errors.Join(errExactDowngradeStartState, fmt.Errorf("read migration version: %w", err))

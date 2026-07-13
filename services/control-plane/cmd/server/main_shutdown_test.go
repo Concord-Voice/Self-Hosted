@@ -9,7 +9,7 @@ import (
 func TestShutdownControlPlaneWaitsForHTTPDrain(t *testing.T) {
 	httpStarted := make(chan struct{})
 	releaseHTTP := make(chan struct{})
-	events := make(chan string, 5)
+	events := make(chan string, 6)
 	result := make(chan error, 1)
 
 	go func() {
@@ -23,6 +23,7 @@ func TestShutdownControlPlaneWaitsForHTTPDrain(t *testing.T) {
 			},
 			func() { events <- "activity" },
 			func() { events <- "hub" },
+			func() error { events <- "metrics"; return nil },
 			func() { events <- "nats" },
 		)
 	}()
@@ -42,8 +43,8 @@ func TestShutdownControlPlaneWaitsForHTTPDrain(t *testing.T) {
 		t.Fatalf("shutdownControlPlane returned error: %v", err)
 	}
 
-	got := []string{"cancel", <-events, <-events, <-events, <-events}
-	want := []string{"cancel", "http", "activity", "hub", "nats"}
+	got := []string{"cancel", <-events, <-events, <-events, <-events, <-events}
+	want := []string{"cancel", "http", "activity", "hub", "metrics", "nats"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("shutdown order = %v, want %v", got, want)
 	}
@@ -51,7 +52,8 @@ func TestShutdownControlPlaneWaitsForHTTPDrain(t *testing.T) {
 
 func TestShutdownControlPlaneCleansUpAfterHTTPError(t *testing.T) {
 	wantErr := errors.New("HTTP drain failed")
-	events := make([]string, 0, 5)
+	metricsErr := errors.New("metrics shutdown failed")
+	events := make([]string, 0, 6)
 
 	gotErr := shutdownControlPlane(
 		func() { events = append(events, "cancel") },
@@ -61,13 +63,17 @@ func TestShutdownControlPlaneCleansUpAfterHTTPError(t *testing.T) {
 		},
 		func() { events = append(events, "activity") },
 		func() { events = append(events, "hub") },
+		func() error { events = append(events, "metrics"); return metricsErr },
 		func() { events = append(events, "nats") },
 	)
 
 	if !errors.Is(gotErr, wantErr) {
 		t.Fatalf("shutdownControlPlane error = %v, want %v", gotErr, wantErr)
 	}
-	wantEvents := []string{"cancel", "http", "activity", "hub", "nats"}
+	if !errors.Is(gotErr, metricsErr) {
+		t.Fatalf("shutdownControlPlane error = %v, want joined error %v", gotErr, metricsErr)
+	}
+	wantEvents := []string{"cancel", "http", "activity", "hub", "metrics", "nats"}
 	if !reflect.DeepEqual(events, wantEvents) {
 		t.Fatalf("shutdown order = %v, want %v", events, wantEvents)
 	}

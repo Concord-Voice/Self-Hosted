@@ -27,6 +27,7 @@ import (
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/mfa"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/middleware"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/notifications"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/opsmetrics"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/ownership"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/presencehistory"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/rbac"
@@ -155,7 +156,19 @@ func bindPresenceHistoryRuntime(
 	return nil
 }
 
-// NewRouter creates a new API router and returns the WebSocket hub and NATS client for lifecycle management.
+func configureOpsMetricsAndRecovery(router *gin.Engine, enabled bool) *opsmetrics.Counters {
+	var counters *opsmetrics.Counters
+	if enabled {
+		counters = opsmetrics.NewCounters()
+		router.Use(opsmetrics.RequestMetricsMiddleware(counters))
+	}
+	// Metrics must wrap Recovery so recovered panics are observed after the
+	// response status has been changed to 500.
+	router.Use(gin.Recovery())
+	return counters
+}
+
+// NewRouter creates a new API router and returns its background runtime dependencies.
 func NewRouter(
 	db *sql.DB,
 	redis *redis.Client,
@@ -164,12 +177,12 @@ func NewRouter(
 	liveSpa *config.LiveSpaConfig,
 	log *logger.Logger,
 	presenceHistoryService *presencehistory.Service,
-) (*gin.Engine, *websocket.Hub, *natsclient.Client, error) {
+) (*gin.Engine, *websocket.Hub, *natsclient.Client, *OpsMetricsRuntime, error) {
 	router := gin.New()
 	configureTrustedProxies(router, cfg, log)
 
 	// Middleware
-	router.Use(gin.Recovery())
+	opsCounters := configureOpsMetricsAndRecovery(router, cfg.OpsMetrics.Enabled)
 	router.Use(middleware.RequestID())
 	router.Use(middleware.Logger(log))
 	router.Use(middleware.SecurityHeaders(cfg.Environment))
@@ -183,9 +196,9 @@ func NewRouter(
 	router.HEAD("/health", healthHandler)
 
 	// Initialize WebSocket hub
-	hub := websocket.NewHub(db, redis)
+	hub := websocket.NewHub(db, redis, opsCounters)
 	if err := bindPresenceHistoryRuntime(hub, presenceHistoryService); err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, nil, err
 	}
 
 	// Initialize NATS (inter-service messaging with media plane)
@@ -249,7 +262,7 @@ func NewRouter(
 	// A kick/leave/ban deletes membership but leaves any voice participant on its
 	// join-time snapshot — recheck evicts them from the room (CV-CAN-007 P1).
 	membersHandler.SetVoiceEnforcer(voicePermEnforcer)
-	messagesHandler := messages.NewHandler(db, log, hub, rbacResolver, entCache)
+	messagesHandler := messages.NewHandler(db, log, hub, rbacResolver, entCache, opsCounters)
 	invitesHandler := invites.NewHandler(db, log, hub, rbacResolver)
 	voiceHandler := voice.NewHandler(voice.HandlerDeps{
 		DB:          db,
@@ -338,7 +351,6 @@ func NewRouter(
 			log.Error("Failed to subscribe to voice NATS events", "error", subErr)
 		}
 	}
-
 	// API v1 routes
 	v1 := router.Group("/api/v1")
 	{
@@ -1952,7 +1964,8 @@ func NewRouter(
 
 	// Start only after every dependency and route has been injected.
 	go hub.Run()
-	return router, hub, natsClient, nil
+	opsRuntime := wireOpsMetricsRuntime(db, natsClient, hub, opsCounters, cfg.OpsMetrics, log)
+	return router, hub, natsClient, opsRuntime, nil
 }
 
 // healthHandler responds with 200 + control-plane health JSON. Registered

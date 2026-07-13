@@ -548,8 +548,8 @@ activity_history_rollback() {
   # A checkpoint exists only after disable-all completed. Exact matching
   # retries resume the old-image start and never repeat maintenance. An
   # attempting state is deliberately ambiguous across host loss: the exact
-  # step may already have reached 85, so repeating it is unsafe, while an older
-  # migrator may not recognize v86. Automatic recovery therefore refuses both
+  # step may already have reached 86, so repeating it is unsafe, while an older
+  # migrator may not recognize v87. Automatic recovery therefore refuses both
   # downgrade and old-image start.
   if [[ $ACTIVITY_HISTORY_IMAGE_SELECTOR_LOADED -eq 1 ]]; then
     if [[ "$old_image" != "$ACTIVITY_HISTORY_ROLLBACK_CHECKPOINT_IMAGE" ]]; then
