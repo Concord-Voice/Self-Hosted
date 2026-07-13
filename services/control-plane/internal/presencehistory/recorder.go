@@ -126,14 +126,25 @@ func (r *Repository) disclosureMatches(settings SettingsRow) bool {
 
 func pauseStaleConsent(ctx context.Context, tx *sql.Tx, userID uuid.UUID) error {
 	if _, err := tx.ExecContext(ctx, `
-		UPDATE user_presence_settings
-		SET activity_history_enabled = FALSE,
-		    activity_history_consent_version = NULL,
-		    activity_history_consent_copy_hash = NULL,
-		    activity_history_consented_at = NULL,
-		    activity_history_reconsent_required = TRUE,
-		    updated_at = clock_timestamp()
-		WHERE user_id = $1
+		WITH pause_clock AS (
+			SELECT clock_timestamp() AS paused_at
+		), paused AS (
+			UPDATE user_presence_settings AS settings
+			SET activity_history_enabled = FALSE,
+			    activity_history_consent_version = NULL,
+			    activity_history_consent_copy_hash = NULL,
+			    activity_history_consented_at = NULL,
+			    activity_history_reconsent_required = TRUE,
+			    updated_at = pause_clock.paused_at
+			FROM pause_clock
+			WHERE settings.user_id = $1
+			RETURNING settings.user_id, settings.updated_at AS paused_at
+		)
+		UPDATE presence_history AS history
+		SET ended_at = paused.paused_at
+		FROM paused
+		WHERE history.sender_id = paused.user_id
+		  AND history.ended_at IS NULL
 	`, userID); err != nil {
 		return fmt.Errorf("pause stale activity history consent: %w", err)
 	}

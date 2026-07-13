@@ -219,7 +219,8 @@ func TestRecordCustomTextTransitionPausesStaleOrUnavailableDisclosure(t *testing
 			assert.False(t, hash.Valid)
 			assert.False(t, consentedAt.Valid)
 			assert.Equal(t, 1, historyRowCount(t, ts.DB, userID), "existing history must be preserved")
-			assert.Equal(t, 1, openHistoryRowCount(t, ts.DB, userID), "pause must not mutate intervals")
+			assert.Zero(t, openHistoryRowCount(t, ts.DB, userID),
+				"pausing recording must close the current interval")
 		})
 	}
 }

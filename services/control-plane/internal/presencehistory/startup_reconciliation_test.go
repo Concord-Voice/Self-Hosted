@@ -41,6 +41,8 @@ func TestStartupReconcileStaleDisclosurePausesOnlyStaleEnabledRowsAndPreservesHi
 	expiresAt := now.Add(90 * 24 * time.Hour)
 	historyID := insertHistoryRow(t, ts.DB, staleUser, CategoryCustomText, 1,
 		`{"text":"preserve me"}`, now, nil, now, expiresAt)
+	currentHistoryID := insertHistoryRow(t, ts.DB, currentUser, CategoryCustomText, 1,
+		`{"text":"still current"}`, now, nil, now, expiresAt)
 
 	paused, err := service.ReconcileStaleDisclosure(context.Background())
 	require.NoError(t, err)
@@ -48,6 +50,7 @@ func TestStartupReconcileStaleDisclosurePausesOnlyStaleEnabledRowsAndPreservesHi
 	assertPausedConsentState(t, ts.DB, staleUser, 90)
 	assertPausedConsentState(t, ts.DB, staleVersionUser, 7)
 	assert.True(t, historyIDExists(t, ts.DB, historyID))
+	assert.Zero(t, openHistoryRowCount(t, ts.DB, staleUser))
 	var retainedExpiry time.Time
 	require.NoError(t, ts.DB.QueryRow(`SELECT expires_at FROM presence_history WHERE id = $1`, historyID).Scan(&retainedExpiry))
 	assert.Equal(t, expiresAt, retainedExpiry)
@@ -56,6 +59,8 @@ func TestStartupReconcileStaleDisclosurePausesOnlyStaleEnabledRowsAndPreservesHi
 	require.NoError(t, err)
 	assert.True(t, current.Enabled)
 	assert.False(t, current.ReconsentRequired)
+	assert.Equal(t, 1, openHistoryRowCount(t, ts.DB, currentUser))
+	assert.True(t, historyIDExists(t, ts.DB, currentHistoryID))
 	var disabledReconsent bool
 	require.NoError(t, ts.DB.QueryRow(`
 		SELECT activity_history_reconsent_required
@@ -88,6 +93,7 @@ func TestStartupReconcileStaleDisclosureUnavailablePausesEveryEnabledRow(t *test
 	assertPausedConsentState(t, ts.DB, first, 7)
 	assertPausedConsentState(t, ts.DB, second, 365)
 	assert.True(t, historyIDExists(t, ts.DB, historyID))
+	assert.Zero(t, openHistoryRowCount(t, ts.DB, first))
 	var retainedExpiry time.Time
 	require.NoError(t, ts.DB.QueryRow(`SELECT expires_at FROM presence_history WHERE id = $1`, historyID).Scan(&retainedExpiry))
 	assert.Equal(t, expiresAt, retainedExpiry)

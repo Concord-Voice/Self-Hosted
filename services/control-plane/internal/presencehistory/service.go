@@ -77,30 +77,33 @@ func NewService(db *sql.DB, disclosure DisclosureState, activationEnabled bool) 
 	}
 }
 
-const reconcileUnavailableDisclosureSQL = `
-	UPDATE user_presence_settings
-	SET activity_history_enabled = FALSE,
-	    activity_history_consent_version = NULL,
-	    activity_history_consent_copy_hash = NULL,
-	    activity_history_consented_at = NULL,
-	    activity_history_reconsent_required = TRUE,
-	    updated_at = clock_timestamp()
-	WHERE activity_history_enabled = TRUE
-`
-
-const reconcileChangedDisclosureSQL = `
-	UPDATE user_presence_settings
-	SET activity_history_enabled = FALSE,
-	    activity_history_consent_version = NULL,
-	    activity_history_consent_copy_hash = NULL,
-	    activity_history_consented_at = NULL,
-	    activity_history_reconsent_required = TRUE,
-	    updated_at = clock_timestamp()
-	WHERE activity_history_enabled = TRUE
-	  AND (
-	      activity_history_consent_version IS DISTINCT FROM $1
-	      OR activity_history_consent_copy_hash IS DISTINCT FROM $2
-	  )
+const reconcileStaleDisclosureSQL = `
+	WITH pause_clock AS (
+		SELECT clock_timestamp() AS paused_at
+	), paused AS (
+		UPDATE user_presence_settings AS settings
+		SET activity_history_enabled = FALSE,
+		    activity_history_consent_version = NULL,
+		    activity_history_consent_copy_hash = NULL,
+		    activity_history_consented_at = NULL,
+		    activity_history_reconsent_required = TRUE,
+		    updated_at = pause_clock.paused_at
+		FROM pause_clock
+		WHERE settings.activity_history_enabled = TRUE
+		  AND (
+		      NOT $1
+		      OR settings.activity_history_consent_version IS DISTINCT FROM $2
+		      OR settings.activity_history_consent_copy_hash IS DISTINCT FROM $3
+		  )
+		RETURNING settings.user_id, settings.updated_at AS paused_at
+	), closed_history AS (
+		UPDATE presence_history AS history
+		SET ended_at = paused.paused_at
+		FROM paused
+		WHERE history.sender_id = paused.user_id
+		  AND history.ended_at IS NULL
+	)
+	SELECT COUNT(*) FROM paused
 `
 
 // ReconcileStaleDisclosure atomically pauses enabled rows whose accepted
@@ -111,27 +114,19 @@ func (s *Service) ReconcileStaleDisclosure(ctx context.Context) (int64, error) {
 		return 0, errors.New("activity history disclosure reconciliation unavailable")
 	}
 
-	var (
-		result sql.Result
-		err    error
-	)
+	available := s.disclosure.Available && s.disclosure.RequiredConsent != nil
+	var version int16
+	var copyHash string
 	if s.disclosure.Available && s.disclosure.RequiredConsent != nil {
 		consent := s.disclosure.RequiredConsent
-		result, err = s.db.ExecContext(
-			ctx,
-			reconcileChangedDisclosureSQL,
-			consent.Version,
-			consent.CopyHash,
-		)
-	} else {
-		result, err = s.db.ExecContext(ctx, reconcileUnavailableDisclosureSQL)
+		version = consent.Version
+		copyHash = consent.CopyHash
 	}
-	if err != nil {
+	var paused int64
+	if err := s.db.QueryRowContext(
+		ctx, reconcileStaleDisclosureSQL, available, version, copyHash,
+	).Scan(&paused); err != nil {
 		return 0, fmt.Errorf("reconcile stale activity history disclosure: %w", err)
-	}
-	paused, err := result.RowsAffected()
-	if err != nil {
-		return 0, fmt.Errorf("count paused activity history settings: %w", err)
 	}
 	return paused, nil
 }
