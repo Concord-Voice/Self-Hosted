@@ -63,7 +63,7 @@ const (
 	ClaimAcknowledged ClaimOutcome = iota
 	// ClaimRecovered means conservative delivery completed while quarantine remains.
 	ClaimRecovered
-	// ClaimSuperseded means a newer completed operation made the old claim irrelevant.
+	// ClaimSuperseded means a newer completed operation or authoritative pending clear made the old claim irrelevant.
 	ClaimSuperseded
 	// ClaimPreDeliveryFailed means exact delivery was never attempted.
 	ClaimPreDeliveryFailed
@@ -317,7 +317,20 @@ func (s *Service) recoverPreDeliveryClaim(
 			errors.Join(cause, errors.New("presence claim recovery marker mismatch")),
 		)
 	}
+	if isAuthoritativeSupersedingClear(settings, pending, plan.OperationID) {
+		return ClaimCompletion{Outcome: ClaimSuperseded, Err: cause}
+	}
 	return s.recoverMappedClaim(ctx, plan, cause)
+}
+
+func isAuthoritativeSupersedingClear(
+	settings lockedPresenceSettings,
+	pending pendingOperationRow,
+	planOperationID uuid.UUID,
+) bool {
+	return pending.ID != planOperationID &&
+		pending.PriorVersion != math.MaxInt64 && settings.Version == pending.PriorVersion+1 &&
+		settings.Tier == 0 && !settings.Text.Valid && !settings.Emoji.Valid
 }
 
 func (s *Service) recoverAllLocalClaim(

@@ -530,6 +530,78 @@ func TestCompleteClaimPreDeliveryRecoveryResetsBeforeLiveNewerPending(t *testing
 	assert.Equal(t, DeliveryConservativeReset, plans[0].Mode)
 }
 
+func TestCompleteClaimPreDeliveryRecoveryResetsMatchingForcedClear(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	senderID := testhelpers.CreateUser(t, db)
+	delivery := &task8Delivery{}
+	service := NewService(db, DisclosureState{}, false)
+	require.NoError(t, service.BindDelivery(delivery))
+
+	tx, err := service.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { _ = tx.Rollback() }()
+	forced, err := service.BeginForcedSecurityClear(ctx, tx, senderID)
+	require.NoError(t, err)
+	require.NoError(t, service.CommitTx(tx))
+
+	claimCause := errors.New("forced claim transaction unavailable")
+	beginCalls := 0
+	restore := service.SetTransactionTestHooks(TransactionTestHooks{
+		Begin: func(ctx context.Context, options *sql.TxOptions) (*sql.Tx, error) {
+			beginCalls++
+			if beginCalls == 1 {
+				return nil, claimCause
+			}
+			return db.BeginTx(ctx, options)
+		},
+	})
+	defer restore()
+
+	completion := service.CompleteClaim(ctx, forced.Plan)
+	require.Error(t, completion.Err)
+	assert.ErrorIs(t, completion.Err, claimCause)
+	assert.Equal(t, ClaimRecovered, completion.Outcome)
+	assert.Equal(t, forced.Operation.ID, task8PendingMarker(t, db, senderID))
+	plans := delivery.snapshot()
+	require.Len(t, plans, 1, "the matching forced plan must retain conservative recovery")
+	assert.Equal(t, forced.Operation.ID, plans[0].OperationID)
+	assert.Equal(t, DeliveryConservativeReset, plans[0].Mode)
+}
+
+func TestCompleteClaimPreDeliveryRecoveryResetsVersionIncoherentClear(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	senderID := testhelpers.CreateUser(t, db)
+	oldOperationID := uuid.New()
+	newOperationID := uuid.New()
+	seedTask8Pending(t, db, senderID, newOperationID, newOperationID, 4, false, CustomTextState{})
+	_, err := db.Exec(`
+		UPDATE user_presence_settings
+		SET presence_settings_version = presence_settings_version + 1
+		WHERE user_id = $1
+	`, senderID)
+	require.NoError(t, err)
+	delivery := &task8Delivery{}
+	service := NewService(db, DisclosureState{}, false)
+	require.NoError(t, service.BindDelivery(delivery))
+
+	completion := service.CompleteClaim(ctx, DeliveryPlan{
+		Mode: DeliveryExactDelta, OperationID: oldOperationID, SenderID: senderID,
+		Payload: &CustomTextState{Text: "old"},
+	})
+	require.Error(t, completion.Err)
+	assert.ErrorContains(t, completion.Err, "marker mismatch")
+	assert.Equal(t, ClaimRecovered, completion.Outcome)
+	assert.Equal(t, newOperationID, task8PendingMarker(t, db, senderID))
+	plans := delivery.snapshot()
+	require.Len(t, plans, 1, "version-incoherent clear must retain fail-closed recovery")
+	assert.Equal(t, oldOperationID, plans[0].OperationID)
+	assert.Equal(t, DeliveryConservativeReset, plans[0].Mode)
+}
+
 func TestCompleteClaimMissingPendingDisconnectsAllAndReturnsFailure(t *testing.T) {
 	db, cleanup := testhelpers.SetupTestDB(t)
 	defer cleanup()
@@ -890,12 +962,13 @@ func TestForcedClearWinsBeforeStaleClaimEnqueueOrdering(t *testing.T) {
 	require.NoError(t, forcedService.CommitTx(forcedTx))
 	assert.Equal(t, forced.Operation.ID, task8PendingMarker(t, db, senderID))
 
-	err = claimService.ClaimAndDeliver(ctx, DeliveryPlan{
+	completion := claimService.CompleteClaim(ctx, DeliveryPlan{
 		Mode: DeliveryExactDelta, OperationID: oldOperationID, SenderID: senderID,
 		Payload: &CustomTextState{Text: "old"},
 	})
-	require.Error(t, err)
-	assert.ErrorContains(t, err, "marker mismatch")
+	require.Error(t, completion.Err)
+	assert.ErrorContains(t, completion.Err, "marker mismatch")
+	assert.Equal(t, ClaimSuperseded, completion.Outcome)
 	assert.Empty(t, delivery.snapshot(), "stale ordinary claim must not enqueue an old update")
 	assert.Equal(t, forced.Operation.ID, task8PendingMarker(t, db, senderID))
 
