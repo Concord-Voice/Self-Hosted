@@ -57,6 +57,48 @@ func TestHandlerStrictSettingsDecoder(t *testing.T) {
 	}
 }
 
+func TestHandlerRegisterRoutesRelativeWithReadAndMutationLimiters(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	router := gin.New()
+	users := router.Group("/api/v1/users")
+	readLimiter := func(c *gin.Context) {
+		c.Header("X-Test-Limiter", "read-30")
+		c.AbortWithStatus(http.StatusNoContent)
+	}
+	mutationLimiter := func(c *gin.Context) {
+		c.Header("X-Test-Limiter", "mutation-10")
+		c.AbortWithStatus(http.StatusAccepted)
+	}
+	NewHandler(nil).RegisterRoutes(users, readLimiter, mutationLimiter)
+
+	wants := []struct {
+		method  string
+		path    string
+		status  int
+		limiter string
+	}{
+		{method: http.MethodGet, path: "/api/v1/users/me/presence-history/settings", status: http.StatusNoContent, limiter: "read-30"},
+		{method: http.MethodPatch, path: "/api/v1/users/me/presence-history/settings", status: http.StatusAccepted, limiter: "mutation-10"},
+		{method: http.MethodGet, path: "/api/v1/users/me/presence-history", status: http.StatusNoContent, limiter: "read-30"},
+		{method: http.MethodDelete, path: "/api/v1/users/me/presence-history", status: http.StatusAccepted, limiter: "mutation-10"},
+	}
+	for _, want := range wants {
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(want.method, want.path, nil))
+		assert.Equal(t, want.status, response.Code, "%s %s", want.method, want.path)
+		assert.Equal(t, want.limiter, response.Header().Get("X-Test-Limiter"))
+	}
+
+	for _, path := range []string{
+		"/api/v1/users/users/me/presence-history/settings",
+		"/api/v1/users/" + uuid.NewString() + "/presence-history/settings",
+	} {
+		response := httptest.NewRecorder()
+		router.ServeHTTP(response, httptest.NewRequest(http.MethodGet, path, nil))
+		assert.Equal(t, http.StatusNotFound, response.Code, path)
+	}
+}
+
 func TestHandlerSelfOnlyRoutesAndNoStoreHistory(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	ts := setupPresenceHistoryTestServer(t)
@@ -149,7 +191,11 @@ func TestHandlerPatchAndMissingSubject(t *testing.T) {
 	assert.Equal(t, http.StatusOK, response.Code)
 
 	missing := gin.New()
-	NewHandler(service).RegisterRoutes(missing.Group("/api/v1"))
+	NewHandler(service).RegisterRoutes(
+		missing.Group("/api/v1/users"),
+		passthroughHistoryMiddleware,
+		passthroughHistoryMiddleware,
+	)
 	missingResponse := httptest.NewRecorder()
 	missing.ServeHTTP(missingResponse, httptest.NewRequest(http.MethodGet,
 		"/api/v1/users/me/presence-history/settings", nil))
@@ -162,6 +208,12 @@ func historyTestRouter(service *Service, userID string) *gin.Engine {
 		c.Set("user_id", userID)
 		c.Next()
 	})
-	NewHandler(service).RegisterRoutes(router.Group("/api/v1"))
+	NewHandler(service).RegisterRoutes(
+		router.Group("/api/v1/users"),
+		passthroughHistoryMiddleware,
+		passthroughHistoryMiddleware,
+	)
 	return router
 }
+
+func passthroughHistoryMiddleware(c *gin.Context) { c.Next() }

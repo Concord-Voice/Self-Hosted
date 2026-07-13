@@ -30,6 +30,7 @@ type plannedPresenceReconciler interface {
 	CompleteClaim(context.Context, presencehistory.DeliveryPlan) presencehistory.ClaimCompletion
 	EmergencyReset(context.Context, presencehistory.DeliveryPlan) error
 	ReconcilePending(context.Context, int) (presencehistory.ReconcileStats, error)
+	ReconcileStaleDisclosure(context.Context) (int64, error)
 	RunPendingReconciler(context.Context)
 	BeginTx(context.Context, *sql.TxOptions) (*sql.Tx, error)
 	CommitTx(*sql.Tx) error

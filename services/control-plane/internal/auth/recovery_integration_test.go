@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/api"
+	"github.com/markdrogersjr/Concord/services/control-plane/internal/presencehistory"
 	"github.com/markdrogersjr/Concord/services/control-plane/internal/testhelpers"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/config"
 	"github.com/markdrogersjr/Concord/services/control-plane/pkg/logger"
@@ -83,28 +84,39 @@ func setupRecoverySMTPFailureTS(t *testing.T, closeDelay time.Duration) *testhel
 		WebAuthnRPOrigins: []string{"http://localhost:3001"},
 	}
 
-	router, hub, natsClient := api.NewRouter(
+	disclosure := presencehistory.BuildDisclosure(presencehistory.DisclosureOptions{InstanceType: "saas"})
+	presenceHistoryService := presencehistory.NewService(
+		db,
+		disclosure,
+		cfg.ActivityHistoryClusterEnabled,
+	)
+	// Dependency cleanup is registered first so LIFO execution shuts down Hub,
+	// then NATS, before Redis/DB.
+	t.Cleanup(func() {
+		redisCleanup()
+		dbCleanup()
+	})
+	router, hub, natsClient, err := api.NewRouter(
 		db,
 		redisClient,
 		nil,
 		cfg,
 		nil,
 		logger.NewWithWriter(io.Discard),
+		presenceHistoryService,
 	)
+	require.NoError(t, err)
 	if natsClient != nil {
 		t.Cleanup(func() { natsClient.Close() })
 	}
 	t.Cleanup(func() { hub.Shutdown() })
-	t.Cleanup(func() {
-		redisCleanup()
-		dbCleanup()
-	})
 
 	return &testhelpers.TestServer{
-		Router: router,
-		Hub:    hub,
-		DB:     db,
-		Redis:  redisClient,
+		Router:          router,
+		Hub:             hub,
+		DB:              db,
+		Redis:           redisClient,
+		PresenceHistory: presenceHistoryService,
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/hex"
+	"fmt"
 	"net/http"
 	"os"
 	"time"
@@ -140,8 +141,30 @@ func publicInviteIconHandler(invitesHandler *invites.Handler, mediaHandler *medi
 	return invitesHandler.GetPublicInviteIconFallback
 }
 
+func bindPresenceHistoryRuntime(
+	hub *websocket.Hub,
+	presenceHistoryService *presencehistory.Service,
+) error {
+	if presenceHistoryService == nil {
+		return fmt.Errorf("presence history service unavailable")
+	}
+	hub.SetPresenceHistoryService(presenceHistoryService)
+	if err := presenceHistoryService.BindDelivery(hub); err != nil {
+		return fmt.Errorf("bind presence history delivery: %w", err)
+	}
+	return nil
+}
+
 // NewRouter creates a new API router and returns the WebSocket hub and NATS client for lifecycle management.
-func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *config.Config, liveSpa *config.LiveSpaConfig, log *logger.Logger) (*gin.Engine, *websocket.Hub, *natsclient.Client) {
+func NewRouter(
+	db *sql.DB,
+	redis *redis.Client,
+	store media.ObjectStore,
+	cfg *config.Config,
+	liveSpa *config.LiveSpaConfig,
+	log *logger.Logger,
+	presenceHistoryService *presencehistory.Service,
+) (*gin.Engine, *websocket.Hub, *natsclient.Client, error) {
 	router := gin.New()
 	configureTrustedProxies(router, cfg, log)
 
@@ -161,15 +184,9 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 
 	// Initialize WebSocket hub
 	hub := websocket.NewHub(db, redis)
-	presenceHistoryService := presencehistory.NewService(
-		db,
-		presencehistory.DisclosureState{},
-		false,
-	)
-	if err := presenceHistoryService.BindDelivery(hub); err != nil {
-		log.Fatal("Failed to bind Custom Status delivery", "error_class", "delivery_binding")
+	if err := bindPresenceHistoryRuntime(hub, presenceHistoryService); err != nil {
+		return nil, nil, nil, err
 	}
-	hub.SetPresenceHistoryService(presenceHistoryService)
 
 	// Initialize NATS (inter-service messaging with media plane)
 	var natsClient *natsclient.Client
@@ -198,8 +215,6 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	hub.SetMentionChecker(permissionChecker)
 	hub.SetChannelPermissionChecker(permissionChecker)
 
-	// Start hub AFTER all dependencies are injected (avoids data races on checkers)
-	go hub.Run()
 	auditWriter := rbac.NewAuditWriter(db, log)
 	rbacHandler := rbac.NewHandler(db, log, redis, hub, rbacResolver, permCache, auditWriter)
 	// Mid-session voice permission push (CV-CAN-007 review P1): permission
@@ -227,6 +242,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	sessionsHandler := sessions.NewHandler(db, redis, log, hub, mfaHandler)
 	usersHandler := users.NewHandler(db, log, hub, mfaHandler, entCache)
 	usersHandler.SetPresenceHistory(presenceHistoryService)
+	presenceHistoryHandler := presencehistory.NewHandler(presenceHistoryService)
 	serversHandler := servers.NewHandler(db, log, hub, rbacResolver, entCache, serverEntCache)
 	channelsHandler := channels.NewHandler(db, log, hub, rbacResolver, redis, serverEntCache)
 	membersHandler := members.NewHandler(db, log, redis, hub, rbacResolver, auditWriter)
@@ -1003,6 +1019,11 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 				userRoutes.PUT("/me/presence-overrides/:category",
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					usersHandler.ReplacePresenceOverrides,
+				)
+				presenceHistoryHandler.RegisterRoutes(
+					userRoutes,
+					middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 				)
 
 				// SSO settings (issue #270)
@@ -1929,7 +1950,9 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 	// Host/path gating of this surface is #1692/#1693.
 	wireAdminRoutes(router, db, redis, cfg, log)
 
-	return router, hub, natsClient
+	// Start only after every dependency and route has been injected.
+	go hub.Run()
+	return router, hub, natsClient, nil
 }
 
 // healthHandler responds with 200 + control-plane health JSON. Registered

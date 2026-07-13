@@ -77,6 +77,57 @@ func NewService(db *sql.DB, disclosure DisclosureState, activationEnabled bool) 
 	}
 }
 
+const reconcileUnavailableDisclosureSQL = `
+	UPDATE user_presence_settings
+	SET activity_history_enabled = FALSE,
+	    activity_history_consent_version = NULL,
+	    activity_history_consent_copy_hash = NULL,
+	    activity_history_consented_at = NULL,
+	    activity_history_reconsent_required = TRUE,
+	    updated_at = clock_timestamp()
+	WHERE activity_history_enabled = TRUE
+`
+
+const reconcileChangedDisclosureSQL = reconcileUnavailableDisclosureSQL + `
+	  AND (
+	      activity_history_consent_version IS DISTINCT FROM $1
+	      OR activity_history_consent_copy_hash IS DISTINCT FROM $2
+	  )
+`
+
+// ReconcileStaleDisclosure atomically pauses enabled rows whose accepted
+// disclosure is no longer current. It intentionally preserves history and
+// retention cutoffs so users can still read or delete existing data.
+func (s *Service) ReconcileStaleDisclosure(ctx context.Context) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, errors.New("activity history disclosure reconciliation unavailable")
+	}
+
+	var (
+		result sql.Result
+		err    error
+	)
+	if s.disclosure.Available && s.disclosure.RequiredConsent != nil {
+		consent := s.disclosure.RequiredConsent
+		result, err = s.db.ExecContext(
+			ctx,
+			reconcileChangedDisclosureSQL,
+			consent.Version,
+			consent.CopyHash,
+		)
+	} else {
+		result, err = s.db.ExecContext(ctx, reconcileUnavailableDisclosureSQL)
+	}
+	if err != nil {
+		return 0, fmt.Errorf("reconcile stale activity history disclosure: %w", err)
+	}
+	paused, err := result.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("count paused activity history settings: %w", err)
+	}
+	return paused, nil
+}
+
 // TransactionTestHooks injects database/sql transaction faults in tests. Empty
 // functions retain the production behavior.
 type TransactionTestHooks struct {

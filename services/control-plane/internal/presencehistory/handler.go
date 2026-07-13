@@ -23,13 +23,18 @@ type Handler struct {
 // NewHandler constructs an Activity History HTTP handler.
 func NewHandler(service *Service) *Handler { return &Handler{service: service} }
 
-// RegisterRoutes mounts the fixed self-only route surface.
-func (h *Handler) RegisterRoutes(api *gin.RouterGroup) {
-	history := api.Group("/users/me/presence-history")
-	history.GET("/settings", h.getSettings)
-	history.PATCH("/settings", h.updateSettings)
-	history.GET("", h.list)
-	history.DELETE("", h.disableAndDelete)
+// RegisterRoutes mounts the fixed self-only route surface relative to the
+// authenticated /users group, with distinct read and mutation limits.
+func (h *Handler) RegisterRoutes(
+	users *gin.RouterGroup,
+	readLimiter gin.HandlerFunc,
+	mutationLimiter gin.HandlerFunc,
+) {
+	history := users.Group("/me/presence-history")
+	history.GET("/settings", readLimiter, h.getSettings)
+	history.PATCH("/settings", mutationLimiter, h.updateSettings)
+	history.GET("", readLimiter, h.list)
+	history.DELETE("", mutationLimiter, h.disableAndDelete)
 }
 
 // DecodeUpdateSettingsRequest strictly decodes a presence-aware PATCH body.
