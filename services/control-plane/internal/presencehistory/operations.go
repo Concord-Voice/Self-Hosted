@@ -73,10 +73,13 @@ type DeliveryAck struct {
 	OperationID uuid.UUID
 }
 
-// Delivery performs bounded Custom Status delivery and returns its exact ack.
-type Delivery interface {
+// CustomTextDeliverer performs bounded Custom Status delivery and returns its exact ack.
+type CustomTextDeliverer interface {
 	DeliverCustomText(context.Context, DeliveryPlan) (DeliveryAck, error)
 }
+
+// Delivery preserves the original exported name for existing callers.
+type Delivery = CustomTextDeliverer
 
 // CommitOutcome classifies an ambiguous main-transaction commit.
 type CommitOutcome uint8

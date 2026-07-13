@@ -199,6 +199,7 @@ func (s *Service) claimAndDeliver(ctx context.Context, plan DeliveryPlan) (outco
 	if tx == nil {
 		return ClaimPreDeliveryFailed, errors.New("begin presence delivery claim: missing transaction")
 	}
+	defer tx.Rollback() //nolint:errcheck
 	defer s.joinTransactionRollback(tx, "presence_delivery_claim", &returnErr)
 
 	if err := lockUser(ctx, tx, plan.SenderID); err != nil {
@@ -289,6 +290,7 @@ func (s *Service) recoverPreDeliveryClaim(
 			errors.Join(cause, errors.New("begin presence claim recovery: missing transaction")),
 		)
 	}
+	defer tx.Rollback() //nolint:errcheck
 	defer s.joinTransactionRollback(tx, "presence_pre_delivery_recovery", &completion.Err)
 	if err := lockUser(ctx, tx, plan.SenderID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -402,6 +404,7 @@ func (s *Service) ensureClaimQuarantine(
 	if tx == nil {
 		return claimCommitUnresolved, errors.New("missing quarantine repair transaction")
 	}
+	defer tx.Rollback() //nolint:errcheck
 	defer s.joinTransactionRollback(tx, "presence_claim_quarantine_repair", &returnErr)
 	repairState, needsInsert, err := inspectClaimQuarantine(repairCtx, tx, plan, prior)
 	if err != nil || !needsInsert {
@@ -702,6 +705,7 @@ func (s *Service) reconcileSenderAlreadyGated(
 	if tx == nil {
 		return reconcileResult{retained: true}, errors.New("begin presence reconciliation: missing transaction")
 	}
+	defer tx.Rollback() //nolint:errcheck
 	defer s.joinTransactionRollback(tx, "presence_reconciliation", &returnErr)
 
 	settings, pending, alreadyResolved, err := lockReconcileState(ctx, tx, senderID)

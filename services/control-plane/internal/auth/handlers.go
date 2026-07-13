@@ -2277,6 +2277,7 @@ func (h *Handler) execRecoveryTx(
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsg})
 		return result, err
 	}
+	defer tx.Rollback() //nolint:errcheck
 	defer func() {
 		if rbErr := h.presenceHistory.RollbackTx(tx); rbErr != nil && rbErr != sql.ErrTxDone {
 			returnErr = errors.Join(returnErr, rbErr)

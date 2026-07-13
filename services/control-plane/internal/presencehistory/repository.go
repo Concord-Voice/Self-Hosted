@@ -104,81 +104,22 @@ func (r *Repository) List(
 	senderID uuid.UUID,
 	options ListOptions,
 ) (HistoryPage, error) {
-	limit := options.Limit
-	if limit == 0 {
-		limit = defaultPageLimit
+	limit, err := normalizeListOptions(options)
+	if err != nil {
+		return HistoryPage{}, err
 	}
-	if limit < 1 || limit > maxPageLimit {
-		return HistoryPage{}, ErrInvalidListOptions
-	}
-
-	var (
-		rows *sql.Rows
-		err  error
-	)
-	if options.Before == nil {
-		rows, err = r.db.QueryContext(ctx, `
-			SELECT id, category, payload_version, payload,
-			       started_at, ended_at, recorded_at, expires_at
-			FROM presence_history
-			WHERE sender_id = $1
-			  AND expires_at > clock_timestamp()
-			ORDER BY recorded_at DESC, id DESC
-			LIMIT $2
-		`, senderID, limit+1)
-	} else {
-		if options.Before.Version != 1 || options.Before.RecordedAt.IsZero() || options.Before.ID == uuid.Nil {
-			return HistoryPage{}, ErrInvalidListOptions
-		}
-		rows, err = r.db.QueryContext(ctx, `
-			SELECT id, category, payload_version, payload,
-			       started_at, ended_at, recorded_at, expires_at
-			FROM presence_history
-			WHERE sender_id = $1
-			  AND (recorded_at, id) < ($2, $3)
-			  AND expires_at > clock_timestamp()
-			ORDER BY recorded_at DESC, id DESC
-			LIMIT $4
-		`, senderID, options.Before.RecordedAt, options.Before.ID, limit+1)
-	}
+	rows, err := r.queryHistoryRows(ctx, senderID, options.Before, limit+1)
 	if err != nil {
 		return HistoryPage{}, fmt.Errorf("list activity history: %w", err)
 	}
 
-	items := make([]HistoryItem, 0, limit+1)
-	unsupportedCount := 0
-	for rows.Next() {
-		item, err := scanHistoryItem(rows)
-		if err != nil {
-			return HistoryPage{}, closeListRowsWithError(rows, err)
-		}
-		if item.Status == ItemStatusUnsupported {
-			unsupportedCount++
-		}
-		items = append(items, item)
+	items, unsupportedCount, err := readHistoryItems(rows, limit+1)
+	if err != nil {
+		return HistoryPage{}, err
 	}
-	if err := rows.Err(); err != nil {
-		return HistoryPage{}, closeListRowsWithError(
-			rows,
-			fmt.Errorf("list activity history rows: %w", err),
-		)
-	}
-
-	hasMore := len(items) > limit
-	if hasMore {
-		items = items[:limit]
-	}
-	page := HistoryPage{Items: items}
-	if hasMore {
-		last := items[len(items)-1]
-		encoded, err := EncodeCursor(PageCursor{Version: 1, RecordedAt: last.RecordedAt, ID: last.ID})
-		if err != nil {
-			return HistoryPage{}, closeListRowsWithError(
-				rows,
-				fmt.Errorf("encode activity history page boundary: %w", err),
-			)
-		}
-		page.NextCursor = &encoded
+	page, err := buildHistoryPage(items, limit)
+	if err != nil {
+		return HistoryPage{}, closeListRowsWithError(rows, err)
 	}
 	if err := rows.Close(); err != nil {
 		return HistoryPage{}, fmt.Errorf("close activity history rows: %w", err)
@@ -192,6 +133,85 @@ func (r *Repository) List(
 		)
 	}
 	return page, nil
+}
+
+func normalizeListOptions(options ListOptions) (int, error) {
+	limit := options.Limit
+	if limit == 0 {
+		limit = defaultPageLimit
+	}
+	if limit < 1 || limit > maxPageLimit {
+		return 0, ErrInvalidListOptions
+	}
+	if options.Before != nil &&
+		(options.Before.Version != 1 || options.Before.RecordedAt.IsZero() || options.Before.ID == uuid.Nil) {
+		return 0, ErrInvalidListOptions
+	}
+	return limit, nil
+}
+
+func (r *Repository) queryHistoryRows(
+	ctx context.Context,
+	senderID uuid.UUID,
+	before *PageCursor,
+	limit int,
+) (*sql.Rows, error) {
+	if before == nil {
+		return r.db.QueryContext(ctx, `
+			SELECT id, category, payload_version, payload,
+			       started_at, ended_at, recorded_at, expires_at
+			FROM presence_history
+			WHERE sender_id = $1
+			  AND expires_at > clock_timestamp()
+			ORDER BY recorded_at DESC, id DESC
+			LIMIT $2
+		`, senderID, limit)
+	}
+	return r.db.QueryContext(ctx, `
+		SELECT id, category, payload_version, payload,
+		       started_at, ended_at, recorded_at, expires_at
+		FROM presence_history
+		WHERE sender_id = $1
+		  AND (recorded_at, id) < ($2, $3)
+		  AND expires_at > clock_timestamp()
+		ORDER BY recorded_at DESC, id DESC
+		LIMIT $4
+	`, senderID, before.RecordedAt, before.ID, limit)
+}
+
+func readHistoryItems(rows *sql.Rows, capacity int) ([]HistoryItem, int, error) {
+	items := make([]HistoryItem, 0, capacity)
+	unsupportedCount := 0
+	for rows.Next() {
+		item, err := scanHistoryItem(rows)
+		if err != nil {
+			return nil, 0, closeListRowsWithError(rows, err)
+		}
+		if item.Status == ItemStatusUnsupported {
+			unsupportedCount++
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, closeListRowsWithError(
+			rows,
+			fmt.Errorf("list activity history rows: %w", err),
+		)
+	}
+	return items, unsupportedCount, nil
+}
+
+func buildHistoryPage(items []HistoryItem, limit int) (HistoryPage, error) {
+	if len(items) <= limit {
+		return HistoryPage{Items: items}, nil
+	}
+	items = items[:limit]
+	last := items[len(items)-1]
+	encoded, err := EncodeCursor(PageCursor{Version: 1, RecordedAt: last.RecordedAt, ID: last.ID})
+	if err != nil {
+		return HistoryPage{}, fmt.Errorf("encode activity history page boundary: %w", err)
+	}
+	return HistoryPage{Items: items, NextCursor: &encoded}, nil
 }
 
 func closeListRowsWithError(rows *sql.Rows, cause error) error {

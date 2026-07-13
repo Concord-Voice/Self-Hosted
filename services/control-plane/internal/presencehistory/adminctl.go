@@ -465,6 +465,7 @@ func (controller *adminCtlController) disableOneTransaction(
 	if tx == nil {
 		return result, errors.New("activity history disable transaction unavailable")
 	}
+	defer tx.Rollback() //nolint:errcheck
 	committed := false
 	defer func() {
 		returnErr = controller.finishAdminCtlTransaction(tx, committed, returnErr)
@@ -535,7 +536,7 @@ func lockAdminCtlSettings(ctx context.Context, tx *sql.Tx, ownerID uuid.UUID) (a
 	return adminCtlSettingsLock{present: true, markerPresent: marker.Valid}, nil
 }
 
-func adminCtlMustForceOff(_ bool, pendingPresent bool) bool {
+func adminCtlMustForceOff(_, pendingPresent bool) bool {
 	return pendingPresent
 }
 

@@ -18,6 +18,7 @@ const (
 	exactDowngradeSourceURL = "file://migrations"
 	exactDowngradeFrom      = 85
 	exactDowngradeTo        = 84
+	postgresPoolOwner       = "PostgreSQL pool"
 )
 
 var (
@@ -122,7 +123,7 @@ func newExactMigration(sourceDriver source.Driver, databaseDriver migratedatabas
 func openDedicatedMigrationDatabase(databaseURL string) (migratedatabase.Driver, error) {
 	pool, err := sql.Open("postgres", databaseURL)
 	if err != nil {
-		return nil, fmt.Errorf("open PostgreSQL pool: %w", err)
+		return nil, fmt.Errorf("open %s: %w", postgresPoolOwner, err)
 	}
 
 	ctx := context.Background()
@@ -130,7 +131,7 @@ func openDedicatedMigrationDatabase(databaseURL string) (migratedatabase.Driver,
 	if err != nil {
 		return nil, errors.Join(
 			fmt.Errorf("open dedicated PostgreSQL connection: %w", err),
-			exactCloseError("PostgreSQL pool", pool.Close()),
+			exactCloseError(postgresPoolOwner, pool.Close()),
 		)
 	}
 
@@ -139,7 +140,7 @@ func openDedicatedMigrationDatabase(databaseURL string) (migratedatabase.Driver,
 		return nil, errors.Join(
 			fmt.Errorf("construct PostgreSQL migration driver: %w", err),
 			exactCloseError("PostgreSQL connection", connection.Close()),
-			exactCloseError("PostgreSQL pool", pool.Close()),
+			exactCloseError(postgresPoolOwner, pool.Close()),
 		)
 	}
 	return &ownedMigrationDatabase{Driver: driver, pool: pool}, nil
@@ -148,7 +149,7 @@ func openDedicatedMigrationDatabase(databaseURL string) (migratedatabase.Driver,
 func (d *ownedMigrationDatabase) Close() error {
 	return errors.Join(
 		exactCloseError("PostgreSQL migration driver", d.Driver.Close()),
-		exactCloseError("PostgreSQL pool", d.pool.Close()),
+		exactCloseError(postgresPoolOwner, d.pool.Close()),
 	)
 }
 

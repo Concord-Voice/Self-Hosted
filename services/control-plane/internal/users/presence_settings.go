@@ -206,6 +206,10 @@ func (h *Handler) writePresenceSettings(
 	if err != nil {
 		return result, &presenceWriterFailure{status: 500, class: "begin", cause: err}
 	}
+	if tx == nil {
+		return result, &presenceWriterFailure{status: 500, class: "begin", cause: errors.New("presence settings transaction missing")}
+	}
+	defer tx.Rollback() //nolint:errcheck
 	defer h.joinPresenceWriterRollback(tx, &returnErr)
 
 	operation, err := h.presenceHistory.BeginAudienceOperation(

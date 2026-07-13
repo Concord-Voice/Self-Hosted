@@ -88,7 +88,15 @@ const reconcileUnavailableDisclosureSQL = `
 	WHERE activity_history_enabled = TRUE
 `
 
-const reconcileChangedDisclosureSQL = reconcileUnavailableDisclosureSQL + `
+const reconcileChangedDisclosureSQL = `
+	UPDATE user_presence_settings
+	SET activity_history_enabled = FALSE,
+	    activity_history_consent_version = NULL,
+	    activity_history_consent_copy_hash = NULL,
+	    activity_history_consented_at = NULL,
+	    activity_history_reconsent_required = TRUE,
+	    updated_at = clock_timestamp()
+	WHERE activity_history_enabled = TRUE
 	  AND (
 	      activity_history_consent_version IS DISTINCT FROM $1
 	      OR activity_history_consent_copy_hash IS DISTINCT FROM $2
@@ -142,7 +150,9 @@ type TransactionTestHooks struct {
 // restore function is called. It is intended only for deterministic tests.
 func (s *Service) SetTransactionTestHooks(hooks TransactionTestHooks) func() {
 	if s == nil {
-		return func() {}
+		return func() {
+			// A nil receiver has no transaction hooks to restore.
+		}
 	}
 	s.transactionMu.Lock()
 	previous := s.transactionHooks
@@ -265,6 +275,7 @@ func (s *Service) UpdateSettings(
 	if err != nil {
 		return SettingsResponse{}, fmt.Errorf("begin activity history settings update: %w", err)
 	}
+	defer tx.Rollback() //nolint:errcheck
 	defer joinRollbackError(tx, "rollback activity history settings update", &returnErr)
 
 	settings, err := lockUserAndSettings(ctx, tx, userID)
@@ -284,29 +295,8 @@ func (s *Service) UpdateSettings(
 		return SettingsResponse{}, fmt.Errorf("read activity history reconsent state: %w", err)
 	}
 
-	if action == settingsActionEnable {
-		if *request.RetentionDays != settings.RetentionDays {
-			if err := updateRetention(
-				ctx,
-				tx,
-				userID,
-				settings.RetentionDays,
-				*request.RetentionDays,
-				false,
-			); err != nil {
-				return SettingsResponse{}, err
-			}
-		}
-		if err := s.enableWithConsent(ctx, tx, userID, request); err != nil {
-			return SettingsResponse{}, err
-		}
-	} else if err := updateRetention(
-		ctx,
-		tx,
-		userID,
-		settings.RetentionDays,
-		*request.RetentionDays,
-		reconsentRequired,
+	if err := s.applySettingsAction(
+		ctx, tx, userID, request, action, settings.RetentionDays, reconsentRequired,
 	); err != nil {
 		return SettingsResponse{}, err
 	}
@@ -344,6 +334,7 @@ func (s *Service) List(
 	if err != nil {
 		return HistoryPage{}, fmt.Errorf("begin activity history read prune: %w", err)
 	}
+	defer tx.Rollback() //nolint:errcheck
 	defer joinRollbackError(tx, "rollback activity history read prune", &returnErr)
 	if err := lockUser(ctx, tx, userID); err != nil {
 		return HistoryPage{}, err
@@ -377,6 +368,7 @@ func (s *Service) DisableAndDelete(ctx context.Context, userID uuid.UUID) (retur
 	if err != nil {
 		return fmt.Errorf("begin activity history disable: %w", err)
 	}
+	defer tx.Rollback() //nolint:errcheck
 	defer joinRollbackError(tx, "rollback activity history disable", &returnErr)
 	if err := lockUser(ctx, tx, userID); err != nil {
 		return err
@@ -420,40 +412,68 @@ const (
 )
 
 func (s *Service) validateUpdate(request UpdateSettingsRequest) (settingsAction, error) {
-	if request.Enabled != nil && !*request.Enabled {
+	if request.Enabled != nil {
+		if *request.Enabled {
+			return s.validateEnableUpdate(request)
+		}
 		if request.RetentionDays != nil || request.Acknowledged != nil ||
 			request.ConsentVersion != nil || request.ConsentCopyHash != nil {
 			return 0, invalidRequestError()
 		}
 		return settingsActionDisable, nil
 	}
-	if request.Enabled != nil && *request.Enabled {
-		if request.RetentionDays == nil || request.Acknowledged == nil || !*request.Acknowledged ||
-			request.ConsentVersion == nil || request.ConsentCopyHash == nil ||
-			!validRetention(*request.RetentionDays) || !lowercaseSHA256.MatchString(*request.ConsentCopyHash) {
-			return 0, invalidRequestError()
-		}
-		if !s.activationEnabled {
-			return 0, &ServiceError{Status: http.StatusServiceUnavailable, Code: "activity_history_activation_unavailable"}
-		}
-		if !s.disclosure.Available || s.disclosure.RequiredConsent == nil {
-			return 0, &ServiceError{Status: http.StatusServiceUnavailable, Code: "activity_history_disclosure_unavailable"}
-		}
-		current := s.disclosure.RequiredConsent
-		if *request.ConsentVersion != current.Version || *request.ConsentCopyHash != current.CopyHash {
-			return 0, &ServiceError{
-				Status:     http.StatusConflict,
-				Code:       "activity_history_consent_mismatch",
-				Disclosure: cloneRequiredConsent(current),
-			}
-		}
-		return settingsActionEnable, nil
-	}
-	if request.Enabled == nil && request.RetentionDays != nil && request.Acknowledged == nil &&
+	if request.RetentionDays != nil && request.Acknowledged == nil &&
 		request.ConsentVersion == nil && request.ConsentCopyHash == nil && validRetention(*request.RetentionDays) {
 		return settingsActionRetention, nil
 	}
 	return 0, invalidRequestError()
+}
+
+func (s *Service) validateEnableUpdate(request UpdateSettingsRequest) (settingsAction, error) {
+	if request.RetentionDays == nil || request.Acknowledged == nil || !*request.Acknowledged ||
+		request.ConsentVersion == nil || request.ConsentCopyHash == nil ||
+		!validRetention(*request.RetentionDays) || !lowercaseSHA256.MatchString(*request.ConsentCopyHash) {
+		return 0, invalidRequestError()
+	}
+	if !s.activationEnabled {
+		return 0, &ServiceError{Status: http.StatusServiceUnavailable, Code: "activity_history_activation_unavailable"}
+	}
+	if !s.disclosure.Available || s.disclosure.RequiredConsent == nil {
+		return 0, &ServiceError{Status: http.StatusServiceUnavailable, Code: "activity_history_disclosure_unavailable"}
+	}
+	current := s.disclosure.RequiredConsent
+	if *request.ConsentVersion != current.Version || *request.ConsentCopyHash != current.CopyHash {
+		return 0, &ServiceError{
+			Status:     http.StatusConflict,
+			Code:       "activity_history_consent_mismatch",
+			Disclosure: cloneRequiredConsent(current),
+		}
+	}
+	return settingsActionEnable, nil
+}
+
+func (s *Service) applySettingsAction(
+	ctx context.Context,
+	tx *sql.Tx,
+	userID uuid.UUID,
+	request UpdateSettingsRequest,
+	action settingsAction,
+	currentRetention int16,
+	reconsentRequired bool,
+) error {
+	if action == settingsActionEnable {
+		if *request.RetentionDays != currentRetention {
+			if err := updateRetention(
+				ctx, tx, userID, currentRetention, *request.RetentionDays, false,
+			); err != nil {
+				return err
+			}
+		}
+		return s.enableWithConsent(ctx, tx, userID, request)
+	}
+	return updateRetention(
+		ctx, tx, userID, currentRetention, *request.RetentionDays, reconsentRequired,
+	)
 }
 
 func (s *Service) enableWithConsent(

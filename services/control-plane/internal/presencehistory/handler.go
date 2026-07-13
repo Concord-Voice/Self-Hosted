@@ -59,40 +59,41 @@ func DecodeUpdateSettingsRequest(reader io.Reader) (UpdateSettingsRequest, error
 		if bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			return UpdateSettingsRequest{}, invalidRequestError()
 		}
-		switch name {
-		case "enabled":
-			var decoded bool
-			if err := json.Unmarshal(value, &decoded); err != nil {
-				return UpdateSettingsRequest{}, invalidRequestError()
-			}
-			request.Enabled = &decoded
-		case "retention_days":
-			var decoded int16
-			if err := json.Unmarshal(value, &decoded); err != nil {
-				return UpdateSettingsRequest{}, invalidRequestError()
-			}
-			request.RetentionDays = &decoded
-		case "acknowledged":
-			var decoded bool
-			if err := json.Unmarshal(value, &decoded); err != nil {
-				return UpdateSettingsRequest{}, invalidRequestError()
-			}
-			request.Acknowledged = &decoded
-		case "consent_version":
-			var decoded int16
-			if err := json.Unmarshal(value, &decoded); err != nil {
-				return UpdateSettingsRequest{}, invalidRequestError()
-			}
-			request.ConsentVersion = &decoded
-		case "consent_copy_hash":
-			var decoded string
-			if err := json.Unmarshal(value, &decoded); err != nil {
-				return UpdateSettingsRequest{}, invalidRequestError()
-			}
-			request.ConsentCopyHash = &decoded
+		if err := decodeUpdateSettingsField(&request, name, value); err != nil {
+			return UpdateSettingsRequest{}, err
 		}
 	}
 	return request, nil
+}
+
+func decodeUpdateSettingsField(
+	request *UpdateSettingsRequest,
+	name string,
+	value json.RawMessage,
+) error {
+	switch name {
+	case "enabled":
+		return decodeSettingsValue(value, &request.Enabled)
+	case "retention_days":
+		return decodeSettingsValue(value, &request.RetentionDays)
+	case "acknowledged":
+		return decodeSettingsValue(value, &request.Acknowledged)
+	case "consent_version":
+		return decodeSettingsValue(value, &request.ConsentVersion)
+	case "consent_copy_hash":
+		return decodeSettingsValue(value, &request.ConsentCopyHash)
+	default:
+		return invalidRequestError()
+	}
+}
+
+func decodeSettingsValue[T any](raw json.RawMessage, target **T) error {
+	var value T
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return invalidRequestError()
+	}
+	*target = &value
+	return nil
 }
 
 func (h *Handler) getSettings(c *gin.Context) {

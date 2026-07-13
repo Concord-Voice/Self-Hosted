@@ -610,8 +610,8 @@ func TestRecoveryForcedClearTransactionInfrastructureFailures(t *testing.T) {
 		workErr := errors.New("recovery work failed")
 		rollbackErr := errors.New("recovery rollback failed")
 		restore := service.SetTransactionTestHooks(presencehistory.TransactionTestHooks{
-			Begin: func(context.Context, *sql.TxOptions) (*sql.Tx, error) {
-				return &sql.Tx{}, nil
+			Begin: func(ctx context.Context, options *sql.TxOptions) (*sql.Tx, error) {
+				return db.BeginTx(ctx, options)
 			},
 			Rollback: func(*sql.Tx) error { return rollbackErr },
 		})

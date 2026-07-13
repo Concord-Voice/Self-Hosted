@@ -3,6 +3,7 @@ package presencehistory
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"unicode/utf8"
@@ -107,18 +108,30 @@ func decodeExactJSONObject(raw []byte, allowedKeys ...string) (map[string]json.R
 	}
 
 	decoder := json.NewDecoder(bytes.NewReader(raw))
-	token, err := decoder.Token()
+	if err := requireJSONDelimiter(decoder, '{', "expected JSON object"); err != nil {
+		return nil, err
+	}
+	fields, err := decodeJSONObjectFields(decoder, allowed, len(allowedKeys))
 	if err != nil {
 		return nil, err
 	}
-	delimiter, ok := token.(json.Delim)
-	if !ok || delimiter != '{' {
-		return nil, fmt.Errorf("expected JSON object")
+	if err := requireJSONDelimiter(decoder, '}', "expected end of JSON object"); err != nil {
+		return nil, err
 	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return nil, err
+	}
+	return fields, nil
+}
 
-	fields := make(map[string]json.RawMessage, len(allowedKeys))
+func decodeJSONObjectFields(
+	decoder *json.Decoder,
+	allowed map[string]struct{},
+	capacity int,
+) (map[string]json.RawMessage, error) {
+	fields := make(map[string]json.RawMessage, capacity)
 	for decoder.More() {
-		token, err = decoder.Token()
+		token, err := decoder.Token()
 		if err != nil {
 			return nil, err
 		}
@@ -138,19 +151,19 @@ func decodeExactJSONObject(raw []byte, allowedKeys ...string) (map[string]json.R
 		}
 		fields[key] = value
 	}
-
-	token, err = decoder.Token()
-	if err != nil {
-		return nil, err
-	}
-	delimiter, ok = token.(json.Delim)
-	if !ok || delimiter != '}' {
-		return nil, fmt.Errorf("expected end of JSON object")
-	}
-	if err := requireJSONEOF(decoder); err != nil {
-		return nil, err
-	}
 	return fields, nil
+}
+
+func requireJSONDelimiter(decoder *json.Decoder, expected json.Delim, message string) error {
+	token, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delimiter, ok := token.(json.Delim)
+	if !ok || delimiter != expected {
+		return errors.New(message)
+	}
+	return nil
 }
 
 func requireJSONEOF(decoder *json.Decoder) error {

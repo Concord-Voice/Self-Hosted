@@ -76,40 +76,60 @@ func (w *RetentionWorker) Sweep(ctx context.Context) (stats SweepStats, returnEr
 	stats.OldestExpiredAge = oldestAge
 
 	for {
-		var deletedThisPass int64
-		var after *uuid.UUID
-		for {
-			owners, err := w.discoverExpiredOwners(ctx, after)
-			if err != nil {
-				return stats, err
-			}
-			if len(owners) > 0 {
-				stats.OwnerBatchCount++
-			}
-			for _, ownerID := range owners {
-				for {
-					deleted, err := w.deleteExpiredOwnerBatch(ctx, ownerID)
-					if err != nil {
-						return stats, err
-					}
-					if deleted > 0 {
-						stats.BatchCount++
-						stats.RowsDeleted += int64(deleted)
-						deletedThisPass += int64(deleted)
-					}
-					if deleted < retentionRowBatch {
-						break
-					}
-				}
-			}
-			if len(owners) < retentionOwnerBatch {
-				break
-			}
-			last := owners[len(owners)-1]
-			after = &last
+		deleted, err := w.sweepExpiredPass(ctx, &stats)
+		if err != nil {
+			return stats, err
 		}
-		if deletedThisPass == 0 {
+		if deleted == 0 {
 			return stats, nil
+		}
+	}
+}
+
+func (w *RetentionWorker) sweepExpiredPass(ctx context.Context, stats *SweepStats) (int64, error) {
+	var (
+		deletedThisPass int64
+		after           *uuid.UUID
+	)
+	for {
+		owners, err := w.discoverExpiredOwners(ctx, after)
+		if err != nil {
+			return 0, err
+		}
+		if len(owners) > 0 {
+			stats.OwnerBatchCount++
+		}
+		for _, ownerID := range owners {
+			if err := w.sweepExpiredOwner(ctx, ownerID, stats, &deletedThisPass); err != nil {
+				return 0, err
+			}
+		}
+		if len(owners) < retentionOwnerBatch {
+			return deletedThisPass, nil
+		}
+		last := owners[len(owners)-1]
+		after = &last
+	}
+}
+
+func (w *RetentionWorker) sweepExpiredOwner(
+	ctx context.Context,
+	ownerID uuid.UUID,
+	stats *SweepStats,
+	deletedThisPass *int64,
+) error {
+	for {
+		deleted, err := w.deleteExpiredOwnerBatch(ctx, ownerID)
+		if err != nil {
+			return err
+		}
+		if deleted > 0 {
+			stats.BatchCount++
+			stats.RowsDeleted += int64(deleted)
+			*deletedThisPass += int64(deleted)
+		}
+		if deleted < retentionRowBatch {
+			return nil
 		}
 	}
 }
@@ -191,48 +211,26 @@ func (w *RetentionWorker) deleteExpiredOwnerBatch(
 		return 0, fmt.Errorf("begin activity cleanup owner: %w", err)
 	}
 	committed := false
-	defer func() {
-		if committed {
-			return
-		}
-		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-			wrapped := fmt.Errorf("rollback activity cleanup owner: %w", rollbackErr)
-			if returnErr == nil {
-				returnErr = wrapped
-			} else {
-				returnErr = errors.Join(returnErr, wrapped)
-			}
-		}
-	}()
+	defer mergeRetentionRollback(tx, &committed, &returnErr)
 
 	if w.hooks.afterOwnerBegin != nil {
 		w.hooks.afterOwnerBegin(ownerID)
 	}
 
-	var lockedID uuid.UUID
-	if err := tx.QueryRowContext(ctx, `
-		SELECT id
-		FROM users
-		WHERE id = $1
-		FOR NO KEY UPDATE
-	`, ownerID).Scan(&lockedID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			if err := tx.Commit(); err != nil {
-				return 0, fmt.Errorf("commit missing activity cleanup owner: %w", err)
-			}
-			committed = true
-			return 0, nil
+	ownerExists, err := lockRetentionOwner(ctx, tx, ownerID)
+	if err != nil {
+		return 0, err
+	}
+	if !ownerExists {
+		if err := tx.Commit(); err != nil {
+			return 0, fmt.Errorf("commit missing activity cleanup owner: %w", err)
 		}
-		return 0, fmt.Errorf("lock activity cleanup owner: %w", err)
+		committed = true
+		return 0, nil
 	}
 
-	if err := tx.QueryRowContext(ctx, `
-		SELECT user_id
-		FROM user_presence_settings
-		WHERE user_id = $1
-		FOR UPDATE
-	`, ownerID).Scan(&lockedID); err != nil {
-		return 0, fmt.Errorf("lock activity cleanup settings: %w", err)
+	if err := lockRetentionSettings(ctx, tx, ownerID); err != nil {
+		return 0, err
 	}
 	if w.hooks.afterOwnerLocks != nil {
 		w.hooks.afterOwnerLocks(ownerID)
@@ -243,6 +241,71 @@ func (w *RetentionWorker) deleteExpiredOwnerBatch(
 		return 0, fmt.Errorf("read activity cleanup clock: %w", err)
 	}
 
+	ids, err := lockExpiredHistoryRows(ctx, tx, ownerID, cutoff)
+	if err != nil {
+		return 0, err
+	}
+
+	if w.hooks.afterRowsLocked != nil && len(ids) > 0 {
+		w.hooks.afterRowsLocked(ownerID, append([]uuid.UUID(nil), ids...))
+	}
+	if err := deleteExpiredHistoryRows(ctx, tx, ownerID, ids); err != nil {
+		return 0, err
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit activity cleanup owner: %w", err)
+	}
+	committed = true
+	return len(ids), nil
+}
+
+func mergeRetentionRollback(tx *sql.Tx, committed *bool, returnErr *error) {
+	if *committed {
+		return
+	}
+	rollbackErr := tx.Rollback()
+	if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+		*returnErr = errors.Join(*returnErr, fmt.Errorf("rollback activity cleanup owner: %w", rollbackErr))
+	}
+}
+
+func lockRetentionOwner(ctx context.Context, tx *sql.Tx, ownerID uuid.UUID) (bool, error) {
+	var lockedID uuid.UUID
+	err := tx.QueryRowContext(ctx, `
+		SELECT id
+		FROM users
+		WHERE id = $1
+		FOR NO KEY UPDATE
+	`, ownerID).Scan(&lockedID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("lock activity cleanup owner: %w", err)
+	}
+	return true, nil
+}
+
+func lockRetentionSettings(ctx context.Context, tx *sql.Tx, ownerID uuid.UUID) error {
+	var lockedID uuid.UUID
+	if err := tx.QueryRowContext(ctx, `
+		SELECT user_id
+		FROM user_presence_settings
+		WHERE user_id = $1
+		FOR UPDATE
+	`, ownerID).Scan(&lockedID); err != nil {
+		return fmt.Errorf("lock activity cleanup settings: %w", err)
+	}
+	return nil
+}
+
+func lockExpiredHistoryRows(
+	ctx context.Context,
+	tx *sql.Tx,
+	ownerID uuid.UUID,
+	cutoff time.Time,
+) ([]uuid.UUID, error) {
 	rows, err := tx.QueryContext(ctx, `
 		SELECT expires_at, id
 		FROM presence_history
@@ -253,7 +316,7 @@ func (w *RetentionWorker) deleteExpiredOwnerBatch(
 		FOR UPDATE SKIP LOCKED
 	`, ownerID, cutoff, retentionRowBatch)
 	if err != nil {
-		return 0, fmt.Errorf("lock expired activity rows: %w", err)
+		return nil, fmt.Errorf("lock expired activity rows: %w", err)
 	}
 	ids := make([]uuid.UUID, 0, retentionRowBatch)
 	for rows.Next() {
@@ -262,47 +325,48 @@ func (w *RetentionWorker) deleteExpiredOwnerBatch(
 			id        uuid.UUID
 		)
 		if err := rows.Scan(&expiresAt, &id); err != nil {
-			return 0, closeRowsWithError(rows, "scan expired activity row", err)
+			return nil, closeRowsWithError(rows, "scan expired activity row", err)
 		}
 		ids = append(ids, id)
 	}
 	if err := rows.Err(); err != nil {
-		return 0, closeRowsWithError(rows, "read expired activity rows", err)
+		return nil, closeRowsWithError(rows, "read expired activity rows", err)
 	}
 	if err := rows.Close(); err != nil {
-		return 0, fmt.Errorf("close expired activity rows: %w", err)
+		return nil, fmt.Errorf("close expired activity rows: %w", err)
 	}
+	return ids, nil
+}
 
-	if w.hooks.afterRowsLocked != nil && len(ids) > 0 {
-		w.hooks.afterRowsLocked(ownerID, append([]uuid.UUID(nil), ids...))
+func deleteExpiredHistoryRows(
+	ctx context.Context,
+	tx *sql.Tx,
+	ownerID uuid.UUID,
+	ids []uuid.UUID,
+) error {
+	if len(ids) == 0 {
+		return nil
 	}
-	if len(ids) > 0 {
-		idStrings := make([]string, len(ids))
-		for index, id := range ids {
-			idStrings[index] = id.String()
-		}
-		result, err := tx.ExecContext(ctx, `
-			DELETE FROM presence_history
-			WHERE sender_id = $1
-			  AND id = ANY($2::UUID[])
-		`, ownerID, pq.Array(idStrings))
-		if err != nil {
-			return 0, fmt.Errorf("delete expired activity rows: %w", err)
-		}
-		affected, err := result.RowsAffected()
-		if err != nil {
-			return 0, fmt.Errorf("count deleted activity rows: %w", err)
-		}
-		if affected != int64(len(ids)) {
-			return 0, fmt.Errorf("delete expired activity rows: exact row count mismatch")
-		}
+	idStrings := make([]string, len(ids))
+	for index, id := range ids {
+		idStrings[index] = id.String()
 	}
-
-	if err := tx.Commit(); err != nil {
-		return 0, fmt.Errorf("commit activity cleanup owner: %w", err)
+	result, err := tx.ExecContext(ctx, `
+		DELETE FROM presence_history
+		WHERE sender_id = $1
+		  AND id = ANY($2::UUID[])
+	`, ownerID, pq.Array(idStrings))
+	if err != nil {
+		return fmt.Errorf("delete expired activity rows: %w", err)
 	}
-	committed = true
-	return len(ids), nil
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("count deleted activity rows: %w", err)
+	}
+	if affected != int64(len(ids)) {
+		return fmt.Errorf("delete expired activity rows: exact row count mismatch")
+	}
+	return nil
 }
 
 func closeRowsWithError(rows *sql.Rows, operation string, cause error) error {

@@ -241,6 +241,10 @@ func (h *Handler) replacePresenceOverride(
 	if err != nil {
 		return result, &presenceWriterFailure{status: 500, class: "begin", cause: err}
 	}
+	if tx == nil {
+		return result, &presenceWriterFailure{status: 500, class: "begin", cause: errors.New("presence override transaction missing")}
+	}
+	defer tx.Rollback() //nolint:errcheck
 	defer h.joinPresenceWriterRollback(tx, &err)
 
 	operation, err := h.presenceHistory.BeginAudienceOperation(

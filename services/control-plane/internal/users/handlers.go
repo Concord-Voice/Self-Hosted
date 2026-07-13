@@ -295,6 +295,7 @@ func (h *Handler) replaceMyKeysCoordinated(
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedReplaceKeys})
 		return
 	}
+	defer tx.Rollback() //nolint:errcheck
 	defer h.rollbackKeyReplacement(tx)
 
 	if err := h.verifyStepUpWithLockedUser(

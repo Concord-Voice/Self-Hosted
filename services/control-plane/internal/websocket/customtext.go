@@ -65,58 +65,28 @@ func (h *Hub) DeliverCustomText(
 	}
 
 	disconnected := make(map[*Client]bool)
+	if err := h.deliverCustomTextPlan(ctx, plan, disconnected); err != nil {
+		return presencehistory.DeliveryAck{}, err
+	}
+	return presencehistory.DeliveryAck{OperationID: plan.OperationID}, nil
+}
+
+func (h *Hub) deliverCustomTextPlan(
+	ctx context.Context,
+	plan presencehistory.DeliveryPlan,
+	disconnected map[*Client]bool,
+) error {
 	switch plan.Mode {
 	case presencehistory.DeliveryExactDelta:
-		if plan.SenderID == uuid.Nil {
-			return presencehistory.DeliveryAck{}, fmt.Errorf(
-				"%w: exact delivery requires sender",
-				ErrCustomTextDeliveryPlan,
-			)
-		}
-		if customTextRecipientCount(plan.UpdateRecipients) > 0 && plan.Payload == nil {
-			return presencehistory.DeliveryAck{}, fmt.Errorf(
-				"%w: update recipients require payload",
-				ErrCustomTextDeliveryPlan,
-			)
-		}
-		if err := h.deliverExactCustomText(ctx, plan, disconnected); err != nil {
-			return presencehistory.DeliveryAck{}, err
-		}
+		return h.deliverExactCustomText(ctx, plan, disconnected)
 	case presencehistory.DeliveryConservativeReset:
-		if plan.ClearRecipients == nil && plan.UpdateRecipients == nil {
-			if err := h.disconnectAllCustomTextClients(ctx); err != nil {
-				return presencehistory.DeliveryAck{}, err
-			}
-			return presencehistory.DeliveryAck{OperationID: plan.OperationID}, nil
-		}
-		recipients := customTextRecipientUnion(plan.ClearRecipients, plan.UpdateRecipients)
-		if plan.SenderID == uuid.Nil && len(recipients) > 0 {
-			return presencehistory.DeliveryAck{}, fmt.Errorf(
-				"%w: prepared recipients require sender",
-				ErrCustomTextDeliveryPlan,
-			)
-		}
-		if plan.SenderID != uuid.Nil {
-			recipients[plan.SenderID] = true
-		}
-		clearData, err := h.marshalCustomTextDeliveryFrame(plan.SenderID, nil)
-		if err != nil {
-			return presencehistory.DeliveryAck{}, err
-		}
-		if err := h.deliverCustomTextToUsers(ctx, recipients, clearData, disconnected); err != nil {
-			return presencehistory.DeliveryAck{}, err
-		}
-		if err := h.deliverCustomTextOverrideMetadata(ctx, plan, disconnected); err != nil {
-			return presencehistory.DeliveryAck{}, err
-		}
+		return h.deliverConservativeCustomText(ctx, plan, disconnected)
 	default:
-		return presencehistory.DeliveryAck{}, fmt.Errorf(
+		return fmt.Errorf(
 			"%w: unsupported mode",
 			ErrCustomTextDeliveryPlan,
 		)
 	}
-
-	return presencehistory.DeliveryAck{OperationID: plan.OperationID}, nil
 }
 
 func (h *Hub) deliverExactCustomText(
@@ -124,6 +94,13 @@ func (h *Hub) deliverExactCustomText(
 	plan presencehistory.DeliveryPlan,
 	disconnected map[*Client]bool,
 ) error {
+	if plan.SenderID == uuid.Nil {
+		return fmt.Errorf("%w: exact delivery requires sender", ErrCustomTextDeliveryPlan)
+	}
+	if customTextRecipientCount(plan.UpdateRecipients) > 0 && plan.Payload == nil {
+		return fmt.Errorf("%w: update recipients require payload", ErrCustomTextDeliveryPlan)
+	}
+
 	var clearData []byte
 	if customTextRecipientCount(plan.ClearRecipients) > 0 {
 		var err error
@@ -155,6 +132,31 @@ func (h *Hub) deliverExactCustomText(
 		if err := h.deliverCustomTextToUsers(ctx, plan.UpdateRecipients, updateData, disconnected); err != nil {
 			return err
 		}
+	}
+	return h.deliverCustomTextOverrideMetadata(ctx, plan, disconnected)
+}
+
+func (h *Hub) deliverConservativeCustomText(
+	ctx context.Context,
+	plan presencehistory.DeliveryPlan,
+	disconnected map[*Client]bool,
+) error {
+	if plan.ClearRecipients == nil && plan.UpdateRecipients == nil {
+		return h.disconnectAllCustomTextClients(ctx)
+	}
+	recipients := customTextRecipientUnion(plan.ClearRecipients, plan.UpdateRecipients)
+	if plan.SenderID == uuid.Nil && len(recipients) > 0 {
+		return fmt.Errorf("%w: prepared recipients require sender", ErrCustomTextDeliveryPlan)
+	}
+	if plan.SenderID != uuid.Nil {
+		recipients[plan.SenderID] = true
+	}
+	clearData, err := h.marshalCustomTextDeliveryFrame(plan.SenderID, nil)
+	if err != nil {
+		return err
+	}
+	if err := h.deliverCustomTextToUsers(ctx, recipients, clearData, disconnected); err != nil {
+		return err
 	}
 	return h.deliverCustomTextOverrideMetadata(ctx, plan, disconnected)
 }
@@ -234,21 +236,30 @@ func (h *Hub) deliverCustomTextToUsers(
 		if !included {
 			continue
 		}
-		for clientID := range h.userClients[userID] {
-			client, connected := h.clients[clientID]
-			if !connected {
-				continue
-			}
-			if disconnected[client] {
-				continue
-			}
-			wasDisconnected, err := h.deliverCustomTextToClient(ctx, client, data)
-			if err != nil {
-				return err
-			}
-			if wasDisconnected {
-				disconnected[client] = true
-			}
+		if err := h.deliverCustomTextToUser(ctx, userID, data, disconnected); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *Hub) deliverCustomTextToUser(
+	ctx context.Context,
+	userID uuid.UUID,
+	data []byte,
+	disconnected map[*Client]bool,
+) error {
+	for clientID := range h.userClients[userID] {
+		client, connected := h.clients[clientID]
+		if !connected || disconnected[client] {
+			continue
+		}
+		wasDisconnected, err := h.deliverCustomTextToClient(ctx, client, data)
+		if err != nil {
+			return err
+		}
+		if wasDisconnected {
+			disconnected[client] = true
 		}
 	}
 	return nil
@@ -450,12 +461,7 @@ func (h *Hub) sendCustomTextSnapshot(ctx context.Context, client *Client) {
 
 	candidates, err := h.customTextCandidates(ctx)
 	if err != nil {
-		if ctx.Err() != nil {
-			return
-		}
-		// Fail closed: if the candidate set can't be read, send no custom-text
-		// snapshot rather than risk an unfiltered emission. Metadata only.
-		log.Printf("[hub] custom-text snapshot candidate query failed: %T", err)
+		h.logCustomTextSnapshotError(ctx, "candidate query", err)
 		return
 	}
 	if h.customTextSnapshotAfterCandidates != nil {
@@ -463,21 +469,37 @@ func (h *Hub) sendCustomTextSnapshot(ctx context.Context, client *Client) {
 	}
 
 	for _, senderID := range candidates {
-		if err := ctx.Err(); err != nil {
+		if !h.sendCustomTextSnapshotForSender(ctx, client, senderID) {
 			return
 		}
-		if senderID == client.UserID {
-			continue // self is delivered via acknowledged writer self-sync, not the snapshot of others
-		}
-		err := h.presenceHistoryService.WithSender(ctx, senderID, func() error {
-			return h.sendCustomTextSnapshotCandidate(ctx, client, senderID)
-		})
-		if err != nil {
-			if ctx.Err() != nil {
-				return
-			}
-			log.Printf("[hub] custom-text snapshot candidate failed: %T", err)
-		}
+	}
+}
+
+func (h *Hub) sendCustomTextSnapshotForSender(
+	ctx context.Context,
+	client *Client,
+	senderID uuid.UUID,
+) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	if senderID == client.UserID {
+		return true // self is delivered via acknowledged writer self-sync, not the snapshot of others
+	}
+	err := h.presenceHistoryService.WithSender(ctx, senderID, func() error {
+		return h.sendCustomTextSnapshotCandidate(ctx, client, senderID)
+	})
+	if err == nil {
+		return true
+	}
+	h.logCustomTextSnapshotError(ctx, "candidate", err)
+	return ctx.Err() == nil
+}
+
+func (h *Hub) logCustomTextSnapshotError(ctx context.Context, operation string, err error) {
+	if ctx.Err() == nil {
+		// Fail closed: a candidate that cannot be read or authorized is omitted.
+		log.Printf("[hub] custom-text snapshot %s failed: %T", operation, err)
 	}
 }
 
@@ -493,19 +515,40 @@ func (h *Hub) sendCustomTextSnapshotCandidate(
 	if err != nil {
 		return fmt.Errorf("begin Custom Status snapshot transaction: %w", err)
 	}
-	defer func() {
-		rollbackErr := tx.Rollback()
-		if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-			returnErr = errors.Join(
-				returnErr,
-				fmt.Errorf("rollback Custom Status snapshot transaction: %w", rollbackErr),
-			)
-		}
-	}()
+	defer mergeCustomTextSnapshotRollback(tx, &returnErr)
 
+	payload, authorized, err := h.readCustomTextSnapshotCandidate(ctx, tx, client.UserID, senderID)
+	if err != nil {
+		return err
+	}
+	if !authorized {
+		return nil
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit Custom Status snapshot transaction: %w", err)
+	}
+	return h.enqueueCustomTextSnapshot(ctx, client, senderID, payload)
+}
+
+func mergeCustomTextSnapshotRollback(tx *sql.Tx, returnErr *error) {
+	rollbackErr := tx.Rollback()
+	if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+		*returnErr = errors.Join(
+			*returnErr,
+			fmt.Errorf("rollback Custom Status snapshot transaction: %w", rollbackErr),
+		)
+	}
+}
+
+func (h *Hub) readCustomTextSnapshotCandidate(
+	ctx context.Context,
+	tx *sql.Tx,
+	viewerID uuid.UUID,
+	senderID uuid.UUID,
+) (*CustomTextPayload, bool, error) {
 	var tier int
 	var text, emoji sql.NullString
-	err = tx.QueryRowContext(ctx, `
+	err := tx.QueryRowContext(ctx, `
 		SELECT settings.custom_text_tier,
 		       settings.custom_text,
 		       settings.custom_text_emoji
@@ -518,33 +561,39 @@ func (h *Hub) sendCustomTextSnapshotCandidate(
 		  )
 	`, senderID).Scan(&tier, &text, &emoji)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil
+		return nil, false, nil
 	}
 	if err != nil {
-		return fmt.Errorf("read Custom Status snapshot state: %w", err)
+		return nil, false, fmt.Errorf("read Custom Status snapshot state: %w", err)
 	}
 	if h.customTextSnapshotAfterStateRead != nil {
-		h.customTextSnapshotAfterStateRead(senderID, client.UserID)
+		h.customTextSnapshotAfterStateRead(senderID, viewerID)
 	}
 	if tier <= 0 || !text.Valid || text.String == "" {
-		return nil
+		return nil, false, nil
 	}
 
 	audience, audErr := presence.ComputeCustomTextAudience(ctx, tx, senderID)
 	if audErr != nil {
-		return fmt.Errorf("authorize Custom Status snapshot: %w", audErr)
+		return nil, false, fmt.Errorf("authorize Custom Status snapshot: %w", audErr)
 	}
-	if !audience[client.UserID] {
-		return nil // viewer is NOT in this user's custom-text audience — exclude (privacy lock)
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("commit Custom Status snapshot transaction: %w", err)
+	if !audience[viewerID] {
+		return nil, false, nil // viewer is NOT in this user's custom-text audience — exclude (privacy lock)
 	}
 
 	payload := &CustomTextPayload{Text: text.String}
 	if emoji.Valid {
 		payload.Emoji = emoji.String
 	}
+	return payload, true, nil
+}
+
+func (h *Hub) enqueueCustomTextSnapshot(
+	ctx context.Context,
+	client *Client,
+	senderID uuid.UUID,
+	payload *CustomTextPayload,
+) error {
 	marshal := h.customTextFrameMarshaler
 	if marshal == nil {
 		marshal = marshalCustomTextFrame
