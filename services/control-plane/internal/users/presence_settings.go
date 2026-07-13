@@ -307,6 +307,7 @@ func (h *Handler) commitAndClaimPresenceWriter(
 	plan presencehistory.DeliveryPlan,
 ) error {
 	commitErr := h.presenceHistory.CommitTx(tx)
+	var confirmedCommitErr error
 	if commitErr != nil {
 		rollbackErr := h.presenceHistory.RollbackTx(tx)
 		if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
@@ -314,7 +315,7 @@ func (h *Handler) commitAndClaimPresenceWriter(
 		}
 		switch h.presenceHistory.ClassifyAudienceCommit(ctx, operation) {
 		case presencehistory.CommitConfirmed:
-			// Continue to the exact claim below.
+			confirmedCommitErr = commitErr
 		case presencehistory.RollbackConfirmed:
 			return &presenceWriterFailure{status: 500, class: "commit_rollback", cause: commitErr}
 		case presencehistory.WriteSuperseded:
@@ -328,8 +329,13 @@ func (h *Handler) commitAndClaimPresenceWriter(
 			}
 		}
 	}
-	if err := h.presenceHistory.ClaimAndDeliver(ctx, plan); err != nil {
-		return &presenceWriterFailure{status: 503, class: "delivery", cause: err}
+	completion := h.presenceHistory.CompleteClaim(ctx, plan)
+	if completion.Err != nil {
+		return &presenceWriterFailure{
+			status: 503,
+			class:  "delivery",
+			cause:  errors.Join(confirmedCommitErr, completion.Err),
+		}
 	}
 	return nil
 }

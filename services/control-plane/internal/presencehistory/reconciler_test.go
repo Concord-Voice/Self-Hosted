@@ -393,6 +393,210 @@ func TestClaimAndDeliverCompletedSupersessionSkipsStaleEmergencyReset(t *testing
 	})
 }
 
+func TestCompleteClaimPreDeliveryRecoverySkipsResetAfterCompletedSupersession(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	senderID := testhelpers.CreateUser(t, db)
+	operationA := uuid.New()
+	seedTask8Pending(t, db, senderID, operationA, operationA, 0, false, CustomTextState{Text: "old"})
+	delivery := &task8Delivery{}
+	serviceA := NewService(db, DisclosureState{}, false)
+	serviceB := NewService(db, DisclosureState{}, false)
+	require.NoError(t, serviceA.BindDelivery(delivery))
+	require.NoError(t, serviceB.BindDelivery(delivery))
+
+	claimCause := errors.New("old claim transaction unavailable")
+	recoveryEntered := make(chan struct{})
+	releaseRecovery := make(chan struct{})
+	beginCalls := 0
+	restore := serviceA.SetTransactionTestHooks(TransactionTestHooks{
+		Begin: func(ctx context.Context, options *sql.TxOptions) (*sql.Tx, error) {
+			beginCalls++
+			if beginCalls == 1 {
+				return nil, claimCause
+			}
+			if beginCalls == 2 {
+				close(recoveryEntered)
+				<-releaseRecovery
+			}
+			return db.BeginTx(ctx, options)
+		},
+	})
+	defer restore()
+
+	completionDone := make(chan ClaimCompletion, 1)
+	go func() {
+		completionDone <- serviceA.CompleteClaim(ctx, DeliveryPlan{
+			Mode: DeliveryExactDelta, OperationID: operationA, SenderID: senderID,
+			Payload: &CustomTextState{Text: "old"},
+		})
+	}()
+	task8Receive(t, recoveryEntered, "old claim did not reach pre-delivery recovery")
+	operationB, err := task8CompleteSupersedingOperation(ctx, serviceB, senderID, ForcedSecurityClear)
+	require.NoError(t, err)
+	close(releaseRecovery)
+	var completion ClaimCompletion
+	select {
+	case completion = <-completionDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("old claim recovery did not finish")
+	}
+	require.Error(t, completion.Err)
+	assert.ErrorIs(t, completion.Err, claimCause)
+	assert.Equal(t, ClaimSuperseded, completion.Outcome)
+	assert.Equal(t, 0, task8PendingCount(t, db, senderID))
+	plans := delivery.snapshot()
+	require.Len(t, plans, 1, "old pre-delivery recovery must not reset after newer acknowledged update")
+	assert.Equal(t, operationB.ID, plans[0].OperationID)
+	assert.Equal(t, DeliveryExactDelta, plans[0].Mode)
+}
+
+func TestCompleteClaimPreDeliveryRecoveryResetsBeforeLiveNewerPending(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	defer cleanup()
+	ctx := context.Background()
+	senderID := testhelpers.CreateUser(t, db)
+	operationA := uuid.New()
+	seedTask8Pending(t, db, senderID, operationA, operationA, 0, false, CustomTextState{Text: "old"})
+	delivery := &task8Delivery{}
+	serviceA := NewService(db, DisclosureState{}, false)
+	serviceB := NewService(db, DisclosureState{}, false)
+	require.NoError(t, serviceA.BindDelivery(delivery))
+	require.NoError(t, serviceB.BindDelivery(delivery))
+
+	claimCause := errors.New("old claim transaction unavailable")
+	recoveryEntered := make(chan struct{})
+	releaseRecovery := make(chan struct{})
+	beginCalls := 0
+	restore := serviceA.SetTransactionTestHooks(TransactionTestHooks{
+		Begin: func(ctx context.Context, options *sql.TxOptions) (*sql.Tx, error) {
+			beginCalls++
+			if beginCalls == 1 {
+				return nil, claimCause
+			}
+			if beginCalls == 2 {
+				close(recoveryEntered)
+				<-releaseRecovery
+			}
+			return db.BeginTx(ctx, options)
+		},
+	})
+	defer restore()
+
+	completionDone := make(chan ClaimCompletion, 1)
+	go func() {
+		completionDone <- serviceA.CompleteClaim(ctx, DeliveryPlan{
+			Mode: DeliveryExactDelta, OperationID: operationA, SenderID: senderID,
+			ClearRecipients: map[uuid.UUID]bool{uuid.New(): true},
+		})
+	}()
+	task8Receive(t, recoveryEntered, "old claim did not reach pre-delivery recovery")
+	var operationB AudienceOperation
+	require.NoError(t, serviceB.WithSender(ctx, senderID, func() error {
+		tx, err := serviceB.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+		operationB, err = serviceB.BeginAudienceOperation(ctx, tx, senderID, ForcedSecurityClear)
+		if err != nil {
+			return err
+		}
+		_, err = tx.ExecContext(ctx, `
+			UPDATE user_presence_settings
+			SET custom_text_tier = 2, custom_text = 'new pending', custom_text_emoji = NULL
+			WHERE user_id = $1
+		`, senderID)
+		if err != nil {
+			return err
+		}
+		return serviceB.CommitTx(tx)
+	}))
+	close(releaseRecovery)
+	var completion ClaimCompletion
+	select {
+	case completion = <-completionDone:
+	case <-time.After(10 * time.Second):
+		t.Fatal("old claim recovery did not finish")
+	}
+	require.Error(t, completion.Err)
+	assert.ErrorIs(t, completion.Err, claimCause)
+	assert.Equal(t, ClaimRecovered, completion.Outcome)
+	assert.Equal(t, operationB.ID, task8PendingMarker(t, db, senderID))
+	plans := delivery.snapshot()
+	require.Len(t, plans, 1, "old reset must precede any later claim of the live newer marker")
+	assert.Equal(t, operationA, plans[0].OperationID)
+	assert.Equal(t, DeliveryConservativeReset, plans[0].Mode)
+}
+
+func TestCompleteClaimMissingPendingDisconnectsAllAndReturnsFailure(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	defer cleanup()
+	senderID := testhelpers.CreateUser(t, db)
+	operationID := uuid.New()
+	_, err := db.Exec(`
+		INSERT INTO user_presence_settings (
+			user_id, custom_text_tier, custom_text,
+			presence_settings_version, presence_settings_operation_id
+		) VALUES ($1, 1, 'uncertain live state', 1, $2)
+	`, senderID, operationID)
+	require.NoError(t, err)
+	delivery := &task8Delivery{}
+	service := NewService(db, DisclosureState{}, false)
+	require.NoError(t, service.BindDelivery(delivery))
+
+	completion := service.CompleteClaim(context.Background(), DeliveryPlan{
+		Mode: DeliveryExactDelta, OperationID: operationID, SenderID: senderID,
+		ClearRecipients:  map[uuid.UUID]bool{uuid.New(): true},
+		UpdateRecipients: map[uuid.UUID]bool{uuid.New(): true},
+		Payload:          &CustomTextState{Text: "uncertain live state"},
+	})
+	require.Error(t, completion.Err, "missing quarantine cannot authorize HTTP success")
+	assert.Equal(t, ClaimRecovered, completion.Outcome)
+	plans := delivery.snapshot()
+	require.Len(t, plans, 1)
+	assert.Equal(t, DeliveryConservativeReset, plans[0].Mode)
+	assert.Nil(t, plans[0].ClearRecipients, "unreadable state must not replay stale mapped recipients")
+	assert.Nil(t, plans[0].UpdateRecipients, "nil maps select sender-safe all-local disconnect")
+}
+
+func TestBoundedDetachedContextPreservesOperationDeadlineAfterCancellation(t *testing.T) {
+	operationCtx, cancelOperation := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	cancelOperation()
+	startedAt := time.Now()
+	nestedCtx, cancelNested := boundedDetachedContext(operationCtx, 500*time.Millisecond)
+	defer cancelNested()
+	<-nestedCtx.Done()
+	elapsed := time.Since(startedAt)
+	assert.GreaterOrEqual(t, elapsed, 40*time.Millisecond,
+		"operation cancellation must be detached until the inherited hard deadline")
+	assert.Less(t, elapsed, 250*time.Millisecond,
+		"nested recovery timeouts must not extend the inherited total deadline")
+}
+
+func TestCompleteClaimIgnoresExpiredRequestDeadlineForRecovery(t *testing.T) {
+	service := NewService(nil, DisclosureState{}, false)
+	delivery := &task8Delivery{deliver: func(ctx context.Context, _ DeliveryPlan) error {
+		return ctx.Err()
+	}}
+	require.NoError(t, service.BindDelivery(delivery))
+	expiredRequest, cancelRequest := context.WithDeadline(
+		context.Background(), time.Now().Add(-time.Second),
+	)
+	defer cancelRequest()
+
+	completion := service.CompleteClaim(expiredRequest, DeliveryPlan{
+		Mode: DeliveryExactDelta, OperationID: uuid.New(), SenderID: uuid.New(),
+	})
+	require.Error(t, completion.Err, "pre-delivery failure must still block HTTP success")
+	assert.Equal(t, ClaimRecovered, completion.Outcome,
+		"expired HTTP deadline must not suppress bounded conservative recovery")
+	plans := delivery.snapshot()
+	require.Len(t, plans, 1)
+	assert.Equal(t, DeliveryConservativeReset, plans[0].Mode)
+}
+
 func testClaimAndDeliverCompletedSupersession(t *testing.T, failPrimaryReadback bool) {
 	t.Helper()
 	db, cleanup := testhelpers.SetupTestDB(t)

@@ -29,6 +29,15 @@ func invokePresenceSettingsPATCH(
 	senderID uuid.UUID,
 	body map[string]interface{},
 ) *httptest.ResponseRecorder {
+	return invokePresenceSettingsPATCHWithContext(context.Background(), h, senderID, body)
+}
+
+func invokePresenceSettingsPATCHWithContext(
+	ctx context.Context,
+	h *users.Handler,
+	senderID uuid.UUID,
+	body map[string]interface{},
+) *httptest.ResponseRecorder {
 	encoded, err := json.Marshal(body)
 	if err != nil {
 		panic(err)
@@ -40,10 +49,124 @@ func invokePresenceSettingsPATCH(
 		http.MethodPatch,
 		"/api/v1/users/me/presence-settings",
 		bytes.NewReader(encoded),
-	)
+	).WithContext(ctx)
 	c.Request.Header.Set("Content-Type", "application/json")
 	h.UpdatePresenceSettings(c)
 	return w
+}
+
+func TestUpdatePresenceSettingsCompletesPostCommitClaimAfterRequestCancellation(t *testing.T) {
+	for _, test := range []struct {
+		name        string
+		initialTier int
+		nextTier    int
+		relation    func(*testing.T, *sql.DB, uuid.UUID, uuid.UUID)
+	}{
+		{
+			name:        "tier narrowing clears revoked server peer",
+			initialTier: 2,
+			nextTier:    1,
+			relation: func(t *testing.T, db *sql.DB, senderID, viewerID uuid.UUID) {
+				t.Helper()
+				serverID := testhelpers.CreateServer(t, db, senderID)
+				testhelpers.AddServerMember(t, db, serverID, senderID)
+				testhelpers.AddServerMember(t, db, serverID, viewerID)
+			},
+		},
+		{
+			name:        "turning off clears revoked friend",
+			initialTier: 1,
+			nextTier:    0,
+			relation: func(t *testing.T, db *sql.DB, senderID, viewerID uuid.UUID) {
+				t.Helper()
+				testhelpers.AddFriendship(t, db, senderID, viewerID)
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			db, _ := testhelpers.SetupTestDB(t)
+			senderID := testhelpers.CreateUser(t, db)
+			viewerID := testhelpers.CreateUser(t, db)
+			test.relation(t, db, senderID, viewerID)
+			_, err := db.Exec(`
+				INSERT INTO user_presence_settings (user_id, custom_text_tier, custom_text)
+				VALUES ($1, $2, 'visible before cancellation')
+			`, senderID, test.initialTier)
+			require.NoError(t, err)
+			delivery := &task9Delivery{}
+			service := presencehistory.NewService(db, presencehistory.DisclosureState{}, false)
+			require.NoError(t, service.BindDelivery(delivery))
+			h := users.NewHandler(db, logger.NewWithWriter(io.Discard), nil, nil, nil)
+			h.SetPresenceHistory(service)
+
+			requestCtx, cancelRequest := context.WithCancel(context.Background())
+			restore := service.SetTransactionTestHooks(presencehistory.TransactionTestHooks{
+				Commit: func(tx *sql.Tx) error {
+					err := tx.Commit()
+					cancelRequest()
+					return err
+				},
+			})
+			defer restore()
+
+			response := invokePresenceSettingsPATCHWithContext(
+				requestCtx, h, senderID, map[string]interface{}{"custom_text_tier": test.nextTier},
+			)
+			require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+			plans := delivery.snapshot()
+			require.Len(t, plans, 1)
+			assert.Equal(t, presencehistory.DeliveryExactDelta, plans[0].Mode)
+			assert.True(t, plans[0].ClearRecipients[viewerID], "revoked connected viewer must be cleared")
+			var pending int
+			require.NoError(t, db.QueryRow(
+				`SELECT COUNT(*) FROM presence_settings_pending_operations WHERE user_id = $1`, senderID,
+			).Scan(&pending))
+			assert.Zero(t, pending)
+		})
+	}
+}
+
+func TestUpdatePresenceSettingsClaimBeginFailureRunsConservativeResetAndRetainsQuarantine(t *testing.T) {
+	db, _ := testhelpers.SetupTestDB(t)
+	senderID := testhelpers.CreateUser(t, db)
+	viewerID := testhelpers.CreateUser(t, db)
+	testhelpers.AddFriendship(t, db, senderID, viewerID)
+	_, err := db.Exec(`
+		INSERT INTO user_presence_settings (user_id, custom_text_tier, custom_text)
+		VALUES ($1, 1, 'visible before failed claim')
+	`, senderID)
+	require.NoError(t, err)
+	delivery := &task9Delivery{}
+	service := presencehistory.NewService(db, presencehistory.DisclosureState{}, false)
+	require.NoError(t, service.BindDelivery(delivery))
+	h := users.NewHandler(db, logger.NewWithWriter(io.Discard), nil, nil, nil)
+	h.SetPresenceHistory(service)
+	claimBeginCause := errors.New("claim transaction unavailable")
+	beginCalls := 0
+	restore := service.SetTransactionTestHooks(presencehistory.TransactionTestHooks{
+		Begin: func(ctx context.Context, options *sql.TxOptions) (*sql.Tx, error) {
+			beginCalls++
+			if beginCalls == 3 {
+				return nil, claimBeginCause
+			}
+			return db.BeginTx(ctx, options)
+		},
+	})
+	defer restore()
+
+	response := invokePresenceSettingsPATCH(h, senderID, map[string]interface{}{"custom_text_tier": 0})
+	assert.Equal(t, http.StatusServiceUnavailable, response.Code)
+	plans := delivery.snapshot()
+	require.Len(t, plans, 1, "pre-delivery claim failure must perform one conservative reset")
+	assert.Equal(t, presencehistory.DeliveryConservativeReset, plans[0].Mode)
+	var settingsMarker, pendingMarker uuid.UUID
+	require.NoError(t, db.QueryRow(`
+		SELECT settings.presence_settings_operation_id, pending.operation_id
+		FROM user_presence_settings AS settings
+		JOIN presence_settings_pending_operations AS pending ON pending.user_id = settings.user_id
+		WHERE settings.user_id = $1
+	`, senderID).Scan(&settingsMarker, &pendingMarker))
+	assert.Equal(t, settingsMarker, pendingMarker, "exact committed quarantine must remain retryable")
 }
 
 type task9Delivery struct {

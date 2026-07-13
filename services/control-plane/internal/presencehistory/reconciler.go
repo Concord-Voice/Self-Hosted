@@ -55,6 +55,28 @@ const (
 	claimCommitSuperseded
 )
 
+// ClaimOutcome identifies the durable/privacy outcome of a post-commit claim.
+type ClaimOutcome uint8
+
+const (
+	// ClaimAcknowledged means exact delivery and marker deletion are durable.
+	ClaimAcknowledged ClaimOutcome = iota
+	// ClaimRecovered means conservative delivery completed while quarantine remains.
+	ClaimRecovered
+	// ClaimSuperseded means a newer completed operation made the old claim irrelevant.
+	ClaimSuperseded
+	// ClaimPreDeliveryFailed means exact delivery was never attempted.
+	ClaimPreDeliveryFailed
+	// ClaimUnresolved means neither acknowledgement nor conservative recovery was proven.
+	ClaimUnresolved
+)
+
+// ClaimCompletion returns the typed post-commit outcome and its preserved cause.
+type ClaimCompletion struct {
+	Outcome ClaimOutcome
+	Err     error
+}
+
 // BindDelivery binds the one process-local typed delivery adapter.
 func (s *Service) BindDelivery(delivery Delivery) error {
 	if s == nil || nilDelivery(delivery) {
@@ -120,33 +142,61 @@ func (s *Service) WithReadySender(ctx context.Context, senderID uuid.UUID, work 
 // ClaimAndDeliver holds canonical database locks until exact delivery is
 // acknowledged, removes only the matching marker, and then commits.
 func (s *Service) ClaimAndDeliver(ctx context.Context, plan DeliveryPlan) (returnErr error) {
+	_, returnErr = s.claimAndDeliver(ctx, plan)
+	return returnErr
+}
+
+// CompleteClaim finishes post-commit work under a bounded context detached from
+// request cancellation and conservatively recovers failures before delivery.
+func (s *Service) CompleteClaim(requestCtx context.Context, plan DeliveryPlan) ClaimCompletion {
+	claimCtx, cancel := context.WithTimeout(
+		context.WithoutCancel(requestCtx),
+		2*s.effectiveDeliveryTimeout()+2*commitReadbackTimeout,
+	)
+	defer cancel()
+	outcome, err := s.claimAndDeliver(claimCtx, plan)
+	if err != nil && outcome == ClaimPreDeliveryFailed {
+		return s.recoverPreDeliveryClaim(claimCtx, plan, err)
+	}
+	return ClaimCompletion{Outcome: outcome, Err: err}
+}
+
+func boundedDetachedContext(parent context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+	deadline := time.Now().Add(timeout)
+	if parentDeadline, ok := parent.Deadline(); ok && parentDeadline.Before(deadline) {
+		deadline = parentDeadline
+	}
+	return context.WithDeadline(context.WithoutCancel(parent), deadline)
+}
+
+func (s *Service) claimAndDeliver(ctx context.Context, plan DeliveryPlan) (outcome ClaimOutcome, returnErr error) {
 	delivery, err := s.validateDeliveryPlan(plan)
 	if err != nil {
-		return err
+		return ClaimPreDeliveryFailed, err
 	}
 	tx, err := s.BeginTx(ctx, nil)
 	if err != nil {
-		return fmt.Errorf("begin presence delivery claim: %w", err)
+		return ClaimPreDeliveryFailed, fmt.Errorf("begin presence delivery claim: %w", err)
 	}
 	if tx == nil {
-		return errors.New("begin presence delivery claim: missing transaction")
+		return ClaimPreDeliveryFailed, errors.New("begin presence delivery claim: missing transaction")
 	}
 	defer s.joinTransactionRollback(tx, "presence_delivery_claim", &returnErr)
 
 	if err := lockUser(ctx, tx, plan.SenderID); err != nil {
-		return err
+		return ClaimPreDeliveryFailed, err
 	}
 	settings, err := lockPresenceSettings(ctx, tx, plan.SenderID)
 	if err != nil {
-		return err
+		return ClaimPreDeliveryFailed, err
 	}
 	pending, err := lockPendingRow(ctx, tx, plan.SenderID)
 	if err != nil {
-		return err
+		return ClaimPreDeliveryFailed, err
 	}
 	if !settings.OperationID.Valid || settings.OperationID.UUID != plan.OperationID ||
 		pending.ID != plan.OperationID {
-		return errors.New("presence delivery claim marker mismatch")
+		return ClaimPreDeliveryFailed, errors.New("presence delivery claim marker mismatch")
 	}
 
 	deliveryCtx, cancel := context.WithTimeout(ctx, s.effectiveDeliveryTimeout())
@@ -168,7 +218,7 @@ func (s *Service) ClaimAndDeliver(ctx context.Context, plan DeliveryPlan) (retur
 	if err := s.CommitTx(tx); err != nil {
 		return s.resolveClaimCommitError(ctx, tx, plan, pending, err)
 	}
-	return nil
+	return ClaimAcknowledged, nil
 }
 
 func (s *Service) resolveClaimCommitError(
@@ -177,15 +227,17 @@ func (s *Service) resolveClaimCommitError(
 	plan DeliveryPlan,
 	pending pendingOperationRow,
 	commitErr error,
-) error {
+) (ClaimOutcome, error) {
 	cause := fmt.Errorf("commit presence delivery claim: %w", commitErr)
 	rollbackErr := s.RollbackTx(tx)
 	if rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
 		cause = errors.Join(cause, fmt.Errorf("rollback presence delivery claim: %w", rollbackErr))
 	}
 	switch s.classifyClaimCommit(ctx, plan, pending) {
-	case claimCommitConfirmed, claimCommitSuperseded:
-		return cause
+	case claimCommitConfirmed:
+		return ClaimAcknowledged, cause
+	case claimCommitSuperseded:
+		return ClaimSuperseded, cause
 	case claimCommitQuarantined:
 		return s.failExactClaim(ctx, plan, cause)
 	default:
@@ -193,11 +245,83 @@ func (s *Service) resolveClaimCommitError(
 		if restoreErr != nil {
 			cause = errors.Join(cause, fmt.Errorf("restore presence delivery quarantine: %w", restoreErr))
 		}
-		if repairState == claimCommitConfirmed || repairState == claimCommitSuperseded {
-			return cause
+		if repairState == claimCommitConfirmed {
+			return ClaimAcknowledged, cause
+		}
+		if repairState == claimCommitSuperseded {
+			return ClaimSuperseded, cause
 		}
 		return s.failExactClaim(ctx, plan, cause)
 	}
+}
+
+func (s *Service) recoverPreDeliveryClaim(
+	ctx context.Context,
+	plan DeliveryPlan,
+	cause error,
+) (completion ClaimCompletion) {
+	tx, err := s.BeginTx(ctx, nil)
+	if err != nil {
+		return s.recoverAllLocalClaim(ctx, plan, errors.Join(cause, err))
+	}
+	if tx == nil {
+		return s.recoverAllLocalClaim(
+			ctx,
+			plan,
+			errors.Join(cause, errors.New("begin presence claim recovery: missing transaction")),
+		)
+	}
+	defer s.joinTransactionRollback(tx, "presence_pre_delivery_recovery", &completion.Err)
+	if err := lockUser(ctx, tx, plan.SenderID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return ClaimCompletion{Outcome: ClaimSuperseded, Err: cause}
+		}
+		return s.recoverAllLocalClaim(ctx, plan, errors.Join(cause, err))
+	}
+	settings, err := lockPresenceSettings(ctx, tx, plan.SenderID)
+	if err != nil {
+		return s.recoverAllLocalClaim(ctx, plan, errors.Join(cause, err))
+	}
+	pending, pendingErr := lockPendingRow(ctx, tx, plan.SenderID)
+	if errors.Is(pendingErr, sql.ErrNoRows) {
+		if settings.OperationID.Valid && settings.OperationID.UUID != plan.OperationID {
+			return ClaimCompletion{Outcome: ClaimSuperseded, Err: cause}
+		}
+		return s.recoverAllLocalClaim(ctx, plan, cause)
+	}
+	if pendingErr != nil {
+		return s.recoverAllLocalClaim(ctx, plan, errors.Join(cause, pendingErr))
+	}
+	if !settings.OperationID.Valid || settings.OperationID.UUID != pending.ID {
+		return s.recoverAllLocalClaim(
+			ctx,
+			plan,
+			errors.Join(cause, errors.New("presence claim recovery marker mismatch")),
+		)
+	}
+	return s.recoverMappedClaim(ctx, plan, cause)
+}
+
+func (s *Service) recoverAllLocalClaim(
+	ctx context.Context,
+	plan DeliveryPlan,
+	cause error,
+) ClaimCompletion {
+	plan.ClearRecipients = nil
+	plan.UpdateRecipients = nil
+	plan.Payload = nil
+	return s.recoverMappedClaim(ctx, plan, cause)
+}
+
+func (s *Service) recoverMappedClaim(
+	ctx context.Context,
+	plan DeliveryPlan,
+	cause error,
+) ClaimCompletion {
+	if err := s.EmergencyReset(ctx, plan); err != nil {
+		return ClaimCompletion{Outcome: ClaimUnresolved, Err: errors.Join(cause, err)}
+	}
+	return ClaimCompletion{Outcome: ClaimRecovered, Err: cause}
 }
 
 func (s *Service) classifyClaimCommit(
@@ -205,7 +329,7 @@ func (s *Service) classifyClaimCommit(
 	plan DeliveryPlan,
 	prior pendingOperationRow,
 ) claimCommitState {
-	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), commitReadbackTimeout)
+	readCtx, cancel := boundedDetachedContext(ctx, commitReadbackTimeout)
 	defer cancel()
 	readState := s.readClaimState
 	if readState == nil {
@@ -238,7 +362,7 @@ func (s *Service) ensureClaimQuarantine(
 	plan DeliveryPlan,
 	prior pendingOperationRow,
 ) (repairState claimCommitState, returnErr error) {
-	repairCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), commitReadbackTimeout)
+	repairCtx, cancel := boundedDetachedContext(ctx, commitReadbackTimeout)
 	defer cancel()
 	tx, err := s.BeginTx(repairCtx, nil)
 	if err != nil {
@@ -369,16 +493,16 @@ func (s *Service) validateDeliveryPlan(plan DeliveryPlan) (Delivery, error) {
 	return s.boundDelivery()
 }
 
-func (s *Service) failExactClaim(ctx context.Context, plan DeliveryPlan, cause error) error {
+func (s *Service) failExactClaim(ctx context.Context, plan DeliveryPlan, cause error) (ClaimOutcome, error) {
 	if plan.Mode != DeliveryExactDelta {
-		return cause
+		return ClaimUnresolved, cause
 	}
-	resetCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), s.effectiveDeliveryTimeout())
+	resetCtx, cancel := boundedDetachedContext(ctx, s.effectiveDeliveryTimeout())
 	defer cancel()
 	if err := s.EmergencyReset(resetCtx, plan); err != nil {
-		return errors.Join(cause, fmt.Errorf("emergency presence reset: %w", err))
+		return ClaimUnresolved, errors.Join(cause, fmt.Errorf("emergency presence reset: %w", err))
 	}
-	return cause
+	return ClaimRecovered, cause
 }
 
 // EmergencyReset performs a marker-preserving conservative safety delivery.

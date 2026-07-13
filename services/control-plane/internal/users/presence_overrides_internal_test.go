@@ -194,6 +194,66 @@ func TestCommitAndClaimPresenceWriterPreservesInitialRollbackFailure(t *testing.
 	assert.ErrorIs(t, err, rollbackCause)
 }
 
+type failingClaimDelivery struct {
+	cause error
+	plans []presencehistory.DeliveryPlan
+}
+
+func (d *failingClaimDelivery) DeliverCustomText(
+	_ context.Context,
+	plan presencehistory.DeliveryPlan,
+) (presencehistory.DeliveryAck, error) {
+	d.plans = append(d.plans, plan)
+	if plan.Mode == presencehistory.DeliveryExactDelta {
+		return presencehistory.DeliveryAck{}, d.cause
+	}
+	return presencehistory.DeliveryAck{OperationID: plan.OperationID}, nil
+}
+
+func TestCommitAndClaimPresenceWriterJoinsConfirmedCommitAndClaimFailures(t *testing.T) {
+	db, _ := testdb.SetupTestDB(t)
+	senderID := testdb.CreateUser(t, db)
+	claimCause := errors.New("claim delivery failed")
+	delivery := &failingClaimDelivery{cause: claimCause}
+	service := presencehistory.NewService(db, presencehistory.DisclosureState{}, false)
+	require.NoError(t, service.BindDelivery(delivery))
+	tx, err := service.BeginTx(context.Background(), nil)
+	require.NoError(t, err)
+	operation, err := service.BeginAudienceOperation(
+		context.Background(), tx, senderID, presencehistory.OrdinaryAudienceWrite,
+	)
+	require.NoError(t, err)
+
+	commitCause := errors.New("ambiguous main commit")
+	rollbackCause := errors.New("main rollback transport failure")
+	rollbackCalls := 0
+	restore := service.SetTransactionTestHooks(presencehistory.TransactionTestHooks{
+		Commit: func(tx *sql.Tx) error {
+			require.NoError(t, tx.Commit())
+			return commitCause
+		},
+		Rollback: func(tx *sql.Tx) error {
+			rollbackCalls++
+			if rollbackCalls == 1 {
+				return rollbackCause
+			}
+			return tx.Rollback()
+		},
+	})
+	defer restore()
+	handler := &Handler{presenceHistory: service}
+	err = handler.commitAndClaimPresenceWriter(context.Background(), tx, operation, presencehistory.DeliveryPlan{
+		Mode: presencehistory.DeliveryExactDelta, OperationID: operation.ID, SenderID: senderID,
+	})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, commitCause)
+	assert.ErrorIs(t, err, rollbackCause)
+	assert.ErrorIs(t, err, claimCause)
+	require.Len(t, delivery.plans, 2, "delivery failure already performs exactly one conservative recovery")
+	assert.Equal(t, presencehistory.DeliveryExactDelta, delivery.plans[0].Mode)
+	assert.Equal(t, presencehistory.DeliveryConservativeReset, delivery.plans[1].Mode)
+}
+
 func TestUpsertPresenceOverridePreferenceConflictAndQueryError(t *testing.T) {
 	db, _ := testdb.SetupTestDB(t)
 	senderID := testdb.CreateUser(t, db)

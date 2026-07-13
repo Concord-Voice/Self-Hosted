@@ -24,6 +24,7 @@ type plannedPresenceReconciler interface {
 	BindDelivery(presencehistory.Delivery) error
 	WithReadySender(context.Context, uuid.UUID, func() error) error
 	ClaimAndDeliver(context.Context, presencehistory.DeliveryPlan) error
+	CompleteClaim(context.Context, presencehistory.DeliveryPlan) presencehistory.ClaimCompletion
 	EmergencyReset(context.Context, presencehistory.DeliveryPlan) error
 	ReconcilePending(context.Context, int) (presencehistory.ReconcileStats, error)
 	RunPendingReconciler(context.Context)
