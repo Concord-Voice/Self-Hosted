@@ -1014,6 +1014,37 @@ func TestReconcilePendingCompensatesLiveMarkerThenClaimsDelivery(t *testing.T) {
 	assert.Nil(t, plans[0].ClearRecipients, "crash recovery must force all-local disconnect")
 }
 
+func TestReconcilePendingTierOffPreservesHiddenStatus(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	defer cleanup()
+	senderID := testhelpers.CreateUser(t, db)
+	operationID := uuid.New()
+	seedTask8Pending(t, db, senderID, operationID, operationID, 1, true, CustomTextState{
+		Text: "hidden", Emoji: "shield",
+	})
+	_, err := db.Exec(`UPDATE user_presence_settings SET custom_text_tier = 0 WHERE user_id = $1`, senderID)
+	require.NoError(t, err)
+	delivery := &task8Delivery{}
+	service := NewService(db, DisclosureState{}, false)
+	require.NoError(t, service.BindDelivery(delivery))
+
+	stats, err := service.ReconcilePending(context.Background(), 10)
+	require.NoError(t, err)
+	assert.Equal(t, 1, stats.ResolvedCount)
+	assert.Zero(t, stats.CompensatedCount)
+	assert.Equal(t, 0, task8PendingCount(t, db, senderID))
+	version, marker, tier, text, emoji := task8SettingsState(t, db, senderID)
+	assert.Equal(t, int64(2), version)
+	assert.Equal(t, operationID, marker)
+	assert.Zero(t, tier)
+	assert.Equal(t, "hidden", text.String)
+	assert.Equal(t, "shield", emoji.String)
+	plans := delivery.snapshot()
+	require.Len(t, plans, 1)
+	assert.Equal(t, DeliveryConservativeReset, plans[0].Mode)
+	assert.Equal(t, operationID, plans[0].OperationID)
+}
+
 func TestReconcilePendingDeliveryRetryKeepsCompensationMarker(t *testing.T) {
 	db, cleanup := testhelpers.SetupTestDB(t)
 	defer cleanup()

@@ -775,9 +775,9 @@ func (s *Service) reconcileLockedPending(
 	if settings.Version == math.MaxInt64 {
 		return reconcileResult{retained: true}, errors.New("presence settings version exhausted")
 	}
-	if settings.Tier == 0 && !settings.Text.Valid && !settings.Emoji.Valid {
+	if settings.Tier == 0 {
 		if err := s.RollbackTx(tx); err != nil && !errors.Is(err, sql.ErrTxDone) {
-			return reconcileResult{retained: true}, fmt.Errorf("release compensated presence locks: %w", err)
+			return reconcileResult{retained: true}, fmt.Errorf("release presence reconciliation locks: %w", err)
 		}
 		err := s.ClaimAndDeliver(ctx, DeliveryPlan{
 			Mode:        DeliveryConservativeReset,
