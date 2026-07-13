@@ -27,6 +27,47 @@ func TestPresenceWriterLogEmissionsExcludeContentIdentifiersAndAccountTimestamps
 	}
 }
 
+func TestReplaceMyKeysForcedClearLogsUseStableMetadataOnly(t *testing.T) {
+	source, err := os.ReadFile("handlers.go") // #nosec G304 -- fixed test-only source filename
+	require.NoError(t, err)
+	files := token.NewFileSet()
+	parsed, err := parser.ParseFile(files, "handlers.go", source, 0)
+	require.NoError(t, err)
+	targets := map[string]bool{
+		"ReplaceMyKeys": true, "replaceMyKeysCoordinated": true, "forcedClearOutcomeClass": true,
+	}
+	var violations []string
+	for _, declaration := range parsed.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if !ok || !targets[function.Name.Name] || function.Body == nil {
+			continue
+		}
+		ast.Inspect(function.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok || !isPresenceWriterLoggerCall(call.Fun) {
+				return true
+			}
+			position := files.Position(call.Pos())
+			for _, argument := range call.Args {
+				ast.Inspect(argument, func(value ast.Node) bool {
+					if identifier, ok := value.(*ast.Ident); ok {
+						lower := strings.ToLower(identifier.Name)
+						if presenceWriterSensitiveLogValue.MatchString(lower) ||
+							lower == "err" || strings.HasSuffix(lower, "err") || lower == "cause" {
+							violations = append(violations, fmt.Sprintf(
+								"%s:%d sensitive/raw logger value %q", position.Filename, position.Line, identifier.Name,
+							))
+						}
+					}
+					return true
+				})
+			}
+			return true
+		})
+	}
+	assert.Empty(t, violations, strings.Join(violations, "\n"))
+}
+
 func TestPresenceWriterLogGuardPositiveAndNegativeControls(t *testing.T) {
 	for name, bad := range map[string][]byte{
 		"direct": []byte(`package users

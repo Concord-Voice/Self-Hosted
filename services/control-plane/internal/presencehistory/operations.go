@@ -46,14 +46,15 @@ const (
 // AudienceOperation is the complete durable evidence needed to classify the
 // main transaction and perform acknowledged delivery.
 type AudienceOperation struct {
-	ID               uuid.UUID
-	SenderID         uuid.UUID
-	PriorVersion     int64
-	Version          int64
-	PriorOperationID *uuid.UUID
-	ReconcileAfter   time.Time
-	Before           CustomTextState
-	BeforeTier       int
+	ID                uuid.UUID
+	SenderID          uuid.UUID
+	PriorVersion      int64
+	Version           int64
+	PriorOperationID  *uuid.UUID
+	SupersededPending bool
+	ReconcileAfter    time.Time
+	Before            CustomTextState
+	BeforeTier        int
 }
 
 // DeliveryPlan contains prepared, non-locking delivery inputs.
@@ -140,27 +141,82 @@ func (s *Service) BeginAudienceOperation(
 	if mode != OrdinaryAudienceWrite && mode != ForcedSecurityClear {
 		return AudienceOperation{}, fmt.Errorf("invalid audience operation mode")
 	}
-	if err := lockUser(ctx, tx, senderID); err != nil {
+	prior, err := lockAudienceOperationPrior(ctx, tx, senderID)
+	if err != nil {
 		return AudienceOperation{}, err
+	}
+	pending, err := lockAudienceOperationPending(ctx, tx, senderID)
+	if err != nil {
+		return AudienceOperation{}, err
+	}
+	now, err := readAudienceOperationClock(ctx, tx)
+	if err != nil {
+		return AudienceOperation{}, err
+	}
+	if err := validateAudienceOperationReadiness(mode, pending, now); err != nil {
+		return AudienceOperation{}, err
+	}
+	if prior.version == math.MaxInt64 {
+		return AudienceOperation{}, fmt.Errorf("audience operation version exhausted")
+	}
+
+	operationID := uuid.New()
+	nextVersion := prior.version + 1
+	nextReconcileAfter := now.Add(pendingOperationGrace)
+	if err := writeAudienceOperationPending(
+		ctx, tx, senderID, operationID, prior.version, now, pending.exists,
+	); err != nil {
+		return AudienceOperation{}, err
+	}
+	if err := writeAudienceOperationVersion(ctx, tx, senderID, operationID, nextVersion, now); err != nil {
+		return AudienceOperation{}, err
+	}
+
+	operation := AudienceOperation{
+		ID:                operationID,
+		SenderID:          senderID,
+		PriorVersion:      prior.version,
+		Version:           nextVersion,
+		SupersededPending: pending.exists,
+		ReconcileAfter:    nextReconcileAfter,
+		Before: normalizeCustomTextState(CustomTextState{
+			Text:  nullableString(prior.text),
+			Emoji: nullableString(prior.emoji),
+		}),
+		BeforeTier: prior.tier,
+	}
+	if prior.marker.Valid {
+		value := prior.marker.UUID
+		operation.PriorOperationID = &value
+	}
+	return operation, nil
+}
+
+type audienceOperationPrior struct {
+	version int64
+	marker  uuid.NullUUID
+	tier    int
+	text    sql.NullString
+	emoji   sql.NullString
+}
+
+func lockAudienceOperationPrior(
+	ctx context.Context,
+	tx *sql.Tx,
+	senderID uuid.UUID,
+) (audienceOperationPrior, error) {
+	if err := lockUser(ctx, tx, senderID); err != nil {
+		return audienceOperationPrior{}, err
 	}
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO user_presence_settings (user_id)
 		VALUES ($1)
 		ON CONFLICT (user_id) DO NOTHING
 	`, senderID); err != nil {
-		return AudienceOperation{}, fmt.Errorf("ensure audience operation settings: %w", err)
+		return audienceOperationPrior{}, fmt.Errorf("ensure audience operation settings: %w", err)
 	}
-
-	var (
-		priorVersion   int64
-		priorMarker    uuid.NullUUID
-		beforeTier     int
-		beforeText     sql.NullString
-		beforeEmoji    sql.NullString
-		pendingMarker  uuid.UUID
-		reconcileAfter time.Time
-	)
-	if err := tx.QueryRowContext(ctx, `
+	var prior audienceOperationPrior
+	err := tx.QueryRowContext(ctx, `
 		SELECT presence_settings_version,
 		       presence_settings_operation_id,
 		       custom_text_tier,
@@ -169,49 +225,77 @@ func (s *Service) BeginAudienceOperation(
 		FROM user_presence_settings
 		WHERE user_id = $1
 		FOR UPDATE
-	`, senderID).Scan(
-		&priorVersion,
-		&priorMarker,
-		&beforeTier,
-		&beforeText,
-		&beforeEmoji,
-	); err != nil {
-		return AudienceOperation{}, fmt.Errorf("lock audience operation settings: %w", err)
+	`, senderID).Scan(&prior.version, &prior.marker, &prior.tier, &prior.text, &prior.emoji)
+	if err != nil {
+		return audienceOperationPrior{}, fmt.Errorf("lock audience operation settings: %w", err)
 	}
+	return prior, nil
+}
 
-	pendingExists := true
-	if err := tx.QueryRowContext(ctx, `
+type audienceOperationPending struct {
+	exists         bool
+	reconcileAfter time.Time
+}
+
+func lockAudienceOperationPending(
+	ctx context.Context,
+	tx *sql.Tx,
+	senderID uuid.UUID,
+) (audienceOperationPending, error) {
+	var operationID uuid.UUID
+	var pending audienceOperationPending
+	err := tx.QueryRowContext(ctx, `
 		SELECT operation_id, reconcile_after
 		FROM presence_settings_pending_operations
 		WHERE user_id = $1
 		FOR UPDATE
-	`, senderID).Scan(&pendingMarker, &reconcileAfter); errors.Is(err, sql.ErrNoRows) {
-		pendingExists = false
-	} else if err != nil {
-		return AudienceOperation{}, fmt.Errorf("lock pending presence operation: %w", err)
+	`, senderID).Scan(&operationID, &pending.reconcileAfter)
+	if errors.Is(err, sql.ErrNoRows) {
+		return pending, nil
 	}
+	if err != nil {
+		return audienceOperationPending{}, fmt.Errorf("lock pending presence operation: %w", err)
+	}
+	pending.exists = true
+	return pending, nil
+}
 
+func readAudienceOperationClock(ctx context.Context, tx *sql.Tx) (time.Time, error) {
 	var now time.Time
 	if err := tx.QueryRowContext(ctx, `SELECT clock_timestamp()`).Scan(&now); err != nil {
-		return AudienceOperation{}, fmt.Errorf("read audience operation clock: %w", err)
+		return time.Time{}, fmt.Errorf("read audience operation clock: %w", err)
 	}
-	if pendingExists && mode == OrdinaryAudienceWrite {
-		if reconcileAfter.After(now) {
-			return AudienceOperation{}, &ServiceError{
-				Status:     http.StatusServiceUnavailable,
-				Code:       "presence_operation_pending",
-				RetryAfter: ceilRetryAfter(reconcileAfter.Sub(now)),
-			}
-		}
-		return AudienceOperation{}, ErrPendingOperationEligible
-	}
-	if priorVersion == math.MaxInt64 {
-		return AudienceOperation{}, fmt.Errorf("audience operation version exhausted")
-	}
+	return now, nil
+}
 
-	operationID := uuid.New()
-	nextVersion := priorVersion + 1
-	nextReconcileAfter := now.Add(pendingOperationGrace)
+func validateAudienceOperationReadiness(
+	mode OperationMode,
+	pending audienceOperationPending,
+	now time.Time,
+) error {
+	if !pending.exists || mode == ForcedSecurityClear {
+		return nil
+	}
+	if pending.reconcileAfter.After(now) {
+		return &ServiceError{
+			Status:     http.StatusServiceUnavailable,
+			Code:       "presence_operation_pending",
+			RetryAfter: ceilRetryAfter(pending.reconcileAfter.Sub(now)),
+		}
+	}
+	return ErrPendingOperationEligible
+}
+
+func writeAudienceOperationPending(
+	ctx context.Context,
+	tx *sql.Tx,
+	senderID uuid.UUID,
+	operationID uuid.UUID,
+	priorVersion int64,
+	now time.Time,
+	pendingExists bool,
+) error {
+	reconcileAfter := now.Add(pendingOperationGrace)
 	if pendingExists {
 		result, err := tx.ExecContext(ctx, `
 			UPDATE presence_settings_pending_operations
@@ -220,14 +304,13 @@ func (s *Service) BeginAudienceOperation(
 			    created_at = $4,
 			    reconcile_after = $5
 			WHERE user_id = $1
-		`, senderID, operationID, priorVersion, now, nextReconcileAfter)
+		`, senderID, operationID, priorVersion, now, reconcileAfter)
 		if err != nil {
-			return AudienceOperation{}, fmt.Errorf("supersede pending presence operation: %w", err)
+			return fmt.Errorf("supersede pending presence operation: %w", err)
 		}
-		if err := requireOneAffected(result, "supersede pending presence operation"); err != nil {
-			return AudienceOperation{}, err
-		}
-	} else if _, err := tx.ExecContext(ctx, `
+		return requireOneAffected(result, "supersede pending presence operation")
+	}
+	_, err := tx.ExecContext(ctx, `
 		INSERT INTO presence_settings_pending_operations (
 			user_id,
 			operation_id,
@@ -235,10 +318,21 @@ func (s *Service) BeginAudienceOperation(
 			created_at,
 			reconcile_after
 		) VALUES ($1, $2, $3, $4, $5)
-	`, senderID, operationID, priorVersion, now, nextReconcileAfter); err != nil {
-		return AudienceOperation{}, fmt.Errorf("insert pending presence operation: %w", err)
+	`, senderID, operationID, priorVersion, now, reconcileAfter)
+	if err != nil {
+		return fmt.Errorf("insert pending presence operation: %w", err)
 	}
+	return nil
+}
 
+func writeAudienceOperationVersion(
+	ctx context.Context,
+	tx *sql.Tx,
+	senderID uuid.UUID,
+	operationID uuid.UUID,
+	nextVersion int64,
+	now time.Time,
+) error {
 	result, err := tx.ExecContext(ctx, `
 		UPDATE user_presence_settings
 		SET presence_settings_version = $2,
@@ -247,29 +341,9 @@ func (s *Service) BeginAudienceOperation(
 		WHERE user_id = $1
 	`, senderID, nextVersion, operationID, now)
 	if err != nil {
-		return AudienceOperation{}, fmt.Errorf("store audience operation version: %w", err)
+		return fmt.Errorf("store audience operation version: %w", err)
 	}
-	if err := requireOneAffected(result, "store audience operation version"); err != nil {
-		return AudienceOperation{}, err
-	}
-
-	operation := AudienceOperation{
-		ID:             operationID,
-		SenderID:       senderID,
-		PriorVersion:   priorVersion,
-		Version:        nextVersion,
-		ReconcileAfter: nextReconcileAfter,
-		Before: normalizeCustomTextState(CustomTextState{
-			Text:  nullableString(beforeText),
-			Emoji: nullableString(beforeEmoji),
-		}),
-		BeforeTier: beforeTier,
-	}
-	if priorMarker.Valid {
-		value := priorMarker.UUID
-		operation.PriorOperationID = &value
-	}
-	return operation, nil
+	return requireOneAffected(result, "store audience operation version")
 }
 
 func ceilRetryAfter(remaining time.Duration) time.Duration {

@@ -216,6 +216,7 @@ func NewRouter(db *sql.DB, redis *redis.Client, store media.ObjectStore, cfg *co
 
 	// Initialize handlers
 	authHandler := auth.NewHandlerForInstance(db, redis, log, cfg.JWTSecret, hub, cfg.InstanceType)
+	authHandler.SetPresenceHistory(presenceHistoryService)
 	authHandler.SetEmailService(emailSvc)
 	// Wire cross-references (breaks circular init dependency)
 	authHandler.SetMFAChecker(mfaHandler)

@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -191,6 +192,7 @@ func TestChangePasswordAtomicallyRotatesPresenceOverrideCiphertext(t *testing.T)
 	user := ts.CreateTestUser(t, "changepresenceatomic")
 	target := ts.CreateTestUser(t, "changepresenceatomictarget")
 	seedPresenceOverrideStateForKeyRotation(t, ts, user.ID, target.ID)
+	historyID := seedOpenHistoryRow(t, ts.DB, uuid.MustParse(user.ID), "private status")
 	_, wrappedKey, salt := testhelpers.E2EETestKeys()
 	const newPassword = "NewPassword456!"                            // pragma: allowlist secret
 	const newCiphertext = "bmV3LXByZWZlcmVuY2Uta2V5LWNpcGhlcnRleHQ=" // pragma: allowlist secret
@@ -238,6 +240,11 @@ func TestChangePasswordAtomicallyRotatesPresenceOverrideCiphertext(t *testing.T)
 	assert.Equal(t, newCiphertext, ciphertext)
 	assert.Equal(t, 5, version)
 	assert.Equal(t, 1, targetCount, "password rotation must not alter materialized recipients")
+	var endedAt sql.NullTime
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT ended_at FROM presence_history WHERE id = $1`, historyID,
+	).Scan(&endedAt))
+	assert.False(t, endedAt.Valid, "password-only rewrap must not be a semantic Custom Status clear")
 }
 
 func TestChangePasswordPresenceOverrideConflictRollsBackPasswordAndKeys(t *testing.T) {
@@ -499,39 +506,167 @@ func TestChangePasswordMFAReauthenticationUsesLockedTransactionConnection(t *tes
 	require.Equal(t, http.StatusOK, w.Code, "%s\n%s", w.Body.String(), requestLogs.String())
 }
 
-type postCommitResetClearer struct {
-	db                    *sql.DB
-	calls                 int
-	senderID              uuid.UUID
-	preferenceCountAtCall int
-	tierAtCall            int
+type forcedClearRecordingDelivery struct {
+	plans []presencehistory.DeliveryPlan
+	err   error
 }
 
-func (c *postCommitResetClearer) ClearCustomTextForPresenceAudience(senderID uuid.UUID) {
-	c.calls++
-	c.senderID = senderID
-	_ = c.db.QueryRow(
-		`SELECT COUNT(*) FROM presence_override_preferences WHERE user_id = $1`,
-		senderID,
-	).Scan(&c.preferenceCountAtCall)
-	_ = c.db.QueryRow(
-		`SELECT custom_text_tier FROM user_presence_settings WHERE user_id = $1`,
-		senderID,
-	).Scan(&c.tierAtCall)
+func (d *forcedClearRecordingDelivery) DeliverCustomText(
+	_ context.Context,
+	plan presencehistory.DeliveryPlan,
+) (presencehistory.DeliveryAck, error) {
+	d.plans = append(d.plans, plan)
+	if d.err != nil {
+		return presencehistory.DeliveryAck{}, d.err
+	}
+	return presencehistory.DeliveryAck{OperationID: plan.OperationID}, nil
 }
 
-func TestReplaceMyKeysCoordinatesAndClearsCustomTextAfterCommit(t *testing.T) {
+func TestReplaceMyKeysRequiresAcknowledgedForcedSecurityClear(t *testing.T) {
 	ts := setupTS(t)
-	user := ts.CreateTestUser(t, "replacepresenceclear")
-	target := ts.CreateTestUser(t, "replacepresencecleartarget")
+	user := ts.CreateTestUser(t, "replaceforcedclear")
+	target := ts.CreateTestUser(t, "replaceforcedcleartarget")
 	seedPresenceOverrideStateForKeyRotation(t, ts, user.ID, target.ID)
-	handler := users.NewHandler(ts.DB, logger.NewWithWriter(io.Discard), nil, nil, nil)
-	service := presencehistory.NewService(ts.DB, presencehistory.DisclosureState{}, false)
-	require.NoError(t, service.BindDelivery(immediatePresenceDelivery{}))
-	handler.SetPresenceHistory(service)
-	clearer := &postCommitResetClearer{db: ts.DB}
-	users.SetCustomTextResetBroadcasterForTest(handler, clearer)
+	_, err := ts.DB.Exec(`
+		UPDATE user_presence_settings
+		SET activity_history_enabled = TRUE,
+		    activity_history_retention_days = 30,
+		    activity_history_consent_version = 1,
+		    activity_history_consent_copy_hash = $2,
+		    activity_history_consented_at = clock_timestamp()
+		WHERE user_id = $1
+	`, user.ID, task9ConsentHash)
+	require.NoError(t, err)
+	historyID := seedOpenHistoryRow(t, ts.DB, uuid.MustParse(user.ID), "private status")
 
+	delivery := &forcedClearRecordingDelivery{}
+	service := presencehistory.NewService(ts.DB, presencehistory.DisclosureState{
+		Available: true,
+		RequiredConsent: &presencehistory.RequiredConsent{
+			Version:  1,
+			CopyHash: task9ConsentHash,
+		},
+	}, true)
+	require.NoError(t, service.BindDelivery(delivery))
+	handler := users.NewHandler(ts.DB, logger.NewWithWriter(io.Discard), nil, nil, nil)
+	handler.SetPresenceHistory(service)
+
+	publicKey, wrappedKey, salt := testhelpers.E2EETestKeys()
+	body, err := json.Marshal(map[string]interface{}{
+		keyWrappedPrivateKey:    wrappedKey,
+		keyKeyDerivationSalt:    salt,
+		"key_derivation_alg":    "argon2id",
+		"public_key":            publicKey,
+		"acknowledge_data_loss": true,
+		keyCurrentPassword:      user.Password,
+		"user_id":               target.ID,
+	})
+	require.NoError(t, err)
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
+	c.Set("user_id", user.ID)
+	c.Request = httptest.NewRequest(http.MethodPut, urlUsersMeKeys, bytes.NewReader(body))
+	c.Request.Header.Set("Content-Type", "application/json")
+
+	handler.ReplaceMyKeys(c)
+
+	require.Equal(t, http.StatusOK, response.Code)
+	require.Len(t, delivery.plans, 1, "success must wait for one acknowledged forced clear")
+	plan := delivery.plans[0]
+	assert.Equal(t, presencehistory.DeliveryConservativeReset, plan.Mode)
+	assert.Equal(t, uuid.MustParse(user.ID), plan.SenderID)
+	assert.NotEqual(t, uuid.Nil, plan.OperationID)
+	assert.Nil(t, plan.Payload)
+	assert.Empty(t, plan.UpdateRecipients)
+
+	var pendingCount int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM presence_settings_pending_operations WHERE user_id = $1`,
+		user.ID,
+	).Scan(&pendingCount))
+	assert.Zero(t, pendingCount, "matching acknowledgement must delete exactly the security marker")
+	var endedAt sql.NullTime
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT ended_at FROM presence_history WHERE id = $1`, historyID,
+	).Scan(&endedAt))
+	assert.True(t, endedAt.Valid, "forced key replacement must close the active interval")
+}
+
+func TestReplaceMyKeysRecorderFailureRollsBackKeyStatusOverrideAndMarker(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "replaceforcedrollback")
+	target := ts.CreateTestUser(t, "replaceforcedrollbacktarget")
+	seedPresenceOverrideStateForKeyRotation(t, ts, user.ID, target.ID)
+	var originalPublicKey []byte
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT public_key FROM public_keys WHERE user_id = $1`, user.ID,
+	).Scan(&originalPublicKey))
+
+	delivery := &forcedClearRecordingDelivery{}
+	service := presencehistory.NewService(ts.DB, presencehistory.DisclosureState{}, false)
+	require.NoError(t, service.BindDelivery(delivery))
+	restore := service.SetTransactionTestHooks(presencehistory.TransactionTestHooks{
+		RecordTransition: func(context.Context, *sql.Tx, uuid.UUID, presencehistory.CustomTextState, presencehistory.CustomTextState) error {
+			return errors.New("forced history recorder failure")
+		},
+	})
+	t.Cleanup(restore)
+	handler := users.NewHandler(ts.DB, logger.NewWithWriter(io.Discard), nil, nil, nil)
+	handler.SetPresenceHistory(service)
+
+	response := invokeReplaceMyKeysWithHandler(t, handler, user)
+	assert.Equal(t, http.StatusInternalServerError, response.Code)
+	assert.Empty(t, delivery.plans)
+
+	var persistedPublicKey []byte
+	var tier, preferenceCount, pendingCount int
+	var text string
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT public_key FROM public_keys WHERE user_id = $1`, user.ID,
+	).Scan(&persistedPublicKey))
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT custom_text_tier, custom_text FROM user_presence_settings WHERE user_id = $1`, user.ID,
+	).Scan(&tier, &text))
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM presence_override_preferences WHERE user_id = $1`, user.ID,
+	).Scan(&preferenceCount))
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM presence_settings_pending_operations WHERE user_id = $1`, user.ID,
+	).Scan(&pendingCount))
+	assert.Equal(t, originalPublicKey, persistedPublicKey)
+	assert.Equal(t, 2, tier)
+	assert.Equal(t, "private status", text)
+	assert.Equal(t, 1, preferenceCount)
+	assert.Zero(t, pendingCount)
+}
+
+func TestReplaceMyKeysDeliveryFailureReturns503AndRetainsSecurityMarker(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "replaceforceddeliveryfailure")
+	target := ts.CreateTestUser(t, "replaceforceddeliveryfailuretarget")
+	seedPresenceOverrideStateForKeyRotation(t, ts, user.ID, target.ID)
+	delivery := &forcedClearRecordingDelivery{err: errors.New("forced delivery failure")}
+	service := presencehistory.NewService(ts.DB, presencehistory.DisclosureState{}, false)
+	require.NoError(t, service.BindDelivery(delivery))
+	handler := users.NewHandler(ts.DB, logger.NewWithWriter(io.Discard), nil, nil, nil)
+	handler.SetPresenceHistory(service)
+
+	response := invokeReplaceMyKeysWithHandler(t, handler, user)
+	assert.Equal(t, http.StatusServiceUnavailable, response.Code)
+	assert.NotEmpty(t, delivery.plans)
+	var pendingCount int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM presence_settings_pending_operations WHERE user_id = $1`, user.ID,
+	).Scan(&pendingCount))
+	assert.Equal(t, 1, pendingCount)
+}
+
+func invokeReplaceMyKeysWithHandler(
+	t *testing.T,
+	handler *users.Handler,
+	user testhelpers.TestUser,
+) *httptest.ResponseRecorder {
+	t.Helper()
 	publicKey, wrappedKey, salt := testhelpers.E2EETestKeys()
 	body, err := json.Marshal(map[string]interface{}{
 		keyWrappedPrivateKey:    wrappedKey,
@@ -542,19 +677,13 @@ func TestReplaceMyKeysCoordinatesAndClearsCustomTextAfterCommit(t *testing.T) {
 		keyCurrentPassword:      user.Password,
 	})
 	require.NoError(t, err)
-	w := httptest.NewRecorder()
-	c, _ := gin.CreateTestContext(w)
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
 	c.Set("user_id", user.ID)
 	c.Request = httptest.NewRequest(http.MethodPut, urlUsersMeKeys, bytes.NewReader(body))
 	c.Request.Header.Set("Content-Type", "application/json")
-
 	handler.ReplaceMyKeys(c)
-
-	require.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, 1, clearer.calls)
-	assert.Equal(t, uuid.MustParse(user.ID), clearer.senderID)
-	assert.Zero(t, clearer.preferenceCountAtCall, "clear must run after reset transaction commits")
-	assert.Zero(t, clearer.tierAtCall, "visibility must already be Off when clear is sent")
+	return response
 }
 
 func TestReplaceMyKeysPresenceGateFailureClassification(t *testing.T) {
@@ -579,30 +708,28 @@ func TestReplaceMyKeysPresenceGateFailureClassification(t *testing.T) {
 		assert.Equal(t, http.StatusInternalServerError, response.Code)
 	})
 
-	t.Run("pending grace is retryable with retry after", func(t *testing.T) {
-		db, _ := testhelpers.SetupTestDB(t)
-		senderID := testhelpers.CreateUser(t, db)
-		operationID := uuid.New()
-		_, err := db.Exec(`
-			INSERT INTO user_presence_settings (
-				user_id, presence_settings_version, presence_settings_operation_id
-			) VALUES ($1, 1, $2)
-		`, senderID, operationID)
+	t.Run("forced clear supersedes unexpired ordinary marker", func(t *testing.T) {
+		ts := setupTS(t)
+		user := ts.CreateTestUser(t, "replacekeyspendingsupersede")
+		senderID := uuid.MustParse(user.ID)
+		delivery := &forcedClearRecordingDelivery{}
+		service := presencehistory.NewService(ts.DB, presencehistory.DisclosureState{}, false)
+		require.NoError(t, service.BindDelivery(delivery))
+		ordinaryTx, err := service.BeginTx(context.Background(), nil)
 		require.NoError(t, err)
-		_, err = db.Exec(`
-			INSERT INTO presence_settings_pending_operations (
-				user_id, operation_id, prior_settings_version, created_at, reconcile_after
-			) VALUES ($1, $2, 0, clock_timestamp(), clock_timestamp() + INTERVAL '30 seconds')
-		`, senderID, operationID)
+		_, err = service.BeginAudienceOperation(
+			context.Background(), ordinaryTx, senderID, presencehistory.OrdinaryAudienceWrite,
+		)
 		require.NoError(t, err)
-		handler := users.NewHandler(db, logger.NewWithWriter(io.Discard), nil, nil, nil)
-		service := presencehistory.NewService(db, presencehistory.DisclosureState{}, false)
-		require.NoError(t, service.BindDelivery(immediatePresenceDelivery{}))
+		require.NoError(t, service.CommitTx(ordinaryTx))
+		handler := users.NewHandler(ts.DB, logger.NewWithWriter(io.Discard), nil, nil, nil)
 		handler.SetPresenceHistory(service)
 
-		response := invokeReplaceMyKeysForPresenceGate(handler, senderID)
-		assert.Equal(t, http.StatusServiceUnavailable, response.Code)
-		assert.NotEmpty(t, response.Header().Get("Retry-After"))
+		response := invokeReplaceMyKeysWithHandler(t, handler, user)
+		assert.Equal(t, http.StatusOK, response.Code)
+		require.Len(t, delivery.plans, 1)
+		assert.Nil(t, delivery.plans[0].ClearRecipients)
+		assert.Nil(t, delivery.plans[0].UpdateRecipients)
 	})
 }
 

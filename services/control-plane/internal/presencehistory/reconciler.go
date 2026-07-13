@@ -125,15 +125,33 @@ func (s *Service) boundDelivery() (Delivery, error) {
 
 // WithReadySender retains one sender gate through reconciliation and work.
 func (s *Service) WithReadySender(ctx context.Context, senderID uuid.UUID, work func() error) error {
+	return s.WithReadySenderMode(ctx, senderID, OrdinaryAudienceWrite, work)
+}
+
+// WithReadySenderMode retains the same single sender gate while allowing a
+// forced privacy-narrowing clear to supersede an unexpired ordinary marker.
+func (s *Service) WithReadySenderMode(
+	ctx context.Context,
+	senderID uuid.UUID,
+	mode OperationMode,
+	work func() error,
+) error {
 	if s == nil || s.db == nil || senderID == uuid.Nil || work == nil {
 		return errors.New("presence history ready sender unavailable")
+	}
+	if mode != OrdinaryAudienceWrite && mode != ForcedSecurityClear {
+		return errors.New("invalid presence history ready sender mode")
 	}
 	if _, err := s.boundDelivery(); err != nil {
 		return err
 	}
 	return s.WithSender(ctx, senderID, func() error {
 		if _, err := s.reconcileSenderAlreadyGated(ctx, senderID); err != nil {
-			return err
+			var pending *ServiceError
+			if mode != ForcedSecurityClear || !errors.As(err, &pending) ||
+				err != pending || pending.Code != "presence_operation_pending" {
+				return err
+			}
 		}
 		return work()
 	})

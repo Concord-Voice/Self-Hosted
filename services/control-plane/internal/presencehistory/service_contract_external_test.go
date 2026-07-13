@@ -23,6 +23,9 @@ type plannedCustomTextRecorder interface {
 type plannedPresenceReconciler interface {
 	BindDelivery(presencehistory.Delivery) error
 	WithReadySender(context.Context, uuid.UUID, func() error) error
+	WithReadySenderMode(context.Context, uuid.UUID, presencehistory.OperationMode, func() error) error
+	BeginForcedSecurityClear(context.Context, *sql.Tx, uuid.UUID) (presencehistory.ForcedClearResult, error)
+	CompleteForcedSecurityClear(context.Context, *sql.Tx, presencehistory.ForcedClearResult) presencehistory.ForcedClearCompletion
 	ClaimAndDeliver(context.Context, presencehistory.DeliveryPlan) error
 	CompleteClaim(context.Context, presencehistory.DeliveryPlan) presencehistory.ClaimCompletion
 	EmergencyReset(context.Context, presencehistory.DeliveryPlan) error
