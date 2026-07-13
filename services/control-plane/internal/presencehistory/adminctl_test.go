@@ -114,13 +114,13 @@ func TestAdminCtlDestructiveGateRefusalPrecedesEveryOperation(t *testing.T) {
 
 func TestPreflightValidationRequiresCleanSchemaAndConsistentPendingRows(t *testing.T) {
 	valid := adminCtlPreflightResult{
-		migrationVersion:    85,
+		migrationVersion:    86,
 		requiredTables:      2,
 		requiredColumns:     8,
 		disclosureAvailable: false,
 	}
 	require.NoError(t, validateAdminCtlPreflight(valid))
-	valid.migrationVersion = 86
+	valid.migrationVersion = 87
 	valid.disclosureAvailable = true
 	require.NoError(t, validateAdminCtlPreflight(valid))
 
@@ -128,7 +128,7 @@ func TestPreflightValidationRequiresCleanSchemaAndConsistentPendingRows(t *testi
 		name   string
 		mutate func(*adminCtlPreflightResult)
 	}{
-		{name: "migration too old", mutate: func(result *adminCtlPreflightResult) { result.migrationVersion = 84 }},
+		{name: "migration too old", mutate: func(result *adminCtlPreflightResult) { result.migrationVersion = 85 }},
 		{name: "dirty migration", mutate: func(result *adminCtlPreflightResult) { result.migrationDirty = true }},
 		{name: "missing table", mutate: func(result *adminCtlPreflightResult) { result.requiredTables = 1 }},
 		{name: "missing column", mutate: func(result *adminCtlPreflightResult) { result.requiredColumns = 7 }},
@@ -140,7 +140,7 @@ func TestPreflightValidationRequiresCleanSchemaAndConsistentPendingRows(t *testi
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			result := valid
-			result.migrationVersion = 85
+			result.migrationVersion = 86
 			result.disclosureAvailable = false
 			tc.mutate(&result)
 			require.Error(t, validateAdminCtlPreflight(result))
@@ -170,7 +170,7 @@ func TestPreflightReadsRealSchemaWithoutMutatingSettingsOrPending(t *testing.T) 
 	controller := newAdminCtlController(db, NewService(db, disclosure, false), disclosure)
 	result, err := controller.preflight(context.Background())
 	require.NoError(t, err)
-	assert.GreaterOrEqual(t, result.migrationVersion, uint(85))
+	assert.GreaterOrEqual(t, result.migrationVersion, uint(86))
 	assert.False(t, result.migrationDirty)
 	assert.Equal(t, 2, result.requiredTables)
 	assert.Equal(t, 8, result.requiredColumns)
@@ -563,7 +563,7 @@ func TestAdminCtlPreflightAndDowngradeDispatchUseAggregateContracts(t *testing.T
 			operations: adminCtlOperations{
 				preflight: func(context.Context) (adminCtlPreflightResult, error) {
 					return adminCtlPreflightResult{
-						migrationVersion:    85,
+						migrationVersion:    86,
 						requiredTables:      2,
 						requiredColumns:     8,
 						disclosureAvailable: false,
@@ -575,7 +575,7 @@ func TestAdminCtlPreflightAndDowngradeDispatchUseAggregateContracts(t *testing.T
 		}
 		code := runAdminCtl(context.Background(), deps, []string{"preflight", "--confirm-drained"})
 		assert.Zero(t, code)
-		assert.Equal(t, "activity-history preflight status=success migration_version=85 migration_dirty=false required_tables=2 required_columns=8 disclosure_available=false pending=2 pending_inconsistent=0\n", stdout.String())
+		assert.Equal(t, "activity-history preflight status=success migration_version=86 migration_dirty=false required_tables=2 required_columns=8 disclosure_available=false pending=2 pending_inconsistent=0\n", stdout.String())
 	})
 
 	t.Run("downgrade", func(t *testing.T) {
@@ -599,7 +599,7 @@ func TestAdminCtlPreflightAndDowngradeDispatchUseAggregateContracts(t *testing.T
 		assert.Zero(t, code)
 		assert.True(t, zeroChecked)
 		assert.True(t, downgraded)
-		assert.Equal(t, "activity-history downgrade-schema status=success enabled_remaining=0 history_remaining=0 pending_remaining=0 migration_version=84\n", stdout.String())
+		assert.Equal(t, "activity-history downgrade-schema status=success enabled_remaining=0 history_remaining=0 pending_remaining=0 migration_version=85\n", stdout.String())
 	})
 }
 

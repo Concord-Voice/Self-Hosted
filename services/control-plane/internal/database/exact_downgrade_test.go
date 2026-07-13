@@ -163,10 +163,10 @@ func (f *fakeExactSource) Prev(version uint) (uint, error) {
 	if f.prevErr != nil {
 		return 0, f.prevErr
 	}
-	if version != 85 {
+	if version != 86 {
 		return 0, os.ErrNotExist
 	}
-	return 84, nil
+	return 85, nil
 }
 
 func (f *fakeExactSource) Next(uint) (uint, error) {
@@ -177,10 +177,10 @@ func (f *fakeExactSource) ReadUp(version uint) (io.ReadCloser, string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.readUpCalls = append(f.readUpCalls, version)
-	if version != 85 {
+	if version != 86 {
 		return nil, "", os.ErrNotExist
 	}
-	return io.NopCloser(strings.NewReader("up migration 85")), "000085_presence_history.up.sql", nil
+	return io.NopCloser(strings.NewReader("up migration 86")), "000086_presence_history.up.sql", nil
 }
 
 func (f *fakeExactSource) ReadDown(version uint) (io.ReadCloser, string, error) {
@@ -190,7 +190,7 @@ func (f *fakeExactSource) ReadDown(version uint) (io.ReadCloser, string, error) 
 	if f.readDownErr != nil {
 		return nil, "", f.readDownErr
 	}
-	return io.NopCloser(strings.NewReader("down migration 85")), "000085_presence_history.down.sql", nil
+	return io.NopCloser(strings.NewReader("down migration 86")), "000086_presence_history.down.sql", nil
 }
 
 type exactDowngradeHarness struct {
@@ -220,15 +220,15 @@ func newExactDowngradeHarness(version int, dirty bool) *exactDowngradeHarness {
 	return h
 }
 
-func TestExactDowngradeMigration85PublicAPI(t *testing.T) {
-	downgrade := ExactDowngradeMigration85
+func TestExactDowngradeMigration86PublicAPI(t *testing.T) {
+	downgrade := ExactDowngradeMigration86
 	require.NotNil(t, downgrade)
 }
 
-func TestExactDowngradeMigration85RunsOneGuardedDownStep(t *testing.T) {
-	h := newExactDowngradeHarness(85, false)
+func TestExactDowngradeMigration86RunsOneGuardedDownStep(t *testing.T) {
+	h := newExactDowngradeHarness(86, false)
 
-	err := runExactDowngradeMigration85("postgres://dedicated", h.deps)
+	err := runExactDowngradeMigration86("postgres://dedicated", h.deps)
 
 	require.NoError(t, err)
 	assert.Equal(t, "postgres://dedicated", h.databaseURL)
@@ -237,27 +237,27 @@ func TestExactDowngradeMigration85RunsOneGuardedDownStep(t *testing.T) {
 	assert.Equal(t, 1, h.database.unlockCalls)
 	assert.Equal(t, []bool{true, false}, h.database.versionLocked,
 		"the start guard must run under the migration lock and final verification must use the underlying driver")
-	assert.Equal(t, []uint{85}, h.source.prevCalls)
-	assert.Equal(t, []uint{85}, h.source.readUpCalls)
-	assert.Equal(t, []uint{85}, h.source.readDownCalls)
-	assert.Equal(t, []fakeExactSetVersion{{version: 84, dirty: true}, {version: 84, dirty: false}}, h.database.setVersionCalls)
-	assert.Equal(t, []string{"down migration 85"}, h.database.runBodies)
-	assert.Equal(t, 84, h.database.version)
+	assert.Equal(t, []uint{86}, h.source.prevCalls)
+	assert.Equal(t, []uint{86}, h.source.readUpCalls)
+	assert.Equal(t, []uint{86}, h.source.readDownCalls)
+	assert.Equal(t, []fakeExactSetVersion{{version: 85, dirty: true}, {version: 85, dirty: false}}, h.database.setVersionCalls)
+	assert.Equal(t, []string{"down migration 86"}, h.database.runBodies)
+	assert.Equal(t, 85, h.database.version)
 	assert.False(t, h.database.dirty)
 	assert.Equal(t, 0, h.database.dropCalls)
 	assert.Equal(t, 1, h.source.closeCalls)
 	assert.Equal(t, 1, h.database.closeCalls)
 }
 
-func TestExactDowngradeMigration85RejectsEveryNonExactStartStateUnderLock(t *testing.T) {
+func TestExactDowngradeMigration86RejectsEveryNonExactStartStateUnderLock(t *testing.T) {
 	tests := []struct {
 		name    string
 		version int
 		dirty   bool
 	}{
-		{name: "version 84", version: 84},
-		{name: "version 85 dirty", version: 85, dirty: true},
-		{name: "version 86", version: 86},
+		{name: "version 85", version: 85},
+		{name: "version 86 dirty", version: 86, dirty: true},
+		{name: "version 87", version: 87},
 		{name: "nil version", version: migratedatabase.NilVersion},
 	}
 
@@ -265,7 +265,7 @@ func TestExactDowngradeMigration85RejectsEveryNonExactStartStateUnderLock(t *tes
 		t.Run(tt.name, func(t *testing.T) {
 			h := newExactDowngradeHarness(tt.version, tt.dirty)
 
-			err := runExactDowngradeMigration85("postgres://dedicated", h.deps)
+			err := runExactDowngradeMigration86("postgres://dedicated", h.deps)
 
 			require.Error(t, err)
 			assert.ErrorIs(t, err, errExactDowngradeStartState)
@@ -280,7 +280,7 @@ func TestExactDowngradeMigration85RejectsEveryNonExactStartStateUnderLock(t *tes
 	}
 }
 
-func TestExactDowngradeMigration85PropagatesStepErrors(t *testing.T) {
+func TestExactDowngradeMigration86PropagatesStepErrors(t *testing.T) {
 	tests := []struct {
 		name      string
 		configure func(*fakeExactDatabase, *fakeExactSource, error)
@@ -337,11 +337,11 @@ func TestExactDowngradeMigration85PropagatesStepErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newExactDowngradeHarness(85, false)
+			h := newExactDowngradeHarness(86, false)
 			want := errors.New("step failure")
 			tt.configure(h.database, h.source, want)
 
-			err := runExactDowngradeMigration85("postgres://dedicated", h.deps)
+			err := runExactDowngradeMigration86("postgres://dedicated", h.deps)
 
 			require.Error(t, err)
 			assert.ErrorIs(t, err, want)
@@ -351,23 +351,23 @@ func TestExactDowngradeMigration85PropagatesStepErrors(t *testing.T) {
 	}
 }
 
-func TestExactDowngradeMigration85VerifiesUnderlyingCleanVersion84(t *testing.T) {
+func TestExactDowngradeMigration86VerifiesUnderlyingCleanVersion85(t *testing.T) {
 	verifyErr := errors.New("verify version failure")
 	tests := []struct {
 		name   string
 		result fakeExactVersion
 	}{
-		{name: "wrong final version", result: fakeExactVersion{version: 85}},
-		{name: "dirty final version", result: fakeExactVersion{version: 84, dirty: true}},
+		{name: "wrong final version", result: fakeExactVersion{version: 86}},
+		{name: "dirty final version", result: fakeExactVersion{version: 85, dirty: true}},
 		{name: "final version read error", result: fakeExactVersion{err: verifyErr}},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newExactDowngradeHarness(85, false)
-			h.database.versionScript = []fakeExactVersion{{version: 85}, tt.result}
+			h := newExactDowngradeHarness(86, false)
+			h.database.versionScript = []fakeExactVersion{{version: 86}, tt.result}
 
-			err := runExactDowngradeMigration85("postgres://dedicated", h.deps)
+			err := runExactDowngradeMigration86("postgres://dedicated", h.deps)
 
 			require.Error(t, err)
 			assert.ErrorIs(t, err, errExactDowngradeFinalState)
@@ -380,7 +380,7 @@ func TestExactDowngradeMigration85VerifiesUnderlyingCleanVersion84(t *testing.T)
 	}
 }
 
-func TestExactDowngradeMigration85JoinsStepAndCloseErrors(t *testing.T) {
+func TestExactDowngradeMigration86JoinsStepAndCloseErrors(t *testing.T) {
 	stepErr := errors.New("step failure")
 	sourceCloseErr := errors.New("source close failure")
 	databaseCloseErr := errors.New("database close failure")
@@ -398,12 +398,12 @@ func TestExactDowngradeMigration85JoinsStepAndCloseErrors(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			h := newExactDowngradeHarness(85, false)
+			h := newExactDowngradeHarness(86, false)
 			h.database.runErr = tt.stepErr
 			h.source.closeErr = tt.sourceCloseErr
 			h.database.closeErr = tt.databaseCloseErr
 
-			err := runExactDowngradeMigration85("postgres://dedicated", h.deps)
+			err := runExactDowngradeMigration86("postgres://dedicated", h.deps)
 
 			require.Error(t, err)
 			for _, want := range []error{tt.stepErr, tt.sourceCloseErr, tt.databaseCloseErr} {
@@ -417,7 +417,7 @@ func TestExactDowngradeMigration85JoinsStepAndCloseErrors(t *testing.T) {
 	}
 }
 
-func TestExactDowngradeMigration85ClosesPartialConstruction(t *testing.T) {
+func TestExactDowngradeMigration86ClosesPartialConstruction(t *testing.T) {
 	t.Run("database open failure owns nothing", func(t *testing.T) {
 		openErr := errors.New("database open failure")
 		sourceOpened := false
@@ -429,7 +429,7 @@ func TestExactDowngradeMigration85ClosesPartialConstruction(t *testing.T) {
 			},
 		}
 
-		err := runExactDowngradeMigration85("postgres://dedicated", deps)
+		err := runExactDowngradeMigration86("postgres://dedicated", deps)
 
 		assert.ErrorIs(t, err, openErr)
 		assert.False(t, sourceOpened)
@@ -444,7 +444,7 @@ func TestExactDowngradeMigration85ClosesPartialConstruction(t *testing.T) {
 			openSource:   func(string) (source.Driver, error) { return nil, openErr },
 		}
 
-		err := runExactDowngradeMigration85("postgres://dedicated", deps)
+		err := runExactDowngradeMigration86("postgres://dedicated", deps)
 
 		assert.ErrorIs(t, err, openErr)
 		assert.ErrorIs(t, err, closeErr)
@@ -465,7 +465,7 @@ func TestExactDowngradeMigration85ClosesPartialConstruction(t *testing.T) {
 			},
 		}
 
-		err := runExactDowngradeMigration85("postgres://dedicated", deps)
+		err := runExactDowngradeMigration86("postgres://dedicated", deps)
 
 		assert.ErrorIs(t, err, constructErr)
 		assert.ErrorIs(t, err, sourceCloseErr)

@@ -18,45 +18,45 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestMigration000085_UpDownReUp(t *testing.T) {
+func TestMigration000086_UpDownReUp(t *testing.T) {
 	ts := testhelpers.SetupTestServer(t)
 	ctx := context.Background()
 
-	historyExists := migration000085TableExists(t, ts.DB, "presence_history")
-	pendingExists := migration000085TableExists(t, ts.DB, "presence_settings_pending_operations")
+	historyExists := migration000086TableExists(t, ts.DB, "presence_history")
+	pendingExists := migration000086TableExists(t, ts.DB, "presence_settings_pending_operations")
 	assert.True(t, historyExists, "up migration must create presence_history")
 	assert.True(t, pendingExists, "up migration must create presence_settings_pending_operations")
 	if !historyExists || !pendingExists {
 		return
 	}
 
-	for _, column := range migration000085SettingsColumns {
-		assert.True(t, migration000085ColumnExists(t, ts.DB, "user_presence_settings", column),
+	for _, column := range migration000086SettingsColumns {
+		assert.True(t, migration000086ColumnExists(t, ts.DB, "user_presence_settings", column),
 			"up migration must add %s", column)
 	}
 
-	downSQL := migration000085SQL(t, "down")
-	migration000085RequireOrderedDown(t, downSQL)
+	downSQL := migration000086SQL(t, "down")
+	migration000086RequireOrderedDown(t, downSQL)
 	_, err := ts.DB.ExecContext(ctx, downSQL)
 	require.NoError(t, err, "down migration must remove dependent tables before settings columns")
-	assert.False(t, migration000085TableExists(t, ts.DB, "presence_settings_pending_operations"))
-	assert.False(t, migration000085TableExists(t, ts.DB, "presence_history"))
-	for _, column := range migration000085SettingsColumns {
-		assert.False(t, migration000085ColumnExists(t, ts.DB, "user_presence_settings", column),
+	assert.False(t, migration000086TableExists(t, ts.DB, "presence_settings_pending_operations"))
+	assert.False(t, migration000086TableExists(t, ts.DB, "presence_history"))
+	for _, column := range migration000086SettingsColumns {
+		assert.False(t, migration000086ColumnExists(t, ts.DB, "user_presence_settings", column),
 			"down migration must remove %s", column)
 	}
 
-	_, err = ts.DB.ExecContext(ctx, migration000085SQL(t, "up"))
+	_, err = ts.DB.ExecContext(ctx, migration000086SQL(t, "up"))
 	require.NoError(t, err, "up migration must re-apply after a clean rollback")
-	assert.True(t, migration000085TableExists(t, ts.DB, "presence_history"))
-	assert.True(t, migration000085TableExists(t, ts.DB, "presence_settings_pending_operations"))
-	for _, column := range migration000085SettingsColumns {
-		assert.True(t, migration000085ColumnExists(t, ts.DB, "user_presence_settings", column),
+	assert.True(t, migration000086TableExists(t, ts.DB, "presence_history"))
+	assert.True(t, migration000086TableExists(t, ts.DB, "presence_settings_pending_operations"))
+	for _, column := range migration000086SettingsColumns {
+		assert.True(t, migration000086ColumnExists(t, ts.DB, "user_presence_settings", column),
 			"re-applied migration must restore %s", column)
 	}
 }
 
-func TestMigration000085_ConstraintsIndexesDefaultsAndCascades(t *testing.T) {
+func TestMigration000086_ConstraintsIndexesDefaultsAndCascades(t *testing.T) {
 	ts := testhelpers.SetupTestServer(t)
 	ctx := context.Background()
 
@@ -127,7 +127,7 @@ func TestMigration000085_ConstraintsIndexesDefaultsAndCascades(t *testing.T) {
 				SET activity_history_retention_days = $2
 				WHERE user_id = $1
 			`, user.ID, days)
-			migration000085RequireConstraint(t, err, "user_presence_settings_history_retention_check")
+			migration000086RequireConstraint(t, err, "user_presence_settings_history_retention_check")
 		}
 	})
 
@@ -149,7 +149,7 @@ func TestMigration000085_ConstraintsIndexesDefaultsAndCascades(t *testing.T) {
 			INSERT INTO user_presence_settings (user_id, presence_settings_version)
 			VALUES ($1, -1)
 		`, negativeVersion.ID)
-		migration000085RequireConstraint(t, err, "user_presence_settings_version_nonnegative")
+		migration000086RequireConstraint(t, err, "user_presence_settings_version_nonnegative")
 
 		for _, tc := range []struct {
 			name           string
@@ -201,7 +201,7 @@ func TestMigration000085_ConstraintsIndexesDefaultsAndCascades(t *testing.T) {
 						activity_history_reconsent_required
 					) VALUES ($1, TRUE, $2, $3, $4, $5)
 				`, user.ID, tc.consentVersion, tc.hash, tc.consentedAt, tc.reconsent)
-				migration000085RequireConstraint(t, err, tc.constraint)
+				migration000086RequireConstraint(t, err, tc.constraint)
 			})
 		}
 
@@ -215,7 +215,7 @@ func TestMigration000085_ConstraintsIndexesDefaultsAndCascades(t *testing.T) {
 				activity_history_consented_at
 			) VALUES ($1, FALSE, 1, $2, clock_timestamp())
 		`, disabledWithConsent.ID, strings.Repeat("c", 64))
-		migration000085RequireConstraint(t, err, "user_presence_settings_history_consent_check")
+		migration000086RequireConstraint(t, err, "user_presence_settings_history_consent_check")
 
 		disabledReconsent := ts.CreateTestUser(t, "presence_history_disabled_reconsent")
 		_, err = ts.DB.ExecContext(ctx, `
@@ -241,36 +241,36 @@ func TestMigration000085_ConstraintsIndexesDefaultsAndCascades(t *testing.T) {
 			"creator",
 			"custom_text",
 		} {
-			err := migration000085InsertHistory(
+			err := migration000086InsertHistory(
 				ts.DB, user.ID, category, 1, `{"value":"test"}`, now, now, now, now.Add(24*time.Hour),
 			)
 			require.NoErrorf(t, err, "category %q must be accepted", category)
 		}
 
-		err := migration000085InsertHistory(
+		err := migration000086InsertHistory(
 			ts.DB, user.ID, "unknown", 1, `{"value":"test"}`, now, now, now, now.Add(24*time.Hour),
 		)
-		migration000085RequireConstraint(t, err, "presence_history_category_check")
+		migration000086RequireConstraint(t, err, "presence_history_category_check")
 
-		err = migration000085InsertHistory(
+		err = migration000086InsertHistory(
 			ts.DB, user.ID, "custom_text", 1, `["not-an-object"]`, now, now, now, now.Add(24*time.Hour),
 		)
-		migration000085RequireConstraint(t, err, "presence_history_payload_object_check")
+		migration000086RequireConstraint(t, err, "presence_history_payload_object_check")
 
-		err = migration000085InsertHistory(
+		err = migration000086InsertHistory(
 			ts.DB, user.ID, "custom_text", 0, `{"value":"test"}`, now, now, now, now.Add(24*time.Hour),
 		)
-		migration000085RequireConstraint(t, err, "presence_history_payload_version_positive")
+		migration000086RequireConstraint(t, err, "presence_history_payload_version_positive")
 
-		err = migration000085InsertHistory(
+		err = migration000086InsertHistory(
 			ts.DB, user.ID, "custom_text", 1, `{"value":"test"}`, now, now.Add(-time.Second), now, now.Add(24*time.Hour),
 		)
-		migration000085RequireConstraint(t, err, "presence_history_ended_at_check")
+		migration000086RequireConstraint(t, err, "presence_history_ended_at_check")
 
-		err = migration000085InsertHistory(
+		err = migration000086InsertHistory(
 			ts.DB, user.ID, "custom_text", 1, `{"value":"test"}`, now, now, now, now,
 		)
-		migration000085RequireConstraint(t, err, "presence_history_expires_at_check")
+		migration000086RequireConstraint(t, err, "presence_history_expires_at_check")
 
 		maxPayload := `{"value":"` + strings.Repeat("x", 4083) + `"}`
 		var payloadBytes int
@@ -278,7 +278,7 @@ func TestMigration000085_ConstraintsIndexesDefaultsAndCascades(t *testing.T) {
 			`SELECT octet_length($1::JSONB::TEXT)`, maxPayload,
 		).Scan(&payloadBytes))
 		require.Equal(t, 4096, payloadBytes, "fixture must exercise the exact 4 KiB JSONB boundary")
-		require.NoError(t, migration000085InsertHistory(
+		require.NoError(t, migration000086InsertHistory(
 			ts.DB, user.ID, "custom_text", 1, maxPayload, now, now, now, now.Add(24*time.Hour),
 		))
 
@@ -287,22 +287,22 @@ func TestMigration000085_ConstraintsIndexesDefaultsAndCascades(t *testing.T) {
 			`SELECT octet_length($1::JSONB::TEXT)`, overPayload,
 		).Scan(&payloadBytes))
 		require.Equal(t, 4097, payloadBytes)
-		err = migration000085InsertHistory(
+		err = migration000086InsertHistory(
 			ts.DB, user.ID, "custom_text", 1, overPayload, now, now, now, now.Add(24*time.Hour),
 		)
-		migration000085RequireConstraint(t, err, "presence_history_payload_size_check")
+		migration000086RequireConstraint(t, err, "presence_history_payload_size_check")
 	})
 
 	t.Run("one open interval per sender and category", func(t *testing.T) {
 		user := ts.CreateTestUser(t, "presence_history_one_open")
 		now := time.Now().UTC().Truncate(time.Microsecond)
-		require.NoError(t, migration000085InsertHistory(
+		require.NoError(t, migration000086InsertHistory(
 			ts.DB, user.ID, "custom_text", 1, `{"value":"first"}`, now, nil, now, now.Add(24*time.Hour),
 		))
-		err := migration000085InsertHistory(
+		err := migration000086InsertHistory(
 			ts.DB, user.ID, "custom_text", 1, `{"value":"second"}`, now, nil, now, now.Add(24*time.Hour),
 		)
-		migration000085RequireConstraint(t, err, "idx_presence_history_one_open")
+		migration000086RequireConstraint(t, err, "idx_presence_history_one_open")
 	})
 
 	t.Run("pending operation constraints and database timestamps", func(t *testing.T) {
@@ -330,7 +330,7 @@ func TestMigration000085_ConstraintsIndexesDefaultsAndCascades(t *testing.T) {
 				user_id, operation_id, prior_settings_version
 			) VALUES ($1, $2, 0)
 		`, user.ID, uuid.NewString())
-		migration000085RequireConstraint(t, err, "presence_settings_pending_operations_pkey")
+		migration000086RequireConstraint(t, err, "presence_settings_pending_operations_pkey")
 
 		duplicateOperationUser := ts.CreateTestUser(t, "presence_history_pending_duplicate_operation")
 		_, err = ts.DB.ExecContext(ctx, `
@@ -338,7 +338,7 @@ func TestMigration000085_ConstraintsIndexesDefaultsAndCascades(t *testing.T) {
 				user_id, operation_id, prior_settings_version
 			) VALUES ($1, $2, 0)
 		`, duplicateOperationUser.ID, operationID)
-		migration000085RequireConstraint(t, err, "presence_settings_pending_operations_operation_id_key")
+		migration000086RequireConstraint(t, err, "presence_settings_pending_operations_operation_id_key")
 
 		negativeVersionUser := ts.CreateTestUser(t, "presence_history_pending_negative")
 		_, err = ts.DB.ExecContext(ctx, `
@@ -346,7 +346,7 @@ func TestMigration000085_ConstraintsIndexesDefaultsAndCascades(t *testing.T) {
 				user_id, operation_id, prior_settings_version
 			) VALUES ($1, $2, -1)
 		`, negativeVersionUser.ID, uuid.NewString())
-		migration000085RequireConstraint(t, err, "presence_settings_pending_operations_prior_version_check")
+		migration000086RequireConstraint(t, err, "presence_settings_pending_operations_prior_version_check")
 
 		badTimeUser := ts.CreateTestUser(t, "presence_history_pending_bad_time")
 		_, err = ts.DB.ExecContext(ctx, `
@@ -358,33 +358,33 @@ func TestMigration000085_ConstraintsIndexesDefaultsAndCascades(t *testing.T) {
 				reconcile_after
 			) VALUES ($1, $2, 0, $3, $3)
 		`, badTimeUser.ID, uuid.NewString(), time.Now().UTC())
-		migration000085RequireConstraint(t, err, "presence_settings_pending_operations_reconcile_check")
+		migration000086RequireConstraint(t, err, "presence_settings_pending_operations_reconcile_check")
 
-		assert.Equal(t, "user_id", migration000085PrimaryKeyColumns(t, ts.DB,
+		assert.Equal(t, "user_id", migration000086PrimaryKeyColumns(t, ts.DB,
 			"presence_settings_pending_operations"))
 		assert.Equal(t,
 			"user_id,operation_id,prior_settings_version,created_at,reconcile_after",
-			migration000085Columns(t, ts.DB, "presence_settings_pending_operations"),
+			migration000086Columns(t, ts.DB, "presence_settings_pending_operations"),
 			"pending-operation storage must contain no status, exception, or history payload",
 		)
 	})
 
 	t.Run("indexes and cascades", func(t *testing.T) {
-		assert.Equal(t, "id", migration000085PrimaryKeyColumns(t, ts.DB, "presence_history"))
-		assert.Equal(t, "c", migration000085ForeignKeyDeleteAction(
+		assert.Equal(t, "id", migration000086PrimaryKeyColumns(t, ts.DB, "presence_history"))
+		assert.Equal(t, "c", migration000086ForeignKeyDeleteAction(
 			t, ts.DB, "presence_history", "presence_history_sender_id_fkey"))
-		assert.Equal(t, "c", migration000085ForeignKeyDeleteAction(
+		assert.Equal(t, "c", migration000086ForeignKeyDeleteAction(
 			t, ts.DB, "presence_settings_pending_operations",
 			"presence_settings_pending_operations_user_id_fkey"))
 
-		oneOpen := migration000085IndexDefinition(t, ts.DB, "idx_presence_history_one_open")
+		oneOpen := migration000086IndexDefinition(t, ts.DB, "idx_presence_history_one_open")
 		assert.Contains(t, oneOpen, "CREATE UNIQUE INDEX")
 		assert.Contains(t, oneOpen, "(sender_id, category)")
 		assert.Contains(t, oneOpen, "WHERE (ended_at IS NULL)")
 
-		senderPage := migration000085IndexDefinition(t, ts.DB, "idx_presence_history_sender_page")
+		senderPage := migration000086IndexDefinition(t, ts.DB, "idx_presence_history_sender_page")
 		assert.Contains(t, senderPage, "(sender_id, recorded_at DESC, id DESC)")
-		expiry := migration000085IndexDefinition(t, ts.DB, "idx_presence_history_expiry")
+		expiry := migration000086IndexDefinition(t, ts.DB, "idx_presence_history_expiry")
 		assert.Contains(t, expiry, "(expires_at, id)")
 
 		user := ts.CreateTestUser(t, "presence_history_cascade")
@@ -392,7 +392,7 @@ func TestMigration000085_ConstraintsIndexesDefaultsAndCascades(t *testing.T) {
 			`INSERT INTO user_presence_settings (user_id) VALUES ($1)`, user.ID)
 		require.NoError(t, err)
 		now := time.Now().UTC().Truncate(time.Microsecond)
-		require.NoError(t, migration000085InsertHistory(
+		require.NoError(t, migration000086InsertHistory(
 			ts.DB, user.ID, "custom_text", 1, `{"value":"test"}`, now, nil, now, now.Add(24*time.Hour),
 		))
 		_, err = ts.DB.ExecContext(ctx, `
@@ -404,16 +404,16 @@ func TestMigration000085_ConstraintsIndexesDefaultsAndCascades(t *testing.T) {
 
 		_, err = ts.DB.ExecContext(ctx, `DELETE FROM users WHERE id = $1`, user.ID)
 		require.NoError(t, err)
-		assert.Zero(t, migration000085RowCount(t, ts.DB,
+		assert.Zero(t, migration000086RowCount(t, ts.DB,
 			`SELECT COUNT(*) FROM user_presence_settings WHERE user_id = $1`, user.ID))
-		assert.Zero(t, migration000085RowCount(t, ts.DB,
+		assert.Zero(t, migration000086RowCount(t, ts.DB,
 			`SELECT COUNT(*) FROM presence_history WHERE sender_id = $1`, user.ID))
-		assert.Zero(t, migration000085RowCount(t, ts.DB,
+		assert.Zero(t, migration000086RowCount(t, ts.DB,
 			`SELECT COUNT(*) FROM presence_settings_pending_operations WHERE user_id = $1`, user.ID))
 	})
 }
 
-var migration000085SettingsColumns = []string{
+var migration000086SettingsColumns = []string{
 	"presence_settings_version",
 	"presence_settings_operation_id",
 	"activity_history_enabled",
@@ -424,7 +424,7 @@ var migration000085SettingsColumns = []string{
 	"activity_history_reconsent_required",
 }
 
-func migration000085InsertHistory(
+func migration000086InsertHistory(
 	db *sql.DB,
 	senderID string,
 	category string,
@@ -452,7 +452,7 @@ func migration000085InsertHistory(
 	return err
 }
 
-func migration000085TableExists(t *testing.T, db *sql.DB, table string) bool {
+func migration000086TableExists(t *testing.T, db *sql.DB, table string) bool {
 	t.Helper()
 
 	qualifiedTable, ok := map[string]string{
@@ -465,7 +465,7 @@ func migration000085TableExists(t *testing.T, db *sql.DB, table string) bool {
 	return relation.Valid
 }
 
-func migration000085ColumnExists(t *testing.T, db *sql.DB, table, column string) bool {
+func migration000086ColumnExists(t *testing.T, db *sql.DB, table, column string) bool {
 	t.Helper()
 
 	var exists bool
@@ -481,7 +481,7 @@ func migration000085ColumnExists(t *testing.T, db *sql.DB, table, column string)
 	return exists
 }
 
-func migration000085Columns(t *testing.T, db *sql.DB, table string) string {
+func migration000086Columns(t *testing.T, db *sql.DB, table string) string {
 	t.Helper()
 
 	var columns string
@@ -493,7 +493,7 @@ func migration000085Columns(t *testing.T, db *sql.DB, table string) string {
 	return columns
 }
 
-func migration000085PrimaryKeyColumns(t *testing.T, db *sql.DB, table string) string {
+func migration000086PrimaryKeyColumns(t *testing.T, db *sql.DB, table string) string {
 	t.Helper()
 
 	var columns string
@@ -513,7 +513,7 @@ func migration000085PrimaryKeyColumns(t *testing.T, db *sql.DB, table string) st
 	return columns
 }
 
-func migration000085ForeignKeyDeleteAction(t *testing.T, db *sql.DB, table, constraint string) string {
+func migration000086ForeignKeyDeleteAction(t *testing.T, db *sql.DB, table, constraint string) string {
 	t.Helper()
 
 	var action string
@@ -530,7 +530,7 @@ func migration000085ForeignKeyDeleteAction(t *testing.T, db *sql.DB, table, cons
 	return action
 }
 
-func migration000085IndexDefinition(t *testing.T, db *sql.DB, index string) string {
+func migration000086IndexDefinition(t *testing.T, db *sql.DB, index string) string {
 	t.Helper()
 
 	var definition string
@@ -542,7 +542,7 @@ func migration000085IndexDefinition(t *testing.T, db *sql.DB, index string) stri
 	return definition
 }
 
-func migration000085RequireConstraint(t *testing.T, err error, name string) {
+func migration000086RequireConstraint(t *testing.T, err error, name string) {
 	t.Helper()
 	require.Error(t, err)
 
@@ -551,7 +551,7 @@ func migration000085RequireConstraint(t *testing.T, err error, name string) {
 	assert.Equal(t, name, pqErr.Constraint)
 }
 
-func migration000085RowCount(t *testing.T, db *sql.DB, query string, arg string) int {
+func migration000086RowCount(t *testing.T, db *sql.DB, query string, arg string) int {
 	t.Helper()
 
 	var count int
@@ -559,7 +559,7 @@ func migration000085RowCount(t *testing.T, db *sql.DB, query string, arg string)
 	return count
 }
 
-func migration000085RequireOrderedDown(t *testing.T, contents string) {
+func migration000086RequireOrderedDown(t *testing.T, contents string) {
 	t.Helper()
 
 	steps := []string{
@@ -577,13 +577,13 @@ func migration000085RequireOrderedDown(t *testing.T, contents string) {
 	}
 }
 
-func migration000085SQL(t *testing.T, direction string) string {
+func migration000086SQL(t *testing.T, direction string) string {
 	t.Helper()
 
 	_, filename, _, ok := runtime.Caller(0)
 	require.True(t, ok, "resolve migration test path")
 	path := filepath.Join(filepath.Dir(filename), "..", "..", "migrations",
-		"000085_presence_history."+direction+".sql")
+		"000086_presence_history."+direction+".sql")
 	// #nosec G304 -- path is constructed from runtime.Caller and a fixed migration filename.
 	contents, err := os.ReadFile(path)
 	require.NoError(t, err)
