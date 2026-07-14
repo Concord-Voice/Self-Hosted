@@ -402,7 +402,7 @@ _up_control_plane() {
     [[ "$QUIET" -eq 0 ]] && echo -e "${YELLOW}🔧 Building control-plane binary${NC}"
     go mod download
     mkdir -p bin
-    go build -o bin/control-plane cmd/server/main.go
+    go build -o bin/control-plane ./cmd/server
   fi
 
   nohup ./bin/control-plane > "$LOG_DIR/control-plane.log" 2>&1 &
