@@ -4,6 +4,12 @@ All notable changes to Concord Voice will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.2.28] — 2026-07-14
+
+### Changed
+
+- **Desktop build and test tooling refreshed** ([#2265](internal development reference omitted), [#2264](internal development reference omitted), [#2261](internal development reference omitted)) — updated tsx, Vitest coverage tooling, ESLint React tooling, and TypeScript ESLint behind the desktop build and test pipeline.
+
 ## [0.2.27] — 2026-07-14
 
 ### Security
