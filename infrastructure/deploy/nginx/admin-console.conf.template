@@ -14,6 +14,9 @@ server {
 
     # Admin console + ceremony — all under /admin (control_plane 127.0.0.1:8080).
     # cfaccess.go (L3) enforces the Cf-Access-Jwt-Assertion inside the app.
+    location = /admin {
+        return 308 /admin/;
+    }
     location /admin/ {
         proxy_pass http://control_plane;
         proxy_http_version 1.1;
