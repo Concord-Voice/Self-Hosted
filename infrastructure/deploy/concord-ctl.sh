@@ -58,6 +58,7 @@ COMPOSE_ENV_FILE_ARG=""
   && COMPOSE_ENV_FILE_ARG="--env-file ${DEPLOY_DIR}/.env"
 COMPOSE_CMD="docker compose ${COMPOSE_ENV_FILE_ARG} -f ${DEPLOY_DIR}/docker-compose.yml -f ${DEPLOY_DIR}/${COMPOSE_OVERRIDE} --profile ${COMPOSE_PROFILES:-services}"
 ACTIVITY_HISTORY_IMAGE_SELECTOR="${SCRIPT_DIR}/.env.activity-history-image.local"
+ACTIVITY_HISTORY_ACTIVATION_RECEIPT="${SCRIPT_DIR}/.env.activity-history-receipt.local"
 ACTIVITY_HISTORY_IMAGE_SELECTOR_LOADED=0
 ACTIVITY_HISTORY_IMAGE_SELECTOR_SELECTED=0
 ACTIVITY_HISTORY_ROLLBACK_CHECKPOINT_IMAGE=""
@@ -346,7 +347,13 @@ activity_history_container_image_matches() {
   [[ -n "$expected" && "$actual" == "$expected" ]]
 }
 
+# Optional $1 selects receipt handling: the default 'consult-receipt' lets a
+# valid durable receipt continue a previously activated deployment at zero
+# running containers; any other value (freshstart passes 'skip-receipt') keeps
+# the pre-receipt fail-closed behavior — the receipt proves activation of the
+# EXISTING durable state, so it never authorizes a wipe-and-recreate (#2326).
 activity_history_routine_guard() {
+  local receipt_mode="${1:-consult-receipt}"
   activity_history_load_contract || return 1
   [[ "$ACTIVITY_HISTORY_RENDERED_GATE" == false ]] && return 0
   if [[ "$ACTIVITY_HISTORY_RENDERED_REPLICAS" != 1 ]]; then
@@ -354,12 +361,31 @@ activity_history_routine_guard() {
     return 1
   fi
   activity_history_refresh_daemon_ids || return 1
-  if [[ ${#ACTIVITY_HISTORY_DAEMON_IDS[@]} -ne 1 ]] \
-     || ! activity_history_container_gate_matches "${ACTIVITY_HISTORY_DAEMON_IDS[0]:-}" true; then
-    echo "activity-history: routine deployment cannot perform first activation or repair ambiguous state" >&2
-    echo "Run concord-ctl.sh activity-history-activate --confirm-drained after draining traffic." >&2
-    return 1
+  if [[ ${#ACTIVITY_HISTORY_DAEMON_IDS[@]} -eq 1 ]] \
+     && activity_history_container_gate_matches "${ACTIVITY_HISTORY_DAEMON_IDS[0]:-}" true; then
+    # Backfill: a stack activated before the receipt feature proves itself with
+    # live one-container gate-true evidence; mint the durable receipt so
+    # stop→up / down→up recovery works after this deploy. Best-effort — a
+    # failed write warns (the writer's stderr) but never blocks the deploy,
+    # whose authorization comes from the live container, not the receipt.
+    activity_history_activation_receipt_valid \
+      || activity_history_write_activation_receipt \
+      || true
+    return 0
   fi
+  if [[ ${#ACTIVITY_HISTORY_DAEMON_IDS[@]} -eq 0 && "$receipt_mode" == consult-receipt ]]; then
+    if activity_history_activation_receipt_valid; then
+      echo "Activity History: durable activation receipt accepted; resuming the previously activated deployment."
+      return 0
+    fi
+    if [[ -e "$ACTIVITY_HISTORY_ACTIVATION_RECEIPT" ]]; then
+      echo "activity-history: activation receipt is malformed or bound to a different deployment; refusing to continue" >&2
+      return 1
+    fi
+  fi
+  echo "activity-history: routine deployment cannot perform first activation or repair ambiguous state" >&2
+  echo "Run concord-ctl.sh activity-history-activate --confirm-drained after draining traffic." >&2
+  return 1
 }
 
 activity_history_image_is_local() {
@@ -446,6 +472,69 @@ activity_history_write_rollback_checkpoint() {
   ACTIVITY_HISTORY_ROLLBACK_DOWNGRADE_STATE="$state"
 }
 
+# Durable activation receipt (#2256). Written only after a guarded activation's
+# health checks and final gate-true daemon invariant succeed. Parsed as data
+# (never sourced); consulted by the routine guard only when zero control-plane
+# containers are running, so it can never override live container evidence.
+# Rollback and freshstart invalidate it before their destructive mutation.
+activity_history_write_activation_receipt() {
+  local temp="${ACTIVITY_HISTORY_ACTIVATION_RECEIPT}.new.$$"
+  umask 077
+  if ! {
+       printf 'ACTIVITY_HISTORY_ACTIVATION_STATE=activated\n'
+       printf 'ACTIVITY_HISTORY_ACTIVATION_CONTRACT_MODE=%s\n' "$ACTIVITY_HISTORY_CONTRACT_MODE"
+       printf 'ACTIVITY_HISTORY_ACTIVATION_INSTANCE_TYPE=%s\n' "$ACTIVITY_HISTORY_RENDERED_INSTANCE_TYPE"
+     } >"$temp" \
+     || ! chmod 600 "$temp" \
+     || ! mv "$temp" "$ACTIVITY_HISTORY_ACTIVATION_RECEIPT"; then
+    rm -f "$temp"
+    echo "activity-history: control-plane is running and healthy, but the activation receipt could not be persisted; stop→up / down→up recovery will require re-activation" >&2
+    return 1
+  fi
+}
+
+# Valid only when the receipt exists, is owned by the invoking user with mode
+# 0600 (a restored/hand-copied receipt with looser permissions or foreign
+# ownership is NOT trusted), parses cleanly (exactly the three known keys, each
+# once), and is bound to the current contract mode and rendered instance type.
+# Any deviation is invalid — callers fail closed.
+activity_history_activation_receipt_valid() {
+  local line value state="" mode="" instance="" perms
+  local state_count=0 mode_count=0 instance_count=0
+  [[ -f "$ACTIVITY_HISTORY_ACTIVATION_RECEIPT" \
+     && -O "$ACTIVITY_HISTORY_ACTIVATION_RECEIPT" ]] || return 1
+  perms="$(stat -c '%a' "$ACTIVITY_HISTORY_ACTIVATION_RECEIPT" 2>/dev/null \
+    || stat -f '%Lp' "$ACTIVITY_HISTORY_ACTIVATION_RECEIPT" 2>/dev/null)" || true
+  [[ "$perms" == 600 ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ -z "$line" ]] && continue
+    value="${line#*=}"
+    case "$line" in
+      ACTIVITY_HISTORY_ACTIVATION_STATE=*)
+        state_count=$((state_count + 1)); state="$value" ;;
+      ACTIVITY_HISTORY_ACTIVATION_CONTRACT_MODE=*)
+        mode_count=$((mode_count + 1)); mode="$value" ;;
+      ACTIVITY_HISTORY_ACTIVATION_INSTANCE_TYPE=*)
+        instance_count=$((instance_count + 1)); instance="$value" ;;
+      *)
+        return 1
+        ;;
+    esac
+  done <"$ACTIVITY_HISTORY_ACTIVATION_RECEIPT"
+  [[ $state_count -eq 1 && $mode_count -eq 1 && $instance_count -eq 1 ]] || return 1
+  [[ "$state" == activated ]] || return 1
+  [[ "$mode" == "$ACTIVITY_HISTORY_CONTRACT_MODE" ]] || return 1
+  [[ "$instance" == "$ACTIVITY_HISTORY_RENDERED_INSTANCE_TYPE" ]]
+}
+
+activity_history_invalidate_activation_receipt() {
+  rm -f "$ACTIVITY_HISTORY_ACTIVATION_RECEIPT" 2>/dev/null || true
+  if [[ -e "$ACTIVITY_HISTORY_ACTIVATION_RECEIPT" ]]; then
+    echo "activity-history: failed to invalidate the activation receipt; refusing to continue" >&2
+    return 1
+  fi
+}
+
 activity_history_select_checkpoint_image() {
   if [[ $ACTIVITY_HISTORY_IMAGE_SELECTOR_LOADED -ne 1 \
      || ! "$ACTIVITY_HISTORY_ROLLBACK_DOWNGRADE_STATE" =~ ^(complete|not_requested)$ ]]; then
@@ -516,6 +605,7 @@ activity_history_activate() {
     echo "activity-history: activation post-start invariant failed; control-plane stopped" >&2
     return 1
   fi
+  activity_history_write_activation_receipt || return 1
   echo "Activity History activation completed with one healthy control-plane."
 }
 
@@ -581,6 +671,7 @@ activity_history_rollback() {
       return 1
     fi
     echo "Activity History rollback checkpoint matches: admin work is complete; resuming pinned old-image start, health, and final count without repeating disable or downgrade."
+    activity_history_invalidate_activation_receipt || return 1
     activity_history_finish_rollback_start
     return
   fi
@@ -595,6 +686,7 @@ activity_history_rollback() {
   # while the service is drained. Refuse before stopping if it is unavailable.
   activity_history_image_is_local "$ACTIVITY_HISTORY_RENDERED_IMAGE" || return 1
   echo "Activity History rollback: stopping CP with a 45s drain, asserting zero daemon-wide, disabling durable state, journaling optional exact downgrade, selecting the pinned old image, and requiring one healthy CP."
+  activity_history_invalidate_activation_receipt || return 1
   activity_history_stop_control_plane || return 1
   activity_history_refresh_daemon_ids || return 1
   if [[ ${#ACTIVITY_HISTORY_DAEMON_IDS[@]} -ne 0 ]]; then
@@ -948,7 +1040,9 @@ case "${1:-help}" in
     ;;
 
   freshstart)
-    activity_history_routine_guard
+    # skip-receipt: the receipt never authorizes freshstart's volume wipe — a
+    # gate-true freshstart still requires live one-container proof (#2326).
+    activity_history_routine_guard skip-receipt
     echo "=== Fresh Start: wiping all data and rebuilding ==="
     echo "This will DELETE all databases, caches, and user data."
     read -rp "Are you sure? (y/N) " confirm
@@ -957,6 +1051,7 @@ case "${1:-help}" in
       exit 0
     fi
     clear_activity_history_image_selector
+    activity_history_invalidate_activation_receipt
     echo ""
     echo "Stopping all services and removing volumes..."
     cd "$DEPLOY_DIR" && $COMPOSE_CMD down -v

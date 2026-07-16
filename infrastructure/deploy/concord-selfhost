@@ -64,6 +64,7 @@ Usage: ./infrastructure/deploy/concord-selfhost <verb> [args]
 
 Verbs:
   up           guarded build + start; refuses implicit first activation
+               (a previously activated stack restarts via its durable receipt)
   activity-history-activate --confirm-drained
                explicitly activate from a fully drained control-plane set
   activity-history-rollback --confirm-drained --old-image <digest> [--downgrade-schema]
