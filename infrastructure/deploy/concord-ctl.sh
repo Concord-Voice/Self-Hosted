@@ -716,6 +716,115 @@ activity_history_rollback() {
   activity_history_finish_rollback_start
 }
 
+# nginx-reload and sudoers-sync both use fixed root-owned candidate paths.
+# Serialize them on one host-global inode so a copied or symlinked controller
+# cannot overlap post-rsync (or another direct invocation). Provisioning creates
+# this file inside a root-owned directory, owned by concord but not unlinkable by
+# concord. Keeping that inode is load-bearing: kernel lock ownership, not file
+# existence, controls admission.
+readonly DEPLOY_TRANSACTION_LOCK_PATH="/var/lib/concord/deploy-transaction.lock"
+readonly LOCKF_REENTRY_MARKER="--concord-ctl-lockf-reentry-v1"
+CONCORD_CTL_LOCKF_REENTRY_INTERNAL=0
+
+validate_lockf_reentry_parent() {
+  local probe_rc=0
+
+  # The outer wrapper alone opens status descriptor 8. It also holds the fixed
+  # pathname through lockf, so an immediate second non-blocking acquisition
+  # must report EX_TEMPFAIL. This avoids relying on ps(1), which is unavailable
+  # in several hardened CI/macOS sandboxes.
+  [[ -e /dev/fd/8 ]] || return 1
+  /usr/bin/lockf -s -k -t 0 "$DEPLOY_TRANSACTION_LOCK_PATH" /usr/bin/true \
+    || probe_rc=$?
+  [[ "$probe_rc" -eq 75 ]]
+}
+
+# Normalize the guarded macOS re-entry before ordinary command dispatch. This
+# is an argv marker rather than a caller-controlled environment bypass, and its
+# lockf ancestry is revalidated before it is honored.
+if [[ "${1:-}" == "$LOCKF_REENTRY_MARKER" ]]; then
+  if ! validate_lockf_reentry_parent; then
+    echo "  ✗ rejected invalid internal deploy-lock re-entry" >&2
+    exit 1
+  fi
+  CONCORD_CTL_LOCKF_REENTRY_INTERNAL=1
+  shift
+fi
+
+acquire_deploy_transaction_lock() {
+  local operation="$1" lock_rc=0 lock_backend=""
+  local lock_path="$DEPLOY_TRANSACTION_LOCK_PATH"
+  local status_path="" child_status=""
+
+  if (( CONCORD_CTL_LOCKF_REENTRY_INTERNAL )); then
+    return 0
+  fi
+
+  if [[ -x /usr/bin/flock ]]; then
+    lock_backend=flock
+    if ! exec 9>"$lock_path"; then
+      echo "  ✗ ${operation}: cannot open deploy transaction lock at $lock_path" >&2
+      exit 1
+    fi
+    /usr/bin/flock -n 9 || lock_rc=$?
+  elif [[ -x /usr/bin/lockf ]]; then
+    lock_backend=lockf
+    # BSD/macOS lockf portably locks a pathname while it runs a command. Let
+    # that parent retain the lock while a guarded child runs the controller.
+    # -k retains the inode. The wrapper records the controller status on an
+    # inherited descriptor and exits zero, so a real child exit 75 cannot be
+    # confused with lockf's EX_TEMPFAIL contention status.
+    status_path="$(/usr/bin/mktemp /tmp/concord-ctl-lock-status.XXXXXX)" || {
+      echo "  ✗ ${operation}: cannot create lock status channel" >&2
+      exit 1
+    }
+    /bin/chmod 0600 "$status_path"
+    exec 8>"$status_path"
+    /usr/bin/lockf -s -k -t 0 "$lock_path" /bin/bash -c '
+      "$@"
+      child_rc=$?
+      printf "%s\n" "$child_rc" >&8 || exit 125
+      exit 0
+    ' _ "$0" "$LOCKF_REENTRY_MARKER" "$@" || lock_rc=$?
+    exec 8>&-
+
+    if [[ -s "$status_path" ]]; then
+      IFS= read -r child_status < "$status_path" || child_status=""
+      /bin/rm -f -- "$status_path"
+      if [[ ! "$child_status" =~ ^([0-9]|[1-9][0-9]|1[0-9]{2}|2[0-4][0-9]|25[0-5])$ ]]; then
+        echo "  ✗ ${operation}: invalid child status from deploy lock" >&2
+        exit 1
+      fi
+      exit "$child_status"
+    fi
+    /bin/rm -f -- "$status_path"
+    if (( lock_rc == 0 )); then
+      lock_rc=125
+    fi
+  else
+    echo "  ✗ ${operation}: no supported deploy lock utility found" >&2
+    echo "    Expected /usr/bin/flock (Linux) or /usr/bin/lockf (macOS)." >&2
+    exit 1
+  fi
+
+  if (( lock_rc != 0 )); then
+    if [[ ( "$lock_backend" == flock && "$lock_rc" -eq 1 ) \
+       || ( "$lock_backend" == lockf && "$lock_rc" -eq 75 ) ]]; then
+      echo "  ✗ ${operation}: deploy transaction lock is busy at $lock_path" >&2
+      echo "    Another nginx-reload or sudoers-sync is running; no changes were made." >&2
+    else
+      echo "  ✗ ${operation}: failed to acquire deploy transaction lock at $lock_path (rc=$lock_rc)" >&2
+    fi
+    exit 1
+  fi
+}
+
+case "${1:-help}" in
+  nginx-reload|sudoers-sync)
+    acquire_deploy_transaction_lock "$@"
+    ;;
+esac
+
 case "${1:-help}" in
   status)
     echo "=== Concord Service Status ==="
@@ -820,175 +929,559 @@ case "${1:-help}" in
     ;;
 
   nginx-reload)
-    # §5.9 (#919): stage the source-of-truth nginx config from
-    # /opt/concord/[internal]nginx/concordvoice.conf into
-    # /etc/nginx/sites-available/concordvoice, validate, and reload/start nginx.
-    #
-    # Sudoers entry /etc/sudoers.d/concord-deploy (NOPASSWD) permits these
-    # command shapes for the concord user:
-    #   1. /usr/bin/install -o root -g root -m 0644 .../concordvoice.conf .../concordvoice
-    #   2. /usr/sbin/nginx -t
-    #   3. /bin/systemctl reload nginx
-    #   4. /bin/systemctl start nginx (only after nginx -t passes and reload
-    #      shows nginx is inactive)
+    # §5.9 (#919): render the source-of-truth nginx config with the validated
+    # API HSTS policy, transactionally activate the fixed main/admin paths,
+    # validate, reload/start, and probe the active public-edge policy.
     #
     # Sequence:
-    #   a. Stage with install(1) (atomic create + chmod + chown).
-    #   b. nginx -t — fail-fast on syntax error (DOES NOT reload if -t fails).
-    #   c. systemctl reload nginx — graceful reload, no dropped connections.
-    #   d. If reload fails because nginx is inactive, start nginx from the same
-    #      syntax-validated config.
+    #   a. Validate/decode all unprivileged input and render inactive files.
+    #   b. Root-stage fixed candidates, hard-link prior inodes, atomically swap.
+    #   c. nginx -t, graceful reload/start, and local /nginx-health HSTS probe.
+    #   d. On any failure after swapping, restore both exact prior files and
+    #      reload/start the old configuration when activation was attempted.
     #
     # Idempotency: re-running with no source change is a no-op at the
-    # filesystem level (install(1) overwrites with byte-identical content)
-    # and at the service level (systemctl reload SIGHUPs nginx workers).
+    # filesystem level (fixed candidates replace the same live paths) and at
+    # the service level (systemctl reload SIGHUPs nginx workers).
     #
     # Spec ref: 2026-05-09-919-spa-deploy-trust-chain-design.md §5.9
     NGINX_SRC="${DEPLOY_DIR}/[internal]nginx/concordvoice.conf"
+    NGINX_RENDER_DIR="${DEPLOY_DIR}/[internal]nginx/.rendered"
+    NGINX_RENDER="${NGINX_RENDER_DIR}/concordvoice.conf"
     NGINX_DST="/etc/nginx/sites-available/concordvoice"
+    NGINX_CANDIDATE="/etc/nginx/sites-available/.concordvoice.candidate"
+    NGINX_BACKUP="/etc/nginx/sites-available/.concordvoice.backup"
+    ADMIN_TMPL="${DEPLOY_DIR}/[internal]nginx/admin-console.conf.template"
+    ADMIN_RENDER="${NGINX_RENDER_DIR}/concord-admin.conf"
+    ADMIN_DST="/etc/nginx/conf.d/concord-admin.conf"
+    ADMIN_CANDIDATE="/etc/nginx/conf.d/.concord-admin.candidate"
+    ADMIN_BACKUP="/etc/nginx/conf.d/.concord-admin.backup"
+    ADMIN_ORIGIN_CERT="${ADMIN_ORIGIN_CERT:-/etc/nginx/cloudflare/origin.pem}"
+    ADMIN_ORIGIN_KEY="${ADMIN_ORIGIN_KEY:-/etc/nginx/cloudflare/origin.key}"
+    CONCORD_ENV_FILE="${CONCORD_ENV_FILE:-/opt/concord/.env}"
+    HSTS_DEFAULT='max-age=63072000; includeSubDomains; preload'
     if [[ ! -f "$NGINX_SRC" ]]; then
       echo "" >&2
       echo "  ✗ nginx-reload: source-of-truth config not found at $NGINX_SRC" >&2
       echo "    Did the rsync of [internal]nginx/ complete? Check deploy.sh logs." >&2
       exit 1
     fi
-    echo "  Staging $NGINX_SRC → $NGINX_DST"
-    if ! sudo /usr/bin/install -o root -g root -m 0644 "$NGINX_SRC" "$NGINX_DST"; then
-      echo "" >&2
-      echo "  ✗ nginx-reload: install(1) staging failed (sudoers entry missing or wrong permissions?)" >&2
+
+    # Decode only canonical writer data forms; never source the runtime env
+    # file. Supports plain data, Bash @Q single/ANSI-C quoting, and Compose's
+    # double-quoted dotenv form (\", \\, and $$). No eval or expansion.
+    decode_concord_env_value() {
+      local raw="$1" decoded="" char escape inner
+      local i=0 length=${#1}
+      if [[ "$raw" == \'* ]]; then
+        (( length >= 2 )) || return 1
+        i=1
+        while (( i < length )); do
+          char="${raw:i:1}"
+          if [[ "$char" != "'" ]]; then
+            decoded+="$char"
+            i=$((i + 1))
+          elif (( i == length - 1 )); then
+            printf '%s' "$decoded"
+            return 0
+          elif [[ "${raw:i:4}" == "'\\''" ]]; then
+            decoded+="'"
+            i=$((i + 4))
+          else
+            return 1
+          fi
+        done
+        return 1
+      fi
+      if [[ "$raw" == \$\'* ]]; then
+        (( length >= 3 )) && [[ "${raw: -1}" == "'" ]] || return 1
+        inner="${raw:2:$((length - 3))}"
+        length=${#inner}
+        i=0
+        while (( i < length )); do
+          char="${inner:i:1}"
+          if [[ "$char" == \\ ]]; then
+            (( i + 1 < length )) || return 1
+            escape="${inner:i+1:1}"
+            case "$escape" in
+              t) decoded+=$'\t' ;;
+              "'") decoded+="'" ;;
+              *) return 1 ;;
+            esac
+            i=$((i + 2))
+          elif [[ "$char" == "'" ]]; then
+            return 1
+          else
+            decoded+="$char"
+            i=$((i + 1))
+          fi
+        done
+        printf '%s' "$decoded"
+        return 0
+      fi
+      if [[ "$raw" == '"'* ]]; then
+        (( length >= 2 )) && [[ "${raw: -1}" == '"' ]] || return 1
+        inner="${raw:1:$((length - 2))}"
+        length=${#inner}
+        i=0
+        while (( i < length )); do
+          char="${inner:i:1}"
+          if [[ "$char" == \\ ]]; then
+            (( i + 1 < length )) || return 1
+            escape="${inner:i+1:1}"
+            case "$escape" in
+              \\) decoded+=\\ ;;
+              '"') decoded+='"' ;;
+              *) return 1 ;;
+            esac
+            i=$((i + 2))
+          elif [[ "$char" == '$' ]]; then
+            (( i + 1 < length )) && [[ "${inner:i+1:1}" == '$' ]] || return 1
+            decoded+='$'
+            i=$((i + 2))
+          elif [[ "$char" == '"' ]]; then
+            return 1
+          else
+            decoded+="$char"
+            i=$((i + 1))
+          fi
+        done
+        printf '%s' "$decoded"
+        return 0
+      fi
+      printf '%s' "$raw"
+    }
+
+    read_concord_env_value() {
+      local key="$1" line raw="" count=0
+      [[ -f "$CONCORD_ENV_FILE" ]] || { printf ''; return 0; }
+      cat "$CONCORD_ENV_FILE" >/dev/null 2>&1 || return 1
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        case "$line" in
+          "${key}"=*)
+            count=$((count + 1))
+            raw="${line#*=}"
+            ;;
+        esac
+      done < "$CONCORD_ENV_FILE"
+      (( count <= 1 )) || return 1
+      (( count == 1 )) || { printf ''; return 0; }
+      decode_concord_env_value "$raw"
+    }
+
+    # Keep this in lockstep with config.invalidHSTSHeaderValue: printable ASCII
+    # plus TAB, semicolon-separated unique directives, exactly one decimal
+    # max-age, valueless includeSubDomains/preload, and token/quoted values.
+    validate_hsts_header_value() {
+      local value="$1" remaining directive name val inner lower
+      local has_value last=false
+      local LC_ALL=C
+      local printable_re=$'^[\t -~]*$'
+      local -A seen=()
+      [[ -z "$value" ]] && return 0
+      [[ "$value" =~ $printable_re ]] || return 1
+      remaining="$value"
+      while :; do
+        if [[ "$remaining" == *';'* ]]; then
+          directive="${remaining%%;*}"
+          remaining="${remaining#*;}"
+        else
+          directive="$remaining"
+          last=true
+        fi
+        directive="${directive#"${directive%%[![:blank:]]*}"}"
+        directive="${directive%"${directive##*[![:blank:]]}"}"
+        if [[ -n "$directive" ]]; then
+          has_value=0
+          if [[ "$directive" == *=* ]]; then
+            name="${directive%%=*}"
+            val="${directive#*=}"
+            has_value=1
+          else
+            name="$directive"
+            val=""
+          fi
+          [[ "$name" =~ ^[A-Za-z0-9-]+$ ]] || return 1
+          if (( has_value )); then
+            if [[ "$val" =~ ^[A-Za-z0-9._-]+$ ]]; then
+              :
+            elif (( ${#val} >= 2 )) \
+              && [[ "${val:0:1}" == '"' && "${val: -1}" == '"' ]]; then
+              inner="${val:1:$(( ${#val} - 2 ))}"
+              [[ "$inner" != *'"'* && "$inner" != *\\* ]] || return 1
+            else
+              return 1
+            fi
+          fi
+          lower="${name,,}"
+          [[ -z "${seen[$lower]+present}" ]] || return 1
+          seen["$lower"]=1
+          if [[ "$lower" == max-age ]]; then
+            (( has_value )) && [[ "$val" =~ ^[0-9]+$ ]] || return 1
+          elif (( has_value )) && [[ "$lower" == includesubdomains || "$lower" == preload ]]; then
+            return 1
+          fi
+        fi
+        [[ "$last" == true ]] && break
+      done
+      [[ -n "${seen[max-age]+present}" ]]
+    }
+
+    encode_hsts_for_nginx() {
+      local value="$1" encoded="" char i
+      for ((i = 0; i < ${#value}; i++)); do
+        char="${value:i:1}"
+        # Append the literal nginx variable; do not expand it in Bash.
+        # shellcheck disable=SC2016
+        case "$char" in
+          '"') encoded+='\"' ;;
+          '$') encoded+='${concord_hsts_dollar}' ;;
+          *) encoded+="$char" ;;
+        esac
+      done
+      printf '%s' "$encoded"
+    }
+
+    render_nginx_config() {
+      local policy="$1" encoded line tmp
+      local in_api=0 scoped_replacements=0 owner_markers=0
+      encoded="$(encode_hsts_for_nginx "$policy")" || return 1
+      mkdir -p "$NGINX_RENDER_DIR" || return 1
+      tmp="$(mktemp "${NGINX_RENDER}.tmp.XXXXXX")" || return 1
+      if ! while IFS= read -r line || [[ -n "$line" ]]; do
+        case "$line" in
+          '# HTTPS — API + WebSocket Hub'*) in_api=1 ;;
+          '# HTTPS — Media Plane'*) in_api=0 ;;
+        esac
+        if (( in_api )) && [[ "$line" == "    # CONCORD_MANAGED_HSTS_OWNER" ]]; then
+          printf '%s\n' "$line"
+          printf '    proxy_hide_header Strict-Transport-Security;\n'
+          printf '    add_header Strict-Transport-Security "%s" always;\n' "$encoded"
+          owner_markers=$((owner_markers + 1))
+        elif (( in_api )) && [[ "$line" == "        add_header Strict-Transport-Security "* ]]; then
+          printf '        add_header Strict-Transport-Security "%s" always;\n' "$encoded"
+          scoped_replacements=$((scoped_replacements + 1))
+        else
+          printf '%s\n' "$line"
+        fi
+      done < "$NGINX_SRC" > "$tmp"; then
+        rm -f "$tmp"
+        return 1
+      fi
+      if (( owner_markers != 1 || scoped_replacements != 3 )); then
+        rm -f "$tmp"
+        return 1
+      fi
+      if ! chmod 0644 "$tmp" || ! mv -f "$tmp" "$NGINX_RENDER"; then
+        rm -f "$tmp"
+        return 1
+      fi
+    }
+
+    if ! hsts_header_value="$(read_concord_env_value HSTS_HEADER_VALUE)"; then
+      echo "  ✗ nginx-reload: could not safely read HSTS_HEADER_VALUE — REFUSING to stage nginx" >&2
       exit 1
     fi
+    hsts_header_value="${hsts_header_value:-$HSTS_DEFAULT}"
+    if ! validate_hsts_header_value "$hsts_header_value"; then
+      echo "  ✗ nginx-reload: HSTS_HEADER_VALUE is malformed — REFUSING to stage nginx" >&2
+      exit 1
+    fi
+    if ! render_nginx_config "$hsts_header_value"; then
+      echo "  ✗ nginx-reload: failed to atomically render the nginx HSTS policy — REFUSING to stage nginx" >&2
+      exit 1
+    fi
+
     # #1692: render/remove the admin-console vhost from runtime env. The
     # codename host stays out of git; ADMIN_WEBAUTHN_RP_ID in /opt/concord/.env
     # is the deploy-time source, and only ${ADMIN_DOMAIN} is envsubst-expanded.
-    ADMIN_TMPL="${DEPLOY_DIR}/[internal]nginx/admin-console.conf.template"
-    ADMIN_RENDER_DIR="${DEPLOY_DIR}/[internal]nginx/.rendered"
-    ADMIN_RENDER="${ADMIN_RENDER_DIR}/concord-admin.conf"
-    ADMIN_DST="/etc/nginx/conf.d/concord-admin.conf"
-    ADMIN_ORIGIN_CERT="${ADMIN_ORIGIN_CERT:-/etc/nginx/cloudflare/origin.pem}"
-    ADMIN_ORIGIN_KEY="${ADMIN_ORIGIN_KEY:-/etc/nginx/cloudflare/origin.key}"
-    CONCORD_ENV_FILE="${CONCORD_ENV_FILE:-/opt/concord/.env}"
-    read_concord_env() {
-      local key="$1"
-      if [[ -f "$CONCORD_ENV_FILE" ]]; then
-        grep -E "^${key}=" "$CONCORD_ENV_FILE" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d "'\"" || true
+    if ! admin_enabled="$(read_concord_env_value ADMIN_CONSOLE_ENABLED)" \
+       || ! admin_domain="$(read_concord_env_value ADMIN_WEBAUTHN_RP_ID)"; then
+      echo "  ✗ nginx-reload: could not safely read admin-console settings — REFUSING to stage nginx" >&2
+      exit 1
+    fi
+
+    admin_enabled="${admin_enabled:-false}"
+    if [[ ! "$admin_enabled" =~ ^(true|false)$ ]]; then
+      echo "  ✗ nginx-reload: ADMIN_CONSOLE_ENABLED must be true or false — REFUSING to stage nginx" >&2
+      exit 1
+    fi
+
+    admin_desired=absent
+    if [[ "$admin_enabled" == true ]]; then
+      # envsubst is deliberately limited to ADMIN_DOMAIN, but validating the
+      # value first is still required: nginx metacharacters must never reach a
+      # generated directive. Accept only an ordinary DNS hostname here.
+      if [[ -z "$admin_domain" \
+         || ! "$admin_domain" =~ ^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]]; then
+        echo "  ✗ nginx-reload: ADMIN_WEBAUTHN_RP_ID must be a valid FQDN — REFUSING to stage nginx" >&2
+        exit 1
       fi
-    }
-    admin_enabled="$(read_concord_env ADMIN_CONSOLE_ENABLED)"
-    admin_domain="$(read_concord_env ADMIN_WEBAUTHN_RP_ID)"
-    if [[ "$admin_enabled" == "true" && -n "$admin_domain" ]]; then
       if [[ ! -e "$ADMIN_ORIGIN_CERT" || ! -e "$ADMIN_ORIGIN_KEY" ]]; then
         echo "  ⚠ admin vhost requested but Cloudflare Origin Certificate files are missing:" >&2
         echo "    cert: $ADMIN_ORIGIN_CERT" >&2
         echo "    key:  $ADMIN_ORIGIN_KEY" >&2
         echo "    Keeping admin closed; install the cert/key and rerun deploy to enable it." >&2
         # ponytail: fail closed but keep service deploys green; hard-fail here if admin availability becomes deploy-critical.
-        echo "  Removing disabled admin vhost $ADMIN_DST"
-        if ! sudo /bin/rm -f "$ADMIN_DST"; then
-          echo "" >&2
-          echo "  ✗ nginx-reload: admin vhost removal failed (sudoers entry missing or wrong permissions?)" >&2
-          exit 1
-        fi
       elif [[ ! -f "$ADMIN_TMPL" ]]; then
-        echo "" >&2
         echo "  ✗ nginx-reload: admin template not found at $ADMIN_TMPL" >&2
         exit 1
       else
-        mkdir -p "$ADMIN_RENDER_DIR"
-        if ! ADMIN_DOMAIN="$admin_domain" envsubst '${ADMIN_DOMAIN}' < "$ADMIN_TMPL" > "$ADMIN_RENDER"; then
-          echo "" >&2
+        mkdir -p "$NGINX_RENDER_DIR"
+        if ! ADMIN_DOMAIN="$admin_domain" envsubst '${ADMIN_DOMAIN}' < "$ADMIN_TMPL" > "$ADMIN_RENDER" \
+           || ! chmod 0644 "$ADMIN_RENDER"; then
           echo "  ✗ nginx-reload: failed to render admin vhost template" >&2
           exit 1
         fi
-        echo "  Staging admin vhost $ADMIN_RENDER → $ADMIN_DST"
-        if ! sudo /usr/bin/install -o root -g root -m 0644 "$ADMIN_RENDER" "$ADMIN_DST"; then
-          echo "" >&2
-          echo "  ✗ nginx-reload: admin vhost install failed (sudoers entry missing or wrong permissions?)" >&2
-          exit 1
+        admin_desired=present
+      fi
+    fi
+
+    # Root-owned candidates and hard-link backups live beside their targets.
+    # The candidates are inactive until mv(1) atomically replaces each fixed
+    # live pathname; hard links preserve the exact previous inode for rollback.
+    main_swapped=0
+    admin_mutated=0
+    admin_was_present=0
+    activation_attempted=0
+    transaction_pending=0
+
+    cleanup_nginx_candidates() {
+      local cleanup_failed=0
+      sudo /bin/rm -f -- "$NGINX_CANDIDATE" || cleanup_failed=1
+      sudo /bin/rm -f -- "$ADMIN_CANDIDATE" || cleanup_failed=1
+      return "$cleanup_failed"
+    }
+
+    cleanup_nginx_backups() {
+      local cleanup_failed=0
+      sudo /bin/rm -f -- "$NGINX_BACKUP" || cleanup_failed=1
+      sudo /bin/rm -f -- "$ADMIN_BACKUP" || cleanup_failed=1
+      return "$cleanup_failed"
+    }
+
+    require_nginx_backup_absent() {
+      local backup="$1"
+      if sudo /usr/bin/test ! -e "$backup"; then
+        return 0
+      fi
+      if sudo /usr/bin/test -e "$backup"; then
+        echo "  ✗ nginx-reload: prior rollback artifact exists at $backup" >&2
+        echo "    Refusing to mutate nginx; inspect and restore/remove it as root." >&2
+        return 1
+      fi
+      echo "  ✗ nginx-reload: could not determine rollback-artifact state for $backup" >&2
+      return 1
+    }
+
+    restore_nginx_transaction() {
+      local restore_failed=0
+      echo "  Restoring the previous nginx configuration" >&2
+      if (( main_swapped )); then
+        sudo /usr/bin/mv -fT -- "$NGINX_BACKUP" "$NGINX_DST" || restore_failed=1
+      fi
+      if (( admin_mutated )); then
+        if (( admin_was_present )); then
+          sudo /usr/bin/mv -fT -- "$ADMIN_BACKUP" "$ADMIN_DST" || restore_failed=1
+        else
+          sudo /bin/rm -f -- "$ADMIN_DST" || restore_failed=1
         fi
+      fi
+
+      # A successful reload/start can make the rejected transaction active.
+      # After restoring the files, load the old configuration back into nginx.
+      if (( activation_attempted )) && (( restore_failed == 0 )); then
+        if ! sudo /usr/sbin/nginx -t; then
+          restore_failed=1
+        elif systemctl is-active --quiet nginx; then
+          sudo /bin/systemctl reload nginx || restore_failed=1
+        else
+          sudo /bin/systemctl start nginx || restore_failed=1
+        fi
+      fi
+      if (( restore_failed )); then
+        # Candidates are never recovery material, but backups are. Preserve
+        # every surviving backup when any restore/re-activation step fails so
+        # an operator still has the exact prior inode.
+        cleanup_nginx_candidates || true
+        echo "  ✗ nginx-reload: automatic rollback was incomplete; operator intervention is required" >&2
+        return 1
+      fi
+      cleanup_nginx_candidates || restore_failed=1
+      cleanup_nginx_backups || restore_failed=1
+      if (( restore_failed )); then
+        echo "  ✗ nginx-reload: rollback succeeded, but transaction cleanup was incomplete" >&2
+        return 1
+      fi
+      echo "  ✓ previous nginx configuration restored" >&2
+    }
+
+    rollback_nginx_on_exit() {
+      local rc=$?
+      trap - EXIT INT TERM
+      if (( transaction_pending )); then
+        restore_nginx_transaction || true
+      fi
+      exit "$rc"
+    }
+
+    verify_active_hsts() {
+      local expected="$1" headers line value
+      local count=0
+      # HTTP field values use optional whitespace at their boundaries. curl (or
+      # nginx) may normalize that OWS, so compare the semantic value rather
+      # than requiring the deploy-time spelling to survive byte-for-byte.
+      expected="${expected#"${expected%%[![:blank:]]*}"}"
+      expected="${expected%"${expected##*[![:blank:]]}"}"
+      if ! headers="$(curl --noproxy '*' --silent --show-error --insecure \
+          --head --http1.1 --max-time 10 \
+          --resolve api.concordvoice.chat:443:127.0.0.1 \
+          https://api.concordvoice.chat/nginx-health)"; then
+        return 1
+      fi
+      while IFS= read -r line || [[ -n "$line" ]]; do
+        line="${line%$'\r'}"
+        if [[ "${line,,}" == strict-transport-security:* ]]; then
+          count=$((count + 1))
+          value="${line#*:}"
+          value="${value#"${value%%[![:blank:]]*}"}"
+          value="${value%"${value##*[![:blank:]]}"}"
+          [[ "$value" == "$expected" ]] || return 1
+        fi
+      done <<< "$headers"
+      (( count == 1 ))
+    }
+
+    # A backup can be the only remaining copy after an interrupted rollback.
+    # Never classify it as debris: fail closed before any privileged mutation.
+    if ! require_nginx_backup_absent "$NGINX_BACKUP" \
+       || ! require_nginx_backup_absent "$ADMIN_BACKUP"; then
+      exit 1
+    fi
+
+    # Candidates are inactive and never recovery material, so stale candidates
+    # may be cleared after both backup paths are proven absent.
+    if ! cleanup_nginx_candidates; then
+      echo "  ✗ nginx-reload: could not clear stale candidate files" >&2
+      exit 1
+    fi
+    echo "  Staging $NGINX_RENDER → $NGINX_CANDIDATE"
+    if ! sudo /usr/bin/install -o root -g root -m 0644 "$NGINX_RENDER" "$NGINX_CANDIDATE"; then
+      echo "  ✗ nginx-reload: main candidate staging failed (sudoers entry missing or wrong permissions?)" >&2
+      cleanup_nginx_candidates || true
+      exit 1
+    fi
+    if [[ "$admin_desired" == present ]]; then
+      echo "  Staging admin vhost $ADMIN_RENDER → $ADMIN_CANDIDATE"
+      if ! sudo /usr/bin/install -o root -g root -m 0644 "$ADMIN_RENDER" "$ADMIN_CANDIDATE"; then
+        echo "  ✗ nginx-reload: admin candidate staging failed (sudoers entry missing or wrong permissions?)" >&2
+        cleanup_nginx_candidates || true
+        exit 1
+      fi
+    fi
+    if ! sudo /usr/bin/ln -fT -- "$NGINX_DST" "$NGINX_BACKUP"; then
+      echo "  ✗ nginx-reload: could not preserve the current main config" >&2
+      cleanup_nginx_candidates || true
+      cleanup_nginx_backups || true
+      exit 1
+    fi
+    if sudo /usr/bin/test -e "$ADMIN_DST"; then
+      admin_was_present=1
+      if ! sudo /usr/bin/ln -fT -- "$ADMIN_DST" "$ADMIN_BACKUP"; then
+        echo "  ✗ nginx-reload: could not preserve the current admin config" >&2
+        cleanup_nginx_candidates || true
+        cleanup_nginx_backups || true
+        exit 1
+      fi
+    elif ! sudo /usr/bin/test ! -e "$ADMIN_DST"; then
+      # Distinguish an absent file from sudo/test execution failure. Treating
+      # a denied/failed existence check as "absent" could destroy an admin
+      # config without first preserving it.
+      echo "  ✗ nginx-reload: could not determine current admin config state" >&2
+      cleanup_nginx_candidates || true
+      cleanup_nginx_backups || true
+      exit 1
+    fi
+
+    transaction_pending=1
+    trap rollback_nginx_on_exit EXIT
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+
+    # Set each rollback flag before the mutating command so INT/TERM cannot
+    # land after a successful syscall but before the transaction records it.
+    # Restoring a backup is safe even when the attempted mutation fails.
+    main_swapped=1
+    if ! sudo /usr/bin/mv -fT -- "$NGINX_CANDIDATE" "$NGINX_DST"; then
+      echo "  ✗ nginx-reload: could not atomically activate the main candidate" >&2
+      exit 1
+    fi
+    admin_mutated=1
+    if [[ "$admin_desired" == present ]]; then
+      if ! sudo /usr/bin/mv -fT -- "$ADMIN_CANDIDATE" "$ADMIN_DST"; then
+        echo "  ✗ nginx-reload: could not atomically activate the admin candidate" >&2
+        exit 1
       fi
     else
       echo "  Removing disabled admin vhost $ADMIN_DST"
-      if ! sudo /bin/rm -f "$ADMIN_DST"; then
-        echo "" >&2
-        echo "  ✗ nginx-reload: admin vhost removal failed (sudoers entry missing or wrong permissions?)" >&2
+      if ! sudo /bin/rm -f -- "$ADMIN_DST"; then
+        echo "  ✗ nginx-reload: admin vhost removal failed" >&2
         exit 1
       fi
     fi
 
     echo "  Validating with nginx -t"
     if ! sudo /usr/sbin/nginx -t 2>&1; then
-      echo "" >&2
-      echo "  ✗ nginx-reload: nginx -t REJECTED the new config — REFUSING to reload" >&2
-      echo "    Live config is unchanged (sites-enabled/ still points at old sites-available/)." >&2
-      echo "    Inspect $NGINX_DST and re-run after fixing." >&2
+      echo "  ✗ nginx-reload: nginx -t rejected the candidate; rolling back" >&2
       exit 1
     fi
+
+    activation_attempted=1
     echo "  Reloading nginx"
     if sudo /bin/systemctl reload nginx; then
-      echo "  ✓ nginx config staged + validated + reloaded"
+      activation_verb=reloaded
     elif systemctl is-active --quiet nginx; then
-      echo "" >&2
-      echo "  ✗ nginx-reload: systemctl reload nginx failed" >&2
+      echo "  ✗ nginx-reload: systemctl reload nginx failed; rolling back" >&2
       exit 1
     else
       echo "  nginx service is inactive; starting nginx"
       if ! sudo /bin/systemctl start nginx; then
-        echo "" >&2
-        echo "  ✗ nginx-reload: systemctl start nginx failed" >&2
+        echo "  ✗ nginx-reload: systemctl start nginx failed; rolling back" >&2
         exit 1
       fi
-      echo "  ✓ nginx config staged + validated + started"
+      activation_verb=started
     fi
+
+    echo "  Probing active HSTS ownership"
+    if ! verify_active_hsts "$hsts_header_value"; then
+      echo "  ✗ nginx-reload: active /nginx-health did not return exactly one expected HSTS field; rolling back" >&2
+      exit 1
+    fi
+
+    transaction_pending=0
+    trap - EXIT INT TERM
+    cleanup_failed=0
+    cleanup_nginx_candidates || cleanup_failed=1
+    cleanup_nginx_backups || cleanup_failed=1
+    if (( cleanup_failed )); then
+      echo "  ✗ nginx config is active, but transaction-file cleanup failed" >&2
+      echo "    Active configuration was not rolled back; resolve the stale artifact before retrying." >&2
+      exit 1
+    fi
+    echo "  ✓ nginx config staged + validated + $activation_verb + probed"
     ;;
 
   sudoers-sync)
-    # Stage the source-of-truth sudoers file from
-    # /opt/concord/[internal]sudoers.d/concord-deploy into
-    # /etc/sudoers.d/concord-deploy via the narrow CONCORD_SUDOERS_INSTALL
-    # entry. Required because nginx-reload above depends on the sudoers entry
-    # being current — if a deploy ships a new nginx Cmnd_Alias and we haven't
-    # synced sudoers, nginx-reload fails (#919 review finding H1).
-    #
-    # First-time install on a fresh VM: operator runs ONCE manually:
-    #   sudo install -m 0440 -o root -g root \
-    #     /opt/concord/[internal]sudoers.d/concord-deploy \
-    #     /etc/sudoers.d/concord-deploy
-    # After that, this subcommand handles all subsequent updates.
-    SUDOERS_SRC="${SUDOERS_SRC_OVERRIDE:-/opt/concord/[internal]sudoers.d/concord-deploy}"
-    SUDOERS_DEST="/etc/sudoers.d/concord-deploy"
-
-    if [[ ! -f "$SUDOERS_SRC" ]]; then
-      echo "  ✗ sudoers-sync: source-of-truth not found at $SUDOERS_SRC" >&2
+    # The only delegated capability is one fixed, root-owned helper. It reads a
+    # root-owned approved snapshot under /usr/local/share; /opt/concord is never
+    # a runtime sudoers input. Policy changes require explicit operator action.
+    if ! sudo -n /usr/local/sbin/concord-sudoers-sync; then
+      echo "  ✗ sudoers-sync: root-owned sync helper is unavailable or failed" >&2
+      echo "    Install from a reviewed root-owned staging directory; see:" >&2
+      echo "      [internal]deploys.md#sudoers-boundary-bootstrap-and-updates" >&2
       exit 1
     fi
-
-    # Validate syntax BEFORE installing. visudo -cf returns non-zero if the
-    # sudoers file would be rejected by sudo at load time. Refusing to
-    # install a broken sudoers file is critical — sudo refuses to load any
-    # file in /etc/sudoers.d/ if any entry is malformed, locking out concord
-    # from the entire sudo surface.
-    if ! visudo -cf "$SUDOERS_SRC" >/dev/null; then
-      echo "  ✗ sudoers-sync: visudo -cf REJECTED $SUDOERS_SRC — refusing to install" >&2
-      exit 1
-    fi
-
-    # If destination exists and is identical, no-op (idempotent).
-    if [[ -f "$SUDOERS_DEST" ]] && cmp -s "$SUDOERS_SRC" "$SUDOERS_DEST"; then
-      echo "  ✓ sudoers-sync: $SUDOERS_DEST already matches source (no-op)"
-      exit 0
-    fi
-
-    if ! sudo -n /usr/bin/install -o root -g root -m 0440 "$SUDOERS_SRC" "$SUDOERS_DEST" 2>/dev/null; then
-      echo "  ✗ sudoers-sync: install(1) staging failed" >&2
-      echo "    Likely cause: bootstrap-install of /etc/sudoers.d/concord-deploy never ran." >&2
-      echo "    First-time install: operator runs ONCE as root:" >&2
-      echo "      sudo install -m 0440 -o root -g root \\" >&2
-      echo "        /opt/concord/[internal]sudoers.d/concord-deploy \\" >&2
-      echo "        /etc/sudoers.d/concord-deploy" >&2
-      exit 1
-    fi
-    echo "  ✓ sudoers-sync: staged $SUDOERS_DEST (mode 0440, owner root:root)"
+    echo "  ✓ sudoers-sync: root-approved policy is active"
     ;;
 
   wait-healthy)
@@ -1172,8 +1665,8 @@ case "${1:-help}" in
     echo "  activity-history-rollback --confirm-drained --old-image <immutable-image-ref> [--downgrade-schema]"
     echo "                 Drain/disable, optionally downgrade, and start one pinned old CP image"
     echo "  validate-config  §F: pre-rebuild guard via 'docker compose config --quiet'"
-    echo "  nginx-reload   Stage infrastructure/deploy/nginx/concordvoice.conf into /etc/nginx/,"
-    echo "                 validate via 'nginx -t', reload nginx (#919 §5.9)"
+    echo "  nginx-reload   Validate/render HSTS, atomically swap main/admin nginx files,"
+    echo "                 nginx -t, reload/start, active-probe, and rollback on failure"
     echo "  wait-healthy   Block until all services healthy (--timeout SECONDS, default 60)"
     echo "  freshstart     Wipe all data, clear rollback image pin, rebuild from scratch"
     echo "  sync-releases  Manual operator-recovery — normal sync happens via GitHub Actions sync-releases.yml"
