@@ -4,7 +4,6 @@ package sessions
 import (
 	"context"
 	"database/sql"
-	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -523,42 +522,10 @@ func (h *Handler) revokeAllSessionsDB(uid string, includeCurrent bool, c *gin.Co
 		currentToken = ""
 	}
 
-	tx, err := h.db.BeginTx(c.Request.Context(), nil)
-	if err != nil {
-		return nil, fmt.Errorf("begin revoke-all sessions transaction: %w", err)
-	}
-	defer func() {
-		if rollbackErr := tx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
-			h.log.Error("Failed to roll back revoke-all sessions transaction", "error", rollbackErr)
-		}
-	}()
-
-	var lockedUserID string
-	if err := tx.QueryRowContext(c.Request.Context(),
-		`SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE`, uid,
-	).Scan(&lockedUserID); err != nil {
-		return nil, fmt.Errorf("lock revoke-all sessions user: %w", err)
-	}
-
-	var result sql.Result
 	if currentToken != "" && !includeCurrent {
-		currentTokenHash := auth.HashRefreshToken(currentToken)
-		result, err = tx.ExecContext(c.Request.Context(),
-			`UPDATE refresh_tokens SET revoked_at = NOW()
-			 WHERE user_id = $1 AND token_hash != $2 AND revoked_at IS NULL`,
-			uid, currentTokenHash)
-	} else {
-		result, err = tx.ExecContext(c.Request.Context(),
-			`UPDATE refresh_tokens SET revoked_at = NOW()
-			 WHERE user_id = $1 AND revoked_at IS NULL`, uid)
+		return auth.RevokeAllRefreshTokens(c.Request.Context(), h.db, uid, auth.HashRefreshToken(currentToken))
 	}
-	if err != nil {
-		return nil, fmt.Errorf("revoke all sessions: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit revoke-all sessions transaction: %w", err)
-	}
-	return result, nil
+	return auth.RevokeAllRefreshTokens(c.Request.Context(), h.db, uid, "")
 }
 
 // UpdateRevocationMode allows users to toggle between "simple" and "secure"

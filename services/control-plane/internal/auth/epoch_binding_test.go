@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -14,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/models"
 	dbtest "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 )
@@ -84,6 +86,36 @@ func newLoginContext() (*gin.Context, *httptest.ResponseRecorder) {
 	c, _ := gin.CreateTestContext(rec)
 	c.Request = httptest.NewRequest(http.MethodPost, "/", nil)
 	return c, rec
+}
+
+type tokenTheftTestDisconnector struct{}
+
+func (tokenTheftTestDisconnector) DisconnectUser(uuid.UUID) {}
+
+// TestHandleTokenTheftRevokesAfterRequestCancellation ensures a hostile client
+// cannot abort the theft sweep by cancelling the request after authentication.
+func TestHandleTokenTheftRevokesAfterRequestCancellation(t *testing.T) {
+	h, db, userID := newAdmitPathHandler(t)
+	h.hub = tokenTheftTestDisconnector{}
+	_, err := db.Exec(
+		`INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)`,
+		uuid.New(), userID, HashRefreshToken("cancelled-token"), time.Now().Add(time.Hour),
+	)
+	require.NoError(t, err)
+
+	requestCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c, rec := newLoginContext()
+	c.Request = c.Request.WithContext(requestCtx)
+
+	require.True(t, h.handleTokenTheft(c, models.RefreshToken{UserID: userID.String()}))
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	var activeCount int
+	require.NoError(t, db.QueryRow(
+		`SELECT COUNT(*) FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL`, userID,
+	).Scan(&activeCount))
+	assert.Zero(t, activeCount, "theft sweep must not inherit attacker request cancellation")
 }
 
 func TestCompleteLoginRejectsSupersededEpoch(t *testing.T) {

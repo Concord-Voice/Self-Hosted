@@ -109,8 +109,12 @@ func installRevokeAllMintBarrier(t *testing.T, db *sql.DB) {
 		FOR EACH ROW EXECUTE FUNCTION revoke_all_mint_barrier()`)
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_, _ = db.Exec(`DROP TRIGGER IF EXISTS revoke_all_mint_barrier ON refresh_tokens`)
-		_, _ = db.Exec(`DROP FUNCTION IF EXISTS revoke_all_mint_barrier()`)
+		if _, dropErr := db.Exec(`DROP TRIGGER IF EXISTS revoke_all_mint_barrier ON refresh_tokens`); dropErr != nil {
+			t.Errorf("drop revoke-all mint barrier trigger: %v", dropErr)
+		}
+		if _, dropErr := db.Exec(`DROP FUNCTION IF EXISTS revoke_all_mint_barrier()`); dropErr != nil {
+			t.Errorf("drop revoke-all mint barrier function: %v", dropErr)
+		}
 	})
 }
 
@@ -130,9 +134,15 @@ func holdRevokeAllMintBarrier(t *testing.T) func() {
 			return
 		}
 		released = true
-		_, _ = conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, revokeAllMintBarrierLockID)
-		_ = conn.Close()
-		_ = lockDB.Close()
+		if _, unlockErr := conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, revokeAllMintBarrierLockID); unlockErr != nil {
+			t.Errorf("release revoke-all mint barrier: %v", unlockErr)
+		}
+		if closeErr := conn.Close(); closeErr != nil {
+			t.Errorf("close revoke-all barrier connection: %v", closeErr)
+		}
+		if closeErr := lockDB.Close(); closeErr != nil {
+			t.Errorf("close revoke-all barrier database: %v", closeErr)
+		}
 	}
 	t.Cleanup(release)
 	return release

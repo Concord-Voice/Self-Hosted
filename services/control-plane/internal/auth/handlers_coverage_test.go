@@ -277,10 +277,27 @@ func TestRefreshMachineIDTheft_RevokeFailureLogsAndRejects(t *testing.T) {
 	require.NoError(t, err)
 	installTokenTheftRevokeFailure(t, ts.DB)
 
+	differentMachineID := uuid.New().String()
 	logs := ts.CaptureLogs(t)
-	w := doRefreshWithMachineID(ts, refreshToken, uuid.New().String(), "10.0.0.99:5678")
+	w := doRefreshWithMachineID(ts, refreshToken, differentMachineID, "10.0.0.99:5678")
 	require.Equal(t, http.StatusUnauthorized, w.Code)
-	assert.Contains(t, logs.String(), "Failed to revoke refresh tokens after token theft")
+	logOutput := logs.String()
+	assert.Contains(t, logOutput, "Failed to revoke refresh tokens after token theft")
+	assert.NotContains(t, logOutput, originalMachineID)
+	assert.NotContains(t, logOutput, differentMachineID)
+	theftLog := findLogLine(logOutput, "TOKEN THEFT DETECTED")
+	require.NotEmpty(t, theftLog)
+	assert.NotContains(t, theftLog, "10.0.0.1")
+	assert.NotContains(t, theftLog, "10.0.0.99")
+}
+
+func findLogLine(logOutput, marker string) string {
+	for _, line := range strings.Split(logOutput, "\n") {
+		if strings.Contains(line, marker) {
+			return line
+		}
+	}
+	return ""
 }
 
 type tokenTheftMintResult struct {
