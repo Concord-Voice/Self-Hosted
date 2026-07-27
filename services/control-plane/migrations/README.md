@@ -208,6 +208,9 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000096 | validate_voice_lifecycle_watermarks_not_null | Validate lifecycle guards without blocking ordinary writes (#2231) |
 | 000097 | enforce_voice_lifecycle_watermarks_not_null | Revalidate rollback proofs, then convert lifecycle guards to metadata-native `NOT NULL` constraints (#2231) |
 | 000098 | add_activity_settings_cleanup_marker | Durable before/after policy evidence and completed-suppression receipts for retrying/finalizing Rich Presence settings cleanup (#2231) |
+| 000099 | user_credential_epoch | Durable per-user credential-epoch fence for destructive access-token revocation (#2201) |
+| 000100 | add_refresh_token_predecessor | Exact predecessor-to-successor lineage for grace-period refresh recovery (#2428) |
+| 000101 | add_presence_offline_fences | Durable Rich Presence emission-denial fences after disconnects |
 | 000102 | add_token_theft_pending_revocations | Durable recovery records for interrupted token-theft refresh-token sweeps (#2457) |
 | 000103 | add_token_theft_completion_state | Post-sweep cleanup state for token-theft recovery records, with guarded rollback (#2457) |
 | 000104 | add_token_theft_operation_id | Operation ownership for token-theft recovery cleanup, with guarded rollback (#2457) |

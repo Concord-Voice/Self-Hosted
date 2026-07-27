@@ -81,7 +81,9 @@ func queueTokenTheftRevocation(ctx context.Context, db *sql.DB, redisClient *red
 		}
 		return true, errors.New("persist token theft recovery state: token theft block store unavailable")
 	}
-	if _, stateErr := persistTokenTheftRecoveryStateScript.Run(ctx, redisClient,
+	fallbackCtx, cancelFallback := context.WithTimeout(context.WithoutCancel(ctx), tokenTheftRecoveryTimeout)
+	defer cancelFallback()
+	if _, stateErr := persistTokenTheftRecoveryStateScript.Run(fallbackCtx, redisClient,
 		[]string{tokenTheftFallbackHashKey, middleware.TokenTheftBlockedKey(userID)}, userID, operationID,
 	).Result(); stateErr != nil {
 		if enqueueErr != nil {
