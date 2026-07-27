@@ -43,8 +43,8 @@ import (
 // matching CompleteLogin semantics), or this mint holds the lock and the reset,
 // which must wait for it, sweeps the freshly-inserted row.
 //
-// Every bulk refresh-token revocation uses RevokeAllRefreshTokens, which takes
-// this same user-row lock before sweeping sessions. SSO's scope limit remains:
+// Standalone bulk refresh-token revocations use RevokeAllRefreshTokens, while
+// destructive flows already holding this row lock retain atomic sweeps. SSO's scope limit remains:
 // CompleteLink is authorized by an earlier password verification and needs a
 // MatchEpoch comparison, not just this lock (#2458).
 //

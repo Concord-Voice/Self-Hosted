@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/models"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
@@ -517,15 +518,19 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 
 // revokeAllSessionsDB revokes all sessions, optionally excluding the current one.
 func (h *Handler) revokeAllSessionsDB(uid string, includeCurrent bool, c *gin.Context) (sql.Result, error) {
-	currentToken, cookieErr := c.Cookie("refresh_token")
-	if cookieErr != nil {
-		currentToken = ""
+	options := auth.RevokeAllRefreshTokensOptions{
+		ExpectedCredentialEpoch: middleware.TokenCredentialEpoch(c),
+		EnforceCredentialEpoch:  true,
 	}
-
-	if currentToken != "" && !includeCurrent {
-		return auth.RevokeAllRefreshTokens(c.Request.Context(), h.db, uid, auth.HashRefreshToken(currentToken))
+	if !includeCurrent {
+		options.ExcludeSessionID = middleware.TokenSessionID(c)
+		if options.ExcludeSessionID == "" {
+			if currentToken, cookieErr := c.Cookie("refresh_token"); cookieErr == nil && currentToken != "" {
+				options.ExcludeTokenHash = auth.HashRefreshToken(currentToken)
+			}
+		}
 	}
-	return auth.RevokeAllRefreshTokens(c.Request.Context(), h.db, uid, "")
+	return auth.RevokeAllRefreshTokens(c.Request.Context(), h.db, uid, options)
 }
 
 // UpdateRevocationMode allows users to toggle between "simple" and "secure"

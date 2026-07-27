@@ -3,6 +3,7 @@ package sessions_test
 import (
 	"context"
 	"database/sql"
+	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -37,8 +38,8 @@ func TestRevokeAllSessions_ConcurrentMintDoesNotSurvive(t *testing.T) {
 	)
 	mintDone := make(chan mintResult, 1)
 	go func() {
-		_, refresh, sessionID, err := mintHandler.IssueAccessAndRefresh(ctx, user.ID)
-		mintDone <- mintResult{refresh: refresh, sessionID: sessionID, err: err}
+		_, refresh, _, err := mintHandler.IssueAccessAndRefresh(ctx, user.ID)
+		mintDone <- mintResult{refresh: refresh, err: err}
 	}()
 
 	assertMintIsBlockedAtInsert(t, ts.DB)
@@ -89,20 +90,22 @@ func TestRevokeAllSessions_ConcurrentMintDoesNotSurvive(t *testing.T) {
 }
 
 type mintResult struct {
-	refresh   string
-	sessionID string
-	err       error
+	refresh string
+	err     error
 }
 
 func installRevokeAllMintBarrier(t *testing.T, db *sql.DB) {
 	t.Helper()
-	_, err := db.Exec(`
+	// A PL/pgSQL function body cannot receive a bind parameter; the only
+	// interpolation is this package-private integer test constant.
+	barrierFunction := fmt.Sprintf(`
 		CREATE OR REPLACE FUNCTION revoke_all_mint_barrier() RETURNS trigger AS $$
 		BEGIN
-			PERFORM pg_advisory_xact_lock(2457001);
+			PERFORM pg_advisory_xact_lock(%d);
 			RETURN NULL;
 		END;
-		$$ LANGUAGE plpgsql`)
+		$$ LANGUAGE plpgsql`, revokeAllMintBarrierLockID)
+	_, err := db.Exec(barrierFunction)
 	require.NoError(t, err)
 	_, err = db.Exec(`
 		CREATE TRIGGER revoke_all_mint_barrier AFTER INSERT ON refresh_tokens

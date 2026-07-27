@@ -4,6 +4,7 @@ package middleware
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -25,6 +26,8 @@ const (
 	// handlers that must act on the current token without reparsing it.
 	JWTClaimsContextKey = "jwt_claims"
 )
+
+var errTokenTheftRevocationPending = errors.New("token theft revocation pending")
 
 // AuthRequired returns a middleware that validates JWT tokens and checks the
 // token blacklist in Redis. Tokens that have been revoked (e.g. on logout)
@@ -138,14 +141,35 @@ func abortAccountDisabled(c *gin.Context) {
 // silently break the denylist.
 func UserDisabledKey(userID string) string { return "user_disabled:" + userID }
 
+// TokenTheftBlockedKey marks a user whose theft-triggered refresh-token sweep
+// has not durably committed. It is checked by both bearer and refresh paths.
+func TokenTheftBlockedKey(userID string) string { return "token_theft_blocked:" + userID }
+
+// CheckTokenTheftBlocked rejects while a theft-triggered refresh-token sweep is
+// pending. Redis failures fail closed so an unavailable marker store cannot
+// re-admit a compromised session.
+func CheckTokenTheftBlocked(ctx context.Context, redisClient *redis.Client, userID string) error {
+	checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	defer cancel()
+
+	exists, err := redisClient.Exists(checkCtx, TokenTheftBlockedKey(userID)).Result()
+	if err != nil {
+		return fmt.Errorf("check token theft block: %w", err)
+	}
+	if exists > 0 {
+		return errTokenTheftRevocationPending
+	}
+	return nil
+}
+
 // VerifyLiveTokenState evaluates shared post-parse bearer-token state. A present
-// disabled-user key or a Redis error rejects fail closed; otherwise it returns
-// the token's backward-compatible email-verification value.
+// disabled-user or theft-block key, or a Redis error, rejects fail closed;
+// otherwise it returns the token's backward-compatible email-verification value.
 func VerifyLiveTokenState(ctx context.Context, redisClient *redis.Client, userID string, claims jwt.MapClaims) (bool, error) {
 	checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
 
-	exists, err := redisClient.Exists(checkCtx, UserDisabledKey(userID)).Result()
+	exists, err := redisClient.Exists(checkCtx, UserDisabledKey(userID), TokenTheftBlockedKey(userID)).Result()
 	if err != nil {
 		return false, fmt.Errorf("check disabled user: %w", err)
 	}

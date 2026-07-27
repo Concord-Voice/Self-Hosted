@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -173,4 +174,32 @@ func TestRevokeAllSessionsExceptCurrent(t *testing.T) {
 	var body map[string]interface{}
 	testhelpers.ParseJSON(t, rw, &body)
 	assert.Equal(t, "All other sessions revoked successfully", body["message"])
+}
+
+func TestRevokeAllSessionsExceptCurrent_UsesBearerSessionWithoutCookie(t *testing.T) {
+	ts := setupTS(t)
+	accessToken, refreshCookie := registerAndGetTokens(t, ts, "revokeotherbearer@test.concord.chat", "revokeotherbearer")
+	require.NotNil(t, refreshCookie)
+
+	var userID, currentSessionID string
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT user_id, id FROM refresh_tokens WHERE token_hash = $1`, auth.HashRefreshToken(refreshCookie.Value),
+	).Scan(&userID, &currentSessionID))
+	var otherSessionID string
+	require.NoError(t, ts.DB.QueryRow(
+		`INSERT INTO refresh_tokens (user_id, token_hash, expires_at)
+		 VALUES ($1, $2, NOW() + INTERVAL '30 days') RETURNING id`,
+		userID, auth.HashRefreshToken("other-session-token"),
+	).Scan(&otherSessionID))
+
+	w := ts.DoRequest("POST", "/api/v1/sessions/revoke-all", map[string]interface{}{
+		"password": "TestPassword123!",
+	}, testhelpers.AuthHeaders(accessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var currentActive, otherActive int
+	require.NoError(t, ts.DB.QueryRow(`SELECT COUNT(*) FROM refresh_tokens WHERE id = $1 AND revoked_at IS NULL`, currentSessionID).Scan(&currentActive))
+	require.NoError(t, ts.DB.QueryRow(`SELECT COUNT(*) FROM refresh_tokens WHERE id = $1 AND revoked_at IS NULL`, otherSessionID).Scan(&otherActive))
+	assert.Equal(t, 1, currentActive, "the bearer-authenticated session must be preserved without a refresh cookie")
+	assert.Zero(t, otherActive, "all non-current sessions must be revoked")
 }

@@ -12046,6 +12046,11 @@ paths:
                   type: boolean
                   default: false
                   description: Revoke the current refresh token as well as all other sessions
+              anyOf:
+              - required:
+                - password
+              - required:
+                - mfa_code
       responses:
         '200':
           description: Sessions revoked

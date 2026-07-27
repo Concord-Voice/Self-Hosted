@@ -268,7 +268,7 @@ func TestRefreshMachineIDTheft_ConcurrentMintDoesNotSurvive(t *testing.T) {
 func TestRefreshMachineIDTheft_RevokeFailureLogsAndRejects(t *testing.T) {
 	ts := setupTS(t)
 	originalMachineID := uuid.New().String()
-	refreshToken, _ := registerAndGetRefreshToken(t, ts, "theftrevokeerror", originalMachineID)
+	refreshToken, userID := registerAndGetRefreshToken(t, ts, "theftrevokeerror", originalMachineID)
 
 	_, err := ts.DB.Exec(
 		`UPDATE refresh_tokens SET ip_address = '10.0.0.1', machine_id = $1 WHERE token_hash = $2`,
@@ -289,6 +289,30 @@ func TestRefreshMachineIDTheft_RevokeFailureLogsAndRejects(t *testing.T) {
 	require.NotEmpty(t, theftLog)
 	assert.NotContains(t, theftLog, "10.0.0.1")
 	assert.NotContains(t, theftLog, "10.0.0.99")
+
+	otherRefresh := "other-refresh-token"
+	_, err = ts.DB.Exec(
+		`INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)`,
+		uuid.New(), userID, auth.HashRefreshToken(otherRefresh), time.Now().Add(time.Hour),
+	)
+	require.NoError(t, err)
+	blockedRefresh := doRefreshWithMachineID(ts, otherRefresh, "", "")
+	assert.Equal(t, http.StatusUnauthorized, blockedRefresh.Code,
+		"the pending theft marker must block refresh-token use")
+
+	accessToken, err := auth.GenerateAccessToken(userID, testhelpers.TestJWTSecret, true, "", "")
+	require.NoError(t, err)
+	blockedAccess := ts.DoRequest("GET", "/api/v1/sessions", nil, testhelpers.AuthHeaders(accessToken))
+	assert.Equal(t, http.StatusForbidden, blockedAccess.Code,
+		"the pending theft marker must block bearer-token use")
+
+	_, err = ts.DB.Exec(`DROP TRIGGER IF EXISTS token_theft_revoke_failure ON refresh_tokens`)
+	require.NoError(t, err)
+	require.Eventually(t, func() bool {
+		exists, redisErr := ts.Redis.Exists(context.Background(), middleware.TokenTheftBlockedKey(userID)).Result()
+		return redisErr == nil && exists == 0
+	}, 3*time.Second, 25*time.Millisecond,
+		"the retry must retain the block until the durable refresh-token sweep commits")
 }
 
 func findLogLine(logOutput, marker string) string {
@@ -307,13 +331,16 @@ type tokenTheftMintResult struct {
 
 func installTokenTheftMintBarrier(t *testing.T, db *sql.DB) {
 	t.Helper()
-	_, err := db.Exec(`
+	// A PL/pgSQL function body cannot receive a bind parameter; the only
+	// interpolation is this package-private integer test constant.
+	barrierFunction := fmt.Sprintf(`
 		CREATE OR REPLACE FUNCTION token_theft_mint_barrier() RETURNS trigger AS $$
 		BEGIN
-			PERFORM pg_advisory_xact_lock(2460001);
+			PERFORM pg_advisory_xact_lock(%d);
 			RETURN NULL;
 		END;
-		$$ LANGUAGE plpgsql`)
+		$$ LANGUAGE plpgsql`, tokenTheftMintBarrierLockID)
+	_, err := db.Exec(barrierFunction)
 	require.NoError(t, err)
 	_, err = db.Exec(`
 		CREATE TRIGGER token_theft_mint_barrier AFTER INSERT ON refresh_tokens
