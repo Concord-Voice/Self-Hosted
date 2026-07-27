@@ -27,7 +27,7 @@ func TestStartTokenTheftRecoveryWorker_CompletesStartupRecoveryBeforeReturning(t
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	auth.StartTokenTheftRecoveryWorker(ctx, ts.DB, ts.Redis, logger.New("test"), time.Hour)
+	require.NoError(t, auth.StartTokenTheftRecoveryWorker(ctx, ts.DB, ts.Redis, logger.New("test"), time.Hour))
 
 	var pending, active int
 	require.NoError(t, ts.DB.QueryRow(
@@ -115,7 +115,7 @@ func TestEnqueueTokenTheftRevocation_ResetsCompletedOperation(t *testing.T) {
 	assert.False(t, completedAt.Valid)
 }
 
-func TestStartTokenTheftRecoveryWorker_RetriesRecoveryFailures(t *testing.T) {
+func TestStartTokenTheftRecoveryWorker_FailsStartupWhenRecoveryIsIncomplete(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "token-theft-recovery-failure")
 	_, err := ts.DB.Exec(
@@ -130,11 +130,33 @@ func TestStartTokenTheftRecoveryWorker_RetriesRecoveryFailures(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	auth.StartTokenTheftRecoveryWorker(ctx, ts.DB, deadRedis, logger.New("test"), time.Hour)
+	err = auth.StartTokenTheftRecoveryWorker(ctx, ts.DB, deadRedis, logger.New("test"), time.Hour)
+	require.Error(t, err)
+	assert.ErrorContains(t, err, "startup token theft revocation recovery incomplete")
 
 	var pending int
 	require.NoError(t, ts.DB.QueryRow(
 		`SELECT COUNT(*) FROM token_theft_pending_revocations WHERE user_id = $1`, user.ID,
 	).Scan(&pending))
 	assert.Equal(t, 1, pending)
+}
+
+func TestRecoverPendingTokenTheftRevocations_RetiresStateForDeletedUser(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "token-theft-deleted-user")
+	ctx := context.Background()
+	operationID := uuid.NewString()
+	const fallbackKey = "token_theft_pending_revocations:fallback:v2"
+
+	require.NoError(t, ts.Redis.HSet(ctx, fallbackKey, user.ID, operationID).Err())
+	require.NoError(t, ts.Redis.Set(ctx, middleware.TokenTheftBlockedKey(user.ID), operationID, 0).Err())
+	_, err := ts.DB.Exec(`DELETE FROM users WHERE id = $1`, user.ID)
+	require.NoError(t, err)
+
+	require.NoError(t, auth.RecoverPendingTokenTheftRevocations(ctx, ts.DB, ts.Redis, logger.New("test")))
+	_, err = ts.Redis.HGet(ctx, fallbackKey, user.ID).Result()
+	assert.ErrorIs(t, err, redis.Nil)
+	blocked, err := ts.Redis.Exists(ctx, middleware.TokenTheftBlockedKey(user.ID)).Result()
+	require.NoError(t, err)
+	assert.Zero(t, blocked)
 }

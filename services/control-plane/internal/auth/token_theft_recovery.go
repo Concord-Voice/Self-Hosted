@@ -298,6 +298,16 @@ func RecoverPendingTokenTheftRevocations(ctx context.Context, db *sql.DB, redisC
 				err := enqueueTokenTheftRevocation(attemptCtx, db, userID, &operationID)
 				cancel()
 				if err != nil {
+					retired, retireErr := retireTokenTheftRecoveryStateIfUserDeleted(ctx, db, redisClient, userID, &operationID)
+					if retireErr != nil {
+						errs = append(errs, retireErr)
+						log.Error("Token theft fallback retirement failed", "error", retireErr, "user_id", userID)
+						continue
+					}
+					if retired {
+						continue
+					}
+					errs = append(errs, fmt.Errorf("promote token theft fallback: %w", err))
 					log.Error("Token theft fallback promotion failed", "error", err, "user_id", userID)
 					continue
 				}
@@ -321,6 +331,16 @@ func RecoverPendingTokenTheftRevocations(ctx context.Context, db *sql.DB, redisC
 				err := enqueueTokenTheftRevocation(attemptCtx, db, userID, nil)
 				cancel()
 				if err != nil {
+					retired, retireErr := retireTokenTheftRecoveryStateIfUserDeleted(ctx, db, redisClient, userID, nil)
+					if retireErr != nil {
+						errs = append(errs, retireErr)
+						log.Error("Legacy token theft fallback retirement failed", "error", retireErr, "user_id", userID)
+						continue
+					}
+					if retired {
+						continue
+					}
+					errs = append(errs, fmt.Errorf("promote legacy token theft fallback: %w", err))
 					log.Error("Legacy token theft fallback promotion failed", "error", err, "user_id", userID)
 					continue
 				}
@@ -334,17 +354,45 @@ func RecoverPendingTokenTheftRevocations(ctx context.Context, db *sql.DB, redisC
 		err := ProcessTokenTheftRevocation(attemptCtx, db, redisClient, userID)
 		cancel()
 		if err != nil {
+			errs = append(errs, fmt.Errorf("recover token theft revocation for %s: %w", userID, err))
 			log.Error("Pending token theft revocation recovery failed", "error", err, "user_id", userID)
 		}
 	}
 	return errors.Join(errs...)
 }
 
+// retireTokenTheftRecoveryStateIfUserDeleted clears Redis-only recovery state
+// after an account erase cascades its durable row. The comparison-and-delete
+// scripts preserve state belonging to a newer theft event for the same user.
+func retireTokenTheftRecoveryStateIfUserDeleted(ctx context.Context, db *sql.DB, redisClient *redis.Client, userID string, operationID *string) (bool, error) {
+	var exists bool
+	if err := db.QueryRowContext(ctx, `SELECT EXISTS (SELECT 1 FROM users WHERE id = $1)`, userID).Scan(&exists); err != nil {
+		return false, fmt.Errorf("check token theft fallback user: %w", err)
+	}
+	if exists {
+		return false, nil
+	}
+	if operationID != nil {
+		if _, err := finalizeTokenTheftRecoveryStateScript.Run(ctx, redisClient,
+			[]string{tokenTheftFallbackHashKey, middleware.TokenTheftBlockedKey(userID)}, userID, *operationID,
+		).Result(); err != nil {
+			return false, fmt.Errorf("clear deleted-user token theft recovery state: %w", err)
+		}
+		return true, nil
+	}
+	if _, err := finalizeLegacyTokenTheftRecoveryStateScript.Run(ctx, redisClient,
+		[]string{tokenTheftLegacyFallbackSetKey, middleware.TokenTheftBlockedKey(userID)}, userID, tokenTheftLegacyStateValue,
+	).Result(); err != nil {
+		return false, fmt.Errorf("clear deleted-user legacy token theft recovery state: %w", err)
+	}
+	return true, nil
+}
+
 // StartTokenTheftRecoveryWorker runs startup recovery before returning, then
 // replays pending theft sweeps on a fixed interval until ctx is cancelled.
-func StartTokenTheftRecoveryWorker(ctx context.Context, db *sql.DB, redisClient *redis.Client, log *logger.Logger, interval time.Duration) {
+func StartTokenTheftRecoveryWorker(ctx context.Context, db *sql.DB, redisClient *redis.Client, log *logger.Logger, interval time.Duration) error {
 	if err := RecoverPendingTokenTheftRevocations(ctx, db, redisClient, log); err != nil {
-		log.Error("Startup token theft revocation recovery incomplete; will retry", "error", err)
+		return fmt.Errorf("startup token theft revocation recovery incomplete: %w", err)
 	}
 	ticker := time.NewTicker(interval)
 	go func() {
@@ -363,4 +411,5 @@ func StartTokenTheftRecoveryWorker(ctx context.Context, db *sql.DB, redisClient 
 			}
 		}
 	}()
+	return nil
 }
