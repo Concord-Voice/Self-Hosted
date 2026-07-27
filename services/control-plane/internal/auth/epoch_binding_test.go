@@ -118,6 +118,49 @@ func TestHandleTokenTheftRevokesAfterRequestCancellation(t *testing.T) {
 	assert.Zero(t, activeCount, "theft sweep must not inherit attacker request cancellation")
 }
 
+func TestRevokeAllRefreshTokens_ExcludesCurrentToken(t *testing.T) {
+	_, db, userID := newAdmitPathHandler(t)
+	excludedHash := HashRefreshToken("current-token")
+	revokedHash := HashRefreshToken("other-token")
+	for _, tokenHash := range []string{excludedHash, revokedHash} {
+		_, err := db.Exec(
+			`INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)`,
+			uuid.New(), userID, tokenHash, time.Now().Add(time.Hour),
+		)
+		require.NoError(t, err)
+	}
+
+	result, err := RevokeAllRefreshTokens(context.Background(), db, userID.String(), excludedHash)
+	require.NoError(t, err)
+	rowsAffected, err := result.RowsAffected()
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, rowsAffected)
+
+	var excludedRevokedAt, otherRevokedAt sql.NullTime
+	require.NoError(t, db.QueryRow(`SELECT revoked_at FROM refresh_tokens WHERE token_hash = $1`, excludedHash).Scan(&excludedRevokedAt))
+	require.NoError(t, db.QueryRow(`SELECT revoked_at FROM refresh_tokens WHERE token_hash = $1`, revokedHash).Scan(&otherRevokedAt))
+	assert.False(t, excludedRevokedAt.Valid, "the current refresh token must remain active")
+	assert.True(t, otherRevokedAt.Valid, "all non-current refresh tokens must be revoked")
+}
+
+func TestRevokeAllRefreshTokens_UnknownUser_ReturnsError(t *testing.T) {
+	_, db, _ := newAdmitPathHandler(t)
+
+	_, err := RevokeAllRefreshTokens(context.Background(), db, uuid.New().String(), "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "lock refresh-token revocation user")
+}
+
+func TestRevokeAllRefreshTokens_CanceledContext_ReturnsError(t *testing.T) {
+	_, db, userID := newAdmitPathHandler(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := RevokeAllRefreshTokens(ctx, db, userID.String(), "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "begin refresh-token revocation transaction")
+}
+
 func TestCompleteLoginRejectsSupersededEpoch(t *testing.T) {
 	h, db, userID := newRejectPathHandler(t)
 
