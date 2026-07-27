@@ -47,6 +47,10 @@ end
 return 1
 `)
 
+func newTokenTheftRecoveryContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), tokenTheftRecoveryTimeout)
+}
+
 // EnqueueTokenTheftRevocation records a theft-triggered sweep before it starts,
 // allowing another process to resume it after a crash.
 func EnqueueTokenTheftRevocation(ctx context.Context, db *sql.DB, userID string) error {
@@ -81,7 +85,7 @@ func queueTokenTheftRevocation(ctx context.Context, db *sql.DB, redisClient *red
 		}
 		return true, errors.New("persist token theft recovery state: token theft block store unavailable")
 	}
-	fallbackCtx, cancelFallback := context.WithTimeout(context.WithoutCancel(ctx), tokenTheftRecoveryTimeout)
+	fallbackCtx, cancelFallback := newTokenTheftRecoveryContext(ctx)
 	defer cancelFallback()
 	if _, stateErr := persistTokenTheftRecoveryStateScript.Run(fallbackCtx, redisClient,
 		[]string{tokenTheftFallbackHashKey, middleware.TokenTheftBlockedKey(userID)}, userID, operationID,
@@ -327,6 +331,10 @@ func RecoverPendingTokenTheftRevocations(ctx context.Context, db *sql.DB, redisC
 			}
 			for _, userID := range legacyFallbackUserIDs {
 				if _, seen := seenUserIDs[userID]; seen {
+					if err := redisClient.SRem(ctx, tokenTheftLegacyFallbackSetKey, userID).Err(); err != nil {
+						errs = append(errs, fmt.Errorf("retire superseded legacy token theft fallback: %w", err))
+						log.Error("Legacy token theft fallback retirement failed", "error", err, "user_id", userID)
+					}
 					continue
 				}
 				attemptCtx, cancel := context.WithTimeout(ctx, tokenTheftRecoveryTimeout)

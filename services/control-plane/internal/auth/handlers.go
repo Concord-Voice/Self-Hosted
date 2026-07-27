@@ -1572,7 +1572,9 @@ func (h *Handler) handleTokenTheft(c *gin.Context, token models.RefreshToken) bo
 		h.log.Error("Failed to persist pending token theft revocation", "error", queueErr, "user_id", token.UserID)
 	}
 	if queuedInDB {
-		if err := ProcessTokenTheftRevocation(revokeCtx, h.db, h.redis, token.UserID); err != nil {
+		processCtx, cancelProcess := newTokenTheftRecoveryContext(revokeCtx)
+		defer cancelProcess()
+		if err := ProcessTokenTheftRevocation(processCtx, h.db, h.redis, token.UserID); err != nil {
 			h.log.Error("Failed to revoke refresh tokens after token theft", "error", err, "user_id", token.UserID)
 		}
 	} else if queueErr == nil {

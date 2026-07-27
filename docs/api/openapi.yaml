@@ -12102,6 +12102,7 @@ paths:
                       description: Present when step-up authentication is required
                     methods:
                       type: array
+                      nullable: true
                       items:
                         type: string
                       description: Enabled MFA methods when MFA authentication is required

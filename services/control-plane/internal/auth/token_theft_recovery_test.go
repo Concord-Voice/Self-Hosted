@@ -160,3 +160,34 @@ func TestRecoverPendingTokenTheftRevocations_RetiresStateForDeletedUser(t *testi
 	require.NoError(t, err)
 	assert.Zero(t, blocked)
 }
+
+func TestRecoverPendingTokenTheftRevocations_RetiresSupersededLegacyFallback(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "token-theft-superseded-legacy")
+	ctx := context.Background()
+	const legacyFallbackKey = "token_theft_pending_revocations:fallback"
+	_, err := ts.DB.Exec(
+		`INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, NOW() + INTERVAL '1 hour')`,
+		uuid.New(), user.ID, auth.HashRefreshToken("pre-recovery-token"),
+	)
+	require.NoError(t, err)
+	require.NoError(t, auth.EnqueueTokenTheftRevocation(ctx, ts.DB, user.ID))
+	require.NoError(t, ts.Redis.SAdd(ctx, legacyFallbackKey, user.ID).Err())
+
+	require.NoError(t, auth.RecoverPendingTokenTheftRevocations(ctx, ts.DB, ts.Redis, logger.New("test")))
+	legacyPending, err := ts.Redis.SIsMember(ctx, legacyFallbackKey, user.ID).Result()
+	require.NoError(t, err)
+	assert.False(t, legacyPending)
+	_, err = ts.DB.Exec(
+		`INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, NOW() + INTERVAL '1 hour')`,
+		uuid.New(), user.ID, auth.HashRefreshToken("post-recovery-token"),
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, auth.RecoverPendingTokenTheftRevocations(ctx, ts.DB, ts.Redis, logger.New("test")))
+	var active int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL`, user.ID,
+	).Scan(&active))
+	assert.Equal(t, 1, active)
+}
