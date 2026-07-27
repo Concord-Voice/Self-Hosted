@@ -20,6 +20,8 @@ import (
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 )
 
 var (
@@ -121,6 +123,7 @@ func setupHubTestRedis(t *testing.T) *redis.Client {
 	ctx := context.Background()
 	require.NoError(t, client.Ping(ctx).Err(), "hub_epoch_test: failed to ping redis")
 	require.NoError(t, client.FlushDB(ctx).Err(), "hub_epoch_test: failed to flush redis DB")
+	require.NoError(t, client.Set(ctx, middleware.TokenTheftRecoveryGenerationKey(), "1", 0).Err())
 	t.Cleanup(func() {
 		_ = client.FlushDB(ctx).Err()
 		_ = client.Close()
