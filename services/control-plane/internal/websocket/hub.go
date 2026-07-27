@@ -1151,21 +1151,21 @@ const (
 	channelAuthCtxTimeout       = 3 * time.Second
 )
 
-func (h *Hub) rejectActiveMemberTimeout(msg IncomingMessage, serverID, userID uuid.UUID) (bool, string) {
+func (h *Hub) rejectActiveMemberTimeout(msg IncomingMessage, serverID, userID uuid.UUID) (bool, time.Time) {
 	if h.db == nil {
-		return false, ""
+		return false, time.Time{}
 	}
 
 	var timedOutUntil sql.NullTime
-	var membershipIncarnation string
+	var membershipIncarnation time.Time
 	err := h.db.QueryRow(
-		"SELECT timed_out_until, xmin::text FROM server_members WHERE server_id = $1 AND user_id = $2",
+		"SELECT timed_out_until, joined_at FROM server_members WHERE server_id = $1 AND user_id = $2",
 		serverID, userID,
 	).Scan(&timedOutUntil, &membershipIncarnation)
 	if err != nil {
 		log.Printf("Failed to check member timeout: %v", err)
 		h.sendError(msg.ClientID, "Failed to verify timeout status")
-		return true, ""
+		return true, time.Time{}
 	}
 	if !timedOutUntil.Valid || !timedOutUntil.Time.After(time.Now().UTC()) {
 		return false, membershipIncarnation
@@ -1175,20 +1175,20 @@ func (h *Hub) rejectActiveMemberTimeout(msg IncomingMessage, serverID, userID uu
 		keyMessage:        "Member is timed out",
 		"timed_out_until": timedOutUntil.Time,
 	})
-	return true, ""
+	return true, time.Time{}
 }
 
-func (h *Hub) authorizeMessageSend(msg IncomingMessage, userID uuid.UUID, chCtx *channelContext, channelUUID uuid.UUID, viewPerm int64) (bool, string) {
+func (h *Hub) authorizeMessageSend(msg IncomingMessage, userID uuid.UUID, chCtx *channelContext, channelUUID uuid.UUID, viewPerm int64) (bool, time.Time) {
 	denied := "Not authorized to send messages in this channel"
 	rejected, membershipIncarnation := h.rejectActiveMemberTimeout(msg, chCtx.serverUUID, userID)
 	if rejected {
-		return false, ""
+		return false, time.Time{}
 	}
 	if !h.authorizeChannelPermission(msg, userID, chCtx, channelUUID, viewPerm, denied) {
-		return false, ""
+		return false, time.Time{}
 	}
 	if !h.authorizeChannelPermission(msg, userID, chCtx, channelUUID, permSendMessages, denied) {
-		return false, ""
+		return false, time.Time{}
 	}
 	return true, membershipIncarnation
 }
@@ -2203,7 +2203,7 @@ type persistMessageParams struct {
 	channelUUID           uuid.UUID
 	userID                uuid.UUID
 	credEpoch             string
-	membershipIncarnation string
+	membershipIncarnation time.Time
 	content               string
 	keyVersion            int
 	embedsSuppressed      bool
@@ -2241,14 +2241,14 @@ func (h *Hub) persistMessage(p persistMessageParams) (uuid.UUID, time.Time, time
 		log.Printf("Message epoch guard read failed: %v", guardErr)
 		return messageID, createdAt, updatedAt, errMsgFailedSaveMessage
 	}
-	// Lock the preflight membership row inside the write transaction. Its tuple
-	// version rejects a same-key rejoin after a kick/ban finishes purging.
+	// Lock the preflight membership row inside the write transaction. Its immutable
+	// joined_at value rejects a same-key rejoin after a kick/ban finishes purging.
 	var membership int
 	err = tx.QueryRowContext(ctx,
 		`SELECT 1
 		 FROM channels ch
 		 INNER JOIN server_members sm ON sm.server_id = ch.server_id
-		 WHERE ch.id = $1 AND sm.user_id = $2 AND sm.xmin::text = $3
+		 WHERE ch.id = $1 AND sm.user_id = $2 AND sm.joined_at = $3
 		 FOR SHARE OF sm`,
 		p.channelUUID, p.userID, p.membershipIncarnation,
 	).Scan(&membership)

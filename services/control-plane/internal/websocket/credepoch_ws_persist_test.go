@@ -19,11 +19,11 @@ import (
 
 const wsPersistArgonHash = "$argon2id$v=19$m=65536,t=3,p=4$3pE9STD1TqLPoZQ2/BTLCg$8SKTCjsZh8Q7pAulEqAIEzJQK9eeOb5ipWhPz4REdCY" //nolint:gosec // dev-only test hash // pragma: allowlist secret
 
-func membershipIncarnation(t *testing.T, db *sql.DB, serverID, userID uuid.UUID) string {
+func membershipIncarnation(t *testing.T, db *sql.DB, serverID, userID uuid.UUID) time.Time {
 	t.Helper()
-	var incarnation string
+	var incarnation time.Time
 	require.NoError(t, db.QueryRow(
-		`SELECT xmin::text FROM server_members WHERE server_id = $1 AND user_id = $2`, serverID, userID,
+		`SELECT joined_at FROM server_members WHERE server_id = $1 AND user_id = $2`, serverID, userID,
 	).Scan(&incarnation))
 	return incarnation
 }
@@ -102,6 +102,24 @@ func TestPersistMessage_RejoinedMemberRejected(t *testing.T) {
 	var count int
 	require.NoError(t, setup.db.QueryRow(`SELECT count(*) FROM messages WHERE channel_id = $1`, channelID).Scan(&count))
 	assert.Zero(t, count, "a rejoined member must not admit a stale socket message")
+}
+
+func TestPersistMessage_MemberUpdateKeepsIncarnation(t *testing.T) {
+	setup := setupMessageTest(t)
+	channelID := uuid.MustParse(setup.convID)
+	incarnation := membershipIncarnation(t, setup.db, setup.user2, setup.user1)
+
+	_, err := setup.db.Exec(
+		`UPDATE server_members SET server_muted = true WHERE server_id = $1 AND user_id = $2`,
+		setup.user2, setup.user1,
+	)
+	require.NoError(t, err)
+
+	_, _, _, errMsg := setup.hub.persistMessage(persistMessageParams{
+		channelUUID: channelID, userID: setup.user1, membershipIncarnation: incarnation,
+		content: "Y2lwaGVydGV4dA==", keyVersion: 1,
+	})
+	assert.Empty(t, errMsg)
 }
 
 func TestHandleMessage_RejoinedMemberDuringPermissionCheckRejected(t *testing.T) {
