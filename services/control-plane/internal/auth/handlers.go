@@ -17,6 +17,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/attestation"
@@ -146,6 +147,7 @@ type Handler struct {
 	pending         *PendingRepo
 	entCache        *entitlements.Cache
 	credFence       *credepoch.Fence
+	theftRetries    sync.Map
 }
 
 // SetCredentialFence injects the per-user credential-epoch fence (#2201).
@@ -1576,9 +1578,14 @@ func (h *Handler) handleTokenTheft(c *gin.Context, token models.RefreshToken) bo
 		defer cancelProcess()
 		if err := ProcessTokenTheftRevocation(processCtx, h.db, h.redis, token.UserID); err != nil {
 			h.log.Error("Failed to revoke refresh tokens after token theft", "error", err, "user_id", token.UserID)
+			if queueErr != nil {
+				h.retryTokenTheftRecovery(token.UserID)
+			}
 		}
 	} else if queueErr == nil {
 		h.log.Warn("Token theft revocation deferred to Redis fallback", "user_id", token.UserID)
+	} else {
+		h.retryTokenTheftRecovery(token.UserID)
 	}
 
 	if uid, parseErr := uuid.Parse(token.UserID); parseErr == nil {
@@ -1589,6 +1596,37 @@ func (h *Handler) handleTokenTheft(c *gin.Context, token models.RefreshToken) bo
 	c.JSON(http.StatusUnauthorized, gin.H{
 		"error": "Session terminated: potential token theft detected", "error_code": "session_theft_detected"})
 	return true
+}
+
+// retryTokenTheftRecovery keeps retrying the only path where both durable
+// stores were unavailable. A per-user guard prevents an outage from spawning
+// duplicate retry loops for the same theft event.
+func (h *Handler) retryTokenTheftRecovery(userID string) {
+	if _, loaded := h.theftRetries.LoadOrStore(userID, struct{}{}); loaded {
+		return
+	}
+	go func() {
+		defer h.theftRetries.Delete(userID)
+		for {
+			retryCtx, cancel := newTokenTheftRecoveryContext(context.Background())
+			queuedInDB, queueErr := queueTokenTheftRevocation(retryCtx, h.db, h.redis, userID)
+			if queuedInDB {
+				processErr := ProcessTokenTheftRevocation(retryCtx, h.db, h.redis, userID)
+				cancel()
+				if queueErr == nil || processErr == nil {
+					return
+				}
+				queueErr = errors.Join(queueErr, fmt.Errorf("revoke refresh tokens after token theft retry: %w", processErr))
+			} else {
+				cancel()
+				if queueErr == nil {
+					return
+				}
+			}
+			h.log.Error("Token theft recovery retry failed", "error", queueErr, "user_id", userID)
+			time.Sleep(time.Second)
+		}
+	}()
 }
 
 func (h *Handler) rejectTheftBlockedRefresh(c *gin.Context, userID string) bool {
