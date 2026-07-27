@@ -17,7 +17,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/attestation"
@@ -147,7 +146,6 @@ type Handler struct {
 	pending         *PendingRepo
 	entCache        *entitlements.Cache
 	credFence       *credepoch.Fence
-	theftRetries    sync.Map
 }
 
 // SetCredentialFence injects the per-user credential-epoch fence (#2201).
@@ -1391,10 +1389,6 @@ func (h *Handler) Refresh(c *gin.Context) {
 		h.handleRefreshTokenNotFound(c, err, tokenHash)
 		return
 	}
-	if h.rejectTheftBlockedRefresh(c, token.UserID) {
-		return
-	}
-
 	if time.Now().After(token.ExpiresAt) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Refresh token expired"})
 		return
@@ -1481,10 +1475,6 @@ func (h *Handler) attemptGracePeriodRecovery(c *gin.Context, tokenHash string) b
 	if revokeErr != nil || revokedUserID == "" {
 		return false
 	}
-	if h.rejectTheftBlockedRefresh(c, revokedUserID) {
-		return true
-	}
-
 	requestIP := c.ClientIP()
 	requestUA := truncateUserAgent(c.GetHeader(headerUserAgent))
 	graceRequestMachineID := c.GetHeader(headerMachineID)
@@ -1569,23 +1559,8 @@ func (h *Handler) handleTokenTheft(c *gin.Context, token models.RefreshToken) bo
 
 	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 5*time.Second)
 	defer cancel()
-	queuedInDB, queueErr := queueTokenTheftRevocation(revokeCtx, h.db, h.redis, token.UserID)
-	if queueErr != nil {
-		h.log.Error("Failed to persist pending token theft revocation", "error", queueErr, "user_id", token.UserID)
-	}
-	if queuedInDB {
-		processCtx, cancelProcess := newTokenTheftRecoveryContext(revokeCtx)
-		defer cancelProcess()
-		if err := ProcessTokenTheftRevocation(processCtx, h.db, h.redis, token.UserID); err != nil {
-			h.log.Error("Failed to revoke refresh tokens after token theft", "error", err, "user_id", token.UserID)
-			if queueErr != nil {
-				h.retryTokenTheftRecovery(token.UserID)
-			}
-		}
-	} else if queueErr == nil {
-		h.log.Warn("Token theft revocation deferred to Redis fallback", "user_id", token.UserID)
-	} else {
-		h.retryTokenTheftRecovery(token.UserID)
+	if _, err := RevokeAllRefreshTokens(revokeCtx, h.db, token.UserID, RevokeAllRefreshTokensOptions{}); err != nil {
+		h.log.Error("Failed to revoke refresh tokens after token theft", "error", err, "user_id", token.UserID)
 	}
 
 	if uid, parseErr := uuid.Parse(token.UserID); parseErr == nil {
@@ -1596,54 +1571,6 @@ func (h *Handler) handleTokenTheft(c *gin.Context, token models.RefreshToken) bo
 	c.JSON(http.StatusUnauthorized, gin.H{
 		"error": "Session terminated: potential token theft detected", "error_code": "session_theft_detected"})
 	return true
-}
-
-// retryTokenTheftRecovery keeps retrying the only path where both durable
-// stores were unavailable. A per-user guard prevents an outage from spawning
-// duplicate retry loops for the same theft event.
-func (h *Handler) retryTokenTheftRecovery(userID string) {
-	if _, loaded := h.theftRetries.LoadOrStore(userID, struct{}{}); loaded {
-		return
-	}
-	go func() {
-		defer h.theftRetries.Delete(userID)
-		for {
-			retryCtx, cancel := newTokenTheftRecoveryContext(context.Background())
-			err := h.retryTokenTheftRecoveryOnce(retryCtx, userID)
-			cancel()
-			if err == nil {
-				return
-			}
-			h.log.Error("Token theft recovery retry failed", "error", err, "user_id", userID)
-			time.Sleep(time.Second)
-		}
-	}()
-}
-
-func (h *Handler) retryTokenTheftRecoveryOnce(ctx context.Context, userID string) error {
-	queuedInDB, queueErr := queueTokenTheftRevocation(ctx, h.db, h.redis, userID)
-	if !queuedInDB {
-		return queueErr
-	}
-	processErr := ProcessTokenTheftRevocation(ctx, h.db, h.redis, userID)
-	if queueErr == nil || processErr == nil {
-		return nil
-	}
-	return errors.Join(queueErr, fmt.Errorf("revoke refresh tokens after token theft retry: %w", processErr))
-}
-
-func (h *Handler) rejectTheftBlockedRefresh(c *gin.Context, userID string) bool {
-	if h.redis == nil {
-		h.log.Error("Refresh rejected because token theft block is unavailable", "user_id", userID)
-		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidRefreshToken})
-		return true
-	}
-	if err := middleware.CheckTokenTheftBlocked(c.Request.Context(), h.redis, h.db, userID); err != nil {
-		h.log.Warn("Refresh rejected by token theft block", "error", err, "user_id", userID)
-		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidRefreshToken})
-		return true
-	}
-	return false
 }
 
 // handleSuspiciousMachineID handles same-IP but different machine ID — suspicious but not theft.

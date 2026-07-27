@@ -17,7 +17,6 @@ func liveTokenStateRedis(t *testing.T) *redis.Client {
 	mr := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mr.Addr()})
 	t.Cleanup(func() { assert.NoError(t, rdb.Close()) })
-	require.NoError(t, rdb.Set(context.Background(), TokenTheftRecoveryGenerationKey(), "1", 0).Err())
 	return rdb
 }
 
@@ -28,7 +27,7 @@ func TestVerifyLiveTokenState(t *testing.T) {
 		rdb := liveTokenStateRedis(t)
 		require.NoError(t, rdb.Set(context.Background(), UserDisabledKey(userID), "1", time.Minute).Err())
 
-		emailVerified, err := VerifyLiveTokenState(context.Background(), rdb, nil, userID, jwt.MapClaims{
+		emailVerified, err := VerifyLiveTokenState(context.Background(), rdb, userID, jwt.MapClaims{
 			"email_verified": true,
 		})
 
@@ -46,7 +45,7 @@ func TestVerifyLiveTokenState(t *testing.T) {
 		})
 		t.Cleanup(func() { assert.NoError(t, rdb.Close()) })
 
-		emailVerified, err := VerifyLiveTokenState(context.Background(), rdb, nil, userID, jwt.MapClaims{
+		emailVerified, err := VerifyLiveTokenState(context.Background(), rdb, userID, jwt.MapClaims{
 			"email_verified": true,
 		})
 
@@ -58,7 +57,7 @@ func TestVerifyLiveTokenState(t *testing.T) {
 	t.Run("explicit unverified claim is returned without error", func(t *testing.T) {
 		rdb := liveTokenStateRedis(t)
 
-		emailVerified, err := VerifyLiveTokenState(context.Background(), rdb, nil, userID, jwt.MapClaims{
+		emailVerified, err := VerifyLiveTokenState(context.Background(), rdb, userID, jwt.MapClaims{
 			"email_verified": false,
 		})
 
@@ -76,7 +75,7 @@ func TestVerifyLiveTokenState(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			rdb := liveTokenStateRedis(t)
 
-			emailVerified, err := VerifyLiveTokenState(context.Background(), rdb, nil, userID, tc.claims)
+			emailVerified, err := VerifyLiveTokenState(context.Background(), rdb, userID, tc.claims)
 
 			require.NoError(t, err)
 			assert.True(t, emailVerified)
