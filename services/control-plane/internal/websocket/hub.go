@@ -1180,14 +1180,17 @@ func (h *Hub) rejectActiveMemberTimeout(msg IncomingMessage, serverID, userID uu
 
 func (h *Hub) authorizeMessageSend(msg IncomingMessage, userID uuid.UUID, chCtx *channelContext, channelUUID uuid.UUID, viewPerm int64) (bool, string) {
 	denied := "Not authorized to send messages in this channel"
+	rejected, membershipIncarnation := h.rejectActiveMemberTimeout(msg, chCtx.serverUUID, userID)
+	if rejected {
+		return false, ""
+	}
 	if !h.authorizeChannelPermission(msg, userID, chCtx, channelUUID, viewPerm, denied) {
 		return false, ""
 	}
 	if !h.authorizeChannelPermission(msg, userID, chCtx, channelUUID, permSendMessages, denied) {
 		return false, ""
 	}
-	rejected, membershipIncarnation := h.rejectActiveMemberTimeout(msg, chCtx.serverUUID, userID)
-	return !rejected, membershipIncarnation
+	return true, membershipIncarnation
 }
 
 func (h *Hub) authorizeChannelPermission(
