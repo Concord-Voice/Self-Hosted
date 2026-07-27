@@ -47,6 +47,11 @@ end
 return 1
 `)
 
+type tokenTheftPendingRevocation struct {
+	operationID sql.NullString
+	completedAt sql.NullTime
+}
+
 func newTokenTheftRecoveryContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), tokenTheftRecoveryTimeout)
 }
@@ -121,54 +126,77 @@ func ProcessTokenTheftRevocation(ctx context.Context, db *sql.DB, redisClient *r
 		}
 	}()
 
-	var operationID sql.NullString
-	var completedAt sql.NullTime
-	if err := tx.QueryRowContext(ctx,
-		`SELECT operation_id, completed_at FROM token_theft_pending_revocations WHERE user_id = $1 FOR UPDATE`, userID,
-	).Scan(&operationID, &completedAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			if commitErr := tx.Commit(); commitErr != nil {
-				return fmt.Errorf("commit token theft no-op transaction: %w", commitErr)
-			}
-			return nil
-		}
-		return fmt.Errorf("lock pending token theft revocation: %w", err)
+	pending, found, err := lockTokenTheftPendingRevocation(ctx, tx, userID)
+	if err != nil {
+		return err
 	}
-	if !completedAt.Valid {
-		stateValue := tokenTheftLegacyStateValue
-		if operationID.Valid {
-			stateValue = operationID.String
-		}
-		if err := redisClient.Set(ctx, middleware.TokenTheftBlockedKey(userID), stateValue, 0).Err(); err != nil {
+	if !found {
+		return commitTokenTheftNoop(tx, "token theft no-op transaction")
+	}
+	if !pending.completedAt.Valid {
+		if err := redisClient.Set(ctx, middleware.TokenTheftBlockedKey(userID), tokenTheftStateValue(pending.operationID), 0).Err(); err != nil {
 			return fmt.Errorf("set token theft block: %w", err)
 		}
 		if _, err := revokeAllRefreshTokensTx(ctx, tx, userID, RevokeAllRefreshTokensOptions{}); err != nil {
 			return fmt.Errorf("revoke refresh tokens: %w", err)
 		}
-		var result sql.Result
-		if operationID.Valid {
-			result, err = tx.ExecContext(ctx,
-				`UPDATE token_theft_pending_revocations SET completed_at = NOW(), updated_at = NOW() WHERE user_id = $1 AND operation_id = $2`, userID, operationID.String,
-			)
-		} else {
-			result, err = tx.ExecContext(ctx,
-				`UPDATE token_theft_pending_revocations SET completed_at = NOW(), updated_at = NOW() WHERE user_id = $1 AND operation_id IS NULL`, userID,
-			)
-		}
-		if err != nil {
-			return fmt.Errorf("complete token theft revocation: %w", err)
-		}
-		if updated, err := result.RowsAffected(); err != nil {
-			return fmt.Errorf("check completed token theft revocation: %w", err)
-		} else if updated != 1 {
-			return fmt.Errorf("complete token theft revocation: expected one row, updated %d", updated)
+		if err := completeTokenTheftRevocation(ctx, tx, userID, pending.operationID); err != nil {
+			return err
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit token theft revocation transaction: %w", err)
 	}
-	if err := finalizeTokenTheftRevocation(ctx, db, redisClient, userID, operationID); err != nil {
+	if err := finalizeTokenTheftRevocation(ctx, db, redisClient, userID, pending.operationID); err != nil {
 		return err
+	}
+	return nil
+}
+
+func lockTokenTheftPendingRevocation(ctx context.Context, tx *sql.Tx, userID string) (tokenTheftPendingRevocation, bool, error) {
+	var pending tokenTheftPendingRevocation
+	if err := tx.QueryRowContext(ctx,
+		`SELECT operation_id, completed_at FROM token_theft_pending_revocations WHERE user_id = $1 FOR UPDATE`, userID,
+	).Scan(&pending.operationID, &pending.completedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return pending, false, nil
+		}
+		return pending, false, fmt.Errorf("lock pending token theft revocation: %w", err)
+	}
+	return pending, true, nil
+}
+
+func tokenTheftStateValue(operationID sql.NullString) string {
+	if operationID.Valid {
+		return operationID.String
+	}
+	return tokenTheftLegacyStateValue
+}
+
+func completeTokenTheftRevocation(ctx context.Context, tx *sql.Tx, userID string, operationID sql.NullString) error {
+	query := `UPDATE token_theft_pending_revocations SET completed_at = NOW(), updated_at = NOW() WHERE user_id = $1 AND operation_id IS NULL`
+	args := []any{userID}
+	if operationID.Valid {
+		query = `UPDATE token_theft_pending_revocations SET completed_at = NOW(), updated_at = NOW() WHERE user_id = $1 AND operation_id = $2`
+		args = append(args, operationID.String)
+	}
+	result, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("complete token theft revocation: %w", err)
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check completed token theft revocation: %w", err)
+	}
+	if updated != 1 {
+		return fmt.Errorf("complete token theft revocation: expected one row, updated %d", updated)
+	}
+	return nil
+}
+
+func commitTokenTheftNoop(tx *sql.Tx, name string) error {
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit %s: %w", name, err)
 	}
 	return nil
 }
@@ -186,62 +214,18 @@ func finalizeTokenTheftRevocation(ctx context.Context, db *sql.DB, redisClient *
 		}
 	}()
 
-	var completedAt sql.NullTime
-	var lockErr error
-	if operationID.Valid {
-		lockErr = tx.QueryRowContext(ctx,
-			`SELECT completed_at FROM token_theft_pending_revocations WHERE user_id = $1 AND operation_id = $2 FOR UPDATE`, userID, operationID.String,
-		).Scan(&completedAt)
-	} else {
-		lockErr = tx.QueryRowContext(ctx,
-			`SELECT completed_at FROM token_theft_pending_revocations WHERE user_id = $1 AND operation_id IS NULL FOR UPDATE`, userID,
-		).Scan(&completedAt)
-	}
-	if lockErr != nil {
-		if errors.Is(lockErr, sql.ErrNoRows) {
-			if commitErr := tx.Commit(); commitErr != nil {
-				return fmt.Errorf("commit token theft cleanup no-op transaction: %w", commitErr)
-			}
-			return nil
-		}
-		return fmt.Errorf("lock completed token theft revocation: %w", lockErr)
-	}
-	if !completedAt.Valid {
-		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit token theft cleanup no-op transaction: %w", err)
-		}
-		return nil
-	}
-	var cleanupErr error
-	if operationID.Valid {
-		_, cleanupErr = finalizeTokenTheftRecoveryStateScript.Run(ctx, redisClient,
-			[]string{tokenTheftFallbackHashKey, middleware.TokenTheftBlockedKey(userID)}, userID, operationID.String,
-		).Result()
-	} else {
-		_, cleanupErr = finalizeLegacyTokenTheftRecoveryStateScript.Run(ctx, redisClient,
-			[]string{tokenTheftLegacyFallbackSetKey, middleware.TokenTheftBlockedKey(userID)}, userID, tokenTheftLegacyStateValue,
-		).Result()
-	}
-	if cleanupErr != nil {
-		return fmt.Errorf("clear token theft recovery state: %w", cleanupErr)
-	}
-	var deleteResult sql.Result
-	if operationID.Valid {
-		deleteResult, err = tx.ExecContext(ctx,
-			`DELETE FROM token_theft_pending_revocations WHERE user_id = $1 AND operation_id = $2 AND completed_at IS NOT NULL`, userID, operationID.String,
-		)
-	} else {
-		deleteResult, err = tx.ExecContext(ctx,
-			`DELETE FROM token_theft_pending_revocations WHERE user_id = $1 AND operation_id IS NULL AND completed_at IS NOT NULL`, userID,
-		)
-	}
+	pending, found, err := lockCompletedTokenTheftRevocation(ctx, tx, userID, operationID)
 	if err != nil {
-		return fmt.Errorf("retire completed token theft revocation: %w", err)
+		return err
 	}
-	if deleted, err := deleteResult.RowsAffected(); err != nil {
-		return fmt.Errorf("check retired token theft revocation: %w", err)
-	} else if deleted != 1 {
-		return fmt.Errorf("retire completed token theft revocation: expected one row, deleted %d", deleted)
+	if !found || !pending.completedAt.Valid {
+		return commitTokenTheftNoop(tx, "token theft cleanup no-op transaction")
+	}
+	if err := clearTokenTheftRecoveryState(ctx, redisClient, userID, operationID); err != nil {
+		return err
+	}
+	if err := retireCompletedTokenTheftRevocation(ctx, tx, userID, operationID); err != nil {
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit token theft cleanup transaction: %w", err)
@@ -249,116 +233,198 @@ func finalizeTokenTheftRevocation(ctx context.Context, db *sql.DB, redisClient *
 	return nil
 }
 
+func lockCompletedTokenTheftRevocation(ctx context.Context, tx *sql.Tx, userID string, operationID sql.NullString) (tokenTheftPendingRevocation, bool, error) {
+	var pending tokenTheftPendingRevocation
+	query := `SELECT operation_id, completed_at FROM token_theft_pending_revocations WHERE user_id = $1 AND operation_id IS NULL FOR UPDATE`
+	args := []any{userID}
+	if operationID.Valid {
+		query = `SELECT operation_id, completed_at FROM token_theft_pending_revocations WHERE user_id = $1 AND operation_id = $2 FOR UPDATE`
+		args = append(args, operationID.String)
+	}
+	if err := tx.QueryRowContext(ctx, query, args...).Scan(&pending.operationID, &pending.completedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return pending, false, nil
+		}
+		return pending, false, fmt.Errorf("lock completed token theft revocation: %w", err)
+	}
+	return pending, true, nil
+}
+
+func clearTokenTheftRecoveryState(ctx context.Context, redisClient *redis.Client, userID string, operationID sql.NullString) error {
+	var err error
+	if operationID.Valid {
+		_, err = finalizeTokenTheftRecoveryStateScript.Run(ctx, redisClient,
+			[]string{tokenTheftFallbackHashKey, middleware.TokenTheftBlockedKey(userID)}, userID, operationID.String,
+		).Result()
+	} else {
+		_, err = finalizeLegacyTokenTheftRecoveryStateScript.Run(ctx, redisClient,
+			[]string{tokenTheftLegacyFallbackSetKey, middleware.TokenTheftBlockedKey(userID)}, userID, tokenTheftLegacyStateValue,
+		).Result()
+	}
+	if err != nil {
+		return fmt.Errorf("clear token theft recovery state: %w", err)
+	}
+	return nil
+}
+
+func retireCompletedTokenTheftRevocation(ctx context.Context, tx *sql.Tx, userID string, operationID sql.NullString) error {
+	query := `DELETE FROM token_theft_pending_revocations WHERE user_id = $1 AND operation_id IS NULL AND completed_at IS NOT NULL`
+	args := []any{userID}
+	if operationID.Valid {
+		query = `DELETE FROM token_theft_pending_revocations WHERE user_id = $1 AND operation_id = $2 AND completed_at IS NOT NULL`
+		args = append(args, operationID.String)
+	}
+	result, err := tx.ExecContext(ctx, query, args...)
+	if err != nil {
+		return fmt.Errorf("retire completed token theft revocation: %w", err)
+	}
+	deleted, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("check retired token theft revocation: %w", err)
+	}
+	if deleted != 1 {
+		return fmt.Errorf("retire completed token theft revocation: expected one row, deleted %d", deleted)
+	}
+	return nil
+}
+
 // RecoverPendingTokenTheftRevocations replays durable theft sweeps. It is safe
 // for several replicas to run: ProcessTokenTheftRevocation locks each pending row.
 func RecoverPendingTokenTheftRevocations(ctx context.Context, db *sql.DB, redisClient *redis.Client, log *logger.Logger) error {
-	rows, err := db.QueryContext(ctx,
-		`SELECT user_id FROM token_theft_pending_revocations ORDER BY created_at`)
+	userIDs, err := listPendingTokenTheftRevocationUserIDs(ctx, db)
 	if err != nil {
-		return fmt.Errorf("list pending token theft revocations: %w", err)
+		return err
 	}
-	var userIDs []string
-	for rows.Next() {
-		var userID string
-		if err := rows.Scan(&userID); err != nil {
-			if closeErr := rows.Close(); closeErr != nil {
-				return errors.Join(
-					fmt.Errorf("scan pending token theft revocation: %w", err),
-					fmt.Errorf("close pending token theft revocations: %w", closeErr),
-				)
-			}
-			return fmt.Errorf("scan pending token theft revocation: %w", err)
-		}
-		userIDs = append(userIDs, userID)
-	}
-	if err := rows.Err(); err != nil {
-		if closeErr := rows.Close(); closeErr != nil {
-			return errors.Join(
-				fmt.Errorf("iterate pending token theft revocations: %w", err),
-				fmt.Errorf("close pending token theft revocations: %w", closeErr),
-			)
-		}
-		return fmt.Errorf("iterate pending token theft revocations: %w", err)
-	}
-	if err := rows.Close(); err != nil {
-		return fmt.Errorf("close pending token theft revocations: %w", err)
+	seenUserIDs := make(map[string]struct{}, len(userIDs))
+	for _, userID := range userIDs {
+		seenUserIDs[userID] = struct{}{}
 	}
 
 	var errs []error
 	if redisClient == nil {
 		errs = append(errs, errors.New("list token theft revocation fallbacks: token theft block store unavailable"))
 	} else {
-		fallbackOperations, fallbackErr := redisClient.HGetAll(ctx, tokenTheftFallbackHashKey).Result()
-		if fallbackErr != nil {
-			errs = append(errs, fmt.Errorf("list token theft revocation fallbacks: %w", fallbackErr))
-		} else {
-			seenUserIDs := make(map[string]struct{}, len(userIDs))
-			for _, userID := range userIDs {
-				seenUserIDs[userID] = struct{}{}
-			}
-			for userID, operationID := range fallbackOperations {
-				if _, seen := seenUserIDs[userID]; seen {
-					continue
-				}
-				attemptCtx, cancel := context.WithTimeout(ctx, tokenTheftRecoveryTimeout)
-				err := enqueueTokenTheftRevocation(attemptCtx, db, userID, &operationID)
-				cancel()
-				if err != nil {
-					retired, retireErr := retireTokenTheftRecoveryStateIfUserDeleted(ctx, db, redisClient, userID, &operationID)
-					if retireErr != nil {
-						errs = append(errs, retireErr)
-						log.Error("Token theft fallback retirement failed", "error", retireErr, "user_id", userID)
-						continue
-					}
-					if retired {
-						continue
-					}
-					errs = append(errs, fmt.Errorf("promote token theft fallback: %w", err))
-					log.Error("Token theft fallback promotion failed", "error", err, "user_id", userID)
-					continue
-				}
-				seenUserIDs[userID] = struct{}{}
-				userIDs = append(userIDs, userID)
-			}
+		userIDs, err = recoverTokenTheftFallbacks(ctx, db, redisClient, log, userIDs, seenUserIDs)
+		if err != nil {
+			errs = append(errs, err)
 		}
-		legacyFallbackUserIDs, legacyFallbackErr := redisClient.SMembers(ctx, tokenTheftLegacyFallbackSetKey).Result()
-		if legacyFallbackErr != nil {
-			errs = append(errs, fmt.Errorf("list legacy token theft revocation fallbacks: %w", legacyFallbackErr))
-		} else {
-			seenUserIDs := make(map[string]struct{}, len(userIDs))
-			for _, userID := range userIDs {
-				seenUserIDs[userID] = struct{}{}
-			}
-			for _, userID := range legacyFallbackUserIDs {
-				if _, seen := seenUserIDs[userID]; seen {
-					if err := redisClient.SRem(ctx, tokenTheftLegacyFallbackSetKey, userID).Err(); err != nil {
-						errs = append(errs, fmt.Errorf("retire superseded legacy token theft fallback: %w", err))
-						log.Error("Legacy token theft fallback retirement failed", "error", err, "user_id", userID)
-					}
-					continue
-				}
-				attemptCtx, cancel := context.WithTimeout(ctx, tokenTheftRecoveryTimeout)
-				err := enqueueTokenTheftRevocation(attemptCtx, db, userID, nil)
-				cancel()
-				if err != nil {
-					retired, retireErr := retireTokenTheftRecoveryStateIfUserDeleted(ctx, db, redisClient, userID, nil)
-					if retireErr != nil {
-						errs = append(errs, retireErr)
-						log.Error("Legacy token theft fallback retirement failed", "error", retireErr, "user_id", userID)
-						continue
-					}
-					if retired {
-						continue
-					}
-					errs = append(errs, fmt.Errorf("promote legacy token theft fallback: %w", err))
-					log.Error("Legacy token theft fallback promotion failed", "error", err, "user_id", userID)
-					continue
-				}
-				seenUserIDs[userID] = struct{}{}
-				userIDs = append(userIDs, userID)
-			}
+		userIDs, err = recoverLegacyTokenTheftFallbacks(ctx, db, redisClient, log, userIDs, seenUserIDs)
+		if err != nil {
+			errs = append(errs, err)
 		}
 	}
+	errs = append(errs, recoverPendingTokenTheftRevocations(ctx, db, redisClient, log, userIDs)...)
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	if err := redisClient.Set(ctx, middleware.TokenTheftRecoveryGenerationKey(), "1", 0).Err(); err != nil {
+		return fmt.Errorf("mark token theft recovery generation: %w", err)
+	}
+	return nil
+}
+
+func listPendingTokenTheftRevocationUserIDs(ctx context.Context, db *sql.DB) (userIDs []string, err error) {
+	rows, err := db.QueryContext(ctx,
+		`SELECT user_id FROM token_theft_pending_revocations ORDER BY created_at`)
+	if err != nil {
+		return nil, fmt.Errorf("list pending token theft revocations: %w", err)
+	}
+	defer func() {
+		if closeErr := rows.Close(); closeErr != nil {
+			err = errors.Join(err, fmt.Errorf("close pending token theft revocations: %w", closeErr))
+		}
+	}()
+	for rows.Next() {
+		var userID string
+		if err := rows.Scan(&userID); err != nil {
+			return nil, fmt.Errorf("scan pending token theft revocation: %w", err)
+		}
+		userIDs = append(userIDs, userID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate pending token theft revocations: %w", err)
+	}
+	return userIDs, nil
+}
+
+func recoverTokenTheftFallbacks(ctx context.Context, db *sql.DB, redisClient *redis.Client, log *logger.Logger, userIDs []string, seenUserIDs map[string]struct{}) ([]string, error) {
+	fallbackOperations, err := redisClient.HGetAll(ctx, tokenTheftFallbackHashKey).Result()
+	if err != nil {
+		return userIDs, fmt.Errorf("list token theft revocation fallbacks: %w", err)
+	}
+	var errs []error
+	for userID, operationID := range fallbackOperations {
+		if _, seen := seenUserIDs[userID]; seen {
+			continue
+		}
+		added, err := promoteTokenTheftFallback(ctx, db, redisClient, userID, &operationID)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("promote token theft fallback: %w", err))
+			log.Error("Token theft fallback promotion failed", "error", err, "user_id", userID)
+			continue
+		}
+		if added {
+			seenUserIDs[userID] = struct{}{}
+			userIDs = append(userIDs, userID)
+		}
+	}
+	return userIDs, errors.Join(errs...)
+}
+
+func recoverLegacyTokenTheftFallbacks(ctx context.Context, db *sql.DB, redisClient *redis.Client, log *logger.Logger, userIDs []string, seenUserIDs map[string]struct{}) ([]string, error) {
+	legacyFallbackUserIDs, err := redisClient.SMembers(ctx, tokenTheftLegacyFallbackSetKey).Result()
+	if err != nil {
+		return userIDs, fmt.Errorf("list legacy token theft revocation fallbacks: %w", err)
+	}
+	var errs []error
+	for _, userID := range legacyFallbackUserIDs {
+		if _, seen := seenUserIDs[userID]; seen {
+			if err := retireSupersededLegacyTokenTheftFallback(ctx, redisClient, userID); err != nil {
+				errs = append(errs, err)
+				log.Error("Legacy token theft fallback retirement failed", "error", err, "user_id", userID)
+			}
+			continue
+		}
+		added, err := promoteTokenTheftFallback(ctx, db, redisClient, userID, nil)
+		if err != nil {
+			errs = append(errs, fmt.Errorf("promote legacy token theft fallback: %w", err))
+			log.Error("Legacy token theft fallback promotion failed", "error", err, "user_id", userID)
+			continue
+		}
+		if added {
+			seenUserIDs[userID] = struct{}{}
+			userIDs = append(userIDs, userID)
+		}
+	}
+	return userIDs, errors.Join(errs...)
+}
+
+func promoteTokenTheftFallback(ctx context.Context, db *sql.DB, redisClient *redis.Client, userID string, operationID *string) (bool, error) {
+	attemptCtx, cancel := context.WithTimeout(ctx, tokenTheftRecoveryTimeout)
+	enqueueErr := enqueueTokenTheftRevocation(attemptCtx, db, userID, operationID)
+	cancel()
+	if enqueueErr == nil {
+		return true, nil
+	}
+	retired, retireErr := retireTokenTheftRecoveryStateIfUserDeleted(ctx, db, redisClient, userID, operationID)
+	if retireErr != nil {
+		return false, retireErr
+	}
+	if retired {
+		return false, nil
+	}
+	return false, enqueueErr
+}
+
+func retireSupersededLegacyTokenTheftFallback(ctx context.Context, redisClient *redis.Client, userID string) error {
+	if err := redisClient.SRem(ctx, tokenTheftLegacyFallbackSetKey, userID).Err(); err != nil {
+		return fmt.Errorf("retire superseded legacy token theft fallback: %w", err)
+	}
+	return nil
+}
+
+func recoverPendingTokenTheftRevocations(ctx context.Context, db *sql.DB, redisClient *redis.Client, log *logger.Logger, userIDs []string) []error {
+	var errs []error
 	for _, userID := range userIDs {
 		attemptCtx, cancel := context.WithTimeout(ctx, tokenTheftRecoveryTimeout)
 		err := ProcessTokenTheftRevocation(attemptCtx, db, redisClient, userID)
@@ -368,13 +434,7 @@ func RecoverPendingTokenTheftRevocations(ctx context.Context, db *sql.DB, redisC
 			log.Error("Pending token theft revocation recovery failed", "error", err, "user_id", userID)
 		}
 	}
-	if err := errors.Join(errs...); err != nil {
-		return err
-	}
-	if err := redisClient.Set(ctx, middleware.TokenTheftRecoveryGenerationKey(), "1", 0).Err(); err != nil {
-		return fmt.Errorf("mark token theft recovery generation: %w", err)
-	}
-	return nil
+	return errs
 }
 
 // retireTokenTheftRecoveryStateIfUserDeleted clears Redis-only recovery state

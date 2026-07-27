@@ -1609,24 +1609,27 @@ func (h *Handler) retryTokenTheftRecovery(userID string) {
 		defer h.theftRetries.Delete(userID)
 		for {
 			retryCtx, cancel := newTokenTheftRecoveryContext(context.Background())
-			queuedInDB, queueErr := queueTokenTheftRevocation(retryCtx, h.db, h.redis, userID)
-			if queuedInDB {
-				processErr := ProcessTokenTheftRevocation(retryCtx, h.db, h.redis, userID)
-				cancel()
-				if queueErr == nil || processErr == nil {
-					return
-				}
-				queueErr = errors.Join(queueErr, fmt.Errorf("revoke refresh tokens after token theft retry: %w", processErr))
-			} else {
-				cancel()
-				if queueErr == nil {
-					return
-				}
+			err := h.retryTokenTheftRecoveryOnce(retryCtx, userID)
+			cancel()
+			if err == nil {
+				return
 			}
-			h.log.Error("Token theft recovery retry failed", "error", queueErr, "user_id", userID)
+			h.log.Error("Token theft recovery retry failed", "error", err, "user_id", userID)
 			time.Sleep(time.Second)
 		}
 	}()
+}
+
+func (h *Handler) retryTokenTheftRecoveryOnce(ctx context.Context, userID string) error {
+	queuedInDB, queueErr := queueTokenTheftRevocation(ctx, h.db, h.redis, userID)
+	if !queuedInDB {
+		return queueErr
+	}
+	processErr := ProcessTokenTheftRevocation(ctx, h.db, h.redis, userID)
+	if queueErr == nil || processErr == nil {
+		return nil
+	}
+	return errors.Join(queueErr, fmt.Errorf("revoke refresh tokens after token theft retry: %w", processErr))
 }
 
 func (h *Handler) rejectTheftBlockedRefresh(c *gin.Context, userID string) bool {
