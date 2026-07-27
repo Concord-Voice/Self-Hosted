@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/models"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
@@ -495,6 +496,10 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 	if err != nil {
 		if errors.Is(err, errCurrentSessionUnknown) {
 			c.JSON(http.StatusBadRequest, gin.H{"error": errMsgCurrentSessionUnknown})
+			return
+		}
+		if errors.Is(err, credepoch.ErrEpochMismatch) || errors.Is(err, credepoch.ErrBlocked) {
+			c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgUnauthorized})
 			return
 		}
 		h.log.Error("Failed to revoke sessions", "error", err)

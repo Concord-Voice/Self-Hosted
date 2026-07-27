@@ -299,8 +299,9 @@ func TestRefreshMachineIDTheft_RevokeFailureLogsAndRejects(t *testing.T) {
 
 	otherRefresh := "other-refresh-token"
 	_, err = ts.DB.Exec(
-		`INSERT INTO refresh_tokens (id, user_id, token_hash, expires_at) VALUES ($1, $2, $3, $4)`,
-		uuid.New(), userID, auth.HashRefreshToken(otherRefresh), time.Now().Add(time.Hour),
+		`INSERT INTO refresh_tokens (id, user_id, token_hash, device_name, ip_address, user_agent, expires_at)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		uuid.New(), userID, auth.HashRefreshToken(otherRefresh), "test device", "127.0.0.1", "test agent", time.Now().Add(time.Hour),
 	)
 	require.NoError(t, err)
 	blockedRefresh := doRefreshWithMachineID(ts, otherRefresh, "", "")
@@ -324,6 +325,37 @@ func TestRefreshMachineIDTheft_RevokeFailureLogsAndRejects(t *testing.T) {
 	assert.Zero(t, exists, "recovery must clear the block only after the durable refresh-token sweep commits")
 	require.NoError(t, ts.DB.QueryRow(`SELECT COUNT(*) FROM token_theft_pending_revocations WHERE user_id = $1`, userID).Scan(&pending))
 	assert.Zero(t, pending, "recovery must retire the durable pending record after the sweep commits")
+}
+
+func TestRefreshMachineIDTheft_EnqueueFailureUsesRedisFallback(t *testing.T) {
+	ts := setupTS(t)
+	originalMachineID := uuid.New().String()
+	refreshToken, userID := registerAndGetRefreshToken(t, ts, "theftenqueueerror", originalMachineID)
+	_, err := ts.DB.Exec(
+		`UPDATE refresh_tokens SET ip_address = '10.0.0.1', machine_id = $1 WHERE token_hash = $2`,
+		originalMachineID, auth.HashRefreshToken(refreshToken),
+	)
+	require.NoError(t, err)
+	installTokenTheftEnqueueFailure(t, ts.DB)
+
+	w := doRefreshWithMachineID(ts, refreshToken, uuid.New().String(), "10.0.0.99:5678")
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+
+	blocked, err := ts.Redis.Exists(context.Background(), middleware.TokenTheftBlockedKey(userID)).Result()
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, blocked, "the fallback marker must deny refresh and bearer use")
+	_, err = ts.DB.Exec(`DROP TRIGGER IF EXISTS token_theft_enqueue_failure ON token_theft_pending_revocations`)
+	require.NoError(t, err)
+	require.NoError(t, auth.RecoverPendingTokenTheftRevocations(context.Background(), ts.DB, ts.Redis, logger.New("test")))
+
+	blocked, err = ts.Redis.Exists(context.Background(), middleware.TokenTheftBlockedKey(userID)).Result()
+	require.NoError(t, err)
+	assert.Zero(t, blocked)
+	var active int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL`, userID,
+	).Scan(&active))
+	assert.Zero(t, active)
 }
 
 func findLogLine(logOutput, marker string) string {
@@ -377,6 +409,29 @@ func installTokenTheftRevokeFailure(t *testing.T, db *sql.DB) {
 		}
 		if _, dropErr := db.Exec(`DROP FUNCTION IF EXISTS token_theft_revoke_failure()`); dropErr != nil {
 			t.Errorf("drop token-theft revoke failure function: %v", dropErr)
+		}
+	})
+}
+
+func installTokenTheftEnqueueFailure(t *testing.T, db *sql.DB) {
+	t.Helper()
+	_, err := db.Exec(`
+		CREATE OR REPLACE FUNCTION token_theft_enqueue_failure() RETURNS trigger AS $$
+		BEGIN
+			RAISE EXCEPTION 'token theft enqueue failure';
+		END;
+		$$ LANGUAGE plpgsql`)
+	require.NoError(t, err)
+	_, err = db.Exec(`
+		CREATE TRIGGER token_theft_enqueue_failure BEFORE INSERT ON token_theft_pending_revocations
+		FOR EACH ROW EXECUTE FUNCTION token_theft_enqueue_failure()`)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		if _, dropErr := db.Exec(`DROP TRIGGER IF EXISTS token_theft_enqueue_failure ON token_theft_pending_revocations`); dropErr != nil {
+			t.Errorf("drop token-theft enqueue failure trigger: %v", dropErr)
+		}
+		if _, dropErr := db.Exec(`DROP FUNCTION IF EXISTS token_theft_enqueue_failure()`); dropErr != nil {
+			t.Errorf("drop token-theft enqueue failure function: %v", dropErr)
 		}
 	})
 }

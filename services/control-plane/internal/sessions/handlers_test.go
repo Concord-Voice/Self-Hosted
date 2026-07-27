@@ -8,7 +8,11 @@ import (
 	"testing"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/sessions"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -223,4 +227,31 @@ func TestRevokeAllSessionsExceptCurrent_WithoutSessionIdentityFailsSafely(t *tes
 		`SELECT COUNT(*) FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL`, claims.UserID,
 	).Scan(&active))
 	assert.Equal(t, 1, active, "a request without a current-session identity must not revoke any session")
+}
+
+func TestRevokeAllSessions_EpochAdvanceAfterAuthenticationReturnsUnauthorized(t *testing.T) {
+	ts := setupTS(t)
+	accessToken, _ := registerAndGetTokens(t, ts, "revokeepoch@test.concord.chat", "revokeepoch")
+	claims, err := auth.ValidateAccessToken(accessToken, testhelpers.TestJWTSecret)
+	require.NoError(t, err)
+	staleToken, err := auth.GenerateAccessToken(claims.UserID, testhelpers.TestJWTSecret, true, "stale-epoch", "")
+	require.NoError(t, err)
+
+	router := gin.New()
+	router.Use(middleware.AuthRequired(testhelpers.TestJWTSecret, ts.Redis, nil))
+	router.Use(func(c *gin.Context) {
+		if _, updateErr := ts.DB.Exec(`UPDATE users SET credential_epoch = 'new-epoch' WHERE id = $1`, claims.UserID); updateErr != nil {
+			c.AbortWithStatus(http.StatusInternalServerError)
+			return
+		}
+	})
+	router.POST(revokeAllPath, sessions.NewHandler(ts.DB, ts.Redis, logger.New("test"), nil, nil).RevokeAllSessions)
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest(http.MethodPost, revokeAllPath, bytes.NewBufferString(`{"password":"TestPassword123!","include_current":true}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+staleToken)
+	router.ServeHTTP(w, req)
+
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
 }

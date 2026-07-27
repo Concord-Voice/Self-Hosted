@@ -29,7 +29,19 @@ func RevokeAllRefreshTokens(ctx context.Context, db *sql.DB, userID string, opti
 			err = errors.Join(err, fmt.Errorf("rollback refresh-token revocation transaction: %w", rollbackErr))
 		}
 	}()
+	result, err = revokeAllRefreshTokensTx(ctx, tx, userID, options)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit refresh-token revocation transaction: %w", err)
+	}
+	return result, nil
+}
 
+// revokeAllRefreshTokensTx performs a serialized bulk refresh-token revocation
+// inside the caller's transaction.
+func revokeAllRefreshTokensTx(ctx context.Context, tx *sql.Tx, userID string, options RevokeAllRefreshTokensOptions) (result sql.Result, err error) {
 	var credentialEpoch sql.NullString
 	if err := tx.QueryRowContext(ctx,
 		`SELECT credential_epoch FROM users WHERE id = $1 FOR NO KEY UPDATE`, userID,
@@ -60,9 +72,6 @@ func RevokeAllRefreshTokens(ctx context.Context, db *sql.DB, userID string, opti
 	}
 	if err != nil {
 		return nil, fmt.Errorf("revoke refresh tokens: %w", err)
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, fmt.Errorf("commit refresh-token revocation transaction: %w", err)
 	}
 	return result, nil
 }
