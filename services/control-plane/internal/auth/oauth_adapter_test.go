@@ -182,6 +182,31 @@ func TestIssueAccessAndRefreshBound_RejectsAdvancedCredentialEpoch(t *testing.T)
 	assert.Zero(t, identities, "an epoch-mismatched mint must not link an SSO identity")
 }
 
+func TestIssueAccessAndRefreshBound_RollsBackIdentityWhenRefreshInsertFails(t *testing.T) {
+	rig := newAdapterRig(t)
+	userID := insertAdapterUser(t, rig, "bound-rollback@example.test", "boundrollback", "Password!1234") // pragma: allowlist secret
+
+	_, err := rig.DB.Exec(`ALTER TABLE refresh_tokens ADD CONSTRAINT oauth_adapter_reject_refresh CHECK (false) NOT VALID`)
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, cleanupErr := rig.DB.Exec(`ALTER TABLE refresh_tokens DROP CONSTRAINT oauth_adapter_reject_refresh`)
+		require.NoError(t, cleanupErr)
+	})
+
+	_, _, _, err = rig.Handler.IssueAccessAndRefreshBound(context.Background(), userID, "", auth.SSOIdentityLink{
+		Provider:       "google",
+		ProviderUserID: "rollback-subject",
+		ProviderEmail:  "bound-rollback@example.test",
+	})
+	require.Error(t, err)
+
+	var identities, refreshes int
+	require.NoError(t, rig.DB.QueryRow(`SELECT COUNT(*) FROM user_sso_identities WHERE user_id = $1`, userID).Scan(&identities))
+	require.NoError(t, rig.DB.QueryRow(`SELECT COUNT(*) FROM refresh_tokens WHERE user_id = $1`, userID).Scan(&refreshes))
+	assert.Zero(t, identities, "a failed refresh insert must roll back the linked identity")
+	assert.Zero(t, refreshes, "a failed bound mint must not persist a refresh row")
+}
+
 // =============================================================================
 // VerifyPassword (4 paths: lookup miss, lockout, bad password, good password)
 // =============================================================================

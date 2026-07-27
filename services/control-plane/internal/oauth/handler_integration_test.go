@@ -252,6 +252,7 @@ type fakeAuthAdapter struct {
 	ValidatePasswordFail            bool
 	IssueAccessAndRefreshCalls      int
 	IssueAccessAndRefreshBoundCalls int
+	IssueAccessAndRefreshBoundErr   error
 	LinkedIdentity                  *auth.SSOIdentityLink
 	// AdvanceCredentialEpochAfterVerify models a destructive credential reset
 	// committing immediately after CompleteLink verifies the password.
@@ -277,6 +278,9 @@ func (f *fakeAuthAdapter) IssueAccessAndRefreshBound(ctx context.Context, userID
 	f.IssueAccessAndRefreshBoundCalls++
 	if f.CredentialEpoch != expectedEpoch {
 		return "", "", "", fmt.Errorf("credential epoch advanced")
+	}
+	if f.IssueAccessAndRefreshBoundErr != nil {
+		return "", "", "", f.IssueAccessAndRefreshBoundErr
 	}
 	f.LinkedIdentity = &identity
 	return f.IssueAccessAndRefresh(ctx, userID)
@@ -1126,6 +1130,39 @@ func TestCompleteLink_RefusesMintAfterCredentialEpochAdvances(t *testing.T) {
 	require.Equal(t, http.StatusInternalServerError, w.Code)
 	assert.Contains(t, w.Body.String(), "token_issuance_failed")
 	assert.Nil(t, adapter.LinkedIdentity)
+}
+
+func TestCompleteLink_IdentityInsertFailureHasSpecificErrorCode(t *testing.T) {
+	adapter := &fakeAuthAdapter{IssueAccessAndRefreshBoundErr: auth.ErrSSOIdentityInsert}
+	rig := newSSOCallbackTestRigWithAuth(t, "http://unused", adapter)
+	rig.Engine.POST("/api/v1/auth/sso/:provider/complete-link", rig.Handler.CompleteLink)
+
+	userID := insertSSOTestUser(t, rig.DB, "identity-error@example.test", "identityerror")
+	ssoToken := "sso-link-token-identity-error" //nolint:gosec // test fixture, not a real secret
+	payload, err := json.Marshal(map[string]any{
+		"provider":         "google",
+		"provider_user_id": "google-sub-identity-error",
+		"provider_email":   "identity-error@example.test",
+		"target_user_id":   userID,
+		"branch":           "account_link",
+		"created_at":       time.Now().UTC().Format(time.RFC3339),
+	})
+	require.NoError(t, err)
+	require.NoError(t, rig.Redis.Set(context.Background(), "sso_token:"+ssoToken, payload, 15*time.Minute).Err())
+
+	body, err := json.Marshal(map[string]string{
+		"sso_token": ssoToken,
+		"password":  "correct-password", // pragma: allowlist secret
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/complete-link", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	rig.Engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Contains(t, w.Body.String(), "sso_identity_insert_failed")
+	assert.Equal(t, 1, adapter.IssueAccessAndRefreshBoundCalls)
 }
 
 // TestCompleteLink_WrongPassword exercises the password-mismatch branch:
