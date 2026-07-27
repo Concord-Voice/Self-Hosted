@@ -3,7 +3,6 @@ package sessions_test
 import (
 	"context"
 	"database/sql"
-	"fmt"
 	"net/http"
 	"testing"
 	"time"
@@ -16,7 +15,16 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-const revokeAllMintBarrierLockID = 2457001
+const (
+	revokeAllMintBarrierLockID   = "2457001"
+	revokeAllMintBarrierFunction = `
+		CREATE OR REPLACE FUNCTION revoke_all_mint_barrier() RETURNS trigger AS $$
+		BEGIN
+			PERFORM pg_advisory_xact_lock(` + revokeAllMintBarrierLockID + `);
+			RETURN NULL;
+		END;
+		$$ LANGUAGE plpgsql`
+)
 
 type revokeAllRaceDisconnector struct{}
 
@@ -96,16 +104,7 @@ type mintResult struct {
 
 func installRevokeAllMintBarrier(t *testing.T, db *sql.DB) {
 	t.Helper()
-	// A PL/pgSQL function body cannot receive a bind parameter; the only
-	// interpolation is this package-private integer test constant.
-	barrierFunction := fmt.Sprintf(`
-		CREATE OR REPLACE FUNCTION revoke_all_mint_barrier() RETURNS trigger AS $$
-		BEGIN
-			PERFORM pg_advisory_xact_lock(%d);
-			RETURN NULL;
-		END;
-		$$ LANGUAGE plpgsql`, revokeAllMintBarrierLockID)
-	_, err := db.Exec(barrierFunction)
+	_, err := db.Exec(revokeAllMintBarrierFunction)
 	require.NoError(t, err)
 	_, err = db.Exec(`
 		CREATE TRIGGER revoke_all_mint_barrier AFTER INSERT ON refresh_tokens
@@ -128,7 +127,7 @@ func holdRevokeAllMintBarrier(t *testing.T) func() {
 	lockDB.SetMaxOpenConns(1)
 	conn, err := lockDB.Conn(context.Background())
 	require.NoError(t, err)
-	_, err = conn.ExecContext(context.Background(), `SELECT pg_advisory_lock($1)`, revokeAllMintBarrierLockID)
+	_, err = conn.ExecContext(context.Background(), `SELECT pg_advisory_lock($1::bigint)`, revokeAllMintBarrierLockID)
 	require.NoError(t, err)
 
 	released := false
@@ -137,7 +136,7 @@ func holdRevokeAllMintBarrier(t *testing.T) func() {
 			return
 		}
 		released = true
-		if _, unlockErr := conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, revokeAllMintBarrierLockID); unlockErr != nil {
+		if _, unlockErr := conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1::bigint)`, revokeAllMintBarrierLockID); unlockErr != nil {
 			t.Errorf("release revoke-all mint barrier: %v", unlockErr)
 		}
 		if closeErr := conn.Close(); closeErr != nil {

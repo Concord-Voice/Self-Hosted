@@ -25,24 +25,31 @@ import (
 )
 
 const (
-	ctJSON                      = "application/json"
-	ctHeader                    = "Content-Type"
-	bearerPrefix                = "Bearer "
-	pathDeviceReqCreate         = "/api/v1/auth/recovery/device-request"
-	pathDeviceReqPoll           = "/api/v1/auth/recovery/device-request/"
-	pathSocialReqCreate         = "/api/v1/auth/recovery/social-request"
-	pathSocialReqPoll           = "/api/v1/auth/recovery/social-request/"
-	pathVerifyCode              = "/api/v1/auth/recovery/verify-code"
-	pathResetPwd                = "/api/v1/auth/recovery/reset-password" //nolint:gosec // G101 false positive: URL path
-	pathResetAcct               = "/api/v1/auth/recovery/reset-account"
-	fakeEphemeralKey            = "fake-ephemeral-key"
-	recoveryCodeKeyPfx          = "recovery_code:"
-	testNewPassword2            = "NewSecurePassword123!" //nolint:gosec // G101 false positive: test credential
-	headerXMachineID            = "X-Machine-Id"
-	pathAuthRegister            = "/api/v1/auth/register"
-	pathAuthLogin               = "/api/v1/auth/login"
-	pathAuthLogout              = "/api/v1/auth/logout"
-	tokenTheftMintBarrierLockID = 2460001
+	ctJSON                        = "application/json"
+	ctHeader                      = "Content-Type"
+	bearerPrefix                  = "Bearer "
+	pathDeviceReqCreate           = "/api/v1/auth/recovery/device-request"
+	pathDeviceReqPoll             = "/api/v1/auth/recovery/device-request/"
+	pathSocialReqCreate           = "/api/v1/auth/recovery/social-request"
+	pathSocialReqPoll             = "/api/v1/auth/recovery/social-request/"
+	pathVerifyCode                = "/api/v1/auth/recovery/verify-code"
+	pathResetPwd                  = "/api/v1/auth/recovery/reset-password" //nolint:gosec // G101 false positive: URL path
+	pathResetAcct                 = "/api/v1/auth/recovery/reset-account"
+	fakeEphemeralKey              = "fake-ephemeral-key"
+	recoveryCodeKeyPfx            = "recovery_code:"
+	testNewPassword2              = "NewSecurePassword123!" //nolint:gosec // G101 false positive: test credential
+	headerXMachineID              = "X-Machine-Id"
+	pathAuthRegister              = "/api/v1/auth/register"
+	pathAuthLogin                 = "/api/v1/auth/login"
+	pathAuthLogout                = "/api/v1/auth/logout"
+	tokenTheftMintBarrierLockID   = "2460001"
+	tokenTheftMintBarrierFunction = `
+		CREATE OR REPLACE FUNCTION token_theft_mint_barrier() RETURNS trigger AS $$
+		BEGIN
+			PERFORM pg_advisory_xact_lock(` + tokenTheftMintBarrierLockID + `);
+			RETURN NULL;
+		END;
+		$$ LANGUAGE plpgsql`
 )
 
 // ── Machine-ID Theft Detection ─────────────────────────────────────────────
@@ -331,16 +338,7 @@ type tokenTheftMintResult struct {
 
 func installTokenTheftMintBarrier(t *testing.T, db *sql.DB) {
 	t.Helper()
-	// A PL/pgSQL function body cannot receive a bind parameter; the only
-	// interpolation is this package-private integer test constant.
-	barrierFunction := fmt.Sprintf(`
-		CREATE OR REPLACE FUNCTION token_theft_mint_barrier() RETURNS trigger AS $$
-		BEGIN
-			PERFORM pg_advisory_xact_lock(%d);
-			RETURN NULL;
-		END;
-		$$ LANGUAGE plpgsql`, tokenTheftMintBarrierLockID)
-	_, err := db.Exec(barrierFunction)
+	_, err := db.Exec(tokenTheftMintBarrierFunction)
 	require.NoError(t, err)
 	_, err = db.Exec(`
 		CREATE TRIGGER token_theft_mint_barrier AFTER INSERT ON refresh_tokens
@@ -386,7 +384,7 @@ func holdTokenTheftMintBarrier(t *testing.T) func() {
 	lockDB.SetMaxOpenConns(1)
 	conn, err := lockDB.Conn(context.Background())
 	require.NoError(t, err)
-	_, err = conn.ExecContext(context.Background(), `SELECT pg_advisory_lock($1)`, tokenTheftMintBarrierLockID)
+	_, err = conn.ExecContext(context.Background(), `SELECT pg_advisory_lock($1::bigint)`, tokenTheftMintBarrierLockID)
 	require.NoError(t, err)
 
 	released := false
@@ -395,7 +393,7 @@ func holdTokenTheftMintBarrier(t *testing.T) func() {
 			return
 		}
 		released = true
-		if _, unlockErr := conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1)`, tokenTheftMintBarrierLockID); unlockErr != nil {
+		if _, unlockErr := conn.ExecContext(context.Background(), `SELECT pg_advisory_unlock($1::bigint)`, tokenTheftMintBarrierLockID); unlockErr != nil {
 			t.Errorf("release token-theft mint barrier: %v", unlockErr)
 		}
 		if closeErr := conn.Close(); closeErr != nil {
