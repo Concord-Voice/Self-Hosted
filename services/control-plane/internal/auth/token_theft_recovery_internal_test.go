@@ -34,6 +34,18 @@ func TestQueueTokenTheftRevocation_PersistsFallbackAfterEnqueueContextExpires(t 
 	assert.EqualValues(t, 1, blocked)
 }
 
+func TestRecoverPendingTokenTheftRevocations_MarksRecoveryGeneration(t *testing.T) {
+	db, cleanup := dbtest.SetupTestDB(t)
+	t.Cleanup(cleanup)
+	redisClient := setupAuthAttemptRedis(t)
+	require.NoError(t, redisClient.Del(t.Context(), middleware.TokenTheftRecoveryGenerationKey()).Err())
+
+	require.NoError(t, RecoverPendingTokenTheftRevocations(t.Context(), db, redisClient, logger.New("test")))
+	state, err := redisClient.Get(t.Context(), middleware.TokenTheftRecoveryGenerationKey()).Result()
+	require.NoError(t, err)
+	assert.Equal(t, "1", state)
+}
+
 type tokenTheftRetryDisconnector struct{}
 
 func (tokenTheftRetryDisconnector) DisconnectUser(uuid.UUID) {}

@@ -12,5 +12,5 @@ BEGIN
 END
 $$;
 
-ALTER TABLE token_theft_pending_revocations
+ALTER TABLE IF EXISTS token_theft_pending_revocations
     DROP COLUMN IF EXISTS completed_at;

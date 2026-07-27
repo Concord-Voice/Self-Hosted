@@ -733,7 +733,7 @@ func NewRouter(
 		// Client attestation routes (#677). Verify takes the configured TTL via
 		// closure since gin.HandlerFunc has a fixed signature.
 		v1.POST("/attestation/verify",
-			middleware.AuthRequired(cfg.JWTSecret, redis, credFence),
+			middleware.AuthRequired(cfg.JWTSecret, redis, db, credFence),
 			func(c *gin.Context) { attestationHandler.Verify(c, cfg.AttestationTokenTTL) },
 		)
 		// Internal CI publish endpoints (Y1 split — #677 R3 reconciliation).
@@ -765,7 +765,7 @@ func NewRouter(
 		// finding #BLOCK-1 of the #1264 review (the middleware was previously
 		// defined and unit-tested but never registered on any route).
 		authRequired := v1.Group("/")
-		authRequired.Use(middleware.AuthRequired(cfg.JWTSecret, redis, credFence))
+		authRequired.Use(middleware.AuthRequired(cfg.JWTSecret, redis, db, credFence))
 		authRequired.Use(middleware.RequireAttestation(cfg.RequireClientAttestation, redis, log))
 
 		// ── Pending-OK routes (unverified email allowed) ──────────────

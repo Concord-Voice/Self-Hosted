@@ -219,9 +219,9 @@ func (h *Handler) authenticateViaTicket(c *gin.Context, ticket string) (uuid.UUI
 //nolint:gosec // G101: context-key name, not a credential
 const wsCredEpochContextKey = "ws_cred_epoch"
 
-// checkUserDisabled mirrors the HTTP middleware's immediate-effect denylist
-// gate (#1623) for WS upgrades: a present user_disabled key OR a Redis error
-// rejects (fail closed).
+// checkUserDisabled mirrors the HTTP middleware's immediate-effect admission
+// gates for WS upgrades: disabled users and pending theft revocations reject
+// fail closed.
 func (h *Handler) checkUserDisabled(c *gin.Context, userID string) error {
 	ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 	defer cancel()
@@ -232,6 +232,9 @@ func (h *Handler) checkUserDisabled(c *gin.Context, userID string) error {
 	}
 	if exists > 0 {
 		return fmt.Errorf("account disabled")
+	}
+	if err := middleware.CheckTokenTheftBlocked(c.Request.Context(), h.redis, h.db, userID); err != nil {
+		return fmt.Errorf("check token theft block: %w", err)
 	}
 	return nil
 }
@@ -271,7 +274,7 @@ func (h *Handler) authenticateViaJWT(c *gin.Context, tokenString string) (uuid.U
 	}
 	// Share HTTP bearer auth's live disabled/email state while retaining the
 	// WebSocket policy that an explicitly unverified token is rejected here.
-	emailVerified, err := middleware.VerifyLiveTokenState(c.Request.Context(), h.redis, userID.String(), claims)
+	emailVerified, err := middleware.VerifyLiveTokenState(c.Request.Context(), h.redis, h.db, userID.String(), claims)
 	if err != nil {
 		return uuid.Nil, "", err
 	}

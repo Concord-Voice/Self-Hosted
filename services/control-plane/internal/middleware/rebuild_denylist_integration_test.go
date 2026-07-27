@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"testing"
 
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -66,4 +68,28 @@ func TestRebuildDisabledDenylist_DBQueryError_ReturnsError(t *testing.T) {
 	err = middleware.RebuildDisabledDenylist(context.Background(), badDB, rdb)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "query", "query failure must be reported by the rebuild")
+}
+
+func TestTokenTheftAdmission_RedisFlushRestoresPendingBlock(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "theftrebuild")
+	operationID := uuid.NewString()
+	_, err := ts.DB.Exec(
+		`INSERT INTO token_theft_pending_revocations (user_id, operation_id) VALUES ($1, $2)`, user.ID, operationID,
+	)
+	require.NoError(t, err)
+	require.NoError(t, ts.Redis.Del(t.Context(), middleware.TokenTheftBlockedKey(user.ID), middleware.TokenTheftRecoveryGenerationKey()).Err())
+
+	err = middleware.CheckTokenTheftBlocked(t.Context(), ts.Redis, ts.DB, user.ID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "token theft revocation pending")
+	state, err := ts.Redis.Get(t.Context(), middleware.TokenTheftBlockedKey(user.ID)).Result()
+	require.NoError(t, err)
+	assert.Equal(t, operationID, state)
+
+	require.NoError(t, ts.Redis.Del(t.Context(), middleware.TokenTheftBlockedKey(user.ID)).Err())
+	emailVerified, err := middleware.VerifyLiveTokenState(t.Context(), ts.Redis, ts.DB, user.ID, jwt.MapClaims{"email_verified": true})
+	assert.False(t, emailVerified)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "token theft revocation pending")
 }

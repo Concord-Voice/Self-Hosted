@@ -1635,7 +1635,7 @@ func (h *Handler) rejectTheftBlockedRefresh(c *gin.Context, userID string) bool 
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidRefreshToken})
 		return true
 	}
-	if err := middleware.CheckTokenTheftBlocked(c.Request.Context(), h.redis, userID); err != nil {
+	if err := middleware.CheckTokenTheftBlocked(c.Request.Context(), h.redis, h.db, userID); err != nil {
 		h.log.Warn("Refresh rejected by token theft block", "error", err, "user_id", userID)
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidRefreshToken})
 		return true

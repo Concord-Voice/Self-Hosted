@@ -368,7 +368,13 @@ func RecoverPendingTokenTheftRevocations(ctx context.Context, db *sql.DB, redisC
 			log.Error("Pending token theft revocation recovery failed", "error", err, "user_id", userID)
 		}
 	}
-	return errors.Join(errs...)
+	if err := errors.Join(errs...); err != nil {
+		return err
+	}
+	if err := redisClient.Set(ctx, middleware.TokenTheftRecoveryGenerationKey(), "1", 0).Err(); err != nil {
+		return fmt.Errorf("mark token theft recovery generation: %w", err)
+	}
+	return nil
 }
 
 // retireTokenTheftRecoveryStateIfUserDeleted clears Redis-only recovery state
