@@ -2,6 +2,7 @@ package websocket
 
 import (
 	"context"
+	"database/sql"
 	"testing"
 	"time"
 
@@ -17,6 +18,15 @@ import (
 // fenced by GuardTx inside the persist transaction and write no ciphertext.
 
 const wsPersistArgonHash = "$argon2id$v=19$m=65536,t=3,p=4$3pE9STD1TqLPoZQ2/BTLCg$8SKTCjsZh8Q7pAulEqAIEzJQK9eeOb5ipWhPz4REdCY" //nolint:gosec // dev-only test hash // pragma: allowlist secret
+
+func membershipIncarnation(t *testing.T, db *sql.DB, serverID, userID uuid.UUID) string {
+	t.Helper()
+	var incarnation string
+	require.NoError(t, db.QueryRow(
+		`SELECT xmin::text FROM server_members WHERE server_id = $1 AND user_id = $2`, serverID, userID,
+	).Scan(&incarnation))
+	return incarnation
+}
 
 func TestPersistMessage_StaleEpochRejected(t *testing.T) {
 	db := setupHubTestDB(t)
@@ -57,12 +67,13 @@ func TestPersistMessage_GuardReadFailureIsSaveError(t *testing.T) {
 func TestPersistMessage_RemovedMemberRejected(t *testing.T) {
 	setup := setupMessageTest(t)
 	channelID := uuid.MustParse(setup.convID)
+	incarnation := membershipIncarnation(t, setup.db, setup.user2, setup.user1)
 
 	_, err := setup.db.Exec(`DELETE FROM server_members WHERE server_id = $1 AND user_id = $2`, setup.user2, setup.user1)
 	require.NoError(t, err)
 
 	_, _, _, errMsg := setup.hub.persistMessage(persistMessageParams{
-		channelUUID: channelID, userID: setup.user1,
+		channelUUID: channelID, userID: setup.user1, membershipIncarnation: incarnation,
 		content: "Y2lwaGVydGV4dA==", keyVersion: 1,
 	})
 	assert.Equal(t, "Not a member of this server", errMsg)
@@ -72,9 +83,31 @@ func TestPersistMessage_RemovedMemberRejected(t *testing.T) {
 	assert.Zero(t, count, "a removed member's socket must not persist a channel message")
 }
 
+func TestPersistMessage_RejoinedMemberRejected(t *testing.T) {
+	setup := setupMessageTest(t)
+	channelID := uuid.MustParse(setup.convID)
+	incarnation := membershipIncarnation(t, setup.db, setup.user2, setup.user1)
+
+	_, err := setup.db.Exec(`DELETE FROM server_members WHERE server_id = $1 AND user_id = $2`, setup.user2, setup.user1)
+	require.NoError(t, err)
+	_, err = setup.db.Exec(`INSERT INTO server_members (server_id, user_id, role) VALUES ($1, $2, 'owner')`, setup.user2, setup.user1)
+	require.NoError(t, err)
+
+	_, _, _, errMsg := setup.hub.persistMessage(persistMessageParams{
+		channelUUID: channelID, userID: setup.user1, membershipIncarnation: incarnation,
+		content: "Y2lwaGVydGV4dA==", keyVersion: 1,
+	})
+	assert.Equal(t, "Not a member of this server", errMsg)
+
+	var count int
+	require.NoError(t, setup.db.QueryRow(`SELECT count(*) FROM messages WHERE channel_id = $1`, channelID).Scan(&count))
+	assert.Zero(t, count, "a rejoined member must not admit a stale socket message")
+}
+
 func TestPersistMessage_MembershipLockHonorsTimeout(t *testing.T) {
 	setup := setupMessageTest(t)
 	channelID := uuid.MustParse(setup.convID)
+	incarnation := membershipIncarnation(t, setup.db, setup.user2, setup.user1)
 
 	lockTx, err := setup.db.BeginTx(context.Background(), nil)
 	require.NoError(t, err)
@@ -89,7 +122,7 @@ func TestPersistMessage_MembershipLockHonorsTimeout(t *testing.T) {
 	result := make(chan string, 1)
 	go func() {
 		_, _, _, errMsg := setup.hub.persistMessage(persistMessageParams{
-			channelUUID: channelID, userID: setup.user1,
+			channelUUID: channelID, userID: setup.user1, membershipIncarnation: incarnation,
 			content: "Y2lwaGVydGV4dA==", keyVersion: 1,
 		})
 		result <- errMsg
@@ -106,6 +139,7 @@ func TestPersistMessage_MembershipLockHonorsTimeout(t *testing.T) {
 func TestPersistMessage_MembershipLockWriterFirstDefersRemoval(t *testing.T) {
 	setup := setupMessageTest(t)
 	channelID := uuid.MustParse(setup.convID)
+	incarnation := membershipIncarnation(t, setup.db, setup.user2, setup.user1)
 
 	messageLockTx, err := setup.db.Begin()
 	require.NoError(t, err)
@@ -116,7 +150,7 @@ func TestPersistMessage_MembershipLockWriterFirstDefersRemoval(t *testing.T) {
 	sendResult := make(chan string, 1)
 	go func() {
 		_, _, _, errMsg := setup.hub.persistMessage(persistMessageParams{
-			channelUUID: channelID, userID: setup.user1,
+			channelUUID: channelID, userID: setup.user1, membershipIncarnation: incarnation,
 			content: "Y2lwaGVydGV4dA==", keyVersion: 1,
 		})
 		sendResult <- errMsg

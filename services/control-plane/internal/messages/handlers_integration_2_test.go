@@ -1,6 +1,7 @@
 package messages_test
 
 import (
+	"database/sql"
 	"net/http"
 	"testing"
 	"time"
@@ -609,7 +610,7 @@ func TestSendMessage_RacingMembershipRemovalCannotOutrunPurge(t *testing.T) {
 			SELECT 1 FROM pg_stat_activity
 			WHERE datname = current_database()
 			  AND wait_event_type = 'Lock'
-			  AND query LIKE '%SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 FOR SHARE%'
+			  AND query LIKE '%SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 AND xmin::text = $3 FOR SHARE%'
 		)`).Scan(&waiting)
 		return queryErr == nil && waiting
 	}, time.Second, 10*time.Millisecond, "send should wait on the membership lock")
@@ -634,6 +635,58 @@ func TestSendMessage_RacingMembershipRemovalCannotOutrunPurge(t *testing.T) {
 	}
 	assert.Zero(t, countChannelMessages(t, ts, channelID))
 	assert.Equal(t, 1, countPurgeAudits(t, ts, serverID))
+}
+
+// regression for #2344: the membership lock must not treat a rejoin as the
+// membership row that passed send preflight before the removal.
+func TestSendMessage_RejoinedMemberCannotRestoreStaleSend(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "sendrejoin_owner")
+	victim := ts.CreateTestUser(t, "sendrejoin_victim")
+	serverID := ts.CreateTestServer(t, owner.ID, "Send Rejoin Server")
+	channelID := ts.CreateTestChannel(t, serverID, "general")
+	ts.AddMemberToServer(t, serverID, victim.ID, "member")
+
+	userLockTx, err := ts.DB.Begin()
+	require.NoError(t, err)
+	defer func() { _ = userLockTx.Rollback() }()
+	var epoch sql.NullString
+	require.NoError(t, userLockTx.QueryRow(
+		`SELECT credential_epoch FROM users WHERE id = $1 FOR NO KEY UPDATE`, victim.ID,
+	).Scan(&epoch))
+
+	sendResult := make(chan int, 1)
+	go func() {
+		w := ts.DoRequest(http.MethodPost, pathAPIMessages, map[string]any{
+			"channel_id": channelID,
+			"content":    testhelpers.ValidCiphertext(),
+		}, testhelpers.AuthHeaders(victim.AccessToken))
+		sendResult <- w.Code
+	}()
+
+	require.Eventually(t, func() bool {
+		var waiting bool
+		queryErr := ts.DB.QueryRow(`SELECT EXISTS (
+			SELECT 1 FROM pg_stat_activity
+			WHERE datname = current_database()
+			  AND wait_event_type = 'Lock'
+			  AND query LIKE '%SELECT credential_epoch FROM users WHERE id = $1 FOR SHARE%'
+		)`).Scan(&waiting)
+		return queryErr == nil && waiting
+	}, time.Second, 10*time.Millisecond, "send should finish preflight before the membership changes")
+
+	_, err = ts.DB.Exec(`DELETE FROM server_members WHERE server_id = $1 AND user_id = $2`, serverID, victim.ID)
+	require.NoError(t, err)
+	ts.AddMemberToServer(t, serverID, victim.ID, "member")
+	require.NoError(t, userLockTx.Commit())
+
+	select {
+	case status := <-sendResult:
+		assert.Equal(t, http.StatusForbidden, status)
+	case <-time.After(time.Second):
+		t.Fatal("stale send did not resume after rejoin")
+	}
+	assert.Zero(t, countChannelMessages(t, ts, channelID))
 }
 
 func TestSendMessage_MembershipLockHonorsTimeout(t *testing.T) {
