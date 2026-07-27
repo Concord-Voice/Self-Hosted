@@ -4,6 +4,7 @@ package sessions
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -27,7 +28,10 @@ const (
 	errMsgFailedVerifyPassword  = "Failed to verify password"
 	errMsgIncorrectPassword     = "Incorrect password"
 	errMsgFailedFetchSessions   = "Failed to fetch sessions"
+	errMsgCurrentSessionUnknown = "Current session cannot be identified"
 )
+
+var errCurrentSessionUnknown = errors.New("current session cannot be identified")
 
 // SessionDisconnector allows forcefully disconnecting WebSocket connections.
 // Defined as an interface to avoid coupling to the websocket package.
@@ -489,6 +493,10 @@ func (h *Handler) RevokeAllSessions(c *gin.Context) {
 
 	result, err := h.revokeAllSessionsDB(uid, req.IncludeCurrent, c)
 	if err != nil {
+		if errors.Is(err, errCurrentSessionUnknown) {
+			c.JSON(http.StatusBadRequest, gin.H{"error": errMsgCurrentSessionUnknown})
+			return
+		}
 		h.log.Error("Failed to revoke sessions", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to revoke sessions"})
 		return
@@ -527,6 +535,8 @@ func (h *Handler) revokeAllSessionsDB(uid string, includeCurrent bool, c *gin.Co
 		if options.ExcludeSessionID == "" {
 			if currentToken, cookieErr := c.Cookie("refresh_token"); cookieErr == nil && currentToken != "" {
 				options.ExcludeTokenHash = auth.HashRefreshToken(currentToken)
+			} else {
+				return nil, errCurrentSessionUnknown
 			}
 		}
 	}

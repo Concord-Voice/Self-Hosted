@@ -12019,11 +12019,15 @@ paths:
       summary: Revoke all sessions
       description: 'Revoke the authenticated user''s active sessions after password
 
-        or MFA re-verification. By default, the refresh token supplied in the current
+        or MFA re-verification. A request with neither step-up credential returns a
 
-        authenticated bearer session is preserved; legacy bearer tokens without a
-        session ID preserve the supplied refresh token. Set `include_current` to
-        `true` to revoke that session too.
+        403 discovery response describing the required method. By default, the authenticated
+
+        bearer session is preserved; legacy bearer tokens without a session ID preserve
+
+        the supplied refresh token. Set `include_current` to `true` to revoke that
+
+        session too.
 
         Rate limit: 5 requests per minute (user-based).
 
@@ -12048,11 +12052,6 @@ paths:
                   type: boolean
                   default: false
                   description: Revoke the current refresh token as well as all other sessions
-              anyOf:
-              - required:
-                - password
-              - required:
-                - mfa_code
       responses:
         '200':
           description: Sessions revoked
@@ -12074,7 +12073,7 @@ paths:
                   include_current:
                     type: boolean
         '400':
-          description: Invalid JSON request body
+          description: Invalid JSON request body or an unidentifiable current session
           content:
             application/json:
               schema:
@@ -12086,24 +12085,26 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '403':
-          description: Password or MFA verification is required or failed
+          description: Account access is denied, or password or MFA verification is required or failed
           content:
             application/json:
               schema:
-                type: object
-                required:
-                - error
-                properties:
-                  error:
-                    type: string
-                  message:
-                    type: string
-                    description: Present when step-up authentication is required
-                  methods:
-                    type: array
-                    items:
+                oneOf:
+                - $ref: '#/components/schemas/AccountDisabledError'
+                - type: object
+                  required:
+                  - error
+                  properties:
+                    error:
                       type: string
-                    description: Enabled MFA methods when MFA authentication is required
+                    message:
+                      type: string
+                      description: Present when step-up authentication is required
+                    methods:
+                      type: array
+                      items:
+                        type: string
+                      description: Enabled MFA methods when MFA authentication is required
         '429':
           $ref: '#/components/responses/RateLimited'
         '500':

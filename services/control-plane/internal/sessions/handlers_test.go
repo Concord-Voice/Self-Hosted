@@ -201,3 +201,26 @@ func TestRevokeAllSessionsExceptCurrent_UsesBearerSessionWithoutCookie(t *testin
 	assert.Equal(t, 1, currentActive, "the bearer-authenticated session must be preserved without a refresh cookie")
 	assert.Zero(t, otherActive, "all non-current sessions must be revoked")
 }
+
+func TestRevokeAllSessionsExceptCurrent_WithoutSessionIdentityFailsSafely(t *testing.T) {
+	ts := setupTS(t)
+	accessToken, _ := registerAndGetTokens(t, ts, "revokeotherlegacy@test.concord.chat", "revokeotherlegacy")
+	claims, err := auth.ValidateAccessToken(accessToken, testhelpers.TestJWTSecret)
+	require.NoError(t, err)
+	legacyAccessToken, err := auth.GenerateAccessToken(claims.UserID, testhelpers.TestJWTSecret, true, "", "")
+	require.NoError(t, err)
+
+	w := ts.DoRequest("POST", revokeAllPath, map[string]interface{}{
+		"password": "TestPassword123!",
+	}, testhelpers.AuthHeaders(legacyAccessToken))
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Equal(t, "Current session cannot be identified", body["error"])
+
+	var active int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL`, claims.UserID,
+	).Scan(&active))
+	assert.Equal(t, 1, active, "a request without a current-session identity must not revoke any session")
+}
