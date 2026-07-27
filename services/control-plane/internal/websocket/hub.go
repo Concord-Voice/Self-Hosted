@@ -2242,22 +2242,27 @@ func (h *Hub) persistMessage(p persistMessageParams) (uuid.UUID, time.Time, time
 		return messageID, createdAt, updatedAt, errMsgFailedSaveMessage
 	}
 	// Lock the preflight membership row inside the write transaction. Its immutable
-	// joined_at value rejects a same-key rejoin after a kick/ban finishes purging.
-	var membership int
+	// joined_at value rejects a same-key rejoin after a kick/ban finishes purging,
+	// while the fresh timeout read prevents a moderation update during RBAC checks
+	// from admitting the frame.
+	var timedOut bool
 	err = tx.QueryRowContext(ctx,
-		`SELECT 1
+		`SELECT sm.timed_out_until IS NOT NULL AND sm.timed_out_until > NOW()
 		 FROM channels ch
 		 INNER JOIN server_members sm ON sm.server_id = ch.server_id
 		 WHERE ch.id = $1 AND sm.user_id = $2 AND sm.joined_at = $3
 		 FOR SHARE OF sm`,
 		p.channelUUID, p.userID, p.membershipIncarnation,
-	).Scan(&membership)
+	).Scan(&timedOut)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return messageID, createdAt, updatedAt, "Not a member of this server"
 		}
 		log.Printf("Failed to lock message membership: %v", err)
 		return messageID, createdAt, updatedAt, errMsgFailedSaveMessage
+	}
+	if timedOut {
+		return messageID, createdAt, updatedAt, "Member is timed out"
 	}
 	err = tx.QueryRowContext(ctx,
 		`INSERT INTO messages (id, channel_id, user_id, content, key_version, embeds_suppressed, reply_to_id, gif_slug, created_at, updated_at)

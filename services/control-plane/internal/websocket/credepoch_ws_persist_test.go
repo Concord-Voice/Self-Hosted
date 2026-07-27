@@ -167,6 +167,52 @@ func TestHandleMessage_RejoinedMemberDuringPermissionCheckRejected(t *testing.T)
 	assert.Zero(t, count, "a frame authorized before removal must not persist after rejoin")
 }
 
+func TestHandleMessage_TimedOutDuringPermissionCheckRejected(t *testing.T) {
+	setup := setupMessageTest(t)
+	checker := newBlockingChannelPermissionChecker(true)
+	setup.hub.SetChannelPermissionChecker(checker)
+
+	done := make(chan struct{})
+	go func() {
+		setup.hub.handleMessage(IncomingMessage{
+			Type:     "message",
+			UserID:   setup.user1,
+			ClientID: setup.client.ID,
+			Data: map[string]interface{}{
+				keyChannelID:  setup.convID,
+				keyContent:    "timed out member frame",
+				keyKeyVersion: float64(1),
+			},
+		})
+		close(done)
+	}()
+
+	select {
+	case <-checker.entered:
+	case <-time.After(time.Second):
+		t.Fatal("message send did not reach the permission check")
+	}
+
+	_, err := setup.db.Exec(
+		`UPDATE server_members SET timed_out_until = NOW() + INTERVAL '1 hour' WHERE server_id = $1 AND user_id = $2`,
+		setup.user2, setup.user1,
+	)
+	require.NoError(t, err)
+	close(checker.release)
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("message send did not complete after permission check")
+	}
+
+	response := readClientMsg(t, setup.client)
+	assert.Equal(t, "error", response["type"])
+	var count int
+	require.NoError(t, setup.db.QueryRow(`SELECT count(*) FROM messages WHERE channel_id = $1`, setup.convID).Scan(&count))
+	assert.Zero(t, count, "a member timed out during authorization must not persist a message")
+}
+
 func TestPersistMessage_MembershipLockHonorsTimeout(t *testing.T) {
 	setup := setupMessageTest(t)
 	channelID := uuid.MustParse(setup.convID)
