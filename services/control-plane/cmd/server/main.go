@@ -208,6 +208,7 @@ func runControlPlane() (runErr error) {
 
 	pendingRepo := auth.NewPendingRepo(db)
 	auth.StartPendingCleanupWorker(cleanupCtx, pendingRepo, log, auth.PendingCleanupInterval)
+	auth.StartTokenTheftRecoveryWorker(cleanupCtx, db, redisClient, log, auth.TokenTheftRecoveryInterval)
 
 	// Start attestation registry retention pruner (#677, ADR-0010 D9).
 	// Periodically prunes release_binaries (keeps current MAJOR.MINOR + last

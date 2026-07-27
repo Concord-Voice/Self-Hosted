@@ -149,7 +149,7 @@ func TokenTheftBlockedKey(userID string) string { return "token_theft_blocked:" 
 // pending. Redis failures fail closed so an unavailable marker store cannot
 // re-admit a compromised session.
 func CheckTokenTheftBlocked(ctx context.Context, redisClient *redis.Client, userID string) error {
-	checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	checkCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
 	defer cancel()
 
 	exists, err := redisClient.Exists(checkCtx, TokenTheftBlockedKey(userID)).Result()

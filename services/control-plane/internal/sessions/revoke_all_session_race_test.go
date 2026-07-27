@@ -67,7 +67,7 @@ func TestRevokeAllSessions_ConcurrentMintDoesNotSurvive(t *testing.T) {
 			SELECT 1 FROM pg_stat_activity
 			WHERE datname = current_database()
 			  AND wait_event_type = 'Lock'
-			  AND query LIKE '%SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE%'
+			  AND query LIKE '%SELECT credential_epoch FROM users WHERE id = $1 FOR NO KEY UPDATE%'
 		)`).Scan(&waiting)
 		return err == nil && waiting
 	}, time.Second, 10*time.Millisecond,

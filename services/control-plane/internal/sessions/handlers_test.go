@@ -178,13 +178,11 @@ func TestRevokeAllSessionsExceptCurrent(t *testing.T) {
 
 func TestRevokeAllSessionsExceptCurrent_UsesBearerSessionWithoutCookie(t *testing.T) {
 	ts := setupTS(t)
-	accessToken, refreshCookie := registerAndGetTokens(t, ts, "revokeotherbearer@test.concord.chat", "revokeotherbearer")
-	require.NotNil(t, refreshCookie)
-
-	var userID, currentSessionID string
-	require.NoError(t, ts.DB.QueryRow(
-		`SELECT user_id, id FROM refresh_tokens WHERE token_hash = $1`, auth.HashRefreshToken(refreshCookie.Value),
-	).Scan(&userID, &currentSessionID))
+	accessToken, _ := registerAndGetTokens(t, ts, "revokeotherbearer@test.concord.chat", "revokeotherbearer")
+	claims, err := auth.ValidateAccessToken(accessToken, testhelpers.TestJWTSecret)
+	require.NoError(t, err)
+	userID, currentSessionID := claims.UserID, claims.SessionID
+	require.NotEmpty(t, currentSessionID)
 	var otherSessionID string
 	require.NoError(t, ts.DB.QueryRow(
 		`INSERT INTO refresh_tokens (user_id, token_hash, expires_at)

@@ -17,7 +17,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/attestation"
@@ -105,8 +104,6 @@ const (
 
 	// Redis key patterns
 	redisKeyLoginLockout = "login_lockout:%s"
-
-	tokenTheftRetryDelay = time.Second
 )
 
 // truncateUserAgent limits the User-Agent string to maxUserAgentLength.
@@ -149,7 +146,6 @@ type Handler struct {
 	pending         *PendingRepo
 	entCache        *entitlements.Cache
 	credFence       *credepoch.Fence
-	theftRetries    sync.Map
 }
 
 // SetCredentialFence injects the per-user credential-epoch fence (#2201).
@@ -1571,15 +1567,11 @@ func (h *Handler) handleTokenTheft(c *gin.Context, token models.RefreshToken) bo
 
 	revokeCtx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), 5*time.Second)
 	defer cancel()
-	if err := h.setTokenTheftBlock(revokeCtx, token.UserID); err != nil {
-		h.log.Error("Failed to block sessions after token theft", "error", err, "user_id", token.UserID)
-		h.retryTokenTheftRevocation(token.UserID)
-	} else if _, err := RevokeAllRefreshTokens(revokeCtx, h.db, token.UserID, RevokeAllRefreshTokensOptions{}); err != nil {
+	if err := EnqueueTokenTheftRevocation(revokeCtx, h.db, token.UserID); err != nil {
+		h.log.Error("Failed to persist pending token theft revocation", "error", err, "user_id", token.UserID)
+	}
+	if err := ProcessTokenTheftRevocation(revokeCtx, h.db, h.redis, token.UserID); err != nil {
 		h.log.Error("Failed to revoke refresh tokens after token theft", "error", err, "user_id", token.UserID)
-		h.retryTokenTheftRevocation(token.UserID)
-	} else if err := h.clearTokenTheftBlock(revokeCtx, token.UserID); err != nil {
-		h.log.Error("Failed to clear token theft block after refresh-token revocation", "error", err, "user_id", token.UserID)
-		h.retryTokenTheftRevocation(token.UserID)
 	}
 
 	if uid, parseErr := uuid.Parse(token.UserID); parseErr == nil {
@@ -1604,60 +1596,6 @@ func (h *Handler) rejectTheftBlockedRefresh(c *gin.Context, userID string) bool 
 		return true
 	}
 	return false
-}
-
-func (h *Handler) setTokenTheftBlock(ctx context.Context, userID string) error {
-	if h.redis == nil {
-		return errors.New("token theft block store unavailable")
-	}
-	if err := h.redis.Set(ctx, middleware.TokenTheftBlockedKey(userID), "1", 0).Err(); err != nil {
-		return fmt.Errorf("set token theft block: %w", err)
-	}
-	return nil
-}
-
-func (h *Handler) clearTokenTheftBlock(ctx context.Context, userID string) error {
-	if h.redis == nil {
-		return errors.New("token theft block store unavailable")
-	}
-	if err := h.redis.Del(ctx, middleware.TokenTheftBlockedKey(userID)).Err(); err != nil {
-		return fmt.Errorf("clear token theft block: %w", err)
-	}
-	return nil
-}
-
-// retryTokenTheftRevocation keeps the deny marker in place until the durable
-// refresh-token sweep commits. A per-user guard prevents repeated theft probes
-// from creating duplicate retry loops.
-func (h *Handler) retryTokenTheftRevocation(userID string) {
-	if h.redis == nil {
-		return
-	}
-	if _, loaded := h.theftRetries.LoadOrStore(userID, struct{}{}); loaded {
-		return
-	}
-	go func() {
-		defer h.theftRetries.Delete(userID)
-		for {
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			blockErr := h.setTokenTheftBlock(ctx, userID)
-			if blockErr == nil {
-				_, revokeErr := RevokeAllRefreshTokens(ctx, h.db, userID, RevokeAllRefreshTokensOptions{})
-				if revokeErr == nil {
-					blockErr = h.clearTokenTheftBlock(ctx, userID)
-					if blockErr == nil {
-						cancel()
-						return
-					}
-				} else {
-					blockErr = revokeErr
-				}
-			}
-			cancel()
-			h.log.Error("Token theft refresh-token revocation retry failed", "error", blockErr, "user_id", userID)
-			time.Sleep(tokenTheftRetryDelay)
-		}
-	}()
 }
 
 // handleSuspiciousMachineID handles same-IP but different machine ID — suspicious but not theft.

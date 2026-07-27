@@ -239,7 +239,7 @@ func TestRefreshMachineIDTheft_ConcurrentMintDoesNotSurvive(t *testing.T) {
 			SELECT 1 FROM pg_stat_activity
 			WHERE datname = current_database()
 			  AND wait_event_type = 'Lock'
-			  AND query LIKE '%SELECT id FROM users WHERE id = $1 FOR NO KEY UPDATE%'
+			  AND query LIKE '%SELECT credential_epoch FROM users WHERE id = $1 FOR NO KEY UPDATE%'
 		)`).Scan(&waiting)
 		return err == nil && waiting
 	}, time.Second, 10*time.Millisecond,
@@ -312,14 +312,18 @@ func TestRefreshMachineIDTheft_RevokeFailureLogsAndRejects(t *testing.T) {
 	blockedAccess := ts.DoRequest("GET", "/api/v1/sessions", nil, testhelpers.AuthHeaders(accessToken))
 	assert.Equal(t, http.StatusForbidden, blockedAccess.Code,
 		"the pending theft marker must block bearer-token use")
+	var pending int
+	require.NoError(t, ts.DB.QueryRow(`SELECT COUNT(*) FROM token_theft_pending_revocations WHERE user_id = $1`, userID).Scan(&pending))
+	assert.Equal(t, 1, pending, "a failed sweep must remain durable for startup recovery")
 
 	_, err = ts.DB.Exec(`DROP TRIGGER IF EXISTS token_theft_revoke_failure ON refresh_tokens`)
 	require.NoError(t, err)
-	require.Eventually(t, func() bool {
-		exists, redisErr := ts.Redis.Exists(context.Background(), middleware.TokenTheftBlockedKey(userID)).Result()
-		return redisErr == nil && exists == 0
-	}, 3*time.Second, 25*time.Millisecond,
-		"the retry must retain the block until the durable refresh-token sweep commits")
+	require.NoError(t, auth.RecoverPendingTokenTheftRevocations(context.Background(), ts.DB, ts.Redis, logger.New("test")))
+	exists, redisErr := ts.Redis.Exists(context.Background(), middleware.TokenTheftBlockedKey(userID)).Result()
+	require.NoError(t, redisErr)
+	assert.Zero(t, exists, "recovery must clear the block only after the durable refresh-token sweep commits")
+	require.NoError(t, ts.DB.QueryRow(`SELECT COUNT(*) FROM token_theft_pending_revocations WHERE user_id = $1`, userID).Scan(&pending))
+	assert.Zero(t, pending, "recovery must retire the durable pending record after the sweep commits")
 }
 
 func findLogLine(logOutput, marker string) string {

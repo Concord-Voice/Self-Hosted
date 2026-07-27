@@ -12021,7 +12021,9 @@ paths:
 
         or MFA re-verification. By default, the refresh token supplied in the current
 
-        request is preserved; set `include_current` to `true` to revoke it too.
+        authenticated bearer session is preserved; legacy bearer tokens without a
+        session ID preserve the supplied refresh token. Set `include_current` to
+        `true` to revoke that session too.
 
         Rate limit: 5 requests per minute (user-based).
 
