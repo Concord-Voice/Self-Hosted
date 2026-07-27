@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -50,7 +51,7 @@ func TestProcessTokenTheftRevocation_SkipsCompletedRecord(t *testing.T) {
 	user := ts.CreateTestUser(t, "token-theft-no-stale-replay")
 	ctx := context.Background()
 	_, err := ts.DB.Exec(
-		`INSERT INTO token_theft_pending_revocations (user_id, completed_at) VALUES ($1, NOW())`, user.ID,
+		`INSERT INTO token_theft_pending_revocations (user_id, operation_id, completed_at) VALUES ($1, $2, NOW())`, user.ID, uuid.New(),
 	)
 	require.NoError(t, err)
 
@@ -73,6 +74,45 @@ func TestProcessTokenTheftRevocation_SkipsCompletedRecord(t *testing.T) {
 		`SELECT COUNT(*) FROM token_theft_pending_revocations WHERE user_id = $1`, user.ID,
 	).Scan(&pending))
 	assert.Zero(t, pending)
+}
+
+func TestProcessTokenTheftRevocation_DrainsLegacyCompletedRecord(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "token-theft-legacy-recovery")
+	_, err := ts.DB.Exec(
+		`INSERT INTO token_theft_pending_revocations (user_id, completed_at) VALUES ($1, NOW())`, user.ID,
+	)
+	require.NoError(t, err)
+	require.NoError(t, ts.Redis.Set(context.Background(), middleware.TokenTheftBlockedKey(user.ID), "1", 0).Err())
+
+	require.NoError(t, auth.ProcessTokenTheftRevocation(context.Background(), ts.DB, ts.Redis, user.ID))
+	blocked, err := ts.Redis.Exists(context.Background(), middleware.TokenTheftBlockedKey(user.ID)).Result()
+	require.NoError(t, err)
+	assert.Zero(t, blocked)
+	var pending int
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT COUNT(*) FROM token_theft_pending_revocations WHERE user_id = $1`, user.ID,
+	).Scan(&pending))
+	assert.Zero(t, pending)
+}
+
+func TestEnqueueTokenTheftRevocation_ResetsCompletedOperation(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "token-theft-new-operation")
+	previousOperationID := uuid.New()
+	_, err := ts.DB.Exec(
+		`INSERT INTO token_theft_pending_revocations (user_id, operation_id, completed_at) VALUES ($1, $2, NOW())`, user.ID, previousOperationID,
+	)
+	require.NoError(t, err)
+
+	require.NoError(t, auth.EnqueueTokenTheftRevocation(context.Background(), ts.DB, user.ID))
+	var operationID uuid.UUID
+	var completedAt sql.NullTime
+	require.NoError(t, ts.DB.QueryRow(
+		`SELECT operation_id, completed_at FROM token_theft_pending_revocations WHERE user_id = $1`, user.ID,
+	).Scan(&operationID, &completedAt))
+	assert.NotEqual(t, previousOperationID, operationID)
+	assert.False(t, completedAt.Valid)
 }
 
 func TestStartTokenTheftRecoveryWorker_RetriesRecoveryFailures(t *testing.T) {

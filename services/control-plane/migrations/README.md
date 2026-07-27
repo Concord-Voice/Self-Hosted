@@ -83,7 +83,7 @@ DROP INDEX IF EXISTS idx_users_status;
 ALTER TABLE users DROP COLUMN IF EXISTS status;
 ```
 
-## Existing Migrations (000001–000098)
+## Existing Migrations (000001–000104)
 
 ### Phase 1A — Authentication & E2EE
 | # | Name | Tables/Changes |
@@ -208,6 +208,9 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000096 | validate_voice_lifecycle_watermarks_not_null | Validate lifecycle guards without blocking ordinary writes (#2231) |
 | 000097 | enforce_voice_lifecycle_watermarks_not_null | Revalidate rollback proofs, then convert lifecycle guards to metadata-native `NOT NULL` constraints (#2231) |
 | 000098 | add_activity_settings_cleanup_marker | Durable before/after policy evidence and completed-suppression receipts for retrying/finalizing Rich Presence settings cleanup (#2231) |
+| 000102 | add_token_theft_pending_revocations | Durable recovery records for interrupted token-theft refresh-token sweeps (#2457) |
+| 000103 | add_token_theft_completion_state | Post-sweep cleanup state for token-theft recovery records, with guarded rollback (#2457) |
+| 000104 | add_token_theft_operation_id | Operation ownership for token-theft recovery cleanup, with guarded rollback (#2457) |
 
 ## Troubleshooting
 

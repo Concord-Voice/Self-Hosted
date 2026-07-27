@@ -1570,10 +1570,13 @@ func (h *Handler) handleTokenTheft(c *gin.Context, token models.RefreshToken) bo
 	queuedInDB, queueErr := queueTokenTheftRevocation(revokeCtx, h.db, h.redis, token.UserID)
 	if queueErr != nil {
 		h.log.Error("Failed to persist pending token theft revocation", "error", queueErr, "user_id", token.UserID)
-	} else if !queuedInDB {
+	}
+	if queuedInDB {
+		if err := ProcessTokenTheftRevocation(revokeCtx, h.db, h.redis, token.UserID); err != nil {
+			h.log.Error("Failed to revoke refresh tokens after token theft", "error", err, "user_id", token.UserID)
+		}
+	} else if queueErr == nil {
 		h.log.Warn("Token theft revocation deferred to Redis fallback", "user_id", token.UserID)
-	} else if err := ProcessTokenTheftRevocation(revokeCtx, h.db, h.redis, token.UserID); err != nil {
-		h.log.Error("Failed to revoke refresh tokens after token theft", "error", err, "user_id", token.UserID)
 	}
 
 	if uid, parseErr := uuid.Parse(token.UserID); parseErr == nil {
