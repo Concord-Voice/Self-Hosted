@@ -1146,10 +1146,11 @@ type ChannelPermissionChecker interface {
 }
 
 const (
-	permViewVoiceChannels int64 = 1 << 9
-	permViewTextChannels  int64 = 1 << 10
-	permSendMessages      int64 = 1 << 11
-	channelAuthCtxTimeout       = 3 * time.Second
+	permViewVoiceChannels   int64 = 1 << 9
+	permViewTextChannels    int64 = 1 << 10
+	permSendMessages        int64 = 1 << 11
+	channelAuthCtxTimeout         = 3 * time.Second
+	errMsgNotMemberOfServer       = "Not a member of this server"
 )
 
 func (h *Hub) rejectActiveMemberTimeout(msg IncomingMessage, serverID, userID uuid.UUID) (bool, time.Time) {
@@ -1166,7 +1167,7 @@ func (h *Hub) rejectActiveMemberTimeout(msg IncomingMessage, serverID, userID uu
 		serverID, userID,
 	).Scan(&timedOutUntil, &membershipIncarnation)
 	if errors.Is(err, sql.ErrNoRows) {
-		h.sendError(msg.ClientID, "Not a member of this server")
+		h.sendError(msg.ClientID, errMsgNotMemberOfServer)
 		return true, time.Time{}
 	}
 	if err != nil {
@@ -1589,7 +1590,7 @@ func (h *Hub) handleSubscribeServer(msg IncomingMessage) {
 		return
 	}
 	if !isMember {
-		h.sendError(msg.ClientID, "Not a member of this server")
+		h.sendError(msg.ClientID, errMsgNotMemberOfServer)
 		return
 	}
 
@@ -2274,7 +2275,7 @@ func (h *Hub) persistMessage(p persistMessageParams) (uuid.UUID, time.Time, time
 	timedOut, err := lockMessageMembership(ctx, tx, p)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return messageID, createdAt, updatedAt, "Not a member of this server"
+			return messageID, createdAt, updatedAt, errMsgNotMemberOfServer
 		}
 		log.Printf("Failed to lock message membership: %v", err)
 		return messageID, createdAt, updatedAt, errMsgFailedSaveMessage
