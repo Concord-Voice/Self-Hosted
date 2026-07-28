@@ -275,6 +275,7 @@ client/desktop/src/renderer/styles/.ds-index.css
 
 # Graphify's shared graph bundle is versioned; extraction caches, chunks,
 # transcripts, local interpreter paths, and per-run cost accounting are not.
+graphify-out/graph.html
 graphify-out/cache/
 graphify-out/transcripts/
 graphify-out/.graphify_*
