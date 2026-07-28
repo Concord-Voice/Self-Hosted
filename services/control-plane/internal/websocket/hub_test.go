@@ -501,7 +501,7 @@ func (staleChannelPermissionChecker) HasChannelPermission(context.Context, strin
 	return true, nil
 }
 
-func (staleChannelPermissionChecker) HasChannelPermissionUncached(context.Context, string, string, string, int64) (bool, error) {
+func (staleChannelPermissionChecker) HasChannelPermissionsUncached(context.Context, string, string, string, ...int64) (bool, error) {
 	return false, nil
 }
 
@@ -509,7 +509,7 @@ func (c staticChannelPermissionChecker) HasChannelPermission(context.Context, st
 	return c.allowed, c.err
 }
 
-func (c staticChannelPermissionChecker) HasChannelPermissionUncached(context.Context, string, string, string, int64) (bool, error) {
+func (c staticChannelPermissionChecker) HasChannelPermissionsUncached(context.Context, string, string, string, ...int64) (bool, error) {
 	return c.allowed, c.err
 }
 
@@ -536,8 +536,12 @@ func (c *blockingChannelPermissionChecker) HasChannelPermission(context.Context,
 	return c.allowed, nil
 }
 
-func (c *blockingChannelPermissionChecker) HasChannelPermissionUncached(ctx context.Context, serverID, userID, channelID string, permBit int64) (bool, error) {
-	return c.HasChannelPermission(ctx, serverID, userID, channelID, permBit)
+func (c *blockingChannelPermissionChecker) HasChannelPermissionsUncached(context.Context, string, string, string, ...int64) (bool, error) {
+	c.once.Do(func() {
+		close(c.entered)
+	})
+	<-c.release
+	return c.allowed, nil
 }
 
 func requirePermissionCheckOffRunGoroutine(t *testing.T, done <-chan struct{}, checker *blockingChannelPermissionChecker) {
@@ -587,8 +591,14 @@ func (c keyedChannelPermissionChecker) HasChannelPermission(
 	}], nil
 }
 
-func (c keyedChannelPermissionChecker) HasChannelPermissionUncached(ctx context.Context, serverID, userID, channelID string, permBit int64) (bool, error) {
-	return c.HasChannelPermission(ctx, serverID, userID, channelID, permBit)
+func (c keyedChannelPermissionChecker) HasChannelPermissionsUncached(ctx context.Context, serverID, userID, channelID string, permBits ...int64) (bool, error) {
+	for _, permBit := range permBits {
+		allowed, err := c.HasChannelPermission(ctx, serverID, userID, channelID, permBit)
+		if err != nil || !allowed {
+			return allowed, err
+		}
+	}
+	return true, nil
 }
 
 func TestAuthorizeChannelPermissionMissingCheckerFailsClosed(t *testing.T) {
@@ -597,12 +607,12 @@ func TestAuthorizeChannelPermissionMissingCheckerFailsClosed(t *testing.T) {
 	client := newTestClient(hub, userID)
 	hub.clients[client.ID] = client
 
-	ok := hub.authorizeChannelPermission(
+	ok := hub.authorizeChannelPermissions(
 		IncomingMessage{ClientID: client.ID},
 		userID,
 		&channelContext{serverUUID: uuid.New()},
 		uuid.New(),
-		permSendMessages,
+		[]int64{permSendMessages},
 		"denied",
 		false,
 	)
@@ -619,12 +629,12 @@ func TestAuthorizeChannelPermissionCheckerErrorFailsClosed(t *testing.T) {
 	client := newTestClient(hub, userID)
 	hub.clients[client.ID] = client
 
-	ok := hub.authorizeChannelPermission(
+	ok := hub.authorizeChannelPermissions(
 		IncomingMessage{ClientID: client.ID},
 		userID,
 		&channelContext{serverUUID: uuid.New()},
 		uuid.New(),
-		permSendMessages,
+		[]int64{permSendMessages},
 		"denied",
 		false,
 	)
@@ -634,19 +644,19 @@ func TestAuthorizeChannelPermissionCheckerErrorFailsClosed(t *testing.T) {
 	assert.Equal(t, "error", resp["type"])
 }
 
-func TestAuthorizeChannelPermissionUsesUncachedChecker(t *testing.T) {
+func TestAuthorizeChannelPermissionsUsesUncachedChecker(t *testing.T) {
 	hub := newMinimalHub()
 	userID := uuid.New()
 	client := newTestClient(hub, userID)
 	hub.clients[client.ID] = client
 	hub.SetChannelPermissionChecker(staleChannelPermissionChecker{})
 
-	ok := hub.authorizeChannelPermission(
+	ok := hub.authorizeChannelPermissions(
 		IncomingMessage{ClientID: client.ID},
 		userID,
 		&channelContext{serverUUID: uuid.New()},
 		uuid.New(),
-		permSendMessages,
+		[]int64{permSendMessages},
 		"denied",
 		true,
 	)

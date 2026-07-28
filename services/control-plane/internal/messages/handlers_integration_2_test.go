@@ -639,6 +639,20 @@ func TestSendMessage_RacingMembershipRemovalCannotOutrunPurge(t *testing.T) {
 	assert.Equal(t, 1, countPurgeAudits(t, ts, serverID))
 }
 
+func requireSendWaitsForCredentialGuard(t *testing.T, ts *testhelpers.TestServer, before string) {
+	t.Helper()
+	require.Eventually(t, func() bool {
+		var waiting bool
+		err := ts.DB.QueryRow(`SELECT EXISTS (
+			SELECT 1 FROM pg_stat_activity
+			WHERE datname = current_database()
+			  AND wait_event_type = 'Lock'
+			  AND query LIKE '%credential_epoch%users%FOR SHARE%'
+		)`).Scan(&waiting)
+		return err == nil && waiting
+	}, time.Second, 10*time.Millisecond, "send should finish preflight before "+before)
+}
+
 // regression for #2344: the membership lock must not treat a rejoin as the
 // membership row that passed send preflight before the removal.
 func TestSendMessage_RejoinedMemberCannotRestoreStaleSend(t *testing.T) {
@@ -670,16 +684,7 @@ func TestSendMessage_RejoinedMemberCannotRestoreStaleSend(t *testing.T) {
 		sendResult <- w.Code
 	}()
 
-	require.Eventually(t, func() bool {
-		var waiting bool
-		queryErr := ts.DB.QueryRow(`SELECT EXISTS (
-			SELECT 1 FROM pg_stat_activity
-			WHERE datname = current_database()
-			  AND wait_event_type = 'Lock'
-			  AND query LIKE '%SELECT credential_epoch FROM users WHERE id = $1 FOR SHARE%'
-		)`).Scan(&waiting)
-		return queryErr == nil && waiting
-	}, time.Second, 10*time.Millisecond, "send should finish preflight before the membership changes")
+	requireSendWaitsForCredentialGuard(t, ts, "the membership changes")
 
 	_, err = ts.DB.Exec(`DELETE FROM server_members WHERE server_id = $1 AND user_id = $2`, serverID, victim.ID)
 	require.NoError(t, err)
@@ -726,16 +731,7 @@ func TestSendMessage_TimedOutDuringPreflightCannotPersist(t *testing.T) {
 		sendResult <- w.Code
 	}()
 
-	require.Eventually(t, func() bool {
-		var waiting bool
-		queryErr := ts.DB.QueryRow(`SELECT EXISTS (
-			SELECT 1 FROM pg_stat_activity
-			WHERE datname = current_database()
-			  AND wait_event_type = 'Lock'
-			  AND query LIKE '%SELECT credential_epoch FROM users WHERE id = $1 FOR SHARE%'
-		)`).Scan(&waiting)
-		return queryErr == nil && waiting
-	}, time.Second, 10*time.Millisecond, "send should finish preflight before the timeout")
+	requireSendWaitsForCredentialGuard(t, ts, "the timeout")
 
 	_, err = ts.DB.Exec(
 		`UPDATE server_members SET timed_out_until = NOW() + INTERVAL '1 hour' WHERE server_id = $1 AND user_id = $2`,
@@ -776,6 +772,7 @@ func TestSendMessage_RejoinedMemberCannotUseStalePermissionCache(t *testing.T) {
 	}, testhelpers.AuthHeaders(member.AccessToken))
 
 	assert.Equal(t, http.StatusForbidden, w.Code)
+	assert.JSONEq(t, `{"error":"Insufficient permissions"}`, w.Body.String())
 	assert.Zero(t, countChannelMessages(t, ts, channelID))
 }
 

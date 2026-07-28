@@ -1142,7 +1142,7 @@ func (h *Hub) handlePresenceIncoming(msg IncomingMessage) {
 // to enforce channel-scoped WebSocket authorization without importing rbac.
 type ChannelPermissionChecker interface {
 	HasChannelPermission(ctx context.Context, serverID, userID, channelID string, permBit int64) (bool, error)
-	HasChannelPermissionUncached(ctx context.Context, serverID, userID, channelID string, permBit int64) (bool, error)
+	HasChannelPermissionsUncached(ctx context.Context, serverID, userID, channelID string, permBits ...int64) (bool, error)
 }
 
 const (
@@ -1159,10 +1159,16 @@ func (h *Hub) rejectActiveMemberTimeout(msg IncomingMessage, serverID, userID uu
 
 	var timedOutUntil sql.NullTime
 	var membershipIncarnation time.Time
-	err := h.db.QueryRow(
+	ctx, cancel := context.WithTimeout(context.Background(), channelAuthCtxTimeout)
+	defer cancel()
+	err := h.db.QueryRowContext(ctx,
 		"SELECT timed_out_until, joined_at FROM server_members WHERE server_id = $1 AND user_id = $2",
 		serverID, userID,
 	).Scan(&timedOutUntil, &membershipIncarnation)
+	if errors.Is(err, sql.ErrNoRows) {
+		h.sendError(msg.ClientID, "Not a member of this server")
+		return true, time.Time{}
+	}
 	if err != nil {
 		log.Printf("Failed to check member timeout: %v", err)
 		h.sendError(msg.ClientID, "Failed to verify timeout status")
@@ -1185,21 +1191,18 @@ func (h *Hub) authorizeMessageSend(msg IncomingMessage, userID uuid.UUID, chCtx 
 	if rejected {
 		return false, time.Time{}
 	}
-	if !h.authorizeChannelPermission(msg, userID, chCtx, channelUUID, viewPerm, denied, true) {
-		return false, time.Time{}
-	}
-	if !h.authorizeChannelPermission(msg, userID, chCtx, channelUUID, permSendMessages, denied, true) {
+	if !h.authorizeChannelPermissions(msg, userID, chCtx, channelUUID, []int64{viewPerm, permSendMessages}, denied, true) {
 		return false, time.Time{}
 	}
 	return true, membershipIncarnation
 }
 
-func (h *Hub) authorizeChannelPermission(
+func (h *Hub) authorizeChannelPermissions(
 	msg IncomingMessage,
 	userID uuid.UUID,
 	chCtx *channelContext,
 	channelUUID uuid.UUID,
-	perm int64,
+	permBits []int64,
 	deniedMessage string,
 	uncached bool,
 ) bool {
@@ -1212,11 +1215,17 @@ func (h *Hub) authorizeChannelPermission(
 	ctx, cancel := context.WithTimeout(context.Background(), channelAuthCtxTimeout)
 	defer cancel()
 
-	check := h.channelPermissionChecker.HasChannelPermission
+	var hasPerm bool
+	var err error
 	if uncached {
-		check = h.channelPermissionChecker.HasChannelPermissionUncached
+		hasPerm, err = h.channelPermissionChecker.HasChannelPermissionsUncached(
+			ctx, chCtx.serverUUID.String(), userID.String(), channelUUID.String(), permBits...,
+		)
+	} else {
+		hasPerm, err = h.channelPermissionChecker.HasChannelPermission(
+			ctx, chCtx.serverUUID.String(), userID.String(), channelUUID.String(), permBits[0],
+		)
 	}
-	hasPerm, err := check(ctx, chCtx.serverUUID.String(), userID.String(), channelUUID.String(), perm)
 	if err != nil {
 		log.Printf("Failed to check channel permission: %v", err)
 		h.sendError(msg.ClientID, "Failed to verify channel access")
@@ -1494,7 +1503,7 @@ func (h *Hub) handleSubscribe(msg IncomingMessage) {
 		h.sendError(msg.ClientID, "Not authorized to subscribe to this channel")
 		return
 	}
-	if !h.authorizeChannelPermission(msg, client.UserID, chCtx, channelUUID, viewPerm, "Not authorized to subscribe to this channel", false) {
+	if !h.authorizeChannelPermissions(msg, client.UserID, chCtx, channelUUID, []int64{viewPerm}, "Not authorized to subscribe to this channel", false) {
 		return
 	}
 
@@ -2214,7 +2223,7 @@ type persistMessageParams struct {
 func lockMessageMembership(ctx context.Context, tx *sql.Tx, p persistMessageParams) (bool, error) {
 	var timedOut bool
 	err := tx.QueryRowContext(ctx,
-		`SELECT sm.timed_out_until IS NOT NULL AND sm.timed_out_until > NOW()
+		`SELECT sm.timed_out_until IS NOT NULL AND sm.timed_out_until > clock_timestamp()
 		 FROM channels ch
 		 INNER JOIN server_members sm ON sm.server_id = ch.server_id
 		 WHERE ch.id = $1 AND sm.user_id = $2 AND sm.joined_at = $3

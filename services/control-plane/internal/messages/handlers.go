@@ -566,7 +566,7 @@ func (h *Handler) lockMessageMembership(ctx context.Context, c *gin.Context, tx 
 	var timedOutUntil sql.NullTime
 	var timedOut bool
 	if err := tx.QueryRowContext(ctx,
-		`SELECT timed_out_until, timed_out_until IS NOT NULL AND timed_out_until > NOW()
+		`SELECT timed_out_until, timed_out_until IS NOT NULL AND timed_out_until > clock_timestamp()
 		 FROM server_members WHERE server_id = $1 AND user_id = $2 AND joined_at = $3 FOR SHARE`,
 		serverID, userID, membershipIncarnation,
 	).Scan(&timedOutUntil, &timedOut); err != nil {

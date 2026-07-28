@@ -120,6 +120,10 @@ func TestPersistMessage_MemberUpdateKeepsIncarnation(t *testing.T) {
 		content: "Y2lwaGVydGV4dA==", keyVersion: 1,
 	})
 	assert.Empty(t, errMsg)
+
+	var count int
+	require.NoError(t, setup.db.QueryRow(`SELECT count(*) FROM messages WHERE channel_id = $1`, channelID).Scan(&count))
+	assert.Equal(t, 1, count, "an in-place membership update must not reject the message")
 }
 
 func TestHandleMessage_RejoinedMemberDuringPermissionCheckRejected(t *testing.T) {

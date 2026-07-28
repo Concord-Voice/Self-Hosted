@@ -101,7 +101,7 @@ func (a *permissionCheckerAdapter) HasChannelPermission(ctx context.Context, ser
 	return a.resolver.HasPermission(ctx, serverID, userID, channelID, rbac.Permission(permBit))
 }
 
-func (a *permissionCheckerAdapter) HasChannelPermissionUncached(ctx context.Context, serverID, userID, channelID string, permBit int64) (bool, error) {
+func (a *permissionCheckerAdapter) HasChannelPermissionsUncached(ctx context.Context, serverID, userID, channelID string, permBits ...int64) (bool, error) {
 	permissions, err := a.resolver.ResolveEffectivePermissionsUncached(ctx, serverID, userID, channelID)
 	if errors.Is(err, rbac.ErrNotMember) {
 		return false, nil
@@ -109,7 +109,12 @@ func (a *permissionCheckerAdapter) HasChannelPermissionUncached(ctx context.Cont
 	if err != nil {
 		return false, err
 	}
-	return permissions.Has(rbac.Permission(permBit)), nil
+	for _, permBit := range permBits {
+		if !permissions.Has(rbac.Permission(permBit)) {
+			return false, nil
+		}
+	}
+	return true, nil
 }
 
 // configureTrustedProxies applies the CIDR allowlist (validated + defaulted at
