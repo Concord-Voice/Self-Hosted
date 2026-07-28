@@ -612,7 +612,7 @@ func TestSendMessage_RacingMembershipRemovalCannotOutrunPurge(t *testing.T) {
 			SELECT 1 FROM pg_stat_activity
 			WHERE datname = current_database()
 			  AND wait_event_type = 'Lock'
-			  AND query LIKE '%SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 AND joined_at = $3 FOR SHARE%'
+			  AND query LIKE '%timed_out_until%FOR SHARE%'
 		)`).Scan(&waiting)
 		return queryErr == nil && waiting
 	}, time.Second, 10*time.Millisecond, "send should wait on the membership lock")
