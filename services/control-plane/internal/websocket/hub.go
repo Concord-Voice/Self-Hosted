@@ -1142,6 +1142,7 @@ func (h *Hub) handlePresenceIncoming(msg IncomingMessage) {
 // to enforce channel-scoped WebSocket authorization without importing rbac.
 type ChannelPermissionChecker interface {
 	HasChannelPermission(ctx context.Context, serverID, userID, channelID string, permBit int64) (bool, error)
+	HasChannelPermissionUncached(ctx context.Context, serverID, userID, channelID string, permBit int64) (bool, error)
 }
 
 const (
@@ -1184,10 +1185,10 @@ func (h *Hub) authorizeMessageSend(msg IncomingMessage, userID uuid.UUID, chCtx 
 	if rejected {
 		return false, time.Time{}
 	}
-	if !h.authorizeChannelPermission(msg, userID, chCtx, channelUUID, viewPerm, denied) {
+	if !h.authorizeChannelPermission(msg, userID, chCtx, channelUUID, viewPerm, denied, true) {
 		return false, time.Time{}
 	}
-	if !h.authorizeChannelPermission(msg, userID, chCtx, channelUUID, permSendMessages, denied) {
+	if !h.authorizeChannelPermission(msg, userID, chCtx, channelUUID, permSendMessages, denied, true) {
 		return false, time.Time{}
 	}
 	return true, membershipIncarnation
@@ -1200,6 +1201,7 @@ func (h *Hub) authorizeChannelPermission(
 	channelUUID uuid.UUID,
 	perm int64,
 	deniedMessage string,
+	uncached bool,
 ) bool {
 	if h.channelPermissionChecker == nil {
 		log.Printf("Channel permission checker not configured")
@@ -1210,13 +1212,11 @@ func (h *Hub) authorizeChannelPermission(
 	ctx, cancel := context.WithTimeout(context.Background(), channelAuthCtxTimeout)
 	defer cancel()
 
-	hasPerm, err := h.channelPermissionChecker.HasChannelPermission(
-		ctx,
-		chCtx.serverUUID.String(),
-		userID.String(),
-		channelUUID.String(),
-		perm,
-	)
+	check := h.channelPermissionChecker.HasChannelPermission
+	if uncached {
+		check = h.channelPermissionChecker.HasChannelPermissionUncached
+	}
+	hasPerm, err := check(ctx, chCtx.serverUUID.String(), userID.String(), channelUUID.String(), perm)
 	if err != nil {
 		log.Printf("Failed to check channel permission: %v", err)
 		h.sendError(msg.ClientID, "Failed to verify channel access")
@@ -1494,7 +1494,7 @@ func (h *Hub) handleSubscribe(msg IncomingMessage) {
 		h.sendError(msg.ClientID, "Not authorized to subscribe to this channel")
 		return
 	}
-	if !h.authorizeChannelPermission(msg, client.UserID, chCtx, channelUUID, viewPerm, "Not authorized to subscribe to this channel") {
+	if !h.authorizeChannelPermission(msg, client.UserID, chCtx, channelUUID, viewPerm, "Not authorized to subscribe to this channel", false) {
 		return
 	}
 
@@ -2211,6 +2211,19 @@ type persistMessageParams struct {
 	gifSlug               *string
 }
 
+func lockMessageMembership(ctx context.Context, tx *sql.Tx, p persistMessageParams) (bool, error) {
+	var timedOut bool
+	err := tx.QueryRowContext(ctx,
+		`SELECT sm.timed_out_until IS NOT NULL AND sm.timed_out_until > NOW()
+		 FROM channels ch
+		 INNER JOIN server_members sm ON sm.server_id = ch.server_id
+		 WHERE ch.id = $1 AND sm.user_id = $2 AND sm.joined_at = $3
+		 FOR SHARE OF sm`,
+		p.channelUUID, p.userID, p.membershipIncarnation,
+	).Scan(&timedOut)
+	return timedOut, err
+}
+
 func (h *Hub) persistMessage(p persistMessageParams) (uuid.UUID, time.Time, time.Time, string) {
 	messageID := uuid.New()
 	var createdAt, updatedAt time.Time
@@ -2245,15 +2258,7 @@ func (h *Hub) persistMessage(p persistMessageParams) (uuid.UUID, time.Time, time
 	// joined_at value rejects a same-key rejoin after a kick/ban finishes purging,
 	// while the fresh timeout read prevents a moderation update during RBAC checks
 	// from admitting the frame.
-	var timedOut bool
-	err = tx.QueryRowContext(ctx,
-		`SELECT sm.timed_out_until IS NOT NULL AND sm.timed_out_until > NOW()
-		 FROM channels ch
-		 INNER JOIN server_members sm ON sm.server_id = ch.server_id
-		 WHERE ch.id = $1 AND sm.user_id = $2 AND sm.joined_at = $3
-		 FOR SHARE OF sm`,
-		p.channelUUID, p.userID, p.membershipIncarnation,
-	).Scan(&timedOut)
+	timedOut, err := lockMessageMembership(ctx, tx, p)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return messageID, createdAt, updatedAt, "Not a member of this server"

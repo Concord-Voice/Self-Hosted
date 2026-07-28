@@ -4,6 +4,7 @@ package api // revive:disable-line:var-naming
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -98,6 +99,17 @@ func (a *permissionCheckerAdapter) HasMentionPermission(ctx context.Context, ser
 
 func (a *permissionCheckerAdapter) HasChannelPermission(ctx context.Context, serverID, userID, channelID string, permBit int64) (bool, error) {
 	return a.resolver.HasPermission(ctx, serverID, userID, channelID, rbac.Permission(permBit))
+}
+
+func (a *permissionCheckerAdapter) HasChannelPermissionUncached(ctx context.Context, serverID, userID, channelID string, permBit int64) (bool, error) {
+	permissions, err := a.resolver.ResolveEffectivePermissionsUncached(ctx, serverID, userID, channelID)
+	if errors.Is(err, rbac.ErrNotMember) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return permissions.Has(rbac.Permission(permBit)), nil
 }
 
 // configureTrustedProxies applies the CIDR allowlist (validated + defaulted at

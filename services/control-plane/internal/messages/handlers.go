@@ -483,13 +483,17 @@ func (h *Handler) checkSendAccess(c *gin.Context, channelID, userID string) (str
 		return "", time.Time{}, false, false
 	}
 
-	hasPerm, permErr := h.resolver.HasPermission(c.Request.Context(), serverID, userID, channelID, rbac.PermSendMessages)
+	effectivePerms, permErr := h.resolver.ResolveEffectivePermissionsUncached(c.Request.Context(), serverID, userID, channelID)
+	if errors.Is(permErr, rbac.ErrNotMember) {
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotMember})
+		return "", time.Time{}, false, false
+	}
 	if permErr != nil {
 		h.log.Error(errMsgFailedCheckPerms, "error", permErr)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendMessage})
 		return "", time.Time{}, false, false
 	}
-	if !hasPerm {
+	if !effectivePerms.Has(rbac.PermSendMessages) {
 		c.JSON(http.StatusForbidden, gin.H{"error": errMsgInsufficientPerms})
 		return "", time.Time{}, false, false
 	}
@@ -559,17 +563,27 @@ func (h *Handler) enforceE2EE(c *gin.Context, channelID string, content string, 
 // lockMessageMembership serializes a message write with member removal and
 // writes the matching HTTP failure response when the lock cannot be acquired.
 func (h *Handler) lockMessageMembership(ctx context.Context, c *gin.Context, tx *sql.Tx, serverID, userID string, membershipIncarnation time.Time) bool {
-	var membership int
+	var timedOutUntil sql.NullTime
+	var timedOut bool
 	if err := tx.QueryRowContext(ctx,
-		`SELECT 1 FROM server_members WHERE server_id = $1 AND user_id = $2 AND joined_at = $3 FOR SHARE`,
+		`SELECT timed_out_until, timed_out_until IS NOT NULL AND timed_out_until > NOW()
+		 FROM server_members WHERE server_id = $1 AND user_id = $2 AND joined_at = $3 FOR SHARE`,
 		serverID, userID, membershipIncarnation,
-	).Scan(&membership); err != nil {
+	).Scan(&timedOutUntil, &timedOut); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotMember})
 			return false
 		}
 		h.log.Error("Failed to lock message membership", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedSendMessage})
+		return false
+	}
+	if timedOut {
+		c.JSON(http.StatusForbidden, gin.H{
+			"error":           "Member is timed out",
+			"code":            "member_timed_out",
+			"timed_out_until": timedOutUntil.Time,
+		})
 		return false
 	}
 	return true

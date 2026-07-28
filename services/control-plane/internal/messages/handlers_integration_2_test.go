@@ -1,7 +1,9 @@
 package messages_test
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -649,7 +651,11 @@ func TestSendMessage_RejoinedMemberCannotRestoreStaleSend(t *testing.T) {
 
 	userLockTx, err := ts.DB.Begin()
 	require.NoError(t, err)
-	defer func() { _ = userLockTx.Rollback() }()
+	defer func() {
+		if rollbackErr := userLockTx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			t.Errorf("rollback user lock transaction: %v", rollbackErr)
+		}
+	}()
 	var epoch sql.NullString
 	require.NoError(t, userLockTx.QueryRow(
 		`SELECT credential_epoch FROM users WHERE id = $1 FOR NO KEY UPDATE`, victim.ID,
@@ -686,6 +692,90 @@ func TestSendMessage_RejoinedMemberCannotRestoreStaleSend(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("stale send did not resume after rejoin")
 	}
+	assert.Zero(t, countChannelMessages(t, ts, channelID))
+}
+
+// regression for #2507: a moderation timeout committed after send preflight
+// must be observed while the write transaction locks the membership row.
+func TestSendMessage_TimedOutDuringPreflightCannotPersist(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "sendtimeoutpreflight_owner")
+	member := ts.CreateTestUser(t, "sendtimeoutpreflight_member")
+	serverID := ts.CreateTestServer(t, owner.ID, "Send Timeout Preflight Server")
+	channelID := ts.CreateTestChannel(t, serverID, "general")
+	ts.AddMemberToServer(t, serverID, member.ID, "member")
+
+	userLockTx, err := ts.DB.Begin()
+	require.NoError(t, err)
+	defer func() {
+		if rollbackErr := userLockTx.Rollback(); rollbackErr != nil && !errors.Is(rollbackErr, sql.ErrTxDone) {
+			t.Errorf("rollback user lock transaction: %v", rollbackErr)
+		}
+	}()
+	var epoch sql.NullString
+	require.NoError(t, userLockTx.QueryRow(
+		`SELECT credential_epoch FROM users WHERE id = $1 FOR NO KEY UPDATE`, member.ID,
+	).Scan(&epoch))
+
+	sendResult := make(chan int, 1)
+	go func() {
+		w := ts.DoRequest(http.MethodPost, pathAPIMessages, map[string]any{
+			"channel_id": channelID,
+			"content":    testhelpers.ValidCiphertext(),
+		}, testhelpers.AuthHeaders(member.AccessToken))
+		sendResult <- w.Code
+	}()
+
+	require.Eventually(t, func() bool {
+		var waiting bool
+		queryErr := ts.DB.QueryRow(`SELECT EXISTS (
+			SELECT 1 FROM pg_stat_activity
+			WHERE datname = current_database()
+			  AND wait_event_type = 'Lock'
+			  AND query LIKE '%SELECT credential_epoch FROM users WHERE id = $1 FOR SHARE%'
+		)`).Scan(&waiting)
+		return queryErr == nil && waiting
+	}, time.Second, 10*time.Millisecond, "send should finish preflight before the timeout")
+
+	_, err = ts.DB.Exec(
+		`UPDATE server_members SET timed_out_until = NOW() + INTERVAL '1 hour' WHERE server_id = $1 AND user_id = $2`,
+		serverID, member.ID,
+	)
+	require.NoError(t, err)
+	require.NoError(t, userLockTx.Commit())
+
+	select {
+	case status := <-sendResult:
+		assert.Equal(t, http.StatusForbidden, status)
+	case <-time.After(time.Second):
+		t.Fatal("timed-out send did not resume")
+	}
+	assert.Zero(t, countChannelMessages(t, ts, channelID))
+}
+
+// regression for #2507: a new membership must not reuse permissions cached
+// for the preceding membership incarnation.
+func TestSendMessage_RejoinedMemberCannotUseStalePermissionCache(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "sendcache_owner")
+	member := ts.CreateTestUser(t, "sendcache_member")
+	serverID := ts.CreateTestServer(t, owner.ID, "Send Cache Rejoin Server")
+	channelID := ts.CreateTestChannel(t, serverID, "general")
+	ts.AddMemberToServer(t, serverID, member.ID, "member")
+
+	cache := rbac.NewPermissionCache(ts.Redis)
+	require.NoError(t, cache.Set(context.Background(), serverID, member.ID, channelID, rbac.PermSendMessages))
+	_, err := ts.DB.Exec(`DELETE FROM server_members WHERE server_id = $1 AND user_id = $2`, serverID, member.ID)
+	require.NoError(t, err)
+	ts.AddMemberToServer(t, serverID, member.ID, "member")
+	ts.CreateChannelOverride(t, channelID, "user", member.ID, 0, int64(rbac.PermSendMessages))
+
+	w := ts.DoRequest(http.MethodPost, pathAPIMessages, map[string]any{
+		"channel_id": channelID,
+		"content":    testhelpers.ValidCiphertext(),
+	}, testhelpers.AuthHeaders(member.AccessToken))
+
+	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.Zero(t, countChannelMessages(t, ts, channelID))
 }
 

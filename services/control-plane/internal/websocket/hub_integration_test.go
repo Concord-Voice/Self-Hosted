@@ -297,6 +297,14 @@ func (c *testChannelPermissionChecker) HasChannelPermission(
 	return finalPerms&permBit != 0, nil
 }
 
+func (c *testChannelPermissionChecker) HasChannelPermissionUncached(
+	ctx context.Context,
+	serverID, userID, channelID string,
+	permBit int64,
+) (bool, error) {
+	return c.HasChannelPermission(ctx, serverID, userID, channelID, permBit)
+}
+
 func TestHandleMessagePlaintextSuccess(t *testing.T) {
 	setup := setupMessageTest(t)
 	channelID := setup.convID
@@ -321,6 +329,25 @@ func TestHandleMessagePlaintextSuccess(t *testing.T) {
 	data := resp["data"].(map[string]interface{})
 	assert.Equal(t, "nonce-123", data[keyNonce])
 	assert.NotEmpty(t, data["id"])
+}
+
+func TestHandleMessageUsesFreshChannelPermissions(t *testing.T) {
+	setup := setupMessageTest(t)
+	setup.hub.SetChannelPermissionChecker(staleChannelPermissionChecker{})
+
+	setup.hub.handleMessage(IncomingMessage{
+		Type:     "message",
+		UserID:   setup.user1,
+		ClientID: setup.client.ID,
+		Data: map[string]interface{}{
+			keyChannelID:  setup.convID,
+			keyContent:    "must use fresh permissions",
+			keyKeyVersion: float64(1),
+		},
+	})
+
+	response := readClientMsg(t, setup.client)
+	assert.Equal(t, "error", response["type"])
 }
 
 func TestHandleMessageNotSubscribed(t *testing.T) {
