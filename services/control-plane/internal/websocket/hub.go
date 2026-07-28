@@ -2224,6 +2224,18 @@ func lockMessageMembership(ctx context.Context, tx *sql.Tx, p persistMessagePara
 	return timedOut, err
 }
 
+func messageCredentialGuardError(ctx context.Context, tx *sql.Tx, p persistMessageParams) string {
+	guardErr := credepoch.GuardTx(ctx, tx, p.userID.String(), p.credEpoch)
+	if guardErr == nil {
+		return ""
+	}
+	if errors.Is(guardErr, credepoch.ErrEpochMismatch) || errors.Is(guardErr, credepoch.ErrBlocked) {
+		return "Authentication required"
+	}
+	log.Printf("Message epoch guard read failed: %v", guardErr)
+	return errMsgFailedSaveMessage
+}
+
 func (h *Hub) persistMessage(p persistMessageParams) (uuid.UUID, time.Time, time.Time, string) {
 	messageID := uuid.New()
 	var createdAt, updatedAt time.Time
@@ -2243,16 +2255,8 @@ func (h *Hub) persistMessage(p persistMessageParams) (uuid.UUID, time.Time, time
 	// reset's DisconnectUser lands must not commit ciphertext under the
 	// superseded epoch. GuardTx (users-row FOR SHARE) rechecks the sender's
 	// connect-time epoch against the current DB epoch inside the write tx.
-	if guardErr := credepoch.GuardTx(ctx, tx, p.userID.String(), p.credEpoch); guardErr != nil {
-		// A proven epoch mismatch/blocked rejects (client must re-auth); a
-		// transient users-row read/lock failure is not a proven mismatch — log it
-		// and return the retryable save error, not the auth-shaped one (#2201
-		// Codex review, mirroring respondGuardTxError on the HTTP paths).
-		if errors.Is(guardErr, credepoch.ErrEpochMismatch) || errors.Is(guardErr, credepoch.ErrBlocked) {
-			return messageID, createdAt, updatedAt, "Authentication required"
-		}
-		log.Printf("Message epoch guard read failed: %v", guardErr)
-		return messageID, createdAt, updatedAt, errMsgFailedSaveMessage
+	if guardError := messageCredentialGuardError(ctx, tx, p); guardError != "" {
+		return messageID, createdAt, updatedAt, guardError
 	}
 	// Lock the preflight membership row inside the write transaction. Its immutable
 	// joined_at value rejects a same-key rejoin after a kick/ban finishes purging,
