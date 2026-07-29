@@ -1191,6 +1191,18 @@ func (h *Hub) sendMemberTimedOut(clientID uuid.UUID, timedOutUntil time.Time) {
 	})
 }
 
+func (h *Hub) respondPersistMessageError(msg IncomingMessage, persistErr string, timedOutUntil *time.Time) bool {
+	if timedOutUntil != nil {
+		h.sendMemberTimedOut(msg.ClientID, *timedOutUntil)
+		return true
+	}
+	if persistErr == "" {
+		return false
+	}
+	h.sendError(msg.ClientID, persistErr)
+	return true
+}
+
 func (h *Hub) authorizeMessageSend(msg IncomingMessage, userID uuid.UUID, chCtx *channelContext, channelUUID uuid.UUID, viewPerm int64) (bool, time.Time) {
 	denied := "Not authorized to send messages in this channel"
 	rejected, membershipIncarnation := h.rejectActiveMemberTimeout(msg, chCtx.serverUUID, userID)
@@ -2489,12 +2501,7 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		keyVersion:       input.keyVersion,
 		embedsSuppressed: embedsSuppressed, replyToID: replyToID, gifSlug: input.gifSlug,
 	})
-	if timedOutUntil != nil {
-		h.sendMemberTimedOut(msg.ClientID, *timedOutUntil)
-		return
-	}
-	if persistErr != "" {
-		h.sendError(msg.ClientID, persistErr)
+	if h.respondPersistMessageError(msg, persistErr, timedOutUntil) {
 		return
 	}
 	if h.opsCounter != nil {

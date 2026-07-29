@@ -1498,6 +1498,37 @@ func TestSendErrorClientNotFound(_ *testing.T) {
 	hub.sendError(uuid.New(), "test error")
 }
 
+func TestRespondPersistMessageError(t *testing.T) {
+	t.Run("timeout keeps structured response", func(t *testing.T) {
+		hub := newMinimalHub()
+		client := newTestClient(hub, uuid.New())
+		hub.clients[client.ID] = client
+		deadline := time.Now().UTC().Add(time.Hour)
+
+		assert.True(t, hub.respondPersistMessageError(IncomingMessage{ClientID: client.ID}, "", &deadline))
+		response := readClientMsg(t, client)
+		data := response["data"].(map[string]interface{})
+		assert.Equal(t, "member_timed_out", data["code"])
+		assert.Equal(t, errMsgMemberTimedOut, data[keyMessage])
+		assert.NotEmpty(t, data["timed_out_until"])
+	})
+
+	t.Run("generic error remains generic", func(t *testing.T) {
+		hub := newMinimalHub()
+		client := newTestClient(hub, uuid.New())
+		hub.clients[client.ID] = client
+
+		assert.True(t, hub.respondPersistMessageError(IncomingMessage{ClientID: client.ID}, errMsgFailedSaveMessage, nil))
+		response := readClientMsg(t, client)
+		data := response["data"].(map[string]interface{})
+		assert.Equal(t, errMsgFailedSaveMessage, data[keyMessage])
+	})
+
+	t.Run("empty result continues", func(t *testing.T) {
+		assert.False(t, newMinimalHub().respondPersistMessageError(IncomingMessage{}, "", nil))
+	})
+}
+
 // --- sendErrorWithData tests ---
 
 func TestSendErrorWithDataIncludesExtraFields(t *testing.T) {
