@@ -309,6 +309,27 @@ func TestResolveEffectivePermissionsUncachedDoesNotRefillCache(t *testing.T) {
 	assert.False(t, cached, "uncached resolution must not restore a permission invalidation")
 }
 
+func TestResolveEffectivePermissionsUncachedServerScopeDoesNotRefillCache(t *testing.T) {
+	resolver, ts := setupResolver(t)
+	ctx := context.Background()
+
+	owner := ts.CreateTestUser(t, "uncachedserverowner")
+	member := ts.CreateTestUser(t, "uncachedservermember")
+	serverID := ts.CreateTestServer(t, owner.ID, "Uncached Server Permissions")
+	ts.AddMemberToServer(t, serverID, member.ID, "member")
+
+	cache := rbac.NewPermissionCache(ts.Redis)
+	require.NoError(t, cache.Set(ctx, serverID, member.ID, "", rbac.PermBan))
+
+	perms, err := resolver.ResolveEffectivePermissionsUncached(ctx, serverID, member.ID, "")
+	require.NoError(t, err)
+	assert.True(t, perms.Has(rbac.PermViewTextChannels))
+
+	cachedPerms, cached := cache.Get(ctx, serverID, member.ID, "")
+	assert.True(t, cached)
+	assert.Equal(t, rbac.PermBan, cachedPerms, "uncached server resolution must not read or overwrite the cache")
+}
+
 func TestResolveEffectivePermissionsUncachedUsesSingleSnapshot(t *testing.T) {
 	resolver, ts := setupResolver(t)
 	ctx := context.Background()
