@@ -1151,6 +1151,7 @@ const (
 	permSendMessages        int64 = 1 << 11
 	channelAuthCtxTimeout         = 3 * time.Second
 	errMsgNotMemberOfServer       = "Not a member of this server"
+	errMsgMemberTimedOut          = "Member is timed out"
 )
 
 func (h *Hub) rejectActiveMemberTimeout(msg IncomingMessage, serverID, userID uuid.UUID) (bool, time.Time) {
@@ -1179,11 +1180,15 @@ func (h *Hub) rejectActiveMemberTimeout(msg IncomingMessage, serverID, userID uu
 		return false, membershipIncarnation
 	}
 
-	h.sendErrorWithData(msg.ClientID, "member_timed_out", map[string]interface{}{
-		keyMessage:        "Member is timed out",
-		"timed_out_until": timedOutUntil.Time,
-	})
+	h.sendMemberTimedOut(msg.ClientID, timedOutUntil.Time)
 	return true, time.Time{}
+}
+
+func (h *Hub) sendMemberTimedOut(clientID uuid.UUID, timedOutUntil time.Time) {
+	h.sendErrorWithData(clientID, "member_timed_out", map[string]interface{}{
+		keyMessage:        errMsgMemberTimedOut,
+		"timed_out_until": timedOutUntil,
+	})
 }
 
 func (h *Hub) authorizeMessageSend(msg IncomingMessage, userID uuid.UUID, chCtx *channelContext, channelUUID uuid.UUID, viewPerm int64) (bool, time.Time) {
@@ -2207,7 +2212,6 @@ func (h *Hub) verifyAttachmentAccess(fileID, uploaderID string, ctx attachmentLi
 }
 
 // persistMessage inserts a message into the database, returning the generated ID and timestamps.
-// Returns a specific error message string if the insert fails (empty string on success).
 // persistMessageParams holds the fields needed to insert a channel message.
 type persistMessageParams struct {
 	channelUUID           uuid.UUID
@@ -2221,17 +2225,22 @@ type persistMessageParams struct {
 	gifSlug               *string
 }
 
-func lockMessageMembership(ctx context.Context, tx *sql.Tx, p persistMessageParams) (bool, error) {
+func lockMessageMembership(ctx context.Context, tx *sql.Tx, p persistMessageParams) (*time.Time, error) {
+	var timedOutUntil sql.NullTime
 	var timedOut bool
 	err := tx.QueryRowContext(ctx,
-		`SELECT sm.timed_out_until IS NOT NULL AND sm.timed_out_until > clock_timestamp()
+		`SELECT sm.timed_out_until,
+		        sm.timed_out_until IS NOT NULL AND sm.timed_out_until > clock_timestamp()
 		 FROM channels ch
 		 INNER JOIN server_members sm ON sm.server_id = ch.server_id
 		 WHERE ch.id = $1 AND sm.user_id = $2 AND sm.joined_at = $3
 		 FOR SHARE OF sm`,
 		p.channelUUID, p.userID, p.membershipIncarnation,
-	).Scan(&timedOut)
-	return timedOut, err
+	).Scan(&timedOutUntil, &timedOut)
+	if err != nil || !timedOut {
+		return nil, err
+	}
+	return &timedOutUntil.Time, nil
 }
 
 func messageCredentialGuardError(ctx context.Context, tx *sql.Tx, p persistMessageParams) string {
@@ -2246,7 +2255,9 @@ func messageCredentialGuardError(ctx context.Context, tx *sql.Tx, p persistMessa
 	return errMsgFailedSaveMessage
 }
 
-func (h *Hub) persistMessage(p persistMessageParams) (uuid.UUID, time.Time, time.Time, string) {
+// persistMessage returns a specific error message on failure and, for a timeout
+// rechecked under the membership lock, its locked deadline.
+func (h *Hub) persistMessage(p persistMessageParams) (uuid.UUID, time.Time, time.Time, string, *time.Time) {
 	messageID := uuid.New()
 	var createdAt, updatedAt time.Time
 	ctx, cancel := context.WithTimeout(context.Background(), channelAuthCtxTimeout)
@@ -2254,7 +2265,7 @@ func (h *Hub) persistMessage(p persistMessageParams) (uuid.UUID, time.Time, time
 	tx, err := h.db.BeginTx(ctx, nil)
 	if err != nil {
 		log.Printf("Failed to begin message tx: %v", err)
-		return messageID, createdAt, updatedAt, errMsgFailedSaveMessage
+		return messageID, createdAt, updatedAt, errMsgFailedSaveMessage, nil
 	}
 	defer func() {
 		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
@@ -2266,22 +2277,22 @@ func (h *Hub) persistMessage(p persistMessageParams) (uuid.UUID, time.Time, time
 	// superseded epoch. GuardTx (users-row FOR SHARE) rechecks the sender's
 	// connect-time epoch against the current DB epoch inside the write tx.
 	if guardError := messageCredentialGuardError(ctx, tx, p); guardError != "" {
-		return messageID, createdAt, updatedAt, guardError
+		return messageID, createdAt, updatedAt, guardError, nil
 	}
 	// Lock the preflight membership row inside the write transaction. Its immutable
 	// joined_at value rejects a same-key rejoin after a kick/ban finishes purging,
 	// while the fresh timeout read prevents a moderation update during RBAC checks
 	// from admitting the frame.
-	timedOut, err := lockMessageMembership(ctx, tx, p)
+	timedOutUntil, err := lockMessageMembership(ctx, tx, p)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return messageID, createdAt, updatedAt, errMsgNotMemberOfServer
+			return messageID, createdAt, updatedAt, errMsgNotMemberOfServer, nil
 		}
 		log.Printf("Failed to lock message membership: %v", err)
-		return messageID, createdAt, updatedAt, errMsgFailedSaveMessage
+		return messageID, createdAt, updatedAt, errMsgFailedSaveMessage, nil
 	}
-	if timedOut {
-		return messageID, createdAt, updatedAt, "Member is timed out"
+	if timedOutUntil != nil {
+		return messageID, createdAt, updatedAt, errMsgMemberTimedOut, timedOutUntil
 	}
 	err = tx.QueryRowContext(ctx,
 		`INSERT INTO messages (id, channel_id, user_id, content, key_version, embeds_suppressed, reply_to_id, gif_slug, created_at, updated_at)
@@ -2290,17 +2301,17 @@ func (h *Hub) persistMessage(p persistMessageParams) (uuid.UUID, time.Time, time
 		messageID, p.channelUUID, p.userID, p.content, p.keyVersion, p.embedsSuppressed, p.replyToID, p.gifSlug,
 	).Scan(&createdAt, &updatedAt)
 	if err != nil && isFKViolation(err) {
-		return messageID, createdAt, updatedAt, "Reply target message not found"
+		return messageID, createdAt, updatedAt, "Reply target message not found", nil
 	}
 	if err != nil {
 		log.Printf("Failed to persist message: %v", err)
-		return messageID, createdAt, updatedAt, errMsgFailedSaveMessage
+		return messageID, createdAt, updatedAt, errMsgFailedSaveMessage, nil
 	}
 	if err := tx.Commit(); err != nil {
 		log.Printf("Failed to commit message: %v", err)
-		return messageID, createdAt, updatedAt, errMsgFailedSaveMessage
+		return messageID, createdAt, updatedAt, errMsgFailedSaveMessage, nil
 	}
-	return messageID, createdAt, updatedAt, ""
+	return messageID, createdAt, updatedAt, "", nil
 }
 
 // isFKViolation returns true if the error is a PostgreSQL foreign key violation (23503).
@@ -2473,11 +2484,15 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 	}
 
 	// Persist message
-	messageID, createdAt, updatedAt, persistErr := h.persistMessage(persistMessageParams{
+	messageID, createdAt, updatedAt, persistErr, timedOutUntil := h.persistMessage(persistMessageParams{
 		channelUUID: channelUUID, userID: msg.UserID, credEpoch: msg.CredEpoch, membershipIncarnation: membershipIncarnation, content: input.content,
 		keyVersion:       input.keyVersion,
 		embedsSuppressed: embedsSuppressed, replyToID: replyToID, gifSlug: input.gifSlug,
 	})
+	if timedOutUntil != nil {
+		h.sendMemberTimedOut(msg.ClientID, *timedOutUntil)
+		return
+	}
 	if persistErr != "" {
 		h.sendError(msg.ClientID, persistErr)
 		return

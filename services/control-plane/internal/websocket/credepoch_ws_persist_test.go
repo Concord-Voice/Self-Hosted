@@ -37,7 +37,7 @@ func TestPersistMessage_StaleEpochRejected(t *testing.T) {
 		userID.String(), "wsstalechan@test.concord.chat", "wsstalechan", wsPersistArgonHash)
 	require.NoError(t, err)
 
-	_, _, _, errMsg := hub.persistMessage(persistMessageParams{
+	_, _, _, errMsg, _ := hub.persistMessage(persistMessageParams{
 		channelUUID: uuid.New(), userID: userID, credEpoch: "staleEpoch",
 		content: "Y2lwaGVydGV4dA==", keyVersion: 1,
 	})
@@ -56,7 +56,7 @@ func TestPersistMessage_GuardReadFailureIsSaveError(t *testing.T) {
 	db := setupHubTestDB(t)
 	hub := NewHub(db, nil)
 
-	_, _, _, errMsg := hub.persistMessage(persistMessageParams{
+	_, _, _, errMsg, _ := hub.persistMessage(persistMessageParams{
 		channelUUID: uuid.New(), userID: uuid.New(), credEpoch: "whatever",
 		content: "Y2lwaGVydGV4dA==", keyVersion: 1,
 	})
@@ -72,7 +72,7 @@ func TestPersistMessage_RemovedMemberRejected(t *testing.T) {
 	_, err := setup.db.Exec(`DELETE FROM server_members WHERE server_id = $1 AND user_id = $2`, setup.user2, setup.user1)
 	require.NoError(t, err)
 
-	_, _, _, errMsg := setup.hub.persistMessage(persistMessageParams{
+	_, _, _, errMsg, _ := setup.hub.persistMessage(persistMessageParams{
 		channelUUID: channelID, userID: setup.user1, membershipIncarnation: incarnation,
 		content: "Y2lwaGVydGV4dA==", keyVersion: 1,
 	})
@@ -93,7 +93,7 @@ func TestPersistMessage_RejoinedMemberRejected(t *testing.T) {
 	_, err = setup.db.Exec(`INSERT INTO server_members (server_id, user_id, role) VALUES ($1, $2, 'owner')`, setup.user2, setup.user1)
 	require.NoError(t, err)
 
-	_, _, _, errMsg := setup.hub.persistMessage(persistMessageParams{
+	_, _, _, errMsg, _ := setup.hub.persistMessage(persistMessageParams{
 		channelUUID: channelID, userID: setup.user1, membershipIncarnation: incarnation,
 		content: "Y2lwaGVydGV4dA==", keyVersion: 1,
 	})
@@ -115,7 +115,7 @@ func TestPersistMessage_MemberUpdateKeepsIncarnation(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	_, _, _, errMsg := setup.hub.persistMessage(persistMessageParams{
+	_, _, _, errMsg, _ := setup.hub.persistMessage(persistMessageParams{
 		channelUUID: channelID, userID: setup.user1, membershipIncarnation: incarnation,
 		content: "Y2lwaGVydGV4dA==", keyVersion: 1,
 	})
@@ -212,6 +212,10 @@ func TestHandleMessage_TimedOutDuringPermissionCheckRejected(t *testing.T) {
 
 	response := readClientMsg(t, setup.client)
 	assert.Equal(t, "error", response["type"])
+	data := response["data"].(map[string]interface{})
+	assert.Equal(t, "member_timed_out", data["code"])
+	assert.Equal(t, errMsgMemberTimedOut, data[keyMessage])
+	assert.NotEmpty(t, data["timed_out_until"])
 	var count int
 	require.NoError(t, setup.db.QueryRow(`SELECT count(*) FROM messages WHERE channel_id = $1`, setup.convID).Scan(&count))
 	assert.Zero(t, count, "a member timed out during authorization must not persist a message")
@@ -234,7 +238,7 @@ func TestPersistMessage_MembershipLockHonorsTimeout(t *testing.T) {
 
 	result := make(chan string, 1)
 	go func() {
-		_, _, _, errMsg := setup.hub.persistMessage(persistMessageParams{
+		_, _, _, errMsg, _ := setup.hub.persistMessage(persistMessageParams{
 			channelUUID: channelID, userID: setup.user1, membershipIncarnation: incarnation,
 			content: "Y2lwaGVydGV4dA==", keyVersion: 1,
 		})
@@ -262,7 +266,7 @@ func TestPersistMessage_MembershipLockWriterFirstDefersRemoval(t *testing.T) {
 
 	sendResult := make(chan string, 1)
 	go func() {
-		_, _, _, errMsg := setup.hub.persistMessage(persistMessageParams{
+		_, _, _, errMsg, _ := setup.hub.persistMessage(persistMessageParams{
 			channelUUID: channelID, userID: setup.user1, membershipIncarnation: incarnation,
 			content: "Y2lwaGVydGV4dA==", keyVersion: 1,
 		})
