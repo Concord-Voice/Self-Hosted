@@ -17,8 +17,10 @@ set -euo pipefail
 
 # ── Constants ──────────────────────────────────────────────────────────
 
-readonly SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-readonly PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly SCRIPT_DIR
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+readonly PROJECT_ROOT
 # LOG_DIR is overridable via env var so tests can sandbox log file ops to a
 # tmpdir without polluting the real $PROJECT_ROOT/logs/. Production callers
 # get the default $PROJECT_ROOT/logs behavior unchanged.
@@ -54,6 +56,7 @@ Verbs:
                       Start all infra + control-plane + media-plane + electron clients
   down [--keep-docker] [--force]
                       Stop natives and (optionally) docker containers
+                      --force may SIGKILL matching Concord listeners in sibling worktrees
   status              Show containers, health, PIDs, log sizes
   logs [<service>] [-n N] [--no-follow] [--errors] [--clear]
                       Tail logs (services: all, control-plane, media-plane, vite, client [N], docker [svc])
@@ -134,10 +137,66 @@ compose() {
   docker compose "${COMPOSE_FILES[@]}" "$@"
 }
 
-# port_in_use() — return 0 if port is bound on localhost.
-# Usage: if port_in_use 8080; then echo "8080 busy"; fi
+# lsof_query() — preserve lsof's three useful outcomes: match, no match, and
+# execution/probe failure. Returns 0 with output, 1 for a clean no-match, and 2
+# when port ownership could not be determined.
+lsof_query() {
+  local output rc
+  if output=$(lsof -w "$@" 2>/dev/null); then
+    [[ -n "$output" ]] || return 2
+    printf '%s\n' "$output"
+    return 0
+  else
+    rc=$?
+  fi
+  [[ $rc -eq 1 && -z "$output" ]] && return 1
+  return 2
+}
+
+# port_in_use() — return 0 for a TCP listener, 1 when free, 2 on probe failure.
 port_in_use() {
-  lsof -i ":$1" >/dev/null 2>&1
+  lsof_query -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null
+}
+
+# udp_port_in_use() — return 0 for a local UDP endpoint, 1 when free, 2 on
+# probe failure. Parsing the local side avoids treating outbound traffic to
+# that remote port as a conflict.
+udp_port_in_use() {
+  local port="$1"
+  local output rc field value local_endpoint remote_endpoint saw_endpoint=0
+  if output=$(lsof_query -nP -iUDP -Fn); then
+    :
+  else
+    rc=$?
+    [[ $rc -eq 1 ]] && return 1
+    return 2
+  fi
+
+  while IFS= read -r field; do
+    case "$field" in
+      p*)
+        value="${field#p}"
+        [[ "$value" =~ ^[0-9]+$ ]] && [[ "$value" -gt 1 ]] || return 2
+        ;;
+      f*)
+        [[ -n "${field#f}" ]] || return 2
+        ;;
+      n*)
+        value="${field#n}"
+        local_endpoint="${value%%->*}"
+        [[ "$local_endpoint" =~ :[0-9]+$ ]] || return 2
+        if [[ "$value" == *"->"* ]]; then
+          remote_endpoint="${value#*->}"
+          [[ "$remote_endpoint" =~ :[0-9]+$ ]] || return 2
+        fi
+        saw_endpoint=1
+        [[ "$local_endpoint" == *":$port" ]] && return 0
+        ;;
+      *) return 2 ;;
+    esac
+  done <<< "$output"
+  [[ $saw_endpoint -eq 1 ]] || return 2
+  return 1
 }
 
 # wait_for_service() — block until URL returns HTTP 200, or timeout.
@@ -180,12 +239,243 @@ read_valid_pid() {
   local pid_file="$1"
   [[ -f "$pid_file" ]] || return 1
   local pid
-  pid=$(cat "$pid_file" 2>/dev/null)
+  pid=$(sed -n '1p' "$pid_file" 2>/dev/null)
   if [[ "$pid" =~ ^[0-9]+$ ]] && [[ "$pid" -gt 1 ]]; then
     printf '%s' "$pid"
     return 0
   fi
   return 1
+}
+
+# process_start_identity() — print a locale-stable start identity. Returns 1
+# only when the PID is absent and 2 when ps itself could not answer safely.
+process_start_identity() {
+  local pid="$1"
+  local output rc
+  if output=$(LC_ALL=C ps -p "$pid" -o lstart= 2>/dev/null); then
+    [[ -n "$output" ]] || return 2
+    printf '%s\n' "$output"
+    return 0
+  else
+    rc=$?
+  fi
+  # With a validated numeric PID and fixed options, ps uses 1 for both an
+  # absent PID and a PID above the platform maximum; both are definitively not
+  # the tracked process. Command/probe failures use another status.
+  [[ $rc -eq 1 ]] && return 1
+  return 2
+}
+
+process_cwd_identity() {
+  local pid="$1"
+  local output rc cwd extra
+  if output=$(lsof_query -a -p "$pid" -d cwd -Fn); then
+    :
+  else
+    rc=$?
+    [[ $rc -eq 1 ]] && return 1
+    return 2
+  fi
+  cwd=$(printf '%s\n' "$output" | sed -n 's/^n//p' | sed -n '1p')
+  extra=$(printf '%s\n' "$output" | sed -n 's/^n//p' | sed -n '2p')
+  [[ -n "$cwd" && -z "$extra" ]] || return 2
+  cwd=$(cd "$cwd" 2>/dev/null && pwd -P) || return 2
+  printf '%s\n' "$cwd"
+}
+
+process_command_identity() {
+  local pid="$1"
+  local output rc
+  if output=$(LC_ALL=C ps -ww -p "$pid" -o command= 2>/dev/null); then
+    [[ -n "$output" ]] || return 2
+    printf '%s\n' "$output"
+    return 0
+  else
+    rc=$?
+  fi
+  [[ $rc -eq 1 ]] && return 1
+  return 2
+}
+
+# process_identity_state() — 0 is the same process, 1 is definitively absent,
+# and 2 is unverified/reused/unauthorized. Callers must never signal state 2.
+process_identity_state() {
+  local pid="$1"
+  local expected_start="$2"
+  local expected_cwd="$3"
+  local current_start current_cwd rc
+
+  if current_start=$(process_start_identity "$pid"); then
+    :
+  else
+    rc=$?
+    [[ $rc -eq 1 ]] && return 1
+    return 2
+  fi
+  [[ "$current_start" == "$expected_start" ]] || return 2
+
+  if current_cwd=$(process_cwd_identity "$pid"); then
+    :
+  else
+    rc=$?
+    [[ $rc -eq 1 ]] && return 1
+    return 2
+  fi
+  [[ "$current_cwd" == "$expected_cwd" ]] || return 2
+  return 0
+}
+
+write_pid_record_values() {
+  local pid_file="$1"
+  local pid="$2"
+  local start="$3"
+  local canonical_cwd="$4"
+  local tmp_file
+  tmp_file="$pid_file.tmp.$$"
+  if ! (umask 077; printf '%s\n%s\n%s\n' "$pid" "$start" "$canonical_cwd" > "$tmp_file"); then
+    rm -f "$tmp_file"
+    return 1
+  fi
+  if ! mv -f "$tmp_file" "$pid_file"; then
+    rm -f "$tmp_file"
+    return 1
+  fi
+  return 0
+}
+
+wait_for_process_identity_exit() {
+  local pid="$1"
+  local expected_start="$2"
+  local expected_cwd="$3"
+  local count=0 rc
+  while [[ $count -lt 10 ]]; do
+    if process_identity_state "$pid" "$expected_start" "$expected_cwd"; then
+      sleep 1
+      count=$((count + 1))
+      continue
+    else
+      rc=$?
+    fi
+    [[ $rc -eq 1 ]] && return 0
+    return 2
+  done
+  return 1
+}
+
+cleanup_started_process() {
+  local pid="$1"
+  local expected_start="$2"
+  local expected_cwd="$3"
+  local rc
+  if process_identity_state "$pid" "$expected_start" "$expected_cwd"; then
+    :
+  else
+    rc=$?
+    [[ $rc -eq 1 ]] && return 0
+    return 1
+  fi
+  if ! kill -9 "$pid" 2>/dev/null; then
+    if process_identity_state "$pid" "$expected_start" "$expected_cwd"; then
+      return 1
+    else
+      rc=$?
+    fi
+    [[ $rc -eq 1 ]] && return 0
+    return 1
+  fi
+  wait_for_process_identity_exit "$pid" "$expected_start" "$expected_cwd"
+}
+
+cleanup_started_job() {
+  local pid="$1"
+  local job_pid
+  while IFS= read -r job_pid; do
+    [[ "$job_pid" == "$pid" ]] || continue
+    kill -9 "$pid" 2>/dev/null || return 1
+    wait "$pid" 2>/dev/null || true
+    return 0
+  done < <(jobs -pr)
+  wait "$pid" 2>/dev/null || true
+  return 0
+}
+
+track_started_process() {
+  local pid_file="$1"
+  local pid="$2"
+  local expected_cwd="$3"
+  local name="$4"
+  local start canonical_cwd
+  start=$(process_start_identity "$pid") || {
+    if ! cleanup_started_job "$pid"; then
+      echo -e "${RED}✗${NC} Could not clean up unidentified $name process (PID: $pid)" >&2
+    fi
+    echo -e "${RED}✗${NC} Could not capture $name process identity" >&2
+    return 1
+  }
+  canonical_cwd=$(cd "$expected_cwd" 2>/dev/null && pwd -P) || {
+    if ! cleanup_started_job "$pid"; then
+      echo -e "${RED}✗${NC} Could not clean up unidentified $name process (PID: $pid)" >&2
+    fi
+    echo -e "${RED}✗${NC} Could not canonicalize $name working directory" >&2
+    return 1
+  }
+  if write_pid_record_values "$pid_file" "$pid" "$start" "$canonical_cwd"; then
+    return 0
+  fi
+  if ! cleanup_started_process "$pid" "$start" "$canonical_cwd"; then
+    echo -e "${RED}✗${NC} Could not safely clean up untracked $name process (PID: $pid)" >&2
+  fi
+  return 1
+}
+
+remove_pid_record() {
+  local pid_file="$1"
+  local name="$2"
+  if rm -f "$pid_file"; then
+    return 0
+  fi
+  echo -e "${RED}✗${NC} Could not remove $name PID file: $pid_file" >&2
+  return 1
+}
+
+tracked_pid_identity_state() {
+  local pid_file="$1"
+  local pid="$2"
+  local expected_start expected_cwd extra
+  expected_start=$(sed -n '2p' "$pid_file" 2>/dev/null)
+  expected_cwd=$(sed -n '3p' "$pid_file" 2>/dev/null)
+  extra=$(sed -n '4p' "$pid_file" 2>/dev/null)
+  [[ -n "$expected_start" && "$expected_cwd" == /* && -z "$extra" ]] || return 2
+  process_identity_state "$pid" "$expected_start" "$expected_cwd"
+}
+
+pid_record_matches() {
+  local pid_file="$1"
+  local pid="$2"
+  local expected_start="$3"
+  local expected_cwd="$4"
+  local stored_pid stored_start stored_cwd extra
+  stored_pid=$(sed -n '1p' "$pid_file" 2>/dev/null)
+  stored_start=$(sed -n '2p' "$pid_file" 2>/dev/null)
+  stored_cwd=$(sed -n '3p' "$pid_file" 2>/dev/null)
+  extra=$(sed -n '4p' "$pid_file" 2>/dev/null)
+  [[ "$stored_pid" == "$pid" && "$stored_start" == "$expected_start" && \
+    "$stored_cwd" == "$expected_cwd" && -z "$extra" ]]
+}
+
+finish_tracked_stop() {
+  local pid_file="$1"
+  local name="$2"
+  local pid="$3"
+  local expected_start="$4"
+  local expected_cwd="$5"
+  if ! pid_record_matches "$pid_file" "$pid" "$expected_start" "$expected_cwd"; then
+    echo -e "${RED}✗${NC} $name PID record changed during shutdown — preserving it" >&2
+    return 1
+  fi
+  remove_pid_record "$pid_file" "$name" || return 1
+  [[ "$QUIET" -eq 0 ]] && echo -e "\r${GREEN}✓${NC} $name stopped                              "
+  return 0
 }
 
 # stop_process() — kill PID from file, escalate TERM → KILL if needed.
@@ -205,32 +495,497 @@ stop_process() {
   local pid
   if ! pid=$(read_valid_pid "$pid_file"); then
     [[ "$QUIET" -eq 0 ]] && echo -e "${YELLOW}⚠${NC} $name PID file contains invalid value — removing"
-    rm -f "$pid_file"
-    return 0
+    remove_pid_record "$pid_file" "$name"
+    return
   fi
-  if ! ps -p "$pid" >/dev/null 2>&1; then
-    [[ "$QUIET" -eq 0 ]] && echo -e "${YELLOW}⚠${NC} $name was not running (stale PID file)"
-    rm -f "$pid_file"
-    return 0
+  local expected_start expected_cwd extra identity_rc
+  expected_start=$(sed -n '2p' "$pid_file" 2>/dev/null)
+  expected_cwd=$(sed -n '3p' "$pid_file" 2>/dev/null)
+  extra=$(sed -n '4p' "$pid_file" 2>/dev/null)
+  if [[ -z "$expected_start" && -z "$expected_cwd" && -z "$extra" ]]; then
+    if process_start_identity "$pid" >/dev/null; then
+      echo -e "${RED}✗${NC} $name PID file is not identity-bound — refusing to signal PID $pid" >&2
+      return 3
+    else
+      identity_rc=$?
+      if [[ $identity_rc -eq 1 ]]; then
+        [[ "$QUIET" -eq 0 ]] && echo -e "${YELLOW}⚠${NC} $name was not running (stale PID file)"
+        remove_pid_record "$pid_file" "$name"
+        return
+      fi
+      echo -e "${RED}✗${NC} Could not verify $name PID $pid" >&2
+      return 1
+    fi
+  fi
+
+  if tracked_pid_identity_state "$pid_file" "$pid"; then
+    :
+  else
+    identity_rc=$?
+    if [[ $identity_rc -eq 1 ]]; then
+      [[ "$QUIET" -eq 0 ]] && echo -e "${YELLOW}⚠${NC} $name was not running (stale PID file)"
+      remove_pid_record "$pid_file" "$name"
+      return
+    fi
+    echo -e "${RED}✗${NC} $name PID identity could not be verified — refusing to signal PID $pid" >&2
+    return 1
   fi
 
   [[ "$QUIET" -eq 0 ]] && echo -ne "${YELLOW}⏳ Stopping $name (PID: $pid)...${NC}"
   if [[ "$force_kill" -eq 1 ]]; then
-    kill -9 "$pid" 2>/dev/null || true
+    if ! kill -9 "$pid" 2>/dev/null; then
+      if process_identity_state "$pid" "$expected_start" "$expected_cwd"; then
+        :
+      else
+        identity_rc=$?
+        [[ $identity_rc -eq 1 ]] && { finish_tracked_stop "$pid_file" "$name" "$pid" "$expected_start" "$expected_cwd"; return; }
+      fi
+      echo -e "${RED}✗${NC} Failed to stop $name (PID: $pid)" >&2
+      return 1
+    fi
   else
-    kill -TERM "$pid" 2>/dev/null || true
-    local count=0
-    while ps -p "$pid" >/dev/null 2>&1 && [[ $count -lt 10 ]]; do
-      sleep 1
-      count=$((count + 1))
-    done
-    if ps -p "$pid" >/dev/null 2>&1; then
-      [[ "$QUIET" -eq 0 ]] && echo -e "\r${YELLOW}⚠${NC} $name didn't stop gracefully, force killing..."
-      kill -9 "$pid" 2>/dev/null || true
+    if ! kill -TERM "$pid" 2>/dev/null; then
+      if process_identity_state "$pid" "$expected_start" "$expected_cwd"; then
+        :
+      else
+        identity_rc=$?
+        [[ $identity_rc -eq 1 ]] && { finish_tracked_stop "$pid_file" "$name" "$pid" "$expected_start" "$expected_cwd"; return; }
+      fi
+      echo -e "${RED}✗${NC} Failed to stop $name (PID: $pid)" >&2
+      return 1
+    fi
+    if wait_for_process_identity_exit "$pid" "$expected_start" "$expected_cwd"; then
+      finish_tracked_stop "$pid_file" "$name" "$pid" "$expected_start" "$expected_cwd"
+      return
+    else
+      identity_rc=$?
+      if [[ $identity_rc -eq 2 ]]; then
+        echo -e "${RED}✗${NC} $name identity changed during shutdown — refusing escalation" >&2
+        return 1
+      fi
+    fi
+    [[ "$QUIET" -eq 0 ]] && echo -e "\r${YELLOW}⚠${NC} $name didn't stop gracefully, force killing..."
+    if process_identity_state "$pid" "$expected_start" "$expected_cwd"; then
+      :
+    else
+      identity_rc=$?
+      if [[ $identity_rc -eq 1 ]]; then
+        finish_tracked_stop "$pid_file" "$name" "$pid" "$expected_start" "$expected_cwd"
+        return
+      fi
+      echo -e "${RED}✗${NC} $name identity changed before escalation — refusing SIGKILL" >&2
+      return 1
+    fi
+    if ! kill -9 "$pid" 2>/dev/null; then
+      if process_identity_state "$pid" "$expected_start" "$expected_cwd"; then
+        :
+      else
+        identity_rc=$?
+        [[ $identity_rc -eq 1 ]] && { finish_tracked_stop "$pid_file" "$name" "$pid" "$expected_start" "$expected_cwd"; return; }
+      fi
+      echo -e "${RED}✗${NC} Failed to force stop $name (PID: $pid)" >&2
+      return 1
     fi
   fi
-  [[ "$QUIET" -eq 0 ]] && echo -e "\r${GREEN}✓${NC} $name stopped                              "
-  rm -f "$pid_file"
+
+  if ! wait_for_process_identity_exit "$pid" "$expected_start" "$expected_cwd"; then
+    echo -e "${RED}✗${NC} Could not confirm $name stopped; preserving $pid_file" >&2
+    return 1
+  fi
+  finish_tracked_stop "$pid_file" "$name" "$pid" "$expected_start" "$expected_cwd"
+}
+
+# Confirm that a root is registered by this repository, not merely pointed at
+# its Git metadata by an arbitrary .git indirection.
+canonical_git_common_dir() {
+  local root="$1"
+  local common
+  common=$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+    git -C "$root" rev-parse --git-common-dir 2>/dev/null) || return 1
+  if [[ "$common" != /* ]]; then
+    common="$root/$common"
+  fi
+  common=$(cd "$common" 2>/dev/null && pwd -P) || return 1
+  printf '%s\n' "$common"
+}
+
+registered_worktree_contains() {
+  local expected_root="$1"
+  local output line root="" saw_worktree=0 prunable=0 matched=0
+  local trusted_common expected_common
+  if output=$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+    git -C "$PROJECT_ROOT" worktree list --porcelain 2>&1); then
+    :
+  else
+    return 2
+  fi
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *)
+        [[ "$root" == "$expected_root" && $prunable -eq 0 ]] && matched=1
+        root="${line#worktree }"
+        root=$(cd "$root" 2>/dev/null && pwd -P) || root=""
+        saw_worktree=1
+        prunable=0
+        ;;
+      prunable*)
+        prunable=1
+        ;;
+      '')
+        [[ "$root" == "$expected_root" && $prunable -eq 0 ]] && matched=1
+        root=""
+        prunable=0
+        ;;
+    esac
+  done <<< "$output"
+  [[ $saw_worktree -eq 1 ]] || return 2
+  [[ "$root" == "$expected_root" && $prunable -eq 0 ]] && matched=1
+  [[ $matched -eq 1 ]] || return 1
+
+  trusted_common=$(canonical_git_common_dir "$PROJECT_ROOT") || return 2
+  expected_common=$(canonical_git_common_dir "$expected_root") || return 2
+  [[ "$trusted_common" == "$expected_common" ]]
+}
+
+listener_pid_matches() {
+  local pid="$1"
+  local port="$2"
+  local output rc candidate
+  if output=$(lsof_query -a -p "$pid" -iTCP:"$port" -sTCP:LISTEN -t); then
+    :
+  else
+    rc=$?
+    [[ $rc -eq 1 ]] && return 1
+    return 2
+  fi
+  while IFS= read -r candidate; do
+    [[ "$candidate" =~ ^[0-9]+$ ]] || return 2
+    [[ "$candidate" == "$pid" ]] && return 0
+  done <<< "$output"
+  return 2
+}
+
+repo_listener_identity_state() {
+  local pid="$1"
+  local port="$2"
+  local expected_cwd="$3"
+  local expected_start="$4"
+  local expected_root="$5"
+  local expected_command="${6:-}"
+  local current_command rc
+  if process_identity_state "$pid" "$expected_start" "$expected_cwd"; then
+    :
+  else
+    rc=$?
+    [[ $rc -eq 1 ]] && return 1
+    return 2
+  fi
+  registered_worktree_contains "$expected_root" || return 2
+  if [[ -n "$expected_command" ]]; then
+    if current_command=$(process_command_identity "$pid"); then
+      [[ "$current_command" == "$expected_command" ]] || return 2
+    else
+      rc=$?
+      [[ $rc -eq 1 ]] && return 1
+      return 2
+    fi
+  fi
+  if listener_pid_matches "$pid" "$port"; then
+    return 0
+  else
+    rc=$?
+  fi
+  [[ $rc -eq 1 ]] && return 1
+  return 2
+}
+
+repo_listener_absent() {
+  local rc
+  if repo_listener_identity_state "$@"; then
+    return 1
+  else
+    rc=$?
+  fi
+  [[ $rc -eq 1 ]]
+}
+
+tcp_listener_pids() {
+  local port="$1"
+  local output rc pid
+  if output=$(lsof_query -tiTCP:"$port" -sTCP:LISTEN); then
+    :
+  else
+    rc=$?
+    [[ $rc -eq 1 ]] && return 1
+    return 2
+  fi
+  while IFS= read -r pid; do
+    [[ "$pid" =~ ^[0-9]+$ ]] && [[ "$pid" -gt 1 ]] || return 2
+    printf '%s\n' "$pid"
+  done <<< "$output"
+}
+
+bind_legacy_direct_listener() {
+  local pid_file="$1"
+  local port="$2"
+  local service_dir="$3"
+  local owner_pid owner_start owner_cwd expected_cwd project_root
+  local listener_pids listener_pid
+
+  owner_pid=$(read_valid_pid "$pid_file") || return 1
+  [[ -z "$(sed -n '2p' "$pid_file" 2>/dev/null)" && \
+    -z "$(sed -n '3p' "$pid_file" 2>/dev/null)" && \
+    -z "$(sed -n '4p' "$pid_file" 2>/dev/null)" ]] || return 1
+  expected_cwd=$(cd "$PROJECT_ROOT/$service_dir" 2>/dev/null && pwd -P) || return 1
+  project_root=$(cd "$PROJECT_ROOT" 2>/dev/null && pwd -P) || return 1
+  owner_start=$(process_start_identity "$owner_pid") || return 1
+  owner_cwd=$(process_cwd_identity "$owner_pid") || return 1
+  [[ "$owner_cwd" == "$expected_cwd" ]] || return 1
+
+  listener_pids=$(tcp_listener_pids "$port") || return 1
+  while IFS= read -r listener_pid; do
+    [[ "$listener_pid" == "$owner_pid" ]] || continue
+    process_identity_state "$owner_pid" "$owner_start" "$owner_cwd" || return 1
+    repo_listener_identity_state "$owner_pid" "$port" "$expected_cwd" \
+      "$owner_start" "$project_root" || return 1
+    [[ "$(sed -n '1p' "$pid_file" 2>/dev/null)" == "$owner_pid" && \
+      -z "$(sed -n '2p' "$pid_file" 2>/dev/null)" && \
+      -z "$(sed -n '3p' "$pid_file" 2>/dev/null)" && \
+      -z "$(sed -n '4p' "$pid_file" 2>/dev/null)" ]] || return 1
+    write_pid_record_values "$pid_file" "$owner_pid" "$owner_start" "$owner_cwd" || return 1
+    return 0
+  done <<< "$listener_pids"
+  return 1
+}
+
+wait_for_repo_listener_exit() {
+  local pid="$1"
+  local port="$2"
+  local expected_cwd="$3"
+  local expected_start="$4"
+  local expected_root="$5"
+  local expected_command="${6:-}"
+  local count=0 rc
+  while [[ $count -lt 10 ]]; do
+    if repo_listener_identity_state "$pid" "$port" "$expected_cwd" "$expected_start" "$expected_root" "$expected_command"; then
+      sleep 1
+      count=$((count + 1))
+      continue
+    else
+      rc=$?
+    fi
+    [[ $rc -eq 1 ]] && return 0
+    return 2
+  done
+  return 1
+}
+
+listener_command_matches_service() {
+  local command="$1"
+  local service_dir="$2"
+  case "$service_dir" in
+    services/control-plane) [[ "$command" == *"bin/control-plane"* ]] ;;
+    services/media-plane) [[ "$command" == *"tsx"* && "$command" == *"src/index.ts"* ]] ;;
+    client/desktop) [[ "$command" == *"vite"* && "$command" == *"--port 3001"* ]] ;;
+    *) return 1 ;;
+  esac
+}
+
+listener_cleanup_error() {
+  local name="$1"
+  local pid="$2"
+  local port="$3"
+  local reason="$4"
+  echo -e "${RED}✗${NC} Could not verify $name listener PID $pid on port $port: $reason" >&2
+}
+
+# Recover a native service whose tracked watcher exited before its listening
+# child. Plain down may TERM only this worktree's listener; --force may KILL a
+# listener in a sibling worktree sharing this repository.
+stop_repo_listener() {
+  local port="$1"
+  local name="$2"
+  local service_dir="$3"
+  local force_kill=0
+  [[ "${4:-}" == "--force" ]] && force_kill=1
+
+  local project_root listener_pids rc cleanup_failed=0
+  project_root=$(cd "$PROJECT_ROOT" 2>/dev/null && pwd -P) || return 1
+  if listener_pids=$(tcp_listener_pids "$port"); then
+    :
+  else
+    rc=$?
+    [[ $rc -eq 1 ]] && return 0
+    return 1
+  fi
+
+  local pid cwd process_root process_start process_command=""
+  while IFS= read -r pid; do
+    if process_start=$(process_start_identity "$pid"); then
+      :
+    else
+      rc=$?
+      if [[ $rc -eq 2 ]]; then
+        listener_cleanup_error "$name" "$pid" "$port" "start identity unavailable"
+        cleanup_failed=1
+      fi
+      continue
+    fi
+    if cwd=$(process_cwd_identity "$pid"); then
+      :
+    else
+      rc=$?
+      [[ $rc -eq 1 ]] && continue
+      listener_cleanup_error "$name" "$pid" "$port" "working directory unavailable"
+      cleanup_failed=1
+      continue
+    fi
+    if ! process_root=$(env -u GIT_DIR -u GIT_WORK_TREE -u GIT_COMMON_DIR \
+      git -C "$cwd" rev-parse --show-toplevel 2>/dev/null); then
+      listener_cleanup_error "$name" "$pid" "$port" "working directory is not in a Git worktree"
+      cleanup_failed=1
+      continue
+    fi
+    if ! process_root=$(cd "$process_root" 2>/dev/null && pwd -P); then
+      listener_cleanup_error "$name" "$pid" "$port" "worktree root could not be canonicalized"
+      cleanup_failed=1
+      continue
+    fi
+    if [[ "$cwd" != "$process_root/$service_dir" ]]; then
+      listener_cleanup_error "$name" "$pid" "$port" "working directory does not match $service_dir"
+      cleanup_failed=1
+      continue
+    fi
+    if [[ "$force_kill" -ne 1 && "$process_root" != "$project_root" ]]; then
+      listener_cleanup_error "$name" "$pid" "$port" "listener belongs to another worktree"
+      cleanup_failed=1
+      continue
+    fi
+    process_command=""
+    if [[ "$force_kill" -ne 1 ]]; then
+      if process_command=$(process_command_identity "$pid"); then
+        :
+      else
+        rc=$?
+        [[ $rc -eq 1 ]] && continue
+        listener_cleanup_error "$name" "$pid" "$port" "command identity unavailable"
+        cleanup_failed=1
+        continue
+      fi
+      if ! listener_command_matches_service "$process_command" "$service_dir"; then
+        listener_cleanup_error "$name" "$pid" "$port" "command does not match the expected service"
+        cleanup_failed=1
+        continue
+      fi
+    fi
+    if repo_listener_identity_state "$pid" "$port" "$cwd" "$process_start" "$process_root" "$process_command"; then
+      :
+    else
+      rc=$?
+      [[ $rc -eq 1 ]] && continue
+      listener_cleanup_error "$name" "$pid" "$port" "identity changed during validation"
+      cleanup_failed=1
+      continue
+    fi
+
+    if [[ "$force_kill" -eq 1 ]]; then
+      [[ "$QUIET" -eq 0 ]] && echo -e "${YELLOW}⚠${NC} Force stopping orphaned $name listener (PID: $pid)"
+      if ! kill -9 "$pid" 2>/dev/null; then
+        if repo_listener_absent "$pid" "$port" "$cwd" "$process_start" "$process_root" "$process_command"; then
+          continue
+        fi
+        listener_cleanup_error "$name" "$pid" "$port" "SIGKILL failed"
+        cleanup_failed=1
+        continue
+      fi
+    else
+      [[ "$QUIET" -eq 0 ]] && echo -ne "${YELLOW}⏳ Stopping orphaned $name listener (PID: $pid)...${NC}"
+      if ! kill -TERM "$pid" 2>/dev/null; then
+        if repo_listener_absent "$pid" "$port" "$cwd" "$process_start" "$process_root" "$process_command"; then
+          continue
+        fi
+        listener_cleanup_error "$name" "$pid" "$port" "SIGTERM failed"
+        cleanup_failed=1
+        continue
+      fi
+      if wait_for_repo_listener_exit "$pid" "$port" "$cwd" "$process_start" "$process_root" "$process_command"; then
+        [[ "$QUIET" -eq 0 ]] && echo -e "\r${GREEN}✓${NC} $name listener stopped                         "
+        continue
+      else
+        rc=$?
+        if [[ $rc -eq 2 ]]; then
+          listener_cleanup_error "$name" "$pid" "$port" "identity changed after SIGTERM"
+          cleanup_failed=1
+          continue
+        fi
+      fi
+      [[ "$QUIET" -eq 0 ]] && echo -e "\r${YELLOW}⚠${NC} $name listener didn't stop gracefully, force killing..."
+      if repo_listener_identity_state "$pid" "$port" "$cwd" "$process_start" "$process_root" "$process_command"; then
+        :
+      else
+        rc=$?
+        [[ $rc -eq 1 ]] && continue
+        listener_cleanup_error "$name" "$pid" "$port" "identity changed before escalation"
+        cleanup_failed=1
+        continue
+      fi
+      if ! kill -9 "$pid" 2>/dev/null; then
+        if repo_listener_absent "$pid" "$port" "$cwd" "$process_start" "$process_root" "$process_command"; then
+          continue
+        fi
+        listener_cleanup_error "$name" "$pid" "$port" "SIGKILL failed"
+        cleanup_failed=1
+        continue
+      fi
+    fi
+
+    if wait_for_repo_listener_exit "$pid" "$port" "$cwd" "$process_start" "$process_root" "$process_command"; then
+      [[ "$QUIET" -eq 0 ]] && echo -e "\r${GREEN}✓${NC} $name listener stopped                         "
+    else
+      listener_cleanup_error "$name" "$pid" "$port" "process remained after shutdown"
+      cleanup_failed=1
+    fi
+  done <<< "$listener_pids"
+  [[ $cleanup_failed -eq 0 ]]
+}
+
+stop_native_service() {
+  local pid_file="$1"
+  local name="$2"
+  local port="$3"
+  local service_dir="$4"
+  local force_flag="$5"
+  local process_rc=0 listener_rc=0
+
+  if stop_process "$pid_file" "$name" "$force_flag"; then
+    :
+  else
+    process_rc=$?
+  fi
+  if [[ $process_rc -eq 3 && "$force_flag" == "--force" ]] && \
+    bind_legacy_direct_listener "$pid_file" "$port" "$service_dir"; then
+    if stop_process "$pid_file" "$name" "$force_flag"; then
+      process_rc=0
+    else
+      process_rc=$?
+    fi
+  fi
+  stop_repo_listener "$port" "$name" "$service_dir" "$force_flag" || listener_rc=$?
+
+  # Listener cleanup may also finish a tracked watcher that exited through its
+  # child. Reconcile once; stop_process revalidates identity and remains
+  # fail-closed for live legacy, reused, or unverified PIDs.
+  if [[ $process_rc -ne 0 && $listener_rc -eq 0 ]]; then
+    if stop_process "$pid_file" "$name" "$force_flag"; then
+      process_rc=0
+    else
+      process_rc=$?
+    fi
+  fi
+  if [[ $process_rc -eq 3 ]]; then
+    echo -e "${RED}✗${NC} $name has a live legacy watcher PID; verify and stop it manually" >&2
+  fi
+  [[ $process_rc -eq 0 && $listener_rc -eq 0 ]]
 }
 
 # pre_flight_checks() — verify environment before starting services.
@@ -249,6 +1004,12 @@ pre_flight_checks() {
     if port_in_use "$port"; then
       echo -e "${RED}✗${NC} Port $port already in use. Run 'concord-dev.sh down' first." >&2
       errors=$((errors + 1))
+    else
+      local probe_rc=$?
+      if [[ $probe_rc -eq 2 ]]; then
+        echo -e "${RED}✗${NC} Could not inspect port $port with lsof." >&2
+        errors=$((errors + 1))
+      fi
     fi
   done
 
@@ -306,7 +1067,8 @@ env_drift_warn() {
   [[ -n "$missing" ]] || return 0
   {
     echo -e "${YELLOW}⚠${NC}  Your .env is missing keys that .env.example defines:"
-    # shellcheck disable=SC2086 -- intentional word-split: one key per line
+    # Intentional word split: print one key per line.
+    # shellcheck disable=SC2086
     printf '     %s\n' $missing
     echo "    Add them from .env.example before 'up' — a required one (e.g. PUBLIC_IP)"
     echo "    otherwise fails with a cryptic compose interpolation error, not this hint."
@@ -406,7 +1168,12 @@ _up_control_plane() {
   fi
 
   nohup ./bin/control-plane > "$LOG_DIR/control-plane.log" 2>&1 &
-  echo $! > "$LOG_DIR/control-plane.pid"
+  local control_pid=$!
+  if ! track_started_process "$LOG_DIR/control-plane.pid" "$control_pid" \
+    "$PROJECT_ROOT/services/control-plane" "Control Plane"; then
+    echo -e "${RED}✗${NC} Could not record Control Plane process identity" >&2
+    return 1
+  fi
   cd "$PROJECT_ROOT"
 
   if ! wait_for_service "http://localhost:8080/health" "Control Plane"; then
@@ -452,7 +1219,12 @@ _up_media_plane() {
 
   # Use npx tsx directly (not via npm run) so the PID file tracks tsx, not npm.
   nohup npx tsx watch src/index.ts > "$LOG_DIR/media-plane.log" 2>&1 &
-  echo $! > "$LOG_DIR/media-plane.pid"
+  local media_pid=$!
+  if ! track_started_process "$LOG_DIR/media-plane.pid" "$media_pid" \
+    "$PROJECT_ROOT/services/media-plane" "Media Plane"; then
+    echo -e "${RED}✗${NC} Could not record Media Plane process identity" >&2
+    return 1
+  fi
   cd "$PROJECT_ROOT"
 
   if ! wait_for_service "http://localhost:3000/health" "Media Plane"; then
@@ -480,7 +1252,12 @@ _up_clients() {
   npx tsc -p tsconfig.main.json >/dev/null
 
   nohup npx vite --port 3001 --strictPort > "$LOG_DIR/vite-renderer.log" 2>&1 &
-  echo $! > "$LOG_DIR/vite-renderer.pid"
+  local vite_pid=$!
+  if ! track_started_process "$LOG_DIR/vite-renderer.pid" "$vite_pid" \
+    "$PROJECT_ROOT/client/desktop" "Vite Dev Server"; then
+    echo -e "${RED}✗${NC} Could not record Vite process identity" >&2
+    return 1
+  fi
 
   if ! wait_for_service "http://localhost:3001" "Vite Dev Server"; then
     echo -e "${RED}✗${NC} Vite startup failed" >&2
@@ -524,8 +1301,13 @@ _up_clients() {
     mkdir -p "$user_data"
     NODE_ENV=development nohup "$electron_bin" . --user-data-dir="$user_data" "${media_flags[@]}" \
       > "$LOG_DIR/desktop-client-$i.log" 2>&1 &
-    echo $! > "$LOG_DIR/desktop-client-$i.pid"
-    [[ "$QUIET" -eq 0 ]] && echo -e "  ${GREEN}→${NC} Client $i: PID $! (data: $user_data)"
+    local client_pid=$!
+    if ! track_started_process "$LOG_DIR/desktop-client-$i.pid" "$client_pid" \
+      "$PROJECT_ROOT/client/desktop" "Desktop Client $i"; then
+      echo -e "${RED}✗${NC} Could not record Desktop Client $i process identity" >&2
+      return 1
+    fi
+    [[ "$QUIET" -eq 0 ]] && echo -e "  ${GREEN}→${NC} Client $i: PID $client_pid (data: $user_data)"
     sleep 2
   done
 
@@ -562,6 +1344,9 @@ _up_summary() {
 verb_down() {
   local keep_docker=0
   local force_flag=""
+  local docker_failed=0
+  local native_failed=0
+  local probe_failed=0
 
   while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -575,6 +1360,10 @@ verb_down() {
   done
 
   mkdir -p "$LOG_DIR"
+  if ! command -v lsof >/dev/null 2>&1; then
+    echo -e "${RED}✗${NC} lsof is required to verify safe process cleanup" >&2
+    probe_failed=1
+  fi
 
   [[ "$QUIET" -eq 0 ]] && echo -e "${BLUE}🖥  Stopping desktop clients${NC}"
   for pid_file in "$LOG_DIR"/desktop-client-*.pid; do
@@ -587,38 +1376,71 @@ verb_down() {
     # the '.pid' suffix to get the bare numeric index.
     local base="${pid_file##*/desktop-client-}"
     num="${base%.pid}"
-    stop_process "$pid_file" "Desktop Client $num" $force_flag
+    stop_process "$pid_file" "Desktop Client $num" "$force_flag" || native_failed=1
   done
-  stop_process "$LOG_DIR/vite-renderer.pid" "Vite Dev Server" $force_flag
+  stop_native_service "$LOG_DIR/vite-renderer.pid" "Vite Dev Server" 3001 \
+    "client/desktop" "$force_flag" || native_failed=1
 
   [[ "$QUIET" -eq 0 ]] && echo -e "${BLUE}🎙  Stopping media-plane${NC}"
-  stop_process "$LOG_DIR/media-plane.pid" "Media Plane" $force_flag
-  pkill -f "tsx watch src/index.ts" 2>/dev/null || true
+  stop_native_service "$LOG_DIR/media-plane.pid" "Media Plane" 3000 \
+    "services/media-plane" "$force_flag" || native_failed=1
 
   [[ "$QUIET" -eq 0 ]] && echo -e "${BLUE}🎛  Stopping control-plane${NC}"
-  stop_process "$LOG_DIR/control-plane.pid" "Control Plane" $force_flag
+  stop_native_service "$LOG_DIR/control-plane.pid" "Control Plane" 8080 \
+    "services/control-plane" "$force_flag" || native_failed=1
 
   if [[ "$keep_docker" -eq 0 ]]; then
     [[ "$QUIET" -eq 0 ]] && echo -e "${BLUE}📦 Stopping infrastructure containers${NC}"
-    compose down >/dev/null 2>&1 || true
-    [[ "$QUIET" -eq 0 ]] && echo -e "${GREEN}✓${NC} Docker containers stopped"
+    local teardown_env_files=()
+    [[ -f "$PROJECT_ROOT/.env.example" ]] && teardown_env_files+=(--env-file "$PROJECT_ROOT/.env.example")
+    [[ -f "$PROJECT_ROOT/.env" ]] && teardown_env_files+=(--env-file "$PROJECT_ROOT/.env")
+    if compose ${teardown_env_files[@]+"${teardown_env_files[@]}"} down >/dev/null 2>&1; then
+      [[ "$QUIET" -eq 0 ]] && echo -e "${GREEN}✓${NC} Docker containers stopped"
+    else
+      echo -e "${RED}✗${NC} Docker containers could not be stopped" >&2
+      docker_failed=1
+    fi
   else
     [[ "$QUIET" -eq 0 ]] && echo -e "${BLUE}📦 Keeping Docker containers (--keep-docker)${NC}"
   fi
 
   # Verify ports are free.
-  local ports_busy=0
-  for port in 8080 3000 3001 3478; do
+  local ports_busy=0 tcp_rc udp_rc
+  local ports=(8080 3000 3001)
+  [[ "$keep_docker" -eq 0 ]] && ports+=(3478)
+  for port in "${ports[@]}"; do
     if port_in_use "$port"; then
       echo -e "${RED}✗${NC} Port $port still in use" >&2
       ports_busy=1
+      continue
+    else
+      tcp_rc=$?
+    fi
+    if [[ $tcp_rc -eq 2 ]]; then
+      echo -e "${RED}✗${NC} Could not verify TCP port $port" >&2
+      probe_failed=1
+      continue
+    fi
+    if [[ "$port" == 3478 ]]; then
+      if udp_port_in_use "$port"; then
+        echo -e "${RED}✗${NC} Port $port still in use" >&2
+        ports_busy=1
+      else
+        udp_rc=$?
+        if [[ $udp_rc -eq 2 ]]; then
+          echo -e "${RED}✗${NC} Could not verify UDP port $port" >&2
+          probe_failed=1
+        fi
+      fi
     fi
   done
 
-  if [[ $ports_busy -eq 1 ]]; then
-    [[ "$QUIET" -eq 0 ]] && echo -e "${YELLOW}Try: $0 down --force${NC}"
+  if [[ $ports_busy -eq 1 || $docker_failed -eq 1 || $native_failed -eq 1 || $probe_failed -eq 1 ]]; then
+    [[ "$QUIET" -eq 0 && $ports_busy -eq 1 && "$force_flag" != "--force" ]] && echo -e "${YELLOW}Try: $0 down --force${NC}"
+    return 1
   else
     [[ "$QUIET" -eq 0 ]] && echo -e "${GREEN}✅ All services stopped${NC}"
+    return 0
   fi
 }
 verb_status() {
@@ -633,8 +1455,12 @@ verb_status() {
   for svc in control-plane media-plane vite-renderer; do
     local pid_file="$LOG_DIR/$svc.pid"
     local pid
-    if pid=$(read_valid_pid "$pid_file") && ps -p "$pid" >/dev/null 2>&1; then
-      printf "  ✓ %-18s PID %s\n" "$svc" "$pid"
+    if pid=$(read_valid_pid "$pid_file"); then
+      if tracked_pid_identity_state "$pid_file" "$pid"; then
+        printf "  ✓ %-18s PID %s\n" "$svc" "$pid"
+      else
+        printf "  ✗ %-18s stale or unverified PID file\n" "$svc"
+      fi
     elif [[ -f "$pid_file" ]]; then
       printf "  ✗ %-18s stale or invalid PID file\n" "$svc"
     else
@@ -647,10 +1473,10 @@ verb_status() {
     local base="${pid_file##*/desktop-client-}"
     local num="${base%.pid}"
     local pid
-    if pid=$(read_valid_pid "$pid_file") && ps -p "$pid" >/dev/null 2>&1; then
+    if pid=$(read_valid_pid "$pid_file") && tracked_pid_identity_state "$pid_file" "$pid"; then
       printf "  ✓ %-18s PID %s\n" "desktop-client-$num" "$pid"
     else
-      printf "  ✗ %-18s stale or invalid PID file\n" "desktop-client-$num"
+      printf "  ✗ %-18s stale or unverified PID file\n" "desktop-client-$num"
     fi
   done
 
@@ -669,6 +1495,8 @@ verb_status() {
   echo ""
   echo "--- Log file sizes ---"
   if [[ -d "$LOG_DIR" ]]; then
+    # Log names are script-owned; ls supplies the size ordering used here.
+    # shellcheck disable=SC2012
     ls -lhS "$LOG_DIR" 2>/dev/null | awk 'NR>1 && /\.log$/ {printf "  %-30s %s\n", $9, $5}'
   fi
 }
@@ -790,13 +1618,13 @@ verb_logs() {
 }
 verb_restart() {
   [[ $# -gt 0 ]] && { echo "verb_restart: takes no args, got '$1'" >&2; return 2; }
-  verb_down --keep-docker
+  verb_down --keep-docker || return $?
   verb_up --no-rebuild
 }
 
 verb_rebuild() {
   [[ $# -gt 0 ]] && { echo "verb_rebuild: takes no args, got '$1'" >&2; return 2; }
-  verb_down --keep-docker
+  verb_down --keep-docker || return $?
   verb_up  # rebuild = default
 }
 
@@ -814,7 +1642,10 @@ verb_freshstart() {
     fi
   fi
 
-  verb_down --force >/dev/null 2>&1 || true
+  if ! verb_down --force; then
+    echo -e "${RED}✗${NC} Fresh start aborted because existing processes could not be stopped safely." >&2
+    return 1
+  fi
   compose down -v >/dev/null 2>&1 || true
   # `compose down -v` only removes containers belonging to the current compose
   # project (`concordvoice-dev` per docker-compose.dev.yml `name:` directive).
