@@ -4,6 +4,12 @@ All notable changes to Concord Voice will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
+## [0.2.39] — 2026-07-31
+
+### Fixed
+
+- **A compromised web layer can no longer make the app read your private network** ([#2668](internal development reference omitted)) — when you pointed Concord Voice at a self-hosted server, the app checked that the address looked well-formed but never checked where it actually led. That let a hostile page inside the app reach devices on your own network, or your machine itself, and read what came back. Addresses are now checked at the moment the connection is made, addresses that could never host a server are refused outright, and a server on your own network or machine is reachable only after you have approved that server in a confirmation the web layer cannot draw or click. Approving a server is also now a separate, deliberate step rather than something a successful connection did on its own.
+
 ## [0.2.38] — 2026-07-30
 
 ### Fixed
