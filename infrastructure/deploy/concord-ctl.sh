@@ -883,12 +883,228 @@ case "${1:-help}" in
     ;;
 
   rebuild)
+    shift  # consume "rebuild"
+    # Optional service scope (#2178). `rebuild` with NO arguments is byte-for-byte
+    # the pre-#2178 behavior; every out-of-band caller (operator SSH,
+    # provision-production.sh, an older post-rsync.sh) therefore keeps working.
+    #
+    # Scope tokens originate from a `git diff` on the CI runner and cross an SSH
+    # env boundary before landing here, then get interpolated into a `docker
+    # compose` invocation. Validate and REJECT — never sanitize.
+    REBUILD_SCOPE=()
+    for _svc in "$@"; do
+      if [[ ! "$_svc" =~ ^[a-z][a-z0-9-]*$ ]]; then
+        echo "rebuild: invalid service name '$_svc'" >&2
+        exit 2
+      fi
+      case "$_svc" in
+        control-plane|media-plane|licensing-authority|ops-agent|coturn|postgres|redis|nats|minio) ;;
+        *)
+          echo "rebuild: unknown compose service '$_svc'" >&2
+          exit 2
+          ;;
+      esac
+      REBUILD_SCOPE+=("$_svc")
+    done
+
+    # `--no-deps` skips dependency startup AND the `depends_on` conditions, so it
+    # is only correct when the dependency containers are already up. Escalate to
+    # a full rebuild otherwise; the fail-safe direction is always "rebuild more",
+    # never "fail".
+    #
+    # Checking only the scoped service is NOT sufficient (#2178 review, HIGH —
+    # found independently by three reviewers). media-plane declares
+    # `nats: service_healthy`, and that gate was doing real work: the initial
+    # NATS connect is one-shot (services/media-plane/src/lib/nats.ts assigns
+    # `this.nc` only inside the try, and nothing retries it), so a media-plane
+    # that starts while NATS is down runs PERMANENTLY with all four
+    # `voice.enforce.*` subscriptions silently absent — server mute/deafen,
+    # mid-session RBAC revocation, temporary-SBAC revocation, and DM membership
+    # removal all stop arriving. Voice audio keeps working, so a banned or
+    # server-muted member keeps transmitting until they leave voluntarily.
+    # `/health` answers 200 throughout, so neither `--wait` nor `wait-healthy`
+    # can see it.
+    #
+    # Escalating on a down dependency restores what `depends_on` used to
+    # guarantee. Dependencies are read from the rendered compose config rather
+    # than hardcoded, so this cannot drift from the compose files.
+    # ERROR HANDLING DIRECTION — read before editing. Every failure to DETERMINE
+    # the dependency set must escalate to a full rebuild. Suppressing an error
+    # here does NOT mean "check fewer things"; it means fewer chances for the
+    # probe below to fire, so the scoped `--no-deps` path runs — which is exactly
+    # the fail-open this block exists to close. This mirrors the same operation
+    # done correctly for the Activity History contract ~750 lines above.
+    _rebuild_scoped=0
+    if [[ ${#REBUILD_SCOPE[@]} -gt 0 ]]; then
+      _rebuild_scoped=1
+      _scope_closure=()
+      # stderr goes to a SEPARATE file, never merged into the JSON. `docker
+      # compose` writes warnings to stderr while still exiting 0, so `2>&1`
+      # would prefix the JSON with a routine warning, fail the parse, and
+      # escalate to a full rebuild on EVERY deploy on that host — the scoping
+      # would silently never engage, with nothing in the log to say why.
+      # A good diagnostic and a parseable stream are different jobs.
+      _stderr_file="$(mktemp)"
+      if ! _rendered="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD config --format json 2>"$_stderr_file")"; then
+        echo "rebuild: cannot render Compose configuration to resolve dependencies — escalating to a full rebuild." >&2
+        sed 's/^/         /' "$_stderr_file" >&2
+        rm -f "$_stderr_file"
+        _rebuild_scoped=0
+      else
+        rm -f "$_stderr_file"
+        _dep_err="$(mktemp)"
+        for _svc in "${REBUILD_SCOPE[@]}"; do
+          _scope_closure+=("$_svc")
+          # `depends_on` renders as an object (service -> {condition:...}) under
+          # `config --format json`, or as a plain list in the short form. Emit
+          # "<name> <condition>" pairs so the probe can require health where the
+          # compose file requires health.
+          if ! _deps="$(python3 -c '
+import json, sys
+svc = json.load(sys.stdin)["services"][sys.argv[1]]
+dep = svc.get("depends_on") or {}
+if isinstance(dep, dict):
+    for name, spec in dep.items():
+        cond = (spec or {}).get("condition", "service_started") if isinstance(spec, dict) else "service_started"
+        print(name, cond)
+else:
+    for name in dep:
+        print(name, "service_started")
+' "$_svc" <<<"$_rendered" 2>"$_dep_err")"; then
+            echo "rebuild: cannot resolve depends_on for '$_svc' — escalating to a full rebuild." >&2
+            sed 's/^/         /' "$_dep_err" >&2
+            rm -f "$_dep_err"
+            _rebuild_scoped=0
+            break
+          fi
+          rm -f "$_dep_err"
+          while IFS= read -r _dep_line; do
+            [[ -n "$_dep_line" ]] && _scope_closure+=("$_dep_line")
+          done <<<"$_deps"
+        done
+      fi
+    fi
+
+    # Probe every member of the closure. A dependency declared `service_healthy`
+    # must be HEALTHY, not merely running — `ps --status running` carries no
+    # health axis, and a running-but-unhealthy NATS would otherwise pass while
+    # media-plane came up against a broken broker.
+    if [[ $_rebuild_scoped -eq 1 ]]; then
+      for _entry in "${_scope_closure[@]}"; do
+        _svc="${_entry%% *}"
+        _cond="${_entry#* }"
+        [[ "$_cond" == "$_svc" ]] && _cond="service_started"
+        # stderr separated here too, and for a sharper reason than the JSON
+        # cases: `_ids` is tested with `-z`, so a Compose warning merged into it
+        # would make the result NON-EMPTY and the service would read as running
+        # even when it is not — a fail-open in the guard's own liveness check.
+        _probe_err="$(mktemp)"
+        if ! _ids="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps --status running -q "$_svc" 2>"$_probe_err")"; then
+          echo "rebuild: cannot probe '$_svc' — escalating to a full rebuild." >&2
+          sed 's/^/         /' "$_probe_err" >&2
+          rm -f "$_probe_err"
+          _rebuild_scoped=0
+          break
+        fi
+        rm -f "$_probe_err"
+        if [[ -z "$_ids" ]]; then
+          echo "rebuild: '$_svc' (scoped service or one of its dependencies) has no running container — escalating to a full rebuild." >&2
+          _rebuild_scoped=0
+          break
+        fi
+        if [[ "$_cond" == "service_healthy" ]]; then
+          # Same stderr discipline as the config render above: a Compose warning
+          # merged into this stream would fail the JSON parse and escalate every
+          # deploy, making the scoping permanently inert.
+          _health_err="$(mktemp)"
+          if ! _health="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps --format json "$_svc" 2>"$_health_err")"; then
+            echo "rebuild: cannot read health for '$_svc' — escalating to a full rebuild." >&2
+            sed 's/^/         /' "$_health_err" >&2
+            rm -f "$_health_err"
+            _rebuild_scoped=0
+            break
+          fi
+          # EVERY row must be healthy. Reading only rows[0] lets one healthy
+          # container mask an unhealthy sibling if a dependency is ever scaled.
+          if ! _state="$(python3 -c '
+import json, sys
+raw = sys.stdin.read().strip()
+rows = json.loads(raw) if raw.startswith("[") else [
+    json.loads(line) for line in raw.splitlines() if line.strip()
+]
+if not rows:
+    print("")
+else:
+    bad = [r.get("Health", "") for r in rows if r.get("Health", "") != "healthy"]
+    print(bad[0] if bad else "healthy")
+' <<<"$_health" 2>"$_health_err")"; then
+            echo "rebuild: cannot parse health for '$_svc' — escalating to a full rebuild." >&2
+            sed 's/^/         /' "$_health_err" >&2
+            rm -f "$_health_err"
+            _rebuild_scoped=0
+            break
+          fi
+          rm -f "$_health_err"
+          if [[ "$_state" != "healthy" ]]; then
+            echo "rebuild: '$_svc' is declared service_healthy but reports '${_state:-unknown}' — escalating to a full rebuild." >&2
+            _rebuild_scoped=0
+            break
+          fi
+        fi
+      done
+    fi
+
+    # Unconditional, and deliberately BEFORE any scope branch: this is the
+    # Activity History first-activation boundary. A scope-conditional guard here
+    # would be a first-activation bypass. It takes an optional receipt_mode
+    # argument, so the scope list must never reach it.
     activity_history_routine_guard
-    clear_activity_history_image_selector
+
+    # ...but the image-selector clear IS scope-gated (#2178). It rm's the
+    # control-plane rollback image pin and its own echo asserts "rebuilding the
+    # current source" — an assertion a media-only scope does not honor. Clearing
+    # it unscoped would delete an operator's active pin while leaving the running
+    # control-plane on the pinned image: a silent divergence that surfaces later
+    # as an unexplained control-plane jump.
+    #
+    # Membership is tested in pure bash, NOT `printf ... | grep -qx`. Under
+    # `set -o pipefail` (line 4) `grep -q` exits on first match and closes the
+    # read end, so a producer still writing takes SIGPIPE and the pipeline
+    # reports 141 despite the match. The window is vanishingly small for a
+    # builtin writing a few short tokens, but the failure DIRECTION is severe: a
+    # false negative skips the clear while control-plane IS in scope, leaving
+    # CONTROL_PLANE_IMAGE exported, so the rebuild deploys the pinned ROLLBACK
+    # image instead of the new code — and then stamps .deploy-meta with the new
+    # SHA, hiding the change from every future scope diff.
+    _has_control_plane=0
+    for _s in ${REBUILD_SCOPE[@]+"${REBUILD_SCOPE[@]}"}; do
+      if [[ "$_s" == "control-plane" ]]; then
+        _has_control_plane=1
+        break
+      fi
+    done
+    if [[ $_rebuild_scoped -eq 0 || $_has_control_plane -eq 1 ]]; then
+      clear_activity_history_image_selector
+    else
+      echo "Keeping the Activity History rollback image pin: control-plane is not in this rebuild's scope."
+    fi
+
     # #1015: sync_releases no longer auto-called (see restart case comment).
     echo "Rebuilding and restarting..."
     echo "Note: release assets NOT refreshed automatically (#1015). Run 'concord-ctl.sh sync-releases' or trigger sync-releases.yml for a refresh."
-    cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --build
+    if [[ $_rebuild_scoped -eq 1 ]]; then
+      # --wait-timeout is MANDATORY, not decorative: `--wait` installs a deadline
+      # only when WaitTimeout > 0, so a bare --wait blocks forever and would hang
+      # the deploy's SSH session with the stack in an indeterminate state.
+      echo "Scope: ${REBUILD_SCOPE[*]} (--no-deps --wait)"
+      cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --build --no-deps --wait --wait-timeout 180 "${REBUILD_SCOPE[@]}"
+    else
+      # Unscoped stays WITHOUT --wait. Adding it here would pull every project
+      # service into the wait set — including coturn, whose STUN probe flaking
+      # would abort a full deploy that previously succeeded — and would duplicate
+      # post-rsync.sh's wait-healthy, which has far better diagnostics.
+      cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --build
+    fi
     echo "Done."
     ;;
 
@@ -1656,8 +1872,13 @@ case "${1:-help}" in
     echo "  status         Show running containers, health checks, last deploy metadata"
     echo "  logs           Tail service logs (pass service name to filter, e.g. 'logs control-plane')"
     echo "  restart        Restart all services (no auto-sync since #1015)"
-    echo "  rebuild        Force rebuild + restart all services (no auto-sync since #1015)"
-    echo "                 Also clears a persisted Activity History rollback image pin"
+    echo "  rebuild [SERVICE...]"
+    echo "                 Force rebuild + restart (no auto-sync since #1015). With no"
+    echo "                 arguments, rebuilds every service exactly as before. With a"
+    echo "                 service list, rebuilds only those with --no-deps --wait, and"
+    echo "                 escalates to a full rebuild if any named service is not running"
+    echo "                 Clears a persisted Activity History rollback image pin only when"
+    echo "                 unscoped or when control-plane is in scope"
     echo "  activity-history-routine-guard"
     echo "                 Verify canonical/rendered config and safe routine-deploy state"
     echo "  activity-history-activate --confirm-drained"
