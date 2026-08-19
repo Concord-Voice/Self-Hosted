@@ -164,6 +164,23 @@ port_in_use() {
 udp_port_in_use() {
   local port="$1"
   local output rc field value local_endpoint remote_endpoint saw_endpoint=0
+  # An `lsof -Fn` endpoint is ADDR:PORT. PORT is numeric for a bound socket,
+  # and `*` when the socket is bound to no port at all — the `*:*` shape
+  # stock macOS daemons (identitys, sharingd) report. Both are real socket
+  # states, so neither is a probe failure: a wildcard-port endpoint simply
+  # is not the port being asked about, so the scan skips it and continues.
+  # Requiring a numeric port made EVERY probe on macOS return 2, so the
+  # port-verification step at the end of verb_down always failed: `down
+  # --force` finished the teardown and then still exited 1, and
+  # verb_freshstart — which treats a non-zero verb_down as "processes could
+  # not be stopped safely" — refused to proceed to its wipe. ADDR is
+  # deliberately not inspected: `*` and bracketed IPv6 are both normal there,
+  # and `*:3478` must still count as port 3478 in use.
+  #
+  # Keep the `=~` right-hand side UNQUOTED at both use sites below. Quoting
+  # it turns the match into a literal-string comparison that never fires,
+  # which reinstates this exact bug in a far subtler form.
+  local endpoint_re=':([0-9]+|\*)$'
   if output=$(lsof_query -nP -iUDP -Fn); then
     :
   else
@@ -184,10 +201,10 @@ udp_port_in_use() {
       n*)
         value="${field#n}"
         local_endpoint="${value%%->*}"
-        [[ "$local_endpoint" =~ :[0-9]+$ ]] || return 2
+        [[ "$local_endpoint" =~ $endpoint_re ]] || return 2
         if [[ "$value" == *"->"* ]]; then
           remote_endpoint="${value#*->}"
-          [[ "$remote_endpoint" =~ :[0-9]+$ ]] || return 2
+          [[ "$remote_endpoint" =~ $endpoint_re ]] || return 2
         fi
         saw_endpoint=1
         [[ "$local_endpoint" == *":$port" ]] && return 0
