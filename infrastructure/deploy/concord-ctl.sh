@@ -898,7 +898,7 @@ case "${1:-help}" in
         exit 2
       fi
       case "$_svc" in
-        control-plane|media-plane|licensing-authority|ops-agent|coturn|postgres|redis|nats|minio) ;;
+        control-plane|media-plane|ops-agent|coturn|postgres|redis|nats|minio) ;;
         *)
           echo "rebuild: unknown compose service '$_svc'" >&2
           exit 2
