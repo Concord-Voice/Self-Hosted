@@ -6449,12 +6449,13 @@ paths:
       operationId: friendsPublicCodeAvatar
       description: 'Serves the code owner''s avatar keyed by CODE rather than by user id.
 
-        Every invalid class — malformed, unknown, expired, revoked, maxed-out — and every
-        owner without an avatar returns the same silhouette fallback with identical BYTES.
-        Headers are not identical: the success path sends Cache-Control max-age=3600 and
-        every fallback sends max-age=60, so the cache directive still distinguishes a live
-        code whose owner has an avatar. Bytes are proxied, never redirected:
-        a 302 would put the owner''s UUID in the Location header.
+        Every invalid class — malformed, unknown, expired, revoked, maxed-out — every
+        owner without an avatar, and every object-storage failure returns the same
+        silhouette fallback with identical bytes AND identical headers, including
+        Cache-Control: public, max-age=60, must-revalidate on the success path too.
+        A storage outage therefore cannot turn this route into a validity oracle.
+        Bytes are proxied, never redirected: a 302 would put the owner''s UUID in
+        the Location header.
 
         Rate limit: 60 requests per minute (per IP).
 
