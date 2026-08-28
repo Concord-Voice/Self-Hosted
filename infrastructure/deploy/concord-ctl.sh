@@ -413,7 +413,7 @@ activity_history_stop_control_plane() {
 activity_history_wait_control_plane() {
   local timeout="${ACTIVITY_HISTORY_HEALTH_TIMEOUT:-60}"
   local interval="${ACTIVITY_HISTORY_HEALTH_INTERVAL:-2}"
-  local deadline now remaining probe_limit sleep_for
+  local deadline now remaining probe_limit sleep_for probed=0
   if [[ ! "$timeout" =~ ^[1-9][0-9]*$ || ! "$interval" =~ ^[0-9]+$ ]]; then
     echo "activity-history: health timeout/interval must be integer seconds" >&2
     return 1
@@ -422,7 +422,22 @@ activity_history_wait_control_plane() {
   while true; do
     now="$(date +%s)"
     remaining=$((deadline - now))
-    (( remaining > 0 )) || break
+    if (( remaining <= 0 )); then
+      # ALWAYS probe at least once. `date +%s` is whole-second granularity, so the
+      # clock can tick between computing `deadline` above and reading `now` here.
+      # With a small timeout that made `remaining` 0 on the FIRST pass, and the
+      # function returned "timed out" having never called curl at all — a health
+      # wait that reports a timeout without probing is wrong on its own terms.
+      #
+      # Reproduced deterministically with a `date` stub controlling the tick:
+      #   no tick  -> rc=0, curl invoked once
+      #   one tick -> rc=1, curl invoked ZERO times
+      # It surfaced as a rare flake in test-activity-history-config.sh, which pins
+      # ACTIVITY_HISTORY_HEALTH_TIMEOUT=1 and so straddles the boundary most often.
+      (( probed )) && break
+      remaining=1
+    fi
+    probed=1
     probe_limit="$remaining"
     if (( interval > 0 && interval < probe_limit )); then
       probe_limit="$interval"
