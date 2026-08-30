@@ -50,14 +50,15 @@ if [[ ! -f "${LIVE}/fullchain.pem" || ! -f "${LIVE}/privkey.pem" ]]; then
 fi
 
 # ── coturn (DTLS/TLS TURN on port 5349) ──────────────────────────────────────
-COTURN_CERT_DIR="/opt/concord/certs/coturn"
-mkdir -p "${COTURN_CERT_DIR}"
-cp "${LIVE}/fullchain.pem" "${COTURN_CERT_DIR}/cert.pem"
-cp "${LIVE}/privkey.pem"   "${COTURN_CERT_DIR}/key.pem"
-# Readable by root + the concord group only; coturn runs as root inside its
-# container but the host-side restriction limits what other processes can read.
-chmod 640 "${COTURN_CERT_DIR}/cert.pem" "${COTURN_CERT_DIR}/key.pem"
-chown root:concord "${COTURN_CERT_DIR}/cert.pem" "${COTURN_CERT_DIR}/key.pem"
+# Test-only seam; do not set in production.
+COTURN_CERT_ROOT="${COTURN_CERT_ROOT:-/opt/concord/certs}"
+COTURN_CERT_DIR="${COTURN_CERT_ROOT}/coturn"
+# The pinned coturn image runs as 65534:65533 (nobody:nogroup). Execute-only
+# directories let that identity reach known files without allowing enumeration.
+install -d -o root -g root -m 0711 "${COTURN_CERT_ROOT}"
+install -d -o root -g root -m 0711 "${COTURN_CERT_DIR}"
+install -o root -g root -m 0444 "${LIVE}/fullchain.pem" "${COTURN_CERT_DIR}/cert.pem"
+install -o 65534 -g 65533 -m 0400 "${LIVE}/privkey.pem" "${COTURN_CERT_DIR}/key.pem"
 
 echo "[copy-certs] coturn certs updated in ${COTURN_CERT_DIR}"
 
