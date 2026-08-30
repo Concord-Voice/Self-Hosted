@@ -45,7 +45,7 @@ if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
   # running containers; Compose then loads the installer-owned root .env.
   unset INSTANCE_TYPE ACTIVITY_HISTORY_CLUSTER_ENABLED \
     CONTROL_PLANE_REPLICA_COUNT ACTIVITY_HISTORY_OPERATOR_NAME \
-    ACTIVITY_HISTORY_PRIVACY_POLICY_URL CONTROL_PLANE_IMAGE \
+    ACTIVITY_HISTORY_PRIVACY_POLICY_URL ATTACHMENT_WRITE_BACKEND CONTROL_PLANE_IMAGE \
     COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE
   COMPOSE_OVERRIDE=docker-compose.production.yml
   COMPOSE_PROFILES=services
@@ -174,10 +174,30 @@ activity_history_read_root_value() {
   count="$(grep -cE "^${key}=" "$file" 2>/dev/null || true)"
   [[ "$count" == 1 ]] || return 1
   value="$(grep -E "^${key}=" "$file" | cut -d= -f2-)"
-  if [[ ${#value} -ge 2 && "$value" == \'*\' ]]; then
+  if [[ ${#value} -ge 2 && ( "$value" == \'*\' || "$value" == \"*\" ) ]]; then
     value="${value:1:${#value}-2}"
   fi
   printf '%s' "$value"
+}
+
+install_attachment_probe_cron() {
+  local marker='concord-ctl.sh attachment-probe'
+  local current
+  local line="30 2 * * * ${DEPLOY_DIR}/[internal]concord-ctl.sh attachment-probe --backend r2-useast >> ${DEPLOY_DIR}/logs/attachment-probe.log 2>&1 && rm -f ${DEPLOY_DIR}/logs/attachment-probe-alert.flag || echo \"attachment-probe failed at \$(date -Is)\" > ${DEPLOY_DIR}/logs/attachment-probe-alert.flag"
+  if ! current="$(LC_ALL=C crontab -l 2>&1)"; then
+    if [[ "$current" != *"no crontab for"* ]]; then
+      echo "attachment-probe-cron-install: could not read the existing crontab: $current" >&2
+      return 1
+    fi
+    current=""
+  fi
+  {
+    if [[ -n "$current" ]]; then
+      grep -Fv "$marker" <<<"$current" || true
+    fi
+    printf '%s\n' "$line"
+  } | crontab -
+  echo "  ✓ nightly attachment probe cron installed"
 }
 
 activity_history_render_contract() {
@@ -1159,6 +1179,47 @@ else:
     fi
     ;;
 
+  attachment-probe)
+    shift
+    attachment_write_backend=legacy
+    if [[ -f "${DEPLOY_DIR}/.env" ]]; then
+      attachment_write_backend_count="$(grep -cE '^ATTACHMENT_WRITE_BACKEND=' "${DEPLOY_DIR}/.env" 2>/dev/null || true)"
+      if [[ "$attachment_write_backend_count" == 1 ]]; then
+        if ! attachment_write_backend="$(activity_history_read_root_value ATTACHMENT_WRITE_BACKEND)"; then
+          echo "attachment-probe: could not read ATTACHMENT_WRITE_BACKEND from ${DEPLOY_DIR}/.env" >&2
+          exit 1
+        fi
+        attachment_write_backend="${attachment_write_backend#"${attachment_write_backend%%[![:space:]]*}"}"
+        attachment_write_backend="${attachment_write_backend%"${attachment_write_backend##*[![:space:]]}"}"
+        attachment_write_backend="${attachment_write_backend:-legacy}"
+      elif [[ "$attachment_write_backend_count" != 0 ]]; then
+        echo "attachment-probe: ATTACHMENT_WRITE_BACKEND is duplicated in ${DEPLOY_DIR}/.env" >&2
+        exit 1
+      fi
+    fi
+    # With explicit arguments, storage-probe owns validation and backend selection.
+    if [[ $# -eq 0 ]]; then
+      if [[ "$attachment_write_backend" == "legacy" ]]; then
+        echo "  ✓ attachment probe dormant: ATTACHMENT_WRITE_BACKEND=legacy"
+        exit 0
+      fi
+      if [[ "$attachment_write_backend" != "legacy" && "$attachment_write_backend" != "r2-useast" ]]; then
+        echo "attachment-probe: invalid ATTACHMENT_WRITE_BACKEND '$attachment_write_backend'" >&2
+        exit 1
+      fi
+    fi
+    cd "$DEPLOY_DIR" && $COMPOSE_CMD run --rm --no-deps --pull never control-plane ./main storage-probe "$@"
+    ;;
+
+  attachment-probe-cron-install)
+    shift
+    if [[ $# -ne 0 ]]; then
+      echo "Usage: concord-ctl.sh attachment-probe-cron-install" >&2
+      exit 2
+    fi
+    install_attachment_probe_cron
+    ;;
+
   nginx-reload)
     # §5.9 (#919): render the source-of-truth nginx config with the validated
     # API HSTS policy, transactionally activate the fixed main/admin paths,
@@ -1901,6 +1962,8 @@ else:
     echo "  activity-history-rollback --confirm-drained --old-image <immutable-image-ref> [--downgrade-schema]"
     echo "                 Drain/disable, optionally downgrade, and start one pinned old CP image"
     echo "  validate-config  §F: pre-rebuild guard via 'docker compose config --quiet'"
+    echo "  attachment-probe  Validate the armed attachment backend without pulling images"
+    echo "  attachment-probe-cron-install  Idempotently install the nightly attachment probe"
     echo "  nginx-reload   Validate/render HSTS, atomically swap main/admin nginx files,"
     echo "                 nginx -t, reload/start, active-probe, and rollback on failure"
     echo "  wait-healthy   Block until all services healthy (--timeout SECONDS, default 60)"
