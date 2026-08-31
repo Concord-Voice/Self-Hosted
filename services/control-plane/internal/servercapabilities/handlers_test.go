@@ -272,7 +272,7 @@ func TestGetCapabilities_AttachmentEnvelopeVersions_OnlyWhenChunkedWired(t *test
 		assert.False(t, present, "unwired routes must not advertise an envelope version")
 	})
 
-	t.Run("wired advertises exactly v2 and v3", func(t *testing.T) {
+	t.Run("wired public JSON advertises exactly v2", func(t *testing.T) {
 		h := servercapabilities.NewHandler(&config.Config{InstanceType: "saas"})
 		h.SetChunkedAttachmentUpload(true)
 		w, c := newTestContext()
@@ -284,6 +284,7 @@ func TestGetCapabilities_AttachmentEnvelopeVersions_OnlyWhenChunkedWired(t *test
 			} `json:"features"`
 		}
 		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
-		assert.Equal(t, []int{2, 3}, body.Features.AttachmentEnvelopeVersions)
+		assert.Equal(t, []int{2}, body.Features.AttachmentEnvelopeVersions,
+			`public JSON features.attachmentEnvelopeVersions equals exactly [2]`)
 	})
 }
