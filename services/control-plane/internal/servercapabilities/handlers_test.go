@@ -36,7 +36,9 @@ func TestGetCapabilities_SaaS(t *testing.T) {
 	servercapabilities.NewHandler(cfg).GetCapabilities(c)
 
 	require.Equal(t, http.StatusOK, w.Code)
-	assert.Equal(t, "public, max-age=300", w.Header().Get("Cache-Control"))
+	assert.Equal(t, "no-store, no-cache, must-revalidate, max-age=0",
+		w.Header().Get("Cache-Control"))
+	assert.Equal(t, "no-cache", w.Header().Get("Pragma"))
 
 	var resp servercapabilities.Response
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))

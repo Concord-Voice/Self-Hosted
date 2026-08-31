@@ -159,7 +159,8 @@ func (h *Handler) GetCapabilities(c *gin.Context) {
 		resp.Features.AttachmentEnvelopeVersions = []int{2}
 	}
 
-	c.Header("Cache-Control", "public, max-age=300")
+	c.Header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+	c.Header("Pragma", "no-cache")
 	c.JSON(http.StatusOK, resp)
 }
 
