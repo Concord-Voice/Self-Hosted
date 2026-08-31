@@ -155,7 +155,8 @@ func (h *Handler) GetCapabilities(c *gin.Context) {
 		PolicyVersion: policyVersion,
 	}
 	if h.chunkedAttachmentUpload {
-		resp.Features.AttachmentEnvelopeVersions = []int{2, 3}
+		// Do not advertise v3 until every supported client can read it.
+		resp.Features.AttachmentEnvelopeVersions = []int{2}
 	}
 
 	c.Header("Cache-Control", "public, max-age=300")
