@@ -20,6 +20,7 @@ Concord Voice now lets you choose who can see your voice-channel and private-cal
 
 ### Fixed
 
+- **Removing someone from a private conversation or deleting its creator no longer leaves stale voice activity after a restart** ([#3052](internal development reference omitted)) — Concord now records the required activity clear before membership or account deletion removes the information needed to find it.
 - **Encrypted attachments stay on the compatible storage format during rollouts** ([#3051](internal development reference omitted)) — the server no longer advertises a new format before every supported client can read it, and the desktop rejects capability lists containing unknown formats instead of assuming the remaining entries are safe.
 - **An invite preview no longer reuses details from a different invite while loading** ([#3037](internal development reference omitted)) — preview results are now kept with the invite code they describe, so changing codes shows a loading state until the new details arrive.
 - **Prepared large encrypted attachments for consistently sized upload pieces** ([#3039](internal development reference omitted)) — the client and server now understand a new attachment format that reserves room for the header inside the first piece, while retaining the existing write format until compatible server and client versions can be negotiated. Attachments already stored in the older format still open normally.
