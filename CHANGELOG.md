@@ -6,11 +6,17 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+## [0.2.45] — 2026-09-02
+
+Voice channels and private calls can be joined again: a minimum-app-version requirement was also being applied to Concord Voice's own internal service calls, which have no app version to report, so every join attempt was refused. This release also refreshes the desktop runtime to Electron 43.5.1, keeps forwarded video within its requested temporal-quality limit, and makes sign-in and security-key enrollment reject extension data Concord Voice did not request. Groundwork for the hosted attachment-storage move continues in the background; where your attachments are stored has not changed yet.
+
 ### Changed
 
 - **The desktop runtime was refreshed to Electron 43.5.1** ([#3087](internal development reference omitted)) — this updates the embedded Chromium, Node.js, and V8 versions and takes upstream sandbox, permission, custom-protocol, and context-bridge fixes without changing app settings or saved data.
 - **Large encrypted attachments can now use consistently sized upload pieces during the storage rollout** ([#3086](internal development reference omitted)) — clients at or above the configured reader floor can choose the newer format, while older or unversioned clients stay on the earlier format and attachments continue using the existing storage destination until the R2 cutover is completed.
-- **Video forwarding now honors requested temporal-quality limits during layer fallback** ([#3055](internal development reference omitted)) — the media server now keeps simulcast and scalable-video output at or below the requested temporal layer when it has to use a different spatial layer. This changes the media engine's layer-selection behavior; no Concord wire-format or configuration migration is required.
+- **Video forwarding now keeps temporal quality at or below the requested layer** ([#3055](internal development reference omitted)) — the media server caps the temporal layer at the requested preference for both simulcast and scalable-video streams. When no usable spatial layer exists at or below the preferred one, it can select a higher spatial layer instead of stopping there. Upstream classifies this as a breaking behavior change; no Concord wire-format or configuration migration is required.
+- **Admin and media-plane production dependencies were refreshed** ([#3073](internal development reference omitted), [#3098](internal development reference omitted)) — `lucide-react` and the media-plane `qs` transitive moved to their reviewed releases.
+- **Development and CI tooling was refreshed** ([#3099](internal development reference omitted), [#3097](internal development reference omitted), [#3096](internal development reference omitted), [#3065](internal development reference omitted), [#3074](internal development reference omitted), [#3071](internal development reference omitted), [#3070](internal development reference omitted), [#3085](internal development reference omitted)) — linting, test, type, and GitHub Actions packages advanced without changing runtime behavior.
 
 ### Fixed
 
@@ -20,9 +26,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **WebAuthn ceremonies now reject unexpected client extension output** ([#3090](internal development reference omitted)) — sign-in and security-key enrollment explicitly fail closed when a client returns extension data that Concord did not request.
 
-### Security
-
-- **The control-plane dependency graph no longer includes the advisory-affected MongoDB driver release** ([#3091](internal development reference omitted)) — Concord does not call the affected bulk-write API, but the indirect driver is patched before that path can become reachable.
+- **The control-plane dependency graph no longer includes the advisory-affected MongoDB driver release** ([#3091](internal development reference omitted)) — Concord does not call the affected bulk-write API, but the indirect driver is patched before that path can become reachable. The same update advances the indirect `quic-go` and `sonic` modules to their reviewed releases.
 
 ## [0.2.44] — 2026-09-01
 
