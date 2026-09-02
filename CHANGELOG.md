@@ -20,6 +20,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **WebAuthn ceremonies now reject unexpected client extension output** ([#3090](internal development reference omitted)) — sign-in and security-key enrollment explicitly fail closed when a client returns extension data that Concord did not request.
 
+### Security
+
+- **The control-plane dependency graph no longer includes the advisory-affected MongoDB driver release** ([#3091](internal development reference omitted)) — Concord does not call the affected bulk-write API, but the indirect driver is patched before that path can become reachable.
+
 ## [0.2.44] — 2026-09-01
 
 Concord Voice now lets you choose who can see your voice-channel and private-call activity, while keeping that activity current internally, and invite previews stay tied to the invite you opened. The attachment stack is ready for the hosted storage cutover without moving writes yet: production validates the R2 destination, format rollout remains fenced to compatible clients, and cleanup work retries fairly across storage backends. Account, conversation, and server deletion now preserve the media and voice-activity cleanup they trigger, while refreshed dependencies and tooling address newly reported advisories.
