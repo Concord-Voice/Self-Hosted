@@ -10,6 +10,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **The desktop runtime was refreshed to Electron 43.5.1** ([#3087](internal development reference omitted)) — this updates the embedded Chromium, Node.js, and V8 versions and takes upstream sandbox, permission, custom-protocol, and context-bridge fixes without changing app settings or saved data.
 - **Large encrypted attachments can now use consistently sized upload pieces during the storage rollout** ([#3086](internal development reference omitted)) — clients at or above the configured reader floor can choose the newer format, while older or unversioned clients stay on the earlier format and attachments continue using the existing storage destination until the R2 cutover is completed.
+- **Video forwarding now honors requested temporal-quality limits during layer fallback** ([#3055](internal development reference omitted)) — the media server now keeps simulcast and scalable-video output at or below the requested temporal layer when it has to use a different spatial layer. This changes the media engine's layer-selection behavior; no Concord wire-format or configuration migration is required.
 
 ### Fixed
 
