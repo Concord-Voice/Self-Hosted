@@ -16,6 +16,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 - **Voice channels and calls can be joined again** ([#3088](internal development reference omitted)) — a server setting that checks which app version you are running was also being applied to an internal check between Concord's own services, which has no app version to report. Every attempt to join a voice channel or start a call was refused as unauthorized, even when you had permission. The internal check now identifies itself directly, so the version requirement applies only where it is meant to.
 
+### Security
+
+- **WebAuthn ceremonies now reject unexpected client extension output** ([#3090](internal development reference omitted)) — sign-in and security-key enrollment explicitly fail closed when a client returns extension data that Concord did not request.
+
 ## [0.2.44] — 2026-09-01
 
 Concord Voice now lets you choose who can see your voice-channel and private-call activity, while keeping that activity current internally, and invite previews stay tied to the invite you opened. The attachment stack is ready for the hosted storage cutover without moving writes yet: production validates the R2 destination, format rollout remains fenced to compatible clients, and cleanup work retries fairly across storage backends. Account, conversation, and server deletion now preserve the media and voice-activity cleanup they trigger, while refreshed dependencies and tooling address newly reported advisories.
