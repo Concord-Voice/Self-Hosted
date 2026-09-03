@@ -143,12 +143,12 @@ func TestUnconfiguredSecretCannotProduceAValidProof(t *testing.T) {
 }
 
 func TestTokenDigestDoesNotEmitTheToken(t *testing.T) {
-	const token = "redacted-test-bearer" // hex-ish prefix so the check below can fail
-	digest := mediaproof.TokenDigest(token)
+	const probe = "abababababababab-probe" // hex-ish prefix so the check below can fail
+	digest := mediaproof.TokenDigest(probe)
 
-	assert.NotContains(t, digest, "0123456789abcdef",
+	assert.NotContains(t, digest, "abababababababab",
 		"a digest that echoed its input would contain this hex-only prefix")
 	assert.Len(t, digest, 64)
-	assert.Equal(t, digest, mediaproof.TokenDigest(token))
+	assert.Equal(t, digest, mediaproof.TokenDigest(probe))
 	assert.NotEqual(t, digest, mediaproof.TokenDigest("another-token"))
 }
