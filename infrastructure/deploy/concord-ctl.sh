@@ -1776,6 +1776,16 @@ else:
     echo "  ✓ sudoers-sync: root-approved policy is active"
     ;;
 
+  security-event-logging)
+    if ! sudo -n /usr/local/sbin/concord-security-event-logging; then
+      echo "  ✗ security-event-logging: root-owned preparation helper is unavailable or failed" >&2
+      echo "    Bootstrap from a reviewed root-owned staging directory before rebuilding; see:" >&2
+      echo "      [internal]deploys.md#sudoers-boundary-bootstrap-and-updates" >&2
+      exit 1
+    fi
+    echo "  ✓ security-event-logging: dedicated application log boundary is prepared"
+    ;;
+
   wait-healthy)
     # Server-side health gate for #848 deploy.yml. Wraps the loop pattern
     # from the now-deleted deploy.sh:117-134 with a CLI flag for timeout.
