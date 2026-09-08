@@ -758,6 +758,8 @@ activity_history_rollback() {
 # concord. Keeping that inode is load-bearing: kernel lock ownership, not file
 # existence, controls admission.
 readonly DEPLOY_TRANSACTION_LOCK_PATH="/var/lib/concord/deploy-transaction.lock"
+# Non-blocking by default; the deploy verbs raise it just before acquiring.
+DEPLOY_LOCK_WAIT_SECS=0
 readonly LOCKF_REENTRY_MARKER="--concord-ctl-lockf-reentry-v1"
 CONCORD_CTL_LOCKF_REENTRY_INTERNAL=0
 
@@ -788,6 +790,44 @@ fi
 
 acquire_deploy_transaction_lock() {
   local operation="$1" lock_rc=0 lock_backend=""
+
+  # SELF-HOSTED HOSTS HAVE NO LOCK, AND MUST NOT BE REFUSED FOR IT.
+  # /var/lib/concord is created by provision-production.sh's
+  # install_sudoers_boundary -- a MANAGED-host step. A self-hosted operator runs
+  # install-selfhost.sh instead and never has that directory, so requiring the
+  # lock here would break `concord-selfhost up|stop|down|freshstart` outright.
+  #
+  # Skipping is correct rather than merely tolerable: the same provisioning step
+  # that creates this directory is the one that installs the #3107 healthwatch
+  # actor and its /var/lib/concord/healthwatch state. No directory means no
+  # actor, which means no contender -- the interlock is protecting against
+  # something that cannot exist on that host.
+  #
+  # Scoped to the WAITING callers on purpose. nginx-reload and sudoers-sync are
+  # managed-only paths that legitimately require the lock, and their strict
+  # behaviour is untouched: they pass no wait, so they never take this branch.
+  # The skip is ANNOUNCED, never silent. A deploy that quietly runs without the
+  # interlock it was told it has is the worse failure of the two: it looks
+  # identical to one that took the lock. Self-hosted hosts are single-operator
+  # and have no healthwatch actor today, so the exposure is nil -- but that is a
+  # property of TODAY'S self-host topology, not a guarantee, and the notice is
+  # what makes it re-checkable when that changes.
+  if (( ${DEPLOY_LOCK_WAIT_SECS:-0} > 0 )) \
+     && [[ ! -d "$(dirname "$DEPLOY_TRANSACTION_LOCK_PATH")" ]]; then
+    echo "  ℹ ${operation}: no $(dirname "$DEPLOY_TRANSACTION_LOCK_PATH") — running WITHOUT the deploy transaction lock." >&2
+    echo "    Expected on a self-hosted host: that directory and the #3107 healthwatch actor are both" >&2
+    echo "    created by provision-production.sh, which self-hosted installs never run. No actor means" >&2
+    echo "    no contender. A self-hosted interlock of its own is tracked at #3161 (epic #1615)." >&2
+    return 0
+  fi
+  # Bounded wait in seconds, taken from DEPLOY_LOCK_WAIT_SECS rather than a
+  # positional argument: callers invoke this as `"$@"`, and the lockf backend
+  # re-executes the controller with that same argv, so a trailing wait argument
+  # would both be misread ($2 is the VERB's first argument) and corrupt the
+  # re-exec. Defaulted to 0 at declaration so an inherited environment value
+  # cannot silently make a deploy block.
+  local wait_secs="${DEPLOY_LOCK_WAIT_SECS:-0}"
+  [[ "$wait_secs" =~ ^[0-9]+$ ]] || wait_secs=0
   local lock_path="$DEPLOY_TRANSACTION_LOCK_PATH"
   local status_path="" child_status=""
 
@@ -801,7 +841,11 @@ acquire_deploy_transaction_lock() {
       echo "  ✗ ${operation}: cannot open deploy transaction lock at $lock_path" >&2
       exit 1
     fi
-    /usr/bin/flock -n 9 || lock_rc=$?
+    if (( wait_secs > 0 )); then
+      /usr/bin/flock -w "$wait_secs" 9 || lock_rc=$?
+    else
+      /usr/bin/flock -n 9 || lock_rc=$?
+    fi
   elif [[ -x /usr/bin/lockf ]]; then
     lock_backend=lockf
     # BSD/macOS lockf portably locks a pathname while it runs a command. Let
@@ -846,7 +890,8 @@ acquire_deploy_transaction_lock() {
     if [[ ( "$lock_backend" == flock && "$lock_rc" -eq 1 ) \
        || ( "$lock_backend" == lockf && "$lock_rc" -eq 75 ) ]]; then
       echo "  ✗ ${operation}: deploy transaction lock is busy at $lock_path" >&2
-      echo "    Another nginx-reload or sudoers-sync is running; no changes were made." >&2
+      echo "    Another deploy, nginx-reload, sudoers-sync, or the healthwatch actor" >&2
+      echo "    (#3107) holds it; no changes were made." >&2
     else
       echo "  ✗ ${operation}: failed to acquire deploy transaction lock at $lock_path (rc=$lock_rc)" >&2
     fi
@@ -856,6 +901,24 @@ acquire_deploy_transaction_lock() {
 
 case "${1:-help}" in
   nginx-reload|sudoers-sync)
+    acquire_deploy_transaction_lock "$@"
+    ;;
+  rebuild|restart|stop|activity-history-activate|activity-history-rollback)
+    # The two activity-history verbs belong here for the SAME reason the deploy
+    # verbs do, and leaving them out was an omission rather than a decision: both
+    # stop and start the control plane, and both then gate on health and image
+    # checks afterwards. An actor cycle holding pre-transition unhealthy evidence
+    # can sample the freshly started container and restart it mid-gate, failing a
+    # guarded activation or rollback for a reason nothing in their output would
+    # explain.
+    #
+    # Bounded wait, NOT fail-fast. The healthwatch actor (#3107) takes this same
+    # inode with `flock -n` and yields immediately on contention, so its hold is
+    # bounded by one cycle -- but that cycle can include a control-plane restart
+    # carrying a 45s stop_grace_period. Failing the deploy there would surface as
+    # an unexplained "lock is busy" on a few percent of deploys and read as CI
+    # flake. 90s comfortably exceeds the actor's worst-case hold.
+    DEPLOY_LOCK_WAIT_SECS=90
     acquire_deploy_transaction_lock "$@"
     ;;
 esac
@@ -1886,6 +1949,17 @@ else:
       echo "Aborted."
       exit 0
     fi
+    # ACQUIRED HERE, not in the pre-dispatch block, and the difference is an
+    # unbounded hold. `flock -w` bounds how long acquisition WAITS; once taken,
+    # the descriptor-form lock is held by this shell until it exits. Acquiring
+    # before the prompt above meant an operator who paused or walked away from
+    # the confirmation left healthwatch deferring every cycle and every other
+    # deploy verb timing out at 90s, indefinitely, with no indication why.
+    # After the confirmation and before the first mutation is the only correct
+    # place: freshstart still holds the interlock for everything destructive.
+    DEPLOY_LOCK_WAIT_SECS=90
+    acquire_deploy_transaction_lock "$@"
+
     clear_activity_history_image_selector
     activity_history_invalidate_activation_receipt
     echo ""
