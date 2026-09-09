@@ -137,6 +137,104 @@ compose() {
   docker compose "${COMPOSE_FILES[@]}" "$@"
 }
 
+# ── Compose-project split detection ──────────────────────────────────────────
+# Containers created WITHOUT the dev overlay land under a project name derived
+# from the directory (concord-voice-alpha) instead of the `name:` declared in
+# docker-compose.dev.yml. `compose ps` filters by the declared project, so those
+# containers are invisible to every verb here: `status` reports an empty stack
+# while postgres and redis are up, `up` tries to create containers whose names
+# are already taken, and `down` removes only what it can see and then reports
+# success -- leaving the rest to collide on the next `up`.
+#
+# Seen 2026-08-19, when another session's DB tests failed against containers a
+# `down` had reported removing and it read as a code regression, and again
+# 2026-09-08, when a clean `status` nearly justified recreating a postgres that
+# had been up 36 hours. Nothing is broken in either case; the tooling's VIEW of
+# the stack is wrong, which is exactly why filtering it out silently is the
+# defect. Name it instead.
+
+# Read the project from the file rather than hardcoding it, so this can never
+# disagree with the command it is warning about.
+declared_compose_project() {
+  # Quotes are stripped because a quoted value kept verbatim matches no docker
+  # label, so EVERY container reads as stray under a banner whose remedy is
+  # `docker rm -f`. (\047 is awk's single quote; embedding one literally inside
+  # this single-quoted program would need shell gymnastics for no gain.)
+  awk '/^name:[[:space:]]/ { v = $2; gsub(/["\047]/, "", v); print v; exit }' \
+    "${1:-$PROJECT_ROOT/docker-compose.dev.yml}" 2>/dev/null
+}
+
+# Only containers THIS stack would create. Matching a `concordvoice-` prefix
+# instead would sweep in other sessions' isolated stacks, which are correctly
+# separate and none of our business.
+expected_container_names() {
+  # Same quote-stripping as above, but this one fails the OTHER way: a quoted
+  # container_name: never enters `known`, so a genuine split goes unreported —
+  # silent and total, where the name: case is merely loud.
+  # An array, not "${@:-a b}" — that expands the default as ONE word, so awk gets
+  # a single nonexistent filename, the caller sees an empty set and returns early.
+  local files=("$@")
+  [[ ${#files[@]} -gt 0 ]] || files=(
+    "$PROJECT_ROOT/docker-compose.yml"
+    "$PROJECT_ROOT/docker-compose.dev.yml"
+  )
+  awk '/^[[:space:]]*container_name:[[:space:]]/ { v = $2; gsub(/["\047]/, "", v); print v }' \
+    "${files[@]}" 2>/dev/null | sort -u
+}
+
+# Advisory only: never fails a verb, and silent when there is no split.
+warn_compose_project_split() {
+  local declared expected rows stray
+  declared=$(declared_compose_project) || return 0
+  [[ -n "$declared" ]] || return 0
+  # "Could not look" and "nothing to report" are the same silence to a reader, and
+  # a silently-degraded view is the exact defect this check exists to name. Say so
+  # under --verbose rather than adding noise to every run.
+  if ! command -v docker >/dev/null 2>&1; then
+    [[ "$VERBOSE" -eq 1 ]] && echo "  split check skipped: docker is not on PATH" >&2
+    return 0
+  fi
+  expected=$(expected_container_names) || return 0
+  [[ -n "$expected" ]] || return 0
+
+  if ! rows=$(docker ps -a --format '{{.Names}}\t{{.Label "com.docker.compose.project"}}\t{{.Status}}' 2>/dev/null); then
+    [[ "$VERBOSE" -eq 1 ]] && echo "  split check skipped: docker ps failed (daemon unreachable?)" >&2
+    return 0
+  fi
+  [[ -n "$rows" ]] || return 0
+
+  # awk -v cannot carry a literal newline, so pass the name list space-separated.
+  # Container names cannot contain spaces, so the round-trip is lossless.
+  stray=$(printf '%s\n' "$rows" | awk -F'\t' -v want="$declared" -v names="$(printf '%s' "$expected" | tr '\n' ' ')" '
+    BEGIN { n = split(names, a, " "); for (i = 1; i <= n; i++) if (a[i] != "") known[a[i]] = 1 }
+    ($1 in known) && $2 != want {
+      printf "    %-30s project=%-24s %s\n", $1, ($2 == "" ? "(none)" : $2), $3
+    }') || return 0
+  [[ -n "$stray" ]] || return 0
+
+  # stderr, matching env_drift_warn. Deliberately NOT suppressed under --quiet,
+  # which is where this differs from that function: --quiet asks for less
+  # narration, and a warning that the tool's VIEW of the stack is wrong is the
+  # one line that must survive it. Hiding it is the defect, one level up.
+  {
+    echo ""
+    echo "  ⚠ COMPOSE PROJECT SPLIT — these containers belong to this stack by name"
+    echo "    but carry a different compose project, so compose cannot see them:"
+    printf '%s\n' "$stray"
+    echo ""
+    echo "    Why it matters: status under-reports, 'up' may try to create containers"
+    echo "    whose names are already taken, and 'down' can report success while"
+    echo "    leaving these running -- so the next 'up' collides again."
+    echo "    Usual cause: created without '-f docker-compose.dev.yml', so compose"
+    echo "    derived the project from the directory instead of name: ${declared}."
+    echo "    A container from the 'tools' or 'services' profile can also appear"
+    echo "    here; this script never creates those, so check before removing one."
+    echo "    Fix, when no other session is mid-test:"
+    echo "      docker rm -f <the names above>   # named volumes survive; data is kept"
+    echo "      ./scripts/concord-dev.sh up"
+  } >&2
+}
+
 # lsof_query() — preserve lsof's three useful outcomes: match, no match, and
 # execution/probe failure. Returns 0 with output, 1 for a clean no-match, and 2
 # when port ownership could not be determined.
@@ -1147,6 +1245,11 @@ _up_infra() {
     rm -rf "$PROJECT_ROOT/.dev-data" 2>/dev/null || true
   fi
 
+  # A split project makes the next line create containers whose names are already
+  # taken, which compose reports as a name conflict after it has begun creating
+  # the rest. Say so BEFORE that happens rather than after it half-applies.
+  warn_compose_project_split
+
   # Default compose profile = 5 infra services (postgres redis nats coturn minio).
   compose up -d >/dev/null
 
@@ -1377,6 +1480,12 @@ verb_down() {
   done
 
   mkdir -p "$LOG_DIR"
+
+  # Warn BEFORE tearing down: `down` removes only what its own project can see,
+  # so a split makes it report success while leaving these running. That is the
+  # 2026-08-19 incident in this file's header comment.
+  warn_compose_project_split
+
   if ! command -v lsof >/dev/null 2>&1; then
     echo -e "${RED}✗${NC} lsof is required to verify safe process cleanup" >&2
     probe_failed=1
@@ -1467,6 +1576,7 @@ verb_status() {
   echo ""
   echo "--- Containers ---"
   compose ps 2>/dev/null || echo "(compose ps failed — Docker may not be running)"
+  warn_compose_project_split
   echo ""
   echo "--- Native processes ---"
   for svc in control-plane media-plane vite-renderer; do
