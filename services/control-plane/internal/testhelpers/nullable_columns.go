@@ -46,7 +46,11 @@ func NullableNoDefaultColumns(t *testing.T, db *sql.DB, table string) []string {
 	if err != nil {
 		t.Fatalf("testhelpers: nullable-column introspection failed for %q: %v", table, err)
 	}
-	defer func() { _ = rows.Close() }()
+	defer func() {
+		if err := rows.Close(); err != nil {
+			t.Errorf("testhelpers: close nullable-column rows for %q: %v", table, err)
+		}
+	}()
 
 	var cols []string
 	for rows.Next() {

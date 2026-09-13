@@ -4,14 +4,15 @@ package auth_test
 
 import (
 	"context"
+	"database/sql"
 	"net/http"
 	"testing"
-
-	"github.com/stretchr/testify/require"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // TestSSORefresh_NullDeviceMetadata_Returns200 reproduces #3290: an SSO-minted
@@ -56,6 +57,7 @@ func TestSSORefresh_NullDeviceMetadata_Returns200(t *testing.T) {
 
 	headers := http.Header{}
 	headers.Set("X-Refresh-Token", refreshToken)
+	headers.Set("User-Agent", "sso-test-agent")
 	w := ts.DoRequest("POST", "/api/v1/auth/refresh", nil, headers)
 
 	if w.Code != http.StatusOK {
@@ -67,4 +69,28 @@ func TestSSORefresh_NullDeviceMetadata_Returns200(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code,
 		"an SSO session must survive its first refresh; a 500 here is the NULL metadata scan (fetchActiveRefreshToken Scans NULL device_name/ip_address/user_agent into plain string fields)")
+
+	var response struct {
+		RefreshToken      string `json:"refresh_token"`
+		PreviousSessionID string `json:"previous_session_id"`
+	}
+	testhelpers.ParseJSON(t, w, &response)
+	require.NotEmpty(t, response.RefreshToken)
+	require.Equal(t, sessionID, response.PreviousSessionID)
+
+	var successorID, deviceName, ipAddress string
+	var userAgent sql.NullString
+	err = ts.DB.QueryRow(
+		`SELECT id, device_name, host(ip_address), user_agent
+		 FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL`, user.ID,
+	).Scan(&successorID, &deviceName, &ipAddress, &userAgent)
+	require.NoError(t, err)
+	require.NotEqual(t, sessionID, successorID)
+	assert.NotEmpty(t, ipAddress)
+	assert.True(t, userAgent.Valid)
+	assert.Empty(t, deviceName, "SSO device name remains absent through rotation")
+
+	// The rotated pair is usable: a second refresh consumes the exact successor.
+	second := ts.DoRequest("POST", "/api/v1/auth/refresh", nil, http.Header{"X-Refresh-Token": []string{response.RefreshToken}, "User-Agent": []string{"sso-test-agent"}})
+	assert.Equal(t, http.StatusOK, second.Code)
 }

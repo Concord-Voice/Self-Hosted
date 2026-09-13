@@ -1,6 +1,15 @@
 package auth
 
-import "testing"
+import (
+	"database/sql"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+	"github.com/gin-gonic/gin"
+	"github.com/stretchr/testify/require"
+)
 
 // regression for #3290
 //
@@ -30,4 +39,15 @@ func TestSignalMatch(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestRefresh_GraceLookupErrorReturns500(t *testing.T) {
+	db := sql.OpenDB(noRowsConnector{})
+	require.NoError(t, db.Close())
+	h := &Handler{db: db, log: logger.New("test")}
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/refresh", nil)
+	require.True(t, h.attemptGracePeriodRecovery(c, "replayed-hash"))
+	require.Equal(t, http.StatusInternalServerError, w.Code)
 }

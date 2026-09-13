@@ -1418,10 +1418,10 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool, 
 		//   - an IS NULL wildcard is the only form that displaces an SSO row, and
 		//     it displaces every metadata-less session of that user from any
 		//     device — a cross-device silent-logout primitive on an auth path.
-		// Exposure is bounded to one refresh interval: rotation writes real
-		// machine_id / ip_address / user_agent into the successor, after which the
-		// machine_id branch above displaces it. Note this arm is reached only when
-		// the LOGIN request carries no machine ID, i.e. web SPA, not desktop.
+		// Exposure is bounded to one refresh interval: rotation writes real IP and
+		// user-agent into the successor, after which this same-origin predicate can
+		// displace a matching machine-ID-less session. A request with a machine ID
+		// uses the branch above. This arm is reached only for web-SPA login requests.
 		// Closing it properly means stamping metadata at the SSO mint.
 		`UPDATE refresh_tokens SET revoked_at = NOW()
 		 WHERE user_id = $1 AND ip_address = $2 AND user_agent = $3 AND revoked_at IS NULL`,
@@ -1639,14 +1639,12 @@ func (h *Handler) attemptGracePeriodRecovery(c *gin.Context, tokenHash string) b
 	// two-outcome form sent every benign SSO rotation race to the loud arm and
 	// emitted a SeverityHigh replay event for it.
 	//
-	// Generalizing absent-as-pass across all three signals was REJECTED: for an
-	// SSO row all three are absent, so the gate would empty to "30s window +
-	// predecessor lineage", which is a session-takeover primitive for anyone
-	// holding the just-revoked token. The >=1-known-signal rule is what prevents
-	// that. Everything here stays fail-closed — the worst new outcome is a 401,
-	// never a mint.
-	ipKnown, ipOk := signalMatch(stripCIDR(revokedIP), requestIP)
-	uaKnown, uaOk := signalMatch(revokedUA, requestUA)
+	// IP and user-agent are recorded evidence: stored absence is no signal, but
+	// a recorded value must match even when the request omits it. The >=1-known-
+	// signal rule keeps an all-absent SSO row from recovering on lineage alone.
+	ip := stripCIDR(revokedIP)
+	ipKnown, ipOk := ip != "", ip == "" || ip == requestIP
+	uaKnown, uaOk := revokedUA != "", revokedUA == "" || revokedUA == requestUA
 	midKnown, midOk := signalMatch(revokedMachineID, graceRequestMachineID)
 
 	withinWindow := time.Since(revokedAt) < 30*time.Second
@@ -1683,13 +1681,12 @@ func (h *Handler) attemptGracePeriodRecovery(c *gin.Context, tokenHash string) b
 
 	// LOUD REFUSE — a known signal was refuted, or the window has passed.
 	//
-	// same_ip reports what the GATE decided. It compared the raw revokedIP while
-	// the gate two lines up compared stripCIDR(revokedIP), so it was always false
-	// in production whenever the stored value carried a suffix (#3290).
+	// same_ip and same_ua report actual known matches; an absent stored signal
+	// passes the gate but is not reported as a match.
 	h.log.Warn("Refresh token replay detected, stale token replayed",
 		"request_id", c.GetString(middleware.RequestIDContextKey),
 		"user_id", revokedUserID,
-		"same_ip", ipOk, "same_ua", uaOk,
+		"same_ip", ipKnown && ipOk, "same_ua", uaKnown && uaOk,
 		"revoked_ago_ms", time.Since(revokedAt).Milliseconds())
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSession, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityHigh, ReasonCode: securityevent.ReasonRefreshReplay, AuthMethod: securityevent.AuthSession, RouteTemplate: securityevent.RouteAuthRefresh})
 	c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidRefreshToken})
@@ -1745,9 +1742,9 @@ func (h *Handler) checkMachineIDTheft(c *gin.Context, token models.RefreshToken,
 	// must not reach it. Before #3290 this compared storedIP != requestIP
 	// directly, which with a coalesced "" would fire on absence-as-value.
 	//
-	// Falling through to the MFA challenge is NOT fail-open — a challenge still
-	// demands proof of possession; it is the proportionate response to a
-	// machine-ID mismatch that nothing else corroborates.
+	// Falling through preserves the existing suspicious-refresh policy: MFA is
+	// required when configured; accounts without it retain their established allow
+	// path. This is the proportionate response to an uncorroborated mismatch.
 	//
 	// UNREACHABLE TODAY: no writer produces machine_id set with ip_address NULL.
 	// The SSO adapter omits all four columns; every other writer sets all four.
