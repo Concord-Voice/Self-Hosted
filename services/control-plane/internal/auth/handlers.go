@@ -1406,6 +1406,23 @@ func (h *Handler) CompleteLogin(c *gin.Context, userID string, rememberMe bool, 
 			return false
 		}
 	} else if _, err := tx.ExecContext(ctx,
+		// SSO rows are deliberately NOT displaced here, and the predicate is left
+		// alone (#3290). This is a device-identity match, and a row carrying no
+		// device identity cannot be matched under any NULL semantics:
+		//   - IS NOT DISTINCT FROM is a no-op ($2/$3 bind from c.ClientIP() and a
+		//     header and are never NULL), and would add a comment falsely
+		//     claiming the gap is closed;
+		//   - COALESCE-ing both sides text-ifies an inet comparison, so stored
+		//     192.168.1.42/32 stops matching supplied 192.168.1.42 and same-origin
+		//     revocation breaks for EVERY machine-ID-less client, to fix nothing;
+		//   - an IS NULL wildcard is the only form that displaces an SSO row, and
+		//     it displaces every metadata-less session of that user from any
+		//     device — a cross-device silent-logout primitive on an auth path.
+		// Exposure is bounded to one refresh interval: rotation writes real
+		// machine_id / ip_address / user_agent into the successor, after which the
+		// machine_id branch above displaces it. Note this arm is reached only when
+		// the LOGIN request carries no machine ID, i.e. web SPA, not desktop.
+		// Closing it properly means stamping metadata at the SSO mint.
 		`UPDATE refresh_tokens SET revoked_at = NOW()
 		 WHERE user_id = $1 AND ip_address = $2 AND user_agent = $3 AND revoked_at IS NULL`,
 		userID, ipAddress, userAgent,
@@ -1599,16 +1616,44 @@ func (h *Handler) attemptGracePeriodRecovery(c *gin.Context, tokenHash string) b
 		 FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NOT NULL`,
 		tokenHash,
 	).Scan(&revokedTokenID, &revokedUserID, &revokedAt, &revokedIP, &revokedUA, &revokedMachineID)
-	if revokeErr != nil || revokedUserID == "" {
+	// A missing lineage row is "not a replay, carry on"; a real DB error is not.
+	// This used to be `revokeErr != nil || revokedUserID == ""`, which collapsed
+	// both into a silent 401 and made an outage indistinguishable from a stale
+	// token. The revokedUserID arm is dropped outright — user_id is NOT NULL, so
+	// it was dead code that read like a real case (#3290).
+	if errors.Is(revokeErr, sql.ErrNoRows) {
 		return false
 	}
+	if revokeErr != nil {
+		h.log.Error("Grace recovery lookup failed", "error", revokeErr)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgRefreshFailed})
+		return true
+	}
+
 	requestIP := c.ClientIP()
 	requestUA := truncateUserAgent(c.GetHeader(headerUserAgent))
 	graceRequestMachineID := c.GetHeader(headerMachineID)
-	storedIP := stripCIDR(revokedIP)
-	machineIDOk := revokedMachineID == "" || graceRequestMachineID == "" || revokedMachineID == graceRequestMachineID
 
-	if time.Since(revokedAt) < 30*time.Second && storedIP == requestIP && revokedUA == requestUA && machineIDOk {
+	// Three outcomes, not two (#3290). Coalescing the metadata columns makes an
+	// absent value compare as "", which never equals a real client IP — so the
+	// two-outcome form sent every benign SSO rotation race to the loud arm and
+	// emitted a SeverityHigh replay event for it.
+	//
+	// Generalizing absent-as-pass across all three signals was REJECTED: for an
+	// SSO row all three are absent, so the gate would empty to "30s window +
+	// predecessor lineage", which is a session-takeover primitive for anyone
+	// holding the just-revoked token. The >=1-known-signal rule is what prevents
+	// that. Everything here stays fail-closed — the worst new outcome is a 401,
+	// never a mint.
+	ipKnown, ipOk := signalMatch(stripCIDR(revokedIP), requestIP)
+	uaKnown, uaOk := signalMatch(revokedUA, requestUA)
+	midKnown, midOk := signalMatch(revokedMachineID, graceRequestMachineID)
+
+	withinWindow := time.Since(revokedAt) < 30*time.Second
+	anyKnown := ipKnown || uaKnown || midKnown
+	allOk := ipOk && uaOk && midOk
+
+	if withinWindow && anyKnown && allOk {
 		// #2428: the disabled check now happens under the users-row lock inside
 		// handleGracePeriodRefresh's transaction. No separate SELECT-then-act
 		// pre-check here — that was the exact non-atomic pattern this work closes,
@@ -1619,10 +1664,32 @@ func (h *Handler) attemptGracePeriodRecovery(c *gin.Context, tokenHash string) b
 		return true
 	}
 
+	if withinWindow && !anyKnown {
+		// QUIET REFUSE. No signal was ever recorded for this session, so nothing
+		// was refuted — an SSO row's first rotation reaches here legitimately and
+		// a SeverityHigh event would be a false positive. Strictly additive to
+		// alerting: unreachable before #3290, because fetchActiveRefreshToken
+		// 500'd first, so this weakens no existing detection.
+		//
+		// Fields deliberately exclude IP and User-Agent (observability principle 2).
+		h.log.Info("Grace replay refused: no known signal to corroborate",
+			"request_id", c.GetString(middleware.RequestIDContextKey),
+			"user_id", revokedUserID,
+			"failure_class", "no_known_signal",
+			"revoked_ago_ms", time.Since(revokedAt).Milliseconds())
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidRefreshToken})
+		return true
+	}
+
+	// LOUD REFUSE — a known signal was refuted, or the window has passed.
+	//
+	// same_ip reports what the GATE decided. It compared the raw revokedIP while
+	// the gate two lines up compared stripCIDR(revokedIP), so it was always false
+	// in production whenever the stored value carried a suffix (#3290).
 	h.log.Warn("Refresh token replay detected, stale token replayed",
 		"request_id", c.GetString(middleware.RequestIDContextKey),
 		"user_id", revokedUserID,
-		"same_ip", revokedIP == requestIP, "same_ua", revokedUA == requestUA,
+		"same_ip", ipOk, "same_ua", uaOk,
 		"revoked_ago_ms", time.Since(revokedAt).Milliseconds())
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSession, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityHigh, ReasonCode: securityevent.ReasonRefreshReplay, AuthMethod: securityevent.AuthSession, RouteTemplate: securityevent.RouteAuthRefresh})
 	c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidRefreshToken})
@@ -2067,7 +2134,12 @@ func (h *Handler) handleGracePeriodRefresh(c *gin.Context, userID string, revoke
 	var successor models.RefreshToken
 	var successorMachineID sql.NullString
 	err = tx.QueryRowContext(ctx,
-		`SELECT id, user_id, device_name, expires_at, remember_me, COALESCE(machine_id, '')
+		// device_name coalesced for the same reason as the readers above. Not
+		// reachable today — every successor is written by a Go string writer, so
+		// the column is "" rather than NULL — but it is the same latent shape one
+		// arming away, and the carry-forward at :2118 propagates whatever it
+		// reads (#3290).
+		`SELECT id, user_id, COALESCE(device_name, ''), expires_at, remember_me, COALESCE(machine_id, '')
 		 FROM refresh_tokens
 		 WHERE predecessor_id = $1 AND revoked_at IS NULL AND expires_at > NOW()
 		 ORDER BY created_at DESC LIMIT 1`,
