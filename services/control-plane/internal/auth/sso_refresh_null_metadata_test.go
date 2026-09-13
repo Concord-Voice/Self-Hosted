@@ -52,12 +52,14 @@ func TestSSORefresh_NullDeviceMetadata_Returns200(t *testing.T) {
 	require.True(t, deviceNameNull, "premise: SSO-minted refresh_tokens.device_name must be NULL")
 	require.True(t, ipAddressNull, "premise: SSO-minted refresh_tokens.ip_address must be NULL")
 	require.True(t, userAgentNull, "premise: SSO-minted refresh_tokens.user_agent must be NULL")
+	machineID := "8f2a7d4e-7f08-4eb2-9f0c-8fef5bf7ab27"
 
 	logs := ts.CaptureLogs(t)
 
 	headers := http.Header{}
 	headers.Set("X-Refresh-Token", refreshToken)
 	headers.Set("User-Agent", "sso-test-agent")
+	headers.Set("X-Machine-Id", machineID)
 	w := ts.DoRequest("POST", "/api/v1/auth/refresh", nil, headers)
 
 	if w.Code != http.StatusOK {
@@ -78,19 +80,20 @@ func TestSSORefresh_NullDeviceMetadata_Returns200(t *testing.T) {
 	require.NotEmpty(t, response.RefreshToken)
 	require.Equal(t, sessionID, response.PreviousSessionID)
 
-	var successorID, deviceName, ipAddress string
+	var successorID, deviceName, ipAddress, successorMachineID string
 	var userAgent sql.NullString
 	err = ts.DB.QueryRow(
-		`SELECT id, device_name, host(ip_address), user_agent
+		`SELECT id, device_name, host(ip_address), user_agent, machine_id
 		 FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL`, user.ID,
-	).Scan(&successorID, &deviceName, &ipAddress, &userAgent)
+	).Scan(&successorID, &deviceName, &ipAddress, &userAgent, &successorMachineID)
 	require.NoError(t, err)
 	require.NotEqual(t, sessionID, successorID)
 	assert.NotEmpty(t, ipAddress)
 	assert.True(t, userAgent.Valid)
 	assert.Empty(t, deviceName, "SSO device name remains absent through rotation")
+	assert.Equal(t, machineID, successorMachineID)
 
 	// The rotated pair is usable: a second refresh consumes the exact successor.
-	second := ts.DoRequest("POST", "/api/v1/auth/refresh", nil, http.Header{"X-Refresh-Token": []string{response.RefreshToken}, "User-Agent": []string{"sso-test-agent"}})
+	second := ts.DoRequest("POST", "/api/v1/auth/refresh", nil, http.Header{"X-Refresh-Token": []string{response.RefreshToken}, "User-Agent": []string{"sso-test-agent"}, "X-Machine-Id": []string{machineID}})
 	assert.Equal(t, http.StatusOK, second.Code)
 }

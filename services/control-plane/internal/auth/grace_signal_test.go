@@ -3,6 +3,7 @@ package auth_test
 // Regression coverage for #3290: refresh metadata may be SQL NULL.
 
 import (
+	"bytes"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -45,15 +46,21 @@ func refreshDirect(t *testing.T, h *auth.Handler, token, machineID, remoteAddr, 
 func TestGraceRecovery_SSONullSignalsQuietlyRefuses(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "grace-sso-null")
-	h := auth.NewHandler(ts.DB, ts.Redis, logger.New("test"), testhelpers.TestJWTSecret, nil)
+	var logBuffer bytes.Buffer
+	h := auth.NewHandler(ts.DB, ts.Redis, logger.NewWithWriter(&logBuffer), testhelpers.TestJWTSecret, nil)
 	_, refresh, _, err := h.IssueAccessAndRefresh(context.Background(), user.ID)
 	require.NoError(t, err)
 	require.Equal(t, http.StatusOK, refreshDirect(t, h, refresh, "", "198.51.100.10:1234", "").Code)
 	recorder := &refreshEventRecorder{}
 	h.SetSecurityEvents(recorder)
-	w := refreshDirect(t, h, refresh, "", "198.51.100.99:1234", "")
+	w := refreshDirect(t, h, refresh, "", "198.51.100.99:1234", "quiet-replay-agent")
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 	assert.Empty(t, recorder.events)
+	assert.Contains(t, logBuffer.String(), "failure_class=no_known_signal")
+	assert.NotContains(t, logBuffer.String(), "ip_address")
+	assert.NotContains(t, logBuffer.String(), "user_agent")
+	assert.NotContains(t, logBuffer.String(), "198.51.100.99")
+	assert.NotContains(t, logBuffer.String(), "quiet-replay-agent")
 }
 
 func TestGraceRecovery_SSONullSignalsOutsideWindowRaisesReplayEvent(t *testing.T) {
