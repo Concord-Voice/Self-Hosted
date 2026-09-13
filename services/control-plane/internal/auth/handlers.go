@@ -1734,14 +1734,27 @@ func (h *Handler) checkRememberMeExpiry(c *gin.Context, token models.RefreshToke
 // checkMachineIDTheft detects machine ID mismatches and handles suspicious/theft scenarios.
 // Returns true if the response was written (blocked or MFA challenge sent).
 func (h *Handler) checkMachineIDTheft(c *gin.Context, token models.RefreshToken, requestMachineID string) bool {
-	if token.MachineID == "" || requestMachineID == "" || token.MachineID == requestMachineID {
-		return false
+	midKnown, midOk := signalMatch(token.MachineID, requestMachineID)
+	if !midKnown || midOk {
+		return false // no machine-ID signal on one side, or the two agree
 	}
 
-	requestIP := c.ClientIP()
-	storedIP := stripCIDR(token.IPAddress)
-
-	if storedIP != requestIP {
+	// The machine IDs disagree. Escalate to theft ONLY if a second signal
+	// corroborates: handleTokenTheft revokes every session the user has,
+	// disconnects them, and triggers key revocations, so an absent stored IP
+	// must not reach it. Before #3290 this compared storedIP != requestIP
+	// directly, which with a coalesced "" would fire on absence-as-value.
+	//
+	// Falling through to the MFA challenge is NOT fail-open — a challenge still
+	// demands proof of possession; it is the proportionate response to a
+	// machine-ID mismatch that nothing else corroborates.
+	//
+	// UNREACHABLE TODAY: no writer produces machine_id set with ip_address NULL.
+	// The SSO adapter omits all four columns; every other writer sets all four.
+	// This is arming prevention, not a live fix — which is why it lands as its
+	// own commit: revert exactly this and the fix stays intact.
+	ipKnown, ipOk := signalMatch(stripCIDR(token.IPAddress), c.ClientIP())
+	if ipKnown && !ipOk {
 		return h.handleTokenTheft(c, token)
 	}
 	return h.handleSuspiciousMachineID(c, token, requestMachineID)
