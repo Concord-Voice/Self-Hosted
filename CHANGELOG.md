@@ -6,8 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+Concord Voice now gives you clearer control over screen sharing, voice calls, and Rich Presence. Activity details show what is shared and who may receive it.
+
 ### Added
 
+- **Rich Presence activity now appears in member rows and profiles, and your own panel shows its eligible audience** ([#2235](internal development reference omitted)) — member rows show the highest-priority delivered activity with a `+N` count for additional entries, profile cards show the ordered `Now` list, and your own panel shows the confirmed audience policy for active voice or call activity. Server-delivered detail stays omitted when the server withholds it.
 - **You can now pick what to share from two tabs instead of one long list** ([#3145](internal development reference omitted), [#3204](internal development reference omitted)) — the
   share window listed every screen and every open window in two flat piles, which on a busy
   machine meant scrolling past a dozen browser windows to find the one you wanted. There are now
