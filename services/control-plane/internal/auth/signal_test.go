@@ -25,10 +25,13 @@ func TestSignalMatch(t *testing.T) {
 	}{
 		{"neither side knows", "", "", false, true},
 		{"never learned it", "", "a", false, true},
+		{"never learned it, other value", "", "b", false, true},
 		{"caller did not present it", "a", "", false, true},
 		{"both known and agree", "a", "a", true, true},
 		{"both known and disagree", "a", "b", true, false},
 		{"both known and disagree, reversed", "b", "a", true, false},
+		{"caller did not present it, other value", "b", "", false, true},
+		{"both known and agree, other value", "b", "b", true, true},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
