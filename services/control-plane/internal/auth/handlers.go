@@ -1534,8 +1534,22 @@ func (h *Handler) fetchActiveRefreshToken(tokenHash string) (models.RefreshToken
 	var storedMachineID sql.NullString
 	// JOIN users + u.disabled = FALSE so a disabled account's token is treated as
 	// not-found (#1623). All selected columns are rt.-qualified after the JOIN.
+	// Absent session metadata is normalized to "" here, not left NULL. The SSO
+	// adapter (oauth_adapter.go) inserts a row omitting device_name, ip_address
+	// and user_agent, and database/sql refuses NULL -> string, so without this
+	// every SSO session 500s on its first refresh (#3290).
+	//
+	// host() rather than ::text, and the difference is measured, not assumed: a
+	// bare inet column renders through inet_out as "192.168.1.42", while
+	// ip_address::text yields "192.168.1.42/32". host() is byte-identical to
+	// what every reader receives today, so only the NULL case changes. ::text
+	// would append /32 and break net.ParseIP in internal/sessions'
+	// maskIPAddress. Residual: host() drops a prefix length, but every writer
+	// binds c.ClientIP(), a bare address stored as /32 or /128.
 	err := h.db.QueryRow(
-		`SELECT rt.id, rt.user_id, rt.token_hash, rt.device_name, rt.ip_address, rt.user_agent, rt.expires_at, rt.created_at, rt.last_used_at, rt.remember_me, COALESCE(rt.machine_id, '')
+		`SELECT rt.id, rt.user_id, rt.token_hash,
+		        COALESCE(rt.device_name, ''), COALESCE(host(rt.ip_address), ''), COALESCE(rt.user_agent, ''),
+		        rt.expires_at, rt.created_at, rt.last_used_at, rt.remember_me, COALESCE(rt.machine_id, '')
 		 FROM refresh_tokens rt
 		 JOIN users u ON u.id = rt.user_id
 		 WHERE rt.token_hash = $1 AND rt.revoked_at IS NULL AND u.disabled = FALSE`,
@@ -1577,7 +1591,11 @@ func (h *Handler) attemptGracePeriodRecovery(c *gin.Context, tokenHash string) b
 	var revokedAt time.Time
 	var revokedTokenID string
 	revokeErr := h.db.QueryRow(
-		`SELECT id, user_id, revoked_at, ip_address, user_agent, COALESCE(machine_id, '')
+		// Same normalization as fetchActiveRefreshToken, and it MUST land in the
+		// same commit: this reader is unreachable today only because that one
+		// returns first, so fixing it alone arms this one (#3290).
+		`SELECT id, user_id, revoked_at,
+		        COALESCE(host(ip_address), ''), COALESCE(user_agent, ''), COALESCE(machine_id, '')
 		 FROM refresh_tokens WHERE token_hash = $1 AND revoked_at IS NOT NULL`,
 		tokenHash,
 	).Scan(&revokedTokenID, &revokedUserID, &revokedAt, &revokedIP, &revokedUA, &revokedMachineID)
