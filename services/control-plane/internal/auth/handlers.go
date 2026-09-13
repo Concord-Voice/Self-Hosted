@@ -1642,8 +1642,7 @@ func (h *Handler) attemptGracePeriodRecovery(c *gin.Context, tokenHash string) b
 	// IP and user-agent are recorded evidence: stored absence is no signal, but
 	// a recorded value must match even when the request omits it. The >=1-known-
 	// signal rule keeps an all-absent SSO row from recovering on lineage alone.
-	ip := stripCIDR(revokedIP)
-	ipKnown, ipOk := ip != "", ip == "" || ip == requestIP
+	ipKnown, ipOk := revokedIP != "", revokedIP == "" || revokedIP == requestIP
 	uaKnown, uaOk := revokedUA != "", revokedUA == "" || revokedUA == requestUA
 	midKnown, midOk := signalMatch(revokedMachineID, graceRequestMachineID)
 
@@ -1663,11 +1662,10 @@ func (h *Handler) attemptGracePeriodRecovery(c *gin.Context, tokenHash string) b
 	}
 
 	if withinWindow && !anyKnown {
-		// QUIET REFUSE. No signal was ever recorded for this session, so nothing
-		// was refuted — an SSO row's first rotation reaches here legitimately and
-		// a SeverityHigh event would be a false positive. Strictly additive to
-		// alerting: unreachable before #3290, because fetchActiveRefreshToken
-		// 500'd first, so this weakens no existing detection.
+		// QUIET REFUSE, within the grace window only. No signal was ever recorded
+		// for this session, so nothing was refuted — an SSO row's first rotation
+		// reaches here legitimately and a SeverityHigh event would be a false
+		// positive. Outside the window remains a loud refusal.
 		//
 		// Fields deliberately exclude IP and User-Agent (observability principle 2).
 		h.log.Info("Grace replay refused: no known signal to corroborate",
@@ -1691,14 +1689,6 @@ func (h *Handler) attemptGracePeriodRecovery(c *gin.Context, tokenHash string) b
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSession, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityHigh, ReasonCode: securityevent.ReasonRefreshReplay, AuthMethod: securityevent.AuthSession, RouteTemplate: securityevent.RouteAuthRefresh})
 	c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidRefreshToken})
 	return true
-}
-
-// stripCIDR removes CIDR notation suffix from an IP address (e.g. "127.0.0.1/32" → "127.0.0.1").
-func stripCIDR(ip string) string {
-	if idx := strings.IndexByte(ip, '/'); idx != -1 {
-		return ip[:idx]
-	}
-	return ip
 }
 
 // checkRememberMeExpiry checks if a remember-me token has expired due to prolonged offline inactivity.
@@ -1750,7 +1740,7 @@ func (h *Handler) checkMachineIDTheft(c *gin.Context, token models.RefreshToken,
 	// The SSO adapter omits all four columns; every other writer sets all four.
 	// This is arming prevention, not a live fix — which is why it lands as its
 	// own commit: revert exactly this and the fix stays intact.
-	ipKnown, ipOk := signalMatch(stripCIDR(token.IPAddress), c.ClientIP())
+	ipKnown, ipOk := token.IPAddress != "", token.IPAddress == "" || token.IPAddress == c.ClientIP()
 	if ipKnown && !ipOk {
 		return h.handleTokenTheft(c, token)
 	}

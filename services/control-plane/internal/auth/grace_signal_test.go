@@ -36,9 +36,9 @@ func refreshDirect(t *testing.T, h *auth.Handler, token, machineID, remoteAddr, 
 	if userAgent != "" {
 		c.Request.Header.Set("User-Agent", userAgent)
 	}
-	if remoteAddr != "" {
-		c.Request.RemoteAddr = remoteAddr
-	}
+	// Assign even an empty value so callers can exercise an absent client IP;
+	// httptest.NewRequest otherwise supplies its synthetic 192.0.2.1 address.
+	c.Request.RemoteAddr = remoteAddr
 	h.Refresh(c)
 	return w
 }
@@ -54,6 +54,23 @@ func TestGraceRecovery_SSONullSignalsQuietlyRefuses(t *testing.T) {
 	w := refreshDirect(t, h, refresh, "", "198.51.100.99:1234", "")
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 	assert.Empty(t, recorder.events)
+}
+
+func TestGraceRecovery_SSONullSignalsOutsideWindowRaisesReplayEvent(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "grace-sso-old-null")
+	h := auth.NewHandler(ts.DB, ts.Redis, logger.New("test"), testhelpers.TestJWTSecret, nil)
+	_, refresh, sessionID, err := h.IssueAccessAndRefresh(context.Background(), user.ID)
+	require.NoError(t, err)
+	_, err = ts.DB.Exec(`UPDATE refresh_tokens SET revoked_at = NOW() - INTERVAL '31 seconds' WHERE id = $1`, sessionID)
+	require.NoError(t, err)
+	recorder := &refreshEventRecorder{}
+	h.SetSecurityEvents(recorder)
+	w := refreshDirect(t, h, refresh, "", "198.51.100.99:1234", "")
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+	require.Len(t, recorder.events, 1)
+	assert.Equal(t, securityevent.SeverityHigh, recorder.events[0].Severity)
+	assert.Equal(t, securityevent.ReasonRefreshReplay, recorder.events[0].ReasonCode)
 }
 func TestGraceRecovery_KnownSignalsStillRaiseReplayEvent(t *testing.T) {
 	ts := setupTS(t)
@@ -128,6 +145,24 @@ func TestRefresh_NullIPMachineMismatchIsSuspiciousNotTheft(t *testing.T) {
 	for _, event := range recorder.events {
 		assert.NotEqual(t, securityevent.ReasonTokenTheftSuspected, event.ReasonCode)
 	}
+}
+
+func TestRefresh_KnownMachineMismatchWithAbsentRequestIPTriggersTheft(t *testing.T) {
+	ts := setupTS(t)
+	storedMachineID, requestMachineID := uuid.New().String(), uuid.New().String()
+	refresh, userID := registerAndGetRefreshToken(t, ts, "known-machine-absent-ip", storedMachineID)
+	_, err := ts.DB.Exec(`UPDATE refresh_tokens SET ip_address = '198.51.100.10', machine_id = $1 WHERE token_hash = $2`, storedMachineID, auth.HashRefreshToken(refresh))
+	require.NoError(t, err)
+	h := auth.NewHandler(ts.DB, ts.Redis, logger.New("test"), testhelpers.TestJWTSecret, ts.Hub)
+	recorder := &refreshEventRecorder{}
+	h.SetSecurityEvents(recorder)
+	w := refreshDirect(t, h, refresh, requestMachineID, "", "")
+	assert.Equal(t, http.StatusUnauthorized, w.Code)
+	require.Len(t, recorder.events, 1)
+	assert.Equal(t, securityevent.ReasonTokenTheftSuspected, recorder.events[0].ReasonCode)
+	var live int
+	require.NoError(t, ts.DB.QueryRow(`SELECT count(*) FROM refresh_tokens WHERE user_id = $1 AND revoked_at IS NULL`, userID).Scan(&live))
+	assert.Zero(t, live, "theft handling must not mint a replacement refresh token")
 }
 func TestGraceRecovery_KnownUserAgentMissingRequestRefuses(t *testing.T) {
 	ts := setupTS(t)
