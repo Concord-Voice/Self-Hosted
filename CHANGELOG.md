@@ -6,8 +6,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+Concord Voice now gives you clearer control over screen sharing, voice calls, and Rich Presence. Activity details show what is shared and who may receive it.
+
 ### Added
 
+- **Rich Presence activity now appears in member rows and profiles, and your own panel shows its eligible audience** ([#2235](internal development reference omitted)) — member rows show the highest-priority delivered activity with a `+N` count for additional entries, profile cards show the ordered `Now` list, and your own panel shows the confirmed audience policy for active voice or call activity. Server-delivered detail stays omitted when the server withholds it.
 - **You can now pick what to share from two tabs instead of one long list** ([#3145](internal development reference omitted), [#3204](internal development reference omitted)) — the
   share window listed every screen and every open window in two flat piles, which on a busy
   machine meant scrolling past a dozen browser windows to find the one you wanted. There are now
@@ -108,6 +111,49 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   On the light themes this also fixes a hairline: the GIF picker's border and caret outline were
   painted a fixed dark grey rather than following your theme, because they referred to a colour
   that was never defined anywhere. They now follow the theme like every other border.
+
+- **Parts of the app stopped ignoring your theme** ([#3270 follow-up](internal development reference omitted)) — twenty-three
+  colours across the call banners, the outgoing-call window, the friend-picker, the category
+  manager, the key-recovery prompt, the two-factor screens and the attachment preview were written
+  into the stylesheet as fixed values rather than as a reference to your theme. They were chosen
+  for the dark themes, so on a dark theme they looked right and nobody noticed. On any of the
+  fifteen light themes they stayed dark: a near-black panel over the call controls, a charcoal
+  surround on the friend-picker, a dark slab behind a call event in your messages. All of them now
+  take their colour from the theme you picked. Two of them were a different kind of wrong — an
+  invite embed and a direct-message profile painted their highlight in the blue Concord used to
+  borrow from elsewhere, which is not the colour of anything else in the app; those now use
+  Concord's own accent, which you will notice on dark themes too.
+
+- **Buttons drawn in the accent colour keep a readable label, High Contrast included** ([#3285](internal development reference omitted)) — the Join
+  button on an invite, the primary action on a profile card, the download link on the attestation
+  warning and the active mic and chat toggles in a call all painted their label pure white on a
+  background taken from the theme's accent. That reads well while the accent stays dark, which it
+  is on most themes, so it went unnoticed. Switch High Contrast on and the accent becomes yellow —
+  and a white label on a yellow button is close to invisible, in the one mode you would turn on
+  precisely because you need to see things. The label now takes the theme's own on-accent colour,
+  black where the accent is light, which is what the thirty-five other buttons in the app already
+  did. The same pass caught the key-recovery prompt, whose warning text was pinned to a pale grey
+  that only worked over a dark card, and the floating menu in the call controls, which was sitting
+  on the page colour rather than a raised one and so had nothing but a shadow to separate it from
+  the page on light themes.
+
+- **Text on red and green buttons is legible on every theme** ([#3285](internal development reference omitted)) — destructive buttons
+  (Leave a call, delete a category, remove a server) and the small success badges wrote their
+  label as fixed white, while the button underneath took its colour from your theme. Most themes
+  use a deep red, where white reads well, so this held up. Some do not: the two-factor "enabled"
+  badge is green, and on the high-contrast theme that green is `#00ff00` — white on it measures
+  1.37, which is not a low contrast so much as no contrast at all. The label now follows two new
+  theme values, one for red fills and one for green, each picked so it stays readable against
+  that theme's own shades. Green badges go from a worst case of 1.37 to 4.66. Red buttons go from
+  2.43 to 3.83, which is the most a single colour can do against reds that range from near-maroon
+  to salmon within one theme; that is fine for button-sized text and short of the standard for
+  body text, and it is recorded rather than glossed.
+
+  Four themes also had an accent text colour that had drifted into decoration — Cotton Candy put
+  pale blue on a pale pink button, at 1.91 — and those are corrected. The wider question of
+  Concord's own pink accent carrying white text, which measures 2.68, is left alone deliberately:
+  that is the brand's colour and changing it is a decision about how the app looks, not a defect
+  to fix in passing.
 - **Server-enforced mutes look enforced again, and some hover highlights came back** ([#3270](internal development reference omitted)) — when a
   moderator mutes or deafens someone, the marker on that person is meant to be amber, so you can
   tell at a glance that the server did it rather than they did. In the channel list, and in the
@@ -136,18 +182,26 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
   lasted; on the fifteen light ones it was a charcoal rectangle on a white panel. It now takes
   its colour from the theme like everything else.
 
-- **Video drops to a smaller size before it freezes when your computer is struggling** ([#3268](internal development reference omitted), [#3094](internal development reference omitted)) — Concord
+- **Video drops to a smaller size before it freezes when your computer is struggling** ([#3268](internal development reference omitted), [#3279](internal development reference omitted), [#3094](internal development reference omitted)) — Concord
   watches how long your computer takes to decode each incoming video, and when it starts falling
   behind it has to give something up. Until now it had one move: pause somebody's camera outright,
   which is abrupt and takes a person off your screen completely. It now asks the server for a
-  smaller version of that video first, and only falls back to pausing when there is nothing
-  smaller left to ask for. Two things worth knowing. The gentler behaviour applies only in calls
-  where the server is already sending video in several sizes; in a call where it sends just one,
-  pausing is still the only option and happens exactly as it did before. And where the step-down
-  does apply, a pause that follows because things stayed bad arrives two measurement cycles later
-  than it used to, because the smaller video needs a moment to take effect before measuring again
-  tells you anything true — roughly ten seconds in the opening half-minute of a call, and roughly
-  a minute after that, once Concord settles into checking less often.
+  smaller version of that video first, and keeps asking for smaller ones as long as there is
+  anything smaller left; only when there is not does it fall back to pausing. On a large tile
+  that means two reductions before anyone disappears, where previously there was one — though
+  how many you actually get depends on your plan, because the server will only send a free
+  account video up to a certain size in the first place. On a free account that is one
+  reduction rather than two, and it now happens on the first attempt: previously the first
+  attempt asked for a size the server was already sending, so nothing changed and you waited
+  through another round of measurements before anything improved. Two further
+  things worth knowing. The gentler behaviour applies only in calls where the server is already
+  sending video in several sizes; in a call where it sends just one, pausing is still the only
+  option and happens exactly as it did before. And where the step-down does apply, a pause that
+  follows because things stayed bad now arrives several measurement cycles later than it used
+  to — two per reduction, because the smaller video needs a moment to take effect before
+  measuring again tells you anything true. That is roughly ten seconds per step in the opening
+  half-minute of a call, and roughly a minute per step after that, once Concord settles into
+  checking less often.
 
 - **Joining a call late no longer leaves your camera stuck at one quality** ([#3275](internal development reference omitted)) — in calls
   where Concord sends video at several sizes, the server tells everyone once, at the moment it
