@@ -18,6 +18,8 @@ without losing the observation that triggered them.
 
 - **Voice channel lists recover more reliably after stale sessions** ([#3304](internal development reference omitted), [#3298](internal development reference omitted)) — the server retries delayed leave updates, and repeated updates no longer lower the displayed participant count or replay leave sounds.
 
+- **Dirty database migrations now require an explicit operator recovery** ([#3138](internal development reference omitted)) — control-plane startup stops rather than guessing whether a partially applied migration can be replayed.
+
 - **Switching screen-share sources no longer drops or leaks per-app audio** ([#3369](internal development reference omitted)) — a failed
   source switch now keeps the current share running, while cancelled or partially started captures
   release their audio process instead of publishing it later or leaving it behind.
