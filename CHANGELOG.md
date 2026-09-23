@@ -16,7 +16,7 @@ without losing the observation that triggered them.
 
 ### Fixed
 
-- **Voice channel lists recover more reliably after stale sessions** ([#3304](internal development reference omitted), [#3298](internal development reference omitted)) — the server retries delayed leave updates, and repeated updates no longer lower the displayed participant count or replay leave sounds.
+- **Voice channel lists recover more reliably after stale sessions** ([#3304](internal development reference omitted), [#3298](internal development reference omitted), [#3370](internal development reference omitted)) — the server retries delayed leave updates, and repeated updates no longer lower the displayed participant count or replay leave sounds. A delayed old-channel leave can no longer overwrite a participant who has already moved or been removed.
 
 - **Dirty database migrations now require an explicit operator recovery** ([#3138](internal development reference omitted)) — control-plane startup stops rather than guessing whether a partially applied migration can be replayed.
 
