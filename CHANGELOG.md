@@ -18,6 +18,12 @@ without losing the observation that triggered them.
   changes, instead of in Accessibility ▸ Display. The UI Scale slider stays in Accessibility. Font
   Size stays usable while Dyslexic Support is on, and screen readers now announce which size is
   selected.
+- **UI Scale now runs from 50% to 200% and scales everything** ([#3414](internal development reference omitted), [#2367](internal development reference omitted)) — Accessibility ▸
+  Display ▸ UI Scale now zooms the whole interface, text, icons and layout together, instead of
+  enlarging text inside panels that stay the same size. Above 100% the zoom is limited by window
+  width so the layout never gets too cramped to use, and the slider tells you when that happens and
+  how far it would go in a wider window. Picture-in-picture windows keep their normal size. A
+  desktop app that has not updated yet keeps the previous 85–130% range.
 
 ### Fixed
 
@@ -30,6 +36,10 @@ without losing the observation that triggered them.
   first-launch screens now show a dark-lettered version of the logo whenever a light theme
   is active, and the original white one in dark themes. It also follows your system
   setting if you have the theme set to match it, switching as soon as the system does.
+- **Right-click menus no longer open partly off-screen** ([#3414](internal development reference omitted), [#2367](internal development reference omitted)) — a tall menu opened near
+  the bottom of the window could spill past the top edge and hide its first items. Menus and their
+  submenus now stay on screen, and one taller than the window scrolls.
+
 - **Voice channel lists recover more reliably after stale sessions** ([#3304](internal development reference omitted), [#3298](internal development reference omitted), [#3370](internal development reference omitted)) — the server retries delayed leave updates, and repeated updates no longer lower the displayed participant count or replay leave sounds. A delayed old-channel leave can no longer overwrite a participant who has already moved or been removed.
 
 - **Dirty database migrations now require an explicit operator recovery** ([#3138](internal development reference omitted)) — control-plane startup stops rather than guessing whether a partially applied migration can be replayed.
