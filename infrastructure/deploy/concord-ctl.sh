@@ -705,6 +705,9 @@ activity_history_rollback() {
       echo "activity-history: rollback retry requires zero running control-plane containers" >&2
       return 1
     fi
+    voice_enforcement_rollout_stop_media || return 1
+    voice_enforcement_rollout_require_rollback_zero_state || return 1
+    voice_enforcement_rollout_require_inactive_current_image || return 1
     echo "Activity History rollback checkpoint matches: admin work is complete; resuming pinned old-image start, health, and final count without repeating disable or downgrade."
     activity_history_invalidate_activation_receipt || return 1
     activity_history_finish_rollback_start
@@ -720,7 +723,10 @@ activity_history_rollback() {
   # The currently rendered image contains the administrative subcommands used
   # while the service is drained. Refuse before stopping if it is unavailable.
   activity_history_image_is_local "$ACTIVITY_HISTORY_RENDERED_IMAGE" || return 1
-  echo "Activity History rollback: stopping CP with a 45s drain, asserting zero daemon-wide, disabling durable state, journaling optional exact downgrade, selecting the pinned old image, and requiring one healthy CP."
+  echo "Activity History rollback: stopping/verifying local media, proving voice zero-state, deactivating durable enforcement, then stopping CP with a 45s drain, disabling durable state, journaling optional exact downgrade, selecting the pinned old image, and requiring one healthy CP."
+  voice_enforcement_rollout_stop_media || return 1
+  voice_enforcement_rollout_require_rollback_zero_state || return 1
+  voice_enforcement_rollout_deactivate_for_rollback || return 1
   activity_history_invalidate_activation_receipt || return 1
   activity_history_stop_control_plane || return 1
   activity_history_refresh_daemon_ids || return 1
@@ -728,6 +734,10 @@ activity_history_rollback() {
     echo "activity-history: rollback requires zero running control-plane containers after stop" >&2
     return 1
   fi
+  # The pre-stop attest admits the planned drain; this one is the authority for
+  # old-image safety. With no serving current CP left, no request can enqueue a
+  # reconciliation between the proof and disable-all.
+  voice_enforcement_rollout_require_rollback_zero_state || return 1
   activity_history_run_admin disable-all || return 1
   if [[ $ACTIVITY_HISTORY_ROLLBACK_DOWNGRADE -eq 1 ]]; then
     activity_history_write_rollback_checkpoint \
@@ -749,6 +759,186 @@ activity_history_rollback() {
   fi
   activity_history_select_checkpoint_image || return 1
   activity_history_finish_rollback_start
+}
+
+# Voice-enforcement rollout (#3140).  The control-plane owns the durable
+# activation bit; the deploy controller only invokes its CLI and verifies the
+# media-plane capability boundary.  Never replace either operation with shell
+# SQL or a health-only probe: /health predates the targeted subscription.
+voice_enforcement_rollout_cli() {
+  local verb="$1"
+  shift
+  case "$verb" in
+    activate|deactivate|status) ;;
+    *)
+      echo "voice-enforcement-rollout: invalid CLI verb '$verb'" >&2
+      return 2
+      ;;
+  esac
+  (cd "$DEPLOY_DIR" && $COMPOSE_CMD run --rm --no-deps --pull never \
+    control-plane ./main voice-enforcement-rollout "$verb" "$@")
+}
+
+voice_enforcement_rollout_deactivate_for_rollback() {
+  if ! voice_enforcement_rollout_cli deactivate; then
+    echo "activity-history: unable to deactivate voice enforcement with the current control-plane; refusing old-image rollback" >&2
+    return 1
+  fi
+}
+
+voice_enforcement_rollout_require_inactive_current_image() {
+  local status
+  # A resumable rollback has no current CP container left to execute the
+  # command. Do not run the status probe through the pinned old image: an old
+  # binary may not contain this CLI. Unsetting the selector makes Compose
+  # resolve the current image from the canonical environment instead.
+  if ! status="$(unset CONTROL_PLANE_IMAGE; voice_enforcement_rollout_cli status 2>&1)"; then
+    echo "activity-history: unable to verify inactive voice enforcement with the current control-plane; refusing old-image rollback" >&2
+    return 1
+  fi
+  if [[ "$status" != *"voice-enforcement-rollout: inactive"* ]]; then
+    echo "activity-history: voice enforcement is not inactive; refusing old-image rollback" >&2
+    return 1
+  fi
+}
+
+voice_enforcement_rollout_require_rollback_zero_state() {
+  local status evidence
+  # The current image must attest every durable obligation before an old CP
+  # can start. Shell SQL is intentionally forbidden here; absent evidence is
+  # a refusal, not an invitation to guess from worker health.
+  if ! status="$(unset CONTROL_PLANE_IMAGE; voice_enforcement_rollout_cli status 2>&1)"; then
+    echo "activity-history: unable to obtain current-image voice-enforcement zero-state evidence; refusing old-image rollback" >&2
+    return 1
+  fi
+  for evidence in registryRows=0 dmParentRows=0 credentialParentRows=0 dmReconciliationRows=0; do
+    if [[ "$status" != *"voice-enforcement-rollout: $evidence"* ]]; then
+      echo "activity-history: current-image status did not attest $evidence; refusing old-image rollback" >&2
+      return 1
+    fi
+  done
+  echo "activity-history: current-image registry/outbox/reconciliation zero-state verified; rollback evidence is single-host only (multi-host media is unsupported)"
+}
+
+voice_enforcement_rollout_activate() {
+  # The application requires this operator receipt.  This helper is private
+  # to the ordered rollout paths below and is called only after old-media
+  # stop/verification and the replacement media protocol gate have passed.
+  voice_enforcement_rollout_cli activate --confirm-drained
+}
+
+voice_enforcement_rollout_wait_control_plane() {
+  local timeout="${VOICE_ENFORCEMENT_HEALTH_TIMEOUT:-180}"
+  local deadline status
+  [[ "$timeout" =~ ^[1-9][0-9]*$ ]] || {
+    echo "voice-enforcement-rollout: health timeout must be a positive integer" >&2
+    return 1
+  }
+  deadline=$(( $(date +%s) + timeout ))
+  while (( $(date +%s) < deadline )); do
+    if curl -sf --max-time 2 http://localhost:8080/readyz >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 2
+  done
+  echo "voice-enforcement-rollout: control-plane did not become ready" >&2
+  return 1
+}
+
+voice_enforcement_rollout_wait_media() {
+  local timeout="${VOICE_ENFORCEMENT_HEALTH_TIMEOUT:-180}"
+  local deadline body status
+  [[ "$timeout" =~ ^[1-9][0-9]*$ ]] || {
+    echo "voice-enforcement-rollout: health timeout must be a positive integer" >&2
+    return 1
+  }
+  body="$(mktemp)"
+  deadline=$(( $(date +%s) + timeout ))
+  while (( $(date +%s) < deadline )); do
+    : >"$body"
+    status="$(curl -sS --max-time 2 -o "$body" -w '%{http_code}' \
+      http://localhost:3000/readyz 2>/dev/null || true)"
+    if [[ "$status" == 200 ]] && python3 - "$body" <<'PY'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as stream:
+        value = json.load(stream)
+except (OSError, ValueError):
+    raise SystemExit(1)
+raise SystemExit(0 if value == {"ready": True, "voiceEnforcementProtocol": 3} else 1)
+PY
+    then
+      rm -f "$body"
+      return 0
+    fi
+    sleep 2
+  done
+  rm -f "$body"
+  echo "voice-enforcement-rollout: media-plane did not advertise protocol 3 readiness" >&2
+  return 1
+}
+
+voice_enforcement_rollout_stop_media() {
+  local running
+  echo "voice-enforcement-rollout: draining the old media-plane"
+  (cd "$DEPLOY_DIR" && $COMPOSE_CMD stop --timeout 45 media-plane)
+  if ! running="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps --status running -q media-plane 2>/dev/null)"; then
+    echo "voice-enforcement-rollout: cannot verify that the old media-plane stopped" >&2
+    return 1
+  fi
+  if [[ -n "$running" ]]; then
+    echo "voice-enforcement-rollout: old media-plane is still running; refusing to start a replacement" >&2
+    return 1
+  fi
+}
+
+voice_enforcement_rollout_deploy() {
+  [[ $# -eq 0 ]] || {
+    echo "Usage: concord-ctl.sh voice-enforcement-rollout deploy" >&2
+    return 2
+  }
+
+  # The paired rollout always replaces the control-plane image.  Do not let a
+  # stale Activity History rollback pin silently select an old digest here.
+  clear_activity_history_image_selector
+
+  # Build first so the new image owns the migration and the compatibility
+  # default before any media handoff.  The explicit deactivation follows CP
+  # readiness because the rollout singleton is created by CP startup migration.
+  echo "voice-enforcement-rollout: building the new control-plane image"
+  (cd "$DEPLOY_DIR" && $COMPOSE_CMD build control-plane)
+  echo "voice-enforcement-rollout: starting the control-plane in compatibility mode"
+  (cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --no-deps --no-build --wait \
+    --wait-timeout 180 control-plane)
+  voice_enforcement_rollout_wait_control_plane
+  voice_enforcement_rollout_cli deactivate
+
+  # The old media container is explicitly stopped before the new image is
+  # created or started.  A single compose up for CP+MP has ambiguous ordering
+  # and can leave old sockets unregistered during the handoff.
+  voice_enforcement_rollout_stop_media
+  echo "voice-enforcement-rollout: building the new media-plane image"
+  (cd "$DEPLOY_DIR" && $COMPOSE_CMD build media-plane)
+  echo "voice-enforcement-rollout: starting the new media-plane"
+  (cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --no-deps --no-build --wait \
+    --wait-timeout 180 media-plane)
+  voice_enforcement_rollout_wait_media
+
+  echo "voice-enforcement-rollout: activating durable enforcement"
+  voice_enforcement_rollout_activate
+  echo "voice-enforcement-rollout: completed"
+}
+
+voice_enforcement_rollout_media_rebuild() {
+  voice_enforcement_rollout_cli deactivate
+  voice_enforcement_rollout_stop_media
+  (cd "$DEPLOY_DIR" && $COMPOSE_CMD build media-plane)
+  (cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --no-deps --no-build --wait \
+    --wait-timeout 180 media-plane)
+  voice_enforcement_rollout_wait_media
+  voice_enforcement_rollout_activate
 }
 
 # nginx-reload and sudoers-sync both use fixed root-owned candidate paths.
@@ -903,7 +1093,7 @@ case "${1:-help}" in
   nginx-reload|sudoers-sync)
     acquire_deploy_transaction_lock "$@"
     ;;
-  rebuild|restart|stop|activity-history-activate|activity-history-rollback)
+  rebuild|restart|stop|activity-history-activate|activity-history-rollback|voice-enforcement-rollout)
     # The two activity-history verbs belong here for the SAME reason the deploy
     # verbs do, and leaving them out was an omission rather than a decision: both
     # stop and start the control plane, and both then gate on health and image
@@ -1175,12 +1365,28 @@ else:
     # image instead of the new code — and then stamps .deploy-meta with the new
     # SHA, hiding the change from every future scope diff.
     _has_control_plane=0
+    _has_media_plane=0
     for _s in ${REBUILD_SCOPE[@]+"${REBUILD_SCOPE[@]}"}; do
       if [[ "$_s" == "control-plane" ]]; then
         _has_control_plane=1
-        break
+      elif [[ "$_s" == "media-plane" ]]; then
+        _has_media_plane=1
       fi
     done
+
+    # A media replacement is a protocol transition, not an ordinary scoped
+    # rebuild.  The paired path is also mandatory for an unscoped rebuild,
+    # whose service set includes media-plane by definition.
+    if [[ $_has_media_plane -eq 1 || $_rebuild_scoped -eq 0 ]]; then
+      if [[ $_has_control_plane -eq 1 || $_rebuild_scoped -eq 0 ]]; then
+        voice_enforcement_rollout_deploy
+      else
+        voice_enforcement_rollout_media_rebuild
+      fi
+      echo "Done."
+      exit 0
+    fi
+
     if [[ $_rebuild_scoped -eq 0 || $_has_control_plane -eq 1 ]]; then
       clear_activity_history_image_selector
     else
@@ -1223,6 +1429,20 @@ else:
   activity-history-rollback)
     shift
     activity_history_rollback "$@"
+    ;;
+
+  voice-enforcement-rollout)
+    shift
+    case "${1:-}" in
+      deploy)
+        shift
+        voice_enforcement_rollout_deploy "$@"
+        ;;
+      *)
+        echo "Usage: concord-ctl.sh voice-enforcement-rollout deploy" >&2
+        exit 2
+        ;;
+    esac
     ;;
 
   validate-config)
@@ -1972,6 +2192,12 @@ else:
     echo "Rebuilding and starting fresh..."
     echo "Note: release assets NOT refreshed automatically (#1015). Run 'concord-ctl.sh sync-releases' or trigger sync-releases.yml AFTER freshstart completes to populate /opt/concord/releases/."
     cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --build
+    if ! voice_enforcement_rollout_wait_control_plane \
+      || ! voice_enforcement_rollout_wait_media \
+      || ! voice_enforcement_rollout_activate; then
+      echo "Fresh start failed the voice-enforcement readiness/activation gate; enforcement remains inactive." >&2
+      exit 1
+    fi
     echo ""
     echo "Fresh start complete. All data has been wiped."
     ;;
@@ -2086,6 +2312,8 @@ else:
     echo "                 First activation: require zero CPs, preflight, CP-only start + health"
     echo "  activity-history-rollback --confirm-drained --old-image <immutable-image-ref> [--downgrade-schema]"
     echo "                 Drain/disable, optionally downgrade, and start one pinned old CP image"
+    echo "  voice-enforcement-rollout deploy"
+    echo "                 Build CP, drain/rebuild MP, verify protocol 3, activate"
     echo "  validate-config  §F: pre-rebuild guard via 'docker compose config --quiet'"
     echo "  attachment-probe  Validate the armed attachment backend without pulling images"
     echo "  attachment-probe-cron-install  Idempotently install the nightly attachment probe"
