@@ -121,6 +121,16 @@ that keeps sending far more than your plan allows.
   that app's sound straight away; before, the capture kept running in the background until you
   quit. Starting a share with app sound can take a moment longer, because it now waits until the
   sound capture is ready.
+- **Sharing an app window with its sound now captures apps like major comms platforms, and tells you if the sound stops** ([#3445](internal development reference omitted), [#3394](internal development reference omitted)) — on
+  macOS, many apps play sound from a separate helper process rather than from their window, so
+  sharing one of those windows sent silence. Concord now captures sound from the app's helper
+  processes too, but never from Concord itself, so your call is not echoed back to the people in
+  it. If app sound stops partway through a share, the Share sound button shows a marker and a
+  message tells you, while your screen keeps being shared; hover the marker to read the message
+  again, and turn Share sound back on to try again.
+  Safari's sound still cannot be captured, and Concord now says so ("We couldn't capture that
+  app's sound") instead of sharing silence without a word. Voice bar error messages now sit on a
+  solid background, so the video behind them no longer shows through the text.
 - **Empty, hidden direct and group conversations are cleaned up** ([#3402](internal development reference omitted), [#2821](internal development reference omitted)) — after everyone has hidden a conversation and no messages remain, Concord removes its unused server data. Pending or active voice calls keep the conversation intact. The last member of a group can also leave when nobody remains to take ownership.
 
 - **Keyboard focus rings are visible in every theme and no longer look like a selection** ([#3438](internal development reference omitted), [#798](internal development reference omitted)) — the ring or border that shows which control has keyboard focus now uses the theme's focus colour everywhere, instead of the accent colour that also marks the selected tab or row. It is readable against every background in all 32 theme variants, including the default light theme, where some rings were a pale yellow that was nearly invisible. The voice-volume slider now shows a solid ring when focused instead of a faint glow.
