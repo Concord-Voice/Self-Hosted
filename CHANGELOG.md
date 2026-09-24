@@ -84,6 +84,7 @@ that keeps sending far more than your plan allows.
   sound capture is ready.
 - **Empty, hidden direct and group conversations are cleaned up** ([#3402](internal development reference omitted), [#2821](internal development reference omitted)) — after everyone has hidden a conversation and no messages remain, Concord removes its unused server data. Pending or active voice calls keep the conversation intact. The last member of a group can also leave when nobody remains to take ownership.
 
+- **Keyboard focus rings are visible in every theme and no longer look like a selection** ([#3438](internal development reference omitted), [#798](internal development reference omitted)) — the ring or border that shows which control has keyboard focus now uses the theme's focus colour everywhere, instead of the accent colour that also marks the selected tab or row. It is readable against every background in all 32 theme variants, including the default light theme, where some rings were a pale yellow that was nearly invisible. The voice-volume slider now shows a solid ring when focused instead of a faint glow.
 - **Moving between voice channels on different servers no longer loses the old-channel leave** ([#3415](internal development reference omitted)) — the old channel's participant update now waits for the move to commit, so its count cannot be left stale by a fast delivery.
 
 - **The Concord logo on the sign-in screens is readable in light themes** — the logo's
