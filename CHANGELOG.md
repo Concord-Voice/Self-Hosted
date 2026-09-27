@@ -64,6 +64,7 @@ account can't provide, never your password twice.
 
 - **DM-block and credential-epoch cleanup now survives delivery failures** ([#3140](internal development reference omitted)) — guarded reconciliation records retryable voice-ejection obligations and fences stale callbacks by generation.
 - **Direct-message writes recheck current membership before durable side effects** ([#3141](internal development reference omitted)) — removed recipients cannot regain keys, enroll pending keys, or attach encrypted uploads through stale authorization.
+- **Server mutations now serialize authority and membership changes at their write boundary** ([#3142](internal development reference omitted)) — stale role, ownership, channel, and message operations fail closed instead of committing partial state.
 
 ### Fixed
 
