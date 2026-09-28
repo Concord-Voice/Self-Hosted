@@ -69,6 +69,9 @@ account can't provide, never your password twice.
 
 ### Fixed
 
+- **A failed voice join no longer removes someone who joined the next call** ([#3479](internal development reference omitted), [#3480](internal development reference omitted)) — delayed cleanup now applies only to the call that failed.
+- **Text-only channel changes work on busy voice servers** ([#3480](internal development reference omitted)) — they no longer scan every active voice channel, and deleting a channel group retries if a child becomes a voice channel during the change.
+- **Voice access cleanup no longer sends an in-flight voice update to someone whose access was revoked** ([#3480](internal development reference omitted)) — temporary access removal holds the audience check through the database change.
 - **A malformed server response no longer replaces the desktop's working configuration** ([#3481](internal development reference omitted), [#2240](internal development reference omitted)) — the app keeps the last valid settings for that server, or safe defaults after switching servers, until a valid response arrives.
 - **Signing in with two-factor authentication no longer hangs when your encryption keys can't be unlocked** ([#3466](internal development reference omitted), [#3453](internal development reference omitted)) —
   the offer to reset your encryption keys appeared only on the password page, so an account with
