@@ -190,7 +190,7 @@ account can't provide, never your password twice.
   that app's sound straight away; before, the capture kept running in the background until you
   quit. Starting a share with app sound can take a moment longer, because it now waits until the
   sound capture is ready.
-- **Sharing an app window with its sound now captures apps like major comms platforms, and tells you if the sound stops** ([#3445](internal development reference omitted), [#3394](internal development reference omitted)) — on
+- **Sharing an app window with its sound now captures apps that play sound from a helper process, and tells you if the sound stops** ([#3445](internal development reference omitted), [#3394](internal development reference omitted)) — on
   macOS, many apps play sound from a separate helper process rather than from their window, so
   sharing one of those windows sent silence. Concord now captures sound from the app's helper
   processes too, but never from Concord itself, so your call is not echoed back to the people in

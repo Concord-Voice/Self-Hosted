@@ -1,4 +1,4 @@
-// Package servers provides handlers for managing Concord servers (community-style communities).
+// Package servers provides handlers for managing Concord servers (communities).
 package servers
 
 import (
