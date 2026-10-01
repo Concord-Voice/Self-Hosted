@@ -119,9 +119,8 @@ run_preflight() {
 
 # ── Secret generation ──────────────────────────────────────────────────────────
 
-# gen_secret — CSPRNG, ≥40 chars guaranteed (48 raw bytes → ≥48 base64 chars after
-# stripping +/=, then truncated to 40). ~238 bits worst case.
-gen_secret()  { openssl rand -base64 48 | tr -d '\n=/+' | cut -c1-40; }
+# gen_secret — CSPRNG, 32 random bytes → 64 safe hexadecimal characters (256 bits).
+gen_secret()  { openssl rand -hex 32; }
 gen_hex_key() { openssl rand -hex 32; }                                # 32-byte hex (MFA key shape)
 
 # ── Validators ─────────────────────────────────────────────────────────────────
