@@ -56,7 +56,160 @@ COMPOSE_OVERRIDE="${COMPOSE_OVERRIDE:-docker-compose.staging.yml}"
 COMPOSE_ENV_FILE_ARG=""
 [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]] \
   && COMPOSE_ENV_FILE_ARG="--env-file ${DEPLOY_DIR}/.env"
-COMPOSE_CMD="docker compose ${COMPOSE_ENV_FILE_ARG} -f ${DEPLOY_DIR}/docker-compose.yml -f ${DEPLOY_DIR}/${COMPOSE_OVERRIDE} --profile ${COMPOSE_PROFILES:-services}"
+# Self-host published-port posture (#3538). Reset AFTER deploy.env/deploy.env.local
+# are sourced, so neither can set or suppress it; empty in managed mode, which keeps
+# the managed COMPOSE_CMD byte-identical (no separating space before --profile).
+COMPOSE_SELFHOST_ARG=""
+[[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]] \
+  && COMPOSE_SELFHOST_ARG=" -f ${DEPLOY_DIR}/docker-compose.selfhost.yml"
+COMPOSE_CMD="docker compose ${COMPOSE_ENV_FILE_ARG} -f ${DEPLOY_DIR}/docker-compose.yml -f ${DEPLOY_DIR}/${COMPOSE_OVERRIDE}${COMPOSE_SELFHOST_ARG} --profile ${COMPOSE_PROFILES:-services}"
+
+# ── Self-host published-port posture (#3538) ─────────────────────────────────
+# Engine floor: before 28.0.0, hosts on the same L2 segment can reach ports
+# published on 127.0.0.1; from 28.2.0 to 28.3.2 a firewalld reload drops the rule
+# that blocks them (CVE-2025-54388). Must equal MIN_ENGINE in install-selfhost.sh
+# (pinned by [internal]tests/test-selfhost-port-posture.sh).
+SELFHOST_MIN_ENGINE=28.3.3
+SELFHOST_DOCKER_DAEMON_JSON="${SELFHOST_DOCKER_DAEMON_JSON:-/etc/docker/daemon.json}"
+
+# selfhost_posture_verdict MODE JSON -> 0 ok | 1 refused (prints violations).
+# Never echoes JSON: it carries .env-derived secrets.
+selfhost_posture_verdict() {
+  local mode="$1" json="$2" violations rc=0
+  violations="$(printf '%s' "$json" | python3 "${SCRIPT_DIR}/selfhost-port-posture.py" "$mode" 2>/dev/null)" || rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1)
+      echo "selfhost-posture: refusing — outside the self-host allowlist:" >&2
+      printf '%s\n' "$violations" | sed 's/^/  /' >&2
+      # A publication is fixed by the compose model or by up; a network attachment is not.
+      if grep -qvE ' network(_mode)?=' <<<"$violations"; then
+        if [[ "$mode" == --rendered ]]; then
+          echo "  Either Compose is too old to honour !override in docker-compose.selfhost.yml (upgrade to >= 2.24.5)," >&2
+          echo "  or a compose file was changed to publish this. Revert that change." >&2
+        else
+          echo "  Run ./infrastructure/deploy/concord-selfhost up to recreate the listed services (never a two-file docker compose up)." >&2
+          echo "  If up itself reported this, the container is one up does not manage (an orphan): remove it with docker rm -f." >&2
+        fi
+      fi
+      if grep -qE ' network(_mode)?=' <<<"$violations"; then
+        echo "  A listed network makes the container reachable with nothing published. Attach services only to a bridge network" >&2
+        echo "  on the default nat gateway mode, and detach any network added by hand: docker network disconnect <network> <container>." >&2
+      fi
+      return 1
+      ;;
+    *)
+      echo "selfhost-posture: refusing — the ${mode#--} port model could not be judged" >&2
+      return 1
+      ;;
+  esac
+}
+
+# Refuses, before any verb runs, an Engine older than SELFHOST_MIN_ENGINE and a
+# rendered model that publishes anything outside the self-host allowlist.
+selfhost_port_posture_gate() {
+  local engine rendered direct rc
+  command -v python3 >/dev/null 2>&1 \
+    || { echo "selfhost-posture: python3 is required" >&2; return 1; }
+  engine="$(docker version --format '{{.Server.Version}}' 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true)"
+  if [[ -z "$engine" ]]; then
+    echo "selfhost-posture: cannot read the Docker Engine version (is the daemon running and accessible?) — refusing" >&2
+    return 1
+  fi
+  if [[ "$(printf '%s\n%s\n' "$SELFHOST_MIN_ENGINE" "$engine" | sort -V | head -1)" != "$SELFHOST_MIN_ENGINE" ]]; then
+    echo "selfhost-posture: Docker Engine $engine is older than $SELFHOST_MIN_ENGINE; older engines can let LAN neighbours reach ports published on 127.0.0.1 (CVE-2025-54388) — refusing" >&2
+    return 1
+  fi
+  # Compose's error is NOT echoed: compose-go's dotenv errors can quote a whole .env
+  # line, value included. validate-config cannot show it either, because this gate runs
+  # before any verb, so name the command that does.
+  if ! rendered="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD config --format json 2>/dev/null)"; then
+    echo "selfhost-posture: could not render the compose model — refusing. To see Compose's error, run:" >&2
+    echo "  cd $DEPLOY_DIR && $COMPOSE_CMD config --quiet" >&2
+    return 1
+  fi
+  # allow-direct-routing opens every published port to direct routing, so a port published
+  # on 127.0.0.1 is reachable through the container's own address.
+  direct=0
+  if [[ -e "$SELFHOST_DOCKER_DAEMON_JSON" ]]; then
+    if [[ ! -r "$SELFHOST_DOCKER_DAEMON_JSON" ]]; then
+      echo "selfhost-posture: cannot read $SELFHOST_DOCKER_DAEMON_JSON to rule out allow-direct-routing — refusing" >&2
+      return 1
+    fi
+    # 0 set, 1 unset or false, 2 unparseable. dockerd reads the file only at start, so a
+    # broken file can sit beside a daemon still running with the setting: refuse.
+    rc=0
+    python3 -c 'import json,sys
+try: v = json.load(open(sys.argv[1])).get("allow-direct-routing")
+except Exception: sys.exit(2)
+sys.exit(1 if v is None or v is False else 0)' "$SELFHOST_DOCKER_DAEMON_JSON" 2>/dev/null || rc=$?
+    case $rc in
+      0) direct=1 ;;
+      1) ;;
+      *) echo "selfhost-posture: cannot parse $SELFHOST_DOCKER_DAEMON_JSON to rule out allow-direct-routing — refusing" >&2
+         return 1 ;;
+    esac
+  fi
+  pgrep -f 'dockerd.*--allow-direct-routing' >/dev/null 2>&1 && direct=1
+  if [[ $direct -eq 1 ]]; then
+    echo "selfhost-posture: Docker is configured with allow-direct-routing, which exposes ports published on 127.0.0.1 — refusing" >&2
+    return 1
+  fi
+  selfhost_posture_verdict --rendered "$rendered"
+}
+
+# Live bindings of every container in this compose project, stopped ones and
+# orphans included, judged against the same allowlist.
+selfhost_live_port_check() {
+  local rendered project ids inspected net_ids networks
+  rendered="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD config --format json 2>/dev/null)" || rendered=""
+  project="$(printf '%s' "$rendered" | python3 -c 'import json,sys; print(json.load(sys.stdin).get("name",""))' 2>/dev/null || true)"
+  if [[ ! "$project" =~ ^[a-z0-9][a-z0-9_-]*$ ]]; then
+    echo "selfhost-posture: cannot resolve the compose project name — refusing" >&2
+    return 1
+  fi
+  # Label filter, not `compose ps`: it includes STOPPED containers (they keep their
+  # bindings) and orphans, whose `compose ps` handling varies by Compose version.
+  if ! ids="$(docker ps -aq --filter "label=com.docker.compose.project=${project}")"; then
+    echo "selfhost-posture: could not list containers for project ${project} — refusing" >&2
+    return 1
+  fi
+  if [[ -z "$ids" ]]; then
+    echo "selfhost-posture: no containers for project ${project} — is the stack up?" >&2
+    return 1
+  fi
+  # shellcheck disable=SC2086  # one argument per container id
+  if ! inspected="$(docker inspect $ids 2>/dev/null)"; then
+    echo "selfhost-posture: docker inspect failed — refusing" >&2
+    return 1
+  fi
+  # The networks those containers are attached to: a macvlan or unprotected bridge makes a
+  # container reachable with nothing published, which PortBindings cannot show.
+  # shellcheck disable=SC2086  # one argument per container id
+  if ! net_ids="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{.NetworkID}} {{end}}' $ids 2>/dev/null)"; then
+    echo "selfhost-posture: docker inspect failed — refusing" >&2
+    return 1
+  fi
+  networks="[]"
+  # shellcheck disable=SC2046,SC2086  # one argument per network id
+  if [[ -n "${net_ids// /}" ]] && ! networks="$(docker network inspect $(printf '%s\n' $net_ids | sort -u) 2>/dev/null)"; then
+    echo "selfhost-posture: docker network inspect failed — refusing" >&2
+    return 1
+  fi
+  # printf is a builtin: the inspect JSON (which carries Config.Env) never reaches argv.
+  selfhost_posture_verdict --live "$(printf '{"containers":%s,"networks":%s}' "$inspected" "$networks")"
+}
+
+# Run before every rebuild's "Done.": a container the rebuild did not recreate keeps
+# whatever it was published with. A no-op outside self-host mode.
+selfhost_post_up_check() {
+  [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]] || return 0
+  selfhost_live_port_check
+}
+
+if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
+  selfhost_port_posture_gate || exit 1
+fi
 ACTIVITY_HISTORY_IMAGE_SELECTOR="${SCRIPT_DIR}/.env.activity-history-image.local"
 ACTIVITY_HISTORY_ACTIVATION_RECEIPT="${SCRIPT_DIR}/.env.activity-history-receipt.local"
 ACTIVITY_HISTORY_IMAGE_SELECTOR_LOADED=0
@@ -463,7 +616,7 @@ activity_history_wait_control_plane() {
       probe_limit="$interval"
     fi
     if curl --connect-timeout "$probe_limit" --max-time "$probe_limit" \
-      -sf 'http://localhost:8080/health' >/dev/null 2>&1; then
+      -sf 'http://127.0.0.1:8080/health' >/dev/null 2>&1; then
       return 0
     fi
     (( interval == 0 )) && break
@@ -835,10 +988,14 @@ voice_enforcement_rollout_wait_control_plane() {
     return 1
   }
   deadline=$(( $(date +%s) + timeout ))
-  while (( $(date +%s) < deadline )); do
-    if curl -sf --max-time 2 http://localhost:8080/readyz >/dev/null 2>&1; then
+  # Probe BEFORE testing the deadline, as activity_history_wait_control_plane does:
+  # `date +%s` is whole-second, so with a small timeout the clock can reach
+  # `deadline` before the first pass and the wait would fail without probing.
+  while :; do
+    if curl -sf --max-time 2 http://127.0.0.1:8080/readyz >/dev/null 2>&1; then
       return 0
     fi
+    (( $(date +%s) < deadline )) || break
     sleep 2
   done
   echo "voice-enforcement-rollout: control-plane did not become ready" >&2
@@ -854,10 +1011,10 @@ voice_enforcement_rollout_wait_media() {
   }
   body="$(mktemp)"
   deadline=$(( $(date +%s) + timeout ))
-  while (( $(date +%s) < deadline )); do
+  while :; do  # probe before the deadline test; see voice_enforcement_rollout_wait_control_plane
     : >"$body"
     status="$(curl -sS --max-time 2 -o "$body" -w '%{http_code}' \
-      http://localhost:3000/readyz 2>/dev/null || true)"
+      http://127.0.0.1:3000/readyz 2>/dev/null || true)"
     if [[ "$status" == 200 ]] && python3 - "$body" <<'PY'
 import json
 import sys
@@ -873,6 +1030,7 @@ PY
       rm -f "$body"
       return 0
     fi
+    (( $(date +%s) < deadline )) || break
     sleep 2
   done
   rm -f "$body"
@@ -1192,7 +1350,7 @@ case "${1:-help}" in
     for svc in "Control Plane:8080" "Media Plane:3000"; do
       name="${svc%%:*}"
       port="${svc##*:}"
-      if curl -sf "http://localhost:${port}/health" > /dev/null 2>&1; then
+      if curl -sf "http://127.0.0.1:${port}/health" > /dev/null 2>&1; then
         echo "  ✓ ${name} (http://${VM_IP}:${port})"
       else
         echo "  ✗ ${name} (port ${port})"
@@ -1452,6 +1610,7 @@ else:
     # the paired handoff, immediately before the control-plane build.
     if [[ $_rebuild_scoped -eq 0 ]]; then
       rebuild_unscoped
+      selfhost_post_up_check || exit 1
       echo "Done."
       exit 0
     fi
@@ -1465,6 +1624,7 @@ else:
       else
         voice_enforcement_rollout_media_rebuild
       fi
+      selfhost_post_up_check || exit 1
       echo "Done."
       exit 0
     fi
@@ -1483,6 +1643,7 @@ else:
     # the deploy's SSH session with the stack in an indeterminate state.
     echo "Scope: ${REBUILD_SCOPE[*]} (--no-deps --wait)"
     cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --build --no-deps --wait --wait-timeout 180 "${REBUILD_SCOPE[@]}"
+    selfhost_post_up_check || exit 1
     echo "Done."
     ;;
 
@@ -1498,11 +1659,13 @@ else:
   activity-history-activate)
     shift
     activity_history_activate "$@"
+    selfhost_post_up_check || exit 1
     ;;
 
   activity-history-rollback)
     shift
     activity_history_rollback "$@"
+    selfhost_post_up_check || exit 1
     ;;
 
   voice-enforcement-rollout)
@@ -1517,6 +1680,15 @@ else:
         exit 2
         ;;
     esac
+    ;;
+
+  selfhost-port-check)
+    if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost ]]; then
+      echo "selfhost-port-check runs only in the self-host contract mode (use concord-selfhost health)" >&2
+      exit 2
+    fi
+    selfhost_live_port_check || exit 1
+    echo "selfhost-posture: live port bindings match the self-host allowlist"
     ;;
 
   validate-config)
@@ -2172,8 +2344,11 @@ else:
     INTERVAL=2
     DEADLINE=$(( $(date +%s) + TIMEOUT ))
     # Single assignment so the blue/green colour flip (#3108) has ONE line to
-    # make colour-aware rather than one per probe site.
-    CP_PROBE_BASE="http://localhost:8080"
+    # make colour-aware rather than one per probe site. Every HTTP probe in this
+    # file targets 127.0.0.1, never `localhost`: the self-host overlay binds 8080
+    # and 3000 to 127.0.0.1 only, so [::1] is free for any local user to answer a
+    # `localhost` probe (curl tries it first) and fake readiness (#3538).
+    CP_PROBE_BASE="http://127.0.0.1:8080"
     cp_ok=0; mp_ok=0; coturn_ok=0
     while [[ $(date +%s) -lt $DEADLINE ]]; do
       cp_ok=0; mp_ok=0; coturn_ok=0
@@ -2185,7 +2360,7 @@ else:
       # that bit is #3107's restart predicate; see
       # [internal]tests/test-compose-health-contract.sh.
       curl -sf "${CP_PROBE_BASE}/readyz" >/dev/null 2>&1 && cp_ok=1
-      curl -sf "http://localhost:3000/health" >/dev/null 2>&1 && mp_ok=1
+      curl -sf "http://127.0.0.1:3000/health" >/dev/null 2>&1 && mp_ok=1
       nc -z -w2 localhost 3478 >/dev/null 2>&1 && coturn_ok=1
       if [[ $cp_ok -eq 1 && $mp_ok -eq 1 && $coturn_ok -eq 1 ]]; then
         echo "  ✓ all services healthy (control-plane + media-plane + coturn)"
@@ -2272,6 +2447,7 @@ else:
       echo "Fresh start failed the voice-enforcement readiness/activation gate; enforcement remains inactive." >&2
       exit 1
     fi
+    selfhost_post_up_check || exit 1
     echo ""
     echo "Fresh start complete. All data has been wiped."
     ;;
@@ -2306,7 +2482,7 @@ else:
 
     # 3. /register endpoint responds (400 expected on empty body)
     HTTP=$(curl -sf -o /dev/null -w "%{http_code}" \
-             -X POST http://localhost:8080/api/v1/auth/register \
+             -X POST http://127.0.0.1:8080/api/v1/auth/register \
              -H "Content-Type: application/json" -d '{}' 2>/dev/null || echo "000")
     if [[ "$HTTP" == "400" ]]; then
       echo "  ✓ /register endpoint responding (400 on empty body expected)"
@@ -2392,6 +2568,7 @@ else:
     echo "  voice-enforcement-rollout deploy"
     echo "                 Build CP, drain/rebuild MP, verify protocol 3, activate"
     echo "  validate-config  §F: pre-rebuild guard via 'docker compose config --quiet'"
+    echo "  selfhost-port-check  Self-host only: refuse live port bindings outside the posture allowlist (#3538)"
     echo "  attachment-probe  Validate the armed attachment backend without pulling images"
     echo "  attachment-probe-cron-install  Idempotently install the nightly attachment probe"
     echo "  nginx-reload   Validate/render HSTS, atomically swap main/admin nginx files,"
@@ -2403,5 +2580,8 @@ else:
     echo "  docker-clean   Prune unused images + builder cache (weekly cron target)"
     echo "                 Add --aggressive to drop 7-day retention + prune stopped containers"
     echo "  stop           Stop all services"
+    # An unknown verb must fail: a caller (concord-selfhost health) treats exit 0 as
+    # "the check ran and passed", so usage on a typo or a missing verb read as success.
+    [[ "${1:-help}" =~ ^(help|-h|--help)$ ]] || exit 2
     ;;
 esac

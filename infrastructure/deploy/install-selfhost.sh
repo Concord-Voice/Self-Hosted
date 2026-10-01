@@ -54,7 +54,9 @@ port_in_use() {
   fi
 }
 
-readonly REQUIRED_TCP_PORTS=(8080 3000 5432 6379 4222 3478 5349 9000 9001)
+# Only HOST-BOUND ports (#3538): Postgres/Redis/NATS/MinIO have no host socket on
+# self-host, so a host-run Postgres or Redis must not block the install.
+readonly REQUIRED_TCP_PORTS=(8080 3000 3478 5349)
 
 preflight_ports() {
   local busy=() p
@@ -85,7 +87,20 @@ preflight_os() {
   esac
 }
 
+# Version floors (#3538). Engine: before 28.0.0, LAN neighbours can reach ports
+# published on 127.0.0.1, and from 28.2.0 to 28.3.2 a firewalld reload drops the
+# rule that blocks them (CVE-2025-54388). Compose: 2.24.5 is the oldest release
+# measured honouring `!override` in docker-compose.selfhost.yml (2.20 and 2.21
+# ignore it and merge the lists back to 0.0.0.0). MIN_ENGINE must equal
+# SELFHOST_MIN_ENGINE in concord-ctl.sh (pinned by test-selfhost-port-posture.sh).
+readonly MIN_ENGINE=28.3.3
+readonly MIN_COMPOSE=2.24.5
+
+# version_at_least HAVE NEED — dotted-version comparison via sort -V.
+version_at_least() { [[ "$(printf '%s\n%s\n' "$2" "$1" | sort -V | head -1)" == "$2" ]]; }
+
 preflight_docker() {
+  local engine compose
   command -v docker >/dev/null 2>&1 || {
     echo -e "${RED}✗ Docker Engine not found${NC}" >&2
     return 2
@@ -94,7 +109,21 @@ preflight_docker() {
     echo -e "${RED}✗ Docker Compose v2 plugin not found${NC}" >&2
     return 2
   }
-  echo -e "${GREEN}✓ docker + compose v2${NC}"
+  engine="$(docker version --format '{{.Server.Version}}' 2>/dev/null | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true)"
+  if [[ -z "$engine" ]] || ! version_at_least "$engine" "$MIN_ENGINE"; then
+    echo -e "${RED}✗ Docker Engine ${engine:-unknown (is the daemon running and accessible?)} — need >= $MIN_ENGINE (older engines can let LAN neighbours reach loopback-published ports, CVE-2025-54388). Install Docker CE from download.docker.com.${NC}" >&2
+    return 2
+  fi
+  compose="$(docker compose version --short 2>/dev/null | tr -d 'v' | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || true)"
+  if [[ -z "$compose" ]] || ! version_at_least "$compose" "$MIN_COMPOSE"; then
+    echo -e "${RED}✗ Docker Compose ${compose:-unknown} — need >= $MIN_COMPOSE (older Compose ignores !override in docker-compose.selfhost.yml)${NC}" >&2
+    return 2
+  fi
+  command -v python3 >/dev/null 2>&1 || {
+    echo -e "${RED}✗ python3 not found (the deploy controller needs it)${NC}" >&2
+    return 2
+  }
+  echo -e "${GREEN}✓ docker ${engine} + compose ${compose} + python3${NC}"
 }
 
 # Thresholds: 2 vCPU, 2GiB RAM, 10GiB free disk (conservative BASIC floor).
@@ -501,12 +530,17 @@ ${GREEN}Install configured.${NC} Next steps:
      'local' is trusted-LAN-only (no MITM protection). Guide: docs/runbooks/self-hosted-tls.md
   2. Install the rendered nginx vhost:
        sudo cp $NGINX_OUT /etc/nginx/conf.d/ && sudo nginx -t && sudo systemctl reload nginx
-  3. Open firewall ports (UFW):
+  3. Firewall (UFW). UFW filters HOST processes (nginx, sshd):
        sudo ufw allow 80,443/tcp
+     Docker-published ports are not filtered by UFW on IPv4 (Docker's rules run first).
+     The stack publishes only TURN and media publicly; allow them so IPv6 and UFW's own
+     view stay correct:
        sudo ufw allow 3478,5349/tcp
        sudo ufw allow 3478/udp
        sudo ufw allow 49152:49252/udp
-     (keep MinIO 9000/9001 host-internal — do NOT expose to the internet)
+       sudo ufw allow 40000:41999/udp
+     Postgres, Redis and NATS have no host socket; 8080/3000 listen on 127.0.0.1 only.
+     Check: docs/runbooks/selfhost-quickstart.md § Verify your exposure
   4. Start the stack:  ./infrastructure/deploy/concord-selfhost up
   5. Check health:     ./infrastructure/deploy/concord-selfhost health"
 }

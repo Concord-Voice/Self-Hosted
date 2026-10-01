@@ -28,6 +28,7 @@ readonly NC='\033[0m'
 COMPOSE_FILES=(
   "-f" "$PROJECT_ROOT/docker-compose.yml"
   "-f" "$PROJECT_ROOT/docker-compose.production.yml"
+  "-f" "$PROJECT_ROOT/docker-compose.selfhost.yml"
   "--profile" "services"
 )
 
@@ -73,7 +74,8 @@ Verbs:
   stop         pause containers, leave them in place (docker compose stop)
   status       per-service container state (docker compose ps)
   logs [svc]   tail logs; optional service name to filter
-  health       probe control-plane /api/v1/client/config (expect HTTP 200)
+  health       probe control-plane over 127.0.0.1 and check live port bindings
+               against the self-host posture (#3538)
   --help       show this help
 
 Run from the repo root. The .env in the repo root is auto-loaded by compose.
@@ -82,15 +84,23 @@ USAGE
 }
 
 verb_health() {
-  local code
+  local code rc=0
   code="$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 5 \
-    http://localhost:8080/api/v1/client/config 2>/dev/null || echo 000)"
+    http://127.0.0.1:8080/api/v1/client/config 2>/dev/null)" || true
+  code="${code:-000}"
   if [[ "$code" == "200" ]]; then
     echo -e "${GREEN}✓ control-plane healthy (HTTP 200)${NC}"
   else
     echo -e "${RED}✗ control-plane unhealthy (HTTP $code)${NC}" >&2
-    return 1
+    rc=1
   fi
+  if guarded_ctl selfhost-port-check; then
+    echo -e "${GREEN}✓ published ports match the self-host posture${NC}"
+  else
+    echo -e "${RED}✗ published-port posture check failed (see above)${NC}" >&2
+    rc=1
+  fi
+  return "$rc"
 }
 
 # ── Verb dispatch ──────────────────────────────────────────────────────
