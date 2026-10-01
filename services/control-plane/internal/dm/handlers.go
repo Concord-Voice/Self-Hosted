@@ -18,6 +18,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmblock"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/entitlements"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/keyrotation"
 	messagehandlers "github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/messages"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/models"
@@ -215,6 +216,18 @@ func (h *Handler) SetActivePlanRail(rail ActivePlanRail) {
 // the wiring line deleted.
 func (h *Handler) HasActivePlanRail() bool { return h != nil && h.activePlans != nil }
 
+// HasMFAVerifier reports whether the handler was constructed with a non-nil
+// MFA verifier. dm.Handler takes its verifier through HandlerDeps rather than
+// a setter (it already backs the #1352 bulk-purge step-up gate), so this asks
+// the FIELD the constructor populated. The delete-rate soft-lock's boot guard
+// (#3455) shares this predicate with that existing purge gate.
+func (h *Handler) HasMFAVerifier() bool { return h != nil && h.mfaVerifier != nil }
+
+// HasRedis reports whether the handler was constructed with a non-nil Redis
+// client. Shared by the #1352 purge gate and the #3455 delete-rate soft-lock's
+// boot guard.
+func (h *Handler) HasRedis() bool { return h != nil && h.redis != nil }
+
 // dmMessageResponse represents a DM message in API responses.
 type dmMessageResponse struct {
 	ID               string          `json:"id"`
@@ -316,6 +329,10 @@ type lastMessageResponse struct {
 	CreatedAt        string          `json:"created_at"`
 	Type             string          `json:"type,omitempty"`
 	CallEventPayload json.RawMessage `json:"call_event_payload,omitempty"`
+	// The CSK epoch the preview ciphertext was written under. Without it the
+	// client can only try the current key, which cannot open a pre-rotation
+	// preview once a group member has left.
+	KeyVersion int64 `json:"key_version,omitempty"`
 	// Attachment metadata for the conversation-list preview (#2364). Both are
 	// display-only: mime_type is sender-asserted (spec §3.3) and must never gate
 	// rendering, download, or any authorization decision. Two scalars only — no
@@ -354,7 +371,7 @@ func (h *Handler) queryConversations(userID string) ([]conversationResponse, []s
 	query := `
 		SELECT dc.id, dc.is_group, dc.is_personal, dc.name, dc.icon_url, dc.created_by,
 		       dc.expiration_window_seconds, dc.expiration_updated_at, dc.expiration_revision, dc.expiration_backfill_mode IS NOT NULL, dc.created_at,
-		       dm.content, dm.expires_at, dm.created_at, dm.user_id, dm.type, dm.call_event_payload,
+		       dm.content, dm.expires_at, dm.created_at, dm.user_id, dm.type, dm.call_event_payload, dm.key_version,
 		       att.file_type, att.mime_type,
 		       (SELECT COUNT(*) FROM dm_messages m
 		        WHERE m.conversation_id = dc.id
@@ -366,7 +383,7 @@ func (h *Handler) queryConversations(userID string) ([]conversationResponse, []s
 		JOIN dm_participants dp ON dp.conversation_id = dc.id AND dp.user_id = $1 AND dp.hidden_at IS NULL
 		LEFT JOIN dm_read_states drs ON drs.conversation_id = dc.id AND drs.user_id = $1
 		LEFT JOIN LATERAL (
-		    SELECT m.id, m.content, m.expires_at, m.created_at, m.user_id, m.type, m.call_event_payload FROM dm_messages m
+		    SELECT m.id, m.content, m.expires_at, m.created_at, m.user_id, m.type, m.call_event_payload, COALESCE(m.key_version, 1) AS key_version FROM dm_messages m
 		    WHERE m.conversation_id = dc.id ` + hiddenRangeFilter(1) + `
 		    ORDER BY m.created_at DESC LIMIT 1
 		) dm ON TRUE
@@ -410,7 +427,7 @@ func (h *Handler) scanConversationRow(rows *sql.Rows) (conversationResponse, err
 	if err := rows.Scan(
 		&conv.ID, &conv.IsGroup, &conv.IsPersonal, &conv.Name, &conv.IconURL, &conv.CreatedBy,
 		&conv.ExpirationWindowSeconds, &conv.ExpirationUpdatedAt, &conv.ExpirationRevision, &conv.ExpirationBackfillPending, &conv.CreatedAt,
-		&lm.content, &lm.expiresAt, &lm.createdAt, &lm.userID, &lm.msgType, &lm.callEventPayload,
+		&lm.content, &lm.expiresAt, &lm.createdAt, &lm.userID, &lm.msgType, &lm.callEventPayload, &lm.keyVersion,
 		&lm.attachmentType, &lm.attachmentMime,
 		&conv.UnreadCount,
 	); err != nil {
@@ -443,6 +460,7 @@ type lastMessageRow struct {
 	userID           sql.NullString
 	msgType          sql.NullString
 	callEventPayload []byte
+	keyVersion       sql.NullInt64
 	attachmentType   sql.NullString
 	attachmentMime   sql.NullString
 }
@@ -463,6 +481,7 @@ func newLastMessageResponse(row lastMessageRow) *lastMessageResponse {
 		CreatedAt:        row.createdAt.String,
 		Type:             row.msgType.String,
 		CallEventPayload: json.RawMessage(row.callEventPayload),
+		KeyVersion:       row.keyVersion.Int64,
 		AttachmentType:   row.attachmentType.String,
 		AttachmentMime:   row.attachmentMime.String,
 	}
@@ -3161,11 +3180,11 @@ func (h *Handler) fetchConversationResponse(convID, viewerID string) *conversati
 	err := h.db.QueryRow(`
 		SELECT dc.id, dc.is_group, dc.is_personal, dc.name, dc.icon_url, dc.created_by,
 		       dc.expiration_window_seconds, dc.expiration_updated_at, dc.expiration_revision, dc.expiration_backfill_mode IS NOT NULL, dc.created_at,
-		       dm.content, dm.expires_at, dm.created_at, dm.user_id, dm.type, dm.call_event_payload,
+		       dm.content, dm.expires_at, dm.created_at, dm.user_id, dm.type, dm.call_event_payload, dm.key_version,
 		       att.file_type, att.mime_type
 		FROM dm_conversations dc
 		LEFT JOIN LATERAL (
-		    SELECT m.id, m.content, m.expires_at, m.created_at, m.user_id, m.type, m.call_event_payload FROM dm_messages m
+		    SELECT m.id, m.content, m.expires_at, m.created_at, m.user_id, m.type, m.call_event_payload, COALESCE(m.key_version, 1) AS key_version FROM dm_messages m
 		    WHERE m.conversation_id = dc.id `+hiddenRangeFilter(2)+`
 		    ORDER BY m.created_at DESC LIMIT 1
 		) dm ON TRUE
@@ -3181,7 +3200,7 @@ func (h *Handler) fetchConversationResponse(convID, viewerID string) *conversati
 	`, convID, viewerID).Scan(
 		&conv.ID, &conv.IsGroup, &conv.IsPersonal, &conv.Name, &conv.IconURL, &conv.CreatedBy,
 		&conv.ExpirationWindowSeconds, &conv.ExpirationUpdatedAt, &conv.ExpirationRevision, &conv.ExpirationBackfillPending, &conv.CreatedAt,
-		&lm.content, &lm.expiresAt, &lm.createdAt, &lm.userID, &lm.msgType, &lm.callEventPayload,
+		&lm.content, &lm.expiresAt, &lm.createdAt, &lm.userID, &lm.msgType, &lm.callEventPayload, &lm.keyVersion,
 		&lm.attachmentType, &lm.attachmentMime,
 	)
 	if err != nil {
@@ -3232,6 +3251,23 @@ func (h *Handler) enforceDMMessageEpoch(c *gin.Context, q epochQueryRower, convI
 		return false
 	}
 	if !epochRevoked {
+		// A label above the newest issued epoch names a key nobody holds, and
+		// every reader that sees it fetches a key that does not exist (#2822).
+		issued, err := keyrotation.IssuedDMEpoch(c.Request.Context(), q, convID)
+		if err != nil {
+			h.log.Error("Failed to resolve issued DM key epoch", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify key epoch"})
+			return false
+		}
+		if keyVersion > issued {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error":           "Key epoch has not been issued",
+				"code":            "epoch_unissued",
+				"current_epoch":   issued,
+				"conversation_id": convID,
+			})
+			return false
+		}
 		return true
 	}
 
@@ -3524,7 +3560,9 @@ func (h *Handler) UpdateMessage(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": result})
 }
 
-// DeleteMessage deletes a DM message.
+// DeleteMessage deletes a DM message. Past the delete-rate soft-lock (#3455)
+// the author confirms under their own require_auth_before_purge rule; see
+// deleteDMMessageUnderSoftLock.
 func (h *Handler) DeleteMessage(c *gin.Context) {
 	convID, messageID, userID, ok := h.resolveDMMessageRequest(c)
 	if !ok {
@@ -3535,9 +3573,54 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteMessage})
 		return
 	}
-	var deletedAuthorID uuid.UUID
-	var deletedCreatedAt time.Time
-	if !h.deleteDMMessage(c, convID, messageID, userID, &deletedAuthorID, &deletedCreatedAt) {
+	in, bodyErr := stepup.ReadOptionalStepUp(c)
+	if bodyErr != nil {
+		bodyErr.Write(c)
+		return
+	}
+
+	// Check message exists and user is the author. The same statement reads the
+	// author's own require_auth_before_purge — a missing row means ON, as it
+	// does for Clear — which is the soft-lock population. Nothing branches on it
+	// before the author 403 below (I7).
+	//
+	// This read is unlocked and is NOT the authority: deleteDMMessageTx
+	// rechecks participation and authorship under the topology locks. It exists
+	// because the soft-lock counts before that transaction opens, so a
+	// non-author or a missing row must be refused here, uncounted.
+	var authorID string
+	var ownRule bool
+	//nolint:gosec // G202: the filter is a compile-time constant; all values are parameterized.
+	if err := h.db.QueryRow(`SELECT m.user_id,
+		       COALESCE((SELECT require_auth_before_purge FROM privacy_settings WHERE user_id = $3), TRUE)
+		FROM dm_messages m WHERE m.id = $1 AND m.conversation_id = $2`+
+		hiddenRangeFilter(3), messageID, convID, userID).Scan(&authorID, &ownRule); err == sql.ErrNoRows {
+		c.JSON(http.StatusNotFound, gin.H{"error": errMsgMessageNotFound})
+		return
+	} else if err != nil {
+		h.log.Error("Failed to check DM message author", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteMessage})
+		return
+	}
+
+	if authorID != userID {
+		c.JSON(http.StatusForbidden, gin.H{"error": "You can only delete your own messages"})
+		return
+	}
+	if h.purgeEngine == nil {
+		h.log.Error("Failed to delete DM message", "error", "purge engine unavailable")
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteMessage})
+		return
+	}
+
+	deleted, ok := h.deleteDMMessageUnderSoftLock(c, dmMessageDeleteTarget{
+		convID:     convID,
+		messageID:  messageID,
+		userID:     userID,
+		actorUUID:  actorUUID,
+		tokenEpoch: middleware.TokenCredentialEpoch(c),
+	}, in, ownRule)
+	if !ok {
 		return
 	}
 
@@ -3551,94 +3634,13 @@ func (h *Handler) DeleteMessage(c *gin.Context) {
 	if h.hub != nil {
 		h.hub.BroadcastToDMMessageAllParticipants(
 			conversationUUID,
-			websocket.NewDeletedDMMessageVisibilitySource(deletedAuthorID, deletedCreatedAt),
+			websocket.NewDeletedDMMessageVisibilitySource(deleted.authorID, deleted.createdAt),
 			actorUUID,
 			msg,
 		)
 	}
 
 	c.JSON(http.StatusOK, gin.H{"success": true})
-}
-
-// deleteDMMessage rechecks authority under the complete topology and
-// credential fence. A member removed after the HTTP preflight receives 403,
-// never a misleading 404 caused by an unfenced purge lookup.
-func (h *Handler) deleteDMMessage(
-	c *gin.Context,
-	convID, messageID, userID string,
-	deletedAuthorID *uuid.UUID,
-	deletedCreatedAt *time.Time,
-) bool {
-	if h.purgeEngine == nil {
-		h.log.Error("Failed to delete DM message", "error", "purge engine unavailable")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteMessage})
-		return false
-	}
-	actor, err := uuid.Parse(userID)
-	if err != nil {
-		h.log.Error("Failed to parse DM message delete actor", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteMessage})
-		return false
-	}
-	err = h.purgeEngine.DeleteOne(c.Request.Context(), messageID, purge.DeleteSpec{
-		MessagesTable:    "dm_messages",
-		ScopeColumn:      "conversation_id",
-		ScopeID:          convID,
-		AttachmentsTable: "dm_message_attachments",
-		Guard: func(ctx context.Context, tx *sql.Tx) error {
-			if _, err := dmblock.PrepareConversationTx(ctx, tx, convID, []uuid.UUID{actor}, dmblock.LockShare, dmblock.LockShare); err != nil {
-				return err
-			}
-			if err := credepoch.GuardTx(ctx, tx, userID, middleware.TokenCredentialEpoch(c)); err != nil {
-				return err
-			}
-			var participant string
-			if err := tx.QueryRowContext(ctx,
-				`SELECT user_id FROM dm_participants WHERE user_id = $1 AND conversation_id = $2 FOR SHARE`, userID, convID,
-			).Scan(&participant); errors.Is(err, sql.ErrNoRows) {
-				return errDMPurgeNotParticipant
-			} else if err != nil {
-				return fmt.Errorf("recheck DM message participant: %w", err)
-			}
-			//nolint:gosec // G202: the filter is a compile-time constant; all values are parameterized.
-			if err := tx.QueryRowContext(ctx,
-				`SELECT m.user_id, m.created_at FROM dm_messages m WHERE m.id = $1 AND m.conversation_id = $2`+hiddenRangeFilter(3)+` FOR UPDATE`,
-				messageID, convID, userID,
-			).Scan(deletedAuthorID, deletedCreatedAt); err != nil {
-				return fmt.Errorf("recheck DM message author: %w", err)
-			}
-			if *deletedAuthorID != actor {
-				return errDMPurgeScopeChanged
-			}
-			return nil
-		},
-	})
-	if err == nil {
-		return true
-	}
-	if errors.Is(err, credepoch.ErrEpochMismatch) || errors.Is(err, credepoch.ErrBlocked) {
-		h.respondGuardTxError(c, err, errMsgFailedDeleteMessage)
-		return false
-	}
-	if errors.Is(err, dmblock.ErrUnavailable) || errors.Is(err, dmblock.ErrMembershipChanged) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "dm_unavailable"})
-		return false
-	}
-	if errors.Is(err, errDMPurgeNotParticipant) {
-		c.JSON(http.StatusForbidden, gin.H{"error": errMsgNotParticipant})
-		return false
-	}
-	if errors.Is(err, errDMPurgeScopeChanged) {
-		c.JSON(http.StatusForbidden, gin.H{"error": "You can only delete your own messages"})
-		return false
-	}
-	if errors.Is(err, sql.ErrNoRows) {
-		c.JSON(http.StatusNotFound, gin.H{"error": errMsgMessageNotFound})
-		return false
-	}
-	h.log.Error("Failed to delete DM message", "error", err)
-	c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteMessage})
-	return false
 }
 
 func parseDMMessageDeliveryIDs(convID, messageID, actorID string) (uuid.UUID, uuid.UUID, uuid.UUID, error) {

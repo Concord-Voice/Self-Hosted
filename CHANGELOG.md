@@ -16,6 +16,44 @@ account can't provide, never your password twice.
 ### Added
 
 - **Bug reports can now include screenshots** ([#1747](internal development reference omitted)) — the in-app bug-report form now lets you attach up to four images (PNG, JPEG, or WebP, up to 5 MB each), so a visual glitch can be shown rather than described. Attached images are re-encoded before upload, which removes embedded camera metadata such as GPS location, and they appear inline in the filed report.
+- **Deleting many messages quickly now asks you to confirm it is you** ([#3455](internal development reference omitted), [#3509](internal development reference omitted)) — if you delete more than 15
+  messages within 30 seconds, or more than 100 within 24 hours, the app asks for your authenticator or
+  security-key code, or your password if your account has no code method, before it deletes the next
+  one. Purging your own messages from a channel or server counts the same way; a purge of more than 15
+  of your own messages always asks. The rule applies when your "Require authentication before purging"
+  privacy setting is on (the default) and you delete your own messages, and on servers that require MFA
+  for dangerous actions. If you cannot confirm, the app shows how long to wait. Deletes that were
+  refused used to fail silently on the desktop; each one now opens a dialog. Your password is sent only
+  to a new confirmation endpoint, never to the delete, purge or clear request itself — DM "Clear
+  history" included — and a security-key confirmation is no longer used up by an attempt that fails
+  partway. **API clients:** a delete or self-purge request may carry an optional JSON body
+  `{"mfa_code", "step_up_token"}` (up to 4 KiB). An account without inline MFA gets the token from the
+  new authenticated `POST /api/v1/auth/step-up/password` with `{current_password, purpose}`: it shares
+  login's lockout (423 `account_locked`) and rate limit, refuses an account with MFA (403
+  `mfa_required` with `mfa_methods`), and returns a single-use `{step_up_token, expires_in: 60}` bound
+  to one route's purpose. It allows 10 attempts per 15 minutes per IP address and 10 per account,
+  answers 503 rather than skipping those limits when it cannot check them, refuses an account that
+  has neither a password nor MFA with the target route's own 400 message (flagged
+  `step_up_unavailable: true`, as is that route's own 400 for the same account), and records every wrong
+  password, lockout and success as a security event the way login does. In the app, a password
+  prompt whose account has since gained an authenticator moves to the code prompt instead of a dead
+  end, a server too old to offer the endpoint says so instead of blaming your password, the password
+  field is emptied after each attempt, a purge that finishes after you closed its dialog no
+  longer reports its result in the next one, and if another account signs in, or another server is
+  selected, while your password is being confirmed, the delete, purge or Clear is not sent at all. DM Clear takes `step_up_token` in place of `current_password` too, and any
+  delete, self-purge or Clear body that still carries `current_password` is now a 400. A WebAuthn
+  confirmation is spent inside the request's own transaction, so a request that rolls back leaves it
+  usable (migration 000162). A channel or server purge body must now be exactly one JSON object: a second JSON value
+  or trailing bytes after it are refused with 400. New refusal bodies on the channel and DM message-delete routes and the channel and server
+  purge routes: 403 with `delete_rate_limited: true` and a `Retry-After` header (`mfa_required` with
+  `methods`, `Invalid MFA code`, `password_required` — with `step_up_token_invalid` when the token sent
+  matched nothing — or `mfa_enrollment_required`);
+  429 with `step_up_budget_exhausted: true` when too many factors were sent; and three different 503
+  bodies: soft-lock unavailable (`Retry-After: 30`, no flag), `step_up_budget_unavailable: true`, and
+  `lock_conflict: true` (`Retry-After: 1`). While Redis refuses writes, deletes by users the rule covers
+  return the first 503. The shared step-up budget's 429 and 503 now carry those two flags on every
+  route that charges it: the MFA settings routes, the "Require authentication before purging" setting,
+  and the server MFA-enforcement toggle.
 
 ### Changed
 
@@ -29,6 +67,8 @@ account can't provide, never your password twice.
 - **The control plane now supports private DM hide and history-clear operations** ([#3306](internal development reference omitted)) — authenticated API clients can hide a direct message or group chat from one participant's list, or clear that participant's history before a server-stamped cutoff. Hide preserves history, read state, and the original hide timestamp on retries. Clear uses MFA when enabled or the current password otherwise when Privacy & Security requires authentication; the existing permanent purge action keeps its current password-and-MFA behavior.
 - **Server owners can require MFA for dangerous actions, through the API** ([#3464](internal development reference omitted), [#3453](internal development reference omitted)) — a server's owner or an Administrator can turn on `PUT /api/v1/servers/{id}/mfa-enforcement`. While it is on, a member without an authenticator app or security key cannot use the dangerous permissions: managing the server, its roles or its channels, kicking, banning, deleting other members' messages, rotating channel keys, and managing developer resources. Email and text-message codes do not count. That member keeps every other permission and still sees every channel they could see before. Turning it on requires your own authenticator app or security key; turning it off requires a code from one. The app has no setting for it yet ([#3456](internal development reference omitted)), so for now only API clients can change it.
 - **Direct messages now offer separate Hide, Clear history for me, and Leave group controls** ([#3434](internal development reference omitted)) — Hide removes a thread from your list until a new message arrives; Clear removes its earlier messages only from your view and asks for account verification when required. Leaving a group ends your membership and access to its messages. Purge Messages remains a separate action.
+- **Purge Messages now uses one range menu and says up front what it deletes** ([#3468](internal development reference omitted)) — the time range is a single dropdown instead of nine buttons, and in a direct message or group the dialog now says before you choose a range that only your own messages are removed; everyone else's stay for them and are hidden only from you.
+- **Hide now looks like the reversible action it is, and Leave group has its own section** ([#3468](internal development reference omitted)) — the Hide confirmation no longer uses the red warning styling of Clear history and Leave group, and Group Info now places Leave group in its own section, styled as destructive and separated from Purge Messages.
 - **Font Size is back under Appearance** ([#3401](internal development reference omitted), [#2367](internal development reference omitted)) — the
   Small / Default / Large text size now sits in Appearance ▸ Application Font, next to the font it
   changes, instead of in Accessibility ▸ Display. The UI Scale slider stays in Accessibility. Font
@@ -73,6 +113,20 @@ account can't provide, never your password twice.
 
 ### Fixed
 
+- **Email MFA can be turned on again, and SMS shows as coming soon** ([#3519](internal development reference omitted)) — switching on email codes in Settings ▸ Multi-Factor Auth failed for every account, because a hardened-recovery setting that was on by default also asked for a text-message code, and text-message codes are not available yet. Email codes now turn on with the email code alone. The SMS option and the hardened-recovery switch, which needs it, are marked "Coming soon" until text-message codes launch.
+- **A hidden conversation now comes back as soon as someone messages it** ([#3468](internal development reference omitted)) — after you hid a direct message or group, a new message (or call) brought it back only after you restarted the app; it now reappears right away with its full history.
+- **Group messages from before someone left are readable again** ([#3472](internal development reference omitted)) — when a
+  member left or was removed from a group chat, the people who stayed saw
+  "Unable to decrypt" on every earlier message after reloading, and in the
+  conversation list, even though they still held the key for them. Earlier
+  messages, replies, pins, search results and the conversation-list preview now
+  open with the key they were written under.
+- **Requests to a server that is deleted mid-request no longer fail with a server error** ([#3508](internal development reference omitted)) — if a server is deleted, or its owner's account is erased, while a request to it is in flight, permission and membership checks and role, channel-permission-override, channel-sync, channel, channel-group, member-add and member-moderation requests now answer as they would for a non-member instead of returning 500. Most now return 403, including creating or reordering roles, adding or banning a member, role unassignment, channel-override deletion and synced channel moves; the last three, and a role reorder, returned 404 in that window ("Role not found" for the reorder), as did a ban by an owner whose own account was being erased; changing a member's role, timing out or removing a member returns 404 "User is not a member of this server", renaming or reordering a channel group returns 404 "Channel group not found", and a server's visible-channel list comes back empty. Relatedly, a database failure while checking membership when changing a member's role or removing a member, or while checking the role hierarchy when removing, timing out or banning a member, now returns 500 instead of wrongly answering 403 or 404, even when the server is deleted at the same moment; a role reorder whose actor's account disappears while the server remains returns 500 rather than 404 "Role not found". And if the database fails to discard an interrupted change to a server's members, roles or channel groups, or an interrupted ban or block, the request now returns 500 instead of the refusal the change had reached.
+- **Buttons and avatars on the brand colours are readable in every colour scheme** ([#3514](internal development reference omitted)) — the label on Continue, Sign In, Send and other brand-coloured buttons, and the initials on brand-coloured avatars, could nearly disappear: in Concord light they measured 1.20:1 against the fill, and 18 of the 32 scheme and theme combinations fell below the 4.5:1 readability line. Each scheme now pairs its brand fill with a text colour chosen against the whole gradient, so every combination clears 4.5:1. Pride keeps its flag under a dark tint with white text, and Spooky and Cotton Candy light use slightly darker gradients. Custom themes get the same guarantee. Hovering a brand button, the Create Channel and system-permission buttons, or the reset-keys button now lifts it instead of fading it. Initials on another member's avatar colours now use a label chosen for those colours rather than your theme's (white on a green avatar read 1.37:1). The Cancel button in the permission-override editor, the account-reset button and the skip-recovery-key button keep a readable label too, and so do the initials and name on a voice tile that dims while someone else speaks. Offline members and friends, and outgoing friend requests, no longer fade their initials and name: only the avatar picture dims. Opening Server Settings no longer restyles the invite window's Generate button, and the Server Settings invite buttons keep a readable label on hover (they read 2.19:1 in Concord light).
+- **Error text in code and security-key prompts is easier to read** ([#3455](internal development reference omitted), [#3509](internal development reference omitted)) — the red error message under
+  a code or security-key prompt failed the 4.5:1 contrast minimum in 9 of the 30 theme and light or
+  dark combinations (as low as 3.45:1 in Spooky dark). It now uses the primary text colour, so it
+  reads in every theme; the message text still says what went wrong.
 - **A failed voice join no longer removes someone who joined the next call** ([#3479](internal development reference omitted), [#3480](internal development reference omitted)) — delayed cleanup now applies only to the call that failed.
 - **Text-only channel changes work on busy voice servers** ([#3480](internal development reference omitted)) — they no longer scan every active voice channel, and deleting a channel group retries if a child becomes a voice channel during the change.
 - **Voice access cleanup no longer sends an in-flight voice update to someone whose access was revoked** ([#3480](internal development reference omitted)) — temporary access removal holds the audience check through the database change.
@@ -101,7 +155,6 @@ account can't provide, never your password twice.
   permission set the server gives a server's owner did not include the right to mention everyone, so
   an owner's @all or @here was silently removed from the message unless one of their roles also
   granted it. Owners now always have it.
-
 - **Try again on the recovery-key screen now shows each attempt** ([#3433](internal development reference omitted)) — when creating a recovery
   key failed again after Try again, the screen looked exactly the same, so the button seemed to do
   nothing. The message now counts the attempts.
@@ -322,6 +375,7 @@ account can't provide, never your password twice.
 
 ### Security
 
+- **The control plane now treats an unset `ENVIRONMENT` as production** ([#3519](internal development reference omitted)) — it used to fall back to development, which skipped the production safety checks and allowed development-only behaviour such as logging verification codes. The bundled deploy files and the self-host installer already set `ENVIRONMENT=production`, so they are unaffected. A custom deployment that never set it will now refuse to start until it does; local development sets `ENVIRONMENT=development`. `CONCORD_ENV=test`, which writes plaintext verification codes and relaxes the sign-in rate limits, is now refused under any `ENVIRONMENT` other than `development` or `test`, not only under `production`.
 - **Updated the voice server's connection library to close a published advisory** ([#3507](internal development reference omitted)) —
   resolves GHSA-2GC4-CQFQ-P2GV, a denial-of-service flaw in the connection that carries voice and
   video signalling.

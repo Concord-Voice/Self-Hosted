@@ -941,6 +941,66 @@ voice_enforcement_rollout_media_rebuild() {
   voice_enforcement_rollout_activate
 }
 
+# Unscoped rebuild (#3524). Every service, ordered so the paired voice handoff
+# stays intact: (1) everything control-plane and media-plane depend on,
+# transitively, health-gated; (2) the paired handoff, unchanged; (3) every
+# remaining service. Each compose call names its services. A service-less `up`
+# would recreate control-plane and media-plane in one unordered call, which is
+# the handoff #3140 exists to prevent; and `--no-deps` is safe in stage 1
+# because the list is transitively complete, so Compose cannot pull
+# control-plane in early.
+rebuild_unscoped() {
+  local rendered plan closure rest
+  local -a closure_arr=() rest_arr=()
+  # stderr is NOT merged: Compose warns on stderr while exiting 0, and a merged
+  # warning would corrupt the JSON (same rule as the scoped dependency probe).
+  if ! rendered="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD config --format json)"; then
+    echo "rebuild: cannot render the Compose configuration; refusing to guess which services to start." >&2
+    return 1
+  fi
+  if ! plan="$(python3 -c '
+import json, sys
+svcs = json.load(sys.stdin)["services"]
+voice = ("control-plane", "media-plane")
+closure, todo = set(), [v for v in voice if v in svcs]
+while todo:
+    # depends_on is a dict or a list; iterating either yields the names.
+    for d in svcs[todo.pop()].get("depends_on") or {}:
+        # Only rendered services: Compose keeps an optional (required: false)
+        # dependency on an inactive-profile service, and naming it enables it.
+        if d in svcs and d not in voice and d not in closure:
+            closure.add(d)
+            todo.append(d)
+print(" ".join(sorted(closure)))
+print(" ".join(sorted(set(svcs) - closure - set(voice))))
+' <<<"$rendered")"; then
+    echo "rebuild: cannot resolve the service order from the Compose configuration." >&2
+    return 1
+  fi
+  # `|| true`: command substitution strips the trailing newline, so an EMPTY
+  # second line leaves `read` at EOF, which returns 1 and would abort under
+  # `set -e` — an empty remainder is a legitimate plan, not an error.
+  { IFS= read -r closure || true; IFS= read -r rest || true; } <<<"$plan"
+  read -r -a closure_arr <<<"$closure"
+  read -r -a rest_arr <<<"$rest"
+
+  # An empty list SKIPS its stage. "${arr[@]}" of an empty array would expand to
+  # a bare `up`, which recreates the whole project. `--` for the same reason: a
+  # service name may start with `-`, and Compose would read it as a flag.
+  if [[ ${#closure_arr[@]} -gt 0 ]]; then
+    echo "rebuild: starting the voice services' dependencies: ${closure_arr[*]}"
+    (cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --build --no-deps --wait --wait-timeout 180 -- \
+      "${closure_arr[@]}")
+  fi
+  voice_enforcement_rollout_deploy
+  if [[ ${#rest_arr[@]} -gt 0 ]]; then
+    # No --wait: coturn's STUN probe flaking would abort a deploy that
+    # otherwise succeeded, and post-rsync's wait-healthy follows anyway.
+    echo "rebuild: starting the remaining services: ${rest_arr[*]}"
+    (cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --build --no-deps -- "${rest_arr[@]}")
+  fi
+}
+
 # nginx-reload and sudoers-sync both use fixed root-owned candidate paths.
 # Serialize them on one host-global inode so a copied or symlinked controller
 # cannot overlap post-rsync (or another direct invocation). Provisioning creates
@@ -1172,9 +1232,10 @@ case "${1:-help}" in
 
   rebuild)
     shift  # consume "rebuild"
-    # Optional service scope (#2178). `rebuild` with NO arguments is byte-for-byte
-    # the pre-#2178 behavior; every out-of-band caller (operator SSH,
-    # provision-production.sh, an older post-rsync.sh) therefore keeps working.
+    # Optional service scope (#2178). `rebuild` with NO arguments rebuilds every
+    # service (#3524): the voice services' dependencies, then the paired voice
+    # handoff, then the rest. Every out-of-band caller (operator SSH,
+    # provision-production.sh, concord-selfhost up) therefore keeps working.
     #
     # Scope tokens originate from a `git diff` on the CI runner and cross an SSH
     # env boundary before landing here, then get interpolated into a `docker
@@ -1195,10 +1256,48 @@ case "${1:-help}" in
       REBUILD_SCOPE+=("$_svc")
     done
 
+    # The image-selector clear below IS scope-gated (#2178). It rm's the
+    # control-plane rollback image pin and its own echo asserts "rebuilding the
+    # current source" — an assertion a media-only scope does not honor. Clearing
+    # it unscoped would delete an operator's active pin while leaving the running
+    # control-plane on the pinned image: a silent divergence that surfaces later
+    # as an unexplained control-plane jump.
+    #
+    # Membership is tested in pure bash, NOT `printf ... | grep -qx`. Under
+    # `set -o pipefail` (line 4) `grep -q` exits on first match and closes the
+    # read end, so a producer still writing takes SIGPIPE and the pipeline
+    # reports 141 despite the match. The window is vanishingly small for a
+    # builtin writing a few short tokens, but the failure DIRECTION is severe: a
+    # false negative skips the clear while control-plane IS in scope, leaving
+    # CONTROL_PLANE_IMAGE exported, so the rebuild deploys the pinned ROLLBACK
+    # image instead of the new code — and then stamps .deploy-meta with the new
+    # SHA, hiding the change from every future scope diff.
+    _has_control_plane=0
+    _has_media_plane=0
+    _mixed_extra=()
+    for _s in ${REBUILD_SCOPE[@]+"${REBUILD_SCOPE[@]}"}; do
+      case "$_s" in
+        control-plane) _has_control_plane=1 ;;
+        media-plane) _has_media_plane=1 ;;
+        *) _mixed_extra+=("$_s") ;;
+      esac
+    done
+    # A media-plane replacement is the paired voice handoff, which rebuilds
+    # control-plane and media-plane and nothing else (#3524). Any other service
+    # in the same scope used to be dropped while the command exited 0. Refuse
+    # before the guard and before any compose call.
+    if [[ $_has_media_plane -eq 1 && ${#_mixed_extra[@]} -gt 0 ]]; then
+      echo "rebuild: media-plane is rebuilt only through the paired voice handoff, which would skip: ${_mixed_extra[*]}" >&2
+      echo "rebuild: run 'rebuild ${_mixed_extra[*]}' separately, or run 'rebuild' with no services." >&2
+      exit 2
+    fi
+
     # `--no-deps` skips dependency startup AND the `depends_on` conditions, so it
     # is only correct when the dependency containers are already up. Escalate to
     # a full rebuild otherwise; the fail-safe direction is always "rebuild more",
-    # never "fail".
+    # never "fail". Since #3524 a full rebuild starts the stopped dependency
+    # first, so escalation restores what depends_on guaranteed rather than
+    # routing around it.
     #
     # Checking only the scoped service is NOT sufficient (#2178 review, HIGH —
     # found independently by three reviewers). media-plane declares
@@ -1287,7 +1386,7 @@ else:
         # would make the result NON-EMPTY and the service would read as running
         # even when it is not — a fail-open in the guard's own liveness check.
         _probe_err="$(mktemp)"
-        if ! _ids="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps --status running -q "$_svc" 2>"$_probe_err")"; then
+        if ! _ids="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps --status running -q -- "$_svc" 2>"$_probe_err")"; then
           echo "rebuild: cannot probe '$_svc' — escalating to a full rebuild." >&2
           sed 's/^/         /' "$_probe_err" >&2
           rm -f "$_probe_err"
@@ -1305,7 +1404,7 @@ else:
           # merged into this stream would fail the JSON parse and escalate every
           # deploy, making the scoping permanently inert.
           _health_err="$(mktemp)"
-          if ! _health="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps --format json "$_svc" 2>"$_health_err")"; then
+          if ! _health="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps --format json -- "$_svc" 2>"$_health_err")"; then
             echo "rebuild: cannot read health for '$_svc' — escalating to a full rebuild." >&2
             sed 's/^/         /' "$_health_err" >&2
             rm -f "$_health_err"
@@ -1348,37 +1447,20 @@ else:
     # argument, so the scope list must never reach it.
     activity_history_routine_guard
 
-    # ...but the image-selector clear IS scope-gated (#2178). It rm's the
-    # control-plane rollback image pin and its own echo asserts "rebuilding the
-    # current source" — an assertion a media-only scope does not honor. Clearing
-    # it unscoped would delete an operator's active pin while leaving the running
-    # control-plane on the pinned image: a silent divergence that surfaces later
-    # as an unexplained control-plane jump.
-    #
-    # Membership is tested in pure bash, NOT `printf ... | grep -qx`. Under
-    # `set -o pipefail` (line 4) `grep -q` exits on first match and closes the
-    # read end, so a producer still writing takes SIGPIPE and the pipeline
-    # reports 141 despite the match. The window is vanishingly small for a
-    # builtin writing a few short tokens, but the failure DIRECTION is severe: a
-    # false negative skips the clear while control-plane IS in scope, leaving
-    # CONTROL_PLANE_IMAGE exported, so the rebuild deploys the pinned ROLLBACK
-    # image instead of the new code — and then stamps .deploy-meta with the new
-    # SHA, hiding the change from every future scope diff.
-    _has_control_plane=0
-    _has_media_plane=0
-    for _s in ${REBUILD_SCOPE[@]+"${REBUILD_SCOPE[@]}"}; do
-      if [[ "$_s" == "control-plane" ]]; then
-        _has_control_plane=1
-      elif [[ "$_s" == "media-plane" ]]; then
-        _has_media_plane=1
-      fi
-    done
+    # Unscoped — or escalated from a scoped call whose peers were not up — runs
+    # every service in order (#3524). The image-selector clear happens inside
+    # the paired handoff, immediately before the control-plane build.
+    if [[ $_rebuild_scoped -eq 0 ]]; then
+      rebuild_unscoped
+      echo "Done."
+      exit 0
+    fi
 
-    # A media replacement is a protocol transition, not an ordinary scoped
-    # rebuild.  The paired path is also mandatory for an unscoped rebuild,
-    # whose service set includes media-plane by definition.
-    if [[ $_has_media_plane -eq 1 || $_rebuild_scoped -eq 0 ]]; then
-      if [[ $_has_control_plane -eq 1 || $_rebuild_scoped -eq 0 ]]; then
+    # A scoped media-plane replacement is a protocol transition, not an
+    # ordinary scoped rebuild. The mixed-scope refusal above guarantees nothing
+    # but control-plane can be in this scope beside it.
+    if [[ $_has_media_plane -eq 1 ]]; then
+      if [[ $_has_control_plane -eq 1 ]]; then
         voice_enforcement_rollout_deploy
       else
         voice_enforcement_rollout_media_rebuild
@@ -1387,7 +1469,7 @@ else:
       exit 0
     fi
 
-    if [[ $_rebuild_scoped -eq 0 || $_has_control_plane -eq 1 ]]; then
+    if [[ $_has_control_plane -eq 1 ]]; then
       clear_activity_history_image_selector
     else
       echo "Keeping the Activity History rollback image pin: control-plane is not in this rebuild's scope."
@@ -1396,19 +1478,11 @@ else:
     # #1015: sync_releases no longer auto-called (see restart case comment).
     echo "Rebuilding and restarting..."
     echo "Note: release assets NOT refreshed automatically (#1015). Run 'concord-ctl.sh sync-releases' or trigger sync-releases.yml for a refresh."
-    if [[ $_rebuild_scoped -eq 1 ]]; then
-      # --wait-timeout is MANDATORY, not decorative: `--wait` installs a deadline
-      # only when WaitTimeout > 0, so a bare --wait blocks forever and would hang
-      # the deploy's SSH session with the stack in an indeterminate state.
-      echo "Scope: ${REBUILD_SCOPE[*]} (--no-deps --wait)"
-      cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --build --no-deps --wait --wait-timeout 180 "${REBUILD_SCOPE[@]}"
-    else
-      # Unscoped stays WITHOUT --wait. Adding it here would pull every project
-      # service into the wait set — including coturn, whose STUN probe flaking
-      # would abort a full deploy that previously succeeded — and would duplicate
-      # post-rsync.sh's wait-healthy, which has far better diagnostics.
-      cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --build
-    fi
+    # --wait-timeout is MANDATORY, not decorative: `--wait` installs a deadline
+    # only when WaitTimeout > 0, so a bare --wait blocks forever and would hang
+    # the deploy's SSH session with the stack in an indeterminate state.
+    echo "Scope: ${REBUILD_SCOPE[*]} (--no-deps --wait)"
+    cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --build --no-deps --wait --wait-timeout 180 "${REBUILD_SCOPE[@]}"
     echo "Done."
     ;;
 
@@ -2301,11 +2375,14 @@ else:
     echo "  restart        Restart all services (no auto-sync since #1015)"
     echo "  rebuild [SERVICE...]"
     echo "                 Force rebuild + restart (no auto-sync since #1015). With no"
-    echo "                 arguments, rebuilds every service exactly as before. With a"
-    echo "                 service list, rebuilds only those with --no-deps --wait, and"
-    echo "                 escalates to a full rebuild if any named service is not running"
-    echo "                 Clears a persisted Activity History rollback image pin only when"
-    echo "                 unscoped or when control-plane is in scope"
+    echo "                 arguments, rebuilds every service: the voice services'"
+    echo "                 dependencies (health-gated), then control-plane and"
+    echo "                 media-plane through the paired voice handoff, then the rest."
+    echo "                 With a service list, rebuilds only those with --no-deps --wait,"
+    echo "                 escalates to a full rebuild if any named service or dependency"
+    echo "                 is not running, and refuses media-plane mixed with a non-voice"
+    echo "                 service. Clears a persisted Activity History rollback image pin"
+    echo "                 only when unscoped or when control-plane is in scope"
     echo "  activity-history-routine-guard"
     echo "                 Verify canonical/rendered config and safe routine-deploy state"
     echo "  activity-history-activate --confirm-drained"
