@@ -13,6 +13,10 @@ that keeps sending far more than your plan allows, and asks for the right
 proof of identity in the right places — never a code an email/text-only
 account can't provide, never your password twice.
 
+### Added
+
+- **Bug reports can now include screenshots** ([#1747](internal development reference omitted)) — the in-app bug-report form now lets you attach up to four images (PNG, JPEG, or WebP, up to 5 MB each), so a visual glitch can be shown rather than described. Attached images are re-encoded before upload, which removes embedded camera metadata such as GPS location, and they appear inline in the filed report.
+
 ### Changed
 
 - **Voice now pauses a stream that keeps sending far more than your plan allows** ([#3413](internal development reference omitted), [#2153](internal development reference omitted)) — the voice server now
