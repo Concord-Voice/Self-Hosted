@@ -59,9 +59,11 @@ validate_host() {
 
 # validate_ip IP — literal IPv4 or IPv6 only, so a value with ',' / 'DNS:' /
 # metachars can never inject extra SAN entries through derive_sans.
+# Same predicate as install-selfhost.sh's validate_public_ip: a shape check, not
+# a parser. IPv6 needs a ':' and may end in an embedded IPv4.
 validate_ip() {
   local ip="${1:-}"
-  [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$ip" =~ ^[0-9A-Fa-f:]+$ ]] || {
+  [[ -z "$ip" || "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$ip" =~ ^[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*$ ]] || {
     err "invalid --ip: $ip (expected an IPv4 or IPv6 address)"; return 1; }
 }
 

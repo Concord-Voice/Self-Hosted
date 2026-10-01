@@ -37,6 +37,12 @@ COMPOSE_FILES=(
 # shellcheck disable=SC2034  # SERVICES is reserved for the follow-up status loop
 readonly SERVICES=(control-plane media-plane postgres redis nats minio coturn)
 
+# Restricted security-event log boundary (#2273). The production overlay bind-
+# mounts its per-service directories with create_host_path: false, and only the
+# root-only `provision-production.sh security-event-logging` creates them (#3561).
+SECURITY_LOG_ROOT="${CONCORD_SECURITY_LOG_ROOT_OVERRIDE:-/var/log/concord-security}"
+readonly SECURITY_LOG_ROOT
+
 # ── Helpers ────────────────────────────────────────────────────────────
 
 # compose ARGS... — invoke docker compose with the production file set.
@@ -57,6 +63,21 @@ guarded_ctl() {
     "$CONCORD_CTL" "$@"
 }
 
+# require_security_log_boundary — refuse `up` before Docker's opaque "bind source
+# path does not exist". Checks the ROOT only: it is root:concord-security-writers
+# 0750 and the operator is never in that group, so the per-service directories
+# are unreadable from here on a correctly prepared host.
+# ponytail: existence + not-a-symlink only; the provisioner owns the trust checks
+# and create_host_path: false remains the real gate.
+require_security_log_boundary() {
+  [[ -d "$SECURITY_LOG_ROOT" && ! -L "$SECURITY_LOG_ROOT" ]] && return 0
+  echo -e "${RED}✗ security-event log boundary missing: $SECURITY_LOG_ROOT${NC}" >&2
+  echo "  Prepare it once as root (idempotent), then re-run up:" >&2
+  # %q: a checkout path with a space must survive being pasted into a root shell.
+  printf '    sudo %q security-event-logging\n' "$SCRIPT_DIR/provision-production.sh" >&2
+  return 1
+}
+
 usage() {
   cat <<'USAGE'
 concord-selfhost — self-hosted operator CLI
@@ -66,6 +87,7 @@ Usage: ./infrastructure/deploy/concord-selfhost <verb> [args]
 Verbs:
   up           guarded build + start; refuses implicit first activation
                (a previously activated stack restarts via its durable receipt)
+               and refuses until the security-event log boundary is prepared
   activity-history-activate --confirm-drained
                explicitly activate from a fully drained control-plane set
   activity-history-rollback --confirm-drained --old-image <digest> [--downgrade-schema]
@@ -107,7 +129,7 @@ verb_health() {
 
 main() {
   case "${1:-}" in
-    up)         guarded_ctl rebuild ;;
+    up)         require_security_log_boundary && guarded_ctl rebuild ;;
     activity-history-activate)
       shift
       guarded_ctl activity-history-activate "$@"
