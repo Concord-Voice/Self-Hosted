@@ -374,7 +374,8 @@ func (h *Handler) UploadDMIcon(c *gin.Context) {
 
 // UploadFeedbackScreenshot handles screenshot/photo uploads for in-app bug
 // reports (#1747). Authenticated; reuses the Tier-1 pipeline, so the image is
-// re-encoded (stripping any EXIF/GPS metadata) and dimension-capped. The
+// re-encoded as JPEG (stripping any EXIF/GPS metadata, and keeping the stored
+// object well under GitHub camo's 5 MiB proxy cap) and dimension-capped. The
 // returned `url` is a public, unguessable proxy path that the feedback handler
 // re-authors into a server-controlled absolute URL when building the GitHub
 // issue (see internal/feedback/handlers.go) — the client never controls the host.
@@ -1186,7 +1187,11 @@ func validateImageType(c *gin.Context, file multipart.File, header *multipart.Fi
 }
 
 func processImage(file io.Reader, purpose string, maxW, maxH int) (*ProcessedImage, error) {
-	if purpose == purposeBanner || purpose == purposeServerBanner {
+	// Feedback screenshots are embedded in public GitHub issues through GitHub's
+	// camo proxy, which refuses images over its 5,242,880-byte Content-Length cap.
+	// A lossless PNG of a 2560px photo routinely exceeds that and would render as
+	// a broken image, so they take the JPEG path alongside banners (#1747 review).
+	if purpose == purposeBanner || purpose == purposeServerBanner || purpose == purposeFeedbackScreenshot {
 		return ProcessImage(file, maxW, maxH)
 	}
 	return ProcessImagePNG(file, maxW, maxH)
