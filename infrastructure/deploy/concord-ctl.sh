@@ -64,6 +64,42 @@ COMPOSE_SELFHOST_ARG=""
   && COMPOSE_SELFHOST_ARG=" -f ${DEPLOY_DIR}/docker-compose.selfhost.yml"
 COMPOSE_CMD="docker compose ${COMPOSE_ENV_FILE_ARG} -f ${DEPLOY_DIR}/docker-compose.yml -f ${DEPLOY_DIR}/${COMPOSE_OVERRIDE}${COMPOSE_SELFHOST_ARG} --profile ${COMPOSE_PROFILES:-services}"
 
+# Keep managed command construction unchanged. Self-host commands, including
+# internal renders and probes, dispatch through the same argv-based runner.
+if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
+  if [[ "$ACTIVITY_HISTORY_REQUESTED_COMPOSE_OVERRIDE" != docker-compose.production.yml \
+     || "$ACTIVITY_HISTORY_REQUESTED_COMPOSE_PROFILES" != services ]]; then
+    echo "activity-history: self-host contract requires the production Compose override and services profile" >&2
+    exit 1
+  fi
+  command -v python3 >/dev/null 2>&1 \
+    || { echo 'selfhost-posture: python3 is required' >&2; exit 1; }
+  # shellcheck source=selfhost-storage.sh
+  source "${SCRIPT_DIR}/selfhost-storage.sh"
+  selfhost_storage_resolve "$DEPLOY_DIR" || exit 1
+  # Direct Docker discovery/inspection must inherit no caller storage controls
+  # either; the captured attestation above remains the contract authority.
+  selfhost_storage_scrub_environment || exit 1
+  COMPOSE_CMD=selfhost_storage_compose
+fi
+
+selfhost_storage_start_guard() {
+  [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]] || return 0
+  selfhost_storage_assert_no_running_minio
+}
+
+selfhost_storage_target_guard() {
+  [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]] || return 0
+  [[ "$SELFHOST_STORAGE_MODE_RESOLVED" == byo-s3 ]] || return 0
+  local target
+  for target in "$@"; do
+    if [[ "$target" == minio ]]; then
+      echo 'selfhost-storage: explicit MinIO target refused' >&2
+      return 1
+    fi
+  done
+}
+
 # ── Self-host published-port posture (#3538) ─────────────────────────────────
 # Engine floor: before 28.0.0, hosts on the same L2 segment can reach ports
 # published on 127.0.0.1; from 28.2.0 to 28.3.2 a firewalld reload drops the rule
@@ -124,8 +160,7 @@ selfhost_port_posture_gate() {
   # line, value included. validate-config cannot show it either, because this gate runs
   # before any verb, so name the command that does.
   if ! rendered="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD config --format json 2>/dev/null)"; then
-    echo "selfhost-posture: could not render the compose model — refusing. To see Compose's error, run:" >&2
-    echo "  cd $DEPLOY_DIR && $COMPOSE_CMD config --quiet" >&2
+    echo "selfhost-posture: could not render the compose model — refusing; check the installed environment and Compose files" >&2
     return 1
   fi
   # allow-direct-routing opens every published port to direct routing, so a port published
@@ -204,6 +239,7 @@ selfhost_live_port_check() {
 # whatever it was published with. A no-op outside self-host mode.
 selfhost_post_up_check() {
   [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]] || return 0
+  selfhost_storage_assert_no_running_minio || return 1
   selfhost_live_port_check
 }
 
@@ -283,6 +319,9 @@ load_activity_history_image_selector() {
     CONTROL_PLANE_IMAGE="$ACTIVITY_HISTORY_ROLLBACK_CHECKPOINT_IMAGE"
     ACTIVITY_HISTORY_IMAGE_SELECTOR_SELECTED=1
     export CONTROL_PLANE_IMAGE
+    if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
+      selfhost_storage_select_image "$CONTROL_PLANE_IMAGE" || return 1
+    fi
   fi
 }
 
@@ -293,6 +332,9 @@ clear_activity_history_image_selector() {
   fi
   if [[ $ACTIVITY_HISTORY_IMAGE_SELECTOR_SELECTED -eq 1 ]]; then
     unset CONTROL_PLANE_IMAGE
+  fi
+  if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
+    selfhost_storage_select_image '' || return 1
   fi
   ACTIVITY_HISTORY_IMAGE_SELECTOR_LOADED=0
   ACTIVITY_HISTORY_IMAGE_SELECTOR_SELECTED=0
@@ -358,7 +400,12 @@ activity_history_render_contract() {
   # Resolve the root .env contract independently of deploy.env.local. The
   # latter is sourced for concord-ctl settings, and inherited shell values
   # otherwise override Compose's root dotenv values during rendering.
-  if ! rendered="$(cd "$DEPLOY_DIR" && env \
+  if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
+    if ! rendered="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD config --format json 2>/dev/null)"; then
+      echo "activity-history: failed to render Compose configuration" >&2
+      return 1
+    fi
+  elif ! rendered="$(cd "$DEPLOY_DIR" && env \
       -u ACTIVITY_HISTORY_CLUSTER_ENABLED \
       -u CONTROL_PLANE_REPLICA_COUNT \
       -u ACTIVITY_HISTORY_OPERATOR_NAME \
@@ -732,6 +779,9 @@ activity_history_select_checkpoint_image() {
   CONTROL_PLANE_IMAGE="$ACTIVITY_HISTORY_ROLLBACK_CHECKPOINT_IMAGE"
   ACTIVITY_HISTORY_IMAGE_SELECTOR_SELECTED=1
   export CONTROL_PLANE_IMAGE
+  if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
+    selfhost_storage_select_image "$CONTROL_PLANE_IMAGE" || return 1
+  fi
 }
 
 activity_history_finish_rollback_start() {
@@ -945,7 +995,11 @@ voice_enforcement_rollout_require_inactive_current_image() {
   # command. Do not run the status probe through the pinned old image: an old
   # binary may not contain this CLI. Unsetting the selector makes Compose
   # resolve the current image from the canonical environment instead.
-  if ! status="$(unset CONTROL_PLANE_IMAGE; voice_enforcement_rollout_cli status 2>&1)"; then
+  if ! status="$(unset CONTROL_PLANE_IMAGE
+    if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
+      selfhost_storage_select_image '' || exit 1
+    fi
+    voice_enforcement_rollout_cli status 2>&1)"; then
     echo "activity-history: unable to verify inactive voice enforcement with the current control-plane; refusing old-image rollback" >&2
     return 1
   fi
@@ -960,7 +1014,11 @@ voice_enforcement_rollout_require_rollback_zero_state() {
   # The current image must attest every durable obligation before an old CP
   # can start. Shell SQL is intentionally forbidden here; absent evidence is
   # a refusal, not an invitation to guess from worker health.
-  if ! status="$(unset CONTROL_PLANE_IMAGE; voice_enforcement_rollout_cli status 2>&1)"; then
+  if ! status="$(unset CONTROL_PLANE_IMAGE
+    if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
+      selfhost_storage_select_image '' || exit 1
+    fi
+    voice_enforcement_rollout_cli status 2>&1)"; then
     echo "activity-history: unable to obtain current-image voice-enforcement zero-state evidence; refusing old-image rollback" >&2
     return 1
   fi
@@ -1307,6 +1365,26 @@ acquire_deploy_transaction_lock() {
   fi
 }
 
+# Stale bundled storage is separate from the exposure-only port gate. Refuse
+# before rollout, receipt/checkpoint changes, or any service mutation.
+if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
+  case "${1:-help}" in
+    rebuild|restart)
+      selfhost_storage_target_guard "${@:2}" || exit 1
+      selfhost_storage_start_guard || exit 1
+      ;;
+    activity-history-activate|activity-history-rollback|activity-history-routine-guard|voice-enforcement-rollout|wait-healthy)
+      selfhost_storage_start_guard || exit 1
+      ;;
+    freshstart)
+      if [[ "$SELFHOST_STORAGE_MODE_RESOLVED" == byo-s3 ]]; then
+        echo 'selfhost-storage: BYO freshstart refused; external storage has no volume-wipe lifecycle' >&2
+        exit 1
+      fi
+      ;;
+  esac
+fi
+
 case "${1:-help}" in
   nginx-reload|sudoers-sync)
     acquire_deploy_transaction_lock "$@"
@@ -1333,6 +1411,8 @@ esac
 
 case "${1:-help}" in
   status)
+    _storage_status_rc=0
+    selfhost_storage_start_guard || _storage_status_rc=1
     echo "=== Concord Service Status ==="
     # NOTE: Branch + commit info no longer surfaced — server has no .git/ post-#848.
     # See `gh api repos/Concord-Voice/Concord-Voice-Alpha/deployments` for deploy history.
@@ -1370,6 +1450,7 @@ case "${1:-help}" in
     else
       echo "  No releases synced"
     fi
+    [[ $_storage_status_rc -eq 0 ]] || exit 1
     ;;
 
   logs)
@@ -1385,6 +1466,7 @@ case "${1:-help}" in
     echo "Restarting services..."
     echo "Note: release assets NOT refreshed automatically (#1015). Run 'concord-ctl.sh sync-releases' or trigger sync-releases.yml for a refresh."
     cd "$DEPLOY_DIR" && $COMPOSE_CMD restart
+    selfhost_post_up_check || exit 1
     echo "Done."
     ;;
 
@@ -1492,7 +1574,7 @@ case "${1:-help}" in
       _stderr_file="$(mktemp)"
       if ! _rendered="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD config --format json 2>"$_stderr_file")"; then
         echo "rebuild: cannot render Compose configuration to resolve dependencies — escalating to a full rebuild." >&2
-        sed 's/^/         /' "$_stderr_file" >&2
+        [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]] || sed 's/^/         /' "$_stderr_file" >&2
         rm -f "$_stderr_file"
         _rebuild_scoped=0
       else
@@ -1517,7 +1599,7 @@ else:
         print(name, "service_started")
 ' "$_svc" <<<"$_rendered" 2>"$_dep_err")"; then
             echo "rebuild: cannot resolve depends_on for '$_svc' — escalating to a full rebuild." >&2
-            sed 's/^/         /' "$_dep_err" >&2
+            [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]] || sed 's/^/         /' "$_dep_err" >&2
             rm -f "$_dep_err"
             _rebuild_scoped=0
             break
@@ -1546,7 +1628,7 @@ else:
         _probe_err="$(mktemp)"
         if ! _ids="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps --status running -q -- "$_svc" 2>"$_probe_err")"; then
           echo "rebuild: cannot probe '$_svc' — escalating to a full rebuild." >&2
-          sed 's/^/         /' "$_probe_err" >&2
+          [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]] || sed 's/^/         /' "$_probe_err" >&2
           rm -f "$_probe_err"
           _rebuild_scoped=0
           break
@@ -1564,7 +1646,7 @@ else:
           _health_err="$(mktemp)"
           if ! _health="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps --format json -- "$_svc" 2>"$_health_err")"; then
             echo "rebuild: cannot read health for '$_svc' — escalating to a full rebuild." >&2
-            sed 's/^/         /' "$_health_err" >&2
+            [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]] || sed 's/^/         /' "$_health_err" >&2
             rm -f "$_health_err"
             _rebuild_scoped=0
             break
@@ -1584,7 +1666,7 @@ else:
     print(bad[0] if bad else "healthy")
 ' <<<"$_health" 2>"$_health_err")"; then
             echo "rebuild: cannot parse health for '$_svc' — escalating to a full rebuild." >&2
-            sed 's/^/         /' "$_health_err" >&2
+            [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]] || sed 's/^/         /' "$_health_err" >&2
             rm -f "$_health_err"
             _rebuild_scoped=0
             break
@@ -1674,6 +1756,7 @@ else:
       deploy)
         shift
         voice_enforcement_rollout_deploy "$@"
+        selfhost_post_up_check || exit 1
         ;;
       *)
         echo "Usage: concord-ctl.sh voice-enforcement-rollout deploy" >&2
@@ -2363,6 +2446,7 @@ else:
       curl -sf "http://127.0.0.1:3000/health" >/dev/null 2>&1 && mp_ok=1
       nc -z -w2 localhost 3478 >/dev/null 2>&1 && coturn_ok=1
       if [[ $cp_ok -eq 1 && $mp_ok -eq 1 && $coturn_ok -eq 1 ]]; then
+        selfhost_post_up_check || exit 1
         echo "  ✓ all services healthy (control-plane + media-plane + coturn)"
         exit 0
       fi
@@ -2536,6 +2620,9 @@ else:
 
   stop)
     echo "Stopping all services..."
+    if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
+      selfhost_storage_stop_stale_minio || exit 1
+    fi
     cd "$DEPLOY_DIR" && $COMPOSE_CMD down
     echo "Done."
     ;;

@@ -23,14 +23,9 @@ readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
 readonly NC='\033[0m'
 
-# Production compose stack: base + production overlay + services profile.
-# Verified against docker-compose.yml / docker-compose.production.yml in the repo.
-COMPOSE_FILES=(
-  "-f" "$PROJECT_ROOT/docker-compose.yml"
-  "-f" "$PROJECT_ROOT/docker-compose.production.yml"
-  "-f" "$PROJECT_ROOT/docker-compose.selfhost.yml"
-  "--profile" "services"
-)
+# Sourcing is read-only; resolve lazily so help needs no installed environment.
+# shellcheck source=selfhost-storage.sh
+source "$SCRIPT_DIR/selfhost-storage.sh"
 
 # Reserved for a richer per-service status in a follow-up (#1616 scope).
 # ponytail: expand status verb to iterate SERVICES for per-container health loop.
@@ -45,8 +40,39 @@ readonly SECURITY_LOG_ROOT
 
 # ── Helpers ────────────────────────────────────────────────────────────
 
-# compose ARGS... — invoke docker compose with the production file set.
-compose() { docker compose "${COMPOSE_FILES[@]}" "$@"; }
+# compose ARGS... — all direct verbs share the persisted model and recovery scope.
+compose() {
+  if [[ -z "$SELFHOST_STORAGE_PROJECT_ROOT" ]]; then
+    selfhost_storage_resolve "$PROJECT_ROOT" || return 1
+  fi
+  case "${1:-}" in
+    up|build|restart|recreate|start|create)
+      if [[ "$SELFHOST_STORAGE_MODE_RESOLVED" == byo-s3 ]]; then
+        local target
+        for target in "${@:2}"; do
+          if [[ "$target" == minio ]]; then
+            echo 'selfhost-storage: explicit MinIO target refused' >&2
+            return 1
+          fi
+        done
+      fi
+      selfhost_storage_assert_no_running_minio || return 1
+      selfhost_storage_compose "$@" || return $?
+      selfhost_storage_assert_no_running_minio
+      ;;
+    stop|down)
+      selfhost_storage_stop_stale_minio || return 1
+      selfhost_storage_compose "$@"
+      ;;
+    ps)
+      local rc=0
+      selfhost_storage_assert_no_running_minio || rc=1
+      selfhost_storage_compose "$@" || rc=1
+      return "$rc"
+      ;;
+    *) selfhost_storage_compose "$@" ;;
+  esac
+}
 
 # guarded_ctl ARGS... — reuse the canonical rollout/rollback state machine in
 # a strictly-attested self-host mode. The root installer .env is the sole
@@ -107,6 +133,8 @@ USAGE
 
 verb_health() {
   local code rc=0
+  selfhost_storage_resolve "$PROJECT_ROOT" || return 1
+  selfhost_storage_assert_no_running_minio || rc=1
   code="$(curl -fsS -o /dev/null -w '%{http_code}' --max-time 5 \
     http://127.0.0.1:8080/api/v1/client/config 2>/dev/null)" || true
   code="${code:-000}"

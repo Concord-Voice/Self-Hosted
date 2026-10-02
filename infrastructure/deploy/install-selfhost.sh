@@ -20,6 +20,20 @@ readonly PROJECT_ROOT
 : "${ENV_OUT:=$PROJECT_ROOT/.env}"                       # overridable for tests
 : "${NGINX_OUT:=$SCRIPT_DIR/nginx/concordvoice.rendered.conf}"  # overridable for tests
 
+# shellcheck source=[internal]selfhost-storage.sh
+source "$SCRIPT_DIR/selfhost-storage.sh" || {
+  printf '%s\n' 'installer: storage helper unavailable' >&2
+  return 1 2>/dev/null || exit 1
+}
+readonly INSTALLER_ANSWER_KEYS=(
+  CFG_DOMAIN CFG_TLS_MODE CFG_TURN_REALM CFG_PUBLIC_IP
+  CFG_SMTP_HOST CFG_SMTP_PORT CFG_SMTP_USER CFG_SMTP_PASS CFG_SMTP_FROM
+  CFG_TRUSTED_CIDRS CFG_ACTIVITY_HISTORY_OPERATOR_NAME CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL
+  CFG_FEEDBACK_ENABLED CFG_FEEDBACK_REPO CFG_FEEDBACK_PAT
+  CFG_STORAGE_MODE CFG_STORAGE_BACKEND CFG_STORAGE_ENDPOINT CFG_STORAGE_REGION
+  CFG_STORAGE_ACCESS_KEY CFG_STORAGE_SECRET_KEY CFG_STORAGE_USE_SSL CFG_STORAGE_BUCKET
+)
+
 readonly RED='\033[0;31m'
 readonly GREEN='\033[0;32m'
 readonly YELLOW='\033[1;33m'
@@ -173,7 +187,7 @@ validate_domain() {
   local d="${1:-}"
   [[ -n "$d" ]] || { echo -e "${RED}domain required${NC}" >&2; return 1; }
   [[ "$d" =~ ^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]] || {
-    echo -e "${RED}invalid domain: $d${NC}" >&2
+    printf '%s\n' 'installer: invalid domain' >&2
     return 1
   }
   case "$d" in
@@ -192,7 +206,7 @@ validate_media_subdomain() {
   host="${url#https://}"
   host="${host%%/*}"
   [[ "$host" == media.*.* ]] || {
-    echo -e "${RED}MEDIA_PLANE_URL must be a media. subdomain, got: $url${NC}" >&2
+    printf '%s\n' 'installer: media URL must be a media subdomain' >&2
     return 1
   }
   return 0
@@ -212,7 +226,8 @@ validate_cidrs() {
       ;;
   esac
   local c
-  IFS=',' read -ra _parsed <<<"${cidrs// /}"
+  local -a _parsed
+  IFS=',' read -ra _parsed <<<"${cidrs// /}" || return 1
   for c in "${_parsed[@]}"; do
     # Shape + prefix-length bound (IPv4 /0-32, IPv6 /0-128). Octet ranges and the
     # split-range all-traffic case (e.g. 0.0.0.0/1,128.0.0.0/1) are left to the
@@ -220,7 +235,7 @@ validate_cidrs() {
     # the operator owns their own .env.
     [[ "$c" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/(3[0-2]|[12][0-9]|[0-9])$ \
       || "$c" =~ ^[0-9A-Fa-f:]+/(12[0-8]|1[01][0-9]|[1-9][0-9]|[0-9])$ ]] || {
-      echo -e "${RED}invalid CIDR in TRUSTED_PROXY_CIDRS: $c${NC}" >&2
+      printf '%s\n' 'installer: invalid trusted proxy CIDR' >&2
       return 1
     }
   done
@@ -231,8 +246,8 @@ validate_cidrs() {
 validate_smtp_port() {
   local p="${1:-}"
   [[ -z "$p" ]] && return 0
-  { [[ "$p" =~ ^[0-9]+$ ]] && (( p >= 1 && p <= 65535 )); } || {
-    echo -e "${RED}invalid SMTP port: $p${NC}" >&2
+  { [[ "$p" =~ ^[0-9]{1,5}$ ]] && (( 10#$p >= 1 && 10#$p <= 65535 )); } || {
+    printf '%s\n' 'installer: invalid SMTP port' >&2
     return 1
   }
   return 0
@@ -283,7 +298,7 @@ validate_activity_history_disclosure() {
 validate_tls_mode() {
   case "${1:-}" in
     letsencrypt|local|import) return 0 ;;
-    *) echo -e "${RED}invalid TLS mode: ${1:-} (letsencrypt|local|import)${NC}" >&2; return 1 ;;
+    *) printf '%s\n' 'installer: invalid TLS mode (letsencrypt|local|import)' >&2; return 1 ;;
   esac
 }
 
@@ -293,7 +308,7 @@ warn_public_ip() {
   if [[ -z "$ip" ]]; then
     echo -e "${YELLOW}⚠ PUBLIC_IP is empty — TURN relay needs a routable public IP${NC}" >&2
   elif [[ "$ip" =~ ^(10\.|192\.168\.|172\.(1[6-9]|2[0-9]|3[01])\.|127\.) ]]; then
-    echo -e "${YELLOW}⚠ PUBLIC_IP '$ip' looks private/NAT — TURN relay will not function without a routable public IP${NC}" >&2
+    echo -e "${YELLOW}⚠ PUBLIC_IP looks private/NAT — TURN relay will not function without a routable public IP${NC}" >&2
   fi
 }
 
@@ -316,14 +331,52 @@ validate_public_ip() {
 # --env-file paths, run before any mutation. Field shape checks that the wizard's
 # per-prompt validation would catch but the --env-file path otherwise would not.
 validate_collected_config() {
-  validate_domain "${CFG_DOMAIN:-}" || exit 1
-  validate_tls_mode "${CFG_TLS_MODE:-letsencrypt}" || exit 1
-  validate_cidrs "${CFG_TRUSTED_CIDRS:-}" || exit 1
-  validate_smtp_port "${CFG_SMTP_PORT:-}" || exit 1
-  validate_activity_history_disclosure \
-    "${CFG_ACTIVITY_HISTORY_OPERATOR_NAME:-}" \
-    "${CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL:-}" || exit 1
-  validate_public_ip "${CFG_PUBLIC_IP:-}" || exit 1
+  local key
+  local -a values=()
+  for key in "${INSTALLER_ANSWER_KEYS[@]}"; do values+=("${!key-}"); done
+  # All text is checked before it can enter diagnostics or the metadata review.
+  if ! printf '%s\0' "${values[@]}" | python3 -c '
+import sys, unicodedata
+try:
+    raw = sys.stdin.buffer.read().split(b"\x00")
+    if raw.pop() != b"" or len(raw) != len(sys.argv) - 1:
+        raise ValueError()
+    for key, value in zip(sys.argv[1:], raw):
+        text = value.decode("utf-8")
+        if "\r" in text or "\n" in text:
+            raise ValueError()
+        if key not in ("CFG_SMTP_PASS", "CFG_FEEDBACK_PAT", "CFG_STORAGE_ACCESS_KEY", "CFG_STORAGE_SECRET_KEY"):
+            if any(unicodedata.category(c) == "Cc" for c in text):
+                raise ValueError()
+except (ValueError, UnicodeError):
+    sys.exit(1)
+' "${INSTALLER_ANSWER_KEYS[@]}" 2>/dev/null; then
+    printf '%s\n' 'installer: invalid configuration text' >&2
+    return 1
+  fi
+  validate_domain "${CFG_DOMAIN:-}" || return 1
+  validate_tls_mode "${CFG_TLS_MODE:-letsencrypt}" || return 1
+  validate_cidrs "${CFG_TRUSTED_CIDRS:-}" || return 1
+  validate_smtp_port "${CFG_SMTP_PORT:-}" || return 1
+  validate_activity_history_disclosure "${CFG_ACTIVITY_HISTORY_OPERATOR_NAME:-}" \
+    "${CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL:-}" || return 1
+  validate_public_ip "${CFG_PUBLIC_IP:-}" || return 1
+  : "${CFG_STORAGE_MODE=bundled}"
+  if [[ "$CFG_STORAGE_MODE" == bundled ]]; then
+    for key in BACKEND ENDPOINT REGION ACCESS_KEY SECRET_KEY USE_SSL BUCKET; do
+      key="CFG_STORAGE_$key"
+      if [[ -v $key ]]; then
+        printf '%s\n' 'installer: bundled storage connection fields refused' >&2
+        return 1
+      fi
+    done
+  elif [[ "$CFG_STORAGE_MODE" == byo-s3 ]]; then
+    : "${CFG_STORAGE_BACKEND=s3}" "${CFG_STORAGE_REGION=}" \
+      "${CFG_STORAGE_USE_SSL=true}" "${CFG_STORAGE_BUCKET=concord-media}"
+  fi
+  selfhost_storage_validate "$CFG_STORAGE_MODE" "${CFG_STORAGE_BACKEND:-}" \
+    "${CFG_STORAGE_ENDPOINT:-}" "${CFG_STORAGE_REGION:-}" "${CFG_STORAGE_ACCESS_KEY:-}" \
+    "${CFG_STORAGE_SECRET_KEY:-}" "${CFG_STORAGE_USE_SSL:-}" "${CFG_STORAGE_BUCKET:-}" || return 1
   warn_public_ip "${CFG_PUBLIC_IP:-}"
 }
 
@@ -341,75 +394,132 @@ detect_public_ip() {
     ip=""
   }
   warn_public_ip "$ip"
-  echo "$ip"
+  printf '%s' "$ip"
 }
 
 # ── Config collection ──────────────────────────────────────────────────────────
 
-# load_answers PATH — non-interactive: source a CFG_*-only answers file.
-# Each line is validated to be CFG_KEY=value before assignment (no arbitrary exec).
+# load_answers PATH — fixed literal keys, first equals, historical aliases once.
 load_answers() {
   local f="${1:-}"
-  [[ -f "$f" ]] || { echo -e "${RED}answers file not found: $f${NC}" >&2; return 1; }
-  local line key val
-  while IFS= read -r line || [[ -n "$line" ]]; do
+  [[ -f "$f" && -r "$f" ]] || { printf '%s\n' 'installer: answers file unavailable' >&2; return 1; }
+  # Bash cannot represent NUL: check original bytes before the first Bash read.
+  if ! python3 -c '
+import sys
+try:
+    data = open(sys.argv[1], "rb").read()
+    if b"\x00" in data or b"\r" in data:
+        raise ValueError()
+    data.decode("utf-8")
+except (OSError, ValueError, UnicodeError):
+    sys.exit(1)
+' "$f" 2>/dev/null; then
+    printf '%s\n' 'installer: invalid answers encoding' >&2
+    return 1
+  fi
+  local line key val allowed candidate status number=0
+  local -A seen=()
+  for key in "${INSTALLER_ANSWER_KEYS[@]}" CFG_MINIO_MODE CFG_MINIO_ENDPOINT CFG_MINIO_USER CFG_MINIO_PASS; do
+    unset "$key"
+  done
+  while :; do
+    line=''
+    if IFS= read -r line; then status=0; else status=$?; fi
+    if [[ $status -ne 0 ]]; then
+      [[ $status -eq 1 ]] || { printf '%s\n' 'installer: answers read failed' >&2; return 1; }
+      [[ -n "$line" ]] || break
+    fi
+    ((number += 1))
     [[ -z "$line" || "$line" == \#* ]] && continue
-    [[ "$line" =~ ^CFG_[A-Z_]+=.*$ ]] || {
-      echo -e "${RED}bad answers line: $line${NC}" >&2
-      return 1
-    }
-    key="${line%%=*}"
-    val="${line#*=}"
-    printf -v "$key" '%s' "$val"
+    [[ "$line" =~ ^CFG_[A-Z_]+=.*$ ]] || { printf 'installer: malformed answers line %d\n' "$number" >&2; return 1; }
+    key="${line%%=*}"; val="${line#*=}"
+    case "$key" in
+      CFG_MINIO_MODE) key=CFG_STORAGE_MODE ;;
+      CFG_MINIO_ENDPOINT) key=CFG_STORAGE_ENDPOINT ;;
+      CFG_MINIO_USER) key=CFG_STORAGE_ACCESS_KEY ;;
+      CFG_MINIO_PASS) key=CFG_STORAGE_SECRET_KEY ;;
+    esac
+    allowed=no
+    for candidate in "${INSTALLER_ANSWER_KEYS[@]}"; do
+      [[ "$key" != "$candidate" ]] || { allowed=yes; break; }
+    done
+    [[ "$allowed" == yes ]] || { printf 'installer: unknown answers field at line %d\n' "$number" >&2; return 1; }
+    [[ ! -v seen[$key] ]] || { printf 'installer: duplicate answers field at line %d\n' "$number" >&2; return 1; }
+    seen[$key]=yes
+    printf -v "$key" '%s' "$val" || return 1
   done <"$f"
   : "${CFG_FEEDBACK_ENABLED:=no}" "${CFG_TURN_REALM:=${CFG_DOMAIN:-}}" \
     "${CFG_TLS_MODE:=letsencrypt}" "${CFG_ACTIVITY_HISTORY_OPERATOR_NAME:=}" \
-    "${CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL:=}"
-  validate_domain "${CFG_DOMAIN:-}" || return 1
+    "${CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL:=}" "${CFG_STORAGE_MODE=bundled}"
+  if [[ "$CFG_STORAGE_MODE" == byo-s3 ]]; then
+    : "${CFG_STORAGE_BACKEND=s3}" "${CFG_STORAGE_REGION=}" \
+      "${CFG_STORAGE_USE_SSL=true}" "${CFG_STORAGE_BUCKET=concord-media}"
+  fi
 }
 
 # ask PROMPT [DEFAULT] — read a non-secret value from stdin; return default if blank.
 ask() {
   local p="$1" d="${2:-}" v
-  read -r -p "$p${d:+ [$d]}: " v
-  echo "${v:-$d}"
+  IFS= read -r -p "$p${d:+ [$d]}: " v || return $?
+  printf '%s' "${v:-$d}"
 }
 
 # ask_secret PROMPT — read a SECRET with terminal echo OFF (read -rs). The prompt
 # and the trailing newline go to stderr so only the captured value reaches stdout.
 ask_secret() {
   local p="$1" v
-  read -rs -p "$p: " v
-  echo >&2
-  echo "$v"
+  IFS= read -rs -p "$p: " v || return $?
+  printf '\n' >&2 || return 1
+  printf '%s' "$v"
 }
 
-# collect_config — interactive wizard. Populates CFG_* vars. Object storage is the
-# bundled MinIO container (external BYO-S3 is a deferred follow-up — see runbook).
+# collect_config — storage metadata precedes echo-off credentials.
 collect_config() {
   echo -e "${BLUE}Concord Voice self-hosted install${NC}"
-  CFG_DOMAIN="$(ask 'Primary domain (apex, e.g. example.com)')"
-  validate_domain "$CFG_DOMAIN" || exit 1
-  CFG_TLS_MODE="$(ask 'TLS mode (letsencrypt recommended / local / import)' letsencrypt)"
-  validate_tls_mode "$CFG_TLS_MODE" || exit 1
+  local detected_ip key
+  for key in "${INSTALLER_ANSWER_KEYS[@]}"; do unset "$key"; done
+  CFG_DOMAIN="$(ask 'Primary domain (apex, e.g. example.com)')" || return $?
+  validate_domain "$CFG_DOMAIN" || return 1
+  CFG_TLS_MODE="$(ask 'TLS mode (letsencrypt recommended / local / import)' letsencrypt)" || return $?
+  validate_tls_mode "$CFG_TLS_MODE" || return 1
   if [[ "$CFG_TLS_MODE" == local ]]; then
     echo -e "${YELLOW}⚠ 'local' self-signed has NO MITM protection on untrusted networks — trusted LAN/homelab only. Use 'letsencrypt' for any internet-reachable host.${NC}" >&2
   fi
-  CFG_TURN_REALM="$(ask 'TURN realm' "$CFG_DOMAIN")"
-  CFG_PUBLIC_IP="$(ask 'Public IP (blank = auto-detect)' "$(detect_public_ip)")"
-  echo -e "Object storage: bundled MinIO (external BYO-S3 is a deferred follow-up)."
-  CFG_SMTP_HOST="$(ask 'SMTP host (required for email verification)')"
-  CFG_SMTP_PORT="$(ask 'SMTP port' 587)"
-  CFG_SMTP_USER="$(ask 'SMTP username')"
-  CFG_SMTP_PASS="$(ask_secret 'SMTP password')"
-  CFG_SMTP_FROM="$(ask 'SMTP from address' "noreply@$CFG_DOMAIN")"
-  CFG_TRUSTED_CIDRS="$(ask 'Trusted proxy CIDRs' '172.16.0.0/12,10.0.0.0/8')"
-  CFG_ACTIVITY_HISTORY_OPERATOR_NAME="$(ask 'Activity History operator name (optional)')"
-  CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL="$(ask 'Activity History privacy policy URL (optional, HTTPS)')"
-  CFG_FEEDBACK_ENABLED="$(ask 'Enable in-app feedback (posts to a GitHub repo)? yes/no' no)"
+  CFG_TURN_REALM="$(ask 'TURN realm' "$CFG_DOMAIN")" || return $?
+  detected_ip="$(detect_public_ip)" || return $?
+  CFG_PUBLIC_IP="$(ask 'Public IP (blank = auto-detect)' "$detected_ip")" || return $?
+  while :; do
+    CFG_STORAGE_MODE="$(ask 'Object storage (bundled / byo-s3)' bundled)" || return $?
+    case "$CFG_STORAGE_MODE" in bundled|byo-s3) break ;; esac
+    printf '%s\n' 'installer: select bundled or byo-s3' >&2
+  done
+  if [[ "$CFG_STORAGE_MODE" == byo-s3 ]]; then
+    CFG_STORAGE_BACKEND=s3
+    while :; do
+      CFG_STORAGE_ENDPOINT="$(ask 'Object storage endpoint (bare host, optional port)')" || return $?
+      if selfhost_storage_validate byo-s3 s3 "$CFG_STORAGE_ENDPOINT" '' pending pending true concord-media; then break; fi
+    done
+    while :; do
+      CFG_STORAGE_USE_SSL="$(ask 'Object storage TLS (true / false)' true)" || return $?
+      if selfhost_storage_validate byo-s3 s3 "$CFG_STORAGE_ENDPOINT" '' pending pending "$CFG_STORAGE_USE_SSL" concord-media; then break; fi
+    done
+    CFG_STORAGE_BUCKET="$(ask 'Object storage bucket' concord-media)" || return $?
+    CFG_STORAGE_REGION="$(ask 'Object storage region (optional)')" || return $?
+    CFG_STORAGE_ACCESS_KEY="$(ask_secret 'Object storage access key')" || return $?
+    CFG_STORAGE_SECRET_KEY="$(ask_secret 'Object storage secret key')" || return $?
+  fi
+  CFG_SMTP_HOST="$(ask 'SMTP host (required for email verification)')" || return $?
+  CFG_SMTP_PORT="$(ask 'SMTP port' 587)" || return $?
+  CFG_SMTP_USER="$(ask 'SMTP username')" || return $?
+  CFG_SMTP_PASS="$(ask_secret 'SMTP password')" || return $?
+  CFG_SMTP_FROM="$(ask 'SMTP from address' "noreply@$CFG_DOMAIN")" || return $?
+  CFG_TRUSTED_CIDRS="$(ask 'Trusted proxy CIDRs' '172.16.0.0/12,10.0.0.0/8')" || return $?
+  CFG_ACTIVITY_HISTORY_OPERATOR_NAME="$(ask 'Activity History operator name (optional)')" || return $?
+  CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL="$(ask 'Activity History privacy policy URL (optional, HTTPS)')" || return $?
+  CFG_FEEDBACK_ENABLED="$(ask 'Enable in-app feedback (posts to a GitHub repo)? yes/no' no)" || return $?
   if [[ "$CFG_FEEDBACK_ENABLED" == yes ]]; then
-    CFG_FEEDBACK_REPO="$(ask 'Feedback repo (owner/repo)')"
-    CFG_FEEDBACK_PAT="$(ask_secret 'Feedback PAT')"
+    CFG_FEEDBACK_REPO="$(ask 'Feedback repo (owner/repo)')" || return $?
+    CFG_FEEDBACK_PAT="$(ask_secret 'Feedback PAT')" || return $?
   fi
 }
 
@@ -421,8 +531,16 @@ collect_config() {
 # double-quoted value; backslash and double quote use their standard escapes.
 compose_dotenv_quote() {
   local value="${1:-}" encoded="" char i
-  if [[ "$value" == *$'\n'* || "$value" == *$'\r'* ]]; then
-    echo "Compose dotenv values must be single-line" >&2
+  if ! printf '%s' "$value" | python3 -c '
+import sys
+try:
+    text = sys.stdin.buffer.read().decode("utf-8")
+    if "\x00" in text or "\r" in text or "\n" in text:
+        raise ValueError()
+except (UnicodeError, ValueError):
+    sys.exit(1)
+' 2>/dev/null; then
+    printf '%s\n' 'installer: invalid dotenv text' >&2
     return 1
   fi
   for ((i = 0; i < ${#value}; i++)); do
@@ -437,78 +555,122 @@ compose_dotenv_quote() {
   printf '"%s"' "$encoded"
 }
 
-# write_env_file — write repo-root .env (compose auto-loads it). chmod 600.
+# write_env_file — stage checked values at 0600, publish without replacement.
 # Logs var NAMES only, never values (observability rule — no secret values to stdout/log).
-write_env_file() {
-  validate_media_subdomain "https://media.${CFG_DOMAIN}" || exit 1
-
-  # Refuse to write CSPRNG secrets into a working tree where .env is NOT gitignored —
-  # otherwise a later `git add` could commit live production secrets (CWE-538/312).
-  # Skipped outside a git work tree (e.g. test tmpdirs).
-  local env_dir
-  env_dir="$(dirname "$ENV_OUT")"
+write_env_file() (
+  # A subshell scopes cleanup traps and umask to this writer.
+  validate_collected_config || return 1
+  validate_media_subdomain "https://media.${CFG_DOMAIN}" || return 1
+  if [[ -e "$ENV_OUT" || -L "$ENV_OUT" ]]; then
+    printf '%s\n' 'installer: environment publication refused' >&2
+    return 1
+  fi
+  local env_dir env_in_git=no
+  env_dir="$(dirname "$ENV_OUT")" || return 1
   if git -C "$env_dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    env_in_git=yes
     if ! git -C "$env_dir" check-ignore -q "$ENV_OUT"; then
-      echo -e "${RED}✗ $ENV_OUT is not gitignored — refusing to write generated secrets that could be committed${NC}" >&2
-      exit 1
+      printf '%s\n' 'installer: environment destination is not gitignored' >&2
+      return 1
     fi
   fi
-
-  local feedback_repo feedback_pat
+  local feedback_repo feedback_pat disabled_token
   if [[ "${CFG_FEEDBACK_ENABLED:-no}" == yes ]]; then
     feedback_repo="${CFG_FEEDBACK_REPO:-}"
     feedback_pat="${CFG_FEEDBACK_PAT:-}"
   else
-    feedback_repo="selfhost/disabled"
-    feedback_pat="disabled-$(gen_secret)"   # satisfies non-empty + owner/repo shape
+    feedback_repo=selfhost/disabled
+    disabled_token="$(gen_secret)" || return 1
+    feedback_pat="disabled-$disabled_token"
   fi
+  local postgres_password redis_password jwt_secret mfa_key turn_secret minio_password
+  postgres_password="$(gen_secret)" || return 1
+  redis_password="$(gen_secret)" || return 1
+  jwt_secret="$(gen_secret)" || return 1
+  mfa_key="$(gen_hex_key)" || return 1
+  turn_secret="$(gen_secret)" || return 1
+  minio_password="$(gen_secret)" || return 1
+  # All operator values use one literal grammar, including older writer fields.
+  local domain public_ip realm cidrs smtp_host smtp_port smtp_user smtp_pass smtp_from
+  local quoted_repo quoted_pat operator privacy
+  domain="$(compose_dotenv_quote "$CFG_DOMAIN")" || return 1
+  public_ip="$(compose_dotenv_quote "${CFG_PUBLIC_IP:-}")" || return 1
+  realm="$(compose_dotenv_quote "${CFG_TURN_REALM:-$CFG_DOMAIN}")" || return 1
+  cidrs="$(compose_dotenv_quote "${CFG_TRUSTED_CIDRS:-172.16.0.0/12,10.0.0.0/8}")" || return 1
+  smtp_host="$(compose_dotenv_quote "${CFG_SMTP_HOST:-}")" || return 1
+  smtp_port="$(compose_dotenv_quote "${CFG_SMTP_PORT:-587}")" || return 1
+  smtp_user="$(compose_dotenv_quote "${CFG_SMTP_USER:-}")" || return 1
+  smtp_pass="$(compose_dotenv_quote "${CFG_SMTP_PASS:-}")" || return 1
+  smtp_from="$(compose_dotenv_quote "${CFG_SMTP_FROM:-noreply@$CFG_DOMAIN}")" || return 1
+  quoted_repo="$(compose_dotenv_quote "$feedback_repo")" || return 1
+  quoted_pat="$(compose_dotenv_quote "$feedback_pat")" || return 1
+  operator="$(compose_dotenv_quote "${CFG_ACTIVITY_HISTORY_OPERATOR_NAME:-}")" || return 1
+  privacy="$(compose_dotenv_quote "${CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL:-}")" || return 1
+  local backend endpoint region access secret tls bucket timestamp
+  if [[ "$CFG_STORAGE_MODE" == byo-s3 ]]; then
+    backend="$(compose_dotenv_quote "$CFG_STORAGE_BACKEND")" || return 1
+    endpoint="$(compose_dotenv_quote "$CFG_STORAGE_ENDPOINT")" || return 1
+    region="$(compose_dotenv_quote "$CFG_STORAGE_REGION")" || return 1
+    access="$(compose_dotenv_quote "$CFG_STORAGE_ACCESS_KEY")" || return 1
+    secret="$(compose_dotenv_quote "$CFG_STORAGE_SECRET_KEY")" || return 1
+    tls="$(compose_dotenv_quote "$CFG_STORAGE_USE_SSL")" || return 1
+    bucket="$(compose_dotenv_quote "$CFG_STORAGE_BUCKET")" || return 1
+  fi
+  timestamp="$(date -u +%FT%TZ)" || return 1
+  local -a lines=(
+    "# Concord Voice self-hosted env — generated by install-selfhost.sh ($timestamp)"
+    "# Self-hosted writer surface; managed provisioning is separate."
+    ENVIRONMENT=production INSTANCE_TYPE=self-hosted
+    "SELFHOST_STORAGE_MODE=$CFG_STORAGE_MODE" "DOMAIN=$domain" "PUBLIC_IP=$public_ip"
+    "POSTGRES_PASSWORD=$postgres_password" "REDIS_PASSWORD=$redis_password"
+    "JWT_SECRET=$jwt_secret" "MFA_ENCRYPTION_KEY=$mfa_key" "TURN_SECRET=$turn_secret"
+    "TURN_REALM=$realm" MINIO_ROOT_USER=concord "MINIO_ROOT_PASSWORD=$minio_password"
+    MINIO_BUCKET=concord-media "TRUSTED_PROXY_CIDRS=$cidrs"
+    "SMTP_HOST=$smtp_host" "SMTP_PORT=$smtp_port" "SMTP_USERNAME=$smtp_user"
+    "SMTP_PASSWORD=$smtp_pass" "SMTP_FROM=$smtp_from"
+    "FEEDBACK_REPO=$quoted_repo" "FEEDBACK_PAT=$quoted_pat"
+    ACTIVITY_HISTORY_CLUSTER_ENABLED=false CONTROL_PLANE_REPLICA_COUNT=1
+    "ACTIVITY_HISTORY_OPERATOR_NAME=$operator" "ACTIVITY_HISTORY_PRIVACY_POLICY_URL=$privacy"
+  )
+  if [[ "$CFG_STORAGE_MODE" == byo-s3 ]]; then
+    lines+=("STORAGE_BACKEND=$backend" "STORAGE_ENDPOINT=$endpoint" "STORAGE_REGION=$region"
+      "STORAGE_ACCESS_KEY=$access" "STORAGE_SECRET_KEY=$secret" "STORAGE_USE_SSL=$tls" "STORAGE_BUCKET=$bucket")
+  fi
+  local staged_env=''
+  trap 'if [[ -n "$staged_env" ]] && ! rm -f -- "$staged_env" 2>/dev/null; then printf "%s\n" "installer: staging cleanup failed" >&2; exit 1; fi' EXIT
+  trap 'exit 1' HUP INT TERM
+  staged_env="$(umask 077; mktemp "${ENV_OUT}.new.XXXXXX.env")" || return 1
+  if [[ "$env_in_git" == yes ]] && ! git -C "$env_dir" check-ignore -q "$staged_env"; then
+    printf '%s\n' 'installer: environment staging is not gitignored' >&2
+    return 1
+  fi
+  chmod 600 "$staged_env" || return 1
+  if ! printf '%s\n' "${lines[@]}" >"$staged_env"; then
+    printf '%s\n' 'installer: environment staging failed' >&2
+    return 1
+  fi
+  # -T refuses existing directories and symlinks to directories as well.
+  if ! ln -T -- "$staged_env" "$ENV_OUT" 2>/dev/null; then
+    printf '%s\n' 'installer: environment publication refused' >&2
+    return 1
+  fi
+  rm -f -- "$staged_env" || return 1
+  staged_env=''
+  printf '%s\n' 'installer: wrote environment (mode 0600)'
+)
 
-  # Operator free text goes through the Compose encoder: written raw, a '$' is
-  # interpolated and ' #' starts a comment, so 'pa$word9 #x' reached the
-  # container as 'pa' (#3561). Encoded BEFORE the file is opened, with an
-  # explicit exit, so a rejected value leaves no partial .env behind.
-  local turn_realm_q smtp_host_q smtp_user_q smtp_pass_q smtp_from_q operator_q policy_q
-  turn_realm_q="$(compose_dotenv_quote "${CFG_TURN_REALM:-${CFG_DOMAIN}}")" || exit 1
-  smtp_host_q="$(compose_dotenv_quote "${CFG_SMTP_HOST:-}")" || exit 1
-  smtp_user_q="$(compose_dotenv_quote "${CFG_SMTP_USER:-}")" || exit 1
-  smtp_pass_q="$(compose_dotenv_quote "${CFG_SMTP_PASS:-}")" || exit 1
-  smtp_from_q="$(compose_dotenv_quote "${CFG_SMTP_FROM:-noreply@${CFG_DOMAIN}}")" || exit 1
-  operator_q="$(compose_dotenv_quote "${CFG_ACTIVITY_HISTORY_OPERATOR_NAME:-}")" || exit 1
-  policy_q="$(compose_dotenv_quote "${CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL:-}")" || exit 1
-
-  umask 077
-  {
-    echo "# Concord Voice self-hosted env — generated by install-selfhost.sh ($(date -u +%FT%TZ))"
-    echo "# Self-hosted writer surface (NOT the managed /opt/concord/.env). See [internal]rules/deployment.md."
-    echo "ENVIRONMENT=production"
-    echo "INSTANCE_TYPE=self-hosted"
-    echo "DOMAIN=${CFG_DOMAIN}"
-    echo "PUBLIC_IP=${CFG_PUBLIC_IP:-}"
-    echo "POSTGRES_PASSWORD=$(gen_secret)"
-    echo "REDIS_PASSWORD=$(gen_secret)"
-    echo "JWT_SECRET=$(gen_secret)"
-    echo "MFA_ENCRYPTION_KEY=$(gen_hex_key)"
-    echo "TURN_SECRET=$(gen_secret)"
-    printf 'TURN_REALM=%s\n' "$turn_realm_q"
-    echo "MINIO_ROOT_USER=concord"
-    echo "MINIO_ROOT_PASSWORD=$(gen_secret)"
-    echo "MINIO_BUCKET=concord-media"
-    echo "TRUSTED_PROXY_CIDRS=${CFG_TRUSTED_CIDRS:-172.16.0.0/12,10.0.0.0/8}"
-    printf 'SMTP_HOST=%s\n' "$smtp_host_q"
-    echo "SMTP_PORT=${CFG_SMTP_PORT:-587}"
-    printf 'SMTP_USERNAME=%s\n' "$smtp_user_q"
-    printf 'SMTP_PASSWORD=%s\n' "$smtp_pass_q"
-    printf 'SMTP_FROM=%s\n' "$smtp_from_q"
-    echo "FEEDBACK_REPO=${feedback_repo}"
-    echo "FEEDBACK_PAT=${feedback_pat}"
-    echo "ACTIVITY_HISTORY_CLUSTER_ENABLED=false"
-    echo "CONTROL_PLANE_REPLICA_COUNT=1"
-    printf 'ACTIVITY_HISTORY_OPERATOR_NAME=%s\n' "$operator_q"
-    printf 'ACTIVITY_HISTORY_PRIVACY_POLICY_URL=%s\n' "$policy_q"
-  } >"$ENV_OUT"
-  chmod 600 "$ENV_OUT"
-  # Log var names only — never values (risk: security / observability rule).
-  echo -e "${GREEN}✓ wrote $ENV_OUT${NC} (vars: INSTANCE_TYPE DOMAIN PUBLIC_IP POSTGRES_PASSWORD REDIS_PASSWORD JWT_SECRET MFA_ENCRYPTION_KEY TURN_SECRET TURN_REALM MINIO_ROOT_USER MINIO_ROOT_PASSWORD MINIO_BUCKET TRUSTED_PROXY_CIDRS SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM FEEDBACK_REPO FEEDBACK_PAT ACTIVITY_HISTORY_CLUSTER_ENABLED CONTROL_PLANE_REPLICA_COUNT ACTIVITY_HISTORY_OPERATOR_NAME ACTIVITY_HISTORY_PRIVACY_POLICY_URL)"
+# Validated storage metadata only; no credential bytes leave this function.
+print_storage_review() {
+  selfhost_storage_validate "${CFG_STORAGE_MODE:-bundled}" "${CFG_STORAGE_BACKEND:-}" \
+    "${CFG_STORAGE_ENDPOINT:-}" "${CFG_STORAGE_REGION:-}" "${CFG_STORAGE_ACCESS_KEY:-}" \
+    "${CFG_STORAGE_SECRET_KEY:-}" "${CFG_STORAGE_USE_SSL:-}" "${CFG_STORAGE_BUCKET:-}" || return 1
+  printf 'Object storage mode: %s\n' "${CFG_STORAGE_MODE:-bundled}" || return 1
+  if [[ "${CFG_STORAGE_MODE:-bundled}" == byo-s3 ]]; then
+    printf 'Endpoint: %s\nBackend: %s\nRegion: %s\nBucket: %s\nTLS: %s\n' \
+      "$CFG_STORAGE_ENDPOINT" "$CFG_STORAGE_BACKEND" "${CFG_STORAGE_REGION:-(default / empty)}" \
+      "$CFG_STORAGE_BUCKET" "$CFG_STORAGE_USE_SSL" || return 1
+    printf '%s\n' 'Access key: provided (hidden)' 'Secret key: provided (hidden)' || return 1
+  fi
 }
 
 # ── nginx render ───────────────────────────────────────────────────────────────
@@ -522,7 +684,7 @@ render_nginx() {
     echo -e "${RED}nginx source not found: $NGINX_SRC${NC}" >&2
     return 1
   }
-  sed "s/concordvoice\.chat/${CFG_DOMAIN}/g" "$NGINX_SRC" >"$NGINX_OUT"
+  sed "s/concordvoice\.chat/${CFG_DOMAIN}/g" "$NGINX_SRC" >"$NGINX_OUT" || return 1
   echo -e "${GREEN}✓ rendered nginx vhost -> $NGINX_OUT${NC} (run: sudo cp it into /etc/nginx/... then nginx -t)"
 }
 
@@ -571,6 +733,9 @@ provision_tls() {
 # ── Summary ────────────────────────────────────────────────────────────────────
 
 print_summary() {
+  if [[ "${CFG_STORAGE_MODE:-bundled}" == byo-s3 ]]; then
+    printf '%s\n' 'Install configured. External storage has not been checked. The control-plane checks it when the stack starts.' || return 1
+  fi
   # Paste-safe paths (#3561): shq output reaches the terminal byte-for-byte
   # through a heredoc. echo -e re-read it, so a backslash in the checkout path
   # vanished and the pasted command named a different file.
@@ -609,29 +774,27 @@ EOF
 
 main() {
   case "${1:-}" in
-    --help|-h)
-      usage
-      return 0
-      ;;
+    --help|-h) usage; return $? ;;
     --env-file)
-      [[ -n "${2:-}" ]] || { echo -e "${RED}--env-file needs a path${NC}" >&2; return 2; }
-      load_answers "$2"
+      [[ $# -eq 2 && -n "$2" ]] || { printf '%s\n' 'installer: --env-file needs one path' >&2; return 2; }
       ;;
-    "")
-      collect_config
-      ;;
-    *)
-      echo -e "${RED}unknown arg: $1${NC}" >&2
-      usage >&2
-      return 2
-      ;;
+    "") [[ $# -eq 0 ]] || return 2 ;;
+    *) printf '%s\n' 'installer: unknown argument' >&2; usage >&2; return 2 ;;
   esac
-  validate_collected_config
-  run_preflight
-  write_env_file
-  render_nginx
-  provision_tls
-  print_summary
+  selfhost_storage_assert_fresh "$PROJECT_ROOT" early || return 1
+  if [[ "${1:-}" == --env-file ]]; then
+    load_answers "$2" || return $?
+  else
+    collect_config || return $?
+  fi
+  validate_collected_config || return $?
+  run_preflight || return $?
+  selfhost_storage_assert_fresh "$PROJECT_ROOT" final || return 1
+  print_storage_review || return $?
+  render_nginx || return $?
+  write_env_file || return $?
+  provision_tls || return $?
+  print_summary || return $?
 }
 
 # ── Source guard ───────────────────────────────────────────────────────────────
