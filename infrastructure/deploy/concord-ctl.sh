@@ -88,6 +88,29 @@ selfhost_storage_start_guard() {
   selfhost_storage_assert_no_running_minio
 }
 
+# Load the TLS caller API only on verbs that need it. Help, stop/down, logs,
+# exposure checks, and recovery remain usable if the observer is unavailable.
+selfhost_tls_load() {
+  [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]] || return 0
+  declare -F selfhost_tls_admit >/dev/null 2>&1 && return 0
+  local helper="${SCRIPT_DIR}/selfhost-tls.sh"
+  [[ -f "$helper" ]] || { echo 'selfhost-tls: observer prerequisite unavailable' >&2; return 1; }
+  # shellcheck source=selfhost-tls.sh
+  source "$helper"
+}
+
+selfhost_tls_admit_gate() {
+  [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]] || return 0
+  selfhost_tls_load || return 1
+  selfhost_tls_admit
+}
+
+selfhost_tls_ready_gate() {
+  [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]] || return 0
+  selfhost_tls_load || return 1
+  selfhost_tls_ready "${1:-15}"
+}
+
 selfhost_storage_target_guard() {
   [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]] || return 0
   [[ "$SELFHOST_STORAGE_MODE_RESOLVED" == byo-s3 ]] || return 0
@@ -1438,9 +1461,18 @@ case "${1:-help}" in
     done
     # coturn check — verify STUN port is listening
     if nc -z -w2 localhost 3478 2>/dev/null; then
-      echo "  ✓ coturn STUN/TURN (${VM_IP}:3478)"
+      echo "  ✓ coturn TCP liveness (${VM_IP}:3478; not TLS proof)"
     else
-      echo "  ✗ coturn STUN/TURN (port 3478)"
+      echo "  ✗ coturn TCP liveness (port 3478; not TLS proof)"
+    fi
+    _tls_status_rc=0
+    if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
+      if selfhost_tls_ready_gate; then
+        echo '  ✓ coturn TLS listener serves the selected certificate'
+      else
+        echo '  ✗ coturn TLS readiness failed (see fixed selfhost-tls reason above)' >&2
+        _tls_status_rc=1
+      fi
     fi
     # Release sync status
     echo ""
@@ -1451,6 +1483,7 @@ case "${1:-help}" in
       echo "  No releases synced"
     fi
     [[ $_storage_status_rc -eq 0 ]] || exit 1
+    [[ $_tls_status_rc -eq 0 ]] || exit 1
     ;;
 
   logs)
@@ -1465,8 +1498,10 @@ case "${1:-help}" in
     # invoke `concord-ctl.sh sync-releases` (manual recovery).
     echo "Restarting services..."
     echo "Note: release assets NOT refreshed automatically (#1015). Run 'concord-ctl.sh sync-releases' or trigger sync-releases.yml for a refresh."
+    selfhost_tls_admit_gate || exit 1
     cd "$DEPLOY_DIR" && $COMPOSE_CMD restart
     selfhost_post_up_check || exit 1
+    selfhost_tls_ready_gate || exit 1
     echo "Done."
     ;;
 
@@ -1681,6 +1716,23 @@ else:
       done
     fi
 
+    # Decide from the effective scope, after dependency discovery can escalate
+    # to a full rebuild. Admission must precede the routine receipt/image guard.
+    _rebuild_starts_coturn=0
+    if [[ $_rebuild_scoped -eq 0 ]]; then
+      _rebuild_starts_coturn=1
+    else
+      for _entry in "${_scope_closure[@]}"; do
+        [[ "${_entry%% *}" == coturn ]] && _rebuild_starts_coturn=1
+      done
+      for _svc in "${REBUILD_SCOPE[@]}"; do
+        [[ "$_svc" == coturn ]] && _rebuild_starts_coturn=1
+      done
+    fi
+    if [[ $_rebuild_starts_coturn -eq 1 ]]; then
+      selfhost_tls_admit_gate || exit 1
+    fi
+
     # Unconditional, and deliberately BEFORE any scope branch: this is the
     # Activity History first-activation boundary. A scope-conditional guard here
     # would be a first-activation bypass. It takes an optional receipt_mode
@@ -1693,6 +1745,7 @@ else:
     if [[ $_rebuild_scoped -eq 0 ]]; then
       rebuild_unscoped
       selfhost_post_up_check || exit 1
+      [[ $_rebuild_starts_coturn -eq 0 ]] || selfhost_tls_ready_gate || exit 1
       echo "Done."
       exit 0
     fi
@@ -1707,6 +1760,7 @@ else:
         voice_enforcement_rollout_media_rebuild
       fi
       selfhost_post_up_check || exit 1
+      [[ $_rebuild_starts_coturn -eq 0 ]] || selfhost_tls_ready_gate || exit 1
       echo "Done."
       exit 0
     fi
@@ -1726,6 +1780,7 @@ else:
     echo "Scope: ${REBUILD_SCOPE[*]} (--no-deps --wait)"
     cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --build --no-deps --wait --wait-timeout 180 "${REBUILD_SCOPE[@]}"
     selfhost_post_up_check || exit 1
+    [[ $_rebuild_starts_coturn -eq 0 ]] || selfhost_tls_ready_gate || exit 1
     echo "Done."
     ;;
 
@@ -2432,9 +2487,9 @@ else:
     # and 3000 to 127.0.0.1 only, so [::1] is free for any local user to answer a
     # `localhost` probe (curl tries it first) and fake readiness (#3538).
     CP_PROBE_BASE="http://127.0.0.1:8080"
-    cp_ok=0; mp_ok=0; coturn_ok=0
+    cp_ok=0; mp_ok=0; coturn_ok=0; tls_ok=0
     while [[ $(date +%s) -lt $DEADLINE ]]; do
-      cp_ok=0; mp_ok=0; coturn_ok=0
+      cp_ok=0; mp_ok=0; coturn_ok=0; tls_ok=0
       # Gates on READINESS, not liveness (#3106). wait-healthy is the real
       # answer to "did this deploy succeed", and a control-plane that bound the
       # port but cannot reach Redis returns 401 on every authenticated request
@@ -2445,9 +2500,21 @@ else:
       curl -sf "${CP_PROBE_BASE}/readyz" >/dev/null 2>&1 && cp_ok=1
       curl -sf "http://127.0.0.1:3000/health" >/dev/null 2>&1 && mp_ok=1
       nc -z -w2 localhost 3478 >/dev/null 2>&1 && coturn_ok=1
-      if [[ $cp_ok -eq 1 && $mp_ok -eq 1 && $coturn_ok -eq 1 ]]; then
+      if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost ]]; then
+        tls_ok=1
+      else
+        _tls_remaining=$(( DEADLINE - $(date +%s) ))
+        if (( _tls_remaining > 0 )) && selfhost_tls_ready_gate "$_tls_remaining"; then
+          tls_ok=1
+        fi
+      fi
+      if [[ $cp_ok -eq 1 && $mp_ok -eq 1 && $coturn_ok -eq 1 && $tls_ok -eq 1 ]]; then
         selfhost_post_up_check || exit 1
-        echo "  ✓ all services healthy (control-plane + media-plane + coturn)"
+        if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
+          echo "  ✓ all services healthy (control-plane + media-plane + coturn TLS)"
+        else
+          echo "  ✓ all services healthy (control-plane + media-plane + coturn)"
+        fi
         exit 0
       fi
       sleep "$INTERVAL"
@@ -2487,6 +2554,8 @@ else:
     fi
     [[ $mp_ok -eq 0 ]] && echo "    media-plane (:3000/health) failed" >&2
     [[ $coturn_ok -eq 0 ]] && echo "    coturn STUN (:3478) failed" >&2
+    [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost || $tls_ok -eq 1 ]] \
+      || echo "    coturn TLS listener proof failed" >&2
     dump_health_diagnostics
     exit 1
     ;;
@@ -2494,13 +2563,21 @@ else:
   freshstart)
     # skip-receipt: the receipt never authorizes freshstart's volume wipe — a
     # gate-true freshstart still requires live one-container proof (#2326).
-    activity_history_routine_guard skip-receipt
+    if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost ]]; then
+      activity_history_routine_guard skip-receipt
+    fi
     echo "=== Fresh Start: wiping all data and rebuilding ==="
     echo "This will DELETE all databases, caches, and user data."
     read -rp "Are you sure? (y/N) " confirm
     if [[ "${confirm,,}" != "y" ]]; then
       echo "Aborted."
       exit 0
+    fi
+    # Consume confirmation first, then admit TLS before the receipt guard or
+    # any rollback/image/volume mutation. BYO has already refused pre-dispatch.
+    if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
+      selfhost_tls_admit_gate || exit 1
+      activity_history_routine_guard skip-receipt
     fi
     # ACQUIRED HERE, not in the pre-dispatch block, and the difference is an
     # unbounded hold. `flock -w` bounds how long acquisition WAITS; once taken,
@@ -2532,6 +2609,7 @@ else:
       exit 1
     fi
     selfhost_post_up_check || exit 1
+    selfhost_tls_ready_gate || exit 1
     echo ""
     echo "Fresh start complete. All data has been wiped."
     ;;

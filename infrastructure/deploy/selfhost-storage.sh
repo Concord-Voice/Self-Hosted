@@ -156,20 +156,34 @@ try:
         parts = sys.stdin.buffer.read().split(b"\x00")
         require(parts[-1] == b"")
         validate([part.decode("utf-8") for part in parts[:-1]])
-    elif operation == "read":
+    elif operation in ("read", "read-tls"):
         text = open(args[0], "rb").read().decode("utf-8")
         require("\x00" not in text and "\r" not in text)
         found = {}
+        key_pattern = (r"SELFHOST_STORAGE_MODE|STORAGE_[A-Za-z0-9_]+"
+                       if operation == "read" else r"DOMAIN|COTURN_CERTS_DIR")
         for line in text.split("\n"):
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
-            match = re.match(r"\s*(?:export\s+)?(SELFHOST_STORAGE_MODE|STORAGE_[A-Za-z0-9_]+)\s*(.*)", line)
+            match = re.match(r"\s*(?:export\s+)?(" + key_pattern + r")\s*(.*)", line)
             if match is None:
                 continue
             key, remainder = match.groups()
-            require(key == "SELFHOST_STORAGE_MODE" or key in FIELDS)
+            if operation == "read":
+                require(key == "SELFHOST_STORAGE_MODE" or key in FIELDS)
+            else:
+                require(key in ("DOMAIN", "COTURN_CERTS_DIR"))
             require(key not in found and remainder.startswith("="))
             found[key] = decode(remainder[1:])
+        if operation == "read-tls":
+            domain = found.get("DOMAIN", "")
+            selector = found.get("COTURN_CERTS_DIR", "")
+            require(set(found) == {"DOMAIN", "COTURN_CERTS_DIR"})
+            require(re.fullmatch(r"([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}", domain) is not None)
+            require(not domain.startswith(("media.", "api.", "turn.")))
+            require(selector == "/opt/concord/certs/coturn")
+            print(json.dumps({"domain": domain, "cert_root": selector}, separators=(",", ":")))
+            sys.exit(0)
         mode = found.get("SELFHOST_STORAGE_MODE", "bundled")
         supplied = [key for key in FIELDS if key in found]
         require(not supplied if mode == "bundled" else
@@ -244,7 +258,7 @@ selfhost_storage_scrub_environment() {
     COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE COMPOSE_OVERRIDE \
     INSTANCE_TYPE ACTIVITY_HISTORY_CLUSTER_ENABLED CONTROL_PLANE_REPLICA_COUNT \
     ACTIVITY_HISTORY_OPERATOR_NAME ACTIVITY_HISTORY_PRIVACY_POLICY_URL \
-    ATTACHMENT_WRITE_BACKEND CONTROL_PLANE_IMAGE
+    ATTACHMENT_WRITE_BACKEND CONTROL_PLANE_IMAGE COTURN_CERTS_DIR
 }
 
 selfhost_storage_project_identity() {

@@ -592,7 +592,7 @@ write_env_file() (
   minio_password="$(gen_secret)" || return 1
   # All operator values use one literal grammar, including older writer fields.
   local domain public_ip realm cidrs smtp_host smtp_port smtp_user smtp_pass smtp_from
-  local quoted_repo quoted_pat operator privacy
+  local quoted_repo quoted_pat operator privacy coturn_certs
   domain="$(compose_dotenv_quote "$CFG_DOMAIN")" || return 1
   public_ip="$(compose_dotenv_quote "${CFG_PUBLIC_IP:-}")" || return 1
   realm="$(compose_dotenv_quote "${CFG_TURN_REALM:-$CFG_DOMAIN}")" || return 1
@@ -606,6 +606,7 @@ write_env_file() (
   quoted_pat="$(compose_dotenv_quote "$feedback_pat")" || return 1
   operator="$(compose_dotenv_quote "${CFG_ACTIVITY_HISTORY_OPERATOR_NAME:-}")" || return 1
   privacy="$(compose_dotenv_quote "${CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL:-}")" || return 1
+  coturn_certs="$(compose_dotenv_quote '/opt/concord/certs/coturn')" || return 1
   local backend endpoint region access secret tls bucket timestamp
   if [[ "$CFG_STORAGE_MODE" == byo-s3 ]]; then
     backend="$(compose_dotenv_quote "$CFG_STORAGE_BACKEND")" || return 1
@@ -622,6 +623,7 @@ write_env_file() (
     "# Self-hosted writer surface; managed provisioning is separate."
     ENVIRONMENT=production INSTANCE_TYPE=self-hosted
     "SELFHOST_STORAGE_MODE=$CFG_STORAGE_MODE" "DOMAIN=$domain" "PUBLIC_IP=$public_ip"
+    "COTURN_CERTS_DIR=$coturn_certs"
     "POSTGRES_PASSWORD=$postgres_password" "REDIS_PASSWORD=$redis_password"
     "JWT_SECRET=$jwt_secret" "MFA_ENCRYPTION_KEY=$mfa_key" "TURN_SECRET=$turn_secret"
     "TURN_REALM=$realm" MINIO_ROOT_USER=concord "MINIO_ROOT_PASSWORD=$minio_password"
@@ -733,16 +735,16 @@ provision_tls() {
 # ── Summary ────────────────────────────────────────────────────────────────────
 
 print_summary() {
-  if [[ "${CFG_STORAGE_MODE:-bundled}" == byo-s3 ]]; then
-    printf '%s\n' 'Install configured. External storage has not been checked. The control-plane checks it when the stack starts.' || return 1
-  fi
   # Paste-safe paths (#3561): shq output reaches the terminal byte-for-byte
   # through a heredoc. echo -e re-read it, so a backslash in the checkout path
   # vanished and the pasted command named a different file.
   local nginx_q boundary_q
   nginx_q="$(shq "$NGINX_OUT")"
   boundary_q="$(shq "$SCRIPT_DIR/provision-production.sh")"
-  printf '\n%bInstall configured.%b Next steps:\n' "$GREEN" "$NC"
+  if [[ "${CFG_STORAGE_MODE:-bundled}" == byo-s3 ]]; then
+    printf '%s\n' 'Install configured. External storage has not been checked. The control-plane checks it when the stack starts.' || return 1
+  fi
+  printf '\n%bInstall configured. Certificate delivery and coturn TLS checks are pending.%b Next steps:\n' "$GREEN" "$NC"
   cat <<EOF
   1. Firewall (UFW). UFW filters HOST processes (nginx, sshd):
        sudo ufw allow 80,443/tcp

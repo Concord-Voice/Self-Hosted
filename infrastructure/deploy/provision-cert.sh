@@ -3,7 +3,7 @@
 # Root-only deploy script. Three modes converge on the canonical cert dir
 # /etc/letsencrypt/live/${DOMAIN}/ (consumed identically by the rendered nginx
 # vhost and copy-certs.sh -> coturn). No custom crypto (openssl/certbot only).
-# No private key / PEM bytes are ever logged (paths + SHA-256 fingerprints only).
+# No private key / PEM bytes are ever logged.
 #
 # Usage:
 #   provision-cert.sh local       --host <h> [--ip <a>] [--days <n>]
@@ -78,8 +78,112 @@ fingerprint() { openssl x509 -in "$1" -noout -fingerprint -sha256 2>/dev/null | 
 # overridable for tests (default: the real sibling copy-certs.sh).
 run_copy_certs() {
   local dir="$1" hook="${COPY_CERTS_HOOK:-${SCRIPT_DIR}/copy-certs.sh}"
-  [[ -f "$hook" ]] || { warn "copy-certs hook not found at $hook — skipping coturn/nginx fan-out"; return 0; }
-  RENEWED_LINEAGE="$dir" bash "$hook"
+  local output
+  if ! output="$(RENEWED_LINEAGE="$dir" bash "$hook")"; then
+    return 1
+  fi
+  case "$output" in
+    $'copy-certs: certificate pair delivery complete.\ncopy-certs: coturn-stage=prepared')
+      COPY_COTURN_STAGE=prepared ;;
+    $'copy-certs: certificate pair delivery complete.\ncopy-certs: coturn-stage=restarted')
+      COPY_COTURN_STAGE=restarted ;;
+    *)
+      err 'tls-provision: coturn delivery result unavailable; delivery not complete'
+      return 1 ;;
+  esac
+}
+
+require_root() {
+  [[ "$EUID" -eq 0 ]] || {
+    err 'tls-provision: root required; certificate delivery not started'
+    return 1
+  }
+}
+
+require_copy_hook() {
+  local hook="${COPY_CERTS_HOOK:-${SCRIPT_DIR}/copy-certs.sh}"
+  [[ -f "$hook" && -r "$hook" && -f "${SCRIPT_DIR}/copy-certs.sh" && -r "${SCRIPT_DIR}/copy-certs.sh" ]] || {
+    err 'tls-provision: required copy hook unavailable; delivery not complete'
+    return 1
+  }
+}
+
+install_required_renewal_hook() {
+  local source="${SCRIPT_DIR}/copy-certs.sh" target="${HOOK_DIR}/copy-certs.sh"
+  mkdir -p "$HOOK_DIR" 2>/dev/null || {
+    err 'tls-provision: renewal hook installation failed; delivery not complete'
+    return 1
+  }
+  if ! install -o root -g root -m 0755 "$source" "$target" 2>/dev/null ||
+      [[ ! -f "$target" || -L "$target" ]] ||
+      ! cmp -s "$source" "$target" ||
+      [[ "$source" -ef "$target" ]] ||
+      [[ "$(stat -Lc '%u:%g:%a' "$target" 2>/dev/null)" != '0:0:755' ]]; then
+    err 'tls-provision: renewal hook installation failed; delivery not complete'
+    return 1
+  fi
+}
+
+validate_source_pair() {
+  local dir="$1" cert="${1}/fullchain.pem" key="${1}/privkey.pem"
+  local cert_pub key_pub
+  if [[ ! -f "$cert" || ! -s "$cert" || ! -f "$key" || ! -s "$key" || -L "$cert" && ! -f "$cert" ]]; then
+    err 'tls-provision: certificate source incomplete; delivery not complete'
+    return 1
+  fi
+  if [[ "$(stat -Lc '%u:%g:%a' "$key" 2>/dev/null)" != '0:0:600' ]] ||
+      ! openssl x509 -in "$cert" -noout >/dev/null 2>&1 ||
+      ! openssl x509 -in "$cert" -noout -checkend 0 >/dev/null 2>&1 ||
+      ! openssl pkey -in "$key" -noout >/dev/null 2>&1; then
+    err 'tls-provision: certificate source incomplete; delivery not complete'
+    return 1
+  fi
+  cert_pub="$(openssl x509 -in "$cert" -noout -pubkey 2>/dev/null)" || cert_pub=''
+  key_pub="$(openssl pkey -in "$key" -pubout 2>/dev/null)" || key_pub=''
+  if [[ -z "$cert_pub" || -z "$key_pub" || "$cert_pub" != "$key_pub" ]]; then
+    err 'tls-provision: certificate source incomplete; delivery not complete'
+    return 1
+  fi
+}
+
+complete_delivery() {
+  local dir="$1" root="${COTURN_CERT_ROOT:-/opt/concord/certs}" target="${COTURN_CERT_ROOT:-/opt/concord/certs}/coturn"
+  validate_source_pair "$dir" || return 1
+  run_copy_certs "$dir" || return 1
+  if [[ ! -d "$root" || -L "$root" || ! -d "$target" || -L "$target" ||
+        "$(stat -Lc '%u:%g:%a' "$root" 2>/dev/null)" != '0:0:711' ||
+        "$(stat -Lc '%u:%g:%a' "$target" 2>/dev/null)" != '0:0:711' ||
+        ! -f "$target/cert.pem" || -L "$target/cert.pem" ||
+        ! -f "$target/key.pem" || -L "$target/key.pem" ||
+        "$(stat -Lc '%u:%g:%a' "$target/cert.pem" 2>/dev/null)" != '0:0:444' ||
+        "$(stat -Lc '%u:%g:%a' "$target/key.pem" 2>/dev/null)" != '65534:65533:400' ]]; then
+    err 'tls-provision: certificate source incomplete; delivery not complete'
+    return 1
+  fi
+  if ! cmp -s "$dir/fullchain.pem" "$target/cert.pem" ||
+      ! cmp -s "$dir/privkey.pem" "$target/key.pem"; then
+    err 'tls-provision: certificate source incomplete; delivery not complete'
+    return 1
+  fi
+}
+
+delivery_complete() {
+  case "${COPY_COTURN_STAGE:-}" in
+    prepared|restarted) ;;
+    *)
+      err 'tls-provision: coturn delivery result unavailable; delivery not complete'
+      return 1 ;;
+  esac
+  printf '%s\n' 'Certificate source and coturn delivery complete.'
+  case "$COPY_COTURN_STAGE" in
+    prepared)
+      printf '%s\n' 'coturn is not started; delivery is prepared for first start.'
+      printf '%s\n' 'TLS readiness has not been checked.'
+      printf '%s\n' 'Install and reload the rendered nginx vhost, then run concord-selfhost up.' ;;
+    restarted)
+      printf '%s\n' 'coturn was restarted; TLS readiness has not been checked.'
+      printf '%s\n' 'Run concord-selfhost health after installing and reloading the rendered nginx vhost.' ;;
+  esac
 }
 
 # mode_local --host <h> [--ip <a>] [--days <n>] — generate a self-signed leaf
@@ -96,9 +200,13 @@ mode_local() {
   validate_host "$host" || return 2
   [[ -n "$ip" ]] && { validate_ip "$ip" || return 2; }
   { [[ "$days" =~ ^[0-9]+$ ]] && (( days >= 1 )); } || { err "local: --days must be a positive integer (>= 1), got: $days"; return 2; }
+  require_copy_hook || return 1
 
   local dir; dir="$(canonical_dir "$host")"
-  mkdir -p "$dir"
+  mkdir -p "$dir" 2>/dev/null || {
+    err 'tls-provision: certificate source incomplete; delivery not complete'
+    return 1
+  }
   local cert="${dir}/fullchain.pem" key="${dir}/privkey.pem"
   local sans; sans="$(derive_sans "$host" "$ip")"
 
@@ -109,12 +217,16 @@ mode_local() {
     -keyout "$key" -out "$cert" \
     -subj "/CN=${host}" -addext "subjectAltName=${sans}" >/dev/null 2>&1 || {
       err "local: openssl self-signed generation failed"; return 1; }
-  chmod 600 "$key"; chmod 644 "$cert"
+  if ! chmod 600 "$key" 2>/dev/null || ! chmod 644 "$cert" 2>/dev/null; then
+    err 'tls-provision: certificate source incomplete; delivery not complete'
+    return 1
+  fi
 
   log "✓ self-signed cert written to ${dir} (SHA-256: $(fingerprint "$cert"))"
   warn "⚠ self-signed: NO MITM protection on untrusted networks — trusted LAN/homelab only."
   warn "  For any internet-reachable host use: provision-cert.sh letsencrypt --domain <d> --email <e>"
-  run_copy_certs "$dir"
+  complete_delivery "$dir" || return 1
+  delivery_complete
 }
 # mode_letsencrypt --domain <d> --email <e> — behavior-preserving extraction of
 # the inline certbot flow from provision-production.sh. --reuse-key is
@@ -130,28 +242,28 @@ mode_letsencrypt() {
   [[ -n "$domain" && -n "$email" ]] || { err "letsencrypt: --domain and --email required"; return 2; }
   validate_host "$domain" || return 2
 
+  require_copy_hook || return 1
+  install_required_renewal_hook || return 1
+
   if certbot certonly \
       --webroot -w /var/www/html \
       -d "$domain" -d "api.${domain}" -d "media.${domain}" -d "turn.${domain}" \
-      --email "$email" --agree-tos --non-interactive --reuse-key 2>&1 | tail -5; then
-    log "✓ TLS certificate obtained at $(canonical_dir "$domain")"
+      --email "$email" --agree-tos --non-interactive --reuse-key >/dev/null 2>&1; then
+    log 'TLS certificate obtained.'
   else
-    err "Let's Encrypt failed. Ensure DNS A records for ${domain}, api/media/turn.${domain} -> this host, then re-run."
+    err 'tls-provision: certificate issuance failed; delivery not complete'
     return 1
   fi
 
-  # Install the deploy hooks for certbot's renewal lifecycle (copy-certs fans to
-  # coturn; CF upload self-skips without /etc/concord/cloudflare.env — self-host
-  # has none, SaaS does).
-  mkdir -p "$HOOK_DIR"
-  install -m 0755 "${SCRIPT_DIR}/copy-certs.sh" "${HOOK_DIR}/copy-certs.sh" 2>/dev/null || true
+  # Install the optional Cloudflare upload hook after the required delivery
+  # hook is in place. It remains best-effort and self-skips on self-host.
   [[ -f "${SCRIPT_DIR}/upload-cert-to-cloudflare.sh" ]] && \
     install -m 0755 "${SCRIPT_DIR}/upload-cert-to-cloudflare.sh" "${HOOK_DIR}/upload-cert-to-cloudflare.sh" 2>/dev/null || true
 
-  # Immediate fan-out (via the same run_copy_certs helper the other modes use).
+  # Immediate fan-out through the same strict path used by the other modes.
   local dir; dir="$(canonical_dir "$domain")"
   if [[ -f "${dir}/fullchain.pem" && -f "${dir}/privkey.pem" ]]; then
-    run_copy_certs "$dir"
+    complete_delivery "$dir" || return 1
     # CF custom-cert upload (SaaS SPKI-pin, #658). Non-fatal — self-host self-skips
     # without /etc/concord/cloudflare.env. Preserve the original success/failure
     # observability (the hook self-reports, but keep the wrapper remediation line).
@@ -163,10 +275,10 @@ mode_letsencrypt() {
         warn "  sudo RENEWED_LINEAGE=${dir} bash ${HOOK_DIR}/upload-cert-to-cloudflare.sh"
       fi
     fi
+    delivery_complete
   else
-    warn "Let's Encrypt reported success but cert files not found at ${dir}; skipping cert fan-out + CF upload."
-    warn "Re-run the hooks manually after obtaining certs:"
-    warn "  RENEWED_LINEAGE=${dir} bash ${HOOK_DIR}/copy-certs.sh"
+    err 'tls-provision: certificate source incomplete; delivery not complete'
+    return 1
   fi
 }
 # mode_import --cert <p> --key <p> --host <h> — validate a BYO PEM pair, then
@@ -222,23 +334,40 @@ mode_import() {
     fi
   done < <(printf '%s\n' "$sans" | tr ',' '\n' | sed -nE 's/.*DNS:([^,[:space:]]+).*/\1/p')
   [[ "$covered" -eq 1 ]] || { err "import: certificate SAN does not cover ${host}"; return 1; }
+  require_copy_hook || return 1
 
   # All checks passed — install (no partial install before this point).
-  local dir; dir="$(canonical_dir "$host")"; mkdir -p "$dir"
+  local dir; dir="$(canonical_dir "$host")"
+  mkdir -p "$dir" 2>/dev/null || {
+    err 'tls-provision: certificate source incomplete; delivery not complete'
+    return 1
+  }
   umask 077
-  cp "$cert" "${dir}/fullchain.pem"; cp "$key" "${dir}/privkey.pem"
-  chmod 600 "${dir}/privkey.pem"; chmod 644 "${dir}/fullchain.pem"
+  if ! cp "$cert" "${dir}/fullchain.pem" 2>/dev/null ||
+      ! cp "$key" "${dir}/privkey.pem" 2>/dev/null ||
+      ! chmod 600 "${dir}/privkey.pem" 2>/dev/null ||
+      ! chmod 644 "${dir}/fullchain.pem" 2>/dev/null; then
+    err 'tls-provision: certificate source incomplete; delivery not complete'
+    return 1
+  fi
   log "✓ imported cert installed to ${dir} (SHA-256: $(fingerprint "${dir}/fullchain.pem"))"
-  run_copy_certs "$dir"
+  complete_delivery "$dir" || return 1
+  delivery_complete
 }
 
 main() {
   case "${1:-}" in
     --help|-h) usage; return 0 ;;
     "")        usage >&2; return 2 ;;
-    local)        shift; mode_local "$@" ;;
-    letsencrypt)  shift; mode_letsencrypt "$@" ;;
-    import)       shift; mode_import "$@" ;;
+    local|letsencrypt|import)
+      local mode="$1"; shift
+      require_root || return 1
+      case "$mode" in
+        local) mode_local "$@" ;;
+        letsencrypt) mode_letsencrypt "$@" ;;
+        import) mode_import "$@" ;;
+      esac
+      ;;
     *)            err "unknown mode: $1"; usage >&2; return 2 ;;
   esac
 }
