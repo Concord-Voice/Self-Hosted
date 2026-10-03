@@ -28,6 +28,13 @@ services:
     ports: !override
       - "127.0.0.1:8080:8080"
   media-plane:
+    # Match the supported two-CPU self-host floor; workers and quota move together.
+    environment:
+      NUM_WORKERS: "2"
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
     ports: !override
       - "127.0.0.1:3000:3000"
       - "40000-41999:40000-41999/udp"

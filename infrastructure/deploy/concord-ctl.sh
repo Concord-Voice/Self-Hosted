@@ -1161,8 +1161,10 @@ voice_enforcement_rollout_deploy() {
   echo "voice-enforcement-rollout: building the new media-plane image"
   (cd "$DEPLOY_DIR" && $COMPOSE_CMD build media-plane)
   echo "voice-enforcement-rollout: starting the new media-plane"
+  echo "voice-enforcement-rollout: waiting for media-plane liveness"
   (cd "$DEPLOY_DIR" && $COMPOSE_CMD up -d --no-deps --no-build --wait \
     --wait-timeout 180 media-plane)
+  echo "voice-enforcement-rollout: waiting for media-plane protocol 3 readiness"
   voice_enforcement_rollout_wait_media
 
   echo "voice-enforcement-rollout: activating durable enforcement"
