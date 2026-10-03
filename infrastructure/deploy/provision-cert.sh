@@ -231,7 +231,9 @@ mode_local() {
 # mode_letsencrypt --domain <d> --email <e> — behavior-preserving extraction of
 # the inline certbot flow from provision-production.sh. --reuse-key is
 # LOAD-BEARING (SPKI-pin stability, #658). DO NOT remove. certonly --webroot
-# (#881) avoids the in-place nginx ssl_certificate auto-edit.
+# (#881) avoids the in-place nginx ssl_certificate auto-edit. Suppress directory
+# hooks for this command only: complete_delivery below performs the required
+# copy/restart/reload once, including when Certbot reuses an existing lineage.
 mode_letsencrypt() {
   local domain="" email=""
   while (( $# )); do case "$1" in
@@ -246,6 +248,7 @@ mode_letsencrypt() {
   install_required_renewal_hook || return 1
 
   if certbot certonly \
+      --no-directory-hooks \
       --webroot -w /var/www/html \
       -d "$domain" -d "api.${domain}" -d "media.${domain}" -d "turn.${domain}" \
       --email "$email" --agree-tos --non-interactive --reuse-key >/dev/null 2>&1; then
@@ -260,7 +263,8 @@ mode_letsencrypt() {
   [[ -f "${SCRIPT_DIR}/upload-cert-to-cloudflare.sh" ]] && \
     install -m 0755 "${SCRIPT_DIR}/upload-cert-to-cloudflare.sh" "${HOOK_DIR}/upload-cert-to-cloudflare.sh" 2>/dev/null || true
 
-  # Immediate fan-out through the same strict path used by the other modes.
+  # Directory hooks were suppressed for this certonly invocation. Fan out
+  # once through the strict path; Certbot success alone cannot prove delivery.
   local dir; dir="$(canonical_dir "$domain")"
   if [[ -f "${dir}/fullchain.pem" && -f "${dir}/privkey.pem" ]]; then
     complete_delivery "$dir" || return 1

@@ -2488,8 +2488,10 @@ else:
     # `localhost` probe (curl tries it first) and fake readiness (#3538).
     CP_PROBE_BASE="http://127.0.0.1:8080"
     cp_ok=0; mp_ok=0; coturn_ok=0; tls_ok=0
+    cp_refresh_skipped=0; mp_refresh_skipped=0; coturn_refresh_skipped=0
     while [[ $(date +%s) -lt $DEADLINE ]]; do
       cp_ok=0; mp_ok=0; coturn_ok=0; tls_ok=0
+      cp_refresh_skipped=0; mp_refresh_skipped=0; coturn_refresh_skipped=0
       # Gates on READINESS, not liveness (#3106). wait-healthy is the real
       # answer to "did this deploy succeed", and a control-plane that bound the
       # port but cannot reach Redis returns 401 on every authenticated request
@@ -2507,8 +2509,32 @@ else:
         if (( _tls_remaining > 0 )) && selfhost_tls_ready_gate "$_tls_remaining"; then
           tls_ok=1
         fi
+        # The TLS observer may use nearly all of the remaining budget. Its
+        # result cannot be combined with readiness samples taken before it.
+        cp_ok=0; mp_ok=0; coturn_ok=0
+        _cp_remaining=$(( DEADLINE - $(date +%s) ))
+        if (( _cp_remaining > 0 )); then
+          curl -sf --max-time "$_cp_remaining" "${CP_PROBE_BASE}/readyz" >/dev/null 2>&1 && cp_ok=1
+        else
+          cp_refresh_skipped=1
+        fi
+        _mp_remaining=$(( DEADLINE - $(date +%s) ))
+        if (( _mp_remaining > 0 )); then
+          curl -sf --max-time "$_mp_remaining" "http://127.0.0.1:3000/health" >/dev/null 2>&1 && mp_ok=1
+        else
+          mp_refresh_skipped=1
+        fi
+        _coturn_remaining=$(( DEADLINE - $(date +%s) ))
+        if (( _coturn_remaining > 0 )); then
+          _coturn_probe_limit=2
+          (( _coturn_remaining < _coturn_probe_limit )) && _coturn_probe_limit="$_coturn_remaining"
+          nc -z -w "$_coturn_probe_limit" localhost 3478 >/dev/null 2>&1 && coturn_ok=1
+        else
+          coturn_refresh_skipped=1
+        fi
       fi
-      if [[ $cp_ok -eq 1 && $mp_ok -eq 1 && $coturn_ok -eq 1 && $tls_ok -eq 1 ]]; then
+      if (( $(date +%s) < DEADLINE )) &&
+          [[ $cp_ok -eq 1 && $mp_ok -eq 1 && $coturn_ok -eq 1 && $tls_ok -eq 1 ]]; then
         selfhost_post_up_check || exit 1
         if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
           echo "  ✓ all services healthy (control-plane + media-plane + coturn TLS)"
@@ -2517,43 +2543,65 @@ else:
         fi
         exit 0
       fi
-      sleep "$INTERVAL"
+      _sleep_remaining=$(( DEADLINE - $(date +%s) ))
+      (( _sleep_remaining > 0 )) || break
+      if (( _sleep_remaining < INTERVAL )); then
+        sleep "$_sleep_remaining"
+      else
+        sleep "$INTERVAL"
+      fi
     done
     echo "  ✗ wait-healthy timed out after ${TIMEOUT}s" >&2
     if [[ $cp_ok -eq 0 ]]; then
-      echo "    control-plane (:8080/readyz) failed" >&2
-      # Liveness on the DIAGNOSTIC path only: it distinguishes "the process is
-      # dead or not listening" from "the process is listening but not ready",
-      # which is a materially better first line for whoever reads this.
-      if curl -sf "${CP_PROBE_BASE}/health" >/dev/null 2>&1; then
-        echo "    ...but :8080/health answers, so the process is UP and NOT READY." >&2
-        # The body names which dependency is down, so a failed deploy is
-        # diagnosable from the workflow log without logging into the host. It
-        # carries dependency names and up/down only — never values.
-        # Capture BEFORE printing: piping straight to head meant a failed or
-        # timed-out fetch printed the label followed by a blank line, which is
-        # indistinguishable from the endpoint returning an empty body -- a
-        # diagnostic silent about its own failure.
-        # `|| true` is load-bearing, not defensive. The script runs under
-        # `set -euo pipefail` (line 4), and errexit DOES fire on a failing
-        # command substitution in an ASSIGNMENT (it does not in an argument --
-        # the same asymmetry [internal]rules/deployment.md documents for the
-        # Compose dotenv writer). So a curl that fails or times out, or a head
-        # that closes early on a >512B body, would abort the whole script here
-        # -- turning a diagnostic into a fatal, and skipping the very branches
-        # below that exist to explain the failure.
-        readyz_body="$(curl -s --max-time 2 "${CP_PROBE_BASE}/readyz" 2>/dev/null | head -c 512 || true)"
-        if [[ -n "$readyz_body" ]]; then
-          echo "    /readyz reported: ${readyz_body}" >&2
-        else
-          echo "    /readyz returned no body within 2s (fetch failed or timed out)." >&2
-        fi
+      if [[ $cp_refresh_skipped -eq 1 ]]; then
+        echo "    control-plane (:8080/readyz) not rechecked (deadline)" >&2
       else
-        echo "    ...and :8080/health does not answer either, so the process is DOWN." >&2
+        echo "    control-plane (:8080/readyz) failed" >&2
+        # Liveness on the DIAGNOSTIC path only: it distinguishes "the process is
+        # dead or not listening" from "the process is listening but not ready",
+        # which is a materially better first line for whoever reads this.
+        if curl -sf "${CP_PROBE_BASE}/health" >/dev/null 2>&1; then
+          echo "    ...but :8080/health answers, so the process is UP and NOT READY." >&2
+          # The body names which dependency is down, so a failed deploy is
+          # diagnosable from the workflow log without logging into the host. It
+          # carries dependency names and up/down only — never values.
+          # Capture BEFORE printing: piping straight to head meant a failed or
+          # timed-out fetch printed the label followed by a blank line, which is
+          # indistinguishable from the endpoint returning an empty body -- a
+          # diagnostic silent about its own failure.
+          # `|| true` is load-bearing, not defensive. The script runs under
+          # `set -euo pipefail` (line 4), and errexit DOES fire on a failing
+          # command substitution in an ASSIGNMENT (it does not in an argument --
+          # the same asymmetry [internal]rules/deployment.md documents for the
+          # Compose dotenv writer). So a curl that fails or times out, or a head
+          # that closes early on a >512B body, would abort the whole script here
+          # -- turning a diagnostic into a fatal, and skipping the very branches
+          # below that exist to explain the failure.
+          readyz_body="$(curl -s --max-time 2 "${CP_PROBE_BASE}/readyz" 2>/dev/null | head -c 512 || true)"
+          if [[ -n "$readyz_body" ]]; then
+            echo "    /readyz reported: ${readyz_body}" >&2
+          else
+            echo "    /readyz returned no body within 2s (fetch failed or timed out)." >&2
+          fi
+        else
+          echo "    ...and :8080/health does not answer either, so the process is DOWN." >&2
+        fi
       fi
     fi
-    [[ $mp_ok -eq 0 ]] && echo "    media-plane (:3000/health) failed" >&2
-    [[ $coturn_ok -eq 0 ]] && echo "    coturn STUN (:3478) failed" >&2
+    if [[ $mp_ok -eq 0 ]]; then
+      if [[ $mp_refresh_skipped -eq 1 ]]; then
+        echo "    media-plane (:3000/health) not rechecked (deadline)" >&2
+      else
+        echo "    media-plane (:3000/health) failed" >&2
+      fi
+    fi
+    if [[ $coturn_ok -eq 0 ]]; then
+      if [[ $coturn_refresh_skipped -eq 1 ]]; then
+        echo "    coturn STUN (:3478) not rechecked (deadline)" >&2
+      else
+        echo "    coturn STUN (:3478) failed" >&2
+      fi
+    fi
     [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost || $tls_ok -eq 1 ]] \
       || echo "    coturn TLS listener proof failed" >&2
     dump_health_diagnostics
