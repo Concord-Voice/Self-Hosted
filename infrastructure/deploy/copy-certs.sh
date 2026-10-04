@@ -74,7 +74,7 @@ KEY_PUB="$(openssl pkey -in "$KEY" -pubout 2>/dev/null)" || KEY_PUB=''
 if DISCOVERY="$(docker ps --all \
     --filter 'name=^/?concordvoice-coturn$' \
     --filter 'label=com.docker.compose.service=coturn' \
-    --format '{{json .}}' 2>/dev/null)"; then
+    --format '{"ID":{{json .ID}},"Names":{{json .Names}},"Labels":{"com.docker.compose.project":{{json (.Label "com.docker.compose.project")}},"com.docker.compose.service":{{json (.Label "com.docker.compose.service")}}}}' 2>/dev/null)"; then
   :
 else
   docker_rc=$?
@@ -84,20 +84,6 @@ fi
 if ! CANDIDATES="$(python3 -c '
 import json, sys
 import re
-
-def labels_of(value):
-    labels = value.get("Labels")
-    if isinstance(labels, dict):
-        return labels
-    if isinstance(labels, str):
-        result = {}
-        for item in labels.split(","):
-            if "=" not in item:
-                return None
-            key, val = item.split("=", 1)
-            result[key] = val
-        return result
-    return None
 
 raw = sys.stdin.read()
 if not raw.strip():
@@ -110,10 +96,10 @@ found = []
 for item in records:
     if not isinstance(item, dict):
         sys.exit(2)
-    labels = labels_of(item)
+    labels = item.get("Labels")
     name = item.get("Names", item.get("Name"))
     ident = item.get("ID", item.get("Id"))
-    if not isinstance(name, str) or not isinstance(ident, str) or not labels:
+    if not isinstance(name, str) or not isinstance(ident, str) or not isinstance(labels, dict):
         sys.exit(2)
     project = labels.get("com.docker.compose.project")
     if (not re.fullmatch(r"[a-z0-9][a-z0-9_-]*", project or "") or
