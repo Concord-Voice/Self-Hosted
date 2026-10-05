@@ -197,11 +197,12 @@ verb_logs() {
           fi
           continue ;;
         --*) continue ;;
-        -*f*)
-          if [[ "$follow" == 0 ]]; then
+        -*f*|-t*n)
+          if [[ "$follow" == 0 && "$argument" == *f* ]]; then
             echo 'selfhost-storage: conflicting log follow options' >&2
             return 1
           fi
+          if [[ "$argument" =~ ^-[tf]+n$ ]]; then skip_value=1; fi
           continue ;;
         -*) continue ;;
       esac
