@@ -13,6 +13,10 @@ before transferring your account key.
 
 - **Trusted-device recovery requires matching fingerprints on both devices** ([#3582](internal development reference omitted)) — compare all eight groups and confirm the match on each device before your account key can be transferred and opened. Recovery keeps your original account key and message access. Updated servers refuse the old recovery protocol, so update and restart both devices and begin a fresh request. The server update clears pending recovery requests; it does not remove accounts, trusted devices, recovery circles or account keys.
 
+### Fixed
+
+- **Settings sections start collapsed and stay the way you leave them** ([#2365](internal development reference omitted)) — every section in Settings now opens collapsed, including the six that used to open expanded. A section you expand stays expanded when you switch panes or close and reopen Settings, until you quit the app, so you can go test something and come straight back to the section you were working in. Expand all, the sidebar links and the update indicator remember what they open the same way.
+
 ## [0.2.48] — 2026-10-04
 
 Concord Voice now keeps screen sharing steady when a capture changes, cleans up
