@@ -12,6 +12,7 @@ before transferring your account key.
 ### Changed
 
 - Webcam speaker frames stay at a fixed size and show a steady accent highlight during voice calls. Avatar frames keep their speaking pulse ([#3595](internal development reference omitted), [PR #3596](internal development reference omitted)).
+- Refreshed the desktop icon library to lucide-react 1.48.0 ([PR #3645](internal development reference omitted)).
 
 ### Security
 
