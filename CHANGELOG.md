@@ -6,19 +6,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
-Trusted-device recovery now asks you to compare a fingerprint on both devices
-before transferring your account key. Voice joins now capture the selected
-microphone once and explain how to recover when capture fails. The desktop
-also includes a patched source-map-js dependency.
+Trusted-device recovery asks you to compare a fingerprint on both devices
+before transferring your account key. Voice joins capture the selected
+microphone once and explain how to recover if capture fails. Audio and video
+device controls now sit with their settings, with app-only microphone level
+adjustment when automatic gain is off. The desktop also includes a patched
+source-map-js dependency. Local camera previews stay
+visible during producer swaps, and a remote tile returns when its replacement
+attaches. A remote close can briefly clear the tile if it arrives first. Brief
+receiver gaps no longer turn off layered camera publishing for the whole room.
+Late media from an earlier voice session is closed before it can attach after a
+rejoin.
 
 ### Fixed
 
 - **Voice joins capture the selected microphone once** ([#3619](internal development reference omitted)) — server and direct-message calls capture the selected input after room and encryption setup. If capture finishes after a join has ended, or encrypted publication fails, Concord stops the track. A capture error now gives you useful next steps; the device may be unavailable or in use, so choose another microphone or close the app using it. Microphone permission errors point you to system settings. Audio setting changes preserve your mute, including when you press Mute during a microphone update, and changing an input or audio setting can retry a failed microphone update during a call. Speaking feedback keeps working after switching or rebuilding the microphone, including while alone in a call.
 - **Audio menus now show one Default option** ([#3619](internal development reference omitted)) — it follows your operating system's default device, while named microphones and speakers remain selectable.
+- **Camera replacements and call cleanup preserve the right video** ([PR #3650](internal development reference omitted)) — local previews survive swaps, and remote video turns on only after its replacement consumer attaches. A remote tile can briefly disappear if its old producer closes first; room-level debounce keeps that gap from disabling layered camera publishing. Queued camera loads are canceled when their producer closes or their owner leaves before the stream attaches. Late media from an earlier voice session is closed before it can attach after a rejoin.
 
 ### Changed
 
 - GIF personalization now uses the Personalization ID shown in Settings to derive the separate ID sent to KLIPY. When personalization is off, GIF browsing requests use a temporary ID that changes about every 30 minutes; sharing a GIF does not send that ID. Turning personalization back on resumes the saved Personalization ID unless you rotate it. The Recent tab is available only while personalization is on. After you click Rotate while personalization is on, requests using your saved ID wait for the new ID, which starts a new Recent list. An open GIF picker refreshes when the setting or saved ID changes.
+- **Audio and video device controls now sit with their settings** ([#3635](internal development reference omitted)) — Input and Output selectors, microphone and speaker tests, and output level start Audio Configuration; Camera selection, test, and preview start Video Configuration, removing the separate Device Configuration section. Device choices, including Default, apply immediately; processing and Microphone Level use Apply/Revert. The app-only Microphone Level defaults to 100%, spans 0–200% by 1%, and appears when effective automatic gain control (AGC) is off, including Music Mode; its saved value persists while hidden. While AGC manages the microphone, positive saved levels are ignored and app gain stays at unity; saved 0% remains silent. The saved level applies again when AGC is off or Music Mode is on. Microphone Test uses applied settings. Section close and call conflicts stop tests; mic-input changes replace active test capture, while output/camera changes stop theirs. Level is applied before the saved gate; a non-unity level changes gate activation without recalibration, so apply and retest it.
 - Webcam speaker frames stay at a fixed size and show a steady accent highlight during voice calls. Avatar frames keep their speaking pulse ([#3595](internal development reference omitted), [PR #3596](internal development reference omitted)).
 - Refreshed the desktop icon library to lucide-react 1.48.0 ([PR #3645](internal development reference omitted)).
 
