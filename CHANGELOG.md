@@ -30,6 +30,8 @@ rejoin.
 - **Audio and video device controls now sit with their settings** ([#3635](internal development reference omitted)) — Input and Output selectors, microphone and speaker tests, and output level start Audio Configuration; Camera selection, test, and preview start Video Configuration, removing the separate Device Configuration section. Device choices, including Default, apply immediately; processing and Microphone Level use Apply/Revert. The app-only Microphone Level defaults to 100%, spans 0–200% by 1%, and appears when effective automatic gain control (AGC) is off, including Music Mode; its saved value persists while hidden. While AGC manages the microphone, positive saved levels are ignored and app gain stays at unity; saved 0% remains silent. The saved level applies again when AGC is off or Music Mode is on. Microphone Test uses applied settings. Section close and call conflicts stop tests; mic-input changes replace active test capture, while output/camera changes stop theirs. Level is applied before the saved gate; a non-unity level changes gate activation without recalibration, so apply and retest it.
 - Webcam speaker frames stay at a fixed size and show a steady accent highlight during voice calls. Avatar frames keep their speaking pulse ([#3595](internal development reference omitted), [PR #3596](internal development reference omitted)).
 - Refreshed the desktop icon library to lucide-react 1.48.0 ([PR #3645](internal development reference omitted)).
+- **Electron updated to 44.5.0** ([PR #3599](internal development reference omitted)).
+- **Voice-call connection libraries updated** ([PR #3602](internal development reference omitted)) — mediasoup-client 3.24.1 and socket.io-client 4.8.4.
 
 ### Security
 
@@ -43,6 +45,7 @@ rejoin.
 ### Changed
 
 - **HDR codec controls are separate** — Enable HDR allows supported HDR-capable codecs. Prioritize HDR Codecs prefers an HDR codec over hardware acceleration when both are available. If a codec check finishes after your camera or screen share starts, Concord Voice updates the active stream's codec choice. Neither setting guarantees HDR capture or display.
+- Voice, camera, and screen sends now use separate plan-based bitrate ceilings. The desktop lowers its send settings when a plan changes. When measured video use repeatedly exceeds an admitted limit, the server turns off video for a temporary cooldown while voice remains available. Closing a video stream during a server measurement does not erase its measured usage.
 
 ### Fixed
 
