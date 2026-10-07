@@ -31,6 +31,7 @@ rejoin.
 - Webcam speaker frames stay at a fixed size and show a steady accent highlight during voice calls. Avatar frames keep their speaking pulse ([#3595](internal development reference omitted), [PR #3596](internal development reference omitted)).
 - Refreshed the desktop icon library to lucide-react 1.48.0 ([PR #3645](internal development reference omitted)).
 - **Electron updated to 44.5.0** ([PR #3599](internal development reference omitted)).
+- **Voice-call connection libraries updated** ([PR #3602](internal development reference omitted)) — mediasoup-client 3.24.1 and socket.io-client 4.8.4.
 
 ### Security
 
