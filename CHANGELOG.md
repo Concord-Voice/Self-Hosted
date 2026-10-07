@@ -16,7 +16,8 @@ visible during producer swaps, and a remote tile returns when its replacement
 attaches. A remote close can briefly clear the tile if it arrives first. Brief
 receiver gaps no longer turn off layered camera publishing for the whole room.
 Late media from an earlier voice session is closed before it can attach after a
-rejoin.
+rejoin. Settings sections now start collapsed and remember what you expand for
+the rest of the session.
 
 ### Fixed
 
@@ -24,7 +25,7 @@ rejoin.
 - **Voice joins capture the selected microphone once** ([#3619](internal development reference omitted)) — server and direct-message calls capture the selected input after room and encryption setup. If capture finishes after a join has ended, or encrypted publication fails, Concord stops the track. A capture error now gives you useful next steps; the device may be unavailable or in use, so choose another microphone or close the app using it. Microphone permission errors point you to system settings. Audio setting changes preserve your mute, including when you press Mute during a microphone update, and changing an input or audio setting can retry a failed microphone update during a call. Speaking feedback keeps working after switching or rebuilding the microphone, including while alone in a call.
 - **Audio menus now show one Default option** ([#3619](internal development reference omitted)) — it follows your operating system's default device, while named microphones and speakers remain selectable.
 - **Camera replacements and call cleanup preserve the right video** ([PR #3650](internal development reference omitted)) — local previews survive swaps, and remote video turns on only after its replacement consumer attaches. A remote tile can briefly disappear if its old producer closes first; room-level debounce keeps that gap from disabling layered camera publishing. Queued camera loads are canceled when their producer closes or their owner leaves before the stream attaches. Late media from an earlier voice session is closed before it can attach after a rejoin.
-- **Settings sections start collapsed and stay the way you leave them** ([#2365](internal development reference omitted)) — every section in Settings now opens collapsed, including the six that used to open expanded. A section you expand stays expanded when you switch panes or close and reopen Settings, until Concord Voice restarts or reloads, so you can go test something and come straight back to the section you were working in. Expand all, the sidebar links and the update indicator remember what they open the same way.
+- **Settings sections start collapsed and stay the way you leave them** ([#2365](internal development reference omitted), [PR #3651](internal development reference omitted)) — every section in Settings now opens collapsed, including the six that used to open expanded. A section you expand stays expanded when you switch panes or close and reopen Settings, until Concord Voice restarts or reloads, so you can go test something and come straight back to the section you were working in. Expand all, the sidebar links and the update indicator remember what they open the same way.
 
 ### Changed
 
