@@ -34,7 +34,7 @@ readonly SERVICES=(control-plane media-plane postgres redis nats minio coturn)
 
 # Restricted security-event log boundary (#2273). The production overlay bind-
 # mounts its per-service directories with create_host_path: false, and only the
-# root-only `provision-production.sh security-event-logging` creates them (#3561).
+# root-only `selfhost-security-event-logging.sh security-event-logging` creates them (#3561).
 SECURITY_LOG_ROOT="${CONCORD_SECURITY_LOG_ROOT_OVERRIDE:-/var/log/concord-security}"
 readonly SECURITY_LOG_ROOT
 
@@ -100,7 +100,7 @@ require_security_log_boundary() {
   echo -e "${RED}✗ security-event log boundary missing: $SECURITY_LOG_ROOT${NC}" >&2
   echo "  Prepare it once as root (idempotent), then re-run up:" >&2
   # %q: a checkout path with a space must survive being pasted into a root shell.
-  printf '    sudo %q security-event-logging\n' "$SCRIPT_DIR/provision-production.sh" >&2
+  printf '    sudo %q security-event-logging\n' "$SCRIPT_DIR/selfhost-security-event-logging.sh" >&2
   return 1
 }
 

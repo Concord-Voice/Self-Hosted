@@ -369,9 +369,15 @@ clear_activity_history_image_selector() {
 
 load_activity_history_image_selector
 
-# Shared release sync logic
-# shellcheck source=sync-releases.sh
-source "${SCRIPT_DIR}/sync-releases.sh"
+# Load the managed recovery writer only for its explicit managed dispatch.
+if [[ "${1:-}" == sync-releases ]]; then
+  [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == managed ]] || {
+    echo 'sync-releases is managed-host recovery only' >&2
+    exit 1
+  }
+  # shellcheck source=sync-releases.sh
+  source "${SCRIPT_DIR}/sync-releases.sh"
+fi
 
 dump_health_diagnostics() {
   echo "" >&2
@@ -1499,7 +1505,9 @@ case "${1:-help}" in
     # If you need to refresh release assets, trigger the workflow OR
     # invoke `concord-ctl.sh sync-releases` (manual recovery).
     echo "Restarting services..."
-    echo "Note: release assets NOT refreshed automatically (#1015). Run 'concord-ctl.sh sync-releases' or trigger sync-releases.yml for a refresh."
+    if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == managed ]]; then
+      echo "Note: release assets NOT refreshed automatically (#1015). Run 'concord-ctl.sh sync-releases' or trigger sync-releases.yml for a refresh."
+    fi
     selfhost_tls_admit_gate || exit 1
     cd "$DEPLOY_DIR" && $COMPOSE_CMD restart
     selfhost_post_up_check || exit 1
@@ -1775,7 +1783,9 @@ else:
 
     # #1015: sync_releases no longer auto-called (see restart case comment).
     echo "Rebuilding and restarting..."
-    echo "Note: release assets NOT refreshed automatically (#1015). Run 'concord-ctl.sh sync-releases' or trigger sync-releases.yml for a refresh."
+    if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == managed ]]; then
+      echo "Note: release assets NOT refreshed automatically (#1015). Run 'concord-ctl.sh sync-releases' or trigger sync-releases.yml for a refresh."
+    fi
     # --wait-timeout is MANDATORY, not decorative: `--wait` installs a deadline
     # only when WaitTimeout > 0, so a bare --wait blocks forever and would hang
     # the deploy's SSH session with the stack in an indeterminate state.

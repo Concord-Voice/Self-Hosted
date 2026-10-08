@@ -71,6 +71,86 @@ port_in_use() {
 # Only HOST-BOUND ports (#3538): Postgres/Redis/NATS/MinIO have no host socket on
 # self-host, so a host-run Postgres or Redis must not block the install.
 readonly REQUIRED_TCP_PORTS=(8080 3000 3478 5349)
+# Inclusive UDP host publications of base + production + selfhost, with or
+# without BYO storage. Kept in parity with both rendered Compose contracts;
+# installer answers do not offer a different RTC or TURN publication window.
+readonly REQUIRED_UDP_RANGES=(3478:3478 40000:41999 49152:49252)
+
+preflight_udp_ports() {
+  local inventory verdict
+  # All UDP sockets includes connected sockets as well as unconnected binds,
+  # on both address families. One numeric inventory covers every range port.
+  if ! command -v ss >/dev/null 2>&1 ||
+     ! inventory="$(LC_ALL=C ss -H -a -u -n 2>/dev/null)"; then
+    printf '%s\n' 'installer: UDP socket inventory unavailable or unparseable' >&2
+    return 2
+  fi
+  # Host socket text stays on stdin, never in exported variables or diagnostics.
+  # Refuse the complete inventory if any row cannot be judged, even when other
+  # rows are known unrelated or already reveal a required-port conflict.
+  if ! verdict="$(printf '%s' "$inventory" | python3 -c '
+import ipaddress, re, sys
+
+def endpoint(value, local=False):
+    host, separator, port = value.rpartition(":")
+    if not separator or not host:
+        raise ValueError()
+    # Native ss places IPv6 zones after the bracket; older forms put them inside.
+    if host.startswith("[") and "]%" in host:
+        host, scope = host.rsplit("%", 1)
+        if "%" in host or not re.fullmatch(r"[A-Za-z0-9_.-]+", scope):
+            raise ValueError()
+    if host.startswith("["):
+        if not host.endswith("]"):
+            raise ValueError()
+        host = host[1:-1]
+    elif "[" in host or "]" in host:
+        raise ValueError()
+    if "%" in host:
+        host, scope = host.rsplit("%", 1)
+        if not re.fullmatch(r"[A-Za-z0-9_.-]+", scope):
+            raise ValueError()
+    if host != "*":
+        ipaddress.ip_address(host)
+    if port == "*" and not local:
+        return None
+    if not re.fullmatch(r"[0-9]{1,5}", port) or int(port) > 65535:
+        raise ValueError()
+    return int(port)
+
+try:
+    ranges = [tuple(int(piece) for piece in value.split(":")) for value in sys.argv[1:]]
+    if not ranges or any(len(value) != 2 or not 0 < value[0] <= value[1] <= 65535 for value in ranges):
+        raise ValueError()
+    text = sys.stdin.read(4 * 1024 * 1024 + 1)
+    if len(text) > 4 * 1024 * 1024:
+        raise ValueError()
+    busy = False
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        fields = line.split()
+        if len(fields) != 5:
+            raise ValueError()
+        state, recvq, sendq, local, peer = fields
+        if state not in ("UNCONN", "ESTAB") or not re.fullmatch(r"[0-9]+", recvq) or not re.fullmatch(r"[0-9]+", sendq):
+            raise ValueError()
+        port = endpoint(local, local=True)
+        endpoint(peer)
+        busy = busy or any(low <= port <= high for low, high in ranges)
+except Exception:
+    sys.exit(2)
+print("busy" if busy else "free")
+' "${REQUIRED_UDP_RANGES[@]}" 2>/dev/null)"; then
+    printf '%s\n' 'installer: UDP socket inventory unavailable or unparseable' >&2
+    return 2
+  fi
+  case "$verdict" in
+    free) return 0 ;;
+    busy) printf '%s\n' 'installer: required UDP ports already in use' >&2; return 2 ;;
+    *) printf '%s\n' 'installer: UDP socket inventory unavailable or unparseable' >&2; return 2 ;;
+  esac
+}
 
 preflight_ports() {
   local busy=() p
@@ -81,6 +161,7 @@ preflight_ports() {
     echo -e "${RED}✗ preflight: ports already in use: ${busy[*]}${NC}" >&2
     return 2
   fi
+  preflight_udp_ports || return $?
   echo -e "${GREEN}✓ ports free${NC}"
 }
 
@@ -181,12 +262,14 @@ gen_hex_key() { openssl rand -hex 32; }                                # 32-byte
 
 # ── Validators ─────────────────────────────────────────────────────────────────
 
-# validate_domain DOMAIN — strict per-label FQDN; reject empty, leading/trailing/
+# validate_domain DOMAIN — lowercase per-label FQDN; reject empty, leading/trailing/
 # consecutive dots, leading/trailing hyphens, and media./api./turn.-prefixed apex.
+# Labels fit 63 bytes; media.<apex>, the longest generated name, fits 253.
+# Browser origins use lowercase hosts and the server compares origins exactly.
 validate_domain() {
   local d="${1:-}"
   [[ -n "$d" ]] || { echo -e "${RED}domain required${NC}" >&2; return 1; }
-  [[ "$d" =~ ^([A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?\.)+[A-Za-z]{2,}$ ]] || {
+  [[ ${#d} -le 247 && "$d" =~ ^([a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}$ ]] || {
     printf '%s\n' 'installer: invalid domain' >&2
     return 1
   }
@@ -212,34 +295,117 @@ validate_media_subdomain() {
   return 0
 }
 
-# validate_cidrs LIST — comma-separated CIDR shape; REJECT all-traffic CIDRs
-# (0.0.0.0/0, ::/0) which would make TRUSTED_PROXY_CIDRS trust every source —
+# validate_cidrs LIST — mirror the consumer comma split, Go whitespace trim and
+# net.ParseCIDR address/prefix grammar; REJECT all-traffic CIDRs
+# (0.0.0.0/0, ::/0 and equivalent spellings) which would trust every source —
 # a spoofable X-Forwarded-For / rate-limit-bypass fail-open (CWE-348). Empty is OK
 # (the writer applies the private-range default).
 validate_cidrs() {
-  local cidrs="${1:-}"
+  local cidrs="${1:-}" cidr_status=0
   [[ -z "$cidrs" ]] && return 0
-  case ",${cidrs// /}," in
-    *,0.0.0.0/0,*|*,::/0,*)
+  python3 -c '
+import ipaddress, re, sys
+# Python strip() also removes U+001C..U+001F; Go strings.TrimSpace does not.
+go_space = "\t\n\v\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
+try:
+    parsed = False
+    effective_v4, native_v6 = [], []
+    for raw in sys.argv[1].split(","):
+        cidr = raw.strip(go_space)
+        if not cidr:
+            continue
+        if cidr.count("/") != 1:
+            raise ValueError()
+        address, prefix = cidr.split("/")
+        if "%" in address or re.fullmatch(r"[0-9]+", prefix) is None:
+            raise ValueError()
+        # net.ParseCIDR accepts leading-zero decimal masks, unlike ParsePrefix.
+        # Bound the significant digits before int() to preserve arbitrary zeros.
+        significant = prefix.lstrip("0") or "0"
+        if len(significant) > 3:
+            raise ValueError()
+        network = ipaddress.ip_network((address, int(significant)), strict=False)
+        # Go IPNet.Contains normalizes mapped networks and masks to IPv4:
+        # mapped /96 is effective IPv4 /0; /97 and longer remain restricted.
+        mapped_all = (network.version == 6 and network.prefixlen == 96
+                      and network.network_address.ipv4_mapped is not None)
+        if network.prefixlen == 0 or mapped_all:
+            sys.exit(2)
+        if network.version == 4:
+            effective_v4.append(network)
+        elif network.prefixlen >= 96 and network.network_address.ipv4_mapped is not None:
+            effective_v4.append(ipaddress.IPv4Network(
+                (int(network.network_address.ipv4_mapped), network.prefixlen - 96)))
+        else:
+            native_v6.append(network)
+        parsed = True
+    if not parsed:
+        raise ValueError()
+    # Match the consumer-effective families, including mixed native/mapped
+    # IPv4 unions. Native IPv6 peers exclude the mapped IPv4 /96 namespace;
+    # filling that hole here tests completeness without trusting those IPv4 peers.
+    if any(n.prefixlen == 0 for n in ipaddress.collapse_addresses(effective_v4)):
+        sys.exit(2)
+    native_v6.append(ipaddress.IPv6Network("::ffff:0:0/96"))
+    if any(n.prefixlen == 0 for n in ipaddress.collapse_addresses(native_v6)):
+        sys.exit(2)
+except ValueError:
+    sys.exit(1)
+' "$cidrs" 2>/dev/null || cidr_status=$?
+  case "$cidr_status" in
+    0) return 0 ;;
+    2)
       echo -e "${RED}TRUSTED_PROXY_CIDRS must not include 0.0.0.0/0 or ::/0 (would trust every source — X-Forwarded-For spoofing / rate-limit bypass)${NC}" >&2
       return 1
       ;;
+    *) printf '%s\n' 'installer: invalid trusted proxy CIDR' >&2; return 1 ;;
   esac
-  local c
-  local -a _parsed
-  IFS=',' read -ra _parsed <<<"${cidrs// /}" || return 1
-  for c in "${_parsed[@]}"; do
-    # Shape + prefix-length bound (IPv4 /0-32, IPv6 /0-128). Octet ranges and the
-    # split-range all-traffic case (e.g. 0.0.0.0/1,128.0.0.0/1) are left to the
-    # downstream config.go net.ParseCIDR parser — this is an early shape guard and
-    # the operator owns their own .env.
-    [[ "$c" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}/(3[0-2]|[12][0-9]|[0-9])$ \
-      || "$c" =~ ^[0-9A-Fa-f:]+/(12[0-8]|1[01][0-9]|[1-9][0-9]|[0-9])$ ]] || {
-      printf '%s\n' 'installer: invalid trusted proxy CIDR' >&2
-      return 1
-    }
-  done
-  return 0
+}
+
+# SMTP_HOST is a bare Go-compatible DNS/LAN name or zoneless IP literal,
+# not a URL, authority with port, or display address. Preserve admitted bytes.
+validate_smtp_host() {
+  local host="${1:-}"
+  if [[ -z "$host" ]]; then
+    printf '%s\n' 'installer: SMTP host is required' >&2
+    return 1
+  fi
+  if python3 - "$host" 2>/dev/null <<'PY'
+import ipaddress, re, sys
+host = sys.argv[1]
+try:
+    if "%" in host:
+        raise ValueError()
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        # Go domain grammar permits underscores and a terminal root dot, but
+        # requires a nonnumeric name and labels no longer than 63 bytes.
+        if (not host.isascii() or len(host) > 254
+                or (len(host) == 254 and not host.endswith("."))):
+            raise ValueError()
+        name = host[:-1] if host.endswith(".") else host
+        if not re.search(r"[A-Za-z_-]", name):
+            raise ValueError()
+        for label in name.split("."):
+            if (not 1 <= len(label) <= 63
+                    or re.fullmatch(r"[A-Za-z0-9_-]+", label) is None
+                    or label.startswith("-") or label.endswith("-")):
+                raise ValueError()
+    else:
+        if isinstance(address, ipaddress.IPv6Address) and address.ipv4_mapped is not None:
+            address = address.ipv4_mapped
+        if (address.is_unspecified or address.is_multicast
+                or address == ipaddress.IPv4Address("255.255.255.255")):
+            raise ValueError()
+except ValueError:
+    sys.exit(1)
+PY
+  then
+    return 0
+  fi
+  printf '%s\n' 'installer: invalid SMTP host' >&2
+  return 1
 }
 
 # validate_smtp_port PORT — numeric 1-65535 (empty OK, writer defaults to 587).
@@ -312,18 +478,30 @@ warn_public_ip() {
   fi
 }
 
-# validate_public_ip IP — empty, or IPv4/IPv6-shaped (the same predicate as
-# provision-cert.sh's validate_ip). The value is written to .env and printed inside
+# validate_public_ip IP — required host IPv4 address, including explicit LAN IPv4.
+# The basic runtime's TURN bridge/listener has no supported IPv6 relay path.
+# The value is written to .env and printed inside
 # a root command the operator pastes, and its default comes from an external echo
 # service, so a shell metacharacter must never get through (#3561). The rejected
 # value is not echoed: it is untrusted terminal input.
-# ponytail: a shape check, not a parser — it admits malformed addresses such as
-# ':::' or '999.1.1.1', which coturn and openssl then reject. IPv6 needs a ':' and
-# may end in an embedded IPv4 ('64:ff9b::203.0.113.10').
+# Preserve the restricted spelling (no brackets, scope IDs or metacharacters),
+# then parse the complete address before any durable environment publication.
 validate_public_ip() {
   local ip="${1:-}"
-  [[ -z "$ip" || "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ || "$ip" =~ ^[0-9A-Fa-f:]*:[0-9A-Fa-f:.]*$ ]] && return 0
-  echo -e "${RED}invalid public IP: expected an IPv4 or IPv6 address${NC}" >&2
+  if [[ -n "$ip" && "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] &&
+    python3 - "$ip" 2>/dev/null <<'PY'
+import ipaddress, sys
+try:
+    address = ipaddress.IPv4Address(sys.argv[1])
+    if address.is_unspecified or address.is_multicast or int(address) == 0xffffffff:
+        sys.exit(1)
+except ValueError:
+    sys.exit(1)
+PY
+  then
+    return 0
+  fi
+  echo -e "${RED}invalid public IP: expected an IPv4 address for basic self-host${NC}" >&2
   return 1
 }
 
@@ -331,16 +509,20 @@ validate_public_ip() {
 # --env-file paths, run before any mutation. Field shape checks that the wizard's
 # per-prompt validation would catch but the --env-file path otherwise would not.
 validate_collected_config() {
-  local key
+  local key text_status=0
   local -a values=()
+  : "${CFG_FEEDBACK_ENABLED=no}"
   for key in "${INSTALLER_ANSWER_KEYS[@]}"; do values+=("${!key-}"); done
   # All text is checked before it can enter diagnostics or the metadata review.
-  if ! printf '%s\0' "${values[@]}" | python3 -c '
-import sys, unicodedata
+  printf '%s\0' "${values[@]}" | python3 -c '
+import re, sys, unicodedata
+# Classification matches Go strings.TrimSpace without altering published bytes.
+go_space = "\t\n\v\f\r \u0085\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000"
 try:
     raw = sys.stdin.buffer.read().split(b"\x00")
     if raw.pop() != b"" or len(raw) != len(sys.argv) - 1:
         raise ValueError()
+    feedback_mode = feedback_repo = feedback_pat = smtp_from = ""
     for key, value in zip(sys.argv[1:], raw):
         text = value.decode("utf-8")
         if "\r" in text or "\n" in text:
@@ -348,12 +530,47 @@ try:
         if key not in ("CFG_SMTP_PASS", "CFG_FEEDBACK_PAT", "CFG_STORAGE_ACCESS_KEY", "CFG_STORAGE_SECRET_KEY"):
             if any(unicodedata.category(c) == "Cc" for c in text):
                 raise ValueError()
+        if key == "CFG_FEEDBACK_ENABLED":
+            feedback_mode = text
+        elif key == "CFG_FEEDBACK_REPO":
+            feedback_repo = text
+        elif key == "CFG_FEEDBACK_PAT":
+            feedback_pat = text
+        elif key == "CFG_SMTP_FROM":
+            smtp_from = text
+    if feedback_mode not in ("yes", "no"):
+        sys.exit(2)
+    if feedback_mode == "yes" and feedback_repo.strip().casefold() == "selfhost/disabled":
+        sys.exit(3)
+    if feedback_mode == "yes":
+        repo = feedback_repo.strip(go_space)
+        if not repo or not feedback_pat.strip(go_space):
+            sys.exit(4)
+        # Preserve Unicode segments, refusing URL syntax and path-normalizing dots.
+        parts = repo.split("/")
+        if (len(parts) != 2 or any(c in repo for c in " \t\r\n?#%") or not all(parts)
+                or any(part in (".", "..") for part in parts)):
+            sys.exit(5)
+    # This raw field serves Go mail.ParseAddress and Certbot contact email.
+    # Support their common bare-address subset; preserve exact-empty defaults.
+    if smtp_from:
+        if re.fullmatch(r"[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+", smtp_from) is None:
+            sys.exit(6)
+        if any(part.startswith(".") or part.endswith(".") or ".." in part
+               for part in smtp_from.split("@")):
+            sys.exit(6)
 except (ValueError, UnicodeError):
     sys.exit(1)
-' "${INSTALLER_ANSWER_KEYS[@]}" 2>/dev/null; then
-    printf '%s\n' 'installer: invalid configuration text' >&2
-    return 1
-  fi
+' "${INSTALLER_ANSWER_KEYS[@]}" 2>/dev/null || text_status=$?
+  case "$text_status" in
+    0) ;;
+    2) printf '%s\n' 'installer: invalid feedback mode (yes|no)' >&2; return 1 ;;
+    3) printf '%s\n' 'installer: disabled feedback repository is reserved' >&2; return 1 ;;
+    4) printf '%s\n' 'installer: enabled feedback requires a repository and PAT' >&2; return 1 ;;
+    5) printf '%s\n' 'installer: invalid feedback repository' >&2; return 1 ;;
+    6) printf '%s\n' 'installer: invalid SMTP sender' >&2; return 1 ;;
+    *) printf '%s\n' 'installer: invalid configuration text' >&2; return 1 ;;
+  esac
   validate_domain "${CFG_DOMAIN:-}" || return 1
   validate_tls_mode "${CFG_TLS_MODE:-letsencrypt}" || return 1
   validate_cidrs "${CFG_TRUSTED_CIDRS:-}" || return 1
@@ -361,6 +578,7 @@ except (ValueError, UnicodeError):
   validate_activity_history_disclosure "${CFG_ACTIVITY_HISTORY_OPERATOR_NAME:-}" \
     "${CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL:-}" || return 1
   validate_public_ip "${CFG_PUBLIC_IP:-}" || return 1
+  validate_smtp_host "${CFG_SMTP_HOST:-}" || return 1
   : "${CFG_STORAGE_MODE=bundled}"
   if [[ "$CFG_STORAGE_MODE" == bundled ]]; then
     for key in BACKEND ENDPOINT REGION ACCESS_KEY SECRET_KEY USE_SSL BUCKET; do
@@ -389,7 +607,7 @@ detect_public_ip() {
   [[ -z "$ip" ]] && ip="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
   # A non-IP response must never become the wizard's default (#3561). Its own
   # message: the operator typed nothing, so "invalid public IP" would mislead.
-  validate_public_ip "$ip" 2>/dev/null || {
+  [[ -z "$ip" ]] || validate_public_ip "$ip" 2>/dev/null || {
     echo -e "${YELLOW}⚠ auto-detected public IP is not an IP address; ignoring it${NC}" >&2
     ip=""
   }
@@ -448,7 +666,7 @@ except (OSError, ValueError, UnicodeError):
     seen[$key]=yes
     printf -v "$key" '%s' "$val" || return 1
   done <"$f"
-  : "${CFG_FEEDBACK_ENABLED:=no}" "${CFG_TURN_REALM:=${CFG_DOMAIN:-}}" \
+  : "${CFG_FEEDBACK_ENABLED=no}" "${CFG_TURN_REALM:=${CFG_DOMAIN:-}}" \
     "${CFG_TLS_MODE:=letsencrypt}" "${CFG_ACTIVITY_HISTORY_OPERATOR_NAME:=}" \
     "${CFG_ACTIVITY_HISTORY_PRIVACY_POLICY_URL:=}" "${CFG_STORAGE_MODE=bundled}"
   if [[ "$CFG_STORAGE_MODE" == byo-s3 ]]; then
@@ -487,7 +705,7 @@ collect_config() {
   fi
   CFG_TURN_REALM="$(ask 'TURN realm' "$CFG_DOMAIN")" || return $?
   detected_ip="$(detect_public_ip)" || return $?
-  CFG_PUBLIC_IP="$(ask 'Public IP (blank = auto-detect)' "$detected_ip")" || return $?
+  CFG_PUBLIC_IP="$(ask 'Public IPv4 address (blank = auto-detect)' "$detected_ip")" || return $?
   while :; do
     CFG_STORAGE_MODE="$(ask 'Object storage (bundled / byo-s3)' bundled)" || return $?
     case "$CFG_STORAGE_MODE" in bundled|byo-s3) break ;; esac
@@ -740,7 +958,7 @@ print_summary() {
   # vanished and the pasted command named a different file.
   local nginx_q boundary_q
   nginx_q="$(shq "$NGINX_OUT")"
-  boundary_q="$(shq "$SCRIPT_DIR/provision-production.sh")"
+  boundary_q="$(shq "$SCRIPT_DIR/selfhost-security-event-logging.sh")"
   if [[ "${CFG_STORAGE_MODE:-bundled}" == byo-s3 ]]; then
     printf '%s\n' 'Install configured. External storage has not been checked. The control-plane checks it when the stack starts.' || return 1
   fi
@@ -761,7 +979,7 @@ print_summary() {
      above, as root, BEFORE step 3: nginx -t needs the cert files. 'letsencrypt' also needs
      DNS pointing here and port 80 open (step 1); nginx's stock default site answers the
      challenge. Self-signed 'local' is trusted-LAN-only (no MITM protection).
-     Guide: docs/runbooks/self-hosted-tls.md
+     Guide: docs/runbooks/selfhost-quickstart.md
   3. Install the rendered nginx vhost:
        sudo cp $nginx_q /etc/nginx/conf.d/ && sudo nginx -t && sudo systemctl reload nginx
   4. Prepare the security-event log boundary (root, once per host; safe to re-run):

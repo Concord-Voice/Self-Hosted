@@ -18,9 +18,10 @@
 # Extend with additional service directories here as needed (e.g. custom
 # nginx certs, media-plane TLS, etc.).
 #
-# Installed by provision-production.sh to:
+# provision-cert.sh installs a copy bound to the selected lineage at:
 #   /etc/letsencrypt/renewal-hooks/deploy/copy-certs.sh
-# and runs automatically as part of certbot's renewal lifecycle.
+# The bound executable ignores other Certbot lineages before this helper runs.
+# Direct source invocation remains the explicit copy-only delivery retry.
 
 set -euo pipefail
 
@@ -61,6 +62,24 @@ if [[ "$(stat -Lc '%u:%g:%a' "$KEY" 2>/dev/null)" != '0:0:600' ]] ||
     ! openssl x509 -in "$CERT" -noout >/dev/null 2>&1 ||
     ! openssl x509 -in "$CERT" -noout -checkend 0 >/dev/null 2>&1 ||
     ! openssl pkey -in "$KEY" -noout >/dev/null 2>&1; then
+  fail 'copy-certs: certificate source invalid; delivery not complete'
+fi
+# checkend covers expiration only. Decode the leaf with native SSL before
+# discovery or fan-out so a future-dated pair cannot replace working material.
+if ! python3 -c '
+import ssl, sys, time
+try:
+    decode = getattr(getattr(ssl, "_ssl", None), "_test_decode_cert", None)
+    if not callable(decode):
+        raise ValueError()
+    certificate = decode(sys.argv[1])
+    now = time.time()
+    if not (ssl.cert_time_to_seconds(certificate["notBefore"]) <= now <
+            ssl.cert_time_to_seconds(certificate["notAfter"])):
+        raise ValueError()
+except Exception:
+    sys.exit(1)
+' "$CERT" >/dev/null 2>&1; then
   fail 'copy-certs: certificate source invalid; delivery not complete'
 fi
 CERT_PUB="$(openssl x509 -in "$CERT" -noout -pubkey 2>/dev/null)" || CERT_PUB=''

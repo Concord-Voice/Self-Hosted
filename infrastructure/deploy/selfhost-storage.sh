@@ -41,6 +41,13 @@ import ipaddress, json, re, sys, unicodedata
 FIELDS = ("STORAGE_BACKEND", "STORAGE_ENDPOINT", "STORAGE_REGION",
           "STORAGE_ACCESS_KEY", "STORAGE_SECRET_KEY", "STORAGE_USE_SSL", "STORAGE_BUCKET")
 PROJECT = r"[a-z0-9][a-z0-9_-]*"
+PUBLIC_PROJECT = r"concord-selfhost-[a-z0-9][a-z0-9_-]*"
+# Retained data under these logical keys is ambiguous even in another Compose
+# project. Refuse it rather than authorize a fresh installation over prior data.
+CONCORD_DATA_VOLUMES = {"postgres-data", "redis-data", "minio-data", "nats-data"}
+CONCORD_CONTAINERS = {"concordvoice-" + service for service in (
+    "postgres", "redis", "nats", "coturn", "minio", "ops-agent",
+    "control-plane", "media-plane", "pgadmin", "redis-commander")}
 
 def require(test):
     if not test:
@@ -68,6 +75,13 @@ def endpoint_host(value):
                 for label in dns.split(".")))
             address = None
     require(port is None or 1 <= int(port) <= 65535)
+    # TLS does not make a non-host destination usable from the control-plane
+    # container. Normalize mapped IPv4 before checking its address class.
+    destination = address
+    if isinstance(destination, ipaddress.IPv6Address) and destination.ipv4_mapped is not None:
+        destination = destination.ipv4_mapped
+    require(destination is None or not (destination.is_unspecified or destination.is_link_local
+            or destination.is_multicast or destination == ipaddress.IPv4Address("255.255.255.255")))
     return host, address
 
 def private_destination(host, address):
@@ -95,6 +109,11 @@ def validate(values):
     require(all((endpoint, access, secret, bucket)))
     require(all(unicodedata.category(c) != "Cc" for value in
                 (mode, backend, endpoint, region, tls, bucket) for c in value))
+    # Match minio-go/v7 v7.3.0 s3utils.CheckValidBucketName, the non-strict
+    # consumer shared by all supported backends. Uppercase, _ and : are valid.
+    require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9.\-_:]{1,61}[A-Za-z0-9]", bucket) is not None)
+    require(not any(part in bucket for part in ("..", ".-", "-.")))
+    require(re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+", bucket) is None)
     host, address = endpoint_host(endpoint)
     require(tls == "true" or private_destination(host, address))
 
@@ -198,7 +217,7 @@ try:
     elif operation in ("ids", "volumes"):
         values = sys.stdin.read().splitlines()
         pattern = r"[0-9a-f]{12,64}" if operation == "ids" else r"[A-Za-z0-9][A-Za-z0-9_.-]*"
-        require(len(values) == len(set(values)))
+        require(len(values) <= 1000 and len(values) == len(set(values)))
         require(all(re.fullmatch(pattern, value) for value in values))
         if values:
             print("\n".join(values))
@@ -207,6 +226,42 @@ try:
         require(isinstance(labels, dict))
         project = project_name(labels.get("com.docker.compose.project"))
         print("match" if project == args[0] else "other")
+    elif operation == "fresh-host-volume":
+        labels = json.load(sys.stdin)
+        require(isinstance(labels, dict))
+        project = project_name(labels.get("com.docker.compose.project"))
+        # A renamed checkout can leave only volumes after down. Require typed
+        # logical metadata for every discovered Compose-project volume before
+        # judging the exact persistent keys; never infer identity from its name.
+        volume = labels.get("com.docker.compose.volume")
+        require(isinstance(volume, str) and re.fullmatch(
+            r"[A-Za-z0-9][A-Za-z0-9_.-]*", volume) is not None)
+        match = re.fullmatch(PUBLIC_PROJECT, project) is not None or volume in CONCORD_DATA_VOLUMES
+        print("match" if match else "other")
+    elif operation == "fresh-host-container":
+        # Only Name/Labels/State are queried; never read Config.Env or emit
+        # metadata. A stopped renamed release container still owns its project.
+        decoder, remaining, objects = json.JSONDecoder(), sys.stdin.read(), []
+        for index in range(3):
+            value, end = decoder.raw_decode(remaining)
+            objects.append(value)
+            remaining = remaining[end:]
+            if index < 2:
+                require(remaining.startswith("|"))
+                remaining = remaining[1:]
+        require(not remaining.strip())
+        name, labels, state = objects
+        require(isinstance(name, str) and re.fullmatch(
+            r"/[A-Za-z0-9][A-Za-z0-9_.-]{0,254}", name) is not None)
+        require(labels is None or isinstance(labels, dict))
+        require(isinstance(state, dict) and isinstance(state.get("Running"), bool))
+        labels = {} if labels is None else labels
+        project = None
+        if "com.docker.compose.project" in labels:
+            project = project_name(labels["com.docker.compose.project"])
+        match = name[1:] in CONCORD_CONTAINERS or (
+            project is not None and re.fullmatch(PUBLIC_PROJECT, project) is not None)
+        print("match" if match else "other")
     elif operation in ("fresh-container", "minio-container"):
         labels, state = container_metadata(sys.stdin.read())
         running = state["Running"]
@@ -251,6 +306,13 @@ selfhost_storage_read() {
 }
 
 selfhost_storage_scrub_environment() {
+  # --env-file is lower precedence than shell interpolation. These values,
+  # including the complete MFA keyring, must come from durable .env.
+  unset ENVIRONMENT DOMAIN PUBLIC_IP POSTGRES_PASSWORD REDIS_PASSWORD \
+    JWT_SECRET MFA_ENCRYPTION_KEY MFA_ENCRYPTION_KEY_VERSION MFA_ENCRYPTION_KEYS_RETIRED \
+    TURN_SECRET TURN_REALM TRUSTED_PROXY_CIDRS \
+    SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM FEEDBACK_REPO FEEDBACK_PAT \
+    RESEND_API_KEY || return 1
   unset SELFHOST_STORAGE_MODE STORAGE_BACKEND STORAGE_ENDPOINT STORAGE_REGION \
     STORAGE_ACCESS_KEY STORAGE_SECRET_KEY STORAGE_USE_SSL STORAGE_BUCKET \
     MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY MINIO_USE_SSL MINIO_BUCKET \
@@ -458,6 +520,54 @@ selfhost_storage_assert_fresh() {
     while IFS= read -r id; do
       if ! verdict="$(_selfhost_storage_docker volume inspect --format '{{json .Labels}}' "$id")" \
         || ! verdict="$(printf '%s' "$verdict" | _selfhost_storage_data volume "$SELFHOST_STORAGE_PROJECT_NAME")"; then
+        _selfhost_storage_clear_resolution
+        _selfhost_storage_refuse 'selfhost-storage: installation discovery unavailable'
+        return 1
+      fi
+      if [[ "$verdict" == match ]]; then
+        _selfhost_storage_clear_resolution
+        _selfhost_storage_refuse 'selfhost-storage: existing installation refused'
+        return 1
+      fi
+    done <<<"$volumes"
+  fi
+  # Versioned release roots have different default Compose projects. Retained
+  # volumes and stopped/renamed containers must not authorize a fresh install.
+  # Reserve the public release project namespace and the fixed Concord names.
+  # Persistent logical volume keys do not prove application ownership; refuse
+  # that ambiguous retained data under any typed Compose project to preserve it.
+  if ! ids="$(_selfhost_storage_docker ps --all --quiet --no-trunc)" \
+    || ! ids="$(printf '%s' "$ids" | _selfhost_storage_data ids)"; then
+    _selfhost_storage_clear_resolution
+    _selfhost_storage_refuse 'selfhost-storage: installation discovery unavailable'
+    return 1
+  fi
+  if [[ -n "$ids" ]]; then
+    while IFS= read -r id; do
+      if ! verdict="$(_selfhost_storage_docker inspect --type container --format \
+        '{{json .Name}}|{{json .Config.Labels}}|{{json .State}}' "$id")" \
+        || ! verdict="$(printf '%s' "$verdict" | _selfhost_storage_data fresh-host-container)"; then
+        _selfhost_storage_clear_resolution
+        _selfhost_storage_refuse 'selfhost-storage: installation discovery unavailable'
+        return 1
+      fi
+      if [[ "$verdict" == match ]]; then
+        _selfhost_storage_clear_resolution
+        _selfhost_storage_refuse 'selfhost-storage: existing installation refused'
+        return 1
+      fi
+    done <<<"$ids"
+  fi
+  if ! volumes="$(_selfhost_storage_docker volume ls --quiet --filter label=com.docker.compose.project)" \
+    || ! volumes="$(printf '%s' "$volumes" | _selfhost_storage_data volumes)"; then
+    _selfhost_storage_clear_resolution
+    _selfhost_storage_refuse 'selfhost-storage: installation discovery unavailable'
+    return 1
+  fi
+  if [[ -n "$volumes" ]]; then
+    while IFS= read -r id; do
+      if ! verdict="$(_selfhost_storage_docker volume inspect --format '{{json .Labels}}' "$id")" \
+        || ! verdict="$(printf '%s' "$verdict" | _selfhost_storage_data fresh-host-volume)"; then
         _selfhost_storage_clear_resolution
         _selfhost_storage_refuse 'selfhost-storage: installation discovery unavailable'
         return 1
