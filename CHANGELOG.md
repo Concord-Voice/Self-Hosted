@@ -73,6 +73,8 @@ expiration timer can now keep pinned messages, and says so.
 - **Session refresh security** ([PR #3865](internal development reference omitted)) — Session recovery after a refresh retry now verifies the device identifier recorded on either the old token or its live successor.
 - **Recovery codes cannot be reused by concurrent sign-in attempts** ([PR #3860](internal development reference omitted)) — the first successful attempt now consumes the code before another attempt can use it.
 
+- **Reliable voice removal during joins** ([PR #3870](internal development reference omitted)) — removing someone from a voice channel now waits for their connection to close even if their join is still in progress.
+
 - **Voice enforcement readiness** ([PR #3852](internal development reference omitted)) — Voice service startup now waits for all enforcement subscriptions. If enforcement
   becomes unavailable, new voice joins stop immediately and remaining calls close
   within 30 seconds; reconnecting requires authentication again.
