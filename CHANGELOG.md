@@ -69,6 +69,12 @@ expiration timer can now keep pinned messages, and says so.
 
 ### Fixed
 
+- **Voice moderation survives delivery outages** ([PR #3818](internal development reference omitted)) — voice moderation and group DM member removal now save enforcement commands with the
+  accepted action and retry delivery after broker outages. Acknowledged commands free
+  broker capacity, and a full queue refuses new actions before changing saved state. Moderation responses identify
+  queued enforcement, so accepting a disconnect no longer claims the live connection
+  has already closed ([#2623](internal development reference omitted)).
+
 - **Reading a server's channels clears its unread indicator** ([#3777](internal development reference omitted)) — it stays clear when unread status arrives after a server switch. Mark All as Read clears the selected server; other servers keep their genuine unread indicators.
 - **Voice disconnects wait for media cleanup** ([PR #3778](internal development reference omitted), [#2624](internal development reference omitted)) — session authority is released only after the exact native transports are gone or the media worker has stopped. The media service also gains a serial durable-command consumer that retries unfinished enforcement before acknowledging delivery.
 - **Group-DM icons load through authenticated desktop requests** ([PR #3771](internal development reference omitted)) — Image resources are released when the icon, account, server or view changes.
