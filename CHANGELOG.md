@@ -69,6 +69,8 @@ expiration timer can now keep pinned messages, and says so.
 
 ### Fixed
 
+- **Session refresh security** ([PR #3865](internal development reference omitted)) — Session recovery after a refresh retry now verifies the device identifier recorded on either the old token or its live successor.
+
 - **Voice enforcement readiness** ([PR #3852](internal development reference omitted)) — Voice service startup now waits for all enforcement subscriptions. If enforcement
   becomes unavailable, new voice joins stop immediately and remaining calls close
   within 30 seconds; reconnecting requires authentication again.
