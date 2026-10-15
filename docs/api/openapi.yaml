@@ -12774,7 +12774,25 @@ paths:
                     type: string
                     example: owner
         '400':
-          $ref: '#/components/responses/BadRequest'
+          description: >-
+            Validation error. Includes an inline `icon_url` or `banner_url` that is over the size
+            limit, is not a base64 `data:image/` URL declaring PNG, JPEG, GIF or WebP, or whose
+            bytes are not one of those formats. Animation is detected from the decoded bytes, not
+            the declared MIME type, and an image the server cannot classify is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: >-
+            An inline `icon_url` or `banner_url` that animates (a multi-frame GIF, an APNG or an
+            animated WebP) (#3856). A new server starts below Mach, so an animated banner is always
+            refused here, and an animated icon is refused at every tier. Static inline images are
+            accepted.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AnimatedMediaRefusedError'
         '429':
           description: 'Either the per-minute rate limit or the daily create quota.
             Only the quota carries `code: server_create_quota`; the account has
@@ -13043,16 +13061,26 @@ paths:
             `mfa_enrollment_required: true` when the actor has no inline MFA factor. None of them
             carries `delete_rate_limited` or `Retry-After`, because waiting does not lift a refusal.
             Nothing was changed. Route on the body flag, never the message text.
+
+
+            The same status also refuses an inline `data:image/` icon or banner that animates (#3856):
+            `animated_not_supported` for an icon at every tier, `animated_server_banner_mach` for a
+            banner on a server whose tier lacks animated banners. Static inline images are accepted.
           content:
             application/json:
               schema:
                 anyOf:
                 - $ref: '#/components/schemas/DangerousActionMFAForbiddenError'
+                - $ref: '#/components/schemas/AnimatedMediaRefusedError'
                 - $ref: '#/components/schemas/Error'
         '400':
           description: >-
             Invalid server ID, an unreadable or invalid request body (including an `mfa_code` over
-            256 characters), or an invalid `icon_url`.
+            256 characters), an invalid `icon_url` or `banner_url`, or an inline `data:image/` icon
+            or banner that is over the size limit, is not a base64 URL declaring PNG, JPEG, GIF or
+            WebP, or whose bytes are not one of those formats (#3856). Animation is detected from
+            the decoded bytes, not the declared MIME type, and an image the server cannot classify
+            is refused.
           content:
             application/json:
               schema:
@@ -16084,11 +16112,17 @@ paths:
       tags:
       - Users
       summary: Update current user profile
-      description: 'Update profile fields. All fields are optional.
+      description: >-
+        Update profile fields. All fields are optional.
 
         Rate limit: 10 requests per minute.
 
-        '
+
+        **Profile images are uploaded, never inlined (#3856).** Set an avatar or banner with
+        `POST /api/v1/media/upload/avatar` or `POST /api/v1/media/upload/banner`, then send the
+        canonical proxy URL here. A new `data:image/` value for `avatar_url` or `header_image_url`
+        is refused with a 400 carrying `code: inline_profile_image_unsupported`, on every tier.
+        Re-sending the exact value already stored is a no-op. An empty string clears the image.
       security:
       - BearerAuth: []
       requestBody:
@@ -16108,7 +16142,16 @@ paths:
                   user:
                     $ref: '#/components/schemas/User'
         '400':
-          $ref: '#/components/responses/BadRequest'
+          description: >-
+            Validation error. A new inline `data:image/` avatar or banner returns
+            `code: inline_profile_image_unsupported` with a message that names the upload route.
+            The refusal rolls back the whole request, so no other field in it is applied.
+          content:
+            application/json:
+              schema:
+                anyOf:
+                - $ref: '#/components/schemas/InlineProfileImageError'
+                - $ref: '#/components/schemas/Error'
         '409':
           description: Username already taken
           content:
@@ -19336,6 +19379,44 @@ components:
       required:
       - error
       - code
+    InlineProfileImageError:
+      type: object
+      additionalProperties: false
+      description: >-
+        A new inline `data:image/` avatar or banner on PATCH /users/me (#3856). The `error` text
+        names the upload route to use.
+      properties:
+        error:
+          type: string
+          example: Upload avatars with POST /api/v1/media/upload/avatar
+        code:
+          type: string
+          enum:
+          - inline_profile_image_unsupported
+      required:
+      - error
+      - code
+    AnimatedMediaRefusedError:
+      type: object
+      additionalProperties: false
+      description: >-
+        An inline server icon or banner that animates and the server may not use (#3856). The
+        codes and messages are the ones the upload routes return when they refuse animated media.
+      properties:
+        error:
+          type: string
+          example: Animated server banners require a Mach server boost
+        code:
+          type: string
+          description: >-
+            `animated_not_supported` for an icon (no tier may animate one);
+            `animated_server_banner_mach` for a banner on a server below Mach.
+          enum:
+          - animated_not_supported
+          - animated_server_banner_mach
+      required:
+      - error
+      - code
     ActivityHistoryRequiredConsent:
       type: object
       additionalProperties: false
@@ -19752,7 +19833,19 @@ components:
         avatar_url:
           type: string
           nullable: true
-          description: Data URL (max 500KB) or null to remove
+          description: >-
+            The canonical avatar proxy URL for this user (`/api/v1/media/avatars/{user_id}`), set
+            after an upload through `POST /api/v1/media/upload/avatar`. An empty string removes the
+            avatar; `null` leaves it unchanged. A new `data:image/` value is refused with a 400
+            (`inline_profile_image_unsupported`). Re-sending the stored value is a no-op.
+        header_image_url:
+          type: string
+          nullable: true
+          description: >-
+            The canonical banner proxy URL for this user (`/api/v1/media/banners/{user_id}`), set
+            after an upload through `POST /api/v1/media/upload/banner`. An empty string removes the
+            banner; `null` leaves it unchanged. A new `data:image/` value is refused with a 400
+            (`inline_profile_image_unsupported`). Re-sending the stored value is a no-op.
         links:
           type: array
           items:
@@ -19993,7 +20086,16 @@ components:
         icon_url:
           type: string
           nullable: true
-          description: Data URL (max 500KB)
+          description: >-
+            Static `data:image/` URL (PNG, JPEG, GIF or WebP, max 5 MiB). An animated icon is
+            refused with a 403.
+        banner_url:
+          type: string
+          nullable: true
+          description: >-
+            Static `data:image/` URL (PNG, JPEG, GIF or WebP, max 5 MiB). An animated banner is
+            refused with a 403 unless the new server's starting tier allows animated banners (a
+            self-hosted instance's tier does; Groundspeed does not).
     UpdateServerRequest:
       type: object
       required:
@@ -20006,7 +20108,17 @@ components:
         icon_url:
           type: string
           nullable: true
-          description: Data URL or null to remove
+          description: >-
+            The server's uploaded icon URL, a `data:image/` URL, or null to remove. An animated
+            inline icon is refused with a 403 at every tier. Re-sending the inline value the server
+            already stores is a no-op.
+        banner_url:
+          type: string
+          nullable: true
+          description: >-
+            The server's uploaded banner URL, a `data:image/` URL, or null to remove. An animated
+            inline banner is refused with a 403 unless the server's tier allows animated banners.
+            Re-sending the inline value the server already stores is a no-op.
         mfa_code:
           $ref: '#/components/schemas/DangerousActionMFACode'
     ExpirationRequest:
