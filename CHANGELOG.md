@@ -71,6 +71,7 @@ colour customization.
 
 ### Fixed
 
+- **Editing a message is held to the character limit** ([#3857](internal development reference omitted), [PR #3873](internal development reference omitted)) — an edit could be saved longer than a new message is allowed to be. Over the limit, Save is disabled, Enter does nothing, and the box stays open with your text and says what the limit is. A counter appears as you near it.
 - **Direct messages authenticate unexpected message types** ([PR #3864](internal development reference omitted)) — participant messages are always stored as ordinary encrypted messages, and only validated call and expiration events can use the system-event history path.
 - **Session refresh security** ([PR #3865](internal development reference omitted)) — Session recovery after a refresh retry now verifies the device identifier recorded on either the old token or its live successor.
 - **Recovery codes cannot be reused by concurrent sign-in attempts** ([PR #3860](internal development reference omitted)) — the first successful attempt now consumes the code before another attempt can use it.
