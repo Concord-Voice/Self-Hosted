@@ -25,6 +25,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/graphpresence"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/health"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/invites"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/joinpause"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/klipy"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/media"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/members"
@@ -890,6 +891,10 @@ func NewRouter(
 	// scope (healthHandler below) so router_test.go can call it directly.
 	router.GET("/health", healthHandler)
 	router.HEAD("/health", healthHandler)
+	// Loopback-only: production nginx proxies only /api/ and /health, and the
+	// catch-all configs (West staging, failover) deny this path, so only
+	// concord-ctl.sh's legacy-conversion pause proof reaches it on 127.0.0.1:8080.
+	router.GET("/voice-join-pause", joinpause.Handler(redis))
 
 	// Initialize WebSocket hub
 	hub := newHubWithSecurityEvents(db, redis, opsCounters, securityEvents)
