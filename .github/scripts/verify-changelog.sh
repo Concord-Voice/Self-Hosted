@@ -65,12 +65,9 @@ if [[ -z "${BASE_SHA:-}" ]]; then
   exit 1
 fi
 
-# Private-ref regex is defined once, in the public-mirror helpers — source it
-# relative to THIS script's location (not the repo under inspection, which in
-# tests is a bare fixture without scripts/).
-SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-# shellcheck source=/dev/null
-source "$SCRIPT_DIR/../../scripts/public-mirror/lib.sh"
+# The public-mirror helpers stay in Hosted. Keep the identical private-ref
+# pattern here so this guard can run from the Self-Hosted checkout.
+PMIRROR_PRIVATE_REF_REGEX='(\[internal\]|\.claude/|docs/(adr|superpowers|runbooks|reference|ci|competitive-analysis)/|infrastructure/(deploy|cloudflare|github)/|/CLAUDE\.md|CLAUDE\.md|/TODO\.md|TODO\.md|docs/policies/(update-cert-pinning-runbook|audit-log-retention)\.md)'
 
 # ── Diff anchor (mirrors classify-release.sh #1568/#1572) ─────────────────────
 BASE_REF="${GITHUB_BASE_REF:-}"

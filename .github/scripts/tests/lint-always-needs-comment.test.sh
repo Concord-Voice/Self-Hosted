@@ -3,8 +3,8 @@
 # lint-always-needs-comment.test.sh — Self-test for lint-always-needs-comment.sh.
 #
 # Covers the five non-negotiable fixtures from plan §5.3 plus a sanity
-# check against the live `.github/workflows/build-desktop.yml` (all 4
-# existing `always()` uses are commented and must continue to pass).
+# check against the live `.github/workflows/build.yml` (its coverage
+# `always()` uses are commented and must continue to pass).
 #
 # Pattern mirrors check-required-statuses.test.sh: assert_exit +
 # assert_stderr_contains helpers, PASS/FAIL count at the end.
@@ -106,11 +106,11 @@ assert_stderr_contains "always|load-bearing|cascade|skip" "case 4: stderr names 
 assert_exit 0 "case 5: inline trailing comment passes" \
   "$SCRIPT" "${FIXTURES}/case-05-inline-comment.yml"
 
-# ── Live sanity: build-desktop.yml ────────────────────────────────────
+# ── Live sanity: build.yml ────────────────────────────────────────────
 echo ""
 echo "Live sanity:"
-LIVE_WORKFLOW="${REPO_ROOT}/.github/workflows/build-desktop.yml"
-assert_exit 0 "live: build-desktop.yml has 4 commented always() uses → exit 0" \
+LIVE_WORKFLOW="${REPO_ROOT}/.github/workflows/build.yml"
+assert_exit 0 "live: build.yml has commented always() uses → exit 0" \
   "$SCRIPT" "$LIVE_WORKFLOW"
 
 echo ""

@@ -5,7 +5,7 @@
 # Mirrors the assert-helper pattern from check-required-statuses.test.sh.
 # Each fixture under tests/fixtures/multisecret/ exercises one branch of
 # the AND-check completeness rule. A final sanity test runs the linter
-# against live .github/workflows/build-desktop.yml and expects exit 0
+# against the live .github/workflows/ directory and expects exit 0
 # (validates today's repo passes).
 
 set -euo pipefail
@@ -14,7 +14,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 SCRIPT="${REPO_ROOT}/.github/scripts/lint-multisecret-andcheck.sh"
 FIXTURES="${SCRIPT_DIR}/fixtures/multisecret"
-BUILD_DESKTOP="${REPO_ROOT}/.github/workflows/build-desktop.yml"
+LIVE_WORKFLOWS="${REPO_ROOT}/.github/workflows"
 
 pass=0
 fail=0
@@ -107,8 +107,8 @@ assert_stderr_contains "YAML parse error" "case 6: stderr names YAML parse error
 # ── Live workflow sanity check ───────────────────────────────────────
 echo ""
 echo "Live workflow sanity:"
-assert_exit 0 "build-desktop.yml lints clean (exit 0)" \
-  "$SCRIPT" "$BUILD_DESKTOP"
+assert_exit 0 "live workflows lint clean (exit 0)" \
+  "$SCRIPT" "$LIVE_WORKFLOWS"
 
 # ── Directory mode ───────────────────────────────────────────────────
 echo ""

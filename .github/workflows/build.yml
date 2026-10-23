@@ -1074,7 +1074,10 @@ jobs:
       TURN_SECRET: CI_STUB_NOT_A_SECRET_turn             # pragma: allowlist secret
       MINIO_ROOT_USER: ci_stub_minio_user
       MINIO_ROOT_PASSWORD: CI_STUB_NOT_A_SECRET_minio    # pragma: allowlist secret
+      MFA_ENCRYPTION_KEY: CI_STUB_NOT_A_SECRET_mfa       # pragma: allowlist secret
       DOMAIN: ci-stub.invalid
+      SMTP_HOST: smtp.ci-stub.invalid
+      SMTP_FROM: ci-stub@invalid.example
       TRUSTED_PROXY_CIDRS: 10.0.0.0/8
       PUBLIC_IP: 127.0.0.1
       # Feedback handler (#158, PR #1547) — docker-compose.production.yml

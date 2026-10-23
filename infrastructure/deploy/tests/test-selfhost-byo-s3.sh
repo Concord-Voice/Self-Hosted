@@ -86,7 +86,7 @@ except ImportError:
 # changes require baseline review. Snapshot all inputs to detect test-side mutations.
 SOURCE_HASHES = {
     "docker-compose.yml": "".join(('bdad506e', '1c166bec', '88960d3e', '1fcc62c1', '6be3f8ec', 'a9e58f62', '19d455a6', '252fa641')),
-    "docker-compose.production.yml": "".join(('5ad70fa7', 'fdca0fd9', '820fd92c', 'de2ef9fa', 'e6762734', 'beb205fa', 'db41c5e0', '7dccbb7f')),
+    "docker-compose.production.yml": "".join(('9fb8be64', '804f352d', '22b376de', '93bbf3d7', 'bf3642b8', 'b9fc36ee', '16b7ea3b', '36ed56a1')),
 }
 SOURCE_FILES = tuple(SOURCE_HASHES) + ("docker-compose.selfhost.yml",)
 if not check("all shared Compose source inputs are available",
@@ -123,6 +123,8 @@ SYNTHETIC = {
     "MINIO_BUCKET": "synthetic-bundled-bucket",
     "FEEDBACK_PAT": "synthetic-feedback-token",
     "MFA_ENCRYPTION_KEY": "synthetic-mfa-key",
+    "SMTP_HOST": "smtp.byo.example.invalid",
+    "SMTP_FROM": "byo@example.invalid",
     "INSTANCE_TYPE": "self-hosted",
     "ACTIVITY_HISTORY_CLUSTER_ENABLED": "false",
     "CONTROL_PLANE_REPLICA_COUNT": "1",
@@ -193,7 +195,6 @@ def packaging():
     check("ordinary YAML retains safe loading", "--unsafe" not in generic.get("args", []))
 
     selfhost = next(h for h in hooks if h["id"] == "selfhost-deploy-tests")
-    minio = next(h for h in hooks if h["id"] == "test-publish-minio-image")
     suites = ("scripts/tests/test-install-selfhost.sh", "scripts/tests/test-provision-cert.sh",
               "scripts/tests/test-concord-selfhost.sh",
               "infrastructure/deploy/tests/test-selfhost-storage.sh",
@@ -202,27 +203,16 @@ def packaging():
               "infrastructure/deploy/tests/test-selfhost-tls-readiness.sh",
               "infrastructure/deploy/tests/test-selfhost-tls-callers.sh",
               "infrastructure/deploy/tests/test-copy-certs.sh",
-              "infrastructure/deploy/tests/test-selfhost-tls-selected-consumer.sh",
-              "infrastructure/deploy/tests/test-security-event-logging.sh",
-              "infrastructure/deploy/tests/test-control-plane-secrets.sh",
-              "infrastructure/deploy/tests/test-selfhost-acceptance.sh")
+              "infrastructure/deploy/tests/test-selfhost-tls-selected-consumer.sh")
     inputs = ("docker-compose.byo-s3.yml", "infrastructure/deploy/selfhost-storage.sh",
               "infrastructure/deploy/tests/test-selfhost-storage.sh",
               "infrastructure/deploy/tests/test-selfhost-byo-s3.sh")
-    for hook in (selfhost, minio):
+    for hook in (selfhost,):
         for name in inputs:
             check(hook["id"] + " triggers for " + name,
                   re.search(hook.get("files", r"(?!)"), name) is not None)
         check(hook["id"] + " does not trigger for unrelated application source",
               re.search(hook.get("files", r"(?!)"), "client/desktop/src/main/index.ts") is None)
-    acceptance_inputs = (
-        "infrastructure/deploy/tests/selfhost-acceptance.py",
-        "infrastructure/deploy/tests/test_selfhost_acceptance.py",
-        "infrastructure/deploy/tests/test-selfhost-acceptance.sh",
-    )
-    for name in acceptance_inputs:
-        check("selfhost-deploy-tests triggers for " + name,
-              re.search(selfhost.get("files", r"(?!)"), name) is not None)
     # Every new TLS implementation/test surface and the actual coturn config
     # must continue to select the complete self-host suite.
     tls_inputs = (
@@ -250,12 +240,9 @@ def packaging():
               re.search(selfhost.get("files", r"(?!)"), name) is not None)
     for name in ("scripts/tests/run-selfhost-deploy-tests.sh",
                  "infrastructure/deploy/tests/Dockerfile.selfhost-hook",
-                 "infrastructure/deploy/provision-production.sh",
-                 "infrastructure/deploy/tests/test-control-plane-secrets.sh"):
+                 "infrastructure/deploy/provision-cert.sh"):
         check("self-host hook covers runner input " + name,
               re.search(selfhost.get("files", r"(?!)"), name) is not None)
-    check("MinIO semantic suite remains invoked",
-          shlex.split(minio["entry"]) == ["bash", "scripts/tests/test-publish-minio-image.sh"])
     # Execute the actual self-host hook command against private logging suites.
     # This catches a listed-but-never-invoked suite rather than grepping an entry.
     hook_root = WORK / "hook-fixture"

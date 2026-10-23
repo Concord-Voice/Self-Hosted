@@ -337,6 +337,14 @@ jobs:
         if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.feature_wiring) }}
         run: bash scripts/check-feature-wiring.sh
 
+      - name: Manifest-coverage lint (Tier A, #1246)
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.deployment) }}
+        run: bash scripts/check-compose-manifest-coverage.sh --scope=production-active
+
+      - name: Test compose-manifest-coverage lint (#1246 self-test)
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.deployment) }}
+        run: bash scripts/test-check-compose-manifest-coverage.sh
+
       - name: Verify Admin Portal production wiring
         if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.deployment) }}
         run: bash scripts/test-admin-ui-production-wiring.sh
@@ -429,6 +437,15 @@ jobs:
           tests=()
           for t in infrastructure/deploy/tests/test-*.sh; do
             case "$t" in
+              infrastructure/deploy/tests/test-control-plane-secrets.sh|
+              infrastructure/deploy/tests/test-security-event-logging.sh)
+                # Managed-host provisioning and logging stay in Hosted.
+                continue
+                ;;
+              infrastructure/deploy/tests/test-selfhost-acceptance.sh)
+                # Full acceptance is the S5 release gate, not routine PR CI.
+                continue
+                ;;
               infrastructure/deploy/tests/test-selfhost-*.sh)
                 if [ "${RUN_SELFHOST_TESTS:-true}" = false ]; then
                   continue
@@ -858,7 +875,7 @@ jobs:
         run: |
           bash .github/scripts/tests/lint-multisecret-andcheck.test.sh
           bash .github/scripts/tests/lint-always-needs-comment.test.sh
-          bash .github/scripts/tests/sonar-required-gate.test.sh
+          python3 .github/scripts/tests/selfhost-required-workflow.test.py
           bash .github/scripts/tests/lint-boolean-coercion.test.sh
           bash .github/scripts/tests/lint-empty-expression.test.sh
           bash .github/scripts/tests/lint-gh-repo-flag.test.sh

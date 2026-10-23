@@ -576,6 +576,8 @@ else
     envline DOMAIN t.test
     envline PUBLIC_IP 203.0.113.10
     envline FEEDBACK_REPO a/b
+    envline SMTP_HOST smtp.t.test
+    envline SMTP_FROM fixture@t.test
     envline TRUSTED_PROXY_CIDRS 10.0.0.0/8
     for k in "POSTGRES_PASS""WORD" "REDIS_PASS""WORD" "JWT_SEC""RET" "TURN_SEC""RET" \
              "MINIO_ROOT_USER" "MINIO_ROOT_PASS""WORD" "FEEDBACK_PAT" "MFA_ENCRYPTION_KEY"; do

@@ -18,9 +18,6 @@ SUITES=(
   infrastructure/deploy/tests/test-selfhost-tls-callers.sh
   infrastructure/deploy/tests/test-copy-certs.sh
   infrastructure/deploy/tests/test-selfhost-tls-selected-consumer.sh
-  infrastructure/deploy/tests/test-security-event-logging.sh
-  infrastructure/deploy/tests/test-control-plane-secrets.sh
-  infrastructure/deploy/tests/test-selfhost-acceptance.sh
 )
 
 if [[ $(uname -s) == Darwin ]]; then
