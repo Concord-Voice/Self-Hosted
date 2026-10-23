@@ -324,7 +324,7 @@ need("contains(github.event.pull_request.labels.*.name, 'workflow-validation: di
      'fork notice retains the workflow-validation label gate')
 steps = analysis.get('steps', [])
 checkout = next((s for s in steps if str(s.get('uses', '')).startswith('actions/checkout@')), {})
-need(checkout.get('with', {}).get('ref') == '${{ github.event.pull_request.base.sha }}', 'checkout uses base SHA')
+need(checkout.get('with', {}).get('ref') == '${{ github.sha }}', 'checkout uses pull_request_target base SHA')
 need(checkout.get('with', {}).get('persist-credentials') == 'false', 'checkout disables persisted credentials')
 need(checkout.get('with', {}).get('fetch-depth') == '0', 'checkout fetches complete history')
 need(bool(__import__('re').fullmatch(r'actions/checkout@[0-9a-f]{40}(?:\s+#.*)?', str(checkout.get('uses', '')))),

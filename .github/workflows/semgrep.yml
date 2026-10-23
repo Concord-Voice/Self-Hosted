@@ -186,8 +186,11 @@ jobs:
           # (review-tooling audit, 2026-09-23). The fixture patterns are anchored
           # (gitignore syntax) so a production directory that happens to be named
           # fixtures stays in scope.
+          # Self-Hosted's acceptance test executes a fixed internal supervisor
+          # string twice to verify its launcher; this one test file is excluded.
           semgrep scan --timeout=45 --config=p/security-audit --config=p/owasp-top-ten \
             --exclude='*_test.go' --exclude='**/tests/fixtures' --exclude='/scripts/fixtures' \
+            --exclude='infrastructure/deploy/tests/test_selfhost_acceptance.py' \
             --baseline-commit="${BASELINE_COMMIT}" --json-output=semgrep-community.json --sarif-output=semgrep-community.sarif
           SCAN_EXIT=$?
           set -e

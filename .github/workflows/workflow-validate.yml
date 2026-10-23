@@ -59,10 +59,11 @@ jobs:
       contents: read
       pull-requests: write
     steps:
-      # Checks out the protected base SHA; PR code is read only as Git data.
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 nosemgrep
+      # On pull_request_target, github.sha is the protected base commit.
+      # PR code is read only as Git data.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.base.sha }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
           persist-credentials: false
 

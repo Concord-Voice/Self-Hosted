@@ -939,7 +939,7 @@ class AcceptanceRunnerTests(unittest.TestCase):
                 with mock.patch.object(sys, "argv", ["owned-root-launcher", deadline, *command]), \
                      mock.patch.object(time, "monotonic", return_value=current), \
                      mock.patch.object(os, "execv") as execute:
-                    exec(acceptance._PRIVILEGED_SUPERVISOR, {"__name__": "__main__"})  # nosemgrep
+                    exec(acceptance._PRIVILEGED_SUPERVISOR, {"__name__": "__main__"})
                 execute.assert_called_once()
                 binary, arguments = execute.call_args.args
                 self.assertEqual(binary, "/usr/bin/timeout")
@@ -959,7 +959,7 @@ class AcceptanceRunnerTests(unittest.TestCase):
                      mock.patch.object(time, "monotonic", return_value=current), \
                      mock.patch.object(os, "execv") as execute:
                     with self.assertRaises(SystemExit) as caught:
-                        exec(acceptance._PRIVILEGED_SUPERVISOR, {"__name__": "__main__"})  # nosemgrep
+                        exec(acceptance._PRIVILEGED_SUPERVISOR, {"__name__": "__main__"})
                 self.assertEqual(caught.exception.code, 124)
                 execute.assert_not_called()
 
