@@ -41,6 +41,7 @@ type fakeStripe struct {
 	// still retrieves them, as {"deleted": true}.
 	deletedCustomers map[string]bool
 	sessions         []*fakeSession
+	balanceTxns      []map[string]any // customer balance transactions, in creation order
 	requests         []fakeRequest
 	seq              map[string]int
 	failures         map[string]fakeFailure // keyed by "METHOD /path"
@@ -267,6 +268,8 @@ func (f *fakeStripe) handler() http.Handler {
 	mux.HandleFunc("POST /v1/billing_portal/sessions", f.createPortalSession)
 	mux.HandleFunc("POST /v1/customers", f.createCustomer)
 	mux.HandleFunc("POST /v1/checkout/sessions", f.createSession)
+	mux.HandleFunc("POST /v1/customers/{id}/balance_transactions", f.createBalanceTransaction)
+	mux.HandleFunc("GET /v1/customers/{id}/balance_transactions", f.listBalanceTransactions)
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
 		defer f.mu.Unlock()
@@ -660,6 +663,40 @@ func (f *fakeStripe) retrieveCustomer(w http.ResponseWriter, r *http.Request) {
 	default:
 		f.writeRaw(w, http.StatusNotFound, resourceMissingBody)
 	}
+}
+
+// createBalanceTransaction answers a customer balance credit (code credit, D1).
+func (f *fakeStripe) createBalanceTransaction(w http.ResponseWriter, r *http.Request) {
+	amount, _ := strconv.ParseInt(r.Form.Get("amount"), 10, 64)
+	f.writeJSON(w, f.addBalanceTxn(r.PathValue("id"), amount, r.Form.Get("currency"),
+		map[string]string{"concord_redemption_id": r.Form.Get("metadata[concord_redemption_id]")}))
+}
+
+// addBalanceTxn stores a balance transaction; the caller holds f.mu.
+func (f *fakeStripe) addBalanceTxn(customer string, amount int64, currency string, metadata map[string]string) map[string]any {
+	txn := map[string]any{
+		"id": f.nextID("cbtxn"), "object": "customer_balance_transaction",
+		"customer": customer, "amount": amount, "currency": currency, "metadata": metadata,
+	}
+	f.balanceTxns = append(f.balanceTxns, txn)
+	return txn
+}
+
+// seedBalanceTxn stores a credit the account already holds for redemptionID.
+func (f *fakeStripe) seedBalanceTxn(customer, redemptionID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.addBalanceTxn(customer, -2697, "usd", map[string]string{"concord_redemption_id": redemptionID})
+}
+
+func (f *fakeStripe) listBalanceTransactions(w http.ResponseWriter, r *http.Request) {
+	out := []map[string]any{}
+	for _, txn := range f.balanceTxns {
+		if txn["customer"] == r.PathValue("id") {
+			out = append(out, txn)
+		}
+	}
+	f.writeJSON(w, map[string]any{"object": "list", "url": r.URL.Path, "data": out})
 }
 
 func (f *fakeStripe) listSessions(w http.ResponseWriter, r *http.Request) {

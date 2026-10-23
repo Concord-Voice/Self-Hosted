@@ -6976,6 +6976,16 @@ paths:
         subscription and pushes `entitlements_changed` so the client updates live.
 
 
+        Code credit (#2033 D1): when the user''s Stripe subscription is live and
+        renewing, a `premium:subscription` code becomes Stripe customer-balance credit
+        spent on the next renewals instead. A code for the subscribed plan is priced
+        at the renewal amount; a code for another plan (`grant_params.plan`) becomes
+        face-value credit only after the user confirms (409 `credit_confirmation_required`,
+        then a retry with `confirm_credit: true`). A subscription set to end takes the
+        ordinary grant, starting where its paid period ends. The credit is queued
+        with the redemption and applied to Stripe after it commits, with retries.
+
+
         No-oracle property: invalid, not-found, expired, exhausted, revoked, and bad-checksum
         all return the SAME generic 400 body — the client can never learn WHICH condition
         failed, only that the code is not valid. The code value and its hash are NEVER
@@ -7004,6 +7014,10 @@ paths:
                   description: The redemption code as shown to the user (prefix + grouped
                     plaintext, e.g. `CV-XXXX-XXXX-XXXX`). Normalized and checksum-validated
                     server-side.
+                confirm_credit:
+                  type: boolean
+                  description: Answers a 409 `credit_confirmation_required`; turns a code
+                    for another plan into face-value credit.
       responses:
         '200':
           description: Code redeemed; the grant has been applied
@@ -7033,14 +7047,55 @@ paths:
         '401':
           description: Missing or invalid Bearer token
         '409':
-          description: The authenticated user has already redeemed this code (idempotent;
-            not an oracle — reflects only this user's own prior redemption).
+          description: 'The authenticated user has already redeemed this code (idempotent;
+            not an oracle — reflects only this user''s own prior redemption), or `error`
+            is `credit_confirmation_required`: the code names another plan than the
+            user''s live subscription and would become face-value credit. Nothing was
+            redeemed; retry with `confirm_credit: true` to accept the quote.'
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - error
+                properties:
+                  error:
+                    type: string
+                  credit:
+                    type: object
+                    required:
+                    - amount
+                    - currency
+                    - code_plan
+                    - subscribed_plan
+                    properties:
+                      amount:
+                        type: integer
+                        description: Credit in cents
+                      currency:
+                        type: string
+                        enum:
+                        - usd
+                      code_plan:
+                        type: string
+                        enum:
+                        - supersonic
+                        - wing
+                      subscribed_plan:
+                        type: string
+                        enum:
+                        - supersonic
+                        - wing
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: '`billing_unavailable`: the code would become credit but billing
+            is not configured or the subscription has no plan to price it by. Nothing
+            was redeemed; the user can retry.'
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
-        '429':
-          $ref: '#/components/responses/RateLimited'
         '500':
           description: The code could not be redeemed right now (infrastructure error).
             If a grant landed post-commit it is durable and surfaces on the next entitlements
@@ -7098,7 +7153,8 @@ paths:
                   type: object
                   additionalProperties: true
                   description: 'Effect parameters (e.g. `{"months": 12}` for `premium:subscription`).
-                    Defaults to `{}`.'
+                    A `premium:subscription` code may add `"plan": "supersonic"` (the default) or `"wing"`;
+                    any other plan is rejected with 400. Defaults to `{}`.'
                 count:
                   type: integer
                   minimum: 1

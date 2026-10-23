@@ -1362,14 +1362,15 @@ func NewRouter(
 	// admin generation endpoint is gated by REDEMPTION_ADMIN_TOKEN; empty
 	// disables it (503).
 	redemptionEntNotifier := NewEntitlementNotifier(hub, log)
-	redemptionHandler := buildRedemptionHandler(db, entCache, redemptionEntNotifier, cfg, log)
 
 	// Stripe billing (#2033 PR-2): nil unless keys are configured and the
 	// instance is not self-hosted, so production without keys registers no
 	// billing route and runs no billing worker. The workers live as long as
-	// the router's lifecycle context.
+	// the router's lifecycle context. Built before redemption, which uses it
+	// for code credit (D1).
 	billingSvc := wireBilling(lifecycleCtx, cfg, db, entCache, redemptionEntNotifier, opsCounters, log)
 	startBillingWorkers(lifecycleCtx, billingSvc)
+	redemptionHandler := buildRedemptionHandler(db, entCache, redemptionEntNotifier, billingSvc, cfg, log)
 
 	// DM-block convergence is pure SQL and must run on every Block-serving
 	// replica, including self-hosted deployments without NATS.

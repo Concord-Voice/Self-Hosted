@@ -13,6 +13,12 @@ opens a secure Stripe page to subscribe or manage billing.
 Your failed channel messages stay available to retry after a brief disconnect.
 Camera recovery honors codec settings you save while capture restarts.
 
+Redeeming a premium code while you have a paid subscription now adds credit to
+your account, which your next renewals use before your card is charged. A code
+for a different plan shows the credit amount and asks you to confirm first. If
+your subscription is set to end, the code's time starts when the paid period
+ends.
+
 If suspicious use of a sign-in session is detected, that account stays blocked
 until session revocation finishes, even after a temporary server error.
 
