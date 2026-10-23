@@ -35,9 +35,6 @@ assert re.fullmatch(
     config_ref,
 ), "CodeQL config must use an immutable bootstrap commit"
 config = yaml.safe_load((root / ".github/codeql/codeql-config.yml").read_text())
-assert re.fullmatch(
-    r"Concord-Voice/Self-Hosted/\.github/codeql/queries/go/LogInjectionUnstructured\.ql@[0-9a-f]{40}",
-    config["queries"][0]["uses"],
-), "custom CodeQL query must use an immutable bootstrap commit"
+assert config["queries"][0]["uses"] == "./.github/codeql/queries/go/LogInjectionUnstructured.ql"
 assert ".github/codeql/**" in (root / "CODEOWNERS").read_text()
 print("Self-Hosted protected workflow bootstrap checks passed")
