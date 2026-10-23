@@ -33,7 +33,6 @@ FAIL_DETAILS=()
 
 mkdir -p "$TMP/scripts" "$TMP/bin" \
          "$TMP/.github/tools/license-checker/node_modules/.bin" \
-         "$TMP/client/desktop/node_modules" \
          "$TMP/services/media-plane/node_modules" \
          "$TMP/client/admin/node_modules" \
          "$TMP/services/control-plane"
@@ -48,12 +47,11 @@ cat > "$LICENSE_CHECKER_BIN" <<'SHIM'
 printf '%s|%s\n' "$PWD" "$*" >> "${LOCKED_CALL_LOG:?}"
 echo '"module name","license","repository"'
 case "$PWD" in
-  */client/desktop)        echo '"alpha@1.0.0","MIT","https://example.com/alpha"' ;;
+  */client/admin)          echo '"alpha@1.0.0","MIT","https://example.com/alpha"' ;;
   */services/media-plane)  echo '"beta@2.0.0","ISC","https://example.com/beta"'
                            echo '"dup@1.0.0","MIT","https://example.com/dup"'
                            echo '"dup@2.0.0","MIT","https://example.com/dup"'
                            echo '"gamma@3.0.0","MIT","https://example.com/gamma"' ;;
-  */client/admin)          echo '"delta@4.0.0","MIT","https://example.com/delta"' ;;
 esac
 SHIM
 
@@ -88,26 +86,25 @@ write_notice() {
 
 **Generated:** 2020-01-01
 
-Concord Voice distributes ${1:-8} third-party software components across its four
+Concord Voice distributes ${1:-7} third-party software components across its three
 CVSL application artifact families:
 
 - **${2:-2}** Go modules linked into the control-plane runtime binary.
-- **${3:-1}** npm packages in the desktop client production bundle (plus Electron and its bundled components)
 - **${4:-4}** npm packages in the media-plane production bundle
 - **${5:-1}** npm packages in the admin portal production bundle (\`client/admin\`),
   compiled by the admin-ui-builder stage.
 
 | License family | Share | Compatible with CVSL 1.0 + AGPL-3.0 |
 |---|---|---|
-| MIT | 75.0% (6) | ✓ |
-| Apache-2.0 | 12.5% (1) | ✓ |
-| ISC | 12.5% (1) | ✓ |
+| MIT | 71.4% (5) | ✓ |
+| Apache-2.0 | 14.3% (1) | ✓ |
+| ISC | 14.3% (1) | ✓ |
 | MPL-2.0 (build-time only) | not in the count above | ✓ |
 
-Shares are exact counts over the ${1:-8} components tabulated below, not estimates.
-They are not part of that ${1:-8} and therefore carry no share of it.
+Shares are exact counts over the ${1:-7} components tabulated below, not estimates.
+They are not part of that ${1:-7} and therefore carry no share of it.
 
-It is not part of the ${1:-8}-component count.
+It is not part of the ${1:-7}-component count.
 
 ## Go Control-Plane Runtime Dependencies
 
@@ -115,14 +112,6 @@ It is not part of the ${1:-8}-component count.
 |---|---|---|
 | github.com/example/one | ${6:-v1.1.0} | MIT |
 | github.com/example/two | v2.2.0 | Apache-2.0 |
-
----
-
-## Desktop Client Production Dependencies
-
-| Package | Version | License | Repository |
-|---|---|---|---|
-| alpha | 1.0.0 | MIT | https://example.com/alpha |
 
 ---
 
@@ -141,7 +130,7 @@ It is not part of the ${1:-8}-component count.
 
 | Package | Version | License | Repository |
 |---|---|---|---|
-| delta | 4.0.0 | MIT | https://example.com/delta |
+| alpha | 1.0.0 | MIT | https://example.com/alpha |
 
 ---
 
@@ -187,9 +176,9 @@ assert_output() {
 write_notice
 expect "clean fixture passes --check" 0 --check
 assert_output "clean fixture" "No changes needed"
-if [[ "$(wc -l < "$LOCKED_CALL_LOG" | tr -d ' ')" == 3 ]] \
+if [[ "$(wc -l < "$LOCKED_CALL_LOG" | tr -d ' ')" == 2 ]] \
   && ! [[ -e "$NPX_TRAP_LOG" ]] \
-  && awk -F'|' '$2 == "--production --csv --excludePrivatePackages" && $1 ~ "/(client/desktop|services/media-plane|client/admin)$" { n++ } END { exit n != 3 }' "$LOCKED_CALL_LOG"; then
+  && awk -F'|' '$2 == "--production --csv --excludePrivatePackages" && $1 ~ "/(services/media-plane|client/admin)$" { n++ } END { exit n != 2 }' "$LOCKED_CALL_LOG"; then
   PASSES=$((PASSES + 1))
 else
   FAILS=$((FAILS + 1))
@@ -212,7 +201,7 @@ chmod +x "$LICENSE_CHECKER_BIN"
 # 2. A stale version is bookkeeping, not an attribution defect: the component
 #    is still attributed and its licence is unchanged. It must warn, not fail,
 #    or every routine Dependabot bump turns License Check red.
-write_notice 8 2 1 4 1 v0.0.1
+write_notice 7 2 1 4 1 v0.0.1
 expect "stale Go version warns but does not block" 0 --check --scope go
 assert_output "stale version emits a warning annotation" "::warning::"
 
@@ -272,7 +261,7 @@ expect "deleted npm row -> exit 1 (attribution defect)" 1 --check --scope npm
 assert_output "missing row is reported as an error annotation" "::error::"
 
 # 5. A summary count that disagrees with its own table is drift.
-write_notice 8 2 1 99 1
+write_notice 7 2 1 99 1
 expect "wrong summary count -> exit 1" 1 --check --scope npm
 
 # 6. A wrong total is caught even under a scoped run, because the total is
@@ -281,7 +270,7 @@ write_notice 99 2 1 4 1
 expect "wrong total -> exit 1" 1 --check --scope go
 
 # 7. --apply repairs drift, and the repaired file then passes --check.
-write_notice 8 2 1 4 1 v0.0.1
+write_notice 7 2 1 4 1 v0.0.1
 expect "--apply repairs drift" 0 --apply
 expect "repaired file passes --check" 0 --check
 grep -q "| github.com/example/one | v1.1.0 | MIT |" "$TMP/NOTICE.md" || {
@@ -329,7 +318,7 @@ fi
 #     keying-independent — mutating classify() back to name-keying left the
 #     whole suite green. Counts are now corrected so the keying is what is
 #     under test.
-write_notice 7 2 1 3 1
+write_notice 6 2 1 3 1
 # Alphabetic heredoc labels keep this fixture compatible with the pinned Semgrep Bash parser.
 python3 - "$TMP/NOTICE.md" <<'PYX'
 import sys
@@ -349,12 +338,11 @@ cat > "$LICENSE_CHECKER_BIN" <<'SHIM'
 printf '%s|%s\n' "$PWD" "$*" >> "${LOCKED_CALL_LOG:?}"
 echo '"module name","license","repository"'
 case "$PWD" in
-  */client/desktop)        echo '"alpha@1.0.0","MIT","https://example.com/alpha"' ;;
+  */client/admin)          echo '"alpha@1.0.0","MIT","https://example.com/alpha"' ;;
   */services/media-plane)  echo '"beta@2.0.0","ISC","https://example.com/beta"'
                            echo '"dup@1.0.0","Apache-2.0","https://example.com/dup"'
                            echo '"dup@2.0.0","MIT","https://example.com/dup"'
                            echo '"gamma@3.0.0","MIT","https://example.com/gamma"' ;;
-  */client/admin)          echo '"delta@4.0.0","MIT","https://example.com/delta"' ;;
 esac
 SHIM
 chmod +x "$LICENSE_CHECKER_BIN"
@@ -380,12 +368,11 @@ cat > "$LICENSE_CHECKER_BIN" <<'SHIM'
 printf '%s|%s\n' "$PWD" "$*" >> "${LOCKED_CALL_LOG:?}"
 echo '"module name","license","repository"'
 case "$PWD" in
-  */client/desktop)        echo '"alpha@1.0.0","MIT","https://example.com/alpha"' ;;
+  */client/admin)          echo '"alpha@1.0.0","MIT","https://example.com/alpha"' ;;
   */services/media-plane)  echo '"beta@2.0.0","ISC","https://example.com/beta"'
                            echo '"dup@1.0.0","MIT","https://example.com/dup"'
                            echo '"dup@2.0.0","Apache-2.0","https://example.com/dup"'
                            echo '"gamma@3.0.0","MIT","https://example.com/gamma"' ;;
-  */client/admin)          echo '"delta@4.0.0","MIT","https://example.com/delta"' ;;
 esac
 SHIM
 chmod +x "$LICENSE_CHECKER_BIN"
@@ -398,12 +385,11 @@ cat > "$LICENSE_CHECKER_BIN" <<'SHIM'
 printf '%s|%s\n' "$PWD" "$*" >> "${LOCKED_CALL_LOG:?}"
 echo '"module name","license","repository"'
 case "$PWD" in
-  */client/desktop)        echo '"alpha@1.0.0","MIT","https://example.com/alpha"' ;;
+  */client/admin)          echo '"alpha@1.0.0","MIT","https://example.com/alpha"' ;;
   */services/media-plane)  echo '"beta@2.0.0","ISC","https://example.com/beta"'
                            echo '"dup@1.0.0","MIT","https://example.com/dup"'
                            echo '"dup@2.0.0","MIT","https://example.com/dup"'
                            echo '"gamma@3.0.0","MIT","https://example.com/gamma"' ;;
-  */client/admin)          echo '"delta@4.0.0","MIT","https://example.com/delta"' ;;
 esac
 SHIM
 chmod +x "$LICENSE_CHECKER_BIN"
@@ -428,13 +414,12 @@ cat > "$LICENSE_CHECKER_BIN" <<'SHIM'
 printf '%s|%s\n' "$PWD" "$*" >> "${LOCKED_CALL_LOG:?}"
 echo '"module name","license","repository"'
 case "$PWD" in
-  */client/desktop)        echo '"alpha@1.0.0","MIT","https://example.com/alpha"' ;;
+  */client/admin)          echo '"alpha@1.0.0","MIT","https://example.com/alpha"' ;;
   */services/media-plane)  echo '"beta@2.0.0","ISC","https://example.com/beta"'
                            echo '"dup@1.0.0","MIT","https://example.com/dup"'
                            echo '"dup@2.0.0","MIT","https://example.com/dup"'
                            echo '"dup@3.0.0","MIT","https://example.com/dup"'
                            echo '"gamma@3.0.0","MIT","https://example.com/gamma"' ;;
-  */client/admin)          echo '"delta@4.0.0","MIT","https://example.com/delta"' ;;
 esac
 SHIM
 chmod +x "$LICENSE_CHECKER_BIN"
@@ -450,9 +435,8 @@ cat > "$LICENSE_CHECKER_BIN" <<'SHIM'
 printf '%s|%s\n' "$PWD" "$*" >> "${LOCKED_CALL_LOG:?}"
 echo '"module name","license","repository"'
 case "$PWD" in
-  */client/desktop)        echo '"alpha@1.0.0","UNKNOWN","https://example.com/alpha"' ;;
+  */client/admin)          echo '"alpha@1.0.0","UNKNOWN","https://example.com/alpha"' ;;
   */services/media-plane)  echo '"beta@2.0.0","ISC","https://example.com/beta"' ;;
-  */client/admin)          echo '"delta@4.0.0","MIT","https://example.com/delta"' ;;
 esac
 SHIM
 chmod +x "$LICENSE_CHECKER_BIN"
@@ -465,12 +449,11 @@ cat > "$LICENSE_CHECKER_BIN" <<'SHIM'
 printf '%s|%s\n' "$PWD" "$*" >> "${LOCKED_CALL_LOG:?}"
 echo '"module name","license","repository"'
 case "$PWD" in
-  */client/desktop)        echo '"alpha@1.0.0","MIT","https://example.com/alpha"' ;;
+  */client/admin)          echo '"alpha@1.0.0","MIT","https://example.com/alpha"' ;;
   */services/media-plane)  echo '"beta@2.0.0","ISC","https://example.com/beta"'
                            echo '"dup@1.0.0","MIT","https://example.com/dup"'
                            echo '"dup@2.0.0","MIT","https://example.com/dup"'
                            echo '"gamma@3.0.0","MIT","https://example.com/gamma"' ;;
-  */client/admin)          echo '"delta@4.0.0","MIT","https://example.com/delta"' ;;
 esac
 SHIM
 chmod +x "$LICENSE_CHECKER_BIN"
@@ -484,8 +467,8 @@ python3 - "$TMP/NOTICE.md" <<'PYX'
 import sys
 p = sys.argv[1]; t = open(p).read()
 # A stray rule inside a section truncates it before its table.
-open(p, "w").write(t.replace("## Desktop Client Production Dependencies\n",
-                             "## Desktop Client Production Dependencies\n\n---\n"))
+open(p, "w").write(t.replace("## Admin Portal Production Dependencies\n",
+                             "## Admin Portal Production Dependencies\n\n---\n"))
 PYX
 expect "malformed section -> exit 2, never 1" 2 --check --scope npm
 
@@ -496,7 +479,7 @@ python3 - "$TMP/NOTICE.md" <<'PYX'
 import sys
 p = sys.argv[1]; t = open(p).read()
 open(p, "w").write(t.replace("## Contact",
-                             "### Desktop Client Production Dependencies\n\nprose\n\n## Contact"))
+                             "### Admin Portal Production Dependencies\n\nprose\n\n## Contact"))
 PYX
 expect "### heading does not retarget the rewrite" 0 --check --scope npm
 assert_output "still finds the real section" "No changes needed"
@@ -507,12 +490,12 @@ write_notice
 python3 - "$TMP/NOTICE.md" <<'PYX'
 import sys
 p = sys.argv[1]; t = open(p).read()
-open(p, "w").write(t.replace("| MIT | 75.0% (6) | ✓ |", "| MIT | 99.9% (999) | ✓ |"))
+open(p, "w").write(t.replace("| MIT | 71.4% (5) | ✓ |", "| MIT | 99.9% (999) | ✓ |"))
 PYX
 expect "stale licence-share row is drift" 0 --check --scope npm
 assert_output "share drift is reported" "::warning::"
 "$TMP/scripts/update-notice-md.py" --apply >/dev/null 2>&1 || true
-if grep -q "| MIT | 75.0% (6) | ✓ |" "$TMP/NOTICE.md"; then PASSES=$((PASSES + 1)); else
+if grep -q "| MIT | 71.4% (5) | ✓ |" "$TMP/NOTICE.md"; then PASSES=$((PASSES + 1)); else
   FAILS=$((FAILS + 1)); FAIL_DETAILS+=("--apply did not rebuild the licence-share table")
 fi
 if grep -q "MPL-2.0 (build-time only)" "$TMP/NOTICE.md"; then PASSES=$((PASSES + 1)); else
@@ -528,19 +511,18 @@ cat > "$LICENSE_CHECKER_BIN" <<'SHIM'
 printf '%s|%s\n' "$PWD" "$*" >> "${LOCKED_CALL_LOG:?}"
 echo '"module name","license","repository"'
 case "$PWD" in
-  */client/desktop)        echo '"alpha@1.0.0","MIT","https://example.com/alpha"'
+  */client/admin)          echo '"alpha@1.0.0","MIT","https://example.com/alpha"'
                            echo '"epsilon@5.0.0","MIT","https://example.com/epsilon"' ;;
   */services/media-plane)  echo '"beta@2.0.0","ISC","https://example.com/beta"'
                            echo '"dup@1.0.0","MIT","https://example.com/dup"'
                            echo '"dup@2.0.0","MIT","https://example.com/dup"'
                            echo '"gamma@3.0.0","MIT","https://example.com/gamma"' ;;
-  */client/admin)          echo '"delta@4.0.0","MIT","https://example.com/delta"' ;;
 esac
 SHIM
 chmod +x "$LICENSE_CHECKER_BIN"
 expect "--apply with a changed total" 0 --apply
-if grep -q "\b8\b.*component\|exact counts over the 8 " "$TMP/NOTICE.md"; then
-  FAILS=$((FAILS + 1)); FAIL_DETAILS+=("stale old total 8 survived --apply")
+if grep -q "\b7\b.*component\|exact counts over the 7 " "$TMP/NOTICE.md"; then
+  FAILS=$((FAILS + 1)); FAIL_DETAILS+=("stale old total 7 survived --apply")
 else PASSES=$((PASSES + 1)); fi
 expect "file is self-consistent after --apply" 0 --check
 
@@ -572,9 +554,8 @@ cat > "$LICENSE_CHECKER_BIN" <<'SHIM'
 printf '%s|%s\n' "$PWD" "$*" >> "${LOCKED_CALL_LOG:?}"
 echo '"module name","license","repository"'
 case "$PWD" in
-  */client/desktop)        echo '"alpha@1.0.0","MIT | GPL-3.0","https://example.com/alpha"' ;;
+  */client/admin)          echo '"alpha@1.0.0","MIT | GPL-3.0","https://example.com/alpha"' ;;
   */services/media-plane)  echo '"beta@2.0.0","ISC","https://example.com/beta"' ;;
-  */client/admin)          echo '"delta@4.0.0","MIT","https://example.com/delta"' ;;
 esac
 SHIM
 chmod +x "$LICENSE_CHECKER_BIN"
@@ -588,12 +569,11 @@ cat > "$LICENSE_CHECKER_BIN" <<'SHIM'
 printf '%s|%s\n' "$PWD" "$*" >> "${LOCKED_CALL_LOG:?}"
 echo '"module name","license","repository"'
 case "$PWD" in
-  */client/desktop)        echo '"alpha@1.0.0","MIT","https://example.com/alpha"' ;;
+  */client/admin)          echo '"alpha@1.0.0","MIT","https://example.com/alpha"' ;;
   */services/media-plane)  echo '"beta@2.0.0","ISC","https://example.com/beta"'
                            echo '"dup@1.0.0","MIT","https://example.com/dup"'
                            echo '"dup@2.0.0","MIT","https://example.com/dup"'
                            echo '"gamma@3.0.0","MIT","https://example.com/gamma"' ;;
-  */client/admin)          echo '"delta@4.0.0","MIT","https://example.com/delta"' ;;
 esac
 SHIM
 chmod +x "$LICENSE_CHECKER_BIN"

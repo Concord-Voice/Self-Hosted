@@ -36,7 +36,7 @@ something. See main()'s catch-all.
 `--scope` limits the work to one ecosystem so CI can check each half inside the
 job that already paid for its toolchain (see .github/workflows/license-check.yml):
 
-    --scope npm     the three npm bundles; needs workspace node_modules and the
+    --scope npm     the two npm bundles; needs workspace node_modules and the
                     locked license-checker tool installed
     --scope go      the Go control-plane table; needs a Go toolchain
     --scope all     both (the default, and the only scope --apply accepts)
@@ -134,8 +134,9 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 NOTICE = REPO_ROOT / "NOTICE.md"
 
 # Heading -> workspace directory. Order matters only for reporting.
+# Self-Hosted: the desktop client and its Electron bundle are attributed in the
+# Desktop repository's NOTICE.md, which ships them.
 NPM_FAMILIES = [
-    ("Desktop Client Production Dependencies", "client/desktop"),
     ("Media-Plane Production Dependencies", "services/media-plane"),
     ("Admin Portal Production Dependencies", "client/admin"),
 ]
@@ -155,7 +156,6 @@ ALL_HEADINGS = [GO_HEADING] + [h for h, _ in NPM_FAMILIES]
 # Each summary bullet that states a per-family count, keyed by its heading.
 SUMMARY_PATTERNS = {
     GO_HEADING: r"- \*\*(\d+)\*\* Go modules linked",
-    "Desktop Client Production Dependencies": r"- \*\*(\d+)\*\* npm packages in the desktop client production bundle",
     "Media-Plane Production Dependencies": r"- \*\*(\d+)\*\* npm packages in the media-plane production bundle",
     "Admin Portal Production Dependencies": r"- \*\*(\d+)\*\* npm packages in the admin portal production bundle",
 }
@@ -476,7 +476,7 @@ def classify(current: str, updated: str) -> tuple[list[str], list[str]]:
         m = re.search(pattern, current)
         if m and int(m.group(1)) != stated_total:
             blocking.append(
-                f"summary states {m.group(1)} components in total, its four "
+                f"summary states {m.group(1)} components in total, its three "
                 f"tables hold {stated_total}")
             break
     for heading, pattern in SUMMARY_PATTERNS.items():
@@ -518,7 +518,7 @@ def replace_table(text: str, heading: str, rows: list[str]) -> str:
 
 
 def replace_share_table(text: str, counts: dict[str, int], total: int) -> str:
-    """Rewrite the licence-distribution table from the four regenerated tables.
+    """Rewrite the licence-distribution table from the three regenerated tables.
 
     This table is not decoration: the prose under it asserts the shares are
     "exact counts over the N components tabulated below". If --apply moves a
@@ -731,8 +731,7 @@ def _main() -> int:
 
     blocking, advisory = classify(current, updated)
     fix = ("Regenerate with:  scripts/update-notice-md.py --apply\n"
-           "(needs `npm ci` in client/desktop, services/media-plane and "
-           "client/admin first.)")
+           "(needs `npm ci` in services/media-plane and client/admin first.)")
 
     if not args.check:
         print(f"NOTICE.md has drifted from the installed dependency set{sub}.\n\n"
