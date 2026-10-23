@@ -125,6 +125,8 @@ jobs:
             # and the protected Sonar job names stay unchanged (epic #3947).
             desktop:
               - 'packages/**'
+              - 'services/control-plane/internal/authoritycontract/testdata/vectors.json'
+              - 'scripts/authority-vectors/**'
               - 'package.json'
               - 'package-lock.json'
               - 'vitest.config.ts'
@@ -133,6 +135,8 @@ jobs:
               - '.github/workflows/build.yml'
             control-plane:
               - 'services/control-plane/**'
+              - 'scripts/authority-vectors/**'
+              - 'docs/design/trusted-recovery-v2-vectors.json'
               - 'scripts/test-tools/nats-server.sh'
             media-plane:
               - 'services/media-plane/**'

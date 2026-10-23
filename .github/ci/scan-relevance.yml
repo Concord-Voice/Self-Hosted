@@ -241,6 +241,8 @@ spa:
   - '.github/scripts/ci-scan-relevance.mjs'
 desktop:
   - 'packages/**'
+  - 'services/control-plane/internal/authoritycontract/testdata/vectors.json'
+  - 'scripts/authority-vectors/**'
   - 'package.json'
   - 'package-lock.json'
   - 'vitest.config.ts'
@@ -249,6 +251,8 @@ desktop:
   - '.github/workflows/build.yml'
 control_plane:
   - 'services/control-plane/**'
+  - 'scripts/authority-vectors/**'
+  - 'docs/design/trusted-recovery-v2-vectors.json'
   - 'scripts/test-tools/nats-server.sh'
 media_plane:
   - 'services/media-plane/**'
