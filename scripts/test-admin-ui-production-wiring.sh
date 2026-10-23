@@ -52,7 +52,7 @@ assert_filter_path() {
 }
 
 assert_filter_path ".github/workflows/build.yml" "production-docker" "client/admin/**"
-assert_filter_path ".github/workflows/main-cd.yml" "services" "client/admin/**"
+# Self-Hosted: main-cd.yml (the managed deploy) lives in the Hosted repository.
 assert_filter_path ".github/ci/scan-relevance.yml" "services" "client/admin/**"
 assert_filter_path ".github/ci/scan-relevance.yml" "production_docker" "client/admin/**"
 assert_contains "docker-compose.yml" "admin_ui: ./client/admin" \
