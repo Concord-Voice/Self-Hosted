@@ -142,6 +142,8 @@ jobs:
           import json, os
           data = json.load(open('semgrep-custom.json'))
           if data.get('errors'):
+              for error in data['errors']:
+                  print(json.dumps(error, sort_keys=True))
               raise SystemExit(f"Semgrep custom scan reported {len(data['errors'])} scanner error(s)")
           results = data.get('results', [])
           if not isinstance(results, list):

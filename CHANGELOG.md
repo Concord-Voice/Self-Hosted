@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+Self-hosted deployments now ship from the dedicated Self-Hosted repository, with
+the service, admin, and package checks running in that repository's CI.
+
 If suspicious use of a sign-in session is detected, that account stays blocked
 until session revocation finishes, even after a temporary server error.
 

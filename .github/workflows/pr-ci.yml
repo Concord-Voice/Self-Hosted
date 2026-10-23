@@ -437,8 +437,7 @@ jobs:
           tests=()
           for t in infrastructure/deploy/tests/test-*.sh; do
             case "$t" in
-              infrastructure/deploy/tests/test-control-plane-secrets.sh|
-              infrastructure/deploy/tests/test-security-event-logging.sh)
+              infrastructure/deploy/tests/test-control-plane-secrets.sh|infrastructure/deploy/tests/test-security-event-logging.sh)
                 # Managed-host provisioning and logging stay in Hosted.
                 continue
                 ;;
