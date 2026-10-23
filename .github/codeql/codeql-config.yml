@@ -23,6 +23,10 @@ queries:
   # CodeQL CLI cannot clone a private repository for an external query reference.
   # Resolve the copied query from the checked-out repository instead.
   - uses: ./.github/codeql/queries/go/LogInjectionUnstructured.ql
+  # Scoped copies of the upstream Actions queries preserve coverage except for
+  # the one immutable IOC workflow_sha checkout misclassified as PR-controlled.
+  - uses: ./.github/codeql/queries/actions/CachePoisoningViaPoisonableStep.ql
+  - uses: ./.github/codeql/queries/actions/UntrustedCheckoutMedium.ql
 query-filters:
   - exclude:
       id: go/log-injection
