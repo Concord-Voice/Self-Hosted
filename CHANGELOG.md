@@ -202,7 +202,7 @@ you verify your email.
 
 ### Security
 
-- **Desktop TLS certificate protection updated** ([#4071](internal development reference omitted)) — Electron 44.9.1 blocks compromised eMudhra intermediate certificates in Chromium and Node network requests.
+- **Desktop TLS certificate protection updated** ([#4071](internal development reference omitted), [PR #4074](internal development reference omitted)) — Electron 44.9.1 blocks compromised eMudhra intermediate certificates in Chromium and Node network requests.
 - **Account deletion clears shared status only for its prior viewers** ([PR #4055](internal development reference omitted)) — people who could see the account's Custom Status receive its removal; unrelated connected users no longer receive a deletion signal.
 - **Server container images are scanned for known vulnerabilities** ([PR #3987](internal development reference omitted)) — continuous integration now fails when a control-plane, media-plane, or ops-agent image carries a high or critical vulnerability that has a fix, and when a scan could not see an image's operating-system packages, so an image the scanner could not read never passes as clean. The media-plane image no longer includes the unused npm package manager.
 - **Message encryption versions are stored explicitly** ([#2844](internal development reference omitted), [PR #3935](internal development reference omitted)) — the server now requires a positive key version on channel and DM messages instead of filling in a missing version. Empty call and expiration events use a storage marker. Operators must upgrade all control-plane writers before applying the database migration.
