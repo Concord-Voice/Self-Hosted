@@ -1,9 +1,9 @@
-import { useRef } from 'react';
-import { act, fireEvent, render, screen } from '@testing-library/react';
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { useRef } from "react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
-import { ApiContractError, ApiError } from './api';
-import { usePolling } from './usePolling';
+import { ApiContractError, ApiError } from "./api";
+import { usePolling } from "./usePolling";
 
 interface HarnessProps {
   enabled?: boolean;
@@ -23,7 +23,7 @@ function Harness({
   onData,
   onForbidden = () => {},
   onUnauthorized = () => {},
-  resourceKey = 'health',
+  resourceKey = "health",
   sessionGeneration,
 }: HarnessProps) {
   const localSessionGenerationRef = useRef(0);
@@ -41,8 +41,8 @@ function Harness({
   return (
     <>
       <output data-testid="state">{polling.state}</output>
-      <output data-testid="data">{polling.data ?? 'none'}</output>
-      <output data-testid="retry">{polling.retryAt ?? 'none'}</output>
+      <output data-testid="data">{polling.data ?? "none"}</output>
+      <output data-testid="retry">{polling.retryAt ?? "none"}</output>
       <button type="button" onClick={polling.refresh}>
         Refresh
       </button>
@@ -57,17 +57,17 @@ async function flush(): Promise<void> {
 }
 
 function setHidden(hidden: boolean): void {
-  Object.defineProperty(document, 'hidden', {
+  Object.defineProperty(document, "hidden", {
     configurable: true,
     value: hidden,
   });
-  document.dispatchEvent(new Event('visibilitychange'));
+  document.dispatchEvent(new Event("visibilitychange"));
 }
 
-describe('usePolling', () => {
+describe("usePolling", () => {
   beforeEach(() => {
     vi.useFakeTimers();
-    vi.setSystemTime(new Date('2026-07-14T12:00:00Z'));
+    vi.setSystemTime(new Date("2026-07-14T12:00:00Z"));
     setHidden(false);
   });
 
@@ -76,7 +76,7 @@ describe('usePolling', () => {
     setHidden(false);
   });
 
-  it('loads immediately and schedules exact cadence only after settlement', async () => {
+  it("loads immediately and schedules exact cadence only after settlement", async () => {
     let settleFirst: (value: string) => void = () => {};
     const load = vi
       .fn<(signal: AbortSignal) => Promise<string>>()
@@ -84,9 +84,9 @@ describe('usePolling', () => {
         () =>
           new Promise((resolve) => {
             settleFirst = resolve;
-          })
+          }),
       )
-      .mockResolvedValue('second');
+      .mockResolvedValue("second");
 
     render(<Harness load={load} />);
     expect(load).toHaveBeenCalledOnce();
@@ -96,9 +96,9 @@ describe('usePolling', () => {
     });
     expect(load).toHaveBeenCalledOnce();
 
-    settleFirst('first');
+    settleFirst("first");
     await flush();
-    expect(screen.getByTestId('data')).toHaveTextContent('first');
+    expect(screen.getByTestId("data")).toHaveTextContent("first");
 
     await act(async () => {
       vi.advanceTimersByTime(14_999);
@@ -110,9 +110,9 @@ describe('usePolling', () => {
     expect(load).toHaveBeenCalledTimes(2);
   });
 
-  it('pauses while hidden and performs one fresh request when visible', async () => {
+  it("pauses while hidden and performs one fresh request when visible", async () => {
     setHidden(true);
-    const load = vi.fn().mockResolvedValue('visible');
+    const load = vi.fn().mockResolvedValue("visible");
     render(<Harness load={load} />);
     expect(load).not.toHaveBeenCalled();
 
@@ -131,7 +131,7 @@ describe('usePolling', () => {
     expect(load).toHaveBeenCalledTimes(2);
   });
 
-  it('aborts requests on key changes and unmount', async () => {
+  it("aborts requests on key changes and unmount", async () => {
     const signals: AbortSignal[] = [];
     const load = vi.fn((signal: AbortSignal) => {
       signals.push(signal);
@@ -148,7 +148,7 @@ describe('usePolling', () => {
     expect(signals[1]?.aborted).toBe(true);
   });
 
-  it('drops a deferred response after logout advances the session generation', async () => {
+  it("drops a deferred response after logout advances the session generation", async () => {
     const sessionGeneration = { current: 0 };
     const onData = vi.fn();
     let settle: (value: string) => void = () => {};
@@ -156,19 +156,25 @@ describe('usePolling', () => {
       () =>
         new Promise<string>((resolve) => {
           settle = resolve;
-        })
+        }),
     );
-    render(<Harness load={load} onData={onData} sessionGeneration={sessionGeneration} />);
+    render(
+      <Harness
+        load={load}
+        onData={onData}
+        sessionGeneration={sessionGeneration}
+      />,
+    );
 
     sessionGeneration.current += 1;
-    settle('late-session-data');
+    settle("late-session-data");
     await flush();
 
     expect(onData).not.toHaveBeenCalled();
-    expect(screen.getByTestId('data')).toHaveTextContent('none');
+    expect(screen.getByTestId("data")).toHaveTextContent("none");
   });
 
-  it('drops a deferred sibling response after a 401 terminal cleanup', async () => {
+  it("drops a deferred sibling response after a 401 terminal cleanup", async () => {
     const sessionGeneration = { current: 0 };
     const onData = vi.fn();
     let settle: (value: string) => void = () => {};
@@ -176,7 +182,7 @@ describe('usePolling', () => {
       () =>
         new Promise<string>((resolve) => {
           settle = resolve;
-        })
+        }),
     );
     const onUnauthorized = vi.fn(() => {
       sessionGeneration.current += 1;
@@ -196,55 +202,57 @@ describe('usePolling', () => {
           resourceKey="current"
           sessionGeneration={sessionGeneration}
         />
-      </>
+      </>,
     );
     await flush();
     expect(onUnauthorized).toHaveBeenCalledOnce();
 
-    settle('late-session-data');
+    settle("late-session-data");
     await flush();
 
     expect(onData).not.toHaveBeenCalled();
-    expect(screen.getAllByTestId('data')).toHaveLength(2);
-    for (const data of screen.getAllByTestId('data')) {
-      expect(data).toHaveTextContent('none');
+    expect(screen.getAllByTestId("data")).toHaveLength(2);
+    for (const data of screen.getAllByTestId("data")) {
+      expect(data).toHaveTextContent("none");
     }
   });
 
-  it('deduplicates manual refresh while a request is in flight', async () => {
+  it("deduplicates manual refresh while a request is in flight", async () => {
     let settle: (value: string) => void = () => {};
     const load = vi.fn(
       () =>
         new Promise<string>((resolve) => {
           settle = resolve;
-        })
+        }),
     );
     render(<Harness load={load} />);
 
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await act(async () => {
       vi.advanceTimersByTime(60_000);
     });
     expect(load).toHaveBeenCalledOnce();
 
-    settle('ready');
+    settle("ready");
     await flush();
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     expect(load).toHaveBeenCalledTimes(2);
   });
 
-  it('honors Retry-After and disables refresh until the absolute deadline', async () => {
+  it("honors Retry-After and disables refresh until the absolute deadline", async () => {
     const load = vi
       .fn()
       .mockRejectedValueOnce(new ApiError(429, 10))
-      .mockResolvedValueOnce('recovered');
+      .mockResolvedValueOnce("recovered");
     render(<Harness load={load} />);
     await flush();
 
-    expect(screen.getByTestId('state')).toHaveTextContent('rate-limited');
-    expect(screen.getByTestId('retry')).toHaveTextContent(String(Date.now() + 10_000));
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    expect(screen.getByTestId("state")).toHaveTextContent("rate-limited");
+    expect(screen.getByTestId("retry")).toHaveTextContent(
+      String(Date.now() + 10_000),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     expect(load).toHaveBeenCalledOnce();
 
     await act(async () => {
@@ -256,68 +264,74 @@ describe('usePolling', () => {
     });
     expect(load).toHaveBeenCalledTimes(2);
     await flush();
-    expect(screen.getByTestId('state')).toHaveTextContent('ready');
+    expect(screen.getByTestId("state")).toHaveTextContent("ready");
   });
 
   it.each([
-    [503, 'service unavailable'],
-    [0, 'network failure'],
-  ])('retains stale in-memory data after %i %s', async (status) => {
+    [503, "service unavailable"],
+    [0, "network failure"],
+  ])("retains stale in-memory data after %i %s", async (status) => {
     const load = vi
       .fn()
-      .mockResolvedValueOnce('last-good')
+      .mockResolvedValueOnce("last-good")
       .mockRejectedValueOnce(new ApiError(status, null));
     render(<Harness load={load} />);
     await flush();
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await flush();
 
-    expect(screen.getByTestId('state')).toHaveTextContent('stale');
-    expect(screen.getByTestId('data')).toHaveTextContent('last-good');
+    expect(screen.getByTestId("state")).toHaveTextContent("stale");
+    expect(screen.getByTestId("data")).toHaveTextContent("last-good");
   });
 
-  it('treats a 400 as a closed-contract error without stale data', async () => {
+  it("treats a 400 as a closed-contract error without stale data", async () => {
     const load = vi.fn().mockRejectedValue(new ApiError(400, null));
     render(<Harness load={load} />);
     await flush();
 
-    expect(screen.getByTestId('state')).toHaveTextContent('error');
-    expect(screen.getByTestId('data')).toHaveTextContent('none');
+    expect(screen.getByTestId("state")).toHaveTextContent("error");
+    expect(screen.getByTestId("data")).toHaveTextContent("none");
   });
 
-  it('surfaces a response-contract mismatch as an error instead of stale data', async () => {
+  it("surfaces a response-contract mismatch as an error instead of stale data", async () => {
     const load = vi.fn().mockRejectedValue(new ApiContractError());
     render(<Harness load={load} />);
     await flush();
 
-    expect(screen.getByTestId('state')).toHaveTextContent('error');
-    expect(screen.getByTestId('data')).toHaveTextContent('none');
+    expect(screen.getByTestId("state")).toHaveTextContent("error");
+    expect(screen.getByTestId("data")).toHaveTextContent("none");
   });
 
   it.each([
-    [401, 'unauthorized'],
-    [403, 'forbidden'],
-  ])('clears data and dispatches the %i %s boundary', async (status) => {
+    [401, "unauthorized"],
+    [403, "forbidden"],
+  ])("clears data and dispatches the %i %s boundary", async (status) => {
     const onUnauthorized = vi.fn();
     const onForbidden = vi.fn();
     const load = vi
       .fn()
-      .mockResolvedValueOnce('sensitive-metrics')
+      .mockResolvedValueOnce("sensitive-metrics")
       .mockRejectedValueOnce(new ApiError(status, null));
-    render(<Harness load={load} onForbidden={onForbidden} onUnauthorized={onUnauthorized} />);
+    render(
+      <Harness
+        load={load}
+        onForbidden={onForbidden}
+        onUnauthorized={onUnauthorized}
+      />,
+    );
     await flush();
-    fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await flush();
 
-    expect(screen.getByTestId('data')).toHaveTextContent('none');
+    expect(screen.getByTestId("data")).toHaveTextContent("none");
     expect(onUnauthorized).toHaveBeenCalledTimes(status === 401 ? 1 : 0);
     expect(onForbidden).toHaveBeenCalledTimes(status === 403 ? 1 : 0);
   });
 
-  it('never treats polling as operator activity', async () => {
+  it("never treats polling as operator activity", async () => {
     const activity = vi.fn();
-    window.addEventListener('admin-operator-activity', activity);
-    const load = vi.fn().mockResolvedValue('healthy');
+    window.addEventListener("admin-operator-activity", activity);
+    const load = vi.fn().mockResolvedValue("healthy");
     render(<Harness intervalMs={1_000} load={load} />);
     await flush();
     await act(async () => {
@@ -327,6 +341,6 @@ describe('usePolling', () => {
 
     expect(load.mock.calls.length).toBeGreaterThan(1);
     expect(activity).not.toHaveBeenCalled();
-    window.removeEventListener('admin-operator-activity', activity);
+    window.removeEventListener("admin-operator-activity", activity);
   });
 });

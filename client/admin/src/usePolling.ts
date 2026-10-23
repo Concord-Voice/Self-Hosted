@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from "react";
 
-import { ApiContractError, ApiError } from './api';
+import { ApiContractError, ApiError } from "./api";
 
-export type PollingState = 'idle' | 'loading' | 'ready' | 'stale' | 'rate-limited' | 'error';
+export type PollingState =
+  "idle" | "loading" | "ready" | "stale" | "rate-limited" | "error";
 
 export interface UsePollingOptions<T> {
   enabled: boolean;
@@ -41,7 +42,7 @@ export function usePolling<T>({
   const [snapshot, setSnapshot] = useState<PollingSnapshot<T>>({
     data: null,
     retryAt: null,
-    state: 'idle',
+    state: "idle",
   });
   const loadRef = useRef(load);
   const dataRef = useRef(onData);
@@ -87,13 +88,13 @@ export function usePolling<T>({
       setSnapshot((current) => ({
         ...current,
         retryAt: null,
-        state: 'stale',
+        state: "stale",
       }));
     };
 
     const handleFailure = (cause: unknown): void => {
       if (cause instanceof ApiContractError) {
-        setSnapshot({ data: null, retryAt: null, state: 'error' });
+        setSnapshot({ data: null, retryAt: null, state: "error" });
         return;
       }
       if (!(cause instanceof ApiError)) {
@@ -104,22 +105,24 @@ export function usePolling<T>({
       switch (cause.status) {
         case 401:
           terminal = true;
-          setSnapshot({ data: null, retryAt: null, state: 'idle' });
+          setSnapshot({ data: null, retryAt: null, state: "idle" });
           unauthorizedRef.current();
           return;
         case 403:
           terminal = true;
-          setSnapshot({ data: null, retryAt: null, state: 'idle' });
+          setSnapshot({ data: null, retryAt: null, state: "idle" });
           forbiddenRef.current();
           return;
         case 429: {
           const retryMs =
-            cause.retryAfter === null ? intervalMs : Math.max(1, cause.retryAfter * 1_000);
+            cause.retryAfter === null
+              ? intervalMs
+              : Math.max(1, cause.retryAfter * 1_000);
           retryDeadline = Date.now() + retryMs;
           setSnapshot((current) => ({
             ...current,
             retryAt: retryDeadline,
-            state: 'rate-limited',
+            state: "rate-limited",
           }));
           return;
         }
@@ -128,7 +131,7 @@ export function usePolling<T>({
           setStale();
           return;
         default:
-          setSnapshot({ data: null, retryAt: null, state: 'error' });
+          setSnapshot({ data: null, retryAt: null, state: "error" });
       }
     };
 
@@ -147,7 +150,7 @@ export function usePolling<T>({
       setSnapshot((current) => ({
         data: resetPending ? null : current.data,
         retryAt: null,
-        state: 'loading',
+        state: "loading",
       }));
       resetPending = false;
 
@@ -156,7 +159,7 @@ export function usePolling<T>({
         if (isInactive() || activeController.signal.aborted) return;
         dataRef.current?.(data);
         if (isInactive() || activeController.signal.aborted) return;
-        setSnapshot({ data, retryAt: null, state: 'ready' });
+        setSnapshot({ data, retryAt: null, state: "ready" });
       } catch (cause) {
         if (isInactive() || activeController.signal.aborted) return;
         handleFailure(cause);
@@ -164,7 +167,10 @@ export function usePolling<T>({
         if (controller === activeController) controller = null;
         inFlight = false;
         if (isInactive()) return;
-        const delay = retryDeadline === null ? intervalMs : Math.max(0, retryDeadline - Date.now());
+        const delay =
+          retryDeadline === null
+            ? intervalMs
+            : Math.max(0, retryDeadline - Date.now());
         schedule(delay, () => void run());
       }
     };
@@ -194,7 +200,7 @@ export function usePolling<T>({
       void run();
     };
 
-    document.addEventListener('visibilitychange', handleVisibility);
+    document.addEventListener("visibilitychange", handleVisibility);
     if (enabled && !document.hidden) {
       void run();
     } else {
@@ -203,7 +209,7 @@ export function usePolling<T>({
         setSnapshot({
           data: null,
           retryAt: null,
-          state: enabled ? 'loading' : 'idle',
+          state: enabled ? "loading" : "idle",
         });
       });
     }
@@ -212,7 +218,7 @@ export function usePolling<T>({
       disposed = true;
       clearTimer();
       controller?.abort();
-      document.removeEventListener('visibilitychange', handleVisibility);
+      document.removeEventListener("visibilitychange", handleVisibility);
       refreshRef.current = () => {};
     };
   }, [enabled, intervalMs, key, sessionGeneration]);

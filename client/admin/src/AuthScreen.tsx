@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from "react";
 
-import { ApiContractError, ApiError, api } from './api';
-import { decodeRequestOptions, encodeAssertion } from './webauthn';
+import { ApiContractError, ApiError, api } from "./api";
+import { decodeRequestOptions, encodeAssertion } from "./webauthn";
 
 interface AuthScreenProps {
   onAuthenticated: () => void;
@@ -19,10 +19,10 @@ const UNREADABLE_RESPONSE =
   "The server's response was not recognized. This console may be out of date.";
 
 export function AuthScreen({ onAuthenticated }: Readonly<AuthScreenProps>) {
-  const [username, setUsername] = useState('');
-  const [password, setPassword] = useState('');
-  const [error, setError] = useState('');
-  const [status, setStatus] = useState('');
+  const [username, setUsername] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
   const errorRef = useRef<HTMLParagraphElement>(null);
@@ -39,31 +39,34 @@ export function AuthScreen({ onAuthenticated }: Readonly<AuthScreenProps>) {
 
   const runWebAuthn = async (next: Ceremony) => {
     markBusy(true);
-    setStatus('Touch your security key');
-    setError('');
+    setStatus("Touch your security key");
+    setError("");
     try {
       const credential = await navigator.credentials.get({
         publicKey: next.options,
       });
       if (!credential) {
-        setError('Security key did not return a credential.');
+        setError("Security key did not return a credential.");
         return;
       }
-      await api.webauthnLogin(next.handle, encodeAssertion(credential as PublicKeyCredential));
-      setPassword('');
-      setStatus('');
+      await api.webauthnLogin(
+        next.handle,
+        encodeAssertion(credential as PublicKeyCredential),
+      );
+      setPassword("");
+      setStatus("");
       setCeremony(null);
       onAuthenticated();
     } catch (cause) {
-      if (cause instanceof DOMException && cause.name === 'NotAllowedError') {
-        setError('Security key verification was canceled.');
+      if (cause instanceof DOMException && cause.name === "NotAllowedError") {
+        setError("Security key verification was canceled.");
         return;
       }
       setCeremony(null);
       setError(
         cause instanceof ApiContractError
           ? UNREADABLE_RESPONSE
-          : 'Sign-in failed. Check your credentials and try again.'
+          : "Sign-in failed. Check your credentials and try again.",
       );
     } finally {
       markBusy(false);
@@ -74,8 +77,8 @@ export function AuthScreen({ onAuthenticated }: Readonly<AuthScreenProps>) {
     event.preventDefault();
     if (busyRef.current) return;
     markBusy(true);
-    setError('');
-    setStatus('Checking credentials');
+    setError("");
+    setStatus("Checking credentials");
     try {
       const response = await api.passwordLogin(username, password);
       const next = {
@@ -88,19 +91,19 @@ export function AuthScreen({ onAuthenticated }: Readonly<AuthScreenProps>) {
       if (cause instanceof ApiContractError) {
         setError(UNREADABLE_RESPONSE);
       } else if (cause instanceof ApiError) {
-        setError('Sign-in failed. Check your credentials and try again.');
+        setError("Sign-in failed. Check your credentials and try again.");
       } else {
-        setError('Security-key challenge could not be used. Start again.');
+        setError("Security-key challenge could not be used. Start again.");
       }
-      setStatus('');
+      setStatus("");
       markBusy(false);
     }
   };
 
   const backToPassword = () => {
     setCeremony(null);
-    setError('');
-    setStatus('');
+    setError("");
+    setStatus("");
   };
 
   return (
@@ -131,7 +134,7 @@ export function AuthScreen({ onAuthenticated }: Readonly<AuthScreenProps>) {
           onChange={(event) => setPassword(event.currentTarget.value)}
         />
         <button disabled={busy || !username || !password} type="submit">
-          {busy ? 'Verifying' : 'Continue'}
+          {busy ? "Verifying" : "Continue"}
         </button>
       </form>
       {ceremony && !busy ? (

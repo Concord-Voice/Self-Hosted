@@ -1,12 +1,12 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState } from "react";
 
-import { ApiError, api } from './api';
-import concordSymbol from './assets/logos/symbol-transparent-vector.svg';
-import { AuthScreen } from './AuthScreen';
-import type { AdminHealthResponse } from './contracts';
-import { EnrollScreen } from './EnrollScreen';
-import { Portal } from './Portal';
-import './styles.css';
+import { ApiError, api } from "./api";
+import concordSymbol from "./assets/logos/symbol-transparent-vector.svg";
+import { AuthScreen } from "./AuthScreen";
+import type { AdminHealthResponse } from "./contracts";
+import { EnrollScreen } from "./EnrollScreen";
+import { Portal } from "./Portal";
+import "./styles.css";
 
 function Brand() {
   return (
@@ -37,11 +37,11 @@ function reloadDocument(): void {
 }
 
 type View =
-  | { kind: 'loading' }
-  | { kind: 'login' }
-  | { kind: 'reloading' }
-  | { kind: 'unverified' }
-  | { health: AdminHealthResponse; kind: 'portal' };
+  | { kind: "loading" }
+  | { kind: "login" }
+  | { kind: "reloading" }
+  | { kind: "unverified" }
+  | { health: AdminHealthResponse; kind: "portal" };
 
 interface EntryContentProps {
   isEnrollment: boolean;
@@ -59,17 +59,20 @@ function EntryContent({
   view,
 }: Readonly<EntryContentProps>) {
   if (isEnrollment) {
-    return <EnrollScreen onContinue={() => navigate('/admin/')} />;
+    return <EnrollScreen onContinue={() => navigate("/admin/")} />;
   }
-  if (view.kind === 'login') {
+  if (view.kind === "login") {
     return <AuthScreen onAuthenticated={onAuthenticated} />;
   }
-  if (view.kind === 'reloading') {
+  if (view.kind === "reloading") {
     return <output>Reconnecting to Access</output>;
   }
-  if (view.kind === 'unverified') {
+  if (view.kind === "unverified") {
     return (
-      <section aria-labelledby="session-verification-title" className="auth-panel">
+      <section
+        aria-labelledby="session-verification-title"
+        className="auth-panel"
+      >
         <h1 id="session-verification-title">Unable to verify session</h1>
         <output className="form-status">
           The Admin Portal could not confirm whether you are signed in.
@@ -87,8 +90,8 @@ export function App({
   navigate = navigateDocument,
   reload = reloadDocument,
 }: Readonly<AppProps> = {}) {
-  const isEnrollment = globalThis.location.pathname === '/admin/enroll';
-  const [view, setView] = useState<View>({ kind: 'loading' });
+  const isEnrollment = globalThis.location.pathname === "/admin/enroll";
+  const [view, setView] = useState<View>({ kind: "loading" });
   const [probeGeneration, setProbeGeneration] = useState(0);
 
   useEffect(() => {
@@ -98,20 +101,20 @@ export function App({
     void api
       .getHealth({ signal: controller.signal })
       .then((health) => {
-        if (active) setView({ health, kind: 'portal' });
+        if (active) setView({ health, kind: "portal" });
       })
       .catch((cause: unknown) => {
         if (!active) return;
         if (cause instanceof ApiError && cause.status === 401) {
-          setView({ kind: 'login' });
+          setView({ kind: "login" });
           return;
         }
         if (cause instanceof ApiError && cause.status === 403) {
-          setView({ kind: 'reloading' });
+          setView({ kind: "reloading" });
           reload();
           return;
         }
-        setView({ kind: 'unverified' });
+        setView({ kind: "unverified" });
       });
     return () => {
       active = false;
@@ -120,18 +123,18 @@ export function App({
   }, [isEnrollment, probeGeneration, reload]);
 
   const retrySessionProbe = () => {
-    setView({ kind: 'loading' });
+    setView({ kind: "loading" });
     setProbeGeneration((generation) => generation + 1);
   };
 
   return (
     <div className="app-shell">
       <Brand />
-      {!isEnrollment && view.kind === 'portal' ? (
+      {!isEnrollment && view.kind === "portal" ? (
         <Portal
           initialHealth={view.health}
           onForbidden={reload}
-          onSessionEnded={() => setView({ kind: 'login' })}
+          onSessionEnded={() => setView({ kind: "login" })}
         />
       ) : (
         <main className="app-main">

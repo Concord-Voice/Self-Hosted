@@ -1,7 +1,7 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState } from "react";
 
-import { ApiContractError, ApiError, api } from './api';
-import { decodeCreationOptions, encodeAttestation } from './webauthn';
+import { ApiContractError, ApiError, api } from "./api";
+import { decodeCreationOptions, encodeAttestation } from "./webauthn";
 
 interface EnrollScreenProps {
   onContinue: () => void;
@@ -20,11 +20,11 @@ interface Ceremony {
 function readInvite(): EnrollmentInvite {
   const params = new URLSearchParams(globalThis.location.search);
   const invite = {
-    username: params.get('username') ?? '',
-    token: params.get('token') ?? '',
+    username: params.get("username") ?? "",
+    token: params.get("token") ?? "",
   };
   if (globalThis.location.search) {
-    globalThis.history.replaceState(null, '', '/admin/enroll');
+    globalThis.history.replaceState(null, "", "/admin/enroll");
   }
   return invite;
 }
@@ -37,10 +37,10 @@ const UNREADABLE_RESPONSE =
 
 export function EnrollScreen({ onContinue }: Readonly<EnrollScreenProps>) {
   const [invite] = useState(readInvite);
-  const [password, setPassword] = useState('');
-  const [credentialName, setCredentialName] = useState('');
-  const [error, setError] = useState('');
-  const [status, setStatus] = useState('');
+  const [password, setPassword] = useState("");
+  const [credentialName, setCredentialName] = useState("");
+  const [error, setError] = useState("");
+  const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
   const [complete, setComplete] = useState(false);
   const [ceremony, setCeremony] = useState<Ceremony | null>(null);
@@ -52,28 +52,28 @@ export function EnrollScreen({ onContinue }: Readonly<EnrollScreenProps>) {
 
   const createCredential = async (next: Ceremony) => {
     setBusy(true);
-    setStatus('Touch your security key');
-    setError('');
+    setStatus("Touch your security key");
+    setError("");
     try {
       const credential = await navigator.credentials.create({
         publicKey: next.options,
       });
       if (!credential) {
-        setError('Security key did not return a credential.');
+        setError("Security key did not return a credential.");
         return;
       }
       await api.enrollFinish(
         next.handle,
         encodeAttestation(credential as PublicKeyCredential),
-        credentialName
+        credentialName,
       );
-      setPassword('');
-      setStatus('');
+      setPassword("");
+      setStatus("");
       setComplete(true);
       setCeremony(null);
     } catch (cause) {
-      if (cause instanceof DOMException && cause.name === 'NotAllowedError') {
-        setError('Security key enrollment was canceled.');
+      if (cause instanceof DOMException && cause.name === "NotAllowedError") {
+        setError("Security key enrollment was canceled.");
         return;
       }
       if (cause instanceof ApiContractError) {
@@ -83,10 +83,10 @@ export function EnrollScreen({ onContinue }: Readonly<EnrollScreenProps>) {
       }
       if (cause instanceof ApiError) {
         setCeremony(null);
-        setError('Enrollment failed. Check the invitation and try again.');
+        setError("Enrollment failed. Check the invitation and try again.");
         return;
       }
-      setError('Security-key challenge could not be used. Start again.');
+      setError("Security-key challenge could not be used. Start again.");
     } finally {
       setBusy(false);
     }
@@ -96,9 +96,13 @@ export function EnrollScreen({ onContinue }: Readonly<EnrollScreenProps>) {
     event.preventDefault();
     if (busy) return;
     setBusy(true);
-    setError('');
+    setError("");
     try {
-      const response = await api.enrollBegin(invite.username, password, invite.token);
+      const response = await api.enrollBegin(
+        invite.username,
+        password,
+        invite.token,
+      );
       const next = {
         handle: response.handle,
         options: decodeCreationOptions(response.publicKey),
@@ -109,7 +113,7 @@ export function EnrollScreen({ onContinue }: Readonly<EnrollScreenProps>) {
       setError(
         cause instanceof ApiContractError
           ? UNREADABLE_RESPONSE
-          : 'Enrollment failed. Check the invitation and try again.'
+          : "Enrollment failed. Check the invitation and try again.",
       );
       setBusy(false);
     }
@@ -152,12 +156,18 @@ export function EnrollScreen({ onContinue }: Readonly<EnrollScreenProps>) {
               value={credentialName}
               onChange={(event) => setCredentialName(event.currentTarget.value)}
             />
-            <button disabled={busy || !password || !credentialName} type="submit">
-              {busy ? 'Enrolling' : 'Enroll security key'}
+            <button
+              disabled={busy || !password || !credentialName}
+              type="submit"
+            >
+              {busy ? "Enrolling" : "Enroll security key"}
             </button>
           </form>
           {ceremony && !busy ? (
-            <button type="button" onClick={() => void createCredential(ceremony)}>
+            <button
+              type="button"
+              onClick={() => void createCredential(ceremony)}
+            >
               Try again
             </button>
           ) : null}

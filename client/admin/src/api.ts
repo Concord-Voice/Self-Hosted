@@ -1,4 +1,10 @@
-import { ContractError, parseCounters, parseCurrent, parseHealth, parseSeries } from './contracts';
+import {
+  ContractError,
+  parseCounters,
+  parseCurrent,
+  parseHealth,
+  parseSeries,
+} from "./contracts";
 import type {
   AdminCountersResponse,
   AdminCurrentResponse,
@@ -6,22 +12,22 @@ import type {
   AdminSeriesResponse,
   MetricKey,
   SeriesWindow,
-} from './contracts';
+} from "./contracts";
 
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
-    public readonly retryAfter: number | null
+    public readonly retryAfter: number | null,
   ) {
-    super('Admin Portal request failed');
-    this.name = 'ApiError';
+    super("Admin Portal request failed");
+    this.name = "ApiError";
   }
 }
 
 export class ApiContractError extends Error {
   constructor() {
-    super('Admin Portal response did not match the request');
-    this.name = 'ApiContractError';
+    super("Admin Portal response did not match the request");
+    this.name = "ApiContractError";
   }
 }
 
@@ -39,7 +45,7 @@ interface RequestOptions {
 
 interface RequestInitOptions extends RequestOptions {
   body?: unknown;
-  method?: 'GET' | 'POST';
+  method?: "GET" | "POST";
 }
 
 function retryAfter(value: string | null): number | null {
@@ -51,20 +57,20 @@ function retryAfter(value: string | null): number | null {
 async function request<T>(
   path: string,
   parser: (value: unknown) => T,
-  init: RequestInitOptions = {}
+  init: RequestInitOptions = {},
 ): Promise<T> {
   const headers = new Headers();
   let body: string | undefined;
   if (init.body !== undefined) {
-    headers.set('Content-Type', 'application/json');
+    headers.set("Content-Type", "application/json");
     body = JSON.stringify(init.body);
   }
 
   let response: Response;
   try {
     response = await fetch(path, {
-      method: init.method ?? (init.body === undefined ? 'GET' : 'POST'),
-      credentials: 'same-origin',
+      method: init.method ?? (init.body === undefined ? "GET" : "POST"),
+      credentials: "same-origin",
       headers,
       body,
       signal: init.signal,
@@ -74,7 +80,10 @@ async function request<T>(
   }
 
   if (!response.ok) {
-    throw new ApiError(response.status, retryAfter(response.headers.get('Retry-After')));
+    throw new ApiError(
+      response.status,
+      retryAfter(response.headers.get("Retry-After")),
+    );
   }
 
   if (response.status === 204) return parser(null);
@@ -108,22 +117,28 @@ async function request<T>(
 // api.ts classifying the SAME failure differently per endpoint — auth as a
 // transport failure, metrics as a contract failure.
 function record(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
     throw new ContractError();
   }
   return value as Record<string, unknown>;
 }
 
-function exactKeys(value: Record<string, unknown>, expected: readonly string[]): void {
+function exactKeys(
+  value: Record<string, unknown>,
+  expected: readonly string[],
+): void {
   const actual = Object.keys(value);
   const expectedSet = new Set(expected);
-  if (actual.length !== expected.length || actual.some((key) => !expectedSet.has(key))) {
+  if (
+    actual.length !== expected.length ||
+    actual.some((key) => !expectedSet.has(key))
+  ) {
     throw new ContractError();
   }
 }
 
 function nonEmptyString(value: unknown): string {
-  if (typeof value !== 'string' || value.length === 0) {
+  if (typeof value !== "string" || value.length === 0) {
     throw new ContractError();
   }
   return value;
@@ -131,7 +146,7 @@ function nonEmptyString(value: unknown): string {
 
 function credentialOptionsResponse(value: unknown): CredentialOptionsResponse {
   const data = record(value);
-  exactKeys(data, ['handle', 'publicKey']);
+  exactKeys(data, ["handle", "publicKey"]);
   record(data.publicKey);
   return {
     handle: nonEmptyString(data.handle),
@@ -142,62 +157,73 @@ function credentialOptionsResponse(value: unknown): CredentialOptionsResponse {
 function statusResponse(expected: string): (value: unknown) => void {
   return (value) => {
     const data = record(value);
-    exactKeys(data, ['status']);
+    exactKeys(data, ["status"]);
     if (data.status !== expected) throw new ContractError();
   };
 }
 
 export const api = {
   getHealth(options?: RequestOptions): Promise<AdminHealthResponse> {
-    return request('/admin/api/v1/health', parseHealth, options);
+    return request("/admin/api/v1/health", parseHealth, options);
   },
   getCurrent(options?: RequestOptions): Promise<AdminCurrentResponse> {
-    return request('/admin/api/v1/metrics/current', parseCurrent, options);
+    return request("/admin/api/v1/metrics/current", parseCurrent, options);
   },
   getCounters(options?: RequestOptions): Promise<AdminCountersResponse> {
-    return request('/admin/api/v1/counters', parseCounters, options);
+    return request("/admin/api/v1/counters", parseCounters, options);
   },
   getSeries(
     metricKey: MetricKey,
     window: SeriesWindow,
-    options?: RequestOptions
+    options?: RequestOptions,
   ): Promise<AdminSeriesResponse> {
     const query = new URLSearchParams({ key: metricKey, window });
     return request(
       `/admin/api/v1/metrics/series?${query.toString()}`,
       (value) => {
         const response = parseSeries(value);
-        if (response.metric.metric_key !== metricKey || response.window !== window) {
+        if (
+          response.metric.metric_key !== metricKey ||
+          response.window !== window
+        ) {
           throw new ApiContractError();
         }
         return response;
       },
-      options
+      options,
     );
   },
   passwordLogin(
     username: string,
     password: string,
-    options?: RequestOptions
+    options?: RequestOptions,
   ): Promise<PasswordLoginResponse> {
-    return request('/admin/api/v1/auth/password', credentialOptionsResponse, {
+    return request("/admin/api/v1/auth/password", credentialOptionsResponse, {
       ...options,
       body: { username, password },
     });
   },
-  webauthnLogin(handle: string, assertion: unknown, options?: RequestOptions): Promise<void> {
-    return request('/admin/api/v1/auth/webauthn', statusResponse('authenticated'), {
-      ...options,
-      body: { handle, assertion },
-    });
+  webauthnLogin(
+    handle: string,
+    assertion: unknown,
+    options?: RequestOptions,
+  ): Promise<void> {
+    return request(
+      "/admin/api/v1/auth/webauthn",
+      statusResponse("authenticated"),
+      {
+        ...options,
+        body: { handle, assertion },
+      },
+    );
   },
   enrollBegin(
     username: string,
     password: string,
     token: string,
-    options?: RequestOptions
+    options?: RequestOptions,
   ): Promise<EnrollBeginResponse> {
-    return request('/admin/api/v1/enroll/begin', credentialOptionsResponse, {
+    return request("/admin/api/v1/enroll/begin", credentialOptionsResponse, {
       ...options,
       body: { username, password, token },
     });
@@ -206,17 +232,17 @@ export const api = {
     handle: string,
     attestation: unknown,
     credentialName: string,
-    options?: RequestOptions
+    options?: RequestOptions,
   ): Promise<void> {
-    return request('/admin/api/v1/enroll/finish', statusResponse('enrolled'), {
+    return request("/admin/api/v1/enroll/finish", statusResponse("enrolled"), {
       ...options,
       body: { handle, attestation, credential_name: credentialName },
     });
   },
   logout(options?: RequestOptions): Promise<void> {
-    return request('/admin/api/v1/auth/logout', statusResponse('logged out'), {
+    return request("/admin/api/v1/auth/logout", statusResponse("logged out"), {
       ...options,
-      method: 'POST',
+      method: "POST",
     });
   },
 };

@@ -1,31 +1,32 @@
 @font-face {
-  font-family: 'Droidiga';
-  src: url('./assets/fonts/Droidiga.otf') format('opentype');
+  font-family: "Droidiga";
+  src: url("./assets/fonts/Droidiga.otf") format("opentype");
   font-display: swap;
 }
 
 @font-face {
-  font-family: 'Source Sans';
-  src: url('./assets/fonts/SourceSans.otf') format('opentype');
+  font-family: "Source Sans";
+  src: url("./assets/fonts/SourceSans.otf") format("opentype");
   font-display: swap;
 }
 
 @font-face {
-  font-family: 'Atkinson Hyperlegible';
-  src: url('./assets/fonts/AtkinsonHyperlegibleNextVF-Variable.woff2') format('woff2');
+  font-family: "Atkinson Hyperlegible";
+  src: url("./assets/fonts/AtkinsonHyperlegibleNextVF-Variable.woff2")
+    format("woff2");
   font-display: swap;
 }
 
 @font-face {
-  font-family: 'OpenDyslexic';
-  src: url('./assets/fonts/OpenDyslexic-Regular.woff2') format('woff2');
+  font-family: "OpenDyslexic";
+  src: url("./assets/fonts/OpenDyslexic-Regular.woff2") format("woff2");
   font-display: swap;
   font-weight: 400;
 }
 
 @font-face {
-  font-family: 'OpenDyslexic';
-  src: url('./assets/fonts/OpenDyslexic-Bold.woff2') format('woff2');
+  font-family: "OpenDyslexic";
+  src: url("./assets/fonts/OpenDyslexic-Bold.woff2") format("woff2");
   font-display: swap;
   font-weight: 700;
 }
@@ -33,7 +34,7 @@
 :root {
   color: #ffffff;
   background: #080611;
-  font-family: 'Source Sans', system-ui, sans-serif;
+  font-family: "Source Sans", system-ui, sans-serif;
   font-synthesis: none;
   color-scheme: dark;
   --night: #0d0821;
@@ -107,7 +108,7 @@ code,
 .counter-row strong,
 .session-badge,
 .timestamp {
-  font-family: 'Atkinson Hyperlegible', ui-monospace, monospace;
+  font-family: "Atkinson Hyperlegible", ui-monospace, monospace;
   font-variant-numeric: tabular-nums;
 }
 
@@ -151,7 +152,7 @@ code,
 .brand-name {
   overflow: hidden;
   color: var(--paper);
-  font-family: 'Droidiga', 'Source Sans', sans-serif;
+  font-family: "Droidiga", "Source Sans", sans-serif;
   font-size: 17px;
   line-height: 1.05;
   text-overflow: ellipsis;
@@ -168,7 +169,7 @@ code,
   overflow: hidden;
   max-width: 45vw;
   color: var(--muted);
-  font-family: 'Atkinson Hyperlegible', ui-monospace, monospace;
+  font-family: "Atkinson Hyperlegible", ui-monospace, monospace;
   font-size: 12px;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -274,15 +275,15 @@ code,
   grid-template-columns: 224px minmax(0, 1fr);
   min-height: calc(100vh - 64px);
   background: var(--night);
-  font-family: 'Source Sans', system-ui, sans-serif;
+  font-family: "Source Sans", system-ui, sans-serif;
 }
 
-.portal-shell[data-font='atkinson'] {
-  font-family: 'Atkinson Hyperlegible', system-ui, sans-serif;
+.portal-shell[data-font="atkinson"] {
+  font-family: "Atkinson Hyperlegible", system-ui, sans-serif;
 }
 
-.portal-shell[data-font='open-dyslexic'] {
-  font-family: 'OpenDyslexic', system-ui, sans-serif;
+.portal-shell[data-font="open-dyslexic"] {
+  font-family: "OpenDyslexic", system-ui, sans-serif;
 }
 
 .command-rail-shell {
@@ -327,7 +328,7 @@ code,
 
 .rail-link small {
   color: var(--muted);
-  font-family: 'Atkinson Hyperlegible', ui-monospace, monospace;
+  font-family: "Atkinson Hyperlegible", ui-monospace, monospace;
   font-size: 11px;
 }
 
@@ -336,7 +337,7 @@ code,
   background: var(--surface);
 }
 
-.rail-link[aria-current='page'] {
+.rail-link[aria-current="page"] {
   color: var(--paper);
   border-color: var(--border);
   background: var(--surface-raised);
@@ -630,7 +631,7 @@ meter::-moz-meter-bar {
   white-space: nowrap;
 }
 
-.status > span[aria-hidden='true'] {
+.status > span[aria-hidden="true"] {
   display: inline-grid;
   width: 16px;
   height: 16px;
@@ -868,7 +869,7 @@ td .status {
   background: transparent;
 }
 
-.segmented-control button[aria-pressed='true'] {
+.segmented-control button[aria-pressed="true"] {
   color: #1b1022;
   background: var(--gold);
   font-weight: 800;
@@ -908,7 +909,7 @@ td .status {
 
 .event-row time {
   color: var(--muted);
-  font-family: 'Atkinson Hyperlegible', ui-monospace, monospace;
+  font-family: "Atkinson Hyperlegible", ui-monospace, monospace;
   font-size: 11px;
 }
 
