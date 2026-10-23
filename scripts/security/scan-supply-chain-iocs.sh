@@ -70,11 +70,12 @@ run_subcheck_1() {
 }
 
 # ── Subcheck 2: IOC-list match in lockfiles ─────────────────────────────────
+# Self-Hosted: the root lockfile (packages/*) takes the desktop slot; the
+# concord-bridge workspace stays with Desktop.
 LOCKFILES=(
-  "client/desktop/package-lock.json"
+  "package-lock.json"
   "services/media-plane/package-lock.json"
   "client/admin/package-lock.json"
-  "dev-tooling/concord-bridge/package-lock.json"
   ".github/tools/license-checker/package-lock.json"
 )
 # Pass inline Python with -c instead of stdin: Bash can deadlock a heredoc

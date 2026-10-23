@@ -381,7 +381,7 @@ for label in 'risk: hotfix' 'risk: security'; do
     1 2 3 "$label" > "$fixture"
   : > "$output"
   PATH="$TASK_TMP/bin:$PATH" PR_FIXTURE="$fixture" PR_NUMBER=123 GITHUB_OUTPUT="$output" \
-    GITHUB_REPOSITORY=Concord-Voice/Concord-Voice-Alpha RUNNER_TEMP="$TASK_TMP/runner" \
+    GITHUB_REPOSITORY=Concord-Voice/Self-Hosted RUNNER_TEMP="$TASK_TMP/runner" \
     GH_TOKEN=test-token-123 \
     bash "$TASK_TMP/metadata-step.sh"
 done

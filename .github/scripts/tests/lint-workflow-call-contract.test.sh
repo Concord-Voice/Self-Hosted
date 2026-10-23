@@ -109,7 +109,7 @@ pinned="$(fixture_git -c user.name=Test -c user.email=test@example.invalid \
   commit-tree "$(fixture_git write-tree)" -m 'pinned fixture')"
 write_callee callee "  contents: read" EMPTY
 write_caller "  contents: read" EMPTY callee \
-  "Concord-Voice/Concord-Voice-Alpha/.github/workflows/callee.yml@$pinned"
+  "Concord-Voice/Self-Hosted/.github/workflows/callee.yml@$pinned"
 assert_exit 1 "SHA-pinned call checks the committed contract, not the edited checkout"
 
 new_case

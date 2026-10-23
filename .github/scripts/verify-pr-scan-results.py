@@ -24,7 +24,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 import yaml
 
 
-REPO = "Concord-Voice/Concord-Voice-Alpha"
+REPO = "Concord-Voice/Self-Hosted"
 API = f"https://api.github.com/repos/{REPO}"
 REPO_ROOT = Path(__file__).resolve().parents[2]
 GIT_ENV = {key: value for key, value in os.environ.items() if not key.startswith("GIT_")}

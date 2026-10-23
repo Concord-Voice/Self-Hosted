@@ -13,7 +13,7 @@ from urllib.error import HTTPError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
-REPO = "Concord-Voice/Concord-Voice-Alpha"
+REPO = "Concord-Voice/Self-Hosted"
 API = f"https://api.github.com/repos/{REPO}"
 APP_ID = 12526
 CHECK_NAME = "SonarCloud Code Analysis"

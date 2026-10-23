@@ -35,11 +35,11 @@ FAILED_TESTS=()
 setup_test_repo() {
   local tmpdir
   tmpdir=$(mktemp -d)
-  mkdir -p "$tmpdir"/client/desktop \
+  mkdir -p "$tmpdir" \
            "$tmpdir"/services/media-plane \
            "$tmpdir"/.github/tools/license-checker \
            "$tmpdir"/scripts/security/iocs
-  cp "$FIXTURES/lockfile-clean.json" "$tmpdir/client/desktop/package-lock.json"
+  cp "$FIXTURES/lockfile-clean.json" "$tmpdir/package-lock.json"
   cp "$FIXTURES/lockfile-clean.json" "$tmpdir/services/media-plane/package-lock.json"
   cp "$FIXTURES/lockfile-clean.json" "$tmpdir/.github/tools/license-checker/package-lock.json"
   cp "$FIXTURES/fake-ioc-list.txt" "$tmpdir/scripts/security/iocs/shai-hulud-2.0.txt"
@@ -173,7 +173,7 @@ test_subcheck2_ioc_in_lockfile_fails() {
   trap "rm -rf $tmpdir" RETURN
   cd "$tmpdir"
 
-  cp "$FIXTURES/lockfile-with-ioc.json" client/desktop/package-lock.json
+  cp "$FIXTURES/lockfile-with-ioc.json" package-lock.json
 
   local output exit_code=0
   output=$("$SCANNER" --lockfile-only 2>&1) || exit_code=$?
@@ -217,7 +217,7 @@ test_subcheck2_nested_node_modules_ioc_detected() {
   trap "rm -rf $tmpdir" RETURN
   cd "$tmpdir"
 
-  cp "$FIXTURES/lockfile-with-nested-ioc.json" client/desktop/package-lock.json
+  cp "$FIXTURES/lockfile-with-nested-ioc.json" package-lock.json
 
   local output exit_code=0
   output=$("$SCANNER" --lockfile-only 2>&1) || exit_code=$?
@@ -235,7 +235,7 @@ test_subcheck2_malformed_lockfile_internal_error() {
   cd "$tmpdir"
 
   echo "{ this is not valid json <<< MERGE CONFLICT MARKER" \
-    > client/desktop/package-lock.json
+    > package-lock.json
 
   local output exit_code=0
   output=$("$SCANNER" --lockfile-only 2>&1) || exit_code=$?
@@ -250,7 +250,7 @@ test_subcheck2_fp_allowlist_suppresses_match() {
   trap "rm -rf $tmpdir" RETURN
   cd "$tmpdir"
 
-  cp "$FIXTURES/lockfile-with-ioc.json" client/desktop/package-lock.json
+  cp "$FIXTURES/lockfile-with-ioc.json" package-lock.json
   echo "fixture-malicious-package  # FP confirmed for test" \
     > scripts/security/iocs/false-positive-allowlist.txt
 
@@ -267,7 +267,7 @@ test_subcheck2_fp_allowlist_without_rationale() {
   trap "rm -rf $tmpdir" RETURN
   cd "$tmpdir"
 
-  cp "$FIXTURES/lockfile-with-ioc.json" client/desktop/package-lock.json
+  cp "$FIXTURES/lockfile-with-ioc.json" package-lock.json
   echo "fixture-malicious-package" \
     > scripts/security/iocs/false-positive-allowlist.txt
 
@@ -297,7 +297,7 @@ test_subcheck2_trusted_policy_overrides_pr_files() {
   trap "rm -rf $tmpdir" RETURN
   cd "$tmpdir"
 
-  cp "$FIXTURES/lockfile-with-ioc.json" client/desktop/package-lock.json
+  cp "$FIXTURES/lockfile-with-ioc.json" package-lock.json
   printf '# PR deleted the IOC list\n' > scripts/security/iocs/shai-hulud-2.0.txt
   printf 'fixture-malicious-package\n' > scripts/security/iocs/false-positive-allowlist.txt
   printf 'fixture-malicious-package\n' > "$tmpdir/trusted-list.txt"
@@ -322,7 +322,7 @@ test_subcheck2_v1_lockfile_fails_closed() {
   cd "$tmpdir"
 
   printf '%s\n' '{"lockfileVersion":1,"dependencies":{"fixture-malicious-package":{"version":"1.0.0"}}}' \
-    > client/desktop/package-lock.json
+    > package-lock.json
   local output exit_code=0
   output=$("$SCANNER" --lockfile-only 2>&1) || exit_code=$?
   [[ $exit_code -eq 10 ]] || { echo "expected unsupported v1 to fail closed (10), got $exit_code: $output" >&2; return 1; }
@@ -336,7 +336,7 @@ test_subcheck2_invalid_packages_fails_closed() {
   cd "$tmpdir"
 
   printf '%s\n' '{"lockfileVersion":3,"packages":[]}' \
-    > client/desktop/package-lock.json
+    > package-lock.json
   local output exit_code=0
   output=$("$SCANNER" --lockfile-only 2>&1) || exit_code=$?
   [[ $exit_code -eq 10 ]] || { echo "expected invalid packages to fail closed (10), got $exit_code: $output" >&2; return 1; }
@@ -347,9 +347,9 @@ test_subcheck2_v2_lockfile_still_supported() {
   trap "rm -rf $tmpdir" RETURN
   cd "$tmpdir"
 
-  cp "$FIXTURES/lockfile-with-ioc.json" client/desktop/package-lock.json
-  sed -i.bak 's/"lockfileVersion": 3/"lockfileVersion": 2/' client/desktop/package-lock.json
-  rm -f client/desktop/package-lock.json.bak
+  cp "$FIXTURES/lockfile-with-ioc.json" package-lock.json
+  sed -i.bak 's/"lockfileVersion": 3/"lockfileVersion": 2/' package-lock.json
+  rm -f package-lock.json.bak
   local output exit_code=0
   output=$("$SCANNER" --lockfile-only 2>&1) || exit_code=$?
   [[ $exit_code -eq 3 ]] || { echo "expected v2 IOC finding (3), got $exit_code: $output" >&2; return 1; }
@@ -360,7 +360,7 @@ test_subcheck2_npm_alias_real_name_matches_ioc() {
   trap "rm -rf $tmpdir" RETURN
   cd "$tmpdir"
 
-  cat > client/desktop/package-lock.json <<'JSON'
+  cat > package-lock.json <<'JSON'
 {"lockfileVersion":3,"packages":{"":{"name":"fixture-app","version":"1.0.0"},
 "node_modules/safe-alias":{"name":"fixture-malicious-package","version":"1.0.0-poisoned"}}}
 JSON
@@ -376,8 +376,8 @@ test_subcheck3_new_preinstall_warns() {
   trap "rm -rf $tmpdir" RETURN
   cd "$tmpdir"
 
-  cp "$FIXTURES/lockfile-with-install.json" client/desktop/package-lock.json
-  git add client/desktop/package-lock.json
+  cp "$FIXTURES/lockfile-with-install.json" package-lock.json
+  git add package-lock.json
   git -c commit.gpgsign=false commit -q -m "add sketchy-pkg"
 
   local output exit_code=0
@@ -398,8 +398,8 @@ test_subcheck3_multiline_preinstall_warns() {
   trap "rm -rf $tmpdir" RETURN
   cd "$tmpdir"
 
-  cp "$FIXTURES/lockfile-with-multiline-install.json" client/desktop/package-lock.json
-  git add client/desktop/package-lock.json
+  cp "$FIXTURES/lockfile-with-multiline-install.json" package-lock.json
+  git add package-lock.json
   git -c commit.gpgsign=false commit -q -m "add multiline-pkg"
 
   local output exit_code=0
@@ -428,8 +428,8 @@ test_subcheck3_existing_preinstall_not_flagged() {
   # then add an unrelated second commit so HEAD~1 is resolvable and
   # contains the install script. This exercises the diff-suppression
   # path (pre-existing script in base → no WARN), not the skip path.
-  cp "$FIXTURES/lockfile-with-install.json" client/desktop/package-lock.json
-  git add client/desktop/package-lock.json
+  cp "$FIXTURES/lockfile-with-install.json" package-lock.json
+  git add package-lock.json
   git -c commit.gpgsign=false commit --amend -q --no-edit
 
   echo "marker" > unrelated.txt

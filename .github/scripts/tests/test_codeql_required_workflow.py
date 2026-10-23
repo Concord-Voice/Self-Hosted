@@ -43,8 +43,8 @@ def reachable_actions(root: Path, workflow_path: str) -> list[tuple[str, str, tu
             callee = job.get("uses", "")
             if callee.startswith("./.github/workflows/"):
                 visit(callee[2:], job_path, ref)
-            elif callee.startswith("Concord-Voice/Concord-Voice-Alpha/.github/workflows/"):
-                path, _, pinned_ref = callee.removeprefix("Concord-Voice/Concord-Voice-Alpha/").rpartition("@")
+            elif callee.startswith("Concord-Voice/Self-Hosted/.github/workflows/"):
+                path, _, pinned_ref = callee.removeprefix("Concord-Voice/Self-Hosted/").rpartition("@")
                 if re.fullmatch(r"[0-9a-f]{40}", pinned_ref):
                     visit(path, job_path, pinned_ref)
             for step_index, step in enumerate(job.get("steps", [])):
@@ -164,7 +164,7 @@ jobs:
 on: {{pull_request: {{}}}}
 jobs:
   call:
-    uses: Concord-Voice/Concord-Voice-Alpha/.github/workflows/leaf.yml@{pinned}
+    uses: Concord-Voice/Self-Hosted/.github/workflows/leaf.yml@{pinned}
 """)
             with patch.dict(os.environ, {"GIT_DIR": str(fixture / "missing"),
                                       "GIT_INDEX_FILE": str(fixture / "missing-index")}):

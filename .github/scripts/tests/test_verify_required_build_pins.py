@@ -10,7 +10,7 @@ SCRIPT = ROOT / ".github/scripts/verify-required-build-pins.py"
 # A hook's GIT_DIR would point the fixture's `git init` at this repository
 # ([internal]rules/git-hooks.md), so the fixture git never sees git's local env.
 ENV = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
-OURS = "Concord-Voice/Concord-Voice-Alpha/.github/workflows"
+OURS = "Concord-Voice/Self-Hosted/.github/workflows"
 CONTRACT = """\
 on:
   workflow_call:
@@ -159,11 +159,11 @@ class VerifyRequiredBuildPins(unittest.TestCase):
             # points at later.
             "step_mutable.yml": steps("someone/action@main"),
             "step_docker.yml": steps("docker://alpine:3"),
-            "step_branch.yml": steps(f"Concord-Voice/Concord-Voice-Alpha/.github/actions/x@{cls.branch_only}"),
+            "step_branch.yml": steps(f"Concord-Voice/Self-Hosted/.github/actions/x@{cls.branch_only}"),
             "step_local.yml": steps("./.github/actions/x"),
             "step_ok.yml": steps(f"dorny/paths-filter@{'c' * 40}",
                                  f"docker://alpine@sha256:{'d' * 64}",
-                                 f"Concord-Voice/Concord-Voice-Alpha/.github/actions/x@{cls.reviewed}"),
+                                 f"Concord-Voice/Self-Hosted/.github/actions/x@{cls.reviewed}"),
             # Review r5 H1: libyaml skips a BOM at the start of a line, so it reads this
             # `uses` inside the job, while PyYAML's pure-Python reader puts it at the top.
             "bom_hide.yml": "on: workflow_call\njobs:\n  shadow:\n    permissions: {contents: read}\n"
@@ -253,7 +253,7 @@ class VerifyRequiredBuildPins(unittest.TestCase):
 
     def test_owner_case_does_not_bypass(self):
         run = self.run_check(self.workflow(
-            self.branch_only, owner_path="concord-voice/CONCORD-VOICE-ALPHA/.github/workflows"))
+            self.branch_only, owner_path="concord-voice/SELF-HOSTED/.github/workflows"))
         self.assert_blocked(run, "is not a commit on main")
 
     def test_mutable_ref_fails(self):
@@ -321,8 +321,8 @@ class VerifyRequiredBuildPins(unittest.TestCase):
         self.assertEqual(self.run_check(text).returncode, 1)
 
     def test_reusable_workflow_from_another_repository_fails(self):
-        for owner_path in ("attacker/Concord-Voice-Alpha/.github/workflows",
-                           "Concord-Voice/Concord-Voice-Alpha.git/.github/workflows"):
+        for owner_path in ("attacker/Self-Hosted/.github/workflows",
+                           "Concord-Voice/Self-Hosted.git/.github/workflows"):
             with self.subTest(owner_path=owner_path):
                 text = (f"jobs:\n  osv:\n    uses: {OURS}/osv-scanner.yml@{self.reviewed}\n"
                         f"  pr-ci:\n    uses: {owner_path}/pr-ci.yml@{'0' * 40}\n")
@@ -338,7 +338,7 @@ class VerifyRequiredBuildPins(unittest.TestCase):
                 self.assert_blocked(self.run_check(text), "names `uses` but is not")
 
     def test_internal_pin_must_be_a_top_level_workflow(self):
-        for value in (f"Concord-Voice/Concord-Voice-Alpha/some-action@{self.reviewed}",
+        for value in (f"Concord-Voice/Self-Hosted/some-action@{self.reviewed}",
                       f"{OURS}/nested/pr-ci.yml@{self.reviewed}"):
             with self.subTest(value=value):
                 text = self.workflow(self.reviewed) + f"  extra:\n    steps:\n      - uses: {value}\n"

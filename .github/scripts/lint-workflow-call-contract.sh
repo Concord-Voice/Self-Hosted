@@ -79,7 +79,7 @@ _cache: dict[tuple[pathlib.Path, str | None], dict] = {}
 def local_callee(uses: str, ref: str | None = None) -> tuple[pathlib.Path, str | None] | None:
     if uses.startswith("./"):
         return ROOT / uses[2:], ref
-    prefix = "Concord-Voice/Concord-Voice-Alpha/"
+    prefix = "Concord-Voice/Self-Hosted/"
     if uses.startswith(prefix + ".github/workflows/"):
         path, _, pinned_ref = uses[len(prefix):].rpartition("@")
         if re.fullmatch(r"[0-9a-f]{40}", pinned_ref):

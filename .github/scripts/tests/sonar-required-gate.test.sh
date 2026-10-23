@@ -93,7 +93,7 @@ with tempfile.TemporaryDirectory(prefix="pr-ci-owner-") as temporary:
         env = {**os.environ, "MODE": mode, "SELECTION": json.dumps(selection),
                "GH_FAIL": "true" if failure else "false", "RULES_FIXTURE": str(rules),
                "GITHUB_OUTPUT": str(output), "RUNNER_TEMP": str(tmp),
-               "GITHUB_REPOSITORY": "Concord-Voice/Concord-Voice-Alpha",
+               "GITHUB_REPOSITORY": "Concord-Voice/Self-Hosted",
                "PATH": f"{tmp}:{os.environ['PATH']}"}
         run = subprocess.run(["bash", "-c", owner_step["run"]], env=env,
                              capture_output=True, text=True)
@@ -109,9 +109,9 @@ codeql_init = next(step for step in codeql_workflow["jobs"]["analyze"]["steps"]
                    if step.get("name") == "Initialize CodeQL")
 codeql_config = yaml.load((root / ".github/codeql/codeql-config.yml").read_text(), Loader=yaml.BaseLoader)
 codeowners = (root / "CODEOWNERS").read_text()
-assert codeql_init["with"]["config-file"] == "remote=Concord-Voice/Concord-Voice-Alpha@main:.github/codeql/codeql-config.yml", (
+assert codeql_init["with"]["config-file"] == "remote=Concord-Voice/Self-Hosted@main:.github/codeql/codeql-config.yml", (
     "CodeQL configuration must come from protected main, not the PR checkout")
-assert codeql_config["queries"][0]["uses"] == "Concord-Voice/Concord-Voice-Alpha/.github/codeql/queries/go/LogInjectionUnstructured.ql@main", (
+assert codeql_config["queries"][0]["uses"] == "Concord-Voice/Self-Hosted/.github/codeql/queries/go/LogInjectionUnstructured.ql@main", (
     "the custom CodeQL query must come from protected main")
 assert any(line.split()[:1] == [".github/codeql/**"] and
            line.split()[1:] == ["@Concord-Voice/security"]
@@ -245,7 +245,7 @@ else:
         result = subprocess.run(
             ["bash", str(push_validator)],
             env={**os.environ, "PATH": f"{tmp}:{os.environ['PATH']}",
-                 "GITHUB_REPOSITORY": "Concord-Voice/Concord-Voice-Alpha",
+                 "GITHUB_REPOSITORY": "Concord-Voice/Self-Hosted",
                  "BEFORE_SHA": before, "AFTER_SHA": after,
                  "RESOLVED_VIA": via, "HOTFIX_RESOLUTION": resolution,
                  "HOTFIX": hotfix, "PR_NUMBER": pr_number, "PR_JSON": str(pr_path),
@@ -511,7 +511,7 @@ assert "needs.select-licenses.outputs.go != 'false'" in go_license["if"]
 jobs = workflow["jobs"]
 assert workflow["on"]["pull_request"]["branches"] == ["__ruleset_only__"]
 assert "concurrency" not in workflow
-assert jobs["pr-ci"]["uses"] == "Concord-Voice/Concord-Voice-Alpha/.github/workflows/pr-ci.yml@cb10844a7860092011f96b4607682ef2e6c55a80"
+assert jobs["pr-ci"]["uses"] == "Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@cb10844a7860092011f96b4607682ef2e6c55a80"
 script_pin = re.search(r"^readonly PR_CI_SHA='([0-9a-f]{40})'", relevance_apply.read_text(), re.M)
 assert script_pin and jobs["pr-ci"]["uses"].endswith("@" + script_pin.group(1)), (
     "scan cutover verifier must use the protected workflow's pinned pr-ci SHA")
@@ -519,7 +519,7 @@ assert jobs["pr-ci"]["name"] == "Protected scan enforcement"
 assert jobs["pr-ci"]["with"] == {"trusted-source": "true", "enforcement-only": "true"}
 assert jobs["pr-ci"]["secrets"] == {"SONAR_TOKEN": "${{ secrets.SONAR_TOKEN }}"}
 assert jobs["osv"]["name"] == "Protected OSV dependency scan"
-assert jobs["osv"]["uses"] == "Concord-Voice/Concord-Voice-Alpha/.github/workflows/osv-scanner.yml@06bc23adc8c82a1eb55e5d6988b42f42f463fb83"
+assert jobs["osv"]["uses"] == "Concord-Voice/Self-Hosted/.github/workflows/osv-scanner.yml@06bc23adc8c82a1eb55e5d6988b42f42f463fb83"
 assert jobs["osv"]["needs"] == ["pr-ci"]
 assert jobs["osv"]["if"] == "${{ always() && contains(needs.pr-ci.outputs.report-selection, '\"osv\":true') }}", (
     "selected protected OSV must run even when another pr-ci scan fails; unselected OSV stays skipped")
@@ -557,12 +557,12 @@ with tempfile.TemporaryDirectory() as temporary:
         sha: process.env.CURRENT_HEAD_SHA,
         repo: JSON.parse(process.env.CURRENT_HEAD_REPO),
       }, base: {ref: process.env.CURRENT_BASE_REF,
-                repo: {full_name: 'Concord-Voice/Concord-Voice-Alpha'}},
+                repo: {full_name: 'Concord-Voice/Self-Hosted'}},
       user: {login: process.env.MOCK_PR_AUTHOR}}})};
       const github = {paginate: async () => comments, rest: {issues, pulls}};
       const core = {notice: message => notices.push(message),
                     info: message => notices.push(message)};
-      const context = {repo: {owner: 'Concord-Voice', repo: 'Concord-Voice-Alpha'},
+      const context = {repo: {owner: 'Concord-Voice', repo: 'Self-Hosted'},
                        issue: {number: 123}, payload: {pull_request: {head: {sha: 'a'.repeat(40)},
                                                                      base: {ref: 'main'},
                                                                      user: {login: process.env.MOCK_PR_AUTHOR}}}};
@@ -582,7 +582,7 @@ with tempfile.TemporaryDirectory() as temporary:
 
     def publish_case(payload, comments, expected_kind, expected_id=None,
                      current_sha="a" * 40, current_base="main",
-                     author="contributor", head_repo="Concord-Voice/Concord-Voice-Alpha",
+                     author="contributor", head_repo="Concord-Voice/Self-Hosted",
                      expect_notice=False):
         artifact.write_text(json.dumps(payload))
         run = subprocess.run(
@@ -624,7 +624,7 @@ with tempfile.TemporaryDirectory() as temporary:
     publish_case({"count": 1, "warnings": [warning]}, [attacker], "skip",
                  author="dependabot[bot]", expect_notice=True)
     publish_case({"count": 1, "warnings": [warning]}, [attacker], "skip",
-                 head_repo="contributor/Concord-Voice-Alpha", expect_notice=True)
+                 head_repo="contributor/Self-Hosted", expect_notice=True)
     publish_case({"count": 1, "warnings": [warning]}, [attacker], "skip",
                  head_repo=None, expect_notice=True)
     publish_case({"count": 0, "warnings": []}, [attacker], "skip",
@@ -684,7 +684,7 @@ with tempfile.TemporaryDirectory() as tmp:
         return fixture_git(repo, "rev-parse", "HEAD")
     def required_build(pin):
         return ("permissions:\n  contents: read\n"
-                "jobs:\n  pr-ci:\n    uses: Concord-Voice/Concord-Voice-Alpha/.github/workflows/"
+                "jobs:\n  pr-ci:\n    uses: Concord-Voice/Self-Hosted/.github/workflows/"
                 f"pr-ci.yml@{pin}\n")
     older = commit_file(origin, ".github/workflows/pr-ci.yml", "on: workflow_call\n", "older seed")
     seed = commit_file(origin, ".github/workflows/pr-ci.yml", "on: workflow_call # seed\n", "seed")
@@ -764,9 +764,9 @@ assert identity_step["if"] == "${{ inputs.trusted-source }}"
 assert "workflow_repository" in identity_step["env"]["WORKFLOW_REPOSITORY"]
 assert "workflow_sha" in identity_step["env"]["WORKFLOW_SHA"]
 for repo, sha, passes in [
-    ("Concord-Voice/Concord-Voice-Alpha", "a" * 40, True),
-    ("Concord-Voice/Concord-Voice-Alpha", "", False),
-    ("Concord-Voice/Concord-Voice-Alpha", "a" * 39, False),
+    ("Concord-Voice/Self-Hosted", "a" * 40, True),
+    ("Concord-Voice/Self-Hosted", "", False),
+    ("Concord-Voice/Self-Hosted", "a" * 39, False),
     ("attacker/repo", "a" * 40, False),
 ]:
     check = subprocess.run(
@@ -936,14 +936,14 @@ elif a == ["api", "orgs/Concord-Voice/rulesets/123"]:
         if mode == "drift":
             desired["enforcement"] = "disabled"
         print(json.dumps(desired))
-elif any("repos/Concord-Voice/Concord-Voice-Alpha/commits/main" in arg for arg in a):
+elif any("repos/Concord-Voice/Self-Hosted/commits/main" in arg for arg in a):
     count = source_count()
     sha = "c" * 40 if source == "move" and count > 1 else "a" * 40
     if "--jq" in a and a[a.index("--jq") + 1] == ".sha":
         print(sha)
     else:
         print(json.dumps({"sha": sha}))
-elif any("repos/Concord-Voice/Concord-Voice-Alpha/contents/" in arg for arg in a):
+elif any("repos/Concord-Voice/Self-Hosted/contents/" in arg for arg in a):
     path = next(arg.split("/contents/", 1)[1].split("?", 1)[0]
                 for arg in a if "/contents/" in arg)
     if source == "missing" and path == ".github/workflows/required-pr-build.yml":
@@ -1067,10 +1067,10 @@ if path == "orgs/Concord-Voice/rulesets/17153062":
     result = json.loads(Path(os.environ["ORG_RULE"]).read_text())
 elif path == "orgs/Concord-Voice/rulesets/24555855":
     result = json.loads(Path(os.environ["WORKFLOW_SOURCE_RULE"]).read_text())
-elif path == "repos/Concord-Voice/Concord-Voice-Alpha/rulesets/17541948":
+elif path == "repos/Concord-Voice/Self-Hosted/rulesets/17541948":
     override = os.environ.get("REPO_RULE_OVERRIDE", os.environ["REPO_RULE"])
     result = json.loads(Path(override).read_text())
-elif path == "repos/Concord-Voice/Concord-Voice-Alpha/rules/branches/main":
+elif path == "repos/Concord-Voice/Self-Hosted/rules/branches/main":
     pages = json.loads(Path(os.environ["EFFECTIVE_PAGES"]).read_text())
     if os.environ.get("LIVE_EFFECTIVE_WRAPPED") == "1":
         print(json.dumps({"rules": [rule for page in pages for rule in page]}))
@@ -1089,11 +1089,11 @@ elif path == "orgs/Concord-Voice/rulesets?per_page=100":
     result = [{"id": 123, "name": "Alpha Required PR Build"}]
 elif path == "orgs/Concord-Voice/rulesets/123":
     result = json.loads(Path(os.environ["WORKFLOW_RULE"]).read_text())
-elif path == "repos/Concord-Voice/Concord-Voice-Alpha/commits/main":
+elif path == "repos/Concord-Voice/Self-Hosted/commits/main":
     result = {"sha": "a" * 40}
-elif path == "repos/Concord-Voice/Concord-Voice-Alpha/actions/workflows/required-pr-build.yml":
+elif path == "repos/Concord-Voice/Self-Hosted/actions/workflows/required-pr-build.yml":
     result = {"id": 369488263, "path": ".github/workflows/required-pr-build.yml"}
-elif path == "repos/Concord-Voice/Concord-Voice-Alpha/pulls?state=open&per_page=100":
+elif path == "repos/Concord-Voice/Self-Hosted/pulls?state=open&per_page=100":
     result = json.loads(Path(os.environ["OPEN_PRS"]).read_text()) if os.environ.get("OPEN_PRS") else []
 elif path.endswith("actions/variables/" + "CI_SCAN_RELEVANCE_MODE"):
     result = {"name": "CI_SCAN_RELEVANCE_MODE", "value": "required-full"}
@@ -1316,18 +1316,18 @@ else:
             "status": "modified" if case_id.startswith("selector-mask-") else "added"} for path in changed]
         run_data[str(run_id)] = {"id": run_id, "run_attempt": 1, "status": "completed", "workflow_id": 380888328,
             "created_at": "2026-10-08T12:00:01Z" if case_id == "docs-baseline-pass" else "2026-10-09T12:00:00Z",
-            "workflow_url": "https://api.github.com/repos/Concord-Voice/Concord-Voice-Alpha/actions/required_workflows/380888328",
+            "workflow_url": "https://api.github.com/repos/Concord-Voice/Self-Hosted/actions/required_workflows/380888328",
             "path": ".github/workflows/required-pr-build.yml", "event": "pull_request",
             "head_sha": head_sha, "conclusion": conclusion, "check_suite_id": run_id + 1000,
-            "repository": {"full_name": "Concord-Voice/Concord-Voice-Alpha"},
+            "repository": {"full_name": "Concord-Voice/Self-Hosted"},
             "pull_requests": [{"number": number, "head": {"sha": head_sha, "repo": {"id": 1158152129}},
                                "base": {"sha": main_sha, "ref": "main", "repo": {"id": 1158152129}}}],
-            "referenced_workflows": [{"path": f"Concord-Voice/Concord-Voice-Alpha/.github/workflows/pr-ci.yml@{pinned_pr_ci_sha}",
+            "referenced_workflows": [{"path": f"Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@{pinned_pr_ci_sha}",
                 "sha": pinned_pr_ci_sha}]}
         pr_data[str(number)] = {"number": number, "state": "open", "head": {"ref": f"canary-{number}", "sha": head_sha,
             "repo": {"id": 1158152129}},
             "base": {"ref": "main", "repo": {"id": 1158152129,
-                "full_name": "Concord-Voice/Concord-Voice-Alpha"}, "sha": main_sha},
+                "full_name": "Concord-Voice/Self-Hosted"}, "sha": main_sha},
             "merge_commit_sha": check_sha, "changed_files": len(changed)}
     evidence = {"schema_version": 3, "repository_id": 1158152129, "main_sha": main_sha,
         "protected": {"ruleset_id": 123, "source_path": ".github/workflows/required-pr-build.yml",
@@ -1402,9 +1402,9 @@ if a[:2] == ["api", "-X"]:
         payload["id"] = 17153062; state["org"] = payload; save(); output(state["org"])
     elif verb == "PUT" and endpoint == "orgs/Concord-Voice/rulesets/9001":
         payload["id"] = 9001; state["alpha"] = payload; save(); output(state["alpha"])
-    elif verb == "DELETE" and endpoint == "repos/Concord-Voice/Concord-Voice-Alpha/rulesets/17541948":
+    elif verb == "DELETE" and endpoint == "repos/Concord-Voice/Self-Hosted/rulesets/17541948":
         state["repo_present"] = False; save(); output({})
-    elif verb == "POST" and endpoint == "repos/Concord-Voice/Concord-Voice-Alpha/rulesets":
+    elif verb == "POST" and endpoint == "repos/Concord-Voice/Self-Hosted/rulesets":
         payload["id"] = 8001; state["repo"] = payload; state["repo_present"] = True; save(); output({"id":8001})
     elif verb == "DELETE" and endpoint == "orgs/Concord-Voice/rulesets/9001":
         state["alpha"] = None; save(); output({})
@@ -1424,7 +1424,7 @@ elif path == "orgs/Concord-Voice/rulesets/24555855":
     if case == "workflow-custody-drift": value["name"] = "unexpected policy"
     if case == "workflow-custody-extra-condition":
         value["conditions"]["ref_name"] = {"include": ["refs/heads/main"], "exclude": []}
-elif path in {"repos/Concord-Voice/Concord-Voice-Alpha/rulesets/17541948", "repos/Concord-Voice/Concord-Voice-Alpha/rulesets/8001"}:
+elif path in {"repos/Concord-Voice/Self-Hosted/rulesets/17541948", "repos/Concord-Voice/Self-Hosted/rulesets/8001"}:
     if not state["repo_present"]: raise SystemExit(1)
     value = state["repo"]
     tamper = os.environ.get("APPLY_TAMPER", "")
@@ -1435,11 +1435,11 @@ elif path in {"repos/Concord-Voice/Concord-Voice-Alpha/rulesets/17541948", "repo
         tool[field] = "unexpected"
     elif tamper == "extra-setting":
         value["rules"][0]["parameters"]["code_scanning_tools"][0]["unexpected_setting"] = "x"
-elif path == "repos/Concord-Voice/Concord-Voice-Alpha/rules/branches/main":
+elif path == "repos/Concord-Voice/Self-Hosted/rules/branches/main":
     baseline = [rule for page in state["effective_pages"] for rule in page
                 if rule["ruleset_id"] not in {17153062, 17541948, 9001}]
     current = []
-    if "Concord-Voice-Alpha" not in state["org"]["conditions"]["repository_name"].get("exclude", []):
+    if "Self-Hosted" not in state["org"]["conditions"]["repository_name"].get("exclude", []):
         current += [{**rule, "ruleset_id": 17153062} for rule in state["org"]["rules"]]
     if state["repo_present"]:
         current += [{**rule, "ruleset_id": 17541948} for rule in state["repo"]["rules"]]
@@ -1498,11 +1498,11 @@ elif path == "orgs/Concord-Voice/rulesets/123":
             (case == "workflow-rule-drift-final" and state["workflow_rule_reads"] >= 4)):
         value["updated_at"] = "2026-10-09T12:00:00Z"
 elif path == "orgs/Concord-Voice/rulesets/9001": value = state["alpha"]
-elif path == "repos/Concord-Voice/Concord-Voice-Alpha/commits/main":
+elif path == "repos/Concord-Voice/Self-Hosted/commits/main":
     state["main_reads"] = state.get("main_reads", 0) + 1; save()
     value = {"sha": ("b" if case == "main-moved-before-write" and state["main_reads"] >= 2 else "a") * 40}
-elif path == "repos/Concord-Voice/Concord-Voice-Alpha/actions/workflows/required-pr-build.yml": value = {"id":369488263,"path":".github/workflows/required-pr-build.yml"}
-elif path.startswith("repos/Concord-Voice/Concord-Voice-Alpha/actions/runs?"):
+elif path == "repos/Concord-Voice/Self-Hosted/actions/workflows/required-pr-build.yml": value = {"id":369488263,"path":".github/workflows/required-pr-build.yml"}
+elif path.startswith("repos/Concord-Voice/Self-Hosted/actions/runs?"):
     if "status=" in path:
         value = {"workflow_runs": []}
     else:
@@ -1514,7 +1514,7 @@ elif path.startswith("repos/Concord-Voice/Concord-Voice-Alpha/actions/runs?"):
                 recent_run["path"] = ".github/workflows/required-pr-build.yml"
                 recent_runs.append(recent_run)
         value = {"workflow_runs": recent_runs}
-elif path.startswith("repos/Concord-Voice/Concord-Voice-Alpha/actions/jobs/") and path.endswith("/logs"):
+elif path.startswith("repos/Concord-Voice/Self-Hosted/actions/jobs/") and path.endswith("/logs"):
     job_id = int(path.split("/jobs/")[1].split("/")[0])
     run_id = str(job_id // 100)
     run = json.loads(Path(os.environ["RUNS_JSON"]).read_text())[run_id]
@@ -1533,7 +1533,7 @@ elif path.endswith("actions/variables/" + "CI_SCAN_RELEVANCE_MODE"):
     if case == "shadow-final-mode-drift" and state.get("restored_full_reads_at_patch") is not None and \
             state["variable_reads"] > state["restored_full_reads_at_patch"] + 1:
         value = {**value, "value": "required-relevant:2001:3:9999999999"}
-elif path == "repos/Concord-Voice/Concord-Voice-Alpha/pulls?state=open&per_page=100":
+elif path == "repos/Concord-Voice/Self-Hosted/pulls?state=open&per_page=100":
     state["open_pr_reads"] = state.get("open_pr_reads", 0) + 1; save()
     value = json.loads(Path(os.environ["OPEN_PRS"]).read_text())
     if case == "head-moved-before-write" and state["open_pr_reads"] >= 2:
@@ -1623,7 +1623,7 @@ elif "/attempts/" in path and "/jobs?per_page=100" in path:
     if "--paginate" in a:
         print(json.dumps(value))
         raise SystemExit(0)
-elif path.startswith("repos/Concord-Voice/Concord-Voice-Alpha/actions/runs/"):
+elif path.startswith("repos/Concord-Voice/Self-Hosted/actions/runs/"):
     runs_path = Path(os.environ["RUNS_JSON"])
     runs = json.loads(runs_path.read_text())
     run_id = path.rsplit("/",1)[1]
@@ -1641,15 +1641,15 @@ elif path.startswith("repos/Concord-Voice/Concord-Voice-Alpha/actions/runs/"):
     value = runs[run_id]
     if case == "shadow-timeout" and state["variable"]["value"] == "required-full":
         value = dict(value); value["status"] = "completed"
-elif path.startswith("repos/Concord-Voice/Concord-Voice-Alpha/pulls/") and "/files?per_page=100" in path:
+elif path.startswith("repos/Concord-Voice/Self-Hosted/pulls/") and "/files?per_page=100" in path:
     number = path.split("/pulls/")[1].split("/")[0]
     value = json.loads(Path(os.environ["PR_FILES"]).read_text())[number]
     if case == "canary-wrong-file-set" and number == "1": value[0]["filename"] = "docs/other.md"
     if case == "canary-wrong-file-status" and number == "1": value[0]["status"] = "modified"
-elif path.startswith("repos/Concord-Voice/Concord-Voice-Alpha/pulls/"):
+elif path.startswith("repos/Concord-Voice/Self-Hosted/pulls/"):
     value=json.loads(Path(os.environ["PR_DETAILS"]).read_text())[path.rsplit("/",1)[1]]
     value.setdefault("user", {"login": "pr-author", "type": "User"})
-elif path.startswith("repos/Concord-Voice/Concord-Voice-Alpha/compare/"):
+elif path.startswith("repos/Concord-Voice/Self-Hosted/compare/"):
     value={"base_commit":{"sha":"a"*40},"merge_base_commit":{"sha":"a"*40},"behind_by":0,"ahead_by":0,"total_commits":0,"status":"identical"}
 elif ("/commits/" in path and ("/check-runs?filter=all" in path or
       ("/check-runs?filter=latest" in path and "&per_page=100" not in path))):
@@ -1689,7 +1689,7 @@ elif "/commits/" in path and "/check-runs?filter=latest&per_page=100" in path:
     value={"check_runs":[{"name":"CodeQL","app":{"id":57789,"slug":"github-advanced-security"},
         "head_sha":head_sha,"status":"completed","conclusion":native_conclusion,
         "pull_requests":pull_requests}]}
-elif path == "repos/Concord-Voice/Concord-Voice-Alpha/rulesets?per_page=100":
+elif path == "repos/Concord-Voice/Self-Hosted/rulesets?per_page=100":
     value=[state["repo"]] if state["repo_present"] else []
 else: raise SystemExit("unexpected read: " + path)
 output(value)
@@ -1750,14 +1750,14 @@ output(value)
             mode_writes = [call for call in writes if "CI_SCAN_RELEVANCE_MODE" in " ".join(call)]
             assert len(mode_writes) == 2 and run.stdout.count("VERIFIED:") >= 2, (label, writes, run.stdout)
             assert "required-relevant" in run.stdout and "required-full" in run.stdout, run.stdout
-            reruns = [call for call in writes if call[2:4] == ["POST", "repos/Concord-Voice/Concord-Voice-Alpha/actions/runs/2001/rerun"]]
+            reruns = [call for call in writes if call[2:4] == ["POST", "repos/Concord-Voice/Self-Hosted/actions/runs/2001/rerun"]]
             assert len(reruns) == 2, (label, reruns)
         elif expected == "restored-failure":
             assert run.returncode != 0, (label, run)
             assert final["variable"]["value"] == "required-full", (label, final)
             assert "RESTORED: CI_SCAN_RELEVANCE_MODE=required-full" in run.stderr, run.stderr
             assert "CRITICAL:" not in run.stderr, run.stderr
-            assert len([call for call in writes if call[2:4] == ["POST", "repos/Concord-Voice/Concord-Voice-Alpha/actions/runs/2001/rerun"]]) == 2, (label, writes)
+            assert len([call for call in writes if call[2:4] == ["POST", "repos/Concord-Voice/Self-Hosted/actions/runs/2001/rerun"]]) == 2, (label, writes)
         elif expected == "preflight":
             assert run.returncode != 0, (label, run)
             assert final["variable"]["value"] == "required-full", final
@@ -1777,7 +1777,7 @@ output(value)
         elif expected in ("native-critical", "effective-critical"):
             assert run.returncode != 0 and "CRITICAL: protected or native rules changed during the shadow trial" in run.stderr, (label, run.stderr)
             assert final["variable"]["value"] == "required-full", final
-            assert len([call for call in writes if call[2:4] == ["POST", "repos/Concord-Voice/Concord-Voice-Alpha/actions/runs/2001/rerun"]]) == 2, (label, writes)
+            assert len([call for call in writes if call[2:4] == ["POST", "repos/Concord-Voice/Self-Hosted/actions/runs/2001/rerun"]]) == 2, (label, writes)
             if expected == "native-critical":
                 assert "native CodeQL check is missing, ambiguous, or stale for PR #1" in run.stderr, run.stderr
         elif expected == "native-restored-failure":
@@ -1786,7 +1786,7 @@ output(value)
             assert "RESTORED: CI_SCAN_RELEVANCE_MODE=required-full" in run.stderr, run.stderr
             assert "native CodeQL check is missing, ambiguous, or stale for PR #1" in run.stderr, run.stderr
             assert "CRITICAL:" not in run.stderr, run.stderr
-            assert len([call for call in writes if call[2:4] == ["POST", "repos/Concord-Voice/Concord-Voice-Alpha/actions/runs/2001/rerun"]]) == 2, (label, writes)
+            assert len([call for call in writes if call[2:4] == ["POST", "repos/Concord-Voice/Self-Hosted/actions/runs/2001/rerun"]]) == 2, (label, writes)
         elif expected == "final-drift":
             assert run.returncode != 0 and "CRITICAL: protected or native rules changed during the shadow trial" in run.stderr, (label, run)
             assert final["variable"]["value"] == "required-full", final

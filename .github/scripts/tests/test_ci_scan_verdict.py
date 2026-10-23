@@ -32,7 +32,7 @@ SPEC.loader.exec_module(MODULE)
 
 HEAD, BASE, MERGE, POLICY = (letter * 40 for letter in "abcd")
 PR = {"number": 3691, "head": {"sha": HEAD, "ref": "feature", "repo": {"full_name": "contributor/repo"}},
-      "base": {"sha": BASE, "ref": "main", "repo": {"full_name": "Concord-Voice/Concord-Voice-Alpha"}},
+      "base": {"sha": BASE, "ref": "main", "repo": {"full_name": "Concord-Voice/Self-Hosted"}},
       "merge_commit_sha": MERGE}
 RUN_ID, ATTEMPT = "7001", "2"
 PR_REF = "refs/pull/3691/merge"
@@ -105,10 +105,10 @@ def evidence_for(items=None):
         reports[name] = {"report": payload, "artifact": {"id": 501, "name": name,
             "expired": False, "size_in_bytes": 128,
             "workflow_run": {"id": int(RUN_ID)}, "created_at": "2026-10-08T12:00:00Z"}}
-    referenced_workflows = [{"path": "Concord-Voice/Concord-Voice-Alpha/.github/workflows/pr-ci.yml@" + POLICY,
+    referenced_workflows = [{"path": "Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@" + POLICY,
                              "sha": POLICY}]
     if any(scan.get("tool") == "osv-scanner" for scan in (items or [item])):
-        referenced_workflows.append({"path": "Concord-Voice/Concord-Voice-Alpha/.github/workflows/osv-scanner.yml@" + POLICY,
+        referenced_workflows.append({"path": "Concord-Voice/Self-Hosted/.github/workflows/osv-scanner.yml@" + POLICY,
                                      "sha": POLICY})
     return {"run": {"id": RUN_ID, "run_attempt": int(ATTEMPT),
                 "head_sha": HEAD,
@@ -715,7 +715,7 @@ class ScanVerdictTests(unittest.TestCase):
         self.assertTrue(any("artifact" in reason.lower() for reason in self.verdict(ev)))
         for workflows in ([],
             [{"path": "attacker/workflow.yml@" + POLICY, "ref": PR_REF, "sha": POLICY}],
-            [{"path": "Concord-Voice/Concord-Voice-Alpha/.github/workflows/pr-ci.yml@" + "e" * 40,
+            [{"path": "Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@" + "e" * 40,
               "ref": PR_REF, "sha": "e" * 40}]):
             ev = evidence_for(); ev["run"]["referenced_workflows"] = workflows
             with self.subTest(workflows=workflows):
@@ -731,14 +731,14 @@ class ScanVerdictTests(unittest.TestCase):
     def test_platform_provenance_requires_protected_source_and_main_ancestry(self):
         run = {"path": ".github/workflows/required-pr-build.yml@refs/heads/main",
                "event": "pull_request", "head_sha": HEAD,
-               "repository": {"full_name": "Concord-Voice/Concord-Voice-Alpha"},
+               "repository": {"full_name": "Concord-Voice/Self-Hosted"},
                "workflow_id": 77,
-               "workflow_url": "https://api.github.com/repos/Concord-Voice/Concord-Voice-Alpha/actions/required_workflows/77",
-               "referenced_workflows": [{"path": "Concord-Voice/Concord-Voice-Alpha/.github/workflows/pr-ci.yml@" + POLICY,
+               "workflow_url": "https://api.github.com/repos/Concord-Voice/Self-Hosted/actions/required_workflows/77",
+               "referenced_workflows": [{"path": "Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@" + POLICY,
                    "sha": POLICY}]}
         pr = {"number": 3691, "head": {"sha": HEAD},
               "base": {"ref": "main", "sha": POLICY,
-                       "repo": {"full_name": "Concord-Voice/Concord-Voice-Alpha"}}}
+                       "repo": {"full_name": "Concord-Voice/Self-Hosted"}}}
         identical = {"status": "identical", "ahead_by": 0, "behind_by": 0,
                      "total_commits": 0, "base_commit": {"sha": POLICY},
                      "merge_base_commit": {"sha": POLICY}}
@@ -746,7 +746,7 @@ class ScanVerdictTests(unittest.TestCase):
         # main_sha (main's live tip), which the comparison sets against the wrapper commit.
         self.assertTrue(MODULE._protected_provenance(run, pr, identical, POLICY, POLICY, POLICY))
         for path in (".github/workflows/required-pr-build.yml@main",
-                     "Concord-Voice/Concord-Voice-Alpha/.github/workflows/required-pr-build.yml@main"):
+                     "Concord-Voice/Self-Hosted/.github/workflows/required-pr-build.yml@main"):
             with self.subTest(path=path):
                 valid_run = dict(run, path=path)
                 self.assertTrue(MODULE._protected_provenance(valid_run, pr, identical, POLICY, POLICY, POLICY))
@@ -763,15 +763,15 @@ class ScanVerdictTests(unittest.TestCase):
         mutations = []
         bad = copy.deepcopy(pr); bad["base"]["ref"] = "release"
         mutations.append((run, bad, identical, POLICY, POLICY, POLICY))
-        bad = copy.deepcopy(pr); bad["base"]["repo"]["full_name"] = "attacker/Concord-Voice-Alpha"
+        bad = copy.deepcopy(pr); bad["base"]["repo"]["full_name"] = "attacker/Self-Hosted"
         mutations.append((run, bad, identical, POLICY, POLICY, POLICY))
-        bad_run = copy.deepcopy(run); bad_run["path"] = "Concord-Voice/Concord-Voice-Alpha/.github/workflows/required-pr-build.yml@refs/pull/3691/merge"
+        bad_run = copy.deepcopy(run); bad_run["path"] = "Concord-Voice/Self-Hosted/.github/workflows/required-pr-build.yml@refs/pull/3691/merge"
         mutations.append((bad_run, pr, identical, POLICY, POLICY, POLICY))
-        bad_run = copy.deepcopy(run); bad_run["referenced_workflows"][0]["path"] = "Concord-Voice/Concord-Voice-Alpha/.github/workflows/pr-ci.yml@" + HEAD
+        bad_run = copy.deepcopy(run); bad_run["referenced_workflows"][0]["path"] = "Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@" + HEAD
         mutations.append((bad_run, pr, identical, POLICY, POLICY, POLICY))
         bad_run = copy.deepcopy(run); bad_run["referenced_workflows"][0]["ref"] = "refs/pull/999/merge"
         mutations.append((bad_run, pr, identical, POLICY, POLICY, POLICY))
-        bad_run = copy.deepcopy(run); bad_run["workflow_url"] = "https://api.github.com/repos/Concord-Voice/Concord-Voice-Alpha/actions/workflows/77"
+        bad_run = copy.deepcopy(run); bad_run["workflow_url"] = "https://api.github.com/repos/Concord-Voice/Self-Hosted/actions/workflows/77"
         mutations.append((bad_run, pr, identical, POLICY, POLICY, POLICY))
         divergent = dict(identical, status="diverged", behind_by=1)
         mutations.append((run, pr, divergent, POLICY, POLICY, POLICY))
@@ -982,7 +982,7 @@ class ScanVerdictTests(unittest.TestCase):
         jobs = {"build": "success", "codeql": "success", "sonar": "skipped"}
         self.assertEqual([], self.verdict(ev, sel, jobs, pr=PR))
         same_repo = copy.deepcopy(PR)
-        same_repo["head"]["repo"]["full_name"] = "Concord-Voice/Concord-Voice-Alpha"
+        same_repo["head"]["repo"]["full_name"] = "Concord-Voice/Self-Hosted"
         self.assertTrue(any("Sonar selected build or scan" in reason
                             for reason in self.verdict(ev, sel, jobs, pr=same_repo)))
         # Dependabot reads SONAR_TOKEN from its own secret store, so a skipped
@@ -1029,7 +1029,7 @@ class GitHubClientTests(unittest.TestCase):
             body, _ = client.get("/pulls/3691")
         request, timeout = captured[0]
         self.assertEqual({"ok": True}, body)
-        self.assertEqual("https://api.github.com/repos/Concord-Voice/Concord-Voice-Alpha/pulls/3691",
+        self.assertEqual("https://api.github.com/repos/Concord-Voice/Self-Hosted/pulls/3691",
                          request.full_url)
         self.assertNotIn("synthetic-test-token", request.full_url)
         self.assertEqual("Bearer synthetic-test-token", request.get_header("Authorization"))
@@ -1351,15 +1351,15 @@ class ProtectedProvenanceCollectionTests(unittest.TestCase):
     def collect(self, *, tip=MAIN, ref=None, tip_compare=None):
         pr = {"number": 3691, "head": {"sha": HEAD, "repo": {"full_name": "contributor/repo"}},
               "base": {"sha": BASE, "ref": "main",
-                       "repo": {"full_name": "Concord-Voice/Concord-Voice-Alpha"}},
+                       "repo": {"full_name": "Concord-Voice/Self-Hosted"}},
               "merge_commit_sha": MERGE}
         run = {"id": int(RUN_ID), "run_attempt": int(ATTEMPT), "head_sha": HEAD,
                "path": ".github/workflows/required-pr-build.yml@refs/heads/main",
-               "event": "pull_request", "repository": {"full_name": "Concord-Voice/Concord-Voice-Alpha"},
-               "workflow_url": "https://api.github.com/repos/Concord-Voice/Concord-Voice-Alpha/actions/required_workflows/77",
+               "event": "pull_request", "repository": {"full_name": "Concord-Voice/Self-Hosted"},
+               "workflow_url": "https://api.github.com/repos/Concord-Voice/Self-Hosted/actions/required_workflows/77",
                "workflow_id": 77, "run_started_at": "2026-10-08T12:00:00Z",
                "updated_at": "2026-10-08T12:01:00Z",
-               "referenced_workflows": [{"path": "Concord-Voice/Concord-Voice-Alpha/.github/workflows/pr-ci.yml@" + POLICY,
+               "referenced_workflows": [{"path": "Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@" + POLICY,
                    "sha": POLICY}]}
         on_main = compare_response("identical", WRAPPER) if tip == WRAPPER \
             else compare_response("ahead", WRAPPER, ahead=1)
@@ -1461,15 +1461,15 @@ class ProtectedCollectionTests(unittest.TestCase):
             wrapper_sha = "e" * 40
             pr = {"number": 3691, "head": {"sha": HEAD, "repo": {"full_name": "contributor/repo"}},
                   "base": {"sha": BASE, "ref": "main",
-                           "repo": {"full_name": "Concord-Voice/Concord-Voice-Alpha"}},
+                           "repo": {"full_name": "Concord-Voice/Self-Hosted"}},
                   "merge_commit_sha": MERGE}
             run = {"id": int(RUN_ID), "run_attempt": int(ATTEMPT), "head_sha": HEAD,
                    "path": ".github/workflows/required-pr-build.yml@refs/heads/main",
-                   "event": "pull_request", "repository": {"full_name": "Concord-Voice/Concord-Voice-Alpha"},
-                   "workflow_url": "https://api.github.com/repos/Concord-Voice/Concord-Voice-Alpha/actions/required_workflows/77",
+                   "event": "pull_request", "repository": {"full_name": "Concord-Voice/Self-Hosted"},
+                   "workflow_url": "https://api.github.com/repos/Concord-Voice/Self-Hosted/actions/required_workflows/77",
                    "workflow_id": 77, "run_started_at": "2026-10-08T12:00:00Z",
                    "updated_at": "2026-10-08T12:01:00Z",
-                   "referenced_workflows": [{"path": "Concord-Voice/Concord-Voice-Alpha/.github/workflows/pr-ci.yml@" + POLICY,
+                   "referenced_workflows": [{"path": "Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@" + POLICY,
                        "sha": POLICY}]}
             comparison = {"status": "ahead", "ahead_by": 1, "behind_by": 0,
                           "total_commits": 1, "base_commit": {"sha": wrapper_sha},
@@ -1543,15 +1543,15 @@ class ProtectedCollectionTests(unittest.TestCase):
             wrapper_sha = "e" * 40
             pr = {"number": 3691, "head": {"sha": head, "repo": {"full_name": "contributor/repo"}},
                   "base": {"sha": main_tip, "ref": "main",
-                           "repo": {"full_name": "Concord-Voice/Concord-Voice-Alpha"}},
+                           "repo": {"full_name": "Concord-Voice/Self-Hosted"}},
                   "merge_commit_sha": merge}
             run = {"id": int(RUN_ID), "run_attempt": int(ATTEMPT), "head_sha": head,
                    "path": ".github/workflows/required-pr-build.yml@refs/heads/main",
-                   "event": "pull_request", "repository": {"full_name": "Concord-Voice/Concord-Voice-Alpha"},
-                   "workflow_url": "https://api.github.com/repos/Concord-Voice/Concord-Voice-Alpha/actions/required_workflows/77",
+                   "event": "pull_request", "repository": {"full_name": "Concord-Voice/Self-Hosted"},
+                   "workflow_url": "https://api.github.com/repos/Concord-Voice/Self-Hosted/actions/required_workflows/77",
                    "workflow_id": 77, "run_started_at": "2026-10-08T12:00:00Z",
                    "updated_at": "2026-10-08T12:01:00Z",
-                   "referenced_workflows": [{"path": "Concord-Voice/Concord-Voice-Alpha/.github/workflows/pr-ci.yml@" + POLICY,
+                   "referenced_workflows": [{"path": "Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@" + POLICY,
                        "sha": POLICY}]}
             ahead = {"status": "ahead", "ahead_by": 1, "behind_by": 0, "total_commits": 1,
                      "base_commit": {"sha": wrapper_sha}, "merge_base_commit": {"sha": wrapper_sha}}
@@ -1659,17 +1659,17 @@ class StandaloneScanCollectionTests(unittest.TestCase):
         pr = {"number": 3691, "created_at": "2026-10-08T11:30:00Z",
               "head": {"sha": HEAD, "repo": {"full_name": "contributor/repo"}},
               "base": {"sha": BASE, "ref": "main",
-                       "repo": {"full_name": "Concord-Voice/Concord-Voice-Alpha"}},
+                       "repo": {"full_name": "Concord-Voice/Self-Hosted"}},
               "merge_commit_sha": MERGE}
         run = {"id": int(RUN_ID), "run_attempt": int(ATTEMPT), "head_sha": HEAD,
                "path": ".github/workflows/required-pr-build.yml@refs/heads/main",
-               "event": "pull_request", "repository": {"full_name": "Concord-Voice/Concord-Voice-Alpha"},
-               "workflow_url": "https://api.github.com/repos/Concord-Voice/Concord-Voice-Alpha/actions/required_workflows/77",
+               "event": "pull_request", "repository": {"full_name": "Concord-Voice/Self-Hosted"},
+               "workflow_url": "https://api.github.com/repos/Concord-Voice/Self-Hosted/actions/required_workflows/77",
                "workflow_id": 77, "run_started_at": "2026-10-08T12:00:00Z",
                "status": run_status, "updated_at": run_updated,
-               "referenced_workflows": [{"path": "Concord-Voice/Concord-Voice-Alpha/.github/workflows/pr-ci.yml@" + POLICY,
+               "referenced_workflows": [{"path": "Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@" + POLICY,
                    "sha": POLICY},
-                   {"path": "Concord-Voice/Concord-Voice-Alpha/.github/workflows/osv-scanner.yml@" + (osv_reference_sha or osv_pin),
+                   {"path": "Concord-Voice/Self-Hosted/.github/workflows/osv-scanner.yml@" + (osv_reference_sha or osv_pin),
                     "sha": osv_reference_sha or osv_pin}]}
         comparison = {"status": "ahead", "ahead_by": 1, "behind_by": 0,
                       "total_commits": 1, "base_commit": {"sha": POLICY},
@@ -1762,7 +1762,7 @@ class StandaloneScanCollectionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary:
             workflow = Path(temporary) / ".github/workflows/required-pr-build.yml"
             workflow.parent.mkdir(parents=True)
-            workflow.write_text("jobs:\n  osv:\n    uses: Concord-Voice/Concord-Voice-Alpha/.github/workflows/osv-scanner.yml@" + promoted + "\n")
+            workflow.write_text("jobs:\n  osv:\n    uses: Concord-Voice/Self-Hosted/.github/workflows/osv-scanner.yml@" + promoted + "\n")
             with patch.object(MODULE, "REPO_ROOT", Path(temporary)):
                 self.assertEqual(promoted, MODULE._protected_osv_pin())
                 workflow.write_text(workflow.read_text().replace("osv-scanner.yml", "pr-ci.yml"))

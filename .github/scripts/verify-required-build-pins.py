@@ -66,7 +66,7 @@ from types import SimpleNamespace
 
 import yaml
 
-THIS_REPO = "concord-voice/concord-voice-alpha"
+THIS_REPO = "concord-voice/self-hosted"
 # GitHub redirects a renamed or transferred repository's old name, and no API
 # lists those names, so any other owner/repo could be this repository in
 # disguise. A required build's actions, and the reusable workflows its pinned
@@ -200,7 +200,7 @@ def step_problem(action, walk):
         # GitHub reads a local action from the job's workspace, which holds whatever
         # the job checked out (often the PR), not the pinned commit.
         return (f"runs code from the job's workspace, not the pinned commit; name it as "
-                f"`Concord-Voice/Concord-Voice-Alpha/{action[2:]}@<sha>` instead")
+                f"`Concord-Voice/Self-Hosted/{action[2:]}@<sha>` instead")
     if IMAGE_DIGEST.fullmatch(action):
         return None
     pinned = PINNED.fullmatch(action)

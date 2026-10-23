@@ -15,7 +15,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
-REPO = "Concord-Voice/Concord-Voice-Alpha"
+REPO = "Concord-Voice/Self-Hosted"
 API = f"https://api.github.com/repos/{REPO}"
 DISPATCH = f"{API}/actions/workflows/sonarcloud.yml/dispatches"
 AUDIENCE = "concord-voice:protected-sonar:sha256:"

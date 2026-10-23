@@ -15,7 +15,7 @@
 # half was verified by hand against live GitHub on 2026-08-29, at the three
 # branches that matter — reproduce with an authenticated `gh`:
 #
-#   export GITHUB_REPOSITORY=Concord-Voice/Concord-Voice-Alpha
+#   export GITHUB_REPOSITORY=Concord-Voice/Self-Hosted
 #   M=$(gh api repos/$GITHUB_REPOSITORY/pulls/3013 --jq .merge_commit_sha)
 #   # 1. the founding incident, whose old-code answer was silence:
 #   SHA=$M COMMIT_SUBJECT="$(git log -1 --format=%s $M)" \
@@ -96,7 +96,7 @@ run() { # run <subject> -> sets OUT
   MOCK_COUNTER="$WORK/counter.$RANDOM"; export MOCK_COUNTER
   : > "$MOCK_COUNTER"
   SHA="deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" \
-  GITHUB_REPOSITORY="Concord-Voice/Concord-Voice-Alpha" \
+  GITHUB_REPOSITORY="Concord-Voice/Self-Hosted" \
   COMMIT_SUBJECT="$1" \
   HOTFIX_RETRY_DELAY=0 \
   HOTFIX_RETRY_ATTEMPTS="${ATTEMPTS:-5}" \

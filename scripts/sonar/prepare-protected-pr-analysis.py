@@ -19,7 +19,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 import zipfile
 
 
-REPO = "Concord-Voice/Concord-Voice-Alpha"
+REPO = "Concord-Voice/Self-Hosted"
 API = f"https://api.github.com/repos/{REPO}"
 ROOT = Path(__file__).resolve().parents[2]
 GIT_REMOTE = f"https://github.com/{REPO}.git"
