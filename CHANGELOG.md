@@ -114,6 +114,8 @@ you verify your email.
 
 ### Fixed
 
+- **Calls keep mute and deafen choices through recovery** ([PR #4086](internal development reference omitted)) — reconnecting after an outage or falling back from encrypted voice no longer turns your microphone or speakers back on. Direct message calls also retain their call type when they rejoin.
+- **Offscreen attachments release decrypted memory** ([PR #4086](internal development reference omitted)) — images, videos and manually loaded audio in chat history stop holding their decrypted data after they scroll away and are no longer in use. Busy public profile-photo requests use the default silhouette when the image service is at capacity.
 - **Failed channel messages survive reconnects** ([PR #4079](internal development reference omitted)) — your pending and failed sends keep their text and retry controls after a brief outage. Reply previews are cleared, and message purges, access loss and sign-out still clear the affected history.
 - **Camera recovery honors saved settings** ([PR #4079](internal development reference omitted)) — codec and HDR settings saved while camera capture restarts now replace the earlier recovery choice. Room compatibility checks still apply.
 - **Subscription updates arrive in order** ([PR #4079](internal development reference omitted)) — an older downgrade notification can no longer follow a newer upgrade for the same subscription and lower your active capabilities.
