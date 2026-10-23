@@ -5,7 +5,7 @@ import { defineConfig } from 'vitest/config';
 // setup file); this file only lists them and owns coverage.
 export default defineConfig({
   test: {
-    projects: ['packages/*'],
+    projects: ['packages/*/vitest.config.ts'],
     coverage: {
       provider: 'istanbul',
       reporter: ['text', 'html', 'lcov'],
