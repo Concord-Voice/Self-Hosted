@@ -1,0 +1,5 @@
+{
+  "name": "concord-voice-self-hosted",
+  "private": true,
+  "workspaces": ["packages/*"]
+}

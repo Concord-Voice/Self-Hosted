@@ -1,0 +1,237 @@
+name: CI
+
+# Every job runs on every change, with no path filter: the media-plane parity
+# suites import packages/protocol, and services/media-plane/tests/
+# crossWorkspaceImports.test.ts fails if a gate is added here.
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  control-plane:
+    name: Control Plane / Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: concord
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: concord_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U concord -d concord_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      nats:
+        image: nats:2-alpine
+        ports:
+          - 4222:4222
+        options: >-
+          --health-cmd "nc -z 127.0.0.1 4222 || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      PGHOST: localhost
+      PGUSER: concord
+      PGPASSWORD: test_password
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: services/control-plane/go.mod
+          cache-dependency-path: services/control-plane/go.sum
+
+      - name: Build
+        working-directory: services/control-plane
+        run: go build ./...
+
+      - name: Build account-authority (CGO_ENABLED=0)
+        working-directory: services/control-plane
+        env:
+          CGO_ENABLED: "0"
+        run: go build -trimpath -o /dev/null ./cmd/account-authority
+
+      - name: Validate package database wrapper
+        working-directory: services/control-plane
+        run: bash scripts/test-ci-test-package-db.sh
+
+      - name: Migrate package database template
+        working-directory: services/control-plane
+        env:
+          DATABASE_URL: postgres://concord:test_password@localhost:5432/concord_test?sslmode=disable
+          JWT_SECRET: test_secret_key_for_ci
+          ENVIRONMENT: test
+          CONCORD_ENV: test
+        run: go run ./cmd/migrate -command=up
+
+      - name: Create isolated operations metrics test database
+        run: psql --dbname=postgres --set=ON_ERROR_STOP=1 --command='CREATE DATABASE concord_opsmetrics_test'
+
+      - name: Confine operations metrics reader to its test database
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+        run: |
+          set -euo pipefail
+          docker cp infrastructure/docker/postgres/configure-ops-metrics-hba.sh \
+            "$POSTGRES_CONTAINER_ID:/tmp/configure-ops-metrics-hba.sh"
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            sh /tmp/configure-ops-metrics-hba.sh concord_opsmetrics_test
+          psql --dbname=postgres --set=ON_ERROR_STOP=1 --command='SELECT pg_reload_conf()'
+          for _ in {1..50}; do
+            status="$(psql --dbname=postgres --tuples-only --no-align --set=ON_ERROR_STOP=1 \
+              --command="SELECT (
+                SELECT count(*) = 5
+                FROM pg_hba_file_rules
+                WHERE rule_number <= 5
+                  AND error IS NULL
+                  AND user_name = ARRAY['concord_ops_metrics_reader_' || md5('concord_opsmetrics_test')]
+              ) AND NOT EXISTS (
+                SELECT 1 FROM pg_hba_file_rules WHERE error IS NOT NULL
+              )")"
+            [ "$status" = "t" ] && exit 0
+            sleep 0.1
+          done
+          psql --dbname=postgres --command='TABLE pg_hba_file_rules'
+          exit 1
+
+      - name: Create isolated account-authority test databases
+        run: >-
+          psql --dbname=postgres --set=ON_ERROR_STOP=1
+          --file=services/control-plane/scripts/authority-test-bootstrap.sql
+
+      # A separate PostgreSQL, so setting synchronous_standby_names on it can
+      # never hang the shared concord_test cluster.
+      - name: Start the dedicated cancelled-wait PostgreSQL (authority release gate)
+        timeout-minutes: 3
+        run: |
+          set -euo pipefail
+          docker run -d --name authority-ghost -e POSTGRES_USER=concord -e POSTGRES_PASSWORD="$PGPASSWORD" \
+            -p 5433:5432 postgres:16-alpine
+          for i in $(seq 1 60); do
+            docker exec authority-ghost pg_isready -h 127.0.0.1 -U concord >/dev/null 2>&1 && break
+            if [ "$i" = 60 ]; then
+              docker logs authority-ghost
+              echo "::error::authority-ghost never accepted TCP connections"
+              exit 1
+            fi
+            sleep 1
+          done
+          psql --port=5433 --dbname=postgres --set=ON_ERROR_STOP=1 \
+            --file=services/control-plane/scripts/authority-test-bootstrap.sql
+
+      # Token-theft fallback cleanup needs AOF, as in the Compose stacks.
+      - name: Enable Redis AOF for security recovery tests
+        run: |
+          docker run --rm --network host redis:8-alpine redis-cli CONFIG SET appendonly yes
+          test "$(docker run --rm --network host redis:8-alpine redis-cli CONFIG GET appendonly | tail -n 1)" = yes
+
+      - name: Run tests
+        working-directory: services/control-plane
+        env:
+          DATABASE_URL: postgres://concord:test_password@localhost:5432/concord_test?sslmode=disable
+          OPS_METRICS_TEST_DATABASE_URL: postgres://concord:test_password@localhost:5432/concord_opsmetrics_test?sslmode=disable
+          AUTHORITY_TEST_DATABASE_URL: postgres://concord:test_password@localhost:5432/concord_authority_test?sslmode=disable  # pragma: allowlist secret
+          AUTHORITY_DIRTY_TEST_DATABASE_URL: postgres://concord:test_password@localhost:5432/concord_authority_dirty_test?sslmode=disable  # pragma: allowlist secret
+          AUTHORITY_GHOST_DATABASE_URL: postgres://concord:test_password@localhost:5433/concord_authority_test?sslmode=disable  # pragma: allowlist secret
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: test_secret_key_for_ci
+          CONCORD_ENV: test
+          CI_PACKAGE_DB_ISOLATION: '1'
+        run: >-
+          go test -race -trimpath -p 2 -exec "$PWD/scripts/ci-test-package-db.sh"
+          -tags integration ./...
+
+  media-plane:
+    name: Media Plane / Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: services/media-plane/package-lock.json
+      - name: Install dependencies
+        working-directory: services/media-plane
+        run: npm ci
+      - name: Lint
+        working-directory: services/media-plane
+        run: npm run lint
+      - name: Typecheck
+        working-directory: services/media-plane
+        run: npm run typecheck
+      - name: Test
+        working-directory: services/media-plane
+        run: npx vitest run
+
+  admin:
+    name: Admin Portal / Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: client/admin/package-lock.json
+      - name: Install dependencies
+        working-directory: client/admin
+        run: npm ci
+      - name: Lint
+        working-directory: client/admin
+        run: npm run lint
+      - name: Typecheck
+        working-directory: client/admin
+        run: npm run typecheck
+      - name: Test
+        working-directory: client/admin
+        run: npm test
+
+  packages:
+    name: Packages / Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: package-lock.json
+      - name: Install dependencies
+        run: npm ci
+      - name: Test
+        run: npm test --workspaces
