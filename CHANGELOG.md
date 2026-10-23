@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+Settings ▸ Subscription is ready for paid plans. Once purchasing opens, it
+lists each plan with its monthly and yearly price, shows your current plan, and
+opens a secure Stripe page to subscribe or manage billing.
+
 Your failed channel messages stay available to retry after a brief disconnect.
 Camera recovery honors codec settings you save while capture restarts.
 
