@@ -138,13 +138,11 @@ jobs:
             echo "::error::Semgrep custom rules scan failed (exit $SCAN_EXIT)"
             exit "$SCAN_EXIT"
           fi
-          # Semgrep 1.121 cannot parse two existing Alpha TypeScript constructs.
-          # Only their exact bootstrap locations are tolerated by this check.
-          # The same scanner version and all scanned files remain unchanged.
-          python3 .github/scripts/check-semgrep-parse-errors.py semgrep-custom.json
           python3 <<'PY'
           import json, os
           data = json.load(open('semgrep-custom.json'))
+          if data.get('errors'):
+              raise SystemExit(f"Semgrep custom scan reported {len(data['errors'])} scanner error(s)")
           results = data.get('results', [])
           if not isinstance(results, list):
               raise SystemExit('Semgrep custom report has an invalid results field')
@@ -214,11 +212,7 @@ jobs:
               results, count = [], 'unavailable'
           else:
               if os.environ.get('EXTERNAL_VERDICT') == 'true' and data.get('errors'):
-                  import subprocess
-                  subprocess.run(
-                      ['python3', '.github/scripts/check-semgrep-parse-errors.py', 'semgrep-community.json'],
-                      check=True,
-                  )
+                  raise SystemExit(f"community scan reported {len(data['errors'])} scanner error(s)")
               results = data.get('results', [])
               if not isinstance(results, list):
                   raise SystemExit('Semgrep community report has an invalid results field')

@@ -516,9 +516,6 @@ PY
         step = next(step for step in workflow["jobs"]["semgrep"]["steps"] if step.get("id") == "custom")
         with tempfile.TemporaryDirectory(prefix="semgrep-step-contract-") as tmp:
             work = Path(tmp)
-            helper = work / ".github/scripts/check-semgrep-parse-errors.py"
-            helper.parent.mkdir(parents=True)
-            helper.write_bytes((root / ".github/scripts/check-semgrep-parse-errors.py").read_bytes())
             bindir = work / "bin"
             bindir.mkdir()
             fake = bindir / "semgrep"
