@@ -754,7 +754,7 @@ def verify_bundle_identity(path: Path, workspace: Path) -> tuple[dict, set[str]]
             if payload != archive_files[name] or (name in files and hashlib.sha256(payload).hexdigest() != files[name]):
                 _fail(code)
         if ("infrastructure/deploy/selfhost-security-event-logging.sh" not in files
-                or "[internal]provision-production.sh" in files):
+                or "infrastructure/deploy/provision-production.sh" in files):
             _fail(code)
         return identity, expected
     except (OSError, ValueError, TypeError, tarfile.TarError, json.JSONDecodeError):

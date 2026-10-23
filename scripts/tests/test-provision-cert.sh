@@ -1368,8 +1368,8 @@ printf '%s\n' upload >>"$BOUNDARY_EVENTS"
 BOUNDARY_CURL
   chmod 0755 "$fixture/uploader" "$fixture/bin/curl" || return 1
   case "$checkout" in
-    public) [[ ! -e "$fixture/source/[internal]upload-cert-to-cloudflare.sh" ]] || return 1 ;;
-    managed) cp "$fixture/uploader" "$fixture/source/[internal]upload-cert-to-cloudflare.sh" || return 1 ;;
+    public) [[ ! -e "$fixture/source/infrastructure/deploy/upload-cert-to-cloudflare.sh" ]] || return 1 ;;
+    managed) cp "$fixture/uploader" "$fixture/source/infrastructure/deploy/upload-cert-to-cloudflare.sh" || return 1 ;;
     *) return 2 ;;
   esac
   case "$retained" in
@@ -1450,7 +1450,7 @@ BOUNDARY_CURL
     grep -q -- '--reuse-key' "$CERTBOT_LOG" && grep -q -- '--webroot' "$CERTBOT_LOG" || return 1
   if [[ "$authorization" == managed ]]; then
     [[ "$(cat "$BOUNDARY_EVENTS")" == $'upload-hook\nconfiguration-read\nupload' ]] || return 1
-    cmp -s "$fixture/source/[internal]upload-cert-to-cloudflare.sh" "$artifact" && [[ -x "$artifact" ]] || return 1
+    cmp -s "$fixture/source/infrastructure/deploy/upload-cert-to-cloudflare.sh" "$artifact" && [[ -x "$artifact" ]] || return 1
   else
     [[ ! -s "$BOUNDARY_EVENTS" && ! -e "$artifact" && ! -L "$artifact" ]] || return 1
   fi

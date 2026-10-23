@@ -418,10 +418,10 @@ fi
 # The head of concord-ctl.sh up to the COMPOSE_CMD= line is sourced from a temp root, so the
 # posture gate (which comes after that line) never runs and docker is never invoked.
 mkdir -p "$WORK/root/infrastructure/deploy"
-HEAD_SH="$WORK/root/[internal]concord-ctl-head.sh"
+HEAD_SH="$WORK/root/infrastructure/deploy/concord-ctl-head.sh"
 sed -n '1,/^COMPOSE_CMD=/p' "$ROOT/infrastructure/deploy/concord-ctl.sh" > "$HEAD_SH"
-D="$WORK/root/[internal]../.."
-DEPLOY_ENV="$WORK/root/[internal]deploy.env"
+D="$WORK/root/infrastructure/deploy/../.."
+DEPLOY_ENV="$WORK/root/infrastructure/deploy/deploy.env"
 # No full controller/CLI execution is added here. Only when the extracted
 # setup actually loads the helper does it need copied helper/model inputs.
 HEAD_LOADS_STORAGE=0
@@ -541,7 +541,7 @@ else
 fi
 
 # ── 9. Packaging pins ────────────────────────────────────────────────────────
-if grep -qx 'docker-compose.selfhost.yml' "$ROOT/[internal]deploy-manifest.txt"; then
+if grep -qx 'docker-compose.selfhost.yml' "$ROOT/infrastructure/deploy/deploy-manifest.txt"; then
   ok "deploy-manifest.txt lists docker-compose.selfhost.yml"
 else
   bad "deploy-manifest.txt does not list docker-compose.selfhost.yml on its own line"

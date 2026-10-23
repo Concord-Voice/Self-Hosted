@@ -470,8 +470,8 @@ selfhost_storage_assert_fresh() {
   # Both root artifacts and the controller existing deploy-local artifacts count.
   for artifact in "$root/.env" \
     "$root/.env.activity-history-image.local" "$root/.env.activity-history-receipt.local" \
-    "$root/[internal].env.activity-history-image.local" \
-    "$root/[internal].env.activity-history-receipt.local"; do
+    "$root/infrastructure/deploy/.env.activity-history-image.local" \
+    "$root/infrastructure/deploy/.env.activity-history-receipt.local"; do
     if [[ -e "$artifact" || -L "$artifact" ]]; then
       _selfhost_storage_refuse 'selfhost-storage: existing installation refused'
       return 1

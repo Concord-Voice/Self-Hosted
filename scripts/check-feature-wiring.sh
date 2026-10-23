@@ -41,7 +41,7 @@ EDGES=(
   "docker-compose.production.yml|CLIENT_MIN_VERSION:|the control-plane never receives the client version floor"
   "$CP/pkg/config/config.go|LoadBillingConfig|billing settings are never loaded, so no boot guard runs and later PRs read an empty config"
   "$CP/cmd/server/main.go|cfg.Billing.LogBoot|the boot log never states the billing mode, key class or founders cutoff"
-  ".github/workflows/provision-secrets.yml|bash [internal]check-billing-env.sh|a bad billing value reaches the host and crash-loops the control plane at its next restart"
+  ".github/workflows/provision-secrets.yml|bash infrastructure/deploy/check-billing-env.sh|a bad billing value reaches the host and crash-loops the control plane at its next restart"
   ".github/workflows/provision-secrets.yml|vars.BILLING_PURCHASE_MODE|the purchase-mode kill switch is not sourced from GitHub public configuration"
   "docker-compose.yml|STRIPE_SECRET_KEY:|the development control plane never receives a Stripe key"
   "docker-compose.production.yml|STRIPE_SECRET_KEY:|the production control plane never receives a Stripe key"
@@ -232,7 +232,7 @@ for billing_var in STRIPE_SECRET_KEY STRIPE_WEBHOOK_SECRET BILLING_PURCHASE_MODE
     "the SSH step's envs: list omits ${billing_var}, so set -u aborts the server-side write"
 done
 
-NGINX=[internal]nginx/concordvoice.conf
+NGINX=infrastructure/deploy/nginx/concordvoice.conf
 http_ws_nginx_start=$(grep -nF '    location ~ ^/api/v1/ws/?$ {' "$NGINX" | cut -d: -f1)
 http_ws_nginx_end=$(awk '/^    location \/ \{/{ print NR; exit }' "$NGINX")
 if [[ -n "$http_ws_nginx_start" && -n "$http_ws_nginx_end" ]]; then
@@ -290,7 +290,7 @@ require_server_access_logs "$FAILOVER_NGINX"
 # The admin-console vhost is rendered into conf.d, which loads before
 # sites-enabled, so it cannot use `timed` from concordvoice.conf: it defines
 # admin_timed on the same $log_uri map variable.
-ADMIN_TMPL=[internal]nginx/admin-console.conf.template
+ADMIN_TMPL=infrastructure/deploy/nginx/admin-console.conf.template
 require_count "$ADMIN_TMPL" '"$request_method $log_uri $server_protocol"' 1 \
   "the admin vhost log format must log the redacted, query-free URI"
 require_count "$ADMIN_TMPL" '"$request"' 0 \

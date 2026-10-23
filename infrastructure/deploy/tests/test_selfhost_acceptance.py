@@ -778,7 +778,7 @@ class AcceptanceRunnerTests(unittest.TestCase):
                          "infrastructure/deploy/concord-selfhost",
                          "infrastructure/deploy/concord-ctl.sh",
                          "infrastructure/deploy/provision-cert.sh",
-                         "[internal]provision-production.sh",
+                         "infrastructure/deploy/provision-production.sh",
                          "infrastructure/deploy/nginx/concordvoice.conf",
                          "infrastructure/deploy/selfhost-storage.sh",
                          "infrastructure/deploy/selfhost-tls.sh",
@@ -3226,7 +3226,7 @@ class PublicBundleAcceptanceTests(unittest.TestCase):
         self.workspace = destination
         (self.workspace / "docker-compose.production.yml").write_bytes(
             (ROOT / "scripts/public-mirror/public-overlay/docker-compose.production.yml").read_bytes())
-        (self.workspace / "[internal]provision-production.sh").unlink()
+        (self.workspace / "infrastructure/deploy/provision-production.sh").unlink()
         helper = "infrastructure/deploy/selfhost-security-event-logging.sh"
         (self.workspace / helper).write_bytes((ROOT / helper).read_bytes())
         files = {str(path.relative_to(self.workspace)): hashlib.sha256(path.read_bytes()).hexdigest()
@@ -3323,7 +3323,7 @@ class PublicBundleAcceptanceTests(unittest.TestCase):
                             for row in record["checks"]))
         self.assertFalse(any(call and call[0] == "git" for call in self.executor.calls),
                          "an unpacked archive has no Git HEAD identity")
-        self.assertFalse((self.workspace / "[internal]provision-production.sh").exists())
+        self.assertFalse((self.workspace / "infrastructure/deploy/provision-production.sh").exists())
         commands = [" ".join(call) for call in self.executor.calls]
         self.assertTrue(any("selfhost-security-event-logging.sh" in call for call in commands))
         self.assertFalse(any("provision-production.sh" in call for call in commands))
@@ -3430,7 +3430,7 @@ class PublicBundleAcceptanceTests(unittest.TestCase):
                 elif case == "extra-payload":
                     (self.workspace / "unexpected-input").write_text("unlisted\n")
                 elif case == "managed-provisioner":
-                    (self.workspace / "[internal]provision-production.sh").write_text("managed\n")
+                    (self.workspace / "infrastructure/deploy/provision-production.sh").write_text("managed\n")
                 elif case == "missing-helper":
                     (self.workspace / "infrastructure/deploy/selfhost-security-event-logging.sh").unlink()
                 else:

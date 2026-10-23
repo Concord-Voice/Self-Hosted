@@ -20,7 +20,7 @@ readonly PROJECT_ROOT
 : "${ENV_OUT:=$PROJECT_ROOT/.env}"                       # overridable for tests
 : "${NGINX_OUT:=$SCRIPT_DIR/nginx/concordvoice.rendered.conf}"  # overridable for tests
 
-# shellcheck source=[internal]selfhost-storage.sh
+# shellcheck source=infrastructure/deploy/selfhost-storage.sh
 source "$SCRIPT_DIR/selfhost-storage.sh" || {
   printf '%s\n' 'installer: storage helper unavailable' >&2
   return 1 2>/dev/null || exit 1

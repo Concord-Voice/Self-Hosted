@@ -50,8 +50,8 @@ ENV
 }
 reset_case() {
   rm -f -- "$FIX/.env" "$FIX/.env.activity-history-image.local" "$FIX/.env.activity-history-receipt.local" \
-    "$FIX/[internal].env.activity-history-image.local" \
-    "$FIX/[internal].env.activity-history-receipt.local"
+    "$FIX/infrastructure/deploy/.env.activity-history-image.local" \
+    "$FIX/infrastructure/deploy/.env.activity-history-receipt.local"
   printf '%s' empty >"$STATE/scenario"
   rm -f -- "$STATE/stopped" "$STATE/rejected"
   rm -f -- "$STATE/fresh-rendered" "$STATE/fresh-generation" "$STATE/fresh-privileged" "$STATE/fresh-entry-output"
@@ -174,7 +174,7 @@ fresh_case() {
     file) printf 'DOMAIN=example.invalid\n' >"$FIX/.env" ;;
     symlink) ln -s "$FIX/absent-target" "$FIX/.env" ;;
     image|receipt) printf 'synthetic-artifact\n' >"$FIX/.env.activity-history-$evidence.local" ;;
-    deploy-image|deploy-receipt) printf 'synthetic-artifact\n' >"$FIX/[internal].env.activity-history-${evidence#deploy-}.local" ;;
+    deploy-image|deploy-receipt) printf 'synthetic-artifact\n' >"$FIX/infrastructure/deploy/.env.activity-history-${evidence#deploy-}.local" ;;
     *) scenario "$evidence" ;;
   esac
   ambient

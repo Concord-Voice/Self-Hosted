@@ -39,7 +39,7 @@ var billingCaseEscapes = strings.NewReplacer(`\r`, "\r", `\n`, "\n", `\t`, "\t")
 
 // billingEnvCaseCount is the number of non-comment rows in
 // testdata/billing_env_cases.tsv. The shell twin
-// ([internal]tests/test-billing-env.sh, Task 9) asserts the same
+// (infrastructure/deploy/tests/test-billing-env.sh, Task 9) asserts the same
 // count, so a truncated or partly commented-out table fails both readers
 // instead of shrinking the shared contract unnoticed.
 const billingEnvCaseCount = 82
@@ -99,7 +99,7 @@ func readBillingEnvCases(t *testing.T) []billingEnvCase {
 }
 
 // TestBillingEnvCases runs every row of the shared case table through
-// LoadBillingConfig. [internal]tests/test-billing-env.sh runs the
+// LoadBillingConfig. infrastructure/deploy/tests/test-billing-env.sh runs the
 // same rows through check-billing-env.sh, so the two cannot drift (R9).
 func TestBillingEnvCases(t *testing.T) {
 	for _, tc := range readBillingEnvCases(t) {

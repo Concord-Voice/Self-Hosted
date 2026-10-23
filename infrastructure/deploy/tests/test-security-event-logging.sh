@@ -23,7 +23,7 @@ fi
 # Test-only source selection lets ROOT replay saved production bytes. No path
 # override is added to either production entrypoint.
 HELPER="$SOURCE_ROOT/infrastructure/deploy/selfhost-security-event-logging.sh"
-PROVISION_SOURCE="$SOURCE_ROOT/[internal]provision-production.sh"
+PROVISION_SOURCE="$SOURCE_ROOT/infrastructure/deploy/provision-production.sh"
 TMP="$(mktemp -d)"
 trap '/bin/rm -rf "$TMP"' EXIT
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
@@ -41,7 +41,7 @@ import sys
 root = Path(sys.argv[1])
 helper = 'infrastructure/deploy/selfhost-security-event-logging.sh'
 entries = [line.split('#', 1)[0].strip().rstrip('/')
-           for line in (root / '[internal]deploy-manifest.txt').read_text().splitlines()]
+           for line in (root / 'infrastructure/deploy/deploy-manifest.txt').read_text().splitlines()]
 covered = any(entry and (helper == entry or helper.startswith(entry + '/'))
               for entry in entries)
 if not covered:
@@ -300,7 +300,7 @@ if policy == 'public':
     assert 'nightwatch' not in rotation.lower() and '--drain' not in rotation
 else:
     assert len(blocks) == 2 and blocks[0] == blocks[1], 'both managed stanzas must retain the same drain'
-    drain = '/usr/bin/flock -n /run/nightwatch-normalizer/normalizer.lock /usr/bin/python3 /usr/local/lib/nightwatch-source/[internal]nightwatch/normalizer/nightwatch-app-normalize.py --drain || exit 1'
+    drain = '/usr/bin/flock -n /run/nightwatch-normalizer/normalizer.lock /usr/bin/python3 /usr/local/lib/nightwatch-source/infrastructure/deploy/nightwatch/normalizer/nightwatch-app-normalize.py --drain || exit 1'
     for block in blocks:
         assert block.count(drain) == 1
         assert f'[ -e {root}/normalizer/commissioned ] || [ -L {root}/normalizer/commissioned ]' in block
@@ -468,7 +468,7 @@ ORDER_STAGE="$TMP/import-order-stage"
 ORDER_BIN="$TMP/import-order-bin"
 mkdir -p "$ORDER_STAGE/sudoers.d" "$ORDER_STAGE/../docker/iptables" "$ORDER_BIN"
 cp "$ROOT/infrastructure/docker/iptables/docker-user-rules.sh" "$ORDER_STAGE/../docker/iptables/docker-user-rules.sh"
-cp "$ROOT/[internal]sudoers.d/concord-deploy" "$ORDER_STAGE/sudoers.d/concord-deploy"
+cp "$ROOT/infrastructure/deploy/sudoers.d/concord-deploy" "$ORDER_STAGE/sudoers.d/concord-deploy"
 # Operator readiness is a separate native-sshd regression. This fixture isolates
 # import trust/order, so satisfy that new prerequisite without reading host NSS
 # or keys; reject every command other than the read-only preflight seam.

@@ -1508,7 +1508,7 @@ class SelfhostPathFilterPolicyTests(unittest.TestCase):
             "infrastructure/deploy/concord-selfhost", "infrastructure/deploy/selfhost-security-event-logging.sh",
             "infrastructure/deploy/tests/selfhost-acceptance.py", "infrastructure/deploy/tests/test_selfhost_acceptance.py",
             "docker-compose.yml", "docker-compose.production.yml", "docker-compose.selfhost.yml",
-            ".env.example", "[internal]deploy.env.example",
+            ".env.example", "infrastructure/deploy/deploy.env.example",
             "scripts/tests/test-concord-selfhost.sh", "scripts/tests/test-install-selfhost.sh",
             "scripts/tests/test-selfhost-log-tail-flags.sh",
             "scripts/public-mirror/transform.sh", "scripts/public-mirror/test-selfhost-stage.py",
@@ -1696,7 +1696,7 @@ class SelfhostPathFilterPolicyTests(unittest.TestCase):
         # Two consumers remain: runner sizing and the common queue scope env.
         self.assertEqual(static.count("needs.detect-changes.outputs.selfhost"), 2)
         self.assertNotIn("Hermetic public self-host release gates", static)
-        loop = re.search(r"(?ms)^      - name: Run all test-\*\.sh under [internal]tests/\n"
+        loop = re.search(r"(?ms)^      - name: Run all test-\*\.sh under infrastructure/deploy/tests/\n"
                          r"(.*?)(?=^      - name:|\Z)", static)
         self.assertIsNotNone(loop)
         loop_condition = self.condition(loop.group(1), 8)
@@ -1848,12 +1848,12 @@ class SelfhostPathFilterPolicyTests(unittest.TestCase):
                                          "selected failures must aggregate while later selected tests still run")
 
     QUEUE_STEPS = COSTLY
-    DEPLOY_QUEUE_INVENTORY = ("[internal]tests/test-a first.sh",
-                              "[internal]tests/test-b'quoted.sh",
-                              "[internal]tests/test-c\nline.sh",
-                              "[internal]tests/test-d;literal.sh",
+    DEPLOY_QUEUE_INVENTORY = ("infrastructure/deploy/tests/test-a first.sh",
+                              "infrastructure/deploy/tests/test-b'quoted.sh",
+                              "infrastructure/deploy/tests/test-c\nline.sh",
+                              "infrastructure/deploy/tests/test-d;literal.sh",
                               "infrastructure/deploy/tests/test-selfhost-acceptance.sh",
-                              "[internal]tests/test-selfhost-tls.sh")
+                              "infrastructure/deploy/tests/test-selfhost-tls.sh")
     LIFECYCLE_QUEUE_INVENTORY = ("scripts/tests/test-concord-selfhost.sh",
                                  "scripts/tests/test-install-selfhost.sh",
                                  "scripts/tests/test-provision-cert.sh")
@@ -1955,7 +1955,7 @@ if name == config["failing"]:
             bin_dir.mkdir()
             (bin_dir / "bash").symlink_to(TEST_BASH)
             for name in (*inventory, "scripts/tests/test-unselected.sh",
-                         "[internal]tests/nested/test-unselected.sh"):
+                         "infrastructure/deploy/tests/nested/test-unselected.sh"):
                 path = root / name
                 path.parent.mkdir(parents=True, exist_ok=True)
                 path.write_text("#!/bin/bash\nexec " + shlex.quote(sys.executable) + " " +
@@ -2365,7 +2365,7 @@ class OverlappedStaticQueueTests(unittest.TestCase):
     INSTALLER = "scripts/tests/test-install-selfhost.sh"
     STORAGE = "infrastructure/deploy/tests/test-selfhost-storage.sh"
     # Deployment suites that run in their own pr-ci.yml job, not static-guards.
-    OWN_JOB = {"[internal]tests/test-managed-firewall.sh": "managed-firewall"}
+    OWN_JOB = {"infrastructure/deploy/tests/test-managed-firewall.sh": "managed-firewall"}
 
     def test_own_job_suites_run_in_their_own_job(self):
         import yaml
@@ -2386,8 +2386,8 @@ class OverlappedStaticQueueTests(unittest.TestCase):
         self.assertIn("needs.detect-changes.outputs.managed-firewall == 'true'", jobs["managed-firewall"]["if"])
         paths = yaml.safe_load(step["with"]["filters"])["managed_firewall"]
         for suite_input in ("infrastructure/docker/iptables/**",
-                            "[internal]tests/managed_firewall_fixture.py",
-                            "[internal]tests/managed_firewall_fake.py",
+                            "infrastructure/deploy/tests/managed_firewall_fixture.py",
+                            "infrastructure/deploy/tests/managed_firewall_fake.py",
                             *self.OWN_JOB):
             self.assertIn(suite_input, paths)
 

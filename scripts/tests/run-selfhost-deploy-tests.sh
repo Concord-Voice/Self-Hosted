@@ -37,7 +37,7 @@ if [[ $(uname -s) == Darwin ]]; then
 
   image=concord-selfhost-hook:ubuntu24-v2
   docker build -f "$ROOT/infrastructure/deploy/tests/Dockerfile.selfhost-hook" -t "$image" "$ROOT/infrastructure/deploy/tests"
-  # shellcheck source=[internal]tests/selfhost-cert-test-tools.sh
+  # shellcheck source=infrastructure/deploy/tests/selfhost-cert-test-tools.sh
   source "$ROOT/infrastructure/deploy/tests/selfhost-cert-test-tools.sh"
   cert_image="$(selfhost_cert_prepare_tool_image)"
   # The nested Docker daemon sees host paths. Keep source and scratch at their

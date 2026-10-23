@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Unit tests for [internal]concord-selfhost.
+# Unit tests for infrastructure/deploy/concord-selfhost.
 # PATH-stubs docker so no real daemon is needed.
 set -uo pipefail
 
@@ -440,7 +440,7 @@ if [[ $(grep -Fxc "$fixture_lock_declaration" \
 fi
 chmod +x "$BEHAVIOR_ROOT/infrastructure/deploy/concord-selfhost" \
   "$BEHAVIOR_ROOT/infrastructure/deploy/concord-ctl.sh"
-cat >"$BEHAVIOR_ROOT/[internal]sync-releases.sh" <<'STUB'
+cat >"$BEHAVIOR_ROOT/infrastructure/deploy/sync-releases.sh" <<'STUB'
 sync_releases() { :; }
 STUB
 touch "$BEHAVIOR_ROOT/docker-compose.yml" \
@@ -959,9 +959,9 @@ reset_selfhost_behavior() {
   export STUB_PROJECT_IDS=$'cp1\npg1'
   STUB_INSPECT_JSON="$(live_inspect '{}')"
   export STUB_INSPECT_JSON
-  rm -f "$BEHAVIOR_ROOT/[internal]deploy.env.local" \
-    "$BEHAVIOR_ROOT/[internal].env.activity-history-image.local" \
-    "$BEHAVIOR_ROOT/[internal].env.activity-history-receipt.local"
+  rm -f "$BEHAVIOR_ROOT/infrastructure/deploy/deploy.env.local" \
+    "$BEHAVIOR_ROOT/infrastructure/deploy/.env.activity-history-image.local" \
+    "$BEHAVIOR_ROOT/infrastructure/deploy/.env.activity-history-receipt.local"
 }
 
 run_selfhost() {
@@ -1058,7 +1058,7 @@ exit 93
 GH_FIXTURE
 chmod +x "$BEHAVIOR_STUB/gh"
 # #2506: a public unpack has no managed recovery writer. Exercise real callers.
-mv "$BEHAVIOR_ROOT/[internal]sync-releases.sh" "$STUB/sync-releases.saved"
+mv "$BEHAVIOR_ROOT/infrastructure/deploy/sync-releases.sh" "$STUB/sync-releases.saved"
 write_selfhost_contract false
 reset_selfhost_behavior false 1 '' ''
 selfhost_output="$(ACTIVITY_HISTORY_CONTRACT_MODE=selfhost COMPOSE_OVERRIDE=docker-compose.production.yml \
@@ -1142,7 +1142,7 @@ if [[ $selfhost_rc -eq 0 ]] && grep -qx 'Done.' <<<"$selfhost_output" \
   pass "self-host rebuild success omits managed release recovery advice"
 else fail "self-host rebuild suggests managed recovery or did not finish: $selfhost_output"; fi
 # The companion managed dispatch must actually load and invoke its writer.
-cat >"$BEHAVIOR_ROOT/[internal]sync-releases.sh" <<'RECOVERY'
+cat >"$BEHAVIOR_ROOT/infrastructure/deploy/sync-releases.sh" <<'RECOVERY'
 sync_releases() { printf 'managed-writer-called\n' >>"$SELFHOST_DOCKER_LOG"; }
 RECOVERY
 reset_selfhost_behavior false 1 '' ''
@@ -1152,7 +1152,7 @@ selfhost_rc=$?
 if [[ $selfhost_rc -eq 0 ]] && grep -qx 'managed-writer-called' "$SELFHOST_DOCKER_LOG"; then
   pass "managed sync-releases loads and invokes the recovery writer"
 else fail "managed sync-releases lost its writer dispatch: $selfhost_output"; fi
-mv "$STUB/sync-releases.saved" "$BEHAVIOR_ROOT/[internal]sync-releases.sh"
+mv "$STUB/sync-releases.saved" "$BEHAVIOR_ROOT/infrastructure/deploy/sync-releases.sh"
 
 # The lock matrix keeps real wrapper/controller dispatch and substitutes only
 # the absolute backend executable. Never open the host's managed lock path.
@@ -1241,7 +1241,7 @@ reset_selfhost_behavior false 1 '' ''
   printf 'export ACTIVITY_HISTORY_CONTRACT_MODE=managed\n'
   printf 'export ACTIVITY_HISTORY_CLUSTER_ENABLED=false\n'
   printf 'export CONTROL_PLANE_REPLICA_COUNT=1\n'
-} >"$BEHAVIOR_ROOT/[internal]deploy.env.local"
+} >"$BEHAVIOR_ROOT/infrastructure/deploy/deploy.env.local"
 run_selfhost up
 if [[ $selfhost_rc -ne 0 ]] \
   && grep -q 'self-host contract refuses deploy.env.local' <<<"$selfhost_output" \
@@ -1294,7 +1294,7 @@ run_selfhost activity-history-activate --confirm-drained
 if [[ $selfhost_rc -eq 0 ]] \
   && grep -qE 'compose .* run .*activity-history preflight --confirm-drained' "$SELFHOST_DOCKER_LOG" \
   && grep -qE 'compose .* up -d --no-deps --no-build .*control-plane' "$SELFHOST_DOCKER_LOG" \
-  && [[ ! -e "$BEHAVIOR_ROOT/[internal]deploy.env.local" ]]; then
+  && [[ ! -e "$BEHAVIOR_ROOT/infrastructure/deploy/deploy.env.local" ]]; then
   pass "self-host drained activation works from installer root env without deploy.env.local"
 else
   fail "self-host activation did not delegate through the guarded single-writer contract"
@@ -1307,14 +1307,14 @@ run_selfhost activity-history-rollback --confirm-drained --old-image "$old_image
 if [[ $selfhost_rc -eq 0 ]] \
   && grep -qE 'compose .* run .*activity-history disable-all --confirm-drained' "$SELFHOST_DOCKER_LOG" \
   && grep -qE 'compose .* up -d --no-deps --no-build .*control-plane' "$SELFHOST_DOCKER_LOG" \
-  && [[ ! -e "$BEHAVIOR_ROOT/[internal]deploy.env.local" ]]; then
+  && [[ ! -e "$BEHAVIOR_ROOT/infrastructure/deploy/deploy.env.local" ]]; then
   pass "self-host drained rollback works from installer root env without deploy.env.local"
 else
   fail "self-host rollback did not delegate through the guarded single-writer contract"
 fi
 
 # ── Activation receipt (#2256) ─────────────────────────────────────────
-RECEIPT="$BEHAVIOR_ROOT/[internal].env.activity-history-receipt.local"
+RECEIPT="$BEHAVIOR_ROOT/infrastructure/deploy/.env.activity-history-receipt.local"
 
 write_receipt() {
   printf 'ACTIVITY_HISTORY_ACTIVATION_STATE=%s\nACTIVITY_HISTORY_ACTIVATION_CONTRACT_MODE=%s\nACTIVITY_HISTORY_ACTIVATION_INSTANCE_TYPE=%s\n' \
@@ -1744,7 +1744,7 @@ reset_selfhost_behavior false 1 '' ''
   printf 'CONTROL_PLANE_REPLICA_COUNT=1\n'
   printf 'ACTIVITY_HISTORY_OPERATOR_NAME=\n'
   printf 'ACTIVITY_HISTORY_PRIVACY_POLICY_URL=\n'
-} >"$BEHAVIOR_ROOT/[internal]deploy.env.local"
+} >"$BEHAVIOR_ROOT/infrastructure/deploy/deploy.env.local"
 STUB_INSPECT_JSON="$(live_inspect "$NONCOMPLIANT_PG")"
 export STUB_INSPECT_JSON
 export STUB_RENDER_EXTRA=',"nats":{}'
@@ -1752,7 +1752,7 @@ selfhost_output="$(ACTIVITY_HISTORY_CONTRACT_MODE=managed \
   COMPOSE_OVERRIDE=docker-compose.production.yml COMPOSE_PROFILES=services \
   bash "$BEHAVIOR_CTL" rebuild 2>&1)"
 selfhost_rc=$?
-rm -f "$BEHAVIOR_ROOT/[internal]deploy.env.local"
+rm -f "$BEHAVIOR_ROOT/infrastructure/deploy/deploy.env.local"
 if [[ $selfhost_rc -eq 0 ]] && grep -qx 'Done.' <<<"$selfhost_output" \
   && grep -qE 'compose .* up ' "$SELFHOST_DOCKER_LOG" \
   && ! grep -qE 'docker .* inspect [^-]' "$SELFHOST_DOCKER_LOG" \
@@ -1770,13 +1770,13 @@ reset_selfhost_behavior false 1 'cp-false\n' 'cp-false\n'
   printf 'CONTROL_PLANE_REPLICA_COUNT=1\n'
   printf 'ACTIVITY_HISTORY_OPERATOR_NAME=\n'
   printf 'ACTIVITY_HISTORY_PRIVACY_POLICY_URL=\n'
-} >"$BEHAVIOR_ROOT/[internal]deploy.env.local"
+} >"$BEHAVIOR_ROOT/infrastructure/deploy/deploy.env.local"
 export STUB_RENDER_EXTRA=',"nats":{}' STUB_COMPOSE_RUNNING=nats
 selfhost_output="$(ACTIVITY_HISTORY_CONTRACT_MODE=managed \
   COMPOSE_OVERRIDE=docker-compose.production.yml COMPOSE_PROFILES=services \
   bash "$BEHAVIOR_CTL" rebuild nats 2>&1)"
 selfhost_rc=$?
-rm -f "$BEHAVIOR_ROOT/[internal]deploy.env.local"
+rm -f "$BEHAVIOR_ROOT/infrastructure/deploy/deploy.env.local"
 if [[ $selfhost_rc -eq 0 ]] && grep -qx 'Done.' <<<"$selfhost_output" \
   && grep -qE 'compose .* up -d --build --no-deps --wait .* nats' "$SELFHOST_DOCKER_LOG" \
   && ! grep -qE 'escalating|remaining services' <<<"$selfhost_output" \
@@ -2063,14 +2063,14 @@ reset_selfhost_behavior false 1 '' ''
   printf 'CONTROL_PLANE_REPLICA_COUNT=1\n'
   printf 'ACTIVITY_HISTORY_OPERATOR_NAME=\n'
   printf 'ACTIVITY_HISTORY_PRIVACY_POLICY_URL=\n'
-} >"$BEHAVIOR_ROOT/[internal]deploy.env.local"
+} >"$BEHAVIOR_ROOT/infrastructure/deploy/deploy.env.local"
 STUB_INSPECT_JSON="$(live_inspect "$NONCOMPLIANT_PG")"
 export STUB_INSPECT_JSON
 selfhost_output="$(printf 'y\n' | ACTIVITY_HISTORY_CONTRACT_MODE=managed STUB_RENDER_EXTRA=',"nats":{}' \
   COMPOSE_OVERRIDE=docker-compose.production.yml COMPOSE_PROFILES=services \
   bash "$BEHAVIOR_CTL" freshstart 2>&1)"
 selfhost_rc=$?
-rm -f "$BEHAVIOR_ROOT/[internal]deploy.env.local"
+rm -f "$BEHAVIOR_ROOT/infrastructure/deploy/deploy.env.local"
 if [[ $selfhost_rc -eq 0 ]] && grep -qF 'Fresh start complete.' <<<"$selfhost_output" \
   && grep -qE 'compose .* up -d --no-deps --no-build --pull missing --wait --wait-timeout 180 nats' "$SELFHOST_DOCKER_LOG" \
   && ! grep -qE 'ps -aq --filter label=com\.docker\.compose\.project=' "$SELFHOST_DOCKER_LOG" \
@@ -2652,9 +2652,9 @@ import json,sys
 rs=[json.loads(x) for x in open(sys.argv[1])]
 actual=[r["argv"] for r in rs if r["argv"] and r["argv"][0] == "compose"]
 root=sys.argv[2]
-# Managed DEPLOY_DIR historically includes [internal]../..;
+# Managed DEPLOY_DIR historically includes infrastructure/deploy/../..;
 # retain its exact path bytes while services includes the legacy media plane.
-prefix=root+"/[internal]../.."
+prefix=root+"/infrastructure/deploy/../.."
 expected=["compose","-f",prefix+"/docker-compose.yml","-f",prefix+"/docker-compose.production.yml",
           "--profile","services","ps"]
 sys.exit(0 if actual == [expected] else 1)

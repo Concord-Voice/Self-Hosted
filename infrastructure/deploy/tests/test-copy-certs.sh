@@ -17,7 +17,7 @@ if [[ "$IMAGE" != "coturn/coturn:4.18.0-alpine@sha256:c29135c08565810d37053f3845
   fail "the Compose coturn image must remain pinned to the reviewed 4.18.0 artifact (got ${IMAGE:-none})"
 fi
 [[ -r "$TOOL_HELPER" ]] || fail "shared public tooling image helper unavailable"
-# shellcheck source=[internal]tests/selfhost-cert-test-tools.sh
+# shellcheck source=infrastructure/deploy/tests/selfhost-cert-test-tools.sh
 source "$TOOL_HELPER"
 FIXTURE_IMAGE="$(selfhost_cert_prepare_tool_image)" || fail "required tooling image setup failed"
 command -v python3 >/dev/null 2>&1 || fail "required Python 3 TLS observer runtime unavailable"

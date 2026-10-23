@@ -47,7 +47,7 @@ set -euo pipefail
 # depends on producer buffering, so it passes on one machine and fails on another.
 # first_line DRAINS its input, so there is nothing to race. Prose ABOUT the defect
 # deliberately keeps saying `head -1`. Reference: #3105, commit 3f7144952 in
-# [internal]tests/test-rtc-port-ingress-parity.sh.
+# infrastructure/deploy/tests/test-rtc-port-ingress-parity.sh.
 first_line() {
   local l first=
   while IFS= read -r l || [[ -n "$l" ]]; do

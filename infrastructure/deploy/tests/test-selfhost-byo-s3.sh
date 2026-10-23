@@ -165,7 +165,7 @@ def model(result, name):
 
 
 def packaging():
-    manifest = (ROOT / "[internal]deploy-manifest.txt").read_text().splitlines()
+    manifest = (ROOT / "infrastructure/deploy/deploy-manifest.txt").read_text().splitlines()
     for name in ("docker-compose.byo-s3.yml", "infrastructure/deploy/selfhost-storage.sh"):
         check("deployment ships complete " + name, manifest.count(name) == 1)
     owners = (ROOT / "CODEOWNERS").read_text().splitlines()
@@ -243,14 +243,14 @@ def packaging():
         "infrastructure/docker/coturn/turnserver.conf",
         "docker-compose.yml",
         "docker-compose.production.yml",
-        "[internal]deploy-manifest.txt",
+        "infrastructure/deploy/deploy-manifest.txt",
     )
     for name in tls_inputs:
         check("self-host hook covers TLS input " + name,
               re.search(selfhost.get("files", r"(?!)"), name) is not None)
     for name in ("scripts/tests/run-selfhost-deploy-tests.sh",
                  "infrastructure/deploy/tests/Dockerfile.selfhost-hook",
-                 "[internal]provision-production.sh",
+                 "infrastructure/deploy/provision-production.sh",
                  "infrastructure/deploy/tests/test-control-plane-secrets.sh"):
         check("self-host hook covers runner input " + name,
               re.search(selfhost.get("files", r"(?!)"), name) is not None)
@@ -269,7 +269,7 @@ def packaging():
     shutil.copyfile(ROOT / runner.relative_to(hook_root), runner)
     runner_source = runner.read_text()
     check("macOS bridge is limited to the two TLS observer suites",
-          re.search(r'network=none\s+bridge_env=\(\)\s+if \[\[ \$suite == [internal]tests/test-copy-certs\.sh \|\|\s+\$suite == [internal]tests/test-selfhost-tls-selected-consumer\.sh \]\]; then\s+network=bridge', runner_source) is not None and
+          re.search(r'network=none\s+bridge_env=\(\)\s+if \[\[ \$suite == infrastructure/deploy/tests/test-copy-certs\.sh \|\|\s+\$suite == infrastructure/deploy/tests/test-selfhost-tls-selected-consumer\.sh \]\]; then\s+network=bridge', runner_source) is not None and
           '--network "$network"' in runner_source)
     bin_dir = hook_root / "bin"
     bin_dir.mkdir()
@@ -289,7 +289,7 @@ def packaging():
     workflow = yaml.safe_load((ROOT / ".github/workflows/pr-ci.yml").read_text())
     runs = [step.get("run", "") for job in workflow["jobs"].values() for step in job.get("steps", [])]
     check("CI discovers deployment test scripts", any(
-        re.search(r"for\s+\w+\s+in\s+[internal]tests/test-\*\.sh", run) for run in runs))
+        re.search(r"for\s+\w+\s+in\s+infrastructure/deploy/tests/test-\*\.sh", run) for run in runs))
     for name in ("test-concord-selfhost.sh", "test-install-selfhost.sh",
                  "test-provision-cert.sh"):
         check("CI retains explicit " + name, any("bash scripts/tests/" + name in run for run in runs))

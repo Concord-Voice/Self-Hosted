@@ -7,7 +7,7 @@
 # Usage: test-control-plane-secrets.sh [path/to/provision-production.sh]
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-PROVISION="${1:-$ROOT/[internal]provision-production.sh}"
+PROVISION="${1:-$ROOT/infrastructure/deploy/provision-production.sh}"
 HELPER="$ROOT/infrastructure/deploy/selfhost-security-event-logging.sh"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

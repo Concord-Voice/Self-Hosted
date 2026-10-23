@@ -1290,7 +1290,7 @@ selfhost_storage_target_guard() {
 # registry credentials (CVE-2026-92543). Before 28.0.0, hosts on the same L2 segment can reach ports
 # published on 127.0.0.1; from 28.2.0 to 28.3.2 a firewalld reload drops the rule
 # that blocks them (CVE-2025-54388). Must equal MIN_ENGINE in install-selfhost.sh
-# (pinned by [internal]tests/test-selfhost-port-posture.sh).
+# (pinned by infrastructure/deploy/tests/test-selfhost-port-posture.sh).
 SELFHOST_MIN_ENGINE=29.8.2
 SELFHOST_DOCKER_DAEMON_JSON="${SELFHOST_DOCKER_DAEMON_JSON:-/etc/docker/daemon.json}"
 
@@ -1586,7 +1586,7 @@ activity_history_read_root_value() {
 install_attachment_probe_cron() {
   local marker='concord-ctl.sh attachment-probe'
   local current
-  local line="30 2 * * * ${DEPLOY_DIR}/[internal]concord-ctl.sh attachment-probe --backend r2-useast >> ${CONFIG_ROOT}/logs/attachment-probe.log 2>&1 && rm -f ${CONFIG_ROOT}/logs/attachment-probe-alert.flag || echo \"attachment-probe failed at \$(date -Is)\" > ${CONFIG_ROOT}/logs/attachment-probe-alert.flag"
+  local line="30 2 * * * ${DEPLOY_DIR}/infrastructure/deploy/concord-ctl.sh attachment-probe --backend r2-useast >> ${CONFIG_ROOT}/logs/attachment-probe.log 2>&1 && rm -f ${CONFIG_ROOT}/logs/attachment-probe-alert.flag || echo \"attachment-probe failed at \$(date -Is)\" > ${CONFIG_ROOT}/logs/attachment-probe-alert.flag"
   if ! current="$(LC_ALL=C crontab -l 2>&1)"; then
     if [[ "$current" != *"no crontab for"* ]]; then
       echo "attachment-probe-cron-install: could not read the existing crontab: $current" >&2
@@ -5755,9 +5755,9 @@ else:
       managed_core_identity_admit || exit 1
     fi
     if (( NGINX_STAGE )); then
-      NGINX_SRC="${DEPLOY_DIR}/[internal]nginx/west-staging.conf.template"
+      NGINX_SRC="${DEPLOY_DIR}/infrastructure/deploy/nginx/west-staging.conf.template"
     else
-      NGINX_SRC="${DEPLOY_DIR}/[internal]nginx/concordvoice.conf"
+      NGINX_SRC="${DEPLOY_DIR}/infrastructure/deploy/nginx/concordvoice.conf"
     fi
     NGINX_RENDER_DIR="${CONFIG_DEPLOY_DIR}/nginx/.rendered"
     if (( NGINX_STAGE )); then
@@ -5768,7 +5768,7 @@ else:
     NGINX_DST="/etc/nginx/sites-available/concordvoice"
     NGINX_CANDIDATE="/etc/nginx/sites-available/.concordvoice.candidate"
     NGINX_BACKUP="/etc/nginx/sites-available/.concordvoice.backup"
-    ADMIN_TMPL="${DEPLOY_DIR}/[internal]nginx/admin-console.conf.template"
+    ADMIN_TMPL="${DEPLOY_DIR}/infrastructure/deploy/nginx/admin-console.conf.template"
     ADMIN_RENDER="${NGINX_RENDER_DIR}/concord-admin.conf"
     ADMIN_DST="/etc/nginx/conf.d/concord-admin.conf"
     ADMIN_CANDIDATE="/etc/nginx/conf.d/.concord-admin.candidate"
@@ -5780,7 +5780,7 @@ else:
     if [[ ! -f "$NGINX_SRC" ]]; then
       echo "" >&2
       echo "  ✗ nginx-reload: source-of-truth config not found at $NGINX_SRC" >&2
-      echo "    Did the immutable release copy of [internal]nginx/ complete?" >&2
+      echo "    Did the immutable release copy of infrastructure/deploy/nginx/ complete?" >&2
       exit 1
     fi
 
@@ -6491,7 +6491,7 @@ else:
       # while /health answers 200 throughout — a failed deploy this previously
       # called green. The compose healthcheck keeps probing /health, because
       # that bit is #3107's restart predicate; see
-      # [internal]tests/test-compose-health-contract.sh.
+      # infrastructure/deploy/tests/test-compose-health-contract.sh.
       curl -sf "${CP_PROBE_BASE}/readyz" >/dev/null 2>&1 && cp_ok=1
       if [[ "${MEDIA_DEPLOY_PROFILE:-media-single}" == media-bluegreen ]]; then
         media_bluegreen_active_ready && mp_ok=1

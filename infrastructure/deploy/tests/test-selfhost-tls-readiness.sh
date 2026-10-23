@@ -6,7 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 STORAGE="$ROOT/infrastructure/deploy/selfhost-storage.sh"
 TLS_SHELL="$ROOT/infrastructure/deploy/selfhost-tls.sh"
 TLS_PY="$ROOT/infrastructure/deploy/selfhost-tls.py"
-MANIFEST="$ROOT/[internal]deploy-manifest.txt"
+MANIFEST="$ROOT/infrastructure/deploy/deploy-manifest.txt"
 
 # CI invokes test-*.sh directly as a nonroot host user. Bootstrap tooling over
 # the public network once, stage only this test's allowlisted source inputs, then
@@ -48,7 +48,7 @@ DOCKERFILE
     docker-compose.yml docker-compose.production.yml docker-compose.selfhost.yml docker-compose.byo-s3.yml; do
     case "$name" in
       docker-compose*) source_file="$ROOT/$name"; destination="$outer_stage/$name" ;;
-      *) source_file="$ROOT/[internal]$name"; destination="$outer_stage/[internal]$name" ;;
+      *) source_file="$ROOT/infrastructure/deploy/$name"; destination="$outer_stage/infrastructure/deploy/$name" ;;
     esac
     install -m 0644 "$source_file" "$destination"
   done

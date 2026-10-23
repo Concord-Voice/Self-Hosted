@@ -1,7 +1,7 @@
 # Shared billing configuration cases (#2033, spec section 11, R9).
 # TestBillingEnvCases (pkg/config/billing_test.go) runs every row through
-# config.LoadBillingConfig; [internal]tests/test-billing-env.sh runs
-# every row through [internal]check-billing-env.sh. Both must give
+# config.LoadBillingConfig; infrastructure/deploy/tests/test-billing-env.sh runs
+# every row through infrastructure/deploy/check-billing-env.sh. Both must give
 # each row the same outcome.
 #
 # Columns are separated by one TAB: name, outcome, expect, then zero or more

@@ -3,7 +3,7 @@
 # resolve-hotfix-label.test.sh — self-test for resolve-hotfix-label.sh.
 #
 # Hermetic: a PATH-prepended mock `gh` whose behaviour is driven by env vars,
-# mirroring the mock-gh pattern in [internal]tests/test-deploy-spa.sh.
+# mirroring the mock-gh pattern in infrastructure/deploy/tests/test-deploy-spa.sh.
 # No network, no sleeping (HOTFIX_RETRY_DELAY=0 throughout).
 #
 # The case that matters is "association empty then resolves" — the #3013 race.

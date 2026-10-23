@@ -376,7 +376,7 @@ new derivative is published, the consumer PR adds that derivative's platform
 digests and the measured subcomponent versions, after measuring the published
 binaries. For this derivative that includes the `x/crypto` v0.56.0
 subcomponent. The steps are in
-[the runbook](../../../[internal]refresh-minio-image.md#3a-vex-verification).
+[the runbook](../../../docs/runbooks/refresh-minio-image.md#3a-vex-verification).
 
 Every subcomponent is pinned to an exact module version
 (`pkg:golang/<module>@<version>`). Trivy matches only that version, so a

@@ -320,7 +320,7 @@ services:
     # cannot fix the dependency and fails the same probe again on restart.
     # Readiness is gated by `concord-ctl.sh wait-healthy`, which probes
     # /readyz, so a deploy still cannot pass with the database unreachable.
-    # Enforced by [internal]tests/test-compose-health-contract.sh.
+    # Enforced by infrastructure/deploy/tests/test-compose-health-contract.sh.
     #
     # BusyBox wget: curl is absent from alpine:3.24 and no package may be added
     # to the runtime image. --spider writes nothing, so this survives the
