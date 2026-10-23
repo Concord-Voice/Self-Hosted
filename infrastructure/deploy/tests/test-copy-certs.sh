@@ -308,7 +308,8 @@ MANAGED_COMPOSE="$TEST_ROOT/managed-compose.json"
 env PUBLIC_IP="$peer_ip" TURN_SECRET=test-secret TURN_REALM=concordvoice.chat \
   POSTGRES_PASSWORD=test REDIS_PASSWORD=test JWT_SECRET=test MINIO_ROOT_USER=test \
   MINIO_ROOT_PASSWORD=test DOMAIN=example.com FEEDBACK_PAT=test FEEDBACK_REPO=fixture/example \
-  TRUSTED_PROXY_CIDRS=127.0.0.1/32 \
+  TRUSTED_PROXY_CIDRS=127.0.0.1/32 MFA_ENCRYPTION_KEY=test \
+  SMTP_HOST=smtp.example.invalid SMTP_FROM=noreply@example.invalid \
   docker compose --env-file /dev/null --project-directory "$SCRIPT_DIR/../../.." \
   -f "$SCRIPT_DIR/../../../docker-compose.yml" -f "$SCRIPT_DIR/../../../docker-compose.production.yml" \
   config --format json >"$MANAGED_COMPOSE" || fail "managed Coturn Compose command must render"

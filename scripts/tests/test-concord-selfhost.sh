@@ -3157,14 +3157,17 @@ PYREADONLY
 if python3 - "$ROOT" <<'PYSMTPALIAS'
 from pathlib import Path
 import sys
-expression = '${RESEND_API_KEY:-${SMTP_PASSWORD:-}}'
-expected = ['SMTP_PASSWORD: ' + expression, 'SMTP_PASSWORD: "' + expression + '"']
-for name in ('docker-compose.yml', 'docker-compose.production.yml'):
+expected_by_file = {
+    'docker-compose.yml': '${RESEND_API_KEY:-${SMTP_PASSWORD:-}}',
+    'docker-compose.production.yml': '${SMTP_PASSWORD:-}',
+}
+for name, expression in expected_by_file.items():
+    expected = ['SMTP_PASSWORD: ' + expression, 'SMTP_PASSWORD: "' + expression + '"']
     lines = [line.strip() for line in (Path(sys.argv[1]) / name).read_text().splitlines()
              if line.lstrip().startswith('SMTP_PASSWORD:')]
     assert len(lines) == 1 and lines[0] in expected, 'selected SMTP alias consumer changed: ' + name
 PYSMTPALIAS
-then pass "selected base/repository-production SMTP consumer pins exact legacy alias precedence"
+then pass "selected base/production SMTP consumers pin their configured password variables"
 else fail "SMTP alias seam differs from the selected Compose consumer"; fi
 
 run_managed_command_snapshot

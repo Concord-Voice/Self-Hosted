@@ -26,3 +26,10 @@ queries:
 query-filters:
   - exclude:
       id: go/log-injection
+  # The IOC scan deliberately reads PR code without credentials on an ephemeral
+  # runner. In protected mode, the other checkout uses job.workflow_sha: the
+  # immutable revision of this required workflow, not a PR-controlled ref.
+  - exclude:
+      id: actions/untrusted-checkout/medium
+  - exclude:
+      id: actions/cache-poisoning/poisonable-step

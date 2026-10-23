@@ -60,8 +60,7 @@ jobs:
       pull-requests: write
     steps:
       # Checks out the protected base SHA; PR code is read only as Git data.
-      # nosemgrep: yaml.github-actions.security.pull-request-target-code-checkout.pull-request-target-code-checkout
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1 nosemgrep
         with:
           ref: ${{ github.event.pull_request.base.sha }}
           fetch-depth: 0
