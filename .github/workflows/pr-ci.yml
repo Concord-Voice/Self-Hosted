@@ -875,6 +875,7 @@ jobs:
           bash .github/scripts/tests/lint-multisecret-andcheck.test.sh
           bash .github/scripts/tests/lint-always-needs-comment.test.sh
           python3 .github/scripts/tests/selfhost-required-workflow.test.py
+          bash .github/scripts/tests/sonar-required-gate.test.sh
           bash .github/scripts/tests/lint-boolean-coercion.test.sh
           bash .github/scripts/tests/lint-empty-expression.test.sh
           bash .github/scripts/tests/lint-gh-repo-flag.test.sh

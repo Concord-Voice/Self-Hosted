@@ -560,28 +560,8 @@ o=$(make_changelog 'Caf&eacute; mode is fixed.
 check 0 "an entity that decodes to a letter is still prose" \
   "$PROMOTE" 0.2.41 2026-08-26 "$o"
 
-# THE ANTI-DRIFT PIN. The promoter mirrors sanitizeSchema.ts's `strip:` array;
-# the first version copied ten of twenty-four and `button` was caught by a
-# reviewer rather than a check. Compare the two lists directly so the next
-# divergence is a red test.
-SCHEMA="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/client/desktop/src/renderer/components/Markdown/sanitizeSchema.ts"
-if [[ -f "$SCHEMA" && -f "$PROMOTE_PY" ]]; then
-  want=$(sed -n '/^  strip: \[/,/^  \]/p' "$SCHEMA" | grep -oE "'[a-z]+'" | tr -d "'" | sort -u | tr '\n' ' ')
-  # `|| true`: a STRIP_TAGS block that stops matching must report as drift (an
-  # empty promoter list), not abort the whole suite under `set -e` with no summary.
-  got=$(sed -n '/^STRIP_TAGS = (/,/).split()/p' "$PROMOTE_PY" | grep -oE '[a-z]+' \
-        | grep -vE '^(STRIP|TAGS|split)$' | sort -u | tr '\n' ' ' || true)
-  if [[ "$want" == "$got" ]]; then
-    echo "  PASS: the promoter's strip list matches sanitizeSchema.ts"; pass=$((pass + 1))
-  else
-    echo "  FAIL: strip-list drift" >&2
-    printf '    schema:   %s\n    promoter: %s\n' "$want" "$got" >&2
-    fail=$((fail + 1))
-  fi
-else
-  echo "  FAIL: $SCHEMA or $PROMOTE_PY not found — the pin verified nothing" >&2
-  fail=$((fail + 1))
-fi
+# The anti-drift pin against client/desktop's sanitizeSchema.ts runs in Desktop.
+# Self-Hosted retains the promoter's behavioral cases below.
 
 # The wrapper must CALL the .py rather than carry the Python itself. With a
 # heredoc back in the wrapper and the old .py left on disk, the pin above would

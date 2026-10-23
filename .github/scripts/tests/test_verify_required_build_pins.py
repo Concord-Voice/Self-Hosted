@@ -579,6 +579,13 @@ class VerifyRequiredBuildPins(unittest.TestCase):
             if os.environ.get("CI") == "true":
                 self.fail("origin/main is not available, so the required build pin cannot be checked")
             self.skipTest("origin/main is not fetched")
+        if subprocess.run(
+            ["git", "-C", str(ROOT), "cat-file", "-e", "origin/main:.github/workflows/required-pr-build.yml"],
+            capture_output=True,
+        ).returncode != 0:
+            # The split repository has no protected workflow on main until this
+            # bootstrap PR merges. Keep the positive control active thereafter.
+            self.skipTest("bootstrap: required-pr-build.yml is not on main yet")
         main_copy = os.path.join(self.tmp.name, "main-required-pr-build.yml")
         Path(main_copy).write_text(subprocess.run(
             ["git", "-C", str(ROOT), "show", "origin/main:.github/workflows/required-pr-build.yml"],

@@ -102,7 +102,9 @@ def check_scan_consumer_policies(pr_ci, workflows, main_ci, nightly_ci):
     """Validate real consumer workflow inputs, gates, artifacts, and defaults."""
     codeql, semgrep = workflows["codeql.yml"], workflows["semgrep.yml"]
     eslint, govuln = workflows["eslint-sarif.yml"], workflows["govulncheck.yml"]
-    build, sonar = workflows["build.yml"], workflows["sonarcloud.yml"]
+    # Self-Hosted: sonarcloud.yml arrives with the Sonar wiring (F7), so it is
+    # optional during bootstrap; main-ci retains the non-desktop hotfix gates.
+    build, sonar = workflows["build.yml"], workflows.get("sonarcloud.yml")
 
     def call_inputs(workflow, owner):
         trigger = workflow.get("on", {})
@@ -133,7 +135,8 @@ def check_scan_consumer_policies(pr_ci, workflows, main_ci, nightly_ci):
     for workflow, owner in ((semgrep, "Semgrep"), (eslint, "ESLint"), (govuln, "govulncheck")):
         require_default(workflow, "external-verdict", "false", owner)
     require_default(build, "force-coverage", "false", "build")
-    require_default(sonar, "require-quality-gate", "false", "Sonar")
+    if sonar is not None:
+        require_default(sonar, "require-quality-gate", "false", "Sonar")
 
     jobs = pr_ci["jobs"]
     selected_calls = {"semgrep": ("run-custom", None),
@@ -188,6 +191,8 @@ def check_scan_consumer_policies(pr_ci, workflows, main_ci, nightly_ci):
     old_defaults = {"codeql-matrix", "run-custom", "run-community", "run-canary",
                     "external-verdict", "force-coverage", "require-quality-gate"}
     for label, caller in (("main-ci", main_ci), ("nightly-ci", nightly_ci)):
+        if caller is None:
+            continue
         for job in caller["jobs"].values():
             uses = job.get("uses", "")
             if any(uses.endswith(name) for name in ("codeql.yml", "eslint-sarif.yml", "govulncheck.yml",
@@ -215,11 +220,13 @@ def check_scan_consumer_policies(pr_ci, workflows, main_ci, nightly_ci):
         if producer_name.endswith("-coverage-merge"):
             assert f"needs.{suite}.result == 'success'" in producer.get("if", ""), (
                 f"{suite} skipped/failed coverage producer must not publish uploaded=true")
-        assert f"{suite}-coverage" in str(sonar["jobs"])
+        if sonar is not None:
+            assert f"{suite}-coverage" in str(sonar["jobs"])
     assert "sonar" not in jobs, "PR-owned workflow must not invoke the credentialed scanner"
-    sonar_scan = next(step for step in sonar["jobs"]["sonarcloud"]["steps"] if step.get("name") == "SonarCloud Scan")
-    assert "require-quality-gate" in sonar_scan.get("with", {}).get("args", "") and "!inputs.reusable-analysis" in sonar_scan.get("with", {}).get("args", ""), (
-        "protected Sonar must wait for the real quality gate")
+    if sonar is not None:
+        sonar_scan = next(step for step in sonar["jobs"]["sonarcloud"]["steps"] if step.get("name") == "SonarCloud Scan")
+        assert "require-quality-gate" in sonar_scan.get("with", {}).get("args", "") and "!inputs.reusable-analysis" in sonar_scan.get("with", {}).get("args", ""), (
+            "protected Sonar must wait for the real quality gate")
 
     # Each evidence report must derive from an identified, real pinned action output.
     for workflow, job_name, label in ((codeql, "analyze", "CodeQL"), (semgrep, "semgrep", "Semgrep"),
