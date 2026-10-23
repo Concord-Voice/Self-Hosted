@@ -1,13 +1,8 @@
-export const THRESHOLD_STORAGE_KEY = "cv.admin.thresholds.v1";
-export const FONT_STORAGE_KEY = "cv.admin.font.v1";
+export const THRESHOLD_STORAGE_KEY = 'cv.admin.thresholds.v1';
+export const FONT_STORAGE_KEY = 'cv.admin.font.v1';
 
 export type ThresholdName =
-  | "hostCpu"
-  | "hostMemory"
-  | "hostDisk"
-  | "serviceCpu"
-  | "http4xxShare"
-  | "http5xxShare";
+  'hostCpu' | 'hostMemory' | 'hostDisk' | 'serviceCpu' | 'http4xxShare' | 'http5xxShare';
 
 export interface ThresholdPair {
   warning: number;
@@ -15,8 +10,8 @@ export interface ThresholdPair {
 }
 
 export type Thresholds = Record<ThresholdName, ThresholdPair>;
-export type ThresholdStatus = "normal" | "warning" | "critical";
-export type FontChoice = "source-sans" | "atkinson" | "open-dyslexic";
+export type ThresholdStatus = 'normal' | 'warning' | 'critical';
+export type FontChoice = 'source-sans' | 'atkinson' | 'open-dyslexic';
 
 export const THRESHOLD_MAXIMUMS: Readonly<Record<ThresholdName, number>> = {
   hostCpu: 100,
@@ -28,19 +23,15 @@ export const THRESHOLD_MAXIMUMS: Readonly<Record<ThresholdName, number>> = {
 };
 
 const thresholdNames: ThresholdName[] = [
-  "hostCpu",
-  "hostMemory",
-  "hostDisk",
-  "serviceCpu",
-  "http4xxShare",
-  "http5xxShare",
+  'hostCpu',
+  'hostMemory',
+  'hostDisk',
+  'serviceCpu',
+  'http4xxShare',
+  'http5xxShare',
 ];
 
-const fontChoices = new Set<string>([
-  "source-sans",
-  "atkinson",
-  "open-dyslexic",
-]);
+const fontChoices = new Set<string>(['source-sans', 'atkinson', 'open-dyslexic']);
 
 export const DEFAULT_THRESHOLDS: Thresholds = {
   hostCpu: { warning: 75, critical: 90 },
@@ -56,24 +47,19 @@ function copyThresholds(value: Thresholds): Thresholds {
     thresholdNames.map((name) => [
       name,
       { warning: value[name].warning, critical: value[name].critical },
-    ]),
+    ])
   ) as Thresholds;
 }
 
 function isPair(value: unknown, maximum: number): value is ThresholdPair {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const pair = value as Record<string, unknown>;
-  if (
-    Object.keys(pair).length !== 2 ||
-    !("warning" in pair) ||
-    !("critical" in pair)
-  )
-    return false;
+  if (Object.keys(pair).length !== 2 || !('warning' in pair) || !('critical' in pair)) return false;
   const { warning, critical } = pair;
   return (
-    typeof warning === "number" &&
+    typeof warning === 'number' &&
     Number.isFinite(warning) &&
-    typeof critical === "number" &&
+    typeof critical === 'number' &&
     Number.isFinite(critical) &&
     warning >= 0 &&
     warning < critical &&
@@ -82,15 +68,13 @@ function isPair(value: unknown, maximum: number): value is ThresholdPair {
 }
 
 export function validateThresholds(value: unknown): value is Thresholds {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
   const candidate = value as Record<string, unknown>;
   const actualNames = Object.keys(candidate);
   return (
     actualNames.length === thresholdNames.length &&
     thresholdNames.every(
-      (name) =>
-        Object.hasOwn(candidate, name) &&
-        isPair(candidate[name], THRESHOLD_MAXIMUMS[name]),
+      (name) => Object.hasOwn(candidate, name) && isPair(candidate[name], THRESHOLD_MAXIMUMS[name])
     )
   );
 }
@@ -111,10 +95,7 @@ export function loadThresholds(): Thresholds {
 export function saveThresholds(value: unknown): boolean {
   if (!validateThresholds(value)) return false;
   try {
-    globalThis.localStorage.setItem(
-      THRESHOLD_STORAGE_KEY,
-      JSON.stringify(copyThresholds(value)),
-    );
+    globalThis.localStorage.setItem(THRESHOLD_STORAGE_KEY, JSON.stringify(copyThresholds(value)));
     return true;
   } catch {
     return false;
@@ -130,9 +111,9 @@ export function resetThresholds(): void {
 }
 
 export function statusFor(value: number, pair: ThresholdPair): ThresholdStatus {
-  if (value >= pair.critical) return "critical";
-  if (value >= pair.warning) return "warning";
-  return "normal";
+  if (value >= pair.critical) return 'critical';
+  if (value >= pair.warning) return 'warning';
+  return 'normal';
 }
 
 export function loadFont(): FontChoice {
@@ -142,7 +123,7 @@ export function loadFont(): FontChoice {
   } catch {
     // Storage can be unavailable under hardened browser policies.
   }
-  return "source-sans";
+  return 'source-sans';
 }
 
 export function saveFont(value: string): value is FontChoice {

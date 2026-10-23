@@ -9,10 +9,10 @@ import {
   Settings,
   Users,
   type LucideIcon,
-} from "lucide-react";
-import { useCallback, useEffect, useRef, useState } from "react";
+} from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { api } from "./api";
+import { api } from './api';
 import type {
   AdminCountersResponse,
   AdminCurrentResponse,
@@ -21,12 +21,8 @@ import type {
   HealthState,
   MetricKey,
   SeriesWindow,
-} from "./contracts";
-import {
-  ACCOUNT_ACTIVITY_METRIC_KEYS,
-  PRIMARY_METRIC_MAP,
-  SERVICE_NAMES,
-} from "./contracts";
+} from './contracts';
+import { ACCOUNT_ACTIVITY_METRIC_KEYS, PRIMARY_METRIC_MAP, SERVICE_NAMES } from './contracts';
 import {
   DEFAULT_THRESHOLDS,
   THRESHOLD_MAXIMUMS,
@@ -38,8 +34,8 @@ import {
   type FontChoice,
   type ThresholdName,
   type Thresholds,
-} from "./preferences";
-import { usePolling, type PollingState } from "./usePolling";
+} from './preferences';
+import { usePolling, type PollingState } from './usePolling';
 import {
   ChangesWorkspace,
   CountersWorkspace,
@@ -50,11 +46,10 @@ import {
   UsersActivityWorkspace,
   type HealthChange,
   type PollingResource,
-} from "./workspaces";
-import type { TimeMode } from "./time";
+} from './workspaces';
+import type { TimeMode } from './time';
 
-export type Workspace =
-  "host" | "services" | "users" | "counters" | "series" | "changes";
+export type Workspace = 'host' | 'services' | 'users' | 'counters' | 'series' | 'changes';
 
 interface WorkspaceDefinition {
   count: string;
@@ -76,57 +71,47 @@ const WORKSPACES: readonly WorkspaceDefinition[] = [
   {
     count: String(PRIMARY_METRIC_MAP.hostOverview.length),
     icon: Gauge,
-    id: "host",
-    label: "Host Overview",
+    id: 'host',
+    label: 'Host Overview',
   },
   {
     count: String(SERVICE_NAMES.length),
     icon: Server,
-    id: "services",
-    label: "Services",
+    id: 'services',
+    label: 'Services',
   },
   {
     count: String(ACCOUNT_ACTIVITY_METRIC_KEYS.length),
     icon: Users,
-    id: "users",
-    label: "Users & Activity",
+    id: 'users',
+    label: 'Users & Activity',
   },
   {
     count: String(COUNTERS_WORKSPACE_SIZE),
     icon: ListChecks,
-    id: "counters",
-    label: "Counters",
+    id: 'counters',
+    label: 'Counters',
   },
-  { count: "1", icon: ChartLine, id: "series", label: "Time Series" },
-  { count: "Live", icon: Activity, id: "changes", label: "Health & Changes" },
+  { count: '1', icon: ChartLine, id: 'series', label: 'Time Series' },
+  { count: 'Live', icon: Activity, id: 'changes', label: 'Health & Changes' },
 ];
 
 const THRESHOLD_FIELDS: readonly {
   key: ThresholdName;
   label: string;
 }[] = [
-  { key: "hostCpu", label: "Host CPU" },
-  { key: "hostMemory", label: "Host memory" },
-  { key: "hostDisk", label: "Host disk" },
-  { key: "serviceCpu", label: "Service CPU" },
-  { key: "http4xxShare", label: "HTTP client-error share" },
-  { key: "http5xxShare", label: "HTTP server-error share" },
+  { key: 'hostCpu', label: 'Host CPU' },
+  { key: 'hostMemory', label: 'Host memory' },
+  { key: 'hostDisk', label: 'Host disk' },
+  { key: 'serviceCpu', label: 'Service CPU' },
+  { key: 'http4xxShare', label: 'HTTP client-error share' },
+  { key: 'http5xxShare', label: 'HTTP server-error share' },
 ];
 
 const warningAfterMs = 25 * 60 * 1_000;
 const logoutAfterMs = 30 * 60 * 1_000;
-const CURRENT_WORKSPACES = new Set<Workspace>([
-  "host",
-  "services",
-  "users",
-  "counters",
-]);
-const HEALTH_SEED_STATES = new Set<PollingState>([
-  "idle",
-  "loading",
-  "stale",
-  "rate-limited",
-]);
+const CURRENT_WORKSPACES = new Set<Workspace>(['host', 'services', 'users', 'counters']);
+const HEALTH_SEED_STATES = new Set<PollingState>(['idle', 'loading', 'stale', 'rate-limited']);
 
 function reloadDocument(): void {
   globalThis.location.reload();
@@ -144,64 +129,61 @@ function copyThresholds(value: Thresholds): Thresholds {
     THRESHOLD_FIELDS.map(({ key }) => [
       key,
       { critical: value[key].critical, warning: value[key].warning },
-    ]),
+    ])
   ) as Thresholds;
 }
 
 function pairError(
   name: ThresholdName,
-  pair: { critical: number; warning: number },
+  pair: { critical: number; warning: number }
 ): string | null {
   if (!Number.isFinite(pair.warning) || !Number.isFinite(pair.critical)) {
-    return "Enter finite warning and critical values";
+    return 'Enter finite warning and critical values';
   }
   const maximum = THRESHOLD_MAXIMUMS[name];
   if (pair.warning < 0 || pair.critical > maximum) {
-    return `Values must be between 0 and ${maximum.toLocaleString("en-US")}`;
+    return `Values must be between 0 and ${maximum.toLocaleString('en-US')}`;
   }
-  if (pair.warning >= pair.critical) return "Warning must be below critical";
+  if (pair.warning >= pair.critical) return 'Warning must be below critical';
   return null;
 }
 
 function aggregateState(health: AdminHealthResponse | null): HealthState {
-  if (!health) return "unknown";
+  if (!health) return 'unknown';
   const states = new Set(health.services.map(({ state }) => state));
-  if (states.has("stopped")) return "stopped";
-  if (states.has("degraded")) return "degraded";
-  if (states.has("unknown")) return "unknown";
-  return "healthy";
+  if (states.has('stopped')) return 'stopped';
+  if (states.has('degraded')) return 'degraded';
+  if (states.has('unknown')) return 'unknown';
+  return 'healthy';
 }
 
 function aggregateCopy(state: HealthState): string {
   switch (state) {
-    case "healthy":
-      return "All systems healthy";
-    case "degraded":
-      return "Service degradation observed";
-    case "stopped":
-      return "Stopped service observed";
-    case "unknown":
-      return "Health unavailable";
+    case 'healthy':
+      return 'All systems healthy';
+    case 'degraded':
+      return 'Service degradation observed';
+    case 'stopped':
+      return 'Stopped service observed';
+    case 'unknown':
+      return 'Health unavailable';
   }
 }
 
 function asPollingResource<T>(
-  value: Pick<PollingResource<T>, "data" | "retryAt" | "state">,
+  value: Pick<PollingResource<T>, 'data' | 'retryAt' | 'state'>
 ): PollingResource<T> {
   return value;
 }
 
 function resolveHealthResource(
-  poll: Pick<
-    PollingResource<AdminHealthResponse>,
-    "data" | "retryAt" | "state"
-  >,
+  poll: Pick<PollingResource<AdminHealthResponse>, 'data' | 'retryAt' | 'state'>,
   seed: AdminHealthResponse | null,
-  initialState: PollingState,
+  initialState: PollingState
 ): PollingResource<AdminHealthResponse> {
   const data = poll.data ?? (HEALTH_SEED_STATES.has(poll.state) ? seed : null);
   let state = poll.state;
-  if (poll.data === null && seed === null && poll.state === "loading") {
+  if (poll.data === null && seed === null && poll.state === 'loading') {
     state = initialState;
   }
   return { data, retryAt: poll.retryAt, state };
@@ -213,7 +195,7 @@ interface StatefulResource {
 
 function activePollingResources(
   health: StatefulResource,
-  optional: readonly (readonly [boolean, StatefulResource])[],
+  optional: readonly (readonly [boolean, StatefulResource])[]
 ): StatefulResource[] {
   const active = [health];
   for (const [enabled, resource] of optional) {
@@ -254,7 +236,7 @@ function WorkspaceContent({
   workspace,
 }: Readonly<WorkspaceContentProps>) {
   switch (workspace) {
-    case "host":
+    case 'host':
       return (
         <HostWorkspace
           current={current}
@@ -264,7 +246,7 @@ function WorkspaceContent({
           timeMode={timeMode}
         />
       );
-    case "services":
+    case 'services':
       return (
         <ServicesWorkspace
           current={current}
@@ -273,7 +255,7 @@ function WorkspaceContent({
           timeMode={timeMode}
         />
       );
-    case "users":
+    case 'users':
       return (
         <UsersActivityWorkspace
           counters={counters}
@@ -282,7 +264,7 @@ function WorkspaceContent({
           timeMode={timeMode}
         />
       );
-    case "counters":
+    case 'counters':
       return (
         <CountersWorkspace
           counters={counters}
@@ -292,7 +274,7 @@ function WorkspaceContent({
           timeMode={timeMode}
         />
       );
-    case "series":
+    case 'series':
       return (
         <TimeSeriesWorkspace
           metricKey={metricKey}
@@ -303,33 +285,29 @@ function WorkspaceContent({
           window={window}
         />
       );
-    case "changes":
-      return (
-        <ChangesWorkspace events={events} health={health} timeMode={timeMode} />
-      );
+    case 'changes':
+      return <ChangesWorkspace events={events} health={health} timeMode={timeMode} />;
   }
 }
 
 export function Portal({
   initialHealth,
-  initialState = initialHealth === null ? "stale" : "ready",
+  initialState = initialHealth === null ? 'stale' : 'ready',
   onForbidden = reloadDocument,
   onSessionEnded,
 }: Readonly<PortalProps>) {
-  const [workspace, setWorkspace] = useState<Workspace>("host");
+  const [workspace, setWorkspace] = useState<Workspace>('host');
   const [healthSeed, setHealthSeed] = useState(initialHealth);
   const [healthEvents, setHealthEvents] = useState<HealthChange[]>([]);
   const [thresholds, setThresholds] = useState(loadThresholds);
   const [font, setFont] = useState(loadFont);
-  const [draftThresholds, setDraftThresholds] = useState(() =>
-    copyThresholds(thresholds),
-  );
+  const [draftThresholds, setDraftThresholds] = useState(() => copyThresholds(thresholds));
   const [draftFont, setDraftFont] = useState<FontChoice>(font);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
-  const [seriesKey, setSeriesKey] = useState<MetricKey>("host_cpu_percent");
-  const [seriesWindow, setSeriesWindow] = useState<SeriesWindow>("24h");
-  const [timeMode, setTimeMode] = useState<TimeMode>("utc");
+  const [seriesKey, setSeriesKey] = useState<MetricKey>('host_cpu_percent');
+  const [seriesWindow, setSeriesWindow] = useState<SeriesWindow>('24h');
+  const [timeMode, setTimeMode] = useState<TimeMode>('utc');
   const [warning, setWarning] = useState(false);
   const [ending, setEnding] = useState(false);
   const [logoutError, setLogoutError] = useState(false);
@@ -383,22 +361,15 @@ export function Portal({
     forbiddenRef.current();
   }, [beginTerminalTransition]);
 
-  const loadHealth = useCallback(
-    (signal: AbortSignal) => api.getHealth({ signal }),
-    [],
-  );
+  const loadHealth = useCallback((signal: AbortSignal) => api.getHealth({ signal }), []);
 
   const recordHealth = useCallback((next: AdminHealthResponse) => {
     const previous = previousHealthRef.current;
     if (previous) {
       const changes: HealthChange[] = [];
       for (const service of SERVICE_NAMES) {
-        const before = previous.services.find(
-          (candidate) => candidate.service === service,
-        );
-        const after = next.services.find(
-          (candidate) => candidate.service === service,
-        );
+        const before = previous.services.find((candidate) => candidate.service === service);
+        const after = next.services.find((candidate) => candidate.service === service);
         if (before && after && before.state !== after.state) {
           healthEventSequenceRef.current += 1;
           changes.push({
@@ -417,39 +388,30 @@ export function Portal({
     previousHealthRef.current = next;
   }, []);
 
-  const loadCurrent = useCallback(
-    (signal: AbortSignal) => api.getCurrent({ signal }),
-    [],
-  );
+  const loadCurrent = useCallback((signal: AbortSignal) => api.getCurrent({ signal }), []);
 
-  const loadCounters = useCallback(
-    (signal: AbortSignal) => api.getCounters({ signal }),
-    [],
-  );
+  const loadCounters = useCallback((signal: AbortSignal) => api.getCounters({ signal }), []);
 
   const recordCounters = useCallback((next: AdminCountersResponse) => {
     previousCountersRef.current = latestCountersRef.current;
     latestCountersRef.current = next;
   }, []);
 
-  const activeSeriesKey = workspace === "host" ? "host_cpu_percent" : seriesKey;
-  const activeSeriesWindow = workspace === "host" ? "24h" : seriesWindow;
+  const activeSeriesKey = workspace === 'host' ? 'host_cpu_percent' : seriesKey;
+  const activeSeriesWindow = workspace === 'host' ? '24h' : seriesWindow;
   const loadSeries = useCallback(
-    (signal: AbortSignal) =>
-      api.getSeries(activeSeriesKey, activeSeriesWindow, { signal }),
-    [activeSeriesKey, activeSeriesWindow],
+    (signal: AbortSignal) => api.getSeries(activeSeriesKey, activeSeriesWindow, { signal }),
+    [activeSeriesKey, activeSeriesWindow]
   );
 
   const currentEnabled = !ending && CURRENT_WORKSPACES.has(workspace);
-  const countersEnabled =
-    !ending && (workspace === "counters" || workspace === "users");
-  const seriesEnabled =
-    !ending && (workspace === "host" || workspace === "series");
+  const countersEnabled = !ending && (workspace === 'counters' || workspace === 'users');
+  const seriesEnabled = !ending && (workspace === 'host' || workspace === 'series');
 
   const healthPoll = usePolling({
     enabled: !ending,
     intervalMs: 15_000,
-    key: "health",
+    key: 'health',
     load: loadHealth,
     onData: recordHealth,
     onForbidden: handleForbidden,
@@ -468,7 +430,7 @@ export function Portal({
   const countersPoll = usePolling({
     enabled: countersEnabled,
     intervalMs: 30_000,
-    key: "counters",
+    key: 'counters',
     load: loadCounters,
     onData: recordCounters,
     onForbidden: handleForbidden,
@@ -478,10 +440,10 @@ export function Portal({
   useEffect(() => {
     if (
       countersEnabled &&
-      countersPoll.state !== "idle" &&
-      countersPoll.state !== "stale" &&
-      countersPoll.state !== "rate-limited" &&
-      countersPoll.state !== "error"
+      countersPoll.state !== 'idle' &&
+      countersPoll.state !== 'stale' &&
+      countersPoll.state !== 'rate-limited' &&
+      countersPoll.state !== 'error'
     ) {
       return;
     }
@@ -495,12 +457,9 @@ export function Portal({
       previousCountersRef.current = null;
       latestCountersRef.current = null;
     };
-    document.addEventListener("visibilitychange", clearHiddenCounterBaseline);
+    document.addEventListener('visibilitychange', clearHiddenCounterBaseline);
     return () => {
-      document.removeEventListener(
-        "visibilitychange",
-        clearHiddenCounterBaseline,
-      );
+      document.removeEventListener('visibilitychange', clearHiddenCounterBaseline);
     };
   }, [countersEnabled]);
   const seriesPoll = usePolling({
@@ -513,11 +472,7 @@ export function Portal({
     sessionGeneration: sessionGenerationRef,
   });
 
-  const healthResource = resolveHealthResource(
-    healthPoll,
-    healthSeed,
-    initialState,
-  );
+  const healthResource = resolveHealthResource(healthPoll, healthSeed, initialState);
   const healthData = healthResource.data;
   const currentResource = asPollingResource(currentPoll);
   const countersResource = asPollingResource(countersPoll);
@@ -581,9 +536,7 @@ export function Portal({
     };
 
     const recordActivity = () => {
-      const restoreFocus = warningActiveRef.current
-        ? focusBeforeWarningRef.current
-        : null;
+      const restoreFocus = warningActiveRef.current ? focusBeforeWarningRef.current : null;
       warningActiveRef.current = false;
       focusBeforeWarningRef.current = null;
       lastOperatorActivityRef.current = Date.now();
@@ -597,22 +550,22 @@ export function Portal({
       if (!document.hidden) evaluateIdle();
     };
 
-    globalThis.addEventListener("pointerdown", recordActivity, {
+    globalThis.addEventListener('pointerdown', recordActivity, {
       passive: true,
     });
-    globalThis.addEventListener("keydown", recordActivity);
-    globalThis.addEventListener("touchstart", recordActivity, {
+    globalThis.addEventListener('keydown', recordActivity);
+    globalThis.addEventListener('touchstart', recordActivity, {
       passive: true,
     });
-    document.addEventListener("visibilitychange", handleVisibility);
+    document.addEventListener('visibilitychange', handleVisibility);
     evaluateIdle();
 
     return () => {
       clearTimer();
-      globalThis.removeEventListener("pointerdown", recordActivity);
-      globalThis.removeEventListener("keydown", recordActivity);
-      globalThis.removeEventListener("touchstart", recordActivity);
-      document.removeEventListener("visibilitychange", handleVisibility);
+      globalThis.removeEventListener('pointerdown', recordActivity);
+      globalThis.removeEventListener('keydown', recordActivity);
+      globalThis.removeEventListener('touchstart', recordActivity);
+      document.removeEventListener('visibilitychange', handleVisibility);
       recordActivityRef.current = () => {};
     };
   }, [ending, endSession]);
@@ -639,7 +592,7 @@ export function Portal({
   const saveSettings = () => {
     if (!validateThresholds(draftThresholds)) return;
     if (!saveThresholds(draftThresholds) || !saveFont(draftFont)) {
-      setSettingsError("Browser settings storage is unavailable");
+      setSettingsError('Browser settings storage is unavailable');
       return;
     }
     setThresholds(copyThresholds(draftThresholds));
@@ -652,9 +605,7 @@ export function Portal({
       return (
         <section aria-labelledby="logout-error-title" className="shell-notice">
           <h1 id="logout-error-title">Sign out incomplete</h1>
-          <p role="alert">
-            Could not confirm sign out. Your session may still be active.
-          </p>
+          <p role="alert">Could not confirm sign out. Your session may still be active.</p>
           <button type="button" onClick={endSession}>
             Retry sign out
           </button>
@@ -673,7 +624,7 @@ export function Portal({
     [seriesEnabled, seriesResource],
   ]);
   const refreshDisabled = activeResources.some(
-    ({ state }) => state === "loading" || state === "rate-limited",
+    ({ state }) => state === 'loading' || state === 'rate-limited'
   );
 
   const refreshVisible = () => {
@@ -695,7 +646,7 @@ export function Portal({
               <button
                 key={candidate.id}
                 aria-label={candidate.label}
-                aria-current={selected ? "page" : undefined}
+                aria-current={selected ? 'page' : undefined}
                 aria-pressed={selected}
                 className="rail-link"
                 type="button"
@@ -710,7 +661,7 @@ export function Portal({
         </nav>
         <div className="rail-node">
           <span>Current node</span>
-          <code>{healthData?.node_id ?? "Unavailable"}</code>
+          <code>{healthData?.node_id ?? 'Unavailable'}</code>
         </div>
       </aside>
 
@@ -724,7 +675,7 @@ export function Portal({
                   <code>{healthData.node_id}</code> / aggregate telemetry
                 </>
               ) : (
-                "Aggregate telemetry unavailable"
+                'Aggregate telemetry unavailable'
               )}
             </p>
           </div>
@@ -733,14 +684,14 @@ export function Portal({
               aria-label="Timestamp display"
               className="segmented-control time-mode-control"
             >
-              {(["utc", "local"] as const).map((mode) => (
+              {(['utc', 'local'] as const).map((mode) => (
                 <button
                   key={mode}
                   aria-pressed={timeMode === mode}
                   type="button"
                   onClick={() => setTimeMode(mode)}
                 >
-                  {mode === "utc" ? "UTC" : "Local"}
+                  {mode === 'utc' ? 'UTC' : 'Local'}
                 </button>
               ))}
             </fieldset>
@@ -789,7 +740,7 @@ export function Portal({
           {healthData === null ? (
             <output className="shell-notice">
               Live telemetry is temporarily unavailable
-              {initialState === "rate-limited" ? "; requests are paused" : ""}.
+              {initialState === 'rate-limited' ? '; requests are paused' : ''}.
             </output>
           ) : null}
           <WorkspaceContent
@@ -891,11 +842,7 @@ export function Portal({
               value={draftFont}
               onChange={(event) => {
                 const next = event.currentTarget.value;
-                if (
-                  next === "source-sans" ||
-                  next === "atkinson" ||
-                  next === "open-dyslexic"
-                ) {
+                if (next === 'source-sans' || next === 'atkinson' || next === 'open-dyslexic') {
                   setDraftFont(next);
                 }
               }}
@@ -914,7 +861,7 @@ export function Portal({
               type="button"
               onClick={() => {
                 setDraftThresholds(copyThresholds(DEFAULT_THRESHOLDS));
-                setDraftFont("source-sans");
+                setDraftFont('source-sans');
                 setSettingsError(null);
               }}
             >
@@ -934,9 +881,7 @@ export function Portal({
           role="alertdialog"
           tabIndex={-1}
         >
-          <h2 id="idle-warning-title">
-            Your Admin Portal session is about to end
-          </h2>
+          <h2 id="idle-warning-title">Your Admin Portal session is about to end</h2>
           <p id="idle-warning-copy">
             Interact with this page within five minutes to stay signed in.
           </p>

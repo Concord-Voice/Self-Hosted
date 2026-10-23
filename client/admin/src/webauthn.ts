@@ -18,15 +18,15 @@ const MAX_CREDENTIAL_ID_BYTES = 1023;
 const MAX_USER_ID_BYTES = 64;
 
 function failOptions(): never {
-  throw new Error("Invalid WebAuthn options");
+  throw new Error('Invalid WebAuthn options');
 }
 
 function failCredential(): never {
-  throw new Error("Invalid WebAuthn credential");
+  throw new Error('Invalid WebAuthn credential');
 }
 
 function record(value: unknown): JsonObject {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
     failOptions();
   }
   return value as JsonObject;
@@ -35,7 +35,7 @@ function record(value: unknown): JsonObject {
 function closedKeys(
   value: JsonObject,
   required: readonly string[],
-  optional: readonly string[] = [],
+  optional: readonly string[] = []
 ): void {
   const allowed = new Set([...required, ...optional]);
   if (
@@ -52,33 +52,30 @@ function boundedArray(value: unknown, maximum: number): unknown[] {
 }
 
 function credentialRecord(value: unknown): JsonObject {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
     failCredential();
   }
   return value as JsonObject;
 }
 
 function string(value: unknown): string {
-  if (typeof value !== "string" || value.length === 0) failOptions();
+  if (typeof value !== 'string' || value.length === 0) failOptions();
   return value;
 }
 
 function finiteNonnegative(value: unknown): number {
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0) {
+  if (typeof value !== 'number' || !Number.isFinite(value) || value < 0) {
     failOptions();
   }
   return value;
 }
 
 function boolean(value: unknown): boolean {
-  if (typeof value !== "boolean") failOptions();
+  if (typeof value !== 'boolean') failOptions();
   return value;
 }
 
-function enumValue<const T extends string>(
-  value: unknown,
-  allowed: readonly T[],
-): T {
+function enumValue<const T extends string>(value: unknown, allowed: readonly T[]): T {
   const match = allowed.find((candidate) => candidate === value);
   if (match === undefined) failOptions();
   return match;
@@ -93,11 +90,8 @@ function base64urlToBuffer(value: string, maximumBytes: number): ArrayBuffer {
   ) {
     failOptions();
   }
-  const base64 = value.replaceAll("-", "+").replaceAll("_", "/");
-  const padded = base64.padEnd(
-    base64.length + ((4 - (base64.length % 4)) % 4),
-    "=",
-  );
+  const base64 = value.replaceAll('-', '+').replaceAll('_', '/');
+  const padded = base64.padEnd(base64.length + ((4 - (base64.length % 4)) % 4), '=');
   let binary: string;
   try {
     binary = atob(padded);
@@ -120,31 +114,25 @@ function bufferToBase64url(value: ArrayBuffer | ArrayBufferView): string {
     if (!(value.buffer instanceof ArrayBuffer)) failCredential();
     bytes = new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
   }
-  let binary = "";
+  let binary = '';
   for (const byte of bytes) binary += String.fromCodePoint(byte);
-  return btoa(binary)
-    .replaceAll("+", "-")
-    .replaceAll("/", "_")
-    .replaceAll(/=+$/g, "");
+  return btoa(binary).replaceAll('+', '-').replaceAll('/', '_').replaceAll(/=+$/g, '');
 }
 
 function descriptor(value: unknown): PublicKeyCredentialDescriptor {
   const data = record(value);
-  closedKeys(data, ["type", "id"], ["transports"]);
-  const type = enumValue(data.type, ["public-key"] as const);
+  closedKeys(data, ['type', 'id'], ['transports']);
+  const type = enumValue(data.type, ['public-key'] as const);
   let transports: AuthenticatorTransport[] | undefined;
   if (data.transports !== undefined) {
-    transports = boundedArray(
-      data.transports,
-      MAX_AUTHENTICATOR_TRANSPORTS,
-    ).map((transport) => {
+    transports = boundedArray(data.transports, MAX_AUTHENTICATOR_TRANSPORTS).map((transport) => {
       const validated = enumValue(transport, [
-        "ble",
-        "hybrid",
-        "internal",
-        "nfc",
-        "smart-card",
-        "usb",
+        'ble',
+        'hybrid',
+        'internal',
+        'nfc',
+        'smart-card',
+        'usb',
       ] as const);
       // TypeScript 6.0's lib.dom omits WebAuthn Level 3's smart-card value.
       // The literal is closed-validated above and matches the Go v0.17.4 contract.
@@ -160,31 +148,27 @@ function descriptor(value: unknown): PublicKeyCredentialDescriptor {
 
 function unwrapPublicKey(value: unknown): JsonObject {
   const data = record(value);
-  closedKeys(data, ["publicKey"]);
+  closedKeys(data, ['publicKey']);
   return record(data.publicKey);
 }
 
 function userVerification(value: unknown): UserVerificationRequirement {
-  return enumValue(value, ["discouraged", "preferred", "required"] as const);
+  return enumValue(value, ['discouraged', 'preferred', 'required'] as const);
 }
 
-function extensions(
-  value: unknown,
-): AuthenticationExtensionsClientInputs | undefined {
+function extensions(value: unknown): AuthenticationExtensionsClientInputs | undefined {
   if (value === undefined) return undefined;
   const data = record(value);
   closedKeys(data, []);
   return {};
 }
 
-export function decodeRequestOptions(
-  value: unknown,
-): PublicKeyCredentialRequestOptions {
+export function decodeRequestOptions(value: unknown): PublicKeyCredentialRequestOptions {
   const data = unwrapPublicKey(value);
   closedKeys(
     data,
-    ["challenge"],
-    ["timeout", "rpId", "allowCredentials", "userVerification", "extensions"],
+    ['challenge'],
+    ['timeout', 'rpId', 'allowCredentials', 'userVerification', 'extensions']
   );
   const options: PublicKeyCredentialRequestOptions = {
     challenge: base64urlToBuffer(string(data.challenge), MAX_CHALLENGE_BYTES),
@@ -194,10 +178,9 @@ export function decodeRequestOptions(
   }
   if (data.rpId !== undefined) options.rpId = string(data.rpId);
   if (data.allowCredentials !== undefined) {
-    options.allowCredentials = boundedArray(
-      data.allowCredentials,
-      MAX_ALLOW_CREDENTIALS,
-    ).map(descriptor);
+    options.allowCredentials = boundedArray(data.allowCredentials, MAX_ALLOW_CREDENTIALS).map(
+      descriptor
+    );
   }
   if (data.userVerification !== undefined) {
     options.userVerification = userVerification(data.userVerification);
@@ -209,13 +192,13 @@ export function decodeRequestOptions(
 
 function relyingParty(value: unknown): PublicKeyCredentialRpEntity {
   const data = record(value);
-  closedKeys(data, ["id", "name"]);
+  closedKeys(data, ['id', 'name']);
   return { id: string(data.id), name: string(data.name) };
 }
 
 function user(value: unknown): PublicKeyCredentialUserEntity {
   const data = record(value);
-  closedKeys(data, ["id", "name", "displayName"]);
+  closedKeys(data, ['id', 'name', 'displayName']);
   return {
     id: base64urlToBuffer(string(data.id), MAX_USER_ID_BYTES),
     name: string(data.name),
@@ -225,43 +208,36 @@ function user(value: unknown): PublicKeyCredentialUserEntity {
 
 function parameter(value: unknown): PublicKeyCredentialParameters {
   const data = record(value);
-  closedKeys(data, ["type", "alg"]);
-  const type = enumValue(data.type, ["public-key"] as const);
-  if (typeof data.alg !== "number" || !Number.isInteger(data.alg)) {
+  closedKeys(data, ['type', 'alg']);
+  const type = enumValue(data.type, ['public-key'] as const);
+  if (typeof data.alg !== 'number' || !Number.isInteger(data.alg)) {
     failOptions();
   }
   return { type, alg: data.alg };
 }
 
-function authenticatorSelection(
-  value: unknown,
-): AuthenticatorSelectionCriteria {
+function authenticatorSelection(value: unknown): AuthenticatorSelectionCriteria {
   const data = record(value);
   closedKeys(
     data,
     [],
-    [
-      "authenticatorAttachment",
-      "requireResidentKey",
-      "residentKey",
-      "userVerification",
-    ],
+    ['authenticatorAttachment', 'requireResidentKey', 'residentKey', 'userVerification']
   );
   const selection: AuthenticatorSelectionCriteria = {};
   if (data.authenticatorAttachment !== undefined) {
-    selection.authenticatorAttachment = enumValue(
-      data.authenticatorAttachment,
-      ["cross-platform", "platform"] as const,
-    );
+    selection.authenticatorAttachment = enumValue(data.authenticatorAttachment, [
+      'cross-platform',
+      'platform',
+    ] as const);
   }
   if (data.requireResidentKey !== undefined) {
     selection.requireResidentKey = boolean(data.requireResidentKey);
   }
   if (data.residentKey !== undefined) {
     selection.residentKey = enumValue(data.residentKey, [
-      "discouraged",
-      "preferred",
-      "required",
+      'discouraged',
+      'preferred',
+      'required',
     ] as const);
   }
   if (data.userVerification !== undefined) {
@@ -270,50 +246,36 @@ function authenticatorSelection(
   return selection;
 }
 
-export function decodeCreationOptions(
-  value: unknown,
-): PublicKeyCredentialCreationOptions {
+export function decodeCreationOptions(value: unknown): PublicKeyCredentialCreationOptions {
   const data = unwrapPublicKey(value);
   closedKeys(
     data,
-    ["challenge", "rp", "user", "pubKeyCredParams"],
-    [
-      "timeout",
-      "excludeCredentials",
-      "authenticatorSelection",
-      "attestation",
-      "extensions",
-    ],
+    ['challenge', 'rp', 'user', 'pubKeyCredParams'],
+    ['timeout', 'excludeCredentials', 'authenticatorSelection', 'attestation', 'extensions']
   );
   const options: PublicKeyCredentialCreationOptions = {
     challenge: base64urlToBuffer(string(data.challenge), MAX_CHALLENGE_BYTES),
     rp: relyingParty(data.rp),
     user: user(data.user),
-    pubKeyCredParams: boundedArray(
-      data.pubKeyCredParams,
-      MAX_PUB_KEY_CRED_PARAMS,
-    ).map(parameter),
+    pubKeyCredParams: boundedArray(data.pubKeyCredParams, MAX_PUB_KEY_CRED_PARAMS).map(parameter),
   };
   if (data.timeout !== undefined) {
     options.timeout = finiteNonnegative(data.timeout);
   }
   if (data.excludeCredentials !== undefined) {
-    options.excludeCredentials = boundedArray(
-      data.excludeCredentials,
-      MAX_EXCLUDE_CREDENTIALS,
-    ).map(descriptor);
+    options.excludeCredentials = boundedArray(data.excludeCredentials, MAX_EXCLUDE_CREDENTIALS).map(
+      descriptor
+    );
   }
   if (data.authenticatorSelection !== undefined) {
-    options.authenticatorSelection = authenticatorSelection(
-      data.authenticatorSelection,
-    );
+    options.authenticatorSelection = authenticatorSelection(data.authenticatorSelection);
   }
   if (data.attestation !== undefined) {
     options.attestation = enumValue(data.attestation, [
-      "direct",
-      "enterprise",
-      "indirect",
-      "none",
+      'direct',
+      'enterprise',
+      'indirect',
+      'none',
     ] as const);
   }
   const parsedExtensions = extensions(data.extensions);
@@ -324,9 +286,7 @@ export function decodeCreationOptions(
 function standardCredentialJson(credential: unknown): CredentialJson {
   const data = credentialRecord(credential);
   const json =
-    typeof data.toJSON === "function"
-      ? credentialRecord(data.toJSON.call(credential))
-      : null;
+    typeof data.toJSON === 'function' ? credentialRecord(data.toJSON.call(credential)) : null;
   if (json) {
     return {
       id: stringFromCredential(json.id),
@@ -344,14 +304,13 @@ function standardCredentialJson(credential: unknown): CredentialJson {
     rawId: bufferToBase64url(publicKey.rawId),
     type: publicKey.type,
     authenticatorAttachment: attachment(publicKey.authenticatorAttachment),
-    clientExtensionResults:
-      publicKey.getClientExtensionResults() as unknown as JsonObject,
+    clientExtensionResults: publicKey.getClientExtensionResults() as unknown as JsonObject,
     response: credentialRecord(publicKey.response),
   };
 }
 
 function stringFromCredential(value: unknown): string {
-  if (typeof value !== "string") failCredential();
+  if (typeof value !== 'string') failCredential();
   return value;
 }
 
@@ -369,13 +328,11 @@ function bufferField(value: unknown): string {
   if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
     return bufferToBase64url(value);
   }
-  if (typeof value === "string") return value;
+  if (typeof value === 'string') return value;
   failCredential();
 }
 
-export function encodeAssertion(
-  credential: PublicKeyCredential | null,
-): JsonObject {
+export function encodeAssertion(credential: PublicKeyCredential | null): JsonObject {
   const data = standardCredentialJson(credential);
   const response = data.response;
   return {
@@ -400,9 +357,7 @@ export function encodeAssertion(
   };
 }
 
-export function encodeAttestation(
-  credential: PublicKeyCredential | null,
-): JsonObject {
+export function encodeAttestation(credential: PublicKeyCredential | null): JsonObject {
   const data = standardCredentialJson(credential);
   const response = data.response;
   return {

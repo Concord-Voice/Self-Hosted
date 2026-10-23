@@ -3,29 +3,23 @@ import type {
   AdminCurrentResponse,
   AdminHealthResponse,
   AdminSeriesResponse,
-} from "../contracts";
+} from '../contracts';
 
-export const NODE_ID = "cvn_abcdefghijklmnop";
-export const SAMPLED_AT = "2026-07-14T12:00:00Z";
+export const NODE_ID = 'cvn_abcdefghijklmnop';
+export const SAMPLED_AT = '2026-07-14T12:00:00Z';
 
 export function healthFixture(): AdminHealthResponse {
   return {
     node_id: NODE_ID,
-    services: [
-      "control_plane",
-      "media_plane",
-      "postgres",
-      "redis",
-      "nats",
-      "minio",
-      "coturn",
-    ].map((service) => ({
-      service,
-      state: "healthy",
-      running: true,
-      healthy: true,
-      sampled_at: SAMPLED_AT,
-    })) as AdminHealthResponse["services"],
+    services: ['control_plane', 'media_plane', 'postgres', 'redis', 'nats', 'minio', 'coturn'].map(
+      (service) => ({
+        service,
+        state: 'healthy',
+        running: true,
+        healthy: true,
+        sampled_at: SAMPLED_AT,
+      })
+    ) as AdminHealthResponse['services'],
   };
 }
 
@@ -34,18 +28,18 @@ export function currentFixture(): AdminCurrentResponse {
     node_id: NODE_ID,
     metrics: [
       {
-        metric_key: "host_cpu_percent",
-        source: "host",
-        unit: "percent",
-        kind: "gauge",
+        metric_key: 'host_cpu_percent',
+        source: 'host',
+        unit: 'percent',
+        kind: 'gauge',
         value: 12.5,
         sampled_at: SAMPLED_AT,
       },
       {
-        metric_key: "http_requests_total",
-        source: "control",
-        unit: "count",
-        kind: "counter",
+        metric_key: 'http_requests_total',
+        source: 'control',
+        unit: 'count',
+        kind: 'counter',
         value: 42,
         sampled_at: SAMPLED_AT,
       },
@@ -58,10 +52,10 @@ export function countersFixture(): AdminCountersResponse {
     node_id: NODE_ID,
     counters: [
       {
-        metric_key: "http_requests_total",
-        source: "control",
-        unit: "count",
-        kind: "counter",
+        metric_key: 'http_requests_total',
+        source: 'control',
+        unit: 'count',
+        kind: 'counter',
         value: 42,
         sampled_at: SAMPLED_AT,
       },
@@ -69,17 +63,15 @@ export function countersFixture(): AdminCountersResponse {
   };
 }
 
-export function seriesFixture(
-  window: "24h" | "7d" = "24h",
-): AdminSeriesResponse {
+export function seriesFixture(window: '24h' | '7d' = '24h'): AdminSeriesResponse {
   return {
     node_id: NODE_ID,
     metric: {
-      metric_key: "host_cpu_percent",
-      source: "host",
-      unit: "percent",
-      kind: "gauge",
-      rollup: "average",
+      metric_key: 'host_cpu_percent',
+      source: 'host',
+      unit: 'percent',
+      kind: 'gauge',
+      rollup: 'average',
     },
     window,
     bucket_seconds: 3600,

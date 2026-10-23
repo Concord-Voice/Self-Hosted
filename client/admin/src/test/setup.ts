@@ -1,20 +1,20 @@
-import "@testing-library/jest-dom/vitest";
-import { cleanup } from "@testing-library/react";
-import { afterAll, afterEach, beforeAll, vi } from "vitest";
+import '@testing-library/jest-dom/vitest';
+import { cleanup } from '@testing-library/react';
+import { afterAll, afterEach, beforeAll, vi } from 'vitest';
 
-import { server } from "./server";
+import { server } from './server';
 
 const nativeFetch = globalThis.fetch.bind(globalThis);
 
 globalThis.fetch = (input: RequestInfo | URL, init?: RequestInit) => {
-  if (typeof input === "string" && input.startsWith("/")) {
+  if (typeof input === 'string' && input.startsWith('/')) {
     return nativeFetch(new URL(input, window.location.origin), init);
   }
   return nativeFetch(input, init);
 };
 
 if (!navigator.credentials) {
-  Object.defineProperty(navigator, "credentials", {
+  Object.defineProperty(navigator, 'credentials', {
     configurable: true,
     value: {
       create: () => Promise.resolve(null),
@@ -24,7 +24,7 @@ if (!navigator.credentials) {
 }
 
 beforeAll(() => {
-  server.listen({ onUnhandledFrame: "error" });
+  server.listen({ onUnhandledFrame: 'error' });
 });
 
 afterEach(() => {

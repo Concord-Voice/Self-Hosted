@@ -1,29 +1,25 @@
-import type {
-  AdminSeriesResponse,
-  RollupMode,
-  SeriesWindow,
-} from "./contracts";
-import { formatScalar } from "./formatMetric";
-import { METRIC_LABELS } from "./metricLabels";
-import { formatTimestamp, type TimeMode } from "./time";
+import type { AdminSeriesResponse, RollupMode, SeriesWindow } from './contracts';
+import { formatScalar } from './formatMetric';
+import { METRIC_LABELS } from './metricLabels';
+import { formatTimestamp, type TimeMode } from './time';
 
 const WIDTH = 800;
 const HEIGHT = 240;
 const PADDING = 16;
 
 const WINDOW_LABELS: Record<SeriesWindow, string> = {
-  "24h": "24 hours",
-  "7d": "7 days",
+  '24h': '24 hours',
+  '7d': '7 days',
 };
 
 const ROLLUP_LABELS: Record<RollupMode, { summary: string; column: string }> = {
   average: {
-    summary: "Latest hourly average",
-    column: "Hourly average",
+    summary: 'Latest hourly average',
+    column: 'Hourly average',
   },
   last: {
-    summary: "Latest hourly value",
-    column: "Hourly value",
+    summary: 'Latest hourly value',
+    column: 'Hourly value',
   },
 };
 
@@ -43,17 +39,16 @@ function polylinePoints(response: AdminSeriesResponse): string {
         response.points.length === 1
           ? WIDTH / 2
           : PADDING + (index / (response.points.length - 1)) * xRange;
-      const normalized =
-        scaledRange === 0 ? 0.5 : (value / scale - scaledMinimum) / scaledRange;
+      const normalized = scaledRange === 0 ? 0.5 : (value / scale - scaledMinimum) / scaledRange;
       const y = PADDING + (1 - Math.min(1, Math.max(0, normalized))) * yRange;
       return `${x},${y}`;
     })
-    .join(" ");
+    .join(' ');
 }
 
 export function SeriesChart({
   response,
-  timeMode = "utc",
+  timeMode = 'utc',
 }: Readonly<{ response: AdminSeriesResponse; timeMode?: TimeMode }>) {
   const label = METRIC_LABELS[response.metric.metric_key];
   const latestPoint = response.points.at(-1);
@@ -119,7 +114,7 @@ export function SeriesChart({
                 <td>{formatScalar(point.value, response.metric.unit)}</td>
                 <td>{formatScalar(point.minimum, response.metric.unit)}</td>
                 <td>{formatScalar(point.maximum, response.metric.unit)}</td>
-                <td>{formatScalar(point.sample_count, "count")}</td>
+                <td>{formatScalar(point.sample_count, 'count')}</td>
               </tr>
             ))}
           </tbody>

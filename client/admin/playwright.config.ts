@@ -1,42 +1,42 @@
-import { defineConfig, devices } from "@playwright/test";
+import { defineConfig, devices } from '@playwright/test';
 
 const port = 4181;
 
 export default defineConfig({
   expect: {
     toHaveScreenshot: {
-      animations: "disabled",
-      caret: "hide",
+      animations: 'disabled',
+      caret: 'hide',
       maxDiffPixelRatio: 0.01,
     },
   },
   forbidOnly: Boolean(process.env.CI),
   fullyParallel: false,
-  outputDir: "test-results",
+  outputDir: 'test-results',
   projects: [
     {
-      name: "chromium-desktop",
+      name: 'chromium-desktop',
       use: {
-        ...devices["Desktop Chrome"],
+        ...devices['Desktop Chrome'],
         viewport: { height: 1000, width: 1440 },
       },
     },
     {
-      name: "chromium-mobile-320",
+      name: 'chromium-mobile-320',
       use: {
-        ...devices["Desktop Chrome"],
+        ...devices['Desktop Chrome'],
         viewport: { height: 800, width: 320 },
       },
     },
   ],
-  reporter: process.env.CI ? [["github"], ["list"]] : "list",
+  reporter: process.env.CI ? [['github'], ['list']] : 'list',
   retries: process.env.CI ? 2 : 0,
-  testDir: "./e2e",
+  testDir: './e2e',
   timeout: 30_000,
   use: {
     baseURL: `http://localhost:${port}`,
-    screenshot: "only-on-failure",
-    trace: "on-first-retry",
+    screenshot: 'only-on-failure',
+    trace: 'on-first-retry',
   },
   webServer: {
     command: `npm run build && npx vite preview --host 127.0.0.1 --port ${port} --strictPort`,

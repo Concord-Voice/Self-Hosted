@@ -1,112 +1,112 @@
 export const SERVICE_NAMES = [
-  "control_plane",
-  "media_plane",
-  "postgres",
-  "redis",
-  "nats",
-  "minio",
-  "coturn",
+  'control_plane',
+  'media_plane',
+  'postgres',
+  'redis',
+  'nats',
+  'minio',
+  'coturn',
 ] as const;
 
 export type ServiceName = (typeof SERVICE_NAMES)[number];
 
 const HOST_METRIC_KEYS = [
-  "host_cpu_percent",
-  "host_memory_percent",
-  "host_disk_percent",
-  "host_load_1m",
+  'host_cpu_percent',
+  'host_memory_percent',
+  'host_disk_percent',
+  'host_load_1m',
 ] as const;
 
 const SERVICE_METRIC_KEYS = [
-  "service_control_plane_running",
-  "service_control_plane_healthy",
-  "service_control_plane_cpu_percent",
-  "service_control_plane_memory_bytes",
-  "service_media_plane_running",
-  "service_media_plane_healthy",
-  "service_media_plane_cpu_percent",
-  "service_media_plane_memory_bytes",
-  "service_postgres_running",
-  "service_postgres_healthy",
-  "service_postgres_cpu_percent",
-  "service_postgres_memory_bytes",
-  "service_redis_running",
-  "service_redis_healthy",
-  "service_redis_cpu_percent",
-  "service_redis_memory_bytes",
-  "service_nats_running",
-  "service_nats_healthy",
-  "service_nats_cpu_percent",
-  "service_nats_memory_bytes",
-  "service_minio_running",
-  "service_minio_healthy",
-  "service_minio_cpu_percent",
-  "service_minio_memory_bytes",
-  "service_coturn_running",
-  "service_coturn_healthy",
-  "service_coturn_cpu_percent",
-  "service_coturn_memory_bytes",
+  'service_control_plane_running',
+  'service_control_plane_healthy',
+  'service_control_plane_cpu_percent',
+  'service_control_plane_memory_bytes',
+  'service_media_plane_running',
+  'service_media_plane_healthy',
+  'service_media_plane_cpu_percent',
+  'service_media_plane_memory_bytes',
+  'service_postgres_running',
+  'service_postgres_healthy',
+  'service_postgres_cpu_percent',
+  'service_postgres_memory_bytes',
+  'service_redis_running',
+  'service_redis_healthy',
+  'service_redis_cpu_percent',
+  'service_redis_memory_bytes',
+  'service_nats_running',
+  'service_nats_healthy',
+  'service_nats_cpu_percent',
+  'service_nats_memory_bytes',
+  'service_minio_running',
+  'service_minio_healthy',
+  'service_minio_cpu_percent',
+  'service_minio_memory_bytes',
+  'service_coturn_running',
+  'service_coturn_healthy',
+  'service_coturn_cpu_percent',
+  'service_coturn_memory_bytes',
 ] as const;
 
 const CONTROL_METRIC_KEYS = [
-  "http_requests_total",
-  "http_client_errors_total",
-  "http_server_errors_total",
-  "websocket_connections_current",
-  "channel_messages_total",
-  "dm_messages_total",
-  "ops_snapshot_rejections_total",
-  "presence_audience_suppressed_total",
-  "presence_ttl_lapsed_total",
-  "websocket_abnormal_closes_total",
-  "server_voice_terminal_outbox_captured_total",
-  "server_voice_terminal_outbox_delivered_total",
-  "server_voice_terminal_outbox_successor_suppressed_total",
-  "server_voice_terminal_outbox_channel_suppressed_total",
-  "server_voice_terminal_outbox_lock_retained_total",
-  "server_voice_terminal_outbox_queue_rescheduled_total",
-  "billing_erasure_outbox_pending",
-  "billing_drift_corrections_total",
+  'http_requests_total',
+  'http_client_errors_total',
+  'http_server_errors_total',
+  'websocket_connections_current',
+  'channel_messages_total',
+  'dm_messages_total',
+  'ops_snapshot_rejections_total',
+  'presence_audience_suppressed_total',
+  'presence_ttl_lapsed_total',
+  'websocket_abnormal_closes_total',
+  'server_voice_terminal_outbox_captured_total',
+  'server_voice_terminal_outbox_delivered_total',
+  'server_voice_terminal_outbox_successor_suppressed_total',
+  'server_voice_terminal_outbox_channel_suppressed_total',
+  'server_voice_terminal_outbox_lock_retained_total',
+  'server_voice_terminal_outbox_queue_rescheduled_total',
+  'billing_erasure_outbox_pending',
+  'billing_drift_corrections_total',
 ] as const;
 
 export const ACCOUNT_ACTIVITY_METRIC_KEYS = [
-  "registered_users_current",
-  "pending_registrations_current",
-  "users_online_current",
-  "active_sessions_current",
-  "active_users_24h",
-  "active_users_7d",
-  "active_users_15d",
-  "active_users_30d",
-  "media_uploads_total",
+  'registered_users_current',
+  'pending_registrations_current',
+  'users_online_current',
+  'active_sessions_current',
+  'active_users_24h',
+  'active_users_7d',
+  'active_users_15d',
+  'active_users_30d',
+  'media_uploads_total',
 ] as const;
 
 const MEDIA_ACTIVITY_METRIC_KEYS = [
-  "media_rooms_current",
-  "media_participants_audio_current",
-  "media_participants_webcam_current",
-  "media_participants_screenshare_current",
-  "media_camera_publishers_current",
-  "media_screen_publishers_current",
-  "media_peak_video_publishers_per_room",
+  'media_rooms_current',
+  'media_participants_audio_current',
+  'media_participants_webcam_current',
+  'media_participants_screenshare_current',
+  'media_camera_publishers_current',
+  'media_screen_publishers_current',
+  'media_peak_video_publishers_per_room',
   // #3094 witnesses. Counters in a gauge-shaped group, following
   // media_egress_cumulative_bytes: COUNTER_METRIC_KEYS carries the kind, so a new
   // workspace panel would be presentation churn for two values an operator reads
   // alongside the publisher counts they explain.
-  "media_camera_layering_gate_flips_total",
-  "media_camera_pressure_demands_total",
+  'media_camera_layering_gate_flips_total',
+  'media_camera_pressure_demands_total',
 ] as const;
 
 const MEDIA_EGRESS_METRIC_KEYS = [
-  "media_egress_current_bps",
-  "media_egress_peak_bps",
-  "media_egress_cumulative_bytes",
+  'media_egress_current_bps',
+  'media_egress_peak_bps',
+  'media_egress_cumulative_bytes',
 ] as const;
 
 const PARTICIPANT_HOUR_METRIC_KEYS = [
-  "media_participant_hours_audio",
-  "media_participant_hours_webcam",
-  "media_participant_hours_screenshare",
+  'media_participant_hours_audio',
+  'media_participant_hours_webcam',
+  'media_participant_hours_screenshare',
 ] as const;
 
 export const METRIC_KEYS = [
@@ -132,42 +132,41 @@ export const PRIMARY_METRIC_MAP = {
 } as const;
 
 export const COUNTER_METRIC_KEYS = [
-  "http_requests_total",
-  "http_client_errors_total",
-  "http_server_errors_total",
-  "channel_messages_total",
-  "dm_messages_total",
-  "media_uploads_total",
-  "ops_snapshot_rejections_total",
-  "presence_audience_suppressed_total",
-  "presence_ttl_lapsed_total",
-  "websocket_abnormal_closes_total",
-  "server_voice_terminal_outbox_captured_total",
-  "server_voice_terminal_outbox_delivered_total",
-  "server_voice_terminal_outbox_successor_suppressed_total",
-  "server_voice_terminal_outbox_channel_suppressed_total",
-  "server_voice_terminal_outbox_lock_retained_total",
-  "server_voice_terminal_outbox_queue_rescheduled_total",
-  "billing_drift_corrections_total",
-  "media_egress_cumulative_bytes",
-  "media_participant_hours_audio",
-  "media_participant_hours_webcam",
-  "media_participant_hours_screenshare",
-  "media_camera_layering_gate_flips_total",
-  "media_camera_pressure_demands_total",
+  'http_requests_total',
+  'http_client_errors_total',
+  'http_server_errors_total',
+  'channel_messages_total',
+  'dm_messages_total',
+  'media_uploads_total',
+  'ops_snapshot_rejections_total',
+  'presence_audience_suppressed_total',
+  'presence_ttl_lapsed_total',
+  'websocket_abnormal_closes_total',
+  'server_voice_terminal_outbox_captured_total',
+  'server_voice_terminal_outbox_delivered_total',
+  'server_voice_terminal_outbox_successor_suppressed_total',
+  'server_voice_terminal_outbox_channel_suppressed_total',
+  'server_voice_terminal_outbox_lock_retained_total',
+  'server_voice_terminal_outbox_queue_rescheduled_total',
+  'billing_drift_corrections_total',
+  'media_egress_cumulative_bytes',
+  'media_participant_hours_audio',
+  'media_participant_hours_webcam',
+  'media_participant_hours_screenshare',
+  'media_camera_layering_gate_flips_total',
+  'media_camera_pressure_demands_total',
 ] as const;
 // Compile-time check that every counter key is a MetricKey. Not `as const
 // satisfies`: the pinned CI Semgrep parser rejects `satisfies` and fails the scan.
 const _counterKeysAreMetricKeys: readonly MetricKey[] = COUNTER_METRIC_KEYS;
 
 export type CounterMetricKey = (typeof COUNTER_METRIC_KEYS)[number];
-export type MetricSource = "host" | "control" | "media";
-export type MetricUnit =
-  "percent" | "count" | "bytes" | "bits_per_second" | "load" | "hours";
-export type MetricKind = "gauge" | "counter";
-export type RollupMode = "average" | "last";
-export type HealthState = "healthy" | "degraded" | "stopped" | "unknown";
-export type SeriesWindow = "24h" | "7d";
+export type MetricSource = 'host' | 'control' | 'media';
+export type MetricUnit = 'percent' | 'count' | 'bytes' | 'bits_per_second' | 'load' | 'hours';
+export type MetricKind = 'gauge' | 'counter';
+export type RollupMode = 'average' | 'last';
+export type HealthState = 'healthy' | 'degraded' | 'stopped' | 'unknown';
+export type SeriesWindow = '24h' | '7d';
 
 export interface AdminHealthService {
   service: ServiceName;
@@ -200,7 +199,7 @@ export interface AdminCounterPoint {
   metric_key: CounterMetricKey;
   source: MetricSource;
   unit: MetricUnit;
-  kind: "counter";
+  kind: 'counter';
   value: number;
   sampled_at: string;
 }
@@ -236,8 +235,8 @@ export interface AdminSeriesResponse {
 
 export class ContractError extends Error {
   constructor() {
-    super("Invalid Admin Portal response");
-    this.name = "ContractError";
+    super('Invalid Admin Portal response');
+    this.name = 'ContractError';
   }
 }
 
@@ -248,24 +247,12 @@ const controlMetricKeySet = new Set<string>([
   ...ACCOUNT_ACTIVITY_METRIC_KEYS,
 ]);
 const serviceNameSet = new Set<string>(SERVICE_NAMES);
-const sources = new Set<string>(["host", "control", "media"]);
-const units = new Set<string>([
-  "percent",
-  "count",
-  "bytes",
-  "bits_per_second",
-  "load",
-  "hours",
-]);
-const kinds = new Set<string>(["gauge", "counter"]);
-const rollups = new Set<string>(["average", "last"]);
-const healthStates = new Set<string>([
-  "healthy",
-  "degraded",
-  "stopped",
-  "unknown",
-]);
-const windows = new Set<string>(["24h", "7d"]);
+const sources = new Set<string>(['host', 'control', 'media']);
+const units = new Set<string>(['percent', 'count', 'bytes', 'bits_per_second', 'load', 'hours']);
+const kinds = new Set<string>(['gauge', 'counter']);
+const rollups = new Set<string>(['average', 'last']);
+const healthStates = new Set<string>(['healthy', 'degraded', 'stopped', 'unknown']);
+const windows = new Set<string>(['24h', '7d']);
 const nodePattern = /^cvn_[a-z2-7]{16}$/;
 
 interface MetricDefinition {
@@ -280,21 +267,14 @@ function invalid(): never {
 }
 
 function record(value: unknown): Record<string, unknown> {
-  if (!value || typeof value !== "object" || Array.isArray(value)) invalid();
+  if (!value || typeof value !== 'object' || Array.isArray(value)) invalid();
   return value as Record<string, unknown>;
 }
 
-function exactKeys(
-  value: Record<string, unknown>,
-  expected: readonly string[],
-): void {
+function exactKeys(value: Record<string, unknown>, expected: readonly string[]): void {
   const expectedSet = new Set(expected);
   const actual = Object.keys(value);
-  if (
-    actual.length !== expected.length ||
-    actual.some((key) => !expectedSet.has(key))
-  )
-    invalid();
+  if (actual.length !== expected.length || actual.some((key) => !expectedSet.has(key))) invalid();
 }
 
 function array(value: unknown, maximum: number, exact?: number): unknown[] {
@@ -308,22 +288,18 @@ function array(value: unknown, maximum: number, exact?: number): unknown[] {
   return value;
 }
 
-function fixedString<T extends string>(
-  value: unknown,
-  allowed: Set<string>,
-): T {
-  if (typeof value !== "string" || !allowed.has(value)) invalid();
+function fixedString<T extends string>(value: unknown, allowed: Set<string>): T {
+  if (typeof value !== 'string' || !allowed.has(value)) invalid();
   return value as T;
 }
 
 function finite(value: unknown): number {
-  if (typeof value !== "number" || !Number.isFinite(value)) invalid();
+  if (typeof value !== 'number' || !Number.isFinite(value)) invalid();
   return value;
 }
 
 function timestamp(value: unknown): string {
-  if (typeof value !== "string" || !Number.isFinite(Date.parse(value)))
-    invalid();
+  if (typeof value !== 'string' || !Number.isFinite(Date.parse(value))) invalid();
   return value;
 }
 
@@ -332,12 +308,12 @@ function nullableTimestamp(value: unknown): string | null {
 }
 
 function nullableBoolean(value: unknown): boolean | null {
-  if (value === null || typeof value === "boolean") return value;
+  if (value === null || typeof value === 'boolean') return value;
   return invalid();
 }
 
 function nodeID(value: unknown): string {
-  if (typeof value !== "string" || !nodePattern.test(value)) invalid();
+  if (typeof value !== 'string' || !nodePattern.test(value)) invalid();
   return value;
 }
 
@@ -346,61 +322,61 @@ function metricKey(value: unknown): MetricKey {
 }
 
 function serviceMetricDefinition(key: MetricKey): MetricDefinition {
-  if (key.endsWith("_running") || key.endsWith("_healthy")) {
-    return { source: "host", unit: "count", kind: "gauge", rollup: "last" };
+  if (key.endsWith('_running') || key.endsWith('_healthy')) {
+    return { source: 'host', unit: 'count', kind: 'gauge', rollup: 'last' };
   }
-  if (key.endsWith("_cpu_percent")) {
+  if (key.endsWith('_cpu_percent')) {
     return {
-      source: "host",
-      unit: "percent",
-      kind: "gauge",
-      rollup: "average",
+      source: 'host',
+      unit: 'percent',
+      kind: 'gauge',
+      rollup: 'average',
     };
   }
-  return { source: "host", unit: "bytes", kind: "gauge", rollup: "average" };
+  return { source: 'host', unit: 'bytes', kind: 'gauge', rollup: 'average' };
 }
 
 function hostMetricDefinition(key: MetricKey): MetricDefinition {
   return {
-    source: "host",
-    unit: key === "host_load_1m" ? "load" : "percent",
-    kind: "gauge",
-    rollup: "average",
+    source: 'host',
+    unit: key === 'host_load_1m' ? 'load' : 'percent',
+    kind: 'gauge',
+    rollup: 'average',
   };
 }
 
 function controlMetricDefinition(key: MetricKey): MetricDefinition {
   const counter = counterMetricKeySet.has(key);
   return {
-    source: "control",
-    unit: "count",
-    kind: counter ? "counter" : "gauge",
-    rollup: counter ? "last" : "average",
+    source: 'control',
+    unit: 'count',
+    kind: counter ? 'counter' : 'gauge',
+    rollup: counter ? 'last' : 'average',
   };
 }
 
 function mediaMetricDefinition(key: MetricKey): MetricDefinition {
-  if (key === "media_egress_current_bps") {
+  if (key === 'media_egress_current_bps') {
     return {
-      source: "media",
-      unit: "bits_per_second",
-      kind: "gauge",
-      rollup: "average",
+      source: 'media',
+      unit: 'bits_per_second',
+      kind: 'gauge',
+      rollup: 'average',
     };
   }
-  if (key === "media_egress_peak_bps") {
+  if (key === 'media_egress_peak_bps') {
     return {
-      source: "media",
-      unit: "bits_per_second",
-      kind: "gauge",
-      rollup: "last",
+      source: 'media',
+      unit: 'bits_per_second',
+      kind: 'gauge',
+      rollup: 'last',
     };
   }
-  if (key === "media_egress_cumulative_bytes") {
-    return { source: "media", unit: "bytes", kind: "counter", rollup: "last" };
+  if (key === 'media_egress_cumulative_bytes') {
+    return { source: 'media', unit: 'bytes', kind: 'counter', rollup: 'last' };
   }
-  if (key.startsWith("media_participant_hours_")) {
-    return { source: "media", unit: "hours", kind: "counter", rollup: "last" };
+  if (key.startsWith('media_participant_hours_')) {
+    return { source: 'media', unit: 'hours', kind: 'counter', rollup: 'last' };
   }
   // Derive kind from COUNTER_METRIC_KEYS, exactly as controlMetricDefinition
   // already does. This fallback hardcoded "gauge", so the moment #3094 admitted
@@ -414,26 +390,23 @@ function mediaMetricDefinition(key: MetricKey): MetricDefinition {
   // /counters fail closed in the browser").
   const counter = counterMetricKeySet.has(key);
   return {
-    source: "media",
-    unit: "count",
-    kind: counter ? "counter" : "gauge",
-    rollup:
-      counter || key === "media_peak_video_publishers_per_room"
-        ? "last"
-        : "average",
+    source: 'media',
+    unit: 'count',
+    kind: counter ? 'counter' : 'gauge',
+    rollup: counter || key === 'media_peak_video_publishers_per_room' ? 'last' : 'average',
   };
 }
 
 function definitionFor(key: MetricKey): MetricDefinition {
-  if (key.startsWith("service_")) return serviceMetricDefinition(key);
-  if (key.startsWith("host_")) return hostMetricDefinition(key);
+  if (key.startsWith('service_')) return serviceMetricDefinition(key);
+  if (key.startsWith('host_')) return hostMetricDefinition(key);
   if (controlMetricKeySet.has(key)) return controlMetricDefinition(key);
   return mediaMetricDefinition(key);
 }
 
 function parseHealthService(value: unknown): AdminHealthService {
   const item = record(value);
-  exactKeys(item, ["service", "state", "running", "healthy", "sampled_at"]);
+  exactKeys(item, ['service', 'state', 'running', 'healthy', 'sampled_at']);
   return {
     service: fixedString<ServiceName>(item.service, serviceNameSet),
     state: fixedString<HealthState>(item.state, healthStates),
@@ -445,14 +418,7 @@ function parseHealthService(value: unknown): AdminHealthService {
 
 function parseMetricPoint(value: unknown): AdminMetricPoint {
   const item = record(value);
-  exactKeys(item, [
-    "metric_key",
-    "source",
-    "unit",
-    "kind",
-    "value",
-    "sampled_at",
-  ]);
+  exactKeys(item, ['metric_key', 'source', 'unit', 'kind', 'value', 'sampled_at']);
   const key = metricKey(item.metric_key);
   const definition = definitionFor(key);
   const point: AdminMetricPoint = {
@@ -485,60 +451,50 @@ function unique<T>(values: T[], key: (value: T) => string): T[] {
 
 export function parseHealth(value: unknown): AdminHealthResponse {
   const response = record(value);
-  exactKeys(response, ["node_id", "services"]);
+  exactKeys(response, ['node_id', 'services']);
   const services = unique(
     array(response.services, 7, 7).map(parseHealthService),
-    (item) => item.service,
+    (item) => item.service
   );
-  if (
-    SERVICE_NAMES.some(
-      (service) => !services.some((item) => item.service === service),
-    )
-  )
+  if (SERVICE_NAMES.some((service) => !services.some((item) => item.service === service)))
     invalid();
   return { node_id: nodeID(response.node_id), services };
 }
 
 export function parseCurrent(value: unknown): AdminCurrentResponse {
   const response = record(value);
-  exactKeys(response, ["node_id", "metrics"]);
+  exactKeys(response, ['node_id', 'metrics']);
   const metrics = unique(
     // Bound derived from the key list, never a literal: a hand-maintained cap
     // silently becomes one-too-small the next time the catalog grows, and the
     // resulting failure surfaces as a network-outage banner (#2975).
     array(response.metrics, METRIC_KEYS.length).map(parseMetricPoint),
-    (item) => item.metric_key,
+    (item) => item.metric_key
   );
   return { node_id: nodeID(response.node_id), metrics };
 }
 
 export function parseCounters(value: unknown): AdminCountersResponse {
   const response = record(value);
-  exactKeys(response, ["node_id", "counters"]);
+  exactKeys(response, ['node_id', 'counters']);
   const counters = unique(
-    array(response.counters, COUNTER_METRIC_KEYS.length).map(
-      (value): AdminCounterPoint => {
-        const point = parseMetricPoint(value);
-        if (
-          !counterMetricKeySet.has(point.metric_key) ||
-          point.kind !== "counter"
-        )
-          invalid();
-        return {
-          ...point,
-          metric_key: point.metric_key as CounterMetricKey,
-          kind: "counter",
-        };
-      },
-    ),
-    (item) => item.metric_key,
+    array(response.counters, COUNTER_METRIC_KEYS.length).map((value): AdminCounterPoint => {
+      const point = parseMetricPoint(value);
+      if (!counterMetricKeySet.has(point.metric_key) || point.kind !== 'counter') invalid();
+      return {
+        ...point,
+        metric_key: point.metric_key as CounterMetricKey,
+        kind: 'counter',
+      };
+    }),
+    (item) => item.metric_key
   );
   return { node_id: nodeID(response.node_id), counters };
 }
 
 function parseSeriesMetric(value: unknown): AdminSeriesMetric {
   const item = record(value);
-  exactKeys(item, ["metric_key", "source", "unit", "kind", "rollup"]);
+  exactKeys(item, ['metric_key', 'source', 'unit', 'kind', 'rollup']);
   const key = metricKey(item.metric_key);
   const definition = definitionFor(key);
   const metric: AdminSeriesMetric = {
@@ -561,13 +517,7 @@ function parseSeriesMetric(value: unknown): AdminSeriesMetric {
 
 function parseSeriesPoint(value: unknown): AdminSeriesPoint {
   const item = record(value);
-  exactKeys(item, [
-    "bucket_start",
-    "value",
-    "minimum",
-    "maximum",
-    "sample_count",
-  ]);
+  exactKeys(item, ['bucket_start', 'value', 'minimum', 'maximum', 'sample_count']);
   const sampleCount = finite(item.sample_count);
   if (!Number.isInteger(sampleCount) || sampleCount < 1) invalid();
   return {
@@ -581,19 +531,13 @@ function parseSeriesPoint(value: unknown): AdminSeriesPoint {
 
 export function parseSeries(value: unknown): AdminSeriesResponse {
   const response = record(value);
-  exactKeys(response, [
-    "node_id",
-    "metric",
-    "window",
-    "bucket_seconds",
-    "points",
-  ]);
+  exactKeys(response, ['node_id', 'metric', 'window', 'bucket_seconds', 'points']);
   const window = fixedString<SeriesWindow>(response.window, windows);
   if (response.bucket_seconds !== 3600) invalid();
-  const maximum = window === "24h" ? 25 : 169;
+  const maximum = window === '24h' ? 25 : 169;
   const points = unique(
     array(response.points, maximum).map(parseSeriesPoint),
-    (item) => item.bucket_start,
+    (item) => item.bucket_start
   );
   return {
     node_id: nodeID(response.node_id),
