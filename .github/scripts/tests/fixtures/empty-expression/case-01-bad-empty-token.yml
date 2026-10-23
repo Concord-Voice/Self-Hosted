@@ -1,0 +1,15 @@
+# Synthetic fixture: empty ${{ }} token inside a run: block. The GHA
+# expression parser fails dispatch with the cryptic "An expression was
+# expected" error pointing at the wrong column. Root cause of #876.
+# The lint MUST flag this.
+name: bad-empty-token
+on: [workflow_dispatch]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "before"
+          echo "value: ${{ }}"
+          echo "after"

@@ -1,0 +1,28 @@
+# Build and generated artifacts
+dist/
+build/
+coverage/
+out/
+
+# Dependencies and lockfiles
+node_modules/
+vendor/
+client/desktop/package-lock.json
+
+# Local/runtime artifacts
+.git/
+tmp/
+temp/
+
+# Test fixtures (intentionally vulnerable — used for Semgrep rule validation)
+.semgrep/tests/
+# Workflow-injection regression fixtures (intentionally contain injection patterns — issue #836)
+.github/scripts/tests/fixtures/workflow-injection/
+# Test harnesses embed fake shell/Python programs that Semgrep cannot parse.
+[internal]tests/test-redis-managed-maintenance.sh
+[internal]tests/test-redis-managed-runtime.sh
+# Vendored Claude Design HTML/JS prototype exports — the design runtime uses
+# innerHTML templating, new Function() JSX compilation, and postMessage('*').
+# Browser-only mock code, never production (#204). Mirrors the pre-commit
+# semgrep + detect-secrets excludes in .pre-commit-config.yaml.
+prototypes/

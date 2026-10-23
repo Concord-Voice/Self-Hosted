@@ -1,0 +1,18 @@
+# Synthetic fixture: workflow that exhibits the P2/P8 bug. This is the
+# pattern that broke main-cd's force-deploy gating in #911 — at runtime
+# `inputs.force_deploy == 'true'` evaluated FALSE even when the user
+# dispatched with `-f force_deploy=true`. The lint MUST flag this.
+name: bad-eq
+on:
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        type: boolean
+        default: false
+
+jobs:
+  deploy:
+    if: inputs.force_deploy == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "would never reach here"

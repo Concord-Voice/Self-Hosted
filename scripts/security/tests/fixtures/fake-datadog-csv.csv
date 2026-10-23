@@ -1,0 +1,5 @@
+package_name,package_version
+@ctrl/tinycolor,4.1.1
+angulartics2,19.0.2
+chalk-template,1.2.0
+fixture-malicious-package,1.0.0-poisoned

@@ -1,0 +1,48 @@
+rules:
+  # ── Flag fmt.Sprintf with SQL keywords (potential injection) ──────────
+  # Note: The existing codebase uses fmt.Sprintf for safe dynamic column
+  # building with hardcoded column names and $N placeholders. This rule
+  # catches new fmt.Sprintf usage near SQL keywords that doesn't use the
+  # established safe pattern. Annotate safe usage with // #nosec G201.
+  - id: concord-go-sql-sprintf
+    patterns:
+      - pattern: fmt.Sprintf($FMT, ...)
+      - metavariable-regex:
+          metavariable: $FMT
+          regex: ".*(SELECT|INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE).*"
+    paths:
+      exclude:
+        - "**/*_test.go"
+        - "**/testhelpers/**"
+    message: >-
+      fmt.Sprintf with SQL keywords detected. Use database/sql parameterized
+      queries ($1, $2, ...) instead. If this is a safe dynamic column builder
+      with hardcoded column names, suppress with // nosemgrep:concord-go-sql-sprintf.
+      See [internal] "Go Constraints".
+    languages: [go]
+    severity: WARNING
+    metadata:
+      category: security
+      cwe: "CWE-89: Improper Neutralization of Special Elements used in an SQL Command"
+
+  # ── Flag http.ListenAndServe (no TLS) ─────────────────────────────────
+  - id: concord-go-no-tls
+    pattern: http.ListenAndServe(...)
+    paths:
+      exclude:
+        - "**/*_test.go"
+        - "**/testhelpers/**"
+    message: >-
+      http.ListenAndServe serves without TLS. Use http.ListenAndServeTLS
+      or terminate TLS at the reverse proxy. Production traffic must be
+      encrypted. See [internal] "Conventions".
+    languages: [go]
+    severity: WARNING
+    metadata:
+      category: security
+      cwe: "CWE-319: Cleartext Transmission of Sensitive Information"
+
+  # Note: "missing defer rows.Close()" detection is handled by golangci-lint's
+  # errcheck and rowserrcheck linters, which run in pre-commit hooks and CI.
+  # Semgrep's pattern matching produces too many false positives for this pattern
+  # due to multi-line matching limitations. Removed to avoid noise.

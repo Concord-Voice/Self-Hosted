@@ -1,0 +1,11 @@
+name: "Sample workflow with no if: clauses"
+on:
+  push:
+    branches: [main]
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build
+        run: echo "hello"

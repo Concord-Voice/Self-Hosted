@@ -1,0 +1,15 @@
+name: Case 05 — bash existence check missing companion (apple-p12, no PASSWORD)
+
+on: [push]
+
+jobs:
+  sign:
+    runs-on: macos-latest
+    steps:
+      - name: Bash-guarded signing
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+        run: |
+          if [[ -n "$APPLE_CERTIFICATE_P12" ]]; then
+            echo "would sign — missing PASSWORD companion check"
+          fi

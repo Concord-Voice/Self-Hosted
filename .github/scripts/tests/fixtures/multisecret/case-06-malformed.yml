@@ -1,0 +1,16 @@
+# Test case 6 fixture: malformed YAML — bad anchor reference.
+# Expected: lint exits 2 (script error), NOT 1 (policy violation).
+# Per script header: malformed YAML is a tooling failure, not an
+# Invariant 5 violation, so it must surface as exit 2 distinct from
+# the policy path. Mirrors §5.1 case-05-malformed.yml's contract.
+name: Test Case Malformed
+on:
+  push:
+    branches: [main]
+
+jobs:
+  broken:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "this YAML will fail to parse"
+    bad_ref: *nonexistent_anchor

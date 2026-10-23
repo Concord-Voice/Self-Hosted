@@ -1,0 +1,14 @@
+name: Test Fixture — Mixed Environments
+on:
+  workflow_dispatch:
+jobs:
+  staging-deploy:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - run: echo "staging"
+  production-deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - run: echo "production"

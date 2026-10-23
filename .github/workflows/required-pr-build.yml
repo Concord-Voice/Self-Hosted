@@ -1,0 +1,380 @@
+# Alpha-only organization ruleset workflow. GitHub loads this definition from
+# protected main, so a PR cannot skip or rewrite its required result job.
+# Event filters are ignored for ruleset-triggered runs. The sentinel branch
+# avoids a second ordinary run for each PR after this file reaches main.
+name: Required PR build
+
+on:
+  pull_request:
+    branches: [__ruleset_only__]
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+  checks: read
+  packages: read
+  security-events: write
+
+jobs:
+  pr-ci:
+    name: Protected scan enforcement
+    # Reviewed main commit keeps the reusable graph immutable in ruleset runs.
+    uses: Concord-Voice/Concord-Voice-Alpha/.github/workflows/pr-ci.yml@cb10844a7860092011f96b4607682ef2e6c55a80
+    with:
+      trusted-source: true
+      enforcement-only: true
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+    permissions:
+      contents: read
+      pull-requests: write
+      actions: read
+      checks: read
+      packages: read
+      security-events: write
+
+  protected-sonar:
+    name: Protected Sonar canary (advisory)
+    needs: [pr-ci]
+    if: ${{ vars.PROTECTED_SONAR_CANARY == 'true' && needs.pr-ci.result == 'success' && github.event.pull_request.head.repo.full_name == github.repository && contains(needs.pr-ci.outputs.report-selection, '"sonar":true') }}
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      actions: write
+      id-token: write
+    steps:
+      - name: Check out protected caller source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ fromJSON(toJSON(job)).workflow_repository }}
+          ref: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          fetch-depth: 1
+          persist-credentials: false
+          path: protected
+
+      - name: Emit authenticated caller proof
+        id: proof
+        env:
+          WORKFLOW_REPOSITORY: ${{ fromJSON(toJSON(job)).workflow_repository }}
+          WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          RUN_ID: ${{ github.run_id }}
+          RUN_ATTEMPT: ${{ github.run_attempt }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_CI_RESULT: ${{ needs.pr-ci.result }}
+          SELECTION_JSON: ${{ needs.pr-ci.outputs.report-selection }}
+          JOBS_JSON: ${{ needs.pr-ci.outputs.report-jobs }}
+          COVERAGE_JSON: ${{ needs.pr-ci.outputs.coverage-uploads }}
+        run: |
+          set -euo pipefail
+          test "$WORKFLOW_REPOSITORY" = Concord-Voice/Concord-Voice-Alpha
+          test "$(git -C protected rev-parse HEAD)" = "$WORKFLOW_SHA"
+          mkdir -m 700 "$RUNNER_TEMP/protected-sonar-proof"
+          jq -cn --argjson caller_run_id "$RUN_ID" --argjson caller_run_attempt "$RUN_ATTEMPT" \
+            --argjson pr_number "$PR_NUMBER" --arg expected_head_sha "$HEAD_SHA" \
+            --arg expected_base_sha "$BASE_SHA" --arg pr_ci_result "$PR_CI_RESULT" \
+            '{caller_run_id:$caller_run_id,caller_run_attempt:$caller_run_attempt,pr_number:$pr_number,expected_head_sha:$expected_head_sha,expected_base_sha:$expected_base_sha,pr_ci_result:$pr_ci_result}' \
+            > "$RUNNER_TEMP/protected-sonar-proof/ids.json"
+          printf '%s' "$SELECTION_JSON" > "$RUNNER_TEMP/protected-sonar-proof/selection.json"
+          printf '%s' "$JOBS_JSON" > "$RUNNER_TEMP/protected-sonar-proof/jobs.json"
+          printf '%s' "$COVERAGE_JSON" > "$RUNNER_TEMP/protected-sonar-proof/coverage.json"
+          python3 protected/scripts/sonar/protected-pr-caller.py emit-proof \
+            --ids-json "$RUNNER_TEMP/protected-sonar-proof/ids.json" \
+            --selection-json "$RUNNER_TEMP/protected-sonar-proof/selection.json" \
+            --jobs-json "$RUNNER_TEMP/protected-sonar-proof/jobs.json" \
+            --coverage-json "$RUNNER_TEMP/protected-sonar-proof/coverage.json" \
+            --out "$RUNNER_TEMP/protected-sonar-proof/proof.json"
+
+      - name: Upload authenticated caller proof
+        id: upload
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: protected-sonar-caller-proof-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/protected-sonar-proof/proof.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Dispatch and watch exact protected Sonar run
+        id: dispatch
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          python3 protected/scripts/sonar/protected-pr-caller.py dispatch-watch \
+            --proof "$RUNNER_TEMP/protected-sonar-proof/proof.json" \
+            --out "$RUNNER_TEMP/protected-sonar-proof/child.json"
+
+      - name: Record underlying canary result
+        # always() reports raw outcomes after a failed proof, upload, or dispatch step.
+        if: ${{ always() }}
+        env:
+          PROOF_OUTCOME: ${{ steps.proof.outcome }}
+          UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
+          DISPATCH_OUTCOME: ${{ steps.dispatch.outcome }}
+        run: |
+          printf 'Protected Sonar canary: proof=%s, upload=%s, dispatch=%s\n' \
+            "$PROOF_OUTCOME" "$UPLOAD_OUTCOME" "$DISPATCH_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
+
+  osv:
+    name: Protected OSV dependency scan
+    needs: [pr-ci]
+    # always() lets selected OSV run when another pr-ci scan fails; the result still verifies both.
+    if: ${{ always() && contains(needs.pr-ci.outputs.report-selection, '"osv":true') }}
+    uses: Concord-Voice/Concord-Voice-Alpha/.github/workflows/osv-scanner.yml@06bc23adc8c82a1eb55e5d6988b42f42f463fb83
+    with:
+      protected-pr: true
+      base-sha: ${{ fromJSON(needs.pr-ci.outputs.report-selection).base_sha }}
+      merge-sha: ${{ fromJSON(needs.pr-ci.outputs.report-selection).merge_sha }}
+      hotfix: ${{ fromJSON(needs.pr-ci.outputs.report-selection).hotfix }}
+    permissions:
+      actions: read
+      contents: read
+      pull-requests: read
+      security-events: write
+
+  publish-install-script-warnings:
+    name: Publish install-script warnings
+    needs: [pr-ci]
+    # always() publishes warnings even when the nested IOC job fails.
+    if: ${{ always() }}
+    # Serialize this PR's comment writes so a paused older run cannot finish
+    # after a newer publisher and replace its warning verdict.
+    concurrency:
+      group: required-pr-install-script-comments-${{ github.event.pull_request.number }}
+      cancel-in-progress: false
+      queue: max
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    permissions:
+      actions: read
+      pull-requests: write
+    steps:
+      - name: Download install-script warnings
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ioc-install-script-warnings
+          path: ${{ runner.temp }}/ioc-warning-artifact
+
+      - name: Publish install-script warnings to PR
+        env:
+          WARNINGS_PATH: ${{ runner.temp }}/ioc-warning-artifact/ioc-install-script-warnings.json
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            const fs = require('fs');
+            const payload = JSON.parse(fs.readFileSync(process.env.WARNINGS_PATH, 'utf8'));
+            const { count, warnings } = payload;
+            if (!Number.isSafeInteger(count) || count < 0 || !Array.isArray(warnings) ||
+                warnings.length !== Math.min(count, 50) ||
+                !warnings.every(w => typeof w === 'string' &&
+                  Buffer.byteLength(w, 'utf8') <= 1000 &&
+                  w.startsWith('[WARN] New install script:'))) {
+              throw new Error('Invalid IOC warning artifact');
+            }
+            const marker = '<!-- supply-chain-install-scripts -->';
+            // A prior run may finish after a newer head. Never let it replace
+            // the current head's warning comment with stale scan output.
+            const currentPR = await github.rest.pulls.get({
+              owner: context.repo.owner, repo: context.repo.repo,
+              pull_number: context.issue.number,
+            });
+            if (currentPR.data.head.sha !== context.payload.pull_request.head.sha ||
+                currentPR.data.base.ref !== context.payload.pull_request.base.ref) return;
+            const headRepo = currentPR.data.head.repo;
+            const baseRepo = currentPR.data.base.repo;
+            const readOnlyPR = currentPR.data.user?.login === 'dependabot[bot]' ||
+              headRepo === null ||
+              (typeof headRepo?.full_name === 'string' &&
+               typeof baseRepo?.full_name === 'string' &&
+               headRepo.full_name !== baseRepo.full_name);
+            if (readOnlyPR) {
+              core.notice(count > 0
+                ? `Read-only PR has ${count} new install-script warning(s). Review the ioc-install-script-warnings artifact and Supply-chain IOC scan log; the token cannot post a PR comment.`
+                : 'Read-only PR has no new install-script warnings; the token cannot update PR comments.');
+              return;
+            }
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, per_page: 100 }
+            );
+            const existing = comments.find(c =>
+              c.user?.login === 'github-actions[bot]' &&
+              typeof c.body === 'string' && c.body.includes(marker));
+
+            if (count === 0) {
+              if (existing) {
+                await github.rest.issues.deleteComment({
+                  owner: context.repo.owner, repo: context.repo.repo,
+                  comment_id: existing.id,
+                });
+              }
+              return;
+            }
+
+            const body = [
+              marker,
+              `### ⚠️ New install scripts in this PR — reviewer must acknowledge`,
+              '',
+              `Shai-Hulud 2.0's attack vector is a poisoned \`preinstall\` script. ` +
+              `Review each new entry; if the script is legitimate (e.g., a ` +
+              `native-binary postinstall from \`fsevents\`/\`esbuild\`), note the ` +
+              `rationale in your review.`,
+              '',
+              ...warnings.map(w => `    ${w}`),
+              '',
+              count > 50 ? `_+${count - 50} more warnings truncated._` : '',
+            ].join('\n');
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: existing.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body,
+              });
+            }
+
+  result:
+    name: Required PR build result
+    needs: [pr-ci, osv, publish-install-script-warnings]
+    # always() prevents a failed or skipped dependency from hiding this result.
+    if: ${{ always() }}
+    permissions:
+      actions: read
+      checks: read
+      contents: read
+      pull-requests: read
+      security-events: read
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      # always() is load-bearing: failed dependencies still need the trusted verifier source.
+      - name: Check out immutable protected verifier source
+        if: ${{ always() }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ${{ fromJSON(toJSON(job)).workflow_repository }}
+          ref: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: true
+          path: protected
+
+      # always() preserves the protected data fetch after scanner failures.
+      - name: Verify immutable workflow identity and fetch PR objects as data
+        if: ${{ always() }}
+        env:
+          WORKFLOW_REPOSITORY: ${{ fromJSON(toJSON(job)).workflow_repository }}
+          WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          actual_sha="$(git -C protected rev-parse HEAD)"
+          if [[ "$WORKFLOW_REPOSITORY" != Concord-Voice/Concord-Voice-Alpha ||
+                ! "$WORKFLOW_SHA" =~ ^[0-9a-fA-F]{40}$ || "$actual_sha" != "$WORKFLOW_SHA" ||
+                ! "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ || ! "$HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::Protected verifier source or PR revisions are unavailable or invalid."
+            exit 1
+          fi
+          git -C protected fetch --no-tags origin \
+            "refs/pull/${PR_NUMBER}/head:refs/scan/pr-head" \
+            "refs/pull/${PR_NUMBER}/merge:refs/scan/pr-merge" "$BASE_SHA"
+          git -C protected cat-file -e "${HEAD_SHA}^{commit}"
+          git -C protected cat-file -e "${BASE_SHA}^{commit}"
+
+      # always() keeps the pin check live after scanner failures. A pin PR's own
+      # protected run still uses the old pin, so only this step can see a new one.
+      - name: Require reusable workflow pins on main
+        id: pins
+        if: ${{ always() }}
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          # The merge ref is fetched long after this run started, so it may build
+          # on a newer push; the file read must belong to the head this run reports.
+          if [[ ! "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ||
+                "$(git -C protected rev-parse 'refs/scan/pr-merge^2')" != "$HEAD_SHA" ]]; then
+            echo "::error::The PR merge ref does not build on the head this run reports: a newer push supersedes this run, or GitHub has not rebuilt the merge ref (after a merge conflict, for example)."
+            exit 1
+          fi
+          python3 -m pip install --user --quiet --disable-pip-version-check --require-hashes \
+            --only-binary=:all: -r protected/.github/requirements-pyyaml.txt
+          git -C protected fetch --no-tags origin +refs/heads/main:refs/scan/main
+          git -C protected show refs/scan/pr-merge:.github/workflows/required-pr-build.yml \
+            > "$RUNNER_TEMP/pr-required-pr-build.yml"
+          # The merge ref's first parent is the base it was built on, so a PR that
+          # leaves the file alone always compares equal, however far main has moved.
+          git -C protected show 'refs/scan/pr-merge^1:.github/workflows/required-pr-build.yml' \
+            > "$RUNNER_TEMP/base-required-pr-build.yml"
+          python3 protected/.github/scripts/verify-required-build-pins.py \
+            --repo protected --main-ref refs/scan/main \
+            --workflow "$RUNNER_TEMP/pr-required-pr-build.yml" \
+            --base-workflow "$RUNNER_TEMP/base-required-pr-build.yml"
+
+      # always() keeps selected evidence retrieval live after a failed producer.
+      - name: Download current-attempt scan evidence
+        if: >-
+          ${{ always() && (contains(needs.pr-ci.outputs.report-selection, '"eslint":true') ||
+          contains(needs.pr-ci.outputs.report-selection, '"govulncheck":true') ||
+          contains(needs.pr-ci.outputs.report-selection, '"osv":true') ||
+          contains(needs.pr-ci.outputs.report-selection, '"semgrep_custom":true') ||
+          contains(needs.pr-ci.outputs.report-selection, '"semgrep_community":true')) }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: scan-evidence-${{ github.run_id }}-${{ github.run_attempt }}-*
+          path: ${{ runner.temp }}/scan-evidence
+          merge-multiple: false
+
+      # always() makes missing or failed upstream evidence reach the fail-closed verifier.
+      - name: Run protected scan verdict
+        id: verify
+        if: ${{ always() }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          SELECTION_JSON: ${{ needs.pr-ci.outputs.report-selection || '{}' }}
+          JOBS_JSON: ${{ needs.pr-ci.outputs.report-jobs || '{}' }}
+          COVERAGE_JSON: ${{ needs.pr-ci.outputs.coverage-uploads || '{}' }}
+          OSV_RESULT: ${{ needs.osv.result }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          SCAN_EVIDENCE_DIR: ${{ runner.temp }}/scan-evidence
+        run: |
+          set -euo pipefail
+          mkdir -p "$SCAN_EVIDENCE_DIR"
+          printf '%s\n' "$SELECTION_JSON" > "$RUNNER_TEMP/scan-selection.json"
+          jq -cn --argjson jobs "$JOBS_JSON" --argjson coverage "$COVERAGE_JSON" --arg osv "$OSV_RESULT" \
+            '$jobs + {osv:$osv,coverage_uploads:$coverage}' > "$RUNNER_TEMP/scan-jobs.json"
+          python3 protected/.github/scripts/verify-pr-scan-results.py \
+            --selection "$RUNNER_TEMP/scan-selection.json" \
+            --jobs "$RUNNER_TEMP/scan-jobs.json" \
+            --pr "$PR_NUMBER" --run-id "$RUN_ID"
+
+      # always() publishes one final required result even when the verifier or publisher fails.
+      - name: Require protected verdict and warning publication
+        if: ${{ always() }}
+        shell: bash
+        env:
+          PR_CI_RESULT: ${{ needs.pr-ci.result }}
+          PUBLISH_RESULT: ${{ needs.publish-install-script-warnings.result }}
+          OSV_RESULT: ${{ needs.osv.result }}
+          VERIFIER_OUTCOME: ${{ steps.verify.outcome }}
+          PINS_OUTCOME: ${{ steps.pins.outcome }}
+        run: |
+          if [[ "$PR_CI_RESULT" == success && "$PUBLISH_RESULT" == success && "$VERIFIER_OUTCOME" == success && "$PINS_OUTCOME" == success && "$OSV_RESULT" != failure && "$OSV_RESULT" != cancelled ]]; then
+            echo "::notice::Required PR scan verdict succeeded."
+          else
+            echo "::error::Required PR scan verdict blocked: pr-ci=${PR_CI_RESULT}, publisher=${PUBLISH_RESULT}, verifier=${VERIFIER_OUTCOME}, pins=${PINS_OUTCOME}"
+            exit 1
+          fi

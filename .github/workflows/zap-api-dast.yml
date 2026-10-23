@@ -1,0 +1,362 @@
+# ZAP API DAST — per-tool Code Scanning workflow (#1465, epic #1422).
+#
+# Dynamic application security testing of the control-plane REST API via the
+# OWASP ZAP Automation Framework (plan-as-code in .zap/ — NOT the deprecated
+# wrapper actions). Uploads SARIF to GitHub Code Scanning under category
+# `zap-api`. ADVISORY posture: not in the Alpha Code Scanning Gate (#1431);
+# promotion is a separate later decision after the observed FP rate
+# stabilizes.
+#
+# TARGET — never production. The scan runs against an EPHEMERAL compose
+# stack brought up in-job with CONCORD_ENV=test (deterministic rate-limit
+# relaxation + Redis-mirrored verification codes, PR #1277). It must NEVER
+# point at production or api.concordvoice.chat: the Cloudflare proxy there
+# is load-bearing for updates-cache + rate limiting, so scanning through it
+# would both distort results and trip bot mitigation. Zero non-localhost
+# scan traffic is an invariant of this job (third-party-proxying routes are
+# excluded in the plans — see .zap/pr.yaml).
+#
+# SCOPE HONESTY — REST surface only. The WebSocket hub, media-plane
+# Socket.IO/WebRTC, and NATS are explicitly out of scope. Do not read a
+# green run as DAST coverage of those planes.
+#
+# AUTH — load-bearing. The job seeds a throwaway test user via the API
+# (register → test_only Redis code → confirm, the PR #1277 pattern),
+# captures the JWT, and injects it into every scanner request via the AF
+# replacer rule in the plan. An unauthenticated scan of a JWT-gated API
+# tests almost nothing. AccessTokenTTL is a hard 15-minute const, which is
+# why both plans time-box their active scans (see .zap/full.yaml header
+# for the TTL math).
+#
+# ENGINE PIN — the ZAP image is pinned by manifest digest per the custom
+# base-image discipline ([internal]rules/electron.md §Supply-chain hardening).
+# Upgrade procedure: resolve the new digest with
+#   docker buildx imagetools inspect ghcr.io/zaproxy/zaproxy:stable
+# (or an authenticated HEAD against ghcr.io/v2/zaproxy/zaproxy/manifests/stable),
+# update ZAP_IMAGE below, and validate with a workflow_dispatch run before
+# merging. Do not float on the bare `stable` tag.
+name: ZAP API DAST
+
+# Invoked by pr-ci.yml with `needs: [ioc, detect-changes]` (ADR-0018
+# IOC-first — the job builds and executes repo code via the compose build)
+# and path-gated there on the zap-surface filter (advisory tools may be
+# path-gated; only #1431-gated tools require every-PR analyses). The weekly
+# schedule and manual dispatch run standalone on main.
+on:
+  # The caller STATES the plan; this workflow never infers it from the event.
+  # `github.event_name` inside a called workflow is the CALLER's event, so the
+  # old `case $EVENT_NAME` gave the scheduled nightly a full scan and the
+  # manually-dispatched nightly a 5-minute one — same workflow, same code,
+  # different depth, decided by how someone started it.
+  workflow_call:
+    inputs:
+      plan:
+        description: "AF plan to run (.zap/<plan>.yaml)"
+        type: string
+        default: pr
+  workflow_dispatch:
+    inputs:
+      plan:
+        description: "AF plan to run (.zap/<plan>.yaml)"
+        type: choice
+        options:
+          - pr
+          - full
+        default: pr
+
+# Least-privilege default; the zap-api-dast job elevates to the writes it needs.
+permissions:
+  contents: read
+
+jobs:
+  zap-api-dast:
+    name: ZAP API DAST
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    permissions:
+      contents: read
+      # SARIF upload to Code Scanning
+      security-events: write
+      # required by upload-sarif in private repos to read the Actions run status
+      actions: read
+    # Budget follows the PLAN, which is the thing that determines runtime:
+    # `full` is a compose build + image pull + 10-min active scan (~30 min plus
+    # teardown headroom); `pr` is the same setup with a 5-min light scan.
+    timeout-minutes: ${{ inputs.plan == 'full' && 45 || 25 }}
+    env:
+      # CI-stub credentials for the ephemeral compose stack. They exist
+      # only inside this job's containers and secure nothing — real values
+      # never leave the canonical writer ([internal]rules/deployment.md).
+      POSTGRES_PASSWORD: zap-ci-postgres-stub # pragma: allowlist secret
+      REDIS_PASSWORD: zap-ci-redis-stub # pragma: allowlist secret
+      JWT_SECRET: zap-ci-jwt-secret-stub-never-production-0001 # pragma: allowlist secret
+      TURN_SECRET: zap-ci-turn-stub # pragma: allowlist secret
+      MINIO_ROOT_USER: zapciminio
+      MINIO_ROOT_PASSWORD: zap-ci-minio-stub # pragma: allowlist secret
+      # docker compose evaluates ${VAR:?} substitutions at YAML-parse time
+      # for ALL services in the project, before --profile filtering and
+      # before service selection — coturn's PUBLIC_IP must be stubbed even
+      # though coturn never starts in this job (same finding as build.yml's
+      # production-compose-docker env block, #1254).
+      PUBLIC_IP: 127.0.0.1
+      # Digest-pinned scan engine (see ENGINE PIN header note). Tag kept
+      # for human readability; the digest is authoritative.
+      # stable resolved 2026-06-11:
+      ZAP_IMAGE: ghcr.io/zaproxy/zaproxy:stable@sha256:2ec1d5d5b44d55cfd02ba9b89cd26852f06d92b7fc0ce9f064b9463babc73074
+      COMPOSE_FILES: -f docker-compose.yml -f .zap/docker-compose.zap-ci.yml
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Select AF plan
+        id: plan
+        env:
+          # Both trigger surfaces declare `plan`, so this is always populated.
+          # The `:-pr` is a fail-safe, not a code path: an unset value must
+          # degrade to the CHEAP plan, never silently book a 45-minute scan.
+          INPUT_PLAN: ${{ inputs.plan }}
+        run: |
+          set -euo pipefail
+          PLAN="${INPUT_PLAN:-pr}"
+          if [ ! -f ".zap/${PLAN}.yaml" ]; then
+            echo "::error::No AF plan at .zap/${PLAN}.yaml"
+            exit 1
+          fi
+          echo "plan=${PLAN}" >> "$GITHUB_OUTPUT"
+          echo "Selected plan: .zap/${PLAN}.yaml"
+
+      - name: Write CI stub .env for compose
+        # The base compose file fail-louds (`${VAR:?}`) on these names; the
+        # stubs satisfy it for the ephemeral stack. CONCORD_ENV=test and
+        # SMTP_HOST="" ride the .zap/docker-compose.zap-ci.yml override
+        # (POSIX :- semantics swallow empty-string .env values — see that
+        # file's comments).
+        run: |
+          set -euo pipefail
+          {
+            printf 'POSTGRES_PASSWORD=%s\n' "$POSTGRES_PASSWORD"
+            printf 'REDIS_PASSWORD=%s\n' "$REDIS_PASSWORD"
+            printf 'JWT_SECRET=%s\n' "$JWT_SECRET"
+            printf 'TURN_SECRET=%s\n' "$TURN_SECRET"
+            printf 'MINIO_ROOT_USER=%s\n' "$MINIO_ROOT_USER"
+            printf 'MINIO_ROOT_PASSWORD=%s\n' "$MINIO_ROOT_PASSWORD"
+            printf 'PUBLIC_IP=%s\n' "$PUBLIC_IP"
+          } > .env
+
+      - name: Bring up ephemeral API stack (CONCORD_ENV=test)
+        # Naming control-plane starts only it + its depends_on chain
+        # (postgres/redis/nats/minio) — coturn and media-plane stay down.
+        run: |
+          set -euo pipefail
+          # shellcheck disable=SC2086 # COMPOSE_FILES is a flag list, not a path
+          docker compose $COMPOSE_FILES --profile services up -d --build --wait control-plane
+
+      - name: Wait for API health (migrations run at server startup)
+        run: |
+          set -euo pipefail
+          for _ in $(seq 1 60); do
+            if curl -fsS -o /dev/null http://localhost:8080/health; then
+              echo "control-plane healthy"
+              exit 0
+            fi
+            sleep 2
+          done
+          echo "::error::control-plane never became healthy at http://localhost:8080/health"
+          exit 1
+
+      - name: Pre-pull ZAP engine image
+        # Pulled BEFORE seeding on purpose: the image is ~1.7 GB and the
+        # JWT minted by the next step has a hard 15-minute TTL — pulling
+        # after login would burn minutes of the scan's auth budget.
+        run: docker pull "$ZAP_IMAGE"
+
+      - name: Seed scan user + capture JWT (PR #1277 pattern)
+        # register → 201 {pending_id} → plaintext code from the test-only
+        # Redis mirror (CONCORD_ENV=test) → confirm → access token. The
+        # The public key is a fresh RSA-4096 SPKI because registration
+        # validates E2EE key shape. The token belongs to a
+        # throwaway user inside throwaway containers and never leaves the
+        # runner.
+        run: | # pragma: allowlist secret -- ephemeral local JWT seed shell block
+          set -euo pipefail
+          # Not named USERNAME — that name is shell-special in some
+          # environments (zsh ties it to the effective UID) and a common
+          # preset CI variable on other platforms.
+          # Keep this fixed and intentionally boring. App username validation
+          # de-leets digits before reserved-word checks, so run IDs can
+          # accidentally normalize into blocked words such as "bot".
+          SCAN_USER="zapci"
+          EMAIL="${SCAN_USER}@zap-ci.example.com"
+          PASSWORD='ZapCi!Scan-stub-2026' # pragma: allowlist secret
+          B64_STUB=$(openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:4096 2>/dev/null | openssl pkey -pubout -outform DER | base64 | tr -d '\n')
+
+          REG_BODY=$(jq -n \
+            --arg u "$SCAN_USER" --arg e "$EMAIL" --arg p "$PASSWORD" --arg k "$B64_STUB" \
+            '{username:$u, email:$e, password:$p, age_confirmation:true,
+              public_key:$k, wrapped_private_key:$k, key_derivation_salt:$k}')
+          REG=$(curl -fsS -X POST http://localhost:8080/api/v1/auth/register \
+            -H 'Content-Type: application/json' -d "$REG_BODY")
+          PENDING_ID=$(jq -re '.pending_id' <<<"$REG")
+
+          # shellcheck disable=SC2086 # COMPOSE_FILES is a flag list, not a path
+          CODE=$(docker compose $COMPOSE_FILES exec -T redis \
+            redis-cli --no-auth-warning -a "$REDIS_PASSWORD" GET "test_only:${PENDING_ID}")
+          if [ -z "$CODE" ]; then
+            echo "::error::test_only verification code missing from Redis — is CONCORD_ENV=test set on control-plane?"
+            exit 1
+          fi
+
+          CONFIRM_BODY=$(jq -n --arg id "$PENDING_ID" --arg c "$CODE" '{pending_id:$id, code:$c}')
+          CONF=$(curl -fsS -X POST http://localhost:8080/api/v1/auth/register/confirm \
+            -H 'Content-Type: application/json' -d "$CONFIRM_BODY")
+          TOKEN=$(jq -re '.access_token' <<<"$CONF")
+          echo "::add-mask::$TOKEN"
+          echo "ZAP_AUTH_HEADER_VALUE=Bearer $TOKEN" >> "$GITHUB_ENV"
+          echo "Seeded user ${SCAN_USER}; JWT captured (15-min TTL — scan starts immediately)"
+
+      - name: Pre-scan auth proof (direct, route A)
+        # Proves the seeded JWT works BEFORE spending scan time. Uses
+        # /users/me deliberately — the in-scan proof (below) greps for
+        # /servers, which only ZAP traffic touches, so the two assertions
+        # can't contaminate each other.
+        run: |
+          set -euo pipefail
+          STATUS=$(curl -s -o /dev/null -w '%{http_code}' \
+            -H "$(printf 'Authorization: %s' "$ZAP_AUTH_HEADER_VALUE")" \
+            http://localhost:8080/api/v1/users/me)
+          if [ "$STATUS" != "200" ]; then
+            echo "::error::seeded JWT rejected by GET /api/v1/users/me (HTTP ${STATUS})"
+            exit 1
+          fi
+          echo "GET /api/v1/users/me → 200 with seeded JWT"
+
+      - name: Run ZAP Automation Framework (selected plan)
+        id: zap
+        env:
+          PLAN: ${{ steps.plan.outputs.plan }}
+        run: |
+          set -euo pipefail
+          # The zap image runs as uid 1000 ('zap'); the runner workspace is
+          # uid 1001. 0777 is load-bearing, NOT a tightenable nit: the dir is
+          # owned by the runner (1001) and the container writes the SARIF as
+          # 1000, which is neither the owner nor in the runner's group — so a
+          # 0775 dir would leave the container ('other') with no write bit and
+          # the report could not be created. World-writable is benign here:
+          # single-tenant ephemeral runner (no other local user), non-secret
+          # tool output (CWE-732 does not apply). Running ZAP as --user 1001
+          # instead is unsafe — the image's 'zap' user owns /home/zap/.ZAP and
+          # mis-uid'ing it breaks the engine. Do not "harden" to 0775.
+          mkdir -p reports && chmod 777 reports
+          # -port 8090: ZAP binds a local proxy even in -cmd mode, on 8080
+          # by default — the control-plane's port. Under --network host
+          # that collision is fatal AND ZAP exits 0 on it ("Terminating
+          # ZAP, unable to start the main proxy"), so without this flag
+          # the step would go green having scanned nothing (caught in the
+          # #1465 local rehearsal; the coverage assertion below is the
+          # backstop for this failure class).
+          docker run --rm --network host \
+            -v "${GITHUB_WORKSPACE}:/zap/wrk" \
+            -e ZAP_AUTH_HEADER_VALUE \
+            "$ZAP_IMAGE" \
+            zap.sh -cmd -port 8090 -autorun "/zap/wrk/.zap/${PLAN}.yaml"
+
+      - name: Assert authenticated scan coverage (server-side, route B)
+        # AC (#1465): the scan log must show ≥1 JWT-gated route exercised
+        # with a 2xx. The control-plane request log is the ground truth:
+        # GET /api/v1/servers is only ever hit by ZAP (requestor job +
+        # OpenAPI import) — the workflow's own curl used /users/me — so a
+        # status=200 line here proves the replacer-injected JWT worked
+        # inside the scanner. Tolerates both slog text and JSON handlers.
+        run: |
+          set -euo pipefail
+          # Capture the logs into a variable BEFORE grepping. Piping
+          # `docker compose logs` straight into `grep -qE` is a footgun under
+          # `pipefail`: grep -q exits on the first match and closes the pipe,
+          # the upstream log producer takes SIGPIPE (exit 141), and pipefail
+          # promotes that 141 to a pipeline failure — so the `if` takes the
+          # FALSE branch even when the match existed (the #1465 first-run
+          # red: a real 200 was present, "Broken pipe" in the log). Counting
+          # with `grep -c` consumes all input (no early exit, no SIGPIPE) and
+          # `|| true` absorbs grep's exit-1-on-zero-matches.
+          # shellcheck disable=SC2086 # COMPOSE_FILES is a flag list, not a path
+          LOGS=$(docker compose $COMPOSE_FILES logs control-plane 2>&1 || true)
+          HITS=$(printf '%s\n' "$LOGS" \
+            | grep -E '(path=/api/v1/servers|"path":"/api/v1/servers")' \
+            | grep -cE '(status=200|"status":200)' || true)
+          if [ "${HITS:-0}" -gt 0 ]; then
+            echo "Authenticated scan coverage proven: ZAP exercised GET /api/v1/servers → 200 (${HITS} hit(s))"
+          else
+            echo "::error::no 200 on GET /api/v1/servers in control-plane logs — the replacer JWT did not reach the scanner traffic"
+            exit 1
+          fi
+
+      - name: Locate SARIF report
+        # always() is load-bearing (#920 §5.3): ZAP exits non-zero when a
+        # plan job errors after the report was written, and the coverage
+        # assertion above can fail post-report — the SARIF must still be
+        # found and uploaded rather than dropped with the red job.
+        if: always()
+        id: sarif
+        run: |
+          set -euo pipefail
+          SARIF=$(find reports -maxdepth 1 -type f \( -name '*.sarif' -o -name '*.json' \) | head -1 || true)
+          if [ -n "$SARIF" ]; then
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "path=${SARIF}" >> "$GITHUB_OUTPUT"
+            echo "SARIF report: ${SARIF}"
+          else
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::no SARIF report produced (scan failed before the report job)"
+          fi
+
+      - name: Rewrite DAST location URIs for Code Scanning
+        # ZAP reports finding locations as scanned URLs (http://localhost...);
+        # Code Scanning anchors alerts to repo files and rejects non-file URI
+        # schemes ("SARIF URI scheme http did not match the checkout URI
+        # scheme file" — the #1465 first-run red). sarif-postprocess.py
+        # re-anchors every finding onto .zap/DAST-FINDINGS.md (uriBaseId
+        # %SRCROOT%) and preserves the real URL in the message + properties.
+        # always() mirrors the upload step: a post-coverage-assertion failure
+        # must not skip the rewrite, or the upload below re-hits the scheme
+        # error.
+        if: always() && steps.sarif.outputs.found == 'true'
+        id: rewrite
+        env:
+          # The report path travels in the environment: a template inside the script text is a
+          # scanner error for Semgrep's protected scan ([internal]workflow-failure-patterns.md P18).
+          SARIF_PATH: ${{ steps.sarif.outputs.path }}
+        run: |
+          set -euo pipefail
+          # The ZAP container runs as uid 1000 ('zap') and writes the report
+          # owned by that uid, mode 644. On the Linux runner the workflow user
+          # (uid 1001) can READ it but cannot overwrite it in place
+          # (PermissionError — the #1465 second-run red). cp creates a
+          # runner-owned copy the post-processor can rewrite. (Locally this is
+          # masked: macOS Docker Desktop remaps bind-mount ownership to the
+          # host user, so the in-place write succeeds — a Linux-only failure.)
+          REWRITTEN="reports/zap-api.codescanning.sarif"
+          cp "$SARIF_PATH" "$REWRITTEN"
+          python3 .zap/sarif-postprocess.py "$REWRITTEN"
+          echo "path=${REWRITTEN}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload SARIF to Code Scanning (category zap-api)
+        # always() is load-bearing (#920 §5.3): findings must reach Code
+        # Scanning even when the scan step or the coverage assertion exited
+        # non-zero. Gated on the rewrite producing its output path — uploading
+        # the un-rewritten ZAP SARIF would re-hit the http-scheme rejection.
+        if: always() && steps.rewrite.outputs.path != ''
+        # first-party, SHA-pinned for Alpha Code Scanning Gate (#1431).
+        # Keep the trailing version comment bare: dependabot only rewrites that
+        # exact shape, so an annotated one silently rots on every bump (#2309).
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: ${{ steps.rewrite.outputs.path }}
+          category: zap-api
+
+      - name: Dump stack diagnostics on failure
+        if: failure()
+        run: |
+          # shellcheck disable=SC2086 # COMPOSE_FILES is a flag list, not a path
+          docker compose $COMPOSE_FILES ps || true
+          # shellcheck disable=SC2086
+          docker compose $COMPOSE_FILES logs --tail 200 control-plane || true

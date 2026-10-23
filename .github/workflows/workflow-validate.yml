@@ -1,0 +1,102 @@
+name: Workflow Validate
+
+# L3 static V1/V7: workflow/helper from protected main; same-repo PR YAML read only as Git-object data.
+# The analyzer never executes PR-head files.
+# Workflow-validation details: ../../[internal]pipeline-architecture.md.
+# Trust contract: ../../[internal]specs/2026-10-02-3569-trusted-workflow-validation-design.md.
+# Failure patterns consulted: ../../[internal]workflow-failure-patterns.md (P2/P3/P5/P14).
+
+on:
+  pull_request_target:
+    types: [labeled, synchronize]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: none
+
+concurrency:
+  group: workflow-validate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  notify-fork-pr:
+    name: Reject fork-PR validation
+    if: |
+      github.event.pull_request.base.ref == 'main'
+      && contains(github.event.pull_request.labels.*.name, 'workflow-validation: dispatch')
+      && github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Post fork-PR rejection comment
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          FORK_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+          COMMENT_BODY="**Workflow validation is unavailable for fork PRs.**
+
+          This PR originates from a fork (${FORK_REPO}). L3 analyzes workflow changes only for same-repository branches. A maintainer can review the workflow diff and rely on L2 static checks."
+          echo "$COMMENT_BODY" >> "$GITHUB_STEP_SUMMARY"
+          if ! gh pr comment "$PR_NUMBER" --repo "$REPO" --body "$COMMENT_BODY"; then
+            echo "::warning::Failed to post the fork-PR explanation; see the step summary."
+          fi
+
+  analyze-changed-workflows:
+    name: Analyze changed workflows
+    if: |
+      github.event.pull_request.base.ref == 'main'
+      && contains(github.event.pull_request.labels.*.name, 'workflow-validation: dispatch')
+      && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install parser dependency
+        run: >-
+          python3 -m pip install --user --quiet --require-hashes --only-binary=:all:
+          -r .github/requirements-pyyaml.txt
+
+      - name: Prepare trusted V1/V7 report
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          COMMENT_PATH: ${{ runner.temp }}/workflow-validate-comment.md
+        run: |
+          set -euo pipefail
+          python3 .github/scripts/workflow-validate-report.py \
+            "$BASE_SHA" "$HEAD_SHA" "$GITHUB_STEP_SUMMARY" "$COMMENT_PATH"
+
+      - name: Publish report if PR head is current
+        id: publish-report
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          COMMENT_PATH: ${{ runner.temp }}/workflow-validate-comment.md
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          live=$(gh api "repos/${REPO}/pulls/${PR_NUMBER}")
+          live_head=$(jq -r '.head.sha' <<< "$live")
+          live_base=$(jq -r '.base.ref' <<< "$live")
+          if [[ "$live_head" != "$EVENT_HEAD_SHA" || "$live_base" != main ]]; then
+            echo 'Report skipped: PR head or base changed while analysis was running.' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [[ -s "$COMMENT_PATH" ]]; then
+            gh pr comment "$PR_NUMBER" --repo "$REPO" --body-file "$COMMENT_PATH"
+          fi

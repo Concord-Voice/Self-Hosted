@@ -1,0 +1,518 @@
+# Nightly CI — the third trigger-owning orchestrator (ADR-0018 §1, amended).
+#
+# WHY THIS EXISTS. Scanning used to run twice per change: once on the PR, then
+# again on the squash-merge. `strict_required_status_checks_policy` is on, so
+# every PR is already rebased onto current main before it merges — the merge
+# commit's tree is what CI just tested. Re-running the whole scan fleet on it
+# bought a fresh main-branch baseline and little else, at ~112 full runs/month.
+#
+# That work moves here, once a day, and `main-ci.yml` keeps the scan fleet only
+# on the path that can actually cut a release (see § Hotfix below).
+#
+# WHAT THIS COSTS, stated plainly: a regression that PR CI misses can now sit on
+# main for up to 24h before anything notices. That is the deliberate trade. The
+# blocking set below is scoped so the nightly still refuses to ship a release on
+# a real failure.
+#
+# WHERE THE VERSION BUMP COMES FROM — read this before adding a job here.
+# Nothing in this workflow creates a bump, and nothing should. The PR that
+# finishes a releasable unit carries its own bump AND its own changelog
+# promotion:
+#
+#   ./.github/scripts/promote-unreleased-changelog.sh <next>
+#   cd client/desktop && npm version <next> --no-git-tag-version
+#
+# That is not a convention, it is what verify-changelog.sh (#1857) already
+# enforces: Rule 1 fails a bump with no `## [<version>]` section at HEAD, and
+# Rule 3 accepts that heading ONLY in a promotion-shaped diff. So the bump and
+# the dated notes are one reviewed, human-merged change. This workflow's only
+# job is to notice one and cut it.
+#
+# A `bump` job that opened a release-proposal PR lived here from #2934 until
+# #3354 and was REMOVED, not relocated: it fired on `pending == 'false'` —
+# precisely the nights nobody bumped — so it was never part of the release
+# path, and merging it inserted a manual gate into a topology whose whole
+# point was to cut without one. It also halved the cadence, because `release`
+# and `bump` are mutually exclusive: the proposal could not be released until
+# the NEXT night. Do not re-propose it. An `## [Unreleased]` section growing
+# with no bump beneath it means nobody has decided to cut yet, which is a
+# valid state.
+#
+# WHAT IT FIXES, which the per-merge model could not: main-ci's pending-release
+# probe re-arms only on pushes that TRIGGER a workflow, so a commit carrying a
+# CI-suppression marker cannot re-arm it — which is how desktop-v0.2.33 and
+# v0.2.34 both stranded untagged. A cron does not care what the commit message
+# says. Moving the probe here closes that structurally.
+#
+# PRODUCTION DEPLOYS start here and nowhere else: the `deploy` job dispatches
+# main-cd.yml once the blocking set is green (see that job's comment and
+# [internal]deploys.md § Nightly-only production deploys).
+name: Nightly CI
+
+on:
+  schedule:
+    # 07:00 UTC daily. After the overnight quiet window, before the working day.
+    # Shares the slot with graphify-refresh on Mondays — harmless, they are
+    # independent workflows contending for nothing.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+concurrency:
+  # Never cancel a nightly: a half-finished scan uploads a partial SARIF
+  # baseline, and a cancelled release dispatch strands a tag. Same rationale as
+  # main-ci's group.
+  group: nightly-ci
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ─── Scan window + pending-release probe ─────────────────────────────
+  window:
+    name: Resolve scan window
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      diff-base: ${{ steps.window.outputs.diff-base }}
+      pending: ${{ steps.pending.outputs.pending }}
+      version: ${{ steps.pending.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Resolve the diff base from the last successful nightly
+        id: window
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The window this run is responsible for is "everything since the last
+          # nightly that actually finished". Not HEAD~1 (that is one merge, and
+          # main takes ~4/day), and not a fixed 24h lookback — a fixed window
+          # silently skips the night a run FAILED, which is the exact case a
+          # backstop must survive. Keying on the last SUCCESS makes a failed
+          # night get covered by the next one instead.
+          LAST=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/nightly-ci.yml/runs?status=success&branch=main&per_page=1" \
+            --jq '.workflow_runs[0].head_sha // ""' 2>/dev/null || echo "")
+          if [[ -n "$LAST" ]] && git cat-file -e "${LAST}^{commit}" 2>/dev/null; then
+            echo "::notice::Scanning since the last successful nightly (${LAST})"
+          else
+            # No successful run yet, or its commit is gone (force-push, GC).
+            # Fall back to the repo's ROOT commit — a full-history scan. Cold
+            # start should be thorough, never HEAD~1-blind.
+            LAST=$(git rev-list --max-parents=0 HEAD | tail -1)
+            echo "::warning::No usable prior nightly; falling back to a full-history scan from ${LAST}"
+          fi
+          echo "diff-base=${LAST}" >> "$GITHUB_OUTPUT"
+
+      - name: Probe for a pending desktop release
+        id: pending
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Same probe main-ci carried, moved here. It compares the manifest
+          # version against its tag, so it is version-based, not PR-based: it
+          # arms on the bump commit and stays armed until the tag lands,
+          # regardless of which PR did the bumping or how many pushes followed.
+          VERSION=$(node -p "require('./client/desktop/package.json').version")
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          AUTH_HEADER=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')
+          if GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0='http.https://github.com/.extraheader' \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${AUTH_HEADER}" \
+            git ls-remote --exit-code origin "refs/tags/desktop-v${VERSION}" >/dev/null; then
+            echo "::notice::desktop-v${VERSION} is already tagged — nothing to release"
+            echo "pending=false" >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [[ "$status" -ne 2 ]]; then
+              echo "::error::Failed to query desktop-v${VERSION} release tag (git ls-remote exit ${status})"
+              exit "$status"
+            fi
+            echo "::notice::desktop-v${VERSION} is untagged — release armed for tonight"
+            echo "pending=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  # ─── IOC-first (ADR-0018 §2) ─────────────────────────────────────────
+  # Non-negotiable here: every job below installs or executes repo code.
+  ioc:
+    name: ioc
+    needs: [window]
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/ioc-scanning.yml
+    with:
+      diff-base: ${{ needs.window.outputs.diff-base }}
+
+  # ─── Scanner fleet (moved off per-merge) ─────────────────────────────
+  eslint:
+    name: eslint
+    needs: [ioc]
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/eslint-sarif.yml
+
+  codeql:
+    name: codeql
+    needs: [ioc]
+    permissions:
+      contents: read
+      security-events: write
+      packages: read
+      actions: read
+    uses: ./.github/workflows/codeql.yml
+
+  govulncheck:
+    name: govulncheck
+    needs: [ioc]
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/govulncheck.yml
+
+  # The native addon's ONLY post-merge coverage, and it exists for exactly the
+  # reason govulncheck's nightly leg above does: main-ci.yml is the release
+  # orchestrator and every job there — its own `ioc` included — is gated on
+  # `hotfix && desktop-release`, so a node there would be skipped on every ordinary
+  # merge. `check-native-ioc-gate.sh` asserts that absence.
+  #
+  # Without this the sanitizer and fuzz legs would not re-run against `main` until
+  # some later PR happened to touch a native path, so a toolchain-drift regression
+  # — a runner image bumping clang or glibc, a new UB pattern a compiler upgrade
+  # surfaces — could sit undetected indefinitely. Found by
+  # @deployment-config-reviewer on PR #3155.
+  #
+  # UNCONDITIONAL here, unlike the path-gated PR leg: drift arrives from the
+  # environment rather than from the diff, so "did this commit touch native code"
+  # is the wrong question at this cadence.
+  native-audiocap:
+    name: native-audiocap
+    needs: [ioc]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/native-audiocap.yml
+
+  # Advisory: new CVEs land in base images daily with no diff here, so this is
+  # the leg that catches them. Advisory because a server-image CVE must not
+  # withhold a desktop release; it is listed in `summary` only, not `release`.
+  container-image-scan:
+    name: container-image-scan
+    needs: [ioc]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/container-image-scan.yml
+
+  # DO NOT "fix" secret-scanning.yml's empty base/head here. Its job is named
+  # "TruffleHog (PR diff)" and passes `base: github.event.pull_request.base.sha`,
+  # which is '' outside a PR — and an empty `base` is TruffleHog's DOCUMENTED
+  # "scan entire branch" configuration (`base` maps to --since-commit). So the
+  # nightly leg is a full-history verified-secrets sweep of main, strictly
+  # broader than the PR diff, and measurably so: 95s here vs 40s on a PR.
+  # Wiring a base SHA in would NARROW it.
+  secret-scanning:
+    name: secret-scanning
+    needs: [ioc]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/secret-scanning.yml
+
+  scorecard:
+    name: scorecard
+    needs: [ioc]
+    # A caller's grant must be a SUPERSET of every permission the called
+    # workflow requests, or GitHub rejects the WHOLE RUN at startup —
+    # `startup_failure`, zero jobs, no log. scorecard.yml's analysis job asks
+    # for issues/pull-requests/checks read (its Maintained + Branch-Protection
+    # checks read them); dropping them here cost exactly that, caught only by
+    # the first real dispatch. Keep this set aligned with main-ci.yml's
+    # scorecard job; `.github/scripts/lint-workflow-call-permissions.sh`
+    # now fails closed on any drift.
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+      id-token: write
+      issues: read
+      pull-requests: read
+      checks: read
+    uses: ./.github/workflows/scorecard.yml
+
+  # ─── Tests, coverage, Docker canaries ────────────────────────────────
+  # No `with:` inputs: build.yml's path filters carry `|| github.event_name !=
+  # 'pull_request'`, so every suite force-runs here. That clause is #1510's
+  # (SonarCloud main-branch coverage must stay fresh) — it used to read
+  # `== 'push'`, which would have gone dead the moment main-ci stopped calling
+  # build on ordinary merges. It moved rather than rotted.
+  build:
+    name: build
+    needs: [ioc]
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/build.yml
+
+  unit-smoke:
+    name: unit-smoke
+    needs: [ioc]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/unit-smoke.yml
+    with:
+      # STRING, not boolean — unit-smoke.yml types this input as string and
+      # tests it with `format('{0}', inputs.dev-stack-changed) == 'true'`.
+      # actionlint rejects the bare boolean, which is the same coercion trap
+      # the repo's G3 boolean lint exists for.
+      dev-stack-changed: ${{ 'true' }}
+
+  sonar:
+    name: sonar
+    needs: [build]
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: read
+    uses: ./.github/workflows/sonarcloud.yml
+    with:
+      reusable-analysis: true
+      desktop-coverage: ${{ needs.build.outputs.desktop-coverage == 'true' }}
+      control-plane-coverage: ${{ needs.build.outputs.control-plane-coverage == 'true' }}
+      media-plane-coverage: ${{ needs.build.outputs.media-plane-coverage == 'true' }}
+      admin-coverage: ${{ needs.build.outputs.admin-coverage == 'true' }}
+      concord-bridge-coverage: ${{ needs.build.outputs.concord-bridge-coverage == 'true' }}
+    # Secrets are NOT inherited through workflow_call — a caller must pass them
+    # explicitly. sonarcloud.yml declares SONAR_TOKEN `required: false`, so
+    # omitting it is legal YAML and actionlint stays silent; the scanner just
+    # receives an empty token and reports the misleading "Not authorized or
+    # project not found" (exit 3). pr-ci.yml and main-ci.yml both pass it.
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # ─── DAST (moved off per-PR; deep plan, was weekly) ──────────────────
+  # zap-api-dast.yml's own `schedule` was removed in the same change: this is
+  # now its only scheduled run. Cadence improves (weekly deep -> nightly deep)
+  # while the per-PR light scan goes away.
+  # Unconditional: DAST result moves with the dependency tree and the ZAP
+  # engine image, not only with the repo diff, so a paths gate here would
+  # under-approximate what changes the answer. That is why the cron it replaces
+  # ran unconditionally too — this is the same posture, seven times as often.
+  zap:
+    name: zap
+    needs: [ioc]
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/zap-api-dast.yml
+    with:
+      plan: full
+
+  # ─── Release ─────────────────────────────────────────────────────────
+  # Dispatches the desktop release for a NON-urgent version bump. A `risk:
+  # hotfix` bump never reaches here — main-ci cuts it on merge. This job and
+  # main-ci's dispatcher are the ONLY two ways a release is cut, and both are
+  # triggered by a bump a human already merged.
+  #
+  # The `needs:` list is the COMPLETE gate set, so every verdict is visible and
+  # ordered before a release can be cut. The `if:` is deliberately NARROWER
+  # than `success()`: per the approved blocking/non-blocking split, a red
+  # scorecard, sonar, or ZAP must not strand a release.
+  #
+  # `native-audiocap` is BLOCKING (ADR-0043 § Standing requirements). Its PR-time
+  # leg is path-gated and main-ci's jobs are hotfix-gated, so this unconditional
+  # node is the only thing that re-runs the ASAN/UBSAN and fuzz legs against
+  # `main` at all -- and a memory-safety defect in a real-time audio callback that
+  # nothing stops is a defect that ships. It is listed in BOTH the `if:` above and
+  # the `blocking` arrays below: a name in one and not the other prints "blocking"
+  # in the summary table while the release cuts anyway. Those are posture and
+  # advisory signals (ZAP is advisory by #1465; nothing consumes the main-branch
+  # Sonar gate), whereas a red build, IOC, or SARIF scanner is a real defect.
+  #
+  # This is the `always()` + per-need `result == 'success'` discipline that
+  # #1077 and ADR-0004 already require of the release path — used here to widen
+  # what runs while keeping the gate honest, not to weaken it.
+  release:
+    name: release
+    needs: [window, ioc, eslint, codeql, govulncheck, secret-scanning, native-audiocap, scorecard, build, unit-smoke, sonar, zap]
+    if: >-
+      !cancelled()
+      && needs.window.outputs.pending == 'true'
+      && needs.ioc.result == 'success'
+      && needs.build.result == 'success'
+      && needs.unit-smoke.result == 'success'
+      && needs.eslint.result == 'success'
+      && needs.codeql.result == 'success'
+      && needs.govulncheck.result == 'success'
+      && needs.secret-scanning.result == 'success'
+      && needs.native-audiocap.result == 'success'
+    permissions:
+      actions: write
+      checks: read
+      # Job-level permissions REPLACE workflow-level (#1462), so this must be
+      # declared here even though the workflow default grants it: the overtake
+      # check below reads refs/heads/main via the API and would 404 without it.
+      contents: read
+    runs-on: ubuntu-latest
+    # Matches main-ci's dispatcher budget: the six-leg signed build, the release
+    # job, and the child's own sync/mirror watch, plus unbounded runner queueing.
+    timeout-minutes: 300
+    steps:
+      - name: Dispatch and await the trusted desktop build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          # Bind to main HEAD, exactly as main-ci does. The child fails closed
+          # if main has advanced past it (#2274) — the nightly re-arms tomorrow.
+          EXPECTED_SHA: ${{ github.sha }}
+          VERSION: ${{ needs.window.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          # #2274's `expected_sha` binding makes build-desktop fail closed when
+          # main has advanced past the SHA that was gated. main-ci's window is
+          # ~14 min; the nightly's is ~45 (full ZAP), so it is MORE likely to be
+          # overtaken — and unlike main-ci it has no next push to re-arm on.
+          #
+          # A merge landing mid-nightly is not an error, so do not spend a red
+          # run reporting one. Defer instead: the probe is version-based and
+          # stays armed until the tag exists, so tomorrow's nightly gates the
+          # newer SHA and releases from that. Same binding, no false alarm.
+          HEAD_SHA=$(gh api "repos/$GITHUB_REPOSITORY/commits/main" --jq '.sha')
+          if [ "$HEAD_SHA" != "$EXPECTED_SHA" ]; then
+            echo "::notice::main advanced to ${HEAD_SHA} during this run;" \
+                 "deferring desktop-v${VERSION} to the next nightly."
+            exit 0
+          fi
+
+          echo "::notice::Releasing desktop-v${VERSION} (nightly, non-urgent path)"
+          RUN_ID=$(gh api --method POST \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/build-desktop.yml/dispatches" \
+            -F return_run_details=true \
+            -f ref=main \
+            -f "inputs[expected_sha]=$EXPECTED_SHA" \
+            --jq '.workflow_run_id')
+          test -n "$RUN_ID" || { echo "::error::Dispatch returned no workflow run ID"; exit 1; }
+          echo "::notice::Watching trusted desktop build run ${RUN_ID} for ${EXPECTED_SHA}"
+          gh run watch "$RUN_ID" --repo "$GITHUB_REPOSITORY" --compact --exit-status
+
+  # ─── Production deploy ───────────────────────────────────────────────
+  # The ONLY automatic path to production (nightly-only deploy policy). Runs
+  # after the same blocking set the release gate uses, and after `release` so
+  # deploy-spa's release-contract gate (#2995) sees a desktop release cut
+  # tonight. main-cd re-proves this job is running for this SHA and that the
+  # start is inside the core off-hours window, so a missed window refuses and
+  # turns this run red: the last-successful-nightly base then never advances
+  # past an undeployed commit, and tomorrow's nightly picks the change up.
+  #
+  # Dispatch, not workflow_call: a called workflow's OIDC workflow_ref names
+  # the caller, which would break the SPA attestation's main-cd.yml binding.
+  deploy:
+    name: deploy
+    needs: [ioc, eslint, codeql, govulncheck, secret-scanning, native-audiocap, build, unit-smoke, release]
+    if: >-
+      !cancelled()
+      && github.ref == 'refs/heads/main'
+      && needs.ioc.result == 'success'
+      && needs.build.result == 'success'
+      && needs.unit-smoke.result == 'success'
+      && needs.eslint.result == 'success'
+      && needs.codeql.result == 'success'
+      && needs.govulncheck.result == 'success'
+      && needs.secret-scanning.result == 'success'
+      && needs.native-audiocap.result == 'success'
+      && (needs.release.result == 'success' || needs.release.result == 'skipped')
+    permissions:
+      actions: write
+      contents: read
+    runs-on: ubuntu-latest
+    # main-cd's own jobs are bounded at well under this; queueing is not.
+    timeout-minutes: 120
+    steps:
+      - name: Dispatch and await the production deploy
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEPLOY_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          RUN_ID=$(gh api --method POST \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/main-cd.yml/dispatches" \
+            -F return_run_details=true \
+            -f ref=main \
+            -f "inputs[ref]=$DEPLOY_SHA" \
+            -f "inputs[nightly_run_id]=$GITHUB_RUN_ID" \
+            --jq '.workflow_run_id')
+          test -n "$RUN_ID" || { echo "::error::Dispatch returned no workflow run ID"; exit 1; }
+          echo "::notice::Watching production deploy run ${RUN_ID} for ${DEPLOY_SHA}"
+          gh run watch "$RUN_ID" --repo "$GITHUB_REPOSITORY" --compact --exit-status
+
+  # ─── Verdict ─────────────────────────────────────────────────────────
+  # `always()` is load-bearing: the summary must render precisely when the run
+  # went badly. Default success() semantics would skip this job on the nights
+  # its table is most worth reading, leaving a red nightly with no rendered
+  # explanation of WHICH leg failed or whether the release was withheld.
+  summary:
+    name: summary
+    needs: [window, ioc, eslint, codeql, govulncheck, secret-scanning, native-audiocap, container-image-scan, scorecard, build, unit-smoke, sonar, zap, release, deploy]
+    if: always()
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Render the nightly verdict
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          PENDING: ${{ needs.window.outputs.pending }}
+          VERSION: ${{ needs.window.outputs.version }}
+          BASE: ${{ needs.window.outputs.diff-base }}
+        run: |
+          set -euo pipefail
+          # Untrusted input never reaches the shell: results arrive as JSON in
+          # env and are read by python, never interpolated into a command.
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+          r = json.loads(os.environ["RESULTS"])
+          blocking = ["ioc","build","unit-smoke","eslint","codeql","govulncheck","secret-scanning","native-audiocap"]
+          advisory = ["scorecard","sonar","zap","container-image-scan"]
+          print("## Nightly CI\n")
+          print(f"Window scanned from `{os.environ['BASE'][:12]}`.\n")
+          print("| Job | Result | Class |")
+          print("|---|---|---|")
+          for name in blocking + advisory:
+              res = (r.get(name) or {}).get("result", "skipped")
+              icon = {"success":"✅","failure":"❌","cancelled":"⚠️","skipped":"⏭️"}.get(res,"❓")
+              print(f"| `{name}` | {icon} {res} | {'blocking' if name in blocking else 'advisory'} |")
+          red = [n for n in blocking if (r.get(n) or {}).get("result") == "failure"]
+          rel = (r.get("release") or {}).get("result", "skipped")
+          print()
+          if red:
+              print(f"**Release withheld** — blocking failures: {', '.join('`'+n+'`' for n in red)}.")
+              print("\nA `risk: hotfix` PR bypasses this gate by design and cuts on merge.")
+          elif os.environ.get("PENDING") == "true":
+              print(f"**Release {rel}** for `desktop-v{os.environ['VERSION']}`.")
+          else:
+              # No bump on main, which is a VALID state and not a defect: the PR
+              # that finishes a releasable unit carries its own bump and its own
+              # changelog promotion (verify-changelog.sh Rules 1 and 3), so this
+              # line means nobody has decided to cut yet. Nothing here proposes
+              # one on their behalf.
+              print("No pending version bump — nothing to release.")
+          dep = (r.get("deploy") or {}).get("result", "skipped")
+          print(f"\n**Production deploy:** {dep}." + (" Withheld by the gate above; production is unchanged." if dep == "skipped" else ""))
+          amber = [n for n in advisory if (r.get(n) or {}).get("result") == "failure"]
+          if amber:
+              print(f"\nAdvisory signals red (did NOT block): {', '.join('`'+n+'`' for n in amber)}.")
+          PY

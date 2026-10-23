@@ -1,0 +1,111 @@
+rules:
+  # ── Flag eval() usage ─────────────────────────────────────────────────
+  - id: concord-injection-eval
+    pattern: eval(...)
+    paths:
+      exclude:
+        - "**/*.test.*"
+        - "**/*.md"
+        - "**/node_modules/**"
+    message: >-
+      eval() is prohibited. It enables arbitrary code execution and XSS.
+      Use structured alternatives instead.
+      See [internal] "TypeScript / JavaScript Constraints".
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: "CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code"
+
+  # ── Flag new Function() usage ─────────────────────────────────────────
+  - id: concord-injection-new-function
+    pattern: new Function(...)
+    paths:
+      exclude:
+        - "**/*.test.*"
+        - "**/*.md"
+        - "**/node_modules/**"
+    message: >-
+      new Function() is prohibited. It is equivalent to eval() and enables
+      arbitrary code execution. See [internal] "TypeScript / JavaScript Constraints".
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: "CWE-95: Improper Neutralization of Directives in Dynamically Evaluated Code"
+
+  # ── Flag document.write() usage ───────────────────────────────────────
+  - id: concord-injection-document-write
+    pattern: document.write(...)
+    paths:
+      exclude:
+        - "**/*.test.*"
+        - "**/*.md"
+        - "**/node_modules/**"
+    message: >-
+      document.write() is prohibited. It can overwrite the entire document
+      and is an XSS vector. Use DOM APIs or React rendering.
+      See [internal] "TypeScript / JavaScript Constraints".
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation"
+
+  # ── Flag dangerouslySetInnerHTML ──────────────────────────────────────
+  - id: concord-injection-dangerous-html
+    pattern: dangerouslySetInnerHTML={...}
+    paths:
+      exclude:
+        - "**/*.test.*"
+        - "**/*.md"
+        - "**/node_modules/**"
+    message: >-
+      dangerouslySetInnerHTML is flagged for review. If the content is
+      user-controlled, it must be sanitized with DOMPurify or equivalent.
+      See [internal] "TypeScript / JavaScript Constraints".
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation"
+
+  # ── Flag direct innerHTML assignment ──────────────────────────────────
+  - id: concord-injection-innerhtml
+    pattern: $EL.innerHTML = $VAL
+    paths:
+      exclude:
+        - "**/*.test.*"
+        - "**/*.md"
+        - "**/node_modules/**"
+        - "**/TEST_*.html"
+    message: >-
+      Direct innerHTML assignment is prohibited in production code. Use React
+      JSX rendering or a sanitization library.
+      See [internal] "TypeScript / JavaScript Constraints".
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: "CWE-79: Improper Neutralization of Input During Web Page Generation"
+
+  # ── Flag shell: true in child_process ─────────────────────────────────
+  - id: concord-injection-exec
+    pattern-either:
+      - pattern: execSync(...)
+      - pattern: exec(...)
+    paths:
+      exclude:
+        - "**/*.test.*"
+        - "**/*.md"
+        - "**/node_modules/**"
+        - "**/scripts/**"
+    message: >-
+      exec() and execSync() run commands through a shell and are prohibited
+      in application code. Use spawn() with shell: false and pass arguments
+      as an array. See [internal] "TypeScript / JavaScript Constraints".
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: "CWE-78: Improper Neutralization of Special Elements used in an OS Command"

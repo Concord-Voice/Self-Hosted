@@ -1,0 +1,579 @@
+# Semgrep SAST — per-tool Code Scanning workflow (ADR-0017 End-state A, #1426).
+# Extracted from build.yml's `semgrep` job; scan logic, version pin, baseline
+# diff-awareness, ERROR-blocking semantics, and the PR summary comment are
+# ported unchanged. New here: each scan also emits SARIF, uploaded to GitHub
+# Code Scanning under two categories — `semgrep-custom` (in-repo .semgrep/
+# rules, blocking in-job on ERROR) and `semgrep-community` (p/security-audit +
+# p/owasp-top-ten). "Advisory" describes only the community STEP's exit code:
+# its findings DO block merges, via the Alpha Code Scanning Gate, which gates
+# tool `Semgrep OSS` at errors_and_warnings. The ruleset blocks, the job does
+# not — see [internal]rules/electron.md § Supply-chain hardening.
+# Deliberately NOT the semgrep.dev SaaS model (no SEMGREP_APP_TOKEN);
+# rules stay in-repo.
+# pull_request-only: --baseline-commit requires a PR base SHA.
+# nightly-ci.yml deliberately does NOT call this. It was added there on
+# 2026-08-26 and failed on the first run: outside a PR the base SHA is '', the
+# baseline is meaningless, and the "Publish Semgrep results to PR" step has no
+# PR to post to. Main has never had a Semgrep baseline and the #1431 Code
+# Scanning gate works without one, so the nightly does not need this leg.
+name: Semgrep SAST
+
+# Invoked by pr-ci.yml with `needs: ioc` (ADR-0018 IOC-first, #1476) — the
+# pip install below must not race the supply-chain verdict. PR event context
+# (BASELINE_COMMIT etc.) flows from the caller's pull_request event.
+on:
+  workflow_call:
+    inputs:
+      run-custom:
+        description: "Run the repository custom rules scan"
+        type: boolean
+        default: true
+        required: false
+      run-community:
+        description: "Run the community rules scan"
+        type: boolean
+        default: true
+        required: false
+      run-canary:
+        description: "Run the mutable action-ref registry canary"
+        type: boolean
+        default: true
+        required: false
+      external-verdict:
+        description: "Report actual SARIF upload provenance and delegate findings to the protected verifier"
+        type: boolean
+        default: false
+        required: false
+
+# Least-privilege default; the semgrep job elevates to the writes it needs.
+permissions:
+  contents: read
+
+jobs:
+  semgrep:
+    name: Semgrep SAST
+    if: inputs.run-custom || inputs.run-community || inputs.run-canary
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      # PR summary comment (ported surface — enhanced-pr-review keys on its marker)
+      pull-requests: write
+      # SARIF upload to Code Scanning
+      security-events: write
+      # required by upload-sarif in private repos to read the Actions run status
+      actions: read
+    env:
+      # PR base SHA — used by both semgrep scan steps via --baseline-commit.
+      # Robust against shallow clones (paired with fetch-depth: 0 below)
+      # and fork PRs.
+      BASELINE_COMMIT: ${{ github.event.pull_request.base.sha }}
+      # Single source of truth for the Semgrep version. Referenced by
+      # both the pip install step and the cache key so a future bump
+      # only needs to change this one line.
+      SEMGREP_VERSION: '1.121.0'
+      EXTERNAL_VERDICT: ${{ inputs.external-verdict }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Required so the PR base SHA is reachable for
+          # `semgrep scan --baseline-commit`. On a shallow clone the
+          # baseline commit may be missing and semgrep falls back to
+          # full-scan, voiding the speedup.
+          fetch-depth: 0
+
+      - name: Cache semgrep registry rules
+        if: inputs.run-custom || inputs.run-community || inputs.run-canary
+        # Caches the community-ruleset download (p/security-audit +
+        # p/owasp-top-ten) under ~/.semgrep/. Custom rules live in-repo
+        # at .semgrep/ and aren't cached, but their hash invalidates
+        # the key when rule files change — useful as a versioning signal.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.semgrep
+          key: semgrep-${{ runner.os }}-${{ env.SEMGREP_VERSION }}-${{ hashFiles('.semgrep/**') }}
+          restore-keys: |
+            semgrep-${{ runner.os }}-${{ env.SEMGREP_VERSION }}-
+
+      - name: Capture Python version (pip cache key component)
+        if: inputs.run-custom || inputs.run-community || inputs.run-canary
+        # Without the interpreter version in the key, a runner-image
+        # Python bump would keep hitting the stale exact key forever
+        # (actions/cache never re-saves on exact-key hit) while the old
+        # cpXX wheels go unused — silent permanent re-download.
+        id: py
+        run: echo "version=$(python3 -c 'import sys; print(".".join(map(str, sys.version_info[:2])))')" >> "$GITHUB_OUTPUT"
+
+      - name: Cache pip wheels (semgrep install)
+        if: inputs.run-custom || inputs.run-community || inputs.run-canary
+        # The pip install below re-downloads the semgrep wheel set
+        # (~30 MB incl. deps) on every run. Caching pip's wheel cache
+        # keyed on the pinned version makes the install a local unpack.
+        # Stock actions/cache is deliberate: Blacksmith transparently
+        # intercepts it against the colocated cache (ADR-0016 §Decision 4
+        # verification note, #1438) — do NOT swap to the archived
+        # useblacksmith/cache fork.
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/pip
+          key: pip-semgrep-${{ runner.os }}-py${{ steps.py.outputs.version }}-${{ env.SEMGREP_VERSION }}
+
+      - name: Install Semgrep
+        if: inputs.run-custom || inputs.run-community || inputs.run-canary
+        run: |
+          python3 -m pip install --user "semgrep==${SEMGREP_VERSION}"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run Semgrep (custom rules)
+        id: custom
+        if: inputs.run-custom
+        run: |
+          set +e
+          semgrep scan --config=.semgrep/ --baseline-commit="${BASELINE_COMMIT}" --json-output=semgrep-custom.json --sarif-output=semgrep-custom.sarif
+          SCAN_EXIT=$?
+          set -e
+          # Exit code 0 = no findings, 1 = findings found, other = scan error
+          if [ "$SCAN_EXIT" -gt 1 ]; then
+            echo "::error::Semgrep custom rules scan failed (exit $SCAN_EXIT)"
+            exit "$SCAN_EXIT"
+          fi
+          python3 <<'PY'
+          import json, os
+          data = json.load(open('semgrep-custom.json'))
+          if data.get('errors'):
+              raise SystemExit(f"Semgrep custom scan reported {len(data['errors'])} scanner error(s)")
+          results = data.get('results', [])
+          if not isinstance(results, list):
+              raise SystemExit('Semgrep custom report has an invalid results field')
+          counts = {'ERROR': 0, 'WARNING': 0, 'INFO': 0}
+          grouped = {'ERROR': [], 'WARNING': [], 'INFO': []}
+          for r in results:
+              sev = r.get('extra', {}).get('severity', 'INFO').upper()
+              if sev not in counts:
+                  sev = 'INFO'
+              counts[sev] += 1
+              grouped[sev].append(r)
+          for k, v in counts.items():
+              print(f'{k}: {v}')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f"error_count={counts['ERROR']}\n")
+              out.write(f"warning_count={counts['WARNING']}\n")
+              out.write(f"info_count={counts['INFO']}\n")
+          for sev, path in [('ERROR','semgrep-errors.txt'),('WARNING','semgrep-warnings.txt'),('INFO','semgrep-info.txt')]:
+              with open(path, 'w') as f:
+                  for r in grouped[sev]:
+                      cid = r.get('check_id', 'unknown')
+                      msg = r.get('extra', {}).get('message', '').strip()
+                      fp = r.get('path', '?')
+                      ln = r.get('start', {}).get('line', '?')
+                      f.write(f'[{sev}] {cid}  {fp}:{ln}\n')
+                      if msg:
+                          f.write(f'  {msg}\n')
+                      f.write('\n')
+          PY
+
+      - name: Run Semgrep (community rulesets)
+        id: community
+        if: inputs.run-community
+        run: |
+          set +e
+          # All deployed GitHub Actions are SHA-pinned, so the complete
+          # community rulesets run without mutable-action exclusions.
+          # Go test files and the test-fixture directories are excluded: every
+          # community finding there was test data (hard-coded JWT keys, test DDL,
+          # fixture workflows), dismissed as false positive or used-in-tests
+          # (review-tooling audit, 2026-09-23). The fixture patterns are anchored
+          # (gitignore syntax) so a production directory that happens to be named
+          # fixtures stays in scope.
+          semgrep scan --timeout=45 --config=p/security-audit --config=p/owasp-top-ten \
+            --exclude='*_test.go' --exclude='**/tests/fixtures' --exclude='/scripts/fixtures' \
+            --baseline-commit="${BASELINE_COMMIT}" --json-output=semgrep-community.json --sarif-output=semgrep-community.sarif
+          SCAN_EXIT=$?
+          set -e
+          if [ "$SCAN_EXIT" -gt 1 ]; then
+            if [ "$EXTERNAL_VERDICT" = 'true' ]; then
+              echo "::error::Semgrep community scan failed (exit $SCAN_EXIT)"
+              exit "$SCAN_EXIT"
+            fi
+            echo "::warning::Semgrep community scan failed (exit $SCAN_EXIT) — treating as non-blocking"
+          fi
+          SCAN_EXIT="$SCAN_EXIT" python3 <<'PY'
+          import json, os
+          # A failed scan or an unreadable report is 'unavailable', never 0: a crash
+          # must not read as a clean run in the PR comment. Still non-blocking.
+          try:
+              data = json.load(open('semgrep-community.json'))
+          except (FileNotFoundError, json.JSONDecodeError):
+              data = None
+          if data is None or int(os.environ['SCAN_EXIT']) > 1:
+              if os.environ.get('EXTERNAL_VERDICT') == 'true':
+                  raise SystemExit('community scan report is missing or unreadable')
+              results, count = [], 'unavailable'
+          else:
+              if os.environ.get('EXTERNAL_VERDICT') == 'true' and data.get('errors'):
+                  raise SystemExit(f"community scan reported {len(data['errors'])} scanner error(s)")
+              results = data.get('results', [])
+              if not isinstance(results, list):
+                  raise SystemExit('Semgrep community report has an invalid results field')
+              count = str(len(results))
+          print(f'Community rulesets: {count} findings')
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
+              out.write(f'finding_count={count}\n')
+          with open('semgrep-community-text.txt', 'w') as f:
+              for r in results:
+                  sev = r.get('extra', {}).get('severity', 'INFO').upper()
+                  cid = r.get('check_id', 'unknown')
+                  msg = r.get('extra', {}).get('message', '').strip()
+                  fp = r.get('path', '?')
+                  ln = r.get('start', {}).get('line', '?')
+                  f.write(f'[{sev}] {cid}  {fp}:{ln}\n')
+                  if msg:
+                      f.write(f'  {msg}\n')
+                  f.write('\n')
+          PY
+
+      - name: Upload custom-rules SARIF to Code Scanning
+        if: inputs.run-custom
+        # first-party, SHA-pinned for Alpha Code Scanning Gate (#1431).
+        # Keep the trailing version comment bare: dependabot only rewrites that
+        # exact shape, so an annotated one silently rots on every bump (#2309).
+        id: upload-custom
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: semgrep-custom.sarif
+          category: semgrep-custom
+
+      - name: Upload community SARIF to Code Scanning
+        if: inputs.run-community
+        # first-party, SHA-pinned for Alpha Code Scanning Gate (#1431).
+        # Keep the trailing version comment bare: dependabot only rewrites that
+        # exact shape, so an annotated one silently rots on every bump (#2309).
+        id: upload-community
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: semgrep-community.sarif
+          category: semgrep-community
+
+      - name: Write protected Semgrep upload evidence
+        if: inputs.external-verdict && (inputs.run-custom || inputs.run-community)
+        env:
+          CUSTOM_SELECTED: ${{ inputs.run-custom }}
+          COMMUNITY_SELECTED: ${{ inputs.run-community }}
+          CUSTOM_SARIF_ID: ${{ steps.upload-custom.outputs.sarif-id }}
+          COMMUNITY_SARIF_ID: ${{ steps.upload-community.outputs.sarif-id }}
+        run: |
+          set -euo pipefail
+          if [ "$CUSTOM_SELECTED" = 'true' ] && [ -z "$CUSTOM_SARIF_ID" ]; then
+            echo "::error::Semgrep custom scan did not return a SARIF upload ID"; exit 1
+          fi
+          if [ "$COMMUNITY_SELECTED" = 'true' ] && [ -z "$COMMUNITY_SARIF_ID" ]; then
+            echo "::error::Semgrep community scan did not return a SARIF upload ID"; exit 1
+          fi
+          jq -n --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg custom_selected "$CUSTOM_SELECTED" --arg community_selected "$COMMUNITY_SELECTED" \
+            --arg custom_sarif_id "$CUSTOM_SARIF_ID" --arg community_sarif_id "$COMMUNITY_SARIF_ID" \
+            '{run_id:$run_id,run_attempt:$run_attempt,uploads:([if $custom_selected == "true" then {category:"semgrep-custom",sarif_id:$custom_sarif_id} else empty end,if $community_selected == "true" then {category:"semgrep-community",sarif_id:$community_sarif_id} else empty end])}' \
+            > "$RUNNER_TEMP/scan-evidence-semgrep.json"
+
+      - name: Upload protected Semgrep evidence
+        if: inputs.external-verdict && (inputs.run-custom || inputs.run-community)
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scan-evidence-${{ github.run_id }}-${{ github.run_attempt }}-semgrep
+          path: ${{ runner.temp }}/scan-evidence-semgrep.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Canary — mutable-action-ref detector is still live
+        id: canary
+        if: inputs.run-canary
+        # The full-SHA pin invariant ([internal]rules/electron.md § Supply-chain
+        # hardening) is enforced by ONE upstream rule, shipped in the
+        # p/owasp-top-ten pack only, fetched from the registry at scan time.
+        # SEMGREP_VERSION pins the engine, not the pack — so an upstream
+        # removal, rename, or severity downgrade would silently delete a merge
+        # gate with no repo-side signal. This step fails closed instead.
+        #
+        # Runs AFTER both SARIF uploads on purpose: a canary failure must not
+        # suppress the scan results, which would leave the Alpha Code Scanning
+        # Gate PENDING and block merges far less legibly than a named red step.
+        #
+        # The fixture is passed as an EXPLICIT path because .semgrepignore
+        # suppresses directory walks, not named files — that asymmetry is what
+        # lets one file be invisible to the repo-wide scan (so its deliberately
+        # mutable refs never reach Code Scanning, the #2399 failure mode) and
+        # still be scannable here. See #2426.
+        env:
+          CANARY_FIXTURE: .semgrep/tests/action-ref-canary.test.yaml
+        run: |
+          set +e
+          semgrep scan --config=p/owasp-top-ten --metrics=off \
+            --json-output=semgrep-canary.json "${CANARY_FIXTURE}"
+          SCAN_EXIT=$?
+          set -e
+          if [ "$SCAN_EXIT" -gt 1 ]; then
+            echo "::error::Canary scan could not run (exit $SCAN_EXIT). This is a scan/registry failure, NOT evidence the rule is missing."
+            exit "$SCAN_EXIT"
+          fi
+          python3 <<'PY'
+          import json, os, sys
+          RULE = ('yaml.github-actions.security.github-actions-mutable-action-tag'
+                  '.github-actions-mutable-action-tag')
+          # Wider than the minimum needed to prove the rule fires: an upstream
+          # narrowing that still caught @main and @v7 but stopped catching
+          # dotted-semver, arbitrary branches, or short SHAs would pass a
+          # smaller canary while enforcement was materially weakened.
+          MUST_FLAG = [
+              'actions/checkout@main',
+              'github/codeql-action/init@master',
+              'actions/setup-node@release-1.0',
+              'actions/checkout@v7',
+              'actions/cache@v6.1.0',
+              'actions/upload-artifact@v5.0.1-beta.1',
+              'actions/download-artifact@latest',
+              'actions/checkout@3d3c42e',
+              'dorny/paths-filter@v4',
+          ]
+          MUST_PASS = [
+              'actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1',
+              './.github/actions/track-deployment',
+          ]
+          # Mirrors `alerts_threshold: errors_and_warnings` for tool "Semgrep OSS"
+          # in [internal]alpha-code-scanning-ruleset.json. The two are
+          # duplicated, not derived — if that threshold is ever relaxed to
+          # `errors`, narrow this set in the same change or the severity check
+          # silently stops meaning anything.
+          BLOCKING_SEVERITIES = {'WARNING', 'ERROR'}
+          FIXTURE = os.environ['CANARY_FIXTURE']
+          try:
+              report = json.load(open('semgrep-canary.json'))
+          except (FileNotFoundError, json.JSONDecodeError) as exc:
+              print(f'::error::action-ref canary: cannot read semgrep-canary.json ({exc}). '
+                    'The scan produced no parseable output — this is a scan failure, not '
+                    'evidence about the rule.')
+              sys.exit(1)
+          results = report.get('results', [])
+          hits = [r for r in results if r.get('check_id') == RULE]
+          failures = []
+          # A suppressed internal error or a silently-skipped rule yields ZERO
+          # findings, which would otherwise be misreported below as "the rule
+          # was removed upstream" and send someone chasing a change that never
+          # happened. Check these FIRST so the diagnosis names the real cause.
+          # (`semgrep scan` has no --no-suppress-errors flag — that is `semgrep
+          # ci` only, and passing it here exits 2 with "unknown option" — so
+          # inspecting the JSON is the available mechanism, not a second-best.)
+          scan_errors = report.get('errors') or []
+          skipped_rules = report.get('skipped_rules') or []
+          if scan_errors:
+              failures.append(
+                  f'semgrep reported {len(scan_errors)} internal error(s) during the '
+                  f'canary scan: {json.dumps(scan_errors)[:500]}. The canary verdict '
+                  'below is NOT trustworthy — fix the scan before reading it.'
+              )
+          if skipped_rules:
+              failures.append(
+                  f'semgrep SKIPPED {len(skipped_rules)} rule(s): '
+                  f'{json.dumps(skipped_rules)[:500]}. A skipped rule is not an absent '
+                  'rule — this is a load/parse failure, not an upstream removal.'
+              )
+          # The fixture must actually have been scanned. If semgrep's
+          # explicit-target-overrides-.semgrepignore behavior ever changes, or the
+          # fixture is renamed/moved, the scan finds zero targets and exits 0 — and
+          # the `not hits` branch below would confidently blame an upstream removal
+          # and send the responder to the wrong place entirely.
+          scanned = (report.get('paths') or {}).get('scanned') or []
+          if scanned and not any(FIXTURE in str(p) for p in scanned):
+              failures.append(
+                  f'{FIXTURE} was NOT among the scanned paths ({json.dumps(scanned)[:300]}). '
+                  'The fixture was renamed, moved, or newly excluded — this is a fixture '
+                  'or target-selection problem, NOT an upstream rule removal.'
+              )
+          # Inverse assertion: the fixture must stay OUT of the enforcing repo-wide
+          # scan. `.semgrepignore` carrying `.semgrep/tests/` is what keeps the
+          # deliberately-mutable refs above from entering semgrep-community.sarif and
+          # blocking every PR through the Alpha gate — the #2399 failure mode. That
+          # exclusion is load-bearing in both directions and nothing else locks it.
+          try:
+              community = json.load(open('semgrep-community.json'))
+          except (FileNotFoundError, json.JSONDecodeError):
+              community = None
+          if community is not None:
+              leaked = [r for r in community.get('results', [])
+                        if FIXTURE in str(r.get('path', ''))]
+              if leaked:
+                  failures.append(
+                      f'the canary fixture leaked into the enforcing community scan '
+                      f'({len(leaked)} finding(s)). .semgrepignore no longer excludes '
+                      f'{FIXTURE}, so its intentional violations will reach Code Scanning '
+                      'and block unrelated PRs. Restore the exclusion.'
+                  )
+          if not hits:
+              failures.append(
+                  f'{RULE} produced NO findings on the canary fixture — it was '
+                  'removed, renamed, or dropped from p/owasp-top-ten upstream. '
+                  'The full-SHA pin invariant is currently UNENFORCED.'
+              )
+          # Resolve each finding's line NUMBER against the fixture we commit,
+          # rather than trusting the finding's own `extra.lines` text. That
+          # field is populated inconsistently across Semgrep versions — 1.157
+          # fills it, the pinned 1.121 leaves it empty — so matching on it made
+          # the canary report "rule no longer flagged" while the rule was in
+          # fact flagging all four refs correctly. `start.line` is stable, and
+          # the fixture is ours, so this comparison is version-independent.
+          src = open(FIXTURE).read().splitlines()
+          matched = []
+          for r in hits:
+              ln = r.get('start', {}).get('line')
+              if isinstance(ln, int) and 1 <= ln <= len(src):
+                  matched.append(src[ln - 1])
+              else:
+                  failures.append(
+                      f'finding at unusable line {ln!r} — cannot resolve it against '
+                      'the fixture; the Semgrep JSON shape may have changed again.'
+                  )
+          flagged = '\n'.join(matched)
+          for ref in MUST_FLAG:
+              if ref not in flagged:
+                  failures.append(f'mutable ref no longer flagged: {ref}')
+          for ref in MUST_PASS:
+              if ref in flagged:
+                  failures.append(f'accepted ref now flagged (false positive): {ref}')
+          severities = {r.get('extra', {}).get('severity', '').upper() for r in hits}
+          if hits and not (severities & BLOCKING_SEVERITIES):
+              failures.append(
+                  f'severity downgraded to {sorted(severities)}, below the Alpha '
+                  'Code Scanning Gate errors_and_warnings threshold — findings '
+                  'would no longer block a merge.'
+              )
+          if failures:
+              for f in failures:
+                  print(f'::error::action-ref canary: {f}')
+              sys.exit(1)
+          print(f'action-ref canary OK — {len(hits)} findings, severities {sorted(severities)}')
+          PY
+
+      - name: Publish Semgrep results to PR
+        # always() is load-bearing: publish results to the PR comment
+        # even when the scan step exited non-zero. Without it, a failing
+        # scan would silently skip the PR-summary step and reviewers
+        # would have to dig into the raw Actions log for findings.
+        if: always()
+        # Fork and dependency-bot tokens can be read-only. The protected verdict
+        # checks scanner results and SARIF evidence; a comment permission error
+        # must not turn a clean protected scan into a failed required result.
+        continue-on-error: ${{ inputs.external-verdict == true }}
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          RUN_CUSTOM: ${{ inputs.run-custom }}
+          RUN_COMMUNITY: ${{ inputs.run-community }}
+          CUSTOM_ERRORS: ${{ steps.custom.outputs.error_count }}
+          CUSTOM_WARNINGS: ${{ steps.custom.outputs.warning_count }}
+          CUSTOM_INFO: ${{ steps.custom.outputs.info_count }}
+          COMMUNITY_FINDINGS: ${{ steps.community.outputs.finding_count }}
+        with:
+          script: |
+            const fs = require('fs');
+            const marker = '<!-- semgrep-results -->';
+            const errors = parseInt(process.env.CUSTOM_ERRORS || '0', 10);
+            const warnings = parseInt(process.env.CUSTOM_WARNINGS || '0', 10);
+            const info = parseInt(process.env.CUSTOM_INFO || '0', 10);
+            // 'unavailable' (scan failed) is kept distinct from 0 findings.
+            const communityRaw = process.env.COMMUNITY_FINDINGS || 'unavailable';
+            const communityAvailable = /^\d+$/.test(communityRaw);
+            const community = communityAvailable ? parseInt(communityRaw, 10) : 0;
+
+            let errorText = '', warningText = '', infoText = '', communityText = '';
+            try { errorText = fs.readFileSync('semgrep-errors.txt', 'utf8').trim(); } catch {}
+            try { warningText = fs.readFileSync('semgrep-warnings.txt', 'utf8').trim(); } catch {}
+            try { infoText = fs.readFileSync('semgrep-info.txt', 'utf8').trim(); } catch {}
+            try { communityText = fs.readFileSync('semgrep-community-text.txt', 'utf8').trim(); } catch {}
+
+            // Overall status. A hard-failed custom scan (exit >1) never writes
+            // its outputs — CUSTOM_ERRORS arrives empty, and without this guard
+            // the comment would claim "PASSED" while the job is red (the merge
+            // gate itself is unaffected: the failed scan step fails the job).
+            const customSkipped = process.env.RUN_CUSTOM !== 'true';
+            const communitySkipped = process.env.RUN_COMMUNITY !== 'true';
+            const customMissing = !customSkipped && !process.env.CUSTOM_ERRORS;
+            const blocked = errors > 0;
+            const needsReview = warnings > 0;
+            let statusIcon, statusLabel;
+            if (customMissing) { statusIcon = '🚨'; statusLabel = 'SCAN ERROR — custom-rules scan did not complete; see workflow logs'; }
+            else if (blocked) { statusIcon = '🚫'; statusLabel = 'BLOCKED — ERROR findings must be resolved'; }
+            else if (needsReview) { statusIcon = '⚠️'; statusLabel = 'PASSED — WARNING findings require review before merge'; }
+            else { statusIcon = '✅'; statusLabel = 'PASSED — no action required'; }
+
+            let body = [
+              marker,
+              `### ${statusIcon} Semgrep SAST — ${statusLabel}`,
+              '',
+              '| Severity | Count | Action Required |',
+              '|----------|:-----:|-----------------|',
+              `| ERROR | ${customSkipped ? 'skipped' : errors} | ${customSkipped ? 'Not selected' : errors > 0 ? '**Merge blocked** — must fix before merge' : 'None'} |`,
+              `| WARNING | ${customSkipped ? 'skipped' : warnings} | ${customSkipped ? 'Not selected' : warnings > 0 ? '**Requires review** — reviewer must acknowledge before merge' : 'None'} |`,
+              `| INFO | ${customSkipped ? 'skipped' : info} | ${customSkipped ? 'Not selected' : 'Visibility only — validate during review'} |`,
+              communitySkipped ? '| Community | skipped | Not selected |' : communityAvailable
+                ? `| Community | ${community} | Informational — tracked separately |`
+                : '| Community | unavailable | **Scan did not complete** — see the job log |',
+            ];
+
+            // ERROR section — always shown if findings exist
+            if (errors > 0) {
+              body.push('', '#### 🚫 ERROR — Blocking Findings', '');
+              body.push('These must be resolved before the PR can merge.', '');
+              if (errorText) { body.push('```', errorText.slice(0, 3000), '```'); }
+            }
+
+            // WARNING section — always shown if findings exist
+            if (warnings > 0) {
+              body.push('', '#### ⚠️ WARNING — Requires Review', '');
+              body.push('A reviewer must acknowledge these findings before merge. If the pattern is a known-safe usage (e.g., `fmt.Sprintf` with hardcoded column names and `#nosec` annotation), note the justification in the review.', '');
+              if (warningText) {
+                body.push('<details><summary>Show WARNING findings</summary>', '', '```', warningText.slice(0, 4000), '```', '', '</details>');
+              }
+            }
+
+            // INFO section — collapsible, visibility only
+            if (info > 0) {
+              body.push('', '<details><summary>INFO findings (visibility only, ' + info + ' items)</summary>', '');
+              if (infoText) { body.push('```', infoText.slice(0, 3000), '```'); }
+              else { body.push(`${info} INFO-level findings. Review CI logs for details.`); }
+              body.push('', '</details>');
+            }
+
+            // Community section — collapsible
+            if (community > 0) {
+              body.push('', '<details><summary>Community ruleset findings (informational, ' + community + ' items)</summary>', '');
+              if (communityText) { body.push('```', communityText.slice(0, 6000), '```'); }
+              else { body.push(`${community} findings from p/security-audit and p/owasp-top-ten. Review CI logs for details.`); }
+              body.push('', '</details>');
+            }
+
+            body = body.join('\n');
+
+            const comments = await github.paginate(
+              github.rest.issues.listComments,
+              { owner: context.repo.owner, repo: context.repo.repo, issue_number: context.issue.number, per_page: 100 }
+            );
+            const existing = comments.find(c => typeof c.body === 'string' && c.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                comment_id: existing.id, body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner, repo: context.repo.repo,
+                issue_number: context.issue.number, body,
+              });
+            }
+
+      - name: Fail if blocking findings
+        if: inputs.run-custom && steps.custom.outputs.error_count != '0' && !inputs.external-verdict
+        env:
+          ERROR_COUNT: ${{ steps.custom.outputs.error_count }}
+        run: |
+          echo "::error::Semgrep found $ERROR_COUNT ERROR-level findings. See PR comment for details."
+          exit 1

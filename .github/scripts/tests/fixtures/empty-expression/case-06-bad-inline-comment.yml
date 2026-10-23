@@ -1,0 +1,14 @@
+# Synthetic fixture: single-line `run:` form with a trailing bash comment
+# containing ${{ ... }}. Exercises the single-line scanner path (script
+# lines 173-184) which scans run content in-place without entering the
+# in-block state machine. The bug class is identical to the multi-line
+# variant in case-02-bad-token-in-comment.yml; the difference is which
+# code branch executes. The lint MUST flag this form too.
+name: bad-inline-comment
+on: [workflow_dispatch]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "value"  # trailing bash comment with ${{ env.SOMETHING }}

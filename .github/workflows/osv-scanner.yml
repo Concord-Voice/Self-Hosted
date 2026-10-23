@@ -1,0 +1,408 @@
+# OSV-Scanner — per-tool SCA → SARIF → Code Scanning (ADR-0017 End-state A, #1427).
+# Standalone scans use Google's reusable workflows (SHA-pinned per #847):
+#   - scan-scheduled: relevance-filtered ordinary main pushes; Hotfix and weekly full-tree watches
+#   - scan-pr: native Code Scanning PR result alongside protected enforcement
+# Protected required-workflow calls scan from protected source and bind upload IDs.
+# Main-push skips require verified closed/merged main-PR provenance for the exact
+# pushed merge commit; unknown or ambiguous provenance keeps the full scan.
+# Recursive scan-args pick up ALL manifests: client/desktop/package-lock.json,
+# services/media-plane/package-lock.json, services/control-plane/go.mod+go.sum
+# (and any future workspace automatically).
+# Unknown standalone provenance, metadata, policy, filter, or protected rule
+# state runs a full scan with findings blocking.
+# Runner note: the reusable workflows expose no runs-on input — these jobs run
+# GitHub-hosted ubuntu-latest (accepted deviation from Blacksmith parity; see
+# spec §Key-decisions 2). Complementary to Dependabot (audit report: no redundancy).
+name: OSV-Scanner
+
+# The standalone PR trigger preserves the native Code Scanning configuration
+# expected by the Alpha scanner rule. The protected workflow_call independently
+# supplies the trusted required-workflow verdict (ADR-0018).
+on:
+  workflow_call:
+    inputs:
+      protected-pr:
+        type: boolean
+        required: false
+        default: false
+      base-sha:
+        type: string
+        required: false
+      merge-sha:
+        type: string
+        required: false
+      hotfix:
+        type: boolean
+        required: false
+        default: false
+  pull_request:
+    branches: [main]
+  # NO merge_group trigger: the repo has no merge queue, and the upstream
+  # PR-diff reusable workflow checks out $GITHUB_BASE_REF — which is EMPTY on
+  # merge_group events, making the old-vs-new comparison vacuous (always
+  # green). A silently-passing gate is worse than an absent one (review
+  # finding, PR #1444). Re-add deliberately if a merge queue is ever enabled.
+  schedule:
+    - cron: '26 11 * * 0' # weekly supply-chain watch (Sun 11:26 UTC)
+  push:
+    branches: [main]
+
+concurrency:
+  group: osv-scanner-${{ github.workflow }}-${{ github.ref }}
+  # Cancel superseded PR runs only. push:main and the weekly scheduled scan
+  # share the refs/heads/main group — cancellation there would abort the
+  # supply-chain baseline mid-flight (Gitar finding, PR #1444).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# Least-privilege default; the SARIF-scanning jobs elevate to
+# security-events: write at job level (each calls a reusable workflow that
+# uploads SARIF to Code Scanning).
+permissions:
+  contents: read
+
+jobs:
+  select-osv:
+    name: select-osv
+    if: ${{ !inputs.protected-pr }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      known: ${{ steps.selection.outputs.known }}
+      selection: ${{ steps.selection.outputs.selection }}
+      fail-on-vuln: ${{ steps.policy.outputs.fail-on-vuln }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Resolve pushed merge provenance
+        id: hotfix
+        if: github.event_name == 'push'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          COMMIT_SUBJECT: ${{ github.event.head_commit.message }}
+        run: bash .github/scripts/resolve-hotfix-label.sh
+
+      - name: Read event metadata
+        id: metadata
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EVENT_NAME: ${{ github.event_name }}
+          PR_NUMBER: ${{ steps.hotfix.outputs.pr_number }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.event.after }}
+          SCHEDULE_SHA: ${{ github.sha }}
+          HOTFIX: ${{ steps.hotfix.outputs.hotfix }}
+          HOTFIX_RESOLUTION: ${{ steps.hotfix.outputs.resolution }}
+          RESOLVED_VIA: ${{ steps.hotfix.outputs.resolved_via }}
+        run: |
+          set -euo pipefail
+          case "$EVENT_NAME" in
+            pull_request)
+              if ! gh api "repos/$GITHUB_REPOSITORY/pulls/$EVENT_PR_NUMBER" > "$RUNNER_TEMP/osv-pr.json"; then
+                echo 'valid=false' >> "$GITHUB_OUTPUT"; exit 0
+              fi
+              if ! jq -er '
+                if (
+                .base.ref == "main" and
+                (.head.sha | type == "string" and test("^[0-9a-f]{40}$")) and
+                (.base.sha | type == "string" and test("^[0-9a-f]{40}$")) and
+                (.merge_commit_sha | type == "string" and test("^[0-9a-f]{40}$")) and
+                (.changed_files | type == "number" and floor == . and . >= 0 and . <= 3000) and
+                (.labels | type == "array" and all(.[]; type == "object" and (.name | type == "string")))
+                ) then
+                  "valid=true\nhead_sha=" + .head.sha + "\nbase_sha=" + .base.sha +
+                    "\nmerge_sha=" + .merge_commit_sha + "\nchanged_files=" + (.changed_files|tostring) +
+                    "\nhotfix=" + ([.labels[].name] | any(. == "risk: hotfix") | tostring)
+                else empty end
+              ' "$RUNNER_TEMP/osv-pr.json" > "$RUNNER_TEMP/osv-pr-outputs"; then
+                echo 'valid=false' >> "$GITHUB_OUTPUT"; exit 0
+              fi
+              cat "$RUNNER_TEMP/osv-pr-outputs" >> "$GITHUB_OUTPUT" ;;
+            push)
+              bash .github/scripts/validate-osv-push-provenance.sh
+              exit 0 ;;
+            schedule)
+              if [[ ! "$SCHEDULE_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+                echo 'valid=false' >> "$GITHUB_OUTPUT"; exit 0
+              fi
+              printf 'valid=true\nhead_sha=%s\nhotfix=false\n' "$SCHEDULE_SHA" >> "$GITHUB_OUTPUT" ;;
+            *) echo 'valid=false' >> "$GITHUB_OUTPUT" ;;
+          esac
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.metadata.outputs.valid == 'true'
+        id: policy-checkout
+        continue-on-error: true
+        with:
+          ref: ${{ steps.metadata.outputs.base_sha || github.sha }}
+          path: policy
+          persist-credentials: false
+
+      - name: Record immutable policy revision
+        id: policy-revision
+        if: steps.metadata.outputs.valid == 'true'
+        continue-on-error: true
+        env:
+          EXPECTED_SHA: ${{ steps.metadata.outputs.base_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          actual_sha="$(git -C policy rev-parse HEAD 2>/dev/null || true)"
+          if [[ "$actual_sha" == "$EXPECTED_SHA" ]]; then
+            echo "sha=$actual_sha" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        if: github.event_name != 'schedule' && steps.metadata.outputs.valid == 'true' && steps.policy-revision.outputs.sha != '' && hashFiles('policy/.github/ci/scan-relevance.yml') != ''
+        continue-on-error: true
+        with:
+          filters: policy/.github/ci/scan-relevance.yml
+          predicate-quantifier: some-with-excludes
+
+      - name: Compose shared scan selection
+        id: selection
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          FILTER_OUTCOME: ${{ steps.filter.outcome }}
+          METADATA_VALID: ${{ steps.metadata.outputs.valid }}
+          PR_HEAD: ${{ steps.metadata.outputs.head_sha }}
+          PR_BASE: ${{ steps.metadata.outputs.base_sha }}
+          PR_MERGE: ${{ steps.metadata.outputs.merge_sha }}
+          CHANGED_FILES: ${{ steps.metadata.outputs.changed_files }}
+          BEFORE_SHA: ${{ steps.metadata.outputs.before }}
+          AFTER_SHA: ${{ steps.metadata.outputs.after }}
+          HOTFIX: ${{ steps.metadata.outputs.hotfix }}
+          MODE: ${{ vars.CI_SCAN_RELEVANCE_MODE }}
+          POLICY_SHA: ${{ steps.policy-revision.outputs.sha }}
+          SCHEDULE_SHA: ${{ github.sha }}
+          FILTERS: >-
+            {"all_changed":"${{ steps.filter.outputs.all_changed }}","codeql_actions":"${{ steps.filter.outputs.codeql_actions }}","codeql_go":"${{ steps.filter.outputs.codeql_go }}","codeql_js":"${{ steps.filter.outputs.codeql_js }}","eslint":"${{ steps.filter.outputs.eslint }}","govulncheck":"${{ steps.filter.outputs.govulncheck }}","osv":"${{ steps.filter.outputs.osv }}","semgrep_custom":"${{ steps.filter.outputs.semgrep_custom }}","semgrep_community":"${{ steps.filter.outputs.semgrep_community }}","semgrep_canary":"${{ steps.filter.outputs.semgrep_canary }}","sonar":"${{ steps.filter.outputs.sonar }}","sonar_force_all":"${{ steps.filter.outputs.sonar_force_all }}","sonar_desktop":"${{ steps.filter.outputs.sonar_desktop }}","sonar_control_plane":"${{ steps.filter.outputs.sonar_control_plane }}","sonar_media_plane":"${{ steps.filter.outputs.sonar_media_plane }}","sonar_admin":"${{ steps.filter.outputs.sonar_admin }}","selfhost":"${{ steps.filter.outputs.selfhost }}","selfhost_guard":"${{ steps.filter.outputs.selfhost_guard }}","services":"${{ steps.filter.outputs.services }}","spa":"${{ steps.filter.outputs.spa }}","desktop":"${{ steps.filter.outputs.desktop }}","control_plane":"${{ steps.filter.outputs.control_plane }}","media_plane":"${{ steps.filter.outputs.media_plane }}","media_plane_tests":"${{ steps.filter.outputs.media_plane_tests }}","admin":"${{ steps.filter.outputs.admin }}","production_docker":"${{ steps.filter.outputs.production_docker }}","native":"${{ steps.filter.outputs.native }}","go_lint":"${{ steps.filter.outputs.go_lint }}","dev_stack":"${{ steps.filter.outputs.dev_stack }}","go_toolchain":"${{ steps.filter.outputs.go_toolchain }}","openapi":"${{ steps.filter.outputs.openapi }}","spa_env":"${{ steps.filter.outputs.spa_env }}","deployment":"${{ steps.filter.outputs.deployment }}","feature_wiring":"${{ steps.filter.outputs.feature_wiring }}","adr_numbers":"${{ steps.filter.outputs.adr_numbers }}","secrets_contract":"${{ steps.filter.outputs.secrets_contract }}","dispatch_trust":"${{ steps.filter.outputs.dispatch_trust }}","go_test_contracts":"${{ steps.filter.outputs.go_test_contracts }}","review_contracts":"${{ steps.filter.outputs.review_contracts }}","tooling_mirrors":"${{ steps.filter.outputs.tooling_mirrors }}","graphify_contracts":"${{ steps.filter.outputs.graphify_contracts }}","native_ioc":"${{ steps.filter.outputs.native_ioc }}","sonar_profile":"${{ steps.filter.outputs.sonar_profile }}","changelog":"${{ steps.filter.outputs.changelog }}","dev_checks":"${{ steps.filter.outputs.dev_checks }}","workflow_lint":"${{ steps.filter.outputs.workflow_lint }}","worker_apple":"${{ steps.filter.outputs.worker_apple }}","worker_invite":"${{ steps.filter.outputs.worker_invite }}","license_desktop":"${{ steps.filter.outputs.license_desktop }}","license_media":"${{ steps.filter.outputs.license_media }}","license_admin":"${{ steps.filter.outputs.license_admin }}","license_go":"${{ steps.filter.outputs.license_go }}"}
+        run: |
+          set -euo pipefail
+          echo 'known=false' >> "$GITHUB_OUTPUT"
+          echo 'selection={"version":1,"known":false}' >> "$GITHUB_OUTPUT"
+          # The protected base may predate the policy; unknown keeps the full standalone scan.
+          if [[ "$METADATA_VALID" != true || -z "$POLICY_SHA" || ! -f policy/.github/ci/scan-relevance.yml || ! -f policy/.github/scripts/ci-scan-relevance.mjs ]]; then exit 0; fi
+          if [[ "$EVENT_NAME" != schedule && "$FILTER_OUTCOME" != success ]]; then exit 0; fi
+          node - "$RUNNER_TEMP/osv-selection.json" <<'NODE'
+          const fs = require('node:fs');
+          const keys = ['codeql_actions','codeql_go','codeql_js','eslint','govulncheck','osv','semgrep_custom','semgrep_community','semgrep_canary','sonar','sonar_force_all','sonar_desktop','sonar_control_plane','sonar_media_plane','sonar_admin','services','spa','selfhost','selfhost_guard','desktop','control_plane','media_plane','media_plane_tests','admin','production_docker','dev_stack','native','go_lint','go_toolchain','openapi','spa_env','deployment','feature_wiring','adr_numbers','secrets_contract','dispatch_trust','go_test_contracts','review_contracts','tooling_mirrors','graphify_contracts','native_ioc','sonar_profile','changelog','dev_checks','workflow_lint','worker_apple','worker_invite','license_desktop','license_media','license_admin','license_go','all_changed'];
+          const raw = JSON.parse(process.env.FILTERS);
+          const event = process.env.EVENT_NAME;
+          if (event !== 'schedule' && !keys.every(key => raw[key] === 'true' || raw[key] === 'false')) {
+            throw new Error('dorny filter output is incomplete or malformed');
+          }
+          const filters = Object.fromEntries(keys.map(key => [key,
+            event === 'schedule' ? 'false' : raw[key]]));
+          const rawHotfix = process.env.HOTFIX;
+          const hotfix = rawHotfix === 'true' ? true : rawHotfix === 'false' ? false : undefined;
+          const metadata = { event_name: event, hotfix };
+          if (event === 'pull_request') Object.assign(metadata, { head_sha: process.env.PR_HEAD, base_sha: process.env.PR_BASE, merge_sha: process.env.PR_MERGE, changed_files: Number(process.env.CHANGED_FILES) });
+          if (event === 'push') Object.assign(metadata, { before: process.env.BEFORE_SHA, after: process.env.AFTER_SHA, history_available: process.env.METADATA_VALID === 'true' });
+          if (event === 'schedule') metadata.head_sha = process.env.SCHEDULE_SHA;
+          const mode = ['required-full','required-relevant'].includes(process.env.MODE) ? process.env.MODE : 'legacy';
+          fs.writeFileSync(process.argv[2], JSON.stringify({ filters, metadata, mode, policy_sha: process.env.POLICY_SHA }));
+          NODE
+          node policy/.github/scripts/ci-scan-relevance.mjs "$RUNNER_TEMP/osv-selection.json"
+
+      - name: Set OSV finding policy
+        id: policy
+        run: |
+          echo 'fail-on-vuln=true' >> "$GITHUB_OUTPUT"
+
+  scan-scheduled:
+    needs: [select-osv]
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || (github.event_name == 'push' && (needs.select-osv.result != 'success' || needs.select-osv.outputs.known != 'true' || fromJSON(needs.select-osv.outputs.selection).selected.osv))) }}
+    permissions:
+      # SARIF upload to Code Scanning (inside the reusable workflow)
+      security-events: write
+      # checkout inside the reusable workflow
+      contents: read
+      # required by upload-sarif in private repos to read the Actions run status
+      actions: read
+    uses: "google/osv-scanner-action/.github/workflows/osv-scanner-reusable.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36" # v2.7.0
+    with:
+      # No --skip-git: osv-scanner v2 no longer scans the .git root by default
+      # (opt back in with --include-git-root), and v2.6.0 rejects the flag.
+      scan-args: |-
+        -r
+        ./
+  scan-pr:
+    needs: [select-osv]
+    if: ${{ !cancelled() && !inputs.protected-pr && github.event_name == 'pull_request' && (needs.select-osv.result != 'success' || needs.select-osv.outputs.known != 'true' || vars.CI_SCAN_RELEVANCE_MODE == 'required-full' || vars.CI_SCAN_RELEVANCE_MODE == 'required-relevant' || fromJSON(needs.select-osv.outputs.selection).selected.osv) }}
+    permissions:
+      # SARIF upload to Code Scanning (inside the reusable workflow)
+      security-events: write
+      # checkout inside the reusable workflow
+      contents: read
+      # required by upload-sarif in private repos to read the Actions run status
+      actions: read
+    uses: "google/osv-scanner-action/.github/workflows/osv-scanner-reusable-pr.yml@b1d267aea5211fa648d9d442fa64b90dbdcbdd36" # v2.7.0
+    with:
+      fail-on-vuln: ${{ fromJSON(needs.select-osv.outputs.fail-on-vuln || 'true') }}
+      # No --skip-git: osv-scanner v2 no longer scans the .git root by default
+      # (opt back in with --include-git-root), and v2.6.0 rejects the flag.
+      scan-args: |-
+        -r
+        ./
+
+  protected-pr-scan:
+    if: ${{ inputs.protected-pr && github.event_name == 'pull_request' }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - name: Check protected revision inputs
+        env:
+          BASE_SHA: ${{ inputs.base-sha }}
+          MERGE_SHA: ${{ inputs.merge-sha }}
+        run: |
+          set -euo pipefail
+          [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ && "$MERGE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.base-sha }}
+          path: scan
+          persist-credentials: false
+
+      - name: Scan base dependencies
+        env:
+          EXPECTED_SHA: ${{ inputs.base-sha }}
+        run: |
+          set -euo pipefail
+          [[ "$(git -C scan rev-parse HEAD)" == "$EXPECTED_SHA" ]] || exit 1
+          mkdir -p "$RUNNER_TEMP/osv-results"
+          printf '# Protected scan ignores PR-controlled suppressions\n' > "$RUNNER_TEMP/osv-results/config.toml"
+          set +e
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE/scan:/github/workspace:ro" \
+            --volume "$RUNNER_TEMP/osv-results:/results" \
+            --workdir /github/workspace \
+            ghcr.io/google/osv-scanner@sha256:afd838850ac1a0fcc15ff4a041dc9ba11123c3f0d2666217a5f0fcf9222b55fa \
+            scan --config=/results/config.toml --format=json --output=/results/old-results.json -r ./
+          scan_status=$?
+          set -e
+          [[ "$scan_status" == 0 || "$scan_status" == 1 ]] || { echo "::error::OSV base engine failed ($scan_status)"; exit 1; }
+          jq -e 'type == "object" and (.results | type == "array")' "$RUNNER_TEMP/osv-results/old-results.json" >/dev/null
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.merge-sha }}
+          path: scan
+          persist-credentials: false
+
+      - name: Scan test-merge dependencies
+        env:
+          EXPECTED_SHA: ${{ inputs.merge-sha }}
+        run: |
+          set -euo pipefail
+          [[ "$(git -C scan rev-parse HEAD)" == "$EXPECTED_SHA" ]] || exit 1
+          set +e
+          docker run --rm \
+            --volume "$GITHUB_WORKSPACE/scan:/github/workspace:ro" \
+            --volume "$RUNNER_TEMP/osv-results:/results" \
+            --workdir /github/workspace \
+            ghcr.io/google/osv-scanner@sha256:afd838850ac1a0fcc15ff4a041dc9ba11123c3f0d2666217a5f0fcf9222b55fa \
+            scan --config=/results/config.toml --format=json --output=/results/new-results.json -r ./
+          scan_status=$?
+          set -e
+          [[ "$scan_status" == 0 || "$scan_status" == 1 ]] || { echo "::error::OSV test-merge engine failed ($scan_status)"; exit 1; }
+          jq -e 'type == "object" and (.results | type == "array")' "$RUNNER_TEMP/osv-results/new-results.json" >/dev/null
+          cp "$RUNNER_TEMP/osv-results/old-results.json" old-results.json
+          cp "$RUNNER_TEMP/osv-results/new-results.json" new-results.json
+
+      - name: Report new vulnerabilities
+        uses: google/osv-scanner-action/osv-reporter-action@9a96bc4d2b09685b6142bcfe25a3dc17cb2d7347 # v2.7.0
+        with:
+          scan-args: |-
+            --output=results.sarif
+            --old=old-results.json
+            --new=new-results.json
+            --gh-annotations=true
+            --fail-on-vuln=true
+
+      - name: Validate protected SARIF
+        run: |
+          set -euo pipefail
+          test ! -L results.sarif
+          jq -e '.version == "2.1.0" and (.runs | type == "array" and length == 1) and
+            .runs[0].tool.driver.name == "osv-scanner" and (.runs[0].results | type == "array")' results.sarif >/dev/null
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: protected-osv-sarif-${{ github.run_id }}-${{ github.run_attempt }}
+          path: results.sarif
+          if-no-files-found: error
+          retention-days: 1
+
+  protected-pr-publish:
+    needs: [protected-pr-scan]
+    if: ${{ inputs.protected-pr && needs.protected-pr-scan.result == 'success' }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.merge-sha }}
+          path: scan
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: protected-osv-sarif-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/protected-osv-sarif
+
+      - name: Pin protected OSV category
+        env:
+          SARIF_PATH: ${{ runner.temp }}/protected-osv-sarif/results.sarif
+          EXPECTED_SHA: ${{ inputs.merge-sha }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ && "$(git -C scan rev-parse HEAD)" == "$EXPECTED_SHA" ]] || exit 1
+          test -f "$SARIF_PATH" && test ! -L "$SARIF_PATH"
+          jq -e '.version == "2.1.0" and (.runs | type == "array" and length == 1) and
+            .runs[0].tool.driver.name == "osv-scanner" and (.runs[0].results | type == "array")' "$SARIF_PATH" >/dev/null
+          jq '.runs[0].automationDetails.id = ".github/workflows/osv-scanner.yml:osv-scan"' \
+            "$SARIF_PATH" > "$RUNNER_TEMP/osv-protected.sarif"
+
+      - name: Upload protected OSV SARIF
+        id: upload-sarif
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: ${{ runner.temp }}/osv-protected.sarif
+          category: .github/workflows/osv-scanner.yml:osv-scan
+          checkout_path: ${{ github.workspace }}/scan
+          ref: refs/pull/${{ github.event.pull_request.number }}/merge
+          sha: ${{ inputs.merge-sha }}
+
+      - name: Write protected OSV upload evidence
+        env:
+          SARIF_ID: ${{ steps.upload-sarif.outputs.sarif-id }}
+        run: |
+          set -euo pipefail
+          test -n "$SARIF_ID" || { echo "::error::OSV did not return a SARIF upload ID"; exit 1; }
+          jq -n --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg category '.github/workflows/osv-scanner.yml:osv-scan' --arg sarif_id "$SARIF_ID" \
+            '{run_id:$run_id,run_attempt:$run_attempt,category:$category,sarif_id:$sarif_id}' \
+            > "$RUNNER_TEMP/scan-evidence-osv.json"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scan-evidence-${{ github.run_id }}-${{ github.run_attempt }}-osv
+          path: ${{ runner.temp }}/scan-evidence-osv.json
+          if-no-files-found: error
+          retention-days: 1

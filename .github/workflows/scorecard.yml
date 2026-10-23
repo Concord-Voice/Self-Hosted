@@ -1,0 +1,91 @@
+# OpenSSF Scorecard — supply-chain posture scoring → SARIF → Code Scanning
+# (ADR-0017 End-state A, #1428; reintroduced after the PR #837 removal).
+# Private-repo posture: publish_results is false (forced for private repos
+# anyway — no OpenSSF API publishing, no badge), NO PAT/repo_token, and the
+# Branch-Protection probe has reduced visibility without a PAT (#837 caveat).
+# id-token: write is deliberately ABSENT: it exists solely for OIDC publishing
+# to the OpenSSF REST API, which publish_results: false disables (least
+# privilege; re-add only if the repo goes public and publishing is enabled).
+# No pull_request trigger: Scorecard scores repo posture, not PR diffs —
+# first real run happens post-merge on push:main.
+name: Scorecard supply-chain security
+
+on:
+  # Re-score when branch-protection settings change (default branch only).
+  branch_protection_rule:
+  # The weekly posture refresh ('0 15 * * 0', #1428) is retired: nightly-ci.yml
+  # scores main every night, which keeps the Maintained check fresher than a
+  # Sunday cron did. See ADR-0018's 2026-08-26 amendment.
+  #
+  # Invoked by nightly-ci.yml every night, and by main-ci.yml on a `risk: hotfix`
+  # merge — both with `needs: ioc` (#1477).
+  workflow_call:
+
+concurrency:
+  group: scorecard-${{ github.ref }}
+  cancel-in-progress: true
+
+# Workflow-level permissions = least-privilege `contents: read` ONLY (#1494):
+# a broad `read-all` here made every workflow_call invocation startup-fail
+# (the caller job's grant must be a superset of the called workflow's requested
+# permissions, and read-all exceeds main-ci's scoped grant). A narrow
+# `contents: read` is a subset of main-ci's scorecard-job grant, so it satisfies
+# the superset rule while declaring a top-level default for Scorecard's
+# TokenPermissions check. It is inert for the analysis job either way — job-level
+# permissions REPLACE workflow-level (#1462).
+permissions:
+  contents: read
+
+jobs:
+  analysis:
+    name: Scorecard analysis
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    # Scorecard only supports the default branch; guard non-default refs
+    # (e.g., a branch_protection_rule event on a non-default branch rule).
+    if: github.event.repository.default_branch == github.ref_name
+    permissions:
+      # Needed to upload the results to the code-scanning dashboard.
+      security-events: write
+      # Private repository: checkout + run-status reads for upload-sarif.
+      contents: read
+      actions: read
+      # PRIVATE-REPO requirement (#1462): job-level permissions REPLACE the
+      # workflow-level read-all (they do not merge). Scorecard's GraphQL
+      # probes against a private repo need these read scopes — ListCommits
+      # reads commit→associated-PR data (pull-requests), other probes read
+      # issues/checks. Without them the auto-issued GITHUB_TOKEN gets
+      # "Resource not accessible by integration" (founding failure: run
+      # 27334148048, the first post-merge push:main run of #1428).
+      issues: read
+      pull-requests: read
+      checks: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Run analysis
+        uses: ossf/scorecard-action@fa7117db83c52d787ae5a89f350999701505d78e # v2.5.0
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          # Private repositories: always false regardless of value; set
+          # explicitly per issue #1428 / PR #837 private-repo posture.
+          publish_results: false
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: SARIF file
+          path: results.sarif
+          retention-days: 5
+
+      - name: Upload to code-scanning
+        # first-party, SHA-pinned for Alpha Code Scanning Gate (#1431).
+        # Keep the trailing version comment bare: dependabot only rewrites that
+        # exact shape, so an annotated one silently rots on every bump (#2309).
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: results.sarif
+          category: scorecard

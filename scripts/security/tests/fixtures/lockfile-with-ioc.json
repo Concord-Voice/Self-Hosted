@@ -1,0 +1,19 @@
+{
+  "name": "fixture-app",
+  "version": "0.0.1",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "fixture-app",
+      "version": "0.0.1",
+      "dependencies": {
+        "fixture-malicious-package": "^1.0.0"
+      }
+    },
+    "node_modules/fixture-malicious-package": {
+      "version": "1.0.0-poisoned",
+      "resolved": "https://registry.npmjs.org/fixture-malicious-package/-/fixture-malicious-package-1.0.0-poisoned.tgz"
+    }
+  }
+}

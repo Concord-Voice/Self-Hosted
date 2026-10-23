@@ -1,0 +1,17 @@
+# Synthetic fixture: a complete ${{ ... }} token sitting inside a bash
+# comment within a run: block. The GHA expression parser scans run:
+# block content for ${{ ... }} substrings regardless of bash-comment
+# semantics — it doesn't know bash, just sees the token. If the token
+# itself is well-formed this may dispatch successfully; if not, dispatch
+# fails. The lint flags any such token-in-comment to prevent the bug class.
+name: bad-token-in-comment
+on: [workflow_dispatch]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          echo "ok"
+          # next line: ${{ env.OUTDATED_REF }}
+          echo "done"

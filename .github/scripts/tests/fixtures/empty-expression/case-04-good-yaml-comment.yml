@@ -1,0 +1,18 @@
+# Synthetic fixture: a YAML comment OUTSIDE any run: block that itself
+# mentions the patterns. The GHA expression evaluator never sees YAML
+# comments, so this is harmless prose. Mirrors the real occurrences at
+# .github/workflows/sync-releases.yml:7 ("# (no direct ${{ }}") and
+# .github/workflows/build.yml:334 ("# uses runs-on: ${{ matrix.os }}").
+# The lint MUST NOT flag YAML-level comments.
+name: good-yaml-comment
+on: [workflow_dispatch]
+
+# Documentation: empty ${{ }} would be a bug, and ${{ env.X }} in a bash
+# comment would also be a bug — but writing about them in YAML is fine.
+
+jobs:
+  test:
+    # Another YAML comment: ${{ env.SOME_VAR }} (in YAML, not bash)
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "no expression tokens here at all"

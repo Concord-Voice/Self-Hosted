@@ -1,0 +1,17 @@
+# Synthetic fixture: a job whose own steps include actions/checkout
+# before the gh call. gh's cwd-detection succeeds. The lint MUST NOT flag.
+name: good-own-checkout
+on: [workflow_dispatch]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - uses: actions/checkout@v6
+      - name: file an issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create --title "Build failed" --body "see logs"

@@ -1,0 +1,140 @@
+{
+  "//": [
+    "Register of dependencies we deliberately hold at a chosen version rather than letting",
+    "them float — the documentation trail for 'a newer version exists and we are not taking",
+    "it yet, here is why'. Enforced by scripts/security/check-pin-exceptions.mjs, which fails",
+    "when a pin or a dependabot ignore: rule exists with no entry here, and warns when an",
+    "entry passes its review_by date.",
+    "",
+    "TWO KINDS live here, and the difference matters:",
+    "  kind=exact-pin  — the manifest declares an exact version (no ^ or ~). Dependabot still",
+    "                    proposes bumps; the pin only forces each one to arrive as a reviewable",
+    "                    PR instead of resolving silently on npm ci. Being at latest is normal.",
+    "  kind=held-back  — we are actively refusing an available newer version, normally via a",
+    "                    dependabot ignore: rule. These are the ones that rot: every entry MUST",
+    "                    carry a review_by, and the lint warns once it passes.",
+    "",
+    "This register does NOT cover two neighbouring cases that have their own files:",
+    "  - accepted vulnerability advisories -> <workspace>/.audit-allowlist.json",
+    "  - overrides forcing a consumer off its declared range -> <workspace>/.override-range-baseline.json",
+    "",
+    "Adding an entry is not approval. An exact pin on anything in the desktop signing path is",
+    "governed by ADR-0034; a held-back entry on a security-sensitive package (see",
+    "[internal]skills/weekly-deps/references/security-sensitive-packages.md) needs the same",
+    "scrutiny as an audit-allowlist acceptance."
+  ],
+  "exceptions": [
+    {
+      "kind": "exact-pin",
+      "ecosystem": "npm",
+      "workspace": ".github/tools/license-checker",
+      "package": "license-checker",
+      "pinned": "25.0.1",
+      "reason": "CI license policy uses a reviewed tool version and integrity-locked dependency tree. Dependabot may propose version updates; this is not a hold against newer versions.",
+      "authority": "Code Scanning alert 1609; [internal]specs/2026-10-17-ci-license-tool-token-permissions-design.md",
+      "recorded": "2026-10-17",
+      "review_by": "2027-01-17"
+    },
+    {
+      "kind": "exact-pin",
+      "ecosystem": "npm",
+      "workspace": "client/desktop",
+      "package": "@electron-forge/plugin-fuses",
+      "pinned": "8.0.1",
+      "reason": "Mutates security-sensitive Electron fuse bits during desktop packaging, before signing and notarization. Exact-pinned so a package that rewrites the executable cannot change under npm ci without a reviewed dependency bump.",
+      "authority": "#2468; [internal]specs/2026-08-27-2468-electron-content-protection-fuses-design.md; [internal]rules/electron.md § Package and capture hardening",
+      "recorded": "2026-08-27",
+      "review_by": "2027-08-27"
+    },
+    {
+      "kind": "exact-pin",
+      "ecosystem": "npm",
+      "workspace": "client/desktop",
+      "package": "@electron/fuses",
+      "pinned": "2.1.3",
+      "reason": "Defines and applies the fuse configuration written into packaged Electron executables. Exact-pinned so this signed-build input changes only through a reviewed dependency bump rather than silent range resolution.",
+      "authority": "#2468; [internal]specs/2026-08-27-2468-electron-content-protection-fuses-design.md; [internal]rules/electron.md § Package and capture hardening",
+      "recorded": "2026-08-27",
+      "review_by": "2027-08-27"
+    },
+    {
+      "kind": "exact-pin",
+      "ecosystem": "npm",
+      "workspace": "client/desktop",
+      "package": "app-builder-lib",
+      "pinned": "26.15.3",
+      "reason": "Build-time dependency inside the desktop SIGNING path (desktop-release environment, Azure Trusted Signing, Apple notarization). A build dependency that floats on npm ci is a supply-chain exposure, not a convenience question, so every version change must arrive as a reviewable dependabot PR triaged through /weekly-deps. Consumed by the locally-owned Forge NSIS and DMG makers (build/makerNsis.ts, build/makerDmg.ts). Explicitly: do NOT relax to a caret.",
+      "authority": "ADR-0034 (accepted by repo admin 2026-07-25); [internal]rules/electron.md § Windows packaging",
+      "recorded": "2026-07-25",
+      "review_by": "2027-07-25"
+    },
+    {
+      "kind": "exact-pin",
+      "ecosystem": "npm",
+      "workspace": "client/desktop",
+      "package": "@microsoft/eslint-formatter-sarif",
+      "pinned": "3.1.0",
+      "reason": "Produces the SARIF that eslint-sarif.yml uploads to GitHub Code Scanning. Installed --save-exact so the SARIF schema cannot drift underneath the upload step without a reviewed bump; a malformed or reshaped report degrades a merge-gated scanner rather than failing loudly.",
+      "authority": "[internal]plans/2026-06-11-1425-eslint-sarif.md (steps 1-3)",
+      "recorded": "2026-06-11",
+      "review_by": "2027-06-11"
+    },
+    {
+      "kind": "exact-pin",
+      "ecosystem": "npm",
+      "workspace": "client/desktop",
+      "package": "jose",
+      "pinned": "6.2.8",
+      "reason": "Verifies Apple and Google SSO ID tokens in the Electron main process (src/main/oauth/*/idTokenVerifier.ts) — an authentication trust boundary. Exact-pinned so every bump is a reviewed change rather than a silent range resolution; jose is on the /weekly-deps security-sensitive package list, which routes it to the specialist reviewers. NOTE this is an exact-pin, not a held-back: 6.2.9 published 2026-08-15 and is simply awaiting its normal Tuesday dependabot proposal.",
+      "authority": "#1486 (client-driven Apple OAuth with local JWKS verification); [internal]skills/weekly-deps/references/security-sensitive-packages.md",
+      "recorded": "2026-08-15",
+      "review_by": "2027-08-15"
+    },
+    {
+      "kind": "held-back",
+      "ecosystem": "docker",
+      "workspace": "infrastructure/docker/postgres",
+      "package": "postgres",
+      "pinned": "16.15-alpine",
+      "available": "18-alpine",
+      "reason": "A PostgreSQL major is a data migration, not an image-tag bump, and the one-line diff hides all of it. PGDATA initialised by 16 refuses to start under 18 (\"database files are incompatible with server\"), so every developer volume and production's — behind 133 applied migrations — needs pg_upgrade or dump/restore, and there is no upgrade runbook in [internal]. docker-compose.failover.yml:68 pins postgres:16-alpine DIRECTLY and runs pg_basebackup into continuous streaming replication, which requires identical majors and refuses rather than degrading. build.yml:293 tests against 16 and :943 names the 16 tag in the canary. Both docker-compose.yml:4 and docker-compose.production.yml:33 declare image: concordvoice-postgres:16-alpine, so bumping only the Dockerfile FROM ships an image whose tag says 16 and whose contents do not. PR #3210 was closed for exactly this; the ignore stops it regenerating every Tuesday. Lift when the upgrade is scheduled as its own piece of work — moving the compose tags, the failover replica, the CI service, the canary and a runbook in lockstep. PostgreSQL 16 is supported upstream until November 2028, so nothing forces the date.",
+      "authority": "#3210; [internal]rules/deployment.md § The pin-exception register",
+      "recorded": "2026-09-09",
+      "review_by": "2027-06-30"
+    },
+    {
+      "kind": "exact-pin",
+      "ecosystem": "npm",
+      "workspace": "[internal]workers/apple-sso-bridge",
+      "package": "wrangler",
+      "pinned": "4.143.1",
+      "reason": "wrangler is the CLI that authenticates to Cloudflare with CLOUDFLARE_MASTER_TOKEN and deploys this Worker. Exact-pinned so the binary holding a production account-wide credential cannot change under npm ci without a reviewed bump. PR #3284 made both deploy workflows run ./node_modules/.bin/wrangler instead of npx wrangler@<version>, so this pin is now what actually reaches production — before that the workflows fetched a separate, older version and the pin governed nothing.",
+      "authority": "#3292; PR #3284; [internal]rules/deployment.md § The pin-exception register; #3133 (align or remove the workflow-pinned transient Wrangler versions)",
+      "recorded": "2026-09-16",
+      "review_by": "2027-09-16"
+    },
+    {
+      "kind": "exact-pin",
+      "ecosystem": "npm",
+      "workspace": "[internal]workers/invite-landing",
+      "package": "wrangler",
+      "pinned": "4.143.1",
+      "reason": "wrangler is the CLI that authenticates to Cloudflare with CLOUDFLARE_MASTER_TOKEN and deploys this Worker. Exact-pinned so the binary holding a production account-wide credential cannot change under npm ci without a reviewed bump. PR #3284 made both deploy workflows run ./node_modules/.bin/wrangler instead of npx wrangler@<version>, so this pin is now what actually reaches production — before that the workflows fetched a separate, older version and the pin governed nothing.",
+      "authority": "#3292; PR #3284; [internal]rules/deployment.md § The pin-exception register; #3133 (align or remove the workflow-pinned transient Wrangler versions)",
+      "recorded": "2026-09-16",
+      "review_by": "2027-09-16"
+    },
+    {
+      "kind": "held-back",
+      "ecosystem": "docker",
+      "workspace": "infrastructure/deploy/tests",
+      "package": "ubuntu",
+      "pinned": "24.04",
+      "available": "25.10",
+      "reason": "Ubuntu interim releases (YY.10, odd-year YY.04) get 9 months of support, so a bump to one ships a deploy-test base image that is end-of-life within the year. #3879 proposed 25.10, past its July 2026 end of life, after #3842 (26.04) was closed with `@dependabot ignore ubuntu major version`. The ignore lists the interim tags explicitly because dependabot `versions:` cannot express non-LTS; LTS tags (24.04, 26.04, 28.04) still flow. Review when 27.10 nears: append the next interim tags, or retire the rule if the image moves off numeric tags.",
+      "authority": "#3879; #3842; [internal]rules/deployment.md § The pin-exception register",
+      "recorded": "2026-10-15",
+      "review_by": "2027-09-30"
+    }
+  ]
+}

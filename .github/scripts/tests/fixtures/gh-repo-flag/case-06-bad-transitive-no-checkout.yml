@@ -1,0 +1,23 @@
+# Synthetic fixture: a dependent job whose `needs:` chain has NO job
+# with actions/checkout. The lint MUST flag — the cascade-walk doesn't
+# find a checkout anywhere upstream, so the gh call still lacks context.
+# This exercises the transitive-needs walker to ensure it correctly
+# reports "no checkout in cascade" rather than misleadingly accepting
+# any presence of `needs:` as proof of context.
+name: bad-transitive-no-checkout
+on: [workflow_dispatch]
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "prepare, no checkout"
+
+  notify:
+    needs: prepare
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - run: |
+          gh issue create --title "Build failed" --body "see logs"

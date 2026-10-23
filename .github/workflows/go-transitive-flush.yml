@@ -1,0 +1,259 @@
+name: Refresh transitive Go module graph
+
+# Runs Tuesday 06:00 UTC. Dependabot's gomod ecosystem fires the same day
+# (`day: tuesday` in .github/dependabot.yml, no `time:` pinned) — its exact
+# fire time isn't guaranteed and may land before, during, or after our
+# 06:00 UTC slot. Timing-independence is structural via the contention
+# guard step below, NOT via this cron's choice; do not rely on "06:00
+# precedes Dependabot" as an invariant.
+#
+# CI re-trigger note (per Copilot review on #1228): PRs created by this
+# workflow are authored by `GITHUB_TOKEN`. Per `peter-evans/create-pull-request`
+# known limitation, `pull_request` workflows do NOT auto-trigger on these PRs.
+# Reviewers must push an empty commit (or close+reopen the PR) to run CI
+# before merging. See [internal]rules/backend.md § Dependency Hygiene for the
+# full triage path.
+#
+# That instruction is ALSO rendered into the PR body itself (see "Render PR
+# body" below). It used to live only here and in backend.md — i.e. everywhere
+# except the one artifact a reviewer actually reads — so the body presented an
+# unrunnable "green in CI" checkbox with no hint that CI had not run. Keep the
+# two copies in sync if either changes.
+#
+# Output PR is processed by /weekly-deps Wednesday review window.
+# See [internal]rules/backend.md § Dependency Hygiene.
+# Spec: [internal]specs/2026-05-28-1212-go-transitive-hygiene-design.md
+
+on:
+  schedule:
+    - cron: "0 6 * * 2"
+  workflow_dispatch:
+
+# Least-privilege default; the flush job elevates to the writes it needs
+# (peter-evans/create-pull-request: contents + pull-requests; the contention
+# guard's gh pr comment: pull-requests).
+permissions:
+  contents: read
+
+concurrency:
+  group: go-transitive-flush
+  cancel-in-progress: false
+
+jobs:
+  flush:
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: services/control-plane/go.mod
+          cache-dependency-path: services/control-plane/go.sum
+
+      - name: Contention guard — defer if open Dependabot Go PRs exist
+        id: contention
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Query open Dependabot Go PRs against services/control-plane
+          OPEN_PRS=$(gh pr list \
+            --search "head:dependabot/go_modules/services/control-plane" \
+            --state open \
+            --json number \
+            --jq '[.[].number] | join(" ")')
+
+          if [ -z "$OPEN_PRS" ]; then
+            echo "No open Dependabot Go PRs. Proceeding."
+            echo "deferred=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Open Dependabot Go PRs detected: $OPEN_PRS"
+          echo "deferred=true" >> "$GITHUB_OUTPUT"
+
+          TODAY=$(date -u +%Y-%m-%d)
+          MARKER="<!-- go-transitive-flush-deferral-${TODAY} -->"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          # Render deferral comment body to a tempfile (heredoc-to-file pattern;
+          # avoids multi-line bash strings breaking YAML literal-block indentation).
+          # Intentionally generated ONCE before the per-PR loop — the body has no
+          # per-PR substitutions, so reusing the same file for every PR in the loop
+          # is correct. If future maintainers add per-PR substitution, move the
+          # cat-heredoc INSIDE the loop.
+          cat > /tmp/deferral-comment.md <<DEFERRAL
+          ${MARKER}
+
+          \`go-transitive-flush\` workflow deferred this week's run — this branch is open against \`services/control-plane/go.sum\`, which would conflict with a parallel transitive-flush PR. Will re-run next Tuesday 06:00 UTC.
+
+          If you'd prefer to merge this PR first to unblock the next transitive-flush, no action needed — the workflow will re-check next week and proceed if your branch has merged or been closed.
+
+          — Run: ${RUN_URL}
+          DEFERRAL
+
+          # Idempotency: skip comment if a deferral was added in last 6 days (518400s)
+          for PR in $OPEN_PRS; do
+            RECENT=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
+              --jq '[.[] | select(.body | contains("<!-- go-transitive-flush-deferral-")) | select(.created_at | fromdateiso8601 > (now - 518400))] | length')
+
+            if [ "$RECENT" -gt 0 ]; then
+              echo "PR #${PR} already has a recent deferral comment. Skipping."
+              continue
+            fi
+
+            gh pr comment "$PR" --body-file /tmp/deferral-comment.md
+            echo "Added deferral comment to PR #${PR}."
+          done
+
+          echo "Exiting success-skip due to contention."
+          exit 0
+
+      - name: Refresh transitive Go module graph
+        id: refresh
+        if: steps.contention.outputs.deferred != 'true'
+        working-directory: services/control-plane
+        run: |
+          set -euo pipefail
+          echo "Running go get -u ./... && go mod tidy"
+          go get -u ./...
+          go mod tidy
+
+          # Stat the result for the PR body
+          if git diff --quiet go.mod go.sum 2>/dev/null; then
+            echo "No transitive updates available. Workflow will exit success-skip after PR-creation step skips."
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "Changes detected in go.mod / go.sum."
+            git diff --stat go.mod go.sum
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Render PR body
+        if: steps.contention.outputs.deferred != 'true' && steps.refresh.outputs.has_changes == 'true'
+        env:
+          # Passed via env rather than inlined into the script. `github.event_name` is
+          # a fixed enum and not attacker-controllable, but the env-block form is the
+          # repo-wide convention for context expressions inside `run:` and costs
+          # nothing to follow.
+          TRIGGER: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          # Render the REAL generation stamp. This was hardcoded as "Tuesday ... at
+          # 06:00 UTC", so every manual `workflow_dispatch` produced a body that
+          # misstated its own origin — wrong day-of-week, wrong time, and a
+          # Coordination section claiming a cron cadence that was not in play. The
+          # ad-hoc dispatch path is sanctioned (backend.md § Dependency Hygiene), so
+          # the body has to be able to describe it.
+          GEN_STAMP=$(date -u '+%A %Y-%m-%d at %H:%M UTC')
+
+          # Measure what `go mod tidy` actually did instead of asserting it. The
+          # "Cleanup of orphan modules" bullet used to be unconditional boilerplate
+          # describing something that usually had not happened.
+          GOMOD=services/control-plane/go.mod
+          # Every grep here is `|| true`-guarded, and that is load-bearing under
+          # `set -euo pipefail`: a grep matching nothing exits 1, pipefail promotes
+          # that to the pipeline, and `set -e` then kills the step BEFORE the body is
+          # written — so no PR is opened at all. The unguarded form died on any run
+          # where `go mod tidy` only removed modules (zero '+' lines), i.e. exactly
+          # the orphan-cleanup case these counts exist to report. Regression-tested
+          # by scripts/tests/test-go-transitive-flush-render.sh.
+          # Handles BOTH go.mod requirement forms: the indented block entry
+          # ("\tgithub.com/foo/bar v1.0.0") and the single-line directive
+          # ("require github.com/foo/bar v1.0.0"). Keying on whitespace after the
+          # diff marker matched only the block form and silently scored a
+          # single-line-require module graph as 0/0/0.
+          # After normalising the marker and any `require ` prefix, a requirement is
+          # exactly a line whose second field is a version — which also rejects
+          # `require (`, `)`, `module …`, `go …` and `toolchain …` without listing them.
+          mod_paths() { # $1 = extended regex selecting the diff marker ('^\+' or '^-')
+            git diff -- "$GOMOD" \
+              | { grep -E "$1" || true; } \
+              | { grep -vE '^(\+\+\+|---)' || true; } \
+              | sed -E 's/^[+-][[:space:]]*//; s/^require[[:space:]]+//' \
+              | awk '$2 ~ /^v[0-9]/ { print $1 }' \
+              | sort -u
+          }
+          ADDED=$(mod_paths '^\+')
+          REMOVED=$(mod_paths '^-')
+          N_BUMPED=$(comm -12 <(printf '%s\n' "$ADDED") <(printf '%s\n' "$REMOVED") | grep -c . || true)
+          N_NEW=$(comm -23 <(printf '%s\n' "$ADDED") <(printf '%s\n' "$REMOVED") | grep -c . || true)
+          N_ORPHANED=$(comm -13 <(printf '%s\n' "$ADDED") <(printf '%s\n' "$REMOVED") | grep -c . || true)
+
+          cat > /tmp/pr-body.md <<EOF
+          Automated refresh of the transitive Go module graph for \`services/control-plane\`.
+
+          Generated by \`.github/workflows/go-transitive-flush.yml\` (trigger: \`${TRIGGER}\`) on ${GEN_STAMP}.
+
+          ## What this PR contains
+
+          \`go get -u ./... && go mod tidy\` was run against the current \`main\`, producing
+          **${N_BUMPED} module(s) bumped, ${N_NEW} added, ${N_ORPHANED} orphaned module(s) removed**:
+          - Direct deps bumped to latest minor+patch
+          - Indirect deps that newer direct/indirect versions now require (MVS resolution)
+          - Orphan cleanup by \`go mod tidy\` (the count above is measured from the diff, not assumed)
+
+          ## ⚠ CI does not run on this PR until you re-trigger it
+
+          This PR is authored by \`GITHUB_TOKEN\`, and GitHub does not fire \`pull_request\`
+          workflows for PRs created that way — a known \`peter-evans/create-pull-request\`
+          limitation. \`pr-ci.yml\` therefore never runs here on its own, which makes the
+          first two checklist items below **unsatisfiable until you act**.
+
+          **Close and reopen this PR** (or push an empty commit) to run the full suite.
+
+          The only checks that appear without that step are scanners which do not depend on
+          the \`pull_request\` event. Do NOT read those few green marks as "CI is green" —
+          the build, race tests, integration suite, govulncheck and SonarCloud have not run.
+
+          ## Review checklist
+
+          - [ ] \`go test -race ./...\` is green in CI
+          - [ ] Integration suite is green in CI
+          - [ ] No major-version transitive crossings present (look for \`vX.Y.Z → vX+1.0.0\` in go.mod diff). If any present, manually inspect the consuming code for compatibility.
+          - [ ] Diff size is plausible (after the initial backlog flush, expect 5-15 modules/week; >50 = investigate)
+          - [ ] No new direct deps appeared in go.mod (they should only be bumped, not added)
+
+          ## Coordination
+
+          The contention guard ran before this PR was generated and verified no open Dependabot Go PRs against \`services/control-plane/\`. That guard runs on every invocation regardless of trigger, so the check is not tied to any particular day or time. If a Dependabot Go PR opens between this PR's creation and merge, expect a rebase comment from \`/weekly-deps\`.
+
+          ## Refs
+
+          - Mechanism rationale: \`[internal]rules/backend.md § Dependency Hygiene\`
+          - Triage workflow: \`/weekly-deps\` Phase 1
+          - Founding issue: #1212
+          EOF
+          echo "Rendered PR body to /tmp/pr-body.md"
+
+      - name: Open PR if changed
+        if: steps.contention.outputs.deferred != 'true' && steps.refresh.outputs.has_changes == 'true'
+        # SHA-pinned per supply-chain hardening (#847). Same SHA as refresh-ioc-list.yml.
+        # Upgrade procedure: `gh api repos/peter-evans/create-pull-request/git/refs/tags/vX.Y.Z`,
+        # replace SHA + comment.
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ github.token }}
+          # Pin BOTH identities. create-pull-request defaults `author` to
+          # `github.actor`, which on a workflow_dispatch run is whoever pressed the
+          # button — so `git log --format=%an` on main attributed a machine-generated
+          # `go get -u` result to a human, and did so nondeterministically (scheduled
+          # and dispatched runs resolved github.actor differently).
+          author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          committer: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          branch: chore/go-transitive-flush
+          delete-branch: true
+          title: "chore: refresh transitive Go module graph (services/control-plane)"
+          labels: "area: deps,area: control-plane,area: ci-cd,domain: developer-experience,routine: go-transitive-hygiene"
+          commit-message: "chore: refresh transitive Go module graph"
+          body-path: /tmp/pr-body.md
+          add-paths: |
+            services/control-plane/go.mod
+            services/control-plane/go.sum

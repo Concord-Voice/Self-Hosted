@@ -1,0 +1,24 @@
+# Synthetic fixture: gh call spanning multiple physical lines via
+# backslash continuation, with --repo absent from ALL continuation
+# lines. Exercises `join_continuations`: confirms it correctly joins
+# the continuation chain and the scanner sees a single logical command
+# missing --repo. The companion case-02-good-with-repo-flag.yml covers
+# the happy path; this fixture covers the inverse so future refactors
+# of the continuation logic can't regress silently on line-offset
+# semantics.
+name: bad-multiline-no-repo
+on: [workflow_dispatch]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: file an issue (multi-line, no --repo)
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --title "Build failed" \
+            --body "see logs"

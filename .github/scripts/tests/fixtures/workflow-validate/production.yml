@@ -1,0 +1,9 @@
+name: Test Fixture — Production
+on:
+  workflow_dispatch:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - run: echo "production deploy"

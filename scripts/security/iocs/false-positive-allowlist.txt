@@ -1,0 +1,14 @@
+# False-positive allowlist for the Shai-Hulud 2.0 IOC scanner.
+#
+# One package name per line. Comments with `#` (either end-of-line or on
+# their own line) describe the rationale. Blank lines are ignored.
+#
+# Adding an entry is CODEOWNERS-gated — security review required for every
+# edit. The escape should be used only when a legitimate package shares a
+# name with a listed IOC (e.g., post-recovery republishing, or a name
+# collision). See [internal]supply-chain-defense.md §FP workflow.
+#
+# Every entry should cite: the delisting source (if any), the date of
+# decision, and the reviewer.
+
+# (Initially empty — no confirmed false positives as of 2026-04-21.)

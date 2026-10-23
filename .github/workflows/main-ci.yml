@@ -1,0 +1,386 @@
+# Main CI — push:main orchestrator (ADR-0018 / #1477, epic #1470).
+#
+# Owns the push:main CI pipeline: IOC scan first (push mode — diff base from
+# github.event.before via IOC_DIFF_BASE), then the scanner push-legs, then a
+# build-desktop DISPATCH gated behind ALL scan verdicts (#2048/#2274 — the
+# standalone child run resolves the desktop-release environment secrets that
+# workflow_call paths lose, and owns release publication plus the release-asset
+# sync and public-mirror fan-out). It does NOT deploy: production deploys run
+# only from nightly-ci.yml's green `deploy` job (ADR-0018 deferred decision,
+# resolved 2026-10-21).
+#
+# Scanner exceptions (in-file triggers retained elsewhere):
+#   - osv-scanner.yml: standalone main/weekly and legacy or uncertain PR
+#     triggers; protected required-pr-build owns selected PR scans.
+#   - scorecard.yml: branch_protection_rule stays in-file.
+#
+# build-desktop gating: the former build-desktop push trigger was
+# path-filtered to the version manifest + the workflow itself (the release
+# path) — replicated here via the changes filter so ordinary merges do NOT
+# run six platform builds.
+name: Main CI
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  # Never cancel in-flight main scans/releases — rapid merges queue instead
+  # (a cancelled baseline upload or half-finished release is worse than
+  # latency; same rationale as the per-scanner push groups this replaces).
+  group: main-ci
+  cancel-in-progress: false
+
+# Least-privilege default; jobs elevate to the writes they need at job level.
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Detect release-path changes
+    # ADR-0013 §2 / ADR-0005 §3: ADR-0016 measured sub-minute parity;
+    # 2-vCPU Blacksmith is the half-cost tier for detect/verify work.
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      # `contents: read` alone cannot read PR metadata. The old inline hotfix
+      # lookup hit `commits/{sha}/pulls` with contents-only and swallowed the
+      # result via `2>/dev/null || echo ""`, so a 403 and a not-yet-written
+      # association were byte-identical — which is why the 2026-08-29 miss on
+      # #3013 cannot be attributed to one cause or the other from the log.
+      pull-requests: read
+      issues: read
+    outputs:
+      # Path match OR pending-release probe. The probe is the SOLE detector
+      # of a pending version bump — the path filter no longer lists
+      # client/desktop/package.json (see the filter block below) — as well as
+      # the liveness backstop for the dispatch topology (#2274): if a gated
+      # dispatch fails its SHA binding because main advanced mid-pipeline,
+      # the untagged version re-arms the release path on every successor push
+      # THAT TRIGGERS THIS WORKFLOW, until the release lands. Mirrors
+      # detect-release's own tag-vs-version decision, so it never fires
+      # once the current version is tagged.
+      #
+      # That qualifier is load-bearing and was learned the hard way: a push
+      # carrying a CI-suppression marker in its commit body runs NO workflow
+      # at all, so it cannot re-arm — and main-cd's spa.env audit commit,
+      # which used to carry one, is precisely the push that lands ~1-2 min
+      # after a merge and advances HEAD past the commit this job just gated
+      # (~14 min of scan legs later). The backstop was therefore inert
+      # against the only push class that actually broke the binding, and
+      # desktop-v0.2.33/v0.2.34 both stranded untagged. The marker was
+      # removed in deploy-spa.sh; its recursion guard is now structural
+      # (spa.env matches no main-cd path filter). Do not describe this probe
+      # as covering "every push" — it covers every push that triggers CI.
+      #
+      # NARROWED AGAIN 2026-08-26 (ADR-0018 amendment): the dispatcher below is
+      # now also gated on `hotfix`, so on an ordinary merge this probe arms
+      # NOTHING here. It still runs, and its value still feeds `desktop-release`,
+      # but the release it arms is dispatched by nightly-ci.yml at 07:00 UTC.
+      # Liveness survives because the probe is VERSION-based, not push-based —
+      # it stays armed until desktop-v<version> is tagged, no matter how many
+      # pushes go by — and nightly-ci.yml runs the identical probe. The cost is
+      # latency: up-to-24h instead of next-merge. That was the accepted trade.
+      desktop-release: ${{ steps.filter.outputs.desktop-release == 'true' || steps.pending.outputs.pending == 'true' }}
+      # Whether THIS merge must cut a release now instead of waiting for the
+      # nightly. DERIVED on every push, never stored: resolve the merge commit
+      # to its PR and read the label. There is no flag to set and none to drop,
+      # so two hotfixes in flight cannot race a shared bit, and a re-run
+      # recomputes the same answer.
+      hotfix: ${{ steps.hotfix.outputs.hotfix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Push-mode paths-filter needs the previous ref locally; otherwise it
+          # falls back to an unauthenticated fetch after checkout.
+          fetch-depth: 0
+      # SHA-pinned per supply-chain hardening (#847). Matches the pins in
+      # build.yml / pr-ci.yml.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            # This filter covers the release workflow's own definition only,
+            # so a change to it still smokes the release path. Version-bump
+            # detection is the `pending` probe's job below, NOT this filter's.
+            #
+            # client/desktop/package.json is deliberately NOT listed, and was
+            # removed here: every dependabot bump to a desktop dependency edits
+            # that file (37 of 302 main commits in the 30 days to 2026-08-19),
+            # and each one armed a dispatch with nothing to release — the
+            # child's `Check version against tags` finds the tag already
+            # present and sets should_release=false. Those no-op dispatches
+            # still fail closed on `Verify dispatched SHA binding` whenever
+            # main advances inside this pipeline's ~14-min gate window, which
+            # reddened main three times consecutively on 2026-08-19 while a
+            # dependabot train was merging faster than that window.
+            #
+            # Dropping the path strands no release: the probe arms on the
+            # version-bump commit itself AND on every later push until the tag
+            # lands, so it strictly dominates the path match for that case. A
+            # path filter cannot tell a version bump from a dependency bump;
+            # the probe can, because it compares against the tag.
+            desktop-release:
+              - '.github/workflows/build-desktop.yml'
+      - name: Probe for a pending desktop release
+        id: pending
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          VERSION=$(node -p "require('./client/desktop/package.json').version")
+          AUTH_HEADER=$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 | tr -d '\n')
+          if GIT_CONFIG_COUNT=1 \
+            GIT_CONFIG_KEY_0='http.https://github.com/.extraheader' \
+            GIT_CONFIG_VALUE_0="AUTHORIZATION: basic ${AUTH_HEADER}" \
+            git ls-remote --exit-code origin "refs/tags/desktop-v${VERSION}" >/dev/null; then
+            echo "pending=false" >> "$GITHUB_OUTPUT"
+          else
+            status=$?
+            if [[ "$status" -ne 2 ]]; then
+              echo "::error::Failed to query desktop-v${VERSION} release tag (git ls-remote exit ${status})"
+              exit "$status"
+            fi
+            echo "::notice::desktop-v${VERSION} is untagged — release path stays armed"
+            echo "pending=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Resolve the hotfix label from the merged PR
+        id: hotfix
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          # Untrusted, so it stays in env and is only ever read as a value —
+          # never interpolated into a command. It is the race-free source: a
+          # squash merge carries "(#N)" in its subject, available here with no
+          # API call. Null on non-push events; the script falls back.
+          COMMIT_SUBJECT: ${{ github.event.head_commit.message }}
+        run: bash .github/scripts/resolve-hotfix-label.sh
+
+      - name: Report how the hotfix label was resolved
+        env:
+          RESOLUTION: ${{ steps.hotfix.outputs.resolution }}
+          # NOT named PATH. The obvious name for "how it was resolved" would
+          # overwrite the runner's PATH for this step and break every command
+          # in it, including the shell's own lookups.
+          RESOLVED_VIA: ${{ steps.hotfix.outputs.resolved_via }}
+          PR_NUMBER: ${{ steps.hotfix.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          # "Could not tell" is logged DIFFERENTLY from "no label". Collapsing
+          # the two is what hid the 2026-08-29 miss on #3013: the release
+          # deferred, the log said "No risk: hotfix", and that was
+          # indistinguishable from the author not having applied it.
+          case "${RESOLUTION}" in
+            undetermined)
+              echo "::warning::Could NOT determine the hotfix label for this commit — deferring the release to the nightly (fail-closed). This is not the same as the label being absent; if the merge was meant to be a hotfix, dispatch nightly-ci.yml." ;;
+            api-error)
+              # Split out of the `*)` arm, which would otherwise announce a
+              # hotfix on a run that never read a label. When the PR was located
+              # before the failure, RESOLVED_VIA names how — the difference
+              # between "the API is down" and "we never found the PR".
+              echo "::warning::Hotfix resolution hit a GitHub API error (PR #${PR_NUMBER:-unknown}, found via ${RESOLVED_VIA}) — deferring to the nightly (fail-closed). Check the changes job permissions before assuming the label was absent." ;;
+            no-label)
+              # `resolved_via` is the half `resolution` cannot carry here: it
+              # separates a race-free subject parse from a fallback that had to
+              # retry, on the outcome that happens on nearly every merge.
+              echo "::notice::No risk: hotfix on PR #${PR_NUMBER} (found via ${RESOLVED_VIA}) — any pending release defers to the nightly" ;;
+            *)
+              echo "::notice::risk: hotfix present on PR #${PR_NUMBER} (found via ${RESOLVED_VIA}) — release path runs on this merge" ;;
+          esac
+
+  # ─── Supply-chain IOC gate (IOC-first invariant, ADR-0018) ───────────
+  ioc:
+    name: ioc
+    needs: [changes]
+    # Runs ONLY on the hotfix release path. Ordinary merges are covered by
+    # nightly-ci.yml — every PR is already rebased onto current main before it
+    # merges (strict_required_status_checks_policy), so re-scanning the squash
+    # commit bought a fresh baseline and little else. See nightly-ci.yml header
+    # for the trade this accepts.
+    if: needs.changes.outputs.hotfix == 'true' && needs.changes.outputs.desktop-release == 'true'
+    uses: ./.github/workflows/ioc-scanning.yml
+    permissions:
+      contents: read
+      pull-requests: read
+
+  # ─── Scanner push-legs (moved from per-file push triggers, #1477) ────
+  eslint:
+    name: eslint
+    needs: [changes, ioc]
+    # Runs ONLY on the hotfix release path. Ordinary merges are covered by
+    # nightly-ci.yml — every PR is already rebased onto current main before it
+    # merges (strict_required_status_checks_policy), so re-scanning the squash
+    # commit bought a fresh baseline and little else. See nightly-ci.yml header
+    # for the trade this accepts.
+    if: needs.changes.outputs.hotfix == 'true' && needs.changes.outputs.desktop-release == 'true'
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/eslint-sarif.yml
+
+  codeql:
+    name: codeql
+    needs: [changes, ioc]
+    # Runs ONLY on the hotfix release path. Ordinary merges are covered by
+    # nightly-ci.yml — every PR is already rebased onto current main before it
+    # merges (strict_required_status_checks_policy), so re-scanning the squash
+    # commit bought a fresh baseline and little else. See nightly-ci.yml header
+    # for the trade this accepts.
+    if: needs.changes.outputs.hotfix == 'true' && needs.changes.outputs.desktop-release == 'true'
+    permissions:
+      contents: read
+      security-events: write
+      packages: read
+      actions: read
+    uses: ./.github/workflows/codeql.yml
+
+  govulncheck:
+    name: govulncheck
+    needs: [changes, ioc]
+    # Runs ONLY on the hotfix release path. Ordinary merges are covered by
+    # nightly-ci.yml — every PR is already rebased onto current main before it
+    # merges (strict_required_status_checks_policy), so re-scanning the squash
+    # commit bought a fresh baseline and little else. See nightly-ci.yml header
+    # for the trade this accepts.
+    if: needs.changes.outputs.hotfix == 'true' && needs.changes.outputs.desktop-release == 'true'
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/govulncheck.yml
+
+  scorecard:
+    name: scorecard
+    needs: [changes, ioc]
+    # Runs ONLY on the hotfix release path. Ordinary merges are covered by
+    # nightly-ci.yml — every PR is already rebased onto current main before it
+    # merges (strict_required_status_checks_policy), so re-scanning the squash
+    # commit bought a fresh baseline and little else. See nightly-ci.yml header
+    # for the trade this accepts.
+    if: needs.changes.outputs.hotfix == 'true' && needs.changes.outputs.desktop-release == 'true'
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+      # Private-repo GraphQL probes (#1462 — replace-not-merge semantics
+      # apply to the caller grant too).
+      issues: read
+      pull-requests: read
+      checks: read
+    uses: ./.github/workflows/scorecard.yml
+
+  # ─── Product-correctness suite + SonarCloud (restored on push:main, #1510) ───
+  # Per repo-admin decision (2026-06-14): build.yml + sonarcloud.yml run on
+  # EVERY merge to main so SonarCloud's main-branch analysis (dashboard,
+  # badges, issue list) stays current — reversing the #919 post-merge removal
+  # for the Sonar path. Mirrors pr-ci.yml's build -> sonar wiring; IOC-first
+  # per ADR-0018 (build installs/executes repo code).
+  build:
+    name: build
+    needs: [changes, ioc]
+    # Runs ONLY on the hotfix release path. Ordinary merges are covered by
+    # nightly-ci.yml — every PR is already rebased onto current main before it
+    # merges (strict_required_status_checks_policy), so re-scanning the squash
+    # commit bought a fresh baseline and little else. See nightly-ci.yml header
+    # for the trade this accepts.
+    if: needs.changes.outputs.hotfix == 'true' && needs.changes.outputs.desktop-release == 'true'
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/build.yml
+
+  # Fail-stop SonarCloud (ADR-0018 §Decision 3): default success() on
+  # `needs: build` means any failed build job skips the scan — no scan on
+  # partial coverage. On push:main the scanner runs in MAIN-branch context,
+  # refreshing the main dashboard/badges (not a PR analysis).
+  sonar:
+    name: sonar
+    needs: [changes, build]
+    # Runs ONLY on the hotfix release path. Ordinary merges are covered by
+    # nightly-ci.yml — every PR is already rebased onto current main before it
+    # merges (strict_required_status_checks_policy), so re-scanning the squash
+    # commit bought a fresh baseline and little else. See nightly-ci.yml header
+    # for the trade this accepts.
+    if: needs.changes.outputs.hotfix == 'true' && needs.changes.outputs.desktop-release == 'true'
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: read
+    uses: ./.github/workflows/sonarcloud.yml
+    with:
+      reusable-analysis: true
+      desktop-coverage: ${{ needs.build.outputs.desktop-coverage == 'true' }}
+      control-plane-coverage: ${{ needs.build.outputs.control-plane-coverage == 'true' }}
+      media-plane-coverage: ${{ needs.build.outputs.media-plane-coverage == 'true' }}
+      admin-coverage: ${{ needs.build.outputs.admin-coverage == 'true' }}
+      concord-bridge-coverage: ${{ needs.build.outputs.concord-bridge-coverage == 'true' }}
+    secrets:  # pragma: allowlist secret
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+  # ─── Desktop release path (after ALL scan verdicts) ──────────────────
+  # success() is load-bearing: with an explicit `if:` the implicit
+  # success()-on-needs is REPLACED, so it must be restated — a failed
+  # scanner must block the release dispatch (#1077 discipline, dispatcher side).
+  #
+  # Dispatch the standalone workflow instead of workflow_call: the trusted
+  # release-build/release jobs resolve signing secrets from the desktop-release
+  # environment, and workflow_call paths repeatedly lose environment secrets
+  # (#2048; third incident #2274 — the v0.2.29 release run resolved
+  # APPLE_CERTIFICATE_P12 / AZURE_* empty even though the environment OIDC
+  # claim validated, proving the environment binds but its secrets never merge
+  # into a called workflow's secrets context). Same dispatch-only topology as
+  # sync-releases below. EXPECTED_SHA binds the child to this run's gated
+  # commit: the child fails closed if main advanced past it, and the
+  # pending-release probe in `changes` re-arms EVERY successor push (not just
+  # release-path ones) until the version is tagged, so a binding failure is
+  # re-dispatched by the next merge's own gated run. The child run owns
+  # release publication, release-asset sync, and the public-mirror fan-out
+  # (its workflow_dispatch-gated jobs), so no fan-out jobs remain here.
+  build-desktop:
+    name: build-desktop
+    needs: [changes, ioc, eslint, codeql, govulncheck, scorecard, build, sonar]
+    # The complete gate set above still guards every release this job cuts —
+    # deployment.md:411's requirement is intact, because when hotfix is false
+    # those jobs skip and this one skips with them. A release is never
+    # dispatched from an ungated run; it is only ever deferred to the nightly.
+    if: success() && needs.changes.outputs.desktop-release == 'true' && needs.changes.outputs.hotfix == 'true'
+    permissions:
+      actions: write
+      checks: read
+    runs-on: ubuntu-latest
+    # 6-leg release-build caps at 60m, release at 20m, and the child's own
+    # sync/mirror watch at 45m — worst-case EXECUTION is ~135m, but runner
+    # queue/provisioning and the child queueing behind another main-ref
+    # release run (its concurrency group never cancels main runs) are
+    # unbounded, so 300m adds real headroom. If the watch still times out,
+    # the DETACHED child keeps running and may finish the release — check
+    # the child run's conclusion before re-dispatching anything. A child
+    # stuck PENDING can also be cancelled by a newer overlapping manual
+    # dispatch (1-pending-slot per group); the pending-release probe in
+    # `changes` re-arms the next push in every one of these cases.
+    timeout-minutes: 300
+    steps:
+      - name: Dispatch and await trusted desktop build
+        env:
+          GH_TOKEN: ${{ github.token }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          # ref=main is load-bearing: the desktop-release environment admits
+          # the main branch only, and the child builds exactly main HEAD.
+          RUN_ID=$(gh api --method POST \
+            -H "X-GitHub-Api-Version: 2026-03-10" \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/build-desktop.yml/dispatches" \
+            -F return_run_details=true \
+            -f ref=main \
+            -f "inputs[expected_sha]=$EXPECTED_SHA" \
+            --jq '.workflow_run_id')
+          test -n "$RUN_ID" || { echo "::error::Dispatch returned no workflow run ID"; exit 1; }
+          echo "::notice::Watching trusted desktop build run ${RUN_ID} for ${EXPECTED_SHA}"
+          gh run watch "$RUN_ID" --repo "$GITHUB_REPOSITORY" --compact --exit-status

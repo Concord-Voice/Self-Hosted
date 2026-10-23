@@ -1,0 +1,16 @@
+# Test fixture for issue #836 — safe form for env-block routing of
+# attacker-controlled metadata. actionlint MUST accept this without
+# triggering the expression rule.
+name: P14 case 05 — safe env-block form
+
+on:
+  issues:
+    types: [opened]
+
+jobs:
+  safe:
+    runs-on: ubuntu-latest
+    steps:
+      - env:
+          ISSUE_TITLE: ${{ github.event.issue.title }}
+        run: echo "Issue title is $ISSUE_TITLE"

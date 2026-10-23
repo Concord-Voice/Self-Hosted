@@ -1,0 +1,18 @@
+# Synthetic fixture: the type-agnostic correct form. `format('{0}', x)` forces
+# x to its string representation regardless of the declared input type, so
+# the subsequent `== 'true'` comparison works for both boolean and string
+# inputs. Lint MUST NOT flag this.
+name: good-format
+on:
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        type: boolean
+        default: false
+
+jobs:
+  deploy:
+    if: format('{0}', inputs.force_deploy) == 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "deploys when force_deploy=true"

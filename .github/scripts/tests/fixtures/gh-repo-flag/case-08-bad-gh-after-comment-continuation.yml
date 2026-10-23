@@ -1,0 +1,24 @@
+# Synthetic fixture: regression guard for the silent-clean bug fixed
+# in join_continuations(). A bash comment ending with `\` is followed
+# by a real gh call. Bash does NOT treat `\` at end of comment lines
+# as a line-continuation — the comment ends at \n regardless. Pre-fix,
+# the lint's join_continuations greedily joined the next line onto the
+# backslashed-comment and discarded the joined string as a comment,
+# silently swallowing the gh call and exiting clean. Post-fix, comment
+# lines are NOT continuation sources, so the gh call is correctly
+# recognized as a separate command and flagged for the missing --repo.
+name: bad-gh-after-comment-continuation
+on: [workflow_dispatch]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: comment-continuation regression guard
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          # disable temporarily for debugging \
+          gh issue create --title bug --body hello

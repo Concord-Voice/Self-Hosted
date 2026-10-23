@@ -1,0 +1,14 @@
+name: case-01-commented
+
+on: pull_request
+
+jobs:
+  example:
+    name: Example job
+    # always() is load-bearing: GHA propagates a `skipped` status of any
+    # `needs:` job through to dependent jobs unless `always()` overrides.
+    # See spec Invariant 8 for the full rationale.
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "ok"

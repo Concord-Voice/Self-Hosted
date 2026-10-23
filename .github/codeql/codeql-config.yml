@@ -1,0 +1,26 @@
+# CodeQL Advanced config — consumed by .github/workflows/codeql.yml
+name: "Concord CodeQL config"
+
+# Exclude the vendored Claude Design mobile-client prototype from CodeQL
+# analysis. It is browser-only mock code (never production, #204) and its
+# design runtime intentionally uses patterns CodeQL flags (e.g. a postMessage
+# handler with no explicit origin check → js/missing-origin-check). This
+# mirrors the prototypes/ excludes already applied to Semgrep (.semgrepignore)
+# and detect-secrets (.pre-commit-config.yaml); CodeQL honours its own config,
+# not .semgrepignore. Revisit/remove when the prototype is retired (#204).
+paths-ignore:
+  - prototypes
+
+# go/log-injection is replaced by a scoped copy of itself. The upstream query treats
+# every log/slog call as a sink, but slog's JSON and Text handlers escape control
+# characters at render time, so CWE-117 record forging cannot happen through them.
+# It produced 434 false positives, each dismissed by hand (see
+# [internal]codeql-false-positive-register.md, go/log-injection calibration note).
+# The scoped query keeps stdlib log.Printf and every other unstructured logger as
+# sinks. The workflow's `queries:` input is prefixed with `+` so this list ADDS to
+# security-extended instead of being ignored.
+queries:
+  - uses: Concord-Voice/Concord-Voice-Alpha/.github/codeql/queries/go/LogInjectionUnstructured.ql@main
+query-filters:
+  - exclude:
+      id: go/log-injection

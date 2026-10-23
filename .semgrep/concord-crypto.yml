@@ -1,0 +1,72 @@
+rules:
+  # ── Flag crypto.subtle usage outside designated crypto modules ────────
+  - id: concord-crypto-outside-module
+    patterns:
+      - pattern: crypto.subtle.$METHOD(...)
+    paths:
+      exclude:
+        - "client/desktop/src/renderer/utils/crypto/crypto.ts"
+        - "client/desktop/src/renderer/utils/crypto/attachmentCrypto.ts"
+        - "client/desktop/src/renderer/utils/crypto/attachmentChunkedCrypto.ts"
+        - "client/desktop/src/renderer/services/e2ee/e2eeService.ts"
+        - "client/desktop/src/renderer/services/e2ee/mediaEncryption.ts"
+        - "client/desktop/src/renderer/components/Auth/**"
+        - "client/desktop/src/renderer/components/Settings/RecoveryCircle.tsx"
+        - "client/desktop/tests/**"
+        - "**/*.test.ts"
+        - "**/*.test.tsx"
+        # Measurement tooling, same category as the test paths above: it drives
+        # the REAL production encrypt path and needs a CryptoKey to do so. Listed
+        # by exact filename rather than as scripts/** -- a blanket exemption for
+        # scripts would hand a free pass to production tooling that has no
+        # business calling crypto.subtle directly.
+        - "scripts/measure-attachment-image-path.mjs"
+    message: >-
+      crypto.subtle must only be used in designated crypto modules
+      (crypto.ts, attachmentCrypto.ts, attachmentChunkedCrypto.ts, e2eeService.ts,
+      mediaEncryption.ts).
+      Move cryptographic operations to the appropriate module and import from there.
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"
+      references:
+        - docs/policies/ai-generated-code-policy.md
+
+  # ── Flag deprecated cryptographic algorithms ──────────────────────────
+  - id: concord-crypto-deprecated-md5
+    pattern-either:
+      - pattern: createHash("md5")
+      - pattern: createHash('md5')
+    paths:
+      exclude:
+        - "**/*.test.*"
+    message: >-
+      MD5 is deprecated for integrity purposes. Use SHA-256 or SHA-384.
+      See [internal] "AI Code Generation Security Constraints".
+    languages: [typescript, javascript]
+    severity: WARNING
+    metadata:
+      category: security
+      cwe: "CWE-328: Use of Weak Hash"
+
+  - id: concord-crypto-deprecated-des-ts
+    pattern-either:
+      - pattern: |
+          "DES"
+      - pattern: |
+          "DES-CBC"
+      - pattern: |
+          "RC4"
+    paths:
+      exclude:
+        - "**/*.test.*"
+    message: >-
+      DES and RC4 are deprecated. Use AES-256-GCM.
+      See [internal] "AI Code Generation Security Constraints".
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: "CWE-327: Use of a Broken or Risky Cryptographic Algorithm"

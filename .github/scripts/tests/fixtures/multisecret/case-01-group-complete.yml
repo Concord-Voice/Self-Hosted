@@ -1,0 +1,14 @@
+name: Case 01 — complete apple-p12 AND-check
+
+on: [push]
+
+jobs:
+  sign:
+    runs-on: macos-latest
+    steps:
+      - name: Import signing cert
+        if: matrix.platform == 'darwin' && env.APPLE_CERTIFICATE_P12 != '' && env.APPLE_CERTIFICATE_PASSWORD != ''
+        env:
+          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: echo "would sign"

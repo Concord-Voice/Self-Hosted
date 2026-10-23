@@ -1,0 +1,10 @@
+name: Expression runner
+on: push
+jobs:
+  build:
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-22.04]
+    steps:
+      - run: echo ok

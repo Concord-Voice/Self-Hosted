@@ -1,0 +1,12 @@
+name: Test Fixture — Staging Only
+on:
+  workflow_dispatch:
+jobs:
+  deploy-staging:
+    runs-on: ubuntu-latest
+    environment: staging
+    steps:
+      - name: Use staging secret
+        env:
+          DB_URL: ${{ secrets.DATABASE_URL }}
+        run: echo "deploying to staging"

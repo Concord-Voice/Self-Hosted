@@ -1,0 +1,6 @@
+# Install-script allowlist for the Shai-Hulud 2.0 IOC scanner.
+#
+# RESERVED FOR FUTURE USE — the MVP of the scanner warns-only on new
+# install scripts (see spec #715 Q4) and does not consult this file.
+# If a future iteration promotes install-script warnings to blocks, this
+# allowlist will be the escape mechanism, with the same CODEOWNERS gate.

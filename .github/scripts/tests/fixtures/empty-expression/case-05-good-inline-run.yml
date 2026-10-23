@@ -1,0 +1,14 @@
+# Synthetic fixture: a single-line run: with a well-formed expression
+# token. Exercises the lint's single-line run: detection path (which
+# does NOT enter the in-run state machine but still scans content
+# in-place). Must not be flagged.
+name: good-inline-run
+on: [workflow_dispatch]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      VAL: ok
+    steps:
+      - run: echo "value=${{ env.VAL }}"

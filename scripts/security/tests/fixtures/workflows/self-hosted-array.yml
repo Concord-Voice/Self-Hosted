@@ -1,0 +1,7 @@
+name: Self-hosted array
+on: push
+jobs:
+  build:
+    runs-on: [self-hosted, linux, fips-validated]
+    steps:
+      - run: echo ok

@@ -1,0 +1,17 @@
+name: case-05-inline-comment
+
+on: pull_request
+
+jobs:
+  example:
+    name: Example job
+    needs: [precursor]
+    runs-on: ubuntu-latest
+    if: ${{ always() && github.event_name == 'pull_request' }}  # always(): load-bearing — overrides cascade-skip from needs
+    steps:
+      - run: echo "ok"
+  precursor:
+    name: Precursor
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "precursor"

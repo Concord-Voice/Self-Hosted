@@ -1,0 +1,14 @@
+# Synthetic fixture: a well-formed ${{ env.X }} token in a run: block.
+# This is the canonical pattern and must not be flagged.
+name: good-proper-token
+on: [workflow_dispatch]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    env:
+      MY_VAR: hello
+    steps:
+      - run: |
+          echo "value: ${{ env.MY_VAR }}"
+          echo "non-empty token, no comment"

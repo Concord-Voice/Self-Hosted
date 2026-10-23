@@ -1,0 +1,9 @@
+{
+  "name": "@concord-voice/license-checker-tool",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned license checker used by CI",
+  "devDependencies": {
+    "license-checker": "25.0.1"
+  }
+}
