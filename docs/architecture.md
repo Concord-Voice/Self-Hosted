@@ -1842,6 +1842,7 @@ Concord/
 │   ├── src/renderer/         # React app (stores/, services/, components/, hooks/)
 │   ├── src/shared/           # Cross-process types (clientBehavior, spaIpcTypes, spaUrlPattern)
 │   └── src/constants/        # Typed constants + build-time generators
+├── client/mobile/            # React Native iOS/Android client (pre-alpha; native/ConcordCrypto crypto pod)
 ├── services/
 │   ├── control-plane/        # Go backend (generated internal-package count; migrations/)
 │   │   ├── internal/erasureclear/  # Authenticated account-erasure audience batches
