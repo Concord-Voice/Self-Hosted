@@ -137,6 +137,7 @@ jobs:
               - 'services/control-plane/**'
               - 'scripts/authority-vectors/**'
               - 'docs/design/trusted-recovery-v2-vectors.json'
+              - 'packages/protocol/src/renderer/stores/voice/audioQualityTiers.ts'
               - 'scripts/test-tools/nats-server.sh'
             media-plane:
               - 'services/media-plane/**'
