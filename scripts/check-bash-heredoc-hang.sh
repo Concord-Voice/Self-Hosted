@@ -58,6 +58,6 @@ if affected "$os" "$major" "$minor" "$patch"; then
     "heredocs that size, so the hooks are refused rather than risk a silent hang." \
     "Upgrade the bash first on your PATH, then retry:" \
     "  brew upgrade bash" \
-    "Details: internal development reference omitted" >&2
+    "Details: internal issue #3426 (macOS bash heredoc hang)" >&2
   exit 1
 fi

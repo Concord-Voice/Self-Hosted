@@ -122,7 +122,7 @@ jobs:
           queries: +security-extended
           # Excludes the vendored prototypes/ tree (browser-only design mocks,
           # #204) from analysis — mirrors the Semgrep/detect-secrets excludes.
-          config-file: remote=Concord-Voice/Concord-Voice-Alpha@main:.github/codeql/codeql-config.yml
+          config-file: remote=Concord-Voice/Self-Hosted@main:.github/codeql/codeql-config.yml
 
       - name: Build all Go modules (manual build mode)
         if: matrix.language == 'go'

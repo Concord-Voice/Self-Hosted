@@ -110,7 +110,7 @@ export function composeSelection(filters, metadata, options) {
     workers: WORKER_KEYS.filter(key => filters[key] === 'true')
       .map(key => key === 'worker_apple' ? 'apple-sso-bridge' : 'invite-landing'),
     npm_workspaces: NPM_LICENSE_KEYS.filter(key => filters[key] === 'true')
-      .map(key => ({ license_desktop: 'client/desktop', license_media: 'services/media-plane',
+      .map(key => ({ license_desktop: '.', license_media: 'services/media-plane',
         license_admin: 'client/admin' })[key]),
     license_go: filters.license_go === 'true',
     coverage_required,

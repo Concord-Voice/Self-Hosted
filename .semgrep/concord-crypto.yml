@@ -5,14 +5,11 @@ rules:
       - pattern: crypto.subtle.$METHOD(...)
     paths:
       exclude:
-        - "client/desktop/src/renderer/utils/crypto/crypto.ts"
-        - "client/desktop/src/renderer/utils/crypto/attachmentCrypto.ts"
-        - "client/desktop/src/renderer/utils/crypto/attachmentChunkedCrypto.ts"
-        - "client/desktop/src/renderer/services/e2ee/e2eeService.ts"
-        - "client/desktop/src/renderer/services/e2ee/mediaEncryption.ts"
-        - "client/desktop/src/renderer/components/Auth/**"
-        - "client/desktop/src/renderer/components/Settings/RecoveryCircle.tsx"
-        - "client/desktop/tests/**"
+        - "packages/e2ee-client/src/renderer/utils/crypto/crypto.ts"
+        - "packages/e2ee-client/src/renderer/utils/crypto/attachmentCrypto.ts"
+        - "packages/e2ee-client/src/renderer/utils/crypto/attachmentChunkedCrypto.ts"
+        - "packages/e2ee-client/src/renderer/services/e2ee/mediaEncryption.ts"
+        - "packages/*/tests/**"
         - "**/*.test.ts"
         - "**/*.test.tsx"
         # Measurement tooling, same category as the test paths above: it drives

@@ -51,8 +51,6 @@ mkdir -p "$FIXTURE/docs" "$FIXTURE/services/control-plane/internal/example"
 printf 'old doc\n' > "$FIXTURE/docs/relevance.md"
 printf 'old source\n' > "$FIXTURE/services/control-plane/internal/example/deleted.go"
 printf 'old source\n' > "$FIXTURE/services/control-plane/internal/example/renamed-out.go"
-mkdir -p "$FIXTURE/infrastructure/github"
-printf 'secret consumer fixture\n' > "$FIXTURE/[internal]secrets-hygiene.json"
 mkdir -p "$FIXTURE/.github/workflows" "$FIXTURE/.github/actions/obsolete"
 printf 'name: retired\n' > "$FIXTURE/.github/workflows/removed-consumer.yaml"
 printf 'name: retired\n' > "$FIXTURE/.github/actions/obsolete/action.yaml"
@@ -166,12 +164,12 @@ if (label === 'admin-lock')
   assert.deepEqual(result.npm_workspaces, ['client/admin'], 'admin lockfile selects only its license workspace');
 if (label === 'admin-lock') assert.equal(result.license_go, false, 'npm manifest does not run Go attribution');
 if (label === 'license-tool-manifest' || label === 'license-tool-lock') {
-  assert.deepEqual(result.npm_workspaces, ['client/desktop', 'services/media-plane', 'client/admin'],
+  assert.deepEqual(result.npm_workspaces, ['.', 'services/media-plane', 'client/admin'],
     `${label}: license tool inputs select every npm license workspace`);
   assert.equal(result.license_go, false, `${label}: tool dependency changes do not select Go attribution`);
 }
 if (label === 'notice')
-  assert.deepEqual(result.npm_workspaces, ['client/desktop', 'services/media-plane', 'client/admin'],
+  assert.deepEqual(result.npm_workspaces, ['.', 'services/media-plane', 'client/admin'],
     'NOTICE/policy changes select all npm workspaces in fixed order');
 if (label === 'notice') assert.equal(result.license_go, true, 'NOTICE selects Go and npm attribution');
 if (label === 'go-import-reachability')
@@ -256,7 +254,7 @@ run_inventory_case() {
   local count="$1" path i
   reset_fixture
   for ((i = 1; i <= count; i++)); do
-    path="$FIXTURE/[internal]inventory/file-$i.md"
+    path="$FIXTURE/docs/inventory/file-$i.md"
     mkdir -p "$(dirname "$path")"
     printf 'inventory %s\n' "$i" > "$path"
   done
@@ -275,30 +273,29 @@ fi
 # Matcher cases use the real dorny action against exact Git diffs. Expected scanner
 # keys are intentionally explicit so accidental broadening also fails.
 run_policy_case historical-docs semgrep_community \
-  [internal]plans/2026-10-07-3587-pr-a1-contract-codec.md \
-  [internal]plans/2026-10-07-3587-pr-a2-contract-verification.md \
-  [internal]plans/2026-10-07-3587-pr0-migrationrunner.md \
-  [internal]reports/2026-10-07-2553-account-root-authority-vendors.md \
-  [internal]reports/2026-10-07-2553-key-custody-decision-brief.md \
-  [internal]reports/2026-10-07-2553-recovery-sheet-decisions.md \
-  [internal]reports/2026-10-07-2553-vendor-review.md \
-  [internal]specs/2026-10-07-2553-account-key-authority-design-of-record.md
+  docs/history/plans/2026-10-07-3587-pr-a1-contract-codec.md \
+  docs/history/plans/2026-10-07-3587-pr-a2-contract-verification.md \
+  docs/history/plans/2026-10-07-3587-pr0-migrationrunner.md \
+  docs/history/reports/2026-10-07-2553-account-root-authority-vendors.md \
+  docs/history/reports/2026-10-07-2553-key-custody-decision-brief.md \
+  docs/history/reports/2026-10-07-2553-recovery-sheet-decisions.md \
+  docs/history/reports/2026-10-07-2553-vendor-review.md \
+  docs/history/specs/2026-10-07-2553-account-key-authority-design-of-record.md
 run_policy_case docs-ordinary-push semgrep_community docs/ordinary.md
 run_policy_case docs-hotfix-push codeql_actions,codeql_go,codeql_js,eslint,govulncheck,osv,semgrep_custom,semgrep_community,semgrep_canary,sonar docs/hotfix.md
 run_policy_case docs-schedule codeql_actions,codeql_go,codeql_js,eslint,govulncheck,osv,semgrep_custom,semgrep_community,semgrep_canary,sonar docs/scheduled.md
 run_policy_case go-only codeql_go,govulncheck,osv,semgrep_custom,semgrep_community,sonar services/control-plane/internal/example/example.go
-run_policy_case ts-only codeql_js,eslint,semgrep_custom,semgrep_community,sonar client/desktop/src/renderer/example.ts
+run_policy_case ts-only codeql_js,eslint,semgrep_custom,semgrep_community,sonar packages/protocol/src/renderer/example.ts
 run_policy_case selfhost-docs semgrep_community docs/self-hosting/example.md
-run_policy_case selfhost-packaging guard-input scripts/public-mirror/assemble.sh
-run_policy_case eslint-csp-prod-strip codeql_js,eslint,semgrep_custom,semgrep_community,sonar client/desktop/scripts/csp-prod-strip.ts
-run_policy_case ignored-desktop-functions eslint-false 'client/desktop/functions/assets/[[path]].js'
+run_policy_case selfhost-packaging guard-input infrastructure/deploy/selfhost-storage.sh
+run_policy_case ignored-package-tests eslint-false packages/protocol/tests/unit/example.test.ts
 run_policy_case admin-tsconfig codeql_js,semgrep_community,sonar client/admin/tsconfig.json
 run_policy_case actions-only codeql_actions,codeql_js,semgrep_community,semgrep_canary .github/workflows/example.yml
 run_policy_case embedded-html codeql_go,codeql_js,govulncheck,semgrep_community,sonar services/control-plane/internal/email/templates/reset.html
 run_policy_case admin-html codeql_js,semgrep_community,sonar client/admin/index.html
 run_policy_case embedded-json codeql_js,semgrep_community,osv,sonar client/admin/package.json
 run_policy_case embedded-yaml codeql_js,codeql_actions,semgrep_community,semgrep_canary .github/workflows/reusable.yml
-run_policy_case desktop-manifest codeql_js,eslint,semgrep_community,sonar,osv client/desktop/package.json
+run_policy_case desktop-manifest codeql_js,eslint,semgrep_community,sonar,osv package.json
 run_policy_case admin-manifest codeql_js,semgrep_community,sonar,osv client/admin/package-lock.json
 run_policy_case media-manifest codeql_js,semgrep_community,sonar,osv services/media-plane/package.json
 run_policy_case control-plane-manifest codeql_go,govulncheck,osv,semgrep_community,sonar services/control-plane/go.sum
@@ -307,8 +304,6 @@ run_policy_case sonar-config semgrep_community,sonar sonar-project.properties
 run_policy_case ignored-prototype '' prototypes/mobile-client/example.ts
 run_policy_case sbom codeql_js,osv,semgrep_community docs/inventory.cdx.json
 run_policy_case scanner-config codeql_js,semgrep_custom,semgrep_community,semgrep_canary .semgrep/rules/example.yml
-run_policy_case apple-worker codeql_js,semgrep_custom,semgrep_community [internal]workers/apple-sso-bridge/src/index.ts
-run_policy_case invite-worker codeql_js,semgrep_custom,semgrep_community [internal]workers/invite-landing/src/index.ts
 run_policy_case admin-lock codeql_js,semgrep_community,sonar,osv client/admin/package-lock.json
 tool_input_failures=0
 run_policy_case license-tool-manifest codeql_js,osv,semgrep_community .github/tools/license-checker/package.json || tool_input_failures=1
@@ -327,18 +322,11 @@ run_policy_case workflow-lint-source-helper advisory-only .github/scripts/ci-sca
 run_policy_case workflow-lint-source-map advisory-only .github/ci/scan-relevance.yml
 run_policy_case workflow-lint-only advisory-only .github/scripts/workflow-lint-only.txt
 run_policy_case workflow-lint-legacy-changelog advisory-only CHANGELOG.md
-run_policy_case workflow-lint-legacy-script advisory-only scripts/lint-example.sh
 run_policy_case guard-go-toolchain semgrep_community scripts/check-go-toolchain.py scripts/test-check-go-toolchain.py
 run_policy_case toolchain-input-builder guard-input services/control-plane/Dockerfile
 run_policy_case toolchain-input-ops-builder guard-input services/control-plane/Dockerfile.ops-agent
 run_policy_case guard-openapi codeql_go,govulncheck,osv,semgrep_custom,semgrep_community,sonar scripts/api/check-openapi-coverage.sh services/control-plane/internal/stepup/openapi_contract_test.go
-run_policy_case guard-spa-env semgrep_community scripts/verify-spa-env.sh scripts/test-verify-spa-env.sh [internal]verify-spa-env.sh [internal]tests/test-verify-spa-env.sh
-run_policy_case guard-deployment semgrep_community scripts/check-compose-manifest-coverage.sh scripts/test-check-compose-manifest-coverage.sh
-run_policy_case deployment-input-main-cd guard-input .github/workflows/main-cd.yml
-run_policy_case deployment-input-west-workflow guard-input .github/workflows/deployment-access-west.yml
-run_policy_case deployment-input-fleet-helper guard-input .github/scripts/fleet_preflight.py
-run_policy_case deployment-input-provision-secrets guard-input .github/workflows/provision-secrets.yml
-run_policy_case guard-secrets-contract-catalog guard-input [internal]secrets-catalog.json
+run_policy_case guard-deployment semgrep_community scripts/test-admin-ui-production-wiring.sh
 run_policy_case guard-secrets-contract-workflow-consumer guard-input .github/workflows/provision-secrets.yml
 run_policy_case guard-secrets-contract-composite-consumer guard-input .github/actions/release/action.yml
 run_policy_case guard-secrets-contract-generic-workflow-yml guard-input .github/workflows/unlisted-consumer.yml
@@ -346,52 +334,19 @@ run_policy_case guard-secrets-contract-generic-workflow-yaml guard-input .github
 run_policy_case guard-secrets-contract-generic-composite guard-input .github/actions/unlisted/action.yml
 run_delete_case guard-secrets-contract-deleted-workflow guard-input .github/workflows/removed-consumer.yaml
 run_delete_case guard-secrets-contract-deleted-composite guard-input .github/actions/obsolete/action.yaml
-run_delete_case guard-secrets-contract-deleted-consumer guard-input [internal]secrets-hygiene.json
 run_policy_case guard-selfhost semgrep_community scripts/tests/test-install-selfhost.sh scripts/install-selfhost.sh
 run_policy_case guard-feature-wiring semgrep_community scripts/check-feature-wiring.sh
-run_policy_case feature-input-provision guard-input .github/workflows/provision-secrets.yml
 run_policy_case feature-input-openapi guard-input docs/api/openapi.yaml
 run_policy_case feature-input-compose guard-input docker-compose.production.yml
 run_policy_case feature-input-primary-nginx guard-input infrastructure/deploy/nginx/concordvoice.conf
-run_policy_case feature-input-failover-nginx guard-input infrastructure/docker/nginx/nginx.conf
 run_policy_case feature-input-admin-nginx guard-input infrastructure/deploy/nginx/admin-console.conf.template
-run_policy_case guard-adr-numbers semgrep_community scripts/check-adr-numbers.sh scripts/test-check-adr-numbers.sh
-run_policy_case guard-secrets-contract semgrep_community scripts/check-provision-secrets-source.sh scripts/test-check-provision-secrets-source.sh
-run_policy_case guard-dispatch-trust semgrep_community .github/scripts/lint-pr-release-trust.sh
 run_policy_case guard-go-test-contracts semgrep_community scripts/check-no-unscoped-redis-flush.sh scripts/test-check-no-unscoped-redis-flush.sh
-run_policy_case guard-review-contracts semgrep_community scripts/check-review-dispositions.sh scripts/test-check-review-dispositions.sh
-run_policy_case roster-input-claude guard-input [internal]repo-config.json
-run_policy_case roster-input-codex guard-input .codex/repo-config.json
-run_policy_case guard-tooling-mirrors semgrep_community scripts/sync-codex-tooling.py
-run_policy_case guard-graphify-contracts semgrep_community scripts/fetch-graphify-graph.sh scripts/test-fetch-graphify-graph.sh scripts/test-graphify-query-bootstrap.sh scripts/test-graphify-query-persistence.sh
-run_policy_case catalog-input-dev-lifecycle guard-input [internal]skills/dev-lifecycle/SKILL.md
-run_policy_case guard-native-ioc semgrep_community scripts/check-native-ioc-gate.sh scripts/test-check-native-ioc-gate.sh
-run_policy_case ioc-input-main-ci guard-input .github/workflows/main-ci.yml
 run_policy_case verifier-gate all-scanners .github/scripts/verify-pr-scan-results.py
 run_policy_case wrapper-gate all-scanners .github/workflows/required-pr-build.yml
-run_policy_case workflow-lint-source-migration guard-input [internal]apply-alpha-scan-relevance.sh
-run_policy_case desktop-input-authority-vectors desktop-input services/control-plane/internal/authoritycontract/testdata/vectors.json
-run_policy_case desktop-input-vector-generator desktop-input scripts/authority-vectors/gen.mjs
-run_policy_case spa-input-deploy-script guard-input [internal]deploy-spa.sh
-python3 - "$REPO_ROOT" <<'PY'
-import sys
-from pathlib import Path
-import yaml
-
-workflow = yaml.load((Path(sys.argv[1]) / '.github/workflows/pr-ci.yml').read_text(), Loader=yaml.BaseLoader)
-steps = workflow['jobs']['static-guards']['steps']
-catalog = next(step for step in steps if step.get('name') == 'Catalog/skill discipline regression tests')
-for family in ('graphify_contracts', 'review_contracts', 'tooling_mirrors'):
-    assert f'.advisory.{family}' in catalog['if'], f'catalog guard must run for {family} inputs'
-PY
+run_policy_case desktop-input-package desktop-input packages/e2ee-client/src/example.ts
 run_policy_case guard-sonar-profile semgrep_community,sonar scripts/sonar/check-narrowed-profile.sh scripts/sonar/test-check-narrowed-profile.sh
 run_policy_case guard-changelog semgrep_community .github/scripts/verify-changelog.sh .github/scripts/tests/verify-changelog.test.sh
 run_policy_case guard-dev-checks semgrep_community scripts/concord-dev.sh scripts/tests/test-concord-dev-args.sh
-run_policy_case guard-dev-checks-desktop-store dev-counts-only client/desktop/src/renderer/stores/countsFixture.ts
-run_policy_case guard-dev-checks-desktop-test dev-counts-only client/desktop/tests/unit/countsFixture.test.ts
-run_policy_case guard-dev-checks-desktop-src-test dev-counts-only client/desktop/src/renderer/components/countsFixture.test.tsx
-run_policy_case guard-dev-checks-desktop-theme dev-counts-only client/desktop/src/renderer/styles/index.css
-run_policy_case guard-dev-checks-desktop-package dev-counts-only client/desktop/package.json
 run_delete_case delete-in-scope codeql_go,govulncheck,osv,semgrep_custom,semgrep_community,sonar services/control-plane/internal/example/deleted.go
 run_transition_case rename-into-scope codeql_go,govulncheck,osv,semgrep_custom,semgrep_community,sonar docs/relevance.md services/control-plane/internal/example/renamed.go
 run_transition_case rename-out-scope codeql_go,govulncheck,osv,semgrep_custom,semgrep_community,sonar services/control-plane/internal/example/renamed-out.go docs/renamed.md
@@ -637,7 +592,7 @@ grep -qF "$BUNDLE_SHA" "$REPO_ROOT/.github/workflows/pr-ci.yml"
 
 # Regression for #2624: the shared native broker is executed by both workspaces.
 run_policy_case broker-shared-vector broker-input services/control-plane/internal/voicecommand/testdata/envelopes.json
-run_policy_case broker-unrelated-doc broker-input [internal]nats-resolver-unrelated.md
+run_policy_case broker-unrelated-doc broker-input docs/nats-resolver-unrelated.md
 run_policy_case broker-resolver broker-input scripts/test-tools/nats-server.sh
 run_policy_case broker-contract-suite broker-input scripts/test-nats-server-bootstrap.sh
 broker_routing_status=0

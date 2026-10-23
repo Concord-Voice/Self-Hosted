@@ -54,12 +54,10 @@ const DEPENDABOT = '.github/dependabot.yml';
 // means a sixth workspace never breaks the suite — and never silently un-tests it.
 export const WORKSPACES = [
   '.github/tools/license-checker',
-  'client/desktop',
+  // Self-Hosted: the root workspace (packages/*) takes the desktop slot.
+  '.',
   'client/admin',
   'services/media-plane',
-  '[internal]workers/apple-sso-bridge',
-  '[internal]workers/invite-landing',
-  'dev-tooling/concord-bridge',
 ];
 const REQUIRED = ['kind', 'ecosystem', 'workspace', 'package', 'pinned', 'reason', 'review_by'];
 const KINDS = new Set(['exact-pin', 'held-back']);
@@ -220,7 +218,8 @@ function updateBlocks(doc) {
 // No String() coercion: `updateBlocks` guarantees a non-empty string, and the
 // coercion is precisely what turned `directories: [null]` into the directory
 // "null". A type guarantee that is enforced upstream should not be re-faked here.
-const normDir = (d) => d.replace(/^\/+/, '').replace(/\/+$/, '');
+// Dependabot spells the repo root "/", which strips to ""; it is the "." workspace.
+const normDir = (d) => d.replace(/^\/+/, '').replace(/\/+$/, '') || '.';
 
 /**
  * Every directory a block names, whichever key spells it.

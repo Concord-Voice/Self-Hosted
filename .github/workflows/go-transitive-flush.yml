@@ -227,7 +227,7 @@ jobs:
 
           ## Refs
 
-          - Mechanism rationale: \`[internal]rules/backend.md § Dependency Hygiene\`
+          - Mechanism rationale: the backend Dependency Hygiene rule (internal development docs)
           - Triage workflow: \`/weekly-deps\` Phase 1
           - Founding issue: #1212
           EOF

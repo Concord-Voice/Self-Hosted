@@ -85,7 +85,7 @@ def main() -> int:
     module = args.root.resolve() / "services/control-plane"
     try:
         version = selected_version((module / "go.mod").read_text())
-        for filename in ("Dockerfile", "Dockerfile.ops-agent", "Dockerfile.redis-auth-controller", "Dockerfile.turn-secret-writer"):
+        for filename in ("Dockerfile", "Dockerfile.ops-agent", "Dockerfile.redis-auth-controller"):
             check_dockerfile(module / filename, version)
         if args.check_license_workflow:
             check_license_workflow(args.root.resolve() / ".github/workflows/license-check.yml")

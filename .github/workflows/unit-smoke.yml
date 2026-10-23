@@ -143,40 +143,8 @@ jobs:
           AGE_DAYS=$(( $(( $(date -u +%s) - $(date -u -d "$TAG_DATE" +%s) )) / 86400 ))
           echo "Buildtools base image pinned at $TAG_DATE (age: $AGE_DAYS days)"
           if [ "$AGE_DAYS" -gt 100 ]; then
-            echo "::warning file=services/media-plane/Dockerfile::Buildtools base image is $AGE_DAYS days old. Refresh per [internal]refresh-buildtools-base.md (quarterly cadence: 90 days)."
+            echo "::warning file=services/media-plane/Dockerfile::Buildtools base image is $AGE_DAYS days old. Refresh the buildtools base image (quarterly cadence: 90 days)."
           fi
-
-      # ── [internal] counts drift advisory (informational, non-blocking) ──
-      # Folded in from the former standalone `claude-md-counts-advisory` job
-      # (2026-08 CI cost audit). That job averaged 1.00 min across 2,163 runs —
-      # entirely per-job billing floor for one grep. It belongs here: dev-checks
-      # is the other unconditional, Docker-free, script-only job in this file.
-      #
-      # It also moves OFF ubuntu-latest. The old job's comment called that "the
-      # correct, cheaper choice" for a grep; the reasoning was right and the
-      # cost claim was not. Billing export 2026-08-22: GitHub-hosted
-      # `actions_linux` bills $0.006/min, Blacksmith 2-vCPU $0.004/min — the
-      # Blacksmith tier is a third cheaper, not more expensive. Blacksmith buys
-      # no speed for a grep, which was the true half of that comment.
-      #
-      # Surfaces [internal] "Key Counts" drift at the PR boundary: the warn-only
-      # pre-commit hook only fires for committers who run hooks locally, and the
-      # docs-reviewer agent is dispatched only when a PR touches doc surfaces —
-      # so a CODE-ONLY PR (e.g. a bare migration) can silently desync the
-      # counts. Non-blocking by design; the in-PR refresh is enforced by
-      # /dev-lifecycle Phase 4 + enhanced-pr-review §2.5.0, not by failing here.
-      - name: [internal] counts drift advisory
-        run: |
-          set -euo pipefail
-          # The wrapper always exits 0; it prints "[warn] ..." to stderr on real
-          # drift (date-only churn is suppressed inside the wrapper). No untrusted
-          # input is interpolated — the message below is a static string.
-          OUT="$(scripts/check-claude-md-counts-drift.sh 2>&1 || true)"
-          printf '%s\n' "$OUT"
-          if printf '%s' "$OUT" | grep -q '\[warn\]'; then
-            echo "::warning file=[internal]::[internal] Key Counts drifted from the live repo. Refresh in THIS PR: ./scripts/update-claude-md-counts.sh --apply (see /dev-lifecycle Phase 4 / enhanced-pr-review §2.5.0)."
-          fi
-
 
   # ─── concord-dev.sh smoke (real docker, infra + compose only) (#1113) ──
   # Smoke: bootstrap .env, validate compose config, pull infra images, bring

@@ -21,7 +21,7 @@ class GoToolchainGuardTest(unittest.TestCase):
         self.module = self.root / "services/control-plane"
         self.module.mkdir(parents=True)
         (self.module / "go.mod").write_text("module example.test/service\n\ngo 1.26.6\n\ntoolchain go1.27.1\n")
-        for filename in ("Dockerfile", "Dockerfile.ops-agent", "Dockerfile.redis-auth-controller", "Dockerfile.turn-secret-writer"):
+        for filename in ("Dockerfile", "Dockerfile.ops-agent", "Dockerfile.redis-auth-controller"):
             (self.module / filename).write_text("FROM golang:1.27.1-alpine@sha256:" + "a" * 64 + " AS builder\n")
         self.workflow = self.root / ".github/workflows/license-check.yml"
         self.workflow.parent.mkdir(parents=True)
@@ -47,7 +47,7 @@ class GoToolchainGuardTest(unittest.TestCase):
         self.assertEqual(self.run_guard().returncode, 0)
 
     def test_planted_mismatch_in_each_dockerfile_fails(self):
-        for filename in ("Dockerfile", "Dockerfile.ops-agent", "Dockerfile.redis-auth-controller", "Dockerfile.turn-secret-writer"):
+        for filename in ("Dockerfile", "Dockerfile.ops-agent", "Dockerfile.redis-auth-controller"):
             with self.subTest(filename=filename):
                 path = self.module / filename
                 original = path.read_text()
@@ -76,7 +76,7 @@ class GoToolchainGuardTest(unittest.TestCase):
         self.assertEqual(self.run_guard().returncode, 0)
 
     def test_missing_files_fail(self):
-        for filename in ("go.mod", "Dockerfile", "Dockerfile.ops-agent", "Dockerfile.redis-auth-controller", "Dockerfile.turn-secret-writer"):
+        for filename in ("go.mod", "Dockerfile", "Dockerfile.ops-agent", "Dockerfile.redis-auth-controller"):
             with self.subTest(filename=filename):
                 path = self.module / filename
                 original = path.read_text()

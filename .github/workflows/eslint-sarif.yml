@@ -1,7 +1,8 @@
 # ESLint → SARIF → Code Scanning (ADR-0017 End-state A, #1425).
-# Runs the workspace's pinned ESLint 10 flat config (client/desktop/
-# eslint.config.mjs) with the EXACT same scope as `npm run lint`
-# (`eslint . --ignore-pattern 'tests/**'`) so CI findings always match
+# Runs the root workspace's pinned ESLint 10 flat config (eslint.config.mjs,
+# covering packages/*) with the EXACT same scope as `npm run lint`
+# (`eslint packages vitest.config.ts --ignore-pattern 'packages/*/tests/**'`)
+# so CI findings always match
 # local runs, then uploads SARIF under category `eslint`.
 # push:main upload included so Code Scanning computes new-vs-existing
 # alert deltas for PRs (full-tree scan, unlike Semgrep's baseline diff).
@@ -40,7 +41,7 @@ jobs:
       actions: read
     defaults:
       run:
-        working-directory: client/desktop
+        working-directory: .
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -50,7 +51,7 @@ jobs:
         with:
           node-version: 24
           cache: 'npm'
-          cache-dependency-path: client/desktop/package-lock.json
+          cache-dependency-path: package-lock.json
 
       - name: Install dependencies
         run: npm ci
@@ -61,7 +62,7 @@ jobs:
           EXTERNAL_VERDICT: ${{ inputs.external-verdict }}
         run: |
           set +e
-          npx eslint . --config eslint.config.mjs --ignore-pattern 'tests/**' \
+          npx eslint packages vitest.config.ts --config eslint.config.mjs --ignore-pattern 'packages/*/tests/**' \
             --format @microsoft/eslint-formatter-sarif --output-file eslint-results.sarif
           scan_exit=$?
           set -e
@@ -126,7 +127,7 @@ jobs:
         id: upload-sarif
         uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
         with:
-          sarif_file: client/desktop/eslint-results.sarif
+          sarif_file: eslint-results.sarif
           category: eslint
 
       - name: Write protected ESLint upload evidence

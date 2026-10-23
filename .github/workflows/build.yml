@@ -84,9 +84,6 @@ on:
       admin-coverage:
         description: "true when the Admin Portal coverage artifact exists"
         value: ${{ jobs.admin.outputs.uploaded }}
-      concord-bridge-coverage:
-        description: "true when the concord-bridge coverage artifact exists"
-        value: ${{ jobs.concord-bridge.outputs.uploaded }}
 
 permissions:
   contents: read
@@ -122,19 +119,18 @@ jobs:
         id: filter
         with:
           filters: |
+            # Self-Hosted: the `desktop` key is the packages/* lane. The desktop
+            # app lives in the Desktop repo; its renderer's protocol and E2EE
+            # code moved here and kept the key, so the scan-selection contract
+            # and the protected Sonar job names stay unchanged (epic #3947).
             desktop:
-              - 'client/desktop/**'
+              - 'packages/**'
+              - 'package.json'
+              - 'package-lock.json'
+              - 'vitest.config.ts'
+              - 'eslint.config.mjs'
               - 'scripts/security/override-range-lint.mjs'
               - '.github/workflows/build.yml'
-              # Re-runs the desktop suite so the Go/TS purpose parity test
-              # (stepUpPurpose.parity.test.ts) sees a Go-only rename (#3455).
-              - 'services/control-plane/internal/stepup/purpose.go'
-              # Re-runs the desktop suite so the authority-vectors tests
-              # (scripts/authority-vectors/*.test.ts) see a vectors-only or a
-              # generator-only change (#3587 PR-A1): on a PR, pr-ci.yml computes
-              # desktop-changed and build.yml's own filter does not run.
-              - 'services/control-plane/internal/authoritycontract/testdata/vectors.json'
-              - 'scripts/authority-vectors/**'
             control-plane:
               - 'services/control-plane/**'
               - 'scripts/test-tools/nats-server.sh'
@@ -159,9 +155,9 @@ jobs:
               - 'scripts/test-tools/nats-server.sh'
               # Shared wire fixtures are exercised by the media-plane decoder.
               - 'services/control-plane/internal/voicecommand/testdata/**'
-              - 'client/desktop/src/renderer/services/voice/remoteVideoLayerPolicy.ts'
-              - 'client/desktop/src/renderer/stores/voice/audioQualityTiers.ts'
-              - 'client/desktop/src/renderer/services/voice/fecHeadroom.ts'
+              - 'packages/protocol/src/renderer/services/voice/remoteVideoLayerPolicy.ts'
+              - 'packages/protocol/src/renderer/stores/voice/audioQualityTiers.ts'
+              - 'packages/protocol/src/renderer/services/voice/fecHeadroom.ts'
             admin:
               - 'client/admin/**'
               - 'scripts/security/override-range-lint.mjs'
@@ -206,10 +202,9 @@ jobs:
         with:
           node-version: 24
           cache: 'npm'
-          cache-dependency-path: client/desktop/package-lock.json
+          cache-dependency-path: package-lock.json
 
       - name: Install dependencies
-        working-directory: client/desktop
         run: npm ci --ignore-scripts --no-audit --no-fund
 
       - name: Supply-chain post-install tripwire
@@ -217,11 +212,9 @@ jobs:
         run: scripts/security/scan-supply-chain-iocs.sh --include-node-modules --working-tree-only
 
       - name: Verify installed Undici floors
-        working-directory: client/desktop
-        run: node ../../scripts/security/override-range-lint.mjs --dir . --verify-installed-versions --minimum-version undici=6.28.1 --minimum-version undici=7.29.1 --minimum-version undici=8.10.2
+        run: node scripts/security/override-range-lint.mjs --dir . --verify-installed-versions --minimum-version undici=6.28.1 --minimum-version undici=7.29.1 --minimum-version undici=8.10.2
 
       - name: Run tests with coverage (shard ${{ matrix.shard }}/2)
-        working-directory: client/desktop
         env:
           NODE_OPTIONS: '--max-old-space-size=4096'
           SHARD_INDEX: ${{ matrix.shard }}
@@ -229,7 +222,7 @@ jobs:
 
       - name: Format check
         # Shard-guarded because formatting is tree-wide: `npm run format:check`
-        # globs all of src/, so one shard covers the package and a second run
+        # globs every package, so one shard covers the package and a second run
         # would be pure duplicate cost. Same pattern as Build and the audit
         # gate below.
         #
@@ -238,17 +231,14 @@ jobs:
         # commit touches. Files that drift while untouched were checked by
         # nothing, which is how three src/main files reached main unformatted.
         if: matrix.shard == 1
-        working-directory: client/desktop
         run: npm run format:check
 
       - name: Build
         if: matrix.shard == 1
-        working-directory: client/desktop
         run: npm run build
 
       - name: Dependency audit (allowlist-aware HIGH/CRITICAL gate)
         if: matrix.shard == 1
-        working-directory: client/desktop
         # Allowlist-aware replacement for bare `npm audit --audit-level=high`.
         # A bare audit gate is time-brittle: it queries the live advisory DB at
         # run time, so a newly-published HIGH advisory red-gates every PR with
@@ -267,90 +257,8 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: desktop-coverage-shard-${{ matrix.shard }}
-          path: client/desktop/coverage/lcov.info
+          path: coverage/lcov.info
           retention-days: 1
-
-  # ─── Electron host probe (ADR-0043 / #3195) ─────────────────────────
-  #
-  # PLACEMENT IS THE POINT, so do not "tidy" this into native-audiocap.yml.
-  # That workflow is NOT merge-gating -- the ruleset names only `Gitar` and
-  # `SonarCloud Code Analysis`. But pr-ci.yml wires `sonar: needs: [build]`, so a
-  # failed job in THIS file fails `build`, `sonar` never runs, and the required
-  # context never reports: the PR cannot merge. Moved out of here, the most
-  # load-bearing new assertion in #3195 becomes one a red run can be merged past.
-  #
-  # WHAT IT PROVES THAT NOTHING ELSE CAN. native-audiocap.yml's load step runs
-  # `node -e "require('./native/concord-audiocap')"` under PLAIN NODE, where the
-  # addon's D5 guard is gated on `process.versions.electron` and is therefore
-  # INERT. CI's only execution of the addon exercises the one branch a packaged
-  # build never takes, which makes every "no addon in main or the renderer" claim
-  # proven there vacuous. This job runs a minimal main-only Electron app -- no
-  # BrowserWindow, so no display server -- where the guard is live.
-  #
-  # LINUX RUNS ONE ASSERTION, AND THAT IS NOT A GAP TO FIX BY WIDENING ANYTHING.
-  # `resolveNativeAddonPath` supports only darwin and win32
-  # (client/desktop/src/main/nativeAddonPath.ts), so on Linux the host returns
-  # `unsupported-os` and never forks -- the fork-dependent assertions are
-  # structurally unreachable. A1 is the assertion that cannot be made anywhere
-  # else and it runs here; A2-A6 need a darwin or win32 runner, which build.yml
-  # does not currently have. The probe SKIPS them explicitly and says so in its
-  # output rather than passing silently. See #3195 for the follow-up.
-  electron-host-probe:
-    name: Desktop / Electron host probe (audiocap D5 guard)
-    needs: [changes]
-    if: >-
-      !failure() && !cancelled() &&
-      (format('{0}', inputs.desktop-changed) == 'true' || needs.changes.outputs.desktop == 'true' || github.event_name != 'pull_request')
-    runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        with:
-          node-version: 24
-          cache: 'npm'
-          cache-dependency-path: client/desktop/package-lock.json
-
-      - name: Install dependencies
-        working-directory: client/desktop
-        run: npm ci
-
-      - name: Supply-chain post-install tripwire
-        working-directory: ${{ github.workspace }}
-        run: scripts/security/scan-supply-chain-iocs.sh --include-node-modules --working-tree-only
-
-      # The probe imports the COMPILED host from dist/main, so the main leg must
-      # exist. Building only that leg keeps this job independent of the renderer
-      # build's cost.
-      - name: Build the main process
-        working-directory: client/desktop
-        run: npm run build:main
-
-      - name: Run the Electron host probe
-        working-directory: client/desktop
-        # `--ozone-platform=headless` IS REQUIRED, and the reasoning that said
-        # otherwise is worth keeping so it is not re-derived. This step first
-        # shipped with the comment "xvfb-run is NOT needed: the probe creates no
-        # BrowserWindow", which is true and irrelevant: Electron initializes its
-        # Ozone/Aura platform layer during app startup on Linux, BEFORE any window
-        # exists, so a windowless app still aborts with
-        #   ERROR:ozone_platform_x11.cc  Missing X server or $DISPLAY
-        #   ERROR:env.cc                 The platform failed to initialize. Exiting.
-        # and the process dies on SIGTRAP with no probe output at all.
-        #
-        # The claim was verified on darwin, which has no X11 path whatsoever, so
-        # the failure mode was structurally invisible to the local run that
-        # "proved" it. Headless Ozone does not weaken A1: the assertion reads
-        # `process.type` and `process.versions.electron`, neither of which the
-        # display platform touches.
-        #
-        # A renderer-dependent assertion (the AudioData offset and transfer checks)
-        # would need a REAL display and a darwin/win32 runner -- headless Ozone is
-        # not a substitute for either. Add both together.
-        run: ./node_modules/.bin/electron --ozone-platform=headless scripts/audiocap-host-probe
 
   # ─── Desktop Coverage Merge ─────────────────────────────────────────
   desktop-coverage-merge:
@@ -903,102 +811,6 @@ jobs:
         # on un-accepted HIGH/CRITICAL advisories; exceptions in
         # .audit-allowlist.json.
         run: bash "${GITHUB_WORKSPACE}/scripts/security/npm-audit-gate.sh" --allowlist .audit-allowlist.json
-
-  # ─── Concord Bridge MCP server (dev tooling, Node/TypeScript) ────────
-  # Path-gated INSIDE the job, not in `changes`: callers precompute that job's
-  # filters (pr-ci.yml scan-relevance) and its two-step shape is pinned by the
-  # SonarCloud path-skip sentinel, so a new component there would mean a new
-  # scan-selection key. A skipped run costs only the API-only filter step.
-  concord-bridge:
-    name: Concord Bridge / Test + Coverage
-    # Not in the force-coverage set (that input selects the four product
-    # suites). `uploaded` is 'true' only when the upload ran and found lcov;
-    # consumers also stop on a failed build. Reads nothing from `changes`.
-    outputs:
-      uploaded: ${{ steps.upload.outcome == 'success' && 'true' || 'false' }}
-    runs-on: blacksmith-2vcpu-ubuntu-2404
-    timeout-minutes: 10
-    steps:
-      # On pull_request paths-filter lists changed files through the API and
-      # needs no checkout. Every other event runs the suite unconditionally.
-      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
-        if: ${{ github.event_name == 'pull_request' }}
-        id: filter
-        with:
-          filters: |
-            concord-bridge:
-              - 'dev-tooling/concord-bridge/**'
-              - '.github/workflows/build.yml'
-
-      - name: Decide whether to run
-        id: gate
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          CHANGED: ${{ steps.filter.outputs.concord-bridge }}
-        run: |
-          if [[ "$EVENT_NAME" != pull_request || "$CHANGED" == true ]]; then
-            echo 'run=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'run=false' >> "$GITHUB_OUTPUT"
-          fi
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        if: ${{ steps.gate.outputs.run == 'true' }}
-        with:
-          persist-credentials: false
-
-      # The workflow can land before the package does (companion-PR order), and
-      # push/nightly runs are not path-filtered, so a missing package is a skip.
-      - name: Check package is present
-        if: ${{ steps.gate.outputs.run == 'true' }}
-        id: present
-        run: |
-          if [[ -f dev-tooling/concord-bridge/package-lock.json ]]; then
-            echo 'ok=true' >> "$GITHUB_OUTPUT"
-          else
-            echo 'ok=false' >> "$GITHUB_OUTPUT"
-          fi
-
-      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
-        if: ${{ steps.present.outputs.ok == 'true' }}
-        with:
-          node-version: 24
-          cache: 'npm'
-          cache-dependency-path: dev-tooling/concord-bridge/package-lock.json
-
-      - name: Install dependencies
-        if: ${{ steps.present.outputs.ok == 'true' }}
-        working-directory: dev-tooling/concord-bridge
-        # No dependency needs a lifecycle script, so none runs before the tripwire.
-        run: npm ci --ignore-scripts --no-audit --no-fund
-
-      - name: Supply-chain post-install tripwire
-        if: ${{ steps.present.outputs.ok == 'true' }}
-        working-directory: ${{ github.workspace }}
-        run: scripts/security/scan-supply-chain-iocs.sh --include-node-modules --working-tree-only
-
-      - name: Typecheck and build
-        if: ${{ steps.present.outputs.ok == 'true' }}
-        working-directory: dev-tooling/concord-bridge
-        run: npm run typecheck && npm run build
-
-      - name: Run tests with coverage
-        if: ${{ steps.present.outputs.ok == 'true' }}
-        working-directory: dev-tooling/concord-bridge
-        run: npm exec --no -- vitest run --coverage
-
-      - name: Upload coverage
-        # always() is load-bearing, as in the media-plane job: upload partial
-        # coverage even when vitest failed. The failed test step still fails
-        # the job, so `uploaded` never propagates from a failing run.
-        if: ${{ always() && steps.present.outputs.ok == 'true' }}
-        id: upload
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: concord-bridge-coverage
-          path: dev-tooling/concord-bridge/coverage/lcov.info
-          if-no-files-found: error
-          retention-days: 1
 
   # ─── Admin Portal (React/TypeScript) ────────────────────────────────
   admin:

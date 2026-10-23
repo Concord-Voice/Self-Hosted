@@ -1,4 +1,8 @@
-# Alpha-only organization ruleset workflow. GitHub loads this definition from
+# Self-Hosted organization ruleset workflow (ported from Alpha's, epic #3947).
+# BOOTSTRAP PINS: both reusable-workflow pins below name the Self-Hosted main
+# commit this port branched from, which predates pr-ci.yml. They must be
+# re-pinned to the merged port commit before an organization ruleset loads
+# this file; until then nothing runs it. GitHub loads this definition from
 # protected main, so a PR cannot skip or rewrite its required result job.
 # Event filters are ignored for ruleset-triggered runs. The sentinel branch
 # avoids a second ordinary run for each PR after this file reaches main.
@@ -20,7 +24,7 @@ jobs:
   pr-ci:
     name: Protected scan enforcement
     # Reviewed main commit keeps the reusable graph immutable in ruleset runs.
-    uses: Concord-Voice/Concord-Voice-Alpha/.github/workflows/pr-ci.yml@cb10844a7860092011f96b4607682ef2e6c55a80
+    uses: Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@e3955a041429065e701a3701953041b7dbd845b8
     with:
       trusted-source: true
       enforcement-only: true
@@ -71,7 +75,7 @@ jobs:
           COVERAGE_JSON: ${{ needs.pr-ci.outputs.coverage-uploads }}
         run: |
           set -euo pipefail
-          test "$WORKFLOW_REPOSITORY" = Concord-Voice/Concord-Voice-Alpha
+          test "$WORKFLOW_REPOSITORY" = Concord-Voice/Self-Hosted
           test "$(git -C protected rev-parse HEAD)" = "$WORKFLOW_SHA"
           mkdir -m 700 "$RUNNER_TEMP/protected-sonar-proof"
           jq -cn --argjson caller_run_id "$RUN_ID" --argjson caller_run_attempt "$RUN_ATTEMPT" \
@@ -124,7 +128,7 @@ jobs:
     needs: [pr-ci]
     # always() lets selected OSV run when another pr-ci scan fails; the result still verifies both.
     if: ${{ always() && contains(needs.pr-ci.outputs.report-selection, '"osv":true') }}
-    uses: Concord-Voice/Concord-Voice-Alpha/.github/workflows/osv-scanner.yml@06bc23adc8c82a1eb55e5d6988b42f42f463fb83
+    uses: Concord-Voice/Self-Hosted/.github/workflows/osv-scanner.yml@e3955a041429065e701a3701953041b7dbd845b8
     with:
       protected-pr: true
       base-sha: ${{ fromJSON(needs.pr-ci.outputs.report-selection).base_sha }}
@@ -279,7 +283,7 @@ jobs:
         run: |
           set -euo pipefail
           actual_sha="$(git -C protected rev-parse HEAD)"
-          if [[ "$WORKFLOW_REPOSITORY" != Concord-Voice/Concord-Voice-Alpha ||
+          if [[ "$WORKFLOW_REPOSITORY" != Concord-Voice/Self-Hosted ||
                 ! "$WORKFLOW_SHA" =~ ^[0-9a-fA-F]{40}$ || "$actual_sha" != "$WORKFLOW_SHA" ||
                 ! "$BASE_SHA" =~ ^[0-9a-fA-F]{40}$ || ! "$HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
             echo "::error::Protected verifier source or PR revisions are unavailable or invalid."

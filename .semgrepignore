@@ -7,7 +7,7 @@ out/
 # Dependencies and lockfiles
 node_modules/
 vendor/
-client/desktop/package-lock.json
+package-lock.json
 
 # Local/runtime artifacts
 .git/
@@ -18,9 +18,6 @@ temp/
 .semgrep/tests/
 # Workflow-injection regression fixtures (intentionally contain injection patterns — issue #836)
 .github/scripts/tests/fixtures/workflow-injection/
-# Test harnesses embed fake shell/Python programs that Semgrep cannot parse.
-[internal]tests/test-redis-managed-maintenance.sh
-[internal]tests/test-redis-managed-runtime.sh
 # Vendored Claude Design HTML/JS prototype exports — the design runtime uses
 # innerHTML templating, new Function() JSX compilation, and postMessage('*').
 # Browser-only mock code, never production (#204). Mirrors the pre-commit

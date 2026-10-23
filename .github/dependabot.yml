@@ -38,25 +38,13 @@ updates:
       - "area: deps"
       - "area: ci-cd"
 
-  # ─── Concord Bridge MCP Server ─────────────────────────────────────
+  # ─── Shared packages (root workspace: packages/*) ──────────────────
+  # Self-Hosted: the desktop client's entry, moved to the root workspace that
+  # holds the protocol and E2EE packages. Groups for packages this workspace
+  # does not use match nothing and are kept so the entry stays a copy of the
+  # desktop one (epic #3947).
   - package-ecosystem: "npm"
-    directory: "/dev-tooling/concord-bridge"
-    schedule:
-      interval: "weekly"
-      day: "tuesday"
-      time: "05:00"
-      timezone: "Etc/UTC"
-    commit-message:
-      prefix: "chore"
-    cooldown:
-      default-days: 7
-    labels:
-      - "area: deps"
-      - "area: dev-tooling"
-
-  # ─── Desktop Client (Electron + React) ─────────────────────────────
-  - package-ecosystem: "npm"
-    directory: "/client/desktop"
+    directory: "/"
     schedule:
       interval: "weekly"
       day: "tuesday"
@@ -223,7 +211,7 @@ updates:
           - "jsdom"
           - "msw"
       vitest-pair-security:
-        # Required sibling — see `vitest-pair-security` under /client/desktop for
+        # Required sibling — see `vitest-pair-security` under the root workspace for
         # why a group without `applies-to` is INVISIBLE to security updates.
         # Narrower than the `testing` group above on purpose: only the
         # exact-peer-pinned pair, not playwright/testing-library/jsdom/msw.
@@ -305,7 +293,7 @@ updates:
           - "vitest"
           - "@vitest/*"
       vitest-pair-security:
-        # Required sibling — see `vitest-pair-security` under /client/desktop for
+        # Required sibling — see `vitest-pair-security` under the root workspace for
         # why a group without `applies-to` is INVISIBLE to security updates.
         applies-to: security-updates
         dependency-type: "development"
@@ -316,53 +304,6 @@ updates:
         dependency-type: "development"
         patterns:
           - "@types/*"
-    versioning-strategy: increase
-
-  # ─── Cloudflare Workers (apple-sso-bridge, invite-landing) ─────────
-  # Neither directory appeared in this file at all, so both were unwatched —
-  # their `vitest` + `@vitest/coverage-istanbul` sat at ^4.1.11 while all three
-  # tracked npm manifests moved to ^5.0.0, and no CVE in any of their five
-  # devDependencies would have produced a PR. worker-ci.yml runs `npm ci` for
-  # each worker before `npm test`, so the same exact-peer split described under
-  # /services/media-plane above would fail install here before a test ran.
-  # Grouped from the outset rather than fixed after the fact.
-  #
-  # Both are production surface: deploy-apple-sso-worker.yml and
-  # deploy-invite-landing-worker.yml ship them to Cloudflare.
-  - package-ecosystem: "npm"
-    directories:
-      - "/[internal]workers/apple-sso-bridge"
-      - "/[internal]workers/invite-landing"
-    schedule:
-      interval: "weekly"
-      day: "tuesday"
-      time: "05:00"
-      timezone: "Etc/UTC"
-    commit-message:
-      prefix: "chore"
-    cooldown:
-      default-days: 7
-    labels:
-      - "area: deps"
-      - "area: ci-cd"
-    open-pull-requests-limit: 5
-    groups:
-      testing:
-        dependency-type: "development"
-        patterns:
-          - "vitest"
-          - "@vitest/*"
-      vitest-pair-security:
-        # Required sibling — see `vitest-pair-security` under /client/desktop for
-        # why a group without `applies-to` is INVISIBLE to security updates.
-        # Matters most here: these two directories had no coverage at all until
-        # this entry, so an advisory would arrive as the FIRST dependabot PR they
-        # ever received, and a one-sided one fails `npm ci` before `npm test`.
-        applies-to: security-updates
-        dependency-type: "development"
-        patterns:
-          - "vitest"
-          - "@vitest/*"
     versioning-strategy: increase
 
   # ─── Control Plane (Go) ────────────────────────────────────────────
@@ -383,30 +324,6 @@ updates:
     open-pull-requests-limit: 10
     groups:
       go-all:
-        patterns:
-          - "*"
-
-  # ─── Composite actions (not covered by the "/" github-actions block) ──
-  # Dependabot's github-actions ecosystem scans the workflows under the given
-  # directory; a composite action's own `uses:` pins live in its action.yml and
-  # need the directory named explicitly. .github/actions/track-deployment pins
-  # actions/github-script by SHA and was previously unwatched.
-  - package-ecosystem: "github-actions"
-    directory: "/.github/actions/track-deployment"
-    schedule:
-      interval: "weekly"
-      day: "tuesday"
-      time: "05:00"
-      timezone: "Etc/UTC"
-    commit-message:
-      prefix: "chore"
-    cooldown:
-      default-days: 7
-    labels:
-      - "area: deps"
-      - "area: ci-cd"
-    groups:
-      actions:
         patterns:
           - "*"
 
@@ -449,7 +366,6 @@ updates:
     directories:
       - "/services/control-plane"
       - "/services/media-plane"
-      - "/infrastructure/docker/buildtools"
     schedule:
       interval: "weekly"
       day: "tuesday"

@@ -1,5 +1,29 @@
 {
   "name": "concord-voice-self-hosted",
   "private": true,
-  "workspaces": ["packages/*"]
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage",
+    "typecheck": "npm run typecheck --workspaces",
+    "build": "npm run typecheck",
+    "lint": "eslint packages vitest.config.ts --ignore-pattern 'packages/*/tests/**'",
+    "format:check": "prettier --check \"packages/*/{src,tests}/**/*.ts\" vitest.config.ts eslint.config.mjs",
+    "format": "prettier --write \"packages/*/{src,tests}/**/*.ts\" vitest.config.ts eslint.config.mjs"
+  },
+  "devDependencies": {
+    "@eslint-community/eslint-plugin-eslint-comments": "^4.8.1",
+    "@microsoft/eslint-formatter-sarif": "3.1.0",
+    "@vitest/coverage-istanbul": "^5.0.5",
+    "eslint": "^10.13.0",
+    "eslint-config-prettier": "^10.1.8",
+    "globals": "^17.13.0",
+    "jsdom": "^30.1.3",
+    "prettier": "^3.9.10",
+    "typescript": "npm:@typescript/typescript6@^6.0.2",
+    "typescript-eslint": "^8.72.0",
+    "vitest": "^5.0.5"
+  }
 }

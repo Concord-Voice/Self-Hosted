@@ -32,8 +32,6 @@ name: License Check
 on:
   pull_request:
     paths:
-      - 'client/desktop/package.json'
-      - 'client/desktop/package-lock.json'
       - 'services/media-plane/package.json'
       - 'services/media-plane/package-lock.json'
       - 'client/admin/package.json'
@@ -53,8 +51,6 @@ on:
   push:
     branches: [main]
     paths:
-      - 'client/desktop/package.json'
-      - 'client/desktop/package-lock.json'
       - 'services/media-plane/package.json'
       - 'services/media-plane/package-lock.json'
       - 'client/admin/package.json'
@@ -171,12 +167,14 @@ jobs:
           if (!keys.every(key => raw[key] === 'true' || raw[key] === 'false')) {
             throw new Error('license workspace filter output is incomplete or malformed');
           }
-          const all = ['client/desktop', 'services/media-plane', 'client/admin'];
+          // Self-Hosted: the desktop key selects the packages/* workspace, which this
+          // repository does not distribute. The Desktop repo bundles it and gates
+          // its licences there, so the key selects no npm workspace here.
+          const all = ['services/media-plane', 'client/admin'];
           const workspaces = process.env.FULL_SCAN === 'true' ? all : keys.filter(key => raw[key] === 'true').map(key => ({
-            license_desktop: 'client/desktop',
             license_media: 'services/media-plane',
             license_admin: 'client/admin',
-          })[key]);
+          })[key]).filter(Boolean);
           fs.appendFileSync(process.env.GITHUB_OUTPUT, `workspaces=${JSON.stringify(workspaces)}\n`);
           NODE
 
@@ -190,7 +188,7 @@ jobs:
       contents: read
     env:
       LICENSE_ALLOWLIST: 'MIT;ISC;Apache-2.0;BSD-2-Clause;BSD-3-Clause;0BSD;BlueOak-1.0.0;Python-2.0;Unlicense;CC0-1.0;CC-BY-3.0;CC-BY-4.0;MIT-0;MPL-2.0;(MIT OR CC0-1.0);(MIT OR Apache-2.0);(MIT OR GPL-2.0)'
-      NPM_WORKSPACES: ${{ needs.select-licenses.outputs.npm-workspaces || '["client/desktop","services/media-plane","client/admin"]' }}
+      NPM_WORKSPACES: ${{ needs.select-licenses.outputs.npm-workspaces || '["services/media-plane","client/admin"]' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -205,7 +203,7 @@ jobs:
         run: |
           set -euo pipefail
           mapfile -t workspaces < <(node -e '
-            const allowed = ["client/desktop", "services/media-plane", "client/admin"];
+            const allowed = ["services/media-plane", "client/admin"];
             let selected;
             try { selected = JSON.parse(process.env.NPM_WORKSPACES); } catch { selected = null; }
             if (!Array.isArray(selected) || selected.some(value => !allowed.includes(value))) selected = allowed;
@@ -213,7 +211,7 @@ jobs:
           ')
           for workspace in "${workspaces[@]}"; do
             case "$workspace" in
-              client/desktop|services/media-plane|client/admin) ;;
+              services/media-plane|client/admin) ;;
               *) echo '::error::invalid npm workspace selection'; exit 1 ;;
             esac
             (cd "$workspace" && npm ci --no-audit --no-fund && \

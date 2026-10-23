@@ -33,6 +33,6 @@ jobs:
       - name: Scan allowlists for expired exceptions
         run: |
           node scripts/security/npm-audit-gate.mjs --expiry-scan \
-            --allowlist client/desktop/.audit-allowlist.json \
+            --allowlist .audit-allowlist.json \
             --allowlist client/admin/.audit-allowlist.json \
             --allowlist services/media-plane/.audit-allowlist.json

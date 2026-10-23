@@ -32,7 +32,7 @@ decide() {
   set +e; out=$(bash "$GUARD" --check "$2" "$3" "$4" "$5" 2>&1); rc=$?; set -e
   if [[ "$rc" != "$want" ]]; then
     bad "$label: exit $rc, want $want"
-  elif [[ "$want" == 1 && ( "$out" != *"can hang forever"* || "$out" != *"brew upgrade bash"* || "$out" != *"/issues/3426"* ) ]]; then
+  elif [[ "$want" == 1 && ( "$out" != *"can hang forever"* || "$out" != *"brew upgrade bash"* || "$out" != *"#3426"* ) ]]; then
     bad "$label: refused without naming the cause, the fix and #3426"
   elif [[ "$want" == 0 && -n "$out" ]]; then
     bad "$label: passed but printed output"
