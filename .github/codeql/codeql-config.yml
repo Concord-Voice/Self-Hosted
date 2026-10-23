@@ -20,7 +20,7 @@ paths-ignore:
 # sinks. The workflow's `queries:` input is prefixed with `+` so this list ADDS to
 # security-extended instead of being ignored.
 queries:
-  - uses: Concord-Voice/Self-Hosted/.github/codeql/queries/go/LogInjectionUnstructured.ql@main
+  - uses: Concord-Voice/Self-Hosted/.github/codeql/queries/go/LogInjectionUnstructured.ql@28358df2d826cdf6635937eb7f9566f333a8e7e2
 query-filters:
   - exclude:
       id: go/log-injection
