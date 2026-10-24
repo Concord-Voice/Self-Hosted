@@ -234,9 +234,60 @@ else
   echo "  ✓ missing SHA exits 1"; pass=$(( pass + 1 ))
 fi
 
-# Self-Hosted: the main-ci.yml wiring cases stay with Desktop, which owns
-# main-ci.yml (it only dispatches the desktop hotfix release). The resolver
-# is still consumed here by license-check.yml and osv-scanner.yml.
+echo ""
+echo "Workflow: the changes job can actually read PR metadata"
+MAIN_CI="${REPO_ROOT}/.github/workflows/main-ci.yml"
+if grep -q 'pull-requests: read' < <(awk '/^  changes:/{f=1;next} f&&/^  [a-z-]+:$/{f=0} f' "$MAIN_CI"); then
+  echo "  ✓ changes job declares pull-requests: read"; pass=$(( pass + 1 ))
+else
+  echo "  ✗ changes job cannot read PR metadata — every resolution 403s" >&2; fail=$(( fail + 1 ))
+fi
+if grep -q 'contents: read' < <(awk '/^  changes:/{f=1;next} f&&/^  [a-z-]+:$/{f=0} f' "$MAIN_CI"); then
+  echo "  ✓ changes job restates contents: read (job-level REPLACES workflow-level)"; pass=$(( pass + 1 ))
+else
+  echo "  ✗ job-level permissions dropped contents: read" >&2; fail=$(( fail + 1 ))
+fi
+
+echo ""
+echo "Workflow: main-ci.yml consumes the script, not an inline lookup"
+MAIN_CI="${REPO_ROOT}/.github/workflows/main-ci.yml"
+if grep -q 'resolve-hotfix-label.sh' "$MAIN_CI"; then
+  echo "  ✓ main-ci.yml calls resolve-hotfix-label.sh"; pass=$(( pass + 1 ))
+else
+  echo "  ✗ main-ci.yml does not call resolve-hotfix-label.sh" >&2; fail=$(( fail + 1 ))
+fi
+# The bare association lookup is what raced. Its return would silently
+# reintroduce the bug, so pin its absence (comment lines excluded — three
+# assertions in the preceding branch matched the prose explaining a removal).
+if awk '/^[[:space:]]*#/ { next } /commits\/\$\{SHA\}\/pulls/ { found=1 } END { exit !found }' "$MAIN_CI"; then
+  echo "  ✗ main-ci.yml still performs the racing association lookup inline" >&2; fail=$(( fail + 1 ))
+else
+  echo "  ✓ no inline association lookup remains in main-ci.yml"; pass=$(( pass + 1 ))
+fi
+
+echo ""
+echo "Workflow: the reporting step consumes resolved_via, and not as \$PATH"
+# The natural name for this variable is PATH, which would overwrite the runner's
+# PATH for the step and break every command in it — including the shell's own
+# lookups. Pin the safe name AND the absence of the dangerous one.
+if grep -qE '^\s+RESOLVED_VIA: \$\{\{ steps\.hotfix\.outputs\.resolved_via \}\}' "$MAIN_CI"; then
+  echo "  ✓ RESOLVED_VIA is wired to the resolved_via output"; pass=$(( pass + 1 ))
+else
+  echo "  ✗ reporting step does not consume resolved_via" >&2; fail=$(( fail + 1 ))
+fi
+if awk '/^[[:space:]]*#/ { next } /^[[:space:]]+PATH:/ { found=1 } END { exit !found }' "$MAIN_CI"; then
+  echo "  ✗ a step declares PATH: as an env var — it would clobber the runner PATH" >&2; fail=$(( fail + 1 ))
+else
+  echo "  ✓ no step overwrites PATH"; pass=$(( pass + 1 ))
+fi
+# api-error used to fall through to the catch-all arm, announcing "risk: hotfix
+# present ... release path runs on this merge" on a run that never read a label
+# and never dispatched. A wrong log line is worse than a missing one.
+if awk '/^[[:space:]]*#/ { next } /^[[:space:]]+api-error\)/ { found=1 } END { exit !found }' "$MAIN_CI"; then
+  echo "  ✓ api-error has its own case arm"; pass=$(( pass + 1 ))
+else
+  echo "  ✗ api-error falls through to the hotfix-present arm" >&2; fail=$(( fail + 1 ))
+fi
 
 echo ""
 echo "─────────────────────────────────────────"

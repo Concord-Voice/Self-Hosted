@@ -1,0 +1,177 @@
+# Main CI, ported from Alpha. The desktop version probe and release dispatch
+# belong to Desktop. Self-Hosted retains the hotfix scanner and build legs;
+# nightly-ci.yml handles ordinary main-branch baseline scans.
+name: Main CI
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: main-ci
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  changes:
+    name: Resolve hotfix label
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+    outputs:
+      hotfix: ${{ steps.hotfix.outputs.hotfix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Resolve the hotfix label from the merged PR
+        id: hotfix
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          # Untrusted, so it stays in env and is only ever read as a value —
+          # never interpolated into a command. It is the race-free source: a
+          # squash merge carries "(#N)" in its subject, available here with no
+          # API call. Null on non-push events; the script falls back.
+          COMMIT_SUBJECT: ${{ github.event.head_commit.message }}
+        run: bash .github/scripts/resolve-hotfix-label.sh
+
+      - name: Report how the hotfix label was resolved
+        env:
+          RESOLUTION: ${{ steps.hotfix.outputs.resolution }}
+          # NOT named PATH. The obvious name for "how it was resolved" would
+          # overwrite the runner's PATH for this step and break every command
+          # in it, including the shell's own lookups.
+          RESOLVED_VIA: ${{ steps.hotfix.outputs.resolved_via }}
+          PR_NUMBER: ${{ steps.hotfix.outputs.pr_number }}
+        run: |
+          set -euo pipefail
+          # "Could not tell" is logged DIFFERENTLY from "no label". Collapsing
+          # the two is what hid the 2026-08-29 miss on #3013: the release
+          # deferred, the log said "No risk: hotfix", and that was
+          # indistinguishable from the author not having applied it.
+          case "${RESOLUTION}" in
+            undetermined)
+              echo "::warning::Could NOT determine the hotfix label for this commit — deferring the release to the nightly (fail-closed). This is not the same as the label being absent; if the merge was meant to be a hotfix, dispatch nightly-ci.yml." ;;
+            api-error)
+              # Split out of the `*)` arm, which would otherwise announce a
+              # hotfix on a run that never read a label. When the PR was located
+              # before the failure, RESOLVED_VIA names how — the difference
+              # between "the API is down" and "we never found the PR".
+              echo "::warning::Hotfix resolution hit a GitHub API error (PR #${PR_NUMBER:-unknown}, found via ${RESOLVED_VIA}) — deferring to the nightly (fail-closed). Check the changes job permissions before assuming the label was absent." ;;
+            no-label)
+              # `resolved_via` is the half `resolution` cannot carry here: it
+              # separates a race-free subject parse from a fallback that had to
+              # retry, on the outcome that happens on nearly every merge.
+              echo "::notice::No risk: hotfix on PR #${PR_NUMBER} (found via ${RESOLVED_VIA}) — any pending release defers to the nightly" ;;
+            *)
+              echo "::notice::risk: hotfix present on PR #${PR_NUMBER} (found via ${RESOLVED_VIA}) — release path runs on this merge" ;;
+          esac
+
+  # ─── Supply-chain IOC gate (IOC-first invariant, ADR-0018) ───────────
+  ioc:
+    name: ioc
+    needs: [changes]
+    # Runs ONLY on the hotfix scan path. Ordinary merges are covered by
+    # nightly-ci.yml — every PR is already rebased onto current main before it
+    # merges (strict_required_status_checks_policy), so re-scanning the squash
+    # commit bought a fresh baseline and little else. See nightly-ci.yml header
+    # for the trade this accepts.
+    if: needs.changes.outputs.hotfix == 'true'
+    uses: ./.github/workflows/ioc-scanning.yml
+    permissions:
+      contents: read
+      pull-requests: read
+
+  # ─── Scanner push-legs (moved from per-file push triggers, #1477) ────
+  eslint:
+    name: eslint
+    needs: [changes, ioc]
+    # Runs ONLY on the hotfix scan path. Ordinary merges are covered by
+    # nightly-ci.yml — every PR is already rebased onto current main before it
+    # merges (strict_required_status_checks_policy), so re-scanning the squash
+    # commit bought a fresh baseline and little else. See nightly-ci.yml header
+    # for the trade this accepts.
+    if: needs.changes.outputs.hotfix == 'true'
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/eslint-sarif.yml
+
+  codeql:
+    name: codeql
+    needs: [changes, ioc]
+    # Runs ONLY on the hotfix scan path. Ordinary merges are covered by
+    # nightly-ci.yml — every PR is already rebased onto current main before it
+    # merges (strict_required_status_checks_policy), so re-scanning the squash
+    # commit bought a fresh baseline and little else. See nightly-ci.yml header
+    # for the trade this accepts.
+    if: needs.changes.outputs.hotfix == 'true'
+    permissions:
+      contents: read
+      security-events: write
+      packages: read
+      actions: read
+    uses: ./.github/workflows/codeql.yml
+
+  govulncheck:
+    name: govulncheck
+    needs: [changes, ioc]
+    # Runs ONLY on the hotfix scan path. Ordinary merges are covered by
+    # nightly-ci.yml — every PR is already rebased onto current main before it
+    # merges (strict_required_status_checks_policy), so re-scanning the squash
+    # commit bought a fresh baseline and little else. See nightly-ci.yml header
+    # for the trade this accepts.
+    if: needs.changes.outputs.hotfix == 'true'
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/govulncheck.yml
+
+  scorecard:
+    name: scorecard
+    needs: [changes, ioc]
+    # Runs ONLY on the hotfix scan path. Ordinary merges are covered by
+    # nightly-ci.yml — every PR is already rebased onto current main before it
+    # merges (strict_required_status_checks_policy), so re-scanning the squash
+    # commit bought a fresh baseline and little else. See nightly-ci.yml header
+    # for the trade this accepts.
+    if: needs.changes.outputs.hotfix == 'true'
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+      # Private-repo GraphQL probes (#1462 — replace-not-merge semantics
+      # apply to the caller grant too).
+      issues: read
+      pull-requests: read
+      checks: read
+    uses: ./.github/workflows/scorecard.yml
+
+  # ─── Product-correctness suite ─────────────────────────────────────────
+  # Per repo-admin decision (2026-06-14): build.yml + sonarcloud.yml run on
+  # EVERY merge to main so SonarCloud's main-branch analysis (dashboard,
+  # badges, issue list) stays current — reversing the #919 post-merge removal
+  # for the Sonar path. Mirrors pr-ci.yml's build -> sonar wiring; IOC-first
+  # per ADR-0018 (build installs/executes repo code).
+  build:
+    name: build
+    needs: [changes, ioc]
+    # Runs ONLY on the hotfix scan path. Ordinary merges are covered by
+    # nightly-ci.yml — every PR is already rebased onto current main before it
+    # merges (strict_required_status_checks_policy), so re-scanning the squash
+    # commit bought a fresh baseline and little else. See nightly-ci.yml header
+    # for the trade this accepts.
+    if: needs.changes.outputs.hotfix == 'true'
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/build.yml
+
