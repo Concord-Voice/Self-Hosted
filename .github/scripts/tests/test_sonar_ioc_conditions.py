@@ -109,7 +109,7 @@ class IOCConditionPolicyTests(unittest.TestCase):
         osv = yaml.load((root / ".github/workflows/osv-scanner.yml").read_text(), Loader=yaml.BaseLoader)
         call = required["jobs"].get("osv")
         self.assertIsNotNone(call, "protected workflow must own the selected OSV execution")
-        self.assertEqual("Concord-Voice/Self-Hosted/.github/workflows/osv-scanner.yml@e3955a041429065e701a3701953041b7dbd845b8",
+        self.assertEqual("Concord-Voice/Self-Hosted/.github/workflows/osv-scanner.yml@463dd955bd28b1b34aadcb2f5630aab72ed5ad2d",
                          call.get("uses"))
         needs = call.get("needs", [])
         self.assertIn("pr-ci", needs if isinstance(needs, list) else [needs])
@@ -631,9 +631,9 @@ class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
         jobs = self.wrapper["jobs"]
         call = jobs["pr-ci"]
         self.assertEqual(call["uses"],
-                         "Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@e3955a041429065e701a3701953041b7dbd845b8")
+                         "Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@463dd955bd28b1b34aadcb2f5630aab72ed5ad2d")
         self.assertEqual(call["with"], {"trusted-source": "true", "enforcement-only": "true"})
-        self.assertEqual(call["secrets"], {"SONAR_TOKEN": "${{ secrets.SONAR_TOKEN }}"})
+        self.assertNotIn("secrets", call)
         self.assertNotIn("ioc", jobs)
         self.assertNotIn("build", jobs)
         self.assertEqual(jobs["result"]["if"], "${{ always() }}")

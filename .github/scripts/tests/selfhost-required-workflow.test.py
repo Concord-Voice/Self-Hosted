@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Check the Self-Hosted protected scan wrapper during the bootstrap port."""
+"""Check the Self-Hosted protected scan wrapper and CodeQL config reference."""
 from pathlib import Path
 import re
 import yaml
@@ -21,7 +21,7 @@ for job, path in ((pr, "pr-ci.yml"), (osv, "osv-scanner.yml")):
         job["uses"],
     ), f"{path} must use a full Self-Hosted commit pin"
 assert pr["with"] == {"trusted-source": "true", "enforcement-only": "true"}
-assert pr["secrets"] == {"SONAR_TOKEN": "${{ secrets.SONAR_TOKEN }}"}
+assert "secrets" not in pr, "pr-ci.yml declares no secrets to receive"
 assert osv["needs"] == ["pr-ci"]
 assert "always()" in osv["if"] and '"osv":true' in osv["if"]
 assert jobs["publish-install-script-warnings"]["needs"] == ["pr-ci"]
@@ -31,10 +31,10 @@ codeql = workflow("codeql.yml")
 init = next(s for s in codeql["jobs"]["analyze"]["steps"] if s.get("name") == "Initialize CodeQL")
 config_ref = init["with"]["config-file"]
 assert re.fullmatch(
-    r"remote=Concord-Voice/Self-Hosted@[0-9a-f]{40}:.github/codeql/codeql-config.yml",
+    r"remote=Concord-Voice/Self-Hosted@main:.github/codeql/codeql-config.yml",
     config_ref,
-), "CodeQL config must use an immutable bootstrap commit"
+), "CodeQL config must come from protected main, as in Alpha"
 config = yaml.safe_load((root / ".github/codeql/codeql-config.yml").read_text())
 assert config["queries"][0]["uses"] == "./.github/codeql/queries/go/LogInjectionUnstructured.ql"
 assert ".github/codeql/**" in (root / "CODEOWNERS").read_text()
-print("Self-Hosted protected workflow bootstrap checks passed")
+print("Self-Hosted protected workflow checks passed")
