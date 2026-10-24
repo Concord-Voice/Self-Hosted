@@ -503,6 +503,14 @@ class VerifyRequiredBuildPins(unittest.TestCase):
             with self.subTest(text=text[:40]):
                 self.assertEqual(self.run_check(text, base="").returncode, 0)
 
+    def test_quote_runs_in_an_expression_stay_linear(self):
+        # CodeQL py/redos: an unclosed `${{` before a long run of quotes used to
+        # backtrack exponentially. It must still finish, and `''` stays an escape.
+        flood = "      - run: echo ${{{{'" + "''''" * 40 + "\n"
+        self.assertEqual(self.run_check(self.contract_caller(tail=flood), base="").returncode, 0)
+        escaped = "      - run: echo ${{ format('it''s }}', needs.c.outputs.missing) }}\n"
+        self.assert_blocked(self.run_check(self.contract_caller(tail=escaped), base=""), "reads output `missing`")
+
     def test_byte_order_mark_after_the_start_fails(self):
         # Review N1: libyaml skips a BOM at the start of any line, PyYAML's pure-
         # Python reader does not, so they can place the key after it differently.

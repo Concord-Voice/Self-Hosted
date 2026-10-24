@@ -84,8 +84,10 @@ VALUE = (r"(?P<repo>[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+)(?P<path>(?:/(?!\.\.?(?=[/@]
          r"@(?P<sha>[0-9a-f]{40})")
 PINNED = re.compile(VALUE, re.ASCII)
 IMAGE_DIGEST = re.compile(r"docker://[^@\s]+@sha256:[0-9a-f]{64}", re.ASCII)
-# A `${{ }}` body: single-quoted literals (with '' escapes) may hold `}}`.
-EXPRESSION = re.compile(r"\$\{\{((?:[^'}]|'(?:[^']|'')*'|\}(?!\}))*)\}\}")
+# A `${{ }}` body: single-quoted literals (with '' escapes) may hold `}}`. A literal
+# never ends right before another `'`, so a run of quotes splits one way only and
+# an unclosed body cannot backtrack exponentially.
+EXPRESSION = re.compile(r"\$\{\{((?:[^'}]|'(?:[^']|'')*'(?!')|\}(?!\}))*)\}\}")
 # A single-quoted literal is a string, not a property read, unless it is an index.
 LITERAL = re.compile(r"(\[\s*)?'(?:[^']|'')*'")
 LINE = re.compile(r"^ *(?:- )?uses: (?P<q>[\"']?)(?P<v>" + VALUE + r")(?P=q)(?: +#[ -~]*)?$", re.ASCII)
