@@ -184,3 +184,24 @@ func creditDescription(r CreditResult) string {
 	return fmt.Sprintf("Added $%d.%02d of credit to your subscription. Your next renewals use it before your card is charged.",
 		r.Amount/100, r.Amount%100)
 }
+
+// heldSeatSQL matches an active Wing seat whose parent entitles, the same
+// join entitlements.ResolveTierQ reads.
+const heldSeatSQL = `SELECT EXISTS (SELECT 1 FROM subscription_seats s
+	JOIN subscriptions ON subscriptions.id = s.subscription_id
+	WHERE s.holder_user_id = $1 AND ` + entitlements.LiveSeatParentPredicate + `)`
+
+// refuseSeatMember returns ErrSeatMember when the user holds an entitling
+// Wing seat. It takes no seat lock: the users row is already held, and a seat
+// accepted after this read leaves the code grant running beside the seat, the
+// "code first, then seat" order the spec allows.
+func refuseSeatMember(ctx context.Context, tx *sql.Tx, userID uuid.UUID) error {
+	var seated bool
+	if err := tx.QueryRowContext(ctx, heldSeatSQL, userID).Scan(&seated); err != nil {
+		return fmt.Errorf("redemption: read wing seat: %w", err)
+	}
+	if seated {
+		return ErrSeatMember
+	}
+	return nil
+}

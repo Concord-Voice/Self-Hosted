@@ -28,6 +28,11 @@ var (
 	// only that THIS authenticated user already redeemed THIS code, which they
 	// performed themselves, not whether the code is otherwise valid.
 	ErrAlreadyRedeemed = errors.New("redemption: already redeemed")
+	// ErrSeatMember: a premium code redeemed by a user whose access comes from
+	// an active Wing seat (#2033 D1, seat-member half, PR-5). The redemption
+	// rolls back, so the code stays unredeemed and is there for the user if
+	// the payer removes the seat.
+	ErrSeatMember = errors.New("redemption: covered by a wing seat")
 )
 
 // Notifier runs the post-commit live-update (cache invalidate + WS push). It is
@@ -135,6 +140,11 @@ func (e *Engine) RedeemConfirmed(ctx context.Context, userID uuid.UUID, rawInput
 	if claim.grantKind == GrantPremiumSubscription {
 		if sub, subscribed, err = liveStripeSub(ctx, tx, userID); err != nil {
 			return RedeemOutcome{}, err
+		}
+		if !subscribed {
+			if err := refuseSeatMember(ctx, tx, userID); err != nil {
+				return RedeemOutcome{}, err
+			}
 		}
 	}
 	if subscribed && !sub.canceling {

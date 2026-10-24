@@ -1368,8 +1368,11 @@ func NewRouter(
 	// billing route and runs no billing worker. The workers live as long as
 	// the router's lifecycle context. Built before redemption, which uses it
 	// for code credit (D1).
-	billingSvc := wireBilling(lifecycleCtx, cfg, db, entCache, redemptionEntNotifier, opsCounters, log)
+	billingSvc := wireBilling(lifecycleCtx, cfg, db, entCache, redemptionEntNotifier, redemptionEntNotifier, opsCounters, log)
 	startBillingWorkers(lifecycleCtx, billingSvc)
+	if billingSvc != nil {
+		accountService.SetErasedSeatNotifier(erasedSeatNotifier(billingSvc))
+	}
 	redemptionHandler := buildRedemptionHandler(db, entCache, redemptionEntNotifier, billingSvc, cfg, log)
 
 	// DM-block convergence is pure SQL and must run on every Block-serving
@@ -1828,6 +1831,15 @@ func NewRouter(
 					middleware.RateLimitByUser(redis, 5, 10*time.Minute),
 					billingSvc.CheckoutSession,
 				)
+				// Wing seats (#2033 PR-5, spec §8): verified email, 10/hour
+				// per user on each route, not gated by purchase mode (a payer
+				// can always manage the seat they bought).
+				seatLimit := middleware.RateLimitByUser(redis, 10, 1*time.Hour)
+				protected.POST("/billing/seat/invite", seatLimit, billingSvc.SeatInvite)
+				protected.DELETE("/billing/seat", seatLimit, billingSvc.SeatRevoke)
+				protected.POST("/billing/seat/leave", seatLimit, billingSvc.SeatLeave)
+				protected.POST("/billing/seat-invites/:id/accept", seatLimit, billingSvc.SeatAccept)
+				protected.POST("/billing/seat-invites/:id/decline", seatLimit, billingSvc.SeatDecline)
 				protected.POST("/billing/plan-change",
 					middleware.RateLimitByUser(redis, 5, 10*time.Minute),
 					billingSvc.PlanChange,

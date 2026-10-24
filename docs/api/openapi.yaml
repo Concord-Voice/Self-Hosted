@@ -7051,7 +7051,10 @@ paths:
             not an oracle — reflects only this user''s own prior redemption), or `error`
             is `credit_confirmation_required`: the code names another plan than the
             user''s live subscription and would become face-value credit. Nothing was
-            redeemed; retry with `confirm_credit: true` to accept the quote.'
+            redeemed; retry with `confirm_credit: true` to accept the quote. Or
+            `error` is `seat_member` (#2470): a premium code was redeemed by a user
+            whose access comes from an active Wing seat and who has no live Stripe
+            subscription of their own. Nothing was redeemed; the code stays usable.'
           content:
             application/json:
               schema:
@@ -13463,9 +13466,10 @@ paths:
       description: 'Returns the authenticated user''s live subscription status
         (tier / status / source / expiry) for the Settings subscription page (#1304).
         The entitlement set (`GET /entitlements`) carries only the resolved tier;
-        this read adds the grant''s status, source (`code` | `stripe`), and optional
+        this read adds the grant''s status, source (`code` | `stripe` | `seat`), and optional
         period end. Server-authoritative from the JWT user_id
-        — never client-supplied.
+        — never client-supplied. `seat` and `invites` (#2470) describe the
+        caller''s Wing seat side; they carry user ids only.
 
 
         When the user has no live subscription row the free-default shape is returned
@@ -13817,7 +13821,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '409':
-          description: '`manage_existing`: the caller already has a live Stripe subscription; manage it in the Portal'
+          description: '`manage_existing`: the caller already has a live Stripe subscription; manage it in the Portal. `seat_member` (#2470): the caller holds an active Wing seat; they leave the Wing before buying their own plan.'
           content:
             application/json:
               schema:
@@ -14042,6 +14046,348 @@ paths:
           $ref: '#/components/responses/RateLimited'
         '503':
           description: Stripe or database failure
+  /billing/seat/invite:
+    post:
+      tags:
+      - Platform
+      summary: Invite a friend to the caller's Wing seat
+      description: 'Invites one accepted friend to the +1 seat of the caller''s live
+        Wing (#2470). The invitee must be an accepted friend with no block either
+        way. A stale pending invite is expired first. `replace: true` revokes the
+        active seat in the same transaction (Change +1). The invite expires after
+        7 days; the invitee gets a `subscription_seat_invite` event.
+
+
+        Cooldown: once a seat has been active, the payer cannot pick a different
+        person for 30 days from the latest activation. A voluntary leave counts;
+        an end because the holder bought their own plan does not.
+
+
+        Registered only when Stripe keys are configured on a non-self-hosted
+        instance; otherwise the route does not exist (404). Requires a verified email.
+        Not gated by `BILLING_PURCHASE_MODE`.
+
+
+        Rate limit: 10 requests per hour per route.
+
+        '
+      operationId: inviteBillingSeat
+      security:
+      - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [user_id]
+              properties:
+                user_id:
+                  type: string
+                  format: uuid
+                replace:
+                  type: boolean
+                  default: false
+      responses:
+        '201':
+          description: Invite sent
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [seat]
+                properties:
+                  seat:
+                    $ref: '#/components/schemas/SeatDTO'
+        '400':
+          description: '`invalid_request`: the body is not exactly one JSON object with a user id'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '404':
+          description: '`invitee_not_eligible`: not a friend, blocked, nonexistent or the caller (one body for all)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: '`not_wing_payer`: no live Wing. `seat_occupied`: a seat is open and `replace` is not set. `seat_cooldown` with `available_at`: the 30-day cooldown is running.'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: string
+                  available_at:
+                    type: string
+                    format: date-time
+        '401':
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Email not verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: '`billing_unavailable`: the database failed; nothing changed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /billing/seat:
+    delete:
+      tags:
+      - Platform
+      summary: Remove the caller's +1 or withdraw the pending invite
+      description: 'Ends the open seat of the caller''s live Wing (#2470): revokes an
+        active seat or withdraws a pending invite. The former holder loses premium
+        at once unless another grant covers them. Both sides get
+        `subscription_seat_updated`.
+
+
+        Registered only when Stripe keys are configured on a non-self-hosted
+        instance; otherwise the route does not exist (404). Requires a verified email.
+        Not gated by `BILLING_PURCHASE_MODE`.
+
+
+        Rate limit: 10 requests per hour per route.
+
+        '
+      operationId: removeBillingSeat
+      security:
+      - BearerAuth: []
+      responses:
+        '204':
+          description: Seat ended
+        '404':
+          description: '`no_seat`: the caller has no open seat'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Email not verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: '`billing_unavailable`: the database failed; nothing changed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /billing/seat/leave:
+    post:
+      tags:
+      - Platform
+      summary: Leave the Wing the caller is a +1 on
+      description: 'Ends the caller''s active seat (#2470). The leave counts toward
+        the payer''s 30-day cooldown. Both sides get `subscription_seat_updated`.
+
+
+        Registered only when Stripe keys are configured on a non-self-hosted
+        instance; otherwise the route does not exist (404). Requires a verified email.
+        Not gated by `BILLING_PURCHASE_MODE`.
+
+
+        Rate limit: 10 requests per hour per route.
+
+        '
+      operationId: leaveBillingSeat
+      security:
+      - BearerAuth: []
+      responses:
+        '204':
+          description: Left the Wing
+        '404':
+          description: '`no_seat`: the caller holds no active seat'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Email not verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: '`billing_unavailable`: the database failed; nothing changed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /billing/seat-invites/{id}/accept:
+    post:
+      tags:
+      - Platform
+      summary: Accept a Wing invite
+      description: 'Accepts an invite addressed to the caller (#2470). Any open
+        Checkout of the caller is expired first. The caller gets premium through
+        the seat while the Wing is live.
+
+
+        Registered only when Stripe keys are configured on a non-self-hosted
+        instance; otherwise the route does not exist (404). Requires a verified email.
+        Not gated by `BILLING_PURCHASE_MODE`.
+
+
+        Rate limit: 10 requests per hour per route.
+
+        '
+      operationId: acceptBillingSeatInvite
+      security:
+      - BearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: The invite id (`invite_id` in `/subscriptions/me`)
+      responses:
+        '200':
+          description: Invite accepted
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [seat]
+                properties:
+                  seat:
+                    $ref: '#/components/schemas/SeatDTO'
+        '404':
+          description: '`invite_not_found`: no pending invite with this id is addressed to the caller (one body for all)'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '410':
+          description: '`invite_expired`: the invite expired, or the Wing is no longer live'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '409':
+          description: '`own_subscription_active` with `current_period_end`: the caller pays for their own plan. `already_seat_member`: the caller already holds a seat. `seat_cooldown` with `available_at`: the payer''s cooldown is running.'
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [error]
+                properties:
+                  error:
+                    type: string
+                  available_at:
+                    type: string
+                    format: date-time
+                  current_period_end:
+                    type: string
+                    format: date-time
+        '401':
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Email not verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: '`billing_unavailable`: the database failed; nothing changed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+  /billing/seat-invites/{id}/decline:
+    post:
+      tags:
+      - Platform
+      summary: Decline a Wing invite
+      description: 'Declines an invite addressed to the caller (#2470).
+
+
+        Registered only when Stripe keys are configured on a non-self-hosted
+        instance; otherwise the route does not exist (404). Requires a verified email.
+        Not gated by `BILLING_PURCHASE_MODE`.
+
+
+        Rate limit: 10 requests per hour per route.
+
+        '
+      operationId: declineBillingSeatInvite
+      security:
+      - BearerAuth: []
+      parameters:
+      - name: id
+        in: path
+        required: true
+        schema:
+          type: string
+          format: uuid
+        description: The invite id (`invite_id` in `/subscriptions/me`)
+      responses:
+        '204':
+          description: Invite declined
+        '404':
+          description: '`invite_not_found`: no pending invite with this id is addressed to the caller'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing or invalid bearer token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Email not verified
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: '`billing_unavailable`: the database failed; nothing changed'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /servers/{id}/audit-log:
     get:
       tags:
@@ -20541,6 +20887,7 @@ components:
           enum:
           - code
           - stripe
+          - seat
           example: code
         current_period_end:
           type: string
@@ -20567,6 +20914,107 @@ components:
           $ref: '#/components/schemas/SubscriptionStripe'
         code:
           $ref: '#/components/schemas/SubscriptionCode'
+        seat:
+          $ref: '#/components/schemas/SubscriptionSeat'
+        invites:
+          type: array
+          description: Open Wing invites the caller may answer (#2470). Absent
+            when there are none.
+          items:
+            $ref: '#/components/schemas/SubscriptionSeatInvite'
+    SubscriptionSeat:
+      type: object
+      description: The caller's side of a Wing seat (#2470). For a payer it is
+        present whenever they pay for a live, premium Wing; `seat_id` and
+        `state` are absent when no invite is open. For a member it describes
+        their active seat, including one whose Wing is paused or lapsed
+        (`suspended`), so they can still leave it.
+      required:
+      - role
+      properties:
+        role:
+          type: string
+          enum:
+          - payer
+          - member
+        seat_id:
+          type: string
+          format: uuid
+        state:
+          type: string
+          description: The open seat's state. A pending invite past its expiry
+            reads `expired` before anything materializes it.
+          enum:
+          - pending
+          - active
+          - expired
+        counterpart_user_id:
+          type: string
+          format: uuid
+          description: The holder (for a payer) or the payer (for a member).
+        invite_expires_at:
+          type: string
+          format: date-time
+          description: Present while the payer's invite is pending.
+        next_swap_at:
+          type: string
+          format: date-time
+          description: Payer only. While the 30-day cooldown runs, when the
+            payer can pick someone other than the current holder again.
+        suspended:
+          type: boolean
+          description: Member only. True while the parent Wing does not
+            entitle (paused or lapsed); the seat grants nothing until it is
+            live again, and the member may still leave it.
+    SubscriptionSeatInvite:
+      type: object
+      required:
+      - invite_id
+      - payer_user_id
+      - expires_at
+      properties:
+        invite_id:
+          type: string
+          format: uuid
+        payer_user_id:
+          type: string
+          format: uuid
+        expires_at:
+          type: string
+          format: date-time
+        blocked:
+          type: string
+          description: Present when the caller cannot accept yet because their
+            own Stripe subscription is live.
+          enum:
+          - own_subscription_active
+    SeatDTO:
+      type: object
+      description: A Wing seat as the seat endpoints return it (#2470).
+      required:
+      - seat_id
+      - state
+      - payer_user_id
+      - holder_user_id
+      - invite_expires_at
+      properties:
+        seat_id:
+          type: string
+          format: uuid
+        state:
+          type: string
+          enum:
+          - pending
+          - active
+        payer_user_id:
+          type: string
+          format: uuid
+        holder_user_id:
+          type: string
+          format: uuid
+        invite_expires_at:
+          type: string
+          format: date-time
     SubscriptionStripe:
       type: object
       description: The user's first live Stripe-billed row. Present only when the

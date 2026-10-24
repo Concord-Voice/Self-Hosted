@@ -604,3 +604,37 @@ func TestRedeem_PremiumExtendsLapsedUnsweptCodeRow(t *testing.T) {
 	require.Len(t, notifier.calls, 1)
 	assert.Equal(t, "premium", notifier.calls[0][2])
 }
+
+// TestRedeem_SeatMemberRefusesPremiumCode: a user seated on a live Wing gets
+// ErrSeatMember for a premium code, and the code stays unredeemed (#2033 D5).
+func TestRedeem_SeatMemberRefusesPremiumCode(t *testing.T) {
+	db, cleanup := testhelpers.SetupTestDB(t)
+	defer cleanup()
+	payer, holder := insertUser(t, db), insertUser(t, db)
+	var sub uuid.UUID
+	require.NoError(t, db.QueryRow(`INSERT INTO subscriptions
+		(user_id, tier, status, source, current_period_end, stripe_customer_id, stripe_subscription_id, plan)
+		VALUES ($1, 'premium', 'active', 'stripe', $2, $3, $4, 'wing') RETURNING id`,
+		payer, time.Now().Add(24*time.Hour), "cus_"+uuid.NewString(), "sub_"+uuid.NewString()).Scan(&sub))
+	_, err := db.Exec(`INSERT INTO subscription_seats
+		(subscription_id, payer_user_id, holder_user_id, state, invite_expires_at, activated_at)
+		VALUES ($1, $2, $3, 'active', NOW() + INTERVAL '7 days', NOW())`, sub, payer, holder)
+	require.NoError(t, err)
+	code := issueOne(t, db, redemption.IssueSpec{
+		GrantKind: redemption.GrantPremiumSubscription, GrantParams: map[string]any{"months": 1},
+		SingleUse: true, MaxRedeems: intPtr(1), BatchID: "test-seat-member",
+	})
+
+	_, err = newEngine(db, &recordingNotifier{}).Redeem(context.Background(), holder, code)
+	require.ErrorIs(t, err, redemption.ErrSeatMember)
+	assert.Zero(t, codeRowCount(t, db, holder))
+	var redeemed int
+	require.NoError(t, db.QueryRow(`SELECT COUNT(*) FROM code_redemptions WHERE user_id = $1`, holder).Scan(&redeemed))
+	assert.Zero(t, redeemed, "the refused code stays unredeemed")
+
+	// The seat ends; the same code now redeems.
+	_, err = db.Exec(`UPDATE subscription_seats SET state = 'left', ended_at = NOW(), end_reason = 'holder_left'`)
+	require.NoError(t, err)
+	_, err = newEngine(db, &recordingNotifier{}).Redeem(context.Background(), holder, code)
+	require.NoError(t, err)
+}

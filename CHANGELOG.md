@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+A Wing subscription can now share Supersonic with one friend. Invite a friend
+from Settings ▸ Subscription; they get Supersonic once they accept, for as long
+as your Wing is active. You can change your +1 once every 30 days.
+
 Opening the web address in a browser now shows a link to download the desktop
 app, instead of an "Update Required" prompt that could not be completed.
 
@@ -18,6 +22,7 @@ Opening billing no longer withdraws a booked change, and confirming cancellation
 keeps access through the paid period, including after a scheduled change takes
 effect. The plan card shows the subscriber's
 actual Stripe price, including a Founders rate.
+
 New subscribers get a 30-day free trial. Your card is collected up front, and
 billing starts when the trial ends unless you cancel.
 

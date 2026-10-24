@@ -115,8 +115,10 @@ func (c *notificationOrderConn) QueryContext(_ context.Context, q string, _ []dr
 	switch q {
 	case payerByCustomerSQL:
 		return notificationOrderResult(c.s.user), nil
-	case lockPayerSQL:
-		return notificationOrderResult(int64(1)), nil
+	case lockUsersAscSQL:
+		return notificationOrderResult(c.s.user), nil
+	case seatPartiesSQL, activeHolderSQL, ownOpenSeatSQL, heldActiveSeatSQL:
+		return &notificationOrderRows{cols: []string{"id"}}, nil
 	case selectStoredRowSQL:
 		return notificationOrderResult(c.s.user, c.s.tier, c.s.status, "cus_scan", c.s.end, false, "wing", "year", false, nil,
 			int64(16489), nil, nil, nil, nil), nil

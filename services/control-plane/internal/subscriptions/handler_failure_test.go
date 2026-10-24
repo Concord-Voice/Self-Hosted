@@ -125,6 +125,9 @@ func (c statusConn) QueryContext(_ context.Context, query string, _ []driver.Nam
 		}
 		return &statusRows{values: []driver.Value{true}, columns: []string{"trial_available"}}, nil
 	}
+	if strings.Contains(query, "subscription_seats") {
+		return &statusRows{columns: []string{"seat"}}, nil // no Wing seat side (PR-5)
+	}
 	return &statusRows{values: c.values}, nil
 }
 

@@ -109,9 +109,10 @@ func (s *Service) CheckoutSession(c *gin.Context) {
 	})
 }
 
-// checkoutPreconditions writes the advisory 409 for a caller who already has
-// a live Stripe subscription (spec §8 step 3). It takes no lock: Stripe's
-// one-subscription limit and Reconcile are the backstops (R1, R43).
+// checkoutPreconditions writes the advisory 409s (spec §8 step 3): a caller
+// who already has a live Stripe subscription, or (PR-5) holds an active Wing
+// seat that entitles. It takes no lock: Stripe's one-subscription limit and
+// Reconcile (its holder_subscribed transition) are the backstops (R1, R43, F5).
 func (s *Service) checkoutPreconditions(c *gin.Context, userID uuid.UUID) (bool, bool) {
 	var live, prior bool
 	if err := s.DB.QueryRowContext(c.Request.Context(), checkoutStripeHistorySQL, userID).Scan(&live, &prior); err != nil {
@@ -122,6 +123,17 @@ func (s *Service) checkoutPreconditions(c *gin.Context, userID uuid.UUID) (bool,
 	}
 	if live {
 		abortWebhook(c, http.StatusConflict, checkoutErrManage)
+		return false, false
+	}
+	seated, err := s.holdsLiveSeat(c.Request.Context(), userID)
+	if err != nil {
+		s.Log.Error("billing: checkout seat check failed",
+			logKeyErrorClass, errorClass(err), logKeyStage, errorStage(err))
+		abortWebhook(c, http.StatusServiceUnavailable, portalErrUnavailable)
+		return false, false
+	}
+	if seated {
+		abortWebhook(c, http.StatusConflict, checkoutErrSeatMember)
 		return false, false
 	}
 	return !prior, true

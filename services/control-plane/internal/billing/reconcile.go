@@ -93,7 +93,6 @@ const (
 
 const (
 	payerByCustomerSQL = `SELECT user_id FROM stripe_customers WHERE stripe_customer_id = $1`
-	lockPayerSQL       = `SELECT 1 FROM users WHERE id = $1 FOR UPDATE`
 	selfHealMappingSQL = `INSERT INTO stripe_customers (user_id, stripe_customer_id) VALUES ($1, $2)
 		ON CONFLICT DO NOTHING`
 	customerByUserSQL = `SELECT stripe_customer_id FROM stripe_customers WHERE user_id = $1`
@@ -165,6 +164,9 @@ type reconcileOutcome struct {
 	owner       uuid.UUID
 	ownerBefore string
 	ownerAfter  string
+
+	// seats is what the seat transitions owe after the commit (PR-5).
+	seats seatOutcome
 }
 
 // Reconcile fetches subID from Stripe under its advisory lock and writes the
@@ -199,6 +201,7 @@ func (s *Service) Reconcile(ctx context.Context, subID, eventID, eventType strin
 	if out.owner != uuid.Nil && (out.changed || out.ownerBefore != out.ownerAfter) {
 		s.pushTier(ctx, subID, out.owner, out.ownerBefore, out.ownerAfter)
 	}
+	s.afterSeatCommit(ctx, out.seats)
 	return out.changed, nil
 }
 
@@ -346,12 +349,16 @@ func (s *Service) writeSubscription(ctx context.Context, conn *sql.Conn, in reco
 		s.logRollback(tx.Rollback(), "billing: reconcile rollback failed", logKeySubID, in.subID)
 	}()
 
-	payer, err := s.resolvePayer(ctx, tx, in)
+	payer, locked, err := s.resolvePayer(ctx, tx, in)
 	if err != nil {
 		return reconcileOutcome{}, err
 	}
 	out := reconcileOutcome{payer: payer, statusAfter: in.fields.Status}
 	if out.before, err = resolveTier(ctx, tx, payer, stageTierBefore); err != nil {
+		return reconcileOutcome{}, err
+	}
+	holder, holderBefore, err := seatHolderBefore(ctx, tx, in.subID)
+	if err != nil {
 		return reconcileOutcome{}, err
 	}
 	old, found, err := loadStoredRow(ctx, tx, in.subID)
@@ -365,6 +372,9 @@ func (s *Service) writeSubscription(ctx context.Context, conn *sql.Conn, in reco
 		}
 	}
 	if out.changed, out.statusBefore, err = s.upsertRow(ctx, tx, payer, in, old, found); err != nil {
+		return reconcileOutcome{}, err
+	}
+	if out.seats, err = s.reconcileSeats(ctx, tx, in, payer, locked, holder, holderBefore, out.changed); err != nil {
 		return reconcileOutcome{}, err
 	}
 	if err := s.finishWrite(ctx, tx, in, &out); err != nil {
@@ -406,20 +416,22 @@ func resolveTier(ctx context.Context, tx *sql.Tx, userID uuid.UUID, stage string
 }
 
 // resolvePayer finds the user who pays for the subscription and locks that
-// user's row FOR UPDATE before anything is written (R-a). A mapped customer's
+// user's row FOR UPDATE before anything is written (R-a), together with the
+// seat parties this reconcile may move (PR-5), ascending; it returns that
+// locked set. A mapped customer's
 // user is the payer. An unmapped customer's payer comes from the
 // subscription's metadata, and the mapping is then self-healed. A payer whose
 // row is gone (erasure committed, or a user that never existed here) is
 // unactionable: no row, no mapping, no outbox row and no Stripe call (R31).
-func (s *Service) resolvePayer(ctx context.Context, tx *sql.Tx, in reconcileInput) (uuid.UUID, error) {
+func (s *Service) resolvePayer(ctx context.Context, tx *sql.Tx, in reconcileInput) (uuid.UUID, map[uuid.UUID]bool, error) {
 	payer, mapped, err := s.lookupPayer(ctx, tx, in)
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, nil, err
 	}
 
-	exists, err := lockUser(ctx, tx, payer)
+	exists, locked, err := lockPayerAndSeatParties(ctx, tx, in.subID, payer)
 	if err != nil {
-		return uuid.Nil, err
+		return uuid.Nil, nil, err
 	}
 	if !exists {
 		if mapped {
@@ -427,14 +439,14 @@ func (s *Service) resolvePayer(ctx context.Context, tx *sql.Tx, in reconcileInpu
 		} else {
 			s.logUnresolvablePayer("billing: subscription metadata names no user here; nothing written", in)
 		}
-		return uuid.Nil, fmt.Errorf("%w: payer absent", ErrUnactionable)
+		return uuid.Nil, nil, fmt.Errorf("%w: payer absent", ErrUnactionable)
 	}
 	if !mapped {
 		if err := s.healUnlessTerminal(ctx, tx, payer, in); err != nil {
-			return uuid.Nil, err
+			return uuid.Nil, nil, err
 		}
 	}
-	return payer, nil
+	return payer, locked, nil
 }
 
 // healUnlessTerminal self-heals the mapping for an unmapped customer, except
@@ -508,19 +520,6 @@ func (s *Service) logUnresolvablePayer(msg string, in reconcileInput) {
 		return
 	}
 	s.Log.Warn(msg, attrs...)
-}
-
-// lockUser locks the user's row FOR UPDATE and reports whether it exists.
-func lockUser(ctx context.Context, tx *sql.Tx, userID uuid.UUID) (bool, error) {
-	var one int
-	err := tx.QueryRowContext(ctx, lockPayerSQL, userID).Scan(&one)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
-	if err != nil {
-		return false, withStage(stageLockPayer, fmt.Errorf("billing: reconcile: lock payer: %w", err))
-	}
-	return true, nil
 }
 
 // selfHealMapping records the customer for a payer found through metadata, as

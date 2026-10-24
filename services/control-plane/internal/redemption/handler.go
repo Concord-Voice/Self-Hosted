@@ -84,6 +84,8 @@ func (h *Handler) Redeem(c *gin.Context) {
 //   - ErrCodeNotValid / unknown grant_kind / checksum fail → 400 generic message.
 //   - ErrAlreadyRedeemed → 409 (idempotent "already redeemed"; not an oracle —
 //     it only reflects THIS user's own prior redemption).
+//   - ErrSeatMember → 409 seat_member (access comes from a Wing seat; the code
+//     stays unredeemed, PR-5)
 //   - *CreditConfirmationError → 409 credit_confirmation_required with the
 //     quote; nothing was redeemed (#2033 D1). It tells a subscriber the code is
 //     valid without consuming it, which is the point: they hold the code and
@@ -108,6 +110,9 @@ func (h *Handler) handleRedeemError(c *gin.Context, userID uuid.UUID, err error)
 	case errors.As(err, &confirm):
 		h.log.Info("redeem rejected", "outcome", "credit_confirmation_required", "user_id", sanitizeID(userID.String()))
 		c.JSON(http.StatusConflict, gin.H{"error": "credit_confirmation_required", "credit": confirm})
+	case errors.Is(err, ErrSeatMember):
+		h.log.Info("redeem rejected", "outcome", "seat_member", "user_id", sanitizeID(userID.String()))
+		c.JSON(http.StatusConflict, gin.H{"error": "seat_member"})
 	case errors.Is(err, ErrCreditUnavailable):
 		h.log.Error("redeem rejected", "outcome", "credit_unavailable", "user_id", sanitizeID(userID.String()), "error", err.Error())
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "billing_unavailable"})
