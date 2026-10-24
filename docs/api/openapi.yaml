@@ -20908,8 +20908,9 @@ components:
         trial_available:
           type: boolean
           description: Advisory eligibility for the first 30-day trial, based on
-            all historical Stripe subscription rows. Checkout rechecks it in
-            Postgres before creating a session.
+            all historical Stripe subscription rows. Only the Supersonic plan
+            carries the trial; Wing Checkout bills immediately. Checkout
+            rechecks it in Postgres before creating a session.
         stripe:
           $ref: '#/components/schemas/SubscriptionStripe'
         code:

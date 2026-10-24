@@ -30,6 +30,8 @@ import (
 const (
 	customerCreatePath = "/v1/customers"
 	bodyWingYearly     = `{"plan":"wing","interval":"year"}`
+	// Supersonic is the only plan with a trial, so trial tests buy it.
+	bodySupersonicMonthly = `{"plan":"supersonic","interval":"month"}`
 )
 
 type checkoutEnv struct {
@@ -111,7 +113,6 @@ func TestCheckout_CreatesSessionWithExpectedParams(t *testing.T) {
 		"line_items[0][quantity]":                      "1",
 		"allowed_payment_method_types[0]":              "card",
 		"payment_method_collection":                    "always",
-		"subscription_data[trial_period_days]":         "30",
 		"adaptive_pricing[enabled]":                    "false",
 		"subscription_data[metadata][concord_user_id]": user.String(),
 		"subscription_data[metadata][concord_env]":     testEnvironment,
@@ -124,7 +125,7 @@ func TestCheckout_CreatesSessionWithExpectedParams(t *testing.T) {
 	for k, v := range want {
 		assert.Equal(t, v, f.Get(k), "form field %s", k)
 	}
-	for _, absent := range []string{"allow_promotion_codes", "automatic_tax[enabled]", "billing_address_collection", "customer_update[address]"} {
+	for _, absent := range []string{"subscription_data[trial_period_days]", "allow_promotion_codes", "automatic_tax[enabled]", "billing_address_collection", "customer_update[address]"} {
 		assert.False(t, f.Has(absent), "%s is not sent", absent)
 	}
 }
@@ -148,10 +149,21 @@ func TestCheckout_CodeGrantDoesNotConsumeTrial(t *testing.T) {
 	user := dbtest.CreateUser(t, env.DB)
 	seedLiveCodeSub(t, env.DB, user)
 
-	require.Equal(t, http.StatusCreated, postCheckout(env.Svc, user, bodyWingYearly).Code)
+	require.Equal(t, http.StatusCreated, postCheckout(env.Svc, user, bodySupersonicMonthly).Code)
 	sessions := env.Fake.requestsTo(http.MethodPost, sessionsListPath)
 	require.Len(t, sessions, 1)
 	assert.Equal(t, "30", sessions[0].Form.Get("subscription_data[trial_period_days]"))
+}
+
+// Only Supersonic carries the trial: an eligible account buying Wing starts paid.
+func TestCheckout_WingHasNoTrial(t *testing.T) {
+	env := newCheckoutEnv(t, foundersConfig(config.BillingPurchaseModeOn))
+	user := dbtest.CreateUser(t, env.DB)
+
+	require.Equal(t, http.StatusCreated, postCheckout(env.Svc, user, `{"plan":"wing","interval":"month"}`).Code)
+	sessions := env.Fake.requestsTo(http.MethodPost, sessionsListPath)
+	require.Len(t, sessions, 1)
+	assert.False(t, sessions[0].Form.Has("subscription_data[trial_period_days]"), "Wing never gets a trial")
 }
 
 func TestCheckout_HistoryReadFailureFailsClosed(t *testing.T) {
@@ -228,7 +240,7 @@ func TestCheckout_EndedSubscriptionDoesNotBlock(t *testing.T) {
 	env.Fake.seedCustomer("cus_payer")
 	user := newPayer(t, env.testEnv, "cus_payer")
 	seedStripeSub(t, env.DB, user, "sub_old", "cus_payer", "canceled", time.Now().Add(-48*time.Hour))
-	assert.Equal(t, http.StatusCreated, postCheckout(env.Svc, user, bodyWingYearly).Code)
+	assert.Equal(t, http.StatusCreated, postCheckout(env.Svc, user, bodySupersonicMonthly).Code)
 	sessions := env.Fake.requestsTo(http.MethodPost, sessionsListPath)
 	require.Len(t, sessions, 1)
 	assert.Equal(t, "always", sessions[0].Form.Get("payment_method_collection"))

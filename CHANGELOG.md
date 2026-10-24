@@ -23,8 +23,9 @@ keeps access through the paid period, including after a scheduled change takes
 effect. The plan card shows the subscriber's
 actual Stripe price, including a Founders rate.
 
-New subscribers get a 30-day free trial. Your card is collected up front, and
-billing starts when the trial ends unless you cancel.
+New subscribers get a 30-day free trial of Supersonic. Your card is collected
+up front, and billing starts when the trial ends unless you cancel. Wing has no
+trial and starts billing when you subscribe.
 
 Settings ▸ Subscription is ready for paid plans. Once purchasing opens, it
 lists each plan with its monthly and yearly price, shows your current plan, and

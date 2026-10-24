@@ -35,6 +35,7 @@ const (
 
 	// Historical Stripe rows survive cancellation and expiry. A prior paid
 	// subscription also makes the account ineligible for its first trial.
+	// Only Supersonic carries the trial (D6, Mark 2026-10-24); Wing starts paid.
 	checkoutStripeHistorySQL = `SELECT
 		EXISTS (SELECT 1 FROM subscriptions WHERE user_id = $1 AND source = 'stripe' AND ` + entitlements.LiveRowPredicate + `),
 		EXISTS (SELECT 1 FROM subscriptions WHERE user_id = $1 AND source = 'stripe')`
@@ -210,7 +211,7 @@ func (s *Service) sessionParams(userID uuid.UUID, cus string, price *stripe.Pric
 		SuccessURL: stripe.String(ReturnURLCheckoutSuccess),
 		CancelURL:  stripe.String(ReturnURLCheckoutCancel),
 	}
-	if trialEligible {
+	if trialEligible && plan == PlanSupersonic {
 		params.SubscriptionData.TrialPeriodDays = stripe.Int64(checkoutTrialDays)
 	}
 	if s.foundersActive() {
