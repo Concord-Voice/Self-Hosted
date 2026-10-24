@@ -27,6 +27,10 @@ const (
 	billingMePath      = "/api/v1/subscriptions/me"
 	billingPlansPath   = "/api/v1/billing/plans"
 	billingCheckout    = "/api/v1/billing/checkout-session"
+	billingPlanChange  = "/api/v1/billing/plan-change"
+	billingPlanPreview = "/api/v1/billing/plan-change/preview"
+	billingPlanKeep    = "/api/v1/billing/plan-change/cancel"
+	billingCancelSub   = "/api/v1/billing/subscription-cancel"
 )
 
 // billingRouter builds the production router (api.NewRouter) over the test
@@ -86,6 +90,10 @@ func TestRouter_BillingRoutesOnlyWhenConfigured(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, serve(router, http.MethodPost, billingPortalPath, "{}", jsonHeader).Code)
 		assert.Equal(t, http.StatusNotFound, serve(router, http.MethodGet, billingPlansPath, "", nil).Code)
 		assert.Equal(t, http.StatusNotFound, serve(router, http.MethodPost, billingCheckout, "{}", jsonHeader).Code)
+		assert.Equal(t, http.StatusNotFound, serve(router, http.MethodPost, billingPlanChange, "{}", jsonHeader).Code)
+		for _, path := range []string{billingPlanPreview, billingPlanKeep, billingCancelSub} {
+			assert.Equal(t, http.StatusNotFound, serve(router, http.MethodPost, path, "{}", jsonHeader).Code)
+		}
 	})
 
 	t.Run("self-hosted with keys: neither route exists", func(t *testing.T) {
@@ -94,6 +102,10 @@ func TestRouter_BillingRoutesOnlyWhenConfigured(t *testing.T) {
 		assert.Equal(t, http.StatusNotFound, serve(router, http.MethodPost, billingPortalPath, "{}", jsonHeader).Code)
 		assert.Equal(t, http.StatusNotFound, serve(router, http.MethodGet, billingPlansPath, "", nil).Code)
 		assert.Equal(t, http.StatusNotFound, serve(router, http.MethodPost, billingCheckout, "{}", jsonHeader).Code)
+		assert.Equal(t, http.StatusNotFound, serve(router, http.MethodPost, billingPlanChange, "{}", jsonHeader).Code)
+		for _, path := range []string{billingPlanPreview, billingPlanKeep, billingCancelSub} {
+			assert.Equal(t, http.StatusNotFound, serve(router, http.MethodPost, path, "{}", jsonHeader).Code)
+		}
 	})
 
 	t.Run("test key: webhook rejects a bad signature, portal needs auth", func(t *testing.T) {
@@ -102,6 +114,10 @@ func TestRouter_BillingRoutesOnlyWhenConfigured(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, serve(router, http.MethodPost, billingPortalPath, "{}", jsonHeader).Code)
 		assert.Equal(t, http.StatusUnauthorized, serve(router, http.MethodGet, billingPlansPath, "", nil).Code)
 		assert.Equal(t, http.StatusUnauthorized, serve(router, http.MethodPost, billingCheckout, "{}", jsonHeader).Code)
+		assert.Equal(t, http.StatusUnauthorized, serve(router, http.MethodPost, billingPlanChange, "{}", jsonHeader).Code)
+		for _, path := range []string{billingPlanPreview, billingPlanKeep, billingCancelSub} {
+			assert.Equal(t, http.StatusUnauthorized, serve(router, http.MethodPost, path, "{}", jsonHeader).Code)
+		}
 	})
 
 	// Buying needs a verified email; the verified-email gate answers before

@@ -236,6 +236,46 @@ func TestGetMe_StripeObjectFields(t *testing.T) {
 	assert.NotContains(t, body, `"code"`)
 }
 
+func TestGetMe_StripeSubscriberPriceAndPendingChange(t *testing.T) {
+	h, _, db := newTestHandler(t)
+	user := testhelpers.CreateUser(t, db)
+	periodEnd := time.Now().UTC().Add(200 * 24 * time.Hour).Truncate(time.Second)
+	insertStripeRow(t, db, user, stripeRowSpec{
+		tier: "premium", plan: strPtr("wing"), interval: strPtr("year"),
+		foundersRate: true, periodEnd: periodEnd,
+	})
+	_, err := db.Exec(`UPDATE subscriptions SET stripe_unit_amount=$1, stripe_schedule_id=$2, pending_plan=$3,
+		pending_billing_interval=$4, pending_change_at=$5 WHERE user_id=$6 AND source='stripe'`,
+		8244, "sub_sched_test", "supersonic", "month", periodEnd, user)
+	require.NoError(t, err)
+	resp := getMeFor(t, h, user)
+	require.NotNil(t, resp.Stripe)
+	require.NotNil(t, resp.Stripe.UnitAmount)
+	assert.EqualValues(t, 8244, *resp.Stripe.UnitAmount)
+	assert.True(t, resp.Stripe.ScheduleAttached)
+	assert.Equal(t, strPtr("supersonic"), resp.Stripe.PendingPlan)
+	assert.Equal(t, strPtr("month"), resp.Stripe.PendingInterval)
+	assert.Equal(t, strPtr(periodEnd.Format(rfc3339)), resp.Stripe.PendingChangeAt)
+}
+
+func TestGetMe_AttachedScheduleWithoutPendingChange(t *testing.T) {
+	h, _, db := newTestHandler(t)
+	user := testhelpers.CreateUser(t, db)
+	periodEnd := time.Now().UTC().Add(200 * 24 * time.Hour).Truncate(time.Second)
+	insertStripeRow(t, db, user, stripeRowSpec{
+		tier: "premium", plan: strPtr("supersonic"), interval: strPtr("year"), periodEnd: periodEnd,
+	})
+	_, err := db.Exec(`UPDATE subscriptions SET stripe_schedule_id=$1
+		WHERE user_id=$2 AND source='stripe'`, "sub_sched_after_transition", user)
+	require.NoError(t, err)
+
+	resp := getMeFor(t, h, user)
+	require.NotNil(t, resp.Stripe)
+	assert.True(t, resp.Stripe.ScheduleAttached)
+	assert.Nil(t, resp.Stripe.PendingPlan)
+	assert.Nil(t, resp.Stripe.PendingChangeAt)
+}
+
 // TestGetMe_CancelingFlexibleMode: Stripe's flexible cancellation sets cancel_at
 // and leaves cancel_at_period_end false. The subscription is canceling and
 // ends at cancel_at, not at the period end.

@@ -1828,6 +1828,22 @@ func NewRouter(
 					middleware.RateLimitByUser(redis, 5, 10*time.Minute),
 					billingSvc.CheckoutSession,
 				)
+				protected.POST("/billing/plan-change",
+					middleware.RateLimitByUser(redis, 5, 10*time.Minute),
+					billingSvc.PlanChange,
+				)
+				protected.POST("/billing/plan-change/preview",
+					middleware.RateLimitByUser(redis, 10, 10*time.Minute),
+					billingSvc.PlanChangePreview,
+				)
+				protected.POST("/billing/plan-change/cancel",
+					middleware.RateLimitByUser(redis, 5, 10*time.Minute),
+					billingSvc.KeepCurrentPlan,
+				)
+				protected.POST("/billing/subscription-cancel",
+					middleware.RateLimitByUser(redis, 5, 10*time.Minute),
+					billingSvc.CancelSubscription,
+				)
 			}
 			// WebSocket ticket (short-lived, single-use)
 			protected.POST("/auth/ws-ticket",

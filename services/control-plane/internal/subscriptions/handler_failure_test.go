@@ -73,7 +73,7 @@ func TestGetMe_TrialEligibilityErrorKeepsStatus(t *testing.T) {
 		"tier":"premium","status":"trialing","source":"stripe",
 		"current_period_end":"2026-11-22T00:00:00Z","billing":"available","trial_available":false,
 		"stripe":{"plan":"supersonic","interval":"month","status":"trialing",
-			"current_period_end":"2026-11-22T00:00:00Z","canceling":false,"founders_rate":false}
+			"current_period_end":"2026-11-22T00:00:00Z","canceling":false,"founders_rate":false,"schedule_attached":false}
 	}`, w.Body.String())
 }
 
@@ -140,6 +140,7 @@ func (r *statusRows) Columns() []string {
 	return []string{
 		"tier", "status", "source", "current_period_end",
 		"plan", "billing_interval", "founders_rate", "cancel_at_period_end", "cancel_at",
+		"stripe_unit_amount", "stripe_schedule_id", "pending_plan", "pending_billing_interval", "pending_change_at",
 	}
 }
 func (statusRows) Close() error { return nil }

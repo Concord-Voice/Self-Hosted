@@ -101,7 +101,8 @@ const (
 		ON CONFLICT (event_id) DO NOTHING`
 
 	selectStoredRowSQL = `SELECT user_id, tier, status, stripe_customer_id, current_period_end,
-		cancel_at_period_end, plan, billing_interval, founders_rate, cancel_at
+		cancel_at_period_end, plan, billing_interval, founders_rate, cancel_at,
+		stripe_unit_amount, stripe_schedule_id, pending_plan, pending_billing_interval, pending_change_at
 		FROM subscriptions WHERE stripe_subscription_id = $1 FOR UPDATE`
 
 	// upsertRowSQL never changes user_id on conflict: a row stays with the
@@ -110,8 +111,9 @@ const (
 	// records that it ran (F27).
 	upsertRowSQL = `INSERT INTO subscriptions
 		(user_id, tier, status, source, stripe_customer_id, stripe_subscription_id,
-		 current_period_end, cancel_at_period_end, plan, billing_interval, founders_rate, cancel_at)
-		VALUES ($1, $2, $3, 'stripe', $4, $5, $6, $7, $8, $9, $10, $11)
+		 current_period_end, cancel_at_period_end, plan, billing_interval, founders_rate, cancel_at,
+		 stripe_unit_amount, stripe_schedule_id, pending_plan, pending_billing_interval, pending_change_at)
+		VALUES ($1, $2, $3, 'stripe', $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 		ON CONFLICT (stripe_subscription_id) WHERE stripe_subscription_id IS NOT NULL DO UPDATE SET
 		 tier = EXCLUDED.tier,
 		 status = EXCLUDED.status,
@@ -122,6 +124,11 @@ const (
 		 billing_interval = EXCLUDED.billing_interval,
 		 founders_rate = EXCLUDED.founders_rate,
 		 cancel_at = EXCLUDED.cancel_at,
+		 stripe_unit_amount = EXCLUDED.stripe_unit_amount,
+		 stripe_schedule_id = EXCLUDED.stripe_schedule_id,
+		 pending_plan = EXCLUDED.pending_plan,
+		 pending_billing_interval = EXCLUDED.pending_billing_interval,
+		 pending_change_at = EXCLUDED.pending_change_at,
 		 updated_at = NOW()`
 
 	// countLiveStripeRowsSQL concatenates the shared predicate as a constant.
@@ -305,6 +312,23 @@ func (s *Service) fetchSubscription(ctx context.Context, subID string) (rowField
 	if fields.CustomerID == "" {
 		s.Log.Error("billing: subscription has no customer; nothing written", logKeySubID, subID)
 		return rowFields{}, nil, fmt.Errorf("%w: no customer", ErrUnactionable)
+	}
+	booked, err := s.completeAuthenticatedMixedChange(ctx, sub)
+	if err != nil {
+		return rowFields{}, nil, withStage(stageFetchSub, fmt.Errorf("billing: reconcile: finish authenticated mixed change: %w", err))
+	}
+	if booked {
+		sub, err = s.Stripe.V1Subscriptions.Retrieve(ctx, subID, params)
+		if err != nil {
+			return rowFields{}, nil, withStage(stageFetchSub, fmt.Errorf("billing: reconcile: refresh mixed booking: %w", err))
+		}
+		fields, err = classify(sub)
+		if err != nil {
+			return rowFields{}, nil, fmt.Errorf("%w: no current period end", ErrUnactionable)
+		}
+	}
+	if err := s.classifyPendingChange(ctx, &fields); err != nil {
+		return rowFields{}, nil, withStage(stageFetchSub, fmt.Errorf("billing: reconcile: retrieve schedule: %w", err))
 	}
 	return fields, sub.Metadata, nil
 }
@@ -549,6 +573,7 @@ func (s *Service) upsertRow(ctx context.Context, tx *sql.Tx, payer uuid.UUID, in
 	if _, err := tx.ExecContext(ctx, upsertRowSQL,
 		payer, f.Tier, f.Status, f.CustomerID, in.subID,
 		f.PeriodEnd, f.CancelAtPeriodEnd, f.Plan, f.Interval, f.FoundersRate, f.CancelAt,
+		f.UnitAmount, f.ScheduleID, f.PendingPlan, f.PendingInterval, f.PendingChangeAt,
 	); err != nil {
 		return false, "", withStage(stageUpsert, fmt.Errorf("billing: reconcile: upsert subscription: %w", err))
 	}
@@ -572,7 +597,8 @@ func loadStoredRow(ctx context.Context, tx *sql.Tx, subID string) (storedRow, bo
 	var customer sql.NullString
 	err := tx.QueryRowContext(ctx, selectStoredRowSQL, subID).Scan(
 		&r.userID, &r.fields.Tier, &r.fields.Status, &customer, &r.periodEnd,
-		&r.fields.CancelAtPeriodEnd, &r.fields.Plan, &r.fields.Interval, &r.fields.FoundersRate, &r.fields.CancelAt)
+		&r.fields.CancelAtPeriodEnd, &r.fields.Plan, &r.fields.Interval, &r.fields.FoundersRate, &r.fields.CancelAt,
+		&r.fields.UnitAmount, &r.fields.ScheduleID, &r.fields.PendingPlan, &r.fields.PendingInterval, &r.fields.PendingChangeAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return storedRow{}, false, nil
 	}
@@ -594,7 +620,12 @@ func (r storedRow) sameAs(f rowFields) bool {
 		o.Plan == f.Plan &&
 		o.Interval == f.Interval &&
 		o.FoundersRate == f.FoundersRate &&
-		sameNullTime(o.CancelAt, f.CancelAt)
+		sameNullTime(o.CancelAt, f.CancelAt) &&
+		o.UnitAmount == f.UnitAmount &&
+		o.ScheduleID == f.ScheduleID &&
+		o.PendingPlan == f.PendingPlan &&
+		o.PendingInterval == f.PendingInterval &&
+		sameNullTime(o.PendingChangeAt, f.PendingChangeAt)
 }
 
 // sameNullTime compares two nullable instants by value, not by location.

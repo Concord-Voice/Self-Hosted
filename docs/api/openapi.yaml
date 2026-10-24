@@ -13836,6 +13836,212 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /billing/plan-change:
+    post:
+      tags: [Platform]
+      summary: Change the authenticated subscriber's Stripe plan
+      description: >-
+        Upgrades and monthly-to-yearly changes take effect now with Stripe proration;
+        downgrades and yearly-to-monthly changes wait until the paid period ends.
+        Supersonic yearly to Wing monthly upgrades to Wing yearly now, then books
+        Wing monthly. Wing monthly to Supersonic yearly waits entirely. A booked
+        change must be withdrawn with Keep current plan before another change.
+        Immediate changes require a fresh USD invoice preview amount and
+        proration timestamp. Scheduled changes also require the previewed
+        period end, so confirmation cannot silently move to a later renewal.
+        A payment requiring authentication remains a Stripe pending update
+        until the hosted invoice is paid. Rate limit 5 per 10 minutes.
+      operationId: changeBillingPlan
+      security:
+      - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan, interval, expected_effective]
+              properties:
+                plan:
+                  type: string
+                  enum: [supersonic, wing]
+                interval:
+                  type: string
+                  enum: [month, year]
+                expected_effective:
+                  type: string
+                  enum: [immediate, scheduled, immediate_then_scheduled]
+                expected_change_at:
+                  type: string
+                  format: date-time
+                  description: Required for a scheduled or immediate_then_scheduled change; change_at from the preview
+                quoted_amount_due:
+                  type: integer
+                  format: int64
+                  minimum: 0
+                  description: Required for an immediate change; USD cents from preview
+                proration_date:
+                  type: integer
+                  format: int64
+                  description: Required for an immediate change; timestamp from preview
+      responses:
+        '200':
+          description: Stripe accepted the immediate or booked change
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [effective]
+                properties:
+                  effective:
+                    type: string
+                    enum: [immediate, scheduled, immediate_then_scheduled]
+                  change_at:
+                    type: string
+                    format: date-time
+                  booking_failed:
+                    type: boolean
+                    description: True if the immediate mixed upgrade succeeded but its later interval change could not be booked
+        '202':
+          description: Payment authentication or a new payment method is needed before the change applies
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [effective, payment_status, payment_url]
+                properties:
+                  effective:
+                    type: string
+                    enum: [payment_pending]
+                  payment_status:
+                    type: string
+                    enum: [requires_action, card_declined, processing]
+                  payment_url:
+                    type: string
+                    format: uri
+                    description: Subscriber-only Stripe hosted invoice URL; treat as a bearer link
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Missing or invalid bearer token
+        '402':
+          description: '`card_declined`: payment method was declined'
+        '403':
+          description: Email not verified
+        '404':
+          description: No mapped live subscription
+        '409':
+          description: Same price, stale quote, pending cancellation, unmanaged schedule, `pending_plan_change` (withdraw the booked change first), or `payment_pending` (complete the previous invoice first)
+        '413':
+          description: Request body too large
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: Stripe or database failure
+  /billing/plan-change/preview:
+    post:
+      tags: [Platform]
+      summary: Preview the subscriber's proposed plan change
+      operationId: previewBillingPlanChange
+      security:
+      - BearerAuth: []
+      description: Stripe invoice preview supplies the amount due now for an immediate change. Rate limit 10 per 10 minutes.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [plan, interval]
+              properties:
+                plan:
+                  type: string
+                  enum: [supersonic, wing]
+                interval:
+                  type: string
+                  enum: [month, year]
+      responses:
+        '200':
+          description: Proposed timing and amount due now
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [effective, due_now, currency]
+                properties:
+                  effective:
+                    type: string
+                    enum: [immediate, scheduled, immediate_then_scheduled]
+                  due_now:
+                    type: integer
+                    format: int64
+                  currency:
+                    type: string
+                    enum: [usd]
+                  proration_date:
+                    type: integer
+                    format: int64
+                  change_at:
+                    type: string
+                    format: date-time
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          description: Missing or invalid bearer token
+        '403':
+          description: Email not verified
+        '404':
+          description: No mapped live subscription
+        '409':
+          description: Same price, pending cancellation, unmanaged schedule, `pending_plan_change` (withdraw the booked change first), or `payment_pending` (complete the previous invoice first)
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: Stripe or database failure
+  /billing/plan-change/cancel:
+    post:
+      tags: [Platform]
+      summary: Keep the current plan by withdrawing a booked change
+      operationId: keepCurrentBillingPlan
+      security:
+      - BearerAuth: []
+      responses:
+        '200':
+          description: App-owned booking released
+        '401':
+          description: Missing or invalid bearer token
+        '403':
+          description: Email not verified
+        '404':
+          description: No mapped live subscription
+        '409':
+          description: No app-owned active booking
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: Stripe or database failure
+  /billing/subscription-cancel:
+    post:
+      tags: [Platform]
+      summary: Confirm period-end cancellation of a booked subscription
+      operationId: cancelBookedSubscription
+      security:
+      - BearerAuth: []
+      responses:
+        '200':
+          description: Stripe subscription set to cancel at period end; app-owned booking released
+        '401':
+          description: Missing or invalid bearer token
+        '403':
+          description: Email not verified
+        '404':
+          description: No mapped live subscription
+        '409':
+          description: Subscription already canceling or schedule unmanaged
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '503':
+          description: Stripe or database failure
   /servers/{id}/audit-log:
     get:
       tags:
@@ -20374,6 +20580,7 @@ components:
       - current_period_end
       - canceling
       - founders_rate
+      - schedule_attached
       properties:
         plan:
           type: string
@@ -20412,6 +20619,25 @@ components:
         founders_rate:
           type: boolean
           description: True when the founders-rate coupon applies to the subscription.
+        unit_amount:
+          type: integer
+          format: int64
+          description: Subscriber's USD price in cents after the Founders discount, rounded down. Absent until Stripe has supplied a usable price.
+        schedule_attached:
+          type: boolean
+          description: True while Stripe still links a schedule to the subscription, including after a booked change takes effect. The desktop uses in-app cancellation while true.
+        pending_plan:
+          type: string
+          enum: [supersonic, wing]
+          description: Booked next-period plan, when present.
+        pending_interval:
+          type: string
+          enum: [month, year]
+          description: Booked next-period interval, when present.
+        pending_change_at:
+          type: string
+          format: date-time
+          description: When the booked change takes effect, when present.
     SubscriptionCode:
       type: object
       description: The user's first live code-redeemed row. Present only when the

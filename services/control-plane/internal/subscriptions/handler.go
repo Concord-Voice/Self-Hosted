@@ -66,6 +66,11 @@ type StripeDTO struct {
 	Canceling        bool    `json:"canceling"`
 	EndsAt           *string `json:"ends_at,omitempty"`
 	FoundersRate     bool    `json:"founders_rate"`
+	UnitAmount       *int64  `json:"unit_amount,omitempty"`
+	ScheduleAttached bool    `json:"schedule_attached"`
+	PendingPlan      *string `json:"pending_plan,omitempty"`
+	PendingInterval  *string `json:"pending_interval,omitempty"`
+	PendingChangeAt  *string `json:"pending_change_at,omitempty"`
 }
 
 // CodeDTO describes the user's live code-sourced row.
@@ -106,7 +111,8 @@ func NewHandler(db *sql.DB, log *logger.Logger, billingState string) *Handler {
 // sorts first), then id so the pick is deterministic. Both operands of the
 // concatenation are constants.
 const getMeQuery = `SELECT tier, status, source, current_period_end,
-	       plan, billing_interval, founders_rate, cancel_at_period_end, cancel_at
+	       plan, billing_interval, founders_rate, cancel_at_period_end, cancel_at,
+	       stripe_unit_amount, stripe_schedule_id, pending_plan, pending_billing_interval, pending_change_at
 	  FROM subscriptions
 	 WHERE user_id = $1 AND ` + entitlements.LiveRowPredicate + `
 	 ORDER BY CASE WHEN tier = 'premium' THEN 0 ELSE 1 END,
@@ -127,11 +133,17 @@ type liveRow struct {
 	foundersRate         bool
 	cancelAtPeriodEnd    bool
 	cancelAt             sql.NullTime
+	unitAmount           sql.NullInt64
+	scheduleID           sql.NullString
+	pendingPlan          sql.NullString
+	pendingInterval      sql.NullString
+	pendingChangeAt      sql.NullTime
 }
 
 func (r *liveRow) scan(rows *sql.Rows) error {
 	return rows.Scan(&r.tier, &r.status, &r.source, &r.periodEnd,
-		&r.plan, &r.interval, &r.foundersRate, &r.cancelAtPeriodEnd, &r.cancelAt)
+		&r.plan, &r.interval, &r.foundersRate, &r.cancelAtPeriodEnd, &r.cancelAt,
+		&r.unitAmount, &r.scheduleID, &r.pendingPlan, &r.pendingInterval, &r.pendingChangeAt)
 }
 
 // rfc3339UTC formats t as an RFC 3339 UTC timestamp.
@@ -162,11 +174,18 @@ func nullStringPtr(s sql.NullString) *string {
 // period end when cancel_at_period_end, else absent (spec §8).
 func (r *liveRow) stripeDTO() *StripeDTO {
 	dto := &StripeDTO{
-		Plan:         nullStringPtr(r.plan),
-		Interval:     nullStringPtr(r.interval),
-		Status:       r.status,
-		Canceling:    r.cancelAtPeriodEnd || r.cancelAt.Valid,
-		FoundersRate: r.foundersRate,
+		Plan:             nullStringPtr(r.plan),
+		Interval:         nullStringPtr(r.interval),
+		Status:           r.status,
+		Canceling:        r.cancelAtPeriodEnd || r.cancelAt.Valid,
+		FoundersRate:     r.foundersRate,
+		ScheduleAttached: r.scheduleID.Valid,
+		PendingPlan:      nullStringPtr(r.pendingPlan),
+		PendingInterval:  nullStringPtr(r.pendingInterval),
+		PendingChangeAt:  nullTimeString(r.pendingChangeAt),
+	}
+	if r.unitAmount.Valid {
+		dto.UnitAmount = &r.unitAmount.Int64
 	}
 	if r.periodEnd.Valid {
 		dto.CurrentPeriodEnd = rfc3339UTC(r.periodEnd.Time)

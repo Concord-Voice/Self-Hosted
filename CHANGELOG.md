@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+Subscribers can change plans in Settings and see the amount due before an
+immediate switch. They can withdraw a change booked for renewal before choosing another.
+Scheduled confirmations stay tied to the renewal date shown in their preview.
+If a card needs authentication, Stripe opens its hosted invoice page and applies
+the plan change after payment succeeds.
+Opening billing no longer withdraws a booked change, and confirming cancellation
+keeps access through the paid period, including after a scheduled change takes
+effect. The plan card shows the subscriber's
+actual Stripe price, including a Founders rate.
 New subscribers get a 30-day free trial. Your card is collected up front, and
 billing starts when the trial ends unless you cancel.
 

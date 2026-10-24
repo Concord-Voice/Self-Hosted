@@ -118,7 +118,8 @@ func (c *notificationOrderConn) QueryContext(_ context.Context, q string, _ []dr
 	case lockPayerSQL:
 		return notificationOrderResult(int64(1)), nil
 	case selectStoredRowSQL:
-		return notificationOrderResult(c.s.user, c.s.tier, c.s.status, "cus_scan", c.s.end, false, "wing", "year", false, nil), nil
+		return notificationOrderResult(c.s.user, c.s.tier, c.s.status, "cus_scan", c.s.end, false, "wing", "year", false, nil,
+			int64(16489), nil, nil, nil, nil), nil
 	case countLiveStripeRowsSQL:
 		if c.s.status == "active" {
 			return notificationOrderResult(int64(1)), nil

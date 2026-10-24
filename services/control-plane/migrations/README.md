@@ -83,7 +83,7 @@ DROP INDEX IF EXISTS idx_users_status;
 ALTER TABLE users DROP COLUMN IF EXISTS status;
 ```
 
-## Existing Migrations (000001–000186)
+## Existing Migrations (000001–000187)
 
 ### Phase 1A — Authentication & E2EE
 | # | Name | Tables/Changes |
@@ -296,6 +296,7 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000184 | feedback_screenshot_backend | Stores the selected backend in the screenshot lifecycle ledger for deferred offload; rollback refuses while live or potentially written vendor placements exist |
 | 000185 | token_theft_pending_revocations | Records pending theft-triggered refresh-token sweeps; rollback requires certified empty Redis fallbacks and an empty recovery table |
 | 000186 | billing_credit_outbox | Pending D1 code credits, committed with the code claim and applied to Stripe afterwards; down refuses while any credit is pending |
+| 000187 | subscription_plan_changes | Stores each subscriber's discounted Stripe unit amount and the app-owned pending plan change; rollback refuses while Stripe subscriptions exist (#2033; 000186 belongs to #4085) |
 
 ### Message key-version constraints (migrations 000171–000176, #2844)
 
