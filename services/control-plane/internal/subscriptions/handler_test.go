@@ -87,6 +87,7 @@ func TestGetMe_ActivePremiumFromCode(t *testing.T) {
 	assert.Equal(t, "premium", resp.Tier)
 	assert.Equal(t, "active", resp.Status)
 	assert.Equal(t, "code", resp.Source)
+	assert.True(t, resp.TrialAvailable, "a code grant does not consume the Stripe trial")
 	require.NotNil(t, resp.CurrentPeriodEnd)
 	assert.Equal(t, expiry.Format("2006-01-02T15:04:05Z07:00"), *resp.CurrentPeriodEnd)
 }
@@ -105,6 +106,7 @@ func TestGetMe_NoRowFreeDefault(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "free", resp.Tier)
 	assert.Equal(t, "none", resp.Status)
+	assert.True(t, resp.TrialAvailable)
 	assert.Empty(t, resp.Source)
 	assert.Nil(t, resp.CurrentPeriodEnd)
 }
@@ -144,6 +146,7 @@ func TestGetMe_CanceledRowFreeDefault(t *testing.T) {
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	assert.Equal(t, "free", resp.Tier)
 	assert.Equal(t, "none", resp.Status)
+	assert.False(t, resp.TrialAvailable, "canceling a trial cannot restore eligibility")
 }
 
 func TestGetMe_ActivePremiumFromStripe(t *testing.T) {

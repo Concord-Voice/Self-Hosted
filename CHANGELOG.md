@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+New subscribers get a 30-day free trial. Your card is collected up front, and
+billing starts when the trial ends unless you cancel.
+
 Settings ▸ Subscription is ready for paid plans. Once purchasing opens, it
 lists each plan with its monthly and yearly price, shows your current plan, and
 opens a secure Stripe page to subscribe or manage billing.

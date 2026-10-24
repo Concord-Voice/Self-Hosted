@@ -104,19 +104,21 @@ func TestCheckout_CreatesSessionWithExpectedParams(t *testing.T) {
 	require.Len(t, sessions, 1)
 	f := sessions[0].Form
 	want := map[string]string{
-		"mode":                            "subscription",
-		"customer":                        cus,
-		"client_reference_id":             user.String(),
-		"line_items[0][price]":            "price_WY",
-		"line_items[0][quantity]":         "1",
-		"allowed_payment_method_types[0]": "card",
-		"adaptive_pricing[enabled]":       "false",
+		"mode":                                         "subscription",
+		"customer":                                     cus,
+		"client_reference_id":                          user.String(),
+		"line_items[0][price]":                         "price_WY",
+		"line_items[0][quantity]":                      "1",
+		"allowed_payment_method_types[0]":              "card",
+		"payment_method_collection":                    "always",
+		"subscription_data[trial_period_days]":         "30",
+		"adaptive_pricing[enabled]":                    "false",
 		"subscription_data[metadata][concord_user_id]": user.String(),
 		"subscription_data[metadata][concord_env]":     testEnvironment,
 		"subscription_data[metadata][concord_plan]":    PlanWing,
-		"success_url":          ReturnURLCheckoutSuccess,
-		"cancel_url":           ReturnURLCheckoutCancel,
-		"discounts[0][coupon]": CouponFoundersID,
+		"success_url":                                  ReturnURLCheckoutSuccess,
+		"cancel_url":                                   ReturnURLCheckoutCancel,
+		"discounts[0][coupon]":                         CouponFoundersID,
 	}
 	want["expires_at"] = strconv.FormatInt(env.Now.Add(35*time.Minute).Unix(), 10)
 	for k, v := range want {
@@ -139,6 +141,29 @@ func TestCheckout_ReusesMappingAndStampsIt(t *testing.T) {
 	require.Len(t, sessions, 1)
 	assert.Equal(t, "cus_existing", sessions[0].Form.Get("customer"))
 	assert.NotNil(t, lastCheckoutAt(t, env, user))
+}
+
+func TestCheckout_CodeGrantDoesNotConsumeTrial(t *testing.T) {
+	env := newCheckoutEnv(t, foundersConfig(config.BillingPurchaseModeOn))
+	user := dbtest.CreateUser(t, env.DB)
+	seedLiveCodeSub(t, env.DB, user)
+
+	require.Equal(t, http.StatusCreated, postCheckout(env.Svc, user, bodyWingYearly).Code)
+	sessions := env.Fake.requestsTo(http.MethodPost, sessionsListPath)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "30", sessions[0].Form.Get("subscription_data[trial_period_days]"))
+}
+
+func TestCheckout_HistoryReadFailureFailsClosed(t *testing.T) {
+	env := newCheckoutEnv(t, config.BillingConfig{PurchaseMode: config.BillingPurchaseModeOn})
+	user := dbtest.CreateUser(t, env.DB)
+	broken, err := sql.Open("postgres", "postgres://unused:unused@127.0.0.1:1/unused?sslmode=disable")
+	require.NoError(t, err)
+	require.NoError(t, broken.Close())
+	env.Svc.DB = broken
+
+	requireError(t, postCheckout(env.Svc, user, bodyWingYearly), http.StatusServiceUnavailable, "billing_unavailable")
+	assert.Empty(t, env.Fake.writes(), "a failed history read must not create a Customer or Checkout")
 }
 
 func TestCheckout_ModeOffAndNotAllowlistedAreIdentical(t *testing.T) {
@@ -204,6 +229,10 @@ func TestCheckout_EndedSubscriptionDoesNotBlock(t *testing.T) {
 	user := newPayer(t, env.testEnv, "cus_payer")
 	seedStripeSub(t, env.DB, user, "sub_old", "cus_payer", "canceled", time.Now().Add(-48*time.Hour))
 	assert.Equal(t, http.StatusCreated, postCheckout(env.Svc, user, bodyWingYearly).Code)
+	sessions := env.Fake.requestsTo(http.MethodPost, sessionsListPath)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "always", sessions[0].Form.Get("payment_method_collection"))
+	assert.False(t, sessions[0].Form.Has("subscription_data[trial_period_days]"), "a canceled subscription must not reset the trial")
 }
 
 func TestCheckout_ExpiresOpenSessionsFirst(t *testing.T) {

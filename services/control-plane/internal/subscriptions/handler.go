@@ -52,6 +52,7 @@ type StatusDTO struct {
 	Source           string     `json:"source,omitempty"`
 	CurrentPeriodEnd *string    `json:"current_period_end,omitempty"`
 	Billing          string     `json:"billing"`
+	TrialAvailable   bool       `json:"trial_available"`
 	Stripe           *StripeDTO `json:"stripe,omitempty"`
 	Code             *CodeDTO   `json:"code,omitempty"`
 }
@@ -112,6 +113,11 @@ const getMeQuery = `SELECT tier, status, source, current_period_end,
 	          CASE WHEN source = 'stripe' THEN 0 ELSE 1 END,
 	          current_period_end DESC NULLS FIRST,
 	          id`
+
+// Canceled and expired Stripe rows remain in subscriptions. Their existence
+// excludes a second trial even when the account currently has no live row.
+const trialAvailableQuery = `SELECT NOT EXISTS (
+	SELECT 1 FROM subscriptions WHERE user_id = $1 AND source = 'stripe')`
 
 // liveRow is one scanned row of getMeQuery.
 type liveRow struct {
@@ -232,7 +238,8 @@ func (h *Handler) readLiveRows(ctx context.Context, userID string) ([]liveRow, e
 // honors (see getMeQuery), "stripe" and "code" describe the first live row of
 // each source, and "billing" reports whether billing exists on this instance.
 // No live row returns the free-default shape. Query, scan or iteration errors
-// return 503 without confirming a tier.
+// in the live-row read return 503 without confirming a tier. A failed trial
+// eligibility read defaults to false while preserving the subscription status.
 func (h *Handler) GetMe(c *gin.Context) {
 	userID := c.GetString("user_id")
 
@@ -244,5 +251,12 @@ func (h *Handler) GetMe(c *gin.Context) {
 		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "subscription status unavailable"})
 		return
 	}
-	c.JSON(http.StatusOK, h.buildStatus(live))
+	var trialAvailable bool
+	if err := h.db.QueryRowContext(c.Request.Context(), trialAvailableQuery, userID).Scan(&trialAvailable); err != nil {
+		h.log.Error("subscriptions: trial eligibility read failed", "user_id", sanitizeID(userID), "error", err.Error())
+		trialAvailable = false
+	}
+	status := h.buildStatus(live)
+	status.TrialAvailable = trialAvailable
+	c.JSON(http.StatusOK, status)
 }

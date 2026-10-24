@@ -13753,8 +13753,12 @@ paths:
         The server picks everything else: the active Stripe price for the plan, the
         caller''s Stripe Customer (created on first use, with no email or name), the
         founders discount while founders pricing runs, card as the only payment
-        method, a 35-minute expiry, and fixed return URLs. Any open Checkout of the
-        caller is expired first.
+        method, a 35-minute expiry, and fixed return URLs. A card is collected
+        up front. An account with no historical Stripe subscription gets a
+        30-day trial; at its end the chosen plan is charged unless canceled.
+        Accounts with an earlier canceled or expired Stripe subscription are
+        charged without another trial. Any open Checkout of the caller is
+        expired first.
 
 
         Rate limit: 5 requests per 10 minutes.
@@ -20308,6 +20312,7 @@ components:
       - tier
       - status
       - billing
+      - trial_available
       properties:
         tier:
           type: string
@@ -20347,6 +20352,11 @@ components:
           - not_configured
           - available
           example: not_configured
+        trial_available:
+          type: boolean
+          description: Advisory eligibility for the first 30-day trial, based on
+            all historical Stripe subscription rows. Checkout rechecks it in
+            Postgres before creating a session.
         stripe:
           $ref: '#/components/schemas/SubscriptionStripe'
         code:
