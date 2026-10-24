@@ -418,8 +418,8 @@ PY
 
     def test_actual_reusable_workflows_consume_selection_and_protect_verdicts(self):
         root = CHECKER.parents[3]
-        # Self-Hosted keeps the non-desktop hotfix gates; Sonar waits for F7.
-        names = ("pr-ci.yml", "main-ci.yml", "nightly-ci.yml", "codeql.yml", "semgrep.yml",
+        # Self-Hosted: main-ci.yml stays with Desktop; Sonar waits for F7.
+        names = ("pr-ci.yml", "nightly-ci.yml", "codeql.yml", "semgrep.yml",
                  "eslint-sarif.yml", "govulncheck.yml", "build.yml")
         workflows = {name: yaml.load((root / ".github/workflows" / name).read_text(),
                                      Loader=yaml.BaseLoader) for name in names}
@@ -427,7 +427,7 @@ PY
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         consumers = {name: workflows[name] for name in names
-                     if name not in ("pr-ci.yml", "main-ci.yml", "nightly-ci.yml")}
+                     if name not in ("pr-ci.yml", "nightly-ci.yml")}
         # The shared static policy predates the protected caller input. Validate
         # its ordinary-call behavior using the input's declared default, then
         # separately pin the actual caller expression below.
@@ -435,7 +435,7 @@ PY
         for name in ("semgrep", "eslint", "govulncheck"):
             ordinary_pr["jobs"][name]["with"]["external-verdict"] = "false"
         module.check_scan_consumer_policies(ordinary_pr, consumers,
-                                             workflows["main-ci.yml"], workflows["nightly-ci.yml"])
+                                             None, workflows["nightly-ci.yml"])
         for name in ("semgrep", "eslint", "govulncheck"):
             self.assertEqual(workflows["pr-ci.yml"]["jobs"][name]["with"]["external-verdict"],
                              "${{ inputs.enforcement-only == true }}")
