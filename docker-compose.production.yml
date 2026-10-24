@@ -97,6 +97,7 @@ services:
       - "--static-auth-secret=${TURN_SECRET:?TURN_SECRET must be set}"
       - "--realm=${TURN_REALM:-${DOMAIN:?DOMAIN must be set}}"
       - --listening-ip=0.0.0.0
+      - "--external-ip=${PUBLIC_IP}/${PUBLIC_IP}"
       - "--external-ip=${PUBLIC_IP:?PUBLIC_IP must be set}"
       - --cert=/etc/coturn/certs/cert.pem
       - --pkey=/etc/coturn/certs/key.pem
