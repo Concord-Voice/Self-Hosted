@@ -23,10 +23,12 @@ func planChangeEnv(t *testing.T, plan, interval string, coupons ...string) (*tes
 	t.Helper()
 	fake := newFakeStripe(t)
 	fake.seedCatalog()
-	fake.seedSubscription("sub_change", "cus_change", plan, interval, planChangePeriodEnd, coupons...)
+	sub := fake.seedSubscription("sub_change", "cus_change", plan, interval, planChangePeriodEnd, coupons...)
 	env := newTestService(t, fake)
 	env.Svc.now = func() time.Time { return time.Unix(1800000000, 0) }
 	user := newPayer(t, env, "cus_change")
+	sub.Metadata[metadataKeyEnv] = env.Svc.Environment
+	sub.Metadata[metadataKeyUserID] = user.String()
 	_, err := env.Svc.Reconcile(t.Context(), "sub_change", "", "")
 	require.NoError(t, err)
 	return env, user

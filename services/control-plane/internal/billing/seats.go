@@ -390,13 +390,13 @@ func (s *Service) afterSeatCommit(ctx context.Context, out seatOutcome) {
 		// transaction left it, so a delayed push cannot restore a stale one.
 		// ponytail: read-then-push still leaves a sub-millisecond window; a
 		// per-user push sequence would close it if that ever matters.
-		if cur, err := entitlements.ResolveTierChecked(ctx, s.DB, m.user.String()); err == nil {
+		notifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tierNotificationTimeout)
+		if cur, err := entitlements.ResolveTierChecked(notifyCtx, s.DB, m.user.String()); err == nil {
 			m.after = cur
 		} else {
 			s.Log.Warn("billing: tier re-read before a seat push failed; pushing the committed tier",
 				logKeyErrorClass, errorClass(err))
 		}
-		notifyCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), tierNotificationTimeout)
 		if err := s.Changer.OnTierChange(notifyCtx, m.user, m.before, m.after); err != nil {
 			s.Log.Error("billing: tier change push failed after a seat change",
 				logKeyErrorClass, errorClass(err), logKeyStage, stageTierPush)

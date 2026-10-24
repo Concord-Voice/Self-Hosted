@@ -6,6 +6,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+Billing recovery now checks environment ownership before changing a subscription,
+and canceled seat requests still notify members using their current tier. The
+mobile pod's public homepage also lets the public source mirror publish again.
+
 Self-hosted calls that go through the bundled TURN relay no longer fail when the
 relay and the media server share one public address.
 
@@ -143,6 +147,8 @@ you verify your email.
 - **Up Arrow edits your last message** ([#1959](internal development reference omitted)) — in an empty message box, Up Arrow opens your most recent message for editing, in channels, direct messages and voice text chat. It keeps its usual cursor behaviour while the box holds text, a reply or an attached file, while an input method is composing, and with Shift, Ctrl, Alt or Cmd held. When your newest message is still sending, failed to send or cannot be read, Up Arrow does nothing rather than opening an older message. Any message edit now opens with the cursor at the end of the text, saving or cancelling it returns focus to the message box you were using, and the edit box has an accessible name. If an edit cannot be saved, the edit box opens again with your text. An edit you leave open closes when you switch channels, and a message that cannot be read offers Delete but not Edit.
 
 ### Fixed
+
+- **Billing recovery and public mirror publication** ([PR #4110](internal development reference omitted)) — recovery changes only subscriptions owned by its environment, and canceled seat requests still notify members using their current tier. The mobile podspec's public homepage lets the source mirror publish.
 
 - **Calls keep mute and deafen choices through recovery** ([PR #4086](internal development reference omitted)) — reconnecting after an outage or falling back from encrypted voice no longer turns your microphone or speakers back on. Direct message calls also retain their call type when they rejoin.
 - **Offscreen attachments release decrypted memory** ([PR #4086](internal development reference omitted)) — images, videos and manually loaded audio in chat history stop holding their decrypted data after they scroll away and are no longer in use. Busy public profile-photo requests use the default silhouette when the image service is at capacity.

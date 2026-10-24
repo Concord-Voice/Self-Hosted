@@ -316,7 +316,10 @@ func (s *Service) fetchSubscription(ctx context.Context, subID string) (rowField
 		s.Log.Error("billing: subscription has no customer; nothing written", logKeySubID, subID)
 		return rowFields{}, nil, fmt.Errorf("%w: no customer", ErrUnactionable)
 	}
-	booked, err := s.completeAuthenticatedMixedChange(ctx, sub)
+	booked := false
+	if sub.Metadata[metadataKeyEnv] == s.Environment {
+		booked, err = s.completeAuthenticatedMixedChange(ctx, sub)
+	}
 	if err != nil {
 		return rowFields{}, nil, withStage(stageFetchSub, fmt.Errorf("billing: reconcile: finish authenticated mixed change: %w", err))
 	}

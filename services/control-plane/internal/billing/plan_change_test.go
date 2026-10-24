@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/stripe/stripe-go/v87"
@@ -121,4 +123,46 @@ func TestClassifyPendingChange(t *testing.T) {
 	fake.failOn("GET", "/v1/subscription_schedules/sub_sched_test", 500, serverErrorBody)
 	f.ScheduleID = fields.ScheduleID
 	require.Error(t, svc.classifyPendingChange(t.Context(), &f))
+}
+
+func TestFetchSubscription_MixedRecoveryRequiresEnvironmentOwnership(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		environment string
+		owned       bool
+	}{
+		{"foreign environment makes no writes", "other-dev-box", false},
+		{"missing environment makes no writes", "", false},
+		{"local environment books schedule", "this-dev-box", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := newFakeStripe(t)
+			fake.seedCatalog()
+			sub := fake.seedSubscription("sub_mixed_environment", "cus_mixed_environment", PlanWing, "year", 1900000000)
+			sub.Metadata = map[string]string{
+				metadataKeyUserID: "11111111-1111-4111-8111-111111111111",
+				planChangeMixedAt: time.Unix(1900000000, 0).UTC().Format(time.RFC3339),
+			}
+			if tc.environment != "" {
+				sub.Metadata[metadataKeyEnv] = tc.environment
+			}
+			svc := NewService(Deps{Stripe: fake.client(), Environment: "this-dev-box", Log: logger.NewWithWriter(&syncBuffer{})})
+			svc.now = func() time.Time { return time.Unix(1800000000, 0) }
+
+			fields, metadata, err := svc.fetchSubscription(t.Context(), sub.ID)
+			require.NoError(t, err)
+			_, payerErr := svc.payerFromMetadata(reconcileInput{subID: sub.ID, fields: fields, metadata: metadata})
+			writes := fake.requestsTo("POST", "/v1/subscriptions/"+sub.ID)
+			creates := fake.requestsTo("POST", "/v1/subscription_schedules")
+			if tc.owned {
+				require.NoError(t, payerErr)
+				assert.Len(t, creates, 1, "owned mixed recovery must create its schedule")
+				assert.NotEmpty(t, sub.Schedule, "created schedule must attach to the subscription")
+			} else {
+				require.ErrorIs(t, payerErr, ErrUnactionable)
+				assert.Empty(t, writes, "environment refusal must precede subscription metadata mutation")
+				assert.Empty(t, creates, "environment refusal must precede schedule creation")
+			}
+		})
+	}
 }
