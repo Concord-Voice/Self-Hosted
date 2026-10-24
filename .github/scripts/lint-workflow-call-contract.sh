@@ -76,6 +76,20 @@ failures: list[str] = []
 _cache: dict[tuple[pathlib.Path, str | None], dict] = {}
 
 
+def bootstrap_workflow_source(path: pathlib.Path, ref: str) -> str | None:
+    """Use the proposed callee until protected main contains this first port."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    def git(*args: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(["git", "-C", str(ROOT), *args], capture_output=True,
+                              text=True, env=env)
+
+    if (git("cat-file", "-e", "origin/main:.github/workflows/required-pr-build.yml").returncode == 0
+            or git("merge-base", "--is-ancestor", ref, "origin/main").returncode != 0
+            or git("cat-file", "-e", f"{ref}:{path.relative_to(ROOT)}").returncode == 0):
+        return None
+    return path.read_text() if path.is_file() else None
+
+
 def local_callee(uses: str, ref: str | None = None) -> tuple[pathlib.Path, str | None] | None:
     if uses.startswith("./"):
         return ROOT / uses[2:], ref
@@ -91,10 +105,17 @@ def load(path: pathlib.Path, ref: str | None = None) -> dict:
     key = path, ref
     if key not in _cache:
         try:
-            source = (subprocess.run(["git", "-C", str(ROOT), "show", f"{ref}:{path.relative_to(ROOT)}"],
-                                     check=True, capture_output=True, text=True,
-                                     env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")}).stdout
-                      if ref else path.read_text())
+            if ref:
+                pinned = subprocess.run(
+                    ["git", "-C", str(ROOT), "show", f"{ref}:{path.relative_to(ROOT)}"],
+                    capture_output=True, text=True,
+                    env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+                )
+                source = pinned.stdout if pinned.returncode == 0 else bootstrap_workflow_source(path, ref)
+                if source is None:
+                    pinned.check_returncode()
+            else:
+                source = path.read_text()
             doc = yaml.safe_load(source) or {}
         except (yaml.YAMLError, OSError, subprocess.CalledProcessError) as exc:
             print(f"ERROR: {path.relative_to(ROOT)}: workflow unavailable or unparseable at {ref or 'checkout'}: {exc}", file=sys.stderr)

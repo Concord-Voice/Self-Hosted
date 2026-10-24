@@ -24,6 +24,20 @@ FORBIDDEN_ACTIONS = (
 )
 
 
+def bootstrap_workflow_source(root: Path, ref: str, relative_path: str) -> str | None:
+    """Read a proposed callee while protected main still predates this CI port."""
+    git = lambda *args: subprocess.run(
+        ["git", "-C", str(root), *args], capture_output=True, text=True,
+        env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+    )
+    if (git("cat-file", "-e", f"origin/main:{REQUIRED_WORKFLOW}").returncode == 0
+            or git("merge-base", "--is-ancestor", ref, "origin/main").returncode != 0
+            or git("cat-file", "-e", f"{ref}:{relative_path}").returncode == 0):
+        return None
+    proposed = root / relative_path
+    return proposed.read_text() if proposed.is_file() else None
+
+
 def reachable_actions(root: Path, workflow_path: str) -> list[tuple[str, str, tuple[str, ...]]]:
     """Return forbidden action refs and their local-workflow call paths."""
     found = []
@@ -33,10 +47,17 @@ def reachable_actions(root: Path, workflow_path: str) -> list[tuple[str, str, tu
         if (ref, relative_path) in visiting:
             return
         visiting.add((ref, relative_path))
-        source = (subprocess.run(["git", "-C", str(root), "show", f"{ref}:{relative_path}"],
-                                 check=True, capture_output=True, text=True,
-                                 env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")}).stdout
-                  if ref else (root / relative_path).read_text())
+        if ref:
+            pinned = subprocess.run(
+                ["git", "-C", str(root), "show", f"{ref}:{relative_path}"],
+                capture_output=True, text=True,
+                env={k: v for k, v in os.environ.items() if not k.startswith("GIT_")},
+            )
+            source = pinned.stdout if pinned.returncode == 0 else bootstrap_workflow_source(root, ref, relative_path)
+            if source is None:
+                pinned.check_returncode()
+        else:
+            source = (root / relative_path).read_text()
         document = yaml.load(source, Loader=yaml.BaseLoader)
         for job_id, job in document.get("jobs", {}).items():
             job_path = call_path + (f"{relative_path}:jobs.{job_id}",)
