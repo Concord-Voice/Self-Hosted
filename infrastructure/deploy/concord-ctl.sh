@@ -4155,6 +4155,51 @@ print(json.dumps({"operation":"register","rotationId":s["rotationId"],"instances
   python3 -c 'import json,sys; v=json.load(sys.stdin); raise SystemExit(0 if v.get("state") in ("prepared","promoted","finalized") else 1)' <<<"$response"
 }
 
+# In-place rotation on the single-media profile: register the running, already
+# bound control-plane and media-plane instances as the new rotation's expected
+# set, so their ACKs for the new target count. No container is created, stopped
+# or started. Each instance must be the slot's current binding and must hold an
+# accepted ACK proof from the prior rotation; anything else needs redis-managed-rebuild.
+redis_managed_register_running_locked() {
+  local status service ids hostname registration response
+  local -a cp_hosts=() media_hosts=() cp_ids=() media_ids=()
+  [[ $# -eq 0 ]] || { echo 'Usage: concord-ctl.sh redis-managed-register-running' >&2; return 2; }
+  [[ "${MEDIA_DEPLOY_PROFILE:-media-single}" == media-single ]] || {
+    echo 'redis-managed: register-running is for the single-media profile; blue/green deploys register their own candidates' >&2; return 1;
+  }
+  [[ ! -e "$REDIS_MANAGED_REBUILD_MARKER" && ! -L "$REDIS_MANAGED_REBUILD_MARKER" ]] || {
+    echo 'redis-managed: interrupted rebuild requires redis-managed-rebuild --resume; refusing registration' >&2; return 1;
+  }
+  redis_managed_host_preflight || return 1
+  status="$(redis_managed_control_request '{"operation":"status"}')" || return 1
+  redis_managed_require_candidate_state "$status" || return 1
+  python3 -c 'import json,sys; s=json.load(sys.stdin); raise SystemExit(0 if s.get("state")=="prepared" and "instances" not in s and "priorAckProofs" in s else 1)' <<<"$status" || {
+    echo 'redis-managed: register-running needs a new rotation awaiting registration' >&2; return 1;
+  }
+  for service in control-plane media-plane; do
+    ids="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps --status running -q "$service")" || return 1
+    [[ "$ids" =~ ^[a-f0-9]{64}$ ]] || { echo "redis-managed: expected one running ${service}" >&2; return 1; }
+    hostname="$(docker inspect --type container --format '{{.Config.Hostname}}' "$ids")" || return 1
+    [[ "$hostname" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]{0,62}$ ]] || return 1
+    redis_managed_assert_compatible_image "$ids" "$service" || return 1
+    if [[ "$service" == control-plane ]]; then cp_hosts+=("$hostname"); cp_ids+=("$ids"); else media_hosts+=("$hostname"); media_ids+=("$ids"); fi
+  done
+  registration="$(python3 -c '
+import json, sys
+s=json.loads(sys.argv[1])
+running={"control-plane":(sys.argv[2],sys.argv[3]),"media-plane":(sys.argv[4],sys.argv[5])}
+proofs={(p["slot"],p["instanceId"],p["containerId"]) for p in s["priorAckProofs"]}
+for slot,(host,cid) in running.items():
+    if s["bindings"].get(slot)!={"containerId":cid,"instanceId":host} or (slot,host,cid) not in proofs: raise SystemExit(1)
+print(json.dumps({"operation":"register","rotationId":s["rotationId"],
+  "instances":{slot:[host] for slot,(host,_) in running.items()},"targets":s["targets"]},separators=(",",":")))
+' "$status" "${cp_hosts[0]}" "${cp_ids[0]}" "${media_hosts[0]}" "${media_ids[0]}")" || {
+    echo 'redis-managed: a running instance is not the bound, previously acknowledged slot head; use redis-managed-rebuild' >&2; return 1;
+  }
+  response="$(redis_managed_control_request "$registration")" || return 1
+  python3 -c 'import json,sys; v=json.load(sys.stdin); raise SystemExit(0 if v.get("state") in ("prepared","promoted") else 1)' <<<"$response"
+}
+
 redis_managed_prepare_locked() {
   local recover=0 proof='' media_service mode=initial redis_running controller_running status cp_id media_id
   [[ "${1:-}" == --first-activation && $# -eq 1 ]] && recover=3
@@ -5072,7 +5117,7 @@ case "${1:-help}" in
     DEPLOY_LOCK_WAIT_SECS=90
     acquire_deploy_transaction_lock "$@"
     ;;
-  rebuild|stage-restore|restart|stop|docker-clean|activity-history-activate|activity-history-rollback|voice-enforcement-rollout|media-reap|media-legacy-pause|media-legacy-resume|redis-managed-prepare|redis-managed-rebuild|turn-managed-init-schema|turn-managed-bootstrap|turn-managed-add-candidate|turn-managed-promote|turn-managed-rollback|turn-managed-recover|turn-managed-discard-unrecorded|turn-managed-status)
+  rebuild|stage-restore|restart|stop|docker-clean|activity-history-activate|activity-history-rollback|voice-enforcement-rollout|media-reap|media-legacy-pause|media-legacy-resume|redis-managed-prepare|redis-managed-rebuild|redis-managed-register-running|turn-managed-init-schema|turn-managed-bootstrap|turn-managed-add-candidate|turn-managed-promote|turn-managed-rollback|turn-managed-recover|turn-managed-discard-unrecorded|turn-managed-status)
     # The two activity-history verbs belong here for the SAME reason the deploy
     # verbs do, and leaving them out was an omission rather than a decision: both
     # stop and start the control plane, and both then gate on health and image
@@ -5236,6 +5281,12 @@ case "${1:-help}" in
     [[ "$REDIS_CREDENTIAL_MODE" == managed ]] || { echo 'redis-managed-rebuild requires REDIS_CREDENTIAL_MODE=managed' >&2; exit 2; }
     turn_managed_pair_guard || exit 1
     redis_managed_rebuild_locked "${@:2}" || exit $?
+    ;;
+
+  redis-managed-register-running)
+    [[ "$REDIS_CREDENTIAL_MODE" == managed ]] || { echo 'redis-managed-register-running requires REDIS_CREDENTIAL_MODE=managed' >&2; exit 2; }
+    turn_managed_pair_guard || exit 1
+    redis_managed_register_running_locked "${@:2}" || exit $?
     ;;
 
   turn-managed-init-schema|turn-managed-bootstrap|turn-managed-add-candidate|turn-managed-promote|turn-managed-rollback|turn-managed-recover|turn-managed-discard-unrecorded|turn-managed-status)
@@ -6808,6 +6859,7 @@ else:
     echo "  redis-managed-prepare --first-activation | --recover | --recover-lost-state <proof.json>"
     echo "                 Explicit stopped activation or reviewed recovery"
     echo "  redis-managed-rebuild [--resume]   Planned full app outage or resume bound stopped containers"
+    echo "  redis-managed-register-running     Register the running single-media apps for an in-place rotation"
     echo "  turn-managed-{init-schema|bootstrap|add-candidate|promote|rollback|recover|discard-unrecorded|status} [--generation N]"
     echo "                 Managed TURN key custody (#3931). Key material is read from stdin only;"
     echo "                 the canonical writer pair must record TURN_CREDENTIAL_MODE=managed"
