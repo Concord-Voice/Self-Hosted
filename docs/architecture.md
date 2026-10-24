@@ -1874,7 +1874,7 @@ Concord/
 
 These describe intended future work, **not** current architecture. This section keeps them visible so contributors can tell shipped reality from roadmap.
 
-- **Web client (PWA)** — a browser client sharing renderer code with the desktop app. Not built. The desktop client is the only shipping client.
+- **Web client (PWA)** — a browser client sharing renderer code with the desktop app. Not built. The desktop client is the only shipping client. A production SPA build opened in a plain browser (no preload bridge) renders a "get the desktop app" page instead of the app (`DesktopAppRequired.tsx`), since it can neither declare a client version nor attest.
 - **Kubernetes / multi-region** — Helm charts, horizontal pod autoscaling, geographic DNS routing, and read-replica fan-out for a multi-region SaaS. Current production is a single-VM Docker Compose deployment.
 - **`messages`-table partitioning** — declarative hash-partitioning by `channel_id` is specified but deliberately **not** implemented. Concrete trigger criteria gate it: query p99 > 100ms, any channel > 100k messages, or > 10M rows with observed bloat. Earliest candidate: v1.2.0.
 - **Performance SLOs** — Concord publishes no formal latency or capacity targets yet. Measure figures before documenting them. The previous version of this section carried aspirational numbers that nobody ever instrumented.

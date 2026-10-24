@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+Opening the web address in a browser now shows a link to download the desktop
+app, instead of an "Update Required" prompt that could not be completed.
+
 Subscribers can change plans in Settings and see the amount due before an
 immediate switch. They can withdraw a change booked for renewal before choosing another.
 Scheduled confirmations stay tied to the renewal date shown in their preview.
