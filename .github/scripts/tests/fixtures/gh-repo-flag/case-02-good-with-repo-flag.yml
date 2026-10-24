@@ -1,0 +1,20 @@
+# Synthetic fixture: a job that calls `gh issue create` without checkout
+# but with explicit `--repo`. This is the canonical correct pattern for
+# checkout-less workflows. The lint MUST NOT flag this.
+name: good-with-repo-flag
+on: [workflow_dispatch]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: file an issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "Build failed" \
+            --body "see logs"

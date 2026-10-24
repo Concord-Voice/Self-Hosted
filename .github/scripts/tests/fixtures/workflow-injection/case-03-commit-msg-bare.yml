@@ -1,0 +1,18 @@
+# Test fixture for issue #836 — P14 untrusted-input script injection.
+# Pattern: ${{ github.event.head_commit.message }} bare in run:.
+# Commit messages can contain arbitrary attacker-controlled text.
+name: P14 case 03 — commit message bare in run
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  inject:
+    runs-on: ubuntu-latest
+    steps:
+      # Suppresses the Pro-registry rule loaded by the local Claude MCP
+      # PostToolUse hook (rule is NOT in the project's CI .semgrep/ ruleset).
+      # The .semgrepignore separately excludes this directory from CLI scans.
+      # nosemgrep: yaml.github-actions.security.run-shell-injection.run-shell-injection
+      - run: echo "Last commit said ${{ github.event.head_commit.message }}"

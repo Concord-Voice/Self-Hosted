@@ -249,7 +249,7 @@ func reconcileComplete(ctx context.Context, _ server.Config, o *store.Owner, out
 // statement and 10 s idle bounds), and reconcile-complete locks every head.
 // Nothing applies store.RequestDeadlineTx to an owner verb. 240 s sits under the
 // clear-held window's default 300 s unit budget
-// ([internal]authority-clear-held-window.sh), so the verb writes
+// (infrastructure/deploy/authority-clear-held-window.sh), so the verb writes
 // its own step=owner exit before systemd stops the unit.
 // ponytail: one bound for every verb; per-verb bounds if B3-D13's realm-scale
 // measurement shows reconcile-complete needs more.

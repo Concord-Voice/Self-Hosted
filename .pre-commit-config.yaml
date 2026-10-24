@@ -1,0 +1,802 @@
+# ── Pre-commit hooks ─────────────────────────────────────────────────────────
+# Single source of truth for local code quality checks.
+# Install: pipx install pre-commit && ./scripts/install-git-hooks.sh
+# Manual run: PRE_COMMIT_COLOR=never pre-commit run --all-files
+# Update:  pre-commit autoupdate
+#
+# These hooks run the same checks SonarQube runs in CI, catching issues locally
+# before they consume GitHub Actions budget. No tests or coverage here — that's
+# SonarQube's job in the Build workflow.
+
+# Hook-level `fail_fast` (the interpreter guard below) needs 2.16.0. An older
+# pre-commit ignores the key, prints the guard's refusal and runs on into the
+# hang the guard exists to prevent, so refuse it here instead.
+minimum_pre_commit_version: '2.16.0'
+
+repos:
+  # ── Interpreter guard — MUST stay the first hook (#3426) ──────────────────
+  # On macOS, bash 5.1.0 through 5.3.15 writes a heredoc that fits its
+  # BUILD-TIME pipe-size estimate into a pipe with one blocking write, before
+  # it execs the reader. A macOS pipe starts at 512 bytes and grows only while
+  # system-wide pipe memory is under its limit (xnu bsd/kern/sys_pipe.c), so
+  # under load any heredoc over 512 bytes, measured after expansion, can block
+  # with nobody left to read it, whatever command reads it. Many hooks below
+  # feed heredocs that size; one pre-commit run hung ~17 min on 2026-09-23.
+  # Fixed upstream in bash 5.3 patch 16; Linux and /bin/bash 3.2 are safe.
+  #
+  # fail_fast makes the refusal stop the run before any later hook starts;
+  # without it pre-commit prints the refusal and then hangs in the next hook.
+  # The guard declares no `stages`, and this file sets no `default_stages`, so
+  # it runs at every stage any hook runs at (manual and pre-push included).
+  # scripts/test-check-bash-heredoc-hang.sh pins all of this.
+  - repo: local
+    hooks:
+      - id: bash-heredoc-hang-guard
+        name: bash heredoc-hang guard (macOS bash 5.1–5.3.15)
+        entry: scripts/check-bash-heredoc-hang.sh
+        language: script
+        always_run: true
+        pass_filenames: false
+        fail_fast: true
+      # python, not script: the self-test reads this file with PyYAML, which an
+      # ambient python3 need not carry (the same reason as the dependabot audit
+      # hooks). Version tracks .github/requirements-pyyaml.txt.
+      - id: test-check-bash-heredoc-hang
+        name: Test the bash heredoc-hang guard and its wiring (#3426)
+        entry: scripts/test-check-bash-heredoc-hang.sh
+        language: python
+        additional_dependencies: ['PyYAML==6.0.3']
+        files: '^(\.pre-commit-config\.yaml|scripts/(check|test-check)-bash-heredoc-hang\.sh)$'
+        pass_filenames: false
+
+      - id: go-toolchain-alignment
+        name: Go toolchain matches all Docker builders
+        entry: python3 scripts/check-go-toolchain.py
+        language: system
+        files: '^(services/control-plane/(go\.mod|Dockerfile(?:\.(?:ops-agent|redis-auth-controller))?)|scripts/(?:test-)?check-go-toolchain\.py|\.pre-commit-config\.yaml)$'
+        pass_filenames: false
+      - id: test-go-toolchain-alignment
+        name: Test Go toolchain guard (planted mismatches)
+        entry: python3 scripts/test-check-go-toolchain.py
+        language: python
+        additional_dependencies: ['PyYAML==6.0.3']
+        files: '^(scripts/(?:test-)?check-go-toolchain\.py|scripts/check-license-check-go-pin\.sh|\.github/workflows/license-check\.yml|\.pre-commit-config\.yaml)$'
+        pass_filenames: false
+
+  # ── Security ──────────────────────────────────────────────────────────────
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ['--baseline', '.secrets.baseline']
+        # Exclude paths where high-entropy strings are expected test data:
+        #   - package-lock.json: npm integrity hashes
+        #   - client/desktop/tests/fixtures/pinning/: SPKI SHA-256 test
+        #     fingerprints, reproducible from the PEMs in the same directory
+        #     (issue #658 cert pinning).
+        #   - services/control-plane/internal/age/testdata/: the age-claim
+        #     cross-impl fixture's RSA-PSS test signature + PUBLIC key SPKI
+        #     (base64). Reproducible via `UPDATE_AGE_FIXTURE=1 go test`; no
+        #     private key is committed (#1623 child-B contract).
+        #   - prototypes/: vendored Claude Design HTML/JS prototype exports.
+        #     Their high-entropy strings are public CDN Subresource-Integrity
+        #     (sha384) hashes; real secrets are still caught by GitHub push
+        #     protection + the CI verified-secret scan (#204 mobile prototype).
+        #   - graphify-out/{graph.json,graph.html,manifest.json}: generated
+        #     graph identifiers and content digests. The queryable graph is
+        #     intentionally versioned; CI still performs a verified-secret
+        #     scan on the PR diff.
+        #   - services/control-plane/internal/authoritycontract/testdata/vectors.json:
+        #     the #3587 authority-contract vectors, regenerated with fresh
+        #     ephemeral keys by scripts/authority-vectors/gen.mjs. In clear they
+        #     hold public P-384 points, RSA SPKIs, digests and signatures, plus
+        #     one private field: recipient_dkx_d, a 48-byte test-only ECDH scalar
+        #     on each PR-A2 device-wrap-open vector. That scalar opens the vector's
+        #     wrap ciphertext, whose plaintext holds test PKCS#8 private keys (a
+        #     root and an EK) of the wrap vectors' own account. Compensating
+        #     controls: vectors_hygiene_test.go pins the closed field-name set and
+        #     refuses any PKCS#8, SEC1 or PKCS#1 private key in clear anywhere in
+        #     the file, including inside messages; and
+        #     vectors_wrap_hygiene_test.go opens every wrap and refuses a
+        #     recovered key that any other vector publishes or that a package test
+        #     file or gen.mjs commits, so the openable keys stay single-use.
+        exclude: '(package-lock\.json|client/desktop/tests/fixtures/pinning/.*|services/control-plane/internal/age/testdata/.*|services/control-plane/internal/authoritycontract/testdata/vectors\.json|prototypes/.*|graphify-out/(graph\.json|graph\.html|manifest\.json))'
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ['--maxkb=5000']
+        # The versioned Graphify graph is a generated, queryable repository
+        # artifact. Keep its manifest and report under the normal size limit.
+        # The account-authority conformance vectors are the DoR's single
+        # committed file; vectors_hygiene_test.go bounds them at 8 MiB instead.
+        exclude: '^(graphify-out/graph\.json|services/control-plane/internal/authoritycontract/testdata/vectors\.json)$'
+      - id: check-case-conflict
+      - id: check-merge-conflict
+      - id: check-yaml
+        # Lint test fixtures named `*-malformed.yml` are intentionally
+        # not valid YAML — they exercise the script-error path of the
+        # workflow-lint scanners (#920 §5.1 case-05 and future siblings).
+        # case-09-yaml-error/workflows/broken.yml: intentionally malformed YAML
+        # fixture that exercises the YAML-parse-error path of
+        # lint-branch-protection.sh (#999 G2 reconciliation finding #2).
+        # These exact Compose overlays carry merge tags safe_load cannot
+        # construct. They get the syntax-only pass below and retain the
+        # semantic Compose contracts in the deployment tests.
+        exclude: '(.*-malformed\.yml$|\.github/scripts/tests/fixtures/branch-protection-lint/case-09-yaml-error/workflows/broken\.yml|^(docker-compose\.(production|staging|west-staging|selfhost|byo-s3|media-shared|redis-managed)\.yml|scripts/public-mirror/public-overlay/docker-compose\.production\.yml)$)'
+      - id: check-yaml
+        alias: check-yaml-compose-merge-tags
+        name: check yaml (syntax only — Compose merge tags, #3538, #1899)
+        args: ['--unsafe']
+        files: '^(docker-compose\.(production|staging|west-staging|selfhost|byo-s3|media-shared|redis-managed)\.yml|scripts/public-mirror/public-overlay/docker-compose\.production\.yml)$'
+      - id: check-json
+        # package-lock.json: excluded by default (large, not authored JSON).
+        # case-05-malformed/bp.json: intentionally truncated JSON fixture that
+        # exercises the script-error path (exit 2) of lint-branch-protection.sh
+        # (#999 G2 Task 6). Mirrors the check-yaml exclude pattern for
+        # malformed YAML fixtures.
+        exclude: '(package-lock\.json|\.github/scripts/tests/fixtures/branch-protection-lint/case-05-malformed/)'
+      - id: detect-private-key
+      - id: end-of-file-fixer
+        # scripts/fixtures/plugin-cache/*.section.md are byte-exact payloads,
+        # not prose: their bytes are digest-pinned in marker-sections.sha256 and
+        # spliced verbatim into the plugin cache. Normalizing the trailing
+        # newline changes the digest and drops the blank line before the anchor
+        # heading. (#2665)
+        exclude: '(\.svg$|^scripts/fixtures/plugin-cache/.*\.section\.md$)'
+      - id: trailing-whitespace
+        exclude: '\.md$'
+      - id: mixed-line-ending
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: detect-aws-credentials
+        args: ['--allow-missing-credentials']
+
+  # Three-layer secret-scanning model (#1429 / audit C1): this LOCAL layer
+  # (trufflehog history scan + gitleaks + detect-secrets) is the fastest
+  # feedback; the CI layer is the fork-safe PR-diff verified-only scan in
+  # .github/workflows/secret-scanning.yml; the PRIMARY layer is GitHub
+  # Secret Scanning + push protection, org-enforced (code-security config
+  # 251472) — fork PRs bypass pre-commit, which is why the other layers exist.
+  - repo: https://github.com/trufflesecurity/trufflehog
+    rev: v3.88.0
+    hooks:
+      - id: trufflehog
+        name: TruffleHog
+        entry: bash -c 'trufflehog git file://. --since-commit HEAD --only-verified --fail'
+
+  # gitleaks stays in the local layer; its CI working-tree job was retired in
+  # the #1429 consolidation (superseded by platform push protection).
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.24.3
+    hooks:
+      - id: gitleaks
+
+
+  # ── GitHub Actions workflow-injection guard (#836) ───────────────────────
+  # actionlint catches P14 (untrusted-input script injection, CWE-94) and
+  # ~30 other workflow-lint issues. Companion to .github/scripts/lint-*.sh.
+  # See [internal]workflow-failure-patterns.md P14 and
+  # [internal]specs/2026-05-20-836-workflow-injection-guard-design.md.
+  #
+  # Tag-pinned to match existing pre-commit hook conventions (detect-secrets,
+  # trufflehog, gitleaks all use tag pins). SHA-pinning per
+  # [internal]rules/electron.md applies to third-party GHA actions in workflows,
+  # not pre-commit hooks.
+  - repo: https://github.com/rhysd/actionlint
+    rev: v1.7.12
+    hooks:
+      - id: actionlint
+        # Shellcheck integration is ENABLED. The 27 pre-existing shellcheck
+        # info/style findings that motivated the earlier `-shellcheck=`
+        # disable have been cleaned up — 8 distinct script-block fixes in
+        # #1088 (build.yml, build-desktop.yml, sync-releases.yml) plus the
+        # bundled provision-secrets.yml fix in this commit. actionlint now
+        # runs its full check set (expression + shellcheck + syntax + …).
+        args: ['-config-file=.actionlint.yaml']
+        # actionlint's default files-glob covers .github/workflows/*.yml.
+
+  # ── Supply-chain (Shai-Hulud 2.0 IOC scanner) ────────────────────────────
+  # See [internal]supply-chain-defense.md. Spec: #715.
+  - repo: local
+    hooks:
+      - id: supply-chain-ioc-scan
+        name: supply-chain IOC scan (Shai-Hulud 2.0)
+        entry: scripts/security/scan-supply-chain-iocs.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+
+      - id: self-hosted-runner-lint
+        name: self-hosted runner allowlist
+        # Exit 2 means "expression runner, cannot statically verify" — the
+        # linter keeps this as a finding for CI strictness, but at the local
+        # pre-commit layer we treat it as non-blocking (stderr is still shown
+        # so the developer sees the warning). Exit 1 (self-hosted+non-allowlisted)
+        # and 10 (parser failure) still block.
+        entry: bash -c 'scripts/security/check-self-hosted-runners.sh; rc=$?; [ "$rc" = "2" ] && exit 0 || exit $rc'
+        language: system
+        pass_filenames: false
+        files: '^\.github/workflows/.*\.ya?ml$'
+
+      - id: check-env-file
+        name: env-file shell-parse lint
+        # Blocks commits that add env-file values whose unquoted form would
+        # fail when sourced by bash. Rejects the following in unquoted values:
+        # space, <, >, ;, `, $, |, &, \ — plus unclosed quotes and quoted
+        # values with trailing extra content (e.g. KEY="foo" "bar").
+        # See #725 Track 4 — the deploy.env.local:15 shell-parse regression
+        # is the class this hook prevents.
+        entry: scripts/check-env-file.sh
+        language: script
+        files: '\.env(\.example|\.local)?$'
+        pass_filenames: true
+
+      # ── Workflow-file structural guards (#920/#2274 trust-model lock-ins) ──
+      # These hooks codify the desktop trust boundary and invariants surfaced
+      # by the 2026-05-09 cascade (#893/#900/#904/#906/#910). Each fires when a
+      # workflow file is in the commit; the script scans the entire
+      # .github/workflows/ tree so cross-file references stay consistent.
+
+      # A caller that under-grants its callee fails the WHOLE RUN at startup —
+      # startup_failure, zero jobs, no log. actionlint cannot see this (it is a
+      # cross-file permission relation, not syntax), and a schedule-only
+      # orchestrator never executes in PR CI, so nothing else catches it. Cost a
+      # silently-dead nightly on 2026-08-26.
+      - id: test-promote-unreleased-changelog
+        name: release-notes promoter self-test
+        entry: bash .github/scripts/tests/promote-unreleased-changelog.test.sh
+        language: system
+        files: '^(\.github/scripts/promote-unreleased-changelog\.sh|\.github/scripts/promote_unreleased_changelog\.py|\.github/scripts/tests/promote-unreleased-changelog\.test\.sh|CHANGELOG\.md)$'
+        pass_filenames: false
+
+      # The hotfix label decides whether main-ci dispatches an UNGATED release,
+      # so its resolution is security-relevant, and it silently mis-answered on
+      # 2026-08-29 (#3013): the commit->PR association is eventually consistent
+      # and was queried 19 s after the merge. The suite's load-bearing case is
+      # the race itself — association empty, then resolving on retry.
+      - id: test-resolve-hotfix-label
+        name: hotfix-label resolution self-test (release fast-path)
+        entry: bash .github/scripts/tests/resolve-hotfix-label.test.sh
+        language: system
+        files: '^(\.github/scripts/resolve-hotfix-label\.sh|\.github/scripts/tests/resolve-hotfix-label\.test\.sh|\.github/workflows/main-ci\.ya?ml)$'
+        pass_filenames: false
+
+      # container-image-scan.yml must not let a scan that saw nothing read as
+      # clean: every Trivy call reads the local daemon only (--image-src docker),
+      # and each leg's report must detect the expected OS with its packages.
+      - id: test-trivy-assert-os
+        name: container image scan silent-clean guards self-test
+        entry: bash .github/scripts/tests/trivy-assert-os.test.sh
+        language: system
+        files: '^(\.github/scripts/trivy-assert-os\.sh|\.github/scripts/tests/trivy-assert-os\.test\.sh|\.github/workflows/container-image-scan\.ya?ml)$'
+        pass_filenames: false
+
+      - id: lint-workflow-call-contract
+        name: workflow lint — workflow_call contract (permissions superset + secrets agree)
+        entry: bash .github/scripts/lint-workflow-call-contract.sh .
+        language: system
+        files: '^(\.github/scripts/lint-workflow-call-contract\.sh|\.github/scripts/tests/lint-workflow-call-contract\.test\.sh|\.github/workflows/.*\.ya?ml)$'
+        pass_filenames: false
+
+      - id: test-lint-workflow-call-contract
+        name: workflow lint self-test — workflow_call contract
+        entry: bash .github/scripts/tests/lint-workflow-call-contract.test.sh
+        language: system
+        files: '^(\.github/scripts/lint-workflow-call-contract\.sh|\.github/scripts/tests/lint-workflow-call-contract\.test\.sh|\.github/workflows/.*\.ya?ml)$'
+        pass_filenames: false
+
+      - id: lint-multisecret-andcheck
+        name: workflow lint — multi-secret AND-check completeness (#920 §5.2)
+        # Invariant 5: if a step gates on one secret from a known
+        # multi-secret group (apple-p12, apple-api-key, azure-oidc,
+        # azure-signing) via env.X != '' or [[ -n "$X" ]], it must
+        # AND-check ALL members. Half-rotated secret pairs fail closed
+        # at if-eval time rather than at action runtime (PR #904 class).
+        entry: .github/scripts/lint-multisecret-andcheck.sh
+        args: ['.github/workflows/']
+        language: script
+        files: '^\.github/workflows/.*\.ya?ml$'
+        pass_filenames: false
+
+      - id: lint-always-needs-comment
+        name: workflow lint — always() requires justification comment (#920 §5.3)
+        # Invariant 8: every `always()` usage must have a justification
+        # comment within 10 lines containing one of: always, load-bearing,
+        # cascade, skip. always() propagation through needs-cascade was
+        # the root mechanism of the #906/#910 cascade.
+        entry: .github/scripts/lint-always-needs-comment.sh
+        args: ['.github/workflows/']
+        language: script
+        files: '^\.github/workflows/.*\.ya?ml$'
+        pass_filenames: false
+
+  # ── SAST (Semgrep) ───────────────────────────────────────────────────
+  - repo: https://github.com/semgrep/semgrep
+    rev: v1.121.0
+    hooks:
+      - id: semgrep
+        name: Semgrep SAST
+        # Pinned to python3.9 because Semgrep's tracing/protobuf deps
+        # are incompatible with Python 3.14 (google.protobuf raises
+        # TypeError: Metaclasses with custom tp_new are not supported).
+        # Developers must have python3.9 installed locally. On macOS this
+        # ships with Command Line Tools at /Library/Developer/CommandLineTools/.
+        # Ruleset matches the blocking CI step (.github/workflows/build.yml
+        # line 77): .semgrep/ custom rules only. CI additionally runs
+        # p/security-audit + p/owasp-top-ten as non-blocking community
+        # checks (build.yml line 120) — those are intentionally excluded
+        # from pre-commit to keep local runs fast.
+        language_version: python3.9
+        args:
+          - --config=.semgrep/
+          - --error
+          - --quiet
+        types_or: [javascript, ts, tsx, go]
+        # prototypes/: vendored Claude Design HTML/JS exports; the design
+        # runtime legitimately uses innerHTML templating + new Function() JSX
+        # compilation. Local-browser mock code, never production (#204).
+        exclude: '(node_modules|dist|out|coverage|\.test\.|tests/|prototypes/)'
+
+  # ── Go (Control Plane) ────────────────────────────────────────────────────
+  # rev bumped v2.10.1 -> v2.12.2 (#1623): v2.10.1's bundled gosec emitted
+  # false-positive G704 (SSRF-via-taint) + G117 (exported-field-matches-secret)
+  # findings on pre-existing files (cfkv, feedback, config, an oauth test) that
+  # the newer gosec in v2.12.x no longer flags. rev bumped v2.12.2 -> v2.14.0
+  # for Go 1.27: v2.12.2's Staticcheck panics building IR for the Go 1.27
+  # standard library (#3656), and v2.13.2 cannot read Go 1.27.2's export data
+  # ("export data version 5 is greater than maximum supported version 4"), so
+  # every package fails typecheck. pre-commit builds this hook with the system Go,
+  # and a golangci-lint built with Go 1.26 refuses a `go 1.27` module, so the
+  # system Go must be 1.27 or newer (see docs/development.md).
+  # This `rev` is ALSO the CI version: pr-ci.yml's advisory `golangci-lint` job
+  # reads it from this file (repo URL line, then the `rev:` line directly under
+  # it — keep them adjacent; the job fails closed if it cannot parse a vX.Y.Z).
+  # No workflow ran golangci-lint from #373 (2026-03-24) until that job; an
+  # earlier version of this comment claimed CI did.
+  - repo: https://github.com/golangci/golangci-lint
+    rev: v2.14.0
+    hooks:
+      - id: golangci-lint
+        entry: bash -c 'cd services/control-plane && golangci-lint run --fix'
+        pass_filenames: false
+
+  - repo: local
+    hooks:
+      - id: go-vet
+        name: go vet
+        entry: bash -c 'cd services/control-plane && go vet ./...'
+        language: system
+        pass_filenames: false
+        files: '\.go$'
+
+      - id: gofmt
+        name: gofmt
+        entry: bash -c 'cd services/control-plane && gofmt -l -d . | head -20; test -z "$(gofmt -l .)"'
+        language: system
+        pass_filenames: false
+        files: '\.go$'
+
+      - id: go-build
+        name: go build
+        entry: bash -c 'cd services/control-plane && go build ./...'
+        language: system
+        pass_filenames: false
+        files: '\.go$'
+
+  # ── TypeScript / React (Desktop Client) ───────────────────────────────────
+  - repo: local
+    hooks:
+      # Pre-flight: fail fast with a friendly "run npm install" message if
+      # client/desktop/node_modules is missing or older than package-lock.json.
+      # Without this, prettier/eslint/tsc fail with opaque "Cannot find module"
+      # errors after a pull that updated the lockfile. Runs first so the real
+      # TS hooks can assume deps are present. The post-merge/post-checkout
+      # auto-install hook (below) should make this rare in practice — this is
+      # the safety net for anyone who bypasses that (e.g. `git checkout -f`).
+      - id: check-node-modules-fresh
+        name: packages node_modules freshness
+        entry: scripts/check-node-modules-fresh.sh
+        args: [.]
+        language: script
+        pass_filenames: false
+        # Must cover every extension the dependency-backed `prettier` hook below
+        # runs on. That hook shells out to `npx prettier`, so it NEEDS node_modules;
+        # this is the pre-flight that turns a stale install into "Run npm install"
+        # instead of an opaque module error. The two matchers are a PAIR — widening
+        # one without the other extends the hook past its own pre-flight.
+        # ANCHORED to packages/ like every other workspace-dependent hook:
+        # unanchored, a client/admin .css or a media-plane .ts would invoke the
+        # root freshness check and fail an unrelated commit.
+        files: '^packages/.*\.(ts|tsx|mts|css)$'
+        # Path-segment anchored: the naive regex `node_modules|dist|out`
+        # would match any path containing the substring "out" (e.g.
+        # `layoutStore.ts`, `AboutUpdateSection.tsx`, `Layout/*.tsx`),
+        # silently skipping the freshness check on those files. The
+        # pre-existing prettier/eslint/tsc hooks below share this bug —
+        # tracked as a follow-up.
+        exclude: '(^|/)(node_modules|dist|out)($|/)'
+
+      - id: prettier
+        name: prettier
+        # Forward pre-commit's changed-file args. Without "$@" forwarding
+        # prettier runs with zero args and silently no-ops the check.
+        # The `--` prevents filenames starting with `-` from being mis-parsed
+        # as flags (CWE-88 defense-in-depth).
+        entry: bash -c 'exec npx prettier --check --ignore-unknown -- "$@"' --
+        language: system
+        files: '^packages/.*\.(ts|tsx|mts|css)$'
+        exclude: 'node_modules|dist|out|coverage'
+
+      - id: eslint
+        name: eslint
+        # Forward pre-commit's changed-file args, so eslint checks only the
+        # files a commit touches (#706). The `--` prevents filenames starting
+        # with `-` from being mis-parsed as flags (CWE-88 defense-in-depth).
+        entry: bash -c 'exec npx eslint --quiet -- "$@"' --
+        language: system
+        files: '^packages/.*\.(ts|tsx)$'
+        exclude: 'node_modules|dist|out|tests/'
+
+      - id: tsc
+        name: tsc --noEmit
+        entry: npm run typecheck
+        language: system
+        pass_filenames: false
+        files: '^packages/.*\.(ts|tsx)$'
+        exclude: 'node_modules|dist|out'
+
+  # ── Commit message format ─────────────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: commit-msg-format
+        name: commit message format
+        entry: scripts/check-commit-msg.sh
+        language: script
+        stages: [commit-msg]
+        always_run: true
+
+
+  # ── Label-reference drift (strict, #1134) ────────────────────────────────
+  # Validates label-name pattern references in modified `[internal]skills/**/*.md`
+  # and `[internal]rules/**/*.md` files against the "Active labels" section of
+  # `[internal]rules/labels.md`. Deprecated namespaces (theme:, system:, etc.)
+  # FAIL strict mode — forces #1135 migration before further skill edits.
+  #
+  # Spec: [internal]specs/2026-05-21-1134-labels-skills-foundation-design.md
+  - repo: local
+    hooks:
+
+      - id: check-feature-wiring
+        name: 'Every feature layer is reached by the layer above it'
+        entry: scripts/check-feature-wiring.sh
+        language: script
+        files: '^(services/control-plane/(internal/api/router\.go|cmd/server/main\.go|internal/storage/registry\.go|pkg/config/config\.go)|docker-compose\.production\.yml|docs/api/openapi\.yaml|scripts/check-feature-wiring\.sh|infrastructure/deploy/nginx/concordvoice\.conf)$'
+        pass_filenames: false
+
+      - id: check-attachment-write-callers
+        name: 'Attachment writes stay on their intended rails'
+        entry: scripts/check-attachment-write-callers.sh
+        language: script
+        files: '^(services/control-plane/internal/media/.*\.go|scripts/check-attachment-write-callers\.sh)$'
+        pass_filenames: false
+
+
+
+
+
+
+  # ── Workflow-failure pattern register drift (warn-only) ───────────────────
+  # Fires on commits that modify `.github/workflows/*.yml` and contain `if:`
+  # clause changes. Prints a non-blocking nudge to consult
+  # [internal]workflow-failure-patterns.md before pushing. Exit 0 always
+  # unless the script itself errors.
+  #
+  # Spec: [internal]specs/2026-05-14-997-pattern-register-design.md §3.4
+  - repo: local
+    hooks:
+      - id: workflow-pattern-register-drift
+        name: workflow-failure pattern register drift (warn-only)
+        entry: .github/scripts/check-pattern-register.sh
+        language: script
+        files: '^\.github/workflows/.*\.ya?ml$'
+        pass_filenames: false
+        verbose: true
+
+  # ── license-check Go source ↔ go.mod lockstep (#1326) ────────────────────
+  # setup-go reads go.mod's exact selected patch directly into GOROOT, avoiding
+  # a later toolchain module download that breaks go-licenses (#128 upstream).
+  # Require the canonical go-version-file input and reject go-version overrides.
+  # The existing hook delegates to the shared Docker/module alignment guard.
+  - repo: local
+    hooks:
+      - id: check-license-check-go-pin
+        name: 'license-check reads the canonical Go toolchain'
+        entry: scripts/check-license-check-go-pin.sh
+        language: python
+        additional_dependencies: ['PyYAML==6.0.3']
+        files: '^(\.github/workflows/license-check\.yml|services/control-plane/(go\.mod|Dockerfile(?:\.ops-agent)?)|scripts/check-license-check-go-pin\.sh|scripts/(?:test-)?check-go-toolchain\.py|\.pre-commit-config\.yaml)$'
+        pass_filenames: false
+
+  # ── No TCP-only PostgreSQL probes (#755) ─────────────────────────────────
+  # Rejects direct TCP/HTTP-style probes against the PG primary or replica
+  # ports (curl/wget against ":5432"/":5433", or `nc -z` against PG hosts).
+  # Such probes trigger `LOG: invalid length of startup packet` on the PG
+  # server because the prober sends HTTP/raw bytes, not a PG startup packet.
+  # The hook detects direct invocations only — wrapper-function calls that
+  # pass the port literal as a string argument are NOT caught and rely on
+  # code review. See scripts/check-no-pg-tcp-probes.sh and
+  # [internal]postgres-probe-investigation.md §2.1 for full coverage
+  # tables and concrete examples (which file is allowlisted, so the literal
+  # anti-patterns there don't trip the hook).
+  - repo: local
+    hooks:
+      - id: no-pg-tcp-probes
+        name: Forbid TCP-only probes against PostgreSQL (#755)
+        entry: scripts/check-no-pg-tcp-probes.sh
+        language: script
+        # The Dockerfile/dockerfile alternatives use `(^|/)NAME$` form because
+        # those files have no `.` extension prefix, so a `\.NAME$` pattern would
+        # silently miss real Dockerfile paths in the repo (#779 review).
+        files: '(\.(sh|yml|yaml)$|(^|/)(Dockerfile|dockerfile)$)'
+        exclude: '^node_modules/'
+        pass_filenames: true
+
+  # ── Go test Redis isolation (blocking, #2680) ─────────────────────────────
+  # Every `go test` process allocates a private Redis logical DB via
+  # internal/testhelpers/redistest. This hook is what keeps that true for
+  # authors who have never heard of it: it bans the ways the original defect was
+  # written — a raw flush (any casing, any quoting, incl. the Async variants), a
+  # hand-rolled client, a hand-rolled URL. The redistest package is allowlisted
+  # inside the script, since it legitimately owns all three.
+  #
+  # This hook is NOT the CI surface. Nothing in .github/ invokes `pre-commit`,
+  # so a hook alone is invisible to a --no-verify commit, an uninstalled hook, or
+  # a fork PR. pr-ci.yml's `static-guards` job runs the guard whole-tree AND this
+  # self-test as explicit named steps — the same belt-and-braces the ADR-number
+  # and provision-secrets drift-locks use. Both surfaces must move together.
+  - repo: local
+    hooks:
+      - id: no-unscoped-redis-flush
+        name: Forbid unscoped Redis flushes and hand-rolled clients in Go tests (#2680)
+        entry: scripts/check-no-unscoped-redis-flush.sh
+        language: script
+        # testhelpers/*.go is in scope as well as *_test.go: testredis.go, where
+        # the defect actually lived, is not a _test.go file.
+        files: '(_test\.go$|^services/control-plane/internal/testhelpers/.*\.go$)'
+        exclude: '^node_modules/'
+        pass_filenames: true
+
+      # Locks the guard itself. Without this, an edit that weakens a regex
+      # produces a silently permissive guard with no signal anywhere.
+      - id: test-no-unscoped-redis-flush
+        name: Test the Redis-isolation guard (#2680 self-test)
+        entry: scripts/test-check-no-unscoped-redis-flush.sh
+        language: script
+        files: '^scripts/(check|test-check)-no-unscoped-redis-flush\.sh$'
+        pass_filenames: false
+
+      # Forbids single-return type assertions on decoded JSON in Go tests.
+      # Such an assertion PANICS on a shape mismatch, and a panic aborts the
+      # whole package test binary -- every other test reports as failed and the
+      # assertion that tripped is buried. See #2811.
+      - id: no-single-return-json-assertion
+        name: Forbid single-return JSON type assertions in Go tests (#2811)
+        entry: scripts/check-no-single-return-json-assertion.sh
+        language: script
+        files: '_test\.go$'
+        exclude: '^node_modules/'
+        pass_filenames: true
+
+      # Locks the guard's regex. Not hypothetical: the guard's first draft
+      # passed its type pattern to awk single-escaped, which errored and then
+      # matched nothing -- every must-not-flag probe passed vacuously.
+      - id: test-no-single-return-json-assertion
+        name: Test the JSON-assertion guard (#2811 self-test)
+        entry: scripts/test-check-no-single-return-json-assertion.sh
+        language: script
+        files: '^scripts/(check|test-check)-no-single-return-json-assertion\.sh$'
+        pass_filenames: false
+
+
+
+
+
+  # ── concord-dev.sh unit tests (#1113) ────────────────────────────────────
+  # Runs the 4 test-concord-dev-*.sh files when scripts/concord-dev.sh,
+  # any test file in scripts/tests/, or docker-compose.dev.yml changes.
+  # The tests use PATH stubs (no docker daemon required) and real fork/kill
+  # on sleep subprocesses for PID lifecycle coverage. Fast enough (~3s
+  # total) to run on every relevant pre-commit.
+  - repo: local
+    hooks:
+      - id: concord-dev-unit-tests
+        name: concord-dev.sh unit tests
+        entry: bash -c 'for t in scripts/tests/test-concord-dev-*.sh; do bash "$t" || exit 1; done'
+        language: system
+        files: '^(scripts/concord-dev\.sh|scripts/tests/test-concord-dev-.*\.sh|docker-compose\.dev\.yml)$'
+        pass_filenames: false
+
+      - id: test-nats-server-bootstrap
+        name: native NATS test broker bootstrap contract
+        entry: bash scripts/test-nats-server-bootstrap.sh
+        language: system
+        files: '^scripts/(test-tools/nats-server|test-nats-server-bootstrap)\.sh$'
+        pass_filenames: false
+
+  # ── Self-hosted deploy script tests (#1617) ──────────────────────────────
+  # Runs installer, cert, wrapper, storage-helper and BYO model suites when their
+  # inputs change. Shell suites stub externals; the BYO suite uses isolated
+  # config-only Compose renders when available, with no daemon or network calls.
+  - repo: local
+    hooks:
+      - id: selfhost-deploy-tests
+        name: self-hosted deploy tests (installer + TLS + lifecycle + storage)
+        entry: bash scripts/tests/run-selfhost-deploy-tests.sh
+        language: system
+        files: '^(\.pre-commit-config\.yaml|docker-compose(\.production)?\.yml|docker-compose\.(selfhost|byo-s3)\.yml|infrastructure/deploy/(deploy-manifest\.txt|install-selfhost\.sh|provision-cert\.sh|copy-certs\.sh|provision-production\.sh|concord-selfhost|concord-ctl\.sh|selfhost-port-posture\.py|selfhost-storage\.sh|selfhost-security-event-logging\.sh|selfhost-tls\.(sh|py)|tests/(Dockerfile\.selfhost-hook|selfhost-acceptance\.py|test-(selfhost-(storage|byo-s3|cert-delivery|tls-readiness|tls-callers|tls-selected-consumer|acceptance)|copy-certs)\.sh|test-selfhost-tls-selected-consumer\.py|test-copy-certs-labels\.py|(?:test_selfhost_(tls|acceptance)|selfhost_acceptance_support)\.py|selfhost-cert-test-tools\.sh|test-security-event-logging\.sh|test-control-plane-secrets\.sh|security_event_publication_test\.py))|infrastructure/docker/coturn/turnserver\.conf|scripts/tests/(run-selfhost-deploy-tests\.sh|test-(install-selfhost|provision-cert|concord-selfhost)\.sh|provision_cert_replacement_test\.py))$'
+        pass_filenames: false
+
+
+
+
+  # ── Concord-built MinIO publication contract (#1220) ──────────────────
+  # Hermetic structural and fail-closed registry-state tests. These run when
+  # the source recipe, publisher, shared consumer, guards, or their tests change.
+  - repo: local
+    hooks:
+
+      # The render step is shell embedded in workflow YAML, so nothing executed it
+      # until this test did — the workflow itself only runs on a weekly cron, where
+      # a crash looks identical to "nothing to update". PR #2760 shipped a
+      # pipefail-sensitive version that opened no PR at all whenever `go mod tidy`
+      # only removed (or only added) modules.
+      - id: test-go-transitive-flush-render
+        name: 'Test go-transitive-flush PR-body render (#1212)'
+        entry: bash scripts/tests/test-go-transitive-flush-render.sh
+        language: system
+        files: '^(\.pre-commit-config\.yaml|\.github/workflows/go-transitive-flush\.yml|scripts/tests/test-go-transitive-flush-render\.sh)$'
+        pass_filenames: false
+
+
+  # ── npm install auto-sync (post-merge / post-checkout) ────────────────────
+  # When a pull, merge, or branch switch changes package-lock.json in
+  # client/desktop/ or services/media-plane/, auto-run `npm install` in the
+  # affected directory so local node_modules stays current after dependency
+  # updates. Prevents the
+  # confusing "Cannot find module" failures from tsc/eslint/prettier after
+  # dependency updates land. Requires `post-merge` and `post-checkout` hook
+  # types to be installed — scripts/install-git-hooks.sh handles that.
+  - repo: local
+    hooks:
+      - id: test-npm-install-lockfile-sync
+        name: Test npm install lockfile sync (#2459)
+        entry: bash scripts/test-npm-install-if-lockfile-changed.sh
+        language: system
+        files: '^scripts/(npm-install-if-lockfile-changed|test-npm-install-if-lockfile-changed)\.sh$'
+        pass_filenames: false
+      # Fires only when a manifest or lockfile moves — the moments an override
+      # can silently start forcing a consumer off its declared range. Runs per
+      # workspace because the lint resolves `semver` from the package under
+      # test (there is no root package.json). See PR #2709 for the incident.
+      - id: override-range-lint-desktop
+        name: override-range lint — packages workspace
+        entry: node scripts/security/override-range-lint.mjs --dir . --minimum-version undici=6.28.1 --minimum-version undici=7.29.1 --minimum-version undici=8.10.2
+        language: system
+        files: '^(package\.json|package-lock\.json|\.override-range-baseline\.json)$'
+        pass_filenames: false
+      - id: override-range-lint-admin
+        name: override-range lint — client/admin
+        entry: node scripts/security/override-range-lint.mjs --dir client/admin --minimum-version undici=6.28.1 --minimum-version undici=7.29.1 --minimum-version undici=8.10.2
+        language: system
+        files: '^client/admin/(package\.json|package-lock\.json|\.override-range-baseline\.json)$'
+        pass_filenames: false
+      - id: override-range-lint-media-plane
+        name: override-range lint — services/media-plane
+        entry: node scripts/security/override-range-lint.mjs --dir services/media-plane
+        language: system
+        files: '^services/media-plane/(package\.json|package-lock\.json|\.override-range-baseline\.json)$'
+        pass_filenames: false
+      # Guards the NOTICE.md regenerator's own behaviour. Hermetic (PATH-shimmed
+      # npx/go), so it needs no node_modules and no Go toolchain — unlike the
+      # regenerator itself, which is why only the TEST runs pre-commit and the
+      # real --check runs in CI.
+      - id: test-update-notice-md
+        name: Test NOTICE.md drift guard (#2886)
+        entry: bash scripts/test-update-notice-md.sh
+        language: system
+        files: '^scripts/(update-notice-md\.py|test-update-notice-md\.sh)$'
+        pass_filenames: false
+      - id: test-override-range-lint
+        name: Test override-range lint (#2709)
+        entry: bash scripts/security/test-override-range-lint.sh
+        language: system
+        files: '^scripts/security/(override-range-lint\.mjs|test-override-range-lint\.sh)$'
+        pass_filenames: false
+      # Fires when a manifest, the dependabot config, or the register itself
+      # moves — the moments a held version can appear without a written reason.
+      - id: pin-exception-lint
+        name: pin-exception register covers every held version
+        entry: node scripts/security/check-pin-exceptions.mjs .
+        language: python
+        # PyYAML through a PRE-COMMIT-MANAGED env, not the contributor's ambient
+        # interpreter. `language: system` invoked ambient `python3`, and pre-commit
+        # being a python application does NOT put PyYAML on that interpreter —
+        # pre-commit's own venv has it, the contributor's python3 need not. A
+        # contributor with pre-commit, node and python but no global PyYAML was
+        # blocked from committing: fail-closed, but on a dependency the hook config
+        # never provisioned (CodeRabbit, PR #3325). Version tracks
+        # .github/requirements-pyyaml.txt — the audit suite asserts they match.
+        additional_dependencies: ['PyYAML==6.0.3']
+        # Every manifest in the checker's WORKSPACES must appear here, or editing it
+        # does not even trigger the control — `pre-commit run pin-exception-lint
+        # --files <worker package.json>` reported "no files to check" while the
+        # worker manifests exact-pinned wrangler with no register entry (#3292).
+        files: '^(\.github/(dependabot\.yml|dependency-pin-exceptions\.json|tools/license-checker/package\.json)|(|client/admin/|services/media-plane/)package\.json|scripts/security/check-pin-exceptions\.mjs)$'
+        pass_filenames: false
+      - id: test-pin-exception-lint
+        name: Test pin-exception lint (#2769)
+        entry: bash scripts/security/test-check-pin-exceptions.sh
+        language: python
+        # PyYAML through a PRE-COMMIT-MANAGED env, not the contributor's ambient
+        # interpreter. `language: system` invoked ambient `python3`, and pre-commit
+        # being a python application does NOT put PyYAML on that interpreter —
+        # pre-commit's own venv has it, the contributor's python3 need not. A
+        # contributor with pre-commit, node and python but no global PyYAML was
+        # blocked from committing: fail-closed, but on a dependency the hook config
+        # never provisioned (CodeRabbit, PR #3325). Version tracks
+        # .github/requirements-pyyaml.txt — the audit suite asserts they match.
+        additional_dependencies: ['PyYAML==6.0.3']
+        files: '^scripts/security/(check-pin-exceptions\.mjs|test-check-pin-exceptions\.sh)$'
+        pass_filenames: false
+      # Fires when dependabot.yml moves, because that is the edit that can leave an
+      # update root unwatched, and when any update root APPEARS or disappears — a new
+      # manifest, go.mod, Dockerfile or composite action is the other direction of the
+      # same drift. Deliberately NOT gated on every package.json in the tree: a nested
+      # dependency-free helper is not an update root, and the audit's own npm leg is
+      # what decides that.
+      - id: dependabot-coverage-audit
+        name: dependabot watches every update root in the tree
+        entry: bash scripts/security/audit-dependabot-coverage.sh
+        language: python
+        # PyYAML through a PRE-COMMIT-MANAGED env, not the contributor's ambient
+        # interpreter. `language: system` invoked ambient `python3`, and pre-commit
+        # being a python application does NOT put PyYAML on that interpreter —
+        # pre-commit's own venv has it, the contributor's python3 need not. A
+        # contributor with pre-commit, node and python but no global PyYAML was
+        # blocked from committing: fail-closed, but on a dependency the hook config
+        # never provisioned (CodeRabbit, PR #3325). Version tracks
+        # .github/requirements-pyyaml.txt — the audit suite asserts they match.
+        additional_dependencies: ['PyYAML==6.0.3']
+        # `(.*/)?` not `.*/`: the latter REQUIRES a slash, so a root-level
+        # package.json or go.mod never triggered the hook and a new root-level
+        # update root could land uncovered (CodeRabbit, PR #3325).
+        files: '^(\.github/(dependabot\.yml|actions/.*/action\.ya?ml)|(.*/)?(package\.json|go\.mod)|.*Dockerfile.*|.*requirements.*\.txt)$'
+        pass_filenames: false
+      - id: test-dependabot-coverage-audit
+        name: Test dependabot coverage audit (#3325)
+        entry: bash scripts/security/test-audit-dependabot-coverage.sh
+        language: python
+        # PyYAML through a PRE-COMMIT-MANAGED env, not the contributor's ambient
+        # interpreter. `language: system` invoked ambient `python3`, and pre-commit
+        # being a python application does NOT put PyYAML on that interpreter —
+        # pre-commit's own venv has it, the contributor's python3 need not. A
+        # contributor with pre-commit, node and python but no global PyYAML was
+        # blocked from committing: fail-closed, but on a dependency the hook config
+        # never provisioned (CodeRabbit, PR #3325). Version tracks
+        # .github/requirements-pyyaml.txt — the audit suite asserts they match.
+        additional_dependencies: ['PyYAML==6.0.3']
+        files: '^scripts/security/(audit-dependabot-coverage\.sh|test-audit-dependabot-coverage\.sh|check-pin-exceptions\.mjs)$'
+        pass_filenames: false
+      - id: npm-install-lockfile-sync
+        name: npm install if lockfile changed
+        entry: scripts/npm-install-if-lockfile-changed.sh
+        args: [., services/media-plane]
+        language: script
+        stages: [post-merge, post-checkout]
+        always_run: true
+        pass_filenames: false
+        verbose: true

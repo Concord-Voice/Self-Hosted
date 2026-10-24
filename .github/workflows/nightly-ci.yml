@@ -1,0 +1,292 @@
+# Nightly CI — the third trigger-owning orchestrator (ADR-0018 §1, amended).
+#
+# Self-Hosted (epic #3947): the desktop release probe, the release and deploy
+# legs, native-audiocap and the Sonar leg are not here. Desktop releases are
+# cut from the Desktop repo and production deploys run from Hosted; Sonar
+# returns with F7. This nightly is the scan baseline for main.
+#
+# WHY THIS EXISTS. Scanning used to run twice per change: once on the PR, then
+# again on the squash-merge. `strict_required_status_checks_policy` is on, so
+# every PR is already rebased onto current main before it merges — the merge
+# commit's tree is what CI just tested. Re-running the whole scan fleet on it
+# bought a fresh main-branch baseline and little else, at ~112 full runs/month.
+#
+# That work moves here, once a day, and `main-ci.yml` keeps the scan fleet only
+# on the path that can actually cut a release (see § Hotfix below).
+#
+# WHAT THIS COSTS, stated plainly: a regression that PR CI misses can now sit on
+# main for up to 24h before anything notices. That is the deliberate trade. The
+# blocking set below is scoped so the nightly still refuses to ship a release on
+# a real failure.
+#
+# WHERE THE VERSION BUMP COMES FROM — read this before adding a job here.
+# Nothing in this workflow creates a bump, and nothing should. The PR that
+# finishes a releasable unit carries its own bump AND its own changelog
+# promotion:
+#
+#   ./.github/scripts/promote-unreleased-changelog.sh <next>
+#   cd client/desktop && npm version <next> --no-git-tag-version
+#
+# That is not a convention, it is what verify-changelog.sh (#1857) already
+# enforces: Rule 1 fails a bump with no `## [<version>]` section at HEAD, and
+# Rule 3 accepts that heading ONLY in a promotion-shaped diff. So the bump and
+# the dated notes are one reviewed, human-merged change. This workflow's only
+# job is to notice one and cut it.
+#
+# A `bump` job that opened a release-proposal PR lived here from #2934 until
+# #3354 and was REMOVED, not relocated: it fired on `pending == 'false'` —
+# precisely the nights nobody bumped — so it was never part of the release
+# path, and merging it inserted a manual gate into a topology whose whole
+# point was to cut without one. It also halved the cadence, because `release`
+# and `bump` are mutually exclusive: the proposal could not be released until
+# the NEXT night. Do not re-propose it. An `## [Unreleased]` section growing
+# with no bump beneath it means nobody has decided to cut yet, which is a
+# valid state.
+#
+# WHAT IT FIXES, which the per-merge model could not: main-ci's pending-release
+# probe re-arms only on pushes that TRIGGER a workflow, so a commit carrying a
+# CI-suppression marker cannot re-arm it — which is how desktop-v0.2.33 and
+# v0.2.34 both stranded untagged. A cron does not care what the commit message
+# says. Moving the probe here closes that structurally.
+#
+# PRODUCTION DEPLOYS start here and nowhere else: the `deploy` job dispatches
+# main-cd.yml once the blocking set is green (see that job's comment and
+# [internal]deploys.md § Nightly-only production deploys).
+name: Nightly CI
+
+on:
+  schedule:
+    # 07:00 UTC daily. After the overnight quiet window, before the working day.
+    # Shares the slot with graphify-refresh on Mondays — harmless, they are
+    # independent workflows contending for nothing.
+    - cron: '0 7 * * *'
+  workflow_dispatch:
+
+concurrency:
+  # Never cancel a nightly: a half-finished scan uploads a partial SARIF
+  # baseline, and a cancelled release dispatch strands a tag. Same rationale as
+  # main-ci's group.
+  group: nightly-ci
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  # ─── Scan window + pending-release probe ─────────────────────────────
+  window:
+    name: Resolve scan window
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      diff-base: ${{ steps.window.outputs.diff-base }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Resolve the diff base from the last successful nightly
+        id: window
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # The window this run is responsible for is "everything since the last
+          # nightly that actually finished". Not HEAD~1 (that is one merge, and
+          # main takes ~4/day), and not a fixed 24h lookback — a fixed window
+          # silently skips the night a run FAILED, which is the exact case a
+          # backstop must survive. Keying on the last SUCCESS makes a failed
+          # night get covered by the next one instead.
+          LAST=$(gh api \
+            "repos/${GITHUB_REPOSITORY}/actions/workflows/nightly-ci.yml/runs?status=success&branch=main&per_page=1" \
+            --jq '.workflow_runs[0].head_sha // ""' 2>/dev/null || echo "")
+          if [[ -n "$LAST" ]] && git cat-file -e "${LAST}^{commit}" 2>/dev/null; then
+            echo "::notice::Scanning since the last successful nightly (${LAST})"
+          else
+            # No successful run yet, or its commit is gone (force-push, GC).
+            # Fall back to the repo's ROOT commit — a full-history scan. Cold
+            # start should be thorough, never HEAD~1-blind.
+            LAST=$(git rev-list --max-parents=0 HEAD | tail -1)
+            echo "::warning::No usable prior nightly; falling back to a full-history scan from ${LAST}"
+          fi
+          echo "diff-base=${LAST}" >> "$GITHUB_OUTPUT"
+
+  # ─── IOC-first (ADR-0018 §2) ─────────────────────────────────────────
+  # Non-negotiable here: every job below installs or executes repo code.
+  ioc:
+    name: ioc
+    needs: [window]
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/ioc-scanning.yml
+    with:
+      diff-base: ${{ needs.window.outputs.diff-base }}
+
+  # ─── Scanner fleet (moved off per-merge) ─────────────────────────────
+  eslint:
+    name: eslint
+    needs: [ioc]
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/eslint-sarif.yml
+
+  codeql:
+    name: codeql
+    needs: [ioc]
+    permissions:
+      contents: read
+      security-events: write
+      packages: read
+      actions: read
+    uses: ./.github/workflows/codeql.yml
+
+  govulncheck:
+    name: govulncheck
+    needs: [ioc]
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/govulncheck.yml
+
+  # Advisory: new CVEs land in base images daily with no diff here, so this is
+  # the leg that catches them. Advisory because a server-image CVE must not
+  # withhold a desktop release; it is listed in `summary` only, not `release`.
+  container-image-scan:
+    name: container-image-scan
+    needs: [ioc]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/container-image-scan.yml
+
+  # DO NOT "fix" secret-scanning.yml's empty base/head here. Its job is named
+  # "TruffleHog (PR diff)" and passes `base: github.event.pull_request.base.sha`,
+  # which is '' outside a PR — and an empty `base` is TruffleHog's DOCUMENTED
+  # "scan entire branch" configuration (`base` maps to --since-commit). So the
+  # nightly leg is a full-history verified-secrets sweep of main, strictly
+  # broader than the PR diff, and measurably so: 95s here vs 40s on a PR.
+  # Wiring a base SHA in would NARROW it.
+  secret-scanning:
+    name: secret-scanning
+    needs: [ioc]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/secret-scanning.yml
+
+  scorecard:
+    name: scorecard
+    needs: [ioc]
+    # A caller's grant must be a SUPERSET of every permission the called
+    # workflow requests, or GitHub rejects the WHOLE RUN at startup —
+    # `startup_failure`, zero jobs, no log. scorecard.yml's analysis job asks
+    # for issues/pull-requests/checks read (its Maintained + Branch-Protection
+    # checks read them); dropping them here cost exactly that, caught only by
+    # the first real dispatch. Keep this set aligned with main-ci.yml's
+    # scorecard job; `.github/scripts/lint-workflow-call-permissions.sh`
+    # now fails closed on any drift.
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+      id-token: write
+      issues: read
+      pull-requests: read
+      checks: read
+    uses: ./.github/workflows/scorecard.yml
+
+  # ─── Tests, coverage, Docker canaries ────────────────────────────────
+  # No `with:` inputs: build.yml's path filters carry `|| github.event_name !=
+  # 'pull_request'`, so every suite force-runs here. That clause is #1510's
+  # (SonarCloud main-branch coverage must stay fresh) — it used to read
+  # `== 'push'`, which would have gone dead the moment main-ci stopped calling
+  # build on ordinary merges. It moved rather than rotted.
+  build:
+    name: build
+    needs: [ioc]
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/build.yml
+
+  unit-smoke:
+    name: unit-smoke
+    needs: [ioc]
+    permissions:
+      contents: read
+    uses: ./.github/workflows/unit-smoke.yml
+    with:
+      # STRING, not boolean — unit-smoke.yml types this input as string and
+      # tests it with `format('{0}', inputs.dev-stack-changed) == 'true'`.
+      # actionlint rejects the bare boolean, which is the same coercion trap
+      # the repo's G3 boolean lint exists for.
+      dev-stack-changed: ${{ 'true' }}
+
+  # ─── DAST (moved off per-PR; deep plan, was weekly) ──────────────────
+  # zap-api-dast.yml's own `schedule` was removed in the same change: this is
+  # now its only scheduled run. Cadence improves (weekly deep -> nightly deep)
+  # while the per-PR light scan goes away.
+  # Unconditional: DAST result moves with the dependency tree and the ZAP
+  # engine image, not only with the repo diff, so a paths gate here would
+  # under-approximate what changes the answer. That is why the cron it replaces
+  # ran unconditionally too — this is the same posture, seven times as often.
+  zap:
+    name: zap
+    needs: [ioc]
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/zap-api-dast.yml
+    with:
+      plan: full
+
+  # ─── Verdict ─────────────────────────────────────────────────────────
+  # `always()` is load-bearing: the summary must render precisely when the run
+  # went badly. Default success() semantics would skip this job on the nights
+  # its table is most worth reading, leaving a red nightly with no rendered
+  # explanation of WHICH leg failed or whether the release was withheld.
+  summary:
+    name: summary
+    needs: [window, ioc, eslint, codeql, govulncheck, secret-scanning, container-image-scan, scorecard, build, unit-smoke, zap]
+    if: always()
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - name: Render the nightly verdict
+        env:
+          RESULTS: ${{ toJSON(needs) }}
+          BASE: ${{ needs.window.outputs.diff-base }}
+        run: |
+          set -euo pipefail
+          # Untrusted input never reaches the shell: results arrive as JSON in
+          # env and are read by python, never interpolated into a command.
+          python3 - <<'PY' >> "$GITHUB_STEP_SUMMARY"
+          import json, os
+          r = json.loads(os.environ["RESULTS"])
+          blocking = ["ioc","build","unit-smoke","eslint","codeql","govulncheck","secret-scanning"]
+          advisory = ["scorecard","zap","container-image-scan"]
+          print("## Nightly CI\n")
+          print(f"Window scanned from `{os.environ['BASE'][:12]}`.\n")
+          print("| Job | Result | Class |")
+          print("|---|---|---|")
+          for name in blocking + advisory:
+              res = (r.get(name) or {}).get("result", "skipped")
+              icon = {"success":"✅","failure":"❌","cancelled":"⚠️","skipped":"⏭️"}.get(res,"❓")
+              print(f"| `{name}` | {icon} {res} | {'blocking' if name in blocking else 'advisory'} |")
+          red = [n for n in blocking if (r.get(n) or {}).get("result") == "failure"]
+          print()
+          if red:
+              print(f"**Blocking failures:** {', '.join('`'+n+'`' for n in red)}.")
+          amber = [n for n in advisory if (r.get(n) or {}).get("result") == "failure"]
+          if amber:
+              print(f"\nAdvisory signals red (did NOT block): {', '.join('`'+n+'`' for n in amber)}.")
+          PY

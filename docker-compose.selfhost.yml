@@ -12,7 +12,7 @@
 #
 # Needs Compose >= 2.24.5: older Compose silently IGNORES !override and MERGES the
 # lists, rendering 0.0.0.0:8080 next to 127.0.0.1:8080. The posture gate in
-# concord-ctl.sh refuses that render; see [internal]selfhost-port-posture.py.
+# concord-ctl.sh refuses that render; see infrastructure/deploy/selfhost-port-posture.py.
 services:
   postgres:
     ports: !reset []

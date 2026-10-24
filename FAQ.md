@@ -633,7 +633,7 @@ We haven't officially tested Pi deployment, but community reports welcome!
 
 ### What about Kubernetes/cloud deployment?
 
-Kubernetes manifests, Helm charts, and cloud provider templates are not currently shipped. Production deployment uses a single VM via systemd timer + Docker Compose (see `[internal]`).
+Kubernetes manifests, Helm charts, and cloud provider templates are not currently shipped. Production deployment uses a single VM via systemd timer + Docker Compose (see `infrastructure/deploy/`).
 
 For now, Docker Compose is the supported method.
 

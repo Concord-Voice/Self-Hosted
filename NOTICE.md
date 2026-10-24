@@ -1,6 +1,6 @@
 # NOTICE — Third-Party Software Used by Concord Voice
 
-**Generated:** 2026-10-22
+**Generated:** 2026-10-23
 **MinIO distribution addendum updated:** 2026-09-27
 **Admin portal family added:** 2026-08-28
 **Concord Voice License:** [Concord Voice Source License 1.0 (CVSL 1.0)](./LICENSE) → AGPL-3.0-or-later on 2030-02-15
@@ -13,7 +13,7 @@ contributions of these projects to the Concord Voice platform.
 
 ## Summary
 
-Concord Voice distributes 400 third-party software components across its four
+Concord Voice distributes 212 third-party software components across its three
 CVSL application artifact families:
 
 - **61** Go modules linked into the control-plane runtime binaries. The image
@@ -21,44 +21,47 @@ CVSL application artifact families:
   `mfa-rekey` (`services/control-plane/Dockerfile:39-41,57-59`) — and the table
   is the union of what all three link. The image also carries the admin portal
   bundle below, so it is not Go-only.
-- **188** npm packages in the desktop client production bundle (plus Electron and its bundled components)
 - **145** npm packages in the media-plane production bundle
 - **6** npm packages in the admin portal production bundle (`client/admin`),
   compiled by the `admin-ui-builder` stage and copied into the control-plane
   runtime image at `/admin-ui` (`services/control-plane/Dockerfile:8,66`)
 
-(Counts exclude Concord Voice's own private packages — `@concordvoice/desktop`,
-`@concordvoice/media-plane` — and the local stub override
+(Counts exclude Concord Voice's own private packages — `@concordvoice/media-plane`
+and `@concordvoice/admin` — and the local stub override
 `node-domexception-stub`. Those are first-party components, not third-party
 attributions. The separately distributed MinIO server image described below is
 also excluded from this linked/bundled application dependency count.)
+
+The desktop application — Electron, Chromium, its npm dependencies and the
+shared `packages/*` libraries it bundles — is distributed from the
+[Desktop repository](https://github.com/Concord-Voice/Desktop), whose NOTICE.md
+attributes it.
 
 Application-dependency license distribution:
 
 | License family | Share | Compatible with CVSL 1.0 + AGPL-3.0 |
 |---|---|---|
-| MIT | 82.8% (331) | ✓ |
-| ISC | 6.2% (25) | ✓ |
-| Apache-2.0 | 4.2% (17) | ✓ |
-| BSD-3-Clause | 3.8% (15) | ✓ |
-| BSD-2-Clause | 1.2% (5) | ✓ |
-| BlueOak-1.0.0 | 1.2% (5) | ✓ |
-| Python-2.0 | 0.2% (1) | ✓ |
-| Unlicense | 0.2% (1) | ✓ |
+| MIT | 76.9% (163) | ✓ |
+| Apache-2.0 | 7.5% (16) | ✓ |
+| BSD-3-Clause | 6.6% (14) | ✓ |
+| ISC | 4.2% (9) | ✓ |
+| BSD-2-Clause | 2.4% (5) | ✓ |
+| BlueOak-1.0.0 | 1.9% (4) | ✓ |
+| Unlicense | 0.5% (1) | ✓ |
 | MPL-2.0 (build-time only) | not in the count above | ✓ |
 | CC-BY-3.0 / CC-BY-4.0 (build-data only) | not in the count above | ✓ (attribution required) |
 
-Shares are exact counts over the 400 components tabulated below, not estimates.
+Shares are exact counts over the 212 components tabulated below, not estimates.
 The final two rows cover build-time and build-data dependencies, which are not
-part of that 400 and therefore carry no share of it; see
+part of that 212 and therefore carry no share of it; see
 [docs/legal/dependency-license-audit.md](docs/legal/dependency-license-audit.md)
 for their treatment.
 
 No GPL, AGPL, SSPL, BUSL, Elastic License, Commons Clause, or other strong
-copyleft / non-commercial dependency is linked into or bundled with the four
+copyleft / non-commercial dependency is linked into or bundled with the three
 CVSL application artifact families counted above. Concord's separately
 distributed MinIO server image is an AGPL-3.0-or-later upstream program and is
-recorded separately below; it is not part of the 400-component count.
+recorded separately below; it is not part of the 212-component count.
 
 ## License Texts
 
@@ -82,7 +85,7 @@ SPDX URLs:
 
 Individual project copyright notices and full license texts are preserved
 in the redistributed source / binary form (npm `node_modules`, Go module
-cache, Electron credits at `about:credits` in the application). For
+cache). For
 projects that ship their own NOTICE file (Apache-2.0 § 4 requirement),
 that content is included with the project in its `node_modules` directory
 or Go module cache and is not duplicated here.
@@ -129,21 +132,6 @@ presentation. Once public, GHCR package visibility cannot return to private, so
 later MinIO releases require that recorded legal approval before dispatch. This
 section is an engineering distribution record, not a legal conclusion about
 compliance or aggregation.
-
-## Electron and Chromium
-
-The Concord Voice desktop application is built on Electron and embeds
-Chromium. Electron itself is licensed under MIT. Chromium and its
-components are licensed under multiple compatible licenses (predominantly
-BSD-3-Clause, with various permissive licenses for individual components).
-The full Chromium credits are included in the desktop application
-installer and accessible at runtime via the in-app About section. The
-Electron and Chromium teams are gratefully acknowledged.
-
-- **Electron** — [https://www.electronjs.org/](https://www.electronjs.org/) — MIT License
-- **Chromium** — [https://www.chromium.org/](https://www.chromium.org/) — see in-app `about:credits`
-
----
 
 ## Go Control-Plane Runtime Dependencies
 
@@ -221,204 +209,6 @@ current tree rather than a guarantee.
 
 ---
 
-## Desktop Client Production Dependencies
-
-The following npm packages are included in the desktop client production
-bundle (client/desktop):
-
-| Package | Version | License | Repository |
-|---|---|---|---|
-| @lukeed/csprng | 1.1.0 | MIT | https://github.com/lukeed/csprng |
-| @lukeed/uuid | 2.0.1 | MIT | https://github.com/lukeed/uuid |
-| @msgpack/msgpack | 3.1.3 | ISC | https://github.com/msgpack/msgpack-javascript |
-| @noble/hashes | 2.4.0 | MIT | https://github.com/paulmillr/noble-hashes |
-| @remix-run/route-pattern | 0.22.1 | MIT | https://github.com/remix-run/remix |
-| @socket.io/component-emitter | 3.1.2 | MIT | https://github.com/socketio/emitter |
-| @types/debug | 4.1.13 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
-| @types/estree-jsx | 1.0.5 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
-| @types/estree | 1.0.8 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
-| @types/events | 3.0.3 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
-| @types/hast | 3.0.4 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
-| @types/mdast | 4.0.4 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
-| @types/ms | 2.1.0 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
-| @types/react | 19.3.0 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
-| @types/unist | 2.0.11 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
-| @types/unist | 3.0.3 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
-| @ungap/structured-clone | 1.3.0 | ISC | https://github.com/ungap/structured-clone |
-| ansi-regex | 5.0.1 | MIT | https://github.com/chalk/ansi-regex |
-| ansi-styles | 4.3.0 | MIT | https://github.com/chalk/ansi-styles |
-| argparse | 2.0.1 | Python-2.0 | https://github.com/nodeca/argparse |
-| awaitqueue | 3.3.1 | ISC | https://github.com/versatica/awaitqueue |
-| bail | 2.0.2 | MIT | https://github.com/wooorm/bail |
-| builder-util-runtime | 9.7.0 | MIT | https://github.com/electron-userland/electron-builder |
-| camelcase | 5.3.1 | MIT | https://github.com/sindresorhus/camelcase |
-| ccount | 2.0.1 | MIT | https://github.com/wooorm/ccount |
-| character-entities-html4 | 2.1.0 | MIT | https://github.com/wooorm/character-entities-html4 |
-| character-entities-legacy | 3.0.0 | MIT | https://github.com/wooorm/character-entities-legacy |
-| character-entities | 2.0.2 | MIT | https://github.com/wooorm/character-entities |
-| character-reference-invalid | 2.0.1 | MIT | https://github.com/wooorm/character-reference-invalid |
-| cliui | 6.0.0 | ISC | https://github.com/yargs/cliui |
-| color-convert | 2.0.1 | MIT | https://github.com/Qix-/color-convert |
-| color-name | 1.1.4 | MIT | https://github.com/colorjs/color-name |
-| comma-separated-tokens | 2.0.3 | MIT | https://github.com/wooorm/comma-separated-tokens |
-| cookie-es | 3.1.1 | MIT | https://github.com/unjs/cookie-es |
-| csstype | 3.2.3 | MIT | https://github.com/frenic/csstype |
-| debug | 2.6.9 | MIT | https://github.com/visionmedia/debug |
-| debug | 4.4.3 | MIT | https://github.com/debug-js/debug |
-| decamelize | 1.2.0 | MIT | https://github.com/sindresorhus/decamelize |
-| decode-named-character-reference | 1.3.0 | MIT | https://github.com/wooorm/decode-named-character-reference |
-| dequal | 2.0.3 | MIT | https://github.com/lukeed/dequal |
-| devlop | 1.1.0 | MIT | https://github.com/wooorm/devlop |
-| dijkstrajs | 1.0.3 | MIT | https://github.com/tcort/dijkstrajs |
-| electron-squirrel-startup | 1.0.1 | Apache-2.0 | https://github.com/mongodb-js/electron-squirrel-startup |
-| electron-updater | 6.8.9 | MIT | https://github.com/electron-userland/electron-builder |
-| emoji-regex | 8.0.0 | MIT | https://github.com/mathiasbynens/emoji-regex |
-| engine.io-client | 6.6.5 | MIT | https://github.com/socketio/socket.io |
-| engine.io-parser | 5.2.3 | MIT | https://github.com/socketio/socket.io |
-| escape-string-regexp | 5.0.0 | MIT | https://github.com/sindresorhus/escape-string-regexp |
-| estree-util-is-identifier-name | 3.0.0 | MIT | https://github.com/syntax-tree/estree-util-is-identifier-name |
-| events | 3.3.0 | MIT | https://github.com/Gozala/events |
-| extend | 3.0.2 | MIT | https://github.com/justmoon/node-extend |
-| fake-mediastreamtrack | 2.2.1 | ISC | https://github.com/ibc/fake-mediastreamtrack |
-| find-up | 4.1.0 | MIT | https://github.com/sindresorhus/find-up |
-| fs-extra | 10.1.0 | MIT | https://github.com/jprichardson/node-fs-extra |
-| get-caller-file | 2.0.5 | ISC | https://github.com/stefanpenner/get-caller-file |
-| graceful-fs | 4.2.11 | ISC | https://github.com/isaacs/node-graceful-fs |
-| h264-profile-level-id | 2.3.3 | ISC | https://github.com/versatica/h264-profile-level-id |
-| hash-wasm | 4.12.0 | MIT | https://github.com/Daninet/hash-wasm |
-| hast-util-is-element | 3.0.0 | MIT | https://github.com/syntax-tree/hast-util-is-element |
-| hast-util-sanitize | 5.0.2 | MIT | https://github.com/syntax-tree/hast-util-sanitize |
-| hast-util-to-jsx-runtime | 2.3.6 | MIT | https://github.com/syntax-tree/hast-util-to-jsx-runtime |
-| hast-util-to-text | 4.0.2 | MIT | https://github.com/syntax-tree/hast-util-to-text |
-| hast-util-whitespace | 3.0.0 | MIT | https://github.com/syntax-tree/hast-util-whitespace |
-| highlight.js | 11.11.1 | BSD-3-Clause | https://github.com/highlightjs/highlight.js |
-| html-url-attributes | 3.0.1 | MIT | https://github.com/rehypejs/rehype-minify/tree/main/packages/html-url-attributes |
-| inline-style-parser | 0.2.7 | MIT | https://github.com/remarkablemark/inline-style-parser |
-| is-alphabetical | 2.0.1 | MIT | https://github.com/wooorm/is-alphabetical |
-| is-alphanumerical | 2.0.1 | MIT | https://github.com/wooorm/is-alphanumerical |
-| is-decimal | 2.0.1 | MIT | https://github.com/wooorm/is-decimal |
-| is-fullwidth-code-point | 3.0.0 | MIT | https://github.com/sindresorhus/is-fullwidth-code-point |
-| is-hexadecimal | 2.0.1 | MIT | https://github.com/wooorm/is-hexadecimal |
-| is-plain-obj | 4.1.0 | MIT | https://github.com/sindresorhus/is-plain-obj |
-| jose | 6.2.12 | MIT | https://github.com/panva/jose |
-| js-yaml | 4.3.2 | MIT | https://github.com/nodeca/js-yaml |
-| jsonfile | 6.2.0 | MIT | https://github.com/jprichardson/node-jsonfile |
-| lazy-val | 1.0.5 | MIT | https://github.com/develar/lazy-val |
-| locate-path | 5.0.0 | MIT | https://github.com/sindresorhus/locate-path |
-| lodash.escaperegexp | 4.1.2 | MIT | https://github.com/lodash/lodash |
-| lodash.isequal | 4.5.0 | MIT | https://github.com/lodash/lodash |
-| longest-streak | 3.1.0 | MIT | https://github.com/wooorm/longest-streak |
-| lowlight | 3.3.0 | MIT | https://github.com/wooorm/lowlight |
-| lucide-react | 1.57.0 | ISC | https://github.com/lucide-icons/lucide |
-| markdown-table | 3.0.4 | MIT | https://github.com/wooorm/markdown-table |
-| mdast-util-find-and-replace | 3.0.2 | MIT | https://github.com/syntax-tree/mdast-util-find-and-replace |
-| mdast-util-from-markdown | 2.0.3 | MIT | https://github.com/syntax-tree/mdast-util-from-markdown |
-| mdast-util-gfm-autolink-literal | 2.0.1 | MIT | https://github.com/syntax-tree/mdast-util-gfm-autolink-literal |
-| mdast-util-gfm-footnote | 2.1.0 | MIT | https://github.com/syntax-tree/mdast-util-gfm-footnote |
-| mdast-util-gfm-strikethrough | 2.0.0 | MIT | https://github.com/syntax-tree/mdast-util-gfm-strikethrough |
-| mdast-util-gfm-table | 2.0.0 | MIT | https://github.com/syntax-tree/mdast-util-gfm-table |
-| mdast-util-gfm-task-list-item | 2.0.0 | MIT | https://github.com/syntax-tree/mdast-util-gfm-task-list-item |
-| mdast-util-gfm | 3.1.0 | MIT | https://github.com/syntax-tree/mdast-util-gfm |
-| mdast-util-mdx-expression | 2.0.1 | MIT | https://github.com/syntax-tree/mdast-util-mdx-expression |
-| mdast-util-mdx-jsx | 3.2.0 | MIT | https://github.com/syntax-tree/mdast-util-mdx-jsx |
-| mdast-util-mdxjs-esm | 2.0.1 | MIT | https://github.com/syntax-tree/mdast-util-mdxjs-esm |
-| mdast-util-phrasing | 4.1.0 | MIT | https://github.com/syntax-tree/mdast-util-phrasing |
-| mdast-util-to-hast | 13.2.1 | MIT | https://github.com/syntax-tree/mdast-util-to-hast |
-| mdast-util-to-markdown | 2.1.2 | MIT | https://github.com/syntax-tree/mdast-util-to-markdown |
-| mdast-util-to-string | 4.0.0 | MIT | https://github.com/syntax-tree/mdast-util-to-string |
-| mediasoup-client | 3.24.5 | ISC | https://github.com/versatica/mediasoup-client |
-| micromark-core-commonmark | 2.0.3 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-core-commonmark |
-| micromark-extension-gfm-autolink-literal | 2.1.0 | MIT | https://github.com/micromark/micromark-extension-gfm-autolink-literal |
-| micromark-extension-gfm-footnote | 2.1.0 | MIT | https://github.com/micromark/micromark-extension-gfm-footnote |
-| micromark-extension-gfm-strikethrough | 2.1.0 | MIT | https://github.com/micromark/micromark-extension-gfm-strikethrough |
-| micromark-extension-gfm-table | 2.1.1 | MIT | https://github.com/micromark/micromark-extension-gfm-table |
-| micromark-extension-gfm-tagfilter | 2.0.0 | MIT | https://github.com/micromark/micromark-extension-gfm-tagfilter |
-| micromark-extension-gfm-task-list-item | 2.1.0 | MIT | https://github.com/micromark/micromark-extension-gfm-task-list-item |
-| micromark-extension-gfm | 3.0.0 | MIT | https://github.com/micromark/micromark-extension-gfm |
-| micromark-factory-destination | 2.0.1 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-factory-destination |
-| micromark-factory-label | 2.0.1 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-factory-label |
-| micromark-factory-space | 2.0.1 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-factory-space |
-| micromark-factory-title | 2.0.1 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-factory-title |
-| micromark-factory-whitespace | 2.0.1 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-factory-whitespace |
-| micromark-util-character | 2.1.1 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-util-character |
-| micromark-util-chunked | 2.0.1 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-util-chunked |
-| micromark-util-classify-character | 2.0.1 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-util-classify-character |
-| micromark-util-combine-extensions | 2.0.1 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-util-combine-extensions |
-| micromark-util-decode-numeric-character-reference | 2.0.2 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-util-decode-numeric-character-reference |
-| micromark-util-decode-string | 2.0.1 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-util-decode-string |
-| micromark-util-encode | 2.0.1 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-util-encode |
-| micromark-util-html-tag-name | 2.0.1 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-util-html-tag-name |
-| micromark-util-normalize-identifier | 2.0.1 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-util-normalize-identifier |
-| micromark-util-resolve-all | 2.0.1 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-util-resolve-all |
-| micromark-util-sanitize-uri | 2.0.1 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-util-sanitize-uri |
-| micromark-util-subtokenize | 2.1.0 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-util-subtokenize |
-| micromark-util-symbol | 2.0.1 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-util-symbol |
-| micromark-util-types | 2.0.2 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark-util-types |
-| micromark | 4.0.2 | MIT | https://github.com/micromark/micromark/tree/main/packages/micromark |
-| minisearch | 7.2.0 | MIT | https://github.com/lucaong/minisearch |
-| ms | 2.0.0 | MIT | https://github.com/zeit/ms |
-| ms | 2.1.3 | MIT | https://github.com/vercel/ms |
-| p-limit | 2.3.0 | MIT | https://github.com/sindresorhus/p-limit |
-| p-locate | 4.1.0 | MIT | https://github.com/sindresorhus/p-locate |
-| p-try | 2.2.0 | MIT | https://github.com/sindresorhus/p-try |
-| parse-entities | 4.0.2 | MIT | https://github.com/wooorm/parse-entities |
-| path-exists | 4.0.0 | MIT | https://github.com/sindresorhus/path-exists |
-| pngjs | 5.0.0 | MIT | https://github.com/lukeapage/pngjs |
-| property-information | 7.1.0 | MIT | https://github.com/wooorm/property-information |
-| qrcode | 1.5.4 | MIT | https://github.com/soldair/node-qrcode |
-| react-dom | 19.3.1 | MIT | https://github.com/react/react |
-| react-markdown | 10.1.0 | MIT | https://github.com/remarkjs/react-markdown |
-| react-router | 8.4.0 | MIT | https://github.com/remix-run/react-router |
-| react | 19.3.1 | MIT | https://github.com/react/react |
-| rehype-highlight | 7.0.2 | MIT | https://github.com/rehypejs/rehype-highlight |
-| rehype-sanitize | 6.0.0 | MIT | https://github.com/rehypejs/rehype-sanitize |
-| remark-gfm | 4.0.1 | MIT | https://github.com/remarkjs/remark-gfm |
-| remark-parse | 11.0.0 | MIT | https://github.com/remarkjs/remark/tree/main/packages/remark-parse |
-| remark-rehype | 11.1.2 | MIT | https://github.com/remarkjs/remark-rehype |
-| remark-stringify | 11.0.0 | MIT | https://github.com/remarkjs/remark/tree/main/packages/remark-stringify |
-| require-directory | 2.1.1 | MIT | https://github.com/troygoode/node-require-directory |
-| require-main-filename | 2.0.0 | ISC | https://github.com/yargs/require-main-filename |
-| sax | 1.6.0 | BlueOak-1.0.0 | https://github.com/isaacs/sax-js |
-| scheduler | 0.28.0 | MIT | https://github.com/react/react |
-| sdp-transform | 3.0.0 | MIT | https://github.com/clux/sdp-transform |
-| semver | 7.7.4 | ISC | https://github.com/npm/node-semver |
-| set-blocking | 2.0.0 | ISC | https://github.com/yargs/set-blocking |
-| socket.io-client | 4.8.4 | MIT | https://github.com/socketio/socket.io |
-| socket.io-parser | 4.2.7 | MIT | https://github.com/socketio/socket.io |
-| space-separated-tokens | 2.0.2 | MIT | https://github.com/wooorm/space-separated-tokens |
-| string-width | 4.2.3 | MIT | https://github.com/sindresorhus/string-width |
-| stringify-entities | 4.0.4 | MIT | https://github.com/wooorm/stringify-entities |
-| strip-ansi | 6.0.1 | MIT | https://github.com/chalk/strip-ansi |
-| style-to-js | 1.1.21 | MIT | https://github.com/remarkablemark/style-to-js |
-| style-to-object | 1.0.14 | MIT | https://github.com/remarkablemark/style-to-object |
-| supports-color | 11.0.0 | MIT | https://github.com/chalk/supports-color |
-| tiny-typed-emitter | 2.1.0 | MIT | https://github.com/binier/tiny-typed-emitter |
-| trim-lines | 3.0.1 | MIT | https://github.com/wooorm/trim-lines |
-| trough | 2.2.0 | MIT | https://github.com/wooorm/trough |
-| unified | 11.0.5 | MIT | https://github.com/unifiedjs/unified |
-| unist-util-find-after | 5.0.0 | MIT | https://github.com/syntax-tree/unist-util-find-after |
-| unist-util-is | 6.0.1 | MIT | https://github.com/syntax-tree/unist-util-is |
-| unist-util-position | 5.0.0 | MIT | https://github.com/syntax-tree/unist-util-position |
-| unist-util-stringify-position | 4.0.0 | MIT | https://github.com/syntax-tree/unist-util-stringify-position |
-| unist-util-visit-parents | 6.0.2 | MIT | https://github.com/syntax-tree/unist-util-visit-parents |
-| unist-util-visit | 5.1.0 | MIT | https://github.com/syntax-tree/unist-util-visit |
-| universalify | 2.0.1 | MIT | https://github.com/RyanZim/universalify |
-| use-sync-external-store | 1.7.0 | MIT | https://github.com/react/react |
-| vfile-message | 4.0.3 | MIT | https://github.com/vfile/vfile-message |
-| vfile | 6.0.3 | MIT | https://github.com/vfile/vfile |
-| which-module | 2.0.1 | ISC | https://github.com/nexdrew/which-module |
-| wrap-ansi | 6.2.0 | MIT | https://github.com/chalk/wrap-ansi |
-| ws | 8.21.3 | MIT | https://github.com/websockets/ws |
-| xmlhttprequest-ssl | 2.1.2 | MIT | https://github.com/mjwwit/node-XMLHttpRequest |
-| y18n | 4.0.3 | ISC | https://github.com/yargs/y18n |
-| yargs-parser | 18.1.3 | ISC | https://github.com/yargs/yargs-parser |
-| yargs | 15.4.1 | MIT | https://github.com/yargs/yargs |
-| zod | 4.6.7 | MIT | https://github.com/colinhacks/zod |
-| zustand | 5.0.13 | MIT | https://github.com/pmndrs/zustand |
-| zwitch | 2.0.4 | MIT | https://github.com/wooorm/zwitch |
-
----
-
 ## Media-Plane Production Dependencies
 
 The following npm packages are included in the media-plane production
@@ -443,7 +233,7 @@ bundle (services/media-plane):
 | accepts | 1.3.8 | MIT | https://github.com/jshttp/accepts |
 | accepts | 2.0.0 | MIT | https://github.com/jshttp/accepts |
 | async | 3.2.6 | MIT | https://github.com/caolan/async |
-| body-parser | 2.3.0 | MIT | https://github.com/expressjs/body-parser |
+| body-parser | 2.4.0 | MIT | https://github.com/expressjs/body-parser |
 | buffer-equal-constant-time | 1.0.1 | BSD-3-Clause | https://github.com/goinstant/buffer-equal-constant-time |
 | bytes | 3.1.2 | MIT | https://github.com/visionmedia/bytes.js |
 | call-bind-apply-helpers | 1.0.2 | MIT | https://github.com/ljharb/call-bind-apply-helpers |
@@ -490,7 +280,7 @@ bundle (services/media-plane):
 | has-symbols | 1.1.0 | MIT | https://github.com/inspect-js/has-symbols |
 | hasown | 2.0.4 | MIT | https://github.com/inspect-js/hasOwn |
 | http-errors | 2.0.1 | MIT | https://github.com/jshttp/http-errors |
-| iconv-lite | 0.7.2 | MIT | https://github.com/pillarjs/iconv-lite |
+| iconv-lite | 0.7.3 | MIT | https://github.com/pillarjs/iconv-lite |
 | inherits | 2.0.4 | ISC | https://github.com/isaacs/inherits |
 | ipaddr.js | 1.9.1 | MIT | https://github.com/whitequark/ipaddr.js |
 | is-promise | 4.0.0 | MIT | https://github.com/then/is-promise |
@@ -509,7 +299,7 @@ bundle (services/media-plane):
 | logform | 2.7.0 | MIT | https://github.com/winstonjs/logform |
 | math-intrinsics | 1.1.0 | MIT | https://github.com/es-shims/math-intrinsics |
 | media-typer | 1.1.0 | MIT | https://github.com/jshttp/media-typer |
-| mediasoup | 3.28.0 | ISC | https://github.com/versatica/mediasoup |
+| mediasoup | 3.29.0 | ISC | https://github.com/versatica/mediasoup |
 | merge-descriptors | 2.0.0 | MIT | https://github.com/sindresorhus/merge-descriptors |
 | mime-db | 1.52.0 | MIT | https://github.com/jshttp/mime-db |
 | mime-db | 1.54.0 | MIT | https://github.com/jshttp/mime-db |
@@ -531,7 +321,7 @@ bundle (services/media-plane):
 | parseurl | 1.3.3 | MIT | https://github.com/pillarjs/parseurl |
 | path-to-regexp | 8.4.0 | MIT | https://github.com/pillarjs/path-to-regexp |
 | proxy-addr | 2.0.8 | MIT | https://github.com/jshttp/proxy-addr |
-| qs | 6.16.0 | BSD-3-Clause | https://github.com/ljharb/qs |
+| qs | 6.16.1 | BSD-3-Clause | https://github.com/ljharb/qs |
 | range-parser | 1.2.1 | MIT | https://github.com/jshttp/range-parser |
 | raw-body | 3.0.2 | MIT | https://github.com/stream-utils/raw-body |
 | readable-stream | 3.6.2 | MIT | https://github.com/nodejs/readable-stream |
@@ -583,7 +373,7 @@ The following npm packages are included in the admin portal production bundle
 image even though the image's Go table above lists only linked Go modules.
 
 Versions here are resolved from `client/admin/package-lock.json` and are
-independent of the desktop client's lockfile: the two are bumped by separate
+independent of the media-plane lockfile: the two are bumped by separate
 Dependabot PRs and may drift apart at any time. Do not read either table as
 covering the other.
 
@@ -643,13 +433,12 @@ This NOTICE file should be regenerated whenever dependencies are added,
 removed, or upgraded. Tooling:
 
 **Prefer the script.** [`scripts/update-notice-md.py`](scripts/update-notice-md.py)
-runs everything below and rewrites the four tables and the summary counts in one
+runs everything below and rewrites the three tables and the summary counts in one
 step. It is dry-run by default; `--apply` writes.
 
 ```bash
 (cd .github/tools/license-checker && npm ci --ignore-scripts --no-audit --no-fund) && \
-(cd client/desktop && npm ci) && (cd services/media-plane && npm ci) && \
-(cd client/admin && npm ci) && ./scripts/update-notice-md.py --apply
+(cd services/media-plane && npm ci) && (cd client/admin && npm ci) && ./scripts/update-notice-md.py --apply
 ```
 
 It exits **2** rather than writing when a Go module is linked into **any of the
@@ -671,7 +460,7 @@ required status check (the org baseline ruleset requires `Gitar` and
 
 CI checks npm workspaces independently. A workspace manifest or lockfile change
 checks that workspace only; NOTICE, workflow, selector-policy, or regenerator
-changes check all three. A Go source change also runs the Go license check,
+changes check both. A Go source change also runs the Go license check,
 because imports can change the runtime dependency set without changing a module
 file. Scoped npm checks use `--check --scope npm --workspace <workspace>` and
 still validate the complete NOTICE summary and table counts.
@@ -696,9 +485,6 @@ key, so a bare name never matches and the exclusion silently does nothing.
 ```bash
 (cd .github/tools/license-checker && npm ci --ignore-scripts --no-audit --no-fund)
 notice_checker="$PWD/.github/tools/license-checker/node_modules/.bin/license-checker"
-
-# Desktop client (npm)
-(cd client/desktop && "$notice_checker" --production --csv --excludePrivatePackages > /tmp/desktop-licenses.csv)
 
 # Media-plane (npm)
 (cd services/media-plane && "$notice_checker" --production --csv --excludePrivatePackages > /tmp/media-licenses.csv)

@@ -1,0 +1,13 @@
+# Path-based label assignments for the Labeler workflow.
+#
+# See .github/workflows/labeler.yml for the workflow that consumes this config.
+# The actions/labeler@v5+ docs are at https://github.com/actions/labeler.
+#
+# Filed under #1237 as part of the restructure for #1127's RESTRUCTURE disposition
+# (the L3 dispatch sandbox at .github/workflows/workflow-validate.yml had 0
+# successful runs over a 30-day baseline + extended sample because the label
+# was never applied).
+
+"workflow-validation: dispatch":
+  - changed-files:
+      - any-glob-to-any-file: .github/workflows/**

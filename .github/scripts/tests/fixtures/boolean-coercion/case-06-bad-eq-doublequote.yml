@@ -1,0 +1,20 @@
+# Synthetic fixture: double-quoted variant of the bug pattern. GHA YAML
+# accepts both 'true' (single-quoted) and "true" (double-quoted) for
+# string literals, and the expression evaluator treats them identically
+# — both exhibit the same coercion bug against `type: boolean` inputs.
+# A previous version of the lint only matched single-quoted 'true' and
+# this variant slipped through silently. The lint MUST flag this form.
+name: bad-eq-doublequote
+on:
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        type: boolean
+        default: false
+
+jobs:
+  deploy:
+    if: inputs.force_deploy == "true"
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "would never reach here"

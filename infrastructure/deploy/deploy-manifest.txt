@@ -1,0 +1,18 @@
+# Self-Hosted bundle inputs retained from Alpha's deploy manifest.
+# The managed deployment entries stay in Hosted.
+docker-compose.yml
+docker-compose.production.yml
+docker-compose.selfhost.yml
+docker-compose.byo-s3.yml
+infrastructure/deploy/concord-selfhost
+infrastructure/deploy/install-selfhost.sh
+infrastructure/deploy/selfhost-storage.sh
+infrastructure/deploy/selfhost-tls.sh
+infrastructure/deploy/selfhost-tls.py
+infrastructure/deploy/selfhost-security-event-logging.sh
+infrastructure/deploy/tests
+infrastructure/docker
+client/admin
+services/control-plane
+services/media-plane
+packages

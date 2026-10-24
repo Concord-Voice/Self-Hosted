@@ -1,0 +1,18 @@
+# Synthetic fixture: a job that calls `gh issue create` without
+# `actions/checkout` and without `--repo`. The gh CLI cannot infer the
+# repo from cwd in this context and fails at runtime with "not a git
+# repository". Root cause of #875. The lint MUST flag this.
+name: bad-no-checkout-no-repo
+on: [workflow_dispatch]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: file an issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create --title "Build failed" --body "see logs"

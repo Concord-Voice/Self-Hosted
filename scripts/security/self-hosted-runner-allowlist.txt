@@ -1,0 +1,11 @@
+# self-hosted runner label allowlist.
+#
+# One label per line; comments with `#` and blank lines are ignored.
+# A workflow's runs-on spec is allowed iff EVERY label in the spec appears
+# in this file.
+#
+# Adding a label here is equivalent to granting shell access to CI —
+# CODEOWNERS requires security review on every edit. Include a comment
+# group-heading per runner pool with rationale and onboarding date.
+#
+# (Initially empty — no self-hosted runners in use.)

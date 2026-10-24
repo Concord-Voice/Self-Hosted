@@ -1,0 +1,255 @@
+name: License Check
+
+# Enforces the dependency-license discipline from
+# docs/legal/dependency-license-audit.md and NOTICE.md:
+#
+# - All dependencies must be under permissive licenses (MIT, BSD, Apache-2.0,
+#   ISC, MPL-2.0, or similar) — see allowlist below.
+# - Copyleft (GPL, AGPL, SSPL, BUSL, Elastic License, Commons Clause) is
+#   disallowed and fails the build.
+# - NOTICE.md must agree with the installed dependency set:
+#   scripts/update-notice-md.py --check regenerates the tables and FAILS THIS
+#   WORKFLOW on any of four conditions: a shipped component with no row, a row
+#   for something no longer shipped, a licence that changed (npm only — Go
+#   licences are carried forward, see the script docstring), or a stated count
+#   that disagrees with its own table. Version-only drift warns and does not
+#   fail. NOTICE.md's "Regenerating This File" section carries the same list. It does not block merge — the
+#   Default Branch Ruleset requires only `Gitar` and `SonarCloud Code Analysis`,
+#   so a red guard here is visible, not gating. Making it gating means adding
+#   both jobs below to that ruleset's required checks, which is a repo-admin
+#   change and deliberately not asserted here.
+#
+# Triggers on changes to dependency manifests in any of the FOUR ecosystems
+# (Go control-plane, desktop npm, media-plane npm, admin npm) plus NOTICE.md,
+# the regenerator, and this workflow itself.
+#
+# client/admin was previously absent from this workflow entirely — neither in
+# the path filters nor in any job — even though its bundle is compiled by the
+# admin-ui-builder stage and shipped inside the control-plane runtime image
+# (services/control-plane/Dockerfile:8,66). Its licences were therefore never
+# gated. Added with the drift guard (#2886).
+
+on:
+  pull_request:
+    paths:
+      - 'services/media-plane/package.json'
+      - 'services/media-plane/package-lock.json'
+      - 'client/admin/package.json'
+      - 'client/admin/package-lock.json'
+      - '.github/tools/license-checker/package.json'
+      - '.github/tools/license-checker/package-lock.json'
+      - 'services/control-plane/go.mod'
+      - 'services/control-plane/go.sum'
+      - 'services/control-plane/**/*.go'
+      - 'NOTICE.md'
+      - 'scripts/update-notice-md.py'
+      - 'scripts/test-update-notice-md.sh'
+      - '.github/workflows/license-check.yml'
+      - '.github/ci/scan-relevance.yml'
+      - '.github/scripts/ci-scan-relevance.mjs'
+      - '.github/scripts/resolve-hotfix-label.sh'
+  push:
+    branches: [main]
+    paths:
+      - 'services/media-plane/package.json'
+      - 'services/media-plane/package-lock.json'
+      - 'client/admin/package.json'
+      - 'client/admin/package-lock.json'
+      - '.github/tools/license-checker/package.json'
+      - '.github/tools/license-checker/package-lock.json'
+      - 'services/control-plane/go.mod'
+      - 'services/control-plane/go.sum'
+      - 'services/control-plane/**/*.go'
+      # Kept identical to the pull_request list above. These three were missing,
+      # so a change to NOTICE.md, the regenerator, or this workflow that reached
+      # main by any route other than a matching PR got no post-merge run at all.
+      - 'NOTICE.md'
+      - 'scripts/update-notice-md.py'
+      - 'scripts/test-update-notice-md.sh'
+      - '.github/workflows/license-check.yml'
+      - '.github/ci/scan-relevance.yml'
+      - '.github/scripts/ci-scan-relevance.mjs'
+      - '.github/scripts/resolve-hotfix-label.sh'
+
+permissions:
+  contents: read
+
+jobs:
+  ioc:
+    name: ioc
+    uses: ./.github/workflows/ioc-scanning.yml
+    permissions:
+      contents: read
+      pull-requests: read
+
+  select-licenses:
+    name: select-licenses
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      desktop: ${{ steps.filter.outputs.license_desktop }}
+      media: ${{ steps.filter.outputs.license_media }}
+      admin: ${{ steps.filter.outputs.license_admin }}
+      go: ${{ steps.filter.outputs.license_go }}
+      npm-workspaces: ${{ steps.compose.outputs.workspaces }}
+      full-scan: ${{ steps.metadata-pr.outputs.full-scan || steps.metadata-push.outputs.full-scan }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Validate PR metadata before using a partial file list
+        id: metadata-pr
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/license-pr.json"
+          jq -e '
+            .base.ref == "main" and
+            (.head.sha | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.base.sha | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.changed_files | type == "number" and floor == . and . >= 0 and . <= 3000) and
+            (.labels | type == "array" and all(.[]; type == "object" and (.name | type == "string")))
+          ' "$RUNNER_TEMP/license-pr.json" >/dev/null
+          if jq -e '[.labels[].name] | any(. == "risk: hotfix")' "$RUNNER_TEMP/license-pr.json" >/dev/null; then
+            echo 'full-scan=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'full-scan=false' >> "$GITHUB_OUTPUT"
+          fi
+      - name: Resolve merged-main Hotfix provenance
+        id: hotfix
+        if: github.event_name == 'push'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.sha }}
+          COMMIT_SUBJECT: ${{ github.event.head_commit.message }}
+        run: bash .github/scripts/resolve-hotfix-label.sh
+      - name: Select full inventory for Hotfix or unknown push provenance
+        id: metadata-push
+        if: github.event_name == 'push' && !cancelled()
+        env:
+          HOTFIX: ${{ steps.hotfix.outputs.hotfix }}
+          RESOLUTION: ${{ steps.hotfix.outputs.resolution }}
+          RESOLVED_VIA: ${{ steps.hotfix.outputs.resolved_via }}
+        run: |
+          if [[ "$RESOLVED_VIA" == subject && ("$RESOLUTION" == subject || "$RESOLUTION" == no-label) && ("$HOTFIX" == true || "$HOTFIX" == false) ]]; then
+            if [[ "$HOTFIX" == true ]]; then
+              echo 'full-scan=true' >> "$GITHUB_OUTPUT"
+            else
+              echo 'full-scan=false' >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo 'full-scan=true' >> "$GITHUB_OUTPUT"
+          fi
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: .github/ci/scan-relevance.yml
+          predicate-quantifier: some-with-excludes
+      - name: Compose selected npm workspaces
+        id: compose
+        env:
+          FILTERS: >-
+            {"license_desktop":"${{ steps.filter.outputs.license_desktop }}","license_media":"${{ steps.filter.outputs.license_media }}","license_admin":"${{ steps.filter.outputs.license_admin }}"}
+          FULL_SCAN: ${{ steps.metadata-pr.outputs.full-scan == 'true' || steps.metadata-push.outputs.full-scan == 'true' }}
+        run: |
+          node - <<'NODE'
+          const fs = require('node:fs');
+          const raw = JSON.parse(process.env.FILTERS);
+          const keys = ['license_desktop','license_media','license_admin'];
+          if (!keys.every(key => raw[key] === 'true' || raw[key] === 'false')) {
+            throw new Error('license workspace filter output is incomplete or malformed');
+          }
+          // Self-Hosted: the desktop key selects the packages/* workspace, which this
+          // repository does not distribute. The Desktop repo bundles it and gates
+          // its licences there, so the key selects no npm workspace here.
+          const all = ['services/media-plane', 'client/admin'];
+          const workspaces = process.env.FULL_SCAN === 'true' ? all : keys.filter(key => raw[key] === 'true').map(key => ({
+            license_media: 'services/media-plane',
+            license_admin: 'client/admin',
+          })[key]).filter(Boolean);
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `workspaces=${JSON.stringify(workspaces)}\n`);
+          NODE
+
+  check-npm-licenses:
+    name: npm — selected workspaces license allowlist and NOTICE attribution
+    needs: [ioc, select-licenses]
+    if: ${{ !cancelled() && needs.ioc.result == 'success' && (needs.select-licenses.result != 'success' || needs.select-licenses.outputs.full-scan == 'true' || needs.select-licenses.outputs.npm-workspaces != '[]') }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 25
+    permissions:
+      contents: read
+    env:
+      LICENSE_ALLOWLIST: 'MIT;ISC;Apache-2.0;BSD-2-Clause;BSD-3-Clause;0BSD;BlueOak-1.0.0;Python-2.0;Unlicense;CC0-1.0;CC-BY-3.0;CC-BY-4.0;MIT-0;MPL-2.0;(MIT OR CC0-1.0);(MIT OR Apache-2.0);(MIT OR GPL-2.0)'
+      NPM_WORKSPACES: ${{ needs.select-licenses.outputs.npm-workspaces || '["services/media-plane","client/admin"]' }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+      - name: Install license-checker
+        working-directory: .github/tools/license-checker
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Check selected npm workspaces and NOTICE tables
+        run: |
+          set -euo pipefail
+          mapfile -t workspaces < <(node -e '
+            const allowed = ["services/media-plane", "client/admin"];
+            let selected;
+            try { selected = JSON.parse(process.env.NPM_WORKSPACES); } catch { selected = null; }
+            if (!Array.isArray(selected) || selected.some(value => !allowed.includes(value))) selected = allowed;
+            process.stdout.write(selected.join("\n") + (selected.length ? "\n" : ""));
+          ')
+          for workspace in "${workspaces[@]}"; do
+            case "$workspace" in
+              services/media-plane|client/admin) ;;
+              *) echo '::error::invalid npm workspace selection'; exit 1 ;;
+            esac
+            (cd "$workspace" && npm ci --no-audit --no-fund && \
+              "$GITHUB_WORKSPACE/.github/tools/license-checker/node_modules/.bin/license-checker" --production --excludePrivatePackages \
+                --onlyAllow "$LICENSE_ALLOWLIST" --summary)
+            scripts/update-notice-md.py --check --scope npm --workspace "$workspace"
+          done
+
+  check-go-licenses:
+    name: Go — control-plane runtime license allowlist
+    needs: [ioc, select-licenses]
+    if: ${{ !cancelled() && needs.ioc.result == 'success' && (needs.select-licenses.result != 'success' || needs.select-licenses.outputs.full-scan == 'true' || needs.select-licenses.outputs.go != 'false') }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: services/control-plane/go.mod
+          cache-dependency-path: services/control-plane/go.sum
+      - name: Install go-licenses
+        run: go install github.com/google/go-licenses@v1.6.0
+      - name: Check control-plane runtime (cmd/server)
+        working-directory: services/control-plane
+        run: |
+          go mod download
+          go-licenses check ./cmd/server \
+            --disallowed_types=restricted,forbidden \
+            --ignore=github.com/Concord-Voice/Concord-Voice-Alpha
+      - name: Check migrate-media + mfa-rekey + account-authority (secondary binaries)
+        working-directory: services/control-plane
+        run: |
+          go-licenses check ./cmd/migrate-media ./cmd/mfa-rekey ./cmd/account-authority \
+            --disallowed_types=restricted,forbidden \
+            --ignore=github.com/Concord-Voice/Concord-Voice-Alpha
+      - name: NOTICE.md drift guard (Go control-plane)
+        run: scripts/update-notice-md.py --check --scope go

@@ -99,7 +99,7 @@ func ParseStripeKeyMode(key string) (mode StripeKeyMode, restricted bool, err er
 // already-loaded ENVIRONMENT and INSTANCE_TYPE values (spec §11). It reports
 // every problem at once, joined by "; ", and never puts a value in the error.
 // Load calls it. TestBillingEnvCases calls it for each row of
-// testdata/billing_env_cases.tsv, and [internal]check-billing-env.sh
+// testdata/billing_env_cases.tsv, and infrastructure/deploy/check-billing-env.sh
 // applies the same rules to the same rows, so a value that provisioning
 // accepts is a value that boot accepts (R9).
 func LoadBillingConfig(environment, instanceType string) (BillingConfig, error) {

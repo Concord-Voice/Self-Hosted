@@ -1,0 +1,11 @@
+name: Case 04 — no if clauses at all
+
+on: [push]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Run a thing
+        run: echo "just a run, no gating"

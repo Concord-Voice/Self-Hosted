@@ -1,0 +1,50 @@
+rules:
+  # ── Flag nodeIntegration: true ────────────────────────────────────────
+  - id: concord-electron-node-integration
+    pattern: "nodeIntegration: true"
+    paths:
+      exclude:
+        - "**/*.test.*"
+        - "**/*.md"
+    message: >-
+      nodeIntegration must never be enabled. It gives the renderer process
+      full Node.js access, bypassing the security sandbox.
+      See [internal] "Electron Constraints".
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: "CWE-269: Improper Privilege Management"
+
+  # ── Flag contextIsolation: false ──────────────────────────────────────
+  - id: concord-electron-context-isolation
+    pattern: "contextIsolation: false"
+    paths:
+      exclude:
+        - "**/*.test.*"
+        - "**/*.md"
+    message: >-
+      contextIsolation must never be disabled. It is a critical Electron
+      security boundary that prevents the renderer from accessing main
+      process objects. See [internal] "Electron Constraints".
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: "CWE-269: Improper Privilege Management"
+
+  # ── Flag sandbox: false ───────────────────────────────────────────────
+  - id: concord-electron-sandbox
+    pattern: "sandbox: false"
+    paths:
+      exclude:
+        - "**/*.test.*"
+        - "**/*.md"
+    message: >-
+      sandbox must never be disabled. The Chromium sandbox provides OS-level
+      process isolation for the renderer. See [internal] "Electron Constraints".
+    languages: [typescript, javascript]
+    severity: ERROR
+    metadata:
+      category: security
+      cwe: "CWE-269: Improper Privilege Management"

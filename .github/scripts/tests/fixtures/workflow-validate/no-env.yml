@@ -1,0 +1,8 @@
+name: Test Fixture — No Environment
+on:
+  workflow_dispatch:
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "no env scope"

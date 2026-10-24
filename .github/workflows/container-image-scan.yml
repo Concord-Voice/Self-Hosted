@@ -1,0 +1,122 @@
+name: Container Image Scan
+
+# CVE scan of the built service images (control-plane, media-plane, ops-agent).
+# Fails on HIGH or CRITICAL findings that have a fixed version upstream.
+# Unfixed findings are reported but do not fail: nothing in this repo can act
+# on them until upstream ships a fix, and the nightly leg re-checks every day.
+#
+# REUSABLE ONLY, for the same ADR-0018 reason as native-audiocap.yml: building
+# media-plane runs `npm ci`, so every caller must hold `needs: ioc`.
+# Callers: pr-ci.yml (path-gated on production-docker) and nightly-ci.yml
+# (unconditional, advisory — new CVEs arrive without any diff).
+#
+# Trivy runs from a digest-pinned image rather than a third-party action:
+# fewer moving parts, and an action tag cannot be repointed under us.
+# Upgrade: resolve the new tag's index digest on ghcr.io and replace both.
+# No workflow_dispatch: a dispatch at any ref would build (and `npm ci`)
+# without the IOC verdict. Re-run through a caller instead.
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  TRIVY_IMAGE: ghcr.io/aquasecurity/trivy:0.75.0@sha256:af6acf9a6b85dfe389a1941505c0ce9efef52a4719635e1a962f022a3d855daa
+
+jobs:
+  scan:
+    name: scan (${{ matrix.image }})
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - image: control-plane
+            context: services/control-plane
+            file: services/control-plane/Dockerfile
+            build-context: admin_ui=client/admin
+            os: alpine
+          - image: media-plane
+            context: services/media-plane
+            file: services/media-plane/Dockerfile
+            os: alpine
+          - image: ops-agent
+            context: services/control-plane
+            file: services/control-plane/Dockerfile.ops-agent
+            # FROM scratch: Trivy can only report the static binary's
+            # embedded Go modules and stdlib, so no OS is detected.
+            os: none
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build image
+        env:
+          IMAGE: ${{ matrix.image }}
+          CONTEXT: ${{ matrix.context }}
+          FILE: ${{ matrix.file }}
+          BUILD_CONTEXT: ${{ matrix.build-context }}
+        run: |
+          set -euo pipefail
+          extra=()
+          [[ -z "$BUILD_CONTEXT" ]] || extra=(--build-context "$BUILD_CONTEXT")
+          docker buildx build --load "${extra[@]}" -f "$FILE" -t "scan/$IMAGE:ci" "$CONTEXT"
+
+      # --ignore-unfixed hides findings entirely, so report everything first
+      # (never fails), then enforce on fixable ones. The shared cache volume
+      # keeps the second run from re-downloading the vulnerability DB.
+      #
+      # Two silent-clean guards, both tested by
+      # .github/scripts/tests/trivy-assert-os.test.sh:
+      # --image-src docker on every scan, so an unreadable local image can
+      # never fall through to pulling a registry image with the same name;
+      # and the OS assertion, because a scan that found no OS packages (an
+      # unrecognised OS, or a deleted package database) reads exactly like a
+      # clean image. --list-all-pkgs puts the package list in the report.
+      # Fetch the official GHCR vulnerability DB directly. The default GCR
+      # mirror has returned a 404 for a valid DB layer during PR scans.
+      - name: Trivy report (all HIGH/CRITICAL, non-failing)
+        env:
+          IMAGE: ${{ matrix.image }}
+          EXPECT_OS: ${{ matrix.os }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v trivy-cache:/root/.cache \
+            -v "$RUNNER_TEMP:/out" \
+            "$TRIVY_IMAGE" image \
+            --image-src docker \
+            --db-repository ghcr.io/aquasecurity/trivy-db:2 \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --exit-code 0 \
+            --no-progress \
+            --list-all-pkgs \
+            --format json \
+            --output /out/trivy-report.json \
+            "scan/$IMAGE:ci"
+          docker run --rm -v "$RUNNER_TEMP:/out" "$TRIVY_IMAGE" \
+            convert --scanners vuln --format table /out/trivy-report.json
+          bash .github/scripts/trivy-assert-os.sh "$RUNNER_TEMP/trivy-report.json" "$EXPECT_OS"
+
+      - name: Trivy scan (fail on fixable HIGH/CRITICAL)
+        env:
+          IMAGE: ${{ matrix.image }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v trivy-cache:/root/.cache \
+            "$TRIVY_IMAGE" image \
+            --image-src docker \
+            --skip-db-update \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --ignore-unfixed \
+            --exit-code 1 \
+            --no-progress \
+            "scan/$IMAGE:ci"

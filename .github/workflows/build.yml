@@ -1,0 +1,1151 @@
+# INSTALL-ORDERING NOTE (ADR-0018 / #1472): the supply-chain IOC scan moved to
+# ioc-scanning.yml; the orchestrator (pr-ci.yml) runs it as the FIRST node and
+# this workflow is invoked with `needs: ioc`. build.yml is workflow_call-only,
+# so that single structural edge at the only call site replaces the five
+# per-job `needs: supply-chain-scan` edges that previously lived here. Do NOT
+# add an independent trigger to this file without re-establishing the gate.
+name: Build
+
+on:
+  # Direct triggers (`push: main` + `pull_request:`) removed in #919 §5.5 —
+  # this workflow is invoked via workflow_call from BOTH orchestrators:
+  # pr-ci.yml (pull_request) and main-ci.yml (push: main, restored in #1510).
+  # NOTE: no required_status_checks rule exists since #1373 — these job
+  # contexts are advisory until the #1380 Alpha repo-ruleset lands (see
+  # docs/policies/branch-protection.md "Required Status Checks").
+  # The post-merge run was reinstated by repo-admin decision (2026-06-14,
+  # #1510): #919 had dropped it as "wasted compute," but SonarCloud's
+  # main-branch analysis (dashboard / badges / issue list) rides on this
+  # suite's coverage and MUST run on every merge to stay current — that
+  # freshness outweighs the re-run cost. The workflow_call trigger landed via
+  # the precursor PR #923 (merge commit 2c3757d8).
+  workflow_call:
+    # Caller-precomputed dorny/paths-filter results (2026-07 CI deep-dive). When
+    # a caller passes these, build.yml skips its `changes` detection steps and
+    # uses the passed values — collapsing three duplicate detects (pr-ci's
+    # detect-changes + build's changes + unit-smoke's changes) into one union
+    # filter computed once in pr-ci.yml. The empty-string default is the "not
+    # provided" sentinel: main-ci.yml (push:main) and any standalone caller pass
+    # nothing, so `changes` runs its local checkout + paths-filter exactly as
+    # before. dorny/paths-filter only ever emits 'true'/'false', so '' is an
+    # unambiguous "compute locally" marker. Strings (not booleans) so the empty
+    # sentinel is expressible.
+    inputs:
+      desktop-changed:
+        description: "Precomputed 'desktop' filter result ('true'/'false'); '' = compute locally."
+        type: string
+        required: false
+        default: ''
+      control-plane-changed:
+        description: "Precomputed 'control-plane' filter result ('true'/'false'); '' = compute locally."
+        type: string
+        required: false
+        default: ''
+      media-plane-changed:
+        description: "Precomputed 'media-plane' filter result ('true'/'false'); '' = compute locally."
+        type: string
+        required: false
+        default: ''
+      media-plane-tests-changed:
+        description: "Precomputed 'media-plane-tests' filter result ('true'/'false'); '' = compute locally."
+        type: string
+        required: false
+        default: ''
+      admin-changed:
+        description: "Precomputed 'admin' filter result ('true'/'false'); '' = compute locally."
+        type: string
+        required: false
+        default: ''
+      production-docker-changed:
+        description: "Precomputed 'production-docker' filter result ('true'/'false'); '' = compute locally."
+        type: string
+        required: false
+        default: ''
+      force-coverage:
+        description: "Run all four existing coverage test producers for a protected full analysis"
+        type: boolean
+        required: false
+        default: false
+    # Per-suite coverage-upload flags consumed by sonarcloud.yml (ADR-0018 /
+    # #1473): job outputs only propagate from SUCCEEDED jobs (skipped -> empty),
+    # so each flag is exactly "this suite ran and uploaded its artifact".
+    # SONAR_TOKEN moved to sonarcloud.yml with the scan; CODECOV_TOKEN was a
+    # dead declaration (never consumed) and is removed.
+    outputs:
+      desktop-coverage:
+        description: "true when the merged desktop coverage artifact exists"
+        value: ${{ jobs.desktop-coverage-merge.outputs.uploaded }}
+      control-plane-coverage:
+        description: "true when the merged control-plane coverage artifact exists"
+        value: ${{ jobs.control-plane-coverage-merge.outputs.uploaded }}
+      media-plane-coverage:
+        description: "true when the media-plane coverage artifact exists"
+        value: ${{ jobs.media-plane.outputs.uploaded }}
+      admin-coverage:
+        description: "true when the Admin Portal coverage artifact exists"
+        value: ${{ jobs.admin.outputs.uploaded }}
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  # ─── Detect which components changed ─────────────────────────────────
+  changes:
+    name: Detect changes
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    # Callers with precomputed filters skip only these detection steps. Keeping
+    # the job successful is the sentinel that lets SonarCloud run when every
+    # component suite is path-skipped; consumers read inputs before outputs.
+    outputs:
+      desktop: ${{ steps.filter.outputs.desktop }}
+      control-plane: ${{ steps.filter.outputs.control-plane }}
+      media-plane: ${{ steps.filter.outputs.media-plane }}
+      media-plane-tests: ${{ steps.filter.outputs.media-plane-tests }}
+      admin: ${{ steps.filter.outputs.admin }}
+      production-docker: ${{ steps.filter.outputs.production-docker }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: ${{ inputs.desktop-changed == '' }}
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      # SHA-pinned per supply-chain hardening (#847). Upgrade procedure: resolve
+      # `gh api repos/dorny/paths-filter/git/refs/tags/vX.Y.Z`, replace SHA + comment.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        if: ${{ inputs.desktop-changed == '' }}
+        id: filter
+        with:
+          filters: |
+            # Self-Hosted: the `desktop` key is the packages/* lane. The desktop
+            # app lives in the Desktop repo; its renderer's protocol and E2EE
+            # code moved here and kept the key, so the scan-selection contract
+            # and the protected Sonar job names stay unchanged (epic #3947).
+            desktop:
+              - 'packages/**'
+              - 'services/control-plane/internal/authoritycontract/testdata/vectors.json'
+              - 'scripts/authority-vectors/**'
+              - 'package.json'
+              - 'package-lock.json'
+              - 'vitest.config.ts'
+              - 'eslint.config.mjs'
+              - 'scripts/security/override-range-lint.mjs'
+              - '.github/workflows/build.yml'
+            control-plane:
+              - 'services/control-plane/**'
+              - 'scripts/authority-vectors/**'
+              - 'docs/design/trusted-recovery-v2-vectors.json'
+              - 'packages/protocol/src/renderer/stores/voice/audioQualityTiers.ts'
+              - 'scripts/test-tools/nats-server.sh'
+            media-plane:
+              - 'services/media-plane/**'
+            # Gates the media-plane TEST job only, never its Docker build. The
+            # camera layer-policy parity suite lives in the media-plane test tree
+            # but imports the DESKTOP copy of the ladder, so a desktop-only change
+            # to that file must run the one test pinning the two implementations
+            # in agreement (Codex, #3277). The audio-policy parity suite (#2153)
+            # imports the desktop audio tier ladder and FEC headroom cap for the
+            # same reason: drift there makes the policer pause stock clients.
+            #
+            # Kept separate from `media-plane` deliberately: that flag also gates
+            # `media-plane-docker-warm`, a 4-vCPU cache-warm build whose context is
+            # `services/media-plane` and which has no business running for a file
+            # outside it. One flag cannot answer both questions (Codex, #3277).
+            # crossWorkspaceImports.test.ts fails if this list drifts from the
+            # imports it must cover.
+            media-plane-tests:
+              - 'services/media-plane/**'
+              - 'scripts/test-tools/nats-server.sh'
+              # Shared wire fixtures are exercised by the media-plane decoder.
+              - 'services/control-plane/internal/voicecommand/testdata/**'
+              - 'packages/protocol/src/renderer/services/voice/remoteVideoLayerPolicy.ts'
+              - 'packages/protocol/src/renderer/stores/voice/audioQualityTiers.ts'
+              - 'packages/protocol/src/renderer/services/voice/fecHeadroom.ts'
+            admin:
+              - 'client/admin/**'
+              - 'scripts/security/override-range-lint.mjs'
+              - '.github/workflows/build.yml'
+            # Gate for production-compose-docker (Tier 2, ADR-0006; #1439
+            # consolidation). Mirrors the path list of the retired
+            # cache-cold-defense.yml: everything that can change a
+            # production-active image — service sources, Docker infra
+            # (incl. the node-buildtools base media-plane FROMs), both
+            # compose files, and this workflow itself. Keep aligned with
+            # the production `--profile services` build set.
+            production-docker:
+              - 'services/**'
+              - 'client/admin/**'
+              - 'infrastructure/docker/**'
+              - 'docker-compose.yml'
+              - 'docker-compose.production.yml'
+              - '.github/workflows/build.yml'
+
+  # ─── Desktop Client (TypeScript/React) ────────────────────────────────
+  desktop:
+    name: Desktop / Test + Coverage (shard ${{ matrix.shard }})
+    needs: [changes]
+    # IOC gating is structural at the orchestrator (`needs: ioc` on the
+    # build invocation in pr-ci.yml) — see the header note (ADR-0018).
+    if: >-
+      !failure() && !cancelled() &&
+      (inputs.force-coverage || format('{0}', inputs.desktop-changed) == 'true' || needs.changes.outputs.desktop == 'true' || github.event_name != 'pull_request')
+    # Codesmith's CPU profile projects p50 shard times of 4m17s/3m17s to
+    # 2m39s/2m08s on 8 vCPU, at about +$28/month combined (ADR-0005/0016).
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 25
+    strategy:
+      matrix:
+        shard: [1, 2]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Supply-chain post-install tripwire
+        working-directory: ${{ github.workspace }}
+        run: scripts/security/scan-supply-chain-iocs.sh --include-node-modules --working-tree-only
+
+      - name: Verify installed Undici floors
+        run: node scripts/security/override-range-lint.mjs --dir . --verify-installed-versions --minimum-version undici=6.28.1 --minimum-version undici=7.29.1 --minimum-version undici=8.10.2
+
+      - name: Run tests with coverage (shard ${{ matrix.shard }}/2)
+        env:
+          NODE_OPTIONS: '--max-old-space-size=4096'
+          SHARD_INDEX: ${{ matrix.shard }}
+        run: npm run test:coverage -- "--shard=${SHARD_INDEX}/2"
+
+      - name: Format check
+        # Shard-guarded because formatting is tree-wide: `npm run format:check`
+        # globs every package, so one shard covers the package and a second run
+        # would be pure duplicate cost. Same pattern as Build and the audit
+        # gate below.
+        #
+        # This gate exists because the pre-commit prettier hook forwards
+        # pre-commit's changed-file arguments, so it only ever sees files a
+        # commit touches. Files that drift while untouched were checked by
+        # nothing, which is how three src/main files reached main unformatted.
+        if: matrix.shard == 1
+        run: npm run format:check
+
+      - name: Build
+        if: matrix.shard == 1
+        run: npm run build
+
+      - name: Dependency audit (allowlist-aware HIGH/CRITICAL gate)
+        if: matrix.shard == 1
+        # Allowlist-aware replacement for bare `npm audit --audit-level=high`.
+        # A bare audit gate is time-brittle: it queries the live advisory DB at
+        # run time, so a newly-published HIGH advisory red-gates every PR with
+        # zero code change (incl. fix-less advisories authors cannot resolve).
+        # The gate fails only on un-accepted HIGH/CRITICAL advisories; tracked
+        # exceptions live in .audit-allowlist.json. See
+        # [internal]quality-gate-definition.md "npm-audit gate".
+        run: bash "${GITHUB_WORKSPACE}/scripts/security/npm-audit-gate.sh" --allowlist .audit-allowlist.json
+
+      - name: Upload coverage (shard ${{ matrix.shard }})
+        # always() is load-bearing: upload partial coverage even when the
+        # test shard exited non-zero so the merge job downstream has data
+        # to compute coverage delta on test failures (otherwise SonarQube
+        # would see "no coverage" and gate on that instead of the failure).
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-coverage-shard-${{ matrix.shard }}
+          path: coverage/lcov.info
+          retention-days: 1
+
+  # ─── Desktop Coverage Merge ─────────────────────────────────────────
+  desktop-coverage-merge:
+    name: Desktop / Merge Coverage
+    needs: desktop
+    # Static-literal output: only propagates when the job SUCCEEDS (failed
+    # jobs drop outputs; skipped jobs yield empty) — consumed by the
+    # workflow_call coverage flags for sonarcloud.yml (ADR-0018 / #1473).
+    # Relies on the test step failing the job: do NOT add
+    # continue-on-error to the test run, or 'uploaded' would propagate
+    # from a failing-test run.
+    outputs:
+      uploaded: 'true'
+    # always() is load-bearing: GitHub's default "skip dependent jobs on
+    # upstream cancel/skip" would prevent the merge job from re-evaluating
+    # when matrix shards finish at different times. The explicit
+    # `needs.desktop.result == 'success'` re-enforces the success gate
+    # that always() relaxed — both clauses are required (the #906/#910
+    # cascade was caused by missing the second half of this pattern).
+    if: always() && needs.desktop.result == 'success'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - name: Download shard 1 coverage
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: desktop-coverage-shard-1
+          path: coverage/shard-1
+
+      - name: Download shard 2 coverage
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: desktop-coverage-shard-2
+          path: coverage/shard-2
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Merge coverage reports
+        run: npx --yes lcov-result-merger@5.0.1 'coverage/shard-*/lcov.info' coverage/lcov.info
+
+      - name: Upload merged coverage
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: desktop-coverage
+          path: coverage/lcov.info
+          retention-days: 1
+
+  # ─── Control Plane (Go) — sharded across 2 runners ───────────────────
+  # The Go suite runs `go test -race -p 2` with one cloned database per package.
+  # Packages observing fixed NATS subjects are serialized against each other.
+  # The former shared-DB run used -p 1 and was the
+  # slowest PR job (p50 ~434s test step). It is split across two matrix shards
+  # (2026-07 CI deep-dive), each on its OWN isolated Postgres+Redis (matrix
+  # creates independent job instances with their own service containers), to
+  # roughly halve wall time / PR feedback latency. Within each shard, the
+  # wrapper clones a migrated template for every test binary, so the fixture's
+  # truncate and advisory lock cannot cross package boundaries. Packages are
+  # partitioned by a deterministic, time-balanced LPT split
+  # (services/control-plane/scripts/ci-shard-packages.sh) driven by the live
+  # `go list ./...`, guaranteeing every package is tested on exactly one shard —
+  # coverage parity with the unsharded `./...` is preserved and merged below.
+  # Cost note: sharding duplicates fixed per-job overhead + adds a merge job, so
+  # billing cost is ~neutral-to-slightly-up; the win is wall time (the user's
+  # explicit speed-over-cost choice for this job).
+  control-plane:
+    name: Control Plane / Test + Coverage (shard ${{ matrix.shard }})
+    needs: [changes]
+    if: >-
+      !failure() && !cancelled() &&
+      (inputs.force-coverage || format('{0}', inputs.control-plane-changed) == 'true' || needs.changes.outputs.control-plane == 'true' || github.event_name != 'pull_request')
+    # Pinned at 4 vCPU per shard — do NOT downsize. Despite low average CPU (the
+    # shared-DB `-p 1` package-serialization gate left cores idle), this is the heaviest
+    # CPU-bound job in CI: ADR-0016 measured -43% wall-clock ON 4 vCPU (8m42s
+    # vs ~15m on GitHub, 2026-06; that cleared the 20-min timeout-cliff then). A
+    # 4->2 downsize would regress toward that cliff. An 8 vCPU *upsize* is a
+    # separate measure-first trial (ADR-0016 AI#2 / #1414), NOT a default. Rationale:
+    # ADR-0013 §2, ADR-0016, [internal]reports/2026-06-17-pr1583-ci-deepdive-design.md (T2).
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # 25, not 20: by 2026-10 a shard runs 15-20 min (shard 1: 19m53s on run
+    # 37674608534), and run 37676463077 was cancelled at 20 min while still
+    # testing. The headroom absorbs runner variance; it is not room for a slower
+    # suite, and a shard routinely past 20 min means re-sharding (ADR-0016 note).
+    timeout-minutes: 25
+    strategy:
+      # No fail-fast: let both shards report so a failure in one does not mask
+      # results (and coverage) from the other. Mirrors the desktop shard matrix.
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: concord
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: concord_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U concord -d concord_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:8-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+      # NATS backs the voice-enforcement integration tests (voice.enforce.*
+      # publishers in internal/voice + the rbac -> enforcer call-site tests,
+      # CV-CAN-007). Those tests skip when NATS is unreachable, so without this
+      # service they silently skipped in CI and permission_enforcer.go showed
+      # ~5% coverage despite a full local suite (the SonarCloud new-code gate
+      # failure that surfaced the gap). Image matches the dev compose stack
+      # (nats:2-alpine); busybox nc provides the TCP health probe.
+      nats:
+        image: nats:2-alpine
+        ports:
+          - 4222:4222
+        options: >-
+          --health-cmd "nc -z 127.0.0.1 4222 || exit 1"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: services/control-plane/go.mod
+          cache-dependency-path: services/control-plane/go.sum
+
+      - name: Print and verify Go toolchain
+        run: python3 scripts/check-go-toolchain.py --check-runtime
+
+      # GOCACHE (compiler output). Split restore/save — was a combined
+      # actions/cache whose key ended in hashFiles('**/*.go'). That hash covers
+      # 753 files, so EVERY commit touching any Go source minted a fresh ~528 MB
+      # entry. Measured 2026-08-22 via `blacksmith cache list`: 36 such entries
+      # held 18.55 GB of the 25 GB Blacksmith quota (74.6%), nearly all scoped
+      # to refs/pull/N/merge and therefore unreadable by any other PR — quota
+      # spent on entries that could never be hit. Saving only on main collapses
+      # that to one entry per main merge, and PRs still restore it because
+      # default-branch caches are readable from every branch (actions/cache
+      # README, "Cache scopes"). Go's build cache is content-addressed
+      # internally, so the source hash never bought correctness — only misses.
+      - name: Restore Go build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('services/control-plane/go.sum') }}
+          restore-keys: |
+            go-build-${{ runner.os }}-${{ hashFiles('services/control-plane/go.sum') }}-
+            go-build-${{ runner.os }}-
+
+      # Compile-check the WHOLE module on every shard (cheap with the warm
+      # GOCACHE above): `go test <subset>` only compiles the shard's packages +
+      # their deps, so a compile error in a no-test package imported by neither
+      # shard would otherwise slip through.
+      - name: Build
+        working-directory: services/control-plane
+        run: go build ./...
+
+      # The account authority's static, pure-Go build (#3587 PR-B2, the DoR §3.3 Build bullet).
+      # Shard 1 only. The hashFiles guard skips a checkout that predates the
+      # command, because the protected PR build runs this file pinned at an
+      # older main against the PR's own tree (required-pr-build.yml).
+      - name: Build account-authority (CGO_ENABLED=0)
+        if: matrix.shard == 1 && hashFiles('services/control-plane/cmd/account-authority/main.go') != ''
+        working-directory: services/control-plane
+        env:
+          CGO_ENABLED: "0"
+        run: go build -trimpath -o /dev/null ./cmd/account-authority
+
+      - name: Validate package database wrapper
+        if: matrix.shard == 1
+        working-directory: services/control-plane
+        run: bash scripts/test-ci-test-package-db.sh
+
+      # Two package binaries at a time peak below postgres:16-alpine's default
+      # 100 connections. Preserve its stock configuration; measure before any
+      # increase to max_connections.
+
+      - name: Migrate package database template
+        working-directory: services/control-plane
+        env:
+          DATABASE_URL: postgres://concord:test_password@localhost:5432/concord_test?sslmode=disable
+          JWT_SECRET: test_secret_key_for_ci
+          ENVIRONMENT: test
+          CONCORD_ENV: test
+        run: go run ./cmd/migrate -command=up
+
+      - name: Create isolated operations metrics test database
+        env:
+          PGPASSWORD: test_password
+        run: >-
+          psql --host=localhost --username=concord --dbname=postgres
+          --set=ON_ERROR_STOP=1
+          --command='CREATE DATABASE concord_opsmetrics_test'
+
+      - name: Confine operations metrics reader to its test database
+        env:
+          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+          PGPASSWORD: test_password
+        run: |
+          set -euo pipefail
+          docker cp infrastructure/docker/postgres/configure-ops-metrics-hba.sh \
+            "$POSTGRES_CONTAINER_ID:/tmp/configure-ops-metrics-hba.sh"
+          docker exec "$POSTGRES_CONTAINER_ID" \
+            sh /tmp/configure-ops-metrics-hba.sh concord_opsmetrics_test
+          psql --host=localhost --username=concord --dbname=postgres \
+            --set=ON_ERROR_STOP=1 \
+            --command='SELECT pg_reload_conf()'
+          hba_ready=false
+          for _ in {1..50}; do
+            status="$(psql --host=localhost --username=concord --dbname=postgres \
+              --tuples-only --no-align --set=ON_ERROR_STOP=1 \
+              --command="SELECT (
+                SELECT count(*) = 5
+                FROM pg_hba_file_rules
+                WHERE rule_number <= 5
+                  AND error IS NULL
+                  AND user_name = ARRAY['concord_ops_metrics_reader_' || md5('concord_opsmetrics_test')]
+              ) AND NOT EXISTS (
+                SELECT 1 FROM pg_hba_file_rules WHERE error IS NOT NULL
+              )")"
+            if [ "$status" = "t" ]; then
+              hba_ready=true
+              break
+            fi
+            sleep 0.1
+          done
+          if [ "$hba_ready" != "true" ]; then
+            psql --host=localhost --username=concord --dbname=postgres \
+              --command='TABLE pg_hba_file_rules'
+            exit 1
+          fi
+
+      - name: Create isolated account-authority test databases
+        # #3587 PR-B1 (DoR §3.2.3): a database of its own and NOLOGIN roles,
+        # never in infrastructure/docker/postgres/init/ (mounted into the CP's
+        # production cluster). Package-to-shard assignment is dynamic, so both
+        # shards run this.
+        # Only on a checkout that carries the bootstrap script. The protected build
+        # runs this file pinned from main against every PR's own checkout, so
+        # without the guard a branch that predates the script fails here.
+        if: hashFiles('services/control-plane/scripts/authority-test-bootstrap.sql') != ''
+        env:
+          PGPASSWORD: test_password
+        run: >-
+          psql --host=localhost --username=concord --dbname=postgres
+          --set=ON_ERROR_STOP=1
+          --file=services/control-plane/scripts/authority-test-bootstrap.sql
+
+      - name: Start the dedicated cancelled-wait PostgreSQL (authority release gate)
+        # DoR §3.2.3: a separate postgres:16-alpine, so setting
+        # synchronous_standby_names on it can never hang the shared concord_test
+        # cluster. The test sets the GUC itself after migrating and seeding.
+        # Only on a checkout that carries the bootstrap script. The protected build
+        # runs this file pinned from main against every PR's own checkout, so
+        # without the guard a branch that predates the script fails here.
+        if: hashFiles('services/control-plane/scripts/authority-test-bootstrap.sql') != ''
+        # A hung docker or psql call fails here instead of spending the shard's 25 minutes.
+        timeout-minutes: 3
+        env:
+          PGPASSWORD: test_password
+        run: |
+          set -euo pipefail
+          docker run -d --name authority-ghost -e POSTGRES_USER=concord -e POSTGRES_PASSWORD="$PGPASSWORD" \
+            -p 5433:5432 postgres:16-alpine
+          # -h: the image's init-time server listens only on the Unix socket, so a
+          # socket probe can pass before TCP (and so port 5433) accepts connections.
+          for i in $(seq 1 60); do
+            docker exec authority-ghost pg_isready -h 127.0.0.1 -U concord >/dev/null 2>&1 && break
+            if [ "$i" = 60 ]; then
+              docker logs authority-ghost
+              echo "::error::authority-ghost never accepted TCP connections"
+              exit 1
+            fi
+            sleep 1
+          done
+          psql --host=localhost --port=5433 --username=concord --dbname=postgres --set=ON_ERROR_STOP=1 \
+            --file=services/control-plane/scripts/authority-test-bootstrap.sql
+
+      # Token-theft fallback cleanup requires a same-connection WAITAOF
+      # receipt, matching the AOF-enabled Redis in the dev and production
+      # Compose stacks. The default redis:8 service starts with AOF disabled.
+      - name: Enable Redis AOF for security recovery tests
+        run: |
+          docker run --rm --network host redis:8-alpine redis-cli CONFIG SET appendonly yes
+          test "$(docker run --rm --network host redis:8-alpine redis-cli CONFIG GET appendonly | tail -n 1)" = yes
+
+      - name: Run tests with coverage (shard ${{ matrix.shard }}/2)
+        working-directory: services/control-plane
+        # matrix.shard is lifted into env (not interpolated in the run block) to
+        # keep the run block free of ${{ }} expansion (workflow-injection
+        # hygiene). SHARD_TOTAL must match the matrix length above.
+        env:
+          DATABASE_URL: postgres://concord:test_password@localhost:5432/concord_test?sslmode=disable
+          OPS_METRICS_TEST_DATABASE_URL: postgres://concord:test_password@localhost:5432/concord_opsmetrics_test?sslmode=disable
+          AUTHORITY_TEST_DATABASE_URL: postgres://concord:test_password@localhost:5432/concord_authority_test?sslmode=disable  # pragma: allowlist secret
+          AUTHORITY_DIRTY_TEST_DATABASE_URL: postgres://concord:test_password@localhost:5432/concord_authority_dirty_test?sslmode=disable  # pragma: allowlist secret
+          AUTHORITY_GHOST_DATABASE_URL: postgres://concord:test_password@localhost:5433/concord_authority_test?sslmode=disable  # pragma: allowlist secret
+          # The DB component of this URL is ADVISORY since #2680: every test
+          # process allocates its own Redis logical DB via
+          # internal/testhelpers/redistest, which overrides whatever DB the URL
+          # names (or omits). Host and credentials are still honoured. Before
+          # #2680 this URL's missing DB segment meant DB 0 for every package in
+          # the shard, so CI had no Redis isolation at all.
+          REDIS_URL: redis://localhost:6379
+          JWT_SECRET: test_secret_key_for_ci
+          CONCORD_ENV: test
+          SHARD_INDEX: ${{ matrix.shard }}
+          SHARD_TOTAL: '2'
+          CI_PACKAGE_DB_ISOLATION: '1'
+          PGHOST: localhost
+          PGUSER: concord
+          PGPASSWORD: test_password
+        run: |
+          set -euo pipefail
+          mapfile -t PKGS < <(bash scripts/ci-shard-packages.sh "$SHARD_INDEX" "$SHARD_TOTAL")
+          if [ "${#PKGS[@]}" -eq 0 ]; then
+            echo "::error::shard ${SHARD_INDEX}/${SHARD_TOTAL} resolved zero packages" >&2
+            exit 1
+          fi
+          echo "::group::Shard ${SHARD_INDEX}/${SHARD_TOTAL} packages (${#PKGS[@]})"
+          printf '  %s\n' "${PKGS[@]}"
+          echo "::endgroup::"
+          # -tags integration is load-bearing (#2445 review). Without it the
+          # //go:build integration files never compile, never run, and never
+          # reach the coverage profile SonarQube consumes — so a suite can be
+          # authored, reviewed, and merged while CI proves nothing about it.
+          # This job already provides everything they need: the Postgres service
+          # gated on the pg_hba readiness check above, DATABASE_URL, and
+          # REDIS_URL. They acquire the DB through the same dbtest.SetupTestDB
+          # helper as the untagged suites, and t.Skipf out cleanly if Redis is
+          # ever absent, so the tag adds no new infrastructure dependency.
+          # Keep the tag on THIS command rather than a separate step: a second
+          # `go test` would not merge into coverage.out, which is the half of
+          # the gap that understates new-code coverage.
+          # Cloned databases let two package binaries run concurrently without
+          # sharing testdb's advisory lock or TRUNCATE target. The wrapper holds
+          # an NATS lock across packages observing fixed voice.enforce subjects.
+          # Go starts each test binary from its package directory, so -exec
+          # needs the absolute script path from this module working directory.
+          # -trimpath keeps the suite runnable with local GOFLAGS=-trimpath,
+          # which lets every worktree share one build cache (without it the
+          # absolute source directory is part of Go's cache key). Under it
+          # runtime.Caller returns module paths, so a test that finds files that
+          # way fails here; tests resolve files from their package directory
+          # instead. Coverage profiles are unchanged (they always use import
+          # paths). Only this command takes it: the `go build ./...` step above
+          # stays untrimmed so codeql.yml's restore-only Go leg still hits the
+          # shared GOCACHE.
+          go test -race -trimpath -p 2 -exec "$PWD/scripts/ci-test-package-db.sh" \
+            -tags integration -coverprofile=coverage.out "${PKGS[@]}"
+
+      - name: Upload coverage (shard ${{ matrix.shard }})
+        # always() is load-bearing: upload this shard's partial coverage even
+        # when the Go test run exited non-zero, so the merge job still has data;
+        # skipping on failure would make SonarQube's Quality Gate ambiguous
+        # (no-coverage vs test-failure).
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: control-plane-coverage-shard-${{ matrix.shard }}
+          path: services/control-plane/coverage.out
+          retention-days: 1
+
+      # THE single writer of the shared GOCACHE (codeql.yml's Go leg restores
+      # the same keyspace but never saves — two savers would collide on an
+      # identical key in the same push). This job is the right writer: it runs
+      # `go build ./...` over the whole module plus the shard's tests, so its
+      # GOCACHE is a superset of the CodeQL leg's.
+      #
+      # main-only: build.yml is reached by workflow_call, so github.event_name
+      # is the CALLER's event — 'push' on main-ci.yml, 'pull_request' on
+      # pr-ci.yml. PR-scoped entries are unreadable by other PRs, so writing
+      # them costs quota and buys nothing.
+      #
+      # The ${{ github.sha }} suffix is load-bearing, via key IMMUTABILITY: a
+      # suffix-free key would be reserved once and every later save would fail
+      # with ReserveCacheError, freezing the cache at its first-ever contents.
+      # (Do not attribute this to the "cache hit on primary key, not saving"
+      # skip — that belongs to the COMBINED actions/cache post-step. This is
+      # actions/cache/save, which runs under a NullStateProvider, reads no
+      # restore state, and therefore always attempts the save.)
+      # Per-merge entries accumulate instead, bounded by the 7-day LRU eviction
+      # both Blacksmith and GitHub apply (~11 main merges/week x ~528 MB ~=
+      # 6 GB steady state).
+      #
+      # `matrix.shard == 1` is load-bearing too: this is a 2-shard matrix, and
+      # both shards would otherwise race an identical key on every main push —
+      # one wins, the other logs ReserveCacheError, and WHICH shard's GOCACHE
+      # becomes the shared baseline is nondeterministic. That is the same
+      # collision hazard that makes codeql.yml restore-only; it applies inside
+      # this job too. Shard 1 is a sufficient writer because `go build ./...`
+      # above runs un-sharded in BOTH shards, so shard 1's GOCACHE already
+      # covers the whole module — only per-shard test-binary output differs,
+      # which is not worth doubling the steady-state cache size to keep.
+      #
+      # Note the implied success(): an `if:` with no status function still
+      # requires prior steps to have succeeded, so a red main run saves
+      # nothing. Deliberate — a broken build's compile cache is valid, but not
+      # worth the risk of pinning a bad baseline.
+      - name: Save Go build cache (main only, shard 1 only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main' && matrix.shard == 1
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('services/control-plane/go.sum') }}-${{ github.sha }}
+
+  # ─── Control Plane Coverage Merge ────────────────────────────────────
+  control-plane-coverage-merge:
+    name: Control Plane / Merge Coverage
+    needs: control-plane
+    # Static-literal output: only propagates when this job SUCCEEDS (failed
+    # jobs drop outputs; skipped jobs yield empty) — consumed by the
+    # workflow_call control-plane-coverage flag for sonarcloud.yml (ADR-0018 /
+    # #1473). Mirrors desktop-coverage-merge. Do NOT add continue-on-error to
+    # the merge, or 'uploaded' could propagate from a broken merge.
+    outputs:
+      uploaded: 'true'
+    # always() is load-bearing: matrix shards finish at different times, so the
+    # default "skip on upstream skip/cancel" would misfire; the explicit
+    # needs.control-plane.result == 'success' re-imposes the success gate that
+    # always() relaxes (both clauses required — the #906/#910 cascade was the
+    # missing second half). A failed/skipped shard -> merge skipped -> empty
+    # coverage flag -> sonar skips control-plane coverage, exactly as an
+    # unsharded control-plane failure behaved.
+    if: always() && needs.control-plane.result == 'success'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      # Pin every action to a verified immutable commit; keep the release comment
+      # aligned with the resolved upstream tag.
+      - name: Download shard 1 coverage
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: control-plane-coverage-shard-1
+          path: coverage/shard-1
+      - name: Download shard 2 coverage
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: control-plane-coverage-shard-2
+          path: coverage/shard-2
+
+      - name: Merge Go coverage profiles
+        # A Go coverprofile is a single `mode:` header line followed by
+        # per-block count lines. The shards test DISJOINT packages (see
+        # ci-shard-packages.sh) and default coverage records only the
+        # package-under-test's own statements, so block lines never overlap
+        # across shards — a header-deduped concatenation is therefore a valid,
+        # complete merged profile equivalent to the unsharded `go test ./...`
+        # output that SonarCloud (sonar.go.coverage.reportPaths) consumes.
+        run: |
+          set -euo pipefail
+          test -s coverage/shard-1/coverage.out
+          test -s coverage/shard-2/coverage.out
+          {
+            head -n 1 coverage/shard-1/coverage.out          # single mode: line
+            tail -n +2 coverage/shard-1/coverage.out         # shard-1 blocks
+            tail -n +2 coverage/shard-2/coverage.out         # shard-2 blocks
+          } > coverage.out
+          echo "Merged $(($(wc -l < coverage.out) - 1)) coverage blocks from 2 shards."
+
+      - name: Upload merged coverage
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          # Name + contents match the unsharded artifact sonarcloud.yml expects:
+          # it downloads `control-plane-coverage` into services/control-plane/,
+          # yielding services/control-plane/coverage.out.
+          name: control-plane-coverage
+          path: coverage.out
+          retention-days: 1
+
+  # ─── Media Plane (Node/TypeScript) ───────────────────────────────────
+  media-plane:
+    name: Media Plane / Test + Coverage
+    needs: [changes]
+    # Static-literal output: only propagates when the job SUCCEEDS (failed
+    # jobs drop outputs; skipped jobs yield empty) — consumed by the
+    # workflow_call coverage flags for sonarcloud.yml (ADR-0018 / #1473).
+    # Relies on the test step failing the job: do NOT add
+    # continue-on-error to the test run, or 'uploaded' would propagate
+    # from a failing-test run.
+    outputs:
+      uploaded: 'true'
+    if: >-
+      !failure() && !cancelled() &&
+      (inputs.force-coverage || format('{0}', inputs.media-plane-tests-changed) == 'true' || needs.changes.outputs.media-plane-tests == 'true' || github.event_name != 'pull_request')
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: 'npm'
+          cache-dependency-path: services/media-plane/package-lock.json
+
+      - name: Install dependencies
+        working-directory: services/media-plane
+        run: npm ci
+
+      - name: Supply-chain post-install tripwire
+        working-directory: ${{ github.workspace }}
+        run: scripts/security/scan-supply-chain-iocs.sh --include-node-modules --working-tree-only
+
+      - name: Lint
+        working-directory: services/media-plane
+        run: npm run lint
+
+      - name: Typecheck
+        working-directory: services/media-plane
+        run: npm run typecheck
+
+      - name: Run tests with coverage
+        working-directory: services/media-plane
+        run: npx vitest run --coverage
+
+      - name: Upload coverage
+        # always() is load-bearing: upload partial coverage even when the
+        # vitest run exited non-zero — same rationale as the control-plane
+        # job (avoid no-coverage vs test-failure ambiguity in SonarQube).
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: media-plane-coverage
+          path: services/media-plane/coverage/lcov.info
+          retention-days: 1
+
+      - name: Dependency audit (allowlist-aware HIGH/CRITICAL gate)
+        working-directory: services/media-plane
+        # Allowlist-aware replacement for bare `npm audit --audit-level=high`
+        # (see the desktop job's audit step for the full rationale). Fails only
+        # on un-accepted HIGH/CRITICAL advisories; exceptions in
+        # .audit-allowlist.json.
+        run: bash "${GITHUB_WORKSPACE}/scripts/security/npm-audit-gate.sh" --allowlist .audit-allowlist.json
+
+  # ─── Admin Portal (React/TypeScript) ────────────────────────────────
+  admin:
+    name: Admin Portal / Test + Coverage
+    needs: [changes]
+    # Static-literal output only propagates from a successful job. The
+    # main-branch force-run keeps Sonar's Admin Portal coverage current.
+    outputs:
+      uploaded: 'true'
+    if: >-
+      !failure() && !cancelled() &&
+      (inputs.force-coverage || format('{0}', inputs.admin-changed) == 'true' || needs.changes.outputs.admin == 'true' || github.event_name != 'pull_request')
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: 'npm'
+          cache-dependency-path: client/admin/package-lock.json
+
+      - name: Install dependencies
+        working-directory: client/admin
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Supply-chain post-install tripwire
+        working-directory: ${{ github.workspace }}
+        run: scripts/security/scan-supply-chain-iocs.sh --include-node-modules --working-tree-only
+
+      - name: Verify installed Undici floors
+        working-directory: client/admin
+        run: node ../../scripts/security/override-range-lint.mjs --dir . --verify-installed-versions --minimum-version undici=6.28.1 --minimum-version undici=7.29.1 --minimum-version undici=8.10.2
+
+      - name: Format check
+        working-directory: client/admin
+        run: npm run format:check
+
+      - name: Lint
+        working-directory: client/admin
+        run: npm run lint
+
+      - name: Typecheck
+        working-directory: client/admin
+        run: npm run typecheck
+
+      - name: Run tests with coverage
+        working-directory: client/admin
+        run: npm run test:coverage
+
+      - name: Build
+        working-directory: client/admin
+        run: npm run build
+
+      - name: Install Chromium
+        working-directory: client/admin
+        # The lockfile-pinned bin, never npm: Scorecard reads any `npm ... install`
+        # as an unpinned install, and this path cannot fall back to the registry.
+        run: ./node_modules/.bin/playwright install --with-deps chromium
+
+      - name: Run browser tests
+        working-directory: client/admin
+        run: npm run test:e2e
+
+      - name: Dependency audit (allowlist-aware HIGH/CRITICAL gate)
+        working-directory: client/admin
+        run: bash "${GITHUB_WORKSPACE}/scripts/security/npm-audit-gate.sh" --allowlist .audit-allowlist.json
+
+      - name: Upload coverage
+        # always() is load-bearing: preserve coverage evidence when a later
+        # gate fails; failed jobs do not propagate the static `uploaded`
+        # output to SonarCloud.
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: admin-coverage
+          path: client/admin/coverage/lcov.info
+          retention-days: 1
+
+  # ─── Media Plane / Docker build (cache-warm, Tier 1, ADR-0006) ──────
+  # Purpose: cache-warm fast-feedback (Tier 1, ADR-0006) — defends
+  #   application logic correctness on PR-time; cache miss on
+  #   package-lock.json or Dockerfile change is expected and acceptable.
+  #   COMPLEMENTS (does NOT replace) the cache-cold
+  #   production-compose-docker sibling immediately below, which provides
+  #   defense-in-depth against file-COPY-order regressions and
+  #   postinstall failures invisible to cache-warm CI (full-stack
+  #   post-#1439 consolidation).
+  #
+  # Tier-2 trigger semantics (#1167 Q1): both jobs run PR-time. The
+  #   investigation report §4.6 prescribed `if: github.event_name == 'push'`
+  #   for the Tier-2 sibling, but build.yml is invoked exclusively via
+  #   workflow_call from pr-ci.yml (pull_request only) post-#919 §5.5 —
+  #   applying the prescribed gate would silently drop Tier-2 coverage
+  #   to zero. Until a future PR restores a push-to-main caller for
+  #   build.yml, Tier-2 stays PR-time alongside Tier-1.
+  #
+  # Success metric: Tier-1 cache hit rate ≥ 85% on lockfile-unchanged
+  #   PRs over a 2-week window post-merge. Matches ADR-0006 §"Tier 1"
+  #   target. NOT population mean (per #1111 investigation report §4.5).
+  #
+  # Tag choice: static `media-plane:built-warm` (not per-PR dynamic).
+  #   The #1167 spec §6.2 originally prescribed
+  #   `media-plane:pr-${{ github.event.pull_request.number }}` for
+  #   theoretical concurrent-runner collision defense, but GHA hosted
+  #   runners are ephemeral and 1:1 with jobs — no shared docker daemon.
+  #   Static tag is hook-safe (avoids ${{ }} in run: blocks) and
+  #   distinguishable from the Tier-2 sibling's compose-built
+  #   `concord-media-plane` image via the `-warm` suffix for log
+  #   grep-ability.
+  media-plane-docker-warm:
+    name: Media Plane / Docker build (cache-warm)
+    needs: [changes]
+    if: >-
+      !failure() && !cancelled() &&
+      (format('{0}', inputs.media-plane-changed) == 'true' || needs.changes.outputs.media-plane == 'true')
+    # Codesmith projects p50 3m09s -> 2m01s on 8 vCPU for about +$3/month.
+    # The persistent builder remains cache-warm (ADR-0005/0006/0016).
+    runs-on: blacksmith-8vcpu-ubuntu-2404
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # SHA-pinned per supply-chain hardening (#847, [internal]rules/electron.md
+      # §"Supply-chain hardening (third-party GitHub Actions)"). Upgrade
+      # procedure: resolve `gh api repos/useblacksmith/setup-docker-builder/git/refs/tags/vX.Y.Z`,
+      # replace SHA + comment. Blacksmith's persistent builder is for this
+      # Tier-1 cache-WARM job ONLY - never add it to the cache-cold sibling
+      # job below, whose value depends on a genuinely cold builder (ADR-0016).
+      - name: Setup Blacksmith Builder
+        uses: useblacksmith/setup-docker-builder@19215110ab936351210feebdfa5b440b4493e184 # v2.2.0
+
+      # SHA-pinned per supply-chain hardening (#847).
+      - uses: useblacksmith/build-push-action@9b0579bbec7a6cad2f171596c57e7ac1e7658850 # v2.3.0
+        with:
+          context: services/media-plane
+          file: services/media-plane/Dockerfile
+          push: false
+          load: true
+          tags: media-plane:built-warm
+
+      - name: Assert toolchain absent in runtime image
+        run: |
+          docker run --rm media-plane:built-warm sh -c '
+            ! command -v g++ \
+            && ! command -v python3 \
+            && ! command -v make
+          '
+
+      - name: Assert mediasoup worker spawns
+        run: |
+          docker run --rm media-plane:built-warm node -e "
+            require('mediasoup').createWorker()
+              .then(w => { console.log('worker OK'); return w.close(); })
+              .then(() => process.exit(0))
+              .catch(e => { console.error(e); process.exit(1); })
+          "
+
+      - name: Log image size
+        run: |
+          docker image inspect media-plane:built-warm --format '{{.Size}}' \
+            | awk '{ printf "media-plane image size (cache-warm): %d MB\n", $1/1024/1024 }'
+
+  # ─── Production-compose / Docker build (cache-cold, Tier 2, ADR-0006) ──
+  # Purpose: cache-cold defense-in-depth (Tier 2, ADR-0006) — catches
+  #   file-COPY-order regressions and postinstall failures invisible to
+  #   the Tier-1 cache-warm CI (sibling job media-plane-docker-warm
+  #   above), across the FULL production-active 4-Dockerfile build set:
+  #   postgres + control-plane + media-plane + ops-agent. Consolidates the former
+  #   media-plane-docker job (single Dockerfile, this file) and the
+  #   retired cache-cold-defense.yml workflow (full stack, push-to-main)
+  #   into one PR-time surface (#1439).
+  #
+  # Trigger semantics: path-gated on the `production-docker` filter
+  #   (everything that can change a production-active image) on BOTH events.
+  #   The filter value is pr-ci.yml's caller-precomputed
+  #   `production-docker-changed` input on PRs, or the local `changes` job on
+  #   push:main / standalone callers (#2065). build.yml is invoked via
+  #   workflow_call from pr-ci.yml (pull_request) and, since #1510, from
+  #   main-ci.yml (push:main). Unlike
+  #   the desktop / control-plane / media-plane suites (force-run on push so
+  #   SonarCloud's main-branch coverage stays fresh, #1510), this job emits
+  #   NO coverage artifact, so it does not need the push-force: a merge that
+  #   touches none of the production-docker paths cannot change a production
+  #   image, and any merge that does touch them re-evaluates the filter to
+  #   true and still runs (the same commit already ran this build in its PR).
+  #   Dropping the former `|| github.event_name == 'push'` skips a cache-cold
+  #   8 vCPU full-stack Docker build on docs/client/unrelated merges to main.
+  #   (The old #1167 "push gate silently zeroes coverage" footgun applied
+  #   only when build.yml was pull_request-only, and never to this
+  #   coverage-free job.)
+  #   Full-stack cache-cold is affordable post-ADR-0016: Blacksmith
+  #   bare-metal measured the single-service cache-cold build at ~2.5 min
+  #   (vs ~14 min GitHub-hosted), collapsing the cost argument that kept
+  #   full-stack coverage post-merge-only.
+  #
+  # Profile + build-set mechanics: postgres has NO `profiles:` key in
+  #   base docker-compose.yml so it is included in EVERY compose
+  #   invocation (always-on default profile). `--profile services`
+  #   activates the two profile-gated services (control-plane,
+  #   media-plane), which are currently the only profile-gated ones.
+  #
+  # Bug class lineage (see `[internal]rules/media-plane.md` §"Docker Build
+  # Context Invariant" and ADR-0006 §11.2):
+  #   - #1083 ERR_MODULE_NOT_FOUND on stubs/ COPY omission
+  #   - #1097 toolchain presence (the fix to #1083)
+  #   - #1018 rsync mode propagation to /opt/concord/releases/
+  #   (#710 layer-depth and #878 manifest-gap are defended elsewhere:
+  #   host-state cron + Tier A manifest lint per ADR-0006 addendum.)
+  #
+  # `--no-cache` is load-bearing: when `package*.json` is unchanged from a
+  # prior successful build (e.g., a Dockerfile-only change), BuildKit would
+  # replay the cached `RUN npm ci` layer and skip re-validating the COPY
+  # layer dependencies — masking any new build-context ordering bug.
+  # Cache-cold builds re-run `npm ci` every time. NEVER attach the
+  # Blacksmith persistent builder here (Tier-1 warm sibling only) —
+  # this job's value depends on a genuinely cold builder (ADR-0016 §4).
+  #
+  # Founding incident: PR #1083 added an npm `overrides` entry for
+  # `node-domexception` (`file:./stubs/node-domexception`) but didn't
+  # update the Dockerfile to copy `stubs/` before `npm ci`; the prod
+  # deploy of SHA 0764ff33 failed with `ERR_MODULE_NOT_FOUND` from
+  # mediasoup's postinstall. Resolved by PR #1097.
+  #
+  # Security note (workflow-injection class CWE-1395): no
+  #   ${{ github.event.* }} interpolation in run: blocks — all run:
+  #   blocks are static command strings.
+  #
+  # See: [internal]0006-cache-tier-split.md §"Tier 2"
+  #      [internal]rules/media-plane.md §"Docker Build Context Invariant"
+  production-compose-docker:
+    name: Production-compose / Docker build (cache-cold)
+    needs: [changes]
+    if: >-
+      !failure() && !cancelled() &&
+      (format('{0}', inputs.production-docker-changed) == 'true' || needs.changes.outputs.production-docker == 'true')
+    # Codesmith measured 86% average CPU at the 95th percentile on 8 vCPU;
+    # 16 vCPU projects p50 2m42s -> 1m38s for about +$15/month. The build
+    # remains cache-cold, with no persistent builder (ADR-0005/0006/0016).
+    runs-on: blacksmith-16vcpu-ubuntu-2404
+    timeout-minutes: 60
+    # CI-stub env vars (ported from the retired cache-cold-defense.yml;
+    # Copilot finding on #1254, validated empirically): docker compose
+    # evaluates ${VAR:?...} substitutions at YAML-parse time for ALL
+    # services in the project, BEFORE --profile filtering and BEFORE any
+    # build dispatch — so stubs are required for every mandatory env var
+    # referenced anywhere in the compose project, not just the built
+    # services. All values are clearly-fake placeholders never consumed
+    # at runtime (the job only runs `docker compose build`, never `up`);
+    # real production values come from /opt/concord/.env per
+    # [internal]rules/deployment.md canonical-writer discipline.
+    env:
+      POSTGRES_PASSWORD: CI_STUB_NOT_A_SECRET_postgres   # pragma: allowlist secret
+      REDIS_PASSWORD: CI_STUB_NOT_A_SECRET_redis         # pragma: allowlist secret
+      JWT_SECRET: CI_STUB_NOT_A_SECRET_jwt_for_build_only # pragma: allowlist secret
+      TURN_SECRET: CI_STUB_NOT_A_SECRET_turn             # pragma: allowlist secret
+      MINIO_ROOT_USER: ci_stub_minio_user
+      MINIO_ROOT_PASSWORD: CI_STUB_NOT_A_SECRET_minio    # pragma: allowlist secret
+      MFA_ENCRYPTION_KEY: CI_STUB_NOT_A_SECRET_mfa       # pragma: allowlist secret
+      DOMAIN: ci-stub.invalid
+      SMTP_HOST: smtp.ci-stub.invalid
+      SMTP_FROM: ci-stub@invalid.example
+      TRUSTED_PROXY_CIDRS: 10.0.0.0/8
+      PUBLIC_IP: 127.0.0.1
+      # Feedback handler (#158, PR #1547) — docker-compose.production.yml
+      # uses ${VAR:?...} fail-loud interpolation; cache-cold compose-build
+      # CI needs stubs to traverse the YAML even though `up` is never run.
+      FEEDBACK_PAT: CI_STUB_NOT_A_SECRET_feedback_pat   # pragma: allowlist secret
+      FEEDBACK_REPO: ci-stub/feedback-repo
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Verify Admin Portal production wiring
+        run: bash scripts/test-admin-ui-production-wiring.sh
+
+      - name: Cache-cold compose build (full production-active stack)
+        # -p concord pins the compose project name so built-image names
+        # are deterministic (concord-media-plane, concord-ops-agent) regardless
+        # of the checkout directory name; postgres and control-plane carry
+        # explicit image tags in the Compose model.
+        run: |
+          docker compose -p concord \
+            -f docker-compose.yml -f docker-compose.production.yml \
+            --profile services build --no-cache
+
+      - name: Assert all 4 production images exist + log sizes
+        run: |
+          for img in concordvoice-postgres:16-alpine concordvoice-control-plane:local concord-media-plane concord-ops-agent; do
+            docker image inspect "$img" --format "$img size: {{.Size}}" \
+              | awk '{ printf "%s %s %d MB\n", $1, $2, $3/1024/1024 }'
+          done
+
+      - name: Assert control-plane runtime assets present and Node toolchain absent
+        run: |
+          docker run --rm --entrypoint sh concordvoice-control-plane:local -c '
+            test -f /home/appuser/admin-ui/index.html \
+            && test -x /home/appuser/mfa-rekey \
+            && ! command -v node \
+            && ! command -v npm
+          '
+
+      - name: Assert toolchain absent in media-plane runtime image
+        run: |
+          docker run --rm concord-media-plane sh -c '
+            ! command -v g++ \
+            && ! command -v python3 \
+            && ! command -v make
+          '
+
+      # #2178: the media-plane compose healthcheck probes /health with BusyBox
+      # wget, which node:24-alpine ships but no apk line in the Dockerfile
+      # installs. If a future base-image bump drops it, the healthcheck starts
+      # failing silently and every SCOPED media deploy then fails `--wait` —
+      # a deploy-time failure with no PR-time signal. Assert it here instead.
+      - name: Assert healthcheck probe binary present in media-plane runtime image
+        run: |
+          docker run --rm concord-media-plane sh -c 'command -v wget'
+
+      - name: Assert mediasoup worker spawns
+        run: |
+          docker run --rm concord-media-plane node -e "
+            require('mediasoup').createWorker()
+              .then(w => { console.log('worker OK'); return w.close(); })
+              .then(() => process.exit(0))
+              .catch(e => { console.error(e); process.exit(1); })
+          "

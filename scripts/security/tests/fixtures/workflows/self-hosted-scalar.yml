@@ -1,0 +1,7 @@
+name: Self-hosted scalar
+on: push
+jobs:
+  build:
+    runs-on: self-hosted
+    steps:
+      - run: echo ok

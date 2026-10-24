@@ -1,0 +1,97 @@
+{
+  "services": {
+    "control-plane": {
+      "ports": [
+        {
+          "host_ip": "127.0.0.1",
+          "mode": "ingress",
+          "protocol": "tcp",
+          "published": "8080",
+          "target": 8080
+        }
+      ]
+    },
+    "coturn": {
+      "ports": [
+        {
+          "mode": "ingress",
+          "protocol": "tcp",
+          "published": "3478",
+          "target": 3478
+        },
+        {
+          "mode": "ingress",
+          "protocol": "udp",
+          "published": "3478",
+          "target": 3478
+        },
+        {
+          "mode": "ingress",
+          "protocol": "tcp",
+          "published": "5349",
+          "target": 5349
+        },
+        {
+          "mode": "ingress",
+          "protocol": "udp",
+          "published": "49152",
+          "target": 49152
+        },
+        {
+          "mode": "ingress",
+          "protocol": "udp",
+          "published": "49252",
+          "target": 49252
+        }
+      ]
+    },
+    "media-plane": {
+      "environment": {
+        "RTC_MAX_PORT": "41999",
+        "RTC_MIN_PORT": "40000"
+      },
+      "ports": [
+        {
+          "host_ip": "127.0.0.1",
+          "mode": "ingress",
+          "protocol": "tcp",
+          "published": "3000",
+          "target": 3000
+        },
+        {
+          "mode": "ingress",
+          "protocol": "udp",
+          "published": "40000",
+          "target": 40000
+        },
+        {
+          "mode": "ingress",
+          "protocol": "udp",
+          "published": "40001",
+          "target": 40001
+        },
+        {
+          "mode": "ingress",
+          "protocol": "udp",
+          "published": "41999",
+          "target": 41999
+        }
+      ]
+    },
+    "minio": {
+      "ports": []
+    },
+    "nats": {
+      "ports": []
+    },
+    "ops-agent": {
+      "ports": []
+    },
+    "postgres": {
+      "ports": []
+    },
+    "redis": {
+      "ports": []
+    }
+  }
+}

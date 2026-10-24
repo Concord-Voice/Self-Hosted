@@ -1,0 +1,27 @@
+# Compose override for the ZAP API DAST job (#1465) — layered on top of
+# the base docker-compose.yml by .github/workflows/zap-api-dast.yml:
+#
+#   docker compose -f docker-compose.yml -f .zap/docker-compose.zap-ci.yml \
+#     up -d --build control-plane
+#
+# CI-only: never used by concord-dev.sh or any deploy path.
+
+services:
+  control-plane:
+    environment:
+      # Activates the deterministic test profile (PR #1277): relaxed
+      # register/login rate limits so seeding + scanning don't trip the
+      # auth-flow caps, and the plaintext verification code mirrored to
+      # Redis under test_only:<pending_id> so the workflow can confirm
+      # registration without real email. Never set in production —
+      # see isTestEnv() in services/control-plane/internal/api/router.go.
+      CONCORD_ENV: test
+      # Named, not inherited: an unset ENVIRONMENT means production, whose
+      # guards refuse CONCORD_ENV=test and an empty SMTP_HOST.
+      ENVIRONMENT: development
+      # Forces the email service into devMode (codes logged to stdout,
+      # nothing sent) — the base compose default is smtp.resend.com, and
+      # `${SMTP_HOST:-...}` substitutes the default even for an
+      # empty-string .env value, so the override must be set HERE, not
+      # in the CI .env file (POSIX :- semantics treat empty as unset).
+      SMTP_HOST: ""

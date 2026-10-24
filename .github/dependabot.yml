@@ -1,0 +1,509 @@
+# https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
+
+version: 2
+updates:
+  # ─── GitHub Actions ────────────────────────────────────────────────
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "05:00"
+      timezone: "Etc/UTC"
+    commit-message:
+      prefix: "chore"
+    cooldown:
+      default-days: 7
+    labels:
+      - "area: deps"
+      - "area: ci-cd"
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # ─── CI license-checking tool ─────────────────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/.github/tools/license-checker"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "05:00"
+      timezone: "Etc/UTC"
+    commit-message:
+      prefix: "chore"
+    cooldown:
+      default-days: 7
+    labels:
+      - "area: deps"
+      - "area: ci-cd"
+
+  # ─── Shared packages (root workspace: packages/*) ──────────────────
+  # Self-Hosted: the desktop client's entry, moved to the root workspace that
+  # holds the protocol and E2EE packages. Groups for packages this workspace
+  # does not use match nothing and are kept so the entry stays a copy of the
+  # desktop one (epic #3947).
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "05:00"
+      timezone: "Etc/UTC"
+    commit-message:
+      prefix: "chore"
+    cooldown:
+      default-days: 7
+    labels:
+      - "area: deps"
+      - "area: desktop"
+    open-pull-requests-limit: 10
+    groups:
+      electron-forge:
+        patterns:
+          - "@electron-forge/*"
+          - "@reforged/*"
+          # plugin-fuses peers on @electron/fuses; listed here, ahead of
+          # electron-core's "@electron/*", so a fuses major arrives with it
+          # rather than alone and failing ERESOLVE (#3165).
+          - "@electron/fuses"
+      electron-core:
+        patterns:
+          - "electron"
+          - "electron-updater"
+          - "electron-squirrel-startup"
+          - "@electron/*"
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "react-router*"
+          - "@types/react"
+          - "@types/react-dom"
+          - "use-sync-external-store"
+      state:
+        patterns:
+          - "zustand"
+      media:
+        patterns:
+          - "mediasoup-client"
+          - "socket.io-client"
+      desktop-prod:
+        patterns:
+          - "lucide-react"
+          - "minisearch"
+          - "qrcode"
+          - "@msgpack/msgpack"
+          - "hash-wasm"
+      validation:
+        # Runtime payload validators (#709 introduced zod at the WebSocket
+        # dispatch boundary). Grouped so a zod bump rolls as one PR rather
+        # than fanning out across unrelated batches.
+        patterns:
+          - "zod"
+          - "valibot"
+          - "@valibot/*"
+      dev-tooling:
+        dependency-type: "development"
+        patterns:
+          - "eslint*"
+          - "@eslint/*"
+          - "@eslint-react/*"
+          - "@typescript-eslint/*"
+          - "typescript-eslint"
+          - "eslint-config-prettier"
+          - "eslint-plugin-*"
+          - "prettier"
+          - "typescript"
+          - "globals"
+      build-tooling:
+        dependency-type: "development"
+        patterns:
+          - "vite"
+          - "@vitejs/*"
+          - "vitest"
+          - "@vitest/*"
+          - "concurrently"
+      vitest-pair-security:
+        # A group without `applies-to` does not merely DEFAULT to version
+        # updates — dependabot FILTERS by it. `dependency_group_engine.rb`
+        # (`from_job_config`) keeps only `security-updates` groups on a security
+        # run and only `version-updates` groups otherwise, so on a security run
+        # the group above does not exist at all. Raised by Codex on PR #3284.
+        #
+        # WHAT THIS DOES AND DOES NOT FIX — the narrower claim, after a Codex
+        # follow-up on the same PR corrected an overstatement that stood here. A
+        # security run is ADVISORY-DRIVEN: only dependencies carrying an advisory
+        # are eligible, and a group AGGREGATES eligible updates rather than opting
+        # a healthy package into the run. So this group covers the case where BOTH
+        # halves are vulnerable (which would otherwise be two PRs), and it does
+        # NOT rescue the case where only one half has an advisory whose patched
+        # release crosses the exact-peer boundary — that still yields a one-sided
+        # PR that fails `npm ci`, and no grouping syntax can fix it. Closing that
+        # needs automation advancing both manifest entries together, or an upstream
+        # end to the exact-peer coupling — tracked in #3293, which carries the three
+        # candidate mechanisms. Keep this group regardless: it costs nothing and it
+        # does close the co-vulnerable case.
+        #
+        # Deliberately scoped to the vitest pair and NOT mirrored for every
+        # other group: `@vitest/coverage-istanbul` declares an EXACT peer pin on
+        # `vitest`, so a split there is UNMERGEABLE. A split in a convenience
+        # group (react, electron-core, …) is merely noisy, and mirroring all of
+        # them would double this file to guard against untidiness. Add a sibling
+        # here only for a pair whose split cannot be merged.
+        #
+        # This group is REQUIRED in every npm entry that groups the pair; the
+        # other three carry a pointer back to this comment.
+        applies-to: security-updates
+        dependency-type: "development"
+        patterns:
+          - "vitest"
+          - "@vitest/*"
+      testing:
+        dependency-type: "development"
+        patterns:
+          - "@testing-library/*"
+          - "jsdom"
+          - "msw"
+      types:
+        dependency-type: "development"
+        patterns:
+          - "@types/node"
+          - "@types/qrcode"
+    versioning-strategy: increase
+
+  # ─── Admin Portal (React) ──────────────────────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/client/admin"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "05:00"
+      timezone: "Etc/UTC"
+    commit-message:
+      prefix: "chore"
+    cooldown:
+      default-days: 7
+    labels:
+      - "area: deps"
+      - "area: admin-portal"
+    open-pull-requests-limit: 10
+    groups:
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
+      build-tooling:
+        dependency-type: "development"
+        patterns:
+          - "vite"
+          - "@vitejs/*"
+          - "typescript"
+      testing:
+        dependency-type: "development"
+        patterns:
+          - "@playwright/test"
+          - "@testing-library/*"
+          - "@vitest/*"
+          - "vitest"
+          - "jsdom"
+          - "msw"
+      vitest-pair-security:
+        # Required sibling — see `vitest-pair-security` under the root workspace for
+        # why a group without `applies-to` is INVISIBLE to security updates.
+        # Narrower than the `testing` group above on purpose: only the
+        # exact-peer-pinned pair, not playwright/testing-library/jsdom/msw.
+        applies-to: security-updates
+        dependency-type: "development"
+        patterns:
+          - "vitest"
+          - "@vitest/*"
+      lint-tooling:
+        dependency-type: "development"
+        patterns:
+          - "eslint*"
+          - "@eslint/*"
+          - "@eslint-react/*"
+          - "@typescript-eslint/*"
+          - "typescript-eslint"
+          - "prettier"
+          - "globals"
+      icons:
+        patterns:
+          - "lucide-react"
+    versioning-strategy: increase
+
+  # ─── Media Plane (Node.js + mediasoup) ─────────────────────────────
+  - package-ecosystem: "npm"
+    directory: "/services/media-plane"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "05:00"
+      timezone: "Etc/UTC"
+    commit-message:
+      prefix: "chore"
+    cooldown:
+      default-days: 7
+    labels:
+      - "area: deps"
+      - "area: media-plane"
+    open-pull-requests-limit: 10
+    groups:
+      mediasoup:
+        patterns:
+          - "mediasoup"
+      socket-io:
+        patterns:
+          - "socket.io"
+      server:
+        patterns:
+          - "express"
+          - "dotenv"
+          - "jsonwebtoken"
+          - "nats"
+          - "redis"
+          - "winston"
+      dev-tooling:
+        dependency-type: "development"
+        patterns:
+          - "eslint*"
+          - "@eslint/*"
+          - "@typescript-eslint/*"
+          - "typescript-eslint"
+          - "prettier"
+          - "typescript"
+          - "tsx"
+          - "globals"
+      testing:
+        # @vitest/coverage-istanbul declares an EXACT peer pin on vitest
+        # (`npm view @vitest/coverage-istanbul@5.0.0 peerDependencies` ->
+        # `{ vitest: '5.0.0' }`). Ungrouped, the two arrived as PR #3257 and
+        # PR #3256, and NEITHER could merge alone: whichever landed first left
+        # an unsatisfiable peer on the package that produces the Istanbul lcov
+        # the SonarCloud coverage gate reads. Grouping is the fix here because
+        # both halves ARE simultaneously available, which is exactly what a group
+        # bundles. It cannot help when one half is not yet published — the
+        # @electron/fuses 2.x hold (#3165, lifted with Forge 8 in PR #3794) was
+        # that case, and only an ignore: rule could stop it regenerating.
+        dependency-type: "development"
+        patterns:
+          - "vitest"
+          - "@vitest/*"
+      vitest-pair-security:
+        # Required sibling — see `vitest-pair-security` under the root workspace for
+        # why a group without `applies-to` is INVISIBLE to security updates.
+        applies-to: security-updates
+        dependency-type: "development"
+        patterns:
+          - "vitest"
+          - "@vitest/*"
+      types:
+        dependency-type: "development"
+        patterns:
+          - "@types/*"
+    versioning-strategy: increase
+
+  # ─── Control Plane (Go) ────────────────────────────────────────────
+  - package-ecosystem: "gomod"
+    directory: "/services/control-plane"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "07:00"
+      timezone: "Etc/UTC"
+    commit-message:
+      prefix: "chore"
+    cooldown:
+      default-days: 7
+    labels:
+      - "area: deps"
+      - "area: control-plane"
+    open-pull-requests-limit: 10
+    groups:
+      go-all:
+        patterns:
+          - "*"
+
+  # ─── Python (pre-commit / workflow tooling) ────────────────────────
+  # .github/requirements-pyyaml.txt is consumed by ioc-scanning.yml, pr-ci.yml,
+  # workflow-validate.yml, selfhost-release-guards.yml and the pin check in
+  # required-pr-build.yml, which installs it on the runner's system Python, so it
+  # carries the cp312-cp314 x86_64 wheel hashes. It is the repo's only pip manifest and appears
+  # in the CycloneDX SBOM as the sole pkg:pypi component, so it was the one
+  # ecosystem in the SBOM with no dependabot coverage at all.
+  - package-ecosystem: "pip"
+    directory: "/.github"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "05:00"
+      timezone: "Etc/UTC"
+    commit-message:
+      prefix: "chore"
+    cooldown:
+      default-days: 7
+    labels:
+      - "area: deps"
+      - "area: ci-cd"
+    open-pull-requests-limit: 5
+    groups:
+      python-tooling:
+        patterns:
+          - "*"
+
+  # ─── Container base images ─────────────────────────────────────────
+  # DELIBERATELY EXCLUDES /infrastructure/docker/minio. That image is governed
+  # by the fixed-upstream-source discipline in [internal]rules/deployment.md
+  # ("Concord-built MinIO publication and consumer discipline", #1220): a
+  # refresh must fix an exact upstream tag AND full commit in reviewable
+  # repository files, via an explicit dispatcher, with paired source/runtime
+  # publication and recorded legal approval. An automated base-image bump
+  # cannot satisfy that process, so it must stay a human-initiated refresh.
+  - package-ecosystem: "docker"
+    directories:
+      - "/services/control-plane"
+      - "/services/media-plane"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "05:00"
+      timezone: "Etc/UTC"
+    commit-message:
+      prefix: "chore"
+    cooldown:
+      default-days: 7
+    labels:
+      - "area: deps"
+      - "area: ci-cd"
+    open-pull-requests-limit: 5
+    groups:
+      base-images:
+        patterns:
+          - "*"
+
+  # Postgres is split out of the block above ONLY so its `ignore` can be scoped.
+  # An ignore under a `directories:` LIST is emitted once per directory by
+  # scripts/security/check-pin-exceptions.mjs, so leaving it there would demand a
+  # register entry for `postgres` in control-plane, media-plane and buildtools —
+  # three entries describing an image none of them builds. Same schedule, labels,
+  # cooldown and grouping as the block above; the split is scoping, not policy.
+  - package-ecosystem: "docker"
+    directory: "/infrastructure/docker/postgres"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "05:00"
+      timezone: "Etc/UTC"
+    commit-message:
+      prefix: "chore"
+    cooldown:
+      default-days: 7
+    labels:
+      - "area: deps"
+      - "area: ci-cd"
+    open-pull-requests-limit: 5
+    ignore:
+      # A PostgreSQL major is a data migration, not an image-tag bump. `PGDATA`
+      # initialised by 16 refuses to start under 18, docker-compose.failover.yml
+      # pins postgres:16-alpine DIRECTLY and runs pg_basebackup (physical
+      # replication requires matching majors), build.yml tests against 16, and
+      # both compose files declare `image: concordvoice-postgres:16-alpine` — so a
+      # FROM bump alone ships an image whose tag says 16 and whose contents are
+      # not. PR #3210 was closed for exactly this; without this rule it returns
+      # every Tuesday.
+      #
+      # Minors and patches within 16 still flow. This ALSO covers security PRs —
+      # GitHub documents `ignore` as governing both update classes — so a
+      # major-only CVE fix would surface as an alert rather than a PR. Do not
+      # "harden" that with `versions:` and do not use `@dependabot ignore this
+      # major version`: both store a version RANGE, which suppresses far more
+      # firmly than intended.
+      #
+      # Recorded as kind=held-back in .github/dependency-pin-exceptions.json,
+      # which carries the review_by that expires this decision. PostgreSQL 16 is
+      # supported upstream until November 2028.
+      - dependency-name: "postgres"
+        update-types: ["version-update:semver-major"]
+    groups:
+      base-images:
+        patterns:
+          - "*"
+
+  # The deploy-test image is split out of the docker block for the same scoping
+  # reason as postgres above. It may only move between Ubuntu LTS releases
+  # (YY.04 with an even YY). Interim releases get 9 months of support, so a
+  # bump to one ships an image that is end-of-life within the year. #3879
+  # proposed 25.10, past its July 2026 end of life, after #3842 (26.04) was
+  # closed with `@dependabot ignore ubuntu major version`. That comment-held
+  # ignore still blocks all of 26.x, 26.04 LTS included, and lives only on
+  # GitHub; lift it with `@dependabot unignore ubuntu` when 26.04 is wanted.
+  #
+  # ponytail: an explicit list, because `versions:` cannot say "non-LTS". Add
+  # each interim tag before its April/October release, or it arrives as a PR.
+  # Recorded as kind=held-back in .github/dependency-pin-exceptions.json.
+  - package-ecosystem: "docker"
+    directory: "/infrastructure/deploy/tests"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "05:00"
+      timezone: "Etc/UTC"
+    commit-message:
+      prefix: "chore"
+    cooldown:
+      default-days: 7
+    labels:
+      - "area: deps"
+      - "area: ci-cd"
+    open-pull-requests-limit: 5
+    ignore:
+      - dependency-name: "ubuntu"
+        versions: ["24.10", "25.04", "25.10", "26.10", "27.04", "27.10"]
+    groups:
+      base-images:
+        patterns:
+          - "*"
+
+  # ─── Compose-file images ───────────────────────────────────────────
+  # Keeps the tag+digest pins in docker-compose.yml fresh (the upstream-image
+  # rule in [internal]rules/electron.md § Supply-chain hardening). This updater
+  # scans EVERY compose file in the directory it names, so `allow:` is what
+  # scopes it, not the directory. It allows only redis and nats:
+  #   - MinIO stays out under #1220, the same reason as the docker block above.
+  #   - coturn stays out: copy-certs.sh checks its exact image+digest as the
+  #     identity of the container it delivers the TLS key to, so a bump must
+  #     move both in one reviewed change.
+  #   - postgres stays out: compose names only the local build tag
+  #     `concordvoice-postgres`; the image is built from
+  #     infrastructure/docker/postgres, which the docker block above watches.
+  # `allow:` matches image names in every file, so the failover overlay's
+  # floating `redis:7-alpine` would be bumped too; `exclude-paths` keeps that
+  # file out, because no deploy script loads it and the pin rule excludes it.
+  # Same schedule, labels and cooldown as the other image blocks.
+  - package-ecosystem: "docker-compose"
+    directory: "/"
+    exclude-paths:
+      - "docker-compose.failover.yml"
+    allow:
+      - dependency-name: "redis"
+      - dependency-name: "nats"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "05:00"
+      timezone: "Etc/UTC"
+    commit-message:
+      prefix: "chore"
+    cooldown:
+      default-days: 7
+    labels:
+      - "area: deps"
+      - "area: ci-cd"
+    open-pull-requests-limit: 5
+    groups:
+      compose-images:
+        patterns:
+          - "*"

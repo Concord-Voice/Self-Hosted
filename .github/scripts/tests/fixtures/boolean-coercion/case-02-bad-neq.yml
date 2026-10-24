@@ -1,0 +1,18 @@
+# Synthetic fixture: the != 'true' variant. Symmetric bug to case-01 —
+# `inputs.skip_tests != 'true'` evaluates TRUE for `-f skip_tests=true`
+# (because the coerced 1 doesn't equal the string 'true'), so the skip
+# never actually skips.
+name: bad-neq
+on:
+  workflow_dispatch:
+    inputs:
+      skip_tests:
+        type: boolean
+        default: false
+
+jobs:
+  test:
+    if: inputs.skip_tests != 'true'
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "ran tests"

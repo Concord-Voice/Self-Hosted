@@ -1,0 +1,33 @@
+name: case-03-comment-too-far
+
+on: pull_request
+
+jobs:
+  example:
+    name: Example job
+    # This always() is load-bearing because needs may be skipped on
+    # PR runs and we want the cascade-skip to be overridden so the
+    # downstream sentinel job runs and emits the required status check.
+    # Below are filler lines to push the comment >10 lines above the
+    # always() expression so the lint should reject this fixture.
+    env:
+      FILLER_A: "a"
+      FILLER_B: "b"
+      FILLER_C: "c"
+      FILLER_D: "d"
+      FILLER_E: "e"
+      FILLER_F: "f"
+      FILLER_G: "g"
+      FILLER_H: "h"
+      FILLER_I: "i"
+      FILLER_J: "j"
+    needs: [precursor]
+    runs-on: ubuntu-latest
+    if: ${{ always() }}
+    steps:
+      - run: echo "ok"
+  precursor:
+    name: Precursor
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "precursor"

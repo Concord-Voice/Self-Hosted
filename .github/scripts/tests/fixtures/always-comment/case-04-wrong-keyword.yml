@@ -1,0 +1,20 @@
+name: case-04-wrong-keyword
+
+on: pull_request
+
+jobs:
+  example:
+    name: Example job
+    # This job runs at the end of the workflow to aggregate results
+    # from the matrix legs. It needs to fire regardless of upstream
+    # outcomes so the developer can see a unified status badge.
+    needs: [precursor]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "ok"
+  precursor:
+    name: Precursor
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "precursor"

@@ -1,0 +1,11 @@
+name: Test Fixture — Dict-form environment
+on:
+  workflow_dispatch:
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: staging
+      url: https://staging.concordvoice.chat
+    steps:
+      - run: echo "uses dict-form environment"

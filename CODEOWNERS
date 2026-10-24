@@ -1,0 +1,17 @@
+# Security ownership for the Self-Hosted repository.
+/CODEOWNERS                                          @Concord-Voice/security
+/.github/CODEOWNERS                                  @Concord-Voice/security
+/.github/workflows/**                                @Concord-Voice/security
+.github/codeql/**                                   @Concord-Voice/security
+/.github/ci/**                                       @Concord-Voice/security
+/.pre-commit-config.yaml                             @Concord-Voice/security
+docker-compose.production.yml                       @Concord-Voice/security
+docker-compose.selfhost.yml                         @Concord-Voice/security
+docker-compose.byo-s3.yml                           @Concord-Voice/security
+infrastructure/**                                   @Concord-Voice/security
+/scripts/security/**                                 @Concord-Voice/security
+**/crypto*                                          @Concord-Voice/security
+**/e2ee*                                            @Concord-Voice/security
+**/auth/**                                          @Concord-Voice/security
+**/mfa/**                                           @Concord-Voice/security
+**/rbac/**                                          @Concord-Voice/security

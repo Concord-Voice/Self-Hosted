@@ -1,0 +1,6 @@
+# Fake IOC list for tests — NOT the real list.
+# Real list lives at scripts/security/iocs/shai-hulud-2.0.txt.
+
+fixture-malicious-package
+another-fixture-ioc
+@fixture/scoped-ioc

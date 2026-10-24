@@ -1,0 +1,17 @@
+name: case-02-no-comment
+
+on: pull_request
+
+jobs:
+  example:
+    name: Example job
+    needs: [precursor]
+    runs-on: ubuntu-latest
+    if: ${{ always() }}
+    steps:
+      - run: echo "ok"
+  precursor:
+    name: Precursor
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "precursor"

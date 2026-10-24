@@ -1,0 +1,138 @@
+{
+  "description": "Public synthetic protocol test material only. Private scalars 1 and 2 are intentionally public and MUST NEVER be used for real recovery.",
+  "user_id": "11111111-2222-4333-8444-555555555555",
+  "recovery_token_jti": "synthetic-public-recovery-token-jti-v2",
+  "context": {
+    "request_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+    "protocol_version": 2,
+    "server_origin": "https://recovery.example.test",
+    "account_binding": "Au0qqDzc7P3xONO1S35BX830iSn4FjY/qlF8nDZ2W1g=",
+    "expires_at": 1791137700000,
+    "requester_nonce": "AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=",
+    "requester_public_key": "BKqHyiK+iwU3jrHHHvMgrXRuHTtii6ebmFn3QeCCVCo4VQLyXb9VKWw6VF44cnYKtzYX3kqWJixvXZ6Yv5KS3Cn49B29KJoUfOnaMRO18LjACmCxzh1+gZ16Qx18kOoOXw==",
+    "recovery_token_jti_hash": "yME402jhzVRxeY08RmH67AS61JkGzd2w6Ts5sNBeNeU="
+  },
+  "offer": {
+    "responder_public_key": "BAjZmQV7o9LZaSYARcVbl/CJAllZpvQ01lHSB9GfuW6eT+Dobr4OZPhblqnHUpXfYY6A8fpbGzztt7/o3/1tunSyddh1vGzEPpBOUF8larQlX/1D6U054i1hUB5wCpQOgA==",
+    "responder_nonce": "ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=",
+    "transcript_hash": "vNTtj5Kv3u2AlhvRvTL4XSuOcF7qfGzAs//rHA9YTC0="
+  },
+  "requester_private_scalar": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB",
+  "responder_private_scalar": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAC",
+  "canonical_transcript": "[\"concord-trusted-device-recovery\",2,\"https://recovery.example.test\",\"aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee\",\"Au0qqDzc7P3xONO1S35BX830iSn4FjY/qlF8nDZ2W1g=\",1791137700000,\"AAECAwQFBgcICQoLDA0ODxAREhMUFRYXGBkaGxwdHh8=\",\"ICEiIyQlJicoKSorLC0uLzAxMjM0NTY3ODk6Ozw9Pj8=\",\"yME402jhzVRxeY08RmH67AS61JkGzd2w6Ts5sNBeNeU=\",\"requester\",\"BKqHyiK+iwU3jrHHHvMgrXRuHTtii6ebmFn3QeCCVCo4VQLyXb9VKWw6VF44cnYKtzYX3kqWJixvXZ6Yv5KS3Cn49B29KJoUfOnaMRO18LjACmCxzh1+gZ16Qx18kOoOXw==\",\"responder\",\"BAjZmQV7o9LZaSYARcVbl/CJAllZpvQ01lHSB9GfuW6eT+Dobr4OZPhblqnHUpXfYY6A8fpbGzztt7/o3/1tunSyddh1vGzEPpBOUF8larQlX/1D6U054i1hUB5wCpQOgA==\"]",
+  "canonical_transcript_base64": "WyJjb25jb3JkLXRydXN0ZWQtZGV2aWNlLXJlY292ZXJ5IiwyLCJodHRwczovL3JlY292ZXJ5LmV4YW1wbGUudGVzdCIsImFhYWFhYWFhLWJiYmItNGNjYy04ZGRkLWVlZWVlZWVlZWVlZSIsIkF1MHFxRHpjN1AzeE9OTzFTMzVCWDgzMGlTbjRGalkvcWxGOG5EWjJXMWc9IiwxNzkxMTM3NzAwMDAwLCJBQUVDQXdRRkJnY0lDUW9MREEwT0R4QVJFaE1VRlJZWEdCa2FHeHdkSGg4PSIsIklDRWlJeVFsSmljb0tTb3JMQzB1THpBeE1qTTBOVFkzT0RrNk96dzlQajg9IiwieU1FNDAyamh6VlJ4ZVkwOFJtSDY3QVM2MUprR3pkMnc2VHM1c05CZU5lVT0iLCJyZXF1ZXN0ZXIiLCJCS3FIeWlLK2l3VTNqckhISHZNZ3JYUnVIVHRpaTZlYm1GbjNRZUNDVkNvNFZRTHlYYjlWS1d3NlZGNDRjbllLdHpZWDNrcVdKaXh2WFo2WXY1S1MzQ240OUIyOUtKb1VmT25hTVJPMThMakFDbUN4emgxK2daMTZReDE4a09vT1h3PT0iLCJyZXNwb25kZXIiLCJCQWpabVFWN285TFphU1lBUmNWYmwvQ0pBbGxacHZRMDFsSFNCOUdmdVc2ZVQrRG9icjRPWlBoYmxxbkhVcFhmWVk2QThmcGJHenp0dDcvbzMvMXR1blN5ZGRoMXZHekVQcEJPVUY4bGFyUWxYLzFENlUwNTRpMWhVQjV3Q3BRT2dBPT0iXQ==",
+  "transcript_hash": "vNTtj5Kv3u2AlhvRvTL4XSuOcF7qfGzAs//rHA9YTC0=",
+  "shared_secret": "CNmZBXuj0tlpJgBFxVuX8IkCWVmm9DTWUdIH0Z+5bp5P4Ohuvg5k+FuWqcdSld9h",
+  "encryption_key": "T2PH3E5WcUkcYAKmV7Ieh8epMcOGqIWWF7oWmMY6iOQ=",
+  "fingerprint_bytes": "TulzLbMmGJKVj/t1NwAQqA==",
+  "fingerprint": "4EE9 732D B326 1892 958F FB75 3700 10A8",
+  "iv": "AAECAwQFBgcICQoL",
+  "plaintext": "cHVibGljIHN5bnRoZXRpYyBwcm90b2NvbCBwbGFpbnRleHQ=",
+  "encrypted_payload": "AgABAgMEBQYHCAkKCyswu63TsHy+4DRKTDsrTy6nvylaytcnQQvjMK3PoD+3qhjEY8IpyRgb0CWuJnT8dnLEyQ==",
+  "origin_cases": [
+    {
+      "origin": "https://example.test",
+      "valid": true
+    },
+    {
+      "origin": "http://localhost:8080",
+      "valid": true
+    },
+    {
+      "origin": "http://127.0.0.1:0",
+      "valid": true
+    },
+    {
+      "origin": "http://foo_bar.local:8080",
+      "valid": true
+    },
+    {
+      "origin": "https://foo!bar.test",
+      "valid": true
+    },
+    {
+      "origin": "https://-foo.test",
+      "valid": true
+    },
+    {
+      "origin": "https://foo-.test",
+      "valid": true
+    },
+    {
+      "origin": "https://a..b.test",
+      "valid": true
+    },
+    {
+      "origin": "https://xn--bcher-kva.example",
+      "valid": true
+    },
+    {
+      "origin": "https://xn--ls8h.example",
+      "valid": true
+    },
+    {
+      "origin": "https://[::ffff:c000:201]",
+      "valid": true
+    },
+    {
+      "origin": "http://[::1]:8080",
+      "valid": true
+    },
+    {
+      "origin": "https://xn--a.test",
+      "valid": false
+    },
+    {
+      "origin": "https://xn--.test",
+      "valid": false
+    },
+    {
+      "origin": "https://xn--abc-.test",
+      "valid": false
+    },
+    {
+      "origin": "https://xn--bcher-kva-.test",
+      "valid": false
+    },
+    {
+      "origin": "https://xn--a_b.test",
+      "valid": false
+    },
+    {
+      "origin": "https://x\u007f.test",
+      "valid": false
+    },
+    {
+      "origin": "https://Example.test",
+      "valid": false
+    },
+    {
+      "origin": "https://b\u00fccher.example",
+      "valid": false
+    },
+    {
+      "origin": "http://127.1",
+      "valid": false
+    },
+    {
+      "origin": "https://[::ffff:192.0.2.1]",
+      "valid": false
+    },
+    {
+      "origin": "https://foo^bar.test",
+      "valid": false
+    },
+    {
+      "origin": "https://foo|bar.test",
+      "valid": false
+    },
+    {
+      "origin": "https://example.test:443",
+      "valid": false
+    },
+    {
+      "origin": "https://example.test/",
+      "valid": false
+    }
+  ]
+}

@@ -1,0 +1,7 @@
+# Gitleaks configuration
+# Excludes files that contain hashed secret fingerprints (not actual secrets)
+
+[allowlist]
+  paths = [
+    ".secrets.baseline",
+  ]

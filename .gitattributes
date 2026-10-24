@@ -1,0 +1,2 @@
+.github/agents/*.agent.md text eol=lf
+.codex/agents/*.toml text eol=lf

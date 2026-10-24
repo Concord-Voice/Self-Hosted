@@ -1,0 +1,101 @@
+# govulncheck — Go vulnerability scanning (call-graph reachability) → SARIF →
+# Code Scanning (ADR-0017, #1433; absorbs #1227 — replaces the advisory
+# text-mode "Dependency audit" step inside build.yml's control-plane job).
+# Scope: services/control-plane — the repo's only Go module. Add a matrix leg
+# if a second Go module with dependencies lands.
+# Tool install is VERSION-PINNED (not @latest): golang.org/x/vuln resolves via
+# the Go module proxy + checksum DB (sumdb), so a version pin is supply-chain
+# equivalent to a SHA pin for Go modules (#847 spirit).
+# Exit semantics: govulncheck exits 0 in -format=sarif mode even with findings;
+# the fail-if-findings step preserves the previous fail-the-job signal until
+# the code_scanning ruleset (A8/#1431) takes over gating.
+name: govulncheck
+
+# PR leg invoked by pr-ci.yml with `needs: ioc` (ADR-0018 IOC-first, #1476)
+# — go install + module-graph resolution must not race the supply-chain
+# verdict. The push leg stays in-file until main-ci.yml (#1477).
+# push:main leg moved to main-ci.yml (#1477); concurrency lives at the
+# orchestrators (main-ci queues, never cancels a baseline upload).
+on:
+  workflow_call:
+    inputs:
+      external-verdict:
+        description: "Report actual SARIF upload provenance and delegate findings to the protected verifier"
+        type: boolean
+        default: false
+        required: false
+
+# Least-privilege default; the govulncheck job elevates to the writes it needs.
+permissions:
+  contents: read
+
+jobs:
+  govulncheck:
+    name: govulncheck (control-plane)
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # SARIF upload to Code Scanning
+      security-events: write
+      # required by upload-sarif in private repos to read the Actions run status
+      actions: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: services/control-plane/go.mod
+          cache-dependency-path: services/control-plane/go.sum
+
+      - name: Install govulncheck (pinned)
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.9.0
+
+      - name: Scan (SARIF)
+        working-directory: services/control-plane
+        run: govulncheck -format sarif ./... > govulncheck.sarif
+
+      - name: Upload SARIF to Code Scanning
+        # first-party, SHA-pinned for Alpha Code Scanning Gate (#1431).
+        # Keep the trailing version comment bare: dependabot only rewrites that
+        # exact shape, so an annotated one silently rots on every bump (#2309).
+        id: upload-sarif
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: services/control-plane/govulncheck.sarif
+          category: govulncheck
+
+      - name: Write protected govulncheck upload evidence
+        if: inputs.external-verdict
+        env:
+          SARIF_ID: ${{ steps.upload-sarif.outputs.sarif-id }}
+        run: |
+          set -euo pipefail
+          test -n "$SARIF_ID" || { echo "::error::govulncheck did not return a SARIF upload ID"; exit 1; }
+          jq -n --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg category govulncheck --arg sarif_id "$SARIF_ID" \
+            '{run_id:$run_id,run_attempt:$run_attempt,category:$category,sarif_id:$sarif_id}' \
+            > "$RUNNER_TEMP/scan-evidence-govulncheck.json"
+
+      - name: Upload protected govulncheck evidence
+        if: inputs.external-verdict
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scan-evidence-${{ github.run_id }}-${{ github.run_attempt }}-govulncheck
+          path: ${{ runner.temp }}/scan-evidence-govulncheck.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Fail on reachable-vulnerability findings
+        working-directory: services/control-plane
+        env:
+          EXTERNAL_VERDICT: ${{ inputs.external-verdict }}
+        run: |
+          COUNT=$(jq '[.runs[].results[]? | select(.level != "note")] | length' govulncheck.sarif)
+          echo "govulncheck findings (non-note): ${COUNT}"
+          if [ "${COUNT}" -gt 0 ] && [ "$EXTERNAL_VERDICT" != 'true' ]; then
+            echo "::error::govulncheck found ${COUNT} reachable vulnerability finding(s) — see the Security tab (category: govulncheck)."
+            exit 1
+          fi

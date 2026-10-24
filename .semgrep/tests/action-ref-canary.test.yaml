@@ -1,0 +1,58 @@
+# Canary fixture for the GitHub Action mutable-ref detector (#2426).
+#
+# NOT a real workflow — it is never executed. It exists so CI can prove the
+# upstream Semgrep rule
+#   yaml.github-actions.security.github-actions-mutable-action-tag.github-actions-mutable-action-tag
+# still fires. That rule is the SOLE detector behind the full-SHA pin invariant
+# in [internal]rules/electron.md, it ships in the p/owasp-top-ten pack only, and
+# it is fetched from the Semgrep registry at scan time — SEMGREP_VERSION pins
+# the engine, not the pack. Upstream could remove, rename, or downgrade it and
+# nothing in this repository would notice. The canary step in
+# .github/workflows/semgrep.yml turns that silence into a red build.
+#
+# TWO HARD CONSTRAINTS — read before renaming or moving this file:
+#   1. The filename MUST end `.test.yaml`. `semgrep scan --config=.semgrep/`
+#      loads every other *.yml/*.yaml under .semgrep/ as a RULE and fails hard
+#      on a workflow-shaped file, breaking the custom-rules scan on every PR.
+#   2. It MUST stay under `.semgrep/tests/`, which .semgrepignore excludes.
+#      That exclusion is what keeps the deliberately-mutable refs below out of
+#      the repo-wide community scan and therefore out of the Alpha Code
+#      Scanning Gate — the #2399 failure mode. The canary step still reaches
+#      them because .semgrepignore suppresses directory walks, not explicitly
+#      named file paths.
+name: action-ref-canary
+on: workflow_dispatch
+jobs:
+  # Every shape here must be rejected. The set is deliberately WIDER than the
+  # four shapes needed to prove "the rule still fires": an upstream narrowing
+  # that kept catching @main and @v7 but stopped catching dotted-semver,
+  # arbitrary branches, or short SHAs would otherwise pass a smaller canary
+  # while enforcement was materially weakened. That is the only vector found
+  # that produces a green canary over a broken invariant, so the fixture
+  # mirrors the full accept/reject matrix rather than a sample of it.
+  must-flag:
+    runs-on: ubuntu-latest
+    steps:
+      # Branch refs — issue #2426's literal scenario.
+      - uses: actions/checkout@main
+      - uses: github/codeql-action/init@master
+      # Arbitrary (non-main/master) branch.
+      - uses: actions/setup-node@release-1.0
+      # Major tag — forbidden for first-party since 32b6241dc.
+      - uses: actions/checkout@v7
+      # Dotted semver and prerelease tags are mutable too.
+      - uses: actions/cache@v6.1.0
+      - uses: actions/upload-artifact@v5.0.1-beta.1
+      # Floating aliases.
+      - uses: actions/download-artifact@latest
+      # Short SHA — not a full 40-hex pin.
+      - uses: actions/checkout@3d3c42e
+      # Third-party mutable tag — the half #2400 kept via a custom rule.
+      - uses: dorny/paths-filter@v4
+  must-pass:
+    runs-on: ubuntu-latest
+    steps:
+      # The only accepted remote form: full 40-hex SHA + bare version comment.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Local actions are first-party by construction and exempt (electron.md).
+      - uses: ./.github/actions/track-deployment

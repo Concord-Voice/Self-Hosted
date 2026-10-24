@@ -1,0 +1,178 @@
+# ZAP Automation Framework plan — PR-time baseline (#1465).
+#
+# Target: the EPHEMERAL in-job compose stack (CONCORD_ENV=test) at
+# http://localhost:8080 — NEVER production and NEVER api.concordvoice.chat
+# (the Cloudflare proxy is load-bearing for updates-cache + rate limiting;
+# scanning through it would distort results and trip bot mitigation).
+#
+# Scope honesty: this plan covers the control-plane REST surface ONLY.
+# The WebSocket hub, media-plane Socket.IO/WebRTC, and NATS are out of
+# scope — do not read "DAST green" as coverage of those planes.
+#
+# Auth: the workflow seeds a throwaway test user (register → Redis
+# test_only code → confirm) and passes the JWT via the ZAP_AUTH_HEADER_VALUE
+# environment variable, injected on every request by the replacer job below.
+# AccessTokenTTL is a hard 15-minute const (services/control-plane/internal/
+# auth/tokens.go) — every job in this plan must finish well inside that
+# window, which is why the active scan is time-boxed at 5 minutes.
+#
+# Scan-surface definition: docs/api/openapi.yaml (drift-gated against the
+# live router by pr-ci's verify-openapi-coverage job, #822 — the spec and
+# the real surface cannot silently diverge).
+
+env:
+  contexts:
+    - name: concord-api
+      urls:
+        - "http://localhost:8080"
+      includePaths:
+        - "http://localhost:8080/api/v1.*"
+        - "http://localhost:8080/health"
+      # Exclusions — each entry needs a justification (mirrors the
+      # instance-level FP register discipline; never silence a class):
+      excludePaths:
+        # Logout blacklists the access token's jti in Redis and the auth
+        # middleware checks the blacklist per-request — one scanner hit
+        # would revoke the seeded JWT and collapse the rest of the scan
+        # to 401s (middleware/auth.go isTokenBlacklisted).
+        - "http://localhost:8080/api/v1/auth/logout"
+        # Deletes the scan user (cascade per migration 000059) — the one
+        # true self-destruct; the scan identity must outlive the scan.
+        - "http://localhost:8080/api/v1/privacy/erase-account"
+        # Account-reset recovery flow — destructive to the scan identity.
+        # Dummy codes would almost certainly 4xx, but defense-in-depth.
+        - "http://localhost:8080/api/v1/auth/recovery/reset-account"
+        # KLIPY routes proxy to the third-party KLIPY API/CDN — scanning
+        # them would generate outbound third-party traffic from CI (the
+        # zero-non-localhost-traffic posture) and the CI stack runs with
+        # an empty KLIPY_API_KEY, so results would be dummy-key noise.
+        - "http://localhost:8080/api/v1/klipy.*"
+        # SSO is unconfigured in the CI stack (no client IDs); when
+        # configured these handlers exchange codes with Google/Apple
+        # upstreams — excluded to guarantee no third-party egress.
+        - "http://localhost:8080/api/v1/auth/sso.*"
+  parameters:
+    failOnError: true
+    failOnWarning: false
+    progressToStdout: true
+
+jobs:
+  # Inject the seeded test-user JWT on every request ZAP sends. This is
+  # the load-bearing auth mechanism: without it, scanning a JWT-gated API
+  # tests almost nothing (every route would 401 at the middleware).
+  - type: replacer
+    parameters:
+      deleteAllRules: true
+    rules:
+      - description: "Authorization: seeded CI test-user JWT (#1465)"
+        url: "http://localhost:8080/api/v1/.*"
+        matchType: "req_header"
+        matchString: "Authorization"
+        matchRegex: false
+        replacementString: "${ZAP_AUTH_HEADER_VALUE}"
+
+  # alertFilter — false-positive register. MUST run BEFORE the alert-generating
+  # jobs (openapi/requestor/activeScan/passiveScan-wait): ZAP applies alert
+  # filters at alert-RAISE time, NOT retroactively, so a filter registered after
+  # the scans is a silent no-op. (Founding incident: a post-scan placement shipped
+  # ~30 un-suppressed advisory alerts to Code Scanning until this reorder. The
+  # report job below also drops `falsepositive` confidence so the reclassified
+  # alerts never reach the SARIF.)
+  #
+  # Scoping (repo-admin decision, 2026-06-18; finalized after gitar review of #1635):
+  # five FP classes are filtered PER-RULE API-wide (/api/v1/.*) — a deliberate,
+  # documented departure from the per-instance default (see .zap/README.md
+  # "False-positive discipline") — and rule 6 stays per-instance:
+  #   * 40018 SQL Injection — API-wide /api/v1/.*. Two reasons it is NOT narrowed:
+  #     (1) Structural FP: every control-plane handler parses its {id}/{user_id}
+  #     path param via uuid.Parse (HTTP 400 before any query) and binds it only as a
+  #     $1/$2 placeholder; no fmt.Sprintf/concatenated SQL. SQLi is additionally
+  #     triple-gated statically — gosec + CodeQL go/sql-injection + Semgrep, the last
+  #     two merge-gated (ADR-0017) — so DAST 40018 is the weakest, redundant SQLi
+  #     layer here. (2) EMPIRICAL: a narrower allow-list does NOT work. ZAP's
+  #     alertFilter url-regex (full-match) fails to suppress DEEP multi-segment
+  #     path-injection alerts even when the regex matches in a standard engine —
+  #     proven on #1635: a family-scoped 40018 left the deep
+  #     servers/{id}/channel-groups/{group_id} FP un-suppressed (1 SARIF result),
+  #     while bare /api/v1/.* suppressed it (0 results). The original per-instance
+  #     servers/[^/]+/channel-groups likewise never matched that deep URL — which is
+  #     why it was a persistent open alert. So bare /api/v1/.* is the only reliably-
+  #     matching scope; periodic review (below) is the time-boxing instead.
+  #   * 90022 / 10104 / 10111 / 10024 — API-wide because they cannot represent a real
+  #     prod defect: 90022 is the CONCORD_ENV=test verbose-error artifact (prod
+  #     returns opaque errors); 10104/10111 are scanner self-observations (UA-header
+  #     fuzzing, auth-request identification); 10024 is the by-design recovery-link
+  #     token in the path. Advisory, never #1431-gated.
+  # Rule 6 (Path Traversal) stays PER-INSTANCE — path-traversal FP-ness is NOT
+  # structural, so only the verified /users/me/preferences instance (a Postgres-blob
+  # read with no filesystem path built from input) is filtered.
+  # PERIODIC REVIEW: re-verify all five API-wide classes each release cycle (README
+  # "False-positive discipline") — confirm the structural argument still holds and no
+  # new attack class hides behind the wildcard. Keep this block mirrored with full.yaml.
+  - type: alertFilter
+    alertFilters:
+      - { ruleId: 40018, newRisk: "False Positive", urlRegex: true, url: "^http://localhost:8080/api/v1/.*" }
+      - { ruleId: 90022, newRisk: "False Positive", urlRegex: true, url: "^http://localhost:8080/api/v1/.*" }
+      - { ruleId: 10104, newRisk: "False Positive", urlRegex: true, url: "^http://localhost:8080/api/v1/.*" }
+      - { ruleId: 10111, newRisk: "False Positive", urlRegex: true, url: "^http://localhost:8080/api/v1/.*" }
+      - { ruleId: 10024, newRisk: "False Positive", urlRegex: true, url: "^http://localhost:8080/api/v1/.*" }
+      - { ruleId: 6, newRisk: "False Positive", urlRegex: true, url: "^http://localhost:8080/api/v1/users/me/preferences$" }
+
+  # Import the OpenAPI spec — the import itself exercises every operation
+  # once (with schema-derived values), populating the sites tree and
+  # feeding the passive scanner real responses.
+  - type: openapi
+    parameters:
+      apiFile: "/zap/wrk/docs/api/openapi.yaml"
+      targetUrl: "http://localhost:8080/api/v1"
+      context: "concord-api"
+
+  # Authenticated-coverage proof (AC, #1465): a deterministic request to a
+  # JWT-gated route, sent through ZAP with the replacer active. The
+  # workflow asserts server-side (control-plane request log shows this
+  # path with status=200) that scanner traffic was authenticated. The
+  # workflow's own pre-scan curl uses a DIFFERENT route (/users/me), so a
+  # 200 on /servers is unambiguously ZAP-attributed.
+  - type: requestor
+    requests:
+      - url: "http://localhost:8080/api/v1/servers"
+        method: "GET"
+        responseCode: 200
+
+  # Light active scan, time-boxed (PR posture: fast signal, not depth —
+  # the full plan owns the deeper pass). 5 min keeps the whole plan
+  # inside the 15-minute JWT TTL with margin.
+  - type: activeScan
+    parameters:
+      context: "concord-api"
+      maxScanDurationInMins: 5
+      maxRuleDurationInMins: 1
+      threadPerHost: 4
+
+  # Flush the passive-scan queue before reporting.
+  - type: passiveScan-wait
+    parameters:
+      maxDuration: 5
+
+  - type: report
+    parameters:
+      template: "sarif-json"
+      reportDir: "/zap/wrk/reports"
+      reportFile: "zap-api"
+      reportTitle: "Concord Voice API DAST (PR baseline)"
+      reportDescription: "ZAP AF pr.yaml against the ephemeral CONCORD_ENV=test compose stack"
+    # Exclude ONLY falsepositive-confidence alerts from the SARIF (the alertFilter
+    # job above reclassifies the structural FP classes to False Positive). Without
+    # this, the default `confidences: all` re-includes them in the report. Sibling
+    # of `parameters:` per the ZAP AF report-job schema.
+    #
+    # `confidences` is an ALLOWLIST over {falsepositive, low, medium, high,
+    # confirmed} — list every level EXCEPT falsepositive. `confirmed` MUST be
+    # present: it is ZAP's strongest signal (an actively-confirmed finding), and
+    # omitting it would silently drop confirmed vulnerabilities from the SARIF —
+    # the opposite of the intent (gitar #1635).
+    confidences:
+      - confirmed
+      - high
+      - medium
+      - low

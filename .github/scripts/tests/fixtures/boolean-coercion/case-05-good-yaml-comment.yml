@@ -1,0 +1,16 @@
+# Synthetic fixture: the bug pattern referenced inside a YAML comment for
+# documentation purposes. The GHA expression evaluator never sees YAML
+# comments (yaml.safe_load strips them at parse time), so this is harmless
+# prose. Mirrors the real occurrence at .github/workflows/main-cd.yml:129
+# ("# Empirical: run 25694970623 had `inputs.force == 'true'` evaluate
+# FALSE"). Lint MUST NOT flag commentary that quotes the bug pattern.
+name: good-yaml-comment
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    # The bug pattern in prose: inputs.force_deploy == 'true' — this never executes.
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "always runs"

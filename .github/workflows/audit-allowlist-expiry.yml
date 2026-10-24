@@ -1,0 +1,38 @@
+name: Audit Allowlist Expiry
+
+# Surfaces stale npm-audit allowlist exceptions: entries in any
+# .audit-allowlist.json whose `review_by` date has passed. This is a SCHEDULED
+# ADVISORY check, NOT a PR gate — the npm-audit PR gate in build.yml never
+# blocks on the wall-clock (an expired exception there warns, never fails). This
+# job is the compensating control for that deliberate WARN-only design: it fails
+# (notifying the repo admin) when an accepted exception goes stale and should be
+# removed, re-bumped, or refreshed. See [internal]quality-gate-definition.md
+# "npm-audit gate".
+on:
+  schedule:
+    - cron: '0 8 * * 3' # Wednesdays 08:00 UTC — ahead of the weekly-deps window
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  expiry-scan:
+    name: npm-audit allowlist expiry
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+
+      - name: Scan allowlists for expired exceptions
+        run: |
+          node scripts/security/npm-audit-gate.mjs --expiry-scan \
+            --allowlist .audit-allowlist.json \
+            --allowlist client/admin/.audit-allowlist.json \
+            --allowlist services/media-plane/.audit-allowlist.json

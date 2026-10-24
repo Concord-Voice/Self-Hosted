@@ -3,7 +3,7 @@
 
 Reads JSON on stdin and refuses any host publication outside the self-host
 allowlist. EXPOSURE ONLY: it never checks that a public port IS published --
-RTP/TURN completeness belongs to [internal]tests/test-rtc-port-ingress-parity.sh.
+RTP/TURN completeness belongs to infrastructure/deploy/tests/test-rtc-port-ingress-parity.sh.
 
   --rendered   `docker compose ... config --format json`
   --live       `docker inspect <ids>` (a JSON array)

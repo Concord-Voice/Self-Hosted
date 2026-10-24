@@ -1,0 +1,152 @@
+# ESLint → SARIF → Code Scanning (ADR-0017 End-state A, #1425).
+# Runs the root workspace's pinned ESLint 10 flat config (eslint.config.mjs,
+# covering packages/*) with the EXACT same scope as `npm run lint`
+# (`eslint packages vitest.config.ts --ignore-pattern 'packages/*/tests/**'`)
+# so CI findings always match
+# local runs, then uploads SARIF under category `eslint`.
+# push:main upload included so Code Scanning computes new-vs-existing
+# alert deltas for PRs (full-tree scan, unlike Semgrep's baseline diff).
+# No path filter: the code_scanning gate (A8/#1431) expects per-tool
+# analyses on every PR; a filtered tool starves the rule on non-frontend PRs.
+name: ESLint SARIF
+
+# PR leg invoked by pr-ci.yml with `needs: ioc` (ADR-0018 IOC-first, #1476)
+# — the npm ci below must not race the supply-chain verdict. The push leg
+# stays in-file until main-ci.yml (#1477) takes it over.
+# push:main leg moved to main-ci.yml (#1477); concurrency lives at the
+# orchestrators (main-ci queues, never cancels a baseline upload).
+on:
+  workflow_call:
+    inputs:
+      external-verdict:
+        description: "Report actual SARIF upload provenance and delegate findings to the protected verifier"
+        type: boolean
+        default: false
+        required: false
+
+# Least-privilege default; the eslint job elevates to the writes it needs.
+permissions:
+  contents: read
+
+jobs:
+  eslint:
+    name: ESLint SARIF
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      # SARIF upload to Code Scanning
+      security-events: write
+      # required by upload-sarif in private repos to read the Actions run status
+      actions: read
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: 'npm'
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run ESLint (flat config → SARIF)
+        id: eslint
+        env:
+          EXTERNAL_VERDICT: ${{ inputs.external-verdict }}
+        run: |
+          set +e
+          npx eslint packages vitest.config.ts --config eslint.config.mjs --ignore-pattern 'packages/*/tests/**' \
+            --format @microsoft/eslint-formatter-sarif --output-file eslint-results.sarif
+          scan_exit=$?
+          set -e
+          if [ "$scan_exit" -eq 1 ] && [ "$EXTERNAL_VERDICT" = 'true' ]; then
+            jq -e '.runs | type == "array" and length > 0' eslint-results.sarif >/dev/null
+            findings=$(jq '[.runs[]?.results[]?] | length' eslint-results.sarif)
+            if [ "$findings" -gt 0 ]; then
+              echo 'finding_exit=true' >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+          exit "$scan_exit"
+
+      - name: Strip in-source-suppressed results from SARIF
+        # always() mirrors the upload step below: ESLint exits non-zero on
+        # ERROR-level findings, and the SARIF written just before that exit
+        # must still be FILTERED (not raw) before it reaches the upload step,
+        # so the filter has to run even when the ESLint step "failed".
+        if: always()
+        # @microsoft/eslint-formatter-sarif emits eslint-disabled findings as
+        # results carrying a `suppressions` array but WITHOUT the SARIF-standard
+        # `kind` field, so GitHub Code Scanning does not honor the in-source
+        # suppression and surfaces every disabled line as an OPEN alert (47 such
+        # false-positive alerts on 2026-06-13). Dropping suppressed results makes
+        # Code Scanning match local `npm run lint` (which respects inline disables
+        # — the stated goal in this file's header) and stops documented
+        # eslint-disable directives (per [internal]rules/observability.md and the
+        # #667 boundary-`any` discipline) from generating noise. Live
+        # (non-suppressed) warnings and errors are preserved untouched.
+        run: |
+          if [ -f eslint-results.sarif ]; then
+            before=$(jq '[.runs[]?.results[]?] | length' eslint-results.sarif)
+            # Drop results that carry an in-source suppression (eslint-disable).
+            # Match on PRESENCE of a suppression, NOT on suppressions[].state: the
+            # raw formatter output does not set `state` — GitHub only adds
+            # `state: "accepted"` when it re-exports a STORED analysis, so a
+            # state-based match is a silent no-op in CI (verified: main-ci run
+            # 27486564415 reported 181 -> 181 with a state==accepted match). The
+            # formatter emits suppressions only for in-source eslint-disable
+            # directives, all of which we intend to drop. `. // []` tolerates a
+            # run with no results array.
+            if jq '(.runs[]?.results) |= ((. // []) | map(select((.suppressions | length // 0) == 0)))' \
+                 eslint-results.sarif > eslint-results.filtered.sarif; then
+              after=$(jq '[.runs[]?.results[]?] | length' eslint-results.filtered.sarif)
+              mv eslint-results.filtered.sarif eslint-results.sarif
+              echo "SARIF results: ${before} -> ${after} (dropped in-source-suppressed)"
+            else
+              echo "::warning::SARIF suppression filter failed; uploading unfiltered SARIF"
+              rm -f eslint-results.filtered.sarif
+            fi
+          fi
+
+      - name: Upload SARIF to Code Scanning
+        # always() is load-bearing: ESLint exits non-zero when ERROR-level
+        # findings exist, and exactly then the SARIF carrying those findings
+        # must still reach Code Scanning so the failure is inspectable in
+        # the Security tab rather than only in the Actions log.
+        if: always()
+        # first-party, SHA-pinned for Alpha Code Scanning Gate (#1431).
+        # Keep the trailing version comment bare: dependabot only rewrites that
+        # exact shape, so an annotated one silently rots on every bump (#2309).
+        id: upload-sarif
+        uses: github/codeql-action/upload-sarif@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          sarif_file: eslint-results.sarif
+          category: eslint
+
+      - name: Write protected ESLint upload evidence
+        if: inputs.external-verdict
+        env:
+          SARIF_ID: ${{ steps.upload-sarif.outputs.sarif-id }}
+        run: |
+          set -euo pipefail
+          test -n "$SARIF_ID" || { echo "::error::ESLint did not return a SARIF upload ID"; exit 1; }
+          jq -n --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg category eslint --arg sarif_id "$SARIF_ID" \
+            '{run_id:$run_id,run_attempt:$run_attempt,category:$category,sarif_id:$sarif_id}' \
+            > "$RUNNER_TEMP/scan-evidence-eslint.json"
+
+      - name: Upload protected ESLint evidence
+        if: inputs.external-verdict
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scan-evidence-${{ github.run_id }}-${{ github.run_attempt }}-eslint
+          path: ${{ runner.temp }}/scan-evidence-eslint.json
+          if-no-files-found: error
+          retention-days: 1

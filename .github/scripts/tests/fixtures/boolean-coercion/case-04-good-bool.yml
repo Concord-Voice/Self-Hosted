@@ -1,0 +1,17 @@
+# Synthetic fixture: the no-quotes correct form. When `type: boolean` is
+# declared on the input, `inputs.X` is a real boolean and can be compared
+# against the unquoted literal `true`. Lint MUST NOT flag this.
+name: good-bool
+on:
+  workflow_dispatch:
+    inputs:
+      force_deploy:
+        type: boolean
+        default: false
+
+jobs:
+  deploy:
+    if: inputs.force_deploy == true
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo "deploys when force_deploy=true"

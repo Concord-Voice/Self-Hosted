@@ -1,0 +1,257 @@
+# Supply-chain IOC scanning — extracted from build.yml per ADR-0018 (#1472).
+#
+# INSTALL-ORDERING INVARIANT (IOC-first): this workflow is the FIRST node in
+# both orchestrators (pr-ci.yml on pull_request, main-ci.yml on push:main per
+# #1477). Every reusable invocation that installs or executes repo code MUST
+# carry `needs: ioc` at the orchestrator — that single structural edge replaces
+# the five per-job `needs: supply-chain-scan` edges that previously lived
+# inside build.yml (and closes the gap where extracted per-tool scanners ran
+# `npm ci` / Go module downloads racing the IOC verdict).
+#
+# Caller contract: workflow_call only. Callers grant read-only permissions;
+# the protected required workflow owns the PR warnings comment.
+# Trigger-agnostic: PR mode diffs install scripts vs the PR base; push mode
+# uses github.event.before via IOC_DIFF_BASE (see scan step env).
+# See [internal]supply-chain-defense.md and #715 for the scanner spec.
+name: IOC scanning
+
+on:
+  workflow_call:
+    inputs:
+      diff-base:
+        description: >-
+          Explicit commit to diff install scripts against. Only the nightly
+          passes this. A cron has no `github.event.before`, so without it the
+          scanner falls through to HEAD~1 (see resolve_diff_base) and inspects
+          only the LAST merge — with ~4 merges/day the nightly would miss most
+          of the window it exists to backstop. The nightly passes the last
+          SUCCESSFUL nightly's SHA so a failed night is covered by the next one
+          rather than silently skipped.
+        type: string
+        required: false
+        default: ''
+      trusted-source:
+        description: Run the protected workflow revision's scanner and policy against the PR checkout.
+        type: boolean
+        required: false
+        default: false
+
+# Jobs that check out and execute repository code use this read-only default.
+permissions:
+  contents: read
+
+jobs:
+  # ─── Supply-chain IOC scan (Shai-Hulud 2.0) ──────────────────────────
+  # See [internal]supply-chain-defense.md. Spec: #715.
+  supply-chain-scan:
+    name: Supply-chain IOC scan
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    # Protected scripts run from the PR checkout. Keep PR-root Python modules
+    # out of sys.path while retaining the user-site PyYAML installed below.
+    env:
+      PYTHONSAFEPATH: '1'
+      PYTHONPATH: ''
+    permissions:
+      contents: read
+      pull-requests: read  # dorny/paths-filter reads PR changed files
+    # Exposed so the selftest job below can path-gate itself on scanner-script
+    # changes without paying for its own checkout + filter job. This job already
+    # runs on EVERY invocation (it is the IOC gate), so computing the filter
+    # here is free.
+    outputs:
+      security-scripts: ${{ steps.filter.outputs.security-scripts }}
+    steps:
+      - name: Verify protected workflow identity
+        if: ${{ inputs.trusted-source }}
+        env:
+          WORKFLOW_REPOSITORY: ${{ fromJSON(toJSON(job)).workflow_repository }}
+          WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          if [[ "$WORKFLOW_REPOSITORY" != Concord-Voice/Self-Hosted ||
+                ! "$WORKFLOW_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::Protected IOC workflow identity is unavailable or invalid."
+            exit 1
+          fi
+
+      - name: Check out target
+        if: ${{ !inputs.trusted-source }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0  # needed for install-script diff against base
+
+      - name: Check out target for trusted scan
+        if: ${{ inputs.trusted-source }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          path: target
+
+      - name: Check out protected scanner and policy
+        if: ${{ inputs.trusted-source }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # actionlint v1.7.12 predates these official job identity properties.
+          repository: ${{ fromJSON(toJSON(job)).workflow_repository }}
+          ref: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          persist-credentials: false
+          path: scanner
+
+      # Path-gate signal for supply-chain-scan-selftest. On pull_request
+      # dorny/paths-filter lists changed files via the API (pull-requests: read);
+      # on push it diffs against the previous
+      # commit (needs the fetch-depth: 0 checkout above). SHA-pinned per
+      # supply-chain hardening (#847) — same pin used across the repo.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: |
+            security-scripts:
+              - 'scripts/security/**'
+
+      - name: Require Python safe-path support
+        run: python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 11) else 1)'
+
+      - name: Install PyYAML (runner linter dependency)
+        run: python3 -m pip install --user pyyaml
+
+      - name: Run supply-chain IOC scan
+        id: scan
+        # IOC_DIFF_BASE: on push events GITHUB_BASE_REF is empty; the scanner's
+        # install-script diff (subcheck 3) would fall back to HEAD~1 — correct
+        # under squash-merge but fragile for multi-commit pushes. github.event.before
+        # is the authoritative pre-push SHA. Event-gated to push because on
+        # pull_request SYNCHRONIZE events event.before is the previous HEAD
+        # SHA — never the right diff base (the script also ranks the PR base
+        # above this override as defense-in-depth; see resolve_diff_base).
+        #
+        # A caller-supplied `diff-base` wins (nightly only). The push
+        # expression is unchanged, so that path is byte-identical.
+        env:
+          IOC_DIFF_BASE: ${{ inputs.diff-base != '' && inputs.diff-base || (github.event_name == 'push' && github.event.before || '') }}
+          TRUSTED_SOURCE: ${{ inputs.trusted-source }}
+          IOC_LIST_PATH: ${{ inputs.trusted-source && format('{0}/scanner/scripts/security/iocs/shai-hulud-2.0.txt', github.workspace) || '' }}
+          IOC_ALLOWLIST_PATH: ${{ inputs.trusted-source && format('{0}/scanner/scripts/security/iocs/false-positive-allowlist.txt', github.workspace) || '' }}
+        working-directory: ${{ inputs.trusted-source && 'target' || '.' }}
+        run: |
+          SCAN_OUTPUT="$RUNNER_TEMP/ioc-scan-output.txt"
+          set +e
+          if [[ "$TRUSTED_SOURCE" == true ]]; then
+            "$GITHUB_WORKSPACE/scanner/scripts/security/scan-supply-chain-iocs.sh" > "$SCAN_OUTPUT" 2>&1
+          else
+            scripts/security/scan-supply-chain-iocs.sh > "$SCAN_OUTPUT" 2>&1
+          fi
+          EXIT=$?
+          set -e
+          echo "exit_code=$EXIT" >> "$GITHUB_OUTPUT"
+          # Lockfile text is untrusted; do not interpret it as runner commands.
+          STOP_MARKER=$(python3 -c 'import uuid; print(uuid.uuid4())')
+          echo "::stop-commands::$STOP_MARKER"
+          cat "$SCAN_OUTPUT"
+          echo "::$STOP_MARKER::"
+
+      - name: Collect install-script warnings
+        # always() preserves warnings from a scanner finding for the protected publisher.
+        if: always() && steps.scan.outcome == 'success'
+        working-directory: ${{ inputs.trusted-source && 'target' || '.' }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          warnings = [line for line in Path(os.environ['RUNNER_TEMP'], 'ioc-scan-output.txt').read_text(errors='replace').splitlines()
+                      if line.startswith('[WARN] New install script:')]
+          def excerpt(line):
+              raw = line.encode()
+              if len(raw) <= 1000:
+                  return line
+              return raw[:950].decode(errors='ignore') + ' … [truncated; see IOC scan log]'
+
+          payload = {'count': len(warnings), 'warnings': [excerpt(line) for line in warnings[:50]]}
+          Path(os.environ['RUNNER_TEMP'], 'ioc-install-script-warnings.json').write_text(json.dumps(payload))
+          PY
+
+      - name: Check self-hosted runner allowlist
+        id: runner
+        # Exit 2 means "expression runner, cannot statically verify". TWO
+        # workflows now legitimately expand a matrix into runs-on:
+        # build-desktop.yml (`${{ matrix.os }}`) and codeql.yml
+        # (`${{ matrix.runner }}`, per-leg tiers). Keep this list current — a
+        # rationale naming one cause reads as a single known exception when it
+        # is a growing set, and the linter cannot descend into
+        # strategy.matrix.include[] to verify either of them (ADR-0016 AI#3).
+        # Mirror the pre-commit wrapper: surface the warning but don't fail the job.
+        # Exit 1 (non-allowlisted self-hosted) and 10 (parser failure) still block.
+        env:
+          TRUSTED_SOURCE: ${{ inputs.trusted-source }}
+          RUNNER_ALLOWLIST_PATH: ${{ inputs.trusted-source && format('{0}/scanner/scripts/security/self-hosted-runner-allowlist.txt', github.workspace) || '' }}
+        working-directory: ${{ inputs.trusted-source && 'target' || '.' }}
+        run: |
+          STOP_MARKER=$(python3 -c 'import uuid; print(uuid.uuid4())')
+          echo "::stop-commands::$STOP_MARKER"
+          set +e
+          if [[ "$TRUSTED_SOURCE" == true ]]; then
+            "$GITHUB_WORKSPACE/scanner/scripts/security/check-self-hosted-runners.sh"
+          else
+            scripts/security/check-self-hosted-runners.sh
+          fi
+          rc=$?
+          set -e
+          echo "::$STOP_MARKER::"
+          if [[ $rc -eq 2 ]]; then
+            echo "::warning::Expression-based runs-on present — cannot statically verify. Review workflow labels manually."
+            rc=0
+          fi
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+
+      - name: Upload install-script warnings
+        # always() carries warnings to the protected publisher before a blocking verdict fails this job.
+        if: always() && inputs.trusted-source && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ioc-install-script-warnings
+          path: ${{ runner.temp }}/ioc-install-script-warnings.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Fail on blocking findings
+        if: steps.scan.outputs.exit_code != '0' || steps.runner.outputs.exit_code != '0'
+        env:
+          SCAN_EXIT_CODE: ${{ steps.scan.outputs.exit_code }}
+          RUNNER_EXIT_CODE: ${{ steps.runner.outputs.exit_code }}
+        run: |
+          echo "::error::IOC blocked: scanner=${SCAN_EXIT_CODE:-missing}, runner=${RUNNER_EXIT_CODE:-missing}"
+          exit 1
+
+  # ─── Supply-chain scanner self-test ─────────────────────────────────────
+  # Runs the fixture-driven test matrix to verify the scanner scripts still
+  # behave as specified. Fails the build on any regression. See #715 spec §8.
+  #
+  # Path-gated (2026-07 CI deep-dive): the self-test only exercises the scanner
+  # scripts under scripts/security/**, so it is skipped entirely unless this
+  # push/PR touches that tree. It reads the security-scripts filter computed by
+  # the supply-chain-scan gate above (which runs unconditionally), so gating
+  # costs no extra job. The IOC scan GATE itself is unaffected and still runs on
+  # every invocation. Not a required status check (branch-protection.json has no
+  # required_status_checks rule), so a skipped self-test cannot deadlock a merge.
+  supply-chain-scan-selftest:
+    name: Supply-chain scanner self-test
+    needs: [supply-chain-scan]
+    if: needs.supply-chain-scan.outputs.security-scripts == 'true'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install PyYAML (required by runner linter)
+        run: python3 -m pip install --user pyyaml
+
+      - name: Run self-test suite
+        run: bash scripts/security/tests/run-tests.sh

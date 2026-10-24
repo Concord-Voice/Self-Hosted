@@ -1,0 +1,271 @@
+# concord-dev unit/smoke suite + buildtools age guard — extracted from
+# build.yml per ADR-0018 (#1475).
+#
+# ORCHESTRATED, NOT STANDALONE (deviation from the issue's original
+# "standalone on: pull_request" wording, governed by ADR-0018's IOC-first
+# invariant): concord-dev-smoke-native runs `concord-dev.sh up`, which
+# performs a media-plane npm install and control-plane Go module downloads
+# — repo dependency installs that MUST NOT race the supply-chain IOC
+# verdict. pr-ci.yml invokes this workflow with `needs: ioc`. The unit
+# tests and compose smoke execute repo scripts (same invariant, lower
+# stakes); the dev-checks job (concord-dev unit tests + buildtools age check
+# + the [internal] counts drift advisory) rides along (informational guards).
+#
+# Path-gating (2026-06-17 CI deep-dive, theme T3; 2026-07 detect-job
+# consolidation): the two real-Docker smoke jobs (concord-dev-smoke,
+# concord-dev-smoke-native) gate on the caller-provided `dev-stack-changed`
+# input. The `dev-stack` filter (service sources, both compose files + the dev
+# overlay, concord-dev.sh + its test scripts, infrastructure/docker,
+# .env.example, and this workflow itself) is now computed ONCE in pr-ci.yml's
+# unified detect-changes job and passed in, instead of a duplicate local
+# `changes` job here. On docs/client/.claude-only PRs the two smokes path-skip,
+# saving ~100 vCPU-min with zero catch-coverage loss — the dev-stack
+# surface is independently covered by pr-ci's static-guards staging dry runs and
+# build.yml's production-compose-docker tripwires. No required_status_checks
+# rule names these jobs, so a path-skipped (green) job cannot deadlock a
+# merge. The cheap dev-checks job runs UNCONDITIONALLY — concord-dev.sh unit
+# tests (~3s, no Docker), the buildtools base-image age check, and the
+# [internal] counts drift advisory, which was its own job until the 2026-08 CI
+# cost audit folded it in (1.00 min average across 2,163 runs, all of it
+# per-job billing floor). Together they gate any dev-lifecycle script
+# regression / base-image staleness / [internal] count drift regardless of diff.
+name: Unit & smoke
+
+on:
+  workflow_call:
+    inputs:
+      # Precomputed dev-stack paths-filter result from the caller's unified
+      # detect-changes job (2026-07 CI deep-dive). unit-smoke.yml is PR-only
+      # (invoked exclusively by pr-ci.yml), so the former local `changes` detect
+      # job is removed and the two real-Docker smokes gate directly on this
+      # value — one fewer detect job per PR. Required so a caller that forgets to
+      # wire it fails loudly at validation rather than silently skipping the
+      # smokes (no-silent-coverage-gap discipline).
+      dev-stack-changed:
+        description: "dorny/paths-filter 'dev-stack' result ('true'/'false') from the caller."
+        type: string
+        required: true
+      dev-checks-relevant:
+        description: "Whether shared relevance selected the developer guard family."
+        type: boolean
+        required: false
+        default: true
+
+# Least-privilege (review finding on #1487 + Gitar on #1589): scoped to the
+# minimum these jobs need. The former `changes` gate job (which required
+# pull-requests: read for dorny/paths-filter's pulls.listFiles call) is gone —
+# dev-stack detection now happens once in the caller's detect-changes job — so
+# the remaining smoke/unit/age jobs use GITHUB_TOKEN only for checkout.
+permissions:
+  contents: read
+
+jobs:
+
+  # ─── Dev-lifecycle checks (unit tests + buildtools age) — always run ────
+  # Two cheap, always-run guards merged into one job (2026-07 CI deep-dive) to
+  # reclaim a per-job billing-floor: concord-dev.sh unit tests (#1113; ~3s, no
+  # Docker — PATH stubs + real fork/kill on sleep subprocesses) and the
+  # buildtools base-image age check (#1166). Neither depends on the diff — they
+  # gate any dev-lifecycle script regression / base-image staleness regardless
+  # of which paths changed, so they carry no path filter.
+  dev-checks:
+    name: dev-checks
+    if: ${{ inputs.dev-checks-relevant }}
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: concord-dev.sh unit tests
+        run: |
+          for t in scripts/tests/test-concord-dev-*.sh; do
+            echo "=== $t ==="
+            bash "$t"
+          done
+
+      # Control-plane CI shard partition self-test (#2066). The sharded
+      # `go test` matrix in build.yml relies on ci-shard-packages.sh producing a
+      # COMPLETE, DISJOINT, deterministic partition of `go list ./...`; a
+      # regression there (e.g. dropping the LC_ALL=C sort or flipping the tie
+      # comparator) silently drops or double-runs packages, surfacing only as
+      # skewed coverage in production runs with no other signal. This hermetic
+      # test stubs `go` on PATH (no Go toolchain needed), so it belongs in this
+      # always-run, Docker-free job alongside the other script self-tests.
+      - name: Control-plane CI shard self-test
+        run: bash services/control-plane/scripts/test-ci-shard-packages.sh
+
+      # Buildtools base image age guard (#1166) — informational nudge: emits
+      # ::warning:: when the buildtools base pinned in services/media-plane/
+      # Dockerfile is >100 days old (quarterly 90-day cadence + 10-day grace).
+      # No-op until #1169 lands the buildtools FROM line; emits ::notice:: then.
+      - name: Check buildtools base image age
+        run: |
+          set -euo pipefail
+          # Parse the tag's trailing "<DATE>" from a FROM line in services/media-plane/Dockerfile (post-#1169).
+          # Single-FROM-by-design: services/media-plane/Dockerfile is expected to have exactly
+          # one buildtools FROM line (the builder stage). `head -1` enforces that — if a future
+          # change ever introduces a second buildtools FROM, this job must be revisited.
+          # Anchored to `^FROM ` so commented-out tag references (e.g. in rollback notes)
+          # don't trigger a stale-date warning.
+          if ! grep -qE '^FROM .*ghcr\.io/concord-voice/node-buildtools' \
+                  services/media-plane/Dockerfile 2>/dev/null; then
+            echo "::notice::No buildtools base image pinned yet (#1169 not merged); age-guard inactive."
+            exit 0
+          fi
+          # Deliberately agnostic to the tag's LEADING component: the publish
+          # workflow derives that from the buildtools parent FROM line, so it moves
+          # on a Node-major bump. This guard once hardcoded `24-alpine-`, which
+          # would have made the first post-bump refresh exit 1 on every PR.
+          #
+          # What IS enforced is the rest of the `<node-tag>-YYYY-MM-DD` contract:
+          # a NONEMPTY prefix, a single `-` separator, then the date at the end.
+          # `[^@[:space:]]*[^@[:space:]-]` requires the prefix to exist and to end
+          # in a non-hyphen, so a bare `:2026-09-12` and a `:-2026-09-12` are both
+          # refused rather than silently yielding a date — the guard used to accept
+          # both, which made it weaker than the contract it prints on failure.
+          # The trailing group absorbs `@sha256:...` and/or ` AS builder`.
+          TAG_DATE=$(sed -nE 's|^FROM .*node-buildtools:[^@[:space:]]*[^@[:space:]-]-([0-9]{4}-[0-9]{2}-[0-9]{2})([@[:space:]].*)?$|\1|p' \
+            services/media-plane/Dockerfile 2>/dev/null | head -1)
+          if [ -z "$TAG_DATE" ]; then
+            # Buildtools FROM line exists but tag-date couldn't be parsed.
+            # The canonical tag format is `<node-tag>-YYYY-MM-DD` per the publish workflow.
+            # If a future refresh uses a different format (e.g., `26-alpine-Q2-2026`), the
+            # age-guard would silently no-op — which is operationally invisible drift.
+            # Fail-loud forces the operator to reconcile the tag format or the parser.
+            echo "::error file=services/media-plane/Dockerfile::Buildtools FROM line found but tag-date could not be parsed. Expected canonical format ghcr.io/concord-voice/node-buildtools:<node-tag>-YYYY-MM-DD@sha256:..."
+            exit 1
+          fi
+          # The difference is its own $(( )) rather than a parenthesised group: Semgrep's protected
+          # scan cannot parse a "( ... ) /" inside $(( )), and any scanner error fails the required
+          # check ([internal]workflow-failure-patterns.md P18). The value is the same.
+          AGE_DAYS=$(( $(( $(date -u +%s) - $(date -u -d "$TAG_DATE" +%s) )) / 86400 ))
+          echo "Buildtools base image pinned at $TAG_DATE (age: $AGE_DAYS days)"
+          if [ "$AGE_DAYS" -gt 100 ]; then
+            echo "::warning file=services/media-plane/Dockerfile::Buildtools base image is $AGE_DAYS days old. Refresh the buildtools base image (quarterly cadence: 90 days)."
+          fi
+
+  # ─── concord-dev.sh smoke (real docker, infra + compose only) (#1113) ──
+  # Smoke: bootstrap .env, validate compose config, pull infra images, bring
+  # up the 5 default-profile containers via the dev overlay, verify status,
+  # tear down. Catches dev-stack wiring breakage at PR-time.
+  #
+  # SCOPE NOTE: This smoke does NOT exercise the native Go (control-plane) +
+  # Node (media-plane) startup paths. Per [internal]rules/media-plane.md
+  # "Docker Build Context Invariant", mediasoup's postinstall has known
+  # finicky interactions with the node-domexception override that fail in
+  # fresh-checkout CI before the override symlink is wired. That class of
+  # bug is orthogonal to "is the dev-stack wiring intact" — which is what
+  # this job catches. Follow-up issue tracks expanding the smoke once the
+  # mediasoup-postinstall flow is reliable in CI.
+  concord-dev-smoke:
+    name: concord-dev.sh smoke (compose + infra)
+    if: format('{0}', inputs.dev-stack-changed) == 'true'
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Bootstrap .env from .env.example
+        run: cp .env.example .env
+      - name: Validate compose config (base + dev overlay)
+        run: ./scripts/concord-dev.sh validate-config
+      - name: Pull remote Docker images
+        # PostgreSQL is a repository build target; --ignore-buildable prevents
+        # Compose from trying to pull the local-only concordvoice-postgres tag.
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml pull --quiet --ignore-buildable postgres redis nats coturn minio
+      - name: Bring up infrastructure only (no natives)
+        run: |
+          docker compose -f docker-compose.yml -f docker-compose.dev.yml up -d
+          # Use a sentinel-name check: wait up to 30s for 4 healthchecks green.
+          # (postgres/redis/nats/coturn; minio has no healthcheck per
+          # docker-compose.yml:128.)
+          # shellcheck disable=SC2034
+          # (_i is an intentionally unused loop counter)
+          for _i in $(seq 1 30); do
+            HEALTHY=$(docker compose -f docker-compose.yml -f docker-compose.dev.yml ps --format json | grep -c '"Health":"healthy"' || true)
+            [ "$HEALTHY" -ge 4 ] && exit 0
+            sleep 1
+          done
+          echo "Infrastructure healthcheck timeout" >&2
+          exit 1
+        timeout-minutes: 3
+      - name: Verify status (compose ps + healthchecks)
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml ps
+      - name: Tear down
+        # Required to run even on earlier-step failure so abandoned
+        # infrastructure containers don't leak across runs. Standard
+        # success() chaining would skip cleanup when any step before
+        # this fails, which would leave the runner with stranded
+        # postgres/redis/nats/coturn/minio containers. This is a
+        # local-scope cleanup, NOT a privileged release-job pattern —
+        # the broader #920 §5.3 always() discipline applies primarily
+        # to release jobs gated on detect-release.result == 'success'.
+        if: always()
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml down
+
+
+  # ─── concord-dev.sh smoke (full native startup) ────────────────────────
+  # End-to-end real-Docker + native cycle that exercises what `concord-dev.sh
+  # up --skip-client` actually does on a developer's first run: 5 infra
+  # containers, control-plane `go build` + run, media-plane `npm install` +
+  # `npx tsx watch`, then /health on both natives. This is the surface that
+  # was scoped down during #1113 development because the original ubuntu-
+  # latest's pre-installed Node (22.x) hit the mediasoup-postinstall +
+  # node-domexception override race documented in [internal]rules/media-plane.md
+  # "Docker Build Context Invariant" section.
+  #
+  # Two fixes combine to make this reliable:
+  #   1. setup-node@v6 pins Node 24 (matching the project's documented runtime)
+  #   2. concord-dev.sh _up_media_plane uses two-pass `npm install
+  #      --ignore-scripts` + `npm rebuild` to defeat the parallelism race
+  #
+  # Parallel to (not replacement for) the compose-only smoke above so a
+  # native-startup regression doesn't mask the cheaper compose+infra signal.
+  concord-dev-smoke-native:
+    name: concord-dev.sh smoke (full native startup)
+    if: format('{0}', inputs.dev-stack-changed) == 'true'
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: services/control-plane/go.mod
+          cache-dependency-path: services/control-plane/go.sum
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: services/media-plane/package-lock.json
+      - name: Bootstrap .env from .env.example
+        run: cp .env.example .env
+      - name: Pull remote Docker images
+        # PostgreSQL is a repository build target; --ignore-buildable prevents
+        # Compose from trying to pull the local-only concordvoice-postgres tag.
+        run: docker compose -f docker-compose.yml -f docker-compose.dev.yml pull --quiet --ignore-buildable postgres redis nats coturn minio
+      - name: concord-dev.sh up --skip-client (full native cycle)
+        # Brings up: 5 infra containers + control-plane (go build + run)
+        # + media-plane (npm install + tsx watch). --skip-client avoids
+        # Electron in headless CI. Internal /health waits gate the step.
+        run: ./scripts/concord-dev.sh up --skip-client
+        timeout-minutes: 10
+      - name: Verify status (containers + native PIDs + healthchecks)
+        run: ./scripts/concord-dev.sh status
+      - name: Verify control-plane /health
+        run: curl -sf http://localhost:8080/health
+      - name: Verify media-plane /health
+        run: curl -sf http://localhost:3000/health
+      - name: Tail control-plane logs (debug aid on later failures)
+        run: ./scripts/concord-dev.sh logs control-plane --no-follow -n 20
+      - name: Tail media-plane logs (debug aid)
+        run: ./scripts/concord-dev.sh logs media-plane --no-follow -n 20
+      - name: Tear down
+        # See concord-dev-smoke job above for the always() justification
+        # (local-scope cleanup, not a privileged release-job pattern).
+        if: always()
+        run: ./scripts/concord-dev.sh down

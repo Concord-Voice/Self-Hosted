@@ -1,0 +1,987 @@
+name: PR CI
+
+# PR-time CI orchestrator (#919 §5.2). Calls build.yml via workflow_call to
+# run the PR-time suite. The live org baseline ruleset (17153062) requires
+# Gitar and SonarCloud Code Analysis; the live Alpha ruleset (17541948)
+# requires per-tool code-scanning analyses. The trusted required build
+# workflow is sourced from protected main by an Alpha-only organization
+# ruleset (24957423), which also requires `Required PR build result` to be
+# current once [internal]alpha-ruleset-hardening.md has been applied.
+# The Go lint, static-guards, and workflow-lint jobs remain advisory; the West
+# deployment-access lab is required when deployment inputs change. It also
+# runs the SPA-deploy contract verifier
+# (`verify-spa-env.sh --mode=pr`), and exercises the deploy scripts in
+# --dry-run mode against the staging target (Invariant 2: PR runners cannot
+# resolve production-scoped secrets, so dry-runs against staging are the only
+# safe rehearsal of script logic before merge).
+#
+# Spec: [internal]specs/2026-05-09-919-spa-deploy-trust-chain-design.md §5.2
+
+on:
+  workflow_call:
+    inputs:
+      trusted-source:
+        description: "Load policy from the immutable protected workflow source"
+        type: boolean
+        required: false
+        default: false
+      enforcement-only:
+        description: "Run only the scanner/build DAG owned by the protected verdict"
+        type: boolean
+        required: false
+        default: false
+    outputs:
+      report-selection:
+        description: "Protected scan selection JSON"
+        value: ${{ jobs.report.outputs.selection }}
+      report-jobs:
+        description: "Actual scanner and build job results"
+        value: ${{ jobs.report.outputs.jobs }}
+      coverage-uploads:
+        description: "Actual build coverage upload flags"
+        value: ${{ jobs.report.outputs.coverage-uploads }}
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+    branches: [main]
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+  checks: read
+  packages: read
+  security-events: write
+  # NO `environment: production` on any job — Invariant 2: PR runners cannot
+  # resolve production-scoped secrets, so dry-run deploys hit staging only.
+
+concurrency:
+  # Title/body-only edits must not cancel a real run on the same head. A base
+  # retarget (or an edited event with unknown changes) still gets ordinary CI.
+  group: ${{ inputs.enforcement-only && format('pr-ci-protected-{0}', github.event.pull_request.number) || (github.event.action == 'edited' && github.event.changes.base == null && (github.event.changes.title != null || github.event.changes.body != null) && format('pr-ci-metadata-{0}', github.event.pull_request.number) || format('pr-ci-ordinary-{0}', github.event.pull_request.number)) }}
+  cancel-in-progress: ${{ !inputs.enforcement-only }}
+
+jobs:
+  # ─── Supply-chain IOC gate (IOC-first invariant, ADR-0018 / #1472) ───
+  # MUST be the first node: every subsequent reusable invocation that
+  # installs or executes repo code carries `needs: ioc`, so no dependency
+  # install can begin before the IOC verdict. This single structural edge
+  # replaces the five per-job `needs: supply-chain-scan` edges that
+  # previously lived inside build.yml.
+  ioc:
+    if: ${{ inputs.enforcement-only || !(github.event.action == 'edited' && github.event.changes.base == null && (github.event.changes.title != null || github.event.changes.body != null)) }}
+    name: ioc
+    uses: ./.github/workflows/ioc-scanning.yml
+    with:
+      trusted-source: ${{ inputs.trusted-source == true }}
+    permissions:
+      contents: read
+      pull-requests: read  # dorny/paths-filter lists changed files
+
+  # ─── PR-time suite (build.yml via workflow_call) ───────────────────────
+  # Spec §6 row 6 — workflow_call invocation. build.yml's workflow_call
+  # declaration keeps coverage outputs available to the protected caller.
+  build:
+    name: build
+    needs: [ioc, detect-changes]
+    if: ${{ !cancelled() && needs.ioc.result == 'success' && (inputs.enforcement-only || needs.detect-changes.outputs.protected-owner != 'true') }}
+    permissions:
+      contents: read
+      pull-requests: read
+    uses: ./.github/workflows/build.yml
+    # Pass the unified detect-changes union so build.yml skips its duplicate
+    # `changes` detection steps (2026-07 CI deep-dive: three detects -> one).
+    # detect-changes is a ~10s API-only job (no repo-code install/exec) that
+    # finishes well before ioc, so this adds no critical-path latency and does
+    # not weaken the IOC-first invariant (build.yml's dependency-installing jobs
+    # still carry `needs: ioc` via this node). On push:main main-ci.yml passes
+    # nothing, so build.yml computes the filter locally as before.
+    with:
+      desktop-changed: ${{ needs.detect-changes.outputs.desktop }}
+      control-plane-changed: ${{ needs.detect-changes.outputs.control-plane }}
+      media-plane-changed: ${{ needs.detect-changes.outputs.media-plane }}
+      media-plane-tests-changed: ${{ needs.detect-changes.outputs.media-plane-tests }}
+      admin-changed: ${{ needs.detect-changes.outputs.admin }}
+      production-docker-changed: ${{ needs.detect-changes.outputs.production-docker }}
+      force-coverage: ${{ inputs.trusted-source == true && needs.detect-changes.result == 'success' && needs.detect-changes.outputs.scan-known == 'true' && (fromJSON(needs.detect-changes.outputs.scan-selection).selected.sonar_force_all || (fromJSON(needs.detect-changes.outputs.scan-selection).coverage_required.desktop && fromJSON(needs.detect-changes.outputs.scan-selection).coverage_required.control_plane && fromJSON(needs.detect-changes.outputs.scan-selection).coverage_required.media_plane && fromJSON(needs.detect-changes.outputs.scan-selection).coverage_required.admin)) }}
+
+  # ─── concord-dev unit/smoke suite + buildtools age (#1475) ───────────
+  # Orchestrated (not standalone): the native smoke installs repo
+  # dependencies via concord-dev.sh, so the IOC-first invariant applies.
+  unit-smoke:
+    name: unit-smoke
+    needs: [ioc, detect-changes]
+    if: ${{ !inputs.enforcement-only && !cancelled() && needs.ioc.result == 'success' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.dev_checks || needs.detect-changes.outputs.dev-stack == 'true') }}
+    permissions:
+      # unit-smoke.yml no longer runs its own dorny/paths-filter (dev-stack now
+      # comes from the shared detect-changes job below), so pull-requests: read
+      # is no longer required — the callee declares only contents: read and its
+      # smoke/unit/age jobs use GITHUB_TOKEN for checkout only. A job-level
+      # permissions block REPLACES the inherited top-level set, and this narrower
+      # grant is still a superset of the callee's, so no #1589 startup_failure.
+      contents: read
+    uses: ./.github/workflows/unit-smoke.yml
+    with:
+      dev-stack-changed: ${{ needs.detect-changes.outputs.dev-stack }}
+      dev-checks-relevant: ${{ needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.dev_checks }}
+
+  # ─── Per-tool scanners (workflow_call conversions, ADR-0018 / #1476) ─
+  # Every scanner that installs or executes repo code carries `needs: ioc`.
+  # OSV retains a standalone pull_request scan for legacy or unverified
+  # enforcement. Selected OSV runs from the protected required workflow after
+  # this workflow's IOC and relevance classification (see osv-scanner.yml).
+  # Caller-job permissions are exact supersets of each called workflow's
+  # declared needs (GitHub requires superset; the called side stays the
+  # effective ceiling). Scanner calls follow the shared relevance selection;
+  # unknown selection retains the full scan.
+  semgrep:
+    name: semgrep
+    needs: [ioc, detect-changes]
+    if: >-
+      !cancelled() && needs.ioc.result == 'success' &&
+      (inputs.enforcement-only || needs.detect-changes.outputs.protected-owner != 'true') &&
+      (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).selected.semgrep_custom || fromJSON(needs.detect-changes.outputs.scan-selection).selected.semgrep_community || fromJSON(needs.detect-changes.outputs.scan-selection).selected.semgrep_canary)
+    permissions:
+      contents: read
+      pull-requests: write  # findings summary comment
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/semgrep.yml
+    with:
+      external-verdict: ${{ inputs.enforcement-only == true }}
+      run-custom: ${{ needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).selected.semgrep_custom }}
+      run-community: ${{ needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).selected.semgrep_community }}
+      run-canary: ${{ needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).selected.semgrep_canary }}
+
+  eslint:
+    name: eslint
+    needs: [ioc, detect-changes]
+    if: >-
+      !cancelled() && needs.ioc.result == 'success' &&
+      (inputs.enforcement-only || needs.detect-changes.outputs.protected-owner != 'true') &&
+      (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).selected.eslint)
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/eslint-sarif.yml
+    with:
+      external-verdict: ${{ inputs.enforcement-only == true }}
+
+  govulncheck:
+    name: govulncheck
+    needs: [ioc, detect-changes]
+    if: >-
+      !cancelled() && needs.ioc.result == 'success' &&
+      (inputs.enforcement-only || needs.detect-changes.outputs.protected-owner != 'true') &&
+      (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).selected.govulncheck)
+    permissions:
+      contents: read
+      security-events: write
+      actions: read
+    uses: ./.github/workflows/govulncheck.yml
+    with:
+      external-verdict: ${{ inputs.enforcement-only == true }}
+
+  secret-scanning:
+    name: secret-scanning
+    needs: [ioc]
+    if: ${{ !inputs.enforcement-only }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/secret-scanning.yml
+
+  # ─── Go lint (golangci-lint) — ADVISORY ──────────────────────────────
+  # No workflow ran golangci-lint between #373 (2026-03-24, which deleted the
+  # golangci-lint-action step) and this job, so the pre-commit hook was the
+  # only gate and a commit made without hooks reached main unlinted (#3368's
+  # staticcheck SA1012, later suppressed by #3402).
+  #
+  # It stays separate from build.yml so a build failure does not hide this
+  # advisory lint verdict.
+  #
+  # The version is READ from .pre-commit-config.yaml so the local and CI gates
+  # cannot drift. `go install` rather than a prebuilt binary or
+  # golangci-lint-action: it is how pre-commit's `language: golang` hook builds
+  # the same rev, it adds no third-party action, and the module proxy + sumdb
+  # make a version pin supply-chain-equivalent to a SHA pin (govulncheck.yml).
+  # Whole module, never --new-from-*: `golangci-lint run ./...` is 0 issues on
+  # main, so any finding is one this PR introduced or a rev bump surfaced.
+  golangci-lint:
+    name: golangci-lint
+    needs: [ioc, detect-changes]
+    if: ${{ !inputs.enforcement-only && needs.detect-changes.outputs.go-lint == 'true' }}
+    # Codesmith measured a CPU-bound whole-module lint: 4 vCPU improves p50
+    # feedback from 1m53s to 1m04s for about $2/month additional runner spend.
+    runs-on: blacksmith-4vcpu-ubuntu-2404
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: services/control-plane/go.mod
+          cache-dependency-path: services/control-plane/go.sum
+
+      - name: Install golangci-lint (rev from .pre-commit-config.yaml)
+        run: |
+          VERSION=$(grep -A1 -F 'repo: https://github.com/golangci/golangci-lint' .pre-commit-config.yaml | sed -n 's/^ *rev: *//p')
+          # Fail closed: an empty, reshaped, or multi-match rev must not reach
+          # `go install`. [[ =~ ]] anchors to the WHOLE string; a per-line
+          # grep would pass two matched revs joined by a newline.
+          if ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::could not read the golangci-lint rev from .pre-commit-config.yaml (got '${VERSION}')"
+            exit 1
+          fi
+          echo "golangci-lint ${VERSION}"
+          go install "github.com/golangci/golangci-lint/v2/cmd/golangci-lint@${VERSION}"
+
+      - name: Lint (whole module)
+        working-directory: services/control-plane
+        run: golangci-lint run ./...
+
+  # Trivy CVE scan of the built service images (container-image-scan.yml).
+  # `needs: ioc` is load-bearing for the same reason as native-audiocap: the
+  # media-plane build runs `npm ci` (ADR-0018). Path-gated on the same
+  # production-docker filter as the cache-cold compose build. Not a ruleset-
+  # required context itself, and a skip never strands a PR, but a FAILURE
+  # fails pr-ci and so blocks "Required PR build result", which reads
+  # needs.pr-ci.result: a fixable HIGH/CRITICAL finding, or a scan that saw no
+  # OS packages, blocks any PR on this path.
+  container-image-scan:
+    name: container-image-scan
+    needs: [ioc, detect-changes]
+    if: ${{ !inputs.enforcement-only && needs.detect-changes.outputs.production-docker == 'true' }}
+    permissions:
+      contents: read
+    uses: ./.github/workflows/container-image-scan.yml
+
+  # ─── Consolidated static guards (#822 / #872 / #998 / #1246 / #1430 / #1559) ─
+  # Three former single-purpose guard jobs — verify-openapi-coverage,
+  # verify-spa-env, verify-deploy-scripts — merged into one job (2026-07 CI
+  # deep-dive) to reclaim two per-job billing floors: each was a sub-20s job
+  # paying a 2 vCPU x 1-min minimum ~1,000x/month. Most steps are hermetic
+  # static checks; deploy regression loops also include Docker-backed fixtures
+  # that install tools from public Ubuntu packages and run checkout code. None
+  # is a required status check: the org baseline ruleset (17153062) requires
+  # Gitar and SonarCloud Code Analysis. The Alpha-only required build workflow
+  # and its `Required PR build result` check belong to a separate organization
+  # ruleset (24957423).
+  # So consolidating job names is merge-safe. A single fetch-depth: 0 checkout
+  # serves the steps that need full history.
+  static-guards:
+    name: static-guards
+    needs: [ioc, detect-changes]
+    # [internal]workflow-failure-patterns.md P3/P8.5: !cancelled()
+    # removes default needs-success chaining so detector failure is conservative;
+    # explicit IOC success still precedes every repository-code execution.
+    if: ${{ !inputs.enforcement-only && !cancelled() && needs.ioc.result == 'success' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.static_guards || needs.detect-changes.outputs.spa == 'true' || needs.detect-changes.outputs.services == 'true') }}
+    # ADR-0016: relevant or uncertain self-host work includes CPU-bound Docker
+    # fixtures; confirmed unrelated lint/verify work stays on the 2-vCPU tier.
+    runs-on: ${{ (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.selfhost != 'false') && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}
+    # The complete deployment suite builds tooling images and runs bounded
+    # readiness tests; #3774 set this budget so its fixtures can finish. The
+    # managed firewall suite, which used most of it, now runs in its own job.
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          # Full history: verify-spa-env's attribution diff and the
+          # compose-manifest coverage lint's `git show f9cadd93^` regression
+          # replay (#1246, spec §6.4 D1) both need it; the shallow default
+          # cannot resolve the PR base / old blobs.
+          fetch-depth: 0
+          # Retain small historical inputs after checkout removes credentials,
+          # while avoiding the transfer of large historical blobs.
+          filter: blob:limit=1m
+
+      # Both the license-workflow guard and provision-secrets drift-lock parse
+      # YAML. Provision their pinned dependency before either guard runs.
+      - name: Ensure PyYAML for static guards
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.go_toolchain || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.secrets_contract || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.dispatch_trust) }}
+        run: >-
+          python3 -m pip install --user --quiet --disable-pip-version-check --require-hashes --only-binary=:all: -r .github/requirements-pyyaml.txt
+
+      - name: Go toolchain alignment guard
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.go_toolchain) }}
+        run: python3 scripts/check-go-toolchain.py --check-license-workflow
+
+      - name: Test Go toolchain guard (planted mismatches)
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.go_toolchain) }}
+        run: python3 scripts/test-check-go-toolchain.py
+
+      # ── OpenAPI route-coverage drift gate (#822) ──────────────────────
+      # Static parse of router.go vs docs/api/openapi.yaml — fails on drift in
+      # either direction. The ZAP API DAST (#1465) imports the spec as its scan
+      # surface, so a stale spec silently narrows DAST coverage.
+      - name: Run check-openapi-coverage.sh
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.openapi) }}
+        run: bash scripts/api/check-openapi-coverage.sh
+
+      # ── Deploy-test wiring (#998 G1 — L1 of #921 trust-chain) ──────────
+      # Hermetic deploy-test scripts + repo-structure guards. No run block
+      # below uses github.event.* or other untrusted input — only hardcoded
+      # paths/flags, and in the deploy-tests loop a local bash var bound to a
+      # glob of checked-out paths (no workflow-injection surface). Runs on the
+      # MERGE ref (no path filter), the only layer that catches concurrent-merge
+      # collisions (the #1549-after-#1536 ADR-number race).
+      # Visible in CI, not a required status check; the pre-commit hook remains
+      # the local fast path.
+      - name: Feature wiring guard (#2157)
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.feature_wiring) }}
+        run: bash scripts/check-feature-wiring.sh
+
+      - name: Manifest-coverage lint (Tier A, #1246)
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.deployment) }}
+        run: bash scripts/check-compose-manifest-coverage.sh --scope=production-active
+
+      - name: Test compose-manifest-coverage lint (#1246 self-test)
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.deployment) }}
+        run: bash scripts/test-check-compose-manifest-coverage.sh
+
+      - name: Verify Admin Portal production wiring
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.deployment) }}
+        run: bash scripts/test-admin-ui-production-wiring.sh
+
+      # macOS bash heredoc-hang guard wiring (#3426). Also a pre-commit hook, and
+      # CI-run because a --no-verify commit,
+      # an uninstalled hook or a fork PR could otherwise land a config that drops
+      # the guard's fail_fast or first position, and every Mac on an affected
+      # bash would hang again with nothing red. Reuses this job's PyYAML install.
+      - name: Test the bash heredoc-hang guard and its wiring (#3426)
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.secrets_contract) }}
+        run: bash scripts/test-check-bash-heredoc-hang.sh
+
+      # Go test Redis isolation (#2680). Also a pre-commit hook, but CI-runs it
+      # for the same reason as the drift-lock above: nothing in .github/ invokes
+      # `pre-commit`, so a hook alone is invisible to a --no-verify commit, an
+      # uninstalled hook, or a fork PR.
+      #
+      # Reach: `static-guards` is not a required status check. The org baseline
+      # ruleset (17153062) requires Gitar and SonarCloud Code Analysis, and the
+      # Alpha-only 24957423 adds Required PR build result.
+      # A red run here is visible, not merge-blocking.
+      #
+      # Whole-tree, not changed-files: pre-commit's `files:` filter cannot see a
+      # delete-or-rename-only commit, the same blind spot #2682 landed a stale
+      # mirror through.
+      - name: Go test Redis isolation guard (#2680)
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.go_test_contracts) }}
+        run: |
+          set -euo pipefail
+          mapfile -t FILES < <(git ls-files '*_test.go' 'services/control-plane/internal/testhelpers/*.go')
+          printf '  scanning %d files\n' "${#FILES[@]}"
+          # An empty list already exits 2 (the script rejects a zero-length
+          # argument list), but a PARTIALLY wrong pathspec would still exit 0
+          # having quietly scanned less. Pin the defect site itself, so a
+          # narrowed pattern is a red step rather than a green one.
+          #
+          # Bash array scan, NOT `printf ... | grep -q`. Under pipefail grep
+          # exits on its match and closes the read end, so printf's remaining
+          # writes take SIGPIPE and the pipeline's 141 reports a guard that HELD
+          # as violated -- a FALSE red on an unrelated PR. Observed on run
+          # 34168515012 at 588 files ("printf: write error: Broken pipe"), green
+          # on the commit immediately before it. scripts/check-mirror-pairing.sh
+          # already avoids the same defect by construction; see its awk note for
+          # the 2026-08-13 measurements. A bash loop has no pipe to signal.
+          found=0
+          for f in "${FILES[@]}"; do
+            if [ "$f" = 'services/control-plane/internal/testhelpers/testredis.go' ]; then
+              found=1; break
+            fi
+          done
+          [ "$found" -eq 1 ] \
+            || { echo "::error::#2680 file list no longer covers the original defect site"; exit 1; }
+          bash scripts/check-no-unscoped-redis-flush.sh "${FILES[@]}"
+
+      - name: Test Redis-isolation guard (#2680 self-test)
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.go_test_contracts) }}
+        run: bash scripts/test-check-no-unscoped-redis-flush.sh
+
+      # Whole-tree, NOT changed-files. The allowlist shrinks as each sweep PR
+      # lands, and the guard errors on a stale entry -- that ratchet only fires
+      # if every file is scanned every run. Pre-commit alone is bypassed by
+      # --no-verify, an uninstalled hook, or a fork PR.
+      # Repo-wide, not services/control-plane-rooted. Every Go test file lives
+      # under control-plane TODAY, so a narrower root is accurate now and stops
+      # being accurate the moment a second Go module lands -- and it would fail
+      # GREEN. -type f keeps a directory or device named *_test.go out of the
+      # scan.
+      - name: JSON-assertion guard (#2811)
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.go_test_contracts) }}
+        run: |
+          find . -type f -name '*_test.go' \
+            -not -path './node_modules/*' -not -path './*/node_modules/*' \
+            -not -path './.git/*' -print0 \
+            | xargs -0 bash scripts/check-no-single-return-json-assertion.sh
+
+      - name: Test JSON-assertion guard (#2811 self-test)
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.go_test_contracts) }}
+        run: bash scripts/test-check-no-single-return-json-assertion.sh
+
+      - name: Run all test-*.sh under infrastructure/deploy/tests/
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.deployment || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.selfhost) }}
+        # P8.5: only the self-host subset reuses conservative detection;
+        # unrelated deployment tests run. Share three worker slots with selected
+        # lifecycle suites so the installer does not wait for the deployment tail.
+        env:
+          RUN_SELFHOST_TESTS: ${{ needs.detect-changes.result != 'success' || needs.detect-changes.outputs.selfhost != 'false' }}
+        run: |
+          set -euo pipefail
+          tests=()
+          for t in infrastructure/deploy/tests/test-*.sh; do
+            case "$t" in
+              infrastructure/deploy/tests/test-control-plane-secrets.sh|infrastructure/deploy/tests/test-security-event-logging.sh)
+                # Both read infrastructure/deploy/provision-production.sh, the
+                # managed-host provisioner, which stays in Hosted.
+                continue
+                ;;
+              infrastructure/deploy/tests/test-selfhost-acceptance.sh)
+                # Reads selfhost-acceptance.yml and selfhost-release-guards.yml
+                # (ported in S5) plus Hosted's provision-production.sh and
+                # public-mirror scripts. Re-enable with the S5 workflows.
+                continue
+                ;;
+              infrastructure/deploy/tests/test-selfhost-*.sh)
+                if [ "${RUN_SELFHOST_TESTS:-true}" = false ]; then
+                  continue
+                fi
+                ;;
+            esac
+            tests+=("$t")
+          done
+          # Start the longest measured consumer early instead of leaving a tail.
+          # Reorder only selected tests, preserving the self-host filter above.
+          for test_index in "${!tests[@]}"; do
+            if [ "${tests[$test_index]}" = "infrastructure/deploy/tests/test-selfhost-storage.sh" ]; then
+              storage_test=${tests[$test_index]}
+              unset "tests[$test_index]"
+              tests=("$storage_test" "${tests[@]}")
+              break
+            fi
+          done
+          if [ "${RUN_SELFHOST_TESTS:-true}" != false ]; then
+            tests=(
+              scripts/tests/test-install-selfhost.sh
+              "${tests[@]}"
+              scripts/tests/test-concord-selfhost.sh
+              scripts/tests/test-provision-cert.sh
+            )
+          fi
+          if [ "${#tests[@]}" -eq 0 ]; then
+            exit 0
+          fi
+          # Three complete scripts at a time; retain every selected consumer.
+          # Normalize 255/signals so xargs does not abandon queued scripts.
+          worker=$(cat <<'BASH'
+            printf "Running %q\n" "$1"
+            # Keep literal lifecycle calls for the structural IOC guard. Its
+            # Docker-backed provisioner fixture retains the job's IOC prerequisite.
+            case "$1" in
+              scripts/tests/test-concord-selfhost.sh)
+                if bash scripts/tests/test-concord-selfhost.sh; then exit 0; fi ;;
+              scripts/tests/test-install-selfhost.sh)
+                if bash scripts/tests/test-install-selfhost.sh; then exit 0; fi ;;
+              scripts/tests/test-provision-cert.sh)
+                if bash scripts/tests/test-provision-cert.sh; then exit 0; fi ;;
+              infrastructure/deploy/tests/test-*.sh)
+                if bash -- "$1"; then exit 0; fi ;;
+              *)
+                printf "Unexpected test script %q\n" "$1" >&2
+                exit 1 ;;
+            esac
+            # Normalize 255/signals so xargs finishes the selected inventory.
+            printf "Failed %q\n" "$1" >&2
+            # Keep the failing consumer visible in check annotations even when
+            # the hosted log download is unavailable. Escape command data only.
+            annotation_path=${1//%/%25}
+            annotation_path=${annotation_path//$'\r'/%0D}
+            annotation_path=${annotation_path//$'\n'/%0A}
+            printf '::error title=Static guard failed::%s\n' "$annotation_path"
+            exit 1
+          BASH
+          )
+          if ! printf '%s\0' "${tests[@]}" | xargs -0 -r -P 3 -n 1 bash -c "$worker" --; then
+            exit 1
+          fi
+
+      # SonarCloud narrowed-profile drift guard (ADR-0017 / #1430).
+      # Hermetic self-test — no token, no network, fork-safe — BLOCKING.
+      - name: Test SonarCloud narrowed-profile drift guard (self-test)
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.sonar_profile) }}
+        run: bash scripts/sonar/test-check-narrowed-profile.sh
+
+      # ── CHANGELOG.md discipline gate (#1857) ───────────────────────────
+      # Folded in from the former standalone `verify-changelog` job (2026-08 CI
+      # cost audit). That job averaged 1.00 min across 1,925 runs and had an
+      # in-job paths fast-exit, so most of those runs paid a full billing floor
+      # to decide they had nothing to do.
+      #
+      # The path gate is a git diff, NOT dorny/paths-filter as before: the
+      # action lists PR files over the API, which is why the old job needed
+      # `pull-requests: read`. Folding that grant into static-guards would
+      # widen the permissions of a job running ~25 other guards, for no gain —
+      # this job already checks out with fetch-depth: 0, which is also exactly
+      # what verify-changelog.sh's merge-base anchoring needs.
+      - name: Verify CHANGELOG discipline (#1857)
+        # `!cancelled()` restores the independence this check had as its own
+        # job. Steps inherit an implicit success(), so without it an earlier
+        # static-guards failure SKIPS this one — the developer fixes guard A,
+        # pushes, and only then learns the changelog is also wrong. Two CI
+        # cycles to surface two independent facts, which is exactly the cost
+        # the consolidation was meant to save. Nothing was ever bypassable
+        # (a failed earlier step still reds the job and blocks merge); what
+        # was lost is completeness of signal in one run. Not `always()`: a
+        # cancelled run should stay cancelled.
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.changelog) }}
+        env:
+          # Untrusted inputs pass via env, never inline ${{ }} in run: (#836).
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        # No step-level path guard. It used to run the script only when
+        # package.json / CHANGELOG.md / the script itself changed, which is
+        # exactly the set Rule 4 (#2996) must NOT be limited to: Rule 4 fires on
+        # a PR that touches client/desktop/src or a service and touches the
+        # changelog not at all, so a guard keyed on changelog-adjacent paths
+        # skips precisely the PRs it exists to catch. The script fast-exits
+        # internally instead — Rule 4 filters paths itself, and Rule 1 returns
+        # on "no desktop version change" — so unconditional execution costs a
+        # handful of git invocations, not a job.
+        run: bash .github/scripts/verify-changelog.sh
+
+  # ─── Unified change detection (single paths-filter for the whole PR) ──
+  # ONE dorny/paths-filter job computes every filter the PR pipeline needs
+  # (2026-07 CI deep-dive). The first two outputs gate pr-ci's own dry-run
+  # jobs (as before); the remaining six are passed as inputs into build.yml
+  # and unit-smoke.yml so those reusable workflows reuse the outputs instead of
+  # executing duplicate checkout + paths-filter steps — one filter execution
+  # per PR. On PRs
+  # dorny/paths-filter reads the changed-file list via the API, so the result is
+  # identical regardless of which workflow computes it; a shallow checkout
+  # suffices. (main-ci.yml push:main keeps computing filters inside build.yml —
+  # it passes no inputs — because push diffs need git history.)
+  detect-changes:
+    name: detect-changes
+    if: ${{ inputs.enforcement-only || !(github.event.action == 'edited' && github.event.changes.base == null && (github.event.changes.title != null || github.event.changes.body != null)) }}
+    # ADR-0013 §2 / ADR-0005 §3: ADR-0016 measured sub-minute parity;
+    # 2-vCPU Blacksmith is the half-cost tier for detect/verify work.
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      # pr-ci-local gates (dry-run-deploy-*)
+      services: ${{ steps.filter.outputs.services }}
+      spa: ${{ steps.filter.outputs.spa }}
+      # Path-gates the self-host fixtures within static-guards.
+      selfhost: ${{ steps.filter.outputs.selfhost }}
+      # passed into build.yml (mirror its local `changes` filter exactly)
+      desktop: ${{ steps.filter.outputs.desktop }}
+      control-plane: ${{ steps.filter.outputs.control_plane }}
+      media-plane: ${{ steps.filter.outputs.media_plane }}
+      media-plane-tests: ${{ steps.filter.outputs.media_plane_tests }}
+      admin: ${{ steps.filter.outputs.admin }}
+      production-docker: ${{ steps.filter.outputs.production_docker }}
+      # passed into unit-smoke.yml (mirror its former `changes` filter exactly)
+      dev-stack: ${{ steps.filter.outputs.dev_stack }}
+      # gates the golangci-lint job
+      go-lint: ${{ steps.filter.outputs.go_lint }}
+      scan-known: ${{ steps.selection.outputs.known }}
+      scan-selection: ${{ steps.selection.outputs.selection }}
+      codeql-matrix: ${{ steps.selection.outputs.codeql_matrix }}
+      protected-owner: ${{ steps.protected-owner.outputs.confirmed }}
+    steps:
+      - name: Verify protected workflow identity
+        if: ${{ inputs.trusted-source }}
+        env:
+          WORKFLOW_REPOSITORY: ${{ fromJSON(toJSON(job)).workflow_repository }}
+          WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+        run: |
+          if [[ "$WORKFLOW_REPOSITORY" != Concord-Voice/Self-Hosted ||
+                ! "$WORKFLOW_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
+            echo "::error::Protected PR CI workflow identity is unavailable or invalid."
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Read fresh PR metadata before policy execution. The PR's changed paths
+      # remain data for dorny; executable policy comes only from protected main.
+      - name: Read validated PR metadata
+        id: metadata
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+          if ! gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/scan-pr.json"; then
+            echo 'valid=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if ! jq -e '
+            .base.ref == "main" and
+            (.head.sha | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.base.sha | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.merge_commit_sha | type == "string" and test("^[0-9a-f]{40}$")) and
+            (.changed_files | type == "number" and floor == . and . >= 0 and . <= 3000)
+          ' "$RUNNER_TEMP/scan-pr.json" >/dev/null; then
+            echo 'valid=false' >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          jq -r '"valid=true", "head_sha=" + .head.sha, "base_sha=" + .base.sha,
+            "merge_sha=" + .merge_commit_sha, "changed_files=" + (.changed_files|tostring),
+            "hotfix=" + ([.labels[].name] | any(. == "risk: hotfix") | tostring)' \
+            "$RUNNER_TEMP/scan-pr.json" >> "$GITHUB_OUTPUT"
+
+      # This checkout is the only executable source for the detector helper.
+      # Before the helper lands on main it is absent; selection stays unknown
+      # while this job's established component outputs and scanners still run.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        if: steps.metadata.outputs.valid == 'true'
+        id: policy
+        continue-on-error: true
+        with:
+          ref: ${{ inputs.trusted-source && fromJSON(toJSON(job)).workflow_sha || steps.metadata.outputs.base_sha }}
+          path: policy
+          persist-credentials: false
+
+      - name: Record protected policy revision
+        id: policy-revision
+        if: steps.metadata.outputs.valid == 'true'
+        continue-on-error: true
+        env:
+          EXPECTED_BASE_SHA: ${{ inputs.trusted-source && fromJSON(toJSON(job)).workflow_sha || steps.metadata.outputs.base_sha }}
+        run: |
+          set -euo pipefail
+          actual_sha="$(git -C policy rev-parse HEAD 2>/dev/null || true)"
+          if [[ "$actual_sha" == "$EXPECTED_BASE_SHA" ]]; then
+            echo "sha=$actual_sha" >> "$GITHUB_OUTPUT"
+          fi
+
+      # SHA-pinned per supply-chain hardening (#847). Matches build.yml's pin.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        with:
+          filters: ${{ inputs.trusted-source && 'policy/.github/ci/scan-relevance.yml' || '.github/ci/scan-relevance.yml' }}
+          predicate-quantifier: some-with-excludes
+      - name: Compose protected scan selection
+        id: selection
+        env:
+          FILTERS: >-
+            {"all_changed":"${{ steps.filter.outputs.all_changed }}","codeql_actions":"${{ steps.filter.outputs.codeql_actions }}","codeql_go":"${{ steps.filter.outputs.codeql_go }}","codeql_js":"${{ steps.filter.outputs.codeql_js }}","eslint":"${{ steps.filter.outputs.eslint }}","govulncheck":"${{ steps.filter.outputs.govulncheck }}","osv":"${{ steps.filter.outputs.osv }}","semgrep_custom":"${{ steps.filter.outputs.semgrep_custom }}","semgrep_community":"${{ steps.filter.outputs.semgrep_community }}","semgrep_canary":"${{ steps.filter.outputs.semgrep_canary }}","sonar":"${{ steps.filter.outputs.sonar }}","sonar_force_all":"${{ steps.filter.outputs.sonar_force_all }}","sonar_desktop":"${{ steps.filter.outputs.sonar_desktop }}","sonar_control_plane":"${{ steps.filter.outputs.sonar_control_plane }}","sonar_media_plane":"${{ steps.filter.outputs.sonar_media_plane }}","sonar_admin":"${{ steps.filter.outputs.sonar_admin }}","selfhost":"${{ steps.filter.outputs.selfhost }}","services":"${{ steps.filter.outputs.services }}","spa":"${{ steps.filter.outputs.spa }}","desktop":"${{ steps.filter.outputs.desktop }}","control_plane":"${{ steps.filter.outputs.control_plane }}","media_plane":"${{ steps.filter.outputs.media_plane }}","media_plane_tests":"${{ steps.filter.outputs.media_plane_tests }}","admin":"${{ steps.filter.outputs.admin }}","production_docker":"${{ steps.filter.outputs.production_docker }}","native":"${{ steps.filter.outputs.native }}","go_lint":"${{ steps.filter.outputs.go_lint }}","dev_stack":"${{ steps.filter.outputs.dev_stack }}","go_toolchain":"${{ steps.filter.outputs.go_toolchain }}","openapi":"${{ steps.filter.outputs.openapi }}","spa_env":"${{ steps.filter.outputs.spa_env }}","deployment":"${{ steps.filter.outputs.deployment }}","selfhost_guard":"${{ steps.filter.outputs.selfhost_guard }}","feature_wiring":"${{ steps.filter.outputs.feature_wiring }}","adr_numbers":"${{ steps.filter.outputs.adr_numbers }}","secrets_contract":"${{ steps.filter.outputs.secrets_contract }}","dispatch_trust":"${{ steps.filter.outputs.dispatch_trust }}","go_test_contracts":"${{ steps.filter.outputs.go_test_contracts }}","review_contracts":"${{ steps.filter.outputs.review_contracts }}","tooling_mirrors":"${{ steps.filter.outputs.tooling_mirrors }}","graphify_contracts":"${{ steps.filter.outputs.graphify_contracts }}","native_ioc":"${{ steps.filter.outputs.native_ioc }}","sonar_profile":"${{ steps.filter.outputs.sonar_profile }}","changelog":"${{ steps.filter.outputs.changelog }}","dev_checks":"${{ steps.filter.outputs.dev_checks }}","workflow_lint":"${{ steps.filter.outputs.workflow_lint }}","worker_apple":"${{ steps.filter.outputs.worker_apple }}","worker_invite":"${{ steps.filter.outputs.worker_invite }}","license_desktop":"${{ steps.filter.outputs.license_desktop }}","license_media":"${{ steps.filter.outputs.license_media }}","license_admin":"${{ steps.filter.outputs.license_admin }}","license_go":"${{ steps.filter.outputs.license_go }}"}
+          METADATA: >-
+            {"event_name":"pull_request","hotfix":${{ steps.metadata.outputs.hotfix == 'true' }},"head_sha":"${{ steps.metadata.outputs.head_sha }}","base_sha":"${{ steps.metadata.outputs.base_sha }}","merge_sha":"${{ steps.metadata.outputs.merge_sha }}","changed_files":${{ steps.metadata.outputs.changed_files || '-1' }}}
+          SCAN_MODE: ${{ inputs.trusted-source && (vars.CI_SCAN_RELEVANCE_MODE == '' || vars.CI_SCAN_RELEVANCE_MODE == 'legacy') && 'required-full' || vars.CI_SCAN_RELEVANCE_MODE }}
+          POLICY_SHA: ${{ steps.policy-revision.outputs.sha }}
+          METADATA_VALID: ${{ steps.metadata.outputs.valid }}
+        run: |
+          set -euo pipefail
+          {
+            # Keep an invalid/missing protected selection visible as unknown;
+            # the final API verdict fails closed instead of inferring false.
+            echo 'known=false'
+            echo 'selection={"version":1,"known":false,"advisory":{"static_guards":true},"workers":["apple-sso-bridge","invite-landing"],"npm_workspaces":[".","services/media-plane","client/admin"],"license_go":true}'
+            echo 'codeql_matrix={"include":[]}'
+          } >> "$GITHUB_OUTPUT"
+          if [[ "$METADATA_VALID" != 'true' || -z "$POLICY_SHA" || ! -f policy/.github/scripts/ci-scan-relevance.mjs ]]; then
+            exit 0
+          fi
+          node - "$RUNNER_TEMP/scan-selection-input.json" <<'NODE'
+          const fs = require('node:fs');
+          const filters = JSON.parse(process.env.FILTERS);
+          const metadata = JSON.parse(process.env.METADATA);
+          fs.writeFileSync(process.argv[2], JSON.stringify({
+            filters, metadata, mode: process.env.SCAN_MODE,
+            policy_sha: process.env.POLICY_SHA,
+          }));
+          NODE
+          node "$GITHUB_WORKSPACE/policy/.github/scripts/ci-scan-relevance.mjs" "$RUNNER_TEMP/scan-selection-input.json"
+
+      # The ordinary PR event keeps full scanning unless the effective main
+      # rules prove that the protected workflow owns the same scanner DAG.
+      - name: Confirm protected scanner owner
+        id: protected-owner
+        if: ${{ !inputs.enforcement-only }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MODE: ${{ vars.CI_SCAN_RELEVANCE_MODE }}
+          SELECTION: ${{ steps.selection.outputs.selection }}
+        run: |
+          set -euo pipefail
+          echo 'confirmed=false' >> "$GITHUB_OUTPUT"
+          [[ "$MODE" == required-full || "$MODE" == required-relevant ]] || exit 0
+          jq -e '.known == true and (.hotfix | type == "boolean") and
+            (.mode == "required-full" or .mode == "required-relevant")' \
+            <<< "$SELECTION" >/dev/null 2>&1 || exit 0
+          pages="$RUNNER_TEMP/pr-ci-effective-rules.jsonl"
+          : > "$pages"
+          for page in {1..10}; do
+            if ! gh api "repos/${GITHUB_REPOSITORY}/rules/branches/main?per_page=100&page=${page}" > "$RUNNER_TEMP/pr-ci-rules-page.json"; then
+              exit 0
+            fi
+            jq -e 'type == "array" and length <= 100' "$RUNNER_TEMP/pr-ci-rules-page.json" >/dev/null || exit 0
+            cat "$RUNNER_TEMP/pr-ci-rules-page.json" >> "$pages"
+            printf '\n' >> "$pages"
+            count=$(jq 'length' "$RUNNER_TEMP/pr-ci-rules-page.json")
+            [[ "$count" -lt 100 ]] && break
+            [[ "$page" -lt 10 ]] || exit 0
+          done
+          # Either spelling of main: the short one is live before the hardening
+          # runbook is applied and again after its `--rollback`, the fully
+          # qualified one in between (a tag named main cannot satisfy it).
+          # Neither may be pinned to a commit. GitHub describes `sha` as "the
+          # commit SHA of the workflow file to use" and does not say how it
+          # combines with `ref`, so a pinned entry is not proof that main's copy
+          # of the workflow is the one that runs. The effective-rules response
+          # omits `sha` when none is set, and `.sha == null` covers that and an
+          # explicit null; an empty or any other value is not a confirmation.
+          jq -e -s 'any(.[][]; .type == "workflows" and
+            any(.parameters.workflows[]?;
+              .repository_id == 1359565266 and
+              .path == ".github/workflows/required-pr-build.yml" and
+              (.ref == "main" or .ref == "refs/heads/main") and
+              .sha == null))' \
+            "$pages" >/dev/null || exit 0
+          echo 'confirmed=true' >> "$GITHUB_OUTPUT"
+
+  # ─── Workflow-file structural guards (#920 PR-A trust-model lock-ins) ─
+  # Lint checks codifying invariants surfaced by the 2026-05-09 cascade
+  # (#893/#900/#904/#906/#910). The shared workflow_lint family selects this
+  # runner from the union of its policy inputs and the former inline fast-path
+  # inputs; each selected check still validates its full governed surface.
+  workflow-lint:
+    name: workflow-lint
+    needs: [ioc, detect-changes]
+    if: ${{ !inputs.enforcement-only && !cancelled() && needs.ioc.result == 'success' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.workflow_lint) }}
+    permissions:
+      contents: read
+    # ADR-0013 §2 / ADR-0005 §3: ADR-0016 measured sub-minute parity;
+    # 2-vCPU Blacksmith is the half-cost tier for detect/verify work.
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install python3 + PyYAML (lint dependencies)
+        # §5.1 and §5.2 lints rely on python3 + PyYAML. ubuntu-latest ships
+        # python3 by default; pyyaml is the only extra install. Uses
+        # --user to align with build.yml's pattern and avoid pip needing
+        # write access to system site-packages (PEP-668 on recent
+        # ubuntu-latest images marks system Python as externally-managed
+        # and rejects unprefixed installs).
+        run: |
+          python3 -m pip install --user --quiet --require-hashes --only-binary=:all: -r .github/requirements-pyyaml.txt
+
+      - name: TruffleHog runtime is digest-pinned
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import yaml
+
+          text = Path('.github/workflows/secret-scanning.yml').read_text()
+          action = re.search(r'^\s*uses:\s*trufflesecurity/trufflehog@[0-9a-f]{40}\s+# v(\d+\.\d+\.\d+)\s*$', text, re.MULTILINE)
+          assert action, 'TruffleHog action must use a full SHA with a bare version comment'
+          workflow = yaml.safe_load(text)
+          step = next(step for step in workflow['jobs']['trufflehog-ci']['steps'] if str(step.get('uses', '')).startswith('trufflesecurity/trufflehog@'))
+          runtime = str(step.get('with', {}).get('version', 'latest'))
+          assert re.fullmatch(rf'{re.escape(action.group(1))}@sha256:[0-9a-f]{{64}}', runtime), f'TruffleHog runtime must match action v{action.group(1)} and be digest-pinned; got {runtime}'
+          PY
+
+      - name: SonarCloud path-skip build sentinel
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import yaml
+
+          changes = yaml.safe_load(Path('.github/workflows/build.yml').read_text())['jobs']['changes']
+          uses_steps = [step for step in changes['steps'] if 'uses' in step]
+          assert 'if' not in changes and len(uses_steps) == 2
+          assert all("inputs.desktop-changed == ''" in str(step.get('if', '')) for step in uses_steps)
+
+          local = yaml.safe_load(next(step for step in uses_steps if step.get('id') == 'filter')['with']['filters'])
+          caller_steps = yaml.safe_load(Path('.github/workflows/pr-ci.yml').read_text())['jobs']['detect-changes']['steps']
+          caller_filter = next(step for step in caller_steps if step.get('id') == 'filter')
+          assert '.github/ci/scan-relevance.yml' in caller_filter['with']['filters']
+          caller = yaml.safe_load(Path('.github/ci/scan-relevance.yml').read_text())
+          for component in ('desktop', 'admin'):
+              assert caller[component] == local[component], f'{component} filter drift between pr-ci.yml and build.yml'
+          PY
+
+      - name: §5.2 — multi-secret AND-check completeness
+        run: bash .github/scripts/lint-multisecret-andcheck.sh .github/workflows/
+
+      - name: §5.3 — always() requires justification comment
+        run: bash .github/scripts/lint-always-needs-comment.sh .github/workflows/
+
+      - name: G3 — workflow_dispatch boolean comparison enforcement (#1000)
+        run: bash .github/scripts/lint-boolean-coercion.sh .github/workflows/
+
+      # Closes the split that occurred three times during #3139: a suite wired
+      # into one of the two lists below and not the other runs nowhere, and
+      # reports nothing when it doesn't.
+      - name: Test suites are both invoked and reachable by their filter (#3139)
+        run: bash .github/scripts/lint-test-suite-wiring.sh
+
+      # Step name deliberately avoids the literal `$` + `{{ }}` token because
+      # GHA evaluates expression syntax in `name:` fields too, and an empty
+      # token there is the exact bug G4 catches — this would self-trigger
+      # the pattern. See the spec note in lint-empty-expression.sh.
+      - name: G4 — empty expression tokens inside run-block bash comments (#1001)
+        run: bash .github/scripts/lint-empty-expression.sh .github/workflows/
+
+      - name: G5 — gh CLI requires --repo when no checkout (#1002)
+        run: bash .github/scripts/lint-gh-repo-flag.sh .github/workflows/
+
+      # P14 — workflow-injection guard (#836). actionlint installed via
+      # curl-pinned release binary with SHA256 verification. Spec:
+      # [internal]specs/2026-05-20-836-workflow-injection-guard-design.md §4.3 + §6.4.
+      # Shellcheck integration is ENABLED — the 27 pre-existing shellcheck
+      # info/style findings have been cleaned up (8 in #1088 + the bundled
+      # provision-secrets.yml fix in this commit).
+      - name: P14 — install actionlint (#836, pinned binary)
+        env:
+          ACTIONLINT_VERSION: v1.7.12
+          # Public release checksum (not a secret). Source:
+          # https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_checksums.txt
+          ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8  # pragma: allowlist secret
+        run: |
+          set -euo pipefail
+          TARBALL="actionlint_${ACTIONLINT_VERSION#v}_linux_amd64.tar.gz"
+          curl -sLo "/tmp/${TARBALL}" \
+            "https://github.com/rhysd/actionlint/releases/download/${ACTIONLINT_VERSION}/${TARBALL}"
+          echo "${ACTIONLINT_SHA256}  /tmp/${TARBALL}" | sha256sum -c -
+          tar -xzf "/tmp/${TARBALL}" -C /tmp actionlint
+          sudo install -m 0755 /tmp/actionlint /usr/local/bin/actionlint
+          actionlint --version
+
+      - name: P14 — actionlint workflow-injection scan (#836)
+        run: actionlint -config-file=.actionlint.yaml
+
+      - name: Self-test — lint scripts pass their own test suites
+        # Defense-in-depth: re-run each lint's hermetic test suite in CI
+        # so a regression to the lint scripts themselves is caught even
+        # if a developer skips pre-commit.
+        run: |
+          bash .github/scripts/tests/lint-multisecret-andcheck.test.sh
+          bash .github/scripts/tests/lint-always-needs-comment.test.sh
+          python3 .github/scripts/tests/selfhost-required-workflow.test.py
+          bash .github/scripts/tests/sonar-required-gate.test.sh
+          bash .github/scripts/tests/lint-boolean-coercion.test.sh
+          bash .github/scripts/tests/lint-empty-expression.test.sh
+          bash .github/scripts/tests/lint-gh-repo-flag.test.sh
+          bash .github/scripts/tests/lint-workflow-injection.test.sh
+          bash .github/scripts/tests/workflow-validate-report.test.sh
+          python3 .github/scripts/tests/test_print_codeql_results.py
+          bash .github/scripts/tests/verify-changelog.test.sh
+          bash .github/scripts/tests/promote-unreleased-changelog.test.sh
+          # Both of these existed with NO runner at all — not this step, not
+          # pre-commit — so they had never executed in CI or locally.
+          bash .github/scripts/tests/check-pattern-register.test.sh
+          bash .github/scripts/tests/lint-test-suite-wiring.test.sh
+          bash .github/scripts/tests/ci-scan-relevance.test.sh
+          bash .github/scripts/tests/trivy-assert-os.test.sh
+          bash scripts/test-nats-server-bootstrap.sh
+
+  # NOTE: the former verify-openapi-coverage, verify-spa-env, and
+  # verify-deploy-scripts jobs are consolidated into the single `static-guards`
+  # job earlier in this file (2026-07 CI deep-dive).
+
+  # Final protected-source API report. This job reports its actual needs
+  # results; the protected wrapper adds its selected OSV job result separately.
+  # always() preserves failed and skipped producers as explicit values for
+  # the required wrapper.
+  report:
+    name: report
+    needs: [ioc, detect-changes, build, semgrep, eslint, govulncheck]
+    if: ${{ always() && (inputs.enforcement-only || !(github.event.action == 'edited' && github.event.changes.base == null && (github.event.changes.title != null || github.event.changes.body != null))) }}
+    permissions:
+      contents: read
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 5
+    outputs:
+      selection: ${{ steps.report.outputs.selection }}
+      jobs: ${{ steps.report.outputs.jobs }}
+      coverage-uploads: ${{ steps.report.outputs.coverage-uploads }}
+    steps:
+      - name: Check out immutable workflow source
+        if: ${{ inputs.trusted-source }}
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          persist-credentials: false
+
+      - name: Confirm report policy source
+        if: ${{ inputs.trusted-source }}
+        env:
+          WORKFLOW_REPOSITORY: ${{ fromJSON(toJSON(job)).workflow_repository }}
+          WORKFLOW_SHA: ${{ fromJSON(toJSON(job)).workflow_sha }}
+          POLICY_SHA: ${{ needs.detect-changes.outputs.scan-selection && fromJSON(needs.detect-changes.outputs.scan-selection).policy_sha || '' }}
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          if [[ "$WORKFLOW_REPOSITORY" != Concord-Voice/Self-Hosted ||
+                ! "$WORKFLOW_SHA" =~ ^[0-9a-fA-F]{40}$ || "$actual_sha" != "$WORKFLOW_SHA" ]]; then
+            echo "::error::Protected report source identity is unavailable or invalid."
+            exit 1
+          fi
+          if [[ "$POLICY_SHA" != "$WORKFLOW_SHA" ]]; then
+            echo "::error::Scan selection is not bound to this protected workflow source."
+            exit 1
+          fi
+
+      - name: Emit actual scan results
+        id: report
+        env:
+          SELECTION: ${{ needs.detect-changes.outputs.scan-selection || '{}' }}
+          IOC_RESULT: ${{ needs.ioc.result }}
+          BUILD_RESULT: ${{ needs.build.result }}
+          SEMGREP_RESULT: ${{ needs.semgrep.result }}
+          ESLINT_RESULT: ${{ needs.eslint.result }}
+          GOVULNCHECK_RESULT: ${{ needs.govulncheck.result }}
+          DESKTOP_COVERAGE: ${{ needs.build.outputs.desktop-coverage == 'true' }}
+          CONTROL_PLANE_COVERAGE: ${{ needs.build.outputs.control-plane-coverage == 'true' }}
+          MEDIA_PLANE_COVERAGE: ${{ needs.build.outputs.media-plane-coverage == 'true' }}
+          ADMIN_COVERAGE: ${{ needs.build.outputs.admin-coverage == 'true' }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          jobs = {
+              'ioc': os.environ['IOC_RESULT'],
+              'build': os.environ['BUILD_RESULT'],
+              'semgrep': os.environ['SEMGREP_RESULT'],
+              'eslint': os.environ['ESLINT_RESULT'],
+              'govulncheck': os.environ['GOVULNCHECK_RESULT'],
+          }
+          coverage = {
+              'desktop': os.environ['DESKTOP_COVERAGE'] == 'true',
+              'control_plane': os.environ['CONTROL_PLANE_COVERAGE'] == 'true',
+              'media_plane': os.environ['MEDIA_PLANE_COVERAGE'] == 'true',
+              'admin': os.environ['ADMIN_COVERAGE'] == 'true',
+          }
+          try:
+              selection = json.loads(os.environ['SELECTION'])
+              if not isinstance(selection, dict):
+                  selection = {}
+          except (TypeError, ValueError):
+              selection = {}
+          output = Path(os.environ['GITHUB_OUTPUT'])
+          with output.open('a', encoding='utf-8') as stream:
+              for name, value in (('selection', selection), ('jobs', jobs), ('coverage-uploads', coverage)):
+                  stream.write(f'{name}={json.dumps(value, separators=(",", ":"))}\n')
+          PY

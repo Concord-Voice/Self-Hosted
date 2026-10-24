@@ -1,0 +1,61 @@
+name: Labeler
+
+# Auto-apply path-based labels to PRs.
+#
+# Currently this workflow applies a single label, `workflow-validation: dispatch`,
+# on PRs touching .github/workflows/**. The label triggers
+# .github/workflows/workflow-validate.yml's L3 dispatch sandbox per the
+# job-level `if:` gate in that file.
+#
+# Filed under #1237 as part of #1109's CI Speed Epic. See
+# [internal]specs/2026-05-29-1237-workflow-validate-trigger-design.md
+# for the design (V1-V7 preservation table, CWE-94 pwn-request defense).
+#
+# === CWE-94 pwn-request defense (load-bearing) ===
+# 1. `pull_request_target` runs in the BASE branch context, NOT the fork's HEAD.
+#    The YAML you are reading IS the trusted base-branch version.
+# 2. NO `actions/checkout` step. The fork's HEAD code is never fetched or
+#    executed. actions/labeler operates on file metadata via GitHub API only.
+# 3. actions/labeler@v5+ is documented-safe under this pattern (label-only
+#    operation on GitHub-supplied metadata).
+# 4. Permissions are minimal: pull-requests: write (to apply labels) +
+#    contents: read (default for actions). NO actions: write, NO id-token,
+#    NO secrets: inherit. Do not add scopes without re-evaluating the
+#    pwn-request defense.
+#
+# === Future labeler additions ===
+# Add new label-to-glob mappings in .github/labeler.yml. This workflow does
+# not need changes when adding new labels — it runs the same labeler action
+# regardless of how many label rules the config defines.
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+# Minimum permissions to apply labels. See "CWE-94 pwn-request defense"
+# comment block above before adding new scopes.
+permissions:
+  pull-requests: write
+  contents: read
+
+# Concurrency: only one labeler run per PR at a time. Older runs are
+# cancelled on rapid syncs. Mirrors the concurrency model in
+# workflow-validate.yml so the two stay coherent during a flurry of pushes.
+concurrency:
+  group: labeler-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  label:
+    name: Apply path-based labels
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      # SHA-pinned per [internal]rules/electron.md "Supply-chain hardening".
+      # The trailing `# v7.0.0` comment is the load-bearing human-readability
+      # convention; the SHA is authoritative. Refresh procedure: see
+      # [internal]upgrade-sha-pinned-action.md if a new v7.x release ships.
+      - uses: actions/labeler@bf12e9b00b37c5c0ca2b87b79b2daf7891dbda13  # v7.0.0
+        with:
+          configuration-path: .github/labeler.yml
+          sync-labels: false  # Don't strip labels we don't manage

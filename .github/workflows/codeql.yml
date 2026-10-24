@@ -1,0 +1,191 @@
+# CodeQL advanced setup — per-tool Code Scanning workflow (ADR-0017 End-state A).
+# Replaces GitHub default setup (disabled in lockstep with the PR that added this
+# file — see [internal]specs/2026-06-10-1424-codeql-advanced-setup-design.md).
+# Feeds the `code_scanning` rule (tool: CodeQL) in the Default Branch Ruleset.
+#
+# Matrix rationale:
+#   - go: manual build (module-discovering `go build ./...` loop — autobuild
+#     traces only ONE module; toolchain preinstalled via setup-go from go.mod)
+#   - javascript-typescript: no build needed for analysis
+#   - actions: workflow-file analysis (supply-chain posture)
+#   - python deliberately omitted: dev-tooling scripts only, no production Python
+#     (documented coverage delta — issue #1424 scope decision).
+# Queries: security-extended = parity with default setup's "extended" suite.
+name: CodeQL Advanced
+
+# PR leg invoked by codeql-pr.yml with `needs: ioc` (ADR-0018 IOC-first, #1476)
+# — the manual Go build downloads modules and must not race the supply-chain
+# verdict. Nightly owns the scheduled baseline; main-ci calls the Hotfix
+# push leg. All three use this reusable workflow.
+on:
+  # The weekly cron ('45 16 * * 0') is retired: nightly-ci.yml analyses main
+  # every night, which strictly supersedes a Sunday run. Every leg is now
+  # orchestrated (codeql-pr, main-ci on hotfix, nightly-ci) — see ADR-0018's
+  # 2026-08-26 amendment.
+  workflow_call:
+    inputs:
+      codeql-matrix:
+        description: "JSON matrix of selected CodeQL languages"
+        type: string
+        default: '{"include":[{"language":"actions","runner":"blacksmith-2vcpu-ubuntu-2404","build-mode":"none"},{"language":"go","runner":"blacksmith-4vcpu-ubuntu-2404","build-mode":"manual"},{"language":"javascript-typescript","runner":"blacksmith-4vcpu-ubuntu-2404","build-mode":"none"}]}'
+        required: false
+      external-verdict:
+        description: "Report actual SARIF upload provenance for the protected verifier"
+        type: boolean
+        default: false
+        required: false
+
+concurrency:
+  # Every leg now runs inside its caller's group, so this is inert; kept as a
+  # declared default rather than deleted, and `false` is the safe value — a
+  # cancel here would kill a baseline analysis (Gitar, PR #1441).
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: false
+
+# Least-privilege default; the analyze job elevates to the writes it needs.
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: Analyze (${{ matrix.language }})
+    # ADR-0013 §2 sizing. Per-leg runner: the three languages have genuinely
+    # different resource profiles, so a single job-level tier over-provisions
+    # one and starves another. GitHub Actions has no "job default, override one
+    # leg" syntax, so a differential tier across matrix legs requires this
+    # matrix-variable indirection. See each `runner:` below for its basis.
+    #
+    # INVARIANT: every `include` entry MUST carry `runner:`. The `||` fallback
+    # is a fail-SAFE, not a licence to omit it — a bare `${{ matrix.runner }}`
+    # resolves to an empty string for a leg that forgot the key, which surfaces
+    # as a scheduling error that never names the missing field. Falling back to
+    # the 4 vCPU class default keeps a new leg correct-but-costly rather than
+    # broken-and-cryptic.
+    runs-on: ${{ matrix.runner || 'blacksmith-4vcpu-ubuntu-2404' }}
+    permissions:
+      # required for all codeql workflows
+      security-events: write
+      # required to fetch internal or private CodeQL packs
+      packages: read
+      # required for workflows in private repositories
+      actions: read
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(inputs.codeql-matrix) }}
+      # The caller gates empty include arrays before this matrix allocates.
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: matrix.language == 'go'
+        with:
+          go-version-file: services/control-plane/go.mod
+          cache-dependency-path: services/control-plane/go.sum
+
+      # GOCACHE (compiler output) for the manual Go build below. setup-go above
+      # only restores the module download cache (~/go/pkg/mod); without a
+      # ~/.cache/go-build cache every leg recompiles all packages from cold,
+      # which is why this leg's p95 (~229s) runs far above its p50 (~74s).
+      #
+      # RESTORE-ONLY, deliberately. The keyspace still mirrors build.yml's
+      # control-plane job exactly so this leg shares the warm GOCACHE that job
+      # populates on main — content-addressed entries are safe to share across
+      # jobs. But build.yml is the SINGLE WRITER: it compiles the whole module
+      # plus tests (a superset of this leg's output), and two savers racing an
+      # identical key inside one push would collide. If this leg ever needs to
+      # write, give it a distinct key suffix rather than duplicating that one.
+      - name: Restore Go build cache
+        if: matrix.language == 'go'
+        # Pin every action to a verified immutable commit; keep the release comment
+        # aligned with the resolved upstream tag.
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.cache/go-build
+          key: go-build-${{ runner.os }}-${{ hashFiles('services/control-plane/go.sum') }}
+          restore-keys: |
+            go-build-${{ runner.os }}-${{ hashFiles('services/control-plane/go.sum') }}-
+            go-build-${{ runner.os }}-
+
+      - name: Initialize CodeQL
+        # first-party, SHA-pinned for Alpha Code Scanning Gate (#1431).
+        # Keep the trailing version comment bare: dependabot only rewrites that
+        # exact shape, so an annotated one silently rots on every bump (#2309).
+        uses: github/codeql-action/init@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # `+` combines this suite with the config file's queries (the scoped
+          # log-injection query). Without it the config's queries are ignored.
+          queries: +security-extended
+          # Excludes the vendored prototypes/ tree (browser-only design mocks,
+          # #204) from analysis — mirrors the Semgrep/detect-secrets excludes.
+          config-file: remote=Concord-Voice/Self-Hosted@106c79167d3eaafd839fda915b0f615729a04718:.github/codeql/codeql-config.yml
+
+      - name: Build all Go modules (manual build mode)
+        if: matrix.language == 'go'
+        shell: bash
+        run: |
+          # CodeQL manual build: trace EVERY Go module that has source files.
+          # The find-guard skips source-less modules (a bare go.mod with no .go
+          # files would fail `go build ./...`) and automatically picks a module
+          # up the day it gains code, closing the silent-coverage-gap failure
+          # mode.
+          # NOTE: the guard uses `find -print -quit` (no pipe). The obvious
+          # `find | head -1 | grep -q .` form is a pipefail trap: on a module
+          # with many .go files, head closes the pipe early, find dies with
+          # SIGPIPE (141), and under `bash -e -o pipefail` the if-condition
+          # reads failure — silently skipping a REAL module (observed on this
+          # PR's first manual-build run: control-plane was skipped and CodeQL
+          # failed with "no source code seen", exit 32).
+          while IFS= read -r mod; do
+            dir=$(dirname "$mod")
+            if [ -n "$(find "$dir" -name '*.go' -not -path '*/node_modules/*' -print -quit)" ]; then
+              echo "Building Go module: $dir"
+              (cd "$dir" && go build ./...)
+            else
+              echo "Skipping Go module with no sources yet: $dir"
+            fi
+          done < <(find . -name go.mod -not -path '*/node_modules/*' -not -path './.git/*')
+
+      - name: Perform CodeQL Analysis
+        # first-party, SHA-pinned for Alpha Code Scanning Gate (#1431).
+        # Keep the trailing version comment bare: dependabot only rewrites that
+        # exact shape, so an annotated one silently rots on every bump (#2309).
+        id: analyze
+        uses: github/codeql-action/analyze@24c54180a607b1449ed407dd24f251e4e9147c8d # v4.38.3
+        with:
+          category: "/language:${{ matrix.language }}"
+          output: ${{ runner.temp }}/codeql-results
+
+      - name: Write protected CodeQL upload evidence
+        if: inputs.external-verdict
+        env:
+          SARIF_ID: ${{ steps.analyze.outputs.sarif-id }}
+          SCAN_CATEGORY: /language:${{ matrix.language }}
+          # The language travels in the environment: a template inside the script text is a
+          # scanner error for Semgrep's protected scan ([internal]workflow-failure-patterns.md P18).
+          MATRIX_LANGUAGE: ${{ matrix.language }}
+        run: |
+          set -euo pipefail
+          test -n "$SARIF_ID" || { echo "::error::CodeQL did not return a SARIF upload ID"; exit 1; }
+          jq -n --arg run_id "$GITHUB_RUN_ID" --arg run_attempt "$GITHUB_RUN_ATTEMPT" \
+            --arg category "$SCAN_CATEGORY" --arg sarif_id "$SARIF_ID" \
+            '{run_id:$run_id,run_attempt:$run_attempt,category:$category,sarif_id:$sarif_id}' \
+            > "$RUNNER_TEMP/scan-evidence-codeql-${MATRIX_LANGUAGE}.json"
+
+      - name: Upload protected CodeQL evidence
+        if: inputs.external-verdict
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scan-evidence-${{ github.run_id }}-${{ github.run_attempt }}-codeql-${{ matrix.language }}
+          path: ${{ runner.temp }}/scan-evidence-codeql-${{ matrix.language }}.json
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Report closed CodeQL finding metadata
+        env:
+          CODEQL_RESULTS_DIR: ${{ runner.temp }}/codeql-results
+        run: python3 .github/scripts/print-codeql-results.py "$CODEQL_RESULTS_DIR"

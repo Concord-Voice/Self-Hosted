@@ -1,0 +1,39 @@
+# CodeQL Advanced config — consumed by .github/workflows/codeql.yml
+name: "Concord CodeQL config"
+
+# Exclude the vendored Claude Design mobile-client prototype from CodeQL
+# analysis. It is browser-only mock code (never production, #204) and its
+# design runtime intentionally uses patterns CodeQL flags (e.g. a postMessage
+# handler with no explicit origin check → js/missing-origin-check). This
+# mirrors the prototypes/ excludes already applied to Semgrep (.semgrepignore)
+# and detect-secrets (.pre-commit-config.yaml); CodeQL honours its own config,
+# not .semgrepignore. Revisit/remove when the prototype is retired (#204).
+paths-ignore:
+  - prototypes
+
+# go/log-injection is replaced by a scoped copy of itself. The upstream query treats
+# every log/slog call as a sink, but slog's JSON and Text handlers escape control
+# characters at render time, so CWE-117 record forging cannot happen through them.
+# It produced 434 false positives, each dismissed by hand (see
+# [internal]codeql-false-positive-register.md, go/log-injection calibration note).
+# The scoped query keeps stdlib log.Printf and every other unstructured logger as
+# sinks. The workflow's `queries:` input is prefixed with `+` so this list ADDS to
+# security-extended instead of being ignored.
+queries:
+  # CodeQL CLI cannot clone a private repository for an external query reference.
+  # Resolve the copied query from the checked-out repository instead.
+  - uses: ./.github/codeql/queries/go/LogInjectionUnstructured.ql
+  # Scoped copies of the upstream Actions queries preserve coverage except for
+  # the one immutable IOC workflow_sha checkout misclassified as PR-controlled.
+  - uses: ./.github/codeql/queries/actions/CachePoisoningViaPoisonableStep.ql
+  - uses: ./.github/codeql/queries/actions/UntrustedCheckoutMedium.ql
+query-filters:
+  - exclude:
+      id: go/log-injection
+  # The IOC scan deliberately reads PR code without credentials on an ephemeral
+  # runner. In protected mode, the other checkout uses job.workflow_sha: the
+  # immutable revision of this required workflow, not a PR-controlled ref.
+  - exclude:
+      id: actions/untrusted-checkout/medium
+  - exclude:
+      id: actions/cache-poisoning/poisonable-step

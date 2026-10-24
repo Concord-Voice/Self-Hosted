@@ -1,0 +1,31 @@
+# Synthetic fixture: the dependent job has no own checkout step but
+# `needs:` a prior job that does. The prior-job's checkout is in a
+# DIFFERENT runner (GHA jobs run on separate runners by default), but the
+# spec's acceptance criteria explicitly model this case as the
+# "needs-cascade" form — the lint MUST NOT flag it. This codifies the
+# project's actual workflow convention where a setup-job + worker-job
+# split is common, the setup job checks out, the worker job inherits.
+# (Whether the runtime cwd actually persists across runners is a
+# secondary concern; the spec's lint scope ends at the YAML-structural
+# check.)
+name: good-needs-cascade
+on: [workflow_dispatch]
+
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - run: echo "setup complete"
+
+  notify:
+    needs: setup
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: file an issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh issue create --title "Build failed" --body "see logs"

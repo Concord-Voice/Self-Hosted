@@ -1,0 +1,115 @@
+# ZAP Automation Framework plan — nightly full active scan (#1465).
+#
+# Same target, context, auth mechanism, and exclusion set as pr.yaml (the
+# PR-time baseline) — read that file's header for the never-production
+# rule, the REST-only scope-honesty statement, and the per-exclusion
+# justifications. This plan differs only in scan depth:
+#
+#   - activeScan: 10 min (vs 5), 2 min/rule (vs 1), 8 threads (vs 4)
+#   - passiveScan-wait: 10 min (vs 5)
+#
+# JWT TTL math (the depth ceiling): AccessTokenTTL is a hard 15-minute
+# const (services/control-plane/internal/auth/tokens.go). The workflow
+# logs in immediately before launching ZAP; OpenAPI import takes ~2-3 min
+# on 234 ops, so a 10-minute active scan finishes around minute 13 —
+# inside the token's lifetime with a small margin. Do NOT raise
+# maxScanDurationInMins past 10 without first solving re-authentication
+# (ZAP's authentication/verification machinery instead of a static
+# replacer header) — a longer scan silently degrades to unauthenticated
+# 401 noise for everything after minute 15.
+
+env:
+  contexts:
+    - name: concord-api
+      urls:
+        - "http://localhost:8080"
+      includePaths:
+        - "http://localhost:8080/api/v1.*"
+        - "http://localhost:8080/health"
+      # Justifications for each exclusion live in pr.yaml — keep the two
+      # lists identical when editing either.
+      excludePaths:
+        - "http://localhost:8080/api/v1/auth/logout"
+        - "http://localhost:8080/api/v1/privacy/erase-account"
+        - "http://localhost:8080/api/v1/auth/recovery/reset-account"
+        - "http://localhost:8080/api/v1/klipy.*"
+        - "http://localhost:8080/api/v1/auth/sso.*"
+  parameters:
+    failOnError: true
+    failOnWarning: false
+    progressToStdout: true
+
+jobs:
+  - type: replacer
+    parameters:
+      deleteAllRules: true
+    rules:
+      - description: "Authorization: seeded CI test-user JWT (#1465)"
+        url: "http://localhost:8080/api/v1/.*"
+        matchType: "req_header"
+        matchString: "Authorization"
+        matchRegex: false
+        replacementString: "${ZAP_AUTH_HEADER_VALUE}"
+
+  # alertFilter — MUST run BEFORE the alert-generating jobs (openapi/requestor/
+  # activeScan/passiveScan-wait): ZAP applies alert filters at alert-RAISE time,
+  # NOT retroactively, so a post-scan filter is a silent no-op. The report job
+  # below also drops every confidence EXCEPT `falsepositive` (so confirmed alerts
+  # are retained). Per-rule scoping (repo-admin decision 2026-06-18, finalized after
+  # gitar review of #1635): 40018/90022/10104/10111/10024 are API-wide, rule 6 is
+  # per-instance. 40018 is API-wide (not narrowed) because ZAP's url-regex fails to
+  # suppress deep multi-segment path-injection alerts under a narrower scope — full
+  # rationale + periodic-review trigger live in pr.yaml and .zap/README.md. MIRRORED
+  # from pr.yaml; keep the two identical.
+  - type: alertFilter
+    alertFilters:
+      - { ruleId: 40018, newRisk: "False Positive", urlRegex: true, url: "^http://localhost:8080/api/v1/.*" }
+      - { ruleId: 90022, newRisk: "False Positive", urlRegex: true, url: "^http://localhost:8080/api/v1/.*" }
+      - { ruleId: 10104, newRisk: "False Positive", urlRegex: true, url: "^http://localhost:8080/api/v1/.*" }
+      - { ruleId: 10111, newRisk: "False Positive", urlRegex: true, url: "^http://localhost:8080/api/v1/.*" }
+      - { ruleId: 10024, newRisk: "False Positive", urlRegex: true, url: "^http://localhost:8080/api/v1/.*" }
+      - { ruleId: 6, newRisk: "False Positive", urlRegex: true, url: "^http://localhost:8080/api/v1/users/me/preferences$" }
+
+  - type: openapi
+    parameters:
+      apiFile: "/zap/wrk/docs/api/openapi.yaml"
+      targetUrl: "http://localhost:8080/api/v1"
+      context: "concord-api"
+
+  # Authenticated-coverage proof — see pr.yaml for the attribution design
+  # (the workflow's own curl proof uses /users/me; /servers is ZAP-only).
+  - type: requestor
+    requests:
+      - url: "http://localhost:8080/api/v1/servers"
+        method: "GET"
+        responseCode: 200
+
+  # Full active scan — the depth pass. Time-boxed by the JWT TTL math in
+  # the header, NOT by runner budget.
+  - type: activeScan
+    parameters:
+      context: "concord-api"
+      maxScanDurationInMins: 10
+      maxRuleDurationInMins: 2
+      threadPerHost: 8
+
+  - type: passiveScan-wait
+    parameters:
+      maxDuration: 10
+
+  - type: report
+    parameters:
+      template: "sarif-json"
+      reportDir: "/zap/wrk/reports"
+      reportFile: "zap-api"
+      reportTitle: "Concord Voice API DAST (nightly full scan)"
+      reportDescription: "ZAP AF full.yaml against the ephemeral CONCORD_ENV=test compose stack"
+    # Exclude ONLY falsepositive-confidence alerts from the SARIF (mirrors pr.yaml).
+    # `confidences` is an allowlist over {falsepositive, low, medium, high,
+    # confirmed}; `confirmed` MUST be listed or confirmed findings are dropped
+    # (gitar #1635).
+    confidences:
+      - confirmed
+      - high
+      - medium
+      - low

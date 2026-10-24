@@ -1,0 +1,84 @@
+# .actionlint.yaml — see https://github.com/rhysd/actionlint/blob/main/docs/config.md
+#
+# Workflow-injection guard config. Issue: #836. Spec:
+# [internal]specs/2026-05-20-836-workflow-injection-guard-design.md
+#
+# scripts/security/check-self-hosted-runners.sh remains the source of truth
+# for runner-label SECURITY policy; this file is for actionlint's SYNTAX-
+# level recognition only.
+#
+# Registered labels (NOT self-hosted runners, despite the schema key name —
+# actionlint's config schema only exposes `self-hosted-runner.labels` for
+# registering custom labels it should recognize):
+#
+#   ubuntu-latest-arm64 — Concord-Voice-org-PROVISIONED managed native arm64
+#     runner. Registered per ADR-0013 §10. Adopted by publish-buildtools-base.yml's
+#     smoke-arm64 job in #1359/#1360. The security check at
+#     scripts/security/check-self-hosted-runners.sh treats this label as
+#     non-self-hosted (does not require allowlisting) because it does NOT
+#     include the literal `self-hosted` token — that's the security-side
+#     handling; this entry is the syntax-side acceptance for actionlint.
+#
+#   blacksmith-2vcpu-ubuntu-2404, blacksmith-4vcpu-ubuntu-2404,
+#   blacksmith-8vcpu-ubuntu-2404, blacksmith-16vcpu-ubuntu-2404: Blacksmith
+#     managed GitHub Actions runners (ephemeral Firecracker microVMs). Adopted
+#     via the workflow migration in this PR's series (ADR-0016); 2vcpu for
+#     trivial network-bound jobs, 4vcpu default for CI workloads, 8vcpu for
+#     the measured desktop shards and warm media Docker build, 16vcpu for the
+#     measured cache-cold production Compose build. Credential-
+#     path workflows stay on GitHub-hosted runners per the ADR-0016 trust
+#     boundary. Like ubuntu-latest-arm64 above, the labels do not include the
+#     literal `self-hosted` token, so the security check treats them as
+#     non-self-hosted; these entries provide the syntax-side acceptance for
+#     actionlint only.
+self-hosted-runner:
+  labels:
+    - ubuntu-latest-arm64
+    - blacksmith-2vcpu-ubuntu-2404
+    - blacksmith-4vcpu-ubuntu-2404
+    - blacksmith-8vcpu-ubuntu-2404
+    - blacksmith-16vcpu-ubuntu-2404
+
+# No project-specific config variables at this time.
+config-variables: null
+
+# Scoped false-positive suppressions for environment- and event-gated secrets
+# that actionlint cannot infer from a reusable workflow's call contract.
+paths:
+  # GitHub supports concurrency.queue: max (up to 100 pending jobs), but the
+  # latest pinned actionlint v1.7.12 predates this syntax. Limit the exception
+  # to the protected warning publisher and Main CD pending queue; other syntax stays checked.
+  # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/control-workflow-concurrency
+  .github/workflows/required-pr-build.yml:
+    ignore:
+      - 'unexpected key "queue" for "concurrency" section'
+  # Main CD likewise uses GitHub's supported queue to retain pending pushes.
+  # The recovery contract checks its exact value and cancellation setting.
+  .github/workflows/main-cd.yml:
+    ignore:
+      - 'unexpected key "queue" for "concurrency" section'
+  # build-desktop.yml intentionally declares only the reviewed non-signing
+  # GOOGLE_OAUTH_CLIENT_SECRET_DESKTOP workflow_call input. The 12 signing
+  # values resolve from the release-build/release `desktop-release`
+  # environment, while the four post-release values are reachable only on the
+  # workflow_dispatch-only manual jobs. actionlint treats workflow_call's
+  # declaration as the exhaustive secrets type and cannot model either source,
+  # so keep these false-positive suppressions explicit and file-scoped.
+  .github/workflows/build-desktop.yml:
+    ignore:
+      - 'property "apple_certificate_p12" is not defined'
+      - 'property "apple_certificate_password" is not defined'
+      - 'property "apple_api_key" is not defined'
+      - 'property "apple_api_key_id" is not defined'
+      - 'property "apple_api_issuer" is not defined'
+      - 'property "azure_client_id" is not defined'
+      - 'property "azure_tenant_id" is not defined'
+      - 'property "azure_subscription_id" is not defined'
+      - 'property "azure_signing_endpoint" is not defined'
+      - 'property "azure_signing_account" is not defined'
+      - 'property "azure_signing_cert_profile" is not defined'
+      - 'property "linux_update_signing_key" is not defined'
+      - 'property "server_host" is not defined'
+      - 'property "ssh_user" is not defined'
+      - 'property "public_mirror_app_private_key" is not defined'
+      - 'property "cf_pages_deploy_hook" is not defined'

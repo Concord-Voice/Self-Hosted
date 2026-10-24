@@ -1,0 +1,15 @@
+# Synthetic fixture: a bash comment that mentions `gh` for documentation
+# purposes inside a run: block. Bash comments aren't executed, so this
+# isn't a real call. The lint MUST NOT flag commented-out documentation
+# of gh usage. Mirrors many existing real-tree occurrences like
+# `# gh api repos/<owner>/<repo>/git/refs/tags/vX.Y.Z` in build.yml:42.
+name: good-gh-in-bash-comment
+on: [workflow_dispatch]
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          # Documentation: to upgrade, run gh api repos/owner/repo/refs/tags/vX
+          echo "no executable command on this line"
