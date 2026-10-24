@@ -494,7 +494,7 @@ func (c *Controller) Restore() error {
 	if exists, err := c.checkedACLFile(); err != nil {
 		return err
 	} else if !exists || j.Intent != "" {
-		if err := c.validatePolicy(j.Effective); err != nil {
+		if err := c.validatePolicy(j.Effective); err != nil || !exists && !c.hasFreshOverlapLocked(j.Effective, true) {
 			return errController
 		}
 		if err := c.writePolicy(j.Effective); err != nil {
@@ -577,11 +577,14 @@ func (c *Controller) Reconcile(ctx context.Context, policy Policy) error {
 		return ErrPolicyStale
 	}
 	sameBefore := c.policy.Version != 0 && samePolicy(c.policy, policy)
-	if !sameBefore && !c.hasFreshOverlapLocked(policy) {
+	if !sameBefore && (!c.hasFreshOverlapLocked(policy, true) || !oldExpiryAligned(policy)) {
 		return errController
 	}
 	if c.loaded && c.intent == "" && c.policy.RotationID == policy.RotationID && sameBefore {
 		c.failureCode = ""
+		// The provider just re-confirmed this exact policy, so renew the finalize
+		// window; otherwise one missed window leaves the rotation promoted forever.
+		c.validatedAt = c.now()
 		return nil
 	}
 	if err := c.validateReconcileTransitionLocked(policy, sameBefore); err != nil {
@@ -676,20 +679,81 @@ func livePriorBindingProof(j rotationJournal) (map[string][]string, []AppliedAck
 	return expected, acks, bindings, nil
 }
 
-func (c *Controller) hasFreshOverlapLocked(policy Policy) bool {
+// hasFreshOverlapLocked reports whether each two-generation service keeps its
+// target, and with includeOld its old generation too, valid for MinimumOverlap.
+func (c *Controller) hasFreshOverlapLocked(policy Policy, includeOld bool) bool {
 	deadline := c.now().Add(MinimumOverlap)
 	for _, service := range []string{controlPlaneService, mediaPlaneService} {
-		generations := policy.Services[service].Generations
-		if len(generations) != 2 {
+		config := policy.Services[service]
+		if len(config.Generations) != 2 {
 			continue
 		}
-		for _, generation := range generations {
-			if generation.ValidUntil.Before(deadline) {
+		for _, generation := range config.Generations {
+			if (includeOld || generation.Generation == config.TargetGeneration) && generation.ValidUntil.Before(deadline) {
 				return false
 			}
 		}
 	}
 	return true
+}
+
+// RevokeExpired removes both old users once any old generation reaches its
+// validUntil, whether or not every target ACKed. Apps already refuse an expired
+// credential; this makes Redis refuse it too, so an instance that withholds its
+// ACK cannot keep an old user enabled. It needs no provider read.
+func (c *Controller) RevokeExpired(ctx context.Context) (bool, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	// A pending reconcile intent already journals the accepted policy, and only a provider
+	// read clears it, so it must not hold an expired old user open.
+	if c.policy.Version == 0 || c.intent != "" && c.intent != "reconcile" || c.state == "drained" || singleGenerationPolicy(c.policy) {
+		return false, nil
+	}
+	now := c.now()
+	oldUsernames := make(map[string]string, 2)
+	expired := false
+	for _, service := range []string{controlPlaneService, mediaPlaneService} {
+		config := c.policy.Services[service]
+		for _, generation := range config.Generations {
+			if generation.Generation != config.TargetGeneration {
+				oldUsernames[service] = generation.Username
+				expired = expired || !now.Before(generation.ValidUntil)
+			}
+		}
+	}
+	if !expired || len(oldUsernames) != 2 {
+		return false, nil
+	}
+	j := c.drainedJournalLocked(c.finalizedPolicyLocked(), oldUsernames)
+	if err := c.persistJournal(j); err != nil {
+		return false, err
+	}
+	c.applyJournalLocked(j)
+	if err := c.writePolicy(c.policy); err != nil {
+		c.failureCode = "reconcile"
+		return true, err
+	}
+	if err := c.admin.LoadACL(ctx, c.aclPath); err != nil {
+		c.failureCode = "reconcile"
+		return true, errController
+	}
+	return true, c.finishRevocationLocked(ctx)
+}
+
+// oldExpiryAligned requires both old generations to share one validUntil:
+// RevokeExpired removes both at the first expiry, so a skew would cut the
+// longer-lived old user before its published deadline.
+func oldExpiryAligned(policy Policy) bool {
+	var until []time.Time
+	for _, service := range []string{controlPlaneService, mediaPlaneService} {
+		config := policy.Services[service]
+		for _, generation := range config.Generations {
+			if generation.Generation != config.TargetGeneration {
+				until = append(until, generation.ValidUntil)
+			}
+		}
+	}
+	return len(until) != 2 || until[0].Equal(until[1])
 }
 
 func (c *Controller) validateReconcileTransitionLocked(policy Policy, sameBefore bool) error {
@@ -946,7 +1010,9 @@ func (c *Controller) RecordAck(_ context.Context, slot string, peerUID uint32, a
 	}
 	wasComplete := c.allExpectedAckedLocked()
 	j := c.ackJournalLocked(ack, wasComplete)
-	if j.Phase == "promoted" && !wasComplete && !c.hasFreshOverlapLocked(j.Effective) {
+	// Only the target needs fresh validity here: an old generation that lapses
+	// is removed by RevokeExpired, so a late ACK must not be refused for it.
+	if j.Phase == "promoted" && !wasComplete && !c.hasFreshOverlapLocked(j.Effective, false) {
 		return errController
 	}
 	if err := c.persistJournal(j); err != nil {
@@ -1371,7 +1437,12 @@ func (c *Controller) finishRevocationLocked(ctx context.Context) error {
 		return errController
 	}
 	j := c.snapshotJournalLocked()
-	j.Phase = "finalized"
+	// "finalized" is the deploy tooling's only proof that every expected host ACKed the
+	// target; an expiry revocation without every ACK stays "prepared" until they arrive.
+	j.Phase = "prepared"
+	if journalAllAcked(j) {
+		j.Phase = "finalized"
+	}
 	j.Intent = ""
 	j.OldUsernames = nil
 	j.FailureCode = ""

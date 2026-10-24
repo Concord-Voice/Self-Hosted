@@ -772,6 +772,11 @@ redis_managed_host_preflight() {
     return 1
   }
   local auth_dir=/run/concord/redis-auth fstype role uid gid slot_gid
+  # findmnt cannot resolve a missing path, which used to read as a disk fallback.
+  [[ -d "$auth_dir" ]] || {
+    echo 'redis-managed: /run/concord/redis-auth is absent (host RAM lost?); see the lost-state recovery runbook' >&2
+    return 1
+  }
   fstype="$(findmnt -n -T "$auth_dir" -o FSTYPE 2>/dev/null || true)"
   [[ "$fstype" == tmpfs ]] || {
     echo 'redis-managed: /run/concord/redis-auth is not on tmpfs; refusing disk fallback' >&2
@@ -858,7 +863,7 @@ redis_managed_marker_preflight() {
     [[ ! -e "$dir" || "$(stat -c '%u:%a' "$dir" 2>/dev/null || true)" == '10004:700' ]] || {
       echo 'redis-managed: legacy root-owned marker requires a separately reviewed migration' >&2; return 1;
     }
-    install -d -o 10004 -g 10004 -m 0700 "$dir" || return 1
+    install -d -o 10004 -g 10004 -m 00700 "$dir" || return 1
   fi
   [[ -d "$dir" && "$(stat -c '%u:%a' "$dir" 2>/dev/null || true)" == '10004:700' ]] || {
     echo 'redis-managed: persistent marker parent is not controller-private' >&2; return 1;
@@ -893,7 +898,8 @@ redis_managed_app_gid() {
     fi
   fi
   model="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD --profile services config --format json)" || return 1
-  image="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["services"][sys.argv[1]].get("image", ""))' "$service" <<<"$model")" || return 1
+  # A build-only service (media-plane) has no image key; Compose tags it <project>-<service>.
+  image="$(python3 -c 'import json,sys; m=json.load(sys.stdin); print(m["services"][sys.argv[1]].get("image") or m["name"] + "-" + sys.argv[1])' "$service" <<<"$model")" || return 1
   [[ -n "$image" ]] || return 1
   image_id="$(docker image inspect --format '{{.Id}}' "$image")" || return 1
   docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges \
@@ -3625,9 +3631,10 @@ except (ValueError,TypeError,KeyError,json.JSONDecodeError):
 }
 
 redis_managed_assert_compatible_image() {
-  local container="$1" role="$2" image modes
-  image="$(docker inspect --format '{{.Image}}' "$container")" || return 1
-  modes="$(docker image inspect --format '{{ index .Config.Labels "org.concord.redis-credential-modes" }}' "$image" 2>/dev/null || true)"
+  local container="$1" role="$2" modes
+  # Read the label the container inherited: under the containerd image store a
+  # preflight rebuild retags the image and its old ID stops resolving.
+  modes="$(docker inspect --type container --format '{{ index .Config.Labels "org.concord.redis-credential-modes" }}' "$container" 2>/dev/null || true)"
   [[ "$modes" == legacy,managed ]] || {
     echo "redis-managed: ${role} image lacks managed credential-mode rollback support; refusing before drain" >&2
     return 1
@@ -3670,7 +3677,7 @@ redis_managed_prepare_registered_apps() {
     service=control-plane
     redis_managed_replace_ready "$service" || return 1
     managed_compose_build build "$service" || return 1
-    (cd "$DEPLOY_DIR" && $COMPOSE_CMD create --no-deps --force-recreate "$service") || return 1
+    (cd "$DEPLOY_DIR" && $COMPOSE_CMD up --no-start --no-build --no-deps --force-recreate "$service") || return 1
     managed_egress_reconcile || return 1
     ids="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps -a -q "$service")" || return 1
     [[ "$ids" =~ ^[a-f0-9]{64}$ ]] || return 1
@@ -3704,7 +3711,7 @@ redis_managed_prepare_registered_apps() {
   }
   redis_managed_replace_ready "$candidate_service" || return 1
   managed_compose_build build "$candidate_service" || return 1
-  (cd "$DEPLOY_DIR" && $COMPOSE_CMD create --no-deps --force-recreate "$candidate_service") || return 1
+  (cd "$DEPLOY_DIR" && $COMPOSE_CMD up --no-start --no-build --no-deps --force-recreate "$candidate_service") || return 1
   managed_egress_reconcile || return 1
   ids="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps -a -q "$candidate_service")" || return 1
   [[ "$ids" =~ ^[a-f0-9]{64}$ ]] || return 1
@@ -3924,7 +3931,7 @@ redis_managed_image_preflight() {
   model="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD --profile services config --format json)" || return 1
   image_services+=(redis)
   for service in "${image_services[@]}"; do
-    image="$(python3 -c 'import json,sys; s=json.load(sys.stdin)["services"][sys.argv[1]]; print(s.get("image", ""))' "$service" <<<"$model")" || return 1
+    image="$(python3 -c 'import json,sys; m=json.load(sys.stdin); print(m["services"][sys.argv[1]].get("image") or m["name"] + "-" + sys.argv[1])' "$service" <<<"$model")" || return 1
     [[ -n "$image" ]] || { echo "redis-managed: selected ${service} image is unavailable in Compose model" >&2; return 1; }
     image_id="$(docker image inspect --format '{{.Id}}' "$image")" || {
       echo "redis-managed: selected ${service} image is unavailable locally after build/pull" >&2; return 1;
@@ -3997,7 +4004,7 @@ redis_managed_prepare_ram_state() {
     }
   done
   install -d -o 10004 -g 0 -m 2710 "$root" || return 1
-  install -d -o 10004 -g 10004 -m 0700 "$root/state" "$root/acks" \
+  install -d -o 10004 -g 10004 -m 00700 "$root/state" "$root/acks" \
     || return 1
   install -d -o 10004 -g "$REDIS_ACL_GID" -m 2710 "$root/acl" \
     || return 1
@@ -4222,7 +4229,7 @@ raise SystemExit(0 if valid and sys.argv[2]!=sys.argv[3] else 1)
   fi
   for service in control-plane "$media_service"; do
     redis_managed_replace_ready "$service" || return 1
-    (cd "$DEPLOY_DIR" && $COMPOSE_CMD create --no-deps --force-recreate "$service") || return 1
+    (cd "$DEPLOY_DIR" && $COMPOSE_CMD up --no-start --no-build --no-deps --force-recreate "$service") || return 1
     managed_egress_reconcile || return 1
   done
   redis_managed_register_stopped_apps "$media_service" || return 1
@@ -4354,7 +4361,7 @@ redis_managed_rebuild_locked() {
   for service in control-plane "$media_service"; do
     redis_managed_replace_ready "$service" || return 1
     managed_compose_build build "$service" || return 1
-    (cd "$DEPLOY_DIR" && $COMPOSE_CMD create --no-deps --force-recreate "$service") || return 1
+    (cd "$DEPLOY_DIR" && $COMPOSE_CMD up --no-start --no-build --no-deps --force-recreate "$service") || return 1
     managed_egress_reconcile || return 1
   done
   redis_managed_assert_same_rotation "$initial_status" || return 1
@@ -4404,7 +4411,7 @@ redis_managed_resume_stopped_rebuild() {
 
 redis_managed_restart_bound_stack() {
   local services service ids cp_running media_running status
-  local -a supporting=()
+  local -a supporting=() oneshot=()
   [[ ! -e "$REDIS_MANAGED_REBUILD_MARKER" && ! -L "$REDIS_MANAGED_REBUILD_MARKER" ]] || {
     echo 'redis-managed: interrupted rebuild requires redis-managed-rebuild --resume; refusing restart' >&2; return 1;
   }
@@ -4414,7 +4421,12 @@ redis_managed_restart_bound_stack() {
   while IFS= read -r service; do
     case "$service" in
       control-plane|media-plane|media-plane-blue|media-plane-green|redis-auth-controller|redis) ;;
-      postgres|minio|nats|coturn|ops-agent|pgadmin|redis-commander)
+      ops-agent)
+        # It exits 0 when metrics are disabled, which `start --wait` reports as a failure.
+        ids="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps -a -q "$service")" || return 1
+        [[ -z "$ids" ]] || oneshot+=("$service")
+        ;;
+      postgres|minio|nats|coturn|pgadmin|redis-commander)
         ids="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps -a -q "$service")" || return 1
         [[ -z "$ids" ]] || supporting+=("$service")
         ;;
@@ -4438,6 +4450,9 @@ redis_managed_restart_bound_stack() {
   (cd "$DEPLOY_DIR" && managed_compose_mutate start --wait --wait-timeout 180 redis) || return 1
   (cd "$DEPLOY_DIR" && managed_compose_mutate start --wait --wait-timeout 180 redis-auth-controller) || return 1
   (cd "$DEPLOY_DIR" && managed_compose_mutate start --wait --wait-timeout 180 "${supporting[@]}") || return 1
+  if (( ${#oneshot[@]} )); then
+    (cd "$DEPLOY_DIR" && managed_compose_mutate start "${oneshot[@]}") || return 1
+  fi
   redis_managed_resume_stopped_rebuild
 }
 

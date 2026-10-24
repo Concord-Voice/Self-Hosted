@@ -74,6 +74,9 @@ func pollManagedRedisWith(ctx context.Context, runtime *managedredis.Runtime, cl
 		refreshCancel()
 		if err != nil {
 			reportFailure("refresh")
+			if runtime.Stale(runtime.Now()) {
+				reportFailure("freshness")
+			}
 		} else {
 			ackCtx, ackCancel := context.WithTimeout(ctx, 5*time.Second)
 			if err := acknowledge(ackCtx, runtime, client); err != nil {
