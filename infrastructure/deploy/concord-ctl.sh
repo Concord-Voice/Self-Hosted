@@ -202,6 +202,9 @@ case "$REDIS_CREDENTIAL_MODE" in
         echo "redis-managed: ${_redis_uid} must be in 1..65535" >&2; exit 1
       fi
     done
+    [[ "$REDIS_CONTROL_UID" != "$REDIS_MEDIA_UID" ]] || {
+      echo 'redis-managed: REDIS_CONTROL_UID and REDIS_MEDIA_UID must differ; peer UID tells the ACK slots apart' >&2; exit 1;
+    }
     COMPOSE_REDIS_MANAGED_ARG=" -f ${DEPLOY_DIR}/docker-compose.redis-managed.yml"
     ;;
   *) echo 'redis-managed: REDIS_CREDENTIAL_MODE must be legacy or managed' >&2; exit 2 ;;
@@ -4160,6 +4163,26 @@ print(json.dumps({"operation":"register","rotationId":s["rotationId"],"instances
 # set, so their ACKs for the new target count. No container is created, stopped
 # or started. Each instance must be the slot's current binding and must hold an
 # accepted ACK proof from the prior rotation; anything else needs redis-managed-rebuild.
+redis_managed_rollback_locked() {
+  local ids
+  [[ $# -eq 0 ]] || { echo 'Usage: concord-ctl.sh redis-managed-rollback' >&2; return 2; }
+  # The controller exists only in the managed overlay, so a legacy `up` would
+  # leave it running. Stop every Redis client first, then remove the
+  # controller and stop Redis. The marker, journal and ACL stay as history.
+  (cd "$DEPLOY_DIR" && managed_compose_mutate stop control-plane) || return 1
+  (cd "$DEPLOY_DIR" && managed_compose_mutate stop media-plane media-plane-blue media-plane-green) || return 1
+  redis_managed_stopped_apps || return 1
+  (cd "$DEPLOY_DIR" && managed_compose_mutate stop redis-auth-controller) || return 1
+  (cd "$DEPLOY_DIR" && managed_compose_mutate rm -f redis-auth-controller) || return 1
+  (cd "$DEPLOY_DIR" && managed_compose_mutate stop redis) || return 1
+  ids="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps -a -q redis-auth-controller)" || return 1
+  [[ -z "$ids" ]] || { echo 'redis-managed: controller container remains; refusing to report rollback ready' >&2; return 1; }
+  ids="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps --status running -q redis)" || return 1
+  [[ -z "$ids" ]] || { echo 'redis-managed: Redis is still running; refusing to report rollback ready' >&2; return 1; }
+  echo 'redis-managed: apps and Redis stopped and the controller removed.'
+  echo 'Next: set REDIS_CREDENTIAL_MODE=legacy in both canonical writers, then run the approved legacy deploy.'
+}
+
 redis_managed_register_running_locked() {
   local status service ids hostname registration response
   local -a cp_hosts=() media_hosts=() cp_ids=() media_ids=()
@@ -4273,6 +4296,15 @@ raise SystemExit(0 if valid and sys.argv[2]!=sys.argv[3] else 1)
     fi
   fi
   for service in control-plane "$media_service"; do
+    if [[ "$recover" == 1 ]]; then
+      # A first activation that failed after the marker was promoted may have
+      # bound this slot's stopped candidate already. Reuse it: replacing an
+      # unacknowledged binding is refused.
+      local existing bound
+      existing="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps -a -q "$service")" || return 1
+      bound="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("bindings",{}).get(sys.argv[1],{}).get("containerId",""))' "$service" <<<"$status")" || return 1
+      [[ -n "$existing" && "$existing" == "$bound" ]] && continue
+    fi
     redis_managed_replace_ready "$service" || return 1
     (cd "$DEPLOY_DIR" && $COMPOSE_CMD up --no-start --no-build --no-deps --force-recreate "$service") || return 1
     managed_egress_reconcile || return 1
@@ -5117,7 +5149,7 @@ case "${1:-help}" in
     DEPLOY_LOCK_WAIT_SECS=90
     acquire_deploy_transaction_lock "$@"
     ;;
-  rebuild|stage-restore|restart|stop|docker-clean|activity-history-activate|activity-history-rollback|voice-enforcement-rollout|media-reap|media-legacy-pause|media-legacy-resume|redis-managed-prepare|redis-managed-rebuild|redis-managed-register-running|turn-managed-init-schema|turn-managed-bootstrap|turn-managed-add-candidate|turn-managed-promote|turn-managed-rollback|turn-managed-recover|turn-managed-discard-unrecorded|turn-managed-status)
+  rebuild|stage-restore|restart|stop|docker-clean|activity-history-activate|activity-history-rollback|voice-enforcement-rollout|media-reap|media-legacy-pause|media-legacy-resume|redis-managed-prepare|redis-managed-rebuild|redis-managed-register-running|redis-managed-rollback|turn-managed-init-schema|turn-managed-bootstrap|turn-managed-add-candidate|turn-managed-promote|turn-managed-rollback|turn-managed-recover|turn-managed-discard-unrecorded|turn-managed-status)
     # The two activity-history verbs belong here for the SAME reason the deploy
     # verbs do, and leaving them out was an omission rather than a decision: both
     # stop and start the control plane, and both then gate on health and image
@@ -5287,6 +5319,11 @@ case "${1:-help}" in
     [[ "$REDIS_CREDENTIAL_MODE" == managed ]] || { echo 'redis-managed-register-running requires REDIS_CREDENTIAL_MODE=managed' >&2; exit 2; }
     turn_managed_pair_guard || exit 1
     redis_managed_register_running_locked "${@:2}" || exit $?
+    ;;
+
+  redis-managed-rollback)
+    [[ "$REDIS_CREDENTIAL_MODE" == managed ]] || { echo 'redis-managed-rollback requires REDIS_CREDENTIAL_MODE=managed' >&2; exit 2; }
+    redis_managed_rollback_locked "${@:2}" || exit $?
     ;;
 
   turn-managed-init-schema|turn-managed-bootstrap|turn-managed-add-candidate|turn-managed-promote|turn-managed-rollback|turn-managed-recover|turn-managed-discard-unrecorded|turn-managed-status)
@@ -6860,6 +6897,7 @@ else:
     echo "                 Explicit stopped activation or reviewed recovery"
     echo "  redis-managed-rebuild [--resume]   Planned full app outage or resume bound stopped containers"
     echo "  redis-managed-register-running     Register the running single-media apps for an in-place rotation"
+    echo "  redis-managed-rollback             Stop managed Redis clients, remove the controller, stop Redis"
     echo "  turn-managed-{init-schema|bootstrap|add-candidate|promote|rollback|recover|discard-unrecorded|status} [--generation N]"
     echo "                 Managed TURN key custody (#3931). Key material is read from stdin only;"
     echo "                 the canonical writer pair must record TURN_CREDENTIAL_MODE=managed"

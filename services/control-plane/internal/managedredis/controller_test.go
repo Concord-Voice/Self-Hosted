@@ -213,6 +213,32 @@ func TestNewControllerRejectsReservedBootstrapUsernames(t *testing.T) {
 	}
 }
 
+func TestNewControllerRefusesSharedApplicationUID(t *testing.T) {
+	for _, mediaUID := range []uint32{1002, 1003} {
+		root := t.TempDir()
+		stateDir := filepath.Join(root, "state")
+		require.NoError(t, os.Mkdir(stateDir, 0o700))
+		_, err := NewController(ControllerOptions{
+			Admin:       &fakeRedisAdmin{users: map[string]bool{}},
+			ACLPath:     filepath.Join(root, "users.acl"),
+			JournalPath: filepath.Join(stateDir, "rotation.json"),
+			MarkerPath:  testMarkerPath(t, filepath.Join(stateDir, "rotation.json")),
+			Bootstrap: AdminBootstrap{
+				Version:  1,
+				Scope:    SecretScope{Project: "project-test", Environment: "prod", Path: "/redis", Name: "REDIS_ADMIN_BOOTSTRAP"},
+				Username: "cv_admin", Password: "synthetic-admin-password",
+			},
+			Now:          func() time.Time { return policyTestNow },
+			ExpectedUIDs: map[string]uint32{controlPlaneService: 1002, mediaPlaneService: mediaUID},
+		})
+		if mediaUID == 1002 {
+			require.ErrorIs(t, err, errController)
+		} else {
+			require.NoError(t, err)
+		}
+	}
+}
+
 func newControllerFixtureWithNow(t *testing.T, admin *fakeRedisAdmin, now func() time.Time) (*Controller, string) {
 	t.Helper()
 	root := t.TempDir()
@@ -2119,4 +2145,34 @@ func TestControllerRevokeExpiredKeepsTheDenyIntentWhenACLLoadFails(t *testing.T)
 	require.True(t, revoked)
 	require.ErrorIs(t, err, errController)
 	require.True(t, controller.RevocationPending(), "a failed load must leave the journaled deny intent for resume")
+}
+
+// A first activation that fails after its marker is promoted (candidate
+// creation, binding or start) must be recoverable with the same policy, but
+// only while nothing has been acknowledged or rotated since.
+func TestControllerPrepareRecoveryResumesAnUntouchedFirstActivation(t *testing.T) {
+	now := func() time.Time { return policyTestNow }
+	controller, aclPath := newControllerFixture(t, &fakeRedisAdmin{users: map[string]bool{}})
+	require.NoError(t, controller.PrepareInitial(initialSingleGenerationPolicy()))
+	bindControllerInstance(t, controller, controlPlaneService, "cp-initial") // the media bind never ran
+
+	restarted := restartControllerFixture(t, aclPath, now)
+	changed := initialSingleGenerationPolicy()
+	changed.Services[controlPlaneService].Generations[0].ValidUntil = policyTestNow.Add(2 * time.Hour)
+	require.Error(t, restarted.PrepareRecovery(changed), "only the exact activated policy resumes")
+	require.NoError(t, restarted.PrepareRecovery(initialSingleGenerationPolicy()))
+	state, rotation, _ := restarted.Status()
+	require.Equal(t, "prepared", state)
+	require.Equal(t, "rotation-11", rotation)
+	require.Equal(t, "cp-initial", restarted.BindingSnapshot()[controlPlaneService].InstanceID, "the partial binding is kept for the resume")
+
+	require.NoError(t, restarted.RegisterExpected(context.Background(), "rotation-11", map[string][]string{
+		controlPlaneService: {"cp-initial"}, mediaPlaneService: {"mp-initial"},
+	}, map[string]uint64{controlPlaneService: 11, mediaPlaneService: 11}))
+	recordControllerAck(t, restarted, controlPlaneService, 1002, AppliedAck{
+		Version: 1, RotationID: "rotation-11", Service: controlPlaneService,
+		InstanceID: "cp-initial", Generation: 11, Username: "cv_cp_11",
+	}) // one ACK keeps the phase prepared
+	acked := restartControllerFixture(t, aclPath, now)
+	require.Error(t, acked.PrepareRecovery(initialSingleGenerationPolicy()), "an acknowledged activation is no longer a failed first activation")
 }

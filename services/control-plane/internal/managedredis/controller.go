@@ -137,6 +137,11 @@ func NewController(options ControllerOptions) (*Controller, error) {
 			return nil, errController
 		}
 	}
+	// Peer-UID checks tell the ACK slots apart only when the images run as
+	// different users.
+	if options.ExpectedUIDs[controlPlaneService] == options.ExpectedUIDs[mediaPlaneService] {
+		return nil, errController
+	}
 	if info, err := os.Lstat(filepath.Dir(options.ACLPath)); err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return nil, errController
 	}
@@ -353,6 +358,12 @@ func (c *Controller) PrepareRecovery(policy Policy) error {
 		len(c.expected) == 0 && len(c.acks) == 0 {
 		return nil
 	}
+	// A first activation that failed after its marker was promoted leaves the
+	// initial journal untouched; recovering with that same policy resumes it
+	// instead of demanding a re-key.
+	if samePolicy(c.policy, policy) && c.untouchedFirstActivationLocked() {
+		return nil
+	}
 	if policy.RotationID == c.policy.RotationID {
 		return errController
 	}
@@ -378,6 +389,19 @@ func (c *Controller) PrepareRecovery(policy Policy) error {
 	}
 	c.applyJournalLocked(j)
 	return c.completeRecoveryIntentLocked(&j)
+}
+
+func (c *Controller) untouchedFirstActivationLocked() bool {
+	if c.recoveryAt.IsZero() && c.state == "prepared" && c.intent == "" && c.failureCode == "" &&
+		singleGenerationPolicy(c.policy) && c.priorRotationID == "" && len(c.priorExpected) == 0 && len(c.priorAcks) == 0 {
+		for _, service := range []string{controlPlaneService, mediaPlaneService} {
+			if len(c.acks[service]) != 0 || c.revoked[service].Generation != 0 {
+				return false
+			}
+		}
+		return true
+	}
+	return false
 }
 
 func (c *Controller) resumePersistedRecoveryIntentLocked(policy Policy) (bool, error) {

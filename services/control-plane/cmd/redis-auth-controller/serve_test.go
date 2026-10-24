@@ -277,11 +277,11 @@ func TestServeRuntimeRestoresStateBeforeOpeningSocketsAndStopsCleanly(t *testing
 	seedBootstrap.Password = strings.Repeat("o", 24)
 	uid := uint32(1002)
 	input := prepareInputs{project: policy.Scope.Project, environment: policy.Scope.Environment, path: policy.Scope.Path,
-		controlUID: uid, mediaUID: uid, aclGID: aclGID}
+		controlUID: uid, mediaUID: uid + 1, aclGID: aclGID}
 	seed, err := managedredis.NewController(managedredis.ControllerOptions{
 		Admin: &cliRedisAdmin{}, ACLPath: filepath.Join(aclDir, "users.acl"), JournalPath: filepath.Join(stateDir, "rotation.json"),
 		MarkerPath: markerPath, Bootstrap: seedBootstrap, Now: time.Now,
-		ExpectedUIDs: map[string]uint32{"control-plane": uid, "media-plane": uid},
+		ExpectedUIDs: map[string]uint32{"control-plane": input.controlUID, "media-plane": input.mediaUID},
 		ACLUID:       os.Geteuid(), ACLGID: input.aclGID,
 	})
 	require.NoError(t, err)
