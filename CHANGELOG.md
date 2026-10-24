@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
 ## [Unreleased]
 
+Self-hosted calls that go through the bundled TURN relay no longer fail when the
+relay and the media server share one public address.
+
 A Wing subscription can now share Supersonic with one friend. Invite a friend
 from Settings ▸ Subscription; they get Supersonic once they accept, for as long
 as your Wing is active. You can change your +1 once every 30 days.
