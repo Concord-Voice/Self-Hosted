@@ -103,7 +103,7 @@ def check_scan_consumer_policies(pr_ci, workflows, main_ci, nightly_ci):
     codeql, semgrep = workflows["codeql.yml"], workflows["semgrep.yml"]
     eslint, govuln = workflows["eslint-sarif.yml"], workflows["govulncheck.yml"]
     # Self-Hosted: sonarcloud.yml arrives with the Sonar wiring (F7), so it is
-    # optional during bootstrap; main-ci retains the non-desktop hotfix gates.
+    # optional during bootstrap. main-ci.yml stays with Desktop (main_ci is None).
     build, sonar = workflows["build.yml"], workflows.get("sonarcloud.yml")
 
     def call_inputs(workflow, owner):
