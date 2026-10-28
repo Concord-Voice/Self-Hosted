@@ -202,7 +202,8 @@ case "$REDIS_CREDENTIAL_MODE" in
         echo "redis-managed: ${_redis_uid} must be in 1..65535" >&2; exit 1
       fi
     done
-    [[ "$REDIS_CONTROL_UID" != "$REDIS_MEDIA_UID" ]] || {
+    # Builtin test compares in base 10, so 010006 equals 10006.
+    [ "$REDIS_CONTROL_UID" -ne "$REDIS_MEDIA_UID" ] || {
       echo 'redis-managed: REDIS_CONTROL_UID and REDIS_MEDIA_UID must differ; peer UID tells the ACK slots apart' >&2; exit 1;
     }
     COMPOSE_REDIS_MANAGED_ARG=" -f ${DEPLOY_DIR}/docker-compose.redis-managed.yml"
@@ -760,6 +761,17 @@ redis_managed_controller_host_identity() {
   [[ "$lock_status" =~ ^redis-auth-controller[[:space:]]+(L|LK)[[:space:]] ]] || {
     echo 'redis-managed: host controller password is not locked' >&2; return 1;
   }
+  # The app identity files are owned by the image UIDs, so no host account may
+  # hold either one.
+  local app_uid
+  for app_uid in "$REDIS_CONTROL_UID" "$REDIS_MEDIA_UID"; do
+    enumerated_user="$(getent passwd 2>/dev/null | awk -F: -v uid="$app_uid" '$3 == uid { print }')" || {
+      echo 'redis-managed: cannot enumerate host UID reservations' >&2; return 1;
+    }
+    [[ -z "$enumerated_user" ]] || {
+      echo 'redis-managed: a host account holds an app UID that owns a provider identity' >&2; return 1;
+    }
+  done
 }
 
 redis_managed_host_preflight() {
