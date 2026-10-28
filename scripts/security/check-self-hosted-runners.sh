@@ -10,6 +10,8 @@
 #   1  — one or more self-hosted jobs have labels not in the allowlist.
 #   2  — one or more runs-on: values are expressions (e.g. ${{ matrix.x }})
 #        and cannot be statically verified. Always a warn-worthy case.
+#   10 — workflow enumeration/parsing failed (e.g. PyYAML missing); refuses
+#        to report clean.
 #
 # Runbook: [internal]supply-chain-defense.md. Spec: #715.
 
