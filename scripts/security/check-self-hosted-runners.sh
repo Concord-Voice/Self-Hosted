@@ -28,7 +28,9 @@ enumerate_runs_on() {
   local wf
   for wf in "$WORKFLOWS_GLOB"/*.yml "$WORKFLOWS_GLOB"/*.yaml; do
     [[ -f "$wf" ]] || continue
-    python3 - "$wf" <<'PY'
+    # The caller's `||` disables set -e here and the loop returns its last
+    # command's status, so a parser failure must leave the function itself.
+    python3 - "$wf" <<'PY' || return
 import json, re, sys
 try:
     import yaml

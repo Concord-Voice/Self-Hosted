@@ -553,6 +553,19 @@ test_runner_linter_expression_unparseable_warns() {
   [[ $exit_code -eq 2 ]] || { echo "expected exit 2 on expression runner, got $exit_code" >&2; return 1; }
 }
 
+test_runner_linter_missing_pyyaml_refuses_clean() {
+  local tmpdir; tmpdir=$(setup_workflow_test_repo "clean.yml")
+  trap "rm -rf $tmpdir" RETURN
+  cd "$tmpdir"
+  # Shadow PyYAML so the parser hits its ImportError branch.
+  printf 'raise ImportError\n' > yaml.py
+
+  local output exit_code=0
+  output=$(PYTHONPATH='' "$RUNNER_LINTER" 2>&1) || exit_code=$?
+  [[ $exit_code -eq 10 ]] || { echo "expected exit 10 without PyYAML, got $exit_code: $output" >&2; return 1; }
+  echo "$output" | grep -q 'refusing to report clean' || { echo "expected refusal line, got: $output" >&2; return 1; }
+}
+
 # Self-Hosted: the IOC-list refresh tooling (regenerate-ioc-list.sh,
 # check-ioc-refresh-pr.sh, refresh-ioc-list.yml) runs from the Hosted
 # repository, which keeps these tests.
