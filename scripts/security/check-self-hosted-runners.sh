@@ -10,6 +10,8 @@
 #   1  — one or more self-hosted jobs have labels not in the allowlist.
 #   2  — one or more runs-on: values are expressions (e.g. ${{ matrix.x }})
 #        and cannot be statically verified. Always a warn-worthy case.
+#   10 — workflow enumeration/parsing failed (e.g. PyYAML missing); refuses
+#        to report clean.
 #
 # Runbook: [internal]supply-chain-defense.md. Spec: #715.
 
@@ -28,7 +30,9 @@ enumerate_runs_on() {
   local wf
   for wf in "$WORKFLOWS_GLOB"/*.yml "$WORKFLOWS_GLOB"/*.yaml; do
     [[ -f "$wf" ]] || continue
-    python3 - "$wf" <<'PY'
+    # The caller's `||` disables set -e here and the loop returns its last
+    # command's status, so a parser failure must leave the function itself.
+    python3 - "$wf" <<'PY' || return
 import json, re, sys
 try:
     import yaml
