@@ -69,6 +69,7 @@ gate can learn from your voice.
 
 ### Fixed
 
+- **Billing:** Blocking someone ends a Wing seat between you, whichever side blocks. Unfriending or blocking also cancels a pending seat invite at once; unfriending alone keeps an active seat ([#4172](internal development reference omitted)).
 - **Billing:** Switching from a monthly to a yearly plan works again. It credits the unused part of the month and keeps your billing date.
 - **Billing:** Subscribing twice at the same time no longer creates a second subscription.
 - **Billing:** Opening billing no longer withdraws a booked plan change. Cancellation keeps access through the paid period, and the plan card shows your actual price.
