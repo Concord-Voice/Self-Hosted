@@ -118,6 +118,7 @@ gate can learn from your voice.
 - **Server:** Animated image uploads use less memory ([#3981](internal development reference omitted)).
 - **Self-hosting:** Calls through the bundled TURN relay work when the relay and media server share one public address. An IPv6 loopback rule no longer blocks IPv4 peers.
 - **Self-hosting:** The offline ingress verifier refuses ambiguous NAT address and source-port pools instead of reading them as fixed translations ([#4180](internal development reference omitted)).
+- **Operations:** A production deploy keeps running on the server when its SSH tunnel drops mid-rollout, and the deploy reconnects to that run instead of failing ([#4178](internal development reference omitted)).
 
 ### Security
 
