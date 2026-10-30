@@ -23,6 +23,11 @@ type rowFields struct {
 	Plan, Interval    sql.NullString
 	Tier              string // entitlements.TierPremium or TierFree
 	FoundersRate      bool
+	UnitAmount        sql.NullInt64
+	ScheduleID        sql.NullString
+	PendingPlan       sql.NullString
+	PendingInterval   sql.NullString
+	PendingChangeAt   sql.NullTime
 	CancelAtPeriodEnd bool
 	CancelAt          sql.NullTime
 	CustomerID        string
@@ -57,6 +62,9 @@ func classify(sub *stripe.Subscription) (rowFields, error) {
 	if sub.CancelAt > 0 {
 		out.CancelAt = sql.NullTime{Time: time.Unix(sub.CancelAt, 0).UTC(), Valid: true}
 	}
+	if sub.Schedule != nil {
+		out.ScheduleID = sql.NullString{String: sub.Schedule.ID, Valid: sub.Schedule.ID != ""}
+	}
 
 	out.Plan, out.Interval, out.Malformed = itemFields(first)
 	if len(sub.Items.Data) != 1 && out.Malformed == "" {
@@ -65,8 +73,22 @@ func classify(sub *stripe.Subscription) (rowFields, error) {
 	out.Tier = entitlements.TierFree
 	if out.Malformed == "" {
 		out.Tier = entitlements.TierPremium
+		out.UnitAmount = chargedUnitAmount(first.Price, out.FoundersRate)
 	}
 	return out, nil
+}
+
+// chargedUnitAmount is the USD amount the item charges per period, after the
+// founders discount, or NULL when the price is not a known USD amount.
+func chargedUnitAmount(price *stripe.Price, founders bool) sql.NullInt64 {
+	if price == nil || price.Currency != stripe.CurrencyUSD || price.UnitAmount < 0 {
+		return sql.NullInt64{}
+	}
+	amount := price.UnitAmount
+	if founders {
+		amount = foundersUnitAmount(amount)
+	}
+	return sql.NullInt64{Int64: amount, Valid: true}
 }
 
 // itemFields reads plan and interval from the item's price and reports why the

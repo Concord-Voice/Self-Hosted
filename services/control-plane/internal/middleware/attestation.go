@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -134,16 +135,18 @@ func loadAndAuthenticateToken(
 	// CV-CAN-013: reject a token whose bound minting user does not match the
 	// authenticated caller, so a token issued for one user cannot satisfy
 	// enforcement for another. rec.UserID stores HashUserID(user_id), so the
-	// caller's id is hashed the same way before comparison. Legacy records
-	// (empty UserID, minted before the binding existed) are treated as unbound
-	// (accept) so a rolling deploy does not invalidate in-flight tokens.
+	// caller's id is hashed the same way before comparison. A record with no
+	// bound user is refused too: every mint path has set UserID since
+	// CV-CAN-013, so an unbound record could only be a pre-binding leftover,
+	// and accepting it would let it satisfy enforcement for any user (#4211
+	// red-team-critical F3). The cost is one re-attest for such a client.
 	//
 	// This is a post-load path: the token has already been authenticated
 	// (constant-time match above), so rec.Version is a trustworthy attribution
 	// and we reject via rejectAttForVersion (mirroring the revoked path) so
 	// the attestation.rejected log retains the release attribution operators
 	// need for CV-CAN-013 investigations.
-	if rec.UserID != "" && rec.UserID != attestation.HashUserID(c.GetString("user_id")) {
+	if rec.UserID == "" || rec.UserID != attestation.HashUserID(c.GetString("user_id")) {
 		rejectAttForVersion(c, log, rdb, attestation.ErrInvalid, rec.Version)
 		return attestation.TokenRecord{}, false
 	}
@@ -168,6 +171,10 @@ func ensureNotRevoked(
 	version string,
 ) bool {
 	isRevoked, err := rdb.SIsMember(ctx, revokedVersionsKey, version).Result()
+	if err == nil && !isRevoked && strings.HasPrefix(version, "ios-") {
+		// iOS revocations live in a set with no TTL (ADR-0010 D17).
+		isRevoked, err = rdb.SIsMember(ctx, attestation.RevokedIOSVersionsKey, version).Result()
+	}
 	if err != nil {
 		c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
 			"error": "attestation registry temporarily unavailable",

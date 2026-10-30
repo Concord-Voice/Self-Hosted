@@ -577,6 +577,41 @@ describe('ws-events schemas — happy path (one per event)', () => {
     expect(result.success).toBe(true);
   });
 
+  // #4179: call_id scopes a terminal event to the call it belongs to.
+  it('DMVoiceStateUpdateSchema accepts a UUID call_id and preserves it', () => {
+    const result = DMVoiceStateUpdateSchema.safeParse({
+      type: 'dm_voice_state_update',
+      data: { conversation_id: UUID_A, action: 'room_empty', call_id: UUID_C },
+    });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.data.call_id).toBe(UUID_C);
+  });
+
+  it('DMVoiceStateUpdateSchema treats call_id as optional', () => {
+    const result = DMVoiceStateUpdateSchema.safeParse({
+      type: 'dm_voice_state_update',
+      data: { conversation_id: UUID_A, action: 'left', user_id: UUID_B },
+    });
+    expect(result.success).toBe(true);
+    if (result.success) expect(result.data.data.call_id).toBeUndefined();
+  });
+
+  it.each([
+    ['a non-UUID string', 'not-a-uuid'],
+    ['an empty string', ''],
+    ['a number', 42],
+    ['null', null],
+  ])('DMVoiceStateUpdateSchema rejects call_id that is %s', (_label, callId) => {
+    const result = DMVoiceStateUpdateSchema.safeParse({
+      type: 'dm_voice_state_update',
+      data: { conversation_id: UUID_A, action: 'room_empty', call_id: callId },
+    });
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues.some((issue) => issue.path.includes('call_id'))).toBe(true);
+    }
+  });
+
   // ── DM voice call ring (4 events) — #1209 ──────────────────────────
 
   it('DMVoiceCallInvitedSchema accepts a canonical invited envelope', () => {
@@ -2508,10 +2543,10 @@ describe('Server role events (#2359)', () => {
     }
   });
 
-  it('WebSocketEventSchema has exactly 83 members', () => {
+  it('WebSocketEventSchema has exactly 85 members', () => {
     // Pins the count quoted in [internal]rules/frontend.md and in the ws-events.ts
     // header, so a future addition cannot silently drift the docs.
-    expect(WebSocketEventSchema.options).toHaveLength(83);
+    expect(WebSocketEventSchema.options).toHaveLength(85);
   });
 });
 
@@ -2650,6 +2685,45 @@ describe('Control-socket token renewal ack (auth_renew_result)', () => {
   it('WebSocketEventSchema rejects an auth_renew_result envelope with a non-boolean ok', () => {
     expect(
       WebSocketEventSchema.safeParse({ type: 'auth_renew_result', data: { ok: 'yes' } }).success
+    ).toBe(false);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════
+// Wing seat events (#2033 PR-5)
+// ════════════════════════════════════════════════════════════════════════
+
+describe('Wing seat events (#2033 PR-5)', () => {
+  it('parses subscription_seat_invite with ids only', () => {
+    const result = WebSocketEventSchema.safeParse({
+      type: 'subscription_seat_invite',
+      data: { invite_id: 'seat-1', expires_at: '2026-10-31T00:00:00Z' },
+    });
+    expect(result.success).toBe(true);
+  });
+
+  it('parses subscription_seat_updated for every seat state', () => {
+    for (const state of ['pending', 'active', 'declined', 'expired', 'revoked', 'left']) {
+      const result = WebSocketEventSchema.safeParse({
+        type: 'subscription_seat_updated',
+        data: { seat_id: 'seat-1', state },
+      });
+      expect(result.success, state).toBe(true);
+    }
+  });
+
+  it('rejects an unknown seat state and a missing id', () => {
+    expect(
+      WebSocketEventSchema.safeParse({
+        type: 'subscription_seat_updated',
+        data: { seat_id: 'seat-1', state: 'gone' },
+      }).success
+    ).toBe(false);
+    expect(
+      WebSocketEventSchema.safeParse({
+        type: 'subscription_seat_invite',
+        data: { expires_at: '2026-10-31T00:00:00Z' },
+      }).success
     ).toBe(false);
   });
 });

@@ -275,7 +275,7 @@ func TestClientVersionLoad(t *testing.T) {
 
 func TestClientVersionValidationRejectsMalformedValuesInEveryEnvironment(t *testing.T) {
 	for _, environment := range []string{"development", "staging", "production"} {
-		for _, version := range []string{"0.2", " 0.2.44 "} {
+		for _, version := range []string{"0.2", " 0.2.44 ", "1.0.0-pilot.0"} {
 			t.Run(environment+"/"+version, func(t *testing.T) {
 				cfg := &Config{Environment: environment, ClientMinVersion: version}
 
@@ -1801,4 +1801,19 @@ func TestLoad_SelfHostedSSOStillValidatesCredentials(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestParseAppAttestAppIDs(t *testing.T) {
+	require.Nil(t, parseAppAttestAppIDs(""))
+	require.Equal(t, []string{"ABCDE12345.com.example.app", "ABCDE12345.com.example.beta"},
+		parseAppAttestAppIDs(" ABCDE12345.com.example.app, ,ABCDE12345.com.example.beta "))
+}
+
+func TestValidateAppAttest(t *testing.T) {
+	require.NoError(t, (&Config{}).validateAppAttest())
+	require.NoError(t, (&Config{AppAttestAppIDs: []string{"ABCDE12345.com.example.app"}, AppAttestAllowDevelopment: true, Environment: "development"}).validateAppAttest())
+	require.ErrorContains(t, (&Config{AppAttestAppIDs: []string{"com.example.app"}}).validateAppAttest(), "TEAMID.bundle.id")
+	require.ErrorContains(t, (&Config{AppAttestAllowDevelopment: true, Environment: "production"}).validateAppAttest(), "APP_ATTEST_ALLOW_DEVELOPMENT")
+	// The check runs even with attestation off.
+	require.Error(t, (&Config{AppAttestAppIDs: []string{"bad"}}).validateAttestation())
 }

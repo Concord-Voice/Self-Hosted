@@ -1,8 +1,8 @@
 # Concord MinIO Source Publication and Cutover Gate
 
-> **Status:** Phase 1 complete; consumer pinned; Phase 2 live cutover complete (2026-10-01)
+> **Status:** Existing release published, consumed and cut over (2026-10-01); #3716/#3482 compiler and builder refresh not yet published or consumed
 > **Owner:** Concord Voice operations
-> **Last updated:** 2026-10-16 (publisher Engine prerequisite updated; historical release and cutover receipts retained)
+> **Last updated:** 2026-10-25 (Go 1.26.10 and BuildKit 0.34.1 recipe; historical publication and cutover receipts retained)
 > **Build record:**
 > [`infrastructure/docker/minio/SOURCE-BUILD.md`](../../infrastructure/docker/minio/SOURCE-BUILD.md)
 
@@ -32,8 +32,9 @@ the published digests exist.
 A separately reviewed, disposable rehearsal must also pass against the then-current
 deployment.
 
-**The `docker-compose.yml` clause is spent** — see the correction banner above. Read the
-remaining Phase 2 language as covering the live container only.
+For the release cut over on 2026-10-01, the `docker-compose.yml` change is
+complete. A new derivative still requires its own reviewed consumer update
+under § 4 before its separately authorized live cutover under § 5.
 
 The container is disposable. The data is not.
 
@@ -41,7 +42,7 @@ This procedure never authorizes:
 
 - an unreviewed patch to the upstream MinIO tree; the sole approved dependency
   exceptions are limited to #3441 and #3469, and to #3527, #3528 and
-  #3530–#3534, as described below
+  #3530–#3534, with the compiler-only #3716 continuation described below
 - publication or use of `latest`
 - a fallback to Docker Hub or an unrelated third-party image
 - a change to the current static SigV4, internal-only, no-STS authentication
@@ -52,26 +53,62 @@ The general policy remains: any source patch or authentication-model change
 needs its own design, security, and legal review. The approved design exception
 covers two dependency-only derivatives of this upstream commit: the first for
 #3441 and #3469, and a second for #3527, #3528 and #3530–#3534. Each changes
-only `go.mod` and `go.sum` and uses the pinned Go 1.26.8 builder. The second
-adds nine module bumps to the first derivative's two and is accompanied by an
+only `go.mod` and `go.sum`; both originally used the pinned Go 1.26.8 builder.
+The second adds nine module bumps to the first derivative's two and is accompanied by an
 OpenVEX not-affected record for the findings that remain. The record is bound to
 platform image digests. The module and identity values for both
 are in
 [`SOURCE-BUILD.md`](../../infrastructure/docker/minio/SOURCE-BUILD.md). Required
 security review and recorded legal approval remain gates before publication
-dispatch. The remaining #3527 recipe corrects Thrift to v0.25.0 while retaining
-the pinned Go 1.26.8 builder and the other twelve reviewed module versions. It
-is an unpublished intermediate; the separate #3716 compiler correction must
-produce the final reviewed recipe before the next publication is requested.
-The scoped #3527 proposal in `REVIEW.md` requires pre-merge source, binary,
-Parquet and contract evidence plus explicit exact-head security/deployment
-acceptance. If superseded unpublished, record that the intermediate publisher
-was not executed; the final publication validates only the final recipe. This
-publisher disposition does not silently defer scan or symbol evidence gaps.
+dispatch. The #3527 Thrift 0.25.0 intermediate
+`ee1b8c5b1ed7`, built with Go 1.26.8, is superseded unpublished; its privileged
+publisher execution was not performed. The #3716 continuation preserves all
+thirteen module versions and `go 1.26.0`, changes only the toolchain directive
+to `go1.26.10`, and pins the Go 1.26.10 builder. Its new synthetic commit and
+archive checksums are recorded in `SOURCE-BUILD.md`.
+
+The current recipe is
+`RELEASE.2025-10-15T17-29-55Z.CONCORD.512ec76c0c95`. It is not a publication
+receipt. The integrated #3482 recipe uses the verified BuildKit 0.34.1 pin in
+`SOURCE-BUILD.md`, retaining the same source/archive, compiler and module
+identities. The final #3716/#3482 proposal in `REVIEW.md` requires explicit final-head
+security/deployment acceptance of any post-merge publisher-runtime validation,
+independent source replay, new-binary and bounded Range/Parquet evidence,
+actual publisher-step contract tests, and fresh scans/symbol evidence or
+explicit dispositions. The #3527 and #3692 dispositions do not transfer
+automatically to the final integrated recipe.
+This proposal supplies neither legal approval nor dispatch authorization.
+
+The final recipe's independent source replay, native amd64 console/S3 checks,
+Parquet tests and compiler contracts passed. Both architecture binaries report
+Go 1.26.10. Fresh Trivy scans omit the two targeted compiler findings and
+retain twelve findings per binary; historical conditional dispositions do not
+attest the current fleet. govulncheck, native arm64 execution and privileged
+publisher/image evidence remain incomplete. These local results are not a
+publication receipt or final reviewer acceptance.
+
+Separate [BuildKit artifact evidence](../superpowers/specs/2026-10-25-3482-buildkit-artifact-evidence.md)
+covers both pinned variants and both architectures: the eight extracted binaries
+report containerd/v2 2.4.1 and Go 1.26.10, with positive binary scans omitting both
+#3482 target CVEs. Six findings per client and seven per daemon remain, including
+HIGH findings. The same-database amd64 binary comparison found no introduced
+advisory/component pairs against the corresponding old images; retained findings
+still require security disposition, and no arm64 baseline or full-image comparison
+is claimed.
+This evidence does not establish a clean full-image scan, Buildx/runtime
+compatibility or execution of the integrated publisher recipe. Those execution
+results remain **UNVERIFIED**. Retain final-recipe publisher evidence from its
+next separately authorized protected-main publication, after explicit exact-head
+security/deployment acceptance of the proposed boundary. The rootless managed
+builder's native-network proof and host transition follow their separate
+[commissioning runbook](managed-egress.md); publisher evidence cannot replace them.
+
 The `88c88a5bea7d` publication receipt remains historical evidence, and the
-shared Compose consumer still uses `823f9aa2bd62`. Neither receipt validates
-the new intermediate binaries or authorizes their publication. No application
-edits, authentication changes, or live cutover are authorized by the exception.
+shared Compose consumer still uses `823f9aa2bd62`. Neither validates the new
+binaries. No application edits, authentication changes or live cutover are
+authorized by this compiler continuation. New published platform digests must
+receive fresh measurements before the digest-bound OpenVEX products or shared
+Compose consumer change.
 
 A design exception, a not-affected record or generic automated-batch approval
 does not supply legal approval. Record the release-specific approval before any
@@ -94,15 +131,56 @@ daemon, failed query or invalid response stops the job before registry
 credentials are supplied. The exact-main admission remains required; a skipped
 branch dispatch does not validate the publisher.
 
-Hosted amd64 jobs only verify their preinstalled daemon. The ephemeral native
+Hosted amd64 publish and finalize jobs install official Docker CE on fixed
+`ubuntu-24.04` before their unchanged guards. Install or startup failure stops
+the job before credentials or Engine registry effects. The ephemeral native
 arm64 job installs Docker CE from Docker's official signed Ubuntu apt repository,
 checks daemon startup, then runs the guard as root before root Docker login.
 That installation is confined to the runner; the existing 15-minute timeout is
 unchanged. Installation time and cost need a real run.
 
-Production/staging Docker server inventories, applicable Blacksmith local-Engine
-and remote-BuildKit inventories, and successful guarded publisher runs with
-sanitized amd64 and native arm64 server versions remain outstanding. A local
+The MinIO bootstrap pins Docker's primary signing identity to
+`9DC858229FC7DD38854AE2D88D81803C0EBFCD88`, independently recorded in
+[Docker's reviewed installation documentation](https://github.com/docker/docs/blob/d813acb6e172a9af209c4acdc0d6c7c03d969aa2/engine/install/ubuntu.md).
+Before installing the downloaded keyring or adding the repository, GPG must
+report exactly one primary key with that fingerprint. Additional primary keys,
+verification failures and unexpected identities refuse. The Signed-By field
+also selects that fingerprint. Apt's signed metadata and package-hash chain then
+authenticate package bytes; this does not claim protection from compromise of
+Docker's legitimate signing key.
+
+All three MinIO jobs use Ubuntu 24.04 (native arm64 uses `ubuntu-24.04-arm`) and
+install this reviewed package set with automatic recommends disabled:
+
+| Package | Exact Noble version |
+| --- | --- |
+| docker-ce | `5:29.9.2-1~ubuntu.24.04~noble` |
+| docker-ce-cli | `5:29.9.2-1~ubuntu.24.04~noble` |
+| docker-ce-rootless-extras | `5:29.9.2-1~ubuntu.24.04~noble` |
+| containerd.io | `2.4.2-3~ubuntu.24.04~noble` |
+| docker-buildx-plugin | `0.36.1-1~ubuntu.24.04~noble` |
+| docker-compose-plugin | `5.5.0-1~ubuntu.24.04~noble` |
+
+Missing versions refuse; do not silently substitute latest packages or trust a
+new key. Refreshes require source review. These versions are grounded in the East
+operator's package inventory and transaction; fresh native runner availability
+is established only by actual protected preflight execution.
+
+The owner-only protected `docker-runner-inventory.yml` also executes the actual
+MinIO installation and admission blocks on their matching runner profiles. Its
+helper allowlists only the three publisher jobs and refuses runner drift,
+missing/conditional/advisory guards or reordered installation. The probe runs
+neither registry login nor build/push/promotion steps and grants no registry-write
+permission. Successful Engine probes satisfy only the Engine-install/admission
+portion of #3692; final-image/compiler/runtime/publication evidence remains under
+#3716/#3482 and this runbook's separate release gates.
+
+East production has a protected Server 29.9.2 receipt in
+[run 40831252269](internal development reference omitted).
+Buildtools [run 40829456877](internal development reference omitted)
+admitted 29.9.2 on amd64 and native arm64. West's operator reported Docker
+unavailable on sudo's command path. Applicable Blacksmith local-Engine/remote-
+BuildKit inventories and changed MinIO publisher evidence remain outstanding. A local
 Engine version does not certify a remote BuildKit service. Repository tests and
 the historical publication/cutover receipts below do not establish those facts
 or a deployed Engine upgrade. Affected managed hosts require separate

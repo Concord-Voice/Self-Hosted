@@ -30,6 +30,8 @@ import (
 const (
 	customerCreatePath = "/v1/customers"
 	bodyWingYearly     = `{"plan":"wing","interval":"year"}`
+	// Supersonic is the only plan with a trial, so trial tests buy it.
+	bodySupersonicMonthly = `{"plan":"supersonic","interval":"month"}`
 )
 
 type checkoutEnv struct {
@@ -104,25 +106,26 @@ func TestCheckout_CreatesSessionWithExpectedParams(t *testing.T) {
 	require.Len(t, sessions, 1)
 	f := sessions[0].Form
 	want := map[string]string{
-		"mode":                            "subscription",
-		"customer":                        cus,
-		"client_reference_id":             user.String(),
-		"line_items[0][price]":            "price_WY",
-		"line_items[0][quantity]":         "1",
-		"allowed_payment_method_types[0]": "card",
-		"adaptive_pricing[enabled]":       "false",
+		"mode":                                         "subscription",
+		"customer":                                     cus,
+		"client_reference_id":                          user.String(),
+		"line_items[0][price]":                         "price_WY",
+		"line_items[0][quantity]":                      "1",
+		"allowed_payment_method_types[0]":              "card",
+		"payment_method_collection":                    "always",
+		"adaptive_pricing[enabled]":                    "false",
 		"subscription_data[metadata][concord_user_id]": user.String(),
 		"subscription_data[metadata][concord_env]":     testEnvironment,
 		"subscription_data[metadata][concord_plan]":    PlanWing,
-		"success_url":          ReturnURLCheckoutSuccess,
-		"cancel_url":           ReturnURLCheckoutCancel,
-		"discounts[0][coupon]": CouponFoundersID,
+		"success_url":                                  ReturnURLCheckoutSuccess,
+		"cancel_url":                                   ReturnURLCheckoutCancel,
+		"discounts[0][coupon]":                         CouponFoundersID,
 	}
 	want["expires_at"] = strconv.FormatInt(env.Now.Add(35*time.Minute).Unix(), 10)
 	for k, v := range want {
 		assert.Equal(t, v, f.Get(k), "form field %s", k)
 	}
-	for _, absent := range []string{"allow_promotion_codes", "automatic_tax[enabled]", "billing_address_collection", "customer_update[address]"} {
+	for _, absent := range []string{"subscription_data[trial_period_days]", "allow_promotion_codes", "automatic_tax[enabled]", "billing_address_collection", "customer_update[address]"} {
 		assert.False(t, f.Has(absent), "%s is not sent", absent)
 	}
 }
@@ -139,6 +142,40 @@ func TestCheckout_ReusesMappingAndStampsIt(t *testing.T) {
 	require.Len(t, sessions, 1)
 	assert.Equal(t, "cus_existing", sessions[0].Form.Get("customer"))
 	assert.NotNil(t, lastCheckoutAt(t, env, user))
+}
+
+func TestCheckout_CodeGrantDoesNotConsumeTrial(t *testing.T) {
+	env := newCheckoutEnv(t, foundersConfig(config.BillingPurchaseModeOn))
+	user := dbtest.CreateUser(t, env.DB)
+	seedLiveCodeSub(t, env.DB, user)
+
+	require.Equal(t, http.StatusCreated, postCheckout(env.Svc, user, bodySupersonicMonthly).Code)
+	sessions := env.Fake.requestsTo(http.MethodPost, sessionsListPath)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "30", sessions[0].Form.Get("subscription_data[trial_period_days]"))
+}
+
+// Only Supersonic carries the trial: an eligible account buying Wing starts paid.
+func TestCheckout_WingHasNoTrial(t *testing.T) {
+	env := newCheckoutEnv(t, foundersConfig(config.BillingPurchaseModeOn))
+	user := dbtest.CreateUser(t, env.DB)
+
+	require.Equal(t, http.StatusCreated, postCheckout(env.Svc, user, `{"plan":"wing","interval":"month"}`).Code)
+	sessions := env.Fake.requestsTo(http.MethodPost, sessionsListPath)
+	require.Len(t, sessions, 1)
+	assert.False(t, sessions[0].Form.Has("subscription_data[trial_period_days]"), "Wing never gets a trial")
+}
+
+func TestCheckout_HistoryReadFailureFailsClosed(t *testing.T) {
+	env := newCheckoutEnv(t, config.BillingConfig{PurchaseMode: config.BillingPurchaseModeOn})
+	user := dbtest.CreateUser(t, env.DB)
+	broken, err := sql.Open("postgres", "postgres://unused:unused@127.0.0.1:1/unused?sslmode=disable")
+	require.NoError(t, err)
+	require.NoError(t, broken.Close())
+	env.Svc.DB = broken
+
+	requireError(t, postCheckout(env.Svc, user, bodyWingYearly), http.StatusServiceUnavailable, "billing_unavailable")
+	assert.Empty(t, env.Fake.writes(), "a failed history read must not create a Customer or Checkout")
 }
 
 func TestCheckout_ModeOffAndNotAllowlistedAreIdentical(t *testing.T) {
@@ -203,7 +240,11 @@ func TestCheckout_EndedSubscriptionDoesNotBlock(t *testing.T) {
 	env.Fake.seedCustomer("cus_payer")
 	user := newPayer(t, env.testEnv, "cus_payer")
 	seedStripeSub(t, env.DB, user, "sub_old", "cus_payer", "canceled", time.Now().Add(-48*time.Hour))
-	assert.Equal(t, http.StatusCreated, postCheckout(env.Svc, user, bodyWingYearly).Code)
+	assert.Equal(t, http.StatusCreated, postCheckout(env.Svc, user, bodySupersonicMonthly).Code)
+	sessions := env.Fake.requestsTo(http.MethodPost, sessionsListPath)
+	require.Len(t, sessions, 1)
+	assert.Equal(t, "always", sessions[0].Form.Get("payment_method_collection"))
+	assert.False(t, sessions[0].Form.Has("subscription_data[trial_period_days]"), "a canceled subscription must not reset the trial")
 }
 
 func TestCheckout_ExpiresOpenSessionsFirst(t *testing.T) {
@@ -490,4 +531,74 @@ func commitWhenWaiting(db *sql.DB, tx *sql.Tx, marker string) error {
 		time.Sleep(10 * time.Millisecond)
 	}
 	return errors.New("no query waited on the lock")
+}
+
+// A Checkout completed in Stripe whose webhook has not landed is not in the
+// database. Stripe's own listing catches it before a second session opens (S9).
+func TestCheckout_LiveStripeSubscriptionWithoutRowIs409(t *testing.T) {
+	env := newCheckoutEnv(t, foundersConfig(config.BillingPurchaseModeOn))
+	env.Fake.seedCustomer("cus_payer")
+	user := newPayer(t, env.testEnv, "cus_payer")
+	env.Fake.seedSubscription("sub_unseen", "cus_payer", PlanSupersonic, "month", time.Now().Add(720*time.Hour).Unix())
+
+	requireError(t, postCheckout(env.Svc, user, bodySupersonicMonthly), http.StatusConflict, checkoutErrManage)
+	assert.Empty(t, env.Fake.requestsTo(http.MethodPost, sessionsListPath), "no second session")
+}
+
+func TestCheckout_EndedStripeSubscriptionDoesNotBlock(t *testing.T) {
+	env := newCheckoutEnv(t, foundersConfig(config.BillingPurchaseModeOn))
+	env.Fake.seedCustomer("cus_payer")
+	user := newPayer(t, env.testEnv, "cus_payer")
+	env.Fake.seedSubscription("sub_dead", "cus_payer", PlanSupersonic, "month", time.Now().Unix()).Status = "incomplete_expired"
+
+	assert.Equal(t, http.StatusCreated, postCheckout(env.Svc, user, bodySupersonicMonthly).Code)
+}
+
+func TestCheckout_SubscriptionListErrorIs503(t *testing.T) {
+	env := newCheckoutEnv(t, foundersConfig(config.BillingPurchaseModeOn))
+	env.Fake.seedCustomer("cus_payer")
+	user := newPayer(t, env.testEnv, "cus_payer")
+	env.Fake.failOn(http.MethodGet, "/v1/subscriptions", http.StatusInternalServerError, serverErrorBody)
+
+	requireError(t, postCheckout(env.Svc, user, bodySupersonicMonthly), http.StatusServiceUnavailable, portalErrUnavailable)
+	assert.Empty(t, env.Fake.requestsTo(http.MethodPost, sessionsListPath))
+}
+
+// Checkouts for one Customer run one at a time (S9, R43): a held lock makes the
+// next request wait instead of racing it.
+func TestCheckout_SerializedPerCustomer(t *testing.T) {
+	env := newCheckoutEnv(t, foundersConfig(config.BillingPurchaseModeOn))
+	env.Fake.seedCustomer("cus_payer")
+	user := newPayer(t, env.testEnv, "cus_payer")
+	conn, err := env.Svc.lockSubscription(context.Background(), checkoutLockPrefix+"cus_payer")
+	require.NoError(t, err)
+
+	done := make(chan int, 1)
+	go func() { done <- postCheckout(env.Svc, user, bodySupersonicMonthly).Code }()
+	select {
+	case code := <-done:
+		t.Fatalf("checkout finished (%d) while another held the Customer's lock", code)
+	case <-time.After(300 * time.Millisecond):
+	}
+	env.Svc.unlockSubscription(context.Background(), conn, checkoutLockPrefix+"cus_payer")
+	assert.Equal(t, http.StatusCreated, <-done)
+}
+
+func TestCheckout_NoFreeSlotIs503(t *testing.T) {
+	env := newCheckoutEnv(t, foundersConfig(config.BillingPurchaseModeOn))
+	env.Fake.seedCustomer("cus_payer")
+	user := newPayer(t, env.testEnv, "cus_payer")
+	wait := checkoutSlotWait
+	checkoutSlotWait = 50 * time.Millisecond
+	for range cap(checkoutSlots) {
+		checkoutSlots <- struct{}{}
+	}
+	t.Cleanup(func() {
+		for range cap(checkoutSlots) {
+			<-checkoutSlots
+		}
+		checkoutSlotWait = wait
+	})
+
+	assert.Equal(t, http.StatusServiceUnavailable, postCheckout(env.Svc, user, bodySupersonicMonthly).Code)
 }
