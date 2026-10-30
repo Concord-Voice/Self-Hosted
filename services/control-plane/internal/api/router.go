@@ -104,16 +104,19 @@ func wireDMBlockReconciler(
 	dmBlockReconciler.SetPurgeEngine(dmBlockAttachmentRetirer{engine: purgeEngine})
 	dmBlockReconciler.SetReconciliationNotifier(newDMBlockReconciliationNotifier(hub))
 	reconciler.SetDMBlockCleanup(dmBlockReconciler.ReconcileDue)
+	var requester dmBlockVoiceEjectionRequester
+	if natsClient != nil {
+		requester = natsClient
+	}
+	runtime := newVoiceAuthRuntime(db, requester, jwtSecret, hub, dmBlockReconciler)
+	dmBlockReconciler.SetAuthRevocationEject(runtime.deliverAuth)
+	dmBlockReconciler.SetCredentialEpochEjectV2(runtime.deliverEpoch)
 	if natsClient != nil {
 		dmBlockReconciler.SetVoiceEjectV2(func(ctx context.Context, conversationID string, userID, generation uuid.UUID) error {
 			return publishDurableDMBlockVoiceEjection(ctx, db, natsClient, jwtSecret, conversationID, userID, generation)
 		})
-		dmBlockReconciler.SetCredentialEpochEjectV2(func(ctx context.Context, userID uuid.UUID, credentialEpoch, supersededCredentialEpoch string, generation uuid.UUID) error {
-			return publishDurableCredentialEpochVoiceEjection(ctx, db, natsClient, jwtSecret, credentialEpochVoiceEjection{
-				userID: userID, credentialEpoch: credentialEpoch, supersededCredentialEpoch: supersededCredentialEpoch,
-			}, generation)
-		})
 	}
+
 	return dmBlockReconciler
 }
 
@@ -1380,6 +1383,7 @@ func NewRouter(
 	// DM-block convergence is pure SQL and must run on every Block-serving
 	// replica, including self-hosted deployments without NATS.
 	dmBlockReconciler := wireDMBlockReconciler(db, log, purgeEngine, activePlanReconciler, hub, natsClient, cfg.JWTSecret)
+	voiceEnforcementSessionHandler.authoritySnapshot = newVoiceAuthRuntime(db, natsClient, cfg.JWTSecret, hub, dmBlockReconciler).AuthoritySnapshot
 	credFence.SetPostCommitEvictor(func(ctx context.Context, userID, credentialEpoch, supersededCredentialEpoch string) {
 		if err := dmBlockReconciler.DeliverCredentialEpochVoiceEjection(ctx, userID, credentialEpoch, supersededCredentialEpoch); err != nil {
 			log.Error("Credential media eviction retained", "failure_class", "delivery")
@@ -1747,6 +1751,10 @@ func NewRouter(
 		// shared-IP application bucket here: one media node can legitimately
 		// release its whole shutdown burst, and a peer can otherwise poison that
 		// bucket to strand durable evidence. The handler caps JSON at 4 KiB.
+		registerVoiceAuthAliases(v1)
+		v1.POST("/internal/voice/auth-connections/release", voiceEnforcementSessionHandler.ReleaseConnection)
+		v1.POST("/internal/voice/auth-connections/provisional-close", voiceEnforcementSessionHandler.ProvisionalClose)
+		v1.POST("/internal/voice/auth-connections/retire-boot", voiceEnforcementSessionHandler.RetireBoot)
 		v1.POST("/internal/voice/enforcement-sessions/release", voiceEnforcementSessionHandler.Release)
 		v1.POST("/internal/voice/enforcement/health", voiceEnforcementSessionHandler.HealthBootstrap)
 
@@ -1826,6 +1834,10 @@ func NewRouter(
 			// The media plane records an exact A1 candidate before its A2
 			// promotion. The handler itself requires the service-hop proof;
 			// rate limiting is a backstop for an accidentally looping node.
+			protected.POST("/internal/voice/auth-connections",
+				middleware.RateLimitByUser(redis, 60, 1*time.Minute),
+				voiceEnforcementSessionHandler.RegisterConnection,
+			)
 			protected.POST("/voice/enforcement-sessions",
 				middleware.RateLimitByUser(redis, 60, 1*time.Minute),
 				voiceEnforcementSessionHandler.Register,

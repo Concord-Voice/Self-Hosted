@@ -68,7 +68,7 @@ func TestRemoteErasureClearDoesNotRetryOtherServerVoiceParticipants(t *testing.T
 	hub.SetChannelPermissionChecker(serverVoiceTerminalErasurePermissionChecker{
 		checked: checked, release: release, calls: &checks,
 	})
-	conn := connectVoiceWireClientAtURL(t, ts.Redis, hub, baseURL, viewer)
+	conn := connectVoiceWireClientAtURL(t, ts, hub, baseURL, viewer)
 	require.NoError(t, conn.WriteJSON(map[string]interface{}{
 		"type": "subscribe_server",
 		"data": map[string]interface{}{"server_id": serverID},
@@ -110,7 +110,7 @@ func TestServerVoiceMoveFencesTheRemovedChannelTerminalDelivery(t *testing.T) {
 	insertVoiceParticipant(t, ts.DB, oldChannelID, participant.ID)
 
 	hub, baseURL := newVoiceReplicaHub(t, ts)
-	conn := connectVoiceWireClientAtURL(t, ts.Redis, hub, baseURL, viewer)
+	conn := connectVoiceWireClientAtURL(t, ts, hub, baseURL, viewer)
 	require.NoError(t, conn.WriteJSON(map[string]interface{}{
 		"type": "subscribe_server",
 		"data": map[string]interface{}{"server_id": serverID},
@@ -221,7 +221,7 @@ func TestServerVoiceCrossServerMoveFencesTheRemovedChannelTerminalDelivery(t *te
 		VALUES ($1, $2, $3, $4, clock_timestamp() + interval '30 seconds')
 	`, newChannelID, participant.ID, admissionID, socketID)
 	require.NoError(t, err)
-	conn := connectVoiceWireClientAtURL(t, ts.Redis, hub, baseURL, viewer)
+	conn := connectVoiceWireClientAtURL(t, ts, hub, baseURL, viewer)
 	require.NoError(t, conn.WriteJSON(map[string]interface{}{
 		"type": "subscribe_server",
 		"data": map[string]interface{}{"server_id": oldServerID},
@@ -351,7 +351,7 @@ func TestServerVoiceTerminalOutbox_ErasureCannotDeliverAdmittedLeave(t *testing.
 
 		hub, baseURL := newVoiceReplicaHub(t, ts)
 		hub.SetChannelPermissionChecker(serverVoiceTerminalErasurePermissionChecker{})
-		conn := connectVoiceWireClientAtURL(t, ts.Redis, hub, baseURL, viewer)
+		conn := connectVoiceWireClientAtURL(t, ts, hub, baseURL, viewer)
 		require.NoError(t, conn.WriteJSON(map[string]interface{}{
 			"type": "subscribe_server",
 			"data": map[string]interface{}{"server_id": serverID},
@@ -387,7 +387,7 @@ func TestServerVoiceTerminalOutbox_ErasureCannotDeliverAdmittedLeave(t *testing.
 			release: release,
 			calls:   &checks,
 		})
-		conn := connectVoiceWireClientAtURL(t, ts.Redis, hub, baseURL, viewer)
+		conn := connectVoiceWireClientAtURL(t, ts, hub, baseURL, viewer)
 		require.NoError(t, conn.WriteJSON(map[string]interface{}{
 			"type": "subscribe_server",
 			"data": map[string]interface{}{"server_id": serverID},
@@ -432,7 +432,7 @@ func TestServerVoiceTerminalOutbox_ErasureCannotDeliverAdmittedLeave(t *testing.
 			release: release,
 			calls:   &checks,
 		})
-		conn := connectVoiceWireClientAtURL(t, ts.Redis, hub, baseURL, viewer)
+		conn := connectVoiceWireClientAtURL(t, ts, hub, baseURL, viewer)
 		require.NoError(t, conn.WriteJSON(map[string]interface{}{
 			"type": "subscribe_server",
 			"data": map[string]interface{}{"server_id": serverID},
@@ -496,7 +496,7 @@ func TestServerVoiceTerminalOutbox_ErasureCannotDeliverAdmittedLeave(t *testing.
 			release:   release,
 			calls:     &checks,
 		})
-		conn := connectVoiceWireClientAtURL(t, ts.Redis, hub, baseURL, viewer)
+		conn := connectVoiceWireClientAtURL(t, ts, hub, baseURL, viewer)
 		require.NoError(t, conn.WriteJSON(map[string]interface{}{
 			"type": "subscribe_server",
 			"data": map[string]interface{}{"server_id": serverID},
@@ -558,7 +558,7 @@ func TestServerVoiceTerminalOutbox_ErasureCannotDeliverAdmittedLeave(t *testing.
 		hub, baseURL := newVoiceReplicaHub(t, ts)
 		var checks atomic.Int32
 		hub.SetChannelPermissionChecker(serverVoiceTerminalErasurePermissionChecker{calls: &checks})
-		conn := connectVoiceWireClientAtURL(t, ts.Redis, hub, baseURL, viewer)
+		conn := connectVoiceWireClientAtURL(t, ts, hub, baseURL, viewer)
 		require.NoError(t, conn.WriteJSON(map[string]interface{}{
 			"type": "subscribe_server",
 			"data": map[string]interface{}{"server_id": serverID},

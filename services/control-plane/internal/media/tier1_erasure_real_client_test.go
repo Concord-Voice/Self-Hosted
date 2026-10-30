@@ -3,6 +3,7 @@ package media_test
 import (
 	"bytes"
 	"context"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
 	"image"
 	"image/color"
 	"image/png"
@@ -160,6 +161,7 @@ func TestRealClientAccountErasureKeepsLatePutFencedAndReclaimable(t *testing.T) 
 	c, _ := gin.CreateTestContext(recorder)
 	c.Request = req
 	c.Set("user_id", userID)
+	testhelpers.AttachUserIdentity(t, c, userID)
 	uploadDone := make(chan struct{})
 	go func() {
 		handler.UploadAvatar(c)

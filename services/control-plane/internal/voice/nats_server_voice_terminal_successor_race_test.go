@@ -100,7 +100,7 @@ func TestServerVoiceTerminalOutbox_OrdinaryLeaveInvalidatesAdmission(t *testing.
 		release: make(chan struct{}),
 	}
 	hub.SetChannelPermissionChecker(checker)
-	conn := connectVoiceWireClientAtURL(t, ts.Redis, hub, baseURL, viewer)
+	conn := connectVoiceWireClientAtURL(t, ts, hub, baseURL, viewer)
 	require.NoError(t, conn.WriteJSON(map[string]interface{}{
 		"type": "subscribe_server",
 		"data": map[string]interface{}{"server_id": serverID},
@@ -162,7 +162,7 @@ func TestServerVoiceTerminalOutbox_SuccessorJoinDuringAdmissionSuppressesLeave(t
 		release: make(chan struct{}),
 	}
 	hub.SetChannelPermissionChecker(checker)
-	conn := connectVoiceWireClientAtURL(t, ts.Redis, hub, baseURL, viewer)
+	conn := connectVoiceWireClientAtURL(t, ts, hub, baseURL, viewer)
 	require.NoError(t, conn.WriteJSON(map[string]interface{}{
 		"type": "subscribe_server",
 		"data": map[string]interface{}{"server_id": serverID},
@@ -222,7 +222,7 @@ func TestServerVoiceTerminalOutbox_PostMutationSuccessorCannotAdmitLeave(t *test
 		release: make(chan struct{}),
 	}
 	hub.SetChannelPermissionChecker(checker)
-	conn := connectVoiceWireClientAtURL(t, ts.Redis, hub, baseURL, viewer)
+	conn := connectVoiceWireClientAtURL(t, ts, hub, baseURL, viewer)
 	require.NoError(t, conn.WriteJSON(map[string]interface{}{
 		"type": "subscribe_server",
 		"data": map[string]interface{}{"server_id": serverID},
@@ -309,7 +309,7 @@ func TestServerVoiceTerminalOutbox_RemoteErasureClearInvalidatesAdmission(t *tes
 		release: make(chan struct{}),
 	}
 	hubA.SetChannelPermissionChecker(checker)
-	conn := connectVoiceWireClientAtURL(t, ts.Redis, hubA, baseURL, viewer)
+	conn := connectVoiceWireClientAtURL(t, ts, hubA, baseURL, viewer)
 	require.NoError(t, conn.WriteJSON(map[string]interface{}{
 		"type": "subscribe_server",
 		"data": map[string]interface{}{"server_id": serverID},
