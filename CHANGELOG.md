@@ -47,6 +47,7 @@ gate can learn from your voice.
 - **Voice:** Updated server voice transport dependencies.
 - **Accessibility:** The desktop app follows the system's reduced-motion setting, hides decorative icons from screen readers, and shows text while bundled fonts load ([#4181](internal development reference omitted)).
 - **Plans:** Every account can create any number of servers, search as far back as a subscriber, and customize theme colors. One account can create up to 10 servers in 24 hours ([#3861](internal development reference omitted)).
+- **Desktop:** Updated navigation dependencies.
 - **Web:** Opening the web address in a browser shows a link to download the desktop app, not an "Update Required" prompt.
 - **Search:** Message search looks back 90 days or 600 messages at a time, loads older results as you scroll, and says when it is paused or stopped ([#3875](internal development reference omitted)).
 - **Search:** Jump reaches messages that are not loaded or are in another channel, from search results, pins, and reply quotes ([#3894](internal development reference omitted)).
