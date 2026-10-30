@@ -82,6 +82,7 @@ gate can learn from your voice.
 
 ### Fixed
 
+- **Voice:** The media server now forwards your app's attestation when it checks your voice access, a step toward letting servers require an attested app ([#4211](internal development reference omitted)).
 - **Sign-in:** A signed-out session no longer retries its rejected refresh token every 10 seconds in the background ([#4205](internal development reference omitted)).
 - **Voice:** Calling someone back in a DM joins the call still open there instead of silently stopping, a failed call start now shows an error, your camera comes back after a brief connection drop, and 1:1 DMs show Join voice call during a call ([#4179](internal development reference omitted)).
 - **Voice:** Microphone processing failures now notify the existing error handler and release the failed audio node once ([#4147](internal development reference omitted)).
@@ -141,6 +142,7 @@ gate can learn from your voice.
 - **Accounts:** A device signed out while its account-deletion request was still processing can no longer delete the account ([#4192](internal development reference omitted)).
 - **Accounts:** Signing out a device or revoking a session cuts it off everywhere at once. Its open connection and any voice call end before the change is confirmed, and a signed-out device can no longer act on your account.
 - **Attestation:** iOS App Attest binds each attested key to the account that attested it, ties the attestation session header to the signed-in session, and caps the verify request size (ADR-0010 D17).
+- **Attestation:** The server no longer accepts an attestation record that is not tied to an account, so such a record cannot stand in for another user ([#4211](internal development reference omitted)).
 - **Dependencies:** Updated golang.org/x/net and fast-uri for security fixes ([#4181](internal development reference omitted)).
 - **Desktop:** Updated the URI parser security floor to address upstream normalization advisories.
 - **Accounts:** Sign-in protection accepts a key re-encryption only from the maintenance run that started it. It refuses to roll back while its state is unknown ([#4137](internal development reference omitted)).

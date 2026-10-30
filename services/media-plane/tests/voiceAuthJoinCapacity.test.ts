@@ -15,7 +15,7 @@ import type { JoinRoomResult } from '../src/lib/roomManager.js';
 import type { MediasoupService } from '../src/lib/mediasoup.js';
 import { isCanonicalEnforcementUUID } from '../src/lib/enforcementCommand.js';
 import type { AuthenticatedSocketData } from '../src/middleware/auth.js';
-import { resolveParticipantIdentity } from '../src/middleware/auth.js';
+import { attestationRelayHeaders, resolveParticipantIdentity } from '../src/middleware/auth.js';
 import { createMockRouter, createRtpCapabilities } from './mocks/mediasoup.js';
 import type { VoiceEnforcementSession } from '../src/lib/voiceEnforcementSession.js';
 import { mediaPolicyCooldownAck } from '../src/lib/mediaPolicyWire.js';
@@ -120,7 +120,7 @@ async function fixture(identityCount: number) {
   const joinRoom = vi.spyOn(manager, 'joinRoom');
   const register = productionRegister({ ...lifecycle, randomUUID, Date, Error, Promise,
     getVoiceAuthConnection: (socket: { id: string }) => handles.get(socket.id),
-    voiceEnforcementNodeBootId: boot, validateChannelAccess, getIdentityAuthorityReasonCode,
+    voiceEnforcementNodeBootId: boot, validateChannelAccess, attestationRelayHeaders, getIdentityAuthorityReasonCode,
     registerVoiceEnforcementSession: async (_token: string, session: Parameters<typeof owners.attachRoom>[1]) => {
       const handle = handles.get(session.socketId);
       if (!handle) throw new Error('Missing actual registered owner');
