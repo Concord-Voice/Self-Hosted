@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencecapture"
@@ -85,7 +86,7 @@ func TestLoginFamilySecurityCredentialWriters(t *testing.T) {
 					payload["public_key"] = pub
 					payload["acknowledge_data_loss"] = true
 				} else {
-					payload["new_password"] = "AnotherSecurePass456!"
+					payload["new_password"] = "AnotherSecurePass456!" // pragma: allowlist secret
 				}
 				w := ts.DoRequest(method, path, payload, testhelpers.AuthHeaders(user.AccessToken))
 				if rollback {
@@ -182,7 +183,7 @@ func TestLoginFamilySecurityErasureEvidenceSurvivesUser(t *testing.T) {
 			service.SetGraphPresenceCapture(capture)
 			fence := &erasureFamilyFence{}
 			users.SetErasureFamilyCloserForTest(service, fence)
-			err := service.DeleteAccount(context.Background(), user.ID)
+			err := service.DeleteAccount(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, user.ID), user.ID)
 			switch outcome {
 			case "commit":
 				require.NoError(t, err)
@@ -339,7 +340,8 @@ func TestLoginFamilySecurityErasureSortedUsersBeforeFamiliesAndConversations(t *
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 	done := make(chan error, 1)
-	go func() { done <- service.DeleteAccount(ctx, erased.ID) }()
+	actor := testhelpers.WithAccessIdentity(ctx, t, erased)
+	go func() { done <- service.DeleteAccount(actor, erased.ID) }()
 	securityWaitBlocker(t, ts.DB, userPID)
 	// KEY SHARE conflicts with UPDATE, while it permits NO KEY UPDATE.
 	for _, subject := range subjects[:2] {
@@ -364,4 +366,65 @@ func TestLoginFamilySecurityErasureSortedUsersBeforeFamiliesAndConversations(t *
 		require.NoError(t, ts.DB.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id=$1)`, survivor.ID).Scan(&exists))
 		require.True(t, exists)
 	}
+}
+
+// A login revoked while its erasure request waited must not erase the account
+// and its surviving logins: the erasure revalidates the requesting family
+// under the users lock.
+func TestLoginFamilySecurityRevokedRequesterCannotErase(t *testing.T) {
+	ts := setupTS(t)
+	stale := securityUser(t, ts, "familyerasestale")
+	survivor := stale
+	minter := auth.NewHandler(ts.DB, ts.Redis, logger.NewWithWriter(io.Discard), testhelpers.TestJWTSecret, nil)
+	access, _, _, err := minter.IssueAccessAndRefresh(context.Background(), stale.ID)
+	require.NoError(t, err)
+	survivor.AccessToken = access
+	survivorFamily := securityFamily(t, ts, survivor)
+
+	identity := testhelpers.AccessIdentityForToken(t, stale.AccessToken)
+	ctx := context.Background()
+	revoke, err := ts.DB.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	defer func() { err := revoke.Rollback(); require.True(t, err == nil || errors.Is(err, sql.ErrTxDone)) }()
+	barrier, err := loginfamily.AcquireWriterBarrierTx(ctx, revoke)
+	require.NoError(t, err)
+	locked, err := loginfamily.LockUsersTx(ctx, revoke, barrier, []uuid.UUID{identity.UserID}, loginfamily.UserNoKeyUpdate)
+	require.NoError(t, err)
+	authority, err := locked.ForUser(identity.UserID)
+	require.NoError(t, err)
+	targets, err := loginfamily.ResolveTargetSIDTx(ctx, revoke, authority, identity.SID)
+	require.NoError(t, err)
+	_, err = loginfamily.RevokeFamiliesTx(ctx, revoke, targets, loginfamily.AuthCause{Scope: loginfamily.ScopeSession, Reason: loginfamily.ReasonLogout})
+	require.NoError(t, err)
+	require.NoError(t, revoke.Commit())
+
+	service := users.NewAccountService(ts.DB, logger.New("test"))
+	err = service.DeleteAccount(testhelpers.WithAccessIdentity(ctx, t, stale), stale.ID)
+
+	require.ErrorIs(t, err, credepoch.ErrEpochMismatch, "the handler maps this to 401")
+	require.ErrorIs(t, err, loginfamily.ErrDenied)
+	var exists bool
+	require.NoError(t, ts.DB.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id=$1)`, stale.ID).Scan(&exists))
+	require.True(t, exists, "the account survives a revoked requester")
+	var terminal bool
+	require.NoError(t, ts.DB.QueryRow(`SELECT terminal_at IS NOT NULL FROM login_families WHERE family_id=$1`, survivorFamily).Scan(&terminal))
+	require.False(t, terminal, "the surviving login stays live")
+}
+
+func TestLoginFamilySecurityEraseRequiresRequesterIdentity(t *testing.T) {
+	ts := setupTS(t)
+	target := securityUser(t, ts, "familyerasetarget")
+	other := securityUser(t, ts, "familyeraseother")
+	service := users.NewAccountService(ts.DB, logger.New("test"))
+	for name, ctx := range map[string]context.Context{
+		"no identity":    context.Background(),
+		"other identity": testhelpers.WithAccessIdentity(context.Background(), t, other),
+	} {
+		err := service.DeleteAccount(ctx, target.ID)
+		require.ErrorIs(t, err, credepoch.ErrEpochMismatch, name)
+		require.ErrorIs(t, err, loginfamily.ErrDenied, name)
+	}
+	var exists bool
+	require.NoError(t, ts.DB.QueryRow(`SELECT EXISTS(SELECT 1 FROM users WHERE id=$1)`, target.ID).Scan(&exists))
+	require.True(t, exists, "the account survives a request without its own identity")
 }

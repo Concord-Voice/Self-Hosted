@@ -217,6 +217,91 @@ func TestEraseAccount_Integration_404OnMissingUserAfterAdmission(t *testing.T) {
 	assert.False(t, exists, "the ordinary-pool race deletion must be durable")
 }
 
+// A login revoked after its request passed admission must not erase the
+// account: session revocation rotates no epoch, so erasure revalidates the
+// family under the users lock and answers 401.
+func TestEraseAccount_Integration_401OnFamilyRevokedAfterAdmission(t *testing.T) {
+	hook, routerDB := stmthook.Open(t)
+	ts := testhelpers.SetupTestServerWithRouterDB(t, routerDB)
+	user := ts.CreateTestUser(t, "erasedrevokedauth")
+	claims := requireLiveErasureFamily(t, ts, user.AccessToken)
+	admitted := false
+	require.NoError(t, hook.ArmAdmission(user.ID, claims.SessionID, func() error { admitted = true; return nil }))
+	const candidateQuery = `SELECT DISTINCT dvp.user_id
+		FROM dm_conversations c
+		JOIN dm_voice_participants dvp ON dvp.conversation_id = c.id
+		WHERE c.created_by = $1 AND dvp.user_id <> $1
+		ORDER BY dvp.user_id
+		LIMIT $2`
+	hook.ArmArg([]string{candidateQuery}, user.ID, func() error {
+		if !admitted {
+			return fmt.Errorf("candidate read preceded successful authentication")
+		}
+		return revokeErasureSession(t.Context(), ts, user.AccessToken)
+	}, nil)
+	ctx, cancel := context.WithTimeout(t.Context(), 10*time.Second)
+	defer cancel()
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/privacy/erase-account", strings.NewReader(`{}`)).WithContext(ctx)
+	req.Header = testhelpers.AuthHeaders(user.AccessToken)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	ts.Router.ServeHTTP(w, req)
+	seen, betweenErr := hook.Report()
+	require.Equal(t, 1, seen, "this request must reach its first erasure candidate query")
+	require.NoError(t, betweenErr)
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.JSONEq(t, `{"error":"authentication required"}`, w.Body.String())
+	var exists bool
+	require.NoError(t, ts.DB.QueryRowContext(t.Context(), `SELECT EXISTS(SELECT 1 FROM users WHERE id=$1)`, user.ID).Scan(&exists))
+	assert.True(t, exists, "a revoked requester must not erase the account")
+}
+
+// revokeErasureSession logs out the token's session family the way the
+// session-revocation writers do.
+func revokeErasureSession(ctx context.Context, ts *testhelpers.TestServer, accessToken string) (err error) {
+	claims, err := auth.ValidateAccessToken(accessToken, ts.Config.JWTSecret)
+	if err != nil {
+		return err
+	}
+	userID, err := uuid.Parse(claims.UserID)
+	if err != nil {
+		return err
+	}
+	sid, err := uuid.Parse(claims.SessionID)
+	if err != nil {
+		return err
+	}
+	tx, err := ts.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+	barrier, err := loginfamily.AcquireWriterBarrierTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+	locked, err := loginfamily.LockUsersTx(ctx, tx, barrier, []uuid.UUID{userID}, loginfamily.UserNoKeyUpdate)
+	if err != nil {
+		return err
+	}
+	authority, err := locked.ForUser(userID)
+	if err != nil {
+		return err
+	}
+	targets, err := loginfamily.ResolveTargetSIDTx(ctx, tx, authority, sid)
+	if err != nil {
+		return err
+	}
+	if _, err = loginfamily.RevokeFamiliesTx(ctx, tx, targets, loginfamily.AuthCause{Scope: loginfamily.ScopeSession, Reason: loginfamily.ReasonLogout}); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func requireLiveErasureFamily(t *testing.T, ts *testhelpers.TestServer, accessToken string) *auth.Claims {
 	t.Helper()
 	claims, err := auth.ValidateAccessToken(accessToken, ts.Config.JWTSecret)

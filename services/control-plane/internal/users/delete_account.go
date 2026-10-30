@@ -11,6 +11,7 @@ import (
 
 	"github.com/lib/pq"
 
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dm"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/erasureclear"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
@@ -577,6 +578,9 @@ func (s *AccountService) deleteAccountTx(
 	if err != nil {
 		return nil, nil, nil, drainedObligation{}, erasedMedia{}, err
 	}
+	if err := guardErasureActorTx(ctx, tx, creatorID); err != nil {
+		return nil, nil, nil, drainedObligation{}, erasedMedia{}, err
+	}
 	// Terminal evidence must precede conversations and every users cascade.
 	targets, err := loginfamily.CaptureUserTargetsTx(ctx, tx, userAuthority, nil)
 	if err != nil {
@@ -755,6 +759,25 @@ func (s *AccountService) deleteAccountTx(
 		return nil, nil, plan, drainedObligation{}, erasedMedia{}, fmt.Errorf("delete account: insert audit: %w", err)
 	}
 	return channelIDs, serverIDs, plan, drained, stranded, nil
+}
+
+// guardErasureActorTx revalidates the requesting login under the users lock.
+// Session revocation rotates no credential epoch, so a login revoked while
+// its request waited must not erase the account and its surviving sessions.
+func guardErasureActorTx(ctx context.Context, tx *sql.Tx, userID uuid.UUID) error {
+	identity, ok := loginfamily.AccessIdentityFromContext(ctx)
+	if !ok || identity.UserID != userID {
+		// Keep the reason readable: a broken identity middleware must not look
+		// exactly like a revoked session.
+		return errors.Join(credepoch.ErrEpochMismatch, loginfamily.NewError(loginfamily.ReasonAccessIdentity, nil))
+	}
+	if err := loginfamily.GuardLockedActorFamilyTx(ctx, tx, identity); err != nil {
+		if errors.Is(err, loginfamily.ErrDenied) {
+			return errors.Join(credepoch.ErrEpochMismatch, err)
+		}
+		return err
+	}
+	return nil
 }
 
 // lockErasureSubjects retains the sender/audience prefix held by the caller,

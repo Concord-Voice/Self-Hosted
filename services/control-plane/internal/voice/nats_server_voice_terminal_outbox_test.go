@@ -452,7 +452,7 @@ func TestServerVoiceTerminalOutbox_AccountErasureCancelsPendingLeave(t *testing.
 	synchronizeVoiceWireClient(t, conn)
 
 	svc := users.NewAccountService(ts.DB, logger.New("test"))
-	require.NoError(t, svc.DeleteAccount(context.Background(), erasedUser.ID))
+	require.NoError(t, svc.DeleteAccount(testdb.ActorContext(context.Background(), t, ts.DB, erasedUser.ID), erasedUser.ID))
 
 	sub := newTestSubscriberWithHub(ts, hub)
 	require.NoError(t, sub.DrainServerVoiceTerminalOutboxCandidateForTest(context.Background(), uuid.MustParse(channelID), uuid.MustParse(erasedUser.ID), op))

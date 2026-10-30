@@ -451,7 +451,7 @@ func TestServerVoiceTerminalOutbox_ErasureCannotDeliverAdmittedLeave(t *testing.
 
 		svc := users.NewAccountService(ts.DB, logger.New("test"))
 		svc.SetAudienceFence(hub)
-		require.NoError(t, svc.DeleteAccount(context.Background(), erasedUser.ID))
+		require.NoError(t, svc.DeleteAccount(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, erasedUser.ID), erasedUser.ID))
 		close(release)
 
 		require.NoError(t, conn.SetReadDeadline(time.Now().Add(2*time.Second)))
@@ -567,7 +567,7 @@ func TestServerVoiceTerminalOutbox_ErasureCannotDeliverAdmittedLeave(t *testing.
 
 		svc := users.NewAccountService(ts.DB, logger.New("test"))
 		svc.SetAudienceFence(hub)
-		require.NoError(t, svc.DeleteAccount(context.Background(), erasedUser.ID))
+		require.NoError(t, svc.DeleteAccount(testhelpers.ActorContextForDB(context.Background(), t, ts.DB, erasedUser.ID), erasedUser.ID))
 		_, accepted := hub.BroadcastToServerVoiceParticipantReliableContext(
 			context.Background(), uuid.MustParse(serverID), uuid.MustParse(channelID), uuid.MustParse(erasedUser.ID),
 			concordws.OutgoingMessage{Type: "voice_state_update", Data: map[string]interface{}{

@@ -2895,6 +2895,96 @@ voice_enforcement_rollout_deploy() {
   echo "voice-enforcement-rollout: completed"
 }
 
+# First protocol-4 cutover from a protocol-3 media predecessor (#2272). The
+# released protocol-3 image reports no boot identity, so neither retirement
+# route can bind it and the rollout preflight refuses even as root. A database
+# that has never applied migration 000194 holds no protocol-4 boot fence and no
+# family authority, so a drained, truthfully stopped legacy container leaves
+# nothing to retire. Host root removes exactly that container; the rollout then
+# treats the empty slot as a fresh start.
+voice_enforcement_rollout_legacy_schema() {
+  local row
+  row="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD exec -T postgres sh -c \
+    'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1 -At -c "SELECT version, dirty, pg_catalog.to_regclass('"'"'public.login_family_rollout'"'"') IS NULL, (SELECT pg_catalog.count(*) FROM public.voice_enforcement_sessions) FROM public.schema_migrations"')" || {
+    echo 'voice-enforcement-rollout: schema observation failed; refusing' >&2
+    return 1
+  }
+  if [[ ! "$row" =~ ^([0-9]+)\|f\|t\|([0-9]+)$ ]] || (( BASH_REMATCH[1] >= 194 )); then
+    echo 'voice-enforcement-rollout: migration 000194 is applied, dirty or unreadable; a protocol-4 boot may exist, so the legacy predecessor cannot be removed' >&2
+    return 1
+  fi
+  printf '%s\n' "${BASH_REMATCH[2]}"
+}
+
+voice_enforcement_rollout_retire_legacy() {
+  local value window t0 deadline state first second reason inventory project id identity sessions
+  [[ "$(id -u)" -eq 0 ]] || {
+    echo 'voice-enforcement-rollout: retire-legacy-predecessor requires host root' >&2
+    return 1
+  }
+  [[ "$MEDIA_DEPLOY_PROFILE" == media-single ]] || {
+    echo 'voice-enforcement-rollout: retire-legacy-predecessor supports only the media-single profile' >&2
+    return 1
+  }
+  voice_enforcement_rollout_legacy_schema >/dev/null || return 1
+  inventory="$(voice_enforcement_rollout_inventory)" || return 1
+  project="${inventory%%$'\n'*}"
+  [[ "${inventory#*$'\n'}" == media-plane ]] || return 1
+  voice_enforcement_rollout_association association-state "$project" media-plane || return 1
+  state="$(media_legacy_state)" || return 1
+  case "$state" in
+    absent)
+      echo 'voice-enforcement-rollout: no legacy media-plane container; nothing to retire'
+      return 0 ;;
+    running)
+      # Only a proved join pause may end calls: the slot is empty, or the
+      # pause's own cutoff has passed.
+      value="$(media_bluegreen_redis GET "$MEDIA_LEGACY_PAUSE_KEY")" || return 1
+      window="$(media_legacy_parse_pause "$value")" || {
+        echo 'voice-enforcement-rollout: run media-legacy-pause and drain before retiring legacy media' >&2
+        return 1
+      }
+      read -r t0 deadline <<<"$window"
+      first="$(media_legacy_counts)" || first=''
+      second=''
+      if [[ "$first" == '0 0' ]]; then
+        sleep 2
+        second="$(media_legacy_counts)" || second=''
+      fi
+      if [[ "$first" == '0 0' && "$second" == '0 0' ]]; then
+        reason=empty
+      elif (( $(date +%s) >= deadline )); then
+        reason=deadline
+      else
+        echo "voice-enforcement-rollout: legacy media is not drained (counts ${second:-${first:-unknown}}); refusing before stop" >&2
+        return 1
+      fi
+      # The mutation guard admits a stop without a retired association only
+      # for the exact container this owner is retiring.
+      VOICE_RETIRING_CONTAINER="$(voice_enforcement_rollout_slot_id "$project" media-plane)" || return 1
+      (cd "$DEPLOY_DIR" && managed_compose_mutate stop --timeout 45 media-plane) || return 1
+      VOICE_RETIRING_CONTAINER=''
+      echo "voice-enforcement-rollout: stopped legacy media reason=${reason} t0=${t0}" ;;
+    exited) ;;
+    *) return 1 ;;
+  esac
+  id="$(voice_enforcement_rollout_slot_id "$project" media-plane)" || return 1
+  identity="$(python3 "$SCRIPT_DIR/voice-boot-containment.py" stopped-identity \
+    --container-id "$id" --slot media-plane --compose-project "$project")" || return 1
+  # Recheck after the stop: the schema must still predate 000194, and the
+  # stopped protocol-3 boot must have released every enforcement session,
+  # because activation refuses while any remain. Keep the container on refusal
+  # so `compose start media-plane` and media-legacy-resume roll back.
+  sessions="$(voice_enforcement_rollout_legacy_schema)" || return 1
+  [[ "$sessions" == 0 ]] || {
+    echo "voice-enforcement-rollout: ${sessions} voice enforcement sessions remain after the legacy stop; refusing to remove it" >&2
+    return 1
+  }
+  docker rm "$id" >/dev/null || return 1
+  echo "voice-enforcement-rollout: removed legacy media predecessor ${identity}"
+  echo 'voice-enforcement-rollout: next: media-legacy-resume, then voice-enforcement-rollout deploy as host root'
+}
+
 voice_enforcement_rollout_media_rebuild() {
   voice_enforcement_rollout_preflight_media || return 1
   managed_compose_build build media-plane || return 1
@@ -3230,6 +3320,19 @@ media_bluegreen_preflight() {
   printf '%s:%s\n' "${active:-none}" "$standby"
 }
 
+# Activation proves every configured slot, so a first promotion's slot
+# preparation runs both colours. Retire the colour that promotion does not
+# use, so the single-standby preflight sees the state it expects.
+media_bluegreen_retire_unpromoted() {
+  local active ids inventory
+  active="$(media_bluegreen_redis GET media:active_colour)" || return 1
+  [[ -z "$active" ]] || return 0
+  ids="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps --status running -q media-plane-green)" || return 1
+  [[ -n "$ids" ]] || return 0
+  inventory="$(voice_enforcement_rollout_inventory)" || return 1
+  voice_enforcement_rollout_retire_slot "${inventory%%$'\n'*}" media-plane-green
+}
+
 voice_enforcement_rollout_prepare_slots() {
   local activation inventory slot
   local -a slots=()
@@ -3246,6 +3349,7 @@ voice_enforcement_rollout_prepare_slots() {
   voice_enforcement_rollout_wait_media || return 1
   voice_enforcement_rollout_activate || return 1
   voice_enforcement_rollout_wait_media productive || return 1
+  media_bluegreen_retire_unpromoted || return 1
 }
 
 media_bluegreen_cutover_locked() {
@@ -3329,7 +3433,13 @@ media_bluegreen_cutover_locked() {
     return 1
   }
 
-  voice_enforcement_rollout_probe_slots either || return 1
+  if [[ -n "$active_port" ]]; then
+    voice_enforcement_rollout_probe_slots either || return 1
+  else
+    # Slot preparation retired the colour a first promotion does not use, so
+    # only the standby runs; probing the exited colour would always refuse.
+    voice_enforcement_rollout_probe_slots either "media-plane-${standby}" || return 1
+  fi
   if ! media_bluegreen_redis SADD media:colours:registered "$standby" >/dev/null; then
     echo 'media-bluegreen: registry write failed before promotion; active color is unchanged' >&2
     return 1
@@ -6165,8 +6275,16 @@ else:
         voice_enforcement_rollout_deploy "$@" || exit 1
         selfhost_post_up_check || exit 1
         ;;
+      retire-legacy-predecessor)
+        shift
+        if [[ $# -ne 0 ]]; then
+          echo 'Usage: concord-ctl.sh voice-enforcement-rollout retire-legacy-predecessor' >&2
+          exit 2
+        fi
+        voice_enforcement_rollout_retire_legacy || exit 1
+        ;;
       *)
-        echo "Usage: concord-ctl.sh voice-enforcement-rollout deploy" >&2
+        echo "Usage: concord-ctl.sh voice-enforcement-rollout deploy|retire-legacy-predecessor" >&2
         exit 2
         ;;
     esac

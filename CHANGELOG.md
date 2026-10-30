@@ -133,6 +133,7 @@ gate can learn from your voice.
 
 ### Security
 
+- **Accounts:** A device signed out while its account-deletion request was still processing can no longer delete the account ([#4192](internal development reference omitted)).
 - **Accounts:** Signing out a device or revoking a session cuts it off everywhere at once. Its open connection and any voice call end before the change is confirmed, and a signed-out device can no longer act on your account.
 - **Attestation:** iOS App Attest binds each attested key to the account that attested it, ties the attestation session header to the signed-in session, and caps the verify request size (ADR-0010 D17).
 - **Dependencies:** Updated golang.org/x/net and fast-uri for security fixes ([#4181](internal development reference omitted)).
