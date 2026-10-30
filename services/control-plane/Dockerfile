@@ -1,12 +1,12 @@
 # Admin Portal build stage. This is the reviewed node:26-alpine multi-platform
-# index at sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80;
+# index at sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94;
 # the named admin_ui context keeps the primary Go context narrow.
 # The `node:26-alpine` tag component is load-bearing, not decorative: a bare
 # `FROM node@sha256:` gives Dependabot no variant to anchor on, so it resolves
 # the default tag (`node:latest`, currently Debian-based `node:26`). PR #2800
 # did exactly that -- swapping this stage to a 443 MB Debian image with nothing
 # in the diff to show it. Keep tag+digest together on every bump.
-FROM node:26-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80 AS admin-ui-builder
+FROM node:26-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94 AS admin-ui-builder
 
 WORKDIR /src
 COPY --from=admin_ui package.json package-lock.json ./
@@ -58,9 +58,10 @@ LABEL org.opencontainers.image.licenses="LicenseRef-CVSL-1.0"
 LABEL org.concord.redis-credential-modes="legacy,managed"
 
 RUN apk --no-cache add ca-certificates \
-    && addgroup -S appuser && adduser -S appuser -G appuser
+    && addgroup -S -g 10006 appuser && adduser -S -u 10006 -G appuser appuser
 
-# Run as non-root user
+# Run as non-root user. UID/GID 10006 is fixed and differs from media-plane
+# (10007) so the managed Redis controller can tell the two apart by peer UID.
 WORKDIR /home/appuser
 
 # Copy binaries from builder

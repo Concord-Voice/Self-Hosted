@@ -51,6 +51,8 @@ SUPPORT = {"client/desktop/tsconfig.json", "client/desktop/tsconfig.main.json",
            "services/media-plane/package.json", "dev-tooling/concord-bridge/tsconfig.json",
            "dev-tooling/concord-bridge/package.json", "services/control-plane/go.mod",
            "services/control-plane/go.sum"}
+# GitHub reports a live run as any of these; a waiting downstream job can flip it off in_progress.
+LIVE_RUN_STATUSES = ("queued", "in_progress", "requested", "waiting", "pending")
 MAX_API = 2 * 1024 * 1024
 MAX_PROOF_ZIP = 128 * 1024
 MAX_PROOF = 64 * 1024
@@ -177,7 +179,9 @@ class GitHub:
         url = API + path
         request = Request(url, headers={"Accept": "application/vnd.github+json",
                                         "Authorization": f"Bearer {self.token}",
-                                        "X-GitHub-Api-Version": "2026-03-10",
+                                        # 2026-03-10 returns merge_commit_sha as null, which fails the
+                                        # signed merge SHA check on every PR.
+                                        "X-GitHub-Api-Version": "2022-11-28",
                                         "User-Agent": "Concord-Voice-protected-sonar"})
         try:
             with OPEN(request, timeout=20) as response:
@@ -267,21 +271,31 @@ def validate_evidence(candidate, verified, run, pr, jobs):
     if (claims.get("run_id") != str(candidate["caller_run_id"])
             or claims.get("run_attempt") != str(candidate["caller_run_attempt"])
             or claims.get("repository") != REPO or claims.get("event_name") != "pull_request"
-            or claims.get("workflow_ref") != REPO + "/.github/workflows/required-pr-build.yml@refs/heads/main"
+            or claims.get("workflow_ref") != REPO + "/.github/workflows/required-pr-build.yml@main"
             or not sha(claims.get("workflow_sha"))):
         raise Reject("verified claims inconsistent")
     workflow_path = ".github/workflows/required-pr-build.yml"
     protected_paths = (workflow_path, f"{workflow_path}@main", f"{workflow_path}@refs/heads/main",
                        f"{REPO}/{workflow_path}@main", f"{REPO}/{workflow_path}@refs/heads/main")
-    if (not isinstance(run, dict) or run.get("id") != candidate["caller_run_id"]
-            or run.get("run_attempt") != candidate["caller_run_attempt"]
-            or run.get("event") != "pull_request" or run.get("head_sha") != candidate["expected_head_sha"]
-            or run.get("status") != "in_progress" or run.get("conclusion") is not None
-            or run.get("path") not in protected_paths
-            or run.get("repository", {}).get("full_name") != REPO
-            or str(run.get("repository", {}).get("id")) != claims.get("repository_id")
-            or candidate["pr_number"] not in [p.get("number") for p in run.get("pull_requests", []) if isinstance(p, dict)]):
-        raise Reject("caller run identity or state invalid")
+    if not isinstance(run, dict):
+        raise Reject("caller run identity or state invalid: run")
+    repository = run.get("repository") if isinstance(run.get("repository"), dict) else {}
+    pulls = run.get("pull_requests") if isinstance(run.get("pull_requests"), list) else []
+    # Field names only, never values, so a live rejection says which check failed.
+    failed = [name for name, ok in (
+        ("id", run.get("id") == candidate["caller_run_id"]),
+        ("run_attempt", run.get("run_attempt") == candidate["caller_run_attempt"]),
+        ("event", run.get("event") == "pull_request"),
+        ("head_sha", run.get("head_sha") == candidate["expected_head_sha"]),
+        ("status", run.get("status") in LIVE_RUN_STATUSES),
+        ("conclusion", run.get("conclusion") is None),
+        ("path", run.get("path") in protected_paths),
+        ("repository", repository.get("full_name") == REPO),
+        ("repository_id", str(repository.get("id")) == claims.get("repository_id")),
+        ("pull_requests", candidate["pr_number"] in [p.get("number") for p in pulls if isinstance(p, dict)]),
+    ) if not ok]
+    if failed:
+        raise Reject("caller run identity or state invalid: " + ",".join(failed))
     if (not isinstance(pr, dict) or pr.get("number") != candidate["pr_number"]
             or pr.get("state") != "open" or pr.get("head", {}).get("sha") != candidate["expected_head_sha"]
             or pr.get("base", {}).get("sha") != candidate["expected_base_sha"]
@@ -578,7 +592,7 @@ def prepare(candidate, directory, api):
                 or current.get("head", {}).get("ref") != pr["head"]["ref"]
                 or current.get("base", {}).get("sha") != candidate["expected_base_sha"]
                 or current.get("merge_commit_sha") != payload["selection"]["merge_sha"]
-                or final_run.get("status") != "in_progress" or final_run.get("run_attempt") != attempt):
+                or final_run.get("status") not in LIVE_RUN_STATUSES or final_run.get("run_attempt") != attempt):
             raise Reject("PR moved during preparation")
         os.replace(repo, directory)
 

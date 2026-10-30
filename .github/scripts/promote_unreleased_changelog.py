@@ -25,23 +25,23 @@ text = path.read_bytes().decode("utf-8")
 # would just move the inconsistency rather than fix it.
 NL = "\r\n" if "\r\n" in text else "\n"
 
-UNRELEASED = re.compile(r"(?m)^## \[Unreleased\][^\n]*\n")
+UNRELEASED = re.compile(r"(?m)^## \[Prerelease\][^\n]*\n")
 head = UNRELEASED.search(text)
 if head is None:
-    print(f"ERROR: {path}: no '## [Unreleased]' heading", file=sys.stderr)
+    print(f"ERROR: {path}: no '## [Prerelease]' heading", file=sys.stderr)
     raise SystemExit(1)
 
 if re.search(rf"(?m)^## \[{re.escape(version)}\]", text):
     print(f"ERROR: {path}: a '## [{version}]' section already exists", file=sys.stderr)
     raise SystemExit(1)
 
-# The Unreleased body runs to the next `## [` heading, or to EOF.
+# The Prerelease body runs to the next `## [` heading, or to EOF.
 nxt = re.compile(r"(?m)^## \[").search(text, head.end())
 body_end = nxt.start() if nxt else len(text)
 body = text[head.end():body_end]
 
 if not body.strip():
-    print("Nothing to release: '## [Unreleased]' is empty.")
+    print("Nothing to release: '## [Prerelease]' is empty.")
     raise SystemExit(3)
 
 # Ordering is load-bearing: this runs AFTER the emptiness check, so an empty
@@ -238,8 +238,8 @@ def has_preamble(body_text):
 
 if not has_preamble(body):
     print(
-        f"ERROR: {path}: '## [Unreleased]' has notes but no preamble.\n"
-        "       Write 1-3 sentences directly under '## [Unreleased]', above the\n"
+        f"ERROR: {path}: '## [Prerelease]' has notes but no preamble.\n"
+        "       Write 1-3 sentences directly under '## [Prerelease]', above the\n"
         "       first '###' category heading. If the section has no category heading\n"
         "       yet, add one (e.g. '### Fixed') below that paragraph — a body with no\n"
         "       category heading is read as all detail and has no preamble at all.\n"
@@ -254,20 +254,56 @@ if not has_preamble(body):
     )
     raise SystemExit(1)
 
-# The body is emitted BYTE-FOR-BYTE. An earlier revision used body.rstrip(),
+# The one sanctioned rewrite: the tally line. PRs add bullets without touching
+# it (editing it in every PR would re-create the merge conflicts the one-line
+# entry rule removes), so it drifts between releases and is recounted here.
+# Only an existing tally line in the preamble zone is replaced; a body without
+# one is emitted unchanged. Counts are top-level '- ' bullets per '### '
+# category, outside code fences, in Keep a Changelog order. Other
+# sections, such as known issues, are not counted.
+# The lookahead admits a CR before the line end so CRLF files are recounted too.
+TALLY_RE = re.compile(r"(?m)^\*\*\d+ Total Changes\*\*[^\r\n]*(?=\r?$)")
+CATEGORY_ORDER = ["Added", "Changed", "Deprecated", "Removed", "Fixed", "Security"]
+
+
+def tally_line(body_text):
+    counts, current, marker = {}, None, None
+    for line in body_text.splitlines():
+        m = FENCE_RE.match(line)
+        if m:
+            marker = m.group(1) if marker is None else (None if marker == m.group(1) else marker)
+            continue
+        if marker is not None:
+            continue
+        if line.startswith("### "):
+            current = line[4:].strip()
+        elif current in CATEGORY_ORDER and line.startswith("- "):
+            counts[current] = counts.get(current, 0) + 1
+    names = [c for c in CATEGORY_ORDER if c in counts]
+    parts = [f"**{sum(counts.values())} Total Changes**"] + [f"{counts[c]} {c}" for c in names]
+    return " | ".join(parts)
+
+
+_boundary = category_boundary(body.split("\n"))
+_zone_end = len("\n".join(body.split("\n")[:_boundary]))
+_tally = TALLY_RE.search(body, 0, _zone_end)
+if _tally:
+    body = body[:_tally.start()] + tally_line(body) + body[_tally.end():]
+
+# Apart from the tally line above, the body is emitted BYTE-FOR-BYTE. An earlier revision used body.rstrip(),
 # which silently contradicted the verbatim contract this script exists to keep:
 # in Markdown two trailing spaces are a hard line break, so stripping them
 # changes how someone's release note RENDERS. `body` already carries its own
-# leading and trailing whitespace (it is the slice between the Unreleased
+# leading and trailing whitespace (it is the slice between the Prerelease
 # heading and the next `## [`), so re-emitting it unmodified reproduces the
 # original spacing exactly. Do not normalise it.
 #
-# Em dash, matching every existing heading: `## [0.2.40] — 2026-08-20`.
+# Keep a Changelog 1.1 heading, matching every existing one: `## [0.2.48] - 2026-10-04`.
 promoted = (
-    f"## [Unreleased]{NL}"
+    f"## [Prerelease]{NL}"
     f"{NL}"
-    f"## [{version}] — {date}{NL}"
+    f"## [{version}] - {date}{NL}"
     f"{body}"
 )
 path.write_bytes((text[:head.start()] + promoted + text[body_end:]).encode("utf-8"))
-print(f"Promoted {len(body.strip())} chars of release notes to [{version}] — {date}")
+print(f"Promoted {len(body.strip())} chars of release notes to [{version}] - {date}")

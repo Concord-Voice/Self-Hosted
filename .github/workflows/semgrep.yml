@@ -237,7 +237,10 @@ jobs:
           PY
 
       - name: Upload custom-rules SARIF to Code Scanning
-        if: inputs.run-custom
+        if: inputs.run-custom && (inputs.external-verdict || github.event_name != 'pull_request')
+        # Ordinary PR runs scan but do not upload: the protected run owns these
+        # categories on the PR merge ref, and the verifier requires its upload to
+        # be the latest one there. A later ordinary upload would fail the verdict.
         # first-party, SHA-pinned for Alpha Code Scanning Gate (#1431).
         # Keep the trailing version comment bare: dependabot only rewrites that
         # exact shape, so an annotated one silently rots on every bump (#2309).
@@ -248,7 +251,7 @@ jobs:
           category: semgrep-custom
 
       - name: Upload community SARIF to Code Scanning
-        if: inputs.run-community
+        if: inputs.run-community && (inputs.external-verdict || github.event_name != 'pull_request')
         # first-party, SHA-pinned for Alpha Code Scanning Gate (#1431).
         # Keep the trailing version comment bare: dependabot only rewrites that
         # exact shape, so an annotated one silently rots on every bump (#2309).

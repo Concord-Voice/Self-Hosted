@@ -134,12 +134,17 @@ jobs:
               - 'scripts/security/override-range-lint.mjs'
               - '.github/workflows/build.yml'
             control-plane:
+              - '.github/ci/docker-engine-packages.lock'
+              - 'scripts/ci/install-docker-engine.sh'
+              - 'scripts/ci/start-control-plane-services.sh'
               - 'services/control-plane/**'
               - 'scripts/authority-vectors/**'
               - 'docs/design/trusted-recovery-v2-vectors.json'
               - 'packages/protocol/src/renderer/stores/voice/audioQualityTiers.ts'
               - 'scripts/test-tools/nats-server.sh'
             media-plane:
+              - '.github/ci/docker-engine-packages.lock'
+              - 'scripts/ci/install-docker-engine.sh'
               - 'services/media-plane/**'
             # Gates the media-plane TEST job only, never its Docker build. The
             # camera layer-policy parity suite lives in the media-plane test tree
@@ -175,6 +180,8 @@ jobs:
             # compose files, and this workflow itself. Keep aligned with
             # the production `--profile services` build set.
             production-docker:
+              - '.github/ci/docker-engine-packages.lock'
+              - 'scripts/ci/install-docker-engine.sh'
               - 'services/**'
               - 'client/admin/**'
               - 'infrastructure/docker/**'
@@ -217,7 +224,7 @@ jobs:
         run: scripts/security/scan-supply-chain-iocs.sh --include-node-modules --working-tree-only
 
       - name: Verify installed Undici floors
-        run: node scripts/security/override-range-lint.mjs --dir . --verify-installed-versions --minimum-version undici=6.28.1 --minimum-version undici=7.29.1 --minimum-version undici=8.10.2
+        run: node scripts/security/override-range-lint.mjs --dir . --verify-installed-versions --minimum-version undici=6.29.1 --minimum-version undici=7.30.1 --minimum-version undici=8.12.2
 
       - name: Run tests with coverage (shard ${{ matrix.shard }}/2)
         env:
@@ -356,50 +363,17 @@ jobs:
       matrix:
         shard: [1, 2]
 
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: concord
-          POSTGRES_PASSWORD: test_password
-          POSTGRES_DB: concord_test
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U concord -d concord_test"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
-      redis:
-        image: redis:8-alpine
-        ports:
-          - 6379:6379
-        options: >-
-          --health-cmd "redis-cli ping"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
-      # NATS backs the voice-enforcement integration tests (voice.enforce.*
-      # publishers in internal/voice + the rbac -> enforcer call-site tests,
-      # CV-CAN-007). Those tests skip when NATS is unreachable, so without this
-      # service they silently skipped in CI and permission_enforcer.go showed
-      # ~5% coverage despite a full local suite (the SonarCloud new-code gate
-      # failure that surfaced the gap). Image matches the dev compose stack
-      # (nats:2-alpine); busybox nc provides the TCP health probe.
-      nats:
-        image: nats:2-alpine
-        ports:
-          - 4222:4222
-        options: >-
-          --health-cmd "nc -z 127.0.0.1 4222 || exit 1"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 5
-
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Install and admit locked Docker Engine
+        run: bash scripts/ci/install-docker-engine.sh
+
+      - name: Start healthy CI service containers
+        id: ci-services
+        run: bash scripts/ci/start-control-plane-services.sh
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -476,7 +450,7 @@ jobs:
 
       - name: Confine operations metrics reader to its test database
         env:
-          POSTGRES_CONTAINER_ID: ${{ job.services.postgres.id }}
+          POSTGRES_CONTAINER_ID: concord-ci-postgres
           PGPASSWORD: test_password
         run: |
           set -euo pipefail
@@ -686,6 +660,11 @@ jobs:
           path: ~/.cache/go-build
           key: go-build-${{ runner.os }}-${{ hashFiles('services/control-plane/go.sum') }}-${{ github.sha }}
 
+      - name: Stop CI service containers
+        # always() cleans up services after partial startup or failed tests.
+        if: always() && steps.ci-services.outcome != 'skipped'
+        run: docker rm -f concord-ci-postgres concord-ci-redis concord-ci-nats
+
   # ─── Control Plane Coverage Merge ────────────────────────────────────
   control-plane-coverage-merge:
     name: Control Plane / Merge Coverage
@@ -851,7 +830,7 @@ jobs:
 
       - name: Verify installed Undici floors
         working-directory: client/admin
-        run: node ../../scripts/security/override-range-lint.mjs --dir . --verify-installed-versions --minimum-version undici=6.28.1 --minimum-version undici=7.29.1 --minimum-version undici=8.10.2
+        run: node ../../scripts/security/override-range-lint.mjs --dir . --verify-installed-versions --minimum-version undici=6.29.1 --minimum-version undici=7.30.1 --minimum-version undici=8.12.2
 
       - name: Format check
         working-directory: client/admin
@@ -944,6 +923,12 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install and admit locked Docker Engine
+        run: bash scripts/ci/install-docker-engine.sh
+
+      - name: Require supported Docker Engine server
+        run: bash scripts/ci/require-docker-engine.sh
+
       # SHA-pinned per supply-chain hardening (#847, [internal]rules/electron.md
       # §"Supply-chain hardening (third-party GitHub Actions)"). Upgrade
       # procedure: resolve `gh api repos/useblacksmith/setup-docker-builder/git/refs/tags/vX.Y.Z`,
@@ -952,6 +937,12 @@ jobs:
       # job below, whose value depends on a genuinely cold builder (ADR-0016).
       - name: Setup Blacksmith Builder
         uses: useblacksmith/setup-docker-builder@19215110ab936351210feebdfa5b440b4493e184 # v2.2.0
+        with:
+          cache-key: services/media-plane/Dockerfile
+          nofallback: true
+
+      - name: Require selected remote BuildKit
+        run: python3 scripts/ci/require-remote-buildkit.py
 
       # SHA-pinned per supply-chain hardening (#847).
       - uses: useblacksmith/build-push-action@9b0579bbec7a6cad2f171596c57e7ac1e7658850 # v2.3.0
@@ -1094,6 +1085,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+
+      - name: Install and admit locked Docker Engine
+        run: bash scripts/ci/install-docker-engine.sh
 
       - name: Verify Admin Portal production wiring
         run: bash scripts/test-admin-ui-production-wiring.sh

@@ -104,16 +104,19 @@ func wireDMBlockReconciler(
 	dmBlockReconciler.SetPurgeEngine(dmBlockAttachmentRetirer{engine: purgeEngine})
 	dmBlockReconciler.SetReconciliationNotifier(newDMBlockReconciliationNotifier(hub))
 	reconciler.SetDMBlockCleanup(dmBlockReconciler.ReconcileDue)
+	var requester dmBlockVoiceEjectionRequester
+	if natsClient != nil {
+		requester = natsClient
+	}
+	runtime := newVoiceAuthRuntime(db, requester, jwtSecret, hub, dmBlockReconciler)
+	dmBlockReconciler.SetAuthRevocationEject(runtime.deliverAuth)
+	dmBlockReconciler.SetCredentialEpochEjectV2(runtime.deliverEpoch)
 	if natsClient != nil {
 		dmBlockReconciler.SetVoiceEjectV2(func(ctx context.Context, conversationID string, userID, generation uuid.UUID) error {
 			return publishDurableDMBlockVoiceEjection(ctx, db, natsClient, jwtSecret, conversationID, userID, generation)
 		})
-		dmBlockReconciler.SetCredentialEpochEjectV2(func(ctx context.Context, userID uuid.UUID, credentialEpoch, supersededCredentialEpoch string, generation uuid.UUID) error {
-			return publishDurableCredentialEpochVoiceEjection(ctx, db, natsClient, jwtSecret, credentialEpochVoiceEjection{
-				userID: userID, credentialEpoch: credentialEpoch, supersededCredentialEpoch: supersededCredentialEpoch,
-			}, generation)
-		})
 	}
+
 	return dmBlockReconciler
 }
 
@@ -1306,7 +1309,8 @@ func NewRouter(
 		dangerousActionGateGap(channelsHandler, membersHandler, rbacHandler, mediaHandler) == "")
 	updatesHandler := updates.NewHandler(cfg, log)
 	privacyHandler, accountService := buildPrivacyHandler(
-		db, redis, log, usersHandler, hub, graphPresenceCapture, natsClient, cfg.MFAEncryptionKey)
+		db, redis, log, usersHandler, hub,
+		erasureClearWiring{capture: graphPresenceCapture, nats: natsClient, secret: cfg.MFAEncryptionKey})
 
 	// The erasure drain (#2448). Wired here rather than beside the DM rail for
 	// the same reason the guard below runs here: accountService does not exist
@@ -1362,18 +1366,24 @@ func NewRouter(
 	// admin generation endpoint is gated by REDEMPTION_ADMIN_TOKEN; empty
 	// disables it (503).
 	redemptionEntNotifier := NewEntitlementNotifier(hub, log)
-	redemptionHandler := buildRedemptionHandler(db, entCache, redemptionEntNotifier, cfg, log)
 
 	// Stripe billing (#2033 PR-2): nil unless keys are configured and the
 	// instance is not self-hosted, so production without keys registers no
 	// billing route and runs no billing worker. The workers live as long as
-	// the router's lifecycle context.
-	billingSvc := wireBilling(lifecycleCtx, cfg, db, entCache, redemptionEntNotifier, opsCounters, log)
+	// the router's lifecycle context. Built before redemption, which uses it
+	// for code credit (D1).
+	billingSvc := wireBilling(cfg, db, entCache, redemptionEntNotifier, redemptionEntNotifier, opsCounters, log)
 	startBillingWorkers(lifecycleCtx, billingSvc)
+	if billingSvc != nil {
+		accountService.SetErasedSeatNotifier(erasedSeatNotifier(billingSvc))
+		friendsHandler.SetSeatPairNotifier(billingSvc.OnPairChanged)
+	}
+	redemptionHandler := buildRedemptionHandler(db, entCache, redemptionEntNotifier, billingSvc, cfg, log)
 
 	// DM-block convergence is pure SQL and must run on every Block-serving
 	// replica, including self-hosted deployments without NATS.
 	dmBlockReconciler := wireDMBlockReconciler(db, log, purgeEngine, activePlanReconciler, hub, natsClient, cfg.JWTSecret)
+	voiceEnforcementSessionHandler.authoritySnapshot = newVoiceAuthRuntime(db, natsClient, cfg.JWTSecret, hub, dmBlockReconciler).AuthoritySnapshot
 	credFence.SetPostCommitEvictor(func(ctx context.Context, userID, credentialEpoch, supersededCredentialEpoch string) {
 		if err := dmBlockReconciler.DeliverCredentialEpochVoiceEjection(ctx, userID, credentialEpoch, supersededCredentialEpoch); err != nil {
 			log.Error("Credential media eviction retained", "failure_class", "delivery")
@@ -1536,10 +1546,12 @@ func NewRouter(
 
 			// Social recovery (unauthenticated — uses recovery token)
 			authRoutes.POST("/recovery/social-request",
+				middleware.RecoveryCirclePaused,
 				middleware.RateLimitByIP(redis, 3, 15*time.Minute),
 				authHandler.CreateSocialRecoveryRequest,
 			)
 			authRoutes.GET("/recovery/social-request/:id",
+				middleware.RecoveryCirclePaused,
 				middleware.RateLimitByIP(redis, 10, 15*time.Minute),
 				authHandler.PollSocialRecoveryRequest,
 			)
@@ -1699,7 +1711,17 @@ func NewRouter(
 		// closure since gin.HandlerFunc has a fixed signature.
 		v1.POST("/attestation/verify",
 			middleware.AuthRequired(cfg.JWTSecret, redis, db, credFence),
+			middleware.RequireSessionHeaderMatchesToken(),
 			func(c *gin.Context) { attestationHandler.Verify(c, cfg.AttestationTokenTTL) },
+		)
+		// iOS App Attest challenge (ADR-0010 D17). Like verify, it sits outside
+		// RequireAttestation so a phone can bootstrap; each call writes one
+		// short-lived Redis key, hence the per-user cap.
+		v1.POST("/attestation/challenge",
+			middleware.AuthRequired(cfg.JWTSecret, redis, db, credFence),
+			middleware.RequireSessionHeaderMatchesToken(),
+			middleware.RateLimitByUser(redis, 30, 1*time.Minute),
+			attestationHandler.Challenge,
 		)
 		// Internal CI publish endpoints (Y1 split — #677 R3 reconciliation).
 		// Two axes, two endpoints, each with its own OIDC-authed shape:
@@ -1731,6 +1753,10 @@ func NewRouter(
 		// shared-IP application bucket here: one media node can legitimately
 		// release its whole shutdown burst, and a peer can otherwise poison that
 		// bucket to strand durable evidence. The handler caps JSON at 4 KiB.
+		registerVoiceAuthAliases(v1)
+		v1.POST("/internal/voice/auth-connections/release", voiceEnforcementSessionHandler.ReleaseConnection)
+		v1.POST("/internal/voice/auth-connections/provisional-close", voiceEnforcementSessionHandler.ProvisionalClose)
+		v1.POST("/internal/voice/auth-connections/retire-boot", voiceEnforcementSessionHandler.RetireBoot)
 		v1.POST("/internal/voice/enforcement-sessions/release", voiceEnforcementSessionHandler.Release)
 		v1.POST("/internal/voice/enforcement/health", voiceEnforcementSessionHandler.HealthBootstrap)
 
@@ -1810,6 +1836,10 @@ func NewRouter(
 			// The media plane records an exact A1 candidate before its A2
 			// promotion. The handler itself requires the service-hop proof;
 			// rate limiting is a backstop for an accidentally looping node.
+			protected.POST("/internal/voice/auth-connections",
+				middleware.RateLimitByUser(redis, 60, 1*time.Minute),
+				voiceEnforcementSessionHandler.RegisterConnection,
+			)
 			protected.POST("/voice/enforcement-sessions",
 				middleware.RateLimitByUser(redis, 60, 1*time.Minute),
 				voiceEnforcementSessionHandler.Register,
@@ -1826,6 +1856,31 @@ func NewRouter(
 				protected.POST("/billing/checkout-session",
 					middleware.RateLimitByUser(redis, 5, 10*time.Minute),
 					billingSvc.CheckoutSession,
+				)
+				// Wing seats (#2033 PR-5, spec §8): verified email, 10/hour
+				// per user on each route, not gated by purchase mode (a payer
+				// can always manage the seat they bought).
+				seatLimit := middleware.RateLimitByUser(redis, 10, 1*time.Hour)
+				protected.POST("/billing/seat/invite", seatLimit, billingSvc.SeatInvite)
+				protected.DELETE("/billing/seat", seatLimit, billingSvc.SeatRevoke)
+				protected.POST("/billing/seat/leave", seatLimit, billingSvc.SeatLeave)
+				protected.POST("/billing/seat-invites/:id/accept", seatLimit, billingSvc.SeatAccept)
+				protected.POST("/billing/seat-invites/:id/decline", seatLimit, billingSvc.SeatDecline)
+				protected.POST("/billing/plan-change",
+					middleware.RateLimitByUser(redis, 5, 10*time.Minute),
+					billingSvc.PlanChange,
+				)
+				protected.POST("/billing/plan-change/preview",
+					middleware.RateLimitByUser(redis, 10, 10*time.Minute),
+					billingSvc.PlanChangePreview,
+				)
+				protected.POST("/billing/plan-change/cancel",
+					middleware.RateLimitByUser(redis, 5, 10*time.Minute),
+					billingSvc.KeepCurrentPlan,
+				)
+				protected.POST("/billing/subscription-cancel",
+					middleware.RateLimitByUser(redis, 5, 10*time.Minute),
+					billingSvc.CancelSubscription,
 				)
 			}
 			// WebSocket ticket (short-lived, single-use)
@@ -2088,16 +2143,19 @@ func NewRouter(
 					mfaHandler.DeleteRecoveryCircle,
 				)
 				mfaRoutes.GET("/recovery-circle/shares",
+					middleware.RecoveryCirclePaused,
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					mfaHandler.GetMyRecoveryShares,
 				)
 
 				// Social recovery requests (contacts respond)
 				mfaRoutes.GET("/recovery-requests/social",
+					middleware.RecoveryCirclePaused,
 					middleware.RateLimitByUser(redis, 10, 1*time.Minute),
 					mfaHandler.ListSocialRecoveryRequests,
 				)
 				mfaRoutes.POST("/recovery-requests/social/:id/respond",
+					middleware.RecoveryCirclePaused,
 					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
 					mfaHandler.RespondToSocialRecovery,
 				)

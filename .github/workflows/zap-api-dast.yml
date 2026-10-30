@@ -108,6 +108,10 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install and admit locked Docker Engine
+        run: bash scripts/ci/install-docker-engine.sh
+
+
       - name: Select AF plan
         id: plan
         env:

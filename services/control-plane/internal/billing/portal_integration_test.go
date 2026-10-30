@@ -188,6 +188,7 @@ func TestPortal_CancelFlowCarriesSubscription(t *testing.T) {
 	latest := later.AddDate(1, 0, 0)
 	seedStripeSub(t, env.DB, env.User, "sub_older_live", env.Customer, "active", earlier)
 	seedStripeSub(t, env.DB, env.User, "sub_newer_live", env.Customer, "active", later)
+	env.Fake.seedSubscription("sub_newer_live", env.Customer, PlanWing, "year", later.Unix())
 	// A canceled row with the latest period end is not live and is never chosen.
 	seedStripeSub(t, env.DB, env.User, "sub_dead_latest", env.Customer, "canceled", latest)
 	// A live code row has no Stripe subscription to cancel in the Portal.
@@ -373,6 +374,30 @@ func TestPortal_NoOwnedConfig503(t *testing.T) {
 	requireLogLine(t, env, "ERROR",
 		"billing: no active Customer Portal configuration is marked for Concord; run the Stripe bootstrap",
 		"marker_key="+PortalMetadataKey, "marker_value="+PortalMetadataVersion)
+}
+
+// A configuration bootstrapped before in-app plan changes still lets a user
+// switch plans in the Portal, ending a trial and charging at once. It is refused.
+func TestPortal_PlanSwitchingConfigIs503(t *testing.T) {
+	fake := newFakeStripe(t)
+	pc := fake.seedPortal(portalV1ConfigID, map[string]string{PortalMetadataKey: PortalMetadataVersion})
+	pc.Features = &fakePortalFeatures{}
+	pc.Features.SubscriptionUpdate.Enabled = true
+	env := newTestService(t, fake)
+	user := newPayer(t, env, "cus_switching")
+
+	w := postPortal(env.Svc, user, `{}`)
+
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, errBillingUnavail, portalErrorClass(t, w))
+	assert.Empty(t, fake.requestsTo(http.MethodPost, portalSessionsPath))
+	requireLogLine(t, env, "ERROR",
+		"billing: the Customer Portal configuration allows plan switching; run the Stripe bootstrap",
+		"marker_key="+PortalMetadataKey, "marker_value="+PortalMetadataVersion)
+
+	pc.Features.SubscriptionUpdate.Enabled = false
+	w = postPortal(env.Svc, user, `{}`)
+	assert.Equal(t, http.StatusCreated, w.Code, "a refused configuration is not cached; the fixed one works at once")
 }
 
 func TestPortal_ConfigListErrorIs503(t *testing.T) {

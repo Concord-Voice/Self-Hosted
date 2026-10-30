@@ -104,6 +104,19 @@ console.log(JSON.stringify(composeSelection(filters, JSON.parse(process.argv[2])
     return json.loads(result.stdout)
 
 
+def run_codeql_matrix_step(select_job: dict, **env: str) -> dict:
+    """Run codeql-pr.yml's matrix step with the given filter env; return its matrix."""
+    step = next(step for step in select_job["steps"] if step.get("id") == "matrix")
+    with tempfile.TemporaryDirectory(prefix="codeql-matrix-") as directory:
+        output = Path(directory) / "output"
+        summary = Path(directory) / "summary"
+        subprocess.run(["bash", "-c", step["run"]], check=True, capture_output=True, text=True,
+                       env={"PATH": os.environ["PATH"], "GITHUB_OUTPUT": str(output),
+                            "GITHUB_STEP_SUMMARY": str(summary), **env})
+        line = next(l for l in output.read_text().splitlines() if l.startswith("matrix="))
+        return json.loads(line.removeprefix("matrix="))
+
+
 class RequiredWorkflowCodeQLGraphTests(unittest.TestCase):
     def test_required_workflow_cannot_reach_codeql_actions(self):
         reachable = reachable_actions(ROOT, REQUIRED_WORKFLOW)
@@ -212,7 +225,7 @@ jobs:
 
             self.assertEqual([], reachable_actions(fixture, ".github/workflows/root.yml"))
 
-    def test_ordinary_pr_workflow_runs_ioc_before_full_codeql_on_retarget(self):
+    def test_ordinary_pr_workflow_runs_ioc_before_selected_codeql_on_retarget(self):
         caller_path = ROOT / ".github/workflows/codeql-pr.yml"
         self.assertTrue(caller_path.is_file(),
                         "ordinary CodeQL PR caller .github/workflows/codeql-pr.yml is missing")
@@ -223,23 +236,55 @@ jobs:
         jobs = caller.get("jobs", {})
         self.assertEqual("./.github/workflows/ioc-scanning.yml", jobs.get("ioc", {}).get("uses"))
         self.assertEqual("./.github/workflows/codeql.yml", jobs.get("codeql", {}).get("uses"))
-        self.assertEqual(["ioc"], jobs.get("codeql", {}).get("needs"))
-        ioc_condition = jobs.get("ioc", {}).get("if", "")
-        self.assertIn("github.event.action == 'edited'", ioc_condition)
-        self.assertIn("github.event.changes.base == null", ioc_condition,
-                      "base retarget edits must not be treated as metadata-only")
-        self.assertIn("github.event.changes.title != null", ioc_condition)
-        self.assertIn("github.event.changes.body != null", ioc_condition)
-        self.assertIn("!", ioc_condition,
-                      "only title/body-only edits may skip the IOC dependency")
-        self.assertNotIn("if", jobs["codeql"], "native CodeQL cannot be path or mode filtered")
-        self.assertNotIn("with", jobs["codeql"], "use the reusable workflow's full default matrix")
-        self.assertNotIn("paths", triggers, "native CodeQL must not use path filters")
+        self.assertEqual(["ioc", "select"], jobs.get("codeql", {}).get("needs"))
+        for job in ("ioc", "select"):
+            condition = jobs.get(job, {}).get("if", "")
+            with self.subTest(job=job):
+                self.assertIn("github.event.action == 'edited'", condition)
+                self.assertIn("github.event.changes.base == null", condition,
+                              "base retarget edits must not be treated as metadata-only")
+                self.assertIn("github.event.changes.title != null", condition)
+                self.assertIn("github.event.changes.body != null", condition)
+                self.assertIn("!", condition,
+                              "only title/body-only edits may skip the IOC dependency")
+        self.assertNotIn("if", jobs["codeql"], "native CodeQL cannot be skipped as a whole")
+        self.assertEqual("${{ needs.select.outputs.matrix }}",
+                         jobs["codeql"].get("with", {}).get("codeql-matrix"))
+        self.assertNotIn("paths", triggers, "native CodeQL must not use trigger path filters")
+        select = jobs["select"]
+        checkout = next(step for step in select["steps"] if step.get("id") == "policy")
+        self.assertEqual("${{ github.event.pull_request.base.sha }}", checkout["with"]["ref"],
+                         "the language filter must come from the base commit, not the PR")
+        dorny = next(step for step in select["steps"] if step.get("id") == "filter")
+        self.assertEqual("policy/.github/ci/scan-relevance.yml", dorny["with"]["filters"])
         codeql = yaml.load((ROOT / ".github/workflows/codeql.yml").read_text(),
                            Loader=yaml.BaseLoader)
-        matrix = json.loads(codeql["on"]["workflow_call"]["inputs"]["codeql-matrix"]["default"])
+        default = json.loads(codeql["on"]["workflow_call"]["inputs"]["codeql-matrix"]["default"])
         self.assertEqual({"actions", "go", "javascript-typescript"},
-                         {leg["language"] for leg in matrix["include"]})
+                         {leg["language"] for leg in default["include"]})
+        full = run_codeql_matrix_step(select, FILTER_OK="false", HOTFIX="false", GO="", JS="")
+        self.assertEqual(default, full, "selected legs must match codeql.yml's default legs")
+
+    def test_codeql_language_selection(self):
+        select = yaml.load((ROOT / ".github/workflows/codeql-pr.yml").read_text(),
+                           Loader=yaml.BaseLoader)["jobs"]["select"]
+        cases = [
+            ({"FILTER_OK": "true", "HOTFIX": "false", "GO": "false", "JS": "false"}, ["actions"]),
+            ({"FILTER_OK": "true", "HOTFIX": "false", "GO": "true", "JS": "false"}, ["actions", "go"]),
+            ({"FILTER_OK": "true", "HOTFIX": "false", "GO": "false", "JS": "true"},
+             ["actions", "javascript-typescript"]),
+            ({"FILTER_OK": "true", "HOTFIX": "true", "GO": "false", "JS": "false"},
+             ["actions", "go", "javascript-typescript"]),
+            # A failed or skipped filter (empty outputs) fails open to the full matrix.
+            ({"FILTER_OK": "false", "HOTFIX": "false", "GO": "", "JS": ""},
+             ["actions", "go", "javascript-typescript"]),
+            ({"FILTER_OK": "true", "HOTFIX": "false", "GO": "", "JS": ""},
+             ["actions", "go", "javascript-typescript"]),
+        ]
+        for env, languages in cases:
+            with self.subTest(**env):
+                matrix = run_codeql_matrix_step(select, **env)
+                self.assertEqual(languages, [leg["language"] for leg in matrix["include"]])
 
     def test_valid_pr_selection_never_claims_protected_codeql_ownership(self):
         metadata = {"event_name": "pull_request", "hotfix": False,

@@ -8,13 +8,9 @@ on:
   pull_request:
     branches: [__ruleset_only__]
 
+# Every job declares its own grants; the workflow default stays read-only.
 permissions:
   contents: read
-  pull-requests: write
-  actions: read
-  checks: read
-  packages: read
-  security-events: write
 
 jobs:
   pr-ci:
@@ -243,9 +239,72 @@ jobs:
               });
             }
 
+  # squawk on the up migrations the PR adds or changes (#4175). Defined here, not
+  # through the pinned pr-ci graph, so it is required as soon as it reaches main
+  # without moving that pin. Same steps as pr-ci's advisory migration-lint job;
+  # change both together.
+  migration-lint:
+    name: Protected migration lint
+    needs: [pr-ci]
+    # pr-ci holds the IOC gate (ADR-0018), so nothing installs before it passes.
+    # Runs only when the protected selection says control-plane files changed
+    # (migrations live there; hotfix and full runs force it on), or when the
+    # selection is unknown, so an unreadable selection never skips the lint.
+    if: >-
+      ${{ !cancelled() && needs.pr-ci.result == 'success' &&
+      (!contains(needs.pr-ci.outputs.report-selection, '"known":true') ||
+      contains(needs.pr-ci.outputs.report-selection, '"control_plane":true')) }}
+    permissions:
+      contents: read
+    # pip runs from the PR checkout; keep a PR-root pip.py (or any module) off
+    # sys.path so it cannot stand in for pip and plant a fake squawk.
+    env:
+      PYTHONSAFEPATH: '1'
+      PYTHONPATH: ''
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # HEAD is the PR merge commit; HEAD^1 is the base it merges into.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Select changed up migrations
+        id: select
+        run: |
+          set -euo pipefail
+          git diff --name-only --diff-filter=ACMR HEAD^1 HEAD \
+            -- 'services/control-plane/migrations/*.up.sql' > "$RUNNER_TEMP/migrations.txt"
+          count=$(grep -c . "$RUNNER_TEMP/migrations.txt" || true)
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          if [ "$count" -eq 0 ]; then
+            echo "No up migrations changed; nothing to lint."
+          else
+            cat "$RUNNER_TEMP/migrations.txt"
+          fi
+
+      # Config and pinned requirements come from the base, never the PR, so a PR
+      # cannot loosen the check it is judged by.
+      - name: Install squawk
+        if: ${{ steps.select.outputs.count != '0' }}
+        run: |
+          set -euo pipefail
+          git show HEAD^1:.squawk.toml > "$RUNNER_TEMP/squawk.toml"
+          git show HEAD^1:.github/requirements-squawk.txt > "$RUNNER_TEMP/requirements-squawk.txt"
+          python3 -m pip install --user --quiet --require-hashes --only-binary=:all: -r "$RUNNER_TEMP/requirements-squawk.txt"
+
+      - name: Lint changed migrations
+        if: ${{ steps.select.outputs.count != '0' }}
+        run: |
+          set -euo pipefail
+          mapfile -t files < "$RUNNER_TEMP/migrations.txt"
+          "$HOME/.local/bin/squawk" --version
+          "$HOME/.local/bin/squawk" --config "$RUNNER_TEMP/squawk.toml" "${files[@]}"
+
   result:
     name: Required PR build result
-    needs: [pr-ci, osv, publish-install-script-warnings]
+    needs: [pr-ci, osv, publish-install-script-warnings, migration-lint]
     # always() prevents a failed or skipped dependency from hiding this result.
     if: ${{ always() }}
     permissions:
@@ -287,7 +346,6 @@ jobs:
             exit 1
           fi
           git -C protected fetch --no-tags origin \
-            "refs/pull/${PR_NUMBER}/head:refs/scan/pr-head" \
             "refs/pull/${PR_NUMBER}/merge:refs/scan/pr-merge" "$BASE_SHA"
           git -C protected cat-file -e "${HEAD_SHA}^{commit}"
           git -C protected cat-file -e "${BASE_SHA}^{commit}"
@@ -372,10 +430,11 @@ jobs:
           OSV_RESULT: ${{ needs.osv.result }}
           VERIFIER_OUTCOME: ${{ steps.verify.outcome }}
           PINS_OUTCOME: ${{ steps.pins.outcome }}
+          MIGRATION_LINT_RESULT: ${{ needs.migration-lint.result }}
         run: |
-          if [[ "$PR_CI_RESULT" == success && "$PUBLISH_RESULT" == success && "$VERIFIER_OUTCOME" == success && "$PINS_OUTCOME" == success && "$OSV_RESULT" != failure && "$OSV_RESULT" != cancelled ]]; then
+          if [[ "$PR_CI_RESULT" == success && ( "$MIGRATION_LINT_RESULT" == success || "$MIGRATION_LINT_RESULT" == skipped ) && "$PUBLISH_RESULT" == success && "$VERIFIER_OUTCOME" == success && "$PINS_OUTCOME" == success && "$OSV_RESULT" != failure && "$OSV_RESULT" != cancelled ]]; then
             echo "::notice::Required PR scan verdict succeeded."
           else
-            echo "::error::Required PR scan verdict blocked: pr-ci=${PR_CI_RESULT}, publisher=${PUBLISH_RESULT}, verifier=${VERIFIER_OUTCOME}, pins=${PINS_OUTCOME}"
+            echo "::error::Required PR scan verdict blocked: pr-ci=${PR_CI_RESULT}, migration-lint=${MIGRATION_LINT_RESULT}, publisher=${PUBLISH_RESULT}, verifier=${VERIFIER_OUTCOME}, pins=${PINS_OUTCOME}"
             exit 1
           fi

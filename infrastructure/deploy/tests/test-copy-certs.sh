@@ -340,7 +340,7 @@ else:
 public_log="$TEST_ROOT/public-peer-turn.log"
 timeout 25s docker exec "$PUBLIC_PEER" turnutils_uclient \
   -u "$TURN_TEST_USERNAME" -w "$TURN_TEST_CREDENTIAL" -p 3478 -n 3 -m 1 \
-  -t -c --no-even-port -e "$peer_ip" -r 3480 "$server_ip" >"$public_log" 2>&1 || \
+  -s -t -c --no-even-port -e "$peer_ip" -r 3480 "$server_ip" >"$public_log" 2>&1 || \
   { tail -n 40 "$public_log" >&2; fail "TCP TURN must relay to an unwhitelisted public peer"; }
 if ! grep -Eq 'tot_send_msgs=3, tot_recv_msgs=3' "$public_log" || \
     ! grep -Eq 'Total lost packets 0 \([^)]*%\)' "$public_log"; then
@@ -369,7 +369,7 @@ else:
 mapped_log="$TEST_ROOT/managed-cohost-peer-turn.log"
 timeout 25s docker exec "$PUBLIC_PEER" turnutils_uclient \
   -u "$TURN_TEST_USERNAME" -w "$TURN_TEST_CREDENTIAL" -p 3478 -n 3 -m 1 \
-  -t -c --no-even-port -e "$peer_ip" -r 3480 "$mapped_server_ip" >"$mapped_log" 2>&1 || \
+  -s -t -c --no-even-port -e "$peer_ip" -r 3480 "$mapped_server_ip" >"$mapped_log" 2>&1 || \
   { tail -n 40 "$mapped_log" >&2; fail "managed same-public-address TCP TURN must relay to the direct echo peer"; }
 if ! grep -Eq 'tot_send_msgs=3, tot_recv_msgs=3' "$mapped_log" || \
     ! grep -Eq 'Total lost packets 0 \([^)]*%\)' "$mapped_log"; then

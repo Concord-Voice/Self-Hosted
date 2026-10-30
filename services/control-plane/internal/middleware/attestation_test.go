@@ -19,12 +19,19 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 )
 
+// testCaller is the authenticated user setupRouter puts in context, and the
+// user writeToken binds its record to.
+const testCaller = "u-attestation-test"
+
+func setCaller(c *gin.Context) { c.Set("user_id", testCaller) }
+
 func setupRouter(t *testing.T, enabled bool, rdb *redis.Client) (*gin.Engine, *bool) {
 	t.Helper()
 	gin.SetMode(gin.TestMode)
 	r := gin.New()
 	called := new(bool)
 	r.GET("/test",
+		setCaller,
 		middleware.RequireAttestation(enabled, rdb, logger.New("development")),
 		func(c *gin.Context) {
 			*called = true
@@ -42,6 +49,7 @@ func setupRouterWithLogBuf(t *testing.T, enabled bool, rdb *redis.Client, buf *b
 	r := gin.New()
 	called := new(bool)
 	r.GET("/test",
+		setCaller,
 		middleware.RequireAttestation(enabled, rdb, logger.NewWithWriter(buf)),
 		func(c *gin.Context) {
 			*called = true
@@ -55,7 +63,7 @@ func writeToken(t *testing.T, rdb *redis.Client, key, token, version string) {
 	t.Helper()
 	rec := attestation.TokenRecord{
 		Token: token, Version: version, SpaVersion: "20260529",
-		IssuedAt: time.Now(),
+		IssuedAt: time.Now(), UserID: attestation.HashUserID(testCaller),
 	}
 	bs, err := json.Marshal(rec)
 	require.NoError(t, err)
@@ -251,6 +259,28 @@ func TestRequireAttestation_TokenBoundToDifferentUser_403Invalid(t *testing.T) {
 
 // TestRequireAttestation_TokenBoundToSameUser_NextCalled confirms the binding does
 // not over-reject: the minting user still passes.
+// TestRequireAttestation_UnboundRecord_403Invalid: a record with no bound user
+// must not satisfy enforcement for anyone (#4211 red-team-critical F3).
+func TestRequireAttestation_UnboundRecord_403Invalid(t *testing.T) {
+	rdb, cleanup := testhelpers.SetupTestRedis(t)
+	defer cleanup()
+	bs, err := json.Marshal(attestation.TokenRecord{
+		Token: "tok-unbound", Version: "0.2.7", SpaVersion: "20260529", IssuedAt: time.Now(),
+	})
+	require.NoError(t, err)
+	require.NoError(t, rdb.Set(context.Background(), "attestation:s-unbound:m-1", bs, 2*time.Hour).Err())
+
+	r, called := setupRouter(t, true, rdb)
+	w := doRequest(t, r, map[string]string{
+		"X-Attestation-Token": "tok-unbound",
+		"X-Session-ID":        "s-unbound",
+		"X-Machine-Id":        "m-1",
+	})
+	require.Equal(t, http.StatusForbidden, w.Code)
+	require.False(t, *called)
+	require.Contains(t, w.Body.String(), string(attestation.ErrInvalid))
+}
+
 func TestRequireAttestation_TokenBoundToSameUser_NextCalled(t *testing.T) {
 	rdb, cleanup := testhelpers.SetupTestRedis(t)
 	defer cleanup()
@@ -327,6 +357,28 @@ func TestRequireAttestation_RevokedVersion_403Revoked(t *testing.T) {
 	w := doRequest(t, r, map[string]string{
 		"X-Attestation-Token": "rv-token",
 		"X-Session-ID":        "s-revoked",
+		"X-Machine-Id":        "m-1",
+	})
+
+	require.Equal(t, http.StatusForbidden, w.Code)
+	require.False(t, *called)
+	var resp attestation.ErrorResponse
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	require.Equal(t, attestation.ErrRevoked, resp.Code)
+}
+
+// An iOS version revoked only in the persistent set still blocks live tokens.
+func TestRequireAttestation_RevokedIOSVersion_403Revoked(t *testing.T) {
+	rdb, cleanup := testhelpers.SetupTestRedis(t)
+	defer cleanup()
+
+	writeToken(t, rdb, "attestation:s-ios:m-1", "ios-token", "ios-1.0.0(5)")
+	require.NoError(t, rdb.SAdd(context.Background(), attestation.RevokedIOSVersionsKey, "ios-1.0.0(5)").Err())
+
+	r, called := setupRouter(t, true, rdb)
+	w := doRequest(t, r, map[string]string{
+		"X-Attestation-Token": "ios-token",
+		"X-Session-ID":        "s-ios",
 		"X-Machine-Id":        "m-1",
 	})
 

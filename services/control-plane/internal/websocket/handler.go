@@ -12,6 +12,7 @@ import (
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/credepoch"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v5"
@@ -89,12 +90,31 @@ func (h *Handler) SetMinimumClientVersion(minimum string) {
 	h.minimumClientVersion = minimum
 }
 
+// liveWebSocketDeadline is the authenticated credential's expiry, when it is
+// set and still in the future.
+func liveWebSocketDeadline(c *gin.Context) (time.Time, bool) {
+	expiresAt, ok := c.Get(wsDeadlineContextKey)
+	deadline, valid := expiresAt.(time.Time)
+	return deadline, ok && valid && time.Now().Before(deadline)
+}
+
+// lookupWebSocketProfile reads the username, display name, and avatar for a
+// connecting user. A failed read keeps the socket and names the user "Unknown".
+func (h *Handler) lookupWebSocketProfile(userID uuid.UUID) (username string, displayName, avatarURL *string) {
+	if err := h.db.QueryRow("SELECT username, display_name, avatar_url FROM users WHERE id = $1", userID).Scan(&username, &displayName, &avatarURL); err != nil {
+		log.Printf("Failed to look up username for user %s: %v", sanitizeLogValue(userID.String()), err)
+		return "Unknown", nil, nil
+	}
+	return username, displayName, avatarURL
+}
+
 // HandleWebSocket upgrades HTTP connections to WebSocket
 func (h *Handler) HandleWebSocket(c *gin.Context) {
 	// Authenticate: prefer ticket-based auth, fall back to JWT for backward compat
 	userID, sessionID, err := h.authenticateWebSocket(c)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		status, message := webSocketAuthFailure(err)
+		c.JSON(status, gin.H{"error": message})
 		return
 	}
 	if !middleware.EnforceClientVersion(c, h.minimumClientVersion, c.Query("client_version")) {
@@ -111,26 +131,24 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 		}
 	}()
 	activityRichPresenceCapable := requestSupportsActivityRichPresence(c.Request)
-	expiresAt, ok := c.Get(wsDeadlineContextKey)
-	deadline, valid := expiresAt.(time.Time)
-	if !ok || !valid || !time.Now().Before(deadline) {
+	deadline, ok := liveWebSocketDeadline(c)
+	if !ok {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
 
-	// Look up username, display name, and avatar for this user
-	var username string
-	var displayName *string
-	var avatarURL *string
-	if err := h.db.QueryRow("SELECT username, display_name, avatar_url FROM users WHERE id = $1", userID).Scan(&username, &displayName, &avatarURL); err != nil {
-		log.Printf("Failed to look up username for user %s: %v", sanitizeLogValue(userID.String()), err)
-		username = "Unknown"
-	}
+	username, displayName, avatarURL := h.lookupWebSocketProfile(userID)
 	if !time.Now().Before(deadline) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
 		return
 	}
 
+	family, validFamily := c.Get(wsFamilyContextKey)
+	familyID, validID := family.(uuid.UUID)
+	if !validFamily || !validID || familyID == uuid.Nil {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "Unauthorized"})
+		return
+	}
 	// Upgrade HTTP connection to WebSocket
 	// Origin is validated by h.upgrader.CheckOrigin (configured in NewHandler)
 	conn, err := h.upgrader.Upgrade(c.Writer, c.Request, h.securityHeaders) // nosemgrep: go.gorilla.security.audit.websocket-missing-origin-check.websocket-missing-origin-check
@@ -144,6 +162,7 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 		ID:                          uuid.New(),
 		UserID:                      userID,
 		SessionID:                   sessionID,
+		FamilyID:                    familyID,
 		CredEpoch:                   c.GetString(wsCredEpochContextKey),
 		TokenExpiresAt:              deadline,
 		Username:                    username,
@@ -224,21 +243,7 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 			return
 		}
 	}
-	// The theft sweep can complete and clear its temporary deny marker while an
-	// upgrade is waiting for hub registration. Compare the durable generation
-	// captured before the first theft check, then repeat the pending-state gate.
-	// A sweep after this check is ordered after registration and disconnects us.
-	generation, err := h.readTokenTheftGeneration(c.Request.Context(), userID)
-	if err == nil {
-		initial, ok := c.Get(wsTheftGenerationContextKey)
-		snapshot, valid := initial.(int64)
-		if !ok || !valid || generation != snapshot {
-			err = fmt.Errorf("token theft generation changed during WebSocket registration")
-		} else {
-			err = middleware.CheckTokenTheftBlocked(c.Request.Context(), h.redis, h.db, userID.String())
-		}
-	}
-	if err != nil {
+	if err := h.recheckTokenTheft(c, userID); err != nil {
 		client.stopTokenExpiry()
 		log.Printf("Evicting WebSocket client for user %s: token theft state changed: %v", sanitizeLogValue(userID.String()), err)
 		client.requestUnregister()
@@ -251,10 +256,50 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 		return
 	}
 
+	if err := h.recheckClientFamily(c.Request.Context(), client); err != nil || client.securityTerminal.Load() {
+		client.securityTerminal.Store(true)
+		if closeErr := client.closeSecurityTransport(); closeErr != nil {
+			log.Printf("WebSocket family transport close failed: %s", describeSocketFailure(closeErr))
+		}
+		client.requestUnregister()
+		return
+	}
 	// Start client's read and write pumps
 	client.admissionOwners.Add(2)
 	go client.writePump()
 	go client.readPump()
+}
+
+// webSocketAuthFailure maps an authentication error to its HTTP status and
+// client-facing message.
+func webSocketAuthFailure(err error) (int, string) {
+	switch {
+	case errors.Is(err, loginfamily.ErrUnavailable):
+		return http.StatusServiceUnavailable, "Authentication temporarily unavailable"
+	case errors.Is(err, loginfamily.ErrContract):
+		return http.StatusInternalServerError, "Unauthorized"
+	default:
+		return http.StatusUnauthorized, "Unauthorized"
+	}
+}
+
+// recheckTokenTheft repeats the theft gate after hub registration. The theft
+// sweep can complete and clear its temporary deny marker while an upgrade is
+// waiting for hub registration. Compare the durable generation captured before
+// the first theft check, then repeat the pending-state gate. A sweep after this
+// check is ordered after registration and disconnects us. A nil return is the
+// only admit.
+func (h *Handler) recheckTokenTheft(c *gin.Context, userID uuid.UUID) error {
+	generation, err := h.readTokenTheftGeneration(c.Request.Context(), userID)
+	if err != nil {
+		return err
+	}
+	initial, ok := c.Get(wsTheftGenerationContextKey)
+	snapshot, valid := initial.(int64)
+	if !ok || !valid || generation != snapshot {
+		return fmt.Errorf("token theft generation changed during WebSocket registration")
+	}
+	return middleware.CheckTokenTheftBlocked(c.Request.Context(), h.redis, h.db, userID.String())
 }
 
 func requestSupportsActivityRichPresence(request *http.Request) bool {
@@ -267,7 +312,7 @@ func requestSupportsActivityRichPresence(request *http.Request) bool {
 
 // authenticateWebSocket validates the connection using ticket-based auth (preferred)
 // or falls back to JWT for backward compatibility. Returns (userID, sessionID, error).
-// sessionID is only populated for ticket-based auth when the client provided X-Session-ID.
+// Both paths resolve the SID and immutable family from verified SQL authority.
 func (h *Handler) authenticateWebSocket(c *gin.Context) (uuid.UUID, string, error) {
 	if ticket := c.Query("ticket"); ticket != "" {
 		return h.authenticateViaTicket(c, ticket)
@@ -313,12 +358,17 @@ func (h *Handler) authenticateViaTicket(c *gin.Context, ticket string) (uuid.UUI
 			return uuid.Nil, "", fmt.Errorf("credential epoch check failed: %w", err)
 		}
 	}
+	grant, err := h.resolveAccessFamily(c.Request.Context(), userID, sessionID, ticketEpoch, expiresAt)
+	if err != nil {
+		return uuid.Nil, "", err
+	}
+	c.Set(wsFamilyContextKey, grant.FamilyID)
 	// Retain the epoch for the socket so message-frame ciphertext writes can be
 	// fenced against a later reset (#2201, Codex #2397 review).
 	c.Set(wsCredEpochContextKey, ticketEpoch)
 	c.Set(wsDeadlineContextKey, expiresAt)
 	c.Set(wsTheftGenerationContextKey, generation)
-	return userID, sessionID, nil
+	return userID, grant.SID.String(), nil
 }
 
 // wsCredEpochContextKey carries the authenticated socket's credential epoch
@@ -330,6 +380,7 @@ func (h *Handler) authenticateViaTicket(c *gin.Context, ticket string) (uuid.UUI
 const wsCredEpochContextKey = "ws_cred_epoch"
 
 const wsDeadlineContextKey = "ws_deadline"
+const wsFamilyContextKey = "ws_family"
 
 const wsTheftGenerationContextKey = "ws_theft_generation"
 
@@ -379,6 +430,7 @@ func (h *Handler) authenticateViaJWT(c *gin.Context, tokenString string) (uuid.U
 	if err != nil {
 		return uuid.Nil, "", err
 	}
+	c.Set(wsFamilyContextKey, verified.FamilyID)
 	c.Set(wsCredEpochContextKey, verified.CredEpoch)
 	c.Set(wsDeadlineContextKey, verified.ExpiresAt)
 	c.Set(wsTheftGenerationContextKey, verified.TheftGeneration)
@@ -387,6 +439,7 @@ func (h *Handler) authenticateViaJWT(c *gin.Context, tokenString string) (uuid.U
 
 // accessTokenAuth is what a fully validated access token proves about its bearer.
 type accessTokenAuth struct {
+	FamilyID        uuid.UUID
 	UserID          uuid.UUID
 	SessionID       string
 	CredEpoch       string
@@ -449,7 +502,11 @@ func (h *Handler) validateAccessToken(ctx context.Context, tokenString string) (
 			return accessTokenAuth{}, fmt.Errorf("credential epoch check failed: %w", ferr)
 		}
 	}
-	return accessTokenAuth{UserID: userID, SessionID: sessionID, CredEpoch: tokenEpoch, ExpiresAt: expiresAt.Time, TheftGeneration: generation}, nil
+	grant, err := h.resolveAccessFamily(ctx, userID, sessionID, tokenEpoch, expiresAt.Time)
+	if err != nil {
+		return accessTokenAuth{}, err
+	}
+	return accessTokenAuth{UserID: userID, FamilyID: grant.FamilyID, SessionID: grant.SID.String(), CredEpoch: tokenEpoch, ExpiresAt: expiresAt.Time, TheftGeneration: generation}, nil
 }
 
 func (h *Handler) checkTokenBlacklist(ctx context.Context, claims jwt.MapClaims) error {
@@ -483,4 +540,23 @@ func parseUserIDFromClaims(claims jwt.MapClaims) (uuid.UUID, string, error) {
 	// it when that refresh lineage is revoked. Legacy tokens without sid → "".
 	sessionID, _ := claims["sid"].(string)
 	return userID, sessionID, nil
+}
+
+func (h *Handler) resolveAccessFamily(ctx context.Context, userID uuid.UUID, sessionID, epoch string, expiry time.Time) (loginfamily.AccessGrant, error) {
+	sid, err := uuid.Parse(sessionID)
+	if err != nil || sid == uuid.Nil {
+		return loginfamily.AccessGrant{}, loginfamily.NewError(loginfamily.ReasonAccessIdentity, nil)
+	}
+	return loginfamily.ResolveVerifiedAccess(ctx, h.db, loginfamily.AccessIdentity{UserID: userID, SID: sid, CredentialEpoch: epoch, AccessExpiresAt: expiry})
+}
+
+func (h *Handler) recheckClientFamily(ctx context.Context, client *Client) error {
+	grant, err := h.resolveAccessFamily(ctx, client.UserID, client.SessionID, client.CredEpoch, client.tokenDeadline())
+	if err != nil {
+		return err
+	}
+	if grant.FamilyID != client.FamilyID {
+		return loginfamily.NewError(loginfamily.ReasonAccessIdentity, nil)
+	}
+	return nil
 }

@@ -33,6 +33,7 @@ SELECTION_KEYS = ("version", "known", "mode", "head_sha", "base_sha", "merge_sha
                   "codeql_matrix")
 SHA = re.compile(r"[0-9a-f]{40}\Z")
 JWT = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\Z")
+OIDC_HOST = re.compile(r"(?:[a-z0-9-]+\.)+actions\.githubusercontent\.com\Z")
 MAX_INPUT = 24 * 1024
 MAX_PROOF = 64 * 1024
 MAX_RESPONSE = 64 * 1024
@@ -157,8 +158,10 @@ def oidc_token(payload_bytes):
     base = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_URL", "")
     bearer = os.environ.get("ACTIONS_ID_TOKEN_REQUEST_TOKEN", "")
     parts = urlsplit(base)
-    if (parts.scheme != "https" or parts.hostname not in
-            ("pipelines.actions.githubusercontent.com", "token.actions.githubusercontent.com")
+    # Hosted runners mint from per-region hosts (pipelinesghubeusN., run-actions-N-azure-*.),
+    # so pin the GitHub-owned domain rather than a fixed host list.
+    host = parts.hostname or ""
+    if (parts.scheme != "https" or not OIDC_HOST.fullmatch(host)
             or parts.username or parts.password or parts.fragment or not bearer):
         raise Invalid("OIDC request environment unavailable")
     audience = AUDIENCE + hashlib.sha256(payload_bytes).hexdigest()
@@ -268,7 +271,11 @@ def main():
             emit_proof(args)
         else:
             dispatch_watch(args)
-    except (Invalid, OSError, UnicodeError, TypeError, ValueError, OverflowError, RecursionError):
+    except Invalid as exc:
+        # Invalid messages are fixed strings, never request or response content.
+        print(f"protected Sonar caller failed: {exc}", file=sys.stderr)
+        return 1
+    except (OSError, UnicodeError, TypeError, ValueError, OverflowError, RecursionError):
         print("protected Sonar caller failed; inspect local input and API status", file=sys.stderr)
         return 1
     return 0

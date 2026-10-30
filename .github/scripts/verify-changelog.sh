@@ -13,10 +13,10 @@
 #      file into the publicly served SPA (#1857), bypassing the public-mirror
 #      transform scrub — so the file itself must stay clean.
 #   3. A `## [X.Y.Z]` heading may only be ADDED in a promotion-shaped diff:
-#      [Unreleased] non-empty at the base, emptied at HEAD, heading matching
+#      [Prerelease] non-empty at the base, emptied at HEAD, heading matching
 #      package.json. Version sections are the promoter's output, not a PR's.
 #   4. A change under client/desktop/src, services/control-plane or
-#      services/media-plane must add a line under `## [Unreleased]`, unless a
+#      services/media-plane must add a line under `## [Prerelease]`, unless a
 #      `Changelog-Exempt: <reason>` commit trailer says why a user cannot
 #      observe it. Tests and dependency manifests are exempt by path.
 #   5. Every `### ` line in CHANGELOG.md at HEAD must be structurally a
@@ -112,9 +112,9 @@ fi
 
 # ── Rule 3: a version heading may only appear in a promotion-shaped diff ─────
 # (#2996) Every `## [X.Y.Z]` section is written by
-# promote-unreleased-changelog.sh, which moves the `## [Unreleased]` body under
+# promote-unreleased-changelog.sh, which moves the `## [Prerelease]` body under
 # a dated heading verbatim. A feature PR that hand-writes one describes only
-# itself AND leaves [Unreleased] empty, so the promoter exits 3 with nothing to
+# itself AND leaves [Prerelease] empty, so the promoter exits 3 with nothing to
 # promote — which is how desktop-v0.2.41 (cut by the since-removed nightly
 # `bump` job) shipped five merges and described one.
 #
@@ -130,19 +130,19 @@ ALL_ADDED_HEADINGS=$(git diff "${MERGE_BASE}" HEAD -- CHANGELOG.md \
   | grep -E '^\+## \[[0-9]+\.[0-9]+\.[0-9]+' \
   | sed 's/^+## \[\([^]]*\)\].*/\1/' || true)
 
-# Lines between `## [Unreleased]` and the next `## [`, at a given ref. Used by
+# Lines between `## [Prerelease]` and the next `## [`, at a given ref. Used by
 # BOTH Rule 3 (was it emptied?) and Rule 4 (did this PR add to it?), so it lives
 # at file scope rather than inside Rule 3's conditional.
 unreleased_body() {
   git show "$1:CHANGELOG.md" 2>/dev/null | awk '
-    /^## \[Unreleased\]/ { inu = 1; next }
+    /^## \[Prerelease\]/ { inu = 1; next }
     inu && /^## \[/      { inu = 0 }
     inu                  { print }
   '
 }
 
 # Lines under a GIVEN version heading, at a given ref. Rule 4 needs it to see a
-# note that this PR promoted out of [Unreleased] and into the new section.
+# note that this PR promoted out of [Prerelease] and into the new section.
 # Prefix-matched with index() rather than a regex so the version's dots need no
 # escaping, and so a heading's trailing date never has to be modelled here.
 section_body() { # <ref> <version label>
@@ -158,8 +158,8 @@ section_body() { # <ref> <version label>
 # indistinguishable from adding one. Drop any version that already had a section
 # at the merge base: Rule 3 governs where notes are WRITTEN, not how a shipped
 # section is corrected. Without this, a one-character date fix failed the gate
-# with a message telling the author to move it under [Unreleased], which would
-# not fix a date; and because main now always carries a populated [Unreleased],
+# with a message telling the author to move it under [Prerelease], which would
+# not fix a date; and because main now always carries a populated [Prerelease],
 # that was the branch every such edit landed in.
 NEW_HEADINGS=""
 while IFS= read -r _h; do
@@ -202,9 +202,9 @@ if [[ -n "$NEW_HEADINGS" ]]; then
   if [[ "$HEADING_COUNT" -gt 1 ]]; then
     RULE3_FAIL="it adds ${HEADING_COUNT} version headings ($(printf '%s' "$NEW_HEADINGS" | tr '\n' ' ')) and a promotion adds exactly one"
   elif [[ -z "$BASE_UNREL" ]]; then
-    RULE3_FAIL="'## [Unreleased]' was empty at the merge base, so there was nothing to promote"
+    RULE3_FAIL="'## [Prerelease]' was empty at the merge base, so there was nothing to promote"
   elif [[ -n "$HEAD_UNREL" ]]; then
-    RULE3_FAIL="'## [Unreleased]' is still populated at HEAD — a promotion empties it"
+    RULE3_FAIL="'## [Prerelease]' is still populated at HEAD — a promotion empties it"
   elif [[ "$HEAD_PKG_VERSION" != "$ADDED_TRIPLE" ]]; then
     RULE3_FAIL="the added heading is [${ADDED_HEADING}] but client/desktop/package.json is ${HEAD_PKG_VERSION}"
   fi
@@ -213,7 +213,7 @@ if [[ -n "$NEW_HEADINGS" ]]; then
     echo "FAIL: this PR adds a '## [${ADDED_HEADING}]' section, but ${RULE3_FAIL}." >&2
     echo "Version sections are written by .github/scripts/promote-unreleased-changelog.sh," >&2
     echo "never by hand. If this PR is not cutting a release, record the change under" >&2
-    echo "'## [Unreleased]' and delete the heading — the promoter moves it under a dated" >&2
+    echo "'## [Prerelease]' and delete the heading — the promoter moves it under a dated" >&2
     echo "heading later, so nothing is lost and the notes cover the whole tag range." >&2
     echo "If it IS cutting one, run the promoter rather than editing the file:" >&2
     echo "  ./.github/scripts/promote-unreleased-changelog.sh <version>" >&2
@@ -223,7 +223,7 @@ if [[ -n "$NEW_HEADINGS" ]]; then
   fi
 fi
 
-# ── Rule 4: client/service-facing changes record an [Unreleased] entry (#2996) ──
+# ── Rule 4: client/service-facing changes record an [Prerelease] entry (#2996) ──
 # Rule 3's complement. Rule 3 stops release notes being written in the wrong
 # PLACE; Rule 4 stops them not being written at all. Both failures produced
 # desktop-v0.2.41, which shipped 98 commits behind a single bullet.
@@ -268,16 +268,16 @@ if [[ -n "$RELEVANT" ]]; then
     echo "PASS: Changelog-Exempt — ${EXEMPT_REASON}"
   else
     # Compare the SECTION BODY at base vs HEAD rather than scanning the diff for
-    # added lines inside an `[Unreleased]` region. In a unified diff that heading
+    # added lines inside an `[Prerelease]` region. In a unified diff that heading
     # is a CONTEXT line whenever a bullet is appended below it, so a region
-    # tracker keyed on `^[+-]## \[Unreleased\]` never enters the region and the
+    # tracker keyed on `^[+-]## \[Prerelease\]` never enters the region and the
     # rule fails every compliant PR. Body comparison has no such dependence on
     # diff formatting.
     BASE_UNREL_R4=$(unreleased_body "$MERGE_BASE" | grep -vE '^[[:space:]]*$' || true)
 
-    # HEAD's notes are [Unreleased] PLUS any section this PR promoted. Without
+    # HEAD's notes are [Prerelease] PLUS any section this PR promoted. Without
     # the second half, Rules 3 and 4 are mutually exclusive for a source-
-    # touching PR — Rule 3 requires a promotion to EMPTY [Unreleased], Rule 4
+    # touching PR — Rule 3 requires a promotion to EMPTY [Prerelease], Rule 4
     # required a source change to ADD to it — so a PR doing both satisfied
     # neither and the version bump could only ever live in a source-free PR of
     # its own. This rule's subject is whether a user-facing change wrote a note,
@@ -305,7 +305,7 @@ if [[ -n "$RELEVANT" ]]; then
 
     if [[ -z "$ADDED_UNREL" ]]; then
       echo "FAIL: this PR changes a client- or service-facing surface but adds no line under" >&2
-      echo "'## [Unreleased]' in CHANGELOG.md. That section is what the desktop post-update" >&2
+      echo "'## [Prerelease]' in CHANGELOG.md. That section is what the desktop post-update" >&2
       echo "modal renders to users after they update (#1857), and the promoter turns" >&2
       echo "it into the release notes." >&2
       printf '%s\n' "$RELEVANT" | sed 's/^/  /' >&2
@@ -322,7 +322,7 @@ fi
 #
 # NOT author error, which is why no rule keyed on "content in the wrong
 # section" can see it. Each branch appended a sentence to the END of the
-# `## [Unreleased]` body — correct when written. Main then PROMOTED that body
+# `## [Prerelease]` body — correct when written. Main then PROMOTED that body
 # under a dated heading while the branch was open, so the position the branch
 # appended to is now occupied by the NEW section's `### Added` heading, and the
 # merge applies the append to that line. Git reports no conflict: one side
@@ -368,7 +368,7 @@ fi
 # claiming otherwise.
 #
 # SCOPE, recorded so it is a decision rather than an oversight. Rule 5 reads
-# `^### ` only. The same merge race can land on the `## [X.Y.Z] — <date>` line
+# `^### ` only. The same merge race can land on the `## [X.Y.Z] - <date>` line
 # the promoter writes directly above, and Rule 1's check is a PREFIX match, so
 # trailing prose after the `]` reds nothing. That variant is uncovered by this
 # gate. Not fixed here: it needs its own rule with its own evidence, and no
@@ -399,7 +399,7 @@ if [[ -n "$BAD_HEADINGS" ]]; then
   echo "branch appended to, and git merged the append onto the new section heading without" >&2
   echo "reporting a conflict." >&2
   echo "Fix: split the line. Leave the heading bare ('### Added') and move the prose down" >&2
-  echo "to a '- ' bullet in whichever section it belongs to — usually '## [Unreleased]'," >&2
+  echo "to a '- ' bullet in whichever section it belongs to — usually '## [Prerelease]'," >&2
   echo "since that is where your branch was writing it." >&2
   exit 1
 fi

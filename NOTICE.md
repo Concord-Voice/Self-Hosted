@@ -1,6 +1,6 @@
 # NOTICE — Third-Party Software Used by Concord Voice
 
-**Generated:** 2026-10-23
+**Generated:** 2026-10-30
 **MinIO distribution addendum updated:** 2026-09-27
 **Admin portal family added:** 2026-08-28
 **Concord Voice License:** [Concord Voice Source License 1.0 (CVSL 1.0)](./LICENSE) → AGPL-3.0-or-later on 2030-02-15
@@ -199,7 +199,7 @@ current tree rather than a guarantee.
 | go.yaml.in/yaml/v3 | v3.0.5 | MIT |
 | golang.org/x/crypto | v0.58.0 | BSD-3-Clause |
 | golang.org/x/image | v0.47.0 | BSD-3-Clause |
-| golang.org/x/net | v0.61.0 | BSD-3-Clause |
+| golang.org/x/net | v0.62.0 | BSD-3-Clause |
 | golang.org/x/oauth2 | v0.37.0 | BSD-3-Clause |
 | golang.org/x/sync | v0.24.0 | BSD-3-Clause |
 | golang.org/x/sys | v0.49.0 | BSD-3-Clause |
@@ -299,7 +299,7 @@ bundle (services/media-plane):
 | logform | 2.7.0 | MIT | https://github.com/winstonjs/logform |
 | math-intrinsics | 1.1.0 | MIT | https://github.com/es-shims/math-intrinsics |
 | media-typer | 1.1.0 | MIT | https://github.com/jshttp/media-typer |
-| mediasoup | 3.29.0 | ISC | https://github.com/versatica/mediasoup |
+| mediasoup | 3.31.0 | ISC | https://github.com/versatica/mediasoup |
 | merge-descriptors | 2.0.0 | MIT | https://github.com/sindresorhus/merge-descriptors |
 | mime-db | 1.52.0 | MIT | https://github.com/jshttp/mime-db |
 | mime-db | 1.54.0 | MIT | https://github.com/jshttp/mime-db |
@@ -381,7 +381,7 @@ covering the other.
 |---|---|---|---|
 | @types/react | 19.3.0 | MIT | https://github.com/DefinitelyTyped/DefinitelyTyped |
 | csstype | 3.2.3 | MIT | https://github.com/frenic/csstype |
-| lucide-react | 1.57.0 | ISC | https://github.com/lucide-icons/lucide |
+| lucide-react | 1.61.0 | ISC | https://github.com/lucide-icons/lucide |
 | react-dom | 19.3.1 | MIT | https://github.com/react/react |
 | react | 19.3.1 | MIT | https://github.com/react/react |
 | scheduler | 0.28.0 | MIT | https://github.com/react/react |

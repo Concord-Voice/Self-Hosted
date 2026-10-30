@@ -1,0 +1,5 @@
+# squawk PostgreSQL migration linter for the PR CI migration-lint job (#4175).
+# Must match the `squawk-cli==` pin on the squawk hook in .pre-commit-config.yaml.
+# Linux x86_64 wheel only: the job runs on ubuntu x86_64 runners.
+squawk-cli==2.70.0 \
+    --hash=sha256:e67651bb984b01276752ca685f870b281cf493d5d7bd318607148b657c359b52

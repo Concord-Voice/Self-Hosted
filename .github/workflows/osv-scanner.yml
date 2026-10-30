@@ -269,6 +269,35 @@ jobs:
           set -euo pipefail
           [[ "$BASE_SHA" =~ ^[0-9a-f]{40}$ && "$MERGE_SHA" =~ ^[0-9a-f]{40}$ ]] || exit 1
 
+      - name: Validate protected workflow bootstrap source
+        env:
+          CALLER_REF: ${{ github.workflow_ref }}
+          EXPECTED_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          test "$CALLER_REF" = 'Concord-Voice/Concord-Voice-Alpha/.github/workflows/required-pr-build.yml@refs/heads/main'
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+
+      - name: Checkout immutable protected caller bootstrap
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: Concord-Voice/Concord-Voice-Alpha
+          ref: ${{ github.workflow_sha }}
+          path: engine-bootstrap
+          persist-credentials: false
+          sparse-checkout: |
+            .github/ci
+            scripts/ci
+
+      - name: Install locked Engine from the protected workflow revision
+        env:
+          EXPECTED_SHA: ${{ github.workflow_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$EXPECTED_SHA" =~ ^[0-9a-f]{40}$ ]]
+          test "$(git -C engine-bootstrap rev-parse HEAD)" = "$EXPECTED_SHA"
+          bash engine-bootstrap/scripts/ci/install-docker-engine.sh
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.base-sha }}

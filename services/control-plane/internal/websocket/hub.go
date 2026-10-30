@@ -19,6 +19,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/dmvisibility"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/keyrotation"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/klipy"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/models"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/opsmetrics"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
@@ -415,6 +416,8 @@ type Hub struct {
 
 	// Force-disconnect a specific session (targeted single-session revocation)
 	disconnectSession chan string
+	disconnectFamily  chan familyDisconnect
+	securityCleanup   chan *Client
 
 	// rebindSession moves a client to its successor refresh session after an
 	// in-band token renewal (token_renewal.go). SessionID is read unlocked by
@@ -774,6 +777,8 @@ func NewHub(db *sql.DB, redisClient *redis.Client, opsCounters ...OpsCounter) *H
 		dmDeliveryActive:             make(map[uuid.UUID]bool),
 		disconnectUser:               make(chan uuid.UUID, 16),
 		disconnectSession:            make(chan string, 16),
+		disconnectFamily:             make(chan familyDisconnect),
+		securityCleanup:              make(chan *Client),
 		rebindSession:                make(chan sessionRebind),
 		voiceCountSignal:             make(chan struct{}, 1),
 		revalidateChannel:            make(chan channelRevalidation, 256),
@@ -1449,8 +1454,17 @@ func (h *Hub) Run() {
 		case sessionID := <-h.disconnectSession:
 			h.handleDisconnectSession(sessionID)
 
+		case command := <-h.disconnectFamily:
+			h.handleDisconnectFamily(command)
+
+		case client := <-h.securityCleanup:
+			client.securityCleanupReady = true
+			h.handleUnregister(client)
+
 		case rebind := <-h.rebindSession:
-			rebind.client.SessionID = rebind.sessionID
+			if !rebind.client.securityTerminal.Load() {
+				rebind.client.SessionID = rebind.sessionID
+			}
 			close(rebind.done)
 
 		case <-onlineCountC:
@@ -1852,6 +1866,10 @@ func (h *Hub) sendVoiceCountsSnapshot(ctx context.Context, client *Client) {
 
 // handleUnregister unregisters a client
 func (h *Hub) handleUnregister(client *Client) {
+	if client.securityTerminal.Load() && !client.securityCleanupReady {
+		h.deferSecurityCleanup(client)
+		return
+	}
 	exists, isLastConnection, remaining := h.unregisterClient(client)
 	if !exists {
 		return
@@ -1868,6 +1886,11 @@ func (h *Hub) handleUnregister(client *Client) {
 	if isLastConnection {
 		now := time.Now().Unix()
 		ctx := context.Background()
+		if client.securityTerminal.Load() {
+			var cancel context.CancelFunc
+			ctx, cancel = context.WithTimeout(ctx, presenceAudienceTimeout)
+			defer cancel()
+		}
 		h.transitionUserOffline(ctx, client.UserID, false)
 		if err := h.redis.Set(ctx, fmt.Sprintf("last_seen:%s", client.UserID), fmt.Sprintf("%d", now), 0).Err(); err != nil {
 			log.Printf("[hub] failed to persist last_seen for user %s: %v", sanitizeLogValue(client.UserID.String()), err)
@@ -2043,6 +2066,9 @@ func (h *Hub) removeFromSubscriptionMap(m map[uuid.UUID]map[uuid.UUID]bool, key,
 
 // handleIncoming processes incoming messages from clients
 func (h *Hub) handleIncoming(msg IncomingMessage) {
+	if client := h.clients[msg.ClientID]; client == nil || client.securityTerminal.Load() {
+		return
+	}
 	if !msg.TokenExpiresAt.IsZero() && !time.Now().Before(msg.TokenExpiresAt) {
 		return
 	}
@@ -3970,6 +3996,7 @@ type persistMessageParams struct {
 	channelUUID           uuid.UUID
 	userID                uuid.UUID
 	credEpoch             string
+	identity              loginfamily.AccessIdentity
 	membershipIncarnation time.Time
 	content               string
 	keyVersion            int
@@ -3998,7 +4025,9 @@ func lockMessageMembership(ctx context.Context, tx *sql.Tx, p persistMessagePara
 }
 
 func messageCredentialGuardError(ctx context.Context, tx *sql.Tx, p persistMessageParams) string {
-	guardErr := credepoch.GuardTx(ctx, tx, p.userID.String(), p.credEpoch)
+	// The family guard refuses a frame whose login was revoked after the hub
+	// admitted it: Run cannot mark the socket terminal until this write returns.
+	guardErr := credepoch.GuardFamilyTx(loginfamily.WithAccessIdentity(ctx, p.identity), tx, p.userID.String(), p.credEpoch)
 	if guardErr == nil {
 		return ""
 	}
@@ -4281,7 +4310,8 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 
 	// Persist message
 	messageID, createdAt, updatedAt, expiresAt, attachmentSummaries, persistErr, timedOutUntil := h.persistMessageWithExpiry(persistMessageParams{
-		channelUUID: channelUUID, userID: msg.UserID, credEpoch: msg.CredEpoch, membershipIncarnation: membershipIncarnation, content: input.content,
+		channelUUID: channelUUID, userID: msg.UserID, credEpoch: msg.CredEpoch, identity: msg.accessIdentity(),
+		membershipIncarnation: membershipIncarnation, content: input.content,
 		keyVersion: input.keyVersion, attachmentIDs: input.attachmentIDs,
 		embedsSuppressed: embedsSuppressed, replyToID: replyToID, gifSlug: input.gifSlug,
 	})
@@ -5099,58 +5129,80 @@ func (h *Hub) BroadcastServerPurgeViewAuthorizedRecovering(
 	if len(events) == 0 {
 		return
 	}
-	go func() {
-		backoff := time.Second
-		pending := events
-		for len(pending) > 0 {
-			jobs := make(chan ServerPurgeChannelEvent, len(pending))
-			for _, event := range pending {
-				jobs <- event
-			}
-			close(jobs)
-			failed := make([]ServerPurgeChannelEvent, 0, len(pending))
-			var mu sync.Mutex
-			var workers sync.WaitGroup
-			for range min(len(pending), cap(h.purgeDeliverySlots)) {
-				workers.Add(1)
-				go func() {
-					defer workers.Done()
-					for event := range jobs {
-						receipt := make(chan ServerVoiceTerminalDeliveryOutcome, 1)
-						if !h.broadcastToServerChannelViewAuthorizedContext(context.Background(), serverID, event.ChannelID, receipt, event.Message) {
-							return // the hub has stopped; its clients are disconnected
-						}
-						select {
-						case outcome := <-receipt:
-							if outcome == ServerVoiceTerminalDeliveryApplied {
-								continue
-							}
-						case <-h.done:
-							return
-						}
-						mu.Lock()
-						failed = append(failed, event)
-						mu.Unlock()
-					}
-				}()
-			}
-			workers.Wait()
-			if len(failed) == 0 {
-				return
-			}
-			pending = failed
-			timer := time.NewTimer(backoff)
-			select {
-			case <-timer.C:
-			case <-h.done:
-				timer.Stop()
-				return
-			}
-			if backoff < 30*time.Second {
-				backoff *= 2
-			}
+	go h.retryServerPurgeInvalidations(serverID, events)
+}
+
+// retryServerPurgeInvalidations delivers rounds until every event applies or
+// the hub stops, backing off between rounds.
+func (h *Hub) retryServerPurgeInvalidations(serverID uuid.UUID, pending []ServerPurgeChannelEvent) {
+	backoff := time.Second
+	for len(pending) > 0 {
+		pending = h.deliverServerPurgeRound(serverID, pending)
+		if len(pending) == 0 || !h.sleepUnlessStopped(backoff) {
+			return
 		}
-	}()
+		if backoff < 30*time.Second {
+			backoff *= 2
+		}
+	}
+}
+
+// deliverServerPurgeRound fans one round out to at most cap(purgeDeliverySlots)
+// workers and returns the events that did not apply.
+func (h *Hub) deliverServerPurgeRound(serverID uuid.UUID, pending []ServerPurgeChannelEvent) []ServerPurgeChannelEvent {
+	jobs := make(chan ServerPurgeChannelEvent, len(pending))
+	for _, event := range pending {
+		jobs <- event
+	}
+	close(jobs)
+	failed := make([]ServerPurgeChannelEvent, 0, len(pending))
+	var mu sync.Mutex
+	var workers sync.WaitGroup
+	for range min(len(pending), cap(h.purgeDeliverySlots)) {
+		workers.Add(1)
+		go func() {
+			defer workers.Done()
+			for event := range jobs {
+				applied, stopped := h.deliverServerPurgeEvent(serverID, event)
+				if stopped {
+					return // the hub has stopped; its clients are disconnected
+				}
+				if !applied {
+					mu.Lock()
+					failed = append(failed, event)
+					mu.Unlock()
+				}
+			}
+		}()
+	}
+	workers.Wait()
+	return failed
+}
+
+// deliverServerPurgeEvent sends one invalidation and waits for its receipt.
+func (h *Hub) deliverServerPurgeEvent(serverID uuid.UUID, event ServerPurgeChannelEvent) (applied, stopped bool) {
+	receipt := make(chan ServerVoiceTerminalDeliveryOutcome, 1)
+	if !h.broadcastToServerChannelViewAuthorizedContext(context.Background(), serverID, event.ChannelID, receipt, event.Message) {
+		return false, true
+	}
+	select {
+	case outcome := <-receipt:
+		return outcome == ServerVoiceTerminalDeliveryApplied, false
+	case <-h.done:
+		return false, true
+	}
+}
+
+// sleepUnlessStopped waits d, or reports false as soon as the hub stops.
+func (h *Hub) sleepUnlessStopped(d time.Duration) bool {
+	timer := time.NewTimer(d)
+	select {
+	case <-timer.C:
+		return true
+	case <-h.done:
+		timer.Stop()
+		return false
+	}
 }
 
 func (h *Hub) broadcastToServerChannelViewAuthorizedContext(
@@ -5462,6 +5514,7 @@ type dmMessageInput struct {
 	mentionAddendum *MentionAddendum
 	attachmentIDs   []string
 	gifSlug         *string
+	identity        loginfamily.AccessIdentity
 	// respawned is written by the persist attempt that committed and read by
 	// handleDMMessage afterwards; both run on Run, and each attempt resets it
 	// so a retried transaction cannot publish the rolled-back attempt's users.
@@ -5685,8 +5738,9 @@ func (h *Hub) persistDMMessageWithExpiryAttempt(ctx context.Context, messageID, 
 		return createdAt, updatedAt, expiresAt, nil, err
 	}
 	// #2201 (Codex #2397 review): fence the WS DM ciphertext write against a
-	// destructive reset that advanced the sender's epoch after connect.
-	if guardErr := credepoch.GuardTx(ctx, tx, userID.String(), credEpoch); guardErr != nil {
+	// destructive reset that advanced the sender's epoch after connect, and
+	// against a login revocation that committed after the hub admitted the frame.
+	if guardErr := credepoch.GuardFamilyTx(loginfamily.WithAccessIdentity(ctx, input.identity), tx, userID.String(), credEpoch); guardErr != nil {
 		return createdAt, updatedAt, expiresAt, nil, guardErr
 	}
 	var windowSeconds sql.NullInt64
@@ -5860,6 +5914,7 @@ func (h *Hub) handleDMMessage(msg IncomingMessage) {
 		return
 	}
 
+	input.identity = msg.accessIdentity()
 	messageID, createdAt, updatedAt, expiresAt, attachments, err := h.persistDMMessageWithExpiry(convUUID, msg.UserID, msg.CredEpoch, input)
 	if err != nil {
 		if errors.Is(err, errDMNotParticipant) {
@@ -6685,7 +6740,27 @@ func (h *Hub) handleDisconnectSession(sessionID string) {
 // a token is blacklisted or session is revoked. The server does not trust the
 // client to disconnect itself — this is the authoritative enforcement.
 func (h *Hub) DisconnectUser(userID uuid.UUID) {
-	h.disconnectUser <- userID
+	h.DisconnectUserContext(context.Background(), userID)
+}
+
+// DisconnectUserContext bounds the authoritative disconnect enqueue for lifecycle callbacks.
+func (h *Hub) DisconnectUserContext(ctx context.Context, userID uuid.UUID) bool {
+	if ctx == nil || ctx.Err() != nil {
+		return false
+	}
+	select {
+	case <-h.done:
+		return false
+	default:
+	}
+	select {
+	case h.disconnectUser <- userID:
+		return true
+	case <-ctx.Done():
+		return false
+	case <-h.done:
+		return false
+	}
 }
 
 // evictServerSubscriber removes every client of userID from serverID's server-level
@@ -8054,4 +8129,90 @@ func (h *Hub) BroadcastServerVoiceCounts() {
 	default:
 		// Already pending — coalesces rapid bursts
 	}
+}
+
+// familyDisconnect carries an exact immutable identity and a narrow transport receipt.
+type familyDisconnect struct {
+	userID   uuid.UUID
+	familyID uuid.UUID
+	done     chan error
+}
+
+// DisconnectFamilyContext waits for fencing and transport closure, not presence cleanup.
+func (h *Hub) DisconnectFamilyContext(ctx context.Context, userID, familyID uuid.UUID) error {
+	if userID == uuid.Nil || familyID == uuid.Nil {
+		return errors.New("invalid family disconnect identity")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	command := familyDisconnect{userID: userID, familyID: familyID, done: make(chan error, 1)}
+	select {
+	case h.disconnectFamily <- command:
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-h.done:
+		return errors.New("family disconnect incomplete: hub stopped")
+	}
+	select {
+	case err := <-command.done:
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-h.done:
+		return errors.New("family disconnect incomplete: hub stopped")
+	}
+}
+
+func (h *Hub) handleDisconnectFamily(command familyDisconnect) {
+	matches := make([]*Client, 0, len(h.userClients[command.userID]))
+	for clientID := range h.userClients[command.userID] {
+		client := h.clients[clientID]
+		if client != nil && client.UserID == command.userID && client.FamilyID == command.familyID {
+			matches = append(matches, client)
+		}
+	}
+	// Fence ALL before closing ANY: no queue, timer, writer or remote wait here.
+	for _, client := range matches {
+		client.securityTerminal.Store(true)
+	}
+	var result error
+	for _, client := range matches {
+		if err := client.closeSecurityTransport(); err != nil {
+			result = errors.Join(result, fmt.Errorf("family transport close: %w", err))
+		}
+	}
+
+	select {
+	case command.done <- result:
+	default:
+	}
+	// Only the checked transport receipt precedes ordinary cleanup scheduling.
+	for _, client := range matches {
+		h.deferSecurityCleanup(client)
+	}
+}
+
+func (h *Hub) deferSecurityCleanup(client *Client) {
+	if !client.securityCloseConfirmed.Load() {
+		return
+	}
+	client.securityCleanupOnce.Do(func() {
+		// Retain the hub admission owner until Run removes this exact client.
+		go func() {
+			if client.asyncCancel != nil {
+				client.asyncCancel()
+			}
+			client.cancelBootstrap()
+			client.asyncWg.Wait()
+			select {
+			case h.securityCleanup <- client:
+			case <-h.done:
+				// Shutdown retains ownership of registered clients and releases it.
+			}
+		}()
+	})
 }

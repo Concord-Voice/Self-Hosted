@@ -301,8 +301,10 @@ echo "PASS: down exits nonzero while port 8080 remains busy"
 # Run from a hermetic project copy with no .env. Compose teardown must bypass
 # implicit project-env loading by naming the tracked, parse-safe example file.
 FIXTURE_ROOT="$TMP_DIR/project"
-mkdir -p "$FIXTURE_ROOT/scripts" "$FIXTURE_ROOT/logs"
+mkdir -p "$FIXTURE_ROOT/scripts" "$FIXTURE_ROOT/logs" "$FIXTURE_ROOT/infrastructure/deploy"
 cp "$CONCORD_DEV" "$FIXTURE_ROOT/scripts/concord-dev.sh"
+cp "$PROJECT_ROOT/infrastructure/deploy/voice-boot-containment.py" \
+  "$FIXTURE_ROOT/infrastructure/deploy/voice-boot-containment.py"
 if [[ ! -f "$PROJECT_ROOT/.env.example" ]]; then
   echo "FAIL: repository .env.example fixture is missing"
   exit 1
@@ -510,11 +512,78 @@ TEST_GIT_COMMON="$TMP_DIR/common.git"
 mkdir -p \
   "$FIXTURE_ROOT/services/control-plane" \
   "$FIXTURE_ROOT/services/media-plane" \
+  "$FIXTURE_ROOT/client/desktop" \
   "$SAME_WORKTREE/services/control-plane" \
   "$TEST_GIT_COMMON"
 : > "$KILL_LOG"
 rm -f "$KILL_MARKER" "$PS_SEEN_MARKER"
 
+# Neither a legacy media watcher record nor an orphan listener binds the
+# retained executable closure to a boot. Both plain and forced down must keep
+# the control plane, Docker transport, and closure for operator recovery.
+for media_shape in legacy-watcher orphan-listener; do
+  for force_flag in '' --force; do
+    mkdir -p "$FIXTURE_ROOT/logs/voice-media-runtime" "$FIXTURE_ROOT/logs/voice-control-runtime"
+    printf 'retained-media\n' > "$FIXTURE_ROOT/logs/voice-media-runtime/closure"
+    printf 'retained-control\n' > "$FIXTURE_ROOT/logs/voice-control-runtime/closure"
+    printf '7777\nstable-7777\n%s\n' "$FIXTURE_ROOT/services/control-plane" \
+      > "$FIXTURE_ROOT/logs/control-plane.pid"
+    if [[ "$media_shape" == legacy-watcher ]]; then
+      printf '5555\noriginal-5555\n%s\n' "$FIXTURE_ROOT/services/media-plane" \
+        > "$FIXTURE_ROOT/logs/media-plane.pid"
+      media_listener=5656
+    else
+      rm -f "$FIXTURE_ROOT/logs/media-plane.pid"
+      media_listener=8484
+    fi
+    : > "$KILL_LOG"
+    : > "$DOCKER_LOG"
+    rm -f "$KILL_MARKER" "$PS_SEEN_MARKER"
+    set +e
+    BASH_ENV="$TMP_DIR/bash-env" \
+      KILL_MARK_CALL='-TERM 5656' \
+      LEGACY_STOPPED_PID=5555 \
+      LOG_DIR="$FIXTURE_ROOT/logs" \
+      LSOF_BUSY_PORT='' \
+      LSOF_LISTENER_PID="$media_listener" \
+      LSOF_LISTENER_PORT=3000 \
+      LSOF_LISTENER_CWD="$FIXTURE_ROOT/services/media-plane" \
+      LSOF_PARENT_CWD="$FIXTURE_ROOT/services/media-plane" \
+      LSOF_PARENT_PID=5555 \
+      PATH="$STUB_DIR:$PATH" \
+      PS_REUSE_AFTER=1 \
+      PS_REUSE_PID=5555 \
+      TEST_GIT_COMMON="$TEST_GIT_COMMON" \
+      TEST_PROJECT_ROOT="$FIXTURE_ROOT" \
+      TEST_SAME_WORKTREE="$SAME_WORKTREE" \
+      "$FIXTURE_ROOT/scripts/concord-dev.sh" --quiet down ${force_flag:+"$force_flag"} \
+      >"$TMP_DIR/media-refusal.out" 2>&1
+    rc=$?
+    set -e
+    if [[ $rc -ne 0 && ! -s "$KILL_LOG" && ! -s "$DOCKER_LOG" && ! -e "$KILL_MARKER" ]] \
+      && [[ "$(cat "$FIXTURE_ROOT/logs/control-plane.pid")" == $'7777\nstable-7777\n'"$FIXTURE_ROOT/services/control-plane" ]] \
+      && [[ "$(cat "$FIXTURE_ROOT/logs/voice-media-runtime/closure")" == retained-media ]] \
+      && [[ "$(cat "$FIXTURE_ROOT/logs/voice-control-runtime/closure")" == retained-control ]] \
+      && grep -Fq 'voice lifecycle: media retirement unverified; control plane and executable closure retained' "$TMP_DIR/media-refusal.out" \
+      && { [[ "$media_shape" == orphan-listener && ! -e "$FIXTURE_ROOT/logs/media-plane.pid" ]] \
+        || { grep -Fq 'voice lifecycle: observation refused' "$TMP_DIR/media-refusal.out" \
+          && [[ "$media_shape" == legacy-watcher && "$(cat "$FIXTURE_ROOT/logs/media-plane.pid")" == $'5555\noriginal-5555\n'"$FIXTURE_ROOT/services/media-plane" ]]; }; }; then
+      echo "PASS: down ${force_flag:-plain} retains media $media_shape without boot binding"
+    else
+      echo "FAIL: down ${force_flag:-plain} mishandled media $media_shape without boot binding (rc=$rc)"
+      sed 's/^/  /' "$TMP_DIR/media-refusal.out"
+      exit 1
+    fi
+  done
+done
+rm -rf "$FIXTURE_ROOT/logs/voice-media-runtime" "$FIXTURE_ROOT/logs/voice-control-runtime"
+rm -f "$FIXTURE_ROOT/logs/media-plane.pid" "$FIXTURE_ROOT/logs/control-plane.pid"
+: > "$KILL_LOG"
+rm -f "$KILL_MARKER" "$PS_SEEN_MARKER"
+
+# Generic watcher/listener cleanup remains supported for Vite. Media now
+# requires its exact boot/artifact association and a verified retirement fence;
+# legacy media watchers must never inherit these generic recovery expectations.
 # A tracked watcher can exit while its listening child survives. If the
 # verified listener cleanup also proves the watcher is now gone, reconcile the
 # stale identity-bound record instead of preserving the earlier race as a
@@ -522,7 +591,7 @@ rm -f "$KILL_MARKER" "$PS_SEEN_MARKER"
 printf '%s\n%s\n%s\n' \
   5555 \
   original-5555 \
-  "$FIXTURE_ROOT/services/media-plane" > "$FIXTURE_ROOT/logs/media-plane.pid"
+  "$FIXTURE_ROOT/client/desktop" > "$FIXTURE_ROOT/logs/vite-renderer.pid"
 set +e
 BASH_ENV="$TMP_DIR/bash-env" \
   KILL_MARK_CALL='-TERM 5656' \
@@ -530,9 +599,9 @@ BASH_ENV="$TMP_DIR/bash-env" \
   LOG_DIR="$FIXTURE_ROOT/logs" \
   LSOF_BUSY_PORT='' \
   LSOF_LISTENER_PID=5656 \
-  LSOF_LISTENER_PORT=3000 \
-  LSOF_LISTENER_CWD="$FIXTURE_ROOT/services/media-plane" \
-  LSOF_PARENT_CWD="$FIXTURE_ROOT/services/media-plane" \
+  LSOF_LISTENER_PORT=3001 \
+  LSOF_LISTENER_CWD="$FIXTURE_ROOT/client/desktop" \
+  LSOF_PARENT_CWD="$FIXTURE_ROOT/client/desktop" \
   LSOF_PARENT_PID=5555 \
   PATH="$STUB_DIR:$PATH" \
   PS_REUSE_AFTER=1 \
@@ -546,14 +615,14 @@ set -e
 
 watcher_exit_calls=$(grep '^kill ' "$KILL_LOG" || true)
 if [[ $rc -eq 0 && "$watcher_exit_calls" == $'kill -TERM 5555\nkill -TERM 5656' && \
-  ! -e "$FIXTURE_ROOT/logs/media-plane.pid" ]]; then
-  echo "PASS: down reconciles a watcher exit after verified listener cleanup"
+  ! -e "$FIXTURE_ROOT/logs/vite-renderer.pid" ]]; then
+  echo "PASS: down (Vite) reconciles a watcher exit after verified listener cleanup"
 else
-  echo "FAIL: down preserved a resolved watcher exit (rc=$rc, calls=${watcher_exit_calls:-none})"
+  echo "FAIL: down (Vite) preserved a resolved watcher exit (rc=$rc, calls=${watcher_exit_calls:-none})"
   sed 's/^/  /' "$TMP_DIR/watcher-exit.out"
   regression_failures=$((regression_failures + 1))
 fi
-rm -f "$FIXTURE_ROOT/logs/media-plane.pid"
+rm -f "$FIXTURE_ROOT/logs/vite-renderer.pid"
 
 : > "$KILL_LOG"
 rm -f "$KILL_MARKER" "$PS_SEEN_MARKER"
@@ -565,8 +634,8 @@ BASH_ENV="$TMP_DIR/bash-env" \
   LOG_DIR="$FIXTURE_ROOT/logs" \
   LSOF_BUSY_PORT='' \
   LSOF_LISTENER_PID=8484 \
-  LSOF_LISTENER_PORT=3000 \
-  LSOF_LISTENER_CWD="$FIXTURE_ROOT/services/media-plane" \
+  LSOF_LISTENER_PORT=3001 \
+  LSOF_LISTENER_CWD="$FIXTURE_ROOT/client/desktop" \
   PATH="$STUB_DIR:$PATH" \
   TEST_GIT_COMMON="$TEST_GIT_COMMON" \
   TEST_PROJECT_ROOT="$FIXTURE_ROOT" \
@@ -577,9 +646,9 @@ set -e
 
 current_listener_kills=$(grep '^kill ' "$KILL_LOG" || true)
 if [[ $rc -eq 0 && "$current_listener_kills" == "kill -TERM 8484" && -e "$KILL_MARKER" ]]; then
-  echo "PASS: down gracefully stops an orphaned current-worktree listener"
+  echo "PASS: down (Vite) gracefully stops an orphaned current-worktree listener"
 else
-  echo "FAIL: down did not stop current-worktree listener 8484 (rc=$rc, calls=${current_listener_kills:-none})"
+  echo "FAIL: down (Vite) did not stop current-worktree listener 8484 (rc=$rc, calls=${current_listener_kills:-none})"
   exit 1
 fi
 
@@ -592,10 +661,10 @@ BASH_ENV="$TMP_DIR/bash-env" \
   LOG_DIR="$FIXTURE_ROOT/logs" \
   LSOF_BUSY_PORT='' \
   LSOF_LISTENER_PID=8494 \
-  LSOF_LISTENER_PORT=3000 \
-  LSOF_LISTENER_CWD="$FIXTURE_ROOT/services/media-plane" \
+  LSOF_LISTENER_PORT=3001 \
+  LSOF_LISTENER_CWD="$FIXTURE_ROOT/client/desktop" \
   PATH="$STUB_DIR:$PATH" \
-  PS_COMMAND='python -m http.server 3000' \
+  PS_COMMAND='python -m http.server 3001' \
   TEST_GIT_COMMON="$TEST_GIT_COMMON" \
   TEST_PROJECT_ROOT="$FIXTURE_ROOT" \
   TEST_SAME_WORKTREE="$SAME_WORKTREE" \
@@ -603,10 +672,10 @@ BASH_ENV="$TMP_DIR/bash-env" \
 rc=$?
 set -e
 
-if [[ $rc -ne 0 && ! -s "$KILL_LOG" ]] && grep -Fq 'PID 8494 on port 3000' "$TMP_DIR/unrelated-command.out"; then
-  echo "PASS: down rejects an unrelated current-worktree listener"
+if [[ $rc -ne 0 && ! -s "$KILL_LOG" ]] && grep -Fq 'PID 8494 on port 3001' "$TMP_DIR/unrelated-command.out"; then
+  echo "PASS: down (Vite) rejects an unrelated current-worktree listener"
 else
-  echo "FAIL: down signaled or silently rejected unrelated listener 8494"
+  echo "FAIL: down (Vite) signaled or silently rejected unrelated listener 8494"
   regression_failures=$((regression_failures + 1))
 fi
 
@@ -619,8 +688,8 @@ BASH_ENV="$TMP_DIR/bash-env" \
   LOG_DIR="$FIXTURE_ROOT/logs" \
   LSOF_BUSY_PORT='' \
   LSOF_LISTENER_PID=8585 \
-  LSOF_LISTENER_PORT=3000 \
-  LSOF_LISTENER_CWD="$FIXTURE_ROOT/services/media-plane" \
+  LSOF_LISTENER_PORT=3001 \
+  LSOF_LISTENER_CWD="$FIXTURE_ROOT/client/desktop" \
   PATH="$STUB_DIR:$PATH" \
   STUB_SLEEP=1 \
   TEST_GIT_COMMON="$TEST_GIT_COMMON" \
@@ -632,9 +701,9 @@ set -e
 
 stubborn_listener_calls=$(grep '^kill ' "$KILL_LOG" || true)
 if [[ $rc -eq 0 && "$stubborn_listener_calls" == $'kill -TERM 8585\nkill -9 8585' && -e "$KILL_MARKER" ]]; then
-  echo "PASS: down escalates a stubborn current-worktree listener TERM to KILL"
+  echo "PASS: down (Vite) escalates a stubborn current-worktree listener TERM to KILL"
 else
-  echo "FAIL: down mishandled stubborn listener 8585 (rc=$rc, calls=${stubborn_listener_calls:-none})"
+  echo "FAIL: down (Vite) mishandled stubborn listener 8585 (rc=$rc, calls=${stubborn_listener_calls:-none})"
   regression_failures=$((regression_failures + 1))
 fi
 
@@ -649,8 +718,8 @@ BASH_ENV="$TMP_DIR/bash-env" \
   LOG_DIR="$FIXTURE_ROOT/logs" \
   LSOF_BUSY_PORT='' \
   LSOF_LISTENER_PID=8787 \
-  LSOF_LISTENER_PORT=3000 \
-  LSOF_LISTENER_CWD="$FIXTURE_ROOT/services/media-plane" \
+  LSOF_LISTENER_PORT=3001 \
+  LSOF_LISTENER_CWD="$FIXTURE_ROOT/client/desktop" \
   PATH="$STUB_DIR:$PATH" \
   TEST_GIT_COMMON="$TEST_GIT_COMMON" \
   TEST_PROJECT_ROOT="$FIXTURE_ROOT" \
@@ -661,9 +730,9 @@ set -e
 
 listener_exit_race_calls=$(grep '^kill ' "$KILL_LOG" || true)
 if [[ $rc -eq 0 && "$listener_exit_race_calls" == "kill -9 8787" && -e "$KILL_MARKER" ]]; then
-  echo "PASS: down accepts confirmed listener exit after a failed signal"
+  echo "PASS: down (Vite) accepts confirmed listener exit after a failed signal"
 else
-  echo "FAIL: down mishandled listener exit race 8787 (rc=$rc, calls=${listener_exit_race_calls:-none})"
+  echo "FAIL: down (Vite) mishandled listener exit race 8787 (rc=$rc, calls=${listener_exit_race_calls:-none})"
   regression_failures=$((regression_failures + 1))
 fi
 
@@ -681,8 +750,8 @@ BASH_ENV="$TMP_DIR/bash-env" \
   LOG_DIR="$FIXTURE_ROOT/logs" \
   LSOF_BUSY_PORT='' \
   LSOF_LISTENER_PID=8690 \
-  LSOF_LISTENER_PORT=3000 \
-  LSOF_LISTENER_CWD="$FIXTURE_ROOT/services/media-plane" \
+  LSOF_LISTENER_PORT=3001 \
+  LSOF_LISTENER_CWD="$FIXTURE_ROOT/client/desktop" \
   PATH="$STUB_DIR:$PATH" \
   PS_EXITING_AFTER_KILL=1 \
   STUB_SLEEP=1 \
@@ -696,9 +765,9 @@ set -e
 exiting_listener_calls=$(grep '^kill ' "$KILL_LOG" || true)
 if [[ $rc -eq 0 && "$exiting_listener_calls" == "kill -TERM 8690" ]] \
   && ! grep -Fq 'identity changed' "$TMP_DIR/exiting-listener.out"; then
-  echo "PASS: down accepts a listener that is exiting as a zombie after TERM"
+  echo "PASS: down (Vite) accepts a listener that is exiting as a zombie after TERM"
 else
-  echo "FAIL: down rejected exiting listener 8690 (rc=$rc, calls=${exiting_listener_calls:-none})"
+  echo "FAIL: down (Vite) rejected exiting listener 8690 (rc=$rc, calls=${exiting_listener_calls:-none})"
   grep -F 'PID 8690' "$TMP_DIR/exiting-listener.out" || true
   regression_failures=$((regression_failures + 1))
 fi
@@ -714,8 +783,8 @@ BASH_ENV="$TMP_DIR/bash-env" \
   LSOF_BUSY_PORT='' \
   LSOF_EXITING_LISTEN_POLLS=2 \
   LSOF_LISTENER_PID=8691 \
-  LSOF_LISTENER_PORT=3000 \
-  LSOF_LISTENER_CWD="$FIXTURE_ROOT/services/media-plane" \
+  LSOF_LISTENER_PORT=3001 \
+  LSOF_LISTENER_CWD="$FIXTURE_ROOT/client/desktop" \
   PATH="$STUB_DIR:$PATH" \
   PS_EXITING_AFTER_KILL=1 \
   STUB_SLEEP=1 \
@@ -730,9 +799,9 @@ exiting_holder_calls=$(grep '^kill ' "$KILL_LOG" || true)
 exiting_holder_polls=0
 [[ -f "$EXITING_POLL_COUNT" ]] && read -r exiting_holder_polls < "$EXITING_POLL_COUNT"
 if [[ $rc -eq 0 && "$exiting_holder_calls" == "kill -TERM 8691" && $exiting_holder_polls -ge 3 ]]; then
-  echo "PASS: down waits for an exiting listener to release its port"
+  echo "PASS: down (Vite) waits for an exiting listener to release its port"
 else
-  echo "FAIL: down mishandled exiting listener 8691 (rc=$rc, calls=${exiting_holder_calls:-none}, polls=$exiting_holder_polls)"
+  echo "FAIL: down (Vite) mishandled exiting listener 8691 (rc=$rc, calls=${exiting_holder_calls:-none}, polls=$exiting_holder_polls)"
   regression_failures=$((regression_failures + 1))
 fi
 
@@ -746,8 +815,8 @@ BASH_ENV="$TMP_DIR/bash-env" \
   LOG_DIR="$FIXTURE_ROOT/logs" \
   LSOF_BUSY_PORT='' \
   LSOF_LISTENER_PID=8692 \
-  LSOF_LISTENER_PORT=3000 \
-  LSOF_LISTENER_CWD="$FIXTURE_ROOT/services/media-plane" \
+  LSOF_LISTENER_PORT=3001 \
+  LSOF_LISTENER_CWD="$FIXTURE_ROOT/client/desktop" \
   PATH="$STUB_DIR:$PATH" \
   PS_EXITING_AFTER_KILL=1 \
   PS_REUSE_AFTER=2 \
@@ -762,9 +831,9 @@ set -e
 
 exiting_reuse_calls=$(grep '^kill ' "$KILL_LOG" || true)
 if [[ $rc -ne 0 && "$exiting_reuse_calls" == "kill -TERM 8692" ]]; then
-  echo "PASS: down rejects a zombie at a reused listener PID"
+  echo "PASS: down (Vite) rejects a zombie at a reused listener PID"
 else
-  echo "FAIL: down accepted a zombie at reused listener PID 8692 (rc=$rc, calls=${exiting_reuse_calls:-none})"
+  echo "FAIL: down (Vite) accepted a zombie at reused listener PID 8692 (rc=$rc, calls=${exiting_reuse_calls:-none})"
   regression_failures=$((regression_failures + 1))
 fi
 
@@ -780,8 +849,8 @@ BASH_ENV="$TMP_DIR/bash-env" \
   LOG_DIR="$FIXTURE_ROOT/logs" \
   LSOF_BUSY_PORT='' \
   LSOF_LISTENER_PID=8693 \
-  LSOF_LISTENER_PORT=3000 \
-  LSOF_LISTENER_CWD="$FIXTURE_ROOT/services/media-plane" \
+  LSOF_LISTENER_PORT=3001 \
+  LSOF_LISTENER_CWD="$FIXTURE_ROOT/client/desktop" \
   PATH="$STUB_DIR:$PATH" \
   PS_EXITING_AFTER_KILL=1 \
   PS_STAT_LAG_CALLS=1 \
@@ -800,9 +869,9 @@ exiting_race_stats=0
 # and the recheck that sees the zombie.
 if [[ $rc -eq 0 && "$exiting_race_calls" == "kill -TERM 8693" && $exiting_race_stats -ge 2 ]] \
   && ! grep -Fq 'identity changed' "$TMP_DIR/exiting-race.out"; then
-  echo "PASS: down rechecks the exit state when the leader exits between probes"
+  echo "PASS: down (Vite) rechecks the exit state when the leader exits between probes"
 else
-  echo "FAIL: down rejected listener 8693 that exited between probes (rc=$rc, calls=${exiting_race_calls:-none}, stat probes=$exiting_race_stats)"
+  echo "FAIL: down (Vite) rejected listener 8693 that exited between probes (rc=$rc, calls=${exiting_race_calls:-none}, stat probes=$exiting_race_stats)"
   grep -F 'PID 8693' "$TMP_DIR/exiting-race.out" || true
   regression_failures=$((regression_failures + 1))
 fi
@@ -820,8 +889,8 @@ BASH_ENV="$TMP_DIR/bash-env" \
   LOG_DIR="$FIXTURE_ROOT/logs" \
   LSOF_BUSY_PORT='' \
   LSOF_LISTENER_PID=8694 \
-  LSOF_LISTENER_PORT=3000 \
-  LSOF_LISTENER_CWD="$FIXTURE_ROOT/services/media-plane" \
+  LSOF_LISTENER_PORT=3001 \
+  LSOF_LISTENER_CWD="$FIXTURE_ROOT/client/desktop" \
   PATH="$STUB_DIR:$PATH" \
   PS_EXITING_AFTER_KILL=1 \
   PS_STAT_LAG_CALLS=3 \
@@ -840,9 +909,9 @@ slow_teardown_stats=0
 # teardown spans a full poll, not only the recheck.
 if [[ $rc -eq 0 && "$slow_teardown_calls" == "kill -TERM 8694" && $slow_teardown_stats -ge 4 ]] \
   && ! grep -Fq 'identity changed' "$TMP_DIR/slow-teardown.out"; then
-  echo "PASS: down waits out a teardown that outlasts the exit-state recheck"
+  echo "PASS: down (Vite) waits out a teardown that outlasts the exit-state recheck"
 else
-  echo "FAIL: down rejected listener 8694 whose teardown outlasted the recheck (rc=$rc, calls=${slow_teardown_calls:-none}, stat probes=$slow_teardown_stats)"
+  echo "FAIL: down (Vite) rejected listener 8694 whose teardown outlasted the recheck (rc=$rc, calls=${slow_teardown_calls:-none}, stat probes=$slow_teardown_stats)"
   grep -F 'PID 8694' "$TMP_DIR/slow-teardown.out" || true
   regression_failures=$((regression_failures + 1))
 fi
@@ -858,8 +927,8 @@ BASH_ENV="$TMP_DIR/bash-env" \
   LOG_DIR="$FIXTURE_ROOT/logs" \
   LSOF_BUSY_PORT='' \
   LSOF_LISTENER_PID=8696 \
-  LSOF_LISTENER_PORT=3000 \
-  LSOF_LISTENER_CWD="$FIXTURE_ROOT/services/media-plane" \
+  LSOF_LISTENER_PORT=3001 \
+  LSOF_LISTENER_CWD="$FIXTURE_ROOT/client/desktop" \
   PATH="$STUB_DIR:$PATH" \
   PS_EXITING_AFTER_KILL=1 \
   PS_STAT_LAG_CALLS=99 \
@@ -879,9 +948,9 @@ reaped_starts=0
 # and the wait's re-read that found the PID gone.
 if [[ $rc -eq 0 && "$reaped_calls" == "kill -TERM 8696" && $reaped_starts -ge 2 ]] \
   && ! grep -Fq 'identity changed' "$TMP_DIR/reaped-mid-poll.out"; then
-  echo "PASS: down accepts a listener reaped while it waits out the teardown"
+  echo "PASS: down (Vite) accepts a listener reaped while it waits out the teardown"
 else
-  echo "FAIL: down rejected listener 8696 reaped mid-poll (rc=$rc, calls=${reaped_calls:-none}, start probes=$reaped_starts)"
+  echo "FAIL: down (Vite) rejected listener 8696 reaped mid-poll (rc=$rc, calls=${reaped_calls:-none}, start probes=$reaped_starts)"
   grep -F 'PID 8696' "$TMP_DIR/reaped-mid-poll.out" || true
   regression_failures=$((regression_failures + 1))
 fi
@@ -899,8 +968,8 @@ BASH_ENV="$TMP_DIR/bash-env" \
   LSOF_BUSY_PORT='' \
   LSOF_EXITING_LISTEN_POLLS=99 \
   LSOF_LISTENER_PID=8695 \
-  LSOF_LISTENER_PORT=3000 \
-  LSOF_LISTENER_CWD="$FIXTURE_ROOT/services/media-plane" \
+  LSOF_LISTENER_PORT=3001 \
+  LSOF_LISTENER_CWD="$FIXTURE_ROOT/client/desktop" \
   PATH="$STUB_DIR:$PATH" \
   PS_COMMAND_AFTER_KILL='node ./unrelated.js' \
   STUB_SLEEP=1 \
@@ -913,10 +982,10 @@ set -e
 
 changed_command_calls=$(grep '^kill ' "$KILL_LOG" || true)
 if [[ $rc -ne 0 && "$changed_command_calls" == "kill -TERM 8695" ]] \
-  && grep -Eq 'PID 8695 on port 3000: identity changed (after SIGTERM|before escalation)' "$TMP_DIR/changed-command.out"; then
-  echo "PASS: down never escalates against a listener whose command changed after TERM"
+  && grep -Eq 'PID 8695 on port 3001: identity changed (after SIGTERM|before escalation)' "$TMP_DIR/changed-command.out"; then
+  echo "PASS: down (Vite) never escalates against a listener whose command changed after TERM"
 else
-  echo "FAIL: down mishandled listener 8695 whose command changed after TERM (rc=$rc, calls=${changed_command_calls:-none})"
+  echo "FAIL: down (Vite) mishandled listener 8695 whose command changed after TERM (rc=$rc, calls=${changed_command_calls:-none})"
   grep -F 'PID 8695' "$TMP_DIR/changed-command.out" || true
   regression_failures=$((regression_failures + 1))
 fi
@@ -930,8 +999,8 @@ BASH_ENV="$TMP_DIR/bash-env" \
   LOG_DIR="$FIXTURE_ROOT/logs" \
   LSOF_BUSY_PORT='' \
   LSOF_LISTENER_PID=8686 \
-  LSOF_LISTENER_PORT=3000 \
-  LSOF_LISTENER_CWD="$FIXTURE_ROOT/services/media-plane" \
+  LSOF_LISTENER_PORT=3001 \
+  LSOF_LISTENER_CWD="$FIXTURE_ROOT/client/desktop" \
   PATH="$STUB_DIR:$PATH" \
   PS_REUSE_AFTER=2 \
   PS_REUSE_PID=8686 \
@@ -947,10 +1016,10 @@ set -e
 # alone cannot show that the reused PID was refused. The reason must say so.
 listener_reuse_calls=$(grep '^kill ' "$KILL_LOG" || true)
 if [[ $rc -ne 0 && "$listener_reuse_calls" == "kill -TERM 8686" ]] \
-  && grep -Fq 'PID 8686 on port 3000: identity changed after SIGTERM' "$TMP_DIR/listener-reuse.out"; then
-  echo "PASS: down never escalates to a listener PID reused after TERM"
+  && grep -Fq 'PID 8686 on port 3001: identity changed after SIGTERM' "$TMP_DIR/listener-reuse.out"; then
+  echo "PASS: down (Vite) never escalates to a listener PID reused after TERM"
 else
-  echo "FAIL: down mishandled listener PID 8686 after TERM (rc=$rc, calls=${listener_reuse_calls:-none})"
+  echo "FAIL: down (Vite) mishandled listener PID 8686 after TERM (rc=$rc, calls=${listener_reuse_calls:-none})"
   regression_failures=$((regression_failures + 1))
 fi
 

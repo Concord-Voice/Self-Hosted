@@ -62,6 +62,7 @@ make migrate-version
 4. **Know the runner's transaction boundary** - The runner uses golang-migrate v4.20.1 with the default PostgreSQL driver configuration. Each file is sent as one simple-query `Exec`; PostgreSQL wraps a multi-statement query in one implicit transaction. Put each `CREATE INDEX CONCURRENTLY` in its own one-statement file, because it cannot run inside a transaction block.
 5. **Avoid data migrations in schema migrations** - Consider separate data migration scripts
 6. **Never modify committed migrations** - Create new migrations to fix issues
+7. **Pass squawk** - The `squawk` pre-commit hook and the `migration-lint` PR CI job lint new and changed `*.up.sql` files against `.squawk.toml` (PostgreSQL 16). Run it by hand with `pre-commit run squawk --files <file>`. Suppress a false positive on one statement with `-- squawk-ignore <rule>` and a reason; see `[internal]rules/migrations.md` § Migration linting (squawk)
 
 ## Migration Structure
 
@@ -71,7 +72,6 @@ make migrate-version
 -- Purpose: Add status field to users table
 
 ALTER TABLE users ADD COLUMN status VARCHAR(20) DEFAULT 'active';
-CREATE INDEX idx_users_status ON users(status);
 ```
 
 ### Down Migration (`*.down.sql`)
@@ -79,11 +79,10 @@ CREATE INDEX idx_users_status ON users(status);
 -- Migration: add_user_status (down)
 -- Purpose: Remove status field from users table
 
-DROP INDEX IF EXISTS idx_users_status;
 ALTER TABLE users DROP COLUMN IF EXISTS status;
 ```
 
-## Existing Migrations (000001–000185)
+## Existing Migrations (000001–000194)
 
 ### Phase 1A — Authentication & E2EE
 | # | Name | Tables/Changes |
@@ -295,6 +294,60 @@ ALTER TABLE users DROP COLUMN IF EXISTS status;
 | 000183 | billing_ops_metrics | Admit the `billing_erasure_outbox_pending` gauge and `billing_drift_corrections_total` counter to the closed operations metric catalog (#2033) |
 | 000184 | feedback_screenshot_backend | Stores the selected backend in the screenshot lifecycle ledger for deferred offload; rollback refuses while live or potentially written vendor placements exist |
 | 000185 | token_theft_pending_revocations | Records pending theft-triggered refresh-token sweeps; rollback requires certified empty Redis fallbacks and an empty recovery table |
+| 000186 | billing_credit_outbox | Pending D1 code credits, committed with the code claim and applied to Stripe afterwards; down refuses while any credit is pending |
+| 000187 | subscription_plan_changes | Stores each subscriber's discounted Stripe unit amount and the app-owned pending plan change; rollback refuses while Stripe subscriptions exist (#2033; 000186 belongs to #4085) |
+| 000188 | subscription_seats | Wing +1 seats: one open seat per Wing subscription and one active seat per holder, 7-day invites, cascading with the parent and both users; down refuses while any seat is pending or active (#2470). |
+| 000189 | accountguard_maturity | Credential maturity, material versions, provenance and contest columns on `users` and the four factor tables, material triggers (all `ENABLE ALWAYS`) with the `mfa-rekey` rewrap exemption, the global `accountguard_material_version_seq` (START 2) that numbers every insert and material change of `users.password_version`, `users.email_version` and the four factor tables' `material_version` so a re-enrolled credential never reuses a version, and the dormant `accountguard_state` marker; down runs under `lock_timeout = '3s'`, refuses while activated or while any credential is contested, and drops the sequence (#3680) |
+| 000190 | app_attest_keys | Apple App Attest public keys for the iOS client, one row per attested key with its last assertion counter (ADR-0010 D17); down drops the table, so every iOS device re-attests |
+| 000191 | accountguard_rewrap_xact_bind | `accountguard_is_rewrap()` accepts only `'mfa-rekey:' \|\| pg_current_xact_id()`, so a session-level rewrap flag exempts no later transaction; down refuses while `accountguard_state` holds no row, then restores 000189's body (#3680 follow-up) |
+| 000193 | seat_end_reason_pair_ineligible | Widens `subscription_seats_end_reason_check` to admit `pair_ineligible`, the end of a seat its pair's friendship no longer supports (an unfriend or block ends a pending invite; a block by either side ends an active seat); down refuses while any seat carries it. 000192 is unused: #4135 took 000194 instead (#4133 follow-up) |
+| 000194 | add_login_family_authority | Logical login families and immutable SID membership, sealed revocation frontiers, exact media connection/room associations and closure evidence, permanent boot fences and one-way activation receipt; down refuses activation or retained authority/delivery evidence (#2272; 000190 belongs to #4131 and 000191 to #4137). |
+
+### Logical login authority (migration 000194, #2272)
+
+The additive schema creates `login_family_rollout`, `login_families`,
+`login_family_sids`, `login_family_revocations`,
+`login_family_revocation_targets`, `voice_auth_boot_fences`,
+`voice_auth_connections`, `voice_auth_room_bindings`,
+`voice_auth_connection_closures` and `voice_auth_room_closures`.
+Triggers protect immutable identity, sealed operation frontiers, terminal-family
+ownership, exact generation closure and permanent boot retirement. Principal IDs
+deliberately have no `users` foreign key: account erasure must retain obligations.
+The new tables start empty, so their ordinary transactional indexes do not scan
+existing populated tables. There is no inferred historical family backfill.
+
+Apply before the paired family-aware binaries; prepared capability does not
+open client admission. Activation records an immutable rollback floor and
+invalidates all unrevoked unmapped legacy refresh rows, including expired rows.
+Existing usable pre-family credentials require reauthentication. Follow the
+[cutover and retirement procedure](../../../[internal]deploys.md#logical-login-session-cutover-and-rollback-2272).
+
+The down is for unused schema only. It sets `lock_timeout` (3s) and
+`statement_timeout` (30s), locks the rollout relation first and refuses any
+activation/receipt, then locks and checks only the ten relations this migration
+creates. Any retained row, including completed auth operations, closures or
+retired boots, refuses removal. It deliberately does NOT count the pre-existing
+`voice_enforcement_sessions` (000154) or `credential_epoch_voice_ejections`
+(000151): live calls keep rows there and nothing in the dropped schema depends on
+them beyond the room-binding foreign key, whose table is itself checked. Do not
+delete evidence, edit a committed migration or reset the floor to make an older
+binary boot. A refused down leaves schema 194 intact but may record the previous
+version dirty: inspect the actual schema and only then repair metadata to
+**clean 194**.
+
+Every evidence table also carries a statement-level `BEFORE TRUNCATE` trigger
+(`login_family_immutable()`), because the row-level delete guards do not fire on
+`TRUNCATE`. Disposable test databases bypass it with
+`session_replication_role = replica` (superuser only) through
+`testdb.ExecReplica`; production's application role cannot. `socket_id` is bounded
+1..255 octets, the same as `voice_enforcement_sessions.socket_id` (000154), and
+the closure insert trigger takes the boot generation lock before reading
+`voice_auth_boot_fences.retired_at`.
+
+Never force a lower version and continue downs. A compatible rollback image must embed 194
+and preserve protocol-4 family enforcement; empty queues do not permit an older
+pair. Broad branch validation and physical commissioning are separate from this
+schema description.
 
 ### Message key-version constraints (migrations 000171–000176, #2844)
 

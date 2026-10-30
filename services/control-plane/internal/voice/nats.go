@@ -5421,6 +5421,20 @@ func (s *NATSSubscriber) unwindLifecycleSubscription(
 // described here: payload bound, accepted-envelope dedup, authentication,
 // sender/chunk dedup, budget, nil-database refusal, existence check, then the
 // appropriate accept-path dedup marks.
+// erasureAudience parses an erasure clear's viewer IDs. A malformed ID, or the
+// erased user among their own viewers, rejects the whole envelope.
+func erasureAudience(viewerIDs []string, erased uuid.UUID) (map[uuid.UUID]bool, bool) {
+	audience := make(map[uuid.UUID]bool, len(viewerIDs))
+	for _, rawViewerID := range viewerIDs {
+		viewerID, err := uuid.Parse(rawViewerID)
+		if err != nil || viewerID == erased {
+			return nil, false
+		}
+		audience[viewerID] = true
+	}
+	return audience, true
+}
+
 func (s *NATSSubscriber) handlePresenceErasureCleared(data []byte) {
 	if len(data) > erasureclear.MaxEventPayloadBytes {
 		s.erasureShed("oversized_payload")
@@ -5458,14 +5472,10 @@ func (s *NATSSubscriber) handlePresenceErasureCleared(data []byte) {
 		s.erasureShed("invalid_envelope")
 		return
 	}
-	audience := make(map[uuid.UUID]bool, len(viewerIDs))
-	for _, rawViewerID := range viewerIDs {
-		viewerID, parseErr := uuid.Parse(rawViewerID)
-		if parseErr != nil || viewerID == erased {
-			s.erasureShed("invalid_viewer")
-			return
-		}
-		audience[viewerID] = true
+	audience, ok := erasureAudience(viewerIDs, erased)
+	if !ok {
+		s.erasureShed("invalid_viewer")
+		return
 	}
 
 	// Ingress admission (#2854 B1). DEDUP BEFORE BUDGET, deliberately.
@@ -6570,7 +6580,7 @@ func (mutation *privateVoiceLeaveMutation) apply(ctx context.Context) (bool, err
 	}
 	mutation.durablyApplied = true
 	mutation.subscriber.broadcastPrivateVoiceLeft(
-		mutation.conversationID, mutation.senderID,
+		mutation.conversationID, mutation.senderID, mutation.callID,
 	)
 	mutation.baseBroadcasted = true
 	if mutation.subscriber.privateLeaveAfterCommitHook != nil {
@@ -6662,7 +6672,7 @@ func (s *NATSSubscriber) handlePrivateVoiceLeft(
 	if event.CallID == "" {
 		_, mutationErr := mutation.apply(ctx)
 		if mutation.durablyApplied && !mutation.baseBroadcasted {
-			s.broadcastPrivateVoiceLeft(conversationID, mutation.senderID)
+			s.broadcastPrivateVoiceLeft(conversationID, mutation.senderID, mutation.callID)
 		}
 		if mutationErr != nil {
 			s.log.Error("Private Call legacy participant clear failed", "failure_class", "state_write")
@@ -6683,7 +6693,7 @@ func (s *NATSSubscriber) handlePrivateVoiceLeft(
 		mutation.apply,
 	)
 	if mutation.durablyApplied && !mutation.baseBroadcasted {
-		s.broadcastPrivateVoiceLeft(conversationID, mutation.senderID)
+		s.broadcastPrivateVoiceLeft(conversationID, mutation.senderID, mutation.callID)
 	}
 	if mutation.durablyApplied {
 		s.refreshPrivateVoicePeers(
@@ -6700,18 +6710,29 @@ func (s *NATSSubscriber) handlePrivateVoiceLeft(
 }
 
 func (s *NATSSubscriber) broadcastPrivateVoiceLeft(
-	conversationID, senderID uuid.UUID,
+	conversationID, senderID, callID uuid.UUID,
 ) {
 	if s.privateVoiceStateBroadcastHook != nil {
 		s.privateVoiceStateBroadcastHook(conversationID, senderID, "left")
 	}
+	data := map[string]interface{}{
+		"conversation_id": conversationID.String(),
+		"user_id":         senderID.String(), "action": "left",
+	}
+	withDMVoiceCallID(data, callID)
 	s.hub.BroadcastToDMParticipants(conversationID, websocket.OutgoingMessage{
 		Type: "dm_voice_state_update",
-		Data: map[string]interface{}{
-			"conversation_id": conversationID.String(),
-			"user_id":         senderID.String(), "action": "left",
-		},
+		Data: data,
 	})
+}
+
+// withDMVoiceCallID tags a terminal dm_voice_state_update with the call it
+// belongs to (#4179), so a client ringing a successor call can ignore a late
+// event from the previous one. Optional and additive: omitted when unknown.
+func withDMVoiceCallID(data map[string]interface{}, callID uuid.UUID) {
+	if callID != uuid.Nil {
+		data["call_id"] = callID.String()
+	}
 }
 
 func (s *NATSSubscriber) broadcastPrivateVoiceOldScopeLeaves(
@@ -6719,7 +6740,7 @@ func (s *NATSSubscriber) broadcastPrivateVoiceOldScopeLeaves(
 ) {
 	for _, delta := range deltas {
 		for _, participantID := range delta.participantIDs {
-			s.broadcastPrivateVoiceLeft(delta.conversationID, participantID)
+			s.broadcastPrivateVoiceLeft(delta.conversationID, participantID, uuid.Nil)
 		}
 	}
 }
@@ -7066,12 +7087,16 @@ func (s *NATSSubscriber) broadcastPrivateVoiceRoomEmpty(
 	if s.privateVoiceStateBroadcastHook != nil {
 		s.privateVoiceStateBroadcastHook(conversationID, uuid.Nil, "room_empty")
 	}
+	data := map[string]interface{}{
+		"conversation_id": event.ChannelID,
+		"action":          "room_empty",
+	}
+	if callID, err := uuid.Parse(event.CallID); err == nil {
+		withDMVoiceCallID(data, callID)
+	}
 	s.hub.BroadcastToDMParticipants(conversationID, websocket.OutgoingMessage{
 		Type: "dm_voice_state_update",
-		Data: map[string]interface{}{
-			"conversation_id": event.ChannelID,
-			"action":          "room_empty",
-		},
+		Data: data,
 	})
 }
 

@@ -478,8 +478,9 @@ echo "PASS: expected_container_names strips quotes from container_name:"
 
 # A detector nobody calls is precisely the silent regression this check exists to
 # prevent. Nothing else in this suite notices a call site being deleted.
+# Consume each complete body: grep -q can close early and SIGPIPE sed under pipefail.
 for _v in _up_infra verb_status verb_down; do
-  if ! sed -n "/^${_v}()/,/^}/p" "$CONCORD_DEV" | grep -q 'warn_compose_project_split'; then
+  if ! sed -n "/^${_v}()/,/^}/p" "$CONCORD_DEV" | grep 'warn_compose_project_split' >/dev/null; then
     echo "FAIL: ${_v}() no longer calls warn_compose_project_split"
     exit 1
   fi

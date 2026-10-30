@@ -279,6 +279,7 @@ def _tls_context(first_leaf_pem: str) -> ssl.SSLContext:
               and hasattr(ssl.SSLContext, "hostname_checks_common_name"),
               "self-host TLS prerequisite unavailable")
         context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        context.minimum_version = ssl.TLSVersion.TLSv1_2
         context.verify_mode = ssl.CERT_REQUIRED
         context.check_hostname = True
         context.hostname_checks_common_name = False

@@ -28,7 +28,7 @@ RUN npm prune --omit=dev \
 # stubs/ must persist at runtime — fetch-blob resolves the symlink at require time.
 # See [internal]rules/media-plane.md "Docker Build Context Invariant" for the discipline.
 # Pin the runtime independently so deploy rebuilds cannot reuse a stale floating Node base.
-FROM node:26-alpine@sha256:0b36e8c136b94cd4fcf02188228e76c31ad5872eef3fec8cbd2eee500cfd9e80
+FROM node:26-alpine@sha256:c6ad9e9c1d80f6eb607c26b4b0a132ff7a2344fad1c78ea3baa2a7d4c8de6d94
 
 LABEL org.opencontainers.image.source="https://github.com/Concord-Voice/Self-Hosted"
 LABEL org.opencontainers.image.description="Concord Voice media-plane (mediasoup SFU)"
@@ -48,8 +48,9 @@ COPY --from=builder /app/package*.json ./
 RUN rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
     /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 
-# Run as non-root user
-RUN addgroup -S appuser && adduser -S appuser -G appuser
+# Run as non-root user. UID/GID 10007 is fixed and differs from control-plane
+# (10006) so the managed Redis controller can tell the two apart by peer UID.
+RUN addgroup -S -g 10007 appuser && adduser -S -u 10007 -G appuser appuser
 RUN chown -R appuser:appuser /app
 
 # GID 10001 is reserved for the host security-event bind mounts. Keep any

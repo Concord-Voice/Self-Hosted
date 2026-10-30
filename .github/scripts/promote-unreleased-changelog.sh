@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# promote-unreleased-changelog.sh — turn `## [Unreleased]` into a dated release
-# section and open a fresh empty `## [Unreleased]` above it.
+# promote-unreleased-changelog.sh — turn `## [Prerelease]` into a dated release
+# section and open a fresh empty `## [Prerelease]` above it.
 #
 # WHY THIS SHAPE. `verify-changelog.sh` (#1857) fails a desktop version bump that
 # has no matching `## [<new-version>]` section at HEAD, so any automated bump must
@@ -11,10 +11,11 @@
 # read wrong and overwrite an editorial voice nobody asked a script to imitate.
 #
 # So this promotes what humans already wrote. Nothing is authored here — the
-# `## [Unreleased]` body is moved verbatim under a dated heading.
+# `## [Prerelease]` body is moved verbatim under a dated heading. The one
+# exception is the `**N Total Changes** | ...` tally line, which is recounted.
 #
 # THE EMPTINESS CHECK IS THE RELEASE DECISION, not a guard against a corner case.
-# An empty `## [Unreleased]` means nobody has written release notes, which means
+# An empty `## [Prerelease]` means nobody has written release notes, which means
 # there is nothing user-facing to ship — the correct answer is "do not release",
 # and exit 3 says exactly that. Do not "fix" this into a bump-anyway path; that
 # would ship releases whose notes are empty by construction.
@@ -39,9 +40,9 @@
 #
 # Exit codes:
 #   0 — promoted; CHANGELOG.md rewritten
-#   3 — `## [Unreleased]` is empty: nothing to release (NOT an error)
+#   3 — `## [Prerelease]` is empty: nothing to release (NOT an error)
 #   1 — the file does not have the structure this script requires, OR its
-#       `[Unreleased]` notes carry no preamble
+#       `[Prerelease]` notes carry no preamble
 #   2 — usage error
 
 set -euo pipefail

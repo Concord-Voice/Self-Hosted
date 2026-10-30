@@ -57,6 +57,7 @@ export const WORKSPACES = [
   // Self-Hosted: the root workspace (packages/*) takes the desktop slot.
   '.',
   'client/admin',
+  'client/mobile',
   'services/media-plane',
 ];
 const REQUIRED = ['kind', 'ecosystem', 'workspace', 'package', 'pinned', 'reason', 'review_by'];
