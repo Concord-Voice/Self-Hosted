@@ -1711,6 +1711,7 @@ func NewRouter(
 		// closure since gin.HandlerFunc has a fixed signature.
 		v1.POST("/attestation/verify",
 			middleware.AuthRequired(cfg.JWTSecret, redis, db, credFence),
+			middleware.RequireSessionHeaderMatchesToken(),
 			func(c *gin.Context) { attestationHandler.Verify(c, cfg.AttestationTokenTTL) },
 		)
 		// iOS App Attest challenge (ADR-0010 D17). Like verify, it sits outside
@@ -1718,6 +1719,7 @@ func NewRouter(
 		// short-lived Redis key, hence the per-user cap.
 		v1.POST("/attestation/challenge",
 			middleware.AuthRequired(cfg.JWTSecret, redis, db, credFence),
+			middleware.RequireSessionHeaderMatchesToken(),
 			middleware.RateLimitByUser(redis, 30, 1*time.Minute),
 			attestationHandler.Challenge,
 		)
