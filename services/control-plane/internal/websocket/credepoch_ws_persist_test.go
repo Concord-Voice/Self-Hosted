@@ -63,7 +63,7 @@ func TestPersistMessage_GuardReadFailureIsSaveError(t *testing.T) {
 	_, _, _, _, errMsg, _ := hub.persistMessage(persistMessageParams{
 		channelUUID: uuid.New(), userID: userID, credEpoch: "whatever",
 		identity: loginfamily.AccessIdentity{UserID: userID, SID: uuid.New(), CredentialEpoch: "whatever"},
-		content: "Y2lwaGVydGV4dA==", keyVersion: 1,
+		content:  "Y2lwaGVydGV4dA==", keyVersion: 1,
 	})
 	assert.Equal(t, "Failed to save message", errMsg,
 		"a store/read guard failure must be the retryable save error, not auth-shaped")
