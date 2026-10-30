@@ -26,6 +26,8 @@ gate can learn from your voice.
 
 ### Added
 
+- **Tray:** The tray icon now shows both stars of the Concord Voice mark, and it reflects your status. It shows when you are in voice, muted, deafened, sharing your screen, reconnecting, or have unread messages or mentions. On macOS and Windows, click the icon to open a menu with Mute, Deafen, Leave voice, Stop sharing, your presence, and a shortcut to your newest unread conversation. On Linux, click the icon to open the window; the menu comes from your desktop's tray host.
+- **Settings:** Settings ▸ Appearance has a new Tray Icon setting (Menu Bar Icon on macOS). Choose Automatic, Light, Dark, or Colour to match your taskbar or menu bar.
 - **Billing:** Settings ▸ Subscription lists each plan with its monthly and yearly price and opens a secure Stripe page to subscribe or manage billing.
 - **Billing:** New subscribers get a 30-day free trial of Supersonic. The card is collected first, and billing starts when the trial ends. Wing has no trial.
 - **Billing:** Subscribers can change plans in Settings, see the amount due before an immediate switch, and withdraw a change that is booked for renewal.
