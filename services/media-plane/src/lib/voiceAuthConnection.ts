@@ -57,6 +57,10 @@ interface LegacyRoomState {
   started: boolean;
 }
 const CAPACITY = 1000;
+// Connection identities one account may hold, so a few accounts cannot fill CAPACITY
+// with idle sockets. Twice the control plane's 8-per-user WebSocket admission, so
+// reconnect overlap fits. ponytail: fixed cap; make it configurable if real multi-device use nears it.
+const PER_USER_CONNECTIONS = 16;
 // Three signed-release timeouts: an ordinary leave finishes well inside this.
 const TERMINATION_STALL_MS = 15_000;
 const bytes = (value: unknown): Uint8Array => Buffer.from(JSON.stringify(value), 'utf8');
@@ -104,6 +108,7 @@ export class VoiceAuthConnections {
   private readonly fetcher: typeof fetch;
   private readonly now: () => number;
   private retained = 0;
+  private readonly userConnections = new Map<string, number>();
   private reservationHorizon: object = Object.freeze({});
   private readonly legacyRooms = new Map<string, LegacyRoomState>();
   private readonly legacyReferences = new WeakMap<VoiceEnforcementSession, LegacyRoomState>();
@@ -192,6 +197,8 @@ export class VoiceAuthConnections {
     tokenExpiresAt: number; disconnect: () => void; relayHeaders?: () => Record<string, string>;
   }): ConnectionHandle {
     if (this.retained >= CAPACITY) throw new Error('Voice identity capacity exhausted');
+    const held = this.userConnections.get(input.userId) ?? 0;
+    if (held >= PER_USER_CONNECTIONS) throw new Error('Voice identity capacity exhausted for user');
     if (!Number.isSafeInteger(input.tokenExpiresAt) || input.tokenExpiresAt <= this.now())
       throw new Error('Expired voice connection');
     const target: Target = {
@@ -211,6 +218,7 @@ export class VoiceAuthConnections {
       state: 'provisional', rooms: new Map(),
     };
     this.retained++;
+    this.userConnections.set(input.userId, held + 1);
     this.handles.set(handle, state);
     this.connections.set(target.connectionGeneration, state);
     this.reservationHorizon = Object.freeze({});
@@ -439,6 +447,9 @@ export class VoiceAuthConnections {
     state.token = '';
     this.connections.delete(state.target.connectionGeneration);
     this.retained--;
+    const held = (this.userConnections.get(state.userId) ?? 1) - 1;
+    if (held > 0) this.userConnections.set(state.userId, held);
+    else this.userConnections.delete(state.userId);
   }
 
   private start(task: Completion, effect: () => Promise<void>): void {
