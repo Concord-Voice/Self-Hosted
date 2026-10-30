@@ -55,6 +55,7 @@ gate can learn from your voice.
 - **Desktop:** Updated runtime and updater dependencies.
 - **Plans:** Every account can create any number of servers, search as far back as a subscriber, and customize theme colors. One account can create up to 10 servers in 24 hours ([#3861](internal development reference omitted)).
 - **Desktop:** Updated navigation dependencies.
+- **Mobile:** The in-development mobile client, not yet released, now builds on React Native 0.88.0.
 - **Web:** Opening the web address in a browser shows a link to download the desktop app, not an "Update Required" prompt.
 - **Desktop:** Updated installer tooling.
 - **Search:** Message search looks back 90 days or 600 messages at a time, loads older results as you scroll, and says when it is paused or stopped ([#3875](internal development reference omitted)).
