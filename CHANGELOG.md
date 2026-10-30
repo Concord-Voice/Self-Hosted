@@ -9,7 +9,10 @@ the release channel that ships it first.
 
 To add an entry, write one line under the matching `###` category in
 `[Prerelease]`: Added, Changed, Deprecated, Removed, Fixed, or Security. Start
-the line with a bold area tag, such as `**Voice:**`. Keep one summary of 1-3
+the line with a bold area tag, such as `**Voice:**`. Mark a breaking change with
+`**BREAKING**` after the tag. The category sets the recommended version bump:
+Added, Deprecated and Removed suggest a minor, and the rest suggest a patch. A
+**BREAKING** entry suggests a major (a minor before 1.0). Keep one summary of 1-3
 sentences above the categories. The post-update dialog shows only that summary.
 Do not add a paragraph for each change. Edit the summary only when your change
 belongs in it, and write it if the section has none. Do not edit the
