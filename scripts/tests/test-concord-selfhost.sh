@@ -1284,7 +1284,7 @@ run_selfhost_lock_case() {
 
 run_selfhost_lock_case 0
 if [[ $selfhost_rc -eq 0 && $(cat "$SELFHOST_LOCK_CALL_LOG") == '-w 90 9' ]] \
-  && [[ -e "$BEHAVIOR_ROOT/[internal].deploy-transaction.lock" ]] \
+  && [[ -e "$BEHAVIOR_ROOT/infrastructure/deploy/.deploy-transaction.lock" ]] \
   && ! grep -qF 'running WITHOUT the deploy transaction lock' "$selfhost_lock_stderr" \
   && grep -qE 'compose .* build control-plane' "$SELFHOST_DOCKER_LOG" \
   && grep -qE 'compose .* build media-plane' "$SELFHOST_DOCKER_LOG"; then
@@ -1292,7 +1292,7 @@ if [[ $selfhost_rc -eq 0 && $(cat "$SELFHOST_LOCK_CALL_LOG") == '-w 90 9' ]] \
 else
   fail "self-host up locks the configuration-directory fallback with absent parent (rc=$selfhost_rc)"
 fi
-rm -f "$BEHAVIOR_ROOT/[internal].deploy-transaction.lock"
+rm -f "$BEHAVIOR_ROOT/infrastructure/deploy/.deploy-transaction.lock"
 
 mkdir "$SELFHOST_LOCK_PARENT"
 run_selfhost_lock_case 0
