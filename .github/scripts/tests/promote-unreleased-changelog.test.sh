@@ -3,7 +3,7 @@
 # Self-test for promote-unreleased-changelog.sh.
 #
 # The load-bearing assertions are the two that protect humans' writing:
-#   * an EMPTY Unreleased must exit 3 and leave the file byte-identical — that
+#   * an EMPTY Prerelease must exit 3 and leave the file byte-identical — that
 #     path is the release decision ("nobody wrote notes, so do not ship"), not
 #     an error case, and a script that bumped anyway would ship empty releases;
 #   * a non-empty body must survive promotion VERBATIM — this script exists
@@ -37,7 +37,7 @@ All notable changes to Concord Voice will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 
-## [Unreleased]
+## [Prerelease]
 '
 FIXTURE_TAIL='
 ## [0.2.40] — 2026-08-20
@@ -118,16 +118,16 @@ echo "Nothing-to-release (exit 3, file untouched):"
 
 f=$(make_changelog '')
 before=$(shasum "$f" | cut -d' ' -f1)
-check 3 "empty Unreleased exits 3" "$PROMOTE" 0.2.41 2026-08-26 "$f"
+check 3 "empty Prerelease exits 3" "$PROMOTE" 0.2.41 2026-08-26 "$f"
 after=$(shasum "$f" | cut -d' ' -f1)
-assert_true "empty Unreleased leaves the file byte-identical" \
+assert_true "empty Prerelease leaves the file byte-identical" \
   "$([[ "$before" == "$after" ]] && echo yes || echo no)"
 
 f=$(make_changelog '
 
 
 ')
-check 3 "whitespace-only Unreleased exits 3" "$PROMOTE" 0.2.41 2026-08-26 "$f"
+check 3 "whitespace-only Prerelease exits 3" "$PROMOTE" 0.2.41 2026-08-26 "$f"
 
 echo ""
 echo "Malformed input:"
@@ -136,9 +136,9 @@ f=$(make_changelog 'x')
 python3 -c '
 import pathlib, re, sys
 p = pathlib.Path(sys.argv[1])
-p.write_text(re.sub(r"(?m)^## \[Unreleased\]\n", "", p.read_text(), count=1))
+p.write_text(re.sub(r"(?m)^## \[Prerelease\]\n", "", p.read_text(), count=1))
 ' "$f"
-check 1 "no Unreleased heading exits 1" "$PROMOTE" 0.2.41 2026-08-26 "$f"
+check 1 "no Prerelease heading exits 1" "$PROMOTE" 0.2.41 2026-08-26 "$f"
 
 # The preamble is LOAD-BEARING here, and its absence made this case vacuous the
 # moment the preamble gate was added: the old fixture started at `### Added`, so
@@ -190,7 +190,7 @@ Sign-in got steadier and a friend link now goes somewhere useful.
 
 '
 f=$(make_changelog "$BODY")
-check 0 "non-empty Unreleased promotes" "$PROMOTE" 0.2.41 2026-08-26 "$f"
+check 0 "non-empty Prerelease promotes" "$PROMOTE" 0.2.41 2026-08-26 "$f"
 
 python3 -c '
 import pathlib, re, sys
@@ -198,15 +198,15 @@ text = pathlib.Path(sys.argv[1]).read_text()
 body = sys.argv[2]
 problems = []
 
-if not re.search(r"(?m)^## \[0\.2\.41\] — 2026-08-26$", text):
-    problems.append("dated heading missing or wrong em-dash/format")
+if not re.search(r"(?m)^## \[0\.2\.41\] - 2026-08-26$", text):
+    problems.append("dated heading missing or wrong Keep a Changelog 1.1 format")
 # verify-changelog.sh:105 greps exactly this
 if not re.search(r"(?m)^## \[0\.2\.41\](-[A-Za-z0-9.]+)?", text):
     problems.append("heading does not satisfy verify-changelog rule 1")
-if not re.search(r"(?m)^## \[Unreleased\]\s*\n+## \[0\.2\.41\]", text):
-    problems.append("fresh empty Unreleased not left above the release")
-if text.index("## [Unreleased]") > text.index("## [0.2.41]"):
-    problems.append("Unreleased is not first")
+if not re.search(r"(?m)^## \[Prerelease\]\s*\n+## \[0\.2\.41\]", text):
+    problems.append("fresh empty Prerelease not left above the release")
+if text.index("## [Prerelease]") > text.index("## [0.2.41]"):
+    problems.append("Prerelease is not first")
 if text.index("## [0.2.41]") > text.index("## [0.2.40]"):
     problems.append("new release not above the previous one")
 # BYTE-EXACT: the promoted file must contain the body as an unbroken,
@@ -225,7 +225,7 @@ if problems:
 ' "$f" "$BODY" && RESULT=yes || RESULT=no
 assert_true "promoted file is structurally correct and preserves the body verbatim" "$RESULT"
 
-# Promotion must be a one-shot: the fresh Unreleased is empty, so a second run
+# Promotion must be a one-shot: the fresh Prerelease is empty, so a second run
 # on the same file is the nothing-to-release path, not a double promotion.
 check 3 "re-running on the promoted file exits 3 (no double promotion)" \
   "$PROMOTE" 0.2.42 2026-08-27 "$f"
@@ -675,7 +675,7 @@ check_msg 1 "add one \\(e\\.g\\. .### Fixed" \
 # silent truncation of it is exactly the drift this suite exists to catch.
 check_msg 0 "Exit codes:" "--help prints the exit-code block" "$PROMOTE" --help
 check_msg 0 "0 — promoted" "--help documents exit 0" "$PROMOTE" --help
-check_msg 0 "3 — .## \\[Unreleased\\]. is empty" "--help documents exit 3" "$PROMOTE" --help
+check_msg 0 "3 — .## \\[Prerelease\\]. is empty" "--help documents exit 3" "$PROMOTE" --help
 check_msg 0 "1 — the file does not have the structure" "--help documents exit 1" "$PROMOTE" --help
 check_msg 0 "2 — usage error" "--help documents exit 2 (the LAST entry)" "$PROMOTE" --help
 
@@ -712,7 +712,7 @@ echo "Line-ending fidelity:"
 CRLF_CASE="$TMP/crlf"; mkdir -p "$CRLF_CASE"
 python3 -c '
 import pathlib, sys
-lines = ["# Changelog", "", "## [Unreleased]", "", "A summary sentence.", "",
+lines = ["# Changelog", "", "## [Prerelease]", "", "A summary sentence.", "",
          "### Added", "", "- A thing.", "",
          "## [0.2.40] - 2026-08-20", "", "Prior release prose.", "",
          "### Added", "", "- Old thing.", ""]
@@ -730,7 +730,7 @@ if raw.replace(b"\r\n", b"").count(b"\n"):
 if b"\r\n" not in raw:
     problems.append("all CRLF endings were rewritten to LF")
 # The inserted headings must carry the ending the file uses, not a hardcoded LF.
-for needle in (b"## [Unreleased]\r\n", b"## [0.2.41] \xe2\x80\x94 2026-08-26\r\n"):
+for needle in (b"## [Prerelease]\r\n", b"## [0.2.41] - 2026-08-26\r\n"):
     if needle not in raw:
         problems.append("inserted heading is not CRLF-terminated: %r" % needle)
 # And the body itself must survive with its CRLF intact.
@@ -764,7 +764,7 @@ echo "Port vs. the TypeScript it mirrors (real CHANGELOG.md):"
 # the promoter, which is the direct counterpart of changelog.test.ts's
 # "every 0.2.x entry in the REAL CHANGELOG.md has a non-blank preamble".
 # It also closes a second hole: until now nothing asserted the promoter accepts
-# real repo content at all, because the live [Unreleased] is empty.
+# real repo content at all, because the live [Prerelease] is empty.
 REAL_CHANGELOG="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)/CHANGELOG.md"
 if [[ -f "$REAL_CHANGELOG" ]]; then
   REJECTED=$(python3 -c '
@@ -782,7 +782,7 @@ for i, h in enumerate(heads):
     body = text[h.end():end]
     d = tempfile.mkdtemp(dir=tmp)
     f = pathlib.Path(d) / "CHANGELOG.md"
-    f.write_text("# Changelog\n\n## [Unreleased]\n" + body + "\n## [0.0.1] - 2020-01-01\n\n- seed.\n")
+    f.write_text("# Changelog\n\n## [Prerelease]\n" + body + "\n## [0.0.1] - 2020-01-01\n\n- seed.\n")
     rc = subprocess.run(["bash", promote, "9.9.9", "2026-01-01", str(f)],
                         capture_output=True).returncode
     if rc != 0:
@@ -807,6 +807,44 @@ else
   echo "  FAIL: real CHANGELOG.md not found at $REAL_CHANGELOG — the port pin verified nothing" >&2
   fail=$((fail + 1))
 fi
+
+# ── Tally line: recounted at promotion, absent tally left alone ──────────────
+TALLY_BODY='
+Summary sentence.
+
+**1 Total Changes** | 1 Added
+
+### Added
+
+- One.
+- Two.
+
+```
+- not a bullet
+```
+
+### Fixed
+
+- Three.
+
+### Known Issues
+
+- Not a change.
+
+'
+f=$(make_changelog "$TALLY_BODY")
+check 0 "body with a stale tally promotes" "$PROMOTE" 0.2.41 2026-08-26 "$f"
+assert_true "stale tally is recounted per category, fences and non-KaC sections excluded" \
+  "$(grep -qFx '**3 Total Changes** | 2 Added | 1 Fixed' "$f" && echo yes || echo no)"
+assert_true "stale tally text is gone" \
+  "$(grep -qF '**1 Total Changes**' "$f" && echo no || echo yes)"
+
+# Same recount on a CRLF file: `$` alone never matches before "\r\n".
+f=$(make_changelog "$TALLY_BODY")
+python3 -c 'import pathlib,sys; p=pathlib.Path(sys.argv[1]); p.write_bytes(p.read_bytes().replace(b"\n", b"\r\n"))' "$f"
+check 0 "CRLF body with a stale tally promotes" "$PROMOTE" 0.2.41 2026-08-26 "$f"
+assert_true "CRLF stale tally is recounted and keeps its CRLF ending" \
+  "$(python3 -c 'import sys; print("yes" if b"**3 Total Changes** | 2 Added | 1 Fixed\r\n" in open(sys.argv[1],"rb").read() else "no")' "$f")"
 
 echo ""
 echo "─────────────────────────────────────────"

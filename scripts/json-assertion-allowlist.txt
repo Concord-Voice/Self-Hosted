@@ -12,7 +12,6 @@ services/control-plane/internal/invites/handlers_integration_2_test.go
 services/control-plane/internal/invites/handlers_test.go
 services/control-plane/internal/members/handlers_integration_test.go
 services/control-plane/internal/members/handlers_test.go
-services/control-plane/internal/messages/credepoch_race_test.go
 services/control-plane/internal/messages/handlers_integration_2_test.go
 services/control-plane/internal/messages/handlers_test.go
 services/control-plane/internal/messages/reactions_test.go
@@ -30,8 +29,6 @@ services/control-plane/internal/rbac/handlers_integration_test.go
 services/control-plane/internal/servers/entitlements_test.go
 services/control-plane/internal/servers/handlers_integration_2_test.go
 services/control-plane/internal/servers/handlers_test.go
-services/control-plane/internal/sessions/handlers_integration_test.go
-services/control-plane/internal/sessions/handlers_test.go
 services/control-plane/internal/users/handlers_integration_test.go
 services/control-plane/internal/users/handlers_test.go
 services/control-plane/internal/users/presence_overrides_test.go

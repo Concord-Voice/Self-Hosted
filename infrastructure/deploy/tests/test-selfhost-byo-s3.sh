@@ -82,7 +82,10 @@ except ImportError:
 # NATS port closure, the dedicated feedback screenshot R2 destination,
 # control-plane GID 10002 secret-file group_add, Redis noeviction for
 # persistent deny state, and the coturn credential-source entrypoint with
-# softened TURN_SECRET guards. Keep explicit digests so source
+# softened TURN_SECRET guards, the BuildKit v0.34.1-rootless image pin, and
+# the dormant iOS App Attest env mapping (ADR-0010 D17), and the production
+# media-plane restatement of CONTROL_PLANE_URL/JWT_SECRET/PORT for the colours.
+# Keep explicit digests so source
 # changes require baseline review. Snapshot all inputs to detect test-side mutations.
 SOURCE_HASHES = {
     "docker-compose.yml": "".join(('bdad506e', '1c166bec', '88960d3e', '1fcc62c1', '6be3f8ec', 'a9e58f62', '19d455a6', '252fa641')),

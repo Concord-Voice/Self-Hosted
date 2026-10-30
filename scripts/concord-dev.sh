@@ -1326,7 +1326,7 @@ voice_native_cli() (
   local pid
   pid="$(read_valid_pid "$LOG_DIR/control-plane.pid")" || return 1
   tracked_pid_identity_state "$LOG_DIR/control-plane.pid" "$pid" || return 1
-  python3 "$PROJECT_ROOT/[internal]voice-boot-containment.py" native-process \
+  python3 "$PROJECT_ROOT/infrastructure/deploy/voice-boot-containment.py" native-process \
     --process-id "$pid" --directory "$VOICE_NATIVE_CONTROL_RUNTIME" --kind control || return 1
   cd "$PROJECT_ROOT/services/control-plane" || return 1
   ENVIRONMENT="${ENVIRONMENT:-development}" "$VOICE_NATIVE_CONTROL_RUNTIME/control-plane" voice-enforcement-rollout "$@"
@@ -1335,7 +1335,7 @@ voice_native_cli() (
 voice_native_status() {
   local observed
   observed="$(voice_native_cli status --json)" || return 1
-  printf '%s' "$observed" | python3 "$PROJECT_ROOT/[internal]voice-boot-containment.py" status "$@"
+  printf '%s' "$observed" | python3 "$PROJECT_ROOT/infrastructure/deploy/voice-boot-containment.py" status "$@"
 }
 
 voice_native_boot() (
@@ -1344,7 +1344,7 @@ voice_native_boot() (
   pid="$(read_valid_pid "$LOG_DIR/media-plane.pid")" || return 1
   tracked_pid_identity_state "$LOG_DIR/media-plane.pid" "$pid" || return 1
   before="$(process_start_identity "$pid")" || return 1
-  python3 "$PROJECT_ROOT/[internal]voice-boot-containment.py" native-process \
+  python3 "$PROJECT_ROOT/infrastructure/deploy/voice-boot-containment.py" native-process \
     --process-id "$pid" --directory "$VOICE_NATIVE_MEDIA_RUNTIME" --kind media || return 1
   [[ "$(lsof_query -a -p "$pid" -iTCP:3000 -sTCP:LISTEN -t)" == "$pid" ]] || return 1
   body="$(mktemp)" || return 1
@@ -1352,12 +1352,12 @@ voice_native_boot() (
   status="$(curl -sS --max-time 2 --max-filesize 65536 -o "$body" -w '%{http_code}' \
     http://127.0.0.1:3000/readyz)" || return 1
   [[ "$status" == 200 || "$status" == 503 ]] || return 1
-  boot="$(python3 "$PROJECT_ROOT/[internal]voice-boot-containment.py" native-ready \
+  boot="$(python3 "$PROJECT_ROOT/infrastructure/deploy/voice-boot-containment.py" native-ready \
     --grant "$1" <"$body")" || return 1
   after="$(process_start_identity "$pid")" || return 1
   [[ "$before" == "$after" ]] || return 1
   tracked_pid_identity_state "$LOG_DIR/media-plane.pid" "$pid" || return 1
-  python3 "$PROJECT_ROOT/[internal]voice-boot-containment.py" native-process \
+  python3 "$PROJECT_ROOT/infrastructure/deploy/voice-boot-containment.py" native-process \
     --process-id "$pid" --directory "$VOICE_NATIVE_MEDIA_RUNTIME" --kind media || return 1
   printf '%s' "$boot"
 )
@@ -1375,16 +1375,16 @@ voice_native_activate() (
   voice_native_paths || return 1
   local status activation boot control_artifact media_artifact receipt
   status="$(voice_native_status)" || return 1
-  activation="$(printf '%s' "$status" | python3 "$PROJECT_ROOT/[internal]voice-boot-containment.py" status --field familyActivation)" || return 1
+  activation="$(printf '%s' "$status" | python3 "$PROJECT_ROOT/infrastructure/deploy/voice-boot-containment.py" status --field familyActivation)" || return 1
   if [[ "$activation" == prepared ]]; then
     boot="$(voice_native_wait_grant false)" || return 1
-    control_artifact="$(python3 "$PROJECT_ROOT/[internal]voice-boot-containment.py" file-artifact "$VOICE_NATIVE_CONTROL_RUNTIME/control-plane")" || return 1
-    media_artifact="$(python3 "$PROJECT_ROOT/[internal]voice-boot-containment.py" native-artifact "$VOICE_NATIVE_MEDIA_RUNTIME")" || return 1
+    control_artifact="$(python3 "$PROJECT_ROOT/infrastructure/deploy/voice-boot-containment.py" file-artifact "$VOICE_NATIVE_CONTROL_RUNTIME/control-plane")" || return 1
+    media_artifact="$(python3 "$PROJECT_ROOT/infrastructure/deploy/voice-boot-containment.py" native-artifact "$VOICE_NATIVE_MEDIA_RUNTIME")" || return 1
     [[ "$control_artifact" == "$VOICE_NATIVE_CONTROL_ARTIFACT" && "$media_artifact" == "$VOICE_NATIVE_MEDIA_ARTIFACT" ]] || return 1
     receipt="$(mktemp)" || return 1
     trap 'rm -f -- "$receipt"' EXIT
     status="$(voice_native_status)" || return 1
-    printf '%s' "$status" | python3 "$PROJECT_ROOT/[internal]voice-boot-containment.py" receipt \
+    printf '%s' "$status" | python3 "$PROJECT_ROOT/infrastructure/deploy/voice-boot-containment.py" receipt \
       --control-plane-artifact "$control_artifact" --slot media-plane "$media_artifact" "$boot" >"$receipt" || return 1
     voice_native_cli activate --confirm-drained --receipt-file "$receipt" || return 1
   fi
@@ -1553,7 +1553,7 @@ _up_control_plane() {
   # An unset ENVIRONMENT means production to the control plane (fail closed),
   # so local dev names its environment rather than inheriting a default.
   voice_native_paths || return 1
-  VOICE_NATIVE_CONTROL_ARTIFACT="$(python3 "$PROJECT_ROOT/[internal]voice-boot-containment.py" stage-native \
+  VOICE_NATIVE_CONTROL_ARTIFACT="$(python3 "$PROJECT_ROOT/infrastructure/deploy/voice-boot-containment.py" stage-native \
     --source "$PROJECT_ROOT/services/control-plane" --destination "$VOICE_NATIVE_CONTROL_RUNTIME" --kind control)" || return 1
   ENVIRONMENT="${ENVIRONMENT:-development}" nohup "$VOICE_NATIVE_CONTROL_RUNTIME/control-plane" 7>&- > "$LOG_DIR/control-plane.log" 2>&1 &
   local control_pid=$!
@@ -1609,7 +1609,7 @@ _up_media_plane() {
   # and native worker closure before launch; source edits cannot restart it.
   npm run build || return 1
   voice_native_paths || return 1
-  VOICE_NATIVE_MEDIA_ARTIFACT="$(python3 "$PROJECT_ROOT/[internal]voice-boot-containment.py" stage-native \
+  VOICE_NATIVE_MEDIA_ARTIFACT="$(python3 "$PROJECT_ROOT/infrastructure/deploy/voice-boot-containment.py" stage-native \
     --source "$PROJECT_ROOT/services/media-plane" --destination "$VOICE_NATIVE_MEDIA_RUNTIME" --kind media)" || return 1
   nohup "$VOICE_NATIVE_MEDIA_RUNTIME/node" "$VOICE_NATIVE_MEDIA_RUNTIME/dist/index.js" 7>&- > "$LOG_DIR/media-plane.log" 2>&1 &
   local media_pid=$!

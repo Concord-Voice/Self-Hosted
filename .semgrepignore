@@ -23,3 +23,8 @@ temp/
 # Browser-only mock code, never production (#204). Mirrors the pre-commit
 # semgrep + detect-secrets excludes in .pre-commit-config.yaml.
 prototypes/
+# Mobile client third-party code: the vendored Argon2 reference C (its
+# "Vendor/" capital V escapes the vendor/ rule above) and the Gradle wrapper
+# script. Semgrep cannot fully parse either, and neither is ours to change.
+client/mobile/native/ConcordCrypto/Vendor/
+client/mobile/android/gradlew

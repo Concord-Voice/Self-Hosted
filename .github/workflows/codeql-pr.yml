@@ -22,11 +22,69 @@ jobs:
       contents: read
       pull-requests: read
 
+  # Select CodeQL languages from the PR's changed paths. The filter file is
+  # read from the PR's base commit, so a PR cannot narrow its own scan. The
+  # Actions leg always runs (2 vCPU, about a minute) so every PR head carries
+  # a CodeQL analysis for the native code-scanning rules; Go and JS/TS run when
+  # their scan-relevance keys match. Hotfix PRs and any selection failure run
+  # the full matrix.
+  select:
+    if: ${{ !(github.event.action == 'edited' && github.event.changes.base == null && (github.event.changes.title != null || github.event.changes.body != null)) }}
+    name: Select CodeQL languages
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read  # dorny/paths-filter lists changed files
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        id: policy
+        continue-on-error: true
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: policy
+          persist-credentials: false
+          sparse-checkout: .github/ci/scan-relevance.yml
+          sparse-checkout-cone-mode: false
+
+      # SHA-pinned per supply-chain hardening (#847). Matches pr-ci.yml's pin.
+      - uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        id: filter
+        if: steps.policy.outcome == 'success'
+        continue-on-error: true
+        with:
+          filters: policy/.github/ci/scan-relevance.yml
+          predicate-quantifier: some-with-excludes
+
+      - name: Compose CodeQL matrix
+        id: matrix
+        env:
+          FILTER_OK: ${{ steps.filter.outcome == 'success' }}
+          HOTFIX: "${{ contains(github.event.pull_request.labels.*.name, 'risk: hotfix') }}"
+          GO: ${{ steps.filter.outputs.codeql_go }}
+          JS: ${{ steps.filter.outputs.codeql_js }}
+        run: |
+          set -euo pipefail
+          actions='{"language":"actions","runner":"blacksmith-2vcpu-ubuntu-2404","build-mode":"none"}'
+          go='{"language":"go","runner":"blacksmith-4vcpu-ubuntu-2404","build-mode":"manual"}'
+          js='{"language":"javascript-typescript","runner":"blacksmith-4vcpu-ubuntu-2404","build-mode":"none"}'
+          legs=("$actions")
+          if [[ "$FILTER_OK" != true || "$HOTFIX" == true || "$GO" != false ]]; then legs+=("$go"); fi
+          if [[ "$FILTER_OK" != true || "$HOTFIX" == true || "$JS" != false ]]; then legs+=("$js"); fi
+          matrix="{\"include\":[$(IFS=,; echo "${legs[*]}")]}"
+          echo "$matrix" | jq -e '.include | length >= 1' >/dev/null
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "CodeQL legs: $(echo "$matrix" | jq -r '[.include[].language] | join(", ")')" >> "$GITHUB_STEP_SUMMARY"
+
   codeql:
-    needs: [ioc]
+    needs: [ioc, select]
     permissions:
       contents: read
       security-events: write
       packages: read
       actions: read
     uses: ./.github/workflows/codeql.yml
+    with:
+      codeql-matrix: ${{ needs.select.outputs.matrix }}

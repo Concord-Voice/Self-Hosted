@@ -162,7 +162,7 @@ repos:
   # Secret Scanning + push protection, org-enforced (code-security config
   # 251472) — fork PRs bypass pre-commit, which is why the other layers exist.
   - repo: https://github.com/trufflesecurity/trufflehog
-    rev: v3.88.0
+    rev: v3.99.2
     hooks:
       - id: trufflehog
         name: TruffleHog
@@ -386,6 +386,22 @@ repos:
         language: system
         pass_filenames: false
         files: '\.go$'
+
+  # ── PostgreSQL migration lint (squawk, #4175) ─────────────────────────────
+  # SonarCloud has no PostgreSQL analyzer, so `.sql` is excluded from it; squawk
+  # flags migrations that lock tables or break a running app. Config, PG
+  # version and rule exclusions live in .squawk.toml (repo root, where hooks
+  # run). Only files being committed are linted, so the applied history is
+  # baselined rather than rewritten. The version is pinned in TWO places that
+  # must move together: here and .github/requirements-squawk.txt (CI).
+  - repo: local
+    hooks:
+      - id: squawk
+        name: squawk (PostgreSQL migration lint)
+        entry: squawk
+        language: python
+        additional_dependencies: ['squawk-cli==2.70.0']
+        files: '^services/control-plane/migrations/[0-9]{6}_[^/]+\.up\.sql$'
 
   # ── TypeScript / React (Desktop Client) ───────────────────────────────────
   - repo: local
@@ -684,13 +700,13 @@ repos:
       # test (there is no root package.json). See PR #2709 for the incident.
       - id: override-range-lint-desktop
         name: override-range lint — packages workspace
-        entry: node scripts/security/override-range-lint.mjs --dir . --minimum-version undici=6.28.1 --minimum-version undici=7.29.1 --minimum-version undici=8.10.2
+        entry: node scripts/security/override-range-lint.mjs --dir . --minimum-version undici=6.29.1 --minimum-version undici=7.30.1 --minimum-version undici=8.12.2
         language: system
         files: '^(package\.json|package-lock\.json|\.override-range-baseline\.json)$'
         pass_filenames: false
       - id: override-range-lint-admin
         name: override-range lint — client/admin
-        entry: node scripts/security/override-range-lint.mjs --dir client/admin --minimum-version undici=6.28.1 --minimum-version undici=7.29.1 --minimum-version undici=8.10.2
+        entry: node scripts/security/override-range-lint.mjs --dir client/admin --minimum-version undici=6.29.1 --minimum-version undici=7.30.1 --minimum-version undici=8.12.2
         language: system
         files: '^client/admin/(package\.json|package-lock\.json|\.override-range-baseline\.json)$'
         pass_filenames: false
@@ -714,7 +730,7 @@ repos:
         name: Test override-range lint (#2709)
         entry: bash scripts/security/test-override-range-lint.sh
         language: system
-        files: '^scripts/security/(override-range-lint\.mjs|test-override-range-lint\.sh)$'
+        files: '^(scripts/security/(override-range-lint\.mjs|test-override-range-lint\.sh)|\.pre-commit-config\.yaml|\.github/workflows/(build|worker-ci)\.yml)$'
         pass_filenames: false
       # Fires when a manifest, the dependabot config, or the register itself
       # moves — the moments a held version can appear without a written reason.

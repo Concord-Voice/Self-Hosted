@@ -53,6 +53,9 @@ jobs:
         with:
           persist-credentials: false
 
+      - name: Install and admit locked Docker Engine
+        run: bash scripts/ci/install-docker-engine.sh
+
       - name: Build image
         env:
           IMAGE: ${{ matrix.image }}

@@ -1,5 +1,7 @@
 # https://docs.github.com/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
 
+# Weekly runs on 2026-10-27/28 hit startup_failure (a GitHub billing problem,
+# not this file). Any merged edit here makes Dependabot re-check every entry.
 version: 2
 updates:
   # ─── GitHub Actions ────────────────────────────────────────────────
@@ -233,6 +235,51 @@ updates:
       icons:
         patterns:
           - "lucide-react"
+    versioning-strategy: increase
+
+  # ─── Mobile Client (React Native) ──────────────────────────────────
+  # The mobile client (#4084) landed without an entry here, so the coverage
+  # audit reported client/mobile as UNCOVERED. No `area:` label exists for
+  # mobile yet, so this carries `area: deps` alone.
+  #
+  # The react-native group exists because the template pins its packages
+  # EXACTLY to each other (react = react-test-renderer, react-native =
+  # @react-native/*), so a split bump fails `npm ci`. Same reason as the
+  # vitest pair under /client/desktop, including the security sibling.
+  - package-ecosystem: "npm"
+    directory: "/client/mobile"
+    schedule:
+      interval: "weekly"
+      day: "tuesday"
+      time: "05:00"
+      timezone: "Etc/UTC"
+    commit-message:
+      prefix: "chore"
+    cooldown:
+      default-days: 7
+    labels:
+      - "area: deps"
+    open-pull-requests-limit: 5
+    groups:
+      react-native:
+        patterns:
+          - "react"
+          - "react-test-renderer"
+          - "react-native"
+          - "@react-native/*"
+          - "@react-native-community/*"
+          - "@types/react"
+          - "@types/react-test-renderer"
+      react-native-security:
+        # Required sibling — see `vitest-pair-security` under /client/desktop for
+        # why a group without `applies-to` is INVISIBLE to security updates.
+        applies-to: security-updates
+        patterns:
+          - "react"
+          - "react-test-renderer"
+          - "react-native"
+          - "@react-native/*"
+          - "@react-native-community/*"
     versioning-strategy: increase
 
   # ─── Media Plane (Node.js + mediasoup) ─────────────────────────────

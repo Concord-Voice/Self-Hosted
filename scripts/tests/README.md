@@ -12,6 +12,7 @@ several — it splits `scripts/concord-dev.sh` by area:
 - `test-concord-dev-args.sh` — argument parsing + verb dispatch
 - `test-concord-dev-console.sh` — console verb
 - `test-concord-dev-dev-code.sh` — dev-code verb
+- `test-concord-dev-billing-listen.sh` — billing-listen verb (docker stubbed)
 - `test-concord-dev-down.sh` — teardown failures, env fallback, retained Docker
   ports, and safe same-repository listener recovery
 - `test-concord-dev-env-drift.sh` — env-file drift detection

@@ -1,0 +1,34 @@
+# squawk — PostgreSQL migration linter (https://squawkhq.com), #4175.
+# Read by the `squawk` pre-commit hook and the PR CI migration-lint job, both of
+# which run from the repo root. Rules and their rationale:
+# [internal]rules/migrations.md § Migration linting (squawk).
+
+# Prod runs PostgreSQL 16; rules that depend on server version (for example
+# ADD COLUMN ... DEFAULT being metadata-only since PG 11) key off this.
+pg_version = "16"
+
+# The runner sends each file as one simple-query Exec, which PostgreSQL wraps
+# in one implicit transaction ([internal]rules/migrations.md § Transaction shape).
+# Without this squawk asks for IF NOT EXISTS on every statement, which a
+# rolled-back file never needs, and treats indexes on tables created in the
+# same file as locking a live table.
+assume_in_transaction = true
+
+# Down migrations are rollbacks: dropping what the up created is their job, so
+# ban-drop-* would fire on every one of them.
+excluded_paths = ["*.down.sql"]
+
+# Rule exclusions are a team decision (Mark), not covered by the Sonar
+# no-tuning rule. Each entry needs a reason.
+excluded_rules = [
+  # No migration in the repo sets these, and squawk wants both in every file,
+  # including CREATE TABLE-only ones. Adopting them is a convention change.
+  "require-lock-timeout",
+  "require-statement-timeout",
+  # Column-type style preferences. They fire on brand-new tables too, where
+  # there is no lock to take; the repo uses VARCHAR(n) and INTEGER/SMALLINT on
+  # purpose (bounded fields, CHECK-constrained enums and counters).
+  "prefer-text-field",
+  "prefer-bigint-over-int",
+  "prefer-bigint-over-smallint",
+]

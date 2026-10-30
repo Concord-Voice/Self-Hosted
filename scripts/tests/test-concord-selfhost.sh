@@ -421,19 +421,25 @@ mkdir -p "$BEHAVIOR_ROOT/infrastructure/deploy" "$BEHAVIOR_STUB"
 cp "$SOURCE_TARGET" "$BEHAVIOR_ROOT/infrastructure/deploy/concord-selfhost"
 cp "$STORAGE_HELPER" "$BEHAVIOR_ROOT/infrastructure/deploy/selfhost-storage.sh"
 SELFHOST_LOCK_PARENT="$STUB/selfhost-lock-parent"
-lock_declaration='readonly DEPLOY_TRANSACTION_LOCK_PATH="/var/lib/concord/deploy-transaction.lock"'
+lock_declaration='DEPLOY_TRANSACTION_LOCK_PATH="/var/lib/concord/deploy-transaction.lock"'
+lock_parent_probe='if [[ ! -d /var/lib/concord ]]; then'
 controller_source="$(cat "$ROOT/infrastructure/deploy/concord-ctl.sh")"
-if [[ $(grep -Fxc "$lock_declaration" <<<"$controller_source") -ne 1 ]]; then
+if [[ $(grep -Fxc "$lock_declaration" <<<"$controller_source") -ne 1 \
+  || $(grep -Fxc "$lock_parent_probe" <<<"$controller_source") -ne 1 ]]; then
   fail "controller fixture must rewrite exactly one deploy lock declaration"
   exit 1
 fi
-fixture_lock_declaration="readonly DEPLOY_TRANSACTION_LOCK_PATH=\"$SELFHOST_LOCK_PARENT/deploy-transaction.lock\""
+fixture_lock_declaration="DEPLOY_TRANSACTION_LOCK_PATH=\"$SELFHOST_LOCK_PARENT/deploy-transaction.lock\""
+fixture_lock_parent_probe="if [[ ! -d $SELFHOST_LOCK_PARENT ]]; then"
 # Replacement left UNQUOTED: bash 3.2 (stock macOS /bin/bash) keeps the quotes of
 # a quoted replacement literally, so the rewrite never matched there. Safe while
 # the path holds no `&` or `\` (bash >=5.2 patsub_replacement); mktemp paths never do.
-printf '%s\n' "${controller_source/"$lock_declaration"/$fixture_lock_declaration}" \
+controller_source="${controller_source/"$lock_declaration"/$fixture_lock_declaration}"
+printf '%s\n' "${controller_source/"$lock_parent_probe"/$fixture_lock_parent_probe}" \
   >"$BEHAVIOR_ROOT/infrastructure/deploy/concord-ctl.sh"
 if [[ $(grep -Fxc "$fixture_lock_declaration" \
+  "$BEHAVIOR_ROOT/infrastructure/deploy/concord-ctl.sh") -ne 1 \
+  || $(grep -Fxc "$fixture_lock_parent_probe" \
   "$BEHAVIOR_ROOT/infrastructure/deploy/concord-ctl.sh") -ne 1 ]]; then
   fail "controller fixture must use the isolated deploy lock path"
   exit 1
@@ -458,6 +464,73 @@ cat >"$BEHAVIOR_ROOT/infrastructure/deploy/selfhost-tls.sh" <<'TLS_FIXTURE'
 selfhost_tls_admit() { return 0; }
 selfhost_tls_ready() { return 0; }
 TLS_FIXTURE
+# The voice-enforcement rollout (#2272) proves media retirement and protocol-4
+# transport through voice-boot-containment.py, which holds kernel descriptors
+# and keeps private state under an owner-controlled ancestry this /tmp fixture
+# cannot provide. As with TLS above, this older caller suite gets a
+# fixture-local helper; test-voice-boot-containment.py and
+# test-voice-enforcement-rollout.sh exercise the real one. The model keeps the
+# one ordering invariant callers depend on: a media slot may be mutated only
+# after its running boot was retired and its stopped association published.
+cat >"$BEHAVIOR_ROOT/infrastructure/deploy/voice-boot-containment.py" <<'VOICE_FIXTURE'
+import json, os, sys
+state = os.environ["SELFHOST_VOICE_STATE"]
+op, args = sys.argv[1], sys.argv[2:]
+with open(os.environ["SELFHOST_DOCKER_LOG"], "a") as log:
+    log.write("voice-boot-containment " + " ".join(sys.argv[1:]) + "\n")
+def opt(name):
+    return args[args.index(name) + 1] if name in args else None
+record = os.path.join(state, "association." + str(opt("--slot")) + ".json")
+BOOT = "00000000-0000-4000-8000-00000000000a"
+if op == "inventory":
+    rendered = json.load(sys.stdin)
+    slots = sorted(set(rendered["services"]) & {"media-plane", "media-plane-blue", "media-plane-green"})
+    # The stubbed render carries only control-plane; the real base file renders media-plane.
+    print("\n".join([rendered["name"]] + (slots or ["media-plane"])))
+elif op == "status":
+    value = json.load(sys.stdin)
+    if value.get("protocol") != 4 or value.get("familyActivation") not in ("prepared", "active"):
+        sys.exit(1)
+    if "--drained" in args and any(value.get(k) for k in ("registryRows", "dmParentRows", "credentialParentRows", "dmReconciliationRows")):
+        sys.exit(1)
+    print(value[opt("--field")] if opt("--field") else json.dumps(value))
+elif op in ("association-state", "association-match"):
+    pass
+elif op == "association-invalidate":
+    if os.path.exists(record): os.unlink(record)
+elif op == "association-read":
+    if not os.path.exists(record): sys.exit(1)
+    print(open(record).read())
+elif op == "association-consume":
+    if not os.path.exists(record) or json.loads(sys.stdin.read()) != json.load(open(record)): sys.exit(1)
+    os.unlink(record)
+elif op == "hold-container":
+    print(BOOT, flush=True)
+    for line in sys.stdin:
+        if line == "verify-stopped\n":
+            print("\n".join(["--node-boot-id", BOOT] + ["fixture"] * 10), flush=True)
+        elif line == "publish-stopped\n":
+            value = {"schema": "concord.stopped-media-association", "nodeBootId": BOOT,
+                     "slot": opt("--slot"), "containerId": opt("--container-id")}
+            json.dump(value, open(record, "w"))
+            print(json.dumps(value, separators=(",", ":")), flush=True)
+        elif line == "release\n":
+            sys.exit(0 if os.path.exists(record) else 1)
+        else:
+            sys.exit(1)
+    sys.exit(1)
+elif op == "retirement-preflight":
+    print("protocol4-self-fence")
+elif op == "probe-container":
+    print(BOOT)
+    print("sha256:" + "d" * 64)
+elif op == "image-artifact":
+    print("e" * 64)
+elif op == "receipt":
+    print(json.dumps({"schema": "concord.login-family-activation", "protocol": 4}))
+else:
+    sys.exit(1)
+VOICE_FIXTURE
 
 cat >"$BEHAVIOR_ROOT/docker-compose.byo-s3.yml" <<'YAML'
 services:
@@ -604,6 +677,28 @@ if [[ "${1:-}" == version ]]; then
   [[ "${STUB_VERSION_FAIL:-}" != 1 ]] || exit 1  # daemon unreachable: no output, non-zero
   printf '%s%s' "${STUB_ENGINE_VERSION-29.8.2}" "${STUB_ENGINE_END-$'\n'}"
   exit "${STUB_ENGINE_EXIT:-0}"
+fi
+# Voice-rollout slot lookup: one exact project+service filter pair. Media
+# exists once the legacy fixture says so or a compose up has created it.
+if [[ "${1:-}" == ps && " $* " == *' --format {{.ID}} '* \
+  && "$*" == *'--filter label=com.docker.compose.project='*' --filter label=com.docker.compose.service='* ]]; then
+  case "${*: -3:1}" in
+    label=com.docker.compose.service=control-plane) printf '%s\n' "$(printf 'c%.0s' {1..64})" ;;
+    label=com.docker.compose.service=media-plane)
+      if [[ "${STUB_MEDIA_PRESENT:-}" == 1 || " ${STUB_COMPOSE_RUNNING:-} " == *' media-plane '* \
+        || -e "$SELFHOST_VOICE_STATE/media-created" ]]; then
+        printf '%s\n' aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      fi ;;
+  esac
+  exit 0
+fi
+if [[ "${1:-}" == inspect && "$*" == *'--format {{.Image}} '* ]]; then
+  printf 'sha256:%s\n' "$(printf 'd%.0s' {1..64})"
+  exit 0
+fi
+if [[ "${1:-}" == inspect && "$*" == *'--type container --format {{.State.Status}} '* ]]; then
+  printf '%s\n' running
+  exit 0
 fi
 # Media admission is a separate daemon-wide read, not an Activity History
 # control-plane observation. Do not consume that fixture's ps sequence.
@@ -807,13 +902,13 @@ fi
 if [[ "${1:-}" == image && "${2:-}" == inspect ]]; then
   exit 0
 fi
-if [[ "$*" == *"voice-enforcement-rollout status"* ]]; then
-  printf '%s\n' \
-    'voice-enforcement-rollout: inactive' \
-    'voice-enforcement-rollout: registryRows=0' \
-    'voice-enforcement-rollout: dmParentRows=0' \
-    'voice-enforcement-rollout: credentialParentRows=0' \
-    'voice-enforcement-rollout: dmReconciliationRows=0'
+if [[ "$*" == *"voice-enforcement-rollout status --json"* ]]; then
+  printf '{"protocol":4,"familyActivation":"%s","registryRows":0,"dmParentRows":0,"credentialParentRows":0,"dmReconciliationRows":0}\n' \
+    "$(cat "$SELFHOST_VOICE_STATE/activation" 2>/dev/null || echo prepared)"
+  exit 0
+fi
+if [[ "$*" == *"voice-enforcement-rollout activate --confirm-drained"* ]]; then
+  printf 'active\n' >"$SELFHOST_VOICE_STATE/activation"
   exit 0
 fi
 if [[ "${1:-}" == compose ]]; then
@@ -842,6 +937,9 @@ state["containers"][0]["running"]=True
 with open(p,"w") as out: json.dump(state,out)
 PYSTALE
         fi
+      fi
+      if [[ "${args[i]}" == up && ( " $* " == *' media-plane '* || " $* " != *' --no-deps '* ) ]]; then
+        : >"$SELFHOST_VOICE_STATE/media-created"
       fi
       exit 0 ;;
   esac
@@ -905,6 +1003,8 @@ chmod +x "$BEHAVIOR_STUB/docker" "$BEHAVIOR_STUB/curl" "$BEHAVIOR_STUB/sleep" \
 
 export SELFHOST_DOCKER_LOG="$STUB/selfhost-docker.log"
 export SELFHOST_PS_INDEX="$STUB/selfhost-ps.index"
+export SELFHOST_VOICE_STATE="$STUB/selfhost-voice-state"
+mkdir -p "$SELFHOST_VOICE_STATE"
 export PATH="$BEHAVIOR_STUB:$PATH"
 export ACTIVE_DOCKER_STUB="$BEHAVIOR_STUB/docker"
 export ACTIVITY_HISTORY_HEALTH_TIMEOUT=1 ACTIVITY_HISTORY_HEALTH_INTERVAL=0 \
@@ -956,6 +1056,7 @@ reset_selfhost_behavior() {
     STUB_INSPECT_NETIDS_FAIL STUB_PGREP_MATCH STUB_MEDIA_PRESENT STUB_MEDIA_ENV_JSON
   chmod 600 "$SELFHOST_DOCKER_DAEMON_JSON" 2>/dev/null || true
   rm -f "$SELFHOST_DOCKER_DAEMON_JSON"
+  rm -rf "$SELFHOST_VOICE_STATE" && mkdir -p "$SELFHOST_VOICE_STATE"
   export STUB_PROJECT_IDS=$'cp1\npg1'
   STUB_INSPECT_JSON="$(live_inspect '{}')"
   export STUB_INSPECT_JSON
@@ -1044,7 +1145,7 @@ run_selfhost up
 if [[ $selfhost_rc -eq 0 ]] \
   && grep -qE 'compose .* build control-plane' "$SELFHOST_DOCKER_LOG" \
   && grep -qE 'compose .* build media-plane' "$SELFHOST_DOCKER_LOG" \
-  && grep -qE 'curl .*3000/readyz' "$SELFHOST_DOCKER_LOG"; then
+  && grep -qE 'voice-boot-containment probe-container .*--slot media-plane' "$SELFHOST_DOCKER_LOG"; then
   pass "self-host up allows desired gate=false through guarded rebuild"
 else
   fail "self-host up failed to perform a safe gate=false rebuild"
@@ -1182,15 +1283,16 @@ run_selfhost_lock_case() {
 }
 
 run_selfhost_lock_case 0
-if [[ $selfhost_rc -eq 0 && ! -s "$SELFHOST_LOCK_CALL_LOG" ]] \
-  && grep -qF 'running WITHOUT the deploy transaction lock' "$selfhost_lock_stderr" \
-  && ! grep -qF 'running WITHOUT the deploy transaction lock' "$selfhost_lock_stdout" \
+if [[ $selfhost_rc -eq 0 && $(cat "$SELFHOST_LOCK_CALL_LOG") == '-w 90 9' ]] \
+  && [[ -e "$BEHAVIOR_ROOT/[internal].deploy-transaction.lock" ]] \
+  && ! grep -qF 'running WITHOUT the deploy transaction lock' "$selfhost_lock_stderr" \
   && grep -qE 'compose .* build control-plane' "$SELFHOST_DOCKER_LOG" \
   && grep -qE 'compose .* build media-plane' "$SELFHOST_DOCKER_LOG"; then
-  pass "self-host up skips lock with absent parent and reaches both builds"
+  pass "self-host up locks the configuration-directory fallback with absent parent"
 else
-  fail "self-host up skips lock with absent parent and reaches both builds (rc=$selfhost_rc)"
+  fail "self-host up locks the configuration-directory fallback with absent parent (rc=$selfhost_rc)"
 fi
+rm -f "$BEHAVIOR_ROOT/[internal].deploy-transaction.lock"
 
 mkdir "$SELFHOST_LOCK_PARENT"
 run_selfhost_lock_case 0
@@ -1707,12 +1809,21 @@ else
 fi
 
 # Scoped exit (media-plane): rebuild media-plane -> voice_enforcement_rollout_media_rebuild.
+# The handoff no longer prints a drain banner: the old boot is held by the
+# containment owner, stopped, and published as retired before media restarts.
+media_retired_before_restart() {
+  awk '/voice-boot-containment hold-container .*--slot media-plane/ { held = NR }
+    held && !stopped && /compose .* stop --timeout 45 media-plane/ { stopped = NR }
+    stopped && /compose .* up .*media-plane/ { up = NR }
+    stopped && up && /voice-boot-containment probe-container .*--slot media-plane/ { ok = 1 }
+    END { exit !ok }' "$SELFHOST_DOCKER_LOG"
+}
 write_selfhost_contract false
 reset_selfhost_behavior false 1 'cp-false\n' 'cp-false\n'
 export STUB_RENDER_EXTRA=',"media-plane":{}' STUB_COMPOSE_RUNNING=media-plane
 selfhost_output="$(env "${SCOPED_ENV[@]}" bash "$BEHAVIOR_CTL" rebuild media-plane 2>&1)"
 selfhost_rc=$?
-if [[ $selfhost_rc -eq 0 ]] && grep -q 'voice-enforcement-rollout: draining the old media-plane' <<<"$selfhost_output" \
+if [[ $selfhost_rc -eq 0 ]] && media_retired_before_restart \
   && ! grep -qE 'compose .* build control-plane' "$SELFHOST_DOCKER_LOG" \
   && ! grep -qE 'escalating|remaining services' <<<"$selfhost_output" \
   && grep -qx 'Done.' <<<"$selfhost_output"; then
@@ -1727,7 +1838,7 @@ export STUB_INSPECT_JSON STUB_RENDER_EXTRA=',"media-plane":{}' STUB_COMPOSE_RUNN
 selfhost_output="$(env "${SCOPED_ENV[@]}" bash "$BEHAVIOR_CTL" rebuild media-plane 2>&1)"
 selfhost_rc=$?
 unset STUB_RENDER_EXTRA STUB_COMPOSE_RUNNING
-if live_refused && grep -q 'voice-enforcement-rollout: draining the old media-plane' <<<"$selfhost_output" \
+if live_refused && media_retired_before_restart \
   && ! grep -qE 'compose .* build control-plane' "$SELFHOST_DOCKER_LOG" \
   && ! grep -qE 'escalating|remaining services' <<<"$selfhost_output"; then
   pass "media-plane-scoped self-host rebuild fails after the media handoff when a live container publishes postgres 5432"
@@ -2409,8 +2520,10 @@ reset_selfhost_behavior false 1 '' ''
 ACTIVITY_HISTORY_CONTRACT_MODE=selfhost COMPOSE_OVERRIDE=docker-compose.production.yml \
   COMPOSE_PROFILES=services bash "$BEHAVIOR_CTL" status >/dev/null 2>&1
 cat "$SELFHOST_DOCKER_LOG" >>"$STUB/probe-log.copy"
+# Media protocol-4 readiness is read inside the slot's own namespace by the
+# containment helper (#2272), not by a host curl of :3000/readyz.
 if grep -qE 'curl .*127\.0\.0\.1:8080/readyz' "$STUB/probe-log.copy" \
-  && grep -qE 'curl .*127\.0\.0\.1:3000/readyz' "$STUB/probe-log.copy" \
+  && grep -qE 'voice-boot-containment probe-container .*--slot media-plane' "$STUB/probe-log.copy" \
   && grep -qE 'curl .*127\.0\.0\.1:8080/health' "$STUB/probe-log.copy" \
   && grep -qE 'curl .*127\.0\.0\.1:3000/health' "$STUB/probe-log.copy" \
   && ! grep -qE 'localhost:(8080|3000)' "$STUB/probe-log.copy"; then

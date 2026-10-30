@@ -2314,33 +2314,14 @@ class AcceptanceWorkflowTests(unittest.TestCase):
         self.assertRegex(active,
                          r"(?ms)- name: [^\n]*prerequisite[^\n]*failure[^\n]*\n\s+if: failure\(\) && steps\.host-prerequisites\.outcome == 'failure'\n(?:(?!- name:).)*?--blocked-prerequisite host-packages")
         prerequisite_block = active[prerequisite_step:blocked_recorder]
-        self.assertIn("https://download.docker.com/linux/ubuntu/gpg", prerequisite_block)
-        self.assertRegex(prerequisite_block,
-                         r"(?m)^\s*curl -fsSL https://download\.docker\.com/linux/ubuntu/gpg -o \"\$RUNNER_TEMP/[A-Za-z0-9._-]+\"\s*$")
-        self.assertIn("gpg --dearmor", prerequisite_block)
-        self.assertIn("sudo install -o root -g root -m 0644", prerequisite_block)
-        self.assertIn("/usr/share/keyrings/docker.gpg", prerequisite_block)
-        self.assertIn("signed-by=/usr/share/keyrings/docker.gpg", prerequisite_block)
-        self.assertIn("dpkg --print-architecture", prerequisite_block)
-        self.assertIn("UBUNTU_CODENAME", prerequisite_block)
-        self.assertIn("VERSION_CODENAME", prerequisite_block)
+        # Package trust/startup refusal is exercised by the shared installer's
+        # process-boundary tests; this consumer must invoke it before fixtures.
+        install = 'bash "$GITHUB_WORKSPACE/scripts/ci/install-docker-engine.sh"'
+        fixture = 'bash "$GITHUB_WORKSPACE/infrastructure/deploy/tests/selfhost-nginx-fixture.sh"'
+        self.assertEqual(prerequisite_block.count(install), 1)
+        self.assertLess(prerequisite_block.index(install), prerequisite_block.index(fixture))
         self.assertNotRegex(prerequisite_block,
                             r"(?m)^\s*curl\b[^\n]*\|\s*(?:sudo\s+)?(?:bash|sh)\b")
-        docker_source_at = prerequisite_block.index("signed-by=/usr/share/keyrings/docker.gpg")
-        docker_update_at = prerequisite_block.rindex("sudo apt-get update")
-        docker_install_at = prerequisite_block.index("docker-ce docker-ce-cli containerd.io")
-        self.assertLess(docker_source_at, docker_update_at)
-        self.assertLess(docker_update_at, docker_install_at)
-        self.assertRegex(prerequisite_block,
-                         r"(?m)^\s*sudo apt-get install[^\n]*docker-ce docker-ce-cli containerd\.io(?:\s|$)")
-        restart_at = prerequisite_block.index("sudo systemctl restart docker")
-        readiness = prerequisite_block[restart_at:]
-        self.assertIn("for attempt in {1..30}; do", readiness)
-        self.assertIn("if docker info >/dev/null 2>&1; then", readiness)
-        self.assertNotIn("sudo docker info", readiness)
-        self.assertIn("sleep 2", readiness)
-        self.assertIn("Docker daemon did not become ready", readiness)
-        self.assertRegex(readiness, r"(?m)^\s*exit 1\s*$")
         for action in re.findall(r"(?m)^\s+uses:\s*(\S+)", active):
             self.assertRegex(action, r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+@[0-9a-f]{40}$")
         self.assertNotRegex(active, r"(?m)^\s+(?:path|paths):\s*[^\n]*(?:\*|\.github/paths-filter)")

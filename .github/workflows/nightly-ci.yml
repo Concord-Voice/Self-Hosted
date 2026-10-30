@@ -39,7 +39,7 @@
 # path, and merging it inserted a manual gate into a topology whose whole
 # point was to cut without one. It also halved the cadence, because `release`
 # and `bump` are mutually exclusive: the proposal could not be released until
-# the NEXT night. Do not re-propose it. An `## [Unreleased]` section growing
+# the NEXT night. Do not re-propose it. An `## [Prerelease]` section growing
 # with no bump beneath it means nobody has decided to cut yet, which is a
 # valid state.
 #

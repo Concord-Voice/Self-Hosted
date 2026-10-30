@@ -1,4 +1,4 @@
-"""Local proof and REST contract tests; no GitHub credentials or network."""
+"""Local proof and REST contract tests; no GitHub credentials or network access."""
 
 import base64
 from contextlib import redirect_stderr
@@ -111,6 +111,49 @@ class CallerTests(unittest.TestCase):
                 patch.object(CALLER, "urlopen", return_value=Response(200, {"value": "header.payload.signature"})):
             CALLER.emit_proof(args)
         self.assertEqual(CALLER.read_proof(args.out)["jobs"], self.jobs)
+
+    def test_emit_accepts_hosted_runner_regional_oidc_hosts(self):
+        for host in ("pipelinesghubeus22.actions.githubusercontent.com",
+                     "run-actions-3-azure-eastus.actions.githubusercontent.com"):
+            with self.subTest(host=host):
+                args = self.emit()
+                with patch.dict(CALLER.os.environ, {
+                        "ACTIONS_ID_TOKEN_REQUEST_URL": f"https://{host}/abc/idtoken/1/2?api-version=2.0",
+                        "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "private-request-bearer"}, clear=True), \
+                        patch.object(CALLER, "urlopen",
+                                     return_value=Response(200, {"value": "header.payload.signature"})):
+                    CALLER.emit_proof(args)
+                self.assertEqual(CALLER.read_proof(args.out)["jobs"], self.jobs)
+                args.out.unlink()
+
+    def test_emit_rejects_oidc_url_outside_github_actions_domain(self):
+        for url in ("https://actions.githubusercontent.com.attacker.example/token",
+                    "https://evilactions.githubusercontent.com/token",
+                    "https://actions.githubusercontent.com/token",
+                    "http://pipelinesghubeus22.actions.githubusercontent.com/token",
+                    "https://user@pipelinesghubeus22.actions.githubusercontent.com/token"):
+            with self.subTest(url=url):
+                args = self.emit()
+                with patch.dict(CALLER.os.environ, {
+                        "ACTIONS_ID_TOKEN_REQUEST_URL": url,
+                        "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "private-request-bearer"}, clear=True), \
+                        patch.object(CALLER, "urlopen", side_effect=AssertionError("must not send bearer")):
+                    with self.assertRaisesRegex(CALLER.Invalid, "OIDC request environment unavailable"):
+                        CALLER.emit_proof(args)
+                self.assertFalse(args.out.exists())
+
+    def test_cli_prints_fixed_invalid_reason_only(self):
+        args = self.emit()
+        output = StringIO()
+        with patch.dict(CALLER.os.environ, {}, clear=True), \
+                patch("sys.argv", [str(SOURCE), "emit-proof", "--ids-json", str(args.ids_json),
+                                   "--selection-json", str(args.selection_json),
+                                   "--jobs-json", str(args.jobs_json),
+                                   "--coverage-json", str(args.coverage_json),
+                                   "--out", str(args.out)]), redirect_stderr(output):
+            self.assertEqual(CALLER.main(), 1)
+        self.assertEqual(output.getvalue().strip(),
+                         "protected Sonar caller failed: OIDC request environment unavailable")
 
     def test_emit_rejects_duplicate_or_oversized_input(self):
         args = self.emit()

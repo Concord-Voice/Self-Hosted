@@ -29,15 +29,15 @@ make_repo() {
   cat > "$dir/CHANGELOG.md" <<'EOF'
 # Changelog
 
-## [Unreleased]
+## [Prerelease]
 
-## [0.2.20] — 2026-06-30
+## [0.2.20] - 2026-06-30
 
 ### Fixed
 
 - Base entry.
 
-## [0.2.0-Beta] — 2026-06-20
+## [0.2.0-Beta] - 2026-06-20
 
 ### Added
 
@@ -94,17 +94,17 @@ set_version() { # <dir> <version>
 }
 
 add_entry() { # <dir> <label>
-  # Insert a version section directly BELOW the '## [Unreleased]' heading —
+  # Insert a version section directly BELOW the '## [Prerelease]' heading —
   # where promote-unreleased-changelog.sh puts it. This used to prepend at
-  # NR==2, which was equivalent while the fixture had no [Unreleased]; once it
+  # NR==2, which was equivalent while the fixture had no [Prerelease]; once it
   # does, NR==2 would stack version sections ABOVE it and invert the file's
   # real shape, so the promotion-shape rule (#2996) would be tested against a
   # layout that never occurs.
   local dir="$1" label="$2"
   awk -v label="$label" '
-    /^## \[Unreleased\]/ {
+    /^## \[Prerelease\]/ {
       print; print "";
-      print "## [" label "] — 2026-07-02"; print "";
+      print "## [" label "] - 2026-07-02"; print "";
       print "### Added"; print ""; print "- New entry.";
       next
     }
@@ -113,21 +113,21 @@ add_entry() { # <dir> <label>
 }
 
 seed_unreleased() { # <dir> <bullet text>
-  # Put a bullet under '## [Unreleased]'. Rule 3's "base [Unreleased] was
+  # Put a bullet under '## [Prerelease]'. Rule 3's "base [Prerelease] was
   # non-empty" precondition needs a fixture that HAS something to promote.
   awk -v line="- $2" '
-    /^## \[Unreleased\]/ { print; print ""; print line; next }
+    /^## \[Prerelease\]/ { print; print ""; print line; next }
     { print }
   ' "$1/CHANGELOG.md" > "$1/CHANGELOG.md.tmp" && mv "$1/CHANGELOG.md.tmp" "$1/CHANGELOG.md"
 }
 
 append_unreleased_bullet() { # <dir> <bullet text>
-  # Append to the END of the '## [Unreleased]' body, which is where a SECOND
+  # Append to the END of the '## [Prerelease]' body, which is where a SECOND
   # PR's note lands. seed_unreleased inserts directly under the heading; on a
   # promotable fixture that displaces the preamble into the body and the
   # promoter then rejects it, so the two helpers are not interchangeable.
   awk -v line="- $2" '
-    /^## \[Unreleased\]/ { inu = 1; print; next }
+    /^## \[Prerelease\]/ { inu = 1; print; next }
     inu && /^## \[/       { print line; print ""; inu = 0; print; next }
     { print }
   ' "$1/CHANGELOG.md" > "$1/CHANGELOG.md.tmp" && mv "$1/CHANGELOG.md.tmp" "$1/CHANGELOG.md"
@@ -143,7 +143,7 @@ seed_unreleased_promotable() { # <dir> <preamble> <bullet text>
   # no `### ` heading is ALL detail and therefore has no preamble at all. Case 36
   # is the only case that runs the real promoter, so only it needs this shape.
   awk -v pre="$2" -v line="- $3" '
-    /^## \[Unreleased\]/ {
+    /^## \[Prerelease\]/ {
       print; print ""; print pre; print ""; print "### Added"; print ""; print line; next
     }
     { print }
@@ -151,10 +151,10 @@ seed_unreleased_promotable() { # <dir> <preamble> <bullet text>
 }
 
 clear_unreleased() { # <dir>
-  # Delete everything between '## [Unreleased]' and the next '## [', keeping
+  # Delete everything between '## [Prerelease]' and the next '## [', keeping
   # the heading. This is exactly what promotion does to the section.
   awk '
-    /^## \[Unreleased\]/ { print; inu = 1; next }
+    /^## \[Prerelease\]/ { print; inu = 1; next }
     inu && /^## \[/      { inu = 0 }
     inu                  { next }
     { print }
@@ -199,7 +199,7 @@ echo "extra" >> "$r/CHANGELOG.md" && commit_all "$r"
 run_case "no-bump passes" 0 "$r"
 
 # ── Case 2: bump WITH matching entry → PASS ───────────────────────────────────
-# Promotion-shaped since #2996: base [Unreleased] carries something, HEAD's is
+# Promotion-shaped since #2996: base [Prerelease] carries something, HEAD's is
 # emptied, and the heading matches package.json. Rule 3 requires all three, so
 # this case now models a real promotion rather than a bare hand-written section.
 r=$(make_repo 0.2.20)
@@ -251,26 +251,26 @@ for i in $(seq 1 3000); do echo "- filler line $i for pipe-buffer overflow" >> "
 commit_all "$r"
 run_case "large changelog does not false-fail (SIGPIPE)" 0 "$r"
 
-# ── Case 9: version heading with an EMPTY base [Unreleased] → FAIL (#2996) ────
+# ── Case 9: version heading with an EMPTY base [Prerelease] → FAIL (#2996) ────
 # This is desktop-v0.2.41's shape exactly: a feature PR bumps the version and
-# hand-writes a section describing only itself, leaving [Unreleased] empty so
+# hand-writes a section describing only itself, leaving [Prerelease] empty so
 # the promoter exits 3 with nothing to promote.
 r=$(make_repo 0.2.20)
 set_version "$r" 0.2.21 && add_entry "$r" 0.2.21 && commit_all "$r"
-run_case "version heading with empty base Unreleased fails" 1 "$r"
+run_case "version heading with empty base Prerelease fails" 1 "$r"
 
-# ── Case 10: promoting without emptying [Unreleased] → FAIL (#2996) ───────────
+# ── Case 10: promoting without emptying [Prerelease] → FAIL (#2996) ───────────
 # The second seed_unreleased is load-bearing and must come AFTER add_entry.
-# add_entry inserts its section immediately below the '## [Unreleased]' heading,
+# add_entry inserts its section immediately below the '## [Prerelease]' heading,
 # which pushes any already-seeded bullet down INTO the new section — leaving
-# [Unreleased] empty at HEAD and quietly satisfying the very condition this case
+# [Prerelease] empty at HEAD and quietly satisfying the very condition this case
 # exists to violate. Seeding again afterwards puts a bullet back above the new
 # heading, which is the state under test.
 r=$(make_repo 0.2.20)
 seed_unreleased "$r" "A human wrote this." && commit_all "$r"
 set_version "$r" 0.2.21 && add_entry "$r" 0.2.21 && seed_unreleased "$r" "Still unreleased." \
   && commit_all "$r"
-run_case "version heading without emptying Unreleased fails" 1 "$r"
+run_case "version heading without emptying Prerelease fails" 1 "$r"
 
 # ── Case 11: heading version not matching package.json → FAIL (#2996) ─────────
 r=$(make_repo 0.2.20)
@@ -300,17 +300,17 @@ seed_unreleased "$r" "A human wrote this." && commit_all "$r"
 clear_unreleased "$r" && add_entry "$r" 0.9.9 && commit_all "$r"
 run_case "version heading without a version bump fails" 1 "$r"
 
-# ── Case 14: include-set change with no [Unreleased] entry → FAIL (#2996) ─────
+# ── Case 14: include-set change with no [Prerelease] entry → FAIL (#2996) ─────
 # Rule 4. The complement of Rule 3: Rule 3 stops notes being written in the
 # wrong PLACE, Rule 4 stops them not being written at all. Without it a change
 # a user can observe merges silently and the promoter has nothing to promote,
 # which is the other half of how 0.2.41 shipped 98 commits behind one bullet.
 r=$(make_repo 0.2.20); touch_include "$r" change; commit_all "$r"
-run_case "include-set change without an Unreleased entry fails" 1 "$r"
+run_case "include-set change without an Prerelease entry fails" 1 "$r"
 
 # ── Case 15: the same change with an entry → PASS ────────────────────────────
 r=$(make_repo 0.2.20); touch_include "$r" change; seed_unreleased "$r" "Described it."; commit_all "$r"
-run_case "include-set change with an Unreleased entry passes" 0 "$r"
+run_case "include-set change with an Prerelease entry passes" 0 "$r"
 
 # ── Case 16: test-only paths are exempt → PASS ───────────────────────────────
 r=$(make_repo 0.2.20); touch_test "$r" change; commit_all "$r"
@@ -338,16 +338,16 @@ run_case "Changelog-Exempt trailer with no reason fails" 1 "$r"
 r=$(make_repo 0.2.20); echo "note" >> "$r/README.md"; commit_all "$r"
 run_case "non-include-set change is unaffected" 0 "$r"
 
-# ── Case 21: non-empty base [Unreleased], no new entry → FAIL (#2996) ────────
+# ── Case 21: non-empty base [Prerelease], no new entry → FAIL (#2996) ────────
 # THE PRODUCTION SHAPE, and the only case that exercises the `== BASE` half of
 # Rule 4. Once main carries release notes for the next version — which it does
-# from this PR onward — [Unreleased] is never empty at a PR's merge base, so the
+# from this PR onward — [Prerelease] is never empty at a PR's merge base, so the
 # `-z` half stops firing entirely and this clause does all the work. Found by
 # falsification: replacing the condition with the `-z` test alone broke nothing.
 r=$(make_repo 0.2.20)
 seed_unreleased "$r" "Notes for the next release." && commit_all "$r"
 touch_include "$r" change && commit_all "$r"
-run_case "include-set change on a populated Unreleased base fails" 1 "$r"
+run_case "include-set change on a populated Prerelease base fails" 1 "$r"
 
 # ── Case 22: non-test file inside a test directory → PASS ───────────────────
 r=$(make_repo 0.2.20); touch_testdir "$r" change; commit_all "$r"
@@ -373,10 +373,10 @@ run_case "Changelog-Exempt on an earlier commit still passes" 0 "$r" 2
 # include regex survived all 23 prior cases: no fixture put a NON-EXEMPT file
 # under either. Silent non-enforcement on the Go backend is the 0.2.41 shape.
 r=$(make_repo 0.2.20); touch_backend "$r" change; commit_all "$r"
-run_case "control-plane change without an Unreleased entry fails" 1 "$r"
+run_case "control-plane change without an Prerelease entry fails" 1 "$r"
 
 r=$(make_repo 0.2.20); touch_media "$r" change; commit_all "$r"
-run_case "media-plane change without an Unreleased entry fails" 1 "$r"
+run_case "media-plane change without an Prerelease entry fails" 1 "$r"
 
 # ── Cases 26-28: the exemptions, each pinned individually ───────────────────
 # The prior mutation pass deleted whole filters; no single ALTERNATIVE inside
@@ -411,7 +411,7 @@ r=$(make_repo 0.2.20)
 seed_unreleased "$r" "Note two." && seed_unreleased "$r" "Note one." && commit_all "$r"
 touch_include "$r" change && clear_unreleased "$r" && seed_unreleased "$r" "Note one."
 commit_all "$r"
-run_case "deleting an Unreleased bullet does not satisfy Rule 4" 1 "$r"
+run_case "deleting an Prerelease bullet does not satisfy Rule 4" 1 "$r"
 
 # ── Case 32: a blank line is not an entry either ────────────────────────────
 r=$(make_repo 0.2.20)
@@ -431,11 +431,11 @@ run_case "a second added heading is not smuggled past Rule 3" 1 "$r"
 # ── Case 34: correcting a PUBLISHED heading is not a promotion ──────────────
 # A unified diff marks a modified line `+`, so a date typo fix looked exactly
 # like adding a section — and since main now always carries a populated
-# [Unreleased], it landed in the "still populated at HEAD" branch every time,
-# with a message telling the author to move it under [Unreleased].
+# [Prerelease], it landed in the "still populated at HEAD" branch every time,
+# with a message telling the author to move it under [Prerelease].
 r=$(make_repo 0.2.20)
 seed_unreleased "$r" "Notes for next." && commit_all "$r"
-sed 's/## \[0\.2\.20\] — 2026-06-30/## [0.2.20] — 2026-06-29/' "$r/CHANGELOG.md" > "$r/c.tmp" \
+sed 's/## \[0\.2\.20\] - 2026-06-30/## [0.2.20] - 2026-06-29/' "$r/CHANGELOG.md" > "$r/c.tmp" \
   && mv "$r/c.tmp" "$r/CHANGELOG.md"
 commit_all "$r"
 run_case "editing an already-published heading passes" 0 "$r"
@@ -502,13 +502,13 @@ git -C "$r" config user.name test
 mkdir -p "$r/client/desktop"
 printf '{\n  "name": "concord",\n  "version": "0.2.20"\n}\n' > "$r/client/desktop/package.json"
 git -C "$r" add -A && git -C "$r" commit -qm "base without a changelog"
-printf '# Changelog\n\n## [Unreleased]\n\n## [0.2.20] — 2026-06-30\n\n- New file.\n' > "$r/CHANGELOG.md"
+printf '# Changelog\n\n## [Prerelease]\n\n## [0.2.20] - 2026-06-30\n\n- New file.\n' > "$r/CHANGELOG.md"
 commit_all "$r"
 run_case "a PR that creates CHANGELOG.md exits 1, not 128" 1 "$r"
 
 # ── Cases 40-41: one PR may carry a source change AND its own promotion ───
 # Rules 3 and 4 used to be mutually exclusive for a source-touching PR: Rule 3
-# requires a promotion to EMPTY [Unreleased], Rule 4 required a source change to
+# requires a promotion to EMPTY [Prerelease], Rule 4 required a source change to
 # ADD to it. A PR doing both satisfied neither, so the bump could only ever live
 # in a source-free PR of its own — which is the shape the nightly `bump` job
 # existed to produce, and why it was the only way to cut a release.

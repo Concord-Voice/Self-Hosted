@@ -44,13 +44,15 @@ SEMVER_SRC=""
 for cand in \
   "$SCRIPT_DIR/../../client/desktop/node_modules/semver" \
   "$SCRIPT_DIR/../../client/admin/node_modules/semver" \
-  "$SCRIPT_DIR/../../services/media-plane/node_modules/semver"; do
+  "$SCRIPT_DIR/../../services/media-plane/node_modules/semver" \
+  "$SCRIPT_DIR/../../[internal]workers/apple-sso-bridge/node_modules/semver" \
+  "$SCRIPT_DIR/../../[internal]workers/invite-landing/node_modules/semver"; do
   [ -d "$cand" ] && { SEMVER_SRC="$(cd "$cand" && pwd)"; break; }
 done
 if [ -z "$SEMVER_SRC" ]; then
-  echo "SKIP: no installed semver found in any workspace — cannot run override-range-lint tests"
-  echo "      (run 'npm install' in client/desktop, then re-run)"
-  exit 0
+  echo "ERROR: no installed semver found in any workspace — cannot run override-range-lint tests"
+  echo "       (run 'npm ci --ignore-scripts' in a listed workspace, then re-run)"
+  exit 1
 fi
 
 # mkfixture <name> <package.json body> <package-lock.json body>
@@ -721,6 +723,87 @@ D=$(mkfixture mixednested \
 out=$(node "$LINT" --dir "$D" --update-baseline 2>&1); got=$?
 assert "baselines the still-required nested containment" "$got" 0 "$out" "wrote 1 accepted"
 run_stale_strict "does not expire containment while one optional parent still needs it" "$D" 0 "1 baselined"
+
+# Exercise the actual four production commands, not a copied floor list. The
+# small extractor deliberately accepts only their current inline YAML format;
+# refactoring a command must update this coverage instead of silently skipping it.
+if node --input-type=module - "$SCRIPT_DIR/../.." > "$WORK/configured-commands.tsv" 2> "$WORK/configured-commands.err" <<'NODE'; then
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+const root = process.argv[2];
+const sources = [
+  ['.pre-commit-config.yaml', /^\s+- id: ([\w-]+)\s*$/, /^\s+entry: (.+)$/, [
+    'override-range-lint-desktop', 'override-range-lint-admin',
+  ]],
+  ['.github/workflows/build.yml', /^  ([\w-]+):\s*$/, /^\s+(?:- )?run: (.+)$/, [
+    'desktop', 'admin',
+  ]],
+];
+const rows = [];
+for (const [file, sectionPattern, commandPattern, sections] of sources) {
+  const commands = new Map(sections.map(section => [section, []]));
+  let section;
+  for (const line of readFileSync(resolve(root, file), 'utf8').split('\n')) {
+    const heading = line.match(sectionPattern);
+    if (heading) section = heading[1];
+    const command = line.match(commandPattern)?.[1];
+    if (commands.has(section) && command &&
+        (file === '.pre-commit-config.yaml' || command.includes('override-range-lint.mjs'))) {
+      commands.get(section).push(command);
+    }
+  }
+  for (const [section, entries] of commands) {
+    const label = `${file}:${section}`;
+    if (entries.length !== 1) throw new Error(`${label}: expected one lint command, found ${entries.length}`);
+    const tokens = entries[0].trim().split(/\s+/);
+    if (tokens.shift() !== 'node' || !/^(?:\.\.\/)*scripts\/security\/override-range-lint\.mjs$/.test(tokens.shift())) {
+      throw new Error(`${label}: unparseable lint command`);
+    }
+    const args = [];
+    let dirs = 0;
+    for (let i = 0; i < tokens.length; i++) {
+      const token = tokens[i];
+      if (token === '--dir' && /^[\w./-]+$/.test(tokens[i + 1] ?? '')) {
+        dirs++;
+        i++; // Only redirect the production workspace to the fixture.
+      } else if (token === '--minimum-version' && /^undici=\d+\.\d+\.\d+$/.test(tokens[i + 1] ?? '')) {
+        args.push(token, tokens[++i]);
+      } else if (token === '--fail-on-stale' || token === '--verify-installed-versions') {
+        args.push(token);
+      } else {
+        throw new Error(`${label}: unsupported argument ${token}`);
+      }
+    }
+    if (dirs !== 1) throw new Error(`${label}: expected exactly one --dir`);
+    rows.push(`${label}\t${args.join(' ')}`);
+  }
+}
+if (rows.length !== 4) throw new Error(`expected four configured commands, found ${rows.length}`);
+console.log(rows.join('\n'));
+NODE
+  assert "extracts both pre-commit and both build floor commands" 0 0 ""
+  while IFS=$'\t' read -r configured_name configured_args; do
+    # read splits the validated argument tokens without evaluating shell text.
+    read -r -a configured_flags <<< "$configured_args"
+    for boundary in 6.29.0:1 6.29.1:0 7.29.1:1 7.30.1:0 8.12.1:1 8.12.2:0; do
+      version="${boundary%:*}"
+      want="${boundary#*:}"
+      D=$(mkfixture "configured-$version-$pass-$fail" \
+        "{\"name\":\"floor-fixture\",\"version\":\"1.0.0\",\"dependencies\":{\"undici\":\"$version\"}}" \
+        "{\"lockfileVersion\":3,\"packages\":{\"\":{\"name\":\"floor-fixture\",\"version\":\"1.0.0\",\"dependencies\":{\"undici\":\"$version\"}},\"node_modules/undici\":{\"name\":\"undici\",\"version\":\"$version\"}}}")
+      mkdir -p "$D/node_modules/undici"
+      printf '{"name":"undici","version":"%s"}\n' "$version" > "$D/node_modules/undici/package.json"
+      pattern="no new consumer forced"
+      if [ "$want" -eq 1 ]; then
+        pattern="BELOW MINIMUM  undici@${version//./\\.} .*below minimum"
+      fi
+      run_minimum_specs "$configured_name checks undici@$version" "$D" "$want" "$pattern" "${configured_flags[@]}"
+    done
+  done < "$WORK/configured-commands.tsv"
+else
+  assert "extracts both pre-commit and both build floor commands" 1 0 "$(cat "$WORK/configured-commands.err")"
+fi
 
 echo
 echo "override-range-lint tests: $pass passed, $fail failed"

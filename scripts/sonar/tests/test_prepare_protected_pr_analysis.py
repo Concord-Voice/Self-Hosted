@@ -106,7 +106,7 @@ class PrepareTest(unittest.TestCase):
         self.verified = {"payload": self.payload,
                          "claims": {"repository": MODULE.REPO, "repository_id": "1158152129",
                                     "event_name": "pull_request", "run_id": "42", "run_attempt": "2",
-                                    "workflow_ref": MODULE.REPO + "/.github/workflows/required-pr-build.yml@refs/heads/main",
+                                    "workflow_ref": MODULE.REPO + "/.github/workflows/required-pr-build.yml@main",
                                     "workflow_sha": self.base}}
         self.run_data = {"id": 42, "run_attempt": 2, "event": "pull_request", "head_sha": self.head,
                          "status": "in_progress", "conclusion": None,
@@ -205,8 +205,56 @@ class PrepareTest(unittest.TestCase):
                 self.run_data["path"] = value
                 MODULE.validate_evidence(self.candidate, self.verified, self.run_data, self.pr_data, jobs)
         self.run_data["path"] = f"{path}@feature/untrusted"
-        with self.assertRaisesRegex(MODULE.Reject, "caller run identity"):
+        with self.assertRaisesRegex(MODULE.Reject, "caller run identity or state invalid: path$"):
             MODULE.validate_evidence(self.candidate, self.verified, self.run_data, self.pr_data, jobs)
+
+    def test_caller_run_rejection_names_every_failed_field(self):
+        jobs = {"total_count": len(self.jobs_data), "jobs": self.jobs_data}
+        self.run_data.update(status="completed", conclusion="success", pull_requests=[])
+        with self.assertRaisesRegex(MODULE.Reject, "invalid: status,conclusion,pull_requests$"):
+            MODULE.validate_evidence(self.candidate, self.verified, self.run_data, self.pr_data, jobs)
+        with self.assertRaisesRegex(MODULE.Reject, "invalid: run$"):
+            MODULE.validate_evidence(self.candidate, self.verified, [], self.pr_data, jobs)
+
+    def test_api_requests_the_version_that_returns_merge_commit_sha(self):
+        calls = []
+
+        class Response(io.BytesIO):
+            def __init__(self, url):
+                super().__init__(b'{"merge_commit_sha": "' + b"a" * 40 + b'"}')
+                self.url = url
+
+            def __exit__(self, *exc):
+                self.close()
+
+        def open_mock(request, timeout):
+            calls.append(request)
+            return Response(request.full_url)
+
+        with patch.object(MODULE, "OPEN", open_mock):
+            pr = MODULE.GitHub("token").request("/pulls/7")
+        self.assertEqual(pr["merge_commit_sha"], "a" * 40)
+        self.assertEqual(calls[0].get_header("X-github-api-version"), "2022-11-28")
+
+    def test_caller_run_accepts_every_live_status(self):
+        # A downstream job waiting on the canary can report the live run as queued.
+        jobs = {"total_count": len(self.jobs_data), "jobs": self.jobs_data}
+        for status in MODULE.LIVE_RUN_STATUSES:
+            with self.subTest(status=status):
+                self.run_data["status"] = status
+                MODULE.validate_evidence(self.candidate, self.verified, self.run_data, self.pr_data, jobs)
+        self.run_data["status"] = "unknown"
+        with self.assertRaisesRegex(MODULE.Reject, "invalid: status$"):
+            MODULE.validate_evidence(self.candidate, self.verified, self.run_data, self.pr_data, jobs)
+
+    def test_signed_workflow_ref_accepts_only_ruleset_main_form(self):
+        jobs = {"total_count": len(self.jobs_data), "jobs": self.jobs_data}
+        ref = f"{MODULE.REPO}/.github/workflows/required-pr-build.yml"
+        for value in (f"{ref}@refs/heads/main", f"{ref}@refs/pull/7/merge", f"{ref}@feature/untrusted"):
+            with self.subTest(workflow_ref=value):
+                self.verified["claims"]["workflow_ref"] = value
+                with self.assertRaisesRegex(MODULE.Reject, "verified claims inconsistent"):
+                    MODULE.validate_evidence(self.candidate, self.verified, self.run_data, self.pr_data, jobs)
 
     def test_selected_report_must_be_present_and_well_formed(self):
         self.metadata.pop(4)

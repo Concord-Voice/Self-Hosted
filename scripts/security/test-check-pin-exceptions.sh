@@ -302,6 +302,7 @@ updates:
     directories:
       - "/"
       - "/client/admin"
+      - "/client/mobile"
       - "/services/media-plane"
       - "/.github/tools/license-checker"'
 D=$(mkroot_raw driftlist "$EMPTY_REG" "$DRIFT_LIST")
@@ -347,6 +348,7 @@ updates:
     directories: [
       "/",
       "/client/admin",
+      "/client/mobile",
       "/services/media-plane",
       "/.github/tools/license-checker"
     ]'
@@ -377,6 +379,7 @@ updates:
     'directories':
       - '/'
       - '/client/admin'
+      - '/client/mobile'
       - '/services/media-plane'
       - '/.github/tools/license-checker'"
 D=$(mkroot_raw driftquoted "$EMPTY_REG" "$DRIFT_QUOTED")

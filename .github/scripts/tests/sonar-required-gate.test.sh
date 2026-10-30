@@ -635,7 +635,7 @@ with tempfile.TemporaryDirectory() as temporary:
     publish_case({"count": 1, "warnings": ["untrusted text"]}, [attacker, bot], None)
     publish_case({"count": 1, "warnings": [warning + "x" * 1000]}, [attacker, bot], None)
 result = jobs["result"]
-assert result["needs"] == ["pr-ci", "osv", "publish-install-script-warnings"]
+assert result["needs"] == ["pr-ci", "osv", "publish-install-script-warnings", "migration-lint"]
 assert result["if"] == "${{ always() }}"
 assert result["permissions"] == {
     "actions": "read", "checks": "read", "contents": "read",
@@ -696,6 +696,27 @@ with tempfile.TemporaryDirectory() as tmp:
     fixture_git(origin, "switch", "-q", "main")
     protected = tmp / "protected"
     subprocess.run(["git", "clone", "-q", str(origin), str(protected)], env=git_env, check=True)
+    # The merge ref supplies its head object even when GitHub has no separate head ref.
+    tree = fixture_git(origin, "rev-parse", "HEAD^{tree}")
+    pr_head = fixture_git(origin, "commit-tree", tree, "-p", reviewed, "-m", "PR head")
+    pr_merge = fixture_git(origin, "commit-tree", tree, "-p", reviewed, "-p", pr_head, "-m", "PR merge")
+    fixture_git(origin, "update-ref", "refs/pull/123/merge", pr_merge)
+    assert subprocess.run(["git", "-C", str(origin), "show-ref", "--verify", "refs/pull/123/head"],
+                          env=git_env, capture_output=True).returncode != 0
+    assert subprocess.run(["git", "-C", str(protected), "cat-file", "-e", pr_head],
+                          env=git_env, capture_output=True).returncode != 0
+    fetch_env = {**git_env, "WORKFLOW_REPOSITORY": "Concord-Voice/Concord-Voice-Alpha",
+                 "WORKFLOW_SHA": reviewed, "BASE_SHA": reviewed, "HEAD_SHA": pr_head, "PR_NUMBER": "123"}
+    fetched = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", fetch["run"]], cwd=tmp,
+                             env=fetch_env, capture_output=True, text=True)
+    assert fetched.returncode == 0, ("merge-only PR fetch must succeed", fetched)
+    assert fixture_git(protected, "rev-parse", "refs/scan/pr-merge") == pr_merge
+    assert fixture_git(protected, "rev-parse", "refs/scan/pr-merge^2") == pr_head
+    for override, message in [({"WORKFLOW_SHA": pr_head}, "Protected verifier source or PR revisions"),
+                              ({"PR_NUMBER": "124"}, "couldn't find remote ref refs/pull/124/merge")]:
+        refused = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", fetch["run"]], cwd=tmp,
+                                 env={**fetch_env, **override}, capture_output=True, text=True)
+        assert refused.returncode != 0 and message in refused.stdout + refused.stderr, refused
     (protected / ".github/scripts").mkdir(parents=True)
     (protected / ".github/scripts/verify-required-build-pins.py").write_text(
         (root / ".github/scripts/verify-required-build-pins.py").read_text())
@@ -746,6 +767,7 @@ assert require["env"] == {
     "OSV_RESULT": "${{ needs.osv.result }}",
     "VERIFIER_OUTCOME": "${{ steps.verify.outcome }}",
     "PINS_OUTCOME": "${{ steps.pins.outcome }}",
+    "MIGRATION_LINT_RESULT": "${{ needs.migration-lint.result }}",
 }
 
 ioc_workflow = yaml.load(
@@ -797,21 +819,29 @@ assert upload["with"]["name"] == "ioc-install-script-warnings"
 assert upload["with"]["if-no-files-found"] == "error"
 assert ioc_workflow["jobs"]["supply-chain-scan-selftest"]["permissions"] == {"contents": "read"}
 
-for pr_ci, publish, verifier_outcome, pins_outcome, passes in [
-    ("success", "success", "success", "success", True),
-    ("failure", "success", "success", "success", False),
-    ("success", "failure", "success", "success", False),
-    ("success", "success", "failure", "success", False),
-    ("success", "success", "success", "failure", False),
-    ("success", "success", "success", "", False),
-    ("cancelled", "skipped", "skipped", "skipped", False),
-    ("", "success", "success", "success", False),
+for pr_ci, publish, verifier_outcome, pins_outcome, migration, passes in [
+    ("success", "success", "success", "success", "success", True),
+    ("failure", "success", "success", "success", "skipped", False),
+    ("success", "failure", "success", "success", "success", False),
+    ("success", "success", "failure", "success", "success", False),
+    ("success", "success", "success", "failure", "success", False),
+    ("success", "success", "success", "", "success", False),
+    ("cancelled", "skipped", "skipped", "skipped", "skipped", False),
+    ("", "success", "success", "success", "success", False),
+    # The protected migration lint (#4175) skips PRs without control-plane changes;
+    # skipped passes only because pr-ci itself must succeed. A failure or a missing
+    # result blocks.
+    ("success", "success", "success", "success", "skipped", True),
+    ("success", "success", "success", "success", "failure", False),
+    ("success", "success", "success", "success", "cancelled", False),
+    ("success", "success", "success", "success", "", False),
 ]:
-    case = (pr_ci, publish, verifier_outcome, pins_outcome)
+    case = (pr_ci, publish, verifier_outcome, pins_outcome, migration)
     run = subprocess.run(
         ["bash", "-e", "-o", "pipefail", "-c", require["run"]],
         env={**os.environ, "PR_CI_RESULT": pr_ci, "PUBLISH_RESULT": publish,
-             "VERIFIER_OUTCOME": verifier_outcome, "PINS_OUTCOME": pins_outcome},
+             "VERIFIER_OUTCOME": verifier_outcome, "PINS_OUTCOME": pins_outcome,
+             "MIGRATION_LINT_RESULT": migration},
         capture_output=True,
         text=True,
     )

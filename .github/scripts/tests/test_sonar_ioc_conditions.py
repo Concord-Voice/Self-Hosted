@@ -644,7 +644,14 @@ class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
         self.assertIn("report", self.pr["jobs"])
         report = self.pr["jobs"]["report"]
         self.assertEqual(report["outputs"]["selection"], "${{ steps.report.outputs.selection }}")
-        self.assertEqual(jobs["result"]["needs"], ["pr-ci", "osv", "publish-install-script-warnings"])
+        self.assertEqual(jobs["result"]["needs"],
+                         ["pr-ci", "osv", "publish-install-script-warnings", "migration-lint"])
+        # The protected migration lint (#4175) waits on pr-ci's IOC gate, runs only for
+        # control-plane changes or an unknown selection, and may only pass or skip.
+        lint_if = jobs["migration-lint"]["if"]
+        for token in ("needs.pr-ci.result == 'success'", """'"known":true'""", """'"control_plane":true'"""):
+            self.assertIn(token, lint_if)
+        self.assertIn('"$MIGRATION_LINT_RESULT" == skipped', str(jobs["result"]))
         result_text = str(jobs["result"])
         for token in ("needs.pr-ci.outputs.report-selection", "needs.pr-ci.outputs.report-jobs",
                       "needs.pr-ci.outputs.coverage-uploads"):
@@ -672,7 +679,7 @@ class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
         self.assertNotIn("coverage_required.desktop }}", str(jobs["build"].get("with", {})))
         self.assertIn("pr-ci-ordinary-", str(self.pr.get("concurrency", {})))
         self.assertIn("pr-ci-protected-", str(self.pr.get("concurrency", {})))
-        self.assertIn("!inputs.enforcement-only", str(self.pr["concurrency"].get("cancel-in-progress", "")))
+        self.assertEqual(self.pr["concurrency"].get("cancel-in-progress"), "true")
 
     def test_detector_runs_only_protected_policy_source_before_ioc(self):
         detect = self.pr["jobs"]["detect-changes"]
@@ -766,7 +773,7 @@ class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
         self.assertIn("SCAN_EVIDENCE_DIR", text)
         self.assertIn("GITHUB_RUN_ATTEMPT", text)
         self.assertIn("git -C protected fetch", text)
-        self.assertIn("refs/scan/pr-head", text)
+        self.assertIn("refs/scan/pr-merge", text)
         checkout = next(step for step in result["steps"] if "actions/checkout@" in step.get("uses", ""))
         self.assertEqual(checkout["with"]["ref"], "${{ fromJSON(toJSON(job)).workflow_sha }}")
         self.assertNotIn("ref: ${{ github.event.pull_request.head.sha }}", text)

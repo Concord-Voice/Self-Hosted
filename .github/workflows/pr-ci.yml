@@ -44,21 +44,22 @@ on:
     types: [opened, synchronize, reopened, edited]
     branches: [main]
 
+# Every job declares its own grants; the workflow default stays read-only.
 permissions:
   contents: read
-  pull-requests: write
-  actions: read
-  checks: read
-  packages: read
-  security-events: write
   # NO `environment: production` on any job — Invariant 2: PR runners cannot
   # resolve production-scoped secrets, so dry-run deploys hit staging only.
 
 concurrency:
   # Title/body-only edits must not cancel a real run on the same head. A base
   # retarget (or an edited event with unknown changes) still gets ordinary CI.
+  # The protected group cancels too: the newest ruleset run for a PR always
+  # runs to completion and reports the current head, so a superseded head's
+  # in-flight build is waste. A ruleset run ignores event filters, so a
+  # title/body edit restarts the run for the same head rather than queueing a
+  # second full build behind it.
   group: ${{ inputs.enforcement-only && format('pr-ci-protected-{0}', github.event.pull_request.number) || (github.event.action == 'edited' && github.event.changes.base == null && (github.event.changes.title != null || github.event.changes.body != null) && format('pr-ci-metadata-{0}', github.event.pull_request.number) || format('pr-ci-ordinary-{0}', github.event.pull_request.number)) }}
-  cancel-in-progress: ${{ !inputs.enforcement-only }}
+  cancel-in-progress: true
 
 jobs:
   # ─── Supply-chain IOC gate (IOC-first invariant, ADR-0018 / #1472) ───
@@ -894,6 +895,69 @@ jobs:
           bash .github/scripts/tests/ci-scan-relevance.test.sh
           bash .github/scripts/tests/trivy-assert-os.test.sh
           bash scripts/test-nats-server-bootstrap.sh
+
+  # ─── PostgreSQL migration lint (squawk, #4175) ───────────────────────
+  # SonarCloud has no PostgreSQL analyzer, so `.sql` is excluded from it.
+  # Lints only the up migrations this PR adds or changes: the applied history
+  # is immutable, so it is baselined rather than rewritten. Self-gating on the
+  # PR diff instead of a detect-changes key, so it costs one checkout on PRs
+  # without migrations. Advisory here: the required copy is the
+  # `migration-lint` job in required-pr-build.yml, which runs from protected
+  # main. Change both together. .squawk.toml holds the PG version and rule
+  # exclusions.
+  migration-lint:
+    name: migration-lint
+    needs: [ioc, detect-changes]
+    if: ${{ !inputs.enforcement-only && !cancelled() && needs.ioc.result == 'success' && (needs.detect-changes.outputs.control-plane == 'true' || needs.detect-changes.outputs.scan-known != 'true') && !(github.event.action == 'edited' && github.event.changes.base == null && (github.event.changes.title != null || github.event.changes.body != null)) }}
+    permissions:
+      contents: read
+    # pip runs from the PR checkout; keep a PR-root pip.py (or any module) off
+    # sys.path so it cannot stand in for pip and plant a fake squawk.
+    env:
+      PYTHONSAFEPATH: '1'
+      PYTHONPATH: ''
+    runs-on: blacksmith-2vcpu-ubuntu-2404
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # HEAD is the PR merge commit; HEAD^1 is the base it merges into, so
+          # the diff is exactly this PR's changes against current main.
+          fetch-depth: 2
+          persist-credentials: false
+
+      - name: Select changed up migrations
+        id: select
+        run: |
+          set -euo pipefail
+          git diff --name-only --diff-filter=ACMR HEAD^1 HEAD \
+            -- 'services/control-plane/migrations/*.up.sql' > "$RUNNER_TEMP/migrations.txt"
+          count=$(grep -c . "$RUNNER_TEMP/migrations.txt" || true)
+          echo "count=$count" >> "$GITHUB_OUTPUT"
+          if [ "$count" -eq 0 ]; then
+            echo "No up migrations changed; nothing to lint."
+          else
+            cat "$RUNNER_TEMP/migrations.txt"
+          fi
+
+      # The config and the pinned requirements come from the base (HEAD^1), never
+      # the PR: a PR that widened excluded_rules or swapped the wheel hash would
+      # otherwise clear its own required check.
+      - name: Install squawk
+        if: ${{ steps.select.outputs.count != '0' }}
+        run: |
+          set -euo pipefail
+          git show HEAD^1:.squawk.toml > "$RUNNER_TEMP/squawk.toml"
+          git show HEAD^1:.github/requirements-squawk.txt > "$RUNNER_TEMP/requirements-squawk.txt"
+          python3 -m pip install --user --quiet --require-hashes --only-binary=:all: -r "$RUNNER_TEMP/requirements-squawk.txt"
+
+      - name: Lint changed migrations
+        if: ${{ steps.select.outputs.count != '0' }}
+        run: |
+          set -euo pipefail
+          mapfile -t files < "$RUNNER_TEMP/migrations.txt"
+          "$HOME/.local/bin/squawk" --version
+          "$HOME/.local/bin/squawk" --config "$RUNNER_TEMP/squawk.toml" "${files[@]}"
 
   # NOTE: the former verify-openapi-coverage, verify-spa-env, and
   # verify-deploy-scripts jobs are consolidated into the single `static-guards`

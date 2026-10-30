@@ -81,6 +81,8 @@ govulncheck:
   - '.github/scripts/ci-scan-relevance.mjs'
   - '.github/workflows/pr-ci.yml'
 osv:
+  - '.github/ci/docker-engine-packages.lock'
+  - 'scripts/ci/install-docker-engine.sh'
   - '.github/scripts/verify-pr-scan-results.py'
   - '.github/workflows/required-pr-build.yml'
   - '**/{conan.lock,pubspec.lock,mix.lock,go.mod,go.sum,cabal.project.freeze,stack.yaml.lock,buildscript-gradle.lockfile,gradle.lockfile,gradle/verification-metadata.xml,pom.xml,bun.lock,package.json,package-lock.json,pnpm-lock.yaml,yarn.lock,deps.json,packages.config,packages.lock.json,composer.lock,Pipfile.lock,poetry.lock,requirements.txt,pdm.lock,pylock.toml,uv.lock,renv.lock,Gemfile.lock,gems.locked,Cargo.lock,osv-scanner-custom.json}'
@@ -178,6 +180,9 @@ sonar_desktop:
   - '.github/scripts/ci-scan-relevance.mjs'
   - '.github/workflows/pr-ci.yml'
 sonar_control_plane:
+  - '.github/ci/docker-engine-packages.lock'
+  - 'scripts/ci/install-docker-engine.sh'
+  - 'scripts/ci/start-control-plane-services.sh'
   - 'services/control-plane/**'
   - 'scripts/test-tools/nats-server.sh'
   - 'sonar-project.properties'
@@ -187,6 +192,8 @@ sonar_control_plane:
   - '.github/scripts/ci-scan-relevance.mjs'
   - '.github/workflows/pr-ci.yml'
 sonar_media_plane:
+  - '.github/ci/docker-engine-packages.lock'
+  - 'scripts/ci/install-docker-engine.sh'
   - 'services/media-plane/**'
   - 'scripts/test-tools/nats-server.sh'
   - 'services/control-plane/internal/voicecommand/testdata/**'
@@ -207,6 +214,8 @@ sonar_admin:
 
 # Existing detector outputs. These preserve the current reusable workflow contract.
 selfhost_guard:
+  - '.github/ci/docker-engine-packages.lock'
+  - 'scripts/ci/install-docker-engine.sh'
   - '.github/ci/scan-relevance.yml'
   - '.github/scripts/ci-scan-relevance.mjs'
   # Shared application paths run in their SaaS build/test lanes. Keep this
@@ -227,6 +236,9 @@ selfhost_guard:
   - '.github/workflows/selfhost-acceptance.yml'
   - '.github/workflows/selfhost-release-guards.yml'
 services:
+  - '.github/ci/docker-engine-packages.lock'
+  - 'scripts/ci/install-docker-engine.sh'
+  - 'scripts/ci/start-control-plane-services.sh'
   - 'services/**'
   - 'client/admin/**'
   - 'docker-compose*.yml'
@@ -250,12 +262,17 @@ desktop:
   - 'scripts/security/override-range-lint.mjs'
   - '.github/workflows/build.yml'
 control_plane:
+  - '.github/ci/docker-engine-packages.lock'
+  - 'scripts/ci/install-docker-engine.sh'
+  - 'scripts/ci/start-control-plane-services.sh'
   - 'services/control-plane/**'
   - 'scripts/authority-vectors/**'
   - 'docs/design/trusted-recovery-v2-vectors.json'
   - 'packages/protocol/src/renderer/stores/voice/audioQualityTiers.ts'
   - 'scripts/test-tools/nats-server.sh'
 media_plane:
+  - '.github/ci/docker-engine-packages.lock'
+  - 'scripts/ci/install-docker-engine.sh'
   - 'services/media-plane/**'
 media_plane_tests:
   - 'services/media-plane/**'
@@ -269,6 +286,8 @@ admin:
   - 'scripts/security/override-range-lint.mjs'
   - '.github/workflows/build.yml'
 production_docker:
+  - '.github/ci/docker-engine-packages.lock'
+  - 'scripts/ci/install-docker-engine.sh'
   - 'services/**'
   - 'client/admin/**'
   - 'infrastructure/docker/**'
@@ -287,6 +306,8 @@ go_lint:
   - '.pre-commit-config.yaml'
   - '.github/workflows/pr-ci.yml'
 dev_stack:
+  - '.github/ci/docker-engine-packages.lock'
+  - 'scripts/ci/install-docker-engine.sh'
   - 'services/**'
   - 'docker-compose.yml'
   - 'docker-compose.dev.yml'
@@ -346,6 +367,8 @@ deployment:
   - 'client/admin/Dockerfile*'
   - 'scripts/test-admin-ui-production-wiring.sh'
 selfhost:
+  - '.github/ci/docker-engine-packages.lock'
+  - 'scripts/ci/install-docker-engine.sh'
   - '.github/ci/scan-relevance.yml'
   - '.github/scripts/ci-scan-relevance.mjs'
   # Application code is exercised by the shared SaaS build/test lanes. Reserve
@@ -469,6 +492,10 @@ dev_checks:
   - 'scripts/test-check-counts.sh'
   - 'services/control-plane/migrations/**'
 workflow_lint:
+  - '.github/ci/docker-engine-packages.lock'
+  - 'scripts/ci/install-docker-engine.sh'
+  - 'scripts/ci/start-control-plane-services.sh'
+  - 'scripts/tests/test-runner-docker-engine.py'
   - 'scripts/test-tools/nats-server.sh'
   - 'scripts/test-nats-server-bootstrap.sh'
   - '.pre-commit-config.yaml'
@@ -489,6 +516,8 @@ workflow_lint:
   - 'infrastructure/docker/minio/dependencies.patch'
   - 'infrastructure/docker/minio/minio.openvex.json'
   - 'infrastructure/docker/minio/SOURCE-BUILD.md'
+  - 'scripts/ci/require-docker-engine.sh'
+  - 'scripts/ci/require-remote-buildkit.py'
   - 'scripts/test-check-*.sh'
 worker_apple:
   - '.github/ci/scan-relevance.yml'

@@ -155,6 +155,14 @@ if (expectedText === 'all-scanners') {
 } else {
   assert.deepEqual(Object.fromEntries(scanners.map(key => [key, result.selected[key]])), Object.fromEntries(scanners.map(key => [key, expected.has(key)])), `${label}: exact scanner selection`);
 }
+if (label.startsWith('runner-docker-')) {
+  assert.equal(filters.control_plane, 'true', `${label} reaches control-plane integration jobs`);
+  if (label !== 'runner-docker-services') {
+    assert.equal(filters.media_plane, 'true', `${label} reaches the warm Docker build`);
+    assert.equal(filters.production_docker, 'true', `${label} reaches the cold Docker build`);
+    assert.equal(filters.dev_stack, 'true', `${label} reaches dev-stack smoke`);
+  }
+}
 if (label === 'historical-docs') {
   assert.equal(result.advisory.static_guards, false, 'docs-only PR does not select static guards');
 }
@@ -272,6 +280,9 @@ fi
 
 # Matcher cases use the real dorny action against exact Git diffs. Expected scanner
 # keys are intentionally explicit so accidental broadening also fails.
+run_policy_case runner-docker-lock advisory-only .github/ci/docker-engine-packages.lock
+run_policy_case runner-docker-install advisory-only scripts/ci/install-docker-engine.sh
+run_policy_case runner-docker-services advisory-only scripts/ci/start-control-plane-services.sh
 run_policy_case historical-docs semgrep_community \
   docs/history/plans/2026-10-07-3587-pr-a1-contract-codec.md \
   docs/history/plans/2026-10-07-3587-pr-a2-contract-verification.md \
@@ -319,6 +330,7 @@ run_policy_case guard-workflow-lint codeql_actions,codeql_go,codeql_js,eslint,go
   .github/ci/scan-relevance.yml
 run_policy_case workflow-lint-source-suite advisory-only .github/scripts/tests/ci-scan-relevance.test.sh
 run_policy_case workflow-lint-source-helper advisory-only .github/scripts/ci-scan-relevance.mjs
+run_policy_case workflow-lint-source-remote-builder advisory-only scripts/ci/require-remote-buildkit.py
 run_policy_case workflow-lint-source-map advisory-only .github/ci/scan-relevance.yml
 run_policy_case workflow-lint-only advisory-only .github/scripts/workflow-lint-only.txt
 run_policy_case workflow-lint-legacy-changelog advisory-only CHANGELOG.md
