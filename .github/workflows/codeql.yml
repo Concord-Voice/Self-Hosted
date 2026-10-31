@@ -28,7 +28,7 @@ on:
       codeql-matrix:
         description: "JSON matrix of selected CodeQL languages"
         type: string
-        default: '{"include":[{"language":"actions","runner":"blacksmith-2vcpu-ubuntu-2404","build-mode":"none"},{"language":"go","runner":"blacksmith-4vcpu-ubuntu-2404","build-mode":"manual"},{"language":"javascript-typescript","runner":"blacksmith-4vcpu-ubuntu-2404","build-mode":"none"},{"language":"python","runner":"blacksmith-2vcpu-ubuntu-2404","build-mode":"none"}]}'
+        default: '{"include":[{"language":"actions","runner":"ubuntu-24.04","build-mode":"none"},{"language":"go","runner":"ubuntu-24.04","build-mode":"manual"},{"language":"javascript-typescript","runner":"ubuntu-24.04","build-mode":"none"},{"language":"python","runner":"ubuntu-24.04","build-mode":"none"}]}'
         required: false
       external-verdict:
         description: "Report actual SARIF upload provenance for the protected verifier"
@@ -62,7 +62,7 @@ jobs:
     # as a scheduling error that never names the missing field. Falling back to
     # the 4 vCPU class default keeps a new leg correct-but-costly rather than
     # broken-and-cryptic.
-    runs-on: ${{ matrix.runner || 'blacksmith-4vcpu-ubuntu-2404' }}
+    runs-on: ${{ matrix.runner || 'ubuntu-24.04' }}
     permissions:
       # required for all codeql workflows
       security-events: write

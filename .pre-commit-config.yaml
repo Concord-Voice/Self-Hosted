@@ -52,7 +52,8 @@ repos:
       - id: go-toolchain-alignment
         name: Go toolchain matches all Docker builders
         entry: python3 scripts/check-go-toolchain.py
-        language: system
+        language: python
+        additional_dependencies: ['PyYAML==6.0.3']
         files: '^(services/control-plane/(go\.mod|Dockerfile(?:\.(?:ops-agent|redis-auth-controller))?)|scripts/(?:test-)?check-go-toolchain\.py|\.pre-commit-config\.yaml)$'
         pass_filenames: false
       - id: test-go-toolchain-alignment
@@ -65,7 +66,7 @@ repos:
 
   # ── Security ──────────────────────────────────────────────────────────────
   - repo: https://github.com/Yelp/detect-secrets
-    rev: v1.5.0
+    rev: 01886c8a910c64595c47f186ca1ffc0b77fa5458  # frozen: v1.5.0
     hooks:
       - id: detect-secrets
         args: ['--baseline', '.secrets.baseline']
@@ -100,10 +101,10 @@ repos:
         #     vectors_wrap_hygiene_test.go opens every wrap and refuses a
         #     recovered key that any other vector publishes or that a package test
         #     file or gen.mjs commits, so the openable keys stay single-use.
-        exclude: '(package-lock\.json|client/desktop/tests/fixtures/pinning/.*|services/control-plane/internal/age/testdata/.*|services/control-plane/internal/authoritycontract/testdata/vectors\.json|prototypes/.*|graphify-out/(graph\.json|graph\.html|manifest\.json))'
+        exclude: '((^|/)package-lock\.json|^services/control-plane/internal/age/testdata/.*|^services/control-plane/internal/authoritycontract/testdata/vectors\.json)$'
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
+    rev: cef0300fd0fc4d2a87a85fa2093c6b283ea36f4b  # frozen: v5.0.0
     hooks:
       - id: check-added-large-files
         args: ['--maxkb=5000']
@@ -150,7 +151,7 @@ repos:
       - id: mixed-line-ending
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
-    rev: v5.0.0
+    rev: cef0300fd0fc4d2a87a85fa2093c6b283ea36f4b  # frozen: v5.0.0
     hooks:
       - id: detect-aws-credentials
         args: ['--allow-missing-credentials']
@@ -162,16 +163,19 @@ repos:
   # Secret Scanning + push protection, org-enforced (code-security config
   # 251472) — fork PRs bypass pre-commit, which is why the other layers exist.
   - repo: https://github.com/trufflesecurity/trufflehog
-    rev: v3.99.2
+    rev: e76dff8a7e57d6df0c60ad8cbf5d5cba505a8fc9  # frozen: v3.99.2
     hooks:
       - id: trufflehog
         name: TruffleHog
-        entry: bash -c 'trufflehog git file://. --since-commit HEAD --only-verified --fail'
+        # No --only-verified: a staged key that is fake, revoked or offline
+        # never verifies, so the hook passed it (canary test, 2026-10-31).
+        # Silence a fixture with an inline `trufflehog:ignore` comment.
+        entry: bash -c 'trufflehog git file://. --since-commit HEAD --fail'
 
   # gitleaks stays in the local layer; its CI working-tree job was retired in
   # the #1429 consolidation (superseded by platform push protection).
   - repo: https://github.com/gitleaks/gitleaks
-    rev: v8.24.3
+    rev: 107a41827bb6698dbbff756b2300537774a1d84c  # frozen: v8.24.3
     hooks:
       - id: gitleaks
 
@@ -187,7 +191,7 @@ repos:
   # [internal]rules/electron.md applies to third-party GHA actions in workflows,
   # not pre-commit hooks.
   - repo: https://github.com/rhysd/actionlint
-    rev: v1.7.12
+    rev: 914e7df21a07ef503a81201c76d2b11c789d3fca  # frozen: v1.7.12
     hooks:
       - id: actionlint
         # Shellcheck integration is ENABLED. The 27 pre-existing shellcheck
@@ -218,7 +222,8 @@ repos:
         # so the developer sees the warning). Exit 1 (self-hosted+non-allowlisted)
         # and 10 (parser failure) still block.
         entry: bash -c 'scripts/security/check-self-hosted-runners.sh; rc=$?; [ "$rc" = "2" ] && exit 0 || exit $rc'
-        language: system
+        language: python
+        additional_dependencies: ['PyYAML==6.0.3']
         pass_filenames: false
         files: '^\.github/workflows/.*\.ya?ml$'
 
@@ -234,6 +239,13 @@ repos:
         language: script
         files: '\.env(\.example|\.local)?$'
         pass_filenames: true
+
+      - id: test-check-env-file
+        name: Test env-file lint
+        entry: bash scripts/check-env-file.test.sh
+        language: system
+        files: '^scripts/check-env-file(\.test)?\.sh$'
+        pass_filenames: false
 
       # ── Workflow-file structural guards (#920/#2274 trust-model lock-ins) ──
       # These hooks codify the desktop trust boundary and invariants surfaced
@@ -278,14 +290,16 @@ repos:
       - id: lint-workflow-call-contract
         name: workflow lint — workflow_call contract (permissions superset + secrets agree)
         entry: bash .github/scripts/lint-workflow-call-contract.sh .
-        language: system
+        language: python
+        additional_dependencies: ['PyYAML==6.0.3']
         files: '^(\.github/scripts/lint-workflow-call-contract\.sh|\.github/scripts/tests/lint-workflow-call-contract\.test\.sh|\.github/workflows/.*\.ya?ml)$'
         pass_filenames: false
 
       - id: test-lint-workflow-call-contract
         name: workflow lint self-test — workflow_call contract
         entry: bash .github/scripts/tests/lint-workflow-call-contract.test.sh
-        language: system
+        language: python
+        additional_dependencies: ['PyYAML==6.0.3']
         files: '^(\.github/scripts/lint-workflow-call-contract\.sh|\.github/scripts/tests/lint-workflow-call-contract\.test\.sh|\.github/workflows/.*\.ya?ml)$'
         pass_filenames: false
 
@@ -298,7 +312,8 @@ repos:
         # at if-eval time rather than at action runtime (PR #904 class).
         entry: .github/scripts/lint-multisecret-andcheck.sh
         args: ['.github/workflows/']
-        language: script
+        language: python
+        additional_dependencies: ['PyYAML==6.0.3']
         files: '^\.github/workflows/.*\.ya?ml$'
         pass_filenames: false
 
@@ -316,7 +331,7 @@ repos:
 
   # ── SAST (Semgrep) ───────────────────────────────────────────────────
   - repo: https://github.com/semgrep/semgrep
-    rev: v1.121.0
+    rev: a8d5ed32994273e8c94a5bf27201fef1106d1e74  # frozen: v1.121.0
     hooks:
       - id: semgrep
         name: Semgrep SAST
@@ -358,7 +373,7 @@ repos:
   # No workflow ran golangci-lint from #373 (2026-03-24) until that job; an
   # earlier version of this comment claimed CI did.
   - repo: https://github.com/golangci/golangci-lint
-    rev: v2.14.0
+    rev: 114493f9b3e7257d29e4130f2b4a4aadefbb6845  # frozen: v2.14.0
     hooks:
       - id: golangci-lint
         entry: bash -c 'cd services/control-plane && golangci-lint run --fix'
@@ -652,7 +667,9 @@ repos:
       - id: selfhost-deploy-tests
         name: self-hosted deploy tests (installer + TLS + lifecycle + storage)
         entry: bash scripts/tests/run-selfhost-deploy-tests.sh
-        language: system
+        # test-selfhost-byo-s3.sh parses Compose files with PyYAML.
+        language: python
+        additional_dependencies: ['PyYAML==6.0.3']
         files: '^(\.pre-commit-config\.yaml|docker-compose(\.production)?\.yml|docker-compose\.(selfhost|byo-s3)\.yml|infrastructure/deploy/(deploy-manifest\.txt|install-selfhost\.sh|provision-cert\.sh|copy-certs\.sh|provision-production\.sh|concord-selfhost|concord-ctl\.sh|selfhost-port-posture\.py|selfhost-storage\.sh|selfhost-security-event-logging\.sh|selfhost-tls\.(sh|py)|tests/(Dockerfile\.selfhost-hook|selfhost-acceptance\.py|test-(selfhost-(storage|byo-s3|cert-delivery|tls-readiness|tls-callers|tls-selected-consumer|acceptance)|copy-certs)\.sh|test-selfhost-tls-selected-consumer\.py|test-copy-certs-labels\.py|(?:test_selfhost_(tls|acceptance)|selfhost_acceptance_support)\.py|selfhost-cert-test-tools\.sh|test-security-event-logging\.sh|test-control-plane-secrets\.sh|security_event_publication_test\.py))|infrastructure/docker/coturn/turnserver\.conf|scripts/tests/(run-selfhost-deploy-tests\.sh|test-(install-selfhost|provision-cert|concord-selfhost)\.sh|provision_cert_replacement_test\.py))$'
         pass_filenames: false
 
@@ -673,7 +690,8 @@ repos:
       - id: test-go-transitive-flush-render
         name: 'Test go-transitive-flush PR-body render (#1212)'
         entry: bash scripts/tests/test-go-transitive-flush-render.sh
-        language: system
+        language: python
+        additional_dependencies: ['PyYAML==6.0.3']
         files: '^(\.pre-commit-config\.yaml|\.github/workflows/go-transitive-flush\.yml|scripts/tests/test-go-transitive-flush-render\.sh)$'
         pass_filenames: false
 
@@ -816,3 +834,13 @@ repos:
         always_run: true
         pass_filenames: false
         verbose: true
+
+  # Remote hook revs are commit SHAs, never tags: a moved tag would run new
+  # code on the next `pre-commit install`. Keep the tag as `# frozen: vX`.
+  - repo: local
+    hooks:
+      - id: hook-revs-are-shas
+        name: pre-commit hook revs are pinned to commit SHAs
+        language: pygrep
+        entry: '^\s*rev:\s*(?![0-9a-f]{40}\s+# frozen: \S+\s*$)'
+        files: '^\.pre-commit-config\.yaml$'

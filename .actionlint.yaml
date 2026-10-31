@@ -19,13 +19,13 @@
 #     include the literal `self-hosted` token — that's the security-side
 #     handling; this entry is the syntax-side acceptance for actionlint.
 #
-#   blacksmith-2vcpu-ubuntu-2404, blacksmith-4vcpu-ubuntu-2404,
 #   blacksmith-8vcpu-ubuntu-2404, blacksmith-16vcpu-ubuntu-2404: Blacksmith
 #     managed GitHub Actions runners (ephemeral Firecracker microVMs). Adopted
-#     via the workflow migration in this PR's series (ADR-0016); 2vcpu for
-#     trivial network-bound jobs, 4vcpu default for CI workloads, 8vcpu for
+#     via the workflow migration in this PR's series (ADR-0016); 8vcpu for
 #     the measured desktop shards and warm media Docker build, 16vcpu for the
-#     measured cache-cold production Compose build. Credential-
+#     measured cache-cold production Compose build. The 2 and 4 vCPU jobs moved
+#     to GitHub's standard ubuntu-24.04 runner when this repository went public
+#     (free for public repositories; port-map decision 3, 2026-10-23). Credential-
 #     path workflows stay on GitHub-hosted runners per the ADR-0016 trust
 #     boundary. Like ubuntu-latest-arm64 above, the labels do not include the
 #     literal `self-hosted` token, so the security check treats them as
@@ -34,8 +34,6 @@
 self-hosted-runner:
   labels:
     - ubuntu-latest-arm64
-    - blacksmith-2vcpu-ubuntu-2404
-    - blacksmith-4vcpu-ubuntu-2404
     - blacksmith-8vcpu-ubuntu-2404
     - blacksmith-16vcpu-ubuntu-2404
 

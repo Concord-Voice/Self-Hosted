@@ -71,7 +71,7 @@ jobs:
   dev-checks:
     name: dev-checks
     if: ${{ inputs.dev-checks-relevant }}
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -162,7 +162,7 @@ jobs:
   concord-dev-smoke:
     name: concord-dev.sh smoke (compose + infra)
     if: format('{0}', inputs.dev-stack-changed) == 'true'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -231,7 +231,7 @@ jobs:
   concord-dev-smoke-native:
     name: concord-dev.sh smoke (full native startup)
     if: format('{0}', inputs.dev-stack-changed) == 'true'
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

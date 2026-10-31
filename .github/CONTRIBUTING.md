@@ -241,7 +241,7 @@ golangci-lint run --timeout=5m
 Go linting runs automatically on staged Go files before each commit. If linting fails, the commit will be blocked. Fix the issue — never bypass with `--no-verify`.
 
 **CI/CD:**
-`pr-ci.yml`'s `golangci-lint` job runs `golangci-lint run ./...` over the whole control-plane module on every PR that touches `services/control-plane/**`, `.pre-commit-config.yaml`, or `.github/workflows/pr-ci.yml`. It runs on pull requests only; nothing lints after merge. It reads its version from the pre-commit hook's `rev`, so both gates run the same release. The job is **advisory**: a failure turns the PR's CI red, but it is not a required status check and does not block merge. Fix it anyway — `main` is 0 issues, so a finding is one your change introduced. The blocking gate is the local pre-commit hook.
+`pr-ci.yml`'s `golangci-lint` job runs `golangci-lint run ./...` over the whole control-plane module on every PR that touches `services/control-plane/**`, `.pre-commit-config.yaml`, or `.github/workflows/pr-ci.yml`. It runs on pull requests only; nothing lints after merge. It reads its version from the `# frozen: vX.Y.Z` comment on the pre-commit hook's SHA-pinned `rev`, so both gates run the same release. The job is **advisory**: a failure turns the PR's CI red, but it is not a required status check and does not block merge. Fix it anyway — `main` is 0 issues, so a finding is one your change introduced. The blocking gate is the local pre-commit hook.
 
 ### TypeScript/React (Frontend)
 
@@ -336,22 +336,25 @@ The hooks are configured in `.pre-commit-config.yaml` via the Python `pre-commit
 ### CI: GitHub Actions (Mandatory)
 
 `pr-ci.yml` is the entry point for **all PRs**. `build.yml` has no direct trigger — it is
-`workflow_call`-only, invoked by `pr-ci.yml` (pull requests) and by `main-ci.yml` (push to `main`).
+`workflow_call`-only, invoked by `pr-ci.yml` (pull requests) and by `nightly-ci.yml` (main).
 
 ```text
-ioc --> build (changes --> desktop        (test + coverage + build)
+ioc --> build (changes --> desktop        (packages/* test + coverage)
                        --> control-plane  (test + coverage + DB)
                        --> media-plane    (lint + typecheck)
                        --> admin          (test + coverage + build))
-    --> sonar
 ```
 
 `pr-ci.yml` also runs the per-tool scanning workflows in parallel with `build`
 (`semgrep`, `eslint`, `codeql`, `govulncheck`, `secret-scanning`, `golangci-lint`,
 `unit-smoke`, `static-guards` (including staging dry runs), `workflow-lint`).
 
-The `sonar` job lives in `pr-ci.yml`, not in `build.yml`. It downloads coverage artifacts from the
-`build.yml` jobs and runs the scan.
+No PR workflow holds `SONAR_TOKEN`. For a same-repository PR, the `protected-sonar` job in
+`required-pr-build.yml` (loaded from `main`) dispatches `sonarcloud.yml` on `main`. That child runs
+in the `protected-sonar` environment, rebuilds an inert copy of the PR source with the PR run's
+coverage artifacts, scans it, and waits for the quality gate. `Required PR build result` then
+requires the child run and a SonarCloud App check from inside its run window. Fork PRs keep the
+App-check-only exception. `nightly-ci.yml` runs the main-branch analysis that PR scans compare to.
 
 ### SonarQube Quality Gate (Mandatory)
 
