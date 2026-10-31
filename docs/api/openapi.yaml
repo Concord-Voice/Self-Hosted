@@ -2363,12 +2363,12 @@ paths:
                   ticket:
                     type: string
                     description: Single-use ticket (TTL is the shorter of 30 seconds or the issuing access token's remaining lifetime)
-        '429':
-          $ref: '#/components/responses/RateLimited'
         '400':
           $ref: '#/components/responses/UnsupportedClientPlatform'
         '403':
           $ref: '#/components/responses/ClientVersionTooOld'
+        '429':
+          $ref: '#/components/responses/RateLimited'
   /categories/{id}/overrides:
     get:
       tags:
@@ -24990,7 +24990,7 @@ components:
       properties:
         minVersion:
           type: string
-          description: Minimum client version allowed to connect
+          description: Minimum desktop client version allowed to connect (`CLIENT_MIN_VERSION`). The iOS and Android floors are not reported here.
           example: 0.1.50
         featureFlags:
           type: object
