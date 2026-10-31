@@ -16,3 +16,5 @@ infrastructure/**                                   @Concord-Voice/security
 **/mfa/**                                           @Concord-Voice/security
 **/rbac/**                                          @Concord-Voice/security
 /.gitar/                                            @Concord-Voice/security
+/.claude/                                           @Concord-Voice/security
+/scripts/repo-config.sh                              @Concord-Voice/security

@@ -75,11 +75,19 @@ jobs:
             commit -qm "chore: sync agentic tooling to $SRC"
           # Each run rebuilds the branch as one bot commit on the default branch, so any
           # newer tip commit by someone else is a fixup pushed to the open PR. Keep it.
-          if git fetch -q --depth=1 origin "$BRANCH" 2>/dev/null \
-             && [ "$(git log -1 --format=%ae FETCH_HEAD)" != '41898283+github-actions[bot]@users.noreply.github.com' ]; then
-            echo "$BRANCH has commits from someone else; leaving the open PR alone"; exit 0
+          # ls-remote exits 2 only when the branch is absent; any other failure stops the job.
+          set +e; tip="$(git ls-remote --exit-code origin "refs/heads/$BRANCH" | cut -f1)"; rc=${PIPESTATUS[0]}; set -e
+          if [ "$rc" -eq 0 ]; then
+            git fetch -q --depth=1 origin "$BRANCH"
+            if [ "$(git log -1 --format=%ae FETCH_HEAD)" != '41898283+github-actions[bot]@users.noreply.github.com' ]; then
+              echo "::warning::$BRANCH has commits from someone else; leaving the open PR alone. Merge or close it to resume syncing."; exit 0
+            fi
+            git push --force-with-lease="$BRANCH:$tip" origin "$BRANCH"
+          elif [ "$rc" -eq 2 ]; then
+            git push origin "$BRANCH"
+          else
+            echo "::error::git ls-remote failed (exit $rc)"; exit 1
           fi
-          git push --force origin "$BRANCH"
           if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
             gh pr create --draft --head "$BRANCH" --title "chore: sync agentic tooling" \
               --body "Re-ran install.sh claude from $TOOLING_REPO@$SRC. Files edited in this repo were skipped."

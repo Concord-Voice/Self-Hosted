@@ -1,0 +1,24 @@
+{
+  "default_branch": "main",
+  "migrations": { "dir": "services/control-plane/migrations/" },
+  "hooks": {
+    "protected_patterns": [
+      "/crypto",
+      "/e2ee",
+      "/auth/",
+      "/mfa/",
+      "/rbac/",
+      "internal/authority",
+      "internal/oauth/",
+      "internal/entitlements/",
+      "redis-auth-controller",
+      "voiceauthprotocol",
+      "docker-compose\\.(production|selfhost|byo-s3)\\.yml$",
+      "infrastructure/",
+      "scripts/security/",
+      "\\.github/workflows/",
+      "\\.pre-commit-config\\.yaml$",
+      "CODEOWNERS$"
+    ]
+  }
+}
