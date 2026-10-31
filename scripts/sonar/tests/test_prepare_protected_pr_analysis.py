@@ -265,6 +265,33 @@ class PrepareTest(unittest.TestCase):
         with self.assertRaisesRegex(MODULE.Reject, "unsafe path"):
             self.prepare()
 
+    def test_lagging_job_inventory_is_polled_until_settled(self):
+        settled = [dict(job) for job in self.jobs_data]
+        self.jobs_data[3].update(status="in_progress", conclusion=None)
+        polls, pause = [], object()
+
+        def settle(delay):
+            if delay is pause:
+                polls.append(1)
+                if len(polls) == 2:
+                    self.jobs_data[:] = settled
+        with patch.object(MODULE, "JOB_SETTLE_DELAY", pause), patch.object(MODULE.time, "sleep", side_effect=settle):
+            self.prepare()
+        self.assertEqual(len(polls), 2)
+        self.assertEqual(self.requests.count("/actions/runs/42/attempts/2/jobs?per_page=100"), 3)
+
+    def test_job_inventory_that_never_settles_is_rejected_after_bounded_poll(self):
+        self.jobs_data[3].update(status="completed", conclusion=None)
+        pause = object()
+        with patch.object(MODULE, "JOB_SETTLE_DELAY", pause), patch.object(MODULE.time, "sleep") as sleep:
+            with self.assertRaisesRegex(MODULE.Reject, "signed job verdict differs"):
+                self.prepare()
+        self.assertEqual([c.args for c in sleep.call_args_list].count((pause,)), MODULE.JOB_SETTLE_ATTEMPTS - 1)
+        self.jobs_data[3]["status"] = "queued"
+        with patch.object(MODULE.time, "sleep"):
+            with self.assertRaisesRegex(MODULE.Reject, "protected caller jobs incomplete"):
+                self.prepare()
+
     def test_api_verdict_and_duplicate_proof_are_rejected(self):
         self.jobs_data[3]["conclusion"] = "failure"
         with self.assertRaisesRegex(MODULE.Reject, "signed job verdict differs"):

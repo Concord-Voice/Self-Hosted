@@ -13,6 +13,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 from urllib.error import HTTPError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -338,7 +339,7 @@ def validate_evidence(candidate, verified, run, pr, jobs):
            or j.get("run_attempt") != candidate["caller_run_attempt"]
            or j.get("head_sha") != candidate["expected_head_sha"] for j in actual):
         raise Reject("caller job identity mismatch")
-    prefix = "Protected scan enforcement / "
+    prefix = JOB_PREFIX
     protected = [j for j in actual if isinstance(j.get("name"), str) and j["name"].startswith(prefix)]
     if not protected or any(j.get("status") != "completed" for j in protected):
         raise Reject("protected caller jobs incomplete")
@@ -541,6 +542,28 @@ def trusted_properties(repo, pr, candidate):
     (repo / "sonar-project.properties").write_text(text.rstrip() + "\n" + "\n".join(values) + "\n", encoding="utf-8")
 
 
+JOB_PREFIX = "Protected scan enforcement / "
+JOB_SETTLE_ATTEMPTS, JOB_SETTLE_DELAY = 13, 10
+
+
+def settled_jobs(api, path):
+    # The jobs API trails the caller's report job by seconds, and longer for the jobs a
+    # re-run copies forward, so a child dispatched at once can see unfinished jobs.
+    # ponytail: fixed 2-minute poll; validate_evidence still rejects whatever stays unsettled.
+    for remaining in range(JOB_SETTLE_ATTEMPTS - 1, -1, -1):
+        jobs = api.request(path)
+        listed = jobs.get("jobs") if isinstance(jobs, dict) else None
+        if not isinstance(listed, list):
+            return jobs
+        protected = [j for j in listed if isinstance(j, dict) and isinstance(j.get("name"), str)
+                     and j["name"].startswith(JOB_PREFIX)]
+        if protected and all(j.get("status") == "completed" and j.get("conclusion") for j in protected):
+            return jobs
+        if remaining:
+            time.sleep(JOB_SETTLE_DELAY)
+    return jobs
+
+
 def prepare(candidate, directory, api):
     if directory.exists() or not directory.parent.is_dir():
         raise Reject("analysis directory must be absent with an existing parent")
@@ -560,7 +583,7 @@ def prepare(candidate, directory, api):
         proof.write_bytes(proof_bytes)
         verified = verify_proof(proof, verified_file)
         pr = api.request(f"/pulls/{candidate['pr_number']}")
-        jobs = api.request(f"/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
+        jobs = settled_jobs(api, f"/actions/runs/{run_id}/attempts/{attempt}/jobs?per_page=100")
         payload, claims, bridge_coverage = validate_evidence(candidate, verified, run, pr, jobs)
         repo = temp / "analysis"
         prepare_git(repo, claims, payload, candidate, api.token)
