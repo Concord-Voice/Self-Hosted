@@ -172,9 +172,9 @@ class JobOrdering(unittest.TestCase):
         "unit-smoke.yml": ("concord-dev-smoke", "concord-dev-smoke-native"),
         "osv-scanner.yml": ("protected-pr-scan",),
         "zap-api-dast.yml": ("zap-api-dast",),
-        "selfhost-acceptance.yml": ("fresh-host-selfhost-acceptance",),
-        "selfhost-release-guards.yml": ("selfhost-release-guards", "selfhost-runtime-guards"),
-        "docker-runner-inventory.yml": ("inventory",),
+        # selfhost-acceptance.yml and selfhost-release-guards.yml return with the
+        # S5 workflows (see pr-ci.yml's deploy-test loop); docker-runner-inventory.yml
+        # is not ported to this repository. Add their jobs back when they land.
     }
 
     def test_bootstrap_is_fatal_before_job_docker_effects_and_automatic_services(self):
@@ -199,7 +199,7 @@ class JobOrdering(unittest.TestCase):
                     if filename == "osv-scanner.yml":
                         self.assertIn("bash engine-bootstrap/scripts/ci/install-docker-engine.sh", step["run"])
                         bootstrap = next(s for s in steps[:index] if s.get("uses", "").startswith("actions/checkout@"))
-                        self.assertEqual(bootstrap["with"]["repository"], "Concord-Voice/Concord-Voice-Alpha")
+                        self.assertEqual(bootstrap["with"]["repository"], "Concord-Voice/Self-Hosted")
                         self.assertEqual(bootstrap["with"]["ref"], "${{ github.workflow_sha }}")
                         self.assertEqual(bootstrap["with"]["path"], "engine-bootstrap")
                         self.assertIs(bootstrap["with"]["persist-credentials"], False)
@@ -233,11 +233,11 @@ class JobOrdering(unittest.TestCase):
         job = yaml.safe_load((ROOT / ".github/workflows/osv-scanner.yml").read_text())["jobs"]["protected-pr-scan"]
         admission = next(s["run"] for s in job["steps"] if s.get("name") == "Validate protected workflow bootstrap source")
         script = next(s["run"] for s in job["steps"] if "bash engine-bootstrap/scripts/ci/install-docker-engine.sh" in s.get("run", ""))
-        trusted = "Concord-Voice/Concord-Voice-Alpha/.github/workflows/required-pr-build.yml@refs/heads/main"
+        trusted = "Concord-Voice/Self-Hosted/.github/workflows/required-pr-build.yml@refs/heads/main"
         cases = [(trusted, "a" * 40, True), (trusted, "b" * 40, False),
                  (trusted, "", False), (trusted, "A" * 40, False), (trusted, "refs/heads/main", False)]
         cases += [(ref, "a" * 40, False) for ref in
-                  (trusted.replace("Concord-Voice-Alpha/", "other/"),
+                  (trusted.replace("Self-Hosted/", "other/"),
                    trusted.replace("required-pr-build.yml", "attacker.yml"),
                    trusted.replace("refs/heads/main", "refs/pull/4213/merge"),
                    trusted.replace("refs/heads/main", "refs/heads/feature"),
