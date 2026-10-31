@@ -1,0 +1,49 @@
+{
+  "skill_name": "feedback-triage",
+  "notes": "All evals run READ-ONLY against the real example-org/example-repo repo (33 open feedback issues). Eval agents may only run read gh commands (issue list/view, search, api GET); never a mutating command. The skill's --mode=dry-run path makes zero mutations by design.",
+  "evals": [
+    {
+      "id": 0,
+      "name": "daily-dry-run-end-to-end",
+      "prompt": "Run the daily feedback triage for the public example-org/example-repo repo in preview/dry-run mode and show me the full plan — what duplicates you'd consolidate, what you'd track internally, and what (if anything) you'd close. Don't change anything.",
+      "expected_output": "A complete dry-run digest: catalog of the real open issues, high-confidence duplicate clusters with the oldest as survivor and a rolled-up report count, a tracker-side tracking plan via /issue-creation for survivors, public tracking-note plan, reverse-sync plan, and a counts summary. Explicitly zero mutations.",
+      "files": [],
+      "assertions": [
+        {"text": "Catalogs the real open issues from example-org/example-repo (cites actual issue numbers/titles)"},
+        {"text": "Explicitly operates dry-run: zero mutating gh commands executed (no close/comment/create/label/reaction)"},
+        {"text": "Identifies at least one duplicate cluster OR explicitly states no high-confidence duplicates, applying the oldest-survives rule"},
+        {"text": "Plans tracker-side tracking via /issue-creation for survivors (names the private tracker repo)"},
+        {"text": "Produces a digest with explicit counts (cataloged / consolidated / tracked / closed)"},
+        {"text": "References the idempotency/managed-marker mechanism (won't double-process on re-run)"}
+      ]
+    },
+    {
+      "id": 1,
+      "name": "consolidation-plan",
+      "prompt": "Look at the open issues in the public example-org/example-repo feedback repo and propose how to consolidate duplicates — the oldest issue survives, newer ones fold in, and I want a count of how many times each thing was reported so we can prioritize. Don't actually change anything yet.",
+      "expected_output": "A consolidation plan grouping same-root-cause reports, oldest selected as survivor per cluster, a per-cluster report count (sum of members), and a note that the GitHub author is a single bot so identity comes from the body. No mutations.",
+      "files": [],
+      "assertions": [
+        {"text": "Groups duplicates by same root cause / same feature, not merely same surface or area"},
+        {"text": "Selects the OLDEST issue (earliest createdAt) as the survivor in each cluster"},
+        {"text": "Computes a report count per surviving cluster (sum of folded-in members)"},
+        {"text": "Makes no mutations (plan only)"},
+        {"text": "Uses the body's internal reporter as identity OR notes the GitHub author is one shared bot"}
+      ]
+    },
+    {
+      "id": 2,
+      "name": "idempotent-rerun-reverse-sync",
+      "prompt": "We've been running feedback triage daily. Do another dry-run pass and tell me: (a) what new feedback needs consolidating or internal tracking, (b) which public issues could be closed because their tracked fix has shipped, and (c) confirm that anything already handled won't be touched again.",
+      "expected_output": "A pass that separates already-handled issues (managed marker present) from new work, checks tracker issue/PR state to decide fixed-close vs in-progress vs no-op, derives a version window, and confirms idempotent no-touch on handled items. No mutations.",
+      "files": [],
+      "assertions": [
+        {"text": "Distinguishes already-handled issues (managed marker present) from new/untriaged work"},
+        {"text": "Checks the linked tracker issue's state to decide fixed / in-progress / leave-open on the public side"},
+        {"text": "Confirms idempotency: already-handled items are not re-processed/re-counted/re-closed"},
+        {"text": "Derives a release/version window for tracked or fixed items (or says 'a future release')"},
+        {"text": "Makes no mutations (read-only)"}
+      ]
+    }
+  ]
+}
