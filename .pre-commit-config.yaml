@@ -101,7 +101,7 @@ repos:
         #     vectors_wrap_hygiene_test.go opens every wrap and refuses a
         #     recovered key that any other vector publishes or that a package test
         #     file or gen.mjs commits, so the openable keys stay single-use.
-        exclude: '(package-lock\.json|client/desktop/tests/fixtures/pinning/.*|services/control-plane/internal/age/testdata/.*|services/control-plane/internal/authoritycontract/testdata/vectors\.json|prototypes/.*|graphify-out/(graph\.json|graph\.html|manifest\.json))'
+        exclude: '((^|/)package-lock\.json|^services/control-plane/internal/age/testdata/.*|^services/control-plane/internal/authoritycontract/testdata/vectors\.json)$'
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
@@ -236,6 +236,13 @@ repos:
         language: script
         files: '\.env(\.example|\.local)?$'
         pass_filenames: true
+
+      - id: test-check-env-file
+        name: Test env-file lint
+        entry: bash scripts/check-env-file.test.sh
+        language: system
+        files: '^scripts/check-env-file(\.test)?\.sh$'
+        pass_filenames: false
 
       # ── Workflow-file structural guards (#920/#2274 trust-model lock-ins) ──
       # These hooks codify the desktop trust boundary and invariants surfaced
