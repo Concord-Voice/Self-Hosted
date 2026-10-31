@@ -121,12 +121,13 @@ def check_scan_consumer_policies(pr_ci, workflows, main_ci, nightly_ci):
         {"language": "actions", "runner": "blacksmith-2vcpu-ubuntu-2404", "build-mode": "none"},
         {"language": "go", "runner": "blacksmith-4vcpu-ubuntu-2404", "build-mode": "manual"},
         {"language": "javascript-typescript", "runner": "blacksmith-4vcpu-ubuntu-2404", "build-mode": "none"},
+        {"language": "python", "runner": "blacksmith-2vcpu-ubuntu-2404", "build-mode": "none"},
     ]
     matrix_input = call_inputs(codeql, "CodeQL").get("codeql-matrix")
     assert matrix_input is not None, "CodeQL needs selectable matrix input"
     default_matrix = json.loads(matrix_input["default"])
     assert isinstance(default_matrix, dict) and default_matrix.get("include") == full_matrix, (
-        "default CodeQL matrix must retain the approved include object with all three existing legs")
+        "default CodeQL matrix must retain the approved include object with every approved leg")
     require_default(codeql, "external-verdict", "false", "CodeQL")
     assert codeql["jobs"]["analyze"]["strategy"]["matrix"] == "${{ fromJSON(inputs.codeql-matrix) }}"
     require_default(semgrep, "run-custom", "true", "Semgrep")

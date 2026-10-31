@@ -260,7 +260,7 @@ jobs:
         codeql = yaml.load((ROOT / ".github/workflows/codeql.yml").read_text(),
                            Loader=yaml.BaseLoader)
         default = json.loads(codeql["on"]["workflow_call"]["inputs"]["codeql-matrix"]["default"])
-        self.assertEqual({"actions", "go", "javascript-typescript"},
+        self.assertEqual({"actions", "go", "javascript-typescript", "python"},
                          {leg["language"] for leg in default["include"]})
         full = run_codeql_matrix_step(select, FILTER_OK="false", HOTFIX="false", GO="", JS="")
         self.assertEqual(default, full, "selected legs must match codeql.yml's default legs")
@@ -269,17 +269,17 @@ jobs:
         select = yaml.load((ROOT / ".github/workflows/codeql-pr.yml").read_text(),
                            Loader=yaml.BaseLoader)["jobs"]["select"]
         cases = [
-            ({"FILTER_OK": "true", "HOTFIX": "false", "GO": "false", "JS": "false"}, ["actions"]),
-            ({"FILTER_OK": "true", "HOTFIX": "false", "GO": "true", "JS": "false"}, ["actions", "go"]),
+            ({"FILTER_OK": "true", "HOTFIX": "false", "GO": "false", "JS": "false"}, ["actions", "python"]),
+            ({"FILTER_OK": "true", "HOTFIX": "false", "GO": "true", "JS": "false"}, ["actions", "go", "python"]),
             ({"FILTER_OK": "true", "HOTFIX": "false", "GO": "false", "JS": "true"},
-             ["actions", "javascript-typescript"]),
+             ["actions", "javascript-typescript", "python"]),
             ({"FILTER_OK": "true", "HOTFIX": "true", "GO": "false", "JS": "false"},
-             ["actions", "go", "javascript-typescript"]),
+             ["actions", "go", "javascript-typescript", "python"]),
             # A failed or skipped filter (empty outputs) fails open to the full matrix.
             ({"FILTER_OK": "false", "HOTFIX": "false", "GO": "", "JS": ""},
-             ["actions", "go", "javascript-typescript"]),
+             ["actions", "go", "javascript-typescript", "python"]),
             ({"FILTER_OK": "true", "HOTFIX": "false", "GO": "", "JS": ""},
-             ["actions", "go", "javascript-typescript"]),
+             ["actions", "go", "javascript-typescript", "python"]),
         ]
         for env, languages in cases:
             with self.subTest(**env):
