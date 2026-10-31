@@ -343,14 +343,15 @@ jobs:
     if: >-
       !failure() && !cancelled() &&
       (inputs.force-coverage || format('{0}', inputs.control-plane-changed) == 'true' || needs.changes.outputs.control-plane == 'true' || github.event_name != 'pull_request')
-    # Runs on GitHub's standard public-repo runner (4 vCPU) since the public
-    # flip, split 4 ways: on 2 shards a GitHub runner hit the 25-min timeout
-    # (PR #38, run 41174159469, test step still running at 22 min). Extra
-    # shards are free on a public repo. If shards still approach the timeout,
-    # return this job to blacksmith-4vcpu-ubuntu-2404 rather than raising the
-    # cliff. Rationale: ADR-0013 §2, ADR-0016,
-    # [internal]reports/2026-06-17-pr1583-ci-deepdive-design.md (T2).
-    runs-on: ubuntu-24.04
+    # Back on Blacksmith, as this note planned if shards approached the cliff
+    # (8 vCPU: the size the rest of this workflow and .actionlint.yaml allow).
+    # The GitHub public-repo runner (4 vCPU, 4 shards) still hit the 25-min
+    # timeout: on 2026-10-31 shards 3 and 4 were cancelled at 25 min with every
+    # finished package passing (Nightly run 41194906389, PR #130 run
+    # 41194904093), and other shards took 16-24 min. Earlier: on 2 shards a
+    # GitHub runner hit it too (PR #38, run 41174159469). Rationale: ADR-0013
+    # §2, ADR-0016, [internal]reports/2026-06-17-pr1583-ci-deepdive-design.md (T2).
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     # 25, not 20: by 2026-10 a shard runs 15-20 min (shard 1: 19m53s on run
     # 37674608534), and run 37676463077 was cancelled at 20 min while still
     # testing. The headroom absorbs runner variance; it is not room for a slower
