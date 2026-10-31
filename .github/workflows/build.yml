@@ -325,7 +325,7 @@ jobs:
   # Packages observing fixed NATS subjects are serialized against each other.
   # The former shared-DB run used -p 1 and was the
   # slowest PR job (p50 ~434s test step). It is split across matrix shards
-  # (2026-07 CI deep-dive; four since the move to GitHub runners), each on its OWN isolated Postgres+Redis (matrix
+  # (2026-07 CI deep-dive; four since 2026-10, on Blacksmith 8 vCPU), each on its OWN isolated Postgres+Redis (matrix
   # creates independent job instances with their own service containers), to
   # roughly halve wall time / PR feedback latency. Within each shard, the
   # wrapper clones a migrated template for every test binary, so the fixture's
@@ -344,7 +344,7 @@ jobs:
       !failure() && !cancelled() &&
       (inputs.force-coverage || format('{0}', inputs.control-plane-changed) == 'true' || needs.changes.outputs.control-plane == 'true' || github.event_name != 'pull_request')
     # Back on Blacksmith, as this note planned if shards approached the cliff
-    # (8 vCPU: the size the rest of this workflow and .actionlint.yaml allow).
+    # (8 vCPU: the smallest Blacksmith size .actionlint.yaml allows).
     # The GitHub public-repo runner (4 vCPU, 4 shards) still hit the 25-min
     # timeout: on 2026-10-31 shards 3 and 4 were cancelled at 25 min with every
     # finished package passing (Nightly run 41194906389, PR #130 run
