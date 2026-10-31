@@ -243,7 +243,7 @@ The project's architecture decision records capture the deploy-contract rational
 
 #### Desktop Auto-Update Trust Model
 
-The SPA hot-update path above is distinct from the **binary** auto-update path that ships new Electron app versions. The latter is a security-critical, signature-verified pipeline in `src/main/` (see the [update trust model](policies/update-trust-model.md)):
+The SPA hot-update path above is distinct from the **binary** auto-update path that ships new Electron app versions. The latter is a security-critical, signature-verified pipeline in `src/main/` (see the [update trust model](https://github.com/Concord-Voice/Desktop/blob/main/docs/policies/update-trust-model.md) in the Desktop repository):
 
 - **`updater.ts`** — `electron-updater` wiring with `autoDownload = false` (the download is a deliberate, user-gated step, not silent), prerelease opt-in gating, and a static public GitHub recovery feed (`releases/latest/download`). It pins the Windows publisher chain by monkey-patching `verifyUpdateCodeSignature` to require the Microsoft Trusted Signing intermediate (`verifyWindowsSignature.ts`). The API host carries no TLS certificate pin — see [`docs/policies/api-tls-trust-model.md`](policies/api-tls-trust-model.md).
 - **`verifyWindowsSignature.ts`** — independently verifies the Authenticode signature on the downloaded Windows installer.
