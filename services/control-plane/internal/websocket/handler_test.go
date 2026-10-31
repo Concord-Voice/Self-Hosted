@@ -712,12 +712,15 @@ func testHandleWebSocketClientVersionFloor(t *testing.T, authPathName string, au
 		name          string
 		minimum       string
 		ios           string
+		android       string
 		platform      string
 		clientVersion string
 		wantStatus    int
 	}{
 		{name: "iOS uses its own floor", minimum: "3.0.0", ios: "1.0.0", platform: "ios", clientVersion: "1.0.0", wantStatus: http.StatusSwitchingProtocols},
 		{name: "iOS older", minimum: "0.1.0", ios: "1.0.0", platform: "ios", clientVersion: "0.9.0", wantStatus: http.StatusForbidden},
+		{name: "Android uses its own floor", minimum: "3.0.0", android: "1.0.0", platform: "android", clientVersion: "1.0.0", wantStatus: http.StatusSwitchingProtocols},
+		{name: "Android older", minimum: "0.1.0", android: "1.0.0", platform: "android", clientVersion: "0.9.0", wantStatus: http.StatusForbidden},
 		{name: "unknown platform", platform: "web", clientVersion: "3.0.0", wantStatus: http.StatusBadRequest},
 		{name: "Pilot equal", minimum: "1.0.0", clientVersion: "1.0.0-pilot.0", wantStatus: http.StatusSwitchingProtocols},
 		{name: "Pilot newer", minimum: "1.0.0", clientVersion: "1.1.0-pilot.2", wantStatus: http.StatusSwitchingProtocols},
@@ -735,7 +738,7 @@ func testHandleWebSocketClientVersionFloor(t *testing.T, authPathName string, au
 
 	for _, test := range tests {
 		t.Run(authPathName+"/"+test.name, func(t *testing.T) {
-			handler.SetClientMinimums(middleware.ClientMinimums{Desktop: test.minimum, IOS: test.ios})
+			handler.SetClientMinimums(middleware.ClientMinimums{Desktop: test.minimum, IOS: test.ios, Android: test.android})
 			wsURL := "ws" + server.URL[4:] + authPath(t, db, redisClient, access) + "&client_version=" + test.clientVersion
 			if test.platform != "" {
 				wsURL += "&client_platform=" + test.platform
@@ -761,8 +764,11 @@ func testHandleWebSocketClientVersionFloor(t *testing.T, authPathName string, au
 			}
 
 			wantMinimum := test.minimum
-			if test.platform == "ios" {
+			switch test.platform {
+			case "ios":
 				wantMinimum = test.ios
+			case "android":
+				wantMinimum = test.android
 			}
 			var body attestation.ErrorResponse
 			require.NoError(t, json.NewDecoder(response.Body).Decode(&body))
