@@ -118,10 +118,10 @@ def check_scan_consumer_policies(pr_ci, workflows, main_ci, nightly_ci):
         assert actual.get("default") == expected, f"{owner}.{name} default must remain {expected}"
 
     full_matrix = [
-        {"language": "actions", "runner": "blacksmith-2vcpu-ubuntu-2404", "build-mode": "none"},
-        {"language": "go", "runner": "blacksmith-4vcpu-ubuntu-2404", "build-mode": "manual"},
-        {"language": "javascript-typescript", "runner": "blacksmith-4vcpu-ubuntu-2404", "build-mode": "none"},
-        {"language": "python", "runner": "blacksmith-2vcpu-ubuntu-2404", "build-mode": "none"},
+        {"language": "actions", "runner": "ubuntu-24.04", "build-mode": "none"},
+        {"language": "go", "runner": "ubuntu-24.04", "build-mode": "manual"},
+        {"language": "javascript-typescript", "runner": "ubuntu-24.04", "build-mode": "none"},
+        {"language": "python", "runner": "ubuntu-24.04", "build-mode": "none"},
     ]
     matrix_input = call_inputs(codeql, "CodeQL").get("codeql-matrix")
     assert matrix_input is not None, "CodeQL needs selectable matrix input"

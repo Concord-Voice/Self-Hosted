@@ -84,7 +84,7 @@ jobs:
 
   select-licenses:
     name: select-licenses
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -182,7 +182,7 @@ jobs:
     name: npm — selected workspaces license allowlist and NOTICE attribution
     needs: [ioc, select-licenses]
     if: ${{ !cancelled() && needs.ioc.result == 'success' && (needs.select-licenses.result != 'success' || needs.select-licenses.outputs.full-scan == 'true' || needs.select-licenses.outputs.npm-workspaces != '[]') }}
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     permissions:
       contents: read
@@ -224,7 +224,7 @@ jobs:
     name: Go — control-plane runtime license allowlist
     needs: [ioc, select-licenses]
     if: ${{ !cancelled() && needs.ioc.result == 'success' && (needs.select-licenses.result != 'success' || needs.select-licenses.outputs.full-scan == 'true' || needs.select-licenses.outputs.go != 'false') }}
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read

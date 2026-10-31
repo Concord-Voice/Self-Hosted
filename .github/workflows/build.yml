@@ -93,7 +93,7 @@ jobs:
   # ─── Detect which components changed ─────────────────────────────────
   changes:
     name: Detect changes
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     # Callers with precomputed filters skip only these detection steps. Keeping
     # the job successful is the sentinel that lets SonarCloud run when every
@@ -291,7 +291,7 @@ jobs:
     # that always() relaxed — both clauses are required (the #906/#910
     # cascade was caused by missing the second half of this pattern).
     if: always() && needs.desktop.result == 'success'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - name: Download shard 1 coverage
@@ -350,7 +350,11 @@ jobs:
     # 4->2 downsize would regress toward that cliff. An 8 vCPU *upsize* is a
     # separate measure-first trial (ADR-0016 AI#2 / #1414), NOT a default. Rationale:
     # ADR-0013 §2, ADR-0016, [internal]reports/2026-06-17-pr1583-ci-deepdive-design.md (T2).
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # Since the public flip this runs on GitHub's standard runner, which also has
+    # 4 vCPU (the 2026-06 GitHub figure above was the private-repo 2-vCPU runner).
+    # If shards approach the timeout, return this job to blacksmith-4vcpu rather
+    # than downsizing or raising the cliff.
+    runs-on: ubuntu-24.04
     # 25, not 20: by 2026-10 a shard runs 15-20 min (shard 1: 19m53s on run
     # 37674608534), and run 37676463077 was cancelled at 20 min while still
     # testing. The headroom absorbs runner variance; it is not room for a slower
@@ -684,7 +688,7 @@ jobs:
     # coverage flag -> sonar skips control-plane coverage, exactly as an
     # unsharded control-plane failure behaved.
     if: always() && needs.control-plane.result == 'success'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       # Pin every action to a verified immutable commit; keep the release comment
@@ -744,7 +748,7 @@ jobs:
     if: >-
       !failure() && !cancelled() &&
       (inputs.force-coverage || format('{0}', inputs.media-plane-tests-changed) == 'true' || needs.changes.outputs.media-plane-tests == 'true' || github.event_name != 'pull_request')
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -807,7 +811,7 @@ jobs:
     if: >-
       !failure() && !cancelled() &&
       (inputs.force-coverage || format('{0}', inputs.admin-changed) == 'true' || needs.changes.outputs.admin == 'true' || github.event_name != 'pull_request')
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1

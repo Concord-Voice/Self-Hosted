@@ -212,8 +212,8 @@ jobs:
     needs: [ioc, detect-changes]
     if: ${{ !inputs.enforcement-only && needs.detect-changes.outputs.go-lint == 'true' }}
     # Codesmith measured a CPU-bound whole-module lint: 4 vCPU improves p50
-    # feedback from 1m53s to 1m04s for about $2/month additional runner spend.
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    # feedback from 1m53s to 1m04s. GitHub's public-repo runner has 4 vCPU.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read
@@ -280,9 +280,9 @@ jobs:
     # removes default needs-success chaining so detector failure is conservative;
     # explicit IOC success still precedes every repository-code execution.
     if: ${{ !inputs.enforcement-only && !cancelled() && needs.ioc.result == 'success' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.static_guards || needs.detect-changes.outputs.spa == 'true' || needs.detect-changes.outputs.services == 'true') }}
-    # ADR-0016: relevant or uncertain self-host work includes CPU-bound Docker
-    # fixtures; confirmed unrelated lint/verify work stays on the 2-vCPU tier.
-    runs-on: ${{ (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.selfhost != 'false') && 'blacksmith-4vcpu-ubuntu-2404' || 'blacksmith-2vcpu-ubuntu-2404' }}
+    # Formerly sized 2 or 4 vCPU by self-host relevance (ADR-0016). GitHub's
+    # standard public-repo runner has 4 vCPU, so one label now serves both.
+    runs-on: ubuntu-24.04
     # The complete deployment suite builds tooling images and runs bounded
     # readiness tests; #3774 set this budget so its fixtures can finish. The
     # managed firewall suite, which used most of it, now runs in its own job.
@@ -573,9 +573,9 @@ jobs:
   detect-changes:
     name: detect-changes
     if: ${{ inputs.enforcement-only || !(github.event.action == 'edited' && github.event.changes.base == null && (github.event.changes.title != null || github.event.changes.body != null)) }}
-    # ADR-0013 §2 / ADR-0005 §3: ADR-0016 measured sub-minute parity;
-    # 2-vCPU Blacksmith is the half-cost tier for detect/verify work.
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    # ADR-0013 §2 / ADR-0005 §3: sub-minute detect/verify work runs on GitHub's
+    # standard runner, which is free for this public repository.
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -769,9 +769,9 @@ jobs:
     if: ${{ !inputs.enforcement-only && !cancelled() && needs.ioc.result == 'success' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.workflow_lint) }}
     permissions:
       contents: read
-    # ADR-0013 §2 / ADR-0005 §3: ADR-0016 measured sub-minute parity;
-    # 2-vCPU Blacksmith is the half-cost tier for detect/verify work.
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    # ADR-0013 §2 / ADR-0005 §3: sub-minute detect/verify work runs on GitHub's
+    # standard runner, which is free for this public repository.
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -920,7 +920,7 @@ jobs:
     env:
       PYTHONSAFEPATH: '1'
       PYTHONPATH: ''
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -977,7 +977,7 @@ jobs:
     if: ${{ always() && (inputs.enforcement-only || !(github.event.action == 'edited' && github.event.changes.base == null && (github.event.changes.title != null || github.event.changes.body != null))) }}
     permissions:
       contents: read
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       selection: ${{ steps.report.outputs.selection }}

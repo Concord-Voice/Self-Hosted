@@ -39,7 +39,7 @@ permissions:
 jobs:
   analysis:
     name: Scorecard analysis
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     # Scorecard only supports the default branch; guard non-default refs
     # (e.g., a branch_protection_rule event on a non-default branch rule).
     if: github.event.repository.default_branch == github.ref_name

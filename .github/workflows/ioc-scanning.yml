@@ -45,7 +45,7 @@ jobs:
   # See [internal]supply-chain-defense.md. Spec: #715.
   supply-chain-scan:
     name: Supply-chain IOC scan
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     # Protected scripts run from the PR checkout. Keep PR-root Python modules
     # out of sys.path while retaining the user-site PyYAML installed below.
@@ -241,7 +241,7 @@ jobs:
     name: Supply-chain scanner self-test
     needs: [supply-chain-scan]
     if: needs.supply-chain-scan.outputs.security-scripts == 'true'
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read

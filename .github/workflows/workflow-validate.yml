@@ -26,7 +26,7 @@ jobs:
       github.event.pull_request.base.ref == 'main'
       && contains(github.event.pull_request.labels.*.name, 'workflow-validation: dispatch')
       && github.event.pull_request.head.repo.full_name != github.repository
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       pull-requests: write
@@ -53,7 +53,7 @@ jobs:
       github.event.pull_request.base.ref == 'main'
       && contains(github.event.pull_request.labels.*.name, 'workflow-validation: dispatch')
       && github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read

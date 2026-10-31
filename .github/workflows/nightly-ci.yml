@@ -76,7 +76,7 @@ jobs:
   # ─── Scan window + pending-release probe ─────────────────────────────
   window:
     name: Resolve scan window
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -256,7 +256,7 @@ jobs:
     name: summary
     needs: [window, ioc, eslint, codeql, govulncheck, secret-scanning, container-image-scan, scorecard, build, unit-smoke, zap]
     if: always()
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
