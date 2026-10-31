@@ -229,7 +229,9 @@ jobs:
 
       - name: Install golangci-lint (rev from .pre-commit-config.yaml)
         run: |
-          VERSION=$(grep -A1 -F 'repo: https://github.com/golangci/golangci-lint' .pre-commit-config.yaml | sed -n 's/^ *rev: *//p')
+          # The rev is a frozen commit SHA; the release tag rides in its
+          # `# frozen: vX.Y.Z` comment.
+          VERSION=$(grep -A1 -F 'repo: https://github.com/golangci/golangci-lint' .pre-commit-config.yaml | sed -n 's/^ *rev: *[0-9a-f]\{40\} *# frozen: *//p')
           # Fail closed: an empty, reshaped, or multi-match rev must not reach
           # `go install`. [[ =~ ]] anchors to the WHOLE string; a per-line
           # grep would pass two matched revs joined by a newline.
