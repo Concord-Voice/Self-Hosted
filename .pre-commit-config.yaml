@@ -52,7 +52,8 @@ repos:
       - id: go-toolchain-alignment
         name: Go toolchain matches all Docker builders
         entry: python3 scripts/check-go-toolchain.py
-        language: system
+        language: python
+        additional_dependencies: ['PyYAML==6.0.3']
         files: '^(services/control-plane/(go\.mod|Dockerfile(?:\.(?:ops-agent|redis-auth-controller))?)|scripts/(?:test-)?check-go-toolchain\.py|\.pre-commit-config\.yaml)$'
         pass_filenames: false
       - id: test-go-toolchain-alignment
@@ -218,7 +219,8 @@ repos:
         # so the developer sees the warning). Exit 1 (self-hosted+non-allowlisted)
         # and 10 (parser failure) still block.
         entry: bash -c 'scripts/security/check-self-hosted-runners.sh; rc=$?; [ "$rc" = "2" ] && exit 0 || exit $rc'
-        language: system
+        language: python
+        additional_dependencies: ['PyYAML==6.0.3']
         pass_filenames: false
         files: '^\.github/workflows/.*\.ya?ml$'
 
@@ -278,14 +280,16 @@ repos:
       - id: lint-workflow-call-contract
         name: workflow lint — workflow_call contract (permissions superset + secrets agree)
         entry: bash .github/scripts/lint-workflow-call-contract.sh .
-        language: system
+        language: python
+        additional_dependencies: ['PyYAML==6.0.3']
         files: '^(\.github/scripts/lint-workflow-call-contract\.sh|\.github/scripts/tests/lint-workflow-call-contract\.test\.sh|\.github/workflows/.*\.ya?ml)$'
         pass_filenames: false
 
       - id: test-lint-workflow-call-contract
         name: workflow lint self-test — workflow_call contract
         entry: bash .github/scripts/tests/lint-workflow-call-contract.test.sh
-        language: system
+        language: python
+        additional_dependencies: ['PyYAML==6.0.3']
         files: '^(\.github/scripts/lint-workflow-call-contract\.sh|\.github/scripts/tests/lint-workflow-call-contract\.test\.sh|\.github/workflows/.*\.ya?ml)$'
         pass_filenames: false
 
@@ -298,7 +302,8 @@ repos:
         # at if-eval time rather than at action runtime (PR #904 class).
         entry: .github/scripts/lint-multisecret-andcheck.sh
         args: ['.github/workflows/']
-        language: script
+        language: python
+        additional_dependencies: ['PyYAML==6.0.3']
         files: '^\.github/workflows/.*\.ya?ml$'
         pass_filenames: false
 
@@ -673,7 +678,8 @@ repos:
       - id: test-go-transitive-flush-render
         name: 'Test go-transitive-flush PR-body render (#1212)'
         entry: bash scripts/tests/test-go-transitive-flush-render.sh
-        language: system
+        language: python
+        additional_dependencies: ['PyYAML==6.0.3']
         files: '^(\.pre-commit-config\.yaml|\.github/workflows/go-transitive-flush\.yml|scripts/tests/test-go-transitive-flush-render\.sh)$'
         pass_filenames: false
 
