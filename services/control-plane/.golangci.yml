@@ -24,4 +24,6 @@ linters:
         - G701
 
 run:
-  timeout: 5m
+  # 10m: a cold Go build cache on GitHub's 4 vCPU runner exceeded 5m loading
+  # packages (PR #38); warm runs finish in about a minute.
+  timeout: 10m

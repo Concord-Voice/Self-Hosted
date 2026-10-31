@@ -144,7 +144,7 @@ jobs:
       group: required-pr-install-script-comments-${{ github.event.pull_request.number }}
       cancel-in-progress: false
       queue: max
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       actions: read
@@ -261,7 +261,7 @@ jobs:
     env:
       PYTHONSAFEPATH: '1'
       PYTHONPATH: ''
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -313,7 +313,7 @@ jobs:
       contents: read
       pull-requests: read
       security-events: read
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       # always() is load-bearing: failed dependencies still need the trusted verifier source.

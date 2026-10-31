@@ -53,7 +53,7 @@ jobs:
   semgrep:
     name: Semgrep SAST
     if: inputs.run-custom || inputs.run-community || inputs.run-canary
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:
       contents: read

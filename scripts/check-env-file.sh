@@ -8,6 +8,8 @@
 #
 # Rejected metachars (unquoted): <, >, ;, space, backtick, $, |, &, \
 # Rejected patterns:
+#   - A key that is not entirely [A-Z_][A-Z0-9_]*
+#   - $ or backtick inside a double-quoted value (bash still expands them)
 #   - Quoted value followed by more content (e.g. KEY="foo" "bar")
 #   - Opened quote that does not close on the same line
 #   - Lines that don't match KEY=VALUE form
@@ -74,15 +76,14 @@ for file in "$@"; do
       ''|'#'*) continue ;;
     esac
 
-    # Must match KEY=... form (uppercase/underscore/digit identifier)
-    case "$line" in
-      [A-Z_]*=*) : ;;
-      *)
-        echo "$file:$line_num: not a valid KEY=VALUE line: $line" >&2
-        file_errors=$((file_errors + 1))
-        continue
-        ;;
-    esac
+    # Must match KEY=... form. The WHOLE key must be an uppercase
+    # identifier: checking only its first character let A$(id)=x through,
+    # which runs `id` when the file is sourced.
+    if ! [[ "$line" =~ ^[A-Z_][A-Z0-9_]*= ]]; then
+      echo "$file:$line_num: not a valid KEY=VALUE line: $line" >&2
+      file_errors=$((file_errors + 1))
+      continue
+    fi
 
     value="${line#*=}"
 
@@ -98,6 +99,14 @@ for file in "$@"; do
         case "$interior" in
           *'"'*)
             echo "$file:$line_num: value has content outside the quoted region — e.g. KEY=\"foo\" \"bar\": $line" >&2
+            file_errors=$((file_errors + 1))
+            continue
+            ;;
+          *'$'*|*'`'*)
+            # Double quotes still expand $VAR, $(...) and `...` when the
+            # file is sourced, so a quoted value is no safer than a bare one.
+            echo "$file:$line_num: double-quoted value contains \$ or a backtick, which bash expands when sourced: $line" >&2
+            echo "  fix: use single quotes — KEY='...' keeps \$ and backticks literal" >&2
             file_errors=$((file_errors + 1))
             continue
             ;;
@@ -213,7 +222,7 @@ for file in "$@"; do
     case "$value" in
       *' '*|*'<'*|*'>'*|*';'*|*'`'*|*'$'*|*'|'*|*'&'*|*'\'*)
         echo "$file:$line_num: unquoted value contains shell metacharacter (one of: space, <, >, ;, \`, \$, |, &, \\): $line" >&2
-        echo "  fix: wrap the value in double quotes — KEY=\"...\"  (use single quotes if the value itself contains \$ that should stay literal)" >&2
+        echo "  fix: wrap the value in single quotes — KEY='...' (double quotes still expand \$ and backticks)" >&2
         file_errors=$((file_errors + 1))
         ;;
     esac

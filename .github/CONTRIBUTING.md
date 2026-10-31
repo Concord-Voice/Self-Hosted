@@ -241,7 +241,7 @@ golangci-lint run --timeout=5m
 Go linting runs automatically on staged Go files before each commit. If linting fails, the commit will be blocked. Fix the issue — never bypass with `--no-verify`.
 
 **CI/CD:**
-`pr-ci.yml`'s `golangci-lint` job runs `golangci-lint run ./...` over the whole control-plane module on every PR that touches `services/control-plane/**`, `.pre-commit-config.yaml`, or `.github/workflows/pr-ci.yml`. It runs on pull requests only; nothing lints after merge. It reads its version from the pre-commit hook's `rev`, so both gates run the same release. The job is **advisory**: a failure turns the PR's CI red, but it is not a required status check and does not block merge. Fix it anyway — `main` is 0 issues, so a finding is one your change introduced. The blocking gate is the local pre-commit hook.
+`pr-ci.yml`'s `golangci-lint` job runs `golangci-lint run ./...` over the whole control-plane module on every PR that touches `services/control-plane/**`, `.pre-commit-config.yaml`, or `.github/workflows/pr-ci.yml`. It runs on pull requests only; nothing lints after merge. It reads its version from the `# frozen: vX.Y.Z` comment on the pre-commit hook's SHA-pinned `rev`, so both gates run the same release. The job is **advisory**: a failure turns the PR's CI red, but it is not a required status check and does not block merge. Fix it anyway — `main` is 0 issues, so a finding is one your change introduced. The blocking gate is the local pre-commit hook.
 
 ### TypeScript/React (Frontend)
 

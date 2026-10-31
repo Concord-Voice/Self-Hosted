@@ -26,9 +26,9 @@ const FILTER_KEYS = [...ANALYSIS_KEYS, ...COMPONENT_KEYS, ...ADVISORY_FILTER_KEY
   ...WORKER_KEYS, ...NPM_LICENSE_KEYS, 'license_go', 'all_changed'];
 
 const CODEQL = {
-  codeql_actions: { language: 'actions', runner: 'blacksmith-2vcpu-ubuntu-2404', 'build-mode': 'none' },
-  codeql_go: { language: 'go', runner: 'blacksmith-4vcpu-ubuntu-2404', 'build-mode': 'manual' },
-  codeql_js: { language: 'javascript-typescript', runner: 'blacksmith-4vcpu-ubuntu-2404', 'build-mode': 'none' },
+  codeql_actions: { language: 'actions', runner: 'ubuntu-24.04', 'build-mode': 'none' },
+  codeql_go: { language: 'go', runner: 'ubuntu-24.04', 'build-mode': 'manual' },
+  codeql_js: { language: 'javascript-typescript', runner: 'ubuntu-24.04', 'build-mode': 'none' },
 };
 
 const sha = value => typeof value === 'string' && /^[0-9a-f]{40}$/.test(value);

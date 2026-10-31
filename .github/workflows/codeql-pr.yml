@@ -31,7 +31,7 @@ jobs:
   select:
     if: ${{ !(github.event.action == 'edited' && github.event.changes.base == null && (github.event.changes.title != null || github.event.changes.body != null)) }}
     name: Select CodeQL languages
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: read
@@ -67,10 +67,10 @@ jobs:
           JS: ${{ steps.filter.outputs.codeql_js }}
         run: |
           set -euo pipefail
-          actions='{"language":"actions","runner":"blacksmith-2vcpu-ubuntu-2404","build-mode":"none"}'
-          go='{"language":"go","runner":"blacksmith-4vcpu-ubuntu-2404","build-mode":"manual"}'
-          js='{"language":"javascript-typescript","runner":"blacksmith-4vcpu-ubuntu-2404","build-mode":"none"}'
-          py='{"language":"python","runner":"blacksmith-2vcpu-ubuntu-2404","build-mode":"none"}'
+          actions='{"language":"actions","runner":"ubuntu-24.04","build-mode":"none"}'
+          go='{"language":"go","runner":"ubuntu-24.04","build-mode":"manual"}'
+          js='{"language":"javascript-typescript","runner":"ubuntu-24.04","build-mode":"none"}'
+          py='{"language":"python","runner":"ubuntu-24.04","build-mode":"none"}'
           legs=("$actions")
           if [[ "$FILTER_OK" != true || "$HOTFIX" == true || "$GO" != false ]]; then legs+=("$go"); fi
           if [[ "$FILTER_OK" != true || "$HOTFIX" == true || "$JS" != false ]]; then legs+=("$js"); fi

@@ -581,7 +581,7 @@ for (const suite of suites) {
 }
 
 const goMatrix = JSON.parse(selected({ ...outputs, codeql_go: 'true' }, pushMeta).codeql_matrix).include;
-assert.deepEqual(goMatrix, [{ language: 'go', runner: 'blacksmith-4vcpu-ubuntu-2404', 'build-mode': 'manual' }],
+assert.deepEqual(goMatrix, [{ language: 'go', runner: 'ubuntu-24.04', 'build-mode': 'manual' }],
   'selected CodeQL matrix preserves the existing Go leg values');
 const docsMatrix = JSON.parse(selected({ ...outputs, semgrep_community: 'true' }, meta).codeql_matrix);
 assert.deepEqual(docsMatrix, { include: [] }, 'docs-only scans allocate no CodeQL leg');
