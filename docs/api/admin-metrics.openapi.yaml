@@ -10,7 +10,7 @@ info:
     url: https://github.com/Concord-Voice/Self-Hosted
   license:
     name: CVSL 1.0
-    url: internal development reference omitted
+    url: https://github.com/Concord-Voice/Self-Hosted/blob/main/LICENSE
 servers:
   - url: https://{adminHost}/admin/api/v1
     description: Deployment-provided hosted admin endpoint
