@@ -143,6 +143,7 @@ gate can learn from your voice.
 ### Security
 
 - **Accounts:** Your encrypted key is only sent to a device that has just signed in, or that confirms your current password, so a stolen session can no longer download it. Changing your password asks for your current password as before.
+- **Accounts:** Guessing passwords on the key-reveal route now counts toward the same sign-in failure ban as the login page, and its attempt limits fail closed. API: a wrong `current_password` on `POST /api/v1/users/me/keys/reveal` is now 403 `invalid_current_password` instead of 401.
 - **Voice:** One account can no longer fill the voice server's connection capacity with idle connections and lock other users out of voice.
 - **Accounts:** A device signed out while its account-deletion request was still processing can no longer delete the account ([#4192](internal development reference omitted)).
 - **Accounts:** Signing out a device or revoking a session cuts it off everywhere at once. Its open connection and any voice call end before the change is confirmed, and a signed-out device can no longer act on your account.
