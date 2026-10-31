@@ -2,9 +2,12 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
-if [[ ! -f "$ROOT/.github/workflows/sonarcloud.yml" ]]; then
-  # F7: the Sonar workflow and Alpha ruleset appliers are still outside this
-  # split checkout. Keep the shared scan and required-workflow suites active.
+if [[ ! -f "$ROOT/infrastructure/github/apply-alpha-scan-relevance.sh" ]]; then
+  # The cases below drive Alpha's ruleset appliers under infrastructure/github,
+  # which stay with Alpha. Run the suites this split checkout owns, including
+  # the protected Sonar bridge (F7, #36).
+  python3 -m unittest discover -s "$ROOT/.github/scripts/tests" -p test_protected_sonar_workflows.py
+  python3 -m unittest discover -s "$ROOT/scripts/sonar/tests"
   python3 "$ROOT/.github/scripts/tests/test_sonar_ioc_conditions.py"
   python3 "$ROOT/.github/scripts/tests/test_codeql_required_workflow.py"
   python3 "$ROOT/.github/scripts/tests/test_ci_scan_verdict.py"
@@ -635,7 +638,7 @@ with tempfile.TemporaryDirectory() as temporary:
     publish_case({"count": 1, "warnings": ["untrusted text"]}, [attacker, bot], None)
     publish_case({"count": 1, "warnings": [warning + "x" * 1000]}, [attacker, bot], None)
 result = jobs["result"]
-assert result["needs"] == ["pr-ci", "osv", "publish-install-script-warnings", "migration-lint"]
+assert result["needs"] == ["pr-ci", "protected-sonar", "osv", "publish-install-script-warnings", "migration-lint"]
 assert result["if"] == "${{ always() }}"
 assert result["permissions"] == {
     "actions": "read", "checks": "read", "contents": "read",
@@ -765,10 +768,19 @@ assert require["env"] == {
     "PR_CI_RESULT": "${{ needs.pr-ci.result }}",
     "PUBLISH_RESULT": "${{ needs.publish-install-script-warnings.result }}",
     "OSV_RESULT": "${{ needs.osv.result }}",
+    "SONAR_RESULT": "${{ needs.protected-sonar.result }}",
     "VERIFIER_OUTCOME": "${{ steps.verify.outcome }}",
     "PINS_OUTCOME": "${{ steps.pins.outcome }}",
     "MIGRATION_LINT_RESULT": "${{ needs.migration-lint.result }}",
 }
+# A failed or cancelled Sonar bridge blocks even if the verifier passed; an
+# unselected (skipped) bridge leaves the verdict to the selection policy.
+for sonar_result, passes in (("success", True), ("skipped", True), ("failure", False), ("cancelled", False)):
+    outcome = subprocess.run(["bash", "-c", require["run"]], capture_output=True, text=True, env={
+        **os.environ, "PR_CI_RESULT": "success", "PUBLISH_RESULT": "success", "OSV_RESULT": "skipped",
+        "SONAR_RESULT": sonar_result, "VERIFIER_OUTCOME": "success", "PINS_OUTCOME": "success",
+        "MIGRATION_LINT_RESULT": "skipped"})
+    assert (outcome.returncode == 0) == passes, (sonar_result, outcome)
 
 ioc_workflow = yaml.load(
     (root / ".github/workflows/ioc-scanning.yml").read_text(),
@@ -1315,7 +1327,7 @@ else:
         "client/admin/src/formatMetric.ts",
         "docs/adr/0018-ci-workflow-orchestration.md"]
     main_sha = "a" * 40
-    pinned_pr_ci_sha = "cb10844a7860092011f96b4607682ef2e6c55a80"  # pragma: allowlist secret -- public workflow commit
+    pinned_pr_ci_sha = "a02ae6921ccffa378560d5293bc10a8fa481deaa"  # pragma: allowlist secret -- public workflow commit
     full_pr = {"number": 100, "head": {"sha": "e" * 40}, "base": {"sha": main_sha}}
     prs = [full_pr]
     heads = []
@@ -1554,7 +1566,7 @@ elif path.startswith("repos/Concord-Voice/Self-Hosted/actions/jobs/") and path.e
     skipped = ("codeql_actions, codeql_go, codeql_js, eslint, govulncheck, osv, semgrep_canary, semgrep_custom, sonar, sonar_admin, sonar_control_plane, sonar_desktop, sonar_force_all, sonar_media_plane"
                if mode == "required-relevant" else "none")
     selected = "semgrep_community" if mode == "required-relevant" else "all"
-    print(f"policy=cb10844a7860092011f96b4607682ef2e6c55a80 head={run['head_sha']} merge={pr['merge_commit_sha']} mode={mode} selected={selected} skipped={skipped}")
+    print(f"policy=a02ae6921ccffa378560d5293bc10a8fa481deaa head={run['head_sha']} merge={pr['merge_commit_sha']} mode={mode} selected={selected} skipped={skipped}")
     raise SystemExit(0)
 elif path.endswith("actions/variables/" + "CI_SCAN_RELEVANCE_MODE"):
     state["variable_reads"] = state.get("variable_reads", 0) + 1; save()
