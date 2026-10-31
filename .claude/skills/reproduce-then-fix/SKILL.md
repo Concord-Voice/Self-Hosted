@@ -30,7 +30,7 @@ This skill encodes a non-negotiable ordering: **failing test exists and is commi
 
 # Reproduce-Then-Fix
 
-A bounded, test-first debugging workflow for issue `$0` — a numeric GitHub issue number (validated in Step 1.1).
+A bounded, test-first debugging workflow for issue `$0` — a numeric GitHub issue number (validated at the start of Step 1.0).
 
 ---
 
@@ -40,22 +40,23 @@ A bounded, test-first debugging workflow for issue `$0` — a numeric GitHub iss
 
 `/dev-lifecycle` routes bugs here before its own branch step, so this skill selects the branch itself. Never commit onto the default branch.
 
+Validate that `$0` is a numeric issue number before touching any branch. If `$0` is not numeric (e.g., free-text description), refuse to proceed and instruct the developer to file an issue via `/issue-creation`, then re-invoke `/reproduce-then-fix <new-issue-number>`. The branch name, commit messages and PR body templates reference `#$0` and `Closes #$0`, which require a numeric value. Also stop if `git status --porcelain` shows uncommitted changes, so a checkout cannot carry them onto the wrong branch.
+
 ```bash
+case "$0" in ''|*[!0-9]*) echo "Issue number must be numeric: $0" >&2; exit 1 ;; esac
 BRANCH=$(git branch --list "feature/$0-*" --format='%(refname:short)' | head -1)
 [ -z "$BRANCH" ] && BRANCH=$(git branch -r --list "origin/feature/$0-*" --format='%(refname:short)' | head -1)
 if [ -n "$BRANCH" ]; then
   git checkout "${BRANCH#origin/}" 2>/dev/null || git checkout --track "$BRANCH"
 else
   # Topic is 2-4 significant words from the issue title, lowercased, hyphenated.
-  git checkout -b feature/$0-<topic>
+  git checkout -b "feature/$0-<topic>"
 fi
 ```
 
 ### Step 1.1 — Gather the symptom
 
-Validate that `$0` is a numeric issue number first. If `$0` is not numeric (e.g., free-text description), refuse to proceed and instruct the developer to file an issue via `/issue-creation`, then re-invoke `/reproduce-then-fix <new-issue-number>`. The downstream commit messages and PR body templates reference `#$0` and `Closes #$0`, which require a numeric value.
-
-Once validated, pull the issue brief:
+With `$0` validated in Step 1.0, pull the issue brief:
 
 ```bash
 gh issue view $0 --json title,body,labels,comments --jq '{title: .title, body: .body, labels: [.labels[].name], comments: [.comments[] | {author: .author.login, body: .body}]}'

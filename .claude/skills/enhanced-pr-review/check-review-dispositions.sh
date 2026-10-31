@@ -242,18 +242,20 @@ if [ -n "$ROSTER_RAW" ]; then
 fi
 
 # --- Assertion 1 — thread coverage -------------------------------------------
-# A thread is IN SCOPE if it is unresolved or bot-authored. A human-authored
+# A thread is IN SCOPE if it is unresolved or reviewer-authored (a bot, or a rostered machine account). A human-authored
 # thread a human already resolved is self-evidently decided; requiring a marker
 # there would be ceremony, not coverage.
 # A rostered machine USER account is a reviewer too (see `rostered` below), so its
 # resolved threads stay in scope and its own comments never count as a disposition.
-THREAD_ROWS=$(echo "$RAW" | jq -r --argjson roster "$ROSTER_JSON" '
-  def rostered($login):
-      ($login // "" | ascii_downcase) as $l
-    | ($roster | map(. as $e | select(
-          ((($e.login // "") | ascii_downcase | sub("\\[bot\\]$";"")) == $l)
+# Shared by Assertions 1 and 3 so the two cannot drift. A null login (a deleted
+# account) or an empty roster login never matches, so a ghost author is not a reviewer.
+JQ_ROSTERED='def rostered($login):
+      (($login // "") | ascii_downcase) as $l
+    | $l != "" and (($roster | map(. as $e | select(
+          ((($e.login // "") | ascii_downcase | sub("\\[bot\\]$";"")) as $el | $el != "" and $el == $l)
           or ((($e.match // "") != "") and ($l | contains($e.match | ascii_downcase)))))
-       | length) > 0;
+       | length) > 0);'
+THREAD_ROWS=$(echo "$RAW" | jq -r --argjson roster "$ROSTER_JSON" "$JQ_ROSTERED"'
   def reviewer: .author.__typename == "Bot" or rostered(.author.login);
   .data.repository.pullRequest.reviewThreads.nodes[]
   | select(.isResolved == false or (.comments.nodes[0] | reviewer))
@@ -445,7 +447,7 @@ fi
 #
 # Resolution order per comment: roster entry whose login matches AND whose marker
 # appears in the body; else whose `match` matches the login; else the bare login.
-REQUIRED=$(echo "$RAW" | jq -r --argjson roster "$ROSTER_JSON" '
+REQUIRED=$(echo "$RAW" | jq -r --argjson roster "$ROSTER_JSON" "$JQ_ROSTERED"'
     # EVERY roster predicate binds the entry with `. as $e` first. Inside
     # contains(), `.` is the string being tested — so a bare `.marker`/`.match`
     # indexes a string and jq aborts the whole program. This exact mistake was
@@ -455,14 +457,9 @@ REQUIRED=$(echo "$RAW" | jq -r --argjson roster "$ROSTER_JSON" '
     # so the type fence alone treated it as a person: its threads fell out of
     # scope, it owed no coverage row, and a PR reviewed only by it reported
     # "no reviewer posted".
-    def rostered($login):
-        ($login | ascii_downcase) as $l
-      | ($roster | map(. as $e | select(
-            ((($e.login // "") | ascii_downcase | sub("\\[bot\\]$";"")) == $l)
-            or ((($e.match // "") != "") and ($l | contains($e.match | ascii_downcase)))))
-         | length) > 0;
+    # rostered() comes from $JQ_ROSTERED, defined above Assertion 1.
     def persona($login; $body):
-        ($login | ascii_downcase) as $l
+        (($login // "") | ascii_downcase) as $l
       | ($roster | map(. as $e | select(
             ((($e.login // "") | ascii_downcase | sub("\\[bot\\]$";"")) == $l)
             and (($e.marker // "") != "") and ($body | contains($e.marker))))) as $bymarker

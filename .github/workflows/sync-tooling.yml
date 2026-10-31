@@ -21,6 +21,7 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions: {contents: read}
     outputs:
       src: ${{ steps.diff.outputs.src }}
@@ -47,6 +48,7 @@ jobs:
     needs: build
     if: needs.build.outputs.changed == 'true'
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     permissions: {contents: write, pull-requests: write}
     steps:
       - id: app
@@ -55,6 +57,9 @@ jobs:
         with:
           client-id: ${{ vars.PUBLIC_MIRROR_APP_CLIENT_ID }}
           private-key: ${{ secrets.PUBLIC_MIRROR_APP_PRIVATE_KEY }}
+          # Narrow the token to what this job needs, whatever else the App can do.
+          permission-contents: write
+          permission-pull-requests: write
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: {token: '${{ steps.app.outputs.token || github.token }}'}
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -66,25 +71,32 @@ jobs:
           PATCH: ${{ runner.temp }}/sync.patch
         run: |
           set -euo pipefail
-          # Only the installer's own outputs may change; anything else in the patch is refused.
-          # --numstat lists only a rename's destination, so refuse renames and copies outright.
-          if grep -qE '^(rename|copy) (from|to) ' "$PATCH"; then echo "::error::patch contains renames or copies"; exit 1; fi
-          bad="$(git apply --numstat "$PATCH" | cut -f3- | grep -vE '^(\.claude/|scripts/repo-config\.sh$)' || true)"
-          if [ -n "$bad" ]; then echo "::error::patch touches paths outside .claude/: $bad"; exit 1; fi
+          # Only the installer's own outputs may change. The check reads the applied index with
+          # rename detection off, so a rename or copy lists its source as well as its
+          # destination, whatever header syntax the patch used. Symlinks are refused too.
           git apply --index "$PATCH"
+          bad="$(git diff --cached --no-renames --name-only | grep -vE '^(\.claude/|scripts/repo-config\.sh$)' || true)"
+          if [ -n "$bad" ]; then echo "::error::patch touches paths outside .claude/: $bad"; exit 1; fi
+          if git diff --cached --no-renames --summary | grep -q ' 120000 '; then echo "::error::patch adds a symlink"; exit 1; fi
           git switch -c "$BRANCH"
           git -c user.name='github-actions[bot]' -c user.email='41898283+github-actions[bot]@users.noreply.github.com' \
             commit -qm "chore: sync agentic tooling to $SRC"
           # Each run rebuilds the branch as one bot commit on the default branch, so any
           # newer tip commit by someone else is a fixup pushed to the open PR. Keep it.
           # ls-remote exits 2 only when the branch is absent; any other failure stops the job.
-          set +e; tip="$(git ls-remote --exit-code origin "refs/heads/$BRANCH" | cut -f1)"; rc=${PIPESTATUS[0]}; set -e
+          out="$(git ls-remote --exit-code origin "refs/heads/$BRANCH")" && rc=0 || rc=$?
           if [ "$rc" -eq 0 ]; then
+            tip="${out%%[[:space:]]*}"
             git fetch -q --depth=1 origin "$BRANCH"
             if [ "$(git log -1 --format=%ae FETCH_HEAD)" != '41898283+github-actions[bot]@users.noreply.github.com' ]; then
               echo "::warning::$BRANCH has commits from someone else; leaving the open PR alone. Merge or close it to resume syncing."; exit 0
             fi
-            git push --force-with-lease="$BRANCH:$tip" origin "$BRANCH"
+            # Same content as the open PR: skip the push so CI and reviews are not reset.
+            if [ "$(git rev-parse 'HEAD^{tree}')" = "$(git rev-parse 'FETCH_HEAD^{tree}')" ]; then
+              echo "$BRANCH already carries this content."
+            else
+              git push --force-with-lease="$BRANCH:$tip" origin "$BRANCH"
+            fi
           elif [ "$rc" -eq 2 ]; then
             git push origin "$BRANCH"
           else
