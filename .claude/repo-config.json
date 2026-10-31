@@ -1,6 +1,8 @@
 {
   "default_branch": "main",
-  "migrations": { "dir": "services/control-plane/migrations/" },
+  "migrations": {
+    "dir": "services/control-plane/migrations/"
+  },
   "hooks": {
     "protected_patterns": [
       "/crypto",
@@ -18,7 +20,9 @@
       "scripts/security/",
       "\\.github/workflows/",
       "\\.pre-commit-config\\.yaml$",
-      "CODEOWNERS$"
+      "CODEOWNERS$",
+      "/\\.claude/(hooks/|settings\\.json|repo-config\\.json)",
+      "scripts/repo-config\\.sh$"
     ]
   }
 }

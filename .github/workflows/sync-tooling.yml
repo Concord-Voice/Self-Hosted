@@ -67,6 +67,8 @@ jobs:
         run: |
           set -euo pipefail
           # Only the installer's own outputs may change; anything else in the patch is refused.
+          # --numstat lists only a rename's destination, so refuse renames and copies outright.
+          if grep -qE '^(rename|copy) (from|to) ' "$PATCH"; then echo "::error::patch contains renames or copies"; exit 1; fi
           bad="$(git apply --numstat "$PATCH" | cut -f3- | grep -vE '^(\.claude/|scripts/repo-config\.sh$)' || true)"
           if [ -n "$bad" ]; then echo "::error::patch touches paths outside .claude/: $bad"; exit 1; fi
           git apply --index "$PATCH"
