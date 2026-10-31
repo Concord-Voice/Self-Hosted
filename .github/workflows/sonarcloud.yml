@@ -1,0 +1,208 @@
+# SonarCloud analysis — extracted from build.yml per ADR-0018 (#1473).
+#
+# FAIL-STOP SEMANTICS: callers use `needs: build` and default success()
+# chaining — if ANY job inside build.yml fails, this workflow never runs.
+# A scan on partial coverage produces misleading new-code coverage,
+# phantom-resolved issues, and Quality Gate false positives; no scan beats a
+# wrong scan (the failing test job already blocks merge, and the scan runs on
+# the fix push). Path-skipped suites are NOT failures: build.yml reports which
+# suites uploaded coverage via workflow_call outputs, consumed here as inputs
+# gating each artifact download — a docs-only PR still produces an analysis.
+#
+# This replaces the former `if: always()` + per-need result-guard shape, whose
+# skip-masking trap (desktop failure ⇒ coverage-merge SKIPPED, not failed ⇒
+# naive result checks pass ⇒ scan without desktop coverage) is retired by
+# construction. See ADR-0018 §Decision 3.
+#
+# Naming: SonarCloud (the SaaS Concord uses). The pinned scan action retains
+# its upstream name (SonarSource/sonarqube-scan-action) — that is the
+# product's action identifier, not our naming choice.
+name: SonarCloud
+
+on:
+  workflow_dispatch:
+    inputs:
+      caller_run_id:
+        description: "Protected caller run ID"
+        type: string
+        required: true
+      caller_run_attempt:
+        description: "Protected caller attempt"
+        type: string
+        required: true
+      pr_number:
+        description: "Candidate PR number"
+        type: string
+        required: true
+      expected_head_sha:
+        description: "Candidate PR head SHA"
+        type: string
+        required: true
+      expected_base_sha:
+        description: "Candidate PR base SHA"
+        type: string
+        required: true
+  workflow_call:
+    inputs:
+      # Called workflows inherit the caller's event name, including manual dispatch.
+      reusable-analysis:
+        description: "True for the Main/Nightly reusable scanner call"
+        type: boolean
+        required: true
+      desktop-coverage:
+        description: "true when build.yml's desktop coverage artifact was uploaded"
+        type: boolean
+        default: false
+        required: false
+      control-plane-coverage:
+        description: "true when build.yml's control-plane coverage artifact was uploaded"
+        type: boolean
+        default: false
+        required: false
+      media-plane-coverage:
+        description: "true when build.yml's media-plane coverage artifact was uploaded"
+        type: boolean
+        default: false
+        required: false
+      admin-coverage:
+        description: "true when build.yml's Admin Portal coverage artifact was uploaded"
+        type: boolean
+        default: false
+        required: false
+      require-quality-gate:
+        description: "Wait for the SonarCloud quality gate in the protected PR caller"
+        type: boolean
+        default: false
+        required: false
+    secrets:
+      SONAR_TOKEN:
+        required: false
+
+# The dispatch path reads caller proof, PR metadata, and coverage artifacts.
+permissions:
+  contents: read
+
+jobs:
+  reject-disabled-dispatch:
+    if: ${{ !inputs.reusable-analysis && (github.event_name != 'workflow_dispatch' || github.ref != 'refs/heads/main') }}
+    runs-on: ubuntu-24.04
+    permissions: {}
+    steps:
+      - name: Reject non-main protected dispatch
+        run: |
+          echo "::error::Protected Sonar dispatch was not loaded from main."
+          exit 1
+
+  sonarcloud:
+    name: SonarCloud
+    if: ${{ github.ref == 'refs/heads/main' && (inputs.reusable-analysis || github.event_name == 'workflow_dispatch') }}
+    environment: protected-sonar
+    # GitHub's standard public-repo runner has 4 vCPU, the size Alpha pins
+    # (ADR-0013 §2: analysis is server-bound, so fewer cores buy nothing and
+    # risk the cold-cache timeout).
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Confirm protected dispatch source
+        if: ${{ !inputs.reusable-analysis }}
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+
+      - name: Verify caller proof and prepare inert PR source
+        if: ${{ !inputs.reusable-analysis }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          CALLER_RUN_ID: ${{ inputs.caller_run_id }}
+          CALLER_RUN_ATTEMPT: ${{ inputs.caller_run_attempt }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_SHA: ${{ inputs.expected_head_sha }}
+          BASE_SHA: ${{ inputs.expected_base_sha }}
+        run: |
+          set -euo pipefail
+          python3 scripts/sonar/prepare-protected-pr-analysis.py \
+            --caller-run-id "$CALLER_RUN_ID" --caller-run-attempt "$CALLER_RUN_ATTEMPT" \
+            --pr-number "$PR_NUMBER" --head-sha "$HEAD_SHA" --base-sha "$BASE_SHA" \
+            --analysis-dir "$RUNNER_TEMP/protected-sonar-analysis"
+
+      - name: Download desktop coverage
+        if: ${{ inputs.reusable-analysis && inputs.desktop-coverage }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: desktop-coverage
+          # Self-Hosted: the packages/* lane's root vitest coverage.
+          path: coverage
+
+      - name: Download control-plane coverage
+        if: ${{ inputs.reusable-analysis && inputs.control-plane-coverage }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: control-plane-coverage
+          path: services/control-plane
+
+      - name: Download media-plane coverage
+        if: ${{ inputs.reusable-analysis && inputs.media-plane-coverage }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: media-plane-coverage
+          path: services/media-plane/coverage
+
+      - name: Download Admin Portal coverage
+        if: ${{ inputs.reusable-analysis && inputs.admin-coverage }}
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: admin-coverage
+          path: client/admin/coverage
+
+      - name: Require Sonar credential
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          if [[ -z "$SONAR_TOKEN" ]]; then
+            echo "::error::Sonar credential unavailable."
+            exit 1
+          fi
+
+      - name: Mark protected analysis start
+        id: analysis-start
+        if: ${{ !inputs.reusable-analysis }}
+        run: echo "started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: SonarCloud Scan
+        # SHA-pinned per supply-chain hardening (#847). Upgrade procedure: resolve
+        # gh api repos/<owner>/<repo>/git/refs/tags/vX.Y.Z, replace SHA + comment.
+        # FP: the 40-char hex below is a git commit SHA for the pinned action
+        # ref, NOT a SonarCloud API key. SonarCloud tokens and git SHAs share
+        # length/character-class, so the regex collides. Suppressed inline:
+        # nosemgrep: generic.secrets.security.detected-sonarqube-docs-api-key.detected-sonarqube-docs-api-key  # pragma: allowlist nextline secret
+        uses: SonarSource/sonarqube-scan-action@d209202bc7d53ff1cc128f7f907dac145c9d6ae9 # v8.3.0
+        with:
+          args: ${{ !inputs.reusable-analysis && format('-Dsonar.projectBaseDir={0}/protected-sonar-analysis -Dsonar.qualitygate.wait=true', runner.temp) || (inputs.require-quality-gate && '-Dsonar.qualitygate.wait=true' || '') }}
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
+      - name: Require fresh exact-head SonarCloud App check
+        if: ${{ !inputs.reusable-analysis }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          HEAD_SHA: ${{ inputs.expected_head_sha }}
+          BASE_SHA: ${{ inputs.expected_base_sha }}
+          STARTED_AT: ${{ steps.analysis-start.outputs.started_at }}
+        run: |
+          set -euo pipefail
+          python3 scripts/sonar/verify-protected-sonar-result.py \
+            --pr "$PR_NUMBER" --head-sha "$HEAD_SHA" --base-ref main \
+            --base-sha "$BASE_SHA" --started-at "$STARTED_AT" --timeout-seconds 180

@@ -20,9 +20,8 @@ jobs:
     with:
       trusted-source: true
       enforcement-only: true
-    # P: pr-ci.yml here is Alpha's current copy, which declares no secrets (#3936),
-    # so the SONAR_TOKEN pass-through Alpha keeps for its older pin cannot apply.
-    # Sonar wiring returns with sonarcloud.yml under F7.
+    # pr-ci.yml declares no secrets (#3936): PR Sonar scans run only in the
+    # main-owned sonarcloud.yml child that protected-sonar dispatches.
     permissions:
       contents: read
       pull-requests: write
@@ -31,17 +30,21 @@ jobs:
       packages: read
       security-events: write
 
+  # The only producer of a PR's SonarCloud App check: the pinned pr-ci has no
+  # Sonar job, so the main-owned child this job dispatches is the sole scanner.
+  # Fork PRs skip it and the verifier applies their existing App-check exception.
   protected-sonar:
-    name: Protected Sonar canary (advisory)
+    name: Protected Sonar analysis
     needs: [pr-ci]
-    if: ${{ vars.PROTECTED_SONAR_CANARY == 'true' && needs.pr-ci.result == 'success' && github.event.pull_request.head.repo.full_name == github.repository && contains(needs.pr-ci.outputs.report-selection, '"sonar":true') }}
-    continue-on-error: true
+    if: ${{ needs.pr-ci.result == 'success' && github.event.pull_request.head.repo.full_name == github.repository && contains(needs.pr-ci.outputs.report-selection, '"sonar":true') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     permissions:
       contents: read
       actions: write
       id-token: write
+    outputs:
+      child-run-id: ${{ steps.dispatch.outputs.child-run-id }}
     steps:
       - name: Check out protected caller source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -104,8 +107,9 @@ jobs:
           python3 protected/scripts/sonar/protected-pr-caller.py dispatch-watch \
             --proof "$RUNNER_TEMP/protected-sonar-proof/proof.json" \
             --out "$RUNNER_TEMP/protected-sonar-proof/child.json"
+          printf 'child-run-id=%s\n' "$(jq -r '.workflow_run_id' "$RUNNER_TEMP/protected-sonar-proof/child.json")" >> "$GITHUB_OUTPUT"
 
-      - name: Record underlying canary result
+      - name: Record protected Sonar outcome
         # always() reports raw outcomes after a failed proof, upload, or dispatch step.
         if: ${{ always() }}
         env:
@@ -113,7 +117,7 @@ jobs:
           UPLOAD_OUTCOME: ${{ steps.upload.outcome }}
           DISPATCH_OUTCOME: ${{ steps.dispatch.outcome }}
         run: |
-          printf 'Protected Sonar canary: proof=%s, upload=%s, dispatch=%s\n' \
+          printf 'Protected Sonar: proof=%s, upload=%s, dispatch=%s\n' \
             "$PROOF_OUTCOME" "$UPLOAD_OUTCOME" "$DISPATCH_OUTCOME" >> "$GITHUB_STEP_SUMMARY"
 
   osv:
@@ -304,7 +308,7 @@ jobs:
 
   result:
     name: Required PR build result
-    needs: [pr-ci, osv, publish-install-script-warnings, migration-lint]
+    needs: [pr-ci, protected-sonar, osv, publish-install-script-warnings, migration-lint]
     # always() prevents a failed or skipped dependency from hiding this result.
     if: ${{ always() }}
     permissions:
@@ -405,6 +409,8 @@ jobs:
           JOBS_JSON: ${{ needs.pr-ci.outputs.report-jobs || '{}' }}
           COVERAGE_JSON: ${{ needs.pr-ci.outputs.coverage-uploads || '{}' }}
           OSV_RESULT: ${{ needs.osv.result }}
+          SONAR_RESULT: ${{ needs.protected-sonar.result }}
+          SONAR_CHILD_RUN_ID: ${{ needs.protected-sonar.outputs.child-run-id }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           RUN_ID: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -414,7 +420,9 @@ jobs:
           mkdir -p "$SCAN_EVIDENCE_DIR"
           printf '%s\n' "$SELECTION_JSON" > "$RUNNER_TEMP/scan-selection.json"
           jq -cn --argjson jobs "$JOBS_JSON" --argjson coverage "$COVERAGE_JSON" --arg osv "$OSV_RESULT" \
-            '$jobs + {osv:$osv,coverage_uploads:$coverage}' > "$RUNNER_TEMP/scan-jobs.json"
+            --arg sonar "$SONAR_RESULT" --arg sonar_child "$SONAR_CHILD_RUN_ID" \
+            '$jobs + {osv:$osv,sonar:$sonar,sonar_child_run_id:$sonar_child,coverage_uploads:$coverage}' \
+            > "$RUNNER_TEMP/scan-jobs.json"
           python3 protected/.github/scripts/verify-pr-scan-results.py \
             --selection "$RUNNER_TEMP/scan-selection.json" \
             --jobs "$RUNNER_TEMP/scan-jobs.json" \
@@ -428,13 +436,14 @@ jobs:
           PR_CI_RESULT: ${{ needs.pr-ci.result }}
           PUBLISH_RESULT: ${{ needs.publish-install-script-warnings.result }}
           OSV_RESULT: ${{ needs.osv.result }}
+          SONAR_RESULT: ${{ needs.protected-sonar.result }}
           VERIFIER_OUTCOME: ${{ steps.verify.outcome }}
           PINS_OUTCOME: ${{ steps.pins.outcome }}
           MIGRATION_LINT_RESULT: ${{ needs.migration-lint.result }}
         run: |
-          if [[ "$PR_CI_RESULT" == success && ( "$MIGRATION_LINT_RESULT" == success || "$MIGRATION_LINT_RESULT" == skipped ) && "$PUBLISH_RESULT" == success && "$VERIFIER_OUTCOME" == success && "$PINS_OUTCOME" == success && "$OSV_RESULT" != failure && "$OSV_RESULT" != cancelled ]]; then
+          if [[ "$PR_CI_RESULT" == success && ( "$MIGRATION_LINT_RESULT" == success || "$MIGRATION_LINT_RESULT" == skipped ) && "$PUBLISH_RESULT" == success && "$VERIFIER_OUTCOME" == success && "$PINS_OUTCOME" == success && "$OSV_RESULT" != failure && "$OSV_RESULT" != cancelled && "$SONAR_RESULT" != failure && "$SONAR_RESULT" != cancelled ]]; then
             echo "::notice::Required PR scan verdict succeeded."
           else
-            echo "::error::Required PR scan verdict blocked: pr-ci=${PR_CI_RESULT}, migration-lint=${MIGRATION_LINT_RESULT}, publisher=${PUBLISH_RESULT}, verifier=${VERIFIER_OUTCOME}, pins=${PINS_OUTCOME}"
+            echo "::error::Required PR scan verdict blocked: pr-ci=${PR_CI_RESULT}, migration-lint=${MIGRATION_LINT_RESULT}, publisher=${PUBLISH_RESULT}, sonar=${SONAR_RESULT}, verifier=${VERIFIER_OUTCOME}, pins=${PINS_OUTCOME}"
             exit 1
           fi
