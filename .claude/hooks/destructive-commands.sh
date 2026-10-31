@@ -62,14 +62,33 @@ fi
 # Work-discarding and history-rewriting git/rm operations, best effort: a regex
 # over the command text, not a parser. Git patterns only match in command
 # position (start, or after ; & | or a subshell paren), so a commit message
-# that mentions one is not blocked. --force-with-lease stays allowed.
+# that mentions one is not blocked. Quoted strings are dropped before matching for
+# the same reason. --force-with-lease (with or without --force-if-includes) and
+# index-only `git restore --staged` stay allowed.
+# A quoted script handed to sh/bash/zsh -c or eval is executed, so it is scanned too.
+# A quoted single word ("." or 'src') is an argument, not prose, so it is unquoted first.
+SCAN=$(printf '%s' "$COMMAND" | sed -E -e "s/'([^'[:space:]]*)'/\\1/g" -e 's/"([^"[:space:]]*)"/\1/g' \
+    -e "s/'[^']*'//g" -e 's/"[^"]*"//g')
+INNER=$(printf '%s' "$COMMAND" | grep -oE "(sh|bash|zsh)[[:space:]]+-c[[:space:]]+(\"[^\"]*\"|'[^']*')|eval[[:space:]]+(\"[^\"]*\"|'[^']*')" \
+    | sed -E "s/^[^\"']*[\"']//; s/[\"']$//")
+[ -n "$INNER" ] && SCAN="$SCAN; $(printf '%s' "$INNER" | tr '\n' ';')"
 CMD_POS='(^|[;&|(])[[:space:]]*'
-DESTRUCTIVE_RE="${CMD_POS}git\s+push\b[^;&|]*(\s(--force|--force-if-includes)(\s|$)|\s-[a-zA-Z]*f[a-zA-Z]*(\s|$)|\s\+[^[:space:]]+)"
+DESTRUCTIVE_RE="${CMD_POS}git\s+push\b[^;&|]*(\s--force(\s|$)|\s-[a-zA-Z]*f[a-zA-Z]*(\s|$)|\s\+[^[:space:]]+)"
 DESTRUCTIVE_RE+="|${CMD_POS}git\s+reset\b[^;&|]*\s--hard"
 DESTRUCTIVE_RE+="|${CMD_POS}git\s+clean\b[^;&|]*\s(-[a-zA-Z]*f|--force)"
-DESTRUCTIVE_RE+="|${CMD_POS}git\s+(checkout|restore)\b[^;&|]*\s\.{1,2}/?(\s|$)"
+DESTRUCTIVE_RE+="|${CMD_POS}git\s+checkout\b[^;&|]*\s\.{1,2}/?(\s|$)"
+RESTORE_RE="${CMD_POS}git\s+restore\b[^;&|]*\s\.{1,2}/?(\s|$)"
 DESTRUCTIVE_RE+="|(^|[;&|([:space:]])rm(\s+[^;&|]*)?\s(-[a-zA-Z]*[rR][a-zA-Z]*|--recursive)(\s|$)"
-if echo "$COMMAND" | grep -qE "$DESTRUCTIVE_RE"; then
+restore_hits_worktree() { # --staged alone only touches the index; judged per command segment
+    local seg
+    while IFS= read -r seg; do
+        echo "$seg" | grep -qE "$RESTORE_RE" || continue
+        echo "$seg" | grep -qE '\s(--staged|-S)(\s|$)' || return 0
+        echo "$seg" | grep -qE '\s(--worktree|-W)(\s|$)' && return 0
+    done < <(printf '%s\n' "$SCAN" | tr ';&|' '\n')
+    return 1
+}
+if echo "$SCAN" | grep -qE "$DESTRUCTIVE_RE" || restore_hits_worktree; then
     echo "BLOCKED: Potentially destructive command detected: $COMMAND" >&2
     exit 2
 fi

@@ -52,9 +52,10 @@ case "$ECOSYSTEM" in
   *)              ADVISORY_ECO="$ECOSYSTEM" ;;   # npm, pip, rubygems, composer map 1:1
 esac
 
-gh api "/advisories?ecosystem=$ADVISORY_ECO&published=>$SINCE" \
-  | jq --arg pkg "$PKG" '
-    [.[]
+# --paginate prints one array per page; jq -s + add merges them before filtering.
+gh api --paginate "/advisories?ecosystem=$ADVISORY_ECO&published=>$SINCE&per_page=100" \
+  | jq -s --arg pkg "$PKG" '
+    [add // [] | .[]
      | . as $adv
      | (.vulnerabilities // [])
        | map(select(.package.name == $pkg))

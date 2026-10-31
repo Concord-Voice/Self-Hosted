@@ -54,10 +54,11 @@ Fetch the issue and check for child issues:
 gh issue view $0 --json body,title,state,labels --jq '{title: .title, state: .state, labels: [.labels[].name], body: .body}'
 ```
 
-Check for child issue references in checkbox lists:
+Check for children: native sub-issues first (REST `/sub_issues`, per `.claude/rules/release-tracking-epics.md`), then legacy checkbox references only when there are none:
 
 ```bash
-gh issue view $0 --json body --jq '.body' | grep -oE '\- \[[ x]\] #[0-9]+' | grep -oE '[0-9]+'
+CHILDREN=$(gh api "repos/{owner}/{repo}/issues/$0/sub_issues?per_page=100" --jq '.[].number')
+[ -n "$CHILDREN" ] || CHILDREN=$(gh issue view $0 --json body --jq '.body' | grep -oE '\- \[[ x]\] #[0-9]+' | grep -oE '[0-9]+')
 ```
 
 **If children found** → go to Parent Issue Mode (below).
