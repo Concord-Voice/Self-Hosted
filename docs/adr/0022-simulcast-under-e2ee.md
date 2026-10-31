@@ -26,7 +26,7 @@
 
 ## Consequences
 
-- **Positive:** receiver-driven selection materially cuts SFU→receiver video egress for still-visible consumers (9-tile gallery ~31 Mbps/viewer → ~1.3); visibility pause and audio last-N also cut aggregate egress by pausing consumers. This unlocks a credible large **paid** gallery (25 active + low-res thumbnails, the Zoom/Signal model) while fully preserving E2EE.
+- **Positive:** receiver-driven selection materially cuts SFU→receiver video egress for still-visible consumers (9-tile gallery ~31 Mbps/viewer → ~1.3); visibility pause and audio last-N also cut aggregate egress by pausing consumers. This unlocks a credible large **paid** gallery (25 active + low-res thumbnails, the model major comms platforms use) while fully preserving E2EE.
 - **Cost:** SVC has lower publisher cost than simulcast but still adds encoder complexity and can hit software paths on some clients. H264/VP8 simulcast = multiple encoder passes + multiple E2EE frame-encryption passes, so it remains more tightly gated. Layer switches can need keyframes — mitigated by speaker-churn hysteresis. Use **device pixels** for the size→layer map (HiDPI).
 - **Sequencing trap:** layered publishing without receiver selection adds tax for little or zero egress benefit — never ship half.
 
