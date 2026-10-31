@@ -1,0 +1,94 @@
+# Copy into a consumer repo as .github/workflows/sync-tooling.yml and set TOOLING_REPO.
+# Weekly (or on demand) it re-runs `install.sh claude` from this tooling repo and opens one
+# draft PR when anything changed. The install lock means files you edited stay yours.
+# The upstream installer runs in a read-only job with no write token; only its diff to
+# .claude/ and scripts/repo-config.sh crosses to the job that holds write credentials.
+# A PR opened with the default GITHUB_TOKEN does not start other workflows, so required
+# checks would never run on it. The job therefore mints a short-lived GitHub App installation
+# token at runtime from the variable PUBLIC_MIRROR_APP_CLIENT_ID and the secret PUBLIC_MIRROR_APP_PRIVATE_KEY
+# (an App with Contents and Pull requests write; keep the key in your secrets manager and sync
+# it to the org). Until both exist it falls back to GITHUB_TOKEN, which needs "Allow GitHub
+# Actions to create pull requests" and opens PRs that start no checks.
+name: sync-tooling
+on:
+  schedule: [{cron: '17 6 * * 1'}]
+  workflow_dispatch:
+permissions: {}
+concurrency: {group: sync-tooling, cancel-in-progress: false}
+env:
+  TOOLING_REPO: Concord-Voice/Agentic-Dev-Tooling
+  BRANCH: chore/sync-tooling
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions: {contents: read}
+    outputs:
+      src: ${{ steps.diff.outputs.src }}
+      changed: ${{ steps.diff.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {persist-credentials: false}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {repository: '${{ env.TOOLING_REPO }}', path: .tooling, persist-credentials: false}
+      - id: diff
+        name: Install (no credentials)
+        run: |
+          set -euo pipefail
+          echo "src=$(git -C .tooling rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          ./.tooling/install.sh claude --project .
+          rm -rf .tooling
+          git add -A .claude scripts/repo-config.sh
+          git diff --cached --binary > sync.patch
+          if [ -s sync.patch ]; then echo changed=true; else echo changed=false; fi >> "$GITHUB_OUTPUT"
+      - if: steps.diff.outputs.changed == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with: {name: sync-patch, path: sync.patch, retention-days: 1}
+  propose:
+    needs: build
+    if: needs.build.outputs.changed == 'true'
+    runs-on: ubuntu-latest
+    permissions: {contents: write, pull-requests: write}
+    steps:
+      - id: app
+        if: vars.PUBLIC_MIRROR_APP_CLIENT_ID != ''
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.PUBLIC_MIRROR_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PUBLIC_MIRROR_APP_PRIVATE_KEY }}
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with: {token: '${{ steps.app.outputs.token || github.token }}'}
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with: {name: sync-patch, path: '${{ runner.temp }}'}
+      - name: Apply and propose
+        env:
+          GH_TOKEN: ${{ steps.app.outputs.token || github.token }}
+          SRC: ${{ needs.build.outputs.src }}
+          PATCH: ${{ runner.temp }}/sync.patch
+        run: |
+          set -euo pipefail
+          # Only the installer's own outputs may change; anything else in the patch is refused.
+          bad="$(git apply --numstat "$PATCH" | cut -f3- | grep -vE '^(\.claude/|scripts/repo-config\.sh$)' || true)"
+          if [ -n "$bad" ]; then echo "::error::patch touches paths outside .claude/: $bad"; exit 1; fi
+          git apply --index "$PATCH"
+          git switch -c "$BRANCH"
+          git -c user.name='github-actions[bot]' -c user.email='41898283+github-actions[bot]@users.noreply.github.com' \
+            commit -qm "chore: sync agentic tooling to $SRC"
+          # Each run rebuilds the branch as one bot commit on the default branch, so any
+          # newer tip commit by someone else is a fixup pushed to the open PR. Keep it.
+          # ls-remote exits 2 only when the branch is absent; any other failure stops the job.
+          set +e; tip="$(git ls-remote --exit-code origin "refs/heads/$BRANCH" | cut -f1)"; rc=${PIPESTATUS[0]}; set -e
+          if [ "$rc" -eq 0 ]; then
+            git fetch -q --depth=1 origin "$BRANCH"
+            if [ "$(git log -1 --format=%ae FETCH_HEAD)" != '41898283+github-actions[bot]@users.noreply.github.com' ]; then
+              echo "::warning::$BRANCH has commits from someone else; leaving the open PR alone. Merge or close it to resume syncing."; exit 0
+            fi
+            git push --force-with-lease="$BRANCH:$tip" origin "$BRANCH"
+          elif [ "$rc" -eq 2 ]; then
+            git push origin "$BRANCH"
+          else
+            echo "::error::git ls-remote failed (exit $rc)"; exit 1
+          fi
+          if [ -z "$(gh pr list --head "$BRANCH" --state open --json number --jq '.[].number')" ]; then
+            gh pr create --draft --head "$BRANCH" --title "chore: sync agentic tooling" \
+              --body "Re-ran install.sh claude from $TOOLING_REPO@$SRC. Files edited in this repo were skipped."
+          fi
