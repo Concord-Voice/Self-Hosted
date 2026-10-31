@@ -54,10 +54,10 @@ cleanup() {
     kill "$PROXY_PID" >/dev/null 2>&1 || true
     wait "$PROXY_PID" 2>/dev/null || true
   fi
-  docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
-  if [[ -n $PUBLIC_PEER ]]; then docker rm -f "$PUBLIC_PEER" >/dev/null 2>&1 || true; fi
-  if [[ -n $MAPPED_PUBLIC_SERVER ]]; then docker rm -f "$MAPPED_PUBLIC_SERVER" >/dev/null 2>&1 || true; fi
-  if [[ -n $PUBLIC_SERVER ]]; then docker rm -f "$PUBLIC_SERVER" >/dev/null 2>&1 || true; fi
+  docker rm -fv "$CONTAINER" >/dev/null 2>&1 || true
+  if [[ -n $PUBLIC_PEER ]]; then docker rm -fv "$PUBLIC_PEER" >/dev/null 2>&1 || true; fi
+  if [[ -n $MAPPED_PUBLIC_SERVER ]]; then docker rm -fv "$MAPPED_PUBLIC_SERVER" >/dev/null 2>&1 || true; fi
+  if [[ -n $PUBLIC_SERVER ]]; then docker rm -fv "$PUBLIC_SERVER" >/dev/null 2>&1 || true; fi
   if [[ -n $PUBLIC_NETWORK ]]; then docker network rm "$PUBLIC_NETWORK" >/dev/null 2>&1 || true; fi
   docker volume rm "$CERT_VOLUME" "${MISSING_VOLUME:-}" >/dev/null 2>&1 || true
   rm -rf "$TEST_ROOT"
