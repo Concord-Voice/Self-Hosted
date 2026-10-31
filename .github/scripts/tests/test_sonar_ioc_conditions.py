@@ -418,9 +418,9 @@ PY
 
     def test_actual_reusable_workflows_consume_selection_and_protect_verdicts(self):
         root = CHECKER.parents[3]
-        # Self-Hosted: main-ci.yml stays with Desktop; Sonar waits for F7.
+        # Self-Hosted: main-ci.yml stays with Desktop.
         names = ("pr-ci.yml", "nightly-ci.yml", "codeql.yml", "semgrep.yml",
-                 "eslint-sarif.yml", "govulncheck.yml", "build.yml")
+                 "eslint-sarif.yml", "govulncheck.yml", "build.yml", "sonarcloud.yml")
         workflows = {name: yaml.load((root / ".github/workflows" / name).read_text(),
                                      Loader=yaml.BaseLoader) for name in names}
         spec = importlib.util.spec_from_file_location("tested_scan_consumer_policy", POLICY)
@@ -645,7 +645,7 @@ class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
         report = self.pr["jobs"]["report"]
         self.assertEqual(report["outputs"]["selection"], "${{ steps.report.outputs.selection }}")
         self.assertEqual(jobs["result"]["needs"],
-                         ["pr-ci", "osv", "publish-install-script-warnings", "migration-lint"])
+                         ["pr-ci", "protected-sonar", "osv", "publish-install-script-warnings", "migration-lint"])
         # The protected migration lint (#4175) waits on pr-ci's IOC gate, runs only for
         # control-plane changes or an unknown selection, and may only pass or skip.
         lint_if = jobs["migration-lint"]["if"]

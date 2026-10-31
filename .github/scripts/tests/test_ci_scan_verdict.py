@@ -985,12 +985,23 @@ class ScanVerdictTests(unittest.TestCase):
         same_repo["head"]["repo"]["full_name"] = "Concord-Voice/Self-Hosted"
         self.assertTrue(any("Sonar selected build or scan" in reason
                             for reason in self.verdict(ev, sel, jobs, pr=same_repo)))
-        # Dependabot reads SONAR_TOKEN from its own secret store, so a skipped
-        # job blocks it like any same-repository PR; a scanned one passes.
+        # Dependabot is same-repository, so the protected bridge scans it: a
+        # skipped bridge blocks it, and a scanned one needs proof and child.
         same_repo["user"] = {"login": "dependabot[bot]"}
         self.assertTrue(any("Sonar selected build or scan" in reason
                             for reason in self.verdict(ev, sel, jobs, pr=same_repo)))
-        self.assertEqual([], self.verdict(ev, sel, dict(jobs, sonar="success"), pr=same_repo))
+        scanned = dict(jobs, sonar="success")
+        self.assertTrue(any("Sonar caller proof" in reason
+                            for reason in self.verdict(ev, sel, scanned, pr=same_repo)))
+        ev["sonar_bridge"] = {"proof_verified": True, "child_verified": True}
+        self.assertEqual([], self.verdict(ev, sel, scanned, pr=same_repo))
+        for field in ("proof_verified", "child_verified"):
+            broken = copy.deepcopy(ev)
+            broken["sonar_bridge"][field] = False
+            self.assertTrue(any("Sonar caller proof" in reason
+                                for reason in self.verdict(broken, sel, scanned, pr=same_repo)))
+        # The external exception never consults bridge evidence.
+        self.assertEqual([], self.verdict(dict(ev, sonar_bridge=None), sel, jobs, pr=PR))
         ev["sonar"] = None
         self.assertTrue(any("Sonar App check" in reason
                             for reason in self.verdict(ev, sel, jobs, pr=PR)))
@@ -1655,9 +1666,11 @@ class StandaloneScanCollectionTests(unittest.TestCase):
                 osv_newer_analysis=False, artifact_created="2026-10-08T12:00:20Z",
                 analysis_created="2026-10-08T12:00:40Z",
                 run_status="in_progress", run_updated="2026-10-08T12:02:00Z",
-                osv_pin=POLICY, osv_reference_sha=None):
+                osv_pin=POLICY, osv_reference_sha=None, same_repo=False,
+                child=None, proof=True, child_run_id="777"):
+        head_repo = "Concord-Voice/Self-Hosted" if same_repo else "contributor/repo"
         pr = {"number": 3691, "created_at": "2026-10-08T11:30:00Z",
-              "head": {"sha": HEAD, "repo": {"full_name": "contributor/repo"}},
+              "head": {"sha": HEAD, "repo": {"full_name": head_repo}},
               "base": {"sha": BASE, "ref": "main",
                        "repo": {"full_name": "Concord-Voice/Self-Hosted"}},
               "merge_commit_sha": MERGE}
@@ -1683,6 +1696,7 @@ class StandaloneScanCollectionTests(unittest.TestCase):
                          "ref": PR_REF, "sarif_id": "osv-sarif-19", "results_count": 0,
                          "rules_count": 0}
         expected_osv_category = self.OSV_CATEGORY
+        self_test = self
 
         class Api:
             def __init__(self):
@@ -1695,6 +1709,7 @@ class StandaloneScanCollectionTests(unittest.TestCase):
                 if path == "/git/ref/heads/main": return main_ref(), ""
                 if path == f"/compare/{POLICY}...{MAIN}": return comparison, ""
                 if path == "/actions/workflows/osv-scanner.yml": return osv_workflow, ""
+                if path == "/actions/runs/777": return dict(self_test.child_run(), **(child or {})), ""
                 if path == "/code-scanning/sarifs/osv-sarif-19": return {"processing_status": "complete"}, ""
                 if path == "/code-scanning/analyses/19":
                     return {"runs": [{"tool": {"driver": {"name": "osv-scanner", "rules": []}},
@@ -1705,7 +1720,8 @@ class StandaloneScanCollectionTests(unittest.TestCase):
             def pages(self, path, field=None):
                 self.paths.append(path)
                 if "/artifacts" in path:
-                    return []
+                    return [{"name": f"protected-sonar-caller-proof-{RUN_ID}-{ATTEMPT}",
+                             "expired": False, "size_in_bytes": 2466}] if proof else []
                 if "/code-scanning/analyses?" in path:
                     if "sarif_id=" not in path and selected_key == "osv" and osv_api_category:
                         items = [analysis_item, dict(analysis_item, id=18,
@@ -1746,7 +1762,8 @@ class StandaloneScanCollectionTests(unittest.TestCase):
                     patch.object(MODULE, "_protected_osv_pin", return_value=osv_pin), \
                     patch.object(MODULE, "_local_reports", return_value=reports):
                 current_pr, evidence = MODULE._collect(api, selection_data,
-                    {"build": "success", selected_key: "success"}, 3691, int(RUN_ID))
+                    {"build": "success", selected_key: "success", "sonar_child_run_id": child_run_id},
+                    3691, int(RUN_ID))
             return selection_data, current_pr, evidence, api.paths
 
     def test_independent_osv_pin_must_match_the_protected_wrapper(self):
@@ -1844,6 +1861,59 @@ class StandaloneScanCollectionTests(unittest.TestCase):
         for checks in ([newer_failed, older_passed], [older_passed, newer_failed]):
             reasons, _ = self.sonar_reasons(checks)
             self.assertTrue(any("Sonar" in reason for reason in reasons), reasons)
+
+    @staticmethod
+    def child_run():
+        return {"id": 777, "run_attempt": 1, "path": ".github/workflows/sonarcloud.yml",
+                "event": "workflow_dispatch", "head_branch": "main",
+                "repository": {"full_name": "Concord-Voice/Self-Hosted"},
+                "status": "completed", "conclusion": "success",
+                "run_started_at": "2026-10-08T12:00:10Z", "updated_at": "2026-10-08T12:02:00Z"}
+
+    def bridge_reasons(self, checks, **kwargs):
+        selected, pr, evidence, _ = self.collect(selected_key="sonar", sonar_checks=checks,
+                                                 same_repo=True, **kwargs)
+        return MODULE.verify_verdict(selected, {"build": "success", "sonar": "success"}, evidence, pr), evidence
+
+    def test_same_repo_app_check_inside_exact_child_window_passes(self):
+        reasons, evidence = self.bridge_reasons([self.sonar_check()])
+        self.assertEqual([], reasons)
+        self.assertEqual({"proof_verified": True, "child_verified": True}, evidence["sonar_bridge"])
+
+    def test_same_repo_app_check_outside_child_window_blocks(self):
+        # Fine for a fork PR, but a same-repository PR's only producer is the child.
+        for started, completed in (("2026-10-08T11:45:00Z", "2026-10-08T11:46:00Z"),
+                                   ("2026-10-08T12:01:30Z", "2026-10-08T12:02:30Z")):
+            with self.subTest(started=started):
+                reasons, _ = self.bridge_reasons([self.sonar_check(started=started, completed=completed)])
+                self.assertTrue(any("Sonar App check" in reason for reason in reasons), reasons)
+
+    def test_two_app_checks_in_one_child_window_block(self):
+        # One producer per window: a second in-window check is ambiguous even
+        # when the newer one passed (red-team F1 on #4214).
+        failed = self.sonar_check(conclusion="failure", started="2026-10-08T12:00:30Z")
+        foreign = self.sonar_check(check_id=552, started="2026-10-08T12:01:00Z",
+                                   completed="2026-10-08T12:01:40Z")
+        for checks in ([failed, foreign], [foreign, failed], [self.sonar_check(), foreign]):
+            with self.subTest(checks=checks):
+                reasons, _ = self.bridge_reasons(checks)
+                self.assertTrue(any("Sonar App check" in reason for reason in reasons), reasons)
+
+    def test_wrong_or_failed_child_and_missing_proof_block(self):
+        for child in ({"conclusion": "failure"}, {"status": "in_progress"}, {"run_attempt": 2},
+                      {"path": ".github/workflows/other.yml"}, {"event": "push"},
+                      {"head_branch": "feature"}, {"repository": {"full_name": "contributor/repo"}},
+                      {"id": 778}, {"run_started_at": "2026-10-08T11:59:59Z"}):
+            with self.subTest(child=child):
+                reasons, _ = self.bridge_reasons([self.sonar_check()], child=child)
+                self.assertTrue(any("exact child run" in reason for reason in reasons), reasons)
+        reasons, _ = self.bridge_reasons([self.sonar_check()], proof=False)
+        self.assertTrue(any("Sonar caller proof" in reason for reason in reasons), reasons)
+
+    def test_missing_child_run_id_is_unknown(self):
+        for child_run_id in ("", None, "0", "-1", "77x", "\u0667\u0667\u0667", "0777"):
+            with self.subTest(child_run_id=child_run_id), self.assertRaisesRegex(MODULE.Unknown, "child run ID"):
+                self.bridge_reasons([self.sonar_check()], child_run_id=child_run_id)
 
     def test_stale_only_two_current_wrong_app_head_and_failed_sonar_checks_block(self):
         stale = self.sonar_check(started="2026-10-08T11:00:00Z", completed="2026-10-08T11:01:00Z")
