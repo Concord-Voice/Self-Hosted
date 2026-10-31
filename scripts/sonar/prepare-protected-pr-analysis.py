@@ -271,7 +271,7 @@ def validate_evidence(candidate, verified, run, pr, jobs):
     if (claims.get("run_id") != str(candidate["caller_run_id"])
             or claims.get("run_attempt") != str(candidate["caller_run_attempt"])
             or claims.get("repository") != REPO or claims.get("event_name") != "pull_request"
-            or claims.get("workflow_ref") != REPO + "/.github/workflows/required-pr-build.yml@main"
+            or claims.get("workflow_ref") != REPO + "/.github/workflows/required-pr-build.yml@refs/heads/main"
             or not sha(claims.get("workflow_sha"))):
         raise Reject("verified claims inconsistent")
     workflow_path = ".github/workflows/required-pr-build.yml"
