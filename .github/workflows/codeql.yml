@@ -8,8 +8,9 @@
 #     traces only ONE module; toolchain preinstalled via setup-go from go.mod)
 #   - javascript-typescript: no build needed for analysis
 #   - actions: workflow-file analysis (supply-chain posture)
-#   - python deliberately omitted: dev-tooling scripts only, no production Python
-#     (documented coverage delta — issue #1424 scope decision).
+#   - python: no build needed; always selected. The self-host bundle ships
+#     operator-run Python (infrastructure/deploy/selfhost-tls.py and peers), so the
+#     upstream "dev-tooling only" omission (issue #1424) does not hold here.
 # Queries: security-extended = parity with default setup's "extended" suite.
 name: CodeQL Advanced
 
@@ -27,7 +28,7 @@ on:
       codeql-matrix:
         description: "JSON matrix of selected CodeQL languages"
         type: string
-        default: '{"include":[{"language":"actions","runner":"blacksmith-2vcpu-ubuntu-2404","build-mode":"none"},{"language":"go","runner":"blacksmith-4vcpu-ubuntu-2404","build-mode":"manual"},{"language":"javascript-typescript","runner":"blacksmith-4vcpu-ubuntu-2404","build-mode":"none"}]}'
+        default: '{"include":[{"language":"actions","runner":"blacksmith-2vcpu-ubuntu-2404","build-mode":"none"},{"language":"go","runner":"blacksmith-4vcpu-ubuntu-2404","build-mode":"manual"},{"language":"javascript-typescript","runner":"blacksmith-4vcpu-ubuntu-2404","build-mode":"none"},{"language":"python","runner":"blacksmith-2vcpu-ubuntu-2404","build-mode":"none"}]}'
         required: false
       external-verdict:
         description: "Report actual SARIF upload provenance for the protected verifier"
@@ -49,7 +50,7 @@ permissions:
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})
-    # ADR-0013 §2 sizing. Per-leg runner: the three languages have genuinely
+    # ADR-0013 §2 sizing. Per-leg runner: the languages have genuinely
     # different resource profiles, so a single job-level tier over-provisions
     # one and starves another. GitHub Actions has no "job default, override one
     # leg" syntax, so a differential tier across matrix legs requires this
