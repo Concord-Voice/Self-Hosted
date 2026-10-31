@@ -66,6 +66,12 @@ run_case "reject-ampersand"        'EVIL=a&b'                                 1
 run_case "reject-backslash"        'EVIL=a\b'                                 1
 run_case "reject-quoted-then-extra" 'KEY="foo" "bar"'                         1
 run_case "reject-single-quoted-then-extra" "KEY='foo' 'bar'"                  1
+# Command substitution through the key or a double-quoted value
+run_case "reject-key-substitution"  'A$(touch x)=y'                             1
+run_case "reject-key-lowercase"     'Ab=y'                                      1
+run_case "reject-dq-dollar-paren"   'T="$(touch x)"'                            1
+run_case "reject-dq-dollar-var"     'T="$HOME/x"'                               1
+run_case "reject-dq-backtick"       'T="`id`"'                                  1
 
 # Accept patterns (expect exit 0)
 run_case "accept-quoted"           'SMTP_FROM="Concord Voice <noreply@x.test>"' 0

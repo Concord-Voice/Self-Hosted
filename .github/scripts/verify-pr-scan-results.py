@@ -323,12 +323,16 @@ def _verify_verdict(selection, jobs, evidence, current_pr):
     if selected["sonar"]:
         head_repo = current_pr.get("head", {}).get("repo")
         external_pr = not isinstance(head_repo, dict) or head_repo.get("full_name") != REPO
-        # Fork PRs have no SONAR_TOKEN; Dependabot PRs read it from their own
-        # secret store and must scan. The trusted App check remains mandatory
-        # and independently bound to this PR head.
+        # The protected bridge skips fork PRs; same-repository PRs, Dependabot
+        # included, must scan through it. The trusted App check remains
+        # mandatory and independently bound to this PR head.
         sonar_job_ok = jobs.get("sonar") == "success" or (external_pr and jobs.get("sonar") == "skipped")
         if not sonar_job_ok or jobs.get("build") != "success":
             reasons.append("policy: Sonar selected build or scan did not succeed")
+        bridge = evidence.get("sonar_bridge")
+        if not external_pr and (not isinstance(bridge, dict) or bridge.get("proof_verified") is not True
+                                or bridge.get("child_verified") is not True):
+            reasons.append("unknown: Sonar caller proof or exact child run unverified")
         for component in COMPONENTS:
             if selection.get("coverage_required", {}).get(component):
                 artifacts = evidence.get("coverage_artifacts", [])
@@ -842,14 +846,18 @@ def _collect(api, selection, jobs, number, run_id):
         name = component.replace("_", "-") + "-coverage"
         coverage.append({"component": component, "present": any(a.get("name") == name and a.get("expired") is False
                          and isinstance(a.get("size_in_bytes"), int) and a["size_in_bytes"] > 0 for a in artifacts)})
-    sonar = None
+    sonar = bridge = None
     if selected.get("sonar"):
         checks = api.pages(f"/commits/{selection['head_sha']}/check-runs?app_id=12526&filter=all", "check_runs")
-        # SonarCloud and the protected workflow start independently. A valid
-        # App check may precede this workflow run; bind it to the current PR
-        # head and base instead of imposing an ordering between the two.
+        # A fork PR's App check may precede this run; bind it to the current PR
+        # head and base. A same-repository PR's App check must fall inside the
+        # exact child run this attempt dispatched: the pinned pr-ci has no Sonar
+        # job, so that child is the only producer (single-producer contract).
         opened = _time(pr.get("created_at"))
         now = datetime.now(timezone.utc)
+        head_repo = pr.get("head", {}).get("repo")
+        if isinstance(head_repo, dict) and head_repo.get("full_name") == REPO:
+            opened, now, bridge = _sonar_bridge(api, jobs, artifacts, run_id, attempt, attempt_started)
         sonar_checks = [c for c in checks if c.get("app", {}).get("id") == 12526
                         and c.get("name") == "SonarCloud Code Analysis"
                         and c.get("head_sha") == selection["head_sha"]
@@ -859,8 +867,10 @@ def _collect(api, selection, jobs, number, run_id):
                                 and link.get("base", {}).get("sha") == pr.get("base", {}).get("sha")
                                 and link.get("base", {}).get("ref") == "main"
                                 for link in c.get("pull_requests", []))]
-        # Retries retain earlier App checks on the same PR revision.
-        if sonar_checks:
+        # Retries retain earlier App checks on the same PR revision. A
+        # same-repository window holds exactly one producer, so two checks in
+        # it are ambiguous, matching the child's "multiple fresh Sonar checks".
+        if sonar_checks and bridge is None:
             newest = max(_time(c["started_at"]) for c in sonar_checks)
             sonar_checks = [c for c in sonar_checks if _time(c["started_at"]) == newest]
         if len(sonar_checks) == 1:
@@ -879,7 +889,27 @@ def _collect(api, selection, jobs, number, run_id):
                 "latest_analyses": latest_items, "pagination_complete": True,
                 "http_errors": [], "alerts": alerts, "main_alerts": main_alerts, "instances": instances,
                 "diff": {"complete": True, "added_lines": diff}, "coverage_artifacts": coverage,
-                "sonar": sonar}
+                "sonar": sonar, "sonar_bridge": bridge}
+
+
+def _sonar_bridge(api, jobs, artifacts, run_id, attempt, attempt_started):
+    """Return the exact child's analysis window and whether this attempt's proof and child hold."""
+    proof_name = f"protected-sonar-caller-proof-{run_id}-{attempt}"
+    proofs = [a for a in artifacts if a.get("name") == proof_name and a.get("expired") is False
+              and isinstance(a.get("size_in_bytes"), int) and a["size_in_bytes"] > 0]
+    child_id = jobs.get("sonar_child_run_id")
+    if not isinstance(child_id, str) or not re.fullmatch(r"[1-9][0-9]{0,18}", child_id):
+        raise Unknown("Sonar child run ID missing")
+    child, _ = api.get(f"/actions/runs/{int(child_id)}")
+    started = _time(child.get("run_started_at"))
+    ended = _time(child.get("updated_at"))
+    child_ok = (child.get("id") == int(child_id) and child.get("run_attempt") == 1
+                and child.get("path") == ".github/workflows/sonarcloud.yml"
+                and child.get("event") == "workflow_dispatch" and child.get("head_branch") == "main"
+                and child.get("repository", {}).get("full_name") == REPO
+                and child.get("status") == "completed" and child.get("conclusion") == "success"
+                and attempt_started <= started <= ended)
+    return started, ended, {"proof_verified": len(proofs) == 1, "child_verified": child_ok}
 
 
 def _pr_revision(pr):

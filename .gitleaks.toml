@@ -1,5 +1,10 @@
 # Gitleaks configuration
-# Excludes files that contain hashed secret fingerprints (not actual secrets)
+# Excludes files that contain hashed secret fingerprints (not actual secrets).
+# A custom config replaces gitleaks' built-in rules unless it extends them,
+# so without [extend] the hook would run with zero rules.
+
+[extend]
+useDefault = true
 
 [allowlist]
   paths = [

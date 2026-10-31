@@ -1,9 +1,9 @@
 # Nightly CI — the third trigger-owning orchestrator (ADR-0018 §1, amended).
 #
 # Self-Hosted (epic #3947): the desktop release probe, the release and deploy
-# legs, native-audiocap and the Sonar leg are not here. Desktop releases are
-# cut from the Desktop repo and production deploys run from Hosted; Sonar
-# returns with F7. This nightly is the scan baseline for main.
+# legs and native-audiocap are not here. Desktop releases are cut from the
+# Desktop repo and production deploys run from Hosted. This nightly is the scan
+# baseline for main, including SonarCloud's main-branch analysis (F7, #36).
 #
 # WHY THIS EXISTS. Scanning used to run twice per change: once on the PR, then
 # again on the squash-merge. `strict_required_status_checks_policy` is on, so
@@ -76,7 +76,7 @@ jobs:
   # ─── Scan window + pending-release probe ─────────────────────────────
   window:
     name: Resolve scan window
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -215,6 +215,27 @@ jobs:
       pull-requests: read
     uses: ./.github/workflows/build.yml
 
+  # SonarCloud main-branch analysis: the new-code baseline PR scans compare to.
+  sonar:
+    name: sonar
+    needs: [build]
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: read
+    uses: ./.github/workflows/sonarcloud.yml
+    with:
+      reusable-analysis: true
+      desktop-coverage: ${{ needs.build.outputs.desktop-coverage == 'true' }}
+      control-plane-coverage: ${{ needs.build.outputs.control-plane-coverage == 'true' }}
+      media-plane-coverage: ${{ needs.build.outputs.media-plane-coverage == 'true' }}
+      admin-coverage: ${{ needs.build.outputs.admin-coverage == 'true' }}
+    # Secrets are not inherited through workflow_call; without this the scanner
+    # gets an empty token and fails with "Not authorized or project not found".
+    secrets:
+      SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+
   unit-smoke:
     name: unit-smoke
     needs: [ioc]
@@ -254,9 +275,9 @@ jobs:
   # explanation of WHICH leg failed or whether the release was withheld.
   summary:
     name: summary
-    needs: [window, ioc, eslint, codeql, govulncheck, secret-scanning, container-image-scan, scorecard, build, unit-smoke, zap]
+    needs: [window, ioc, eslint, codeql, govulncheck, secret-scanning, container-image-scan, scorecard, build, unit-smoke, sonar, zap]
     if: always()
-    runs-on: blacksmith-2vcpu-ubuntu-2404
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
       contents: read
@@ -273,7 +294,7 @@ jobs:
           import json, os
           r = json.loads(os.environ["RESULTS"])
           blocking = ["ioc","build","unit-smoke","eslint","codeql","govulncheck","secret-scanning"]
-          advisory = ["scorecard","zap","container-image-scan"]
+          advisory = ["scorecard","sonar","zap","container-image-scan"]
           print("## Nightly CI\n")
           print(f"Window scanned from `{os.environ['BASE'][:12]}`.\n")
           print("| Job | Result | Class |")
