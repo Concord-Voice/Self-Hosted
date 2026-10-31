@@ -2176,6 +2176,12 @@ func NewRouter(
 					usersHandler.GetMyKeys,
 				)
 
+				// Read E2EE keys mid-session by proving the current password
+				userRoutes.POST("/me/keys/reveal",
+					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
+					usersHandler.RevealMyKeys,
+				)
+
 				// Replace E2EE keys (for key recovery)
 				userRoutes.PUT("/me/keys",
 					middleware.RateLimitByUser(redis, 3, 1*time.Minute),
