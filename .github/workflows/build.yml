@@ -343,17 +343,13 @@ jobs:
     if: >-
       !failure() && !cancelled() &&
       (inputs.force-coverage || format('{0}', inputs.control-plane-changed) == 'true' || needs.changes.outputs.control-plane == 'true' || github.event_name != 'pull_request')
-    # Pinned at 4 vCPU per shard — do NOT downsize. Despite low average CPU (the
-    # shared-DB `-p 1` package-serialization gate left cores idle), this is the heaviest
-    # CPU-bound job in CI: ADR-0016 measured -43% wall-clock ON 4 vCPU (8m42s
-    # vs ~15m on GitHub, 2026-06; that cleared the 20-min timeout-cliff then). A
-    # 4->2 downsize would regress toward that cliff. An 8 vCPU *upsize* is a
-    # separate measure-first trial (ADR-0016 AI#2 / #1414), NOT a default. Rationale:
-    # ADR-0013 §2, ADR-0016, [internal]reports/2026-06-17-pr1583-ci-deepdive-design.md (T2).
-    # Since the public flip this runs on GitHub's standard runner, which also has
-    # 4 vCPU (the 2026-06 GitHub figure above was the private-repo 2-vCPU runner).
-    # If shards approach the timeout, return this job to blacksmith-4vcpu rather
-    # than downsizing or raising the cliff.
+    # Runs on GitHub's standard public-repo runner (4 vCPU) since the public
+    # flip. Keep shards on 4 vCPU or more: this is the heaviest CPU-bound job in
+    # CI, and ADR-0016 measured 4 vCPU at -43% wall-clock against the 2-vCPU
+    # private-repo runner (8m42s vs ~15m, 2026-06). If shards approach the
+    # timeout, return this job to blacksmith-4vcpu-ubuntu-2404 rather than
+    # downsizing or raising the cliff. Rationale: ADR-0013 §2, ADR-0016,
+    # [internal]reports/2026-06-17-pr1583-ci-deepdive-design.md (T2).
     runs-on: ubuntu-24.04
     # 25, not 20: by 2026-10 a shard runs 15-20 min (shard 1: 19m53s on run
     # 37674608534), and run 37676463077 was cancelled at 20 min while still
