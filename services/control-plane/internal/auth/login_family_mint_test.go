@@ -152,7 +152,7 @@ func TestLoginFamilyCommitFailurePublishesNoCredentials(t *testing.T) {
 
 func TestLoginFamilyPasswordLoginRouteCreatesFreshFamily(t *testing.T) {
 	rig := newFamilyTestRig(t)
-	const password = "FamilyFixturePassphrase123!"
+	const password = "FamilyFixturePassphrase123!" // pragma: allowlist secret
 	hash, err := HashPassword(password)
 	require.NoError(t, err)
 	var email string
@@ -178,7 +178,7 @@ func TestLoginFamilyPasswordLoginRouteCreatesFreshFamily(t *testing.T) {
 func TestLoginFamilyRegistrationConfirmationRouteBindsFirstFamily(t *testing.T) {
 	rig := newFamilyTestRig(t)
 	ctx := context.Background()
-	const password = "RegistrationFixturePassphrase123!"
+	const password = "RegistrationFixturePassphrase123!" // pragma: allowlist secret
 	hash, err := HashPassword(password)
 	require.NoError(t, err)
 	pending, _, _, err := rig.h.pending.InsertOrTakeover(ctx, InsertParams{Email: "family-registration@example.test", Username: "familyregistration", PasswordHash: hash, WrappedPrivateKey: []byte{1}, KeyDerivationSalt: []byte{2}, KeyDerivationAlg: "argon2id", PublicKey: []byte{3}}, password)
@@ -349,4 +349,22 @@ func TestLoginFamilyAuthorityWaitCancellationIsUnavailable(t *testing.T) {
 	require.Equal(t, http.StatusServiceUnavailable, w.Code, w.Body.String())
 	assert.JSONEq(t, `{"error":"Authentication temporarily unavailable"}`, w.Body.String())
 	assert.Empty(t, w.Header().Values("Set-Cookie"))
+}
+
+func TestPreparedAccessTokenAuthTimeOnlyOnPrimaryAuth(t *testing.T) {
+	for _, primary := range []bool{true, false} {
+		input := AccessTokenInput{UserID: uuid.New(), SID: uuid.New(), EmailVerified: true, PrimaryAuth: primary}
+		prepared, err := PrepareAccessToken(input, time.Now())
+		require.NoError(t, err)
+		signed, err := prepared.Sign(familyTestSecret)
+		require.NoError(t, err)
+		claims, err := ValidateAccessToken(signed, familyTestSecret)
+		require.NoError(t, err)
+		if primary {
+			require.NotNil(t, claims.AuthTime)
+			require.Equal(t, claims.IssuedAt.Unix(), claims.AuthTime.Unix())
+		} else {
+			require.Nil(t, claims.AuthTime)
+		}
+	}
 }

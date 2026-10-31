@@ -25,7 +25,12 @@ are exact stable ASCII `X.Y.Z` values, are forgeable, and are never signed
 attestation, authentication, authorization, entitlement, or cryptographic evidence.
 
 When configured, the server rejects missing, malformed, or below-floor declarations
-with HTTP 403 `CLIENT_VERSION_TOO_OLD`. Public config, authentication, update, and
+with HTTP 403 `CLIENT_VERSION_TOO_OLD`. Mobile clients also send
+`X-Concord-Client-Platform` (REST) or `client_platform` (WebSocket) as `ios` or
+`android` and are checked against `CLIENT_MIN_VERSION_IOS` or
+`CLIENT_MIN_VERSION_ANDROID`; with no platform the desktop floor
+`CLIENT_MIN_VERSION` applies. Any other platform value is refused with HTTP 400
+`Unsupported client platform`, even when no floor is set. Public config, authentication, update, and
 recovery routes remain available. `/attestation/verify` remains AuthRequired-only
 and is explicitly outside the floor so attestation bootstrap remains possible.
 

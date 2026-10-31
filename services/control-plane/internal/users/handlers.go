@@ -289,14 +289,58 @@ func (h *Handler) GetPublicProfile(c *gin.Context) {
 	})
 }
 
-// GetMyKeys returns the current user's E2EE keys (for key re-wrapping during password change)
+// errCodeRecentAuthRequired tells the client the key read needs a fresh sign-in
+// (GET) or the current password (POST /users/me/keys/reveal).
+const errCodeRecentAuthRequired = "recent_auth_required"
+
+// GetMyKeys returns the current user's password-wrapped E2EE identity key.
+//
+// The wrapped key can be guessed offline, so only an access token minted by a
+// primary sign-in (password, SSO, step-up continuation) within the access-token
+// lifetime may read it. A token renewed by refresh rotation carries no
+// auth_time and is refused: a stolen refresh token must not yield the key.
+// Mid-session callers (password change) use RevealMyKeys instead.
 func (h *Handler) GetMyKeys(c *gin.Context) {
 	userID, exists := c.Get("user_id")
 	if !exists {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgUnauthorized})
 		return
 	}
+	authTime, ok := middleware.TokenAuthTime(c)
+	if !ok || time.Since(authTime) > auth.AccessTokenTTL {
+		c.JSON(http.StatusForbidden, gin.H{"error": "Recent sign-in required", "code": errCodeRecentAuthRequired})
+		return
+	}
+	h.writeMyKeys(c, userID)
+}
 
+// RevealMyKeysRequest carries the current password for RevealMyKeys.
+type RevealMyKeysRequest struct {
+	CurrentPassword string `json:"current_password" binding:"required"`
+}
+
+// RevealMyKeys returns the wrapped identity key to a caller that proves the
+// current password. Knowing the password already unwraps the key, so this
+// releases nothing an attacker without the password could guess offline.
+func (h *Handler) RevealMyKeys(c *gin.Context) {
+	userID, exists := c.Get("user_id")
+	if !exists {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgUnauthorized})
+		return
+	}
+	var req RevealMyKeysRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "current_password is required"})
+		return
+	}
+	if _, status, msg := h.verifyCurrentPassword(userID, req.CurrentPassword); status != 0 {
+		c.JSON(status, gin.H{"error": msg})
+		return
+	}
+	h.writeMyKeys(c, userID)
+}
+
+func (h *Handler) writeMyKeys(c *gin.Context, userID interface{}) {
 	var keys models.UserKeys
 	err := h.db.QueryRow(
 		`SELECT user_id, wrapped_private_key, key_derivation_salt, key_version, key_derivation_alg

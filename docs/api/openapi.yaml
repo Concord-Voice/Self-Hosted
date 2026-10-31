@@ -24,7 +24,12 @@ info:
       stable ASCII `X.Y.Z` compatibility declarations, not signed attestation,
       authentication, authorization, entitlement, or cryptographic evidence. When
       a deployment configures a minimum, missing, malformed, or older declarations
-      receive 403 `CLIENT_VERSION_TOO_OLD`. Public config, authentication, update,
+      receive 403 `CLIENT_VERSION_TOO_OLD`. Mobile clients add `X-Concord-Client-Platform`
+      (or `client_platform` on WebSocket admission) set to `ios` or `android` and are
+      checked against that platform''s own floor (`CLIENT_MIN_VERSION_IOS` /
+      `CLIENT_MIN_VERSION_ANDROID`); an absent platform means desktop
+      (`CLIENT_MIN_VERSION`). Any other platform value gets 400
+      `Unsupported client platform`, even when no floor is set. Public config, authentication, update,
       and recovery routes remain available; `/attestation/verify` is AuthRequired-only
       and outside this floor.
 
@@ -59,7 +64,7 @@ info:
     url: https://github.com/Concord-Voice/Self-Hosted
   license:
     name: CVSL 1.0
-    url: internal development reference omitted
+    url: https://github.com/Concord-Voice/Self-Hosted/blob/main/LICENSE
 servers:
 - url: http://localhost:8080/api/v1
   description: Local development
@@ -2346,6 +2351,7 @@ paths:
       - BearerAuth: []
       parameters:
       - $ref: '#/components/parameters/ClientVersionHeader'
+      - $ref: '#/components/parameters/ClientPlatformHeader'
       responses:
         '200':
           description: Ticket issued
@@ -2359,6 +2365,8 @@ paths:
                     description: Single-use ticket (TTL is the shorter of 30 seconds or the issuing access token's remaining lifetime)
         '429':
           $ref: '#/components/responses/RateLimited'
+        '400':
+          $ref: '#/components/responses/UnsupportedClientPlatform'
         '403':
           $ref: '#/components/responses/ClientVersionTooOld'
   /categories/{id}/overrides:
@@ -17730,7 +17738,7 @@ paths:
       summary: Get E2EE keys
       description: 'Retrieve wrapped private key and derivation salt for the current user.
 
-        Used during password change to re-wrap keys.
+        Only an access token minted by a primary sign-in (password, SSO or step-up continuation), carrying `auth_time` within the 15-minute access-token lifetime, may read it. A token renewed by refresh rotation gets 403 `recent_auth_required`; mid-session callers use `POST /users/me/keys/reveal` with the current password instead.
 
         Rate limit: 5 requests per minute.
 
@@ -17747,6 +17755,19 @@ paths:
                 properties:
                   e2ee_keys:
                     $ref: '#/components/schemas/E2EEKeys'
+        '403':
+          description: The token was not minted by a recent primary sign-in (`code` is `recent_auth_required`)
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  error:
+                    type: string
+                  code:
+                    type: string
+                    enum:
+                    - recent_auth_required
     put:
       tags:
       - Users
@@ -17824,6 +17845,46 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+  /users/me/keys/reveal:
+    post:
+      tags:
+      - Users
+      summary: Reveal E2EE keys with the current password
+      description: 'Return the wrapped private key and derivation salt to a caller that proves the current password. Used mid-session (password change), where the access token may have been renewed by refresh and so cannot use `GET /users/me/keys`.
+
+        Rate limit: 5 requests per minute.
+
+        '
+      security:
+      - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required:
+              - current_password
+              properties:
+                current_password:
+                  type: string
+                  format: password
+      responses:
+        '200':
+          description: E2EE key material
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  e2ee_keys:
+                    $ref: '#/components/schemas/E2EEKeys'
+        '400':
+          description: Missing current_password
+        '401':
+          description: Current password is incorrect
+        '404':
+          description: User or keys not found
   /users/me/password:
     post:
       tags:
@@ -19543,6 +19604,7 @@ paths:
       - BearerAuth: []
       parameters:
       - $ref: '#/components/parameters/ClientVersionQuery'
+      - $ref: '#/components/parameters/ClientPlatformQuery'
       - name: activity_rich_presence
         in: query
         required: false
@@ -19558,6 +19620,8 @@ paths:
       responses:
         '101':
           description: Switching Protocols (WebSocket upgrade)
+        '400':
+          $ref: '#/components/responses/UnsupportedClientPlatform'
         '403':
           $ref: '#/components/responses/ClientVersionTooOld'
         '429':
@@ -19648,6 +19712,26 @@ components:
         maxLength: 32
         pattern: '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
       description: Untrusted compatibility declaration used for authenticated WebSocket admission; exact stable ASCII X.Y.Z.
+    ClientPlatformHeader:
+      name: X-Concord-Client-Platform
+      in: header
+      required: false
+      schema:
+        type: string
+        enum:
+        - ios
+        - android
+      description: Selects the mobile version floor (CLIENT_MIN_VERSION_IOS / CLIENT_MIN_VERSION_ANDROID). Absent means desktop; any other value is refused with 400.
+    ClientPlatformQuery:
+      name: client_platform
+      in: query
+      required: false
+      schema:
+        type: string
+        enum:
+        - ios
+        - android
+      description: WebSocket-admission form of X-Concord-Client-Platform. Absent means desktop; any other value is refused with 400.
     ServerId:
       name: id
       in: path
@@ -19791,6 +19875,12 @@ components:
                 enum: [voice_command_queue_full]
     BadRequest:
       description: Validation error
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/Error'
+    UnsupportedClientPlatform:
+      description: The client platform is neither absent (desktop), `ios`, nor `android`.
       content:
         application/json:
           schema:
