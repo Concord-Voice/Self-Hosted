@@ -302,6 +302,10 @@ jobs:
           # while avoiding the transfer of large historical blobs.
           filter: blob:limit=1m
 
+      - name: Install locked Docker for deploy test containers
+        if: ${{ !cancelled() && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.deployment || fromJSON(needs.detect-changes.outputs.scan-selection).hotfix || fromJSON(needs.detect-changes.outputs.scan-selection).advisory.selfhost) }}
+        run: bash scripts/ci/install-docker-engine.sh
+
       # Both the license-workflow guard and provision-secrets drift-lock parse
       # YAML. Provision their pinned dependency before either guard runs.
       - name: Ensure PyYAML for static guards
