@@ -121,6 +121,14 @@ jobs:
           set -euo pipefail
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
+      # The caller-proof verifier is Go; pin the toolchain its go.mod names
+      # rather than relying on whatever the runner image ships.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        if: ${{ !inputs.reusable-analysis }}
+        with:
+          go-version-file: services/control-plane/go.mod
+          cache: false
+
       - name: Verify caller proof and prepare inert PR source
         if: ${{ !inputs.reusable-analysis }}
         env:
