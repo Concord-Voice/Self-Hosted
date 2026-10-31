@@ -214,7 +214,7 @@ this ADR's References section links; it is not restated here. What follows is on
   that per-unit hardware royalties make GPU vendors licensees. Since 2025-12-15 Access Advance
   also operates the former Via LA HEVC/VVC pool, so a written enquiry has one counterparty; it
   remains available at the project lead's discretion and is not a precondition for this ADR.
-- **JSF++ does not reach a media-engine sidecar.** `.claude/rules/native-audio.md` binds JSF AV
+- **JSF++ does not reach a media-engine sidecar.** `.claude/rules/native-audio.md` (in Desktop) binds JSF AV
   C++ Coding Standards Rev C to the `rt/` real-time core of the audiocap addon
   (`client/desktop/native/concord-audiocap/rt/`); `napi/` is explicitly outside it. No rule yet
   covers a media-engine sidecar, which does not exist. A future one needs its own decision, not
@@ -238,8 +238,8 @@ this ADR's References section links; it is not restated here. What follows is on
 
 ## References
 
-**Internal** — `.claude/rules/e2ee.md` § Media frame crypto v5 · `.claude/rules/media-plane.md`
-§ Profile-aware room codec floor · `.claude/rules/native-audio.md` · `docs/legal/dependency-license-audit.md`
+**Internal** — `.claude/rules/e2ee.md` (in Desktop) § Media frame crypto v5 · `.claude/rules/domains/media-plane.md`
+§ Profile-aware room codec floor · `.claude/rules/native-audio.md` (in Desktop) · `docs/legal/dependency-license-audit.md`
 · `.github/workflows/license-check.yml` · `docs/superpowers/specs/2026-07-15-native-custom-media-engine-design.md` §5
 
 **Research** (merged in PR #3244, under `docs/superpowers/reports/`) —

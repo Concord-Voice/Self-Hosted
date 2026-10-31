@@ -261,5 +261,5 @@ must be trusted and cover the service names clients use.
   govern it on IPv4. See the quickstart's
   [Firewall (UFW)](selfhost-quickstart.md#firewall-ufw) section.
 
-See `.claude/rules/deployment.md` (cert-writer surface) and the design spec
+See `.claude/rules/deployment.md` (in Concord-Voice-Alpha) (cert-writer surface) and the design spec
 `docs/superpowers/specs/2026-06-27-1617-selfhost-tls-cert-provisioning-design.md`.

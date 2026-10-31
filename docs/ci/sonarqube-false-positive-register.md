@@ -17,7 +17,7 @@ The register exists because the `mcp__sonarqube__change_sonar_issue_status` tool
 > detection is re-homing from SonarQube's security sensors to per-tool GitHub
 > Code Scanning (CodeQL #1424, Semgrep #1426 — categories `semgrep-custom` /
 > `semgrep-community`). This is an architecture change recorded per
-> [ADR-0017](../adr/0017-ci-scanning-result-hub.md) §Consequences — NOT a rule
+> ADR-0017 (not published in this repository) §Consequences — NOT a rule
 > suppression on AI-authored code. SonarQube retains coverage + new-code
 > quality + AI-Code-Assurance (#1430 narrows its scope).
 >
@@ -25,7 +25,7 @@ The register exists because the `mcp__sonarqube__change_sonar_issue_status` tool
 > `injection`-tagged VULNERABILITY (taint) rules in project-assigned custom
 > quality profiles — the Sonar-staff-documented mechanism for skipping the
 > security sensors (no scanner property exists). Run
-> [`scripts/sonar/narrow-security-profiles.sh`](../../scripts/sonar/narrow-security-profiles.sh)
+> `scripts/sonar/narrow-security-profiles.sh` (not published in this repository)
 > (dry-run default). This is the recorded ADR-0017 architecture change, NOT
 > rule suppression on AI code: hotspot rules, DBD sensors, and all
 > maintainability/reliability rules stay active. Quality Gate thresholds are
@@ -160,7 +160,7 @@ High-level stances on SonarQube rules whose mismatch with this project's idiomat
 | Field | Value |
 |---|---|
 | First recorded | 2026-04-11 (issue #431) |
-| Rationale | The rule targets predicate functions where a bound value is used only in the condition. Its "compliant" example does not fit Go's canonical error-check idiom `if err := X(); err != nil { ... }`. Rewriting to `if X() != nil { ... }` discards the bound error value, conflicting with `.claude/rules/backend.md` — "Every error MUST be checked. Wrap errors with context." |
+| Rationale | The rule targets predicate functions where a bound value is used only in the condition. Its "compliant" example does not fit Go's canonical error-check idiom `if err := X(); err != nil { ... }`. Rewriting to `if X() != nil { ... }` discards the bound error value, conflicting with `.claude/rules/domains/backend.md` — "Every error MUST be checked. Wrap errors with context." |
 | Instance count in Section 2 | 4 |
 | Disposition | Per-instance `FALSE_POSITIVE` for each occurrence of the error-check idiom. Rule-level disable is prohibited by project SonarQube AI-Code Assurance policy. |
 
@@ -178,7 +178,7 @@ High-level stances on SonarQube rules whose mismatch with this project's idiomat
 | Field | Value |
 |---|---|
 | First recorded | 2026-06-14 (PR #1516) |
-| Rationale | The rule flags `context.Background()` creation where a request-scoped `ctx` is in scope, on the assumption the request context should be propagated. That assumption is correct for in-request work but **wrong for fire-and-forget cleanup that must outlive the request** — specifically post-commit cache invalidation and audit logging that run AFTER the HTTP response transaction has committed. If those used the request `ctx`, a client disconnect (which cancels `ctx`) between commit and cleanup would abort the cache invalidation / audit write, leaving a stale cache entry or a missing audit record — exactly the silent-failure class `.claude/rules/backend.md` guards against. The detached `context.Background()` is the intentional, correct choice here: the cleanup is causally downstream of a committed transaction and its correctness must not depend on the caller still being connected. (Gitar's review on #1516 independently flagged an attempt to "fix" this by switching to the cancellable `ctx`; that change was reverted precisely because it tied durable cleanup to request liveness.) |
+| Rationale | The rule flags `context.Background()` creation where a request-scoped `ctx` is in scope, on the assumption the request context should be propagated. That assumption is correct for in-request work but **wrong for fire-and-forget cleanup that must outlive the request** — specifically post-commit cache invalidation and audit logging that run AFTER the HTTP response transaction has committed. If those used the request `ctx`, a client disconnect (which cancels `ctx`) between commit and cleanup would abort the cache invalidation / audit write, leaving a stale cache entry or a missing audit record — exactly the silent-failure class `.claude/rules/domains/backend.md` guards against. The detached `context.Background()` is the intentional, correct choice here: the cleanup is causally downstream of a committed transaction and its correctness must not depend on the caller still being connected. (Gitar's review on #1516 independently flagged an attempt to "fix" this by switching to the cancellable `ctx`; that change was reverted precisely because it tied durable cleanup to request liveness.) |
 | Instance count in Section 2 | 1 |
 | Disposition | Per-instance `FALSE_POSITIVE` for each `context.Background()` used for post-commit cache/audit cleanup that must survive request cancellation. Confirm by checking the call site runs after the transaction commits and performs durable side effects (cache invalidate, audit log). Rule-level disable is prohibited by project SonarQube AI-Code Assurance policy. |
 
@@ -327,15 +327,12 @@ A CI **drift-guard** now detects that regression:
 the project* is the narrowed one, and (2) it has **zero active**
 injection-tagged VULNERABILITY rules — querying `rules/search` scoped with
 `qprofile=<key>&activation=true` (an org-wide query would always find injection
-rules in the catalog and false-positive forever). It runs in the
-`sonar-profile-drift` job of `.github/workflows/pr-ci.yml` as an **advisory**
-step (`continue-on-error`, gated on `SONAR_TOKEN` presence so it is fork-safe) —
-never a required check. The job is never dispatched for Dependabot, so the token
-never reaches a runner executing a Dependabot PR's action pins. It nags with
-exit 1 until an operator re-runs the human restore op
-`scripts/sonar/narrow-security-profiles.sh --apply`. A hermetic self-test
-(`scripts/sonar/test-check-narrowed-profile.sh`) runs blocking and token-free in
-the `static-guards` job.
+rules in the catalog and false-positive forever). In Concord-Voice-Alpha it
+runs as an advisory step of the `sonar-profile-drift` job; this repo's CI does
+not run it yet (Sonar CI wiring is #36). The restore op
+(`scripts/sonar/narrow-security-profiles.sh --apply`) stays in Alpha, which
+manages the shared org profiles. The hermetic self-test
+(`scripts/sonar/test-check-narrowed-profile.sh`) is in this repo.
 
 ## Schema Rules
 

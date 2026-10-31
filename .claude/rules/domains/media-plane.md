@@ -5,6 +5,8 @@ paths:
   - "services/media-plane/Dockerfile"
 ---
 
+> **Imported from Concord-Voice-Alpha (@771eb3c) at the repo split.** References to `client/desktop/**`, `docs/runbooks/deploys.md`, `docs/reference/as-built-ledger.md`, `docs/superpowers/**`, managed (hosted) deploy workflows and Alpha's org rulesets point at Alpha, Desktop or the private ops repos. Use them for context; they are not files or CI in this repo.
+
 # Media Plane Rules
 
 ## Architecture
@@ -141,7 +143,7 @@ mint path emits such a spelling, so producing one requires the signing secret.
 The refusal carries its **own** error message, not the `missing user_id` one directly above it.
 Sharing that string let the pre-existing missing-claim test pass off this branch once the
 presence check was deleted — proven by mutation, and the reason
-`.claude/rules/tests.md` § Vacuity calls a shared observable a shadowed assertion.
+`.claude/rules/domains/tests.md` § Vacuity calls a shared observable a shadowed assertion.
 
 ## Channel admission convergence (post-#3140)
 
@@ -497,7 +499,7 @@ The Socket.IO `cors.origin` callback lives at `services/media-plane/src/lib/orig
 
 **Worker-count guard (#2178):** the same config loader fatal-exits when `NUM_WORKERS` is not an integer in `[1, MAX_MEDIASOUP_WORKERS]` (`parseWorkerCountEnv`; the ceiling is `32`). Both bounds are load-bearing and they fail differently. A zero or unparseable count builds an EMPTY worker pool, `init()` still resolves, `/health` answers 200 — and then worker placement throws a typed `NoWorkersAvailableError` (`lib/workerSelection.ts`, #3149) which the join handler returns as an ordinary join-error ack via `emitJoinError`. That last hop is verified by inspection, not by test: `src/index.ts` is in `vitest.config.ts`'s coverage `exclude`, so no test reaches the socket-ack seam. The typed error's `code` never crosses the wire — `emitJoinError` special-cases only `CryptoVersionMismatchError` — so do not describe it as a client-visible code. The process **does not crash**: it serves `/health` 200 indefinitely while failing every voice join, so nothing restarts it. An oversized count is the likelier typo, and absent the ceiling it would fork more subprocesses than the container cgroup can hold — `init()` would never resolve, `/health` would never answer, and a scoped deploy's `--wait --wait-timeout 180` would fail with the old container already gone. Both descriptions are of what the guard PREVENTS: since #2178 neither value reaches the worker loop, because the loader exits first. `NUM_WORKERS` is a **per-file compose literal**, never an interpolation: `"4"` in `docker-compose.yml` (which declares no `cpus` limit, so it matches the code default) and `"3"` in `docker-compose.production.yml`, sized to that file's `deploy.resources.limits.cpus: '3'`. A mediasoup worker is a single-threaded C++ subprocess pinned to one core, so N > cpus oversubscribes the CFS quota and surfaces as RTP jitter rather than as a failure. Nothing enforces agreement between the two — the compose comment is the coupling; change them together.
 
-**Do NOT re-introduce** an unconditional allow for `'null'` or `'file://'` — these were the pre-#830 mental model that #894 retired. If a future Electron change needs a new privileged scheme, register it (see `app://concord` in `.claude/rules/electron.md`) and add it to `ALLOWED_ORIGINS`, do not carve a gate exemption.
+**Do NOT re-introduce** an unconditional allow for `'null'` or `'file://'` — these were the pre-#830 mental model that #894 retired. If a future Electron change needs a new privileged scheme, register it (see `app://concord` in `.claude/rules/electron.md` (in Desktop)) and add it to `ALLOWED_ORIGINS`, do not carve a gate exemption.
 
 ## mediasoup Patterns
 - One router per room via `MediasoupService.getOrCreateRouter()`
@@ -1091,7 +1093,7 @@ applies them (latch, pause, evict, emit, log).
    Other pause paths and older media-plane versions can still leave the PiP window on a frozen
    frame or a late joiner on a black tile: the consume response carries no `producerPaused`.
    The popped-out PiP controls window does not show the audio policy owner notice strip;
-   `voiceService.toggleMute` still guards the microphone there. See `.claude/rules/frontend.md`.
+   `voiceService.toggleMute` still guards the microphone there. See `.claude/rules/frontend.md` (in Desktop).
 8. Bundled renderers get no explanation until the next desktop release. A join refused during a
    cooldown on the automatic reconnect path (`resumeAfterReconnect`) tears down through
    `emergencyCleanup()` with no dialog; only `handleJoinFailure` opens it.
@@ -1257,9 +1259,9 @@ The `services/media-plane/Dockerfile` builder stage uses `ghcr.io/concord-voice/
 
 **SHA-pin requirement:** the builder stage MUST reference the GHCR image by manifest digest (`@sha256:...`), not by floating tag. The date-stamped tag (`<node-tag>-<DATE>`) is for human readability only; the digest is the authoritative supply-chain handle.
 
-**`<node-tag>` is DERIVED, never hardcoded (post-#3172).** The publish workflow's `Compute date tag` step reads it from the `FROM node:<tag>` line in `infrastructure/docker/buildtools/Dockerfile` and refuses to publish under an empty prefix. It was the literal string `24-alpine` until dependabot bumped that parent to `node:26-alpine` on 2026-09-08, at which point every subsequent refresh would have stamped a Node 26 image with a tag naming Node 24. **Nothing would have broken** — consumers pin by digest and the tag is decorative at build time — which is exactly why the drift was invisible and survived. The class of defect is an operator reading a truthful-looking tag; deriving the prefix closes it at the source rather than by remembering to update a second place. Aligns with `.claude/rules/electron.md` §"Supply-chain hardening".
+**`<node-tag>` is DERIVED, never hardcoded (post-#3172).** The publish workflow's `Compute date tag` step reads it from the `FROM node:<tag>` line in `infrastructure/docker/buildtools/Dockerfile` and refuses to publish under an empty prefix. It was the literal string `24-alpine` until dependabot bumped that parent to `node:26-alpine` on 2026-09-08, at which point every subsequent refresh would have stamped a Node 26 image with a tag naming Node 24. **Nothing would have broken** — consumers pin by digest and the tag is decorative at build time — which is exactly why the drift was invisible and survived. The class of defect is an operator reading a truthful-looking tag; deriving the prefix closes it at the source rather than by remembering to update a second place. Aligns with `.claude/rules/electron.md` (in Desktop) §"Supply-chain hardening".
 
-**Runtime base pin (post-#1922):** the final-stage `node:26-alpine` base is independently pinned to its top-level multi-platform digest. Re-resolve it during every buildtools refresh and update it when the reviewed upstream digest changes; a rebuild alone cannot advance a digest-pinned runtime. Node/Alpine CVE responses MUST verify and update this runtime pin in the same consumer PR as the builder pin. Confirm the publisher used that upstream digest, verify amd64 and arm64 coverage, and build/smoke the full final image before merge. A floating runtime tag is prohibited because a deploy rebuild may otherwise reuse a cached pre-security base after the builder pin has moved. The general upstream-image rule in `.claude/rules/electron.md` now requires the same tag-plus-digest pin for every deploy-path base; what stays media-plane-specific is the lockstep with the builder pin above. The paired procedure is canonical in the buildtools refresh runbook.
+**Runtime base pin (post-#1922):** the final-stage `node:26-alpine` base is independently pinned to its top-level multi-platform digest. Re-resolve it during every buildtools refresh and update it when the reviewed upstream digest changes; a rebuild alone cannot advance a digest-pinned runtime. Node/Alpine CVE responses MUST verify and update this runtime pin in the same consumer PR as the builder pin. Confirm the publisher used that upstream digest, verify amd64 and arm64 coverage, and build/smoke the full final image before merge. A floating runtime tag is prohibited because a deploy rebuild may otherwise reuse a cached pre-security base after the builder pin has moved. The general upstream-image rule in `.claude/rules/electron.md` (in Desktop) now requires the same tag-plus-digest pin for every deploy-path base; what stays media-plane-specific is the lockstep with the builder pin above. The paired procedure is canonical in the buildtools refresh runbook.
 
 **CI age-guard:** the buildtools age-check step in the `dev-checks` job in `.github/workflows/unit-smoke.yml` (moved from build.yml by #1475; consolidated into `dev-checks` by #2065) emits a `::warning::` annotation when the pinned tag's date is >100 days old. The staleness annotation is informational only — it does NOT fail the build — but an *unparseable* tag is a hard `exit 1`, deliberately, so a tag-format change cannot turn the guard into a silent no-op. Its parser keys on the tag's trailing `YYYY-MM-DD` and is agnostic to the leading `<node-tag>`, so a Node-major bump moves the prefix without tripping it. Operator should respond by dispatching the publish workflow per the runbook. The 100-day threshold gives a 10-day grace past the 90-day quarterly cadence.
 

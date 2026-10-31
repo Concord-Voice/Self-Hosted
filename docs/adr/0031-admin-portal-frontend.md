@@ -18,7 +18,7 @@ operations data available to a dashboard product.
 
 Ship `client/admin` as a bespoke React and TypeScript Admin Portal. The control
 plane serves its built assets at the same origin under `/admin/`; hosted
-deployments keep Cloudflare Access as the outer gate, and the existing local
+deployments keep an access gateway in front as the outer gate, and the existing local
 admin session remains the authorization boundary for metrics.
 
 The portal consumes only the existing fixed routes: `/admin/api/v1/health`,
@@ -42,7 +42,7 @@ may persist. Origin-side metrics storage remains governed by ADR-0030.
 Rejected. An embedded dashboard introduces another authentication boundary,
 iframe and CSP complexity, an outbound target and SSRF defense, a separate visual
 system, and a broader data surface than the fixed, closed aggregate catalog
-(see `.claude/rules/opsmetrics.md` and
+(see `.claude/rules/opsmetrics.md` (in Concord-Voice-Alpha) and
 `services/control-plane/internal/opsmetrics/catalog.go` for the current key set).
 
 ### Repository-root control-plane Docker context

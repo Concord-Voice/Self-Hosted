@@ -48,7 +48,7 @@ address-checked. Guarding the probe alone would leave an origin *checked at admi
 unchecked at use* — the pattern that produced this bug.
 
 This is the desktop port of the Go control-plane's dial-time egress guard
-(`.claude/rules/backend.md` § "Outbound-request SSRF egress guard", reference implementation
+(`.claude/rules/domains/backend.md` § "Outbound-request SSRF egress guard", reference implementation
 `internal/klipy/handlers.go`, issue #1361). Same principle, different runtime.
 
 ## Decision
@@ -466,8 +466,8 @@ renderer entry**, and omitting one fails silently rather than loudly.
 
 - Spec: `docs/superpowers/specs/2026-07-30-2354-selfhosted-probe-ssrf-design.md`
 - Plan: `docs/superpowers/plans/2026-07-30-2354-selfhosted-probe-ssrf.md`
-- `.claude/rules/backend.md` § "Outbound-request SSRF egress guard" — the Go original this
+- `.claude/rules/domains/backend.md` § "Outbound-request SSRF egress guard" — the Go original this
   ports (#1361)
-- `.claude/rules/electron.md` § "Token Storage" — the corrected minting sentence
+- `.claude/rules/electron.md` (in Desktop) § "Token Storage" — the corrected minting sentence
 - ADR-0020 — the pinned `userData` root the
   approvals file lives under

@@ -75,7 +75,8 @@ access occurred. Source hashes are retained in the receipt.
 | Self-hosted origin selected before restore | Self-hosted service | Same self-hosted service |
 | Cold CVNet session | CVNet | CVNet |
 
-The reproduction script takes an owned
+The reproduction script and the assessed commit are in Concord-Voice-Alpha,
+not this repository; run these commands from an Alpha checkout. The script takes an owned
 source snapshot directory as its argument. Prepare it from the assessed commit:
 
 ```bash

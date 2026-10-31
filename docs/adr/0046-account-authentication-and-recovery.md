@@ -3,7 +3,7 @@
 **Status:** Proposed. The lead answered the Phase-2 gate on 2026-10-07 (spec §9.5). It becomes Accepted with C11 (action item 5), after #3587 PR-A freezes Δ1, Δ9 and Δ13.
 **Created:** 2026-10-07.
 **Decision owner:** project lead. Design panel: architect, system-engineer, platform-engineer, frontend-designer.
-**Scope:** #3662 (parent #696). Couples to the #2553 account-key authority ([ADR-0045](0045-account-key-transparency-and-enrollment.md)).
+**Scope:** #3662 (parent #696). Couples to the #2553 account-key authority (ADR-0045, not published in this repository).
 **Design:** `docs/superpowers/specs/2026-10-07-3662-account-auth-recovery-design.md`. This ADR records the decisions; the spec holds the rules, the table and the evidence.
 
 ## Context

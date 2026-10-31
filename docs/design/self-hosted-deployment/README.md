@@ -79,7 +79,7 @@ self-hosted privileges by accident.
 **Discipline:** SSO-suppression (#1619) and the entitlement grant (#1620) branch on
 this **one** seam only — no scattered per-feature `if selfHosted` conditionals.
 This mirrors the `resolveVideoPublisherCap` single-seam rule in
-`.claude/rules/media-plane.md`.
+`.claude/rules/domains/media-plane.md`.
 
 ### 3.2 Capability / version handshake contract (one descriptor, multiple riders)
 
@@ -105,7 +105,7 @@ The descriptor carries, in one round-trip:
 It is a **versioned, additively-evolvable** schema. New fields are `.optional()`.
 Old clients ignore unknown fields, and new clients tolerate missing fields.
 Validate at the client boundary with zod (the schema-at-boundary discipline in
-`.claude/rules/frontend.md`). The Go
+`.claude/rules/frontend.md` (in Desktop)). The Go
 `Response` struct and its `clientConfigStore.ts` mirror are a **hand-maintained
 contract**. Both sides land in the same PR.
 
@@ -216,7 +216,7 @@ Epic #1615
 ## 6. Security posture
 
 - **Client-controlled server URL → privileged main-process code**
-  (`.claude/rules/electron.md`, OWASP A10 SSRF
+  (`.claude/rules/electron.md` (in Desktop), OWASP A10 SSRF
   and A01). Validate the self-hosted `apiBase` for HTTPS-or-localhost and URL
   shape. Extend the `isPermittedFrameUrl` allowlist deliberately, and never
   bypass it.
@@ -233,7 +233,7 @@ Epic #1615
   omits the providers and rejects the routes. Client hiding is UX only. Advertise
   only the `Enabled` booleans (the `gifsEnabled` = `cfg.KlipyAPIKey != ""` precedent)
   — never client IDs / keys. Do **not** re-introduce `GOOGLE_CLIENT_SECRET` (#975).
-- **Installer secrets bootstrapping** (`.claude/rules/deployment.md`
+- **Installer secrets bootstrapping** (`.claude/rules/deployment.md` (in Concord-Voice-Alpha)
   Class-3 writer-conflict). The self-host installer owns a **separate** writer story
   for its `.env`. It must not re-create a server-side writer that conflicts with
   the org single-writer workflows.

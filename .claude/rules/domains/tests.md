@@ -8,6 +8,8 @@ paths:
   - "scripts/test-*.sh"
 ---
 
+> **Imported from Concord-Voice-Alpha (@771eb3c) at the repo split.** References to `client/desktop/**`, `docs/runbooks/deploys.md`, `docs/reference/as-built-ledger.md`, `docs/superpowers/**`, managed (hosted) deploy workflows and Alpha's org rulesets point at Alpha, Desktop or the private ops repos. Use them for context; they are not files or CI in this repo.
+
 ## Test the consumer, not the handshake
 
 **A test that asserts a value is PASSED must be paired with one asserting it is OBEYED.**
@@ -720,7 +722,7 @@ files it reads are the signing-pipeline workflows. To reproduce, run the test in
 
 ## Schema-validated handler tests
 
-WebSocket handlers in `client/desktop/src/renderer/hooks/messaging/useWebSocketMessages.ts` operate on payloads already narrowed by `WebSocketEventSchema` (zod 4 discriminated union, see `.claude/rules/frontend.md` § WebSocket payload validation). Consequence for the test suite:
+WebSocket handlers in `client/desktop/src/renderer/hooks/messaging/useWebSocketMessages.ts` operate on payloads already narrowed by `WebSocketEventSchema` (zod 4 discriminated union, see `.claude/rules/frontend.md` (in Desktop) § WebSocket payload validation). Consequence for the test suite:
 
 - **DO NOT** test in-handler bail paths for fields the schema guarantees (e.g., "ignores message when `channel_id` missing"). After PR #1184 these branches are structurally unreachable — Istanbul will report them as uncovered forever, and they encode behavior that can never fire in production.
 - **DO** test the schema-rejection boundary itself once, in the flat dedicated suite (`client/desktop/tests/unit/services/websocketService.dispatch.test.ts`), which exercises production `client/desktop/src/renderer/services/messaging/websocketService.ts`. Cover: malformed envelope, unknown event type, missing required field per schema. Assert `wireViolationCount` increments and the handler is NOT invoked.

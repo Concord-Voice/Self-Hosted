@@ -4,6 +4,8 @@ paths:
   - "client/admin/**"
 ---
 
+> **Imported from Concord-Voice-Alpha (@771eb3c) at the repo split.** References to `client/desktop/**`, `docs/runbooks/deploys.md`, `docs/reference/as-built-ledger.md`, `docs/superpowers/**`, managed (hosted) deploy workflows and Alpha's org rulesets point at Alpha, Desktop or the private ops repos. Use them for context; they are not files or CI in this repo.
+
 # Admin Portal Rules
 
 ## Closed data boundary
