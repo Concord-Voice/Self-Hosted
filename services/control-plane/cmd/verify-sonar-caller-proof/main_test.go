@@ -204,8 +204,8 @@ func TestVerifyProofRejectsBadProofs(t *testing.T) {
 			c["workflow_ref"] = repository + "/.github/workflows/pr-ci.yml@refs/heads/main"
 			return f.key
 		}},
-		{"branch-form workflow ref", func(_ *testing.T, c map[string]any, _ *[]byte) *rsa.PrivateKey {
-			c["workflow_ref"] = repository + "/.github/workflows/required-pr-build.yml@refs/heads/main"
+		{"short-form workflow ref", func(_ *testing.T, c map[string]any, _ *[]byte) *rsa.PrivateKey {
+			c["workflow_ref"] = repository + "/.github/workflows/required-pr-build.yml@main"
 			return f.key
 		}},
 		{"pull-request workflow ref", func(_ *testing.T, c map[string]any, _ *[]byte) *rsa.PrivateKey {
