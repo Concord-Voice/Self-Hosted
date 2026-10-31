@@ -70,8 +70,9 @@ fi
 # apostrophe inside double quotes is inert. A quoted single word ("." or 'src') is an
 # argument, so it is kept. A double-quoted span holding $( or a backtick is executed
 # by the shell, so its text stays visible. Any other quoted span is prose and becomes
-# the placeholder word `_`, so a quoted option value such as -C "/tmp/a b" stays one word.
-SCAN=$(printf '%s' "$COMMAND" | perl -0777 -pe 's/"((?:[^"\\]|\\.)*)"|\x27([^\x27]*)\x27/my $d = defined $1; my $t = $d ? $1 : $2; ($d && $t =~ m{\$\(|`}) ? " $t " : ($t =~ m{^\S*$} ? $t : " _ ")/ge') || {
+# the placeholder `_` with no padding, so a quoted value stays one word, whether it
+# stands alone (-C "/tmp/a b") or is glued to an option (-c user.name="A B").
+SCAN=$(printf '%s' "$COMMAND" | perl -0777 -pe 's/"((?:[^"\\]|\\.)*)"|\x27([^\x27]*)\x27/my $d = defined $1; my $t = $d ? $1 : $2; ($d && $t =~ m{\$\(|`}) ? " $t " : ($t =~ m{^\S*$} ? $t : "_")/ge') || {
     echo "BLOCKED: perl not available or failed — destructive-commands hook cannot evaluate command" >&2
     exit 2
 }

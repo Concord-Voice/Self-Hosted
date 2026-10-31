@@ -26,7 +26,7 @@
   ".claude/agents/ui-designer.md": "3139521937 16",
   ".claude/agents/ux-designer.md": "2498270857 16",
   ".claude/hooks/auto-format.sh": "3736066948 16",
-  ".claude/hooks/destructive-commands.sh": "2877815511 15",
+  ".claude/hooks/destructive-commands.sh": "142323934 16",
   ".claude/hooks/detect-secrets.sh": "2037546878 16",
   ".claude/hooks/issue-creation-nudge.sh": "4280316669 16",
   ".claude/hooks/protect-applied-migrations.sh": "4077569800 16",
