@@ -1,6 +1,6 @@
 # WebSocket event budgets
 
-Normative contract for [Hosted#2270](https://github.com/Concord-Voice/Hosted/issues/2270).
+Normative contract for `Hosted issue 2270`.
 The current change is **policy groundwork only**: a pure registry, typed config
 validation and integer scaling. Runtime behavior is unchanged. All proposed
 thresholds and workload claims are **UNMEASURED**; this document specifies future
