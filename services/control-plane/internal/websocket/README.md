@@ -140,6 +140,18 @@ reused after refusal; obtain a fresh ticket for a retry.
 
 ## Message Types
 
+### Event budget policy groundwork
+
+[Hosted#2270](https://github.com/Concord-Voice/Hosted/issues/2270) adds a pure
+16-event policy registry in [`event_admission.go`](event_admission.go), covering
+the 15 hub inputs below and `auth_renew`, intercepted by the read pump. It defines
+closed classes/scopes and validated integer account-budget scaling. This is
+groundwork only: runtime admission, socket responses, Redis, metrics and
+environment configuration are unchanged. Proposed thresholds are **UNMEASURED**.
+See the [normative design](../../../../docs/design/ws-event-budgets.md) and
+[implementation plan](../../../../docs/design/ws-event-budgets-plan.md) for the
+future enforcement and compatibility prerequisites.
+
 ### Client -> Server (Incoming)
 
 The hub dispatches 15 incoming frame types from the `switch msg.Type` in
