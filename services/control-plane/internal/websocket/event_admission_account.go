@@ -153,13 +153,7 @@ func (a *accountEventAdmitter) Admit(ctx context.Context, userID uuid.UUID, poli
 	if userID == uuid.Nil || !valid || (!policy.MayHold && !holdDeadline.IsZero()) {
 		return a.finish(ctx, time.Time{}, EventPolicy{}, unavailableAccountAdmission(EventPolicy{}))
 	}
-	deadline := start.Add(accountDecisionBudget)
-	if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(deadline) {
-		deadline = parentDeadline
-	}
-	if !holdDeadline.IsZero() && holdDeadline.Before(deadline) {
-		deadline = holdDeadline
-	}
+	deadline := accountAdmissionDeadline(ctx, start, holdDeadline)
 	if !start.Before(deadline) {
 		return a.finish(ctx, deadline, policy, unavailableAccountAdmission(policy))
 	}
@@ -191,6 +185,17 @@ func (a *accountEventAdmitter) Admit(ctx context.Context, userID uuid.UUID, poli
 	// Warming may have waited on the map lock: evidence observed before 90ms
 	// cannot carry an allowance past authority loss or the final 100ms deadline.
 	return a.finish(ctx, deadline, policy, decision)
+}
+
+func accountAdmissionDeadline(ctx context.Context, start, holdDeadline time.Time) time.Time {
+	deadline := start.Add(accountDecisionBudget)
+	if parentDeadline, ok := ctx.Deadline(); ok && parentDeadline.Before(deadline) {
+		deadline = parentDeadline
+	}
+	if !holdDeadline.IsZero() && holdDeadline.Before(deadline) {
+		deadline = holdDeadline
+	}
+	return deadline
 }
 
 func accountPolicyIndex(policy EventPolicy) (int, bool) {
