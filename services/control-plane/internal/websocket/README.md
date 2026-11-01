@@ -140,6 +140,32 @@ reused after refusal; obtain a fresh ticket for a retry.
 
 ## Message Types
 
+### Event budget policy groundwork
+
+`Hosted issue 2270` adds a pure
+16-event policy registry in [`event_admission.go`](event_admission.go), covering
+the 15 hub inputs below and `auth_renew`, intercepted by the read pump. It defines
+closed classes/scopes and validated integer account-budget scaling. Dedicated
+Redis construction and the account engine are available but have no production
+admission caller. Proposed thresholds are **UNMEASURED**.
+See the [normative design](../../../../docs/design/ws-event-budgets.md) and
+[implementation plan](../../../../docs/design/ws-event-budgets-plan.md) for the
+future enforcement and compatibility prerequisites.
+
+`event_admission_lifecycle.go` supplies the C1 lifetime seam.
+`NewHubWithEventAdmission` validates and copies startup policy and borrows its
+engine; Hub never closes it. The production router will use that constructor in
+C5. Existing `NewHub` explicitly disables admission at scale 100.
+
+Handler initializes each socket's ingress context from the Hub before expiry
+registration or publication. Its lifetime is independent of the HTTP request and
+async bootstrap; each event-context snapshot uses the current renewable token
+deadline. Teardown and shutdown cancel ingress, waking pre-JSON pacing and
+bounded Hub-enqueue waits. Family revocation marks all siblings, closes all
+transports and sends the checked receipt before new ingress cancellation callbacks.
+Existing rates, frame and queue bounds, renewal guards and wire messages remain
+unchanged. Dispatch gates, holds, metrics and configuration wiring are later units.
+
 ### Client -> Server (Incoming)
 
 The hub dispatches 15 incoming frame types from the `switch msg.Type` in

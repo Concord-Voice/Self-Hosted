@@ -215,6 +215,11 @@ type Client struct {
 	// asyncCancel cancels the context passed to async registration goroutines
 	asyncCancel context.CancelFunc
 
+	// Ingress authority is independent of asynchronous bootstrap work. These
+	// fields are initialized before publication and never rebound by renewal.
+	ingressCtx    context.Context
+	ingressCancel context.CancelFunc
+
 	// bootstrapMu orders replacement construction against privacy-critical and
 	// base-presence deltas. Delivery takes Hub.mu before this mutex; bootstrap
 	// completion/cancellation never takes Hub.mu while holding it.
@@ -670,6 +675,7 @@ func (c *Client) closeExpiredToken() {
 			log.Printf("WebSocket expiry transport close failed: %s", describeSocketFailure(err))
 		}
 	})
+	c.cancelIngressLifecycle()
 }
 
 func (c *Client) requestUnregister() {
@@ -696,6 +702,7 @@ func (c *Client) readPump() {
 		if err := c.Conn.Close(); err != nil && !alreadyDisconnected(err) {
 			log.Printf("WebSocket read transport close failed: %s", describeSocketFailure(err))
 		}
+		c.cancelIngressLifecycle()
 		c.requestUnregister()
 		c.releaseConnection()
 	}()
@@ -720,7 +727,7 @@ func (c *Client) readPump() {
 
 // admitFrame decides whether a read result may be dispatched; false ends the read pump.
 func (c *Client) admitFrame(readErr error, budget *ingressbudget.Bucket) bool {
-	if c.securityTerminal.Load() {
+	if c.ingressStopped() {
 		return false
 	}
 	if c.tokenExpired() {
@@ -741,12 +748,15 @@ func (c *Client) admitFrame(readErr error, budget *ingressbudget.Bucket) bool {
 
 // dispatchFrame decodes one metered frame and routes it; false ends the read pump.
 func (c *Client) dispatchFrame(message []byte) bool {
+	if c.ingressStopped() {
+		return false
+	}
 	var msg IncomingMessage
 	if err := json.Unmarshal(message, &msg); err != nil {
 		log.Printf("Invalid message format: %v", err)
 		return true
 	}
-	if c.securityTerminal.Load() {
+	if c.ingressStopped() {
 		return false
 	}
 	// Renewal never reaches the hub: it does Redis/DB work, which the Run
@@ -769,21 +779,30 @@ func (c *Client) dispatchFrame(message []byte) bool {
 	select {
 	case c.Hub.incoming <- msg:
 		return true
+	case <-c.ingressDone():
+		return false
 	case <-c.Hub.done:
 		return false
 	}
 }
 
-// awaitFrameBudget paces until budget admits a frame; false once the hub stops.
+// awaitFrameBudget paces until budget admits a frame or ingress is canceled.
 func (c *Client) awaitFrameBudget(budget *ingressbudget.Bucket) bool {
-	for !budget.Allow() {
+	for {
+		if c.ingressStopped() {
+			return false
+		}
+		if budget.Allow() {
+			return true
+		}
 		select {
 		case <-time.After(applicationFrameInterval):
+		case <-c.ingressDone():
+			return false
 		case <-c.Hub.done:
 			return false
 		}
 	}
-	return true
 }
 
 func (c *Client) recordReadFailure(err error) {
@@ -822,6 +841,7 @@ func (c *Client) writePump() {
 		if err := c.Conn.Close(); err != nil && !alreadyDisconnected(err) {
 			log.Printf("WebSocket write transport close failed: %s", describeSocketFailure(err))
 		}
+		c.cancelIngressLifecycle()
 		c.releaseConnection()
 	}()
 
