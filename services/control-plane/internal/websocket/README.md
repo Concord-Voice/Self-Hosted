@@ -142,7 +142,7 @@ reused after refusal; obtain a fresh ticket for a retry.
 
 ### Event budget policy groundwork
 
-[Hosted#2270](https://github.com/Concord-Voice/Hosted/issues/2270) adds a pure
+`Hosted issue 2270` adds a pure
 16-event policy registry in [`event_admission.go`](event_admission.go), covering
 the 15 hub inputs below and `auth_renew`, intercepted by the read pump. It defines
 closed classes/scopes and validated integer account-budget scaling. This is

@@ -1,6 +1,6 @@
 # WebSocket event budgets
 
-Normative contract for [Hosted#2270](https://github.com/Concord-Voice/Hosted/issues/2270).
+Normative contract for `Hosted issue 2270`.
 The current change is **construction groundwork**: a pure registry, typed config
 validation, integer scaling and the B1 Redis script/adapter. Runtime behavior is
 unchanged; no caller invokes the new backend. All proposed
