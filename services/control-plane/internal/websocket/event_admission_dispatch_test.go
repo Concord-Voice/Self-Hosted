@@ -52,3 +52,34 @@ func TestTokenRenewalAdmissionEnabledEmptyTokenStillClaimsAccountOwner(t *testin
 	assert.JSONEq(t, string(authRenewRejectedFrame), string(<-client.Send))
 	assert.Equal(t, []finalizationRecord{{EventClassRenewal, true, false}}, observer.snapshot(), "account allowance remains counted when token validation refuses")
 }
+
+// The source census must stay attached to behavior at dispatchFrame. Keeping
+// helper comparisons while bypassing either delegated owner must go red here.
+func TestEventAdmissionDispatchBothModesInterceptRenewalAndRouteOrdinaryFrames(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "disabled", true: "enabled"}[enabled], func(t *testing.T) {
+			client, engine, _, _ := c2Client(t, enabled)
+			require.True(t, client.dispatchFrame([]byte(`{"type":"auth_renew","data":{"token":""}}`)))
+			assert.Empty(t, client.Hub.incoming, "credentials must never be routed through Hub.Run")
+			require.Len(t, client.Send, 1, "renewal must reach its actual interception owner")
+			assert.JSONEq(t, string(authRenewRejectedFrame), string(<-client.Send))
+			if enabled {
+				require.Len(t, engine.snapshot(), 1)
+				assert.Equal(t, admissionPolicy(EventClassRenewal), engine.snapshot()[0].policy)
+			} else {
+				assert.Empty(t, engine.snapshot(), "disabled mode does not call account admission")
+			}
+			// Live routing control rules out satisfying no-credential-replay by
+			// silently dropping every frame in this dispatch mode.
+			require.True(t, client.dispatchFrame([]byte(`{"type":"profile_update","data":{}}`)))
+			require.Len(t, client.Hub.incoming, 1)
+			assert.Equal(t, "profile_update", (<-client.Hub.incoming).Type)
+			if enabled {
+				require.Len(t, engine.snapshot(), 2)
+				assert.Equal(t, admissionPolicy(EventClassProfile), engine.snapshot()[1].policy)
+			} else {
+				assert.Empty(t, engine.snapshot())
+			}
+		})
+	}
+}
