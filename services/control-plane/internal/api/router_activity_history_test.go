@@ -51,11 +51,11 @@ func (preboundActivityHistoryDelivery) DeliverCustomText(
 }
 
 func TestNewRouterRequiresOneUnboundActivityHistoryService(t *testing.T) {
-	cfg := &config.Config{Environment: "test"}
+	cfg := &config.Config{Environment: "test", WSEventBudget: config.WSEventBudgetConfig{Enabled: false, ScalePercent: 100}}
 	log := logger.NewWithWriter(io.Discard)
 
 	_, _, _, _, _, _, _, _, _, _, err := api.NewRouter(t.Context(), nil, nil, cfg, nil, log, api.RouterDependencies{})
-	require.Error(t, err)
+	require.ErrorContains(t, err, "presence history service unavailable")
 
 	service := presencehistory.NewService(nil, presencehistory.DisclosureState{}, false)
 	require.NoError(t, service.BindDelivery(preboundActivityHistoryDelivery{}))
@@ -68,7 +68,7 @@ func TestNewRouterRequiresOneUnboundActivityHistoryService(t *testing.T) {
 		log,
 		api.RouterDependencies{PresenceHistory: service},
 	)
-	require.Error(t, err)
+	require.ErrorContains(t, err, "bind presence history delivery")
 }
 
 func TestNewRouterActivityHistoryWiringOrderIsSingleAndFinal(t *testing.T) {
@@ -76,7 +76,7 @@ func TestNewRouterActivityHistoryWiringOrderIsSingleAndFinal(t *testing.T) {
 	require.NoError(t, err)
 	source := string(sourceBytes)
 	needles := []string{
-		"hub := newHubWithSecurityEvents(",
+		"hub, err := newHubWithSecurityEvents(",
 		"bindPresenceHistoryRuntime(hub, presenceHistoryService)",
 		"authHandler.SetPresenceHistory(presenceHistoryService)",
 		"usersHandler.SetPresenceHistory(presenceHistoryService)",

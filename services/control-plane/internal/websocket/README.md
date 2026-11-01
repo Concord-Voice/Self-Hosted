@@ -152,16 +152,24 @@ reused after refusal; obtain a fresh ticket for a retry.
 the 15 hub inputs below and `auth_renew`, intercepted by the read pump. It defines
 closed classes/scopes and validated integer account-budget scaling. Dedicated
 Redis construction and the account engine feed the complete dispatcher when a
-Hub is explicitly enabled. The production router still uses the disabled legacy
-constructor. Proposed thresholds are **UNMEASURED**.
+Hub is enabled. The production router validates startup policy and borrows the
+process-owned engine. Proposed thresholds are **UNMEASURED**.
 See the [normative design](../../../../docs/design/ws-event-budgets.md) and
 [implementation plan](../../../../docs/design/ws-event-budgets-plan.md) for the
 enforcement contract and remaining compatibility prerequisites.
 
 `event_admission_lifecycle.go` supplies the C1 lifetime seam.
 `NewHubWithEventAdmission` validates and copies startup policy and borrows its
-engine; Hub never closes it. The production router will use that constructor in
-C5. Existing `NewHub` explicitly disables admission at scale 100.
+engine; Hub never closes it. The production router uses that constructor in both
+modes. Existing `NewHub` explicitly disables admission at scale 100 for legacy/test use.
+
+`config.Load` validates `WS_EVENT_BUDGET_ENABLED` and
+`WS_EVENT_BUDGET_SCALE_PERCENT`, defaulting absent values to true and 100.
+Main constructs one engine after shared Redis setup. Enabled mode owns a dedicated
+client; managed mode borrows the existing credential runtime. Disabled mode
+constructs no dedicated client or backend. Main closes the engine synchronously
+after the attempted Hub drain, before metrics and credential cleanup, and retains
+a checked startup-failure defer. A spent Hub waiting budget cannot skip engine Close.
 
 Handler initializes each socket's ingress context from the Hub before expiry
 registration or publication. Its lifetime is independent of the HTTP request and
@@ -183,7 +191,7 @@ bootstrap enqueue ordering. Renewal
 acknowledgments and enabled advisories recheck event authority after
 outbound lock waits, suppressing late output without changing generic producers.
 Disabled mode bypasses every new gate/response/counter while retaining original
-rates, queue bounds, renewal guards and C1 cancellation. C5 configuration wiring and
+rates, queue bounds, renewal guards and C1 cancellation. D metrics publication,
 actual E/F schema/client compatibility, G/H configuration delivery and workload
 acceptance remain required before activation.
 

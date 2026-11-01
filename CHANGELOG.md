@@ -50,7 +50,7 @@ gate can learn from your voice.
 
 ### Changed
 
-- **Server:** WebSocket event-budget handling now covers dispatch, token renewal and bounded refusal responses. It remains inactive in production pending configuration wiring, compatible clients and rollout checks.
+- **Server:** WebSocket event budgets now include validated startup settings, dedicated Redis ownership and checked shutdown cleanup alongside dispatch, token renewal and bounded refusal responses. Activation still requires compatible clients, configuration delivery and rollout checks.
 - **Self-hosting:** Self-hosted deployments now ship from the dedicated Self-Hosted repository, with the service, admin, and package checks running in its own CI.
 - **Voice:** The desktop call library handles mixed audio and video RTP header extensions with mediasoup-client 3.25.3.
 - **Voice:** Updated server voice transport dependencies.

@@ -3,10 +3,10 @@
 Normative contract for `Hosted issue 2270`.
 Source now includes the policy registry, typed validation/scaling, dedicated
 Redis account engine, socket lifetimes and complete enabled dispatch/renewal
-integration. Explicitly enabled Hubs enforce the event gates, bounded hold and
-refusal responses described below. The production router still uses the legacy
-disabled constructor: C5 config/process wiring, metrics publication and compatible
-schema/client delivery remain prerequisites, together with G/H self-hosted and
+integration and validated process construction. Enabled Hubs enforce the event
+gates, bounded hold and refusal responses described below. The production router
+uses immutable startup policy and the process-owned engine. Metrics publication and
+compatible schema/client delivery remain prerequisites, together with G/H self-hosted and
 managed configuration delivery and workload acceptance. All thresholds and
 workload claims are **UNMEASURED**; source implementation is not evidence of deployment.
 
@@ -57,12 +57,14 @@ scale 33 is 37879 microseconds / burst 52. The smallest allowed account burst is
 `accountEventBudget` validates config first, rejects content/unknown classes and
 returns configured parameters regardless of `Enabled`. Scope excludes heartbeat.
 
-Future startup settings are `WS_EVENT_BUDGET_ENABLED` (absent default `true`) and
+Startup settings are `WS_EVENT_BUDGET_ENABLED` (absent default `true`) and
 `WS_EVENT_BUDGET_SCALE_PERCENT` (absent default `100`). Explicit empty values fail.
 Accept only lowercase `true`/`false` and canonical unsigned ASCII decimal 25..400,
 without signs, spaces, leading zeros or fractions. Validate both even if disabled.
-No environment parsing, defaults, live reload or per-class override exists in the
-groundwork. Zero typed config is invalid, not implicit disable.
+`config.Load` uses presence-aware parsing and returns errors before runtime
+construction. Errors identify the setting and grammar without echoing its value.
+There is no live reload or per-class override. Zero typed config is invalid,
+not implicit disable.
 
 ## Distributed decisions and bounded fallback
 
@@ -320,7 +322,7 @@ typed configuration, requires an admitter when enabled, and copies the policy.
 The Hub borrows the engine: it neither makes admission calls in C1 nor closes
 the engine. Construction failure retains caller ownership. `NewHub` remains
 the explicit legacy/test constructor with disabled admission and scale 100.
-Production router and process ownership wiring remain C5 work.
+Production router and process ownership use this seam as described below.
 
 Each constructed Hub owns a cancelable ingress context. Handler derives the
 Client context before expiry registration or publication; HTTP request and async
@@ -446,6 +448,39 @@ by a generation-bound timer, including online/recovery paths. Explicit disconnec
 or account change cancels obsolete timers. Preserve terminal security behavior.
 Restore desired subscriptions only; never automatically replay content/mutations.
 Renewal retains its existing 5s acknowledgment wait and single 11s retry.
+
+## C5 process construction and cleanup
+
+The config package owns `WSEventBudgetConfig{Enabled, ScalePercent}` without
+importing websocket. Main maps both fields into `EventBudgetConfig` and validates
+the typed policy again before construction. Disabled mode creates the real disabled
+engine with a nil backend, allocating no dedicated client, warm map or sweep.
+Enabled mode composes the existing dedicated Redis factory, account backend and
+engine. Legacy mode parses fresh Redis options; managed mode borrows the already
+initialized credential runtime and TLS policy. Neither path pings the limiter or
+creates another credential reader, runtime or poller.
+
+Ownership transfers client to backend to engine only after each constructor
+succeeds. Failure closes the last caller-owned resource and joins construction
+and cleanup errors. Main constructs one engine after shared Redis initialization
+and injects it through `RouterDependencies.WSEventAdmitter`. The production router
+uses `NewHubWithEventAdmission` even when disabled, rejects invalid configuration
+or a missing enabled engine, and installs the security emitter before publishing
+the Hub. Router and Hub never close the borrowed engine.
+
+Main immediately registers checked deferred engine Close after its shared-client
+and managed-poll cleanup defers. Startup failures therefore close the dedicated
+engine before stopping credential polling and closing shared Redis. Normal
+shutdown attempts the bounded Hub drain, then calls engine Close synchronously
+before metrics, restricted-reader and NATS cleanup. This stage runs even when the
+Hub waiting budget is exhausted and joins its error into the shutdown result.
+The later safety defer checks the idempotent Close result again.
+
+Engine Close cancels and joins its bounded application attempts and sweep before
+closing its backend. This does not establish that an abandoned Hub stage or all
+underlying library work has joined. Existing managed poll cancellation remains
+cancellation, not a new join guarantee. C5 does not authorize deployment or supply
+the remaining metrics, client, writer or workload acceptance evidence.
 
 ## Observability, compatibility and activation
 

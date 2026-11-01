@@ -4,9 +4,9 @@ Plan for `Hosted issue 2270`, governed
 by the [normative contract](ws-event-budgets.md). All thresholds remain
 **UNMEASURED**. Units A and B1–B3 provide construction groundwork; C1–C4 supply
 socket lifetimes, enabled event gates and complete dispatch/renewal integration.
-The production router remains disabled through its legacy constructor. C5
-configuration/process wiring, D publication and compatible E/F schema/client
-delivery remain later work. G/H configuration delivery and workload acceptance
+C5 adds validated startup settings, process ownership and router injection.
+D publication and compatible E/F schema/client delivery remain prerequisites.
+G/H configuration delivery and workload acceptance
 also remain prerequisites for activation.
 
 ## Bounded work units
@@ -218,7 +218,7 @@ implements the complete account hold and local heartbeat machinery;
 content gates connect every enabled input to its final owner. No intermediate
 enabled dispatcher exempts renewal. `event_admission_outbound.go` guards response
 enqueue after bootstrap/send lock waits without changing generic outbound callers.
-Runtime construction remains C5 work.
+Runtime construction is supplied by C5 below.
 
 The private timer factory drives actual cancellation selects, fixed hold deadlines,
 raw delay scheduling and the strict two-second boundary in independent tests.
@@ -279,6 +279,36 @@ cannot revive authority, and intermediate/abandoned attempts do not count final
 admission. Renewal's local guard claims once; account allowance counts admission
 even when token validation later fails. Assert actual outbound schema, reader
 parsing and reconnection behavior rather than only helper inputs or key sets.
+
+## Unit C5 construction and verification
+
+`pkg/config/ws_event_budget.go` parses the two settings with `LookupEnv` presence
+semantics; `Load` propagates errors. `cmd/server/ws_event_budget.go` maps and
+revalidates policy, composes the existing dedicated client/backend/engine, and
+checks failure cleanup. Its per-call factory seam permits independent construction
+failure tests without mutable globals or live infrastructure. Main owns the one
+engine and injects it into the validating router constructor.
+
+Required evidence covers canonical grammar/defaults and disabled-invalid values,
+actual `Load` propagation, explicit DTO mapping, managed runtime/TLS borrowing,
+disabled zero client/backend construction, each ownership-transfer failure and
+joined cleanup errors. Router tests must prove missing enabled dependencies and
+invalid scales fail before downstream initialization, while valid-policy controls
+still reach later router errors. Manually built fixtures use explicit disabled100
+policy; production does not repair zero typed config.
+
+Shutdown tests exercise the actual coordinator with an exhausted or blocked Hub
+stage and a blocked engine Close. Engine cleanup must remain synchronous and
+precede metrics, poll cancellation and shared Redis cleanup, preserving all error
+causes. The checked deferred-close helper covers startup-error composition; helper
+tests do not claim execution of the complete database-backed startup path. Review
+the immediate production defer placement and exact one engine construction as
+well. Existing B evidence owns engine idempotence and application-work joining.
+
+Focused normal/race checks, meaningful changed-code coverage and independent
+review remain required. Source wiring alone supplies none of D's paired metrics
+reader, released E/F consumers and floors, G/H writer delivery, canonical Hosted
+delivery or measured workload acceptance.
 
 ## Delivery and activation order
 
