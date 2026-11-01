@@ -243,10 +243,10 @@ describe.each([
     }
   );
 
-  // C4a's TestEventAdmissionResponseAdvisorySharesOneSecondSlotAcrossClasses
-  // asserts these first three real json.Marshal/enqueueOutbound outputs via
-  // responseAssertAdvisory. The final vector pins the inclusive upper bound.
-  // Consumer parsing here does not ingest a cross-process producer artifact.
+  // Hand-written wire vectors for the C4 producer contract, whose implementation
+  // and output tests are delivered separately from this schema-only change.
+  // These consumer tests do not ingest a producer artifact or establish producer
+  // compatibility. The final vector pins the inclusive upper bound.
   it.each([
     [
       '{"type":"error","data":{"code":"ws_rate_limited","event_class":"presence","retry_after_ms":100}}',
