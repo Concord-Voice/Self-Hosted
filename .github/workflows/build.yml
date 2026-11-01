@@ -607,7 +607,7 @@ jobs:
           # differential prescan test runs past go test's 10-minute per-package
           # default under -race with atomic coverage. 20m stays inside the
           # job's 25-minute limit; a package needing more means re-sharding.
-          go test -race -trimpath -p 2 -timeout 20m -exec "$PWD/scripts/ci-test-package-db.sh" \
+          go test -v -count=1 -race -trimpath -p 2 -timeout 20m -exec "$PWD/scripts/ci-test-package-db.sh" \
             -tags integration -coverprofile=coverage.out "${PKGS[@]}"
 
       - name: Upload coverage (shard ${{ matrix.shard }})

@@ -1,6 +1,6 @@
 # WebSocket event budgets
 
-Normative contract for [Hosted#2270](https://github.com/Concord-Voice/Hosted/issues/2270).
+Normative contract for `Hosted issue 2270`.
 The current change is **construction groundwork**: a pure registry, typed config
 validation, integer scaling, the B1 Redis script/adapter, B2 dedicated client
 factories with the source ACL grant, and the B3 account admitter. Runtime admission
@@ -164,7 +164,7 @@ retained horizon; the next microsecond rejects without creating a key. Canonical
 time; 9007199254740992 fails the lexical check. Isolated tests substitute only
 the TIME acquisition and expose the PEXPIRE argument; production has no clock
 override. Absolute-expiry snapshots establish no-write rejection, not decreasing
-PTTL comparisons. Real TIME execution and uncertainty tests remain required.
+PTTL comparisons. The isolated execution evidence below supplements these vectors.
 
 ### B2 dedicated clients and source ACL
 
@@ -303,13 +303,84 @@ Repeated/concurrent Close retains the checked backend-close result, and later
 Admit returns Abandon. The backend must honor cancellation; there is no untracked
 escape goroutine for a broken backend. No scheduler-independent Close wall-time
 bound or public join of library recovery goroutines is promised. Shared clients
-and credential runtime remain outside engine ownership; library dial quiescence
-and combined managed failure behavior need separate B4 evidence.
+and credential runtime remain outside engine ownership. The bounded managed
+observations below do not establish a join of library recovery goroutines.
 
 The private per-instance clock constructor and `sweepIdle` helper let tests drive
 the same algorithm without global time mutation or exported test API. C still
 owns production integration, FIFO, authority finalization and the original
 two-second/21-attempt hold; B3 neither sleeps nor schedules that hold.
+
+### B4.1 CI evidence bridge
+
+The existing control-plane coverage invocation reaches the Redis evidence through
+its source-owned `scripts/ci-test-package-db.sh` wrapper. Only `websocket.test`
+receives `WS_EVENT_BUDGET_REDIS_INTEGRATION=1`; its REDIS_URL must be explicitly
+nonempty or the wrapper fails before starting the binary. Only `managedredis.test`
+receives `MANAGED_REDIS_INTEGRATION=1` and `MANAGED_REDIS_TEST_IMAGE=redis:8-alpine`.
+Both selected binaries receive `-test.v` before the original arguments to generate
+per-test records and fixture-version observations. The outer go command also uses
+`-v` to retain successful records; binary verbosity alone would let go test
+suppress a passing package's output.
+Endpoints and credentials are never emitted by these new wrapper branches.
+
+The ACL canary builds under either the coverage run's existing `integration` tag
+or the manually supported `managedredis_integration` tag, retaining its runtime
+opt-in. The single merged coverage command adds outer `go test -v -count=1`; there is
+no second Redis-only test run or coverage artifact. Existing per-package database
+cloning/cleanup, NATS/metrics locks, caller arguments and binary failure status
+remain intact. These are test opt-ins, not new product configuration settings.
+
+This source bridge makes the suites reachable; it does not itself establish a
+fresh protected-workflow pass. The protected required workflow remains pinned
+through its existing reviewed process. Adoption of the changed outer invocation
+must be observed after normal pin advancement; no unmerged/future SHA is assumed.
+Record run/head/workflow identity and non-skipped PASS evidence, distinguishing
+local/current-workflow execution from the required protected run. A cached or
+skipped result is not current-run service evidence. `redis:8-alpine` is a mutable
+fixture tag, not an exact version pin; record the resolved Redis version/image.
+Socket-loss, adjusted-expiry and managed-lifecycle evidence is recorded separately
+below and does not follow from CI wiring alone.
+
+### B4 isolated failure and lifecycle evidence
+
+The full WebSocket race/integration run passed on isolated Redis 8.10.2. A real
+TCP proxy withheld a completed script reply and broke delivery: the server retained
+one debit, and the client issued no replay. Cold/warm admission, reserved-credit
+nonrefund, and cancellation/Close while a reply was held were exercised separately.
+These observations extend the earlier ProcessHook EOF fixture to actual transport
+failure; they do not establish production availability.
+
+Deterministic clock vectors on the same retained key bracketed adjusted absolute
+expiry at 4200000 then 3600000 milliseconds, and 4200001 then 3600001 with a
+one-microsecond remainder. This observes the rollback retention calculation and
+continued debt without an actual 600-second soak.
+
+Managed race/integration tests passed against disposable Docker Redis 8.10.3.
+Removing only PEXPIRE permission caused production Lua to fail after HSET: the
+adapter returned unavailable after one EVALSHA and no EVAL replay. Actual debt
+remained; a new key had no expiry, while an existing key retained its prior expiry.
+This demonstrates post-write uncertainty rather than rollback.
+
+Shared and dedicated clients used the same credential runtime across generations
+12 to 13. Dedicated Close left its pool at zero; the shared client survived and
+used generation 14. A credential stale for 121 seconds remained usable until its
+ValidUntil boundary; after expiry, admission issued no Lua and created no debt.
+These observations do not imply that ACL changes disconnect idle connections or
+that all connections eagerly reauthenticate.
+
+Database transport race tests passed for a production-TLS blackhole with one
+initial dial, RESP3 lost-EVAL delivery without replay, and Close during a held
+EVAL. The held-EVAL case additionally required the closed connection to report
+`net.ErrClosed`. Each fixture observed 1.1 seconds after Close with no new accepts
+or scripts, pool zero, parity between accepted and closed fixture connections,
+and joined fixture workers. A test overlay changing MaxRetries from -1 to 1 was
+rejected: the actual TCP lost-reply case returned success where fixed unavailable
+was required. Production source was unchanged by that mutation.
+
+These bounded observations do not exercise activation of saturated 32-error
+recovery or establish a library-wide join. No production workload, activation
+readiness or protected-workflow adoption is established here.
 
 ## FIFO, authority and wire contract
 

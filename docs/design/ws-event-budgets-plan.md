@@ -1,6 +1,6 @@
 # WebSocket event budget implementation plan
 
-Plan for [Hosted#2270](https://github.com/Concord-Voice/Hosted/issues/2270), governed
+Plan for `Hosted issue 2270`, governed
 by the [normative contract](ws-event-budgets.md). All thresholds remain
 **UNMEASURED**. Units A and B1–B3 are construction groundwork only; no runtime caller
 uses the new Redis backend. Socket behavior, wire schema, metrics and environment
@@ -179,6 +179,70 @@ private seams; use no mutable package clock, exported debug map or per-request
 background wrapper. Root owns execution, focused race/vet/lint/coverage and
 independent review. Record observed failures and unavailable checks; passing unit
 tests do not establish production capacity or full Redis-outage auth availability.
+
+### Unit B4.1 CI bridge and evidence limits
+
+The source-owned package wrapper opts `websocket.test` into the existing Redis
+integration suite only with an explicit nonempty REDIS_URL. It opts
+`managedredis.test` into the ACL canary with the Redis8 fixture image. Both receive
+`-test.v`; other binaries keep their arguments and opt-in behavior. The ACL build
+expression accepts `integration || managedredis_integration`, preserving manual
+callers and its explicit runtime opt-in. The existing single merged coverage
+invocation adds `-count=1` to the outer go command to prevent cached test results,
+and outer `-v` to retain passing per-test records instead of suppressing them.
+
+Independent executable shell fixtures must prove selected flags/image/verbosity,
+nonempty endpoint enforcement, unrelated-package behavior, preserved argument
+bytes and failure status, and database cleanup on failure without emitting URLs
+or credentials. Go's build-tag evaluator must select the ACL file under the
+existing coverage tag. Keep the DB/NATS/metrics isolation paths and one coverage
+run; no workflow trust, protected pin, secrets or service policy changes belong
+to this bridge. Root records the initial behavioral failure and subsequent checks.
+
+Acceptance must identify the exact run/head/workflow SHA and the shards containing
+WebSocket/managedredis. Require non-skipped PASS records for all eight
+`TestRedisAccountBudgetIntegration*` tests, `TestRedisACLIntegration`, and the
+constructor/rotation/unsubscribe tests. The protected required workflow's current
+pin is a separate adoption boundary: the source wrapper/tag improvement is
+reachable without repinning, but fresh execution of the changed outer invocation
+must be observed after its normal reviewed pin advancement. Do not invent a SHA
+or equate local/current-workflow evidence with the required protected run.
+
+Record the actual Redis version and resolved image; `redis:8-alpine` is not an
+immutable pin. CI opt-in wiring alone proves no failure behavior or production
+workload capacity; the isolated evidence below is a separate qualification step.
+
+### Unit B4 isolated execution and remaining limits
+
+The full WebSocket race/integration run passed on isolated Redis 8.10.2 in 1.570s.
+Actual TCP lost-reply tests observed one retained debit without replay, cold/warm
+fallback and nonrefund, and cancellation/Close with a held reply. Same-key
+adjusted absolute-expiry brackets were 4200000 to 3600000 milliseconds and,
+with a one-microsecond remainder, 4200001 to 3600001. These are deterministic
+clock/expiry observations, not an elapsed 600-second soak.
+
+Managed ACL and grouped race/integration tests passed on disposable Docker Redis
+8.10.3. Production Lua with only PEXPIRE removed failed after HSET, returned
+unavailable, and made one EVALSHA with no EVAL replay. Tests inspected retained
+debt, a new key without expiry and unchanged existing expiry. The same runtime
+served shared/dedicated generations 12 to 13; dedicated Close reached pool zero,
+then the surviving shared client used generation 14. Stale-at-121s credentials
+remained usable until ValidUntil; expired credentials produced zero Lua/no debt.
+
+B4.4's three database transport cases passed under race in 4.446s: a
+production-TLS blackhole with one initial dial, RESP3 lost-EVAL delivery without
+replay, and Close during a held EVAL. The strengthened held-EVAL `net.ErrClosed`
+oracle passed in 2.151s. Every case observed 1.1 seconds after Close with no new
+accepts/scripts, pool zero, accepted/closed fixture connection parity and joined
+fixture workers. An actual TCP test overlay changing MaxRetries from -1 to 1
+failed because success replaced the required fixed unavailable result; production
+source was untouched. These cases do not activate saturated 32-error recovery.
+Retain separate observations of pool/dial behavior and checked cleanup; neither
+the passing fixtures nor pool zero establishes a join of every library goroutine.
+ACL changes do not establish disconnection of idle sockets or eager
+reauthentication of every connection. Protected-workflow adoption remains subject
+to the B4.1 pin boundary above. Runtime integration, workload measurements and
+activation prerequisites remain outstanding.
 
 ### Remaining account-engine and runtime gates
 

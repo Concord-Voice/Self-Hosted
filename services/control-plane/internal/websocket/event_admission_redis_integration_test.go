@@ -452,3 +452,51 @@ func TestRedisAccountBudgetIntegrationAdapterDebitsAndIsolatesIdentity(t *testin
 		assert.Len(t, fields, 3)
 	}
 }
+
+func TestRedisAccountBudgetIntegrationSequentialRollbackSetsActualExpiry(t *testing.T) {
+	c := budgetRealRedis(t)
+	inspector := budgetRealRedis(t)
+	const logicalT int64 = 1800000000000000
+	for _, tt := range []struct {
+		name, last, tat              string
+		firstWall, firstTTL, nextTTL int64
+	}{
+		{"aligned", "1800000000000000", "1800000040000000", logicalT - 3600000000, 4200000, 3600000},
+		{"one microsecond remainder", "1800000000000001", "1800000040000001", logicalT - 3600000000 + 1, 4200001, 3600001},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Log("WS_EVENT_BUDGET_RETENTION START")
+			t.Log("synthetic Lua TIME advances 600 seconds; real Redis expiry setting is observed, not 600 seconds of elapsed retention")
+			key := budgetRealKey(t, inspector)
+			budgetSeed(t, inspector, key, tt.last, tt.tat)
+			wantFields := map[string]string{"v": "1", "last_us": tt.last, "tat_us": tt.tat}
+			for _, step := range []struct {
+				name      string
+				wall, ttl int64
+			}{
+				{"one-hour rollback", tt.firstWall, tt.firstTTL},
+				{"same debt after synthetic 600 seconds", tt.firstWall + 600000000, tt.nextTTL},
+			} {
+				// The helper substitutes only the one TIME acquisition. It does not
+				// capture or alter PEXPIRE: the server applies the production TTL.
+				script := budgetClockScript(t, budgetClockLiteral(step.wall), false)
+				before, err := inspector.Time(t.Context()).Result()
+				require.NoError(t, err)
+				reply := budgetEval(t, c, script, key, 5000000, 8)
+				after, err := inspector.Time(t.Context()).Result()
+				require.NoError(t, err)
+				assert.Equal(t, []interface{}{int64(1), int64(0), int64(5000)}, reply, step.name)
+				expiry, err := inspector.Do(t.Context(), "PEXPIRETIME", key).Int64()
+				require.NoError(t, err)
+				assert.GreaterOrEqual(t, expiry, before.UnixMilli()+step.ttl, step.name)
+				assert.LessOrEqual(t, expiry, after.UnixMilli()+step.ttl, step.name)
+				fields, err := inspector.HGetAll(t.Context(), key).Result()
+				require.NoError(t, err)
+				assert.Equal(t, wantFields, fields, "same key is never reset or reseeded between rollback decisions")
+			}
+			if !t.Failed() {
+				t.Log("WS_EVENT_BUDGET_RETENTION PASS")
+			}
+		})
+	}
+}
