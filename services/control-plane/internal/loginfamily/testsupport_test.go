@@ -59,7 +59,13 @@ func newFamily(t *testing.T, db *sql.DB, user uuid.UUID, expiry time.Time) lf.Ac
 	require.NoError(t, tx.Commit())
 	return identity
 }
-func expires() time.Time { return time.Now().Add(time.Hour).UTC().Truncate(time.Second) }
+
+// testExpiry is fixed once per test binary: tests compare a bound expiry with
+// an identity built from a separate expires() call, and two calls straddling a
+// second boundary truncated to different seconds and failed as access_expired.
+var testExpiry = time.Now().Add(time.Hour).UTC().Truncate(time.Second)
+
+func expires() time.Time { return testExpiry }
 func reason(t *testing.T, err error, class error, why lf.ErrorReason) {
 	t.Helper()
 	require.ErrorIs(t, err, class)
