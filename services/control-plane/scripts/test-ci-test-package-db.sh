@@ -121,7 +121,8 @@ check_bridge_cleanup() {
   [[ "$(sed -n '2p' "$PSQL_CALLS")" == *'DROP DATABASE '*' WITH (FORCE)'* ]] || fail_bridge 'selected binary leaked its package database'
 }
 check_bridge_log() {
-  if grep -Fq -- "$fixture_password" "$1" || grep -Fq -- "$REDIS_URL" "$1"; then
+  local output_log="$1"
+  if grep -Fq -- "$fixture_password" "$output_log" || grep -Fq -- "$REDIS_URL" "$output_log"; then
     fail_bridge 'wrapper output exposed a credential or Redis endpoint'
   fi
 }
@@ -134,6 +135,7 @@ for binary in websocket.test managedredis.test fixture.test; do
     websocket.test) check_bridge_flags 1 '' ''; check_bridge_args yes ;;
     managedredis.test) check_bridge_flags '' 1 redis:8-alpine; check_bridge_args yes ;;
     fixture.test) check_bridge_flags '' '' ''; check_bridge_args no ;;
+    *) fail_bridge 'unexpected test binary in bridge fixture' ;;
   esac
   check_bridge_cleanup
   check_bridge_log "$bridge_log"
@@ -187,6 +189,7 @@ for invalid_case in no_arguments non_executable isolation_disabled; do
     no_arguments) command_args=(bash "$SCRIPT_DIR/ci-test-package-db.sh") ;;
     non_executable) command_args=(bash "$SCRIPT_DIR/ci-test-package-db.sh" "$task_tmp/absent.test") ;;
     isolation_disabled) command_args=(env CI_PACKAGE_DB_ISOLATION=0 bash "$SCRIPT_DIR/ci-test-package-db.sh" "$task_tmp/bin/fixture.test") ;;
+    *) fail_bridge 'unexpected invalid-invocation fixture case' ;;
   esac
   if "${command_args[@]}" > "$bridge_log" 2>&1; then
     fail_bridge 'invalid wrapper invocation succeeded'
