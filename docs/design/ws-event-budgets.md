@@ -2,8 +2,9 @@
 
 Normative contract for [Hosted#2270](https://github.com/Concord-Voice/Hosted/issues/2270).
 The current change is **construction groundwork**: a pure registry, typed config
-validation, integer scaling and the B1 Redis script/adapter. Runtime behavior is
-unchanged; no caller invokes the new backend. All proposed
+validation, integer scaling, the B1 Redis script/adapter and B2 dedicated client
+factories with the source ACL grant. Runtime admission behavior is unchanged;
+no caller invokes the new backend. All proposed
 thresholds and workload claims are **UNMEASURED**; this document specifies future
 enforcement and its release prerequisites, not evidence of deployment.
 
@@ -165,15 +166,54 @@ the TIME acquisition and expose the PEXPIRE argument; production has no clock
 override. Absolute-expiry snapshots establish no-write rejection, not decreasing
 PTTL comparisons. Real TIME execution and uncertainty tests remain required.
 
-### Later dedicated client and fallback
+### B2 dedicated clients and source ACL
 
-Use a dedicated client preserving existing managed credential streaming/freshness
-and legacy auth/TLS ownership. Do not change the shared client. Disable command
-retries (`MaxRetries=-1`), use one dial attempt (`DialerRetries=1`), context timeouts,
-pool/active/dial limits 32, no minimum idle connections, and 100ms dial/read/write/
-pool timeouts. Disable optional maintenance notifications on this client without
-changing the shared client's protocol or maintenance settings. These B2 factories
-and the following B3 fallback/lifecycle behavior remain future work.
+Package `database` supplies these constructors in `redis_event_budget.go`:
+
+```go
+func NewEventBudgetRedisClient(redisURL string) (*redis.Client, error)
+func NewManagedEventBudgetRedisClient(endpoint string, tlsConfig *tls.Config,
+    runtime *managedredis.Runtime) (*redis.Client, error)
+```
+
+Both construct fresh options and independent client pools, without a PING, script
+load or credential probe. The legacy constructor uses `redis.ParseURL` and keeps
+URL authentication, database selection, TLS and protocol. Invalid URL errors are
+fixed strings, without echoing credentials. The managed constructor rejects a nil
+runtime, reuses existing endpoint validation and TLS cloning in `managedOptions`,
+then attaches that same runtime as `StreamingCredentialsProvider` and installs
+`NewFreshnessHook(runtime)`. It does not create a runtime, fetch a credential or
+take an immutable credential snapshot. A cold or expired runtime does not prevent
+construction; the existing hook/provider rejects actual use until credentials
+are valid. Existing startup and candidate-authentication checks remain authoritative.
+
+The dedicated settings are fixed: `MaxRetries=-1` at construction (normalized to
+zero by go-redis), `DialerRetries=1`, `ContextTimeoutEnabled=true`, and
+`PoolSize=MaxActiveConns=MaxConcurrentDials=32`. `MinIdleConns=0`; dial, read, write
+and pool timeouts are each 100ms. Optional maintenance notifications are explicitly
+disabled with `maintnotifications.ModeDisabled`. The constructor preserves the
+configured/default RESP protocol and leaves all shared-client settings unchanged.
+Only the account backend receives this client; application pipelines, autopipeline,
+PubSub, cache and full-duplex wrappers are outside this contract.
+
+The caller owns the returned client until successful backend construction; failed
+backend construction leaves checked cleanup with that caller. Closing the dedicated
+client does not close the credential runtime or shared client. The streaming
+provider retains per-connection unsubscribe behavior. Subscription cleanup,
+shared-client survival and library recovery/dial quiescence need separate evidence;
+the constructors do not promise a public join of all library goroutines.
+
+The checked `internal/managedredis/acl-manifest.json` adds only `TIME` to the
+control-plane service command list and removes it from the absent-command list.
+Media-plane and operator selectors receive no new grant. Existing account key
+patterns and TYPE/HLEN/HGET/HSET/PEXPIRE/EVAL/EVALSHA permissions already cover
+the script; no production SCRIPT LOAD, PEXPIRETIME or administrative grant is
+added for test fixtures. This is a source ACL change, not live provisioning;
+managed delivery must install it before enabled runtime admission.
+
+### Later bounded fallback
+
+The following B3 fallback/lifecycle behavior remains future work.
 Acquire one of 32 application slots nonblocking. Each decision has
 an absolute 100ms bound, with at most 90ms for remote work, shortened by authority
 or hold deadlines. Saturation uses immediate fallback. Only a definitive NOSCRIPT

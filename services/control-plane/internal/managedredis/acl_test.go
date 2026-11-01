@@ -90,3 +90,27 @@ func contains(values []string, value string) bool {
 	}
 	return false
 }
+
+func TestAccountBudgetTimeGrantIsControlPlaneOnly(t *testing.T) {
+	control := checkedACLManifest.Services["control-plane"]
+	require.Contains(t, control.Commands, "TIME")
+	require.NotContains(t, checkedACLManifest.ConnectionCommands, "TIME")
+	require.NotContains(t, checkedACLManifest.OptionalConnectionCommands, "TIME")
+	require.NotContains(t, checkedACLManifest.BluegreenOperator.Commands, "TIME")
+	for service, selector := range checkedACLManifest.Services {
+		if service != "control-plane" {
+			require.NotContains(t, selector.Commands, "TIME", service)
+		}
+	}
+	controlTokens := strings.Fields(serviceACLRule("control-plane"))
+	require.Contains(t, controlTokens, "+time", "the manifest grant must reach the emitted Redis ACL")
+	require.NotContains(t, strings.Fields(serviceACLRule("media-plane")), "+time")
+	for _, forbidden := range []string{"+@all", "+@scripting", "+script|load", "+pexpiretime", "+config|get"} {
+		require.NotContains(t, controlTokens, forbidden, "test inspection commands must not widen the service ACL")
+	}
+	var inventory struct {
+		ExcludedAbsentApplicationCommands []string `json:"excludedAbsentApplicationCommands"`
+	}
+	require.NoError(t, json.Unmarshal(aclManifestJSON, &inventory))
+	require.NotContains(t, inventory.ExcludedAbsentApplicationCommands, "TIME")
+}

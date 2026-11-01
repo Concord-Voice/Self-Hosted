@@ -2,7 +2,7 @@
 
 Plan for [Hosted#2270](https://github.com/Concord-Voice/Hosted/issues/2270), governed
 by the [normative contract](ws-event-budgets.md). All thresholds remain
-**UNMEASURED**. Units A and B1 are construction groundwork only; no runtime caller
+**UNMEASURED**. Units A, B1 and B2 are construction groundwork only; no runtime caller
 uses the new Redis backend. Socket behavior, wire schema, metrics and environment
 parsing are unchanged.
 
@@ -111,6 +111,39 @@ then runs focused unit/integration/race/vet/lint checks and independent review.
 The initial missing-symbol barrier is not behavioral red evidence. Record actual
 Redis version, commands, results and missing checks; source construction and test
 fixtures alone do not establish passing tests or production capacity.
+
+### Unit B2 construction and verification
+
+B2 adds `internal/database/redis_event_budget.go` and a control-plane-only `TIME`
+grant in `internal/managedredis/acl-manifest.json`, removing the obsolete absent
+inventory entry. The [B2 contract](ws-event-budgets.md#b2-dedicated-clients-and-source-acl)
+records both constructor signatures, exact settings and resource ownership.
+Shared constructors, runtime credentials, other service/operator grants and key
+patterns are unchanged. No startup call site or environment/configuration writer
+is introduced; source ACL delivery remains a later activation prerequisite.
+
+Independent tests must establish normalized zero command retries, one dial attempt,
+all three connection limits of 32, no minimum idle connections, the four 100ms
+timeouts and disabled maintenance notifications. Assert legacy auth/DB/TLS/protocol
+preservation, managed TLS cloning and shared-client option independence. Constructors
+must issue no PING, script load, dial or credential fetch/probe; nil runtime and
+invalid endpoint/URL reject without exposing credentials.
+
+Managed tests must exercise the same runtime's streaming rotation and freshness
+on actual commands/dials, including a cold/expired runtime accepted by construction
+but refused on use. Closing the dedicated client must unsubscribe its listeners
+while leaving the shared client and runtime usable. Listener-count inspection is
+test-only; do not add a production identity/state accessor. Observe library dial
+quiescence separately from application completion and do not infer a universal
+Close wall-time bound from a passing fixture.
+
+ACL evidence must run the production account script under the control-plane
+identity on disposable Redis, show denial before the TIME grant and success after,
+and retain denial for media/operator identities and unrelated keys/admin commands.
+Administrative fixture setup/expiry inspection does not justify broader service
+permissions. Root records the missing-constructor compile barrier, then focused
+race/integration/vet/lint results and independent review; tests and source changes
+alone do not establish managed deployment or workload capacity.
 
 ### Remaining account-engine and runtime gates
 
