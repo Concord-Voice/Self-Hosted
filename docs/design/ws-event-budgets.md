@@ -2,9 +2,9 @@
 
 Normative contract for [Hosted#2270](https://github.com/Concord-Voice/Hosted/issues/2270).
 The current change is **construction groundwork**: a pure registry, typed config
-validation, integer scaling, the B1 Redis script/adapter and B2 dedicated client
-factories with the source ACL grant. Runtime admission behavior is unchanged;
-no caller invokes the new backend. All proposed
+validation, integer scaling, the B1 Redis script/adapter, B2 dedicated client
+factories with the source ACL grant, and the B3 account admitter. Runtime admission
+behavior is unchanged; no production caller invokes the new engine. All proposed
 thresholds and workload claims are **UNMEASURED**; this document specifies future
 enforcement and its release prerequisites, not evidence of deployment.
 
@@ -211,26 +211,105 @@ the script; no production SCRIPT LOAD, PEXPIRETIME or administrative grant is
 added for test fixtures. This is a source ACL change, not live provisioning;
 managed delivery must install it before enabled runtime admission.
 
-### Later bounded fallback
+### B3 bounded account admission
 
-The following B3 fallback/lifecycle behavior remains future work.
-Acquire one of 32 application slots nonblocking. Each decision has
-an absolute 100ms bound, with at most 90ms for remote work, shortened by authority
-or hold deadlines. Saturation uses immediate fallback. Only a definitive NOSCRIPT
-may fall back to EVAL; uncertain execution is never retried or refunded.
+Package `websocket` supplies the account engine in `event_admission_account.go`:
+
+```go
+type AdmissionAction uint8
+type AdmissionSource uint8
+type AdmissionDecision struct {
+    Action AdmissionAction
+    Source AdmissionSource
+    RetryAfter time.Duration
+    DefinitiveRateDeny bool
+}
+type EventAdmitter interface {
+    Admit(context.Context, uuid.UUID, EventPolicy, time.Time) AdmissionDecision
+    Close() error
+}
+func NewEventAdmitter(EventBudgetConfig, AccountBudgetBackend) (EventAdmitter, error)
+```
+
+Action constants are `AdmissionAllow`, `AdmissionRefuse`, `AdmissionCloseOverload`
+and `AdmissionAbandon`. Sources are `AdmissionSourceExisting`,
+`AdmissionSourceLocalMaintenance`, `AdmissionSourceRedis`,
+`AdmissionSourceWarmLocal` and `AdmissionSourceUnavailable`; zero is invalid for
+both enums. The account engine never returns LocalMaintenance: C retains the
+existing-content and heartbeat gate owners. It accepts exactly the seven account
+policy tuples, including account-scoped presence; only subscription/ready have
+`MayHold=true`. Nil UUID or invalid/mismatched policy returns Refuse/Unavailable
+with one-second advice and no Redis or warm-state work.
+
+The final Admit argument is an absolute hold deadline. Non-hold classes require
+zero. A contradictory deadline is invalid input; an expired valid hold deadline
+is unavailable overload, even when disabled. Construction validates scale in
+either mode. Enabled construction requires a usable nonnil backend (callers must
+not supply typed-nil implementations); disabled construction requires nil, creates
+no warm map/sweep, and allows a valid live account request as Existing. Backend
+ownership transfers only on constructor success. The engine copies config, issues
+no startup backend command, and exposes no mutable map or identity accessor.
+
+Each call captures a monotonic start. The decision deadline is the earliest of
+start+100ms, parent deadline and nonzero hold deadline; the remote deadline is
+the earliest of start+90ms and that decision deadline. Actual deadline instants
+are checked as well as context cancellation, including after map-lock waits.
+One of 32 application slots is acquired nonblocking after the local reservation;
+saturation evaluates fallback immediately. Remote work is one synchronous backend
+call, never an application retry or detached request goroutine. The B1 backend's
+single NOSCRIPT fallback retains that same context.
+
+| Evidence at final evaluation | Decision |
+|---|---|
+| Parent canceled/expired or engine stopping | Abandon/Unavailable, retry0, not definitive |
+| Live parent but decision/hold deadline reached | Refuse/Unavailable, or CloseOverload for subscription/ready, retry1s |
+| Valid remote allow observed before remote deadline | Allow/Redis, retry0, not definitive |
+| Valid remote deny observed before remote deadline | Refuse/Redis with actual delay, definitive |
+| Unavailable/saturated plus reserved local credit before decision deadline | Allow/WarmLocal, retry0, not definitive |
+| Unavailable without local credit | Refuse/Unavailable, or CloseOverload for subscription/ready, retry1s |
+
+The engine defensively validates backend results: allow requires zero retry; deny
+requires integral milliseconds in 1..120000. Malformed/error/late results are
+unavailable and never warm a new account. A reply first observed at 95ms cannot
+count as Redis success but may use an already reserved token before 100ms. At or
+after 100ms no allowance remains. Parent/stopping checks win over overload; a final
+check after warm-map work cannot carry earlier evidence past the decision deadline.
+No result grants authority or refunds an already spent local/server debit.
 
 Fallback has at most 10000 user records, each with seven fixed class states.
-Allocate only after a valid Redis result, initially empty; no LRU or eviction.
-Healthy Redis allowance remains authoritative even with a full/empty local map.
-Fallback interval is four times the effective interval; burst is
-`max(1,floor(effectiveBurst/4))`. Reserve local credit before a remote attempt and
-never refund. Definitive Redis denial refuses; unavailable execution may allow only
-that attempt's already reserved credit. Cold/untracked users are denied in outage.
-Under one lock, look up, touch and reserve; never hold it across Redis or shutdown.
-Sweep every 60s, removing only records idle at least 600s using monotonic time.
-Shutdown rejects new work, cancels/joins application work and sweep, then closes
-the dedicated client before credential teardown. Library dial quiescence needs
-separate evidence; the application slot bound does not prove library shutdown.
+Only a valid timely Redis allow or deny can allocate a record, and only while the
+call remains live and within its decision deadline. Initialize every class empty
+at allocation time with tat=`now+fallbackBurst*fallbackInterval`; interval is four
+times effective interval and burst is `max(1,floor(effectiveBurst/4))`. A newly
+warmed default-profile record has no token before 20s, one at 20s, and at most two
+after 40s. The local clock uses elapsed monotonic duration from an instance origin;
+all lifetime-dependent additions are checked before evaluation.
+
+Lookup, touch, reservation, allocation and sweep share one lock; no bucket pointer
+escapes it. An existing account is touched and debited before remote-slot acquisition,
+including attempts that saturate or fail, with no refund on any branch. A definitive
+Redis denial cannot become a local allowance. Cold/untracked users are denied in
+outage. A full map cannot overrule healthy Redis success; failed allocation counts
+only an aggregate capacity miss. No LRU, active-user eviction, disconnect deletion
+or per-user goroutine exists. One ticker sweeps every 60s, deleting only accounts
+idle at least 600s; recreated records start empty. Internal aggregates retain active
+remote attempts and capacity misses; public metric publication belongs to D.
+
+Close atomically prevents new call registration, cancels active backend contexts,
+stops and joins the sweep and all registered calls, then closes the backend once.
+Registration and stopping use the same lifecycle lock; joins hold neither the map
+nor lifecycle lock. Fixed cancellation slots follow the 32-slot remote bound.
+Repeated/concurrent Close retains the checked backend-close result, and later
+Admit returns Abandon. The backend must honor cancellation; there is no untracked
+escape goroutine for a broken backend. No scheduler-independent Close wall-time
+bound or public join of library recovery goroutines is promised. Shared clients
+and credential runtime remain outside engine ownership; library dial quiescence
+and combined managed failure behavior need separate B4 evidence.
+
+The private per-instance clock constructor and `sweepIdle` helper let tests drive
+the same algorithm without global time mutation or exported test API. C still
+owns production integration, FIFO, authority finalization and the original
+two-second/21-attempt hold; B3 neither sleeps nor schedules that hold.
 
 ## FIFO, authority and wire contract
 

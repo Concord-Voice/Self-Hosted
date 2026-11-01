@@ -2,7 +2,7 @@
 
 Plan for [Hosted#2270](https://github.com/Concord-Voice/Hosted/issues/2270), governed
 by the [normative contract](ws-event-budgets.md). All thresholds remain
-**UNMEASURED**. Units A, B1 and B2 are construction groundwork only; no runtime caller
+**UNMEASURED**. Units A and B1–B3 are construction groundwork only; no runtime caller
 uses the new Redis backend. Socket behavior, wire schema, metrics and environment
 parsing are unchanged.
 
@@ -144,6 +144,41 @@ Administrative fixture setup/expiry inspection does not justify broader service
 permissions. Root records the missing-constructor compile barrier, then focused
 race/integration/vet/lint results and independent review; tests and source changes
 alone do not establish managed deployment or workload capacity.
+
+### Unit B3 construction and verification
+
+B3 adds `internal/websocket/event_admission_account.go` and independent tests in
+`event_admission_account_test.go`. The [B3 contract](ws-event-budgets.md#b3-bounded-account-admission)
+records the exact enums/API, ownership, result priority and fixed resource bounds.
+No production call site, local heartbeat gate, socket response, metrics publication
+or configuration writer is introduced. B4 combines real Redis uncertainty and
+managed-client lifetime evidence before C wires runtime admission.
+
+Use independent backend doubles and a private per-instance clock to test empty
+initialization across all seven configured classes, exact first-token boundaries,
+burst caps and nonrefund after success/denial/error/cancellation. Valid Redis denial
+warms an absent account empty but remains definitive; errors, malformed shapes and
+late/canceled replies must never create refillable state. Pin healthy allowance
+for user 10001 with a full map, unavailable denial for that untracked account, and
+continued resident credit without eviction. Sweep must retain at 600s−1ns, delete
+at 600s and serialize touch/reservation against deletion; recreation stays empty.
+
+Block 32 synchronous backend calls and show a 33rd attempt takes immediate fallback
+without invoking the backend. Check the actual child context deadline and results
+at the 90ms/100ms boundaries, earlier hold/parent deadlines, canceled parent priority,
+and disabled invalid/expired input handling. Delayed cancellation notification must
+not bypass absolute deadline checks. Map contention before remote work must not
+start a late backend command; contention after a valid reply must not produce a
+late allowance or a refillable late allocation. Deny retry values remain strict
+integer milliseconds, and backend errors never acquire definitive-denial status.
+
+Close tests must cancel active backend calls, join them and the real lifecycle
+sweep, reject future admission, retain one checked backend-close result, and race
+registration with stopping without WaitGroup misuse. The clock and sweep body are
+private seams; use no mutable package clock, exported debug map or per-request
+background wrapper. Root owns execution, focused race/vet/lint/coverage and
+independent review. Record observed failures and unavailable checks; passing unit
+tests do not establish production capacity or full Redis-outage auth availability.
 
 ### Remaining account-engine and runtime gates
 
