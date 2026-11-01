@@ -3,8 +3,10 @@
 Normative contract for `Hosted issue 2270`.
 The current change is **construction groundwork**: a pure registry, typed config
 validation, integer scaling, the B1 Redis script/adapter, B2 dedicated client
-factories with the source ACL grant, and the B3 account admitter. Runtime admission
-behavior is unchanged; no production caller invokes the new engine. All proposed
+factories with the source ACL grant, the B3 account admitter, and C1 socket ingress
+lifecycle ownership. C1 wakes pacing and enqueue waits on teardown and adds an
+immutable Hub construction seam; no production caller invokes the new engine.
+New event limits and responses are not active. All proposed
 thresholds and workload claims are **UNMEASURED**; this document specifies future
 enforcement and its release prerequisites, not evidence of deployment.
 
@@ -310,6 +312,37 @@ The private per-instance clock constructor and `sweepIdle` helper let tests driv
 the same algorithm without global time mutation or exported test API. C still
 owns production integration, FIFO, authority finalization and the original
 two-second/21-attempt hold; B3 neither sleeps nor schedules that hold.
+
+### C1 socket ingress lifetime and borrowed construction
+
+`NewHubWithEventAdmission(db, redisClient, counters, cfg, admitter)` validates the
+typed configuration, requires an admitter when enabled, and copies the policy.
+The Hub borrows the engine: it neither makes admission calls in C1 nor closes
+the engine. Construction failure retains caller ownership. `NewHub` remains
+the explicit legacy/test constructor with disabled admission and scale 100.
+Production router and process ownership wiring remain C5 work.
+
+Each constructed Hub owns a cancelable ingress context. Handler derives the
+Client context before expiry registration or publication; HTTP request and async
+bootstrap contexts do not own that socket lifetime. Shutdown cancels ingress
+before taking the delivery shutdown lock. Ordinary read/write teardown, pending
+registration failure, expiry and unregister cancel the Client context outside
+client and Hub locks. Required transport closure precedes its lifecycle cleanup.
+Pre-JSON pacing and the bounded incoming-channel wait observe this cancellation;
+the existing 20/s, burst 10 pacing, 512 KiB frame cap and queue size are unchanged.
+
+The private event-context seam snapshots the current token expiry for one event.
+The socket context has no opening-token deadline: successful renewal can move
+the next event's deadline without extending an earlier event. Missing lifecycle,
+zero/expired deadline, security-terminal state or shutdown fails closed. The
+authority check reads the actual current deadline as well as cancellation state.
+C2/C3 will apply these checks around admission, waits and renewal validation.
+
+Family closure retains its strict sequence: mark all matching clients terminal,
+close all transports, send the checked receipt, then cancel ingress and schedule
+cleanup. Failed transport closes still lose ingress authority and retain an error
+receipt. `closeSecurityTransport` remains frame-free and cancel-free, so new
+cancellation callbacks cannot delay sibling transport closure or its receipt.
 
 ## FIFO, authority and wire contract
 

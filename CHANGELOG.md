@@ -84,6 +84,7 @@ gate can learn from your voice.
 
 ### Fixed
 
+- **Connections:** WebSocket input waiting on pacing or a full server queue now stops when its connection is canceled or the server shuts down.
 - **Voice:** The media server now forwards your app's attestation when it checks your voice access, a step toward letting servers require an attested app ([#4211](internal development reference omitted)).
 - **Sign-in:** A signed-out session no longer retries its rejected refresh token every 10 seconds in the background ([#4205](internal development reference omitted)).
 - **Voice:** Calling someone back in a DM joins the call still open there instead of silently stopping, a failed call start now shows an error, your camera comes back after a brief connection drop, and 1:1 DMs show Join voice call during a call ([#4179](internal development reference omitted)).

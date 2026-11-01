@@ -2,9 +2,10 @@
 
 Plan for `Hosted issue 2270`, governed
 by the [normative contract](ws-event-budgets.md). All thresholds remain
-**UNMEASURED**. Units A and B1–B3 are construction groundwork only; no runtime caller
-uses the new Redis backend. Socket behavior, wire schema, metrics and environment
-parsing are unchanged.
+**UNMEASURED**. Units A and B1–B3 provide construction groundwork; C1 adds socket
+ingress lifetime ownership and cancellation of pacing/enqueue waits. No runtime
+caller uses the new Redis backend. New event gates, wire schema, metrics and
+environment parsing remain later work.
 
 ## Bounded work units
 
@@ -179,6 +180,32 @@ private seams; use no mutable package clock, exported debug map or per-request
 background wrapper. Root owns execution, focused race/vet/lint/coverage and
 independent review. Record observed failures and unavailable checks; passing unit
 tests do not establish production capacity or full Redis-outage auth availability.
+
+### Unit C1 construction and verification
+
+C1 adds `event_admission_lifecycle.go` and independent lifecycle tests, with
+focused changes to Client, Handler and Hub. The
+[C1 contract](ws-event-budgets.md#c1-socket-ingress-lifetime-and-borrowed-construction)
+defines the immutable borrowed-engine constructor, Hub-derived socket lifetime,
+renewable event deadline seam and transport-before-cancellation ordering.
+`NewHub` stays disabled at scale 100; production wiring of
+`NewHubWithEventAdmission` belongs to C5. C1 introduces no account admission,
+heartbeat gate, hold, advisory, 1013 response or final admission metric.
+
+Independent tests cover constructor validation and engine ownership, renewable
+event deadlines, missing/expired/terminal authority, ordinary pump teardown,
+pending expiry, unregister before async join, and shutdown before the delivery
+lock. Instrumented real transports and blocked cancellation callbacks must show
+all family members fenced and closed, with the checked receipt already sent,
+before any new sweep callback; failed closes still cancel authority without
+claiming success. An active account-engine double verifies cancellation abandons
+a late otherwise-successful backend result. Actual pending Handler registration
+and canceled pacing/full-queue waits require boundary tests as well.
+
+The missing-API compile barrier only establishes test-first construction, not a
+behavioral failure. Require focused race checks and negative/mutation evidence at
+the effect boundaries, then independent review. Source and unit evidence do not
+establish runtime admission readiness, managed delivery or workload acceptance.
 
 ### Remaining account-engine and runtime gates
 
