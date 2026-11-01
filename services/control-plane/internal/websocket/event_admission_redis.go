@@ -2,7 +2,7 @@ package websocket
 
 import (
 	"context"
-	_ "embed"
+	_ "embed" // Required by the go:embed directive for the budget script below.
 	"errors"
 	"strconv"
 	"sync"
