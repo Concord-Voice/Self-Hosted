@@ -69,7 +69,14 @@ func (c *Client) ingressAuthorityLive(ctx context.Context) bool {
 	deadline := c.tokenDeadline()
 	// Snapshot acquisition can wait behind renewal or teardown. Recheck every
 	// cancellation/terminal fence after that wait, before using the deadline.
-	return ctx.Err() == nil && !c.ingressStopped() && !deadline.IsZero() && time.Now().Before(deadline)
+	if ctx.Err() != nil || c.ingressStopped() {
+		return false
+	}
+	now := time.Now()
+	if parentDeadline, bounded := ctx.Deadline(); bounded && !now.Before(parentDeadline) {
+		return false
+	}
+	return !deadline.IsZero() && now.Before(deadline)
 }
 
 // ingressDone permits legacy fixtures without an ingress lifecycle. Real sockets

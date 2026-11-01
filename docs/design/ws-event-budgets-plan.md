@@ -2,10 +2,12 @@
 
 Plan for `Hosted issue 2270`, governed
 by the [normative contract](ws-event-budgets.md). All thresholds remain
-**UNMEASURED**. Units A and B1–B3 provide construction groundwork; C1 adds socket
-ingress lifetime ownership and cancellation of pacing/enqueue waits. No runtime
-caller uses the new Redis backend. New event gates, wire schema, metrics and
-environment parsing remain later work.
+**UNMEASURED**. Units A and B1–B3 provide construction groundwork; C1–C4 supply
+socket lifetimes, enabled event gates and complete dispatch/renewal integration.
+The production router remains disabled through its legacy constructor. C5
+configuration/process wiring, D publication and compatible E/F schema/client
+delivery remain later work. G/H configuration delivery and workload acceptance
+also remain prerequisites for activation.
 
 ## Bounded work units
 
@@ -85,7 +87,7 @@ B1 adds `internal/websocket/event_admission.lua` and
 `event_admission_redis.go`, with independent unit and isolated Redis integration
 tests. Its exact API, byte grammar, ownership and boundary examples are recorded
 in the [B1 contract](ws-event-budgets.md#b1-request-result-and-ownership).
-The backend has no runtime call site, warm map, application semaphore or new
+B1 alone introduces no runtime call site, warm map, application semaphore or new
 dependency. B2 owns dedicated client factories and ACL; B3 owns admission,
 deadlines and fallback; B4 combines failure/lifetime evidence. No permissive
 placeholder for these later units is introduced.
@@ -206,6 +208,41 @@ The missing-API compile barrier only establishes test-first construction, not a
 behavioral failure. Require focused race checks and negative/mutation evidence at
 the effect boundaries, then independent review. Source and unit evidence do not
 establish runtime admission readiness, managed delivery or workload acceptance.
+
+### Units C2–C4 connection and verification
+
+`event_admission_responses.go` and `event_admission_finalization.go` provide real
+bounded responses and once-only final accounting. `event_admission_integration.go`
+implements the complete account hold and local heartbeat machinery;
+`event_admission_dispatch.go`, Client, token renewal and the two original Hub
+content gates connect every enabled input to its final owner. No intermediate
+enabled dispatcher exempts renewal. `event_admission_outbound.go` guards response
+enqueue after bootstrap/send lock waits without changing generic outbound callers.
+Runtime construction remains C5 work.
+
+The private timer factory drives actual cancellation selects, fixed hold deadlines,
+raw delay scheduling and the strict two-second boundary in independent tests.
+Malformed engine tuples abandon; current unavailable outcomes must not be replaced
+by stale denial retries. Real local sockets exercise exact 1013 bytes and the
+bounded write under ordinary-writer contention. Finalization tests cover degraded
+OR, once-only outcomes, nil observer, disabled behavior and cancellation during
+deadline snapshot acquisition.
+
+Caller tests must exercise actual dispatch, before-effect denial, all known input
+owners, disabled unknown routing, held-subscription/ready FIFO, full incoming queues
+and actual outgoing bytes. Renewal tests count the local claim, backend and
+validator independently, preserve account allowance across later validation failure,
+and race successful validator results and deadline-lock acquisition against
+cancellation. Original content-gate tests retain malformed-ID/subscription exclusions,
+the shared bucket and finalized allowance on downstream failure. Migrate fixtures
+to real socket lifetimes and explicit contexts instead of adding missing-context
+allowances to production.
+
+The source has no public metrics producer or environment parser yet. Go-generated
+advisory bytes do not prove actual consumer-schema acceptance; E owns that evidence.
+Run focused race and affected existing lifecycle/renewal/content/ready/bootstrap
+checks, then package/quality gates. Record missing-API compile failures separately
+from behavioral RED, and retain the workload and delivery gates below.
 
 ### Remaining account-engine and runtime gates
 

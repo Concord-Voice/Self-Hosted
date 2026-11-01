@@ -107,7 +107,7 @@ func TestEventAdmissionLifecycleFrameDeadlineRenewsWithoutBoundingSocketLifetime
 	require.True(t, ok)
 	assert.Equal(t, old, deadline)
 	renewed := old.Add(time.Hour)
-	require.True(t, client.extendDeadline(renewed))
+	require.True(t, client.extendDeadline(context.Background(), renewed))
 	second, finishSecond := client.ingressEventContext()
 	defer finishSecond()
 	deadline, ok = second.Deadline()

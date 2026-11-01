@@ -82,15 +82,20 @@ rotation and the server answers `{"type":"auth_renew_result","data":{"ok":true}}
 or `{"ok":false}`, with no reason. `readPump` handles the frame after the
 ingress budget and never forwards it to the hub (`token_renewal.go`). The token
 must pass `validateAccessToken`, the same gate as the JWT handshake, and must
-carry the socket's user and credential epoch. Its sid must equal the socket's
-or be the socket's direct successor (`refresh_tokens.predecessor_id`, unrevoked).
+carry the socket's user, immutable login family and credential epoch. A rotated
+sid must resolve through the authoritative binding to that same live family;
+renewal does not require retaining a refresh-token row.
 Its `exp` must be later than the current deadline, and that deadline must not
 have passed. Attempts are throttled to one per socket per 10 seconds and each
-renewal, including both waits on `Hub.Run`, is bounded by a 3-second context.
+validation, including both waits on `Hub.Run`, is bounded by a 3-second context
+derived from the old socket authority. Enabled event budgets make one account
+decision after the local guard and before validation, including for empty tokens.
 Session ids are compared in canonical form. On a rotated sid, `Hub.Run` rebinds
 the client to the new sid first; on every accepted token `readPump` then
 re-checks the sid's revocation, closing the socket if it is revoked or the check
-fails. The deadline moves only after that check passes. Any refusal keeps the old deadline, logs only a
+fails. The deadline moves only after that check passes and cancellation is
+rechecked under the deadline mutex. Abandonment emits no acknowledgment. Any
+ordinary refusal keeps the old deadline, logs only a
 fixed reason class (never the token), and the socket closes at that deadline.
 The desktop then reconnects with a fresh ticket without tearing down the
 separate media connection.
@@ -140,17 +145,18 @@ reused after refusal; obtain a fresh ticket for a retry.
 
 ## Message Types
 
-### Event budget policy groundwork
+### Event budget integration
 
 `Hosted issue 2270` adds a pure
 16-event policy registry in [`event_admission.go`](event_admission.go), covering
 the 15 hub inputs below and `auth_renew`, intercepted by the read pump. It defines
 closed classes/scopes and validated integer account-budget scaling. Dedicated
-Redis construction and the account engine are available but have no production
-admission caller. Proposed thresholds are **UNMEASURED**.
+Redis construction and the account engine feed the complete dispatcher when a
+Hub is explicitly enabled. The production router still uses the disabled legacy
+constructor. Proposed thresholds are **UNMEASURED**.
 See the [normative design](../../../../docs/design/ws-event-budgets.md) and
 [implementation plan](../../../../docs/design/ws-event-budgets-plan.md) for the
-future enforcement and compatibility prerequisites.
+enforcement contract and remaining compatibility prerequisites.
 
 `event_admission_lifecycle.go` supplies the C1 lifetime seam.
 `NewHubWithEventAdmission` validates and copies startup policy and borrows its
@@ -163,8 +169,23 @@ async bootstrap; each event-context snapshot uses the current renewable token
 deadline. Teardown and shutdown cancel ingress, waking pre-JSON pacing and
 bounded Hub-enqueue waits. Family revocation marks all siblings, closes all
 transports and sends the checked receipt before new ingress cancellation callbacks.
-Existing rates, frame and queue bounds, renewal guards and wire messages remain
-unchanged. Dispatch gates, holds, metrics and configuration wiring are later units.
+Enabled dispatch drops unknown input, meters heartbeat locally and accounts for
+the seven account classes before enqueue. Subscription/ready denials may hold the
+single read-owned frame for up to two seconds before overload closure. Renewal
+claims its existing local guard once before account admission. Content keeps its
+original shared budget at the two existing Hub gates. Final accounting uses a
+private optional observer; metrics publication remains D work.
+
+1013 closes use a control-write deadline of at most 100ms, shortened to the earlier
+of event authority and current token expiry, and close transport even if the write
+fails. Metadata advice shares one slot per socket per second and preserves
+bootstrap enqueue ordering. Renewal
+acknowledgments and enabled advisories recheck event authority after
+outbound lock waits, suppressing late output without changing generic producers.
+Disabled mode bypasses every new gate/response/counter while retaining original
+rates, queue bounds, renewal guards and C1 cancellation. C5 configuration wiring and
+actual E/F schema/client compatibility, G/H configuration delivery and workload
+acceptance remain required before activation.
 
 ### Client -> Server (Incoming)
 
