@@ -114,6 +114,168 @@ const UUID_B = '22222222-2222-4222-8222-222222222222';
 const UUID_C = '33333333-3333-4333-8333-333333333333';
 const ISO_NOW = '2026-05-23T12:00:00.000Z';
 
+// #2270 E: exercise both the member schema and the actual dispatch union.
+// Exact parsed-envelope assertions catch silently stripped advisory fields.
+describe.each([
+  ['ErrorSchema', ErrorSchema],
+  ['WebSocketEventSchema', WebSocketEventSchema],
+] as const)('%s — event-budget error contract', (_name, schema) => {
+  const eventClasses = [
+    'content',
+    'typing',
+    'subscription',
+    'presence',
+    'profile',
+    'server',
+    'ready',
+    'renewal',
+  ] as const;
+
+  describe.each(eventClasses)('event_class=%s', (eventClass) => {
+    it.each([100, 1000, 5000, 30000])('retains the class and retry_after_ms=%i', (retry) => {
+      expect(
+        schema.parse({
+          type: 'error',
+          data: { code: 'ws_rate_limited', event_class: eventClass, retry_after_ms: retry },
+        })
+      ).toEqual({
+        type: 'error',
+        data: { code: 'ws_rate_limited', event_class: eventClass, retry_after_ms: retry },
+      });
+    });
+  });
+
+  it.each([
+    ['below the lower bound', 99],
+    ['above the upper bound', 30001],
+    ['fraction inside the bounds', 1000.5],
+    ['fraction at the lower bound', 100.5],
+    ['numeric string', '5000'],
+    ['empty string', ''],
+    ['null', null],
+    ['NaN', Number.NaN],
+    ['positive infinity', Number.POSITIVE_INFINITY],
+    ['negative infinity', Number.NEGATIVE_INFINITY],
+  ])('rejects retry_after_ms: %s without coercion or clamping', (_label, retry) => {
+    // NaN/infinity are deliberately in-memory inputs, never JSON wire fixtures.
+    expect(
+      schema.safeParse({
+        type: 'error',
+        data: { code: 'ws_rate_limited', event_class: 'profile', retry_after_ms: retry },
+      }).success
+    ).toBe(false);
+  });
+
+  it.each(['unknown', 'set_status', 'Profile', 'PROFILE', ' profile', 'profile ', '', null])(
+    'rejects an unknown or malformed event_class: %s',
+    (eventClass) => {
+      expect(
+        schema.safeParse({
+          type: 'error',
+          data: { code: 'ws_rate_limited', event_class: eventClass, retry_after_ms: 5000 },
+        }).success
+      ).toBe(false);
+    }
+  );
+
+  it('requires both advisory fields for ws_rate_limited', () => {
+    expect(schema.safeParse({ type: 'error', data: { code: 'ws_rate_limited' } }).success).toBe(
+      false
+    );
+  });
+
+  describe.each([
+    ['ws_rate_limited', { code: 'ws_rate_limited' }],
+    ['another code', { code: 'another_error' }],
+    ['no code', {}],
+  ] as const)('%s', (_label, codeFields) => {
+    it.each([
+      ['only event_class', { event_class: 'profile' }],
+      ['only retry_after_ms', { retry_after_ms: 5000 }],
+    ] as const)('rejects a partial pair: %s', (_pairLabel, pair) => {
+      expect(schema.safeParse({ type: 'error', data: { ...codeFields, ...pair } }).success).toBe(
+        false
+      );
+    });
+  });
+
+  it.each([{ code: 'another_error' }, {}])(
+    'retains a complete advisory pair with optional code %j',
+    (codeFields) => {
+      expect(
+        schema.parse({
+          type: 'error',
+          data: { ...codeFields, event_class: 'server', retry_after_ms: 1000 },
+        })
+      ).toEqual({
+        type: 'error',
+        data: { ...codeFields, event_class: 'server', retry_after_ms: 1000 },
+      });
+    }
+  );
+
+  it('preserves legacy empty error data', () => {
+    expect(schema.parse({ type: 'error', data: {} })).toEqual({ type: 'error', data: {} });
+  });
+
+  it('retains existing epoch_revoked fields without requiring an advisory', () => {
+    expect(
+      schema.parse({
+        type: 'error',
+        data: { code: 'epoch_revoked', channel_id: UUID_A, current_epoch: 3 },
+      })
+    ).toEqual({
+      type: 'error',
+      data: { code: 'epoch_revoked', channel_id: UUID_A, current_epoch: 3 },
+    });
+  });
+
+  it.each([{}, { code: 'ws_rate_limited', event_class: 'profile', retry_after_ms: 5000 }])(
+    'preserves unknown-property stripping for error data %j',
+    (knownFields) => {
+      expect(
+        schema.parse({
+          type: 'error',
+          unknown_envelope_field: 'discard',
+          data: { ...knownFields, unknown_error_field: 'discard' },
+        })
+      ).toEqual({ type: 'error', data: knownFields });
+    }
+  );
+
+  // C4a's TestEventAdmissionResponseAdvisorySharesOneSecondSlotAcrossClasses
+  // asserts these first three real json.Marshal/enqueueOutbound outputs via
+  // responseAssertAdvisory. The final vector pins the inclusive upper bound.
+  // Consumer parsing here does not ingest a cross-process producer artifact.
+  it.each([
+    [
+      '{"type":"error","data":{"code":"ws_rate_limited","event_class":"presence","retry_after_ms":100}}',
+      'presence',
+      100,
+    ],
+    [
+      '{"type":"error","data":{"code":"ws_rate_limited","event_class":"server","retry_after_ms":1000}}',
+      'server',
+      1000,
+    ],
+    [
+      '{"type":"error","data":{"code":"ws_rate_limited","event_class":"profile","retry_after_ms":5000}}',
+      'profile',
+      5000,
+    ],
+    [
+      '{"type":"error","data":{"code":"ws_rate_limited","event_class":"profile","retry_after_ms":30000}}',
+      'profile',
+      30000,
+    ],
+  ] as const)('retains the C4 wire advisory %s', (wire, eventClass, retry) => {
+    expect(schema.parse(JSON.parse(wire))).toEqual({
+      type: 'error',
+      data: { code: 'ws_rate_limited', event_class: eventClass, retry_after_ms: retry },
+    });
+  });
+});
+
 // ════════════════════════════════════════════════════════════════════════
 // 1. Happy path — one canonical valid payload per directly imported schema
 // ════════════════════════════════════════════════════════════════════════
