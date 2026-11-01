@@ -1,6 +1,6 @@
 # WebSocket event budget implementation plan
 
-Plan for [Hosted#2270](https://github.com/Concord-Voice/Hosted/issues/2270), governed
+Plan for `Hosted issue 2270`, governed
 by the [normative contract](ws-event-budgets.md). All thresholds remain
 **UNMEASURED**. Units A, B1 and B2 are construction groundwork only; no runtime caller
 uses the new Redis backend. Socket behavior, wire schema, metrics and environment
