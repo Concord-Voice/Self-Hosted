@@ -2,8 +2,9 @@
 
 Plan for [Hosted#2270](https://github.com/Concord-Voice/Hosted/issues/2270), governed
 by the [normative contract](ws-event-budgets.md). All thresholds remain
-**UNMEASURED**. Unit A is groundwork only; it changes no runtime admission,
-Redis use, socket behavior, wire schema, metrics or environment parsing.
+**UNMEASURED**. Units A and B1 are construction groundwork only; no runtime caller
+uses the new Redis backend. Socket behavior, wire schema, metrics and environment
+parsing are unchanged.
 
 ## Bounded work units
 
@@ -77,8 +78,43 @@ results and unavailable checks honestly; pure policy evidence is not runtime pro
 
 ## Later evidence and acceptance gates
 
-Freeze B's exact integer byte fixtures and constructor/lifetime contract before B
-starts. Pin corrupt-state refusal, safe-integer overflow, exact reply grammar and
+### Unit B1 construction and verification
+
+B1 adds `internal/websocket/event_admission.lua` and
+`event_admission_redis.go`, with independent unit and isolated Redis integration
+tests. Its exact API, byte grammar, ownership and boundary examples are recorded
+in the [B1 contract](ws-event-budgets.md#b1-request-result-and-ownership).
+The backend has no runtime call site, warm map, application semaphore or new
+dependency. B2 owns dedicated client factories and ACL; B3 owns admission,
+deadlines and fallback; B4 combines failure/lifetime evidence. No permissive
+placeholder for these later units is introduced.
+
+Required B1 evidence covers all approved configured pairs, command bytes and
+one-key count, strict three-integer reply types, copied config, zero-command
+invalid inputs, ownership on constructor error, and concurrent/idempotent Close.
+Run production Lua on isolated Redis for exact stored decimal bytes, burst/refill,
+scale changes, idle/maximum debt, canonical maximum/max+1, corrupt type/field/
+grammar rejection, rollback retention and the conservative expiry horizon.
+Two clients contending for one account must share its burst; another account or
+class remains independent. Corrupt records retain their bytes and absolute expiry.
+
+Only test-local substitutions of the unique TIME acquisition and result plumbing
+may supply deterministic clock/TTL vectors; the production algorithm stays the
+same. Execute the unchanged script separately with real TIME. Cold script cache
+permits exactly EVALSHA then EVAL under one context; warm cache needs only EVALSHA.
+A real debit followed by a lost reply must return unavailable with no replay.
+Use only disposable Redis and administrative test credentials for fixture
+inspection; never broaden production ACL to accommodate tests.
+
+Root captures the absent-feature compile barrier before source implementation,
+then runs focused unit/integration/race/vet/lint checks and independent review.
+The initial missing-symbol barrier is not behavioral red evidence. Record actual
+Redis version, commands, results and missing checks; source construction and test
+fixtures alone do not establish passing tests or production capacity.
+
+### Remaining account-engine and runtime gates
+
+Pin corrupt-state refusal, safe-integer overflow, exact reply grammar and
 backward-clock retention. Profile debt at logical T with wall T−3600s must retain
 4200000ms for millisecond-aligned T, or 4200001ms with a microsecond remainder;
 after 600 wall seconds it must still deny, without a new burst. Use a deterministic

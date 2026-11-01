@@ -1,8 +1,9 @@
 # WebSocket event budgets
 
 Normative contract for [Hosted#2270](https://github.com/Concord-Voice/Hosted/issues/2270).
-The current change is **policy groundwork only**: a pure registry, typed config
-validation and integer scaling. Runtime behavior is unchanged. All proposed
+The current change is **construction groundwork**: a pure registry, typed config
+validation, integer scaling and the B1 Redis script/adapter. Runtime behavior is
+unchanged; no caller invokes the new backend. All proposed
 thresholds and workload claims are **UNMEASURED**; this document specifies future
 enforcement and its release prerequisites, not evidence of deployment.
 
@@ -62,7 +63,7 @@ groundwork. Zero typed config is invalid, not implicit disable.
 
 ## Distributed decisions and bounded fallback
 
-Future account admission uses atomic Redis GCRA and Lua `TIME`, with key
+The B1 backend implements atomic Redis GCRA and Lua `TIME`, with key
 `ratelimit:user:ws:v1:{<canonical-user-uuid>}:<class>` and exact hash fields `v=1`,
 `last_us`, `tat_us`. Values use canonical unsigned decimal integers at most
 9007199254740991, never floating/scientific serialization. Invalid type, version,
@@ -81,11 +82,99 @@ three-integer reply is `{1, allowed, retry_after_ms}`: allow means retry 0; deni
 means retry 1..120000. Malformed replies/errors are unavailable, never permission.
 Process/data loss can reset Redis state; this contract makes no durability claim.
 
+### B1 request, result and ownership
+
+The public construction seam in package `websocket` is:
+
+```go
+type RedisBudgetDecision struct {
+    Allowed bool
+    RetryAfter time.Duration
+}
+type AccountBudgetBackend interface {
+    Decide(context.Context, uuid.UUID, EventClass, int64, int64) (RedisBudgetDecision, error)
+    Close() error
+}
+func NewRedisAccountBudgetBackend(EventBudgetConfig, *redis.Client) (AccountBudgetBackend, error)
+```
+
+The last two `Decide` arguments are interval microseconds and burst. Construction
+validates scale even when disabled, rejects disabled config and nil clients, and
+performs no command, script load or dial. Config is copied. Only successful
+construction transfers ownership of the dedicated client; on failure the caller
+retains it and checks cleanup errors. `Close` closes that client exactly once,
+retains its checked result, and refuses future decisions. Cancellation/joining of
+active application decisions belongs to the later admitter, not this backend.
+
+`Decide` rejects nil UUIDs, content/unknown classes and a supplied pair that differs
+from the approved configured pair before issuing a command. The authenticated
+UUID's canonical string and the closed class name are the sole key components.
+For profile at scale 100, the logical bulk-string command is:
+
+```text
+EVALSHA <sha> 1 ratelimit:user:ws:v1:{11111111-1111-4111-8111-111111111111}:profile 1 5000000 8
+```
+
+The UUID above is a test identity. Arguments are version, interval microseconds,
+burst; no caller clock or payload is sent. `redis.NewScript` identifies the
+embedded `event_admission.lua` bytes by SHA-1
+`aca3e0db97c777545e5ee970f170f6d1c6406fc2` (a cache identifier, not an integrity
+primitive). `Script.Run` falls back once from NOSCRIPT to EVAL with the identical
+source/key/arguments and context. All other errors end the attempt. The dedicated
+client must disable library command retries; B2 supplies its production factory.
+
+Lua requires one key and three arguments, version bytes `1`, canonical unsigned
+ASCII decimal interval 3125..20000000 and burst 2..640, and product at most
+120000000. It validates TIME's two decimal strings, microseconds 0..999999 and
+the combined safe-integer bound. TYPE must be absent or a hash with exactly the
+three specified fields. Stored times are exactly `0` or nonzero-leading ASCII
+digits; signs, leading zeros, spaces, decimal/exponent forms and values above
+9007199254740991 are rejected lexically before numeric conversion. Negative idle
+debt is valid. Stored writes use `string.format('%.0f', value)`.
+
+Every validation and arithmetic check precedes HSET. Rejection returns exactly
+`ERR WS_EVENT_BUDGET_INVALID_STATE` without changing fields or absolute expiry.
+A later runtime failure, including PEXPIRE after HSET, is uncertain execution;
+Redis does not roll back the preceding write. No failure permits replay or reset.
+
+The Go adapter accepts only an array of exactly three RESP integers (`int64`),
+version 1 and either `{1,1,0}` or `{1,0,retry}` with retry 1..120000 milliseconds.
+Numeric strings, floats, booleans, nulls, extra fields and contradictory delays
+are unavailable. The exact script rejection maps to
+`ErrAccountBudgetInvalidState`; other command/protocol failures map to
+`ErrAccountBudgetUnavailable`, with a zero decision. Neither exposes raw Redis
+errors or key values, and neither is a definitive rate denial. Canceled/expired
+contexts and closed backends cannot return a distributed allowance.
+
+For exact arithmetic examples, let T=1800000000000000 microseconds. At default
+profile settings, eight requests at T leave tat=T+40000000; the ninth denies for
+5000ms. At T+4999999 it denies for 1ms and retains TTL600001; at T+5000000 it
+allows and stores tat=T+45000000 with TTL600000. Wall T−3600000000 with logical
+last T retains TTL4200000; nonaligned last T+1 and wall T−3600000000+1 retain
+TTL4200001. Repeated rollback by two hours retains TTL7800000. Changing scale
+retains debt: that burst state denies for 20000ms at scale25 and 1250ms at scale400.
+
+All additions are checked before evaluation, and ceiling conversion uses quotient
+and remainder. Positive stored debt120000000 is valid (default profile retry85000),
+while debt120000001 is rejected unchanged. An absent record at wall
+9007198654740000 allows, stores tat9007198659740000 and TTL600000 exactly at the
+retained horizon; the next microsecond rejects without creating a key. Canonical
+9007199254740991 parses exactly but cannot pass that horizon at ordinary wall
+time; 9007199254740992 fails the lexical check. Isolated tests substitute only
+the TIME acquisition and expose the PEXPIRE argument; production has no clock
+override. Absolute-expiry snapshots establish no-write rejection, not decreasing
+PTTL comparisons. Real TIME execution and uncertainty tests remain required.
+
+### Later dedicated client and fallback
+
 Use a dedicated client preserving existing managed credential streaming/freshness
 and legacy auth/TLS ownership. Do not change the shared client. Disable command
 retries (`MaxRetries=-1`), use one dial attempt (`DialerRetries=1`), context timeouts,
 pool/active/dial limits 32, no minimum idle connections, and 100ms dial/read/write/
-pool timeouts. Acquire one of 32 application slots nonblocking. Each decision has
+pool timeouts. Disable optional maintenance notifications on this client without
+changing the shared client's protocol or maintenance settings. These B2 factories
+and the following B3 fallback/lifecycle behavior remain future work.
+Acquire one of 32 application slots nonblocking. Each decision has
 an absolute 100ms bound, with at most 90ms for remote work, shortened by authority
 or hold deadlines. Saturation uses immediate fallback. Only a definitive NOSCRIPT
 may fall back to EVAL; uncertain execution is never retried or refunded.
