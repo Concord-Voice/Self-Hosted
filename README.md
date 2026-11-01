@@ -25,7 +25,7 @@ Run the Concord Voice server on your own hardware.
 
 ## Introduction
 
-Concord Voice is a privacy-first place to talk with your friends, your community, or your team. It gives you voice calls, video, screen sharing, and chat. Your device encrypts each message before it leaves, so our servers hold only scrambled data that we cannot read. You can use our hosted service, or you can run the same software on your own hardware.
+Concord Voice is a privacy-first place to talk with your friends, your community, or your team. It gives you voice calls, video, screen sharing, and chat. Your device encrypts each message before it leaves, so our servers store your messages only as scrambled data that we cannot read. You can use our hosted service, or you can run the same software on your own hardware.
 
 This repository holds the Concord Voice server. You can install it on a machine that you control.
 Your community then talks on your hardware, and your data stays with you.
@@ -73,7 +73,7 @@ Go tests truncate every table, so point `DATABASE_URL` at a database you can los
 
 ## Security
 
-The server stores only encrypted message data. It cannot read message content, keys, or media.
+The server stores messages only in encrypted form. It cannot read message content, encrypted attachments, or voice and video. It can read profile images such as avatars and banners.
 
 Report a vulnerability by email to security@concordvoice.com. Do not open a public issue for it. The [security policy](./.github/SECURITY.md) describes the disclosure process.
 
@@ -87,7 +87,7 @@ We welcome help. Read the [contributing guide](./.github/CONTRIBUTING.md) and th
 
 ## License
 
-This repository uses the Concord Voice Source License 1.0 (CVSL 1.0). Anyone can read the source. Personal and non-profit use is free. Commercial self-hosted use by a for-profit or government entity needs a commercial license. On 2030-02-15 the license converts to AGPL-3.0-or-later.
+This repository uses the Concord Voice Source License 1.0 (CVSL 1.0). Anyone can read the source. Personal and non-profit use is free. Any use by a for-profit company or a government body needs a commercial license. Each version converts to AGPL-3.0-or-later on 2030-02-15 at the latest.
 
 See [LICENSE](./LICENSE) for the full terms.
 
