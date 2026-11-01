@@ -2,8 +2,9 @@
 
 Plan for `Hosted issue 2270`, governed
 by the [normative contract](ws-event-budgets.md). All thresholds remain
-**UNMEASURED**. Unit A is groundwork only; it changes no runtime admission,
-Redis use, socket behavior, wire schema, metrics or environment parsing.
+**UNMEASURED**. Unit A is pure policy groundwork. Unit E adds canonical error
+schema validation only; neither unit activates runtime admission, Redis use,
+socket behavior, metrics or environment parsing.
 
 ## Bounded work units
 
@@ -24,6 +25,44 @@ consumer; Hosted owns managed deployment. The protocol package is unpublished:
 identify the exact schema source commit and required consumer copy instead of
 assuming a package version propagates it. Census other supported clients before
 activation. Hosted source builds must prove a delivery lane from canonical changes.
+
+## Unit E schema and consumer delivery
+
+Canonical source is `packages/protocol/src/renderer/types/ws-events.ts`, with
+compatibility tests in `packages/protocol/tests/unit/types/ws-events.test.ts`.
+The nested error data schema accepts the closed eight-class `event_class` enum
+and finite integer `retry_after_ms` in the inclusive range 100..30000, without
+coercion. `ws_rate_limited` requires both fields. Every code rejects partial
+pairs, while another or absent code may carry a complete valid pair. Legacy
+errors without the pair and existing unknown-key stripping remain compatible.
+The outer `error` discriminator, union membership and derived payload type stay
+in place.
+
+Required package evidence is `npm test --workspace @concord-voice/protocol` and
+`npm run typecheck --workspace @concord-voice/protocol`. Tests must inspect exact
+parsed retention through both exported schemas, covering all eight classes,
+100/30000 boundaries, ordinary 1000/5000 delays, malformed classes/delays,
+missing/partial pairs, unrelated-code pairs and legacy/union regressions.
+NaN/infinity vectors are direct in-memory negatives, not JSON wire examples.
+The producer advisory example and boundary vectors must also agree with C4's
+actual marshaled output at integration; E's parser tests do not establish that
+producer evidence.
+
+Canonical validation on 2026-11-01 used the real package scripts: the independent
+schema tests first reproduced 128 failures and 232 passes, then all 360 passed
+after the schema change. Both the focused test-file run and full
+`npm test --workspace @concord-voice/protocol` passed, as did
+`npm run typecheck --workspace @concord-voice/protocol`. This establishes parser
+retention and compatibility for E; independent review, remaining quality checks
+and the delivery/activation gates still need their own evidence.
+
+Desktop currently consumes an in-tree schema at
+`desktop/src/renderer/types/ws-events.ts` rather than importing this unpublished
+package. Unit F must port the reviewed schema/test changes with exact canonical
+commit provenance and run its own parser/service checks. E does not publish the
+package, change dependencies/versions, establish released-client adoption or
+authorize activation. Record actual package verification and consumer delivery
+evidence as those gates are completed.
 
 ## Unit A frozen interface and verification
 
