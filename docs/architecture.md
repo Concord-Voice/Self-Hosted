@@ -243,7 +243,7 @@ The project's architecture decision records capture historical hosted deployment
 
 #### Desktop Auto-Update Trust Model
 
-The SPA hot-update path above is distinct from the **binary** auto-update path that ships new Electron app versions. The latter is a security-critical, signature-verified pipeline in `src/main/` (see the [update trust model](policies/update-trust-model.md)):
+The SPA hot-update path above is distinct from the **binary** auto-update path that ships new Electron app versions. The latter is a security-critical, signature-verified pipeline in `src/main/` (see the [update trust model](https://github.com/Concord-Voice/Desktop/blob/main/docs/policies/update-trust-model.md) in the Desktop repository):
 
 - **`updater.ts`** — `electron-updater` wiring with `autoDownload = false` (the download is a deliberate, user-gated step, not silent), prerelease opt-in gating, and a static public GitHub recovery feed (`releases/latest/download`). It pins the Windows publisher chain by monkey-patching `verifyUpdateCodeSignature` to require the Microsoft Trusted Signing intermediate (`verifyWindowsSignature.ts`). The API host carries no TLS certificate pin — see [`docs/policies/api-tls-trust-model.md`](policies/api-tls-trust-model.md).
 - **`verifyWindowsSignature.ts`** — independently verifies the Authenticode signature on the downloaded Windows installer.
@@ -1814,7 +1814,7 @@ sequenceDiagram
 
 > The DM stack raises the same `key_needed` when a peer's first key fetch enrolls a `dm_pending_key_requests` row (`notifyDMKeyNeeded`); a DM has no server, so that push carries no `server_id` and the client schema marks the field optional.
 
-- RSA-OAEP 4096-bit key wrapping, AES-256-GCM message encryption, and Argon2id key derivation. The password-derived wrapping key is an AES-GCM 256 key. AES-GCM wraps the private key, not RFC 3394 AES-KW. `POST /api/v1/auth/register` uploads the registration-time key material (`public_key`, `wrapped_private_key`). `GET /api/v1/users/me/keys` serves only a fresh primary sign-in (`auth_time` within the access-token lifetime; refresh-renewed tokens get 403 `recent_auth_required`), `POST /api/v1/users/me/keys/reveal` serves mid-session password change against the current password, and `PUT /api/v1/users/me/keys` covers key recovery.
+- RSA-OAEP 4096-bit key wrapping, AES-256-GCM message encryption, and Argon2id key derivation. The password-derived wrapping key is an AES-GCM 256 key. AES-GCM wraps the private key, not RFC 3394 AES-KW. `POST /api/v1/auth/register` uploads the registration-time key material (`public_key`, `wrapped_private_key`). `GET /api/v1/users/me/keys` serves only a fresh primary sign-in (`auth_time` within the access-token lifetime; refresh-renewed tokens get 403 `recent_auth_required`), `POST /api/v1/users/me/keys/reveal` serves mid-session password change against the current password (a wrong password is 403 `invalid_current_password`, never 401, and feeds the per-IP auth-failure ban), and `PUT /api/v1/users/me/keys` covers key recovery.
 - PostgreSQL stores the public keys. The client wraps private keys locally, and they never leave the client unwrapped.
 - Encryption is **structural** under E2EE-everywhere (#201): every channel and DM is encrypted by construction. There is no plaintext-or-encrypted toggle and no `is_encrypted` column. Voice/video frames are likewise E2EE (see [Media E2EE](#media-e2ee-frame-encryption)).
 

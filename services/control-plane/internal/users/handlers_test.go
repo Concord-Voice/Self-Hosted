@@ -143,9 +143,17 @@ func TestRevealMyKeys(t *testing.T) {
 	testhelpers.ParseJSON(t, w, &body)
 	assert.NotEmpty(t, body["e2ee_keys"].(map[string]interface{})["wrapped_private_key"])
 
+	// A wrong password is a 403 with a code, never a 401: the renderer reads a
+	// 401 as an expired token and refreshes and resends.
 	w = ts.DoRequest("POST", urlUsersMeKeys+"/reveal", map[string]string{"current_password": "WrongPassword123!"}, renewed) // pragma: allowlist secret
-	assert.Equal(t, http.StatusUnauthorized, w.Code)
+	assert.Equal(t, http.StatusForbidden, w.Code)
 	assert.NotContains(t, w.Body.String(), "wrapped_private_key")
+	var refusal map[string]interface{}
+	testhelpers.ParseJSON(t, w, &refusal)
+	assert.Equal(t, "invalid_current_password", refusal["code"])
+
+	w = ts.DoRequest("POST", urlUsersMeKeys+"/reveal", map[string]string{"current_password": strings.Repeat("x", 1025)}, renewed)
+	assert.Equal(t, http.StatusBadRequest, w.Code, "an oversized password never reaches Argon2id")
 
 	w = ts.DoRequest("POST", urlUsersMeKeys+"/reveal", map[string]string{}, renewed)
 	assert.Equal(t, http.StatusBadRequest, w.Code)

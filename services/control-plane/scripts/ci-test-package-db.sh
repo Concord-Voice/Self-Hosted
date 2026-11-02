@@ -8,6 +8,26 @@ if [[ "${CI_PACKAGE_DB_ISOLATION:-}" != 1 || "$#" -lt 1 || ! -x "$1" ]]; then
   exit 2
 fi
 
+# Enable the Redis evidence in the existing coverage run, without selecting a
+# developer endpoint or making unrelated package output verbose.
+package_test_args=()
+case "$(basename -- "$1")" in
+  websocket.test)
+    if [[ -z "${REDIS_URL:-}" ]]; then
+      echo 'ci-test-package-db: websocket tests require nonempty REDIS_URL' >&2
+      exit 2
+    fi
+    export WS_EVENT_BUDGET_REDIS_INTEGRATION=1
+    package_test_args=(-test.v)
+    ;;
+  managedredis.test)
+    export MANAGED_REDIS_INTEGRATION=1
+    export MANAGED_REDIS_TEST_IMAGE=redis:8-alpine
+    package_test_args=(-test.v)
+    ;;
+  *) : ;;
+esac
+
 # These integration packages observe the same fixed NATS voice.enforce.*
 # subjects. Keep their observers sequential while unrelated binaries use the
 # other Go test slot. This list follows live subscriptions in their *_test.go
@@ -64,4 +84,6 @@ cleanup() {
 trap cleanup EXIT
 
 export DATABASE_URL="$package_url"
-"$@"
+test_binary="$1"
+shift
+"$test_binary" "${package_test_args[@]}" "$@"
