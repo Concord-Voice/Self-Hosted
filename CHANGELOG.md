@@ -94,6 +94,7 @@ gate can learn from your voice.
 ### Fixed
 
 - **Account authority:** Owner cancellation now lets an in-flight lock-health ping finish within its existing timeout before explicitly releasing the serve lock.
+- **WebSocket:** Canceled socket and server lifetimes stop queued frames before activity tracking or handler work, including when event budgets are disabled.
 
 - **Connections:** WebSocket input waiting on pacing or a full server queue now stops when its connection is canceled or the server shuts down.
 - **Operations:** Protected PR Semgrep, ESLint, and govulncheck scans now check out the exact merge revision selected by required CI; same-repository SARIF uploads use that revision even if GitHub regenerates another merge commit.

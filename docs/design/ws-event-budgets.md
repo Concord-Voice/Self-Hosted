@@ -414,11 +414,13 @@ authority check reads actual current and event-context deadlines as well as
 cancellation state. C2/C3 apply these checks around admission, waits and renewal
 validation, including after a deadline snapshot waits for its mutex.
 
-Family closure retains its strict sequence: mark all matching clients terminal,
-close all transports, send the checked receipt, then cancel ingress and schedule
-cleanup. Failed transport closes still lose ingress authority and retain an error
-receipt. `closeSecurityTransport` remains frame-free and cancel-free, so new
-cancellation callbacks cannot delay sibling transport closure or its receipt.
+The family sweep marks all matching clients terminal, closes all transports,
+sends the checked receipt, then initiates ingress cancellation and schedules
+cleanup. A live pump can independently cancel its ingress after its transport
+closes, before sibling closes or the receipt. Those pump callbacks do not run on
+the sweep goroutine and cannot hold back its sibling transport closes or receipt.
+Failed transport closes still lose ingress authority and retain an error receipt.
+`closeSecurityTransport` remains frame-free and cancel-free.
 
 ### C2–C4 dispatch, renewal and finalization
 
