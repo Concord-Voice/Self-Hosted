@@ -32,7 +32,8 @@ func TestNewRouter_SelfHostedSSODeploymentBoundary(t *testing.T) {
 	der, err := x509.MarshalPKCS8PrivateKey(key)
 	require.NoError(t, err)
 	cfg := &config.Config{
-		InstanceType: "self-hosted", Environment: "test", JWTSecret: testhelpers.TestJWTSecret,
+		WSEventBudget: config.WSEventBudgetConfig{Enabled: false, ScalePercent: 100},
+		InstanceType:  "self-hosted", Environment: "test", JWTSecret: testhelpers.TestJWTSecret,
 		AllowedOrigins: []string{"*"}, NATSUrl: os.Getenv("NATS_URL"),
 		MFAEncryptionKey:        "0000000000000000000000000000000000000000000000000000000000000000",
 		MFAEncryptionKeyVersion: 1, WebAuthnRPID: "localhost",

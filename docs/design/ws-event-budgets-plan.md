@@ -2,10 +2,12 @@
 
 Plan for `Hosted issue 2270`, governed
 by the [normative contract](ws-event-budgets.md). All thresholds remain
-**UNMEASURED**. Units A and B1–B3 provide policy, Redis backend, dedicated
-client and account-admitter construction groundwork. Unit E adds canonical
-error schema validation. No production caller invokes the new engine; runtime
-admission, socket behavior, metrics and environment parsing are unchanged.
+**UNMEASURED**. Units A and B1–B3 provide construction groundwork; C1–C4 supply
+socket lifetimes, enabled event gates and complete dispatch/renewal integration.
+C5 adds validated startup settings, process ownership and router injection.
+Unit E canonical error-schema validation is also present. D publication,
+compatible client delivery, G/H configuration delivery and workload acceptance
+remain prerequisites for activation.
 
 ## Bounded work units
 
@@ -20,7 +22,10 @@ admission, socket behavior, metrics and environment parsing are unchanged.
 | G: self-host config | Self-Hosted: actual production Compose, fresh installer, env example and operator docs | required-value wiring, installer/parity fixtures and existing-install preparation |
 | H: managed delivery | Hosted: canonical config writer, Compose, ACL/operator docs and verified delivery lane | every admitted writer branch, reader/client prerequisites and canonical source provenance |
 
-No SQL migration, media-plane change or live commissioning belongs to these units.
+C5 introduces no SQL migration. Unit D requires additive updates to both metric-key
+CHECK constraints before publishing its producer and reader; migration numbering
+and canonical delivery order remain prerequisites. No media-plane change or live
+commissioning belongs to these units.
 Self-Hosted owns control-plane policy and the protocol origin; Desktop owns its
 consumer; Hosted owns managed deployment. The protocol package is unpublished:
 identify the exact schema source commit and required consumer copy instead of
@@ -123,7 +128,7 @@ B1 adds `internal/websocket/event_admission.lua` and
 `event_admission_redis.go`, with independent unit and isolated Redis integration
 tests. Its exact API, byte grammar, ownership and boundary examples are recorded
 in the [B1 contract](ws-event-budgets.md#b1-request-result-and-ownership).
-The backend has no runtime call site, warm map, application semaphore or new
+B1 alone introduces no runtime call site, warm map, application semaphore or new
 dependency. B2 owns dedicated client factories and ACL; B3 owns admission,
 deadlines and fallback; B4 combines failure/lifetime evidence. No permissive
 placeholder for these later units is introduced.
@@ -283,6 +288,67 @@ reauthentication of every connection. Protected-workflow adoption remains subjec
 to the B4.1 pin boundary above. Runtime integration, workload measurements and
 activation prerequisites remain outstanding.
 
+### Unit C1 construction and verification
+
+C1 adds `event_admission_lifecycle.go` and independent lifecycle tests, with
+focused changes to Client, Handler and Hub. The
+[C1 contract](ws-event-budgets.md#c1-socket-ingress-lifetime-and-borrowed-construction)
+defines the immutable borrowed-engine constructor, Hub-derived socket lifetime,
+renewable event deadline seam and transport-before-cancellation ordering.
+`NewHub` stays disabled at scale 100; production wiring of
+`NewHubWithEventAdmission` belongs to C5. C1 introduces no account admission,
+heartbeat gate, hold, advisory, 1013 response or final admission metric.
+
+Independent tests cover constructor validation and engine ownership, renewable
+event deadlines, missing/expired/terminal authority, ordinary pump teardown,
+pending expiry, unregister before async join, and shutdown before the delivery
+lock. Instrumented real transports and blocked cancellation callbacks must show
+all family members fenced and closed, with the checked receipt already sent,
+before any new sweep callback; failed closes still cancel authority without
+claiming success. An active account-engine double verifies cancellation abandons
+a late otherwise-successful backend result. Actual pending Handler registration
+and canceled pacing/full-queue waits require boundary tests as well.
+
+The missing-API compile barrier only establishes test-first construction, not a
+behavioral failure. Require focused race checks and negative/mutation evidence at
+the effect boundaries, then independent review. Source and unit evidence do not
+establish runtime admission readiness, managed delivery or workload acceptance.
+
+### Units C2–C4 connection and verification
+
+`event_admission_responses.go` and `event_admission_finalization.go` provide real
+bounded responses and once-only final accounting. `event_admission_integration.go`
+implements the complete account hold and local heartbeat machinery;
+`event_admission_dispatch.go`, Client, token renewal and the two original Hub
+content gates connect every enabled input to its final owner. No intermediate
+enabled dispatcher exempts renewal. `event_admission_outbound.go` guards response
+enqueue after bootstrap/send lock waits without changing generic outbound callers.
+Runtime construction is supplied by C5 below.
+
+The private timer factory drives actual cancellation selects, fixed hold deadlines,
+raw delay scheduling and the strict two-second boundary in independent tests.
+Malformed engine tuples abandon; current unavailable outcomes must not be replaced
+by stale denial retries. Real local sockets exercise exact 1013 bytes and the
+bounded write under ordinary-writer contention. Finalization tests cover degraded
+OR, once-only outcomes, nil observer, disabled behavior and cancellation during
+deadline snapshot acquisition.
+
+Caller tests must exercise actual dispatch, before-effect denial, all known input
+owners, disabled unknown routing, held-subscription/ready FIFO, full incoming queues
+and actual outgoing bytes. Renewal tests count the local claim, backend and
+validator independently, preserve account allowance across later validation failure,
+and race successful validator results and deadline-lock acquisition against
+cancellation. Original content-gate tests retain malformed-ID/subscription exclusions,
+the shared bucket and finalized allowance on downstream failure. Migrate fixtures
+to real socket lifetimes and explicit contexts instead of adding missing-context
+allowances to production.
+
+The source has no public metrics producer or environment parser yet. Go-generated
+advisory bytes do not prove actual consumer-schema acceptance; E owns that evidence.
+Run focused race and affected existing lifecycle/renewal/content/ready/bootstrap
+checks, then package/quality gates. Record missing-API compile failures separately
+from behavioral RED, and retain the workload and delivery gates below.
+
 ### Remaining account-engine and runtime gates
 
 Pin corrupt-state refusal, safe-integer overflow, exact reply grammar and
@@ -318,6 +384,36 @@ cannot revive authority, and intermediate/abandoned attempts do not count final
 admission. Renewal's local guard claims once; account allowance counts admission
 even when token validation later fails. Assert actual outbound schema, reader
 parsing and reconnection behavior rather than only helper inputs or key sets.
+
+## Unit C5 construction and verification
+
+`pkg/config/ws_event_budget.go` parses the two settings with `LookupEnv` presence
+semantics; `Load` propagates errors. `cmd/server/ws_event_budget.go` maps and
+revalidates policy, composes the existing dedicated client/backend/engine, and
+checks failure cleanup. Its per-call factory seam permits independent construction
+failure tests without mutable globals or live infrastructure. Main owns the one
+engine and injects it into the validating router constructor.
+
+Required evidence covers canonical grammar/defaults and disabled-invalid values,
+actual `Load` propagation, explicit DTO mapping, managed runtime/TLS borrowing,
+disabled zero client/backend construction, each ownership-transfer failure and
+joined cleanup errors. Router tests must prove missing enabled dependencies and
+invalid scales fail before downstream initialization, while valid-policy controls
+still reach later router errors. Manually built fixtures use explicit disabled100
+policy; production does not repair zero typed config.
+
+Shutdown tests exercise the actual coordinator with an exhausted or blocked Hub
+stage and a blocked engine Close. Engine cleanup must remain synchronous and
+precede metrics, poll cancellation and shared Redis cleanup, preserving all error
+causes. The checked deferred-close helper covers startup-error composition; helper
+tests do not claim execution of the complete database-backed startup path. Review
+the immediate production defer placement and exact one engine construction as
+well. Existing B evidence owns engine idempotence and application-work joining.
+
+Focused normal/race checks, meaningful changed-code coverage and independent
+review remain required. Source wiring alone supplies none of D's paired metrics
+reader, released E/F consumers and floors, G/H writer delivery, canonical Hosted
+delivery or measured workload acceptance.
 
 ## Delivery and activation order
 

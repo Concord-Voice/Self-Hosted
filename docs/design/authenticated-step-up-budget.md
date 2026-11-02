@@ -2,12 +2,15 @@
 
 Design contract for Hosted issue 2271, within Hosted epic 696.
 
-**Implementation status:** only the opaque actor adapter in
-`services/control-plane/internal/stepup/budget_actor.go` is implemented here.
-It has no production caller and performs no accounting. The PostgreSQL budget,
-consumer migration, retirement integration and lifecycle controls below are
-planned requirements, not active enforcement or deployment evidence. Existing
-Redis budgets and authentication defenses remain unchanged.
+**Implementation status:** the opaque actor adapter and private SQL accounting
+core are implemented as dormant groundwork in `internal/stepup`, under
+`services/control-plane/`. They have no production callers. The core can reserve
+and settle receipts against the prospective schema in isolated fixtures; no
+numbered production migration, lifecycle admission or consumer integration ships
+with it. Retirement integration and lifecycle controls below remain planned
+requirements. Source availability is not validation, active enforcement or
+deployment evidence. Existing Redis budgets and authentication defenses remain
+unchanged.
 
 ## Actor provenance
 
@@ -75,13 +78,97 @@ transaction owner, preserving visibility, private-voice and presence prefixes.
 No protected-effect transaction locks the budget row. Existing explicit bounded
 authority exceptions remain owned by their original code.
 
+## Next dormant SQL core contract
+
+The bounded SQL core implements private accounting before production admission
+is integrated. It has no production caller or exported
+reservation entrypoint. Its internal success proves fresh SQL actor authority and
+accounting, not that step-up lifecycle admission is active. Keep the current Redis
+guards unchanged. The future admission owner must check authoritative step-up state
+inside the same transaction, immediately after the early writer barrier; a separate
+check transaction or an always-allow lifecycle stub is insufficient.
+
+The prospective table is `step_up_attempt_budgets`. Its exact fields are `user_id`,
+`family_id`, `window_id` (nonnull, nonzero UUIDs), `window_started_at`, `expires_at`
+(nonnull finite TIMESTAMPTZ values exactly900 seconds apart), and `charged_receipts`
+(nonnull UUID array, canonical empty or one-dimensional lower-bound1,0..5 distinct
+nonnull/nonzero entries). Preserve the PK/FK below. The pure immutable strict SQL
+predicate for array validation is named `step_up_receipts_valid(uuid[])`.
+
+The private Go contract is:
+
+```go
+type sqlBudgetStore struct { db *sql.DB }
+
+type budgetReservation struct {
+    userID, familyID, windowID, receiptID uuid.UUID
+    expiresAt time.Time
+}
+
+type budgetFailureKind uint8
+
+const (
+    budgetFailureContract budgetFailureKind = iota + 1
+    budgetFailureAuthorityDenied
+    budgetFailureAuthorityUnavailable
+    budgetFailureUnavailable
+    budgetFailureExhausted
+    budgetFailureSettlementUnknown
+)
+
+type budgetFailure struct {
+    kind budgetFailureKind
+    retryAfterSeconds int
+    authorityReason loginfamily.ErrorReason
+}
+
+func (b *sqlBudgetStore) reserve(ctx context.Context, actor BudgetActor) (budgetReservation, *budgetFailure)
+func (b *sqlBudgetStore) refundVerifiedCommitted(ctx context.Context, r budgetReservation) *budgetFailure
+```
+
+These signatures describe the dormant core. Nil failure is success; no error-interface
+method is required. Kind numbers have no wire or stored meaning. Retry seconds are
+1..900 for exhausted,5 for unavailable and0 otherwise. `authorityReason` is empty
+except for a canonical family failure or the post-wait access-expired reason. No
+raw cause or identity enters failures. Every failed reserve returns a zero receipt;
+an unknown reserve commit is unavailable. An unknown refund commit is
+settlement-unknown: the eligible receipt may already have been removed, so the
+result cannot claim the charge definitely remains. Neither permits operation retry.
+
+The store borrows its DB without closing or reconfiguring it. Nil store/DB/context
+or malformed actor/receipt is a contract failure before SQL. The methods accept no
+caller transaction, callback or verifier. After waiting for the budget row, compare
+the signed access expiry against the new database-clock sample again; authority
+that expired during the wait cannot be charged as a live admission. A valid refund
+needs no live actor and never acquires users or rollout locks after family/budget.
+
+Insertion creates only an uncommitted empty expired seed. A separate locked SELECT
+then precedes the database-clock sample that starts the actual window, so an insert
+or row-lock wait cannot consume its lifetime before admission. The seed never
+commits. An unchanged live window keeps its generation and both timestamps even
+after all receipts are refunded. A backward-clock anomaly or malformed stored row
+refuses unavailable. A valid receipt naming the current generation but a different
+expiry is a contract failure; an older generation is inert.
+
+Known rollback releases accounting locks without changing evidence. Cleanup failure
+cannot turn a refusal into success or hide an unknown commit: preserve an existing
+unavailable/settlement-unknown classification, otherwise report unavailable. No raw
+driver cause or identifier is returned or logged.
+
+No numbered production migration is released for this bounded core while pending
+cross-repository migration ordering remains unresolved. Fixture DDL exercises the
+prospective schema only; it is not production-migration evidence. Production rows
+remain gated on canonical retention integration and authoritative lifecycle admission.
+
 ## Planned settlement and retention
 
 Full required proof and a definite full protected-effect commit permit removing
 only that request's original receipt. Partial or ignored factors, grace-only work,
 rollback, cancellation and uncertain commit retain the charge. Success cannot
 clear another receipt or reset/extend an unexpired window, even when empty.
-Failed settlement leaves the committed effect and charge intact.
+Known failed settlement leaves the committed effect and charge intact. An unknown
+settlement commit leaves the effect committed but makes receipt removal unconfirmed;
+it may have removed only that already-eligible receipt. Never repeat proof or effect.
 
 The separate `step_up_attempt_budgets` relation has primary key
 `(user_id,family_id)` and restrictive foreign key

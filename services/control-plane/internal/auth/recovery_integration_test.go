@@ -72,6 +72,7 @@ func setupRecoverySMTPFailureTS(t *testing.T, closeDelay time.Duration) *testhel
 	require.NoError(t, err)
 
 	cfg := &config.Config{
+		WSEventBudget:    config.WSEventBudgetConfig{Enabled: false, ScalePercent: 100},
 		Environment:      "test",
 		Port:             "0",
 		JWTSecret:        testhelpers.TestJWTSecret,

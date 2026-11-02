@@ -334,6 +334,8 @@ func normalizeSecurityEvents(events securityevent.Emitter) securityevent.Emitter
 type RouterDependencies struct {
 	RedisRuntime   *managedredis.Runtime
 	RedisTLSConfig *tls.Config
+	// WSEventAdmitter is process-owned; the Hub only borrows it.
+	WSEventAdmitter websocket.EventAdmitter
 	// RoomPlacementEnabled is an explicit rollout gate for ADR-0042 room
 	// placement. Keep false until media create fencing and deployment colour
 	// registration are validated together. Its zero value is safely disabled.
@@ -814,10 +816,14 @@ func selectDMIconReadHandler(
 	return dmIconReadHandler
 }
 
-func newHubWithSecurityEvents(db *sql.DB, redis *redis.Client, counters *opsmetrics.Counters, events securityevent.Emitter) *websocket.Hub {
-	hub := websocket.NewHub(db, redis, counters)
+func newHubWithSecurityEvents(db *sql.DB, redis *redis.Client, counters *opsmetrics.Counters, events securityevent.Emitter, cfg config.WSEventBudgetConfig, admitter websocket.EventAdmitter) (*websocket.Hub, error) {
+	policy := websocket.EventBudgetConfig{Enabled: cfg.Enabled, ScalePercent: cfg.ScalePercent}
+	hub, err := websocket.NewHubWithEventAdmission(db, redis, counters, policy, admitter)
+	if err != nil {
+		return nil, err
+	}
 	hub.SetSecurityEvents(events)
-	return hub
+	return hub, nil
 }
 
 func newAuditWriterWithSecurityEvents(db *sql.DB, log *logger.Logger, events securityevent.Emitter) *rbac.AuditWriter {
@@ -927,7 +933,10 @@ func NewRouter(
 	router.GET("/voice-join-pause", joinpause.Handler(redis))
 
 	// Initialize WebSocket hub
-	hub := newHubWithSecurityEvents(db, redis, opsCounters, securityEvents)
+	hub, err := newHubWithSecurityEvents(db, redis, opsCounters, securityEvents, cfg.WSEventBudget, dependencies.WSEventAdmitter)
+	if err != nil {
+		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
+	}
 	if err := bindPresenceHistoryRuntime(hub, presenceHistoryService); err != nil {
 		return nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, err
 	}

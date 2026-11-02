@@ -1,14 +1,15 @@
 # WebSocket event budgets
 
 Normative contract for `Hosted issue 2270`.
-Unit A supplies a pure registry, typed config validation and integer scaling.
-Unit B1 adds the Redis script/adapter. Unit B2 adds dedicated client factories
-with the source ACL grant, and B3 adds the account admitter. No production caller
-invokes the new engine. Unit E adds canonical protocol validation for budget
-advisories. These units remain **construction groundwork** and do not activate
-runtime admission. All proposed thresholds and workload claims are
-**UNMEASURED**; this document specifies enforcement and its release prerequisites,
-not evidence of deployment.
+Source now includes the policy registry, typed validation/scaling, dedicated
+Redis account engine, socket lifetimes and complete enabled dispatch/renewal
+integration, validated process construction and Unit E canonical error-schema
+validation. Enabled Hubs enforce the event gates, bounded hold and refusal
+responses described below. The production router uses immutable startup policy
+and the process-owned engine. Metrics publication and compatible client delivery
+remain prerequisites, together with G/H self-hosted and
+managed configuration delivery and workload acceptance. All thresholds and
+workload claims are **UNMEASURED**; source implementation is not evidence of deployment.
 
 ## Policy and identity
 
@@ -57,12 +58,14 @@ scale 33 is 37879 microseconds / burst 52. The smallest allowed account burst is
 `accountEventBudget` validates config first, rejects content/unknown classes and
 returns configured parameters regardless of `Enabled`. Scope excludes heartbeat.
 
-Future startup settings are `WS_EVENT_BUDGET_ENABLED` (absent default `true`) and
+Startup settings are `WS_EVENT_BUDGET_ENABLED` (absent default `true`) and
 `WS_EVENT_BUDGET_SCALE_PERCENT` (absent default `100`). Explicit empty values fail.
 Accept only lowercase `true`/`false` and canonical unsigned ASCII decimal 25..400,
 without signs, spaces, leading zeros or fractions. Validate both even if disabled.
-No environment parsing, defaults, live reload or per-class override exists in the
-groundwork. Zero typed config is invalid, not implicit disable.
+`config.Load` uses presence-aware parsing and returns errors before runtime
+construction. Errors identify the setting and grammar without echoing its value.
+There is no live reload or per-class override. Zero typed config is invalid,
+not implicit disable.
 
 ## Distributed decisions and bounded fallback
 
@@ -384,6 +387,99 @@ These bounded observations do not exercise activation of saturated 32-error
 recovery or establish a library-wide join. No production workload, activation
 readiness or protected-workflow adoption is established here.
 
+### C1 socket ingress lifetime and borrowed construction
+
+`NewHubWithEventAdmission(db, redisClient, counters, cfg, admitter)` validates the
+typed configuration, requires an admitter when enabled, and copies the policy.
+The Hub borrows the engine: it neither makes admission calls in C1 nor closes
+the engine. Construction failure retains caller ownership. `NewHub` remains
+the explicit legacy/test constructor with disabled admission and scale 100.
+Production router and process ownership use this seam as described below.
+
+Each constructed Hub owns a cancelable ingress context. Handler derives the
+Client context before expiry registration or publication; HTTP request and async
+bootstrap contexts do not own that socket lifetime. Shutdown cancels ingress
+before taking the delivery shutdown lock. Ordinary read/write teardown, pending
+registration failure, expiry and unregister cancel the Client context outside
+client and Hub locks. Required transport closure precedes its lifecycle cleanup.
+Pre-JSON pacing and the bounded incoming-channel wait observe this cancellation;
+the existing 20/s, burst 10 pacing, 512 KiB frame cap and queue size are unchanged.
+
+The private event-context seam snapshots the current token expiry for one event.
+The socket context has no opening-token deadline: successful renewal can move
+the next event's deadline without extending an earlier event. Missing lifecycle,
+zero/expired deadline, security-terminal state or shutdown fails closed. The
+authority check reads actual current and event-context deadlines as well as
+cancellation state. C2/C3 apply these checks around admission, waits and renewal
+validation, including after a deadline snapshot waits for its mutex.
+
+Family closure retains its strict sequence: mark all matching clients terminal,
+close all transports, send the checked receipt, then cancel ingress and schedule
+cleanup. Failed transport closes still lose ingress authority and retain an error
+receipt. `closeSecurityTransport` remains frame-free and cancel-free, so new
+cancellation callbacks cannot delay sibling transport closure or its receipt.
+
+### C2–C4 dispatch, renewal and finalization
+
+Enabled dispatch classifies all 16 known inputs before work reaches Hub activity
+tracking. Unknown input drops without a class outcome. Account decisions use only
+the authenticated Client user; heartbeat initializes one local 5s/burst-2 bucket
+and never calls Redis. Content passes through central admission and retains its
+shared 5/s, burst-10 bucket at the two original subscription/content gates.
+
+The account helper accepts only the engine's closed decision combinations:
+Redis allowance with zero retry, definitive Redis denial with integral retry
+1..120000ms, warm-local allowance with zero retry, policy-appropriate unavailable
+refusal/overload with 1s retry, or abandonment. Flags must match those outcomes;
+malformed combinations abandon without a final count, output or retry. Current
+unavailability takes precedence over older denial metadata, including at the hold
+boundary. Hold exhaustion otherwise preserves the last validated denial retry,
+or uses unavailable 1s when none exists. Late allowance cannot extend a hold.
+
+The single reader keeps one synchronous held frame. Its fixed deadline is captured
+at the first attempt, and no attempt starts at or after two seconds. With ideal
+100ms spacing, starts occur at 0..1900ms; the separate 21-call cap is defensive,
+not a promise that 21 starts fit. Instance clock/timer seams support deterministic
+tests; actual authority and socket write deadlines always use real time.
+
+Renewal has one guarded entry. Enabled attempts claim the local 10-second guard
+once, then make one non-holding account decision before token validation. Failed
+local claims never reach account admission or the validator. Empty/invalid tokens
+remain metered; a finalized account allowance stays counted if validation fails.
+Disabled mode retains the original empty-token and missing-validator short
+circuits. The validator's three-second child inherits the old authority context;
+there is no per-renewal shutdown bridge goroutine. Family/user/epoch checks and
+Hub-owned SID rebind remain in force. Deadline extension checks cancellation and
+both deadlines under its existing mutex before mutation. Abandoned renewal emits
+no acknowledgment; ordinary refusal retains the existing false acknowledgment.
+
+One stack-owned state accumulates degradation and finalizes at most once through
+an optional private observer. The observer is inert until D supplies publication;
+its absence never changes enforcement. Account/heartbeat finalize before queueing,
+renewal owns its local refusal, and content finalizes only where its original
+bucket actually decides. Content uses a fresh child of socket lifetime bounded by
+the stamped expiry, never the completed read event's canceled context. Later
+handler failure does not retract an allowance. Disabled mode records nothing.
+
+Authenticated sender stamping remains common to both dispatch modes. An admitted
+full-queue wait observes event authority cancellation without charging again;
+Hub rechecks enabled socket authority before activity or handler effects.
+
+The overload control write has a separate maximum 100ms deadline, shortened to
+the earlier of event authority and current token expiry, and transport closes
+even when the courtesy write fails. It
+takes no application writer lock. Metadata advisories share one slot per socket
+per second, including when outbound enqueue fails, and use existing bootstrap
+ordering. Renewal acknowledgments and advisories use a context-aware entry to
+that same outbound path. It snapshots only token expiry before queue locks and
+passes the operation context explicitly through the enqueue helpers. It checks
+event/socket authority after acquiring either bootstrap or send locks, before
+append/send, without acquiring the deadline mutex under those locks. An expired
+or canceled wait emits nothing; ordinary full-queue drops remain best effort.
+Generic outbound callers retain their existing behavior. E must still establish
+acceptance and preservation of the new advisory fields in the actual consumer
+schema before production activation.
+
 ## FIFO, authority and wire contract
 
 Admission belongs after parsing/known-type validation and before enqueue or renewal
@@ -401,7 +497,7 @@ late success never revives authority. Limiter/hold deadlines while authority is
 live are final refusals, not abandonment. Family security closure must never wait
 on limiter locks, metrics, Redis cleanup or courtesy frames between siblings.
 
-| Refused event | Future behavior |
+| Refused event | Enabled behavior |
 |---|---|
 | subscription / ready | bounded hold only for definitive rate denial, then 1013 |
 | typing / heartbeat | silent drop; no fanout, ack or presence effect |
@@ -428,6 +524,39 @@ by a generation-bound timer, including online/recovery paths. Explicit disconnec
 or account change cancels obsolete timers. Preserve terminal security behavior.
 Restore desired subscriptions only; never automatically replay content/mutations.
 Renewal retains its existing 5s acknowledgment wait and single 11s retry.
+
+## C5 process construction and cleanup
+
+The config package owns `WSEventBudgetConfig{Enabled, ScalePercent}` without
+importing websocket. Main maps both fields into `EventBudgetConfig` and validates
+the typed policy again before construction. Disabled mode creates the real disabled
+engine with a nil backend, allocating no dedicated client, warm map or sweep.
+Enabled mode composes the existing dedicated Redis factory, account backend and
+engine. Legacy mode parses fresh Redis options; managed mode borrows the already
+initialized credential runtime and TLS policy. Neither path pings the limiter or
+creates another credential reader, runtime or poller.
+
+Ownership transfers client to backend to engine only after each constructor
+succeeds. Failure closes the last caller-owned resource and joins construction
+and cleanup errors. Main constructs one engine after shared Redis initialization
+and injects it through `RouterDependencies.WSEventAdmitter`. The production router
+uses `NewHubWithEventAdmission` even when disabled, rejects invalid configuration
+or a missing enabled engine, and installs the security emitter before publishing
+the Hub. Router and Hub never close the borrowed engine.
+
+Main immediately registers checked deferred engine Close after its shared-client
+and managed-poll cleanup defers. Startup failures therefore close the dedicated
+engine before stopping credential polling and closing shared Redis. Normal
+shutdown attempts the bounded Hub drain, then calls engine Close synchronously
+before metrics, restricted-reader and NATS cleanup. This stage runs even when the
+Hub waiting budget is exhausted and joins its error into the shutdown result.
+The later safety defer checks the idempotent Close result again.
+
+Engine Close cancels and joins its bounded application attempts and sweep before
+closing its backend. This does not establish that an abandoned Hub stage or all
+underlying library work has joined. Existing managed poll cancellation remains
+cancellation, not a new join guarantee. C5 does not authorize deployment or supply
+the remaining metrics, client, writer or workload acceptance evidence.
 
 ## Observability, compatibility and activation
 
