@@ -11,6 +11,7 @@ if [[ ! -f "$ROOT/infrastructure/github/apply-alpha-scan-relevance.sh" ]]; then
   python3 "$ROOT/.github/scripts/tests/test_sonar_ioc_conditions.py"
   python3 "$ROOT/.github/scripts/tests/test_codeql_required_workflow.py"
   python3 "$ROOT/.github/scripts/tests/test_ci_scan_verdict.py"
+  python3 "$ROOT/.github/scripts/tests/test_scan_revision_binding.py"
   python3 "$ROOT/.github/scripts/tests/test_verify_required_build_pins.py"
   bash "$ROOT/.github/scripts/tests/resolve-hotfix-label.test.sh"
   exit 0
@@ -20,6 +21,7 @@ python3 "$ROOT/.github/scripts/tests/test_codeql_required_workflow.py"
 # Self-Hosted: test_ruleset_hardening.py covers Alpha's ruleset files under
 # infrastructure/github, which stay with Alpha.
 python3 -m unittest discover -s "$ROOT/.github/scripts/tests" -p test_ci_scan_verdict.py
+python3 "$ROOT/.github/scripts/tests/test_scan_revision_binding.py"
 python3 -m unittest discover -s "$ROOT/.github/scripts/tests" -p test_verify_required_build_pins.py
 bash "$ROOT/.github/scripts/tests/resolve-hotfix-label.test.sh"
 python3 - "$ROOT" <<'PY'
