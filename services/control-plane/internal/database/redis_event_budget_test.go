@@ -122,7 +122,7 @@ func TestNewManagedEventBudgetRedisClientValidatesWithoutFreshnessProbe(t *testi
 	eventBudgetClientCleanup(t, stale)
 	require.ErrorContains(t, stale.Ping(t.Context()).Err(), "stale")
 	assert.Zero(t, mini.CommandCount())
-	for _, endpoint := range []string{"", "malformed", "redis://fixture:synthetic-budget-canary@127.0.0.1:6379", "127.0.0.1:6379/3"} { // pragma: allowlist secret -- synthetic URL tests credential-safe error output
+	for _, endpoint := range []string{"", "malformed", "redis://fixture:synthetic-budget-canary@127.0.0.1:6379", "127.0.0.1:6379/3"} { // pragma: allowlist secret; trufflehog:ignore -- synthetic URL tests credential-safe error output
 		client, err := NewManagedEventBudgetRedisClient(endpoint, nil, cold)
 		require.Error(t, err)
 		assert.Nil(t, client)

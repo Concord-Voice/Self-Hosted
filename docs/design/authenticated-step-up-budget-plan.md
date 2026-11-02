@@ -3,10 +3,13 @@
 Plan for Hosted issue 2271 within Hosted epic 696, governed by the
 [design contract](authenticated-step-up-budget.md).
 
-Only the opaque actor adapter is implemented in this unit. It introduces no
-production caller, SQL schema, budget admission, factor call, retirement change,
-controller change or activation. Existing middleware S1 provenance is reused;
-it is not rebuilt. Source availability is not release or delivery evidence.
+The opaque actor adapter, private SQL accounting core and process proof-work tracker
+are implemented as dormant groundwork. They introduce no production caller,
+numbered production migration, active budget admission, factor call, retirement
+change, controller change or activation. Existing middleware S1 provenance is
+reused; it is not rebuilt. The
+SQL fixture is prospective-schema evidence only. Source availability is not
+validation, release or delivery evidence.
 
 ## Bounded units and owners
 
@@ -14,7 +17,9 @@ it is not rebuilt. Source availability is not release or delivery evidence.
 |---|---|---|
 | Actor adapter | New `internal/stepup/budget_actor.go` and focused test file | Actual `AuthRequired` provenance, exact value copies, generic refusal and no response side effects |
 | Consumer/lifetime inventory | Source-driven sink and routed-owner census | Independently scan proof, token, enrollment and budget sinks; identify first proof, effect commit, continuation lifetime and retry ownership |
-| SQL budget and retirement | New step-up accounting engine, paired migration and existing loginfamily retirement owner | Exact five-of-six concurrency, fixed DB window, own-receipt settlement, restrictive FK and complete cohort retention |
+| Dormant SQL core | New private step-up accounting engine and disposable schema fixtures; no production callers | Exact five-of-six concurrency, fixed DB window, own-receipt settlement, canonical actor reacquisition and real commit ambiguity |
+| Dormant proof-work tracker | Private `internal/stepup/proof_work.go` and independent component tests; no production opener or route | Atomic root stop, child/effect reference lifetime, canceled/multiple drain waiters and no false zero after parent return |
+| Schema and retention integration | Separately allocated paired migration and existing loginfamily retirement owner | Real migration up/down evidence, restrictive FK and complete cohort retention before production rows |
 | Terminal composition | Canonical loginfamily access-guarded target capture | Complete actor/target union, immutable UUID order, final actor check and unchanged selector semantics |
 | Consumer integration | Authenticated mint and the contract's complete consumer inventory | Reserve before proof, no duplicate charges, definite-effect settlement and ordinary-auth isolation |
 | Proof lifecycle | Existing rollout singleton/current-image CLI and all strict readers/controllers | Complete process-generation inventory, whole-work drain, immutable receipt, one-way DB-clock cutover and rollback floor |
@@ -26,6 +31,40 @@ delivery allocations when schema work begins. Reconcile current overlapping
 key-reveal, auth, router and lifecycle owners before those later units. Hosted
 issue 4201 remains outside this adapter's scope; no repair retry or controller
 write follows from it.
+
+## SQL core interface and commit-boundary evidence
+
+Use exactly the private store, reservation, failure symbols and table named in the
+[design contract](authenticated-step-up-budget.md#next-dormant-sql-core-contract).
+Keep only the borrowed DB on the store. Test fixtures may create the prospective
+table and its pure receipt-array predicate on an explicitly disposable database;
+they must not create an unallocated numbered production migration. This is schema
+fixture evidence only. Retirement, controller, proof-gate, existing Redis guards
+and production caller changes remain separate units.
+
+Commit uncertainty needs no production injection seam. Use a test-only per-fixture
+`driver.Connector` around `pq.NewConnector`, opened with `sql.OpenDB` on the explicit
+disposable URL. Forward real connection/context/BeginTx/query/exec behavior and the
+optional interfaces needed by the actual fixture. Wrap the returned real driver
+transaction: call its Commit exactly once, and only after a nil result consume a
+one-shot atomic latch and return a fixed synthetic lost-result error. Never use or
+wrap `driver.ErrBadConn`, which can trigger database/sql retries. No global driver
+registration, fake transaction, mutable production hook or environment failpoint.
+
+Set up actors/schema and observe results on an ordinary fixture DB handle. Arm only
+the separate operation pool after setup, count BeginTx/Commit/injection attempts,
+and bound every operation. For reserve ambiguity, prove the real charge committed
+but the core returned zero receipt/unavailable and made no second attempt. For
+refund ambiguity, prove only the eligible receipt was removed and the core returned
+settlement-unknown. A local proof sentinel is a harness observation, not a claim of
+production route coverage. If a test rolls back before returning a Commit error,
+fixture knowledge of noncommit must not weaken the core's conservative uncertainty
+classification. Test known pre-commit rollback separately.
+
+Independent test authorship and the initial missing-API RED preceded the core's
+implementation release. The source implements the frozen private interface; actual
+isolated integration/race/lint results remain separate evidence and are not implied
+by this design record. No numbered migration is released by the implementation.
 
 ## Actor API and acceptance
 
@@ -89,6 +128,13 @@ Record the normal test-file inventory/count probe in the implementation handoff;
 do not expand this new-file unit into unrelated generated-source changes.
 
 ## Later acceptance and sequencing
+
+The private tracker is a process-local mechanical prerequisite only. Its unbound
+state cannot issue work or report a drained snapshot; stopping an active tracker
+refuses new roots while registered children and effects remain counted. It does
+not supply current-process status v2, compatibility binding, lifecycle admission
+or stopped-process database-work evidence. The existing lifecycle/runtime owner
+must add those links before any routed caller can use the tracker.
 
 First freeze the actual source-derived consumer inventory, including password and
 MFA checks, raw TOTP matching, WebAuthn assertion/registration finish, token mint/
