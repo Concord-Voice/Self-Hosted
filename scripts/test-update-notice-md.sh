@@ -644,6 +644,37 @@ else
   FAILS=$((FAILS + 1)); FAIL_DETAILS+=("could not locate license-check.yml for parity assertions")
 fi
 
+# The license workflow runs this linter after installing each npm tree. A
+# change to the consumed script must select the workflow on both events and
+# select all three npm licence jobs through the shared relevance map.
+if python3 - "$WF" "$(dirname "$WF")/../ci/scan-relevance.yml" <<'LINTER_FILTERS'; then
+import re, sys
+from pathlib import Path
+
+workflow = Path(sys.argv[1]).read_text()
+relevance = Path(sys.argv[2]).read_text()
+linter = 'scripts/security/override-range-lint.mjs'
+assert re.search(r'(?m)^\s+run:\s+node\s+(?:\.\./)+scripts/security/override-range-lint\.mjs\b', workflow), \
+    'license workflow must actually execute the override-range linter'
+events = workflow.split('on:\n', 1)[1].split('\npermissions:', 1)[0]
+for event, block in (
+    ('pull_request', events.split('  pull_request:\n', 1)[1].split('  push:\n', 1)[0]),
+    ('push', events.split('  push:\n', 1)[1]),
+):
+    assert '    paths:\n' in block, f'{event} license workflow path filter missing'
+    paths = re.findall(r"(?m)^      - '([^']+)'$", block)
+    assert linter in paths, f'{event} license workflow filter misses consumed override-range linter'
+for group in ('license_desktop', 'license_media', 'license_admin'):
+    section = re.search(rf'(?m)^{group}:\n((?:  - .*\n)+)', relevance)
+    assert section, f'{group} relevance group missing'
+    paths = re.findall(r"(?m)^  - '([^']+)'$", section.group(1))
+    assert linter in paths, f'{group} relevance filter misses consumed override-range linter'
+LINTER_FILTERS
+  PASSES=$((PASSES + 1))
+else
+  FAILS=$((FAILS + 1)); FAIL_DETAILS+=("license workflow and all npm relevance filters must watch their consumed override-range linter")
+fi
+
 # 23. An unrecognised row in the licence-share table must be REFUSED, never
 #     silently deleted on rebuild — destroying a hand-added row inside a
 #     routine-looking regeneration diff is the hazard GO_PACKAGES' own comment
