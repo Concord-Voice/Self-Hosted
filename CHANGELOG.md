@@ -29,6 +29,8 @@ gate can learn from your voice.
 
 ### Added
 
+- **Self-hosted setup:** Fresh installer environment files now include explicit WebSocket event-budget settings, with preparation and rollback guidance for existing installations. Runtime delivery and activation remain separate steps.
+
 - **Authentication:** Added a dormant transaction-local source marker for future account-change writers, with closed source validation and caller-owned transaction completion.
 - **Authentication:** Added an internal verified-session snapshot adapter for future step-up attempt accounting. Current request handling and attempt budgets are unchanged.
 - **Authentication:** Added dormant SQL receipt accounting for future separate step-up attempt budgets. Current request handling and attempt budgets are unchanged.

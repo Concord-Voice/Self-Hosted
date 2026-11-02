@@ -402,13 +402,33 @@ writer_run() {
     main --env-file "$STATE/writer-answers"
   else write_env_file; fi
 }
+# Read the real emitted dotenv as data; never source credentials as shell code.
+assert_ws_event_budget_defaults() {
+  python3 - "$1" <<'WS_BUDGET_DEFAULTS'
+import pathlib, sys
+expected = {'WS_EVENT_BUDGET_ENABLED': 'true', 'WS_EVENT_BUDGET_SCALE_PERCENT': '100'}
+observed = {key: [] for key in expected}
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    if not line or line.startswith('#'):
+        continue
+    key, separator, value = line.partition('=')
+    if separator and key in observed:
+        observed[key].append(value)
+for key, value in expected.items():
+    if observed[key] != [value]:
+        raise SystemExit('WS budget writer oracle: missing, duplicate or incorrect ' + key)
+WS_BUDGET_DEFAULTS
+}
 writer_success() {
   writer_run || return 1
+  assert_ws_event_budget_defaults "$FIX/.env" || return 1
   [[ -f "$FIX/.env" && $(stat -c '%a' "$FIX/.env") == 600 ]] || return 1
   if [[ ${WRITER_VIA_MAIN:-no} == yes ]]; then [[ -e "$STATE/rendered" && -e "$STATE/tls" && -e "$STATE/summary-reached" ]] || return 1; fi
   ! compgen -G "$FIX/.env.new.*" >/dev/null || return 1
-python3 - "$FIX/.env" "${WRITER_MODE:-byo-s3}" "${WRITER_FEEDBACK:-yes}" <<'ENVASSERT'
-import pathlib, sys
+python3 - "$FIX/.env" "${WRITER_MODE:-byo-s3}" "${WRITER_FEEDBACK:-yes}" "$STATE/calls.jsonl" <<'ENVASSERT'
+import json, pathlib, sys
+calls = [json.loads(line) for line in pathlib.Path(sys.argv[4]).read_text().splitlines()]
+assert not any(token in {'up', 'start', 'restart', 'run', 'create'} for call in calls for token in call['argv']), 'fresh env writer must not start services'
 lines=pathlib.Path(sys.argv[1]).read_text().splitlines(); fields={}
 for line in lines:
     if line and not line.startswith('#'):
@@ -582,6 +602,8 @@ publication_refusal() {
   write_env_file >"$STATE/writer-output" 2>&1 || status=$?
   [[ $status -ne 0 ]] || return 1
   if [[ ${DESTINATION_KIND:-file} == symlink ]]; then [[ -L "$FIX/.env" && ! -e "$FIX/.env" ]]
+  elif [[ ${DESTINATION_KIND:-file} == directory ]]; then
+    [[ -d "$FIX/.env" && ! -L "$FIX/.env" ]] && cmp -s "$STATE/original" "$FIX/.env/retained"
   else cmp -s "$STATE/original" "$FIX/.env"; fi
 }
 # PR #3568 / #1899: inspect the validation property without executing bad input.
@@ -662,6 +684,10 @@ render_failure_retry_case() {
      && $(wc -l <"$STATE/render-attempts") == 2 ]]
 }
 task3_contracts() {
+  for mode in bundled byo-s3; do
+    reset_task3
+    WRITER_MODE=$mode contract "actual $mode writer emits each WS event-budget default exactly once" writer_success
+  done
   contract 'validation AST oracle accepts explicit gates and detects benign Assert syntax' validation_ast_policy control
   for validator in load_answers validate_collected_config compose_dotenv_quote; do
     contract "$validator validation remains enforced when Python optimization is enabled" validation_ast_policy "$validator"
@@ -815,11 +841,14 @@ TERMINATOR
     WRITER_TLS_MODE=$tls_mode WRITER_MODE=$mode WRITER_VIA_MAIN=yes \
       contract "installer publishes canonical coturn selector for $tls_mode/$mode" writer_success
   done; done
-  for destination in file symlink; do
+  for destination in file symlink directory; do
     reset_task3; contract 'publication refusal equal fixture positive control' writer_success
     reset_task3; printf 'synthetic-original\n' >"$STATE/original"
-    if [[ $destination == file ]]; then cp "$STATE/original" "$FIX/.env"; else ln -s "$FIX/missing-target" "$FIX/.env"; fi
-    DESTINATION_KIND=$destination contract 'writer refuses existing file or dangling symlink without overwrite' publication_refusal
+    if [[ $destination == file ]]; then cp "$STATE/original" "$FIX/.env"
+    elif [[ $destination == directory ]]; then mkdir "$FIX/.env"; cp "$STATE/original" "$FIX/.env/retained"
+    else ln -s "$FIX/missing-target" "$FIX/.env"; fi
+    DESTINATION_KIND=$destination contract 'writer refuses existing file, dangling symlink or directory without overwrite' publication_refusal
+    if [[ $destination == directory ]]; then rm -- "$FIX/.env/retained"; rmdir -- "$FIX/.env"; fi
   done
   reset_task3; contract 'sequential publication equal fixture positive control' writer_success
   reset_task3
@@ -1410,6 +1439,10 @@ for k in ENVIRONMENT DOMAIN PUBLIC_IP POSTGRES_PASSWORD REDIS_PASSWORD JWT_SECRE
   grep -q "^${k}=" "$out_env" || { fail "env missing $k"; all_vars_ok=0; }
 done
 [[ $all_vars_ok -eq 1 ]] && pass "env writer populated all required vars"
+
+assert_ws_event_budget_defaults "$out_env" \
+  && pass "bundled writer emits each WS event-budget default exactly once" \
+  || fail "bundled writer WS event-budget defaults are missing, duplicated or incorrect"
 
 # Secret VALUES must not appear in stdout/log (only names).
 # The openssl stub emits "stub:rand ..." which would expose the pattern if present.
