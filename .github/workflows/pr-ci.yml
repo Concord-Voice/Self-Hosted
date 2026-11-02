@@ -149,6 +149,11 @@ jobs:
     uses: ./.github/workflows/semgrep.yml
     with:
       external-verdict: ${{ inputs.enforcement-only == true }}
+      selected-known: ${{ needs.detect-changes.outputs.scan-known == 'true' && fromJSON(needs.detect-changes.outputs.scan-selection || '{}').known == true && 'true' || 'false' }}
+      selected-pr-number: ${{ format('{0}', github.event.pull_request.number) }}
+      selected-head-sha: ${{ fromJSON(needs.detect-changes.outputs.scan-selection || '{}').head_sha }}
+      selected-base-sha: ${{ fromJSON(needs.detect-changes.outputs.scan-selection || '{}').base_sha }}
+      selected-merge-sha: ${{ fromJSON(needs.detect-changes.outputs.scan-selection || '{}').merge_sha }}
       run-custom: ${{ needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).selected.semgrep_custom }}
       run-community: ${{ needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).selected.semgrep_community }}
       run-canary: ${{ needs.detect-changes.result != 'success' || needs.detect-changes.outputs.scan-known != 'true' || fromJSON(needs.detect-changes.outputs.scan-selection).selected.semgrep_canary }}
@@ -167,6 +172,11 @@ jobs:
     uses: ./.github/workflows/eslint-sarif.yml
     with:
       external-verdict: ${{ inputs.enforcement-only == true }}
+      selected-known: ${{ needs.detect-changes.outputs.scan-known == 'true' && fromJSON(needs.detect-changes.outputs.scan-selection || '{}').known == true && 'true' || 'false' }}
+      selected-pr-number: ${{ format('{0}', github.event.pull_request.number) }}
+      selected-head-sha: ${{ fromJSON(needs.detect-changes.outputs.scan-selection || '{}').head_sha }}
+      selected-base-sha: ${{ fromJSON(needs.detect-changes.outputs.scan-selection || '{}').base_sha }}
+      selected-merge-sha: ${{ fromJSON(needs.detect-changes.outputs.scan-selection || '{}').merge_sha }}
 
   govulncheck:
     name: govulncheck
@@ -182,6 +192,11 @@ jobs:
     uses: ./.github/workflows/govulncheck.yml
     with:
       external-verdict: ${{ inputs.enforcement-only == true }}
+      selected-known: ${{ needs.detect-changes.outputs.scan-known == 'true' && fromJSON(needs.detect-changes.outputs.scan-selection || '{}').known == true && 'true' || 'false' }}
+      selected-pr-number: ${{ format('{0}', github.event.pull_request.number) }}
+      selected-head-sha: ${{ fromJSON(needs.detect-changes.outputs.scan-selection || '{}').head_sha }}
+      selected-base-sha: ${{ fromJSON(needs.detect-changes.outputs.scan-selection || '{}').base_sha }}
+      selected-merge-sha: ${{ fromJSON(needs.detect-changes.outputs.scan-selection || '{}').merge_sha }}
 
   secret-scanning:
     name: secret-scanning
