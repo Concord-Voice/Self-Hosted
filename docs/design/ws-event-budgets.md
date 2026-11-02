@@ -2,8 +2,11 @@
 
 Normative contract for `Hosted issue 2270`.
 Unit A supplies a pure registry, typed config validation and integer scaling.
-Unit E adds canonical protocol validation for budget advisories. Neither unit
-activates runtime admission. All proposed thresholds and workload claims are
+Unit B1 adds the Redis script/adapter. Unit B2 adds dedicated client factories
+with the source ACL grant, and B3 adds the account admitter. No production caller
+invokes the new engine. Unit E adds canonical protocol validation for budget
+advisories. These units remain **construction groundwork** and do not activate
+runtime admission. All proposed thresholds and workload claims are
 **UNMEASURED**; this document specifies enforcement and its release prerequisites,
 not evidence of deployment.
 
@@ -63,7 +66,7 @@ groundwork. Zero typed config is invalid, not implicit disable.
 
 ## Distributed decisions and bounded fallback
 
-Future account admission uses atomic Redis GCRA and Lua `TIME`, with key
+The B1 backend implements atomic Redis GCRA and Lua `TIME`, with key
 `ratelimit:user:ws:v1:{<canonical-user-uuid>}:<class>` and exact hash fields `v=1`,
 `last_us`, `tat_us`. Values use canonical unsigned decimal integers at most
 9007199254740991, never floating/scientific serialization. Invalid type, version,
@@ -82,27 +85,233 @@ three-integer reply is `{1, allowed, retry_after_ms}`: allow means retry 0; deni
 means retry 1..120000. Malformed replies/errors are unavailable, never permission.
 Process/data loss can reset Redis state; this contract makes no durability claim.
 
-Use a dedicated client preserving existing managed credential streaming/freshness
-and legacy auth/TLS ownership. Do not change the shared client. Disable command
-retries (`MaxRetries=-1`), use one dial attempt (`DialerRetries=1`), context timeouts,
-pool/active/dial limits 32, no minimum idle connections, and 100ms dial/read/write/
-pool timeouts. Acquire one of 32 application slots nonblocking. Each decision has
-an absolute 100ms bound, with at most 90ms for remote work, shortened by authority
-or hold deadlines. Saturation uses immediate fallback. Only a definitive NOSCRIPT
-may fall back to EVAL; uncertain execution is never retried or refunded.
+### B1 request, result and ownership
+
+The public construction seam in package `websocket` is:
+
+```go
+type RedisBudgetDecision struct {
+    Allowed bool
+    RetryAfter time.Duration
+}
+type AccountBudgetBackend interface {
+    Decide(context.Context, uuid.UUID, EventClass, int64, int64) (RedisBudgetDecision, error)
+    Close() error
+}
+func NewRedisAccountBudgetBackend(EventBudgetConfig, *redis.Client) (AccountBudgetBackend, error)
+```
+
+The last two `Decide` arguments are interval microseconds and burst. Construction
+validates scale even when disabled, rejects disabled config and nil clients, and
+performs no command, script load or dial. Config is copied. Only successful
+construction transfers ownership of the dedicated client; on failure the caller
+retains it and checks cleanup errors. `Close` closes that client exactly once,
+retains its checked result, and refuses future decisions. Cancellation/joining of
+active application decisions belongs to the later admitter, not this backend.
+
+`Decide` rejects nil UUIDs, content/unknown classes and a supplied pair that differs
+from the approved configured pair before issuing a command. The authenticated
+UUID's canonical string and the closed class name are the sole key components.
+For profile at scale 100, the logical bulk-string command is:
+
+```text
+EVALSHA <sha> 1 ratelimit:user:ws:v1:{11111111-1111-4111-8111-111111111111}:profile 1 5000000 8
+```
+
+The UUID above is a test identity. Arguments are version, interval microseconds,
+burst; no caller clock or payload is sent. `redis.NewScript` identifies the
+embedded `event_admission.lua` bytes by SHA-1
+`aca3e0db97c777545e5ee970f170f6d1c6406fc2` (a cache identifier, not an integrity
+primitive). `Script.Run` falls back once from NOSCRIPT to EVAL with the identical
+source/key/arguments and context. All other errors end the attempt. The dedicated
+client must disable library command retries; B2 supplies its production factory.
+
+Lua requires one key and three arguments, version bytes `1`, canonical unsigned
+ASCII decimal interval 3125..20000000 and burst 2..640, and product at most
+120000000. It validates TIME's two decimal strings, microseconds 0..999999 and
+the combined safe-integer bound. TYPE must be absent or a hash with exactly the
+three specified fields. Stored times are exactly `0` or nonzero-leading ASCII
+digits; signs, leading zeros, spaces, decimal/exponent forms and values above
+9007199254740991 are rejected lexically before numeric conversion. Negative idle
+debt is valid. Stored writes use `string.format('%.0f', value)`.
+
+Every validation and arithmetic check precedes HSET. Rejection returns exactly
+`ERR WS_EVENT_BUDGET_INVALID_STATE` without changing fields or absolute expiry.
+A later runtime failure, including PEXPIRE after HSET, is uncertain execution;
+Redis does not roll back the preceding write. No failure permits replay or reset.
+
+The Go adapter accepts only an array of exactly three RESP integers (`int64`),
+version 1 and either `{1,1,0}` or `{1,0,retry}` with retry 1..120000 milliseconds.
+Numeric strings, floats, booleans, nulls, extra fields and contradictory delays
+are unavailable. The exact script rejection maps to
+`ErrAccountBudgetInvalidState`; other command/protocol failures map to
+`ErrAccountBudgetUnavailable`, with a zero decision. Neither exposes raw Redis
+errors or key values, and neither is a definitive rate denial. Canceled/expired
+contexts and closed backends cannot return a distributed allowance.
+
+For exact arithmetic examples, let T=1800000000000000 microseconds. At default
+profile settings, eight requests at T leave tat=T+40000000; the ninth denies for
+5000ms. At T+4999999 it denies for 1ms and retains TTL600001; at T+5000000 it
+allows and stores tat=T+45000000 with TTL600000. Wall T−3600000000 with logical
+last T retains TTL4200000; nonaligned last T+1 and wall T−3600000000+1 retain
+TTL4200001. Repeated rollback by two hours retains TTL7800000. Changing scale
+retains debt: that burst state denies for 20000ms at scale25 and 1250ms at scale400.
+
+All additions are checked before evaluation, and ceiling conversion uses quotient
+and remainder. Positive stored debt120000000 is valid (default profile retry85000),
+while debt120000001 is rejected unchanged. An absent record at wall
+9007198654740000 allows, stores tat9007198659740000 and TTL600000 exactly at the
+retained horizon; the next microsecond rejects without creating a key. Canonical
+9007199254740991 parses exactly but cannot pass that horizon at ordinary wall
+time; 9007199254740992 fails the lexical check. Isolated tests substitute only
+the TIME acquisition and expose the PEXPIRE argument; production has no clock
+override. Absolute-expiry snapshots establish no-write rejection, not decreasing
+PTTL comparisons. Real TIME execution and uncertainty tests remain required.
+
+### B2 dedicated clients and source ACL
+
+Package `database` supplies these constructors in `redis_event_budget.go`:
+
+```go
+func NewEventBudgetRedisClient(redisURL string) (*redis.Client, error)
+func NewManagedEventBudgetRedisClient(endpoint string, tlsConfig *tls.Config,
+    runtime *managedredis.Runtime) (*redis.Client, error)
+```
+
+Both construct fresh options and independent client pools, without a PING, script
+load or credential probe. The legacy constructor uses `redis.ParseURL` and keeps
+URL authentication, database selection, TLS and protocol. Invalid URL errors are
+fixed strings, without echoing credentials. The managed constructor rejects a nil
+runtime, reuses existing endpoint validation and TLS cloning in `managedOptions`,
+then attaches that same runtime as `StreamingCredentialsProvider` and installs
+`NewFreshnessHook(runtime)`. It does not create a runtime, fetch a credential or
+take an immutable credential snapshot. A cold or expired runtime does not prevent
+construction; the existing hook/provider rejects actual use until credentials
+are valid. Existing startup and candidate-authentication checks remain authoritative.
+
+The dedicated settings are fixed: `MaxRetries=-1` at construction (normalized to
+zero by go-redis), `DialerRetries=1`, `ContextTimeoutEnabled=true`, and
+`PoolSize=MaxActiveConns=MaxConcurrentDials=32`. `MinIdleConns=0`; dial, read, write
+and pool timeouts are each 100ms. Optional maintenance notifications are explicitly
+disabled with `maintnotifications.ModeDisabled`. The constructor preserves the
+configured/default RESP protocol and leaves all shared-client settings unchanged.
+Only the account backend receives this client; application pipelines, autopipeline,
+PubSub, cache and full-duplex wrappers are outside this contract.
+
+The caller owns the returned client until successful backend construction; failed
+backend construction leaves checked cleanup with that caller. Closing the dedicated
+client does not close the credential runtime or shared client. The streaming
+provider retains per-connection unsubscribe behavior. Subscription cleanup,
+shared-client survival and library recovery/dial quiescence need separate evidence;
+the constructors do not promise a public join of all library goroutines.
+
+The checked `internal/managedredis/acl-manifest.json` adds only `TIME` to the
+control-plane service command list and removes it from the absent-command list.
+Media-plane and operator selectors receive no new grant. Existing account key
+patterns and TYPE/HLEN/HGET/HSET/PEXPIRE/EVAL/EVALSHA permissions already cover
+the script; no production SCRIPT LOAD, PEXPIRETIME or administrative grant is
+added for test fixtures. This is a source ACL change, not live provisioning;
+managed delivery must install it before enabled runtime admission.
+
+### B3 bounded account admission
+
+Package `websocket` supplies the account engine in `event_admission_account.go`:
+
+```go
+type AdmissionAction uint8
+type AdmissionSource uint8
+type AdmissionDecision struct {
+    Action AdmissionAction
+    Source AdmissionSource
+    RetryAfter time.Duration
+    DefinitiveRateDeny bool
+}
+type EventAdmitter interface {
+    Admit(context.Context, uuid.UUID, EventPolicy, time.Time) AdmissionDecision
+    Close() error
+}
+func NewEventAdmitter(EventBudgetConfig, AccountBudgetBackend) (EventAdmitter, error)
+```
+
+Action constants are `AdmissionAllow`, `AdmissionRefuse`, `AdmissionCloseOverload`
+and `AdmissionAbandon`. Sources are `AdmissionSourceExisting`,
+`AdmissionSourceLocalMaintenance`, `AdmissionSourceRedis`,
+`AdmissionSourceWarmLocal` and `AdmissionSourceUnavailable`; zero is invalid for
+both enums. The account engine never returns LocalMaintenance: C retains the
+existing-content and heartbeat gate owners. It accepts exactly the seven account
+policy tuples, including account-scoped presence; only subscription/ready have
+`MayHold=true`. Nil UUID or invalid/mismatched policy returns Refuse/Unavailable
+with one-second advice and no Redis or warm-state work.
+
+The final Admit argument is an absolute hold deadline. Non-hold classes require
+zero. A contradictory deadline is invalid input; an expired valid hold deadline
+is unavailable overload, even when disabled. Construction validates scale in
+either mode. Enabled construction requires a usable nonnil backend (callers must
+not supply typed-nil implementations); disabled construction requires nil, creates
+no warm map/sweep, and allows a valid live account request as Existing. Backend
+ownership transfers only on constructor success. The engine copies config, issues
+no startup backend command, and exposes no mutable map or identity accessor.
+
+Each call captures a monotonic start. The decision deadline is the earliest of
+start+100ms, parent deadline and nonzero hold deadline; the remote deadline is
+the earliest of start+90ms and that decision deadline. Actual deadline instants
+are checked as well as context cancellation, including after map-lock waits.
+One of 32 application slots is acquired nonblocking after the local reservation;
+saturation evaluates fallback immediately. Remote work is one synchronous backend
+call, never an application retry or detached request goroutine. The B1 backend's
+single NOSCRIPT fallback retains that same context.
+
+| Evidence at final evaluation | Decision |
+|---|---|
+| Parent canceled/expired or engine stopping | Abandon/Unavailable, retry0, not definitive |
+| Live parent but decision/hold deadline reached | Refuse/Unavailable, or CloseOverload for subscription/ready, retry1s |
+| Valid remote allow observed before remote deadline | Allow/Redis, retry0, not definitive |
+| Valid remote deny observed before remote deadline | Refuse/Redis with actual delay, definitive |
+| Unavailable/saturated plus reserved local credit before decision deadline | Allow/WarmLocal, retry0, not definitive |
+| Unavailable without local credit | Refuse/Unavailable, or CloseOverload for subscription/ready, retry1s |
+
+The engine defensively validates backend results: allow requires zero retry; deny
+requires integral milliseconds in 1..120000. Malformed/error/late results are
+unavailable and never warm a new account. A reply first observed at 95ms cannot
+count as Redis success but may use an already reserved token before 100ms. At or
+after 100ms no allowance remains. Parent/stopping checks win over overload; a final
+check after warm-map work cannot carry earlier evidence past the decision deadline.
+No result grants authority or refunds an already spent local/server debit.
 
 Fallback has at most 10000 user records, each with seven fixed class states.
-Allocate only after a valid Redis result, initially empty; no LRU or eviction.
-Healthy Redis allowance remains authoritative even with a full/empty local map.
-Fallback interval is four times the effective interval; burst is
-`max(1,floor(effectiveBurst/4))`. Reserve local credit before a remote attempt and
-never refund. Definitive Redis denial refuses; unavailable execution may allow only
-that attempt's already reserved credit. Cold/untracked users are denied in outage.
-Under one lock, look up, touch and reserve; never hold it across Redis or shutdown.
-Sweep every 60s, removing only records idle at least 600s using monotonic time.
-Shutdown rejects new work, cancels/joins application work and sweep, then closes
-the dedicated client before credential teardown. Library dial quiescence needs
-separate evidence; the application slot bound does not prove library shutdown.
+Only a valid timely Redis allow or deny can allocate a record, and only while the
+call remains live and within its decision deadline. Initialize every class empty
+at allocation time with tat=`now+fallbackBurst*fallbackInterval`; interval is four
+times effective interval and burst is `max(1,floor(effectiveBurst/4))`. A newly
+warmed default-profile record has no token before 20s, one at 20s, and at most two
+after 40s. The local clock uses elapsed monotonic duration from an instance origin;
+all lifetime-dependent additions are checked before evaluation.
+
+Lookup, touch, reservation, allocation and sweep share one lock; no bucket pointer
+escapes it. An existing account is touched and debited before remote-slot acquisition,
+including attempts that saturate or fail, with no refund on any branch. A definitive
+Redis denial cannot become a local allowance. Cold/untracked users are denied in
+outage. A full map cannot overrule healthy Redis success; failed allocation counts
+only an aggregate capacity miss. No LRU, active-user eviction, disconnect deletion
+or per-user goroutine exists. One ticker sweeps every 60s, deleting only accounts
+idle at least 600s; recreated records start empty. Internal aggregates retain active
+remote attempts and capacity misses; public metric publication belongs to D.
+
+Close atomically prevents new call registration, cancels active backend contexts,
+stops and joins the sweep and all registered calls, then closes the backend once.
+Registration and stopping use the same lifecycle lock; joins hold neither the map
+nor lifecycle lock. Fixed cancellation slots follow the 32-slot remote bound.
+Repeated/concurrent Close retains the checked backend-close result, and later
+Admit returns Abandon. The backend must honor cancellation; there is no untracked
+escape goroutine for a broken backend. No scheduler-independent Close wall-time
+bound or public join of library recovery goroutines is promised. Shared clients
+and credential runtime remain outside engine ownership; library dial quiescence
+and combined managed failure behavior need separate B4 evidence.
+
+The private per-instance clock constructor and `sweepIdle` helper let tests drive
+the same algorithm without global time mutation or exported test API. C still
+owns production integration, FIFO, authority finalization and the original
+two-second/21-attempt hold; B3 neither sleeps nor schedules that hold.
 
 ## FIFO, authority and wire contract
 
