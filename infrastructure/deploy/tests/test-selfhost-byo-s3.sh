@@ -307,6 +307,23 @@ def run():
     if version.returncode != 0 or match is None or tuple(map(int, match.groups())) < (2, 24, 5):
         prerequisite("supported Compose >= 2.24.5 is required")
     print("INFO: config-only Compose " + ".".join(match.groups()))
+    # Run the independent cache-cold build-env oracle with this same admitted CLI.
+    # The oracle discovers `docker compose`, so a private wrapper also carries an
+    # explicitly selected standalone CLI without changing the optional-tool gate.
+    build_cli_dir = WORK / "build-env-cli"
+    build_cli_dir.mkdir()
+    build_cli = build_cli_dir / "docker"
+    build_cli.write_text("#!" + sys.executable + "\nimport os, sys\n" +
+                         "command = " + repr(cli) + "\n" +
+                         "args = sys.argv[1:]\n" +
+                         "if not args or args[0] != 'compose': sys.exit(2)\n" +
+                         "os.execv(command[0], command + args[1:])\n")
+    build_cli.chmod(0o700)
+    build_env = dict(BASE_ENV, PATH=str(build_cli_dir) + os.pathsep + BASE_ENV["PATH"])
+    build_result = capture("production-compose-build-env",
+                           [sys.executable, str(ROOT / ".github/scripts/tests/test-production-compose-build-env.py")],
+                           build_env, cwd=ROOT)
+    check("cache-cold build job env renders production Compose", build_result.returncode == 0)
     for name, digest in SOURCE_HASHES.items():
         check("managed/base accepted source bytes preserved: " + name,
               hashlib.sha256((ROOT / name).read_bytes()).hexdigest() == digest)
