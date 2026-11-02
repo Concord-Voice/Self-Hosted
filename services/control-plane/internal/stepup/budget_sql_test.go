@@ -494,11 +494,11 @@ func TestSQLBudgetRejectsMalformedActorsAndReceiptsWithoutChangingCharge(t *test
 			require.NotNil(t, failure)
 			assert.Equal(t, budgetFailureContract, failure.kind)
 		}
-		reservation, failure := store.reserve(nil, f.actor)
+		reservation, failure := store.reserve(nil, f.actor) //nolint:staticcheck // SA1012: literal nil verifies reserve rejects a missing context as a contract failure.
 		require.NotNil(t, failure)
 		assert.Equal(t, budgetFailureContract, failure.kind)
 		assert.Equal(t, budgetReservation{}, reservation)
-		failure = store.refundVerifiedCommitted(nil, valid)
+		failure = store.refundVerifiedCommitted(nil, valid) //nolint:staticcheck // SA1012: literal nil verifies settlement rejects a missing context as a contract failure.
 		require.NotNil(t, failure)
 		assert.Equal(t, budgetFailureContract, failure.kind)
 	})
