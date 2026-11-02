@@ -227,19 +227,19 @@ rather than shipped unwired.
 
 #### SPA Deploy Lifecycle (ADR-0001, ADR-0015)
 
-**Cloudflare Pages** serves the SPA bundle at the CONSTANT URL `https://spa.concordvoice.chat/index.html`. Serving stays decoupled from the Go control-plane. The per-deploy SHA no longer appears in the URL. Pages publishes each deployment atomically and serves the latest at the constant host. The bundle stays decoupled from its serving origin at build time: Vite's `base: './'` makes every chunk resolve relative to the URL that loaded `index.html`.
+SPA serving stays decoupled from the Go control-plane. Self-Hosted defaults to the desktop's bundled renderer; it does not deploy or enable a hosted Cloudflare Pages stream. Operators may configure compatible Stable and Pre-Release remote streams through the [control-plane discovery settings](../services/control-plane/README.md#remote-spa-discovery). The desktop bundle stays decoupled from its serving origin at build time: Vite's `base: './'` makes every chunk resolve relative to the URL that loaded `index.html`.
 
-The deploy pipeline `wrangler pages deploy`s the renderer bundle to Cloudflare Pages, writes `spa.env` with the constant `SPA_URL` (it records the per-deploy SHA as the `SPA_VERSION` annotation only, never in the URL), and commits + pushes `spa.env` back to main via a short-lived, least-privilege (Contents:write) GitHub App installation token.
+Hosted publishing belongs to Release-Ops. This repository supplies public discovery of operator-configured streams, not a publishing pipeline. `SPA_VERSION` and `SPA_PRERELEASE_VERSION` are optional internal audit annotations and grant no publisher authority.
 
 Five invariants enforce the contract:
 
 1. **Build invariant** — `vite.config.ts` keeps `base: './'`. Locked by `vite-base-relative.test.ts`.
-2. **Deploy invariant** — `spa.env` is a generated artifact, verified by a CI contract check. The committed `spa.env` is bind-mounted into the control-plane container as a single file, so the deploy step rsyncs it with `--inplace` (writes the existing inode rather than atomic-rename to a new one) to avoid a stale-inode `spaUrl` class of bug.
+2. **Configuration invariant** — live reload is opt-in through `SPA_CONFIG_FILE`. Mount the containing directory, not an individual file, so replacements remain visible. Writers must prepare a complete configuration in that directory and atomically rename it over the watched file; in-place writes can expose partial snapshots. Valid replacements update both streams together, with absent streams disabled. Invalid replacements retain the entire previous snapshot. Base Compose reads `spa.env` only at container creation; the production overlay clears that `env_file` and requires an operator override to opt in.
 3. **Runtime safety net** — the renderer self-heals on chunk-load failures via two-layer detection (renderer-side listeners in `spaSelfHealClient.ts` + main-process `did-fail-load` in `spaSelfHeal.ts` / `spaSelfHealMainFrame.ts`) feeding a shared recovery primitive with R2 retry.
 4. **Bundled fallback** — when `spaLoader.ts`'s `resolveSpaSource()` cannot validate the remote SPA (HTTPS + IPC-contract checks fail), it falls back to `mode: 'bundled'`, loading `app://concord/index.html` from the asar bundle. `main.ts` registers the `app://` scheme as privileged (`standard`/`secure`/`supportFetchAPI`/`corsEnabled`). `appProtocol.ts` resolves it, with a host check and path-traversal rejection.
 5. **Freshness check** — `clientConfigService.ts` asks main's `spaUpdate.checkForUpdate()` to compare the served entry bytes at startup, every five minutes, on focus, and on visible-resume. If newer bytes are available, it applies through main's `spa:reloadLatest` soft-reload path, which re-runs `resolveSpaSource()` and uses no-cache `net.fetch` / `loadURL` options. Auto-apply waits during the voice connecting, connected, and reconnecting states, while screen share is active, and while a DM call rings or is in progress.
 
-The project's architecture decision records capture the deploy-contract rationale, and the move from the Go control-plane to Cloudflare Pages.
+The project's architecture decision records capture historical hosted deployment rationale. The discovery settings above describe the current Self-Hosted configuration contract.
 
 #### Desktop Auto-Update Trust Model
 

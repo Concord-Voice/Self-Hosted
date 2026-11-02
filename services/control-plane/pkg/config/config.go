@@ -246,11 +246,15 @@ type Config struct {
 	ClientMinVersion string // Minimum desktop client version allowed (e.g. "0.1.3"); empty = no enforcement
 	// Minimum mobile versions, selected by the X-Concord-Client-Platform header
 	// or the WebSocket client_platform param; empty = no enforcement.
-	ClientMinVersionIOS     string
-	ClientMinVersionAndroid string
-	SpaURL                  string // Remote SPA URL for Tier 3 hot updates (e.g. "https://app.concordvoice.chat/v1/"); empty = use bundled
-	SpaIpcContract          int    // Minimum IPC contract version required by the remote SPA; 0 = no remote SPA
-	SpaConfigFile           string // Path to mounted spa.env for hot-reload; empty = static config from env vars
+	ClientMinVersionIOS      string
+	ClientMinVersionAndroid  string
+	SpaURL                   string // Remote SPA URL for Tier 3 hot updates (e.g. "https://app.concordvoice.chat/v1/"); empty = use bundled
+	SpaIpcContract           int    // Minimum IPC contract version required by the remote SPA; 0 = no remote SPA
+	SpaVersion               string // Internal deployment audit identity, never publisher authorization
+	SpaPrereleaseURL         string
+	SpaPrereleaseIpcContract int
+	SpaPrereleaseVersion     string
+	SpaConfigFile            string // Path to mounted spa.env for hot-reload; empty = static config from env vars
 
 	// Absolute public origin for server-authored media URLs, e.g.
 	// "https://api.concordvoice.chat". Used to embed bug-report screenshots into
@@ -506,6 +510,10 @@ func Load() (*Config, error) {
 		ClientMinVersionAndroid:   strings.TrimSpace(getEnv("CLIENT_MIN_VERSION_ANDROID", "")),
 		SpaURL:                    getEnv("SPA_URL", ""),
 		SpaIpcContract:            getEnvInt("SPA_IPC_CONTRACT", 0),
+		SpaVersion:                getEnv("SPA_VERSION", ""),
+		SpaPrereleaseURL:          getEnv("SPA_PRERELEASE_URL", ""),
+		SpaPrereleaseIpcContract:  getEnvInt("SPA_PRERELEASE_IPC_CONTRACT", 0),
+		SpaPrereleaseVersion:      getEnv("SPA_PRERELEASE_VERSION", ""),
 		SpaConfigFile:             getEnv("SPA_CONFIG_FILE", ""),
 		PublicMediaBaseURL:        strings.TrimRight(getEnv("PUBLIC_MEDIA_BASE_URL", ""), "/"),
 		InstanceType:              getEnv("INSTANCE_TYPE", "saas"),
