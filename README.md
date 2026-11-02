@@ -15,6 +15,7 @@
 [![security](https://img.shields.io/badge/security-policy-green)](./.github/SECURITY.md)
 [![E2EE](https://img.shields.io/badge/E2EE-AES--256--GCM%20%2F%20RSA--OAEP%204096-success)](./docs/architecture.md)
 [![self-hosted](https://img.shields.io/badge/self--hosted-supported-blue)](./infrastructure/deploy)
+
 [![SonarQube Cloud](https://sonarcloud.io/images/project_badges/sonarcloud-dark.svg)](https://sonarcloud.io/summary/new_code?id=Concord-Voice_Self-Hosted)
 
 Run the Concord Voice server on your own hardware.
