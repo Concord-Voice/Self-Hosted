@@ -4431,6 +4431,20 @@ paths:
         '
       operationId: getClientConfig
       security: []
+      parameters:
+      - name: channel
+        in: query
+        required: false
+        description: >-
+          Only the exact value `prerelease` selects Pre-Release. A missing or
+          unrecognized value selects Stable. An unavailable Pre-Release stream
+          omits spaUrl and spaIpcContract (decoded as an empty URL and zero
+          contract) without falling back to Stable. The URL and IPC contract come from one configuration
+          snapshot. Channel selection grants no entitlement or publisher
+          authorization; clients must enforce compatibility and trust checks.
+        schema:
+          type: string
+          default: stable
       responses:
         '200':
           description: Current client configuration
@@ -25013,11 +25027,10 @@ components:
               type: string
         spaUrl:
           type: string
-          description: Remote SPA URL for hot updates; absent means use the bundled renderer
+          description: Remote SPA URL for the selected stream; empty or absent means use the bundled renderer
         spaIpcContract:
           type: integer
-          description: Minimum IPC contract version required by the remote SPA; absent/zero means no remote
-            SPA
+          description: Minimum IPC contract version required by the selected remote SPA; absent/zero means no remote SPA. Read together with spaUrl from the same response.
       required:
       - minVersion
       - featureFlags

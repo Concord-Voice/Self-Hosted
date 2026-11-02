@@ -154,6 +154,47 @@ MEDIA_PLANE_URL=http://localhost:3000
 TRUSTED_PROXY_CIDRS=172.19.0.0/16
 ```
 
+### Remote SPA discovery
+
+`GET /client/config` is public and returns a coherent `spaUrl` / `spaIpcContract`
+pair from one configuration snapshot. Only the exact query value
+`?channel=prerelease` selects Pre-Release. A missing or unrecognized value selects
+Stable. An unavailable Pre-Release stream omits both SPA fields (decoded as an
+empty URL and zero contract); it does not fall back to Stable. Responses use
+`Cache-Control: no-store`.
+
+| Stream | URL | Required IPC contract | Optional audit version |
+| --- | --- | --- | --- |
+| Stable | `SPA_URL` | `SPA_IPC_CONTRACT` | `SPA_VERSION` |
+| Pre-Release | `SPA_PRERELEASE_URL` | `SPA_PRERELEASE_IPC_CONTRACT` | `SPA_PRERELEASE_VERSION` |
+
+An enabled stream requires an HTTP(S) URL with a hostname and no embedded
+credentials, plus a positive integer IPC contract. Versions are optional and
+limited to 128 ASCII letters, digits, dots, underscores, plus signs or hyphens.
+Existing Stable configurations without a version remain valid. A disabled stream
+has an empty URL and version, with an empty or zero contract. An absent stream is
+also disabled. Both streams default to disabled in the repository's `spa.env`.
+
+Base `docker-compose.yml` reads `spa.env` as environment variables when creating
+the container; editing that file alone does not update a running container.
+`docker-compose.production.yml` resets `env_file` to an empty list, preserving the
+bundled default. Production remote SPA opt-in requires an operator Compose
+override supplying the stream environment variables or `env_file`, plus a
+directory mount and `SPA_CONFIG_FILE` setting if live reload is desired. To enable live
+reload, set `SPA_CONFIG_FILE` to a file path accessible to the control plane. When
+using a container, mount the containing directory so atomic file replacements
+remain visible. Write a complete replacement file in the same directory, then
+atomically rename it over the watched file. Do not truncate or partially rewrite
+the live file. Each valid replacement updates both streams together: omitting
+Pre-Release disables it, even if the previous snapshot enabled it. Read failures,
+malformed assignments, duplicate keys, and invalid stream tuples retain the
+previous live snapshot in its entirety.
+
+Discovery supplies configuration metadata only. Neither the channel query nor
+the optional audit version grants entitlement, authenticates a publisher, or
+authorizes execution of remote code. Audit versions are not returned by this
+endpoint; clients must still enforce their compatibility and trust checks.
+
 ### Available Endpoints
 
 #### Health Check

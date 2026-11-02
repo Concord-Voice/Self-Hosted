@@ -67,12 +67,12 @@ type Response struct {
 // GetConfig returns the current client configuration.
 // This endpoint is public — no auth required.
 func (h *Handler) GetConfig(c *gin.Context) {
-	// SPA values: prefer live (hot-reloadable) config when available
-	spaURL := h.cfg.SpaURL
-	spaIpcContract := h.cfg.SpaIpcContract
+	channel := config.SpaChannel(c.Query("channel"))
+	var spa config.SpaSnapshot
 	if h.liveSpa != nil {
-		spaURL = h.liveSpa.SpaURL()
-		spaIpcContract = h.liveSpa.SpaIpcContract()
+		spa = h.liveSpa.Snapshot(channel)
+	} else {
+		spa = h.cfg.Snapshot(channel)
 	}
 
 	resp := Response{
@@ -85,8 +85,8 @@ func (h *Handler) GetConfig(c *gin.Context) {
 			Host:  h.cfg.TURNServerHost,
 			Realm: h.cfg.TURNRealm,
 		},
-		SpaURL:         spaURL,
-		SpaIpcContract: spaIpcContract,
+		SpaURL:         spa.URL,
+		SpaIpcContract: spa.IPCContract,
 	}
 
 	// Never cache /client/config — clients poll this to discover new SPA builds.
