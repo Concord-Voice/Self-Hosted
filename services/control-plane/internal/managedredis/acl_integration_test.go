@@ -71,11 +71,15 @@ func TestRedisACLIntegration(t *testing.T) {
 
 	// The fixture runs as root because the test-created host bind mount's UID mapping
 	// is not equivalent to the production tmpfs ownership contract.
+	image := os.Getenv("MANAGED_REDIS_TEST_IMAGE")
+	if image == "" {
+		image = "redis:7-alpine"
+	}
 	run := exec.CommandContext(ctx, "docker", "run", "-d", "--rm", "--name", name,
 		"--label", "concord.task=epic2944-3930-acl-integration",
 		"--cpus", "0.5", "--memory", "128m", "-p", "127.0.0.1::6379",
 		"-v", aclDir+":/acl:ro", "-v", data+":/data",
-		"--entrypoint", "redis-server", "redis:7-alpine", "--aclfile", "/acl/users.acl", "--dir", "/data", "--appendonly", "yes")
+		"--entrypoint", "redis-server", image, "--aclfile", "/acl/users.acl", "--dir", "/data", "--appendonly", "yes")
 	out, err := run.CombinedOutput()
 	require.NoErrorf(t, err, "start fixture: %s", out)
 	t.Cleanup(func() {
@@ -98,7 +102,7 @@ func TestRedisACLIntegration(t *testing.T) {
 	versionOut, err := exec.CommandContext(ctx, "docker", "exec", name, "redis-server", "--version").Output()
 	require.NoError(t, err)
 	aclDigest := sha256.Sum256(contents)
-	t.Logf("Redis fixture image=redis:7-alpine version=%s ACL_SHA256=%s command_counts={control-plane:%d,media-plane:%d} key_pattern_counts={control-plane:%d,media-plane:%d} container_user=root", strings.TrimSpace(string(versionOut)), hex.EncodeToString(aclDigest[:]), len(manifest.Services["control-plane"].Commands), len(manifest.Services["media-plane"].Commands), len(manifest.Services["control-plane"].KeyPatterns), len(manifest.Services["media-plane"].KeyPatterns))
+	t.Logf("Redis fixture image=%s version=%s ACL_SHA256=%s command_counts={control-plane:%d,media-plane:%d} key_pattern_counts={control-plane:%d,media-plane:%d} container_user=root", image, strings.TrimSpace(string(versionOut)), hex.EncodeToString(aclDigest[:]), len(manifest.Services["control-plane"].Commands), len(manifest.Services["media-plane"].Commands), len(manifest.Services["control-plane"].KeyPatterns), len(manifest.Services["media-plane"].KeyPatterns))
 	if err := controller.Reconcile(ctx, policy); err != nil {
 		t.Fatalf("reconcile: %v; ACL load: %v", err, admin.loadACLErr)
 	}
@@ -140,6 +144,31 @@ func TestRedisACLIntegration(t *testing.T) {
 	cp := integrationRedisClient(t, addr, "cv_cp_12", passwords["cv_cp_12"])
 	mp := integrationRedisClient(t, addr, "cv_mp_12", passwords["cv_mp_12"])
 	t.Cleanup(func() { _ = cp.Close(); _ = mp.Close() })
+	// TIME is needed by the actual account-budget Lua body, and remains outside
+	// the media and operator grants. Check nested execution rather than only
+	// the manifest or ACL DRYRUN handshake.
+	_, err = cp.Time(ctx).Result()
+	require.NoError(t, err)
+	_, err = mp.Time(ctx).Result()
+	require.ErrorContains(t, err, "NOPERM")
+	_, err = adminClient.Time(ctx).Result()
+	require.ErrorContains(t, err, "NOPERM", "operator must not inherit the control-plane TIME grant")
+	_, err = mp.Eval(ctx, `return redis.call('TIME')`, []string{"voice:room_owner:acl-fixture"}).Result()
+	requireBudgetTimeACLRefusal(t, err, "cv_mp_12")
+	budgetSource, err := os.ReadFile(filepath.Join("..", "websocket", "event_admission.lua"))
+	require.NoError(t, err)
+	budgetKey := "ratelimit:user:ws:v1:{11111111-1111-4111-8111-111111111111}:profile"
+	t.Run("account script refuses before TIME grant", func(t *testing.T) {
+		assertBudgetScriptRequiresTimeGrant(t, ctx, aclPath, admin, cp, string(budgetSource), budgetKey)
+	})
+	budgetReply, err := cp.Eval(ctx, string(budgetSource), []string{budgetKey}, "1", "5000000", "8").Result()
+	require.NoError(t, err)
+	require.Equal(t, []interface{}{int64(1), int64(1), int64(0)}, budgetReply)
+	budgetFields, err := cp.HGetAll(ctx, budgetKey).Result()
+	require.NoError(t, err)
+	require.Len(t, budgetFields, 3)
+	require.Equal(t, "1", budgetFields["v"])
+	require.NoError(t, cp.Del(ctx, budgetKey).Err())
 	for _, key := range []string{"mfa_upgrade_bypass:acl-fixture", "session_revokes:acl-fixture", "attach_sess:acl-fixture"} {
 		require.NoError(t, cp.Set(ctx, key, "preserve", 0).Err(), key)
 		require.Equal(t, "preserve", cp.Get(ctx, key).Val())
@@ -320,6 +349,60 @@ func (a *integrationAdminFixture) KillUser(ctx context.Context, username string)
 }
 func (a *integrationAdminFixture) ExecuteOperator(context.Context, []string) (string, error) {
 	return "", fmt.Errorf("unused")
+}
+
+// Redis 7 uses the generic script ACL refusal; Redis 8 names the denied
+// command and user. Require a Redis server error and the complete known prefix
+// plus script-location suffix so transport or unrelated script errors fail.
+func requireBudgetTimeACLRefusal(t *testing.T, err error, user string) {
+	t.Helper()
+	var serverError redis.Error
+	require.ErrorAs(t, err, &serverError)
+	message := serverError.Error()
+	redis7 := strings.HasPrefix(message, "ERR The user executing the script can't run this command or subcommand script: ")
+	redis8 := strings.HasPrefix(message, "ERR ACL failure in script: User "+user+" has no permissions to run the 'time' command script: ")
+	require.True(t, (redis7 || redis8) && strings.Contains(message, "@user_script:"), "expected supported Redis script TIME ACL refusal, got %q", message)
+}
+
+// Only the disposable fixture's ACL file is changed. The production admin has
+// ACL LOAD, not ACL SETUSER; restore the original grants before positive tests.
+func assertBudgetScriptRequiresTimeGrant(t *testing.T, ctx context.Context, aclPath string, admin *integrationAdminFixture, cp *redis.Client, script, key string) {
+	t.Helper()
+	original, err := os.ReadFile(aclPath)
+	require.NoError(t, err)
+	writeACL := func(contents []byte) {
+		t.Helper()
+		require.NoError(t, os.Chmod(aclPath, 0o600))
+		require.NoError(t, os.WriteFile(aclPath, contents, 0o400))
+		require.NoError(t, os.Chmod(aclPath, 0o400))
+		require.NoError(t, admin.LoadACL(ctx, aclPath))
+	}
+	lines := strings.Split(string(original), "\n")
+	removed := 0
+	for i, line := range lines {
+		if !strings.HasPrefix(line, "user cv_cp_12 ") {
+			continue
+		}
+		tokens := strings.Fields(line)
+		kept := make([]string, 0, len(tokens))
+		for _, token := range tokens {
+			if token == "+time" {
+				removed++
+				continue
+			}
+			kept = append(kept, token)
+		}
+		lines[i] = strings.Join(kept, " ")
+	}
+	require.Equal(t, 1, removed, "fixture must remove exactly the intended grant")
+	require.NoError(t, cp.Del(ctx, key).Err())
+	defer writeACL(original)
+	writeACL([]byte(strings.Join(lines, "\n")))
+	_, err = cp.Eval(ctx, script, []string{key}, "1", "5000000", "8").Result()
+	requireBudgetTimeACLRefusal(t, err, "cv_cp_12")
+	exists, err := cp.Exists(ctx, key).Result()
+	require.NoError(t, err)
+	require.Zero(t, exists, "missing TIME must refuse before creating account debt")
 }
 
 func integrationPolicy(passwords map[string]string) Policy {
