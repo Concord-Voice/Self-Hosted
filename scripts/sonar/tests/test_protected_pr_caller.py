@@ -1,8 +1,8 @@
 """Local proof and REST contract tests; no GitHub credentials or network access."""
 
 import base64
-from contextlib import redirect_stderr
-from io import StringIO
+from contextlib import redirect_stderr, redirect_stdout
+from io import BytesIO, StringIO
 import importlib.util
 import json
 from pathlib import Path
@@ -10,6 +10,7 @@ import tempfile
 import types
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 
 
@@ -290,6 +291,45 @@ class CallerTests(unittest.TestCase):
                                    "--out", str(args.out)]), redirect_stderr(output):
             self.assertEqual(CALLER.main(), 1)
         self.assertNotIn("private-gh-token", output.getvalue())
+
+    def test_cli_http_error_reports_only_validated_status_without_dispatch_retry(self):
+        class PrivateCode:
+            def __repr__(self):
+                raise AssertionError("must not format unvalidated HTTP status")
+
+            __str__ = __repr__
+
+        class UnreadableBody(BytesIO):
+            def read(self, *args):
+                raise AssertionError("must not read HTTP error response body")
+
+        cases = [(code, str(code)) for code in (403, 422, 429, 500)]
+        cases += [(code, "unknown") for code in
+                  (None, True, False, "403", 403.0, 0, 99, 600, -1, PrivateCode())]
+        for index, (code, expected) in enumerate(cases):
+            with self.subTest(case=index):
+                args = self._watch_args()
+                args.out.unlink(missing_ok=True)
+                output, stdout = StringIO(), StringIO()
+                private_url = "https://private-api.invalid/dispatch?token=private-url-token"
+                failure = HTTPError(private_url, code, "private-http-message",
+                                    {"Authorization": "Bearer private-header-token",
+                                     "X-Private": "private-response-header"},
+                                    UnreadableBody(b"private-response-body"))
+                with patch.dict(CALLER.os.environ, {"GH_TOKEN": "private-gh-token"}, clear=True), \
+                        patch.object(CALLER, "urlopen", side_effect=failure) as request, \
+                        patch.object(CALLER.time, "sleep") as sleep, \
+                        patch("sys.argv", [str(SOURCE), "dispatch-watch", "--proof", str(args.proof),
+                                           "--out", str(args.out)]), \
+                        redirect_stderr(output), redirect_stdout(stdout):
+                    self.assertEqual(CALLER.main(), 1)
+                request.assert_called_once()
+                sleep.assert_not_called()
+                self.assertFalse(args.out.exists(), "failed dispatch must not record a child run")
+                self.assertEqual(stdout.getvalue(), "")
+                self.assertEqual(output.getvalue(),
+                                 f"protected Sonar caller failed: HTTP status {expected}\n",
+                                 "HTTPError must expose only a validated status instead of the generic OSError banner")
 
     def _watch_args(self):
         payload = CALLER.validate_payload({**self.ids, "selection": self.selection,

@@ -31,6 +31,7 @@ gate can learn from your voice.
 
 - **Self-hosted setup:** Fresh installer environment files now include explicit WebSocket event-budget settings, with preparation and rollback guidance for existing installations. Runtime delivery and activation remain separate steps.
 
+- **Authentication:** Added a dormant transaction-local source marker for future account-change writers, with closed source validation and caller-owned transaction completion.
 - **Authentication:** Added an internal verified-session snapshot adapter for future step-up attempt accounting. Current request handling and attempt budgets are unchanged.
 - **Tray:** The tray icon now shows both stars of the Concord Voice mark, and it reflects your status. It shows when you are in voice, muted, deafened, sharing your screen, reconnecting, or have unread messages or mentions. On macOS and Windows, click the icon to open a menu with Mute, Deafen, Leave voice, Stop sharing, your presence, and a shortcut to your newest unread conversation. On Linux, click the icon to open the window; the menu comes from your desktop's tray host.
 - **Settings:** Settings ▸ Appearance has a new Tray Icon setting (Menu Bar Icon on macOS). Choose Automatic, Light, Dark, or Colour to match your taskbar or menu bar.
@@ -87,6 +88,7 @@ gate can learn from your voice.
 
 ### Fixed
 
+- **Operations:** Protected PR Semgrep, ESLint, and govulncheck scans now check out the exact merge revision selected by required CI; same-repository SARIF uploads use that revision even if GitHub regenerates another merge commit.
 - **Voice:** The media server now forwards your app's attestation when it checks your voice access, a step toward letting servers require an attested app ([#4211](internal development reference omitted)).
 - **Sign-in:** A signed-out session no longer retries its rejected refresh token every 10 seconds in the background ([#4205](internal development reference omitted)).
 - **Voice:** Calling someone back in a DM joins the call still open there instead of silently stopping, a failed call start now shows an error, your camera comes back after a brief connection drop, and 1:1 DMs show Join voice call during a call ([#4179](internal development reference omitted)).
@@ -146,6 +148,7 @@ gate can learn from your voice.
 ### Security
 
 - **Accounts:** Your encrypted key is only sent to a device that has just signed in, or that confirms your current password, so a stolen session can no longer download it. Changing your password asks for your current password as before.
+- **Accounts:** Guessing passwords on the key-reveal route now counts toward the same sign-in failure ban as the login page, and its attempt limits fail closed. API: a wrong `current_password` on `POST /api/v1/users/me/keys/reveal` is now 403 `invalid_current_password` instead of 401.
 - **Voice:** One account can no longer fill the voice server's connection capacity with idle connections and lock other users out of voice.
 - **Accounts:** A device signed out while its account-deletion request was still processing can no longer delete the account ([#4192](internal development reference omitted)).
 - **Accounts:** Signing out a device or revoking a session cuts it off everywhere at once. Its open connection and any voice call end before the change is confirmed, and a signed-out device can no longer act on your account.
