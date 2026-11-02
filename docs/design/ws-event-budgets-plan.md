@@ -24,8 +24,9 @@ remain prerequisites for activation.
 | H: managed delivery | Hosted: canonical config writer, Compose, ACL/operator docs and verified delivery lane | every admitted writer branch, reader/client prerequisites and canonical source provenance |
 
 D2 requires an additive migration for both closed metric-key CHECKs; its number
-and canonical delivery order must be allocated before publication. D1 introduces
-no migration. No media-plane change or live commissioning belongs to these units.
+and canonical delivery order must be allocated before publication. C5 and D1
+introduce no migration. No media-plane change or live commissioning belongs to
+these units.
 Self-Hosted owns control-plane policy and the protocol origin; Desktop owns its
 consumer; Hosted owns managed deployment. The protocol package is unpublished:
 identify the exact schema source commit and required consumer copy instead of

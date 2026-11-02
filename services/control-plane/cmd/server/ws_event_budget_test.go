@@ -4,6 +4,8 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -282,4 +284,34 @@ func TestWSEventBudgetDeferredCloseChecksRetainedError(t *testing.T) {
 		assert.ErrorIs(t, runErr, original)
 		assert.Equal(t, 1, engine.closes)
 	})
+}
+
+// Regression for #2270: explicit shutdown and the safety defer share an
+// idempotent engine whose Close retains its original backend error.
+func TestWSEventBudgetDeferredCloseDoesNotDuplicateShutdownError(t *testing.T) {
+	for _, alreadyReported := range []bool{true, false} {
+		t.Run(fmt.Sprintf("cleanup already reported=%t", alreadyReported), func(t *testing.T) {
+			cleanup := errors.New("unique event budget cleanup failure")
+			other := errors.New("independent shutdown failure")
+			backend := &c5FactoryBackend{closeErr: cleanup}
+			engine, err := websocket.NewEventAdmitter(websocket.EventBudgetConfig{Enabled: true, ScalePercent: 100}, backend)
+			require.NoError(t, err)
+			t.Cleanup(func() { assert.ErrorIs(t, engine.Close(), cleanup) })
+
+			// Match shutdownControlPlane's joined result, including another
+			// failing shutdown stage. The second case checks a newly found error.
+			runErr := errors.Join(other)
+			if alreadyReported {
+				runErr = errors.Join(runErr, engine.Close())
+			}
+			closeWSEventAdmitterOnReturn(engine, &runErr)
+
+			require.Error(t, runErr)
+			assert.ErrorIs(t, runErr, other)
+			assert.ErrorIs(t, runErr, cleanup)
+			assert.Equal(t, 1, strings.Count(runErr.Error(), cleanup.Error()), "retained cleanup failure must be reported once")
+			assert.Equal(t, 1, strings.Count(runErr.Error(), other.Error()))
+			assert.Equal(t, 1, backend.closes, "real engine closes its owned backend once")
+		})
+	}
 }
