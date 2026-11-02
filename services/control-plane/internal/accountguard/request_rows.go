@@ -20,11 +20,6 @@ type requestRow struct {
 	payload      requestPendingPayload
 }
 
-const requestColumns = `id,kind,target_kind,target_id,target_material_version,reset_factors,
-status,origin_class,origin_fingerprint,request_fingerprint,coarse_fingerprint,fingerprint_key_id,
-dispute_group_id,opened_at,completes_at,held_ms,held_since,disputed_at,completed_at,cancelled_at,
-cancel_reason,canceller_class,pending_password_hash,pending_address`
-
 func scanRequestRow(scan func(...any) error) (requestRow, error) {
 	var row requestRow
 	var kind, status string
@@ -49,32 +44,72 @@ func scanRequestRow(scan func(...any) error) (requestRow, error) {
 	if err := row.req.Status.UnmarshalText([]byte(status)); err != nil {
 		return requestRow{}, errRequestShape
 	}
+	if err := decodeRequestTarget(&row, targetKind, targetID, targetVersion); err != nil {
+		return requestRow{}, err
+	}
+	if err := decodeRequestFingerprint(&row, keyID); err != nil {
+		return requestRow{}, err
+	}
+	if err := decodeRequestGroup(&row, group); err != nil {
+		return requestRow{}, err
+	}
+	if err := decodeRequestTimes(&row, held, disputed, completed, cancelled); err != nil {
+		return requestRow{}, err
+	}
+	if err := decodeRequestCancellation(&row, reason, canceller); err != nil {
+		return requestRow{}, err
+	}
+	if hash.Valid {
+		row.payload.passwordHash = &hash.String
+	}
+	if address.Valid {
+		row.payload.address = &address.String
+	}
+	if err := validateRequestRow(row); err != nil {
+		return requestRow{}, err
+	}
+	return row, nil
+}
+
+func decodeRequestTarget(row *requestRow, targetKind, targetID sql.NullString, targetVersion sql.NullInt64) error {
 	if targetKind.Valid != targetID.Valid || targetKind.Valid != targetVersion.Valid {
-		return requestRow{}, errRequestShape
+		return errRequestShape
 	}
 	if targetKind.Valid {
 		ref := decide.CredRef{ID: targetID.String, Version: targetVersion.Int64}
 		if err := ref.Kind.UnmarshalText([]byte(targetKind.String)); err != nil {
-			return requestRow{}, errRequestShape
+			return errRequestShape
 		}
 		row.req.Targets = []decide.CredRef{ref}
 	}
+	return nil
+}
+
+func decodeRequestFingerprint(row *requestRow, keyID sql.NullInt64) error {
 	if keyID.Valid {
 		if keyID.Int64 <= 0 || keyID.Int64 > 32767 {
-			return requestRow{}, errRequestShape
+			return errRequestShape
 		}
 		row.req.FingerprintKeyID = int16(keyID.Int64)
 	}
 	// NULL is different from an empty digest or a zero key ID.
 	if (row.req.Fingerprint != nil) != keyID.Valid || (row.req.Coarse != nil) != keyID.Valid {
-		return requestRow{}, errRequestShape
+		return errRequestShape
 	}
+	return nil
+}
+
+func decodeRequestGroup(row *requestRow, group sql.NullString) error {
 	if group.Valid {
 		if _, err := requestUUID(group.String); err != nil {
-			return requestRow{}, err
+			return err
 		}
 		row.req.DisputeGroup = group.String
 	}
+	return nil
+}
+
+func decodeRequestTimes(row *requestRow, held, disputed, completed, cancelled sql.NullTime) error {
 	if held.Valid {
 		row.req.HeldSince = held.Time
 	}
@@ -90,33 +125,28 @@ func scanRequestRow(scan func(...any) error) (requestRow, error) {
 	// A valid SQL timestamp cannot be silently mapped into the pure zero sentinel.
 	for _, v := range []sql.NullTime{held, disputed, completed, cancelled} {
 		if v.Valid && !validRequestTime(v.Time) {
-			return requestRow{}, errRequestShape
+			return errRequestShape
 		}
 	}
+	return nil
+}
+
+func decodeRequestCancellation(row *requestRow, reason sql.NullString, canceller sql.NullInt64) error {
 	if reason.Valid {
 		if reason.String == "" {
-			return requestRow{}, errRequestShape
+			return errRequestShape
 		}
 		if err := row.req.CancelReason.UnmarshalText([]byte(reason.String)); err != nil || row.req.CancelReason == decide.CancelNone {
-			return requestRow{}, errRequestShape
+			return errRequestShape
 		}
 	}
 	if canceller.Valid {
 		if canceller.Int64 < 1 || canceller.Int64 > 3 {
-			return requestRow{}, errRequestShape
+			return errRequestShape
 		}
 		row.req.CancellerClass = decide.Class(canceller.Int64)
 	}
-	if hash.Valid {
-		row.payload.passwordHash = &hash.String
-	}
-	if address.Valid {
-		row.payload.address = &address.String
-	}
-	if err := validateRequestRow(row); err != nil {
-		return requestRow{}, err
-	}
-	return row, nil
+	return nil
 }
 
 func validateRequestRow(row requestRow) error {
@@ -127,6 +157,27 @@ func validateRequestRow(row requestRow) error {
 		!validRequestPayload(r.Kind, r.Status, row.payload) {
 		return errRequestShape
 	}
+	if err := validateRequestRowTimes(row); err != nil {
+		return err
+	}
+	if err := validateRequestRowDispute(row); err != nil {
+		return err
+	}
+	if err := validateRequestRowCancellation(row); err != nil {
+		return err
+	}
+	if err := validateRequestRowFingerprint(row); err != nil {
+		return err
+	}
+	if r.CompletesAt.Before(r.OpenedAt.Add(decide.DeltaCP)) &&
+		(r.Kind != decide.ReqBreakGlass || r.Status != decide.StatusCompleted || r.OriginClass != decide.C3 || !r.CompletesAt.Equal(r.OpenedAt) || !row.completedAt.Equal(r.OpenedAt)) {
+		return errRequestShape
+	}
+	return nil
+}
+
+func validateRequestRowTimes(row requestRow) error {
+	r := row.req
 	for _, t := range []time.Time{r.HeldSince, r.DisputedAt, row.completedAt, r.CancelledAt} {
 		if !t.IsZero() && !validRequestTime(t) {
 			return errRequestShape
@@ -135,6 +186,11 @@ func validateRequestRow(row requestRow) error {
 	if !r.HeldSince.IsZero() && r.Status != decide.StatusPending {
 		return errRequestShape
 	}
+	return nil
+}
+
+func validateRequestRowDispute(row requestRow) error {
+	r := row.req
 	if r.DisputedAt.IsZero() != (r.DisputeGroup == "") {
 		return errRequestShape
 	}
@@ -149,6 +205,11 @@ func validateRequestRow(row requestRow) error {
 	if r.Status == decide.StatusDisputed && r.DisputedAt.IsZero() {
 		return errRequestShape
 	}
+	return nil
+}
+
+func validateRequestRowCancellation(row requestRow) error {
+	r := row.req
 	if (r.Status == decide.StatusCompleted) != !row.completedAt.IsZero() ||
 		(r.Status == decide.StatusCancelled) != !r.CancelledAt.IsZero() {
 		return errRequestShape
@@ -160,6 +221,11 @@ func validateRequestRow(row requestRow) error {
 	} else if r.CancelReason != decide.CancelNone || r.CancellerClass != decide.ClassNone {
 		return errRequestShape
 	}
+	return nil
+}
+
+func validateRequestRowFingerprint(row requestRow) error {
+	r := row.req
 	hasFingerprint := r.Fingerprint != nil || r.Coarse != nil || r.FingerprintKeyID != 0
 	if hasFingerprint && !validRequestCandidate(decide.Candidate{Keyed: r.Fingerprint, Coarse: r.Coarse, KeyID: r.FingerprintKeyID}) {
 		return errRequestShape
@@ -178,10 +244,6 @@ func validateRequestRow(row requestRow) error {
 			return errRequestShape
 		}
 	default:
-		return errRequestShape
-	}
-	if r.CompletesAt.Before(r.OpenedAt.Add(decide.DeltaCP)) &&
-		(r.Kind != decide.ReqBreakGlass || r.Status != decide.StatusCompleted || r.OriginClass != decide.C3 || !r.CompletesAt.Equal(r.OpenedAt) || !row.completedAt.Equal(r.OpenedAt)) {
 		return errRequestShape
 	}
 	return nil

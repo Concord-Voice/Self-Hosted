@@ -120,6 +120,10 @@ func validateRequestEffect(e decide.Effect) (bool, error) {
 	default:
 		return false, errRequestShape
 	}
+	return validateRequestEffectShape(e, allowed, isRequest)
+}
+
+func validateRequestEffectShape(e, allowed decide.Effect, isRequest bool) (bool, error) {
 	if !reflect.DeepEqual(e, allowed) {
 		return false, errRequestShape
 	}
@@ -177,38 +181,52 @@ func validateRequestPlan(plan requestEffectPlan) (requestPlanShape, error) {
 		if err != nil || !owned {
 			return requestPlanShape{}, errRequestShape
 		}
-		switch e.Kind {
-		case decide.EffectOpen:
-			if shape.opening != nil {
-				return requestPlanShape{}, errRequestShape
-			}
-			o := e.Open
-			shape.opening = &o
-		case decide.EffectHold:
-			if holds[e.RequestID] {
-				return requestPlanShape{}, errRequestShape
-			}
-			holds[e.RequestID] = true
-		default:
-			if transitions[e.RequestID] {
-				return requestPlanShape{}, errRequestShape
-			}
-			transitions[e.RequestID] = true
+		if err := trackRequestPlanEffect(&shape, e, transitions, holds); err != nil {
+			return requestPlanShape{}, err
 		}
-		if e.Kind == decide.EffectDispute || (e.Kind == decide.EffectOpen && e.Open.Status == decide.StatusDisputed) {
-			if e.Group == "" {
-				shape.needsGroup = true
-			} else if shape.group != "" && shape.group != e.Group {
-				return requestPlanShape{}, errRequestShape
-			} else {
-				shape.group = e.Group
-			}
+		if err := trackRequestPlanGroup(&shape, e); err != nil {
+			return requestPlanShape{}, err
 		}
 	}
 	if shape.needsGroup && shape.group != "" {
 		return requestPlanShape{}, errRequestShape
 	}
 	return shape, nil
+}
+
+func trackRequestPlanEffect(shape *requestPlanShape, e decide.Effect, transitions, holds map[string]bool) error {
+	switch e.Kind {
+	case decide.EffectOpen:
+		if shape.opening != nil {
+			return errRequestShape
+		}
+		o := e.Open
+		shape.opening = &o
+	case decide.EffectHold:
+		if holds[e.RequestID] {
+			return errRequestShape
+		}
+		holds[e.RequestID] = true
+	default:
+		if transitions[e.RequestID] {
+			return errRequestShape
+		}
+		transitions[e.RequestID] = true
+	}
+	return nil
+}
+
+func trackRequestPlanGroup(shape *requestPlanShape, e decide.Effect) error {
+	if e.Kind == decide.EffectDispute || (e.Kind == decide.EffectOpen && e.Open.Status == decide.StatusDisputed) {
+		if e.Group == "" {
+			shape.needsGroup = true
+		} else if shape.group != "" && shape.group != e.Group {
+			return errRequestShape
+		} else {
+			shape.group = e.Group
+		}
+	}
+	return nil
 }
 
 func validRequestPayload(kind decide.ReqKind, status decide.ReqStatus, p requestPendingPayload) bool {
@@ -262,32 +280,33 @@ func prepareRequestOpenings(plan requestEffectPlan, payload requestPendingPayloa
 		return preparedOpenings{}, errRequestShape
 	}
 	prepared := preparedOpenings{payload: cloneRequestPayload(payload)}
-	allocate := func() (uuid.UUID, error) {
-		id, err := newID()
-		if err != nil {
-			return uuid.Nil, fmt.Errorf("accountguard: prepare request identity: %w", err)
-		}
-		if id == uuid.Nil || id == prepared.requestID {
-			return uuid.Nil, errRequestShape
-		}
-		for _, e := range plan.effects {
-			if id.String() == e.RequestID || id.String() == e.Group {
-				return uuid.Nil, errRequestShape
-			}
-		}
-		return id, nil
-	}
 	if shape.opening != nil {
-		prepared.requestID, err = allocate()
+		prepared.requestID, err = allocateRequestID(plan, newID, prepared.requestID)
 		if err != nil {
 			return preparedOpenings{}, err
 		}
 	}
 	if shape.needsGroup {
-		prepared.disputeGroupID, err = allocate()
+		prepared.disputeGroupID, err = allocateRequestID(plan, newID, prepared.requestID)
 		if err != nil {
 			return preparedOpenings{}, err
 		}
 	}
 	return prepared, nil
+}
+
+func allocateRequestID(plan requestEffectPlan, newID func() (uuid.UUID, error), openedRequestID uuid.UUID) (uuid.UUID, error) {
+	id, err := newID()
+	if err != nil {
+		return uuid.Nil, fmt.Errorf("accountguard: prepare request identity: %w", err)
+	}
+	if id == uuid.Nil || id == openedRequestID {
+		return uuid.Nil, errRequestShape
+	}
+	for _, e := range plan.effects {
+		if id.String() == e.RequestID || id.String() == e.Group {
+			return uuid.Nil, errRequestShape
+		}
+	}
+	return id, nil
 }

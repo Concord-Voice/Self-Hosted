@@ -26,7 +26,10 @@ func validRequestScope(tx *sql.Tx, userID uuid.UUID, now time.Time) bool {
 }
 
 func readRequestRows(ctx context.Context, tx *sql.Tx, userID uuid.UUID, now time.Time) (result []requestRow, err error) {
-	rows, err := tx.QueryContext(ctx, `SELECT `+requestColumns+` FROM account_pending_requests
+	rows, err := tx.QueryContext(ctx, `SELECT id,kind,target_kind,target_id,target_material_version,reset_factors,
+status,origin_class,origin_fingerprint,request_fingerprint,coarse_fingerprint,fingerprint_key_id,
+dispute_group_id,opened_at,completes_at,held_ms,held_since,disputed_at,completed_at,cancelled_at,
+cancel_reason,canceller_class,pending_password_hash,pending_address FROM account_pending_requests
 WHERE user_id=$1 AND (status IN ('pending','disputed') OR
   (status='cancelled' AND cancel_reason IN ('proof','dispute_resolved') AND cancelled_at>$2))
 ORDER BY id FOR UPDATE`, userID, now.Add(-decide.NCancelCP))
@@ -87,15 +90,8 @@ func validatePreparedOpenings(plan requestEffectPlan, shape requestPlanShape, op
 	if shape.opening != nil && !shape.opening.OpenedAt.Equal(now) {
 		return uuid.Nil, errRequestShape
 	}
-	for _, e := range plan.effects {
-		if !e.HeldSince.IsZero() && !e.HeldSince.Equal(now) {
-			return uuid.Nil, errRequestShape
-		}
-		for _, id := range []uuid.UUID{opens.requestID, opens.disputeGroupID} {
-			if id != uuid.Nil && (id.String() == e.RequestID || id.String() == e.Group) {
-				return uuid.Nil, errRequestShape
-			}
-		}
+	if err := validatePreparedEffectBindings(plan, opens, now); err != nil {
+		return uuid.Nil, err
 	}
 	if shape.needsGroup {
 		return opens.disputeGroupID, nil
@@ -104,6 +100,20 @@ func validatePreparedOpenings(plan requestEffectPlan, shape requestPlanShape, op
 		return requestUUID(shape.group)
 	}
 	return uuid.Nil, nil
+}
+
+func validatePreparedEffectBindings(plan requestEffectPlan, opens preparedOpenings, now time.Time) error {
+	for _, e := range plan.effects {
+		if !e.HeldSince.IsZero() && !e.HeldSince.Equal(now) {
+			return errRequestShape
+		}
+		for _, id := range []uuid.UUID{opens.requestID, opens.disputeGroupID} {
+			if id != uuid.Nil && (id.String() == e.RequestID || id.String() == e.Group) {
+				return errRequestShape
+			}
+		}
+	}
+	return nil
 }
 
 type requestChange struct {
@@ -133,7 +143,10 @@ func prepareRequestChanges(ctx context.Context, tx *sql.Tx, userID uuid.UUID, no
 	changes := make([]requestChange, 0, len(ordered))
 	// Lock the complete sorted request set before loading any child origins.
 	for _, id := range ordered {
-		row, err := scanRequestRow(tx.QueryRowContext(ctx, `SELECT `+requestColumns+`
+		row, err := scanRequestRow(tx.QueryRowContext(ctx, `SELECT id,kind,target_kind,target_id,target_material_version,reset_factors,
+status,origin_class,origin_fingerprint,request_fingerprint,coarse_fingerprint,fingerprint_key_id,
+dispute_group_id,opened_at,completes_at,held_ms,held_since,disputed_at,completed_at,cancelled_at,
+cancel_reason,canceller_class,pending_password_hash,pending_address
 FROM account_pending_requests WHERE user_id=$1 AND id=$2 FOR UPDATE`, userID, id).Scan)
 		if err != nil {
 			return nil, err
@@ -172,38 +185,46 @@ func stageRequestChange(row *requestRow, now time.Time, e decide.Effect, transit
 		r.HeldSince = hold.HeldSince
 	}
 	if transition {
-		switch e.Kind {
-		case decide.EffectCancel:
-			r.Status, r.CancelledAt, r.CancelReason, r.CancellerClass = decide.StatusCancelled, now, e.Reason, e.CancellerClass
-			r.HeldSince, row.payload = time.Time{}, requestPendingPayload{}
-			if e.Reason != decide.CancelProof && e.Reason != decide.CancelDisputeResolved {
-				clearRequestFingerprint(r)
-			}
-		case decide.EffectDispute:
-			if group == uuid.Nil {
-				return errRequestShape
-			}
-			if r.Status == decide.StatusPending {
-				r.DisputedAt = now
-			}
-			r.Status, r.DisputeGroup, r.HeldSince = decide.StatusDisputed, group.String(), time.Time{}
-		case decide.EffectReturnToPending:
-			if r.Status != decide.StatusDisputed {
-				return errRequestShape
-			}
-			r.Status, r.DisputedAt, r.DisputeGroup = decide.StatusPending, time.Time{}, ""
-		case decide.EffectComplete:
-			if r.Status != decide.StatusPending {
-				return errRequestShape
-			}
-			r.Status, row.completedAt, r.HeldSince = decide.StatusCompleted, now, time.Time{}
-			row.payload = requestPendingPayload{}
-			clearRequestFingerprint(r)
-		default:
-			return errRequestShape
+		if err := stageRequestTransition(row, now, e, group); err != nil {
+			return err
 		}
 	}
 	return validateRequestRow(*row)
+}
+
+func stageRequestTransition(row *requestRow, now time.Time, e decide.Effect, group uuid.UUID) error {
+	r := &row.req
+	switch e.Kind {
+	case decide.EffectCancel:
+		r.Status, r.CancelledAt, r.CancelReason, r.CancellerClass = decide.StatusCancelled, now, e.Reason, e.CancellerClass
+		r.HeldSince, row.payload = time.Time{}, requestPendingPayload{}
+		if e.Reason != decide.CancelProof && e.Reason != decide.CancelDisputeResolved {
+			clearRequestFingerprint(r)
+		}
+	case decide.EffectDispute:
+		if group == uuid.Nil {
+			return errRequestShape
+		}
+		if r.Status == decide.StatusPending {
+			r.DisputedAt = now
+		}
+		r.Status, r.DisputeGroup, r.HeldSince = decide.StatusDisputed, group.String(), time.Time{}
+	case decide.EffectReturnToPending:
+		if r.Status != decide.StatusDisputed {
+			return errRequestShape
+		}
+		r.Status, r.DisputedAt, r.DisputeGroup = decide.StatusPending, time.Time{}, ""
+	case decide.EffectComplete:
+		if r.Status != decide.StatusPending {
+			return errRequestShape
+		}
+		r.Status, row.completedAt, r.HeldSince = decide.StatusCompleted, now, time.Time{}
+		row.payload = requestPendingPayload{}
+		clearRequestFingerprint(r)
+	default:
+		return errRequestShape
+	}
+	return nil
 }
 
 func clearRequestFingerprint(r *decide.Req) {
