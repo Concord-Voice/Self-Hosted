@@ -29,3 +29,8 @@ func EventBudgetTestListenerCount(runtime *Runtime) int {
 	defer runtime.mu.RUnlock()
 	return len(runtime.listeners)
 }
+
+// EventBudgetTestControlPlaneACLRule exposes the checked renderer only to tests.
+func EventBudgetTestControlPlaneACLRule() string {
+	return serviceACLRule("control-plane")
+}
