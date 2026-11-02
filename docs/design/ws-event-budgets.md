@@ -6,9 +6,10 @@ Redis account engine, socket lifetimes and complete enabled dispatch/renewal
 integration, validated process construction and Unit E canonical error-schema
 validation. Enabled Hubs enforce the event gates, bounded hold and refusal
 responses described below. The production router uses immutable startup policy
-and the process-owned engine. Metrics publication and compatible client delivery
-remain prerequisites, together with G/H self-hosted and
-managed configuration delivery and workload acceptance. All thresholds and
+and the process-owned engine. D1 adds a read-only scalar snapshot bridge without
+collector wiring or metric publication. Metrics publication and compatible client
+delivery remain prerequisites, together with G/H self-hosted and managed
+configuration delivery and workload acceptance. All thresholds and
 workload claims are **UNMEASURED**; source implementation is not evidence of deployment.
 
 ## Policy and identity
@@ -489,6 +490,16 @@ the remaining metrics, client, writer or workload acceptance evidence.
 
 ## Observability, compatibility and activation
 
+D1 supplies `Hub.EventBudgetSnapshot() (inflight int64, warmUsers int,
+capacityMisses uint64)` through an optional private engine interface. Nil or
+disabled owners and absent providers return zeros. The engine reads its existing
+atomic inflight/miss fields and holds only `warmMu` briefly for the map length.
+The values are independently current; no identities, clock, backend calls, sweep
+or lifecycle lock are involved. Close retains warm residents and cumulative
+misses, so snapshots preserve those values after remote work has joined. The Hub
+continues to borrow the process-owned engine. D1 installs no observer, changes
+no collector/counter catalog and exposes no HTTP or persisted metric surface.
+
 The canonical schema is
 `packages/protocol/src/renderer/types/ws-events.ts`: nested error data validation
 retains `event_class` and `retry_after_ms` through both `ErrorSchema` and the
@@ -512,13 +523,19 @@ exactly once before account admission. Add inflight/warm-user gauges and actual
 warm-capacity-miss counter: 27 keys total, all `SourceControl`/`UnitCount`, counters
 `KindCounter/RollupLast`, gauges `KindGauge/RollupAverage`, existing count bounds.
 Use a closed catalog. Emit no payloads, identifiers or raw close/Redis errors.
-Reuse rate-limit-denied/backend-unavailable security reasons, coalesced per process
+Reuse rate-limit-denied/backend-unavailable security reasons, coalesced per Hub
 per reason per 60s, without new identity/class fields.
 
 Ship the compatible Admin reader before or with the 27-key producer, including
-disabled zero emission. Ship canonical protocol schema and compatible Desktop/
-other supported consumers before relying on the 1013 floor. Verify the actual
-managed deployment consumes the canonical Self-Hosted implementation; any temporary
+disabled zero emission. D2 must also expand both sample and rollup database CHECK
+catalogs before persistence, and pair the Go catalog, OpenAPI and Admin changes.
+Even new zero samples can reject an ordinary collection batch against the old
+constraints. Migration numbering and canonical delivery order require a separate
+allocation; D1 allocates no migration. Retain the expanded storage catalog and
+compatible reader on ordinary binary rollback. Ship canonical protocol schema and
+compatible Desktop/other supported consumers before relying on the 1013 floor.
+Verify the actual managed deployment consumes the canonical Self-Hosted
+implementation; any temporary
 source port must carry the matching Admin changes and explicit provenance.
 Install the control-plane `TIME` ACL and required env keys before enabling the
 binary. Existing installations populate keys through their current config owner

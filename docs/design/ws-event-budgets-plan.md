@@ -5,7 +5,8 @@ by the [normative contract](ws-event-budgets.md). All thresholds remain
 **UNMEASURED**. Units A and B1–B3 provide construction groundwork; C1–C4 supply
 socket lifetimes, enabled event gates and complete dispatch/renewal integration.
 C5 adds validated startup settings, process ownership and router injection.
-Unit E canonical error-schema validation is also present. D publication,
+Unit E canonical error-schema validation and D1 scalar snapshot groundwork are
+also present. D2 publication,
 compatible client delivery, G/H configuration delivery and workload acceptance
 remain prerequisites for activation.
 
@@ -16,13 +17,15 @@ remain prerequisites for activation.
 | A: pure policy | Self-Hosted: `event_admission.go`, focused independent tests, WebSocket README and these design documents | exhaustive registry, strict typed validation, integer vectors and source census |
 | B: account engine | Self-Hosted: Redis Lua/adapter, bounded local fallback, dedicated database client and control-plane ACL | frozen Redis byte/clock vectors, uncertainty, map/slot bounds, lifecycle and managed credentials |
 | C: integration | Self-Hosted: read/dispatch, renewal, handler/router/bootstrap, typed env parsing | before-effect refusal, FIFO, cancellation/authority races, disable and startup validation |
-| D: metrics pair | Self-Hosted: producer, closed backend catalog and bundled Admin reader/labels | all 27 served points through actual reader definitions/parser; rollback compatibility |
+| D: metrics pair | Self-Hosted: scalar snapshots, producer, closed Go/DB/API catalogs and bundled Admin reader/labels | all 27 persisted/served points through actual reader definitions/parser; rollback compatibility |
 | E: schema | Self-Hosted: canonical `packages/protocol` error contract | valid/invalid payload vectors and compatibility |
 | F: client | Desktop: actual WebSocket service and currently required consumer schema copy | strict 1013 grammar, generation timers, all automatic dial paths and no mutation replay |
 | G: self-host config | Self-Hosted: actual production Compose, fresh installer, env example and operator docs | required-value wiring, installer/parity fixtures and existing-install preparation |
 | H: managed delivery | Hosted: canonical config writer, Compose, ACL/operator docs and verified delivery lane | every admitted writer branch, reader/client prerequisites and canonical source provenance |
 
-No SQL migration, media-plane change or live commissioning belongs to these units.
+D2 requires an additive migration for both closed metric-key CHECKs; its number
+and canonical delivery order must be allocated before publication. D1 introduces
+no migration. No media-plane change or live commissioning belongs to these units.
 Self-Hosted owns control-plane policy and the protocol origin; Desktop owns its
 consumer; Hosted owns managed deployment. The protocol package is unpublished:
 identify the exact schema source commit and required consumer copy instead of
@@ -347,6 +350,30 @@ Focused normal/race checks, meaningful changed-code coverage and independent
 review remain required. Source wiring alone supplies none of D's paired metrics
 reader, released E/F consumers and floors, G/H writer delivery, canonical Hosted
 delivery or measured workload acceptance.
+
+## Unit D1 scalar observation groundwork
+
+`event_admission_snapshot.go` adds the optional private engine provider and
+`Hub.EventBudgetSnapshot` bridge. EventAdmitter, constructor ownership and the
+existing admission/finalization paths remain unchanged. Atomic inflight/miss
+loads and a short warm-map length read provide independent scalars without
+backend, clock, sweep or lifecycle-lock work. Nil/disabled owners and absent
+providers return zeros; completed Close retains warm residents and cumulative
+misses while inflight returns to zero.
+
+Independent tests exercise blocked real backend slots, actual warm insertion and
+capacity misses, sweep, disabled/nil/absent providers, lifecycle-lock independence
+and concurrent admission/sweep/Close. Missing-method errors establish only a
+construction barrier. Behavioral/race checks, meaningful mutation evidence and
+independent review remain required; this paragraph claims no passing execution.
+
+D1 installs no observer and changes no collector, counters, persisted keys or
+reader. D2 pairs the final observer and all 27 keys with both database CHECKs,
+OpenAPI and Admin. Preserve the existing live Go/SQL catalog guard by transferring
+it from the historical migration test to the newly allocated migration test.
+Disabled zero emission does not waive that storage dependency. Keep compatible
+readers/catalogs on ordinary rollback; a guarded schema down must refuse retained
+new-key rows rather than delete them. No migration number is allocated by D1.
 
 ## Delivery and activation order
 
