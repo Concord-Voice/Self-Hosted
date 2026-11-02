@@ -41,9 +41,11 @@ chmod +x "$TMP/scripts/update-notice-md.py"
 
 # Locked local CLI shim — emits a per-workspace CSV keyed off cwd and records
 # the real command arguments at the process boundary.
-LICENSE_CHECKER_BIN="$TMP/.github/tools/license-checker/node_modules/.bin/license-checker"
+LICENSE_CHECKER_BIN="$TMP/.github/tools/license-checker/node_modules/.bin/license-checker-rseidelsohn"
+LEGACY_CHECKER_BIN="$TMP/.github/tools/license-checker/node_modules/.bin/license-checker"
 cat > "$LICENSE_CHECKER_BIN" <<'SHIM'
 #!/bin/bash
+printf '%s\n' "$0" >> "${CLI_PATH_LOG:?}"
 printf '%s|%s\n' "$PWD" "$*" >> "${LOCKED_CALL_LOG:?}"
 echo '"module name","license","repository"'
 case "$PWD" in
@@ -73,10 +75,16 @@ echo "github.com/example/one v1.1.0"
 echo "github.com/example/two v2.2.0"
 SHIM
 chmod +x "$LICENSE_CHECKER_BIN" "$TMP/bin/npx" "$TMP/bin/go"
+# The old path is a compatibility shim only for the RED phase. It executes the
+# same fixture so attribution assertions remain meaningful, but the path log
+# below proves the source selected the replacement CLI.
+ln -s license-checker-rseidelsohn "$LEGACY_CHECKER_BIN"
 export PATH="$TMP/bin:$PATH"
 export LOCKED_CALL_LOG="$TMP/license-checker-calls"
+export CLI_PATH_LOG="$TMP/license-checker-paths"
 export NPX_TRAP_LOG="$TMP/npx-fallbacks"
 : > "$LOCKED_CALL_LOG"
+: > "$CLI_PATH_LOG"
 LOCKED_TOOL_SHIM="$TMP/license-checker-shim"
 cp "$LICENSE_CHECKER_BIN" "$LOCKED_TOOL_SHIM"
 
@@ -183,6 +191,13 @@ if [[ "$(wc -l < "$LOCKED_CALL_LOG" | tr -d ' ')" == 2 ]] \
 else
   FAILS=$((FAILS + 1))
   FAIL_DETAILS+=("locked license CLI receives CSV flags from each workspace cwd; npx is never used"$'\n'"$(cat "$LOCKED_CALL_LOG" 2>/dev/null || true)"$'\n'"$(cat "$NPX_TRAP_LOG" 2>/dev/null || true)")
+fi
+if [[ "$(wc -l < "$CLI_PATH_LOG" | tr -d ' ')" == 2 ]] \
+  && ! grep -vFx "$LICENSE_CHECKER_BIN" "$CLI_PATH_LOG" >/dev/null; then
+  PASSES=$((PASSES + 1))
+else
+  FAILS=$((FAILS + 1))
+  FAIL_DETAILS+=("NOTICE inventory must execute the replacement locked CLI for both npm workspaces"$'\n'"$(cat "$CLI_PATH_LOG")")
 fi
 
 # Missing local tooling must stop with actionable setup guidance and must not
@@ -602,12 +617,23 @@ root, workflow, source = map(Path, sys.argv[1:])
 manifest = json.loads((root / 'package.json').read_text())
 lock = json.loads((root / 'package-lock.json').read_text())
 assert manifest.get('private') is True, 'locked tool project must remain private'
-assert manifest.get('devDependencies') == {'license-checker': '25.0.1'}, 'manifest must pin license-checker 25.0.1'
-entry = lock.get('packages', {}).get('node_modules/license-checker', {})
-assert entry.get('version') == '25.0.1' and entry.get('integrity'), 'lock must pin version and integrity'
+assert manifest.get('devDependencies') == {'license-checker-rseidelsohn': '5.0.1'}, 'manifest must pin the maintained checker'
+assert manifest.get('overrides', {}).get('minimatch') == '^11.0.3', 'checker tree must force patched minimatch major'
+assert manifest.get('overrides', {}).get('glob') == '^14.0.3', 'checker tree must force patched glob major'
+packages = lock.get('packages', {})
+entry = packages.get('node_modules/license-checker-rseidelsohn', {})
+assert entry.get('version') == '5.0.1' and entry.get('integrity'), 'lock must pin replacement version and integrity'
+assert packages.get('node_modules/minimatch', {}).get('version') == '11.0.3', 'lock must resolve patched minimatch'
+assert packages.get('node_modules/glob', {}).get('version') == '14.0.3', 'lock must resolve patched glob'
+assert 'node_modules/license-checker' not in packages, 'legacy checker must leave the tool tree'
 text = workflow.read_text()
 assert re.search(r'working-directory:\s*\.github/tools/license-checker', text), 'workflow installs from tool root'
 assert re.search(r'npm ci --ignore-scripts --no-audit --no-fund', text), 'workflow uses frozen script-disabled install'
+assert '.github/tools/license-checker/node_modules/.bin/license-checker-rseidelsohn" --production --excludePrivatePackages' in text, 'workflow must use replacement binary for production license policy'
+assert '--onlyAllow "$LICENSE_ALLOWLIST" --summary' in text, 'workflow must enforce existing allowlist'
+assert '/node_modules/.bin/license-checker"' not in text, 'workflow must not call legacy binary'
+source_text = source.read_text()
+assert '.github/tools/license-checker/node_modules/.bin/license-checker-rseidelsohn"' in source_text, 'NOTICE generator must use replacement binary'
 assert 'LICENSE_CHECKER_VERSION' not in source.read_text(), 'generator must not duplicate manifest version'
 PYX
   PASSES=$((PASSES + 1)); else

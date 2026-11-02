@@ -54,10 +54,11 @@ const DEPENDABOT = '.github/dependabot.yml';
 // means a sixth workspace never breaks the suite — and never silently un-tests it.
 export const WORKSPACES = [
   '.github/tools/license-checker',
-  // Self-Hosted: the root workspace (packages/*) takes the desktop slot.
+  // Self-Hosted: the root workspace and both dependency-bearing packages.
   '.',
   'client/admin',
-  'client/mobile',
+  'packages/e2ee-client',
+  'packages/protocol',
   'services/media-plane',
 ];
 const REQUIRED = ['kind', 'ecosystem', 'workspace', 'package', 'pinned', 'reason', 'review_by'];

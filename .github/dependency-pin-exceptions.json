@@ -28,11 +28,11 @@
       "kind": "exact-pin",
       "ecosystem": "npm",
       "workspace": ".github/tools/license-checker",
-      "package": "license-checker",
-      "pinned": "25.0.1",
-      "reason": "CI license policy uses a reviewed tool version and integrity-locked dependency tree. Dependabot may propose version updates; this is not a hold against newer versions.",
-      "authority": "Code Scanning alert 1609; [internal]specs/2026-10-17-ci-license-tool-token-permissions-design.md",
-      "recorded": "2026-10-17",
+      "package": "license-checker-rseidelsohn",
+      "pinned": "5.0.1",
+      "reason": "CI license policy uses a reviewed, integrity-locked replacement after license-checker@25.0.1 retained vulnerable minimatch@3 through glob@7. Dependabot may propose updates; this is not a hold against newer versions.",
+      "authority": "GHSA-g3hv-75wg-m249; GHSA-3g3m-2fjr-6pw4; docs/ci/minimatch-advisory-repair.md",
+      "recorded": "2026-11-02",
       "review_by": "2027-01-17"
     },
     {
@@ -69,138 +69,6 @@
       "authority": "#3879; #3842; [internal]rules/deployment.md § The pin-exception register",
       "recorded": "2026-10-15",
       "review_by": "2027-09-30"
-    },
-    {
-      "kind": "exact-pin",
-      "ecosystem": "npm",
-      "workspace": "client/mobile",
-      "package": "react",
-      "pinned": "19.2.3",
-      "reason": "Exact pin inherited from the React Native app template, which versions react/react-test-renderer, react-native/@react-native/* and the RN CLI packages in lockstep. Dependabot proposes bumps as one react-native group; this is not a hold against newer versions.",
-      "authority": "#4084 (mobile client scaffold); .github/dependabot.yml /client/mobile block",
-      "recorded": "2026-10-29",
-      "review_by": "2027-04-29"
-    },
-    {
-      "kind": "exact-pin",
-      "ecosystem": "npm",
-      "workspace": "client/mobile",
-      "package": "react-native",
-      "pinned": "0.87.1",
-      "reason": "Exact pin inherited from the React Native app template, which versions react/react-test-renderer, react-native/@react-native/* and the RN CLI packages in lockstep. Dependabot proposes bumps as one react-native group; this is not a hold against newer versions.",
-      "authority": "#4084 (mobile client scaffold); .github/dependabot.yml /client/mobile block",
-      "recorded": "2026-10-29",
-      "review_by": "2027-04-29"
-    },
-    {
-      "kind": "exact-pin",
-      "ecosystem": "npm",
-      "workspace": "client/mobile",
-      "package": "@react-native-community/cli",
-      "pinned": "20.2.0",
-      "reason": "Exact pin inherited from the React Native app template, which versions react/react-test-renderer, react-native/@react-native/* and the RN CLI packages in lockstep. Dependabot proposes bumps as one react-native group; this is not a hold against newer versions.",
-      "authority": "#4084 (mobile client scaffold); .github/dependabot.yml /client/mobile block",
-      "recorded": "2026-10-29",
-      "review_by": "2027-04-29"
-    },
-    {
-      "kind": "exact-pin",
-      "ecosystem": "npm",
-      "workspace": "client/mobile",
-      "package": "@react-native-community/cli-platform-android",
-      "pinned": "20.2.0",
-      "reason": "Exact pin inherited from the React Native app template, which versions react/react-test-renderer, react-native/@react-native/* and the RN CLI packages in lockstep. Dependabot proposes bumps as one react-native group; this is not a hold against newer versions.",
-      "authority": "#4084 (mobile client scaffold); .github/dependabot.yml /client/mobile block",
-      "recorded": "2026-10-29",
-      "review_by": "2027-04-29"
-    },
-    {
-      "kind": "exact-pin",
-      "ecosystem": "npm",
-      "workspace": "client/mobile",
-      "package": "@react-native-community/cli-platform-ios",
-      "pinned": "20.2.0",
-      "reason": "Exact pin inherited from the React Native app template, which versions react/react-test-renderer, react-native/@react-native/* and the RN CLI packages in lockstep. Dependabot proposes bumps as one react-native group; this is not a hold against newer versions.",
-      "authority": "#4084 (mobile client scaffold); .github/dependabot.yml /client/mobile block",
-      "recorded": "2026-10-29",
-      "review_by": "2027-04-29"
-    },
-    {
-      "kind": "exact-pin",
-      "ecosystem": "npm",
-      "workspace": "client/mobile",
-      "package": "@react-native/babel-preset",
-      "pinned": "0.87.1",
-      "reason": "Exact pin inherited from the React Native app template, which versions react/react-test-renderer, react-native/@react-native/* and the RN CLI packages in lockstep. Dependabot proposes bumps as one react-native group; this is not a hold against newer versions.",
-      "authority": "#4084 (mobile client scaffold); .github/dependabot.yml /client/mobile block",
-      "recorded": "2026-10-29",
-      "review_by": "2027-04-29"
-    },
-    {
-      "kind": "exact-pin",
-      "ecosystem": "npm",
-      "workspace": "client/mobile",
-      "package": "@react-native/eslint-config",
-      "pinned": "0.87.1",
-      "reason": "Exact pin inherited from the React Native app template, which versions react/react-test-renderer, react-native/@react-native/* and the RN CLI packages in lockstep. Dependabot proposes bumps as one react-native group; this is not a hold against newer versions.",
-      "authority": "#4084 (mobile client scaffold); .github/dependabot.yml /client/mobile block",
-      "recorded": "2026-10-29",
-      "review_by": "2027-04-29"
-    },
-    {
-      "kind": "exact-pin",
-      "ecosystem": "npm",
-      "workspace": "client/mobile",
-      "package": "@react-native/jest-preset",
-      "pinned": "0.87.1",
-      "reason": "Exact pin inherited from the React Native app template, which versions react/react-test-renderer, react-native/@react-native/* and the RN CLI packages in lockstep. Dependabot proposes bumps as one react-native group; this is not a hold against newer versions.",
-      "authority": "#4084 (mobile client scaffold); .github/dependabot.yml /client/mobile block",
-      "recorded": "2026-10-29",
-      "review_by": "2027-04-29"
-    },
-    {
-      "kind": "exact-pin",
-      "ecosystem": "npm",
-      "workspace": "client/mobile",
-      "package": "@react-native/metro-config",
-      "pinned": "0.87.1",
-      "reason": "Exact pin inherited from the React Native app template, which versions react/react-test-renderer, react-native/@react-native/* and the RN CLI packages in lockstep. Dependabot proposes bumps as one react-native group; this is not a hold against newer versions.",
-      "authority": "#4084 (mobile client scaffold); .github/dependabot.yml /client/mobile block",
-      "recorded": "2026-10-29",
-      "review_by": "2027-04-29"
-    },
-    {
-      "kind": "exact-pin",
-      "ecosystem": "npm",
-      "workspace": "client/mobile",
-      "package": "@react-native/typescript-config",
-      "pinned": "0.87.1",
-      "reason": "Exact pin inherited from the React Native app template, which versions react/react-test-renderer, react-native/@react-native/* and the RN CLI packages in lockstep. Dependabot proposes bumps as one react-native group; this is not a hold against newer versions.",
-      "authority": "#4084 (mobile client scaffold); .github/dependabot.yml /client/mobile block",
-      "recorded": "2026-10-29",
-      "review_by": "2027-04-29"
-    },
-    {
-      "kind": "exact-pin",
-      "ecosystem": "npm",
-      "workspace": "client/mobile",
-      "package": "prettier",
-      "pinned": "2.8.8",
-      "reason": "Exact pin inherited from the React Native app template, which ships prettier 2.8.8 to match @react-native/eslint-config. Dependabot proposes bumps; this is not a hold against newer versions.",
-      "authority": "#4084 (mobile client scaffold); .github/dependabot.yml /client/mobile block",
-      "recorded": "2026-10-29",
-      "review_by": "2027-04-29"
-    },
-    {
-      "kind": "exact-pin",
-      "ecosystem": "npm",
-      "workspace": "client/mobile",
-      "package": "react-test-renderer",
-      "pinned": "19.2.3",
-      "reason": "Exact pin inherited from the React Native app template, which versions react/react-test-renderer, react-native/@react-native/* and the RN CLI packages in lockstep. Dependabot proposes bumps as one react-native group; this is not a hold against newer versions.",
-      "authority": "#4084 (mobile client scaffold); .github/dependabot.yml /client/mobile block",
-      "recorded": "2026-10-29",
-      "review_by": "2027-04-29"
     }
   ]
 }
