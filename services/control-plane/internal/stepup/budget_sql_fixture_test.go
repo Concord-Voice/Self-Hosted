@@ -163,8 +163,8 @@ func sqlBudgetNewFamily(t *testing.T, f sqlBudgetFixture, sameFamily bool) Budge
 // A successful real COMMIT followed by a synthetic transport result models an
 // unknown outcome. Never use ErrBadConn: database/sql must not replay anything.
 type sqlBudgetCommitFault struct {
-	begins, commits atomic.Int32
-	lose            atomic.Bool
+	begins, commits, rollbacks atomic.Int32
+	lose, loseRollback         atomic.Bool
 }
 type sqlBudgetConnector struct {
 	base  driver.Connector
@@ -239,6 +239,17 @@ func (tx *sqlBudgetFaultTx) Commit() error {
 	}
 	if tx.fault.lose.Swap(false) {
 		return errors.New("synthetic lost COMMIT result")
+	}
+	return nil
+}
+func (tx *sqlBudgetFaultTx) Rollback() error {
+	tx.fault.rollbacks.Add(1)
+	err := tx.Tx.Rollback()
+	if err != nil {
+		return err
+	}
+	if tx.fault.loseRollback.Swap(false) {
+		return errors.New("synthetic lost ROLLBACK result")
 	}
 	return nil
 }
