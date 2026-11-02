@@ -264,6 +264,15 @@ printf '%s\n' '{"name":"w","devDependencies":{"wrangler":"4.131.1"}}' > "$D/$WOR
 run "reads a non-client workspace's exact pin"      "$D" 1 "exact pin\(s\) with no register entry"
 run "names that pin, not just a count"   "$D" 1 "wrangler@4.131.1"
 
+# The two package workspaces newly watched by Dependabot must also be read by
+# the pin scanner. A missing package fixture would make this vacuous.
+for package_ws in packages/e2ee-client packages/protocol; do
+  D=$(mkroot "packagepin-${package_ws##*/}" "$EMPTY_REG" "$NO_IGNORES")
+  mkdir -p "$D/$package_ws"
+  printf '%s\n' '{"name":"fixture","dependencies":{"held-fixture":"2.3.4"}}' > "$D/$package_ws/package.json"
+  run "reads $package_ws exact pin" "$D" 1 "held-fixture@2.3.4"
+done
+
 # ── 14. SCOPE DRIFT, both directions. This is the assertion that makes case 13
 #     durable: without it, WORKSPACES and dependabot.yml can part company and the
 #     lint goes on passing. `uncovered` is the #3292 shape — dependabot proposes
@@ -302,7 +311,8 @@ updates:
     directories:
       - "/"
       - "/client/admin"
-      - "/client/mobile"
+      - "/packages/e2ee-client"
+      - "/packages/protocol"
       - "/services/media-plane"
       - "/.github/tools/license-checker"'
 D=$(mkroot_raw driftlist "$EMPTY_REG" "$DRIFT_LIST")
@@ -336,7 +346,7 @@ run "fails closed when dependabot.yml is absent" "$D" 2 "dependabot config not f
 DRIFT_FLOW='version: 2
 updates:
   - package-ecosystem: "npm"
-    directories: ["/", "/client/admin", "/services/media-plane", "/.github/tools/license-checker"]'
+    directories: ["/", "/client/admin", "/packages/e2ee-client", "/packages/protocol", "/services/media-plane", "/.github/tools/license-checker"]'
 D=$(mkroot_raw driftflow "$EMPTY_REG" "$DRIFT_FLOW")
 run "accepts a flow-style directories list"    "$D" 0 "accounted for"
 
@@ -348,7 +358,8 @@ updates:
     directories: [
       "/",
       "/client/admin",
-      "/client/mobile",
+      "/packages/e2ee-client",
+      "/packages/protocol",
       "/services/media-plane",
       "/.github/tools/license-checker"
     ]'
@@ -379,7 +390,8 @@ updates:
     'directories':
       - '/'
       - '/client/admin'
-      - '/client/mobile'
+      - '/packages/e2ee-client'
+      - '/packages/protocol'
       - '/services/media-plane'
       - '/.github/tools/license-checker'"
 D=$(mkroot_raw driftquoted "$EMPTY_REG" "$DRIFT_QUOTED")
@@ -388,7 +400,7 @@ run "quoted mapping keys are read"             "$D" 0 "accounted for"
 # ── 22. The same update written as a flow mapping.
 DRIFT_FLOWMAP='version: 2
 updates:
-  - { package-ecosystem: npm, directories: ["/", "/client/admin", "/services/media-plane", "/.github/tools/license-checker"] }'
+  - { package-ecosystem: npm, directories: ["/", "/client/admin", "/packages/e2ee-client", "/packages/protocol", "/services/media-plane", "/.github/tools/license-checker"] }'
 D=$(mkroot_raw driftflowmap "$EMPTY_REG" "$DRIFT_FLOWMAP")
 run "a flow mapping update block is read"      "$D" 0 "accounted for"
 

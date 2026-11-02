@@ -484,7 +484,7 @@ key, so a bare name never matches and the exclusion silently does nothing.
 
 ```bash
 (cd .github/tools/license-checker && npm ci --ignore-scripts --no-audit --no-fund)
-notice_checker="$PWD/.github/tools/license-checker/node_modules/.bin/license-checker"
+notice_checker="$PWD/.github/tools/license-checker/node_modules/.bin/license-checker-rseidelsohn"
 
 # Media-plane (npm)
 (cd services/media-plane && "$notice_checker" --production --csv --excludePrivatePackages > /tmp/media-licenses.csv)

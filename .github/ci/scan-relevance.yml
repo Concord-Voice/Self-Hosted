@@ -541,6 +541,8 @@ license_desktop:
   - 'package-lock.json'
   - '.github/tools/license-checker/package.json'
   - '.github/tools/license-checker/package-lock.json'
+  - '.github/tools/license-checker/.override-range-baseline.json'
+  - 'scripts/security/override-range-lint.mjs'
 license_media:
   - '.github/ci/scan-relevance.yml'
   - '.github/scripts/ci-scan-relevance.mjs'
@@ -553,6 +555,8 @@ license_media:
   - 'services/media-plane/package-lock.json'
   - '.github/tools/license-checker/package.json'
   - '.github/tools/license-checker/package-lock.json'
+  - '.github/tools/license-checker/.override-range-baseline.json'
+  - 'scripts/security/override-range-lint.mjs'
 license_admin:
   - '.github/ci/scan-relevance.yml'
   - '.github/scripts/ci-scan-relevance.mjs'
@@ -565,6 +569,8 @@ license_admin:
   - 'client/admin/package-lock.json'
   - '.github/tools/license-checker/package.json'
   - '.github/tools/license-checker/package-lock.json'
+  - '.github/tools/license-checker/.override-range-baseline.json'
+  - 'scripts/security/override-range-lint.mjs'
 license_go:
   - '.github/ci/scan-relevance.yml'
   - '.github/scripts/ci-scan-relevance.mjs'
