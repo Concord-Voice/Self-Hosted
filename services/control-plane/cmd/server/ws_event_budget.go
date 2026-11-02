@@ -72,7 +72,7 @@ func (factories wsEventAdmitterFactories) newClient(cfg *config.Config, redisRun
 }
 
 func closeWSEventAdmitterOnReturn(admitter websocket.EventAdmitter, runErr *error) {
-	if err := admitter.Close(); err != nil {
+	if err := admitter.Close(); err != nil && !errors.Is(*runErr, err) {
 		*runErr = errors.Join(*runErr, fmt.Errorf("close websocket event admitter: %w", err))
 	}
 }
