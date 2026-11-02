@@ -1,4 +1,4 @@
-//go:build managedredis_integration
+//go:build integration || managedredis_integration
 
 package managedredis
 
@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -63,7 +64,7 @@ func TestRedisACLIntegration(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.NoError(t, controller.PrepareInitial(initial))
-	contents, err := os.ReadFile(aclPath)
+	contents, err := os.ReadFile(aclPath) // #nosec G304 -- fixed users.acl basename beneath this test's t.TempDir, also passed to the fixture controller.
 	require.NoError(t, err)
 	manifest := checkedACLManifest
 	require.NotContains(t, string(contents), "+@all")
@@ -71,18 +72,24 @@ func TestRedisACLIntegration(t *testing.T) {
 
 	// The fixture runs as root because the test-created host bind mount's UID mapping
 	// is not equivalent to the production tmpfs ownership contract.
+	image := os.Getenv("MANAGED_REDIS_TEST_IMAGE")
+	if image == "" {
+		image = "redis:7-alpine"
+	}
+	require.NoError(t, ValidateRedisIntegrationImage(image))
+	// #nosec G204 G702 -- fixed argv, generated name and TempDir mounts; image passes ValidateRedisIntegrationImage so cannot be an option or shell text.
 	run := exec.CommandContext(ctx, "docker", "run", "-d", "--rm", "--name", name,
 		"--label", "concord.task=epic2944-3930-acl-integration",
 		"--cpus", "0.5", "--memory", "128m", "-p", "127.0.0.1::6379",
 		"-v", aclDir+":/acl:ro", "-v", data+":/data",
-		"--entrypoint", "redis-server", "redis:7-alpine", "--aclfile", "/acl/users.acl", "--dir", "/data", "--appendonly", "yes")
+		"--entrypoint", "redis-server", image, "--aclfile", "/acl/users.acl", "--dir", "/data", "--appendonly", "yes")
 	out, err := run.CombinedOutput()
 	require.NoErrorf(t, err, "start fixture: %s", out)
 	t.Cleanup(func() {
-		_ = exec.Command("docker", "exec", name, "chmod", "-R", "a+rwX", "/data").Run()
-		_ = exec.Command("docker", "rm", "-f", name).Run()
+		_ = exec.Command("docker", "exec", name, "chmod", "-R", "a+rwX", "/data").Run() // #nosec G204 -- fixed argv and generated fixture name; chmod is confined to its disposable /data mount.
+		_ = exec.Command("docker", "rm", "-f", name).Run()                              // #nosec G204 -- fixed argv removes only the generated fixture container; no shell.
 	})
-	portOut, err := exec.Command("docker", "port", name, "6379/tcp").Output()
+	portOut, err := exec.Command("docker", "port", name, "6379/tcp").Output() // #nosec G204 -- fixed argv and generated fixture name; no shell.
 	require.NoError(t, err)
 	endpoint := strings.TrimSpace(string(portOut))
 	_, port, err := net.SplitHostPort(strings.TrimPrefix(endpoint, "127.0.0.1:"))
@@ -95,10 +102,10 @@ func TestRedisACLIntegration(t *testing.T) {
 	t.Cleanup(func() { _ = adminClient.Close() })
 	admin.client = adminClient
 	require.Eventually(t, func() bool { return adminClient.Ping(ctx).Err() == nil }, 20*time.Second, 100*time.Millisecond)
-	versionOut, err := exec.CommandContext(ctx, "docker", "exec", name, "redis-server", "--version").Output()
+	versionOut, err := exec.CommandContext(ctx, "docker", "exec", name, "redis-server", "--version").Output() // #nosec G204 -- fixed version command targets only the generated fixture name; no shell.
 	require.NoError(t, err)
 	aclDigest := sha256.Sum256(contents)
-	t.Logf("Redis fixture image=redis:7-alpine version=%s ACL_SHA256=%s command_counts={control-plane:%d,media-plane:%d} key_pattern_counts={control-plane:%d,media-plane:%d} container_user=root", strings.TrimSpace(string(versionOut)), hex.EncodeToString(aclDigest[:]), len(manifest.Services["control-plane"].Commands), len(manifest.Services["media-plane"].Commands), len(manifest.Services["control-plane"].KeyPatterns), len(manifest.Services["media-plane"].KeyPatterns))
+	t.Logf("Redis fixture image=%s version=%s ACL_SHA256=%s command_counts={control-plane:%d,media-plane:%d} key_pattern_counts={control-plane:%d,media-plane:%d} container_user=root", image, strings.TrimSpace(string(versionOut)), hex.EncodeToString(aclDigest[:]), len(manifest.Services["control-plane"].Commands), len(manifest.Services["media-plane"].Commands), len(manifest.Services["control-plane"].KeyPatterns), len(manifest.Services["media-plane"].KeyPatterns))
 	if err := controller.Reconcile(ctx, policy); err != nil {
 		t.Fatalf("reconcile: %v; ACL load: %v", err, admin.loadACLErr)
 	}
@@ -140,6 +147,31 @@ func TestRedisACLIntegration(t *testing.T) {
 	cp := integrationRedisClient(t, addr, "cv_cp_12", passwords["cv_cp_12"])
 	mp := integrationRedisClient(t, addr, "cv_mp_12", passwords["cv_mp_12"])
 	t.Cleanup(func() { _ = cp.Close(); _ = mp.Close() })
+	// TIME is needed by the actual account-budget Lua body, and remains outside
+	// the media and operator grants. Check nested execution rather than only
+	// the manifest or ACL DRYRUN handshake.
+	_, err = cp.Time(ctx).Result()
+	require.NoError(t, err)
+	_, err = mp.Time(ctx).Result()
+	require.ErrorContains(t, err, "NOPERM")
+	_, err = adminClient.Time(ctx).Result()
+	require.ErrorContains(t, err, "NOPERM", "operator must not inherit the control-plane TIME grant")
+	_, err = mp.Eval(ctx, `return redis.call('TIME')`, []string{"voice:room_owner:acl-fixture"}).Result()
+	requireBudgetTimeACLRefusal(t, err, "cv_mp_12")
+	budgetSource, err := os.ReadFile(filepath.Join("..", "websocket", "event_admission.lua"))
+	require.NoError(t, err)
+	budgetKey := "ratelimit:user:ws:v1:{11111111-1111-4111-8111-111111111111}:profile"
+	t.Run("account script refuses before TIME grant", func(t *testing.T) {
+		assertBudgetScriptRequiresTimeGrant(ctx, t, aclPath, admin, cp, string(budgetSource), budgetKey)
+	})
+	budgetReply, err := cp.Eval(ctx, string(budgetSource), []string{budgetKey}, "1", "5000000", "8").Result()
+	require.NoError(t, err)
+	require.Equal(t, []interface{}{int64(1), int64(1), int64(0)}, budgetReply)
+	budgetFields, err := cp.HGetAll(ctx, budgetKey).Result()
+	require.NoError(t, err)
+	require.Len(t, budgetFields, 3)
+	require.Equal(t, "1", budgetFields["v"])
+	require.NoError(t, cp.Del(ctx, budgetKey).Err())
 	for _, key := range []string{"mfa_upgrade_bypass:acl-fixture", "session_revokes:acl-fixture", "attach_sess:acl-fixture"} {
 		require.NoError(t, cp.Set(ctx, key, "preserve", 0).Err(), key)
 		require.Equal(t, "preserve", cp.Get(ctx, key).Val())
@@ -207,8 +239,8 @@ return 1`, []string{fallbackKey, markerKey}, "acl-fixture", "operation-fixture")
 
 	// Restart from the committed ACL file and AOF; both new auth and data survive.
 	require.NoError(t, cp.Set(ctx, "session_revokes:acl-fixture", "restart-proof", 0).Err())
-	require.NoError(t, exec.CommandContext(ctx, "docker", "restart", name).Run())
-	portOut, err = exec.CommandContext(ctx, "docker", "port", name, "6379/tcp").Output()
+	require.NoError(t, exec.CommandContext(ctx, "docker", "restart", name).Run())        // #nosec G204 -- fixed argv restarts only the generated fixture container; no shell.
+	portOut, err = exec.CommandContext(ctx, "docker", "port", name, "6379/tcp").Output() // #nosec G204 -- fixed argv inspects only the generated fixture container; no shell.
 	require.NoError(t, err)
 	addr = net.JoinHostPort("127.0.0.1", dockerPortNumber(t, string(portOut)))
 	_ = cp.Close()
@@ -217,7 +249,7 @@ return 1`, []string{fallbackKey, markerKey}, "acl-fixture", "operation-fixture")
 	mp = integrationRedisClient(t, addr, "cv_mp_12", passwords["cv_mp_12"])
 	admin.client = integrationRedisClient(t, addr, "cv_admin", admin.password)
 	if !eventually(20*time.Second, 100*time.Millisecond, func() bool { return cp.Ping(ctx).Err() == nil }) {
-		logs, _ := exec.CommandContext(ctx, "docker", "logs", name).CombinedOutput()
+		logs, _ := exec.CommandContext(ctx, "docker", "logs", name).CombinedOutput() // #nosec G204 -- fixed argv reads only the generated fixture container's logs; no shell.
 		t.Fatalf("Redis did not recover after restart: %s", logs)
 	}
 	require.Equal(t, "restart-proof", cp.Get(ctx, "session_revokes:acl-fixture").Val())
@@ -261,6 +293,44 @@ type integrationAdminFixture struct {
 	loadACLErr error
 }
 
+// ValidateRedisIntegrationImage checks the image argument shared by the two
+// opt-in Docker fixtures. It is test-only, including for the external test
+// package, and excludes CLI options, whitespace, controls and shell syntax.
+func ValidateRedisIntegrationImage(image string) error {
+	// Keep registry ports, bracketed IPv6 hosts, repository paths, tags and
+	// digest references usable. This guarantees a single image argument, not
+	// complete OCI validation, image trust or digest pinning. Docker validates
+	// the full reference; the test runner chooses the executable image.
+	const domainPart = `(?:[A-Za-z0-9]|[A-Za-z0-9][A-Za-z0-9-]*[A-Za-z0-9])`
+	const domain = `(?:` + domainPart + `(?:\.` + domainPart + `)*|\[[A-Fa-f0-9:]+\])(?::[0-9]+)?`
+	const component = `[a-z0-9]+(?:(?:[._]|__|-+)[a-z0-9]+)*`
+	const repository = `(?:` + domain + `/)?` + component + `(?:/` + component + `)*`
+	const tag = `(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?`
+	const digest = `(?:@[A-Za-z][A-Za-z0-9]*(?:[-_+.][A-Za-z][A-Za-z0-9]*)*:[A-Fa-f0-9]{32,})?`
+	if !regexp.MustCompile(`^` + repository + tag + digest + `$`).MatchString(image) {
+		return errors.New("Redis integration fixture image reference is invalid")
+	}
+	return nil
+}
+
+func TestValidateRedisIntegrationImage(t *testing.T) {
+	for _, image := range []string{
+		"redis", "redis:8-alpine", "docker.io/library/redis:8.10.2",
+		"localhost:5000/team/redis:fixture_1", "[::1]:5000/team/redis:8",
+		"registry.example/team/redis@sha256:" + strings.Repeat("a", 64),
+		"registry.example/team/redis:8@sha256:" + strings.Repeat("b", 64),
+	} {
+		require.NoError(t, ValidateRedisIntegrationImage(image))
+	}
+	for _, image := range []string{
+		"", "--privileged", "-v/tmp:/data", "privileged=true", "redis --privileged",
+		" redis:8", "redis:8 ", "redis\t8", "redis\n8", "redis\r8", "redis\x008",
+		"$(command)", "redis;command", "redis@sha256:", "https://registry.example/redis",
+	} {
+		require.EqualError(t, ValidateRedisIntegrationImage(image), "Redis integration fixture image reference is invalid")
+	}
+}
+
 func (a *integrationAdminFixture) LoadACL(ctx context.Context, path string) error {
 	if err := appendACLDiagnosticUserOnDisk(path); err != nil {
 		a.loadACLErr = err
@@ -302,8 +372,8 @@ func (a *integrationAdminFixture) ProbeAuth(ctx context.Context, username, passw
 	opts.Username = username
 	opts.Password = password // pragma: allowlist secret -- disposable ACL fixture
 	client := redis.NewClient(&opts)
-	defer client.Close()
-	return client.Ping(ctx).Err()
+	pingErr := client.Ping(ctx).Err()
+	return errors.Join(pingErr, client.Close())
 }
 func (a *integrationAdminFixture) UserExists(ctx context.Context, username string) (bool, error) {
 	value, err := a.client.Do(ctx, "ACL", "GETUSER", username).Result()
@@ -322,6 +392,60 @@ func (a *integrationAdminFixture) ExecuteOperator(context.Context, []string) (st
 	return "", fmt.Errorf("unused")
 }
 
+// Redis 7 uses the generic script ACL refusal; Redis 8 names the denied
+// command and user. Require a Redis server error and the complete known prefix
+// plus script-location suffix so transport or unrelated script errors fail.
+func requireBudgetTimeACLRefusal(t *testing.T, err error, user string) {
+	t.Helper()
+	var serverError redis.Error
+	require.ErrorAs(t, err, &serverError)
+	message := serverError.Error()
+	redis7 := strings.HasPrefix(message, "ERR The user executing the script can't run this command or subcommand script: ")
+	redis8 := strings.HasPrefix(message, "ERR ACL failure in script: User "+user+" has no permissions to run the 'time' command script: ")
+	require.True(t, (redis7 || redis8) && strings.Contains(message, "@user_script:"), "expected supported Redis script TIME ACL refusal, got %q", message)
+}
+
+// Only the disposable fixture's ACL file is changed. The production admin has
+// ACL LOAD, not ACL SETUSER; restore the original grants before positive tests.
+func assertBudgetScriptRequiresTimeGrant(ctx context.Context, t *testing.T, aclPath string, admin *integrationAdminFixture, cp *redis.Client, script, key string) {
+	t.Helper()
+	original, err := os.ReadFile(aclPath) // #nosec G304 -- sole caller passes the fixed users.acl path in its t.TempDir fixture.
+	require.NoError(t, err)
+	writeACL := func(contents []byte) {
+		t.Helper()
+		require.NoError(t, os.Chmod(aclPath, 0o600))
+		require.NoError(t, os.WriteFile(aclPath, contents, 0o400)) // #nosec G703 -- sole caller owns this t.TempDir ACL file; contents only remove/restore its TIME grant.
+		require.NoError(t, os.Chmod(aclPath, 0o400))
+		require.NoError(t, admin.LoadACL(ctx, aclPath))
+	}
+	lines := strings.Split(string(original), "\n")
+	removed := 0
+	for i, line := range lines {
+		if !strings.HasPrefix(line, "user cv_cp_12 ") {
+			continue
+		}
+		tokens := strings.Fields(line)
+		kept := make([]string, 0, len(tokens))
+		for _, token := range tokens {
+			if token == "+time" {
+				removed++
+				continue
+			}
+			kept = append(kept, token)
+		}
+		lines[i] = strings.Join(kept, " ")
+	}
+	require.Equal(t, 1, removed, "fixture must remove exactly the intended grant")
+	require.NoError(t, cp.Del(ctx, key).Err())
+	defer writeACL(original)
+	writeACL([]byte(strings.Join(lines, "\n")))
+	_, err = cp.Eval(ctx, script, []string{key}, "1", "5000000", "8").Result()
+	requireBudgetTimeACLRefusal(t, err, "cv_cp_12")
+	exists, err := cp.Exists(ctx, key).Result()
+	require.NoError(t, err)
+	require.Zero(t, exists, "missing TIME must refuse before creating account debt")
+}
+
 func integrationPolicy(passwords map[string]string) Policy {
 	policy := policyTestValue()
 	for service, generations := range map[string][]string{"control-plane": {"cv_cp_11", "cv_cp_12"}, "media-plane": {"cv_mp_11", "cv_mp_12"}} {
@@ -336,7 +460,7 @@ func integrationPolicy(passwords map[string]string) Policy {
 }
 
 func appendACLDiagnosticUserOnDisk(path string) error {
-	contents, err := os.ReadFile(path)
+	contents, err := os.ReadFile(path) // #nosec G304 -- called only by the integration admin with its controller's fixed t.TempDir ACL path.
 	if err != nil {
 		return err
 	}
@@ -369,6 +493,7 @@ func appendACLDiagnosticUserOnDisk(path string) error {
 			return fmt.Errorf("cannot clone candidate media user for flat-ACL falsification")
 		}
 	}
+	// #nosec G703 -- the integration controller supplies only its fixed t.TempDir ACL path; no request or Redis response supplies a path.
 	if err := os.WriteFile(path, []byte(text), 0o400); err != nil {
 		return err
 	}
