@@ -29,8 +29,13 @@ gate can learn from your voice.
 
 ### Added
 
+- **Self-hosting:** Operators can configure separate Stable and Pre-Release SPA discovery streams. Existing clients keep Stable behavior; remote SPA serving remains off by default, and invalid live configuration updates preserve the previous settings.
+- **Self-hosted setup:** Fresh installer environment files now include explicit WebSocket event-budget settings, with preparation and rollback guidance for existing installations. Runtime delivery and activation remain separate steps.
+
 - **Authentication:** Added a dormant transaction-local source marker for future account-change writers, with closed source validation and caller-owned transaction completion.
 - **Authentication:** Added an internal verified-session snapshot adapter for future step-up attempt accounting. Current request handling and attempt budgets are unchanged.
+- **Authentication:** Added dormant SQL receipt accounting for future separate step-up attempt budgets. Current request handling and attempt budgets are unchanged.
+- **Authentication:** Added a private process proof-work tracker for future step-up cutovers. Current request handling remains unchanged.
 - **Tray:** The tray icon now shows both stars of the Concord Voice mark, and it reflects your status. It shows when you are in voice, muted, deafened, sharing your screen, reconnecting, or have unread messages or mentions. On macOS and Windows, click the icon to open a menu with Mute, Deafen, Leave voice, Stop sharing, your presence, and a shortcut to your newest unread conversation. On Linux, click the icon to open the window; the menu comes from your desktop's tray host.
 - **Settings:** Settings ▸ Appearance has a new Tray Icon setting (Menu Bar Icon on macOS). Choose Automatic, Light, Dark, or Colour to match your taskbar or menu bar.
 - **Billing:** Settings ▸ Subscription lists each plan with its monthly and yearly price and opens a secure Stripe page to subscribe or manage billing.
@@ -52,6 +57,8 @@ gate can learn from your voice.
 
 ### Changed
 
+- **Operations:** WebSocket budget observability groundwork now exposes read-only aggregate engine snapshots. Collector publication, database catalogs and the matching Admin reader remain pending.
+- **Server:** WebSocket event budgets now include validated startup settings, dedicated Redis ownership and checked shutdown cleanup alongside dispatch, token renewal and bounded refusal responses. Activation still requires compatible clients, configuration delivery and rollout checks.
 - **Self-hosting:** Self-hosted deployments now ship from the dedicated Self-Hosted repository, with the service, admin, and package checks running in its own CI.
 - **Voice:** The desktop call library handles mixed audio and video RTP header extensions with mediasoup-client 3.25.3.
 - **Voice:** Updated server voice transport dependencies.

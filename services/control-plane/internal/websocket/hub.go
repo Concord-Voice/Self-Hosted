@@ -203,10 +203,11 @@ type Hub struct {
 	// Optional aggregate counter sink. Nil keeps metrics-disabled behavior inert.
 	opsCounter OpsCounter
 	// Startup policy and engine are immutable; the engine is borrowed from main.
-	eventBudgetConfig EventBudgetConfig
-	eventAdmitter     EventAdmitter
-	ingressCtx        context.Context
-	ingressCancel     context.CancelFunc
+	eventBudgetConfig      EventBudgetConfig
+	eventAdmitter          EventAdmitter
+	eventAdmissionObserver eventAdmissionObserver
+	ingressCtx             context.Context
+	ingressCancel          context.CancelFunc
 	// Optional trusted-side activity observer. It receives only first-client and
 	// last-client transitions for each user and must not perform blocking I/O.
 	activityObserver UserActivityObserver
@@ -2085,7 +2086,11 @@ func (h *Hub) removeFromSubscriptionMap(m map[uuid.UUID]map[uuid.UUID]bool, key,
 
 // handleIncoming processes incoming messages from clients
 func (h *Hub) handleIncoming(msg IncomingMessage) {
-	if client := h.clients[msg.ClientID]; client == nil || client.securityTerminal.Load() {
+	client := h.clients[msg.ClientID]
+	if client == nil || client.securityTerminal.Load() {
+		return
+	}
+	if h.eventBudgetConfig.Enabled && !client.ingressAuthorityLive(client.ingressCtx) {
 		return
 	}
 	if !msg.TokenExpiresAt.IsZero() && !time.Now().Before(msg.TokenExpiresAt) {
@@ -4293,8 +4298,7 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		h.sendError(msg.ClientID, "Not subscribed to this channel")
 		return
 	}
-	if !client.rateLimitAllow() {
-		h.sendError(msg.ClientID, "Rate limit exceeded, please slow down")
+	if !h.allowContentEvent(client, msg) {
 		return
 	}
 
@@ -5584,8 +5588,7 @@ func (h *Hub) validateDMMessage(msg IncomingMessage) (*Client, uuid.UUID, *dmMes
 		h.sendError(msg.ClientID, "Not subscribed to this DM conversation")
 		return nil, uuid.Nil, nil
 	}
-	if !client.rateLimitAllow() {
-		h.sendError(msg.ClientID, "Rate limit exceeded, please slow down")
+	if !h.allowContentEvent(client, msg) {
 		return nil, uuid.Nil, nil
 	}
 

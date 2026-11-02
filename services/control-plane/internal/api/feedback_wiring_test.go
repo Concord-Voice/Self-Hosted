@@ -344,7 +344,8 @@ func newFeedbackScreenshotRouterFixtureWithGitHubToken(t *testing.T, instance, r
 	require.NoError(t, err)
 	store := &feedbackScreenshotStore{objects: map[string][]byte{feedbackScreenshotObjectKey: []byte("owned-previous-screenshot")}}
 	cfg := &config.Config{
-		Environment: "test", InstanceType: instance,
+		WSEventBudget: config.WSEventBudgetConfig{Enabled: false, ScalePercent: 100},
+		Environment:   "test", InstanceType: instance,
 		JWTSecret:        "owned-feedback-screenshot-signing-input", // #nosec G101 -- synthetic fixture signing input
 		NATSUrl:          "nats://127.0.0.1:1",                      // Refused loopback port; no NATS daemon or DNS.
 		AllowedOrigins:   []string{"*"},

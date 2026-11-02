@@ -54,6 +54,7 @@ func stagesFor(t *testing.T, budget time.Duration, block string) ([]string, []st
 		stage("activity"),
 		stage("presence"),
 		stage("hub"),
+		func() error { note("event_engine"); return nil },
 		func() error { note("metrics"); return nil },
 		func() error { note("reader"); return nil },
 		func() { note("nats") },
@@ -93,7 +94,7 @@ func TestAWedgedStageNoLongerSkipsEveryStageAfterIt(t *testing.T) {
 			// The tail MUST still run. Asserting "nats ran" rather than "the
 			// function returned" is deliberate: the unbounded version also
 			// returned eventually, just far too late to matter.
-			for _, want := range []string{"metrics", "reader", "nats"} {
+			for _, want := range []string{"event_engine", "metrics", "reader", "nats"} {
 				if !contains(order, want) {
 					t.Fatalf("stage %q wedged and %q never ran; order=%v. Every stage after a "+
 						"wedged one is exactly what SIGKILL used to discard.", wedged, want, order)
@@ -119,7 +120,7 @@ func TestAWedgedStageNoLongerSkipsEveryStageAfterIt(t *testing.T) {
 func TestEveryStageStillRunsInOrderWhenNothingOverruns(t *testing.T) {
 	order, abandoned := stagesFor(t, time.Minute, "")
 
-	want := []string{"cancel", "http", "attestation", "activity", "presence", "hub", "metrics", "reader", "nats"}
+	want := []string{"cancel", "http", "attestation", "activity", "presence", "hub", "event_engine", "metrics", "reader", "nats"}
 	if len(order) != len(want) {
 		t.Fatalf("order = %v, want %v", order, want)
 	}
@@ -261,7 +262,7 @@ func TestAnEarlyWedgeStarvesTheStagesAfterIt(t *testing.T) {
 				tc.orderName, order, abandoned)
 		}
 	}
-	for _, want := range []string{"metrics", "reader", "nats"} {
+	for _, want := range []string{"event_engine", "metrics", "reader", "nats"} {
 		if !contains(order, want) {
 			t.Fatalf("the %s stage must still run after the shared-budget cascade; order=%v", want, order)
 		}
