@@ -29,6 +29,7 @@ gate can learn from your voice.
 
 ### Added
 
+- **Self-hosting:** Operators can configure separate Stable and Pre-Release SPA discovery streams. Existing clients keep Stable behavior; remote SPA serving remains off by default, and invalid live configuration updates preserve the previous settings.
 - **Self-hosted setup:** Fresh installer environment files now include explicit WebSocket event-budget settings, with preparation and rollback guidance for existing installations. Runtime delivery and activation remain separate steps.
 
 - **Authentication:** Added a dormant transaction-local source marker for future account-change writers, with closed source validation and caller-owned transaction completion.
@@ -57,6 +58,7 @@ gate can learn from your voice.
 ### Changed
 
 - **Self-hosted setup:** The production Compose model now requires both WebSocket event-budget settings and forwards them to control-plane. Selected self-host commands take these values from root `.env`, so existing installations must prepare both keys before adopting this model; rendering does not authorize activation.
+- **Operations:** WebSocket budget observability groundwork now exposes read-only aggregate engine snapshots. Collector publication, database catalogs and the matching Admin reader remain pending.
 - **Server:** WebSocket event budgets now include validated startup settings, dedicated Redis ownership and checked shutdown cleanup alongside dispatch, token renewal and bounded refusal responses. Activation still requires compatible clients, configuration delivery and rollout checks.
 - **Self-hosting:** Self-hosted deployments now ship from the dedicated Self-Hosted repository, with the service, admin, and package checks running in its own CI.
 - **Voice:** The desktop call library handles mixed audio and video RTP header extensions with mediasoup-client 3.25.3.

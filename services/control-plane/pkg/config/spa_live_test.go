@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -122,7 +123,7 @@ func TestNewLiveSpaConfigHotReloadUpdatesOnReload(t *testing.T) {
 	assert.Equal(t, 2, lsc.SpaIpcContract())
 }
 
-func TestNewLiveSpaConfigHotReloadInvalidIntegerDefaultsToZero(t *testing.T) {
+func TestNewLiveSpaConfigHotReloadInvalidIntegerRetainsEmptySnapshot(t *testing.T) {
 	f := writeTempEnvFile(t, "SPA_URL=https://example.com\nSPA_IPC_CONTRACT=notanumber\n")
 
 	cfg := &Config{}
@@ -130,7 +131,8 @@ func TestNewLiveSpaConfigHotReloadInvalidIntegerDefaultsToZero(t *testing.T) {
 	require.NotNil(t, lsc)
 	defer lsc.Stop()
 
-	assert.Equal(t, 0, lsc.SpaIpcContract(), "invalid integer should default to 0")
+	assert.Equal(t, 0, lsc.SpaIpcContract(), "invalid candidate must retain the previous empty snapshot")
+	assert.Empty(t, lsc.SpaURL())
 }
 
 func TestLiveSpaConfigReloadMissingFile(t *testing.T) {
@@ -189,4 +191,36 @@ func writeTempEnvFile(t *testing.T, content string) string {
 	path := filepath.Join(dir, fmt.Sprintf("spa-%d.env", time.Now().UnixNano()))
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 	return path
+}
+
+func TestLiveSpaConfigMalformedFileRetainsSnapshot(t *testing.T) {
+	for _, body := range []string{
+		"SPA_URL=https://next.example.test/\nSPA_IPC_CONTRACT=2\nSPA_PRERELEASE_URL",
+		"SPA_URL=https://next.example.test/\nSPA_URL=\nSPA_IPC_CONTRACT=\n",
+		"=value\n",
+		"SPA_URL=https://user:pass@example.test/\nSPA_IPC_CONTRACT=2\n", // pragma: allowlist secret; trufflehog:ignore -- synthetic userinfo verifies invalid reload retains the prior snapshot
+		"SPA_URL=https://next.example.test/\nSPA_IPC_CONTRACT=2\nSPA_VERSION=bad version\n",
+		"SPA_URL=https://next.example.test/\nSPA_IPC_CONTRACT=2\nSPA_VERSION=" + strings.Repeat("a", 129),
+	} {
+		t.Run(body, func(t *testing.T) {
+			path := writeTempEnvFile(t, "SPA_URL=https://previous.example.test/\nSPA_IPC_CONTRACT=1\n")
+			lsc := NewLiveSpaConfig(&Config{}, path, time.Hour)
+			t.Cleanup(lsc.Stop)
+			before := lsc.Snapshot(SpaStable)
+			require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+			lsc.reload()
+			assert.Equal(t, before, lsc.Snapshot(SpaStable))
+		})
+	}
+}
+
+func TestLiveSpaConfigLegacyZeroContractDisablesStream(t *testing.T) {
+	path := writeTempEnvFile(t, "SPA_URL=https://previous.example.test/\nSPA_IPC_CONTRACT=1\nSPA_VERSION=previous\n")
+	lsc := NewLiveSpaConfig(&Config{}, path, time.Hour)
+	t.Cleanup(lsc.Stop)
+	require.NotEmpty(t, lsc.Snapshot(SpaStable).URL)
+	require.NoError(t, os.WriteFile(path, []byte("SPA_URL=\nSPA_IPC_CONTRACT=0\nSPA_VERSION=\n"), 0o600))
+	lsc.reload()
+	assert.Equal(t, SpaSnapshot{}, lsc.Snapshot(SpaStable), "legacy explicit disable must clear the previously active stream")
+	assert.Equal(t, (&Config{}).Snapshot(SpaStable), lsc.Snapshot(SpaStable), "static and live zero tuples must agree")
 }
