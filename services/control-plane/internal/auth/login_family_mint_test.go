@@ -168,6 +168,7 @@ func TestLoginFamilyPasswordLoginRouteCreatesFreshFamily(t *testing.T) {
 		rig.h.Login(c)
 		pair := familyResponse(t, w)
 		family, _ := assertFamilyAccess(t, rig, pair.Access)
+		requirePrimaryAuthTime(t, pair.Access)
 		if prior != "" {
 			assert.NotEqual(t, prior, family)
 		}
@@ -196,7 +197,18 @@ func TestLoginFamilyRegistrationConfirmationRouteBindsFirstFamily(t *testing.T) 
 	require.NoError(t, err)
 	rig.user = claims.UserID
 	assertFamilyAccess(t, rig, pair.Access)
+	requirePrimaryAuthTime(t, pair.Access)
 	require.NotEmpty(t, w.Header().Values("Set-Cookie"))
+}
+
+// requirePrimaryAuthTime pins that a primary sign-in route mints auth_time
+// equal to iat, which is what lets GET /users/me/keys serve it (#4223).
+func requirePrimaryAuthTime(t *testing.T, access string) {
+	t.Helper()
+	claims, err := ValidateAccessToken(access, familyTestSecret)
+	require.NoError(t, err)
+	require.NotNil(t, claims.AuthTime, "a primary sign-in carries auth_time")
+	require.Equal(t, claims.IssuedAt.Unix(), claims.AuthTime.Unix())
 }
 
 // Authority errors intentionally retain route-specific credential/internal

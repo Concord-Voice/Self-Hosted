@@ -202,6 +202,12 @@ type Hub struct {
 
 	// Optional aggregate counter sink. Nil keeps metrics-disabled behavior inert.
 	opsCounter OpsCounter
+	// Startup policy and engine are immutable; the engine is borrowed from main.
+	eventBudgetConfig      EventBudgetConfig
+	eventAdmitter          EventAdmitter
+	eventAdmissionObserver eventAdmissionObserver
+	ingressCtx             context.Context
+	ingressCancel          context.CancelFunc
 	// Optional trusted-side activity observer. It receives only first-client and
 	// last-client transitions for each user and must not perform blocking I/O.
 	activityObserver UserActivityObserver
@@ -747,9 +753,18 @@ func (d *serverVoiceDeferredBroadcasts) handleDeliveryResult(h *Hub, result chan
 	d.releaseBlocked(h)
 }
 
-// NewHub creates a new Hub
+// NewHub is the legacy/test constructor, with event admission disabled at 100%.
+// Production event-budget wiring uses NewHubWithEventAdmission instead.
 func NewHub(db *sql.DB, redisClient *redis.Client, opsCounters ...OpsCounter) *Hub {
+	return newHub(db, redisClient, opsCounters...)
+}
+
+func newHub(db *sql.DB, redisClient *redis.Client, opsCounters ...OpsCounter) *Hub {
+	ingressCtx, ingressCancel := context.WithCancel(context.Background())
 	hub := &Hub{
+		eventBudgetConfig:            EventBudgetConfig{Enabled: false, ScalePercent: 100},
+		ingressCtx:                   ingressCtx,
+		ingressCancel:                ingressCancel,
 		db:                           db,
 		redis:                        redisClient,
 		clients:                      make(map[uuid.UUID]*Client),
@@ -1579,6 +1594,10 @@ func (h *Hub) shutdownClients() {
 // closes all client connections. Safe to call multiple times.
 func (h *Hub) Shutdown() {
 	h.closeOnce.Do(func() {
+		// Ingress must wake even when the delivery shutdown lock is occupied.
+		if h.ingressCancel != nil {
+			h.ingressCancel()
+		}
 		h.serverVoiceDeliveryMu.Lock()
 		h.serverVoiceDeliveryStopped = true
 		close(h.done)
@@ -1871,6 +1890,7 @@ func (h *Hub) handleUnregister(client *Client) {
 		return
 	}
 	exists, isLastConnection, remaining := h.unregisterClient(client)
+	client.cancelIngressLifecycle()
 	if !exists {
 		return
 	}
@@ -2066,7 +2086,11 @@ func (h *Hub) removeFromSubscriptionMap(m map[uuid.UUID]map[uuid.UUID]bool, key,
 
 // handleIncoming processes incoming messages from clients
 func (h *Hub) handleIncoming(msg IncomingMessage) {
-	if client := h.clients[msg.ClientID]; client == nil || client.securityTerminal.Load() {
+	client := h.clients[msg.ClientID]
+	if client == nil || client.securityTerminal.Load() {
+		return
+	}
+	if h.eventBudgetConfig.Enabled && !client.ingressAuthorityLive(client.ingressCtx) {
 		return
 	}
 	if !msg.TokenExpiresAt.IsZero() && !time.Now().Before(msg.TokenExpiresAt) {
@@ -2974,30 +2998,37 @@ func (h *Hub) applyUnreadDeliveryResult(result channelDeliveryResult) {
 }
 
 func (h *Hub) applyServerBroadcastDeliveryResult(result channelDeliveryResult) serverVoiceDeliveryOutcome {
+	outcome, failedClients := h.enqueueServerBroadcastDeliveryResult(result)
+	// Unregister can cancel ingress and join async work. Neither operation may
+	// hold the generation gate or the delivery admission lock.
+	for _, client := range failedClients {
+		h.handleUnregister(client)
+	}
+	return outcome
+}
+
+func (h *Hub) enqueueServerBroadcastDeliveryResult(result channelDeliveryResult) (serverVoiceDeliveryOutcome, []*Client) {
 	key := serverVoiceDeliveryKey{serverID: result.serverID, channelID: result.channelID}
 	if result.retryOnAuthorizationInvalidation {
 		gate := h.serverVoiceDeliveryGate(key)
 		gate.mu.Lock()
 		defer gate.mu.Unlock()
 		if gate.open != 0 || result.serverVoiceMutationEpoch != gate.epoch {
-			return serverVoiceDeliveryRetry
+			return serverVoiceDeliveryRetry, nil
 		}
 	}
 	h.serverVoiceDeliveryMu.RLock()
 	outcome := h.serverVoiceDeliveryAdmissionOutcomeLocked(key, result)
 	if outcome != serverVoiceDeliveryApplied {
 		h.serverVoiceDeliveryMu.RUnlock()
-		return outcome
+		return outcome, nil
 	}
 	if h.serverVoiceDeliveryBeforeEnqueue != nil {
 		h.serverVoiceDeliveryBeforeEnqueue()
 	}
 	failedClients := h.enqueueServerBroadcastDeliveryLocked(result)
 	h.serverVoiceDeliveryMu.RUnlock()
-	for _, client := range failedClients {
-		h.handleUnregister(client)
-	}
-	return serverVoiceDeliveryApplied
+	return serverVoiceDeliveryApplied, failedClients
 }
 
 func (h *Hub) serverVoiceDeliveryAdmissionOutcomeLocked(
@@ -4267,8 +4298,7 @@ func (h *Hub) handleMessage(msg IncomingMessage) {
 		h.sendError(msg.ClientID, "Not subscribed to this channel")
 		return
 	}
-	if !client.rateLimitAllow() {
-		h.sendError(msg.ClientID, "Rate limit exceeded, please slow down")
+	if !h.allowContentEvent(client, msg) {
 		return
 	}
 
@@ -5558,8 +5588,7 @@ func (h *Hub) validateDMMessage(msg IncomingMessage) (*Client, uuid.UUID, *dmMes
 		h.sendError(msg.ClientID, "Not subscribed to this DM conversation")
 		return nil, uuid.Nil, nil
 	}
-	if !client.rateLimitAllow() {
-		h.sendError(msg.ClientID, "Rate limit exceeded, please slow down")
+	if !h.allowContentEvent(client, msg) {
 		return nil, uuid.Nil, nil
 	}
 
@@ -8192,6 +8221,7 @@ func (h *Hub) handleDisconnectFamily(command familyDisconnect) {
 	}
 	// Only the checked transport receipt precedes ordinary cleanup scheduling.
 	for _, client := range matches {
+		client.cancelIngressLifecycle()
 		h.deferSecurityCleanup(client)
 	}
 }

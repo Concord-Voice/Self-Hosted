@@ -67,17 +67,29 @@ func (c *Client) tokenDeadline() time.Time {
 // extendDeadline moves the deadline to exp. It refuses to shorten, to revive a
 // deadline that has already passed (a close may be under way), and to touch a
 // socket whose expiry timer was stopped by teardown.
-func (c *Client) extendDeadline(exp time.Time) bool {
+func (c *Client) extendDeadline(ctx context.Context, exp time.Time) bool {
+	if ctx == nil || ctx.Err() != nil {
+		return false
+	}
 	c.deadlineMu.Lock()
 	defer c.deadlineMu.Unlock()
-	if c.securityTerminal.Load() || c.tokenExpiryStopped || !time.Now().Before(c.TokenExpiresAt) || !exp.After(c.TokenExpiresAt) {
+	// Cancellation can win while waiting for deadlineMu. Check it here, at the
+	// mutation owner, without invoking cancellation or output under this lock.
+	if ctx.Err() != nil || c.ingressCtx == nil || c.ingressStopped() || c.tokenExpiryStopped {
+		return false
+	}
+	now := time.Now()
+	if deadline, bounded := ctx.Deadline(); bounded && !now.Before(deadline) {
+		return false
+	}
+	if !now.Before(c.TokenExpiresAt) || !exp.After(c.TokenExpiresAt) {
 		return false
 	}
 	c.TokenExpiresAt = exp
 	return true
 }
 
-// deadlineAccepts reports whether extendDeadline(exp) would succeed now. It is
+// deadlineAccepts checks the deadline ordering before rebind. It is
 // the cheap refusal before any rebind; extendDeadline stays authoritative.
 func (c *Client) deadlineAccepts(exp time.Time) bool {
 	c.deadlineMu.Lock()
@@ -128,9 +140,12 @@ func (c *Client) onTokenExpiryTimer(registered <-chan struct{}) {
 
 // handleTokenRenewal answers one auth_renew frame. It runs on the read
 // goroutine, which owns the read deadline it may move.
-func (c *Client) handleTokenRenewal(msg IncomingMessage) {
+func (c *Client) handleTokenRenewal(ctx context.Context, msg IncomingMessage) bool {
 	token, _ := msg.Data["token"].(string)
-	accepted := token != "" && c.renewToken(token)
+	accepted, abandoned := c.attemptTokenRenewal(ctx, token)
+	if abandoned || !c.ingressAuthorityLive(ctx) {
+		return false
+	}
 	if accepted {
 		if err := c.Conn.SetReadDeadline(c.connectionDeadline(pongWait)); err != nil {
 			log.Printf("WebSocket read deadline after renewal failed: %s", describeSocketFailure(err))
@@ -142,7 +157,42 @@ func (c *Client) handleTokenRenewal(msg IncomingMessage) {
 	}
 	// A dropped ack is harmless: the client times out and keeps its old deadline
 	// expectation, and the server-side deadline is already correct.
-	c.enqueueOutbound(frame)
+	if !c.ingressAuthorityLive(ctx) {
+		return false
+	}
+	_, abandoned = c.enqueueOutboundWithAuthority(ctx, frame)
+	return !abandoned
+}
+
+// attemptTokenRenewal is the sole local-claim owner. Enabled empty/invalid
+// tokens still receive account admission before admitted validation refuses.
+func (c *Client) attemptTokenRenewal(ctx context.Context, token string) (accepted, abandoned bool) {
+	if !c.ingressAuthorityLive(ctx) {
+		return false, true
+	}
+	enabled := c.Hub.eventBudgetConfig.Enabled
+	if !enabled && (token == "" || c.renewAuthority == nil) {
+		return false, false
+	}
+	if !c.admitRenewalAttempt(time.Now()) {
+		if enabled {
+			state := eventAdmissionState{}
+			decision := state.finalize(ctx, c, EventClassRenewal, AdmissionDecision{Action: AdmissionRefuse, Source: AdmissionSourceExisting})
+			return false, decision.Action == AdmissionAbandon
+		}
+		return false, false
+	}
+	if enabled {
+		decision := c.admitInboundEvent(ctx, EventPolicy{Class: EventClassRenewal, Scope: BudgetScopeAccount})
+		if decision.Action != AdmissionAllow {
+			return false, decision.Action == AdmissionAbandon
+		}
+	}
+	accepted = c.renewTokenAdmitted(ctx, token)
+	if !c.ingressAuthorityLive(ctx) {
+		return false, true
+	}
+	return accepted, false
 }
 
 func (c *Client) logRenewalRefused(reason string) {
@@ -168,6 +218,7 @@ func (c *Client) failRenewalClosed(reason string) {
 	c.logRenewalRefused(reason)
 	c.stopTokenExpiry()
 	c.closeRevokedConnection()
+	c.cancelIngressLifecycle()
 	c.requestUnregister()
 }
 
@@ -240,11 +291,12 @@ func (c *Client) rebindRenewedSession(ctx context.Context, sid string) bool {
 	}
 }
 
-// renewToken applies every renewal guard. It never logs the token. The
-// deadline moves last, after the session is rebound and re-checked, so an
+// renewTokenAdmitted validates only after the sole entry has claimed the local
+// guard and, when enabled, finalized account admission. It never logs the token.
+// The deadline moves last, after the session is rebound and re-checked, so an
 // extended deadline never exists for a session whose revocation is unproven.
-func (c *Client) renewToken(token string) bool {
-	if c.securityTerminal.Load() || c.renewAuthority == nil || c.Hub == nil || !c.admitRenewalAttempt(time.Now()) {
+func (c *Client) renewTokenAdmitted(parent context.Context, token string) bool {
+	if token == "" || c.renewAuthority == nil || !c.ingressAuthorityLive(parent) {
 		return false
 	}
 	// An absent SID cannot establish family authority.
@@ -254,27 +306,39 @@ func (c *Client) renewToken(token string) bool {
 		return false
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), tokenRenewalTimeout)
+	ctx, cancel := context.WithTimeout(parent, tokenRenewalTimeout)
 	defer cancel()
-	go func() {
-		select {
-		case <-c.Hub.done:
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
+	if !c.ingressAuthorityLive(ctx) {
+		return false
+	}
 
 	verified, tokenSID, ok := c.verifyRenewalToken(ctx, token)
-	if !ok {
+	if !ok || !c.ingressAuthorityLive(ctx) {
 		return false
 	}
 	if !c.deadlineAccepts(verified.ExpiresAt) {
 		c.logRenewalRefused("not_later")
 		return false
 	}
+	if !c.ingressAuthorityLive(ctx) {
+		return false
+	}
 	if tokenSID != ownSID && !c.rebindRenewedSession(ctx, tokenSID) {
 		return false
 	}
+	if !c.ingressAuthorityLive(ctx) || !c.confirmRenewalToken(ctx, token, verified, tokenSID) {
+		return false
+	}
+	if !c.extendDeadline(ctx, verified.ExpiresAt) {
+		// The old deadline passed during the round trips; the socket closes at
+		// it, exactly as an unrenewed one does.
+		c.logRenewalRefused("not_later")
+		return false
+	}
+	return true
+}
+
+func (c *Client) confirmRenewalToken(ctx context.Context, token string, verified accessTokenAuth, tokenSID string) bool {
 	// Repeat the shared gate after Run's rebind. Both SID paths must still
 	// resolve the exact immutable family; no retained refresh row is required.
 	final, err := c.renewAuthority.validateAccessToken(ctx, token)
@@ -285,11 +349,5 @@ func (c *Client) renewToken(token string) bool {
 		return false
 	}
 
-	if !c.extendDeadline(verified.ExpiresAt) {
-		// The old deadline passed during the round trips; the socket closes at
-		// it, exactly as an unrenewed one does.
-		c.logRenewalRefused("not_later")
-		return false
-	}
-	return true
+	return c.ingressAuthorityLive(ctx)
 }
