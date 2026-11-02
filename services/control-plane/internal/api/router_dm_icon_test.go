@@ -130,7 +130,8 @@ func newDMIconRouterFixture(t *testing.T, configured bool) *dmIconRouterFixture 
 		natsURL = rawnats.DefaultURL
 	}
 	cfg := &config.Config{
-		Environment: "test", Port: "0", JWTSecret: testhelpers.TestJWTSecret,
+		WSEventBudget: config.WSEventBudgetConfig{Enabled: false, ScalePercent: 100},
+		Environment:   "test", Port: "0", JWTSecret: testhelpers.TestJWTSecret,
 		NATSUrl: natsURL, AllowedOrigins: []string{"*"},
 		MFAEncryptionKey:        "0000000000000000000000000000000000000000000000000000000000000000",
 		MFAEncryptionKeyVersion: 1, WebAuthnRPID: "localhost",

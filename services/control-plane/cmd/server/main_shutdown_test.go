@@ -352,7 +352,7 @@ func serverOpsMetricsMigration(t *testing.T, name string) string {
 func TestShutdownControlPlaneWaitsForHTTPDrain(t *testing.T) {
 	httpStarted := make(chan struct{})
 	releaseHTTP := make(chan struct{})
-	events := make(chan string, 8)
+	events := make(chan string, 9)
 	result := make(chan error, 1)
 
 	go func() {
@@ -370,6 +370,7 @@ func TestShutdownControlPlaneWaitsForHTTPDrain(t *testing.T) {
 			func() { events <- "activity" },
 			func() { events <- "presence" },
 			func() { events <- "hub" },
+			func() error { events <- "event_engine"; return nil },
 			func() error { events <- "metrics"; return nil },
 			func() error { events <- "admin_reader"; return nil },
 			func() { events <- "nats" },
@@ -391,11 +392,11 @@ func TestShutdownControlPlaneWaitsForHTTPDrain(t *testing.T) {
 		t.Fatalf("shutdownControlPlane returned error: %v", err)
 	}
 
-	got := []string{<-events, <-events, <-events, <-events, <-events, <-events, <-events, <-events}
+	got := []string{<-events, <-events, <-events, <-events, <-events, <-events, <-events, <-events, <-events}
 	// presence BEFORE hub: both presence dispatch workers fail-closed-abandon
 	// through the hub during their drain, so a hub closed first would silently
 	// discard exactly the disconnects that drain exists to deliver (#2738).
-	want := []string{"http", "attestation", "activity", "presence", "hub", "metrics", "admin_reader", "nats"}
+	want := []string{"http", "attestation", "activity", "presence", "hub", "event_engine", "metrics", "admin_reader", "nats"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("shutdown order = %v, want %v", got, want)
 	}
@@ -431,6 +432,7 @@ func TestShutdownControlPlaneDrainsHTTPBeforeCancellingAttestation(t *testing.T)
 		func() {},
 		func() error { return nil },
 		func() error { return nil },
+		func() error { return nil },
 		func() {},
 	)
 	require.NoError(t, gotErr)
@@ -441,7 +443,7 @@ func TestShutdownControlPlaneCleansUpAfterHTTPError(t *testing.T) {
 	wantErr := errors.New("HTTP drain failed")
 	metricsErr := errors.New("metrics shutdown failed")
 	wantReaderErr := errors.New("admin metrics reader cleanup failed")
-	events := make([]string, 0, 8)
+	events := make([]string, 0, 10)
 
 	gotErr := shutdownControlPlane(
 		context.Background(),
@@ -455,6 +457,7 @@ func TestShutdownControlPlaneCleansUpAfterHTTPError(t *testing.T) {
 		func() { events = append(events, "activity") },
 		func() { events = append(events, "presence") },
 		func() { events = append(events, "hub") },
+		func() error { events = append(events, "event_engine"); return nil },
 		func() error { events = append(events, "metrics"); return metricsErr },
 		func() error { events = append(events, "admin_reader"); return wantReaderErr },
 		func() { events = append(events, "nats") },
@@ -472,7 +475,7 @@ func TestShutdownControlPlaneCleansUpAfterHTTPError(t *testing.T) {
 	// The presence drain must still run when the HTTP drain errored — a failed
 	// drain is exactly when stale presence is most likely to be left behind.
 	wantEvents := []string{
-		"cancel", "http", "attestation", "activity", "presence", "hub", "metrics", "admin_reader", "nats",
+		"cancel", "http", "attestation", "activity", "presence", "hub", "event_engine", "metrics", "admin_reader", "nats",
 	}
 	if !reflect.DeepEqual(events, wantEvents) {
 		t.Fatalf("shutdown order = %v, want %v", events, wantEvents)

@@ -42,7 +42,8 @@ const (
 func billingRouter(t *testing.T, ts *testhelpers.TestServer, instanceType string, withKeys bool) *gin.Engine {
 	t.Helper()
 	cfg := &config.Config{
-		Environment: "test", InstanceType: instanceType, JWTSecret: testhelpers.TestJWTSecret,
+		WSEventBudget: config.WSEventBudgetConfig{Enabled: false, ScalePercent: 100},
+		Environment:   "test", InstanceType: instanceType, JWTSecret: testhelpers.TestJWTSecret,
 		AllowedOrigins: []string{"*"}, NATSUrl: os.Getenv("NATS_URL"),
 		MFAEncryptionKey:        "0000000000000000000000000000000000000000000000000000000000000000",
 		MFAEncryptionKeyVersion: 1, WebAuthnRPID: "localhost",

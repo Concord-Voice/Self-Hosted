@@ -84,6 +84,7 @@ func newMintRouterFixture(t *testing.T) *mintRouterFixture {
 	router, hub, natsClient, opsRuntime, permissionEnforcer, _, closePresence, _, _, _, err := api.NewRouter(
 		t.Context(), db, rdb,
 		&config.Config{
+			WSEventBudget:                    config.WSEventBudgetConfig{Enabled: false, ScalePercent: 100},
 			Environment:                      "test",
 			Port:                             "0",
 			JWTSecret:                        testhelpers.TestJWTSecret,

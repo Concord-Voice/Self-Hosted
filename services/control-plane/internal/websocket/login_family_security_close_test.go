@@ -98,6 +98,7 @@ func familyHubWithPublished(t *testing.T, clients ...*Client) *Hub {
 	hub := NewHub(nil, setupHubTestRedis(t))
 	for _, c := range clients {
 		c.Hub = hub
+		c.initIngressLifecycle()
 		hub.clients[c.ID] = c
 		if hub.userClients[c.UserID] == nil {
 			hub.userClients[c.UserID] = map[uuid.UUID]bool{}
@@ -162,7 +163,7 @@ func TestLoginFamilySecurityReceiptFencesEverySiblingBeforeTransportClose(t *tes
 	assert.Equal(t, "fresh-family-alive", string(payload))
 	require.NoError(t, hub.DisconnectFamilyContext(ctx, user, family), "retry joins the same terminal clients")
 	for _, c := range selected {
-		assert.False(t, c.extendDeadline(time.Now().Add(2*time.Hour)), "terminal client cannot renew its deadline")
+		assert.False(t, c.extendDeadline(context.Background(), time.Now().Add(2*time.Hour)), "terminal client cannot renew its deadline")
 	}
 }
 

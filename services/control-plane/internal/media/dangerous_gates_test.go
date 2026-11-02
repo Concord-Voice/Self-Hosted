@@ -216,6 +216,7 @@ func setupImgGateEnv(t *testing.T) *imgGateEnv {
 	db, dbCleanup := testhelpers.SetupTestDB(t)
 	rdb, redisCleanup := testhelpers.SetupTestRedis(t)
 	cfg := &config.Config{
+		WSEventBudget:                    config.WSEventBudgetConfig{Enabled: false, ScalePercent: 100},
 		Environment:                      "test",
 		Port:                             "0",
 		JWTSecret:                        testhelpers.TestJWTSecret,
