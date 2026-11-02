@@ -308,7 +308,23 @@ _None yet._
 
 ### Instance-Specific Entries
 
-_None yet._
+The maintainer confirmed on 2026-11-02 that the following two PR #145 findings
+were marked false positive. The exact rule key and marking timestamp could not
+be independently recovered: the Sonar API was inaccessible and the findings
+were no longer visible to the maintainer. These records preserve that confirmed
+decision and its rationale; rule metadata remains **unverified**, not inferred
+from the diagnostic wording. No rule-wide suppression or profile change was made.
+
+| # | Confirmation date | Issue key | Rule | Location in PR #145 | Marker | Justification |
+|---|---|---|---|---|---|---|
+| 1 | 2026-11-02 | `AaGZNl8sS7pM3HqF3Et8` | Unverified — metadata unavailable | `internal/websocket/hub.go`, `ingressCtx` (reported line 208) | Maintainer confirmation (#145) | The Hub creates and owns a cancellation-only lifetime rooted in `context.Background()`; it does not retain a caller/request context. Shutdown cancels it before taking the delivery shutdown lock. Per-event authority is separately derived with the current token deadline. |
+| 2 | 2026-11-02 | `AaGZNl-FS7pM3HqF3Et9` | Unverified — metadata unavailable | `internal/websocket/client.go`, `ingressCtx` (reported line 220) | Maintainer confirmation (#145) | The socket owns a child of the Hub lifetime, created before publication and never rebound on token renewal. Teardown, expiry, unregister and family-close paths cancel it; event operations separately snapshot current authority/deadlines. The hijacked socket must outlive its opening HTTP request. |
+
+Paths above are relative to `services/control-plane`. The instance-to-file
+mapping is the reported mapping; it was not independently fetched from Sonar.
+Complete the unverified metadata from an authenticated analysis receipt when
+available. The ownership rationale applies only to these internally created
+lifetime contexts, not to arbitrary stored request contexts.
 
 ## Recreation-recovery / drift-guard (ADR-0017 narrowed profile)
 
