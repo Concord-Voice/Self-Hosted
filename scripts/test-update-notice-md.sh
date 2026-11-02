@@ -644,10 +644,10 @@ else
   FAILS=$((FAILS + 1)); FAIL_DETAILS+=("could not locate license-check.yml for parity assertions")
 fi
 
-# The license workflow runs this linter after installing each npm tree. A
-# change to the consumed script must select the workflow on both events and
-# select all three npm licence jobs through the shared relevance map.
-if python3 - "$WF" "$(dirname "$WF")/../ci/scan-relevance.yml" <<'LINTER_FILTERS'; then
+# The license workflow runs this linter against the installed license-tool tree.
+# A change to the consumed script must select the workflow on both events and
+# appear in all three shared npm license relevance groups.
+if python3 - "$WF" "$(dirname "$WF")/../ci/scan-relevance.yml" <<'PYLINT'; then
 import re, sys
 from pathlib import Path
 
@@ -669,7 +669,7 @@ for group in ('license_desktop', 'license_media', 'license_admin'):
     assert section, f'{group} relevance group missing'
     paths = re.findall(r"(?m)^  - '([^']+)'$", section.group(1))
     assert linter in paths, f'{group} relevance filter misses consumed override-range linter'
-LINTER_FILTERS
+PYLINT
   PASSES=$((PASSES + 1))
 else
   FAILS=$((FAILS + 1)); FAIL_DETAILS+=("license workflow and all npm relevance filters must watch their consumed override-range linter")
