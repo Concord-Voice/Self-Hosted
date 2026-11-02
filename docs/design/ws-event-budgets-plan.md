@@ -22,7 +22,10 @@ remain prerequisites for activation.
 | G: self-host config | Self-Hosted: actual production Compose, fresh installer, env example and operator docs | required-value wiring, installer/parity fixtures and existing-install preparation |
 | H: managed delivery | Hosted: canonical config writer, Compose, ACL/operator docs and verified delivery lane | every admitted writer branch, reader/client prerequisites and canonical source provenance |
 
-No SQL migration, media-plane change or live commissioning belongs to these units.
+C5 introduces no SQL migration. Unit D requires additive updates to both metric-key
+CHECK constraints before publishing its producer and reader; migration numbering
+and canonical delivery order remain prerequisites. No media-plane change or live
+commissioning belongs to these units.
 Self-Hosted owns control-plane policy and the protocol origin; Desktop owns its
 consumer; Hosted owns managed deployment. The protocol package is unpublished:
 identify the exact schema source commit and required consumer copy instead of
