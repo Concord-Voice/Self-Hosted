@@ -41,6 +41,7 @@
         "SISMEMBER",
         "SMEMBERS",
         "SREM",
+        "TIME",
         "TTL",
         "TYPE",
         "UNLINK",
@@ -201,7 +202,6 @@
   },
   "excludedAbsentApplicationCommands": [
     "KEYS",
-    "TIME",
     "CONFIG|GET",
     "PUBLISH",
     "SUBSCRIBE",

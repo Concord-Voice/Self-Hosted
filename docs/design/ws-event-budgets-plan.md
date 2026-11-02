@@ -2,9 +2,10 @@
 
 Plan for `Hosted issue 2270`, governed
 by the [normative contract](ws-event-budgets.md). All thresholds remain
-**UNMEASURED**. Unit A is pure policy groundwork. Unit E adds canonical error
-schema validation only; neither unit activates runtime admission, Redis use,
-socket behavior, metrics or environment parsing.
+**UNMEASURED**. Units A, B1 and B2 provide policy, Redis backend and dedicated
+client construction groundwork. Unit E adds canonical error schema validation. No runtime caller
+uses the new Redis backend; runtime admission, socket behavior, metrics and
+environment parsing are unchanged.
 
 ## Bounded work units
 
@@ -116,8 +117,76 @@ results and unavailable checks honestly; pure policy evidence is not runtime pro
 
 ## Later evidence and acceptance gates
 
-Freeze B's exact integer byte fixtures and constructor/lifetime contract before B
-starts. Pin corrupt-state refusal, safe-integer overflow, exact reply grammar and
+### Unit B1 construction and verification
+
+B1 adds `internal/websocket/event_admission.lua` and
+`event_admission_redis.go`, with independent unit and isolated Redis integration
+tests. Its exact API, byte grammar, ownership and boundary examples are recorded
+in the [B1 contract](ws-event-budgets.md#b1-request-result-and-ownership).
+The backend has no runtime call site, warm map, application semaphore or new
+dependency. B2 owns dedicated client factories and ACL; B3 owns admission,
+deadlines and fallback; B4 combines failure/lifetime evidence. No permissive
+placeholder for these later units is introduced.
+
+Required B1 evidence covers all approved configured pairs, command bytes and
+one-key count, strict three-integer reply types, copied config, zero-command
+invalid inputs, ownership on constructor error, and concurrent/idempotent Close.
+Run production Lua on isolated Redis for exact stored decimal bytes, burst/refill,
+scale changes, idle/maximum debt, canonical maximum/max+1, corrupt type/field/
+grammar rejection, rollback retention and the conservative expiry horizon.
+Two clients contending for one account must share its burst; another account or
+class remains independent. Corrupt records retain their bytes and absolute expiry.
+
+Only test-local substitutions of the unique TIME acquisition and result plumbing
+may supply deterministic clock/TTL vectors; the production algorithm stays the
+same. Execute the unchanged script separately with real TIME. Cold script cache
+permits exactly EVALSHA then EVAL under one context; warm cache needs only EVALSHA.
+A real debit followed by a lost reply must return unavailable with no replay.
+Use only disposable Redis and administrative test credentials for fixture
+inspection; never broaden production ACL to accommodate tests.
+
+Root captures the absent-feature compile barrier before source implementation,
+then runs focused unit/integration/race/vet/lint checks and independent review.
+The initial missing-symbol barrier is not behavioral red evidence. Record actual
+Redis version, commands, results and missing checks; source construction and test
+fixtures alone do not establish passing tests or production capacity.
+
+### Unit B2 construction and verification
+
+B2 adds `internal/database/redis_event_budget.go` and a control-plane-only `TIME`
+grant in `internal/managedredis/acl-manifest.json`, removing the obsolete absent
+inventory entry. The [B2 contract](ws-event-budgets.md#b2-dedicated-clients-and-source-acl)
+records both constructor signatures, exact settings and resource ownership.
+Shared constructors, runtime credentials, other service/operator grants and key
+patterns are unchanged. No startup call site or environment/configuration writer
+is introduced; source ACL delivery remains a later activation prerequisite.
+
+Independent tests must establish normalized zero command retries, one dial attempt,
+all three connection limits of 32, no minimum idle connections, the four 100ms
+timeouts and disabled maintenance notifications. Assert legacy auth/DB/TLS/protocol
+preservation, managed TLS cloning and shared-client option independence. Constructors
+must issue no PING, script load, dial or credential fetch/probe; nil runtime and
+invalid endpoint/URL reject without exposing credentials.
+
+Managed tests must exercise the same runtime's streaming rotation and freshness
+on actual commands/dials, including a cold/expired runtime accepted by construction
+but refused on use. Closing the dedicated client must unsubscribe its listeners
+while leaving the shared client and runtime usable. Listener-count inspection is
+test-only; do not add a production identity/state accessor. Observe library dial
+quiescence separately from application completion and do not infer a universal
+Close wall-time bound from a passing fixture.
+
+ACL evidence must run the production account script under the control-plane
+identity on disposable Redis, show denial before the TIME grant and success after,
+and retain denial for media/operator identities and unrelated keys/admin commands.
+Administrative fixture setup/expiry inspection does not justify broader service
+permissions. Root records the missing-constructor compile barrier, then focused
+race/integration/vet/lint results and independent review; tests and source changes
+alone do not establish managed deployment or workload capacity.
+
+### Remaining account-engine and runtime gates
+
+Pin corrupt-state refusal, safe-integer overflow, exact reply grammar and
 backward-clock retention. Profile debt at logical T with wall T−3600s must retain
 4200000ms for millisecond-aligned T, or 4200001ms with a microsecond remainder;
 after 600 wall seconds it must still deny, without a new burst. Use a deterministic
