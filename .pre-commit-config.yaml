@@ -769,7 +769,7 @@ repos:
         # does not even trigger the control — `pre-commit run pin-exception-lint
         # --files <worker package.json>` reported "no files to check" while the
         # worker manifests exact-pinned wrangler with no register entry (#3292).
-        files: '^(\.github/(dependabot\.yml|dependency-pin-exceptions\.json|tools/license-checker/package\.json)|(|client/admin/|services/media-plane/)package\.json|scripts/security/check-pin-exceptions\.mjs)$'
+        files: '^(\.github/(dependabot\.yml|dependency-pin-exceptions\.json|tools/license-checker/package\.json)|(|client/admin/|packages/(e2ee-client|protocol)/|services/media-plane/)package\.json|scripts/security/check-pin-exceptions\.mjs)$'
         pass_filenames: false
       - id: test-pin-exception-lint
         name: Test pin-exception lint (#2769)
@@ -842,5 +842,14 @@ repos:
       - id: hook-revs-are-shas
         name: pre-commit hook revs are pinned to commit SHAs
         language: pygrep
-        entry: '^\s*rev:\s*(?![0-9a-f]{40}\s+# frozen: \S+\s*$)'
+        # Put the negative lookahead immediately after `rev:`. Consuming the
+        # spaces first lets the regex backtrack and reject a valid frozen SHA.
+        entry: '^[ \t]*rev:(?![ \t]*[0-9a-f]{40}[ \t]+# frozen: \S+[ \t]*$)'
         files: '^\.pre-commit-config\.yaml$'
+      - id: test-hook-revs-are-shas
+        name: Test frozen hook revision guard
+        entry: python3 scripts/test-hook-revs-are-shas.py
+        language: python
+        additional_dependencies: ['PyYAML==6.0.3']
+        files: '^(\.pre-commit-config\.yaml|scripts/test-hook-revs-are-shas\.py)$'
+        pass_filenames: false
