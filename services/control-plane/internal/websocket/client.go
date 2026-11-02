@@ -215,6 +215,20 @@ type Client struct {
 	// asyncCancel cancels the context passed to async registration goroutines
 	asyncCancel context.CancelFunc
 
+	// Ingress authority is independent of asynchronous bootstrap work. These
+	// fields are initialized before publication and never rebound by renewal.
+	ingressCtx    context.Context
+	ingressCancel context.CancelFunc
+
+	// Admission scheduling and advisory pacing belong to the read goroutine.
+	// Authority and socket write deadlines always use actual time.
+	eventAdmissionNow      func() time.Time
+	eventAdmissionNewTimer func(time.Duration) eventAdmissionTimer
+	eventHeartbeatBudget   *ingressbudget.Bucket
+	// An explicit first-use bit also supports a clock starting at the zero instant.
+	eventAdvisoryUsed bool
+	eventAdvisoryAt   time.Time
+
 	// bootstrapMu orders replacement construction against privacy-critical and
 	// base-presence deltas. Delivery takes Hub.mu before this mutex; bootstrap
 	// completion/cancellation never takes Hub.mu while holding it.
@@ -306,11 +320,18 @@ func (c *Client) appendBootstrapReplay(data []byte) error {
 }
 
 func (c *Client) bufferBootstrapLive(data []byte) bootstrapBufferOutcome {
+	return c.bufferBootstrapLiveChecked(context.Background(), data, nil)
+}
+
+func (c *Client) bufferBootstrapLiveChecked(ctx context.Context, data []byte, authority *outboundEventAuthority) bootstrapBufferOutcome {
 	if c.securityTerminal.Load() {
 		return bootstrapBufferCanceled
 	}
 	c.bootstrapMu.Lock()
 	defer c.bootstrapMu.Unlock()
+	if !authority.live(ctx, c) {
+		return bootstrapBufferCanceled
+	}
 	if c.bootstrapCanceled {
 		return bootstrapBufferCanceled
 	}
@@ -335,6 +356,10 @@ func (c *Client) cancelBootstrap() {
 }
 
 func (c *Client) enqueueOutbound(data []byte) bool {
+	return c.enqueueOutboundChecked(context.Background(), data, nil)
+}
+
+func (c *Client) enqueueOutboundChecked(ctx context.Context, data []byte, authority *outboundEventAuthority) bool {
 	if c.securityTerminal.Load() {
 		return false
 	}
@@ -342,7 +367,7 @@ func (c *Client) enqueueOutbound(data []byte) bool {
 	// its live tail instead of waiting on sendMu. This keeps Hub.Run responsive
 	// while the publication barrier waits on bounded DB/sender-gate work and
 	// guarantees the frame cannot overtake snapshot and replay.
-	switch c.bufferBootstrapLive(data) {
+	switch c.bufferBootstrapLiveChecked(ctx, data, authority) {
 	case bootstrapBufferEnqueued:
 		return true
 	case bootstrapBufferOverflow, bootstrapBufferCanceled:
@@ -351,7 +376,7 @@ func (c *Client) enqueueOutbound(data []byte) bool {
 	}
 	c.sendMu.Lock()
 	defer c.sendMu.Unlock()
-	if c.securityTerminal.Load() || c.sendClosed || c.Send == nil {
+	if !authority.live(ctx, c) || c.securityTerminal.Load() || c.sendClosed || c.Send == nil {
 		return false
 	}
 	select {
@@ -670,6 +695,7 @@ func (c *Client) closeExpiredToken() {
 			log.Printf("WebSocket expiry transport close failed: %s", describeSocketFailure(err))
 		}
 	})
+	c.cancelIngressLifecycle()
 }
 
 func (c *Client) requestUnregister() {
@@ -696,6 +722,7 @@ func (c *Client) readPump() {
 		if err := c.Conn.Close(); err != nil && !alreadyDisconnected(err) {
 			log.Printf("WebSocket read transport close failed: %s", describeSocketFailure(err))
 		}
+		c.cancelIngressLifecycle()
 		c.requestUnregister()
 		c.releaseConnection()
 	}()
@@ -720,7 +747,7 @@ func (c *Client) readPump() {
 
 // admitFrame decides whether a read result may be dispatched; false ends the read pump.
 func (c *Client) admitFrame(readErr error, budget *ingressbudget.Bucket) bool {
-	if c.securityTerminal.Load() {
+	if c.ingressStopped() {
 		return false
 	}
 	if c.tokenExpired() {
@@ -741,49 +768,40 @@ func (c *Client) admitFrame(readErr error, budget *ingressbudget.Bucket) bool {
 
 // dispatchFrame decodes one metered frame and routes it; false ends the read pump.
 func (c *Client) dispatchFrame(message []byte) bool {
+	if c.ingressStopped() {
+		return false
+	}
 	var msg IncomingMessage
 	if err := json.Unmarshal(message, &msg); err != nil {
 		log.Printf("Invalid message format: %v", err)
 		return true
 	}
-	if c.securityTerminal.Load() {
+	if c.ingressStopped() {
 		return false
 	}
-	// Renewal never reaches the hub: it does Redis/DB work, which the Run
-	// goroutine must not, and its frame carries a credential.
-	if msg.Type == authRenewMessageType {
-		c.handleTokenRenewal(msg)
-		return true
+	if c.Hub.eventBudgetConfig.Enabled {
+		return c.dispatchBudgetedEvent(msg)
 	}
-
-	// Set sender info
-	msg.UserID = c.UserID
-	msg.ClientID = c.ID
-	msg.CredEpoch = c.CredEpoch
-	// Read here, not on Run: only this goroutine's renewal rebinds the SID, and it
-	// waits for the rebind, so the SID and deadline are one consistent snapshot.
-	// An unparseable SID stays uuid.Nil, which every family guard refuses.
-	msg.SID, _ = uuid.Parse(c.SessionID)
-	msg.TokenExpiresAt = c.tokenDeadline()
-
-	select {
-	case c.Hub.incoming <- msg:
-		return true
-	case <-c.Hub.done:
-		return false
-	}
+	return c.dispatchLegacyEvent(msg)
 }
 
-// awaitFrameBudget paces until budget admits a frame; false once the hub stops.
+// awaitFrameBudget paces until budget admits a frame or ingress is canceled.
 func (c *Client) awaitFrameBudget(budget *ingressbudget.Bucket) bool {
-	for !budget.Allow() {
+	for {
+		if c.ingressStopped() {
+			return false
+		}
+		if budget.Allow() {
+			return true
+		}
 		select {
 		case <-time.After(applicationFrameInterval):
+		case <-c.ingressDone():
+			return false
 		case <-c.Hub.done:
 			return false
 		}
 	}
-	return true
 }
 
 func (c *Client) recordReadFailure(err error) {
@@ -822,6 +840,7 @@ func (c *Client) writePump() {
 		if err := c.Conn.Close(); err != nil && !alreadyDisconnected(err) {
 			log.Printf("WebSocket write transport close failed: %s", describeSocketFailure(err))
 		}
+		c.cancelIngressLifecycle()
 		c.releaseConnection()
 	}()
 
