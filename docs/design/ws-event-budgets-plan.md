@@ -2,9 +2,10 @@
 
 Plan for `Hosted issue 2270`, governed
 by the [normative contract](ws-event-budgets.md). All thresholds remain
-**UNMEASURED**. Unit A is pure policy groundwork. Unit E adds canonical error
-schema validation only; neither unit activates runtime admission, Redis use,
-socket behavior, metrics or environment parsing.
+**UNMEASURED**. Units A and B1–B3 provide policy, Redis backend, dedicated
+client and account-admitter construction groundwork. Unit E adds canonical
+error schema validation. No production caller invokes the new engine; runtime
+admission, socket behavior, metrics and environment parsing are unchanged.
 
 ## Bounded work units
 
@@ -116,8 +117,175 @@ results and unavailable checks honestly; pure policy evidence is not runtime pro
 
 ## Later evidence and acceptance gates
 
-Freeze B's exact integer byte fixtures and constructor/lifetime contract before B
-starts. Pin corrupt-state refusal, safe-integer overflow, exact reply grammar and
+### Unit B1 construction and verification
+
+B1 adds `internal/websocket/event_admission.lua` and
+`event_admission_redis.go`, with independent unit and isolated Redis integration
+tests. Its exact API, byte grammar, ownership and boundary examples are recorded
+in the [B1 contract](ws-event-budgets.md#b1-request-result-and-ownership).
+The backend has no runtime call site, warm map, application semaphore or new
+dependency. B2 owns dedicated client factories and ACL; B3 owns admission,
+deadlines and fallback; B4 combines failure/lifetime evidence. No permissive
+placeholder for these later units is introduced.
+
+Required B1 evidence covers all approved configured pairs, command bytes and
+one-key count, strict three-integer reply types, copied config, zero-command
+invalid inputs, ownership on constructor error, and concurrent/idempotent Close.
+Run production Lua on isolated Redis for exact stored decimal bytes, burst/refill,
+scale changes, idle/maximum debt, canonical maximum/max+1, corrupt type/field/
+grammar rejection, rollback retention and the conservative expiry horizon.
+Two clients contending for one account must share its burst; another account or
+class remains independent. Corrupt records retain their bytes and absolute expiry.
+
+Only test-local substitutions of the unique TIME acquisition and result plumbing
+may supply deterministic clock/TTL vectors; the production algorithm stays the
+same. Execute the unchanged script separately with real TIME. Cold script cache
+permits exactly EVALSHA then EVAL under one context; warm cache needs only EVALSHA.
+A real debit followed by a lost reply must return unavailable with no replay.
+Use only disposable Redis and administrative test credentials for fixture
+inspection; never broaden production ACL to accommodate tests.
+
+Root captures the absent-feature compile barrier before source implementation,
+then runs focused unit/integration/race/vet/lint checks and independent review.
+The initial missing-symbol barrier is not behavioral red evidence. Record actual
+Redis version, commands, results and missing checks; source construction and test
+fixtures alone do not establish passing tests or production capacity.
+
+### Unit B2 construction and verification
+
+B2 adds `internal/database/redis_event_budget.go` and a control-plane-only `TIME`
+grant in `internal/managedredis/acl-manifest.json`, removing the obsolete absent
+inventory entry. The [B2 contract](ws-event-budgets.md#b2-dedicated-clients-and-source-acl)
+records both constructor signatures, exact settings and resource ownership.
+Shared constructors, runtime credentials, other service/operator grants and key
+patterns are unchanged. No startup call site or environment/configuration writer
+is introduced; source ACL delivery remains a later activation prerequisite.
+
+Independent tests must establish normalized zero command retries, one dial attempt,
+all three connection limits of 32, no minimum idle connections, the four 100ms
+timeouts and disabled maintenance notifications. Assert legacy auth/DB/TLS/protocol
+preservation, managed TLS cloning and shared-client option independence. Constructors
+must issue no PING, script load, dial or credential fetch/probe; nil runtime and
+invalid endpoint/URL reject without exposing credentials.
+
+Managed tests must exercise the same runtime's streaming rotation and freshness
+on actual commands/dials, including a cold/expired runtime accepted by construction
+but refused on use. Closing the dedicated client must unsubscribe its listeners
+while leaving the shared client and runtime usable. Listener-count inspection is
+test-only; do not add a production identity/state accessor. Observe library dial
+quiescence separately from application completion and do not infer a universal
+Close wall-time bound from a passing fixture.
+
+ACL evidence must run the production account script under the control-plane
+identity on disposable Redis, show denial before the TIME grant and success after,
+and retain denial for media/operator identities and unrelated keys/admin commands.
+Administrative fixture setup/expiry inspection does not justify broader service
+permissions. Root records the missing-constructor compile barrier, then focused
+race/integration/vet/lint results and independent review; tests and source changes
+alone do not establish managed deployment or workload capacity.
+
+### Unit B3 construction and verification
+
+B3 adds `internal/websocket/event_admission_account.go` and independent tests in
+`event_admission_account_test.go`. The [B3 contract](ws-event-budgets.md#b3-bounded-account-admission)
+records the exact enums/API, ownership, result priority and fixed resource bounds.
+No production call site, local heartbeat gate, socket response, metrics publication
+or configuration writer is introduced. B4 combines real Redis uncertainty and
+managed-client lifetime evidence before C wires runtime admission.
+
+Use independent backend doubles and a private per-instance clock to test empty
+initialization across all seven configured classes, exact first-token boundaries,
+burst caps and nonrefund after success/denial/error/cancellation. Valid Redis denial
+warms an absent account empty but remains definitive; errors, malformed shapes and
+late/canceled replies must never create refillable state. Pin healthy allowance
+for user 10001 with a full map, unavailable denial for that untracked account, and
+continued resident credit without eviction. Sweep must retain at 600s−1ns, delete
+at 600s and serialize touch/reservation against deletion; recreation stays empty.
+
+Block 32 synchronous backend calls and show a 33rd attempt takes immediate fallback
+without invoking the backend. Check the actual child context deadline and results
+at the 90ms/100ms boundaries, earlier hold/parent deadlines, canceled parent priority,
+and disabled invalid/expired input handling. Delayed cancellation notification must
+not bypass absolute deadline checks. Map contention before remote work must not
+start a late backend command; contention after a valid reply must not produce a
+late allowance or a refillable late allocation. Deny retry values remain strict
+integer milliseconds, and backend errors never acquire definitive-denial status.
+
+Close tests must cancel active backend calls, join them and the real lifecycle
+sweep, reject future admission, retain one checked backend-close result, and race
+registration with stopping without WaitGroup misuse. The clock and sweep body are
+private seams; use no mutable package clock, exported debug map or per-request
+background wrapper. Root owns execution, focused race/vet/lint/coverage and
+independent review. Record observed failures and unavailable checks; passing unit
+tests do not establish production capacity or full Redis-outage auth availability.
+
+### Unit B4.1 CI bridge and evidence limits
+
+The source-owned package wrapper opts `websocket.test` into the existing Redis
+integration suite only with an explicit nonempty REDIS_URL. It opts
+`managedredis.test` into the ACL canary with the Redis8 fixture image. Both receive
+`-test.v`; other binaries keep their arguments and opt-in behavior. The ACL build
+expression accepts `integration || managedredis_integration`, preserving manual
+callers and its explicit runtime opt-in. The existing single merged coverage
+invocation adds `-count=1` to the outer go command to prevent cached test results,
+and outer `-v` to retain passing per-test records instead of suppressing them.
+
+Independent executable shell fixtures must prove selected flags/image/verbosity,
+nonempty endpoint enforcement, unrelated-package behavior, preserved argument
+bytes and failure status, and database cleanup on failure without emitting URLs
+or credentials. Go's build-tag evaluator must select the ACL file under the
+existing coverage tag. Keep the DB/NATS/metrics isolation paths and one coverage
+run; no workflow trust, protected pin, secrets or service policy changes belong
+to this bridge. Root records the initial behavioral failure and subsequent checks.
+
+Acceptance must identify the exact run/head/workflow SHA and the shards containing
+WebSocket/managedredis. Require non-skipped PASS records for all eight
+`TestRedisAccountBudgetIntegration*` tests, `TestRedisACLIntegration`, and the
+constructor/rotation/unsubscribe tests. The protected required workflow's current
+pin is a separate adoption boundary: the source wrapper/tag improvement is
+reachable without repinning, but fresh execution of the changed outer invocation
+must be observed after its normal reviewed pin advancement. Do not invent a SHA
+or equate local/current-workflow evidence with the required protected run.
+
+Record the actual Redis version and resolved image; `redis:8-alpine` is not an
+immutable pin. CI opt-in wiring alone proves no failure behavior or production
+workload capacity; the isolated evidence below is a separate qualification step.
+
+### Unit B4 isolated execution and remaining limits
+
+The full WebSocket race/integration run passed on isolated Redis 8.10.2 in 1.570s.
+Actual TCP lost-reply tests observed one retained debit without replay, cold/warm
+fallback and nonrefund, and cancellation/Close with a held reply. Same-key
+adjusted absolute-expiry brackets were 4200000 to 3600000 milliseconds and,
+with a one-microsecond remainder, 4200001 to 3600001. These are deterministic
+clock/expiry observations, not an elapsed 600-second soak.
+
+Managed ACL and grouped race/integration tests passed on disposable Docker Redis
+8.10.3. Production Lua with only PEXPIRE removed failed after HSET, returned
+unavailable, and made one EVALSHA with no EVAL replay. Tests inspected retained
+debt, a new key without expiry and unchanged existing expiry. The same runtime
+served shared/dedicated generations 12 to 13; dedicated Close reached pool zero,
+then the surviving shared client used generation 14. Stale-at-121s credentials
+remained usable until ValidUntil; expired credentials produced zero Lua/no debt.
+
+B4.4's three database transport cases passed under race in 4.446s: a
+production-TLS blackhole with one initial dial, RESP3 lost-EVAL delivery without
+replay, and Close during a held EVAL. The strengthened held-EVAL `net.ErrClosed`
+oracle passed in 2.151s. Every case observed 1.1 seconds after Close with no new
+accepts/scripts, pool zero, accepted/closed fixture connection parity and joined
+fixture workers. An actual TCP test overlay changing MaxRetries from -1 to 1
+failed because success replaced the required fixed unavailable result; production
+source was untouched. These cases do not activate saturated 32-error recovery.
+Retain separate observations of pool/dial behavior and checked cleanup; neither
+the passing fixtures nor pool zero establishes a join of every library goroutine.
+ACL changes do not establish disconnection of idle sockets or eager
+reauthentication of every connection. Protected-workflow adoption remains subject
+to the B4.1 pin boundary above. Runtime integration, workload measurements and
+activation prerequisites remain outstanding.
+
+### Remaining account-engine and runtime gates
+
+Pin corrupt-state refusal, safe-integer overflow, exact reply grammar and
 backward-clock retention. Profile debt at logical T with wall T−3600s must retain
 4200000ms for millisecond-aligned T, or 4200001ms with a microsecond remainder;
 after 600 wall seconds it must still deny, without a new burst. Use a deterministic
