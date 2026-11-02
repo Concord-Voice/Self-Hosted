@@ -191,6 +191,11 @@ func runControlPlane() (runErr error) {
 	if stopRedisPoll != nil {
 		defer stopRedisPoll()
 	}
+	wsEventAdmitter, err := initializeWSEventAdmitter(cfg, redisRuntime, redisTLSConfig)
+	if err != nil {
+		return fmt.Errorf("initialize websocket event budgets: %w", err)
+	}
+	defer closeWSEventAdmitterOnReturn(wsEventAdmitter, &runErr)
 
 	// Repopulate the user-disabled denylist from the DB source of truth (#1623):
 	// closes the window after a Redis flush where the immediate-effect mid-session
@@ -321,6 +326,7 @@ func runControlPlane() (runErr error) {
 					Readiness:            readiness,
 					RedisRuntime:         redisRuntime,
 					RedisTLSConfig:       redisTLSConfig,
+					WSEventAdmitter:      wsEventAdmitter,
 				},
 			)
 			if routerErr != nil {
@@ -520,6 +526,7 @@ func runControlPlane() (runErr error) {
 			waitBackgroundWorkers,
 			func() { closePresenceWorkers() },
 			func() { hub.Shutdown() },
+			wsEventAdmitter.Close,
 			func() error {
 				// Own context, NOT the 30s drain budget above. That budget is
 				// consumed by srv.Shutdown, and a metrics stage handed an
@@ -700,7 +707,9 @@ var drainSettleSleep = time.Sleep
 // stop_grace_period is 45s. drainSettle spends 3s of it before cleanup even
 // starts, and the tail stages carry their own bounds (3s ops-metrics, 5s admin
 // reader, 2s NATS drain = 10s). That leaves 32s, and shutdownDrainBudget claims
-// 30 of it, keeping ~2s of margin for process teardown.
+// 30 of it. The remaining margin also covers synchronous event-budget cleanup:
+// its bounded application calls and sweep must join before credentials stop.
+// This is not a bound on all underlying library cleanup or a defective backend.
 //
 // Before this, waitBackgroundWorkers, closePresenceWorkers and hub.Shutdown
 // took no context at all. A stage that blocked ran until Docker SIGKILLed the
@@ -804,8 +813,8 @@ func runControlPlaneServer(
 	//
 	// It lives here rather than inside shutdownControlPlane because the two
 	// arms of the select below already ARE the discriminator. Threading one
-	// into shutdownControlPlane would widen an eight-value signature whose
-	// call ORDER carries three load-bearing comments, inviting a future
+	// into shutdownControlPlane would widen its ordered dependency signature,
+	// whose call order carries lifecycle constraints, inviting a future
 	// reorder to break the drain-before-listener-close property.
 	beginDrain func(),
 ) (runErr error) {
@@ -862,6 +871,9 @@ func shutdownControlPlane(
 	// exactly the work the drain exists to perform (#2738 review).
 	closePresenceWorkers func(),
 	shutdownHub func(),
+	// Engine Close must join its owned work before metrics and credential cleanup,
+	// even if the Hub stage exhausted the shared waiting budget.
+	shutdownEventBudgets func() error,
 	shutdownMetrics func() error,
 	shutdownAdminMetricsReader func() error,
 	closeNATS func(),
@@ -875,6 +887,7 @@ func shutdownControlPlane(
 	awaitStage(drainCtx, "background_workers", waitActivityWorkers, onStageAbandoned)
 	awaitStage(drainCtx, "presence_workers", closePresenceWorkers, onStageAbandoned)
 	awaitStage(drainCtx, "hub", shutdownHub, onStageAbandoned)
+	shutdownErr = errors.Join(shutdownErr, shutdownEventBudgets())
 	shutdownErr = errors.Join(shutdownErr, shutdownMetrics())
 	shutdownErr = errors.Join(shutdownErr, shutdownAdminMetricsReader())
 	closeNATS()

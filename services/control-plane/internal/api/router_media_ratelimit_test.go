@@ -24,6 +24,7 @@ func TestPublicMediaRateLimitExceededResponsesAreNotStored(t *testing.T) {
 		ts.DB,
 		ts.Redis,
 		&config.Config{
+			WSEventBudget:           config.WSEventBudgetConfig{Enabled: false, ScalePercent: 100},
 			Environment:             "test",
 			JWTSecret:               testhelpers.TestJWTSecret,
 			AllowedOrigins:          []string{"*"},
@@ -99,7 +100,8 @@ func TestNewRouterReturnsActivePlanRail(t *testing.T) {
 	_, hub, natsClient, opsRuntime, permissionEnforcer, _, closePresence, rail, _, _, err := api.NewRouter(
 		t.Context(), ts.DB, ts.Redis,
 		&config.Config{
-			Environment: "test", JWTSecret: testhelpers.TestJWTSecret, AllowedOrigins: []string{"*"},
+			WSEventBudget: config.WSEventBudgetConfig{Enabled: false, ScalePercent: 100},
+			Environment:   "test", JWTSecret: testhelpers.TestJWTSecret, AllowedOrigins: []string{"*"},
 			MFAEncryptionKey:        "0000000000000000000000000000000000000000000000000000000000000000",
 			MFAEncryptionKeyVersion: 1, WebAuthnRPID: "localhost", WebAuthnRPOrigins: []string{"http://localhost:3001"},
 		},

@@ -176,6 +176,7 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 		privacyClearThenCloseWake:   make(chan struct{}, 1),
 		releaseAdmission:            release,
 	}
+	client.initIngressLifecycle()
 	client.admissionOwners.Store(2) // Handler and hub; pumps join before starting.
 	release = nil
 	defer client.releaseConnection()
@@ -184,6 +185,7 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 		if err := conn.Close(); err != nil && !alreadyDisconnected(err) {
 			log.Printf("Failed to close pending WebSocket: %s", describeSocketFailure(err))
 		}
+		client.cancelIngressLifecycle()
 		client.releaseConnection() // No hub owns this client.
 	}
 	registered := make(chan struct{})
@@ -201,6 +203,9 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 	select {
 	case h.hub.register <- client:
 		close(registered)
+	case <-client.ingressDone():
+		closePending()
+		return
 	case <-h.hub.done:
 		closePending()
 		return
@@ -238,16 +243,18 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 		if err := h.fence.Check(c.Request.Context(), userID.String(), client.CredEpoch); err != nil {
 			client.stopTokenExpiry()
 			log.Printf("Evicting WebSocket client for user %s: credential epoch superseded", sanitizeLogValue(userID.String()))
-			client.requestUnregister()
 			client.closeRevokedConnection()
+			client.cancelIngressLifecycle()
+			client.requestUnregister()
 			return
 		}
 	}
 	if err := h.recheckTokenTheft(c, userID); err != nil {
 		client.stopTokenExpiry()
 		log.Printf("Evicting WebSocket client for user %s: token theft state changed: %v", sanitizeLogValue(userID.String()), err)
-		client.requestUnregister()
 		client.closeRevokedConnection()
+		client.cancelIngressLifecycle()
+		client.requestUnregister()
 		return
 	}
 	if client.tokenExpired() {
@@ -261,6 +268,7 @@ func (h *Handler) HandleWebSocket(c *gin.Context) {
 		if closeErr := client.closeSecurityTransport(); closeErr != nil {
 			log.Printf("WebSocket family transport close failed: %s", describeSocketFailure(closeErr))
 		}
+		client.cancelIngressLifecycle()
 		client.requestUnregister()
 		return
 	}
