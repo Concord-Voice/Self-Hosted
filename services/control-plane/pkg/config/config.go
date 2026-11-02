@@ -224,6 +224,7 @@ type Config struct {
 	JWTSecret                 string // #nosec G117 -- False positive: config field name, actual secret loaded from env
 	NATSUrl                   string
 	OpsMetrics                OpsMetricsConfig
+	WSEventBudget             WSEventBudgetConfig
 	// Billing is the Stripe billing configuration (#2033), validated by
 	// LoadBillingConfig and logged at boot by BillingConfig.LogBoot.
 	Billing BillingConfig
@@ -464,8 +465,13 @@ func Load() (*Config, error) {
 	if err != nil {
 		return nil, err
 	}
+	wsEventBudget, err := loadWSEventBudgetConfig(os.LookupEnv)
+	if err != nil {
+		return nil, err
+	}
 
 	cfg := &Config{
+		WSEventBudget: wsEventBudget,
 		// Fail closed: an unset ENVIRONMENT means production, so a deploy path
 		// that forgets it meets the production guards below instead of silently
 		// running with development behaviour (codes logged or returned, SMS

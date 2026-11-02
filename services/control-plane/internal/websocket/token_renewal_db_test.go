@@ -143,6 +143,7 @@ func TestRenewToken_RealAuthorityFamily(t *testing.T) {
 			c.asyncWg.Add(1)
 			hub := r.h.hub
 			c.Hub = hub
+			c.initIngressLifecycle()
 			hub.clients[c.ID] = c
 			hub.userClients[c.UserID] = map[uuid.UUID]bool{c.ID: true}
 			go hub.Run()
@@ -161,7 +162,7 @@ func TestRenewToken_RealAuthorityFamily(t *testing.T) {
 			if kind == "terminal family" {
 				r.terminal(t)
 			}
-			accepted := c.renewToken(r.token(t, r.user, next, "", expiry))
+			accepted := renewalAttemptAccepted(c, r.token(t, r.user, next, "", expiry))
 			if kind == "same family" {
 				require.True(t, accepted)
 				assert.True(t, c.tokenDeadline().Equal(expiry))
