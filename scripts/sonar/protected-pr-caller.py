@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import sys
 import time
+from urllib.error import HTTPError
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
@@ -274,6 +275,13 @@ def main():
     except Invalid as exc:
         # Invalid messages are fixed strings, never request or response content.
         print(f"protected Sonar caller failed: {exc}", file=sys.stderr)
+        return 1
+    except HTTPError as exc:
+        # Report only the numeric status; the exception also carries private
+        # request URL, headers, and response body.
+        code = exc.code
+        status = str(code) if type(code) is int and 100 <= code <= 599 else "unknown"
+        print(f"protected Sonar caller failed: HTTP status {status}", file=sys.stderr)
         return 1
     except (OSError, UnicodeError, TypeError, ValueError, OverflowError, RecursionError):
         print("protected Sonar caller failed; inspect local input and API status", file=sys.stderr)
