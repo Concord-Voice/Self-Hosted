@@ -135,6 +135,10 @@ data/
 !client/desktop/src/renderer/data/emoji/**
 postgres-data/
 redis-data/
+# Redis persistence files written when redis-server runs from a source
+# directory (a local test run committed one in Alpha #4211).
+appendonlydir/
+dump.rdb
 
 # Logs
 logs/

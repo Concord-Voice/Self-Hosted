@@ -271,7 +271,7 @@ def validate_evidence(candidate, verified, run, pr, jobs):
     if (claims.get("run_id") != str(candidate["caller_run_id"])
             or claims.get("run_attempt") != str(candidate["caller_run_attempt"])
             or claims.get("repository") != REPO or claims.get("event_name") != "pull_request"
-            or claims.get("workflow_ref") != REPO + "/.github/workflows/required-pr-build.yml@main"
+            or claims.get("workflow_ref") != REPO + "/.github/workflows/required-pr-build.yml@refs/heads/main"
             or not sha(claims.get("workflow_sha"))):
         raise Reject("verified claims inconsistent")
     workflow_path = ".github/workflows/required-pr-build.yml"
@@ -468,6 +468,9 @@ def validate_report(content, component):
             raise Reject("Go coverage empty")
         for path in records:
             safe_path(path)
+            # Self-Hosted's control plane kept Alpha's Go module path through the
+            # split, so `go test` coverage names files under it. Retire this
+            # alternative together with any module rename.
             if not (path.startswith(prefix + "/") or path.startswith("github.com/Concord-Voice/Concord-Voice-Alpha/" + prefix + "/")):
                 raise Reject("Go coverage source outside component")
         return content

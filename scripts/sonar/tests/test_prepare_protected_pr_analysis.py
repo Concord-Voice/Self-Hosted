@@ -105,7 +105,7 @@ class PrepareTest(unittest.TestCase):
         self.verified = {"payload": self.payload,
                          "claims": {"repository": MODULE.REPO, "repository_id": "1158152129",
                                     "event_name": "pull_request", "run_id": "42", "run_attempt": "2",
-                                    "workflow_ref": MODULE.REPO + "/.github/workflows/required-pr-build.yml@main",
+                                    "workflow_ref": MODULE.REPO + "/.github/workflows/required-pr-build.yml@refs/heads/main",
                                     "workflow_sha": self.base}}
         self.run_data = {"id": 42, "run_attempt": 2, "event": "pull_request", "head_sha": self.head,
                          "status": "in_progress", "conclusion": None,
@@ -239,7 +239,7 @@ class PrepareTest(unittest.TestCase):
     def test_signed_workflow_ref_accepts_only_ruleset_main_form(self):
         jobs = {"total_count": len(self.jobs_data), "jobs": self.jobs_data}
         ref = f"{MODULE.REPO}/.github/workflows/required-pr-build.yml"
-        for value in (f"{ref}@refs/heads/main", f"{ref}@refs/pull/7/merge", f"{ref}@feature/untrusted"):
+        for value in (f"{ref}@main", f"{ref}@refs/pull/7/merge", f"{ref}@feature/untrusted"):
             with self.subTest(workflow_ref=value):
                 self.verified["claims"]["workflow_ref"] = value
                 with self.assertRaisesRegex(MODULE.Reject, "verified claims inconsistent"):

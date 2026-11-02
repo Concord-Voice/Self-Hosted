@@ -1,0 +1,86 @@
+{
+  "default_branch": "main",
+  "docs": { "spec_dir": "docs/superpowers/specs/", "plan_dir": "docs/superpowers/plans/" },
+  "project": {
+    "id": "PVT_EXAMPLE000000000",
+    "number": 1,
+    "owner": "<your-github-username>",
+    "fields": {
+      "status": { "id": "PVTSSF_EXAMPLE00000000", "options": { "in_review": "EXAMPLE1" } },
+      "priority": { "id": "PVTSSF_EXAMPLE00000000", "options": { "P1": "EXAMPLE1" } },
+      "size": { "id": "PVTSSF_EXAMPLE00000000", "options": {} }
+    }
+  },
+  "labels": { "namespaces": ["type","area","domain","release","risk","routine","workflow-validation"], "source": ".claude/rules/labels.md" },
+  "board": { "release_label_prefix": "release:", "priority_labels": ["P1","P2","P3","P4","P5"] },
+  "migrations": { "dir": "migrations/" },
+  "paths": { "electron_dir": "." },
+  "red_team": { "focus_surfaces": ["auth boundary: session issuance, refresh, and revocation", "tenant isolation: every query scoped by tenant id", "file upload: path handling and content-type trust"] },
+  "bots": [
+    { "match": "example-review", "name": "Example Review Bot", "login": "example-review-bot[bot]", "ci_check": "Example Review Bot", "blocking": true, "offline": false, "when": "always" },
+    { "match": "sonarqubecloud", "name": "SonarCloud", "login": "sonarqubecloud[bot]", "ci_check": "SonarCloud Code Analysis", "blocking": true, "when": "always" },
+    { "name": "Semgrep SAST", "login": "github-actions[bot]", "marker": "<!-- semgrep-results -->", "ci_check": "build / Semgrep SAST", "when": "always" },
+    { "name": "Release Classifier", "login": "github-actions[bot]", "marker": "<!-- classify-release -->", "ci_check": "build / Classify release impact", "blocking": true, "when": "shippable" },
+    { "match": "copilot", "name": "Copilot Code Review", "login": "copilot-pull-request-reviewer[bot]", "when": "active", "offline": false }
+  ],
+  "review_agents": {
+    "base": ["security-reviewer","code-reviewer","docs-reviewer"],
+    "patterns": [
+      { "glob": "migrations/*.sql", "agent": "migration-reviewer" }
+    ]
+  },
+  "release_signal": { "marker": "<!-- classify-release -->", "version_manifest": "package.json", "shippable_globs": ["src/","package.json"] },
+  "quality_gate": {
+    "enabled": true, "coverage_min": 80, "blockers_max": 0, "hotspots_max": 0,
+    "doc_path": "docs/ci/quality-gate-definition.md",
+    "server": "sonarqube",
+    "checks": [
+      { "name": "backend lint",   "dir": "services/api", "group": "lint",      "cmd": "golangci-lint run ./..." },
+      { "name": "backend vet",    "dir": "services/api", "group": "lint",      "cmd": "go vet ./..." },
+      { "name": "frontend lint",  "dir": "client/web",   "group": "lint",      "cmd": "npm run lint" },
+      { "name": "type-check",     "dir": "client/web",   "group": "typecheck", "cmd": "npx tsc --noEmit" },
+      { "name": "backend tests",  "dir": "services/api", "group": "test",      "cmd": "go test -race ./...", "fast_cmd": "go test ./..." },
+      { "name": "frontend tests", "dir": "client/web",   "group": "test",      "cmd": "npm test" }
+    ]
+  },
+  "epic_linkage": { "enabled": true, "epic_title_pattern": "Epic: v{version} release", "epic_label": "type: epic" },
+  "version_bump": { "enabled": true, "source_check": "SPA Check", "bump_file": "package.json" },
+  "branch_protection": { "doc_path": "docs/policies/branch-protection.md", "code_owner_team": "@example-org/security" },
+  "ecosystems": ["npm","gomod","github-actions"],
+  "weekly_deps": {
+    "tiers": {},
+    "deep_review_skill": "/enhanced-pr-review",
+    "cron": { "prep": "0 13 * * 3", "triage": "0 15 * * 3", "tz_label": "ET" },
+    "digest_issue_title": "Weekly Dependency Triage — Routine Output",
+    "security_sensitive_extra": ["electron*","@electron/*","react","react-dom"],
+    "signal3_repo_map": {},
+    "tier_d_sources": [],
+    "local_test_cmds": { "src/frontend": ["npm test","npm run lint","npm run build"] }
+  },
+  "docs_map": {
+    "sources": [
+      { "glob": "src/api/**", "docs": ["docs/api/README.md", "docs/architecture.md"] }
+    ],
+    "redundancy": [
+      { "fact": "Key metric counts", "source_of_truth": "CLAUDE.md", "mirrors": ["README.md", "docs/architecture.md"] }
+    ],
+    "tiers": { "high": [], "mid": [], "low": [] },
+    "drift": { "config": ".claude/hooks-config.json" }
+  },
+  "skip_commit_patterns": ["chore: update spa.env"],
+  "ai_policy_doc": "docs/policies/ai-generated-code-policy.md",
+  "hooks": {
+    "protected_patterns": ["/e2ee","/crypto","/auth/","/mfa/","/rbac/","/password","/sessions/","/middleware/security","/middleware/cors","/middleware/ratelimit","/preload/","src/main/ipc","deploy-secrets","deploy-production"],
+    "test_reminders": [
+      { "regex": "migrations/.*\\.(up|down)\\.sql$", "message": "Reminder: Migration touched — run the 'migration-reviewer' subagent (up/down symmetry, zero-downtime, sensitive tables).", "stop": true },
+      { "regex": "(src/preload/|src/main/ipc)", "message": "Reminder: Electron IPC surface touched — run '/ipc-channel-audit --only-new'.", "stop": false }
+    ],
+    "test_paths": {
+      "source_ext": ["go","ts","tsx"],
+      "skip_ext": ["md","json","yaml","yml","css","sql","sh"],
+      "test_skip_re": "(_test\\.go|\\.test\\.(ts|tsx)|\\.spec\\.(ts|tsx))$",
+      "remaps": [ { "src": "src/frontend/", "dst": "tests/unit/" } ],
+      "docs_reminder": "Reminder: Source changed — consider the 'docs-reviewer' subagent before opening the PR (doc drift)."
+    }
+  }
+}

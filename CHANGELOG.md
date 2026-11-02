@@ -29,6 +29,7 @@ gate can learn from your voice.
 
 ### Added
 
+- **Authentication:** Added an internal verified-session snapshot adapter for future step-up attempt accounting. Current request handling and attempt budgets are unchanged.
 - **Tray:** The tray icon now shows both stars of the Concord Voice mark, and it reflects your status. It shows when you are in voice, muted, deafened, sharing your screen, reconnecting, or have unread messages or mentions. On macOS and Windows, click the icon to open a menu with Mute, Deafen, Leave voice, Stop sharing, your presence, and a shortcut to your newest unread conversation. On Linux, click the icon to open the window; the menu comes from your desktop's tray host.
 - **Settings:** Settings ▸ Appearance has a new Tray Icon setting (Menu Bar Icon on macOS). Choose Automatic, Light, Dark, or Colour to match your taskbar or menu bar.
 - **Billing:** Settings ▸ Subscription lists each plan with its monthly and yearly price and opens a secure Stripe page to subscribe or manage billing.
@@ -36,6 +37,7 @@ gate can learn from your voice.
 - **Billing:** Subscribers can change plans in Settings, see the amount due before an immediate switch, and withdraw a change that is booked for renewal.
 - **Billing:** A Wing subscription can share Supersonic with one friend. Invite the friend from Settings ▸ Subscription. You can change your +1 once every 30 days.
 - **Billing:** A premium code redeemed on a paid subscription becomes account credit that your next renewals use first. A code for a different plan shows the credit and asks you to confirm.
+- **Self-hosting:** Operators can set separate minimum app versions for iOS and Android with `CLIENT_MIN_VERSION_IOS` and `CLIENT_MIN_VERSION_ANDROID`. `CLIENT_MIN_VERSION` still sets the desktop minimum. API: mobile clients send `X-Concord-Client-Platform` (`ios` or `android`), or `client_platform` on the WebSocket; any other value gets a 400.
 - **Servers:** Owners can require MFA for dangerous actions from Server Settings. Members then confirm each dangerous action with a code or security key ([#3454](internal development reference omitted), [#3456](internal development reference omitted), [#3675](internal development reference omitted)). API: send `mfa_code` on a retry after a 403 `mfa_required`. `GET /api/v1/server/capabilities` reports `features.mfaEnforcedDangerousActions`.
 - **Servers:** Delete Role asks you to confirm and names the role first ([#3675](internal development reference omitted)).
 - **Messages:** Every purge has an "Include pinned messages" option, off by default ([#3458](internal development reference omitted), [#3552](internal development reference omitted)). API: `include_pinned` and `features.purgeKeepsPinned`.
@@ -141,6 +143,7 @@ gate can learn from your voice.
 
 ### Security
 
+- **Accounts:** Your encrypted key is only sent to a device that has just signed in, or that confirms your current password, so a stolen session can no longer download it. Changing your password asks for your current password as before.
 - **Voice:** One account can no longer fill the voice server's connection capacity with idle connections and lock other users out of voice.
 - **Accounts:** A device signed out while its account-deletion request was still processing can no longer delete the account ([#4192](internal development reference omitted)).
 - **Accounts:** Signing out a device or revoking a session cuts it off everywhere at once. Its open connection and any voice call end before the change is confirmed, and a signed-out device can no longer act on your account.
