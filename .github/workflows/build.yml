@@ -607,7 +607,7 @@ jobs:
           # differential prescan test runs past go test's 10-minute per-package
           # default under -race with atomic coverage. 20m stays inside the
           # job's 25-minute limit; a package needing more means re-sharding.
-          go test -race -trimpath -p 2 -timeout 20m -exec "$PWD/scripts/ci-test-package-db.sh" \
+          go test -v -count=1 -race -trimpath -p 2 -timeout 20m -exec "$PWD/scripts/ci-test-package-db.sh" \
             -tags integration -coverprofile=coverage.out "${PKGS[@]}"
 
       - name: Upload coverage (shard ${{ matrix.shard }})
@@ -1094,6 +1094,9 @@ jobs:
       # CI needs stubs to traverse the YAML even though `up` is never run.
       FEEDBACK_PAT: CI_STUB_NOT_A_SECRET_feedback_pat   # pragma: allowlist secret
       FEEDBACK_REPO: ci-stub/feedback-repo
+      # Synthetic build-only values; production keeps the required Compose inputs.
+      WS_EVENT_BUDGET_ENABLED: "true"
+      WS_EVENT_BUDGET_SCALE_PERCENT: "100"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

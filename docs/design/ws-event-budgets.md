@@ -3,12 +3,13 @@
 Normative contract for `Hosted issue 2270`.
 Source now includes the policy registry, typed validation/scaling, dedicated
 Redis account engine, socket lifetimes and complete enabled dispatch/renewal
-integration, together with Unit E canonical error-schema validation. Explicitly
-enabled Hubs enforce the event gates, bounded hold and
-refusal responses described below. The production router still uses the legacy
-disabled constructor: C5 config/process wiring, metrics publication and compatible
-client delivery remain prerequisites, together with G/H self-hosted and
-managed configuration delivery and workload acceptance. All thresholds and
+integration, validated process construction and Unit E canonical error-schema
+validation. Enabled Hubs enforce the event gates, bounded hold and refusal
+responses described below. The production router uses immutable startup policy
+and the process-owned engine. D1 adds a read-only scalar snapshot bridge without
+collector wiring or metric publication. Metrics publication and compatible client
+delivery remain prerequisites, together with G/H self-hosted and managed
+configuration delivery and workload acceptance. All thresholds and
 workload claims are **UNMEASURED**; source implementation is not evidence of deployment.
 
 ## Policy and identity
@@ -58,12 +59,14 @@ scale 33 is 37879 microseconds / burst 52. The smallest allowed account burst is
 `accountEventBudget` validates config first, rejects content/unknown classes and
 returns configured parameters regardless of `Enabled`. Scope excludes heartbeat.
 
-Future startup settings are `WS_EVENT_BUDGET_ENABLED` (absent default `true`) and
+Startup settings are `WS_EVENT_BUDGET_ENABLED` (absent default `true`) and
 `WS_EVENT_BUDGET_SCALE_PERCENT` (absent default `100`). Explicit empty values fail.
 Accept only lowercase `true`/`false` and canonical unsigned ASCII decimal 25..400,
 without signs, spaces, leading zeros or fractions. Validate both even if disabled.
-No environment parsing, defaults, live reload or per-class override exists in the
-groundwork. Zero typed config is invalid, not implicit disable.
+`config.Load` uses presence-aware parsing and returns errors before runtime
+construction. Errors identify the setting and grammar without echoing its value.
+There is no live reload or per-class override. Zero typed config is invalid,
+not implicit disable.
 
 ## Distributed decisions and bounded fallback
 
@@ -167,7 +170,7 @@ retained horizon; the next microsecond rejects without creating a key. Canonical
 time; 9007199254740992 fails the lexical check. Isolated tests substitute only
 the TIME acquisition and expose the PEXPIRE argument; production has no clock
 override. Absolute-expiry snapshots establish no-write rejection, not decreasing
-PTTL comparisons. Real TIME execution and uncertainty tests remain required.
+PTTL comparisons. The isolated execution evidence below supplements these vectors.
 
 ### B2 dedicated clients and source ACL
 
@@ -306,13 +309,84 @@ Repeated/concurrent Close retains the checked backend-close result, and later
 Admit returns Abandon. The backend must honor cancellation; there is no untracked
 escape goroutine for a broken backend. No scheduler-independent Close wall-time
 bound or public join of library recovery goroutines is promised. Shared clients
-and credential runtime remain outside engine ownership; library dial quiescence
-and combined managed failure behavior need separate B4 evidence.
+and credential runtime remain outside engine ownership. The bounded managed
+observations below do not establish a join of library recovery goroutines.
 
 The private per-instance clock constructor and `sweepIdle` helper let tests drive
 the same algorithm without global time mutation or exported test API. C still
 owns production integration, FIFO, authority finalization and the original
 two-second/21-attempt hold; B3 neither sleeps nor schedules that hold.
+
+### B4.1 CI evidence bridge
+
+The existing control-plane coverage invocation reaches the Redis evidence through
+its source-owned `scripts/ci-test-package-db.sh` wrapper. Only `websocket.test`
+receives `WS_EVENT_BUDGET_REDIS_INTEGRATION=1`; its REDIS_URL must be explicitly
+nonempty or the wrapper fails before starting the binary. Only `managedredis.test`
+receives `MANAGED_REDIS_INTEGRATION=1` and `MANAGED_REDIS_TEST_IMAGE=redis:8-alpine`.
+Both selected binaries receive `-test.v` before the original arguments to generate
+per-test records and fixture-version observations. The outer go command also uses
+`-v` to retain successful records; binary verbosity alone would let go test
+suppress a passing package's output.
+Endpoints and credentials are never emitted by these new wrapper branches.
+
+The ACL canary builds under either the coverage run's existing `integration` tag
+or the manually supported `managedredis_integration` tag, retaining its runtime
+opt-in. The single merged coverage command adds outer `go test -v -count=1`; there is
+no second Redis-only test run or coverage artifact. Existing per-package database
+cloning/cleanup, NATS/metrics locks, caller arguments and binary failure status
+remain intact. These are test opt-ins, not new product configuration settings.
+
+This source bridge makes the suites reachable; it does not itself establish a
+fresh protected-workflow pass. The protected required workflow remains pinned
+through its existing reviewed process. Adoption of the changed outer invocation
+must be observed after normal pin advancement; no unmerged/future SHA is assumed.
+Record run/head/workflow identity and non-skipped PASS evidence, distinguishing
+local/current-workflow execution from the required protected run. A cached or
+skipped result is not current-run service evidence. `redis:8-alpine` is a mutable
+fixture tag, not an exact version pin; record the resolved Redis version/image.
+Socket-loss, adjusted-expiry and managed-lifecycle evidence is recorded separately
+below and does not follow from CI wiring alone.
+
+### B4 isolated failure and lifecycle evidence
+
+The full WebSocket race/integration run passed on isolated Redis 8.10.2. A real
+TCP proxy withheld a completed script reply and broke delivery: the server retained
+one debit, and the client issued no replay. Cold/warm admission, reserved-credit
+nonrefund, and cancellation/Close while a reply was held were exercised separately.
+These observations extend the earlier ProcessHook EOF fixture to actual transport
+failure; they do not establish production availability.
+
+Deterministic clock vectors on the same retained key bracketed adjusted absolute
+expiry at 4200000 then 3600000 milliseconds, and 4200001 then 3600001 with a
+one-microsecond remainder. This observes the rollback retention calculation and
+continued debt without an actual 600-second soak.
+
+Managed race/integration tests passed against disposable Docker Redis 8.10.3.
+Removing only PEXPIRE permission caused production Lua to fail after HSET: the
+adapter returned unavailable after one EVALSHA and no EVAL replay. Actual debt
+remained; a new key had no expiry, while an existing key retained its prior expiry.
+This demonstrates post-write uncertainty rather than rollback.
+
+Shared and dedicated clients used the same credential runtime across generations
+12 to 13. Dedicated Close left its pool at zero; the shared client survived and
+used generation 14. A credential stale for 121 seconds remained usable until its
+ValidUntil boundary; after expiry, admission issued no Lua and created no debt.
+These observations do not imply that ACL changes disconnect idle connections or
+that all connections eagerly reauthenticate.
+
+Database transport race tests passed for a production-TLS blackhole with one
+initial dial, RESP3 lost-EVAL delivery without replay, and Close during a held
+EVAL. The held-EVAL case additionally required the closed connection to report
+`net.ErrClosed`. Each fixture observed 1.1 seconds after Close with no new accepts
+or scripts, pool zero, parity between accepted and closed fixture connections,
+and joined fixture workers. A test overlay changing MaxRetries from -1 to 1 was
+rejected: the actual TCP lost-reply case returned success where fixed unavailable
+was required. Production source was unchanged by that mutation.
+
+These bounded observations do not exercise activation of saturated 32-error
+recovery or establish a library-wide join. No production workload, activation
+readiness or protected-workflow adoption is established here.
 
 ### C1 socket ingress lifetime and borrowed construction
 
@@ -321,7 +395,7 @@ typed configuration, requires an admitter when enabled, and copies the policy.
 The Hub borrows the engine: it neither makes admission calls in C1 nor closes
 the engine. Construction failure retains caller ownership. `NewHub` remains
 the explicit legacy/test constructor with disabled admission and scale 100.
-Production router and process ownership wiring remain C5 work.
+Production router and process ownership use this seam as described below.
 
 Each constructed Hub owns a cancelable ingress context. Handler derives the
 Client context before expiry registration or publication; HTTP request and async
@@ -452,7 +526,50 @@ or account change cancels obsolete timers. Preserve terminal security behavior.
 Restore desired subscriptions only; never automatically replay content/mutations.
 Renewal retains its existing 5s acknowledgment wait and single 11s retry.
 
+## C5 process construction and cleanup
+
+The config package owns `WSEventBudgetConfig{Enabled, ScalePercent}` without
+importing websocket. Main maps both fields into `EventBudgetConfig` and validates
+the typed policy again before construction. Disabled mode creates the real disabled
+engine with a nil backend, allocating no dedicated client, warm map or sweep.
+Enabled mode composes the existing dedicated Redis factory, account backend and
+engine. Legacy mode parses fresh Redis options; managed mode borrows the already
+initialized credential runtime and TLS policy. Neither path pings the limiter or
+creates another credential reader, runtime or poller.
+
+Ownership transfers client to backend to engine only after each constructor
+succeeds. Failure closes the last caller-owned resource and joins construction
+and cleanup errors. Main constructs one engine after shared Redis initialization
+and injects it through `RouterDependencies.WSEventAdmitter`. The production router
+uses `NewHubWithEventAdmission` even when disabled, rejects invalid configuration
+or a missing enabled engine, and installs the security emitter before publishing
+the Hub. Router and Hub never close the borrowed engine.
+
+Main immediately registers checked deferred engine Close after its shared-client
+and managed-poll cleanup defers. Startup failures therefore close the dedicated
+engine before stopping credential polling and closing shared Redis. Normal
+shutdown attempts the bounded Hub drain, then calls engine Close synchronously
+before metrics, restricted-reader and NATS cleanup. This stage runs even when the
+Hub waiting budget is exhausted and joins its error into the shutdown result.
+The later safety defer checks the idempotent Close result again.
+
+Engine Close cancels and joins its bounded application attempts and sweep before
+closing its backend. This does not establish that an abandoned Hub stage or all
+underlying library work has joined. Existing managed poll cancellation remains
+cancellation, not a new join guarantee. C5 does not authorize deployment or supply
+the remaining metrics, client, writer or workload acceptance evidence.
+
 ## Observability, compatibility and activation
+
+D1 supplies `Hub.EventBudgetSnapshot() (inflight int64, warmUsers int,
+capacityMisses uint64)` through an optional private engine interface. Nil or
+disabled owners and absent providers return zeros. The engine reads its existing
+atomic inflight/miss fields and holds only `warmMu` briefly for the map length.
+The values are independently current; no identities, clock, backend calls, sweep
+or lifecycle lock are involved. Close retains warm residents and cumulative
+misses, so snapshots preserve those values after remote work has joined. The Hub
+continues to borrow the process-owned engine. D1 installs no observer, changes
+no collector/counter catalog and exposes no HTTP or persisted metric surface.
 
 The canonical schema is
 `packages/protocol/src/renderer/types/ws-events.ts`: nested error data validation
@@ -477,13 +594,19 @@ exactly once before account admission. Add inflight/warm-user gauges and actual
 warm-capacity-miss counter: 27 keys total, all `SourceControl`/`UnitCount`, counters
 `KindCounter/RollupLast`, gauges `KindGauge/RollupAverage`, existing count bounds.
 Use a closed catalog. Emit no payloads, identifiers or raw close/Redis errors.
-Reuse rate-limit-denied/backend-unavailable security reasons, coalesced per process
+Reuse rate-limit-denied/backend-unavailable security reasons, coalesced per Hub
 per reason per 60s, without new identity/class fields.
 
 Ship the compatible Admin reader before or with the 27-key producer, including
-disabled zero emission. Ship canonical protocol schema and compatible Desktop/
-other supported consumers before relying on the 1013 floor. Verify the actual
-managed deployment consumes the canonical Self-Hosted implementation; any temporary
+disabled zero emission. D2 must also expand both sample and rollup database CHECK
+catalogs before persistence, and pair the Go catalog, OpenAPI and Admin changes.
+Even new zero samples can reject an ordinary collection batch against the old
+constraints. Migration numbering and canonical delivery order require a separate
+allocation; D1 allocates no migration. Retain the expanded storage catalog and
+compatible reader on ordinary binary rollback. Ship canonical protocol schema and
+compatible Desktop/other supported consumers before relying on the 1013 floor.
+Verify the actual managed deployment consumes the canonical Self-Hosted
+implementation; any temporary
 source port must carry the matching Admin changes and explicit provenance.
 Install the control-plane `TIME` ACL and required env keys before enabling the
 binary. Existing installations populate keys through their current config owner

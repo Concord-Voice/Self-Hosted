@@ -113,6 +113,7 @@ func SetupTestServerWithRouterDB(t *testing.T, routerDB *sql.DB) *TestServer {
 	redisClient, redisCleanup := SetupTestRedis(t)
 
 	cfg := &config.Config{
+		WSEventBudget:                    config.WSEventBudgetConfig{Enabled: false, ScalePercent: 100},
 		Environment:                      "test",
 		Port:                             "0",
 		JWTSecret:                        TestJWTSecret,
