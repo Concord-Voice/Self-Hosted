@@ -271,7 +271,8 @@ func TestTask4AssemblySecurityEventInjection(t *testing.T) {
 		mediaHandler := media.NewHandler(nil, nil, log, cfg, nil, nil)
 		wireMediaHandler(mediaHandler, nil, nil, cfg, log, nil, RouterDependencies{SecurityEvents: recorder})
 		require.Equal(t, reflect.ValueOf(recorder).Pointer(), nestedEmitterPointer(t, mediaHandler, "diskWatermark", "events"))
-		hub := newHubWithSecurityEvents(nil, nil, nil, recorder)
+		hub, err := newHubWithSecurityEvents(nil, nil, nil, recorder, config.WSEventBudgetConfig{Enabled: false, ScalePercent: 100}, nil)
+		require.NoError(t, err)
 		require.Equal(t, reflect.ValueOf(recorder).Pointer(), nestedEmitterPointer(t, hub, "securityEvents"))
 	})
 

@@ -2,10 +2,13 @@
 
 Plan for `Hosted issue 2270`, governed
 by the [normative contract](ws-event-budgets.md). All thresholds remain
-**UNMEASURED**. Units A and B1–B3 provide policy, Redis backend, dedicated
-client and account-admitter construction groundwork. Unit E adds canonical
-error schema validation. No production caller invokes the new engine; runtime
-admission, socket behavior, metrics and environment parsing are unchanged.
+**UNMEASURED**. Units A and B1–B3 provide construction groundwork; C1–C4 supply
+socket lifetimes, enabled event gates and complete dispatch/renewal integration.
+C5 adds validated startup settings, process ownership and router injection.
+Unit E canonical error-schema validation and D1 scalar snapshot groundwork are
+also present. D2 publication,
+compatible client delivery, G/H configuration delivery and workload acceptance
+remain prerequisites for activation.
 
 ## Bounded work units
 
@@ -14,13 +17,16 @@ admission, socket behavior, metrics and environment parsing are unchanged.
 | A: pure policy | Self-Hosted: `event_admission.go`, focused independent tests, WebSocket README and these design documents | exhaustive registry, strict typed validation, integer vectors and source census |
 | B: account engine | Self-Hosted: Redis Lua/adapter, bounded local fallback, dedicated database client and control-plane ACL | frozen Redis byte/clock vectors, uncertainty, map/slot bounds, lifecycle and managed credentials |
 | C: integration | Self-Hosted: read/dispatch, renewal, handler/router/bootstrap, typed env parsing | before-effect refusal, FIFO, cancellation/authority races, disable and startup validation |
-| D: metrics pair | Self-Hosted: producer, closed backend catalog and bundled Admin reader/labels | all 27 served points through actual reader definitions/parser; rollback compatibility |
+| D: metrics pair | Self-Hosted: scalar snapshots, producer, closed Go/DB/API catalogs and bundled Admin reader/labels | all 27 persisted/served points through actual reader definitions/parser; rollback compatibility |
 | E: schema | Self-Hosted: canonical `packages/protocol` error contract | valid/invalid payload vectors and compatibility |
 | F: client | Desktop: actual WebSocket service and currently required consumer schema copy | strict 1013 grammar, generation timers, all automatic dial paths and no mutation replay |
 | G: self-host config | Self-Hosted: actual production Compose, fresh installer, env example and operator docs | required-value wiring, installer/parity fixtures and existing-install preparation |
 | H: managed delivery | Hosted: canonical config writer, Compose, ACL/operator docs and verified delivery lane | every admitted writer branch, reader/client prerequisites and canonical source provenance |
 
-No SQL migration, media-plane change or live commissioning belongs to these units.
+D2 requires an additive migration for both closed metric-key CHECKs; its number
+and canonical delivery order must be allocated before publication. C5 and D1
+introduce no migration. No media-plane change or live commissioning belongs to
+these units.
 Self-Hosted owns control-plane policy and the protocol origin; Desktop owns its
 consumer; Hosted owns managed deployment. The protocol package is unpublished:
 identify the exact schema source commit and required consumer copy instead of
@@ -123,7 +129,7 @@ B1 adds `internal/websocket/event_admission.lua` and
 `event_admission_redis.go`, with independent unit and isolated Redis integration
 tests. Its exact API, byte grammar, ownership and boundary examples are recorded
 in the [B1 contract](ws-event-budgets.md#b1-request-result-and-ownership).
-The backend has no runtime call site, warm map, application semaphore or new
+B1 alone introduces no runtime call site, warm map, application semaphore or new
 dependency. B2 owns dedicated client factories and ACL; B3 owns admission,
 deadlines and fallback; B4 combines failure/lifetime evidence. No permissive
 placeholder for these later units is introduced.
@@ -219,6 +225,131 @@ background wrapper. Root owns execution, focused race/vet/lint/coverage and
 independent review. Record observed failures and unavailable checks; passing unit
 tests do not establish production capacity or full Redis-outage auth availability.
 
+### Unit B4.1 CI bridge and evidence limits
+
+The source-owned package wrapper opts `websocket.test` into the existing Redis
+integration suite only with an explicit nonempty REDIS_URL. It opts
+`managedredis.test` into the ACL canary with the Redis8 fixture image. Both receive
+`-test.v`; other binaries keep their arguments and opt-in behavior. The ACL build
+expression accepts `integration || managedredis_integration`, preserving manual
+callers and its explicit runtime opt-in. The existing single merged coverage
+invocation adds `-count=1` to the outer go command to prevent cached test results,
+and outer `-v` to retain passing per-test records instead of suppressing them.
+
+Independent executable shell fixtures must prove selected flags/image/verbosity,
+nonempty endpoint enforcement, unrelated-package behavior, preserved argument
+bytes and failure status, and database cleanup on failure without emitting URLs
+or credentials. Go's build-tag evaluator must select the ACL file under the
+existing coverage tag. Keep the DB/NATS/metrics isolation paths and one coverage
+run; no workflow trust, protected pin, secrets or service policy changes belong
+to this bridge. Root records the initial behavioral failure and subsequent checks.
+
+Acceptance must identify the exact run/head/workflow SHA and the shards containing
+WebSocket/managedredis. Require non-skipped PASS records for all eight
+`TestRedisAccountBudgetIntegration*` tests, `TestRedisACLIntegration`, and the
+constructor/rotation/unsubscribe tests. The protected required workflow's current
+pin is a separate adoption boundary: the source wrapper/tag improvement is
+reachable without repinning, but fresh execution of the changed outer invocation
+must be observed after its normal reviewed pin advancement. Do not invent a SHA
+or equate local/current-workflow evidence with the required protected run.
+
+Record the actual Redis version and resolved image; `redis:8-alpine` is not an
+immutable pin. CI opt-in wiring alone proves no failure behavior or production
+workload capacity; the isolated evidence below is a separate qualification step.
+
+### Unit B4 isolated execution and remaining limits
+
+The full WebSocket race/integration run passed on isolated Redis 8.10.2 in 1.570s.
+Actual TCP lost-reply tests observed one retained debit without replay, cold/warm
+fallback and nonrefund, and cancellation/Close with a held reply. Same-key
+adjusted absolute-expiry brackets were 4200000 to 3600000 milliseconds and,
+with a one-microsecond remainder, 4200001 to 3600001. These are deterministic
+clock/expiry observations, not an elapsed 600-second soak.
+
+Managed ACL and grouped race/integration tests passed on disposable Docker Redis
+8.10.3. Production Lua with only PEXPIRE removed failed after HSET, returned
+unavailable, and made one EVALSHA with no EVAL replay. Tests inspected retained
+debt, a new key without expiry and unchanged existing expiry. The same runtime
+served shared/dedicated generations 12 to 13; dedicated Close reached pool zero,
+then the surviving shared client used generation 14. Stale-at-121s credentials
+remained usable until ValidUntil; expired credentials produced zero Lua/no debt.
+
+B4.4's three database transport cases passed under race in 4.446s: a
+production-TLS blackhole with one initial dial, RESP3 lost-EVAL delivery without
+replay, and Close during a held EVAL. The strengthened held-EVAL `net.ErrClosed`
+oracle passed in 2.151s. Every case observed 1.1 seconds after Close with no new
+accepts/scripts, pool zero, accepted/closed fixture connection parity and joined
+fixture workers. An actual TCP test overlay changing MaxRetries from -1 to 1
+failed because success replaced the required fixed unavailable result; production
+source was untouched. These cases do not activate saturated 32-error recovery.
+Retain separate observations of pool/dial behavior and checked cleanup; neither
+the passing fixtures nor pool zero establishes a join of every library goroutine.
+ACL changes do not establish disconnection of idle sockets or eager
+reauthentication of every connection. Protected-workflow adoption remains subject
+to the B4.1 pin boundary above. Runtime integration, workload measurements and
+activation prerequisites remain outstanding.
+
+### Unit C1 construction and verification
+
+C1 adds `event_admission_lifecycle.go` and independent lifecycle tests, with
+focused changes to Client, Handler and Hub. The
+[C1 contract](ws-event-budgets.md#c1-socket-ingress-lifetime-and-borrowed-construction)
+defines the immutable borrowed-engine constructor, Hub-derived socket lifetime,
+renewable event deadline seam and transport-before-cancellation ordering.
+`NewHub` stays disabled at scale 100; production wiring of
+`NewHubWithEventAdmission` belongs to C5. C1 introduces no account admission,
+heartbeat gate, hold, advisory, 1013 response or final admission metric.
+
+Independent tests cover constructor validation and engine ownership, renewable
+event deadlines, missing/expired/terminal authority, ordinary pump teardown,
+pending expiry, unregister before async join, and shutdown before the delivery
+lock. Instrumented real transports and blocked cancellation callbacks must show
+all family members fenced and closed, with the checked receipt already sent,
+before any new sweep callback; failed closes still cancel authority without
+claiming success. An active account-engine double verifies cancellation abandons
+a late otherwise-successful backend result. Actual pending Handler registration
+and canceled pacing/full-queue waits require boundary tests as well.
+
+The missing-API compile barrier only establishes test-first construction, not a
+behavioral failure. Require focused race checks and negative/mutation evidence at
+the effect boundaries, then independent review. Source and unit evidence do not
+establish runtime admission readiness, managed delivery or workload acceptance.
+
+### Units C2–C4 connection and verification
+
+`event_admission_responses.go` and `event_admission_finalization.go` provide real
+bounded responses and once-only final accounting. `event_admission_integration.go`
+implements the complete account hold and local heartbeat machinery;
+`event_admission_dispatch.go`, Client, token renewal and the two original Hub
+content gates connect every enabled input to its final owner. No intermediate
+enabled dispatcher exempts renewal. `event_admission_outbound.go` guards response
+enqueue after bootstrap/send lock waits without changing generic outbound callers.
+Runtime construction is supplied by C5 below.
+
+The private timer factory drives actual cancellation selects, fixed hold deadlines,
+raw delay scheduling and the strict two-second boundary in independent tests.
+Malformed engine tuples abandon; current unavailable outcomes must not be replaced
+by stale denial retries. Real local sockets exercise exact 1013 bytes and the
+bounded write under ordinary-writer contention. Finalization tests cover degraded
+OR, once-only outcomes, nil observer, disabled behavior and cancellation during
+deadline snapshot acquisition.
+
+Caller tests must exercise actual dispatch, before-effect denial, all known input
+owners, disabled unknown routing, held-subscription/ready FIFO, full incoming queues
+and actual outgoing bytes. Renewal tests count the local claim, backend and
+validator independently, preserve account allowance across later validation failure,
+and race successful validator results and deadline-lock acquisition against
+cancellation. Original content-gate tests retain malformed-ID/subscription exclusions,
+the shared bucket and finalized allowance on downstream failure. Migrate fixtures
+to real socket lifetimes and explicit contexts instead of adding missing-context
+allowances to production.
+
+The source has no public metrics producer or environment parser yet. Go-generated
+advisory bytes do not prove actual consumer-schema acceptance; E owns that evidence.
+Run focused race and affected existing lifecycle/renewal/content/ready/bootstrap
+checks, then package/quality gates. Record missing-API compile failures separately
+from behavioral RED, and retain the workload and delivery gates below.
+
 ### Remaining account-engine and runtime gates
 
 Pin corrupt-state refusal, safe-integer overflow, exact reply grammar and
@@ -254,6 +385,60 @@ cannot revive authority, and intermediate/abandoned attempts do not count final
 admission. Renewal's local guard claims once; account allowance counts admission
 even when token validation later fails. Assert actual outbound schema, reader
 parsing and reconnection behavior rather than only helper inputs or key sets.
+
+## Unit C5 construction and verification
+
+`pkg/config/ws_event_budget.go` parses the two settings with `LookupEnv` presence
+semantics; `Load` propagates errors. `cmd/server/ws_event_budget.go` maps and
+revalidates policy, composes the existing dedicated client/backend/engine, and
+checks failure cleanup. Its per-call factory seam permits independent construction
+failure tests without mutable globals or live infrastructure. Main owns the one
+engine and injects it into the validating router constructor.
+
+Required evidence covers canonical grammar/defaults and disabled-invalid values,
+actual `Load` propagation, explicit DTO mapping, managed runtime/TLS borrowing,
+disabled zero client/backend construction, each ownership-transfer failure and
+joined cleanup errors. Router tests must prove missing enabled dependencies and
+invalid scales fail before downstream initialization, while valid-policy controls
+still reach later router errors. Manually built fixtures use explicit disabled100
+policy; production does not repair zero typed config.
+
+Shutdown tests exercise the actual coordinator with an exhausted or blocked Hub
+stage and a blocked engine Close. Engine cleanup must remain synchronous and
+precede metrics, poll cancellation and shared Redis cleanup, preserving all error
+causes. The checked deferred-close helper covers startup-error composition; helper
+tests do not claim execution of the complete database-backed startup path. Review
+the immediate production defer placement and exact one engine construction as
+well. Existing B evidence owns engine idempotence and application-work joining.
+
+Focused normal/race checks, meaningful changed-code coverage and independent
+review remain required. Source wiring alone supplies none of D's paired metrics
+reader, released E/F consumers and floors, G/H writer delivery, canonical Hosted
+delivery or measured workload acceptance.
+
+## Unit D1 scalar observation groundwork
+
+`event_admission_snapshot.go` adds the optional private engine provider and
+`Hub.EventBudgetSnapshot` bridge. EventAdmitter, constructor ownership and the
+existing admission/finalization paths remain unchanged. Atomic inflight/miss
+loads and a short warm-map length read provide independent scalars without
+backend, clock, sweep or lifecycle-lock work. Nil/disabled owners and absent
+providers return zeros; completed Close retains warm residents and cumulative
+misses while inflight returns to zero.
+
+Independent tests exercise blocked real backend slots, actual warm insertion and
+capacity misses, sweep, disabled/nil/absent providers, lifecycle-lock independence
+and concurrent admission/sweep/Close. Missing-method errors establish only a
+construction barrier. Behavioral/race checks, meaningful mutation evidence and
+independent review remain required; this paragraph claims no passing execution.
+
+D1 installs no observer and changes no collector, counters, persisted keys or
+reader. D2 pairs the final observer and all 27 keys with both database CHECKs,
+OpenAPI and Admin. Preserve the existing live Go/SQL catalog guard by transferring
+it from the historical migration test to the newly allocated migration test.
+Disabled zero emission does not waive that storage dependency. Keep compatible
+readers/catalogs on ordinary rollback; a guarded schema down must refuse retained
+new-key rows rather than delete them. No migration number is allocated by D1.
 
 ## Delivery and activation order
 

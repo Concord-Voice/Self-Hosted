@@ -190,6 +190,7 @@ func TestLoginFamilyRenewalSameFamilyHasNoRefreshPredecessorDependency(t *testin
 	hub.clients[c.ID] = c
 	hub.userClients[c.UserID] = map[uuid.UUID]bool{c.ID: true}
 	c.Hub = hub
+	c.initIngressLifecycle()
 	go hub.Run()
 	t.Cleanup(hub.Shutdown)
 	t.Cleanup(c.asyncWg.Done)
@@ -200,7 +201,7 @@ func TestLoginFamilyRenewalSameFamilyHasNoRefreshPredecessorDependency(t *testin
 	var rows int
 	require.NoError(t, r.db.QueryRow(`SELECT COUNT(*) FROM refresh_tokens WHERE id=$1 OR id=$2`, r.sid, nextSID).Scan(&rows))
 	require.Zero(t, rows, "neither refresh predecessor row exists")
-	require.True(t, c.renewToken(r.token(t, r.user, nextSID, "", nextExpiry)))
+	require.True(t, renewalAttemptAccepted(c, r.token(t, r.user, nextSID, "", nextExpiry)))
 	assert.True(t, c.tokenDeadline().Equal(nextExpiry))
 	hub.mu.RLock()
 	sid := c.SessionID
@@ -224,7 +225,7 @@ func TestLoginFamilyRenewalDeniesMismatchesAndUpdatesDeadlineLast(t *testing.T) 
 			c, a, _ := familyRenewalFixture(t)
 			tc.mutate(c, a)
 			before := c.tokenDeadline()
-			require.False(t, c.renewToken("test-family-renew"))
+			require.False(t, renewalAttemptAccepted(c, "test-family-renew"))
 			assert.True(t, before.Equal(c.tokenDeadline()))
 		})
 	}
@@ -235,7 +236,7 @@ func TestLoginFamilyRenewalDeniesMismatchesAndUpdatesDeadlineLast(t *testing.T) 
 		a.finalEntered = make(chan struct{})
 		a.finalRelease = release
 		done := make(chan bool, 1)
-		go func() { done <- c.renewToken("test-family-renew") }()
+		go func() { done <- renewalAttemptAccepted(c, "test-family-renew") }()
 		familyAwait(t, a.finalEntered, "final SQL authority recheck after rebind")
 		assert.True(t, before.Equal(c.tokenDeadline()))
 		hub.mu.RLock()

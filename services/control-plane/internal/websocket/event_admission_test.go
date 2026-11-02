@@ -4,7 +4,9 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"path/filepath"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -235,48 +237,54 @@ func TestInboundEventPolicyCoversActualDispatchRoutes(t *testing.T) {
 			}
 		}
 	}
-	client := parseEventAdmissionSource(t, "client.go")
-	dispatch := eventAdmissionMethod(t, client, "Client", "dispatchFrame")
-	interceptions := 0
-	ast.Inspect(dispatch.Body, func(node ast.Node) bool {
-		branch, ok := node.(*ast.IfStmt)
-		if !ok {
+	// Interception moved into enabled/disabled helpers. Follow the actual
+	// Client call graph rooted at dispatchFrame: an unreachable helper must
+	// never satisfy the census, and a new reachable helper must be inspected.
+	interceptions := map[string]int{}
+	interceptedRoutes := map[string]bool{}
+	for _, dispatch := range eventAdmissionReachableClientMethods(t, "dispatchFrame") {
+		ast.Inspect(dispatch.Body, func(node ast.Node) bool {
+			branch, ok := node.(*ast.IfStmt)
+			if !ok {
+				return true
+			}
+			condition, ok := branch.Cond.(*ast.BinaryExpr)
+			if !ok || condition.Op != token.EQL {
+				return true
+			}
+			var nameExpr ast.Expr
+			if eventAdmissionIsMessageType(condition.X) {
+				nameExpr = condition.Y
+			}
+			if eventAdmissionIsMessageType(condition.Y) {
+				nameExpr = condition.X
+			}
+			if nameExpr == nil {
+				return true
+			}
+			interceptions[dispatch.Name.Name]++
+			var name string
+			switch expr := nameExpr.(type) {
+			case *ast.Ident:
+				var found bool
+				name, found = constants[expr.Name]
+				require.True(t, found, "intercepted type constant must resolve from token_renewal.go")
+			case *ast.BasicLit:
+				require.Equal(t, token.STRING, expr.Kind)
+				var err error
+				name, err = strconv.Unquote(expr.Value)
+				require.NoError(t, err)
+			default:
+				t.Fatalf("unrecognized intercepted event expression %T", nameExpr)
+			}
+			require.False(t, routes[name] && !interceptedRoutes[name], "intercepted route should not also reach the hub: %s", name)
+			interceptedRoutes[name] = true
+			routes[name] = true
 			return true
-		}
-		condition, ok := branch.Cond.(*ast.BinaryExpr)
-		if !ok || condition.Op != token.EQL {
-			return true
-		}
-		var nameExpr ast.Expr
-		if eventAdmissionIsMessageType(condition.X) {
-			nameExpr = condition.Y
-		}
-		if eventAdmissionIsMessageType(condition.Y) {
-			nameExpr = condition.X
-		}
-		if nameExpr == nil {
-			return true
-		}
-		interceptions++
-		var name string
-		switch expr := nameExpr.(type) {
-		case *ast.Ident:
-			var found bool
-			name, found = constants[expr.Name]
-			require.True(t, found, "intercepted type constant must resolve from token_renewal.go")
-		case *ast.BasicLit:
-			require.Equal(t, token.STRING, expr.Kind)
-			var err error
-			name, err = strconv.Unquote(expr.Value)
-			require.NoError(t, err)
-		default:
-			t.Fatalf("unrecognized intercepted event expression %T", nameExpr)
-		}
-		require.False(t, routes[name], "intercepted route should not also reach the hub: %s", name)
-		routes[name] = true
-		return true
-	})
-	require.Equal(t, 1, interceptions, "must find renewal interception in dispatchFrame")
+		})
+	}
+	require.Equal(t, map[string]int{"dispatchLegacyEvent": 1, "dispatchBudgetedEvent": 1}, interceptions,
+		"both reachable dispatch modes must intercept renewal exactly once")
 	expectedNames := map[string]bool{}
 	for name, want := range inboundPolicyExpectations() {
 		expectedNames[name] = true
@@ -285,6 +293,66 @@ func TestInboundEventPolicyCoversActualDispatchRoutes(t *testing.T) {
 		assert.Equal(t, want, got, "route %s", name)
 	}
 	assert.Equal(t, expectedNames, routes, "actual dispatch route union must match the independently specified policy table")
+}
+
+func eventAdmissionReachableClientMethods(t *testing.T, root string) []*ast.FuncDecl {
+	t.Helper()
+	paths, err := filepath.Glob("*.go")
+	require.NoError(t, err)
+	methods := map[string]*ast.FuncDecl{}
+	for _, path := range paths {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file := parseEventAdmissionSource(t, path)
+		for _, decl := range file.Decls {
+			method, ok := decl.(*ast.FuncDecl)
+			if !ok || method.Recv == nil || len(method.Recv.List) != 1 {
+				continue
+			}
+			pointer, ok := method.Recv.List[0].Type.(*ast.StarExpr)
+			if !ok {
+				continue
+			}
+			receiver, ok := pointer.X.(*ast.Ident)
+			if ok && receiver.Name == "Client" {
+				require.NotNil(t, method.Body)
+				methods[method.Name.Name] = method
+			}
+		}
+	}
+	require.Contains(t, methods, root, "actual Client dispatch root must exist")
+	pending := []string{root}
+	seen := map[string]bool{}
+	reachable := make([]*ast.FuncDecl, 0, len(methods))
+	for len(pending) != 0 {
+		name := pending[len(pending)-1]
+		pending = pending[:len(pending)-1]
+		if seen[name] {
+			continue
+		}
+		seen[name] = true
+		method := methods[name]
+		reachable = append(reachable, method)
+		require.Len(t, method.Recv.List[0].Names, 1)
+		receiver := method.Recv.List[0].Names[0].Name
+		ast.Inspect(method.Body, func(node ast.Node) bool {
+			call, ok := node.(*ast.CallExpr)
+			if !ok {
+				return true
+			}
+			selector, ok := call.Fun.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			owner, ok := selector.X.(*ast.Ident)
+			if ok && owner.Name == receiver && methods[selector.Sel.Name] != nil {
+				pending = append(pending, selector.Sel.Name)
+			}
+			return true
+		})
+	}
+	return reachable
 }
 
 func parseEventAdmissionSource(t *testing.T, path string) *ast.File {

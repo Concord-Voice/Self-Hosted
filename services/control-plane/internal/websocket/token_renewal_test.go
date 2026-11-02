@@ -9,7 +9,6 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -188,8 +187,23 @@ func newRenewalFixture(hub *Hub, conn *ws.Conn) *renewalFixture {
 			ExpiresAt: renewedTo,
 		},
 	}
+	client.initIngressLifecycle()
 	client.renewAuthority = authority
 	return &renewalFixture{client: client, authority: authority, deadline: deadline, renewedTo: renewedTo}
+}
+
+// The fixture adapter calls the sole guarded production entry once. It owns
+// the per-event authority child, not a second local renewal claim.
+func renewalAttemptAccepted(c *Client, token string) bool {
+	ctx, cancel := c.ingressEventContext()
+	defer cancel()
+	accepted, _ := c.attemptTokenRenewal(ctx, token)
+	return accepted
+}
+func renewalHandleForTest(c *Client, msg IncomingMessage) bool {
+	ctx, cancel := c.ingressEventContext()
+	defer cancel()
+	return c.handleTokenRenewal(ctx, msg)
 }
 
 func drainSend(t *testing.T, c *Client) string {
@@ -211,7 +225,7 @@ func TestRenewToken_AcceptsSameSessionAndExtendsDeadline(t *testing.T) {
 		startHub(t, hub)
 		f := newRenewalFixture(hub, conn)
 
-		f.client.handleTokenRenewal(IncomingMessage{Type: authRenewMessageType, Data: map[string]interface{}{"token": renewalTestToken}})
+		renewalHandleForTest(f.client, IncomingMessage{Type: authRenewMessageType, Data: map[string]interface{}{"token": renewalTestToken}})
 
 		assert.Equal(t, f.renewedTo, f.client.tokenDeadline())
 		assert.JSONEq(t, `{"type":"auth_renew_result","data":{"ok":true}}`, drainSend(t, f.client))
@@ -225,7 +239,7 @@ func TestRenewToken_AcceptsSameSessionAndExtendsDeadline(t *testing.T) {
 	t.Run("throttle window has elapsed: second renewal accepted", func(t *testing.T) {
 		f := newRenewalFixture(stoppedHub(t), nil)
 		f.client.lastRenewalAttempt = time.Now().Add(-tokenRenewalMinInterval - time.Second)
-		require.True(t, f.client.renewToken(renewalTestToken))
+		require.True(t, renewalAttemptAccepted(f.client, renewalTestToken))
 		assert.Equal(t, f.renewedTo, f.client.tokenDeadline())
 	})
 }
@@ -234,6 +248,7 @@ func TestRenewToken_RefusalsLeaveDeadlineUnchanged(t *testing.T) {
 	type expect struct {
 		validate, predecessor, revoked int
 		reason                         string // "" = no log line expected
+		abandoned                      bool
 	}
 	cases := []struct {
 		name   string
@@ -248,7 +263,7 @@ func TestRenewToken_RefusalsLeaveDeadlineUnchanged(t *testing.T) {
 		{
 			name:   "nil hub",
 			mutate: func(f *renewalFixture) { f.client.Hub = nil },
-			want:   expect{},
+			want:   expect{abandoned: true},
 		},
 		{
 			name: "socket with no session",
@@ -306,7 +321,7 @@ func TestRenewToken_RefusalsLeaveDeadlineUnchanged(t *testing.T) {
 				f.deadline = time.Now().Add(-time.Second)
 				f.client.TokenExpiresAt = f.deadline
 			},
-			want: expect{validate: 1, reason: "not_later"},
+			want: expect{abandoned: true},
 		},
 		{
 			name:   "expiry stopped by teardown",
@@ -326,11 +341,15 @@ func TestRenewToken_RefusalsLeaveDeadlineUnchanged(t *testing.T) {
 			tc.mutate(f)
 			sessionBefore := f.client.SessionID
 
-			f.client.handleTokenRenewal(IncomingMessage{Type: authRenewMessageType, Data: map[string]interface{}{"token": renewalTestToken}})
+			renewalHandleForTest(f.client, IncomingMessage{Type: authRenewMessageType, Data: map[string]interface{}{"token": renewalTestToken}})
 
 			assert.Equal(t, f.deadline, f.client.tokenDeadline(), "a refused renewal must not move the deadline")
 			assert.Equal(t, sessionBefore, f.client.SessionID, "a refused renewal must not rebind")
-			assert.JSONEq(t, `{"type":"auth_renew_result","data":{"ok":false}}`, drainSend(t, f.client))
+			if tc.want.abandoned {
+				assert.Empty(t, f.client.Send, "lost authority sends no renewal acknowledgment")
+			} else {
+				assert.JSONEq(t, `{"type":"auth_renew_result","data":{"ok":false}}`, drainSend(t, f.client))
+			}
 			validate, predecessor, revoked := f.authority.calls()
 			assert.Equal(t, tc.want.validate, validate, "validator calls")
 			assert.Equal(t, tc.want.predecessor, predecessor, "lineage lookups")
@@ -347,7 +366,7 @@ func TestRenewToken_RefusalsLeaveDeadlineUnchanged(t *testing.T) {
 	t.Run("empty token is refused without validation", func(t *testing.T) {
 		for _, data := range []map[string]interface{}{{"token": ""}, {}, {"token": 42}} {
 			f := newRenewalFixture(stoppedHub(t), nil)
-			f.client.handleTokenRenewal(IncomingMessage{Type: authRenewMessageType, Data: data})
+			renewalHandleForTest(f.client, IncomingMessage{Type: authRenewMessageType, Data: data})
 			assert.Equal(t, f.deadline, f.client.tokenDeadline())
 			assert.JSONEq(t, `{"type":"auth_renew_result","data":{"ok":false}}`, drainSend(t, f.client))
 			validate, _, _ := f.authority.calls()
@@ -359,7 +378,7 @@ func TestRenewToken_RefusalsLeaveDeadlineUnchanged(t *testing.T) {
 func TestRenewToken_ThrottlesSecondAttemptWithinWindow(t *testing.T) {
 	logs := captureRenewalLog(t)
 	f := newRenewalFixture(stoppedHub(t), nil)
-	require.True(t, f.client.renewToken(renewalTestToken), "first renewal is accepted")
+	require.True(t, renewalAttemptAccepted(f.client, renewalTestToken), "first renewal is accepted")
 	require.Equal(t, f.renewedTo, f.client.tokenDeadline())
 
 	// The second token is otherwise fully valid and later still.
@@ -368,24 +387,24 @@ func TestRenewToken_ThrottlesSecondAttemptWithinWindow(t *testing.T) {
 	f.authority.verified.ExpiresAt = later
 	f.authority.mu.Unlock()
 
-	assert.False(t, f.client.renewToken(renewalTestToken))
+	assert.False(t, renewalAttemptAccepted(f.client, renewalTestToken))
 	assert.Equal(t, f.renewedTo, f.client.tokenDeadline(), "a throttled renewal must not move the deadline")
 	validate, _, _ := f.authority.calls()
 	assert.Equal(t, 1, validate, "a throttled attempt does no validation work")
 	assert.Contains(t, logs.String(), ": throttled\n")
 	for range 5 {
-		assert.False(t, f.client.renewToken(renewalTestToken))
+		assert.False(t, renewalAttemptAccepted(f.client, renewalTestToken))
 	}
 	assert.Equal(t, 1, strings.Count(logs.String(), ": throttled\n"), "throttling logs once per window, not once per frame")
 
 	t.Run("a refused attempt also starts the window", func(t *testing.T) {
 		g := newRenewalFixture(stoppedHub(t), nil)
 		g.authority.validateErr = errRenewalInjected
-		require.False(t, g.client.renewToken(renewalTestToken))
+		require.False(t, renewalAttemptAccepted(g.client, renewalTestToken))
 		g.authority.mu.Lock()
 		g.authority.validateErr = nil
 		g.authority.mu.Unlock()
-		assert.False(t, g.client.renewToken(renewalTestToken), "a valid token right after a refusal is still throttled")
+		assert.False(t, renewalAttemptAccepted(g.client, renewalTestToken), "a valid token right after a refusal is still throttled")
 		assert.Equal(t, g.deadline, g.client.tokenDeadline())
 	})
 }
@@ -400,7 +419,7 @@ func TestRenewToken_RotatedSessionRebindsThroughHubRun(t *testing.T) {
 		hub.clients[f.client.ID] = f.client
 		startHub(t, hub)
 
-		require.True(t, f.client.renewToken(renewalTestToken))
+		require.True(t, renewalAttemptAccepted(f.client, renewalTestToken))
 		assert.Equal(t, f.renewedTo, f.client.tokenDeadline())
 		assert.Equal(t, newSID, f.client.SessionID, "Run must rebind the socket to its successor session")
 		_, predecessor, revoked := f.authority.calls()
@@ -429,7 +448,7 @@ func TestRenewToken_RotatedSessionRebindsThroughHubRun(t *testing.T) {
 		hub.clients[f.client.ID] = f.client
 		startHub(t, hub)
 
-		require.True(t, f.client.renewToken(renewalTestToken))
+		require.True(t, renewalAttemptAccepted(f.client, renewalTestToken))
 		hub.DisconnectSession(oldSID)
 		// Once Run has received the disconnect it handles it before its next
 		// select, so a probe rebind round-trip after the drain orders after it.
@@ -468,7 +487,7 @@ func TestRenewToken_PostRebindRevocationClosesConnection(t *testing.T) {
 			hub.clients[f.client.ID] = f.client
 			startHub(t, hub)
 
-			assert.False(t, f.client.renewToken(renewalTestToken))
+			assert.False(t, renewalAttemptAccepted(f.client, renewalTestToken))
 			assert.Equal(t, newSID, f.client.SessionID, "the rebind happened before the re-check")
 			assert.Equal(t, f.deadline, f.client.tokenDeadline(), "the deadline moves only after the re-check passes")
 			f.client.deadlineMu.Lock()
@@ -498,7 +517,7 @@ func TestRenewToken_PostRebindRevocationClosesConnection(t *testing.T) {
 		f.authority.verified.SessionID = uuid.NewString()
 		hub.closeOnce.Do(func() { close(hub.done) })
 		result := make(chan bool, 1)
-		go func() { result <- f.client.renewToken(renewalTestToken) }()
+		go func() { result <- renewalAttemptAccepted(f.client, renewalTestToken) }()
 		select {
 		case ok := <-result:
 			assert.False(t, ok)
@@ -513,8 +532,9 @@ func TestRenewToken_PostRebindRevocationClosesConnection(t *testing.T) {
 func TestExtendDeadline_Guards(t *testing.T) {
 	now := time.Now()
 	t.Run("later exp on a live socket is accepted", func(t *testing.T) {
-		c := &Client{TokenExpiresAt: now.Add(time.Minute)}
-		require.True(t, c.extendDeadline(now.Add(2*time.Minute)))
+		c := &Client{Hub: stoppedHub(t), TokenExpiresAt: now.Add(time.Minute)}
+		c.initIngressLifecycle()
+		require.True(t, c.extendDeadline(context.Background(), now.Add(2*time.Minute)))
 		assert.Equal(t, now.Add(2*time.Minute), c.tokenDeadline())
 	})
 	refusals := []struct {
@@ -530,11 +550,12 @@ func TestExtendDeadline_Guards(t *testing.T) {
 	}
 	for _, tc := range refusals {
 		t.Run(tc.name, func(t *testing.T) {
-			c := &Client{TokenExpiresAt: tc.current}
+			c := &Client{Hub: stoppedHub(t), TokenExpiresAt: tc.current}
+			c.initIngressLifecycle()
 			if tc.stopped {
 				c.stopTokenExpiry()
 			}
-			assert.False(t, c.extendDeadline(tc.exp))
+			assert.False(t, c.extendDeadline(context.Background(), tc.exp))
 			assert.Equal(t, tc.current, c.tokenDeadline())
 		})
 	}
@@ -547,11 +568,12 @@ func TestOnTokenExpiryTimer(t *testing.T) {
 		hub := stoppedHub(t)
 		start := time.Now()
 		c := &Client{ID: uuid.New(), UserID: uuid.New(), Conn: conn, Hub: hub, TokenExpiresAt: start.Add(200 * time.Millisecond)}
+		c.initIngressLifecycle()
 		registered := make(chan struct{})
 		c.deadlineMu.Lock()
 		c.tokenExpiryTimer = time.AfterFunc(200*time.Millisecond, func() { c.onTokenExpiryTimer(registered) })
 		c.deadlineMu.Unlock()
-		require.True(t, c.extendDeadline(start.Add(900*time.Millisecond)))
+		require.True(t, c.extendDeadline(context.Background(), start.Add(900*time.Millisecond)))
 
 		select {
 		case ev := <-events:
@@ -574,6 +596,7 @@ func TestOnTokenExpiryTimer(t *testing.T) {
 		hub := NewHub(nil, nil)
 		t.Cleanup(func() { hub.closeOnce.Do(func() { close(hub.done) }) })
 		c := &Client{ID: uuid.New(), UserID: uuid.New(), Conn: conn, Hub: hub, TokenExpiresAt: time.Now().Add(-time.Millisecond)}
+		c.initIngressLifecycle()
 		c.tokenExpiryTimer = time.NewTimer(time.Hour)
 		registered := make(chan struct{})
 		close(registered)
@@ -594,6 +617,7 @@ func TestOnTokenExpiryTimer(t *testing.T) {
 		hub := NewHub(nil, nil)
 		t.Cleanup(func() { hub.closeOnce.Do(func() { close(hub.done) }) })
 		c := &Client{ID: uuid.New(), UserID: uuid.New(), Conn: conn, Hub: hub, TokenExpiresAt: time.Now().Add(-time.Millisecond)}
+		c.initIngressLifecycle()
 		c.onTokenExpiryTimer(make(chan struct{}))
 		ev := <-events
 		assert.True(t, ws.IsCloseError(ev.err, ws.ClosePolicyViolation), "expiry close: %v", ev.err)
@@ -615,6 +639,7 @@ func TestOnTokenExpiryTimer(t *testing.T) {
 		hub := NewHub(nil, nil)
 		t.Cleanup(func() { hub.closeOnce.Do(func() { close(hub.done) }) })
 		c := &Client{ID: uuid.New(), UserID: uuid.New(), Conn: conn, Hub: hub, TokenExpiresAt: time.Now().Add(-time.Millisecond)}
+		c.initIngressLifecycle()
 		c.tokenExpiryTimer = time.NewTimer(time.Hour)
 		c.stopTokenExpiry()
 		unregistered := make(chan struct{}, 1)
@@ -650,18 +675,42 @@ func TestOnTokenExpiryTimer(t *testing.T) {
 func TestTokenDeadline_ConcurrentRenewalTimerAndReaders(t *testing.T) {
 	conn, _ := renewalSocketPair(t)
 	hub := stoppedHub(t)
-	c := &Client{ID: uuid.New(), UserID: uuid.New(), Conn: conn, Hub: hub, TokenExpiresAt: time.Now().Add(20 * time.Millisecond)}
+	base := time.Now().Add(time.Hour)
+	c := &Client{ID: uuid.New(), UserID: uuid.New(), Conn: conn, Hub: hub, TokenExpiresAt: base}
+	c.initIngressLifecycle()
 	registered := make(chan struct{})
-	var fires atomic.Int32
-	c.deadlineMu.Lock()
-	c.tokenExpiryTimer = time.AfterFunc(time.Millisecond, func() {
-		fires.Add(1)
+	var roundMu sync.Mutex
+	var roundDone chan struct{}
+	c.tokenExpiryTimer = time.AfterFunc(time.Hour, func() {
+		roundMu.Lock()
+		done := roundDone
+		roundMu.Unlock()
+		defer close(done)
 		c.onTokenExpiryTimer(registered)
 	})
-	c.deadlineMu.Unlock()
-
 	stop := make(chan struct{})
+	type extensionRequest struct {
+		expiry   time.Time
+		accepted chan bool
+	}
+	extensions := make(chan extensionRequest)
 	var wg sync.WaitGroup
+	var stopOnce sync.Once
+	t.Cleanup(func() {
+		stopOnce.Do(func() { close(stop) })
+		wg.Wait()
+		c.deadlineMu.Lock()
+		stopped := c.tokenExpiryTimer.Stop()
+		c.deadlineMu.Unlock()
+		c.stopTokenExpiry()
+		roundMu.Lock()
+		done := roundDone
+		roundMu.Unlock()
+		if !stopped && done != nil {
+			lifecycleAwait(t, done, "expiry callback joins even on assertion failure")
+		}
+		c.cancelIngressLifecycle()
+	})
 	wg.Add(3)
 	go func() {
 		defer wg.Done()
@@ -669,12 +718,12 @@ func TestTokenDeadline_ConcurrentRenewalTimerAndReaders(t *testing.T) {
 			select {
 			case <-stop:
 				return
-			default:
-				c.extendDeadline(time.Now().Add(20 * time.Millisecond))
+			case request := <-extensions:
+				request.accepted <- c.extendDeadline(context.Background(), request.expiry)
 			}
 		}
 	}()
-	for i := 0; i < 2; i++ {
+	for range 2 {
 		go func() {
 			defer wg.Done()
 			for {
@@ -689,11 +738,29 @@ func TestTokenDeadline_ConcurrentRenewalTimerAndReaders(t *testing.T) {
 			}
 		}()
 	}
-	require.Eventually(t, func() bool { return fires.Load() >= 3 }, 3*time.Second, time.Millisecond,
-		"the timer must fire and re-arm repeatedly while renewals keep winning")
-	close(stop)
-	wg.Wait()
-	c.stopTokenExpiry()
+	for round := 1; round <= 3; round++ {
+		expiry := base.Add(time.Duration(round) * time.Minute)
+		accepted := make(chan bool, 1)
+		extensions <- extensionRequest{expiry: expiry, accepted: accepted}
+		select {
+		case ok := <-accepted:
+			require.True(t, ok)
+		case <-time.After(3 * time.Second):
+			t.Fatal("concurrent extension did not settle")
+		}
+		// Drive the real AfterFunc as an old timer firing after renewal. The
+		// current credential stays live; scheduler speed cannot decide revocation.
+		done := make(chan struct{})
+		roundMu.Lock()
+		roundDone = done
+		roundMu.Unlock()
+		c.deadlineMu.Lock()
+		c.tokenExpiryTimer.Reset(0)
+		c.deadlineMu.Unlock()
+		lifecycleAwait(t, done, "old expiry callback re-arms after confirmed extension")
+		assert.Equal(t, expiry, c.tokenDeadline())
+		lifecycleRequireActive(c.ingressCtx, t)
+	}
 }
 
 func TestReadPump_InterceptsAuthRenew(t *testing.T) {
@@ -763,7 +830,7 @@ func TestHandleTokenRenewal_AckAfterSendClosedDoesNotPanic(t *testing.T) {
 	f.authority.validateErr = errRenewalInjected
 	f.client.closeOutbound()
 	require.NotPanics(t, func() {
-		f.client.handleTokenRenewal(IncomingMessage{Type: authRenewMessageType, Data: map[string]interface{}{"token": renewalTestToken}})
+		renewalHandleForTest(f.client, IncomingMessage{Type: authRenewMessageType, Data: map[string]interface{}{"token": renewalTestToken}})
 	})
 }
 
@@ -782,7 +849,7 @@ func TestRenewToken_SameSessionRevokedFailsClosed(t *testing.T) {
 			hub.clients[f.client.ID] = f.client
 			startHub(t, hub)
 
-			assert.False(t, f.client.renewToken(renewalTestToken))
+			assert.False(t, renewalAttemptAccepted(f.client, renewalTestToken))
 			assert.Equal(t, f.deadline, f.client.tokenDeadline())
 			select {
 			case ev := <-events:
@@ -803,7 +870,7 @@ func TestRenewToken_StalledHubRunIsBoundedByTimeout(t *testing.T) {
 		f.authority.verified.SessionID = uuid.NewString()
 
 		start := time.Now()
-		assert.False(t, f.client.renewToken(renewalTestToken))
+		assert.False(t, renewalAttemptAccepted(f.client, renewalTestToken))
 		assert.Less(t, time.Since(start), tokenRenewalTimeout+time.Second, "the rebind wait is bounded by the renewal timeout")
 		assert.Equal(t, f.deadline, f.client.tokenDeadline(), "no deadline extension while revocation is unproven")
 		assert.Equal(t, oldSID, f.client.SessionID)
@@ -822,7 +889,7 @@ func TestRenewToken_StalledHubRunIsBoundedByTimeout(t *testing.T) {
 		f.authority.verified.SessionID = uuid.NewString()
 
 		done := make(chan bool, 1)
-		go func() { done <- f.client.renewToken(renewalTestToken) }()
+		go func() { done <- renewalAttemptAccepted(f.client, renewalTestToken) }()
 		select {
 		case ev := <-events:
 			require.Error(t, ev.err, "the transport closes even while Run is stalled")
@@ -849,14 +916,14 @@ func TestRenewToken_SessionIDsAreCanonicalized(t *testing.T) {
 		f.authority.verified.SessionID = strings.ToUpper(newSID)
 		startHub(t, hub)
 
-		require.True(t, f.client.renewToken(renewalTestToken))
+		require.True(t, renewalAttemptAccepted(f.client, renewalTestToken))
 		assert.Equal(t, newSID, f.client.SessionID, "DisconnectSession(canonical) must match the rebound socket")
 	})
 
 	t.Run("an uppercase spelling of the same sid is not a rotation", func(t *testing.T) {
 		f := newRenewalFixture(stoppedHub(t), nil)
 		f.authority.verified.SessionID = strings.ToUpper(f.client.SessionID)
-		require.True(t, f.client.renewToken(renewalTestToken))
+		require.True(t, renewalAttemptAccepted(f.client, renewalTestToken))
 		_, predecessor, _ := f.authority.calls()
 		assert.Zero(t, predecessor)
 	})
@@ -865,7 +932,7 @@ func TestRenewToken_SessionIDsAreCanonicalized(t *testing.T) {
 		logs := captureRenewalLog(t)
 		f := newRenewalFixture(stoppedHub(t), nil)
 		f.authority.verified.SessionID = "not-a-uuid"
-		assert.False(t, f.client.renewToken(renewalTestToken))
+		assert.False(t, renewalAttemptAccepted(f.client, renewalTestToken))
 		assert.Equal(t, f.deadline, f.client.tokenDeadline())
 		assert.Contains(t, logs.String(), ": mismatch_session\n")
 	})
