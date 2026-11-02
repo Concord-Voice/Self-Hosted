@@ -177,3 +177,31 @@ func TestSQLBudgetRollbackResultFailureClosesExhaustionAndInertRefund(t *testing
 	assert.Equal(t, int32(0), fault.commits.Load())
 	assert.Equal(t, fullRow, sqlBudgetRead(t, f.db, f.actor))
 }
+
+// A receipt returned for one real family cannot release a different family's
+// charge by changing the row key or by transplanting the other row's window.
+func TestSQLBudgetForeignReceiptSplicesLeaveBothFamiliesCharged(t *testing.T) {
+	f := newSQLBudgetFixture(t, "")
+	otherActor := sqlBudgetNewFamily(t, f, false)
+	store := &sqlBudgetStore{db: f.db}
+	own, failure := store.reserve(t.Context(), f.actor)
+	require.Nil(t, failure)
+	foreign, failure := store.reserve(t.Context(), otherActor)
+	require.Nil(t, failure)
+	ownBefore := sqlBudgetRead(t, f.db, f.actor)
+	foreignBefore := sqlBudgetRead(t, f.db, otherActor)
+	require.NotEqual(t, own.familyID, foreign.familyID)
+	require.NotEqual(t, own.windowID, foreign.windowID)
+	require.NotEqual(t, own.receiptID, foreign.receiptID)
+
+	splices := []budgetReservation{
+		{userID: own.userID, familyID: foreign.familyID, windowID: own.windowID, receiptID: own.receiptID, expiresAt: own.expiresAt},
+		{userID: own.userID, familyID: foreign.familyID, windowID: foreign.windowID, receiptID: own.receiptID, expiresAt: foreign.expiresAt},
+		{userID: own.userID, familyID: own.familyID, windowID: own.windowID, receiptID: foreign.receiptID, expiresAt: own.expiresAt},
+	}
+	for _, splice := range splices {
+		require.Nil(t, store.refundVerifiedCommitted(t.Context(), splice))
+		assert.Equal(t, ownBefore, sqlBudgetRead(t, f.db, f.actor))
+		assert.Equal(t, foreignBefore, sqlBudgetRead(t, f.db, otherActor))
+	}
+}
