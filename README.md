@@ -87,7 +87,7 @@ We welcome help. Read the [contributing guide](./.github/CONTRIBUTING.md) and th
 
 ## License
 
-This repository uses the Concord Voice Source License 1.0 (CVSL 1.0). Anyone can read the source. Personal and non-profit use is free. Any use by a for-profit company or a government body needs a commercial license. Each version converts to AGPL-3.0-or-later on 2030-02-15 at the latest.
+This repository uses the Concord Voice Source License 1.0 (CVSL 1.0). Anyone can read the source. Personal and non-profit use is free. Any other use, including any use by a for-profit company or a government body, needs a commercial license, apart from a 30-day internal evaluation that is not in production. Each version converts to AGPL-3.0-or-later on 2030-02-15 at the latest.
 
 See [LICENSE](./LICENSE) for the full terms.
 
