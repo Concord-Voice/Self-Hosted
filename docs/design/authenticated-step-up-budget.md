@@ -2,12 +2,13 @@
 
 Design contract for Hosted issue 2271, within Hosted epic 696.
 
-**Implementation status:** the opaque actor adapter and private SQL accounting
-core are implemented as dormant groundwork in `internal/stepup`, under
-`services/control-plane/`. They have no production callers. The core can reserve
+**Implementation status:** the opaque actor adapter, private SQL accounting core
+and process-local proof-work tracker are implemented as dormant groundwork in
+`services/control-plane/internal/stepup`. They have no production callers. The core can reserve
 and settle receipts against the prospective schema in isolated fixtures; no
 numbered production migration, lifecycle admission or consumer integration ships
-with it. Retirement integration and lifecycle controls below remain planned
+with it. The tracker has no production opener, router/runtime binding or process
+observation. Retirement integration and lifecycle controls below remain planned
 requirements. Source availability is not validation, active enforcement or
 deployment evidence. Existing Redis budgets and authentication defenses remain
 unchanged.
@@ -251,6 +252,14 @@ does not prove drain. Exclude incompatible/old generations from restart; stopped
 processes require conclusive completion/termination of their database work.
 Unknown work never becomes zero by timeout. Ordinary login/OAuth and independent
 own-family logout continue under their existing policy on compatible processes.
+
+The private `proofWorkTracker` now supplies only local mechanics for that later
+owner: it begins closed, can be armed once by a future compatible owner, stops new
+root work atomically, and retains independently registered child and effect work
+until each handle finishes. Effect handles contribute to both outstanding counts;
+canceling a drain waiter never clears them. The tracker currently has no production
+caller or opener. Its zero-count snapshot cannot establish process inventory,
+stopped-process database completion, or authorization to start cutover.
 
 Use the closed `concord.step-up-budget-cutover` version-1 receipt with canonical
 `cutoverId`, `familyActivationId`, artifact/inventory SHA256 digests and exact
