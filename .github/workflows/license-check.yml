@@ -38,6 +38,8 @@ on:
       - 'client/admin/package-lock.json'
       - '.github/tools/license-checker/package.json'
       - '.github/tools/license-checker/package-lock.json'
+      - '.github/tools/license-checker/.override-range-baseline.json'
+      - 'scripts/security/override-range-lint.mjs'
       - 'services/control-plane/go.mod'
       - 'services/control-plane/go.sum'
       - 'services/control-plane/**/*.go'
@@ -57,6 +59,8 @@ on:
       - 'client/admin/package-lock.json'
       - '.github/tools/license-checker/package.json'
       - '.github/tools/license-checker/package-lock.json'
+      - '.github/tools/license-checker/.override-range-baseline.json'
+      - 'scripts/security/override-range-lint.mjs'
       - 'services/control-plane/go.mod'
       - 'services/control-plane/go.sum'
       - 'services/control-plane/**/*.go'
@@ -199,6 +203,9 @@ jobs:
       - name: Install license-checker
         working-directory: .github/tools/license-checker
         run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Verify license tool dependency overrides
+        working-directory: .github/tools/license-checker
+        run: node ../../../scripts/security/override-range-lint.mjs --dir . --verify-installed-versions --fail-on-stale
       - name: Check selected npm workspaces and NOTICE tables
         run: |
           set -euo pipefail
@@ -215,7 +222,7 @@ jobs:
               *) echo '::error::invalid npm workspace selection'; exit 1 ;;
             esac
             (cd "$workspace" && npm ci --no-audit --no-fund && \
-              "$GITHUB_WORKSPACE/.github/tools/license-checker/node_modules/.bin/license-checker" --production --excludePrivatePackages \
+              "$GITHUB_WORKSPACE/.github/tools/license-checker/node_modules/.bin/license-checker-rseidelsohn" --production --excludePrivatePackages \
                 --onlyAllow "$LICENSE_ALLOWLIST" --summary)
             scripts/update-notice-md.py --check --scope npm --workspace "$workspace"
           done

@@ -263,7 +263,7 @@ def npm_rows(workspace: str) -> list[str]:
             f"(this script checks against license-checker, not the lockfile; "
             f"see the module docstring for why)."
         )
-    checker = REPO_ROOT / ".github/tools/license-checker/node_modules/.bin/license-checker"
+    checker = REPO_ROOT / ".github/tools/license-checker/node_modules/.bin/license-checker-rseidelsohn"
     if not checker.is_file():
         raise RuntimeError(
             "locked license-checker tool is missing — run "

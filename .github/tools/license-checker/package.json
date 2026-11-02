@@ -3,7 +3,12 @@
   "version": "1.0.0",
   "private": true,
   "description": "Pinned license checker used by CI",
+  "//security_rationale": "license-checker-rseidelsohn@5.0.1 replaces the unmaintained license-checker@25.0.1 chain through read-installed@4, glob@7 and vulnerable minimatch@3. GHSA-g3hv-75wg-m249 affects every minimatch version below 11.0.1. The replacement still declares parents on minimatch 10 and glob 13; the tool-local overrides force minimatch >=11.0.3 and glob >=14.0.3 (the latter also closes GHSA-3g3m-2fjr-6pw4). In a disposable install, the replacement returned byte-identical media production CSV and matched the old checker's positive and negative allowlist outcomes. The major-range skews are recorded in .override-range-baseline.json; revisit when upstream declares compatible patched majors. Preserve the workflow allowlist and NOTICE attribution checks.",
   "devDependencies": {
-    "license-checker": "25.0.1"
+    "license-checker-rseidelsohn": "5.0.1"
+  },
+  "overrides": {
+    "minimatch": "^11.0.3",
+    "glob": "^14.0.3"
   }
 }
