@@ -3,10 +3,11 @@
 Plan for Hosted issue 2271 within Hosted epic 696, governed by the
 [design contract](authenticated-step-up-budget.md).
 
-The opaque actor adapter and private SQL accounting core are implemented as dormant
-groundwork. They introduce no production caller, numbered production migration,
-active budget admission, factor call, retirement change, controller change or
-activation. Existing middleware S1 provenance is reused; it is not rebuilt. The
+The opaque actor adapter, private SQL accounting core and process proof-work tracker
+are implemented as dormant groundwork. They introduce no production caller,
+numbered production migration, active budget admission, factor call, retirement
+change, controller change or activation. Existing middleware S1 provenance is
+reused; it is not rebuilt. The
 SQL fixture is prospective-schema evidence only. Source availability is not
 validation, release or delivery evidence.
 
@@ -17,6 +18,7 @@ validation, release or delivery evidence.
 | Actor adapter | New `internal/stepup/budget_actor.go` and focused test file | Actual `AuthRequired` provenance, exact value copies, generic refusal and no response side effects |
 | Consumer/lifetime inventory | Source-driven sink and routed-owner census | Independently scan proof, token, enrollment and budget sinks; identify first proof, effect commit, continuation lifetime and retry ownership |
 | Dormant SQL core | New private step-up accounting engine and disposable schema fixtures; no production callers | Exact five-of-six concurrency, fixed DB window, own-receipt settlement, canonical actor reacquisition and real commit ambiguity |
+| Dormant proof-work tracker | Private `internal/stepup/proof_work.go` and independent component tests; no production opener or route | Atomic root stop, child/effect reference lifetime, canceled/multiple drain waiters and no false zero after parent return |
 | Schema and retention integration | Separately allocated paired migration and existing loginfamily retirement owner | Real migration up/down evidence, restrictive FK and complete cohort retention before production rows |
 | Terminal composition | Canonical loginfamily access-guarded target capture | Complete actor/target union, immutable UUID order, final actor check and unchanged selector semantics |
 | Consumer integration | Authenticated mint and the contract's complete consumer inventory | Reserve before proof, no duplicate charges, definite-effect settlement and ordinary-auth isolation |
@@ -126,6 +128,13 @@ Record the normal test-file inventory/count probe in the implementation handoff;
 do not expand this new-file unit into unrelated generated-source changes.
 
 ## Later acceptance and sequencing
+
+The private tracker is a process-local mechanical prerequisite only. Its unbound
+state cannot issue work or report a drained snapshot; stopping an active tracker
+refuses new roots while registered children and effects remain counted. It does
+not supply current-process status v2, compatibility binding, lifecycle admission
+or stopped-process database-work evidence. The existing lifecycle/runtime owner
+must add those links before any routed caller can use the tracker.
 
 First freeze the actual source-derived consumer inventory, including password and
 MFA checks, raw TOTP matching, WebAuthn assertion/registration finish, token mint/
