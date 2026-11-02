@@ -1664,19 +1664,55 @@ export const SubscribedSchema = z.object({
 });
 
 /**
- * `error` — server-side error. Handler branches on `data.code`; only 'epoch_revoked'
- * gets special-case handling today. A nested z.discriminatedUnion('code', ...) is
- * a follow-up (spec out-of-scope #2).
+ * `error` — server-side error. Budget advisories require a complete class/retry
+ * pair; legacy errors may omit both. Keep validation on data so the outer event
+ * remains a member of the type-discriminated union.
  * Server emitter: `services/control-plane/internal/websocket/hub.go:707`
  * (generic error; also `hub.go:735` for the epoch-revoked specialization).
  */
 export const ErrorSchema = z.object({
   type: z.literal('error'),
-  data: z.object({
-    code: z.string().optional(),
-    channel_id: UUID.optional(),
-    current_epoch: z.number().int().nonnegative().optional(),
-  }),
+  data: z
+    .object({
+      code: z.string().optional(),
+      channel_id: UUID.optional(),
+      current_epoch: z.number().int().nonnegative().optional(),
+      event_class: z
+        .enum([
+          'content',
+          'typing',
+          'subscription',
+          'presence',
+          'profile',
+          'server',
+          'ready',
+          'renewal',
+        ])
+        .optional(),
+      retry_after_ms: z.number().int().min(100).max(30000).optional(),
+    })
+    .superRefine((data, ctx) => {
+      const requiresBudgetPair =
+        data.code === 'ws_rate_limited' ||
+        data.event_class !== undefined ||
+        data.retry_after_ms !== undefined;
+      if (!requiresBudgetPair) return;
+
+      if (data.event_class === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['event_class'],
+          message: 'event_class is required with a budget advisory or retry_after_ms',
+        });
+      }
+      if (data.retry_after_ms === undefined) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['retry_after_ms'],
+          message: 'retry_after_ms is required with a budget advisory or event_class',
+        });
+      }
+    }),
 });
 
 /**
