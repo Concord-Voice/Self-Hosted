@@ -2090,6 +2090,12 @@ func (h *Hub) handleIncoming(msg IncomingMessage) {
 	if client == nil || client.securityTerminal.Load() {
 		return
 	}
+	// Cancellation can follow a successful enqueue or race a ready send. Fence
+	// productive dequeue even when account admission is disabled.
+	if (client.ingressCtx != nil && client.ingressCtx.Err() != nil) ||
+		(h.ingressCtx != nil && h.ingressCtx.Err() != nil) {
+		return
+	}
 	if h.eventBudgetConfig.Enabled && !client.ingressAuthorityLive(client.ingressCtx) {
 		return
 	}
