@@ -2176,10 +2176,12 @@ func NewRouter(
 					usersHandler.GetMyKeys,
 				)
 
-				// Read E2EE keys mid-session by proving the current password
+				// Read E2EE keys mid-session by proving the current password.
+				// A password oracle, so it takes the step-up mint's fail-closed
+				// guards (ban check, IP and per-user limits) rather than the
+				// fail-open per-route limiter.
 				userRoutes.POST("/me/keys/reveal",
-					middleware.RateLimitByUser(redis, 5, 1*time.Minute),
-					usersHandler.RevealMyKeys,
+					append(stepUpPasswordRouteGuards(redis), usersHandler.RevealMyKeys)...,
 				)
 
 				// Replace E2EE keys (for key recovery)

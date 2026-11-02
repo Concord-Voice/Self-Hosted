@@ -24,6 +24,21 @@ on:
         type: boolean
         default: false
         required: false
+      selected-known:
+        type: string
+        required: false
+      selected-pr-number:
+        type: string
+        required: false
+      selected-head-sha:
+        type: string
+        required: false
+      selected-base-sha:
+        type: string
+        required: false
+      selected-merge-sha:
+        type: string
+        required: false
 
 # Least-privilege default; the govulncheck job elevates to the writes it needs.
 permissions:
@@ -41,9 +56,58 @@ jobs:
       # required by upload-sarif in private repos to read the Actions run status
       actions: read
     steps:
+      - name: Validate protected scan revision
+        id: revision
+        if: inputs.external-verdict
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SELECTED_KNOWN: ${{ inputs.selected-known }}
+          PR_NUMBER: ${{ inputs.selected-pr-number }}
+          HEAD_SHA: ${{ inputs.selected-head-sha }}
+          BASE_SHA: ${{ inputs.selected-base-sha }}
+          MERGE_SHA: ${{ inputs.selected-merge-sha }}
+          CALLER_REF: ${{ github.workflow_ref }}
+          CALLER_SHA: ${{ github.workflow_sha }}
+          EVENT_PR_NUMBER: ${{ github.event.pull_request.number }}
+          EVENT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          EVENT_HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
+          EVENT_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          reject() { echo '::error::Protected scan revision input or provenance invalid'; exit 1; }
+          test "$GITHUB_REPOSITORY" = 'Concord-Voice/Self-Hosted' || reject
+          test "$GITHUB_EVENT_NAME" = 'pull_request' || reject
+          test "$CALLER_REF" = 'Concord-Voice/Self-Hosted/.github/workflows/required-pr-build.yml@refs/heads/main' || reject
+          [[ "$CALLER_SHA" =~ ^[0-9a-f]{40}$ ]] || reject
+          test "$SELECTED_KNOWN" = 'true' || reject
+          [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || reject
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ && "$BASE_SHA" =~ ^[0-9a-f]{40}$ && "$MERGE_SHA" =~ ^[0-9a-f]{40}$ ]] || reject
+          test "$EVENT_PR_NUMBER" = "$PR_NUMBER" || reject
+          [[ "$EVENT_HEAD_REPO" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]{1,100}$ ]] || reject
+          test "$EVENT_BASE_REF" = 'main' || reject
+          test "$EVENT_HEAD_SHA" = "$HEAD_SHA" || reject
+          test "$EVENT_BASE_SHA" = "$BASE_SHA" || reject
+          gh api "repos/$GITHUB_REPOSITORY/pulls/$PR_NUMBER" > "$RUNNER_TEMP/protected-scan-pr.json" 2>/dev/null || reject
+          jq -e --argjson pr "$PR_NUMBER" --arg head_repo "$EVENT_HEAD_REPO" \
+            --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg merge "$MERGE_SHA" \
+            '.number == $pr and .head.repo.full_name == $head_repo and .base.ref == "main" and
+             .head.sha == $head and .base.sha == $base and .merge_commit_sha == $merge' \
+            "$RUNNER_TEMP/protected-scan-pr.json" >/dev/null || reject
+          gh api "repos/$GITHUB_REPOSITORY/commits/$MERGE_SHA" > "$RUNNER_TEMP/protected-scan-merge.json" 2>/dev/null || reject
+          jq -e --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg merge "$MERGE_SHA" \
+            '.sha == $merge and ([.parents[]?.sha] == [$base, $head])' \
+            "$RUNNER_TEMP/protected-scan-merge.json" >/dev/null || reject
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.external-verdict && inputs.selected-merge-sha || '' }}
           persist-credentials: false
+
+      - name: Confirm protected scan checkout
+        if: inputs.external-verdict
+        env:
+          EXPECTED_SHA: ${{ inputs.selected-merge-sha }}
+        run: test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
 
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -66,6 +130,8 @@ jobs:
         with:
           sarif_file: services/control-plane/govulncheck.sarif
           category: govulncheck
+          ref: ${{ inputs.external-verdict && format('refs/pull/{0}/merge', inputs.selected-pr-number) || github.ref }}
+          sha: ${{ inputs.external-verdict && inputs.selected-merge-sha || github.sha }}
 
       - name: Write protected govulncheck upload evidence
         if: inputs.external-verdict
