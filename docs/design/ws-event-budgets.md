@@ -6,7 +6,8 @@ validation, integer scaling, the B1 Redis script/adapter, B2 dedicated client
 factories with the source ACL grant, the B3 account admitter, and C1 socket ingress
 lifecycle ownership. C1 wakes pacing and enqueue waits on teardown and adds an
 immutable Hub construction seam; no production caller invokes the new engine.
-New event limits and responses are not active. All proposed
+Unit E adds canonical protocol validation for budget advisories. New event
+limits and responses are not active. All proposed
 thresholds and workload claims are **UNMEASURED**; this document specifies future
 enforcement and its release prerequisites, not evidence of deployment.
 
@@ -370,8 +371,12 @@ on limiter locks, metrics, Redis cleanup or courtesy frames between siblings.
 | content | original content refusal behavior |
 
 Advisory shape: `{"type":"error","data":{"code":"ws_rate_limited","event_class":"profile","retry_after_ms":5000}}`.
-Only closed class names and integer retries 100..30000 are accepted. Require both
-new fields for this code and reject partial new fields. Do not echo payloads,
+Only the eight closed class names above and finite integer retries 100..30000 are
+accepted, without coercion. Require both new fields for this code and reject
+partial pairs for every code. Complete valid pairs remain accepted with another
+or absent code. Existing errors with neither field retain their parsed fields and
+acceptance, including empty data and `epoch_revoked`; existing unknown-key
+stripping is unchanged. Do not echo payloads,
 targets or messages. Full outbound queues drop advisories without blocking.
 For positive known delay, ceil milliseconds then clamp to 100..30000; unavailable
 or nonpositive/nonfinite delay uses 1000. Internal holds use the original delay.
@@ -386,6 +391,20 @@ Restore desired subscriptions only; never automatically replay content/mutations
 Renewal retains its existing 5s acknowledgment wait and single 11s retry.
 
 ## Observability, compatibility and activation
+
+The canonical schema is
+`packages/protocol/src/renderer/types/ws-events.ts`: nested error data validation
+retains `event_class` and `retry_after_ms` through both `ErrorSchema` and the
+existing `WebSocketEventSchema` union. The `error` event remains one union member,
+and `ErrorPayload` is still derived from that schema.
+
+The private `@concord-voice/protocol` package has no publication/import delivery
+mechanism established here. Desktop currently imports its own
+`desktop/src/renderer/types/ws-events.ts`; unit F must port the reviewed canonical
+schema and tests with the exact source commit, then prove its actual parser and
+service behavior. Canonical schema validation alone proves neither Desktop
+adoption nor a compatible released client. No package version, dependency or
+activation change follows from E.
 
 Emit exactly 24 scalar counters: eight classes times `allowed`, `throttled`,
 `degraded`, named `websocket_event_<class>_<outcome>_total`. Count final admission
