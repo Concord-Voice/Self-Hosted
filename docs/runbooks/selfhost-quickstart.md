@@ -32,13 +32,19 @@ The exact target release guide supplies its verification, backup, compatibility 
 
 The fresh installer prepares `WS_EVENT_BUDGET_ENABLED=true` and
 `WS_EVENT_BUDGET_SCALE_PERCENT=100` in its new root `.env`. These are source
-defaults with **UNMEASURED** thresholds. This preparation adds no Compose
-mapping or service-start action and does not authorize activation or announce
-a budget-capable release.
+defaults with **UNMEASURED** thresholds. The production Compose layer requires
+both keys and forwards them only to control-plane; the bundled and BYO S3
+overlays inherit those mappings. This configuration delivery adds no
+service-start action and does not authorize activation or announce a
+budget-capable release.
 
-Before adopting a verified release that requires these keys, existing operators
-must prepare them through their established root `.env` configuration process.
-The installer remains fresh-only: do not rerun it to replace an existing file.
+Existing operators must prepare both keys through their established root `.env`
+configuration process before adopting a verified release with the required-value
+production model. Missing or explicitly
+empty values fail interpolation for any selected command that renders that
+model, not just startup. The installer remains fresh-only: do not rerun it to
+replace an existing file or source dotenv as shell.
+
 In a budget-capable release, enabled accepts only lowercase `true` or `false`;
 scale accepts canonical unsigned decimal 25..400, without spaces, signs, leading
 zeros or fractions. Explicit empty is invalid, and scale is validated even when
@@ -46,10 +52,21 @@ disabled. Select explicit `false` while activation prerequisites remain unmet;
 verify the target release actually delivers that setting to the process. A key
 in root `.env` alone does not prove container-environment delivery.
 
+The existing selected-self-host helper clears inherited shell values for both
+keys before Compose reads root `.env`. Ambient values cannot override or fill
+in missing durable values on that path. Direct raw Compose retains its normal
+shell precedence. Base-only development has no new required budget mapping.
+Compose checks presence only: it forwards nonempty values unchanged, including
+explicit `false` and invalid nonempty grammar. The budget-capable runtime owns
+semantic validation; a successful render proves neither valid runtime settings
+nor delivery to a running process. Use the reviewed target-release procedure
+to apply the prepared configuration and verify the actual process environment.
+
 Activation requires the target release's configuration wiring, compatible
 server/Admin metrics reader and storage catalog, compatible released clients
-and validated admission floors, and the reviewed workload evidence. Do not
-derive a client floor from a repository package version. Record evidence for
+and validated admission floors, supported handling of existing connections,
+and the reviewed workload and security evidence. Do not derive a client floor
+from a repository package version. Record evidence for
 the exact candidate using the [acceptance template](selfhost-public-acceptance.md).
 
 For a budget-capable release's disable/rollback procedure, retain both keys and

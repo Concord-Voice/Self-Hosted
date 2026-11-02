@@ -3030,9 +3030,9 @@ PYLIFECYCLE_ARGS
 }
 
 # ── Installer-owned interpolation authority (#4197915622) ─────────────
-# These 17 fields come from the installer's durable writer. Keep this list
+# These 19 fields come from the installer's durable writer. Keep this list
 # independent of the producer's scrub list so an omitted field remains visible.
-SELFHOST_INSTALLER_KEYS='ENVIRONMENT DOMAIN PUBLIC_IP POSTGRES_PASSWORD REDIS_PASSWORD JWT_SECRET MFA_ENCRYPTION_KEY TURN_SECRET TURN_REALM TRUSTED_PROXY_CIDRS SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM FEEDBACK_REPO FEEDBACK_PAT'
+SELFHOST_INSTALLER_KEYS='ENVIRONMENT DOMAIN PUBLIC_IP POSTGRES_PASSWORD REDIS_PASSWORD JWT_SECRET MFA_ENCRYPTION_KEY TURN_SECRET TURN_REALM TRUSTED_PROXY_CIDRS SMTP_HOST SMTP_PORT SMTP_USERNAME SMTP_PASSWORD SMTP_FROM FEEDBACK_REPO FEEDBACK_PAT WS_EVENT_BUDGET_ENABLED WS_EVENT_BUDGET_SCALE_PERCENT'
 INSTALLER_AUTHORITY_CONTROLS='SELFHOST_STORAGE_MODE STORAGE_BACKEND STORAGE_ENDPOINT STORAGE_REGION STORAGE_ACCESS_KEY STORAGE_SECRET_KEY STORAGE_USE_SSL STORAGE_BUCKET MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY MINIO_USE_SSL MINIO_BUCKET MINIO_ROOT_USER MINIO_ROOT_PASSWORD COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE COMPOSE_OVERRIDE INSTANCE_TYPE ACTIVITY_HISTORY_CLUSTER_ENABLED CONTROL_PLANE_REPLICA_COUNT ACTIVITY_HISTORY_OPERATOR_NAME ACTIVITY_HISTORY_PRIVACY_POLICY_URL ATTACHMENT_WRITE_BACKEND COTURN_CERTS_DIR SELFHOST_STORAGE_TRUSTED_IMAGE RESEND_API_KEY'
 
 installer_authority_invoke() { # wrapper|controller|checkpoint, ambient|clean|smtp-alias
@@ -3054,7 +3054,8 @@ installer_authority_invoke() { # wrapper|controller|checkpoint, ambient|clean|sm
       export ENVIRONMENT=development DOMAIN=ambient.example.invalid PUBLIC_IP=198.51.100.42 \
         TURN_REALM=ambient.example.invalid TRUSTED_PROXY_CIDRS=10.24.0.0/16 \
         SMTP_HOST=smtp.ambient.example.invalid SMTP_PORT=587 \
-        SMTP_FROM=fixture@ambient.example.invalid FEEDBACK_REPO=selfhost/ambient
+        SMTP_FROM=fixture@ambient.example.invalid FEEDBACK_REPO=selfhost/ambient \
+        WS_EVENT_BUDGET_ENABLED=true WS_EVENT_BUDGET_SCALE_PERCENT=400
       export SELFHOST_STORAGE_MODE=bundled STORAGE_BACKEND=s3 \
         STORAGE_ENDPOINT=caller.example.invalid STORAGE_REGION=caller-region \
         STORAGE_ACCESS_KEY=fixture-caller-access STORAGE_SECRET_KEY=fixture-caller-secret \
@@ -3156,6 +3157,8 @@ run_installer_authority_matrix() { # bundled|byo-s3
         SMTP_PORT) value=2525 ;;
         SMTP_FROM) value=fixture@durable.example.invalid ;;
         FEEDBACK_REPO) value=selfhost/durable ;;
+        WS_EVENT_BUDGET_ENABLED) value=false ;;
+        WS_EVENT_BUDGET_SCALE_PERCENT) value=25 ;;
       esac
       printf '%s=%s\n' "$key" "$value" >>"$BEHAVIOR_ROOT/.env"
     done
@@ -3196,7 +3199,7 @@ run_installer_authority_matrix() { # bundled|byo-s3
       [[ "$surface" != checkpoint ]] || trusted="$old_image"
       if [[ $selfhost_rc -eq 0 && ! -s "$SELFHOST_STUB_REJECT_LOG" ]] \
         && installer_authority_matches "$mode" "$expected" "$trusted"; then
-        pass "installer authority: $mode $surface $inheritance consumes all 17 durable values and preserves runtime controls"
+        pass "installer authority: $mode $surface $inheritance consumes all 19 durable values and preserves runtime controls"
       else
         fail "installer authority: $mode $surface $inheritance lost durable selection/command/runtime/image control (rc=$selfhost_rc)"
       fi
@@ -3210,7 +3213,7 @@ run_installer_readonly_scrub_matrix() {
   export SELFHOST_DOCKER_JSON_LOG="$STUB/readonly-scrub.jsonl" \
     SELFHOST_SCRUB_NAMES="$SELFHOST_INSTALLER_KEYS $INSTALLER_AUTHORITY_CONTROLS"
   reset_selfhost_behavior false 1 '' ''
-  for key in DOMAIN SMTP_PASSWORD; do
+  for key in DOMAIN SMTP_PASSWORD WS_EVENT_BUDGET_ENABLED WS_EVENT_BUDGET_SCALE_PERCENT; do
     for mutability in readonly mutable; do
       : >"$SELFHOST_DOCKER_JSON_LOG"
       : >"$SELFHOST_STUB_REJECT_LOG"
