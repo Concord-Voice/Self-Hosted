@@ -631,7 +631,7 @@ class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
         jobs = self.wrapper["jobs"]
         call = jobs["pr-ci"]
         self.assertEqual(call["uses"],
-                         "Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@52a73e362484c4590928ca4dd34ed9c5fbf16c5a")
+                         "Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@5fa007d8e1979c3368181dc6f79e3fb1c8235beb")
         self.assertEqual(call["with"], {"trusted-source": "true", "enforcement-only": "true"})
         self.assertNotIn("secrets", call)
         self.assertNotIn("ioc", jobs)

@@ -1,0 +1,47 @@
+{
+  "//": "Accepted override-range skews — see scripts/security/override-range-lint.mjs. Each row is a consumer that resolves OUTSIDE the range it declares, because an `overrides` entry forces it there. Rows are matched on the full tuple, so a new consumer or a changed range/resolution is reported even for a package already listed here. Prune a row when the lint reports it as no longer occurring. Regenerate: node scripts/security/override-range-lint.mjs --dir <pkg> --update-baseline",
+  "accepted": [
+    {
+      "consumer": "node_modules/@npmcli/arborist",
+      "dep": "minimatch",
+      "range": "^10.0.3",
+      "resolved": "11.0.3"
+    },
+    {
+      "consumer": "node_modules/@npmcli/map-workspaces",
+      "dep": "glob",
+      "range": "^13.0.0",
+      "resolved": "14.0.3"
+    },
+    {
+      "consumer": "node_modules/@npmcli/map-workspaces",
+      "dep": "minimatch",
+      "range": "^10.0.3",
+      "resolved": "11.0.3"
+    },
+    {
+      "consumer": "node_modules/@npmcli/package-json",
+      "dep": "glob",
+      "range": "^13.0.0",
+      "resolved": "14.0.3"
+    },
+    {
+      "consumer": "node_modules/@tufjs/models",
+      "dep": "minimatch",
+      "range": "^10.1.1",
+      "resolved": "11.0.3"
+    },
+    {
+      "consumer": "node_modules/cacache",
+      "dep": "glob",
+      "range": "^13.0.0",
+      "resolved": "14.0.3"
+    },
+    {
+      "consumer": "node_modules/ignore-walk",
+      "dep": "minimatch",
+      "range": "^10.0.3",
+      "resolved": "11.0.3"
+    }
+  ]
+}
