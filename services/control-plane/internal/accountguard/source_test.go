@@ -3,6 +3,8 @@ package accountguard_test
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
+	"errors"
 	"os"
 	"testing"
 
@@ -130,9 +132,27 @@ func TestSourceTxErrorsPreserveIdentityAndCallerOwnership(t *testing.T) {
 		require.NotErrorIs(t, err, sql.ErrTxDone)
 		require.NotContains(t, err.Error(), "private-invalid-source")
 	}
-	tx := sourceTransaction(t, conn)
-	canceled, cancel := context.WithCancel(t.Context())
-	cancel()
-	require.ErrorIs(t, accountguard.SourceTx(canceled, tx, accountguard.SourceUserSession), context.Canceled)
-	// Context errors need not leave a PostgreSQL transaction usable.
+	// A canceled database/sql operation may invalidate its lib/pq connection.
+	// Give this case its own session so the normal fixture's strict cleanup
+	// remains an oracle for caller-owned transactions above.
+	t.Run("canceled operation may invalidate its session", func(t *testing.T) {
+		pool, err := sql.Open("postgres", os.Getenv("DATABASE_URL"))
+		require.NoError(t, err)
+		t.Cleanup(func() { require.NoError(t, pool.Close()) })
+		canceledConn, err := pool.Conn(t.Context())
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			err := canceledConn.Close()
+			require.True(t, err == nil || errors.Is(err, sql.ErrConnDone), "canceled session close: %v", err)
+		})
+		canceledTx, err := canceledConn.BeginTx(t.Context(), nil)
+		require.NoError(t, err)
+		t.Cleanup(func() {
+			err := canceledTx.Rollback()
+			require.True(t, err == nil || errors.Is(err, sql.ErrTxDone) || errors.Is(err, driver.ErrBadConn), "canceled transaction rollback: %v", err)
+		})
+		canceled, cancel := context.WithCancel(t.Context())
+		cancel()
+		require.ErrorIs(t, accountguard.SourceTx(canceled, canceledTx, accountguard.SourceUserSession), context.Canceled)
+	})
 }
