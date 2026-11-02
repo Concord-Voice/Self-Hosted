@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 import subprocess
 import tempfile
+from types import SimpleNamespace
 
 import yaml
 
@@ -163,6 +164,42 @@ sys.stdout.write(pathlib.Path(os.environ['FIXTURE_HTTP_REPLY']).read_text())
         return dict(line.split('=', 1) for line in output.read_text().splitlines())
 
 
+def revision_step(step, context, repo, live_pr, merge_reply):
+    """Execute the actual inline preflight with only exact offline GET routes."""
+    with tempfile.TemporaryDirectory() as directory:
+        fixture = Path(directory)
+        responses = fixture / 'responses.json'
+        calls = fixture / 'http-calls.jsonl'
+        responses.write_text(json.dumps({
+            'repos/Concord-Voice/Self-Hosted/pulls/3691': live_pr,
+            'repos/Concord-Voice/Self-Hosted/commits/' + str(live_pr['merge_commit_sha']): merge_reply,
+        }))
+        gh = fixture / 'gh'
+        gh.write_text("""#!/usr/bin/env python3
+import json, os, pathlib, sys
+with pathlib.Path(os.environ['FIXTURE_HTTP_CALLS']).open('a') as stream:
+    stream.write(json.dumps(sys.argv[1:]) + '\\n')
+responses = json.loads(pathlib.Path(os.environ['FIXTURE_HTTP_RESPONSES']).read_text())
+if len(sys.argv) != 3 or sys.argv[1] != 'api' or sys.argv[2] not in responses:
+    raise SystemExit('unexpected fixture HTTP request')
+sys.stdout.write(json.dumps(responses[sys.argv[2]]))
+""")
+        gh.chmod(0o700)
+        env = {'PATH': str(fixture) + os.pathsep + os.environ.get('PATH', ''),
+               'LANG': 'C', 'LC_ALL': 'C', 'GITHUB_REPOSITORY': context['github']['repository'],
+               'GITHUB_EVENT_NAME': context['github']['event_name'], 'RUNNER_TEMP': str(fixture),
+               'GITHUB_OUTPUT': str(fixture / 'outputs'), 'FIXTURE_HTTP_RESPONSES': str(responses),
+               'FIXTURE_HTTP_CALLS': str(calls)}
+        for key, value in step.get('env', {}).items():
+            resolved = resolve(value, context)
+            env[key] = str(resolved).lower() if isinstance(resolved, bool) else str(resolved)
+        completed = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', step['run']],
+            cwd=repo, env=env, capture_output=True, text=True)
+        observed = [json.loads(line) for line in calls.read_text().splitlines()] if calls.exists() else []
+        return SimpleNamespace(returncode=completed.returncode, stdout=completed.stdout,
+                               stderr=completed.stderr, calls=observed)
+
+
 class WorkflowConsumer:
     def __init__(self, repo, selection, event_merge, *, external=True, ordinary_main=False):
         self.repo = repo
@@ -177,7 +214,7 @@ class WorkflowConsumer:
                 'workflow_ref': 'Concord-Voice/Self-Hosted/.github/workflows/required-pr-build.yml@refs/heads/main',
                 'workflow_sha': selection['policy_sha'], 'event': {'pull_request': {
                     'number': 3691, 'head': {'sha': selection['head_sha'], 'repo': {'full_name': 'Concord-Voice/Self-Hosted'}},
-                    'base': {'sha': selection['base_sha']}}}},
+                    'base': {'sha': selection['base_sha'], 'ref': 'main'}}}},
             'job': {'workflow_repository': 'Concord-Voice/Self-Hosted', 'workflow_sha': selection['policy_sha']},
             'runner': {}, 'steps': {},
         }
@@ -185,8 +222,14 @@ class WorkflowConsumer:
         self.ordinary_main = ordinary_main
         self.checkouts = []
         self.uploads = []
+        self.preflights = []
+        self.execution_boundaries = []
+        event_pr = copy.deepcopy(self.context['github']['event']['pull_request'])
+        self.live_pr = dict(event_pr, merge_commit_sha=selection['merge_sha'])
+        parents = run_git(repo, 'show', '-s', '--format=%P', selection['merge_sha']).split()
+        self.merge_reply = {'sha': selection['merge_sha'], 'parents': [{'sha': sha} for sha in parents]}
 
-    def run_scanner(self, name, *, overrides=None):
+    def run_scanner(self, name, *, overrides=None, input_overrides=None):
         caller = workflow('pr-ci.yml')['jobs'][name]
         callee_name = caller['uses'].rsplit('/', 1)[-1]
         callee = copy.deepcopy(workflow(callee_name))
@@ -198,10 +241,22 @@ class WorkflowConsumer:
             inputs[key] = default == 'true' if definition.get('type') == 'boolean' else default
         if not self.ordinary_main:
             inputs.update({key: resolve(value, self.context) for key, value in caller.get('with', {}).items()})
-        context = dict(self.context, inputs=inputs)
+        if input_overrides: inputs.update(input_overrides)
+        context = copy.deepcopy(dict(self.context, inputs=inputs))
         for job in callee['jobs'].values():
             for step in job.get('steps', []):
+                if step.get('id') == 'revision':
+                    if condition(step.get('if'), context):
+                        outcome = revision_step(step, context, self.repo, self.live_pr, self.merge_reply)
+                        self.preflights.append((name, outcome))
+                        context['steps']['revision'] = {'outcome': 'success' if outcome.returncode == 0 else 'failure'}
+                        if outcome.returncode != 0: return False
+                    else:
+                        context['steps']['revision'] = {'outcome': 'skipped'}
+                    continue
                 uses = step.get('uses', '')
+                if re.search(r'\b(?:npm ci|go install|pip install|pip3 install|semgrep scan|govulncheck -format)\b', step.get('run', '')):
+                    if condition(step.get('if'), context): self.execution_boundaries.append((name, step.get('name', 'scanner command')))
                 if not uses.startswith(('actions/checkout@', 'github/codeql-action/upload-sarif@')):
                     continue
                 if not condition(step.get('if'), context): continue
@@ -219,5 +274,10 @@ class WorkflowConsumer:
                         raise AssertionError('upload action requires explicit ref and sha together')
                     commit = fields.get('sha') or self.context['github']['sha']
                     ref = fields.get('ref') or self.context['github']['ref']
+                    head_repo = self.context['github']['event']['pull_request']['head']['repo']['full_name']
+                    if self.context['github']['event_name'] == 'pull_request' and head_repo != self.context['github']['repository']:
+                        # Documented pinned upload-sarif behavior: fork overrides
+                        # are ignored. This adapter does not grant upload authority.
+                        commit, ref = self.context['github']['sha'], self.context['github']['ref']
                     self.uploads.append(dict(scanner=name, category=fields['category'],
                         commit_sha=commit, ref=ref, checked_out=run_git(self.repo, 'rev-parse', 'HEAD')))
