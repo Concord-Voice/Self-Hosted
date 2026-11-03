@@ -24,7 +24,7 @@ RUN npm run build && test -f dist/index.html
 # the shipped stdlib directly, without a GOTOOLCHAIN build-time download.
 # The `go` directive separately controls the module's compatibility defaults.
 # scripts/check-go-toolchain.py enforces alignment with Dockerfile.ops-agent.
-FROM golang:1.27.3-alpine@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd AS builder
+FROM golang:1.27.3-alpine@sha256:d200d2dd76b03a99b52651fd1325aff7dcd35422c35c01bac56571b0507f3deb AS builder
 
 WORKDIR /app
 
@@ -50,7 +50,7 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       ./cmd/server ./cmd/migrate-media ./cmd/mfa-rekey
 
 # Final stage. Tracks the supported Alpine line -- 3.21 reaches EOL 2026-11-01.
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM alpine:3.24@sha256:be2656061b536c1883c4034790e21d0a09c5aaaf51968b89368a3c0371ea2c9a
 
 LABEL org.opencontainers.image.source="https://github.com/Concord-Voice/Self-Hosted"
 LABEL org.opencontainers.image.description="Concord Voice control-plane service"
