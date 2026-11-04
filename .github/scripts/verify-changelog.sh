@@ -3,7 +3,7 @@
 # verify-changelog.sh — CHANGELOG.md discipline gate (#1857).
 #
 # Fail-closed pr-ci check with five rules:
-#   1. A desktop version bump (client/desktop/package.json "version" changed
+#   1. A version bump (the VERSION file at the repo root changed
 #      upward in this PR) must have a matching "## [<new-version>]" section
 #      present in CHANGELOG.md at HEAD. Presence-at-HEAD (not diff-added) is
 #      deliberate: it is immune to merged-main sweeps / pre-added entries /
@@ -14,8 +14,8 @@
 #      transform scrub — so the file itself must stay clean.
 #   3. A `## [X.Y.Z]` heading may only be ADDED in a promotion-shaped diff:
 #      [Prerelease] non-empty at the base, emptied at HEAD, heading matching
-#      package.json. Version sections are the promoter's output, not a PR's.
-#   4. A change under client/desktop/src, services/control-plane or
+#      VERSION. Version sections are the promoter's output, not a PR's.
+#   4. A change under services/control-plane or
 #      services/media-plane must add a line under `## [Prerelease]`, unless a
 #      `Changelog-Exempt: <reason>` commit trailer says why a user cannot
 #      observe it. Tests and dependency manifests are exempt by path.
@@ -53,6 +53,14 @@ first_line() {
   while IFS= read -r l || [[ -n "$l" ]]; do
     [[ -n "$first" ]] || { first=1; printf '%s\n' "$l"; }
   done
+}
+
+# read_version <rev>: the server version at <rev>. Self-Hosted versions the
+# server and the self-host bundle with a plain-text VERSION file at the repo
+# root (one X.Y.Z line). The desktop app has its own version in the Desktop
+# repo; the two are no longer kept in lockstep. A missing file reads as empty.
+read_version() {
+  git show "$1:VERSION" 2>/dev/null | tr -d '[:space:]' || true
 }
 
 if [[ "${1-}" == "--help" ]]; then
@@ -106,7 +114,7 @@ if [[ -n "$ADDED_LINES" ]] && printf '%s\n' "$ADDED_LINES" | grep -E "$PMIRROR_P
   echo "FAIL: CHANGELOG.md additions reference private-tree paths (the file is bundled into the public SPA):" >&2
   printf '%s\n' "$ADDED_LINES" | grep -E "$PMIRROR_PRIVATE_REF_REGEX" >&2
   echo "Reword these lines without [internal] / internal-docs / [internal] path tokens." >&2
-  echo "See docs/release/desktop-release-checklist.md (CHANGELOG entry step)." >&2
+  echo "See the entry rules at the top of CHANGELOG.md." >&2
   exit 1
 fi
 
@@ -190,8 +198,7 @@ if [[ -n "$NEW_HEADINGS" ]]; then
   # undiagnosable in a CI log, and outside this file's documented exit contract.
   BASE_UNREL=$(unreleased_body "$MERGE_BASE" | tr -d '[:space:]' || true)
   HEAD_UNREL=$(unreleased_body HEAD | tr -d '[:space:]' || true)
-  HEAD_PKG_VERSION=$(git show HEAD:client/desktop/package.json 2>/dev/null \
-    | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | first_line || true)
+  HEAD_PKG_VERSION=$(read_version HEAD)
   # Compare the numeric triple only. Heading labels carry suffixes that
   # package.json never does — `## [0.3.0-Beta]` against a manifest reading
   # "0.3.0" is a real, passing shape (Rule 1 allows it explicitly), so a
@@ -206,7 +213,7 @@ if [[ -n "$NEW_HEADINGS" ]]; then
   elif [[ -n "$HEAD_UNREL" ]]; then
     RULE3_FAIL="'## [Prerelease]' is still populated at HEAD — a promotion empties it"
   elif [[ "$HEAD_PKG_VERSION" != "$ADDED_TRIPLE" ]]; then
-    RULE3_FAIL="the added heading is [${ADDED_HEADING}] but client/desktop/package.json is ${HEAD_PKG_VERSION}"
+    RULE3_FAIL="the added heading is [${ADDED_HEADING}] but VERSION is ${HEAD_PKG_VERSION}"
   fi
 
   if [[ -n "$RULE3_FAIL" ]]; then
@@ -217,8 +224,8 @@ if [[ -n "$NEW_HEADINGS" ]]; then
     echo "heading later, so nothing is lost and the notes cover the whole tag range." >&2
     echo "If it IS cutting one, run the promoter rather than editing the file:" >&2
     echo "  ./.github/scripts/promote-unreleased-changelog.sh <version>" >&2
-    echo "  cd client/desktop && npm version <version> --no-git-tag-version" >&2
-    echo "See docs/release/desktop-release-checklist.md." >&2
+    echo "  printf '%s\\n' <version> > VERSION" >&2
+    echo "See the entry rules at the top of CHANGELOG.md." >&2
     exit 1
   fi
 fi
@@ -237,7 +244,7 @@ fi
 # exits, so anything after it is unreachable.
 CHANGED=$(git diff --name-only "${MERGE_BASE}" HEAD || true)
 RELEVANT=$(printf '%s\n' "$CHANGED" \
-  | grep -E '^(client/desktop/src/|services/control-plane/|services/media-plane/)' \
+  | grep -E '^(services/control-plane/|services/media-plane/)' \
   | grep -vE '(^|/)(tests?|testdata|testhelpers|testutil|__tests__|__mocks__|fixtures)/' \
   | grep -vE '\.(test|spec)\.(ts|tsx|js|jsx)$|_test\.go$' \
   | grep -vE '(^|/)(package(-lock)?\.json|go\.(mod|sum))$' \
@@ -406,20 +413,18 @@ fi
 
 # ── Rule 1: version bump requires a matching section at HEAD ─────────────────
 # sed parse (not jq) for portability with the hermetic test suite (macOS).
-OLD_VERSION=$(git show "${MERGE_BASE}":client/desktop/package.json 2>/dev/null \
-  | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | first_line || true)
+OLD_VERSION=$(read_version "${MERGE_BASE}")
 OLD_VERSION="${OLD_VERSION:-0.0.0}"
-NEW_VERSION=$(git show HEAD:client/desktop/package.json 2>/dev/null \
-  | sed -n 's/.*"version"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | first_line || true)
+NEW_VERSION=$(read_version HEAD)
 NEW_VERSION="${NEW_VERSION:-0.0.0}"
 
 if [[ "$OLD_VERSION" == "$NEW_VERSION" ]]; then
-  echo "PASS: no desktop version change (${OLD_VERSION})."
+  echo "PASS: no version change (${OLD_VERSION})."
   exit 0
 fi
 
 # Downgrade (revert PR): the target version's section already exists — pass.
-# ASSUMPTION (deliberate): package.json versions are plain x.y.z triples — the
+# ASSUMPTION (deliberate): VERSION values are plain x.y.z triples — the
 # repo has never shipped a suffixed manifest version (suffixes like "-Beta"
 # exist only in CHANGELOG heading labels). `sort -V` orders "0.2.0-Beta" BELOW
 # "0.2.0", so a hypothetical plain→suffixed bump would misread as a downgrade;
@@ -445,7 +450,7 @@ if git show HEAD:CHANGELOG.md 2>/dev/null | grep -E "^## \[${NEW_ESC}(-[A-Za-z0-
   exit 0
 fi
 
-echo "FAIL: desktop version bumped ${OLD_VERSION} -> ${NEW_VERSION} but CHANGELOG.md has no '## [${NEW_VERSION}]' section at HEAD." >&2
-echo "Add a Keep-a-Changelog entry for ${NEW_VERSION} (see docs/release/desktop-release-checklist.md)." >&2
+echo "FAIL: version bumped ${OLD_VERSION} -> ${NEW_VERSION} but CHANGELOG.md has no '## [${NEW_VERSION}]' section at HEAD." >&2
+echo "Add a Keep-a-Changelog entry for ${NEW_VERSION} (see the entry rules at the top of CHANGELOG.md)." >&2
 echo "Tip: the release-notes skill generates categorized content to seed the entry." >&2
 exit 1
