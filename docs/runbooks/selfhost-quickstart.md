@@ -30,9 +30,10 @@ The exact target release guide supplies its verification, backup, compatibility 
 
 ### WebSocket event-budget preparation
 
-The fresh installer prepares `WS_EVENT_BUDGET_ENABLED=true` and
-`WS_EVENT_BUDGET_SCALE_PERCENT=100` in its new root `.env`. These are source
-defaults with **UNMEASURED** thresholds. The production Compose layer requires
+The fresh installer prepares `WS_EVENT_BUDGET_ENABLED=false` and
+`WS_EVENT_BUDGET_SCALE_PERCENT=100` in its new root `.env`, so a fresh install
+does not enforce budgets. The scale is a source default with **UNMEASURED**
+thresholds. The production Compose layer requires
 both keys and forwards them only to control-plane; the bundled and BYO S3
 overlays inherit those mappings. This configuration delivery adds no
 service-start action and does not authorize activation or announce a
@@ -50,7 +51,8 @@ replace an existing file or source dotenv as shell.
 The control-plane in this source tree already parses both keys at process
 start and enforces account budgets when enabled is `true`. With a key absent
 from its environment it falls back to enabled and scale 100. The fresh installer
-writes `true` and `100`. Enabled accepts only lowercase `true` or `false`;
+writes `false` and `100`, so enforcement stays off until an operator sets
+`true`. Enabled accepts only lowercase `true` or `false`;
 scale accepts canonical unsigned decimal 25..400, without spaces, signs, leading
 zeros or fractions. Explicit empty is invalid, and scale is validated even when
 disabled. An invalid nonempty value stops the control-plane at startup.
@@ -60,8 +62,11 @@ in root `.env` alone does not prove container-environment delivery.
 
 The existing selected-self-host helper clears inherited shell values for both
 keys before Compose reads root `.env`. Ambient values cannot override or fill
-in missing durable values on that path. Direct raw Compose retains its normal
-shell precedence. Base-only development has no new required budget mapping.
+in missing durable values on that path. Run the wrapper directly, as
+`infrastructure/deploy/concord-selfhost <verb>`, not as `bash concord-selfhost`.
+Its shebang starts Bash with `-p`, so shell functions and `BASH_ENV` exported
+by the calling environment cannot replace the commands that clear those values.
+Direct raw Compose retains its normal shell precedence. Base-only development has no new required budget mapping.
 Compose checks presence only: it forwards nonempty values unchanged, including
 explicit `false` and invalid nonempty grammar. The budget-capable runtime owns
 semantic validation; a successful render proves neither valid runtime settings

@@ -3290,6 +3290,45 @@ run_managed_command_snapshot
 run_installer_authority_matrix bundled
 run_installer_readonly_scrub_matrix
 
+# ── Imported-function hardening (#155 red-team F1) ─────────────────────
+# An exported Bash function named `unset` would turn the environment scrubber
+# into a no-op. Both scrubber entrypoints run under `bash -p`, which never
+# imports functions (or BASH_ENV) from the environment. The probe reuses each
+# entrypoint's own first line, so a shebang regression fails here.
+run_imported_function_hardening() {
+  local entry shebang probe out
+  for entry in concord-selfhost concord-ctl.sh; do
+    shebang="$(head -n 1 "$ROOT/infrastructure/deploy/$entry")"
+    if [[ "$shebang" != '#!/usr/bin/env -S bash -p' ]]; then
+      fail "$entry does not run under bash -p (shebang: $shebang)"
+      continue
+    fi
+    probe="$STUB/hardening-$entry"
+    {
+      printf '%s\n' "$shebang"
+      printf 'source %q\n' "$STORAGE_HELPER"
+      printf '%s\n' 'selfhost_storage_scrub_environment || exit 1' \
+        'printf "%s" "${DOMAIN-scrubbed}"'
+    } >"$probe"
+    chmod 700 "$probe"
+    out="$(env 'BASH_FUNC_unset%%=() { :; }' DOMAIN=planted "$probe" 2>/dev/null)" || out='probe-failed'
+    if [[ "$out" == scrubbed ]]; then
+      pass "$entry shebang keeps an imported unset() from bypassing the scrubber"
+    else
+      fail "$entry: imported unset() bypassed the scrubber ($out)"
+    fi
+  done
+  # Negative control: without -p the same attack must succeed, or the probe
+  # above proves nothing.
+  out="$(env 'BASH_FUNC_unset%%=() { :; }' DOMAIN=planted bash "$probe" 2>/dev/null)" || out='probe-failed'
+  if [[ "$out" == planted ]]; then
+    pass "control: without bash -p an imported unset() does bypass the scrubber"
+  else
+    fail "control: plain bash did not reproduce the bypass ($out)"
+  fi
+}
+run_imported_function_hardening
+
 # Failures from unrecognized Docker calls cannot satisfy negative assertions.
 if [[ -s "$SELFHOST_STUB_REJECT_LOG" ]]; then
   fail "baseline fixture rejected an unrecognized Docker command"
