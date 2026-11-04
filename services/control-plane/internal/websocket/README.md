@@ -175,8 +175,11 @@ Handler initializes each socket's ingress context from the Hub before expiry
 registration or publication. Its lifetime is independent of the HTTP request and
 async bootstrap; each event-context snapshot uses the current renewable token
 deadline. Teardown and shutdown cancel ingress, waking pre-JSON pacing and
-bounded Hub-enqueue waits. Family revocation marks all siblings, closes all
-transports and sends the checked receipt before new ingress cancellation callbacks.
+bounded Hub-enqueue waits. The Hub also rejects canceled socket or Hub lifetimes
+at dequeue in both enabled and disabled modes, before activity or handler work.
+The family sweep marks all siblings, closes all transports and sends the checked
+receipt before initiating ingress cancellation. Live pumps can cancel ingress
+earlier after their own transport closes; their callbacks do not block the sweep.
 Enabled dispatch drops unknown input, meters heartbeat locally and accounts for
 the seven account classes before enqueue. Subscription/ready denials may hold the
 single read-owned frame for up to two seconds before overload closure. Renewal

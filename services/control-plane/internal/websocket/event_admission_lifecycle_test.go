@@ -250,7 +250,7 @@ func TestEventAdmissionLifecycleExpiryCloses1008BeforeCancel(t *testing.T) {
 	assert.False(t, client.ingressAuthorityLive(event))
 }
 
-func TestEventAdmissionLifecycleFamilyReceiptPrecedesEveryIngressCallback(t *testing.T) {
+func TestEventAdmissionLifecycleFamilyReceiptPrecedesSweepIngressCallbacks(t *testing.T) {
 	hub := lifecycleHub(t)
 	user, family := uuid.New(), uuid.New()
 	type callbackObservation struct{ allFenced, allClosed, receiptQueued bool }

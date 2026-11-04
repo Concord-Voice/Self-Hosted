@@ -29,6 +29,7 @@ gate can learn from your voice.
 
 ### Added
 
+- **Authentication:** Added a dormant internal store for account-change request and origin rows, with caller-owned transactions and explicit retention of other decision obligations.
 - **Self-hosting:** Operators can configure separate Stable and Pre-Release SPA discovery streams. Existing clients keep Stable behavior; remote SPA serving remains off by default, and invalid live configuration updates preserve the previous settings.
 - **Self-hosted setup:** Fresh installer environment files now include explicit WebSocket event-budget settings, with preparation and rollback guidance for existing installations. Runtime delivery and activation remain separate steps.
 
@@ -93,8 +94,10 @@ gate can learn from your voice.
 
 ### Fixed
 
+- **Account authority:** Owner cancellation now lets an in-flight lock-health ping finish within its existing timeout before explicitly releasing the serve lock.
+- **WebSocket:** Canceled socket and server lifetimes stop queued frames before activity tracking or handler work, including when event budgets are disabled.
+- **Operations:** Required PR builds now use the reviewed CI producer with exact-revision scanner checks, four control-plane test shards, and synthetic Compose build inputs.
 - **Operations:** The production-image build job now supplies synthetic WebSocket event-budget settings when it renders Compose, without changing deployment settings.
-
 - **Connections:** WebSocket input waiting on pacing or a full server queue now stops when its connection is canceled or the server shuts down.
 - **Operations:** Protected PR Semgrep, ESLint, and govulncheck scans now check out the exact merge revision selected by required CI; same-repository SARIF uploads use that revision even if GitHub regenerates another merge commit.
 - **Voice:** The media server now forwards your app's attestation when it checks your voice access, a step toward letting servers require an attested app ([#4211](internal development reference omitted)).
@@ -155,6 +158,7 @@ gate can learn from your voice.
 
 ### Security
 
+- **Dependencies:** Updated media development tooling and the CI license checker to patched minimatch and glob versions while retaining dependency attribution checks.
 - **Accounts:** Your encrypted key is only sent to a device that has just signed in, or that confirms your current password, so a stolen session can no longer download it. Changing your password asks for your current password as before.
 - **Accounts:** Guessing passwords on the key-reveal route now counts toward the same sign-in failure ban as the login page, and its attempt limits fail closed. API: a wrong `current_password` on `POST /api/v1/users/me/keys/reveal` is now 403 `invalid_current_password` instead of 401.
 - **Voice:** One account can no longer fill the voice server's connection capacity with idle connections and lock other users out of voice.
