@@ -1,7 +1,6 @@
 name: Refresh IOC list (Shai-Hulud 2.0)
 
 # Daily threat-intel refresh with guarded auto-merge for clean small deltas.
-# Ported from the Hosted repository, which ran it for this repo before the split.
 
 on:
   schedule:
