@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # Fail-closed OCI tag state check.
-# Usage: check-oci-tag.sh <reference> [allowed-existing-digest]
+# Usage: check-oci-tag.sh REFERENCE [ALLOWED_EXISTING_DIGEST]
 set -euo pipefail
 
-reference="${1:?usage: check-oci-tag.sh <reference> [allowed-existing-digest]}"
+reference="${1:?usage: check-oci-tag.sh REFERENCE [ALLOWED_EXISTING_DIGEST]}"
 allowed_digest="${2:-}"
 
 if [[ -n "$allowed_digest" && ! "$allowed_digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
