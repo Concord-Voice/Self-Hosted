@@ -1,0 +1,261 @@
+name: Refresh IOC list (Shai-Hulud 2.0)
+
+# Daily threat-intel refresh with guarded auto-merge for clean small deltas.
+# Ported from the Hosted repository, which ran it for this repo before the split.
+
+on:
+  schedule:
+    # Daily: threat-intel cadence beats the old Dependabot-aligned
+    # Tuesday slot — IOC freshness is an active-defense posture, not a
+    # weekly-deps convenience.
+    - cron: "0 9 * * *"
+  workflow_dispatch:
+  pull_request:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+    paths:
+      - ".github/workflows/refresh-ioc-list.yml"
+      - "scripts/security/regenerate-ioc-list.sh"
+      - "scripts/security/check-ioc-refresh-pr.sh"
+      - "scripts/security/iocs/shai-hulud-2.0.txt"
+      - "scripts/security/iocs/false-positive-allowlist.txt"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: refresh-ioc-list-${{ github.event_name == 'pull_request' && github.event.pull_request.number || 'scheduled' }}
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      # Mint a short-lived org App installation token so the refresh PR is
+      # App-authored: a GITHUB_TOKEN-authored PR starts no workflows, so its
+      # required checks would never run. Same org App as sync-tooling.yml.
+      - name: Mint refresh App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.PUBLIC_MIRROR_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PUBLIC_MIRROR_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Fetch Datadog IOC CSV at path-pinned commit
+        id: source
+        run: |
+          set -euo pipefail
+          python3 <<'PY'
+          import hashlib
+          import json
+          import os
+          import urllib.request
+
+          path = "shai-hulud-2.0/shai-hulud-2.0.csv"
+          commits_url = (
+              "https://api.github.com/repos/DataDog/indicators-of-compromise/commits"
+              f"?sha=main&path={path}&per_page=1"
+          )
+          request = urllib.request.Request(
+              commits_url,
+              headers={"Accept": "application/vnd.github+json", "User-Agent": "Concord-Voice-IOC-refresh"},
+          )
+          with urllib.request.urlopen(request, timeout=30) as response:
+              commits = json.load(response)
+          if not commits:
+              raise SystemExit(f"no upstream commit found for {path}")
+          commit = commits[0]["sha"]
+          raw_url = f"https://raw.githubusercontent.com/DataDog/indicators-of-compromise/{commit}/{path}"
+          with urllib.request.urlopen(raw_url, timeout=30) as response:
+              data = response.read()
+          csv_path = "/tmp/shai-hulud-2.0.csv"
+          sha_path = "/tmp/ioc.sha256"
+          digest = hashlib.sha256(data).hexdigest()
+          with open(csv_path, "wb") as f:
+              f.write(data)
+          with open(sha_path, "w", encoding="utf-8") as f:
+              f.write(f"{digest}  {csv_path}\n")
+          with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as f:
+              f.write(f"source_commit={commit}\n")
+              f.write(f"source_sha={digest}\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as f:
+              f.write("## IOC source\n\n")
+              f.write(f"- Commit: `{commit}`\n")
+              f.write(f"- SHA256: `{digest}`\n")
+              f.write(f"- Path: `{path}`\n")
+          PY
+
+      - name: Regenerate vendored IOC list
+        env:
+          SOURCE_COMMIT: ${{ steps.source.outputs.source_commit }}
+        run: bash scripts/security/regenerate-ioc-list.sh /tmp/shai-hulud-2.0.csv /tmp/ioc.sha256 "$SOURCE_COMMIT"
+
+      - name: Detect IOC file changes
+        id: changed
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- scripts/security/iocs/shai-hulud-2.0.txt; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "No IOC data/header change; no PR will be opened." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git diff --stat -- scripts/security/iocs/shai-hulud-2.0.txt >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Run IOC refresh guard
+        id: guard
+        if: steps.changed.outputs.changed == 'true'
+        run: |
+          set +e
+          bash scripts/security/check-ioc-refresh-pr.sh --base-ref HEAD --noop-exit-code 2 > /tmp/ioc-refresh-guard.md 2>&1
+          rc=$?
+          set -e
+          cat /tmp/ioc-refresh-guard.md
+          {
+            echo "exit_code=$rc"
+            echo "report<<EOF"
+            cat /tmp/ioc-refresh-guard.md
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+          cat /tmp/ioc-refresh-guard.md >> "$GITHUB_STEP_SUMMARY"
+          exit 0
+
+      - name: Open PR if changed
+        id: cpr
+        if: steps.changed.outputs.changed == 'true' && steps.guard.outputs.exit_code != '2'
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: chore/refresh-ioc-list
+          delete-branch: true
+          title: "chore: refresh Shai-Hulud 2.0 IOC list"
+          labels: dependencies, security
+          commit-message: "chore: refresh Shai-Hulud 2.0 IOC list"
+          body: |
+            Automated daily refresh of the vendored Shai-Hulud 2.0 IOC list.
+
+            Source: DataDog/indicators-of-compromise/shai-hulud-2.0/shai-hulud-2.0.csv
+            Source commit: `${{ steps.source.outputs.source_commit }}`
+            SHA256: `${{ steps.source.outputs.source_sha }}`
+
+            ## IOC refresh guard
+
+            ${{ steps.guard.outputs.report }}
+
+            Clean guard result requests auto-merge after PR CI is green. Guard
+            failures leave this PR for `@Concord-Voice/security` review.
+
+            Generated by .github/workflows/refresh-ioc-list.yml.
+
+      - name: Request guarded auto-merge
+        if: steps.changed.outputs.changed == 'true' && steps.guard.outputs.exit_code == '0' && steps.cpr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ steps.cpr.outputs.pull-request-number }}
+        run: |
+          set -euo pipefail
+          gh pr merge "$PR_NUMBER" --auto --squash --delete-branch \
+            --subject "chore: refresh Shai-Hulud 2.0 IOC list (#${PR_NUMBER})"
+
+      - name: Escalate anomalous refresh
+        if: steps.changed.outputs.changed == 'true' && steps.guard.outputs.exit_code != '0' && steps.guard.outputs.exit_code != '2' && steps.cpr.outputs.pull-request-number != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          PR_NUMBER: ${{ steps.cpr.outputs.pull-request-number }}
+        run: |
+          set -euo pipefail
+          marker='<!-- ioc-refresh-guard -->'
+          body_file=/tmp/ioc-refresh-escalation.md
+          {
+            echo "$marker"
+            echo "@Concord-Voice/security IOC refresh guard failed; leaving this PR for human review."
+            echo
+            cat /tmp/ioc-refresh-guard.md
+          } > "$body_file"
+          # shellcheck disable=SC2016
+          existing=$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --jq '[.[][] | select(.body | contains("<!-- ioc-refresh-guard -->"))] | first | .id // empty')
+          if [[ -n "$existing" ]]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}" --field "body=$(cat "$body_file")"
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" --field "body=$(cat "$body_file")"
+          fi
+          exit 1
+
+  guard:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Check whether this is a data-only IOC refresh PR
+        id: changed
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+          changed_files=$(git diff --name-only "$BASE_SHA" "$HEAD_SHA")
+          printf '%s\n' "$changed_files" >> "$GITHUB_STEP_SUMMARY"
+          if [[ "$changed_files" == "scripts/security/iocs/shai-hulud-2.0.txt" ]]; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "IOC refresh guard skipped: PR is not a data-only IOC list refresh." >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Run IOC refresh guard
+        if: steps.changed.outputs.changed == 'true'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          bash scripts/security/check-ioc-refresh-pr.sh --base-ref "$BASE_SHA" > /tmp/ioc-refresh-guard.md 2>&1
+          rc=$?
+          set -e
+          cat /tmp/ioc-refresh-guard.md
+          cat /tmp/ioc-refresh-guard.md >> "$GITHUB_STEP_SUMMARY"
+          marker='<!-- ioc-refresh-guard -->'
+          # shellcheck disable=SC2016
+          existing=$(gh api --paginate --slurp "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" \
+            --jq '[.[][] | select(.body | contains("<!-- ioc-refresh-guard -->"))] | first | .id // empty')
+          if [[ $rc -eq 0 ]]; then
+            if [[ -n "$existing" ]]; then
+              gh api -X DELETE "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}"
+            fi
+            exit 0
+          fi
+          body_file=/tmp/ioc-refresh-escalation.md
+          {
+            echo "$marker"
+            echo "@Concord-Voice/security IOC refresh guard failed; this PR must stay under human review."
+            echo
+            cat /tmp/ioc-refresh-guard.md
+          } > "$body_file"
+          if [[ -n "$existing" ]]; then
+            gh api -X PATCH "repos/${GITHUB_REPOSITORY}/issues/comments/${existing}" --field "body=$(cat "$body_file")"
+          else
+            gh api -X POST "repos/${GITHUB_REPOSITORY}/issues/${PR_NUMBER}/comments" --field "body=$(cat "$body_file")"
+          fi
+          exit "$rc"
