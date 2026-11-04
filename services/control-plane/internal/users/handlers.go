@@ -383,7 +383,7 @@ func (h *Handler) RevealMyKeys(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "This account has no password", "code": errCodeNoPassword})
 		return
 	}
-	if h.passwords == nil {
+	if h.passwords == nil { // pragma: allowlist secret
 		h.log.Error("Key reveal refused: password verifier not wired", "failure_class", failureClassRevealVerify)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify password"})
 		return
