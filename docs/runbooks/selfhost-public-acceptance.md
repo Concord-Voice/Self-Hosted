@@ -28,7 +28,7 @@ Historical schema-1 artifacts identify their exact candidate SHA, run, runner an
 | Selected coturn container's served leaf and local TLS handshake | UNVERIFIED | Inspect actual served-leaf check separately from delivery. |
 | Local service health, nginx routes, rendered/live bindings | UNVERIFIED | Review the actual checks; do not infer external reachability. |
 | Wrapper stop/up and down/up retention of the synthetic database row | UNVERIFIED | Establish only the tested named-volume retention scope. |
-| WebSocket budget configuration preparation and delivery | UNVERIFIED | Verify the fresh writer emits exactly one true/100 pair, existing-install preparation preserves the current configuration owner, and the production model requires both keys and forwards their exact strings only to control-plane in bundled and BYO models. Verify selected-helper root-file authority despite conflicting ambient values, then verify the target candidate's actual process environment. Writer or render tests alone do not establish live delivery or activation. |
+| WebSocket budget configuration preparation and delivery | UNVERIFIED | Verify the fresh writer emits exactly one false/100 pair, existing-install preparation preserves the current configuration owner, and the production model requires both keys and forwards their exact strings only to control-plane in bundled and BYO models. Verify selected-helper root-file authority despite conflicting ambient values, then verify the target candidate's actual process environment. Writer or render tests alone do not establish live delivery or activation. |
 
 Record configuration-only render evidence separately from process observations.
 For the production, bundled and BYO models, check explicit true/false and scales

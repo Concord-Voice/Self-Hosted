@@ -3292,12 +3292,12 @@ run_installer_readonly_scrub_matrix
 
 # ── Imported-function hardening (#155 red-team F1) ─────────────────────
 # An exported Bash function named `unset` would turn the environment scrubber
-# into a no-op. Both scrubber entrypoints run under `bash -p`, which never
+# into a no-op. Every scrubber entrypoint runs under `bash -p`, which never
 # imports functions (or BASH_ENV) from the environment. The probe reuses each
 # entrypoint's own first line, so a shebang regression fails here.
 run_imported_function_hardening() {
   local entry shebang probe out
-  for entry in concord-selfhost concord-ctl.sh; do
+  for entry in concord-selfhost concord-ctl.sh install-selfhost.sh; do
     shebang="$(head -n 1 "$ROOT/infrastructure/deploy/$entry")"
     if [[ "$shebang" != '#!/usr/bin/env -S bash -p' ]]; then
       fail "$entry does not run under bash -p (shebang: $shebang)"
@@ -3325,6 +3325,12 @@ run_imported_function_hardening() {
     pass "control: without bash -p an imported unset() does bypass the scrubber"
   else
     fail "control: plain bash did not reproduce the bypass ($out)"
+  fi
+  # selfhost-tls.py starts its own reader shell; it must not import functions.
+  if grep -q '\["bash", "-p", "-c", reader' "$ROOT/infrastructure/deploy/selfhost-tls.py"; then
+    pass "selfhost-tls.py reader shell runs under bash -p"
+  else
+    fail "selfhost-tls.py reader shell does not run under bash -p"
   fi
 }
 run_imported_function_hardening

@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env -S bash -p
 # Concord Voice — Basic self-hosted installer (#1616).
 # Build-from-source. Run from a repo clone on a Debian-12 / Ubuntu-24.04 host.
 #
