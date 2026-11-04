@@ -467,9 +467,12 @@ def _safe_compose_env(trusted_image: str) -> dict[str, str]:
 def _read_tls_data(root: str, deadline: float, env: dict[str, str]) -> tuple[str, str]:
     storage_script = Path(__file__).resolve().with_name("selfhost-storage.sh")
     reader = ('source "$1"; _selfhost_storage_data read-tls "$2"')
-    output = _run_bounded(["bash", "-c", reader, "selfhost-tls",
+    # bash -p: never import caller functions or BASH_ENV into the reader shell.
+    reader_env = {k: v for k, v in env.items()
+                  if not k.startswith("BASH_FUNC_") and k not in ("BASH_ENV", "ENV")}
+    output = _run_bounded(["bash", "-p", "-c", reader, "selfhost-tls",
                            str(storage_script), str(Path(root) / ".env")],
-                          deadline, cwd=root, env=env,
+                          deadline, cwd=root, env=reader_env,
                           refusal="self-host TLS environment refused")
     try:
         value = json.loads(output)

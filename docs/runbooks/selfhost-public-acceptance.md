@@ -28,7 +28,19 @@ Historical schema-1 artifacts identify their exact candidate SHA, run, runner an
 | Selected coturn container's served leaf and local TLS handshake | UNVERIFIED | Inspect actual served-leaf check separately from delivery. |
 | Local service health, nginx routes, rendered/live bindings | UNVERIFIED | Review the actual checks; do not infer external reachability. |
 | Wrapper stop/up and down/up retention of the synthetic database row | UNVERIFIED | Establish only the tested named-volume retention scope. |
-| WebSocket budget configuration preparation and delivery | UNVERIFIED | Verify the fresh writer emits exactly one true/100 pair, existing-install preparation preserves the current configuration owner, and the target release delivers selected values through its actual Compose model. Writer tests alone do not establish delivery or activation. |
+| WebSocket budget configuration preparation and delivery | UNVERIFIED | Verify the fresh writer emits exactly one false/100 pair, existing-install preparation preserves the current configuration owner, and the production model requires both keys and forwards their exact strings only to control-plane in bundled and BYO models. Verify selected-helper root-file authority despite conflicting ambient values, then verify the target candidate's actual process environment. Writer or render tests alone do not establish live delivery or activation. |
+
+Record configuration-only render evidence separately from process observations.
+For the production, bundled and BYO models, check explicit true/false and scales
+25/100/400, named missing/empty-key refusals, and unchanged unrelated topology.
+Exercise the actual selected-self-host helper with conflicting ambient values
+and with missing/empty durable values: root `.env` remains authoritative on that
+path, while direct raw Compose retains normal shell precedence. The helper's
+bounded refusal need not expose the missing key name. Nonempty invalid grammar
+can render unchanged; runtime parser evidence must establish its rejection.
+Keep rendered configuration and synthetic credential-bearing output private;
+retain only sanitized assertions in the evidence record. These checks add no
+operator observation to this template.
 
 A schema-1 PR/source artifact retains its development purpose. Publication needs a protected-main release-candidate run and schema-2 artifact that verifies both full SHAs and the exact public bundle digest before running the same fresh-host checks. Job success alone is insufficient. This lane is local-only: its loopback address and test FQDN establish no public DNS, NAT, provider firewall behavior, external TURN or client use. Local TLS is not system-CA client trust; the disposable PostgreSQL-row readback establishes only the tested named-volume retention behavior, not backup or recovery.
 
@@ -50,7 +62,7 @@ For every private observation, record exact candidate identities, date, attester
 | Update | UNVERIFIED | Perform the [pinned update procedure](selfhost-quickstart.md#updating) on a disposable instance; record before/after identities and service/client result. |
 | Backup | UNVERIFIED | Verify independently stored configuration, certificate, database and object-store backups. |
 | Recovery | UNVERIFIED | Restore on a disposable host and verify scope/service outcome; restart is insufficient. |
-| WebSocket event-budget activation and rollback | BLOCKED | Require exact candidate wiring, paired Admin reader/storage catalog, compatible released clients and admission floors, and reviewed workload evidence. Verify explicit disable reaches the process and preserves original guards, Redis debt and compatible metrics readers/catalogs. See [preparation guidance](selfhost-quickstart.md#websocket-event-budget-preparation). |
+| WebSocket event-budget activation and rollback | BLOCKED | Require exact candidate wiring and application procedure, paired Admin reader/storage catalog, compatible released clients and admission floors, supported existing-connection handling, and reviewed workload/security evidence. Verify explicit disable reaches the process with a valid scale and preserves original guards, Redis debt and compatible metrics readers/catalogs. See [preparation guidance](selfhost-quickstart.md#websocket-event-budget-preparation). |
 
 No row records an actual observation. Configuration, local mocks, a certificate file, an issue closure or another row cannot complete a manual check.
 

@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env -S bash -p
 # Concord service management helper
 # Usage: ./concord-ctl.sh <command>
 set -euo pipefail

@@ -579,6 +579,8 @@ else
     envline SMTP_HOST smtp.t.test
     envline SMTP_FROM fixture@t.test
     envline TRUSTED_PROXY_CIDRS 10.0.0.0/8
+    envline WS_EVENT_BUDGET_ENABLED true
+    envline WS_EVENT_BUDGET_SCALE_PERCENT 100
     for k in "POSTGRES_PASS""WORD" "REDIS_PASS""WORD" "JWT_SEC""RET" "TURN_SEC""RET" \
              "MINIO_ROOT_USER" "MINIO_ROOT_PASS""WORD" "FEEDBACK_PAT" "MFA_ENCRYPTION_KEY"; do
       envline "$k" ph

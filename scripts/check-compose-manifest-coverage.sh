@@ -125,6 +125,8 @@ compose_contexts() {
         "SMTP_FROM=manifest-check@invalid.example"
         "TRUSTED_PROXY_CIDRS=127.0.0.1/32"
         "TURN_SECRET=$placeholder"
+        "WS_EVENT_BUDGET_ENABLED=true"
+        "WS_EVENT_BUDGET_SCALE_PERCENT=100"
     )
     if ! rendered=$(env -i "${compose_env[@]}" docker compose \
         --env-file /dev/null \

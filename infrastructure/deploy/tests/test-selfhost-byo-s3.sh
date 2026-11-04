@@ -89,7 +89,7 @@ except ImportError:
 # changes require baseline review. Snapshot all inputs to detect test-side mutations.
 SOURCE_HASHES = {
     "docker-compose.yml": "".join(('bdad506e', '1c166bec', '88960d3e', '1fcc62c1', '6be3f8ec', 'a9e58f62', '19d455a6', '252fa641')),
-    "docker-compose.production.yml": "".join(('6feef05c', '842b071e', '9f6d68cd', '2711628b', '67604afc', 'a9fbea01', '43cd1d45', '7ea8a1f6')),
+    "docker-compose.production.yml": "".join(('3221ce8d', '0111c0f8', 'c69fd81b', '069c4695', '6f83f390', '8dcc3a6e', 'f2e8a0c6', '9f369e85')),
 }
 SOURCE_FILES = tuple(SOURCE_HASHES) + ("docker-compose.selfhost.yml",)
 if not check("all shared Compose source inputs are available",
@@ -129,6 +129,8 @@ SYNTHETIC = {
     "SMTP_HOST": "smtp.byo.example.invalid",
     "SMTP_FROM": "byo@example.invalid",
     "INSTANCE_TYPE": "self-hosted",
+    "WS_EVENT_BUDGET_ENABLED": "false",
+    "WS_EVENT_BUDGET_SCALE_PERCENT": "100",
     "ACTIVITY_HISTORY_CLUSTER_ENABLED": "false",
     "CONTROL_PLANE_REPLICA_COUNT": "1",
     "ACTIVITY_HISTORY_OPERATOR_NAME": "",
@@ -305,6 +307,23 @@ def run():
     if version.returncode != 0 or match is None or tuple(map(int, match.groups())) < (2, 24, 5):
         prerequisite("supported Compose >= 2.24.5 is required")
     print("INFO: config-only Compose " + ".".join(match.groups()))
+    # Run the independent cache-cold build-env oracle with this same admitted CLI.
+    # The oracle discovers `docker compose`, so a private wrapper also carries an
+    # explicitly selected standalone CLI without changing the optional-tool gate.
+    build_cli_dir = WORK / "build-env-cli"
+    build_cli_dir.mkdir()
+    build_cli = build_cli_dir / "docker"
+    build_cli.write_text("#!" + sys.executable + "\nimport os, sys\n" +
+                         "command = " + repr(cli) + "\n" +
+                         "args = sys.argv[1:]\n" +
+                         "if not args or args[0] != 'compose': sys.exit(2)\n" +
+                         "os.execv(command[0], command + args[1:])\n")
+    build_cli.chmod(0o700)
+    build_env = dict(BASE_ENV, PATH=str(build_cli_dir) + os.pathsep + BASE_ENV["PATH"])
+    build_result = capture("production-compose-build-env",
+                           [sys.executable, str(ROOT / ".github/scripts/tests/test-production-compose-build-env.py")],
+                           build_env, cwd=ROOT)
+    check("cache-cold build job env renders production Compose", build_result.returncode == 0)
     for name, digest in SOURCE_HASHES.items():
         check("managed/base accepted source bytes preserved: " + name,
               hashlib.sha256((ROOT / name).read_bytes()).hexdigest() == digest)
@@ -327,15 +346,18 @@ def run():
     shim = shim_dir / "docker"
     shim.write_text('''#!/usr/bin/env python3
 import json, os, pathlib, sys
+def reject():
+    (pathlib.Path(__file__).parent.parent / "forbidden-compose-operation").write_text("rejected")
+    sys.exit(97)
 argv = sys.argv[1:]
 if not argv or argv.pop(0) != "compose":
-    sys.exit(97)
+    reject()
 options = {"--env-file", "--project-directory", "--project-name", "--profile", "-f"}
 i = 0
 while i < len(argv) and argv[i] in options:
     i += 2
 if i >= len(argv) or argv[i:] not in (["config", "--format", "json"], ["config", "--services"]):
-    sys.exit(97)
+    reject()
 if "P2_UNRELATED_CONTROL" in os.environ:
     with (pathlib.Path(__file__).parent.parent / "unrelated-control.jsonl").open("a") as output:
         output.write(json.dumps(os.environ["P2_UNRELATED_CONTROL"] == "synthetic-unrelated") + "\\n")
@@ -479,6 +501,104 @@ source "$1"
 selfhost_storage_resolve "$2"
 selfhost_storage_compose config --format json
 ''')
+    # G2: real interpolation, not a source-string assertion. Every other
+    # prerequisite stays valid so only the selected budget key can explain RED.
+    budget_keys = ("WS_EVENT_BUDGET_ENABLED", "WS_EVENT_BUDGET_SCALE_PERCENT")
+    for count, topology in ((2, "production"), (3, "bundled"), (4, "byo")):
+        baseline_without_budget = None
+        for enabled in ("true", "false"):
+            for scale in ("25", "100", "400"):
+                values = dict(all_values, WS_EVENT_BUDGET_ENABLED=enabled,
+                              WS_EVENT_BUDGET_SCALE_PERCENT=scale)
+                name = "budget-" + topology + "-" + enabled + "-" + scale
+                actual = model(render(name, count=count, values=values), name)
+                cp_env = actual["services"]["control-plane"]["environment"]
+                check(name + " retains exact budget strings",
+                      all(cp_env.get(key) == values[key] for key in budget_keys))
+                check(name + " maps budget only to control-plane", all(
+                    not any(key in service.get("environment", {}) for key in budget_keys)
+                    for service_name, service in actual["services"].items()
+                    if service_name != "control-plane"))
+                stripped = copy.deepcopy(actual)
+                for key in budget_keys:
+                    stripped["services"]["control-plane"]["environment"].pop(key, None)
+                if baseline_without_budget is None:
+                    baseline_without_budget = stripped
+                check(name + " preserves complete nonbudget topology", stripped == baseline_without_budget)
+        for key in budget_keys:
+            for state in ("missing", "empty"):
+                values = dict(all_values, WS_EVENT_BUDGET_ENABLED="false")
+                if state == "missing": values.pop(key)
+                else: values[key] = ""
+                name = "budget-" + topology + "-" + key + "-" + state
+                result = render(name, count=count, values=values)
+                check(name + " refuses its intended required key",
+                      result.returncode != 0 and key + " must be set" in result.stderr)
+                model(render(name + "-control", count=count), name + " restored positive")
+        for enabled, scale in (("TRUE", "025"), (" false ", "+25"), ("false", "401")):
+            values = dict(all_values, WS_EVENT_BUDGET_ENABLED=enabled,
+                          WS_EVENT_BUDGET_SCALE_PERCENT=scale)
+            actual = model(render("budget-grammar-" + topology + "-" + scale,
+                                  count=count, values=values), topology + " nonempty grammar forwarding")
+            check(topology + " leaves semantic grammar to the control-plane parser", all(
+                actual["services"]["control-plane"]["environment"].get(key) == values[key]
+                for key in budget_keys))
+    check("base development adds no budget mapping", all(
+        not any(key in service.get("environment", {}) for key in budget_keys)
+        for service in base["services"].values()))
+
+    # The canonical production model carries both budget mappings; refuse to
+    # run the authority controls against a model that has lost them. The copy
+    # is restored afterwards so later resolver/storage controls see it intact.
+    production_copy = fixture / "docker-compose.production.yml"
+    copied_before = production_copy.read_bytes()
+    if not all(key + ":" in copied_before.decode() for key in budget_keys):
+        raise RuntimeError("canonical production model lacks the budget mappings")
+    try:
+        for selection in ("bundled", "byo-s3"):
+            for enabled, scale, ambient_enabled, ambient_scale in (
+                    ("false", "25", "true", "400"), ("true", "400", "false", "25")):
+                durable = dict(all_values, SELFHOST_STORAGE_MODE=selection,
+                               WS_EVENT_BUDGET_ENABLED=enabled, WS_EVENT_BUDGET_SCALE_PERCENT=scale)
+                if selection == "bundled":
+                    for key in STORAGE: durable.pop(key, None)
+                dotenv(durable, fixture / ".env")
+                before = (fixture / ".env").read_bytes()
+                clean = dict(BASE_ENV, P2_UNRELATED_CONTROL="synthetic-unrelated")
+                argv = ["bash", str(runner), str(helper), str(fixture)]
+                label = "budget-authority-" + selection + "-" + enabled
+                control = model(capture(label + "-clean", argv, clean), label + " clean control")
+                (WORK / "unrelated-control.jsonl").write_text("")
+                for ambient in ((ambient_enabled, ambient_scale), ("", ""), ("INVALID", "025")):
+                    poisoned = dict(clean, WS_EVENT_BUDGET_ENABLED=ambient[0],
+                                    WS_EVENT_BUDGET_SCALE_PERCENT=ambient[1])
+                    result = model(capture(label + "-ambient", argv, poisoned), label + " ambient control")
+                    check(label + " durable root defeats ambient pair", result == control and all(
+                        result["services"]["control-plane"]["environment"].get(key) == durable[key]
+                        for key in budget_keys))
+                observations = (WORK / "unrelated-control.jsonl").read_text().splitlines()
+                check(label + " preserves unrelated inherited controls",
+                      bool(observations) and all(value == "true" for value in observations))
+                for key in budget_keys:
+                    for state in ("missing", "empty"):
+                        invalid = dict(durable)
+                        if state == "missing": invalid.pop(key)
+                        else: invalid[key] = ""
+                        dotenv(invalid, fixture / ".env")
+                        invalid_bytes = (fixture / ".env").read_bytes()
+                        poisoned = dict(clean, WS_EVENT_BUDGET_ENABLED="true", WS_EVENT_BUDGET_SCALE_PERCENT="100")
+                        failure = capture(label + "-rescue-" + key + "-" + state, argv, poisoned)
+                        check(label + " ambient cannot rescue " + key + " " + state,
+                              failure.returncode != 0 and "selfhost-storage:" in failure.stderr)
+                        check(label + " refusal preserves durable file", (fixture / ".env").read_bytes() == invalid_bytes)
+                        dotenv(durable, fixture / ".env")
+                        model(capture(label + "-restored", argv, clean), label + " restored authority control")
+                check(label + " preserves original durable file", (fixture / ".env").read_bytes() == before)
+    finally:
+        production_copy.write_bytes(copied_before)
+        dotenv(all_values, fixture / ".env")
+    check("budget delivery never requests service or daemon operations",
+          not (WORK / "forbidden-compose-operation").exists())
     baseline = capture("resolver-clean", ["bash", str(runner), str(helper), str(fixture)], BASE_ENV)
     resolved = model(baseline, "real resolver positive control")
     check("resolver chooses the real BYO model", resolved == byo)

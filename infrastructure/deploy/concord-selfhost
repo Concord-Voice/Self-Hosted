@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+#!/usr/bin/env -S bash -p
 # Concord Voice — self-hosted operator CLI (#1616).
 # Day-2 lifecycle/monitoring for a self-hosted instance. Thin wrapper over the
 # production compose stack. Operator analogue of concord-ctl.sh, minus the

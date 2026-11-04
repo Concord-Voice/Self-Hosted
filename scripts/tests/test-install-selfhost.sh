@@ -406,7 +406,7 @@ writer_run() {
 assert_ws_event_budget_defaults() {
   python3 - "$1" <<'WS_BUDGET_DEFAULTS'
 import pathlib, sys
-expected = {'WS_EVENT_BUDGET_ENABLED': 'true', 'WS_EVENT_BUDGET_SCALE_PERCENT': '100'}
+expected = {'WS_EVENT_BUDGET_ENABLED': 'false', 'WS_EVENT_BUDGET_SCALE_PERCENT': '100'}
 observed = {key: [] for key in expected}
 for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
     if not line or line.startswith('#'):
