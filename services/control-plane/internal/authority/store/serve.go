@@ -55,7 +55,9 @@ var ErrServeLockLost = errors.New("authority store: the serve lock's session end
 // once a Ping of the lock's session fails or does not answer within
 // RolePollInterval, the bound serve's role poll puts on its own ping. It
 // pings every ServeLockWatchInterval. stop cancels the context and waits for
-// the watch to end, so the lock's connection is idle again; call it once the
+// the watch to end. An in-flight ping keeps its own bounded timeout so normal
+// work cancellation does not poison the session before Release can unlock it.
+// The lock's connection is idle again when stop returns; call it once the
 // work is done and before Release. Read context.Cause (lockLost) before stop,
 // which cancels the context with no cause of its own.
 //
@@ -77,10 +79,17 @@ func (l *ServeLock) Watch(ctx context.Context) (context.Context, func()) {
 				return
 			case <-t.C:
 			}
-			pctx, pcancel := context.WithTimeout(wctx, RolePollInterval)
+			if wctx.Err() != nil {
+				return
+			}
+			// lib/pq discards a connection when its Ping context is cancelled.
+			// Let a live ping finish before Release explicitly unlocks: closing
+			// the backend instead leaves asynchronous session teardown between
+			// the owner returning and the next holder trying to acquire.
+			pctx, pcancel := context.WithTimeout(context.WithoutCancel(wctx), RolePollInterval)
 			err := l.Ping(pctx)
 			pcancel()
-			if err != nil && wctx.Err() == nil { // not a ping cut short by ctx or stop
+			if err != nil && wctx.Err() == nil { // report session loss while the owner is still working
 				cancel(fmt.Errorf("%w: %w", ErrServeLockLost, err))
 				return
 			}

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -194,11 +195,13 @@ func writeTempEnvFile(t *testing.T, content string) string {
 }
 
 func TestLiveSpaConfigMalformedFileRetainsSnapshot(t *testing.T) {
+	// Construct the synthetic userinfo case without embedding a credential URL.
+	userinfoURL := (&url.URL{Scheme: "https", Host: "example.test", Path: "/", User: url.UserPassword("user", "pass")}).String()
 	for _, body := range []string{
 		"SPA_URL=https://next.example.test/\nSPA_IPC_CONTRACT=2\nSPA_PRERELEASE_URL",
 		"SPA_URL=https://next.example.test/\nSPA_URL=\nSPA_IPC_CONTRACT=\n",
 		"=value\n",
-		"SPA_URL=https://user:pass@example.test/\nSPA_IPC_CONTRACT=2\n", // pragma: allowlist secret; trufflehog:ignore -- synthetic userinfo verifies invalid reload retains the prior snapshot
+		"SPA_URL=" + userinfoURL + "\nSPA_IPC_CONTRACT=2\n",
 		"SPA_URL=https://next.example.test/\nSPA_IPC_CONTRACT=2\nSPA_VERSION=bad version\n",
 		"SPA_URL=https://next.example.test/\nSPA_IPC_CONTRACT=2\nSPA_VERSION=" + strings.Repeat("a", 129),
 	} {

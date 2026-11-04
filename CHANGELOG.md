@@ -29,6 +29,7 @@ gate can learn from your voice.
 
 ### Added
 
+- **Authentication:** Added a dormant internal store for account-change request and origin rows, with caller-owned transactions and explicit retention of other decision obligations.
 - **Self-hosting:** Operators can configure separate Stable and Pre-Release SPA discovery streams. Existing clients keep Stable behavior; remote SPA serving remains off by default, and invalid live configuration updates preserve the previous settings.
 - **Self-hosted setup:** Fresh installer environment files now include explicit WebSocket event-budget settings, with preparation and rollback guidance for existing installations. Runtime delivery and activation remain separate steps.
 
@@ -95,6 +96,8 @@ gate can learn from your voice.
 ### Fixed
 
 - **Self-hosted CI:** Build and configuration checks now provide explicit WebSocket budget settings, so required production inputs do not prevent those checks from rendering Compose.
+- **Account authority:** Owner cancellation now lets an in-flight lock-health ping finish within its existing timeout before explicitly releasing the serve lock.
+- **WebSocket:** Canceled socket and server lifetimes stop queued frames before activity tracking or handler work, including when event budgets are disabled.
 - **Operations:** Required PR builds now use the reviewed CI producer with exact-revision scanner checks, four control-plane test shards, and synthetic Compose build inputs.
 - **Operations:** The production-image build job now supplies synthetic WebSocket event-budget settings when it renders Compose, without changing deployment settings.
 - **Connections:** WebSocket input waiting on pacing or a full server queue now stops when its connection is canceled or the server shuts down.
