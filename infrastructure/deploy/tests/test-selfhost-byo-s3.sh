@@ -540,27 +540,20 @@ selfhost_storage_compose config --format json
                           WS_EVENT_BUDGET_SCALE_PERCENT=scale)
             actual = model(render("budget-grammar-" + topology + "-" + scale,
                                   count=count, values=values), topology + " nonempty grammar forwarding")
-            check(topology + " leaves semantic grammar to C5", all(
+            check(topology + " leaves semantic grammar to the control-plane parser", all(
                 actual["services"]["control-plane"]["environment"].get(key) == values[key]
                 for key in budget_keys))
     check("base development adds no budget mapping", all(
         not any(key in service.get("environment", {}) for key in budget_keys)
         for service in base["services"].values()))
 
-    # Isolate the scrubber defect even before canonical mappings are authored.
-    # Only the private copied model receives this candidate consumer, removed
-    # again before existing resolver/storage controls continue.
+    # The canonical production model carries both budget mappings; refuse to
+    # run the authority controls against a model that has lost them. The copy
+    # is restored afterwards so later resolver/storage controls see it intact.
     production_copy = fixture / "docker-compose.production.yml"
     copied_before = production_copy.read_bytes()
-    candidate = copied_before.decode()
-    anchor = '      CLIENT_MIN_VERSION_ANDROID: "${CLIENT_MIN_VERSION_ANDROID:-}"\n'
-    if not all(key + ":" in candidate for key in budget_keys):
-        if candidate.count(anchor) != 1:
-            raise RuntimeError("unsupported private candidate mapping seam")
-        candidate = candidate.replace(anchor, anchor + "".join(
-            '      ' + key + ': "${' + key + ':?' + key + ' must be set}"\n'
-            for key in budget_keys))
-    production_copy.write_text(candidate)
+    if not all(key + ":" in copied_before.decode() for key in budget_keys):
+        raise RuntimeError("canonical production model lacks the budget mappings")
     try:
         for selection in ("bundled", "byo-s3"):
             for enabled, scale, ambient_enabled, ambient_scale in (

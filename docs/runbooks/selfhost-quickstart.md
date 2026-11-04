@@ -42,13 +42,19 @@ Existing operators must prepare both keys through their established root `.env`
 configuration process before adopting a verified release with the required-value
 production model. Missing or explicitly
 empty values fail interpolation for any selected command that renders that
-model, not just startup. The installer remains fresh-only: do not rerun it to
+model, not just startup. Through the self-host wrapper this appears as
+`selfhost-storage: model resolution refused` on every verb, including `status`,
+`logs`, `stop` and `down`, until both keys are present and nonempty. The installer remains fresh-only: do not rerun it to
 replace an existing file or source dotenv as shell.
 
-In a budget-capable release, enabled accepts only lowercase `true` or `false`;
+The control-plane in this source tree already parses both keys at process
+start and enforces account budgets when enabled is `true`. With a key absent
+from its environment it falls back to enabled and scale 100. The fresh installer
+writes `true` and `100`. Enabled accepts only lowercase `true` or `false`;
 scale accepts canonical unsigned decimal 25..400, without spaces, signs, leading
 zeros or fractions. Explicit empty is invalid, and scale is validated even when
-disabled. Select explicit `false` while activation prerequisites remain unmet;
+disabled. An invalid nonempty value stops the control-plane at startup.
+Select explicit `false` while activation prerequisites remain unmet;
 verify the target release actually delivers that setting to the process. A key
 in root `.env` alone does not prove container-environment delivery.
 
