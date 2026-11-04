@@ -892,6 +892,14 @@ jobs:
       - name: P14 — actionlint workflow-injection scan (#836)
         run: actionlint -config-file=.actionlint.yaml
 
+      - name: Concord-built MinIO publication and consumer contract (#1220)
+        run: |
+          bash scripts/tests/test-check-oci-tag.sh
+          bash scripts/tests/test-publish-minio-image.sh --require-compose
+
+      - name: Image publisher Docker Engine pins
+        run: python3 scripts/tests/test-publish-minio-engine-pins.py
+
       - name: Self-test — lint scripts pass their own test suites
         # Defense-in-depth: re-run each lint's hermetic test suite in CI
         # so a regression to the lint scripts themselves is caught even

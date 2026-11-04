@@ -1,0 +1,246 @@
+name: Publish buildtools base image
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: 'Refresh reason — e.g., "Q2 2026 quarterly" or "CVE-2026-NNNNN in python3"'
+        required: true
+        type: string
+
+# Prevent two same-UTC-day dispatches from racing on the date-stamped tag
+# (both runs would compute the same `<node-tag>-<DATE>` and the second push
+# would overwrite the tag, invalidating any digest captured from the first
+# run's summary). cancel-in-progress: false so an in-flight publish completes
+# before the next one starts.
+concurrency:
+  group: publish-buildtools-base
+  cancel-in-progress: false
+
+# Least-privilege default; the publish job elevates to packages: write for the
+# GHCR push, the smoke-arm64 job to packages: read.
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    # trust-boundary (ADR-0016): credential-path job stays GitHub-hosted - do NOT migrate to third-party runners
+    # Keep the official Docker CE apt suite stable while ubuntu-latest migrates.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
+      tag: ${{ steps.date.outputs.tag }}
+    # Job-level permissions (defense-in-depth over workflow-level scope):
+    # only this job needs packages:write for the GHCR push. Any future job
+    # added to this workflow must opt in explicitly.
+    # The built-in secrets.GITHUB_TOKEN (used below) is auto-issued by GHA
+    # with this scope — no PAT needed.
+    permissions:
+      packages: write
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The hosted image's preinstalled daemon is below the 29.8.2 security
+      # floor. Upgrade from Docker's signed apt repository before admission.
+      - name: Install official Docker CE on the amd64 runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q ca-certificates curl
+          sudo install -m 0755 -d /etc/apt/keyrings
+          sudo curl --fail --show-error --silent --location https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+          sudo chmod a+r /etc/apt/keyrings/docker.asc
+          . /etc/os-release
+          sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
+          Types: deb
+          URIs: https://download.docker.com/linux/ubuntu
+          Suites: ${UBUNTU_CODENAME:-$VERSION_CODENAME}
+          Components: stable
+          Architectures: $(dpkg --print-architecture)
+          Signed-By: /etc/apt/keyrings/docker.asc
+          EOF
+          sudo apt-get update -q
+          sudo apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+          sudo systemctl restart docker
+
+      - name: Require supported Docker Engine server
+        run: bash scripts/ci/require-docker-engine.sh
+
+      - name: Compute date tag
+        id: date
+        # The tag's leading component is DERIVED from the parent FROM line in the
+        # image's own Dockerfile, never hardcoded. A hardcoded `24-alpine` survived
+        # dependabot's bump of that parent to `node:26-alpine` (#3172, 2026-09-08),
+        # so every publish after it would have stamped a Node 26 image with a tag
+        # naming Node 24. Consumers pin by digest, so nothing breaks at build time —
+        # which is exactly why the drift stayed invisible. Deriving the prefix makes
+        # the tag follow the next base-image bump without anyone remembering to.
+        # The trailing `-YYYY-MM-DD` is load-bearing: the unit-smoke age guard keys
+        # on it. Keep the date last if this ever changes shape.
+        run: |
+          set -euo pipefail
+          node_tag=$(sed -nE 's|^FROM node:([^@[:space:]]+).*|\1|p' \
+            infrastructure/docker/buildtools/Dockerfile | head -1)
+          if [ -z "$node_tag" ]; then
+            echo "::error file=infrastructure/docker/buildtools/Dockerfile::Could not parse the parent tag from a 'FROM node:<tag>' line. Refusing to publish under an empty tag prefix."
+            exit 1
+          fi
+          echo "tag=${node_tag}-$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          # username uses ${{ github.actor }} because the ghcr.io/concord-voice/*
+          # namespace is org-scoped — any org member with packages:write can push
+          # via the auto-issued GITHUB_TOKEN. GHCR ties package writes to the
+          # repo-owner org, not the actor's personal namespace; the actor field
+          # is informational. Migrated from personal-namespace (markdrogersjr) in
+          # PR #1348 per Mark's "go to the org now" directive — supersedes the
+          # Phase 5-cleanup deferral previously recorded in ADR-0012 §Consequences.
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up QEMU (for arm64 emulation on amd64 runners)
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+
+      - name: Set up buildx
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+
+      - name: Build and push (multi-arch)
+        id: push
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: infrastructure/docker/buildtools
+          file: infrastructure/docker/buildtools/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ghcr.io/concord-voice/node-buildtools:${{ steps.date.outputs.tag }}
+          # SLSA provenance attestation is deferred per spec §5.2 / runbook §1
+          # ("SBOM generation, cosign signing — future-work items"). Leaving
+          # provenance enabled produces a separate attestation manifest tag
+          # that the smoke + age-guard machinery doesn't expect. Re-enable
+          # alongside the SLSA / cosign rollout (separate future issue).
+          provenance: false
+
+      - name: Smoke-test toolchain present (amd64)
+        env:
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          IMAGE="ghcr.io/concord-voice/node-buildtools@${DIGEST}"
+          docker run --rm --platform linux/amd64 "$IMAGE" sh -c \
+            'python3 --version && g++ --version | head -1 && make --version | head -1 && pip --version'
+
+      - name: Surface digest in workflow summary
+        env:
+          DATE_TAG: ${{ steps.date.outputs.tag }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          REASON: ${{ inputs.reason }}
+        run: |
+          {
+            echo "## Published buildtools base image"
+            echo ""
+            echo "**Tag:** \`ghcr.io/concord-voice/node-buildtools:$DATE_TAG\`"
+            echo ""
+            echo "**Digest (SHA-pin handle):**"
+            echo ""
+            echo "\`\`\`"
+            echo "$DIGEST"
+            echo "\`\`\`"
+            echo ""
+            echo "**Full SHA-pin reference for downstream FROM:**"
+            echo ""
+            echo "\`\`\`dockerfile"
+            echo "FROM ghcr.io/concord-voice/node-buildtools:$DATE_TAG@$DIGEST"
+            echo "\`\`\`"
+            echo ""
+            echo "**Reason for refresh:** $REASON"
+            echo ""
+            echo "Next step: update \`services/media-plane/Dockerfile\` builder stage and capture this digest in the PR body. See [docs/runbooks/refresh-buildtools-base.md](https://github.com/Concord-Voice/Self-Hosted/blob/main/docs/runbooks/refresh-buildtools-base.md)."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  smoke-arm64:
+    name: Smoke-test toolchain present (arm64 native)
+    # trust-boundary (ADR-0016): credential-path job stays GitHub-hosted - do NOT migrate to third-party runners
+    runs-on: ubuntu-latest-arm64
+    needs: publish
+    timeout-minutes: 10
+    # The publish job builds a multi-arch manifest via buildx + QEMU. The
+    # arm64 smoke previously ran on the same amd64 runner via `docker run
+    # --platform linux/arm64`, which triggered a docker daemon manifest
+    # re-import bug (#1359) — `docker: cannot overwrite digest sha256:...`.
+    # Moving the smoke to a native arm64 runner sidesteps the bug entirely
+    # by removing platform emulation from the equation. The publish step
+    # itself is unaffected; the digest from buildx still flows through
+    # needs.publish.outputs.digest.
+    permissions:
+      packages: read
+      contents: read
+    steps:
+      - name: Checkout Docker Engine guard
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The native arm64 runner needs an Engine installation. Use Docker's
+      # signed Ubuntu CE repository, then admit the actual root daemon.
+      - name: Install official Docker CE on the arm64 runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          conflicts=()
+          for package in docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc; do
+            if dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null | grep -qx installed; then
+              conflicts+=("$package")
+            fi
+          done
+          if (( ${#conflicts[@]} )); then
+            sudo apt-get remove -y "${conflicts[@]}"
+          fi
+          sudo apt-get update -q
+          sudo apt-get install -y -q ca-certificates curl
+          sudo install -m 0755 -d /etc/apt/keyrings
+          sudo curl --fail --show-error --silent --location https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
+          sudo chmod a+r /etc/apt/keyrings/docker.asc
+          . /etc/os-release
+          sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
+          Types: deb
+          URIs: https://download.docker.com/linux/ubuntu
+          Suites: ${UBUNTU_CODENAME:-$VERSION_CODENAME}
+          Components: stable
+          Architectures: $(dpkg --print-architecture)
+          Signed-By: /etc/apt/keyrings/docker.asc
+          EOF
+          sudo apt-get update -q
+          sudo apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+          sudo systemctl start docker
+
+      - name: Require supported Docker Engine server (root docker)
+        run: sudo bash scripts/ci/require-docker-engine.sh
+
+      # Login via sudo docker (stdin) rather than docker/login-action: the
+      # action writes credentials to the RUNNER user's ~/.docker/config.json,
+      # but the smoke runs `sudo docker` (root's config) — the two would not
+      # share credentials. GITHUB_TOKEN via stdin never touches argv.
+      - name: Log in to GHCR (root docker)
+        env:
+          GH_TOKEN_FOR_GHCR: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          printf '%s' "$GH_TOKEN_FOR_GHCR" | sudo docker login ghcr.io -u "$GHCR_USER" --password-stdin
+
+      - name: Smoke-test toolchain present (arm64 native)
+        env:
+          DIGEST: ${{ needs.publish.outputs.digest }}
+        run: |
+          IMAGE="ghcr.io/concord-voice/node-buildtools@${DIGEST}"
+          # sudo: the usermod group grant doesn't apply to the already-running
+          # shell session; root docker is fine for a read-only smoke container.
+          sudo docker run --rm "$IMAGE" sh -c \
+            'python3 --version && g++ --version | head -1 && make --version | head -1 && pip --version'
