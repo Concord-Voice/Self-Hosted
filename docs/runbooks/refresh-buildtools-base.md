@@ -72,6 +72,13 @@ possible Engine pull. The guard checks the server in the identity/context used
 by later Docker commands. Missing or failed queries, invalid version responses
 and servers below 29.8.2 stop the job before registry credentials are supplied.
 
+The publish job runs only when dispatched from `main`; a dispatch from any
+other branch skips both jobs. Both jobs install Docker CE the same way as the
+MinIO publisher: the downloaded Docker signing key must have primary
+fingerprint `9DC858229FC7DD38854AE2D88D81803C0EBFCD88`, apt pins that key in
+`Signed-By:`, and the Engine packages are installed at exact versions.
+`scripts/tests/test-publish-minio-engine-pins.py` enforces both publishers.
+
 The hosted amd64 publish job installs Docker CE from Docker's signed Ubuntu
 repository before the guard; it uses the fixed `ubuntu-24.04` image label so
 the apt suite remains available during `ubuntu-latest` migrations. The guard

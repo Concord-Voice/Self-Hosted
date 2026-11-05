@@ -17,6 +17,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 WORKFLOW = ROOT / ".github/workflows/publish-minio-image.yml"
+BUILDTOOLS = ROOT / ".github/workflows/publish-buildtools-base.yml"
 FINGERPRINT = "9DC858229FC7DD38854AE2D88D81803C0EBFCD88"
 PACKAGES = (
     "docker-ce=5:29.9.2-1~ubuntu.24.04~noble",
@@ -69,12 +70,25 @@ elif kind == "dpkg-query":
 
 
 class MinioEnginePins(unittest.TestCase):
+    def test_publishers_refuse_non_main_dispatch(self):
+        buildtools = yaml.safe_load(BUILDTOOLS.read_text())["jobs"]
+        for jobs in (self.jobs, buildtools):
+            self.assertEqual(jobs["publish"].get("if"), "github.ref == 'refs/heads/main'")
+
     def setUp(self):
         self.jobs = yaml.safe_load(WORKFLOW.read_text())["jobs"]
 
-    def install(self, job_id):
-        return next(step["run"] for step in self.jobs[job_id]["steps"]
+    def install(self, job_id, jobs=None):
+        return next(step["run"] for step in (jobs or self.jobs)[job_id]["steps"]
                     if step.get("name", "").startswith("Install official Docker CE"))
+
+    def bootstraps(self):
+        """Every publisher job that installs Docker Engine, across both image publishers."""
+        buildtools = yaml.safe_load(BUILDTOOLS.read_text())["jobs"]
+        for job_id in ("publish", "smoke-arm64", "finalize"):
+            yield "minio", self.jobs, job_id
+        for job_id in ("publish", "smoke-arm64"):
+            yield "buildtools", buildtools, job_id
 
     def test_probe_selects_only_exact_installation_and_admission(self):
         module = runpy.run_path(str(ROOT / "scripts/ci/probe-publisher-engine.py"))
@@ -135,12 +149,12 @@ class MinioEnginePins(unittest.TestCase):
             run.assert_not_called()
 
     def test_each_bootstrap_requires_the_reviewed_key_and_exact_package_set(self):
-        for job_id in ("publish", "smoke-arm64", "finalize"):
-            with self.subTest(job=job_id):
-                job = self.jobs[job_id]
+        for workflow, jobs, job_id in self.bootstraps():
+            with self.subTest(workflow=workflow, job=job_id):
+                job = jobs[job_id]
                 expected_runner = "ubuntu-24.04-arm" if job_id == "smoke-arm64" else "ubuntu-24.04"
                 self.assertEqual(job["runs-on"], expected_runner)
-                script = self.install(job_id)
+                script = self.install(job_id, jobs)
                 self.assertIn("Signed-By: /etc/apt/keyrings/docker.asc " + FINGERPRINT, script)
                 for package in PACKAGES:
                     self.assertIn(package, script)
@@ -149,12 +163,12 @@ class MinioEnginePins(unittest.TestCase):
     def test_actual_bootstraps_refuse_before_trusting_bad_keys_or_crossing_failed_installs(self):
         modes = ("good", "wrong", "extra", "duplicate", "empty", "gpg-fail",
                  "curl-fail", "apt-fail", "start-fail", "restart-fail")
-        for job_id in ("publish", "smoke-arm64", "finalize"):
+        for workflow, jobs, job_id in self.bootstraps():
             for mode in modes:
                 if (job_id == "smoke-arm64" and mode == "restart-fail") or (
                         job_id != "smoke-arm64" and mode == "start-fail"):
                     continue
-                with self.subTest(job=job_id, mode=mode), tempfile.TemporaryDirectory() as temporary:
+                with self.subTest(workflow=workflow, job=job_id, mode=mode), tempfile.TemporaryDirectory() as temporary:
                     directory = Path(temporary)
                     bindir = directory / "bin"
                     bindir.mkdir()
@@ -168,7 +182,7 @@ class MinioEnginePins(unittest.TestCase):
                            "TMPDIR": str(directory), "PIN_MODE": mode, "PIN_TRACE": str(trace),
                            "PIN_ARCH": "arm64" if job_id == "smoke-arm64" else "amd64",
                            "UBUNTU_CODENAME": "noble"}
-                    script = self.install(job_id) + f"\nprintf reached > '{marker}'\n"
+                    script = self.install(job_id, jobs) + f"\nprintf reached > '{marker}'\n"
                     result = subprocess.run(["bash", "-c", script], env=env, cwd=ROOT,
                                             text=True, capture_output=True, timeout=10)
                     calls = [json.loads(line) for line in trace.read_text().splitlines()]

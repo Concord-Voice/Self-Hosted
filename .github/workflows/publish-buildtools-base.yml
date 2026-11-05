@@ -24,6 +24,7 @@ permissions:
 
 jobs:
   publish:
+    if: github.ref == 'refs/heads/main'
     # trust-boundary (ADR-0016): credential-path job stays GitHub-hosted - do NOT migrate to third-party runners
     # Keep the official Docker CE apt suite stable while ubuntu-latest migrates.
     runs-on: ubuntu-24.04
@@ -52,10 +53,25 @@ jobs:
         run: |
           set -euo pipefail
           sudo apt-get update -q
-          sudo apt-get install -y -q ca-certificates curl
+          sudo apt-get install -y -q ca-certificates curl gnupg
           sudo install -m 0755 -d /etc/apt/keyrings
-          sudo curl --fail --show-error --silent --location https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-          sudo chmod a+r /etc/apt/keyrings/docker.asc
+          docker_key_dir=$(mktemp -d)
+          trap 'rm -rf -- "$docker_key_dir"' EXIT
+          curl --fail --show-error --silent --location --proto '=https' --tlsv1.2 https://download.docker.com/linux/ubuntu/gpg -o "$docker_key_dir/docker.asc"
+          # Primary identity independently reviewed from Docker docs d813acb6e172a9af209c4acdc0d6c7c03d969aa2.
+          if ! docker_primary=$(gpg --homedir "$docker_key_dir" --batch --with-colons --show-keys --fingerprint "$docker_key_dir/docker.asc" 2>/dev/null | awk -F: '
+            $1 == "pub" { if (primary) exit 1; primary=1; count++; next }
+            $1 == "fpr" && primary { print $10; primary=0 }
+            END { if (primary || count != 1) exit 1 }
+          '); then
+            printf 'error: Docker signing key verification failed\n' >&2
+            exit 1
+          fi
+          if [[ "$docker_primary" != 9DC858229FC7DD38854AE2D88D81803C0EBFCD88 ]]; then
+            printf 'error: Docker signing key identity refused\n' >&2
+            exit 1
+          fi
+          sudo install -m 0644 "$docker_key_dir/docker.asc" /etc/apt/keyrings/docker.asc
           . /etc/os-release
           sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
           Types: deb
@@ -63,10 +79,16 @@ jobs:
           Suites: ${UBUNTU_CODENAME:-$VERSION_CODENAME}
           Components: stable
           Architectures: $(dpkg --print-architecture)
-          Signed-By: /etc/apt/keyrings/docker.asc
+          Signed-By: /etc/apt/keyrings/docker.asc 9DC858229FC7DD38854AE2D88D81803C0EBFCD88
           EOF
           sudo apt-get update -q
-          sudo apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+          sudo apt-get install -y -q --no-install-recommends \
+            docker-ce=5:29.9.2-1~ubuntu.24.04~noble \
+            docker-ce-cli=5:29.9.2-1~ubuntu.24.04~noble \
+            docker-ce-rootless-extras=5:29.9.2-1~ubuntu.24.04~noble \
+            containerd.io=2.4.2-3~ubuntu.24.04~noble \
+            docker-buildx-plugin=0.36.1-1~ubuntu.24.04~noble \
+            docker-compose-plugin=5.5.0-1~ubuntu.24.04~noble
           sudo systemctl restart docker
 
       - name: Require supported Docker Engine server
@@ -204,10 +226,25 @@ jobs:
             sudo apt-get remove -y "${conflicts[@]}"
           fi
           sudo apt-get update -q
-          sudo apt-get install -y -q ca-certificates curl
+          sudo apt-get install -y -q ca-certificates curl gnupg
           sudo install -m 0755 -d /etc/apt/keyrings
-          sudo curl --fail --show-error --silent --location https://download.docker.com/linux/ubuntu/gpg -o /etc/apt/keyrings/docker.asc
-          sudo chmod a+r /etc/apt/keyrings/docker.asc
+          docker_key_dir=$(mktemp -d)
+          trap 'rm -rf -- "$docker_key_dir"' EXIT
+          curl --fail --show-error --silent --location --proto '=https' --tlsv1.2 https://download.docker.com/linux/ubuntu/gpg -o "$docker_key_dir/docker.asc"
+          # Primary identity independently reviewed from Docker docs d813acb6e172a9af209c4acdc0d6c7c03d969aa2.
+          if ! docker_primary=$(gpg --homedir "$docker_key_dir" --batch --with-colons --show-keys --fingerprint "$docker_key_dir/docker.asc" 2>/dev/null | awk -F: '
+            $1 == "pub" { if (primary) exit 1; primary=1; count++; next }
+            $1 == "fpr" && primary { print $10; primary=0 }
+            END { if (primary || count != 1) exit 1 }
+          '); then
+            printf 'error: Docker signing key verification failed\n' >&2
+            exit 1
+          fi
+          if [[ "$docker_primary" != 9DC858229FC7DD38854AE2D88D81803C0EBFCD88 ]]; then
+            printf 'error: Docker signing key identity refused\n' >&2
+            exit 1
+          fi
+          sudo install -m 0644 "$docker_key_dir/docker.asc" /etc/apt/keyrings/docker.asc
           . /etc/os-release
           sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
           Types: deb
@@ -215,10 +252,16 @@ jobs:
           Suites: ${UBUNTU_CODENAME:-$VERSION_CODENAME}
           Components: stable
           Architectures: $(dpkg --print-architecture)
-          Signed-By: /etc/apt/keyrings/docker.asc
+          Signed-By: /etc/apt/keyrings/docker.asc 9DC858229FC7DD38854AE2D88D81803C0EBFCD88
           EOF
           sudo apt-get update -q
-          sudo apt-get install -y -q docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+          sudo apt-get install -y -q --no-install-recommends \
+            docker-ce=5:29.9.2-1~ubuntu.24.04~noble \
+            docker-ce-cli=5:29.9.2-1~ubuntu.24.04~noble \
+            docker-ce-rootless-extras=5:29.9.2-1~ubuntu.24.04~noble \
+            containerd.io=2.4.2-3~ubuntu.24.04~noble \
+            docker-buildx-plugin=0.36.1-1~ubuntu.24.04~noble \
+            docker-compose-plugin=5.5.0-1~ubuntu.24.04~noble
           sudo systemctl start docker
 
       - name: Require supported Docker Engine server (root docker)
