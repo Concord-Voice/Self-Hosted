@@ -880,3 +880,10 @@ repos:
         additional_dependencies: ['PyYAML==6.0.3']
         files: '^(\.pre-commit-config\.yaml|\.github/(workflows/publish-(buildtools-base|minio-image)\.yml|ci/docker-engine-packages\.lock)|scripts/ci/(probe-publisher-engine\.py|require-docker-engine\.sh)|scripts/tests/test-publish-minio-engine-pins\.py)$'
         pass_filenames: false
+
+      - id: test-selfhost-release
+        name: 'Test self-host release tag check and bundle builder'
+        entry: bash -c 'bash scripts/tests/test-check-release-tag.sh && python3 scripts/tests/test-selfhost-bundle.py'
+        language: system
+        files: '^(\.pre-commit-config\.yaml|VERSION|scripts/release/.*|scripts/tests/test-(check-release-tag\.sh|selfhost-bundle\.py))$'
+        pass_filenames: false

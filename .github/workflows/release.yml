@@ -1,0 +1,105 @@
+# Self-host release build. A protected `v*` tag push builds the self-host
+# bundle from the tagged tree and attests its build provenance. It holds no
+# credential and never creates or writes a release: the Release Trigger App
+# reports this run to Release-Ops, whose verify.yml checks the attestations
+# and makes the draft. Release-Ops lists this file in release-sources.json and
+# pins attestations to it at the tag, so renaming it breaks the lane.
+#
+# The version comes from the root VERSION file (one X.Y.Z line), never from a
+# client package. Fresh-host acceptance is a separate release gate; see
+# docs/runbooks/selfhost-release.md.
+name: Self-Hosted Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selfhost-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  ioc:
+    uses: ./.github/workflows/ioc-scanning.yml
+    permissions:
+      contents: read
+      pull-requests: read
+
+  check-tag:
+    name: Check the tag
+    if: github.repository == 'Concord-Voice/Self-Hosted' && startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Tag matches VERSION and sits on main
+        id: check
+        shell: bash
+        env:
+          BASH_ENV: /dev/null
+        run: bash scripts/release/check-release-tag.sh
+
+  bundle:
+    name: Build and attest the self-host bundle
+    needs: [check-tag, ioc]
+    if: needs.ioc.result == 'success' && needs.check-tag.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.check-tag.outputs.version }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      # Only tracked files at the tagged commit go in the bundle.
+      - name: Export the tagged tree
+        run: |
+          set -euo pipefail
+          mkdir "$RUNNER_TEMP/tree"
+          git archive --format=tar "$GITHUB_SHA" | tar -x -C "$RUNNER_TEMP/tree"
+      - name: Build the bundle
+        run: |
+          python3 scripts/release/selfhost-bundle.py build \
+            --public-tree "$RUNNER_TEMP/tree" --source-sha "$GITHUB_SHA" \
+            --version "$VERSION" --out "$RUNNER_TEMP/assets"
+      - name: Verify the bundle against the tree
+        run: |
+          python3 scripts/release/selfhost-bundle.py verify \
+            --public-tree "$RUNNER_TEMP/tree" \
+            --archive "$RUNNER_TEMP/assets/concord-selfhost-${VERSION}.tar.gz" \
+            --manifest "$RUNNER_TEMP/assets/selfhost-manifest.json" \
+            --sums "$RUNNER_TEMP/assets/SHA256SUMS"
+      - name: Upload the bundle
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: concord-selfhost-v${{ needs.check-tag.outputs.version }}
+          path: ${{ runner.temp }}/assets/
+          if-no-files-found: error
+          retention-days: 30
+      # One provenance statement per uploaded file. Release-Ops checks every
+      # file in the artifact against this workflow at the tag and SHA.
+      - name: Attest build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-path: |
+            ${{ runner.temp }}/assets/concord-selfhost-*.tar.gz
+            ${{ runner.temp }}/assets/selfhost-manifest.json
+            ${{ runner.temp }}/assets/SHA256SUMS
