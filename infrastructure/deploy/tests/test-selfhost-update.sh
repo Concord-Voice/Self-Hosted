@@ -29,6 +29,8 @@ sign() { g -C "$WORK/up" -c gpg.format=ssh -c "user.signingkey=$WORK/$2" tag -s 
 echo two >"$WORK/up/f"; g -C "$WORK/up" commit -qam two; sign v1.1.0 release
 echo three >"$WORK/up/f"; g -C "$WORK/up" commit -qam three; g -C "$WORK/up" tag -a -m v1.2.0 v1.2.0
 echo four >"$WORK/up/f"; g -C "$WORK/up" commit -qam four; sign v1.3.0 other
+# v2.0.0 replays v1.1.0's validly signed tag object under a newer name.
+g -C "$WORK/up" update-ref refs/tags/v2.0.0 "$(g -C "$WORK/up" rev-parse v1.1.0)"
 
 fixture() {
   ROOT="$WORK/root-$RANDOM$RANDOM"
@@ -36,15 +38,16 @@ fixture() {
   : >"$WORK/calls"
 }
 
-# run_update SIGNERS CLI_RC ARGS... — CLI_RC is the stub wrapper's health rc.
+# run_update SIGNERS CLI_RC ARGS... — SIGNERS becomes the deploy dir's
+# release-signers; CLI_RC is the stub wrapper's health rc.
 # shellcheck disable=SC2034  # PROJECT_ROOT, SCRIPT_DIR, BACKUP_LAST_NAME are read by the helper
 run_update() {
-  local signers="$1" cli_rc="$2"; shift 2
-  printf '#!/usr/bin/env bash\nprintf "cli %%s\\n" "$*" >>"%s"\n[[ $1 == up ]] || exit %s\n' "$WORK/calls" "$cli_rc" >"$WORK/cli"
-  chmod +x "$WORK/cli"
+  local signers="$1" cli_rc="$2" dir="$WORK/deploy"; shift 2
+  rm -rf "$dir"; mkdir "$dir"; cp "$signers" "$dir/release-signers"
+  printf '#!/usr/bin/env bash\nprintf "cli %%s\\n" "$*" >>"%s"\n[[ $1 == up ]] || exit %s\n' "$WORK/calls" "$cli_rc" >"$dir/concord-selfhost"
+  chmod +x "$dir/concord-selfhost"
   (
-    PROJECT_ROOT="$ROOT"; SCRIPT_DIR="$DEPLOY"
-    export SELFHOST_RELEASE_SIGNERS_OVERRIDE="$signers" SELFHOST_UPDATE_CLI_OVERRIDE="$WORK/cli"
+    PROJECT_ROOT="$ROOT"; SCRIPT_DIR="$dir"
     # shellcheck source=../selfhost-update.sh
     source "$DEPLOY/selfhost-update.sh"
     # shellcheck disable=SC2329  # stub read by the sourced helper
@@ -70,6 +73,7 @@ refuse "without --confirm" "$WORK/signers" --to v1.1.0
 refuse "while no signing key is configured" "$WORK/empty-signers" --to v1.1.0 --confirm
 refuse "an unsigned tag" "$WORK/signers" --to v1.2.0 --confirm
 refuse "a tag signed by a non-release key" "$WORK/signers" --to v1.3.0 --confirm
+refuse "an older signed tag served under a newer name" "$WORK/signers" --to v2.0.0 --confirm
 refuse "a tag that does not exist" "$WORK/signers" --to v9.0.0 --confirm
 echo dirty >"$ROOT/f"
 refuse "a modified checkout" "$WORK/signers" --to v1.1.0 --confirm

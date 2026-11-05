@@ -285,6 +285,11 @@ st_out="$(PATH="$STUB:$PATH" STUB_PS_JSON='[{"Service":"nats","Name":"n-1","Stat
 [[ "$st_out" == '{"schema":1,"services":[{"service":"nats","name":"n-1","state":"running","health":"","image":"nats:2","exit_code":null}]}' ]] \
   && pass "status --json accepts the older JSON-array form" \
   || fail "status --json array form printed: $st_out"
+st_out="$(PATH="$STUB:$PATH" STUB_PS_JSON='[{"Service":"nats","Name":"a b","State":"up for <b>1h</b>","Health":"weird","Image":"nats:2"}]' \
+  bash "$TARGET" status --json 2>/dev/null)"
+[[ "$st_out" == '{"schema":1,"services":[{"service":"nats","name":"unknown","state":"unknown","health":"unknown","image":"nats:2","exit_code":null}]}' ]] \
+  && pass "status --json reports free text from compose as unknown" \
+  || fail "status --json free-text fields printed: $st_out"
 PATH="$STUB:$PATH" STUB_PS_JSON='not json' bash "$TARGET" status --json >/dev/null 2>&1 \
   && fail "status --json accepted unparseable compose output" \
   || pass "status --json fails closed on unparseable compose output"

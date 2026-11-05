@@ -53,16 +53,25 @@ verb_backup() {
   _backup_run "$out"
 }
 
+# _backup_prepare_dir DIR — create DIR 0700, or accept an existing one only if
+# it is ours and closed to group and others. Never chmod a directory we did
+# not create: `--out /tmp` must not lock every other user out of /tmp.
+_backup_prepare_dir() {
+  if [[ ! -e "$1" ]]; then
+    (umask 077; mkdir -p -- "$1") || { _backup_fail 'cannot create the backup directory'; return 1; }
+    return 0
+  fi
+  [[ -d "$1" && ! -L "$1" && "$(stat -c '%u %a' -- "$1")" =~ ^$(id -u)\ [0-7]00$ ]] \
+    || { _backup_fail 'backup directory must be owned by this user with no group or other access (0700)'; return 1; }
+}
+
 _backup_run() {
   local out="$1" stage release
   BACKUP_LAST_NAME=''
   selfhost_storage_resolve "$PROJECT_ROOT" || return 1
   release="$(_backup_release)" && [[ -n "$release" ]] || { _backup_fail 'release identity unavailable'; return 1; }
   [[ -f "$PROJECT_ROOT/.env" ]] || { _backup_fail 'no .env: nothing installed to back up'; return 1; }
-  (
-    umask 077
-    mkdir -p -- "$out" && chmod 700 -- "$out"
-  ) || { _backup_fail 'cannot prepare the backup directory'; return 1; }
+  _backup_prepare_dir "$out" || return 1
   stage="$(umask 077; mktemp -d "$out/.staging.XXXXXX")" || { _backup_fail 'cannot create staging'; return 1; }
   local rc=0
   _backup_body "$out" "$stage" "$release" || rc=$?
@@ -71,7 +80,7 @@ _backup_run() {
 }
 
 _backup_body() {
-  local out="$1" stage="$2" release="$3" name sum part sep
+  local out="$1" stage="$2" release="$3" name
   name="concord-backup-$(date -u +%Y%m%dT%H%M%SZ).tar.gz"
 
   echo 'Dumping the database...'
@@ -87,18 +96,21 @@ _backup_body() {
   fi
   cp -- "$PROJECT_ROOT/.env" "$stage/env" || { _backup_fail 'cannot copy .env'; return 1; }
 
-  {
-    printf '{"schema":1,"release":"%s","storage_mode":"%s","created":"%s","parts":{' \
-      "$release" "$SELFHOST_STORAGE_MODE_RESOLVED" "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-    sep=''
-    for part in postgres.dump minio.tar env; do
-      [[ -f "$stage/$part" ]] || continue
-      sum="$(sha256sum -- "$stage/$part" | cut -d' ' -f1)"
-      printf '%s"%s":"%s"' "$sep" "$part" "$sum"
-      sep=','
-    done
-    printf '}}\n'
-  } >"$stage/manifest.json"
+  python3 - "$stage" "$release" "$SELFHOST_STORAGE_MODE_RESOLVED" "$(date -u +%Y-%m-%dT%H:%M:%SZ)" <<'PY' \
+    || { _backup_fail 'cannot write the manifest'; return 1; }
+import hashlib, json, os, sys
+stage, release, mode, created = sys.argv[1:5]
+parts = {}
+for name in ("postgres.dump", "minio.tar", "env"):
+    path = os.path.join(stage, name)
+    if os.path.isfile(path):
+        h = hashlib.sha256()
+        with open(path, "rb") as f:
+            for chunk in iter(lambda: f.read(1 << 20), b""): h.update(chunk)
+        parts[name] = h.hexdigest()
+with open(os.path.join(stage, "manifest.json"), "w") as f:
+    json.dump({"schema": 1, "release": release, "storage_mode": mode, "created": created, "parts": parts}, f)
+PY
 
   if ! (umask 077; tar -C "$stage" -czf "$out/.$name.partial" .) \
       || ! mv -- "$out/.$name.partial" "$out/$name"; then
@@ -171,24 +183,33 @@ _restore_run() {
   stage="$(umask 077; mktemp -d)" || { _backup_fail 'cannot create staging'; return 1; }
   local rc=0
   _restore_body "$archive" "$stage" "$release" || rc=$?
-  rm -rf -- "$stage" "$stage.list"
+  rm -rf -- "$stage"
   return "$rc"
 }
 
 _restore_body() {
   local archive="$1" stage="$2" release="$3" i
-  # Refuse links, devices and absolute or parent paths before extracting.
-  if ! tar -tvzf "$archive" >"$stage.list" 2>/dev/null || ! python3 -c '
-import sys
-for line in open(sys.argv[1]):
-    kind, name = line[0], line.split()[-1]
-    if kind not in "-d" or name.startswith("/") or ".." in name.split("/"):
-        sys.exit(1)
-' "$stage.list"; then
-    _backup_fail 'archive is not a Concord backup'
-    return 1
-  fi
-  tar -C "$stage" --no-same-owner -xzf "$archive" || { _backup_fail 'cannot extract the archive'; return 1; }
+  # One read of the archive: only a top-level directory and the known parts as
+  # regular files are accepted, and each is written by name, never by path.
+  python3 - "$archive" "$stage" <<'PY' || { _backup_fail 'archive is not a Concord backup'; return 1; }
+import os, sys, tarfile
+archive, stage = sys.argv[1:3]
+allowed = {"manifest.json", "postgres.dump", "env", "minio.tar"}
+try:
+    with tarfile.open(archive, "r:gz") as tar:
+        for m in tar:
+            name = m.name[2:] if m.name.startswith("./") else m.name
+            if m.isdir() and name in ("", "."):
+                continue
+            if not m.isreg() or name not in allowed:
+                sys.exit(1)
+            fd = os.open(os.path.join(stage, name), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(fd, "wb") as out, tar.extractfile(m) as src:
+                while chunk := src.read(1 << 20):
+                    out.write(chunk)
+except (OSError, tarfile.TarError, EOFError):
+    sys.exit(1)
+PY
   _restore_verify "$stage" "$release" "$SELFHOST_STORAGE_MODE_RESOLVED" || return 1
   # Secrets in .env must match: a restored database under different keys breaks.
   cmp -s -- "$stage/env" "$PROJECT_ROOT/.env" || {
@@ -197,22 +218,41 @@ for line in open(sys.argv[1]):
   }
 
   echo 'Stopping the stack...'
-  compose stop || { _backup_fail 'stop failed'; return 1; }
+  compose stop || { _backup_fail 'stop failed; nothing was restored'; return 1; }
   echo 'Restoring the database...'
-  compose up -d "$BACKUP_PG_SERVICE" || { _backup_fail 'cannot start postgres'; return 1; }
-  for ((i = 0; i < 30; i++)); do
+  compose up -d "$BACKUP_PG_SERVICE" || { _restore_stopped 'cannot start postgres; nothing was restored'; return 1; }
+  for ((i = 0; ; i++)); do
     compose exec -T "$BACKUP_PG_SERVICE" pg_isready -U concord >/dev/null 2>&1 && break
+    (( i < 30 )) || { _restore_stopped 'postgres did not become ready; nothing was restored'; return 1; }
     sleep 2
   done
+  # --single-transaction: a failed restore leaves the database as it was.
   compose exec -T "$BACKUP_PG_SERVICE" pg_restore -U concord -d concord --clean --if-exists \
-    --no-owner --single-transaction <"$stage/postgres.dump" || { _backup_fail 'pg_restore failed'; return 1; }
+    --no-owner --single-transaction <"$stage/postgres.dump" \
+    || { _restore_stopped 'pg_restore failed; the database is unchanged'; return 1; }
   if [[ "$SELFHOST_STORAGE_MODE_RESOLVED" == bundled ]]; then
     echo 'Restoring bundled MinIO data...'
+    # Unpack beside the live data and swap only after tar succeeds, so a bad
+    # stream leaves the existing objects in place.
     docker run --rm -i --network none -u 0 -v "$(_backup_minio_volume):/data" \
-      --entrypoint sh "$BACKUP_HELPER_IMAGE" -c 'find /data -mindepth 1 -delete && tar -C /data -xf -' \
-      <"$stage/minio.tar" || { _backup_fail 'MinIO restore failed'; return 1; }
+      --entrypoint sh "$BACKUP_HELPER_IMAGE" -c '
+        set -e
+        new=/data/.concord-restore
+        rm -rf "$new"; mkdir "$new"
+        tar -C "$new" -xf - || { rm -rf "$new"; exit 1; }
+        find /data -mindepth 1 -maxdepth 1 ! -name .concord-restore -exec rm -rf {} +
+        find "$new" -mindepth 1 -maxdepth 1 -exec mv {} /data/ \;
+        rmdir "$new"' \
+      <"$stage/minio.tar" \
+      || { _restore_stopped 'MinIO restore failed after the database was restored; re-run restore'; return 1; }
   fi
   echo 'Starting the stack...'
   main up || return 1
   main health
+}
+
+# _restore_stopped MSG — a failure after the stack was stopped says so.
+_restore_stopped() {
+  _backup_fail "$1"
+  printf 'selfhost-backup: the stack is stopped; run concord-selfhost up to start it again\n' >&2
 }

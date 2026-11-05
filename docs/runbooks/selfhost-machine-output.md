@@ -25,7 +25,7 @@ This prints one object built from `docker compose ps --all`. Services are sorted
 {"schema":1,"services":[{"service":"control-plane","name":"…","state":"running","health":"healthy","image":"…","exit_code":0}]}
 ```
 
-`health` is empty when a service defines no healthcheck. `exit_code` is `null` when Compose does not report one. Output that Compose produces but that cannot be parsed exits `1`.
+`state` is one of Compose's states (`created`, `running`, `paused`, `restarting`, `removing`, `exited`, `dead`). `health` is `healthy`, `unhealthy`, `starting`, or empty when a service defines no healthcheck. `service`, `name` and `image` are plain identifiers (letters, digits and `._/:@+-`, at most 200 characters). Any value outside these forms is reported as `unknown`. `exit_code` is `null` when Compose does not report one. Output that Compose produces but that cannot be parsed exits `1`.
 
 ## `concord-selfhost health --json`
 
@@ -44,6 +44,6 @@ See [selfhost-backup-restore.md](selfhost-backup-restore.md).
 ## Rules for readers
 
 - `schema` changes only for incompatible changes. Readers must refuse a schema they do not know.
-- Check names are fixed tokens. The JSON never contains host paths, addresses or raw Compose text.
+- Check names are fixed tokens. Status fields are fixed tokens or plain identifiers, as listed above. The JSON never contains host paths, addresses or free text.
 - Human-readable reasons go to stderr only. Show them as text and never parse them.
 - Any other option is refused before Docker is called (`status` and `health` exit `1`, the installer exits `2`).

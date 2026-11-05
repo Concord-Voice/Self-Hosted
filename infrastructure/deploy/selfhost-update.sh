@@ -7,7 +7,9 @@
 # Until Release-Ops signs Self-Hosted tags, that file holds no key and every
 # tag is refused: the verb fails closed rather than trusting the remote.
 
-readonly UPDATE_SIGNERS_FILE="${SELFHOST_RELEASE_SIGNERS_OVERRIDE:-$SCRIPT_DIR/release-signers}"
+readonly UPDATE_SIGNERS_FILE="$SCRIPT_DIR/release-signers"
+# Fetched tags land here, never under refs/tags, so a remote cannot replace a local tag.
+readonly UPDATE_CANDIDATE_REF=refs/concord-update/candidate
 readonly UPDATE_TAG_RE='^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.]+)?$'
 
 _update_fail() { printf 'selfhost-update: %s\n' "$1" >&2; return 1; }
@@ -37,6 +39,12 @@ _update_signed_keys() {
   [[ -f "$UPDATE_SIGNERS_FILE" ]] && grep -qvE '^[[:space:]]*(#|$)' "$UPDATE_SIGNERS_FILE"
 }
 
+# _update_tag_header REF — "<type> <tag>" from the signed tag object's header.
+_update_tag_header() {
+  git -C "$PROJECT_ROOT" cat-file tag "$1" 2>/dev/null \
+    | awk '/^$/ { exit } $1 == "type" { t = $2 } $1 == "tag" { n = $2 } END { print t " " n }'
+}
+
 _update_run() {
   local tag="$1" previous
   git -C "$PROJECT_ROOT" rev-parse --git-dir >/dev/null 2>&1 \
@@ -47,20 +55,24 @@ _update_run() {
   previous="$(git -C "$PROJECT_ROOT" rev-parse HEAD)" || return 1
 
   echo "Fetching $tag..."
-  git -C "$PROJECT_ROOT" fetch --no-tags origin "+refs/tags/$tag:refs/tags/$tag" \
+  git -C "$PROJECT_ROOT" fetch --no-tags origin "+refs/tags/$tag:$UPDATE_CANDIDATE_REF" \
     || { _update_fail 'cannot fetch the tag'; return 1; }
   git -C "$PROJECT_ROOT" -c gpg.format=ssh -c "gpg.ssh.allowedSignersFile=$UPDATE_SIGNERS_FILE" \
-    verify-tag "$tag" >/dev/null 2>&1 \
+    verify-tag "$UPDATE_CANDIDATE_REF" >/dev/null 2>&1 \
     || { _update_fail 'tag signature is missing or not from a release key'; return 1; }
+  # verify-tag checks the signature only. The signed header must name this tag
+  # and a commit, or an old signed release could be served under a newer name.
+  [[ "$(_update_tag_header "$UPDATE_CANDIDATE_REF")" == "commit $tag" ]] \
+    || { _update_fail 'the signed tag is for a different release than requested'; return 1; }
 
   echo 'Taking a backup first...'
   verb_backup || { _update_fail 'backup failed; nothing was changed'; return 1; }
 
-  git -C "$PROJECT_ROOT" checkout -q --detach "refs/tags/$tag^{commit}" \
+  git -C "$PROJECT_ROOT" checkout -q --detach "$UPDATE_CANDIDATE_REF^{commit}" \
     || { _update_fail 'cannot switch to the tag; nothing else was changed'; return 1; }
   echo "Switched to $tag. Rebuilding..."
   # Run the tag's own wrapper: this shell still holds the previous version.
-  local cli="${SELFHOST_UPDATE_CLI_OVERRIDE:-$SCRIPT_DIR/concord-selfhost}"
+  local cli="$SCRIPT_DIR/concord-selfhost"
   if "$cli" up && "$cli" health; then
     echo "Updated to $tag."
     return 0

@@ -247,7 +247,7 @@ verb_status() {
   local raw
   raw="$(compose ps --all --format json)" || return $?
   printf '%s' "$raw" | python3 -c '
-import json, sys
+import json, re, sys
 text = sys.stdin.read().strip()
 try:
     if not text:
@@ -258,12 +258,20 @@ try:
         rows = [json.loads(line) for line in text.splitlines() if line.strip()]
     if not isinstance(rows, list) or any(not isinstance(r, dict) for r in rows):
         raise ValueError()
+    # Only known tokens and plain identifiers pass through; anything else is
+    # "unknown", so no free text from the host reaches a reader.
+    ident = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,199}")
+    def pick(v, ok):
+        v = str(v or "")
+        return v if ok(v) else "unknown"
+    states = {"created", "running", "paused", "restarting", "removing", "exited", "dead"}
+    healths = {"", "healthy", "unhealthy", "starting"}
     services = [{
-        "service": str(r.get("Service", "")),
-        "name": str(r.get("Name", "")),
-        "state": str(r.get("State", "")),
-        "health": str(r.get("Health", "")),
-        "image": str(r.get("Image", "")),
+        "service": pick(r.get("Service"), ident.fullmatch),
+        "name": pick(r.get("Name"), ident.fullmatch),
+        "state": pick(r.get("State"), states.__contains__),
+        "health": pick(r.get("Health"), healths.__contains__),
+        "image": pick(r.get("Image"), ident.fullmatch),
         "exit_code": r.get("ExitCode") if isinstance(r.get("ExitCode"), int) else None,
     } for r in rows]
 except ValueError:

@@ -46,7 +46,7 @@ run_fn() {
       printf 'docker %s\n' "$*" >>"$WORK/calls"
       case "$*" in
         *':/data:ro '*) printf 'MINIO-DATA' ;;
-        *) cat >"$WORK/restored.minio" ;;
+        *) cat >"$WORK/restored.minio"; return "${STUB_DOCKER_RC:-0}" ;;
       esac
     }
     main() { printf 'main %s\n' "$*" >>"$WORK/calls"; }
@@ -93,7 +93,7 @@ PY
 # ── restore round trip ────────────────────────────────────────────────
 : >"$WORK/calls"
 run_fn verb_restore "$archive" --confirm >/dev/null 2>&1; rc=$?
-order="$(grep -v pg_isready "$WORK/calls" | sed -E 's/^(compose|docker|main) ([a-z-]+( -[a-zA-Z]+)?( [a-z_-]+)?).*/\1 \2/' | tr '\n' '|')"
+order="$(grep -E '^(compose|docker|main) ' "$WORK/calls" | grep -v pg_isready | sed -E 's/^(compose|docker|main) ([a-z-]+( -[a-zA-Z]+)?( [a-z_-]+)?).*/\1 \2/' | tr '\n' '|')"
 if [[ $rc -eq 0 && "$order" == 'compose stop|compose up -d postgres|compose exec -T postgres|docker run --rm|main up|main health|' ]]; then
   pass "restore stops, restores postgres then MinIO, then runs up and health"
 else
@@ -127,6 +127,30 @@ printf 'POSTGRES_PASSWORD=x\n' >"$ROOT/.env"
 STUB_MODE=byo-s3 refuse_case "a storage-mode mismatch" "$archive"
 printf 'not a tarball' >"$WORK/junk.tar.gz"
 refuse_case "a non-archive" "$WORK/junk.tar.gz"
+python3 - "$WORK/x1" "$WORK/escape.tar.gz" <<'PY'
+import os, sys, tarfile
+src, out = sys.argv[1:3]
+with tarfile.open(out, "w:gz") as t:
+    for n in os.listdir(src):
+        t.add(os.path.join(src, n), arcname="./" + n)
+    t.add(os.path.join(src, "env"), arcname="../escape a")
+PY
+refuse_case "a parent-path entry" "$WORK/escape.tar.gz"
+
+# ── a failure after the stop says the stack is stopped ────────────────
+: >"$WORK/calls"
+err="$(STUB_DOCKER_RC=1 run_fn verb_restore "$archive" --confirm 2>&1 >/dev/null)"; rc=$?
+[[ $rc -ne 0 && "$err" == *'MinIO restore failed'* && "$err" == *'stack is stopped'* ]] && ! grep -q '^main up' "$WORK/calls" \
+  && pass "a MinIO restore failure says the stack is stopped and does not start it" \
+  || fail "MinIO failure rc=$rc err=$err"
+
+# ── --out never loosens or tightens a directory it did not create ─────
+fixture bundled
+mkdir -m 755 "$WORK/shared"
+run_fn verb_backup --out "$WORK/shared" >/dev/null 2>&1; rc=$?
+[[ $rc -ne 0 && "$(stat -c %a "$WORK/shared")" == 755 && -z "$(ls -A "$WORK/shared")" && ! -s "$WORK/calls" ]] \
+  && pass "backup refuses an existing directory open to others and leaves its mode alone" \
+  || fail "--out shared rc=$rc mode=$(stat -c %a "$WORK/shared")"
 
 # ── BYO S3 backup has no MinIO part ───────────────────────────────────
 fixture byo-s3
