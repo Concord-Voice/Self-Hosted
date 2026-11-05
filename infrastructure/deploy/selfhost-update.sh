@@ -4,7 +4,7 @@
 #
 # Trust root: infrastructure/deploy/release-signers, an SSH allowed-signers
 # file (git's gpg.ssh.allowedSignersFile format) naming the release keys.
-# Until Release-Ops signs Self-Hosted tags, that file holds no key and every
+# Until the release-signing work signs tags, that file holds no key and every
 # tag is refused: the verb fails closed rather than trusting the remote.
 
 readonly UPDATE_SIGNERS_FILE="$SCRIPT_DIR/release-signers"

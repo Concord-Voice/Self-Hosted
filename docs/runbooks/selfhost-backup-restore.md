@@ -55,7 +55,7 @@ The `.env` check exists because the database and its keys must come from the sam
 
 `concord-selfhost update --to vX.Y.Z --confirm [--json]` works only in a git checkout of Self-Hosted. It runs these steps:
 
-1. It refuses if `infrastructure/deploy/release-signers` names no key, which is true **today**. Release-Ops adds the release key when it starts signing tags ([Release-Ops#34](https://github.com/Concord-Voice/Release-Ops/issues/34)). Until then, every tag is refused.
+1. It refuses if `infrastructure/deploy/release-signers` names no key, which is true **today**. The release key is added when the release-signing work starts signing tags. Until then, every tag is refused.
 2. It refuses if tracked files have local changes.
 3. It fetches only that tag into a private ref (`refs/concord-update/candidate`), so local tags are never replaced. It refuses unless `git verify-tag` passes against `release-signers` (SSH signatures) and the signed tag object names the requested tag and points at a commit. The name check stops an older signed release from being served under a newer tag name.
 4. It runs `backup`. If the backup fails, nothing has changed.
