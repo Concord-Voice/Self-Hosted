@@ -82,14 +82,16 @@ read_mode() {
     historical) printf 'DOMAIN=example.invalid\nMINIO_ROOT_USER=synthetic-root\nMINIO_ROOT_PASSWORD=synthetic-root-password\nMINIO_BUCKET=concord-media\n' >"$FIX/.env" ;;
     bundled) printf 'SELFHOST_STORAGE_MODE=bundled\n' >"$FIX/.env" ;;
     byo|minio|r2|b2|literal|unquoted|metadata-literal) write_byo
-      case "$shape" in minio|r2|b2) sed -i "s/STORAGE_BACKEND=s3/STORAGE_BACKEND=$shape/" "$FIX/.env" ;;
+      case "$shape" in
+        minio|r2|b2) sed -i "s/STORAGE_BACKEND=s3/STORAGE_BACKEND=$shape/" "$FIX/.env" ;;
         unquoted) sed -i '/^STORAGE_\(ACCESS\|SECRET\)_KEY=/d' "$FIX/.env"; printf 'STORAGE_ACCESS_KEY=synthetic-access\nSTORAGE_SECRET_KEY=synthetic-secret\n' >>"$FIX/.env" ;;
         metadata-literal) sed -i '/^STORAGE_\(REGION\|BUCKET\)=/d' "$FIX/.env"; printf '%s\n' 'STORAGE_REGION=" literal = $$cash \"quoted\" \\trail "' 'STORAGE_BUCKET="Concord_media:fixture"' >>"$FIX/.env" ;;
       esac ;;
   esac
   ambient
   selfhost_storage_read "$FIX" || return $?
-  case "$shape" in historical|bundled) [[ $SELFHOST_STORAGE_MODE_RESOLVED == bundled ]] ;;
+  case "$shape" in
+    historical|bundled) [[ $SELFHOST_STORAGE_MODE_RESOLVED == bundled ]] ;;
     *) [[ $SELFHOST_STORAGE_MODE_RESOLVED == byo-s3 ]] ;; esac
 }
 read_bad() {
@@ -179,7 +181,8 @@ fresh_case() {
     *) scenario "$evidence" ;;
   esac
   ambient
-  case "$evidence" in deploy-image|deploy-receipt)
+  case "$evidence" in
+    deploy-image|deploy-receipt)
     SELFHOST_STORAGE_MODE_RESOLVED=byo-s3
     SELFHOST_STORAGE_PROJECT_ROOT=/synthetic/stale-root
     SELFHOST_STORAGE_PROJECT_NAME=stale-project
@@ -216,7 +219,7 @@ PY
 # Versioned archives and arbitrary source clones have different Compose project
 # identities. These resources are owned fixture metadata, never a live Docker query.
 source_volume_seed() {
-  python3 - "$STATE/source-volumes.json" "$1" <<'SOURCE_VOLUME_SEED'
+  python3 - "$STATE/source-volumes.json" "$1" <<'SOURCEVOLUMESEED'
 import json, pathlib, sys
 
 destination, evidence = pathlib.Path(sys.argv[1]), sys.argv[2]
@@ -233,20 +236,20 @@ if logical != 'missing':
         'list':['volume-owned-private-sentinel'], 'object':{'private':'volume-owned-private-sentinel'},
         'invalid':'invalid logical volume', 'empty':''}.get(logical, logical)
 destination.write_text(json.dumps({'retained-source-' + scope + '_' + logical:labels}, sort_keys=True))
-SOURCE_VOLUME_SEED
+SOURCEVOLUMESEED
 }
 source_volume_snapshot() {
-  python3 - "$STATE/source-volumes.json" <<'SOURCE_VOLUME_SNAPSHOT'
+  python3 - "$STATE/source-volumes.json" <<'SOURCEVOLUMESNAPSHOT'
 import hashlib, pathlib, sys
 path = pathlib.Path(sys.argv[1])
 details = path.lstat()
 print(details.st_mode, details.st_ino, details.st_uid, details.st_gid,
       details.st_size, details.st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest())
-SOURCE_VOLUME_SNAPSHOT
+SOURCEVOLUMESNAPSHOT
 }
 source_volume_conserved() {
   [[ "$(source_volume_snapshot)" == "$1" ]] || fail 'freshness changed retained owned volume metadata'
-  python3 - "$STATE/calls.jsonl" "$STATE/source-volumes.json" <<'SOURCE_VOLUME_READS'
+  python3 - "$STATE/calls.jsonl" "$STATE/source-volumes.json" <<'SOURCEVOLUMEREADS'
 import json, sys
 calls = [json.loads(line)['argv'] for line in open(sys.argv[1])]
 volumes = json.load(open(sys.argv[2]))
@@ -256,7 +259,7 @@ for name in volumes:
     assert any(call[:2] == ['volume', 'inspect'] and call[-1] == name
                and call[2:4] == ['--format', '{{json .Labels}}'] for call in calls), 'owned volume never reached its authoritative typed labels'
 assert all('{{json .}}' not in call and '{{json .Config.Env}}' not in call for call in calls)
-SOURCE_VOLUME_READS
+SOURCEVOLUMEREADS
 }
 namespace_fresh_case() {
   local evidence=$1 phase=$2 rc=0
@@ -336,7 +339,8 @@ namespace_installer_case() {
     fi
     local diagnostic='selfhost-storage: existing installation refused'
     [[ $evidence != *-fail && $evidence != *-malformed ]] || diagnostic='selfhost-storage: installation discovery unavailable'
-    case $evidence in source-volume-*-missing|source-volume-*-null|source-volume-*-bool|source-volume-*-int|source-volume-*-list|source-volume-*-object|source-volume-*-invalid|source-volume-*-empty)
+    case $evidence in
+      source-volume-*-missing|source-volume-*-null|source-volume-*-bool|source-volume-*-int|source-volume-*-list|source-volume-*-object|source-volume-*-invalid|source-volume-*-empty)
       diagnostic='selfhost-storage: installation discovery unavailable' ;;
     esac
     grep -qFx "$diagnostic" "$STATE/fresh-entry-output" || fail 'installer freshness refusal diagnostic changed'
@@ -351,11 +355,14 @@ resolve_case() {
     agent-off) printf 'SELFHOST_STORAGE_MODE=bundled\nADMIN_CONSOLE_ENABLED=True\n' >"$FIX/.env" ;;
     *) write_byo ;;
   esac
-  case "$kind" in agent|agent-off) : >"$STATE/agent-group" ;; esac
-  case "$kind" in identity-conflict|identity-fail|identity-malformed) scenario "$kind" ;;
+  case "$kind" in
+    agent|agent-off) : >"$STATE/agent-group" ;; esac
+  case "$kind" in
+    identity-conflict|identity-fail|identity-malformed) scenario "$kind" ;;
     bad-read) printf 'SELFHOST_STORAGE_MODE=byo-s3\n' >"$FIX/.env" ;; esac
   ambient
-  case "$kind" in bad-read|identity-conflict|identity-fail|identity-malformed)
+  case "$kind" in
+    bad-read|identity-conflict|identity-fail|identity-malformed)
     SELFHOST_STORAGE_MODE_RESOLVED=byo-s3
     SELFHOST_STORAGE_PROJECT_ROOT=/synthetic/stale-root
     SELFHOST_STORAGE_PROJECT_NAME=stale-project
@@ -427,7 +434,8 @@ runner_case() {
   esac
   [[ "$kind" != clear ]] || selfhost_storage_select_image '' || return $?
   [[ "$kind" != docker-status ]] || scenario runner-fail
-  case "$kind" in daemon-guidance|daemon-control) scenario runner-daemon ;; log-success) scenario runner-stdout ;; esac
+  case "$kind" in
+    daemon-guidance|daemon-control) scenario runner-daemon ;; log-success) scenario runner-stdout ;; esac
   cd "$STATE"
   local rc=0 runner=selfhost_storage_compose
   [[ "$kind" != daemon-control ]] || runner=daemon_guidance_positive_adapter
