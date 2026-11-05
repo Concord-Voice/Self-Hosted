@@ -291,9 +291,11 @@ func (h *Handler) VerifyPassword(ctx context.Context, userID, password string) (
 		return "", fmt.Errorf("lookup user: %w", err)
 	}
 
-	// Pre-flight lockout check — a locked account must short-circuit before
-	// the (relatively expensive) Argon2id hash verification.
-	if h.checkLoginLockout(ctx, email) {
+	// Count the guess before the (relatively expensive) Argon2id check, in
+	// one atomic step with the lockout check. A locked account short-circuits
+	// here, and a burst of concurrent guesses cannot all pass before any
+	// failure is recorded.
+	if !h.reserveLoginAttempt(ctx, email) {
 		return "", ErrAccountLocked
 	}
 
@@ -302,13 +304,10 @@ func (h *Handler) VerifyPassword(ctx context.Context, userID, password string) (
 		return "", fmt.Errorf("verify password: %w", err)
 	}
 	if !valid {
-		// Increment counter and possibly trigger lockout. recordFailedLogin
-		// applies the lockout AFTER threshold; the next request observes it.
-		// We deliberately do NOT also check checkLoginLockout post-record —
-		// the contract is that the caller sees ErrAccountLocked on the
-		// FOLLOWING request, matching /auth/login's UX where the threshold-
-		// reaching request still gets 401, not 423.
-		h.recordFailedLogin(ctx, email)
+		// The guess was counted above; lock if it reached the threshold. The
+		// threshold-reaching request still gets invalid credentials and the
+		// FOLLOWING request sees ErrAccountLocked, matching /auth/login.
+		h.recordCheckedFailure(ctx, email)
 		return "", ErrInvalidCredentials
 	}
 
