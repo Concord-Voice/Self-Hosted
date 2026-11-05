@@ -349,6 +349,9 @@ const (
 	errCodeAccountLocked     = "account_locked"
 	errCodeNoPassword        = "no_password" // pragma: allowlist secret
 	failureClassRevealVerify = "key_reveal_password_verify_failed"
+
+	errMsgFailedVerifyPassword     = "Failed to verify password"
+	errMsgCurrentPasswordIncorrect = "Current password is incorrect" // pragma: allowlist secret
 )
 
 // RevealMyKeys returns the wrapped identity key to a caller that proves the
@@ -375,7 +378,7 @@ func (h *Handler) RevealMyKeys(c *gin.Context) {
 		return
 	case err != nil:
 		h.log.Error("Failed to load password state for key reveal", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify password"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyPassword})
 		return
 	case !hasPassword:
 		// An SSO-only account has no password to prove; never hand the
@@ -385,7 +388,7 @@ func (h *Handler) RevealMyKeys(c *gin.Context) {
 	}
 	if h.passwords == nil { // pragma: allowlist secret
 		h.log.Error("Key reveal refused: password verifier not wired", "failure_class", failureClassRevealVerify)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify password"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyPassword})
 		return
 	}
 	// The shared verifier applies the email-keyed lockout /login uses, so a
@@ -410,12 +413,12 @@ func (h *Handler) RevealMyKeys(c *gin.Context) {
 		})
 		outcome := middleware.RecordAuthFailure(c.Request.Context(), h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
 		middleware.MarkAuthFailureOutcome(c, outcome) // a ban it created supersedes the denial
-		c.JSON(http.StatusForbidden, gin.H{"error": "Current password is incorrect", "code": errCodeInvalidCurrentPassword})
+		c.JSON(http.StatusForbidden, gin.H{"error": errMsgCurrentPasswordIncorrect, "code": errCodeInvalidCurrentPassword})
 	default:
 		// err is deliberately not logged: a hash decode failure can embed the
 		// hash (observability.md principle 1).
 		h.log.Error("Key reveal password verification failed", "failure_class", failureClassRevealVerify)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to verify password"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyPassword})
 	}
 }
 
@@ -1450,11 +1453,11 @@ func (h *Handler) verifyCurrentPassword(userID interface{}, currentPassword stri
 	match, err := auth.VerifyPassword(currentPassword, passwordHash)
 	if err != nil {
 		// The decode error can embed the stored hash; log the fixed class only.
-		h.log.Error("Failed to verify password", "failure_class", "password_verify_failed")
+		h.log.Error(errMsgFailedVerifyPassword, "failure_class", "password_verify_failed")
 		return "", http.StatusInternalServerError, errMsgFailedChangePassword
 	}
 	if !match {
-		return "", http.StatusUnauthorized, "Current password is incorrect"
+		return "", http.StatusUnauthorized, errMsgCurrentPasswordIncorrect
 	}
 	return passwordHash, 0, ""
 }
@@ -1560,7 +1563,7 @@ func (h *Handler) verifyStepUpWithLockedUser(
 	if !match {
 		return &stepUpReauthenticationError{
 			status: http.StatusUnauthorized,
-			body:   gin.H{"error": "Current password is incorrect"},
+			body:   gin.H{"error": errMsgCurrentPasswordIncorrect},
 		}
 	}
 
