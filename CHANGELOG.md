@@ -7,10 +7,10 @@ desktop app and the mobile app have their own versions and changelogs in the
 [Desktop](https://github.com/Concord-Voice/Desktop) and
 [Mobile](https://github.com/Concord-Voice/Mobile) repositories.
 
-Until 0.2.48, all components shared one version and one changelog. The sections
-up to and including 0.2.48 keep that shared history, filtered to the entries
-that changed server or self-host code. Their summaries describe the whole
-release as it shipped.
+Until 0.3.0, all components shared one version and one changelog. The sections
+up to and including 0.3.0 keep that shared history, filtered to the entries
+that changed server or self-host code. Summaries before 0.3.0 describe the
+whole release as it shipped.
 
 The format is based on [Keep a Changelog 1.1.0](https://keepachangelog.com/en/1.1.0/),
 and this project uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
@@ -30,11 +30,12 @@ belongs in it, and write it if the section has none. Do not edit the
 
 ## [Prerelease]
 
-The server is ready for paid plans: Supersonic and Wing subscriptions, a 30-day
-Supersonic trial, plan changes, and code credit. Servers can require MFA for
-dangerous actions, and purges and message timers can keep pinned messages.
+WebSocket event budgets are ready for self-hosted operators and stay off
+until an operator turns them on. Self-hosted deployments now ship from this
+repository, and operators can set separate minimum app versions for iOS and
+Android.
 
-**108 Total Changes** | 21 Added | 21 Changed | 38 Fixed | 28 Security
+**22 Total Changes** | 8 Added | 5 Changed | 7 Fixed | 2 Security
 
 ### Added
 
@@ -45,12 +46,46 @@ dangerous actions, and purges and message timers can keep pinned messages.
 - **Authentication:** Added an internal verified-session snapshot adapter for future step-up attempt accounting. Current request handling and attempt budgets are unchanged.
 - **Authentication:** Added dormant SQL receipt accounting for future separate step-up attempt budgets. Current request handling and attempt budgets are unchanged.
 - **Authentication:** Added a private process proof-work tracker for future step-up cutovers. Current request handling remains unchanged.
+- **Self-hosting:** Operators can set separate minimum app versions for iOS and Android with `CLIENT_MIN_VERSION_IOS` and `CLIENT_MIN_VERSION_ANDROID`. `CLIENT_MIN_VERSION` still sets the desktop minimum. API: mobile clients send `X-Concord-Client-Platform` (`ios` or `android`), or `client_platform` on the WebSocket; any other value gets a 400.
+
+### Changed
+
+- **Self-hosted setup:** The production Compose model now requires both WebSocket event-budget settings and forwards them to control-plane. Selected self-host commands take these values from root `.env`, so existing installations must prepare both keys before adopting this model; rendering does not authorize activation.
+- **Self-hosted setup:** Fresh installs now write `WS_EVENT_BUDGET_ENABLED=false`, so budgets stay off until an operator sets `true`. The `concord-selfhost`, `concord-ctl.sh` and installer entrypoints, and the TLS helper's reader shell, start Bash in privileged mode, so shell functions and `BASH_ENV` from the calling environment cannot bypass their environment cleanup. Run the wrapper directly, not as `bash concord-selfhost`.
+- **Operations:** WebSocket budget observability groundwork now exposes read-only aggregate engine snapshots. Collector publication, database catalogs and the matching Admin reader remain pending.
+- **Server:** WebSocket event budgets now include validated startup settings, dedicated Redis ownership and checked shutdown cleanup alongside dispatch, token renewal and bounded refusal responses. Activation still requires compatible clients, configuration delivery and rollout checks.
+- **Self-hosting:** Self-hosted deployments now ship from the dedicated Self-Hosted repository, with the service, admin, and package checks running in its own CI.
+
+### Fixed
+
+- **Self-hosted CI:** Build and configuration checks now provide explicit WebSocket budget settings, so required production inputs do not prevent those checks from rendering Compose.
+- **Account authority:** Owner cancellation now lets an in-flight lock-health ping finish within its existing timeout before explicitly releasing the serve lock.
+- **WebSocket:** Canceled socket and server lifetimes stop queued frames before activity tracking or handler work, including when event budgets are disabled.
+- **Operations:** Required PR builds now use the reviewed CI producer with exact-revision scanner checks, four control-plane test shards, and synthetic Compose build inputs.
+- **Operations:** The production-image build job now supplies synthetic WebSocket event-budget settings when it renders Compose, without changing deployment settings.
+- **Connections:** WebSocket input waiting on pacing or a full server queue now stops when its connection is canceled or the server shuts down.
+- **Operations:** Protected PR Semgrep, ESLint, and govulncheck scans now check out the exact merge revision selected by required CI; same-repository SARIF uploads use that revision even if GitHub regenerates another merge commit.
+
+### Security
+
+- **Dependencies:** Updated media development tooling and the CI license checker to patched minimatch and glob versions while retaining dependency attribution checks.
+- **Accounts:** Guessing passwords on the key-reveal route now counts toward the same sign-in failure ban as the login page, and its attempt limits fail closed. API: a wrong `current_password` on `POST /api/v1/users/me/keys/reveal` is now 403 `invalid_current_password` instead of 401.
+
+## [0.3.0] - 2026-11-01
+
+The server is ready for paid plans: Supersonic and Wing subscriptions, a 30-day
+Supersonic trial, plan changes, and code credit. Servers can require MFA for
+dangerous actions, and purges and message timers can keep pinned messages.
+
+**86 Total Changes** | 13 Added | 16 Changed | 31 Fixed | 26 Security
+
+### Added
+
 - **Billing:** Settings ▸ Subscription lists each plan with its monthly and yearly price and opens a secure Stripe page to subscribe or manage billing.
 - **Billing:** New subscribers get a 30-day free trial of Supersonic. The card is collected first, and billing starts when the trial ends. Wing has no trial.
 - **Billing:** Subscribers can change plans in Settings, see the amount due before an immediate switch, and withdraw a change that is booked for renewal.
 - **Billing:** A Wing subscription can share Supersonic with one friend. Invite the friend from Settings ▸ Subscription. You can change your +1 once every 30 days.
 - **Billing:** A premium code redeemed on a paid subscription becomes account credit that your next renewals use first. A code for a different plan shows the credit and asks you to confirm.
-- **Self-hosting:** Operators can set separate minimum app versions for iOS and Android with `CLIENT_MIN_VERSION_IOS` and `CLIENT_MIN_VERSION_ANDROID`. `CLIENT_MIN_VERSION` still sets the desktop minimum. API: mobile clients send `X-Concord-Client-Platform` (`ios` or `android`), or `client_platform` on the WebSocket; any other value gets a 400.
 - **Servers:** Owners can require MFA for dangerous actions from Server Settings. Members then confirm each dangerous action with a code or security key ([#3454](internal development reference omitted), [#3456](internal development reference omitted), [#3675](internal development reference omitted)). API: send `mfa_code` on a retry after a 403 `mfa_required`. `GET /api/v1/server/capabilities` reports `features.mfaEnforcedDangerousActions`.
 - **Servers:** Delete Role asks you to confirm and names the role first ([#3675](internal development reference omitted)).
 - **Messages:** Every purge has an "Include pinned messages" option, off by default ([#3458](internal development reference omitted), [#3552](internal development reference omitted)). API: `include_pinned` and `features.purgeKeepsPinned`.
@@ -62,11 +97,6 @@ dangerous actions, and purges and message timers can keep pinned messages.
 
 ### Changed
 
-- **Self-hosted setup:** The production Compose model now requires both WebSocket event-budget settings and forwards them to control-plane. Selected self-host commands take these values from root `.env`, so existing installations must prepare both keys before adopting this model; rendering does not authorize activation.
-- **Self-hosted setup:** Fresh installs now write `WS_EVENT_BUDGET_ENABLED=false`, so budgets stay off until an operator sets `true`. The `concord-selfhost`, `concord-ctl.sh` and installer entrypoints, and the TLS helper's reader shell, start Bash in privileged mode, so shell functions and `BASH_ENV` from the calling environment cannot bypass their environment cleanup. Run the wrapper directly, not as `bash concord-selfhost`.
-- **Operations:** WebSocket budget observability groundwork now exposes read-only aggregate engine snapshots. Collector publication, database catalogs and the matching Admin reader remain pending.
-- **Server:** WebSocket event budgets now include validated startup settings, dedicated Redis ownership and checked shutdown cleanup alongside dispatch, token renewal and bounded refusal responses. Activation still requires compatible clients, configuration delivery and rollout checks.
-- **Self-hosting:** Self-hosted deployments now ship from the dedicated Self-Hosted repository, with the service, admin, and package checks running in its own CI.
 - **Voice:** Updated server voice transport dependencies.
 - **Accessibility:** The desktop app follows the system's reduced-motion setting, hides decorative icons from screen readers, and shows text while bundled fonts load ([#4181](internal development reference omitted)).
 - **Plans:** Every account can create any number of servers, search as far back as a subscriber, and customize theme colors. One account can create up to 10 servers in 24 hours ([#3861](internal development reference omitted)).
@@ -86,13 +116,6 @@ dangerous actions, and purges and message timers can keep pinned messages.
 
 ### Fixed
 
-- **Self-hosted CI:** Build and configuration checks now provide explicit WebSocket budget settings, so required production inputs do not prevent those checks from rendering Compose.
-- **Account authority:** Owner cancellation now lets an in-flight lock-health ping finish within its existing timeout before explicitly releasing the serve lock.
-- **WebSocket:** Canceled socket and server lifetimes stop queued frames before activity tracking or handler work, including when event budgets are disabled.
-- **Operations:** Required PR builds now use the reviewed CI producer with exact-revision scanner checks, four control-plane test shards, and synthetic Compose build inputs.
-- **Operations:** The production-image build job now supplies synthetic WebSocket event-budget settings when it renders Compose, without changing deployment settings.
-- **Connections:** WebSocket input waiting on pacing or a full server queue now stops when its connection is canceled or the server shuts down.
-- **Operations:** Protected PR Semgrep, ESLint, and govulncheck scans now check out the exact merge revision selected by required CI; same-repository SARIF uploads use that revision even if GitHub regenerates another merge commit.
 - **Voice:** The media server now forwards your app's attestation when it checks your voice access, a step toward letting servers require an attested app ([#4211](internal development reference omitted)).
 - **Voice:** Calling someone back in a DM joins the call still open there instead of silently stopping, a failed call start now shows an error, your camera comes back after a brief connection drop, and 1:1 DMs show Join voice call during a call ([#4179](internal development reference omitted)).
 - **Billing:** Blocking someone ends a Wing seat between you, whichever side blocks. Unfriending or blocking also cancels a pending seat invite at once; unfriending alone keeps an active seat ([#4172](internal development reference omitted)).
@@ -127,9 +150,7 @@ dangerous actions, and purges and message timers can keep pinned messages.
 
 ### Security
 
-- **Dependencies:** Updated media development tooling and the CI license checker to patched minimatch and glob versions while retaining dependency attribution checks.
 - **Accounts:** Your encrypted key is only sent to a device that has just signed in, or that confirms your current password, so a stolen session can no longer download it. Changing your password asks for your current password as before.
-- **Accounts:** Guessing passwords on the key-reveal route now counts toward the same sign-in failure ban as the login page, and its attempt limits fail closed. API: a wrong `current_password` on `POST /api/v1/users/me/keys/reveal` is now 403 `invalid_current_password` instead of 401.
 - **Voice:** One account can no longer fill the voice server's connection capacity with idle connections and lock other users out of voice.
 - **Accounts:** A device signed out while its account-deletion request was still processing can no longer delete the account ([#4192](internal development reference omitted)).
 - **Accounts:** Signing out a device or revoking a session cuts it off everywhere at once. Its open connection and any voice call end before the change is confirmed, and a signed-out device can no longer act on your account.
