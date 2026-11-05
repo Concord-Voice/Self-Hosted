@@ -251,7 +251,9 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) string {
 	cancel()
 	_ = pr.Close()
 	runErr := <-done
-	if (runErr != nil && !stopped) || sc.Err() != nil {
+	// The scanner's other errors are the run's own error, passed through the
+	// pipe, so only an over-long line is a separate failure.
+	if (runErr != nil && !stopped) || errors.Is(sc.Err(), bufio.ErrTooLong) {
 		if written == 0 {
 			refuse(w, http.StatusBadGateway, "logs_unavailable")
 		}

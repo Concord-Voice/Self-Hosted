@@ -92,6 +92,20 @@ func TestCheckTrusted(t *testing.T) {
 	}
 	_ = os.Remove(neighbour)
 
+	// ... and by the directories above its target: a safe file in an unsafe
+	// directory (t.TempDir is under the world-writable /tmp) can be replaced.
+	safe := filepath.Join(t.TempDir(), "safe.sh")
+	if err := os.WriteFile(safe, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(safe, neighbour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CheckTrusted(cli); err == nil {
+		t.Fatal("symlink into an unsafe directory accepted")
+	}
+	_ = os.Remove(neighbour)
+
 	if err := os.Chmod(dir, 0o775); err != nil { //nolint:gosec // deliberately unsafe input
 		t.Fatal(err)
 	}

@@ -28,7 +28,8 @@ checkout today:
 
 1. Keep the checkout owned by root and not writable by group or others. The
    agent refuses to start, and refuses each request, if the `concord-selfhost`
-   wrapper, any file beside it (or the target of a symlink beside it), or any
+   wrapper, any file beside it (or the target of a symlink beside it, and the
+   directories above that target), or any
    directory above it is owned by another user or is group- or world-writable.
    It runs the wrapper by its resolved path, so a symlink on the configured
    path cannot be swapped after the check.

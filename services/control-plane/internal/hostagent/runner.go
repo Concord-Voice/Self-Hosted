@@ -74,6 +74,9 @@ func CheckTrusted(cli string) (string, error) {
 			if err != nil {
 				return "", fmt.Errorf("trust check %s: %w", p, err)
 			}
+			if err := trustedAncestors(filepath.Dir(target)); err != nil {
+				return "", err
+			}
 			p = target
 		} else if !e.Type().IsRegular() {
 			continue
@@ -82,12 +85,20 @@ func CheckTrusted(cli string) (string, error) {
 			return "", err
 		}
 	}
+	if err := trustedAncestors(dir); err != nil {
+		return "", err
+	}
+	return resolved, nil
+}
+
+// trustedAncestors checks dir and every directory above it.
+func trustedAncestors(dir string) error {
 	for p := dir; ; p = filepath.Dir(p) {
 		if err := trustedEntry(p); err != nil {
-			return "", err
+			return err
 		}
 		if p == "/" {
-			return resolved, nil
+			return nil
 		}
 	}
 }

@@ -231,6 +231,11 @@ func TestLogsReportsRunFailures(t *testing.T) {
 	if rec = get(t, s, http.MethodGet, "/v1/logs?service=redis&follow=1"); rec.Code != http.StatusOK || rec.Body.String() != "a\n" {
 		t.Fatalf("follow: got %d %q", rec.Code, rec.Body.String())
 	}
+	// A quiet follow that ends at followMax is an empty 200, not a 502.
+	f.out = ""
+	if rec = get(t, s, http.MethodGet, "/v1/logs?service=redis&follow=1"); rec.Code != http.StatusOK || rec.Body.Len() != 0 {
+		t.Fatalf("quiet follow: got %d %q", rec.Code, rec.Body.String())
+	}
 }
 
 func TestStalledReaderReleasesSlot(t *testing.T) {
