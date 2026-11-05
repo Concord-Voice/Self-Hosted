@@ -15,6 +15,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/google/uuid"
@@ -317,6 +318,48 @@ func TestVerifyPassword_PreflightLockout_ReturnsSentinel(t *testing.T) {
 	require.Error(t, err)
 	assert.True(t, errors.Is(err, auth.ErrAccountLocked),
 		"locked account must return auth.ErrAccountLocked sentinel")
+}
+
+// TestVerifyPassword_ConcurrentBurst_StopsAtThreshold verifies that a burst of
+// concurrent wrong guesses cannot get past the lockout: each guess is counted
+// before its password is checked, so at most loginLockoutThreshold (5) guesses
+// are checked and the rest are refused as locked.
+func TestVerifyPassword_ConcurrentBurst_StopsAtThreshold(t *testing.T) {
+	rig := newAdapterRig(t)
+	const goodPassword = "CorrectHorseBatteryStaple1!" // pragma: allowlist secret
+	const wrongPassword = "WrongHorseBatteryStaple1!"  // pragma: allowlist secret
+	userID := insertAdapterUser(t, rig, "burst@example.test", "burstuser", goodPassword)
+
+	const burst = 8
+	errs := make([]error, burst)
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := range burst {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			_, errs[i] = rig.Handler.VerifyPassword(context.Background(), userID, wrongPassword)
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+
+	checked, locked := 0, 0
+	for _, err := range errs {
+		require.Error(t, err)
+		if errors.Is(err, auth.ErrAccountLocked) {
+			locked++
+		} else {
+			checked++
+		}
+	}
+	assert.LessOrEqual(t, checked, 5, "no more than the threshold may reach the password check")
+	assert.Equal(t, burst, checked+locked)
+
+	// The account is now locked, even for the correct password.
+	_, err := rig.Handler.VerifyPassword(context.Background(), userID, goodPassword)
+	assert.True(t, errors.Is(err, auth.ErrAccountLocked), "burst must leave the account locked")
 }
 
 // TestVerifyPassword_UnknownUser_ReturnsInvalidCredentials verifies the
