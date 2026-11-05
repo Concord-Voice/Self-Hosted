@@ -395,9 +395,9 @@ r=$(make_repo 0.2.20); touch_svcdoc "$r" note; commit_all "$r"
 run_case "service README change is exempt" 0 "$r"
 
 # ── Case 30: client/admin is deliberately OUTSIDE the include set ───────────
-# The admin console is operator-facing; its changes are not rendered in the
-# desktop post-update modal. The plan named this case and it was never written,
-# so ADDING client/admin to the include set broke nothing.
+# The admin console is operator-facing and was outside the shared changelog's
+# include set; the per-repo split keeps that rule unchanged. This case pins it,
+# so adding client/admin to the include set has to be a deliberate change.
 r=$(make_repo 0.2.20); touch_admin "$r" change; commit_all "$r"
 run_case "client/admin change is not gated" 0 "$r"
 

@@ -77,7 +77,7 @@ The server is ready for paid plans: Supersonic and Wing subscriptions, a 30-day
 Supersonic trial, plan changes, and code credit. Servers can require MFA for
 dangerous actions, and purges and message timers can keep pinned messages.
 
-**86 Total Changes** | 13 Added | 16 Changed | 31 Fixed | 26 Security
+**84 Total Changes** | 13 Added | 14 Changed | 31 Fixed | 26 Security
 
 ### Added
 
@@ -98,11 +98,9 @@ dangerous actions, and purges and message timers can keep pinned messages.
 ### Changed
 
 - **Voice:** Updated server voice transport dependencies.
-- **Accessibility:** The desktop app follows the system's reduced-motion setting, hides decorative icons from screen readers, and shows text while bundled fonts load ([#4181](internal development reference omitted)).
 - **Plans:** Every account can create any number of servers, search as far back as a subscriber, and customize theme colors. One account can create up to 10 servers in 24 hours ([#3861](internal development reference omitted)).
 - **Web:** Opening the web address in a browser shows a link to download the desktop app, not an "Update Required" prompt.
 - **Search:** Message search looks back 90 days or 600 messages at a time, loads older results as you scroll, and says when it is paused or stopped ([#3875](internal development reference omitted)).
-- **Settings:** Subscription is under Account, protection settings are under Security, and device permissions are under About & Updates ([#3780](internal development reference omitted)).
 - **Security:** Purge, purge protection, DM Clear, and Security settings prompts ask only for the methods your account uses. A passkey or security key works in one step ([#3660](internal development reference omitted), [#3673](internal development reference omitted)).
 - **Privacy:** New accounts start with stricter defaults for friend requests, voice details, call presence, and notification previews. Existing choices do not change.
 - **Friends:** Under Mutual Servers, people who share a server or a mutual friend with you, or who have your friend code, can send you a request. Username changes wait six months on Free and three on Premium.

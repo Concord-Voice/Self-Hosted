@@ -57,10 +57,11 @@ first_line() {
 
 # read_version <rev>: the server version at <rev>. Self-Hosted versions the
 # server and the self-host bundle with a plain-text VERSION file at the repo
-# root (one X.Y.Z line). The desktop app has its own version in the Desktop
-# repo; the two are no longer kept in lockstep. A missing file reads as empty.
+# root (one X.Y.Z line; only the first line is read). The desktop app has its
+# own version in the Desktop repo; the two are no longer kept in lockstep. A
+# missing file reads as empty.
 read_version() {
-  git show "$1:VERSION" 2>/dev/null | tr -d '[:space:]' || true
+  git show "$1:VERSION" 2>/dev/null | sed -n 1p | tr -d '[:space:]' || true
 }
 
 if [[ "${1-}" == "--help" ]]; then
