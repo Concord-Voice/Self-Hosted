@@ -386,6 +386,9 @@ class LoopbackTLS(unittest.TestCase):
                     stop.wait(5); conn.close(); continue
                 try:
                     context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+                    # Pin the floor so the fixture's protocol range is not a
+                    # second variable in these certificate-trust tests.
+                    context.minimum_version = ssl.TLSVersion.TLSv1_2
                     context.load_cert_chain(str(cert), str(key))
                     tls_conn = context.wrap_socket(conn, server_side=True)
                     tls_conn.close()
