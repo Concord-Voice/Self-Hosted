@@ -5,6 +5,7 @@
 # Usage:
 #   ./infrastructure/deploy/install-selfhost.sh            # interactive wizard
 #   ./infrastructure/deploy/install-selfhost.sh --env-file answers.env   # non-interactive
+#   ./infrastructure/deploy/install-selfhost.sh --preflight-only [--json]   # checks only, writes nothing
 #   ./infrastructure/deploy/install-selfhost.sh --help
 #
 # Exit codes: 0 ok | 1 runtime | 2 preflight failure
@@ -46,9 +47,12 @@ usage() {
   cat <<'USAGE'
 Concord Voice self-hosted installer
 
-Usage: install-selfhost.sh [--env-file <path>] [--help]
+Usage: install-selfhost.sh [--env-file <path> | --preflight-only [--json]] [--help]
   (no args)        interactive install wizard
   --env-file PATH  non-interactive install from an answers file
+  --preflight-only run every host check and exit; writes nothing
+                   --json prints one object on stdout:
+                   {"schema":1,"ok":bool,"checks":[{"name":...,"ok":bool}]}
   --help           show this help
 
 Exit codes: 0 ok | 1 runtime | 2 preflight failure
@@ -273,6 +277,32 @@ run_preflight() {
     echo -e "${RED}Preflight failed — aborting before any change.${NC}" >&2
     exit 2
   fi
+}
+
+# preflight_report [--json] — run EVERY check (no short-circuit) and report
+# each one. Writes nothing and needs no answers. Check names are fixed tokens,
+# so --json never carries host text; human reasons stay on stderr.
+preflight_report() {
+  local json=0 name rc=0 sep='' ok
+  local -a names=(os docker resources logrotate ports) results=()
+  [[ "${1:-}" == --json ]] && json=1
+  for name in "${names[@]}"; do
+    if { if (( json )); then "preflight_$name" >&2; else "preflight_$name"; fi; }; then
+      results+=(true)
+    else
+      results+=(false)
+      rc=2
+    fi
+  done
+  if (( json )); then
+    printf '{"schema":1,"checks":['
+    for ((ok = 0; ok < ${#names[@]}; ok++)); do
+      printf '%s{"name":"%s","ok":%s}' "$sep" "${names[ok]}" "${results[ok]}"
+      sep=','
+    done
+    printf '],"ok":%s}\n' "$([[ $rc == 0 ]] && echo true || echo false)"
+  fi
+  return "$rc"
 }
 
 # ── Secret generation ──────────────────────────────────────────────────────────
@@ -1018,6 +1048,13 @@ main() {
     --help|-h) usage; return $? ;;
     --env-file)
       [[ $# -eq 2 && -n "$2" ]] || { printf '%s\n' 'installer: --env-file needs one path' >&2; return 2; }
+      ;;
+    --preflight-only)
+      case "$#:${2:-}" in
+        1:) preflight_report; return $? ;;
+        2:--json) preflight_report --json; return $? ;;
+        *) printf '%s\n' 'installer: --preflight-only accepts only --json' >&2; return 2 ;;
+      esac
       ;;
     "") [[ $# -eq 0 ]] || return 2 ;;
     *) printf '%s\n' 'installer: unknown argument' >&2; usage >&2; return 2 ;;

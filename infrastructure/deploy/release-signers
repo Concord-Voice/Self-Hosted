@@ -1,0 +1,4 @@
+# SSH allowed-signers for Self-Hosted release tags (git gpg.ssh.allowedSignersFile).
+# `concord-selfhost update` refuses every tag while this file names no key.
+# The release key is added here when the release-signing work starts
+# signing tags. Format: <principal> <key-type> <public-key>

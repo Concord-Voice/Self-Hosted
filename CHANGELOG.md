@@ -42,6 +42,9 @@ Android.
 - **Authentication:** Added a dormant internal store for account-change request and origin rows, with caller-owned transactions and explicit retention of other decision obligations.
 - **Self-hosting:** Operators can configure separate Stable and Pre-Release SPA discovery streams. Existing clients keep Stable behavior; remote SPA serving remains off by default, and invalid live configuration updates preserve the previous settings.
 - **Self-hosted setup:** Fresh installer environment files now include explicit WebSocket event-budget settings, with preparation and rollback guidance for existing installations. Runtime delivery and activation remain separate steps.
+- **Self-hosted setup:** `concord-selfhost backup` writes a checksummed archive of the database, bundled file storage and `.env`, and `concord-selfhost restore ARCHIVE --confirm` puts it back after checking that it matches this install.
+- **Self-hosted setup:** `concord-selfhost update --to vX.Y.Z --confirm` moves an instance to a release tag only after verifying the tag's signature against the release keys in `release-signers`, then takes a backup before switching. Until release keys are published, it refuses every tag.
+- **Self-hosted setup:** `concord-selfhost status --json` and `health --json` print one machine-readable object, and `install-selfhost.sh --preflight-only [--json]` runs every host check without changing the host.
 - **Authentication:** Added a dormant transaction-local source marker for future account-change writers, with closed source validation and caller-owned transaction completion.
 - **Authentication:** Added an internal verified-session snapshot adapter for future step-up attempt accounting. Current request handling and attempt budgets are unchanged.
 - **Authentication:** Added dormant SQL receipt accounting for future separate step-up attempt budgets. Current request handling and attempt budgets are unchanged.

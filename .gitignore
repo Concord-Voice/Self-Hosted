@@ -297,3 +297,6 @@ graphify-out/*
 # Tri-Harness Concord Bridge worktrees and audit traces
 .worktrees/
 .agent-bus/
+
+# concord-selfhost backup archives hold .env secrets
+/backups/
