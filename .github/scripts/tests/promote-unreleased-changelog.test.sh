@@ -846,6 +846,27 @@ check 0 "CRLF body with a stale tally promotes" "$PROMOTE" 0.2.41 2026-08-26 "$f
 assert_true "CRLF stale tally is recounted and keeps its CRLF ending" \
   "$(python3 -c 'import sys; print("yes" if b"**3 Total Changes** | 2 Added | 1 Fixed\r\n" in open(sys.argv[1],"rb").read() else "no")' "$f")"
 
+# The shipped sections end a category with a bold paragraph, not a heading:
+# "**Known issues** (not counted as changes):". Its bullets are not changes.
+f=$(make_changelog '
+Summary sentence.
+
+**1 Total Changes** | 1 Security
+
+### Security
+
+- One.
+
+**Known issues** (not counted as changes):
+
+- Not a change.
+- Nor this.
+
+')
+check 0 "body with a bold Known issues block promotes" "$PROMOTE" 0.2.41 2026-08-26 "$f"
+assert_true "bullets under a bold paragraph are not counted" \
+  "$(grep -qFx '**1 Total Changes** | 1 Security' "$f" && echo yes || echo no)"
+
 echo ""
 echo "─────────────────────────────────────────"
 echo "PASS: $pass  FAIL: $fail"

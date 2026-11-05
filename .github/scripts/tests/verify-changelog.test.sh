@@ -15,7 +15,7 @@ SCRIPT="$SCRIPT_DIR/../verify-changelog.sh"
 PASS=0
 FAIL=0
 
-# make_repo <version> — new fixture repo with package.json at <version> and a
+# make_repo <version> — new fixture repo with VERSION at <version> and a
 # CHANGELOG containing an entry for 0.2.20 and the suffixed 0.2.0-Beta entry.
 make_repo() {
   local version="$1"
@@ -24,8 +24,7 @@ make_repo() {
   git -C "$dir" init -q
   git -C "$dir" config user.email test@example.com
   git -C "$dir" config user.name test
-  mkdir -p "$dir/client/desktop"
-  printf '{\n  "name": "concord",\n  "version": "%s"\n}\n' "$version" > "$dir/client/desktop/package.json"
+  printf '%s\n' "$version" > "$dir/VERSION"
   cat > "$dir/CHANGELOG.md" <<'EOF'
 # Changelog
 
@@ -90,7 +89,7 @@ run_case_at() { # <name> <expected> <dir> <base_rev>
 }
 
 set_version() { # <dir> <version>
-  printf '{\n  "name": "concord",\n  "version": "%s"\n}\n' "$2" > "$1/client/desktop/package.json"
+  printf '%s\n' "$2" > "$1/VERSION"
 }
 
 add_entry() { # <dir> <label>
@@ -166,12 +165,12 @@ commit_all() { git -C "$1" add -A && git -C "$1" commit -qm change; }
 # make_repo produces NO include-set files, which is why every case above is
 # unaffected by Rule 4 — its path filter matches nothing, so the rule fast-exits.
 # Rule 4's own cases have to create them.
-touch_include() { mkdir -p "$1/client/desktop/src" && echo "// $2" >> "$1/client/desktop/src/app.ts"; }
-touch_test()    { mkdir -p "$1/client/desktop/src/__tests__" && echo "// $2" >> "$1/client/desktop/src/__tests__/app.test.ts"; }
+touch_include() { mkdir -p "$1/services/media-plane/src" && echo "// $2" >> "$1/services/media-plane/src/app.ts"; }
+touch_test()    { mkdir -p "$1/services/media-plane/src/__tests__" && echo "// $2" >> "$1/services/media-plane/src/__tests__/app.test.ts"; }
 # A file inside a test DIRECTORY that is not itself named *.test.ts. Without it
 # the directory filter is unfalsifiable: app.test.ts is caught by the filename
 # filter too, so deleting the directory filter changes no result.
-touch_testdir()  { mkdir -p "$1/client/desktop/src/__tests__" && echo "// $2" >> "$1/client/desktop/src/__tests__/helpers.ts"; }
+touch_testdir()  { mkdir -p "$1/services/media-plane/src/__tests__" && echo "// $2" >> "$1/services/media-plane/src/__tests__/helpers.ts"; }
 # Two-thirds of Rule 4's include set had NO fixture: nothing put a non-exempt
 # file under services/control-plane or services/media-plane, so deleting either
 # from the regex survived the whole suite. The Go backend is exactly where the
@@ -200,7 +199,7 @@ run_case "no-bump passes" 0 "$r"
 
 # ── Case 2: bump WITH matching entry → PASS ───────────────────────────────────
 # Promotion-shaped since #2996: base [Prerelease] carries something, HEAD's is
-# emptied, and the heading matches package.json. Rule 3 requires all three, so
+# emptied, and the heading matches VERSION. Rule 3 requires all three, so
 # this case now models a real promotion rather than a bare hand-written section.
 r=$(make_repo 0.2.20)
 seed_unreleased "$r" "A human wrote this." && commit_all "$r"
@@ -272,11 +271,11 @@ set_version "$r" 0.2.21 && add_entry "$r" 0.2.21 && seed_unreleased "$r" "Still 
   && commit_all "$r"
 run_case "version heading without emptying Prerelease fails" 1 "$r"
 
-# ── Case 11: heading version not matching package.json → FAIL (#2996) ─────────
+# ── Case 11: heading version not matching VERSION → FAIL (#2996) ─────────
 r=$(make_repo 0.2.20)
 seed_unreleased "$r" "A human wrote this." && commit_all "$r"
 clear_unreleased "$r" && set_version "$r" 0.2.21 && add_entry "$r" 0.2.99 && commit_all "$r"
-run_case "promotion heading not matching package.json fails" 1 "$r"
+run_case "promotion heading not matching VERSION fails" 1 "$r"
 
 # ── Case 12: bullets added to an EXISTING section → PASS (#2996) ──────────────
 # The backfill case. Rule 3 keys on a heading being ADDED, so correcting an
@@ -396,9 +395,9 @@ r=$(make_repo 0.2.20); touch_svcdoc "$r" note; commit_all "$r"
 run_case "service README change is exempt" 0 "$r"
 
 # ── Case 30: client/admin is deliberately OUTSIDE the include set ───────────
-# The admin console is operator-facing; its changes are not rendered in the
-# desktop post-update modal. The plan named this case and it was never written,
-# so ADDING client/admin to the include set broke nothing.
+# The admin console is operator-facing and was outside the shared changelog's
+# include set; the per-repo split keeps that rule unchanged. This case pins it,
+# so adding client/admin to the include set has to be a deliberate change.
 r=$(make_repo 0.2.20); touch_admin "$r" change; commit_all "$r"
 run_case "client/admin change is not gated" 0 "$r"
 
@@ -499,8 +498,7 @@ r=$(mktemp -d)
 git -C "$r" init -q
 git -C "$r" config user.email test@example.com
 git -C "$r" config user.name test
-mkdir -p "$r/client/desktop"
-printf '{\n  "name": "concord",\n  "version": "0.2.20"\n}\n' > "$r/client/desktop/package.json"
+printf '0.2.20\n' > "$r/VERSION"
 git -C "$r" add -A && git -C "$r" commit -qm "base without a changelog"
 printf '# Changelog\n\n## [Prerelease]\n\n## [0.2.20] - 2026-06-30\n\n- New file.\n' > "$r/CHANGELOG.md"
 commit_all "$r"

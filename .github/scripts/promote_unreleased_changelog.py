@@ -277,6 +277,10 @@ def tally_line(body_text):
             continue
         if line.startswith("### "):
             current = line[4:].strip()
+        elif line.startswith("**"):
+            # A bold paragraph such as "**Known issues** (not counted as
+            # changes):" ends the category; its bullets are not changes.
+            current = None
         elif current in CATEGORY_ORDER and line.startswith("- "):
             counts[current] = counts.get(current, 0) + 1
     names = [c for c in CATEGORY_ORDER if c in counts]

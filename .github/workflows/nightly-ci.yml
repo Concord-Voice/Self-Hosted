@@ -25,7 +25,7 @@
 # promotion:
 #
 #   ./.github/scripts/promote-unreleased-changelog.sh <next>
-#   cd client/desktop && npm version <next> --no-git-tag-version
+#   printf "%s\n" <next> > VERSION
 #
 # That is not a convention, it is what verify-changelog.sh (#1857) already
 # enforces: Rule 1 fails a bump with no `## [<version>]` section at HEAD, and
