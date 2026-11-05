@@ -1156,7 +1156,8 @@ return 0
 `)
 
 func (h *Handler) runLoginAttemptScript(ctx context.Context, email, mode string) (int64, error) {
-	args := []interface{}{mode, loginLockoutThreshold, int64(time.Hour / time.Second)}
+	args := make([]interface{}, 0, 3+len(loginLockoutDurations))
+	args = append(args, mode, loginLockoutThreshold, int64(time.Hour/time.Second))
 	for _, d := range loginLockoutDurations {
 		args = append(args, int64(d/time.Second))
 	}
