@@ -25,7 +25,7 @@ With `--json`, stdout carries `{"schema":1,"ok":true,"archive":"<file name>"}` o
 
 - It contains anything other than the top-level directory and the four known parts (`manifest.json`, `postgres.dump`, `env`, `minio.tar`) as regular files. The archive is read once, and each part is written by its name, never by a path from the archive.
 - A part is missing, a part is not in the manifest, or a checksum does not match.
-- Its release differs from this install. The release is the content of `VERSION`, or the git commit when there is no `VERSION` file.
+- Its release differs from this install. The release is the git commit in a git checkout, or the content of `VERSION` in an install without git.
 - Its storage mode differs from this install.
 - Its `env` differs from the current `.env`.
 

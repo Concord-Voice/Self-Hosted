@@ -162,6 +162,16 @@ else
   fail "BYO S3 backup out=$out calls=$(cat "$WORK/calls")"
 fi
 
+# ── a git checkout is identified by its commit, not VERSION ───────────
+fixture bundled
+git -C "$ROOT" init -q && git -C "$ROOT" -c user.name=t -c user.email=t@example.invalid commit -q --allow-empty -m one
+commit="$(git -C "$ROOT" rev-parse HEAD)"
+out="$(run_fn verb_backup --out "$WORK/bk4" --json 2>/dev/null)"
+name="$(python3 -c 'import json,sys; print(json.loads(sys.argv[1])["archive"])' "$out" 2>/dev/null)"
+got="$(tar -xzOf "$WORK/bk4/$name" ./manifest.json 2>/dev/null | python3 -c 'import json,sys; print(json.load(sys.stdin)["release"])' 2>/dev/null)"
+[[ -n "$commit" && "$got" == "$commit" ]] && pass "a git checkout records its commit even when VERSION exists" \
+  || fail "release in git checkout: got=$got want=$commit"
+
 # ── failed dump writes no archive ─────────────────────────────────────
 fixture bundled
 STUB_COMPOSE_RC=1 run_fn verb_backup --out "$WORK/bk3" >/dev/null 2>&1; rc=$?

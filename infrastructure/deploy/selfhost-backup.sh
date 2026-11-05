@@ -15,13 +15,14 @@ readonly BACKUP_HELPER_IMAGE=concordvoice-postgres:16-alpine
 
 _backup_fail() { printf 'selfhost-backup: %s\n' "$1" >&2; return 1; }
 
-# _backup_release — identity a restore must match. A packaged install ships
-# VERSION; a checkout uses its commit. Unknown identity refuses restore.
+# _backup_release — identity a restore must match. A git checkout uses its
+# commit, since one VERSION spans many commits and schemas; a packaged install
+# without git uses VERSION. Unknown identity refuses restore.
 _backup_release() {
-  if [[ -f "$PROJECT_ROOT/VERSION" ]]; then
-    tr -d '[:space:]' <"$PROJECT_ROOT/VERSION"
-  else
+  if git -C "$PROJECT_ROOT" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
     git -C "$PROJECT_ROOT" rev-parse HEAD 2>/dev/null
+  elif [[ -f "$PROJECT_ROOT/VERSION" ]]; then
+    tr -d '[:space:]' <"$PROJECT_ROOT/VERSION"
   fi
 }
 
