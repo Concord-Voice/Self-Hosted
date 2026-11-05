@@ -66,7 +66,8 @@ _update_run() {
     return 0
   fi
   _update_fail "the stack did not come back healthy on $tag"
+  local backup_name="${BACKUP_LAST_NAME:-LATEST_BACKUP}"
   printf 'To roll back:\n  git -C %q checkout --detach %s\n  ./infrastructure/deploy/concord-selfhost restore backups/%s --confirm\n' \
-    "$PROJECT_ROOT" "$previous" "${BACKUP_LAST_NAME:-<latest backup>}" >&2
+    "$PROJECT_ROOT" "$previous" "$backup_name" >&2
   return 1
 }
