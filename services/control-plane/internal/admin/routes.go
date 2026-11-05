@@ -71,6 +71,9 @@ func RegisterRoutes(rg *gin.RouterGroup, h *Handler, metrics *opsmetrics.AdminHa
 		gated.Use(AdminAuthRequired(h.sessions))
 		{
 			gated.POST("/admins", h.CreateAdmin)
+			gated.GET("/server/status", h.server.Status)
+			gated.GET("/server/health", h.server.Health)
+			gated.GET("/server/logs", h.server.Logs)
 
 			metricsRoutes := gated.Group("")
 			metricsRoutes.Use(middleware.RateLimitByIPFailClosedWithHandlers(

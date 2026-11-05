@@ -18,8 +18,28 @@ answers any other path with 404, any other method with 405, and a bad
 parameter with 400. It never runs a shell and never passes caller text to the
 command line.
 
-The Admin Console connection is added separately; until then the agent only
-answers on its socket.
+## Admin Console
+
+The Admin Console's Server page reads the agent through three signed-in admin
+routes. Each call writes one `server_read` row to the admin audit log with the
+action, the service for logs, and the result.
+
+| Route | Agent request |
+| --- | --- |
+| `GET /admin/api/v1/server/status` | `/v1/status` |
+| `GET /admin/api/v1/server/health` | `/v1/health` |
+| `GET /admin/api/v1/server/logs?service=S&lines=N` | `/v1/logs` (never follow) |
+
+`concord-selfhost` connects the console to the agent only when both of these
+hold, and otherwise leaves control-plane exactly as before:
+
+1. `ADMIN_CONSOLE_ENABLED=true` in `.env`.
+2. The `concord-agent` group exists on the host.
+
+It then adds `docker-compose.host-agent.yml`, which mounts
+`/run/concord-agent` read-only into control-plane and adds the container to
+that group. Run `concord-selfhost up` after installing the agent to apply it.
+The page shows "agent unavailable" until the agent is running.
 
 ## Install
 

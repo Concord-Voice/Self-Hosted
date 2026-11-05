@@ -66,6 +66,7 @@ type Handler struct {
 	redis    *redis.Client
 	cfg      *config.Config
 	log      *logger.Logger
+	server   *ServerArea
 
 	// dummyPasswordHash is a throwaway Argon2id hash verified against when the
 	// requested username does not exist, so the password step takes the same time
@@ -99,9 +100,11 @@ func NewHandler(db *sql.DB, rdb *redis.Client, log *logger.Logger, cfg *config.C
 		return nil, fmt.Errorf("admin handler: seed enumeration-defense hash: %w", err)
 	}
 
+	audit := NewAuditLog(db)
 	return &Handler{
 		repo:              NewAdminRepo(db),
-		audit:             NewAuditLog(db),
+		audit:             audit,
+		server:            NewServerArea(audit, log),
 		sessions:          NewSessionStore(rdb, nil),
 		lockout:           NewLockout(rdb, nil),
 		enroll:            NewEnrollmentStore(rdb),
