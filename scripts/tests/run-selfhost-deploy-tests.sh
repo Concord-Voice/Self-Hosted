@@ -12,6 +12,7 @@ SUITES=(
   scripts/tests/test-provision-cert.sh
   scripts/tests/test-concord-selfhost.sh
   infrastructure/deploy/tests/test-selfhost-storage.sh
+  infrastructure/deploy/tests/test-selfhost-backup.sh
   infrastructure/deploy/tests/test-selfhost-byo-s3.sh
   infrastructure/deploy/tests/test-selfhost-cert-delivery.sh
   infrastructure/deploy/tests/test-selfhost-tls-readiness.sh

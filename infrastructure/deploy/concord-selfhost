@@ -132,6 +132,13 @@ Verbs:
                TLS listener serves the selected certificate on port 5349
                --json prints one object on stdout: {"schema":1,"ok":bool,
                "checks":[{"name":...,"ok":bool}]}; reasons stay on stderr
+  backup [--out DIR] [--json]
+               write a 0600 archive (database dump, bundled MinIO data, .env,
+               checksummed manifest) to DIR (default ./backups, mode 0700)
+  restore ARCHIVE --confirm [--json]
+               verify the archive matches this release, storage mode and .env,
+               stop the stack, restore the database (and bundled MinIO data),
+               then run up and health
   --help       show this help
 
 Run from the repo root. The .env in the repo root is auto-loaded by compose.
@@ -368,6 +375,11 @@ main() {
     status)     shift; verb_status "$@" ;;
     logs)       shift; verb_logs "$@" ;;
     health)     shift; verb_health "$@" ;;
+    backup|restore)
+      # shellcheck source=selfhost-backup.sh
+      source "$SCRIPT_DIR/selfhost-backup.sh" || return 1
+      if [[ "$1" == backup ]]; then shift; verb_backup "$@"; else shift; verb_restore "$@"; fi
+      ;;
     --help|-h|"") usage ;;
     *)
       echo -e "${RED}unknown verb: $1${NC}" >&2

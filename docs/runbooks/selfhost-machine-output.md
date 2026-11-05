@@ -37,6 +37,10 @@ This runs the same checks as `health` and prints one object on stdout:
 
 The check names are `storage_model`, `storage_minio_inactive`, `control_plane`, `port_posture` and `coturn_tls`. A check that did not run because an earlier step failed is absent from the list. The exit code matches plain `health`.
 
+## `concord-selfhost backup --json` and `restore --json`
+
+See [selfhost-backup-restore.md](selfhost-backup-restore.md).
+
 ## Rules for readers
 
 - `schema` changes only for incompatible changes. Readers must refuse a schema they do not know.
