@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -80,10 +81,10 @@ func TestStatus(t *testing.T) {
 
 func TestStatusRejectsBadOutput(t *testing.T) {
 	cases := map[string]*fakeRunner{
-		"wrong schema":  {out: `{"schema":2,"services":[]}`},
-		"not json":      {out: "boom"},
-		"exit 2":        {out: statusJSON, err: exitErr(2)},
-		"too large":     {out: strings.Repeat(" ", maxCLIOutput+1) + statusJSON},
+		"wrong schema": {out: `{"schema":2,"services":[]}`},
+		"not json":     {out: "boom"},
+		"exit 2":       {out: statusJSON, err: exitErr(2)},
+		"too large":    {out: strings.Repeat(" ", maxCLIOutput+1) + statusJSON},
 	}
 	for name, f := range cases {
 		if rec := get(t, NewServer(f), http.MethodGet, "/v1/status"); rec.Code != http.StatusBadGateway {
@@ -188,12 +189,14 @@ func TestInFlightLimit(t *testing.T) {
 
 func TestSanitizeLogLine(t *testing.T) {
 	cases := map[string]string{
-		"plain\ttab":               "plain\ttab",
-		"\x1b[2J\x1b[Hcleared":     "cleared",
-		"bell\x07 nul\x00 del\x7f": "bell nul del",
-		"c1\u0085 ls  ps ":         "c1 ls ps",
-		"osc\x1b]0;title\x07":      "osc0;title",
-		"emoji ok 🎉":               "emoji ok 🎉",
+		"plain\ttab":                  "plain\ttab",
+		"\x1b[2J\x1b[Hcleared":        "cleared",
+		"bell\x07 nul\x00 del\x7f":    "bell nul del",
+		"c1\u0085 ls  ps ":            "c1 ls ps",
+		"osc\x1b]0;title\x07":         "osc0;title",
+		"emoji ok 🎉":                  "emoji ok 🎉",
+		"bidi\u202eevil\u2066x\u2069": "bidievilx",
+		"zw\u200bsp\ufeffbom\u061c":   "zwspbom",
 	}
 	for in, want := range cases {
 		if got := SanitizeLogLine(in); got != want {
@@ -227,5 +230,35 @@ func TestLogsReportsRunFailures(t *testing.T) {
 	s.followMax = 20 * time.Millisecond
 	if rec = get(t, s, http.MethodGet, "/v1/logs?service=redis&follow=1"); rec.Code != http.StatusOK || rec.Body.String() != "a\n" {
 		t.Fatalf("follow: got %d %q", rec.Code, rec.Body.String())
+	}
+}
+
+func TestStalledReaderReleasesSlot(t *testing.T) {
+	// A client that never reads must not keep a follower slot once the
+	// follow budget and the write grace have passed.
+	f := &fakeRunner{out: strings.Repeat(strings.Repeat("x", 4000)+"\n", 4000), wait: make(chan struct{})}
+	s := NewServer(f)
+	s.followMax = 50 * time.Millisecond
+	s.writeGrace = 50 * time.Millisecond
+	ts := httptest.NewServer(s)
+	defer ts.Close()
+	conn, err := net.Dial("tcp", ts.Listener.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = conn.Close() }()
+	if _, err := io.WriteString(conn, "GET /v1/logs?service=redis&follow=1 HTTP/1.1\r\nHost: agent\r\n\r\n"); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(3 * time.Second); ; time.Sleep(10 * time.Millisecond) {
+		f.mu.Lock()
+		started := len(f.args) == 1
+		f.mu.Unlock()
+		if started && len(s.followers) == 0 && len(s.inFlight) == 0 {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("stalled reader still holds a slot")
+		}
 	}
 }

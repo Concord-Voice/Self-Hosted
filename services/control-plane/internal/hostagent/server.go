@@ -16,6 +16,7 @@ import (
 	"regexp"
 	"strconv"
 	"time"
+	"unicode"
 )
 
 // Limits. Each is a ceiling a caller cannot raise.
@@ -55,16 +56,20 @@ type Server struct {
 	run       Runner
 	inFlight  chan struct{}
 	followers chan struct{}
-	followMax time.Duration
+	// writeGrace is how long past an action's budget a response may take to
+	// write before the connection is cut.
+	writeGrace time.Duration
+	followMax  time.Duration
 }
 
 // NewServer returns a Server that runs actions through r.
 func NewServer(r Runner) *Server {
 	return &Server{
-		run:       r,
-		inFlight:  make(chan struct{}, maxInFlight),
-		followers: make(chan struct{}, maxFollowers),
-		followMax: followMaxRuntime,
+		run:        r,
+		inFlight:   make(chan struct{}, maxInFlight),
+		followers:  make(chan struct{}, maxFollowers),
+		followMax:  followMaxRuntime,
+		writeGrace: 5 * time.Second,
 	}
 }
 
@@ -96,6 +101,9 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusTooManyRequests, "busy")
 		return
 	}
+	// A client that stops reading must not hold a slot past the action's own
+	// budget; the run's timeout cannot interrupt a blocked write.
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(healthTimeout + s.writeGrace))
 	outcome := handle(w, r)
 	log.Printf("concord-agent: action=%s outcome=%s", action, outcome)
 }
@@ -209,6 +217,7 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) string {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
+	_ = http.NewResponseController(w).SetWriteDeadline(time.Now().Add(timeout + s.writeGrace))
 
 	w.Header().Set(contentType, "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
@@ -253,14 +262,15 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) string {
 
 var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-_]`)
 
-// SanitizeLogLine removes terminal escapes and control characters (tab kept)
+// SanitizeLogLine removes terminal escapes, control characters (tab kept) and
+// invisible format characters such as bidi overrides,
 // and caps the length, so a log line cannot drive a terminal or forge lines.
 func SanitizeLogLine(s string) string {
 	s = ansiEscape.ReplaceAllString(s, "")
 	out := make([]rune, 0, len(s))
 	size := 0
 	for _, c := range s {
-		if c == '\t' || (c >= 0x20 && c != 0x7f && (c < 0x80 || c > 0x9f) && c != 0x2028 && c != 0x2029 && c != 0xfffd) {
+		if c == '\t' || (c >= 0x20 && c != 0x7f && (c < 0x80 || c > 0x9f) && c != 0x2028 && c != 0x2029 && c != 0xfffd && !unicode.Is(unicode.Cf, c)) {
 			if size += len(string(c)); size > maxLogLineBytes {
 				break
 			}

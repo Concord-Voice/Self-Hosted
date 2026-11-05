@@ -70,8 +70,11 @@ is logged to the journal as `action=… outcome=…`, without parameters.
   `logs_unavailable`.
 - An idle connection is closed after 60 seconds.
 - A log request without follow returns at most the lines asked for.
-- Each log line is capped at 4096 bytes, with terminal escapes and control
-  characters removed (tab is kept).
+- Each log line is capped at 4096 bytes, with terminal escapes, control
+  characters and invisible format characters (such as bidi overrides)
+  removed. Tab is kept.
+- A response that the client stops reading is cut 5 seconds after the
+  action's time budget, so a stalled client cannot hold a slot.
 
 ## Threat model
 
@@ -80,9 +83,10 @@ is logged to the journal as `action=… outcome=…`, without parameters.
   identifiers. Add only the control-plane container's group to it.
 - **The agent trusts the checkout.** It runs the wrapper as root, and the
   wrapper reads the Compose files and `.env` in the checkout. The agent checks
-  the wrapper's directory and every directory above it, but a writable Compose
-  file elsewhere in the checkout would still be a path to root. Keep the whole
-  checkout root-owned.
+  the wrapper's directory and every directory above it. Its own actions only
+  read (`compose ps`, `config`, `logs`), but a writable Compose file elsewhere
+  in the checkout becomes a path to root the next time an operator runs `up`.
+  Keep the whole checkout root-owned.
 - **The `docker` group is already root.** Membership of the `docker` group
   gives root on the host with or without this agent.
 - **Confused deputy.** The agent allows only fixed actions, whatever the
