@@ -1169,16 +1169,17 @@ func (h *Handler) runLoginAttemptScript(ctx context.Context, email, mode string)
 }
 
 // reserveLoginAttempt counts a password guess before it is checked. It returns
-// false when the account is locked, or when Redis fails (fail closed: an
-// uncounted guess would reopen unlimited guessing). After a reserved guess
-// fails, call recordCheckedFailure, not recordFailedLogin.
-func (h *Handler) reserveLoginAttempt(ctx context.Context, email string) bool {
+// false when the account is locked. A Redis failure returns an error, and the
+// caller must refuse the guess (an uncounted guess would reopen unlimited
+// guessing) without reporting it as a lock. After a reserved guess fails, call
+// recordCheckedFailure, not recordFailedLogin.
+func (h *Handler) reserveLoginAttempt(ctx context.Context, email string) (bool, error) {
 	ok, err := h.runLoginAttemptScript(ctx, email, "reserve")
 	if err != nil {
 		h.log.Error("login lockout: reserve attempt failed", "error", err)
-		return false
+		return false, err
 	}
-	return ok == 1
+	return ok == 1, nil
 }
 
 // recordCheckedFailure locks the account when a reserved guess that failed
@@ -1248,7 +1249,12 @@ func (h *Handler) readCredentialEpoch(ctx context.Context, userID string) (strin
 func (h *Handler) verifyCredentials(ctx context.Context, c *gin.Context, email, password, passwordHash string) bool {
 	// Count the guess before checking it, so concurrent guesses cannot all slip
 	// past the lockout check at the top of Login.
-	if !h.reserveLoginAttempt(ctx, email) {
+	allowed, err := h.reserveLoginAttempt(ctx, email)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
+		return false
+	}
+	if !allowed {
 		h.emitHTTPEvent(c, accountLockedEvent())
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
 		return false

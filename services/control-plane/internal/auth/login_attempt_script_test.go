@@ -17,6 +17,13 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 )
 
+func mustReserve(t *testing.T, h *Handler) bool {
+	t.Helper()
+	ok, err := h.reserveLoginAttempt(context.Background(), attemptEmail)
+	require.NoError(t, err)
+	return ok
+}
+
 func newLoginAttemptRig(t *testing.T) (*Handler, *miniredis.Miniredis, *bytes.Buffer) {
 	t.Helper()
 	mini := miniredis.RunT(t)
@@ -30,21 +37,20 @@ const attemptEmail = "burst@example.test"
 
 func TestReserveLoginAttempt_CountsUpToThresholdThenLocks(t *testing.T) {
 	h, mini, _ := newLoginAttemptRig(t)
-	ctx := context.Background()
 
 	for i := 1; i <= loginLockoutThreshold; i++ {
-		require.True(t, h.reserveLoginAttempt(ctx, attemptEmail), "guess %d must be allowed", i)
+		require.True(t, mustReserve(t, h), "guess %d must be allowed", i)
 	}
 	assert.False(t, mini.Exists("login_lockout:"+attemptEmail), "reaching the threshold by reserving alone must not lock")
 
 	// The guess over the threshold is refused and locks the account at once.
-	assert.False(t, h.reserveLoginAttempt(ctx, attemptEmail))
+	assert.False(t, mustReserve(t, h))
 	assert.True(t, mini.Exists("login_lockout:"+attemptEmail))
 	assert.Equal(t, 15*time.Minute, mini.TTL("login_lockout:"+attemptEmail))
 	assert.False(t, mini.Exists("login_attempts:"+attemptEmail), "setting the lock resets the attempts counter")
 
 	// While locked, a reserve is refused without counting.
-	assert.False(t, h.reserveLoginAttempt(ctx, attemptEmail))
+	assert.False(t, mustReserve(t, h))
 	assert.False(t, mini.Exists("login_attempts:"+attemptEmail))
 }
 
@@ -53,7 +59,7 @@ func TestRecordCheckedFailure_LocksOnlyAtThreshold(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 1; i < loginLockoutThreshold; i++ {
-		require.True(t, h.reserveLoginAttempt(ctx, attemptEmail))
+		require.True(t, mustReserve(t, h))
 		h.recordCheckedFailure(ctx, attemptEmail)
 	}
 	assert.False(t, mini.Exists("login_lockout:"+attemptEmail))
@@ -61,7 +67,7 @@ func TestRecordCheckedFailure_LocksOnlyAtThreshold(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "4", v, "a checked failure must not count the guess twice")
 
-	require.True(t, h.reserveLoginAttempt(ctx, attemptEmail))
+	require.True(t, mustReserve(t, h))
 	h.recordCheckedFailure(ctx, attemptEmail)
 	assert.True(t, mini.Exists("login_lockout:"+attemptEmail))
 
@@ -92,7 +98,9 @@ func TestLoginAttemptScript_RedisErrorsFailClosedAndLog(t *testing.T) {
 	ctx := context.Background()
 	mini.Close()
 
-	assert.False(t, h.reserveLoginAttempt(ctx, attemptEmail), "a Redis error must refuse the guess")
+	ok, err := h.reserveLoginAttempt(ctx, attemptEmail)
+	assert.False(t, ok, "a Redis error must refuse the guess")
+	assert.Error(t, err, "a Redis error must not look like a lock")
 	h.recordCheckedFailure(ctx, attemptEmail)
 	h.recordFailedLogin(ctx, attemptEmail)
 
@@ -116,4 +124,19 @@ func TestVerifyCredentials_RefusesWhenReserveFails(t *testing.T) {
 	assert.Equal(t, http.StatusUnauthorized, w.Code)
 	assert.Contains(t, w.Body.String(), errMsgInvalidCredentials)
 	assert.True(t, mini.Exists("login_lockout:"+attemptEmail))
+}
+
+func TestVerifyCredentials_RedisFailureIs500NotALock(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h, mini, _ := newLoginAttemptRig(t)
+	mini.Close()
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/login", nil)
+
+	ok := h.verifyCredentials(context.Background(), c, attemptEmail, "irrelevant", "not-a-hash")
+	assert.False(t, ok)
+	assert.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Contains(t, w.Body.String(), errMsgLoginFailed)
 }

@@ -295,7 +295,11 @@ func (h *Handler) VerifyPassword(ctx context.Context, userID, password string) (
 	// one atomic step with the lockout check. A locked account short-circuits
 	// here, and a burst of concurrent guesses cannot all pass before any
 	// failure is recorded.
-	if !h.reserveLoginAttempt(ctx, email) {
+	allowed, err := h.reserveLoginAttempt(ctx, email)
+	if err != nil {
+		return "", fmt.Errorf("reserve login attempt: %w", err)
+	}
+	if !allowed {
 		return "", ErrAccountLocked
 	}
 
