@@ -3,7 +3,7 @@
 # promote-unreleased-changelog.sh — turn `## [Prerelease]` into a dated release
 # section and open a fresh empty `## [Prerelease]` above it.
 #
-# WHY THIS SHAPE. `verify-changelog.sh` (#1857) fails a desktop version bump that
+# WHY THIS SHAPE. `verify-changelog.sh` (#1857) fails a version bump that
 # has no matching `## [<new-version>]` section at HEAD, so any automated bump must
 # produce one. It must NOT produce it by summarising commit messages: the entries
 # in this file are hand-written user-facing prose ("a friend link shared outside
