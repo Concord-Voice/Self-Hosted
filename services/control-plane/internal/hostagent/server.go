@@ -180,31 +180,62 @@ func (s *Server) health(w http.ResponseWriter, r *http.Request) string {
 	return "ok"
 }
 
-func (s *Server) logs(w http.ResponseWriter, r *http.Request) string {
+// logQuery validates a logs request; reason is set when it is refused.
+func logQuery(r *http.Request) (service string, lines int, follow bool, reason string) {
 	q := r.URL.Query()
-	service := q.Get("service")
+	service = q.Get("service")
 	if !logServices[service] {
-		refuse(w, http.StatusBadRequest, "unknown_service")
-		return "refused"
+		return "", 0, false, "unknown_service"
 	}
-	lines := defaultLogLines
+	lines = defaultLogLines
 	if v := q.Get("lines"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 || n > maxLogLines {
-			refuse(w, http.StatusBadRequest, "invalid_lines")
-			return "refused"
+			return "", 0, false, "invalid_lines"
 		}
 		lines = n
 	}
-	follow := q.Get("follow")
-	if follow != "" && follow != "0" && follow != "1" {
-		refuse(w, http.StatusBadRequest, "invalid_follow")
+	switch q.Get("follow") {
+	case "", "0":
+	case "1":
+		follow = true
+	default:
+		return "", 0, false, "invalid_follow"
+	}
+	return service, lines, follow, ""
+}
+
+// copyLines writes sanitised lines to w: at most limit of them unless
+// following, flushing each one when following. It returns how many it wrote
+// and false if the client could not be written to.
+func copyLines(w http.ResponseWriter, sc *bufio.Scanner, limit int, follow bool) (int, bool) {
+	flusher, _ := w.(http.Flusher)
+	written := 0
+	for sc.Scan() {
+		if !follow && written >= limit {
+			continue // drain; never send more than asked
+		}
+		if _, err := io.WriteString(w, SanitizeLogLine(sc.Text())+"\n"); err != nil {
+			return written, false
+		}
+		written++
+		if flusher != nil && follow {
+			flusher.Flush()
+		}
+	}
+	return written, true
+}
+
+func (s *Server) logs(w http.ResponseWriter, r *http.Request) string {
+	service, lines, follow, reason := logQuery(r)
+	if reason != "" {
+		refuse(w, http.StatusBadRequest, reason)
 		return "refused"
 	}
 
 	args := []string{"logs", "--no-follow", "--tail", strconv.Itoa(lines), service}
 	timeout := readTimeout
-	if follow == "1" {
+	if follow {
 		select {
 		case s.followers <- struct{}{}:
 			defer func() { <-s.followers }()
@@ -228,26 +259,15 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) string {
 		_ = pw.CloseWithError(err)
 		done <- err
 	}()
-	flusher, _ := w.(http.Flusher)
 	sc := bufio.NewScanner(pr)
 	sc.Buffer(make([]byte, 64*1024), 1<<20)
-	written := 0
-	for sc.Scan() {
-		if follow != "1" && written >= lines {
-			continue // drain; never send more than asked
-		}
-		if _, err := io.WriteString(w, SanitizeLogLine(sc.Text())+"\n"); err != nil {
-			cancel()
-			break
-		}
-		written++
-		if flusher != nil && follow == "1" {
-			flusher.Flush()
-		}
+	written, ok := copyLines(w, sc, lines, follow)
+	if !ok {
+		cancel()
 	}
 	// A deadline (followMax) or a client that went away ends a run normally;
 	// anything else is a real failure and must not look like an empty log.
-	stopped := r.Context().Err() != nil || (follow == "1" && ctx.Err() != nil)
+	stopped := r.Context().Err() != nil || (follow && ctx.Err() != nil)
 	cancel()
 	_ = pr.Close()
 	runErr := <-done
