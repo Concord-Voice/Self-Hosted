@@ -226,10 +226,7 @@ export function ServerWorkspace({
         </div>
         {logsError && <output className="resource-notice">{logsError}</output>}
         {logs !== null && (
-          <pre
-            aria-label={`${service} logs`}
-            className="server-logs"
-          >
+          <pre aria-label={`${service} logs`} className="server-logs">
             {logs === "" ? "No log lines." : logs}
           </pre>
         )}
