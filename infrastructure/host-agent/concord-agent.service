@@ -1,0 +1,35 @@
+# Concord Host Agent (#186). Serves read-only concord-selfhost actions to the
+# Admin Console on /run/concord-agent/agent.sock. See
+# docs/runbooks/selfhost-host-agent.md before installing.
+[Unit]
+Description=Concord Host Agent
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+# Set this to the concord-selfhost wrapper in your root-owned checkout.
+Environment=CONCORD_AGENT_CLI=/opt/concord/infrastructure/deploy/concord-selfhost
+ExecStart=/usr/local/libexec/concord-agent
+Restart=on-failure
+RestartSec=5s
+RuntimeDirectory=concord-agent
+RuntimeDirectoryMode=0750
+# Keep the directory across restarts: the control-plane container bind-mounts
+# it, and a new directory would leave that mount pointing at the old one.
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# docker (unix) and the health check's local HTTP probe (inet).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

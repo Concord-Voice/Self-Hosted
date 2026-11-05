@@ -14,6 +14,7 @@ infrastructure/deploy/selfhost-tls.sh
 infrastructure/deploy/selfhost-tls.py
 infrastructure/deploy/selfhost-security-event-logging.sh
 infrastructure/deploy/tests
+infrastructure/host-agent
 infrastructure/docker
 client/admin
 services/control-plane
