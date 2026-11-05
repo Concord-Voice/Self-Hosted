@@ -900,6 +900,11 @@ jobs:
       - name: Image publisher Docker Engine pins
         run: python3 scripts/tests/test-publish-minio-engine-pins.py
 
+      - name: Self-host release tag check and bundle builder
+        run: |
+          bash scripts/tests/test-check-release-tag.sh
+          python3 scripts/tests/test-selfhost-bundle.py
+
       - name: Self-test — lint scripts pass their own test suites
         # Defense-in-depth: re-run each lint's hermetic test suite in CI
         # so a regression to the lint scripts themselves is caught even
