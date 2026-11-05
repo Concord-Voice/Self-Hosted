@@ -1,4 +1,4 @@
-import { ApiContractError, ApiError } from "./api";
+import { ApiContractError, ApiError, retryAfter } from "./api";
 
 // Read-only Server area (#186). The control plane forwards these to the
 // Concord Host Agent, which allows only these services and line counts.
@@ -13,6 +13,7 @@ export const LOG_SERVICES = [
 ] as const;
 export type LogService = (typeof LOG_SERVICES)[number];
 export const LOG_LINE_CHOICES = [100, 200, 500, 1000] as const;
+export type LogLineChoice = (typeof LOG_LINE_CHOICES)[number];
 
 export interface ServerService {
   exit_code: number | null;
@@ -75,7 +76,12 @@ async function get(path: string, signal?: AbortSignal): Promise<Response> {
   } catch {
     throw new ApiError(0, null);
   }
-  if (!response.ok) throw new ApiError(response.status, null);
+  if (!response.ok) {
+    throw new ApiError(
+      response.status,
+      retryAfter(response.headers.get("Retry-After")),
+    );
+  }
   return response;
 }
 
@@ -99,7 +105,7 @@ export const serverApi = {
     getJSON("/admin/api/v1/server/status", parseServerStatus, signal),
   health: (signal?: AbortSignal) =>
     getJSON("/admin/api/v1/server/health", parseServerHealth, signal),
-  async logs(service: LogService, lines: number, signal?: AbortSignal) {
+  async logs(service: LogService, lines: LogLineChoice, signal?: AbortSignal) {
     const query = new URLSearchParams({ service, lines: String(lines) });
     const response = await get(
       `/admin/api/v1/server/logs?${query.toString()}`,

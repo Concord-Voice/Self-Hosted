@@ -21,6 +21,9 @@ const (
 	adminEnrollRateLimit   = 10
 	adminMetricsRateLimit  = 60
 	adminMetricsRateWindow = time.Minute
+	// Each Server read runs a root command through the host agent and writes an
+	// audit row, so the budget is tighter than the metrics one.
+	adminServerRateLimit = 30
 )
 
 var adminMetricsDeniedMethods = []string{
@@ -71,9 +74,23 @@ func RegisterRoutes(rg *gin.RouterGroup, h *Handler, metrics *opsmetrics.AdminHa
 		gated.Use(AdminAuthRequired(h.sessions))
 		{
 			gated.POST("/admins", h.CreateAdmin)
-			gated.GET("/server/status", h.server.Status)
-			gated.GET("/server/health", h.server.Health)
-			gated.GET("/server/logs", h.server.Logs)
+			serverRoutes := gated.Group("/server")
+			serverRoutes.Use(middleware.RateLimitByIPFailClosedWithHandlers(
+				rdb,
+				adminServerRateLimit,
+				adminMetricsRateWindow,
+				func(c *gin.Context) {
+					c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "rate_limited"})
+				},
+				func(c *gin.Context) {
+					c.AbortWithStatusJSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+				},
+			))
+			{
+				serverRoutes.GET("/status", h.server.Status)
+				serverRoutes.GET("/health", h.server.Health)
+				serverRoutes.GET("/logs", h.server.Logs)
+			}
 
 			metricsRoutes := gated.Group("")
 			metricsRoutes.Use(middleware.RateLimitByIPFailClosedWithHandlers(

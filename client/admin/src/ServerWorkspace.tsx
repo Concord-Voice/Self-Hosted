@@ -1,16 +1,23 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError } from "./api";
 import {
   LOG_LINE_CHOICES,
   LOG_SERVICES,
   serverApi,
+  type LogLineChoice,
   type LogService,
   type ServerHealth,
   type ServerService,
   type ServerStatus,
 } from "./server";
 import { Status, type DisplayStatus } from "./workspaces";
+
+interface LoadedLogs {
+  service: LogService;
+  lines: LogLineChoice;
+  text: string;
+}
 
 interface ServerWorkspaceProps {
   onForbidden: () => void;
@@ -29,7 +36,9 @@ function errorCopy(error: unknown): string {
 }
 
 function serviceStatus({ state, health }: ServerService): DisplayStatus {
-  if (state !== "running") return state === "unknown" ? "unknown" : "stopped";
+  if (state === "restarting") return "degraded";
+  if (state === "exited" || state === "dead") return "stopped";
+  if (state !== "running") return "unknown";
   if (health === "unhealthy") return "degraded";
   if (health === "healthy" || health === "none") return "healthy";
   return "unknown";
@@ -41,12 +50,18 @@ export function ServerWorkspace({
 }: Readonly<ServerWorkspaceProps>) {
   const [status, setStatus] = useState<ServerStatus | null>(null);
   const [health, setHealth] = useState<ServerHealth | null>(null);
-  const [overviewError, setOverviewError] = useState<string | null>(null);
+  const [statusError, setStatusError] = useState<string | null>(null);
+  const [healthError, setHealthError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(0);
   const [service, setService] = useState<LogService>("control-plane");
-  const [lines, setLines] = useState<number>(200);
-  const [logs, setLogs] = useState<string | null>(null);
+  const [lines, setLines] = useState<LogLineChoice>(200);
+  const [logs, setLogs] = useState<LoadedLogs | null>(null);
   const [logsError, setLogsError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  // One controller per view: a refresh or unmount aborts what is in flight,
+  // so a slow, older answer can never overwrite a newer one.
+  const overviewAbortRef = useRef<AbortController | null>(null);
+  const logsAbortRef = useRef<AbortController | null>(null);
 
   // Returns the copy to show, or null when the session itself ended.
   const handle = useCallback(
@@ -64,33 +79,58 @@ export function ServerWorkspace({
     [onForbidden, onUnauthorized],
   );
 
-  const loadOverview = useCallback(async () => {
-    setOverviewError(null);
-    try {
-      const [nextStatus, nextHealth] = await Promise.all([
-        serverApi.status(),
-        serverApi.health(),
-      ]);
-      setStatus(nextStatus);
-      setHealth(nextHealth);
-    } catch (error) {
-      setOverviewError(handle(error));
-    }
+  const loadOverview = useCallback(() => {
+    overviewAbortRef.current?.abort();
+    const controller = new AbortController();
+    overviewAbortRef.current = controller;
+    const { signal } = controller;
+    // Status answers in moments; health can take a minute. Load them apart so
+    // the table does not wait on the checks, and clear old data on failure so
+    // a stale reading never sits beside a fresh error.
+    const load = async <T,>(
+      fetchView: (signal: AbortSignal) => Promise<T>,
+      setData: (value: T | null) => void,
+      setError: (value: string | null) => void,
+    ) => {
+      setError(null);
+      setLoading((count) => count + 1);
+      try {
+        const value = await fetchView(signal);
+        if (!signal.aborted) setData(value);
+      } catch (error) {
+        if (signal.aborted) return;
+        setData(null);
+        setError(handle(error));
+      } finally {
+        setLoading((count) => count - 1);
+      }
+    };
+    void load(serverApi.status, setStatus, setStatusError);
+    void load(serverApi.health, setHealth, setHealthError);
   }, [handle]);
 
   useEffect(() => {
-    void loadOverview();
+    loadOverview();
+    return () => {
+      overviewAbortRef.current?.abort();
+      logsAbortRef.current?.abort();
+    };
   }, [loadOverview]);
 
   const loadLogs = async () => {
+    logsAbortRef.current?.abort();
+    const controller = new AbortController();
+    logsAbortRef.current = controller;
+    const requested = { service, lines };
     setBusy(true);
     setLogsError(null);
     try {
-      setLogs(await serverApi.logs(service, lines));
+      const text = await serverApi.logs(service, lines, controller.signal);
+      if (!controller.signal.aborted) setLogs({ ...requested, text });
     } catch (error) {
-      setLogsError(handle(error));
+      if (!controller.signal.aborted) setLogsError(handle(error));
     } finally {
-      setBusy(false);
+      if (!controller.signal.aborted) setBusy(false);
     }
   };
 
@@ -109,14 +149,20 @@ export function ServerWorkspace({
           </div>
           <button
             className="server-action"
+            disabled={loading > 0}
             type="button"
-            onClick={() => void loadOverview()}
+            onClick={loadOverview}
           >
-            Refresh
+            {loading > 0 ? "Refreshing" : "Refresh"}
           </button>
         </div>
-        {overviewError && (
-          <output className="resource-notice">{overviewError}</output>
+        {loading > 0 && !status && !statusError && (
+          <output className="resource-notice resource-loading">
+            Loading containers
+          </output>
+        )}
+        {statusError && (
+          <output className="resource-notice">{statusError}</output>
         )}
         {status && (
           <div className="table-scroll">
@@ -151,6 +197,11 @@ export function ServerWorkspace({
         )}
       </section>
 
+      {healthError && (
+        <output className="resource-notice">
+          Health checks: {healthError}
+        </output>
+      )}
       {health && (
         <section
           aria-labelledby="server-health-title"
@@ -206,7 +257,10 @@ export function ServerWorkspace({
             <span>Lines</span>
             <select
               value={lines}
-              onChange={(event) => setLines(Number(event.currentTarget.value))}
+              onChange={(event) => {
+                const next = Number(event.currentTarget.value) as LogLineChoice;
+                if (LOG_LINE_CHOICES.includes(next)) setLines(next);
+              }}
             >
               {LOG_LINE_CHOICES.map((count) => (
                 <option key={count} value={count}>
@@ -226,9 +280,21 @@ export function ServerWorkspace({
         </div>
         {logsError && <output className="resource-notice">{logsError}</output>}
         {logs !== null && (
-          <pre aria-label={`${service} logs`} className="server-logs">
-            {logs === "" ? "No log lines." : logs}
-          </pre>
+          <>
+            <p className="server-logs-caption">
+              {logs.service}, last {logs.lines} lines
+            </p>
+            {/* A focusable region so keyboard users can scroll the logs in
+                every browser; WebKit does not focus scroll containers. */}
+            <div
+              aria-label={`${logs.service} logs`}
+              className="server-logs"
+              role="region"
+              tabIndex={0}
+            >
+              <pre>{logs.text === "" ? "No log lines." : logs.text}</pre>
+            </div>
+          </>
         )}
       </section>
     </div>

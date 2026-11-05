@@ -21,10 +21,16 @@ import (
 const hostAgentSocket = "/run/concord-agent/agent.sock"
 
 const (
-	maxAgentJSON    = 1 << 20
-	maxAgentLogs    = 1000 * 4097
-	defaultLogLines = 200
-	maxLogLines     = 1000
+	maxAgentJSON = 1 << 20
+	// 1000 capped lines plus the agent's "output incomplete" marker line.
+	maxAgentLogs      = 1000*4097 + 64
+	defaultLogLines   = 200
+	maxLogLines       = 1000
+	auditWriteTimeout = 5 * time.Second
+	// agentTimeout sits above the agent's 60-second health budget.
+	agentTimeout = 70 * time.Second
+	// writeGrace is the time left to send an answer once the agent replies.
+	writeGrace = 5 * time.Second
 )
 
 // serverLogServices mirrors the agent's own allowlist; the agent re-checks it.
@@ -52,7 +58,7 @@ func NewServerArea(audit auditWriter, log *logger.Logger) *ServerArea {
 
 func unixClient(sock string) *http.Client {
 	return &http.Client{
-		Timeout: 70 * time.Second, // above the agent's 60-second health budget
+		Timeout: agentTimeout,
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				var d net.Dialer
@@ -102,6 +108,9 @@ func (s *ServerArea) proxyJSON(c *gin.Context, action, path string) {
 
 // fetch asks the agent and writes the error response itself when it fails.
 func (s *ServerArea) fetch(c *gin.Context, action, service, path string, limit int64) ([]byte, bool) {
+	// The control plane's server-wide WriteTimeout (15 s) is shorter than a
+	// health run, so extend it for this response or the answer is dropped.
+	_ = http.NewResponseController(c.Writer).SetWriteDeadline(time.Now().Add(agentTimeout + writeGrace))
 	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodGet, "http://agent"+path, nil)
 	if err != nil {
 		s.fail(c, action, service, http.StatusInternalServerError, "internal_error")
@@ -147,7 +156,11 @@ func (s *ServerArea) record(c *gin.Context, action, service, result, reason stri
 	if id := c.GetString(adminIDContextKey); id != "" {
 		ev.AdminID = &id
 	}
-	if err := s.audit.Write(c.Request.Context(), ev); err != nil {
+	// A client that leaves mid-read must not cancel the row: the agent has
+	// already run the command.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), auditWriteTimeout)
+	defer cancel()
+	if err := s.audit.Write(ctx, ev); err != nil {
 		s.log.Warn("admin audit write failed", "error", err)
 	}
 }

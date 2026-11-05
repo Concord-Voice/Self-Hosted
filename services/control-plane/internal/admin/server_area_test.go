@@ -22,13 +22,15 @@ import (
 type fakeAudit struct {
 	mu     sync.Mutex
 	events []AuditEvent
+	ctxErr []error
 	err    error
 }
 
-func (f *fakeAudit) Write(_ context.Context, ev AuditEvent) error {
+func (f *fakeAudit) Write(ctx context.Context, ev AuditEvent) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.events = append(f.events, ev)
+	f.ctxErr = append(f.ctxErr, ctx.Err())
 	return f.err
 }
 
@@ -166,6 +168,55 @@ func TestServerAreaAgentFailures(t *testing.T) {
 	rec := call(serverEngine(newArea("/nonexistent/agent.sock", audit)), "/server/health")
 	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "agent_unavailable") {
 		t.Fatalf("no agent: %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestServerAreaAuditsAReadTheClientAbandoned(t *testing.T) {
+	sock := fakeAgent(t, func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"schema":1}`))
+	})
+	audit := &fakeAudit{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rec := httptest.NewRecorder()
+	serverEngine(newArea(sock, audit)).ServeHTTP(rec,
+		httptest.NewRequest(http.MethodGet, "/server/status", nil).WithContext(ctx))
+	if len(audit.events) != 1 || audit.ctxErr[0] != nil {
+		t.Fatalf("audit row not written with a live context: %+v %v", audit.events, audit.ctxErr)
+	}
+}
+
+func TestServerAreaLogsSizeLimit(t *testing.T) {
+	for _, tc := range []struct {
+		size int
+		want int
+	}{{maxAgentLogs, http.StatusOK}, {maxAgentLogs + 1, http.StatusBadGateway}} {
+		sock := fakeAgent(t, func(w http.ResponseWriter, _ *http.Request) {
+			_, _ = w.Write([]byte(strings.Repeat("x", tc.size)))
+		})
+		if rec := call(serverEngine(newArea(sock, &fakeAudit{})), "/server/logs?service=redis"); rec.Code != tc.want {
+			t.Errorf("%d bytes: got %d", tc.size, rec.Code)
+		}
+	}
+}
+
+func TestServerAreaOutlastsTheServerWriteTimeout(t *testing.T) {
+	sock := fakeAgent(t, func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(300 * time.Millisecond)
+		_, _ = w.Write([]byte(`{"schema":1}`))
+	})
+	// Stands in for the control plane's 15 s WriteTimeout against a slow health run.
+	srv := httptest.NewUnstartedServer(serverEngine(newArea(sock, &fakeAudit{})))
+	srv.Config.WriteTimeout = 100 * time.Millisecond
+	srv.Start()
+	t.Cleanup(srv.Close)
+	resp, err := http.Get(srv.URL + "/server/health")
+	if err != nil {
+		t.Fatalf("answer dropped: %v", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("got %d", resp.StatusCode)
 	}
 }
 

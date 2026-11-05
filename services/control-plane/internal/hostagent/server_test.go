@@ -221,8 +221,14 @@ func TestLogsReportsRunFailures(t *testing.T) {
 	}
 	// Once lines are sent the status is fixed; the lines stay.
 	rec = get(t, NewServer(&fakeRunner{out: "a\n", err: exitErr(1)}), http.MethodGet, "/v1/logs?service=redis")
-	if rec.Code != http.StatusOK || rec.Body.String() != "a\n" {
+	if rec.Code != http.StatusOK || rec.Body.String() != "a\n"+truncatedMarker {
 		t.Fatalf("partial: got %d %q", rec.Code, rec.Body.String())
+	}
+	// An over-long line after others ends the reply with the marker, so the
+	// lines after it are not silently missing.
+	rec = get(t, NewServer(&fakeRunner{out: "before\n" + strings.Repeat("A", 2<<20) + "\nafter\n"}), http.MethodGet, "/v1/logs?service=redis")
+	if rec.Code != http.StatusOK || rec.Body.String() != "before\n"+truncatedMarker {
+		t.Fatalf("long line mid-log: got %d %q", rec.Code, rec.Body.String())
 	}
 	// In follow mode the followMax kill is the normal end, not a failure.
 	f := &fakeRunner{out: "a\n", err: errors.New("signal: killed"), wait: make(chan struct{})}

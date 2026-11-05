@@ -80,17 +80,95 @@ describe("ServerWorkspace", () => {
     );
     renderWorkspace();
     expect(
-      await screen.findByText(/host agent is not reachable/),
-    ).toBeVisible();
+      await screen.findAllByText(/host agent is not reachable/),
+    ).toHaveLength(2);
   });
 
-  it("ends the session on 401 and hands 403 to the portal", async () => {
+  it("shows containers while health is still running", async () => {
+    let finishHealth = () => {};
+    server.use(
+      http.get(`${base}/status`, () => HttpResponse.json(statusBody)),
+      http.get(
+        `${base}/health`,
+        () =>
+          new Promise<Response>((resolve) => {
+            finishHealth = () => resolve(HttpResponse.json(healthBody));
+          }),
+      ),
+    );
+    renderWorkspace();
+    expect(
+      await screen.findByRole("rowheader", { name: "postgres" }),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Refreshing" })).toBeDisabled();
+    finishHealth();
+    expect(
+      await screen.findByRole("button", { name: "Refresh" }),
+    ).toBeEnabled();
+    expect(screen.getByText("At least one check failed")).toBeVisible();
+  });
+
+  it("clears stale containers when a refresh fails", async () => {
+    agentUp();
+    renderWorkspace();
+    await screen.findByRole("rowheader", { name: "postgres" });
+    server.use(
+      http.get(`${base}/status`, () => HttpResponse.error()),
+      http.get(`${base}/health`, () => HttpResponse.json(healthBody)),
+    );
+    await userEvent
+      .setup()
+      .click(await screen.findByRole("button", { name: "Refresh" }));
+    expect(
+      await screen.findByText(/could not answer this request/),
+    ).toBeVisible();
+    expect(screen.queryByRole("rowheader", { name: "postgres" })).toBeNull();
+  });
+
+  it("maps container states to status", async () => {
+    const service = statusBody.services[0];
+    server.use(
+      http.get(`${base}/status`, () =>
+        HttpResponse.json({
+          schema: 1,
+          services: [
+            { ...service, service: "a", name: "a", state: "restarting" },
+            { ...service, service: "b", name: "b", state: "paused" },
+            { ...service, service: "c", name: "c", health: "unhealthy" },
+            { ...service, service: "d", name: "d", health: "starting" },
+            { ...service, service: "e", name: "e", state: "dead" },
+          ],
+        }),
+      ),
+      http.get(`${base}/health`, () => HttpResponse.json(healthBody)),
+    );
+    renderWorkspace();
+    const statusOf = async (name: string) =>
+      (await screen.findByRole("rowheader", { name })).nextElementSibling
+        ?.textContent;
+    expect(await statusOf("a")).toMatch(/Degraded/);
+    expect(await statusOf("b")).toMatch(/Unknown/);
+    expect(await statusOf("c")).toMatch(/Degraded/);
+    expect(await statusOf("d")).toMatch(/Unknown/);
+    expect(await statusOf("e")).toMatch(/Stopped/);
+  });
+
+  it("ends the session on 401", async () => {
     server.use(
       http.get(`${base}/status`, () => new HttpResponse(null, { status: 401 })),
       http.get(`${base}/health`, () => new HttpResponse(null, { status: 401 })),
     );
-    const first = renderWorkspace();
-    await waitFor(() => expect(first.onUnauthorized).toHaveBeenCalled());
+    const { onUnauthorized } = renderWorkspace();
+    await waitFor(() => expect(onUnauthorized).toHaveBeenCalled());
+  });
+
+  it("hands a 403 overview to the portal", async () => {
+    server.use(
+      http.get(`${base}/status`, () => new HttpResponse(null, { status: 403 })),
+      http.get(`${base}/health`, () => new HttpResponse(null, { status: 403 })),
+    );
+    const { onForbidden } = renderWorkspace();
+    await waitFor(() => expect(onForbidden).toHaveBeenCalled());
   });
 
   it("loads logs for the chosen service and line count", async () => {
@@ -117,6 +195,26 @@ describe("ServerWorkspace", () => {
       "first line",
     );
     expect(query).toBe("?service=redis&lines=500");
+    expect(screen.getByText("redis, last 500 lines")).toBeVisible();
+    // Changing the select does not relabel logs already on screen.
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "Service" }),
+      "postgres",
+    );
+    expect(screen.getByRole("region", { name: "redis logs" })).toHaveAttribute(
+      "tabindex",
+      "0",
+    );
+  });
+
+  it("says when a service has no log lines", async () => {
+    agentUp();
+    server.use(http.get(`${base}/logs`, () => HttpResponse.text("")));
+    renderWorkspace();
+    await userEvent
+      .setup()
+      .click(screen.getByRole("button", { name: "Show logs" }));
+    expect(await screen.findByText("No log lines.")).toBeVisible();
   });
 
   it("reports a busy agent for logs", async () => {

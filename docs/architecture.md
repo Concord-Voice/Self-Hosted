@@ -779,7 +779,7 @@ Admin Portal does not expose that operation in its UI.
 1. `POST /admin/api/v1/auth/password` — constant-time password verify. Returns a short-lived challenge handle + WebAuthn `BeginLogin` assertion. **Password alone never yields a session.**
 2. `POST /admin/api/v1/auth/webauthn` — `FinishLogin` with `userVerification: required`. On success mints an opaque Redis session.
 
-**Sessions:** 256-bit CSPRNG session id stored in Redis under `admin_session:{sid}`. Cookie `__Host-cv_admin_sid`: `Secure; HttpOnly; SameSite=Strict; Path=/`. Idle TTL 30 min (sliding). Absolute cap 8 h. Logout `DEL`s the key (instant revocation). `AdminAuthRequired` validates the cookie → Redis → expiry only for protected administration and metrics routes. The SPA shell, assets, authentication, logout, and enrollment routes remain outside the local-session gate.
+**Sessions:** 256-bit CSPRNG session id stored in Redis under `admin_session:{sid}`. Cookie `__Host-cv_admin_sid`: `Secure; HttpOnly; SameSite=Strict; Path=/`. Idle TTL 30 min (sliding). Absolute cap 8 h. Logout `DEL`s the key (instant revocation). `AdminAuthRequired` validates the cookie → Redis → expiry only for protected administration, metrics and Server routes. The SPA shell, assets, authentication, logout, and enrollment routes remain outside the local-session gate.
 
 **Hardware key requirement:** `attestation: direct` is enforced at enrollment. The server checks the AAGUID against `ADMIN_WEBAUTHN_ALLOWED_AAGUIDS` (canonical YubiKey 5-series set). Only approved hardware keys can become admin credentials.
 
@@ -790,6 +790,16 @@ Admin Portal does not expose that operation in its UI.
 **Dormancy:** `ADMIN_CONSOLE_ENABLED` gates the entire surface (default `false`). All `/admin/*` routes return 404 when disabled. See the "Post-deploy: bootstrap the first admin (#1688)" section in the deploy runbook for provisioning.
 
 **Hosted edge-gating:** Cloudflare Access wraps hosted admin traffic (identity allowlist + hardware-key requirement) before origin, then nginx serves the codename vhost with a Cloudflare Origin Certificate, and the Go `/admin` route group verifies `Cf-Access-Jwt-Assertion` against the Access JWKS/audience before any admin handler runs. The origin firewall helper restricts `:443` to Cloudflare IP ranges. The codename hostname is not the access control. Protected administration and metrics requests pass both Cloudflare Access and local admin-session gates. The SPA shell, auth, and enrollment routes pass the hosted outer gate without requiring a local session.
+
+**Self-hosted Server area (#186):** `GET /admin/api/v1/server/status`,
+`/server/health`, and `/server/logs` run behind the local admin-session gate and
+proxy to the root Concord Host Agent over `/run/concord-agent/agent.sock`, which
+`docker-compose.host-agent.yml` mounts only on self-hosted installs with the
+console enabled. The handler checks the log service against an allowlist and
+the line count against 1–1000, then rebuilds the agent query itself and never
+asks for follow mode. Each call writes one `server_read` audit row; the three
+paths share a fail-closed limit of 30 requests/minute/IP. See
+`docs/runbooks/selfhost-host-agent.md`.
 
 **Read-only metrics API:** `GET /admin/api/v1/health`, `/metrics/current`,
 `/metrics/series`, and `/counters` run behind both gates above. They expose only
