@@ -27,6 +27,7 @@ const (
 	maxInFlight      = 8
 	maxFollowers     = 2
 	readTimeout      = 30 * time.Second
+	healthTimeout    = 60 * time.Second // health runs several probes with their own budgets
 	followMaxRuntime = 10 * time.Minute
 )
 
@@ -112,8 +113,8 @@ func writeJSON(w http.ResponseWriter, v any) {
 
 // runJSON runs args and decodes the CLI's JSON into dst. A non-zero exit is
 // accepted when the output still decodes: `health` exits 1 when a check fails.
-func (s *Server) runJSON(r *http.Request, args []string, dst any) bool {
-	ctx, cancel := context.WithTimeout(r.Context(), readTimeout)
+func (s *Server) runJSON(r *http.Request, timeout time.Duration, args []string, dst any) bool {
+	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 	var out limitedBuffer
 	out.max = maxCLIOutput
@@ -122,7 +123,6 @@ func (s *Server) runJSON(r *http.Request, args []string, dst any) bool {
 		return false
 	}
 	dec := json.NewDecoder(&out.buf)
-	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		return false
 	}
@@ -154,7 +154,7 @@ type healthDoc struct {
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) string {
 	var doc statusDoc
-	if !s.runJSON(r, []string{"status", "--json"}, &doc) || doc.Schema != 1 {
+	if !s.runJSON(r, readTimeout, []string{"status", "--json"}, &doc) || doc.Schema != 1 {
 		refuse(w, http.StatusBadGateway, "status_unavailable")
 		return "error"
 	}
@@ -164,7 +164,7 @@ func (s *Server) status(w http.ResponseWriter, r *http.Request) string {
 
 func (s *Server) health(w http.ResponseWriter, r *http.Request) string {
 	var doc healthDoc
-	if !s.runJSON(r, []string{"health", "--json"}, &doc) || doc.Schema != 1 {
+	if !s.runJSON(r, healthTimeout, []string{"health", "--json"}, &doc) || doc.Schema != 1 {
 		refuse(w, http.StatusBadGateway, "health_unavailable")
 		return "error"
 	}
@@ -236,9 +236,18 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) string {
 			flusher.Flush()
 		}
 	}
+	// A deadline (followMax) or a client that went away ends a run normally;
+	// anything else is a real failure and must not look like an empty log.
+	stopped := r.Context().Err() != nil || (follow == "1" && ctx.Err() != nil)
 	cancel()
 	_ = pr.Close()
-	<-done
+	runErr := <-done
+	if (runErr != nil && !stopped) || sc.Err() != nil {
+		if written == 0 {
+			refuse(w, http.StatusBadGateway, "logs_unavailable")
+		}
+		return "error"
+	}
 	return "ok"
 }
 

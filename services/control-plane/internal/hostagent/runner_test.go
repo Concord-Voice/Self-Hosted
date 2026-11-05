@@ -18,7 +18,10 @@ func trustedDir(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckTrusted(filepath.Join(wd, "runner.go")); err != nil && !strings.Contains(err.Error(), "not an executable") {
+	if _, err := CheckTrusted(filepath.Join(wd, "runner.go")); err != nil && !strings.Contains(err.Error(), "not an executable") {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("checkout itself is not trusted here: %v", err)
+		}
 		t.Skipf("checkout itself is not trusted here: %v", err)
 	}
 	dir, err := os.MkdirTemp(wd, "trusted-")
@@ -44,10 +47,20 @@ func writeCLI(t *testing.T, dir, body string) string {
 func TestCheckTrusted(t *testing.T) {
 	dir := trustedDir(t)
 	cli := writeCLI(t, dir, "true")
-	if err := CheckTrusted(cli); err != nil {
+	if _, err := CheckTrusted(cli); err != nil {
 		t.Fatalf("trusted cli refused: %v", err)
 	}
-	if err := CheckTrusted("concord-selfhost"); err == nil {
+	// A symlink on the configured path resolves to the checked file, and that
+	// resolved path is what callers run.
+	link := filepath.Join(t.TempDir(), "concord-selfhost")
+	if err := os.Symlink(cli, link); err != nil {
+		t.Fatal(err)
+	}
+	want, _ := filepath.EvalSymlinks(cli)
+	if got, err := CheckTrusted(link); err != nil || got != want {
+		t.Fatalf("CheckTrusted(link) = %q, %v; want %q", got, err, want)
+	}
+	if _, err := CheckTrusted("concord-selfhost"); err == nil {
 		t.Fatal("relative path accepted")
 	}
 
@@ -58,15 +71,31 @@ func TestCheckTrusted(t *testing.T) {
 	if err := os.Chmod(neighbour, 0o666); err != nil { //nolint:gosec // deliberately unsafe input
 		t.Fatal(err)
 	}
-	if err := CheckTrusted(cli); err == nil {
+	if _, err := CheckTrusted(cli); err == nil {
 		t.Fatal("world-writable neighbour accepted")
+	}
+	_ = os.Remove(neighbour)
+
+	// A symlink beside the CLI is checked by its target.
+	bad := filepath.Join(t.TempDir(), "evil.sh")
+	if err := os.WriteFile(bad, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(bad, 0o666); err != nil { //nolint:gosec // deliberately unsafe input
+		t.Fatal(err)
+	}
+	if err := os.Symlink(bad, neighbour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CheckTrusted(cli); err == nil {
+		t.Fatal("symlink to a world-writable file accepted")
 	}
 	_ = os.Remove(neighbour)
 
 	if err := os.Chmod(dir, 0o775); err != nil { //nolint:gosec // deliberately unsafe input
 		t.Fatal(err)
 	}
-	if err := CheckTrusted(cli); err == nil {
+	if _, err := CheckTrusted(cli); err == nil {
 		t.Fatal("group-writable directory accepted")
 	}
 	_ = os.Chmod(dir, 0o755) //nolint:gosec // restore the normal directory mode
@@ -74,7 +103,7 @@ func TestCheckTrusted(t *testing.T) {
 	if err := os.Chmod(cli, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := CheckTrusted(cli); err == nil {
+	if _, err := CheckTrusted(cli); err == nil {
 		t.Fatal("non-executable cli accepted")
 	}
 }

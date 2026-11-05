@@ -58,6 +58,20 @@ func TestListenPermissions(t *testing.T) {
 	if _, err := listen(sock, os.Getgid()); err == nil {
 		t.Fatal("regular file at socket path was replaced")
 	}
+
+	// A shared directory (like /run) is refused before its mode is touched.
+	_ = os.Remove(sock)
+	other := filepath.Join(filepath.Dir(sock), "other")
+	if err := os.WriteFile(other, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_ = os.Chmod(filepath.Dir(sock), 0o755) //nolint:gosec // checked below for being left alone
+	if _, err := listen(sock, os.Getgid()); err == nil {
+		t.Fatal("shared socket directory accepted")
+	}
+	if dst, _ := os.Stat(filepath.Dir(sock)); dst.Mode().Perm() != 0o755 {
+		t.Fatalf("shared dir mode changed to %v", dst.Mode())
+	}
 }
 
 func TestRunRefusesUntrustedCLI(t *testing.T) {
@@ -86,7 +100,10 @@ func TestRunServesAndStopsOnSIGTERM(t *testing.T) {
 	if err := os.WriteFile(cli, []byte("#!/bin/sh\necho '{\"schema\":1,\"services\":[]}'\n"), 0o755); err != nil { //nolint:gosec // the fake CLI must be executable
 		t.Fatal(err)
 	}
-	if err := hostagent.CheckTrusted(cli); err != nil {
+	if _, err := hostagent.CheckTrusted(cli); err != nil {
+		if os.Getenv("CI") != "" {
+			t.Fatalf("checkout is not trusted here: %v", err)
+		}
 		t.Skipf("checkout is not trusted here: %v", err)
 	}
 	grp, err := user.LookupGroupId(strconv.Itoa(os.Getgid()))

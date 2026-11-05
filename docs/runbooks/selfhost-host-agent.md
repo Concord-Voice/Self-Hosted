@@ -28,8 +28,10 @@ checkout today:
 
 1. Keep the checkout owned by root and not writable by group or others. The
    agent refuses to start, and refuses each request, if the `concord-selfhost`
-   wrapper, any file beside it, or any directory above it is owned by another
-   user or is group- or world-writable.
+   wrapper, any file beside it (or the target of a symlink beside it), or any
+   directory above it is owned by another user or is group- or world-writable.
+   It runs the wrapper by its resolved path, so a symlink on the configured
+   path cannot be swapped after the check.
 2. Build the agent: `go -C services/control-plane build -o /usr/local/libexec/concord-agent ./cmd/concord-agent`.
 3. Create the group that may use the socket: `groupadd --system concord-agent`.
 4. Copy `infrastructure/host-agent/concord-agent.service` to
@@ -46,7 +48,9 @@ sudo curl --unix-socket /run/concord-agent/agent.sock http://agent/v1/health
 The socket is `/run/concord-agent/agent.sock`, mode `0660`, owner
 `root:concord-agent`, in a `0750` directory. The directory is kept across restarts so
 a container that mounts it keeps seeing the live socket. The agent removes a
-stale socket on start and refuses to start if something else is at that path. Each request
+stale socket on start and refuses to start if something else is at that path,
+or if the socket's directory holds anything else (it must be a dedicated
+directory, because the agent sets its owner and mode). Each request
 is logged to the journal as `action=… outcome=…`, without parameters.
 
 | Setting | Default |
@@ -59,8 +63,12 @@ is logged to the journal as `action=… outcome=…`, without parameters.
 
 - At most 8 requests run at once; more get 429.
 - At most 2 log follows run at once, each for at most 10 minutes.
-- Status and health time out after 30 seconds, and their output is capped at
-  1 MiB. The agent decodes it and passes on only the documented fields.
+- Status times out after 30 seconds and health after 60. Their output is
+  capped at 1 MiB. The agent decodes it and passes on only the documented
+  fields; fields it does not know are dropped, not refused.
+- A log request whose run fails before any line is sent gets 502
+  `logs_unavailable`.
+- An idle connection is closed after 60 seconds.
 - A log request without follow returns at most the lines asked for.
 - Each log line is capped at 4096 bytes, with terminal escapes and control
   characters removed (tab is kept).

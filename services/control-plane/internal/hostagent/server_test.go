@@ -80,7 +80,6 @@ func TestStatus(t *testing.T) {
 
 func TestStatusRejectsBadOutput(t *testing.T) {
 	cases := map[string]*fakeRunner{
-		"unknown field": {out: `{"schema":1,"services":[],"extra":"x"}`},
 		"wrong schema":  {out: `{"schema":2,"services":[]}`},
 		"not json":      {out: "boom"},
 		"exit 2":        {out: statusJSON, err: exitErr(2)},
@@ -90,6 +89,15 @@ func TestStatusRejectsBadOutput(t *testing.T) {
 		if rec := get(t, NewServer(f), http.MethodGet, "/v1/status"); rec.Code != http.StatusBadGateway {
 			t.Errorf("%s: got %d", name, rec.Code)
 		}
+	}
+}
+
+func TestStatusDropsUnknownFields(t *testing.T) {
+	// A newer CLI may add fields; the agent drops them instead of failing.
+	f := &fakeRunner{out: `{"schema":1,"services":[],"extra":"x"}`}
+	rec := get(t, NewServer(f), http.MethodGet, "/v1/status")
+	if rec.Code != http.StatusOK || strings.Contains(rec.Body.String(), "extra") {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
 	}
 }
 
@@ -194,5 +202,30 @@ func TestSanitizeLogLine(t *testing.T) {
 	}
 	if got := SanitizeLogLine(strings.Repeat("é", maxLogLineBytes)); len(got) > maxLogLineBytes {
 		t.Fatalf("not capped: %d bytes", len(got))
+	}
+}
+
+func TestLogsReportsRunFailures(t *testing.T) {
+	// A refused or failed run must not look like an empty log.
+	rec := get(t, NewServer(&fakeRunner{err: errors.New("untrusted")}), http.MethodGet, "/v1/logs?service=redis")
+	if rec.Code != http.StatusBadGateway || !strings.Contains(rec.Body.String(), "logs_unavailable") {
+		t.Fatalf("got %d %q", rec.Code, rec.Body.String())
+	}
+	// A line over the scanner limit is a failure too.
+	rec = get(t, NewServer(&fakeRunner{out: strings.Repeat("x", 2<<20) + "\n"}), http.MethodGet, "/v1/logs?service=redis")
+	if rec.Code != http.StatusBadGateway {
+		t.Fatalf("long line: got %d", rec.Code)
+	}
+	// Once lines are sent the status is fixed; the lines stay.
+	rec = get(t, NewServer(&fakeRunner{out: "a\n", err: exitErr(1)}), http.MethodGet, "/v1/logs?service=redis")
+	if rec.Code != http.StatusOK || rec.Body.String() != "a\n" {
+		t.Fatalf("partial: got %d %q", rec.Code, rec.Body.String())
+	}
+	// In follow mode the followMax kill is the normal end, not a failure.
+	f := &fakeRunner{out: "a\n", err: errors.New("signal: killed"), wait: make(chan struct{})}
+	s := NewServer(f)
+	s.followMax = 20 * time.Millisecond
+	if rec = get(t, s, http.MethodGet, "/v1/logs?service=redis&follow=1"); rec.Code != http.StatusOK || rec.Body.String() != "a\n" {
+		t.Fatalf("follow: got %d %q", rec.Code, rec.Body.String())
 	}
 }

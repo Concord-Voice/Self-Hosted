@@ -21,16 +21,19 @@ type ExecRunner struct {
 // no stdin, and stderr discarded. A cancelled context kills the whole process
 // group, so `docker compose logs -f` children do not outlive the request.
 func (e ExecRunner) Run(ctx context.Context, args []string, w io.Writer) error {
-	if err := CheckTrusted(e.CLI); err != nil {
+	cli, err := CheckTrusted(e.CLI)
+	if err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, e.CLI, args...) //nolint:gosec // fixed CLI path checked above; args come from the server's allowlists
+	// Run the path that was checked, not the configured one: a symlink on the
+	// configured path could be repointed after the check.
+	cmd := exec.CommandContext(ctx, cli, args...) //nolint:gosec // CLI path verified above; args come from the server's allowlists
 	cmd.Env = []string{
 		"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
 		"LANG=C.UTF-8",
 		"HOME=/root",
 	}
-	cmd.Dir = filepath.Dir(e.CLI)
+	cmd.Dir = filepath.Dir(cli)
 	cmd.Stdout = w
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
@@ -41,40 +44,50 @@ func (e ExecRunner) Run(ctx context.Context, args []string, w io.Writer) error {
 // CheckTrusted refuses a CLI that anyone but root (or the agent's own user)
 // could change: the file, every file beside it (the CLI sources its
 // neighbours), and every ancestor directory must be owned by root or the
-// agent's user and not writable by group or others.
-func CheckTrusted(cli string) error {
+// agent's user and not writable by group or others. It returns the resolved
+// path, which is the one callers must run.
+func CheckTrusted(cli string) (string, error) {
 	if !filepath.IsAbs(cli) {
-		return errors.New("cli path must be absolute")
+		return "", errors.New("cli path must be absolute")
 	}
 	resolved, err := filepath.EvalSymlinks(cli)
 	if err != nil {
-		return err
+		return "", err
 	}
 	st, err := os.Lstat(resolved)
 	if err != nil {
-		return err
+		return "", err
 	}
 	if !st.Mode().IsRegular() || st.Mode()&0o111 == 0 {
-		return fmt.Errorf("%s is not an executable file", resolved)
+		return "", fmt.Errorf("%s is not an executable file", resolved)
 	}
 	dir := filepath.Dir(resolved)
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return err
+		return "", err
 	}
 	for _, e := range entries {
-		if e.Type().IsRegular() {
-			if err := trustedEntry(filepath.Join(dir, e.Name())); err != nil {
-				return err
+		p := filepath.Join(dir, e.Name())
+		if e.Type()&os.ModeSymlink != 0 {
+			// The CLI may source a neighbour through a link: check its target.
+			target, err := filepath.EvalSymlinks(p)
+			if err != nil {
+				return "", fmt.Errorf("trust check %s: %w", p, err)
 			}
+			p = target
+		} else if !e.Type().IsRegular() {
+			continue
+		}
+		if err := trustedEntry(p); err != nil {
+			return "", err
 		}
 	}
 	for p := dir; ; p = filepath.Dir(p) {
 		if err := trustedEntry(p); err != nil {
-			return err
+			return "", err
 		}
 		if p == "/" {
-			return nil
+			return resolved, nil
 		}
 	}
 }
@@ -82,7 +95,7 @@ func CheckTrusted(cli string) error {
 func trustedEntry(p string) error {
 	st, err := os.Lstat(p)
 	if err != nil {
-		return err
+		return fmt.Errorf("trust check %s: %w", p, err)
 	}
 	sys, ok := st.Sys().(*syscall.Stat_t)
 	if !ok {

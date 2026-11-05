@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -38,7 +39,7 @@ func envOr(key, def string) string {
 
 func run() int {
 	cli := os.Getenv("CONCORD_AGENT_CLI")
-	if err := hostagent.CheckTrusted(cli); err != nil {
+	if _, err := hostagent.CheckTrusted(cli); err != nil {
 		log.Printf("concord-agent: startup failed: untrusted cli: %v", err)
 		return 1
 	}
@@ -62,6 +63,7 @@ func run() int {
 		Handler:           hostagent.NewServer(hostagent.ExecRunner{CLI: cli}),
 		ReadHeaderTimeout: 5 * time.Second,
 		MaxHeaderBytes:    8 << 10,
+		IdleTimeout:       60 * time.Second,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer stop()
@@ -86,6 +88,17 @@ func listen(path string, gid int) (net.Listener, error) {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, 0o750); err != nil {
 		return nil, err
+	}
+	// The directory is chowned and chmodded below, so it must be one the
+	// agent owns outright: refuse a shared directory such as /run.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	for _, e := range entries {
+		if e.Name() != filepath.Base(path) {
+			return nil, fmt.Errorf("socket directory %s is not empty; use a dedicated directory", dir)
+		}
 	}
 	if err := os.Chown(dir, os.Geteuid(), gid); err != nil {
 		return nil, err
