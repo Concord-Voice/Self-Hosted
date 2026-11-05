@@ -254,6 +254,8 @@ compose_minio_contract() {
     "PATH=$PATH"
     "HOME=${HOME:-/tmp}"
     "DOMAIN=contract-check.invalid"
+    # Config-only host agent overlay input; concord-selfhost sets the real GID.
+    "CONCORD_AGENT_GID=4242"
     "FEEDBACK_PAT=$placeholder"
     "FEEDBACK_REPO=example/example"
     "JWT_SECRET=$placeholder"
