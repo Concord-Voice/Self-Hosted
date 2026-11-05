@@ -44,8 +44,9 @@ sudo curl --unix-socket /run/concord-agent/agent.sock http://agent/v1/health
 ```
 
 The socket is `/run/concord-agent/agent.sock`, mode `0660`, owner
-`root:concord-agent`, in a `0750` directory. The agent removes a stale socket
-on start and refuses to start if something else is at that path. Each request
+`root:concord-agent`, in a `0750` directory. The directory is kept across restarts so
+a container that mounts it keeps seeing the live socket. The agent removes a
+stale socket on start and refuses to start if something else is at that path. Each request
 is logged to the journal as `action=… outcome=…`, without parameters.
 
 | Setting | Default |

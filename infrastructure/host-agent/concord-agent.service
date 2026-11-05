@@ -15,6 +15,9 @@ Restart=on-failure
 RestartSec=5s
 RuntimeDirectory=concord-agent
 RuntimeDirectoryMode=0750
+# Keep the directory across restarts: the control-plane container bind-mounts
+# it, and a new directory would leave that mount pointing at the old one.
+RuntimeDirectoryPreserve=yes
 UMask=0077
 NoNewPrivileges=yes
 PrivateTmp=yes
