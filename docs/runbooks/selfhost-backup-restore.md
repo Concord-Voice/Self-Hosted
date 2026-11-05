@@ -50,3 +50,15 @@ The `.env` check exists because the database and its keys must come from the sam
 
 - **A database step fails:** `--single-transaction` means the database is left unchanged. The stack stays stopped. Run `concord-selfhost up` to resume on the old data.
 - **The MinIO step fails:** the volume may be partly emptied. Re-run the same restore.
+
+## Updating to a release tag
+
+`concord-selfhost update --to vX.Y.Z --confirm [--json]` works only in a git checkout of Self-Hosted. It runs these steps:
+
+1. It refuses if `infrastructure/deploy/release-signers` names no key, which is true **today**. Release-Ops adds the release key when it starts signing tags ([Release-Ops#34](https://github.com/Concord-Voice/Release-Ops/issues/34)). Until then, every tag is refused.
+2. It refuses if tracked files have local changes.
+3. It fetches only that tag, and refuses unless `git verify-tag` passes against `release-signers` (SSH signatures).
+4. It runs `backup`. If the backup fails, nothing has changed.
+5. It checks out the tag (detached), then runs the **tag's own** `concord-selfhost up` and `health`.
+
+If health fails, the command prints the two commands to roll back: check out the previous commit, then restore the backup it just took. A backup can only be restored onto the release that wrote it, so check out the previous commit first.

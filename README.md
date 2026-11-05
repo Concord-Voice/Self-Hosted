@@ -56,8 +56,11 @@ Neither package is published yet.
 
 ### Run it
 
-See `docs/runbooks/selfhost-public-acceptance.md` and run
-`infrastructure/deploy/install-selfhost.sh` on a fresh host.
+No verified self-host release exists yet, so there is no supported install
+procedure. Each verified release will carry its own install guide; see
+`docs/runbooks/selfhost-quickstart.md` for the current status. A guided
+installer and a server-management area in the Admin Console are being built
+under [#182](https://github.com/Concord-Voice/Self-Hosted/issues/182).
 
 ### Develop
 

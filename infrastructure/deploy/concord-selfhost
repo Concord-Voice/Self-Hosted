@@ -139,6 +139,9 @@ Verbs:
                verify the archive matches this release, storage mode and .env,
                stop the stack, restore the database (and bundled MinIO data),
                then run up and health
+  update --to TAG --confirm [--json]
+               fetch TAG, verify its signature against release-signers (no key
+               configured = every tag refused), back up, switch, then up + health
   --help       show this help
 
 Run from the repo root. The .env in the repo root is auto-loaded by compose.
@@ -375,10 +378,18 @@ main() {
     status)     shift; verb_status "$@" ;;
     logs)       shift; verb_logs "$@" ;;
     health)     shift; verb_health "$@" ;;
-    backup|restore)
+    backup|restore|update)
       # shellcheck source=selfhost-backup.sh
       source "$SCRIPT_DIR/selfhost-backup.sh" || return 1
-      if [[ "$1" == backup ]]; then shift; verb_backup "$@"; else shift; verb_restore "$@"; fi
+      case "$1" in
+        backup) shift; verb_backup "$@" ;;
+        restore) shift; verb_restore "$@" ;;
+        update)
+          # shellcheck source=selfhost-update.sh
+          source "$SCRIPT_DIR/selfhost-update.sh" || return 1
+          shift; verb_update "$@"
+          ;;
+      esac
       ;;
     --help|-h|"") usage ;;
     *)
