@@ -30,6 +30,8 @@ const (
 	followMaxRuntime = 10 * time.Minute
 )
 
+const contentType = "Content-Type"
+
 // Services the agent will read logs for. Compose service names.
 var logServices = map[string]bool{
 	"control-plane": true,
@@ -98,13 +100,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func refuse(w http.ResponseWriter, code int, reason string) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentType, "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": reason})
 }
 
 func writeJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set(contentType, "application/json")
 	_ = json.NewEncoder(w).Encode(v)
 }
 
@@ -208,7 +210,7 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) string {
 	ctx, cancel := context.WithTimeout(r.Context(), timeout)
 	defer cancel()
 
-	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	w.Header().Set(contentType, "text/plain; charset=utf-8")
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	pr, pw := io.Pipe()
 	done := make(chan error, 1)
