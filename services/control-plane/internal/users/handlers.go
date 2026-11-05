@@ -94,8 +94,8 @@ type Handler struct {
 	// that one branch rather than skipping the bound; no other handler in this
 	// package reads it.
 	redis *redis.Client
-	// passwords verifies RevealMyKeys' password against the account lockout
-	// /login, CompleteLink and the step-up mint share. Nil refuses (500).
+	// passwords verifies current passwords (reveal, password change, key reset,
+	// security patch) against the account lockout /login shares. Nil refuses (500).
 	passwords                          stepup.PasswordVerifier
 	log                                *logger.Logger
 	instanceType                       string
@@ -148,7 +148,7 @@ func (h *Handler) SetInstanceType(instanceType string) {
 	h.instanceType = config.NormalizeInstanceType(instanceType)
 }
 
-// SetPasswordVerifier wires the lockout-sharing verifier RevealMyKeys uses.
+// SetPasswordVerifier wires the lockout-sharing verifier the password routes use.
 // *auth.Handler satisfies it.
 func (h *Handler) SetPasswordVerifier(v stepup.PasswordVerifier) {
 	h.passwords = v
@@ -525,6 +525,13 @@ func (h *Handler) replaceMyKeysCoordinated(
 	req ReplaceKeysRequest,
 	wrappedKeyBytes, saltBytes, publicKeyBytes []byte,
 ) {
+	// Check the password through the shared lockout first, so this route
+	// cannot keep guessing once the account is locked. The locked re-check
+	// inside the transaction still guards against a concurrent recovery.
+	if _, status, msg := h.verifyCurrentPassword(senderID.String(), req.CurrentPassword, errMsgFailedReplaceKeys); status != 0 {
+		c.JSON(status, gin.H{"error": msg})
+		return
+	}
 	// Credential-epoch fence (#2201): publish the blocked marker before the
 	// rotating transaction. Fail closed if the fence is unwired — a destructive
 	// key replacement must never run without epoch rotation.
@@ -1436,7 +1443,9 @@ func validateChangePasswordPresenceOverride(rotation *changePasswordPresenceOver
 
 // verifyCurrentPassword fetches the user's password hash and checks it against the provided password.
 // Returns the password hash on success, or an HTTP status + error message on failure.
-func (h *Handler) verifyCurrentPassword(userID interface{}, currentPassword string) (string, int, string) {
+//
+// failMsg is the calling route's own 500 message.
+func (h *Handler) verifyCurrentPassword(userID interface{}, currentPassword, failMsg string) (string, int, string) {
 	var passwordHash string
 	err := h.db.QueryRow(
 		`SELECT password_hash FROM users WHERE id = $1`,
@@ -1447,14 +1456,14 @@ func (h *Handler) verifyCurrentPassword(userID interface{}, currentPassword stri
 	}
 	if err != nil {
 		h.log.Error("Failed to fetch password hash", "error", err)
-		return "", http.StatusInternalServerError, errMsgFailedChangePassword
+		return "", http.StatusInternalServerError, failMsg
 	}
 
 	// The shared verifier applies the /login account lockout, so this route
 	// cannot be used to keep guessing once the account is locked.
 	if h.passwords == nil { // pragma: allowlist secret
 		h.log.Error("Password change refused: password verifier not wired", "failure_class", "password_verify_failed")
-		return "", http.StatusInternalServerError, errMsgFailedChangePassword
+		return "", http.StatusInternalServerError, failMsg
 	}
 	_, err = h.passwords.VerifyPassword(context.Background(), fmt.Sprint(userID), currentPassword)
 	switch {
@@ -1466,7 +1475,7 @@ func (h *Handler) verifyCurrentPassword(userID interface{}, currentPassword stri
 		return "", http.StatusUnauthorized, errMsgCurrentPasswordIncorrect
 	default:
 		h.log.Error(errMsgFailedVerifyPassword, "failure_class", "password_verify_failed")
-		return "", http.StatusInternalServerError, errMsgFailedChangePassword
+		return "", http.StatusInternalServerError, failMsg
 	}
 }
 
@@ -1949,7 +1958,7 @@ func (h *Handler) ChangePassword(c *gin.Context) {
 		return
 	}
 
-	passwordHash, status, msg := h.verifyCurrentPassword(userID, req.CurrentPassword)
+	passwordHash, status, msg := h.verifyCurrentPassword(userID, req.CurrentPassword, errMsgFailedChangePassword)
 	if status != 0 {
 		c.JSON(status, gin.H{"error": msg})
 		return

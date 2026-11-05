@@ -115,7 +115,7 @@ func TestPasswordRoutesShareTheAccountLockout(t *testing.T) {
 	ts := setupTS(t)
 	user := ts.CreateTestUser(t, "pwroutelock")
 	auth := testhelpers.AuthHeaders(user.AccessToken)
-	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
+	newPub, newWrapped, newSalt := testhelpers.E2EETestKeys()
 	changePassword := func(current string) int {
 		return ts.DoRequest("POST", urlUsersMePassword, map[string]interface{}{
 			keyCurrentPassword:   current,
@@ -128,17 +128,29 @@ func TestPasswordRoutesShareTheAccountLockout(t *testing.T) {
 		return ts.DoRequest(methodPatch, urlUsersMeSecurity,
 			map[string]interface{}{"current_passphrase": current}, auth).Code
 	}
+	replaceKeys := func(current string) int {
+		return ts.DoRequest("PUT", urlUsersMeKeys, map[string]interface{}{
+			keyWrappedPrivateKey:    newWrapped,
+			keyKeyDerivationSalt:    newSalt,
+			"key_derivation_alg":    "argon2id",
+			"public_key":            newPub,
+			"acknowledge_data_loss": true,
+			keyCurrentPassword:      current,
+		}, auth).Code
+	}
 
-	for range 3 {
+	for range 2 {
 		require.Equal(t, http.StatusUnauthorized, changePassword("WrongPassword123!")) // pragma: allowlist secret
 	}
 	for range 2 {
 		require.Equal(t, http.StatusUnauthorized, patchSecurity("WrongPassword123!")) // pragma: allowlist secret
 	}
+	require.Equal(t, http.StatusUnauthorized, replaceKeys("WrongPassword123!")) // pragma: allowlist secret
 
 	assert.Equal(t, http.StatusLocked, changePassword(user.Password), "the correct password is refused once locked")
 	assert.Equal(t, http.StatusLocked, patchSecurity(user.Password), "the correct passphrase is refused once locked")
+	assert.Equal(t, http.StatusLocked, replaceKeys(user.Password), "the key reset is refused once locked")
 	login := ts.DoRequest("POST", "/api/v1/auth/login",
 		map[string]string{"email": user.Email, "password": user.Password}, nil)
-	assert.Equal(t, http.StatusUnauthorized, login.Code, "five failures across the two routes lock /login")
+	assert.Equal(t, http.StatusUnauthorized, login.Code, "five failures across the three routes lock /login")
 }

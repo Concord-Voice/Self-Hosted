@@ -17853,6 +17853,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '423':
+          description: The account is locked after repeated wrong passwords. A wrong `current_password` here counts toward the same lockout as `/auth/login`.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '500':
           description: Key replacement transaction failed or its commit result was ambiguous
           content:
