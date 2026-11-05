@@ -191,8 +191,8 @@ describe("ServerWorkspace", () => {
       "500",
     );
     await user.click(screen.getByRole("button", { name: "Show logs" }));
-    expect(await screen.findByLabelText("redis logs")).toHaveTextContent(
-      "first line",
+    expect(await screen.findByLabelText("redis logs")).toHaveValue(
+      "first line\nsecond line\n",
     );
     expect(query).toBe("?service=redis&lines=500");
     expect(screen.getByText("redis, last 500 lines")).toBeVisible();
@@ -201,9 +201,8 @@ describe("ServerWorkspace", () => {
       screen.getByRole("combobox", { name: "Service" }),
       "postgres",
     );
-    expect(screen.getByRole("region", { name: "redis logs" })).toHaveAttribute(
-      "tabindex",
-      "0",
+    expect(screen.getByRole("textbox", { name: "redis logs" })).toHaveAttribute(
+      "readonly",
     );
   });
 
@@ -214,7 +213,9 @@ describe("ServerWorkspace", () => {
     await userEvent
       .setup()
       .click(screen.getByRole("button", { name: "Show logs" }));
-    expect(await screen.findByText("No log lines.")).toBeVisible();
+    expect(await screen.findByLabelText("control-plane logs")).toHaveValue(
+      "No log lines.",
+    );
   });
 
   it("reports a busy agent for logs", async () => {

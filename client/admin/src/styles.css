@@ -1261,7 +1261,10 @@ td .status {
 }
 
 .server-logs {
+  display: block;
+  width: 100%;
   max-height: 480px;
+  resize: vertical;
   margin: 12px 0 0;
   padding: 12px;
   overflow: auto;
@@ -1274,12 +1277,6 @@ td .status {
   line-height: 1.5;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-
-.server-logs pre {
-  margin: 0;
-  font: inherit;
-  white-space: inherit;
 }
 
 .server-logs:focus-visible {

@@ -284,16 +284,16 @@ export function ServerWorkspace({
             <p className="server-logs-caption">
               {logs.service}, last {logs.lines} lines
             </p>
-            {/* A focusable region so keyboard users can scroll the logs in
-                every browser; WebKit does not focus scroll containers. */}
-            <div
+            {/* A read-only text area: keyboard users can focus and scroll it in
+                every browser, including WebKit, which does not focus scroll
+                containers. */}
+            <textarea
               aria-label={`${logs.service} logs`}
               className="server-logs"
-              role="region"
-              tabIndex={0}
-            >
-              <pre>{logs.text === "" ? "No log lines." : logs.text}</pre>
-            </div>
+              readOnly
+              rows={20}
+              value={logs.text === "" ? "No log lines." : logs.text}
+            />
           </>
         )}
       </section>
