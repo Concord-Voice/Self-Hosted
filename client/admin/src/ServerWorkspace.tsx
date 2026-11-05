@@ -229,7 +229,6 @@ export function ServerWorkspace({
           <pre
             aria-label={`${service} logs`}
             className="server-logs"
-            tabIndex={0}
           >
             {logs === "" ? "No log lines." : logs}
           </pre>
