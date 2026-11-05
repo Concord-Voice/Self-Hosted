@@ -350,7 +350,7 @@ const (
 	errCodeNoPassword        = "no_password" // pragma: allowlist secret
 	failureClassRevealVerify = "key_reveal_password_verify_failed"
 
-	errMsgFailedVerifyPassword     = "Failed to verify password"
+	errMsgFailedVerifyPassword     = "Failed to verify password"     // pragma: allowlist secret
 	errMsgCurrentPasswordIncorrect = "Current password is incorrect" // pragma: allowlist secret
 )
 
