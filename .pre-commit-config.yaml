@@ -853,3 +853,30 @@ repos:
         additional_dependencies: ['PyYAML==6.0.3']
         files: '^(\.pre-commit-config\.yaml|scripts/test-hook-revs-are-shas\.py)$'
         pass_filenames: false
+
+  # ── Concord-built MinIO and buildtools image publishers ────────────────
+  # Hermetic structural and fail-closed registry-state tests. These run when
+  # the source recipe, publisher, shared consumer, guards, or their tests change.
+  - repo: local
+    hooks:
+      - id: test-publish-minio-image
+        name: 'Test Concord-built MinIO publisher and consumer (#1220)'
+        entry: bash scripts/tests/test-publish-minio-image.sh
+        language: system
+        files: '^(\.pre-commit-config\.yaml|\.github/workflows/publish-minio-image\.yml|(?:\.zap/)?docker-compose(?:\.[A-Za-z0-9_-]+)*\.ya?ml|infrastructure/docker/minio/(Dockerfile|SOURCE-BUILD\.md|dependencies\.patch|minio\.openvex\.json)|scripts/(ci/check-oci-tag|tests/test-(publish-minio-image|check-oci-tag))\.sh)$'
+        pass_filenames: false
+
+      - id: test-check-oci-tag
+        name: 'Test fail-closed OCI tag guard (#1220)'
+        entry: bash scripts/tests/test-check-oci-tag.sh
+        language: system
+        files: '^(\.pre-commit-config\.yaml|scripts/(ci/check-oci-tag|tests/test-check-oci-tag)\.sh)$'
+        pass_filenames: false
+
+      - id: test-publish-minio-engine-pins
+        name: 'Test image publisher Docker Engine pins'
+        entry: python3 scripts/tests/test-publish-minio-engine-pins.py
+        language: python
+        additional_dependencies: ['PyYAML==6.0.3']
+        files: '^(\.pre-commit-config\.yaml|\.github/(workflows/publish-(buildtools-base|minio-image)\.yml|ci/docker-engine-packages\.lock)|scripts/ci/(probe-publisher-engine\.py|require-docker-engine\.sh)|scripts/tests/test-publish-minio-engine-pins\.py)$'
+        pass_filenames: false
