@@ -3195,6 +3195,42 @@ if [[ ${1:-} != --base-only ]]; then
 fi
 [[ ! -e "$STATE/rejected" ]] || fail "unexpected Docker request invalidated fixture"
 udp_preflight_contracts
+# ── #183: --preflight-only runs every check, writes nothing, --json is exact ──
+PFO_LOG="$STUB/preflight-only.log"
+preflight_only_with() { # $@ = installer args; stdout = installer stdout; rc in $STUB/pfo-rc
+  : >"$PFO_LOG"
+  ( source "$TARGET"
+    preflight_os()        { printf 'os '        >>"$PFO_LOG"; }
+    preflight_docker()    { printf 'docker '    >>"$PFO_LOG"; return 2; }
+    preflight_resources() { printf 'resources ' >>"$PFO_LOG"; }
+    preflight_logrotate() { printf 'logrotate ' >>"$PFO_LOG"; }
+    preflight_ports()     { printf 'ports '     >>"$PFO_LOG"; }
+    ENV_OUT="$STUB/pfo-env" main "$@" ) 2>/dev/null
+  echo $? >"$STUB/pfo-rc"
+}
+pfo_out="$(preflight_only_with --preflight-only --json)"
+pfo_want='{"schema":1,"checks":[{"name":"os","ok":true},{"name":"docker","ok":false},{"name":"resources","ok":true},{"name":"logrotate","ok":true},{"name":"ports","ok":true}],"ok":false}'
+[[ "$pfo_out" == "$pfo_want" ]] \
+  && pass "--preflight-only --json prints the exact check object" \
+  || fail "--preflight-only --json printed: $pfo_out"
+[[ "$(cat "$STUB/pfo-rc")" == 2 ]] \
+  && pass "--preflight-only exits 2 when a check fails" \
+  || fail "--preflight-only rc=$(cat "$STUB/pfo-rc"), want 2"
+[[ "$(cat "$PFO_LOG")" == 'os docker resources logrotate ports ' ]] \
+  && pass "--preflight-only runs every check after a failure (no short-circuit)" \
+  || fail "--preflight-only ran: $(cat "$PFO_LOG")"
+[[ ! -e "$STUB/pfo-env" ]] \
+  && pass "--preflight-only writes no .env" \
+  || fail "--preflight-only wrote $STUB/pfo-env"
+pfo_out="$(preflight_only_with --preflight-only)"
+[[ -z "$pfo_out" || "$pfo_out" != *'"schema"'* ]] \
+  && pass "--preflight-only without --json prints no JSON" \
+  || fail "--preflight-only without --json printed JSON"
+preflight_only_with --preflight-only --yaml >/dev/null
+[[ "$(cat "$STUB/pfo-rc")" == 2 && ! -s "$PFO_LOG" ]] \
+  && pass "--preflight-only refuses an unknown option before any check" \
+  || fail "--preflight-only --yaml rc=$(cat "$STUB/pfo-rc") ran: $(cat "$PFO_LOG")"
+
 # ── Summary ───────────────────────────────────────────────────────────────────
 
 echo ""

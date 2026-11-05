@@ -32,6 +32,7 @@ gate can learn from your voice.
 - **Authentication:** Added a dormant internal store for account-change request and origin rows, with caller-owned transactions and explicit retention of other decision obligations.
 - **Self-hosting:** Operators can configure separate Stable and Pre-Release SPA discovery streams. Existing clients keep Stable behavior; remote SPA serving remains off by default, and invalid live configuration updates preserve the previous settings.
 - **Self-hosted setup:** Fresh installer environment files now include explicit WebSocket event-budget settings, with preparation and rollback guidance for existing installations. Runtime delivery and activation remain separate steps.
+- **Self-hosted setup:** `concord-selfhost status --json` and `health --json` print one machine-readable object, and `install-selfhost.sh --preflight-only [--json]` runs every host check without changing the host.
 
 - **Authentication:** Added a dormant transaction-local source marker for future account-change writers, with closed source validation and caller-owned transaction completion.
 - **Authentication:** Added an internal verified-session snapshot adapter for future step-up attempt accounting. Current request handling and attempt budgets are unchanged.

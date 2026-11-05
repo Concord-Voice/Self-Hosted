@@ -102,6 +102,7 @@ if [[ "${1:-}" == compose ]]; then
         printf '%s\n' 'REJECT: all-profile option on mutating or untargeted operation' >>"$SELFHOST_STUB_REJECT_LOG"
         exit 97
       }
+      [[ "${args[i]}" != ps || -z "${STUB_PS_JSON:-}" ]] || printf '%s\n' "$STUB_PS_JSON"
       exit 0 ;;
     logs)
       targeted=0 skip=0
@@ -268,6 +269,47 @@ if grep -q -- '--profile.*services.*ps' "$STUB/docker.log"; then
 else
   fail "status argv wrong: $(cat "$STUB/docker.log")"
 fi
+
+# ── #183: status --json and health --json ─────────────────────────────
+: >"$STUB/docker.log"
+st_out="$(PATH="$STUB:$PATH" STUB_PS_JSON=$'{"Service":"redis","Name":"r-1","State":"running","Health":"healthy","Image":"redis:8","ExitCode":0}\n{"Service":"control-plane","Name":"cp-1","State":"exited","Health":"","Image":"cp:local","ExitCode":1}' \
+  bash "$TARGET" status --json 2>/dev/null)"; st_rc=$?
+st_want='{"schema":1,"services":[{"service":"control-plane","name":"cp-1","state":"exited","health":"","image":"cp:local","exit_code":1},{"service":"redis","name":"r-1","state":"running","health":"healthy","image":"redis:8","exit_code":0}]}'
+if [[ $st_rc -eq 0 && "$st_out" == "$st_want" ]] && grep -q -- '--profile.*services.*ps --all --format json' "$STUB/docker.log"; then
+  pass "status --json normalizes line-delimited compose ps output, sorted by service"
+else
+  fail "status --json rc=$st_rc out=$st_out argv=$(cat "$STUB/docker.log")"
+fi
+st_out="$(PATH="$STUB:$PATH" STUB_PS_JSON='[{"Service":"nats","Name":"n-1","State":"running","Image":"nats:2"}]' \
+  bash "$TARGET" status --json 2>/dev/null)"
+[[ "$st_out" == '{"schema":1,"services":[{"service":"nats","name":"n-1","state":"running","health":"","image":"nats:2","exit_code":null}]}' ]] \
+  && pass "status --json accepts the older JSON-array form" \
+  || fail "status --json array form printed: $st_out"
+PATH="$STUB:$PATH" STUB_PS_JSON='not json' bash "$TARGET" status --json >/dev/null 2>&1 \
+  && fail "status --json accepted unparseable compose output" \
+  || pass "status --json fails closed on unparseable compose output"
+: >"$STUB/docker.log"
+PATH="$STUB:$PATH" bash "$TARGET" status --yaml >/dev/null 2>&1; st_rc=$?
+[[ $st_rc -eq 1 && ! -s "$STUB/docker.log" ]] \
+  && pass "status refuses an unknown option before calling Docker" \
+  || fail "status --yaml rc=$st_rc docker=$(cat "$STUB/docker.log")"
+: >"$STUB/docker.log"
+PATH="$STUB:$PATH" bash "$TARGET" health --yaml >/dev/null 2>&1; st_rc=$?
+[[ $st_rc -eq 1 && ! -s "$STUB/docker.log" ]] \
+  && pass "health refuses an unknown option before calling Docker" \
+  || fail "health --yaml rc=$st_rc docker=$(cat "$STUB/docker.log")"
+hj_out="$( source "$TARGET"
+  HEALTH_RESULTS=(storage_model:0 control_plane:1 coturn_tls:0)
+  health_json )"
+[[ "$hj_out" == '{"schema":1,"checks":[{"name":"storage_model","ok":true},{"name":"control_plane","ok":false},{"name":"coturn_tls","ok":true}],"ok":false}' ]] \
+  && pass "health --json object marks ok=false when any check fails" \
+  || fail "health_json printed: $hj_out"
+hj_out="$( source "$TARGET"
+  health_checks() { echo 'human line'; HEALTH_RESULTS=(storage_model:0 port_posture:0); }
+  verb_health --json 2>/dev/null )"
+[[ "$hj_out" == '{"schema":1,"checks":[{"name":"storage_model","ok":true},{"name":"port_posture","ok":true}],"ok":true}' ]] \
+  && pass "health --json keeps human lines off stdout" \
+  || fail "health --json stdout: $hj_out"
 
 # ── Test 5: 'logs' passes remaining args to compose logs -f ───────────
 : >"$STUB/docker.log"
