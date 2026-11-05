@@ -1132,6 +1132,10 @@ func (h *Handler) checkLoginLockout(ctx context.Context, email string) bool {
 // ARGV[2] is the threshold, ARGV[3] the attempts window in seconds, and the
 // rest the escalating lock lengths in seconds. Only the call that sets the lock
 // escalates its length.
+//
+// Counting before the check has one cost: six guesses sent at the same moment
+// lock the account even if they are all correct, because the sixth is refused
+// before any success clears the count. A real user does not do this.
 var loginAttemptScript = redis.NewScript(`
 local locked = redis.call('EXISTS', KEYS[2]) == 1
 local mode = ARGV[1]
@@ -1255,6 +1259,8 @@ func (h *Handler) verifyCredentials(ctx context.Context, c *gin.Context, email, 
 		return false
 	}
 	if !allowed {
+		// Deliberately not fed to the per-IP ban, matching the lock check at
+		// the top of Login: a locked account is already refusing guesses.
 		h.emitHTTPEvent(c, accountLockedEvent())
 		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
 		return false

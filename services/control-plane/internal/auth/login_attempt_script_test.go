@@ -109,7 +109,7 @@ func TestLoginAttemptScript_RedisErrorsFailClosedAndLog(t *testing.T) {
 	assert.Contains(t, out, "login lockout: record failure failed")
 }
 
-func TestVerifyCredentials_RefusesWhenReserveFails(t *testing.T) {
+func TestVerifyCredentials_RefusesOverThreshold(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	h, mini, _ := newLoginAttemptRig(t)
 	// A burst already used up the threshold, but no failure has set the lock yet.
