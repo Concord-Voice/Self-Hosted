@@ -70,7 +70,7 @@ Android.
 ### Security
 
 - **Dependencies:** Updated media development tooling and the CI license checker to patched minimatch and glob versions while retaining dependency attribution checks.
-- **Accounts:** Guessing passwords on the key-reveal route now counts toward the same sign-in failure ban as the login page, and its attempt limits fail closed. API: a wrong `current_password` on `POST /api/v1/users/me/keys/reveal` is now 403 `invalid_current_password` instead of 401.
+- **Accounts:** **BREAKING** Guessing passwords on the key-reveal route now counts toward the same sign-in failure ban as the login page, and its attempt limits fail closed. Wrong passwords there, and when changing your password, resetting your encryption keys or changing your sign-in security settings, now count toward the same lockout as sign-in: five lock the account. API: a wrong `current_password` on `POST /api/v1/users/me/keys/reveal` is now 403 `invalid_current_password` instead of 401, a locked account gets 423 `account_locked`, and an account with no password gets 400 `no_password`.
 
 ## [0.3.0] - 2026-11-01
 
