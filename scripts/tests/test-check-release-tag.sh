@@ -39,6 +39,8 @@ case_ prefix-in-file 'v0.3.0\n' v0.3.0 yes fail
 case_ prerelease    '0.3.0-rc1\n' v0.3.0-rc1 yes fail
 case_ leading-zero  '0.03.0\n'  v0.03.0 yes fail
 case_ two-lines     '0.3.0\n0.3.1\n' v0.3.0 yes fail
+case_ split-joins   '0.3.1\n0\n' v0.3.10 yes fail
+case_ inner-space   '0.3 .1\n'  v0.3.1 yes fail
 case_ empty         ''          v      yes fail
 case_ off-main      '0.3.0\n'   v0.3.0 no  fail
 exit $fail

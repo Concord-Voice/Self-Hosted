@@ -4,7 +4,10 @@
 # Reads GITHUB_REF_NAME, GITHUB_SHA, GITHUB_OUTPUT. Run from the repo root.
 set -euo pipefail
 
-VERSION=$(tr -d '[:space:]' < VERSION)
+# Trim only the ends: whitespace inside (a second line, a stray space) must fail.
+VERSION=$(<VERSION)
+VERSION="${VERSION#"${VERSION%%[![:space:]]*}"}"
+VERSION="${VERSION%"${VERSION##*[![:space:]]}"}"
 if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
   echo "::error::VERSION must be one X.Y.Z line, got '${VERSION}'"
   exit 1
