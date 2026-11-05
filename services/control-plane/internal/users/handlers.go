@@ -1450,16 +1450,24 @@ func (h *Handler) verifyCurrentPassword(userID interface{}, currentPassword stri
 		return "", http.StatusInternalServerError, errMsgFailedChangePassword
 	}
 
-	match, err := auth.VerifyPassword(currentPassword, passwordHash)
-	if err != nil {
-		// The decode error can embed the stored hash; log the fixed class only.
+	// The shared verifier applies the /login account lockout, so this route
+	// cannot be used to keep guessing once the account is locked.
+	if h.passwords == nil { // pragma: allowlist secret
+		h.log.Error("Password change refused: password verifier not wired", "failure_class", "password_verify_failed")
+		return "", http.StatusInternalServerError, errMsgFailedChangePassword
+	}
+	_, err = h.passwords.VerifyPassword(context.Background(), fmt.Sprint(userID), currentPassword)
+	switch {
+	case err == nil:
+		return passwordHash, 0, ""
+	case errors.Is(err, auth.ErrAccountLocked):
+		return "", http.StatusLocked, stepup.ErrMsgStepUpLocked
+	case errors.Is(err, auth.ErrInvalidCredentials):
+		return "", http.StatusUnauthorized, errMsgCurrentPasswordIncorrect
+	default:
 		h.log.Error(errMsgFailedVerifyPassword, "failure_class", "password_verify_failed")
 		return "", http.StatusInternalServerError, errMsgFailedChangePassword
 	}
-	if !match {
-		return "", http.StatusUnauthorized, errMsgCurrentPasswordIncorrect
-	}
-	return passwordHash, 0, ""
 }
 
 // mfaRequiredMessage is the human-readable half of the mfa_required refusal for
@@ -3107,17 +3115,30 @@ func (h *Handler) verifyCurrentPassphrase(c *gin.Context, userID, plaintext stri
 		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "lookup_failed"})
 		return false
 	}
-	match, err := auth.VerifyPassword(plaintext, passwordHash)
-	if err != nil {
-		h.log.Error("Failed to verify passphrase for security patch", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "verify_failed"})
-		return false
-	}
-	if !match {
+	// An SSO-only account has no passphrase to prove.
+	if passwordHash == "" { // pragma: allowlist secret
 		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "invalid_credentials"})
 		return false
 	}
-	return true
+	// The shared verifier applies the /login account lockout.
+	if h.passwords == nil { // pragma: allowlist secret
+		h.log.Error("Security patch refused: password verifier not wired", "failure_class", "password_verify_failed")
+		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "verify_failed"})
+		return false
+	}
+	_, err = h.passwords.VerifyPassword(c.Request.Context(), userID, plaintext)
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, auth.ErrAccountLocked):
+		c.JSON(http.StatusLocked, gin.H{"error_code": "account_locked"})
+	case errors.Is(err, auth.ErrInvalidCredentials):
+		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "invalid_credentials"})
+	default:
+		h.log.Error("Failed to verify passphrase for security patch", "failure_class", "password_verify_failed")
+		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "verify_failed"})
+	}
+	return false
 }
 
 // PatchSecurity flips the two SSO-related security flags. Any change requires

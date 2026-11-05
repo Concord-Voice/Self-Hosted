@@ -17983,6 +17983,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '423':
+          description: The account is locked after repeated wrong passwords (here, at `/auth/login`, the step-up mint or key reveal). No change is made, even for the correct password.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '409':
           description: Version conflict on a password-derived domain (presence
             exception or a sync domain); the whole password/key transaction is
@@ -19086,6 +19092,12 @@ paths:
                 $ref: '#/components/schemas/ErrorCode'
         '403':
           description: Self-hosted instances require password login (`password_login_required_self_hosted`)
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorCode'
+        '423':
+          description: The account is locked after repeated wrong passwords (`account_locked`). Wrong passphrases here count toward the same lockout as `/auth/login`.
           content:
             application/json:
               schema:

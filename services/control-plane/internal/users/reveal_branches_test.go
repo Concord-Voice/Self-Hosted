@@ -105,3 +105,40 @@ func TestChangePassword_CorruptHashIsNotLogged(t *testing.T) {
 	assert.Contains(t, logs.String(), "password_verify_failed")
 	assert.NotContains(t, logs.String(), "SECRETHASH")
 }
+
+// Wrong passwords at the password-change and security-toggle routes count
+// toward the account lockout, and a locked account is refused there too, so
+// neither route works as an unlocked password oracle.
+//
+// Mutant killed: either route verifying with auth.VerifyPassword directly.
+func TestPasswordRoutesShareTheAccountLockout(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "pwroutelock")
+	auth := testhelpers.AuthHeaders(user.AccessToken)
+	_, newWrapped, newSalt := testhelpers.E2EETestKeys()
+	changePassword := func(current string) int {
+		return ts.DoRequest("POST", urlUsersMePassword, map[string]interface{}{
+			keyCurrentPassword:   current,
+			keyNewPassword:       "weak", // pragma: allowlist secret
+			keyWrappedPrivateKey: newWrapped,
+			keyKeyDerivationSalt: newSalt,
+		}, auth).Code
+	}
+	patchSecurity := func(current string) int {
+		return ts.DoRequest(methodPatch, urlUsersMeSecurity,
+			map[string]interface{}{"current_passphrase": current}, auth).Code
+	}
+
+	for range 3 {
+		require.Equal(t, http.StatusUnauthorized, changePassword("WrongPassword123!")) // pragma: allowlist secret
+	}
+	for range 2 {
+		require.Equal(t, http.StatusUnauthorized, patchSecurity("WrongPassword123!")) // pragma: allowlist secret
+	}
+
+	assert.Equal(t, http.StatusLocked, changePassword(user.Password), "the correct password is refused once locked")
+	assert.Equal(t, http.StatusLocked, patchSecurity(user.Password), "the correct passphrase is refused once locked")
+	login := ts.DoRequest("POST", "/api/v1/auth/login",
+		map[string]string{"email": user.Email, "password": user.Password}, nil)
+	assert.Equal(t, http.StatusUnauthorized, login.Code, "five failures across the two routes lock /login")
+}
