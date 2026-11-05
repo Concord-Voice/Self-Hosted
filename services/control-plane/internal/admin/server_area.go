@@ -52,7 +52,7 @@ func NewServerArea(audit auditWriter, log *logger.Logger) *ServerArea {
 
 func unixClient(sock string) *http.Client {
 	return &http.Client{
-		Timeout: 35 * time.Second,
+		Timeout: 70 * time.Second, // above the agent's 60-second health budget
 		Transport: &http.Transport{
 			DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
 				var d net.Dialer
