@@ -1887,7 +1887,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/SSOError'
         '500':
-          description: Session issuance or SSO identity persistence failed (`token_issuance_failed` / `sso_identity_insert_failed`)
+          description: Password verification, session issuance or SSO identity persistence failed (`password_verify_failed` / `token_issuance_failed` / `sso_identity_insert_failed`)
           content:
             application/json:
               schema:
