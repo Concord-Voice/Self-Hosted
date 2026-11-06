@@ -11,7 +11,7 @@ Wants=docker.service
 Type=simple
 # Set this to the concord-selfhost wrapper in your root-owned checkout.
 Environment=CONCORD_AGENT_CLI=/opt/concord/infrastructure/deploy/concord-selfhost
-ExecStart=/usr/local/libexec/concord-agent
+ExecStart=/usr/libexec/concord-agent
 Restart=on-failure
 RestartSec=5s
 RuntimeDirectory=concord-agent

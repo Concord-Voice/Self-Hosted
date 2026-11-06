@@ -1,0 +1,37 @@
+#!/bin/sh
+# Concord Voice self-hosted package (#187).
+set -e
+
+root=/opt/concord
+bundle=/usr/share/concord-selfhost/concord-selfhost-@VERSION@.tar.gz
+
+if [ "$1" = configure ]; then
+  getent group concord-agent >/dev/null || groupadd --system concord-agent
+
+  # The release goes to /opt/concord once. After that the directory holds the
+  # operator's .env and certificates, so the package never touches it again.
+  if [ -e "$root" ]; then
+    echo "concord-selfhost: $root already exists; leaving it as it is." >&2
+  else
+    umask 022
+    rm -rf "$root.new"
+    mkdir "$root.new"
+    tar -xzf "$bundle" -C "$root.new" --strip-components=1 --no-same-owner
+    mv "$root.new" "$root"
+  fi
+
+  if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    if [ -z "$2" ]; then
+      systemctl enable --now concord-agent.service
+    else
+      systemctl try-restart concord-agent.service
+    fi
+  fi
+
+  if [ ! -e "$root/.env" ]; then
+    echo "concord-selfhost: to finish, open the setup wizard from a browser on your network."
+    echo "concord-selfhost: its address, with a one-time token: sudo cat /run/concord-agent/setup-token"
+    echo "concord-selfhost: compare the certificate fingerprint in: journalctl -u concord-agent"
+  fi
+fi
