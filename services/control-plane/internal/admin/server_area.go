@@ -43,8 +43,8 @@ type auditWriter interface {
 	Write(ctx context.Context, ev AuditEvent) error
 }
 
-// ServerArea serves the read-only Server area of the Admin Console by asking
-// the host agent. Every call, allowed or not, writes one audit row.
+// ServerArea serves the Server area of the Admin Console by asking the host
+// agent. Every call, allowed or not, writes one audit row.
 type ServerArea struct {
 	agent *http.Client
 	audit auditWriter
@@ -103,7 +103,7 @@ func (s *ServerArea) proxyJSON(c *gin.Context, action, path string) {
 	if !ok {
 		return
 	}
-	c.Data(http.StatusOK, "application/json", body)
+	c.Data(http.StatusOK, contentTypeJSON, body)
 }
 
 // fetch asks the agent and writes the error response itself when it fails.
@@ -149,18 +149,31 @@ func (s *ServerArea) record(c *gin.Context, action, service, result, reason stri
 	if service != "" {
 		detail["service"] = service
 	}
+	_ = s.writeAudit(c, EventServerRead, detail, result, reason)
+}
+
+// recordWrite writes the server_write row for one write attempt.
+func (s *ServerArea) recordWrite(c *gin.Context, detail map[string]any, result, reason string) {
+	_ = s.writeAudit(c, EventServerWrite, detail, result, reason)
+}
+
+// writeAudit writes one row and returns the write error, which only the
+// pre-call row of a write action acts on.
+func (s *ServerArea) writeAudit(c *gin.Context, event string, detail map[string]any, result, reason string) error {
 	if reason != "" {
 		detail["reason"] = reason
 	}
-	ev := AuditEvent{EventType: EventServerRead, Result: result, Detail: detail}
+	ev := AuditEvent{EventType: event, Result: result, Detail: detail}
 	if id := c.GetString(adminIDContextKey); id != "" {
 		ev.AdminID = &id
 	}
-	// A client that leaves mid-read must not cancel the row: the agent has
+	// A client that leaves mid-call must not cancel the row: the agent has
 	// already run the command.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), auditWriteTimeout)
 	defer cancel()
-	if err := s.audit.Write(ctx, ev); err != nil {
+	err := s.audit.Write(ctx, ev)
+	if err != nil {
 		s.log.Warn("admin audit write failed", "error", err)
 	}
+	return err
 }

@@ -62,19 +62,16 @@ and the caller polls the job:
   removal refuses until the job ends.
 
 The agent does not check who is asking beyond the socket's permissions. The
-console route for these, still to come, is to require a signed-in admin, a
-fresh WebAuthn check for stop, restart, update and restore, and an audit row
-for every write before it calls the agent. Until then nothing in the console
-calls them.
+console routes below check the admin before they call it.
 
 ## Admin Console
 
-The Admin Console's Server page reads the agent through three signed-in admin
+The Admin Console's Server page reads the agent through signed-in admin
 routes. Each call writes one `server_read` row to the admin audit log with the
 action, the service for logs, and the result, even when the browser leaves
 before the answer. A failed audit write is logged as a warning and does not
 block the read, as for every other admin action. Server reads are recorded
-only in the audit log; they emit no separate security event. The three routes share a limit
+only in the audit log; they emit no separate security event. The routes share a limit
 of 30 requests per minute per client address; more get 429 `rate_limited`.
 
 | Route | Agent request |
@@ -82,6 +79,46 @@ of 30 requests per minute per client address; more get 429 `rate_limited`.
 | `GET /admin/api/v1/server/status` | `/v1/status` |
 | `GET /admin/api/v1/server/health` | `/v1/health` |
 | `GET /admin/api/v1/server/logs?service=S&lines=N` | `/v1/logs` (never follow) |
+| `GET /admin/api/v1/server/jobs` | `/v1/jobs` |
+| `GET /admin/api/v1/server/jobs/<id>` | `/v1/jobs/<id>` |
+| `POST /admin/api/v1/server/stepup` | none: starts a WebAuthn check |
+| `POST /admin/api/v1/server/actions/<action>` | `/v1/actions/<action>` |
+
+### Console write actions
+
+1. Start and backup need only the signed-in admin. Stop, restart, update and
+   restore also need a fresh WebAuthn check on a key that admin enrolled.
+2. For those four, the console first posts `{"action": "<action>"}` to
+   `/server/stepup` and gets a handle and assertion options. The handle is
+   for that admin and that action only, works once, and expires after 2
+   minutes. User verification is required. The handle is spent when the
+   action is posted, even if the agent then refuses it, so a retry needs a
+   new step-up.
+3. The console then posts the action with
+   `{"stepup": {"handle": "...", "assertion": {...}}}`, plus `"tag"` for update
+   or `"archive"` for restore. The control plane checks the tag and archive
+   name itself and sends the agent only those fields.
+4. Every step-up begin and every action attempt writes a `server_write` audit
+   row with the action, tag or archive, whether a step-up passed, the job id
+   when one started, and the reason for a refusal. Step-up begins carry
+   `"phase": "stepup_begin"`. Before calling the agent the control plane
+   writes a `"phase": "requested"` row, and if that write fails it refuses
+   with 503 `audit_unavailable` and does not call the agent. The agent call
+   does not stop if the browser leaves, so the outcome row records what the
+   agent did. When the agent may have started a job but its answer was lost,
+   the row says `"may_have_started": true`; check `/server/jobs`. Unlike
+   reads, these rows also emit a privileged-action security event.
+5. Refusals: 403 `stepup_required`, `stepup_failed` or `stepup_unavailable`
+   (no enrolled key), 400 `invalid_request`, 404 `unknown_action`, 503
+   `audit_unavailable` or `agent_unavailable`, 500 `internal_error`. The
+   agent's own refusals (for example 409 `write_in_progress`) pass through
+   with its code; anything else from the agent becomes 502 `agent_error`. Job
+   polls answer 400 `invalid_request`, 404 `unknown_job`, 502 `agent_error`
+   or 503 `agent_unavailable`.
+
+Job polls count as reads and write `server_read` rows. All these routes share
+the 30-per-minute limit with the other Server routes, so poll a job no faster
+than every 5 seconds.
 
 `concord-selfhost` connects the console to the agent only when both of these
 hold, and otherwise leaves control-plane exactly as before:
