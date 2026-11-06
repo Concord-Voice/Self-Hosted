@@ -1,6 +1,6 @@
-# Concord Host Agent (#186). Serves read-only concord-selfhost actions to the
-# Admin Console on /run/concord-agent/agent.sock, and on a host with no .env
-# the first-run setup wizard on TCP 9443 (#187). See
+# Concord Host Agent (#186). Serves fixed concord-selfhost reads and write
+# actions (#188) to the Admin Console on /run/concord-agent/agent.sock, and on
+# a host with no .env the first-run setup wizard on TCP 9443 (#187). See
 # docs/runbooks/selfhost-host-agent.md before installing.
 [Unit]
 Description=Concord Host Agent

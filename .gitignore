@@ -301,3 +301,6 @@ graphify-out/*
 
 # concord-selfhost backup archives hold .env secrets
 /backups/
+
+# A stray `go build ./cmd/concord-agent` output.
+services/control-plane/concord-agent

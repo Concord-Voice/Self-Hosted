@@ -50,17 +50,16 @@ RUN --mount=type=cache,target=/go/pkg/mod \
       ./cmd/server ./cmd/migrate-media ./cmd/mfa-rekey
 
 # Final stage. Tracks the supported Alpine line -- 3.21 reaches EOL 2026-11-01.
-FROM alpine:3.24@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6
+FROM alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a
 
 LABEL org.opencontainers.image.source="https://github.com/Concord-Voice/Self-Hosted"
 LABEL org.opencontainers.image.description="Concord Voice control-plane service"
 LABEL org.opencontainers.image.licenses="LicenseRef-CVSL-1.0"
 LABEL org.concord.redis-credential-modes="legacy,managed"
 
-# Packages upgraded past the pinned base image, for fixes it predates:
-# musl 1.2.6-r3 (CVE-2026-107891) and zlib 1.3.2-r1 (CVE-2026-85091).
-# ponytail: drop the upgrade once the alpine:3.24 digest ships both.
-RUN apk --no-cache upgrade musl musl-utils zlib \
+# zlib: CVE-2026-85091 is fixed in 1.3.2-r1, which the pinned base predates.
+# Drop this upgrade once the base-image digest ships it.
+RUN apk --no-cache upgrade zlib \
     && apk --no-cache add ca-certificates \
     && addgroup -S -g 10006 appuser && adduser -S -u 10006 -G appuser appuser
 

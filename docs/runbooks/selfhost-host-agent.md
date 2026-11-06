@@ -1,13 +1,14 @@
 # Self-hosted host agent
 
-The Concord Host Agent lets the Admin Console read the state of a self-hosted
+The Concord Host Agent lets the Admin Console read and manage a self-hosted
 server. It is a small Go program that runs as root under systemd and answers
 on a unix socket. Its only network listener is the first-run setup wizard
 (see [Setup mode](#setup-mode)), which closes for good once the server is
 installed.
 
-The socket API is read-only. It can do three things, and nothing else (setup
-mode, below, can also run the installer's preflight and a fresh install):
+The socket API has three reads and six write actions, and nothing else
+(setup mode, below, can also run the installer's preflight and a fresh
+install). The reads:
 
 | Request | Runs | Returns |
 | --- | --- | --- |
@@ -20,6 +21,51 @@ mode, below, can also run the installer's preflight and a fresh install):
 answers any other path with 404, any other method with 405, and a bad
 parameter with 400. It never runs a shell and never passes caller text to the
 command line.
+
+### Write actions
+
+A write is `POST /v1/actions/<action>`. It answers 202 with a job at once,
+and the caller polls the job:
+
+| Action | Body | Runs |
+| --- | --- | --- |
+| `start` | none | `concord-selfhost up` |
+| `stop` | none | `concord-selfhost stop` |
+| `restart` | none | `stop`, then `up`; refused with 409 `security_log_boundary_missing` first if `up` would refuse for that |
+| `backup` | none | `backup --json` (into the install's `backups/`) |
+| `restore` | `{"archive":"concord-backup-<UTC>.tar.gz"}` | `restore <backups>/<archive> --confirm --json` |
+| `update` | `{"tag":"vX.Y.Z"}` | `update --to <tag> --confirm --json` (signed tags only) |
+
+- Only one write runs at a time; another gets 409 `write_in_progress`.
+  Reads keep working while it runs. The lock covers only the agent: do not
+  run `concord-selfhost` by hand while the console runs a write.
+- `restore` takes only a file name the CLI generates, and only for a regular
+  file (not a link, else 404 `unknown_archive`) directly in the install's
+  `backups/` directory, which must be owned by root and closed to group and
+  others (else 409 `untrusted_backups`): the archive's `.env` is what the
+  root agent runs with afterwards. `update`
+  takes only a tag shaped like `vX.Y.Z`; the CLI then refuses any tag that is
+  not signed by a release key. Any other field, a body on an action that
+  takes none, or a body over 1 KiB gets 400.
+- `GET /v1/jobs` lists the last 16 jobs, newest first. `GET /v1/jobs/<id>`
+  returns one with `state` (`running`, `succeeded`, `failed`), its start and
+  finish times, the archive a backup wrote, and the last 64 KiB of the CLI's
+  output, sanitised like log lines. A failed job ends with a
+  `[concord-agent: <action> failed: …]` line saying why. Jobs live in memory,
+  so an agent restart forgets them.
+- A job is not tied to the request that started it. Stop gets 15 minutes;
+  the others get 2 hours (`up` may rebuild images), after which the run is
+  killed.
+- Stopping or restarting the agent kills a running job, so while one runs the
+  agent keeps `/run/concord-agent/write-in-progress`. A package upgrade then
+  leaves the old agent running and says to restart it afterwards, and package
+  removal refuses until the job ends.
+
+The agent does not check who is asking beyond the socket's permissions. The
+console route for these, still to come, is to require a signed-in admin, a
+fresh WebAuthn check for stop, restart, update and restore, and an audit row
+for every write before it calls the agent. Until then nothing in the console
+calls them.
 
 ## Admin Console
 
@@ -167,7 +213,8 @@ touches `/opt/concord` or its `.env`. If you disabled the agent, an upgrade
 or a reinstall keeps it disabled. While setup has not finished (no `.env`
 and the agent running), an upgrade does not restart the agent, because that
 would stop the installer the wizard runs; restart it yourself afterwards.
-Removing the package stops and masks the agent and leaves `/opt/concord` in
+The same holds while a write action runs, and removal waits for it to end
+(see [Write actions](#write-actions)). Removing the package stops and masks the agent and leaves `/opt/concord` in
 place; purging it also forgets whether the agent was enabled. Because `/opt/concord` is not a git checkout,
 `concord-selfhost update` cannot update it yet; that waits on signed
 releases.
@@ -250,28 +297,31 @@ is logged to the journal as `action=… outcome=…`, without parameters.
 
 ## Threat model
 
-- **Socket access means read access to the server.** Anyone in the
+- **Socket access means control of the server.** Anyone in the
   `concord-agent` group can read service logs, which may contain user
-  identifiers. Add only the control-plane container's group to it.
+  identifiers, and can stop, update or restore the server. Add only the
+  control-plane container's group to it.
 - **The agent trusts the checkout.** It runs the wrapper as root, and the
   wrapper reads the Compose files and `.env` in the checkout. The agent checks
-  the wrapper's directory and every directory above it. Its socket actions
-  only read (`compose ps`, `config`, `logs`); setup mode also runs the
-  installer, which writes `.env` and the nginx config in the checkout. A
+  the wrapper's directory and every directory above it before every run. Its
+  reads only read (`compose ps`, `config`, `logs`); its writes run the
+  wrapper's own `up`, `stop`, `backup`, `restore` and `update`; setup mode
+  also runs the installer, which writes `.env` and the nginx config in the checkout. A
   writable Compose file elsewhere in the checkout becomes a path to root the
   next time an operator runs `up`.
   Keep the whole checkout root-owned.
 - **The `docker` group is already root.** Membership of the `docker` group
   gives root on the host with or without this agent.
-- **Confused deputy.** The agent allows only fixed actions, whatever the
-  caller. A future proxy in the control plane is a convenience, not the gate.
+- **Confused deputy.** The agent allows only fixed actions and validates
+  their arguments itself, whatever the caller. The control-plane proxy is a
+  convenience, not the gate.
 - **Log injection.** Log lines are sanitised so a container cannot write
   escape sequences or fake line breaks into the console.
 - **Denial of service.** The request, follow and output limits above bound
   what a socket user can make the agent run.
 - **Environment.** The wrapper runs with a fixed `PATH`, `LANG` and `HOME`,
-  no stdin, and stderr discarded (the setup wizard keeps the installer's
-  stderr to show its messages). A cancelled request kills its whole process
+  no stdin, and stderr discarded for reads (writes and the setup wizard keep
+  stderr to show the CLI's progress and messages). A cancelled request kills its whole process
   group.
 - **Setup wizard on the LAN.** Until the server is installed, anyone on the
   LAN can load the wizard page, but nothing runs without the token, and the

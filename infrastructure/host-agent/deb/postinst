@@ -6,6 +6,7 @@ root=/opt/concord
 bundle=/usr/share/concord-selfhost/concord-selfhost-@VERSION@.tar.gz
 
 token=/run/concord-agent/setup-token
+marker=/run/concord-agent/write-in-progress
 
 case "$1" in
 configure | abort-upgrade | abort-deconfigure | abort-remove) ;;
@@ -47,6 +48,9 @@ if [ -d /run/systemd/system ]; then
   systemctl --system daemon-reload >/dev/null || true
   if [ -z "$2" ]; then
     deb-systemd-invoke start concord-agent.service || true
+  elif [ -e "$marker" ]; then
+    # Restarting would kill a restore or update halfway.
+    echo "concord-selfhost: a write action (backup, restore, update, start or stop) is running, so concord-agent keeps running the old version. When it finishes, run: sudo systemctl restart concord-agent" >&2
   elif [ ! -e "$root/.env" ] && systemctl is-active --quiet concord-agent.service; then
     # The setup wizard may be running the installer as the agent's child, and
     # a restart would kill it halfway.

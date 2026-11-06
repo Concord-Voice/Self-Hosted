@@ -135,6 +135,13 @@ rm /opt/concord/.env
 step install -y -qq --reinstall /pkg/concord-selfhost_1.2.4_amd64.deb
 not_called restart; grep -q "setup may be in progress" /tmp/log
 echo "KEY=kept" >/opt/concord/.env
+# A write action running: an upgrade does not restart, and removal waits.
+: >/run/concord-agent/write-in-progress
+step install -y -qq --reinstall /pkg/concord-selfhost_1.2.4_amd64.deb
+not_called restart; grep -q "a write action" /tmp/log
+if apt-get remove -y -qq concord-selfhost >/tmp/log 2>&1; then echo "removed during a write"; exit 1; fi
+grep -q "remove the package after it finishes" /tmp/log
+rm /run/concord-agent/write-in-progress
 # Removal: stop, mask, reload, keep /opt/concord.
 step remove -y -qq concord-selfhost
 called "stop concord-agent.service"; called daemon-reload; test ! -e "$wants"
