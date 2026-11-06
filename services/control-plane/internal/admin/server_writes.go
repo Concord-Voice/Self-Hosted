@@ -31,6 +31,7 @@ const (
 	// maxServerActionBody leaves room for a WebAuthn assertion.
 	maxServerActionBody = 64 << 10
 	maxAgentJob         = 128 << 10
+	contentTypeJSON     = "application/json"
 )
 
 // serverActions maps each write action to whether it needs a fresh WebAuthn
@@ -122,19 +123,13 @@ func (h *Handler) ServerAction(c *gin.Context) {
 		deny(http.StatusBadRequest, "invalid_request")
 		return
 	}
-	switch {
-	case action == "update" && !serverUpdateTag.MatchString(req.Tag),
-		action == "restore" && !serverBackupArchive.MatchString(req.Archive),
-		action != "update" && req.Tag != "",
-		action != "restore" && req.Archive != "":
+	args, ok := serverActionArgs(action, req)
+	if !ok {
 		deny(http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if req.Tag != "" {
-		detail["tag"] = req.Tag
-	}
-	if req.Archive != "" {
-		detail["archive"] = req.Archive
+	for k, v := range args {
+		detail[k] = v
 	}
 	if needsStepUp {
 		if req.StepUp == nil {
@@ -147,20 +142,30 @@ func (h *Handler) ServerAction(c *gin.Context) {
 		}
 		detail["stepup"] = true
 	}
-	// Send only the arguments the action takes; the agent refuses the rest.
-	args := map[string]string{}
-	if req.Tag != "" {
-		args["tag"] = req.Tag
-	}
-	if req.Archive != "" {
-		args["archive"] = req.Archive
-	}
 	payload, err := json.Marshal(args)
 	if err != nil {
 		deny(http.StatusInternalServerError, "internal_error")
 		return
 	}
 	h.server.startJob(c, action, detail, payload)
+}
+
+// serverActionArgs checks the tag and archive and returns only the arguments
+// the action takes; the agent refuses the rest.
+func serverActionArgs(action string, req serverActionRequest) (map[string]string, bool) {
+	args := map[string]string{}
+	switch {
+	case action == "update" && !serverUpdateTag.MatchString(req.Tag),
+		action == "restore" && !serverBackupArchive.MatchString(req.Archive),
+		action != "update" && req.Tag != "",
+		action != "restore" && req.Archive != "":
+		return nil, false
+	case action == "update":
+		args["tag"] = req.Tag
+	case action == "restore":
+		args["archive"] = req.Archive
+	}
+	return args, true
 }
 
 // ServerJobs returns the agent's recent jobs.
@@ -203,7 +208,7 @@ func (s *ServerArea) proxyJob(c *gin.Context, id string) {
 		return
 	}
 	s.record(c, "job", "", AuditSuccess, "")
-	c.Data(http.StatusOK, "application/json", body)
+	c.Data(http.StatusOK, contentTypeJSON, body)
 }
 
 // startJob posts the action to the agent and relays the job or its refusal.
@@ -213,7 +218,7 @@ func (s *ServerArea) startJob(c *gin.Context, action string, detail map[string]a
 		s.writeFail(c, detail, http.StatusInternalServerError, "internal_error")
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Content-Type", contentTypeJSON)
 	resp, err := s.agent.Do(req)
 	if err != nil {
 		s.writeFail(c, detail, http.StatusServiceUnavailable, "agent_unavailable")
@@ -246,7 +251,7 @@ func (s *ServerArea) startJob(c *gin.Context, action string, detail map[string]a
 	}
 	detail["job_id"] = job.ID
 	s.recordWrite(c, detail, AuditSuccess, "")
-	c.Data(http.StatusAccepted, "application/json", body)
+	c.Data(http.StatusAccepted, contentTypeJSON, body)
 }
 
 func (s *ServerArea) writeFail(c *gin.Context, detail map[string]any, code int, reason string) {

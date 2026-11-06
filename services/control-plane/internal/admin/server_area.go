@@ -103,7 +103,7 @@ func (s *ServerArea) proxyJSON(c *gin.Context, action, path string) {
 	if !ok {
 		return
 	}
-	c.Data(http.StatusOK, "application/json", body)
+	c.Data(http.StatusOK, contentTypeJSON, body)
 }
 
 // fetch asks the agent and writes the error response itself when it fails.
