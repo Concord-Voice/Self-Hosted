@@ -276,11 +276,19 @@ func (s *Server) logs(w http.ResponseWriter, r *http.Request) string {
 	if (runErr != nil && !stopped) || errors.Is(sc.Err(), bufio.ErrTooLong) {
 		if written == 0 {
 			refuse(w, http.StatusBadGateway, "logs_unavailable")
+		} else {
+			// The status is already sent; say in-band that lines are missing so
+			// a cut-off log never reads as complete.
+			_, _ = io.WriteString(w, truncatedMarker)
 		}
 		return "error"
 	}
 	return "ok"
 }
+
+// truncatedMarker ends a log reply that failed after lines were sent, so the
+// console shows the log as cut off instead of complete.
+const truncatedMarker = "[concord-agent: output incomplete]\n"
 
 var ansiEscape = regexp.MustCompile(`\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b[@-_]`)
 

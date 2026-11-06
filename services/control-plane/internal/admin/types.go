@@ -77,4 +77,7 @@ const (
 	EventCredentialRevoked = "credential_revoked" // #nosec G101 -- event-type label, not a secret
 	// EventBootstrap marks the out-of-band creation of an admin (adminctl / in-console).
 	EventBootstrap = "bootstrap"
+	// EventServerRead marks an admin reading server status, health or logs
+	// through the host agent (#186).
+	EventServerRead = "server_read"
 )

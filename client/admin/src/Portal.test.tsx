@@ -90,7 +90,7 @@ describe("Portal", () => {
     setHidden(false);
   });
 
-  it("starts with usable health and a fixed six-workspace command rail", () => {
+  it("starts with usable health and a fixed seven-workspace command rail", () => {
     vi.spyOn(api, "logout").mockResolvedValue();
     render(<Portal initialHealth={healthFixture()} onSessionEnded={vi.fn()} />);
 
@@ -105,6 +105,7 @@ describe("Portal", () => {
       "Counters",
       "Time Series",
       "Health & Changes",
+      "Server",
     ]) {
       expect(screen.getByRole("button", { name: workspace })).toBeVisible();
     }

@@ -53,7 +53,7 @@ reset_case() {
     "$FIX/infrastructure/deploy/.env.activity-history-image.local" \
     "$FIX/infrastructure/deploy/.env.activity-history-receipt.local"
   printf '%s' empty >"$STATE/scenario"
-  rm -f -- "$STATE/stopped" "$STATE/rejected"
+  rm -f -- "$STATE/stopped" "$STATE/rejected" "$STATE/agent-group"
   rm -f -- "$STATE/fresh-rendered" "$STATE/fresh-generation" "$STATE/fresh-privileged" "$STATE/fresh-entry-output"
   rm -f -- "$STATE/source-volumes.json"
   : >"$STATE/fresh-events"
@@ -68,7 +68,8 @@ ambient() {
     MINIO_USE_SSL MINIO_BUCKET MINIO_ROOT_USER MINIO_ROOT_PASSWORD COMPOSE_FILE COMPOSE_PROFILES \
     COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE INSTANCE_TYPE \
     ACTIVITY_HISTORY_CLUSTER_ENABLED CONTROL_PLANE_REPLICA_COUNT ACTIVITY_HISTORY_OPERATOR_NAME \
-    ACTIVITY_HISTORY_PRIVACY_POLICY_URL ATTACHMENT_WRITE_BACKEND CONTROL_PLANE_IMAGE COMPOSE_OVERRIDE; do
+    ACTIVITY_HISTORY_PRIVACY_POLICY_URL ATTACHMENT_WRITE_BACKEND CONTROL_PLANE_IMAGE COMPOSE_OVERRIDE \
+    CONCORD_AGENT_GID; do
     printf -v "$key" '%s' caller-sentinel
     export "$key"
   done
@@ -81,14 +82,16 @@ read_mode() {
     historical) printf 'DOMAIN=example.invalid\nMINIO_ROOT_USER=synthetic-root\nMINIO_ROOT_PASSWORD=synthetic-root-password\nMINIO_BUCKET=concord-media\n' >"$FIX/.env" ;;
     bundled) printf 'SELFHOST_STORAGE_MODE=bundled\n' >"$FIX/.env" ;;
     byo|minio|r2|b2|literal|unquoted|metadata-literal) write_byo
-      case "$shape" in minio|r2|b2) sed -i "s/STORAGE_BACKEND=s3/STORAGE_BACKEND=$shape/" "$FIX/.env" ;;
+      case "$shape" in
+        minio|r2|b2) sed -i "s/STORAGE_BACKEND=s3/STORAGE_BACKEND=$shape/" "$FIX/.env" ;;
         unquoted) sed -i '/^STORAGE_\(ACCESS\|SECRET\)_KEY=/d' "$FIX/.env"; printf 'STORAGE_ACCESS_KEY=synthetic-access\nSTORAGE_SECRET_KEY=synthetic-secret\n' >>"$FIX/.env" ;;
         metadata-literal) sed -i '/^STORAGE_\(REGION\|BUCKET\)=/d' "$FIX/.env"; printf '%s\n' 'STORAGE_REGION=" literal = $$cash \"quoted\" \\trail "' 'STORAGE_BUCKET="Concord_media:fixture"' >>"$FIX/.env" ;;
       esac ;;
   esac
   ambient
   selfhost_storage_read "$FIX" || return $?
-  case "$shape" in historical|bundled) [[ $SELFHOST_STORAGE_MODE_RESOLVED == bundled ]] ;;
+  case "$shape" in
+    historical|bundled) [[ $SELFHOST_STORAGE_MODE_RESOLVED == bundled ]] ;;
     *) [[ $SELFHOST_STORAGE_MODE_RESOLVED == byo-s3 ]] ;; esac
 }
 read_bad() {
@@ -178,7 +181,8 @@ fresh_case() {
     *) scenario "$evidence" ;;
   esac
   ambient
-  case "$evidence" in deploy-image|deploy-receipt)
+  case "$evidence" in
+    deploy-image|deploy-receipt)
     SELFHOST_STORAGE_MODE_RESOLVED=byo-s3
     SELFHOST_STORAGE_PROJECT_ROOT=/synthetic/stale-root
     SELFHOST_STORAGE_PROJECT_NAME=stale-project
@@ -215,7 +219,7 @@ PY
 # Versioned archives and arbitrary source clones have different Compose project
 # identities. These resources are owned fixture metadata, never a live Docker query.
 source_volume_seed() {
-  python3 - "$STATE/source-volumes.json" "$1" <<'SOURCE_VOLUME_SEED'
+  python3 - "$STATE/source-volumes.json" "$1" <<'SOURCEVOLUMESEED'
 import json, pathlib, sys
 
 destination, evidence = pathlib.Path(sys.argv[1]), sys.argv[2]
@@ -232,20 +236,20 @@ if logical != 'missing':
         'list':['volume-owned-private-sentinel'], 'object':{'private':'volume-owned-private-sentinel'},
         'invalid':'invalid logical volume', 'empty':''}.get(logical, logical)
 destination.write_text(json.dumps({'retained-source-' + scope + '_' + logical:labels}, sort_keys=True))
-SOURCE_VOLUME_SEED
+SOURCEVOLUMESEED
 }
 source_volume_snapshot() {
-  python3 - "$STATE/source-volumes.json" <<'SOURCE_VOLUME_SNAPSHOT'
+  python3 - "$STATE/source-volumes.json" <<'SOURCEVOLUMESNAPSHOT'
 import hashlib, pathlib, sys
 path = pathlib.Path(sys.argv[1])
 details = path.lstat()
 print(details.st_mode, details.st_ino, details.st_uid, details.st_gid,
       details.st_size, details.st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest())
-SOURCE_VOLUME_SNAPSHOT
+SOURCEVOLUMESNAPSHOT
 }
 source_volume_conserved() {
   [[ "$(source_volume_snapshot)" == "$1" ]] || fail 'freshness changed retained owned volume metadata'
-  python3 - "$STATE/calls.jsonl" "$STATE/source-volumes.json" <<'SOURCE_VOLUME_READS'
+  python3 - "$STATE/calls.jsonl" "$STATE/source-volumes.json" <<'SOURCEVOLUMEREADS'
 import json, sys
 calls = [json.loads(line)['argv'] for line in open(sys.argv[1])]
 volumes = json.load(open(sys.argv[2]))
@@ -255,7 +259,7 @@ for name in volumes:
     assert any(call[:2] == ['volume', 'inspect'] and call[-1] == name
                and call[2:4] == ['--format', '{{json .Labels}}'] for call in calls), 'owned volume never reached its authoritative typed labels'
 assert all('{{json .}}' not in call and '{{json .Config.Env}}' not in call for call in calls)
-SOURCE_VOLUME_READS
+SOURCEVOLUMEREADS
 }
 namespace_fresh_case() {
   local evidence=$1 phase=$2 rc=0
@@ -335,7 +339,8 @@ namespace_installer_case() {
     fi
     local diagnostic='selfhost-storage: existing installation refused'
     [[ $evidence != *-fail && $evidence != *-malformed ]] || diagnostic='selfhost-storage: installation discovery unavailable'
-    case $evidence in source-volume-*-missing|source-volume-*-null|source-volume-*-bool|source-volume-*-int|source-volume-*-list|source-volume-*-object|source-volume-*-invalid|source-volume-*-empty)
+    case $evidence in
+      source-volume-*-missing|source-volume-*-null|source-volume-*-bool|source-volume-*-int|source-volume-*-list|source-volume-*-object|source-volume-*-invalid|source-volume-*-empty)
       diagnostic='selfhost-storage: installation discovery unavailable' ;;
     esac
     grep -qFx "$diagnostic" "$STATE/fresh-entry-output" || fail 'installer freshness refusal diagnostic changed'
@@ -346,12 +351,18 @@ resolve_case() {
   case "$kind" in
     historical) printf 'DOMAIN=example.invalid\n' >"$FIX/.env" ;;
     bundled) printf 'SELFHOST_STORAGE_MODE=bundled\n' >"$FIX/.env" ;;
+    agent|agent-no-group) printf 'SELFHOST_STORAGE_MODE=bundled\nADMIN_CONSOLE_ENABLED=true\n' >"$FIX/.env" ;;
+    agent-off) printf 'SELFHOST_STORAGE_MODE=bundled\nADMIN_CONSOLE_ENABLED=True\n' >"$FIX/.env" ;;
     *) write_byo ;;
   esac
-  case "$kind" in identity-conflict|identity-fail|identity-malformed) scenario "$kind" ;;
+  case "$kind" in
+    agent|agent-off) : >"$STATE/agent-group" ;; esac
+  case "$kind" in
+    identity-conflict|identity-fail|identity-malformed) scenario "$kind" ;;
     bad-read) printf 'SELFHOST_STORAGE_MODE=byo-s3\n' >"$FIX/.env" ;; esac
   ambient
-  case "$kind" in bad-read|identity-conflict|identity-fail|identity-malformed)
+  case "$kind" in
+    bad-read|identity-conflict|identity-fail|identity-malformed)
     SELFHOST_STORAGE_MODE_RESOLVED=byo-s3
     SELFHOST_STORAGE_PROJECT_ROOT=/synthetic/stale-root
     SELFHOST_STORAGE_PROJECT_NAME=stale-project
@@ -367,7 +378,8 @@ root, mode, *a = sys.argv[1:]
 pairs = [a[i:i+2] for i in range(0, len(a), 2)]
 files = [p[1] for p in pairs if len(p) == 2 and p[0] == '-f']
 want = [root + '/' + n for n in ('docker-compose.yml', 'docker-compose.production.yml', 'docker-compose.selfhost.yml')]
-if mode not in ('historical', 'bundled'): want += [root + '/docker-compose.byo-s3.yml']
+if mode not in ('historical', 'bundled') and not mode.startswith('agent'): want += [root + '/docker-compose.byo-s3.yml']
+if mode == 'agent': want += [root + '/docker-compose.host-agent.yml']
 assert files == want
 for flag, value in (('--env-file', root+'/.env'), ('--project-directory', root), ('--profile', 'services')):
     assert pairs.count([flag, value]) == 1
@@ -376,7 +388,11 @@ assert len(a) == 2 * (len(want) + 4)
 PY
   # Resolve/read results must not become interpolation environment variables.
   export -p >"$STATE/exports"
-  ! grep -qE 'declare -x SELFHOST_STORAGE_(MODE_RESOLVED|PROJECT_ROOT|PROJECT_NAME|COMPOSE_ARGS)=' "$STATE/exports"
+  ! grep -qE 'declare -x SELFHOST_STORAGE_(MODE_RESOLVED|PROJECT_ROOT|PROJECT_NAME|COMPOSE_ARGS|AGENT_GID)=' "$STATE/exports"
+  if [[ "$kind" == agent ]]; then [[ $SELFHOST_STORAGE_AGENT_GID == 987 ]] || fail 'agent group id not resolved'
+  else [[ -z $SELFHOST_STORAGE_AGENT_GID ]] || fail 'agent group id resolved without the console and group'; fi
+  # A render must carry the resolved group id, never the caller's.
+  selfhost_storage_compose config --format json >/dev/null
 }
 scrub_case() {
   ambient
@@ -388,7 +404,8 @@ scrub_case() {
     MINIO_USE_SSL MINIO_BUCKET MINIO_ROOT_USER MINIO_ROOT_PASSWORD COMPOSE_FILE COMPOSE_PROFILES \
     COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE INSTANCE_TYPE \
     ACTIVITY_HISTORY_CLUSTER_ENABLED CONTROL_PLANE_REPLICA_COUNT ACTIVITY_HISTORY_OPERATOR_NAME \
-    ACTIVITY_HISTORY_PRIVACY_POLICY_URL ATTACHMENT_WRITE_BACKEND CONTROL_PLANE_IMAGE COMPOSE_OVERRIDE; do
+    ACTIVITY_HISTORY_PRIVACY_POLICY_URL ATTACHMENT_WRITE_BACKEND CONTROL_PLANE_IMAGE COMPOSE_OVERRIDE \
+    CONCORD_AGENT_GID; do
     [[ ! -v "$key" ]] || fail 'caller control survived scrub'
   done
   [[ $SELFHOST_UNRELATED_SETTING == kept ]]
@@ -417,7 +434,8 @@ runner_case() {
   esac
   [[ "$kind" != clear ]] || selfhost_storage_select_image '' || return $?
   [[ "$kind" != docker-status ]] || scenario runner-fail
-  case "$kind" in daemon-guidance|daemon-control) scenario runner-daemon ;; log-success) scenario runner-stdout ;; esac
+  case "$kind" in
+    daemon-guidance|daemon-control) scenario runner-daemon ;; log-success) scenario runner-stdout ;; esac
   cd "$STATE"
   local rc=0 runner=selfhost_storage_compose
   [[ "$kind" != daemon-control ]] || runner=daemon_guidance_positive_adapter
@@ -559,7 +577,7 @@ cp -- "$ROOT/infrastructure/deploy/install-selfhost.sh" "$FIX/infrastructure/dep
 cp -- "$HELPER" "$FIX/infrastructure/deploy/selfhost-storage.sh"
 cp -- "$ROOT/infrastructure/deploy/nginx/concordvoice.conf" "$FIX/infrastructure/deploy/nginx/concordvoice.conf"
 # Whitelist only model source files; never copy a checkout directory or real environment.
-for model in docker-compose.yml docker-compose.production.yml docker-compose.selfhost.yml; do cp -- "$ROOT/$model" "$FIX/$model"; done
+for model in docker-compose.yml docker-compose.production.yml docker-compose.selfhost.yml docker-compose.host-agent.yml; do cp -- "$ROOT/$model" "$FIX/$model"; done
 printf '' >"$FIX/spa.env"
 # Exact proved candidate is fixture data until Task 5 supplies the production overlay.
 cat >"$FIX/docker-compose.byo-s3.yml" <<'YAML'
@@ -584,12 +602,18 @@ services:
       STORAGE_USE_SSL: "${STORAGE_USE_SSL:?STORAGE_USE_SSL must be set for BYO storage}"
       STORAGE_BUCKET: "${STORAGE_BUCKET:?STORAGE_BUCKET must be set for BYO storage}"
 YAML
+cat >"$WORK/bin/getent" <<'SH'
+#!/bin/sh
+[ "$1 $2" = "group concord-agent" ] && [ -e "$STATE/agent-group" ] || exit 2
+echo 'concord-agent:x:987:'
+SH
+chmod +x "$WORK/bin/getent"
 cat >"$WORK/bin/docker" <<'PY'
 #!/usr/bin/python3
 import json, os, re, sys
 from pathlib import Path
 s = Path(os.environ['STATE']); root = os.environ['FIX']; a = sys.argv[1:]
-controls = '''SELFHOST_STORAGE_MODE STORAGE_BACKEND STORAGE_ENDPOINT STORAGE_REGION STORAGE_ACCESS_KEY STORAGE_SECRET_KEY STORAGE_USE_SSL STORAGE_BUCKET MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY MINIO_USE_SSL MINIO_BUCKET MINIO_ROOT_USER MINIO_ROOT_PASSWORD COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE INSTANCE_TYPE ACTIVITY_HISTORY_CLUSTER_ENABLED CONTROL_PLANE_REPLICA_COUNT ACTIVITY_HISTORY_OPERATOR_NAME ACTIVITY_HISTORY_PRIVACY_POLICY_URL ATTACHMENT_WRITE_BACKEND CONTROL_PLANE_IMAGE COMPOSE_OVERRIDE'''.split()
+controls = '''SELFHOST_STORAGE_MODE STORAGE_BACKEND STORAGE_ENDPOINT STORAGE_REGION STORAGE_ACCESS_KEY STORAGE_SECRET_KEY STORAGE_USE_SSL STORAGE_BUCKET MINIO_ENDPOINT MINIO_ACCESS_KEY MINIO_SECRET_KEY MINIO_USE_SSL MINIO_BUCKET MINIO_ROOT_USER MINIO_ROOT_PASSWORD COMPOSE_FILE COMPOSE_PROFILES COMPOSE_PROJECT_NAME COMPOSE_ENV_FILES COMPOSE_DISABLE_ENV_FILE INSTANCE_TYPE ACTIVITY_HISTORY_CLUSTER_ENABLED CONTROL_PLANE_REPLICA_COUNT ACTIVITY_HISTORY_OPERATOR_NAME ACTIVITY_HISTORY_PRIVACY_POLICY_URL ATTACHMENT_WRITE_BACKEND CONTROL_PLANE_IMAGE COMPOSE_OVERRIDE CONCORD_AGENT_GID'''.split()
 with (s/'calls.jsonl').open('a') as f: f.write(json.dumps({'argv':a,'cwd':os.getcwd(),'env':{k:os.environ[k] for k in controls if k in os.environ},'ambient':{k:os.environ[k] for k in ('COTURN_CERTS_DIR',) if k in os.environ}})+'\n')
 scenario = (s/'scenario').read_text()
 def reject():
@@ -676,12 +700,15 @@ if a[0] == 'compose':
         expected = [root+'/'+x for x in ('docker-compose.yml','docker-compose.production.yml','docker-compose.selfhost.yml')]
         text = (Path(root)/'.env').read_text()
         if 'SELFHOST_STORAGE_MODE=byo-s3' in text: expected.append(root+'/docker-compose.byo-s3.yml')
+        agent = 'ADMIN_CONSOLE_ENABLED=true' in text.split('\n') and (s/'agent-group').exists()
+        if agent: expected.append(root+'/docker-compose.host-agent.yml')
+        if os.environ.get('CONCORD_AGENT_GID') != ('987' if agent else None): reject()
         if [p[1] for p in pairs if p[0]=='-f'] != expected: reject()
         for p in (['--env-file',root+'/.env'],['--project-directory',root],['--profile','services']):
             if pairs.count(p)!=1: reject()
         if sum(p in (['--project-name','concordfixture'],['-p','concordfixture']) for p in pairs)!=1: reject()
         if len(pairs)!=len(expected)+4: reject()
-        if any(k in os.environ for k in controls if k!='CONTROL_PLANE_IMAGE'): reject()
+        if any(k in os.environ for k in controls if k not in ('CONTROL_PLANE_IMAGE','CONCORD_AGENT_GID')): reject()
     if tail == ['config','--format','json']:
         if scenario == 'identity-fail': error()
         if scenario == 'identity-malformed': print('{synthetic-secret-render-sentinel'); sys.exit(0)
@@ -1039,6 +1066,9 @@ done
 namespace_freshness_contracts
 source_volume_freshness_contracts
 for mode in historical bundled byo; do expect "resolver canonical file/env/root/profile argv for $mode" 0 resolve_case "$mode"; done
+expect 'resolver adds the host agent overlay with the console on and the group present' 0 resolve_case agent
+expect 'resolver omits the host agent overlay without the concord-agent group' 0 resolve_case agent-no-group
+expect 'resolver omits the host agent overlay unless the console is exactly true' 0 resolve_case agent-off
 for evidence in bad-read identity-fail identity-malformed identity-conflict; do expect "resolver refuses $evidence and clears results" 1 resolve_case "$evidence"; done
 expect 'explicit scrub removes controls and preserves unrelated setting' 0 scrub_case
 for kind in caller trusted clear; do expect "runner subprocess environment and image $kind" 0 runner_case "$kind"; done

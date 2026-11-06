@@ -37,6 +37,9 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         # Forward the Access assertion to the origin app (L3 verifies it).
         proxy_set_header Cf-Access-Jwt-Assertion $http_cf_access_jwt_assertion;
+        # Server-page health checks can take up to 60 s; nginx's default read
+        # timeout is exactly that, so leave headroom above the 70 s proxy budget.
+        proxy_read_timeout 90s;
     }
     location / { return 404; }
 }

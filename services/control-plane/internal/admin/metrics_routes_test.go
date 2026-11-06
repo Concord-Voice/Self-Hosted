@@ -109,6 +109,36 @@ func TestAdminMetricsRouteRateLimitUsesClosed429Response(t *testing.T) {
 	assert.NotContains(t, body, "message")
 }
 
+func TestAdminServerRoutesAreRateLimited(t *testing.T) {
+	engine, sessions := registerAdminEngineAndSessions(t)
+	sid, err := sessions.Mint(context.Background(), "admin-server-rate-test")
+	require.NoError(t, err)
+	// A refused query never reaches the agent, so no socket is needed.
+	target := "/admin/api/v1/server/logs?service=unknown"
+	for requestNumber := 1; requestNumber <= 30; requestNumber++ {
+		response := serveAdminMetricsRoute(engine, sid, http.MethodGet, target)
+		assert.Equal(t, http.StatusBadRequest, response.Code, "request %d", requestNumber)
+	}
+	response := serveAdminMetricsRoute(engine, sid, http.MethodGet, target)
+	assert.Equal(t, http.StatusTooManyRequests, response.Code)
+	assert.JSONEq(t, `{"error":"rate_limited"}`, response.Body.String())
+}
+
+func TestAdminServerRouteRateLimitFailsClosed(t *testing.T) {
+	limiterRedis := redis.NewClient(&redis.Options{
+		Addr:        "127.0.0.1:1",
+		DialTimeout: 100 * time.Millisecond,
+		MaxRetries:  -1,
+	})
+	t.Cleanup(func() { _ = limiterRedis.Close() })
+	engine, sessions := registerAdminEngineAndSessionsWithLimiter(t, limiterRedis)
+	sid, err := sessions.Mint(context.Background(), "admin-server-rate-backend-test")
+	require.NoError(t, err)
+	response := serveAdminMetricsRoute(engine, sid, http.MethodGet, "/admin/api/v1/server/status")
+	assert.Equal(t, http.StatusInternalServerError, response.Code)
+	assert.JSONEq(t, `{"error":"internal_error"}`, response.Body.String())
+}
+
 func TestAdminMetricsRouteRateLimitFailsClosedWithFixed503Response(t *testing.T) {
 	limiterRedis := redis.NewClient(&redis.Options{
 		Addr:        "127.0.0.1:1",

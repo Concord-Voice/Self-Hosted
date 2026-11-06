@@ -27,6 +27,12 @@ validated catalog identifiers and finite scalar values. Session state comes from
 the protected response codes, and presentation thresholds stay browser-local;
 there is no status endpoint or threshold-write API.
 
+*Amendment (#186, self-hosted Server area):* the portal also reads
+`/admin/api/v1/server/status`, `/server/health` and `/server/logs`, which the
+control plane proxies read-only to the Concord Host Agent. These are fixed,
+allowlisted reads behind the same local admin session; the portal still has no
+write API.
+
 The primary Docker build context remains `services/control-plane`. Compose and
 Buildx supply `client/admin` as the named `admin_ui` context, and a Node build
 stage copies generated assets into the final control-plane image. `dist` is not

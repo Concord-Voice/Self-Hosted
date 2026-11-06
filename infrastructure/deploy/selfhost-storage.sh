@@ -3,13 +3,15 @@
 # Results and checkpoint state never inherit caller interpolation authority.
 unset SELFHOST_STORAGE_MODE_RESOLVED SELFHOST_STORAGE_PROJECT_ROOT \
   SELFHOST_STORAGE_PROJECT_NAME SELFHOST_STORAGE_COMPOSE_ARGS \
-  SELFHOST_STORAGE_MINIO_IDS SELFHOST_STORAGE_TRUSTED_IMAGE SELFHOST_STORAGE_IMAGE
+  SELFHOST_STORAGE_MINIO_IDS SELFHOST_STORAGE_TRUSTED_IMAGE SELFHOST_STORAGE_IMAGE \
+  SELFHOST_STORAGE_AGENT_GID
 SELFHOST_STORAGE_MODE_RESOLVED=''
 SELFHOST_STORAGE_PROJECT_ROOT=''
 SELFHOST_STORAGE_PROJECT_NAME=''
 SELFHOST_STORAGE_COMPOSE_ARGS=()
 SELFHOST_STORAGE_MINIO_IDS=()
 SELFHOST_STORAGE_TRUSTED_IMAGE=''
+SELFHOST_STORAGE_AGENT_GID=''
 
 _selfhost_storage_refuse() {
   printf '%s\n' "$1" >&2
@@ -22,8 +24,10 @@ _selfhost_storage_clear_resolution() {
   SELFHOST_STORAGE_PROJECT_NAME=''
   SELFHOST_STORAGE_COMPOSE_ARGS=()
   SELFHOST_STORAGE_MINIO_IDS=()
+  SELFHOST_STORAGE_AGENT_GID=''
   export -n SELFHOST_STORAGE_MODE_RESOLVED SELFHOST_STORAGE_PROJECT_ROOT \
-    SELFHOST_STORAGE_PROJECT_NAME SELFHOST_STORAGE_COMPOSE_ARGS SELFHOST_STORAGE_MINIO_IDS
+    SELFHOST_STORAGE_PROJECT_NAME SELFHOST_STORAGE_COMPOSE_ARGS SELFHOST_STORAGE_MINIO_IDS \
+    SELFHOST_STORAGE_AGENT_GID
 }
 
 _selfhost_storage_root() {
@@ -175,12 +179,13 @@ try:
         parts = sys.stdin.buffer.read().split(b"\x00")
         require(parts[-1] == b"")
         validate([part.decode("utf-8") for part in parts[:-1]])
-    elif operation in ("read", "read-tls"):
+    elif operation in ("read", "read-tls", "read-agent"):
         text = open(args[0], "rb").read().decode("utf-8")
         require("\x00" not in text and "\r" not in text)
         found = {}
-        key_pattern = (r"SELFHOST_STORAGE_MODE|STORAGE_[A-Za-z0-9_]+"
-                       if operation == "read" else r"DOMAIN|COTURN_CERTS_DIR")
+        key_pattern = {"read": r"SELFHOST_STORAGE_MODE|STORAGE_[A-Za-z0-9_]+",
+                       "read-tls": r"DOMAIN|COTURN_CERTS_DIR",
+                       "read-agent": r"ADMIN_CONSOLE_ENABLED"}[operation]
         for line in text.split("\n"):
             if not line.strip() or line.lstrip().startswith("#"):
                 continue
@@ -190,10 +195,13 @@ try:
             key, remainder = match.groups()
             if operation == "read":
                 require(key == "SELFHOST_STORAGE_MODE" or key in FIELDS)
-            else:
+            elif operation == "read-tls":
                 require(key in ("DOMAIN", "COTURN_CERTS_DIR"))
             require(key not in found and remainder.startswith("="))
             found[key] = decode(remainder[1:])
+        if operation == "read-agent":
+            print("true" if found.get("ADMIN_CONSOLE_ENABLED") == "true" else "false")
+            sys.exit(0)
         if operation == "read-tls":
             domain = found.get("DOMAIN", "")
             selector = found.get("COTURN_CERTS_DIR", "")
@@ -323,7 +331,21 @@ selfhost_storage_scrub_environment() {
     ACTIVITY_HISTORY_OPERATOR_NAME ACTIVITY_HISTORY_PRIVACY_POLICY_URL \
     ATTACHMENT_WRITE_BACKEND FEEDBACK_SCREENSHOT_WRITE_BACKEND \
     CLOUDFLARE_R2_FEEDBACK_ID CLOUDFLARE_R2_FEEDBACK_ID_KEY \
-    CONTROL_PLANE_IMAGE COTURN_CERTS_DIR
+    CONTROL_PLANE_IMAGE COTURN_CERTS_DIR CONCORD_AGENT_GID
+}
+
+# The host agent overlay (#186) mounts the agent's socket directory into
+# control-plane. It is added only when the admin console is on in .env and the
+# concord-agent group exists; its id comes from the group database, never the
+# caller's environment.
+_selfhost_storage_agent_gid() {
+  local root=$1 enabled entry gid
+  enabled="$(_selfhost_storage_data read-agent "$root/.env")" || return 1
+  [[ "$enabled" == true ]] || return 1
+  entry="$(getent group concord-agent 2>/dev/null)" || return 1
+  gid="$(printf '%s' "$entry" | cut -d: -f3)"
+  [[ "$gid" =~ ^[1-9][0-9]{0,9}$ ]] || return 1
+  printf '%s\n' "$gid"
 }
 
 selfhost_storage_project_identity() {
@@ -366,6 +388,11 @@ selfhost_storage_resolve() {
   done
   if [[ "$SELFHOST_STORAGE_MODE_RESOLVED" == byo-s3 ]]; then
     SELFHOST_STORAGE_COMPOSE_ARGS+=(-f "$root/docker-compose.byo-s3.yml")
+  fi
+  if SELFHOST_STORAGE_AGENT_GID="$(_selfhost_storage_agent_gid "$root")"; then
+    SELFHOST_STORAGE_COMPOSE_ARGS+=(-f "$root/docker-compose.host-agent.yml")
+  else
+    SELFHOST_STORAGE_AGENT_GID=''
   fi
   if ! model="$(selfhost_storage_compose config --format json 2>/dev/null)" \
     || ! rendered_name="$(printf '%s' "$model" | _selfhost_storage_data identity)" \
@@ -425,6 +452,10 @@ selfhost_storage_compose() {
     if [[ -n "$SELFHOST_STORAGE_TRUSTED_IMAGE" ]]; then
       CONTROL_PLANE_IMAGE="$SELFHOST_STORAGE_TRUSTED_IMAGE"
       export CONTROL_PLANE_IMAGE
+    fi
+    if [[ -n "$SELFHOST_STORAGE_AGENT_GID" ]]; then
+      CONCORD_AGENT_GID="$SELFHOST_STORAGE_AGENT_GID"
+      export CONCORD_AGENT_GID
     fi
     local rc=0 diagnostic stdout_fd
     exec {stdout_fd}>&1

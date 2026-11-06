@@ -4,6 +4,7 @@ docker-compose.yml
 docker-compose.production.yml
 docker-compose.selfhost.yml
 docker-compose.byo-s3.yml
+docker-compose.host-agent.yml
 infrastructure/deploy/concord-selfhost
 infrastructure/deploy/install-selfhost.sh
 infrastructure/deploy/selfhost-storage.sh
