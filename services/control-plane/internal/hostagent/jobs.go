@@ -73,19 +73,30 @@ func (s *Server) EnableWrites(r Runner, backups string) {
 	s.writes = &jobs{run: r, backups: backups}
 }
 
-// commands maps a write action and its request to the CLI runs it makes.
-// reason is set when the request is refused.
-func (j *jobs) commands(action string, req actionRequest) (cmds [][]string, budget time.Duration, reason string) {
-	noArgs := req == (actionRequest{})
+// actionName returns the fixed name of a known write action, so nothing the
+// caller sent reaches the log, or "" for any other.
+func actionName(action string) string {
 	switch action {
 	case "start":
-		cmds, budget = [][]string{{"up"}}, shortJobBudget
+		return "start"
 	case "stop":
-		cmds, budget = [][]string{{"stop"}}, shortJobBudget
+		return "stop"
 	case "restart":
-		cmds, budget = [][]string{{"stop"}, {"up"}}, shortJobBudget
+		return "restart"
 	case "backup":
-		cmds, budget = [][]string{{"backup", "--json"}}, longJobBudget
+		return "backup"
+	case "update":
+		return "update"
+	case "restore":
+		return "restore"
+	}
+	return ""
+}
+
+// commands maps a known write action and its request to the CLI runs it
+// makes. reason is set when the request is refused.
+func (j *jobs) commands(name string, req actionRequest) (cmds [][]string, budget time.Duration, reason string) {
+	switch name {
 	case "update":
 		if req.Archive != "" || !updateTagPattern.MatchString(req.Tag) {
 			return nil, 0, "invalid_tag"
@@ -100,13 +111,20 @@ func (j *jobs) commands(action string, req actionRequest) (cmds [][]string, budg
 			return nil, 0, "unknown_archive"
 		}
 		return [][]string{{"restore", p, "--confirm", "--json"}}, longJobBudget, ""
-	default:
-		return nil, 0, "unknown_action"
 	}
-	if !noArgs {
+	if req != (actionRequest{}) {
 		return nil, 0, "unexpected_argument"
 	}
-	return cmds, budget, ""
+	switch name {
+	case "start":
+		return [][]string{{"up"}}, shortJobBudget, ""
+	case "stop":
+		return [][]string{{"stop"}}, shortJobBudget, ""
+	case "restart":
+		return [][]string{{"stop"}, {"up"}}, shortJobBudget, ""
+	default: // backup
+		return [][]string{{"backup", "--json"}}, longJobBudget, ""
+	}
 }
 
 func newJobID() (string, error) {
@@ -202,6 +220,12 @@ func (j *jobs) snapshot(job *Job, withOutput bool) Job {
 
 // handleWrite serves POST /v1/actions/<name>.
 func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action string) {
+	name := actionName(action)
+	if name == "" {
+		refuse(w, http.StatusNotFound, "unknown_action")
+		log.Printf("concord-agent: refused unknown action")
+		return
+	}
 	if r.Method != http.MethodPost {
 		refuse(w, http.StatusMethodNotAllowed, "method_not_allowed")
 		return
@@ -215,31 +239,26 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action stri
 			return
 		}
 	}
-	cmds, budget, reason := s.writes.commands(action, req)
-	if reason == "unknown_action" {
-		refuse(w, http.StatusNotFound, reason)
-		log.Printf("concord-agent: refused unknown action")
-		return
-	}
+	cmds, budget, reason := s.writes.commands(name, req)
 	if reason != "" {
 		refuse(w, http.StatusBadRequest, reason)
-		log.Printf("concord-agent: action=%s outcome=refused reason=%s", action, reason)
+		log.Printf("concord-agent: action=%s outcome=refused reason=%s", name, reason)
 		return
 	}
-	job, err := s.writes.start(action, cmds, budget)
+	job, err := s.writes.start(name, cmds, budget)
 	if err != nil {
 		refuse(w, http.StatusInternalServerError, "job_unavailable")
 		return
 	}
 	if job == nil {
 		refuse(w, http.StatusConflict, "write_in_progress")
-		log.Printf("concord-agent: action=%s outcome=busy", action)
+		log.Printf("concord-agent: action=%s outcome=busy", name)
 		return
 	}
 	s.writes.mu.Lock()
 	snap := s.writes.snapshot(job, false)
 	s.writes.mu.Unlock()
-	log.Printf("concord-agent: action=%s outcome=started job=%s", action, job.ID)
+	log.Printf("concord-agent: action=%s outcome=started job=%s", name, job.ID)
 	w.Header().Set(contentType, "application/json")
 	w.WriteHeader(http.StatusAccepted)
 	_ = json.NewEncoder(w).Encode(snap)

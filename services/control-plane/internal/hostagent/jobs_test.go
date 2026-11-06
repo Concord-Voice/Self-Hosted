@@ -104,12 +104,12 @@ func TestRestoreTakesOnlyAnArchiveInBackups(t *testing.T) {
 		t.Fatal(err)
 	}
 	for body, want := range map[string]string{
-		`{"archive":"concord-backup-20261106T071502Z.tar.gz"}`: "unknown_archive",
-		`{"archive":"concord-backup-20261106T071501Z.tar.gz"}`: "unknown_archive", // a link
+		`{"archive":"concord-backup-20261106T071502Z.tar.gz"}`:    "unknown_archive",
+		`{"archive":"concord-backup-20261106T071501Z.tar.gz"}`:    "unknown_archive", // a link
 		`{"archive":"../concord-backup-20261106T071500Z.tar.gz"}`: "invalid_archive",
-		`{"archive":"/etc/passwd"}`: "invalid_archive",
-		`{}`: "invalid_archive",
-		`{"archive":"` + name + `","tag":"v1.0.0"}`: "invalid_archive",
+		`{"archive":"/etc/passwd"}`:                               "invalid_archive",
+		`{}`:                                                      "invalid_archive",
+		`{"archive":"` + name + `","tag":"v1.0.0"}`:               "invalid_archive",
 	} {
 		rec := post(t, s, "/v1/actions/restore", body)
 		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), want) {
@@ -188,7 +188,7 @@ func TestFailedStepStopsTheJob(t *testing.T) {
 func TestBackupJobReportsItsArchive(t *testing.T) {
 	for out, want := range map[string]string{
 		"dumping\n" + `{"schema":1,"ok":true,"archive":"concord-backup-20261106T071500Z.tar.gz"}` + "\n": "concord-backup-20261106T071500Z.tar.gz",
-		`{"schema":1,"ok":true,"archive":"../x.tar.gz"}` + "\n":                                             "",
+		`{"schema":1,"ok":true,"archive":"../x.tar.gz"}` + "\n":                                          "",
 		"no json\n": "",
 	} {
 		s, _ := writeServer(t, &fakeRunner{out: out})
