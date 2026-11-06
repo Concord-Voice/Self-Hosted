@@ -1294,3 +1294,51 @@ td .status {
     grid-template-columns: 1fr;
   }
 }
+
+/* First-run setup wizard (#187), served by the host agent. */
+.setup-main {
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+.setup-panel h2 {
+  margin: 18px 0 8px;
+  font-size: 18px;
+}
+
+.setup-panel fieldset {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-base);
+}
+
+.setup-panel legend {
+  padding: 0 4px;
+  color: var(--muted-strong);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.auth-panel .setup-choice {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-weight: 400;
+}
+
+.auth-panel .setup-choice input {
+  width: auto;
+  min-height: 0;
+  margin-top: 3px;
+}
+
+.setup-checks {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}

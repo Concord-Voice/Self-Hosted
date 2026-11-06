@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -15,10 +16,13 @@ import (
 // ExecRunner runs the concord-selfhost CLI at a fixed absolute path.
 type ExecRunner struct {
 	CLI string
+	// Combined sends stderr to the same writer as stdout; otherwise stderr
+	// is discarded.
+	Combined bool
 }
 
-// Run checks the CLI is still trusted, then runs it with a fixed environment,
-// no stdin, and stderr discarded. A cancelled context kills the whole process
+// Run checks the CLI is still trusted, then runs it with a fixed environment
+// and no stdin. A cancelled context kills the whole process
 // group, so `docker compose logs -f` children do not outlive the request.
 func (e ExecRunner) Run(ctx context.Context, args []string, w io.Writer) error {
 	cli, err := CheckTrusted(e.CLI)
@@ -35,6 +39,9 @@ func (e ExecRunner) Run(ctx context.Context, args []string, w io.Writer) error {
 	}
 	cmd.Dir = filepath.Dir(cli)
 	cmd.Stdout = w
+	if e.Combined {
+		cmd.Stderr = w
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = 5 * time.Second
@@ -89,6 +96,33 @@ func CheckTrusted(cli string) (string, error) {
 		return "", err
 	}
 	return resolved, nil
+}
+
+// CheckTrustedTree applies the same ownership rule to a directory, every
+// directory above it and everything inside it, and refuses links inside it, so
+// nobody but root can change what is served from it. It returns the resolved
+// path.
+func CheckTrustedTree(dir string) (string, error) {
+	if !filepath.IsAbs(dir) {
+		return "", errors.New("path must be absolute")
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", err
+	}
+	if err := trustedAncestors(resolved); err != nil {
+		return "", err
+	}
+	err = filepath.WalkDir(resolved, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("%s is a link", p)
+		}
+		return trustedEntry(p)
+	})
+	return resolved, err
 }
 
 // trustedAncestors checks dir and every directory above it.

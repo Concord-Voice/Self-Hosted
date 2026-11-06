@@ -145,3 +145,47 @@ func TestExecRunner(t *testing.T) {
 		t.Fatal("process group not killed on cancel")
 	}
 }
+
+func TestExecRunnerCombined(t *testing.T) {
+	dir := trustedDir(t)
+	cli := writeCLI(t, dir, "echo out; echo err >&2")
+	for combined, want := range map[bool]string{false: "out\n", true: "out\nerr\n"} {
+		var out bytes.Buffer
+		if err := (ExecRunner{CLI: cli, Combined: combined}).Run(context.Background(), nil, &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.String() != want {
+			t.Fatalf("combined=%v: %q", combined, out.String())
+		}
+	}
+}
+
+func TestCheckTrustedTree(t *testing.T) {
+	dir := trustedDir(t)
+	if err := os.WriteFile(filepath.Join(dir, "index.html"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CheckTrustedTree(dir); err != nil {
+		t.Fatalf("trusted tree refused: %v", err)
+	}
+	if _, err := CheckTrustedTree("relative"); err == nil {
+		t.Fatal("relative path accepted")
+	}
+	if _, err := CheckTrustedTree(t.TempDir()); err == nil {
+		t.Fatal("tree under world-writable /tmp accepted")
+	}
+	link := filepath.Join(dir, "link.js")
+	if err := os.Symlink("/etc/hostname", link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CheckTrustedTree(dir); err == nil || !strings.Contains(err.Error(), "is a link") {
+		t.Fatalf("link inside the tree accepted: %v", err)
+	}
+	_ = os.Remove(link)
+	if err := os.Chmod(filepath.Join(dir, "index.html"), 0o664); err != nil { //nolint:gosec // the point of the test
+		t.Fatal(err)
+	}
+	if _, err := CheckTrustedTree(dir); err == nil {
+		t.Fatal("group-writable file accepted")
+	}
+}
