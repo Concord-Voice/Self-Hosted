@@ -584,3 +584,24 @@ type recoveryIssuanceTx struct{}
 
 func (recoveryIssuanceTx) Commit() error   { return nil }
 func (recoveryIssuanceTx) Rollback() error { return nil }
+
+func TestLoginUnknownUserRedisFailureIs500(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	mini := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: mini.Addr(), MaxRetries: -1})
+	t.Cleanup(func() { _ = redisClient.Close() })
+	mini.Close()
+
+	noRowsDB := sql.OpenDB(noRowsConnector{})
+	t.Cleanup(func() { require.NoError(t, noRowsDB.Close()) })
+	handler := NewHandler(noRowsDB, redisClient, logger.New("test"), "test", nil)
+	response := httptest.NewRecorder()
+	ginContext, _ := gin.CreateTestContext(response)
+	ginContext.Request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/login",
+		strings.NewReader(`{"email":"unknown@example.test","password":"wrong"}`))
+	ginContext.Request.Header.Set("Content-Type", "application/json")
+
+	handler.Login(ginContext)
+
+	require.Equal(t, http.StatusInternalServerError, response.Code, "an uncounted unknown-email guess must not answer 401")
+}

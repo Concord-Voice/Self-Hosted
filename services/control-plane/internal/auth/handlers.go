@@ -1128,6 +1128,9 @@ func (h *Handler) checkLoginLockout(ctx context.Context, email string) bool {
 //	          threshold locks the account at once.
 //	checked - a reserved guess failed; lock if the threshold is reached.
 //	fail    - count and lock-check a failure that was not reserved.
+//	clear   - a guess succeeded; reset the counters. Does nothing while the
+//	          account is locked, so a correct guess that was in flight while a
+//	          burst set the lock cannot lift that lock or its escalation.
 //
 // ARGV[2] is the threshold, ARGV[3] the attempts window in seconds, and the
 // rest the escalating lock lengths in seconds. Only the call that sets the lock
@@ -1139,6 +1142,11 @@ func (h *Handler) checkLoginLockout(ctx context.Context, email string) bool {
 var loginAttemptScript = redis.NewScript(`
 local locked = redis.call('EXISTS', KEYS[2]) == 1
 local mode = ARGV[1]
+if mode == 'clear' then
+  if locked then return 0 end
+  redis.call('DEL', KEYS[1], KEYS[3])
+  return 1
+end
 if mode == 'reserve' and locked then return 0 end
 local n
 if mode == 'checked' then
@@ -1195,20 +1203,23 @@ func (h *Handler) recordCheckedFailure(ctx context.Context, email string) {
 }
 
 // recordFailedLogin counts a failure that was not reserved (for example an
-// unknown email) and locks the account if the threshold is reached.
-func (h *Handler) recordFailedLogin(ctx context.Context, email string) {
+// unknown email) and locks the account if the threshold is reached. A Redis
+// failure is returned so the caller can answer it the same way as a failed
+// reserve; otherwise an outage would tell unknown emails from known ones.
+func (h *Handler) recordFailedLogin(ctx context.Context, email string) error {
 	if _, err := h.runLoginAttemptScript(ctx, email, "fail"); err != nil {
 		h.log.Error("login lockout: record failure failed", "error", err)
+		return err
 	}
+	return nil
 }
 
-// clearLoginAttempts resets counters on successful login.
+// clearLoginAttempts resets the counters after a successful guess. It leaves a
+// lock that a concurrent burst set in place (see the script's clear mode).
 func (h *Handler) clearLoginAttempts(ctx context.Context, email string) {
-	h.redis.Del(ctx,
-		fmt.Sprintf("login_attempts:%s", email),
-		fmt.Sprintf(redisKeyLoginLockout, email),
-		fmt.Sprintf("login_lockout_count:%s", email),
-	)
+	if _, err := h.runLoginAttemptScript(ctx, email, "clear"); err != nil {
+		h.log.Error("login lockout: clear attempts failed", "error", err)
+	}
 }
 
 // Login handles user authentication
@@ -1415,7 +1426,10 @@ func (h *Handler) Login(c *gin.Context) {
 
 	user, loginEpoch, err := h.lookupUserForLogin(req.Email)
 	if err == sql.ErrNoRows {
-		h.recordFailedLogin(ctx, req.Email)
+		if h.recordFailedLogin(ctx, req.Email) != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
+			return
+		}
 		outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
 		h.emitHTTPEvent(c, loginInvalidCredentialsEvent())
 		middleware.MarkAuthFailureOutcome(c, outcome)

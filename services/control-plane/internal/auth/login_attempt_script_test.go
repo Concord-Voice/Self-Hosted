@@ -85,7 +85,7 @@ func TestRecordFailedLogin_CountsAndEscalatesToTheLongestLock(t *testing.T) {
 	want := []time.Duration{15 * time.Minute, 30 * time.Minute, 60 * time.Minute, 60 * time.Minute}
 	for _, d := range want {
 		for i := 0; i < loginLockoutThreshold; i++ {
-			h.recordFailedLogin(ctx, attemptEmail)
+			require.NoError(t, h.recordFailedLogin(ctx, attemptEmail))
 		}
 		require.True(t, mini.Exists("login_lockout:"+attemptEmail))
 		assert.Equal(t, d, mini.TTL("login_lockout:"+attemptEmail))
@@ -102,11 +102,13 @@ func TestLoginAttemptScript_RedisErrorsFailClosedAndLog(t *testing.T) {
 	assert.False(t, ok, "a Redis error must refuse the guess")
 	assert.Error(t, err, "a Redis error must not look like a lock")
 	h.recordCheckedFailure(ctx, attemptEmail)
-	h.recordFailedLogin(ctx, attemptEmail)
+	assert.Error(t, h.recordFailedLogin(ctx, attemptEmail), "a Redis error must reach the caller")
+	h.clearLoginAttempts(ctx, attemptEmail)
 
 	out := logs.String()
 	assert.Contains(t, out, "login lockout: reserve attempt failed")
 	assert.Contains(t, out, "login lockout: record failure failed")
+	assert.Contains(t, out, "login lockout: clear attempts failed")
 }
 
 func TestVerifyCredentials_RefusesOverThreshold(t *testing.T) {
@@ -139,4 +141,32 @@ func TestVerifyCredentials_RedisFailureIs500NotALock(t *testing.T) {
 	assert.False(t, ok)
 	assert.Equal(t, http.StatusInternalServerError, w.Code)
 	assert.Contains(t, w.Body.String(), errMsgLoginFailed)
+}
+
+func TestClearLoginAttempts_KeepsALockSetDuringTheGuess(t *testing.T) {
+	h, mini, _ := newLoginAttemptRig(t)
+	ctx := context.Background()
+
+	// A correct guess reserves a slot, then a burst locks the account before
+	// the correct guess finishes. Its success must not lift that lock.
+	require.True(t, mustReserve(t, h))
+	for i := 0; i < loginLockoutThreshold; i++ {
+		mustReserve(t, h)
+	}
+	require.True(t, mini.Exists("login_lockout:"+attemptEmail))
+
+	h.clearLoginAttempts(ctx, attemptEmail)
+	assert.True(t, mini.Exists("login_lockout:"+attemptEmail), "a success must not lift a burst lock")
+	assert.True(t, mini.Exists("login_lockout_count:"+attemptEmail), "a success must not reset escalation while locked")
+}
+
+func TestClearLoginAttempts_ResetsCountersWhenNotLocked(t *testing.T) {
+	h, mini, _ := newLoginAttemptRig(t)
+	ctx := context.Background()
+
+	require.NoError(t, mini.Set("login_lockout_count:"+attemptEmail, "2"))
+	require.True(t, mustReserve(t, h))
+	h.clearLoginAttempts(ctx, attemptEmail)
+	assert.False(t, mini.Exists("login_attempts:"+attemptEmail))
+	assert.False(t, mini.Exists("login_lockout_count:"+attemptEmail))
 }
