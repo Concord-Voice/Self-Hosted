@@ -6,9 +6,10 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
+    "build:setup": "tsc -b && vite build -c vite.setup.config.ts",
     "lint": "eslint .",
-    "format": "prettier --write --no-error-on-unmatched-pattern src e2e *.ts *.json *.html",
-    "format:check": "prettier --check --no-error-on-unmatched-pattern src e2e *.ts *.json *.html",
+    "format": "prettier --write --no-error-on-unmatched-pattern src e2e *.ts *.json *.html setup",
+    "format:check": "prettier --check --no-error-on-unmatched-pattern src e2e *.ts *.json *.html setup",
     "typecheck": "tsc -b --pretty false",
     "test": "vitest run",
     "test:coverage": "vitest run --coverage",

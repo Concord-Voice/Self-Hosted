@@ -33,6 +33,11 @@ control plane proxies read-only to the Concord Host Agent. These are fixed,
 allowlisted reads behind the same local admin session; the portal still has no
 write API.
 
+*Amendment (#187, setup wizard):* `client/admin` has a second, separate build
+(`setup/`, `vite.setup.config.ts`) for the first-run wizard. The Concord Host
+Agent serves it, not the control plane, and it is the only entry point that
+writes: it posts install answers to the agent's token-gated `/api/install`.
+
 The primary Docker build context remains `services/control-plane`. Compose and
 Buildx supply `client/admin` as the named `admin_ui` context, and a Node build
 stage copies generated assets into the final control-plane image. `dist` is not

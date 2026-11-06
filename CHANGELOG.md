@@ -44,6 +44,8 @@ Android.
 - **Self-hosted setup:** Fresh installer environment files now include explicit WebSocket event-budget settings, with preparation and rollback guidance for existing installations. Runtime delivery and activation remain separate steps.
 - **Self-hosted setup:** `concord-selfhost backup` writes a checksummed archive of the database, bundled file storage and `.env`, and `concord-selfhost restore ARCHIVE --confirm` puts it back after checking that it matches this install.
 - **Self-hosted setup:** `concord-selfhost update --to vX.Y.Z --confirm` moves an instance to a release tag only after verifying the tag's signature against the release keys in `release-signers`, then takes a backup before switching. Until release keys are published, it refuses every tag.
+- **Self-hosted setup:** `scripts/release/build-selfhost-deb.sh` builds a `concord-selfhost` package for Debian 12 and Ubuntu 24.04 (amd64 and arm64). It installs the host agent, its systemd unit and the setup wizard, unpacks the release into `/opt/concord` only when that directory does not exist, and enables and starts the agent so the setup wizard is ready. Upgrades and removal never touch `/opt/concord`.
+- **Self-hosted setup:** On a host with no `.env`, the Concord Host Agent serves a setup wizard over HTTPS on port 9443. It checks the host, collects the install answers in the browser, and runs the installer. A one-time token is written to a root-only file and the certificate fingerprint to the agent's journal, and the wizard closes after a successful install or 60 minutes.
 - **Self-hosted setup:** The Admin Console has a Server page that shows service status, health checks and recent logs through the Concord Host Agent. Each view is recorded in the admin audit log. It is connected only when the console is on and the `concord-agent` group exists.
 - **Self-hosted setup:** Added the Concord Host Agent, a root service on a unix socket that serves read-only status, health and log actions for the Admin Console. It refuses any other action or service.
 - **Self-hosted setup:** `concord-selfhost status --json` and `health --json` print one machine-readable object, and `install-selfhost.sh --preflight-only [--json]` runs every host check without changing the host.
@@ -64,6 +66,7 @@ Android.
 
 ### Fixed
 
+- **Voice:** Voice room presence writes to Redis now time out like the other media-plane Redis calls, and clearing an empty room no longer removes a user who joined during the clear.
 - **Self-hosted CI:** Build and configuration checks now provide explicit WebSocket budget settings, so required production inputs do not prevent those checks from rendering Compose.
 - **Account authority:** Owner cancellation now lets an in-flight lock-health ping finish within its existing timeout before explicitly releasing the serve lock.
 - **WebSocket:** Canceled socket and server lifetimes stop queued frames before activity tracking or handler work, including when event budgets are disabled.
@@ -74,6 +77,7 @@ Android.
 
 ### Security
 
+- **Container images:** The control-plane and Redis auth controller images upgrade zlib to 1.3.2-r1 for CVE-2026-85091 (heap buffer overflow in `gz_vacate()`).
 - **Dependencies:** Updated media development tooling and the CI license checker to patched minimatch and glob versions while retaining dependency attribution checks.
 - **Accounts:** **BREAKING** Guessing passwords on the key-reveal route now counts toward the same sign-in failure ban as the login page, and its attempt limits fail closed. Wrong passwords there, and when changing your password, resetting your encryption keys or changing your sign-in security settings, now count toward the same lockout as sign-in: five lock the account. API: a wrong `current_password` on `POST /api/v1/users/me/keys/reveal` is now 403 `invalid_current_password` instead of 401, a locked account gets 423 `account_locked`, and an account with no password gets 400 `no_password`.
 - **Accounts:** Sending many wrong passwords at the same moment no longer gets more than five guesses checked before the account locks. Each guess now counts toward the lockout before its password is checked, on sign-in, linking a sign-in provider, key reveal, password change, key reset and the sign-in security settings. A correct password that finishes during such a burst no longer lifts the lock, and a sign-in for an unknown email fails safely when the lockout store is down.

@@ -2,9 +2,12 @@
 
 The Concord Host Agent lets the Admin Console read the state of a self-hosted
 server. It is a small Go program that runs as root under systemd and answers
-on a unix socket. It has no network listener.
+on a unix socket. Its only network listener is the first-run setup wizard
+(see [Setup mode](#setup-mode)), which closes for good once the server is
+installed.
 
-This first version is read-only. It can do three things, and nothing else:
+The socket API is read-only. It can do three things, and nothing else (setup
+mode, below, can also run the installer's preflight and a fresh install):
 
 | Request | Runs | Returns |
 | --- | --- | --- |
@@ -46,10 +49,150 @@ that group. Run `concord-selfhost up` after installing the agent to apply it.
 Until the agent is running the page says "The host agent is not reachable.
 Install and start it, then run concord-selfhost up."
 
+## Setup mode
+
+When the agent starts on a host that has no `.env` in the install root (three
+directories above `concord-selfhost`), it also serves a setup wizard over
+HTTPS, so the operator can install from a browser on another machine.
+
+1. The agent writes the wizard address, with a one-time token, to
+   `/run/concord-agent/setup-token` (mode `0600`, root only), and prints the
+   SHA-256 fingerprint of its self-signed certificate to its journal. The
+   token never goes to the journal, which members of the `adm` and
+   `systemd-journal` groups can read.
+
+   ```text
+   $ sudo cat /run/concord-agent/setup-token
+   https://<this-host>:9443/#token=<64 hex characters>
+   $ journalctl -u concord-agent
+   concord-agent: setup mode on port 9443; the wizard address with its one-time token is in /run/concord-agent/setup-token (root only)
+   concord-agent: setup certificate SHA-256 fingerprint AB:CD:…; setup closes in 1h0m0s
+   ```
+
+   If the host has a firewall, allow TCP 9443 from your LAN for the setup
+   window (for example `ufw allow from 192.168.1.0/24 to any port 9443
+   proto tcp`), and remove the rule afterwards.
+
+2. Open the address from a browser on the LAN. The certificate is
+   self-signed, so the browser warns. Compare the fingerprint the browser
+   shows with the printed one before you continue; if they differ, stop.
+   The token in the address is after `#`, so the browser never sends it in
+   the request line, and the page removes it from the address bar.
+3. The wizard runs `install-selfhost.sh --preflight-only --json` and lists the
+   checks in plain words. The wizard offers the install only when every check
+   passes, and the installer runs the same checks again itself.
+4. The wizard collects the domain, public IPv4 address, certificate mode,
+   SMTP server and storage. The agent writes them to an answers file at mode
+   `0600` in a fresh `0700` directory, runs `install-selfhost.sh --env-file`
+   on it, and deletes the directory whatever the outcome. The wizard shows
+   the installer's output, which ends with the next steps to run on the
+   server. The output also goes to the journal, so a browser that left
+   before the install finished loses nothing.
+
+The wizard closes after the first install that writes `.env`, after 60
+minutes, or when the agent stops, whichever comes first. The token then stops
+working and its file is removed; an install already running still finishes. An install that writes `.env` and then fails at a later step
+still closes setup, because the installer refuses to run on an existing
+installation; the wizard says so, and the output shows which step failed.
+After that the token no longer works. To open a new window, run
+`systemctl restart concord-agent`, which writes a new token; once `.env`
+exists the agent does not start setup mode at all.
+
+| Setting | Default |
+| --- | --- |
+| `CONCORD_AGENT_SETUP_ADDR` | `:9443` (all interfaces, so the LAN can reach it) |
+| `CONCORD_AGENT_WIZARD_DIR` | `/usr/share/concord-agent/wizard` |
+
+Build the wizard pages with `npm --prefix client/admin run build:setup` and
+copy `client/admin/dist-setup/` to the wizard directory. The `.deb` ships
+them there. The page handles the token, so the agent refuses setup mode
+unless the wizard directory, everything in it and every directory above it is
+owned by root and not writable by group or others, with no links inside.
+
+Setup-mode rules:
+
+- Every API call needs `Authorization: Bearer <token>`. The token is 32 random
+  bytes and is compared in constant time.
+- The right token always works. Wrong tokens are counted across all
+  addresses; after 10 in 10 minutes, further wrong tokens get 429 and are no
+  longer logged. A 256-bit token cannot be guessed, so the limit only keeps a
+  flood out of the journal; it never locks out the operator.
+- One preflight runs at a time; a second gets 409. At most 16 connections
+  are open at once.
+- One install runs at a time; a second gets 409. An install may take up to
+  10 minutes, and closing the browser does not stop it. Its output is capped
+  at 256 KiB, with terminal escapes and control characters removed; output
+  past the cap is dropped without stopping the installer.
+- The installer refuses an answers file with an unknown field. The agent also
+  refuses unknown fields and any value with a line break or NUL, so an answer
+  cannot add a line.
+- Pages are served with a strict Content Security Policy, `nosniff`,
+  `no-referrer` and no framing. API answers are `no-store`.
+
 ## Install
 
-The packaged install (#187) will do these steps for you. To install from a
-checkout today:
+### Packaged install (Debian 12, Ubuntu 24.04)
+
+The `concord-selfhost_<version>_<arch>.deb` package (amd64 or arm64) installs:
+
+| Path | What |
+| --- | --- |
+| `/usr/libexec/concord-agent` | the agent |
+| `/usr/lib/systemd/system/concord-agent.service` | its unit |
+| `/usr/share/concord-agent/wizard/` | the setup wizard pages |
+| `/usr/share/concord-selfhost/concord-selfhost-<version>.tar.gz` | the server scripts and Compose files for that release |
+
+Install Docker Engine with the Compose plugin first, then:
+
+```bash
+sudo apt-get install ./concord-selfhost_<version>_<arch>.deb
+```
+
+On first install the package:
+
+1. Creates the `concord-agent` system group.
+2. Unpacks the release into `/opt/concord`, owned by root, with no file
+   writable by group or others and no setuid bits, unless `/opt/concord`
+   already exists (then it is left exactly as it is).
+3. Enables `concord-agent`, and starts it when systemd is running. With no
+   `.env` yet, the agent starts setup mode, and the package prints the
+   command that shows the wizard address
+   (`sudo cat /run/concord-agent/setup-token`). Installed into an image
+   without a running systemd, the agent is enabled and starts on first boot.
+
+`/opt/concord` belongs to you, not to the package. Upgrading the package
+replaces only the agent, its unit, the wizard pages and the release tarball
+under `/usr/share/concord-selfhost/`, and restarts the agent; it never
+touches `/opt/concord` or its `.env`. If you disabled the agent, an upgrade
+or a reinstall keeps it disabled. While setup has not finished (no `.env`
+and the agent running), an upgrade does not restart the agent, because that
+would stop the installer the wizard runs; restart it yourself afterwards.
+Removing the package stops and masks the agent and leaves `/opt/concord` in
+place; purging it also forgets whether the agent was enabled. Because `/opt/concord` is not a git checkout,
+`concord-selfhost update` cannot update it yet; that waits on signed
+releases.
+
+To change a setting such as `CONCORD_AGENT_CLI`, use a drop-in
+(`sudo systemctl edit concord-agent`); edits to the packaged unit are lost on
+upgrade.
+
+**Moving from a checkout install.** A unit in `/etc/systemd/system`
+overrides the packaged one, so remove the old files before installing the
+package: `sudo systemctl disable --now concord-agent`, then
+`sudo rm /etc/systemd/system/concord-agent.service /usr/local/libexec/concord-agent`
+and `sudo systemctl daemon-reload`. Unless your checkout is `/opt/concord`,
+first point the packaged agent at it with a drop-in, so it keeps managing
+your running server: create
+`/etc/systemd/system/concord-agent.service.d/override.conf` containing
+`[Service]` and
+`Environment=CONCORD_AGENT_CLI=<checkout>/infrastructure/deploy/concord-selfhost`.
+Without it the agent finds no `.env` beside the fresh `/opt/concord` the
+package unpacks, and opens the setup wizard on a host that is already
+installed.
+
+### From a checkout
+
+To install from a checkout instead:
 
 1. Keep the checkout owned by root and not writable by group or others. The
    agent refuses to start, and refuses each request, if the `concord-selfhost`
@@ -59,10 +202,12 @@ checkout today:
    It runs the wrapper by its resolved path, so a symlink on the configured
    path cannot be swapped after the check.
 2. Build the agent: `go -C services/control-plane build -o /usr/local/libexec/concord-agent ./cmd/concord-agent`.
+   (`/usr/libexec/concord-agent` belongs to the package.)
 3. Create the group that may use the socket: `groupadd --system concord-agent`.
 4. Copy `infrastructure/host-agent/concord-agent.service` to
-   `/etc/systemd/system/`, and set `CONCORD_AGENT_CLI` to the wrapper's
-   absolute path in your checkout.
+   `/etc/systemd/system/`, and in that copy set
+   `ExecStart=/usr/local/libexec/concord-agent` and `CONCORD_AGENT_CLI` to
+   the wrapper's absolute path in your checkout.
 5. Run `systemctl daemon-reload && systemctl enable --now concord-agent`.
 
 Check it from the host:
@@ -110,9 +255,11 @@ is logged to the journal as `action=… outcome=…`, without parameters.
   identifiers. Add only the control-plane container's group to it.
 - **The agent trusts the checkout.** It runs the wrapper as root, and the
   wrapper reads the Compose files and `.env` in the checkout. The agent checks
-  the wrapper's directory and every directory above it. Its own actions only
-  read (`compose ps`, `config`, `logs`), but a writable Compose file elsewhere
-  in the checkout becomes a path to root the next time an operator runs `up`.
+  the wrapper's directory and every directory above it. Its socket actions
+  only read (`compose ps`, `config`, `logs`); setup mode also runs the
+  installer, which writes `.env` and the nginx config in the checkout. A
+  writable Compose file elsewhere in the checkout becomes a path to root the
+  next time an operator runs `up`.
   Keep the whole checkout root-owned.
 - **The `docker` group is already root.** Membership of the `docker` group
   gives root on the host with or without this agent.
@@ -123,5 +270,13 @@ is logged to the journal as `action=… outcome=…`, without parameters.
 - **Denial of service.** The request, follow and output limits above bound
   what a socket user can make the agent run.
 - **Environment.** The wrapper runs with a fixed `PATH`, `LANG` and `HOME`,
-  no stdin, and stderr discarded. A cancelled request kills its whole process
+  no stdin, and stderr discarded (the setup wizard keeps the installer's
+  stderr to show its messages). A cancelled request kills its whole process
   group.
+- **Setup wizard on the LAN.** Until the server is installed, anyone on the
+  LAN can load the wizard page, but nothing runs without the token, and the
+  token is only in a root-only file. Anyone who can read that file on an
+  uninstalled host can configure it. Someone on the network
+  path could intercept the first connection, which is why the fingerprint
+  check matters. The wizard can only run the installer's preflight and a
+  fresh install; it cannot change an installed server.

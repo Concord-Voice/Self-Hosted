@@ -801,6 +801,22 @@ asks for follow mode. Each call writes one `server_read` audit row; the three
 paths share a fail-closed limit of 30 requests/minute/IP. See
 `docs/runbooks/selfhost-host-agent.md`.
 
+**Self-hosted setup wizard (#187):** on a host with no `.env`, the Concord Host
+Agent also listens on TCP 9443 with a fresh self-signed ECDSA P-384 certificate
+and serves a separate wizard build of `client/admin` (`setup/`,
+`vite.setup.config.ts`). Its two API routes, `GET /api/preflight` and
+`POST /api/install`, need a one-time 32-byte bearer token written only to the
+root-only file `/run/concord-agent/setup-token`, run `install-selfhost.sh --preflight-only --json` and
+`--env-file` respectively. Setup closes for good after the first install that
+writes `.env`, or after 60 minutes until the agent restarts with a new token.
+Control-plane is not involved: it is not running yet.
+
+The `concord-selfhost` `.deb` (`scripts/release/build-selfhost-deb.sh`) owns
+the agent (`/usr/libexec/concord-agent`), its unit and the wizard pages, and
+carries the release bundle under `/usr/share/concord-selfhost/`. Its postinst
+unpacks that bundle into `/opt/concord` only when the directory is absent, so
+dpkg never owns the operator's tree or `.env`.
+
 **Read-only metrics API:** `GET /admin/api/v1/health`, `/metrics/current`,
 `/metrics/series`, and `/counters` run behind both gates above. They expose only
 fixed catalog metadata and scalar aggregates for the configured local node.

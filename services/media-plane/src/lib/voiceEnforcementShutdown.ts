@@ -85,7 +85,7 @@ export class VoiceEnforcementSessionReleaseQueue {
 
   retryPending(): Promise<void> {
     if (this.owner) {
-      for (const session of this.pending.values()) this.owner.releaseLegacyRoom(session);
+      for (const session of this.pending.values()) void this.owner.releaseLegacyRoom(session);
       return this.owner.retryPending();
     }
     this.retryRequested = true;

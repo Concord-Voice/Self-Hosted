@@ -57,9 +57,10 @@ LABEL org.opencontainers.image.description="Concord Voice control-plane service"
 LABEL org.opencontainers.image.licenses="LicenseRef-CVSL-1.0"
 LABEL org.concord.redis-credential-modes="legacy,managed"
 
-# musl is upgraded past the pinned base image's 1.2.6-r2 for CVE-2026-107891.
-# ponytail: drop the upgrade once the alpine:3.24 digest ships musl 1.2.6-r3.
-RUN apk --no-cache upgrade musl musl-utils \
+# Packages upgraded past the pinned base image, for fixes it predates:
+# musl 1.2.6-r3 (CVE-2026-107891) and zlib 1.3.2-r1 (CVE-2026-85091).
+# ponytail: drop the upgrade once the alpine:3.24 digest ships both.
+RUN apk --no-cache upgrade musl musl-utils zlib \
     && apk --no-cache add ca-certificates \
     && addgroup -S -g 10006 appuser && adduser -S -u 10006 -G appuser appuser
 
