@@ -425,3 +425,14 @@ func TestSelfSignedTLS(t *testing.T) {
 		t.Fatalf("fingerprint %q", fp)
 	}
 }
+
+func TestSetupExpire(t *testing.T) {
+	s, tok := newTestSetup(t, runFunc(func(_ context.Context, _ []string, w io.Writer) error {
+		_, _ = io.WriteString(w, preflightOK)
+		return nil
+	}))
+	s.Expire()
+	if rec := call(s, http.MethodGet, "/api/preflight", tok, ""); rec.Code != http.StatusGone {
+		t.Fatalf("token works after the window: %d", rec.Code)
+	}
+}

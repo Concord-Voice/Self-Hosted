@@ -166,6 +166,7 @@ func startSetup(ctx context.Context, cli, addr, assets, tokenFile string, window
 			log.Print("concord-agent: setup window ended; restart the agent for a new token")
 		case <-ctx.Done():
 		}
+		setup.Expire()
 		_ = os.Remove(tokenFile) // best-effort: the token is dead either way
 		// An install already running may finish: it writes .env atomically.
 		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 11*time.Minute)

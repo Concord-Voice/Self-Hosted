@@ -87,6 +87,14 @@ func NewSetup(installer Runner, envPath, assetsDir string) (*Setup, string, erro
 // Done is closed after a successful install.
 func (s *Setup) Done() <-chan struct{} { return s.done }
 
+// Expire makes the token stop working, as when the setup window ends. An
+// install already running still finishes.
+func (s *Setup) Expire() {
+	s.mu.Lock()
+	s.used = true
+	s.mu.Unlock()
+}
+
 // Needed reports whether the host is still uninstalled.
 func Needed(envPath string) bool {
 	_, err := os.Lstat(envPath)

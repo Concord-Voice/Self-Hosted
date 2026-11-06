@@ -90,8 +90,8 @@ HTTPS, so the operator can install from a browser on another machine.
    before the install finished loses nothing.
 
 The wizard closes after the first install that writes `.env`, after 60
-minutes, or when the agent stops, whichever comes first, and the token file
-is removed. An install that writes `.env` and then fails at a later step
+minutes, or when the agent stops, whichever comes first. The token then stops
+working and its file is removed; an install already running still finishes. An install that writes `.env` and then fails at a later step
 still closes setup, because the installer refuses to run on an existing
 installation; the wizard says so, and the output shows which step failed.
 After that the token no longer works. To open a new window, run
