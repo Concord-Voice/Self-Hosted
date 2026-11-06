@@ -99,8 +99,9 @@ Setup-mode rules:
 - After 10 wrong tokens in 10 minutes, from any address, every attempt gets
   429 for the rest of that window, including the right token.
 - One install runs at a time; a second gets 409. An install may take up to
-  10 minutes. Its output is capped at 256 KiB, with terminal escapes and
-  control characters removed.
+  10 minutes, and closing the browser does not stop it. Its output is capped
+  at 256 KiB, with terminal escapes and control characters removed; output
+  past the cap is dropped without stopping the installer.
 - The installer refuses an answers file with an unknown field. The agent also
   refuses unknown fields and any value with a line break or NUL, so an answer
   cannot add a line.

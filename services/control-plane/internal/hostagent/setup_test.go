@@ -273,12 +273,44 @@ func TestSetupInstallIsExclusive(t *testing.T) {
 
 func TestSetupInstallOutputIsCapped(t *testing.T) {
 	s, tok := newTestSetup(t, runFunc(func(_ context.Context, _ []string, w io.Writer) error {
-		_, _ = io.WriteString(w, strings.Repeat("x\n", setupMaxOutput))
+		// Writes past the cap must succeed, or the installer dies of EPIPE.
+		for range 2 {
+			if _, err := io.WriteString(w, strings.Repeat("x\n", setupMaxOutput/2+1)); err != nil {
+				t.Errorf("write past the cap failed: %v", err)
+			}
+		}
 		return exitErr(1)
 	}))
 	rec := call(s, http.MethodPost, "/api/install", tok, `{"CFG_DOMAIN":"a"}`)
 	if rec.Body.Len() > setupMaxOutput+1024 || !strings.Contains(rec.Body.String(), "output incomplete") {
 		t.Fatalf("output not capped: %d bytes", rec.Body.Len())
+	}
+}
+
+func TestSetupInstallOutlivesTheBrowser(t *testing.T) {
+	s, tok := newTestSetup(t, runFunc(func(ctx context.Context, _ []string, _ io.Writer) error {
+		if ctx.Err() != nil {
+			t.Error("installer context ended with the request")
+		}
+		if _, ok := ctx.Deadline(); !ok {
+			t.Error("installer has no time budget")
+		}
+		return exitErr(1)
+	}))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel() // the browser has gone
+	req := httptest.NewRequest(http.MethodPost, "/api/install", strings.NewReader(`{"CFG_DOMAIN":"a"}`)).WithContext(ctx)
+	req.Header.Set("Authorization", "Bearer "+tok)
+	s.ServeHTTP(httptest.NewRecorder(), req)
+}
+
+func TestSetupPreflightFindsTheReportAmongStderr(t *testing.T) {
+	s, tok := newTestSetup(t, runFunc(func(_ context.Context, _ []string, w io.Writer) error {
+		_, _ = io.WriteString(w, "before\n"+preflightOK+"\nwarning printed after the report\n")
+		return nil
+	}))
+	if rec := call(s, http.MethodGet, "/api/preflight", tok, ""); rec.Code != http.StatusOK {
+		t.Fatalf("got %d", rec.Code)
 	}
 }
 

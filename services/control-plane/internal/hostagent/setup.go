@@ -173,11 +173,18 @@ func (s *Setup) preflight(w http.ResponseWriter, r *http.Request) {
 	var out limitedBuffer
 	out.max = maxCLIOutput
 	runErr := s.installer.Run(ctx, []string{"--preflight-only", "--json"}, &out)
-	// The JSON is the last line; reasons for failed checks precede it.
-	lines := strings.Split(strings.TrimSpace(out.buf.String()), "\n")
+	// stderr is interleaved with the report, so take the last line that
+	// decodes as one.
+	lines := strings.Split(out.buf.String(), "\n")
 	var doc preflightDoc
+	for i := len(lines) - 1; i >= 0; i-- {
+		if json.Unmarshal([]byte(lines[i]), &doc) == nil && doc.Schema == 1 {
+			break
+		}
+		doc = preflightDoc{}
+	}
 	var ee interface{ ExitCode() int }
-	if out.overflow || json.Unmarshal([]byte(lines[len(lines)-1]), &doc) != nil || doc.Schema != 1 ||
+	if out.overflow || doc.Schema != 1 ||
 		(runErr != nil && (!errors.As(runErr, &ee) || ee.ExitCode() != 2)) {
 		refuse(w, http.StatusBadGateway, "preflight_unavailable")
 		return
@@ -256,10 +263,11 @@ func (s *Setup) runInstaller(r *http.Request, file []byte) (string, error) {
 	if err := os.WriteFile(path, file, 0o600); err != nil {
 		return "", err
 	}
-	ctx, cancel := context.WithTimeout(r.Context(), setupInstallBudget)
+	// A browser that leaves must not kill the installer halfway: only the
+	// install budget ends it.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), setupInstallBudget)
 	defer cancel()
-	var out limitedBuffer
-	out.max = setupMaxOutput
+	out := limitedBuffer{max: setupMaxOutput, keepRunning: true}
 	runErr := s.installer.Run(ctx, []string{"--env-file", path}, &out)
 	lines := strings.Split(strings.ToValidUTF8(out.buf.String(), "?"), "\n")
 	for i, l := range lines {
