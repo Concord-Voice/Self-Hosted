@@ -104,8 +104,8 @@ exists the agent does not start setup mode at all.
 | `CONCORD_AGENT_WIZARD_DIR` | `/usr/share/concord-agent/wizard` |
 
 Build the wizard pages with `npm --prefix client/admin run build:setup` and
-copy `client/admin/dist-setup/` to the wizard directory. The packaged install
-will ship them. The page handles the token, so the agent refuses setup mode
+copy `client/admin/dist-setup/` to the wizard directory. The `.deb` ships
+them there. The page handles the token, so the agent refuses setup mode
 unless the wizard directory, everything in it and every directory above it is
 owned by root and not writable by group or others, with no links inside.
 
@@ -131,8 +131,68 @@ Setup-mode rules:
 
 ## Install
 
-The packaged install (#187) will do these steps for you. To install from a
-checkout today:
+### Packaged install (Debian 12, Ubuntu 24.04)
+
+The `concord-selfhost_<version>_<arch>.deb` package (amd64 or arm64) installs:
+
+| Path | What |
+| --- | --- |
+| `/usr/libexec/concord-agent` | the agent |
+| `/usr/lib/systemd/system/concord-agent.service` | its unit |
+| `/usr/share/concord-agent/wizard/` | the setup wizard pages |
+| `/usr/share/concord-selfhost/concord-selfhost-<version>.tar.gz` | the server scripts and Compose files for that release |
+
+Install Docker Engine with the Compose plugin first, then:
+
+```bash
+sudo apt-get install ./concord-selfhost_<version>_<arch>.deb
+```
+
+On first install the package:
+
+1. Creates the `concord-agent` system group.
+2. Unpacks the release into `/opt/concord`, owned by root, with no file
+   writable by group or others and no setuid bits, unless `/opt/concord`
+   already exists (then it is left exactly as it is).
+3. Enables `concord-agent`, and starts it when systemd is running. With no
+   `.env` yet, the agent starts setup mode, and the package prints the
+   command that shows the wizard address
+   (`sudo cat /run/concord-agent/setup-token`). Installed into an image
+   without a running systemd, the agent is enabled and starts on first boot.
+
+`/opt/concord` belongs to you, not to the package. Upgrading the package
+replaces only the agent, its unit, the wizard pages and the release tarball
+under `/usr/share/concord-selfhost/`, and restarts the agent; it never
+touches `/opt/concord` or its `.env`. If you disabled the agent, an upgrade
+or a reinstall keeps it disabled. While setup has not finished (no `.env`
+and the agent running), an upgrade does not restart the agent, because that
+would stop the installer the wizard runs; restart it yourself afterwards.
+Removing the package stops and masks the agent and leaves `/opt/concord` in
+place; purging it also forgets whether the agent was enabled. Because `/opt/concord` is not a git checkout,
+`concord-selfhost update` cannot update it yet; that waits on signed
+releases.
+
+To change a setting such as `CONCORD_AGENT_CLI`, use a drop-in
+(`sudo systemctl edit concord-agent`); edits to the packaged unit are lost on
+upgrade.
+
+**Moving from a checkout install.** A unit in `/etc/systemd/system`
+overrides the packaged one, so remove the old files before installing the
+package: `sudo systemctl disable --now concord-agent`, then
+`sudo rm /etc/systemd/system/concord-agent.service /usr/local/libexec/concord-agent`
+and `sudo systemctl daemon-reload`. Unless your checkout is `/opt/concord`,
+first point the packaged agent at it with a drop-in, so it keeps managing
+your running server: create
+`/etc/systemd/system/concord-agent.service.d/override.conf` containing
+`[Service]` and
+`Environment=CONCORD_AGENT_CLI=<checkout>/infrastructure/deploy/concord-selfhost`.
+Without it the agent finds no `.env` beside the fresh `/opt/concord` the
+package unpacks, and opens the setup wizard on a host that is already
+installed.
+
+### From a checkout
+
+To install from a checkout instead:
 
 1. Keep the checkout owned by root and not writable by group or others. The
    agent refuses to start, and refuses each request, if the `concord-selfhost`
@@ -142,10 +202,12 @@ checkout today:
    It runs the wrapper by its resolved path, so a symlink on the configured
    path cannot be swapped after the check.
 2. Build the agent: `go -C services/control-plane build -o /usr/local/libexec/concord-agent ./cmd/concord-agent`.
+   (`/usr/libexec/concord-agent` belongs to the package.)
 3. Create the group that may use the socket: `groupadd --system concord-agent`.
 4. Copy `infrastructure/host-agent/concord-agent.service` to
-   `/etc/systemd/system/`, and set `CONCORD_AGENT_CLI` to the wrapper's
-   absolute path in your checkout.
+   `/etc/systemd/system/`, and in that copy set
+   `ExecStart=/usr/local/libexec/concord-agent` and `CONCORD_AGENT_CLI` to
+   the wrapper's absolute path in your checkout.
 5. Run `systemctl daemon-reload && systemctl enable --now concord-agent`.
 
 Check it from the host:

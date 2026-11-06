@@ -375,6 +375,9 @@ selfhost:
   # these extra fixtures for the distinct public packaging and installer path.
   - 'infrastructure/deploy/**'
   - 'infrastructure/docker/**'
+  - 'infrastructure/host-agent/**'
+  - 'scripts/release/build-selfhost-deb.sh'
+  - 'scripts/release/selfhost-bundle.py'
   - 'infrastructure/ingress/**'
   - 'docker-compose*.yml'
   - '.env.example'
