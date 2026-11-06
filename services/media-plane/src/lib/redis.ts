@@ -1008,14 +1008,14 @@ export class RedisService {
           return this.markRoomLive(event.roomId, config.roomPlacementEnabled);
         case 'user-joined':
           void this.markRoomLive(event.roomId);
-          this.addParticipant(event.roomId, event.userId);
+          void this.addParticipant(event.roomId, event.userId);
           break;
         case 'user-left':
-          this.removeParticipant(event.roomId, event.userId);
+          void this.removeParticipant(event.roomId, event.userId);
           break;
         case 'room-empty':
           void this.clearOwnedRoomLive(event.roomId);
-          this.clearRoom(event.roomId);
+          void this.clearRoom(event.roomId);
           break;
       }
       return undefined;
