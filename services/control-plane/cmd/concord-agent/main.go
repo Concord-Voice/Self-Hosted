@@ -1,5 +1,5 @@
 // Command concord-agent is the Concord Host Agent (#186). It runs as root under
-// systemd and serves a fixed set of read-only concord-selfhost actions on a
+// systemd and serves a fixed set of concord-selfhost actions on a
 // unix socket that only root and the concord-agent group can open. On a host
 // with no .env it also serves the first-run setup wizard over HTTPS (#187).
 package main
@@ -36,6 +36,9 @@ const (
 	// directory, and is itself 0600 root: the journal is readable by the adm
 	// and systemd-journal groups, so the token never goes there.
 	setupTokenFile = "setup-token"
+	// writeMarkerFile exists while a write action runs; the package scripts
+	// read it so an upgrade does not restart the agent mid-restore.
+	writeMarkerFile = "write-in-progress"
 	// setupMaxConns bounds the TLS connections a LAN client can hold open.
 	setupMaxConns = 16
 )
@@ -75,8 +78,14 @@ func run() int {
 		return 1
 	}
 
+	agent := hostagent.NewServer(hostagent.ExecRunner{CLI: cli})
+	// Writes report progress on stderr, so their runs keep it. backups is the
+	// CLI's default, three levels above it like .env.
+	agent.EnableWrites(hostagent.ExecRunner{CLI: cli, Combined: true},
+		filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(resolved))), "backups"),
+		filepath.Join(filepath.Dir(sock), writeMarkerFile))
 	srv := &http.Server{
-		Handler:           hostagent.NewServer(hostagent.ExecRunner{CLI: cli}),
+		Handler:           agent,
 		ReadHeaderTimeout: 5 * time.Second,
 		MaxHeaderBytes:    8 << 10,
 		IdleTimeout:       60 * time.Second,
