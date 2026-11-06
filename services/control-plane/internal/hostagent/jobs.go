@@ -23,6 +23,7 @@ import (
 // polls the job.
 
 const (
+	jsonFlag       = "--json"
 	maxJobs        = 16
 	maxJobOutput   = 64 << 10 // tail kept per job
 	maxActionBody  = 1 << 10
@@ -101,7 +102,7 @@ func (j *jobs) commands(name string, req actionRequest) (cmds [][]string, budget
 		if req.Archive != "" || !updateTagPattern.MatchString(req.Tag) {
 			return nil, 0, "invalid_tag"
 		}
-		return [][]string{{"update", "--to", req.Tag, "--confirm", "--json"}}, longJobBudget, ""
+		return [][]string{{"update", "--to", req.Tag, "--confirm", jsonFlag}}, longJobBudget, ""
 	case "restore":
 		if req.Tag != "" || !archivePattern.MatchString(req.Archive) {
 			return nil, 0, "invalid_archive"
@@ -110,7 +111,7 @@ func (j *jobs) commands(name string, req actionRequest) (cmds [][]string, budget
 		if st, err := os.Lstat(p); err != nil || !st.Mode().IsRegular() {
 			return nil, 0, "unknown_archive"
 		}
-		return [][]string{{"restore", p, "--confirm", "--json"}}, longJobBudget, ""
+		return [][]string{{"restore", p, "--confirm", jsonFlag}}, longJobBudget, ""
 	}
 	if req != (actionRequest{}) {
 		return nil, 0, "unexpected_argument"
@@ -123,7 +124,7 @@ func (j *jobs) commands(name string, req actionRequest) (cmds [][]string, budget
 	case "restart":
 		return [][]string{{"stop"}, {"up"}}, shortJobBudget, ""
 	default: // backup
-		return [][]string{{"backup", "--json"}}, longJobBudget, ""
+		return [][]string{{"backup", jsonFlag}}, longJobBudget, ""
 	}
 }
 
