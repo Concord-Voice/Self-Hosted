@@ -10,7 +10,9 @@ COPY . .
 RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/redis-auth-controller ./cmd/redis-auth-controller
 
 FROM alpine:3.24@sha256:3f4d6b32e26703c6082839234f43769d5046b3ac7c910033911d1e71d8cd630a
+# zlib: CVE-2026-85091 is fixed in 1.3.2-r1, which the pinned base predates.
 RUN grep -Eq '^3\.24\.' /etc/alpine-release \
+    && apk --no-cache upgrade zlib \
     && apk --no-cache add ca-certificates \
     && addgroup -S -g 10004 redis-auth-controller \
     && adduser -S -D -H -u 10004 -G redis-auth-controller redis-auth-controller \

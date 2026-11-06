@@ -295,6 +295,26 @@ describe('shared lifecycle release accounting', () => {
     expect(f.calls.filter(call => call.request.endpoint() === 'room_release')).toHaveLength(2);
   });
 
+  it('retries a started legacy release that failed when pending work is retried', async () => {
+    const f = fixture();
+    const parent = f.reserve('legacy-retry-parent'); await f.owners.register(parent);
+    const legacy = { ...f.session(parent, 1), connectionGeneration: undefined };
+    let attempts = 0;
+    const legacyEffect = vi.fn(async () => {
+      attempts++;
+      if (attempts === 1) throw new Error('first legacy release fails');
+    });
+    f.owners.reserveLegacyRoom(legacy, legacyEffect);
+    const held = f.owners.retainedIdentityCount();
+    const terminal = f.owners.releaseLegacyRoom(legacy);
+    await settledTurn(); await settledTurn();
+    expect(legacyEffect).toHaveBeenCalledTimes(1);
+    expect(f.owners.retainedIdentityCount()).toBe(held);
+    await f.owners.retryPending(); await terminal;
+    expect(legacyEffect).toHaveBeenCalledTimes(2);
+    expect(f.owners.retainedIdentityCount()).toBe(held - 1);
+  });
+
   it('reserves legacy release liability in the same full budget before invoking native or remote effects', async () => {
     const f = fixture();
     const parent = f.reserve('legacy-budget-parent'); await f.owners.register(parent);
