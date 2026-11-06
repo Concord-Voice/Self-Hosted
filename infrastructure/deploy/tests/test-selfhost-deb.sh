@@ -112,6 +112,8 @@ wants=/etc/systemd/system/multi-user.target.wants/concord-agent.service
 enabled=/var/lib/systemd/deb-systemd-helper-enabled/concord-agent.service.dsh-also
 mkdir -p /run/systemd/system
 rm -f /usr/sbin/policy-rc.d
+# Stands in for the agent reaching setup mode.
+mkdir -p /run/concord-agent && : >/run/concord-agent/setup-token
 apt-get update -qq >/dev/null
 # First install: unpack, enable, start, print the wizard hint.
 step install -y -qq /pkg/concord-selfhost_1.2.3_amd64.deb
@@ -128,17 +130,30 @@ called " restart concord-agent.service"; not_called " start "
 grep -q "already exists; leaving it as it is" /tmp/log
 if grep -q "setup-token" /tmp/log; then exit 1; fi
 grep -qx KEY=kept /opt/concord/.env
-# Removal: stop and disable, reload, keep /opt/concord.
+# Upgrade during setup: no .env and the agent active, so no restart.
+rm /opt/concord/.env
+step install -y -qq --reinstall /pkg/concord-selfhost_1.2.4_amd64.deb
+not_called restart; grep -q "setup may be in progress" /tmp/log
+echo "KEY=kept" >/opt/concord/.env
+# Removal: stop, mask, reload, keep /opt/concord.
 step remove -y -qq concord-selfhost
-called "stop concord-agent.service"; called daemon-reload; test ! -e "$enabled"; test ! -e "$wants"
+called "stop concord-agent.service"; called daemon-reload; test ! -e "$wants"
+test "$(readlink /etc/systemd/system/concord-agent.service)" = /dev/null
 test ! -e /usr/libexec/concord-agent
+grep -qx KEY=kept /opt/concord/.env
+# Reinstall after removal: unmasked and enabled again.
+step install -y -qq /pkg/concord-selfhost_1.2.4_amd64.deb
+test ! -L /etc/systemd/system/concord-agent.service; test -e "$enabled"
+called " restart concord-agent.service"
+step purge -y -qq concord-selfhost
+test ! -e "$enabled"; test ! -L /etc/systemd/system/concord-agent.service
 grep -qx KEY=kept /opt/concord/.env
 # Fresh install with no running systemd (the real systemctl, if any, works
 # offline) and a bundle with unsafe modes.
 rm -rf /opt/concord /run/systemd/system /usr/local/sbin/systemctl
 step install -y -qq /pkg/concord-selfhost_1.2.5_amd64.deb
 test -L "$wants"
-grep -q "concord-agent is not running yet" /tmp/log
+grep -q "concord-agent is not in setup mode yet" /tmp/log
 test -z "$(find /opt/concord \( -perm /6000 -o -perm /022 \) -print)"
 echo ok'
   for image in debian:12 ubuntu:24.04; do

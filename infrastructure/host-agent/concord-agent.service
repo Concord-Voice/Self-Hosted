@@ -9,8 +9,8 @@ Wants=docker.service
 
 [Service]
 Type=simple
-# The packaged path. For a checkout install, point it at the wrapper in your
-# root-owned checkout (use a drop-in: systemctl edit concord-agent).
+# The packaged paths. A checkout install points both at its own copies; see
+# docs/runbooks/selfhost-host-agent.md.
 Environment=CONCORD_AGENT_CLI=/opt/concord/infrastructure/deploy/concord-selfhost
 ExecStart=/usr/libexec/concord-agent
 Restart=on-failure
