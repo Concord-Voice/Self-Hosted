@@ -801,6 +801,13 @@ asks for follow mode. Each call writes one `server_read` audit row; the three
 paths share a fail-closed limit of 30 requests/minute/IP. See
 `docs/runbooks/selfhost-host-agent.md`.
 
+**Host-agent write actions (#188):** the agent's socket also takes
+`POST /v1/actions/{start,stop,restart,backup,restore,update}`, each mapped to a
+fixed `concord-selfhost` run, one at a time, returned as an in-memory job that
+`GET /v1/jobs[/<id>]` polls. The agent validates the update tag and restricts
+restore to a CLI-named regular file in the install's `backups/`. The console
+proxy for these, with the WebAuthn step-up and audit, is not wired yet.
+
 **Self-hosted setup wizard (#187):** on a host with no `.env`, the Concord Host
 Agent also listens on TCP 9443 with a fresh self-signed ECDSA P-384 certificate
 and serves a separate wizard build of `client/admin` (`setup/`,

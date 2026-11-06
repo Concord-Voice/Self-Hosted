@@ -1,6 +1,6 @@
 // Package hostagent is the Concord Host Agent (#186): a root service on the
 // self-hosted machine that runs a fixed set of concord-selfhost verbs for the
-// Admin Console. It listens only on a unix socket and accepts nothing but the
+// Admin Console, reads (#186) and write actions (#188). It listens only on a unix socket and accepts nothing but the
 // actions below; the control-plane proxy is a convenience, not the gate.
 package hostagent
 
@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 	"unicode"
 )
@@ -56,6 +57,7 @@ type Server struct {
 	run       Runner
 	inFlight  chan struct{}
 	followers chan struct{}
+	writes    *jobs // nil unless EnableWrites was called
 	// writeGrace is how long past an action's budget a response may take to
 	// write before the connection is cut.
 	writeGrace time.Duration
@@ -73,9 +75,24 @@ func NewServer(r Runner) *Server {
 	}
 }
 
-// ServeHTTP routes exactly three GET actions; everything else is refused here,
-// whatever the proxy in front allowed.
+// ServeHTTP routes three GET reads and, once enabled, the write actions and
+// their jobs; everything else is refused here, whatever the proxy in front
+// allowed.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.writes != nil {
+		if action, ok := strings.CutPrefix(r.URL.Path, "/v1/actions/"); ok && !strings.Contains(action, "/") {
+			s.handleWrite(w, r, action)
+			return
+		}
+		if r.URL.Path == "/v1/jobs" {
+			s.handleJobs(w, r, "")
+			return
+		}
+		if id, ok := strings.CutPrefix(r.URL.Path, "/v1/jobs/"); ok {
+			s.handleJobs(w, r, id)
+			return
+		}
+	}
 	var handle func(http.ResponseWriter, *http.Request) string
 	var action string
 	switch r.URL.Path {
