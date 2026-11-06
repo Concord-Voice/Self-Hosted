@@ -66,6 +66,7 @@ Android.
 
 ### Fixed
 
+- **Voice:** Voice room presence writes to Redis now time out like the other media-plane Redis calls, and clearing an empty room no longer removes a user who joined during the clear.
 - **Self-hosted CI:** Build and configuration checks now provide explicit WebSocket budget settings, so required production inputs do not prevent those checks from rendering Compose.
 - **Account authority:** Owner cancellation now lets an in-flight lock-health ping finish within its existing timeout before explicitly releasing the serve lock.
 - **WebSocket:** Canceled socket and server lifetimes stop queued frames before activity tracking or handler work, including when event budgets are disabled.
@@ -76,6 +77,7 @@ Android.
 
 ### Security
 
+- **Container images:** The control-plane and Redis auth controller images upgrade zlib to 1.3.2-r1 for CVE-2026-85091 (heap buffer overflow in `gz_vacate()`).
 - **Dependencies:** Updated media development tooling and the CI license checker to patched minimatch and glob versions while retaining dependency attribution checks.
 - **Accounts:** **BREAKING** Guessing passwords on the key-reveal route now counts toward the same sign-in failure ban as the login page, and its attempt limits fail closed. Wrong passwords there, and when changing your password, resetting your encryption keys or changing your sign-in security settings, now count toward the same lockout as sign-in: five lock the account. API: a wrong `current_password` on `POST /api/v1/users/me/keys/reveal` is now 403 `invalid_current_password` instead of 401, a locked account gets 423 `account_locked`, and an account with no password gets 400 `no_password`.
 - **Accounts:** Sending many wrong passwords at the same moment no longer gets more than five guesses checked before the account locks. Each guess now counts toward the lockout before its password is checked, on sign-in, linking a sign-in provider, key reveal, password change, key reset and the sign-in security settings.
