@@ -35,7 +35,8 @@ done
 [[ -f "$agent" ]] || fail 'agent binary not found'
 # ELF e_machine: 62 is x86-64, 183 is AArch64. A wrong-arch agent installs
 # fine and then restart-loops on exec, so refuse it here.
-case $arch in amd64) machine=62 ;; arm64) machine=183 ;; esac
+machine=62
+[[ "$arch" == arm64 ]] && machine=183
 [[ "$(head -c 4 "$agent" | od -An -c | tr -d ' ')" == '177ELF' &&
   "$(od -An -tu2 -j18 -N2 --endian=little "$agent" | tr -d ' ')" == "$machine" ]] ||
   fail "agent is not an ELF binary for $arch"
