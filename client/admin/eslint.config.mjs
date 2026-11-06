@@ -5,7 +5,7 @@ import tseslint from 'typescript-eslint';
 
 export default [
   {
-    ignores: ['coverage/**', 'dist/**', 'node_modules/**', 'playwright-report/**', 'test-results/**']
+    ignores: ['coverage/**', 'dist/**', 'dist-setup/**', 'node_modules/**', 'playwright-report/**', 'test-results/**']
   },
   ...tseslint.configs.recommended,
   eslintReact.configs['recommended-type-checked'],

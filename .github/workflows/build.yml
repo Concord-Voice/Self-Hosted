@@ -865,6 +865,10 @@ jobs:
         working-directory: client/admin
         run: npm run build
 
+      - name: Build setup wizard
+        working-directory: client/admin
+        run: npm run build:setup
+
       - name: Install Chromium
         working-directory: client/admin
         # The lockfile-pinned bin, never npm: Scorecard reads any `npm ... install`

@@ -43,6 +43,15 @@ npx vite preview --host 127.0.0.1 --port 4181 --strictPort
 
 Open `http://127.0.0.1:4181/admin/`.
 
+## Setup wizard
+
+`setup/` is a second entry point: the first-run setup wizard that the Concord
+Host Agent serves before a self-hosted server is installed (#187). It shares
+`src/styles.css` and lives in `src/setup/`. `npm run build:setup` writes it to
+`dist-setup/`, with `/` as its base. `npx vite -c vite.setup.config.ts` serves
+it for development; its `/api/*` calls need the agent or a test intercept. See
+`docs/runbooks/selfhost-host-agent.md`.
+
 ## Production image
 
 The control-plane Dockerfile reads this package through the named `admin_ui`
