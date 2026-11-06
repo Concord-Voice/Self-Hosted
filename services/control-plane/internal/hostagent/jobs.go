@@ -123,19 +123,7 @@ func (j *jobs) commands(name string, req actionRequest) ([][]string, time.Durati
 		}
 		return [][]string{{"update", "--to", req.Tag, "--confirm", jsonFlag}}, longJobBudget, nil
 	case "restore":
-		if req.Tag != "" || !archivePattern.MatchString(req.Archive) {
-			return nil, 0, bad("invalid_archive")
-		}
-		// Only root may change what is in the folder: restore puts back the
-		// archive's .env, which the root agent then runs with.
-		if st, err := os.Lstat(j.backups); err != nil || !st.IsDir() || trustedEntry(j.backups) != nil {
-			return nil, 0, &refusal{http.StatusConflict, "untrusted_backups"}
-		}
-		p := filepath.Join(j.backups, req.Archive)
-		if st, err := os.Lstat(p); err != nil || !st.Mode().IsRegular() {
-			return nil, 0, &refusal{http.StatusNotFound, "unknown_archive"}
-		}
-		return [][]string{{"restore", p, "--confirm", jsonFlag}}, longJobBudget, nil
+		return j.restoreCommand(req)
 	}
 	if req != (actionRequest{}) {
 		return nil, 0, bad("unexpected_argument")
@@ -156,6 +144,23 @@ func (j *jobs) commands(name string, req actionRequest) ([][]string, time.Durati
 	default: // backup
 		return [][]string{{"backup", jsonFlag}}, longJobBudget, nil
 	}
+}
+
+// restoreCommand checks a restore request against the backups folder.
+func (j *jobs) restoreCommand(req actionRequest) ([][]string, time.Duration, *refusal) {
+	if req.Tag != "" || !archivePattern.MatchString(req.Archive) {
+		return nil, 0, &refusal{http.StatusBadRequest, "invalid_archive"}
+	}
+	// Only root may change what is in the folder: restore puts back the
+	// archive's .env, which the root agent then runs with.
+	if st, err := os.Lstat(j.backups); err != nil || !st.IsDir() || trustedEntry(j.backups) != nil {
+		return nil, 0, &refusal{http.StatusConflict, "untrusted_backups"}
+	}
+	p := filepath.Join(j.backups, req.Archive)
+	if st, err := os.Lstat(p); err != nil || !st.Mode().IsRegular() {
+		return nil, 0, &refusal{http.StatusNotFound, "unknown_archive"}
+	}
+	return [][]string{{"restore", p, "--confirm", jsonFlag}}, longJobBudget, nil
 }
 
 func newJobID() (string, error) {
