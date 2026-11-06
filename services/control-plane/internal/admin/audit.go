@@ -148,7 +148,7 @@ func (a *AuditLog) emitAuditCommitted(ctx context.Context, eventType, result str
 		event = securityevent.Event{EventType: securityevent.EventSession, Outcome: outcome, Severity: securityevent.SeverityHigh, ReasonCode: securityevent.ReasonSessionRevoked}
 	case EventLockout:
 		event = securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: outcome, Severity: securityevent.SeverityHigh, ReasonCode: securityevent.ReasonAccountLocked}
-	case EventEnrollComplete, EventCredentialRevoked, EventBootstrap:
+	case EventEnrollComplete, EventCredentialRevoked, EventBootstrap, EventServerWrite:
 		event = securityevent.Event{EventType: securityevent.EventPrivilegedAction, Outcome: outcome, Severity: securityevent.SeverityHigh, ReasonCode: securityevent.ReasonAuditCommitted}
 	default:
 		return

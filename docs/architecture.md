@@ -806,8 +806,12 @@ paths share a fail-closed limit of 30 requests/minute/IP. See
 fixed `concord-selfhost` run, one at a time, returned as an in-memory job that
 `GET /v1/jobs[/<id>]` polls. The agent validates the update tag and restricts
 restore to a CLI-named regular file in a root-only `backups/`; a marker file
-held during a job stops the package scripts restarting the agent mid-run. The console
-proxy for these, with the WebAuthn step-up and audit, is not wired yet.
+held during a job stops the package scripts restarting the agent mid-run. The
+console reaches them through `POST /admin/api/v1/server/actions/<action>` and
+`GET /server/jobs[/<id>]`. Stop, restart, update and restore also need a fresh
+user-verified WebAuthn assertion from `POST /server/stepup`, bound to the admin
+and the action and usable once within 2 minutes. Every attempt writes a
+`server_write` audit row and a privileged-action security event.
 
 **Self-hosted setup wizard (#187):** on a host with no `.env`, the Concord Host
 Agent also listens on TCP 9443 with a fresh self-signed ECDSA P-384 certificate

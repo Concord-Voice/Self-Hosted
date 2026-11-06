@@ -66,3 +66,8 @@ func RunAdminCtlWithWriterForTest(ctx context.Context, db *sql.DB, rdb *redis.Cl
 	}
 	return runAdminCtlWithSecurityEvents(ctx, deps, args, open)
 }
+
+// UseServerAgentForTest points the handler's Server area at a test socket.
+func UseServerAgentForTest(h *Handler, sock string) {
+	h.server.agent = unixClient(sock)
+}

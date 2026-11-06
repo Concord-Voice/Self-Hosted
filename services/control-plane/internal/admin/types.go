@@ -80,4 +80,7 @@ const (
 	// EventServerRead marks an admin reading server status, health or logs
 	// through the host agent (#186).
 	EventServerRead = "server_read"
+	// EventServerWrite marks an admin asking the host agent to run a write
+	// action (#188), whether it started, was refused or failed.
+	EventServerWrite = "server_write"
 )

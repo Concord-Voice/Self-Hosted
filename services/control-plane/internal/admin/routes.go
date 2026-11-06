@@ -90,6 +90,10 @@ func RegisterRoutes(rg *gin.RouterGroup, h *Handler, metrics *opsmetrics.AdminHa
 				serverRoutes.GET("/status", h.server.Status)
 				serverRoutes.GET("/health", h.server.Health)
 				serverRoutes.GET("/logs", h.server.Logs)
+				serverRoutes.POST("/stepup", h.ServerStepUpBegin)
+				serverRoutes.POST("/actions/:action", h.ServerAction)
+				serverRoutes.GET("/jobs", h.server.ServerJobs)
+				serverRoutes.GET("/jobs/:id", h.server.ServerJob)
 			}
 
 			metricsRoutes := gated.Group("")
