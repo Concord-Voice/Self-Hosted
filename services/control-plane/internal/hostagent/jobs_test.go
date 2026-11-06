@@ -24,7 +24,8 @@ func writeServer(t *testing.T, f *fakeRunner) (*Server, string) {
 	t.Helper()
 	dir := t.TempDir()
 	s := NewServer(&fakeRunner{out: statusJSON})
-	s.EnableWrites(f, dir)
+	s.EnableWrites(f, dir, filepath.Join(t.TempDir(), "write-in-progress"))
+	s.writes.boundary = t.TempDir()
 	return s, dir
 }
 
@@ -104,8 +105,6 @@ func TestRestoreTakesOnlyAnArchiveInBackups(t *testing.T) {
 		t.Fatal(err)
 	}
 	for body, want := range map[string]string{
-		`{"archive":"concord-backup-20261106T071502Z.tar.gz"}`:    "unknown_archive",
-		`{"archive":"concord-backup-20261106T071501Z.tar.gz"}`:    "unknown_archive", // a link
 		`{"archive":"../concord-backup-20261106T071500Z.tar.gz"}`: "invalid_archive",
 		`{"archive":"/etc/passwd"}`:                               "invalid_archive",
 		`{}`:                                                      "invalid_archive",
@@ -115,6 +114,23 @@ func TestRestoreTakesOnlyAnArchiveInBackups(t *testing.T) {
 		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), want) {
 			t.Errorf("%s: got %d %s", body, rec.Code, rec.Body)
 		}
+	}
+	for _, missing := range []string{"concord-backup-20261106T071502Z.tar.gz", "concord-backup-20261106T071501Z.tar.gz"} {
+		rec := post(t, s, "/v1/actions/restore", `{"archive":"`+missing+`"}`) // absent, then a link
+		if rec.Code != http.StatusNotFound || !strings.Contains(rec.Body.String(), "unknown_archive") {
+			t.Errorf("%s: got %d %s", missing, rec.Code, rec.Body)
+		}
+	}
+	// A backups folder others can write to is refused outright.
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if rec := post(t, s, "/v1/actions/restore", `{"archive":"`+name+`"}`); rec.Code != http.StatusConflict ||
+		!strings.Contains(rec.Body.String(), "untrusted_backups") {
+		t.Errorf("writable backups: got %d %s", rec.Code, rec.Body)
+	}
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
 	}
 	waitJob(t, s, started(t, post(t, s, "/v1/actions/restore", `{"archive":"`+name+`"}`)).ID)
 	want := [][]string{{"restore", filepath.Join(dir, name), "--confirm", "--json"}}
@@ -157,6 +173,46 @@ func TestRefusesBadWriteRequests(t *testing.T) {
 	}
 }
 
+func TestRestartChecksTheLogBoundaryFirst(t *testing.T) {
+	f := &fakeRunner{}
+	s, _ := writeServer(t, f)
+	s.writes.boundary = filepath.Join(t.TempDir(), "missing")
+	if rec := post(t, s, "/v1/actions/restart", ""); rec.Code != http.StatusConflict ||
+		!strings.Contains(rec.Body.String(), "security_log_boundary_missing") {
+		t.Errorf("got %d %s", rec.Code, rec.Body)
+	}
+	if len(f.args) != 0 {
+		t.Errorf("ran %v", f.args)
+	}
+}
+
+func TestMarkerExistsOnlyWhileAWriteRuns(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "write-in-progress")
+	if err := os.WriteFile(marker, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeRunner{wait: make(chan struct{})}
+	s := NewServer(&fakeRunner{})
+	s.EnableWrites(f, t.TempDir(), marker)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("stale marker kept: %v", err)
+	}
+	j := started(t, post(t, s, "/v1/actions/stop", ""))
+	if b, err := os.ReadFile(marker); err != nil || strings.TrimSpace(string(b)) != j.ID {
+		t.Errorf("marker during the run: %q %v", b, err)
+	}
+	close(f.wait)
+	waitJob(t, s, j.ID)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Errorf("marker after the run: %v", err)
+	}
+	// No marker, no job.
+	s.writes.marker = filepath.Join(t.TempDir(), "gone", "write-in-progress")
+	if rec := post(t, s, "/v1/actions/stop", ""); rec.Code != http.StatusServiceUnavailable {
+		t.Errorf("unwritable marker: got %d", rec.Code)
+	}
+}
+
 func TestOneWriteAtATime(t *testing.T) {
 	f := &fakeRunner{wait: make(chan struct{})}
 	s, _ := writeServer(t, f)
@@ -180,13 +236,23 @@ func TestFailedStepStopsTheJob(t *testing.T) {
 	if j.State != "failed" || len(f.args) != 1 {
 		t.Errorf("state %s, ran %v", j.State, f.args)
 	}
-	if j.Output != "stopping\n" {
+	if j.Output != "stopping\n[concord-agent: restart failed: the command could not run or was stopped]\n" {
 		t.Errorf("output %q", j.Output)
+	}
+	s, _ = writeServer(t, &fakeRunner{err: exitErr(3)})
+	if j := waitJob(t, s, started(t, post(t, s, "/v1/actions/stop", "")).ID); j.Output != "[concord-agent: stop failed: exit status 3]\n" {
+		t.Errorf("exit output %q", j.Output)
+	}
+	s, _ = writeServer(t, &fakeRunner{})
+	if j := waitJob(t, s, started(t, post(t, s, "/v1/actions/stop", "")).ID); j.Output != "" {
+		t.Errorf("no output: %q", j.Output)
 	}
 }
 
 func TestBackupJobReportsItsArchive(t *testing.T) {
 	for out, want := range map[string]string{
+		`{"schema":1,"ok":true,"archive":"concord-backup-20261106T071500Z.tar.gz"}` + "\nwarning: late stderr\n": "concord-backup-20261106T071500Z.tar.gz",
+		`{"schema":1,"ok":false}` + "\n": "",
 		"dumping\n" + `{"schema":1,"ok":true,"archive":"concord-backup-20261106T071500Z.tar.gz"}` + "\n": "concord-backup-20261106T071500Z.tar.gz",
 		`{"schema":1,"ok":true,"archive":"../x.tar.gz"}` + "\n":                                          "",
 		"no json\n": "",
@@ -212,7 +278,7 @@ func TestJobsList(t *testing.T) {
 	if len(doc.Jobs) != maxJobs || doc.Jobs[0].ID != ids[len(ids)-1] || doc.Jobs[0].Output != "" {
 		t.Errorf("list: %d jobs, first %+v", len(doc.Jobs), doc.Jobs[0])
 	}
-	for _, id := range []string{ids[0], "nope", strings.Repeat("A", 32)} {
+	for _, id := range []string{ids[0], "nope", strings.Repeat("A", 32), ""} {
 		if rec := get(t, s, http.MethodGet, "/v1/jobs/"+id); rec.Code != http.StatusNotFound {
 			t.Errorf("%s: got %d", id, rec.Code)
 		}

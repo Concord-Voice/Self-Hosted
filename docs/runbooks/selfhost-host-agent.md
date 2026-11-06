@@ -31,31 +31,41 @@ and the caller polls the job:
 | --- | --- | --- |
 | `start` | none | `concord-selfhost up` |
 | `stop` | none | `concord-selfhost stop` |
-| `restart` | none | `stop`, then `up` |
+| `restart` | none | `stop`, then `up`; refused with 409 `security_log_boundary_missing` first if `up` would refuse for that |
 | `backup` | none | `backup --json` (into the install's `backups/`) |
 | `restore` | `{"archive":"concord-backup-<UTC>.tar.gz"}` | `restore <backups>/<archive> --confirm --json` |
 | `update` | `{"tag":"vX.Y.Z"}` | `update --to <tag> --confirm --json` (signed tags only) |
 
 - Only one write runs at a time; another gets 409 `write_in_progress`.
-  Reads keep working while it runs.
+  Reads keep working while it runs. The lock covers only the agent: do not
+  run `concord-selfhost` by hand while the console runs a write.
 - `restore` takes only a file name the CLI generates, and only for a regular
-  file (not a link) directly in the install's `backups/` directory. `update`
+  file (not a link, else 404 `unknown_archive`) directly in the install's
+  `backups/` directory, which must be owned by root and closed to group and
+  others (else 409 `untrusted_backups`): the archive's `.env` is what the
+  root agent runs with afterwards. `update`
   takes only a tag shaped like `vX.Y.Z`; the CLI then refuses any tag that is
   not signed by a release key. Any other field, a body on an action that
   takes none, or a body over 1 KiB gets 400.
 - `GET /v1/jobs` lists the last 16 jobs, newest first. `GET /v1/jobs/<id>`
   returns one with `state` (`running`, `succeeded`, `failed`), its start and
   finish times, the archive a backup wrote, and the last 64 KiB of the CLI's
-  output, sanitised like log lines. Jobs live in memory, so an agent restart
-  forgets them.
-- A job is not tied to the request that started it. Start, stop and restart
-  get 15 minutes; backup, restore and update get 2 hours, after which the run
-  is killed. A restart of the agent itself also kills a running job.
+  output, sanitised like log lines. A failed job ends with a
+  `[concord-agent: <action> failed: …]` line saying why. Jobs live in memory,
+  so an agent restart forgets them.
+- A job is not tied to the request that started it. Stop gets 15 minutes;
+  the others get 2 hours (`up` may rebuild images), after which the run is
+  killed.
+- Stopping or restarting the agent kills a running job, so while one runs the
+  agent keeps `/run/concord-agent/write-in-progress`. A package upgrade then
+  leaves the old agent running and says to restart it afterwards, and package
+  removal refuses until the job ends.
 
 The agent does not check who is asking beyond the socket's permissions. The
-Admin Console requires a signed-in admin, a fresh WebAuthn check for stop,
-update and restore, and an audit row for every write before it calls the
-agent.
+console route for these, still to come, is to require a signed-in admin, a
+fresh WebAuthn check for stop, restart, update and restore, and an audit row
+for every write before it calls the agent. Until then nothing in the console
+calls them.
 
 ## Admin Console
 
@@ -203,7 +213,8 @@ touches `/opt/concord` or its `.env`. If you disabled the agent, an upgrade
 or a reinstall keeps it disabled. While setup has not finished (no `.env`
 and the agent running), an upgrade does not restart the agent, because that
 would stop the installer the wizard runs; restart it yourself afterwards.
-Removing the package stops and masks the agent and leaves `/opt/concord` in
+The same holds while a write action runs, and removal waits for it to end
+(see [Write actions](#write-actions)). Removing the package stops and masks the agent and leaves `/opt/concord` in
 place; purging it also forgets whether the agent was enabled. Because `/opt/concord` is not a git checkout,
 `concord-selfhost update` cannot update it yet; that waits on signed
 releases.

@@ -1,6 +1,6 @@
 // Package hostagent is the Concord Host Agent (#186): a root service on the
-// self-hosted machine that runs a fixed set of concord-selfhost verbs for the
-// Admin Console, reads (#186) and write actions (#188). It listens only on a unix socket and accepts nothing but the
+// self-hosted machine that runs a fixed set of concord-selfhost verbs, reads
+// (#186) and write actions (#188), for the Admin Console. It listens only on a unix socket and accepts nothing but the
 // actions below; the control-plane proxy is a convenience, not the gate.
 package hostagent
 
@@ -88,7 +88,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			s.handleJobs(w, r, "")
 			return
 		}
-		if id, ok := strings.CutPrefix(r.URL.Path, "/v1/jobs/"); ok {
+		if id, ok := strings.CutPrefix(r.URL.Path, "/v1/jobs/"); ok && id != "" {
 			s.handleJobs(w, r, id)
 			return
 		}
