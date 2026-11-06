@@ -1,6 +1,6 @@
 # Self-host release guidance
 
-Self-host installation is available only through a verified published release. Consult the [public Releases index](https://github.com/Concord-Voice/Concord-Voice/releases) for published assets. If no verified self-host release is listed, installation and an install link are unavailable.
+Self-host releases are published on the [Self-Hosted releases page](https://github.com/Concord-Voice/Self-Hosted/releases). [v0.3.0](https://github.com/Concord-Voice/Self-Hosted/releases/tag/v0.3.0) is published with its bundle, manifest and `SHA256SUMS`, and each file carries a build attestation you can check with `gh attestation verify <file> --repo Concord-Voice/Self-Hosted`. It has no supported install procedure yet: fresh-host acceptance ([#74](https://github.com/Concord-Voice/Self-Hosted/issues/74)) has not passed, so installation and an install link are unavailable.
 
 Use the operator guide retained with the selected verified immutable release tag and archive. This ordinary snapshot provides availability guidance; it does not announce a release or provide an installation procedure.
 
