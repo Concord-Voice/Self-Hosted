@@ -57,6 +57,7 @@ type Setup struct {
 	assets    http.Handler
 	tmpDir    string // parent for the answers file; "" means os.TempDir()
 	now       func() time.Time
+	budget    time.Duration // how long an install may run
 
 	checking   sync.Mutex // one preflight at a time
 	mu         sync.Mutex
@@ -80,6 +81,7 @@ func NewSetup(installer Runner, envPath, assetsDir string) (*Setup, string, erro
 		envPath:   envPath,
 		assets:    http.FileServer(http.Dir(assetsDir)),
 		now:       time.Now,
+		budget:    setupInstallBudget,
 		done:      make(chan struct{}),
 	}, tok, nil
 }
@@ -298,7 +300,7 @@ func (s *Setup) runInstaller(r *http.Request, file []byte) (string, error) {
 	}
 	// A browser that leaves must not kill the installer halfway: only the
 	// install budget ends it.
-	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), setupInstallBudget)
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), s.budget)
 	defer cancel()
 	out := limitedBuffer{max: setupMaxOutput, keepRunning: true}
 	runErr := s.installer.Run(ctx, []string{"--env-file", path}, &out)
@@ -309,6 +311,10 @@ func (s *Setup) runInstaller(r *http.Request, file []byte) (string, error) {
 	text := strings.Join(lines, "\n")
 	if out.overflow {
 		text += "\n" + truncatedMarker
+	}
+	if runErr != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		runErr = fmt.Errorf("installer stopped after its %s limit: %w", s.budget, runErr)
+		text += fmt.Sprintf("\n[concord-agent: the installer ran past its %s limit and was stopped]\n", s.budget)
 	}
 	return text, runErr
 }

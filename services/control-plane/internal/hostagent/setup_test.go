@@ -436,3 +436,15 @@ func TestSetupExpire(t *testing.T) {
 		t.Fatalf("token works after the window: %d", rec.Code)
 	}
 }
+
+func TestSetupInstallReportsTheTimeLimit(t *testing.T) {
+	s, tok := newTestSetup(t, runFunc(func(ctx context.Context, _ []string, _ io.Writer) error {
+		<-ctx.Done()
+		return ctx.Err()
+	}))
+	s.budget = 10 * time.Millisecond
+	rec := call(s, http.MethodPost, "/api/install", tok, `{"CFG_DOMAIN":"a"}`)
+	if !strings.Contains(rec.Body.String(), "ran past its 10ms limit") {
+		t.Fatalf("time limit not reported: %s", rec.Body.String())
+	}
+}
