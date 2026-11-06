@@ -108,7 +108,7 @@ describe('RedisService', () => {
 
     it('registers error and reconnecting event handlers', async () => {
       await service.connect();
-      const eventNames = mockClient.on.mock.calls.map((c: any[]) => c[0]);
+      const eventNames = mockClient.on.mock.calls.map((c: unknown[]) => c[0]);
       expect(eventNames).toContain('error');
       expect(eventNames).toContain('reconnecting');
     });
@@ -168,20 +168,37 @@ describe('RedisService', () => {
       await service.clearRoom('channel-1');
 
       expect(mockClient.sMembers).toHaveBeenCalledWith('voice:room:channel-1');
-      expect(mockClient.del).toHaveBeenCalledWith([
-        'voice:room:channel-1',
-        'voice:user:user-1',
-        'voice:user:user-2',
-      ]);
+      expect(mockMulti.sRem).toHaveBeenCalledWith('voice:room:channel-1', ['user-1', 'user-2']);
+      expect(mockMulti.del).toHaveBeenCalledWith(['voice:user:user-1', 'voice:user:user-2']);
+      expect(mockMulti.exec).toHaveBeenCalled();
+      expect(mockClient.del).not.toHaveBeenCalled();
     });
 
-    it('deletes only room key when no members', async () => {
+    it('writes nothing when the room has no members', async () => {
       await service.connect();
       mockClient.sMembers.mockResolvedValueOnce([]);
 
       await service.clearRoom('channel-1');
 
-      expect(mockClient.del).toHaveBeenCalledWith('voice:room:channel-1');
+      expect(mockClient.multi).not.toHaveBeenCalled();
+      expect(mockClient.del).not.toHaveBeenCalled();
+    });
+
+    it('retires the client when the member read hangs past the deadline', async () => {
+      vi.useFakeTimers();
+      try {
+        await service.connect();
+        mockClient.sMembers.mockReturnValueOnce(new Promise(() => {}));
+
+        const pending = service.clearRoom('channel-1');
+        await vi.advanceTimersByTimeAsync(1_000);
+        await expect(pending).resolves.toBeUndefined();
+
+        expect(mockClient.destroy).toHaveBeenCalled();
+        expect(mockClient.multi).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 

@@ -880,13 +880,16 @@ export class RedisService {
       const roomKey = `voice:room:${channelId}`;
       const userKey = `voice:user:${userId}`;
 
-      await client
-        .multi()
-        .sAdd(roomKey, userId)
-        .expire(roomKey, ROOM_TTL)
-        .hSet(userKey, { channelId, joinedAt: new Date().toISOString() })
-        .expire(userKey, USER_TTL)
-        .exec();
+      await this.withDeadline(
+        client
+          .multi()
+          .sAdd(roomKey, userId)
+          .expire(roomKey, ROOM_TTL)
+          .hSet(userKey, { channelId, joinedAt: new Date().toISOString() })
+          .expire(userKey, USER_TTL)
+          .exec(),
+        () => this.retireTimedOutClient(client)
+      );
       this.redisCommandSucceeded();
     } catch (err) {
       this.redisCommandFailed();
@@ -910,7 +913,9 @@ export class RedisService {
       const roomKey = `voice:room:${channelId}`;
       const userKey = `voice:user:${userId}`;
 
-      await client.multi().sRem(roomKey, userId).del(userKey).exec();
+      await this.withDeadline(client.multi().sRem(roomKey, userId).del(userKey).exec(), () =>
+        this.retireTimedOutClient(client)
+      );
       this.redisCommandSucceeded();
     } catch (err) {
       this.redisCommandFailed();
@@ -933,15 +938,20 @@ export class RedisService {
     try {
       const roomKey = `voice:room:${channelId}`;
 
-      // Get all users in room to clean up their keys
-      const userIds = await client.sMembers(roomKey);
+      const userIds = await this.withDeadline(client.sMembers(roomKey), () =>
+        this.retireTimedOutClient(client)
+      );
       const freshClient = this.currentClient();
       if (!freshClient) return;
       if (userIds.length > 0) {
+        // Remove only the members read above. A user who joins between the read and
+        // this write stays in the set, so it can't be wiped while its user key survives.
+        // Redis drops the set itself once it is empty.
         const userKeys = userIds.map((id) => `voice:user:${id}`);
-        await freshClient.del([roomKey, ...userKeys]);
-      } else {
-        await freshClient.del(roomKey);
+        await this.withDeadline(
+          freshClient.multi().sRem(roomKey, userIds).del(userKeys).exec(),
+          () => this.retireTimedOutClient(freshClient)
+        );
       }
       this.redisCommandSucceeded();
     } catch (err) {
