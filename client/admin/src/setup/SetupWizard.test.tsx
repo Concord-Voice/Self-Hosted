@@ -47,7 +47,7 @@ function agent(preflight: object = passing) {
 }
 
 afterEach(() => {
-  window.history.replaceState(null, "", "/");
+  globalThis.history.replaceState(null, "", "/");
 });
 
 const form: SetupForm = {
@@ -153,12 +153,12 @@ describe("SetupWizard", () => {
 
   it("takes the token from the link and removes it from the address", async () => {
     const seen = agent();
-    window.history.replaceState(null, "", `/#token=${TOKEN}`);
+    globalThis.history.replaceState(null, "", `/#token=${TOKEN}`);
     render(<SetupWizard />);
     expect(
       await screen.findByText("The ports Concord Voice needs are free"),
     ).toBeInTheDocument();
-    expect(window.location.hash).toBe("");
+    expect(globalThis.location.hash).toBe("");
     expect(seen.auth).toEqual([`Bearer ${TOKEN}`]);
   });
 
@@ -171,7 +171,7 @@ describe("SetupWizard", () => {
         { name: "gpu", ok: true },
       ],
     });
-    window.history.replaceState(null, "", `/#token=${TOKEN}`);
+    globalThis.history.replaceState(null, "", `/#token=${TOKEN}`);
     render(<SetupWizard />);
     expect(
       await screen.findByText("Docker and Docker Compose are installed"),
@@ -184,7 +184,7 @@ describe("SetupWizard", () => {
 
   it("reports a lockout from the check-again button", async () => {
     agent();
-    window.history.replaceState(null, "", `/#token=${TOKEN}`);
+    globalThis.history.replaceState(null, "", `/#token=${TOKEN}`);
     const user = userEvent.setup();
     render(<SetupWizard />);
     await screen.findByText("Supported operating system");
@@ -201,7 +201,7 @@ describe("SetupWizard", () => {
 
   async function reachAnswers() {
     const seen = agent();
-    window.history.replaceState(null, "", `/#token=${TOKEN}`);
+    globalThis.history.replaceState(null, "", `/#token=${TOKEN}`);
     const user = userEvent.setup();
     render(<SetupWizard />);
     await screen.findByText("Supported operating system");

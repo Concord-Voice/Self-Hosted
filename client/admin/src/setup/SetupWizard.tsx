@@ -113,11 +113,11 @@ export function errorMessage(cause: unknown): string {
 
 function tokenFromHash(): string {
   const match = /(?:^#|&)token=([0-9a-f]{64})(?:&|$)/.exec(
-    window.location.hash,
+    globalThis.location.hash,
   );
   if (match) {
     // Keep the token out of history and anything copied from the address bar.
-    window.history.replaceState(null, "", window.location.pathname);
+    globalThis.history.replaceState(null, "", globalThis.location.pathname);
     return match[1];
   }
   return "";
@@ -185,16 +185,6 @@ export function SetupWizard() {
     }
   };
 
-  const field = (key: keyof SetupForm) => ({
-    id: `setup-${key}`,
-    disabled: busy,
-    value: form[key] as string,
-    onChange: (event: React.ChangeEvent<HTMLInputElement>) => {
-      const value = event.currentTarget.value;
-      setForm((prev) => ({ ...prev, [key]: value }));
-    },
-  });
-
   return (
     <main className="app-main setup-main">
       <section aria-labelledby="setup-title" className="auth-panel setup-panel">
@@ -234,201 +224,246 @@ export function SetupWizard() {
         ) : null}
 
         {step === "preflight" ? (
-          <>
-            <h2>Server checks</h2>
-            {preflight ? (
-              <ul className="setup-checks">
-                {preflight.checks.map((check) => (
-                  <li key={check.name}>
-                    <span
-                      className={`status ${check.ok ? "status-healthy" : "status-critical"}`}
-                    >
-                      {check.ok ? "Passed" : "Failed"}
-                    </span>{" "}
-                    {CHECK_LABELS[check.name] ?? check.name}
-                  </li>
-                ))}
-              </ul>
-            ) : (
-              <output className="form-status">Running checks</output>
-            )}
-            {preflight && !preflight.ok ? (
-              <p className="form-status">
-                Fix the failed checks on the server, then check again. The
-                server's journal has the details.
-              </p>
-            ) : null}
-            <div className="button-row">
-              <button
-                disabled={busy}
-                type="button"
-                onClick={() => void runPreflight(token)}
-              >
-                {busy ? "Checking" : "Check again"}
-              </button>
-              <button
-                disabled={busy || !preflight?.ok}
-                type="button"
-                onClick={() => setStep("answers")}
-              >
-                Continue
-              </button>
-            </div>
-          </>
+          <ChecksStep
+            busy={busy}
+            preflight={preflight}
+            onContinue={() => setStep("answers")}
+            onRecheck={() => void runPreflight(token)}
+          />
         ) : null}
 
         {step === "answers" ? (
-          <form onSubmit={(event) => void install(event)}>
-            <h2>Server address</h2>
-            <label htmlFor="setup-domain">
-              Domain (for example example.com)
-            </label>
-            <input {...field("domain")} autoComplete="off" required />
-            <label htmlFor="setup-publicIp">Public IPv4 address</label>
-            <input
-              {...field("publicIp")}
-              autoComplete="off"
-              inputMode="decimal"
-              required
-            />
-
-            <fieldset disabled={busy}>
-              <legend>HTTPS certificate</legend>
-              {(Object.keys(TLS_HINTS) as TlsMode[]).map((mode) => (
-                <label key={mode} className="setup-choice">
-                  <input
-                    checked={form.tlsMode === mode}
-                    name="tls-mode"
-                    type="radio"
-                    value={mode}
-                    onChange={() =>
-                      setForm((prev) => ({ ...prev, tlsMode: mode }))
-                    }
-                  />
-                  <span>{TLS_HINTS[mode]}</span>
-                </label>
-              ))}
-            </fieldset>
-
-            <h2>Email (SMTP)</h2>
-            <label htmlFor="setup-smtpHost">SMTP server</label>
-            <input {...field("smtpHost")} autoComplete="off" required />
-            <label htmlFor="setup-smtpPort">Port (optional)</label>
-            <input
-              {...field("smtpPort")}
-              autoComplete="off"
-              inputMode="numeric"
-            />
-            <label htmlFor="setup-smtpUser">Username (optional)</label>
-            <input {...field("smtpUser")} autoComplete="off" />
-            <label htmlFor="setup-smtpPass">Password (optional)</label>
-            <input
-              {...field("smtpPass")}
-              autoComplete="new-password"
-              type="password"
-            />
-            <label htmlFor="setup-smtpFrom">Sender address (optional)</label>
-            <input {...field("smtpFrom")} autoComplete="off" type="email" />
-
-            <fieldset disabled={busy}>
-              <legend>File storage</legend>
-              <label className="setup-choice">
-                <input
-                  checked={form.storageMode === "bundled"}
-                  name="storage-mode"
-                  type="radio"
-                  onChange={() =>
-                    setForm((prev) => ({ ...prev, storageMode: "bundled" }))
-                  }
-                />
-                <span>Store files on this server</span>
-              </label>
-              <label className="setup-choice">
-                <input
-                  checked={form.storageMode === "byo-s3"}
-                  name="storage-mode"
-                  type="radio"
-                  onChange={() =>
-                    setForm((prev) => ({ ...prev, storageMode: "byo-s3" }))
-                  }
-                />
-                <span>Use my own S3-compatible storage</span>
-              </label>
-            </fieldset>
-            {form.storageMode === "byo-s3" ? (
-              <>
-                <label htmlFor="setup-storageEndpoint">Endpoint</label>
-                <input
-                  {...field("storageEndpoint")}
-                  autoComplete="off"
-                  required
-                />
-                <label htmlFor="setup-storageRegion">Region (optional)</label>
-                <input {...field("storageRegion")} autoComplete="off" />
-                <label htmlFor="setup-storageBucket">Bucket (optional)</label>
-                <input {...field("storageBucket")} autoComplete="off" />
-                <label htmlFor="setup-storageAccessKey">Access key</label>
-                <input
-                  {...field("storageAccessKey")}
-                  autoComplete="off"
-                  required
-                />
-                <label htmlFor="setup-storageSecretKey">Secret key</label>
-                <input
-                  {...field("storageSecretKey")}
-                  autoComplete="new-password"
-                  required
-                  type="password"
-                />
-                <label className="setup-choice">
-                  <input
-                    checked={form.storageUseSsl}
-                    disabled={busy}
-                    type="checkbox"
-                    onChange={(event) => {
-                      const checked = event.currentTarget.checked;
-                      setForm((prev) => ({ ...prev, storageUseSsl: checked }));
-                    }}
-                  />
-                  <span>Connect with HTTPS</span>
-                </label>
-              </>
-            ) : null}
-            <button disabled={busy} type="submit">
-              {busy ? "Installing" : "Install"}
-            </button>
-          </form>
+          <AnswersForm
+            busy={busy}
+            form={form}
+            setForm={setForm}
+            onSubmit={(event) => void install(event)}
+          />
         ) : null}
 
         {step === "result" && result ? (
-          <>
-            <h2>
-              {result.ok
-                ? "Concord Voice is configured"
-                : "The installer stopped"}
-            </h2>
-            <p className="form-status">
-              {result.ok
-                ? "This setup page has closed. Finish on the server with the steps below."
-                : "Read the installer's message below, fix the answers, and try again."}
-            </p>
-            <textarea
-              aria-label="Installer output"
-              className="server-logs"
-              readOnly
-              rows={16}
-              value={result.output === "" ? "No output." : result.output}
-            />
-            {result.ok ? null : (
-              <div className="button-row">
-                <button type="button" onClick={() => setStep("answers")}>
-                  Back to answers
-                </button>
-              </div>
-            )}
-          </>
+          <ResultStep result={result} onBack={() => setStep("answers")} />
         ) : null}
       </section>
     </main>
+  );
+}
+
+interface ChecksStepProps {
+  busy: boolean;
+  preflight: Preflight | null;
+  onRecheck: () => void;
+  onContinue: () => void;
+}
+
+function ChecksStep({
+  busy,
+  preflight,
+  onRecheck,
+  onContinue,
+}: Readonly<ChecksStepProps>) {
+  return (
+    <>
+      <h2>Server checks</h2>
+      {preflight ? (
+        <ul className="setup-checks">
+          {preflight.checks.map((check) => (
+            <li key={check.name}>
+              <span
+                className={`status ${check.ok ? "status-healthy" : "status-critical"}`}
+              >
+                {check.ok ? "Passed" : "Failed"}
+              </span>{" "}
+              {CHECK_LABELS[check.name] ?? check.name}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <output className="form-status">Running checks</output>
+      )}
+      {preflight && !preflight.ok ? (
+        <p className="form-status">
+          Fix the failed checks on the server, then check again. The server's
+          journal has the details.
+        </p>
+      ) : null}
+      <div className="button-row">
+        <button disabled={busy} type="button" onClick={onRecheck}>
+          {busy ? "Checking" : "Check again"}
+        </button>
+        <button
+          disabled={busy || !preflight?.ok}
+          type="button"
+          onClick={onContinue}
+        >
+          Continue
+        </button>
+      </div>
+    </>
+  );
+}
+
+interface AnswersFormProps {
+  busy: boolean;
+  form: SetupForm;
+  setForm: React.Dispatch<React.SetStateAction<SetupForm>>;
+  onSubmit: (event: React.FormEvent<HTMLFormElement>) => void;
+}
+
+function AnswersForm({
+  busy,
+  form,
+  setForm,
+  onSubmit,
+}: Readonly<AnswersFormProps>) {
+  const field = (key: keyof SetupForm) => ({
+    id: `setup-${key}`,
+    disabled: busy,
+    value: form[key] as string,
+    onChange: (event: React.ChangeEvent<HTMLInputElement>) => {
+      const value = event.currentTarget.value;
+      setForm((prev) => ({ ...prev, [key]: value }));
+    },
+  });
+
+  return (
+    <form onSubmit={onSubmit}>
+      <h2>Server address</h2>
+      <label htmlFor="setup-domain">Domain (for example example.com)</label>
+      <input {...field("domain")} autoComplete="off" required />
+      <label htmlFor="setup-publicIp">Public IPv4 address</label>
+      <input
+        {...field("publicIp")}
+        autoComplete="off"
+        inputMode="decimal"
+        required
+      />
+
+      <fieldset disabled={busy}>
+        <legend>HTTPS certificate</legend>
+        {(Object.keys(TLS_HINTS) as TlsMode[]).map((mode) => (
+          <label key={mode} className="setup-choice">
+            <input
+              checked={form.tlsMode === mode}
+              name="tls-mode"
+              type="radio"
+              value={mode}
+              onChange={() => setForm((prev) => ({ ...prev, tlsMode: mode }))}
+            />
+            <span>{TLS_HINTS[mode]}</span>
+          </label>
+        ))}
+      </fieldset>
+
+      <h2>Email (SMTP)</h2>
+      <label htmlFor="setup-smtpHost">SMTP server</label>
+      <input {...field("smtpHost")} autoComplete="off" required />
+      <label htmlFor="setup-smtpPort">Port (optional)</label>
+      <input {...field("smtpPort")} autoComplete="off" inputMode="numeric" />
+      <label htmlFor="setup-smtpUser">Username (optional)</label>
+      <input {...field("smtpUser")} autoComplete="off" />
+      <label htmlFor="setup-smtpPass">Password (optional)</label>
+      <input
+        {...field("smtpPass")}
+        autoComplete="new-password"
+        type="password"
+      />
+      <label htmlFor="setup-smtpFrom">Sender address (optional)</label>
+      <input {...field("smtpFrom")} autoComplete="off" type="email" />
+
+      <fieldset disabled={busy}>
+        <legend>File storage</legend>
+        <label className="setup-choice">
+          <input
+            checked={form.storageMode === "bundled"}
+            name="storage-mode"
+            type="radio"
+            onChange={() =>
+              setForm((prev) => ({ ...prev, storageMode: "bundled" }))
+            }
+          />
+          <span>Store files on this server</span>
+        </label>
+        <label className="setup-choice">
+          <input
+            checked={form.storageMode === "byo-s3"}
+            name="storage-mode"
+            type="radio"
+            onChange={() =>
+              setForm((prev) => ({ ...prev, storageMode: "byo-s3" }))
+            }
+          />
+          <span>Use my own S3-compatible storage</span>
+        </label>
+      </fieldset>
+      {form.storageMode === "byo-s3" ? (
+        <>
+          <label htmlFor="setup-storageEndpoint">Endpoint</label>
+          <input {...field("storageEndpoint")} autoComplete="off" required />
+          <label htmlFor="setup-storageRegion">Region (optional)</label>
+          <input {...field("storageRegion")} autoComplete="off" />
+          <label htmlFor="setup-storageBucket">Bucket (optional)</label>
+          <input {...field("storageBucket")} autoComplete="off" />
+          <label htmlFor="setup-storageAccessKey">Access key</label>
+          <input {...field("storageAccessKey")} autoComplete="off" required />
+          <label htmlFor="setup-storageSecretKey">Secret key</label>
+          <input
+            {...field("storageSecretKey")}
+            autoComplete="new-password"
+            required
+            type="password"
+          />
+          <label className="setup-choice">
+            <input
+              checked={form.storageUseSsl}
+              disabled={busy}
+              type="checkbox"
+              onChange={(event) => {
+                const checked = event.currentTarget.checked;
+                setForm((prev) => ({ ...prev, storageUseSsl: checked }));
+              }}
+            />
+            <span>Connect with HTTPS</span>
+          </label>
+        </>
+      ) : null}
+      <button disabled={busy} type="submit">
+        {busy ? "Installing" : "Install"}
+      </button>
+    </form>
+  );
+}
+
+interface ResultStepProps {
+  result: InstallResult;
+  onBack: () => void;
+}
+
+function ResultStep({ result, onBack }: Readonly<ResultStepProps>) {
+  return (
+    <>
+      <h2>
+        {result.ok ? "Concord Voice is configured" : "The installer stopped"}
+      </h2>
+      <p className="form-status">
+        {result.ok
+          ? "This setup page has closed. Finish on the server with the steps below."
+          : "Read the installer's message below, fix the answers, and try again."}
+      </p>
+      <textarea
+        aria-label="Installer output"
+        className="server-logs"
+        readOnly
+        rows={16}
+        value={result.output === "" ? "No output." : result.output}
+      />
+      {result.ok ? null : (
+        <div className="button-row">
+          <button type="button" onClick={onBack}>
+            Back to answers
+          </button>
+        </div>
+      )}
+    </>
   );
 }
