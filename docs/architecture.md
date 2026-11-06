@@ -811,6 +811,12 @@ root-only file `/run/concord-agent/setup-token`, run `install-selfhost.sh --pref
 writes `.env`, or after 60 minutes until the agent restarts with a new token.
 Control-plane is not involved: it is not running yet.
 
+The `concord-selfhost` `.deb` (`scripts/release/build-selfhost-deb.sh`) owns
+the agent (`/usr/libexec/concord-agent`), its unit and the wizard pages, and
+carries the release bundle under `/usr/share/concord-selfhost/`. Its postinst
+unpacks that bundle into `/opt/concord` only when the directory is absent, so
+dpkg never owns the operator's tree or `.env`.
+
 **Read-only metrics API:** `GET /admin/api/v1/health`, `/metrics/current`,
 `/metrics/series`, and `/counters` run behind both gates above. They expose only
 fixed catalog metadata and scalar aggregates for the configured local node.
