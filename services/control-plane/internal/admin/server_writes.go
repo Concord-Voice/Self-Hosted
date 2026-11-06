@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	"regexp"
 	"time"
@@ -78,29 +79,37 @@ func (h *Handler) ServerStepUpBegin(c *gin.Context) {
 	var req struct {
 		Action string `json:"action"`
 	}
+	detail := map[string]any{"phase": "stepup_begin"}
+	fail := func(code int, result, reason string) {
+		h.server.recordWrite(c, detail, result, reason)
+		c.JSON(code, gin.H{"error": reason})
+	}
 	if decodeStrict(c, &req, 1<<10) != nil || !serverActions[req.Action] {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid_request"})
+		detail["action"] = "unknown"
+		fail(http.StatusBadRequest, AuditDenied, "invalid_request")
 		return
 	}
+	detail["action"] = req.Action
 	adminID := c.GetString(adminIDContextKey)
 	user, err := h.webAuthnUserForAdmin(c.Request.Context(), adminID)
 	if err != nil {
 		h.log.Error("admin step-up user build failed", "error", err)
-		c.JSON(http.StatusForbidden, gin.H{"error": "stepup_unavailable"})
+		fail(http.StatusForbidden, AuditDenied, "stepup_unavailable")
 		return
 	}
 	assertion, session, err := h.webauthn.BeginLogin(user, webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
 		h.log.Error("admin step-up begin failed", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		fail(http.StatusInternalServerError, AuditFailure, "internal_error")
 		return
 	}
 	handle, err := h.storeServerStepUp(c.Request.Context(), serverStepUp{AdminID: adminID, Action: req.Action, Session: *session})
 	if err != nil {
 		h.log.Error("admin step-up store failed", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "internal_error"})
+		fail(http.StatusInternalServerError, AuditFailure, "internal_error")
 		return
 	}
+	h.server.recordWrite(c, detail, AuditSuccess, "")
 	c.JSON(http.StatusOK, passwordResponse{Handle: handle, PublicKey: assertion})
 }
 
@@ -130,6 +139,10 @@ func (h *Handler) ServerAction(c *gin.Context) {
 	}
 	for k, v := range args {
 		detail[k] = v
+	}
+	if !needsStepUp && req.StepUp != nil {
+		deny(http.StatusBadRequest, "invalid_request")
+		return
 	}
 	if needsStepUp {
 		if req.StepUp == nil {
@@ -211,9 +224,19 @@ func (s *ServerArea) proxyJob(c *gin.Context, id string) {
 	c.Data(http.StatusOK, contentTypeJSON, body)
 }
 
-// startJob posts the action to the agent and relays the job or its refusal.
+// startJob records the request, posts the action to the agent and relays the
+// job or its refusal. The request row is written first and the agent is not
+// called if that write fails, so no write runs unaudited. The agent call does
+// not follow the client: once sent, the job may run, and the outcome row must
+// say what happened rather than that the client left.
 func (s *ServerArea) startJob(c *gin.Context, action string, detail map[string]any, payload []byte) {
-	req, err := http.NewRequestWithContext(c.Request.Context(), http.MethodPost, "http://agent/v1/actions/"+action, bytes.NewReader(payload))
+	if err := s.writeAudit(c, EventServerWrite, requestedRow(detail), AuditSuccess, ""); err != nil {
+		s.writeFail(c, detail, http.StatusServiceUnavailable, "audit_unavailable")
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), agentTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "http://agent/v1/actions/"+action, bytes.NewReader(payload))
 	if err != nil {
 		s.writeFail(c, detail, http.StatusInternalServerError, "internal_error")
 		return
@@ -221,12 +244,15 @@ func (s *ServerArea) startJob(c *gin.Context, action string, detail map[string]a
 	req.Header.Set("Content-Type", contentTypeJSON)
 	resp, err := s.agent.Do(req)
 	if err != nil {
+		// The request may have reached the agent before the transport failed.
+		detail["may_have_started"] = true
 		s.writeFail(c, detail, http.StatusServiceUnavailable, "agent_unavailable")
 		return
 	}
 	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(io.LimitReader(resp.Body, maxAgentJob+1))
 	if err != nil || len(body) > maxAgentJob {
+		detail["may_have_started"] = resp.StatusCode == http.StatusAccepted
 		s.writeFail(c, detail, http.StatusBadGateway, "agent_error")
 		return
 	}
@@ -245,7 +271,8 @@ func (s *ServerArea) startJob(c *gin.Context, action string, detail map[string]a
 		ID string `json:"id"`
 	}
 	if json.Unmarshal(body, &job) != nil || !serverJobID.MatchString(job.ID) {
-		// The agent may have started it; say so in the audit row.
+		// The agent accepted the action, so the job may be running.
+		detail["may_have_started"] = true
 		s.writeFail(c, detail, http.StatusBadGateway, "agent_error")
 		return
 	}
@@ -273,11 +300,20 @@ func (h *Handler) verifyServerStepUp(ctx context.Context, adminID, action, handl
 		return false
 	}
 	var ch serverStepUp
-	if json.Unmarshal([]byte(raw), &ch) != nil || ch.AdminID != adminID || ch.Action != action {
+	switch {
+	case json.Unmarshal([]byte(raw), &ch) != nil:
+		h.log.Warn("admin step-up record unreadable")
+		return false
+	case ch.AdminID != adminID:
+		h.log.Warn("admin step-up handle used by another admin")
+		return false
+	case ch.Action != action:
+		h.log.Warn("admin step-up handle used for another action", "begun_for", ch.Action, "used_for", action)
 		return false
 	}
 	user, err := h.webAuthnUserForAdmin(ctx, adminID)
 	if err != nil {
+		h.log.Warn("admin step-up user build failed", "error", err)
 		return false
 	}
 	cred, err := h.webauthn.FinishLoginWithBytes(user, ch.Session, assertion)
@@ -326,4 +362,11 @@ func decodeStrict(c *gin.Context, dst any, limit int64) error {
 		return errors.New("trailing data")
 	}
 	return nil
+}
+
+// requestedRow is the detail of the row written before the agent call.
+func requestedRow(detail map[string]any) map[string]any {
+	row := maps.Clone(detail)
+	row["phase"] = "requested"
+	return row
 }

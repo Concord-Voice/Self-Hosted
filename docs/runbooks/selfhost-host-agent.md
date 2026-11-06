@@ -91,19 +91,30 @@ of 30 requests per minute per client address; more get 429 `rate_limited`.
 2. For those four, the console first posts `{"action": "<action>"}` to
    `/server/stepup` and gets a handle and assertion options. The handle is
    for that admin and that action only, works once, and expires after 2
-   minutes. User verification is required.
+   minutes. User verification is required. The handle is spent when the
+   action is posted, even if the agent then refuses it, so a retry needs a
+   new step-up.
 3. The console then posts the action with
    `{"stepup": {"handle": "...", "assertion": {...}}}`, plus `"tag"` for update
    or `"archive"` for restore. The control plane checks the tag and archive
    name itself and sends the agent only those fields.
-4. Every attempt writes one `server_write` audit row with the action, tag or
-   archive, whether a step-up passed, the job id when one started, and the
-   reason for a refusal. Unlike reads, these rows also emit a privileged-action
-   security event.
-5. Refusals: 403 `stepup_required` or `stepup_failed`, 400 `invalid_request`,
-   404 `unknown_action`. The agent's own refusals (for example 409
-   `write_in_progress`) pass through with its code; anything else from the
-   agent becomes 502 `agent_error`.
+4. Every step-up begin and every action attempt writes a `server_write` audit
+   row with the action, tag or archive, whether a step-up passed, the job id
+   when one started, and the reason for a refusal. Step-up begins carry
+   `"phase": "stepup_begin"`. Before calling the agent the control plane
+   writes a `"phase": "requested"` row, and if that write fails it refuses
+   with 503 `audit_unavailable` and does not call the agent. The agent call
+   does not stop if the browser leaves, so the outcome row records what the
+   agent did. When the agent may have started a job but its answer was lost,
+   the row says `"may_have_started": true`; check `/server/jobs`. Unlike
+   reads, these rows also emit a privileged-action security event.
+5. Refusals: 403 `stepup_required`, `stepup_failed` or `stepup_unavailable`
+   (no enrolled key), 400 `invalid_request`, 404 `unknown_action`, 503
+   `audit_unavailable` or `agent_unavailable`, 500 `internal_error`. The
+   agent's own refusals (for example 409 `write_in_progress`) pass through
+   with its code; anything else from the agent becomes 502 `agent_error`. Job
+   polls answer 400 `invalid_request`, 404 `unknown_job`, 502 `agent_error`
+   or 503 `agent_unavailable`.
 
 Job polls count as reads and write `server_read` rows. All these routes share
 the 30-per-minute limit with the other Server routes, so poll a job no faster

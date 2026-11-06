@@ -18,8 +18,8 @@ import (
 	"time"
 )
 
-// Write actions (#188). The control-plane proxy (a later change) is to check
-// the admin session and a fresh WebAuthn assertion and write the audit row
+// Write actions (#188). The control-plane proxy checks the admin session and,
+// for disruptive actions, a fresh WebAuthn assertion, and writes an audit row
 // before it calls the agent; the agent keeps the allowlist, validates every
 // argument itself, and runs one write at a time. A write returns a job id at
 // once and the caller polls the job.

@@ -2,6 +2,8 @@ package admin
 
 import (
 	"bytes"
+	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -70,7 +72,10 @@ func TestServerActionStartsJobsWithoutStepUp(t *testing.T) {
 		if got := calls(); len(got) != 1 || got[0].path != "POST /v1/actions/"+action || got[0].body != "{}" {
 			t.Fatalf("%s: agent got %+v", action, got)
 		}
-		ev := audit.events[0]
+		if len(audit.events) != 2 || audit.events[0].Detail["phase"] != "requested" {
+			t.Fatalf("%s: want requested row then outcome, got %+v", action, audit.events)
+		}
+		ev := audit.events[1]
 		if ev.EventType != EventServerWrite || ev.Result != AuditSuccess || ev.Detail["job_id"] != testJobID || ev.Detail["action"] != action {
 			t.Fatalf("%s: audit %+v", action, ev)
 		}
@@ -90,6 +95,7 @@ func TestServerActionRefusesBadInputWithoutCallingAgent(t *testing.T) {
 		{"/server/actions/start", `{"tag":"v1.0.0"}`, http.StatusBadRequest, "invalid_request"},
 		{"/server/actions/backup", `{"archive":"concord-backup-20260101T000000Z.tar.gz"}`, http.StatusBadRequest, "invalid_request"},
 		{"/server/actions/start", `{"force":true}`, http.StatusBadRequest, "invalid_request"},
+		{"/server/actions/backup", `{"stepup":{"handle":"x","assertion":{}}}`, http.StatusBadRequest, "invalid_request"},
 		{"/server/actions/start", `{}{}`, http.StatusBadRequest, "invalid_request"},
 		{"/server/actions/start", `{"tag":"` + strings.Repeat("x", maxServerActionBody) + `"}`, http.StatusBadRequest, "invalid_request"},
 		{"/server/actions/update", `{"tag":"main"}`, http.StatusBadRequest, "invalid_request"},
@@ -141,8 +147,12 @@ func TestServerActionRelaysAgentRefusals(t *testing.T) {
 		if rec.Code != tc.want || !strings.Contains(rec.Body.String(), tc.reason) {
 			t.Errorf("%s: got %d %s", tc.body, rec.Code, rec.Body)
 		}
-		if audit.events[0].Result != AuditFailure || audit.events[0].Detail["reason"] != tc.reason {
-			t.Errorf("%s: audit %+v", tc.body, audit.events[0])
+		ev := audit.events[len(audit.events)-1]
+		if ev.Result != AuditFailure || ev.Detail["reason"] != tc.reason {
+			t.Errorf("%s: audit %+v", tc.body, ev)
+		}
+		if started := tc.status == http.StatusAccepted; (ev.Detail["may_have_started"] != nil) != started {
+			t.Errorf("%s: may_have_started %v", tc.body, ev.Detail["may_have_started"])
 		}
 	}
 	rec := send(writeEngine("/nonexistent/agent.sock", &fakeAudit{}), "/server/actions/start", "")
@@ -193,10 +203,46 @@ func TestServerJobsProxy(t *testing.T) {
 }
 
 func TestServerStepUpBeginRefusesActionsWithoutStepUp(t *testing.T) {
-	r := writeEngine("/nonexistent/agent.sock", &fakeAudit{})
-	for _, body := range []string{`{"action":"start"}`, `{"action":"delete"}`, `{}`, `nope`} {
+	audit := &fakeAudit{}
+	r := writeEngine("/nonexistent/agent.sock", audit)
+	bodies := []string{`{"action":"start"}`, `{"action":"delete"}`, `{}`, `nope`}
+	for _, body := range bodies {
 		if rec := send(r, "/server/stepup", body); rec.Code != http.StatusBadRequest {
 			t.Errorf("%s: got %d", body, rec.Code)
 		}
+	}
+	if len(audit.events) != len(bodies) {
+		t.Fatalf("audit rows %d", len(audit.events))
+	}
+	for _, ev := range audit.events {
+		if ev.EventType != EventServerWrite || ev.Result != AuditDenied || ev.Detail["phase"] != "stepup_begin" {
+			t.Fatalf("audit %+v", ev)
+		}
+	}
+}
+
+func TestServerActionFailsClosedWhenAuditIsDown(t *testing.T) {
+	sock, calls := recordingAgent(t, http.StatusAccepted, `{"id":"`+testJobID+`"}`)
+	rec := send(writeEngine(sock, &fakeAudit{err: errors.New("db down")}), "/server/actions/backup", "")
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "audit_unavailable") {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+	if got := calls(); len(got) != 0 {
+		t.Fatalf("agent called: %+v", got)
+	}
+}
+
+func TestServerActionOutlivesTheClient(t *testing.T) {
+	sock, calls := recordingAgent(t, http.StatusAccepted, `{"id":"`+testJobID+`"}`)
+	audit := &fakeAudit{}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodPost, "/server/actions/backup", nil).WithContext(ctx)
+	writeEngine(sock, audit).ServeHTTP(httptest.NewRecorder(), req)
+	if len(calls()) != 1 {
+		t.Fatal("agent not called")
+	}
+	if ev := audit.events[len(audit.events)-1]; ev.Result != AuditSuccess || ev.Detail["job_id"] != testJobID {
+		t.Fatalf("audit %+v", ev)
 	}
 }

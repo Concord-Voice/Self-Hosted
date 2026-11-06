@@ -811,7 +811,9 @@ console reaches them through `POST /admin/api/v1/server/actions/<action>` and
 `GET /server/jobs[/<id>]`. Stop, restart, update and restore also need a fresh
 user-verified WebAuthn assertion from `POST /server/stepup`, bound to the admin
 and the action and usable once within 2 minutes. Every attempt writes a
-`server_write` audit row and a privileged-action security event.
+`server_write` audit row and a privileged-action security event; the row asking
+for the action is written before the agent is called, and the call is refused
+if it cannot be.
 
 **Self-hosted setup wizard (#187):** on a host with no `.env`, the Concord Host
 Agent also listens on TCP 9443 with a fresh self-signed ECDSA P-384 certificate

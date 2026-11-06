@@ -149,15 +149,17 @@ func (s *ServerArea) record(c *gin.Context, action, service, result, reason stri
 	if service != "" {
 		detail["service"] = service
 	}
-	s.writeAudit(c, EventServerRead, detail, result, reason)
+	_ = s.writeAudit(c, EventServerRead, detail, result, reason)
 }
 
 // recordWrite writes the server_write row for one write attempt.
 func (s *ServerArea) recordWrite(c *gin.Context, detail map[string]any, result, reason string) {
-	s.writeAudit(c, EventServerWrite, detail, result, reason)
+	_ = s.writeAudit(c, EventServerWrite, detail, result, reason)
 }
 
-func (s *ServerArea) writeAudit(c *gin.Context, event string, detail map[string]any, result, reason string) {
+// writeAudit writes one row and returns the write error, which only the
+// pre-call row of a write action acts on.
+func (s *ServerArea) writeAudit(c *gin.Context, event string, detail map[string]any, result, reason string) error {
 	if reason != "" {
 		detail["reason"] = reason
 	}
@@ -169,7 +171,9 @@ func (s *ServerArea) writeAudit(c *gin.Context, event string, detail map[string]
 	// already run the command.
 	ctx, cancel := context.WithTimeout(context.WithoutCancel(c.Request.Context()), auditWriteTimeout)
 	defer cancel()
-	if err := s.audit.Write(ctx, ev); err != nil {
+	err := s.audit.Write(ctx, ev)
+	if err != nil {
 		s.log.Warn("admin audit write failed", "error", err)
 	}
+	return err
 }
