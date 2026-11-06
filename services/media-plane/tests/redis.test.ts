@@ -202,6 +202,39 @@ describe('RedisService', () => {
     });
   });
 
+  describe('room presence write deadlines', () => {
+    async function expectRetiredAfterHang(run: () => Promise<void>) {
+      vi.useFakeTimers();
+      try {
+        const pending = run();
+        await vi.advanceTimersByTimeAsync(1_000);
+        await expect(pending).resolves.toBeUndefined();
+        expect(mockClient.destroy).toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    }
+
+    it('retires the client when addParticipant hangs', async () => {
+      await service.connect();
+      mockMulti.exec.mockReturnValueOnce(new Promise(() => {}));
+      await expectRetiredAfterHang(() => service.addParticipant('channel-1', 'user-1'));
+    });
+
+    it('retires the client when removeParticipant hangs', async () => {
+      await service.connect();
+      mockMulti.exec.mockReturnValueOnce(new Promise(() => {}));
+      await expectRetiredAfterHang(() => service.removeParticipant('channel-1', 'user-1'));
+    });
+
+    it('retires the client when the clearRoom write hangs', async () => {
+      await service.connect();
+      mockClient.sMembers.mockResolvedValueOnce(['user-1']);
+      mockMulti.exec.mockReturnValueOnce(new Promise(() => {}));
+      await expectRetiredAfterHang(() => service.clearRoom('channel-1'));
+    });
+  });
+
   describe('getRoomParticipants', () => {
     it('returns sMembers result', async () => {
       await service.connect();
