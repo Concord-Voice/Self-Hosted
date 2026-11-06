@@ -2,6 +2,7 @@
 # Concord Voice self-hosted package (#187). /opt/concord is never removed.
 set -e
 
+# A failure here must not leave the package impossible to remove.
 if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
-  systemctl disable --now concord-agent.service
+  deb-systemd-invoke stop concord-agent.service || true
 fi

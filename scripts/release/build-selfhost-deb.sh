@@ -33,6 +33,12 @@ done
 [[ -f "$bundle" && "$(basename "$bundle")" == "concord-selfhost-$version.tar.gz" ]] ||
   fail "bundle must be concord-selfhost-$version.tar.gz"
 [[ -f "$agent" ]] || fail 'agent binary not found'
+# ELF e_machine: 62 is x86-64, 183 is AArch64. A wrong-arch agent installs
+# fine and then restart-loops on exec, so refuse it here.
+case $arch in amd64) machine=62 ;; arm64) machine=183 ;; esac
+[[ "$(head -c 4 "$agent" | od -An -c | tr -d ' ')" == '177ELF' &&
+  "$(od -An -tu2 -j18 -N2 --endian=little "$agent" | tr -d ' ')" == "$machine" ]] ||
+  fail "agent is not an ELF binary for $arch"
 [[ -f "$wizard/index.html" ]] || fail 'wizard pages not found (index.html missing)'
 [[ -n "$out" ]] || fail '--out is required'
 
@@ -59,7 +65,7 @@ mkdir -m 0755 "$stage/DEBIAN"
 size=$(du -sk --exclude=DEBIAN "$stage" | cut -f1)
 sed -e "s/@VERSION@/$version/" -e "s/@ARCH@/$arch/" -e "s/@SIZE@/$size/" \
   "$src/deb/control" >"$stage/DEBIAN/control"
-for script in postinst prerm; do
+for script in postinst prerm postrm; do
   sed "s/@VERSION@/$version/" "$src/deb/$script" >"$stage/DEBIAN/$script"
   chmod 0755 "$stage/DEBIAN/$script"
 done

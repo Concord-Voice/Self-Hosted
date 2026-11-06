@@ -151,18 +151,33 @@ sudo apt-get install ./concord-selfhost_<version>_<arch>.deb
 On first install the package:
 
 1. Creates the `concord-agent` system group.
-2. Unpacks the release into `/opt/concord`, owned by root, unless
-   `/opt/concord` already exists (then it is left exactly as it is).
-3. Enables and starts `concord-agent`. With no `.env` yet, the agent starts
-   setup mode, and the package prints the command that shows the wizard
-   address (`sudo cat /run/concord-agent/setup-token`).
+2. Unpacks the release into `/opt/concord`, owned by root, with no file
+   writable by group or others and no setuid bits, unless `/opt/concord`
+   already exists (then it is left exactly as it is).
+3. Enables `concord-agent`, and starts it when systemd is running. With no
+   `.env` yet, the agent starts setup mode, and the package prints the
+   command that shows the wizard address
+   (`sudo cat /run/concord-agent/setup-token`). Installed into an image
+   without a running systemd, the agent is enabled and starts on first boot.
 
 `/opt/concord` belongs to you, not to the package. Upgrading the package
-replaces only the agent, its unit and the wizard pages, and restarts the
-agent; it never touches `/opt/concord` or its `.env`. Removing the package
-stops and disables the agent and leaves `/opt/concord` in place. Because
-`/opt/concord` is not a git checkout, `concord-selfhost update` cannot update
-it yet; that waits on signed releases.
+replaces only the agent, its unit, the wizard pages and the release tarball
+under `/usr/share/concord-selfhost/`, and restarts the agent; it never
+touches `/opt/concord` or its `.env`. If you disabled the agent, an upgrade
+keeps it disabled. Removing the package stops and disables the agent and
+leaves `/opt/concord` in place. Because `/opt/concord` is not a git checkout,
+`concord-selfhost update` cannot update it yet; that waits on signed
+releases.
+
+To change a setting such as `CONCORD_AGENT_CLI`, use a drop-in
+(`sudo systemctl edit concord-agent`); edits to the packaged unit are lost on
+upgrade.
+
+**Moving from a checkout install.** A unit in `/etc/systemd/system`
+overrides the packaged one, so remove the old files before installing the
+package: `sudo systemctl disable --now concord-agent`, then
+`sudo rm /etc/systemd/system/concord-agent.service /usr/local/libexec/concord-agent`
+and `sudo systemctl daemon-reload`.
 
 ### From a checkout
 

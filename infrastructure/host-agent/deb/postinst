@@ -16,22 +16,40 @@ if [ "$1" = configure ]; then
     umask 022
     rm -rf "$root.new"
     mkdir "$root.new"
-    tar -xzf "$bundle" -C "$root.new" --strip-components=1 --no-same-owner
+    # The root agent runs scripts from this tree, so no mode in the archive
+    # may make a file writable by others or setuid.
+    tar -xzf "$bundle" -C "$root.new" --strip-components=1 --no-same-owner --no-same-permissions
+    chmod -R u-s,g-s,go-w "$root.new"
     mv "$root.new" "$root"
   fi
 
+  # As debhelper does: enable unless the operator disabled it before.
+  # deb-systemd-helper works without a running systemd (image builds), and
+  # deb-systemd-invoke honours policy-rc.d. Only starting needs systemd.
+  if deb-systemd-helper --quiet was-enabled concord-agent.service; then
+    deb-systemd-helper enable concord-agent.service >/dev/null ||
+      echo "concord-selfhost: could not enable concord-agent; run: systemctl enable --now concord-agent" >&2
+  else
+    deb-systemd-helper update-state concord-agent.service >/dev/null || true
+  fi
+  running=no
   if [ -d /run/systemd/system ]; then
-    systemctl daemon-reload
+    systemctl --system daemon-reload >/dev/null || true
     if [ -z "$2" ]; then
-      systemctl enable --now concord-agent.service
+      deb-systemd-invoke start concord-agent.service || true
     else
-      systemctl try-restart concord-agent.service
+      deb-systemd-invoke restart concord-agent.service || true
     fi
+    if systemctl is-active --quiet concord-agent.service; then running=yes; fi
   fi
 
   if [ ! -e "$root/.env" ]; then
-    echo "concord-selfhost: to finish, open the setup wizard from a browser on your network."
-    echo "concord-selfhost: its address, with a one-time token: sudo cat /run/concord-agent/setup-token"
-    echo "concord-selfhost: compare the certificate fingerprint in: journalctl -u concord-agent"
+    if [ "$running" = yes ]; then
+      echo "concord-selfhost: to finish, open the setup wizard from a browser on your network."
+      echo "concord-selfhost: its address, with a one-time token: sudo cat /run/concord-agent/setup-token"
+      echo "concord-selfhost: compare the certificate fingerprint in: journalctl -u concord-agent"
+    else
+      echo "concord-selfhost: concord-agent is not running yet. Once it starts, the setup wizard address is in /run/concord-agent/setup-token; if it does not start, see: journalctl -u concord-agent"
+    fi
   fi
 fi

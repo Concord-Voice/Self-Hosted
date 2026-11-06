@@ -5,7 +5,7 @@ Maintainer: Concord Voice LLC <security@concordvoice.com>
 Installed-Size: @SIZE@
 Section: net
 Priority: optional
-Depends: python3, iproute2, logrotate, openssl, ca-certificates
+Depends: init-system-helpers, python3, iproute2, logrotate, openssl, ca-certificates
 Recommends: docker-ce | docker.io, docker-compose-plugin | docker-compose-v2, git
 Homepage: https://www.concordvoice.com
 Description: Concord Voice self-hosted server and host agent
