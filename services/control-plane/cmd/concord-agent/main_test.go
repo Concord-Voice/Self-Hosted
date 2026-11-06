@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"net"
 	"net/http"
@@ -151,5 +152,89 @@ func TestRunServesAndStopsOnSIGTERM(t *testing.T) {
 		}
 	case <-time.After(15 * time.Second):
 		t.Fatal("agent did not stop on SIGTERM")
+	}
+}
+
+func setupRoot(t *testing.T, installed bool) (cli, assets string) {
+	t.Helper()
+	root := t.TempDir()
+	deploy := filepath.Join(root, "infrastructure", "deploy")
+	assets = filepath.Join(root, "wizard")
+	for _, d := range []string{deploy, assets} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(assets, "index.html"), []byte("wizard"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if installed {
+		if err := os.WriteFile(filepath.Join(root, ".env"), nil, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return filepath.Join(deploy, "concord-selfhost"), assets
+}
+
+func TestStartSetupSkipsAnInstalledHost(t *testing.T) {
+	cli, assets := setupRoot(t, true)
+	addr, done, err := startSetup(context.Background(), cli, "127.0.0.1:0", assets, time.Minute)
+	if err != nil || addr != nil || done != nil {
+		t.Fatalf("setup started on an installed host: %v %v", addr, err)
+	}
+}
+
+func TestStartSetupServesTLSUntilTheWindowEnds(t *testing.T) {
+	cli, assets := setupRoot(t, false)
+	addr, done, err := startSetup(context.Background(), cli, "127.0.0.1:0", assets, 300*time.Millisecond)
+	if err != nil || addr == nil {
+		t.Fatalf("setup did not start: %v", err)
+	}
+	client := &http.Client{Timeout: 5 * time.Second, Transport: &http.Transport{
+		TLSClientConfig: &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}, //nolint:gosec // self-signed test server
+	}}
+	resp, err := client.Get("https://" + addr.String() + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || string(body) != "wizard" {
+		t.Fatalf("got %d %q", resp.StatusCode, body)
+	}
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("setup listener outlived its window")
+	}
+	if _, err := net.DialTimeout("tcp", addr.String(), time.Second); err == nil {
+		t.Fatal("setup port still open after the window")
+	}
+}
+
+func TestStartSetupStopsWithTheAgent(t *testing.T) {
+	cli, assets := setupRoot(t, false)
+	ctx, cancel := context.WithCancel(context.Background())
+	_, done, err := startSetup(ctx, cli, "127.0.0.1:0", assets, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("setup listener outlived the agent")
+	}
+}
+
+func TestStartSetupReportsABusyPort(t *testing.T) {
+	cli, assets := setupRoot(t, false)
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = ln.Close() }()
+	if _, _, err := startSetup(context.Background(), cli, ln.Addr().String(), assets, time.Minute); err == nil {
+		t.Fatal("busy port not reported")
 	}
 }

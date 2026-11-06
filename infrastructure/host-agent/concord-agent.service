@@ -1,5 +1,6 @@
 # Concord Host Agent (#186). Serves read-only concord-selfhost actions to the
-# Admin Console on /run/concord-agent/agent.sock. See
+# Admin Console on /run/concord-agent/agent.sock, and on a host with no .env
+# the first-run setup wizard on TCP 9443 (#187). See
 # docs/runbooks/selfhost-host-agent.md before installing.
 [Unit]
 Description=Concord Host Agent
@@ -28,7 +29,7 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
-# docker (unix) and the health check's local HTTP probe (inet).
+# docker (unix), the health check's local HTTP probe and the setup wizard (inet).
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 
 [Install]

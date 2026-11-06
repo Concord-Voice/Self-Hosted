@@ -15,10 +15,13 @@ import (
 // ExecRunner runs the concord-selfhost CLI at a fixed absolute path.
 type ExecRunner struct {
 	CLI string
+	// Combined sends stderr to the same writer as stdout; otherwise stderr
+	// is discarded.
+	Combined bool
 }
 
-// Run checks the CLI is still trusted, then runs it with a fixed environment,
-// no stdin, and stderr discarded. A cancelled context kills the whole process
+// Run checks the CLI is still trusted, then runs it with a fixed environment
+// and no stdin. A cancelled context kills the whole process
 // group, so `docker compose logs -f` children do not outlive the request.
 func (e ExecRunner) Run(ctx context.Context, args []string, w io.Writer) error {
 	cli, err := CheckTrusted(e.CLI)
@@ -35,6 +38,9 @@ func (e ExecRunner) Run(ctx context.Context, args []string, w io.Writer) error {
 	}
 	cmd.Dir = filepath.Dir(cli)
 	cmd.Stdout = w
+	if e.Combined {
+		cmd.Stderr = w
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = 5 * time.Second

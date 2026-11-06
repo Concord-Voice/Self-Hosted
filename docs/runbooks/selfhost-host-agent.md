@@ -2,7 +2,9 @@
 
 The Concord Host Agent lets the Admin Console read the state of a self-hosted
 server. It is a small Go program that runs as root under systemd and answers
-on a unix socket. It has no network listener.
+on a unix socket. Its only network listener is the first-run setup wizard
+(see [Setup mode](#setup-mode)), which closes for good once the server is
+installed.
 
 This first version is read-only. It can do three things, and nothing else:
 
@@ -45,6 +47,65 @@ It then adds `docker-compose.host-agent.yml`, which mounts
 that group. Run `concord-selfhost up` after installing the agent to apply it.
 Until the agent is running the page says "The host agent is not reachable.
 Install and start it, then run concord-selfhost up."
+
+## Setup mode
+
+When the agent starts on a host that has no `.env` in the install root (three
+directories above `concord-selfhost`), it also serves a setup wizard over
+HTTPS, so the operator can install from a browser on another machine.
+
+1. The agent prints two lines to its journal (`journalctl -u concord-agent`):
+   the wizard address with a one-time token, and the SHA-256 fingerprint of
+   its self-signed certificate.
+
+   ```text
+   concord-agent: setup mode: open https://<this-host>:9443/#token=<64 hex characters>
+   concord-agent: setup certificate SHA-256 fingerprint AB:CD:…; setup closes in 1h0m0s
+   ```
+
+2. Open the address from a browser on the LAN. The certificate is
+   self-signed, so the browser warns. Compare the fingerprint the browser
+   shows with the printed one before you continue; if they differ, stop.
+   The token in the address is after `#`, so the browser never sends it in
+   the request line, and the page removes it from the address bar.
+3. The wizard runs `install-selfhost.sh --preflight-only --json` and lists the
+   checks in plain words. Install stays blocked until every check passes.
+4. The wizard collects the domain, public IPv4 address, certificate mode,
+   SMTP server and storage. The agent writes them to an answers file at mode
+   `0600` in a fresh `0700` directory, runs `install-selfhost.sh --env-file`
+   on it, and deletes the directory whatever the outcome. The wizard shows
+   the installer's output, which ends with the next steps to run on the
+   server.
+
+The wizard closes after the first install that writes `.env`, after 60
+minutes, or when the agent stops, whichever comes first. After a successful
+install the token no longer works. To open a new window, run
+`systemctl restart concord-agent`, which prints a new token; once `.env`
+exists the agent does not start setup mode at all.
+
+| Setting | Default |
+| --- | --- |
+| `CONCORD_AGENT_SETUP_ADDR` | `:9443` (all interfaces, so the LAN can reach it) |
+| `CONCORD_AGENT_WIZARD_DIR` | `/usr/share/concord-agent/wizard` |
+
+Build the wizard pages with `npm --prefix client/admin run build:setup` and
+copy `client/admin/dist-setup/` to the wizard directory. The packaged install
+will ship them.
+
+Setup-mode rules:
+
+- Every API call needs `Authorization: Bearer <token>`. The token is 32 random
+  bytes and is compared in constant time.
+- After 10 wrong tokens in 10 minutes, from any address, every attempt gets
+  429 for the rest of that window, including the right token.
+- One install runs at a time; a second gets 409. An install may take up to
+  10 minutes. Its output is capped at 256 KiB, with terminal escapes and
+  control characters removed.
+- The installer refuses an answers file with an unknown field. The agent also
+  refuses unknown fields and any value with a line break or NUL, so an answer
+  cannot add a line.
+- Pages are served with a strict Content Security Policy, `nosniff`,
+  `no-referrer` and no framing. API answers are `no-store`.
 
 ## Install
 
@@ -123,5 +184,13 @@ is logged to the journal as `action=… outcome=…`, without parameters.
 - **Denial of service.** The request, follow and output limits above bound
   what a socket user can make the agent run.
 - **Environment.** The wrapper runs with a fixed `PATH`, `LANG` and `HOME`,
-  no stdin, and stderr discarded. A cancelled request kills its whole process
+  no stdin, and stderr discarded (the setup wizard keeps the installer's
+  stderr to show its messages). A cancelled request kills its whole process
   group.
+- **Setup wizard on the LAN.** Until the server is installed, anyone on the
+  LAN can load the wizard page, but nothing runs without the token, and the
+  token appears only in the root-readable journal. Anyone who can read the
+  journal on an uninstalled host can configure it. Someone on the network
+  path could intercept the first connection, which is why the fingerprint
+  check matters. The wizard can only run the installer's preflight and a
+  fresh install; it cannot change an installed server.
