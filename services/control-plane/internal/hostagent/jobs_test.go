@@ -122,14 +122,14 @@ func TestRestoreTakesOnlyAnArchiveInBackups(t *testing.T) {
 		}
 	}
 	// A backups folder others can write to is refused outright.
-	if err := os.Chmod(dir, 0o777); err != nil {
+	if err := os.Chmod(dir, 0o777); err != nil { //nolint:gosec // deliberately unsafe input
 		t.Fatal(err)
 	}
 	if rec := post(t, s, "/v1/actions/restore", `{"archive":"`+name+`"}`); rec.Code != http.StatusConflict ||
 		!strings.Contains(rec.Body.String(), "untrusted_backups") {
 		t.Errorf("writable backups: got %d %s", rec.Code, rec.Body)
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	if err := os.Chmod(dir, 0o700); err != nil { //nolint:gosec // root-only directory, as the agent expects
 		t.Fatal(err)
 	}
 	waitJob(t, s, started(t, post(t, s, "/v1/actions/restore", `{"archive":"`+name+`"}`)).ID)
@@ -198,7 +198,8 @@ func TestMarkerExistsOnlyWhileAWriteRuns(t *testing.T) {
 		t.Fatalf("stale marker kept: %v", err)
 	}
 	j := started(t, post(t, s, "/v1/actions/stop", ""))
-	if b, err := os.ReadFile(marker); err != nil || strings.TrimSpace(string(b)) != j.ID {
+	b, err := os.ReadFile(marker) //nolint:gosec // temp path from the test
+	if err != nil || strings.TrimSpace(string(b)) != j.ID {
 		t.Errorf("marker during the run: %q %v", b, err)
 	}
 	close(f.wait)

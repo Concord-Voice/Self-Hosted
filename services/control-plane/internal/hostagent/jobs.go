@@ -214,9 +214,9 @@ func (j *jobs) execute(job *Job, cmds [][]string, budget time.Duration) {
 		// Say why in-band: a CLI the trust check refused prints nothing.
 		var ee interface{ ExitCode() int }
 		if errors.As(err, &ee) {
-			fmt.Fprintf(&job.out, "[concord-agent: %s failed: exit status %d]\n", job.Action, ee.ExitCode())
+			_, _ = fmt.Fprintf(&job.out, "[concord-agent: %s failed: exit status %d]\n", job.Action, ee.ExitCode())
 		} else {
-			fmt.Fprintf(&job.out, "[concord-agent: %s failed: the command could not run or was stopped]\n", job.Action)
+			_, _ = fmt.Fprintf(&job.out, "[concord-agent: %s failed: the command could not run or was stopped]\n", job.Action)
 		}
 	}
 	if job.Action == "backup" && err == nil {
