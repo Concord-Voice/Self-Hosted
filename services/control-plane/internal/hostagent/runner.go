@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -95,6 +96,33 @@ func CheckTrusted(cli string) (string, error) {
 		return "", err
 	}
 	return resolved, nil
+}
+
+// CheckTrustedTree applies the same ownership rule to a directory, every
+// directory above it and everything inside it, and refuses links inside it, so
+// nobody but root can change what is served from it. It returns the resolved
+// path.
+func CheckTrustedTree(dir string) (string, error) {
+	if !filepath.IsAbs(dir) {
+		return "", errors.New("path must be absolute")
+	}
+	resolved, err := filepath.EvalSymlinks(dir)
+	if err != nil {
+		return "", err
+	}
+	if err := trustedAncestors(resolved); err != nil {
+		return "", err
+	}
+	err = filepath.WalkDir(resolved, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&fs.ModeSymlink != 0 {
+			return fmt.Errorf("%s is a link", p)
+		}
+		return trustedEntry(p)
+	})
+	return resolved, err
 }
 
 // trustedAncestors checks dir and every directory above it.

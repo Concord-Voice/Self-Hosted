@@ -805,11 +805,11 @@ paths share a fail-closed limit of 30 requests/minute/IP. See
 Agent also listens on TCP 9443 with a fresh self-signed ECDSA P-384 certificate
 and serves a separate wizard build of `client/admin` (`setup/`,
 `vite.setup.config.ts`). Its two API routes, `GET /api/preflight` and
-`POST /api/install`, need a one-time 32-byte bearer token printed only to the
-agent's journal, run `install-selfhost.sh --preflight-only --json` and
-`--env-file` respectively, and close for good after the first install that
-writes `.env` or after 60 minutes. Control-plane is not involved: it is not
-running yet.
+`POST /api/install`, need a one-time 32-byte bearer token written only to the
+root-only file `/run/concord-agent/setup-token`, run `install-selfhost.sh --preflight-only --json` and
+`--env-file` respectively. Setup closes for good after the first install that
+writes `.env`, or after 60 minutes until the agent restarts with a new token.
+Control-plane is not involved: it is not running yet.
 
 **Read-only metrics API:** `GET /admin/api/v1/health`, `/metrics/current`,
 `/metrics/series`, and `/counters` run behind both gates above. They expose only

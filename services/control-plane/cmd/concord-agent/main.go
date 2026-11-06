@@ -20,6 +20,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/net/netutil"
+
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/hostagent"
 )
 
@@ -30,6 +32,12 @@ const (
 	// it from another machine on the LAN.
 	defaultSetupAddr = ":9443"
 	defaultWizardDir = "/usr/share/concord-agent/wizard"
+	// setupTokenFile sits beside the socket, in the agent's own 0750
+	// directory, and is itself 0600 root: the journal is readable by the adm
+	// and systemd-journal groups, so the token never goes there.
+	setupTokenFile = "setup-token"
+	// setupMaxConns bounds the TLS connections a LAN client can hold open.
+	setupMaxConns = 16
 )
 
 func main() {
@@ -60,7 +68,8 @@ func run() int {
 		log.Print("concord-agent: startup failed: group id")
 		return 1
 	}
-	ln, err := listen(envOr("CONCORD_AGENT_SOCKET", defaultSocket), gid)
+	sock := envOr("CONCORD_AGENT_SOCKET", defaultSocket)
+	ln, err := listen(sock, gid)
 	if err != nil {
 		log.Printf("concord-agent: startup failed: socket: %v", err)
 		return 1
@@ -77,7 +86,8 @@ func run() int {
 	// Setup mode is an extra listener; the socket serves either way, so a
 	// setup failure is logged and the agent carries on.
 	if _, _, err := startSetup(ctx, resolved, envOr("CONCORD_AGENT_SETUP_ADDR", defaultSetupAddr),
-		envOr("CONCORD_AGENT_WIZARD_DIR", defaultWizardDir), hostagent.SetupWindow); err != nil {
+		envOr("CONCORD_AGENT_WIZARD_DIR", defaultWizardDir), filepath.Join(filepath.Dir(sock), setupTokenFile),
+		hostagent.SetupWindow); err != nil {
 		log.Printf("concord-agent: setup mode unavailable: %v", err)
 	}
 	go func() {
@@ -97,12 +107,19 @@ func run() int {
 // startSetup serves the first-run wizard over HTTPS when the install root
 // (three levels above the CLI) has no .env. It returns a nil address when the
 // host is already installed. The listener closes after a successful install,
-// after window, or when ctx ends; done is closed once it has.
-func startSetup(ctx context.Context, cli, addr, assets string, window time.Duration) (net.Addr, <-chan struct{}, error) {
+// after window, or when ctx ends; done is closed once it has. The wizard
+// address with its token goes to tokenFile, which is removed on close.
+func startSetup(ctx context.Context, cli, addr, assets, tokenFile string, window time.Duration) (net.Addr, <-chan struct{}, error) {
+	_ = os.Remove(tokenFile) // a token from an earlier run is dead
 	deploy := filepath.Dir(cli)
 	envPath := filepath.Join(filepath.Dir(filepath.Dir(deploy)), ".env")
 	if !hostagent.Needed(envPath) {
 		return nil, nil, nil
+	}
+	// The page reads the token, so only root may change what it is built from.
+	assets, err := hostagent.CheckTrustedTree(assets)
+	if err != nil {
+		return nil, nil, fmt.Errorf("untrusted wizard directory: %w", err)
 	}
 	installer := hostagent.ExecRunner{CLI: filepath.Join(deploy, "install-selfhost.sh"), Combined: true}
 	setup, token, err := hostagent.NewSetup(installer, envPath, assets)
@@ -113,10 +130,19 @@ func startSetup(ctx context.Context, cli, addr, assets string, window time.Durat
 	if err != nil {
 		return nil, nil, err
 	}
-	ln, err := tls.Listen("tcp", addr, cfg)
+	tcp, err := net.Listen("tcp", addr)
 	if err != nil {
 		return nil, nil, err
 	}
+	port := 0
+	if a, ok := tcp.Addr().(*net.TCPAddr); ok {
+		port = a.Port
+	}
+	if err := writeTokenFile(tokenFile, fmt.Sprintf("https://<this-host>:%d/#token=%s\n", port, token)); err != nil {
+		_ = tcp.Close()
+		return nil, nil, err
+	}
+	ln := tls.NewListener(netutil.LimitListener(tcp, setupMaxConns), cfg)
 	srv := &http.Server{
 		Handler:           setup,
 		ReadHeaderTimeout: 5 * time.Second,
@@ -140,18 +166,28 @@ func startSetup(ctx context.Context, cli, addr, assets string, window time.Durat
 			log.Print("concord-agent: setup window ended; restart the agent for a new token")
 		case <-ctx.Done():
 		}
+		_ = os.Remove(tokenFile) // best-effort: the token is dead either way
 		// An install already running may finish: it writes .env atomically.
 		sctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 11*time.Minute)
 		defer cancel()
 		_ = srv.Shutdown(sctx) // best-effort: Serve returns either way
 	}()
-	port := 0
-	if a, ok := ln.Addr().(*net.TCPAddr); ok {
-		port = a.Port
-	}
-	log.Printf("concord-agent: setup mode: open https://<this-host>:%d/#token=%s", port, token) //nolint:gosec // token is hex from crypto/rand, port an int
+	log.Printf("concord-agent: setup mode on port %d; the wizard address with its one-time token is in %s (root only)", port, tokenFile)
 	log.Printf("concord-agent: setup certificate SHA-256 fingerprint %s; setup closes in %s", fingerprint, window)
 	return ln.Addr(), done, nil
+}
+
+// writeTokenFile creates path afresh as 0600, refusing anything already there.
+func writeTokenFile(path, content string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600) //nolint:gosec // fixed path beside the socket
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(content); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // listen opens the socket with no window in which it is world-accessible:
@@ -169,7 +205,7 @@ func listen(path string, gid int) (net.Listener, error) {
 		return nil, err
 	}
 	for _, e := range entries {
-		if e.Name() != filepath.Base(path) {
+		if e.Name() != filepath.Base(path) && e.Name() != setupTokenFile {
 			return nil, fmt.Errorf("socket directory %s is not empty; use a dedicated directory", dir)
 		}
 	}

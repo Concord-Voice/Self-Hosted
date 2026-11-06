@@ -58,6 +58,7 @@ type Setup struct {
 	tmpDir    string // parent for the answers file; "" means os.TempDir()
 	now       func() time.Time
 
+	checking   sync.Mutex // one preflight at a time
 	mu         sync.Mutex
 	used       bool
 	installing bool
@@ -129,13 +130,21 @@ func (s *Setup) api(w http.ResponseWriter, r *http.Request, method string, next 
 	next(w, r)
 }
 
-// authorize checks the bearer token in constant time. Failed attempts are
-// counted across all callers: after setupMaxFailures in setupFailureWindow
-// every attempt is refused until the oldest failure ages out.
+// authorize checks the bearer token in constant time. The right token always
+// passes: at 256 bits it cannot be guessed, and a lockout that refused it would
+// let any host on the LAN shut the operator out. Wrong tokens are counted
+// across all callers; past setupMaxFailures in setupFailureWindow they get 429
+// and are no longer logged, so a flood cannot fill the journal.
 func (s *Setup) authorize(r *http.Request) (int, string) {
 	given, _ := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.used {
+		return http.StatusGone, "setup_complete"
+	}
+	if subtle.ConstantTimeCompare([]byte(given), s.token) == 1 {
+		return 0, ""
+	}
 	now := s.now()
 	kept := s.failures[:0]
 	for _, t := range s.failures {
@@ -147,15 +156,9 @@ func (s *Setup) authorize(r *http.Request) (int, string) {
 	if len(s.failures) >= setupMaxFailures {
 		return http.StatusTooManyRequests, "too_many_attempts"
 	}
-	if s.used {
-		return http.StatusGone, "setup_complete"
-	}
-	if subtle.ConstantTimeCompare([]byte(given), s.token) != 1 {
-		s.failures = append(s.failures, now)
-		log.Print("concord-agent: setup: rejected token")
-		return http.StatusUnauthorized, "invalid_token"
-	}
-	return 0, ""
+	s.failures = append(s.failures, now)
+	log.Print("concord-agent: setup: rejected token")
+	return http.StatusUnauthorized, "invalid_token"
 }
 
 type preflightDoc struct {
@@ -168,6 +171,11 @@ type preflightDoc struct {
 }
 
 func (s *Setup) preflight(w http.ResponseWriter, r *http.Request) {
+	if !s.checking.TryLock() {
+		refuse(w, http.StatusConflict, "preflight_running")
+		return
+	}
+	defer s.checking.Unlock()
 	ctx, cancel := context.WithTimeout(r.Context(), readTimeout)
 	defer cancel()
 	var out limitedBuffer
@@ -204,7 +212,14 @@ func (s *Setup) install(w http.ResponseWriter, r *http.Request) {
 		refuse(w, http.StatusBadRequest, "invalid_answers")
 		return
 	}
+	// used is checked again here: a request authorized while another install
+	// ran may reach this point after that install succeeded.
 	s.mu.Lock()
+	if s.used {
+		s.mu.Unlock()
+		refuse(w, http.StatusGone, "setup_complete")
+		return
+	}
 	if s.installing {
 		s.mu.Unlock()
 		refuse(w, http.StatusConflict, "install_running")
@@ -219,19 +234,29 @@ func (s *Setup) install(w http.ResponseWriter, r *http.Request) {
 	}()
 
 	output, err := s.runInstaller(r, file)
-	if err == nil && Needed(s.envPath) {
-		err = errors.New("installer exited without writing .env")
+	// The output carries the next steps; the journal keeps them for an
+	// operator whose browser left before the answer arrived.
+	for _, line := range strings.Split(strings.TrimRight(output, "\n"), "\n") {
+		log.Printf("concord-agent: setup: installer: %s", line)
 	}
-	if err != nil {
+	// Once .env exists the installer refuses to run again, so setup is over
+	// even if a step after writing it failed.
+	if Needed(s.envPath) {
+		if err == nil {
+			err = errors.New("installer exited without writing .env")
+		}
 		log.Printf("concord-agent: setup: install failed: %v", err)
-		writeJSON(w, map[string]any{"ok": false, "output": output})
+		writeJSON(w, map[string]any{"ok": false, "clean": false, "output": output})
 		return
 	}
 	s.mu.Lock()
 	s.used = true
 	s.mu.Unlock()
+	if err != nil {
+		log.Printf("concord-agent: setup: installer wrote .env but then failed: %v", err)
+	}
 	log.Print("concord-agent: setup: install complete; setup mode closing")
-	writeJSON(w, map[string]any{"ok": true, "output": output})
+	writeJSON(w, map[string]any{"ok": true, "clean": err == nil, "output": output})
 	close(s.done)
 }
 

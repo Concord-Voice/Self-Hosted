@@ -108,6 +108,10 @@ describe("setup API parsing", () => {
       parsePreflight({ ok: true, checks: [{ name: 1, ok: true }] }),
     ).toThrow(SetupError);
     expect(() => parseInstall({ ok: true })).toThrow(SetupError);
+    expect(parseInstall({ ok: true, output: "" }).clean).toBe(true);
+    expect(parseInstall({ ok: true, clean: false, output: "" }).clean).toBe(
+      false,
+    );
     expect(parsePreflight({ ...passing, extra: 1 }).checks).toEqual(
       passing.checks,
     );
@@ -118,13 +122,19 @@ describe("setup API parsing", () => {
       /token is not right/,
     );
     expect(errorMessage(new SetupError(429, "too_many_attempts"))).toMatch(
-      /Wait 10 minutes/,
+      /right token still works/,
     );
     expect(errorMessage(new SetupError(410, "setup_complete"))).toMatch(
-      /already complete/,
+      /journalctl -u concord-agent/,
     );
     expect(errorMessage(new SetupError(409, "install_running"))).toMatch(
-      /already running/,
+      /install is already running/,
+    );
+    expect(errorMessage(new SetupError(409, "preflight_running"))).toMatch(
+      /checks are already running/,
+    );
+    expect(errorMessage(new SetupError(400, "invalid_answers"))).toMatch(
+      /line break/,
     );
     expect(errorMessage(new Error("x"))).toMatch(/could not complete/);
   });
@@ -195,8 +205,22 @@ describe("SetupWizard", () => {
     );
     await user.click(screen.getByRole("button", { name: "Check again" }));
     expect(await screen.findByRole("alert")).toHaveTextContent(
-      /Wait 10 minutes/,
+      /right token still works/,
     );
+    // Nothing is running, so nothing may say so.
+    expect(screen.queryByText("Running checks")).not.toBeInTheDocument();
+  });
+
+  it("moves focus to the new step's heading", async () => {
+    agent();
+    globalThis.history.replaceState(null, "", `/#token=${TOKEN}`);
+    const user = userEvent.setup();
+    render(<SetupWizard />);
+    await screen.findByText("Supported operating system");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(
+      screen.getByRole("heading", { name: "Server address" }),
+    ).toHaveFocus();
   });
 
   async function reachAnswers() {
@@ -290,6 +314,40 @@ describe("SetupWizard", () => {
       expect(screen.getByRole("alert")).toHaveTextContent(/already running/),
     );
     expect(screen.getByRole("button", { name: "Install" })).toBeEnabled();
+  });
+
+  it("returns to the token step when the token changed, keeping the answers", async () => {
+    const { user } = await reachAnswers();
+    server.use(
+      http.post(`${base}/install`, () =>
+        HttpResponse.json({ error: "invalid_token" }, { status: 401 }),
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: "Install" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(/setup-token/);
+    expect(screen.getByLabelText("Setup token")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    await screen.findByText("Supported operating system");
+    await user.click(screen.getByRole("button", { name: "Continue" }));
+    expect(screen.getByLabelText(/^Domain/)).toHaveValue("example.com");
+  });
+
+  it("says when the installer saved the settings but then failed", async () => {
+    const { user } = await reachAnswers();
+    server.use(
+      http.post(`${base}/install`, () =>
+        HttpResponse.json({ ok: true, clean: false, output: "tls: failed" }),
+      ),
+    );
+    await user.click(screen.getByRole("button", { name: "Install" }));
+    expect(
+      await screen.findByRole("heading", {
+        name: "Concord Voice is configured, but the installer reported an error",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Back to answers" }),
+    ).not.toBeInTheDocument();
   });
 
   it("shows empty installer output plainly", async () => {

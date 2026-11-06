@@ -6,7 +6,8 @@ on a unix socket. Its only network listener is the first-run setup wizard
 (see [Setup mode](#setup-mode)), which closes for good once the server is
 installed.
 
-This first version is read-only. It can do three things, and nothing else:
+The socket API is read-only. It can do three things, and nothing else (setup
+mode, below, can also run the installer's preflight and a fresh install):
 
 | Request | Runs | Returns |
 | --- | --- | --- |
@@ -54,14 +55,23 @@ When the agent starts on a host that has no `.env` in the install root (three
 directories above `concord-selfhost`), it also serves a setup wizard over
 HTTPS, so the operator can install from a browser on another machine.
 
-1. The agent prints two lines to its journal (`journalctl -u concord-agent`):
-   the wizard address with a one-time token, and the SHA-256 fingerprint of
-   its self-signed certificate.
+1. The agent writes the wizard address, with a one-time token, to
+   `/run/concord-agent/setup-token` (mode `0600`, root only), and prints the
+   SHA-256 fingerprint of its self-signed certificate to its journal. The
+   token never goes to the journal, which members of the `adm` and
+   `systemd-journal` groups can read.
 
    ```text
-   concord-agent: setup mode: open https://<this-host>:9443/#token=<64 hex characters>
+   $ sudo cat /run/concord-agent/setup-token
+   https://<this-host>:9443/#token=<64 hex characters>
+   $ journalctl -u concord-agent
+   concord-agent: setup mode on port 9443; the wizard address with its one-time token is in /run/concord-agent/setup-token (root only)
    concord-agent: setup certificate SHA-256 fingerprint AB:CD:…; setup closes in 1h0m0s
    ```
+
+   If the host has a firewall, allow TCP 9443 from your LAN for the setup
+   window (for example `ufw allow from 192.168.1.0/24 to any port 9443
+   proto tcp`), and remove the rule afterwards.
 
 2. Open the address from a browser on the LAN. The certificate is
    self-signed, so the browser warns. Compare the fingerprint the browser
@@ -69,18 +79,23 @@ HTTPS, so the operator can install from a browser on another machine.
    The token in the address is after `#`, so the browser never sends it in
    the request line, and the page removes it from the address bar.
 3. The wizard runs `install-selfhost.sh --preflight-only --json` and lists the
-   checks in plain words. Install stays blocked until every check passes.
+   checks in plain words. The wizard offers the install only when every check
+   passes, and the installer runs the same checks again itself.
 4. The wizard collects the domain, public IPv4 address, certificate mode,
    SMTP server and storage. The agent writes them to an answers file at mode
    `0600` in a fresh `0700` directory, runs `install-selfhost.sh --env-file`
    on it, and deletes the directory whatever the outcome. The wizard shows
    the installer's output, which ends with the next steps to run on the
-   server.
+   server. The output also goes to the journal, so a browser that left
+   before the install finished loses nothing.
 
 The wizard closes after the first install that writes `.env`, after 60
-minutes, or when the agent stops, whichever comes first. After a successful
-install the token no longer works. To open a new window, run
-`systemctl restart concord-agent`, which prints a new token; once `.env`
+minutes, or when the agent stops, whichever comes first, and the token file
+is removed. An install that writes `.env` and then fails at a later step
+still closes setup, because the installer refuses to run on an existing
+installation; the wizard says so, and the output shows which step failed.
+After that the token no longer works. To open a new window, run
+`systemctl restart concord-agent`, which writes a new token; once `.env`
 exists the agent does not start setup mode at all.
 
 | Setting | Default |
@@ -90,14 +105,20 @@ exists the agent does not start setup mode at all.
 
 Build the wizard pages with `npm --prefix client/admin run build:setup` and
 copy `client/admin/dist-setup/` to the wizard directory. The packaged install
-will ship them.
+will ship them. The page handles the token, so the agent refuses setup mode
+unless the wizard directory, everything in it and every directory above it is
+owned by root and not writable by group or others, with no links inside.
 
 Setup-mode rules:
 
 - Every API call needs `Authorization: Bearer <token>`. The token is 32 random
   bytes and is compared in constant time.
-- After 10 wrong tokens in 10 minutes, from any address, every attempt gets
-  429 for the rest of that window, including the right token.
+- The right token always works. Wrong tokens are counted across all
+  addresses; after 10 in 10 minutes, further wrong tokens get 429 and are no
+  longer logged. A 256-bit token cannot be guessed, so the limit only keeps a
+  flood out of the journal; it never locks out the operator.
+- One preflight runs at a time; a second gets 409. At most 16 connections
+  are open at once.
 - One install runs at a time; a second gets 409. An install may take up to
   10 minutes, and closing the browser does not stop it. Its output is capped
   at 256 KiB, with terminal escapes and control characters removed; output
@@ -172,9 +193,11 @@ is logged to the journal as `action=… outcome=…`, without parameters.
   identifiers. Add only the control-plane container's group to it.
 - **The agent trusts the checkout.** It runs the wrapper as root, and the
   wrapper reads the Compose files and `.env` in the checkout. The agent checks
-  the wrapper's directory and every directory above it. Its own actions only
-  read (`compose ps`, `config`, `logs`), but a writable Compose file elsewhere
-  in the checkout becomes a path to root the next time an operator runs `up`.
+  the wrapper's directory and every directory above it. Its socket actions
+  only read (`compose ps`, `config`, `logs`); setup mode also runs the
+  installer, which writes `.env` and the nginx config in the checkout. A
+  writable Compose file elsewhere in the checkout becomes a path to root the
+  next time an operator runs `up`.
   Keep the whole checkout root-owned.
 - **The `docker` group is already root.** Membership of the `docker` group
   gives root on the host with or without this agent.
@@ -190,8 +213,8 @@ is logged to the journal as `action=… outcome=…`, without parameters.
   group.
 - **Setup wizard on the LAN.** Until the server is installed, anyone on the
   LAN can load the wizard page, but nothing runs without the token, and the
-  token appears only in the root-readable journal. Anyone who can read the
-  journal on an uninstalled host can configure it. Someone on the network
+  token is only in a root-only file. Anyone who can read that file on an
+  uninstalled host can configure it. Someone on the network
   path could intercept the first connection, which is why the fingerprint
   check matters. The wizard can only run the installer's preflight and a
   fresh install; it cannot change an installed server.

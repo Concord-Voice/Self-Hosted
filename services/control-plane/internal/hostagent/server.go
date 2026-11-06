@@ -314,14 +314,16 @@ type limitedBuffer struct {
 	buf      bytes.Buffer
 	max      int
 	overflow bool
-	// keepRunning drops output past max instead of failing the write, so a
-	// command whose run must not be cut short (the installer) is not killed
-	// by a broken pipe.
+	// keepRunning drops all output from the first write past max instead of
+	// failing the write, so a command whose run must not be cut short (the
+	// installer) is not killed by a broken pipe.
 	keepRunning bool
 }
 
 func (b *limitedBuffer) Write(p []byte) (int, error) {
-	if b.buf.Len()+len(p) > b.max {
+	// ponytail: keepRunning cuts at the first overflow and keeps the head; keep
+	// a tail ring too if the installer's closing next steps ever get cut.
+	if b.overflow || b.buf.Len()+len(p) > b.max {
 		b.overflow = true
 		if b.keepRunning {
 			return len(p), nil

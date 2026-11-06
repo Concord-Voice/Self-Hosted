@@ -13,7 +13,10 @@ export interface Preflight {
 }
 
 export interface InstallResult {
+  /** The installer wrote .env; setup is over. */
   ok: boolean;
+  /** It also exited cleanly; false means a later step failed. */
+  clean: boolean;
   output: string;
 }
 
@@ -84,7 +87,8 @@ export function parseInstall(value: unknown): InstallResult {
   ) {
     throw new SetupError(0, "unreadable_response");
   }
-  return { ok: value.ok, output: value.output };
+  const clean = typeof value.clean === "boolean" ? value.clean : value.ok;
+  return { ok: value.ok, clean, output: value.output };
 }
 
 export const setupApi = {

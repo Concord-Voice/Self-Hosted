@@ -95,17 +95,23 @@ export function buildAnswers(form: SetupForm): Answers {
   return answers;
 }
 
+const TOKEN_COMMAND = "sudo cat /run/concord-agent/setup-token";
+
 export function errorMessage(cause: unknown): string {
   if (cause instanceof SetupError) {
     switch (cause.status) {
+      case 400:
+        return "An answer has a line break or a character the installer cannot take. Check the answers and try again.";
       case 401:
-        return "That token is not right. Copy it again from the server's terminal or system journal.";
+        return `That token is not right. On the server, run ${TOKEN_COMMAND} and copy it again.`;
       case 429:
-        return "Too many wrong tokens. Wait 10 minutes, then try again.";
+        return "That token is not right, and many wrong tokens were tried in the last 10 minutes. The right token still works.";
       case 410:
-        return "Setup is already complete on this server.";
+        return "Setup is already complete on this server. The installer's output, with the next steps, is in the server's journal: journalctl -u concord-agent.";
       case 409:
-        return "An install is already running. Wait for it to finish.";
+        return cause.reason === "preflight_running"
+          ? "The checks are already running. Wait for them to finish."
+          : "An install is already running. Wait for it to finish.";
     }
   }
   return "The server could not complete that step. Check the server is still running and try again.";
@@ -136,10 +142,22 @@ export function SetupWizard() {
   const [busy, setBusy] = useState(false);
   const errorRef = useRef<HTMLParagraphElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const panelRef = useRef<HTMLElement>(null);
+  const firstStepRef = useRef(true);
 
   useEffect(() => {
     if (error) errorRef.current?.focus();
   }, [error]);
+
+  // The button that moved the wizard on is gone, so move focus to the new
+  // step's heading and let a screen reader announce it. An error keeps focus.
+  useEffect(() => {
+    if (firstStepRef.current) {
+      firstStepRef.current = false;
+      return;
+    }
+    if (!errorRef.current) panelRef.current?.querySelector("h2")?.focus();
+  }, [step]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
@@ -180,6 +198,9 @@ export function SetupWizard() {
       if (next.ok) setForm(EMPTY_FORM);
     } catch (cause) {
       setError(errorMessage(cause));
+      // A new token (after a restart) is entered on the token step; the
+      // answers stay in the form.
+      if (cause instanceof SetupError && cause.status === 401) setStep("token");
     } finally {
       setBusy(false);
     }
@@ -187,7 +208,11 @@ export function SetupWizard() {
 
   return (
     <main className="app-main setup-main">
-      <section aria-labelledby="setup-title" className="auth-panel setup-panel">
+      <section
+        ref={panelRef}
+        aria-labelledby="setup-title"
+        className="auth-panel setup-panel"
+      >
         <h1 id="setup-title">Set up Concord Voice</h1>
         {error ? (
           <p ref={errorRef} role="alert" className="form-error" tabIndex={-1}>
@@ -202,10 +227,11 @@ export function SetupWizard() {
               void runPreflight(token.trim());
             }}
           >
+            <h2 tabIndex={-1}>Setup token</h2>
             <p className="form-status">
-              Paste the setup token the server printed when it started. Check
-              the certificate fingerprint your browser shows matches the one
-              printed beside it.
+              On the server, run <code>{TOKEN_COMMAND}</code> and paste the
+              token from the address it shows. Check the certificate fingerprint
+              your browser shows matches the one in the server's journal.
             </p>
             <label htmlFor="setup-token">Setup token</label>
             <input
@@ -264,7 +290,7 @@ function ChecksStep({
 }: Readonly<ChecksStepProps>) {
   return (
     <>
-      <h2>Server checks</h2>
+      <h2 tabIndex={-1}>Server checks</h2>
       {preflight ? (
         <ul className="setup-checks">
           {preflight.checks.map((check) => (
@@ -278,9 +304,10 @@ function ChecksStep({
             </li>
           ))}
         </ul>
-      ) : (
+      ) : null}
+      {!preflight && busy ? (
         <output className="form-status">Running checks</output>
-      )}
+      ) : null}
       {preflight && !preflight.ok ? (
         <p className="form-status">
           Fix the failed checks on the server, then check again. The server's
@@ -328,7 +355,7 @@ function AnswersForm({
 
   return (
     <form onSubmit={onSubmit}>
-      <h2>Server address</h2>
+      <h2 tabIndex={-1}>Server address</h2>
       <label htmlFor="setup-domain">Domain (for example example.com)</label>
       <input {...field("domain")} autoComplete="off" required />
       <label htmlFor="setup-publicIp">Public IPv4 address</label>
@@ -439,17 +466,31 @@ interface ResultStepProps {
   onBack: () => void;
 }
 
+function resultText(result: InstallResult): [string, string] {
+  if (!result.ok) {
+    return [
+      "The installer stopped",
+      "Read the installer's message below, fix the answers, and try again.",
+    ];
+  }
+  if (!result.clean) {
+    return [
+      "Concord Voice is configured, but the installer reported an error",
+      "This setup page has closed. The installer saved the settings, then stopped at a later step. Read its message below and finish on the server.",
+    ];
+  }
+  return [
+    "Concord Voice is configured",
+    "This setup page has closed. Finish on the server with the steps below.",
+  ];
+}
+
 function ResultStep({ result, onBack }: Readonly<ResultStepProps>) {
+  const [heading, text] = resultText(result);
   return (
     <>
-      <h2>
-        {result.ok ? "Concord Voice is configured" : "The installer stopped"}
-      </h2>
-      <p className="form-status">
-        {result.ok
-          ? "This setup page has closed. Finish on the server with the steps below."
-          : "Read the installer's message below, fix the answers, and try again."}
-      </p>
+      <h2 tabIndex={-1}>{heading}</h2>
+      <p className="form-status">{text}</p>
       <textarea
         aria-label="Installer output"
         className="server-logs"

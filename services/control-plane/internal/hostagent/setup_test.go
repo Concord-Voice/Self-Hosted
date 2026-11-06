@@ -7,11 +7,13 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -146,13 +148,44 @@ func TestSetupRateLimitsFailedTokens(t *testing.T) {
 			t.Fatalf("got %d", rec.Code)
 		}
 	}
-	// Locked out, even with the right token.
-	if rec := call(s, http.MethodGet, "/api/preflight", tok, ""); rec.Code != http.StatusTooManyRequests {
+	if rec := call(s, http.MethodGet, "/api/preflight", "wrong", ""); rec.Code != http.StatusTooManyRequests {
 		t.Fatalf("lockout: %d", rec.Code)
 	}
-	now = now.Add(setupFailureWindow)
+	// A LAN host flooding wrong tokens cannot shut out the operator.
 	if rec := call(s, http.MethodGet, "/api/preflight", tok, ""); rec.Code != http.StatusOK {
+		t.Fatalf("right token refused during lockout: %d", rec.Code)
+	}
+	if len(s.failures) != setupMaxFailures {
+		t.Fatalf("refused attempts still counted: %d", len(s.failures))
+	}
+	now = now.Add(setupFailureWindow)
+	if rec := call(s, http.MethodGet, "/api/preflight", "wrong", ""); rec.Code != http.StatusUnauthorized {
 		t.Fatalf("after window: %d", rec.Code)
+	}
+}
+
+func TestSetupPreflightRunsOneAtATime(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{})
+	var once sync.Once
+	s, tok := newTestSetup(t, runFunc(func(_ context.Context, _ []string, w io.Writer) error {
+		once.Do(func() { close(started); <-release })
+		_, _ = io.WriteString(w, preflightOK)
+		return exitErr(2) // a failed check still carries the report
+	}))
+	first := make(chan *httptest.ResponseRecorder)
+	go func() { first <- call(s, http.MethodGet, "/api/preflight", tok, "") }()
+	<-started
+	if rec := call(s, http.MethodGet, "/api/preflight", tok, ""); rec.Code != http.StatusConflict ||
+		!strings.Contains(rec.Body.String(), "preflight_running") {
+		t.Fatalf("second preflight: %d %s", rec.Code, rec.Body.String())
+	}
+	close(release)
+	if rec := <-first; rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"schema":1`) {
+		t.Fatalf("first preflight: %d %s", rec.Code, rec.Body.String())
+	}
+	if rec := call(s, http.MethodGet, "/api/preflight", tok, ""); rec.Code != http.StatusOK {
+		t.Fatalf("preflight slot not released: %d", rec.Code)
 	}
 }
 
@@ -181,9 +214,10 @@ func TestSetupInstallWritesPrivateAnswersAndBurnsToken(t *testing.T) {
 	rec := call(s, http.MethodPost, "/api/install", tok, `{"CFG_DOMAIN":"example.com"}`)
 	var res struct {
 		OK     bool   `json:"ok"`
+		Clean  bool   `json:"clean"`
 		Output string `json:"output"`
 	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil || rec.Code != http.StatusOK || !res.OK {
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil || rec.Code != http.StatusOK || !res.OK || !res.Clean {
 		t.Fatalf("install: %d %q", rec.Code, rec.Body.String())
 	}
 	if res.Output != "✓ wrote .env\nnext steps\n" {
@@ -254,9 +288,9 @@ func TestSetupInstallRefusesBadAnswers(t *testing.T) {
 func TestSetupInstallIsExclusive(t *testing.T) {
 	release := make(chan struct{})
 	started := make(chan struct{})
+	var once sync.Once
 	s, tok := newTestSetup(t, runFunc(func(context.Context, []string, io.Writer) error {
-		close(started)
-		<-release
+		once.Do(func() { close(started); <-release })
 		return exitErr(1)
 	}))
 	first := make(chan int)
@@ -269,20 +303,64 @@ func TestSetupInstallIsExclusive(t *testing.T) {
 	if code := <-first; code != http.StatusOK {
 		t.Fatalf("first install: %d", code)
 	}
+	if rec := call(s, http.MethodPost, "/api/install", tok, `{"CFG_DOMAIN":"a"}`); rec.Code != http.StatusOK {
+		t.Fatalf("install slot not released: %d", rec.Code)
+	}
+}
+
+func TestSetupInstallRechecksUsed(t *testing.T) {
+	ran := false
+	s, _ := newTestSetup(t, runFunc(func(context.Context, []string, io.Writer) error { ran = true; return nil }))
+	// As if another install succeeded after this request was authorized.
+	s.used = true
+	rec := httptest.NewRecorder()
+	s.install(rec, httptest.NewRequest(http.MethodPost, "/api/install", strings.NewReader(`{"CFG_DOMAIN":"a"}`)))
+	if rec.Code != http.StatusGone || ran {
+		t.Fatalf("second install ran after the first succeeded: %d ran=%v", rec.Code, ran)
+	}
+}
+
+func TestSetupInstallThatWroteEnvClosesSetupEvenOnError(t *testing.T) {
+	var s *Setup
+	s, tok := newTestSetup(t, runFunc(func(_ context.Context, _ []string, w io.Writer) error {
+		_, _ = io.WriteString(w, "wrote .env\ntls: failed\n")
+		if err := os.WriteFile(s.envPath, []byte("X=1\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return exitErr(1)
+	}))
+	var logs strings.Builder
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	rec := call(s, http.MethodPost, "/api/install", tok, `{"CFG_DOMAIN":"a"}`)
+	if !strings.Contains(rec.Body.String(), `"ok":true`) || !strings.Contains(rec.Body.String(), `"clean":false`) {
+		t.Fatalf("got %s", rec.Body.String())
+	}
+	select {
+	case <-s.Done():
+	default:
+		t.Fatal("setup left open after .env was written")
+	}
+	// The next steps survive a browser that left before the answer.
+	if !strings.Contains(logs.String(), "setup: installer: tls: failed") {
+		t.Fatalf("installer output not logged: %q", logs.String())
+	}
 }
 
 func TestSetupInstallOutputIsCapped(t *testing.T) {
 	s, tok := newTestSetup(t, runFunc(func(_ context.Context, _ []string, w io.Writer) error {
 		// Writes past the cap must succeed, or the installer dies of EPIPE.
-		for range 2 {
-			if _, err := io.WriteString(w, strings.Repeat("x\n", setupMaxOutput/2+1)); err != nil {
+		for _, chunk := range []string{strings.Repeat("x\n", setupMaxOutput/2+1), strings.Repeat("x\n", setupMaxOutput/2+1), "after the cut\n"} {
+			if _, err := io.WriteString(w, chunk); err != nil {
 				t.Errorf("write past the cap failed: %v", err)
 			}
 		}
 		return exitErr(1)
 	}))
 	rec := call(s, http.MethodPost, "/api/install", tok, `{"CFG_DOMAIN":"a"}`)
-	if rec.Body.Len() > setupMaxOutput+1024 || !strings.Contains(rec.Body.String(), "output incomplete") {
+	// Output stops at the first overflow, so the marker is a clean cut.
+	if rec.Body.Len() > setupMaxOutput+1024 || !strings.Contains(rec.Body.String(), "output incomplete") ||
+		strings.Contains(rec.Body.String(), "after the cut") {
 		t.Fatalf("output not capped: %d bytes", rec.Body.Len())
 	}
 }
