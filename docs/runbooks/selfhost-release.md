@@ -1,8 +1,10 @@
 # Self-Host Release Build
 
 This runbook covers building and attesting a self-host bundle. Pushing a tag
-does not publish anything: publication still needs the fresh-host acceptance
-in [selfhost-public-acceptance.md](selfhost-public-acceptance.md).
+does not publish anything. A published release is not a supported install
+until it passes the fresh-host acceptance in
+[selfhost-public-acceptance.md](selfhost-public-acceptance.md): v0.3.0 was
+published before that acceptance, so its docs say install is unsupported.
 
 ## What the tag builds
 
@@ -29,11 +31,12 @@ The workflow holds no credential and never creates a release.
 1. Merge the `VERSION` change and its `CHANGELOG.md` section to `main`.
 2. Tag that `main` commit, for example
    `git tag -s "v$(tr -d '[:space:]' < VERSION)" <sha>`, and push the tag.
-3. The Release Trigger App reports the successful run to Release-Ops.
-   Release-Ops `verify.yml` checks each file's attestation against this
-   workflow at the tag and SHA, then opens an **unsigned draft** release.
-4. Release-Ops `sign-selfhost.yml` fails closed until its signing steps exist.
-   Do not publish the draft until fresh-host acceptance has passed.
+3. The Release Trigger App reports the successful run to the release
+   pipeline, which checks each file's attestation against this workflow at
+   the tag and SHA, then opens an **unsigned draft** release.
+4. The pipeline's signing step fails closed until its signing steps exist.
+   A release published before fresh-host acceptance must say in its docs and
+   notes that installing it is not supported.
 
 ## Checking a bundle by hand
 
@@ -42,7 +45,9 @@ git archive --format=tar <sha> | tar -x -C /tmp/tree
 python3 scripts/release/selfhost-bundle.py verify --public-tree /tmp/tree \
   --archive concord-selfhost-<version>.tar.gz \
   --manifest selfhost-manifest.json --sums SHA256SUMS
-gh attestation verify concord-selfhost-<version>.tar.gz --repo Concord-Voice/Self-Hosted
+gh attestation verify concord-selfhost-<version>.tar.gz --repo Concord-Voice/Self-Hosted \
+  --signer-workflow Concord-Voice/Self-Hosted/.github/workflows/release.yml \
+  --source-ref refs/tags/v<version>
 ```
 
 ## Failures
