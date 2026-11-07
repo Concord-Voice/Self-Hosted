@@ -15,8 +15,10 @@ import {
 import { decodeRequestOptions, encodeAssertion } from "./webauthn";
 
 // The Server routes share 30 requests a minute; the runbook says poll a job
-// no faster than every 5 seconds.
+// no faster than every 5 seconds. The jobs list is checked every 30 seconds
+// so a job started in another tab or by another admin locks the buttons.
 const POLL_MS = 5000;
+const JOBS_EVERY = 6;
 
 const ACTION_LABELS: Record<WriteAction, string> = {
   start: "Start",
@@ -45,6 +47,10 @@ const REFUSALS: Record<string, string> = {
   untrusted_backups:
     "The backups folder is not owned by root, so the agent will not read it.",
   unknown_archive: "That backup is no longer in the backups folder.",
+  unknown_job: "The host agent no longer knows that action.",
+  appliance_managed:
+    "An appliance runs this server's containers, so this console only reads.",
+  rate_limited: "Too many requests. Wait a minute, then try again.",
   invalid_tag: "Enter a release tag such as v0.3.1.",
   invalid_archive: "Choose a backup from the list.",
 };
@@ -77,6 +83,12 @@ function describe(
   return "The security key could not be used. Start again.";
 }
 
+// Worth asking again: rate limits, a busy or restarting agent, a dropped
+// connection.
+const transient = (error: unknown) =>
+  error instanceof ApiError &&
+  (error.status === 0 || error.status === 429 || error.status === 503);
+
 const formatTime = (iso: string) => new Date(iso).toLocaleString();
 const formatSize = (bytes: number) =>
   bytes >= 1 << 30
@@ -98,44 +110,56 @@ export function ServerActions({
   const [archive, setArchive] = useState("");
   const pollRef = useRef<number | null>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const followRef = useRef<AbortController | null>(null);
 
   const refresh = useCallback(async () => {
     abortRef.current?.abort();
     const controller = new AbortController();
     abortRef.current = controller;
-    try {
-      const [nextJobs, nextBackups] = await Promise.all([
-        serverWriteApi.jobs(controller.signal),
-        serverWriteApi.backups(controller.signal),
-      ]);
-      if (controller.signal.aborted) return;
-      setJobs(nextJobs);
-      setBackups(nextBackups);
-      setArchive((chosen) =>
-        nextBackups.some((b) => b.name === chosen)
-          ? chosen
-          : (nextBackups[0]?.name ?? ""),
-      );
-    } catch (cause) {
-      if (controller.signal.aborted) return;
-      if (cause instanceof ServerRequestError && cause.appliance) {
-        setAppliance(cause.appliance);
-        return;
-      }
-      setError(describe(cause, onSessionError));
+    // Each list stands alone: an untrusted backups folder must not hide a
+    // running job.
+    const [nextJobs, nextBackups] = await Promise.allSettled([
+      serverWriteApi.jobs(controller.signal),
+      serverWriteApi.backups(controller.signal),
+    ]);
+    if (controller.signal.aborted) return;
+    const failures = [nextJobs, nextBackups].flatMap((result) =>
+      result.status === "rejected" ? [result.reason as unknown] : [],
+    );
+    const managed = failures.find(
+      (cause) => cause instanceof ServerRequestError && cause.appliance,
+    ) as ServerRequestError | undefined;
+    if (managed?.appliance) {
+      setAppliance(managed.appliance);
+      return;
     }
+    if (nextJobs.status === "fulfilled") setJobs(nextJobs.value);
+    if (nextBackups.status === "fulfilled") {
+      const list = nextBackups.value;
+      setBackups(list);
+      setArchive((chosen) =>
+        list.some((b) => b.name === chosen) ? chosen : (list[0]?.name ?? ""),
+      );
+    }
+    if (failures.length > 0) setError(describe(failures[0], onSessionError));
   }, [onSessionError]);
 
   // Follows one job until it ends, then refreshes the lists.
   const follow = useCallback(
     (id: string) => {
+      const signal = followRef.current?.signal;
+      const again = (ms: number) => {
+        pollRef.current = globalThis.setTimeout(() => void tick(), ms);
+      };
       const tick = async () => {
         pollRef.current = null;
         try {
-          const job = await serverWriteApi.job(id);
+          const job = await serverWriteApi.job(id, signal);
+          if (signal?.aborted) return;
           setCurrent(job);
+          setJobs((list) => list.map((j) => (j.id === job.id ? job : j)));
           if (job.state === "running") {
-            pollRef.current = globalThis.setTimeout(() => void tick(), pollMs);
+            again(pollMs);
             return;
           }
           setStatus(
@@ -145,6 +169,12 @@ export function ServerActions({
           );
           void refresh();
         } catch (cause) {
+          if (signal?.aborted) return;
+          if (transient(cause)) {
+            const wait = (cause as ApiError).retryAfter ?? 0;
+            again(Math.max(pollMs * 2, wait * 1000));
+            return;
+          }
           setError(describe(cause, onSessionError));
         }
       };
@@ -154,12 +184,24 @@ export function ServerActions({
   );
 
   useEffect(() => {
+    followRef.current = new AbortController();
+    return () => {
+      followRef.current?.abort();
+      if (pollRef.current !== null) globalThis.clearTimeout(pollRef.current);
+      pollRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
     void refresh();
+    const timer = globalThis.setInterval(() => {
+      if (pollRef.current === null) void refresh();
+    }, pollMs * JOBS_EVERY);
     return () => {
       abortRef.current?.abort();
-      if (pollRef.current !== null) globalThis.clearTimeout(pollRef.current);
+      globalThis.clearInterval(timer);
     };
-  }, [refresh]);
+  }, [refresh, pollMs]);
 
   // A job started elsewhere (another tab or admin) is followed too.
   const running = jobs.find((job) => job.state === "running");
@@ -197,7 +239,17 @@ export function ServerActions({
       follow(job.id);
     } catch (cause) {
       setStatus("");
+      if (cause instanceof ServerRequestError && cause.appliance) {
+        setAppliance(cause.appliance);
+        return;
+      }
       setError(describe(cause, onSessionError));
+      // Someone else started a job: load it so the buttons lock.
+      if (
+        cause instanceof ServerRequestError &&
+        cause.code === "write_in_progress"
+      )
+        void refresh();
     } finally {
       setBusy(false);
     }
@@ -223,7 +275,7 @@ export function ServerActions({
     );
   }
 
-  const locked = busy || running !== undefined;
+  const locked = busy || running !== undefined || current?.state === "running";
   const validTag = UPDATE_TAG.test(tag);
 
   return (

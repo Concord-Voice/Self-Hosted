@@ -266,9 +266,16 @@ func (s *ServerArea) startJob(c *gin.Context, action string, detail map[string]a
 	}
 	if resp.StatusCode != http.StatusAccepted {
 		var refusal struct {
-			Error string `json:"error"`
+			Error     string `json:"error"`
+			Appliance string `json:"appliance"`
 		}
 		if json.Unmarshal(body, &refusal) == nil && agentRefusals[refusal.Error] && resp.StatusCode >= 400 && resp.StatusCode < 600 {
+			if refusal.Error == "appliance_managed" && applianceNames[refusal.Appliance] {
+				// The panel needs the name to point at the appliance's own UI.
+				s.recordWrite(c, detail, AuditFailure, refusal.Error)
+				c.JSON(resp.StatusCode, gin.H{"error": refusal.Error, "appliance": refusal.Appliance})
+				return
+			}
 			s.writeFail(c, detail, resp.StatusCode, refusal.Error)
 			return
 		}

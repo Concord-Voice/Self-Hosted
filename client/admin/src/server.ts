@@ -162,8 +162,9 @@ export class ServerRequestError extends ApiError {
     status: number,
     public readonly code: string | null,
     public readonly appliance: Appliance | null = null,
+    retryAfterSeconds: number | null = null,
   ) {
-    super(status, null);
+    super(status, retryAfterSeconds);
     this.name = "ServerRequestError";
   }
 }
@@ -201,6 +202,7 @@ export function parseServerBackups(value: unknown): ServerBackup[] {
         typeof item.name === "string" &&
         ARCHIVE.test(item.name) &&
         Number.isInteger(item.size) &&
+        (item.size as number) >= 0 &&
         isTime(item.modified),
     );
     return item as unknown as ServerBackup;
@@ -239,7 +241,12 @@ async function send(
       isRecord(value) && Object.hasOwn(APPLIANCES, String(value.appliance))
         ? (value.appliance as Appliance)
         : null;
-    throw new ServerRequestError(response.status, code, appliance);
+    throw new ServerRequestError(
+      response.status,
+      code,
+      appliance,
+      retryAfter(response.headers.get("Retry-After")),
+    );
   }
   return value;
 }

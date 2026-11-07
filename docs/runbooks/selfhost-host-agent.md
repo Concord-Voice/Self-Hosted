@@ -133,7 +133,9 @@ The Server page's Actions panel uses these routes. It has buttons for start,
 stop, restart and back up, a release-tag field for update and a backup picker
 for restore. It asks for the security key before the four step-up actions,
 follows the running job every 5 seconds, shows its output and lists recent
-jobs. While a job runs, from any tab or admin, the buttons are disabled. On an
+jobs. While a job runs the buttons are disabled. The panel checks the jobs list
+every 30 seconds, so a job started in another tab or by another admin locks
+them too. A rate-limited or failed poll is retried; it does not drop the job. On an
 appliance-managed host the panel says to use the appliance's own UI and shows
 no buttons.
 

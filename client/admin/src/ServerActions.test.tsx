@@ -102,6 +102,88 @@ describe("ServerActions", () => {
     expect(get).not.toHaveBeenCalled();
   });
 
+  it("locks the buttons while its own job runs and rides out a rate limit", async () => {
+    lists();
+    let polls = 0;
+    server.use(
+      http.post(`${base}/actions/backup`, () =>
+        HttpResponse.json(job("running"), { status: 202 }),
+      ),
+      http.get(`${base}/jobs/${id}`, () => {
+        polls += 1;
+        if (polls === 1) return HttpResponse.json(job("running"));
+        if (polls === 2)
+          return HttpResponse.json({ error: "rate_limited" }, { status: 429 });
+        return HttpResponse.json(job("succeeded", { finished: started }));
+      }),
+    );
+    const { onSessionError } = renderActions();
+    await userEvent
+      .setup()
+      .click(await screen.findByRole("button", { name: "Back up now" }));
+    expect(await screen.findByText("Back up: running")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Start" })).toBeDisabled();
+    expect(await screen.findByText("Back up: succeeded")).toBeVisible();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Start" })).toBeEnabled(),
+    );
+    expect(onSessionError).not.toHaveBeenCalled();
+  });
+
+  it("still loads jobs when the backups folder is untrusted", async () => {
+    server.use(
+      http.get(`${base}/jobs`, () =>
+        HttpResponse.json({ jobs: [job("running")] }),
+      ),
+      http.get(`${base}/backups`, () =>
+        HttpResponse.json({ error: "untrusted_backups" }, { status: 409 }),
+      ),
+      http.get(`${base}/jobs/${id}`, () => HttpResponse.json(job("running"))),
+    );
+    renderActions();
+    expect(
+      await screen.findByText(/backups folder is not owned by root/),
+    ).toBeVisible();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: "Start" })).toBeDisabled(),
+    );
+  });
+
+  it("notices a job another admin starts later", async () => {
+    let calls = 0;
+    server.use(
+      http.get(`${base}/jobs`, () => {
+        calls += 1;
+        return HttpResponse.json({ jobs: calls > 1 ? [job("running")] : [] });
+      }),
+      http.get(`${base}/backups`, () => HttpResponse.json({ backups: [] })),
+      http.get(`${base}/jobs/${id}`, () => HttpResponse.json(job("running"))),
+    );
+    renderActions();
+    const start = await screen.findByRole("button", { name: "Start" });
+    expect(start).toBeEnabled();
+    await waitFor(() => expect(start).toBeDisabled());
+  });
+
+  it("turns read-only when a write finds an appliance", async () => {
+    lists();
+    server.use(
+      http.post(`${base}/actions/start`, () =>
+        HttpResponse.json(
+          { error: "appliance_managed", appliance: "truenas" },
+          { status: 409 },
+        ),
+      ),
+    );
+    renderActions();
+    await userEvent
+      .setup()
+      .click(await screen.findByRole("button", { name: "Start" }));
+    expect(
+      await screen.findByText(/TrueNAS runs this server's containers/),
+    ).toBeVisible();
+  });
+
   it("asks for the security key before a restore and sends the assertion", async () => {
     lists([], [{ name: archive, size: 3 << 20, modified: started }]);
     let stepUpBody: unknown;
@@ -278,11 +360,13 @@ describe("server write parsers", () => {
         backups: [{ name: "x", size: 1, modified: started }],
       }),
     ).toThrow();
-    expect(() =>
-      parseServerBackups({
-        backups: [{ name: archive, size: 1.5, modified: started }],
-      }),
-    ).toThrow();
+    for (const size of [1.5, -1]) {
+      expect(() =>
+        parseServerBackups({
+          backups: [{ name: archive, size, modified: started }],
+        }),
+      ).toThrow();
+    }
     expect(() => parseServerBackups({})).toThrow();
     expect(() => parseServerJobs({})).toThrow();
   });

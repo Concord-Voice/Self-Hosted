@@ -136,6 +136,8 @@ func TestServerActionRelaysAgentRefusals(t *testing.T) {
 	}{
 		{http.StatusConflict, `{"error":"write_in_progress"}`, http.StatusConflict, "write_in_progress"},
 		{http.StatusConflict, `{"error":"security_log_boundary_missing"}`, http.StatusConflict, "security_log_boundary_missing"},
+		{http.StatusConflict, `{"appliance":"truenas","error":"appliance_managed"}`, http.StatusConflict, "appliance_managed"},
+		{http.StatusConflict, `{"appliance":"<script>","error":"appliance_managed"}`, http.StatusConflict, "appliance_managed"},
 		{http.StatusConflict, `{"error":"<script>"}`, http.StatusBadGateway, "agent_error"},
 		{http.StatusInternalServerError, `nope`, http.StatusBadGateway, "agent_error"},
 		{http.StatusAccepted, `{"id":"short"}`, http.StatusBadGateway, "agent_error"},
@@ -146,6 +148,13 @@ func TestServerActionRelaysAgentRefusals(t *testing.T) {
 		rec := send(writeEngine(sock, audit), "/server/actions/backup", "")
 		if rec.Code != tc.want || !strings.Contains(rec.Body.String(), tc.reason) {
 			t.Errorf("%s: got %d %s", tc.body, rec.Code, rec.Body)
+		}
+		if strings.Contains(rec.Body.String(), "<script>") {
+			t.Errorf("%s: relayed %s", tc.body, rec.Body)
+		}
+		// Only a known appliance name is passed on to the panel.
+		if named := strings.Contains(rec.Body.String(), `"appliance":"truenas"`); named != strings.Contains(tc.body, "truenas") {
+			t.Errorf("%s: appliance relay %s", tc.body, rec.Body)
 		}
 		ev := audit.events[len(audit.events)-1]
 		if ev.Result != AuditFailure || ev.Detail["reason"] != tc.reason {
