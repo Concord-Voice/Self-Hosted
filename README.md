@@ -87,7 +87,7 @@ Report a vulnerability by email to security@concordvoice.com. Do not open a publ
 
 ## Contributing
 
-We welcome help. Read the [contributing guide](./.github/CONTRIBUTING.md) and the [code of conduct](./.github/CODE_OF_CONDUCT.md) before you open a pull request. Report bugs and request features in our [feedback repository](https://github.com/Concord-Voice/Concord-Voice/issues).
+We welcome help. Read the [contributing guide](./.github/CONTRIBUTING.md) and the [code of conduct](./.github/CODE_OF_CONDUCT.md) before you open a pull request. Report bugs and request features in our [feedback repository](https://github.com/Concord-Voice/Feedback/issues).
 
 ---
 
