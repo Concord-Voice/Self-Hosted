@@ -40,6 +40,8 @@ function agentUp() {
   server.use(
     http.get(`${base}/status`, () => HttpResponse.json(statusBody)),
     http.get(`${base}/health`, () => HttpResponse.json(healthBody)),
+    http.get(`${base}/jobs`, () => HttpResponse.json({ jobs: [] })),
+    http.get(`${base}/backups`, () => HttpResponse.json({ backups: [] })),
   );
 }
 

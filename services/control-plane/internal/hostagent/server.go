@@ -57,7 +57,8 @@ type Server struct {
 	run       Runner
 	inFlight  chan struct{}
 	followers chan struct{}
-	writes    *jobs // nil unless EnableWrites was called
+	writes    *jobs  // nil unless EnableWrites was called
+	managedBy string // an appliance that owns writes; see SetManagedBy
 	// writeGrace is how long past an action's budget a response may take to
 	// write before the connection is cut.
 	writeGrace time.Duration
@@ -79,7 +80,15 @@ func NewServer(r Runner) *Server {
 // their jobs; everything else is refused here, whatever the proxy in front
 // allowed.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if s.managedBy != "" && writePath(r.URL.Path) {
+		s.refuseManaged(w)
+		return
+	}
 	if s.writes != nil {
+		if r.URL.Path == "/v1/backups" {
+			s.handleBackups(w, r)
+			return
+		}
 		if action, ok := strings.CutPrefix(r.URL.Path, "/v1/actions/"); ok && !strings.Contains(action, "/") {
 			s.handleWrite(w, r, action)
 			return

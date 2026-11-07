@@ -56,6 +56,7 @@ var agentRefusals = map[string]bool{
 	"invalid_body": true, "untrusted_backups": true, "unknown_archive": true,
 	"security_log_boundary_missing": true, "job_unavailable": true,
 	"write_in_progress": true, "unknown_action": true, "unknown_job": true,
+	"appliance_managed": true,
 }
 
 type serverStepUp struct {
@@ -184,6 +185,9 @@ func serverActionArgs(action string, req serverActionRequest) (map[string]string
 // ServerJobs returns the agent's recent jobs.
 func (s *ServerArea) ServerJobs(c *gin.Context) { s.proxyJSON(c, "jobs", "/v1/jobs") }
 
+// ServerBackups lists the archives restore accepts.
+func (s *ServerArea) ServerBackups(c *gin.Context) { s.proxyJSON(c, "backups", "/v1/backups") }
+
 // ServerJob returns one job by id.
 func (s *ServerArea) ServerJob(c *gin.Context) {
 	id := c.Param("id")
@@ -214,6 +218,10 @@ func (s *ServerArea) proxyJob(c *gin.Context, id string) {
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		s.fail(c, "job", "", http.StatusNotFound, "unknown_job")
+		return
+	}
+	if resp.StatusCode == http.StatusConflict {
+		s.agentConflict(c, "job", "", bytes.NewReader(body))
 		return
 	}
 	if resp.StatusCode != http.StatusOK {

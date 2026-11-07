@@ -126,6 +126,9 @@ func (s *ServerArea) fetch(c *gin.Context, action, service, path string, limit i
 	case resp.StatusCode == http.StatusTooManyRequests:
 		s.fail(c, action, service, http.StatusTooManyRequests, "agent_busy")
 		return nil, false
+	case resp.StatusCode == http.StatusConflict:
+		s.agentConflict(c, action, service, resp.Body)
+		return nil, false
 	case resp.StatusCode != http.StatusOK:
 		s.fail(c, action, service, http.StatusBadGateway, "agent_error")
 		return nil, false
@@ -137,6 +140,29 @@ func (s *ServerArea) fetch(c *gin.Context, action, service, path string, limit i
 	}
 	s.record(c, action, service, AuditSuccess, "")
 	return body, true
+}
+
+// applianceNames are the appliances the agent can report, passed through
+// so the console can point at the right UI.
+var applianceNames = map[string]bool{"truenas": true}
+
+// agentConflict relays the agent's 409 refusals the console acts on: an
+// appliance-managed host and a backups folder it will not trust.
+func (s *ServerArea) agentConflict(c *gin.Context, action, service string, r io.Reader) {
+	var refusal struct {
+		Error     string `json:"error"`
+		Appliance string `json:"appliance"`
+	}
+	_ = json.NewDecoder(io.LimitReader(r, 1<<10)).Decode(&refusal)
+	switch {
+	case refusal.Error == "appliance_managed" && applianceNames[refusal.Appliance]:
+		s.record(c, action, service, AuditFailure, refusal.Error)
+		c.JSON(http.StatusConflict, gin.H{"error": refusal.Error, "appliance": refusal.Appliance})
+	case refusal.Error == "untrusted_backups":
+		s.fail(c, action, service, http.StatusConflict, refusal.Error)
+	default:
+		s.fail(c, action, service, http.StatusBadGateway, "agent_error")
+	}
 }
 
 func (s *ServerArea) fail(c *gin.Context, action, service string, code int, reason string) {

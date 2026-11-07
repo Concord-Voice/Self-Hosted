@@ -213,7 +213,8 @@ code,
 .auth-panel input,
 .settings-dialog input,
 .settings-dialog select,
-.series-controls select {
+.series-controls select,
+.series-controls input {
   width: 100%;
   min-height: 42px;
   padding: 8px 10px;
@@ -1341,4 +1342,22 @@ td .status {
   margin: 0;
   padding: 0;
   list-style: none;
+}
+
+.server-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.server-help {
+  margin: 6px 0 16px;
+  color: var(--muted-strong);
+  font-size: 0.875rem;
+}
+
+.server-actions-output,
+.server-actions-jobs {
+  margin-top: 16px;
 }

@@ -813,7 +813,10 @@ user-verified WebAuthn assertion from `POST /server/stepup`, bound to the admin
 and the action and usable once within 2 minutes. Every attempt writes a
 `server_write` audit row and a privileged-action security event; the row asking
 for the action is written before the agent is called, and the call is refused
-if it cannot be.
+if it cannot be. `GET /server/backups` lists the archives restore accepts. The Server
+page's Actions panel drives all of this. With `CONCORD_AGENT_MANAGED_BY=truenas`
+the agent refuses writes, jobs and backups with 409 `appliance_managed`, and
+the panel points to the appliance's UI instead.
 
 **Self-hosted setup wizard (#187):** on a host with no `.env`, the Concord Host
 Agent also listens on TCP 9443 with a fresh self-signed ECDSA P-384 certificate
