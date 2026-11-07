@@ -42,8 +42,6 @@ import (
 	"net/http"
 
 	"github.com/gin-gonic/gin"
-
-	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
 )
 
 // ErrMsgVerificationFailed is the opaque 500 body. Byte-identical to the DM
@@ -228,7 +226,15 @@ type Copy struct {
 // Order matters: the no-factor branch is evaluated BEFORE the
 // missing-input branch, because an empty stored hash is not the same thing as
 // an actor who simply supplied nothing.
-func VerifyPasswordFactor(subj Subject, currentPassword string, wording Copy) *Error {
+//
+// A supplied password is one guess against the account's shared /auth/login
+// lockout (see password_attempt.go): attempt must have been reserved for this
+// account BEFORE the caller's transaction opened. This function makes no Redis
+// call, so it is safe under a row lock; it notes the outcome on attempt, and
+// the caller records a wrong guess after the transaction ends and clears the
+// count only after a verified success. An unreserved attempt with a supplied
+// password is a 500, never a check: a guess that was not counted is refused.
+func VerifyPasswordFactor(attempt *PasswordAttempt, subj Subject, currentPassword string, wording Copy) *Error {
 	if subj.PasswordHash == "" {
 		if !subj.MFAEnabled {
 			return &Error{Status: http.StatusBadRequest, Body: gin.H{"error": wording.NoFactors}}
@@ -241,24 +247,29 @@ func VerifyPasswordFactor(subj Subject, currentPassword string, wording Copy) *E
 			"error": wording.CredentialRequired, "password_required": true,
 		}}
 	}
-	match, err := auth.VerifyPassword(currentPassword, subj.PasswordHash)
+	match, err := attempt.Check(currentPassword, subj.PasswordHash)
 	if err != nil {
-		// The underlying error is DISCARDED, not wrapped. An argon2 decode
-		// failure can embed the malformed hash it could not parse, and a
-		// password hash may reach no log sink in any form
-		// ([internal]rules/observability.md Core principle #1). The sentinel
-		// names the stage that broke and carries nothing derived from the
-		// credential — enough to tell this 500 apart from the other two.
-		return &Error{
-			Status: http.StatusInternalServerError,
-			Body:   gin.H{"error": ErrMsgVerificationFailed},
-			Cause:  ErrPasswordVerification,
-		}
+		// err is ErrPasswordNotReserved or ErrPasswordVerification: Check
+		// DISCARDS the argon2 decode error, which can embed the malformed hash
+		// it could not parse, and a password hash may reach no log sink in any
+		// form ([internal]rules/observability.md Core principle #1). Each
+		// sentinel names the stage that broke and carries nothing derived from
+		// the credential.
+		return verificationFailed(err)
 	}
 	if !match {
 		return &Error{Status: http.StatusForbidden, Body: gin.H{"error": ErrMsgInvalidPassword}}
 	}
 	return nil
+}
+
+// LockedError is the 423 every password step-up answers while the account's
+// shared /auth/login lockout is engaged: the mint endpoint's body, so the
+// client parses one shape.
+func LockedError() *Error {
+	return &Error{Status: http.StatusLocked, Body: gin.H{
+		"error": ErrMsgStepUpLocked, "error_code": errCodeAccountLocked,
+	}}
 }
 
 // VerifyMFAFactor checks the MFA half outside a transaction. Only call when the

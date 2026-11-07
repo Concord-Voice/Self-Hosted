@@ -114,7 +114,7 @@ func TestIsP1Write(t *testing.T) {
 //     places that use it, recursively: the callers of a helper function, or the
 //     users of a package-level const or var. This is what attributes the two
 //     disable DELETEs, which live in verifyAndDeleteTOTPTx and
-//     verifyAndDeleteWebAuthnTx, to TOTPDisable and WebAuthnDeleteCredential,
+//     deleteWebAuthnTx, to TOTPDisable and WebAuthnDeleteCredential,
 //     whose transactions they run on. It fails closed: an owner with no use in
 //     the package (an HTTP handler, say) stays in the set, and so does a helper
 //     that is referenced without being called (a method value, which could run

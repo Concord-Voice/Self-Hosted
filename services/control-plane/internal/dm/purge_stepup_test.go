@@ -19,7 +19,9 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -98,7 +100,7 @@ func TestVerifyPurgeStepUp_SubjectLoadFailureIs500(t *testing.T) {
 // not a raw 500 (review finding S1), and the bytes must not drift — the desktop
 // client discriminates on them by string.
 func TestPurgeStepUpCopy_PasswordlessWithoutMFAIsActionable400(t *testing.T) {
-	err := stepup.VerifyPasswordFactor(
+	err := stepup.VerifyPasswordFactor(nil,
 		stepup.Subject{PasswordHash: "", MFAEnabled: false}, "", purgeStepUpCopy)
 
 	require.NotNil(t, err)
@@ -114,7 +116,7 @@ func TestPurgeStepUpCopy_PasswordlessWithoutMFAIsActionable400(t *testing.T) {
 func TestPurgeStepUpCopy_MissingPasswordIs403(t *testing.T) {
 	const truncatedHash = "$argon2id$vali"
 
-	err := stepup.VerifyPasswordFactor(
+	err := stepup.VerifyPasswordFactor(nil,
 		stepup.Subject{PasswordHash: truncatedHash}, "", purgeStepUpCopy)
 
 	require.NotNil(t, err)
@@ -131,6 +133,10 @@ func TestPurgeStepUpCopy_CorrectPasswordWithoutMFAPasses(t *testing.T) {
 	hash, hashErr := auth.HashPassword(plaintext)
 	require.NoError(t, hashErr)
 
-	assert.Nil(t, stepup.VerifyPasswordFactor(
+	rdb := redis.NewClient(&redis.Options{Addr: miniredis.RunT(t).Addr()})
+	attempt, rErr := stepup.ReservePasswordAttempt(context.Background(), rdb, "purge-stepup@example.test", plaintext)
+	require.Nil(t, rErr)
+
+	assert.Nil(t, stepup.VerifyPasswordFactor(attempt,
 		stepup.Subject{PasswordHash: hash, MFAEnabled: false}, plaintext, purgeStepUpCopy))
 }
