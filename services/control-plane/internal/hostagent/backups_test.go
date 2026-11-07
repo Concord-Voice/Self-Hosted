@@ -44,10 +44,12 @@ func TestBackupListMissingFolderIsEmptyAndUntrustedIsRefused(t *testing.T) {
 	if rec := get(t, s, http.MethodGet, "/v1/backups"); rec.Code != http.StatusOK || rec.Body.String() != "{\"backups\":[]}\n" {
 		t.Fatalf("missing: got %d %s", rec.Code, rec.Body)
 	}
-	if err := os.Chmod(dir, 0o777); err != nil {
+	// A symlink in place of the folder is refused, as restore refuses it.
+	link := filepath.Join(t.TempDir(), "backups")
+	if err := os.Symlink(dir, link); err != nil {
 		t.Fatal(err)
 	}
-	s.writes.backups = dir
+	s.writes.backups = link
 	if rec := get(t, s, http.MethodGet, "/v1/backups"); rec.Code != http.StatusConflict {
 		t.Fatalf("untrusted: got %d %s", rec.Code, rec.Body)
 	}
