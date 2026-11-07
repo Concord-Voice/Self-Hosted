@@ -127,6 +127,18 @@ describe("ServerWorkspace", () => {
     expect(screen.queryByRole("rowheader", { name: "postgres" })).toBeNull();
   });
 
+  it("rejects a status answer of the wrong shape", async () => {
+    agentUp();
+    server.use(
+      http.get(`${base}/status`, () => HttpResponse.json({ schema: 2 })),
+    );
+    renderWorkspace();
+    expect(
+      await screen.findByText(/could not answer this request/),
+    ).toBeVisible();
+    expect(screen.queryByRole("rowheader", { name: "postgres" })).toBeNull();
+  });
+
   it("maps container states to status", async () => {
     const service = statusBody.services[0];
     server.use(

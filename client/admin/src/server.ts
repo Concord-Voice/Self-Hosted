@@ -97,7 +97,7 @@ async function getJSON<T>(
   } catch {
     throw new ApiContractError();
   }
-  return value;
+  return parse(value);
 }
 
 export const serverApi = {
