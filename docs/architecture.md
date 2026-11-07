@@ -229,7 +229,7 @@ rather than shipped unwired.
 
 SPA serving stays decoupled from the Go control-plane. Self-Hosted defaults to the desktop's bundled renderer; it does not deploy or enable a hosted Cloudflare Pages stream. Operators may configure compatible Stable and Pre-Release remote streams through the [control-plane discovery settings](../services/control-plane/README.md#remote-spa-discovery). The desktop bundle stays decoupled from its serving origin at build time: Vite's `base: './'` makes every chunk resolve relative to the URL that loaded `index.html`.
 
-Hosted publishing belongs to Release-Ops. This repository supplies public discovery of operator-configured streams, not a publishing pipeline. `SPA_VERSION` and `SPA_PRERELEASE_VERSION` are optional internal audit annotations and grant no publisher authority.
+Hosted publishing belongs to a separate release pipeline. This repository supplies public discovery of operator-configured streams, not a publishing pipeline. `SPA_VERSION` and `SPA_PRERELEASE_VERSION` are optional internal audit annotations and grant no publisher authority.
 
 Five invariants enforce the contract:
 

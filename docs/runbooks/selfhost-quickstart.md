@@ -1,8 +1,8 @@
 # Self-host release guidance
 
-Self-host releases are published on the [Self-Hosted releases page](https://github.com/Concord-Voice/Self-Hosted/releases). [v0.3.0](https://github.com/Concord-Voice/Self-Hosted/releases/tag/v0.3.0) is published with its bundle, manifest and `SHA256SUMS`, and each file carries a build attestation you can check with `gh attestation verify <file> --repo Concord-Voice/Self-Hosted`. It has no supported install procedure yet: fresh-host acceptance ([#74](https://github.com/Concord-Voice/Self-Hosted/issues/74)) has not passed, so installation and an install link are unavailable.
+Self-host releases are published on the [Self-Hosted releases page](https://github.com/Concord-Voice/Self-Hosted/releases). [v0.3.0](https://github.com/Concord-Voice/Self-Hosted/releases/tag/v0.3.0) is published with its bundle, manifest and `SHA256SUMS`, and each file carries a build attestation you can check with `gh attestation verify <file> --repo Concord-Voice/Self-Hosted --signer-workflow Concord-Voice/Self-Hosted/.github/workflows/release.yml --source-ref refs/tags/v0.3.0`. It has no supported install procedure yet: fresh-host acceptance ([#74](https://github.com/Concord-Voice/Self-Hosted/issues/74)) has not passed, so installation and an install link are unavailable. The `install-selfhost.sh` inside the v0.3.0 bundle is not a supported install path.
 
-Use the operator guide retained with the selected verified immutable release tag and archive. This ordinary snapshot provides availability guidance; it does not announce a release or provide an installation procedure.
+Once a release passes fresh-host acceptance, use the operator guide retained with that release's immutable tag and archive. No release, v0.3.0 included, qualifies yet, so the "selected verified release guide" sections below do not apply to any published release. This ordinary snapshot provides availability guidance; it does not announce a release or provide an installation procedure.
 
 ## Requirements
 

@@ -56,7 +56,7 @@ Android.
 - **Authentication:** Added dormant SQL receipt accounting for future separate step-up attempt budgets. Current request handling and attempt budgets are unchanged.
 - **Authentication:** Added a private process proof-work tracker for future step-up cutovers. Current request handling remains unchanged.
 - **Self-hosting:** Operators can set separate minimum app versions for iOS and Android with `CLIENT_MIN_VERSION_IOS` and `CLIENT_MIN_VERSION_ANDROID`. `CLIENT_MIN_VERSION` still sets the desktop minimum. API: mobile clients send `X-Concord-Client-Platform` (`ios` or `android`), or `client_platform` on the WebSocket; any other value gets a 400.
-- **Self-hosting:** Pushing a `v<VERSION>` tag now builds the self-host bundle (`concord-selfhost-<version>.tar.gz`, its manifest and `SHA256SUMS`) from the tagged tree in this repository and attests each file's build provenance. Release-Ops verifies the attestations and opens an unsigned draft; publication still waits on fresh-host acceptance.
+- **Self-hosting:** Pushing a `v<VERSION>` tag now builds the self-host bundle (`concord-selfhost-<version>.tar.gz`, its manifest and `SHA256SUMS`) from the tagged tree in this repository and attests each file's build provenance. The release pipeline verifies the attestations and opens an unsigned draft. A release is not a supported install until it passes fresh-host acceptance.
 
 ### Changed
 
