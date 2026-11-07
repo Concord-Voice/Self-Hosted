@@ -53,6 +53,10 @@ and the caller polls the job:
   output, sanitised like log lines. A failed job ends with a
   `[concord-agent: <action> failed: …]` line saying why. Jobs live in memory,
   so an agent restart forgets them.
+- `GET /v1/backups` lists the archives `restore` accepts, newest first, at
+  most 100: name, size and modification time. A `backups/` that does not
+  exist yet is an empty list; one that is not root-only gets 409
+  `untrusted_backups`, as restore does.
 - A job is not tied to the request that started it. Stop gets 15 minutes;
   the others get 2 hours (`up` may rebuild images), after which the run is
   killed.
@@ -60,6 +64,12 @@ and the caller polls the job:
   agent keeps `/run/concord-agent/write-in-progress`. A package upgrade then
   leaves the old agent running and says to restart it afterwards, and package
   removal refuses until the job ends.
+
+On an appliance that runs the containers itself (TrueNAS), set
+`CONCORD_AGENT_MANAGED_BY=truenas` in the agent's environment. The agent then
+refuses every write route, `/v1/jobs` and `/v1/backups` with 409
+`{"error":"appliance_managed","appliance":"truenas"}` and keeps serving
+reads. Any other value stops the agent at startup.
 
 The agent does not check who is asking beyond the socket's permissions. The
 console routes below check the admin before they call it.
@@ -81,6 +91,7 @@ of 30 requests per minute per client address; more get 429 `rate_limited`.
 | `GET /admin/api/v1/server/logs?service=S&lines=N` | `/v1/logs` (never follow) |
 | `GET /admin/api/v1/server/jobs` | `/v1/jobs` |
 | `GET /admin/api/v1/server/jobs/<id>` | `/v1/jobs/<id>` |
+| `GET /admin/api/v1/server/backups` | `/v1/backups` |
 | `POST /admin/api/v1/server/stepup` | none: starts a WebAuthn check |
 | `POST /admin/api/v1/server/actions/<action>` | `/v1/actions/<action>` |
 
@@ -114,7 +125,19 @@ of 30 requests per minute per client address; more get 429 `rate_limited`.
    agent's own refusals (for example 409 `write_in_progress`) pass through
    with its code; anything else from the agent becomes 502 `agent_error`. Job
    polls answer 400 `invalid_request`, 404 `unknown_job`, 502 `agent_error`
-   or 503 `agent_unavailable`.
+   or 503 `agent_unavailable`. On an appliance-managed host, jobs, job polls
+   and backups answer 409 `appliance_managed` with the appliance's name, and
+   writes answer 409 `appliance_managed`.
+
+The Server page's Actions panel uses these routes. It has buttons for start,
+stop, restart and back up, a release-tag field for update and a backup picker
+for restore. It asks for the security key before the four step-up actions,
+follows the running job every 5 seconds, shows its output and lists recent
+jobs. While a job runs the buttons are disabled. The panel checks the jobs list
+every 30 seconds, so a job started in another tab or by another admin locks
+them too. A rate-limited or failed poll is retried; it does not drop the job. On an
+appliance-managed host the panel says to use the appliance's own UI and shows
+no buttons.
 
 Job polls count as reads and write `server_read` rows. All these routes share
 the 30-per-minute limit with the other Server routes, so poll a job no faster

@@ -84,6 +84,12 @@ func run() int {
 	agent.EnableWrites(hostagent.ExecRunner{CLI: cli, Combined: true},
 		filepath.Join(filepath.Dir(filepath.Dir(filepath.Dir(resolved))), "backups"),
 		filepath.Join(filepath.Dir(sock), writeMarkerFile))
+	// An appliance (TrueNAS) runs the containers itself; its own UI owns
+	// every write, so the console only reads.
+	if appliance := os.Getenv("CONCORD_AGENT_MANAGED_BY"); appliance != "" && !agent.SetManagedBy(appliance) {
+		log.Print("concord-agent: startup failed: unknown CONCORD_AGENT_MANAGED_BY")
+		return 1
+	}
 	srv := &http.Server{
 		Handler:           agent,
 		ReadHeaderTimeout: 5 * time.Second,

@@ -226,3 +226,45 @@ func TestNewServerAreaUsesTheMountedSocket(t *testing.T) {
 		t.Fatal("agent client not configured")
 	}
 }
+
+func TestServerAreaBackupsAndApplianceRefusals(t *testing.T) {
+	reply := `{"backups":[]}`
+	code := http.StatusOK
+	sock := fakeAgent(t, func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(code)
+		_, _ = w.Write([]byte(reply))
+	})
+	audit := &fakeAudit{}
+	area := newArea(sock, audit)
+	r := serverEngine(area)
+	r.GET("/server/backups", area.ServerBackups)
+	r.GET("/server/jobs", area.ServerJobs)
+	r.GET("/server/jobs/:id", area.ServerJob)
+	if rec := call(r, "/server/backups"); rec.Code != http.StatusOK || rec.Body.String() != reply {
+		t.Fatalf("backups: %d %s", rec.Code, rec.Body)
+	}
+	if ev := audit.events[0]; ev.EventType != EventServerRead || ev.Detail["action"] != "backups" {
+		t.Fatalf("audit %+v", ev)
+	}
+	code = http.StatusConflict
+	reply = `{"appliance":"truenas","error":"appliance_managed"}`
+	for _, p := range []string{"/server/backups", "/server/jobs", "/server/jobs/0123456789abcdef0123456789abcdef"} {
+		if rec := call(r, p); rec.Code != http.StatusConflict || rec.Body.String() != reply {
+			t.Fatalf("%s: %d %s", p, rec.Code, rec.Body)
+		}
+	}
+	if ev := audit.events[len(audit.events)-1]; ev.Result != AuditFailure || ev.Detail["reason"] != "appliance_managed" {
+		t.Fatalf("audit %+v", ev)
+	}
+	// An appliance the proxy does not know, or any other conflict, is not relayed.
+	for _, body := range []string{`{"appliance":"<script>","error":"appliance_managed"}`, `{"error":"other"}`, `not json`} {
+		reply = body
+		if rec := call(r, "/server/backups"); rec.Code != http.StatusBadGateway || rec.Body.String() != `{"error":"agent_error"}` {
+			t.Fatalf("%s: %d %s", body, rec.Code, rec.Body)
+		}
+	}
+	reply = `{"error":"untrusted_backups"}`
+	if rec := call(r, "/server/backups"); rec.Code != http.StatusConflict || rec.Body.String() != reply {
+		t.Fatalf("untrusted: %d %s", rec.Code, rec.Body)
+	}
+}

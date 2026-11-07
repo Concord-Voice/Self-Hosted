@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { ApiError } from "./api";
+import { ServerActions } from "./ServerActions";
 import {
   LOG_LINE_CHOICES,
   LOG_SERVICES,
@@ -196,6 +197,8 @@ export function ServerWorkspace({
           </div>
         )}
       </section>
+
+      <ServerActions onSessionError={handle} />
 
       {healthError && (
         <output className="resource-notice">
