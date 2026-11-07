@@ -591,12 +591,39 @@ func (h *Handler) BeginWebAuthnLogin(ctx context.Context, userID string, jti str
 
 // ── Helper ───────────────────────────────────────────────────────────────────
 
+// verifyUserPassword checks password under the account's shared /auth/login
+// lockout. It returns auth.ErrAccountLocked while the account is locked; any
+// other error is a lookup, Redis or hash fault and carries no credential.
 func (h *Handler) verifyUserPassword(ctx context.Context, userID, password string) (bool, error) {
-	var passwordHash string
-	if err := h.db.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id = $1`, userID).Scan(&passwordHash); err != nil {
+	var email, passwordHash string
+	if err := h.db.QueryRowContext(ctx, `SELECT email, password_hash FROM users WHERE id = $1`, userID).Scan(&email, &passwordHash); err != nil {
 		return false, fmt.Errorf("fetch password hash: %w", err)
 	}
-	return auth.VerifyPassword(password, passwordHash)
+	return auth.VerifyPasswordWithLockout(ctx, h.redis, email, password, passwordHash)
+}
+
+// verifyFactorRemovalPassword is the password leg of a factor removal, on the
+// subject the caller's locked transaction read. attempt is the guess's
+// shared /auth/login lockout reservation, taken before BeginTx; this makes no
+// Redis call. On refusal it writes the response and returns false.
+func (h *Handler) verifyFactorRemovalPassword(
+	c *gin.Context, subj stepup.Subject, attempt *stepup.PasswordAttempt, password, failureLog string,
+) bool {
+	match, err := attempt.Check(password, subj.PasswordHash)
+	switch {
+	case err != nil:
+		// err is stepup.ErrPasswordNotReserved or ErrPasswordVerification,
+		// never the argon2 decode error that can embed the hash
+		// (observability.md principle 1).
+		h.log.Error(failureLog, "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": stepup.ErrMsgVerificationFailed})
+	case !match:
+		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonInvalidCredentials, AuthMethod: securityevent.AuthPassword})
+		c.JSON(http.StatusForbidden, gin.H{"error": stepup.ErrMsgInvalidPassword})
+	default:
+		return true
+	}
+	return false
 }
 
 func containsStr(ss []string, target string) bool {
@@ -1405,13 +1432,20 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 	}
 
 	es := h.readEmailSmsForSync(ctx, userID)
+	// The password's lockout reservation is a Redis round trip, so it runs
+	// before BeginTx (see stepup.Budget); the wrong-password record runs in
+	// the deferred end, after the rollback.
+	attempt, ok := h.reserveStepUpPassword(c, userID, req.Password)
+	if !ok {
+		return
+	}
 	tx, err := h.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		h.log.Error("Failed to begin TOTP disable transaction", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableMFA})
 		return
 	}
-	defer h.rollbackQuietly(tx)
+	defer h.endMFASettingsTx(tx, attempt)
 	subj, e := stepup.LockSubjectTx(ctx, tx, userID, stepup.LockForNoKeyUpdate, middleware.TokenCredentialEpoch(c))
 	if e != nil {
 		h.refuseMFASettingsStepUp(c, e, subjectStage(e))
@@ -1428,7 +1462,7 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 	}
 	// Row gone but mfa_methods may still list 'totp': the sync below cleans
 	// the denormalized flags either way.
-	if totpExists && !h.verifyAndDeleteTOTPTx(c, tx, userID, subj, req, es) {
+	if totpExists && !h.verifyAndDeleteTOTPTx(c, tx, userID, subj, attempt, req, es) {
 		return
 	}
 	if err := syncMFAFlagsTx(ctx, tx, userID, es); err != nil {
@@ -1454,20 +1488,13 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 // verifyAndDeleteTOTPTx is TOTPDisable's verified delete, on the caller's
 // locked transaction. On refusal or failure it has written the response and
 // returns false; the caller's deferred rollback undoes the delete.
-func (h *Handler) verifyAndDeleteTOTPTx(c *gin.Context, tx *sql.Tx, userID string, subj stepup.Subject, req totpDisableRequest, es emailSmsState) bool {
+func (h *Handler) verifyAndDeleteTOTPTx(
+	c *gin.Context, tx *sql.Tx, userID string, subj stepup.Subject, attempt *stepup.PasswordAttempt,
+	req totpDisableRequest, es emailSmsState,
+) bool {
 	ctx := c.Request.Context()
 
-	match, err := auth.VerifyPassword(req.Password, subj.PasswordHash)
-	if err != nil {
-		// Never log err: an argon2 decode failure can embed the hash
-		// ([internal]rules/observability.md Core principle #1).
-		h.log.Error("Password verification failed during TOTP disable", "error", stepup.ErrPasswordVerification)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": stepup.ErrMsgVerificationFailed})
-		return false
-	}
-	if !match {
-		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonInvalidCredentials, AuthMethod: securityevent.AuthPassword})
-		c.JSON(http.StatusForbidden, gin.H{"error": stepup.ErrMsgInvalidPassword})
+	if !h.verifyFactorRemovalPassword(c, subj, attempt, req.Password, "Password verification failed during TOTP disable") {
 		return false
 	}
 
@@ -1506,6 +1533,11 @@ func (h *Handler) RegenerateBackupCodes(c *gin.Context) {
 	}
 
 	match, err := h.verifyUserPassword(ctx, userID, req.Password)
+	if errors.Is(err, auth.ErrAccountLocked) {
+		h.emitHTTPEvent(c, accountLockedEvent)
+		stepup.LockedError().Write(c)
+		return
+	}
 	if err != nil {
 		// A failed lookup is not a wrong password.
 		h.log.Error("Password verification failed during backup-code regeneration", "user_id", userID, "error", err)
@@ -1834,19 +1866,26 @@ func (h *Handler) WebAuthnDeleteCredential(c *gin.Context) {
 	// One transaction, users row locked FOR NO KEY UPDATE first (it writes the
 	// flags): password under the lock, delete, D1, flags, commit (B1).
 	es := h.readEmailSmsForSync(ctx, userID)
+	// Lockout reservation before BeginTx, record after the rollback (see
+	// TOTPDisable).
+	attempt, ok := h.reserveStepUpPassword(c, userID, req.Password)
+	if !ok {
+		return
+	}
 	tx, err := h.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		h.log.Error("Failed to begin WebAuthn delete transaction", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDeleteCredential})
 		return
 	}
-	defer h.rollbackQuietly(tx)
+	defer h.endMFASettingsTx(tx, attempt)
 	subj, e := stepup.LockSubjectTx(ctx, tx, userID, stepup.LockForNoKeyUpdate, middleware.TokenCredentialEpoch(c))
 	if e != nil {
 		h.refuseMFASettingsStepUp(c, e, subjectStage(e))
 		return
 	}
-	if !h.verifyAndDeleteWebAuthnTx(c, tx, userID, credentialID, subj, req.Password, es) {
+	if !h.verifyFactorRemovalPassword(c, subj, attempt, req.Password, "Password verification failed during WebAuthn delete") ||
+		!h.deleteWebAuthnTx(c, tx, userID, credentialID, es) {
 		return
 	}
 	if err := syncMFAFlagsTx(ctx, tx, userID, es); err != nil {
@@ -1901,26 +1940,12 @@ func (h *Handler) remainingCredentialIDs(ctx context.Context, userID string) ([]
 	return encoded, nil
 }
 
-// verifyAndDeleteWebAuthnTx is WebAuthnDeleteCredential's verified delete, on
-// the caller's locked transaction. On refusal or failure it has written the
-// response and returns false; the caller's deferred rollback undoes the delete.
-func (h *Handler) verifyAndDeleteWebAuthnTx(
-	c *gin.Context, tx *sql.Tx, userID, credentialID string, subj stepup.Subject, password string, es emailSmsState,
-) bool {
+// deleteWebAuthnTx is WebAuthnDeleteCredential's delete, on the caller's
+// locked transaction, after the password leg passed. On refusal or failure it
+// has written the response and returns false; the caller's deferred rollback
+// undoes the delete.
+func (h *Handler) deleteWebAuthnTx(c *gin.Context, tx *sql.Tx, userID, credentialID string, es emailSmsState) bool {
 	ctx := c.Request.Context()
-
-	match, err := auth.VerifyPassword(password, subj.PasswordHash)
-	if err != nil {
-		// Never log err: an argon2 decode failure can embed the hash.
-		h.log.Error("Password verification failed during WebAuthn delete", "error", stepup.ErrPasswordVerification)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": stepup.ErrMsgVerificationFailed})
-		return false
-	}
-	if !match {
-		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonInvalidCredentials, AuthMethod: securityevent.AuthPassword})
-		c.JSON(http.StatusForbidden, gin.H{"error": stepup.ErrMsgInvalidPassword})
-		return false
-	}
 
 	// An id that is not a UUID names no credential; without this the
 	// database's parse error would answer 500 for a request that matches nothing.
@@ -3529,13 +3554,13 @@ func (h *Handler) EmailSmsDisable(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequest})
 		return
 	}
-	tx, subj, ok := h.openMFASettingsTx(c, userID, creds, lockForNoKeyUpdate)
+	tx, subj, attempt, ok := h.openMFASettingsTx(c, userID, creds, lockForNoKeyUpdate)
 	if !ok {
 		return
 	}
-	defer h.rollbackQuietly(tx)
+	defer h.endMFASettingsTx(tx, attempt)
 	ctx := c.Request.Context()
-	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, creds, emailSmsDisableStepUp); e != nil {
+	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, creds, emailSmsDisableStepUp, attempt); e != nil {
 		h.refuseMFASettingsStepUp(c, e, stage)
 		return
 	}
@@ -3584,7 +3609,7 @@ func (h *Handler) EmailSmsDisable(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableEmailSms})
 		return
 	}
-	h.clearStepUpAfterSuccess(c, userID)
+	h.clearTxStepUpAfterCommit(c, userID)
 	h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventMFA, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityInformational, ReasonCode: securityevent.ReasonFactorDisabled})
 	c.JSON(http.StatusOK, gin.H{"message": "Email/SMS MFA methods disabled"})
 }
@@ -3672,15 +3697,15 @@ func (h *Handler) SetBackupEmail(c *gin.Context) {
 		return
 	}
 
-	tx, subj, ok := h.openMFASettingsTx(c, userID, req.mfaStepUpCredentials, lockForNoKeyUpdate)
+	tx, subj, attempt, ok := h.openMFASettingsTx(c, userID, req.mfaStepUpCredentials, lockForNoKeyUpdate)
 	if !ok {
 		return
 	}
-	defer h.rollbackQuietly(tx)
+	defer h.endMFASettingsTx(tx, attempt)
 	ctx := c.Request.Context()
 	// Gated on the requested action, set or clear alike; the prior value is
 	// never read.
-	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, req.mfaStepUpCredentials, backupEmailStepUp); e != nil {
+	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, req.mfaStepUpCredentials, backupEmailStepUp, attempt); e != nil {
 		h.refuseMFASettingsStepUp(c, e, stage)
 		return
 	}
@@ -3699,7 +3724,7 @@ func (h *Handler) SetBackupEmail(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedUpdateBackupEmail})
 		return
 	}
-	h.clearStepUpAfterSuccess(c, userID)
+	h.clearTxStepUpAfterCommit(c, userID)
 
 	c.JSON(http.StatusOK, gin.H{"backup_email": req.Email})
 }
@@ -3830,11 +3855,11 @@ type recoveryKeyMaterial struct {
 // upload) needs no credentials; an overwrite, which can do everything
 // DeleteRecoveryKey can, needs the same step-up. It always writes the response.
 func (h *Handler) storeRecoveryKey(c *gin.Context, userID string, creds mfaStepUpCredentials, m recoveryKeyMaterial) {
-	tx, subj, ok := h.openMFASettingsTx(c, userID, creds, lockForShare)
+	tx, subj, attempt, ok := h.openMFASettingsTx(c, userID, creds, lockForShare)
 	if !ok {
 		return
 	}
-	defer h.rollbackQuietly(tx)
+	defer h.endMFASettingsTx(tx, attempt)
 	ctx := c.Request.Context()
 
 	res, err := tx.ExecContext(ctx, `
@@ -3859,7 +3884,7 @@ func (h *Handler) storeRecoveryKey(c *gin.Context, userID string, creds mfaStepU
 	if replacing && !creds.sent() && h.answerRepeatedFirstStoreTx(c, tx, userID, m) {
 		return
 	}
-	if replacing && !h.replaceRecoveryKeyTx(c, tx, userID, subj, creds, m) {
+	if replacing && !h.replaceRecoveryKeyTx(c, tx, userID, subj, creds, m, attempt) {
 		return
 	}
 	if err := tx.Commit(); err != nil {
@@ -3870,7 +3895,7 @@ func (h *Handler) storeRecoveryKey(c *gin.Context, userID string, creds mfaStepU
 	if replacing {
 		// Only a VERIFIED commit clears the budget. A first-time insert
 		// verified nothing, even when credentials were sent and charged.
-		h.clearStepUpAfterSuccess(c, userID)
+		h.clearTxStepUpAfterCommit(c, userID)
 	}
 
 	h.log.Info(msgRecoveryKeyStored, "user_id", userID)
@@ -3956,9 +3981,10 @@ func sameRecoveryColumn(a, b []byte) int {
 // written the response and returns false.
 func (h *Handler) replaceRecoveryKeyTx(
 	c *gin.Context, tx *sql.Tx, userID string, subj stepup.Subject, creds mfaStepUpCredentials, m recoveryKeyMaterial,
+	attempt *stepup.PasswordAttempt,
 ) bool {
 	ctx := c.Request.Context()
-	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, creds, recoveryKeyReplaceStepUp); e != nil {
+	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, creds, recoveryKeyReplaceStepUp, attempt); e != nil {
 		h.refuseMFASettingsStepUp(c, e, stage)
 		return false
 	}
@@ -4015,13 +4041,13 @@ func (h *Handler) DeleteRecoveryKey(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidRequest})
 		return
 	}
-	tx, subj, ok := h.openMFASettingsTx(c, userID, creds, lockForShare)
+	tx, subj, attempt, ok := h.openMFASettingsTx(c, userID, creds, lockForShare)
 	if !ok {
 		return
 	}
-	defer h.rollbackQuietly(tx)
+	defer h.endMFASettingsTx(tx, attempt)
 	ctx := c.Request.Context()
-	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, creds, recoveryKeyRemoveStepUp); e != nil {
+	if e, stage := h.verifyMFASettingsStepUpTx(ctx, tx, userID, subj, creds, recoveryKeyRemoveStepUp, attempt); e != nil {
 		h.refuseMFASettingsStepUp(c, e, stage)
 		return
 	}
@@ -4035,7 +4061,7 @@ func (h *Handler) DeleteRecoveryKey(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to remove recovery key"})
 		return
 	}
-	h.clearStepUpAfterSuccess(c, userID)
+	h.clearTxStepUpAfterCommit(c, userID)
 
 	h.log.Info("Recovery key removed", "user_id", userID)
 	c.JSON(http.StatusOK, gin.H{"message": "Recovery key removed"})

@@ -218,7 +218,7 @@ func TestNotifyPermissionsChanged_TOTPDisable(t *testing.T) {
 
 // Kills: the notify call removed from WebAuthnDeleteCredential, moved above
 // tx.Commit() (the success arm observes the credential still present), or moved
-// into verifyAndDeleteWebAuthnTx after the DELETE (the D1 arm notifies).
+// into deleteWebAuthnTx after the DELETE (the D1 arm notifies).
 func TestNotifyPermissionsChanged_WebAuthnDeleteCredential(t *testing.T) {
 	db := iuNewTestDB(t)
 	h, hooks, observer, _ := newNotifierFixture(t, db, logger.New("test"))
