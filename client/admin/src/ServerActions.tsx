@@ -135,7 +135,7 @@ export function ServerActions({
           const job = await serverWriteApi.job(id);
           setCurrent(job);
           if (job.state === "running") {
-            pollRef.current = window.setTimeout(() => void tick(), pollMs);
+            pollRef.current = globalThis.setTimeout(() => void tick(), pollMs);
             return;
           }
           setStatus(
@@ -157,7 +157,7 @@ export function ServerActions({
     void refresh();
     return () => {
       abortRef.current?.abort();
-      if (pollRef.current !== null) window.clearTimeout(pollRef.current);
+      if (pollRef.current !== null) globalThis.clearTimeout(pollRef.current);
     };
   }, [refresh]);
 
