@@ -175,6 +175,9 @@ export function ServerActions({
             again(Math.max(pollMs * 2, wait * 1000));
             return;
           }
+          // Stop locking on a snapshot that can no longer update. The jobs
+          // check picks the job up again if it is still running.
+          setCurrent((now) => (now?.id === id ? null : now));
           setError(describe(cause, onSessionError));
         }
       };

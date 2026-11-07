@@ -130,6 +130,30 @@ describe("ServerActions", () => {
     expect(onSessionError).not.toHaveBeenCalled();
   });
 
+  it("unlocks when the agent forgets the job it was following", async () => {
+    lists();
+    let polls = 0;
+    server.use(
+      http.post(`${base}/actions/backup`, () =>
+        HttpResponse.json(job("running"), { status: 202 }),
+      ),
+      http.get(`${base}/jobs/${id}`, () => {
+        polls += 1;
+        return polls === 1
+          ? HttpResponse.json(job("running"))
+          : HttpResponse.json({ error: "unknown_job" }, { status: 404 });
+      }),
+    );
+    renderActions();
+    await userEvent
+      .setup()
+      .click(await screen.findByRole("button", { name: "Back up now" }));
+    expect(
+      await screen.findByText("The host agent no longer knows that action."),
+    ).toBeVisible();
+    expect(screen.getByRole("button", { name: "Start" })).toBeEnabled();
+  });
+
   it("still loads jobs when the backups folder is untrusted", async () => {
     server.use(
       http.get(`${base}/jobs`, () =>
