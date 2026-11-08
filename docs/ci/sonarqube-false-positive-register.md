@@ -89,7 +89,7 @@ High-level stances on SonarQube rules whose mismatch with this project's idiomat
 |---|---|
 | First recorded | 2026-08-19 (PR #2827, following the PR #2800 review) |
 | Rationale | The `<image>:<tag>@sha256:<digest>` form is deliberate supply-chain hardening, not redundancy: the digest supplies immutability, and the tag supplies the *lineage anchor that the update tooling resolves against*. A bare `FROM node@sha256:<digest>` gives Dependabot no variant to anchor on, so it resolves the repository's default tag. PR #2800 demonstrated the consequence on this exact line: `node:latest` is byte-identical to Debian-based `node:26`, so the pin moved from `node:24-alpine` (57.6 MB) to `node:26` (443 MB) with nothing in the diff but a changed hex string — while Dependabot's own PR body described it as "24-alpine to 26-alpine" ten times. S8431's premise, that the tag is redundant because the digest decides, holds for Docker's *resolution* semantics and fails for the *update tooling's*. Dropping the tag loses that update cue; dropping the digest forfeits immutability. Sonar's own [rule clarification](https://community.sonarsource.com/t/docker-s8431-makes-dependabot-upgrades-harder-to-read-and-limits-its-features/183693/6) exempts projects with supported Dependabot/Renovate configuration. |
-| Instance count in Section 2 | 13 (#223–#225 are the 2026-10-29 re-keyed `Dockerfile.turn-secret-writer` and `Dockerfile.redis-auth-controller` pins; #126 `Dockerfile:8`; #147–#149 added 2026-08-21 when the remaining three base images were pinned to close Scorecard `PinnedDependenciesID` #1216/#1217/#1227; #196 is the refreshed control-plane pin in PR #3604; #197–#198 are the Go 1.26.8 builder pins in PR #3656; #202–#203 are the Redis controller pins in PR #3940) |
+| Instance count in Section 2 | 13 (#223–#225 are the 2026-10-29 re-keyed `Dockerfile.turn-secret-writer` and `Dockerfile.redis-auth-controller` pins; #126 `Dockerfile:8`; #147–#149 added 2026-08-21 when the remaining three base images were pinned to close Scorecard `PinnedDependenciesID` #1216/#1217/#1227; #196 is the refreshed control-plane pin in PR #3604; #197–#198 are the Go 1.26.8 builder pins in PR #3656; #202–#203 are the Redis controller pins in PR #3940); plus row 77 under Post-migration, 2026-11-08 |
 | Disposition | Per-instance `FALSE_POSITIVE` for `FROM <image>:<tag>@sha256:<digest>` pins where the tag names the intended variant line and the digest pins the reviewed index. Re-review if Dependabot gains variant-aware digest resolution (making the tag genuinely redundant), or if a pin is found carrying a tag that disagrees with what its digest resolves to. |
 
 #### `go:S100` — Identifier naming regex excludes underscore in test names
@@ -413,6 +413,14 @@ Marked `FALSE_POSITIVE` on 2026-11-06 with Mark's explicit approval, each with a
 | 74 | 2026-11-06 | `AaGQ962Bi6y9d045l-0w` | `godre:S8168` | `services/control-plane/internal/testhelpers/stmthook/stmthook.go:489` | Claude (#202) | Rollback on every exit, verified at source (credepoch fence, returned-tx helper, deferred rollback helper, or explicit checked rollback). Legacy note `godre:S8168` cases (a)–(d). |
 | 75 | 2026-11-06 | `AaGQ964Ni6y9d045l-1O` | `godre:S8168` | `services/control-plane/internal/users/handlers.go:2046` | Claude (#202) | Rollback on every exit, verified at source (credepoch fence, returned-tx helper, deferred rollback helper, or explicit checked rollback). Legacy note `godre:S8168` cases (a)–(d). |
 | 76 | 2026-11-06 | `AaGQ961si6y9d045l-0i` | `godre:S8168` | `services/control-plane/internal/websocket/hub.go:6279` | Claude (#202) | Rollback on every exit, verified at source (credepoch fence, returned-tx helper, deferred rollback helper, or explicit checked rollback). Legacy note `godre:S8168` cases (a)–(d). |
+
+### Later instances
+
+Rows marked one at a time after the sweep. Paths are relative to the repo root. Numbering continues from the table above.
+
+| # | Date | Issue key | Rule | Location | Marker | Justification |
+|---|---|---|---|---|---|---|
+| 77 | 2026-11-08 | `AaG9AnwuTyWH8afVCQo8` | `docker:S8431` | `services/control-plane/Dockerfile.account-authority:5` | Claude (#213) | `golang:1.27.3-alpine@sha256:<digest>`, the same reviewed builder pin as `Dockerfile.ops-agent`. The tag is the Dependabot lineage anchor and the digest gives immutability. Legacy note `docker:S8431`. |
 
 ## Recreation-recovery / drift-guard (ADR-0017 narrowed profile)
 

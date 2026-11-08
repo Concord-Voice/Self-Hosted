@@ -1,0 +1,147 @@
+# Self-host account-key authority (DoR D-109, D-173). Layered last, after
+# docker-compose.yml, docker-compose.production.yml and docker-compose.selfhost.yml.
+# Dormant: nothing in the control plane calls the authority until the client
+# integration ships, so this overlay adds services the CP does not yet reach.
+#
+# Shape, each part asserted by infrastructure/deploy/tests/test-selfhost-authority-overlay.sh:
+#   - authority-postgres is the authority's own cluster. It listens on sockets only
+#     (no TCP, no network): in a volume it shares with the two authority services
+#     alone, never with the CP's postgres, and in its own default socket
+#     directory, which nothing outside the container sees.
+#   - Only authority joins the internal concordvoice-authority network, read-only
+#     and with every capability dropped; the owner job has no network.
+#   - authority runs `serve` as authority_app. It holds the RSK and TLS key; nothing
+#     else mounts them. It has no owner URL and no owner passfile.
+#   - authority-owner is the one-shot owner job (migrate and the owner verbs):
+#     a profile, restart "no", run by hand: `docker compose ... run --rm authority-owner <verb>`.
+#
+# Secrets are files the installer writes under ${AUTHORITY_DIR}/secrets, mode 0400,
+# owned by the uid that reads them:
+#   - uid 70 (the postgres image's postgres user, which runs the entrypoint's
+#     password read and the init script): superuser-password, app-password,
+#     owner-password.
+#   - uid 65532 (the authority image; the loader refuses a passfile, RSK or TLS
+#     key that uid does not own): app-pgpass, owner-pgpass, rsk, tls-key.
+services:
+  authority-postgres:
+    image: concordvoice-postgres:16-alpine
+    # The upstream entrypoint, not the CP image's wrapper: the wrapper installs
+    # the CP's ops-metrics login rules, which do not belong in this cluster.
+    # Docker creates the socket volume root-owned, and the upstream entrypoint
+    # prepares only /var/run/postgresql, so hand the shared directory to
+    # postgres first (0755: the authority loader refuses an other-writable one).
+    entrypoint: ["sh", "-c", 'chown postgres:postgres /run/authority-pg && chmod 0755 /run/authority-pg && exec docker-entrypoint.sh "$$@"', "authority-postgres"]
+    # The shared directory comes first; the second keeps the upstream
+    # entrypoint's own psql calls, and the init script's, on their default socket.
+    command: ["postgres", "-c", "listen_addresses=", "-c", "unix_socket_directories=/run/authority-pg,/var/run/postgresql"]
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD_FILE: /run/secrets/authority_superuser_password
+      POSTGRES_DB: postgres
+      # No trust rule ever: a bootstrap that dies half way leaves a cluster
+      # nobody can log in to, not an open one.
+      POSTGRES_INITDB_ARGS: --auth=scram-sha-256
+    network_mode: none
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    secrets:
+      - authority_superuser_password
+      - authority_app_password
+      - authority_owner_password
+    volumes:
+      - authority-pg-data:/var/lib/postgresql/data
+      - authority-pg-socket:/run/authority-pg
+      - ./infrastructure/docker/authority-postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # Healthy only once the bootstrap finished; pg_isready alone also passes on
+      # initdb's temporary server and on a cluster whose bootstrap failed.
+      test: ["CMD-SHELL", 'test -f "$$PGDATA/authority-bootstrap.done" && pg_isready -q -h /run/authority-pg -U authority_app -d authority']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  authority:
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
+    image: concordvoice-account-authority:local
+    build:
+      context: ./services/control-plane
+      dockerfile: Dockerfile.account-authority
+    command: ["serve"]
+    environment:
+      AUTHORITY_LISTEN_ADDR: ${AUTHORITY_IP:-172.30.53.2}:8443
+      AUTHORITY_DATABASE_URL: postgres:///authority?host=/run/authority-pg&user=authority_app&passfile=/run/secrets/authority_app_pgpass
+      AUTHORITY_TRUST_PATH: /etc/authority/trust
+      AUTHORITY_ANCHORS_PATH: /etc/authority/anchors
+      AUTHORITY_DISK_WATCH_PATH: /var/lib/authority-pg
+      CREDENTIALS_DIRECTORY: /run/secrets
+    depends_on:
+      authority-postgres:
+        condition: service_healthy
+    networks:
+      concordvoice-authority:
+        ipv4_address: ${AUTHORITY_IP:-172.30.53.2}
+    secrets:
+      - authority_app_pgpass
+      - source: authority_rsk
+        target: rsk
+      - source: authority_tls_key
+        target: tls-key
+    volumes:
+      - authority-pg-socket:/run/authority-pg
+      - authority-pg-data:/var/lib/authority-pg:ro
+      - ${AUTHORITY_DIR:-/etc/concord-authority}/public:/etc/authority:ro
+
+  authority-owner:
+    image: concordvoice-account-authority:local
+    profiles: [authority-owner]
+    restart: "no"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    network_mode: none
+    environment:
+      AUTHORITY_MIGRATE_DATABASE_URL: postgres:///authority?host=/run/authority-pg&user=authority_owner&passfile=/run/secrets/authority_owner_pgpass
+      AUTHORITY_TRUST_PATH: /etc/authority/trust
+      AUTHORITY_ANCHORS_PATH: /etc/authority/anchors
+    depends_on:
+      authority-postgres:
+        condition: service_healthy
+    secrets:
+      - authority_owner_pgpass
+    volumes:
+      - authority-pg-socket:/run/authority-pg
+      - ${AUTHORITY_DIR:-/etc/concord-authority}/public:/etc/authority:ro
+
+secrets:
+  authority_superuser_password:
+    file: ${AUTHORITY_DIR:-/etc/concord-authority}/secrets/superuser-password
+  authority_app_password:
+    file: ${AUTHORITY_DIR:-/etc/concord-authority}/secrets/app-password
+  authority_owner_password:
+    file: ${AUTHORITY_DIR:-/etc/concord-authority}/secrets/owner-password
+  authority_app_pgpass:
+    file: ${AUTHORITY_DIR:-/etc/concord-authority}/secrets/app-pgpass
+  authority_owner_pgpass:
+    file: ${AUTHORITY_DIR:-/etc/concord-authority}/secrets/owner-pgpass
+  authority_rsk:
+    file: ${AUTHORITY_DIR:-/etc/concord-authority}/secrets/rsk
+  authority_tls_key:
+    file: ${AUTHORITY_DIR:-/etc/concord-authority}/secrets/tls-key
+
+volumes:
+  authority-pg-data:
+  authority-pg-socket:
+
+networks:
+  # The authority's listen network. Nothing else joins it until the CP's client
+  # integration attaches the control plane. internal: no route out.
+  concordvoice-authority:
+    internal: true
+    ipam:
+      config:
+        - subnet: ${AUTHORITY_SUBNET:-172.30.53.0/29}

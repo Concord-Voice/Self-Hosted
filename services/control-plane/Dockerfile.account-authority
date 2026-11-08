@@ -1,0 +1,31 @@
+# The account-key authority's self-host image (DoR D-173). Managed realms run
+# the same static binary under systemd on a dedicated VM, with no image.
+# Match go.mod's toolchain (falling back to its go directive); checked by
+# scripts/check-go-toolchain.py alongside the control-plane Dockerfile.
+FROM golang:1.27.3-alpine@sha256:f2c872bcee949b7be9c490efd02b48a8a2fbf947cdf533f1c58525ec9d8170fd AS builder
+
+WORKDIR /src
+
+COPY go.mod go.sum ./
+# Same cache targets as the control-plane Dockerfile; see the note there.
+RUN --mount=type=cache,target=/go/pkg/mod \
+    go mod download
+
+COPY . .
+RUN --mount=type=cache,target=/go/pkg/mod \
+    --mount=type=cache,target=/root/.cache/go-build \
+    CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/account-authority ./cmd/account-authority
+
+FROM scratch
+
+LABEL org.opencontainers.image.source="https://github.com/Concord-Voice/Self-Hosted"
+LABEL org.opencontainers.image.description="Concord Voice account-key authority"
+LABEL org.opencontainers.image.licenses="LicenseRef-CVSL-1.0"
+
+COPY --from=builder /out/account-authority /account-authority
+
+# A fixed uid: the installer gives this uid the authority's secret files
+# (passfiles, RSK, TLS key), which the loader refuses unless the euid owns them.
+USER 65532:65532
+
+ENTRYPOINT ["/account-authority"]

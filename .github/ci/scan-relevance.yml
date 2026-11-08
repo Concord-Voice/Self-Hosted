@@ -334,6 +334,7 @@ go_toolchain:
   - '**/go.work.sum'
   - 'services/control-plane/Dockerfile'
   - 'services/control-plane/Dockerfile.ops-agent'
+  - 'services/control-plane/Dockerfile.account-authority'
   - 'scripts/check-go-toolchain.py'
   - 'scripts/test-check-go-toolchain.py'
 openapi:
