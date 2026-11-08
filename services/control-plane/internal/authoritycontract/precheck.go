@@ -7,7 +7,9 @@ import (
 	"slices"
 )
 
-// ErrPrecheck marks a delegation or succession that must not be signed.
+// ErrPrecheck marks a delegation or succession the precheck refuses. The
+// prechecks also return ErrMalformed for bytes that do not decode and for a
+// nil Trust: any error means do not sign.
 var ErrPrecheck = errors.New("refused before signing")
 
 // refusePrecheck is an ErrPrecheck with its reason.
@@ -19,6 +21,12 @@ func refusePrecheck(format string, a ...any) error {
 // signature. nil means that msg, dual-signed by the current
 // generation's primaries A and B, would be retained (T3) without halting the
 // realm (T4), and does not move the cutover backward (VP-1).
+//
+// The Trust must hold every delegation and succession issued: a stale one
+// cannot see what it lacks. Any error means do not sign.
+//
+// It refuses on a halted Trust: a delegation repairs no halt (T4), and a
+// delegation contradiction is cleared only by a succession.
 //
 // It is T3 without the signatures: the realm, the generation, the §2.5 bounds
 // and the §2.4 key separation. Beyond T3 it refuses:
@@ -42,6 +50,9 @@ func (t *Trust) PrecheckDelegation(msg []byte) error {
 	d, err := DecodeDelegation(msg)
 	if err != nil {
 		return err
+	}
+	if t.halt != nil {
+		return refusePrecheck("the realm is halted (%s); a delegation does not repair it", t.halt.Rule)
 	}
 	switch {
 	case d.RealmID != t.realm:
@@ -100,7 +111,10 @@ func (t *Trust) precheckIssued(d Delegation) error {
 // It refuses a succession that is not from CurrentGen to CurrentGen + 1: a
 // second succession from a generation already succeeded is a fork, which
 // halts the realm (T4) when both are validly signed. It also refuses new keys
-// that repeat each other or any key of an earlier generation (T2).
+// that repeat each other or any key of an earlier generation (T2), and any
+// succession once two successions from one generation have halted the realm,
+// which nothing clears. A delegation contradiction does not refuse it: a
+// succession is what clears that halt. Any error means do not sign.
 func (t *Trust) PrecheckSuccession(msg []byte) error {
 	if t == nil {
 		return malformed("nil trust")
@@ -109,11 +123,16 @@ func (t *Trust) PrecheckSuccession(msg []byte) error {
 	if err != nil {
 		return err
 	}
+	if h := t.successionHalt(); h != nil {
+		return refusePrecheck("the realm is halted (%s); no succession repairs it", h.Rule)
+	}
 	switch cur := t.CurrentGen(); {
 	case m.RealmID != t.realm:
 		return refusePrecheck("realm %s is not the anchors' realm %s", m.RealmID, t.realm)
-	case m.PrevRootGen != cur:
+	case m.PrevRootGen < cur:
 		return refusePrecheck("prev_root_gen %d is not the current generation %d; a second succession from one generation halts the realm (T4)", m.PrevRootGen, cur)
+	case m.PrevRootGen > cur:
+		return refusePrecheck("prev_root_gen %d is not the current generation %d; clients ignore a succession from a generation not reached", m.PrevRootGen, cur)
 	case m.NewRootGen != cur+1:
 		return refusePrecheck("new_root_gen %d is not %d", m.NewRootGen, cur+1)
 	case !t.freshSuccessor(genKeys{m.NewPrimaryA, m.NewPrimaryB, m.NewRecoveryA, m.NewRecoveryB}, cur):

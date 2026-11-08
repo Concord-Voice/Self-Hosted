@@ -114,6 +114,44 @@ func TestPrecheckDelegationRefusesABackwardCutoverAcrossASuccession(t *testing.T
 	fresh.succeed(nil)
 	fresh.addDel(1, func(d *Delegation) { d.CutoverAtMs = testT0 - 1 })
 	require.Nil(t, fresh.trust(t).Halted(), "T4 does not compare cutovers across generations")
+
+	// The precheck refuses that first delegation, which only VP-1 catches.
+	gap := newTestRealm(t)
+	gap.addDel(1, func(d *Delegation) { d.CutoverAtMs = testT0 })
+	gap.succeed(nil)
+	err := gap.trust(t).PrecheckDelegation(gap.del(1, func(d *Delegation) { d.CutoverAtMs = testT0 - 1 }).Encode())
+	require.ErrorIs(t, err, ErrPrecheck)
+	require.ErrorContains(t, err, "(VP-1)")
+}
+
+func TestPrecheckDelegationRefusesAnUnreachedGeneration(t *testing.T) {
+	r := newTestRealm(t)
+	r.addDel(1, nil)
+	err := r.trust(t).PrecheckDelegation(r.del(2, func(d *Delegation) { d.ProductRootGen = 1 }).Encode())
+	require.ErrorContains(t, err, "product_root_gen 1 is not the current generation 0")
+}
+
+// A halted Trust signs nothing that cannot clear the halt.
+func TestPrechecksOnAHaltedTrust(t *testing.T) {
+	r := newTestRealm(t)
+	r.addDel(1, nil)
+	tr := r.trust(t)
+	g := r.Gens[0]
+	requireHalt(t, tr.AddSigned(r.signDel(r.del(1, func(d *Delegation) { d.TauMs++ }), g.A, g.B)))
+	err := tr.PrecheckDelegation(r.del(2, nil).Encode())
+	require.ErrorIs(t, err, ErrPrecheck)
+	require.ErrorContains(t, err, "the realm is halted (T4: two delegations for (0, 1))")
+	require.NoError(t, tr.PrecheckSuccession(succ(r, 0, nil).Encode()), "a succession clears a delegation halt")
+
+	f := newTestRealm(t)
+	f.addDel(1, nil)
+	f.succeed(nil)
+	ft := f.trust(t)
+	requireHalt(t, ft.AddSigned(signSucc(f, succ(f, 0, nil), f.Gens[0])))
+	err = ft.PrecheckSuccession(succ(f, 1, nil).Encode())
+	require.ErrorIs(t, err, ErrPrecheck)
+	require.ErrorContains(t, err, "T4: two successions for generation 0")
+	require.ErrorIs(t, ft.PrecheckDelegation(f.del(1, nil).Encode()), ErrPrecheck)
 }
 
 func TestPrecheckDelegationRefusesMalformedBytesAndANilTrust(t *testing.T) {
@@ -225,9 +263,43 @@ func TestPrecheckSuccessionRefusesMalformedBytesAndANilTrust(t *testing.T) {
 	require.ErrorIs(t, tr.PrecheckSuccession([]byte("x")), ErrMalformed)
 	var nilTrust *Trust
 	require.ErrorIs(t, nilTrust.PrecheckSuccession(succ(r, 0, nil).Encode()), ErrMalformed)
-	a, b := tr.CurrentRecoveries()
+}
+
+func TestPrecheckSuccessionRefusesAnUnreachedGeneration(t *testing.T) {
+	r := newTestRealm(t)
+	err := r.trust(t).PrecheckSuccession(succ(r, 1, nil).Encode())
+	require.ErrorIs(t, err, ErrPrecheck)
+	require.ErrorContains(t, err, "a generation not reached")
+}
+
+func TestCurrentKeyAccessors(t *testing.T) {
+	r := newTestRealm(t)
+	r.addDel(1, nil)
+	tr := r.trust(t)
+	a, b := tr.CurrentPrimaries()
+	require.Equal(t, r.Anchors.PrimaryA, a)
+	require.Equal(t, r.Anchors.PrimaryB, b)
+	a, b = tr.CurrentRecoveries()
 	require.Equal(t, r.Anchors.RecoveryA, a)
 	require.Equal(t, r.Anchors.RecoveryB, b)
+
+	r.succeed(nil)
+	tr = r.trust(t)
+	g := r.Gens[1]
+	a, b = tr.CurrentPrimaries()
+	require.Equal(t, pointOf(t, g.A), a)
+	require.Equal(t, pointOf(t, g.B), b)
+	a[0] ^= 0xff
+	again, _ := tr.CurrentPrimaries()
+	require.Equal(t, pointOf(t, g.A), again, "the accessor returns a copy")
+	a, b = tr.CurrentRecoveries()
+	require.Equal(t, pointOf(t, g.RA), a)
+	require.Equal(t, pointOf(t, g.RB), b)
+
+	var nilTrust *Trust
+	a, b = nilTrust.CurrentPrimaries()
+	require.Nil(t, a)
+	require.Nil(t, b)
 	a, b = nilTrust.CurrentRecoveries()
 	require.Nil(t, a)
 	require.Nil(t, b)
