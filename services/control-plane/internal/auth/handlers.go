@@ -1167,37 +1167,27 @@ end
 return 0
 `)
 
-func (h *Handler) runLoginAttemptScript(ctx context.Context, email, mode string) (int64, error) {
-	args := make([]interface{}, 0, 3+len(loginLockoutDurations))
-	args = append(args, mode, loginLockoutThreshold, int64(time.Hour/time.Second))
-	for _, d := range loginLockoutDurations {
-		args = append(args, int64(d/time.Second))
-	}
-	return loginAttemptScript.Run(ctx, h.redis, []string{
-		fmt.Sprintf("login_attempts:%s", email),
-		fmt.Sprintf(redisKeyLoginLockout, email),
-		fmt.Sprintf("login_lockout_count:%s", email),
-	}, args...).Int64()
-}
+// The handler methods below are thin wrappers over the package-level
+// functions in login_lockout.go, which hold the one implementation. They add
+// only the handler's logging. A Redis error never carries the password.
 
-// reserveLoginAttempt counts a password guess before it is checked. It returns
-// false when the account is locked. A Redis failure returns an error, and the
-// caller must refuse the guess (an uncounted guess would reopen unlimited
-// guessing) without reporting it as a lock. After a reserved guess fails, call
-// recordCheckedFailure, not recordFailedLogin.
+// reserveLoginAttempt is ReserveLoginAttempt on the handler's client. A Redis
+// failure returns an error, and the caller must refuse the guess (an uncounted
+// guess would reopen unlimited guessing) without reporting it as a lock. After
+// a reserved guess fails, call recordCheckedFailure, not recordFailedLogin.
 func (h *Handler) reserveLoginAttempt(ctx context.Context, email string) (bool, error) {
-	ok, err := h.runLoginAttemptScript(ctx, email, "reserve")
+	ok, err := ReserveLoginAttempt(ctx, h.redis, email)
 	if err != nil {
 		h.log.Error("login lockout: reserve attempt failed", "error", err)
 		return false, err
 	}
-	return ok == 1, nil
+	return ok, nil
 }
 
-// recordCheckedFailure locks the account when a reserved guess that failed
-// reached the threshold. The guess was already counted by reserveLoginAttempt.
+// recordCheckedFailure is RecordCheckedFailure on the handler's client. A
+// Redis failure is logged and dropped here: the guess was already counted.
 func (h *Handler) recordCheckedFailure(ctx context.Context, email string) {
-	if _, err := h.runLoginAttemptScript(ctx, email, "checked"); err != nil {
+	if err := RecordCheckedFailure(ctx, h.redis, email); err != nil {
 		h.log.Error("login lockout: record failure failed", "error", err)
 	}
 }
@@ -1207,17 +1197,17 @@ func (h *Handler) recordCheckedFailure(ctx context.Context, email string) {
 // failure is returned so the caller can answer it the same way as a failed
 // reserve; otherwise an outage would tell unknown emails from known ones.
 func (h *Handler) recordFailedLogin(ctx context.Context, email string) error {
-	if _, err := h.runLoginAttemptScript(ctx, email, "fail"); err != nil {
+	if _, err := runLoginAttemptScript(ctx, h.redis, email, loginAttemptFail); err != nil {
 		h.log.Error("login lockout: record failure failed", "error", err)
 		return err
 	}
 	return nil
 }
 
-// clearLoginAttempts resets the counters after a successful guess. It leaves a
-// lock that a concurrent burst set in place (see the script's clear mode).
+// clearLoginAttempts is ClearLoginAttempts on the handler's client. It leaves
+// a lock that a concurrent burst set in place (see the script's clear mode).
 func (h *Handler) clearLoginAttempts(ctx context.Context, email string) {
-	if _, err := h.runLoginAttemptScript(ctx, email, "clear"); err != nil {
+	if err := ClearLoginAttempts(ctx, h.redis, email); err != nil {
 		h.log.Error("login lockout: clear attempts failed", "error", err)
 	}
 }

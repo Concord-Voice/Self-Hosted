@@ -1576,18 +1576,27 @@ func (h *Handler) resolveTransferExecutionError(
 	}
 }
 
-// verifyPassword checks the user's password against the stored hash.
+// verifyPassword checks the user's password against the stored hash, under
+// the account's shared /auth/login lockout: a locked account is a 423 even for
+// the correct password.
 // On failure, sends an error response to the gin context and returns an error.
 func (h *Handler) verifyPassword(c *gin.Context, userID, password string) error {
-	var passwordHash string
-	err := h.db.QueryRowContext(c.Request.Context(), `SELECT password_hash FROM users WHERE id = $1`, userID).Scan(&passwordHash)
+	var email, passwordHash string
+	err := h.db.QueryRowContext(c.Request.Context(), `SELECT email, password_hash FROM users WHERE id = $1`, userID).Scan(&email, &passwordHash)
 	if err != nil {
 		h.internalError(c, "Failed to fetch password hash", errMsgFailedVerifyPassword, err)
 		return err
 	}
 
-	match, err := auth.VerifyPassword(password, passwordHash)
+	match, err := auth.VerifyPasswordWithLockout(c.Request.Context(), h.redis, email, password, passwordHash)
+	if errors.Is(err, auth.ErrAccountLocked) {
+		stepup.MarkAccountLocked(c)
+		stepup.LockedError().Write(c)
+		return err
+	}
 	if err != nil {
+		// err is a Redis fault or auth.ErrPasswordHashCheck; it never carries
+		// the hash, so internalError may log it.
 		h.internalError(c, "Failed to verify password", errMsgFailedVerifyPassword, err)
 		return err
 	}

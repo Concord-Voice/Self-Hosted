@@ -5576,6 +5576,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StepUpError'
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '500':
           description: Purge failed or timed out
           content:
@@ -11096,6 +11102,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /mfa/backup-email:
     get:
       tags:
@@ -11194,6 +11206,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StepUpError'
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/StepUpAttemptsExhausted'
         '500':
@@ -11258,6 +11276,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StepUpError'
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/StepUpAttemptsExhausted'
         '500':
@@ -11361,6 +11385,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StepUpError'
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/StepUpAttemptsExhausted'
         '500':
@@ -11615,6 +11645,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StepUpError'
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/StepUpAttemptsExhausted'
         '500':
@@ -11661,6 +11697,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StepUpError'
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/StepUpAttemptsExhausted'
         '500':
@@ -11750,6 +11792,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StepUpError'
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/StepUpAttemptsExhausted'
         '500':
@@ -11861,6 +11909,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StepUpError'
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/StepUpAttemptsExhausted'
         '500':
@@ -11957,6 +12011,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StepUpError'
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/StepUpAttemptsExhausted'
         '500':
@@ -12036,6 +12096,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StepUpError'
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/StepUpAttemptsExhausted'
         '500':
@@ -12447,6 +12513,12 @@ paths:
               example:
                 error: Turn off email and text-message codes before removing your last authenticator app or security key.
                 inline_factor_required: true
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '500':
           description: TOTP could not be removed, or the account MFA flags could not be updated. The removal and the flags write are one transaction, so nothing changed; it is safe to retry.
           content:
@@ -12504,6 +12576,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StepUpError'
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/StepUpAttemptsExhausted'
         '500':
@@ -12681,6 +12759,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StepUpError'
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/StepUpAttemptsExhausted'
         '500':
@@ -12732,6 +12816,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StepUpError'
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/StepUpAttemptsExhausted'
         '500':
@@ -12851,6 +12941,12 @@ paths:
               example:
                 error: Turn off email and text-message codes before removing your last authenticator app or security key.
                 inline_factor_required: true
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '500':
           description: The credential could not be deleted, or the account MFA flags could not be updated. The delete and the flags write are one transaction, so nothing changed; it is safe to retry.
           content:
@@ -12920,6 +13016,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StepUpError'
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/StepUpAttemptsExhausted'
         '500':
@@ -13310,6 +13412,12 @@ paths:
                 $ref: '#/components/schemas/Error'
         '410':
           description: Reversal window has expired
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
           content:
             application/json:
               schema:
@@ -16633,6 +16741,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
     get:
       tags:
       - Servers
@@ -17418,9 +17532,15 @@ paths:
       tags:
       - Sessions
       summary: Set session revocation mode
-      description: 'Enable or disable session revocation mode. When enabled, all new sessions
+      description: 'Set the server-authoritative session revocation mode: `secure` asks for
 
-        are immediately revoked (useful for compromised accounts).
+        password or MFA re-verification on every revoke, `simple` opens a short window
+
+        after one verified revoke. Changing the mode needs the same step-up as a revoke:
+
+        a request with neither credential returns a 403 discovery response, and a
+
+        password counts toward the same per-email lockout as `/auth/login`.
 
         Rate limit: 5 requests per minute (user-based).
 
@@ -17434,10 +17554,20 @@ paths:
             schema:
               type: object
               required:
-              - enabled
+              - mode
               properties:
-                enabled:
-                  type: boolean
+                mode:
+                  type: string
+                  enum:
+                  - simple
+                  - secure
+                password:
+                  type: string
+                  format: password
+                  description: Current account password for step-up authentication
+                mfa_code:
+                  type: string
+                  description: MFA verification code; may be used instead of the password
       responses:
         '200':
           description: Revocation mode updated
@@ -17446,10 +17576,57 @@ paths:
               schema:
                 type: object
                 properties:
+                  revocation_mode:
+                    type: string
+                    enum:
+                    - simple
+                    - secure
+        '400':
+          description: Invalid JSON request body or an unknown mode
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '401':
+          description: Missing or invalid access token
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '403':
+          description: Password or MFA verification is required or failed
+          content:
+            application/json:
+              schema:
+                type: object
+                required:
+                - error
+                properties:
+                  error:
+                    type: string
                   message:
                     type: string
-                  enabled:
-                    type: boolean
+                    description: Present when step-up authentication is required
+                  methods:
+                    type: array
+                    nullable: true
+                    items:
+                      type: string
+                    description: Enabled MFA methods when MFA authentication is required
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+        '500':
+          description: Password/MFA verification failed (including a Redis fault that keeps the lockout from counting the guess, or a failed MFA-method read), or the mode could not be saved
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
   /sessions/revoke-all:
     post:
       tags:
@@ -17548,6 +17725,12 @@ paths:
                       items:
                         type: string
                       description: Enabled MFA methods when MFA authentication is required
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/RateLimited'
         '503':
@@ -17604,6 +17787,12 @@ paths:
                 $ref: '#/components/schemas/Error'
         '404':
           description: Session not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
           content:
             application/json:
               schema:
@@ -18229,6 +18418,12 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/StepUpError'
+        '423':
+          description: The account is locked after repeated wrong passwords (`error_code` `account_locked`). A wrong password here counts toward the same lockout as `/auth/login`, and while it holds even the correct password is refused.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '429':
           $ref: '#/components/responses/StepUpAttemptsExhausted'
         '500':
