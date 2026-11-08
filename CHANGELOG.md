@@ -35,10 +35,11 @@ until an operator turns them on. Self-hosted deployments now ship from this
 repository, and operators can set separate minimum app versions for iOS and
 Android.
 
-**22 Total Changes** | 8 Added | 5 Changed | 7 Fixed | 2 Security
+**23 Total Changes** | 9 Added | 5 Changed | 7 Fixed | 2 Security
 
 ### Added
 
+- **Authentication:** Added `authority-ceremony`, an operator tool that signs account-key authority delegations and successions with two hardware keys, or with two key files on a self-hosted install (`--key-file`, `--yes`). Nothing runs it yet.
 - **Authentication:** Added dormant checks to the account-key authority contract that refuse a delegation or succession before it is signed when clients would ignore it, halt on it, or see its cutover or supersession move backward. Nothing calls them yet.
 - **Self-host:** Added a dormant compose overlay that runs the account-key authority beside its own socket-only PostgreSQL, with a contract test that keeps owner credentials, signing keys and authority settings away from the control plane. The installer does not use it yet.
 - **Authentication:** Added a dormant internal store for account-change request and origin rows, with caller-owned transactions and explicit retention of other decision obligations.

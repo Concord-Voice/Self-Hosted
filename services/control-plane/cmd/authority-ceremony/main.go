@@ -1,8 +1,10 @@
 // Command authority-ceremony is the account-key authority's workstation tool
 // (#3593, DoR §2.16 and §4): it signs a delegation with the two product-root
 // primaries (LD-3, the 2-of-2 ceremony), a succession with the two recovery
-// keys (T2), and an operator intent with an operator YubiKey (LD-4). It runs on an operator workstation only and is
-// never built into a server image (D-43).
+// keys (T2), and an operator intent with an operator YubiKey (LD-4). The
+// managed realm signs with YubiKeys on an operator workstation; a self-host
+// install signs with software keys in files (--key-file, D-218). It is never
+// built into a server image (D-43).
 package main
 
 import (
@@ -26,9 +28,9 @@ import (
 )
 
 const usage = "usage: authority-ceremony sign-delegation --anchors <file> (--trust <file> | --first) --spec <file> " +
-	"(--out <file> | --dry-run) [--slot <slot>] [--piv-tool <path>]\n" +
+	"(--out <file> | --dry-run) [--slot <slot>] [--piv-tool <path> | --key-file <file>... [--yes]]\n" +
 	"       authority-ceremony sign-succession --anchors <file> --trust <file> --spec <file> " +
-	"(--out <file> | --dry-run) [--slot <slot>] [--piv-tool <path>]\n" +
+	"(--out <file> | --dry-run) [--slot <slot>] [--piv-tool <path> | --key-file <file>... [--yes]]\n" +
 	"       authority-ceremony add-trust --anchors <file> (--trust <file> | --first) --signed <file> --out <file>\n" +
 	"       authority-ceremony operator-sign --intent <file> --key <hex point> [--slot <slot>] [--piv-tool <path>]"
 
@@ -110,12 +112,11 @@ func signDelegation(args []string, e env) error {
 	specPath := fs.String("spec", "", "")
 	outPath := fs.String("out", "", "")
 	dryRun := fs.Bool("dry-run", false, "")
-	slot := fs.String("slot", "9c", "")
-	tool := fs.String("piv-tool", "yubico-piv-tool", "")
+	sf := addSignerFlags(fs)
 	if err := parse(fs, args); err != nil {
 		return err
 	}
-	if *anchorsPath == "" || *specPath == "" || (*trustPath == "") == !*first || (*outPath == "") == !*dryRun {
+	if *anchorsPath == "" || *specPath == "" || (*trustPath == "") == !*first || (*outPath == "") == !*dryRun || !sf.valid() {
 		return errUsage
 	}
 	tr, err := loadTrust(*anchorsPath, *trustPath)
@@ -152,17 +153,17 @@ func signDelegation(args []string, e env) error {
 	if err := refuseExisting(*outPath); err != nil {
 		return err
 	}
-	p, err := newPIVSigner(*tool, *slot, e)
+	p, err := sf.signer(e)
 	if err != nil {
 		return err
 	}
-	if *first {
+	if *first && !*sf.yes {
 		if err := confirmWord(e, "first", "This is the realm's first delegation and no trust file was checked. Type first to continue: "); err != nil {
 			return err
 		}
 	}
 	primaryA, primaryB := tr.CurrentPrimaries()
-	c := ceremony{e: e, p: p, tr: tr, msg: msg, kind: "delegation", out: *outPath,
+	c := ceremony{e: e, p: p, yes: *sf.yes, tr: tr, msg: msg, kind: "delegation", out: *outPath,
 		show:   func() error { return showDelegation(e.out, msg, d) },
 		reread: func() ([]byte, error) { b, _, err := readSpec(*specPath); return b, err },
 		keys:   [2]named{{"primary A", primaryA}, {"primary B", primaryB}}}
@@ -185,12 +186,11 @@ func signSuccession(args []string, e env) error {
 	specPath := fs.String("spec", "", "")
 	outPath := fs.String("out", "", "")
 	dryRun := fs.Bool("dry-run", false, "")
-	slot := fs.String("slot", "9c", "")
-	tool := fs.String("piv-tool", "yubico-piv-tool", "")
+	sf := addSignerFlags(fs)
 	if err := parse(fs, args); err != nil {
 		return err
 	}
-	if *anchorsPath == "" || *trustPath == "" || *specPath == "" || (*outPath == "") == !*dryRun {
+	if *anchorsPath == "" || *trustPath == "" || *specPath == "" || (*outPath == "") == !*dryRun || !sf.valid() {
 		return errUsage
 	}
 	tr, err := loadTrust(*anchorsPath, *trustPath)
@@ -218,12 +218,12 @@ func signSuccession(args []string, e env) error {
 	if err := refuseExisting(*outPath); err != nil {
 		return err
 	}
-	p, err := newPIVSigner(*tool, *slot, e)
+	p, err := sf.signer(e)
 	if err != nil {
 		return err
 	}
 	recA, recB := tr.CurrentRecoveries()
-	c := ceremony{e: e, p: p, tr: tr, msg: msg, kind: "succession", out: *outPath, show: show,
+	c := ceremony{e: e, p: p, yes: *sf.yes, tr: tr, msg: msg, kind: "succession", out: *outPath, show: show,
 		reread: func() ([]byte, error) { b, _, err := readSuccessionSpec(*specPath); return b, err },
 		keys:   [2]named{{"recovery A′", recA}, {"recovery B′", recB}}}
 	if err := c.run(); err != nil {
@@ -244,7 +244,8 @@ type named struct {
 // point, and the result is admitted into the trust before it is written.
 type ceremony struct {
 	e      env
-	p      pivSigner
+	p      signer
+	yes    bool // software keys only: no typed digest (signerFlags.valid)
 	tr     *ac.Trust
 	msg    []byte
 	kind   string // the signed envelope's type
@@ -269,8 +270,10 @@ func (c ceremony) run() error {
 		if err := c.show(); err != nil {
 			return err
 		}
-		if err := confirm(c.e, c.msg, k.name); err != nil {
-			return err
+		if !c.yes {
+			if err := confirm(c.e, c.msg, k.name); err != nil {
+				return err
+			}
 		}
 		sig, err := c.p.sign(c.msg, k.point)
 		if err != nil {
