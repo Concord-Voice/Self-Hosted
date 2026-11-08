@@ -483,7 +483,7 @@ func TestOpenMFASettingsTx_EpochFence(t *testing.T) {
 	h := iuHandler(db, rdb, kr)
 	c, w := iuGinContext(http.MethodPost, "/api/v1/mfa/email-sms/disable", "", userID, "stale-client-epoch")
 
-	tx, _, ok := h.openMFASettingsTx(c, userID, mfaStepUpCredentials{Password: iuPassword}, lockForNoKeyUpdate)
+	tx, _, _, ok := h.openMFASettingsTx(c, userID, mfaStepUpCredentials{Password: iuPassword}, lockForNoKeyUpdate)
 
 	assert.False(t, ok, "a mismatched credential epoch must refuse")
 	assert.Nil(t, tx)
@@ -564,7 +564,8 @@ func TestOpenAndVerifyMFASettingsStepUpTx_PoolSafety(t *testing.T) {
 				c, _ := iuGinContext(http.MethodPost, "/x", "", s.userID, "")
 				var tx *sql.Tx
 				var subj stepup.Subject
-				tx, subj, ok = h.openMFASettingsTx(c, s.userID, s.creds(), s.lock)
+				var attempt *stepup.PasswordAttempt
+				tx, subj, attempt, ok = h.openMFASettingsTx(c, s.userID, s.creds(), s.lock)
 				if !ok {
 					return
 				}
@@ -575,7 +576,7 @@ func TestOpenAndVerifyMFASettingsStepUpTx_PoolSafety(t *testing.T) {
 						NoFactors:          "no factors",
 						CredentialRequired: "credential required",
 					},
-				})
+				}, attempt)
 				if stepErr == nil {
 					_ = tx.Commit()
 				}

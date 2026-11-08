@@ -227,13 +227,16 @@ func passwordRequired(activeCount int, revokesInWindow int64) bool {
 	return revokesInWindow >= 1
 }
 
-// verifyUserPassword fetches the stored Argon2id hash and verifies the provided password.
+// verifyUserPassword fetches the stored Argon2id hash and verifies the provided
+// password under the account's shared /auth/login lockout. It returns
+// auth.ErrAccountLocked while the account is locked; any other error is a
+// lookup, Redis or hash fault and carries no credential.
 func (h *Handler) verifyUserPassword(ctx context.Context, userID, password string) (bool, error) {
-	var passwordHash string
-	if err := h.db.QueryRowContext(ctx, `SELECT password_hash FROM users WHERE id = $1`, userID).Scan(&passwordHash); err != nil {
+	var email, passwordHash string
+	if err := h.db.QueryRowContext(ctx, `SELECT email, password_hash FROM users WHERE id = $1`, userID).Scan(&email, &passwordHash); err != nil {
 		return false, fmt.Errorf("failed to fetch password hash: %w", err)
 	}
-	match, err := auth.VerifyPassword(password, passwordHash)
+	match, err := auth.VerifyPasswordWithLockout(ctx, h.redis, email, password, passwordHash)
 	if err != nil {
 		return false, fmt.Errorf("password verification error: %w", err)
 	}
@@ -489,6 +492,11 @@ func (h *Handler) authenticateForRevoke(ctx context.Context, c *gin.Context, uid
 
 	if password != "" {
 		match, verifyErr := h.verifyUserPassword(ctx, uid, password)
+		if errors.Is(verifyErr, auth.ErrAccountLocked) {
+			h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSecurityControl, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonAccountLocked, AuthMethod: securityevent.AuthPassword, RouteTemplate: route})
+			stepup.LockedError().Write(c)
+			return true
+		}
 		if verifyErr != nil {
 			h.log.Error("Password verification failed during session revoke", "error", verifyErr)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedVerifyPassword})
@@ -504,7 +512,14 @@ func (h *Handler) authenticateForRevoke(ctx context.Context, c *gin.Context, uid
 
 	// Neither provided — tell client what's needed
 	if hasMFA {
-		methods, _ := h.mfaVerifier.GetEnabledMethods(ctx, uid)
+		methods, err := h.mfaVerifier.GetEnabledMethods(ctx, uid)
+		if err != nil {
+			// A failed read is not an empty method list: answering with one
+			// would tell the client no factor is available.
+			h.log.Error("Failed to read MFA methods during session revoke", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgMFAVerificationFailed})
+			return true
+		}
 		c.JSON(http.StatusForbidden, gin.H{
 			"error":   "auth_required",
 			"message": "Authentication required to " + action.desc,

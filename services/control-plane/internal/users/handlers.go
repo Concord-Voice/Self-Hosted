@@ -1573,6 +1573,7 @@ func (h *Handler) verifyStepUpWithLockedUser(
 		return fmt.Errorf("lock user for reauthentication: %w", err)
 	}
 
+	// Plain verify, not the lockout: verifyCurrentPassword already counted this guess before the lock.
 	match, err := auth.VerifyPassword(currentPassword, passwordHash)
 	if err != nil {
 		return fmt.Errorf("verify locked password: %w", err)
@@ -2685,6 +2686,26 @@ func (h *Handler) allowPurgeFenceStepUp(ctx context.Context, c *gin.Context, use
 	return false
 }
 
+// reservePurgeFencePassword counts a supplied purge-fence password against the
+// account's shared /auth/login lockout, before the transaction begins. It
+// writes the 423 (locked, with the lockout security event), the 500 (the
+// guess cannot be counted) or the 401 (account gone) and returns false when
+// the guess may not be checked. An empty password counts nothing.
+func (h *Handler) reservePurgeFencePassword(
+	ctx context.Context, c *gin.Context, userID, password string,
+) (*stepup.PasswordAttempt, bool) {
+	attempt, e := stepup.ReserveUserPasswordAttempt(ctx, h.db, h.redis, userID, password)
+	if e == nil {
+		return attempt, true
+	}
+	if e.Status == http.StatusLocked {
+		stepup.MarkAccountLocked(c)
+	}
+	h.logPurgeFenceStepUpFailure(e)
+	e.Write(c)
+	return nil, false
+}
+
 // clearPurgeFenceStepUpAttempts resets the budget after a step-up that actually
 // succeeded and committed.
 //
@@ -2717,8 +2738,12 @@ func (h *Handler) clearPurgeFenceStepUpAttempts(ctx context.Context, userID stri
 // The returned error is a *stepup.Error (never a typed nil); the outer
 // handler unwraps it with errors.As so the closure's blanket 500 does not
 // swallow the real status.
+//
+// attempt is the password's shared /auth/login lockout reservation, taken by
+// the caller before BeginTx: the hash check here makes no Redis call.
 func (h *Handler) gatePurgeFenceDisable(
 	ctx context.Context, c *gin.Context, tx *sql.Tx, userID string, creds updatePrivacyStepUp,
+	attempt *stepup.PasswordAttempt,
 ) error {
 	// The attempt budget is NOT taken here. It runs before BeginTx in the
 	// caller — a Redis round trip inside an open transaction pins a pooled DB
@@ -2739,7 +2764,7 @@ func (h *Handler) gatePurgeFenceDisable(
 		return e
 	}
 
-	if pErr := stepup.VerifyPasswordFactor(subj, creds.CurrentPassword, purgeFenceStepUpCopy); pErr != nil {
+	if pErr := stepup.VerifyPasswordFactor(attempt, subj, creds.CurrentPassword, purgeFenceStepUpCopy); pErr != nil {
 		return pErr
 	}
 	if !subj.MFAEnabled {
@@ -2805,6 +2830,24 @@ func (h *Handler) respondPresenceTerminal(c *gin.Context, message string, err er
 	c.JSON(failure.Status, gin.H{"error": failure.Body(message)})
 }
 
+// beginPurgeFenceStepUp runs the purge-fence step-up's Redis work, which must
+// precede the transaction: the attempt budget, then the password's lockout
+// reservation. It returns whether this request disables the fence, the
+// reserved attempt, and false once it has written a refusal. A request that
+// does not disable the fence takes neither.
+func (h *Handler) beginPurgeFenceStepUp(
+	ctx context.Context, c *gin.Context, userID string, req *updatePrivacyBody,
+) (bool, *stepup.PasswordAttempt, bool) {
+	if req.RequireAuthBeforePurge == nil || *req.RequireAuthBeforePurge {
+		return false, nil, true
+	}
+	if !h.allowPurgeFenceStepUp(ctx, c, userID) {
+		return true, nil, false
+	}
+	attempt, ok := h.reservePurgeFencePassword(ctx, c, userID, req.CurrentPassword)
+	return true, attempt, ok
+}
+
 // UpdatePrivacySettings updates the current user's privacy settings.
 // Accepts a partial JSON body — only provided fields are updated.
 // PATCH /users/me/privacy
@@ -2851,8 +2894,8 @@ func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
 	// disablingPurgeFence is computed once and reused below: gate on the
 	// REQUESTED value, never a computed transition — a prior-value read is
 	// ambiguous on a lazily-created row and would be a fail-open surface.
-	disablingPurgeFence := req.RequireAuthBeforePurge != nil && !*req.RequireAuthBeforePurge
-	if disablingPurgeFence && !h.allowPurgeFenceStepUp(ctx, c, userID) {
+	disablingPurgeFence, passwordAttempt, ok := h.beginPurgeFenceStepUp(ctx, c, userID, &req)
+	if !ok {
 		return
 	}
 
@@ -2915,7 +2958,7 @@ func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
 		// durable trace — otherwise a 403 would still create a privacy_settings
 		// row and flip the fail-closed "no row means true" default.
 		if disablingPurgeFence {
-			if err := h.gatePurgeFenceDisable(ctx, c, tx, userID, req.updatePrivacyStepUp); err != nil {
+			if err := h.gatePurgeFenceDisable(ctx, c, tx, userID, req.updatePrivacyStepUp, passwordAttempt); err != nil {
 				return err
 			}
 		}
@@ -3000,6 +3043,12 @@ func (h *Handler) UpdatePrivacySettings(c *gin.Context) {
 		// calls tx.Commit() itself. A nil plan is the benign terminal.
 		return presencehook.Complete(ctx, gatedCapture, tx, plan)
 	})
+	// The transaction has ended either way: settle the password guess against
+	// the login lockout (record a wrong one, reset after a correct one). A
+	// no-op unless the gate checked a password.
+	if err := passwordAttempt.Settle(ctx); err != nil {
+		h.log.Warn("Could not settle a purge-fence password against the lockout", "error", err)
+	}
 	if txErr != nil {
 		// A step-up rejection carries its own status and body and is NOT a
 		// presence-capture failure, so it is classified first and never reaches

@@ -304,7 +304,7 @@ func runWebAuthnDelete(t *testing.T, h *Handler, userID, credentialID string) (i
 
 // Kills: the hook removed from WebAuthnDeleteCredential (the success arm sees
 // no bump), the hook moved above tx.Commit() (the success arm observes the
-// credential still present), and the hook moved into verifyAndDeleteWebAuthnTx
+// credential still present), and the hook moved into deleteWebAuthnTx
 // after the DELETE (the D1 arm bumps).
 func TestInvalidatePermissionState_WebAuthnDeleteCredential(t *testing.T) {
 	db := iuNewTestDB(t)

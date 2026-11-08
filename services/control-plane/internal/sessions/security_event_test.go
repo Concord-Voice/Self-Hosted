@@ -190,7 +190,7 @@ func newSecurityEventFamilyRig(t *testing.T) securityEventFamilyRig {
 	require.NoError(t, err)
 	_, err = db.Exec(`INSERT INTO user_keys(user_id,wrapped_private_key,key_derivation_salt,key_version,key_derivation_alg) VALUES($1,$2,$3,1,'argon2id')`, user, []byte{1}, []byte{2})
 	require.NoError(t, err)
-	const secret = "security-event-family-test-signing-secret"
+	const secret = "security-event-family-test-signing-secret" // pragma: allowlist secret
 	minter := auth.NewHandler(db, rdb, logger.New("test"), secret, testDisconnector{})
 	access, refresh, sid, err := minter.IssueAccessAndRefresh(context.Background(), user)
 	require.NoError(t, err)
@@ -289,6 +289,27 @@ func (revokeMFAVerifier) GetEnabledMethods(context.Context, string) ([]string, e
 	return []string{"totp"}, nil
 }
 
+type methodsFaultMFAVerifier struct{ revokeMFAVerifier }
+
+func (methodsFaultMFAVerifier) GetEnabledMethods(context.Context, string) ([]string, error) {
+	return nil, errors.New("methods read failed")
+}
+
+// A failed method read is a 500, never the empty list that would tell the
+// client the account has no factor to offer.
+func TestAuthenticateForRevoke_MethodsReadFailureIs500(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	h := NewHandler(nil, nil, logger.New("test"), testDisconnector{}, methodsFaultMFAVerifier{revokeMFAVerifier{enabled: true}})
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/v1/sessions/revocation-mode", nil)
+
+	require.True(t, h.authenticateForRevoke(context.Background(), c, privacyUserID, "", "", revocationModeSetAction))
+	require.Equal(t, http.StatusInternalServerError, response.Code)
+	require.Contains(t, response.Body.String(), errMsgMFAVerificationFailed)
+	require.NotContains(t, response.Body.String(), "auth_required")
+}
+
 func TestAuthenticateForRevokeEmitsCredentialSpecificRefusalEvents(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	passwordHash, err := auth.HashPasswordWithParams(privacyPassword, &auth.Argon2Params{Memory: 8, Iterations: 1, Parallelism: 1, SaltLength: 8, KeyLength: 16})
@@ -312,7 +333,9 @@ func TestAuthenticateForRevokeEmitsCredentialSpecificRefusalEvents(t *testing.T)
 
 			db := sql.OpenDB(execConnector{passwordHash: passwordHash})
 			t.Cleanup(func() { require.NoError(t, db.Close()) })
-			passwordHandler := NewHandler(db, nil, logger.New("test"), testDisconnector{}, revokeMFAVerifier{})
+			lockoutRedis := redis.NewClient(&redis.Options{Addr: miniredis.RunT(t).Addr()})
+			t.Cleanup(func() { require.NoError(t, lockoutRedis.Close()) })
+			passwordHandler := NewHandler(db, lockoutRedis, logger.New("test"), testDisconnector{}, revokeMFAVerifier{})
 			passwordRecorder := &securityEventRecorder{}
 			passwordHandler.SetSecurityEvents(passwordRecorder)
 			passwordContext, passwordResponse := newContext()
@@ -389,7 +412,27 @@ func (c execConn) QueryContext(_ context.Context, query string, _ []driver.Named
 	if c.connector.passwordHash == "" {
 		return noSessionRows{}, nil
 	}
+	if strings.Contains(query, "SELECT email, password_hash") {
+		return &emailHashRow{hash: c.connector.passwordHash}, nil
+	}
 	return &oneSessionStringRow{value: c.connector.passwordHash}, nil
+}
+
+// emailHashRow answers verifyUserPassword's lockout-keyed read.
+type emailHashRow struct {
+	hash string
+	sent bool
+}
+
+func (emailHashRow) Columns() []string { return []string{"email", "password_hash"} }
+func (emailHashRow) Close() error      { return nil }
+func (r *emailHashRow) Next(dest []driver.Value) error {
+	if r.sent {
+		return io.EOF
+	}
+	dest[0], dest[1] = "revoke-events@example.test", r.hash
+	r.sent = true
+	return nil
 }
 
 type execTx struct{ connector execConnector }

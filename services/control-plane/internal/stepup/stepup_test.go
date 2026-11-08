@@ -83,7 +83,7 @@ func TestVerifyPasswordFactor_PasswordlessWithoutMFAIsActionable400(t *testing.T
 	// the fail-safe's behaviour so a future schema change or auth method
 	// inherits a defined answer rather than a 500. Do not read it as evidence
 	// that an SSO account has no hash.
-	err := VerifyPasswordFactor(Subject{PasswordHash: "", MFAEnabled: false}, "", testCopy)
+	err := VerifyPasswordFactor(nil, Subject{PasswordHash: "", MFAEnabled: false}, "", testCopy)
 
 	require.NotNil(t, err)
 	require.Equal(t, http.StatusBadRequest, err.Status)
@@ -94,7 +94,7 @@ func TestVerifyPasswordFactor_PasswordlessWithoutMFAIsActionable400(t *testing.T
 func TestVerifyPasswordFactor_PasswordlessWithMFAPasses(t *testing.T) {
 	// No usable password factor but MFA enabled: MFA carries the step-up.
 	// Same defence-in-depth framing as the case above — unreachable today.
-	require.Nil(t, VerifyPasswordFactor(Subject{PasswordHash: "", MFAEnabled: true}, "", testCopy))
+	require.Nil(t, VerifyPasswordFactor(nil, Subject{PasswordHash: "", MFAEnabled: true}, "", testCopy))
 }
 
 func TestVerifyPasswordFactor_MissingPasswordIs403(t *testing.T) {
@@ -103,7 +103,7 @@ func TestVerifyPasswordFactor_MissingPasswordIs403(t *testing.T) {
 	// literal here would need a nolint pragma to survive the linter.
 	const truncatedHash = "$argon2id$vali"
 
-	err := VerifyPasswordFactor(Subject{PasswordHash: truncatedHash, MFAEnabled: false}, "", testCopy)
+	err := VerifyPasswordFactor(nil, Subject{PasswordHash: truncatedHash, MFAEnabled: false}, "", testCopy)
 
 	require.NotNil(t, err)
 	require.Equal(t, http.StatusForbidden, err.Status)
@@ -115,7 +115,7 @@ func TestVerifyPasswordFactor_WrongPasswordIs403(t *testing.T) {
 	hash, hashErr := auth.HashPassword("correct-horse-battery")
 	require.NoError(t, hashErr)
 
-	err := VerifyPasswordFactor(Subject{PasswordHash: hash}, "wrong-password", testCopy)
+	err := VerifyPasswordFactor(reservedAttempt(t), Subject{PasswordHash: hash}, "wrong-password", testCopy)
 
 	require.NotNil(t, err)
 	require.Equal(t, http.StatusForbidden, err.Status)
@@ -127,7 +127,7 @@ func TestVerifyPasswordFactor_CorrectPasswordPasses(t *testing.T) {
 	hash, hashErr := auth.HashPassword(plaintext)
 	require.NoError(t, hashErr)
 
-	require.Nil(t, VerifyPasswordFactor(Subject{PasswordHash: hash}, plaintext, testCopy))
+	require.Nil(t, VerifyPasswordFactor(reservedAttempt(t), Subject{PasswordHash: hash}, plaintext, testCopy))
 }
 
 func TestVerifyPasswordFactor_MalformedHashIs500(t *testing.T) {
@@ -135,7 +135,7 @@ func TestVerifyPasswordFactor_MalformedHashIs500(t *testing.T) {
 	// user error — surface 500, not a misleading "invalid password".
 	const malformedHash = "not-a-valid-argon2-hash"
 
-	err := VerifyPasswordFactor(Subject{PasswordHash: malformedHash}, "anything", testCopy)
+	err := VerifyPasswordFactor(reservedAttempt(t), Subject{PasswordHash: malformedHash}, "anything", testCopy)
 
 	require.NotNil(t, err)
 	require.Equal(t, http.StatusInternalServerError, err.Status)
@@ -228,7 +228,7 @@ func TestError_PasswordFailureCarriesSentinelNotUnderlyingError(t *testing.T) {
 	// literal assigned to a PasswordHash field, the same hazard that governs
 	// the Copy.CredentialRequired naming. Bind, do not nolint.
 	unparseable := "not-a-valid-argon2-encoding"
-	err := VerifyPasswordFactor(
+	err := VerifyPasswordFactor(reservedAttempt(t),
 		Subject{PasswordHash: unparseable, MFAEnabled: false},
 		"any-input", testCopy)
 
@@ -245,8 +245,8 @@ func TestError_RejectionsCarryNoCause(t *testing.T) {
 	// error into error-level noise and hint at which accounts are being probed.
 	stubEncoding := "$argon2id$stub" // bound, not inline — gosec G101
 	cases := map[string]*Error{
-		"no factors available": VerifyPasswordFactor(Subject{}, "", testCopy),
-		"password omitted": VerifyPasswordFactor(
+		"no factors available": VerifyPasswordFactor(nil, Subject{}, "", testCopy),
+		"password omitted": VerifyPasswordFactor(nil,
 			Subject{PasswordHash: stubEncoding}, "", testCopy),
 		"mfa code omitted": VerifyMFAFactor(context.Background(),
 			&fakeMFAVerifier{enabled: true}, "u1", testPurpose, "", []string{"totp"}),
