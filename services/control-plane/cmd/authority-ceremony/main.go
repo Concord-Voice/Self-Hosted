@@ -143,8 +143,13 @@ func signDelegation(args []string, e env) error {
 	if err := showTrust(e.out, tr, *first); err != nil {
 		return err
 	}
+	primaryA, primaryB := tr.CurrentPrimaries()
+	keys := [2]named{{"primary A", primaryA}, {"primary B", primaryB}}
 	if *dryRun {
 		if err := showDelegation(e.out, msg, d); err != nil {
+			return err
+		}
+		if err := sf.checkKeys(e, keys); err != nil {
 			return err
 		}
 		_, err := fmt.Fprintln(e.out, "dry run: the precheck passed and nothing was signed")
@@ -153,7 +158,7 @@ func signDelegation(args []string, e env) error {
 	if err := refuseExisting(*outPath); err != nil {
 		return err
 	}
-	p, err := sf.signer(e)
+	p, err := sf.signer(e, keys)
 	if err != nil {
 		return err
 	}
@@ -162,11 +167,10 @@ func signDelegation(args []string, e env) error {
 			return err
 		}
 	}
-	primaryA, primaryB := tr.CurrentPrimaries()
 	c := ceremony{e: e, p: p, yes: *sf.yes, tr: tr, msg: msg, kind: "delegation", out: *outPath,
 		show:   func() error { return showDelegation(e.out, msg, d) },
 		reread: func() ([]byte, error) { b, _, err := readSpec(*specPath); return b, err },
-		keys:   [2]named{{"primary A", primaryA}, {"primary B", primaryB}}}
+		keys:   keys}
 	if err := c.run(); err != nil {
 		return err
 	}
@@ -208,8 +212,13 @@ func signSuccession(args []string, e env) error {
 		return err
 	}
 	show := func() error { return showSuccession(e.out, msg, m) }
+	recA, recB := tr.CurrentRecoveries()
+	keys := [2]named{{"recovery A′", recA}, {"recovery B′", recB}}
 	if *dryRun {
 		if err := show(); err != nil {
+			return err
+		}
+		if err := sf.checkKeys(e, keys); err != nil {
 			return err
 		}
 		_, err := fmt.Fprintln(e.out, "dry run: the precheck passed and nothing was signed")
@@ -218,14 +227,13 @@ func signSuccession(args []string, e env) error {
 	if err := refuseExisting(*outPath); err != nil {
 		return err
 	}
-	p, err := sf.signer(e)
+	p, err := sf.signer(e, keys)
 	if err != nil {
 		return err
 	}
-	recA, recB := tr.CurrentRecoveries()
 	c := ceremony{e: e, p: p, yes: *sf.yes, tr: tr, msg: msg, kind: "succession", out: *outPath, show: show,
 		reread: func() ([]byte, error) { b, _, err := readSuccessionSpec(*specPath); return b, err },
-		keys:   [2]named{{"recovery A′", recA}, {"recovery B′", recB}}}
+		keys:   keys}
 	if err := c.run(); err != nil {
 		return err
 	}

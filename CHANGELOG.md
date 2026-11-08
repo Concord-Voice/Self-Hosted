@@ -35,7 +35,7 @@ until an operator turns them on. Self-hosted deployments now ship from this
 repository, and operators can set separate minimum app versions for iOS and
 Android.
 
-**23 Total Changes** | 9 Added | 5 Changed | 7 Fixed | 2 Security
+**22 Total Changes** | 8 Added | 5 Changed | 7 Fixed | 2 Security
 
 ### Added
 
