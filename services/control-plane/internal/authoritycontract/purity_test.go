@@ -63,7 +63,7 @@ func packagePurityPolicy() purityPolicy {
 			vars[n] = reason
 		}
 	}
-	allow("error sentinel, assigned at declaration", "ErrMalformed", "ErrIgnored")
+	allow("error sentinel, assigned at declaration", "ErrMalformed", "ErrIgnored", "ErrPrecheck")
 	allow("kind descriptor, assigned at declaration and only read",
 		"kP97", "kEKSPKI", "kS36", "kS36v4", "kU", "kU1", "kU01", "kDev")
 	allow("closed enum value set, assigned at declaration and only read",
