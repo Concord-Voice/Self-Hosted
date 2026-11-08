@@ -15,12 +15,6 @@
 # Secrets are files the installer writes under ${AUTHORITY_DIR}, mode 0400. The
 # authority image runs as uid 65532 and the loader refuses a passfile, RSK or
 # TLS key that uid does not own; the postgres image's postgres user is uid 70.
-x-authority-hardening: &authority-hardening
-  read_only: true
-  cap_drop: [ALL]
-  security_opt: ["no-new-privileges:true"]
-  restart: unless-stopped
-
 services:
   authority-postgres:
     image: concordvoice-postgres:16-alpine
@@ -52,7 +46,10 @@ services:
       retries: 5
 
   authority:
-    <<: *authority-hardening
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    restart: unless-stopped
     image: concordvoice-account-authority:local
     build:
       context: ./services/control-plane
