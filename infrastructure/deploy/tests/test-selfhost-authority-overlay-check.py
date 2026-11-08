@@ -77,8 +77,15 @@ def check(model):
         fails.append("(e) authority-postgres has a network")
     if "listen_addresses=" not in (apg.get("command") or []):
         fails.append("(e) authority-postgres does not set an empty listen_addresses")
-    if apg.get("entrypoint") != ["docker-entrypoint.sh"]:
+    ep = apg.get("entrypoint") or []
+    # `compose config` keeps "$$" escaped; the container's shell sees "$@".
+    if len(ep) != 4 or ep[:2] != ["sh", "-c"] or not ep[2].endswith('exec docker-entrypoint.sh "$$@"'):
         fails.append("(e) authority-postgres runs the CP image's entrypoint wrapper")
+    elif "chown postgres:postgres /run/authority-pg" not in ep[2] or "chmod 0755 /run/authority-pg" not in ep[2]:
+        fails.append("(e) authority-postgres does not hand the socket directory to postgres")
+    dirs = next((a.split("=", 1)[1] for a in apg.get("command") or [] if a.startswith("unix_socket_directories=")), "")
+    if dirs.split(",") != ["/run/authority-pg", "/var/run/postgresql"]:
+        fails.append("(e) authority-postgres does not put its socket in the shared directory first")
     return fails
 
 

@@ -88,6 +88,8 @@ mutant "CP postgres mounts the authority socket" e '.services.postgres.volumes +
 mutant "authority postgres on a network" e 'del(.services["authority-postgres"].network_mode)'
 mutant "authority postgres listens on TCP" e '.services["authority-postgres"].command |= map(if . == "listen_addresses=" then "listen_addresses=*" else . end)'
 mutant "authority postgres runs the CP wrapper" e 'del(.services["authority-postgres"].entrypoint)'
+mutant "socket directory left root-owned" e '.services["authority-postgres"].entrypoint[2] |= sub("chown postgres:postgres /run/authority-pg && "; "")'
+mutant "socket only in the default directory" e '.services["authority-postgres"].command |= map(if startswith("unix_socket_directories=") then "unix_socket_directories=/var/run/postgresql" else . end)'
 
 if [[ "$(printf 'not json' | python3 "$CHECKER")" == "FAIL: the rendered model is not JSON" ]]; then
   ok "a non-JSON render is refused"

@@ -20,8 +20,13 @@ services:
     image: concordvoice-postgres:16-alpine
     # The upstream entrypoint, not the CP image's wrapper: the wrapper installs
     # the CP's ops-metrics login rules, which do not belong in this cluster.
-    entrypoint: ["docker-entrypoint.sh"]
-    command: ["postgres", "-c", "listen_addresses=", "-c", "unix_socket_directories=/run/authority-pg"]
+    # Docker creates the socket volume root-owned, and the upstream entrypoint
+    # prepares only /var/run/postgresql, so hand the shared directory to
+    # postgres first (0755: the authority loader refuses an other-writable one).
+    entrypoint: ["sh", "-c", 'chown postgres:postgres /run/authority-pg && chmod 0755 /run/authority-pg && exec docker-entrypoint.sh "$$@"', "authority-postgres"]
+    # The shared directory comes first; the second keeps the upstream
+    # entrypoint's own psql calls, and the init script's, on their default socket.
+    command: ["postgres", "-c", "listen_addresses=", "-c", "unix_socket_directories=/run/authority-pg,/var/run/postgresql"]
     environment:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD_FILE: /run/secrets/authority_superuser_password
