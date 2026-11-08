@@ -7,6 +7,7 @@
 /.pre-commit-config.yaml                             @Concord-Voice/security
 docker-compose.production.yml                       @Concord-Voice/security
 docker-compose.selfhost.yml                         @Concord-Voice/security
+docker-compose.authority.yml                        @Concord-Voice/security
 docker-compose.byo-s3.yml                           @Concord-Voice/security
 infrastructure/**                                   @Concord-Voice/security
 /scripts/security/**                                 @Concord-Voice/security

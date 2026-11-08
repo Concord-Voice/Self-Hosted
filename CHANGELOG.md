@@ -40,6 +40,7 @@ Android.
 ### Added
 
 - **Authentication:** Added dormant checks to the account-key authority contract that refuse a delegation or succession before it is signed when clients would ignore it, halt on it, or see its cutover or supersession move backward. Nothing calls them yet.
+- **Self-host:** Added a dormant compose overlay that runs the account-key authority beside its own socket-only PostgreSQL, with a contract test that keeps owner credentials, signing keys and authority settings away from the control plane. The installer does not use it yet.
 - **Authentication:** Added a dormant internal store for account-change request and origin rows, with caller-owned transactions and explicit retention of other decision obligations.
 - **Self-hosting:** Operators can configure separate Stable and Pre-Release SPA discovery streams. Existing clients keep Stable behavior; remote SPA serving remains off by default, and invalid live configuration updates preserve the previous settings.
 - **Self-hosted setup:** Fresh installer environment files now include explicit WebSocket event-budget settings, with preparation and rollback guidance for existing installations. Runtime delivery and activation remain separate steps.
