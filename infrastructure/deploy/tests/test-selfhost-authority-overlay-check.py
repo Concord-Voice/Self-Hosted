@@ -9,11 +9,16 @@ line per broken rule, naming its letter:
   (d) no other service carries an AUTHORITY_* variable or an authority secret;
   (e) the authority's PostgreSQL shares no volume or socket with the CP's
       postgres, has no network, listens on no TCP address and skips the CP
-      image's wrapper.
+      image's wrapper;
+  (f) only the authority joins the internal authority network, at an address
+      inside its subnet, read-only with every capability dropped, and the
+      owner job has no network.
 Exit 0 when every rule holds, 1 otherwise.
 """
+import ipaddress
 import json
 import sys
+from urllib.parse import parse_qs, urlsplit
 
 AUTHORITY = {"authority", "authority-owner", "authority-postgres"}
 OWNER_SECRETS = {"authority_owner_pgpass", "authority_owner_password", "authority_superuser_password"}
@@ -44,7 +49,7 @@ def check(model):
     if secret_sources(auth) & OWNER_SECRETS:
         fails.append("(a) authority mounts an owner secret")
     url = env.get("AUTHORITY_DATABASE_URL") or ""
-    if "user=authority_app&" not in url + "&" or "authority_owner" in url:
+    if parse_qs(urlsplit(url).query).get("user") != ["authority_app"] or "authority_owner" in url:
         fails.append("(a) authority's database URL is not authority_app's")
 
     if not owner.get("profiles"):
@@ -86,6 +91,30 @@ def check(model):
     dirs = next((a.split("=", 1)[1] for a in apg.get("command") or [] if a.startswith("unix_socket_directories=")), "")
     if dirs.split(",") != ["/run/authority-pg", "/var/run/postgresql"]:
         fails.append("(e) authority-postgres does not put its socket in the shared directory first")
+    fails += check_network(model, services, auth, owner)
+    return fails
+
+
+def check_network(model, services, auth, owner):
+    fails = []
+    net = (model.get("networks") or {}).get("concordvoice-authority") or {}
+    if net.get("internal") is not True:
+        fails.append("(f) concordvoice-authority is not internal")
+    for name, svc in services.items():
+        if name != "authority" and "concordvoice-authority" in (svc.get("networks") or {}):
+            fails.append(f"(f) {name} joins concordvoice-authority")
+    if auth.get("read_only") is not True or auth.get("cap_drop") != ["ALL"]:
+        fails.append("(f) authority is not read-only with every capability dropped")
+    if owner.get("network_mode") != "none":
+        fails.append("(f) authority-owner has a network")
+    try:
+        ip = ipaddress.ip_address(((auth.get("networks") or {}).get("concordvoice-authority") or {}).get("ipv4_address", ""))
+        subnets = [ipaddress.ip_network(c["subnet"]) for c in (net.get("ipam") or {}).get("config") or []]
+        inside = any(ip in n for n in subnets)
+    except (KeyError, ValueError):
+        inside = False
+    if not inside:
+        fails.append("(f) authority's address is not inside the authority subnet")
     return fails
 
 

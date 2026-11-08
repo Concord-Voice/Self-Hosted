@@ -32,3 +32,7 @@ local authority authority_app   scram-sha-256
 local authority authority_owner scram-sha-256
 local all       all             reject
 HBA
+
+# Last: the healthcheck waits for this marker, so a bootstrap that stops
+# earlier never reports healthy.
+touch "$PGDATA/authority-bootstrap.done"

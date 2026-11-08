@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Tests for docker-compose.authority.yml through test-selfhost-authority-overlay-check.py
-# (DoR D-173 contract (a)-(e)). CI-run via pr-ci.yml's
+# (DoR D-173 contract (a)-(e), plus the network rule (f)). CI-run via pr-ci.yml's
 # infrastructure/deploy/tests/test-*.sh loop. The render needs `docker compose`
 # but no daemon.
 set -uo pipefail
@@ -58,7 +58,7 @@ else
 fi
 
 if out="$(python3 "$CHECKER" <"$WORK/real.json")"; then
-  ok "the rendered overlay meets (a)-(e)"
+  ok "the rendered overlay meets (a)-(f)"
 else
   bad "the rendered overlay breaks the contract: $out"
 fi
@@ -78,6 +78,7 @@ mutant() { # NAME LETTER JQ
 mutant "owner URL on authority" a '.services.authority.environment.AUTHORITY_MIGRATE_DATABASE_URL = "x"'
 mutant "owner passfile on authority" a '.services.authority.secrets += [{"source":"authority_owner_pgpass"}]'
 mutant "owner role in authority URL" a '.services.authority.environment.AUTHORITY_DATABASE_URL |= sub("authority_app"; "authority_owner")'
+mutant "another role, app user hidden in a value" a '.services.authority.environment.AUTHORITY_DATABASE_URL |= sub("user=authority_app"; "user=postgres&application_name=user=authority_app")'
 mutant "owner job without profile" b 'del(.services["authority-owner"].profiles)'
 mutant "owner job restarts" b '.services["authority-owner"].restart = "unless-stopped"'
 mutant "owner job holds the RSK" c '.services["authority-owner"].secrets += [{"source":"authority_rsk"}]'
@@ -90,6 +91,12 @@ mutant "authority postgres listens on TCP" e '.services["authority-postgres"].co
 mutant "authority postgres runs the CP wrapper" e 'del(.services["authority-postgres"].entrypoint)'
 mutant "socket directory left root-owned" e '.services["authority-postgres"].entrypoint[2] |= sub("chown postgres:postgres /run/authority-pg && "; "")'
 mutant "socket only in the default directory" e '.services["authority-postgres"].command |= map(if startswith("unix_socket_directories=") then "unix_socket_directories=/var/run/postgresql" else . end)'
+mutant "authority network not internal" f '.networks["concordvoice-authority"].internal = false'
+mutant "CP joins the authority network" f '.services["control-plane"].networks["concordvoice-authority"] = {}'
+mutant "authority writable" f '.services.authority.read_only = false'
+mutant "authority keeps capabilities" f 'del(.services.authority.cap_drop)'
+mutant "owner job on a network" f 'del(.services["authority-owner"].network_mode)'
+mutant "authority address outside the subnet" f '.services.authority.networks["concordvoice-authority"].ipv4_address = "172.30.54.2"'
 
 if [[ "$(printf 'not json' | python3 "$CHECKER")" == "FAIL: the rendered model is not JSON" ]]; then
   ok "a non-JSON render is refused"

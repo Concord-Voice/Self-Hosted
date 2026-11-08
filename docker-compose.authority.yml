@@ -4,17 +4,24 @@
 # integration ships, so this overlay adds services the CP does not yet reach.
 #
 # Shape, each part asserted by infrastructure/deploy/tests/test-selfhost-authority-overlay.sh:
-#   - authority-postgres is the authority's own cluster. It listens on a socket only
-#     (no TCP, no network) in a volume it shares with the two authority services
-#     alone, never with the CP's postgres.
+#   - authority-postgres is the authority's own cluster. It listens on sockets only
+#     (no TCP, no network): in a volume it shares with the two authority services
+#     alone, never with the CP's postgres, and in its own default socket
+#     directory, which nothing outside the container sees.
+#   - Only authority joins the internal concordvoice-authority network, read-only
+#     and with every capability dropped; the owner job has no network.
 #   - authority runs `serve` as authority_app. It holds the RSK and TLS key; nothing
 #     else mounts them. It has no owner URL and no owner passfile.
 #   - authority-owner is the one-shot owner job (migrate and the owner verbs):
 #     a profile, restart "no", run by hand: `docker compose ... run --rm authority-owner <verb>`.
 #
-# Secrets are files the installer writes under ${AUTHORITY_DIR}, mode 0400. The
-# authority image runs as uid 65532 and the loader refuses a passfile, RSK or
-# TLS key that uid does not own; the postgres image's postgres user is uid 70.
+# Secrets are files the installer writes under ${AUTHORITY_DIR}/secrets, mode 0400,
+# owned by the uid that reads them:
+#   - uid 70 (the postgres image's postgres user, which runs the entrypoint's
+#     password read and the init script): superuser-password, app-password,
+#     owner-password.
+#   - uid 65532 (the authority image; the loader refuses a passfile, RSK or TLS
+#     key that uid does not own): app-pgpass, owner-pgpass, rsk, tls-key.
 services:
   authority-postgres:
     image: concordvoice-postgres:16-alpine
@@ -31,6 +38,9 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD_FILE: /run/secrets/authority_superuser_password
       POSTGRES_DB: postgres
+      # No trust rule ever: a bootstrap that dies half way leaves a cluster
+      # nobody can log in to, not an open one.
+      POSTGRES_INITDB_ARGS: --auth=scram-sha-256
     network_mode: none
     cap_drop: [ALL]
     cap_add: [CHOWN, DAC_OVERRIDE, FOWNER, SETGID, SETUID]
@@ -45,7 +55,9 @@ services:
       - authority-pg-socket:/run/authority-pg
       - ./infrastructure/docker/authority-postgres/init:/docker-entrypoint-initdb.d:ro
     healthcheck:
-      test: ["CMD", "pg_isready", "-h", "/run/authority-pg", "-d", "authority"]
+      # Healthy only once the bootstrap finished; pg_isready alone also passes on
+      # initdb's temporary server and on a cluster whose bootstrap failed.
+      test: ["CMD-SHELL", 'test -f "$$PGDATA/authority-bootstrap.done" && pg_isready -q -h /run/authority-pg -U authority_app -d authority']
       interval: 10s
       timeout: 5s
       retries: 5
