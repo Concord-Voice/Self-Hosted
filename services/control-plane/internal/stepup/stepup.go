@@ -252,7 +252,7 @@ func VerifyPasswordFactor(attempt *PasswordAttempt, subj Subject, currentPasswor
 		// err is ErrPasswordNotReserved or ErrPasswordVerification: Check
 		// DISCARDS the argon2 decode error, which can embed the malformed hash
 		// it could not parse, and a password hash may reach no log sink in any
-		// form ([internal]rules/observability.md Core principle #1). Each
+		// form (the observability policy, Core principle #1). Each
 		// sentinel names the stage that broke and carries nothing derived from
 		// the credential.
 		return verificationFailed(err)

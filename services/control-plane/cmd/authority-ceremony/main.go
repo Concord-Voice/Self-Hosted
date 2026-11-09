@@ -207,7 +207,8 @@ func signSuccession(args []string, e env) error {
 		return errUsage
 	}
 	tr, err := loadTrust(*anchorsPath, *trustPath)
-	if err != nil {
+	var halt *ac.HaltError
+	if err != nil && !errors.As(err, &halt) {
 		return err
 	}
 	msg, m, err := readSuccessionSpec(*specPath)
@@ -348,8 +349,9 @@ func newPIVSigner(tool, slot string, e env) (pivSigner, error) {
 }
 
 // loadTrust is the realm's trust as clients build it: the anchors file and,
-// unless this is the first delegation, the realm's trust file. A halted trust
-// is refused: no delegation repairs a T4 halt.
+// unless this is the first delegation, the realm's trust file. A typed halt
+// returns the populated trust alongside the error so recovery callers can
+// apply their own checks. Every other admission error returns no trust.
 func loadTrust(anchorsPath, trustPath string) (*ac.Trust, error) {
 	b, err := os.ReadFile(anchorsPath) //nolint:gosec // G304: operator-supplied path
 	if err != nil {
@@ -371,6 +373,10 @@ func loadTrust(anchorsPath, trustPath string) (*ac.Trust, error) {
 		return nil, err
 	}
 	if err := tr.AddTrust(envelope); err != nil {
+		var halt *ac.HaltError
+		if errors.As(err, &halt) {
+			return tr, fmt.Errorf("trust: %w", err)
+		}
 		return nil, fmt.Errorf("trust: %w", err)
 	}
 	return tr, nil
@@ -717,7 +723,8 @@ func addTrust(args []string, e env) error {
 		return err
 	}
 	tr, err := loadTrust(*anchors, *trustPath)
-	if err != nil {
+	var halt *ac.HaltError
+	if err != nil && !errors.As(err, &halt) {
 		return err
 	}
 	var items [][]byte
