@@ -289,7 +289,7 @@ jobs:
     def test_valid_pr_selection_never_claims_protected_codeql_ownership(self):
         metadata = {"event_name": "pull_request", "hotfix": False,
                     "head_sha": "a" * 40, "base_sha": "b" * 40,
-                    "merge_sha": "c" * 40, "changed_files": 2}
+                    "merge_base_sha": "b" * 40, "merge_sha": "c" * 40, "changed_files": 2}
         for mode in ("legacy", "required-full", "required-relevant"):
             with self.subTest(mode=mode):
                 selection = compose_selection(metadata, mode)

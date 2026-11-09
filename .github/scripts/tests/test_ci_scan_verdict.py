@@ -64,8 +64,8 @@ def selection(categories=None, coverage=None, sonar=False):
     cats.update({"codeql_go": True} if categories is None else categories)
     required = dict.fromkeys(("desktop", "control_plane", "media_plane", "admin"), False)
     required.update(coverage or {})
-    return {"version": 1, "known": True, "mode": "required-relevant",
-            "head_sha": HEAD, "base_sha": BASE, "merge_sha": MERGE,
+    return {"version": 2, "known": True, "mode": "required-relevant",
+            "head_sha": HEAD, "base_sha": BASE, "merge_sha": MERGE, "merge_base_sha": BASE,
             "policy_sha": POLICY, "selected": cats,
             "coverage_required": required}
 
@@ -113,7 +113,7 @@ def evidence_for(items=None):
     return {"run": {"id": RUN_ID, "run_attempt": int(ATTEMPT),
                 "head_sha": HEAD,
                 "referenced_workflows": referenced_workflows},
-            "source_policy_sha": POLICY, "provenance_verified": True,
+            "source_policy_sha": POLICY, "provenance_verified": True, "merge_base_verified": True,
             "artifact_verified": True, "osv_source_verified": any(
                 scan.get("tool") == "osv-scanner" for scan in (items or [item])), "reports": reports,
             "osv_correlations": osv_correlations,
@@ -645,6 +645,55 @@ class ScanVerdictTests(unittest.TestCase):
             with self.subTest(diagnostic=diagnostic, selection=selected):
                 self.assertTrue(any(diagnostic in reason.lower() for reason in self.verdict(sel=selected)))
 
+    def test_v2_selection_version_requires_an_exact_integer(self):
+        self.assertEqual([], self.verdict())
+        for version in (True, False, 2.0, '2', None):
+            selected = selection()
+            selected['version'] = version
+            with self.subTest(version=version):
+                self.assertIn('unknown: selection invalid', self.verdict(sel=selected))
+
+    def test_legacy_v1_bootstrap_is_bounded_to_the_immutable_deployed_policy(self):
+        legacy_policy = MODULE.LEGACY_SELECTION_POLICY_SHA
+        legacy = selection()
+        legacy.update(version=1, policy_sha=legacy_policy)
+        evidence = evidence_for()
+        evidence['source_policy_sha'] = legacy_policy
+        evidence['run']['referenced_workflows'][0].update(
+            path='Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@' + legacy_policy,
+            sha=legacy_policy)
+        self.assertEqual([], self.verdict(ev=evidence, sel=legacy),
+                         'only the deployed immutable v1 producer may bridge pin activation')
+
+        for policy in ('e' * 40, POLICY):
+            other = copy.deepcopy(legacy)
+            other['policy_sha'] = policy
+            candidate = copy.deepcopy(evidence)
+            candidate['source_policy_sha'] = policy
+            candidate['run']['referenced_workflows'][0].update(
+                path='Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@' + policy,
+                sha=policy)
+            with self.subTest(policy=policy):
+                self.assertIn('unknown: selection invalid', self.verdict(ev=candidate, sel=other))
+
+        unrecognized = copy.deepcopy(legacy)
+        unrecognized['version'] = 3
+        self.assertIn('unknown: selection invalid', self.verdict(ev=evidence, sel=unrecognized))
+        moved = copy.deepcopy(PR)
+        moved['head']['sha'] = 'e' * 40
+        self.assertIn('unknown: PR head revision moved', self.verdict(ev=evidence, sel=legacy, pr=moved))
+
+    def test_v2_requires_a_verified_well_formed_merge_base(self):
+        self.assertEqual([], self.verdict())
+        for value in ('', 'not-a-sha', None):
+            selected = selection()
+            selected['merge_base_sha'] = value
+            with self.subTest(merge_base=value):
+                self.assertIn('unknown: protected merge base unproven', self.verdict(sel=selected))
+        evidence = evidence_for()
+        evidence['merge_base_verified'] = False
+        self.assertIn('unknown: protected merge base unproven', self.verdict(ev=evidence))
+
     def test_each_selected_scanner_category_requires_matching_analysis(self):
         cases = [
             ("codeql_actions", "CodeQL", "/language:actions"),
@@ -794,6 +843,11 @@ class ScanVerdictTests(unittest.TestCase):
         ahead = compare_response("ahead", WRAPPER, ahead=3)
         self.assertTrue(MODULE._ancestor(ahead, WRAPPER, MAIN))
         self.assertTrue(MODULE._ancestor(compare_response("identical", WRAPPER), WRAPPER, WRAPPER))
+        for field, value in (("ahead_by", True), ("total_commits", True), ("behind_by", False)):
+            malformed = copy.deepcopy(ahead)
+            malformed[field] = value
+            with self.subTest(field=field):
+                self.assertFalse(MODULE._ancestor(malformed, WRAPPER, MAIN))
         for label, change in (
                 ("the ancestor is behind the tip", {"behind_by": 1}),
                 ("the behind count is missing", {"behind_by": None}),
@@ -1379,6 +1433,8 @@ class ProtectedProvenanceCollectionTests(unittest.TestCase):
             f"/actions/runs/{RUN_ID}": run,
             "/git/ref/heads/main": main_ref(tip) if ref is None else ref,
             f"/compare/{WRAPPER}...{tip}": tip_compare or on_main,
+            f"/compare/{BASE}...{tip}": compare_response("identical", BASE) if tip == BASE
+            else compare_response("ahead", BASE, ahead=1),
             # The question the old proof asked. The PR's base is an older main commit,
             # so the workflow commit is ahead of it and GitHub answers "behind".
             f"/compare/{WRAPPER}...{BASE}": compare_response("behind", WRAPPER, behind=2, merge_base=BASE),
@@ -1499,6 +1555,7 @@ class ProtectedCollectionTests(unittest.TestCase):
                     if path == "/pulls/3691": return pr, ""
                     if path == f"/actions/runs/{RUN_ID}": return run, ""
                     if path == "/git/ref/heads/main": return main_ref(), ""
+                    if path == f"/compare/{BASE}...{MAIN}": return compare_response("ahead", BASE, ahead=1), ""
                     if path == f"/compare/{wrapper_sha}...{MAIN}": return self.compare, ""
                     if path == f"/compare/{POLICY}...{wrapper_sha}": return self.pinned_compare, ""
                     raise AssertionError(f"unexpected API path: {path}")
@@ -1575,6 +1632,7 @@ class ProtectedCollectionTests(unittest.TestCase):
                     if path == f"/actions/runs/{RUN_ID}": return run, ""
                     # Provenance asks for main's live tip, which here is the commit the merge was built on.
                     if path == "/git/ref/heads/main": return main_ref(main_tip), ""
+                    if path == f"/compare/{main_tip}...{main_tip}": return compare_response("identical", main_tip), ""
                     if path == f"/compare/{wrapper_sha}...{main_tip}": return ahead, ""
                     if path == f"/compare/{POLICY}...{wrapper_sha}": return pinned, ""
                     raise AssertionError(f"unexpected API path: {path}")
@@ -1583,7 +1641,7 @@ class ProtectedCollectionTests(unittest.TestCase):
                     return []
 
             sel = selection({"semgrep_canary": True})
-            sel.update(base_sha=main_tip, head_sha=head, merge_sha=merge)
+            sel.update(base_sha=main_tip, head_sha=head, merge_sha=merge, merge_base_sha=main_tip)
             if selection_overrides is not None:
                 sel.update(selection_overrides(SimpleNamespace(base=main_tip, head=head,
                                                                merge=merge, origin=origin)))
@@ -1625,6 +1683,11 @@ class ProtectedCollectionTests(unittest.TestCase):
         self.assertEqual({"shared.go": [10]}, evidence["diff"]["added_lines"],
                          "the diff base must be the merge commit's other parent, not selection base_sha")
 
+    def test_collect_refuses_a_selected_merge_base_that_is_not_ordered_merge_parent(self):
+        with self.assertRaisesRegex(MODULE.Unknown, "selected merge base mismatch"):
+            self._collected_diff_evidence(
+                self.TOP_INSERT, lambda shas: {"merge_base_sha": shas.origin}, raise_unknown=True)
+
     def test_collect_admits_a_pr_behind_main_and_still_numbers_lines_in_the_merge_commit(self):
         # The provenance anchor does not require the PR to be current with main, so a PR whose recorded
         # base trails the commit GitHub merged it into reaches the diff step. That step must number
@@ -1653,9 +1716,9 @@ class ProtectedCollectionTests(unittest.TestCase):
             self._collected_diff_evidence(self.TOP_INSERT, lambda shas: {"merge_sha": "f" * 40},
                                           raise_unknown=True)
 
-    def test_collect_accepts_either_parent_order(self):
-        evidence = self._collected_diff_evidence(self.TOP_INSERT, head_first=True)
-        self.assertEqual({"shared.go": [10]}, evidence["diff"]["added_lines"])
+    def test_collect_refuses_reversed_merge_parent_order(self):
+        with self.assertRaisesRegex(MODULE.Unknown, "does not join the PR head in order"):
+            self._collected_diff_evidence(self.TOP_INSERT, head_first=True, raise_unknown=True)
 
 
 class StandaloneScanCollectionTests(unittest.TestCase):
@@ -1707,6 +1770,7 @@ class StandaloneScanCollectionTests(unittest.TestCase):
                 if path == "/pulls/3691": return pr, ""
                 if path == f"/actions/runs/{RUN_ID}": return run, ""
                 if path == "/git/ref/heads/main": return main_ref(), ""
+                if path == f"/compare/{BASE}...{MAIN}": return compare_response("ahead", BASE, ahead=1), ""
                 if path == f"/compare/{POLICY}...{MAIN}": return comparison, ""
                 if path == "/actions/workflows/osv-scanner.yml": return osv_workflow, ""
                 if path == "/actions/runs/777": return dict(self_test.child_run(), **(child or {})), ""

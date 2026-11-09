@@ -56,6 +56,10 @@ on:
       selected-base-sha:
         type: string
         required: false
+      selected-merge-base-sha:
+        description: "Protected main parent of the selected merge (distinct from PR API base identity)"
+        type: string
+        required: false
       selected-merge-sha:
         type: string
         required: false
@@ -82,7 +86,7 @@ jobs:
       # PR base SHA — used by both semgrep scan steps via --baseline-commit.
       # Robust against shallow clones (paired with fetch-depth: 0 below)
       # and fork PRs.
-      BASELINE_COMMIT: ${{ github.event.pull_request.base.sha }}
+      BASELINE_COMMIT: ${{ inputs.external-verdict && inputs.selected-merge-base-sha || github.event.pull_request.base.sha }}
       # Single source of truth for the Semgrep version. Referenced by
       # both the pip install step and the cache key so a future bump
       # only needs to change this one line.
@@ -98,6 +102,7 @@ jobs:
           PR_NUMBER: ${{ inputs.selected-pr-number }}
           HEAD_SHA: ${{ inputs.selected-head-sha }}
           BASE_SHA: ${{ inputs.selected-base-sha }}
+          MERGE_BASE_SHA: ${{ inputs.selected-merge-base-sha }}
           MERGE_SHA: ${{ inputs.selected-merge-sha }}
           CALLER_REF: ${{ github.workflow_ref }}
           CALLER_SHA: ${{ github.workflow_sha }}
@@ -115,7 +120,7 @@ jobs:
           [[ "$CALLER_SHA" =~ ^[0-9a-f]{40}$ ]] || reject
           test "$SELECTED_KNOWN" = 'true' || reject
           [[ "$PR_NUMBER" =~ ^[1-9][0-9]{0,9}$ ]] || reject
-          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ && "$BASE_SHA" =~ ^[0-9a-f]{40}$ && "$MERGE_SHA" =~ ^[0-9a-f]{40}$ ]] || reject
+          [[ "$HEAD_SHA" =~ ^[0-9a-f]{40}$ && "$BASE_SHA" =~ ^[0-9a-f]{40}$ && "$MERGE_SHA" =~ ^[0-9a-f]{40}$ && "$MERGE_BASE_SHA" =~ ^[0-9a-f]{40}$ ]] || reject
           test "$EVENT_PR_NUMBER" = "$PR_NUMBER" || reject
           [[ "$EVENT_HEAD_REPO" =~ ^[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9_.-]{1,100}$ ]] || reject
           test "$EVENT_BASE_REF" = 'main' || reject
@@ -128,9 +133,21 @@ jobs:
              .head.sha == $head and .base.sha == $base and .merge_commit_sha == $merge' \
             "$RUNNER_TEMP/protected-scan-pr.json" >/dev/null || reject
           gh api "repos/$GITHUB_REPOSITORY/commits/$MERGE_SHA" > "$RUNNER_TEMP/protected-scan-merge.json" 2>/dev/null || reject
-          jq -e --arg head "$HEAD_SHA" --arg base "$BASE_SHA" --arg merge "$MERGE_SHA" \
+          jq -e --arg head "$HEAD_SHA" --arg base "$MERGE_BASE_SHA" --arg merge "$MERGE_SHA" \
             '.sha == $merge and ([.parents[]?.sha] == [$base, $head])' \
             "$RUNNER_TEMP/protected-scan-merge.json" >/dev/null || reject
+          gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/main" > "$RUNNER_TEMP/protected-scan-main.json" 2>/dev/null || reject
+          jq -e '.ref == "refs/heads/main" and .object.type == "commit" and
+            (.object.sha | type == "string" and test("^[0-9a-f]{40}$"))' \
+            "$RUNNER_TEMP/protected-scan-main.json" >/dev/null || reject
+          MAIN_SHA="$(jq -r '.object.sha' "$RUNNER_TEMP/protected-scan-main.json")"
+          gh api "repos/$GITHUB_REPOSITORY/compare/$MERGE_BASE_SHA...$MAIN_SHA" > "$RUNNER_TEMP/protected-scan-ancestry.json" 2>/dev/null || reject
+          jq -e --arg base "$MERGE_BASE_SHA" --arg main "$MAIN_SHA" '
+            .base_commit.sha == $base and .merge_base_commit.sha == $base and .behind_by == 0 and
+            (.ahead_by | type == "number" and floor == . and . >= 0) and .ahead_by == .total_commits and
+            ((.status == "identical" and .ahead_by == 0 and $base == $main) or
+             (.status == "ahead" and .ahead_by > 0 and $base != $main))' \
+            "$RUNNER_TEMP/protected-scan-ancestry.json" >/dev/null || reject
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.external-verdict && inputs.selected-merge-sha || '' }}

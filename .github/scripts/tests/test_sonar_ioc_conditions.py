@@ -707,13 +707,16 @@ class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
           const keys = [...policy.matchAll(/^([a-z][a-z0-9_]*):$/gm)].map(match => match[1]);
           const filters = Object.fromEntries(keys.map(k => [k, 'false']));
           const metadata = {event_name:'pull_request', head_sha:'a'.repeat(40), base_sha:'b'.repeat(40),
-            merge_sha:'c'.repeat(40), changed_files:0, hotfix:false};
+            merge_base_sha:'b'.repeat(40), merge_sha:'c'.repeat(40), changed_files:0, hotfix:false};
           const policySha = 'd'.repeat(40);
           const full = composeSelection(filters, metadata, {mode:'required-full', policySha});
           const legacy = composeSelection(filters, metadata, {mode:'legacy', policySha});
+          const {merge_base_sha, ...withoutMergeBase} = metadata;
+          const missingRequired = composeSelection(filters, withoutMergeBase, {mode:'required-full', policySha});
+          const legacyWithoutMergeBase = composeSelection(filters, withoutMergeBase, {mode:'legacy', policySha});
           const hotfix = composeSelection(filters, {...metadata, hotfix:true}, {mode:'required-relevant', policySha});
           const unknown = composeSelection(filters, metadata, {mode:'invalid', policySha});
-          console.log(JSON.stringify({full, legacy, hotfix, unknown}));
+          console.log(JSON.stringify({full, legacy, missingRequired, legacyWithoutMergeBase, hotfix, unknown}));
         '''
         run = subprocess.run(["node", "--input-type=module", "-e", node], cwd=self.root,
                              text=True, capture_output=True, check=True)
@@ -735,6 +738,13 @@ class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
         self.assertTrue(selections["hotfix"]["selected"]["osv"],
                         "Hotfix keeps standalone OSV selected even when component filters are empty")
         self.assertEqual(selections["legacy"]["coverage_required"],
+                         {key: False for key in ("desktop", "control_plane", "media_plane", "admin")})
+        self.assertFalse(selections["missingRequired"]["known"],
+                         "required scan modes fail closed without a protected merge base")
+        self.assertTrue(selections["legacyWithoutMergeBase"]["known"],
+                        "legacy standalone mode remains compatible with old metadata")
+        self.assertEqual(selections["legacyWithoutMergeBase"]["version"], 1)
+        self.assertEqual(selections["legacyWithoutMergeBase"]["coverage_required"],
                          {key: False for key in ("desktop", "control_plane", "media_plane", "admin")})
         self.assertFalse(selections["unknown"]["known"])
 
