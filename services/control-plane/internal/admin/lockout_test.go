@@ -217,10 +217,10 @@ func TestLockout_EscalatesAcrossExpiry(t *testing.T) {
 	user, ip := uniqueAdminUsername("acct"), uniqueLockoutIP("1.2.4")
 	lk := admin.NewLockout(rdb, nil)
 
-	want := []time.Duration{1, 2, 4, 8, 16, 32, 60, 60, 60}
+	want := []int{1, 2, 4, 8, 16, 32, 60, 60, 60}
 	for i, minutes := range want {
 		lockOut(t, lk, user, ip+string(rune('a'+i)))
-		assertWindow(t, rdb, acctLockKey(user), minutes*time.Minute, "lock window")
+		assertWindow(t, rdb, acctLockKey(user), time.Duration(minutes)*time.Minute, "lock window")
 		// Expiry: the lock key goes, the level key stays.
 		require.NoError(t, rdb.Del(ctx, acctLockKey(user)).Err())
 		require.True(t, keyExists(t, rdb, acctLevelKey(user)), "the level must outlive the lock")

@@ -774,6 +774,14 @@ subcommand creates the first admin, inside the running container. An authenticat
 subsequent pending admin and returns its enrollment token once. The current
 Admin Portal does not expose that operation in its UI.
 
+**Admin CLI:** `control-plane admin <verb>` runs inside the running container, on host shell access only. It is never a deploy-pipeline step. The verbs are:
+
+| Verb | What it does |
+|---|---|
+| `bootstrap --username <handle>` | Creates a pending admin and prints a one-time enrollment URL and token. |
+| `reset-enrollment --username <handle>` | Revokes the admin's hardware keys, returns the admin to pending, and prints a new enrollment token. It does not change the password. |
+| `unlock <username>` | Clears the admin's sign-in lock, failed attempts and escalation level, so the next correct sign-in succeeds. It does not touch the IP lock, which expires within an hour. It writes one audit row. |
+
 **Auth flow (2FA mandatory):**
 
 1. `POST /admin/api/v1/auth/password` — constant-time password verify. Returns a short-lived challenge handle + WebAuthn `BeginLogin` assertion. **Password alone never yields a session.**
@@ -783,7 +791,7 @@ Admin Portal does not expose that operation in its UI.
 
 **Hardware key requirement:** `attestation: direct` is enforced at enrollment. The server checks the AAGUID against `ADMIN_WEBAUTHN_ALLOWED_AAGUIDS` (canonical YubiKey 5-series set). Only approved hardware keys can become admin credentials.
 
-**Lockout:** per-account + per-IP exponential backoff in Redis (IP is **hashed**, not stored raw) after 5 consecutive failures.
+**Lockout (#221):** per-account + per-IP exponential backoff in Redis (IP is **hashed**, not stored raw). `PasswordLogin` and `EnrollBegin` count each guess on both axes in one Lua script *before* the user lookup and the Argon2id verify, so a burst of concurrent requests gets at most 5 password verifies per account and per IP (CWE-367); the sixth guess is refused unchecked and locks the axis. A failed fifth guess locks it at once. Each axis keeps three keys: `attempts` (1 h window), `lock` (exists while locked) and `level` (counts locks; lives for the lock window plus 1 h, so it outlives the lock). A lock lasts 1, 2, 4, 8, 16, 32, then 60 minutes (cap) for level 1, 2, 3 ... A completed sign-in or enrollment clears `attempts` and `lock` but keeps `level`, so an attacker who resumes straight afterwards escalates at once; `admin unlock` clears all three for the account. Every guess is counted for unknown usernames too, so the lockout adds no enumeration oracle. A lockout store fault fails closed: 500 before any password verify. `WebAuthnLogin` re-checks the lock as a pure read, and `EnrollFinish` has no lockout re-check, because an enrollment that has begun must be able to finish. Trade-off: a third party who knows an admin username can keep that admin locked for up to 60 minutes at a time from many IPs; the cap bounds it and `admin unlock` is the way out.
 
 **Audit log:** `admin_audit_log` table — append-only, records every auth outcome and admin action with a sanitized actor identifier and opaque source reference. Never records passwords, assertion bytes, raw IPs, or end-user PII.
 

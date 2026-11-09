@@ -157,13 +157,13 @@ func TestLockout_EscalatesAcrossExpiries_ThroughHandlers(t *testing.T) { // regr
 			ctx := context.Background()
 			username := uniqueAdminUsername("esc")
 
-			for round, minutes := range []time.Duration{1, 2, 4, 8, 16, 32, 60, 60} {
+			for round, minutes := range []int{1, 2, 4, 8, 16, 32, 60, 60} {
 				for i := 0; i < 5; i++ {
 					// A fresh IP per guess keeps the IP axis out of the way.
 					code := h.guess(engine, fmt.Sprintf("10.%d.%d.1", round+10, i+1), username)
 					require.Equal(t, http.StatusUnauthorized, code, "round %d guess %d", round, i)
 				}
-				assertWindow(t, rdb, acctLockKey(username), minutes*time.Minute, fmt.Sprintf("round %d", round))
+				assertWindow(t, rdb, acctLockKey(username), time.Duration(minutes)*time.Minute, fmt.Sprintf("round %d", round))
 				require.Equal(t, http.StatusTooManyRequests, h.guess(engine, "10.99.99.99", username))
 				require.NoError(t, rdb.Del(ctx, acctLockKey(username)).Err()) // the lock expires
 			}
@@ -372,4 +372,34 @@ func enrollFailureAuditRows(t *testing.T, db *sql.DB, username string) int {
 		`SELECT count(*) FROM admin_audit_log WHERE actor = $1 AND event_type = $2 AND result = $3`,
 		username, admin.EventEnrollComplete, admin.AuditFailure).Scan(&n))
 	return n
+}
+
+func auditRows(t *testing.T, db *sql.DB, username, event, result string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM admin_audit_log WHERE actor = $1 AND event_type = $2 AND result = $3`,
+		username, event, result).Scan(&n))
+	return n
+}
+
+// Counting before the check moved the lockout write out of failLogin/failEnroll;
+// their audit rows stay: one failure row per refused guess, one denied row for a
+// guess refused by the lock.
+func TestFailedGuesses_KeepTheirAuditRows(t *testing.T) { // regression for #221
+	db, rdb, engine := setupEnrollLockout(t)
+	_, username, _ := enrolledAdmin(t, db, rdb)
+
+	require.Equal(t, http.StatusUnauthorized, loginGuess(engine, "10.7.0.1", username))
+	require.Equal(t, http.StatusUnauthorized, enrollGuess(engine, "10.7.0.2", username))
+	assert.Equal(t, 1, auditRows(t, db, username, admin.EventLoginFailure, admin.AuditFailure))
+	assert.Equal(t, 1, auditRows(t, db, username, admin.EventEnrollComplete, admin.AuditFailure))
+
+	for i := 0; i < 3; i++ { // reach five counted guesses
+		require.Equal(t, http.StatusUnauthorized, loginGuess(engine, fmt.Sprintf("10.7.1.%d", i+1), username))
+	}
+	require.Equal(t, http.StatusTooManyRequests, loginGuess(engine, "10.7.2.1", username))
+	require.Equal(t, http.StatusTooManyRequests, enrollGuess(engine, "10.7.2.2", username))
+	assert.Equal(t, 1, auditRows(t, db, username, admin.EventLoginFailure, admin.AuditDenied))
+	assert.Equal(t, 1, auditRows(t, db, username, admin.EventEnrollComplete, admin.AuditDenied))
 }
