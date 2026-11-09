@@ -11,6 +11,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -50,6 +51,38 @@ func enrollBegin(engine *gin.Engine, username, password, token string) (int, str
 		"username": username, "password": password, "token": token,
 	})
 	return rec.Code, rec.Body.String()
+}
+
+// enrollBeginFrom sends EnrollBegin from a chosen client IP.
+func enrollBeginFrom(engine *gin.Engine, ip, username, password, token string) (int, string) {
+	b, _ := json.Marshal(map[string]string{"username": username, "password": password, "token": token})
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/enroll/begin", bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = ip + ":1234"
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+	return rec.Code, rec.Body.String()
+}
+
+// defaultTestIP is the client IP httptest.NewRequest assigns.
+const defaultTestIP = "192.0.2.1"
+
+func acctKey(username string) string { return "admin_lockout:acct:" + username }
+
+func ipKey(ip string) string {
+	sum := sha256.Sum256([]byte(ip))
+	return "admin_lockout:ip:" + hex.EncodeToString(sum[:])
+}
+
+// failCount reads a lockout counter; an absent key is 0.
+func failCount(t *testing.T, rdb *redis.Client, key string) int64 {
+	t.Helper()
+	n, err := rdb.Get(context.Background(), key).Int64()
+	if errors.Is(err, redis.Nil) {
+		return 0
+	}
+	require.NoError(t, err)
+	return n
 }
 
 func passwordLogin(engine *gin.Engine, username, password string) (int, string) {
@@ -120,37 +153,35 @@ func TestEnrollBegin_BadTokenWithCorrectPasswordCounts(t *testing.T) { // regres
 	assert.Equal(t, http.StatusTooManyRequests, code, body)
 }
 
-// An active admin's correct password at enroll is a failure, with the same body
-// as an unknown user, and it counts toward the lockout.
+// An active admin's correct password and a token bound to that admin is a
+// failure, with the same body as an unknown user, and it counts toward the
+// lockout. The token is valid, so only the pending-status check can refuse.
 func TestEnrollBegin_ActiveAdminCorrectPasswordCounts(t *testing.T) { // regression for #216
 	db, rdb, engine := setupEnrollLockout(t)
-	_, username, _ := enrolledAdmin(t, db, rdb)
+	adminID, username, _ := enrolledAdmin(t, db, rdb)
+	token, err := admin.NewEnrollmentStore(rdb).MintEnrollmentToken(context.Background(), adminID)
+	require.NoError(t, err)
 
 	// The probe comes from another IP so it does not spend the IP axis the
 	// five attempts below are counted on.
-	b, _ := json.Marshal(map[string]string{"username": uniqueAdminUsername("ghost"), "password": adminTestPassword, "token": badEnrollTok})
-	probe := httptest.NewRequest(http.MethodPost, "/admin/api/v1/enroll/begin", bytes.NewReader(b))
-	probe.Header.Set("Content-Type", "application/json")
-	probe.RemoteAddr = "198.51.100.7:1234"
-	probeRec := httptest.NewRecorder()
-	engine.ServeHTTP(probeRec, probe)
-	unknownCode, unknownBody := probeRec.Code, probeRec.Body.String()
+	unknownCode, unknownBody := enrollBeginFrom(engine, "198.51.100.7", uniqueAdminUsername("ghost"), adminTestPassword, badEnrollTok)
 	require.Equal(t, http.StatusUnauthorized, unknownCode)
 	for i := 0; i < 5; i++ {
-		code, body := enrollBegin(engine, username, adminTestPassword, badEnrollTok)
+		code, body := enrollBegin(engine, username, adminTestPassword, token)
 		require.Equal(t, unknownCode, code)
 		require.Equal(t, unknownBody, body)
 	}
 
-	locked, _, err := admin.NewLockout(rdb, nil).IsLocked(context.Background(), username, "")
-	require.NoError(t, err)
-	assert.True(t, locked, "five enroll attempts on an active admin must lock the account")
+	assert.Equal(t, int64(5), failCount(t, rdb, acctKey(username)))
+	assert.True(t, tokenStillStored(t, rdb, token), "a non-pending admin must be refused before the token is spent")
 }
 
-// EnrollFinish refuses a held handle once the account is locked.
-func TestEnrollFinish_LockedAfterBegin_Returns429(t *testing.T) { // regression for #216
+// A lock that lands after a successful EnrollBegin does not block EnrollFinish:
+// the handle is unguessable and the token is already spent, so refusing would
+// strand the admin. The finished enrollment then clears the counters.
+func TestEnrollFinish_LockAfterBegin_StillEnrolls(t *testing.T) { // regression for #216
 	db, rdb, engine := setupEnrollLockout(t)
-	adminID, username, token := pendingAdminWithToken(t, db, rdb)
+	_, username, token := pendingAdminWithToken(t, db, rdb)
 
 	beginRec := postJSON(engine, "/admin/api/v1/enroll/begin", map[string]string{
 		"username": username, "password": adminTestPassword, "token": token,
@@ -162,21 +193,26 @@ func TestEnrollFinish_LockedAfterBegin_Returns429(t *testing.T) { // regression 
 	}
 	require.NoError(t, json.Unmarshal(beginRec.Body.Bytes(), &begin))
 
-	lk := admin.NewLockout(rdb, nil)
-	for i := 0; i < 6; i++ {
-		require.NoError(t, lk.RecordFailure(context.Background(), username, "203.0.113.9"))
+	for i := 0; i < 5; i++ {
+		code, _ := passwordLogin(engine, username, "wrong-password")
+		require.Equal(t, http.StatusUnauthorized, code)
 	}
+	locked, _, err := admin.NewLockout(rdb, nil).IsLocked(context.Background(), username, defaultTestIP)
+	require.NoError(t, err)
+	require.True(t, locked)
 
 	va := newVirtualAuthenticator(t, uuid.MustParse(testAllowedAAGID))
 	att := va.attestationResponse(t, testAdminRPID, begin.PublicKey.Response.Challenge.String(), testAdminOrigin, flagUP|flagUV)
 	finishRec := postJSON(engine, "/admin/api/v1/enroll/finish", map[string]any{ // #nosec G101 -- "credential_name" is a key-name label, not a secret
 		"handle": begin.Handle, "attestation": json.RawMessage(att), "credential_name": "primary",
 	})
-	assert.Equal(t, http.StatusTooManyRequests, finishRec.Code, finishRec.Body.String())
+	require.Equal(t, http.StatusOK, finishRec.Code, finishRec.Body.String())
 
 	got, err := admin.NewAdminRepo(db).GetByUsername(context.Background(), username)
 	require.NoError(t, err)
-	assert.Equal(t, admin.StatusPending, got.Status, "a locked finish must not activate admin %s", adminID)
+	assert.Equal(t, admin.StatusActive, got.Status)
+	assert.Zero(t, failCount(t, rdb, acctKey(username)))
+	assert.Zero(t, failCount(t, rdb, ipKey(defaultTestIP)))
 }
 
 // A successful begin does not clear earlier failures; only a finished enrollment does.
@@ -226,12 +262,8 @@ func TestEnroll_FinishResetsCounter(t *testing.T) { // regression for #216
 	})
 	require.Equal(t, http.StatusOK, finishRec.Code, finishRec.Body.String())
 
-	// One more failure would be the fifth if the finish had not reset the count.
-	code, _ := passwordLogin(engine, username, "wrong-password")
-	require.Equal(t, http.StatusUnauthorized, code)
-	locked, _, err := admin.NewLockout(rdb, nil).IsLocked(context.Background(), username, "")
-	require.NoError(t, err)
-	assert.False(t, locked, "a finished enrollment must reset the failure counter")
+	assert.Zero(t, failCount(t, rdb, acctKey(username)), "a finished enrollment must reset the account counter")
+	assert.Zero(t, failCount(t, rdb, ipKey(defaultTestIP)), "a finished enrollment must reset the IP counter")
 }
 
 // An active admin cannot re-enroll a key at the enroll door, even holding a
@@ -245,6 +277,7 @@ func TestEnrollBegin_ActiveAdminWithValidTokenRefused(t *testing.T) { // regress
 	code, body := enrollBegin(engine, username, adminTestPassword, token)
 	assert.Equal(t, http.StatusUnauthorized, code, body)
 	assert.True(t, tokenStillStored(t, rdb, token), "a non-pending admin must be refused before the token is spent")
+	assert.Equal(t, int64(1), failCount(t, rdb, acctKey(username)), "the refusal must count toward the lockout")
 }
 
 // When the lockout store cannot be read, enroll fails closed: 500, no enrollment.
@@ -260,4 +293,75 @@ func TestEnrollBegin_LockoutStoreDown_FailsClosed(t *testing.T) { // regression 
 	assert.Equal(t, http.StatusInternalServerError, code, body)
 	assert.JSONEq(t, `{"error":"internal error"}`, body)
 	assert.True(t, tokenStillStored(t, rdb, token), "a failed lockout read must not reach the token")
+}
+
+// A real token bound to ANOTHER admin, sent with this admin's correct
+// credentials, is a failure and counts.
+func TestEnrollBegin_MismatchedTokenCounts(t *testing.T) { // regression for #216
+	db, rdb, engine := setupEnrollLockout(t)
+	adminA, usernameA, _ := pendingAdminWithToken(t, db, rdb)
+	_, _, tokenB := pendingAdminWithToken(t, db, rdb)
+
+	code, body := enrollBegin(engine, usernameA, adminTestPassword, tokenB)
+	assert.Equal(t, http.StatusUnauthorized, code, body)
+	assert.Equal(t, int64(1), failCount(t, rdb, acctKey(usernameA)))
+
+	got, err := admin.NewAdminRepo(db).GetByUsername(context.Background(), usernameA)
+	require.NoError(t, err)
+	assert.Equal(t, admin.StatusPending, got.Status, "admin %s must stay pending", adminA)
+}
+
+// Failures on other accounts from one IP lock that IP for every account.
+func TestEnrollBegin_IPAxisLocksOtherAccounts(t *testing.T) { // regression for #216
+	db, rdb, engine := setupEnrollLockout(t)
+	_, username, token := pendingAdminWithToken(t, db, rdb)
+
+	for i := 0; i < 5; i++ {
+		code, _ := enrollBeginFrom(engine, "203.0.113.5", uniqueAdminUsername("spray"), "wrong-password", badEnrollTok)
+		require.Equal(t, http.StatusUnauthorized, code)
+	}
+	require.Zero(t, failCount(t, rdb, acctKey(username)), "the target account must be untouched")
+
+	code, body := enrollBeginFrom(engine, "203.0.113.5", username, adminTestPassword, token)
+	assert.Equal(t, http.StatusTooManyRequests, code, body)
+	assert.JSONEq(t, lockedBody, body)
+
+	code, body = enrollBeginFrom(engine, "198.51.100.20", username, adminTestPassword, token)
+	assert.Equal(t, http.StatusOK, code, body)
+}
+
+// Failures on one account from many IPs lock that account from a fresh IP.
+func TestEnrollBegin_AccountAxisAcrossIPs(t *testing.T) { // regression for #216
+	db, rdb, engine := setupEnrollLockout(t)
+	_, username, token := pendingAdminWithToken(t, db, rdb)
+
+	ips := []string{"203.0.113.11", "203.0.113.12", "203.0.113.13", "203.0.113.14", "203.0.113.15"}
+	for _, ip := range ips {
+		code, _ := enrollBeginFrom(engine, ip, username, "wrong-password", badEnrollTok)
+		require.Equal(t, http.StatusUnauthorized, code)
+	}
+
+	code, body := enrollBeginFrom(engine, "198.51.100.30", username, adminTestPassword, token)
+	assert.Equal(t, http.StatusTooManyRequests, code, body)
+	assert.True(t, tokenStillStored(t, rdb, token))
+}
+
+// A token-store fault after a correct password is a 500, not a counted guess.
+func TestEnrollBegin_TokenStoreFault_NotCounted(t *testing.T) { // regression for #216
+	db, rdb, engine := setupEnrollLockout(t)
+	_, username, token := pendingAdminWithToken(t, db, rdb)
+
+	// A list at the token key makes GETDEL fail with WRONGTYPE, a real store
+	// error rather than redis.Nil.
+	sum := sha256.Sum256([]byte(token))
+	key := "admin_enroll:" + hex.EncodeToString(sum[:])
+	ctx := context.Background()
+	require.NoError(t, rdb.Del(ctx, key).Err())
+	require.NoError(t, rdb.LPush(ctx, key, "x").Err())
+
+	code, body := enrollBegin(engine, username, adminTestPassword, token)
+	assert.Equal(t, http.StatusInternalServerError, code, body)
+	assert.JSONEq(t, `{"error":"internal error"}`, body)
+	assert.Zero(t, failCount(t, rdb, acctKey(username)), "a store fault must not spend the lockout budget")
+	assert.Zero(t, failCount(t, rdb, ipKey(defaultTestIP)))
 }
