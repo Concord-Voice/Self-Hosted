@@ -268,7 +268,8 @@ func TestEnroll_FinishResetsCounter(t *testing.T) { // regression for #216
 	require.Equal(t, http.StatusOK, finishRec.Code, finishRec.Body.String())
 
 	assert.Zero(t, failCount(t, rdb, acctKey(username)), "a finished enrollment must reset the account counter")
-	assert.Zero(t, failCount(t, rdb, ipKey(defaultTestIP)), "a finished enrollment must reset the IP counter")
+	assert.Equal(t, int64(4), failCount(t, rdb, ipKey(defaultTestIP)),
+		"a finished enrollment refunds only the guess its begin reserved; the four failures stay on the IP")
 }
 
 // An active admin cannot re-enroll a key at the enroll door, even holding a

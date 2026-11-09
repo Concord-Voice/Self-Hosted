@@ -260,10 +260,11 @@ func TestLockout_PerAccountIndependentOfPerIP(t *testing.T) {
 	assert.False(t, lockedBOther, "an unrelated account+IP must not be locked")
 }
 
-// Reset drops the account's attempts and lock and the IP's attempts, keeps both
-// levels, and never lifts an IP lock: one admin proving their own identity says
-// nothing about the guesses that locked the source.
-func TestLockout_ResetClearsAccountAxisKeepsLevelsAndIPLock(t *testing.T) {
+// Reset drops the account's attempts and lock, refunds the one guess the sign-in
+// reserved on the IP, keeps both levels, and never lifts an IP lock or clears the
+// rest of an IP count: one admin proving their own identity says nothing about
+// the guesses that came from the source.
+func TestLockout_ResetClearsAccountAxisKeepsLevelsAndIPState(t *testing.T) {
 	rdb, cleanup := testhelpers.SetupTestRedis(t)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
@@ -271,12 +272,6 @@ func TestLockout_ResetClearsAccountAxisKeepsLevelsAndIPLock(t *testing.T) {
 	user, ip := uniqueAdminUsername("acct"), uniqueLockoutIP("7.7.7")
 
 	lockOut(t, lk, user, ip)
-	// A second IP holds only attempts, no lock.
-	otherIP := uniqueLockoutIP("6.6.6")
-	ok, err := lk.Reserve(ctx, uniqueAdminUsername("other"), otherIP)
-	require.NoError(t, err)
-	require.True(t, ok)
-
 	require.NoError(t, lk.Reset(ctx, user, ip))
 
 	assert.False(t, keyExists(t, rdb, acctLockKey(user)), "Reset must lift the account lock")
@@ -285,16 +280,42 @@ func TestLockout_ResetClearsAccountAxisKeepsLevelsAndIPLock(t *testing.T) {
 	locked, err := lk.IsLocked(ctx, uniqueAdminUsername("someone-else"), ip)
 	require.NoError(t, err)
 	assert.True(t, locked, "the IP stays locked for every other account")
+	assert.False(t, keyExists(t, rdb, ipKey(ip)), "a refund on a locked IP must not recreate its deleted count")
 	assert.Equal(t, int64(1), failCount(t, rdb, acctLevelKey(user)), "the account level survives a Reset")
 	assert.Equal(t, int64(1), failCount(t, rdb, ipLevelKey(ip)), "the IP level survives a Reset")
-
-	// The IP's attempts are cleared, so completed sign-ins do not pile up on a NAT.
-	require.NoError(t, lk.Reset(ctx, uniqueAdminUsername("other"), otherIP))
-	assert.False(t, keyExists(t, rdb, ipKey(otherIP)), "Reset must clear the IP attempts")
 
 	// A re-attack straight after a Reset escalates from the kept level.
 	lockOut(t, lk, user, uniqueLockoutIP("5.5.4"))
 	assertWindow(t, rdb, acctLockKey(user), 2*time.Minute, "the next lock is level 2")
+}
+
+// A completed sign-in refunds exactly the guess it reserved: three spray guesses
+// from the same IP stay counted, so signing in cannot reset a spray budget, and a
+// refund never takes the count below zero.
+func TestLockout_Reset_RefundsOnlyItsOwnGuessOnTheIP(t *testing.T) {
+	rdb, cleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+	lk := admin.NewLockout(rdb, nil)
+	ip := uniqueLockoutIP("8.8.4")
+	for i := 0; i < 3; i++ {
+		ok, err := lk.Reserve(ctx, uniqueAdminUsername("spray"), ip)
+		require.NoError(t, err)
+		require.True(t, ok)
+	}
+	user := uniqueAdminUsername("acct")
+	ok, err := lk.Reserve(ctx, user, ip) // the sign-in's own password-step guess
+	require.NoError(t, err)
+	require.True(t, ok)
+	require.Equal(t, int64(4), failCount(t, rdb, ipKey(ip)))
+
+	require.NoError(t, lk.Reset(ctx, user, ip))
+	assert.Equal(t, int64(3), failCount(t, rdb, ipKey(ip)), "only the sign-in's own guess is refunded")
+
+	for i := 0; i < 5; i++ { // more resets than guesses: the count floors at zero
+		require.NoError(t, lk.Reset(ctx, user, ip))
+	}
+	assert.Equal(t, int64(0), failCount(t, rdb, ipKey(ip)), "a refund never goes below zero")
 }
 
 // Unlock is the operator's way out: it clears the account's lock, attempts and

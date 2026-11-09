@@ -77,11 +77,13 @@ var ErrLockoutUnavailable = errors.New("admin lockout unavailable")
 //	checked - a reserved guess failed; lock any axis that reached the threshold.
 //	          The guess was already counted, so this does not count it again.
 //	clear   - the sign-in or enrollment completed; drop the account's attempts and
-//	          lock, and the IP's attempts. The levels stay, so a re-attack after a
-//	          sign-in escalates at once. The IP lock stays too: it records what
-//	          came from that source, and one admin proving their own identity says
-//	          nothing about the guesses that locked it (a holder of one valid
-//	          account must not be able to lift a spray lock).
+//	          lock, and refund the one guess this sign-in reserved on the IP
+//	          (never below zero). The levels stay, so a re-attack after a sign-in
+//	          escalates at once. The IP lock and the rest of the IP count stay
+//	          too: they record what came from that source, and one admin proving
+//	          their own identity says nothing about those guesses (a holder of one
+//	          valid account must not be able to lift a spray lock or reset a spray
+//	          budget).
 //
 // Counting before the check has one cost: six guesses sent at the same moment
 // lock the axis even if they are all correct, because the sixth is refused
@@ -102,7 +104,8 @@ local function lock(attempts, lockKey, levelKey)
 end
 
 if mode == 'clear' then
-  redis.call('DEL', KEYS[1], KEYS[2], KEYS[4])
+  redis.call('DEL', KEYS[1], KEYS[2])
+  if tonumber(redis.call('GET', KEYS[4]) or '0') > 0 then redis.call('DECR', KEYS[4]) end
   return 1
 end
 
@@ -228,9 +231,9 @@ func (l *Lockout) IsLocked(ctx context.Context, username, ip string) (bool, erro
 
 // Reset is called when a sign-in or enrollment completes. It drops the account's
 // attempts and lock (the caller just proved the password and the hardware key)
-// and the IP's attempts, but never the IP lock, and it keeps both levels: a
-// re-attack straight after a sign-in escalates from where it left off. Deleting
-// absent keys is a no-op.
+// and refunds the one guess that sign-in reserved on the IP, but never lifts an
+// IP lock or clears the rest of the IP count. It keeps both levels: a re-attack
+// straight after a sign-in escalates from where it left off.
 func (l *Lockout) Reset(ctx context.Context, username, ip string) error {
 	if _, err := l.run(ctx, lockoutModeClear, username, ip); err != nil {
 		return fmt.Errorf("reset lockout: %w", err)
