@@ -69,7 +69,10 @@ const (
 	EventLoginFailure = "login_failure"
 	// EventLogout marks an explicit admin logout (session revoked).
 	EventLogout = "logout"
-	// EventLockout marks an account/IP entering exponential-backoff lockout.
+	// EventLockout marks an account/IP entering exponential-backoff lockout. It is
+	// reserved: the lock is taken inside the Redis script, which writes no audit
+	// row, so nothing emits this event today. A refused guess is recorded as a
+	// denied EventLoginFailure or EventEnrollComplete row with reason locked_out.
 	EventLockout = "lockout"
 	// EventEnrollComplete marks a pending admin flipping to active on WebAuthn enrollment.
 	EventEnrollComplete = "enroll_complete"

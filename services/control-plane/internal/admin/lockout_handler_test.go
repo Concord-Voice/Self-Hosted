@@ -374,6 +374,52 @@ func TestEnrollFinish_DuplicateCredential_Is401WithAuditRow(t *testing.T) { // r
 	assert.Equal(t, 1, enrollFailureAuditRows(t, db, username), "a reused credential keeps its failure audit row")
 }
 
+// postFromRec posts a JSON body from a chosen client IP and returns the recorder.
+func postFromRec(engine *gin.Engine, path, ip string, body any) *httptest.ResponseRecorder {
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = ip + ":1234"
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+	return rec
+}
+
+// Enrollment refunds the address EnrollBegin ran from, as sign-in does: finishing
+// from an address that holds a spray count must not lower that count.
+func TestEnrollFinish_RefundsTheBeginIP(t *testing.T) { // regression for #221
+	db, rdb, _ := setupEnrollLockout(t)
+	var logs bytes.Buffer
+	engine := enrollEngineWithLog(t, db, rdb, &logs)
+	_, username, token := pendingAdminWithToken(t, db, rdb)
+	const beginIP, sprayIP = "10.12.0.1", "10.12.0.2"
+	for i := 0; i < 3; i++ {
+		require.Equal(t, http.StatusUnauthorized, enrollGuess(engine, sprayIP, uniqueAdminUsername("spray")))
+	}
+	require.Equal(t, int64(3), failCount(t, rdb, ipKey(sprayIP)))
+
+	rec := postFromRec(engine, "/admin/api/v1/enroll/begin", beginIP, map[string]string{
+		"username": username, "password": adminTestPassword, "token": token,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var begin struct {
+		Handle    string                       `json:"handle"`
+		PublicKey *protocol.CredentialCreation `json:"publicKey"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &begin))
+	require.Equal(t, int64(1), failCount(t, rdb, ipKey(beginIP)), "the begin step counted one guess")
+
+	va := newVirtualAuthenticator(t, uuid.MustParse(testAllowedAAGID))
+	att := va.attestationResponse(t, testAdminRPID, begin.PublicKey.Response.Challenge.String(), testAdminOrigin, flagUP|flagUV)
+	fin := postFromRec(engine, "/admin/api/v1/enroll/finish", sprayIP, map[string]any{ // #nosec G101 -- "credential_name" is a key-name label, not a secret
+		"handle": begin.Handle, "attestation": json.RawMessage(att), "credential_name": "primary",
+	})
+	require.Equal(t, http.StatusOK, fin.Code, fin.Body.String())
+
+	assert.Zero(t, failCount(t, rdb, ipKey(beginIP)), "the address that began the enrollment gets its guess back")
+	assert.Equal(t, int64(3), failCount(t, rdb, ipKey(sprayIP)), "the address that only finished it is not refunded")
+}
+
 // failingConnector backs a *sql.DB whose every connection attempt fails: a
 // database outage.
 type failingConnector struct{}
