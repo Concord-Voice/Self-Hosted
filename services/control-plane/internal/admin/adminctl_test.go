@@ -224,6 +224,8 @@ func TestAdminCtl_Unlock_ClearsLockAttemptsAndLevel(t *testing.T) { // regressio
 		[]string{"unlock", username})
 	require.Equal(t, 0, code, "stdout: %s", stdout.String())
 	assert.Contains(t, stdout.String(), "Unlocked "+username)
+	assert.Contains(t, stdout.String(), "A lock on the sign-in address is not cleared",
+		"the operator must be told an IP lock can still refuse the sign-in")
 
 	for _, k := range []string{acctKey(username), acctLockKey(username), acctLevelKey(username)} {
 		assert.False(t, keyExists(t, rdb, k), "unlock must clear %s", k)
@@ -268,6 +270,7 @@ func TestAdminCtl_Unlock_BadUsage(t *testing.T) { // regression for #221
 		"no username":    {"unlock"},
 		"empty username": {"unlock", ""},
 		"flag form":      {"unlock", "--username", "someone"},
+		"lone flag":      {"unlock", "--username"}, // one argument, so only the dash-prefix guard refuses it
 		"two usernames":  {"unlock", "a", "b"},
 	} {
 		t.Run(name, func(t *testing.T) {

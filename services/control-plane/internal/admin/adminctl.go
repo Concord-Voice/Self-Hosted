@@ -347,9 +347,11 @@ func runUnlock(ctx context.Context, deps adminCtlDeps, args []string) error {
 		Result:    AuditSuccess,
 		Detail:    map[string]any{"verb": verbUnlock},
 	}); auditErr != nil {
-		return fmt.Errorf("audit unlock: %w", auditErr)
+		// The lock is already cleared; say so, so the operator does not retry blind.
+		return fmt.Errorf("account %s is unlocked but the audit row was not written: %w", username, auditErr)
 	}
-	outf(deps.stdout, "Unlocked %s: lock, failed attempts and escalation level cleared.\n", username)
+	outf(deps.stdout, "Unlocked %s: lock, failed attempts and escalation level cleared.\n"+
+		"A lock on the sign-in address is not cleared; it expires on its own within 60 minutes.\n", username)
 	return nil
 }
 

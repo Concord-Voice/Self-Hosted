@@ -105,7 +105,8 @@ type AdminRegistrationInput struct {
 // list; `in.CredentialName` is an operator-supplied label (may be empty).
 //
 // Returns the stored AdminCredential. On AAGUID rejection it returns
-// ErrAAGUIDNotAllowed (or ErrInvalidAAGUID) and writes nothing. A fault while
+// ErrAAGUIDNotAllowed (or ErrInvalidAAGUID) and writes nothing. A credential ID
+// that is already registered returns ErrDuplicateCredential. Any other fault while
 // saving the credential returns an error wrapping ErrCredentialPersist.
 func FinishAdminRegistration(ctx context.Context, svc *mfa.WebAuthnService, repo *AdminRepo, in AdminRegistrationInput) (AdminCredential, error) {
 	cred, err := svc.FinishRegistration(in.User, in.Session, in.Request)
@@ -134,6 +135,11 @@ func FinishAdminRegistration(ctx context.Context, svc *mfa.WebAuthnService, repo
 		Transports:     transports,
 	})
 	if err != nil {
+		// A reused credential ID is the client's input: it is rejected like any other
+		// bad attestation, not reported as a storage fault.
+		if errors.Is(err, ErrDuplicateCredential) {
+			return AdminCredential{}, err
+		}
 		return AdminCredential{}, fmt.Errorf("%w: %w", ErrCredentialPersist, err)
 	}
 	return stored, nil

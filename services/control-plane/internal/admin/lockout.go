@@ -77,8 +77,8 @@ var ErrLockoutUnavailable = errors.New("admin lockout unavailable")
 //	checked - a reserved guess failed; lock any axis that reached the threshold.
 //	          The guess was already counted, so this does not count it again.
 //	clear   - the sign-in or enrollment completed; drop the account's attempts and
-//	          lock, and refund the one guess this sign-in reserved on the IP
-//	          (never below zero). The levels stay, so a re-attack after a sign-in
+//	          lock, and refund the one guess this sign-in reserved on the IP that
+//	          reserved it (never below zero). The levels stay, so a re-attack after a sign-in
 //	          escalates at once. The IP lock and the rest of the IP count stay
 //	          too: they record what came from that source, and one admin proving
 //	          their own identity says nothing about those guesses (a holder of one
@@ -134,7 +134,8 @@ return 1
 // Lockout enforces per-account AND per-IP exponential backoff in Redis. The two
 // axes are independent: account lockout stops credential-stuffing one handle;
 // IP lockout stops spraying many handles from one source. A guess is refused if
-// EITHER axis is locked. The clock is injectable for deterministic tests.
+// EITHER axis is locked. Every window is a Redis TTL, so the now field is not
+// read; it stays so NewLockout keeps its signature.
 type Lockout struct {
 	redis *redis.Client
 	now   func() time.Time
@@ -176,7 +177,10 @@ func windowForLevel(level int64) time.Duration {
 	return window
 }
 
-func (l *Lockout) run(ctx context.Context, mode, username, ip string) (int64, error) {
+// run executes lockoutScript for one mode. It takes the IP's hash, not the IP:
+// Reset must name the IP that RESERVED the guess, which a later request cannot
+// supply as a raw address without the raw IP being stored between the two steps.
+func (l *Lockout) run(ctx context.Context, mode, username, ipHash string) (int64, error) {
 	if l == nil || l.redis == nil {
 		return 0, ErrLockoutUnavailable
 	}
@@ -186,7 +190,6 @@ func (l *Lockout) run(ctx context.Context, mode, username, ip string) (int64, er
 	for level := int64(1); level <= lockoutMaxLevel; level++ {
 		args = append(args, int64(windowForLevel(level)/time.Second))
 	}
-	ipHash := hashIP(ip)
 	return lockoutScript.Run(ctx, l.redis, []string{
 		lockoutAcctPrefix + username, lockoutAcctLockPrefix + username, lockoutAcctLevelPrefix + username,
 		lockoutIPPrefix + ipHash, lockoutIPLockPrefix + ipHash, lockoutIPLevelPrefix + ipHash,
@@ -199,7 +202,7 @@ func (l *Lockout) run(ctx context.Context, mode, username, ip string) (int64, er
 // caller must refuse the guess as a server error — never as a lock, and never as
 // a success — because an uncounted guess would reopen unlimited guessing.
 func (l *Lockout) Reserve(ctx context.Context, username, ip string) (bool, error) {
-	allowed, err := l.run(ctx, lockoutModeReserve, username, ip)
+	allowed, err := l.run(ctx, lockoutModeReserve, username, hashIP(ip))
 	if err != nil {
 		return false, fmt.Errorf("reserve admin login attempt: %w", err)
 	}
@@ -209,7 +212,7 @@ func (l *Lockout) Reserve(ctx context.Context, username, ip string) (bool, error
 // RecordCheckedFailure locks any axis whose reserved guess reached the threshold.
 // The guess was already counted by Reserve, so this does not count it again.
 func (l *Lockout) RecordCheckedFailure(ctx context.Context, username, ip string) error {
-	if _, err := l.run(ctx, lockoutModeChecked, username, ip); err != nil {
+	if _, err := l.run(ctx, lockoutModeChecked, username, hashIP(ip)); err != nil {
 		return fmt.Errorf("record admin login failure: %w", err)
 	}
 	return nil
@@ -234,8 +237,15 @@ func (l *Lockout) IsLocked(ctx context.Context, username, ip string) (bool, erro
 // and refunds the one guess that sign-in reserved on the IP, but never lifts an
 // IP lock or clears the rest of the IP count. It keeps both levels: a re-attack
 // straight after a sign-in escalates from where it left off.
-func (l *Lockout) Reset(ctx context.Context, username, ip string) error {
-	if _, err := l.run(ctx, lockoutModeClear, username, ip); err != nil {
+//
+// reservedIPHash is hashIP of the address the PASSWORD step ran from, which the
+// handler stored in the challenge. It is deliberately not the address of the
+// request that completes the sign-in: the handle is a bearer value, so the two
+// can differ, and refunding the completing request's address would let a holder
+// of one valid account lower the count of a source that never reserved the guess.
+// An empty hash (a challenge stored before this field existed) refunds nothing.
+func (l *Lockout) Reset(ctx context.Context, username, reservedIPHash string) error {
+	if _, err := l.run(ctx, lockoutModeClear, username, reservedIPHash); err != nil {
 		return fmt.Errorf("reset lockout: %w", err)
 	}
 	return nil

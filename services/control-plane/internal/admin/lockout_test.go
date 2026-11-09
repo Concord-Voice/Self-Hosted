@@ -274,7 +274,7 @@ func TestLockout_ResetClearsAccountAxisKeepsLevelsAndIPState(t *testing.T) {
 	user, ip := uniqueAdminUsername("acct"), uniqueLockoutIP("7.7.7")
 
 	lockOut(t, lk, user, ip)
-	require.NoError(t, lk.Reset(ctx, user, ip))
+	require.NoError(t, lk.Reset(ctx, user, ipHashOf(ip)))
 
 	assert.False(t, keyExists(t, rdb, acctLockKey(user)), "Reset must lift the account lock")
 	assert.False(t, keyExists(t, rdb, acctKey(user)), "Reset must clear the account attempts")
@@ -311,13 +311,41 @@ func TestLockout_Reset_RefundsOnlyItsOwnGuessOnTheIP(t *testing.T) {
 	require.True(t, ok)
 	require.Equal(t, int64(4), failCount(t, rdb, ipKey(ip)))
 
-	require.NoError(t, lk.Reset(ctx, user, ip))
+	require.NoError(t, lk.Reset(ctx, user, ipHashOf(ip)))
 	assert.Equal(t, int64(3), failCount(t, rdb, ipKey(ip)), "only the sign-in's own guess is refunded")
 
 	for i := 0; i < 5; i++ { // more resets than guesses: the count floors at zero
-		require.NoError(t, lk.Reset(ctx, user, ip))
+		require.NoError(t, lk.Reset(ctx, user, ipHashOf(ip)))
 	}
 	assert.Equal(t, int64(0), failCount(t, rdb, ipKey(ip)), "a refund never goes below zero")
+}
+
+// The refund goes to the address that reserved the guess, whatever address the
+// completing request came from: Reset takes the reserving address's hash, so a
+// sign-in cannot lower the count of a source that never reserved its guess.
+func TestLockout_Reset_RefundsTheReservingIPOnly(t *testing.T) {
+	rdb, cleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+	lk := admin.NewLockout(rdb, nil)
+	reserving, spray := uniqueLockoutIP("8.8.5"), uniqueLockoutIP("8.8.6")
+	user := uniqueAdminUsername("acct")
+	for i := 0; i < 4; i++ {
+		ok, err := lk.Reserve(ctx, uniqueAdminUsername("spray"), spray)
+		require.NoError(t, err)
+		require.True(t, ok)
+	}
+	ok, err := lk.Reserve(ctx, user, reserving)
+	require.NoError(t, err)
+	require.True(t, ok)
+
+	require.NoError(t, lk.Reset(ctx, user, ipHashOf(reserving)))
+
+	assert.Equal(t, int64(0), failCount(t, rdb, ipKey(reserving)), "the reserving address gets its guess back")
+	assert.Equal(t, int64(4), failCount(t, rdb, ipKey(spray)), "an address that reserved nothing is untouched")
+
+	require.NoError(t, lk.Reset(ctx, user, "")) // a challenge stored before the field existed
+	assert.Equal(t, int64(4), failCount(t, rdb, ipKey(spray)), "an empty hash refunds nothing")
 }
 
 // Unlock is the operator's way out: it clears the account's lock, attempts and
@@ -335,6 +363,18 @@ func TestLockout_UnlockClearsAccountAxisOnly(t *testing.T) {
 	for _, k := range []string{acctKey(user), acctLockKey(user), acctLevelKey(user)} {
 		assert.False(t, keyExists(t, rdb, k), "Unlock must clear %s", k)
 	}
+	// lockOut ends with the account's attempts already deleted by the lock itself,
+	// so the loop above cannot prove Unlock clears them: count three guesses with no
+	// lock and clear those.
+	counted := uniqueAdminUsername("counted")
+	for i := 0; i < 3; i++ {
+		ok, err := lk.Reserve(ctx, counted, uniqueLockoutIP("5.5.6"))
+		require.NoError(t, err)
+		require.True(t, ok)
+	}
+	require.Equal(t, int64(3), failCount(t, rdb, acctKey(counted)))
+	require.NoError(t, lk.Unlock(ctx, counted))
+	assert.False(t, keyExists(t, rdb, acctKey(counted)), "Unlock must clear the running attempt count")
 	for _, k := range []string{ipLockKey(ip), ipLevelKey(ip)} {
 		assert.True(t, keyExists(t, rdb, k), "Unlock must leave the IP axis alone: %s", k)
 	}

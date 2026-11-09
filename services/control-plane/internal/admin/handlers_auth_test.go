@@ -5,6 +5,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -259,6 +260,12 @@ func TestWebAuthnLogin_BadAssertion_NoSession(t *testing.T) {
 	_, username, va := enrolledAdmin(t, db, rdb)
 	engine := adminAuthEngine(t, db, rdb)
 
+	// Four counted wrong guesses, so the password step below is the fifth: a bad
+	// assertion that counted (or ran the checked-failure lock) would lock the
+	// account it is redeeming.
+	for i := 0; i < 4; i++ {
+		require.Equal(t, http.StatusUnauthorized, loginGuess(engine, fmt.Sprintf("10.8.0.%d", i+1), username))
+	}
 	pwRec := postJSON(engine, "/admin/api/v1/auth/password", map[string]string{
 		"username": username,
 		"password": adminTestPassword,
@@ -269,6 +276,7 @@ func TestWebAuthnLogin_BadAssertion_NoSession(t *testing.T) {
 		PublicKey *protocol.CredentialAssertion `json:"publicKey"`
 	}
 	require.NoError(t, json.Unmarshal(pwRec.Body.Bytes(), &pwResp))
+	failuresBefore := auditRows(t, db, username, admin.EventLoginFailure, admin.AuditFailure)
 
 	va.signCount++
 	// tamperSig=true corrupts the ECDSA signature.
@@ -280,6 +288,12 @@ func TestWebAuthnLogin_BadAssertion_NoSession(t *testing.T) {
 	})
 	assert.Equal(t, http.StatusUnauthorized, waRec.Code)
 	assert.Empty(t, waRec.Header().Get("Set-Cookie"))
+
+	// A rejected assertion is audited but never counted.
+	assert.Equal(t, failuresBefore+1, auditRows(t, db, username, admin.EventLoginFailure, admin.AuditFailure),
+		"a rejected assertion keeps its failure audit row")
+	assert.Equal(t, int64(5), failCount(t, rdb, acctKey(username)), "the assertion adds no guess to the count")
+	assert.False(t, keyExists(t, rdb, acctLockKey(username)), "a held handle must not lock the account it is redeeming")
 }
 
 // TestWebAuthnLogin_UnknownHandle_Rejected asserts a fabricated/expired handle is
