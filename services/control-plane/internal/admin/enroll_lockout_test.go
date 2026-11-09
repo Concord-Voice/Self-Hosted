@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/gin-gonic/gin"
@@ -125,7 +126,16 @@ func TestEnrollBegin_ActiveAdminCorrectPasswordCounts(t *testing.T) { // regress
 	db, rdb, engine := setupEnrollLockout(t)
 	_, username, _ := enrolledAdmin(t, db, rdb)
 
-	unknownCode, unknownBody := enrollBegin(engine, uniqueAdminUsername("ghost"), adminTestPassword, badEnrollTok)
+	// The probe comes from another IP so it does not spend the IP axis the
+	// five attempts below are counted on.
+	b, _ := json.Marshal(map[string]string{"username": uniqueAdminUsername("ghost"), "password": adminTestPassword, "token": badEnrollTok})
+	probe := httptest.NewRequest(http.MethodPost, "/admin/api/v1/enroll/begin", bytes.NewReader(b))
+	probe.Header.Set("Content-Type", "application/json")
+	probe.RemoteAddr = "198.51.100.7:1234"
+	probeRec := httptest.NewRecorder()
+	engine.ServeHTTP(probeRec, probe)
+	unknownCode, unknownBody := probeRec.Code, probeRec.Body.String()
+	require.Equal(t, http.StatusUnauthorized, unknownCode)
 	for i := 0; i < 5; i++ {
 		code, body := enrollBegin(engine, username, adminTestPassword, badEnrollTok)
 		require.Equal(t, unknownCode, code)
@@ -189,4 +199,50 @@ func TestEnroll_CounterResetsOnlyAfterFinish(t *testing.T) { // regression for #
 	locked, _, err := admin.NewLockout(rdb, nil).IsLocked(context.Background(), username, "")
 	require.NoError(t, err)
 	assert.True(t, locked, "a successful EnrollBegin must not reset the failure counter")
+}
+
+// A finished enrollment clears earlier failures, as a finished login does.
+func TestEnroll_FinishResetsCounter(t *testing.T) { // regression for #216
+	db, rdb, engine := setupEnrollLockout(t)
+	_, username, token := pendingAdminWithToken(t, db, rdb)
+
+	for i := 0; i < 4; i++ {
+		code, _ := enrollBegin(engine, username, "wrong-password", token)
+		require.Equal(t, http.StatusUnauthorized, code)
+	}
+	beginRec := postJSON(engine, "/admin/api/v1/enroll/begin", map[string]string{
+		"username": username, "password": adminTestPassword, "token": token,
+	})
+	require.Equal(t, http.StatusOK, beginRec.Code, beginRec.Body.String())
+	var begin struct {
+		Handle    string                       `json:"handle"`
+		PublicKey *protocol.CredentialCreation `json:"publicKey"`
+	}
+	require.NoError(t, json.Unmarshal(beginRec.Body.Bytes(), &begin))
+	va := newVirtualAuthenticator(t, uuid.MustParse(testAllowedAAGID))
+	att := va.attestationResponse(t, testAdminRPID, begin.PublicKey.Response.Challenge.String(), testAdminOrigin, flagUP|flagUV)
+	finishRec := postJSON(engine, "/admin/api/v1/enroll/finish", map[string]any{ // #nosec G101 -- "credential_name" is a key-name label, not a secret
+		"handle": begin.Handle, "attestation": json.RawMessage(att), "credential_name": "primary",
+	})
+	require.Equal(t, http.StatusOK, finishRec.Code, finishRec.Body.String())
+
+	// One more failure would be the fifth if the finish had not reset the count.
+	code, _ := passwordLogin(engine, username, "wrong-password")
+	require.Equal(t, http.StatusUnauthorized, code)
+	locked, _, err := admin.NewLockout(rdb, nil).IsLocked(context.Background(), username, "")
+	require.NoError(t, err)
+	assert.False(t, locked, "a finished enrollment must reset the failure counter")
+}
+
+// An active admin cannot re-enroll a key at the enroll door, even holding a
+// token bound to that admin.
+func TestEnrollBegin_ActiveAdminWithValidTokenRefused(t *testing.T) { // regression for #216
+	db, rdb, engine := setupEnrollLockout(t)
+	adminID, username, _ := enrolledAdmin(t, db, rdb)
+	token, err := admin.NewEnrollmentStore(rdb).MintEnrollmentToken(context.Background(), adminID)
+	require.NoError(t, err)
+
+	code, body := enrollBegin(engine, username, adminTestPassword, token)
+	assert.Equal(t, http.StatusUnauthorized, code, body)
+	assert.True(t, tokenStillStored(t, rdb, token), "a non-pending admin must be refused before the token is spent")
 }
