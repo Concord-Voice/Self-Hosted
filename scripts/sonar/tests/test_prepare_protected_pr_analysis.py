@@ -152,6 +152,12 @@ class PrepareTest(unittest.TestCase):
         with patch.object(MODULE, "ROOT", self.trusted), patch.object(MODULE, "GIT_REMOTE", str(self.upstream)), patch.object(MODULE, "verify_proof", self.verify):
             MODULE.prepare(self.candidate, self.root / "analysis", self.api)
 
+    def v2_selection(self):
+        """The v2 contract is the caller's complete selection plus merge-base provenance."""
+        return {**self.payload["selection"], "version": 2, "merge_base_sha": self.base,
+                "changed_files": 1, "hotfix": False, "advisory": {}, "workers": [],
+                "npm_workspaces": [], "license_go": False, "codeql_matrix": '{"include":[]}'}
+
     def test_valid_proof_prepares_inert_sources_full_history_and_all_reports(self):
         self.prepare()
         analysis = self.root / "analysis"
@@ -168,6 +174,29 @@ class PrepareTest(unittest.TestCase):
         self.assertNotIn("attacker", props)
         self.assertNotIn("/etc/passwd", (analysis / "packages/protocol/tsconfig.json").read_text())
         self.assertIn("/pulls/7", self.requests)
+
+    def test_schema_v2_full_selection_prepares_only_when_merge_base_matches(self):
+        self.payload["selection"] = self.v2_selection()
+        self.prepare()
+        self.assertEqual(run(self.root / "analysis", "rev-parse", "HEAD"), self.head)
+
+    def test_schema_v2_rejects_missing_malformed_or_extra_merge_base_fields(self):
+        mutations = (
+            lambda selection: selection.pop("merge_base_sha"),
+            lambda selection: selection.__setitem__("merge_base_sha", "not-a-sha"),
+            lambda selection: selection.__setitem__("unexpected", True),
+        )
+        for mutation in mutations:
+            with self.subTest(mutation=mutation):
+                self.payload["selection"] = self.v2_selection()
+                mutation(self.payload["selection"])
+                with self.assertRaisesRegex(MODULE.Reject, "signed scan selection or verdict invalid"):
+                    self.prepare()
+
+    def test_schema_v1_rejects_a_merge_base_downgrade_shape(self):
+        self.payload["selection"]["merge_base_sha"] = self.base
+        with self.assertRaisesRegex(MODULE.Reject, "signed scan selection or verdict invalid"):
+            self.prepare()
 
     def test_invalid_proof_blocks_pr_fetch(self):
         with patch.object(MODULE, "verify_proof", side_effect=MODULE.Reject("invalid")):

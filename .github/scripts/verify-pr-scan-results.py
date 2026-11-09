@@ -49,6 +49,9 @@ ANALYSIS_KEYS = frozenset(("codeql_actions", "codeql_go", "codeql_js", "eslint",
                            "osv", "semgrep_custom", "semgrep_community", "semgrep_canary", "sonar",
                            "sonar_force_all", "sonar_desktop", "sonar_control_plane",
                            "sonar_media_plane", "sonar_admin"))
+# One immutable deployed v1 producer remains supported during the two-PR rollout.
+# New producers must emit v2; this is not a generic missing-field fallback.
+LEGACY_SELECTION_POLICY_SHA = "5fa007d8e1979c3368181dc6f79e3fb1c8235beb"  # pragma: allowlist secret -- public immutable Git commit, not credential
 MAX_REQUESTS = 120
 MAX_BYTES = 12 * 1024 * 1024
 
@@ -218,10 +221,15 @@ def _verify_verdict(selection, jobs, evidence, current_pr):
     reasons = []
     if not isinstance(selection, dict) or not isinstance(jobs, dict) or not isinstance(evidence, dict) or not isinstance(current_pr, dict):
         return ["unknown: malformed verdict input"]
-    if (selection.get("version") != 1 or selection.get("known") is not True
+    version = selection.get("version")
+    legacy = version == 1 and selection.get("policy_sha") == LEGACY_SELECTION_POLICY_SHA
+    if (type(version) is not int or (version != 2 and not legacy) or selection.get("known") is not True
             or selection.get("mode") not in ("required-full", "required-relevant")
             or not all(_sha(selection.get(k)) for k in ("head_sha", "base_sha", "merge_sha", "policy_sha"))):
         return ["unknown: selection invalid"]
+    if version == 2 and (not _sha(selection.get("merge_base_sha"))
+                         or evidence.get("merge_base_verified") is not True):
+        return ["unknown: protected merge base unproven"]
     selected = _selected(selection)
     if set(selected) != ANALYSIS_KEYS or any(not isinstance(v, bool) for v in selected.values()):
         return ["unknown: selection categories invalid"]
@@ -482,11 +490,10 @@ def _git_text(args):
 
 
 def _base_parent(head, merge):
-    """Return the base GitHub merged the PR head into: the other parent of its merge commit.
+    """Return merge^1, requiring exactly two ordered parents [base, PR head].
 
-    The selection's base SHA comes from the PR API, which can lag the merge commit it was
-    served with, so the diff base is read from the merge commit itself. Requiring the head
-    as one of exactly two parents also ties the scanned tree to the head under verification.
+    The API base is an identity field and may lag the actual merge baseline.
+    Protected-main ancestry is established separately before collecting scans.
     """
     if not _sha(head) or not _sha(merge):
         raise Unknown("diff revision invalid")
@@ -494,9 +501,9 @@ def _base_parent(head, merge):
         fields = _git_text(["rev-list", "--parents", "-n", "1", merge]).split()
     except Unknown:
         raise Unknown("merge revision unavailable") from None
-    if len(fields) != 3 or head not in fields[1:]:
-        raise Unknown("merge revision does not join the PR head")
-    return fields[2] if fields[1] == head else fields[1]
+    if len(fields) != 3 or fields[2] != head or fields[0] != merge:
+        raise Unknown("merge revision does not join the PR head in order")
+    return fields[1]
 
 
 def _diff_lines(base, merge):
@@ -625,10 +632,11 @@ def _ancestor(comparison, ancestor, descendant):
             or not isinstance(comparison.get("merge_base_commit"), dict)
             or comparison["base_commit"].get("sha") != ancestor
             or comparison["merge_base_commit"].get("sha") != ancestor
+            or type(comparison.get("behind_by")) is not int
             or comparison.get("behind_by") != 0):
         return False
     ahead, total = comparison.get("ahead_by"), comparison.get("total_commits")
-    if not isinstance(ahead, int) or not isinstance(total, int) or ahead != total:
+    if type(ahead) is not int or type(total) is not int or ahead != total:
         return False
     return ((comparison.get("status") == "identical" and ahead == 0 and ancestor == descendant)
             or (comparison.get("status") == "ahead" and ahead > 0 and ancestor != descendant))
@@ -809,7 +817,16 @@ def _collect(api, selection, jobs, number, run_id):
             raise Unknown("current-attempt artifact not after run start")
     report_ids = _report_ids(reports, selected, run_id, attempt)
     merge = selection.get("merge_sha")
-    diff = _diff_lines(_base_parent(selection.get("head_sha"), merge), merge)
+    merge_base = _base_parent(selection.get("head_sha"), merge)
+    merge_base_verified = False
+    if selection.get("version") == 2:
+        if selection.get("merge_base_sha") != merge_base:
+            raise Unknown("selected merge base mismatch")
+        merge_comparison, _ = api.get(f"/compare/{merge_base}...{main_sha}")
+        merge_base_verified = _ancestor(merge_comparison, merge_base, main_sha)
+        if not merge_base_verified:
+            raise Unknown("selected merge base outside protected main")
+    diff = _diff_lines(merge_base, merge)
     ref = f"refs/pull/{number}/merge"
     all_analyses = api.pages(f"/code-scanning/analyses?{urlencode({'ref': ref})}")
     latest_items = _latest_analyses(all_analyses)
@@ -883,7 +900,7 @@ def _collect(api, selection, jobs, number, run_id):
     policy_refs = [item.get("sha") for item in refs if isinstance(item, dict)
                    and item.get("path") == f"{REPO}/.github/workflows/pr-ci.yml@{policy_sha}"] if isinstance(refs, list) else []
     return pr, {"run": run, "source_policy_sha": policy_refs[0] if len(policy_refs) == 1 else None,
-                "provenance_verified": provenance,
+                "provenance_verified": provenance, "merge_base_verified": merge_base_verified,
                 "artifact_verified": True, "reports": reports, "analyses": normalized,
                 "osv_source_verified": osv_source_verified,
                 "latest_analyses": latest_items, "pagination_complete": True,
