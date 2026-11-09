@@ -6,21 +6,22 @@ The user-facing **Known Issues** list is a single **pinned issue** in `$PUBLIC` 
 
 - **Title (stable):** `📋 Known Issues — check here before filing`
 - **Label:** `documentation` (exists in the repo; do not create labels).
-- **Sentinel** (first line of the body, exact): `<!-- feedback-triage:known-issues v1 -->` — how the routine locates its own issue, and how Phase 1 excludes it from the feedback pipeline (it is not user feedback).
+- **Sentinel** (first line of the body, exact): `<!-- $SP:known-issues v1 -->`, where `$SP` is the sentinel prefix resolved in Phase 0 (`.feedback_triage.sentinel_prefix`, default `feedback-triage`) — how the routine locates its own issue, and how Phase 1 excludes it from the feedback pipeline (it is not user feedback).
 - **Pinned** via the GraphQL `pinIssue` mutation (GitHub allows max 3 pins/repo; this takes one slot).
 
 ## Locate / create / pin
 
 ```bash
 # Locate by sentinel (title is stable; confirm via the body sentinel, never the title alone).
+# $ME is resolved once, as in markers-and-templates.md (FT_ME; a bot in its <name>[bot] form).
 KI=$(gh issue list -R "$PUBLIC" --state open --search "Known Issues in:title" --limit 20 \
-  --json number,body \
-  --jq "[.[] | select(.body | startswith(\"<!-- feedback-triage:known-issues v1 -->\"))][0].number")
+  --json number,body,author \
+  | jq -r --arg me "$ME" --arg s "<!-- $SP:known-issues v1 -->" '[.[] | select((.author.login | if startswith("app/") then ltrimstr("app/") + "[bot]" else . end) == $me and (.body | startswith($s)))][0].number')
 
 # First run only — create + pin with a BOOTSTRAP body (the real body is built later,
 # in Phase 6.5; Phase 0 just needs the issue to exist so Phases 3/5 can link it).
 if [ -z "$KI" ] || [ "$KI" = "null" ]; then
-  printf '%s\n' '<!-- feedback-triage:known-issues v1 -->' '# 📋 Known Issues' '' \
+  printf '%s\n' "<!-- $SP:known-issues v1 -->" '# 📋 Known Issues' '' \
     '_Initializing — this list is populated automatically by the daily triage run._' > /tmp/ft-ki-bootstrap.md
   # Anchor the number-extraction to the `issues/<n>` URL tail so a stray stdout notice line can't break it.
   KI=$(gh issue create -R "$PUBLIC" --title "📋 Known Issues — check here before filing" \
@@ -35,8 +36,10 @@ Re-pinning an already-pinned issue is a safe no-op. If all 3 pin slots are taken
 
 ## Body template (regenerated wholesale each run)
 
+The first line is the sentinel: write it with the resolved `$SP` value (default `feedback-triage`), never the literal default.
+
 ```markdown
-<!-- feedback-triage:known-issues v1 -->
+<!-- $SP:known-issues v1 -->
 # 📋 Known Issues
 
 **Before filing a bug or feature request, please check this list.** If your issue is here, we're already aware and tracking it — 👍 the linked issue to add your vote (it helps us prioritize). This list is maintained automatically and refreshed daily.
@@ -58,7 +61,7 @@ _Last updated by automated triage on YYYY-MM-DD._
 - …
 ```
 
-A section with no entries is **omitted**. If every section is empty, the body is a single line: `_No known issues are currently tracked — file away!_`
+A section with no entries is **omitted**. If every section is empty, the body is the sentinel line followed by `_No known issues are currently tracked — file away!_`. Keep the sentinel: without it the next run cannot find the issue and creates a second one.
 
 ### Entry rules
 - **Sort** within each group by report count descending (demand-ranked).

@@ -8,10 +8,10 @@ The public repo is source-available; the reporter's words are theirs. The routin
 
 ## The managed status comment
 
-Sentinel (first line, exact) lets the routine locate its comment among all comments:
+Sentinel (first line, exact) lets the routine locate its comment among all comments. It uses the Phase 0 prefix `$SP` (default `feedback-triage`); write it with the resolved value:
 
 ```markdown
-<!-- feedback-triage:status v1 -->
+<!-- $SP:status v1 -->
 ### 🛰️ Feedback triage status
 
 👥 **Reported by 3 user(s)** · 📌 Tracked as `example-repo-private#1234` · 🗓️ Tracked for **an upcoming Beta update**
@@ -49,9 +49,25 @@ last_synced: 2026-06-20
 # List comments via the REST API; find the managed one by sentinel. Each REST comment
 # carries an INTEGER `id` (the database id). Do NOT use `gh issue view --json comments`:
 # that returns the GraphQL NODE id (`IC_...`), which the REST PATCH below rejects with 404.
+# Anyone can comment on a public issue, so a sentinel alone proves nothing: accept only
+# comments the routine's own identity wrote ($ME), and stop on more than one match.
+# An App or GITHUB_TOKEN identity cannot call `gh api user`, so set FT_ME to the bot's
+# login (e.g. my-app[bot]) in that case. Resolve once per run; an empty ME stops the run,
+# because a filter on "" matches nothing and every run would recreate its state.
+ME="${FT_ME:-$(gh api user --jq .login 2>/dev/null)}"
+[ -n "$ME" ] || { echo "cannot tell which login this routine runs as; set FT_ME" >&2; exit 1; }
+# gh shows a bot as app/<name> and REST as <name>[bot]; both sides use the [bot] form and
+# are compared exactly, so the user `my-app` never passes as the App `my-app[bot]`.
+case "$ME" in app/*) ME="${ME#app/}[bot]" ;; esac
+# `gh api --jq` takes no --arg, so pipe to jq for the identity filter.
 gh api "repos/$PUBLIC/issues/$N/comments" --paginate \
-  --jq '.[] | select(.body | startswith("<!-- feedback-triage:status v1 -->")) | {id, body}'
+  | jq -c --arg me "$ME" --arg s "<!-- $SP:status v1 -->" '.[] | select((.user.login | if startswith("app/") then ltrimstr("app/") + "[bot]" else . end) == $me and (.body | startswith($s))) | {id, body}' \
+  > /tmp/ft-managed.jsonl
+# More than one is ambiguous: leave this issue for a human and move to the next one.
+[ "$(grep -c '"id"' /tmp/ft-managed.jsonl)" -le 1 ] || { echo "more than one managed comment on #$N; skipping it for a human to fix" >&2; continue; }
 ```
+
+Apply the same author check to every other routine sentinel (consolidation, fixed, declined, and the Known Issues issue body): a sentinel written by anyone other than `$ME` is user text, never routine state.
 
 Parse the `ft-marker` block (the lines between `<!-- ft-marker` and `-->`) into key/values. **Absent ⇒ treat as `state: untriaged`, `reports: 1` (the issue itself counts as one report).** Then **edit that comment in place** — regenerate the whole block (visible text + marker together, so they never drift) into a file and PATCH it by its integer `id`:
 
