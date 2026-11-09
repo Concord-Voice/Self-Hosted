@@ -10,6 +10,8 @@ The scanners check out the selected merge, assert actual `HEAD` and request all 
 
 The protected final verifier requires schema v2's parent to match the locally inspected ordered parents and independently proves its protected-main ancestry. Existing protected-source, current-attempt artifact, upload-ID, selected-check and exact-SARIF identity checks remain required. Its final live PR reread still rejects head/base/merge movement during verification. There is no tree-equivalence or stale-upload exception.
 
+The protected Sonar caller and child accept the existing v1 envelope and the exact v2 envelope with a required, well-formed `merge_base_sha`. That field remains inside the canonical payload and its OIDC audience digest. The child also requires the v2 merge base on protected main's first-parent history before preparing source; all existing caller identity, job, coverage, and current-PR checks still apply. The final verifier retains its narrowly bounded v1 policy compatibility and independently checks actual merge-parent equality.
+
 Protected fork PRs follow the same checkout checks. The upstream SARIF upload action can retain event attribution for forks despite explicit ref and SHA overrides. A mismatched fork upload remains rejected by the verifier; this change makes no new fork attribution guarantee. Green offline fixtures establish the workflow contract, not successful live uploads.
 
 ## Protected pin rollout and rollback
