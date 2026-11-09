@@ -105,7 +105,7 @@ end
 
 if mode == 'clear' then
   redis.call('DEL', KEYS[1], KEYS[2])
-  if tonumber(redis.call('GET', KEYS[4]) or '0') > 0 then redis.call('DECR', KEYS[4]) end
+  if tonumber(redis.call('GET', KEYS[4]) or '0') > 0 then redis.call('DECRBY', KEYS[4], 1) end
   return 1
 end
 

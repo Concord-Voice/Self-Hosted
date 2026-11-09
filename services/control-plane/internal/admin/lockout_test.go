@@ -6,6 +6,8 @@ import (
 	"errors"
 	"os"
 	"path"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -381,5 +383,37 @@ func TestWindowForLevel(t *testing.T) {
 	}
 	for level, want := range cases {
 		assert.Equal(t, want, admin.WindowForLevelForTest(level), "level %d", level)
+	}
+}
+
+// The managed-Redis ACL checks the commands a Lua script calls, not just EVALSHA,
+// so a command the script uses that the manifest does not grant fails every admin
+// sign-in with NOPERM. Every redis.call in lockout.go (and the Go-side Exists and
+// Del) must be in the control-plane command list. DECR, for one, is not: the
+// manifest grants DECRBY.
+func TestLockoutRedisCommandsAreInTheManagedRedisACL(t *testing.T) {
+	raw, err := os.ReadFile("../managedredis/acl-manifest.json")
+	require.NoError(t, err)
+	var manifest struct {
+		Services map[string]struct {
+			Commands []string `json:"commands"`
+		} `json:"services"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &manifest))
+	granted := map[string]bool{}
+	for _, c := range manifest.Services["control-plane"].Commands {
+		granted[c] = true
+	}
+
+	src, err := os.ReadFile("lockout.go")
+	require.NoError(t, err)
+	used := map[string]bool{"EVAL": true, "EVALSHA": true, "EXISTS": true, "DEL": true}
+	matches := regexp.MustCompile(`redis\.call\('([A-Za-z]+)'`).FindAllStringSubmatch(string(src), -1)
+	require.NotEmpty(t, matches, "the script's redis.call sites were not found")
+	for _, m := range matches {
+		used[strings.ToUpper(m[1])] = true
+	}
+	for cmd := range used {
+		assert.True(t, granted[cmd], "%s is used by the lockout but is not granted to the control-plane in acl-manifest.json", cmd)
 	}
 }
