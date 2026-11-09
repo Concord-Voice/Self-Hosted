@@ -150,7 +150,7 @@ func TestSessionStore_Get_RedisIOError_PropagatesError(t *testing.T) {
 // Lockout — error paths via closed Redis (was 60–66%)
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestLockout_RecordFailure_RedisError(t *testing.T) {
+func TestLockout_Reserve_RedisError(t *testing.T) {
 	rdb, cleanup := testhelpers.SetupTestRedis(t)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
@@ -158,8 +158,31 @@ func TestLockout_RecordFailure_RedisError(t *testing.T) {
 	lk := admin.NewLockout(rdb, nil)
 	require.NoError(t, rdb.Close())
 
-	err := lk.RecordFailure(ctx, "user", "1.2.3.4")
-	require.Error(t, err, "RecordFailure against closed Redis must error")
+	allowed, err := lk.Reserve(ctx, "user", "1.2.3.4")
+	require.Error(t, err, "Reserve against closed Redis must error")
+	assert.False(t, allowed, "a guess that cannot be counted must never be allowed")
+}
+
+func TestLockout_RecordCheckedFailure_RedisError(t *testing.T) {
+	rdb, cleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+
+	lk := admin.NewLockout(rdb, nil)
+	require.NoError(t, rdb.Close())
+
+	require.Error(t, lk.RecordCheckedFailure(ctx, "user", "1.2.3.4"), "RecordCheckedFailure against closed Redis must error")
+}
+
+func TestLockout_Unlock_RedisError(t *testing.T) {
+	rdb, cleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+
+	lk := admin.NewLockout(rdb, nil)
+	require.NoError(t, rdb.Close())
+
+	require.Error(t, lk.Unlock(ctx, "user"), "Unlock against closed Redis must error")
 }
 
 func TestLockout_Reset_RedisError(t *testing.T) {
@@ -182,7 +205,7 @@ func TestLockout_IsLocked_RedisError(t *testing.T) {
 	lk := admin.NewLockout(rdb, nil)
 	require.NoError(t, rdb.Close())
 
-	_, _, err := lk.IsLocked(ctx, "user", "1.2.3.4")
+	_, err := lk.IsLocked(ctx, "user", "1.2.3.4")
 	require.Error(t, err, "IsLocked against closed Redis must error")
 }
 
@@ -324,10 +347,7 @@ func TestPasswordLogin_LockedOut_Returns429(t *testing.T) {
 	engine := adminAuthEngine(t, db, rdb)
 	_, username, _ := enrolledAdmin(t, db, rdb)
 
-	lk := admin.NewLockout(rdb, nil)
-	for i := 0; i < 5; i++ {
-		require.NoError(t, lk.RecordFailure(context.Background(), username, "203.0.113.10"))
-	}
+	lockOut(t, admin.NewLockout(rdb, nil), username, "203.0.113.10")
 
 	// Locked branch -> auditDenied is called -> 429.
 	rec := postJSON(engine, "/admin/api/v1/auth/password", map[string]string{

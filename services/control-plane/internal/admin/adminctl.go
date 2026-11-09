@@ -29,6 +29,12 @@ import (
 // audit detail).
 const verbResetEnrollment = "reset-enrollment"
 
+// verbUnlock is the lockout recovery subcommand name.
+const verbUnlock = "unlock"
+
+// adminCtlUsage is the one verb list shown for a missing or unknown verb.
+const adminCtlUsage = "bootstrap|reset-enrollment|unlock"
+
 // adminCtlDeps bundles the injected collaborators an adminctl verb operates on.
 // Tests construct this against the isolated PG/Redis stack and an in-memory
 // stdin/stdout, so the verbs run with no real TTY and no global state.
@@ -36,6 +42,8 @@ type adminCtlDeps struct {
 	repo   *AdminRepo
 	audit  *AuditLog
 	enroll *EnrollmentStore
+	// lockout is the sign-in lockout the unlock verb clears.
+	lockout *Lockout
 	// enrollBaseURL is the console origin the printed enrollment URL points at
 	// (e.g. https://admin.example.org). Derived from the admin RP origins.
 	enrollBaseURL string
@@ -53,7 +61,7 @@ func (discardSecurityEvents) Close() error { return nil }
 type securityEventsOpener func() (securityevent.Emitter, io.Closer, error)
 
 // RunAdminCtl is the entrypoint for the `control-plane admin <verb>` subcommand
-// (bootstrap / reset-enrollment). It is invoked out-of-band via `docker exec` on
+// (bootstrap / reset-enrollment / unlock). It is invoked out-of-band via `docker exec` on
 // the server for first-admin provisioning and break-glass recovery — never via
 // the GitHub deploy pipeline (the trust anchor is host shell access, not CI).
 //
@@ -62,7 +70,8 @@ type securityEventsOpener func() (securityevent.Emitter, io.Closer, error)
 // process exit code.
 func RunAdminCtl(args []string) int {
 	if len(args) == 0 {
-		outf(os.Stderr, "usage: control-plane admin <bootstrap|reset-enrollment> [flags]\n")
+		outf(os.Stderr, "usage: control-plane admin <%s> [flags]\n"+
+			"       control-plane admin unlock <username>\n", adminCtlUsage)
 		return 2
 	}
 
@@ -117,6 +126,7 @@ func RunAdminCtl(args []string) int {
 		repo:          NewAdminRepo(db),
 		audit:         NewAuditLog(db),
 		enroll:        NewEnrollmentStore(rdb),
+		lockout:       NewLockout(rdb, nil),
 		enrollBaseURL: enrollBaseURL(cfg),
 		stdin:         os.Stdin,
 		stdout:        os.Stdout,
@@ -171,8 +181,14 @@ func runAdminCtl(ctx context.Context, deps adminCtlDeps, args []string) int {
 			return 1
 		}
 		return 0
+	case verbUnlock:
+		if err := runUnlock(ctx, deps, rest); err != nil {
+			outf(deps.stdout, "admin unlock failed: %v\n", err)
+			return 1
+		}
+		return 0
 	default:
-		outf(deps.stdout, "admin: unknown verb %q (want bootstrap|reset-enrollment)\n", verb)
+		outf(deps.stdout, "admin: unknown verb %q (want %s)\n", verb, adminCtlUsage)
 		return 2
 	}
 }
@@ -303,6 +319,37 @@ func runResetEnrollment(ctx context.Context, deps adminCtlDeps, args []string) e
 	}
 
 	printEnrollment(deps.stdout, *username, deps.enrollBaseURL, token)
+	return nil
+}
+
+// runUnlock is the operator's way out of a sign-in lockout: it clears the named
+// admin's lock, attempts and escalation level, so the next correct sign-in
+// succeeds. Usage: unlock <username>. It does not touch the IP axis (an IP lock
+// expires within an hour) and it audits EventBootstrap with verb "unlock", as the
+// other break-glass verbs do (EventLockout would emit an account-locked event).
+func runUnlock(ctx context.Context, deps adminCtlDeps, args []string) error {
+	if len(args) != 1 || args[0] == "" || strings.HasPrefix(args[0], "-") {
+		return errors.New("usage: unlock <username>")
+	}
+	username := args[0]
+
+	adminUser, err := deps.repo.GetByUsername(ctx, username)
+	if err != nil {
+		return fmt.Errorf("look up admin: %w", err)
+	}
+	if err := deps.lockout.Unlock(ctx, username); err != nil {
+		return err
+	}
+	if auditErr := deps.audit.Write(ctx, AuditEvent{
+		AdminID:   &adminUser.ID,
+		Actor:     username,
+		EventType: EventBootstrap,
+		Result:    AuditSuccess,
+		Detail:    map[string]any{"verb": verbUnlock},
+	}); auditErr != nil {
+		return fmt.Errorf("audit unlock: %w", auditErr)
+	}
+	outf(deps.stdout, "Unlocked %s: lock, failed attempts and escalation level cleared.\n", username)
 	return nil
 }
 

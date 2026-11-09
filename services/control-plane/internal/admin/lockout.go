@@ -11,35 +11,124 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
-// Lockout policy constants (#1688 §7). After lockoutThreshold consecutive
-// failures the account/IP is locked for an exponentially growing window,
-// 2^(n-threshold) minutes, capped at lockoutMaxWindow.
+// Lockout policy constants (#1688 §7, reworked in #221). A password guess is
+// counted BEFORE its password is checked. The sixth guess in an attempts window
+// locks the axis; each lock lasts twice as long as the one before it, from
+// lockoutBaseWindow up to lockoutMaxWindow. The level behind that escalation
+// lives in its own key and outlives the lock, so waiting out a lock does not
+// buy a fresh first-level lock.
 const (
-	// lockoutThreshold is the number of consecutive failures tolerated before a
-	// lock engages.
+	// lockoutThreshold is the number of guesses whose password is checked before
+	// a lock engages. The next guess is refused unchecked.
 	lockoutThreshold = 5
-	// lockoutBaseWindow is the window for the first lock (the threshold-th
-	// failure): 2^0 * base = 1 minute.
+	// lockoutBaseWindow is the length of the first lock.
 	lockoutBaseWindow = time.Minute
-	// lockoutMaxWindow caps the exponential growth so a determined attacker
-	// cannot push the lock to an absurd duration that would also harm a
-	// legitimate operator's recovery.
+	// lockoutMaxWindow caps the escalation so a determined attacker cannot hold an
+	// operator out for longer than an operator can wait.
 	lockoutMaxWindow = 60 * time.Minute
+	// lockoutAttemptsWindow is how long a guess stays counted. It must be long
+	// enough that a patient attacker cannot stay under the threshold by waiting.
+	lockoutAttemptsWindow = time.Hour
+	// lockoutLevelMemory is how long the level outlives the lock it escalated: a
+	// level key lives for the lock window plus this.
+	lockoutLevelMemory = time.Hour
+	// lockoutMaxLevel is the first level whose window reaches lockoutMaxWindow.
+	lockoutMaxLevel = 7
 )
 
-// Lockout key prefixes. The account key carries the operator handle directly
-// (not PII — admin handles are not emails); the IP key carries a SHA-256 hash of
-// the IP so the RAW IP is NEVER stored at rest (#1688 §7 / [internal]rules/observability.md).
+// Lockout key prefixes. Each axis has three keys: attempts (the running count),
+// lock (exists while the axis is locked) and level (how many times it has
+// locked). The account keys carry the operator handle directly (not PII — admin
+// handles are not emails); the IP keys carry a SHA-256 hash of the IP so the RAW
+// IP is NEVER stored at rest (#1688 §7 / [internal]rules/observability.md).
+// The kind sits before the colon ("acct_lock:", not "acct:lock:") so a handle
+// can never collide with another kind's key. The managed-Redis ACL manifest
+// lists every prefix.
 const (
-	lockoutAcctPrefix = "admin_lockout:acct:"
-	lockoutIPPrefix   = "admin_lockout:ip:"
+	lockoutAcctPrefix      = "admin_lockout:acct:"
+	lockoutAcctLockPrefix  = "admin_lockout:acct_lock:"
+	lockoutAcctLevelPrefix = "admin_lockout:acct_level:"
+	lockoutIPPrefix        = "admin_lockout:ip:"
+	lockoutIPLockPrefix    = "admin_lockout:ip_lock:"
+	lockoutIPLevelPrefix   = "admin_lockout:ip_level:"
 )
+
+// The lockoutScript modes.
+const (
+	lockoutModeReserve = "reserve"
+	lockoutModeChecked = "checked"
+	lockoutModeClear   = "clear"
+)
+
+// ErrLockoutUnavailable is returned when no Redis client is wired. A guess that
+// cannot be counted is refused, never allowed.
+var ErrLockoutUnavailable = errors.New("admin lockout unavailable")
+
+// lockoutScript counts and locks both axes in one atomic Redis step, so a burst
+// of concurrent guesses cannot all pass the lock check before any is counted.
+// KEYS: account attempts, lock, level; then the same three for the IP.
+// ARGV[1] is the mode, ARGV[2] the threshold, ARGV[3] the attempts window in
+// seconds, ARGV[4] how long the level outlives its lock in seconds, and the rest
+// the lock window of level 1, 2, ... in seconds (the last repeats).
+//
+//	reserve - count a guess BEFORE its password is checked. Returns 1 if the
+//	          check may run, 0 if either axis is locked or this guess went over
+//	          the threshold. A locked axis is not counted again.
+//	checked - a reserved guess failed; lock any axis that reached the threshold.
+//	          The guess was already counted, so this does not count it again.
+//	clear   - the sign-in or enrollment completed; drop the attempts and the lock
+//	          of both axes. The level stays, so a re-attack after a sign-in
+//	          escalates at once.
+//
+// Counting before the check has one cost: six guesses sent at the same moment
+// lock the axis even if they are all correct, because the sixth is refused
+// before any success clears the count. A real operator does not do this.
+var lockoutScript = redis.NewScript(`
+local mode = ARGV[1]
+local limit = tonumber(ARGV[2])
+local memory = tonumber(ARGV[4])
+local windows = #ARGV - 4
+local axes = {{KEYS[1], KEYS[2], KEYS[3]}, {KEYS[4], KEYS[5], KEYS[6]}}
+
+local function lock(attempts, lockKey, levelKey)
+  local level = redis.call('INCR', levelKey)
+  local window = tonumber(ARGV[4 + math.min(level, windows)])
+  redis.call('SET', lockKey, '1', 'EX', window)
+  redis.call('EXPIRE', levelKey, window + memory)
+  redis.call('DEL', attempts)
+end
+
+if mode == 'clear' then
+  for _, k in ipairs(axes) do redis.call('DEL', k[1], k[2]) end
+  return 1
+end
+
+if mode == 'reserve' then
+  if redis.call('EXISTS', KEYS[2]) == 1 or redis.call('EXISTS', KEYS[5]) == 1 then return 0 end
+  local allowed = 1
+  for _, k in ipairs(axes) do
+    local n = redis.call('INCR', k[1])
+    redis.call('EXPIRE', k[1], ARGV[3])
+    if n > limit then
+      lock(k[1], k[2], k[3])
+      allowed = 0
+    end
+  end
+  return allowed
+end
+
+for _, k in ipairs(axes) do
+  if redis.call('EXISTS', k[2]) == 0 and tonumber(redis.call('GET', k[1]) or '0') >= limit then
+    lock(k[1], k[2], k[3])
+  end
+end
+return 1
+`)
 
 // Lockout enforces per-account AND per-IP exponential backoff in Redis. The two
 // axes are independent: account lockout stops credential-stuffing one handle;
-// IP lockout stops spraying many handles from one source. A login attempt is
-// blocked if EITHER axis is locked. The clock is injectable for deterministic
-// tests.
+// IP lockout stops spraying many handles from one source. A guess is refused if
+// EITHER axis is locked. The clock is injectable for deterministic tests.
 type Lockout struct {
 	redis *redis.Client
 	now   func() time.Time
@@ -61,17 +150,16 @@ func hashIP(ip string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// windowFor computes the lock window for a given consecutive-failure count.
-// Below the threshold there is no lock (zero window). At and above it the window
-// grows as 2^(count-threshold) * base, capped at lockoutMaxWindow.
-func windowFor(count int64) time.Duration {
-	if count < lockoutThreshold {
+// windowForLevel is the lock window for the n-th consecutive lock of an axis:
+// 2^(level-1) * lockoutBaseWindow, capped at lockoutMaxWindow. Level 0 and below
+// have no lock.
+func windowForLevel(level int64) time.Duration {
+	if level < 1 {
 		return 0
 	}
-	exp := count - lockoutThreshold
-	// Guard the shift: once 1<<exp * base would exceed the cap, return the cap.
-	// 2^6 min = 64 min already exceeds the 60 min cap, so exp >= 6 saturates;
-	// the explicit bound also prevents an overflowing shift on a huge count.
+	// 2^6 min = 64 min already exceeds the 60 min cap, so exp >= 6 saturates; the
+	// explicit bound also prevents an overflowing shift on a huge level.
+	exp := level - 1
 	if exp >= 6 {
 		return lockoutMaxWindow
 	}
@@ -82,89 +170,78 @@ func windowFor(count int64) time.Duration {
 	return window
 }
 
-// RecordFailure increments both the per-account and per-IP failure counters and
-// (re)sets each key's TTL to that axis's current lock window once the threshold
-// is reached. Before the threshold, the counter is held for the base window so a
-// burst of failures within that window accumulates (consecutive-failure
-// semantics); the key self-expires after the window, resetting the counter.
-func (l *Lockout) RecordFailure(ctx context.Context, username, ip string) error {
-	if err := l.recordOne(ctx, lockoutAcctPrefix+username); err != nil {
-		return fmt.Errorf("record account failure: %w", err)
+func (l *Lockout) run(ctx context.Context, mode, username, ip string) (int64, error) {
+	if l == nil || l.redis == nil {
+		return 0, ErrLockoutUnavailable
 	}
-	if err := l.recordOne(ctx, lockoutIPPrefix+hashIP(ip)); err != nil {
-		return fmt.Errorf("record ip failure: %w", err)
+	args := make([]interface{}, 0, 4+lockoutMaxLevel)
+	args = append(args, mode, lockoutThreshold,
+		int64(lockoutAttemptsWindow/time.Second), int64(lockoutLevelMemory/time.Second))
+	for level := int64(1); level <= lockoutMaxLevel; level++ {
+		args = append(args, int64(windowForLevel(level)/time.Second))
+	}
+	ipHash := hashIP(ip)
+	return lockoutScript.Run(ctx, l.redis, []string{
+		lockoutAcctPrefix + username, lockoutAcctLockPrefix + username, lockoutAcctLevelPrefix + username,
+		lockoutIPPrefix + ipHash, lockoutIPLockPrefix + ipHash, lockoutIPLevelPrefix + ipHash,
+	}, args...).Int64()
+}
+
+// Reserve counts a password guess on both axes before its password is checked,
+// in one atomic step with the lock check. It returns false when the account or
+// the IP is locked, or when this guess is the one that locks it. On an error the
+// caller must refuse the guess as a server error — never as a lock, and never as
+// a success — because an uncounted guess would reopen unlimited guessing.
+func (l *Lockout) Reserve(ctx context.Context, username, ip string) (bool, error) {
+	allowed, err := l.run(ctx, lockoutModeReserve, username, ip)
+	if err != nil {
+		return false, fmt.Errorf("reserve admin login attempt: %w", err)
+	}
+	return allowed == 1, nil
+}
+
+// RecordCheckedFailure locks any axis whose reserved guess reached the threshold.
+// The guess was already counted by Reserve, so this does not count it again.
+func (l *Lockout) RecordCheckedFailure(ctx context.Context, username, ip string) error {
+	if _, err := l.run(ctx, lockoutModeChecked, username, ip); err != nil {
+		return fmt.Errorf("record admin login failure: %w", err)
 	}
 	return nil
 }
 
-// recordOne increments a single counter key and sets its TTL to the lock window
-// for the resulting count. The TTL is what enforces lock expiry: once it lapses,
-// the counter is gone and the axis is unlocked again. Until the threshold, the
-// TTL is the base window (so failures within it count as consecutive).
-func (l *Lockout) recordOne(ctx context.Context, key string) error {
-	count, err := l.redis.Incr(ctx, key).Result()
+// IsLocked reports whether the account OR the IP is currently locked. It is a
+// pure read: it counts nothing, so a step that only re-checks (WebAuthnLogin)
+// can never lock the axis it is checking.
+func (l *Lockout) IsLocked(ctx context.Context, username, ip string) (bool, error) {
+	if l == nil || l.redis == nil {
+		return false, ErrLockoutUnavailable
+	}
+	n, err := l.redis.Exists(ctx, lockoutAcctLockPrefix+username, lockoutIPLockPrefix+hashIP(ip)).Result()
 	if err != nil {
-		return err
+		return false, fmt.Errorf("check admin lock: %w", err)
 	}
-	window := windowFor(count)
-	if window <= 0 {
-		// Pre-threshold: hold the counter for the base window so a slow drip of
-		// failures still accumulates toward the lock.
-		window = lockoutBaseWindow
-	}
-	if err := l.redis.Expire(ctx, key, window).Err(); err != nil {
-		return err
-	}
-	return nil
+	return n > 0, nil
 }
 
-// IsLocked reports whether the account OR the IP is currently locked, along with
-// the retry-after duration (the larger of the two axes' remaining lock windows).
-// A non-locked attempt returns (false, 0, nil).
-func (l *Lockout) IsLocked(ctx context.Context, username, ip string) (bool, time.Duration, error) {
-	acctLocked, acctRetry, err := l.axisLocked(ctx, lockoutAcctPrefix+username)
-	if err != nil {
-		return false, 0, fmt.Errorf("check account lock: %w", err)
-	}
-	ipLocked, ipRetry, err := l.axisLocked(ctx, lockoutIPPrefix+hashIP(ip))
-	if err != nil {
-		return false, 0, fmt.Errorf("check ip lock: %w", err)
-	}
-	locked := acctLocked || ipLocked
-	retry := acctRetry
-	if ipRetry > retry {
-		retry = ipRetry
-	}
-	if !locked {
-		return false, 0, nil
-	}
-	return true, retry, nil
-}
-
-// axisLocked reports whether a single counter key is at/over the threshold and
-// the retry-after for that axis. retry-after is derived from windowFor(count) —
-// the policy window for the current failure depth — which the Expire TTL
-// mirrors; using the policy window keeps the value deterministic under the
-// injected test clock (Redis TTL is wall-clock, independent of the clock seam).
-func (l *Lockout) axisLocked(ctx context.Context, key string) (bool, time.Duration, error) {
-	count, err := l.redis.Get(ctx, key).Int64()
-	if errors.Is(err, redis.Nil) {
-		return false, 0, nil
-	}
-	if err != nil {
-		return false, 0, err
-	}
-	if count < lockoutThreshold {
-		return false, 0, nil
-	}
-	return true, windowFor(count), nil
-}
-
-// Reset clears both the account and IP counters (called on a successful login).
-// Deleting absent keys is a no-op, so a fresh login that never failed is safe.
+// Reset drops the attempts and the lock of both axes (called when a sign-in or
+// enrollment completes). It keeps the level: a re-attack straight after a
+// sign-in escalates from where it left off. Deleting absent keys is a no-op.
 func (l *Lockout) Reset(ctx context.Context, username, ip string) error {
-	if err := l.redis.Del(ctx, lockoutAcctPrefix+username, lockoutIPPrefix+hashIP(ip)).Err(); err != nil {
+	if _, err := l.run(ctx, lockoutModeClear, username, ip); err != nil {
 		return fmt.Errorf("reset lockout: %w", err)
+	}
+	return nil
+}
+
+// Unlock is the operator's way out (adminctl unlock): it clears the account's
+// attempts, lock AND level, so the next sign-in starts from a clean first level.
+// The IP axis is not touched; an IP lock expires within lockoutMaxWindow.
+func (l *Lockout) Unlock(ctx context.Context, username string) error {
+	if l == nil || l.redis == nil {
+		return ErrLockoutUnavailable
+	}
+	if err := l.redis.Del(ctx, lockoutAcctPrefix+username, lockoutAcctLockPrefix+username, lockoutAcctLevelPrefix+username).Err(); err != nil {
+		return fmt.Errorf("unlock admin account: %w", err)
 	}
 	return nil
 }

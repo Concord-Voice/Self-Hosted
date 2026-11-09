@@ -172,7 +172,7 @@ func TestEnrollBegin_ActiveAdminCorrectPasswordCounts(t *testing.T) { // regress
 		require.Equal(t, unknownBody, body)
 	}
 
-	assert.Equal(t, int64(5), failCount(t, rdb, acctKey(username)))
+	assert.True(t, keyExists(t, rdb, acctLockKey(username)), "five refusals must lock the account")
 	assert.True(t, tokenStillStored(t, rdb, token), "a non-pending admin must be refused before the token is spent")
 }
 
@@ -193,11 +193,12 @@ func TestEnrollFinish_LockAfterBegin_StillEnrolls(t *testing.T) { // regression 
 	}
 	require.NoError(t, json.Unmarshal(beginRec.Body.Bytes(), &begin))
 
-	for i := 0; i < 5; i++ {
+	// The successful begin was the first counted guess; four failures make five.
+	for i := 0; i < 4; i++ {
 		code, _ := passwordLogin(engine, username, "wrong-password")
 		require.Equal(t, http.StatusUnauthorized, code)
 	}
-	locked, _, err := admin.NewLockout(rdb, nil).IsLocked(context.Background(), username, defaultTestIP)
+	locked, err := admin.NewLockout(rdb, nil).IsLocked(context.Background(), username, defaultTestIP)
 	require.NoError(t, err)
 	require.True(t, locked)
 
@@ -213,9 +214,12 @@ func TestEnrollFinish_LockAfterBegin_StillEnrolls(t *testing.T) { // regression 
 	assert.Equal(t, admin.StatusActive, got.Status)
 	assert.Zero(t, failCount(t, rdb, acctKey(username)))
 	assert.Zero(t, failCount(t, rdb, ipKey(defaultTestIP)))
+	assert.False(t, keyExists(t, rdb, acctLockKey(username)), "a finished enrollment lifts the account lock")
+	assert.False(t, keyExists(t, rdb, ipLockKey(defaultTestIP)), "a finished enrollment lifts the IP lock")
 }
 
-// A successful begin does not clear earlier failures; only a finished enrollment does.
+// A successful begin does not clear earlier failures, and it is itself a counted
+// guess; only a finished enrollment clears the count.
 func TestEnroll_CounterResetsOnlyAfterFinish(t *testing.T) { // regression for #216
 	db, rdb, engine := setupEnrollLockout(t)
 	_, username, token := pendingAdminWithToken(t, db, rdb)
@@ -229,12 +233,13 @@ func TestEnroll_CounterResetsOnlyAfterFinish(t *testing.T) { // regression for #
 	})
 	require.Equal(t, http.StatusOK, beginRec.Code, beginRec.Body.String())
 
-	// Fifth failure after a successful begin: still locks, because begin did not reset.
+	// Four failures plus the successful begin are five counted guesses, so the
+	// next guess is the one that locks: begin did not reset the count.
 	code, _ := passwordLogin(engine, username, "wrong-password")
-	require.Equal(t, http.StatusUnauthorized, code)
-	locked, _, err := admin.NewLockout(rdb, nil).IsLocked(context.Background(), username, "")
+	require.Equal(t, http.StatusTooManyRequests, code, "a successful EnrollBegin must not reset the guess counter")
+	locked, err := admin.NewLockout(rdb, nil).IsLocked(context.Background(), username, "")
 	require.NoError(t, err)
-	assert.True(t, locked, "a successful EnrollBegin must not reset the failure counter")
+	assert.True(t, locked)
 }
 
 // A finished enrollment clears earlier failures, as a finished login does.
@@ -346,8 +351,10 @@ func TestEnrollBegin_AccountAxisAcrossIPs(t *testing.T) { // regression for #216
 	assert.True(t, tokenStillStored(t, rdb, token))
 }
 
-// A token-store fault after a correct password is a 500, not a counted guess.
-func TestEnrollBegin_TokenStoreFault_NotCounted(t *testing.T) { // regression for #216
+// A token-store fault after a correct password is a 500, not a failed guess: it
+// records no failure and never locks. The guess was counted before the verify, so
+// the fault costs exactly one attempt.
+func TestEnrollBegin_TokenStoreFault_IsNotAFailure(t *testing.T) { // regression for #216
 	db, rdb, engine := setupEnrollLockout(t)
 	_, username, token := pendingAdminWithToken(t, db, rdb)
 
@@ -362,6 +369,7 @@ func TestEnrollBegin_TokenStoreFault_NotCounted(t *testing.T) { // regression fo
 	code, body := enrollBegin(engine, username, adminTestPassword, token)
 	assert.Equal(t, http.StatusInternalServerError, code, body)
 	assert.JSONEq(t, `{"error":"internal error"}`, body)
-	assert.Zero(t, failCount(t, rdb, acctKey(username)), "a store fault must not spend the lockout budget")
-	assert.Zero(t, failCount(t, rdb, ipKey(defaultTestIP)))
+	assert.Equal(t, int64(1), failCount(t, rdb, acctKey(username)), "the guess was counted before the verify")
+	assert.Equal(t, int64(1), failCount(t, rdb, ipKey(defaultTestIP)))
+	assert.False(t, keyExists(t, rdb, acctLockKey(username)), "a store fault is not a failure and must not lock")
 }

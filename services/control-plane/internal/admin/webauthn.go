@@ -29,6 +29,12 @@ var ErrAAGUIDNotAllowed = errors.New("admin: authenticator AAGUID is not in the 
 // rejection — an unparseable AAGUID can never match the allow-list.
 var ErrInvalidAAGUID = errors.New("admin: authenticator AAGUID is malformed")
 
+// ErrCredentialPersist marks a storage fault while saving a verified credential.
+// It is the server's failure, not a rejected key, so EnrollFinish answers it with
+// a logged 500 instead of the uniform 401 that attestation and AAGUID rejections
+// get.
+var ErrCredentialPersist = errors.New("admin: persist admin credential")
+
 // NewAdminWebAuthn builds a WebAuthnService bound to the DEDICATED admin relying
 // party (`ADMIN_WEBAUTHN_RP_ID` / `ADMIN_WEBAUTHN_RP_ORIGINS`), never the
 // user-facing `WEBAUTHN_RP_*` config. Reuses the vendored go-webauthn wrapper in
@@ -99,7 +105,8 @@ type AdminRegistrationInput struct {
 // list; `in.CredentialName` is an operator-supplied label (may be empty).
 //
 // Returns the stored AdminCredential. On AAGUID rejection it returns
-// ErrAAGUIDNotAllowed (or ErrInvalidAAGUID) and writes nothing.
+// ErrAAGUIDNotAllowed (or ErrInvalidAAGUID) and writes nothing. A fault while
+// saving the credential returns an error wrapping ErrCredentialPersist.
 func FinishAdminRegistration(ctx context.Context, svc *mfa.WebAuthnService, repo *AdminRepo, in AdminRegistrationInput) (AdminCredential, error) {
 	cred, err := svc.FinishRegistration(in.User, in.Session, in.Request)
 	if err != nil {
@@ -127,7 +134,7 @@ func FinishAdminRegistration(ctx context.Context, svc *mfa.WebAuthnService, repo
 		Transports:     transports,
 	})
 	if err != nil {
-		return AdminCredential{}, fmt.Errorf("persist admin credential: %w", err)
+		return AdminCredential{}, fmt.Errorf("%w: %w", ErrCredentialPersist, err)
 	}
 	return stored, nil
 }

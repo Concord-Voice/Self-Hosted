@@ -221,7 +221,6 @@ func TestWebAuthnLogin_LockedAfterHandleIssued_Returns429(t *testing.T) {
 
 	_, username, va := enrolledAdmin(t, db, rdb)
 	engine := adminAuthEngine(t, db, rdb)
-	ctx := context.Background()
 
 	// Step 1: password step succeeds and issues a valid handle (not yet locked).
 	pwRec := postJSON(engine, "/admin/api/v1/auth/password", map[string]string{
@@ -236,10 +235,7 @@ func TestWebAuthnLogin_LockedAfterHandleIssued_Returns429(t *testing.T) {
 	require.NoError(t, json.Unmarshal(pwRec.Body.Bytes(), &pwResp))
 
 	// Lock the account (per-account axis) AFTER the handle was issued.
-	lk := admin.NewLockout(rdb, nil)
-	for i := 0; i < 6; i++ {
-		require.NoError(t, lk.RecordFailure(ctx, username, "203.0.113.9"))
-	}
+	forceLock(t, admin.NewLockout(rdb, nil), username, "203.0.113.9")
 
 	// Step 2: the held handle must NOT be redeemable while locked → 429, no session.
 	va.signCount++
