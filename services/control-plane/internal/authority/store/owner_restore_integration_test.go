@@ -889,17 +889,17 @@ func TestStoppedVerbAbortsWhenTheServeLockSessionDies(t *testing.T) {
 func TestRestoreBeginEndsOnTheReplicationCheck(t *testing.T) {
 	e := newEnv(t)
 	e.enrolledWith()
-	p := &fakeProbe{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	p := &cancelAtReplicationProbe{cancel: cancel}
 	o := ownerOver(t, e.f, e.r, OwnerConfig{Probe: p})
 	trust := trustFile(t, e.r.Current)
 	requireGate(t, e.f, true)
 
-	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
-	defer cancel()
 	if _, err := o.RestoreBegin(ctx, trust); !errors.Is(err, ErrNotReplicated) {
 		t.Fatalf("RestoreBegin with no standby confirming = %v, want ErrNotReplicated", err)
 	}
-	if p.calls.Load() == 0 {
+	if p.calls == 0 {
 		t.Fatal("RestoreBegin never asked the replication probe")
 	}
 	m := readMetaRestore(t, e.f.Super)
@@ -910,13 +910,14 @@ func TestRestoreBeginEndsOnTheReplicationCheck(t *testing.T) {
 		t.Fatal("RestoreBegin leaked the serve lock on ErrNotReplicated")
 	}
 
-	p.ok.Store(true)
-	asked := p.calls.Load()
+	confirmed := &fakeProbe{}
+	confirmed.ok.Store(true)
+	o.probe = confirmed
 	pt, err := o.RestoreBegin(liveCtx(t), trust)
 	if err != nil {
 		t.Fatalf("re-run once a standby confirms = %v, want nil", err)
 	}
-	if p.calls.Load() <= asked {
+	if confirmed.calls.Load() == 0 {
 		t.Fatal("the re-run returned without ending on the replication check")
 	}
 	if after := readMetaRestore(t, e.f.Super); after.epoch != 1 || !after.started.Time.Equal(m.started.Time) ||

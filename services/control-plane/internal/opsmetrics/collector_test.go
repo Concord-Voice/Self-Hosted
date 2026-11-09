@@ -393,11 +393,13 @@ func TestCollectorDropsFailedWriteIntervalAndContinuesRetention(t *testing.T) {
 	now := time.Date(2026, 7, 12, 20, 0, 0, 0, time.UTC)
 	store := newCollectorTestStore()
 	store.writeErr = errors.New("forced write failure")
-	_, clock, ticker, cancel, _ := newCollectorUnderTest(now, store)
+	collector, clock, ticker, cancel, _ := newCollectorUnderTest(now, store)
 	t.Cleanup(cancel)
 
 	ticker.tick(t, now)
 	waitCollectorEvents(t, store, "write", "rollup", "prune")
+	require.Eventually(t, func() bool { return !collector.busy.Load() }, time.Second, time.Millisecond,
+		"the next tick must wait for the completed collection, not merely its buffered prune event")
 
 	store.mu.Lock()
 	store.writeErr = nil

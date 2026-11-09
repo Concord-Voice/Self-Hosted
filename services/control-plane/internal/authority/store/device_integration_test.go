@@ -2,6 +2,7 @@ package store
 
 import (
 	"bytes"
+	"context"
 	"testing"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/authoritytest"
@@ -310,8 +311,16 @@ func TestDeviceTransactionsPassTheReleaseGate(t *testing.T) {
 	e := newEnv(t)
 	a, _ := e.enrolledWith()
 	requireGate(t, e.f, true)
-	e.s.txDL = 200 * 1e6 // 200 ms
-	if out := e.device(a.AddDevice(t, authoritytest.NewDevice(t)).Bytes); out.Code != string(ac.ErrorReplication) {
-		t.Fatalf("device-transaction with replication unconfirmed = %+v, want 503 replication", out)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	probe := &cancelAtReplicationProbe{cancel: cancel}
+	e.s.probe = probe
+	out := e.s.SubmitDevice(ctx, a.AddDevice(t, authoritytest.NewDevice(t)).Bytes)
+	if probe.calls == 0 {
+		t.Fatal("device transaction never reached the replication probe")
+	}
+	wantBody := ac.ErrorEnvelope{Code: string(ac.ErrorReplication)}.Encode()
+	if out.HTTP != 503 || out.Kind != KindError || out.Code != string(ac.ErrorReplication) || !bytes.Equal(out.Body, wantBody) {
+		t.Fatalf("device transaction with replication unconfirmed = %+v, want 503 replication and no signed outcome bytes", out)
 	}
 }
