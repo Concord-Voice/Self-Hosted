@@ -4,7 +4,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from scan_revision_fixture import WorkflowConsumer, twin_merges, admitted_metadata
+from scan_revision_fixture import WorkflowConsumer, twin_merges, admitted_metadata, workflow
 from test_ci_scan_verdict import MODULE, PR, selection, analysis, evidence_for, run_git
 
 
@@ -15,7 +15,9 @@ class ScanRevisionBindingTests(unittest.TestCase):
         self.repo = Path(temporary.name)
         self.base, self.head, self.event_merge, self.admitted_merge = twin_merges(self.repo)
         self.selection = selection(dict(semgrep_custom=True, semgrep_community=True, eslint=True, govulncheck=True))
-        self.selection.update(base_sha=self.base, head_sha=self.head, merge_sha=self.admitted_merge)
+        merge_base = run_git(self.repo, 'show', '-s', '--format=%P', self.admitted_merge).split()[0]
+        self.selection.update(base_sha=self.base, head_sha=self.head, merge_sha=self.admitted_merge,
+                              merge_base_sha=merge_base)
         self.pr = copy.deepcopy(PR)
         self.pr['head']['sha'] = self.head
         self.pr['head']['repo']['full_name'] = 'Concord-Voice/Self-Hosted'
@@ -28,7 +30,9 @@ class ScanRevisionBindingTests(unittest.TestCase):
         self.assertEqual(self.head, admitted['head_sha'])
         self.assertEqual(self.base, admitted['base_sha'])
         self.assertEqual(self.admitted_merge, admitted['merge_sha'])
-        self.selection.update(head_sha=admitted['head_sha'], base_sha=admitted['base_sha'], merge_sha=admitted['merge_sha'])
+        self.assertEqual(merge_base, admitted['merge_base_sha'])
+        self.selection.update(head_sha=admitted['head_sha'], base_sha=admitted['base_sha'],
+                              merge_sha=admitted['merge_sha'], merge_base_sha=merge_base)
         self.assertNotEqual(self.event_merge, self.admitted_merge)
         self.assertEqual(run_git(self.repo, 'show', '-s', '--format=%P', self.event_merge),
                          run_git(self.repo, 'show', '-s', '--format=%P', self.admitted_merge))
@@ -75,6 +79,16 @@ class ScanRevisionBindingTests(unittest.TestCase):
             with self.subTest(scanner=scanner):
                 self.assertEqual(self.admitted_merge, actual,
                     scanner + ' scanned event merge instead of admitted selected merge')
+
+    def test_external_scanners_receive_distinct_api_and_merge_base_identities(self):
+        """The protected selector must not replace API base identity with merge^1."""
+        for scanner in ('semgrep', 'eslint', 'govulncheck'):
+            with self.subTest(scanner=scanner):
+                inputs = workflow('pr-ci.yml')['jobs'][scanner]['with']
+                self.assertIn('selected-base-sha', inputs)
+                self.assertIn("scan-selection || '{}').base_sha", inputs['selected-base-sha'])
+                self.assertIn('selected-merge-base-sha', inputs)
+                self.assertIn("scan-selection || '{}').merge_base_sha", inputs['selected-merge-base-sha'])
 
     def test_all_four_actual_uploads_bind_selected_merge_and_strict_verdict_accepts(self):
         consumer = self.observed()

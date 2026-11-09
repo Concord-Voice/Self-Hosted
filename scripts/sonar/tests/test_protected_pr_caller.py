@@ -171,6 +171,38 @@ class CallerTests(unittest.TestCase):
         with self.assertRaises(CALLER.Invalid):
             CALLER.emit_proof(args)
 
+    def test_schema_v2_payload_round_trips_its_merge_base(self):
+        """Schema 2 proves the selected merge's parent without weakening v1's exact shape."""
+        self.selection.update(version=2, merge_base_sha=SHA_B)
+        args = self.emit()
+        with patch.dict(CALLER.os.environ, {
+                "ACTIONS_ID_TOKEN_REQUEST_URL": "https://pipelines.actions.githubusercontent.com/token",
+                "ACTIONS_ID_TOKEN_REQUEST_TOKEN": "private-request-bearer"}, clear=True), \
+                patch.object(CALLER, "urlopen", return_value=Response(200, {"value": "header.payload.signature"})):
+            CALLER.emit_proof(args)
+        proof = json.loads(args.out.read_text())
+        payload = json.loads(base64.b64decode(proof["payload_b64"], validate=True))
+        self.assertEqual(payload["selection"]["merge_base_sha"], SHA_B)
+
+    def test_schema_payload_rejects_missing_malformed_extra_or_downgraded_merge_base(self):
+        """A merge base is mandatory only for v2 and cannot be smuggled into v1."""
+        cases = (
+            (2, None, False),
+            (2, "not-a-sha", False),
+            (2, SHA_B, True),
+            (1, SHA_B, False),
+        )
+        for version, merge_base, extra in cases:
+            with self.subTest(version=version, merge_base=merge_base, extra=extra):
+                selection = dict(self.selection, version=version)
+                if merge_base is not None:
+                    selection["merge_base_sha"] = merge_base
+                if extra:
+                    selection["unexpected"] = True
+                with self.assertRaises(CALLER.Invalid):
+                    CALLER.validate_payload({**self.ids, "selection": selection,
+                                             "jobs": self.jobs, "coverage": self.coverage})
+
     def test_dispatch_posts_only_five_keys_to_main_and_polls_exact_run(self):
         payload = CALLER.validate_payload({**self.ids, "selection": self.selection,
                                            "jobs": self.jobs, "coverage": self.coverage})

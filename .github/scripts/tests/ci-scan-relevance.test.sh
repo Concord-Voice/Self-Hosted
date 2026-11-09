@@ -383,7 +383,13 @@ mkdir -p "$TASK_TMP/bin"
 mkdir -p "$TASK_TMP/runner"
 cat > "$TASK_TMP/bin/gh" <<'SH'
 #!/bin/sh
-cat "$PR_FIXTURE"
+case "${2:-}" in
+  */pulls/*) cat "$PR_FIXTURE" ;;
+  */commits/*) printf '{"sha":"%040d","parents":[{"sha":"%040d"},{"sha":"%040d"}]}' 3 1 2 ;;
+  */git/ref/heads/main) printf '{"ref":"refs/heads/main","object":{"type":"commit","sha":"%040d"}}' 1 ;;
+  */compare/*) printf '{"status":"identical","ahead_by":0,"behind_by":0,"total_commits":0,"base_commit":{"sha":"%040d"},"merge_base_commit":{"sha":"%040d"}}' 1 1 ;;
+  *) exit 1 ;;
+esac
 SH
 chmod +x "$TASK_TMP/bin/gh"
 for label in 'risk: hotfix' 'risk: security'; do
@@ -427,7 +433,8 @@ const metadata = async path => {
     const at = line.indexOf('='); return [line.slice(0, at), line.slice(at + 1)];
   }));
   return { event_name: 'pull_request', hotfix: values.hotfix === 'true',
-    head_sha: values.head_sha, base_sha: values.base_sha, merge_sha: values.merge_sha,
+    head_sha: values.head_sha, base_sha: values.base_sha, merge_base_sha: values.merge_base_sha,
+    merge_sha: values.merge_sha,
     changed_files: Number(values.changed_files) };
 };
 const opts = { mode: 'required-relevant', policySha: 'd'.repeat(40) };
@@ -451,7 +458,9 @@ assert.equal(unknownMode.known, false, 'unrecognized policy mode stays unknown')
 
 const complete = { ...outputs };
 const base = { event_name: 'pull_request', hotfix: false, head_sha: 'a'.repeat(40),
-  base_sha: 'b'.repeat(40), merge_sha: 'c'.repeat(40), changed_files: 8 };
+  base_sha: 'b'.repeat(40), merge_base_sha: 'b'.repeat(40), merge_sha: 'c'.repeat(40), changed_files: 8 };
+assert.equal(composeSelection(complete, { ...base, merge_base_sha: undefined }, opts).known, false,
+  'required metadata without protected merge base remains unknown');
 for (const key of requiredOutputs) {
   const { [key]: _removed, ...missing } = complete;
   assert.equal(composeSelection(missing, base, opts).known, false, `missing ${key} is unknown`);
@@ -498,7 +507,7 @@ const filterNames = matcherLines.flatMap((line, i) => {
 });
 const outputs = Object.fromEntries(filterNames.map(key => [key, 'false']));
 const meta = { event_name: 'pull_request', hotfix: false, head_sha: 'a'.repeat(40),
-  base_sha: 'b'.repeat(40), merge_sha: 'c'.repeat(40), changed_files: 8 };
+  base_sha: 'b'.repeat(40), merge_base_sha: 'b'.repeat(40), merge_sha: 'c'.repeat(40), changed_files: 8 };
 const policySha = 'd'.repeat(40);
 const selected = (filters, m = meta, mode = 'required-relevant') =>
   composeSelection(filters, m, { mode, policySha });
@@ -548,6 +557,7 @@ assert.equal(selected(outputs, { ...meta, head_sha: 'bad' }).known, false,
 
 const legacy = selected(outputs, meta, 'legacy');
 assert.equal(legacy.known, true, 'legacy metadata remains accepted');
+assert.equal(legacy.version, 1, 'legacy standalone metadata remains explicitly schema v1');
 for (const key of ['eslint', 'govulncheck', 'osv', 'semgrep_custom', 'semgrep_community', 'semgrep_canary', 'sonar'])
   assert.equal(legacy.selected[key], true, `legacy defaults to full ${key}`);
 for (const key of ['codeql_actions', 'codeql_go', 'codeql_js'])
