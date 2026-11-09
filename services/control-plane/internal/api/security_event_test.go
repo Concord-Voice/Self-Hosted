@@ -301,6 +301,12 @@ func TestTask4AssemblySecurityEventInjection(t *testing.T) {
 		cfg := &config.Config{InstanceType: "saas", AdminConsoleEnabled: true, AdminWebAuthnRPID: "admin.example.org", AdminWebAuthnRPOrigins: []string{"https://admin.example.org"}, AdminWebAuthnAllowedAAGUIDs: []string{"ee882879-721c-4913-9775-3dfcce97072a"}}
 		db := openWiringTestDB(t)
 		require.NoError(t, db.Close())
+		// The account is locked, so the guess is refused before any lookup and the
+		// handler writes its denied audit row. The closed database makes that write
+		// fail, which is what this case needs to observe. (A database that is down at
+		// the admin lookup is a 500 that writes no audit row, so it cannot reach the
+		// audit write.)
+		redisServer.Set("admin_lockout:acct_lock:nightwatch", "1")
 		handler := wireAdminRoutesWithSecurityEvents(gin.New(), db, rdb, nil, cfg, log, recorder)
 		require.NotNil(t, handler)
 		response := httptest.NewRecorder()
@@ -308,7 +314,7 @@ func TestTask4AssemblySecurityEventInjection(t *testing.T) {
 		requestContext.Request = httptest.NewRequest(http.MethodPost, "/admin/api/v1/auth/login", bytes.NewBufferString(`{"username":"nightwatch","password":"invalid"}`))
 		requestContext.Request.Header.Set("Content-Type", "application/json")
 		handler.PasswordLogin(requestContext)
-		require.Equal(t, http.StatusUnauthorized, response.Code)
+		require.Equal(t, http.StatusTooManyRequests, response.Code)
 		require.Equal(t, []securityevent.Event{{
 			EventType: securityevent.EventAudit, Outcome: securityevent.OutcomeFailure,
 			Severity: securityevent.SeverityHigh, ReasonCode: securityevent.ReasonAuditWriteFailed,
