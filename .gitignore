@@ -116,6 +116,10 @@ vendor/
 bin/
 services/control-plane/server
 services/control-plane/migrate-media
+services/control-plane/account-authority
+services/control-plane/authority-ceremony
+services/control-plane/cmd/*/account-authority
+services/control-plane/cmd/*/authority-ceremony
 client/desktop/Helper
 coverage.txt
 *.prof
