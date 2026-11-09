@@ -215,7 +215,7 @@ func TestEnrollFinish_LockAfterBegin_StillEnrolls(t *testing.T) { // regression 
 	assert.Zero(t, failCount(t, rdb, acctKey(username)))
 	assert.Zero(t, failCount(t, rdb, ipKey(defaultTestIP)))
 	assert.False(t, keyExists(t, rdb, acctLockKey(username)), "a finished enrollment lifts the account lock")
-	assert.False(t, keyExists(t, rdb, ipLockKey(defaultTestIP)), "a finished enrollment lifts the IP lock")
+	assert.True(t, keyExists(t, rdb, ipLockKey(defaultTestIP)), "a finished enrollment must not lift the IP lock")
 }
 
 // A successful begin does not clear earlier failures, and it is itself a counted

@@ -76,9 +76,12 @@ var ErrLockoutUnavailable = errors.New("admin lockout unavailable")
 //	          the threshold. A locked axis is not counted again.
 //	checked - a reserved guess failed; lock any axis that reached the threshold.
 //	          The guess was already counted, so this does not count it again.
-//	clear   - the sign-in or enrollment completed; drop the attempts and the lock
-//	          of both axes. The level stays, so a re-attack after a sign-in
-//	          escalates at once.
+//	clear   - the sign-in or enrollment completed; drop the account's attempts and
+//	          lock, and the IP's attempts. The levels stay, so a re-attack after a
+//	          sign-in escalates at once. The IP lock stays too: it records what
+//	          came from that source, and one admin proving their own identity says
+//	          nothing about the guesses that locked it (a holder of one valid
+//	          account must not be able to lift a spray lock).
 //
 // Counting before the check has one cost: six guesses sent at the same moment
 // lock the axis even if they are all correct, because the sixth is refused
@@ -99,7 +102,7 @@ local function lock(attempts, lockKey, levelKey)
 end
 
 if mode == 'clear' then
-  for _, k in ipairs(axes) do redis.call('DEL', k[1], k[2]) end
+  redis.call('DEL', KEYS[1], KEYS[2], KEYS[4])
   return 1
 end
 
@@ -223,9 +226,11 @@ func (l *Lockout) IsLocked(ctx context.Context, username, ip string) (bool, erro
 	return n > 0, nil
 }
 
-// Reset drops the attempts and the lock of both axes (called when a sign-in or
-// enrollment completes). It keeps the level: a re-attack straight after a
-// sign-in escalates from where it left off. Deleting absent keys is a no-op.
+// Reset is called when a sign-in or enrollment completes. It drops the account's
+// attempts and lock (the caller just proved the password and the hardware key)
+// and the IP's attempts, but never the IP lock, and it keeps both levels: a
+// re-attack straight after a sign-in escalates from where it left off. Deleting
+// absent keys is a no-op.
 func (l *Lockout) Reset(ctx context.Context, username, ip string) error {
 	if _, err := l.run(ctx, lockoutModeClear, username, ip); err != nil {
 		return fmt.Errorf("reset lockout: %w", err)

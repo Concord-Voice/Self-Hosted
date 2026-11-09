@@ -260,8 +260,10 @@ func TestLockout_PerAccountIndependentOfPerIP(t *testing.T) {
 	assert.False(t, lockedBOther, "an unrelated account+IP must not be locked")
 }
 
-// Reset drops attempts and lock on both axes but keeps the level.
-func TestLockout_ResetClearsAttemptsAndLockButKeepsLevel(t *testing.T) {
+// Reset drops the account's attempts and lock and the IP's attempts, keeps both
+// levels, and never lifts an IP lock: one admin proving their own identity says
+// nothing about the guesses that locked the source.
+func TestLockout_ResetClearsAccountAxisKeepsLevelsAndIPLock(t *testing.T) {
 	rdb, cleanup := testhelpers.SetupTestRedis(t)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
@@ -269,23 +271,29 @@ func TestLockout_ResetClearsAttemptsAndLockButKeepsLevel(t *testing.T) {
 	user, ip := uniqueAdminUsername("acct"), uniqueLockoutIP("7.7.7")
 
 	lockOut(t, lk, user, ip)
-	ok, err := lk.Reserve(ctx, uniqueAdminUsername("other"), uniqueLockoutIP("6.6.6"))
+	// A second IP holds only attempts, no lock.
+	otherIP := uniqueLockoutIP("6.6.6")
+	ok, err := lk.Reserve(ctx, uniqueAdminUsername("other"), otherIP)
 	require.NoError(t, err)
 	require.True(t, ok)
 
 	require.NoError(t, lk.Reset(ctx, user, ip))
 
-	locked, err := lk.IsLocked(ctx, user, ip)
+	assert.False(t, keyExists(t, rdb, acctLockKey(user)), "Reset must lift the account lock")
+	assert.False(t, keyExists(t, rdb, acctKey(user)), "Reset must clear the account attempts")
+	assert.True(t, keyExists(t, rdb, ipLockKey(ip)), "Reset must NOT lift an IP lock")
+	locked, err := lk.IsLocked(ctx, uniqueAdminUsername("someone-else"), ip)
 	require.NoError(t, err)
-	assert.False(t, locked, "Reset must lift the lock")
-	for _, k := range []string{acctKey(user), ipKey(ip)} {
-		assert.False(t, keyExists(t, rdb, k), "Reset must clear the attempts: %s", k)
-	}
+	assert.True(t, locked, "the IP stays locked for every other account")
 	assert.Equal(t, int64(1), failCount(t, rdb, acctLevelKey(user)), "the account level survives a Reset")
 	assert.Equal(t, int64(1), failCount(t, rdb, ipLevelKey(ip)), "the IP level survives a Reset")
 
+	// The IP's attempts are cleared, so completed sign-ins do not pile up on a NAT.
+	require.NoError(t, lk.Reset(ctx, uniqueAdminUsername("other"), otherIP))
+	assert.False(t, keyExists(t, rdb, ipKey(otherIP)), "Reset must clear the IP attempts")
+
 	// A re-attack straight after a Reset escalates from the kept level.
-	lockOut(t, lk, user, ip)
+	lockOut(t, lk, user, uniqueLockoutIP("5.5.4"))
 	assertWindow(t, rdb, acctLockKey(user), 2*time.Minute, "the next lock is level 2")
 }
 
