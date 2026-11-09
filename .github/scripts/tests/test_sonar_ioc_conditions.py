@@ -17,7 +17,6 @@ CHECKER = Path(__file__).with_name('sonar-required-gate.test.sh')
 POLICY = Path(__file__).with_name('sonar_ioc_policy.py')
 STATIC_CONDITION = "${{ !cancelled() && needs.ioc.result == 'success' }}"
 ACCEPTANCE_CONDITION = "${{ !cancelled() && needs.ioc.result == 'success' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.selfhost != 'false') }}"
-NODE = os.environ.get("NODE", "node")
 
 
 def check_actual_policy(jobs):
@@ -86,7 +85,7 @@ def evaluate_osv_baseline(expression, selection):
     access = "needs.pr-ci.outputs.report-selection"
     body = body.replace(access, json.dumps(json.dumps(selection)))
     result = subprocess.run(
-        [NODE, "-e", "const fromJSON = JSON.parse; const toJSON = JSON.stringify; process.stdout.write(String(" + body + "));"],
+        ["node", "-e", "const fromJSON = JSON.parse; const toJSON = JSON.stringify; process.stdout.write(String(" + body + "));"],
         check=True, capture_output=True, text=True,
     )
     return result.stdout
