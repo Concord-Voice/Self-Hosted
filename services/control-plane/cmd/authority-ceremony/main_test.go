@@ -713,6 +713,7 @@ func TestMakeAnchors(t *testing.T) {
 	b, err := os.ReadFile(out) //nolint:gosec // G304: a test temp file
 	require.NoError(t, err)
 	require.Contains(t, stdout, "sha384="+hex.EncodeToString(ac.Digest(b)))
+	require.Contains(t, stdout, "primary_a="+hex.EncodeToString(authoritytest.Point(keys[0])))
 	a, err := ac.DecodeAnchors(b)
 	require.NoError(t, err)
 	require.Equal(t, ac.Anchors{RealmID: id, PrimaryA: authoritytest.Point(keys[0]), PrimaryB: authoritytest.Point(keys[1]),
@@ -741,6 +742,12 @@ func TestMakeAnchorsRefuses(t *testing.T) {
 		"a missing field":     {missing, "recovery_b is missing"},
 		"an unknown field":    {withExtra, "unknown field"},
 		"bad hex":             {[]byte(strings.Replace(string(anchorsJSON(t, id, keys)), `"primary_a":"`, `"primary_a":"zz`, 1)), "primary_a"},
+		"a key in another case": {[]byte(strings.Replace(string(anchorsJSON(t, id, keys)), `{`, `{"PRIMARY_A":"00",`, 1)),
+			`unknown field "PRIMARY_A"`},
+		"a key given twice": {[]byte(strings.Replace(string(anchorsJSON(t, id, keys)), `{`, `{"primary_a":"00",`, 1)),
+			"primary_a is given twice"},
+		"trailing data": {append(anchorsJSON(t, id, keys), []byte(`{}`)...), "trailing data"},
+		"not an object": {[]byte(`[]`), "not a JSON object"},
 	}
 	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -762,7 +769,8 @@ func TestMakeAnchorsRefuses(t *testing.T) {
 func TestShowTrust(t *testing.T) {
 	r := authoritytest.NewRealm(t)
 	d1 := r.Current
-	d2 := r.NextDelegation(t)
+	d2 := r.NextDelegation(t, func(d *ac.Delegation) { d.NotBeforeMs++; d.NotAfterMs += 86_400_000 })
+	require.NotEqual(t, d1.D.NotAfterMs, d2.D.NotAfterMs, "precondition: the window identifies the delegation")
 	f := newFixture(t)
 	anchors := f.file("anchors", r.AnchorBytes)
 	code, stdout, stderr := runTool("", "show-trust", "--anchors", anchors,
@@ -772,7 +780,11 @@ func TestShowTrust(t *testing.T) {
 		r.ID, d2.D.Serial, d2.D.MinValidSerial, d2.D.NotBeforeMs, d2.D.NotAfterMs), stdout)
 
 	code, _, _ = runTool("", "show-trust", "--anchors", anchors, "--trust", f.file("empty", trustFile()))
-	require.Equal(t, 1, code, "a trust with no delegation is halted")
+	require.Equal(t, 1, code, "an empty trust")
+	succ := signedSuccession(t, r, newKeys(t, 4))
+	code, _, stderr = runTool("", "show-trust", "--anchors", anchors, "--trust", f.file("succ", trustFile(succ, d1.Signed)))
+	require.Equal(t, 1, code, "a succession with no delegation of the new generation is halted")
+	require.Contains(t, stderr, "no valid delegation for the current generation", "the halt says why")
 	other := authoritytest.NewRealm(t)
 	code, _, _ = runTool("", "show-trust", "--anchors", f.file("other", other.AnchorBytes),
 		"--trust", f.file("trust1", trustFile(d1.Signed)))

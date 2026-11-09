@@ -671,3 +671,22 @@ func TestCurrentIsTheHighWaterDelegation(t *testing.T) {
 	_, ok = tr.Current()
 	require.False(t, ok, "a halted trust")
 }
+
+// After a succession, Current is the new generation's delegation even when
+// the retired generation reached a higher serial or holds a contradiction,
+// and nothing until the new generation has a delegation.
+func TestCurrentAfterASuccession(t *testing.T) {
+	r := newTestRealm(t)
+	g0 := r.Gens[0]
+	r.addDel(5, nil)
+	r.succeed(nil)
+	_, ok := r.trust(t).Current()
+	require.False(t, ok, "no generation-1 delegation yet")
+
+	// A retired contradiction at gen 0 serial 5, admitted after the succession.
+	r.Items = append(r.Items, r.signDel(r.del(5, func(d *Delegation) { d.ProductRootGen = 0; d.NotAfterMs-- }), g0.A, g0.B))
+	r.addDel(1, nil)
+	d, ok := r.trust(t).Current()
+	require.True(t, ok)
+	require.Equal(t, [2]uint64{1, 1}, [2]uint64{d.ProductRootGen, d.Serial})
+}
