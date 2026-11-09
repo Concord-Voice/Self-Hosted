@@ -183,7 +183,8 @@ type healthDoc struct {
 		Name string `json:"name"`
 		OK   bool   `json:"ok"`
 	} `json:"checks"`
-	OK bool `json:"ok"`
+	Warnings []string `json:"warnings,omitempty"`
+	OK       bool     `json:"ok"`
 }
 
 func (s *Server) status(w http.ResponseWriter, r *http.Request) string {

@@ -114,6 +114,18 @@ func TestHealthAcceptsExitOne(t *testing.T) {
 	}
 }
 
+func TestHealthPassesWarnings(t *testing.T) {
+	f := &fakeRunner{out: `{"schema":1,"checks":[{"name":"authority_delegation","ok":true}],"warnings":["authority_delegation_expiring"],"ok":true}`}
+	rec := get(t, NewServer(f), http.MethodGet, "/v1/health")
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"warnings":["authority_delegation_expiring"],"ok":true`) {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+	f.out = `{"schema":1,"checks":[],"ok":true}`
+	if rec := get(t, NewServer(f), http.MethodGet, "/v1/health"); strings.Contains(rec.Body.String(), "warnings") {
+		t.Fatalf("no warnings: got %s", rec.Body)
+	}
+}
+
 func TestLogsValidation(t *testing.T) {
 	f := &fakeRunner{}
 	s := NewServer(f)

@@ -13,7 +13,7 @@ install). The reads:
 | Request | Runs | Returns |
 | --- | --- | --- |
 | `GET /v1/status` | `concord-selfhost status --json` | the status object ([machine output](selfhost-machine-output.md)) |
-| `GET /v1/health` | `concord-selfhost health --json` | the health object, also when a check fails |
+| `GET /v1/health` | `concord-selfhost health --json` | the health object, with its `warnings`, also when a check fails |
 | `GET /v1/logs?service=S&lines=N&follow=0\|1` | `concord-selfhost logs [--no-follow] --tail N S` | plain-text log lines |
 
 `S` must be one of `control-plane`, `media-plane`, `postgres`, `redis`,

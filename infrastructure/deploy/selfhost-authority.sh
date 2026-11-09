@@ -53,6 +53,15 @@ verb_authority() {
 # that a recreated authority stays up.
 _authority_require_root() { [[ "$(id -u)" == 0 ]] || _authority_fail 'authority init and renew must run as root'; }
 _authority_chown() { chown "$@"; }
+# _authority_regular FILE... — each FILE, just moved out of the stage that the
+# keygen container's uid owns, is a plain file: chown and chmod would follow
+# a symlink planted there.
+_authority_regular() {
+  local f
+  for f in "$@"; do
+    [[ -f "$f" && ! -L "$f" ]] || { _authority_fail "$f is not a regular file"; return 1; }
+  done
+}
 # serve exits 1 on a trust or key it cannot use, and restart: unless-stopped
 # then loops it, so "up" alone proves nothing: it must still be running, never
 # restarted, 10 s later.
@@ -311,6 +320,7 @@ _authority_init_keys() {
   _authority_keygen "$stage" cp-tls-key cptls || return 1
   mv -- "$stage/rsk" "$stage/tls-key" "$dir/secrets/" || return 1
   mv -- "$stage/cak" "$stage/cp-tls-key" "$dir/cp/" || return 1
+  _authority_regular "$dir/secrets/rsk" "$dir/secrets/tls-key" "$dir/cp/cak" "$dir/cp/cp-tls-key" || return 1
   _authority_chown "$AUTHORITY_CP_UID:$AUTHORITY_CP_UID" "$dir/cp/cak" "$dir/cp/cp-tls-key" || return 1
   chmod 0400 "$dir/secrets/rsk" "$dir/secrets/tls-key" "$dir/cp/cak" "$dir/cp/cp-tls-key" || return 1
   rmdir -- "$stage" || return 1
@@ -386,7 +396,7 @@ _authority_health() {
   [[ -f "$dir/public/trust" ]] || return 3
   # An authority set up before the record existed gets it here, from the
   # root-only tool, when health runs as root.
-  [[ -s "$dir/public/delegation-not-after-ms" || ! -x "$dir/tools/authority-ceremony" ]] \
+  ! _authority_backfill_ok "$dir" \
     || _authority_record_not_after "$dir/tools/authority-ceremony" "$dir" >/dev/null 2>&1 || :
   na="$(cat -- "$dir/public/delegation-not-after-ms" 2>/dev/null)"
   now="$(date +%s%3N)"
@@ -405,6 +415,18 @@ _authority_health() {
     return 2
   fi
   printf 'authority delegation valid for %d more days\n' "$days"
+}
+
+# _authority_backfill_ok DIR — health may run DIR's ceremony tool as root:
+# the record is missing, and only root can change the tool or any directory
+# above it, as init and renew require. Otherwise a planted tool would run as
+# root from up, update and restore.
+_authority_backfill_ok() {
+  local tool="$1/tools/authority-ceremony" uid mode
+  [[ "$(id -u)" == 0 && ! -s "$1/public/delegation-not-after-ms" && -f "$tool" && -x "$tool" && ! -L "$tool" ]] || return 1
+  _authority_safe_dir "$1/tools" 2>/dev/null || return 1
+  read -r uid mode < <(stat -c '%u %A' -- "$tool") || return 1
+  [[ "$uid" == 0 && "${mode:5:1}${mode:8:1}" == -- ]]
 }
 
 # ── renew ──────────────────────────────────────────────────────────────
@@ -479,7 +501,14 @@ with open(dst, "x") as f:
 
   echo "Installing delegation $next and restarting the authority..."
   _authority_renew_place "$dir" || { _authority_warn 'cannot stage the new keys'; _authority_renew_unstage "$dir" "$next"; return 1; }
-  _authority_renew_swap "$dir" next prev || { _authority_renew_swap "$dir" prev next || :; _authority_renew_unstage "$dir" "$next"; return 1; }
+  if ! _authority_renew_swap "$dir" next prev; then
+    if _authority_renew_swap "$dir" prev next; then
+      _authority_renew_unstage "$dir" "$next"
+    else
+      _authority_warn "cannot put the old files back. Each of $dir/public/trust, $dir/secrets/rsk and $dir/cp/cak with a .prev beside it: move FILE.prev to FILE. Then remove $dir/stage and the .next files."
+    fi
+    return 1
+  fi
   # From here on delegation $next is the authority's: no way back (see above).
   rm -f -- "$dir/public/trust.prev" "$dir/secrets/rsk.prev" "$dir/cp/cak.prev"
   _authority_record_not_after "$tool" "$dir" \
@@ -497,8 +526,10 @@ with open(dst, "x") as f:
 _authority_renew_place() {
   chmod 0644 "$1/public/trust.next" || return 1
   mv -- "$1/stage/rsk" "$1/secrets/rsk.next" || return 1
+  _authority_regular "$1/secrets/rsk.next" || return 1
   chmod 0400 "$1/secrets/rsk.next" || return 1
   mv -- "$1/stage/cak" "$1/cp/cak.next" || return 1
+  _authority_regular "$1/cp/cak.next" || return 1
   _authority_chown "$AUTHORITY_CP_UID:$AUTHORITY_CP_UID" "$1/cp/cak.next" || return 1
   chmod 0400 "$1/cp/cak.next" || return 1
   rmdir -- "$1/stage"
@@ -512,12 +543,13 @@ _authority_renew_unstage() {
 }
 
 # _authority_renew_swap DIR FROM TO — each of trust, rsk and cak: the live
-# file becomes FILE.TO and FILE.FROM becomes the live file.
+# file, if there is one, becomes FILE.TO and FILE.FROM becomes the live file.
+# A swap back after a failure part way through therefore finds every file.
 _authority_renew_swap() {
   local f
   for f in "$1/public/trust" "$1/secrets/rsk" "$1/cp/cak"; do
     [[ -e "$f.$2" ]] || continue
-    mv -f -- "$f" "$f.$3" || { _authority_fail "cannot swap $f"; return 1; }
+    [[ ! -e "$f" ]] || mv -f -- "$f" "$f.$3" || { _authority_fail "cannot swap $f"; return 1; }
     mv -f -- "$f.$2" "$f" || { _authority_fail "cannot swap $f"; return 1; }
   done
 }

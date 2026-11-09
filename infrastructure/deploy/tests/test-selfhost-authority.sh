@@ -50,8 +50,9 @@ chmod +x "$WORK/fake-tool"
 
 # The fake docker is an executable on PATH, since init runs compose under
 # env -i. It reads its settings from $WORK/state, written by each test:
-# CALLS, PG_IMAGE (0 = the postgres image is missing), SUBNETS, and SALT,
-# which keygen mixes into its points so that a renewal's keys are new.
+# CALLS, PG_IMAGE (0 = the postgres image is missing), SUBNETS, SALT,
+# which keygen mixes into its points so that a renewal's keys are new, and
+# LINK=NAME:TARGET, which makes keygen leave key NAME as a symlink to TARGET.
 mkdir "$WORK/bin"
 cat >"$WORK/bin/docker" <<DOCKER
 #!/usr/bin/env bash
@@ -74,7 +75,8 @@ done
 if [[ " $* " == *" go build "* ]]; then
   cp "$TOOL" "$vol/authority-ceremony"
 else
-  printf 'key %s%s' "$name" "${SALT:-}" >"$vol/$name"
+  if [[ "${LINK%%:*}" == "$name" ]]; then ln -s "${LINK#*:}" "$vol/$name"
+  else printf 'key %s%s' "$name" "${SALT:-}" >"$vol/$name"; fi
   printf 'point=04%s%s\npin=%s\n' "$(hex384 "$name${SALT:-}")" "$(hex384 "$name.y")" "$(hex384 "$name.pin")"
 fi
 DOCKER
@@ -100,7 +102,7 @@ fixture() {
   local line
   for line in "$@"; do printf '%s\n' "$line" >>"$ROOT/.env"; done
   : >"$CALLS"
-  printf 'CALLS=%q TOOL=%q PG_IMAGE=1 SUBNETS=172.18.0.0/16\n' "$CALLS" "$WORK/fake-tool" >"$WORK/state"
+  printf 'CALLS=%q TOOL=%q PG_IMAGE=1 SUBNETS=172.18.0.0/16 LINK=\n' "$CALLS" "$WORK/fake-tool" >"$WORK/state"
 }
 docker_set() { printf '%s\n' "$1" >>"$WORK/state"; }
 
@@ -109,7 +111,7 @@ docker_set() { printf '%s\n' "$1" >>"$WORK/state"; }
 # a caller's `if` would ignore it.
 run_init() {
   local input="$1"; shift
-  ROOT="$ROOT" DEPLOY="$DEPLOY" CALLS="$CALLS" TOOL_FAIL="${TOOL_FAIL:-}" \
+  ROOT="$ROOT" DEPLOY="$DEPLOY" CALLS="$CALLS" TOOL_FAIL="${TOOL_FAIL:-}" SWAP_FAIL="${SWAP_FAIL:-}" \
   bash -euo pipefail -c '
     # shellcheck disable=SC2034 # read by the helper
     PROJECT_ROOT="$ROOT"
@@ -121,6 +123,11 @@ run_init() {
     _authority_cp_accounts() { [[ "${CP_ACCOUNTS:-0}" != fail ]] && printf "%s\n" "${CP_ACCOUNTS:-0}"; }
     _authority_running() { printf "running?\n" >>"$CALLS"; [[ "${RUNNING:-1}" == 1 ]]; }
     [[ "${RECORD_FAIL:-}" != 1 ]] || _authority_record_not_after() { return 1; }
+    # SWAP_FAIL=FILE: the first mv onto FILE fails.
+    [[ -z "$SWAP_FAIL" ]] || mv() {
+      if [[ "${*: -1}" == "$SWAP_FAIL" && ! -e "$ROOT/swap-failed" ]]; then : >"$ROOT/swap-failed"; return 1; fi
+      command mv "$@"
+    }
     verb_authority "${VERB:-init}" "$@"
   ' run_init "$@" <<<"$input" >"$ROOT/out" 2>&1
 }
@@ -250,6 +257,33 @@ elif [[ "$(cat "$AUTH/public/trust")" == "$trust2" && ! -e "$AUTH/ceremony/deleg
 else
   fail "a failed renewal signature: $(cat "$ROOT/out")"
 fi
+# The swap fails part way, after the live RSK has moved aside: the old trust
+# and keys all come back, and nothing restarts.
+rsk3="$(cat "$AUTH/secrets/rsk")"; cak3="$(cat "$AUTH/cp/cak")"
+: >"$CALLS"; docker_set SALT=x
+if SWAP_FAIL="$AUTH/secrets/rsk" VERB=renew run_init ''; then
+  fail "renew accepted a failed swap"
+elif [[ -e "$ROOT/swap-failed" && "$(cat "$AUTH/public/trust")" == "$trust2" && "$(cat "$AUTH/secrets/rsk")" == "$rsk3" \
+       && "$(cat "$AUTH/cp/cak")" == "$cak3" && ! -e "$AUTH/ceremony/delegation-4.json" ]] \
+     && [[ -z "$(find "$AUTH" -name '*.prev' -o -name '*.next' -o -name stage)" ]] && ! grep -q 'force-recreate' "$CALLS"; then
+  pass "a swap that fails part way puts the old trust and keys back"
+else
+  fail "a failed swap: $(cat "$ROOT/out"); $(find "$AUTH/secrets" "$AUTH/public")"
+fi
+rm -f "$ROOT/swap-failed"
+# A key left in the stage as a symlink: renew does not chown or chmod its
+# target, and changes nothing.
+printf 'outside\n' >"$ROOT/outside"; chmod 0644 "$ROOT/outside"
+: >"$CALLS"; docker_set SALT=y; docker_set "LINK=cak:$ROOT/outside"
+if VERB=renew run_init ''; then
+  fail "renew installed a symlinked key"
+elif grep -qF 'is not a regular file' "$ROOT/out" && [[ "$(mode "$ROOT/outside")" == 644 && "$(cat "$AUTH/cp/cak")" == "$cak3" ]] \
+     && ! grep -qF "chown 10006:10006 $AUTH/cp/cak.next" "$CALLS" && [[ "$(cat "$AUTH/public/trust")" == "$trust2" ]]; then
+  pass "renew refuses a key left in the stage as a symlink"
+else
+  fail "symlinked key: $(cat "$ROOT/out")"
+fi
+docker_set LINK=
 : >"$CALLS"; docker_set SALT=4
 record_before="$(cat "$AUTH/public/delegation-not-after-ms")"
 if RECORD_FAIL=1 VERB=renew run_init ''; then
@@ -304,6 +338,14 @@ in30=$(( now_ms + 30 * 86400000 )) in20=$(( now_ms + 20 * 86400000 )) past=$(( n
 chmod 0600 "$AUTH/tools/authority-ceremony"
 [[ "$(health_rc garbage)" == 1 && "$(health_rc none)" == 1 ]] && pass "health fails on a missing or unreadable record" || fail "bad record: $(cat "$ROOT/out")"
 chmod 0700 "$AUTH/tools/authority-ceremony"
+# health runs the tool only when nobody but root can change it or a
+# directory above it.
+chmod 0702 "$AUTH/tools/authority-ceremony"
+[[ "$(health_rc none)" == 1 ]] && pass "health does not run a tool that others can write" || fail "writable tool: $(cat "$ROOT/out")"
+chmod 0700 "$AUTH/tools/authority-ceremony"; chmod o+w "$AUTH"
+[[ "$(health_rc none)" == 1 ]] && pass "health does not run the tool from a directory that others can write" || fail "writable dir: $(cat "$ROOT/out")"
+chmod o-w "$AUTH"
+[[ "$(health_rc none)" == 0 ]] && pass "health backfills again once the directory is safe" || fail "safe again: $(cat "$ROOT/out")"
 saved_root="$ROOT"; fixture
 [[ "$(health_rc none 2>/dev/null)" == 3 ]] && pass "health has nothing to check before init" || fail "no authority: $(cat "$ROOT/out")"
 ROOT="$saved_root"

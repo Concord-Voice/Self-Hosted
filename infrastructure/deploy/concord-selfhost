@@ -152,7 +152,7 @@ Verbs:
   authority renew
                as root: sign the next delegation (new RSK and CAK, 180 days)
                with primaries A and B, install it and restart the authority;
-               put the old one back if the authority does not stay up
+               if the authority does not stay up, keep it and fix the cause
   --help       show this help
 
 Run from the repo root. The .env in the repo root is auto-loaded by compose.
