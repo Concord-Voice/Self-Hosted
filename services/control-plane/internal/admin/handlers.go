@@ -518,7 +518,13 @@ func (h *Handler) EnrollBegin(c *gin.Context) {
 	}
 
 	// Consume the single-use enrollment token and verify it binds to THIS admin.
+	// A store fault is not a guess: it must not spend the admin's lockout budget.
 	boundAdminID, err := h.enroll.ConsumeEnrollmentToken(ctx, req.Token)
+	if err != nil && !errors.Is(err, ErrEnrollTokenInvalid) {
+		h.log.Error("admin consume enrollment token failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
+		return
+	}
 	if err != nil || boundAdminID != adminUser.ID {
 		h.failEnroll(c, req.Username, ip)
 		return
@@ -557,6 +563,7 @@ type enrollFinishRequest struct {
 // and flips the admin to active. Audits enroll_complete.
 func (h *Handler) EnrollFinish(c *gin.Context) {
 	ctx := c.Request.Context()
+	ip := c.ClientIP()
 
 	var req enrollFinishRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -570,13 +577,10 @@ func (h *Handler) EnrollFinish(c *gin.Context) {
 		return
 	}
 
-	// Re-check the lockout: the handle is single-use, but the account can be
-	// locked after it was issued (same reasoning as WebAuthnLogin).
-	ip := c.ClientIP()
-	if h.enrollLocked(c, challenge.Username, ip) {
-		return
-	}
-
+	// No lockout re-check here, unlike WebAuthnLogin: the handle is 256-bit and
+	// only a successful EnrollBegin issues it, so Finish is not a guessing
+	// surface. A lock landing between Begin and Finish would burn the already
+	// spent enrollment token and strand the admin until an operator resets it.
 	user := adminRegistrationUser()
 	if _, err := FinishAdminRegistration(ctx, h.webauthn, h.repo, AdminRegistrationInput{
 		User:           user,
