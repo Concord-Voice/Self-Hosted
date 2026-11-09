@@ -157,6 +157,94 @@ func TestDockerReaderMapsStoppedAndUnhealthyContainersWithoutInspectingStoppedSt
 	require.NotContains(t, requested, "/v1.44/containers/"+testContainerID+"/stats?stream=false")
 }
 
+func TestDockerReaderResolvesMediaContainerVariants(t *testing.T) {
+	legacy := dockerContainerSummary{ID: strings.Repeat("b", 64), Names: []string{"/concordvoice-media-plane"}, State: "running", Status: "Up 1 minute (healthy)"}
+	blue := dockerContainerSummary{ID: strings.Repeat("c", 64), Names: []string{"/concordvoice-media-plane-blue"}, State: "running", Status: "Up 1 minute (healthy)"}
+	green := dockerContainerSummary{ID: strings.Repeat("d", 64), Names: []string{"/concordvoice-media-plane-green"}, State: "running", Status: "Up 1 minute (healthy)"}
+	stoppedLegacy, stoppedBlue, stoppedGreen := legacy, blue, green
+	stoppedLegacy.State, stoppedBlue.State, stoppedGreen.State = "exited", "exited", "exited"
+	unhealthyBlue := blue
+	unhealthyBlue.Status = "Up 1 minute (unhealthy)"
+	startingGreen := green
+	startingGreen.Status = "Up 1 minute (health: starting)"
+	foreign := blue
+	foreign.Names = []string{"/concordvoice-media-plane-blue-extra"}
+	aliasedBlue := blue
+	aliasedBlue.Names = []string{legacy.Names[0], blue.Names[0]}
+	duplicateBlue := blue
+	duplicateBlue.ID = strings.Repeat("e", 64)
+	invalidGreen := green
+	invalidGreen.ID = "../containers/json"
+	tests := []struct {
+		name       string
+		containers []dockerContainerSummary
+		selectedID string
+		healthy    float64
+		wantError  string
+	}{
+		{name: "legacy", containers: []dockerContainerSummary{legacy}, selectedID: legacy.ID, healthy: 1},
+		{name: "blue", containers: []dockerContainerSummary{blue}, selectedID: blue.ID, healthy: 1},
+		{name: "green", containers: []dockerContainerSummary{green}, selectedID: green.ID, healthy: 1},
+		{name: "stopped legacy with blue", containers: []dockerContainerSummary{stoppedLegacy, blue}, selectedID: blue.ID, healthy: 1},
+		{name: "stopped legacy with green", containers: []dockerContainerSummary{green, stoppedLegacy}, selectedID: green.ID, healthy: 1},
+		{name: "stopped blue predecessor", containers: []dockerContainerSummary{stoppedBlue, green}, selectedID: green.ID, healthy: 1},
+		{name: "stopped green predecessor", containers: []dockerContainerSummary{blue, stoppedGreen}, selectedID: blue.ID, healthy: 1},
+		{name: "legacy with stopped colors", containers: []dockerContainerSummary{stoppedBlue, legacy, stoppedGreen}, selectedID: legacy.ID, healthy: 1},
+		{name: "unhealthy blue", containers: []dockerContainerSummary{unhealthyBlue, stoppedGreen}, selectedID: blue.ID},
+		{name: "starting green", containers: []dockerContainerSummary{startingGreen}, selectedID: green.ID},
+		{name: "absent"},
+		{name: "all stopped", containers: []dockerContainerSummary{stoppedLegacy, stoppedBlue, stoppedGreen}},
+		{name: "foreign suffix ignored", containers: []dockerContainerSummary{foreign}},
+		{name: "aliases of one container", containers: []dockerContainerSummary{aliasedBlue}, selectedID: blue.ID, healthy: 1},
+		{name: "both colors running", containers: []dockerContainerSummary{blue, green}, wantError: "multiple running Docker containers for allowlisted service"},
+		{name: "both colors reversed", containers: []dockerContainerSummary{green, blue}, wantError: "multiple running Docker containers for allowlisted service"},
+		{name: "unhealthy color still ambiguous", containers: []dockerContainerSummary{green, unhealthyBlue}, wantError: "multiple running Docker containers for allowlisted service"},
+		{name: "legacy and blue running", containers: []dockerContainerSummary{legacy, blue}, wantError: "multiple running Docker containers for allowlisted service"},
+		{name: "legacy and green running", containers: []dockerContainerSummary{green, legacy}, wantError: "multiple running Docker containers for allowlisted service"},
+		{name: "duplicate blue name", containers: []dockerContainerSummary{blue, duplicateBlue}, wantError: "duplicate allowlisted Docker container"},
+		{name: "invalid green id", containers: []dockerContainerSummary{invalidGreen}, wantError: "invalid Docker container id"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			body, err := json.Marshal(tt.containers)
+			require.NoError(t, err)
+			var requests []string
+			reader := newDockerReader(roundTripFunc(func(request *http.Request) (*http.Response, error) {
+				uri := request.URL.RequestURI()
+				requests = append(requests, uri)
+				require.Equal(t, http.MethodGet, request.Method)
+				if uri == testContainerListURI {
+					return dockerResponse(http.StatusOK, string(body)), nil
+				}
+				require.NotEmpty(t, tt.selectedID, "unselected containers must not be inspected")
+				require.Equal(t, "/v1.44/containers/"+tt.selectedID+"/stats?stream=false", uri)
+				return dockerResponse(http.StatusOK, healthyContainerStats()), nil
+			}))
+			metrics, err := reader.Read(context.Background())
+			if tt.wantError != "" {
+				require.ErrorContains(t, err, tt.wantError)
+				require.Nil(t, metrics)
+				require.Equal(t, []string{testContainerListURI}, requests)
+				return
+			}
+			require.NoError(t, err)
+			require.Len(t, metrics, len(concordServiceAllowlist)*4)
+			require.Equal(t, tt.healthy, metrics[MetricServiceMediaPlaneHealthy])
+			if tt.selectedID == "" {
+				require.Zero(t, metrics[MetricServiceMediaPlaneRunning])
+				require.Zero(t, metrics[MetricServiceMediaPlaneCPUPercent])
+				require.Zero(t, metrics[MetricServiceMediaPlaneMemoryBytes])
+				require.Equal(t, []string{testContainerListURI}, requests)
+				return
+			}
+			require.Equal(t, 1.0, metrics[MetricServiceMediaPlaneRunning])
+			require.InDelta(t, 40.0, metrics[MetricServiceMediaPlaneCPUPercent], 1e-9)
+			require.Equal(t, 1234.0, metrics[MetricServiceMediaPlaneMemoryBytes])
+			require.Len(t, requests, 2)
+		})
+	}
+}
+
 func TestDockerReaderRejectsOversizedMalformedAndRedirectResponses(t *testing.T) {
 	tests := []struct {
 		name    string
