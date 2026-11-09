@@ -11,7 +11,12 @@
 set -eu
 
 # psql reads each file itself (\set with a backtick command), so neither
-# password is ever on a command line another process can read.
+# password is ever on a command line another process can read. psql does not
+# stop when that command fails, so check the files first: an empty password
+# would only clear the role's password, and the bootstrap would still finish.
+for f in /run/secrets/authority_app_password /run/secrets/authority_owner_password; do
+  [ -r "$f" ] && [ -s "$f" ] || { echo "authority bootstrap: $f is missing, empty or unreadable" >&2; exit 1; }
+done
 psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres <<'SQL'
 \set pw_app `cat /run/secrets/authority_app_password`
 \set pw_owner `cat /run/secrets/authority_owner_password`

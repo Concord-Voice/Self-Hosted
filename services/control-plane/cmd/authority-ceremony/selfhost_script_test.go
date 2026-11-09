@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/hex"
+	"errors"
+	"io/fs"
 	"os"
 	"regexp"
 	"slices"
@@ -19,11 +21,20 @@ import (
 // lifetime. This keeps them equal to the contract.
 func TestSelfhostAuthorityScriptMatchesTheContract(t *testing.T) {
 	src, err := os.ReadFile("../../../../infrastructure/deploy/selfhost-authority.sh")
+	if errors.Is(err, fs.ErrNotExist) {
+		t.Skip("selfhost-authority.sh is not in this tree")
+	}
 	require.NoError(t, err)
+	// A quoted value may hold spaces; an unquoted one ends at whitespace.
 	value := func(name string) string {
-		m := regexp.MustCompile(`(?m)\b` + name + `='?([^'\s]+(?: [^'\s]+)*)'?`).FindSubmatch(src)
+		m := regexp.MustCompile(`(?m)\b` + name + `=(?:'([^']*)'|(\S+))`).FindSubmatch(src)
 		require.NotNil(t, m, name)
-		return string(m[1])
+		return string(m[1]) + string(m[2])
+	}
+	ms := func(name string) uint64 {
+		v, err := strconv.ParseUint(value(name), 10, 64)
+		require.NoError(t, err, name)
+		return v
 	}
 
 	empty, err := ac.PopulationDigest(nil)
@@ -36,7 +47,10 @@ func TestSelfhostAuthorityScriptMatchesTheContract(t *testing.T) {
 	slices.Sort(all)
 	require.Equal(t, all, strings.Fields(value("AUTHORITY_SCOPE")))
 
-	lifetime, err := strconv.ParseUint(value("AUTHORITY_LIFETIME_MS"), 10, 64)
-	require.NoError(t, err)
-	require.LessOrEqual(t, lifetime, ac.DelegationLifetimeMaxMs)
+	// §2.5's bounds, as delegationBoundsOK checks them.
+	require.LessOrEqual(t, ms("AUTHORITY_LIFETIME_MS"), ac.DelegationLifetimeMaxMs)
+	tau, delta, g := ms("AUTHORITY_TAU_MS"), ms("AUTHORITY_DELTA_MS"), ms("AUTHORITY_G_MS")
+	require.True(t, tau >= 1 && tau <= ac.VMaxMs, "tau")
+	require.True(t, delta > ac.IntentWindowMs+ac.EpsilonMs && delta <= ac.DeltaMaxMs, "delta")
+	require.True(t, g >= 1 && g <= delta, "g")
 }

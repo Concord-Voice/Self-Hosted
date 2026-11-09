@@ -69,6 +69,13 @@ else
 fi
 DOCKER
 chmod +x "$WORK/bin/docker"
+# openssl is real, wrapped so that a passphrase on its command line fails the run.
+cat >"$WORK/bin/openssl" <<OPENSSL
+#!/usr/bin/env bash
+[[ " \$* " != *"$PASS"* ]] || { echo 'openssl got the passphrase in argv' >&2; exit 99; }
+exec $(command -v openssl) "\$@"
+OPENSSL
+chmod +x "$WORK/bin/openssl"
 PATH="$WORK/bin:$PATH"
 
 # fixture [ENV_LINE...] — a project root with a .env and the Dockerfile line init reads.
@@ -99,6 +106,7 @@ run_init() {
     _authority_require_root() { [[ "${NOT_ROOT:-}" != 1 ]] || _authority_fail 'authority init must run as root'; }
     _authority_chown() { printf 'chown %s\n' "$*" >>"$CALLS"; }
     selfhost_storage_project_identity() { SELFHOST_STORAGE_PROJECT_NAME=fixture; }
+    _authority_cp_accounts() { [[ "${CP_ACCOUNTS:-0}" != fail ]] && printf '%s\n' "${CP_ACCOUNTS:-0}"; }
     verb_authority init "$@"
   ) <<<"$input" >"$ROOT/out" 2>&1
 }
@@ -125,18 +133,21 @@ grep -qxF "chown 70:70 $AUTH/secrets/superuser-password" "$CALLS" && grep -qxF "
   && grep -qxF "chown 10006:10006 $AUTH/cp/cak $AUTH/cp/cp-tls-key" "$CALLS" \
   && pass "each secret is handed to its reader's uid" || fail "ownership calls: $(grep chown "$CALLS")"
 
-[[ ! -e "$AUTH/stage" && ! -e "$AUTH/recovery" ]] && pass "the stage and recovery directories are gone" \
-  || fail "stage or recovery left behind"
+[[ ! -e "$AUTH/stage" && -z "$(find "$AUTH" -name 'recovery*')" ]] && pass "the stage is gone and no recovery key is on the host" \
+  || fail "stage or a recovery key left behind"
 
 app_pw="$(cat "$AUTH/secrets/app-password")"
 [[ "$(cat "$AUTH/secrets/app-pgpass")" == "localhost:*:authority:authority_app:$app_pw" && "$app_pw" =~ ^[0-9a-f]{64}$ ]] \
   && pass "the app passfile carries the app password" || fail "app passfile does not match"
 
 # The exports decrypt with the passphrase to the recovery points in the anchors.
+export_point() {
+  openssl pkey -in "$1" -passin fd:3 -pubout -outform DER 3< <(printf '%s' "$PASS") | tail -c 97 | od -An -v -tx1 | tr -d ' \n'
+}
 ok=true
 for k in a b; do
   [[ "$(mode "$EXPORT/recovery-$k.p8")" == 600 ]] || ok=false
-  point="$(openssl pkey -in "$EXPORT/recovery-$k.p8" -passin "pass:$PASS" -pubout -outform DER | tail -c 97 | od -An -v -tx1 | tr -d ' \n')"
+  point="$(export_point "$EXPORT/recovery-$k.p8")"
   [[ "$point" == "$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['recovery_$k'])" "$AUTH/ceremony/anchors.json")" ]] || ok=false
 done
 $ok && pass "the exports decrypt to the anchors' recovery keys" || fail "an export does not match the anchors"
@@ -197,11 +208,20 @@ refuse "a relative AUTHORITY_DIR" "absolute" "$good" --export-dir "$EXPORT"
 fixture 'AUTHORITY_SUBNET=10.0.0.0/29;rm'; refuse "a .env value with shell characters" "unsupported characters" "$good" --export-dir "$EXPORT"
 fixture; mkdir "$AUTH"; refuse "an existing AUTHORITY_DIR" "init runs once" "$good" --export-dir "$EXPORT"
 rmdir "$AUTH"
+fixture; chmod 0777 "$ROOT"; refuse "an AUTHORITY_DIR under a directory others can write" "writable by other users" "$good" --export-dir "$EXPORT"
+fixture; mkdir "$ROOT/real"; ln -s real "$ROOT/link"; AUTH="$ROOT/link/authority"
+printf 'AUTHORITY_DIR=%s\n' "$AUTH" >"$ROOT/.env"; refuse "an AUTHORITY_DIR with a symlink in its path" "no symlink" "$good" --export-dir "$EXPORT"
 fixture; refuse "a missing export directory" "is not a directory" "$good" --export-dir "$ROOT/nowhere"
 fixture; : >"$EXPORT/recovery-a.p8"; refuse "an export directory holding a recovery key" "already holds" "$good" --export-dir "$EXPORT"
 fixture; docker_set PG_IMAGE=0; refuse "no postgres image" "run concord-selfhost up first" "$good" --export-dir "$EXPORT"
 fixture; docker_set SUBNETS=172.30.0.0/16; refuse "an overlapping subnet" "overlaps a Docker network" "$good" --export-dir "$EXPORT"
 fixture 'AUTHORITY_SUBNET=172.30.53.1/29'; refuse "a subnet that is not a network address" "not a network address" "$good" --export-dir "$EXPORT"
+fixture 'AUTHORITY_IP=172.30.53.1'; refuse "the gateway as AUTHORITY_IP" "other than its gateway" "$good" --export-dir "$EXPORT"
+fixture 'AUTHORITY_IP=10.0.0.2'; refuse "an AUTHORITY_IP outside the subnet" "must be a host in" "$good" --export-dir "$EXPORT"
+fixture "export AUTHORITY_SUBNET = '172.30.53.1/29'"; refuse "a .env line written the way compose also reads it" "not a network address" "$good" --export-dir "$EXPORT"
+fixture; CP_ACCOUNTS=3 refuse "a control plane with accounts" "has 3 accounts" "$good" --export-dir "$EXPORT"
+fixture; CP_ACCOUNTS=fail refuse "a control plane that cannot be read" "cannot count the control plane's accounts" "$good" --export-dir "$EXPORT"
+fixture; chmod 1777 "$EXPORT"; refuse "an export directory others can write" "writable by other users" "$good" --export-dir "$EXPORT"
 fixture; refuse "passphrases that differ" "differ" "$PASS"$'\n'"$PASS!" --export-dir "$EXPORT"
 fixture; refuse "a short passphrase" "at least 12" $'short\nshort' --export-dir "$EXPORT"
 fixture; refuse "no passphrase" "no passphrase" '' --export-dir "$EXPORT"
@@ -210,7 +230,7 @@ fixture; refuse "no passphrase" "no passphrase" '' --export-dir "$EXPORT"
 fixture
 if TOOL_FAIL=sign-delegation run_init "$good" --export-dir "$EXPORT"; then
   fail "a failed signature was accepted"
-elif grep -q "sign-delegation failed" "$ROOT/out" && grep -q "remove $AUTH and what init started" "$ROOT/out" && grep -q "authority-owner down -v" "$ROOT/out" \
+elif grep -q "sign-delegation failed" "$ROOT/out" && grep -q "remove $AUTH, any recovery-\*.p8 in $EXPORT" "$ROOT/out" && grep -q "authority-owner down -v" "$ROOT/out" \
      && ! grep -q 'compose.* up ' "$CALLS"; then
   pass "a failed signature stops before the database, naming what to remove"
 else
