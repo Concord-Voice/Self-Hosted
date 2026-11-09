@@ -754,6 +754,32 @@ func TestAddTrustRefuses(t *testing.T) {
 	require.Equal(t, 2, code, "--trust and --first are exclusive")
 }
 
+func TestRecoveryVerbsRefuseMalformedTrustBeforeOutputOrSigning(t *testing.T) {
+	r := authoritytest.NewRealm(t)
+	for _, verb := range []string{"sign-succession", "add-trust"} {
+		t.Run(verb, func(t *testing.T) {
+			f := newFixture(t)
+			anchors := f.file("anchors", r.AnchorBytes)
+			trust := f.file("trust", []byte("not a trust envelope"))
+			out := filepath.Join(f.dir, "out")
+			var code int
+			var stdout, stderr string
+			if verb == "sign-succession" {
+				code, stdout, stderr = f.run("", verb, "--anchors", anchors, "--trust", trust,
+					"--spec", f.file("spec", successionJSON(t, r, 0, newKeys(t, 4))), "--dry-run")
+			} else {
+				code, stdout, stderr = runTool("", verb, "--anchors", anchors, "--trust", trust,
+					"--signed", f.file("signed", r.Current.Signed), "--out", out)
+			}
+			require.Equal(t, 1, code)
+			require.Contains(t, stderr, "trust:")
+			require.Empty(t, stdout)
+			require.Empty(t, f.calls())
+			require.NoFileExists(t, out)
+		})
+	}
+}
+
 func anchorsJSON(t *testing.T, id string, keys []*ecdsa.PrivateKey) []byte {
 	b, err := json.Marshal(map[string]string{"realm_id": id,
 		"primary_a": hex.EncodeToString(authoritytest.Point(keys[0])), "primary_b": hex.EncodeToString(authoritytest.Point(keys[1])),
