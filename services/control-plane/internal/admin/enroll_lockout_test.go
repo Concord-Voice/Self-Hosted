@@ -246,3 +246,18 @@ func TestEnrollBegin_ActiveAdminWithValidTokenRefused(t *testing.T) { // regress
 	assert.Equal(t, http.StatusUnauthorized, code, body)
 	assert.True(t, tokenStillStored(t, rdb, token), "a non-pending admin must be refused before the token is spent")
 }
+
+// When the lockout store cannot be read, enroll fails closed: 500, no enrollment.
+func TestEnrollBegin_LockoutStoreDown_FailsClosed(t *testing.T) { // regression for #216
+	db, rdb, _ := setupEnrollLockout(t)
+	_, username, token := pendingAdminWithToken(t, db, rdb)
+
+	dead := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", MaxRetries: -1, DialerRetries: 1})
+	t.Cleanup(func() { _ = dead.Close() })
+	engine := enrollLockoutEngine(t, db, dead)
+
+	code, body := enrollBegin(engine, username, adminTestPassword, token)
+	assert.Equal(t, http.StatusInternalServerError, code, body)
+	assert.JSONEq(t, `{"error":"internal error"}`, body)
+	assert.True(t, tokenStillStored(t, rdb, token), "a failed lockout read must not reach the token")
+}
