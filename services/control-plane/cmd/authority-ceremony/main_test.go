@@ -584,10 +584,8 @@ func TestSignSuccessionRecoversABackwardsCutoverTrust(t *testing.T) {
 	require.Equal(t, 0, code, stderr)
 	signed, err := os.ReadFile(out) // #nosec G304 -- test output path.
 	require.NoError(t, err)
-	after, err := ac.NewTrust(anchors)
-	require.NoError(t, err)
-	require.NoError(t, after.AddTrust(trustFile(first.Signed, a.Signed, b.Signed, signed)))
-	require.Equal(t, uint64(1), after.CurrentGen())
+	require.NoError(t, before.AddSigned(signed))
+	require.Equal(t, uint64(1), before.CurrentGen())
 }
 
 func TestSignSuccessionRefuses(t *testing.T) {
