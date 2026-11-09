@@ -395,7 +395,7 @@ _authority_health() {
   dir="$(_authority_env AUTHORITY_DIR /etc/concord-authority)" || return 1
   [[ -f "$dir/public/trust" ]] || return 3
   # An authority set up before the record existed gets it here, from the
-  # root-only tool, when health runs as root.
+  # root-only tool, when health runs as root and the tool is safe to run.
   ! _authority_backfill_ok "$dir" \
     || _authority_record_not_after "$dir/tools/authority-ceremony" "$dir" >/dev/null 2>&1 || :
   na="$(cat -- "$dir/public/delegation-not-after-ms" 2>/dev/null)"
@@ -417,16 +417,16 @@ _authority_health() {
   printf 'authority delegation valid for %d more days\n' "$days"
 }
 
-# _authority_backfill_ok DIR — health may run DIR's ceremony tool as root:
-# the record is missing, and only root can change the tool or any directory
-# above it, as init and renew require. Otherwise a planted tool would run as
-# root from up, update and restore.
+# _authority_backfill_ok DIR — health may run DIR's ceremony tool: the
+# record is missing, and only root or the user running health can change the
+# tool or any directory above it, as init and renew require. Otherwise a
+# planted tool would run as root from up, update and restore.
 _authority_backfill_ok() {
   local tool="$1/tools/authority-ceremony" uid mode
-  [[ "$(id -u)" == 0 && ! -s "$1/public/delegation-not-after-ms" && -f "$tool" && -x "$tool" && ! -L "$tool" ]] || return 1
+  [[ ! -s "$1/public/delegation-not-after-ms" && -f "$tool" && -x "$tool" && ! -L "$tool" ]] || return 1
   _authority_safe_dir "$1/tools" 2>/dev/null || return 1
   read -r uid mode < <(stat -c '%u %A' -- "$tool") || return 1
-  [[ "$uid" == 0 && "${mode:5:1}${mode:8:1}" == -- ]]
+  [[ ( "$uid" == 0 || "$uid" == "$(id -u)" ) && "${mode:5:1}${mode:8:1}" == -- ]]
 }
 
 # ── renew ──────────────────────────────────────────────────────────────
