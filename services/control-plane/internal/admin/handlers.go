@@ -484,12 +484,21 @@ type enrollChallenge struct {
 // EnrollBegin verifies password + single-use token, then begins a hardware-key
 // registration ceremony bound to the pending admin. The token is consumed here
 // (single-use); a failed finish requires a fresh token via reset-enrollment.
+//
+// Enroll shares the login Lockout (#216): it checks the same per-account and
+// per-IP counters first and records every failure in them, so a password
+// guessed here costs the same budget as one guessed at login.
 func (h *Handler) EnrollBegin(c *gin.Context) {
 	ctx := c.Request.Context()
+	ip := c.ClientIP()
 
 	var req enrollBeginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": msgInvalidRequestBody})
+		return
+	}
+
+	if h.enrollLocked(c, req.Username, ip) {
 		return
 	}
 
@@ -499,17 +508,17 @@ func (h *Handler) EnrollBegin(c *gin.Context) {
 		verifyHash = adminUser.PasswordHash
 	}
 	ok, verifyErr := auth.VerifyPassword(req.Password, verifyHash)
-	if lookupErr != nil || adminUser == nil || verifyErr != nil || !ok {
-		h.auditFailure(ctx, req.Username, EventEnrollComplete)
-		c.JSON(http.StatusUnauthorized, genericAuthError)
+	// A non-pending admin is refused AFTER the constant-time verify, never by an
+	// early return, so an active admin and an unknown user look the same.
+	if lookupErr != nil || adminUser == nil || verifyErr != nil || !ok || adminUser.Status != StatusPending {
+		h.failEnroll(c, req.Username, ip)
 		return
 	}
 
 	// Consume the single-use enrollment token and verify it binds to THIS admin.
 	boundAdminID, err := h.enroll.ConsumeEnrollmentToken(ctx, req.Token)
 	if err != nil || boundAdminID != adminUser.ID {
-		h.auditFailure(ctx, req.Username, EventEnrollComplete)
-		c.JSON(http.StatusUnauthorized, genericAuthError)
+		h.failEnroll(c, req.Username, ip)
 		return
 	}
 
@@ -559,6 +568,13 @@ func (h *Handler) EnrollFinish(c *gin.Context) {
 		return
 	}
 
+	// Re-check the lockout: the handle is single-use, but the account can be
+	// locked after it was issued (same reasoning as WebAuthnLogin).
+	ip := c.ClientIP()
+	if h.enrollLocked(c, challenge.Username, ip) {
+		return
+	}
+
 	user := adminRegistrationUser()
 	if _, err := FinishAdminRegistration(ctx, h.webauthn, h.repo, AdminRegistrationInput{
 		User:           user,
@@ -580,9 +596,43 @@ func (h *Handler) EnrollFinish(c *gin.Context) {
 		return
 	}
 
+	// Reset only after the key is enrolled, as WebAuthnLogin resets only after
+	// the second factor. Non-fatal: a stale counter self-expires.
+	if err := h.lockout.Reset(ctx, challenge.Username, ip); err != nil {
+		h.log.Warn("admin lockout reset failed", "error", err)
+	}
+
 	adminID := challenge.AdminID
 	h.auditOK(ctx, &adminID, challenge.Username, EventEnrollComplete)
 	c.JSON(http.StatusOK, gin.H{"status": "enrolled"})
+}
+
+// enrollLocked writes the login 429 and returns true when the account or IP is
+// locked. A lockout read error fails closed with a 500.
+func (h *Handler) enrollLocked(c *gin.Context, username, ip string) bool {
+	ctx := c.Request.Context()
+	locked, _, err := h.lockout.IsLocked(ctx, username, ip)
+	if err != nil {
+		h.log.Error("admin lockout check failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
+		return true
+	}
+	if locked {
+		h.auditDenied(ctx, username, EventEnrollComplete, "locked_out")
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many attempts, try again later"})
+		return true
+	}
+	return false
+}
+
+// failEnroll records a lockout failure, audits it, and writes the uniform 401.
+func (h *Handler) failEnroll(c *gin.Context, username, ip string) {
+	ctx := c.Request.Context()
+	if err := h.lockout.RecordFailure(ctx, username, ip); err != nil {
+		h.log.Warn("admin lockout record failed", "error", err)
+	}
+	h.auditFailure(ctx, username, EventEnrollComplete)
+	c.JSON(http.StatusUnauthorized, genericAuthError)
 }
 
 // adminRegistrationUser is the WebAuthnUser used for the admin registration
