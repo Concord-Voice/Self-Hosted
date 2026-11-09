@@ -559,6 +559,35 @@ func TestSignSuccession(t *testing.T) {
 	require.Equal(t, authoritytest.Point(next[1]), b)
 }
 
+func TestSignSuccessionRecoversABackwardsCutoverTrust(t *testing.T) {
+	r := authoritytest.NewRealm(t, func(d *ac.Delegation) { d.CutoverAtMs = r0(t) })
+	first := r.Current
+	a := r.NextDelegation(t)
+	b := r.NextDelegation(t, func(d *ac.Delegation) { d.CutoverAtMs-- })
+	haltedTrust := trustFile(first.Signed, a.Signed, b.Signed)
+	anchors, err := ac.DecodeAnchors(r.AnchorBytes)
+	require.NoError(t, err)
+	before, err := ac.NewTrust(anchors)
+	require.NoError(t, err)
+	err = before.AddTrust(haltedTrust)
+	var halt *ac.HaltError
+	require.ErrorAs(t, err, &halt)
+	next := newKeys(t, 4)
+	f := newFixture(t, r.RecoveryA, r.RecoveryB)
+	specPath := f.file("succession.json", successionJSON(t, r, 0, next))
+	msg, _, err := readSuccessionSpec(specPath)
+	require.NoError(t, err)
+	out := filepath.Join(f.dir, "s1.signed")
+
+	code, _, stderr := f.run(twice(msg), "sign-succession", "--anchors", f.file("anchors", r.AnchorBytes),
+		"--trust", f.file("trust", haltedTrust), "--spec", specPath, "--out", out)
+	require.Equal(t, 0, code, stderr)
+	signed, err := os.ReadFile(out) // #nosec G304 -- test output path.
+	require.NoError(t, err)
+	require.NoError(t, before.AddSigned(signed))
+	require.Equal(t, uint64(1), before.CurrentGen())
+}
+
 func TestSignSuccessionRefuses(t *testing.T) {
 	r := authoritytest.NewRealm(t)
 	next := newKeys(t, 4)
@@ -656,6 +685,36 @@ func TestAddTrust(t *testing.T) {
 	require.Equal(t, uint64(1), tr.CurrentGen())
 }
 
+func TestAddTrustRecoversABackwardsCutoverTrust(t *testing.T) {
+	r := authoritytest.NewRealm(t, func(d *ac.Delegation) { d.CutoverAtMs = r0(t) })
+	first := r.Current
+	a := r.NextDelegation(t)
+	b := r.NextDelegation(t, func(d *ac.Delegation) { d.CutoverAtMs-- })
+	haltedTrust := trustFile(first.Signed, a.Signed, b.Signed)
+	anchorRecord, err := ac.DecodeAnchors(r.AnchorBytes)
+	require.NoError(t, err)
+	before, err := ac.NewTrust(anchorRecord)
+	require.NoError(t, err)
+	err = before.AddTrust(haltedTrust)
+	var halt *ac.HaltError
+	require.ErrorAs(t, err, &halt)
+	next := newKeys(t, 4)
+	f := newFixture(t)
+	anchors := f.file("anchors", r.AnchorBytes)
+	trust := f.file("trust", haltedTrust)
+	out := filepath.Join(f.dir, "recovered-trust")
+
+	code, _, stderr := runTool("", "add-trust", "--anchors", anchors, "--trust", trust,
+		"--signed", f.file("s1", signedSuccession(t, r, next)), "--out", out)
+	require.Equal(t, 0, code, stderr)
+	recovered, err := os.ReadFile(out) // #nosec G304 -- test output path.
+	require.NoError(t, err)
+	after, err := ac.NewTrust(anchorRecord)
+	require.NoError(t, err)
+	require.NoError(t, after.AddTrust(recovered))
+	require.Equal(t, uint64(1), after.CurrentGen())
+}
+
 func TestAddTrustRefuses(t *testing.T) {
 	r := authoritytest.NewRealm(t)
 	d2 := r.NextDelegation(t)
@@ -693,6 +752,32 @@ func TestAddTrustRefuses(t *testing.T) {
 	}
 	code, _, _ := runTool("", "add-trust", "--anchors", anchors, "--trust", trust, "--first", "--signed", "x", "--out", "y")
 	require.Equal(t, 2, code, "--trust and --first are exclusive")
+}
+
+func TestRecoveryVerbsRefuseMalformedTrustBeforeOutputOrSigning(t *testing.T) {
+	r := authoritytest.NewRealm(t)
+	for _, verb := range []string{"sign-succession", "add-trust"} {
+		t.Run(verb, func(t *testing.T) {
+			f := newFixture(t)
+			anchors := f.file("anchors", r.AnchorBytes)
+			trust := f.file("trust", []byte("not a trust envelope"))
+			out := filepath.Join(f.dir, "out")
+			var code int
+			var stdout, stderr string
+			if verb == "sign-succession" {
+				code, stdout, stderr = f.run("", verb, "--anchors", anchors, "--trust", trust,
+					"--spec", f.file("spec", successionJSON(t, r, 0, newKeys(t, 4))), "--dry-run")
+			} else {
+				code, stdout, stderr = runTool("", verb, "--anchors", anchors, "--trust", trust,
+					"--signed", f.file("signed", r.Current.Signed), "--out", out)
+			}
+			require.Equal(t, 1, code)
+			require.Contains(t, stderr, "trust:")
+			require.Empty(t, stdout)
+			require.Empty(t, f.calls())
+			require.NoFileExists(t, out)
+		})
+	}
 }
 
 func anchorsJSON(t *testing.T, id string, keys []*ecdsa.PrivateKey) []byte {

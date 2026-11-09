@@ -73,6 +73,8 @@ Android.
 
 ### Fixed
 
+- **Account authority:** Recovery ceremonies can sign and add a succession that clears a delegation halt, while other commands and malformed trust inputs remain refused. Removed an obsolete private-policy citation that blocked importing the server changes into Hosted.
+
 - **Authentication:** Removed the compiled `authority-ceremony` binary that was committed with the tool's source. Build the tool from source; build outputs are now ignored.
 - **Voice:** Voice room presence writes to Redis now time out like the other media-plane Redis calls, and clearing an empty room no longer removes a user who joined during the clear.
 - **Self-hosted CI:** Build and configuration checks now provide explicit WebSocket budget settings, so required production inputs do not prevent those checks from rendering Compose.
