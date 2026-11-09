@@ -641,3 +641,33 @@ func TestHighWaterIsTheLexicographicMaximum(t *testing.T) {
 		}
 	}
 }
+
+// Current is the high-water delegation for renew and health, and nothing at
+// all for a trust that is halted, empty or nil.
+func TestCurrentIsTheHighWaterDelegation(t *testing.T) {
+	var nilTrust *Trust
+	_, ok := nilTrust.Current()
+	require.False(t, ok, "a nil trust")
+
+	r := newTestRealm(t)
+	_, ok = r.trust(t).Current()
+	require.False(t, ok, "no delegation yet: T4 halts")
+
+	r.addDel(1, nil)
+	r.addDel(2, func(d *Delegation) { d.MinValidSerial = 1; d.NotAfterMs = testT0 + 300*86_400_000 })
+	d, ok := r.trust(t).Current()
+	require.True(t, ok)
+	require.Equal(t, uint64(2), d.Serial)
+	require.Equal(t, testT0+300*86_400_000, d.NotAfterMs)
+
+	// A second, different delegation at serial 2 is a T4 contradiction.
+	r.addDel(2, func(d *Delegation) { d.MinValidSerial = 1 })
+	tr, err := NewTrust(r.Anchors)
+	require.NoError(t, err)
+	for _, it := range r.Items {
+		_ = tr.AddSigned(it)
+	}
+	requireHalted(t, tr)
+	_, ok = tr.Current()
+	require.False(t, ok, "a halted trust")
+}

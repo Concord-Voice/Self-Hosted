@@ -399,6 +399,19 @@ func (t *Trust) lookup(gen, serial uint64) (Delegation, bool) {
 	return ds[0], true
 }
 
+// Current is the delegation at the high-water mark: the one a renewal
+// replaces and whose not_after_ms a health check reads. It reports false for
+// a halted trust. An unhalted trust holds exactly one record there (T4), so
+// the answer never depends on arrival order. The Delegation shares its slices
+// with the retained record: callers must not mutate it.
+func (t *Trust) Current() (Delegation, bool) {
+	if t.Halted() != nil {
+		return Delegation{}, false
+	}
+	hw := t.HighWater()
+	return t.lookup(hw.Gen, hw.Serial)
+}
+
 // Halted is T4's state, including "no valid delegation for current_gen",
 // which is evaluated at verification time, never in AddSigned. A nil Trust
 // is halted.

@@ -32,7 +32,9 @@ const usage = "usage: authority-ceremony sign-delegation --anchors <file> (--tru
 	"       authority-ceremony sign-succession --anchors <file> --trust <file> --spec <file> " +
 	"(--out <file> | --dry-run) [--slot <slot>] [--piv-tool <path> | --key-file <file>... [--yes]]\n" +
 	"       authority-ceremony add-trust --anchors <file> (--trust <file> | --first) --signed <file> --out <file>\n" +
-	"       authority-ceremony operator-sign --intent <file> --key <hex point> [--slot <slot>] [--piv-tool <path>]"
+	"       authority-ceremony operator-sign --intent <file> --key <hex point> [--slot <slot>] [--piv-tool <path>]\n" +
+	"       authority-ceremony make-anchors --spec <file> --out <file>\n" +
+	"       authority-ceremony show-trust --anchors <file> --trust <file>"
 
 // errUsage is exit 2; every other error is exit 1.
 var errUsage = errors.New("usage")
@@ -69,6 +71,10 @@ func run(args []string, e env) int {
 		err = addTrust(rest, e)
 	case "operator-sign":
 		err = operatorSign(rest, e)
+	case "make-anchors":
+		err = makeAnchors(rest, e)
+	case "show-trust":
+		err = printTrust(rest, e)
 	default:
 		err = errUsage
 	}
@@ -713,6 +719,84 @@ func addTrust(args []string, e env) error {
 		return p.err
 	}
 	return errors.New("the signed item has no place in the trust order (a duplicate?); nothing was written")
+}
+
+// anchorsSpec is the realm id and the four product-root points, in hex.
+type anchorsSpec struct {
+	RealmID   string `json:"realm_id"`
+	PrimaryA  string `json:"primary_a"`
+	PrimaryB  string `json:"primary_b"`
+	RecoveryA string `json:"recovery_a"`
+	RecoveryB string `json:"recovery_b"`
+}
+
+var anchorsFields = []string{"realm_id", "primary_a", "primary_b", "recovery_a", "recovery_b"}
+
+// makeAnchors writes the realm's anchors file (T1): four pairwise-distinct
+// P-384 points. It prints the file's SHA-384, which the operator records
+// out of band: the anchors are trusted by provenance, not by a signature.
+func makeAnchors(args []string, e env) error {
+	fs := newFlags("make-anchors", e)
+	specPath := fs.String("spec", "", "")
+	out := fs.String("out", "", "")
+	if err := parse(fs, args); err != nil || *specPath == "" || *out == "" {
+		return errUsage
+	}
+	if err := refuseExisting(*out); err != nil {
+		return err
+	}
+	var s anchorsSpec
+	if err := readStrict(*specPath, anchorsFields, &s); err != nil {
+		return err
+	}
+	a := ac.Anchors{RealmID: s.RealmID}
+	for _, f := range []struct {
+		name, in string
+		out      *[]byte
+	}{
+		{"primary_a", s.PrimaryA, &a.PrimaryA}, {"primary_b", s.PrimaryB, &a.PrimaryB},
+		{"recovery_a", s.RecoveryA, &a.RecoveryA}, {"recovery_b", s.RecoveryB, &a.RecoveryB},
+	} {
+		var err error
+		if *f.out, err = hex.DecodeString(f.in); err != nil {
+			return fmt.Errorf("spec: %s: %w", f.name, err)
+		}
+	}
+	if _, err := ac.NewTrust(a); err != nil {
+		return fmt.Errorf("spec: %w (the realm id must be a UUID and the four points distinct P-384 points)", err)
+	}
+	b := a.Encode()
+	if err := writeNew(*out, b); err != nil {
+		return err
+	}
+	p := &printer{w: e.out}
+	p.f("wrote %s\nsha384=%s\n", *out, hex.EncodeToString(ac.Digest(b)))
+	return p.err
+}
+
+// printTrust prints a trust file's state as key=value lines for scripts:
+// the high-water mark and the current delegation's window. A trust that does
+// not load, or is halted, is refused.
+func printTrust(args []string, e env) error {
+	fs := newFlags("show-trust", e)
+	anchors := fs.String("anchors", "", "")
+	trustPath := fs.String("trust", "", "")
+	if err := parse(fs, args); err != nil || *anchors == "" || *trustPath == "" {
+		return errUsage
+	}
+	tr, err := loadTrust(*anchors, *trustPath)
+	if err != nil {
+		return err
+	}
+	d, ok := tr.Current()
+	if !ok {
+		return errors.New("trust: no single current delegation")
+	}
+	hw := tr.HighWater()
+	p := &printer{w: e.out}
+	p.f("realm_id=%s\ngeneration=%d\nserial=%d\nmin_valid_serial=%d\nnot_before_ms=%d\nnot_after_ms=%d\n",
+		d.RealmID, hw.Gen, hw.Serial, hw.MinValid, d.NotBeforeMs, d.NotAfterMs)
+	return p.err
 }
 
 // loadTrustBytes checks that a trust envelope loads under the anchors with no halt.
