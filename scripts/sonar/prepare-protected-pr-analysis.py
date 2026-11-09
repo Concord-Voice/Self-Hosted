@@ -14,7 +14,7 @@ import stat
 import subprocess
 import tempfile
 import time
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlparse
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 import zipfile
@@ -206,8 +206,16 @@ class GitHub:
                     if response.url != location:
                         raise Reject("artifact redirected again")
                     result = response.read(limit + 1)
-            except (HTTPError, OSError):
-                raise Reject("artifact download failed") from None
+            except HTTPError as exc:
+                code = exc.code
+                status = str(code) if type(code) is int and 100 <= code <= 599 else "unknown"
+                raise Reject(f"artifact download failed: HTTP status {status}") from None
+            except TimeoutError:
+                raise Reject("artifact download failed: timeout") from None
+            except URLError:
+                raise Reject("artifact download failed: url-error") from None
+            except OSError:
+                raise Reject("artifact download failed: os-error") from None
         except OSError:
             raise Reject("GitHub API unavailable") from None
         if len(result) > limit:
