@@ -9,6 +9,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -16,6 +17,7 @@ CHECKER = Path(__file__).with_name('sonar-required-gate.test.sh')
 POLICY = Path(__file__).with_name('sonar_ioc_policy.py')
 STATIC_CONDITION = "${{ !cancelled() && needs.ioc.result == 'success' }}"
 ACCEPTANCE_CONDITION = "${{ !cancelled() && needs.ioc.result == 'success' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.selfhost != 'false') }}"
+NODE = os.environ.get("NODE", "node")
 
 
 def check_actual_policy(jobs):
@@ -78,6 +80,22 @@ def validate_consumer_wiring(text):
         raise AssertionError('IOC consumer must unconditionally call loaded fixed policy with parsed pr_ci')
 
 
+def evaluate_osv_baseline(expression, selection):
+    """Evaluate the checked-in Action expression after replacing its fixed report-selection access."""
+    body = expression.removeprefix("${{ ").removesuffix(" }}")
+    access = "needs.pr-ci.outputs.report-selection"
+    body = body.replace(access, json.dumps(json.dumps(selection)))
+    result = subprocess.run(
+        [NODE, "-e", "const fromJSON = JSON.parse; const toJSON = JSON.stringify; process.stdout.write(String(" + body + "));"],
+        check=True, capture_output=True, text=True,
+    )
+    return result.stdout
+
+
+def git_revision(directory, *args):
+    return subprocess.check_output(["git", "-C", str(directory), *args], text=True).strip()
+
+
 def provision_job(*, needs='ioc', condition=None, continue_on_error=None):
     job = {'needs': needs,
            'steps': [{'run': 'bash scripts/tests/test-provision-cert.sh'}]}
@@ -115,6 +133,90 @@ class IOCConditionPolicyTests(unittest.TestCase):
         self.assertIn("pr-ci", needs if isinstance(needs, list) else [needs])
         self.assertIn("workflow_call", osv.get("on", {}),
                       "the reusable OSV source must execute from the protected workflow commit")
+
+    def test_protected_osv_baseline_uses_v2_merge_parent_with_bounded_v1_fallback(self):
+        """The old OSV side must follow merge provenance during the staged v1-to-v2 rollout."""
+        root = CHECKER.parents[3]
+        required = yaml.load((root / ".github/workflows/required-pr-build.yml").read_text(),
+                             Loader=yaml.BaseLoader)
+        scanner = yaml.load((root / ".github/workflows/osv-scanner.yml").read_text(),
+                            Loader=yaml.BaseLoader)
+        call = required["jobs"]["osv"]
+        baseline = call["with"]["base-sha"]
+        legacy_pin = "5fa007d8e1979c3368181dc6f79e3fb1c8235beb"  # pragma: allowlist secret -- public immutable Git commit, not credential
+
+        selected_merge = "c" * 40
+        cases = (
+            ("v2 merge parent", {"version": 2, "base_sha": "a" * 40,
+                                  "merge_base_sha": "b" * 40}, "b" * 40, True),
+            ("v2 missing parent", {"version": 2, "base_sha": "a" * 40}, "", False),
+            ("v2 malformed parent", {"version": 2, "base_sha": "a" * 40,
+                                      "merge_base_sha": "forged"}, "forged", False),
+            ("approved v1 legacy", {"version": 1, "policy_sha": legacy_pin,
+                                    "base_sha": "a" * 40}, "a" * 40, True),
+            ("unapproved v1", {"version": 1, "policy_sha": "d" * 40,
+                                "base_sha": "a" * 40}, "", False),
+            ("unknown version", {"version": 3, "base_sha": "a" * 40,
+                                 "merge_base_sha": "b" * 40}, "", False),
+            ("string v2", {"version": "2", "base_sha": "a" * 40,
+                           "merge_base_sha": "b" * 40}, "", False),
+            ("string v1", {"version": "1", "policy_sha": legacy_pin,
+                           "base_sha": "a" * 40}, "", False),
+            ("boolean true", {"version": True, "policy_sha": legacy_pin,
+                              "base_sha": "a" * 40}, "", False),
+            ("boolean false", {"version": False, "base_sha": "a" * 40,
+                               "merge_base_sha": "b" * 40}, "", False),
+        )
+
+        steps = scanner["jobs"]["protected-pr-scan"]["steps"]
+        old_checkout = next(step for step in steps
+                            if step.get("with", {}).get("ref") == "${{ inputs.base-sha }}")
+        old_scan = next(step for step in steps if step.get("name") == "Scan base dependencies")
+        self.assertEqual("scan", old_checkout["with"]["path"])
+        self.assertEqual("${{ inputs.base-sha }}", old_scan["env"]["EXPECTED_SHA"])
+        self.assertIn('git -C scan rev-parse HEAD', old_scan["run"])
+        input_check = next(step for step in steps if step.get("name") == "Check protected revision inputs")
+        for name, selection, expected, valid in cases:
+            with self.subTest(name=name):
+                resolved = evaluate_osv_baseline(baseline, selection)
+                self.assertEqual(expected, resolved)
+                check = subprocess.run(
+                    ["bash", "-c", input_check["run"]], text=True, capture_output=True,
+                    env={**os.environ, "BASE_SHA": resolved, "MERGE_SHA": selected_merge},
+                )
+                self.assertEqual(0 if valid else 1, check.returncode, check.stderr)
+
+    def test_protected_preparer_rejects_a_forged_v2_osv_merge_parent(self):
+        """A SHA-shaped parent still needs to belong to protected main first-parent history."""
+        root = CHECKER.parents[3]
+        source = root / "scripts/sonar/prepare-protected-pr-analysis.py"
+        spec = importlib.util.spec_from_file_location("osv_merge_parent_preparer", source)
+        preparer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(preparer)
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            upstream, trusted, analysis = temporary / "upstream", temporary / "trusted", temporary / "analysis"
+            subprocess.run(["git", "init", "-q", "-b", "main", str(upstream)], check=True)
+            git_revision(upstream, "config", "user.name", "Test")
+            git_revision(upstream, "config", "user.email", "test@example.invalid")
+            (upstream / "README.md").write_text("base\n")
+            git_revision(upstream, "add", "README.md")
+            git_revision(upstream, "commit", "-qm", "base")
+            base = git_revision(upstream, "rev-parse", "HEAD")
+            subprocess.run(["git", "clone", "-q", str(upstream), str(trusted)], check=True)
+            (upstream / "README.md").write_text("head\n")
+            git_revision(upstream, "add", "README.md")
+            git_revision(upstream, "commit", "-qm", "head")
+            head = git_revision(upstream, "rev-parse", "HEAD")
+            git_revision(upstream, "update-ref", "refs/pull/7/head", head)
+            git_revision(upstream, "update-ref", "refs/heads/main", base)
+            candidate = {"expected_base_sha": base, "expected_head_sha": head}
+            claims = {"workflow_sha": base}
+            payload = {"selection": {"version": 2, "policy_sha": base,
+                                     "merge_base_sha": "f" * 40}}
+            with patch.object(preparer, "ROOT", trusted), patch.object(preparer, "GIT_REMOTE", str(upstream)):
+                with self.assertRaisesRegex(preparer.Reject, "first-parent history"):
+                    preparer.prepare_git(analysis, claims, payload, candidate, "test-token")
 
     def test_ordinary_pr_passes_booleans_to_reusable_workflows(self):
         root = CHECKER.parents[3]

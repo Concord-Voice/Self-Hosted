@@ -128,7 +128,9 @@ jobs:
     uses: Concord-Voice/Self-Hosted/.github/workflows/osv-scanner.yml@52a73e362484c4590928ca4dd34ed9c5fbf16c5a
     with:
       protected-pr: true
-      base-sha: ${{ fromJSON(needs.pr-ci.outputs.report-selection).base_sha }}
+      # v2 scans from the proven merge parent. Only the deployed v1 producer
+      # retains API-base compatibility until the separate reviewed pin activation.
+      base-sha: ${{ (toJSON(fromJSON(needs.pr-ci.outputs.report-selection).version) == '2' && fromJSON(needs.pr-ci.outputs.report-selection).merge_base_sha) || (toJSON(fromJSON(needs.pr-ci.outputs.report-selection).version) == '1' && fromJSON(needs.pr-ci.outputs.report-selection).policy_sha == '5fa007d8e1979c3368181dc6f79e3fb1c8235beb' && fromJSON(needs.pr-ci.outputs.report-selection).base_sha) || '' }} # pragma: allowlist secret -- public immutable Git commit, not credential
       merge-sha: ${{ fromJSON(needs.pr-ci.outputs.report-selection).merge_sha }}
       hotfix: ${{ fromJSON(needs.pr-ci.outputs.report-selection).hotfix }}
     permissions:
