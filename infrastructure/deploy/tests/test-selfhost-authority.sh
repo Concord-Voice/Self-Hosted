@@ -120,6 +120,7 @@ run_init() {
     selfhost_storage_project_identity() { SELFHOST_STORAGE_PROJECT_NAME=fixture; }
     _authority_cp_accounts() { [[ "${CP_ACCOUNTS:-0}" != fail ]] && printf "%s\n" "${CP_ACCOUNTS:-0}"; }
     _authority_running() { printf "running?\n" >>"$CALLS"; [[ "${RUNNING:-1}" == 1 ]]; }
+    [[ "${RECORD_FAIL:-}" != 1 ]] || _authority_record_not_after() { return 1; }
     verb_authority "${VERB:-init}" "$@"
   ' run_init "$@" <<<"$input" >"$ROOT/out" 2>&1
 }
@@ -224,26 +225,44 @@ staged="$(find "$AUTH" -name '*.prev' -o -name '*.next' -o -name stage)"
    && "$(cat "$AUTH/secrets/rsk")" != "$old_rsk" && -z "$staged" ]] && grep -qxF "chown 10006:10006 $AUTH/cp/cak.next" "$CALLS" \
   && pass "renew installs the new keys 0400 with their owners and leaves no staged files" || fail "renew files: $staged"
 
-# The authority does not stay up: delegation 2 comes back, delegation 3 is gone.
+# The authority does not stay up: renew goes forward, since the authority may
+# already hold delegation 3, and says so.
 : >"$CALLS"; docker_set SALT=3
-trust2="$(cat "$AUTH/public/trust")"
+rsk2="$(cat "$AUTH/secrets/rsk")"
 if RUNNING=0 VERB=renew run_init ''; then
   fail "renew accepted an authority that did not stay up"
-elif grep -qF 'putting delegation 2 back' "$ROOT/out" && [[ "$(cat "$AUTH/public/trust")" == "$trust2" ]] \
-     && [[ ! -e "$AUTH/ceremony/delegation-3.json" && -z "$(find "$AUTH" -name '*.prev' -o -name '*.next' -o -name stage)" ]] \
-     && [[ "$(grep -c 'force-recreate authority' "$CALLS")" == 2 ]]; then
-  pass "renew puts the old delegation and keys back when the authority does not stay up"
+elif grep -qF 'Do not put the old files back' "$ROOT/out" && [[ "$(jget "$AUTH/public/trust" serial)" == 3 ]] \
+     && [[ "$(cat "$AUTH/secrets/rsk")" != "$rsk2" && -e "$AUTH/ceremony/delegation-3.signed" ]] \
+     && [[ "$(cat "$AUTH/public/delegation-not-after-ms")" == "$(jget "$AUTH/ceremony/delegation-3.json" not_after_ms)" ]] \
+     && [[ -z "$(find "$AUTH" -name '*.prev' -o -name '*.next' -o -name stage)" ]] \
+     && [[ "$(grep -c 'force-recreate authority' "$CALLS")" == 1 ]]; then
+  pass "renew keeps delegation 3 and its keys when the authority does not stay up, and does not roll back"
 else
-  fail "renew rollback: $(cat "$ROOT/out")"
+  fail "renew after a failed start: $(cat "$ROOT/out")"
 fi
+trust2="$(cat "$AUTH/public/trust")"
 : >"$CALLS"
 if TOOL_FAIL=sign-delegation VERB=renew run_init ''; then
   fail "renew accepted a failed signature"
-elif [[ "$(cat "$AUTH/public/trust")" == "$trust2" && ! -e "$AUTH/ceremony/delegation-3.json" && ! -e "$AUTH/stage" ]] \
+elif [[ "$(cat "$AUTH/public/trust")" == "$trust2" && ! -e "$AUTH/ceremony/delegation-4.json" && ! -e "$AUTH/stage" ]] \
      && ! grep -q 'compose' "$CALLS"; then
   pass "a failed renewal signature changes nothing and restarts nothing"
 else
   fail "a failed renewal signature: $(cat "$ROOT/out")"
+fi
+: >"$CALLS"; docker_set SALT=4
+record_before="$(cat "$AUTH/public/delegation-not-after-ms")"
+if RECORD_FAIL=1 VERB=renew run_init ''; then
+  if [[ "$(jget "$AUTH/public/trust" serial)" == 4 ]] && grep -qF 'Delegation 4 is installed' "$ROOT/out" \
+     && grep -qF "expiry record was not updated; run: " "$ROOT/out" \
+     && [[ "$(cat "$AUTH/public/delegation-not-after-ms")" == "$record_before" ]] \
+     && [[ -z "$(find "$AUTH" -name '*.prev' -o -name '*.next' -o -name stage)" ]]; then
+    pass "renew reports success and the manual fix when only the expiry record fails"
+  else
+    fail "record failure: $(cat "$ROOT/out")"
+  fi
+else
+  fail "renew failed after installing because the expiry record failed: $(cat "$ROOT/out")"
 fi
 mkdir "$AUTH/stage"
 VERB=renew run_init '' && fail "renew ran over a stage left behind" \
@@ -278,7 +297,13 @@ in30=$(( now_ms + 30 * 86400000 )) in20=$(( now_ms + 20 * 86400000 )) past=$(( n
 [[ "$(health_rc "$in20")" == 2 ]] && grep -qF 'expires in 19 days' "$ROOT/out" \
   && pass "health warns with 20 days left" || fail "20 days: $(cat "$ROOT/out")"
 [[ "$(health_rc "$past")" == 1 ]] && grep -qF 'has expired' "$ROOT/out" && pass "health fails once expired" || fail "expired: $(cat "$ROOT/out")"
+# With the tool there, health rewrites a missing record (an authority set up
+# before it existed); without it, a missing or unreadable record fails.
+[[ "$(health_rc none)" == 0 && "$(cat "$AUTH/public/delegation-not-after-ms")" == "$(jget "$AUTH/ceremony/delegation-4.json" not_after_ms)" ]] \
+  && pass "health backfills a missing expiry record from the trust" || fail "backfill: $(cat "$ROOT/out")"
+chmod 0600 "$AUTH/tools/authority-ceremony"
 [[ "$(health_rc garbage)" == 1 && "$(health_rc none)" == 1 ]] && pass "health fails on a missing or unreadable record" || fail "bad record: $(cat "$ROOT/out")"
+chmod 0700 "$AUTH/tools/authority-ceremony"
 saved_root="$ROOT"; fixture
 [[ "$(health_rc none 2>/dev/null)" == 3 ]] && pass "health has nothing to check before init" || fail "no authority: $(cat "$ROOT/out")"
 ROOT="$saved_root"

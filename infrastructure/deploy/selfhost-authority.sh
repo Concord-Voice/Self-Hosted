@@ -384,6 +384,10 @@ _authority_health() {
   local dir na now left
   dir="$(_authority_env AUTHORITY_DIR /etc/concord-authority)" || return 1
   [[ -f "$dir/public/trust" ]] || return 3
+  # An authority set up before the record existed gets it here, from the
+  # root-only tool, when health runs as root.
+  [[ -s "$dir/public/delegation-not-after-ms" || ! -x "$dir/tools/authority-ceremony" ]] \
+    || _authority_record_not_after "$dir/tools/authority-ceremony" "$dir" >/dev/null 2>&1 || :
   na="$(cat -- "$dir/public/delegation-not-after-ms" 2>/dev/null)"
   now="$(date +%s%3N)"
   if [[ ! "$na" =~ ^[0-9]+$ || ! "$now" =~ ^[0-9]{13}$ ]]; then
@@ -409,7 +413,10 @@ _authority_health() {
 # and everything else as the current delegation has it. The TLS keys stay:
 # they are not a validity control (D-204). Then it installs the new trust
 # and keys and recreates the authority, which installs the new delegation.
-# On a failure it puts the old trust and keys back. The CP's switch to the
+# A failure before the swap leaves the old files as they were. After it,
+# renew only goes forward: the authority installs the delegation in its
+# database once it starts, and from then on the old RSK is not in the
+# high-water delegation, so the old files cannot run it. The CP's switch to the
 # new CAK after the authority shows it (§2.16 step 5) arrives with the
 # client integration; until then nothing holds the old CAK.
 _authority_renew() {
@@ -473,20 +480,16 @@ with open(dst, "x") as f:
   echo "Installing delegation $next and restarting the authority..."
   _authority_renew_place "$dir" || { _authority_warn 'cannot stage the new keys'; _authority_renew_unstage "$dir" "$next"; return 1; }
   _authority_renew_swap "$dir" next prev || { _authority_renew_swap "$dir" prev next || :; _authority_renew_unstage "$dir" "$next"; return 1; }
+  # From here on delegation $next is the authority's: no way back (see above).
+  rm -f -- "$dir/public/trust.prev" "$dir/secrets/rsk.prev" "$dir/cp/cak.prev"
+  _authority_record_not_after "$tool" "$dir" \
+    || _authority_warn "health's expiry record was not updated; run: $tool show-trust --anchors $dir/public/anchors --trust $dir/public/trust | sed -n 's/^not_after_ms=//p' >$dir/public/delegation-not-after-ms"
   if _authority_compose up -d --no-deps --force-recreate authority && _authority_running; then
-    rm -f -- "$dir/public/trust.prev" "$dir/secrets/rsk.prev" "$dir/cp/cak.prev"
-    _authority_record_not_after "$tool" "$dir" || return 1
     printf 'Delegation %s is installed; it expires in 180 days.\n' "$next"
     return 0
   fi
-  _authority_warn "the authority did not stay up on delegation $next; putting delegation $serial back"
-  _authority_renew_swap "$dir" prev next \
-    || { _authority_fail "cannot put delegation $serial back; its files are the FILE.prev ones in $dir"; return 1; }
-  rm -f -- "$dir/public/trust.next" "$dir/secrets/rsk.next" "$dir/cp/cak.next" "$spec" "$signed"
-  if ! _authority_compose up -d --no-deps --force-recreate authority || ! _authority_running; then
-    _authority_fail "the authority is not running on delegation $serial either; see its logs"
-  fi
-  return 1
+  # A retry would sign another delegation for nothing: fix the cause instead.
+  _authority_fail "delegation $next and its keys are in place, but the authority did not stay up on them. Fix the cause from its logs, then recreate it. Do not put the old files back: the authority may already hold delegation $next."
 }
 
 # _authority_renew_place DIR — the new RSK and CAK from the stage to
