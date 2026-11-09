@@ -10,11 +10,11 @@
 # authority itself reads them from passfiles, never from its URL.
 set -eu
 
-pw_app="$(cat /run/secrets/authority_app_password)"
-pw_owner="$(cat /run/secrets/authority_owner_password)"
-
-psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres \
-  -v pw_app="$pw_app" -v pw_owner="$pw_owner" <<'SQL'
+# psql reads each file itself (\set with a backtick command), so neither
+# password is ever on a command line another process can read.
+psql -v ON_ERROR_STOP=1 --username "$POSTGRES_USER" --dbname postgres <<'SQL'
+\set pw_app `cat /run/secrets/authority_app_password`
+\set pw_owner `cat /run/secrets/authority_owner_password`
 CREATE ROLE authority_owner LOGIN PASSWORD :'pw_owner';
 CREATE ROLE authority_app LOGIN PASSWORD :'pw_app';
 CREATE ROLE authority_backup NOLOGIN;
