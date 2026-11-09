@@ -41,6 +41,8 @@ const loginChallengePrefix = "admin_login_challenge:"
 const (
 	msgInvalidRequestBody = "invalid request body"
 	msgInternalError      = "internal error"
+	msgTooManyAttempts    = "too many attempts, try again later"
+	logLockoutCheckFailed = "admin lockout check failed"
 )
 
 // adminWebAuthnUserHandle is the stable WebAuthn user handle for the admin RP.
@@ -175,13 +177,13 @@ func (h *Handler) PasswordLogin(c *gin.Context) {
 	// Lockout gate FIRST — a locked account/IP never reaches password verify.
 	locked, _, err := h.lockout.IsLocked(ctx, req.Username, ip)
 	if err != nil {
-		h.log.Error("admin lockout check failed", "error", err)
+		h.log.Error(logLockoutCheckFailed, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 		return
 	}
 	if locked {
 		h.auditDenied(ctx, req.Username, EventLoginFailure, "locked_out")
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many attempts, try again later"})
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": msgTooManyAttempts})
 		return
 	}
 
@@ -268,13 +270,13 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 	// otherwise still redeem it once. Mirrors PasswordLogin's gate.
 	locked, _, lerr := h.lockout.IsLocked(ctx, challenge.Username, ip)
 	if lerr != nil {
-		h.log.Error("admin lockout check failed", "error", lerr)
+		h.log.Error(logLockoutCheckFailed, "error", lerr)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 		return
 	}
 	if locked {
 		h.auditDenied(ctx, challenge.Username, EventLoginFailure, "locked_out")
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many attempts, try again later"})
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": msgTooManyAttempts})
 		return
 	}
 
@@ -613,13 +615,13 @@ func (h *Handler) enrollLocked(c *gin.Context, username, ip string) bool {
 	ctx := c.Request.Context()
 	locked, _, err := h.lockout.IsLocked(ctx, username, ip)
 	if err != nil {
-		h.log.Error("admin lockout check failed", "error", err)
+		h.log.Error(logLockoutCheckFailed, "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 		return true
 	}
 	if locked {
 		h.auditDenied(ctx, username, EventEnrollComplete, "locked_out")
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many attempts, try again later"})
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": msgTooManyAttempts})
 		return true
 	}
 	return false
