@@ -205,6 +205,7 @@ def packaging():
               "infrastructure/deploy/tests/test-selfhost-storage.sh",
               "infrastructure/deploy/tests/test-selfhost-backup.sh",
               "infrastructure/deploy/tests/test-selfhost-update.sh",
+              "infrastructure/deploy/tests/test-selfhost-authority.sh",
               "infrastructure/deploy/tests/test-selfhost-byo-s3.sh",
               "infrastructure/deploy/tests/test-selfhost-cert-delivery.sh",
               "infrastructure/deploy/tests/test-selfhost-tls-readiness.sh",
@@ -217,7 +218,9 @@ def packaging():
               "infrastructure/deploy/selfhost-backup.sh", "infrastructure/deploy/selfhost-update.sh",
               "infrastructure/deploy/release-signers",
               "infrastructure/deploy/tests/test-selfhost-backup.sh",
-              "infrastructure/deploy/tests/test-selfhost-update.sh")
+              "infrastructure/deploy/tests/test-selfhost-update.sh",
+              "infrastructure/deploy/selfhost-authority.sh",
+              "infrastructure/deploy/tests/test-selfhost-authority.sh")
     for hook in (selfhost,):
         for name in inputs:
             check(hook["id"] + " triggers for " + name,

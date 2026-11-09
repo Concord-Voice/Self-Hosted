@@ -11,6 +11,7 @@ infrastructure/deploy/install-selfhost.sh
 infrastructure/deploy/selfhost-storage.sh
 infrastructure/deploy/selfhost-backup.sh
 infrastructure/deploy/selfhost-update.sh
+infrastructure/deploy/selfhost-authority.sh
 infrastructure/deploy/release-signers
 infrastructure/deploy/selfhost-tls.sh
 infrastructure/deploy/selfhost-tls.py

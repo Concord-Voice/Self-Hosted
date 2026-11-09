@@ -15,7 +15,7 @@
 #   - authority-owner is the one-shot owner job (migrate and the owner verbs):
 #     a profile, restart "no", run by hand: `docker compose ... run --rm authority-owner <verb>`.
 #
-# Secrets are files the installer writes under ${AUTHORITY_DIR}/secrets, mode 0400,
+# Secrets are files `concord-selfhost authority init` writes under ${AUTHORITY_DIR}/secrets, mode 0400,
 # owned by the uid that reads them:
 #   - uid 70 (the postgres image's postgres user, which runs the entrypoint's
 #     password read and the init script): superuser-password, app-password,

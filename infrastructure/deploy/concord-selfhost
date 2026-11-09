@@ -142,6 +142,10 @@ Verbs:
   update --to TAG --confirm [--json]
                fetch TAG, verify its signature against release-signers (no key
                configured = every tag refused), back up, switch, then up + health
+  authority init --export-dir DIR
+               as root, once: create the account-key authority's keys, first
+               delegation and database, export the encrypted recovery keys to
+               DIR, then start it (dormant until the client integration ships)
   --help       show this help
 
 Run from the repo root. The .env in the repo root is auto-loaded by compose.
@@ -398,6 +402,11 @@ main() {
           shift; verb_update "$@"
           ;;
       esac
+      ;;
+    authority)
+      # shellcheck source=selfhost-authority.sh
+      source "$SCRIPT_DIR/selfhost-authority.sh" || return 1
+      shift; verb_authority "$@"
       ;;
     --help|-h|"") usage ;;
     *)
