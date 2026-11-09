@@ -143,7 +143,8 @@ $ok && pass "the exports decrypt to the anchors' recovery keys" || fail "an expo
 openssl pkey -in "$EXPORT/recovery-a.p8" -passin pass:wrong-passphrase -noout 2>/dev/null \
   && fail "an export opens with the wrong passphrase" || pass "an export refuses the wrong passphrase"
 
-if python3 - "$AUTH/ceremony/delegation-1.json" "$(hex384 rsk)" "$(hex384 cp-tls-key.pin)" <<'PY'
+# Not `if python3 - <<PY`: Semgrep's bash parser refuses a heredoc in an if condition.
+python3 - "$AUTH/ceremony/delegation-1.json" "$(hex384 rsk)" "$(hex384 cp-tls-key.pin)" <<'PY'
 import json, sys
 d = json.load(open(sys.argv[1]))
 assert d["scope"] == sorted(d["scope"]) and len(d["scope"]) == 15
@@ -153,7 +154,8 @@ assert d["cp_tls_pins"] == [sys.argv[3]]
 assert (d["serial"], d["min_valid_serial"], d["product_root_gen"]) == (1, 1, 0)
 assert (d["tau_ms"], d["delta_ms"], d["g_ms"]) == (600000, 259200000, 900000)
 PY
-then pass "the first delegation carries the keys, the full scope and 180 days"
+spec_rc=$?
+if [[ $spec_rc -eq 0 ]]; then pass "the first delegation carries the keys, the full scope and 180 days"
 else fail "the first delegation spec is wrong"
 fi
 
