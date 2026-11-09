@@ -3,8 +3,10 @@
 // primaries (LD-3, the 2-of-2 ceremony), a succession with the two recovery
 // keys (T2), and an operator intent with an operator YubiKey (LD-4). The
 // managed realm signs with YubiKeys on an operator workstation; a self-host
-// install signs with software keys in files (--key-file, D-218). It is never
-// built into a server image (D-43).
+// install signs with software keys in files (--key-file, D-218). It also
+// writes a realm's anchors file (make-anchors) and prints a trust file's
+// current delegation for scripts (show-trust). It is never built into a
+// server image (D-43).
 package main
 
 import (
@@ -20,6 +22,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"syscall"
 	"time"
@@ -32,7 +35,9 @@ const usage = "usage: authority-ceremony sign-delegation --anchors <file> (--tru
 	"       authority-ceremony sign-succession --anchors <file> --trust <file> --spec <file> " +
 	"(--out <file> | --dry-run) [--slot <slot>] [--piv-tool <path> | --key-file <file>... [--yes]]\n" +
 	"       authority-ceremony add-trust --anchors <file> (--trust <file> | --first) --signed <file> --out <file>\n" +
-	"       authority-ceremony operator-sign --intent <file> --key <hex point> [--slot <slot>] [--piv-tool <path>]"
+	"       authority-ceremony operator-sign --intent <file> --key <hex point> [--slot <slot>] [--piv-tool <path>]\n" +
+	"       authority-ceremony make-anchors --spec <file> --out <file>\n" +
+	"       authority-ceremony show-trust --anchors <file> --trust <file>"
 
 // errUsage is exit 2; every other error is exit 1.
 var errUsage = errors.New("usage")
@@ -69,6 +74,10 @@ func run(args []string, e env) int {
 		err = addTrust(rest, e)
 	case "operator-sign":
 		err = operatorSign(rest, e)
+	case "make-anchors":
+		err = makeAnchors(rest, e)
+	case "show-trust":
+		err = showTrust(rest, e)
 	default:
 		err = errUsage
 	}
@@ -140,7 +149,7 @@ func signDelegation(args []string, e env) error {
 	if now := uint64(e.now().UnixMilli()); d.NotBeforeMs > now || d.NotAfterMs <= now {
 		return fmt.Errorf("the window [%d, %d) does not cover now (%d)", d.NotBeforeMs, d.NotAfterMs, now)
 	}
-	if err := showTrust(e.out, tr, *first); err != nil {
+	if err := printHighWater(e.out, tr, *first); err != nil {
 		return err
 	}
 	primaryA, primaryB := tr.CurrentPrimaries()
@@ -208,7 +217,7 @@ func signSuccession(args []string, e env) error {
 	if err := tr.PrecheckSuccession(msg); err != nil {
 		return err
 	}
-	if err := showTrust(e.out, tr, false); err != nil {
+	if err := printHighWater(e.out, tr, false); err != nil {
 		return err
 	}
 	show := func() error { return showSuccession(e.out, msg, m) }
@@ -303,16 +312,16 @@ func (c ceremony) run() error {
 // the write.
 func refuseExisting(path string) error {
 	if _, err := os.Lstat(path); err == nil {
-		return fmt.Errorf("%s already exists; nothing was signed", path)
+		return fmt.Errorf("%s already exists; nothing was written", path)
 	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil
 }
 
-// showTrust prints what the precheck checked the spec against, so a stale
+// printHighWater prints what the precheck checked the spec against, so a stale
 // trust file is visible before any touch.
-func showTrust(w io.Writer, tr *ac.Trust, first bool) error {
+func printHighWater(w io.Writer, tr *ac.Trust, first bool) error {
 	if first {
 		_, err := fmt.Fprintln(w, "trust: none (--first)")
 		return err
@@ -395,15 +404,22 @@ var specFields = []string{"realm_id", "serial", "min_valid_serial", "product_roo
 	"scope", "accepted_versions", "tau_ms", "delta_ms", "g_ms", "cutover_at_ms"}
 
 // readStrict decodes the JSON file at path into v: every field in fields
-// must be present and not null, and an unknown field is refused.
+// must be present once, spelled exactly, and not null, and any other key is
+// refused. encoding/json alone would match a key in any case and let a later
+// duplicate win, so a spec could sign a value its reader never saw.
 func readStrict(path string, fields []string, v any) error {
 	b, err := os.ReadFile(path) //nolint:gosec // G304: operator-supplied path
 	if err != nil {
 		return err
 	}
-	var present map[string]json.RawMessage
-	if err := json.Unmarshal(b, &present); err != nil {
+	present, err := topLevelKeys(b)
+	if err != nil {
 		return fmt.Errorf("spec: %w", err)
+	}
+	for k := range present {
+		if !slices.Contains(fields, k) {
+			return fmt.Errorf("spec: json: unknown field %q", k)
+		}
 	}
 	for _, f := range fields {
 		raw, ok := present[f]
@@ -420,6 +436,38 @@ func readStrict(path string, fields []string, v any) error {
 		return fmt.Errorf("spec: %w", err)
 	}
 	return nil
+}
+
+// topLevelKeys returns the object's keys and raw values, refusing a key
+// given twice.
+func topLevelKeys(b []byte) (map[string]json.RawMessage, error) {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return nil, errors.New("not a JSON object")
+	}
+	out := map[string]json.RawMessage{}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return nil, err
+		}
+		k, _ := t.(string) // an object key is always a string
+		var raw json.RawMessage
+		if err := dec.Decode(&raw); err != nil {
+			return nil, err
+		}
+		if _, dup := out[k]; dup {
+			return nil, fmt.Errorf("%s is given twice", k)
+		}
+		out[k] = raw
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+	if dec.More() {
+		return nil, errors.New("trailing data after the object")
+	}
+	return out, nil
 }
 
 // readSpec returns the canonical delegation bytes the spec encodes.
@@ -713,6 +761,86 @@ func addTrust(args []string, e env) error {
 		return p.err
 	}
 	return errors.New("the signed item has no place in the trust order (a duplicate?); nothing was written")
+}
+
+// anchorsSpec is the realm id and the four product-root points, in hex.
+type anchorsSpec struct {
+	RealmID   string `json:"realm_id"`
+	PrimaryA  string `json:"primary_a"`
+	PrimaryB  string `json:"primary_b"`
+	RecoveryA string `json:"recovery_a"`
+	RecoveryB string `json:"recovery_b"`
+}
+
+var anchorsFields = []string{"realm_id", "primary_a", "primary_b", "recovery_a", "recovery_b"}
+
+// makeAnchors writes the realm's anchors file (T1): four pairwise-distinct
+// P-384 points. It prints the file's SHA-384, which the operator records
+// out of band: the anchors are trusted by provenance, not by a signature.
+func makeAnchors(args []string, e env) error {
+	fs := newFlags("make-anchors", e)
+	specPath := fs.String("spec", "", "")
+	out := fs.String("out", "", "")
+	if err := parse(fs, args); err != nil || *specPath == "" || *out == "" {
+		return errUsage
+	}
+	if err := refuseExisting(*out); err != nil {
+		return err
+	}
+	var s anchorsSpec
+	if err := readStrict(*specPath, anchorsFields, &s); err != nil {
+		return err
+	}
+	a := ac.Anchors{RealmID: s.RealmID}
+	for _, f := range []struct {
+		name, in string
+		out      *[]byte
+	}{
+		{"primary_a", s.PrimaryA, &a.PrimaryA}, {"primary_b", s.PrimaryB, &a.PrimaryB},
+		{"recovery_a", s.RecoveryA, &a.RecoveryA}, {"recovery_b", s.RecoveryB, &a.RecoveryB},
+	} {
+		var err error
+		if *f.out, err = hex.DecodeString(f.in); err != nil {
+			return fmt.Errorf("spec: %s: %w", f.name, err)
+		}
+	}
+	if _, err := ac.NewTrust(a); err != nil {
+		return fmt.Errorf("spec: %w (the realm id must be a lower-case canonical UUID and the four points distinct P-384 points)", err)
+	}
+	b := a.Encode()
+	if err := writeNew(*out, b); err != nil {
+		return err
+	}
+	p := &printer{w: e.out}
+	p.f("wrote %s\nrealm_id=%s\nprimary_a=%s\nprimary_b=%s\nrecovery_a=%s\nrecovery_b=%s\nsha384=%s\n", *out,
+		a.RealmID, s.PrimaryA, s.PrimaryB, s.RecoveryA, s.RecoveryB, hex.EncodeToString(ac.Digest(b)))
+	return p.err
+}
+
+// showTrust prints a trust file's state as key=value lines for scripts:
+// the high-water mark and the current delegation's window. It does not read
+// the clock: a caller compares not_before_ms and not_after_ms with the time
+// itself. A trust that does not load, or is halted, is refused with the halt.
+func showTrust(args []string, e env) error {
+	fs := newFlags("show-trust", e)
+	anchors := fs.String("anchors", "", "")
+	trustPath := fs.String("trust", "", "")
+	if err := parse(fs, args); err != nil || *anchors == "" || *trustPath == "" {
+		return errUsage
+	}
+	tr, err := loadTrust(*anchors, *trustPath)
+	if err != nil {
+		return err
+	}
+	d, ok := tr.Current()
+	if !ok {
+		return fmt.Errorf("trust: %w", tr.Halted())
+	}
+	hw := tr.HighWater()
+	p := &printer{w: e.out}
+	p.f("realm_id=%s\ngeneration=%d\nserial=%d\nmin_valid_serial=%d\nnot_before_ms=%d\nnot_after_ms=%d\n",
+		d.RealmID, hw.Gen, hw.Serial, hw.MinValid, d.NotBeforeMs, d.NotAfterMs)
+	return p.err
 }
 
 // loadTrustBytes checks that a trust envelope loads under the anchors with no halt.
