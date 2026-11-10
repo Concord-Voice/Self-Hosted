@@ -15,6 +15,7 @@ stub="$TMP/stub"
 mkdir -p "$fixture/infrastructure/deploy" "$fixture/security-logs" "$stub"
 cp "$ROOT/infrastructure/deploy/concord-selfhost" "$fixture/infrastructure/deploy/concord-selfhost"
 cp "$ROOT/infrastructure/deploy/selfhost-storage.sh" "$fixture/infrastructure/deploy/selfhost-storage.sh"
+cp "$ROOT/infrastructure/deploy/selfhost-authority.sh" "$fixture/infrastructure/deploy/selfhost-authority.sh"
 for file in docker-compose.yml docker-compose.production.yml docker-compose.selfhost.yml; do
   cp "$ROOT/$file" "$fixture/$file"
 done

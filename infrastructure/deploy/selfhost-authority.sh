@@ -10,9 +10,10 @@
 #   secrets/     the overlay's compose secrets, 0400, owned by their reader:
 #                uid 70 for the three postgres passwords, uid 65532 for the
 #                passfiles, the RSK and the TLS key
-#   public/      anchors and trust, 0644, mounted read-only by the authority
+#   public/      anchors, trust and delegation-not-after-ms (read by
+#                `concord-selfhost health`), 0644, mounted read-only by the authority
 #   root-keys/   product-root primaries A and B (PKCS#8 PEM, root 0600), kept
-#                for renewing the delegation
+#                for `authority renew`
 #   cp/          the CAK and the CP TLS key, owned by the CP image's uid 10006
 #   ceremony/    the specs and the signed first delegation, for the record
 #   tools/       the ceremony tool, built here and never put in an image (D-43)
@@ -35,18 +36,41 @@ readonly AUTHORITY_TAU_MS=600000 AUTHORITY_DELTA_MS=259200000 AUTHORITY_G_MS=900
 readonly AUTHORITY_LIFETIME_MS=15552000000
 readonly AUTHORITY_MIN_PASSPHRASE=12
 
-_authority_fail() { printf 'selfhost-authority: %s\n' "$1" >&2; return 1; }
+# _authority_warn prints and succeeds, for a message with more steps after it:
+# concord-selfhost runs under set -e, so a failing step would stop them.
+_authority_warn() { printf 'selfhost-authority: %s\n' "$1" >&2; }
+_authority_fail() { _authority_warn "$1"; return 1; }
 
 verb_authority() {
   case "${1:-}" in
     init) shift; _authority_init "$@" ;;
-    *) _authority_fail 'usage: concord-selfhost authority init --export-dir DIR' ;;
+    renew) shift; _authority_renew "$@" ;;
+    *) _authority_fail 'usage: concord-selfhost authority init --export-dir DIR | renew' ;;
   esac
 }
 
-# Seams the tests replace: the root check and ownership changes.
-_authority_require_root() { [[ "$(id -u)" == 0 ]] || _authority_fail 'authority init must run as root'; }
+# Seams the tests replace: the root check, ownership changes, and the check
+# that a recreated authority stays up.
+_authority_require_root() { [[ "$(id -u)" == 0 ]] || _authority_fail 'authority init and renew must run as root'; }
 _authority_chown() { chown "$@"; }
+# _authority_regular FILE... — each FILE, just moved out of the stage that the
+# keygen container's uid owns, is a plain file: chown and chmod would follow
+# a symlink planted there.
+_authority_regular() {
+  local f
+  for f in "$@"; do
+    [[ -f "$f" && ! -L "$f" ]] || { _authority_fail "$f is not a regular file"; return 1; }
+  done
+}
+# serve exits 1 on a trust or key it cannot use, and restart: unless-stopped
+# then loops it, so "up" alone proves nothing: it must still be running, never
+# restarted, 10 s later.
+_authority_running() {
+  local id state
+  sleep 10
+  id="$(_authority_compose ps -q authority)" && [[ -n "$id" ]] || return 1
+  state="$(docker inspect -f '{{.State.Running}} {{.RestartCount}}' "$id")" && [[ "$state" == 'true 0' ]]
+}
 
 # _authority_env KEY DEFAULT — KEY's value in the root .env, which the overlay
 # reads too, so both agree. Only plain path or CIDR characters are accepted.
@@ -193,6 +217,24 @@ _authority_secret() {
   printf '%s' "$3" >"$1" && chmod 0400 "$1" && _authority_chown "$2:$2" "$1"
 }
 
+# _authority_trust_value TOOL DIR TRUST KEY — KEY from show-trust (digits only).
+_authority_trust_value() {
+  local v
+  v="$("$1" show-trust --anchors "$2/public/anchors" --trust "$3" | sed -n "s/^$4=//p")"
+  [[ "$v" =~ ^[0-9]+$ ]] || return 1
+  printf '%s\n' "$v"
+}
+
+# _authority_record_not_after TOOL DIR — the trust's current not_after_ms in
+# public/delegation-not-after-ms, which health reads without the root-only tool.
+_authority_record_not_after() {
+  local v
+  v="$(_authority_trust_value "$1" "$2" "$2/public/trust" not_after_ms)" || { _authority_fail 'show-trust gave no not_after_ms'; return 1; }
+  printf '%s\n' "$v" >"$2/public/delegation-not-after-ms.next" \
+    && chmod 0644 "$2/public/delegation-not-after-ms.next" \
+    && mv -f -- "$2/public/delegation-not-after-ms.next" "$2/public/delegation-not-after-ms"
+}
+
 _authority_init() {
   local export_dir=''
   while (( $# )); do
@@ -246,7 +288,7 @@ _authority_init() {
   # final mode afterwards, never readable by others in between.
   ( umask 077 && _authority_init_keys "$dir" "$export_dir" "$pass" ) \
     || {
-      _authority_fail "init stopped. Before running it again, remove $dir, any recovery-*.p8 in $export_dir (they belong to this failed realm), and what init started:"
+      _authority_warn "init stopped. Before running it again, remove $dir, any recovery-*.p8 in $export_dir (they belong to this failed realm), and what init started:"
       printf '  docker compose --project-directory %q --project-name %q --env-file %q -f %q --profile authority-owner down -v\n' \
         "$PROJECT_ROOT" "$SELFHOST_STORAGE_PROJECT_NAME" "$PROJECT_ROOT/.env" "$PROJECT_ROOT/docker-compose.authority.yml" >&2
       return 1
@@ -278,6 +320,7 @@ _authority_init_keys() {
   _authority_keygen "$stage" cp-tls-key cptls || return 1
   mv -- "$stage/rsk" "$stage/tls-key" "$dir/secrets/" || return 1
   mv -- "$stage/cak" "$stage/cp-tls-key" "$dir/cp/" || return 1
+  _authority_regular "$dir/secrets/rsk" "$dir/secrets/tls-key" "$dir/cp/cak" "$dir/cp/cp-tls-key" || return 1
   _authority_chown "$AUTHORITY_CP_UID:$AUTHORITY_CP_UID" "$dir/cp/cak" "$dir/cp/cp-tls-key" || return 1
   chmod 0400 "$dir/secrets/rsk" "$dir/secrets/tls-key" "$dir/cp/cak" "$dir/cp/cp-tls-key" || return 1
   rmdir -- "$stage" || return 1
@@ -316,6 +359,7 @@ _authority_init_keys() {
     --out "$dir/public/trust" >/dev/null || { _authority_fail 'add-trust failed'; return 1; }
   # Written 0600 under the umask; the authority reads these as uid 65532.
   chmod 0644 "$dir/public/anchors" "$dir/public/trust" || return 1
+  _authority_record_not_after "$tool" "$dir" || return 1
 
   echo "Starting the authority database and running its owner steps..."
   _authority_compose up -d --wait authority-postgres || { _authority_fail 'the authority database did not start'; return 1; }
@@ -334,6 +378,178 @@ The account-key authority is set up (realm $realm).
   Move $export_dir/recovery-a.p8 and recovery-b.p8 to separate offline media
   now, and keep the passphrase apart from both. Only they can replace the
   primary keys, which stay in $dir/root-keys for renewal.
-  The first delegation expires in 180 days. Renewal comes in a later release.
+  The first delegation expires in 180 days. Renew it before then with
+  concord-selfhost authority renew; health warns from 21 days before.
 EOF
+}
+
+# ── health ─────────────────────────────────────────────────────────────
+readonly AUTHORITY_WARN_MS=$((21 * 86400000))
+
+# _authority_health — for `concord-selfhost health`. 3 when init has not run
+# (nothing to check); 0 with more than 21 days left; 2 within 21 days (a
+# warning: the authority still signs); 1 when the delegation has expired or
+# its record cannot be read.
+_authority_health() {
+  local dir na now left
+  dir="$(_authority_env AUTHORITY_DIR /etc/concord-authority)" || return 1
+  [[ -f "$dir/public/trust" ]] || return 3
+  # An authority set up before the record existed gets it here, from the
+  # root-only tool, when health runs as root and the tool is safe to run.
+  ! _authority_backfill_ok "$dir" \
+    || _authority_record_not_after "$dir/tools/authority-ceremony" "$dir" >/dev/null 2>&1 || :
+  na="$(cat -- "$dir/public/delegation-not-after-ms" 2>/dev/null)"
+  now="$(date +%s%3N)"
+  if [[ ! "$na" =~ ^[0-9]+$ || ! "$now" =~ ^[0-9]{13}$ ]]; then
+    echo '✗ cannot read when the authority delegation expires' >&2
+    return 1
+  fi
+  left=$(( na - now ))
+  if [[ "$left" -le 0 ]]; then
+    echo '✗ the authority delegation has expired: run concord-selfhost authority renew' >&2
+    return 1
+  fi
+  local days=$(( left / 86400000 ))
+  if [[ "$left" -le "$AUTHORITY_WARN_MS" ]]; then
+    printf '! the authority delegation expires in %d days: run concord-selfhost authority renew\n' "$days" >&2
+    return 2
+  fi
+  printf 'authority delegation valid for %d more days\n' "$days"
+}
+
+# _authority_backfill_ok DIR — health may run DIR's ceremony tool: the
+# record is missing, and only root or the user running health can change the
+# tool or any directory above it, as init and renew require. Otherwise a
+# planted tool would run as root from up, update and restore.
+_authority_backfill_ok() {
+  local tool="$1/tools/authority-ceremony" uid mode
+  [[ ! -s "$1/public/delegation-not-after-ms" && -f "$tool" && -x "$tool" && ! -L "$tool" ]] || return 1
+  _authority_safe_dir "$1/tools" 2>/dev/null || return 1
+  read -r uid mode < <(stat -c '%u %A' -- "$tool") || return 1
+  [[ ( "$uid" == 0 || "$uid" == "$(id -u)" ) && "${mode:5:1}${mode:8:1}" == -- ]]
+}
+
+# ── renew ──────────────────────────────────────────────────────────────
+# `authority renew` signs delegation serial + 1 with A and B (§2.16): a new
+# RSK and a new CAK, min_valid_serial = the new serial, a new 180-d window,
+# and everything else as the current delegation has it. The TLS keys stay:
+# they are not a validity control (D-204). Then it installs the new trust
+# and keys and recreates the authority, which installs the new delegation.
+# A failure before the swap leaves the old files as they were. After it,
+# renew only goes forward: the authority installs the delegation in its
+# database once it starts, and from then on the old RSK is not in the
+# high-water delegation, so the old files cannot run it. The CP's switch to the
+# new CAK after the authority shows it (§2.16 step 5) arrives with the
+# client integration; until then nothing holds the old CAK.
+_authority_renew() {
+  (( $# == 0 )) || { _authority_fail 'usage: concord-selfhost authority renew'; return 1; }
+  _authority_require_root || return 1
+  local c dir
+  for c in docker python3; do
+    command -v "$c" >/dev/null || { _authority_fail "$c is required"; return 1; }
+  done
+  [[ -f "$PROJECT_ROOT/.env" ]] || { _authority_fail 'no .env: install the stack first'; return 1; }
+  dir="$(_authority_env AUTHORITY_DIR /etc/concord-authority)" || return 1
+  [[ "$dir" == /* ]] || { _authority_fail 'AUTHORITY_DIR must be an absolute path'; return 1; }
+  [[ -f "$dir/public/trust" ]] || { _authority_fail "no authority in $dir: run concord-selfhost authority init first"; return 1; }
+  _authority_safe_dir "$dir" || return 1
+  [[ ! -e "$dir/stage" ]] || { _authority_fail "$dir/stage exists: a renew is running, or one stopped; remove it and try again"; return 1; }
+  selfhost_storage_project_identity "$PROJECT_ROOT" || return 1
+  ( umask 077 && _authority_renew_keys "$dir" )
+}
+
+_authority_renew_keys() {
+  local dir="$1" stage="$1/stage" tool="$1/tools/authority-ceremony"
+  local serial next now spec signed
+  # shellcheck disable=SC2034 # keygen sets a point and a pin; not every one is used
+  local rsk_point rsk_pin cak_point cak_pin
+  [[ -x "$tool" ]] || { _authority_fail "no ceremony tool in $dir/tools"; return 1; }
+  serial="$(_authority_trust_value "$tool" "$dir" "$dir/public/trust" serial)" || { _authority_fail 'show-trust failed on the current trust'; return 1; }
+  next=$((serial + 1)) spec="$dir/ceremony/delegation-$next.json" signed="$dir/ceremony/delegation-$next.signed"
+  [[ -f "$dir/ceremony/delegation-$serial.json" ]] || { _authority_fail "no record of delegation $serial in $dir/ceremony"; return 1; }
+  [[ ! -e "$spec" && ! -e "$signed" ]] || { _authority_fail "$spec or its signed copy already exists"; return 1; }
+
+  echo "Generating the new RSK and CAK..."
+  mkdir -m 0700 "$stage" || { _authority_fail "cannot create $stage"; return 1; }
+  _authority_chown "$AUTHORITY_APP_UID:$AUTHORITY_APP_UID" "$stage" || { _authority_renew_unstage "$dir" "$next"; return 1; }
+  _authority_keygen "$stage" rsk rsk || { _authority_renew_unstage "$dir" "$next"; return 1; }
+  _authority_keygen "$stage" cak cak || { _authority_renew_unstage "$dir" "$next"; return 1; }
+  now="$(date +%s%3N)" && [[ "$now" =~ ^[0-9]{13}$ ]] \
+    || { _authority_warn 'cannot read the time in milliseconds'; _authority_renew_unstage "$dir" "$next"; return 1; }
+  # The current delegation's spec, with the fields a renewal changes.
+  python3 -c '
+import json, sys
+src, dst, serial, rsk, cak, nb, life = sys.argv[1:]
+d = json.load(open(src))
+d.update(serial=int(serial), min_valid_serial=int(serial), rsk_public_keys=[rsk], cak_public_keys=[cak],
+         not_before_ms=int(nb), not_after_ms=int(nb) + int(life))
+with open(dst, "x") as f:
+    json.dump(d, f, separators=(",", ":"))
+    f.write("\n")
+' "$dir/ceremony/delegation-$serial.json" "$spec" "$next" "$rsk_point" "$cak_point" "$((now - 60000))" "$AUTHORITY_LIFETIME_MS" \
+    || { _authority_warn 'cannot write the next delegation spec'; _authority_renew_unstage "$dir" "$next"; return 1; }
+
+  echo "Signing delegation $next..."
+  "$tool" sign-delegation --anchors "$dir/public/anchors" --trust "$dir/public/trust" --spec "$spec" \
+    --out "$signed" --key-file "$dir/root-keys/primary-a.pem" --key-file "$dir/root-keys/primary-b.pem" --yes </dev/null >/dev/null \
+    || { _authority_warn 'sign-delegation failed'; _authority_renew_unstage "$dir" "$next"; return 1; }
+  "$tool" add-trust --anchors "$dir/public/anchors" --trust "$dir/public/trust" --signed "$signed" \
+    --out "$dir/public/trust.next" >/dev/null \
+    || { _authority_warn 'add-trust failed'; _authority_renew_unstage "$dir" "$next"; return 1; }
+  [[ "$(_authority_trust_value "$tool" "$dir" "$dir/public/trust.next" serial)" == "$next" ]] \
+    || { _authority_warn "the new trust does not hold delegation $next"; _authority_renew_unstage "$dir" "$next"; return 1; }
+
+  echo "Installing delegation $next and restarting the authority..."
+  _authority_renew_place "$dir" || { _authority_warn 'cannot stage the new keys'; _authority_renew_unstage "$dir" "$next"; return 1; }
+  if ! _authority_renew_swap "$dir" next prev; then
+    if _authority_renew_swap "$dir" prev next; then
+      _authority_renew_unstage "$dir" "$next"
+    else
+      _authority_warn "cannot put the old files back. Each of $dir/public/trust, $dir/secrets/rsk and $dir/cp/cak with a .prev beside it: move FILE.prev to FILE. Then remove $dir/stage and the .next files."
+    fi
+    return 1
+  fi
+  # From here on delegation $next is the authority's: no way back (see above).
+  rm -f -- "$dir/public/trust.prev" "$dir/secrets/rsk.prev" "$dir/cp/cak.prev"
+  _authority_record_not_after "$tool" "$dir" \
+    || _authority_warn "health's expiry record was not updated; run: $tool show-trust --anchors $dir/public/anchors --trust $dir/public/trust | sed -n 's/^not_after_ms=//p' >$dir/public/delegation-not-after-ms"
+  if _authority_compose up -d --no-deps --force-recreate authority && _authority_running; then
+    printf 'Delegation %s is installed; it expires in 180 days.\n' "$next"
+    return 0
+  fi
+  # A retry would sign another delegation for nothing: fix the cause instead.
+  _authority_fail "delegation $next and its keys are in place, but the authority did not stay up on them. Fix the cause from its logs, then recreate it. Do not put the old files back: the authority may already hold delegation $next."
+}
+
+# _authority_renew_place DIR — the new RSK and CAK from the stage to
+# FILE.next beside the live ones, with their final owners and modes.
+_authority_renew_place() {
+  chmod 0644 "$1/public/trust.next" || return 1
+  mv -- "$1/stage/rsk" "$1/secrets/rsk.next" || return 1
+  _authority_regular "$1/secrets/rsk.next" || return 1
+  chmod 0400 "$1/secrets/rsk.next" || return 1
+  mv -- "$1/stage/cak" "$1/cp/cak.next" || return 1
+  _authority_regular "$1/cp/cak.next" || return 1
+  _authority_chown "$AUTHORITY_CP_UID:$AUTHORITY_CP_UID" "$1/cp/cak.next" || return 1
+  chmod 0400 "$1/cp/cak.next" || return 1
+  rmdir -- "$1/stage"
+}
+
+# _authority_renew_unstage DIR SERIAL — before the install, a failure removes
+# what this run made, and the live files stay as they were.
+_authority_renew_unstage() {
+  rm -rf -- "$1/stage" "$1/ceremony/delegation-$2.json" "$1/ceremony/delegation-$2.signed" \
+    "$1/public/trust.next" "$1/secrets/rsk.next" "$1/cp/cak.next"
+}
+
+# _authority_renew_swap DIR FROM TO — each of trust, rsk and cak: the live
+# file, if there is one, becomes FILE.TO and FILE.FROM becomes the live file.
+# A swap back after a failure part way through therefore finds every file.
+_authority_renew_swap() {
+  local f
+  for f in "$1/public/trust" "$1/secrets/rsk" "$1/cp/cak"; do
+    [[ -e "$f.$2" ]] || continue
+    [[ ! -e "$f" ]] || mv -f -- "$f" "$f.$3" || { _authority_fail "cannot swap $f"; return 1; }
+    mv -f -- "$f.$2" "$f" || { _authority_fail "cannot swap $f"; return 1; }
+  done
 }

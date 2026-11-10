@@ -20,19 +20,28 @@ fail() { echo "FAIL: $1"; fails=$((fails + 1)); }
 PASS='correct horse battery'
 hex384() { printf '%s' "$1" | openssl dgst -sha384 -r | cut -c1-96; }
 
-# The fake ceremony tool: copies its input to --out and records its argv.
+# The fake ceremony tool: copies its input to --out and records its argv, so
+# a trust file is the last delegation spec. show-trust prints that spec's
+# fields as the real one does.
 cat >"$WORK/fake-tool" <<'TOOL'
 #!/usr/bin/env bash
 printf 'tool %s\n' "$*" >>"$CALLS"
-verb="$1"; shift; in='' out=''
+verb="$1"; shift; in='' out='' trust=''
 while (( $# )); do
   case "$1" in
     --spec|--signed) in="$2"; shift 2 ;;
     --out) out="$2"; shift 2 ;;
+    --trust) trust="$2"; shift 2 ;;
     *) shift ;;
   esac
 done
 [[ "$verb" == "${TOOL_FAIL:-}" ]] && exit 1
+if [[ "$verb" == show-trust ]]; then
+  exec python3 -c 'import json, sys
+d = json.load(open(sys.argv[1]))
+for k in ("realm_id", "serial", "min_valid_serial", "not_before_ms", "not_after_ms"):
+    print("%s=%s" % (k, d[k]))' "$trust"
+fi
 cp -- "$in" "$out" || exit 1
 [[ "$verb" == make-anchors ]] && printf 'wrote %s\nsha384=%s\n' "$out" "$(openssl dgst -sha384 -r "$out" | cut -c1-96)"
 exit 0
@@ -41,7 +50,9 @@ chmod +x "$WORK/fake-tool"
 
 # The fake docker is an executable on PATH, since init runs compose under
 # env -i. It reads its settings from $WORK/state, written by each test:
-# CALLS, PG_IMAGE (0 = the postgres image is missing) and SUBNETS.
+# CALLS, PG_IMAGE (0 = the postgres image is missing), SUBNETS, SALT,
+# which keygen mixes into its points so that a renewal's keys are new, and
+# LINK=NAME:TARGET, which makes keygen leave key NAME as a symlink to TARGET.
 mkdir "$WORK/bin"
 cat >"$WORK/bin/docker" <<DOCKER
 #!/usr/bin/env bash
@@ -64,8 +75,9 @@ done
 if [[ " $* " == *" go build "* ]]; then
   cp "$TOOL" "$vol/authority-ceremony"
 else
-  printf 'key %s' "$name" >"$vol/$name"
-  printf 'point=04%s%s\npin=%s\n' "$(hex384 "$name")" "$(hex384 "$name.y")" "$(hex384 "$name.pin")"
+  if [[ "${LINK%%:*}" == "$name" ]]; then ln -s "${LINK#*:}" "$vol/$name"
+  else printf 'key %s%s' "$name" "${SALT:-}" >"$vol/$name"; fi
+  printf 'point=04%s%s\npin=%s\n' "$(hex384 "$name${SALT:-}")" "$(hex384 "$name.y")" "$(hex384 "$name.pin")"
 fi
 DOCKER
 chmod +x "$WORK/bin/docker"
@@ -90,25 +102,34 @@ fixture() {
   local line
   for line in "$@"; do printf '%s\n' "$line" >>"$ROOT/.env"; done
   : >"$CALLS"
-  printf 'CALLS=%q TOOL=%q PG_IMAGE=1 SUBNETS=172.18.0.0/16\n' "$CALLS" "$WORK/fake-tool" >"$WORK/state"
+  printf 'CALLS=%q TOOL=%q PG_IMAGE=1 SUBNETS=172.18.0.0/16 LINK=\n' "$CALLS" "$WORK/fake-tool" >"$WORK/state"
 }
 docker_set() { printf '%s\n' "$1" >>"$WORK/state"; }
 
-# run_init STDIN ARGS... — init in a subshell with the stubs.
-# shellcheck disable=SC2034,SC2329  # PROJECT_ROOT and the stubs are read by the helper
+# run_init STDIN ARGS... — init (or VERB) in a new bash with the stubs. A new
+# process keeps set -e in force as concord-selfhost runs it: a subshell under
+# a caller's `if` would ignore it.
 run_init() {
   local input="$1"; shift
-  (
+  ROOT="$ROOT" DEPLOY="$DEPLOY" CALLS="$CALLS" TOOL_FAIL="${TOOL_FAIL:-}" SWAP_FAIL="${SWAP_FAIL:-}" \
+  bash -euo pipefail -c '
+    # shellcheck disable=SC2034 # read by the helper
     PROJECT_ROOT="$ROOT"
-    export CALLS TOOL_FAIL="${TOOL_FAIL:-}"
     # shellcheck source=../selfhost-authority.sh
     source "$DEPLOY/selfhost-authority.sh"
-    _authority_require_root() { [[ "${NOT_ROOT:-}" != 1 ]] || _authority_fail 'authority init must run as root'; }
-    _authority_chown() { printf 'chown %s\n' "$*" >>"$CALLS"; }
+    _authority_require_root() { [[ "${NOT_ROOT:-}" != 1 ]] || _authority_fail "authority init must run as root"; }
+    _authority_chown() { printf "chown %s\n" "$*" >>"$CALLS"; }
     selfhost_storage_project_identity() { SELFHOST_STORAGE_PROJECT_NAME=fixture; }
-    _authority_cp_accounts() { [[ "${CP_ACCOUNTS:-0}" != fail ]] && printf '%s\n' "${CP_ACCOUNTS:-0}"; }
-    verb_authority init "$@"
-  ) <<<"$input" >"$ROOT/out" 2>&1
+    _authority_cp_accounts() { [[ "${CP_ACCOUNTS:-0}" != fail ]] && printf "%s\n" "${CP_ACCOUNTS:-0}"; }
+    _authority_running() { printf "running?\n" >>"$CALLS"; [[ "${RUNNING:-1}" == 1 ]]; }
+    [[ "${RECORD_FAIL:-}" != 1 ]] || _authority_record_not_after() { return 1; }
+    # SWAP_FAIL=FILE: the first mv onto FILE fails.
+    [[ -z "$SWAP_FAIL" ]] || mv() {
+      if [[ "${*: -1}" == "$SWAP_FAIL" && ! -e "$ROOT/swap-failed" ]]; then : >"$ROOT/swap-failed"; return 1; fi
+      command mv "$@"
+    }
+    verb_authority "${VERB:-init}" "$@"
+  ' run_init "$@" <<<"$input" >"$ROOT/out" 2>&1
 }
 
 # ── The whole run ──────────────────────────────────────────────────────
@@ -183,6 +204,151 @@ up -d authority"
 grep -q -- "--project-name fixture" "$CALLS" && pass "compose uses the stack's project name" || fail "no project name"
 grep -q "sha384=[0-9a-f]\{96\}" "$ROOT/out" && pass "init prints the anchors digest" || fail "no anchors digest"
 ! grep -qF "$PASS" "$ROOT/out" "$CALLS" && pass "the passphrase is never printed or passed" || fail "the passphrase leaked"
+
+na="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['not_after_ms'])" "$AUTH/ceremony/delegation-1.json")"
+[[ "$(cat "$AUTH/public/delegation-not-after-ms")" == "$na" && "$(mode "$AUTH/public/delegation-not-after-ms")" == 644 ]] \
+  && pass "init records the delegation's expiry for health" || fail "no delegation-not-after-ms record"
+
+# ── renew, on the authority init just made ─────────────────────────────
+jget() { python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])" "$1" "$2"; }
+old_rsk="$(cat "$AUTH/secrets/rsk")"; old_tls="$(jget "$AUTH/ceremony/delegation-1.json" authority_tls_keys)"
+: >"$CALLS"; docker_set SALT=2
+if VERB=renew run_init ''; then pass "renew completes"; else fail "renew failed: $(cat "$ROOT/out")"; fi
+d2="$AUTH/ceremony/delegation-2.json"
+[[ "$(jget "$AUTH/public/trust" serial)" == 2 && "$(jget "$d2" min_valid_serial)" == 2 \
+   && "$(jget "$d2" rsk_public_keys)" != "$(jget "$AUTH/ceremony/delegation-1.json" rsk_public_keys)" \
+   && "$(jget "$d2" cak_public_keys)" != "$(jget "$AUTH/ceremony/delegation-1.json" cak_public_keys)" \
+   && "$(jget "$d2" authority_tls_keys)" == "$old_tls" \
+   && "$(jget "$d2" scope)" == "$(jget "$AUTH/ceremony/delegation-1.json" scope)" ]] \
+  && pass "renew installs serial 2 with min_valid 2, a new RSK and CAK, and the same TLS keys and scope" \
+  || fail "the renewed delegation is wrong: $(cat "$d2")"
+[[ "$(jget "$d2" not_after_ms)" -gt "$na" && "$(cat "$AUTH/public/delegation-not-after-ms")" == "$(jget "$d2" not_after_ms)" ]] \
+  && pass "renew moves the window and its health record forward" || fail "renew did not move the window"
+grep -qF -- '--trust '"$AUTH/public/trust"' --spec '"$d2" "$CALLS" && grep -qF -- "--key-file $AUTH/root-keys/primary-a.pem --key-file $AUTH/root-keys/primary-b.pem --yes" "$CALLS" \
+  && grep -qF 'up -d --no-deps --force-recreate authority' "$CALLS" \
+  && pass "renew signs against the current trust with A and B, then recreates the authority" || fail "renew calls: $(cat "$CALLS")"
+staged="$(find "$AUTH" -name '*.prev' -o -name '*.next' -o -name stage)"
+[[ "$(mode "$AUTH/secrets/rsk")" == 400 && "$(mode "$AUTH/cp/cak")" == 400 && "$(mode "$AUTH/public/trust")" == 644 \
+   && "$(cat "$AUTH/secrets/rsk")" != "$old_rsk" && -z "$staged" ]] && grep -qxF "chown 10006:10006 $AUTH/cp/cak.next" "$CALLS" \
+  && pass "renew installs the new keys 0400 with their owners and leaves no staged files" || fail "renew files: $staged"
+
+# The authority does not stay up: renew goes forward, since the authority may
+# already hold delegation 3, and says so.
+: >"$CALLS"; docker_set SALT=3
+rsk2="$(cat "$AUTH/secrets/rsk")"
+if RUNNING=0 VERB=renew run_init ''; then
+  fail "renew accepted an authority that did not stay up"
+elif grep -qF 'Do not put the old files back' "$ROOT/out" && [[ "$(jget "$AUTH/public/trust" serial)" == 3 ]] \
+     && [[ "$(cat "$AUTH/secrets/rsk")" != "$rsk2" && -e "$AUTH/ceremony/delegation-3.signed" ]] \
+     && [[ "$(cat "$AUTH/public/delegation-not-after-ms")" == "$(jget "$AUTH/ceremony/delegation-3.json" not_after_ms)" ]] \
+     && [[ -z "$(find "$AUTH" -name '*.prev' -o -name '*.next' -o -name stage)" ]] \
+     && [[ "$(grep -c 'force-recreate authority' "$CALLS")" == 1 ]]; then
+  pass "renew keeps delegation 3 and its keys when the authority does not stay up, and does not roll back"
+else
+  fail "renew after a failed start: $(cat "$ROOT/out")"
+fi
+trust2="$(cat "$AUTH/public/trust")"
+: >"$CALLS"
+if TOOL_FAIL=sign-delegation VERB=renew run_init ''; then
+  fail "renew accepted a failed signature"
+elif [[ "$(cat "$AUTH/public/trust")" == "$trust2" && ! -e "$AUTH/ceremony/delegation-4.json" && ! -e "$AUTH/stage" ]] \
+     && ! grep -q 'compose' "$CALLS"; then
+  pass "a failed renewal signature changes nothing and restarts nothing"
+else
+  fail "a failed renewal signature: $(cat "$ROOT/out")"
+fi
+# The swap fails part way, after the live RSK has moved aside: the old trust
+# and keys all come back, and nothing restarts.
+rsk3="$(cat "$AUTH/secrets/rsk")"; cak3="$(cat "$AUTH/cp/cak")"
+: >"$CALLS"; docker_set SALT=x
+if SWAP_FAIL="$AUTH/secrets/rsk" VERB=renew run_init ''; then
+  fail "renew accepted a failed swap"
+elif [[ -e "$ROOT/swap-failed" && "$(cat "$AUTH/public/trust")" == "$trust2" && "$(cat "$AUTH/secrets/rsk")" == "$rsk3" \
+       && "$(cat "$AUTH/cp/cak")" == "$cak3" && ! -e "$AUTH/ceremony/delegation-4.json" ]] \
+     && [[ -z "$(find "$AUTH" -name '*.prev' -o -name '*.next' -o -name stage)" ]] && ! grep -q 'force-recreate' "$CALLS"; then
+  pass "a swap that fails part way puts the old trust and keys back"
+else
+  fail "a failed swap: $(cat "$ROOT/out"); $(find "$AUTH/secrets" "$AUTH/public")"
+fi
+rm -f "$ROOT/swap-failed"
+# A key left in the stage as a symlink: renew does not chown or chmod its
+# target, and changes nothing.
+printf 'outside\n' >"$ROOT/outside"; chmod 0644 "$ROOT/outside"
+: >"$CALLS"; docker_set SALT=y; docker_set "LINK=cak:$ROOT/outside"
+if VERB=renew run_init ''; then
+  fail "renew installed a symlinked key"
+elif grep -qF 'is not a regular file' "$ROOT/out" && [[ "$(mode "$ROOT/outside")" == 644 && "$(cat "$AUTH/cp/cak")" == "$cak3" ]] \
+     && ! grep -qF "chown 10006:10006 $AUTH/cp/cak.next" "$CALLS" && [[ "$(cat "$AUTH/public/trust")" == "$trust2" ]]; then
+  pass "renew refuses a key left in the stage as a symlink"
+else
+  fail "symlinked key: $(cat "$ROOT/out")"
+fi
+docker_set LINK=
+: >"$CALLS"; docker_set SALT=4
+record_before="$(cat "$AUTH/public/delegation-not-after-ms")"
+if RECORD_FAIL=1 VERB=renew run_init ''; then
+  if [[ "$(jget "$AUTH/public/trust" serial)" == 4 ]] && grep -qF 'Delegation 4 is installed' "$ROOT/out" \
+     && grep -qF "expiry record was not updated; run: " "$ROOT/out" \
+     && [[ "$(cat "$AUTH/public/delegation-not-after-ms")" == "$record_before" ]] \
+     && [[ -z "$(find "$AUTH" -name '*.prev' -o -name '*.next' -o -name stage)" ]]; then
+    pass "renew reports success and the manual fix when only the expiry record fails"
+  else
+    fail "record failure: $(cat "$ROOT/out")"
+  fi
+else
+  fail "renew failed after installing because the expiry record failed: $(cat "$ROOT/out")"
+fi
+mkdir "$AUTH/stage"
+VERB=renew run_init '' && fail "renew ran over a stage left behind" \
+  || { grep -qF 'a renew is running' "$ROOT/out" && pass "renew refuses a stage left behind" || fail "stage refusal: $(cat "$ROOT/out")"; }
+rmdir "$AUTH/stage"
+NOT_ROOT=1 VERB=renew run_init '' && fail "renew ran as non-root" \
+  || { grep -qF 'must run as root' "$ROOT/out" && pass "renew refuses non-root" || fail "root refusal: $(cat "$ROOT/out")"; }
+VERB=renew run_init '' --now && fail "renew took an argument" \
+  || { grep -qF 'usage: concord-selfhost authority renew' "$ROOT/out" && pass "renew refuses arguments" || fail "usage: $(cat "$ROOT/out")"; }
+saved_root="$ROOT"
+saved_auth="$AUTH"
+fixture; VERB=renew run_init '' && fail "renew ran without an authority" \
+  || { grep -qF 'run concord-selfhost authority init first' "$ROOT/out" && pass "renew refuses an install with no authority" || fail "no-authority refusal: $(cat "$ROOT/out")"; }
+ROOT="$saved_root"
+AUTH="$saved_auth"
+
+# ── health: the 21-day warning ─────────────────────────────────────────
+# health_rc NOT_AFTER — _authority_health's code with that record (none = no file).
+# shellcheck disable=SC2034  # PROJECT_ROOT is read by the helper
+health_rc() {
+  rm -f "$AUTH/public/delegation-not-after-ms"
+  [[ "$1" == none ]] || printf '%s\n' "$1" >"$AUTH/public/delegation-not-after-ms"
+  ( PROJECT_ROOT="$ROOT"
+    # shellcheck source=../selfhost-authority.sh
+    source "$DEPLOY/selfhost-authority.sh"
+    _authority_health ) >"$ROOT/out" 2>&1
+  echo $?
+}
+now_ms=$(( $(date +%s) * 1000 ))
+in30=$(( now_ms + 30 * 86400000 )) in20=$(( now_ms + 20 * 86400000 )) past=$(( now_ms - 1000 ))
+[[ "$(health_rc "$in30")" == 0 ]] && pass "health passes with 30 days left" || fail "30 days: $(cat "$ROOT/out")"
+[[ "$(health_rc "$in20")" == 2 ]] && grep -qF 'expires in 19 days' "$ROOT/out" \
+  && pass "health warns with 20 days left" || fail "20 days: $(cat "$ROOT/out")"
+[[ "$(health_rc "$past")" == 1 ]] && grep -qF 'has expired' "$ROOT/out" && pass "health fails once expired" || fail "expired: $(cat "$ROOT/out")"
+# With the tool there, health rewrites a missing record (an authority set up
+# before it existed); without it, a missing or unreadable record fails.
+[[ "$(health_rc none)" == 0 && "$(cat "$AUTH/public/delegation-not-after-ms")" == "$(jget "$AUTH/ceremony/delegation-4.json" not_after_ms)" ]] \
+  && pass "health backfills a missing expiry record from the trust" || fail "backfill: $(cat "$ROOT/out")"
+chmod 0600 "$AUTH/tools/authority-ceremony"
+[[ "$(health_rc garbage)" == 1 && "$(health_rc none)" == 1 ]] && pass "health fails on a missing or unreadable record" || fail "bad record: $(cat "$ROOT/out")"
+chmod 0700 "$AUTH/tools/authority-ceremony"
+# health runs the tool only when nobody but root can change it or a
+# directory above it.
+chmod 0702 "$AUTH/tools/authority-ceremony"
+[[ "$(health_rc none)" == 1 ]] && pass "health does not run a tool that others can write" || fail "writable tool: $(cat "$ROOT/out")"
+chmod 0700 "$AUTH/tools/authority-ceremony"; chmod o+w "$AUTH"
+[[ "$(health_rc none)" == 1 ]] && pass "health does not run the tool from a directory that others can write" || fail "writable dir: $(cat "$ROOT/out")"
+chmod o-w "$AUTH"
+[[ "$(health_rc none)" == 0 ]] && pass "health backfills again once the directory is safe" || fail "safe again: $(cat "$ROOT/out")"
+saved_root="$ROOT"; fixture
+[[ "$(health_rc none 2>/dev/null)" == 3 ]] && pass "health has nothing to check before init" || fail "no authority: $(cat "$ROOT/out")"
+ROOT="$saved_root"
 
 # ── Refusals before anything is written ────────────────────────────────
 # refuse LABEL WANT INPUT ARGS... — init exits non-zero, says WANT, writes nothing in AUTHORITY_DIR.

@@ -32,11 +32,13 @@ mkdir -p "$SIMPLE_ROOT/infrastructure/deploy"
 TARGET="$SIMPLE_ROOT/infrastructure/deploy/concord-selfhost"
 cp "$SOURCE_TARGET" "$TARGET"
 STORAGE_HELPER="$ROOT/infrastructure/deploy/selfhost-storage.sh"
+AUTHORITY_HELPER="$ROOT/infrastructure/deploy/selfhost-authority.sh"
 if [[ ! -f "$STORAGE_HELPER" ]]; then
   printf '%s\n' 'FAIL: prerequisite missing: accepted selfhost-storage helper' >&2
   exit 1
 fi
 cp "$STORAGE_HELPER" "$SIMPLE_ROOT/infrastructure/deploy/selfhost-storage.sh"
+cp "$AUTHORITY_HELPER" "$SIMPLE_ROOT/infrastructure/deploy/selfhost-authority.sh"
 printf 'INSTANCE_TYPE=self-hosted\n' >"$SIMPLE_ROOT/.env"
 touch "$SIMPLE_ROOT/docker-compose.yml" "$SIMPLE_ROOT/docker-compose.production.yml" \
   "$SIMPLE_ROOT/docker-compose.selfhost.yml"
@@ -223,6 +225,7 @@ CLONE="$STUB/clone dir"
 mkdir -p "$CLONE/infrastructure/deploy"
 cp "$TARGET" "$CLONE/infrastructure/deploy/concord-selfhost"
 cp "$STORAGE_HELPER" "$CLONE/infrastructure/deploy/selfhost-storage.sh"
+cp "$AUTHORITY_HELPER" "$CLONE/infrastructure/deploy/selfhost-authority.sh"
 : >"$STUB/ctl.log"
 up_err=$( PATH="$STUB:$PATH" SELFHOST_CTL_LOG="$STUB/ctl.log" \
   CONCORD_CTL_OVERRIDE="$STUB/concord-ctl" \
@@ -315,6 +318,12 @@ hj_out="$( source "$TARGET"
 [[ "$hj_out" == '{"schema":1,"checks":[{"name":"storage_model","ok":true},{"name":"port_posture","ok":true}],"ok":true}' ]] \
   && pass "health --json keeps human lines off stdout" \
   || fail "health --json stdout: $hj_out"
+hj_out="$( source "$TARGET"
+  HEALTH_RESULTS=(authority_delegation:0) HEALTH_WARNINGS=(authority_delegation_expiring)
+  health_json )"
+[[ "$hj_out" == '{"schema":1,"checks":[{"name":"authority_delegation","ok":true}],"warnings":["authority_delegation_expiring"],"ok":true}' ]] \
+  && pass "health --json lists a warning without failing the object" \
+  || fail "health_json with a warning printed: $hj_out"
 
 # ── Test 5: 'logs' passes remaining args to compose logs -f ───────────
 : >"$STUB/docker.log"
@@ -467,6 +476,7 @@ BEHAVIOR_STUB="$STUB/behavior-stubs"
 mkdir -p "$BEHAVIOR_ROOT/infrastructure/deploy" "$BEHAVIOR_STUB"
 cp "$SOURCE_TARGET" "$BEHAVIOR_ROOT/infrastructure/deploy/concord-selfhost"
 cp "$STORAGE_HELPER" "$BEHAVIOR_ROOT/infrastructure/deploy/selfhost-storage.sh"
+cp "$AUTHORITY_HELPER" "$BEHAVIOR_ROOT/infrastructure/deploy/selfhost-authority.sh"
 SELFHOST_LOCK_PARENT="$STUB/selfhost-lock-parent"
 lock_declaration='DEPLOY_TRANSACTION_LOCK_PATH="/var/lib/concord/deploy-transaction.lock"'
 lock_parent_probe='if [[ ! -d /var/lib/concord ]]; then'
