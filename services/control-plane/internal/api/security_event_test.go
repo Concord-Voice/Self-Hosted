@@ -306,7 +306,7 @@ func TestTask4AssemblySecurityEventInjection(t *testing.T) {
 		// fail, which is what this case needs to observe. (A database that is down at
 		// the admin lookup is a 500 that writes no audit row, so it cannot reach the
 		// audit write.)
-		redisServer.Set("admin_lockout:acct_lock:nightwatch", "1")
+		require.NoError(t, redisServer.Set("admin_lockout:acct_lock:nightwatch", "1"))
 		handler := wireAdminRoutesWithSecurityEvents(gin.New(), db, rdb, nil, cfg, log, recorder)
 		require.NotNil(t, handler)
 		response := httptest.NewRecorder()
