@@ -17,8 +17,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq" // postgres driver
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -290,10 +292,9 @@ func testDBPassword() string {
 // under the given Redis prefix+handle so the consume*Challenge JSON-decode path fires.
 func corruptChallengeEngine(t *testing.T, prefix string) (*gin.Engine, string) {
 	t.Helper()
-	db, dbCleanup := testhelpers.SetupTestDB(t)
-	t.Cleanup(dbCleanup)
-	rdb, rCleanup := testhelpers.SetupTestRedis(t)
-	t.Cleanup(rCleanup)
+	server := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { require.NoError(t, rdb.Close()) })
 
 	handle := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 	require.NoError(t,
@@ -301,7 +302,7 @@ func corruptChallengeEngine(t *testing.T, prefix string) (*gin.Engine, string) {
 	)
 
 	gin.SetMode(gin.TestMode)
-	h, err := admin.NewHandler(db, rdb, logger.NewWithWriter(&bytes.Buffer{}), authHandlerCfg())
+	h, err := admin.NewHandler(nil, rdb, logger.NewWithWriter(&bytes.Buffer{}), authHandlerCfg())
 	require.NoError(t, err)
 
 	r := gin.New()
@@ -311,18 +312,18 @@ func corruptChallengeEngine(t *testing.T, prefix string) (*gin.Engine, string) {
 	return r, handle
 }
 
-func TestWebAuthnLogin_CorruptChallengeJSON_Returns401(t *testing.T) {
+func TestWebAuthnLogin_CorruptChallengeJSON_Returns500(t *testing.T) {
 	engine, handle := corruptChallengeEngine(t, "admin_login_challenge:")
 
 	rec := postJSON(engine, "/admin/api/v1/auth/webauthn", map[string]any{
 		"handle":    handle,
 		"assertion": json.RawMessage(`{}`),
 	})
-	// consumeLoginChallenge returns error on unmarshal; handler responds 401.
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	// consumeLoginChallenge returns error on unmarshal; handler responds 500.
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
-func TestEnrollFinish_CorruptChallengeJSON_Returns401(t *testing.T) {
+func TestEnrollFinish_CorruptChallengeJSON_Returns500(t *testing.T) {
 	engine, handle := corruptChallengeEngine(t, "admin_enroll_challenge:")
 
 	rec := postJSON(engine, "/admin/api/v1/enroll/finish", map[string]any{
@@ -330,8 +331,8 @@ func TestEnrollFinish_CorruptChallengeJSON_Returns401(t *testing.T) {
 		"attestation":     json.RawMessage(`{}`),
 		"credential_name": "key",
 	})
-	// consumeEnrollChallenge returns error on unmarshal; handler responds 401.
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	// consumeEnrollChallenge returns error on unmarshal; handler responds 500.
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

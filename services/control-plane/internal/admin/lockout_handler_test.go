@@ -12,13 +12,16 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/go-webauthn/webauthn/protocol"
 	"github.com/google/uuid"
@@ -432,7 +435,9 @@ func (failingConnector) Driver() driver.Driver { return nil }
 // A database fault in the admin lookup is the server's, not an unknown username:
 // it is a logged 500, not a 401 counted as one more wrong password.
 func TestLookupFault_IsLoggedFiveHundred_NotUnknownUser(t *testing.T) { // regression for #221
-	_, rdb, _ := setupEnrollLockout(t)
+	server := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { require.NoError(t, rdb.Close()) })
 	for _, h := range []struct {
 		name  string
 		path  string
@@ -448,16 +453,21 @@ func TestLookupFault_IsLoggedFiveHundred_NotUnknownUser(t *testing.T) { // regre
 		t.Run(h.name, func(t *testing.T) {
 			var logs bytes.Buffer
 			gin.SetMode(gin.TestMode)
-			handler, err := admin.NewHandler(sql.OpenDB(failingConnector{}), rdb, logger.NewWithWriter(&logs), authHandlerCfg())
+			db := sql.OpenDB(failingConnector{})
+			t.Cleanup(func() { require.NoError(t, db.Close()) })
+			handler, err := admin.NewHandler(db, rdb, logger.NewWithWriter(&logs), authHandlerCfg())
 			require.NoError(t, err)
 			engine := gin.New()
 			engine.POST("/admin/api/v1/auth/password", handler.PasswordLogin)
 			engine.POST("/admin/api/v1/enroll/begin", handler.EnrollBegin)
 
-			rec := postJSON(engine, h.path, h.build(uniqueAdminUsername("anyone")))
+			username := "private-operator@example.invalid"
+			rec := postJSON(engine, h.path, h.build(username))
 
 			assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
 			assert.Contains(t, logs.String(), "admin lookup failed")
+			assert.NotContains(t, logs.String(), username)
+			assert.NotContains(t, logs.String(), "username=")
 			assert.Contains(t, logs.String(), "level=ERROR")
 		})
 	}
@@ -556,8 +566,10 @@ func failCredentialInserts(t *testing.T, db *sql.DB, sqlstate string) {
 		`CREATE TRIGGER %s BEFORE INSERT ON admin_webauthn_credentials FOR EACH ROW EXECUTE FUNCTION %s()`, fn, fn))
 	require.NoError(t, err)
 	t.Cleanup(func() {
-		_, _ = db.ExecContext(context.Background(), fmt.Sprintf(`DROP TRIGGER IF EXISTS %s ON admin_webauthn_credentials`, fn))
-		_, _ = db.ExecContext(context.Background(), fmt.Sprintf(`DROP FUNCTION IF EXISTS %s()`, fn))
+		_, triggerErr := db.ExecContext(context.Background(), fmt.Sprintf(`DROP TRIGGER IF EXISTS %s ON admin_webauthn_credentials`, fn))
+		assert.NoError(t, triggerErr)
+		_, functionErr := db.ExecContext(context.Background(), fmt.Sprintf(`DROP FUNCTION IF EXISTS %s()`, fn))
+		assert.NoError(t, functionErr)
 	})
 }
 
@@ -598,4 +610,140 @@ func TestFailedGuesses_KeepTheirAuditRows(t *testing.T) { // regression for #221
 	require.Equal(t, http.StatusTooManyRequests, enrollGuess(engine, "10.7.2.2", username))
 	assert.Equal(t, 1, auditRows(t, db, username, admin.EventLoginFailure, admin.AuditDenied))
 	assert.Equal(t, 1, auditRows(t, db, username, admin.EventEnrollComplete, admin.AuditDenied))
+}
+
+// A lockout-store outage refuses requests before database access and logs only
+// the failure class/event, never the submitted identifier or source address.
+func TestCredentialRoutes_LockoutFaultDoesNotLogIdentifiers(t *testing.T) {
+	for _, path := range []string{"/admin/api/v1/auth/password", "/admin/api/v1/enroll/begin"} {
+		t.Run(path, func(t *testing.T) {
+			var logs bytes.Buffer
+			handler, err := admin.NewHandler(nil, nil, logger.NewWithWriter(&logs), authHandlerCfg())
+			require.NoError(t, err)
+			engine := gin.New()
+			engine.POST("/admin/api/v1/auth/password", handler.PasswordLogin)
+			engine.POST("/admin/api/v1/enroll/begin", handler.EnrollBegin)
+			username, ip := "private-operator@example.invalid", "192.0.2.123"
+			rec := postFromRec(engine, path, ip, map[string]string{"username": username, "password": "rejected-input", "token": badEnrollTok})
+			assert.Equal(t, http.StatusInternalServerError, rec.Code)
+			assert.Contains(t, logs.String(), "admin lockout check failed")
+			assert.Contains(t, logs.String(), "level=ERROR")
+			assert.Contains(t, logs.String(), "event=")
+			for _, private := range []string{username, ip, "rejected-input", "username="} {
+				assert.NotContains(t, logs.String(), private)
+			}
+		})
+	}
+}
+
+// Both completion handlers distinguish invalid handles from operational faults,
+// without disclosing bearer handles or Redis error contents in logs or responses.
+func TestChallengeConsumption_FaultsAreLoggedWithoutPrivateData(t *testing.T) {
+	for _, route := range []struct{ path, prefix, responseField string }{
+		{"/admin/api/v1/auth/webauthn", "admin_login_challenge:", "assertion"},
+		{"/admin/api/v1/enroll/finish", "admin_enroll_challenge:", "attestation"},
+	} {
+		for _, fault := range []string{"missing", "empty", "store", "decode"} {
+			t.Run(route.path+"/"+fault, func(t *testing.T) {
+				server := miniredis.RunT(t)
+				rdb := redis.NewClient(&redis.Options{Addr: server.Addr(), MaxRetries: -1})
+				t.Cleanup(func() { require.NoError(t, rdb.Close()) })
+				var logs bytes.Buffer
+				handler, err := admin.NewHandler(nil, rdb, logger.NewWithWriter(&logs), authHandlerCfg())
+				require.NoError(t, err)
+				engine := gin.New()
+				engine.POST("/admin/api/v1/auth/webauthn", handler.WebAuthnLogin)
+				engine.POST("/admin/api/v1/enroll/finish", handler.EnrollFinish)
+				handle := "private-bearer-handle"
+				private := "private-operator@example.invalid"
+				want := http.StatusInternalServerError
+				switch fault {
+				case "missing":
+					want = http.StatusUnauthorized
+				case "empty":
+					handle = ""
+					want = http.StatusUnauthorized
+				case "store":
+					server.SetError("NOPERM " + private)
+				case "decode":
+					require.NoError(t, server.Set(route.prefix+handle, private))
+				}
+				rec := postJSON(engine, route.path, map[string]any{
+					"handle": handle, route.responseField: json.RawMessage(`{}`),
+				})
+				assert.Equal(t, want, rec.Code, rec.Body.String())
+				if want == http.StatusInternalServerError {
+					assert.Contains(t, logs.String(), "admin challenge load failed")
+					assert.Contains(t, logs.String(), "level=ERROR")
+					assert.Contains(t, logs.String(), "event=")
+				} else {
+					assert.Empty(t, logs.String(), "invalid handles are ordinary authentication rejections")
+				}
+				for _, output := range []string{logs.String(), rec.Body.String()} {
+					assert.NotContains(t, output, "private-bearer-handle")
+					assert.NotContains(t, output, private)
+				}
+			})
+		}
+	}
+}
+
+// countingLookupConnector observes the SQL boundary before password verification.
+// It deliberately fails lookups and audit transactions without using a real DB.
+type countingLookupConnector struct{ lookups atomic.Int64 }
+
+func (c *countingLookupConnector) Connect(context.Context) (driver.Conn, error) {
+	return &countingLookupConn{owner: c}, nil
+}
+func (c *countingLookupConnector) Driver() driver.Driver { return nil }
+
+type countingLookupConn struct{ owner *countingLookupConnector }
+
+func (c *countingLookupConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("unexpected prepared statement")
+}
+func (c *countingLookupConn) Close() error { return nil }
+func (c *countingLookupConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("injected audit transaction failure")
+}
+func (c *countingLookupConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	if strings.Contains(query, "FROM admin_users WHERE username") {
+		c.owner.lookups.Add(1)
+	}
+	return nil, errors.New("injected lookup failure")
+}
+
+// Response counts alone cannot prove early admission: a mutant could verify
+// every password before returning the same 401/429 totals. Count the earlier
+// database boundary, independently of HTTP status, for both handlers and axes.
+func TestCredentialBursts_ReserveBeforeLookup(t *testing.T) {
+	for _, route := range []string{"/admin/api/v1/auth/password", "/admin/api/v1/enroll/begin"} {
+		for _, axis := range []string{"account", "ip"} {
+			t.Run(route+"/"+axis, func(t *testing.T) {
+				server := miniredis.RunT(t)
+				rdb := redis.NewClient(&redis.Options{Addr: server.Addr()})
+				t.Cleanup(func() { require.NoError(t, rdb.Close()) })
+				counter := &countingLookupConnector{}
+				db := sql.OpenDB(counter)
+				t.Cleanup(func() { require.NoError(t, db.Close()) })
+				handler, err := admin.NewHandler(db, rdb, logger.NewWithWriter(io.Discard), authHandlerCfg())
+				require.NoError(t, err)
+				engine := gin.New()
+				engine.POST("/admin/api/v1/auth/password", handler.PasswordLogin)
+				engine.POST("/admin/api/v1/enroll/begin", handler.EnrollBegin)
+				codes := burst(burstSize, func(i int) int {
+					username, ip := "operator", "192.0.2.1"
+					if axis == "account" {
+						ip = fmt.Sprintf("192.0.2.%d", i+1)
+					} else {
+						username = fmt.Sprintf("operator-%d", i)
+					}
+					return postFrom(engine, route, ip, map[string]string{"username": username, "password": "wrong-password", "token": badEnrollTok})
+				})
+				assert.Equal(t, int64(5), counter.lookups.Load(), "only admitted guesses may reach the database/password boundary")
+				assert.Equal(t, 5, codes[http.StatusInternalServerError])
+				assert.Equal(t, burstSize-5, codes[http.StatusTooManyRequests])
+			})
+		}
+	}
 }

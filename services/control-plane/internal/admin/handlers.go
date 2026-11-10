@@ -45,6 +45,9 @@ const (
 	logLockoutCheckFailed = "admin lockout check failed"
 )
 
+// errInvalidAdminChallenge denotes an absent, expired or already consumed handle.
+var errInvalidAdminChallenge = errors.New("invalid admin challenge")
+
 // adminWebAuthnUserHandle is the stable WebAuthn user handle for the admin RP.
 // The admin RP authenticates a single logical "operator" identity per browser
 // ceremony; the binding to a concrete admin row is carried server-side in the
@@ -194,7 +197,7 @@ func (h *Handler) PasswordLogin(c *gin.Context) {
 	}
 
 	admin, lookupErr := h.repo.GetByUsername(ctx, req.Username)
-	if h.lookupFailed(c, lookupErr, req.Username, EventLoginFailure) {
+	if h.lookupFailed(c, lookupErr, EventLoginFailure) {
 		return
 	}
 
@@ -205,7 +208,7 @@ func (h *Handler) PasswordLogin(c *gin.Context) {
 		verifyHash = admin.PasswordHash
 	}
 	ok, verifyErr := auth.VerifyPassword(req.Password, verifyHash)
-	h.logVerifyFault(verifyErr, req.Username, EventLoginFailure)
+	h.logVerifyFault(verifyErr, EventLoginFailure)
 
 	// Treat unknown user, disabled admin, verify error, or mismatch identically.
 	if lookupErr != nil || admin == nil || verifyErr != nil || !ok || admin.Status != StatusActive {
@@ -271,8 +274,7 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 
 	challenge, err := h.consumeLoginChallenge(ctx, req.Handle)
 	if err != nil {
-		// Unknown/expired/replayed handle.
-		c.JSON(http.StatusUnauthorized, genericAuthError)
+		h.challengeFailure(c, err, EventLoginFailure)
 		return
 	}
 
@@ -283,7 +285,7 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 	// not a guessing surface: only a counted password step issues one.
 	locked, lerr := h.lockout.IsLocked(ctx, challenge.Username, ip)
 	if lerr != nil {
-		h.log.Error(logLockoutCheckFailed, "error", lerr, "username", challenge.Username, "event", EventLoginFailure)
+		h.log.Error(logLockoutCheckFailed, "event", EventLoginFailure)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 		return
 	}
@@ -328,7 +330,7 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 		// Non-fatal: the login succeeded. A stale counter ages out on its own (the
 		// lock within lockoutMaxWindow, the attempts within lockoutAttemptsWindow of
 		// the last guess); `admin unlock` clears it sooner.
-		h.log.Warn("admin lockout reset failed", "error", err, "username", challenge.Username, "event", EventLoginSuccess)
+		h.log.Warn("admin lockout reset failed", "event", EventLoginSuccess)
 	}
 
 	adminID := challenge.AdminID
@@ -366,7 +368,7 @@ func (h *Handler) reserveGuess(c *gin.Context, username, ip, event string) bool 
 	ctx := c.Request.Context()
 	allowed, err := h.lockout.Reserve(ctx, username, ip)
 	if err != nil {
-		h.log.Error(logLockoutCheckFailed, "error", err, "username", username, "event", event)
+		h.log.Error(logLockoutCheckFailed, "event", event)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 		return true
 	}
@@ -385,7 +387,7 @@ func (h *Handler) reserveGuess(c *gin.Context, username, ip, event string) bool 
 // counted, so the next reserve locks the axis even if this write was lost.
 func (h *Handler) failPassword(ctx context.Context, username, ip, event string) {
 	if err := h.lockout.RecordCheckedFailure(ctx, username, ip); err != nil {
-		h.log.Warn("admin lockout record failed", "error", err, "username", username, "event", event)
+		h.log.Warn("admin lockout record failed", "event", event)
 	}
 	h.auditFailure(ctx, username, event)
 }
@@ -396,11 +398,11 @@ func (h *Handler) failPassword(ctx context.Context, username, ip, event string) 
 // user" would turn a Postgres outage into a 401 for every admin, each one counted
 // as a wrong guess and given a failure audit row, with nothing logged. The fault
 // does not depend on the username, so the 500 is no enumeration oracle.
-func (h *Handler) lookupFailed(c *gin.Context, err error, username, event string) bool {
+func (h *Handler) lookupFailed(c *gin.Context, err error, event string) bool {
 	if err == nil || errors.Is(err, ErrAdminNotFound) {
 		return false
 	}
-	h.log.Error("admin lookup failed", "error", err, "username", username, "event", event)
+	h.log.Error("admin lookup failed", "event", event)
 	c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 	return true
 }
@@ -408,10 +410,22 @@ func (h *Handler) lookupFailed(c *gin.Context, err error, username, event string
 // logVerifyFault records a password-verification fault (a stored hash that does
 // not decode) without changing the client's uniform 401. The error itself is not
 // logged: an Argon2 decode failure can echo the malformed hash.
-func (h *Handler) logVerifyFault(verifyErr error, username, event string) {
+func (h *Handler) logVerifyFault(verifyErr error, event string) {
 	if verifyErr != nil {
-		h.log.Error("admin password verification failed", "username", username, "event", event)
+		h.log.Error("admin password verification failed", "event", event)
 	}
+}
+
+// challengeFailure keeps invalid bearer handles indistinguishable while making
+// storage/decode faults observable. Error text may contain stored data or Redis
+// command arguments, so log only a fixed failure classification and event.
+func (h *Handler) challengeFailure(c *gin.Context, err error, event string) {
+	if errors.Is(err, errInvalidAdminChallenge) {
+		c.JSON(http.StatusUnauthorized, genericAuthError)
+		return
+	}
+	h.log.Error("admin challenge load failed", "event", event)
+	c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 }
 
 // webAuthnUserForAdmin reconstructs the WebAuthnUser (with all registered
@@ -470,11 +484,11 @@ func (h *Handler) storeLoginChallenge(ctx context.Context, ch loginChallenge) (s
 // handle (single-use via GETDEL). An unknown/expired/replayed handle errors.
 func (h *Handler) consumeLoginChallenge(ctx context.Context, handle string) (loginChallenge, error) {
 	if handle == "" {
-		return loginChallenge{}, errors.New("empty login handle")
+		return loginChallenge{}, errInvalidAdminChallenge
 	}
 	raw, err := h.redis.GetDel(ctx, loginChallengePrefix+handle).Result()
 	if errors.Is(err, redis.Nil) {
-		return loginChallenge{}, errors.New("unknown or expired login handle")
+		return loginChallenge{}, errInvalidAdminChallenge
 	}
 	if err != nil {
 		return loginChallenge{}, fmt.Errorf("load login challenge: %w", err)
@@ -570,7 +584,7 @@ func (h *Handler) EnrollBegin(c *gin.Context) {
 	}
 
 	adminUser, lookupErr := h.repo.GetByUsername(ctx, req.Username)
-	if h.lookupFailed(c, lookupErr, req.Username, EventEnrollComplete) {
+	if h.lookupFailed(c, lookupErr, EventEnrollComplete) {
 		return
 	}
 	verifyHash := h.dummyPasswordHash
@@ -578,7 +592,7 @@ func (h *Handler) EnrollBegin(c *gin.Context) {
 		verifyHash = adminUser.PasswordHash
 	}
 	ok, verifyErr := auth.VerifyPassword(req.Password, verifyHash)
-	h.logVerifyFault(verifyErr, req.Username, EventEnrollComplete)
+	h.logVerifyFault(verifyErr, EventEnrollComplete)
 	// A non-pending admin is refused AFTER the constant-time verify, never by an
 	// early return, so an active admin and an unknown user look the same.
 	if lookupErr != nil || adminUser == nil || verifyErr != nil || !ok || adminUser.Status != StatusPending {
@@ -644,7 +658,7 @@ func (h *Handler) EnrollFinish(c *gin.Context) {
 
 	challenge, err := h.consumeEnrollChallenge(ctx, req.Handle)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, genericAuthError)
+		h.challengeFailure(c, err, EventEnrollComplete)
 		return
 	}
 
@@ -685,7 +699,7 @@ func (h *Handler) EnrollFinish(c *gin.Context) {
 	// the second factor. Non-fatal: a stale counter ages out on its own (see
 	// WebAuthnLogin); `admin unlock` clears it sooner.
 	if err := h.lockout.Reset(ctx, challenge.Username, challenge.IPHash); err != nil {
-		h.log.Warn("admin lockout reset failed", "error", err, "username", challenge.Username, "event", EventEnrollComplete)
+		h.log.Warn("admin lockout reset failed", "event", EventEnrollComplete)
 	}
 
 	adminID := challenge.AdminID
@@ -745,11 +759,11 @@ func (h *Handler) storeEnrollChallenge(ctx context.Context, ch enrollChallenge) 
 
 func (h *Handler) consumeEnrollChallenge(ctx context.Context, handle string) (enrollChallenge, error) {
 	if handle == "" {
-		return enrollChallenge{}, errors.New("empty enroll handle")
+		return enrollChallenge{}, errInvalidAdminChallenge
 	}
 	raw, err := h.redis.GetDel(ctx, enrollChallengePrefix+handle).Result()
 	if errors.Is(err, redis.Nil) {
-		return enrollChallenge{}, errors.New("unknown or expired enroll handle")
+		return enrollChallenge{}, errInvalidAdminChallenge
 	}
 	if err != nil {
 		return enrollChallenge{}, fmt.Errorf("load enroll challenge: %w", err)
