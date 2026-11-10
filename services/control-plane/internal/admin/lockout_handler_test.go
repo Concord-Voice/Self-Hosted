@@ -1,0 +1,749 @@
+package admin_test
+
+// Handler-level tests for #221: PasswordLogin and EnrollBegin count each guess
+// BEFORE its password is checked, repeated locks escalate across expiries, and a
+// credential-save fault at EnrollFinish is a logged 500.
+
+import (
+	"bytes"
+	"context"
+	"database/sql"
+	"database/sql/driver"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/alicebob/miniredis/v2"
+	"github.com/gin-gonic/gin"
+	"github.com/go-webauthn/webauthn/protocol"
+	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/admin"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
+)
+
+// guessFn sends one wrong-password guess to a handler from a chosen client IP
+// and returns the status code.
+type guessFn func(engine *gin.Engine, ip, username string) int
+
+func loginGuess(engine *gin.Engine, ip, username string) int {
+	return postFrom(engine, "/admin/api/v1/auth/password", ip, map[string]string{
+		"username": username, "password": "wrong-password",
+	})
+}
+
+func enrollGuess(engine *gin.Engine, ip, username string) int {
+	return postFrom(engine, "/admin/api/v1/enroll/begin", ip, map[string]string{
+		"username": username, "password": "wrong-password", "token": badEnrollTok,
+	})
+}
+
+// postFrom posts a JSON body from a chosen client IP.
+func postFrom(engine *gin.Engine, path, ip string, body any) int {
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = ip + ":1234"
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+	return rec.Code
+}
+
+// burst fires n requests at once and returns the status codes seen.
+func burst(n int, send func(i int) int) map[int]int {
+	codes := make(map[int]int)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			code := send(i)
+			mu.Lock()
+			codes[code]++
+			mu.Unlock()
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	return codes
+}
+
+// burstSize is large enough that, without counting before the check, far more
+// than the threshold's worth of guesses would pass the lock check together.
+const burstSize = 12
+
+var guessHandlers = []struct {
+	name  string
+	guess guessFn
+}{
+	{"PasswordLogin", loginGuess},
+	{"EnrollBegin", enrollGuess},
+}
+
+// N concurrent wrong passwords for ONE account from N distinct IPs get at most
+// five password verifies (a verified wrong password answers 401), then 429.
+func TestBurst_AccountAxis_AtMostFiveVerifies(t *testing.T) { // regression for #221
+	for _, h := range guessHandlers {
+		t.Run(h.name, func(t *testing.T) {
+			_, rdb, engine := setupEnrollLockout(t)
+			username := uniqueAdminUsername("burst")
+
+			codes := burst(burstSize, func(i int) int {
+				return h.guess(engine, fmt.Sprintf("203.0.113.%d", i+1), username)
+			})
+
+			assert.Equal(t, 5, codes[http.StatusUnauthorized], "exactly five guesses may reach the password verify: %v", codes)
+			assert.Equal(t, burstSize-5, codes[http.StatusTooManyRequests], "the rest are refused before any verify: %v", codes)
+			assert.True(t, keyExists(t, rdb, acctLockKey(username)))
+		})
+	}
+}
+
+// N concurrent wrong passwords from ONE IP, spraying N different usernames, get
+// at most five verifies: the IP axis bounds what no single account's count can.
+func TestBurst_IPAxis_AtMostFiveVerifies(t *testing.T) { // regression for #221
+	for _, h := range guessHandlers {
+		t.Run(h.name, func(t *testing.T) {
+			_, rdb, engine := setupEnrollLockout(t)
+
+			codes := burst(burstSize, func(i int) int {
+				return h.guess(engine, "198.51.100.77", uniqueAdminUsername(fmt.Sprintf("spray%d", i)))
+			})
+
+			assert.Equal(t, 5, codes[http.StatusUnauthorized], "exactly five guesses may reach the password verify: %v", codes)
+			assert.Equal(t, burstSize-5, codes[http.StatusTooManyRequests], "the rest are refused before any verify: %v", codes)
+			assert.True(t, keyExists(t, rdb, ipLockKey("198.51.100.77")))
+		})
+	}
+}
+
+// Unknown usernames lock exactly like known ones: the count runs before the
+// lookup, so the lockout adds no enumeration oracle.
+func TestLockout_UnknownUserLocksLikeKnownUser(t *testing.T) { // regression for #221
+	for _, h := range guessHandlers {
+		t.Run(h.name, func(t *testing.T) {
+			db, rdb, engine := setupEnrollLockout(t)
+			_, known, _ := enrolledAdmin(t, db, rdb)
+			unknown := uniqueAdminUsername("ghost")
+
+			for i := 0; i < 5; i++ {
+				kc := h.guess(engine, fmt.Sprintf("10.2.0.%d", i+1), known)
+				uc := h.guess(engine, fmt.Sprintf("10.3.0.%d", i+1), unknown)
+				require.Equal(t, kc, uc)
+			}
+			assert.Equal(t, http.StatusTooManyRequests, h.guess(engine, "10.2.9.9", known))
+			assert.Equal(t, http.StatusTooManyRequests, h.guess(engine, "10.3.9.9", unknown))
+			assert.True(t, keyExists(t, rdb, acctLockKey(unknown)))
+		})
+	}
+}
+
+// After each lock expires the next five failures lock for twice as long, up to
+// the 60-minute cap. Expiry is simulated by deleting the lock key (the level key
+// is what survives it), never by sleeping.
+func TestLockout_EscalatesAcrossExpiries_ThroughHandlers(t *testing.T) { // regression for #221
+	for _, h := range guessHandlers {
+		t.Run(h.name, func(t *testing.T) {
+			_, rdb, engine := setupEnrollLockout(t)
+			ctx := context.Background()
+			username := uniqueAdminUsername("esc")
+
+			for round, minutes := range []int{1, 2, 4, 8, 16, 32, 60, 60} {
+				for i := 0; i < 5; i++ {
+					// A fresh IP per guess keeps the IP axis out of the way.
+					code := h.guess(engine, fmt.Sprintf("10.%d.%d.1", round+10, i+1), username)
+					require.Equal(t, http.StatusUnauthorized, code, "round %d guess %d", round, i)
+				}
+				assertWindow(t, rdb, acctLockKey(username), time.Duration(minutes)*time.Minute, fmt.Sprintf("round %d", round))
+				require.Equal(t, http.StatusTooManyRequests, h.guess(engine, "10.99.99.99", username))
+				require.NoError(t, rdb.Del(ctx, acctLockKey(username)).Err()) // the lock expires
+			}
+		})
+	}
+}
+
+// A lockout store that cannot be reached refuses before any password verify: a
+// wrong password answers 500, not 401, and a correct one does not sign in.
+func TestPasswordLogin_LockoutStoreDown_FailsClosed(t *testing.T) { // regression for #221
+	db, rdb, _ := setupEnrollLockout(t)
+	_, username, _ := enrolledAdmin(t, db, rdb)
+	dead := redis.NewClient(&redis.Options{Addr: "127.0.0.1:1", MaxRetries: -1, DialerRetries: 1})
+	t.Cleanup(func() { _ = dead.Close() })
+	engine := enrollLockoutEngine(t, db, dead)
+
+	code, body := passwordLogin(engine, username, "wrong-password")
+	assert.Equal(t, http.StatusInternalServerError, code, body)
+	assert.JSONEq(t, `{"error":"internal error"}`, body)
+	code, _ = passwordLogin(engine, username, adminTestPassword)
+	assert.Equal(t, http.StatusInternalServerError, code)
+}
+
+// signIn runs the two steps of an admin sign-in; the password step counts as one
+// guess, and the WebAuthn step clears the count.
+func signIn(t *testing.T, engine *gin.Engine, ip, username string, va *virtualAuthenticator) {
+	t.Helper()
+	signInSplit(t, engine, ip, ip, username, va)
+}
+
+// signInSplit runs the password step from passwordIP and the WebAuthn step from
+// finishIP: the handle is a bearer value, so the two can differ.
+func signInSplit(t *testing.T, engine *gin.Engine, passwordIP, finishIP, username string, va *virtualAuthenticator) {
+	t.Helper()
+	pw, _ := json.Marshal(map[string]string{"username": username, "password": adminTestPassword})
+	req := httptest.NewRequest(http.MethodPost, "/admin/api/v1/auth/password", bytes.NewReader(pw))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = passwordIP + ":1234"
+	pwRec := httptest.NewRecorder()
+	engine.ServeHTTP(pwRec, req)
+	require.Equal(t, http.StatusOK, pwRec.Code, pwRec.Body.String())
+	var resp struct {
+		Handle    string                        `json:"handle"`
+		PublicKey *protocol.CredentialAssertion `json:"publicKey"`
+	}
+	require.NoError(t, json.Unmarshal(pwRec.Body.Bytes(), &resp))
+
+	va.signCount++
+	assertion := va.assertionResponse(t, testAdminRPID, resp.PublicKey.Response.Challenge.String(), testAdminOrigin, flagUP|flagUV, false)
+	wb, _ := json.Marshal(map[string]any{"handle": resp.Handle, "assertion": json.RawMessage(assertion)})
+	wreq := httptest.NewRequest(http.MethodPost, "/admin/api/v1/auth/webauthn", bytes.NewReader(wb))
+	wreq.Header.Set("Content-Type", "application/json")
+	wreq.RemoteAddr = finishIP + ":1234"
+	wrec := httptest.NewRecorder()
+	engine.ServeHTTP(wrec, wreq)
+	require.Equal(t, http.StatusOK, wrec.Code, wrec.Body.String())
+}
+
+// The refund goes to the address the password step ran from. Finishing the
+// sign-in from an address that holds a spray count must not lower that count, and
+// the address that reserved the guess must get it back.
+func TestSignIn_RefundsThePasswordStepIP(t *testing.T) { // regression for #221
+	db, rdb, _ := setupEnrollLockout(t)
+	_, username, va := enrolledAdmin(t, db, rdb)
+	engine := adminAuthEngineWithEnroll(t, db, rdb)
+	const reserving, spray = "10.9.0.1", "10.9.0.2"
+	for i := 0; i < 3; i++ {
+		require.Equal(t, http.StatusUnauthorized, loginGuess(engine, spray, uniqueAdminUsername("spray")))
+	}
+	require.Equal(t, int64(3), failCount(t, rdb, ipKey(spray)))
+
+	signInSplit(t, engine, reserving, spray, username, va)
+
+	assert.Zero(t, failCount(t, rdb, ipKey(reserving)), "the address that reserved the guess gets it back")
+	assert.Equal(t, int64(3), failCount(t, rdb, ipKey(spray)), "the address that only finished the sign-in is not refunded")
+}
+
+// A correct password plus hardware key signs in and clears the attempts and the
+// lock, but the escalation level is KEPT: a re-attack right after a sign-in
+// continues from the level it had reached instead of starting over at one minute.
+func TestSignIn_ClearsAttemptsAndLock_KeepsLevel(t *testing.T) { // regression for #221
+	db, rdb, _ := setupEnrollLockout(t)
+	_, username, va := enrolledAdmin(t, db, rdb)
+	engine := adminAuthEngineWithEnroll(t, db, rdb)
+	ctx := context.Background()
+
+	for i := 0; i < 5; i++ {
+		require.Equal(t, http.StatusUnauthorized, loginGuess(engine, fmt.Sprintf("10.4.0.%d", i+1), username))
+	}
+	require.True(t, keyExists(t, rdb, acctLockKey(username)))
+	require.NoError(t, rdb.Del(ctx, acctLockKey(username)).Err()) // the lock expires
+	for i := 0; i < 2; i++ {
+		require.Equal(t, http.StatusUnauthorized, loginGuess(engine, fmt.Sprintf("10.4.1.%d", i+1), username))
+	}
+
+	signIn(t, engine, "10.4.9.9", username, va)
+
+	assert.Zero(t, failCount(t, rdb, acctKey(username)), "a completed sign-in clears the attempts")
+	assert.False(t, keyExists(t, rdb, acctLockKey(username)))
+	assert.Equal(t, int64(1), failCount(t, rdb, acctLevelKey(username)), "the level survives the sign-in")
+
+	for i := 0; i < 5; i++ {
+		require.Equal(t, http.StatusUnauthorized, loginGuess(engine, fmt.Sprintf("10.4.2.%d", i+1), username))
+	}
+	assertWindow(t, rdb, acctLockKey(username), 2*time.Minute, "a re-attack after a sign-in escalates at once")
+}
+
+// adminAuthEngineWithEnroll wires every sign-in and enrollment route on one
+// handler, as routes.go does.
+func adminAuthEngineWithEnroll(t *testing.T, db *sql.DB, rdb *redis.Client) *gin.Engine {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	h, err := admin.NewHandler(db, rdb, logger.NewWithWriter(&bytes.Buffer{}), authHandlerCfg())
+	require.NoError(t, err)
+	r := gin.New()
+	r.POST("/admin/api/v1/auth/password", h.PasswordLogin)
+	r.POST("/admin/api/v1/auth/webauthn", h.WebAuthnLogin)
+	r.POST("/admin/api/v1/enroll/begin", h.EnrollBegin)
+	r.POST("/admin/api/v1/enroll/finish", h.EnrollFinish)
+	return r
+}
+
+// The WebAuthn step's lock re-check is a pure read, so a held handle cannot lock
+// itself: a sign-in whose password step was the fifth counted guess still finishes.
+func TestWebAuthnLogin_FifthGuessHandleStillRedeems(t *testing.T) { // regression for #221
+	db, rdb, _ := setupEnrollLockout(t)
+	_, username, va := enrolledAdmin(t, db, rdb)
+	engine := adminAuthEngineWithEnroll(t, db, rdb)
+
+	for i := 0; i < 4; i++ {
+		require.Equal(t, http.StatusUnauthorized, loginGuess(engine, fmt.Sprintf("10.5.0.%d", i+1), username))
+	}
+	signIn(t, engine, "10.5.9.9", username, va) // password step = fifth counted guess
+
+	assert.False(t, keyExists(t, rdb, acctLockKey(username)))
+}
+
+// A credential-save fault at EnrollFinish is a logged 500 with no failure audit
+// row; an attestation that is rejected stays a Warn, an audit row and a 401.
+func TestEnrollFinish_CredentialPersistFault_Is500(t *testing.T) { // regression for #221
+	db, rdb, _ := setupEnrollLockout(t)
+	var logs bytes.Buffer
+	engine := enrollEngineWithLog(t, db, rdb, &logs)
+	_, username, token := pendingAdminWithToken(t, db, rdb)
+	handle, creation := enrollBeginOK(t, engine, username, token)
+
+	failCredentialInserts(t, db, "P0001")
+
+	va := newVirtualAuthenticator(t, uuid.MustParse(testAllowedAAGID))
+	att := va.attestationResponse(t, testAdminRPID, creation.Response.Challenge.String(), testAdminOrigin, flagUP|flagUV)
+	rec := postJSON(engine, "/admin/api/v1/enroll/finish", map[string]any{ // #nosec G101 -- "credential_name" is a key-name label, not a secret
+		"handle": handle, "attestation": json.RawMessage(att), "credential_name": "primary",
+	})
+
+	assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+	assert.JSONEq(t, `{"error":"internal error"}`, rec.Body.String())
+	assert.Contains(t, logs.String(), "level=ERROR", "a storage fault must be logged at Error")
+	assert.Contains(t, logs.String(), "admin credential persist failed")
+	assert.Zero(t, enrollFailureAuditRows(t, db, username), "a storage fault is not a failed enrollment")
+	got, err := admin.NewAdminRepo(db).GetByUsername(context.Background(), username)
+	require.NoError(t, err)
+	assert.Equal(t, admin.StatusPending, got.Status, "the admin must stay pending")
+}
+
+func TestEnrollFinish_AttestationRejection_StaysWarn401(t *testing.T) { // regression for #221
+	db, rdb, _ := setupEnrollLockout(t)
+	var logs bytes.Buffer
+	engine := enrollEngineWithLog(t, db, rdb, &logs)
+	_, username, token := pendingAdminWithToken(t, db, rdb)
+	handle, creation := enrollBeginOK(t, engine, username, token)
+
+	// A key whose model is not on the allow-list is rejected, never persisted.
+	va := newVirtualAuthenticator(t, uuid.New())
+	att := va.attestationResponse(t, testAdminRPID, creation.Response.Challenge.String(), testAdminOrigin, flagUP|flagUV)
+	rec := postJSON(engine, "/admin/api/v1/enroll/finish", map[string]any{ // #nosec G101 -- "credential_name" is a key-name label, not a secret
+		"handle": handle, "attestation": json.RawMessage(att), "credential_name": "primary",
+	})
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assert.Contains(t, logs.String(), "level=WARN")
+	assert.NotContains(t, logs.String(), "level=ERROR")
+	assert.Equal(t, 1, enrollFailureAuditRows(t, db, username), "a rejected key keeps its failure audit row")
+}
+
+// A credential ID that is already registered is the client's input, not a storage
+// fault: it is rejected like any other bad attestation, with a Warn, the failure
+// audit row and the uniform 401.
+func TestEnrollFinish_DuplicateCredential_Is401WithAuditRow(t *testing.T) { // regression for #221
+	db, rdb, _ := setupEnrollLockout(t)
+	var logs bytes.Buffer
+	engine := enrollEngineWithLog(t, db, rdb, &logs)
+	_, username, token := pendingAdminWithToken(t, db, rdb)
+	handle, creation := enrollBeginOK(t, engine, username, token)
+
+	failCredentialInserts(t, db, "23505") // the unique-violation code
+
+	va := newVirtualAuthenticator(t, uuid.MustParse(testAllowedAAGID))
+	att := va.attestationResponse(t, testAdminRPID, creation.Response.Challenge.String(), testAdminOrigin, flagUP|flagUV)
+	rec := postJSON(engine, "/admin/api/v1/enroll/finish", map[string]any{ // #nosec G101 -- "credential_name" is a key-name label, not a secret
+		"handle": handle, "attestation": json.RawMessage(att), "credential_name": "primary",
+	})
+
+	assert.Equal(t, http.StatusUnauthorized, rec.Code, rec.Body.String())
+	assert.NotContains(t, logs.String(), "level=ERROR")
+	assert.NotContains(t, logs.String(), "admin credential persist failed")
+	assert.Equal(t, 1, enrollFailureAuditRows(t, db, username), "a reused credential keeps its failure audit row")
+}
+
+// postFromRec posts a JSON body from a chosen client IP and returns the recorder.
+func postFromRec(engine *gin.Engine, path, ip string, body any) *httptest.ResponseRecorder {
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = ip + ":1234"
+	rec := httptest.NewRecorder()
+	engine.ServeHTTP(rec, req)
+	return rec
+}
+
+// Enrollment refunds the address EnrollBegin ran from, as sign-in does: finishing
+// from an address that holds a spray count must not lower that count.
+func TestEnrollFinish_RefundsTheBeginIP(t *testing.T) { // regression for #221
+	db, rdb, _ := setupEnrollLockout(t)
+	var logs bytes.Buffer
+	engine := enrollEngineWithLog(t, db, rdb, &logs)
+	_, username, token := pendingAdminWithToken(t, db, rdb)
+	const beginIP, sprayIP = "10.12.0.1", "10.12.0.2"
+	for i := 0; i < 3; i++ {
+		require.Equal(t, http.StatusUnauthorized, enrollGuess(engine, sprayIP, uniqueAdminUsername("spray")))
+	}
+	require.Equal(t, int64(3), failCount(t, rdb, ipKey(sprayIP)))
+
+	rec := postFromRec(engine, "/admin/api/v1/enroll/begin", beginIP, map[string]string{
+		"username": username, "password": adminTestPassword, "token": token,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var begin struct {
+		Handle    string                       `json:"handle"`
+		PublicKey *protocol.CredentialCreation `json:"publicKey"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &begin))
+	require.Equal(t, int64(1), failCount(t, rdb, ipKey(beginIP)), "the begin step counted one guess")
+
+	va := newVirtualAuthenticator(t, uuid.MustParse(testAllowedAAGID))
+	att := va.attestationResponse(t, testAdminRPID, begin.PublicKey.Response.Challenge.String(), testAdminOrigin, flagUP|flagUV)
+	fin := postFromRec(engine, "/admin/api/v1/enroll/finish", sprayIP, map[string]any{ // #nosec G101 -- "credential_name" is a key-name label, not a secret
+		"handle": begin.Handle, "attestation": json.RawMessage(att), "credential_name": "primary",
+	})
+	require.Equal(t, http.StatusOK, fin.Code, fin.Body.String())
+
+	assert.Zero(t, failCount(t, rdb, ipKey(beginIP)), "the address that began the enrollment gets its guess back")
+	assert.Equal(t, int64(3), failCount(t, rdb, ipKey(sprayIP)), "the address that only finished it is not refunded")
+}
+
+// failingConnector backs a *sql.DB whose every connection attempt fails: a
+// database outage.
+type failingConnector struct{}
+
+func (failingConnector) Connect(context.Context) (driver.Conn, error) {
+	return nil, errors.New("injected database outage")
+}
+func (failingConnector) Driver() driver.Driver { return nil }
+
+// A database fault in the admin lookup is the server's, not an unknown username:
+// it is a logged 500, not a 401 counted as one more wrong password.
+func TestLookupFault_IsLoggedFiveHundred_NotUnknownUser(t *testing.T) { // regression for #221
+	server := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { require.NoError(t, rdb.Close()) })
+	for _, h := range []struct {
+		name  string
+		path  string
+		build func(username string) any
+	}{
+		{"PasswordLogin", "/admin/api/v1/auth/password", func(u string) any {
+			return map[string]string{"username": u, "password": adminTestPassword}
+		}},
+		{"EnrollBegin", "/admin/api/v1/enroll/begin", func(u string) any {
+			return map[string]string{"username": u, "password": adminTestPassword, "token": badEnrollTok}
+		}},
+	} {
+		t.Run(h.name, func(t *testing.T) {
+			var logs bytes.Buffer
+			gin.SetMode(gin.TestMode)
+			db := sql.OpenDB(failingConnector{})
+			t.Cleanup(func() { require.NoError(t, db.Close()) })
+			handler, err := admin.NewHandler(db, rdb, logger.NewWithWriter(&logs), authHandlerCfg())
+			require.NoError(t, err)
+			engine := gin.New()
+			engine.POST("/admin/api/v1/auth/password", handler.PasswordLogin)
+			engine.POST("/admin/api/v1/enroll/begin", handler.EnrollBegin)
+
+			username := "private-operator@example.invalid"
+			rec := postJSON(engine, h.path, h.build(username))
+
+			assert.Equal(t, http.StatusInternalServerError, rec.Code, rec.Body.String())
+			assert.Contains(t, logs.String(), "admin lookup failed")
+			assert.NotContains(t, logs.String(), username)
+			assert.NotContains(t, logs.String(), "username=")
+			assert.Contains(t, logs.String(), "level=ERROR")
+		})
+	}
+}
+
+// The two routes that take a password bound their body, because the guess is
+// counted in Redis under the submitted username before any lookup.
+func TestCredentialRoutes_OversizedBodyIs400_AndCountsNothing(t *testing.T) { // regression for #221
+	_, rdb, engine := setupEnrollLockout(t)
+	huge := strings.Repeat("a", 9<<10) // one byte over the 8 KiB cap is enough; this is well over it
+	for _, p := range []struct{ name, path string }{
+		{"PasswordLogin", "/admin/api/v1/auth/password"},
+		{"EnrollBegin", "/admin/api/v1/enroll/begin"},
+	} {
+		t.Run(p.name, func(t *testing.T) {
+			code := postFrom(engine, p.path, "10.10.0.1", map[string]string{"username": huge, "password": "x", "token": "x"})
+			assert.Equal(t, http.StatusBadRequest, code)
+			assert.False(t, keyExists(t, rdb, acctKey(huge)), "an oversized body must not reach the lockout store")
+		})
+	}
+}
+
+// failCheckedHook fails the lockout script only in its "checked" mode, so
+// Reserve still succeeds: the guess is counted and the lock write after the
+// failed password is the one that is lost.
+type failCheckedHook struct{}
+
+func (failCheckedHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+func (failCheckedHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		for _, a := range cmd.Args() {
+			if s, ok := a.(string); ok && s == "checked" {
+				return errors.New("injected checked-write fault")
+			}
+		}
+		return next(ctx, cmd)
+	}
+}
+func (failCheckedHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+// A lost lock write after a wrong password never reaches the client and never
+// skips the failure audit row: the guess was already counted, so the uniform 401
+// stands and the next reserve still locks.
+func TestPasswordLogin_CheckedWriteFault_Is401_StillAudited(t *testing.T) { // regression for #221
+	db, rdb, _ := setupEnrollLockout(t)
+	_, username, _ := enrolledAdmin(t, db, rdb)
+	engine := adminAuthEngineWithEnroll(t, db, rdb)
+	rdb.AddHook(failCheckedHook{})
+
+	code := loginGuess(engine, "10.11.0.1", username)
+
+	assert.Equal(t, http.StatusUnauthorized, code, "a lost lock write must not become a 500")
+	assert.Equal(t, int64(1), failCount(t, rdb, acctKey(username)), "the guess was counted before the check")
+	assert.Equal(t, 1, auditRows(t, db, username, admin.EventLoginFailure, admin.AuditFailure),
+		"the failure audit row is written even when the lock write was lost")
+}
+
+func enrollEngineWithLog(t *testing.T, db *sql.DB, rdb *redis.Client, logs *bytes.Buffer) *gin.Engine {
+	t.Helper()
+	gin.SetMode(gin.TestMode)
+	h, err := admin.NewHandler(db, rdb, logger.NewWithWriter(logs), authHandlerCfg())
+	require.NoError(t, err)
+	r := gin.New()
+	r.POST("/admin/api/v1/enroll/begin", h.EnrollBegin)
+	r.POST("/admin/api/v1/enroll/finish", h.EnrollFinish)
+	return r
+}
+
+func enrollBeginOK(t *testing.T, engine *gin.Engine, username, token string) (string, *protocol.CredentialCreation) {
+	t.Helper()
+	rec := postJSON(engine, "/admin/api/v1/enroll/begin", map[string]string{
+		"username": username, "password": adminTestPassword, "token": token,
+	})
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var begin struct {
+		Handle    string                       `json:"handle"`
+		PublicKey *protocol.CredentialCreation `json:"publicKey"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &begin))
+	return begin.Handle, begin.PublicKey
+}
+
+// failCredentialInserts makes every insert into admin_webauthn_credentials fail
+// with the given SQLSTATE, the way a database fault would, until the test ends.
+// P0001 is a generic fault; 23505 is a unique violation.
+func failCredentialInserts(t *testing.T, db *sql.DB, sqlstate string) {
+	t.Helper()
+	ctx := context.Background()
+	fn := "cv_test_fail_cred_insert_" + strings.ReplaceAll(uuid.NewString(), "-", "_")
+	_, err := db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE FUNCTION %s() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'injected credential store fault' USING ERRCODE = '%s'; END $$`, fn, sqlstate))
+	require.NoError(t, err)
+	_, err = db.ExecContext(ctx, fmt.Sprintf(
+		`CREATE TRIGGER %s BEFORE INSERT ON admin_webauthn_credentials FOR EACH ROW EXECUTE FUNCTION %s()`, fn, fn))
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_, triggerErr := db.ExecContext(context.Background(), fmt.Sprintf(`DROP TRIGGER IF EXISTS %s ON admin_webauthn_credentials`, fn))
+		assert.NoError(t, triggerErr)
+		_, functionErr := db.ExecContext(context.Background(), fmt.Sprintf(`DROP FUNCTION IF EXISTS %s()`, fn))
+		assert.NoError(t, functionErr)
+	})
+}
+
+func enrollFailureAuditRows(t *testing.T, db *sql.DB, username string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM admin_audit_log WHERE actor = $1 AND event_type = $2 AND result = $3`,
+		username, admin.EventEnrollComplete, admin.AuditFailure).Scan(&n))
+	return n
+}
+
+func auditRows(t *testing.T, db *sql.DB, username, event, result string) int {
+	t.Helper()
+	var n int
+	require.NoError(t, db.QueryRowContext(context.Background(),
+		`SELECT count(*) FROM admin_audit_log WHERE actor = $1 AND event_type = $2 AND result = $3`,
+		username, event, result).Scan(&n))
+	return n
+}
+
+// Counting before the check moved the lockout write out of failLogin/failEnroll;
+// their audit rows stay: one failure row per refused guess, one denied row for a
+// guess refused by the lock.
+func TestFailedGuesses_KeepTheirAuditRows(t *testing.T) { // regression for #221
+	db, rdb, engine := setupEnrollLockout(t)
+	_, username, _ := enrolledAdmin(t, db, rdb)
+
+	require.Equal(t, http.StatusUnauthorized, loginGuess(engine, "10.7.0.1", username))
+	require.Equal(t, http.StatusUnauthorized, enrollGuess(engine, "10.7.0.2", username))
+	assert.Equal(t, 1, auditRows(t, db, username, admin.EventLoginFailure, admin.AuditFailure))
+	assert.Equal(t, 1, auditRows(t, db, username, admin.EventEnrollComplete, admin.AuditFailure))
+
+	for i := 0; i < 3; i++ { // reach five counted guesses
+		require.Equal(t, http.StatusUnauthorized, loginGuess(engine, fmt.Sprintf("10.7.1.%d", i+1), username))
+	}
+	require.Equal(t, http.StatusTooManyRequests, loginGuess(engine, "10.7.2.1", username))
+	require.Equal(t, http.StatusTooManyRequests, enrollGuess(engine, "10.7.2.2", username))
+	assert.Equal(t, 1, auditRows(t, db, username, admin.EventLoginFailure, admin.AuditDenied))
+	assert.Equal(t, 1, auditRows(t, db, username, admin.EventEnrollComplete, admin.AuditDenied))
+}
+
+// A lockout-store outage refuses requests before database access and logs only
+// the failure class/event, never the submitted identifier or source address.
+func TestCredentialRoutes_LockoutFaultDoesNotLogIdentifiers(t *testing.T) {
+	for _, path := range []string{"/admin/api/v1/auth/password", "/admin/api/v1/enroll/begin"} {
+		t.Run(path, func(t *testing.T) {
+			var logs bytes.Buffer
+			handler, err := admin.NewHandler(nil, nil, logger.NewWithWriter(&logs), authHandlerCfg())
+			require.NoError(t, err)
+			engine := gin.New()
+			engine.POST("/admin/api/v1/auth/password", handler.PasswordLogin)
+			engine.POST("/admin/api/v1/enroll/begin", handler.EnrollBegin)
+			username, ip := "private-operator@example.invalid", "192.0.2.123"
+			rec := postFromRec(engine, path, ip, map[string]string{"username": username, "password": "rejected-input", "token": badEnrollTok})
+			assert.Equal(t, http.StatusInternalServerError, rec.Code)
+			assert.Contains(t, logs.String(), "admin lockout check failed")
+			assert.Contains(t, logs.String(), "level=ERROR")
+			assert.Contains(t, logs.String(), "event=")
+			for _, private := range []string{username, ip, "rejected-input", "username="} {
+				assert.NotContains(t, logs.String(), private)
+			}
+		})
+	}
+}
+
+// Both completion handlers distinguish invalid handles from operational faults,
+// without disclosing bearer handles or Redis error contents in logs or responses.
+func TestChallengeConsumption_FaultsAreLoggedWithoutPrivateData(t *testing.T) {
+	for _, route := range []struct{ path, prefix, responseField string }{
+		{"/admin/api/v1/auth/webauthn", "admin_login_challenge:", "assertion"},
+		{"/admin/api/v1/enroll/finish", "admin_enroll_challenge:", "attestation"},
+	} {
+		for _, fault := range []string{"missing", "empty", "store", "decode"} {
+			t.Run(route.path+"/"+fault, func(t *testing.T) {
+				server := miniredis.RunT(t)
+				rdb := redis.NewClient(&redis.Options{Addr: server.Addr(), MaxRetries: -1})
+				t.Cleanup(func() { require.NoError(t, rdb.Close()) })
+				var logs bytes.Buffer
+				handler, err := admin.NewHandler(nil, rdb, logger.NewWithWriter(&logs), authHandlerCfg())
+				require.NoError(t, err)
+				engine := gin.New()
+				engine.POST("/admin/api/v1/auth/webauthn", handler.WebAuthnLogin)
+				engine.POST("/admin/api/v1/enroll/finish", handler.EnrollFinish)
+				handle := "private-bearer-handle"
+				private := "private-operator@example.invalid"
+				want := http.StatusInternalServerError
+				switch fault {
+				case "missing":
+					want = http.StatusUnauthorized
+				case "empty":
+					handle = ""
+					want = http.StatusUnauthorized
+				case "store":
+					server.SetError("NOPERM " + private)
+				case "decode":
+					require.NoError(t, server.Set(route.prefix+handle, private))
+				}
+				rec := postJSON(engine, route.path, map[string]any{
+					"handle": handle, route.responseField: json.RawMessage(`{}`),
+				})
+				assert.Equal(t, want, rec.Code, rec.Body.String())
+				if want == http.StatusInternalServerError {
+					assert.Contains(t, logs.String(), "admin challenge load failed")
+					assert.Contains(t, logs.String(), "level=ERROR")
+					assert.Contains(t, logs.String(), "event=")
+				} else {
+					assert.Empty(t, logs.String(), "invalid handles are ordinary authentication rejections")
+				}
+				for _, output := range []string{logs.String(), rec.Body.String()} {
+					assert.NotContains(t, output, "private-bearer-handle")
+					assert.NotContains(t, output, private)
+				}
+			})
+		}
+	}
+}
+
+// countingLookupConnector observes the SQL boundary before password verification.
+// It deliberately fails lookups and audit transactions without using a real DB.
+type countingLookupConnector struct{ lookups atomic.Int64 }
+
+func (c *countingLookupConnector) Connect(context.Context) (driver.Conn, error) {
+	return &countingLookupConn{owner: c}, nil
+}
+func (c *countingLookupConnector) Driver() driver.Driver { return nil }
+
+type countingLookupConn struct{ owner *countingLookupConnector }
+
+func (c *countingLookupConn) Prepare(string) (driver.Stmt, error) {
+	return nil, errors.New("unexpected prepared statement")
+}
+func (c *countingLookupConn) Close() error { return nil }
+func (c *countingLookupConn) Begin() (driver.Tx, error) {
+	return nil, errors.New("injected audit transaction failure")
+}
+func (c *countingLookupConn) QueryContext(_ context.Context, query string, _ []driver.NamedValue) (driver.Rows, error) {
+	if strings.Contains(query, "FROM admin_users WHERE username") {
+		c.owner.lookups.Add(1)
+	}
+	return nil, errors.New("injected lookup failure")
+}
+
+// Response counts alone cannot prove early admission: a mutant could verify
+// every password before returning the same 401/429 totals. Count the earlier
+// database boundary, independently of HTTP status, for both handlers and axes.
+func TestCredentialBursts_ReserveBeforeLookup(t *testing.T) {
+	for _, route := range []string{"/admin/api/v1/auth/password", "/admin/api/v1/enroll/begin"} {
+		for _, axis := range []string{"account", "ip"} {
+			t.Run(route+"/"+axis, func(t *testing.T) {
+				server := miniredis.RunT(t)
+				rdb := redis.NewClient(&redis.Options{Addr: server.Addr()})
+				t.Cleanup(func() { require.NoError(t, rdb.Close()) })
+				counter := &countingLookupConnector{}
+				db := sql.OpenDB(counter)
+				t.Cleanup(func() { require.NoError(t, db.Close()) })
+				handler, err := admin.NewHandler(db, rdb, logger.NewWithWriter(io.Discard), authHandlerCfg())
+				require.NoError(t, err)
+				engine := gin.New()
+				engine.POST("/admin/api/v1/auth/password", handler.PasswordLogin)
+				engine.POST("/admin/api/v1/enroll/begin", handler.EnrollBegin)
+				codes := burst(burstSize, func(i int) int {
+					username, ip := "operator", "192.0.2.1"
+					if axis == "account" {
+						ip = fmt.Sprintf("192.0.2.%d", i+1)
+					} else {
+						username = fmt.Sprintf("operator-%d", i)
+					}
+					return postFrom(engine, route, ip, map[string]string{"username": username, "password": "wrong-password", "token": badEnrollTok})
+				})
+				assert.Equal(t, int64(5), counter.lookups.Load(), "only admitted guesses may reach the database/password boundary")
+				assert.Equal(t, 5, codes[http.StatusInternalServerError])
+				assert.Equal(t, burstSize-5, codes[http.StatusTooManyRequests])
+			})
+		}
+	}
+}
