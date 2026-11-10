@@ -225,7 +225,7 @@ jobs:
 
             self.assertEqual([], reachable_actions(fixture, ".github/workflows/root.yml"))
 
-    def test_ordinary_pr_workflow_runs_ioc_before_selected_codeql_on_retarget(self):
+    def test_ordinary_pr_workflow_runs_ioc_before_full_codeql_on_retarget(self):
         caller_path = ROOT / ".github/workflows/codeql-pr.yml"
         self.assertTrue(caller_path.is_file(),
                         "ordinary CodeQL PR caller .github/workflows/codeql-pr.yml is missing")
@@ -236,55 +236,62 @@ jobs:
         jobs = caller.get("jobs", {})
         self.assertEqual("./.github/workflows/ioc-scanning.yml", jobs.get("ioc", {}).get("uses"))
         self.assertEqual("./.github/workflows/codeql.yml", jobs.get("codeql", {}).get("uses"))
-        self.assertEqual(["ioc", "select"], jobs.get("codeql", {}).get("needs"))
-        for job in ("ioc", "select"):
-            condition = jobs.get(job, {}).get("if", "")
-            with self.subTest(job=job):
-                self.assertIn("github.event.action == 'edited'", condition)
-                self.assertIn("github.event.changes.base == null", condition,
-                              "base retarget edits must not be treated as metadata-only")
-                self.assertIn("github.event.changes.title != null", condition)
-                self.assertIn("github.event.changes.body != null", condition)
-                self.assertIn("!", condition,
-                              "only title/body-only edits may skip the IOC dependency")
+        self.assertEqual(["ioc"], jobs.get("codeql", {}).get("needs"))
+        condition = jobs.get("ioc", {}).get("if", "")
+        self.assertIn("github.event.action == 'edited'", condition)
+        self.assertIn("github.event.changes.base == null", condition,
+                      "base retarget edits must not be treated as metadata-only")
+        self.assertIn("github.event.changes.title != null", condition)
+        self.assertIn("github.event.changes.body != null", condition)
+        self.assertIn("!", condition,
+                      "only title/body-only edits may skip the IOC dependency")
         self.assertNotIn("if", jobs["codeql"], "native CodeQL cannot be skipped as a whole")
-        self.assertEqual("${{ needs.select.outputs.matrix }}",
-                         jobs["codeql"].get("with", {}).get("codeql-matrix"))
+        self.assertNotIn("codeql-matrix", jobs["codeql"].get("with", {}),
+                         "PR analysis must inherit the same full default as nightly")
+        self.assertNotIn("select", jobs, "no unused path-selector job should remain")
         self.assertNotIn("paths", triggers, "native CodeQL must not use trigger path filters")
-        select = jobs["select"]
-        checkout = next(step for step in select["steps"] if step.get("id") == "policy")
-        self.assertEqual("${{ github.event.pull_request.base.sha }}", checkout["with"]["ref"],
-                         "the language filter must come from the base commit, not the PR")
-        dorny = next(step for step in select["steps"] if step.get("id") == "filter")
-        self.assertEqual("policy/.github/ci/scan-relevance.yml", dorny["with"]["filters"])
-        codeql = yaml.load((ROOT / ".github/workflows/codeql.yml").read_text(),
-                           Loader=yaml.BaseLoader)
-        default = json.loads(codeql["on"]["workflow_call"]["inputs"]["codeql-matrix"]["default"])
-        self.assertEqual({"actions", "go", "javascript-typescript", "python"},
-                         {leg["language"] for leg in default["include"]})
-        full = run_codeql_matrix_step(select, FILTER_OK="false", HOTFIX="false", GO="", JS="")
-        self.assertEqual(default, full, "selected legs must match codeql.yml's default legs")
+        self.assertNotIn("paths-ignore", triggers)
+        concurrency = caller["concurrency"]
+        self.assertEqual("true", concurrency["cancel-in-progress"])
+        for expression in ("github.event.action == 'edited'", "github.event.changes.base == null",
+                           "github.event.changes.title != null", "github.event.changes.body != null",
+                           "codeql-pr-metadata-{0}", "codeql-pr-{0}"):
+            self.assertIn(expression, concurrency["group"])
+        self.assertEqual({"contents": "read", "security-events": "write", "packages": "read",
+                          "actions": "read"}, jobs["codeql"]["permissions"])
 
-    def test_codeql_language_selection(self):
-        select = yaml.load((ROOT / ".github/workflows/codeql-pr.yml").read_text(),
-                           Loader=yaml.BaseLoader)["jobs"]["select"]
+    def test_pr_codeql_matrix_matches_nightly_for_all_path_results(self):
+        caller = yaml.load((ROOT / ".github/workflows/codeql-pr.yml").read_text(),
+                           Loader=yaml.BaseLoader)
+        nightly = yaml.load((ROOT / ".github/workflows/nightly-ci.yml").read_text(),
+                            Loader=yaml.BaseLoader)
+        codeql = yaml.load((ROOT / ".github/workflows/codeql.yml").read_text(),
+                          Loader=yaml.BaseLoader)
+        default = codeql["on"]["workflow_call"]["inputs"]["codeql-matrix"]["default"]
+        nightly_job = nightly["jobs"]["codeql"]
+        self.assertEqual(caller["jobs"]["codeql"]["uses"], nightly_job["uses"])
+        baseline = json.loads(nightly_job.get("with", {}).get("codeql-matrix", default))
+        self.assertEqual({"actions", "go", "javascript-typescript", "python"},
+                         {leg["language"] for leg in baseline["include"]})
         cases = [
-            ({"FILTER_OK": "true", "HOTFIX": "false", "GO": "false", "JS": "false"}, ["actions", "python"]),
-            ({"FILTER_OK": "true", "HOTFIX": "false", "GO": "true", "JS": "false"}, ["actions", "go", "python"]),
-            ({"FILTER_OK": "true", "HOTFIX": "false", "GO": "false", "JS": "true"},
-             ["actions", "javascript-typescript", "python"]),
-            ({"FILTER_OK": "true", "HOTFIX": "true", "GO": "false", "JS": "false"},
-             ["actions", "go", "javascript-typescript", "python"]),
-            # A failed or skipped filter (empty outputs) fails open to the full matrix.
-            ({"FILTER_OK": "false", "HOTFIX": "false", "GO": "", "JS": ""},
-             ["actions", "go", "javascript-typescript", "python"]),
-            ({"FILTER_OK": "true", "HOTFIX": "false", "GO": "", "JS": ""},
-             ["actions", "go", "javascript-typescript", "python"]),
+            {"FILTER_OK": "true", "HOTFIX": "false", "GO": "false", "JS": "false"},
+            {"FILTER_OK": "true", "HOTFIX": "false", "GO": "true", "JS": "false"},
+            {"FILTER_OK": "true", "HOTFIX": "false", "GO": "false", "JS": "true"},
+            {"FILTER_OK": "true", "HOTFIX": "true", "GO": "false", "JS": "false"},
+            {"FILTER_OK": "false", "HOTFIX": "false", "GO": "", "JS": ""},
+            {"FILTER_OK": "true", "HOTFIX": "false", "GO": "", "JS": ""},
         ]
-        for env, languages in cases:
+        configured = caller["jobs"]["codeql"].get("with", {}).get("codeql-matrix", default)
+        for env in cases:
             with self.subTest(**env):
-                matrix = run_codeql_matrix_step(select, **env)
-                self.assertEqual(languages, [leg["language"] for leg in matrix["include"]])
+                # Execute the old selector if reintroduced: Python-only, Go-only and
+                # JS-only PRs must each retain every category in the nightly baseline.
+                if configured == "${{ needs.select.outputs.matrix }}":
+                    actual = run_codeql_matrix_step(caller["jobs"]["select"], **env)
+                else:
+                    actual = json.loads(configured)
+                self.assertEqual(baseline, actual,
+                                 "path selection must not leave native baseline categories missing")
 
     def test_valid_pr_selection_never_claims_protected_codeql_ownership(self):
         metadata = {"event_name": "pull_request", "hotfix": False,

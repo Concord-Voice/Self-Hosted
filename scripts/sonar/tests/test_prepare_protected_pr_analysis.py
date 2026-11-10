@@ -10,6 +10,7 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
+from urllib.error import HTTPError, URLError
 import zipfile
 
 
@@ -51,6 +52,90 @@ class FakeGitHub(MODULE.GitHub):
         if binary and path.startswith("/actions/artifacts/") and path.endswith("/zip"):
             return self.case.zips[int(path.split("/")[3])]
         raise AssertionError(f"unexpected API request: {path}")
+
+
+class ArtifactDownloadDiagnosticTest(unittest.TestCase):
+    path = "/actions/artifacts/123/zip"
+    location = "https://fixture.blob.core.windows.net/artifact?sig=synthetic-signed-secret"
+
+    def error(self, code):
+        error = HTTPError(self.location, 403, "synthetic-private-message",
+                          {"X-Private": "synthetic-private-header"},
+                          io.BytesIO(b"synthetic-private-body"))
+        # Construct with an integer first: urllib may format it before our code runs.
+        error.code = code
+        self.addCleanup(error.close)
+        return error
+
+    def opened(self, outcome, location=None):
+        redirect = HTTPError(MODULE.API + self.path, 302, "redirect",
+                             {"Location": location or self.location}, None)
+        self.addCleanup(redirect.close)
+        return patch.object(MODULE, "OPEN", side_effect=[redirect, outcome])
+
+    def assert_download_rejected(self, error, expected, during_read=False):
+        outcome = error
+        if during_read:
+            outcome = io.BytesIO()
+            outcome.url = self.location
+            def fail_read(*args):
+                raise error
+            outcome.read = fail_read
+        with self.opened(outcome) as opened:
+            with self.assertRaises(MODULE.Reject) as caught:
+                MODULE.GitHub("synthetic-api-token").request(self.path, binary=True)
+        self.assertEqual(str(caught.exception), expected)
+        self.assertTrue(caught.exception.__suppress_context__)
+        self.assertEqual(opened.call_count, 2, "failed download must not retry")
+        self.assertIsNone(opened.call_args_list[1].args[0].get_header("Authorization"))
+        for private in (self.location, "synthetic-api-token", "synthetic-private-message",
+                        "synthetic-private-header", "synthetic-private-body"):
+            self.assertNotIn(private, str(caught.exception))
+
+    def test_http_status_is_validated_and_private_inputs_are_not_formatted(self):
+        class PrivateCode:
+            def __repr__(self):
+                raise AssertionError("must not format an unvalidated status")
+            __str__ = __repr__
+
+        codes = [403, 404, 410, 429, 500, 503, None, True, False, "403", 403.0,
+                 99, 600, -1, PrivateCode()]
+        for index, code in enumerate(codes):
+            with self.subTest(index=index):
+                status = str(code) if type(code) is int and 100 <= code <= 599 else "unknown"
+                self.assert_download_rejected(self.error(code),
+                                             f"artifact download failed: HTTP status {status}")
+
+    def test_fixed_transport_categories_cover_open_and_read_failures(self):
+        for error_type, category in ((TimeoutError, "timeout"), (URLError, "url-error"),
+                                     (OSError, "os-error")):
+            for during_read in (False, True):
+                with self.subTest(category=category, during_read=during_read):
+                    self.assert_download_rejected(
+                        error_type(self.location + " synthetic-api-token"),
+                        f"artifact download failed: {category}", during_read)
+
+    def test_success_and_existing_redirect_and_size_guards(self):
+        for url, data, expected in ((self.location, b"zip", None),
+                                    (self.location + "&again=1", b"zip", "artifact redirected again"),
+                                    (self.location, b"oversized", "API byte bound exceeded")):
+            with self.subTest(expected=expected):
+                response = io.BytesIO(data)
+                response.url = url
+                with self.opened(response) as opened:
+                    client = MODULE.GitHub("synthetic-api-token")
+                    if expected:
+                        with self.assertRaisesRegex(MODULE.Reject, expected):
+                            client.request(self.path, limit=3, binary=True)
+                    else:
+                        self.assertEqual(client.request(self.path, limit=3, binary=True), b"zip")
+                self.assertEqual(opened.call_count, 2)
+
+    def test_untrusted_redirect_is_rejected_before_download(self):
+        with self.opened(None, "https://untrusted.invalid/?sig=synthetic-secret") as opened:
+            with self.assertRaisesRegex(MODULE.Reject, "artifact redirect host invalid"):
+                MODULE.GitHub("synthetic-api-token").request(self.path, binary=True)
+        self.assertEqual(opened.call_count, 1)
 
 
 class PrepareTest(unittest.TestCase):
