@@ -834,6 +834,16 @@ jobs:
         run: |
           python3 -m pip install --user --quiet --require-hashes --only-binary=:all: -r .github/requirements-pyyaml.txt
 
+      # Fails when a tracked manifest root (a Dockerfile, a package.json, a
+      # go.mod, a requirements file) is in no block of .github/dependabot.yml, or
+      # when a block watches a directory that no longer exists. Until this step
+      # the audit ran only as a local pre-commit hook, and a Dockerfile dropped
+      # from the config went unnoticed. Exit 2 means the audit could not parse
+      # the config (PyYAML from the step above); that is a failure, not a pass.
+      # This job is advisory: a failure is a red check, not a merge block.
+      - name: Dependabot watches every update root
+        run: bash scripts/security/audit-dependabot-coverage.sh
+
       - name: TruffleHog runtime is digest-pinned
         run: |
           python3 - <<'PY'

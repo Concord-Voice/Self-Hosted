@@ -332,6 +332,12 @@ run_policy_case workflow-lint-source-suite advisory-only .github/scripts/tests/c
 run_policy_case workflow-lint-source-helper advisory-only .github/scripts/ci-scan-relevance.mjs
 run_policy_case workflow-lint-source-remote-builder advisory-only scripts/ci/require-remote-buildkit.py
 run_policy_case workflow-lint-source-map advisory-only .github/ci/scan-relevance.yml
+# Dependabot coverage can change when the config, the audit, or any Dockerfile
+# changes. Each must start workflow-lint, which runs the audit. The Dockerfile
+# path is deliberately one that no other filter names.
+run_policy_case workflow-lint-source-dependabot advisory-only .github/dependabot.yml
+run_policy_case workflow-lint-source-coverage-audit advisory-only scripts/security/audit-dependabot-coverage.sh
+run_policy_case workflow-lint-source-new-dockerfile advisory-only tools/example/Dockerfile.example
 run_policy_case workflow-lint-only advisory-only .github/scripts/workflow-lint-only.txt
 run_policy_case workflow-lint-legacy-changelog advisory-only CHANGELOG.md
 run_policy_case guard-go-toolchain semgrep_community scripts/check-go-toolchain.py scripts/test-check-go-toolchain.py
