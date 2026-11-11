@@ -248,7 +248,7 @@ _None yet._
 | First recorded | 2026-11-11, PR #259 |
 | Suppressed by | Trailing `# nosemgrep:` with the rule ID on the same line |
 | Rationale | The stub upstream computes `Sec-WebSocket-Accept`, which RFC 6455 section 4.2.2 defines as base64(SHA-1(key + GUID)). It is a protocol handshake value, not a security hash, and SHA-256 would break the handshake. Test-only file. |
-| Verification | The local community rulesets reported the finding before the marker and none after it. |
+| Verification | The local community rulesets reported the finding before the marker and none after it. Code Scanning alert #493 was dismissed as a false positive on 2026-11-11 with Mark's approval, because the PR scan verifier does not honour in-source suppressions. |
 | Disposition | Rule-specific inline suppression for this line only. |
 
 #### `generic.nginx.security.request-host-used.request-host-used` — blue-green nginx test vhost (#253)
@@ -259,7 +259,7 @@ _None yet._
 | First recorded | 2026-11-11, PR #259 |
 | Suppressed by | Trailing `# nosemgrep:` with the rule ID on the same line, inside the generated nginx config |
 | Rationale | The line is a stand-in for the shipped vhost's `$validated_host` map so the cut locations render. The test nginx listens on loopback only and serves stub upstreams; no production config is generated from it. |
-| Verification | The local community rulesets reported two findings on the line before the marker and none after it. |
+| Verification | The local community rulesets reported two findings on the line before the marker and none after it. Code Scanning alerts #494/#495 were dismissed as false positives on 2026-11-11 with Mark's approval, because the PR scan verifier does not honour in-source suppressions. |
 | Disposition | Rule-specific inline suppression for this test line only. A `$host` use in a shipped vhost is still a real finding. |
 
 ## Adding a new entry
