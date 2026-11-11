@@ -226,6 +226,7 @@ COMPOSE_SELFHOST_ARG=""
   && COMPOSE_SELFHOST_ARG=" -f ${DEPLOY_DIR}/docker-compose.selfhost.yml"
 if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]]; then
   MEDIA_DEPLOY_PROFILE=media-single
+  CONTROL_PLANE_DEPLOY_PROFILE=control-plane-single
   COMPOSE_PROJECT_ARG=""
 elif [[ "$COMPOSE_OVERRIDE" == docker-compose.west-staging.yml ]]; then
   # A third Compose layer is privileged West-only state. Bind it to both
@@ -265,6 +266,7 @@ elif [[ "$COMPOSE_OVERRIDE" == docker-compose.west-staging.yml ]]; then
     exit 1
   fi
   MEDIA_DEPLOY_PROFILE=media-single
+  CONTROL_PLANE_DEPLOY_PROFILE=control-plane-single
   COMPOSE_PROJECT_ARG=" -p concord-west-stage"
   COMPOSE_PRODUCTION_ARG=" -f ${DEPLOY_DIR}/docker-compose.production.yml"
 elif [[ "$COMPOSE_OVERRIDE" == docker-compose.production.yml \
@@ -275,8 +277,15 @@ elif [[ "$COMPOSE_OVERRIDE" == docker-compose.production.yml \
     media-single|media-bluegreen) ;;
     *) echo 'media-bluegreen: invalid media deployment profile' >&2; exit 2 ;;
   esac
+  # Same source and shape as MEDIA_DEPLOY_PROFILE: the sourced deploy env files.
+  CONTROL_PLANE_DEPLOY_PROFILE="${CONTROL_PLANE_DEPLOY_PROFILE:-control-plane-single}"
+  case "$CONTROL_PLANE_DEPLOY_PROFILE" in
+    control-plane-single|control-plane-bluegreen) ;;
+    *) echo 'control-plane-bluegreen: invalid control-plane deployment profile' >&2; exit 2 ;;
+  esac
 else
   MEDIA_DEPLOY_PROFILE=media-single
+  CONTROL_PLANE_DEPLOY_PROFILE=control-plane-single
   COMPOSE_PROJECT_ARG=""
 fi
 if [[ "$MEDIA_DEPLOY_PROFILE" == media-bluegreen ]]; then
@@ -288,12 +297,25 @@ else
     COMPOSE_PROFILES=services
   fi
 fi
-# Control-plane blue-green rail. Hard-coded off: while it is off nothing that
-# reads these runs a new command or changes any output. The cutover marker
-# exists only while a cutover is in flight and drives recovery; the live vhost
-# is the rail's only record of the active control-plane port and is the same
-# path as nginx-reload's NGINX_DST.
+# Control-plane blue-green rail. On only for control-plane-bluegreen on a
+# managed production or staging host; every other branch above forced
+# control-plane-single. While it is off nothing that reads these runs a new
+# command or changes any output. The rail needs the flock backend (its nested
+# flip re-enters on fd 9) and cannot share a host with the media colours; the
+# managed lock state directory is checked once its path is known. The cutover
+# marker exists only while a cutover is in flight and drives recovery; the live
+# vhost is the rail's only record of the active control-plane port and is the
+# same path as nginx-reload's NGINX_DST.
 CONTROL_PLANE_BLUEGREEN=0
+if [[ "$CONTROL_PLANE_DEPLOY_PROFILE" == control-plane-bluegreen \
+   && "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost ]]; then
+  if [[ "$MEDIA_DEPLOY_PROFILE" == media-bluegreen ]]; then
+    echo 'control-plane-bluegreen: rail-refused-media-bluegreen' >&2
+    exit 2
+  fi
+  [[ -x /usr/bin/flock ]] || { echo 'control-plane-bluegreen: rail-refused-no-flock' >&2; exit 2; }
+  CONTROL_PLANE_BLUEGREEN=1
+fi
 CONTROL_PLANE_CUTOVER_MARKER="${CONFIG_DEPLOY_DIR}/.control-plane-cutover.local"
 CONTROL_PLANE_LIVE_VHOST="/etc/nginx/sites-available/concordvoice"
 [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]] || export COMPOSE_PROFILES
@@ -5565,6 +5587,45 @@ control_plane_bluegreen_live_port() {
   printf '%s\n' "$port"
 }
 
+control_plane_bluegreen_marker_present() {
+  [[ -e "$CONTROL_PLANE_CUTOVER_MARKER" || -L "$CONTROL_PLANE_CUTOVER_MARKER" ]]
+}
+
+# Called once per locked verb, with the verb, as soon as the deploy transaction
+# lock is held and before any mutation.
+# No marker: return 0 having run nothing. With a marker a cutover is in flight
+# or was interrupted. sudoers-sync touches neither containers nor nginx and
+# always proceeds. With the rail off nothing else may run against the
+# half-finished cutover; with it on only the verbs that recover or contain it
+# (rebuild, nginx-reload, stop) may.
+control_plane_bluegreen_marker_guard() {
+  control_plane_bluegreen_marker_present || return 0
+  [[ "$1" != sudoers-sync ]] || return 0
+  if (( !CONTROL_PLANE_BLUEGREEN )); then
+    echo 'control-plane-bluegreen: rail-off-with-cutover-marker' >&2
+    return 1
+  fi
+  case "$1" in
+    rebuild|nginx-reload|stop) return 0 ;;
+  esac
+  echo 'control-plane-bluegreen: cutover-incomplete' >&2
+  return 1
+}
+
+# Stop green with home's 45s drain, then remove it. A green that is already
+# gone is success; any other Docker failure is printed and returns 1.
+control_plane_bluegreen_reap_green() {
+  local name=concordvoice-control-plane-green out
+  if ! out="$(docker stop -t 45 "$name" 2>&1)" && [[ "$out" != *'No such container'* ]]; then
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+  if ! out="$(docker rm -f "$name" 2>&1)" && [[ "$out" != *'No such container'* ]]; then
+    printf '%s\n' "$out" >&2
+    return 1
+  fi
+}
+
 # Unscoped rebuild (#3524). Every service, ordered so the paired voice handoff
 # stays intact: (1) everything control-plane and media-plane depend on,
 # transitively, health-gated; (2) the paired handoff, unchanged; (3) every
@@ -5776,6 +5837,12 @@ if [[ ! -d /var/lib/concord ]]; then
   DEPLOY_TRANSACTION_LOCK_PATH="$(cd "$CONFIG_DEPLOY_DIR" && pwd -P)/.deploy-transaction.lock" || exit 1
 fi
 readonly DEPLOY_TRANSACTION_LOCK_PATH
+# The rail serializes on the managed lock inode only, never the fallback: the
+# same admission acquire_deploy_transaction_lock applies to nginx-reload.
+if (( CONTROL_PLANE_BLUEGREEN )) && [[ "$DEPLOY_TRANSACTION_LOCK_PATH" != /var/lib/concord/* ]]; then
+  echo 'control-plane-bluegreen: rail-refused-no-state-dir' >&2
+  exit 2
+fi
 # Non-blocking by default; the deploy verbs raise it just before acquiring.
 DEPLOY_LOCK_WAIT_SECS=0
 readonly LOCKF_REENTRY_MARKER="--concord-ctl-lockf-reentry-v1"
@@ -5994,6 +6061,7 @@ case "${1:-help}" in
     # These early post-rsync transactions wait for an in-progress actor cycle.
     DEPLOY_LOCK_WAIT_SECS=90
     acquire_deploy_transaction_lock "$@"
+    control_plane_bluegreen_marker_guard "$1" || exit 1
     ;;
   rebuild|stage-restore|restart|stop|docker-clean|activity-history-activate|activity-history-rollback|voice-enforcement-rollout|media-reap|media-legacy-pause|media-legacy-resume|redis-managed-prepare|redis-managed-rebuild|redis-managed-register-running|redis-managed-rollback|turn-managed-init-schema|turn-managed-bootstrap|turn-managed-add-candidate|turn-managed-promote|turn-managed-rollback|turn-managed-recover|turn-managed-discard-unrecorded|turn-managed-status)
     # The two activity-history verbs belong here for the SAME reason the deploy
@@ -6012,6 +6080,7 @@ case "${1:-help}" in
     # flake. 90s comfortably exceeds the actor's worst-case hold.
     DEPLOY_LOCK_WAIT_SECS=90
     acquire_deploy_transaction_lock "$@"
+    control_plane_bluegreen_marker_guard "$1" || exit 1
     if [[ "${1:-}" != docker-clean && "$ACTIVITY_HISTORY_CONTRACT_MODE" == managed \
        && "$COMPOSE_OVERRIDE" == docker-compose.production.yml ]]; then
       redis_managed_writer_consistency_guard || exit 1
@@ -7666,6 +7735,8 @@ else:
       turn_managed_writer_consistency_guard || exit 1
     fi
     fi
+    # Outside the block above so the lockf child, which skips it, runs it too.
+    control_plane_bluegreen_marker_guard "$1" || exit 1
 
     managed_egress_gate verify || exit 1
     managed_production_nats_reconcile model-only || exit 1
@@ -7784,6 +7855,12 @@ else:
       cd "$DEPLOY_DIR" && managed_compose_mutate stop || exit 1
     else
       cd "$DEPLOY_DIR" && managed_compose_mutate down || exit 1
+    fi
+    # An interrupted cutover can leave the green one-off running, and stopping
+    # the service set does not reach it. The marker stays: the next
+    # `rebuild control-plane` recovers.
+    if (( CONTROL_PLANE_BLUEGREEN )) && control_plane_bluegreen_marker_present; then
+      control_plane_bluegreen_reap_green || exit 1
     fi
     echo "Done."
     ;;

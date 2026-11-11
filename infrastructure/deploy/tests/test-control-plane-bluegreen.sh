@@ -65,22 +65,54 @@ fixture_rewrite '     && [[ "$DEPLOY_TRANSACTION_LOCK_PATH" != /var/lib/concord/
   "     && [[ \"\$DEPLOY_TRANSACTION_LOCK_PATH\" != $TMP/lock/* ]]; then"
 fixture_rewrite 'CONTROL_PLANE_LIVE_VHOST="/etc/nginx/sites-available/concordvoice"' \
   "CONTROL_PLANE_LIVE_VHOST=\"$TMP/live/concordvoice\""
+#   5. the rail's managed-lock admission (rail-refused-no-state-dir) -> $TMP/lock
+# shellcheck disable=SC2016
+fixture_rewrite 'if (( CONTROL_PLANE_BLUEGREEN )) && [[ "$DEPLOY_TRANSACTION_LOCK_PATH" != /var/lib/concord/* ]]; then' \
+  "if (( CONTROL_PLANE_BLUEGREEN )) && [[ \"\$DEPLOY_TRANSACTION_LOCK_PATH\" != $TMP/lock/* ]]; then"
+# Rewrites 3 and 5 are the controller's two managed-lock admissions; a third
+# would still name the real path in the fixture.
+if grep -Fq '!= /var/lib/concord/*' <<<"$src"; then
+  fail "controller fixture left a managed lock admission unrewritten"
+fi
 printf '%s\n' "${src/"$lock_probe"/$new_probe}" >"$CTL"
 chmod +x "$CTL"
 
-# Rail-on twin: its own project tree, so its cutover marker is separate, with a
-# controller that differs from $CTL only in rewrite 5, the rail selector line.
+# Rail-on twin: its own project tree, so its cutover marker is separate. Its
+# controller is $CTL unchanged; the rail is on through the switch in its
+# deploy.env.local, written in the canonical writer's @Q form.
 RAIL_PROJECT="$TMP/rail-project"
 RAIL_CTL="$RAIL_PROJECT/infrastructure/deploy/concord-ctl.sh"
+RAIL_ENV="$RAIL_PROJECT/infrastructure/deploy/deploy.env.local"
 RAIL_MARKER="$RAIL_PROJECT/infrastructure/deploy/.control-plane-cutover.local"
+PLAIN_ENV="$PROJECT/infrastructure/deploy/deploy.env.local"
 PLAIN_MARKER="$PROJECT/infrastructure/deploy/.control-plane-cutover.local"
 cp -R "$PROJECT" "$RAIL_PROJECT"
+printf '%s\n' "CONTROL_PLANE_DEPLOY_PROFILE='control-plane-bluegreen'" >>"$RAIL_ENV"
+# No-flock twin in the rail project: rewrite 6 points the rail's flock probe
+# at a path that never exists.
+NOFLOCK_CTL="$RAIL_PROJECT/infrastructure/deploy/concord-ctl-noflock.sh"
 src="$(cat "$CTL")"
-fixture_rewrite 'CONTROL_PLANE_BLUEGREEN=0' 'CONTROL_PLANE_BLUEGREEN=1'
-printf '%s\n' "$src" >"$RAIL_CTL"
+fixture_rewrite "  [[ -x /usr/bin/flock ]] || { echo 'control-plane-bluegreen: rail-refused-no-flock' >&2; exit 2; }" \
+  "  [[ -x $TMP/no-flock ]] || { echo 'control-plane-bluegreen: rail-refused-no-flock' >&2; exit 2; }"
+printf '%s\n' "$src" >"$NOFLOCK_CTL"
+chmod +x "$NOFLOCK_CTL"
+# Stop twins, one per project (rewrite 7): `stop` retires media and gates its
+# compose mutation through voice-boot-containment.py, which admits only a real
+# host's deploy lock and provisioning state. These copies make those two
+# helpers no-ops; the rest of stop is the shipped code.
+STOP_CTL="$PROJECT/infrastructure/deploy/concord-ctl-stop.sh"
+RAIL_STOP_CTL="$RAIL_PROJECT/infrastructure/deploy/concord-ctl-stop.sh"
+src="$(cat "$CTL")"
+fixture_rewrite 'voice_enforcement_rollout_stop_media() {' 'voice_enforcement_rollout_stop_media() { return 0; }
+voice_enforcement_rollout_stop_media_fixture_unused() {'
+fixture_rewrite 'voice_enforcement_rollout_guard_mutation() {' 'voice_enforcement_rollout_guard_mutation() { return 0; }
+voice_enforcement_rollout_guard_mutation_fixture_unused() {'
+printf '%s\n' "$src" >"$STOP_CTL"
+cp "$STOP_CTL" "$RAIL_STOP_CTL"
+chmod +x "$STOP_CTL" "$RAIL_STOP_CTL"
 
-# Stubs: every tool logs "<tool> <argv>" to $TMP/calls. stub_exit/stub_out
-# register rules in $TMP/rules.{exit,out}.<tool> as "<pattern>|<value>" (glob
+# Stubs: every tool logs "<tool> <argv>" to $TMP/calls. stub_exit/stub_out/stub_err
+# register rules in $TMP/rules.{exit,out,err}.<tool> as "<pattern>|<value>" (glob
 # pattern on the joined argv, first match wins). Default: exit 0, no stdout.
 # (The controller's flock/lockf lock itself is the host's real one, on a $TMP path.)
 for tool in docker curl nginx systemctl flock nc sudo; do
@@ -89,6 +121,12 @@ for tool in docker curl nginx systemctl flock nc sudo; do
 tool="$tool"
 argv="\$*"
 printf '%s %s\n' "\$tool" "\$argv" >>"$TMP/calls"
+if [[ -f "$TMP/rules.err.\$tool" ]]; then
+  while IFS='|' read -r pat text; do
+    # shellcheck disable=SC2254
+    case "\$argv" in \$pat) printf '%b' "\$text" >&2; break ;; esac
+  done <"$TMP/rules.err.\$tool"
+fi
 if [[ -f "$TMP/rules.exit.\$tool" ]]; then
   while IFS='|' read -r pat code; do
     # shellcheck disable=SC2254
@@ -111,6 +149,8 @@ done
 stub_exit() { printf '%s|%s\n' "$2" "$3" >>"$TMP/rules.exit.$1"; }
 # stub_out <tool> <glob-pattern-on-argv> <stdout-text (printf %b escapes)>
 stub_out() { printf '%s|%s\n' "$2" "$3" >>"$TMP/rules.out.$1"; }
+# stub_err <tool> <glob-pattern-on-argv> <stderr-text>: printed before any exit rule.
+stub_err() { printf '%s|%s\n' "$2" "$3" >>"$TMP/rules.err.$1"; }
 # transcript: ordered argv log of every stub call, fixture root shown as <P>
 transcript() { sed "s#$PROJECT/infrastructure/deploy/../..#<P>#g" "$TMP/calls"; }
 
@@ -120,7 +160,7 @@ COMPOSE_MODEL='{"services":{"control-plane":{"image":"cp:fixture","depends_on":{
 # container, and a NATS container with no published host ports.
 reset_stubs() {
   : >"$TMP/calls"
-  rm -f "$TMP"/rules.exit.* "$TMP"/rules.out.*
+  rm -f "$TMP"/rules.exit.* "$TMP"/rules.out.* "$TMP"/rules.err.*
   stub_out docker '*config --format json*' "$COMPOSE_MODEL\\n"
   stub_out docker '*ps --status running -q -- control-plane*' 'c0ffee000001\n'
   stub_out docker '*ps -q nats' 'ab12ab12ab12\n'
@@ -695,6 +735,7 @@ flip_form_refused_without_marker_file() {
   expect_flip_rejected flip_form_refused_without_marker_file
 }
 flip_argument_without_reentry_is_usage_error() {
+  need_flock flip_argument_without_reentry_is_usage_error || return 0
   reset_stubs
   : >"$RAIL_MARKER"
   run_ctl_at "$RAIL_CTL" nginx-reload --control-plane-upstream 8081
@@ -704,6 +745,399 @@ flip_argument_without_reentry_is_usage_error() {
     pass "flip_argument_without_reentry_is_usage_error"
   else
     fail "flip_argument_without_reentry_is_usage_error rc=$rc: $(head -c 400 "$TMP/out" | tr '\n' ';')"
+  fi
+}
+
+# ---------------------------------------------------------------------------
+# Control-plane rail switch, its exit-2 refusals and the cutover-marker guard.
+# The rail is on only through CONTROL_PLANE_DEPLOY_PROFILE in the deploy env
+# file, and only with flock: on a host without /usr/bin/flock every rail-on
+# controller run refuses by design, so those cases SKIP there (fail under CI).
+T0_COMPOSE='docker compose -f <P>/docker-compose.yml -f <P>/docker-compose.production.yml --profile services'
+T0_PROBE="rc=0 flag=0 profile=control-plane-single cmd=$T0_COMPOSE"
+SWITCH_INVALID='control-plane-bluegreen: invalid control-plane deployment profile'
+RAIL_OFF_MARKER='control-plane-bluegreen: rail-off-with-cutover-marker'
+CUTOVER_INCOMPLETE='control-plane-bluegreen: cutover-incomplete'
+GREEN=concordvoice-control-plane-green
+# sha256 of the two migration guards, extracted by name from 778d3b7e.
+GUARD_SHA256_REFRESH_DAEMON_IDS='78761343e1e4521bf3728bdd04cee884a889e910b1d47b64929f2541703248a2'
+GUARD_SHA256_PRIVACY_FOREIGN_CP='314d9b4d23f36c58bbe3eb12042945f762822b288d3ce343b46dfa4488053fca'
+
+# The head of the fixture controller through its COMPOSE_CMD= line (the
+# test-selfhost-port-posture.sh precedent): it selects the deployment profiles
+# and builds COMPOSE_CMD, and dispatches nothing. A self-host project has no
+# deploy.env.local (the self-host contract refuses one), only deploy.env.
+SH_PROJECT="$TMP/selfhost-project"
+SH_ENV="$SH_PROJECT/infrastructure/deploy/deploy.env"
+HEAD_NAME=concord-ctl-head.sh
+mkdir -p "$SH_PROJECT/infrastructure/deploy"
+for root in "$PROJECT" "$RAIL_PROJECT" "$SH_PROJECT"; do
+  sed -n '1,/^COMPOSE_CMD=/p' "$CTL" >"$root/infrastructure/deploy/$HEAD_NAME"
+done
+# head_probe <root> [VAR=value...]: source <root>'s head with the stubs first on
+# PATH and CONTROL_PLANE_DEPLOY_PROFILE unset unless a VAR sets it. Prints
+# "rc=<n> flag=<rail> profile=<profile> cmd=<word-split COMPOSE_CMD>" (or rc
+# and the refusal), fixture root shown as <P>.
+head_probe() {
+  local root="$1" out r=0
+  shift
+  # shellcheck disable=SC2016
+  out="$(env -u CONTROL_PLANE_DEPLOY_PROFILE PATH="$STUBS:$PATH" "$@" bash -c 'source "$1"
+    # shellcheck disable=SC2086
+    printf "flag=%s profile=%s cmd=%s" "$CONTROL_PLANE_BLUEGREEN" \
+      "${CONTROL_PLANE_DEPLOY_PROFILE-<unset>}" "$(echo $COMPOSE_CMD)"' \
+    _ "$root/infrastructure/deploy/$HEAD_NAME" 2>&1 </dev/null)" || r=$?
+  printf 'rc=%s %s' "$r" "$out" | sed "s#$root/infrastructure/deploy/../..#<P>#g"
+}
+# with_env_line <env-file> <line> <command...>: run <command> with <line>
+# appended to <env-file>, then restore the file.
+with_env_line() {
+  local f="$1" line="$2"
+  shift 2
+  cp "$f" "$TMP/env.bak"
+  printf '%s\n' "$line" >>"$f"
+  "$@"
+  cp "$TMP/env.bak" "$f"
+}
+# rail_transcript / rail_out: the call log and output with either fixture root
+# shown as <P>, so a rail-off and a rail-on run compare byte for byte.
+rail_transcript() {
+  sed -e "s#$PROJECT/infrastructure/deploy/../..#<P>#g" \
+    -e "s#$RAIL_PROJECT/infrastructure/deploy/../..#<P>#g" "$TMP/calls"
+}
+rail_out() { sed -e "s#$RAIL_PROJECT#<P>#g" -e "s#$PROJECT#<P>#g" "$TMP/out"; }
+# refused_exactly <rc> <line>: the run exited <rc>, printed exactly <line>, and
+# called no stub.
+refused_exactly() {
+  [[ "$rc" == "$1" && "$(cat "$TMP/out")" == "$2" && ! -s "$TMP/calls" ]]
+}
+# mutating_calls: stub calls that change containers or images.
+mutating_calls() {
+  grep -cE '^docker (compose .* )?(build|stop|up|down|run|rm|restart|kill|start)( |$)' "$TMP/calls" || true
+}
+# saw <line>: the last run printed <line> as a whole line.
+saw() { grep -qFx -- "$1" "$TMP/out"; }
+brief_out() { head -c 400 "$TMP/out" | tr '\n' ';'; }
+# reset_nats: reset_stubs plus a running nats container, so `rebuild nats`
+# stays scoped instead of escalating to a full rebuild.
+reset_nats() {
+  reset_stubs
+  stub_out docker '*ps --status running -q -- nats' 'ab12ab12ab12\n'
+}
+
+switch_unset_compose_cmd_identical() {
+  local got probe
+  got="$( (unset CONTROL_PLANE_DEPLOY_PROFILE; char_rebuild_control_plane_transcript) 2>&1)"
+  cp "$TMP/out" "$TMP/t0.out"
+  probe="$(head_probe "$PROJECT" COMPOSE_OVERRIDE=docker-compose.production.yml)"
+  # Mutation that turns this red: default the profile to control-plane-bluegreen
+  # in the production/staging branch (flag 1, or rail-refused-no-flock).
+  if [[ "$got" == 'PASS: char_rebuild_control_plane_transcript' && "$probe" == "$T0_PROBE" ]]; then
+    pass "switch_unset_compose_cmd_identical"
+  else
+    fail "switch_unset_compose_cmd_identical probe=[$probe] t0=[$(tr '\n' ';' <<<"$got")]"
+  fi
+}
+
+switch_single_identical() {
+  local got probe line="CONTROL_PLANE_DEPLOY_PROFILE='control-plane-single'" same=0
+  got="$( (with_env_line "$PLAIN_ENV" "$line" char_rebuild_control_plane_transcript) 2>&1)"
+  cmp -s "$TMP/out" "$TMP/t0.out" && same=1
+  probe="$(with_env_line "$PLAIN_ENV" "$line" head_probe "$PROJECT" COMPOSE_OVERRIDE=docker-compose.production.yml)"
+  # Mutation that turns this red: turn the rail on for control-plane-single too.
+  if [[ "$got" == 'PASS: char_rebuild_control_plane_transcript' && $same -eq 1 && "$probe" == "$T0_PROBE" ]]; then
+    pass "switch_single_identical"
+  else
+    fail "switch_single_identical output-identical=$same probe=[$probe] t0=[$(tr '\n' ';' <<<"$got")]"
+  fi
+}
+
+switch_bluegreen_compose_cmd_identical() {
+  need_flock switch_bluegreen_compose_cmd_identical || return 0
+  local probe total other
+  probe="$(head_probe "$RAIL_PROJECT" COMPOSE_OVERRIDE=docker-compose.production.yml)"
+  reset_nats
+  rm -f "$RAIL_MARKER"
+  run_ctl_at "$RAIL_CTL" rebuild nats
+  total="$(rail_transcript | grep -c '^docker compose ' || true)"
+  other="$(rail_transcript | grep '^docker compose ' | grep -vcF "$T0_COMPOSE " || true)"
+  # Mutation that turns this red: add an -f overlay (or a project flag) to
+  # COMPOSE_CMD when the rail is on.
+  if [[ "$probe" == "rc=0 flag=1 profile=control-plane-bluegreen cmd=$T0_COMPOSE" \
+     && $rc -eq 0 && $total -ge 1 && $other -eq 0 ]]; then
+    pass "switch_bluegreen_compose_cmd_identical"
+  else
+    fail "switch_bluegreen_compose_cmd_identical probe=[$probe] rc=$rc compose-calls=$total other-prefix=$other: $(brief_out)"
+  fi
+}
+
+# Every invalid value is refused before any command runs.
+switch_invalid_exits_2() {
+  local v bad=''
+  for v in control-plane-blue CONTROL-PLANE-BLUEGREEN control_plane_bluegreen media-bluegreen; do
+    reset_stubs
+    with_env_line "$PLAIN_ENV" "CONTROL_PLANE_DEPLOY_PROFILE='$v'" run_ctl rebuild control-plane
+    refused_exactly 2 "$SWITCH_INVALID" || bad+=" [$v rc=$rc: $(brief_out)]"
+  done
+  # Mutation that turns this red: delete the profile case's `*)` refusal arm.
+  if [[ -z "$bad" ]]; then pass "switch_invalid_exits_2"; else fail "switch_invalid_exits_2:$bad"; fi
+}
+
+# The value after sourcing must be exact: no padding, no literal quotes.
+switch_quoted_or_padded_value_exits_2() {
+  local line bad=''
+  for line in "CONTROL_PLANE_DEPLOY_PROFILE=' control-plane-bluegreen'" \
+    "CONTROL_PLANE_DEPLOY_PROFILE='\"control-plane-bluegreen\"'" \
+    "CONTROL_PLANE_DEPLOY_PROFILE='control-plane-bluegreen '"; do
+    reset_stubs
+    with_env_line "$PLAIN_ENV" "$line" run_ctl rebuild control-plane
+    refused_exactly 2 "$SWITCH_INVALID" || bad+=" [$line rc=$rc: $(brief_out)]"
+  done
+  # Mutation that turns this red: trim whitespace or quotes before the case, or
+  # match with a glob such as `*control-plane-bluegreen*`.
+  if [[ -z "$bad" ]]; then pass "switch_quoted_or_padded_value_exits_2"; else fail "switch_quoted_or_padded_value_exits_2:$bad"; fi
+}
+
+switch_forced_single_in_selfhost_mode() {
+  local base sw inv envsw
+  local -a sh=(ACTIVITY_HISTORY_CONTRACT_MODE=selfhost COMPOSE_OVERRIDE=docker-compose.production.yml COMPOSE_PROFILES=services)
+  reset_stubs
+  rm -f "$SH_ENV"
+  base="$(head_probe "$SH_PROJECT" "${sh[@]}")"
+  printf '%s\n' "CONTROL_PLANE_DEPLOY_PROFILE='control-plane-bluegreen'" >"$SH_ENV"
+  sw="$(head_probe "$SH_PROJECT" "${sh[@]}")"
+  printf '%s\n' "CONTROL_PLANE_DEPLOY_PROFILE='not-a-profile'" >"$SH_ENV"
+  inv="$(head_probe "$SH_PROJECT" "${sh[@]}")"
+  rm -f "$SH_ENV"
+  envsw="$(head_probe "$SH_PROJECT" "${sh[@]}" CONTROL_PLANE_DEPLOY_PROFILE=control-plane-bluegreen)"
+  # Mutation that turns this red: leave the sourced profile in place in the
+  # self-host branch instead of forcing control-plane-single.
+  if [[ "$base" == 'rc=0 flag=0 profile=control-plane-single cmd=docker compose --env-file <P>/.env '* \
+     && "$sw" == "$base" && "$inv" == "$base" && "$envsw" == "$base" && ! -s "$TMP/calls" ]]; then
+    pass "switch_forced_single_in_selfhost_mode"
+  else
+    fail "switch_forced_single_in_selfhost_mode base=[$base] switch=[$sw] invalid=[$inv] env=[$envsw]"
+  fi
+}
+
+# The final `else` branch (an override that is neither production, staging nor
+# West staging) forces control-plane-single silently, whatever the value.
+switch_forced_single_outside_production() {
+  local base sw inv
+  base="$(head_probe "$PROJECT" COMPOSE_OVERRIDE=docker-compose.dev.yml)"
+  sw="$(with_env_line "$PLAIN_ENV" "CONTROL_PLANE_DEPLOY_PROFILE='control-plane-bluegreen'" \
+    head_probe "$PROJECT" COMPOSE_OVERRIDE=docker-compose.dev.yml)"
+  inv="$(with_env_line "$PLAIN_ENV" "CONTROL_PLANE_DEPLOY_PROFILE='not-a-profile'" \
+    head_probe "$PROJECT" COMPOSE_OVERRIDE=docker-compose.dev.yml)"
+  # Mutation that turns this red: give the final else branch the production
+  # branch's default-and-validate form.
+  if [[ "$base" == 'rc=0 flag=0 profile=control-plane-single cmd=docker compose -f <P>/docker-compose.yml -f <P>/docker-compose.dev.yml --profile services' \
+     && "$sw" == "$base" && "$inv" == "$base" ]]; then
+    pass "switch_forced_single_outside_production"
+  else
+    fail "switch_forced_single_outside_production base=[$base] switch=[$sw] invalid=[$inv]"
+  fi
+}
+
+# Checked before flock, so this runs on every host.
+rail_refused_media_bluegreen() {
+  reset_stubs
+  with_env_line "$RAIL_ENV" "MEDIA_DEPLOY_PROFILE='media-bluegreen'" run_ctl_at "$RAIL_CTL" rebuild control-plane
+  # Mutation that turns this red: delete the media-bluegreen refusal.
+  if refused_exactly 2 'control-plane-bluegreen: rail-refused-media-bluegreen'; then
+    pass "rail_refused_media_bluegreen"
+  else
+    fail "rail_refused_media_bluegreen rc=$rc: $(brief_out)"
+  fi
+}
+
+# Simulated everywhere by rewrite 6 (on a host without flock it also holds natively).
+rail_refused_no_flock() {
+  reset_stubs
+  run_ctl_at "$NOFLOCK_CTL" rebuild control-plane
+  # Mutation that turns this red: delete the /usr/bin/flock refusal line.
+  if refused_exactly 2 'control-plane-bluegreen: rail-refused-no-flock'; then
+    pass "rail_refused_no_flock"
+  else
+    fail "rail_refused_no_flock rc=$rc: $(brief_out)"
+  fi
+}
+
+# Without the state directory the lock falls back to the deploy directory.
+rail_refused_no_state_dir() {
+  need_flock rail_refused_no_state_dir || return 0
+  reset_stubs
+  mv "$TMP/lock" "$TMP/lock.away"
+  run_ctl_at "$RAIL_CTL" rebuild control-plane
+  mv "$TMP/lock.away" "$TMP/lock"
+  # Mutation that turns this red: delete the no-state-dir refusal after
+  # `readonly DEPLOY_TRANSACTION_LOCK_PATH` (the fallback lock is taken).
+  if refused_exactly 2 'control-plane-bluegreen: rail-refused-no-state-dir'; then
+    pass "rail_refused_no_state_dir"
+  else
+    fail "rail_refused_no_state_dir rc=$rc: $(brief_out)"
+  fi
+}
+
+guards_unchanged_from_baseline() {
+  local spec fn got bad=''
+  for spec in "activity_history_refresh_daemon_ids:$GUARD_SHA256_REFRESH_DAEMON_IDS" \
+    "privacy_defaults_refuse_foreign_control_plane:$GUARD_SHA256_PRIVACY_FOREIGN_CP"; do
+    fn="${spec%%:*}"
+    extract_top_fn "$fn" >"$TMP/guard.body"
+    got="$(sha256_of "$TMP/guard.body")"
+    [[ -s "$TMP/guard.body" && "$got" == "${spec#*:}" ]] || bad+=" $fn=$got"
+  done
+  # Mutation that turns this red: change any byte of either guard.
+  if [[ -z "$bad" ]]; then pass "guards_unchanged_from_baseline"; else fail "guards_unchanged_from_baseline:$bad"; fi
+}
+
+# Rail on, no marker: a non-control-plane rebuild is byte-identical to rail off.
+marker_absent_no_extra_calls() {
+  need_flock marker_absent_no_extra_calls || return 0
+  local off_t off_o off_rc
+  rm -f "$PLAIN_MARKER" "$RAIL_MARKER"
+  reset_nats
+  run_ctl rebuild nats
+  off_rc=$rc off_t="$(rail_transcript)" off_o="$(rail_out)"
+  reset_nats
+  run_ctl_at "$RAIL_CTL" rebuild nats
+  # Mutation that turns this red: make any call from the marker guard before its
+  # marker test (for example a docker ps probe for green).
+  if [[ $off_rc -eq 0 && $rc -eq 0 && -n "$off_t" && "$(rail_transcript)" == "$off_t" && "$(rail_out)" == "$off_o" ]]; then
+    pass "marker_absent_no_extra_calls"
+  else
+    fail "marker_absent_no_extra_calls off-rc=$off_rc on-rc=$rc"
+    diff <(printf '%s\n' "$off_t") <(rail_transcript) >&2 || true
+  fi
+}
+
+# Rail off + marker: every locked verb but sudoers-sync refuses after the lock.
+marker_rail_off_refuses_rebuild() {
+  local spec bad=''
+  local -a v
+  : >"$PLAIN_MARKER"
+  for spec in 'rebuild control-plane' 'stop' 'nginx-reload'; do
+    read -r -a v <<<"$spec"
+    reset_stubs
+    run_ctl "${v[@]}"
+    [[ $rc -eq 1 && "$(mutating_calls)" == 0 ]] && saw "$RAIL_OFF_MARKER" || bad+=" [$spec rc=$rc: $(brief_out)]"
+  done
+  rm -f "$PLAIN_MARKER"
+  # Mutation that turns this red: delete the guard call after either dispatch
+  # lock (or the guard's rail-off arm).
+  if [[ -z "$bad" ]]; then pass "marker_rail_off_refuses_rebuild"; else fail "marker_rail_off_refuses_rebuild:$bad"; fi
+}
+
+marker_rail_off_refuses_freshstart() {
+  reset_stubs
+  : >"$PLAIN_MARKER"
+  rc=0
+  printf 'y\n' | PATH="$STUBS:$PATH" COMPOSE_OVERRIDE=docker-compose.production.yml \
+    bash "$CTL" freshstart >"$TMP/out" 2>&1 || rc=$?
+  rm -f "$PLAIN_MARKER"
+  # Mutation that turns this red: delete the guard call after freshstart's lock.
+  if [[ $rc -eq 1 && "$(mutating_calls)" == 0 ]] && saw "$RAIL_OFF_MARKER"; then
+    pass "marker_rail_off_refuses_freshstart"
+  else
+    fail "marker_rail_off_refuses_freshstart rc=$rc mutating=$(mutating_calls): $(brief_out)"
+  fi
+}
+
+marker_rail_off_allows_sudoers_sync() {
+  reset_stubs
+  : >"$PLAIN_MARKER"
+  run_ctl sudoers-sync
+  rm -f "$PLAIN_MARKER"
+  # Mutation that turns this red: drop sudoers-sync from the guard's always-allowed arm.
+  if [[ $rc -eq 0 ]] && ! saw "$RAIL_OFF_MARKER" && grep -qFx 'sudo -n /usr/local/sbin/concord-sudoers-sync' "$TMP/calls"; then
+    pass "marker_rail_off_allows_sudoers_sync"
+  else
+    fail "marker_rail_off_allows_sudoers_sync rc=$rc: $(brief_out)"
+  fi
+}
+
+marker_rail_on_refuses_restart() {
+  need_flock marker_rail_on_refuses_restart || return 0
+  local bad=''
+  reset_stubs
+  : >"$RAIL_MARKER"
+  run_ctl_at "$RAIL_CTL" restart
+  [[ $rc -eq 1 && "$(mutating_calls)" == 0 ]] && saw "$CUTOVER_INCOMPLETE" || bad+=" marker:rc=$rc: $(brief_out)"
+  # Control: without the marker restart is not refused by the guard.
+  reset_stubs
+  rm -f "$RAIL_MARKER"
+  run_ctl_at "$RAIL_CTL" restart
+  saw "$CUTOVER_INCOMPLETE" && bad+=" no-marker:refused"
+  # Mutation that turns this red: add restart to the rail-on allowed verbs (or
+  # invert the marker test).
+  if [[ -z "$bad" ]]; then pass "marker_rail_on_refuses_restart"; else fail "marker_rail_on_refuses_restart:$bad"; fi
+}
+
+marker_rail_on_allows_nginx_reload_and_stop() {
+  need_flock marker_rail_on_allows_nginx_reload_and_stop || return 0
+  local bad=''
+  reset_stubs
+  : >"$RAIL_MARKER"
+  run_ctl_at "$RAIL_CTL" nginx-reload
+  # Under the stubs nginx-reload stops at the managed identity admission, after the guard.
+  { ! saw "$CUTOVER_INCOMPLETE" && grep -qF 'managed-core: canonical deployment identity is missing or ambiguous' "$TMP/out"; } \
+    || bad+=" nginx-reload:rc=$rc: $(brief_out)"
+  reset_stubs
+  run_ctl_at "$RAIL_STOP_CTL" stop
+  [[ $rc -eq 0 ]] && ! saw "$CUTOVER_INCOMPLETE" && saw 'Done.' || bad+=" stop:rc=$rc: $(brief_out)"
+  rm -f "$RAIL_MARKER"
+  # Mutation that turns this red: drop nginx-reload or stop from the rail-on allowed verbs.
+  if [[ -z "$bad" ]]; then pass "marker_rail_on_allows_nginx_reload_and_stop"; else fail "marker_rail_on_allows_nginx_reload_and_stop:$bad"; fi
+}
+
+stop_with_marker_reaps_green_and_keeps_marker() {
+  need_flock stop_with_marker_reaps_green_and_keeps_marker || return 0
+  local bad='' want
+  want="$(printf 'docker stop -t 45 %s\ndocker rm -f %s' "$GREEN" "$GREEN")"
+  reset_stubs
+  : >"$RAIL_MARKER"
+  run_ctl_at "$RAIL_STOP_CTL" stop
+  # Mutations: drop the reap (the last calls are compose's); remove the marker.
+  [[ $rc -eq 0 && "$(tail -n 2 "$TMP/calls")" == "$want" && -e "$RAIL_MARKER" ]] \
+    || bad+=" reap:rc=$rc,last=$(tail -n 2 "$TMP/calls" | tr '\n' ';')"
+  # Green already gone: both calls report No such container; stop succeeds.
+  # Mutation: treat a missing green as a failure.
+  reset_stubs
+  stub_err docker "stop -t 45 $GREEN" "Error response from daemon: No such container: $GREEN\\n"
+  stub_exit docker "stop -t 45 $GREEN" 1
+  stub_err docker "rm -f $GREEN" "Error response from daemon: No such container: $GREEN\\n"
+  stub_exit docker "rm -f $GREEN" 1
+  run_ctl_at "$RAIL_STOP_CTL" stop
+  [[ $rc -eq 0 && -e "$RAIL_MARKER" ]] || bad+=" absent:rc=$rc: $(brief_out)"
+  # Any other reap failure fails the stop and keeps the marker.
+  # Mutation: ignore every reap failure.
+  reset_stubs
+  stub_err docker "stop -t 45 $GREEN" 'Cannot connect to the Docker daemon\n'
+  stub_exit docker "stop -t 45 $GREEN" 1
+  run_ctl_at "$RAIL_STOP_CTL" stop
+  [[ $rc -eq 1 && -e "$RAIL_MARKER" ]] && saw 'Cannot connect to the Docker daemon' \
+    || bad+=" daemon-error:rc=$rc: $(brief_out)"
+  rm -f "$RAIL_MARKER"
+  if [[ -z "$bad" ]]; then pass "stop_with_marker_reaps_green_and_keeps_marker"; else fail "stop_with_marker_reaps_green_and_keeps_marker:$bad"; fi
+}
+
+stop_without_marker_unchanged() {
+  need_flock stop_without_marker_unchanged || return 0
+  local off_t off_o off_rc
+  rm -f "$PLAIN_MARKER" "$RAIL_MARKER"
+  reset_stubs
+  run_ctl_at "$STOP_CTL" stop
+  off_rc=$rc off_t="$(rail_transcript)" off_o="$(rail_out)"
+  reset_stubs
+  run_ctl_at "$RAIL_STOP_CTL" stop
+  # Mutation that turns this red: reap green whenever the rail is on (drop the
+  # marker test from stop).
+  if [[ $off_rc -eq 0 && $rc -eq 0 && "$(rail_transcript)" == "$off_t" && "$(rail_out)" == "$off_o" ]]; then
+    pass "stop_without_marker_unchanged"
+  else
+    fail "stop_without_marker_unchanged off-rc=$off_rc on-rc=$rc"
+    diff <(printf '%s\n' "$off_t") <(rail_transcript) >&2 || true
   fi
 }
 
@@ -727,4 +1161,23 @@ reentry_genuine_accepted
 flip_form_refused_when_rail_off
 flip_form_refused_without_marker_file
 flip_argument_without_reentry_is_usage_error
+switch_unset_compose_cmd_identical
+switch_single_identical
+switch_bluegreen_compose_cmd_identical
+switch_invalid_exits_2
+switch_quoted_or_padded_value_exits_2
+switch_forced_single_in_selfhost_mode
+switch_forced_single_outside_production
+rail_refused_media_bluegreen
+rail_refused_no_flock
+rail_refused_no_state_dir
+guards_unchanged_from_baseline
+marker_absent_no_extra_calls
+marker_rail_off_refuses_rebuild
+marker_rail_off_refuses_freshstart
+marker_rail_off_allows_sudoers_sync
+marker_rail_on_refuses_restart
+marker_rail_on_allows_nginx_reload_and_stop
+stop_with_marker_reaps_green_and_keeps_marker
+stop_without_marker_unchanged
 exit $((fails > 0))
