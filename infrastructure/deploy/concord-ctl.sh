@@ -288,6 +288,14 @@ else
     COMPOSE_PROFILES=services
   fi
 fi
+# Control-plane blue-green rail. Hard-coded off: while it is off nothing that
+# reads these runs a new command or changes any output. The cutover marker
+# exists only while a cutover is in flight and drives recovery; the live vhost
+# is the rail's only record of the active control-plane port and is the same
+# path as nginx-reload's NGINX_DST.
+CONTROL_PLANE_BLUEGREEN=0
+CONTROL_PLANE_CUTOVER_MARKER="${CONFIG_DEPLOY_DIR}/.control-plane-cutover.local"
+CONTROL_PLANE_LIVE_VHOST="/etc/nginx/sites-available/concordvoice"
 [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]] || export COMPOSE_PROFILES
 if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost ]]; then
   # Managed filesystem and daemon operations must address the same host.
@@ -5526,6 +5534,37 @@ print(" ".join(sorted(set(s) - closure - excluded)))
   echo 'media-bluegreen: rebuild completed with active colour excluded'
 }
 
+# Control-plane blue-green: the active port is read back from the live vhost,
+# parsed with the renderer's rules. A missing vhost is the home port. Otherwise
+# the file needs exactly one `upstream control_plane {` line, one canonical
+# server line on 8080 or 8081 inside that block, no other server line there,
+# and a closing `}`. Anything else (CRLF, trailing or tab whitespace, another
+# address or port, a second block, an unreadable file) prints nothing and
+# returns 1. Only the rail calls this.
+control_plane_bluegreen_live_port() {
+  local path="$CONTROL_PLANE_LIVE_VHOST" line port="" blocks=0 servers=0 in_block=0 bad=0
+  if [[ ! -e "$path" && ! -L "$path" ]]; then
+    printf '8080\n'
+    return 0
+  fi
+  [[ -f "$path" && -r "$path" ]] || return 1
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    if [[ "$line" == 'upstream control_plane {' ]]; then
+      blocks=$((blocks + 1))
+      in_block=1
+    elif (( in_block )) && [[ "$line" == '}' ]]; then
+      in_block=0
+    elif (( in_block )) && [[ "$line" =~ ^\ {4}server\ 127\.0\.0\.1:(8080|8081)\;$ ]]; then
+      port="${BASH_REMATCH[1]}"
+      servers=$((servers + 1))
+    elif (( in_block )) && [[ "$line" =~ ^[[:space:]]*server([[:space:]]|\;|$) ]]; then
+      bad=1
+    fi
+  done < "$path" || return 1
+  (( blocks == 1 && servers == 1 && !bad && !in_block )) || return 1
+  printf '%s\n' "$port"
+}
+
 # Unscoped rebuild (#3524). Every service, ordered so the paired voice handoff
 # stays intact: (1) everything control-plane and media-plane depend on,
 # transitively, health-gated; (2) the paired handoff, unchanged; (3) every
@@ -5767,6 +5806,39 @@ if [[ "${1:-}" == "$LOCKF_REENTRY_MARKER" ]]; then
   shift
 fi
 
+readonly CONTROL_PLANE_FLIP_REENTRY_MARKER="--concord-ctl-control-plane-flip-v1"
+CONCORD_CTL_FLIP_REENTRY_INTERNAL=0
+
+# The control-plane cutover re-invokes nginx-reload while it already holds the
+# deploy transaction lock on fd 9 (flock backend only). Honour that child only
+# when its argv is exactly the flip form, the rail is on, the cutover marker
+# exists, fd 9 is the lock file, someone holds the lock, and fd 9 can take it
+# without contention: the holder is this process tree's own open file
+# description, so an unrelated holder cannot lend its lock.
+validate_control_plane_flip_reentry() {
+  local probe_rc=0
+
+  [[ $# -eq 4 && "$1" == "$CONTROL_PLANE_FLIP_REENTRY_MARKER" && "$2" == nginx-reload \
+     && "$3" == --control-plane-upstream && ( "$4" == 8080 || "$4" == 8081 ) ]] || return 1
+  (( CONTROL_PLANE_BLUEGREEN )) || return 1
+  [[ -f "$CONTROL_PLANE_CUTOVER_MARKER" ]] || return 1
+  [[ -x /usr/bin/flock ]] || return 1
+  [[ /dev/fd/9 -ef "$DEPLOY_TRANSACTION_LOCK_PATH" ]] || return 1
+  /usr/bin/flock -n "$DEPLOY_TRANSACTION_LOCK_PATH" -c : || probe_rc=$?
+  [[ "$probe_rc" -eq 1 ]] || return 1
+  /usr/bin/flock -n 9
+}
+
+# Same normalization for the nested control-plane flip.
+if [[ "${1:-}" == "$CONTROL_PLANE_FLIP_REENTRY_MARKER" ]]; then
+  if ! validate_control_plane_flip_reentry "$@"; then
+    echo "  ✗ rejected invalid internal control-plane flip re-entry" >&2
+    exit 1
+  fi
+  CONCORD_CTL_FLIP_REENTRY_INTERNAL=1
+  shift
+fi
+
 acquire_deploy_transaction_lock() {
   local operation="$1" lock_rc=0 lock_backend=""
 
@@ -5790,7 +5862,7 @@ acquire_deploy_transaction_lock() {
   local lock_path="$DEPLOY_TRANSACTION_LOCK_PATH"
   local status_path="" child_status=""
 
-  if (( CONCORD_CTL_LOCKF_REENTRY_INTERNAL )); then
+  if (( CONCORD_CTL_LOCKF_REENTRY_INTERNAL || CONCORD_CTL_FLIP_REENTRY_INTERNAL )); then
     return 0
   fi
 
@@ -6629,6 +6701,8 @@ else:
     # Spec ref: 2026-05-09-919-spa-deploy-trust-chain-design.md §5.9
     NGINX_STAGE=0
     NGINX_STAGE_BOOTSTRAP=0
+    # Control-plane upstream port to render; consulted only with the rail on.
+    NGINX_CP_UPSTREAM_PORT=""
     if [[ "$COMPOSE_OVERRIDE" == docker-compose.west-staging.yml ]]; then
       NGINX_STAGE=1
       if [[ $# -eq 2 && "$2" == --stage-bootstrap ]]; then
@@ -6637,12 +6711,24 @@ else:
         echo 'Usage: concord-ctl.sh nginx-reload [--stage-bootstrap]' >&2
         exit 2
       fi
+    elif (( CONCORD_CTL_FLIP_REENTRY_INTERNAL )) \
+       && [[ $# -eq 3 && "$2" == --control-plane-upstream ]]; then
+      # The cutover's nested flip; its exact argv was validated before dispatch.
+      NGINX_CP_UPSTREAM_PORT="$3"
     elif [[ $# -ne 1 ]]; then
       echo 'Usage: concord-ctl.sh nginx-reload' >&2
       exit 2
     fi
     if (( !NGINX_STAGE )) && [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost ]]; then
       managed_core_identity_admit || exit 1
+    fi
+    # Carry-forward: an ordinary reload with the rail on keeps the active
+    # colour, and refuses before rendering anything if it cannot read it.
+    if (( !NGINX_STAGE && CONTROL_PLANE_BLUEGREEN )) && [[ -z "$NGINX_CP_UPSTREAM_PORT" ]]; then
+      if ! NGINX_CP_UPSTREAM_PORT="$(control_plane_bluegreen_live_port)"; then
+        echo 'control-plane-bluegreen: live-upstream-unparseable' >&2
+        exit 1
+      fi
     fi
     if (( NGINX_STAGE )); then
       NGINX_SRC="${DEPLOY_DIR}/infrastructure/deploy/nginx/west-staging.conf.template"
@@ -6922,8 +7008,16 @@ else:
     }
 
     render_nginx_config() {
-      local policy="$1" encoded line tmp
+      local policy="$1" cp_port="${2:-}" encoded line tmp
       local in_api=0 scoped_replacements=0 owner_markers=0
+      # Rail only: the control_plane upstream block, parsed with the rules of
+      # control_plane_bluegreen_live_port, gets its one server line rewritten
+      # to cp_port. With the rail off the port is ignored and nothing changes.
+      local cp_rail=0 in_cp=0 cp_blocks=0 cp_servers=0 cp_bad=0
+      if [[ "${CONTROL_PLANE_BLUEGREEN:-0}" == 1 ]]; then
+        cp_rail=1
+        [[ "$cp_port" == 8080 || "$cp_port" == 8081 ]] || return 1
+      fi
       encoded="$(encode_hsts_for_nginx "$policy")" || return 1
       mkdir -p "$NGINX_RENDER_DIR" || return 1
       tmp="$(mktemp "${NGINX_RENDER}.tmp.XXXXXX")" || return 1
@@ -6932,7 +7026,20 @@ else:
           '# HTTPS — API + WebSocket Hub'*) in_api=1 ;;
           '# HTTPS — Media Plane'*) in_api=0 ;;
         esac
-        if (( in_api )) && [[ "$line" == "    # CONCORD_MANAGED_HSTS_OWNER" ]]; then
+        if (( cp_rail )) && [[ "$line" == 'upstream control_plane {' ]]; then
+          cp_blocks=$((cp_blocks + 1))
+          in_cp=1
+          printf '%s\n' "$line"
+        elif (( cp_rail && in_cp )) && [[ "$line" == '}' ]]; then
+          in_cp=0
+          printf '%s\n' "$line"
+        elif (( cp_rail && in_cp )) && [[ "$line" =~ ^\ {4}server\ 127\.0\.0\.1:(8080|8081)\;$ ]]; then
+          printf '    server 127.0.0.1:%s;\n' "$cp_port"
+          cp_servers=$((cp_servers + 1))
+        elif (( cp_rail && in_cp )) && [[ "$line" =~ ^[[:space:]]*server([[:space:]]|\;|$) ]]; then
+          cp_bad=1
+          printf '%s\n' "$line"
+        elif (( in_api )) && [[ "$line" == "    # CONCORD_MANAGED_HSTS_OWNER" ]]; then
           printf '%s\n' "$line"
           printf '    proxy_hide_header Strict-Transport-Security;\n'
           printf '    add_header Strict-Transport-Security "%s" always;\n' "$encoded"
@@ -6950,6 +7057,10 @@ else:
         return 1
       fi
       if (( owner_markers != 1 || scoped_replacements != 3 )); then
+        rm -f "$tmp"
+        return 1
+      fi
+      if (( cp_rail )) && ! (( cp_blocks == 1 && cp_servers == 1 && !cp_bad && !in_cp )); then
         rm -f "$tmp"
         return 1
       fi
@@ -6973,7 +7084,7 @@ else:
         echo "  ✗ nginx-reload: HSTS_HEADER_VALUE is malformed — REFUSING to stage nginx" >&2
         exit 1
       fi
-      if ! render_nginx_config "$hsts_header_value"; then
+      if ! render_nginx_config "$hsts_header_value" "$NGINX_CP_UPSTREAM_PORT"; then
         echo "  ✗ nginx-reload: failed to atomically render the nginx HSTS policy — REFUSING to stage nginx" >&2
         exit 1
       fi
