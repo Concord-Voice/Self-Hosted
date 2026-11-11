@@ -332,14 +332,20 @@ run_policy_case workflow-lint-source-suite advisory-only .github/scripts/tests/c
 run_policy_case workflow-lint-source-helper advisory-only .github/scripts/ci-scan-relevance.mjs
 run_policy_case workflow-lint-source-remote-builder advisory-only scripts/ci/require-remote-buildkit.py
 run_policy_case workflow-lint-source-map advisory-only .github/ci/scan-relevance.yml
-# Dependabot coverage can change when the config, the audit, or any Dockerfile
-# changes. Each must start workflow-lint, which runs the audit. The Dockerfile
-# path is deliberately one that no other filter names.
+# Dependabot coverage can change when the config, the audit, its regression
+# suite, the helper it imports, or any Dockerfile changes. Each must start
+# workflow-lint, which runs the audit. The Dockerfile paths are deliberately
+# ones that no other filter names.
 run_policy_case workflow-lint-source-dependabot advisory-only .github/dependabot.yml
 run_policy_case workflow-lint-source-coverage-audit advisory-only scripts/security/audit-dependabot-coverage.sh
+run_policy_case workflow-lint-source-coverage-audit-suite advisory-only scripts/security/test-audit-dependabot-coverage.sh
+run_policy_case workflow-lint-source-pin-exceptions advisory-only scripts/security/check-pin-exceptions.mjs
 run_policy_case workflow-lint-source-new-dockerfile advisory-only tools/example/Dockerfile.example
-# The audit counts any tracked path that contains `Dockerfile`, suffix form included.
+run_policy_case workflow-lint-source-root-dockerfile advisory-only Dockerfile
+# The audit lists tracked paths with the pathspec `*Dockerfile*`: a suffix
+# form, and a file under a directory with such a name, both count.
 run_policy_case workflow-lint-source-suffix-dockerfile advisory-only tools/example/api.Dockerfile
+run_policy_case workflow-lint-source-dockerfile-dir advisory-only tools/example/Dockerfile.d/conf
 run_policy_case workflow-lint-only advisory-only .github/scripts/workflow-lint-only.txt
 run_policy_case workflow-lint-legacy-changelog advisory-only CHANGELOG.md
 run_policy_case guard-go-toolchain semgrep_community scripts/check-go-toolchain.py scripts/test-check-go-toolchain.py
