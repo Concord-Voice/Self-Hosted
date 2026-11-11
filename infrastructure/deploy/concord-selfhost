@@ -120,6 +120,9 @@ Verbs:
                guarded disable/checkpoint/immutable old-image rollback
   down         stop AND remove containers + network (docker compose down)
   stop         pause containers, leave them in place (docker compose stop)
+               up, down and stop also manage the account-key authority once
+               authority init or upgrade has run; up migrates it, and an
+               authority failure there is a warning, not a failure
   status [--json]
                per-service container state (docker compose ps); --json prints
                one object: {"schema":1,"services":[{service,name,state,health,
@@ -149,6 +152,9 @@ Verbs:
                as root, once: create the account-key authority's keys, first
                delegation and database, export the encrypted recovery keys to
                DIR, then start it (dormant until the client integration ships)
+  authority upgrade --export-dir DIR
+               as init, for an install that already has accounts; it never
+               seals: sealing them comes with the client integration
   authority renew
                as root: sign the next delegation (new RSK and CAK, 180 days)
                with primaries A and B, install it and restart the authority;
@@ -400,11 +406,23 @@ except (KeyError, TypeError, ValueError):
   fi
 }
 
+# authority_lifecycle up|stop|down — the account-key authority follows the
+# stack once authority init or upgrade has run (selfhost-authority.sh).
+authority_lifecycle() {
+  # shellcheck source=selfhost-authority.sh
+  { declare -F _authority_lifecycle >/dev/null || source "$SCRIPT_DIR/selfhost-authority.sh"; } \
+    && _authority_lifecycle "$1" && return 0
+  # ponytail: a warning, not a failure, while nothing calls the authority, so
+  # update does not roll back a healthy stack. Make it fatal with the client
+  # integration.
+  echo "WARNING: the stack's $1 finished, but the account-key authority's did not (see above)" >&2
+}
+
 # ── Verb dispatch ──────────────────────────────────────────────────────
 
 main() {
   case "${1:-}" in
-    up)         require_security_log_boundary && guarded_ctl rebuild ;;
+    up)         require_security_log_boundary && guarded_ctl rebuild && authority_lifecycle up ;;
     activity-history-activate)
       shift
       guarded_ctl activity-history-activate "$@"
@@ -413,8 +431,8 @@ main() {
       shift
       guarded_ctl activity-history-rollback "$@"
       ;;
-    down)       compose down ;;
-    stop)       compose stop ;;
+    down)       compose down && authority_lifecycle down ;;
+    stop)       compose stop && authority_lifecycle stop ;;
     status)     shift; verb_status "$@" ;;
     logs)       shift; verb_logs "$@" ;;
     health)     shift; verb_health "$@" ;;

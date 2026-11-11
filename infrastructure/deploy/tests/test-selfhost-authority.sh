@@ -52,7 +52,8 @@ chmod +x "$WORK/fake-tool"
 # env -i. It reads its settings from $WORK/state, written by each test:
 # CALLS, PG_IMAGE (0 = the postgres image is missing), SUBNETS, SALT,
 # which keygen mixes into its points so that a renewal's keys are new, and
-# LINK=NAME:TARGET, which makes keygen leave key NAME as a symlink to TARGET.
+# LINK=NAME:TARGET, which makes keygen leave key NAME as a symlink to TARGET,
+# and COMPOSE_FAIL=WORD, which fails each compose call with WORD as an argument.
 mkdir "$WORK/bin"
 cat >"$WORK/bin/docker" <<DOCKER
 #!/usr/bin/env bash
@@ -65,7 +66,7 @@ case "$1 $2" in
   'image inspect') [[ "$PG_IMAGE" == 1 ]]; exit ;;
   'network ls') printf 'net1\nnet2\n'; exit 0 ;;
   'network inspect') printf '172.17.0.0/16 \n%s \n' "$SUBNETS"; exit 0 ;;
-  'compose '*) exit 0 ;;
+  'compose '*) [[ -z "${COMPOSE_FAIL:-}" || " $* " != *" $COMPOSE_FAIL "* ]]; exit ;;
 esac
 vol='' name=''
 for a in "$@"; do
@@ -111,7 +112,7 @@ docker_set() { printf '%s\n' "$1" >>"$WORK/state"; }
 # a caller's `if` would ignore it.
 run_init() {
   local input="$1"; shift
-  ROOT="$ROOT" DEPLOY="$DEPLOY" CALLS="$CALLS" TOOL_FAIL="${TOOL_FAIL:-}" SWAP_FAIL="${SWAP_FAIL:-}" \
+  ROOT="$ROOT" DEPLOY="$DEPLOY" CALLS="$CALLS" TOOL_FAIL="${TOOL_FAIL:-}" SWAP_FAIL="${SWAP_FAIL:-}" FN="${FN:-verb_authority}" \
   bash -euo pipefail -c '
     # shellcheck disable=SC2034 # read by the helper
     PROJECT_ROOT="$ROOT"
@@ -120,7 +121,12 @@ run_init() {
     _authority_require_root() { [[ "${NOT_ROOT:-}" != 1 ]] || _authority_fail "authority init must run as root"; }
     _authority_chown() { printf "chown %s\n" "$*" >>"$CALLS"; }
     selfhost_storage_project_identity() { SELFHOST_STORAGE_PROJECT_NAME=fixture; }
-    _authority_cp_accounts() { [[ "${CP_ACCOUNTS:-0}" != fail ]] && printf "%s\n" "${CP_ACCOUNTS:-0}"; }
+    # CP_ACCOUNTS for the first count, CP_ACCOUNTS_LATER (default the same) for the one before the seal.
+    _authority_cp_accounts() {
+      [[ "${CP_ACCOUNTS:-0}" != fail ]] || return 1
+      if [[ -e "$ROOT/counted" ]]; then printf "%s\n" "${CP_ACCOUNTS_LATER:-${CP_ACCOUNTS:-0}}"
+      else : >"$ROOT/counted"; printf "%s\n" "${CP_ACCOUNTS:-0}"; fi
+    }
     _authority_running() { printf "running?\n" >>"$CALLS"; [[ "${RUNNING:-1}" == 1 ]]; }
     [[ "${RECORD_FAIL:-}" != 1 ]] || _authority_record_not_after() { return 1; }
     # SWAP_FAIL=FILE: the first mv onto FILE fails.
@@ -128,7 +134,7 @@ run_init() {
       if [[ "${*: -1}" == "$SWAP_FAIL" && ! -e "$ROOT/swap-failed" ]]; then : >"$ROOT/swap-failed"; return 1; fi
       command mv "$@"
     }
-    verb_authority "${VERB:-init}" "$@"
+    "$FN" "${VERB:-init}" "$@"
   ' run_init "$@" <<<"$input" >"$ROOT/out" 2>&1
 }
 
@@ -208,6 +214,39 @@ grep -q "sha384=[0-9a-f]\{96\}" "$ROOT/out" && pass "init prints the anchors dig
 na="$(python3 -c "import json,sys; print(json.load(open(sys.argv[1]))['not_after_ms'])" "$AUTH/ceremony/delegation-1.json")"
 [[ "$(cat "$AUTH/public/delegation-not-after-ms")" == "$na" && "$(mode "$AUTH/public/delegation-not-after-ms")" == 644 ]] \
   && pass "init records the delegation's expiry for health" || fail "no delegation-not-after-ms record"
+[[ "$(cat "$AUTH/public/realm-id")" == "$realm" && "$(mode "$AUTH/public/realm-id")" == 644 ]] \
+  && pass "init records the realm for up" || fail "no realm-id record"
+grep -q "not sealed" "$ROOT/out" && fail "init reports an unsealed authority" || pass "init seals the empty population"
+
+# ── up, stop and down, on the authority init just made ─────────────────
+lifecycle_calls() { grep -oE 'compose .*' "$CALLS" | sed 's/.*docker-compose.authority.yml //'; }
+: >"$CALLS"
+if FN=_authority_lifecycle VERB=up run_init ''; then pass "up updates the authority"; else fail "up failed: $(cat "$ROOT/out")"; fi
+expected="build authority
+stop authority
+--profile authority-owner run --rm authority-owner migrate --realm $realm
+up -d --no-deps --force-recreate authority"
+[[ "$(lifecycle_calls)" == "$expected" ]] && grep -qxF 'running?' "$CALLS" \
+  && pass "up builds, stops serve, migrates, then recreates the authority and checks it stays up" || fail "up calls: $(lifecycle_calls)"
+: >"$CALLS"
+if RUNNING=0 FN=_authority_lifecycle VERB=up run_init ''; then fail "up accepted an authority that did not stay up"
+else grep -qF 'did not stay up' "$ROOT/out" && pass "up fails when the authority does not stay up" || fail "up, not running: $(cat "$ROOT/out")"
+fi
+: >"$CALLS"
+FN=_authority_lifecycle VERB=stop run_init '' && [[ "$(lifecycle_calls)" == stop ]] && pass "stop stops the authority" || fail "stop calls: $(lifecycle_calls)"
+: >"$CALLS"
+FN=_authority_lifecycle VERB=down run_init '' && [[ "$(lifecycle_calls)" == '--profile authority-owner down' ]] \
+  && pass "down removes the authority's containers and keeps its volumes" || fail "down calls: $(lifecycle_calls)"
+mv "$AUTH/public/realm-id" "$AUTH/public/realm-id.saved"; : >"$CALLS"
+if FN=_authority_lifecycle VERB=up run_init ''; then fail "up ran without a realm"
+else grep -qF 'realm-id is missing, so the authority is left alone' "$ROOT/out" && ! grep -q compose "$CALLS" && pass "up refuses, untouched, without the realm record" || fail "no realm: $(cat "$ROOT/out") calls: $(cat "$CALLS")"
+fi
+mv "$AUTH/public/realm-id.saved" "$AUTH/public/realm-id"
+cp "$ROOT/.env" "$ROOT/.env.saved"; printf 'AUTHORITY_DIR=%s\n' rel >>"$ROOT/.env"; : >"$CALLS"
+if FN=_authority_lifecycle VERB=stop run_init ''; then fail "stop accepted a relative AUTHORITY_DIR"
+else grep -qF 'must be an absolute path' "$ROOT/out" && [[ ! -s "$CALLS" ]] && pass "the lifecycle refuses a relative AUTHORITY_DIR" || fail "relative: $(cat "$ROOT/out")"
+fi
+mv "$ROOT/.env.saved" "$ROOT/.env"
 
 # ── renew, on the authority init just made ─────────────────────────────
 jget() { python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])" "$1" "$2"; }
@@ -348,7 +387,42 @@ chmod o-w "$AUTH"
 [[ "$(health_rc none)" == 0 ]] && pass "health backfills again once the directory is safe" || fail "safe again: $(cat "$ROOT/out")"
 saved_root="$ROOT"; fixture
 [[ "$(health_rc none 2>/dev/null)" == 3 ]] && pass "health has nothing to check before init" || fail "no authority: $(cat "$ROOT/out")"
+ok=true
+for v in up stop down; do FN=_authority_lifecycle VERB=$v run_init '' || ok=false; done
+$ok && [[ ! -s "$CALLS" ]] && pass "up, stop and down leave the authority alone before init" || fail "lifecycle before init: $(cat "$CALLS" "$ROOT/out")"
 ROOT="$saved_root"
+
+# ── upgrade: an install that already has accounts ──────────────────────
+fixture
+if CP_ACCOUNTS=3 VERB=upgrade run_init "$PASS"$'\n'"$PASS" --export-dir "$EXPORT"; then
+  pass "upgrade completes on an install with accounts"
+else
+  fail "upgrade failed: $(cat "$ROOT/out")"
+fi
+grep -qF 'replication-gate off' "$CALLS" && ! grep -qF seal-legacy "$CALLS" && grep -q 'compose.* up -d authority$' "$CALLS" \
+  && grep -qF 'It is not sealed.' "$ROOT/out" && [[ -f "$AUTH/public/realm-id" ]] \
+  && pass "upgrade turns the replication gate off, starts the authority unsealed and says so" || fail "upgrade: $(cat "$ROOT/out")"
+# An account made between the first count and the seal: nothing is sealed.
+fixture
+CP_ACCOUNTS=0 CP_ACCOUNTS_LATER=1 run_init "$PASS"$'\n'"$PASS" --export-dir "$EXPORT" \
+  && ! grep -qF seal-legacy "$CALLS" && grep -qF 'It is not sealed.' "$ROOT/out" \
+  && pass "init does not seal when an account appears before the seal" || fail "late account: $(cat "$ROOT/out")"
+# upgrade on an install with no accounts still leaves the seal to the integration.
+fixture
+CP_ACCOUNTS=0 VERB=upgrade run_init "$PASS"$'\n'"$PASS" --export-dir "$EXPORT" \
+  && ! grep -qF seal-legacy "$CALLS" && grep -qF 'It is not sealed.' "$ROOT/out" \
+  && pass "upgrade never seals, even with no accounts" || fail "upgrade, no accounts: $(cat "$ROOT/out")"
+# A setup that stopped part way: up leaves it alone, stop and down still clear it.
+fixture; docker_set COMPOSE_FAIL=replication-gate
+if run_init "$PASS"$'\n'"$PASS" --export-dir "$EXPORT"; then fail "a failed replication-gate was accepted"
+else [[ -f "$AUTH/public/trust" && ! -e "$AUTH/public/realm-id" ]] && pass "a setup that stops writes no realm-id" || fail "partial setup: $(ls "$AUTH/public")"
+fi
+docker_set COMPOSE_FAIL=; : >"$CALLS"
+if FN=_authority_lifecycle VERB=up run_init ''; then fail "up took over a setup that did not finish"
+else grep -qF 'did not finish' "$ROOT/out" && [[ ! -s "$CALLS" ]] && pass "up leaves a setup that did not finish alone" || fail "up on a partial setup: $(cat "$ROOT/out" "$CALLS")"
+fi
+FN=_authority_lifecycle VERB=down run_init '' && [[ "$(lifecycle_calls)" == '--profile authority-owner down' ]] \
+  && pass "down still clears a setup that did not finish" || fail "down on a partial setup: $(cat "$ROOT/out")"
 
 # ── Refusals before anything is written ────────────────────────────────
 # refuse LABEL WANT INPUT ARGS... — init exits non-zero, says WANT, writes nothing in AUTHORITY_DIR.
@@ -385,7 +459,7 @@ fixture 'AUTHORITY_SUBNET=172.30.53.1/29'; refuse "a subnet that is not a networ
 fixture 'AUTHORITY_IP=172.30.53.1'; refuse "the gateway as AUTHORITY_IP" "other than its gateway" "$good" --export-dir "$EXPORT"
 fixture 'AUTHORITY_IP=10.0.0.2'; refuse "an AUTHORITY_IP outside the subnet" "must be a host in" "$good" --export-dir "$EXPORT"
 fixture "export AUTHORITY_SUBNET = '172.30.53.1/29'"; refuse "a .env line written the way compose also reads it" "not a network address" "$good" --export-dir "$EXPORT"
-fixture; CP_ACCOUNTS=3 refuse "a control plane with accounts" "has 3 accounts" "$good" --export-dir "$EXPORT"
+fixture; CP_ACCOUNTS=3 refuse "a control plane with accounts" "has 3 accounts; init only sets up an authority on an install with none: use concord-selfhost authority upgrade" "$good" --export-dir "$EXPORT"
 fixture; CP_ACCOUNTS=fail refuse "a control plane that cannot be read" "cannot count the control plane's accounts" "$good" --export-dir "$EXPORT"
 fixture; chmod 1777 "$EXPORT"; refuse "an export directory others can write" "writable by other users" "$good" --export-dir "$EXPORT"
 fixture; refuse "passphrases that differ" "differ" "$PASS"$'\n'"$PASS!" --export-dir "$EXPORT"

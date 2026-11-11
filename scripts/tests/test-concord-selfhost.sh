@@ -39,7 +39,7 @@ if [[ ! -f "$STORAGE_HELPER" ]]; then
 fi
 cp "$STORAGE_HELPER" "$SIMPLE_ROOT/infrastructure/deploy/selfhost-storage.sh"
 cp "$AUTHORITY_HELPER" "$SIMPLE_ROOT/infrastructure/deploy/selfhost-authority.sh"
-printf 'INSTANCE_TYPE=self-hosted\n' >"$SIMPLE_ROOT/.env"
+printf 'INSTANCE_TYPE=self-hosted\nAUTHORITY_DIR=%s/no-authority\n' "$SIMPLE_ROOT" >"$SIMPLE_ROOT/.env"
 touch "$SIMPLE_ROOT/docker-compose.yml" "$SIMPLE_ROOT/docker-compose.production.yml" \
   "$SIMPLE_ROOT/docker-compose.selfhost.yml"
 export SELFHOST_STUB_REJECT_LOG="$STUB/docker-reject.log"
@@ -262,6 +262,31 @@ if grep -q -- '--profile.*services.*stop' "$STUB/docker.log" && ! grep -qw 'down
   pass "stop uses compose stop (not down)"
 else
   fail "stop should call compose stop, not down: $(cat "$STUB/docker.log")"
+fi
+
+# ── Test 3b: up, stop and down hand the authority its turn after the stack's ─
+# The real authority_lifecycle wrapper, with the authority's own step stubbed.
+lifecycle_log="$( bash -c '
+  source "$1"
+  compose() { echo "compose $*"; }
+  require_security_log_boundary() { :; }
+  guarded_ctl() { echo "ctl $*"; }
+  _authority_lifecycle() { echo "authority $1"; }
+  main up; main stop; main down
+  compose() { echo "compose $*"; return 1; }
+  main down || echo "down failed"
+  guarded_ctl() { echo "ctl $*"; return 1; }
+  main up || echo "up failed"
+  guarded_ctl() { echo "ctl $*"; }
+  _authority_lifecycle() { echo "authority $1"; return 1; }
+  main up && echo "up ok"
+' lifecycle "$TARGET" 2>&1 )"
+expected=$'ctl rebuild\nauthority up\ncompose stop\nauthority stop\ncompose down\nauthority down\ncompose down\ndown failed\nctl rebuild\nup failed'
+expected+=$'\nctl rebuild\nauthority up\nWARNING: the stack\'s up finished, but the account-key authority\'s did not (see above)\nup ok'
+if [[ "$lifecycle_log" == "$expected" ]]; then
+  pass "up, stop and down run the authority's step after the stack's, not after a failure, and only warn when it fails"
+else
+  fail "authority lifecycle wiring: $lifecycle_log"
 fi
 
 # ── Test 4: 'status' invokes compose ps ───────────────────────────────
