@@ -41,7 +41,7 @@ invoke() {
 run() {
   local dir="$1" f
   shift
-  case "$dir" in /*) ;; *) dir="$FIXTURES/$dir" ;; esac
+  [[ "$dir" == /* ]] || dir="$FIXTURES/$dir"
   local files=("$@")
   if [ "${#files[@]}" -eq 0 ]; then
     for f in "$dir"/*.dockerfile; do files+=("$(basename "$f")"); done
@@ -127,7 +127,6 @@ expect_fail fail-stage-alias-dropped      stage-mismatch       "a dropped alias 
 expect_fail fail-stage-alias-added        stage-mismatch       "an added alias is refused"
 expect_fail fail-stage-image-for-scratch  stage-mismatch       "an image where the manifest says scratch is refused"
 expect_fail fail-stage-scratch-for-image  stage-mismatch       "scratch where the manifest says an image is refused"
-expect_fail fail-stage-heredoc-from       heredoc,stage-mismatch "a FROM-looking line inside a heredoc body is a stage, and the heredoc is refused"
 
 echo ""
 echo "── must fail (exit 2, could not complete) ──"
@@ -149,7 +148,8 @@ expect_exit2 "a manifest that is not JSON is refused" "not valid JSON"
 
 # Inputs that BuildKit reads differently from a naive line parser. Each one hid
 # an image from an earlier version of the checker. Built here because the
-# repository's own hooks would rewrite a CR or a control byte in a fixture.
+# repository's own hooks would rewrite a CR or a control byte in a fixture, and
+# the Semgrep Dockerfile parser reports a heredoc fixture as a scanner error.
 EVIL="evil.example/base:1@${DIGEST}"
 HEAD_LINE="FROM ${IMAGE} AS builder"
 dyn hidden-double-backslash "${HEAD_LINE}"'\nENV PAD=x\\\\\nFROM '"${EVIL}"'\n'
@@ -158,6 +158,8 @@ dyn hidden-lone-cr "${HEAD_LINE}"'\nRUN echo \\\r#c\nFROM '"${EVIL}"'\n'
 expect_fail "$WORK/hidden-lone-cr"          unsupported-character "a lone CR is refused"
 dyn hidden-control-blank "${HEAD_LINE}"'\nRUN echo a \\\n\x1f\nFROM '"${EVIL}"'\n'
 expect_fail "$WORK/hidden-control-blank"    unsupported-character "a control byte that Python reads as a blank line is refused"
+dyn heredoc-from "${HEAD_LINE}"'\nRUN <<EOF\nFROM '"${EVIL}"'\nEOF\n'
+expect_fail "$WORK/heredoc-from"            heredoc,stage-mismatch "a FROM-looking line inside a heredoc body is a stage, and the heredoc is refused"
 dyn hidden-heredoc "${HEAD_LINE}"'\nRUN <<\x27#END\x27\ntrue \\\n#END\nFROM '"${EVIL}"'\n'
 expect_fail "$WORK/hidden-heredoc"          heredoc              "a heredoc is refused, whatever its body hides"
 dyn flag-quoted "${HEAD_LINE}"'\nCOPY --fr"o"m='"${EVIL}"' /a /b\n'
