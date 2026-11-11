@@ -200,7 +200,86 @@ char_nginx_render_hash() {
   fi
 }
 
+# Real-daemon contract (the only case that calls the real docker, never the
+# stub). The rail starts green as a `compose run` one-off of the control-plane
+# service and depends on how Compose labels, lists, stops and networks a
+# one-off. If a Compose release changes any of this, this case goes red before
+# a deploy does.
+compose_oneoff_contract() {
+  if ! docker info >/dev/null 2>&1; then
+    if [[ -n "${CI:-}" ]]; then
+      fail "compose_oneoff_contract needs a docker daemon under CI"
+    else
+      printf 'SKIP: compose_oneoff_contract (no docker daemon)\n'
+    fi
+    return
+  fi
+  local d="$TMP/oneoff" proj="cpbg$$" green="cpbg$$-green" errs='' gid='' got
+  local p1=$((20000 + $$ % 20000)) p2
+  p2=$((p1 + 1))
+  local -a dc
+  mkdir -p "$d"
+  cat >"$d/base.yml" <<YML
+services:
+  cp:
+    image: busybox:1.36
+    command: ["sh", "-c", "mkdir -p /tmp/w && echo ok >/tmp/w/index.html && httpd -f -p 8080 -h /tmp/w"]
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:8080/"]
+      interval: 1s
+    ports: ["127.0.0.1:$p1:8080"]
+    networks: [svc]
+networks:
+  svc: {}
+YML
+  # Second layer, standing in for a production hardening file.
+  cat >"$d/prod.yml" <<'YML'
+services:
+  cp:
+    read_only: true
+    tmpfs: ["/tmp:size=8M"]
+YML
+  dc=(docker compose -p "$proj" -f "$d/base.yml" -f "$d/prod.yml")
+
+  "${dc[@]}" up -d --wait cp >"$TMP/oneoff.log" 2>&1 || errs+=' home-up-failed'
+  # The exact flag set the rail uses for green. Mutation that turns this case
+  # red: drop --use-aliases here (the alias assertion fails).
+  gid="$("${dc[@]}" run --detach --no-deps --pull never --use-aliases --name "$green" \
+    -p "127.0.0.1:$p2:8080" -e MODE=verify cp 2>>"$TMP/oneoff.log")" || errs+=' run-failed'
+  [[ "$gid" =~ ^[a-f0-9]{64}$ ]] || errs+=' run-did-not-print-an-id'
+
+  got="$(docker inspect --format '{{index .Config.Labels "com.docker.compose.service"}}|{{index .Config.Labels "com.docker.compose.oneoff"}}' "$green" 2>&1)" || true
+  [[ "$got" == 'cp|True' ]] || errs+=" labels=$got"
+  # The daemon-wide filter the drained check uses sees the one-off.
+  docker ps --no-trunc --filter label=com.docker.compose.service=cp --format '{{.ID}}' \
+    | grep -qFx "$gid" || errs+=' label-filter-misses-oneoff'
+  # The own-set query the foreign-project guard uses lists the one-off.
+  "${dc[@]}" ps --status running -q -- cp 2>/dev/null | grep -qFx "$gid" || errs+=' compose-ps-misses-oneoff'
+  got="$(docker inspect --format '{{.HostConfig.ReadonlyRootfs}}|{{.HostConfig.RestartPolicy.Name}}|{{json .HostConfig.PortBindings}}' "$green" 2>&1)" || true
+  [[ "$got" == "true|no|{\"8080/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"$p2\"}]}" ]] || errs+=" hostconfig=$got"
+  got="$(docker inspect --format '{{range .NetworkSettings.Networks}}{{json .Aliases}}{{end}}' "$green" 2>&1)" || true
+  [[ "$got" == *'"cp"'* ]] || errs+=" aliases=$got"
+
+  # Stopping the service stops home only; home can then start beside the one-off.
+  "${dc[@]}" stop -t 1 cp >>"$TMP/oneoff.log" 2>&1 || errs+=' stop-failed'
+  got="$("${dc[@]}" ps --status running -q -- cp 2>/dev/null | tr '\n' ' ')"
+  [[ "$got" == "$gid " ]] || errs+=" after-stop-running=$got"
+  "${dc[@]}" up -d --no-deps --wait cp >>"$TMP/oneoff.log" 2>&1 || errs+=' home-restart-failed'
+  got="$("${dc[@]}" ps --status running -q -- cp 2>/dev/null | wc -l | tr -d ' ')"
+  [[ "$got" == 2 ]] || errs+=" after-restart-running=$got"
+
+  docker rm -f "$green" >/dev/null 2>&1 || true
+  "${dc[@]}" down -t 0 -v --remove-orphans >>"$TMP/oneoff.log" 2>&1 || true
+  if [[ -z "$errs" ]]; then
+    pass "compose_oneoff_contract"
+  else
+    fail "compose_oneoff_contract:$errs"
+    tail -20 "$TMP/oneoff.log" >&2 || true
+  fi
+}
+
 char_rebuild_control_plane_transcript
 char_wait_healthy_curl_argv
 char_nginx_render_hash
+compose_oneoff_contract
 exit $((fails > 0))
