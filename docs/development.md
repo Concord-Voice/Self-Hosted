@@ -23,7 +23,7 @@ See [SETUP_GITHUB.md](./SETUP_GITHUB.md) for full GitHub collaboration workflow.
   field is authoritative. Go-only work does not require Node.js
 - **Go** 1.27.4 (the supported toolchain, recorded in `services/control-plane/go.mod`)
   Select this exact release with `GOTOOLCHAIN=go1.27.4` if a newer Go is installed;
-  CI and all three Docker builders use the same version. pre-commit builds the
+  CI and all four Docker builders use the same version. pre-commit builds the
   golangci-lint hook with your system Go, so a system Go older than 1.27 makes that
   hook fail; upgrade Go, then run `pre-commit clean` so the hook rebuilds
 - **Docker** and **Docker Compose**

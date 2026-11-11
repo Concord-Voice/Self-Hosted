@@ -3,7 +3,7 @@ FROM golang:1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2
 WORKDIR /app
 COPY go.mod go.sum ./
 # Fail the build if a future digest update changes the reviewed release line.
-RUN GOTOOLCHAIN=local go version | grep -q '^go version go1\.27\.3 ' \
+RUN GOTOOLCHAIN=local go version | grep -q '^go version go1\.27\.4 ' \
     && grep -Eq '^3\.24\.' /etc/alpine-release \
     && go mod download
 COPY . .

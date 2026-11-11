@@ -422,6 +422,17 @@ Rows marked one at a time after the sweep. Paths are relative to the repo root. 
 |---|---|---|---|---|---|---|
 | 77 | 2026-11-08 | `AaG9AnwuTyWH8afVCQo8` | `docker:S8431` | `services/control-plane/Dockerfile.account-authority:5` | Claude (#213) | `golang:1.27.3-alpine@sha256:<digest>`, the same reviewed builder pin as `Dockerfile.ops-agent`. The tag is the Dependabot lineage anchor and the digest gives immutability. Legacy note `docker:S8431`. |
 
+### Builder-pin re-verification — 2026-11-11 (PR #256)
+
+Row 77 and the other three control-plane Go builders now pin
+`golang:1.27.4-alpine@sha256:0a5f7fe796599ff487605987432e7619ae45beeb2fba4c2ce0b907879932aebf`.
+The registry tag resolves to that index, the raw index body hashes to the same
+digest, and the index includes linux/amd64 and linux/arm64. The build-time check
+in `Dockerfile.redis-auth-controller` now requires Go 1.27.4. The Go toolchain
+alignment guard passes, and it now also checks that build-time version
+assertion. This records the new pin's evidence; no SonarCloud finding status or
+historical decision was changed.
+
 ## Recreation-recovery / drift-guard (ADR-0017 narrowed profile)
 
 The **2026-06-14 SonarCloud project recreation** (see the Section 2 banner) did
