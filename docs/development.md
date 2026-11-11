@@ -226,9 +226,10 @@ python3 .github/scripts/check-base-images.py
 ```
 
 It checks every tracked path that contains `dockerfile` in any letter case. It
-needs no Docker daemon and no network. It runs in the `workflow-lint` CI job,
-which is advisory: a failure shows red on the pull request but does not block
-the merge.
+needs no Docker daemon and no network. It runs as a pre-commit hook when a
+commit touches a Dockerfile, the manifest or the checker, and in the
+`workflow-lint` CI job. That job is advisory: a failure shows red on the pull
+request but does not block the merge.
 
 Each violation is one line, `<file>:<line>: <rule>: <message>`, and the exit
 code is 1. Exit code 2 means the check could not complete, for example because
