@@ -25,7 +25,7 @@
 - **Mint step moved above the module refresh.** A write token would be live during `go get -u`. Pinned by the order assertion in Task 1.
 - **Deferred or no-change run mints a token.** Expected: no token is minted. Pinned by the `if:` count assertion in Task 1.
 - **`create-pull-request` falls back to `github.token`.** Expected: the step fails as it does today. Pinned by the token-source assertion in Task 1.
-- **Rendered body still tells the reviewer to close and reopen, or links `#1212`.** Expected: neither appears. Pinned by the body assertions in Task 1.
+- **Rendered body still tells the reviewer to close and reopen, or carries a bare issue reference.** Expected: neither appears. Pinned by the body assertions in Task 1.
 - **App variable or secret missing in this repository.** Expected: the mint step fails and the job goes red, which is visible. No test; this is the action's own behavior, and the end-to-end dispatch in the PR proves the credentials resolve.
 
 ---
@@ -42,7 +42,7 @@
 
 - [ ] **Step 1: Write the failing assertions**
 
-In `scripts/tests/test-go-transitive-flush-render.sh`, replace the "body must carry the CI re-trigger warning" block with assertions that the rendered body does NOT contain `Close and reopen this PR`, `GITHUB_TOKEN` or `#1212`.
+In `scripts/tests/test-go-transitive-flush-render.sh`, replace the "body must carry the CI re-trigger warning" block with assertions that the rendered body does NOT contain `Close and reopen this PR`, `GITHUB_TOKEN` or a bare issue reference.
 
 Then add a static block before the summary lines, using the existing `ok` / `bad` helpers and `$WORKFLOW`:
 
@@ -73,8 +73,8 @@ In `.github/workflows/go-transitive-flush.yml`:
 - Job `flush` permissions: `contents: read`, `pull-requests: write`.
 - Insert the `Mint flush App token` step (`id: app-token`) between "Render PR body" and "Open PR if changed", gated by the same `if:` line, with the pin and inputs from Global Constraints.
 - "Open PR if changed": `token: ${{ steps.app-token.outputs.token }}`.
-- Rendered body: delete the whole `## ⚠ CI does not run on this PR until you re-trigger it` section and the `- Founding issue: #1212` line.
-- Header comment: replace the "CI re-trigger note" and the paragraph after it with a note that the PR is App-authored so PR checks start on their own, and that the token is minted only after the module refresh. Remove `#1228`. In the "Open PR if changed" comment, remove `(#847)`. Update the top-level permissions comment so it no longer says `create-pull-request` uses the job token.
+- Rendered body: delete the whole `## ⚠ CI does not run on this PR until you re-trigger it` section and the `- Founding issue` line.
+- Header comment: replace the "CI re-trigger note" and the paragraph after it with a note that the PR is App-authored so PR checks start on their own, and that the token is minted only after the module refresh. Remove the issue numbers that belong to another repository, here and in the "Open PR if changed" comment. Update the top-level permissions comment so it no longer says `create-pull-request` uses the job token.
 
 - [ ] **Step 4: Run the test to verify it passes**
 
@@ -116,7 +116,7 @@ After the `author:app/github-actions` discovery query, add a third query with th
 
 - [ ] **Step 3: `.pre-commit-config.yaml`**
 
-The hook `test-go-transitive-flush-render` is named `'Test go-transitive-flush PR-body render (#1212)'`. Rename it to `'Test go-transitive-flush PR-body render and token order'`.
+The hook `test-go-transitive-flush-render` carries an issue number from another repository in its display name. Rename it to `'Test go-transitive-flush PR-body render and token order'`.
 
 - [ ] **Step 4: Verify and commit**
 
@@ -132,3 +132,12 @@ git commit -m "docs: describe App-authored go-transitive-flush PRs"
 
 - Create the repository label: `gh label create "routine: go-transitive-hygiene" --description "Weekly Go transitive module refresh" --color BFD4F2`.
 - End-to-end dispatches (issue acceptance criteria) run from `main` after merge, because `workflow_dispatch` on a feature branch would open a flush PR built from that branch. Record both results on issue #250.
+
+## Amendment after the branch review
+
+The branch review found that minting late inside one job does not deliver the security property this plan set out to pin. A job receives every secret it references when it starts, so the App private key would be on the runner during `go get -u`. Tasks 1 and 2 were executed as written, and then changed as follows. The spec carries the final design.
+
+- The workflow has two jobs. `refresh` (guard, module refresh, render, artifact upload) references no App credential. `open-pr` (`needs: refresh`, gated on its `has_changes` output) downloads the artifact, mints the token and opens the PR. It runs no Go tooling.
+- Global Constraints line "Job permissions become exactly `contents: read` and `pull-requests: write`" now describes `refresh`. `open-pr` has `contents: read` only.
+- The four static assertions of Task 1 Step 1 are replaced by assertions bound to jobs: no App credential in `refresh`; `open-pr` gated on `has_changes`; no Go tooling in `open-pr`; exactly one mint step and one key reference, both in `open-pr`; only the PR step consumes the token; no `contents: write` anywhere.
+- Task 2 Step 3 (hook display name) was not done. It is cosmetic and is left for the next change to `.pre-commit-config.yaml`.

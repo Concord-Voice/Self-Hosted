@@ -13,12 +13,16 @@ name: Refresh transitive Go module graph
 # pull requests at all. An App-authored PR runs the full PR check set on its
 # own, with no close-and-reopen step for the reviewer.
 #
-# Token ordering is a security property: "Mint flush App token" runs AFTER
-# "Refresh transitive Go module graph" and carries the same `if:` gate as
-# "Open PR if changed". No write-capable token exists while `go get -u`
-# downloads and resolves third-party modules, and a deferred or no-change run
-# mints nothing. Do not move the mint step earlier.
-# scripts/tests/test-go-transitive-flush-render.sh locks the order.
+# Two jobs, and the split is a security boundary. A job receives every secret
+# it references when the job starts, whatever the step order, so minting the
+# token "late" inside one job would still put the App private key on the runner
+# while `go get -u` downloads and resolves third-party modules.
+#   refresh  fetches modules. It references no App credential. Its
+#            `GITHUB_TOKEN` can read contents and comment on pull requests.
+#   open-pr  holds the App key. It runs no Go tooling: it copies go.mod, go.sum
+#            and the rendered body out of the artifact and opens the PR.
+# Do not merge the jobs, and do not add Go commands to open-pr.
+# scripts/tests/test-go-transitive-flush-render.sh locks both rules.
 #
 # Output PR is processed by /weekly-deps Wednesday review window.
 # See [internal]rules/backend.md § Dependency Hygiene.
@@ -29,7 +33,7 @@ on:
     - cron: "0 6 * * 2"
   workflow_dispatch:
 
-# Least-privilege default. The flush job adds only `pull-requests: write`, for
+# Least-privilege default. The refresh job adds only `pull-requests: write`, for
 # the contention guard's `gh pr comment`. The branch push and the PR itself use
 # the App installation token, so `GITHUB_TOKEN` never needs `contents: write`.
 permissions:
@@ -40,12 +44,15 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  flush:
+  refresh:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
       contents: read
       pull-requests: write
+    outputs:
+      # Set only when the run was not deferred AND go.mod / go.sum changed.
+      has_changes: ${{ steps.refresh.outputs.has_changes }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -219,11 +226,48 @@ jobs:
           EOF
           echo "Rendered PR body to /tmp/pr-body.md"
 
-      # Minted here, after the module refresh, and only when a PR will be opened.
+      - name: Stage the PR payload
+        if: steps.contention.outputs.deferred != 'true' && steps.refresh.outputs.has_changes == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/flush"
+          cp services/control-plane/go.mod services/control-plane/go.sum /tmp/pr-body.md "$RUNNER_TEMP/flush/"
+
+      - name: Upload the PR payload
+        if: steps.contention.outputs.deferred != 'true' && steps.refresh.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: go-transitive-flush
+          path: ${{ runner.temp }}/flush
+          retention-days: 1
+          if-no-files-found: error
+
+  open-pr:
+    needs: refresh
+    if: needs.refresh.outputs.has_changes == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: go-transitive-flush
+          path: ${{ runner.temp }}/flush
+
+      # The payload is data from the lower-trust job. It is copied, never executed.
+      - name: Apply the refreshed module files
+        run: |
+          set -euo pipefail
+          cp "$RUNNER_TEMP/flush/go.mod" "$RUNNER_TEMP/flush/go.sum" services/control-plane/
+
       # Same App and same pinned action as refresh-ioc-list.yml.
       - name: Mint flush App token
         id: app-token
-        if: steps.contention.outputs.deferred != 'true' && steps.refresh.outputs.has_changes == 'true'
         uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
         with:
           client-id: ${{ vars.PUBLIC_MIRROR_APP_CLIENT_ID }}
@@ -231,8 +275,7 @@ jobs:
           permission-contents: write
           permission-pull-requests: write
 
-      - name: Open PR if changed
-        if: steps.contention.outputs.deferred != 'true' && steps.refresh.outputs.has_changes == 'true'
+      - name: Open PR
         # SHA-pinned per supply-chain hardening. Same SHA as refresh-ioc-list.yml.
         # Upgrade procedure: `gh api repos/peter-evans/create-pull-request/git/refs/tags/vX.Y.Z`,
         # replace SHA + comment.
@@ -251,7 +294,7 @@ jobs:
           title: "chore: refresh transitive Go module graph (services/control-plane)"
           labels: "area: deps,area: control-plane,area: ci-cd,domain: developer-experience,routine: go-transitive-hygiene"
           commit-message: "chore: refresh transitive Go module graph"
-          body-path: /tmp/pr-body.md
+          body-path: ${{ runner.temp }}/flush/pr-body.md
           add-paths: |
             services/control-plane/go.mod
             services/control-plane/go.sum

@@ -161,13 +161,22 @@ render_case "directive churn is not counted as modules" \
 # The PR is opened with an App installation token, so `pull_request` workflows
 # start on their own. A leftover re-trigger instruction would send the reviewer
 # to close and reopen a PR whose checks are already running.
-for stale in "Close and reopen this PR" "GITHUB_TOKEN" "#1212"; do
+for stale in "Close and reopen this PR" "GITHUB_TOKEN"; do
   if grep -qF -- "$stale" /tmp/pr-body.md; then
     bad "body still contains '$stale'"
   else
     ok "body does not contain '$stale'"
   fi
 done
+
+# A bare issue reference in a PR body autolinks to THIS repository's issue of
+# that number, whatever the author meant. The body is generated, so it must
+# carry none.
+if grep -qE '(^|[^[:alnum:]&/])#[0-9]+' /tmp/pr-body.md; then
+  bad "body contains a bare issue reference" "$(grep -nE '(^|[^[:alnum:]&/])#[0-9]+' /tmp/pr-body.md)"
+else
+  ok "body contains no bare issue reference"
+fi
 
 # ── the body must render a REAL stamp, not the hardcoded cron literals ───────
 # The guard used to be `grep -qE 'on Tuesday|at 06:00 UTC'`, which was wrong in a
@@ -185,45 +194,71 @@ else
   bad "body has no real date — the generation stamp is hardcoded again"
 fi
 
-# ── static: the App token is minted late, and only when a PR will be opened ──
-# Ordering is the security property. The mint step must come AFTER the module
-# refresh, so no write-capable token exists while `go get -u` downloads and
-# resolves third-party modules, and it must share the PR-opening gate, so a
-# deferred or no-change run never mints one.
-line_of() { grep -n -- "$1" "$WORKFLOW" | first_line | cut -d: -f1; }
-refresh_at=$(line_of '^      - name: Refresh transitive Go module graph')
-mint_at=$(line_of '^      - name: Mint flush App token')
-open_at=$(line_of '^      - name: Open PR if changed')
-GATE="if: steps.contention.outputs.deferred != 'true' && steps.refresh.outputs.has_changes == 'true'"
+# ── static: the App key never shares a job with the module refresh ──────────
+# A job receives every secret it references when the job STARTS, whatever the
+# step order and whatever `if:` a step carries. Minting late inside one job
+# would therefore still put the App private key on the runner while `go get -u`
+# downloads and resolves third-party modules. The lock is structural: the job
+# that fetches modules references no App credential, and the job that holds
+# the credential runs no Go tooling.
+job_block() { # $1 = job id; prints that job's lines with comment lines dropped
+  awk -v j="  $1:" '
+    $0 == j                  { p = 1; next }
+    p && /^  [^ #]/          { exit }
+    p && !/^[[:space:]]*#/   { print }
+  ' "$WORKFLOW"
+}
+code_count() { grep -v '^[[:space:]]*#' "$WORKFLOW" | grep -cF -- "$1" || true; }
 
-if [ -n "$refresh_at" ] && [ -n "$mint_at" ] && [ -n "$open_at" ] \
-   && [ "$refresh_at" -lt "$mint_at" ] && [ "$mint_at" -lt "$open_at" ]; then
-  ok "mint step sits after the module refresh and before the PR is opened"
-else
-  bad "mint step is missing or out of order" \
-      "refresh=${refresh_at:-<none>} mint=${mint_at:-<none>} open=${open_at:-<none>}"
-fi
+REFRESH_JOB=$(job_block refresh)
+OPEN_JOB=$(job_block open-pr)
 
-gate_count=$(grep -cF -- "$GATE" "$WORKFLOW" || true)
-if [ "$gate_count" -eq 3 ]; then
-  ok "render, mint and open steps all carry the PR-opening gate"
+if grep -qF 'go get -u' <<<"$REFRESH_JOB" \
+   && ! grep -qE 'PUBLIC_MIRROR_APP_|create-github-app-token|create-pull-request|contents: write' <<<"$REFRESH_JOB"; then
+  ok "the refresh job fetches modules and references no App credential"
 else
-  bad "expected the PR-opening gate on exactly 3 steps" "found: $gate_count"
+  bad "the refresh job is missing, or references an App credential or a contents-write permission"
 fi
 
 # shellcheck disable=SC2016  # literal GitHub expression, not a shell expansion
-if grep -qF 'token: ${{ steps.app-token.outputs.token }}' "$WORKFLOW" \
-   && ! grep -qF 'token: ${{ github.token }}' "$WORKFLOW"; then
-  ok "the PR is opened with the App token, not github.token"
+if grep -qF 'has_changes: ${{ steps.refresh.outputs.has_changes }}' <<<"$REFRESH_JOB" \
+   && grep -qE '^    needs: refresh$' <<<"$OPEN_JOB" \
+   && grep -qF "    if: needs.refresh.outputs.has_changes == 'true'" <<<"$OPEN_JOB"; then
+  ok "the open-pr job runs only when the refresh job reports a change"
 else
-  bad "create-pull-request does not take its token from steps.app-token"
+  bad "the open-pr job is missing, or is not gated on the refresh job's has_changes output"
 fi
 
-if ! grep -qE '^      contents: write' "$WORKFLOW" \
-   && grep -qE '^      contents: read' "$WORKFLOW"; then
-  ok "job GITHUB_TOKEN is contents: read"
+if [ -n "$OPEN_JOB" ] \
+   && ! grep -qE 'setup-go|(^|[^[:alnum:]_-])go (get|mod|run|build|test|install|generate)' <<<"$OPEN_JOB"; then
+  ok "the open-pr job runs no Go tooling"
 else
-  bad "job permissions must be contents: read, never contents: write"
+  bad "the job that holds the App key must not run Go tooling"
+fi
+
+mints=$(code_count 'actions/create-github-app-token@')
+keys=$(code_count 'PUBLIC_MIRROR_APP_PRIVATE_KEY')
+if [ "$mints" -eq 1 ] && [ "$keys" -eq 1 ] \
+   && grep -qF 'PUBLIC_MIRROR_APP_PRIVATE_KEY' <<<"$OPEN_JOB"; then
+  ok "one mint step and one key reference, both in the open-pr job"
+else
+  bad "expected exactly one mint step and one key reference, in the open-pr job" "mints=$mints keys=$keys"
+fi
+
+# shellcheck disable=SC2016  # literal GitHub expression, not a shell expansion
+if grep -qF 'token: ${{ steps.app-token.outputs.token }}' <<<"$OPEN_JOB" \
+   && [ "$(code_count 'steps.app-token.outputs')" -eq 1 ] \
+   && ! grep -qE 'github\.token|GITHUB_TOKEN' <<<"$OPEN_JOB"; then
+  ok "the PR is opened with the App token, and only the PR step consumes it"
+else
+  bad "create-pull-request must take the App token, and nothing else may consume it"
+fi
+
+# Anchored, so the mint step's `permission-contents: write` input does not match.
+if ! grep -qE '^[[:space:]]+contents: write' "$WORKFLOW"; then
+  ok "no job grants GITHUB_TOKEN contents: write"
+else
+  bad "GITHUB_TOKEN must never get contents: write in this workflow"
 fi
 
 echo "─────────────────────────────────"
