@@ -256,6 +256,9 @@ hard stop.
    - `.github/workflows/publish-minio-image.yml`
    - `scripts/tests/test-publish-minio-image.sh`
    - the fixed-release table below
+   - `.github/base-images.json`, only when the builder or runtime image
+     changes registry, repository, minor version or flavor (see
+     [Changing a Docker base image](../development.md#changing-a-docker-base-image))
 
 Example source verification:
 

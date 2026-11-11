@@ -214,6 +214,39 @@ verification, and commissioning live in the dedicated
 - There is no development API proxy. Use tests for mocked API flows, or the
   control-plane production image for same-origin integration
 
+### Changing a Docker Base Image
+
+`.github/base-images.json` declares which image each stage of each tracked
+Dockerfile is built from: registry, repository and a tag pattern. A static
+check compares every `FROM` and every `COPY --from=` with it:
+
+```bash
+python3 .github/scripts/check-base-images.py
+```
+
+It runs in pre-commit and in the `workflow-lint` CI job. It needs no Docker
+daemon and no network.
+
+| Change | Manifest edit |
+|---|---|
+| New digest, same tag | None |
+| New patch of a patch-pinned tag (`1.27.3-alpine` to `1.27.4-alpine`) | None |
+| New minor or major, new flavor, new repository or registry | Edit the stage entry in the same pull request |
+| New Dockerfile, new stage, or a new `AS` name | Add or edit the entry in the same pull request |
+| New `COPY --from=<build context>` | Add the name to `build_contexts` |
+
+Every image reference needs a tag and a `@sha256:` digest. The check refuses a
+reference built from an `ARG`, a `COPY --from=` that names an external image,
+and an `# escape=` directive. A `# syntax=` directive must equal the `syntax`
+value in the manifest entry.
+
+The manifest has a code owner. A pull request that changes a Dockerfile and
+its manifest entry together passes the check, so review of the manifest diff
+is the control: read it as a change of supplier.
+
+The check does not verify image signatures, image contents, or `image:`
+references in Compose files.
+
 ### Database Migrations
 
 Current migrations run automatically on startup. For production, use a migration tool:

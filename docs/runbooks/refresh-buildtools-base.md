@@ -244,6 +244,8 @@ In a new feature branch (e.g., `feature/<N>-bump-buildtools-<date>`):
 
    The runtime digest is mandatory and is revalidated in the same PR as the builder digest. If it is unchanged, do not churn the pin. Never substitute an amd64- or arm64-specific child manifest in the Dockerfile.
 
+   A digest-only change needs no edit to `.github/base-images.json`. A new Node major, a different flavor or a different repository does: edit the Dockerfile and its manifest entry in the same PR, then run `python3 .github/scripts/check-base-images.py`. See [Changing a Docker base image](../development.md#changing-a-docker-base-image). The same rule applies to the publisher parent pin in §10.
+
 4. Run the local builder and final-image smokes:
 
    ```bash
