@@ -52,7 +52,8 @@ chmod +x "$WORK/fake-tool"
 # env -i. It reads its settings from $WORK/state, written by each test:
 # CALLS, PG_IMAGE (0 = the postgres image is missing), SUBNETS, SALT,
 # which keygen mixes into its points so that a renewal's keys are new, and
-# LINK=NAME:TARGET, which makes keygen leave key NAME as a symlink to TARGET.
+# LINK=NAME:TARGET, which makes keygen leave key NAME as a symlink to TARGET,
+# and COMPOSE_FAIL=WORD, which fails each compose call with WORD as an argument.
 mkdir "$WORK/bin"
 cat >"$WORK/bin/docker" <<DOCKER
 #!/usr/bin/env bash
@@ -65,7 +66,7 @@ case "$1 $2" in
   'image inspect') [[ "$PG_IMAGE" == 1 ]]; exit ;;
   'network ls') printf 'net1\nnet2\n'; exit 0 ;;
   'network inspect') printf '172.17.0.0/16 \n%s \n' "$SUBNETS"; exit 0 ;;
-  'compose '*) exit 0 ;;
+  'compose '*) [[ -z "${COMPOSE_FAIL:-}" || " $* " != *" $COMPOSE_FAIL "* ]]; exit ;;
 esac
 vol='' name=''
 for a in "$@"; do
@@ -238,9 +239,14 @@ FN=_authority_lifecycle VERB=down run_init '' && [[ "$(lifecycle_calls)" == '--p
   && pass "down removes the authority's containers and keeps its volumes" || fail "down calls: $(lifecycle_calls)"
 mv "$AUTH/public/realm-id" "$AUTH/public/realm-id.saved"; : >"$CALLS"
 if FN=_authority_lifecycle VERB=up run_init ''; then fail "up ran without a realm"
-else grep -qF 'cannot read the realm' "$ROOT/out" && ! grep -q compose "$CALLS" && pass "up refuses, untouched, without the realm record" || fail "no realm: $(cat "$ROOT/out") calls: $(cat "$CALLS")"
+else grep -qF 'realm-id is missing, so the authority is left alone' "$ROOT/out" && ! grep -q compose "$CALLS" && pass "up refuses, untouched, without the realm record" || fail "no realm: $(cat "$ROOT/out") calls: $(cat "$CALLS")"
 fi
 mv "$AUTH/public/realm-id.saved" "$AUTH/public/realm-id"
+cp "$ROOT/.env" "$ROOT/.env.saved"; printf 'AUTHORITY_DIR=%s\n' rel >>"$ROOT/.env"; : >"$CALLS"
+if FN=_authority_lifecycle VERB=stop run_init ''; then fail "stop accepted a relative AUTHORITY_DIR"
+else grep -qF 'must be an absolute path' "$ROOT/out" && [[ ! -s "$CALLS" ]] && pass "the lifecycle refuses a relative AUTHORITY_DIR" || fail "relative: $(cat "$ROOT/out")"
+fi
+mv "$ROOT/.env.saved" "$ROOT/.env"
 
 # ── renew, on the authority init just made ─────────────────────────────
 jget() { python3 -c "import json,sys; print(json.load(open(sys.argv[1]))[sys.argv[2]])" "$1" "$2"; }
@@ -394,13 +400,29 @@ else
   fail "upgrade failed: $(cat "$ROOT/out")"
 fi
 grep -qF 'replication-gate off' "$CALLS" && ! grep -qF seal-legacy "$CALLS" && grep -q 'compose.* up -d authority$' "$CALLS" \
-  && grep -qF 'not sealed: the control plane has 3 accounts' "$ROOT/out" \
+  && grep -qF 'It is not sealed.' "$ROOT/out" && [[ -f "$AUTH/public/realm-id" ]] \
   && pass "upgrade turns the replication gate off, starts the authority unsealed and says so" || fail "upgrade: $(cat "$ROOT/out")"
 # An account made between the first count and the seal: nothing is sealed.
 fixture
 CP_ACCOUNTS=0 CP_ACCOUNTS_LATER=1 run_init "$PASS"$'\n'"$PASS" --export-dir "$EXPORT" \
-  && ! grep -qF seal-legacy "$CALLS" && grep -qF 'not sealed: the control plane has 1 accounts' "$ROOT/out" \
+  && ! grep -qF seal-legacy "$CALLS" && grep -qF 'It is not sealed.' "$ROOT/out" \
   && pass "init does not seal when an account appears before the seal" || fail "late account: $(cat "$ROOT/out")"
+# upgrade on an install with no accounts still leaves the seal to the integration.
+fixture
+CP_ACCOUNTS=0 VERB=upgrade run_init "$PASS"$'\n'"$PASS" --export-dir "$EXPORT" \
+  && ! grep -qF seal-legacy "$CALLS" && grep -qF 'It is not sealed.' "$ROOT/out" \
+  && pass "upgrade never seals, even with no accounts" || fail "upgrade, no accounts: $(cat "$ROOT/out")"
+# A setup that stopped part way: up leaves it alone, stop and down still clear it.
+fixture; docker_set COMPOSE_FAIL=replication-gate
+if run_init "$PASS"$'\n'"$PASS" --export-dir "$EXPORT"; then fail "a failed replication-gate was accepted"
+else [[ -f "$AUTH/public/trust" && ! -e "$AUTH/public/realm-id" ]] && pass "a setup that stops writes no realm-id" || fail "partial setup: $(ls "$AUTH/public")"
+fi
+docker_set COMPOSE_FAIL=; : >"$CALLS"
+if FN=_authority_lifecycle VERB=up run_init ''; then fail "up took over a setup that did not finish"
+else grep -qF 'did not finish' "$ROOT/out" && [[ ! -s "$CALLS" ]] && pass "up leaves a setup that did not finish alone" || fail "up on a partial setup: $(cat "$ROOT/out" "$CALLS")"
+fi
+FN=_authority_lifecycle VERB=down run_init '' && [[ "$(lifecycle_calls)" == '--profile authority-owner down' ]] \
+  && pass "down still clears a setup that did not finish" || fail "down on a partial setup: $(cat "$ROOT/out")"
 
 # ── Refusals before anything is written ────────────────────────────────
 # refuse LABEL WANT INPUT ARGS... — init exits non-zero, says WANT, writes nothing in AUTHORITY_DIR.
