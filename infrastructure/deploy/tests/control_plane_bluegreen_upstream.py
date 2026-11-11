@@ -46,7 +46,8 @@ OP_TEXT, OP_CLOSE, OP_PING, OP_PONG = 0x1, 0x8, 0x9, 0xA
 
 
 def ws_accept(key):
-    return base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()
+    # RFC 6455 section 4.2.2 fixes SHA-1 for Sec-WebSocket-Accept; not a security hash.
+    return base64.b64encode(hashlib.sha1((key + WS_GUID).encode()).digest()).decode()  # nosemgrep: python.lang.security.insecure-hash-algorithms.insecure-hash-algorithm-sha1
 
 
 def ws_send(sock, opcode, payload, mask):

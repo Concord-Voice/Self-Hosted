@@ -5907,7 +5907,8 @@ control_plane_bluegreen_cutover() {
     [[ "$line" == "$green" ]] && member=1
   done <<<"$running"
   if (( !member )); then
-    if ! { control_plane_bluegreen_reap_green && control_plane_bluegreen_marker_clear; }; then
+    # ponytail: two calls, not `! { a && b; }`, which Semgrep's bash parser rejects.
+    if ! control_plane_bluegreen_reap_green || ! control_plane_bluegreen_marker_clear; then
       control_plane_bluegreen_fail standby-not-ready \
         'the previous control-plane still serves on 8080; green could not be removed and the cutover marker was kept'
     fi

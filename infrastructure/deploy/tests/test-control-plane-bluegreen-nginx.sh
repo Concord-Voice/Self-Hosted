@@ -170,7 +170,7 @@ build_conf() {
     # thousands of requests a second, so the stand-in rate is raised until
     # limit_req cannot fire and only upstream failures can show as non-200.
     cat <<'NGINX'
-    map $host $validated_host { default $host; }
+    map $host $validated_host { default $host; }  # nosemgrep: generic.nginx.security.request-host-used.request-host-used -- test stand-in, loopback only
     map $http_user_agent $is_scanner { default 0; }
     log_format timed_ws '[$time_local] "$request_method $uri $server_protocol" $status';
     limit_req_zone $binary_remote_addr zone=ws_handshake:1m rate=20r/s;
