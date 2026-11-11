@@ -4,7 +4,7 @@
 
 **Goal:** A default-off rail in `concord-ctl.sh` that rebuilds the control-plane with no 502s by starting a transient green instance, flipping nginx to it and back, and falling back to today's stop-first path whenever the schema is not provably current.
 
-**Architecture:** Home stays the service `control-plane` on 8080. `control-plane-green` on loopback 8081 lives in an opt-in compose overlay and exists only inside a locked cutover. The live nginx vhost is the only record of the active colour. A new read-only `migrations status` subcommand and a `MIGRATIONS_MODE=verify` startup mode implement the migration gate.
+**Architecture:** Home stays the service `control-plane` on 8080. Green is a `compose run` one-off container of the same service on loopback 8081 (container `concordvoice-control-plane-green`) and exists only inside a locked cutover. No compose file is added or edited. The live nginx vhost is the only record of the active colour. A new read-only `migrations status` subcommand and a `MIGRATIONS_MODE=verify` startup mode implement the migration gate.
 
 **Tech Stack:** Bash (`infrastructure/deploy/concord-ctl.sh`), Docker Compose, nginx, Go (golang-migrate v4, `database/sql`), Python 3 stdlib (stub upstream).
 
@@ -14,11 +14,13 @@
 
 - **Default-off.** With `CONTROL_PLANE_DEPLOY_PROFILE` unset, the compose command string, every docker/compose argv, the nginx render and all output are identical to today. The only permitted delta is one `[[ -e "$CONTROL_PLANE_CUTOVER_MARKER" ]]` test.
 - **Never fail open.** Any doubt about the schema, the model, or the live port takes the drained path or refuses. Nothing proceeds on an unparsed value.
-- **Names are fixed:** service `control-plane-green`, container `concordvoice-control-plane-green`, port `127.0.0.1:8081:8080`, profile `control-plane-bluegreen`, switch values `control-plane-single` | `control-plane-bluegreen`.
+- **Names are fixed:** green container `concordvoice-control-plane-green` (a one-off of service `control-plane`; there is no green service), port `127.0.0.1:8081:8080`, switch values `control-plane-single` | `control-plane-bluegreen`.
+- **Green start form (exact):** `$COMPOSE_CMD run --detach --no-deps --pull never --use-aliases --name concordvoice-control-plane-green -p 127.0.0.1:8081:8080 -e MIGRATIONS_MODE=verify -e OPS_METRICS_ENABLED=false control-plane`. **Green reap form:** `docker stop -t 45 concordvoice-control-plane-green` then `docker rm -f concordvoice-control-plane-green`.
+- **The two migration guards are not edited:** `activity_history_refresh_daemon_ids` and `privacy_defaults_refuse_foreign_control_plane` already see a one-off of the service.
 - **Ports:** only 8080 and 8081 are ever valid upstream ports.
 - **Public repo.** No hostnames, addresses, provider names or private issue numbers in code, comments, tests, docs or commit messages.
-- **Protected paths.** Only these may be edited under the protected patterns: `infrastructure/deploy/concord-ctl.sh`, `infrastructure/deploy/tests/test-control-plane-bluegreen.sh`, `infrastructure/deploy/tests/test-control-plane-bluegreen-nginx.sh`, `infrastructure/deploy/tests/control_plane_bluegreen_upstream.py`; and conditionally `CODEOWNERS`, `infrastructure/deploy/deploy-manifest.txt`, `.github/workflows/pr-ci.yml`. If a task seems to need any other protected file, stop and report.
-- **Do not edit:** the six existing compose files, `nginx/concordvoice.conf`, `nginx/admin-console.conf.template`, `selfhost-port-posture.py`, `.env.example`, `docker_reader.go`.
+- **Protected paths.** Only these may be edited under the protected patterns: `infrastructure/deploy/concord-ctl.sh`, `infrastructure/deploy/tests/test-control-plane-bluegreen.sh`, `infrastructure/deploy/tests/test-control-plane-bluegreen-nginx.sh`, `infrastructure/deploy/tests/control_plane_bluegreen_upstream.py`; and conditionally `.github/workflows/pr-ci.yml`. If a task seems to need any other protected file, stop and report.
+- **Do not edit or add:** any compose file, `nginx/concordvoice.conf`, `nginx/admin-console.conf.template`, `selfhost-port-posture.py`, `.env.example`, `docker_reader.go`.
 - **Tests** follow `.claude/rules/domains/tests.md`: every rejection test names, in a comment, the one-line mutation of production code that turns it red; cover the happy and the error path.
 - **Go** follows `.claude/rules/domains/backend.md`: every error checked and wrapped; no driver error or DSN in any output.
 - **Line numbers in the spec are leads.** Locate every site by symbol name.
@@ -43,8 +45,7 @@
 | `services/control-plane/internal/migrationrunner/status.go` (create) | Read-only schema status and verify. Never builds the migrate driver. |
 | `services/control-plane/internal/database/postgres.go` (edit) | `MigrationStatus`, `VerifyMigrations` bound to `file://migrations`. |
 | `services/control-plane/cmd/server/main.go` (edit) | `migrations` subcommand; `MIGRATIONS_MODE` parse before the database opens. |
-| `docker-compose.control-plane-bluegreen.yml` (create) | The green service only. |
-| `infrastructure/deploy/concord-ctl.sh` (edit) | Switch, guards, marker, renderer, reader, flip, cutover, recovery. All new functions are named `control_plane_bluegreen_*` and sit together directly after the `media_bluegreen_*` block. |
+| `infrastructure/deploy/concord-ctl.sh` (edit) | Switch, marker, renderer, reader, flip, cutover, recovery. All new functions are named `control_plane_bluegreen_*` and sit together directly after the `media_bluegreen_*` block. |
 | `infrastructure/deploy/tests/test-control-plane-bluegreen-nginx.sh` + `control_plane_bluegreen_upstream.py` (create) | Real-nginx proof of zero 502 and WebSocket survival. |
 
 ---
@@ -73,7 +74,7 @@
 **Files:**
 - Create: `services/control-plane/internal/migrationrunner/status.go`, `status_test.go`
 - Modify: `services/control-plane/internal/migrationrunner/runner.go` (package comment only), `services/control-plane/internal/database/postgres.go`, `services/control-plane/cmd/server/main.go`
-- Test: `services/control-plane/cmd/server/main_subcommand_test.go`
+- Test: `services/control-plane/cmd/server/main_migrations_test.go`
 
 **Interfaces:**
 - Produces:
@@ -84,40 +85,38 @@
   - `func Verify(ctx context.Context, db *sql.DB, sourceURL string) error` — nil only when `Current()`; otherwise an error whose text is `schema not current for this binary (verify mode)`.
   - `func database.MigrationStatus(ctx context.Context, db *sql.DB) (migrationrunner.Status, error)` and `func database.VerifyMigrations(ctx context.Context, db *sql.DB) error`, both bound to `file://migrations`.
   - CLI contract for Task 5: `./main migrations status` prints `Line()` on stdout; exit 0 for `current`, 3 for the other four, 1 on any failure with the fixed stderr line `migrations status: unavailable`, 64 on a usage error. Total timeout 15 s.
-  - Env contract for Task 2 and Task 5: `MIGRATIONS_MODE` empty or `apply` → `RunMigrations`; `verify` → `VerifyMigrations`; anything else → startup error `invalid MIGRATIONS_MODE` before any database connection.
+  - Env contract for Task 5: `MIGRATIONS_MODE` empty or `apply` → `RunMigrations`; `verify` → `VerifyMigrations`; anything else → startup error `invalid MIGRATIONS_MODE` before any database connection.
 
 - [ ] **Step 1: Confirm the driver side effect.** Read `database/postgres/postgres.go` of the pinned golang-migrate version in the module cache (`go list -m -f '{{.Dir}}' github.com/golang-migrate/migrate/v4`). Confirm `WithInstance` reaches `ensureVersionTable` (advisory lock + `CREATE TABLE IF NOT EXISTS`). If it does not, report before continuing; the design depends on it.
 - [ ] **Step 2: Write failing tests in `status_test.go`** using the same real-Postgres helper `runner_test.go` uses. Cases: `TestReadStatus_Uninitialised`, `_Current`, `_Pending`, `_Ahead`, `_Dirty`, `_TwoRowsIsError`, `_EmptySourceIsError`, `TestReadStatus_WritesNothing` (snapshot `pg_class` row count and `pg_locks` advisory locks before and after: unchanged, and no `schema_migrations` table created on an empty schema), `TestVerify_ErrorsOnEveryNonCurrentCase`, `TestStatusLine_ExactFormats`.
 - [ ] **Step 3: Run to see them fail.** Run: `cd services/control-plane && go test ./internal/migrationrunner/ -run 'ReadStatus|Verify|StatusLine' -p 1`. Expected: build failure, `undefined: ReadStatus`.
 - [ ] **Step 4: Implement `status.go`.** Read path, in one transaction: `BEGIN READ ONLY`; `SET LOCAL statement_timeout='5s'`; `SELECT current_schema()`; `SELECT to_regclass($1)` on the schema-qualified, `pq.QuoteIdentifier`-quoted table name (NULL → not initialised); `SELECT version, dirty` (zero rows → not initialised; more than one → error). Latest: `source.Open(sourceURL)`, `First` then `Next` until `errors.Is(err, os.ErrNotExist)`; close the source. Do not call `postgres.WithInstance` or `migrate.New*`.
 - [ ] **Step 5: Add the wrappers** in `postgres.go` and one sentence to the `runner.go` package comment: status and verify are read-only siblings of `Run` and must never build the migrate driver.
-- [ ] **Step 6: Write failing subcommand tests** in `main_subcommand_test.go`: `migrations` routes to a new `migrations` runner in `controlPlaneSubcommandRunners`; `migrations` with no verb, an unknown verb, or extra args → 64; empty `DATABASE_URL` → 1 with stderr exactly `migrations status: unavailable\n` and empty stdout (Review Focus 3); unreachable database → 1 and the combined output contains no substring of the DSN; exit-code table for all five lines. Add `TestMigrationsMode_Parse` (`""`, `apply`, `verify`, `Verify`, `skip` → the last two are errors) and `TestMigrationsMode_VerifyNeverApplies` (inject the apply and verify functions; verify mode calls only verify).
+- [ ] **Step 6: Write failing subcommand tests** in `main_migrations_test.go`: `migrations` routes to a new `migrations` runner in `controlPlaneSubcommandRunners`; `migrations` with no verb, an unknown verb, or extra args → 64; empty `DATABASE_URL` → 1 with stderr exactly `migrations status: unavailable\n` and empty stdout (Review Focus 3); unreachable database → 1 and the combined output contains no substring of the DSN; exit-code table for all five lines. Add `TestMigrationsMode_Parse` (`""`, `apply`, `verify`, `Verify`, `skip` → the last two are errors) and `TestMigrationsMode_VerifyNeverApplies` (inject the apply and verify functions; verify mode calls only verify).
 - [ ] **Step 7: Implement** the `migrations` case in `dispatchControlPlaneSubcommandWithRunners`, the runner (reads `DATABASE_URL` from the environment, 15 s context), the usage string update, and `parseMigrationsMode(string) (mode, error)` called before `database.New` in the serve path. Replace the single `database.RunMigrations(db)` call with a switch on the mode; keep the existing `run migrations: %w` wrapping.
 - [ ] **Step 8: Run.** `go test ./internal/migrationrunner/ ./internal/database/ ./cmd/server/ -p 1` → `ok` for all three. `golangci-lint run ./internal/migrationrunner/... ./cmd/server/... ./internal/database/...` → no findings.
 - [ ] **Step 9: Commit.** `feat: add a read-only migrations status subcommand and verify startup mode`
 
 ---
 
-### Task 2: Compose overlay and contract tests
+### Task 2: Compose one-off contract test (test only)
 
 **Files:**
-- Create: `docker-compose.control-plane-bluegreen.yml`
 - Modify: `infrastructure/deploy/tests/test-control-plane-bluegreen.sh`
 
 **Interfaces:**
-- Consumes: `MIGRATIONS_MODE` (Task 1).
-- Produces: service `control-plane-green` whose rendered config equals `control-plane`'s except exactly these keys: `container_name: concordvoice-control-plane-green`; `ports: ["127.0.0.1:8081:8080"]`; `networks.<services network>.aliases: [control-plane]`; `environment.MIGRATIONS_MODE: verify`; `environment.OPS_METRICS_ENABLED: "false"`; `profiles: [control-plane-bluegreen]`; no `build`; `pull_policy: never`. The overlay also sets `environment.MIGRATIONS_MODE: ${CONCORD_CONTROL_PLANE_MIGRATIONS_MODE:-apply}` on `control-plane`.
+- Produces: nothing consumed by code. It pins the Docker Compose behaviour the cutover depends on (spec 4.1).
 
-- [ ] **Step 1: Write failing tests** (skip with a `SKIP` line when `docker compose` is absent locally; hard-fail when `CI` is set):
-  - `compose_green_parity`: `docker compose -f docker-compose.yml -f docker-compose.production.yml -f docker-compose.control-plane-bluegreen.yml --profile control-plane-bluegreen config --format json`; a python3 one-off asserts the key-difference set between the two services is exactly the list above. Supply dummy values for required env through an env file in `$TMP`.
-  - `compose_green_not_default`: the same render without `--profile` contains no `control-plane-green`.
-  - `compose_base_unchanged`: `config` of base+production with and without the overlay (no profile) differs only in `control-plane.environment.MIGRATIONS_MODE == "apply"`.
-  - `compose_named_service_activates_profile`: with a throwaway two-service project in `$TMP` (image `busybox`, one service behind a profile), prove `up -d`, `ps -q`, `stop` and `rm -f` work when the profiled service is named and no profile is active. Requires a running daemon; `SKIP` locally without one, hard-fail under `CI`.
-- [ ] **Step 2: Run to see them fail** (`overlay file not found`).
-- [ ] **Step 3: Write the overlay.** Use YAML merge only if the rendered parity test passes; otherwise restate keys. Find the services network name in `docker-compose.yml`; do not guess it. Confirm in the Go source that `OPS_METRICS_ENABLED=false` means the reader is never opened or closed; if the variable has a different name, use the real one and report it.
-- [ ] **Step 4: Run** → all `PASS` (or `SKIP` locally for the daemon case).
-- [ ] **Step 5: Decide the conditional `CODEOWNERS` line.** If `CODEOWNERS` lists `docker-compose.production.yml`, add the overlay on the same line pattern. Otherwise leave it.
-- [ ] **Step 6: Commit.** `feat: add the opt-in control-plane green compose overlay`
+- [ ] **Step 1: Write one case, `compose_oneoff_contract`.** It calls the real `docker` (never the PATH stub). No daemon: print `SKIP` locally, `fail` when `CI` is set. Fixture in `$TMP`: a two-file project (`base.yml`: service `cp`, image `busybox:1.36`, an `httpd` command on 8080, `container_name`, `ports: ["18080:8080"]`, a healthcheck, a user network, plus a `peer` service on the same network; `prod.yml`: `read_only: true` and a tmpfs for `cp`). A unique project name; a trap tears the project down. Steps and assertions:
+  - `up -d --wait cp peer`; then `run --detach --no-deps --pull never --use-aliases --name <unique>-green -p 127.0.0.1:18081:8080 -e MODE=verify cp`.
+  - the one-off has labels `com.docker.compose.service=cp` and `com.docker.compose.oneoff=True`;
+  - `docker ps --filter label=com.docker.compose.service=cp --format '{{.ID}}'` lists two IDs;
+  - `compose ps --status running -q -- cp` lists the one-off's ID;
+  - the one-off's `HostConfig.ReadonlyRootfs` is `true` (second-file key inherited) and its only published port is `127.0.0.1:18081`;
+  - its network aliases include `cp`;
+  - `compose stop cp` leaves the one-off running; `compose up -d --no-deps --wait cp` then succeeds beside it.
+- [ ] **Step 2: Run.** Expected: `PASS: compose_oneoff_contract`. Prove non-vacuity once: drop `--use-aliases`, see `FAIL`, restore.
+- [ ] **Step 3: shellcheck, commit.** `test: pin the compose one-off behaviour the control-plane rail depends on`
 
 ---
 
@@ -145,7 +144,7 @@
 
 ---
 
-### Task 4: Switch, refusals, guard widening, marker
+### Task 4: Switch, refusals, marker
 
 **Files:**
 - Modify: `infrastructure/deploy/concord-ctl.sh`, `infrastructure/deploy/tests/test-control-plane-bluegreen.sh`
@@ -155,14 +154,14 @@
   - `CONTROL_PLANE_DEPLOY_PROFILE` read from the deploy env file exactly as `MEDIA_DEPLOY_PROFILE` is; `CONTROL_PLANE_BLUEGREEN=1` only for the value `control-plane-bluegreen` in the production/staging branch; `0` in every other branch.
   - `CONTROL_PLANE_CUTOVER_MARKER="${CONFIG_DEPLOY_DIR}/.control-plane-cutover.local"`.
   - `control_plane_bluegreen_marker_guard <verb>` — returns 0 to proceed. Rail off + marker → `control-plane-bluegreen: rail-off-with-cutover-marker`, exit 1. Rail on + marker → `control-plane-bluegreen: cutover-incomplete`, exit 1, except for `rebuild`, `nginx-reload` and `stop`.
-  - With the rail on, `COMPOSE_CMD` gains ` -f ${DEPLOY_DIR}/docker-compose.control-plane-bluegreen.yml` and `CONCORD_CONTROL_PLANE_MIGRATIONS_MODE=apply` is exported.
-  - Refusals, exit 2: `control-plane-bluegreen: invalid control-plane deployment profile`; `rail-refused-media-bluegreen`; `rail-refused-no-flock`; `rail-refused-no-state-dir`; `rail-refused-overlay-missing`.
+  - `COMPOSE_CMD` is identical with the rail on or off.
+  - Refusals, exit 2: `control-plane-bluegreen: invalid control-plane deployment profile`; `rail-refused-media-bluegreen`; `rail-refused-no-flock`; `rail-refused-no-state-dir`.
 
-- [ ] **Step 1: Write failing tests:** `switch_unset_compose_cmd_identical` (the Task 0 transcript still matches byte for byte); `switch_single_identical`; `switch_bluegreen_appends_overlay` (transcript's compose argv contains the overlay `-f`); `switch_invalid_exits_2`; `switch_quoted_or_padded_value_exits_2` for `" control-plane-bluegreen"` and `'"control-plane-bluegreen"'` (Review Focus 2); `switch_forced_single_in_selfhost_mode` (self-host fixture + switch set → transcript identical to self-host baseline, exit 0); one test per `rail-refused-*`; `guard_rail_on_counts_green` (stub the second `docker ps` to return an ID → the drained check refuses); `guard_rail_on_second_ps_failure_refuses`; `guard_rail_on_green_is_own` (foreign-project guard accepts an ID that `compose ps -q -- control-plane control-plane-green` lists); `guard_rail_on_foreign_still_refused`; `guard_rail_off_single_docker_ps` (transcript shows exactly one daemon-wide `docker ps`); `marker_rail_off_refuses_rebuild`; `marker_rail_on_refuses_restart_allows_nginx_reload_and_stop`; `rebuild_scope_control_plane_green_rejected` (pins existing behaviour); `posture_rejects_rendered_green` (feed `selfhost-port-posture.py` a model containing the green publish → non-zero); `managed_redis_makes_no_green_call`.
+- [ ] **Step 1: Write failing tests:** `switch_unset_compose_cmd_identical` (the Task 0 transcript still matches byte for byte); `switch_single_identical`; `switch_bluegreen_compose_cmd_identical` (with the rail on and a non-control-plane scope, every compose argv prefix equals the rail-off one); `switch_invalid_exits_2`; `switch_quoted_or_padded_value_exits_2` for `" control-plane-bluegreen"` and `'"control-plane-bluegreen"'` (Review Focus 2); `switch_forced_single_in_selfhost_mode` (self-host fixture + switch set → transcript identical to self-host baseline, exit 0); one test per `rail-refused-*`; `guards_unchanged_from_baseline` (the bodies of `activity_history_refresh_daemon_ids` and `privacy_defaults_refuse_foreign_control_plane`, extracted by name, hash to constants recorded from the unmodified tree); `marker_rail_off_refuses_rebuild`; `marker_rail_on_refuses_restart_allows_nginx_reload_and_stop`; `managed_redis_makes_no_green_call`.
 - [ ] **Step 2: Run to see them fail.**
-- [ ] **Step 3: Implement.** Replace Task 3's hard-coded `CONTROL_PLANE_BLUEGREEN=0`. Widen `activity_history_refresh_daemon_ids` with a second `docker ps` only under the rail; widen the own-set in `privacy_defaults_refuse_foreign_control_plane` only under the rail. Call `control_plane_bluegreen_marker_guard` once, right after the deploy lock is acquired, for every verb that takes the lock. `stop` additionally stops and removes green when a marker exists.
+- [ ] **Step 3: Implement.** Replace Task 3's hard-coded `CONTROL_PLANE_BLUEGREEN=0`. Call `control_plane_bluegreen_marker_guard` once, right after the deploy lock is acquired, for every verb that takes the lock. `stop` additionally reaps green (the reap form above) when a marker exists.
 - [ ] **Step 4: Run** → all `PASS`, Task 0 unchanged. shellcheck clean.
-- [ ] **Step 5: Commit.** `feat: add the control-plane blue-green switch, guard coverage and cutover marker`
+- [ ] **Step 5: Commit.** `feat: add the control-plane blue-green switch and cutover marker`
 
 ---
 
@@ -174,18 +173,17 @@
 **Interfaces:**
 - Consumes: everything from Tasks 1-4.
 - Produces:
-  - `control_plane_bluegreen_validate_model` — 0 valid; 1 invalid, printing `control-plane-bluegreen: model differs from control-plane in: <key names>` (names only).
   - `control_plane_bluegreen_schema_current` — 0 only on exit 0 and stdout matching `^current [0-9]+$` from `control_plane_cli migrations status`.
-  - `control_plane_bluegreen_flip <port>`; `control_plane_bluegreen_reap_green`.
+  - `control_plane_bluegreen_flip <port>`; `control_plane_bluegreen_start_green` (the start form above, through the same wrappers and egress reconcile `control_plane_cli` uses); `control_plane_bluegreen_reap_green` (the reap form above; succeeds when the container is absent).
   - `control_plane_bluegreen_cutover` — returns 0 when the round trip completed (the caller skips the drained sequence); returns 10 for "take the drained path, nothing was changed"; exits 1 with a named error otherwise.
   - `control_plane_bluegreen_recover <scope…>` — implements the spec 4.6 recovery table.
   - `activity_history_wait_control_plane [<full-url>]`.
   - `control_plane_cli`: `migrations` added to the forced-fresh-container condition.
 
-- [ ] **Step 1: Verify three spec unknowns first** and note each result in the commit body: `control_plane_cli` stdout is only the subcommand's stdout in non-direct egress mode; `voice_enforcement_rollout_guard_mutation` (if it wraps compose mutations) accepts argv naming `control-plane-green`; the vhost and any nginx config in this repo leave `worker_shutdown_timeout` unset.
-- [ ] **Step 2: Write failing happy-path tests:** `cutover_happy_transcript` — golden of the full ordered argv for one round trip (model render, status run, foreign guard, `up … control-plane-green`, curl `http://127.0.0.1:8081/readyz`, flip 8081, `stop --timeout 45 control-plane`, `up … control-plane` with `CONCORD_CONTROL_PLANE_MIGRATIONS_MODE=verify` in its environment, curl `http://127.0.0.1:8080/readyz`, flip 8080, `stop --timeout 45 control-plane-green`, `rm -f control-plane-green`), marker absent afterwards, exit 0; `cutover_gates_on_readyz_not_health`; `cutover_only_for_exact_scope` (`rebuild control-plane media-plane` with the rail on → the Task 0-style drained transcript).
-- [ ] **Step 3: Write failing gate tests** — each asserts the five drained calls appear in their original order and no `control-plane-green` argv appears: status stdout `current` (no number); `current 12\nextra`; exit 3 `pending 11 12`; exit 64; exit 1; status timeout; validator failure for a dropped env key, a `0.0.0.0` publish and a second port; `validator_output_has_no_env_values` (plant `SENTINEL_SECRET_VALUE` in a differing key and assert it is absent from all output); `marker_write_failure_takes_drained_path` (make the marker directory read-only → drained transcript, no green call) (Review Focus 4).
-- [ ] **Step 4: Write failing order and failure tests:** `stop_follows_reload_leg1` and `_leg2` (the very next mutating call after each successful flip is the old colour's stop); `int_during_flip_still_stops` (the `nginx` stub sleeps, the test sends INT to `ctl`, the stop still appears); one test per named error asserting the message, exit 1 and the end state from the spec (`standby-image-mismatch`, `standby-not-ready` → no flip call and green reaped, `flip-failed` on each leg, `old-colour-stop-failed` → marker kept, `home-not-ready` → marker kept and no stop of green).
+- [ ] **Step 1: Verify three spec unknowns first** and note each result in the commit body: `control_plane_cli` stdout is only the subcommand's stdout in non-direct egress mode; which wrapper `control_plane_cli` passes its `compose run` through, and what it runs afterwards in non-direct egress mode (the green start must do the same); the vhost and any nginx config in this repo leave `worker_shutdown_timeout` unset.
+- [ ] **Step 2: Write failing happy-path tests:** `cutover_happy_transcript` — golden of the full ordered argv for one round trip (status run, foreign guard, the green start form, `compose ps --status running -q -- control-plane`, `docker inspect` of green's image, curl `http://127.0.0.1:8081/readyz`, flip 8081, `stop --timeout 45 control-plane`, status run, `up -d --no-build --no-deps --wait --wait-timeout 180 control-plane`, curl `http://127.0.0.1:8080/readyz`, flip 8080, `docker stop -t 45 concordvoice-control-plane-green`, `docker rm -f concordvoice-control-plane-green`), marker absent afterwards, exit 0; `cutover_gates_on_readyz_not_health`; `cutover_only_for_exact_scope` (`rebuild control-plane media-plane` with the rail on → the Task 0-style drained transcript).
+- [ ] **Step 3: Write failing gate tests** — each asserts the five drained calls appear in their original order and no `compose run` or `concordvoice-control-plane-green` argv appears: status stdout `current` (no number); `current 12\nextra`; exit 3 `pending 11 12`; exit 64; exit 1; status timeout; `green_missing_from_compose_ps_reaps_and_drains` (the `compose ps` stub omits green's ID → green reaped, marker cleared, drained transcript); `live_port_8081_without_marker_refuses` (`recovery-ambiguous`, nothing changed); `marker_write_failure_takes_drained_path` (make the marker directory read-only → drained transcript, no green call) (Review Focus 4).
+- [ ] **Step 4: Write failing order and failure tests:** `stop_follows_reload_leg1` and `_leg2` (the very next mutating call after each successful flip is the old colour's stop); `int_during_flip_still_stops` (the `nginx` stub sleeps, the test sends INT to `ctl`, the stop still appears); one test per named error asserting the message, exit 1 and the end state from the spec (`standby-image-mismatch`, `standby-not-ready` → no flip call and green reaped, `flip-failed` on each leg, `old-colour-stop-failed` → marker kept, `home-not-ready` → marker kept and no stop of green, both for a failed home start and for a status that is no longer current at step 8). Add `egress_reconcile_runs_after_green_start_and_reap` if Step 1 found a reconcile.
 - [ ] **Step 5: Write failing recovery tests,** one per table row: `recover_unparseable_refuses_nothing_changed`; `recover_live_8080_reaps_and_continues`; `recover_stale_marker_unscoped_rebuild_continues` (Review Focus 5); `recover_live_8081_green_ready_current_resumes_steps_8_9`; `recover_live_8081_green_ready_pending_runs_apply_then_flips_home`; `recover_live_8081_green_ready_wrong_scope_is_cutover_incomplete`; `recover_live_8081_green_absent_runs_drained_then_flips_home`; `recover_runs_before_routine_guard`.
 - [ ] **Step 6: Write failing `wait-healthy` tests:** `wait_healthy_rail_on_uses_live_port` (live vhost at 8081 → curls target 8081); `wait_healthy_rail_on_unparseable_exits_1`; `wait_healthy_rail_off_unchanged` (Task 0 case).
 - [ ] **Step 7: Run to see them fail.**
@@ -221,9 +219,9 @@
 **Files:**
 - Modify: `docs/architecture.md`, `docs/development.md`, `CHANGELOG.md`, `.claude/rules/domains/migrations.md`
 
-- [ ] **Step 1: `docs/architecture.md`.** Add a "Control-plane blue-green deploys" section next to the existing deploy-verb material: the round-trip colour model; the switch and where it is honoured (managed production/staging only; forced off in self-host mode; not reached under managed Redis); how to tell the active colour (the `server` line in the live vhost's `upstream control_plane` block; the marker file); the migration gate; every named error with the state each leaves and the operator action; forcing back (rerun `rebuild control-plane`; last resort `stop` then `rebuild control-plane`); the SIGKILL-between-flip-and-stop case; the warning against a hand-run `docker compose up` after an overlap; deployment-owned compose layers must be mirrored onto green; activation preconditions (Concord-Voice/Desktop#68, Concord-Voice/Desktop#64). Add env-table rows for `MIGRATIONS_MODE` and `CONTROL_PLANE_DEPLOY_PROFILE`.
+- [ ] **Step 1: `docs/architecture.md`.** Add a "Control-plane blue-green deploys" section next to the existing deploy-verb material: the round-trip colour model; the switch and where it is honoured (managed production/staging only; forced off in self-host mode; not reached under managed Redis); how to tell the active colour (the `server` line in the live vhost's `upstream control_plane` block; the marker file); the migration gate; every named error with the state each leaves and the operator action; forcing back (rerun `rebuild control-plane`; last resort `stop` then `rebuild control-plane`); the SIGKILL-between-flip-and-stop case; green's restart policy `no` and what it means; that green inherits every compose layer of `control-plane`, so nothing has to be mirrored; activation preconditions (Concord-Voice/Desktop#68, Concord-Voice/Desktop#64). Add env-table rows for `MIGRATIONS_MODE` and `CONTROL_PLANE_DEPLOY_PROFILE`.
 - [ ] **Step 2: `docs/development.md`.** In the deploy-verb section: the `migrations status` subcommand with its output and exit-code table, and how to run the two new test scripts.
 - [ ] **Step 3: `CHANGELOG.md`.** One entry under the unreleased heading, in the file's existing style: default-off rail, `migrations status`, `MIGRATIONS_MODE`.
 - [ ] **Step 4: `.claude/rules/domains/migrations.md`.** One sentence beside the runner contract: status and verify are read-only and must never build the migrate driver, because building it takes the advisory lock and can create the version table.
-- [ ] **Step 5: Verify.** Every identifier named in the docs exists in the code: `grep -c` each of `CONTROL_PLANE_DEPLOY_PROFILE`, `MIGRATIONS_MODE`, `control-plane-green`, and each named error in `infrastructure/deploy/concord-ctl.sh` or `services/control-plane` → non-zero. Run the repo's markdown lint if `.pre-commit-config.yaml` has one: `pre-commit run --files docs/architecture.md docs/development.md CHANGELOG.md`.
+- [ ] **Step 5: Verify.** Every identifier named in the docs exists in the code: `grep -c` each of `CONTROL_PLANE_DEPLOY_PROFILE`, `MIGRATIONS_MODE`, `concordvoice-control-plane-green`, and each named error in `infrastructure/deploy/concord-ctl.sh` or `services/control-plane` → non-zero. Run the repo's markdown lint if `.pre-commit-config.yaml` has one: `pre-commit run --files docs/architecture.md docs/development.md CHANGELOG.md`.
 - [ ] **Step 6: Commit.** `docs: document the control-plane blue-green rail and its migration gate`
