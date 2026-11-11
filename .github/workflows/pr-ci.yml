@@ -834,6 +834,17 @@ jobs:
         run: |
           python3 -m pip install --user --quiet --require-hashes --only-binary=:all: -r .github/requirements-pyyaml.txt
 
+      # Runs when a workflow_lint path in .github/ci/scan-relevance.yml changes;
+      # a new package.json, go.mod or requirements root alone does not start it.
+      # Fails if a tracked update root is in no block of .github/dependabot.yml,
+      # or a block watches a missing directory. Exit 2 means the audit could not
+      # complete (for example PyYAML is missing); that is a failure, not a pass.
+      # The audit's regression suite runs first, so a broken audit cannot pass.
+      - name: Dependabot watches every update root
+        run: |
+          bash scripts/security/test-audit-dependabot-coverage.sh
+          bash scripts/security/audit-dependabot-coverage.sh
+
       - name: TruffleHog runtime is digest-pinned
         run: |
           python3 - <<'PY'
