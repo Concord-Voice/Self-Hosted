@@ -375,9 +375,8 @@ updates:
   # scripts/security/audit-dependabot-coverage.sh fails when a tracked
   # Dockerfile is in no block; it does not check that tiers stay apart.
   #
-  # Tier 1 — runtime services. These images run in production and face the
-  # network. A bump here changes what is deployed, so it carries
-  # `risk: security`.
+  # Tier 1 — runtime services. These images run in production. A bump here
+  # changes what is deployed, so it carries `risk: security`.
   - package-ecosystem: "docker"
     directories:
       - "/services/control-plane"

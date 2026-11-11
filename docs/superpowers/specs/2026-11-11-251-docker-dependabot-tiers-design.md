@@ -28,7 +28,7 @@ Four `docker` blocks with disjoint directories. MinIO stays excluded.
 
 | Tier | Directories | Why it is separate |
 |---|---|---|
-| Runtime services | `/services/control-plane`, `/services/media-plane` | These images run in production and face the network. Gains the `risk: security` label. |
+| Runtime services | `/services/control-plane`, `/services/media-plane` | These images run in production. Gains the `risk: security` label. |
 | Database | `/infrastructure/docker/postgres` | A base bump can be a data migration. Carries its own `ignore` for majors. |
 | Build tooling | `/infrastructure/docker/buildtools` (new) | Its parent becomes the parent of the next published builder image, which every later runtime build inherits. |
 | Deploy tests | `/infrastructure/deploy/tests` | Test-only image. Carries its own `ignore` for non-LTS Ubuntu. |
@@ -47,9 +47,9 @@ The `workflow_lint` filter in `.github/ci/scan-relevance.yml` gains four paths, 
 - `.github/dependabot.yml`
 - `scripts/security/audit-dependabot-coverage.sh`
 - `scripts/security/check-pin-exceptions.mjs` (the audit imports it)
-- `**/Dockerfile*`
+- `**/*Dockerfile*` (the audit counts any tracked path that contains `Dockerfile`)
 
-Known ceiling: a new npm, Go or pip root added with no other `workflow_lint` path in the same pull request does not start the job. The local hook still catches it. Add those manifest globs if that case is ever missed.
+Known ceiling: a new npm, Go, pip or non-root compose root added with no other `workflow_lint` path in the same pull request does not start the job. Add those manifest globs if that case is ever missed.
 
 `workflow-lint` is an advisory job: its failure shows as a red check and is not part of the required build result. That matches the issue's acceptance criterion (the pull request "fails it") and is no weaker than `unit-smoke`, which is advisory too. Which job should be merge-blocking for supply-chain guards is an open question that #252 settles; this step can move with that decision.
 

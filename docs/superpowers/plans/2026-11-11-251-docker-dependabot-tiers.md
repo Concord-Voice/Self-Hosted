@@ -107,7 +107,7 @@ Expected: non-zero exit on the first new case, with the `reaches workflow-lint r
 
 - [ ] **Step 3: Extend the filter and add the step**
 
-- `.github/ci/scan-relevance.yml`, filter `workflow_lint`: add `.github/dependabot.yml`, `scripts/security/audit-dependabot-coverage.sh`, `scripts/security/check-pin-exceptions.mjs`, `**/Dockerfile*`.
+- `.github/ci/scan-relevance.yml`, filter `workflow_lint`: add `.github/dependabot.yml`, `scripts/security/audit-dependabot-coverage.sh`, `scripts/security/check-pin-exceptions.mjs`, `**/*Dockerfile*` (widened from `**/Dockerfile*` after the branch review: the audit also counts suffix-named Dockerfiles).
 - `.github/workflows/pr-ci.yml`, job `workflow-lint`: add a step after "Install python3 + PyYAML (lint dependencies)", named `Dependabot watches every update root`, running `bash scripts/security/audit-dependabot-coverage.sh`. Its comment says what a failure means and that the job is advisory.
 
 - [ ] **Step 4: Run the test to verify it passes**

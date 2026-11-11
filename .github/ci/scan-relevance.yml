@@ -499,12 +499,12 @@ dev_checks:
   - 'services/control-plane/migrations/**'
 workflow_lint:
   # Dependabot coverage audit (runs in workflow-lint): the config, the audit and
-  # the helper it imports, and every Dockerfile. A new npm, Go or pip root that
-  # arrives with none of these paths is caught by the local hook only.
+  # the helper it imports, and every Dockerfile. A new npm, Go, pip or non-root
+  # compose root that arrives with none of these paths does not start the job.
   - '.github/dependabot.yml'
   - 'scripts/security/audit-dependabot-coverage.sh'
   - 'scripts/security/check-pin-exceptions.mjs'
-  - '**/Dockerfile*'
+  - '**/*Dockerfile*'
   - '.github/ci/docker-engine-packages.lock'
   - 'scripts/ci/install-docker-engine.sh'
   - 'scripts/ci/start-control-plane-services.sh'

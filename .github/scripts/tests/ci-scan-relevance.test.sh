@@ -338,6 +338,8 @@ run_policy_case workflow-lint-source-map advisory-only .github/ci/scan-relevance
 run_policy_case workflow-lint-source-dependabot advisory-only .github/dependabot.yml
 run_policy_case workflow-lint-source-coverage-audit advisory-only scripts/security/audit-dependabot-coverage.sh
 run_policy_case workflow-lint-source-new-dockerfile advisory-only tools/example/Dockerfile.example
+# The audit counts any tracked path that contains `Dockerfile`, suffix form included.
+run_policy_case workflow-lint-source-suffix-dockerfile advisory-only tools/example/api.Dockerfile
 run_policy_case workflow-lint-only advisory-only .github/scripts/workflow-lint-only.txt
 run_policy_case workflow-lint-legacy-changelog advisory-only CHANGELOG.md
 run_policy_case guard-go-toolchain semgrep_community scripts/check-go-toolchain.py scripts/test-check-go-toolchain.py
