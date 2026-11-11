@@ -155,10 +155,12 @@ Verbs:
   authority upgrade --export-dir DIR
                as init, for an install that already has accounts; it never
                seals: sealing them comes with the client integration
-  authority renew
+  authority renew [--rotate-tls]
                as root: sign the next delegation (new RSK and CAK, 180 days)
                with primaries A and B, install it and restart the authority;
-               if the authority does not stay up, keep it and fix the cause
+               if the authority does not stay up, keep it and fix the cause.
+               --rotate-tls also gives the authority a new TLS key, listed
+               beside the old one, which the next renew drops
   --help       show this help
 
 Run from the repo root. The .env in the repo root is auto-loaded by compose.
