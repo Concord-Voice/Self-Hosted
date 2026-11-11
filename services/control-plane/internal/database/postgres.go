@@ -2,6 +2,7 @@
 package database
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"time"
@@ -10,6 +11,10 @@ import (
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/migrationrunner"
 )
+
+// migrationsSourceURL is the control plane's migrations directory, relative to
+// the working directory the binary runs in.
+const migrationsSourceURL = "file://migrations"
 
 // New creates a new PostgreSQL database connection
 func New(databaseURL string) (*sql.DB, error) {
@@ -35,5 +40,17 @@ func New(databaseURL string) (*sql.DB, error) {
 // RunMigrations runs the control plane's migrations through the shared
 // migrationrunner, which refuses a dirty recorded version (#3587 PR-0).
 func RunMigrations(db *sql.DB) error {
-	return migrationrunner.Run(db, "file://migrations")
+	return migrationrunner.Run(db, migrationsSourceURL)
+}
+
+// MigrationStatus reads the control plane's schema status against its
+// migrations without writing anything or taking the migration lock.
+func MigrationStatus(ctx context.Context, db *sql.DB) (migrationrunner.Status, error) {
+	return migrationrunner.ReadStatus(ctx, db, migrationsSourceURL)
+}
+
+// VerifyMigrations fails unless the control plane's schema is current for its
+// migrations. It never applies a migration.
+func VerifyMigrations(ctx context.Context, db *sql.DB) error {
+	return migrationrunner.Verify(ctx, db, migrationsSourceURL)
 }
