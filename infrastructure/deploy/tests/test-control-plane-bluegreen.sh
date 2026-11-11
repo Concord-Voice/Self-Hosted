@@ -250,7 +250,7 @@ char_wait_healthy_curl_argv() {
 
 # sha256 of the shipped vhost rendered with the default HSTS policy, recorded
 # from an unmodified-tree run.
-NGINX_RENDER_SHA256='e6c88346ed3fdf12bf901b808e6244050591b79a63a1efd054199de51c5ae951'
+NGINX_RENDER_SHA256='e6c88346ed3fdf12bf901b808e6244050591b79a63a1efd054199de51c5ae951'  # pragma: allowlist secret -- sha256 of a rendered fixture, not a secret
 HSTS_DEFAULT_VALUE='max-age=63072000; includeSubDomains; preload'
 # extract_fn <name>: print the function declared as `    name() {` (4-space
 # indent, inside the nginx-reload arm) through its closing `    }`.
@@ -780,8 +780,8 @@ RAIL_OFF_MARKER='control-plane-bluegreen: rail-off-with-cutover-marker'
 CUTOVER_INCOMPLETE='control-plane-bluegreen: cutover-incomplete'
 GREEN=concordvoice-control-plane-green
 # sha256 of the two migration guards, extracted by name from 778d3b7e.
-GUARD_SHA256_REFRESH_DAEMON_IDS='78761343e1e4521bf3728bdd04cee884a889e910b1d47b64929f2541703248a2'
-GUARD_SHA256_PRIVACY_FOREIGN_CP='314d9b4d23f36c58bbe3eb12042945f762822b288d3ce343b46dfa4488053fca'
+GUARD_SHA256_REFRESH_DAEMON_IDS='78761343e1e4521bf3728bdd04cee884a889e910b1d47b64929f2541703248a2'  # pragma: allowlist secret -- sha256 of a rendered fixture, not a secret
+GUARD_SHA256_PRIVACY_FOREIGN_CP='314d9b4d23f36c58bbe3eb12042945f762822b288d3ce343b46dfa4488053fca'  # pragma: allowlist secret -- sha256 of a rendered fixture, not a secret
 
 # The head of the fixture controller through its COMPOSE_CMD= line (the
 # test-selfhost-port-posture.sh precedent): it selects the deployment profiles
