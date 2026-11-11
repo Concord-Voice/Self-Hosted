@@ -264,6 +264,23 @@ else
   fail "stop should call compose stop, not down: $(cat "$STUB/docker.log")"
 fi
 
+# ── Test 3b: up, stop and down hand the authority its turn after the stack's ─
+lifecycle_log="$( bash -c '
+  source "$1"
+  compose() { echo "compose $*"; }
+  require_security_log_boundary() { :; }
+  guarded_ctl() { echo "ctl $*"; }
+  authority_lifecycle() { echo "authority $1"; }
+  main up; main stop; main down
+  compose() { echo "compose $*"; return 1; }
+  main down || echo "down failed"
+' lifecycle "$TARGET" 2>&1 )"
+if [[ "$lifecycle_log" == $'ctl rebuild\nauthority up\ncompose stop\nauthority stop\ncompose down\nauthority down\ncompose down\ndown failed' ]]; then
+  pass "up, stop and down run the authority's step after the stack's, and not after a failure"
+else
+  fail "authority lifecycle wiring: $lifecycle_log"
+fi
+
 # ── Test 4: 'status' invokes compose ps ───────────────────────────────
 : >"$STUB/docker.log"
 ( PATH="$STUB:$PATH" bash "$TARGET" status )

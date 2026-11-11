@@ -6,12 +6,15 @@
 # `authority init` runs once, as root, on an installed stack, and nothing calls
 # it yet: the control plane uses the authority only once its client
 # integration ships, which then mounts the CAK and CP TLS key this writes.
+# `authority upgrade` is the same for an install that already has accounts
+# (D-234). Once either has run, up, stop and down manage the authority too.
 # It creates ${AUTHORITY_DIR} (default /etc/concord-authority):
 #   secrets/     the overlay's compose secrets, 0400, owned by their reader:
 #                uid 70 for the three postgres passwords, uid 65532 for the
 #                passfiles, the RSK and the TLS key
-#   public/      anchors, trust and delegation-not-after-ms (read by
-#                `concord-selfhost health`), 0644, mounted read-only by the authority
+#   public/      anchors, trust, realm-id (read by up) and
+#                delegation-not-after-ms (read by `concord-selfhost health`),
+#                0644, mounted read-only by the authority
 #   root-keys/   product-root primaries A and B (PKCS#8 PEM, root 0600), kept
 #                for `authority renew`
 #   cp/          the CAK and the CP TLS key, owned by the CP image's uid 10006
@@ -20,7 +23,9 @@
 # The recovery keys A' and B' go only to --export-dir, encrypted with a
 # passphrase typed twice. They are never written to the host unencrypted
 # (D-234). init seals the empty population, so it refuses a control plane
-# that already has accounts (DoR activation sequence, step 3).
+# that already has accounts. upgrade leaves such an install unsealed: sealing
+# existing accounts is step 3 of the activation sequence (DoR §2.17), and the
+# control plane's side of it ships with the client integration.
 
 readonly AUTHORITY_IMAGE=concordvoice-account-authority:local
 readonly AUTHORITY_PG_IMAGE=concordvoice-postgres:16-alpine
@@ -43,15 +48,15 @@ _authority_fail() { _authority_warn "$1"; return 1; }
 
 verb_authority() {
   case "${1:-}" in
-    init) shift; _authority_init "$@" ;;
+    init|upgrade) _authority_init "$@" ;;
     renew) shift; _authority_renew "$@" ;;
-    *) _authority_fail 'usage: concord-selfhost authority init --export-dir DIR | renew' ;;
+    *) _authority_fail 'usage: concord-selfhost authority init|upgrade --export-dir DIR | renew' ;;
   esac
 }
 
 # Seams the tests replace: the root check, ownership changes, and the check
 # that a recreated authority stays up.
-_authority_require_root() { [[ "$(id -u)" == 0 ]] || _authority_fail 'authority init and renew must run as root'; }
+_authority_require_root() { [[ "$(id -u)" == 0 ]] || _authority_fail 'authority init, upgrade and renew must run as root'; }
 _authority_chown() { chown "$@"; }
 # _authority_regular FILE... — each FILE, just moved out of the stage that the
 # keygen container's uid owns, is a plain file: chown and chmod would follow
@@ -235,15 +240,17 @@ _authority_record_not_after() {
     && mv -f -- "$2/public/delegation-not-after-ms.next" "$2/public/delegation-not-after-ms"
 }
 
+# _authority_init init|upgrade ARGS...
 _authority_init() {
-  local export_dir=''
+  local verb="$1" export_dir=''
+  shift
   while (( $# )); do
     case "$1" in
       --export-dir) [[ -n "${2:-}" ]] || { _authority_fail '--export-dir needs a directory'; return 1; }; export_dir="$2"; shift 2 ;;
-      *) _authority_fail 'usage: concord-selfhost authority init --export-dir DIR'; return 1 ;;
+      *) _authority_fail "usage: concord-selfhost authority $verb --export-dir DIR"; return 1 ;;
     esac
   done
-  [[ -n "$export_dir" ]] || { _authority_fail 'usage: concord-selfhost authority init --export-dir DIR'; return 1; }
+  [[ -n "$export_dir" ]] || { _authority_fail "usage: concord-selfhost authority $verb --export-dir DIR"; return 1; }
   _authority_require_root || return 1
   local c
   for c in docker openssl python3 od cmp; do
@@ -268,12 +275,12 @@ _authority_init() {
     || { _authority_fail "$AUTHORITY_PG_IMAGE is missing: run concord-selfhost up first"; return 1; }
   _authority_subnet_free "$subnet" "$ip" || return 1
   selfhost_storage_project_identity "$PROJECT_ROOT" || return 1
-  # init seals the empty population, which is permanent: an install that
-  # already has accounts needs the manual activation sequence instead.
+  # The empty seal is permanent, so init refuses an install with accounts;
+  # upgrade sets one up and leaves it unsealed.
   accounts="$(_authority_cp_accounts)" && [[ "$accounts" =~ ^[0-9]+$ ]] \
     || { _authority_fail "cannot count the control plane's accounts: start the stack with concord-selfhost up"; return 1; }
-  (( accounts == 0 )) \
-    || { _authority_fail "the control plane has $accounts accounts; init only sets up an authority on an install with none"; return 1; }
+  [[ "$verb" == upgrade ]] || (( accounts == 0 )) \
+    || { _authority_fail "the control plane has $accounts accounts; init only sets up an authority on an install with none: use concord-selfhost authority upgrade"; return 1; }
 
   local pass
   pass="$(_authority_passphrase)" || return 1
@@ -288,7 +295,7 @@ _authority_init() {
   # final mode afterwards, never readable by others in between.
   ( umask 077 && _authority_init_keys "$dir" "$export_dir" "$pass" ) \
     || {
-      _authority_warn "init stopped. Before running it again, remove $dir, any recovery-*.p8 in $export_dir (they belong to this failed realm), and what init started:"
+      _authority_warn "$verb stopped. Before running it again, remove $dir, any recovery-*.p8 in $export_dir (they belong to this failed realm), and what init started:"
       printf '  docker compose --project-directory %q --project-name %q --env-file %q -f %q --profile authority-owner down -v\n' \
         "$PROJECT_ROOT" "$SELFHOST_STORAGE_PROJECT_NAME" "$PROJECT_ROOT/.env" "$PROJECT_ROOT/docker-compose.authority.yml" >&2
       return 1
@@ -358,7 +365,8 @@ _authority_init_keys() {
   "$tool" add-trust --anchors "$dir/public/anchors" --first --signed "$dir/ceremony/delegation-1.signed" \
     --out "$dir/public/trust" >/dev/null || { _authority_fail 'add-trust failed'; return 1; }
   # Written 0600 under the umask; the authority reads these as uid 65532.
-  chmod 0644 "$dir/public/anchors" "$dir/public/trust" || return 1
+  printf '%s\n' "$realm" >"$dir/public/realm-id" || return 1
+  chmod 0644 "$dir/public/anchors" "$dir/public/trust" "$dir/public/realm-id" || return 1
   _authority_record_not_after "$tool" "$dir" || return 1
 
   echo "Starting the authority database and running its owner steps..."
@@ -367,8 +375,17 @@ _authority_init_keys() {
     || { _authority_fail 'migrate failed'; return 1; }
   _authority_compose --profile authority-owner run --rm authority-owner replication-gate off \
     || { _authority_fail 'replication-gate off failed'; return 1; }
-  _authority_compose --profile authority-owner run --rm authority-owner seal-legacy --cp-digest "$AUTHORITY_EMPTY_POPULATION_DIGEST" \
-    || { _authority_fail 'seal-legacy failed'; return 1; }
+  # Counted again just before the seal: an account made since the first count
+  # must not be sealed out of the population for ever.
+  local accounts sealed=1
+  accounts="$(_authority_cp_accounts)" && [[ "$accounts" =~ ^[0-9]+$ ]] \
+    || { _authority_fail "cannot count the control plane's accounts"; return 1; }
+  if (( accounts == 0 )); then
+    _authority_compose --profile authority-owner run --rm authority-owner seal-legacy --cp-digest "$AUTHORITY_EMPTY_POPULATION_DIGEST" \
+      || { _authority_fail 'seal-legacy failed'; return 1; }
+  else
+    sealed=0
+  fi
   _authority_compose up -d authority || { _authority_fail 'the authority did not start'; return 1; }
 
   cat <<EOF
@@ -380,6 +397,11 @@ The account-key authority is set up (realm $realm).
   primary keys, which stay in $dir/root-keys for renewal.
   The first delegation expires in 180 days. Renew it before then with
   concord-selfhost authority renew; health warns from 21 days before.
+EOF
+  (( sealed )) || cat <<EOF
+  It is not sealed: the control plane has $accounts accounts. Sealing them is
+  step 3 of the activation sequence, which needs the control plane's
+  authority integration. Until then nothing calls the authority.
 EOF
 }
 
@@ -427,6 +449,37 @@ _authority_backfill_ok() {
   _authority_safe_dir "$1/tools" 2>/dev/null || return 1
   read -r uid mode < <(stat -c '%u %A' -- "$tool") || return 1
   [[ ( "$uid" == 0 || "$uid" == "$(id -u)" ) && "${mode:5:1}${mode:8:1}" == -- ]]
+}
+
+# ── up, stop and down ──────────────────────────────────────────────────
+# _authority_lifecycle up|stop|down — the stack's verbs also manage the
+# authority once init or upgrade has run, and do nothing before. up rebuilds
+# the image, then stops serve, migrates and starts it again (DoR deploys:
+# migrate refuses while serve runs), so `update` brings the authority along.
+# down keeps the authority's volumes, as the stack's down keeps its own.
+_authority_lifecycle() {
+  local dir realm
+  dir="$(_authority_env AUTHORITY_DIR /etc/concord-authority)" || return 1
+  [[ -f "$dir/public/trust" ]] || return 0
+  selfhost_storage_project_identity "$PROJECT_ROOT" || return 1
+  case "$1" in
+    up)
+      realm="$(cat -- "$dir/public/realm-id" 2>/dev/null)" || realm=""
+      [[ "$realm" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]] \
+        || { _authority_fail "cannot read the realm from $dir/public/realm-id"; return 1; }
+      echo "Updating the account-key authority..."
+      _authority_compose build authority || { _authority_fail 'cannot build the authority image'; return 1; }
+      _authority_compose stop authority || { _authority_fail 'cannot stop the authority'; return 1; }
+      _authority_compose --profile authority-owner run --rm authority-owner migrate --realm "$realm" \
+        || { _authority_fail 'authority migrate failed; the authority is stopped'; return 1; }
+      if ! { _authority_compose up -d --no-deps --force-recreate authority && _authority_running; }; then
+        _authority_fail 'the authority did not stay up'; return 1
+      fi
+      ;;
+    stop) _authority_compose stop ;;
+    down) _authority_compose --profile authority-owner down ;;
+    *) _authority_fail 'usage: _authority_lifecycle up|stop|down'; return 1 ;;
+  esac
 }
 
 # ── renew ──────────────────────────────────────────────────────────────
