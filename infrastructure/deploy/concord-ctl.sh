@@ -5727,24 +5727,152 @@ control_plane_bluegreen_restore_traps() {
   eval "$1"
 }
 
+# control_plane_bluegreen_flip_home <what serves if the flip fails>: with HUP,
+# INT and TERM ignored, move nginx to 8080 and remove green at once; then
+# restore the traps and clear the marker. A failure keeps the marker.
+control_plane_bluegreen_flip_home() {
+  local traps
+  traps="$(trap -p HUP INT TERM)"
+  trap '' HUP INT TERM
+  if ! control_plane_bluegreen_flip 8080; then
+    control_plane_bluegreen_restore_traps "$traps"
+    control_plane_bluegreen_fail flip-failed "$1"
+  fi
+  if ! control_plane_bluegreen_reap_green; then
+    control_plane_bluegreen_restore_traps "$traps"
+    control_plane_bluegreen_fail old-colour-stop-failed \
+      'nginx routes the control plane to 8080, green could not be removed and the cutover marker was kept'
+  fi
+  control_plane_bluegreen_restore_traps "$traps"
+  control_plane_bluegreen_marker_clear || control_plane_bluegreen_fail cutover-incomplete \
+    'nginx routes the control plane to 8080 and green was removed, but the cutover marker could not be removed'
+}
+
+# control_plane_bluegreen_home_back <what serves on 8081>: the end of a round
+# trip, shared by the cutover and the resume. Start home on the new image with
+# the drained path's `up` line, gate its /readyz, then
+# control_plane_bluegreen_flip_home. A failure keeps the marker.
+control_plane_bluegreen_home_back() {
+  (cd "$DEPLOY_DIR" && managed_compose_mutate up -d --no-build --no-deps --wait --wait-timeout 180 control-plane) \
+    || control_plane_bluegreen_fail home-not-ready "$1, home is not serving and the cutover marker was kept"
+  activity_history_wait_control_plane 'http://127.0.0.1:8080/readyz' \
+    || control_plane_bluegreen_fail home-not-ready "$1, home is not serving and the cutover marker was kept"
+  control_plane_bluegreen_flip_home "$1, home is ready on 8080 and the cutover marker was kept"
+}
+
+# The resume, at the hook, of a cutover the recovery pre-step left in place:
+# nginx routes to green on 8081 and home is stopped. A green that answers
+# /readyz while the new image reports the schema current ends the round trip.
+# Otherwise (green unready, or a migration pending) green is removed and home
+# is drained and started as on the drained path, applying any pending
+# migration, before nginx moves back. Returns 0; a failure keeps the marker.
+control_plane_bluegreen_resume() {
+  local none='nginx routes the control plane to 8081, where nothing serves'
+  if activity_history_wait_control_plane 'http://127.0.0.1:8081/readyz' \
+     && control_plane_bluegreen_schema_current; then
+    echo 'rebuild: resuming the interrupted blue-green cutover'
+    control_plane_bluegreen_home_back 'green serves on 8081'
+    return 0
+  fi
+  echo 'rebuild: resuming the interrupted blue-green cutover by the drained path (green is not ready or the schema is not current)'
+  privacy_defaults_refuse_foreign_control_plane || exit 1
+  control_plane_bluegreen_reap_green || control_plane_bluegreen_fail old-colour-stop-failed \
+    'green may still serve on 8081, home is not serving and the cutover marker was kept'
+  privacy_defaults_require_local_control_plane_drained \
+    || control_plane_bluegreen_fail home-not-ready "$none, home is not serving and the cutover marker was kept"
+  # The reap after the flip back finds green already removed.
+  control_plane_bluegreen_home_back "$none"
+}
+
+# The recovery pre-step of `rebuild` with the rail on, called with the
+# effective scope (none for a full or escalated rebuild) immediately before
+# activity_history_routine_guard. Nothing here starts a container, so none is
+# started ahead of that first-activation boundary. It acts only when the
+# cutover marker exists or nginx routes the control plane to 8081; otherwise it
+# returns after one file test and one file read. By the live port:
+#   unparseable   recovery-ambiguous (the marker is present), nothing changed;
+#   8080          green is not serving: remove it, clear the marker, go on (the
+#                 rebuild may cut over afresh);
+#   8081, green not running
+#                 nothing serves on 8081: move nginx to 8080, remove the
+#                 stopped leftover, clear the marker, go on, whatever the scope;
+#   8081, green running
+#                 only an exact `rebuild control-plane` may go on, else
+#                 cutover-incomplete with nothing changed. Write the marker if
+#                 missing and stop home, leaving green as the one control-plane
+#                 the guard counts; the hook then resumes the cutover.
+# "Green running" is `docker ps` (running only) listing a container named
+# exactly concordvoice-control-plane-green; a failed `docker ps` is
+# recovery-ambiguous.
+control_plane_bluegreen_recover() {
+  local port names line green=0 name=concordvoice-control-plane-green
+  local none='nginx routes the control plane to 8081, where nothing serves'
+  if ! control_plane_bluegreen_marker_present; then
+    if ! port="$(control_plane_bluegreen_live_port)" || [[ "$port" != 8081 ]]; then
+      return 0
+    fi
+  elif ! port="$(control_plane_bluegreen_live_port)"; then
+    control_plane_bluegreen_fail recovery-ambiguous \
+      'the cutover marker is present, the live nginx upstream cannot be read and nothing was changed'
+  fi
+
+  if [[ "$port" == 8080 ]]; then
+    echo 'rebuild: recovering an interrupted blue-green cutover: nginx routes to 8080; removing green'
+    control_plane_bluegreen_reap_green || control_plane_bluegreen_fail old-colour-stop-failed \
+      'nginx routes the control plane to 8080, green could not be removed and the cutover marker was kept'
+    control_plane_bluegreen_marker_clear || control_plane_bluegreen_fail cutover-incomplete \
+      'nginx routes the control plane to 8080 and green was removed, but the cutover marker could not be removed'
+    return 0
+  fi
+
+  if ! names="$(docker ps --filter "name=$name" --format '{{.Names}}')"; then
+    control_plane_bluegreen_fail recovery-ambiguous \
+      'nginx routes the control plane to 8081, whether green runs cannot be read and nothing was changed'
+  fi
+  while IFS= read -r line; do
+    [[ "$line" == "$name" ]] && green=1
+  done <<<"$names"
+
+  if (( !green )); then
+    echo 'rebuild: recovering an interrupted blue-green cutover: nothing serves on 8081; moving nginx back to 8080'
+    # The nested flip is admitted only while the marker exists.
+    if ! control_plane_bluegreen_marker_present && ! control_plane_bluegreen_marker_write; then
+      control_plane_bluegreen_fail cutover-incomplete "$none; the cutover marker could not be written and nothing was changed"
+    fi
+    control_plane_bluegreen_flip_home "$none, and the cutover marker was kept"
+    return 0
+  fi
+
+  [[ $# -eq 1 && "$1" == control-plane ]] || control_plane_bluegreen_fail cutover-incomplete \
+    'green serves on 8081 and nothing was changed'
+  echo 'rebuild: recovering an interrupted blue-green cutover: green serves on 8081; stopping home, resuming after the build'
+  if ! control_plane_bluegreen_marker_present && ! control_plane_bluegreen_marker_write; then
+    control_plane_bluegreen_fail cutover-incomplete 'green serves on 8081; the cutover marker could not be written and nothing was changed'
+  fi
+  activity_history_stop_control_plane || control_plane_bluegreen_fail old-colour-stop-failed \
+    'green serves on 8081, home may still run and the cutover marker was kept'
+}
+
 # The blue-green round trip of `rebuild control-plane`, run after the build:
 # start the new image as green beside home, move nginx to green, stop home,
 # restart home on the new image, move nginx back and remove green. Home is
-# stopped only once green serves. Returns 0 when the round trip is done (the
+# stopped only once green serves. A present marker means the recovery
+# pre-step left an interrupted cutover in place; it is resumed instead
+# (control_plane_bluegreen_resume). Returns 0 when the round trip is done (the
 # caller skips the drained path), and 10 when the caller must take the drained
 # path with nothing changed. Anything else prints a named error and exits 1.
 # Each flip and the stop that follows it run with HUP, INT and TERM ignored:
 # an interrupt there would leave nginx on one colour with both running.
 control_plane_bluegreen_cutover() {
-  local port built green running line member=0 traps
-  local green_serves='green serves on 8081, home is not serving and the cutover marker was kept'
-  if ! port="$(control_plane_bluegreen_live_port)"; then
+  local built green running line member=0 traps
+  if control_plane_bluegreen_marker_present; then
+    control_plane_bluegreen_resume
+    return 0
+  fi
+  if ! control_plane_bluegreen_live_port >/dev/null; then
     control_plane_bluegreen_not_taken 'the live nginx upstream cannot be read'
     return 10
   fi
-  # Until recovery exists, a live 8081 is an interrupted earlier cutover.
-  [[ "$port" == 8080 ]] || control_plane_bluegreen_fail recovery-ambiguous \
-    'nginx routes the control plane to 8081 and nothing was changed'
   if ! control_plane_bluegreen_schema_current; then
     control_plane_bluegreen_not_taken 'the new image does not report the schema current'
     return 10
@@ -5787,7 +5915,10 @@ control_plane_bluegreen_cutover() {
   trap '' HUP INT TERM
   if ! control_plane_bluegreen_flip 8081; then
     control_plane_bluegreen_restore_traps "$traps"
-    control_plane_bluegreen_abandon flip-failed
+    # Only a vhost read back on 8080 proves nginx is not routing to green.
+    [[ "$(control_plane_bluegreen_live_port)" != 8080 ]] || control_plane_bluegreen_abandon flip-failed
+    control_plane_bluegreen_fail flip-failed \
+      'nginx may be routing the control plane to green on 8081; the previous control-plane still runs, and green and the cutover marker were kept'
   fi
   if ! activity_history_stop_control_plane; then
     control_plane_bluegreen_restore_traps "$traps"
@@ -5796,25 +5927,9 @@ control_plane_bluegreen_cutover() {
   fi
   control_plane_bluegreen_restore_traps "$traps"
 
-  control_plane_bluegreen_schema_current || control_plane_bluegreen_fail home-not-ready "$green_serves"
-  (cd "$DEPLOY_DIR" && managed_compose_mutate up -d --no-build --no-deps --wait --wait-timeout 180 control-plane) \
-    || control_plane_bluegreen_fail home-not-ready "$green_serves"
-  activity_history_wait_control_plane 'http://127.0.0.1:8080/readyz' \
-    || control_plane_bluegreen_fail home-not-ready "$green_serves"
-
-  trap '' HUP INT TERM
-  if ! control_plane_bluegreen_flip 8080; then
-    control_plane_bluegreen_restore_traps "$traps"
-    control_plane_bluegreen_fail flip-failed 'green still serves on 8081 and the cutover marker was kept'
-  fi
-  if ! control_plane_bluegreen_reap_green; then
-    control_plane_bluegreen_restore_traps "$traps"
-    control_plane_bluegreen_fail old-colour-stop-failed \
-      'home serves on 8080, green could not be removed and the cutover marker was kept'
-  fi
-  control_plane_bluegreen_restore_traps "$traps"
-  control_plane_bluegreen_marker_clear || control_plane_bluegreen_fail cutover-incomplete \
-    'home serves on 8080 and green was removed, but the cutover marker could not be removed'
+  control_plane_bluegreen_schema_current || control_plane_bluegreen_fail home-not-ready \
+    'green serves on 8081, home is not serving and the cutover marker was kept'
+  control_plane_bluegreen_home_back 'green serves on 8081'
 }
 
 # Unscoped rebuild (#3524). Every service, ordered so the paired voice handoff
@@ -6710,6 +6825,17 @@ else:
       turn_managed_init_schema_before_coturn || exit 1
     fi
 
+    # Control-plane blue-green, rail on only: recover an interrupted cutover
+    # before the guard below, given the effective scope (none when the rebuild
+    # is full or escalated). It starts no container; a cutover it leaves in
+    # place is resumed at the hook after the build.
+    if (( CONTROL_PLANE_BLUEGREEN )); then
+      if [[ $_rebuild_scoped -eq 1 ]]; then
+        control_plane_bluegreen_recover "${REBUILD_SCOPE[@]}" || exit 1
+      else
+        control_plane_bluegreen_recover || exit 1
+      fi
+    fi
     # Unconditional, and deliberately BEFORE any scope branch: this is the
     # Activity History first-activation boundary. A scope-conditional guard here
     # would be a first-activation bypass. It takes an optional receipt_mode
@@ -6775,9 +6901,11 @@ else:
     # Two paths follow the build. With the control-plane blue-green rail on and
     # the scope exactly control-plane, the cutover starts the new image as green
     # beside home, moves nginx to it, restarts home on the new image and moves
-    # nginx back; it returns 0 when that round trip is done. It returns 10, with
-    # nothing changed, when the schema is not provably current or a
-    # precondition fails, and every other scope or the rail off never runs it.
+    # nginx back; it returns 0 when that round trip is done. When the recovery
+    # pre-step left an interrupted cutover in place (marker present, green
+    # serving, home stopped) it resumes that cutover instead and returns 0. It
+    # returns 10, with nothing changed, when the schema is not provably current
+    # or a precondition fails, and every other scope or the rail off never runs it.
     # Then home is drained as before: stopped, so its startup migrations never
     # run beside an older binary, and started on the new image.
     _cutover_done=0

@@ -1179,8 +1179,10 @@ fixture_rewrite '  "$0" "$CONTROL_PLANE_FLIP_REENTRY_MARKER" nginx-reload --cont
 printf '%s\n' "$src" >"$CUT_CTL"
 chmod +x "$CUT_CTL"
 # ctlflip <port>: with $TMP/ctlflip.sleep.<port> (seconds) it records
-# $TMP/ctlflip.started and sleeps first; with $TMP/ctlflip.fail.<port> it
-# exits 1 and leaves the vhost alone.
+# $TMP/ctlflip.started and sleeps first. Like the real re-entry it refuses
+# (exit 1) without the cutover marker. With $TMP/ctlflip.fail.<port> it exits
+# 1: an empty file leaves the vhost alone, `applied` rewrites it to <port>
+# first, and `garble` leaves it unparseable.
 cat >"$STUBS/ctlflip" <<STUB
 #!/usr/bin/env bash
 printf 'ctlflip %s\n' "\$*" >>"$TMP/calls"
@@ -1188,10 +1190,18 @@ if [[ -f "$TMP/ctlflip.sleep.\$1" ]]; then
   : >"$TMP/ctlflip.started"
   sleep "\$(cat "$TMP/ctlflip.sleep.\$1")"
 fi
-[[ ! -e "$TMP/ctlflip.fail.\$1" ]] || exit 1
+[[ -e "$RAIL_MARKER" ]] || { echo 'ctlflip: no cutover marker' >&2; exit 1; }
+fail=none
+[[ ! -e "$TMP/ctlflip.fail.\$1" ]] || fail="\$(cat "$TMP/ctlflip.fail.\$1")"
+[[ -n "\$fail" ]] || exit 1
 mkdir -p "$TMP/live"
+if [[ "\$fail" == garble ]]; then
+  printf 'not an nginx vhost\n' >"$LIVE_VHOST"
+  exit 1
+fi
 awk -v port="\$1" '\$0 == "    server 127.0.0.1:8080;" { \$0 = "    server 127.0.0.1:" port ";" } { print }' \
   "$VHOST_SRC" >"$LIVE_VHOST"
+[[ "\$fail" != applied ]] || exit 1
 STUB
 chmod +x "$STUBS/ctlflip"
 
@@ -1544,6 +1554,25 @@ err_flip_failed_leg1() {
   fi
 }
 
+# A failed first flip whose vhost no longer reads 8080 (reloaded to green, or
+# unparseable) may route to green: green and the marker stay.
+err_flip_failed_leg1_live_port_not_8080_keeps_green() {
+  need_flock err_flip_failed_leg1_live_port_not_8080_keeps_green || return 0
+  local mode bad=''
+  for mode in applied garble; do
+    cut_prepare
+    printf '%s\n' "$mode" >"$TMP/ctlflip.fail.8081"
+    run_cut_at "$CUT_CTL" rebuild control-plane
+    { named_error flip-failed && [[ -e "$RAIL_MARKER" && "$(last_calls 1)" == 'ctlflip 8081' ]] \
+      && [[ $(ncalls "$GREEN_STOP") -eq 1 ]] && ! has_call "$HOME_STOP" && grep -qF 'may be routing' "$TMP/out"; } \
+      || bad+=" [$mode rc=$rc: $(brief_out)]"
+    rm -f "$RAIL_MARKER"
+  done
+  # Mutation that turns this red: drop the live-port re-read after a failed
+  # first flip (green is reaped and the marker cleared whatever nginx routes).
+  if [[ -z "$bad" ]]; then pass "err_flip_failed_leg1_live_port_not_8080_keeps_green"; else fail "err_flip_failed_leg1_live_port_not_8080_keeps_green:$bad"; fi
+}
+
 err_old_colour_stop_failed() {
   need_flock err_old_colour_stop_failed || return 0
   cut_prepare
@@ -1653,6 +1682,280 @@ wait_healthy_rail_on_unparseable_exits_1() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Recovery of an interrupted cutover: the pre-step just before the routine
+# guard (control_plane_bluegreen_recover) and the resume at the hook.
+GREEN_PS="docker ps --filter name=$GREEN --format {{.Names}}"
+GUARD_CONFIG="$C config --format json"
+NATS_PS="$C ps --status running -q -- nats"
+CURL_8081='curl --connect-timeout 1 --max-time 1 -sf http://127.0.0.1:8081/readyz'
+CURL_8080='curl --connect-timeout 1 --max-time 1 -sf http://127.0.0.1:8080/readyz'
+# live_at <port>: the fixture live vhost routes the control plane to <port>.
+live_at() {
+  mkdir -p "$TMP/live"
+  awk -v port="$1" "$AWK_CP_SERVER_TO" "$VHOST_SRC" >"$LIVE_VHOST"
+}
+live_is() { grep -qFx "    server 127.0.0.1:$1;" "$LIVE_VHOST" 2>/dev/null; }
+# green_running: `docker ps` (running only) lists a container named green.
+green_running() { stub_out docker "ps --filter name=$GREEN *" "$GREEN\\n"; }
+nats_running() { stub_out docker '*ps --status running -q -- nats' 'ab12ab12ab12\n'; }
+# insert_after <text> <line> <lines>: <text> with <lines> after its first <line>.
+insert_after() {
+  INS="$3" awk -v l="$2" '{ print } !done && $0 == l { print ENVIRON["INS"]; done = 1 }' <<<"$1"
+}
+# The pre-step's calls follow the scope probe (the first $CP_PS) and precede
+# the guard's config render. Green running: green probe, home stop.
+RESUME_HEAD="$(insert_after "$CUT_PREFIX" "$CP_PS" "$GREEN_PS"$'\n'"$HOME_STOP")"
+RESUME_READY="$(printf '%s\n' "$RESUME_HEAD" "$CURL_8081" "$STATUS_RUN" "$HOME_UP" "$CURL_8080" 'ctlflip 8080' "$GREEN_REAP")"
+# The drained resume: foreign guard, reap, drained check, home up, gate, flip
+# back (its reap finds green already removed).
+RESUME_DRAINED_TAIL="$(printf '%s\n' "$DAEMON_PS" "$CP_PS" "$GREEN_REAP" "$DAEMON_PS" "$HOME_UP" "$CURL_8080" 'ctlflip 8080' "$GREEN_REAP")"
+# resumed_ok: exit 0 with Done., marker cleared, nginx back on 8080.
+resumed_ok() { [[ $rc -eq 0 && ! -e "$RAIL_MARKER" ]] && saw 'Done.' && live_is 8080; }
+
+recover_no_marker_live_8080_is_noop_no_docker_call() {
+  need_flock recover_no_marker_live_8080_is_noop_no_docker_call || return 0
+  local off_rc off_t off_o bad=''
+  cut_prepare
+  nats_running
+  run_cut_at "$CTL" rebuild nats
+  off_rc=$rc off_t="$(rail_transcript)" off_o="$(rail_out)"
+  cut_prepare
+  live_at 8080
+  nats_running
+  run_cut_at "$CUT_CTL" rebuild nats
+  [[ $off_rc -eq 0 && $rc -eq 0 && -n "$off_t" && "$(rail_transcript)" == "$off_t" && "$(rail_out)" == "$off_o" ]] \
+    || bad+=" [nats off-rc=$off_rc on-rc=$rc]"
+  cut_prepare
+  live_at 8080
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  [[ $rc -eq 0 && "$(rail_transcript)" == "$CUT_HAPPY" ]] || bad+=" [control-plane rc=$rc: $(brief_out)]"
+  # Mutation that turns this red: query docker for green in the pre-step
+  # before its marker and live-port test.
+  if [[ -z "$bad" ]]; then pass "recover_no_marker_live_8080_is_noop_no_docker_call"; else fail "recover_no_marker_live_8080_is_noop_no_docker_call:$bad"; fi
+}
+
+recover_marker_unparseable_refuses() {
+  need_flock recover_marker_unparseable_refuses || return 0
+  cut_prepare
+  : >"$RAIL_MARKER"
+  mkdir -p "$TMP/live"
+  printf 'not an nginx vhost\n' >"$LIVE_VHOST"
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: read an unparseable live vhost as 8080 in
+  # the pre-step (green is reaped, the marker cleared and the rebuild goes on).
+  if named_error recovery-ambiguous && [[ -e "$RAIL_MARKER" && "$(last_calls 1)" == "$CP_PS" \
+     && "$(mutating_calls)" == 0 ]] && ! has_call "$GREEN_PS"; then
+    cut_report recover_marker_unparseable_refuses ok
+  else
+    cut_report recover_marker_unparseable_refuses bad
+  fi
+  rm -f "$RAIL_MARKER"
+}
+
+recover_live_8080_reaps_and_continues() {
+  need_flock recover_live_8080_reaps_and_continues || return 0
+  cut_prepare
+  : >"$RAIL_MARKER"
+  live_at 8080
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: leave the marker in the 8080 arm (the hook
+  # then resumes instead of cutting over afresh).
+  if [[ "$(rail_transcript)" == "$(insert_after "$CUT_HAPPY" "$CP_PS" "$GREEN_REAP")" ]] && resumed_ok; then
+    cut_report recover_live_8080_reaps_and_continues ok
+  else
+    cut_report recover_live_8080_reaps_and_continues bad
+  fi
+  rm -f "$RAIL_MARKER"
+}
+
+# Review Focus 5: a stale marker must not block a full rebuild.
+recover_stale_marker_unscoped_rebuild_continues() {
+  need_flock recover_stale_marker_unscoped_rebuild_continues || return 0
+  local off_rc off_t got
+  cut_prepare
+  run_cut_at "$CTL" rebuild
+  off_rc=$rc off_t="$(rail_transcript)"
+  cut_prepare
+  : >"$RAIL_MARKER"
+  live_at 8080
+  run_cut_at "$CUT_CTL" rebuild
+  got="$(rail_transcript | awk -v a="$GREEN_STOP" -v b="$GREEN_RM" '
+    n == 0 && $0 == a { n = 1; next } n == 1 && $0 == b { n = 2; next } { print }')"
+  # Mutation that turns this red: require the exact control-plane scope in the
+  # 8080 arm too (the full rebuild refuses with cutover-incomplete).
+  if [[ $rc -eq $off_rc && -n "$off_t" && "$got" == "$off_t" && ! -e "$RAIL_MARKER" \
+     && $(ncalls "$GREEN_STOP") -eq 1 && "$(lines_after "$GREEN_STOP" 1)" == "$GREEN_RM" ]]; then
+    cut_report recover_stale_marker_unscoped_rebuild_continues ok
+  else
+    cut_report recover_stale_marker_unscoped_rebuild_continues bad
+    diff <(printf '%s\n' "$off_t") <(printf '%s\n' "$got") >&2 || true
+  fi
+  rm -f "$RAIL_MARKER"
+}
+
+recover_live_8081_wrong_scope_is_cutover_incomplete() {
+  need_flock recover_live_8081_wrong_scope_is_cutover_incomplete || return 0
+  local bad=''
+  cut_prepare
+  : >"$RAIL_MARKER"
+  live_at 8081
+  green_running
+  nats_running
+  run_cut_at "$CUT_CTL" rebuild nats
+  { named_error cutover-incomplete && [[ -e "$RAIL_MARKER" && "$(last_calls 1)" == "$GREEN_PS" \
+    && "$(mutating_calls)" == 0 ]] && live_is 8081; } || bad+=" [nats rc=$rc: $(brief_out)]"
+  cut_prepare
+  live_at 8081
+  green_running
+  nats_running
+  run_cut_at "$CUT_CTL" rebuild control-plane nats
+  { named_error cutover-incomplete && [[ ! -e "$RAIL_MARKER" && "$(last_calls 1)" == "$GREEN_PS" \
+    && "$(mutating_calls)" == 0 ]] && live_is 8081; } || bad+=" [control-plane nats rc=$rc: $(brief_out)]"
+  rm -f "$RAIL_MARKER"
+  # Mutation that turns this red: drop the exact-scope test in the
+  # green-running arm (home is stopped under another scope).
+  if [[ -z "$bad" ]]; then pass "recover_live_8081_wrong_scope_is_cutover_incomplete"; else fail "recover_live_8081_wrong_scope_is_cutover_incomplete:$bad"; fi
+}
+
+recover_live_8081_without_marker_writes_marker_and_resumes() {
+  need_flock recover_live_8081_without_marker_writes_marker_and_resumes || return 0
+  cut_prepare
+  live_at 8081
+  green_running
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: skip the marker write in the green-running
+  # arm (the hook then cuts over afresh beside the running green).
+  if [[ "$(rail_transcript)" == "$RESUME_READY" ]] && resumed_ok; then
+    cut_report recover_live_8081_without_marker_writes_marker_and_resumes ok
+  else
+    cut_report recover_live_8081_without_marker_writes_marker_and_resumes bad
+    diff <(printf '%s\n' "$RESUME_READY") <(rail_transcript) >&2 || true
+  fi
+  rm -f "$RAIL_MARKER"
+}
+
+recover_live_8081_green_ready_current_resumes() {
+  need_flock recover_live_8081_green_ready_current_resumes || return 0
+  cut_prepare
+  : >"$RAIL_MARKER"
+  live_at 8081
+  green_running
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: ignore a present marker at the hook (the
+  # cutover starts afresh).
+  if [[ "$(rail_transcript)" == "$RESUME_READY" ]] && resumed_ok; then
+    cut_report recover_live_8081_green_ready_current_resumes ok
+  else
+    cut_report recover_live_8081_green_ready_current_resumes bad
+  fi
+  rm -f "$RAIL_MARKER"
+}
+
+recover_live_8081_green_ready_pending_goes_drained_then_flips_home() {
+  need_flock recover_live_8081_green_ready_pending_goes_drained_then_flips_home || return 0
+  cut_prepare
+  : >"$RAIL_MARKER"
+  live_at 8081
+  green_running
+  stub_reply docker "$STATUS_PAT" 3 'pending 12 13\n'
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: drop the status check from the resume's
+  # ready test (home starts beside green with a migration pending).
+  if [[ "$(rail_transcript)" == "$(printf '%s\n' "$RESUME_HEAD" "$CURL_8081" "$STATUS_RUN" "$RESUME_DRAINED_TAIL")" ]] \
+     && resumed_ok; then
+    cut_report recover_live_8081_green_ready_pending_goes_drained_then_flips_home ok
+  else
+    cut_report recover_live_8081_green_ready_pending_goes_drained_then_flips_home bad
+  fi
+  rm -f "$RAIL_MARKER"
+}
+
+# "stop" then "rebuild" is the last resort: nothing serves on 8081, so any
+# scope flips home first and then rebuilds as requested.
+recover_live_8081_green_absent_flips_home_and_continues_any_scope() {
+  need_flock recover_live_8081_green_absent_flips_home_and_continues_any_scope || return 0
+  local off_rc off_t want m bad=''
+  cut_prepare
+  nats_running
+  run_cut_at "$CTL" rebuild nats
+  off_rc=$rc off_t="$(rail_transcript)"
+  want="$(insert_after "$off_t" "$NATS_PS" "$GREEN_PS"$'\n''ctlflip 8080'$'\n'"$GREEN_REAP")"
+  for m in marker no-marker; do
+    cut_prepare
+    [[ "$m" == no-marker ]] || : >"$RAIL_MARKER"
+    live_at 8081
+    nats_running
+    run_cut_at "$CUT_CTL" rebuild nats
+    { [[ $off_rc -eq 0 && "$(rail_transcript)" == "$want" ]] && resumed_ok; } || bad+=" [$m rc=$rc: $(brief_out)]"
+  done
+  rm -f "$RAIL_MARKER"
+  # Mutations that turn this red: test the scope before the green probe (nats
+  # refuses); skip writing a missing marker (the flip is refused without it).
+  if [[ -z "$bad" ]]; then pass "recover_live_8081_green_absent_flips_home_and_continues_any_scope"; else fail "recover_live_8081_green_absent_flips_home_and_continues_any_scope:$bad"; fi
+}
+
+recover_live_8081_green_unready_goes_drained_then_flips_home() {
+  need_flock recover_live_8081_green_unready_goes_drained_then_flips_home || return 0
+  cut_prepare
+  : >"$RAIL_MARKER"
+  live_at 8081
+  green_running
+  stub_exit curl '*8081/readyz' 22
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: ignore the 8081 readiness result in the
+  # resume (the ready path starts home beside an unready green).
+  if [[ "$(rail_transcript | grep -vFx -- "$CURL_8081")" == "$RESUME_HEAD"$'\n'"$RESUME_DRAINED_TAIL" ]] \
+     && has_call "$CURL_8081" && [[ $(ncalls "$STATUS_RUN") -eq 0 ]] && resumed_ok; then
+    cut_report recover_live_8081_green_unready_goes_drained_then_flips_home ok
+  else
+    cut_report recover_live_8081_green_unready_goes_drained_then_flips_home bad
+  fi
+  rm -f "$RAIL_MARKER"
+}
+
+# The pre-step's calls come after the scope probe and before the guard's
+# render, so nothing it does precedes the first-activation boundary's view.
+recover_runs_before_routine_guard() {
+  need_flock recover_runs_before_routine_guard || return 0
+  local bad=''
+  cut_prepare
+  : >"$RAIL_MARKER"
+  live_at 8080
+  nats_running
+  run_cut_at "$CUT_CTL" rebuild nats
+  [[ $rc -eq 0 && "$(lines_after "$NATS_PS" 3)" == "$GREEN_REAP"$'\n'"$GUARD_CONFIG" ]] \
+    || bad+=" [8080 rc=$rc: $(lines_after "$NATS_PS" 3 | tr '\n' ';')]"
+  cut_prepare
+  live_at 8081
+  green_running
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  [[ $rc -eq 0 && "$(lines_after "$CP_PS" 3)" == "$GREEN_PS"$'\n'"$HOME_STOP"$'\n'"$GUARD_CONFIG" ]] \
+    || bad+=" [8081 rc=$rc: $(lines_after "$CP_PS" 3 | tr '\n' ';')]"
+  rm -f "$RAIL_MARKER"
+  # Mutation that turns this red: move the pre-step call after
+  # activity_history_routine_guard.
+  if [[ -z "$bad" ]]; then pass "recover_runs_before_routine_guard"; else fail "recover_runs_before_routine_guard:$bad"; fi
+}
+
+recover_home_stop_failure_keeps_marker() {
+  need_flock recover_home_stop_failure_keeps_marker || return 0
+  cut_prepare
+  live_at 8081
+  green_running
+  stub_exit docker '*stop --timeout 45 control-plane' 1
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: ignore the home stop's status in the
+  # green-running arm (the build and the resume run).
+  if named_error old-colour-stop-failed && [[ -e "$RAIL_MARKER" && "$(last_calls 1)" == "$HOME_STOP" ]] \
+     && ! has_call "$C build control-plane" && live_is 8081; then
+    cut_report recover_home_stop_failure_keeps_marker ok
+  else
+    cut_report recover_home_stop_failure_keeps_marker bad
+  fi
+  rm -f "$RAIL_MARKER"
+}
+
 char_rebuild_control_plane_transcript
 char_wait_healthy_curl_argv
 char_nginx_render_hash
@@ -1707,6 +2010,7 @@ err_standby_start_failed
 err_standby_image_mismatch
 err_standby_not_ready
 err_flip_failed_leg1
+err_flip_failed_leg1_live_port_not_8080_keeps_green
 err_old_colour_stop_failed
 err_home_not_ready_status_changed
 err_home_not_ready_up_failed
@@ -1714,4 +2018,16 @@ err_home_not_ready_readyz
 err_flip_failed_leg2
 wait_healthy_rail_on_uses_live_port
 wait_healthy_rail_on_unparseable_exits_1
+recover_no_marker_live_8080_is_noop_no_docker_call
+recover_marker_unparseable_refuses
+recover_live_8080_reaps_and_continues
+recover_stale_marker_unscoped_rebuild_continues
+recover_live_8081_wrong_scope_is_cutover_incomplete
+recover_live_8081_without_marker_writes_marker_and_resumes
+recover_live_8081_green_ready_current_resumes
+recover_live_8081_green_ready_pending_goes_drained_then_flips_home
+recover_live_8081_green_absent_flips_home_and_continues_any_scope
+recover_live_8081_green_unready_goes_drained_then_flips_home
+recover_runs_before_routine_guard
+recover_home_stop_failure_keeps_marker
 exit $((fails > 0))
