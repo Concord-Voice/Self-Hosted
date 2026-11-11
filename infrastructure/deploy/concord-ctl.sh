@@ -5562,15 +5562,19 @@ print(" ".join(sorted(set(s) - closure - excluded)))
 }
 
 # Control-plane blue-green: the active port is read back from the live vhost,
-# parsed with the renderer's rules. A missing vhost is the home port. Otherwise
+# parsed with the renderer's rules. A vhost missing from a directory that exists
+# and can be searched is the home port; a missing, non-directory or unsearchable
+# parent hides whether the vhost exists and is refused. Otherwise
 # the file needs exactly one `upstream control_plane {` line, one canonical
 # server line on 8080 or 8081 inside that block, no other server line there,
 # and a closing `}`. Anything else (CRLF, trailing or tab whitespace, another
 # address or port, a second block, an unreadable file) prints nothing and
 # returns 1. Only the rail calls this.
 control_plane_bluegreen_live_port() {
-  local path="$CONTROL_PLANE_LIVE_VHOST" line port="" blocks=0 servers=0 in_block=0 bad=0
+  local path="$CONTROL_PLANE_LIVE_VHOST" dir line port="" blocks=0 servers=0 in_block=0 bad=0
+  dir="${path%/*}"
   if [[ ! -e "$path" && ! -L "$path" ]]; then
+    [[ -d "$dir" && -x "$dir" ]] || return 1
     printf '8080\n'
     return 0
   fi
@@ -5886,11 +5890,15 @@ control_plane_bluegreen_cutover() {
     control_plane_bluegreen_not_taken 'the cutover marker cannot be written'
     return 10
   fi
-  # A leftover green from an earlier run; nginx is on 8080.
+  # A leftover green from an earlier run; nginx is on 8080. One that cannot be
+  # removed is an error, not the drained path: that path stops home and its
+  # drained check then counts the surviving green and refuses, leaving nothing
+  # serving. Nothing has been stopped yet, and the marker is this run's own.
   if ! control_plane_bluegreen_reap_green; then
-    control_plane_bluegreen_marker_clear
-    control_plane_bluegreen_not_taken 'a leftover standby cannot be removed'
-    return 10
+    control_plane_bluegreen_marker_clear || control_plane_bluegreen_fail standby-not-ready \
+      'the previous control-plane still serves on 8080; a leftover green and the cutover marker could not be removed'
+    control_plane_bluegreen_fail standby-not-ready \
+      'the previous control-plane still serves on 8080; a leftover green could not be removed'
   fi
 
   green="$(control_plane_bluegreen_start_green)" || control_plane_bluegreen_abandon standby-not-ready

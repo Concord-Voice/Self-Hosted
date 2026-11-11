@@ -1741,6 +1741,15 @@ The deploy controller (`infrastructure/deploy/concord-ctl.sh`) has an optional r
 
 **Do not turn the rail on before Concord-Voice/Desktop#68 and Concord-Voice/Desktop#64 are released.** Each overlapped deploy drops connected clients twice, and they reconnect each time. Without the client's reconnect refetch (Concord-Voice/Desktop#68) and its session-drain handling (Concord-Voice/Desktop#64), users can see stale state after a deploy.
 
+**Before turning it on, verify on the target host.** The hermetic tests stub Docker, nginx and the nested reload, so these paths have not run end to end anywhere yet:
+
+1. A full nested flip: `rebuild control-plane` with the rail on must reach the internal `nginx-reload --control-plane-upstream 8081`, pass identity admission, render, `nginx -t`, reload and the `/nginx-health` probe, and then do the same for 8080.
+2. Green's start and removal in the host's egress mode, when that mode is not `direct`.
+3. A deploy with a pending migration, to confirm it takes the stop-first path.
+4. Background jobs and event subscribers during the overlap: two control planes run from green's boot until home is ready again, which is longer than the 45-second nginx split.
+
+Every failure in step 1 fails safe (home keeps serving), but a rail that never completes a cutover would otherwise go unnoticed.
+
 **Where it applies.** The switch is honoured only when the controller selects the managed production or staging Compose stack. Every other selection forces it off without a message. **It never applies to `concord-selfhost` installs**: self-host mode always runs the single control plane. It is also not reached under managed Redis, where an ordinary `rebuild` exits before the cutover step.
 
 #### Colours

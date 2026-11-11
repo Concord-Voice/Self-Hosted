@@ -541,7 +541,11 @@ AWK_CP_SERVER_TO='$0 == "    server 127.0.0.1:8080;" { $0 = "    server 127.0.0.
 # shellcheck disable=SC2016
 live_port_cases() {
   # Mutation: make the reader's missing-file branch `return 1`.
+  mkdir -p "$TMP/live-none"
   expect_live_port live_port_missing_file_is_8080 "$TMP/live-none/concordvoice" 8080
+  # Mutation: drop the parent test from the missing-file branch (a vhost whose
+  # directory is gone reads as 8080).
+  expect_live_port live_port_missing_parent_refuses "$TMP/live-gone/concordvoice" refuse
   # Mutation: print a fixed 8080 instead of the captured port.
   expect_live_port live_port_8081 "$(live_fixture p8081 -v port=8081 "$AWK_CP_SERVER_TO")" 8081
   # Mutation: widen the reader's (8080|8081) to [0-9]+.
@@ -574,6 +578,25 @@ live_port_cases() {
     [[ $r -eq 1 && -z "$out" ]] || bad+=" mode-000:rc=$r,out=$out"
   fi
   if [[ -z "$bad" ]]; then pass "live_port_unreadable_refuses"; else fail "live_port_unreadable_refuses:$bad"; fi
+  # A vhost on 8081 in a directory the controller cannot search: neither -e nor
+  # -L sees it. Mutation: drop the `-x` half of the parent test (it reads as
+  # 8080 and recovery would reap a serving green).
+  # Root searches a mode-0600 directory, so this cannot be simulated as root.
+  if [[ "$(id -u)" == 0 ]]; then
+    printf 'SKIP: live_port_unsearchable_parent_refuses (running as root; an unsearchable directory cannot be simulated)\n'
+    return 0
+  fi
+  mkdir -p "$TMP/live-unsearchable"
+  awk -v port=8081 "$AWK_CP_SERVER_TO" "$VHOST_SRC" >"$TMP/live-unsearchable/concordvoice"
+  chmod 600 "$TMP/live-unsearchable"
+  r=0
+  out="$(live_port "$TMP/live-unsearchable/concordvoice" 2>/dev/null)" || r=$?
+  chmod 700 "$TMP/live-unsearchable"
+  if [[ $r -eq 1 && -z "$out" ]]; then
+    pass "live_port_unsearchable_parent_refuses"
+  else
+    fail "live_port_unsearchable_parent_refuses rc=$r out=$(tr '\n' ';' <<<"$out") want=refuse"
+  fi
 }
 
 live_port_roundtrip() {
@@ -1169,6 +1192,9 @@ stop_without_marker_unchanged() {
 # to that port.
 CUT_CTL="$RAIL_PROJECT/infrastructure/deploy/concord-ctl-cutover.sh"
 LIVE_VHOST="$TMP/live/concordvoice"
+# Its directory exists, as the live vhost's does on a host: the reader reads
+# only a missing vhost in a searchable directory as 8080.
+mkdir -p "$TMP/live"
 GREEN_ID="$(printf 'fe%.0s' {1..32})"
 BUILT_ID="sha256:$(printf 'b1%.0s' {1..32})"
 OTHER_ID="sha256:$(printf 'a0%.0s' {1..32})"
@@ -1956,6 +1982,78 @@ recover_home_stop_failure_keeps_marker() {
   rm -f "$RAIL_MARKER"
 }
 
+# A control-plane of another Compose project on this daemon: the daemon-wide
+# `docker ps` lists an ID this project's `compose ps` does not.
+FOREIGN_ID=f0f0f0f0f0f0
+foreign_running() { stub_out docker 'ps --filter label=com.docker.compose.service=control-plane *' "$FOREIGN_ID\\n"; }
+FOREIGN_REFUSAL='privacy-defaults: another Compose project runs a control-plane on this Docker daemon; refusing before stopping this one'
+
+foreign_project_refused_before_green_start() {
+  need_flock foreign_project_refused_before_green_start || return 0
+  cut_prepare
+  foreign_running
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: drop `privacy_defaults_refuse_foreign_control_plane
+  # || exit 1` from control_plane_bluegreen_cutover (green starts and the
+  # round trip runs beside the foreign control-plane).
+  if [[ $rc -eq 1 && "$(rail_transcript)" == "$(printf '%s\n' "$CUT_PREFIX" "$STATUS_RUN" "$DAEMON_PS" "$CP_PS")" \
+     && ! -e "$RAIL_MARKER" ]] && saw "$FOREIGN_REFUSAL" \
+     && ! grep -qE -e ' run --detach ' -e '^ctlflip ' -e ' stop ' <<<"$(rail_transcript)"; then
+    cut_report foreign_project_refused_before_green_start ok
+  else
+    cut_report foreign_project_refused_before_green_start bad
+  fi
+}
+
+foreign_project_refused_on_drained_resume() {
+  need_flock foreign_project_refused_on_drained_resume || return 0
+  cut_prepare
+  : >"$RAIL_MARKER"
+  live_at 8081
+  green_running
+  foreign_running
+  stub_exit curl '*8081/readyz' 22
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: drop `privacy_defaults_refuse_foreign_control_plane
+  # || exit 1` from control_plane_bluegreen_resume (green is reaped, then the
+  # drained check refuses with home and green both down).
+  if [[ $rc -eq 1 && "$(rail_transcript | grep -vFx -- "$CURL_8081")" == "$(printf '%s\n' "$RESUME_HEAD" "$DAEMON_PS" "$CP_PS")" \
+     && -e "$RAIL_MARKER" ]] && has_call "$CURL_8081" && saw "$FOREIGN_REFUSAL" && live_is 8081; then
+    cut_report foreign_project_refused_on_drained_resume ok
+  else
+    cut_report foreign_project_refused_on_drained_resume bad
+  fi
+  rm -f "$RAIL_MARKER"
+}
+
+# The leftover-green reap before the start fails with a Docker error other than
+# "No such container", once at the stop and once at the remove.
+leftover_green_unremovable_keeps_home_serving() {
+  need_flock leftover_green_unremovable_keeps_home_serving || return 0
+  local leg pat want n bad=''
+  for leg in stop rm; do
+    cut_prepare
+    if [[ "$leg" == stop ]]; then
+      pat="${GREEN_STOP#docker }" want="$GREEN_STOP" n=1
+      stub_err docker "$pat" 'Error response from daemon: cannot stop container: permission denied\n'
+    else
+      pat="${GREEN_RM#docker }" want="$GREEN_REAP" n=2
+      stub_err docker "$pat" 'Error response from daemon: removal of container is already in progress\n'
+    fi
+    stub_exit docker "$pat" 1
+    run_cut_at "$CUT_CTL" rebuild control-plane
+    { named_error standby-not-ready \
+      && saw "the previous control-plane still serves on 8080; a leftover green could not be removed; run 'rebuild control-plane' to recover." \
+      && [[ ! -e "$RAIL_MARKER" && "$(last_calls "$n")" == "$want" ]] \
+      && ! has_call "$HOME_STOP" && ! grep -qE -e ' run --detach ' -e '^ctlflip ' <<<"$(rail_transcript)"; } \
+      || bad+=" [$leg rc=$rc: $(brief_out)]"
+  done
+  # Mutation that turns this red: take the drained path (return 10) when the
+  # leftover green cannot be removed (home is stopped, and the drained check
+  # would count the surviving green and refuse with nothing serving).
+  if [[ -z "$bad" ]]; then pass "leftover_green_unremovable_keeps_home_serving"; else fail "leftover_green_unremovable_keeps_home_serving:$bad"; last_calls 6 >&2; fi
+}
+
 char_rebuild_control_plane_transcript
 char_wait_healthy_curl_argv
 char_nginx_render_hash
@@ -2030,4 +2128,7 @@ recover_live_8081_green_absent_flips_home_and_continues_any_scope
 recover_live_8081_green_unready_goes_drained_then_flips_home
 recover_runs_before_routine_guard
 recover_home_stop_failure_keeps_marker
+foreign_project_refused_before_green_start
+foreign_project_refused_on_drained_resume
+leftover_green_unremovable_keeps_home_serving
 exit $((fails > 0))
