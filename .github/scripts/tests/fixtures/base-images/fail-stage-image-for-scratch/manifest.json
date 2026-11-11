@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "dockerfiles": {
+    "app.dockerfile": {
+      "stages": [
+        {
+          "scratch": true
+        }
+      ]
+    }
+  }
+}
