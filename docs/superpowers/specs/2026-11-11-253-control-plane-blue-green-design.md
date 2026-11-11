@@ -148,7 +148,7 @@ Three options were weighed:
 
 **Home's mode after an overlap.** Home keeps `MIGRATIONS_MODE=verify` in its container config until its next recreate. That is safe: it is the same image on the same schema, and the next `rebuild` recreates it. The docs warn against a hand-run `docker compose up`.
 
-**Errors.** Named errors are prefixed `control-plane-bluegreen:` and exit 1: `standby-image-mismatch`, `standby-not-ready`, `flip-failed`, `old-colour-stop-failed`, `home-not-ready`, `cutover-incomplete`, `recovery-ambiguous`, `live-upstream-unparseable`. Mode refusals are `rail-refused-<reason>` and exit 2.
+**Errors.** Named errors are prefixed `control-plane-bluegreen:` and exit 1: `standby-image-mismatch`, `standby-not-ready`, `flip-failed`, `old-colour-stop-failed`, `home-not-ready`, `cutover-incomplete`, `recovery-ambiguous`, `live-upstream-unparseable`, `rail-off-with-cutover-marker`. Mode refusals are `rail-refused-<reason>` and exit 2.
 
 ## 5. Test strategy
 
