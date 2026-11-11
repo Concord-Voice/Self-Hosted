@@ -746,13 +746,19 @@ class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
         report = self.pr["jobs"]["report"]
         self.assertEqual(report["outputs"]["selection"], "${{ steps.report.outputs.selection }}")
         self.assertEqual(jobs["result"]["needs"],
-                         ["pr-ci", "protected-sonar", "osv", "publish-install-script-warnings", "migration-lint"])
+                         ["pr-ci", "protected-sonar", "osv", "publish-install-script-warnings", "migration-lint",
+                          "base-image-lint"])
         # The protected migration lint (#4175) waits on pr-ci's IOC gate, runs only for
         # control-plane changes or an unknown selection, and may only pass or skip.
         lint_if = jobs["migration-lint"]["if"]
         for token in ("needs.pr-ci.result == 'success'", """'"known":true'""", """'"control_plane":true'"""):
             self.assertIn(token, lint_if)
         self.assertIn('"$MIGRATION_LINT_RESULT" == skipped', str(jobs["result"]))
+        # The protected base-image check (#252) installs nothing, so it has no needs
+        # and no if, and result accepts only success from it.
+        self.assertNotIn("needs", jobs["base-image-lint"])
+        self.assertNotIn("if", jobs["base-image-lint"])
+        self.assertIn('"$BASE_IMAGE_LINT_RESULT" == success', str(jobs["result"]))
         result_text = str(jobs["result"])
         for token in ("needs.pr-ci.outputs.report-selection", "needs.pr-ci.outputs.report-jobs",
                       "needs.pr-ci.outputs.coverage-uploads"):
@@ -764,6 +770,33 @@ class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
         for token in ("verify-pr-scan-results.py", "GITHUB_RUN_ATTEMPT", "SCAN_EVIDENCE_DIR"):
             self.assertIn(token, wrapper_result)
         self.assertIn("needs.osv.result", str(jobs["result"]))
+
+    def test_protected_base_image_lint_blocks_unless_it_succeeds(self):
+        jobs = self.wrapper["jobs"]
+        lint = jobs["base-image-lint"]
+        self.assertEqual(lint["permissions"], {"contents": "read"})
+        self.assertEqual(lint["steps"][0]["with"], {"fetch-depth": "2", "persist-credentials": "false"})
+        check = lint["steps"][1]["run"]
+        # The checker is read from the base, never the PR it judges.
+        self.assertIn("git show HEAD^1:.github/scripts/check-base-images.py", check)
+        self.assertIn('python3 -I "$RUNNER_TEMP/check-base-images.py" --root "$GITHUB_WORKSPACE"', check)
+        require = next(s for s in jobs["result"]["steps"]
+                       if s.get("name") == "Require protected verdict and warning publication")
+        self.assertEqual(require["env"]["BASE_IMAGE_LINT_RESULT"], "${{ needs.base-image-lint.result }}")
+        # Nothing legitimately skips this job, so unlike migration-lint, skipped blocks.
+        for base_image, passes in (("success", True), ("skipped", False), ("failure", False),
+                                   ("cancelled", False), ("", False)):
+            with self.subTest(base_image=base_image):
+                run = subprocess.run(
+                    ["bash", "-e", "-o", "pipefail", "-c", require["run"]],
+                    env={**os.environ, "PR_CI_RESULT": "success", "PUBLISH_RESULT": "success",
+                         "VERIFIER_OUTCOME": "success", "PINS_OUTCOME": "success",
+                         "OSV_RESULT": "skipped", "SONAR_RESULT": "skipped",
+                         "MIGRATION_LINT_RESULT": "skipped", "BASE_IMAGE_LINT_RESULT": base_image},
+                    capture_output=True, text=True)
+                self.assertEqual(run.returncode == 0, passes, run)
+                if not passes:
+                    self.assertIn(f"base-image-lint={base_image},", run.stdout)
 
     def test_protected_pr_ci_keeps_ioc_first_and_limits_enforcement_mode(self):
         jobs = self.pr["jobs"]

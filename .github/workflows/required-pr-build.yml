@@ -308,9 +308,35 @@ jobs:
           "$HOME/.local/bin/squawk" --version
           "$HOME/.local/bin/squawk" --config "$RUNNER_TEMP/squawk.toml" "${files[@]}"
 
+  # #252: every image source in a tracked Dockerfile must match the identity in
+  # .github/base-images.json. No needs and no if: it installs nothing, so it does
+  # not wait on pr-ci's IOC gate, and it runs on every PR so `result` can require
+  # success. The checker comes from the base, so a PR cannot loosen the check it
+  # is judged by; the Dockerfiles and manifest come from the PR merge commit.
+  # pr-ci's advisory workflow-lint step runs the PR's own copy; keep both.
+  base-image-lint:
+    name: Protected base-image identity check
+    permissions:
+      contents: read
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # HEAD is the PR merge commit; HEAD^1 is the base it merges into.
+          fetch-depth: 2
+          persist-credentials: false
+
+      # -I: isolated mode, so no PR-root module or PYTHON* variable is loaded.
+      - name: Check base images with the base commit's checker
+        run: |
+          set -euo pipefail
+          git show HEAD^1:.github/scripts/check-base-images.py > "$RUNNER_TEMP/check-base-images.py"
+          python3 -I "$RUNNER_TEMP/check-base-images.py" --root "$GITHUB_WORKSPACE"
+
   result:
     name: Required PR build result
-    needs: [pr-ci, protected-sonar, osv, publish-install-script-warnings, migration-lint]
+    needs: [pr-ci, protected-sonar, osv, publish-install-script-warnings, migration-lint, base-image-lint]
     # always() prevents a failed or skipped dependency from hiding this result.
     if: ${{ always() }}
     permissions:
@@ -442,10 +468,11 @@ jobs:
           VERIFIER_OUTCOME: ${{ steps.verify.outcome }}
           PINS_OUTCOME: ${{ steps.pins.outcome }}
           MIGRATION_LINT_RESULT: ${{ needs.migration-lint.result }}
+          BASE_IMAGE_LINT_RESULT: ${{ needs.base-image-lint.result }}
         run: |
-          if [[ "$PR_CI_RESULT" == success && ( "$MIGRATION_LINT_RESULT" == success || "$MIGRATION_LINT_RESULT" == skipped ) && "$PUBLISH_RESULT" == success && "$VERIFIER_OUTCOME" == success && "$PINS_OUTCOME" == success && "$OSV_RESULT" != failure && "$OSV_RESULT" != cancelled && "$SONAR_RESULT" != failure && "$SONAR_RESULT" != cancelled ]]; then
+          if [[ "$PR_CI_RESULT" == success && ( "$MIGRATION_LINT_RESULT" == success || "$MIGRATION_LINT_RESULT" == skipped ) && "$BASE_IMAGE_LINT_RESULT" == success && "$PUBLISH_RESULT" == success && "$VERIFIER_OUTCOME" == success && "$PINS_OUTCOME" == success && "$OSV_RESULT" != failure && "$OSV_RESULT" != cancelled && "$SONAR_RESULT" != failure && "$SONAR_RESULT" != cancelled ]]; then
             echo "::notice::Required PR scan verdict succeeded."
           else
-            echo "::error::Required PR scan verdict blocked: pr-ci=${PR_CI_RESULT}, migration-lint=${MIGRATION_LINT_RESULT}, publisher=${PUBLISH_RESULT}, sonar=${SONAR_RESULT}, verifier=${VERIFIER_OUTCOME}, pins=${PINS_OUTCOME}"
+            echo "::error::Required PR scan verdict blocked: pr-ci=${PR_CI_RESULT}, migration-lint=${MIGRATION_LINT_RESULT}, base-image-lint=${BASE_IMAGE_LINT_RESULT}, publisher=${PUBLISH_RESULT}, sonar=${SONAR_RESULT}, verifier=${VERIFIER_OUTCOME}, pins=${PINS_OUTCOME}"
             exit 1
           fi
