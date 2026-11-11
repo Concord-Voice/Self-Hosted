@@ -1735,6 +1735,122 @@ Syntax, reload or start, and an active one-field HTTPS probe must all pass. Othe
 
 The sudoers policy itself updates through a root-validated, root-compared dotfile candidate and an atomic rename. The legacy direct overwrite exists only in already-installed old policies, for one transition. This public-edge ownership avoids HSTS divergence when a later Docker rebuild fails. The six other security headers remain Go-owned, and media and TURN retain independent policies.
 
+### Control-plane blue-green deploys
+
+The deploy controller (`infrastructure/deploy/concord-ctl.sh`) has an optional rail that rebuilds the control plane without 502s. It starts a second control-plane instance beside the running one, moves nginx to it, and then moves nginx back. The rail ships **default-off**. With it off, `rebuild`, `nginx-reload` and `wait-healthy` behave exactly as before. Design: `docs/superpowers/specs/2026-11-11-253-control-plane-blue-green-design.md`.
+
+**Do not turn the rail on before Concord-Voice/Desktop#68 and Concord-Voice/Desktop#64 are released.** Each overlapped deploy drops connected clients twice, and they reconnect each time. Without the client's reconnect refetch (Concord-Voice/Desktop#68) and its session-drain handling (Concord-Voice/Desktop#64), users can see stale state after a deploy.
+
+**Where it applies.** The switch is honoured only when the controller selects the managed production or staging Compose stack. Every other selection forces it off without a message. **It never applies to `concord-selfhost` installs**: self-host mode always runs the single control plane. It is also not reached under managed Redis, where an ordinary `rebuild` exits before the cutover step.
+
+#### Colours
+
+The two instances are called colours.
+
+| Colour | What it is | Host port |
+|---|---|---|
+| Home (blue) | The Compose service `control-plane`, container `concordvoice-control-plane`. Always the steady-state server. | `127.0.0.1:8080` |
+| Green | A transient `docker compose run` one-off container of the same `control-plane` service, named `concordvoice-control-plane-green`. It exists only during a cutover. | `127.0.0.1:8081` |
+
+The colour model is a round trip. Home is never renamed, and green never becomes the long-lived server. Because green is a one-off of the same service, it inherits every Compose layer of `control-plane`, including hardening, volumes, environment, healthcheck and the 45-second stop grace, and any layer a deployment adds. Nothing has to be mirrored onto green. Green starts with `MIGRATIONS_MODE=verify` and `OPS_METRICS_ENABLED=false`. Home's configuration is never changed.
+
+Green's restart policy is `no`. If green dies while it is the only serving colour, Docker does not restart it, and nginx returns errors until the next `rebuild control-plane`, which recovers.
+
+#### Switch
+
+Set `CONTROL_PLANE_DEPLOY_PROFILE` in the deploy env file (`deploy.env.local` in the deploy directory), as for `MEDIA_DEPLOY_PROFILE`.
+
+| Value | Effect |
+|---|---|
+| `control-plane-single` (default) | Rail off. Today's stop-first rebuild. |
+| `control-plane-bluegreen` | Rail on, on a managed production or staging selection only. |
+
+The controller exits 2 before doing anything for an invalid value, and for `control-plane-bluegreen` combined with `MEDIA_DEPLOY_PROFILE=media-bluegreen`, a host without `/usr/bin/flock`, or a host without the `/var/lib/concord` deploy state directory.
+
+#### The cutover
+
+The cutover runs inside `rebuild` when the rail is on and the rebuild scope is exactly `control-plane`, after the image build. It holds the deploy transaction lock throughout.
+
+1. **Migration gate.** The controller runs `migrations status` (see [development.md](development.md#database-migrations)) in a fresh container of the built image. It overlaps only on exit 0 with stdout `current <n>`. A pending migration, any other answer, or an image too old to have the subcommand takes the stop-first drained path instead, with the brief downtime that path has always had. Green also refuses to start unless the schema is current, so a colour started beside a serving colour never migrates.
+2. **Marker.** It writes the cutover marker, an empty file at `.control-plane-cutover.local` in the deploy directory. The marker exists only while a cutover is in flight.
+3. **Start green** and wait for its `/readyz`. If green fails here, home is still serving and no user was moved.
+4. **Flip to green.** It re-renders the live vhost's `upstream control_plane` block to `127.0.0.1:8081`, runs `nginx -t` and reloads, then stops home at once. HUP, INT and TERM are ignored between the reload and the stop.
+5. **Start home** with the new image once the status check still reads current, and wait for its `/readyz` on 8080.
+6. **Flip back** to 8080, stop and remove green at once, and clear the marker.
+
+Each flip overlaps the two colours from the successful reload until the old colour exits: at most the 45-second stop grace. With the rail on, an operator `nginx-reload` (for a certificate or HSTS change) renders whichever port is live, so it keeps the active colour. `wait-healthy` probes the live colour.
+
+#### Telling which colour is active
+
+1. Read the `server` line inside the `upstream control_plane` block of the live vhost, `/etc/nginx/sites-available/concordvoice`. `127.0.0.1:8080` is home; `127.0.0.1:8081` is green. A missing vhost counts as 8080.
+2. Check for the marker file. Present means a cutover is in flight or was interrupted.
+3. Check whether a `concordvoice-control-plane-green` container exists (`docker ps -a --filter name=concordvoice-control-plane-green`).
+
+In the steady state the vhost reads 8080, there is no marker and there is no green container.
+
+#### Recovery and forcing back
+
+To force the control plane back to home, rerun `rebuild control-plane` with the rail still on. Before its first-activation guard, `rebuild` runs a recovery pre-step whenever the marker exists or the live vhost reads 8081:
+
+| Live port | Recovery |
+|---|---|
+| 8080 | Remove green, clear the marker, continue. The rebuild may then run a fresh cutover. |
+| 8081, green not running | Nothing is serving on 8081. Flip nginx to 8080, clear the marker, continue with the rebuild as requested (any scope). |
+| 8081, green running | Green is serving. Needs the scope to be exactly `control-plane`, else `cutover-incomplete` and nothing is changed. Write the marker if it is missing, stop home if it is running, and continue. At the cutover step, either finish the move back to home with the newly built image, or take the drained path and flip to 8080 at the end. |
+| Unreadable (marker present) | `recovery-ambiguous`. Nothing is changed. |
+
+The resume runs after the image build, so a bad image left by an interrupted run cannot block the rebuild that fixes it.
+
+While a marker exists, the controller restricts the other locked verbs:
+
+- **Rail on:** only `rebuild`, `nginx-reload`, `stop` and `sudoers-sync` run. Every other locked verb refuses with `cutover-incomplete`. `stop` also removes green and keeps the marker.
+- **Rail off:** every locked verb except `sudoers-sync` refuses with `rail-off-with-cutover-marker`. Turn the rail back on and rerun `rebuild control-plane` to finish recovery before turning it off.
+
+If a `rebuild control-plane` does not converge, stop everything and rebuild. This causes downtime.
+
+1. Run `concord-ctl.sh stop`. This removes green and keeps the marker.
+2. Run `concord-ctl.sh rebuild control-plane`. Recovery sees that green is gone, flips nginx to 8080 and clears the marker.
+
+Manual reset, for `recovery-ambiguous` or `live-upstream-unparseable`. The controller cannot read the live vhost, so it will not guess which colour is serving. This also causes downtime.
+
+1. Remove green: `docker rm -f concordvoice-control-plane-green`.
+2. Delete the marker file `.control-plane-cutover.local` in the deploy directory.
+3. Set `CONTROL_PLANE_DEPLOY_PROFILE=control-plane-single` in the deploy env file.
+4. Run `concord-ctl.sh nginx-reload`. With the rail off it renders the shipped vhost, which points at 8080.
+5. Run `concord-ctl.sh rebuild control-plane`. This is the stop-first path.
+6. Set `CONTROL_PLANE_DEPLOY_PROFILE=control-plane-bluegreen` again when you are ready.
+
+A SIGKILL that lands between a flip and the stop that follows it leaves both colours serving until the next `rebuild control-plane`. This is a documented limit, not a bug.
+
+#### Named errors
+
+Rail errors are prefixed `control-plane-bluegreen:` on stderr. The first nine exit 1; the mode refusals exit 2.
+
+| Error | What is serving afterwards | What to do |
+|---|---|---|
+| `standby-image-mismatch` | Home. Green was removed and the marker cleared. | Green was not running the image just built. Check the build, then rerun `rebuild control-plane`. |
+| `standby-not-ready` | Home. Green was removed and the marker cleared. No flip happened. | The new image did not start or did not pass `/readyz`. Fix the image, then rerun. |
+| `flip-failed` | nginx restored its previous config, so the colour it was on keeps serving. On the first flip: home. Green is removed and the marker cleared only when the live vhost reads 8080 again; otherwise green and the marker are kept, because nginx may be routing to green. On the flip back: green, with the marker kept. | Check `nginx -t` output, then rerun `rebuild control-plane`. |
+| `old-colour-stop-failed` | The new colour, and possibly the old one too. The marker is kept. | Rerun `rebuild control-plane`. |
+| `home-not-ready` | Green. Home did not pass `/readyz` on 8080, or the schema no longer read current. The marker is kept. | Fix the cause, then rerun `rebuild control-plane`. |
+| `cutover-incomplete` | Unchanged. A marker exists, or the vhost reads 8081 while green runs, and this verb or scope cannot recover it. Also printed when the marker file cannot be written or removed. | Run `rebuild control-plane`. If the marker file is the cause, fix the deploy directory's permissions first. |
+| `recovery-ambiguous` | Unchanged. A marker exists and the live vhost's upstream block cannot be read. | Follow the manual reset above. |
+| `live-upstream-unparseable` | Unchanged. `nginx-reload` or `wait-healthy` could not read the live port. | Follow the manual reset above. |
+| `rail-off-with-cutover-marker` | Unchanged. The rail is off but a cutover marker exists. | Turn the rail back on and run `rebuild control-plane`. |
+| `rail-refused-media-bluegreen` (exit 2) | Unchanged. | Use only one of the two blue-green rails. |
+| `rail-refused-no-flock` (exit 2) | Unchanged. | Install `flock`, or turn the rail off. |
+| `rail-refused-no-state-dir` (exit 2) | Unchanged. | Provision the `/var/lib/concord` deploy state directory, or turn the rail off. |
+| `invalid control-plane deployment profile` (exit 2) | Unchanged. | Set `CONTROL_PLANE_DEPLOY_PROFILE` to one of the two values above. |
+
+#### Known limits
+
+- Every overlapped deploy causes two reconnect waves.
+- A deploy that carries a pending migration takes the stop-first drained path, with the same brief downtime as before.
+- A SIGKILL between a flip and its stop leaves both colours serving until the next `rebuild`.
+- During an overlap, the media plane's calls to `control-plane:8080` can reach either colour. Calls that reach a colour that is starting or stopping are refused, and voice authorization fails closed.
+
+The environment variables are listed in [development.md](development.md#environment-variables-reference): `MIGRATIONS_MODE` under Control Plane, `CONTROL_PLANE_DEPLOY_PROFILE` under Deploy Controller (managed hosts).
+
 ### Self-Hosted (Docker Compose)
 
 The self-hosted CLI runs the selected stack on a single server using repo-root `.env` and its persisted `SELFHOST_STORAGE_MODE=bundled|byo-s3`. The ordered files are `docker-compose.yml` → `docker-compose.production.yml` → `docker-compose.selfhost.yml`; BYO appends `docker-compose.byo-s3.yml` fourth, after the port overlay, and leaves bundled MinIO inactive. The installer supports fresh bundled or BYO installations only, with no existing-object migration or automatic bundled fallback. See the quickstart's [storage selection](runbooks/selfhost-quickstart.md#object-storage-bundled-or-byo-s3) and [updating procedure](runbooks/selfhost-quickstart.md#updating) for the persisted-mode and lifecycle contract. Production-required variables use fail-loud `${VAR:?msg}` interpolation. A misconfiguration therefore fails at `docker compose config` time, not at runtime.

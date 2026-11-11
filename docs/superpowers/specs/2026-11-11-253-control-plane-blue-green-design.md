@@ -135,7 +135,7 @@ Three options were weighed:
    - Its image ID differs from the built one: reap, clear the marker, `standby-image-mismatch`.
 6. Gate on green's `/readyz`. On failure: reap green, clear the marker, `standby-not-ready`. No flip is attempted and home keeps serving.
 7. Ignore HUP, INT and TERM. Flip to 8081. On success stop home with nothing in between, then restore the traps.
-   - Flip failed: nginx restored itself; reap green, clear the marker, `flip-failed`.
+   - Flip failed: read the live port back. Only if it reads 8080: reap green, clear the marker, `flip-failed`. Otherwise keep green and the marker (nginx may be routing to green) and fail `flip-failed`.
    - Stop failed: `old-colour-stop-failed`, marker kept.
 8. Repeat the status check. If it is still current, start home with the unchanged drained-path `up` line: on a schema proven current its startup migration run changes nothing. Gate on its `/readyz`. On a non-current status or any failure: `home-not-ready`; green keeps serving and the marker stays. Home's image is not checked (today's path does not check it either).
 9. Ignore signals. Flip to 8080. On success stop green at once (`docker stop -t 45`) and remove it, restore the traps, clear the marker. On flip failure: `flip-failed`, marker kept. On a failed reap: `old-colour-stop-failed`, marker kept.
@@ -151,12 +151,13 @@ Three options were weighed:
 |---|---|
 | unparseable (marker present) | `recovery-ambiguous`; nothing changed |
 | 8080 | Reap green, clear the marker, continue. The rebuild may then run a fresh cutover. |
-| 8081 | The effective scope must be exactly `control-plane`, else `cutover-incomplete` and nothing changed. Write the marker if it is missing. Stop home if it is running. Continue with the marker in place: exactly one control-plane container (green) or none is left for the guard to count. |
+| 8081, green not running | Nothing is serving on 8081. Flip to 8080 now (`flip-failed` keeps the marker), clear the marker, continue with the rebuild as requested, whatever its scope. This is what makes `stop` then `rebuild` a working last resort. |
+| 8081, green running | The effective scope must be exactly `control-plane`, else `cutover-incomplete` and nothing changed. Write the marker if it is missing. Stop home if it is running. Continue with the marker in place: exactly one control-plane container (green) is left for the guard to count. |
 
 *Resume*, at the hook, when the marker is present. It replaces steps 1-7:
 
 - green answers `/readyz` and the status is current → steps 8-9 with the newly built image;
-- otherwise → the foreign-project guard, reap green, the daemon-wide drained check, start home in the ordinary apply mode, gate 8080, flip to 8080, clear the marker. This is the drained path with a flip at the end.
+- otherwise (green unready, or a migration is pending) → the foreign-project guard, reap green, the daemon-wide drained check, start home in the ordinary apply mode, gate 8080, flip to 8080, clear the marker. This is the drained path with a flip at the end.
 
 Because the resume runs after the build, a bad image recorded by an interrupted run can never block the deploy that fixes it.
 
@@ -296,7 +297,6 @@ It must pass on the unmodified tree and on every later commit.
 - That `control_plane_cli` stdout is clean in non-direct egress mode.
 - `media-plane` behaviour on brief control-plane call failures.
 - That the host `nginx.conf` leaves `worker_shutdown_timeout` unset. Neither repo vhost file sets it.
-- That building the golang-migrate Postgres driver takes the advisory lock and creates the version table in the pinned version.
 - `/auth/ws-ticket` allows 10 per user per minute; two waves cost 2 tickets per device.
 
 ## 10. Out of scope

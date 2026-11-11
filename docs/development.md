@@ -229,6 +229,30 @@ migrate create -ext sql -dir services/control-plane/migrations -seq add_users_ta
 migrate -path services/control-plane/migrations -database "postgres://concord:concord_dev_password@localhost:5432/concord?sslmode=disable" up
 ```
 
+#### Checking migration status
+
+`control-plane migrations status` reports whether the database schema matches the migrations built into the binary. It is read-only: it never applies a migration, never takes the migration lock and never creates the version table. It reads only `DATABASE_URL` and does not load the rest of the configuration. Run it from `services/control-plane`, because it reads the `migrations` directory there:
+
+```bash
+cd services/control-plane
+DATABASE_URL="postgres://concord:concord_dev_password@localhost:5432/concord?sslmode=disable" \
+  go run ./cmd/server migrations status
+```
+
+In a built image the same subcommand is `./main migrations status`. It prints one line and exits within 15 seconds:
+
+| Stdout | Exit | Meaning |
+|---|---|---|
+| `current <n>` | 0 | The schema is at version `<n>`, the latest this binary has |
+| `pending <db> <latest>` | 3 | The database is behind the binary |
+| `ahead <db> <latest>` | 3 | The database is newer than the binary |
+| `dirty <db>` | 3 | A migration at version `<db>` failed part-way |
+| `uninitialised <latest>` | 3 | No migration has ever run |
+| none (stderr: `migrations status: unavailable`) | 1 | The database could not be read. The message never includes the DSN or a driver error |
+| none (stderr: usage line) | 64 | Wrong arguments |
+
+The deploy controller's control-plane blue-green rail uses this check as its migration gate. See [architecture.md](architecture.md#control-plane-blue-green-deploys).
+
 ### Accessing Database
 
 **Via psql**:
@@ -338,6 +362,20 @@ not prevent this; it only prevents the separate schema-divergence hazard. Give t
 second worktree its own `DATABASE_URL`, or run the two serially. See the same
 rules file, and [#2790](internal development reference omitted)
 for the fix.
+
+### Deploy Controller
+
+The control-plane blue-green rail in `infrastructure/deploy/concord-ctl.sh` has two test scripts. Run them from the repository root:
+
+```bash
+# Hermetic: the real controller against PATH stubs
+bash infrastructure/deploy/tests/test-control-plane-bluegreen.sh
+
+# Real nginx: zero non-200 responses and WebSocket survival across a flip
+bash infrastructure/deploy/tests/test-control-plane-bluegreen-nginx.sh
+```
+
+Some cases need Linux. The rail-on and lock re-entry cases need `/usr/bin/flock`, and the compose one-off contract case needs a running Docker daemon. The nginx script needs `nginx` and `python3` on `PATH` and free loopback ports 8080 and 8081. macOS has no `/usr/bin/flock`, so the flock cases print `SKIP` there; any other missing prerequisite also skips its cases locally. With `CI` set, a missing prerequisite is a failure, not a skip. CI runs both scripts through the deploy-test step's `infrastructure/deploy/tests/test-*.sh` glob.
 
 ### Media Plane
 
@@ -486,6 +524,7 @@ directory belong to the intended service.
 | `CONTROL_PLANE_REPLICA_COUNT` | unset (Compose: `1`) | Explicit control-plane replica contract. Since #2178 it is enforced **unconditionally at startup**, not only under the Activity History gate: any explicitly set value other than `1` fails `Load()` with a fatal error, on every environment. The WebSocket hub holds per-connection session state and channel interest maps in process memory, so a second replica silently drops cross-replica fanout. Horizontal scaling is tracked in #2757. Leaving it unset is fine — the guard only fires on an explicit value |
 | `ACTIVITY_HISTORY_OPERATOR_NAME` | empty | Self-host disclosure operator. Required before new Activity History opt-in becomes available (SaaS uses `Concord Voice LLC`) |
 | `ACTIVITY_HISTORY_PRIVACY_POLICY_URL` | empty | Self-host disclosure URL. Absolute HTTPS applies outside loopback development and test |
+| `MIGRATIONS_MODE` | empty (`apply`) | What startup does with migrations. Empty or `apply` runs them as before. `verify` refuses to start unless the schema is current and writes nothing. Any other value fails startup before the database is opened. Only the deploy controller's transient green container sets it, to `verify`; it is not in `.env.example` |
 
 On managed hosts, `concord-ctl.sh nginx-reload` reads the canonical Compose-quoted value from `/opt/concord/.env`. It validates that value before sudo. It then renders nginx as the public HSTS owner. The nginx config hides Go's upstream STS field and emits one server-level policy. It repeats that policy in the three locations whose own `add_header` directives suppress inheritance.
 
@@ -504,6 +543,14 @@ opt-in unavailable. It does not prevent existing history reads or deletion.
 | `OPS_METRICS_SHARED_SECRET` | (empty) | Snapshot-signing secret of at least 32 bytes. Required when enabled |
 | `OPS_METRICS_INTERVAL` | `15s` | Sampling interval from 5 seconds through 5 minutes |
 | `OPS_METRICS_ROLE` | `local` | Local storage role. Reserve `aggregator` for #1504 |
+
+### Deploy Controller (managed hosts)
+
+Set in the deploy env file (`deploy.env.local` in the deploy directory), not in `.env`.
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CONTROL_PLANE_DEPLOY_PROFILE` | `control-plane-single` | `control-plane-bluegreen` turns on the control-plane blue-green rail. Honoured only on a managed production or staging selection; forced to `control-plane-single` everywhere else, including every `concord-selfhost` install. An invalid value exits 2. Do not turn it on before Concord-Voice/Desktop#68 and Concord-Voice/Desktop#64 are released. See [architecture.md](architecture.md#control-plane-blue-green-deploys) |
 
 ### Media Plane
 
