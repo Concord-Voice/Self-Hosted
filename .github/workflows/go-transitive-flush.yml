@@ -4,7 +4,7 @@ name: Refresh transitive Go module graph
 # (`day: tuesday` in .github/dependabot.yml, no `time:` pinned) — its exact
 # fire time isn't guaranteed and may land before, during, or after our
 # 06:00 UTC slot. Timing-independence is structural via the contention
-# guard step below, NOT via this cron's choice; do not rely on "06:00
+# guard job below, NOT via this cron's choice; do not rely on "06:00
 # precedes Dependabot" as an invariant.
 #
 # PR authorship: the PR is opened with a short-lived GitHub App installation
@@ -13,16 +13,19 @@ name: Refresh transitive Go module graph
 # pull requests at all. An App-authored PR runs the full PR check set on its
 # own, with no close-and-reopen step for the reviewer.
 #
-# Two jobs, and the split is a security boundary. A job receives every secret
-# it references when the job starts, whatever the step order, so minting the
-# token "late" inside one job would still put the App private key on the runner
-# while `go get -u` downloads and resolves third-party modules.
-#   refresh  fetches modules. It references no App credential. Its
-#            `GITHUB_TOKEN` can read contents and comment on pull requests.
-#   open-pr  holds the App key. It runs no Go tooling: it copies go.mod, go.sum
-#            and the rendered body out of the artifact and opens the PR.
-# Do not merge the jobs, and do not add Go commands to open-pr.
-# scripts/tests/test-go-transitive-flush-render.sh locks both rules.
+# Three jobs, and the split is a security boundary. A job receives every secret
+# it references, and its `GITHUB_TOKEN`, when the job starts, whatever the step
+# order. Minting the token "late" inside one job would still put the App private
+# key on the runner while `go get -u` downloads and resolves third-party modules.
+#   guard    holds the only `GITHUB_TOKEN` write scope (`pull-requests`), for
+#            the deferral comment. It checks out nothing and runs no Go tooling.
+#   refresh  fetches modules. Its `GITHUB_TOKEN` is read-only and it references
+#            no secret.
+#   open-pr  holds the App key. It runs no Go tooling: it copies go.mod and
+#            go.sum out of the artifact, and create-pull-request reads the
+#            rendered body from the artifact directory.
+# Do not merge the jobs, and do not add Go commands to guard or open-pr.
+# scripts/tests/test-go-transitive-flush-render.sh locks these rules.
 #
 # Output PR is processed by /weekly-deps Wednesday review window.
 # See [internal]rules/backend.md § Dependency Hygiene.
@@ -33,8 +36,8 @@ on:
     - cron: "0 6 * * 2"
   workflow_dispatch:
 
-# Least-privilege default. The refresh job adds only `pull-requests: write`, for
-# the contention guard's `gh pr comment`. The branch push and the PR itself use
+# Least-privilege default. The guard job adds only `pull-requests: write`, for
+# its `gh pr comment`. The branch push and the PR itself use
 # the App installation token, so `GITHUB_TOKEN` never needs `contents: write`.
 permissions:
   contents: read
@@ -44,29 +47,21 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  refresh:
+  guard:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 5
     permissions:
       contents: read
       pull-requests: write
     outputs:
-      # Set only when the run was not deferred AND go.mod / go.sum changed.
-      has_changes: ${{ steps.refresh.outputs.has_changes }}
+      deferred: ${{ steps.contention.outputs.deferred }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: services/control-plane/go.mod
-          cache-dependency-path: services/control-plane/go.sum
-
       - name: Contention guard — defer if open Dependabot Go PRs exist
         id: contention
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # No checkout in this job, so `gh` cannot infer the repository.
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 
@@ -123,9 +118,30 @@ jobs:
           echo "Exiting success-skip due to contention."
           exit 0
 
+  refresh:
+    needs: guard
+    if: needs.guard.outputs.deferred != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      # 'true' or 'false' from the refresh step; empty when this job is skipped.
+      has_changes: ${{ steps.refresh.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No module or build cache: a cache entry is state shared between runs,
+      # and this job resolves third-party modules.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: services/control-plane/go.mod
+          cache: false
+
       - name: Refresh transitive Go module graph
         id: refresh
-        if: steps.contention.outputs.deferred != 'true'
         working-directory: services/control-plane
         run: |
           set -euo pipefail
@@ -135,7 +151,7 @@ jobs:
 
           # Stat the result for the PR body
           if git diff --quiet go.mod go.sum 2>/dev/null; then
-            echo "No transitive updates available. Workflow will exit success-skip after PR-creation step skips."
+            echo "No transitive updates available. The open-pr job will be skipped."
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
           else
             echo "Changes detected in go.mod / go.sum."
@@ -144,7 +160,7 @@ jobs:
           fi
 
       - name: Render PR body
-        if: steps.contention.outputs.deferred != 'true' && steps.refresh.outputs.has_changes == 'true'
+        if: steps.refresh.outputs.has_changes == 'true'
         env:
           # Passed via env rather than inlined into the script. `github.event_name` is
           # a fixed enum and not attacker-controllable, but the env-block form is the
@@ -227,14 +243,14 @@ jobs:
           echo "Rendered PR body to /tmp/pr-body.md"
 
       - name: Stage the PR payload
-        if: steps.contention.outputs.deferred != 'true' && steps.refresh.outputs.has_changes == 'true'
+        if: steps.refresh.outputs.has_changes == 'true'
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/flush"
           cp services/control-plane/go.mod services/control-plane/go.sum /tmp/pr-body.md "$RUNNER_TEMP/flush/"
 
       - name: Upload the PR payload
-        if: steps.contention.outputs.deferred != 'true' && steps.refresh.outputs.has_changes == 'true'
+        if: steps.refresh.outputs.has_changes == 'true'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: go-transitive-flush

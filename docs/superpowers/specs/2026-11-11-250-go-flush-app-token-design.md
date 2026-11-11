@@ -33,6 +33,8 @@ Job separation is the security property: the job that fetches modules cannot rea
 
 `refresh` still holds a `GITHUB_TOKEN` that can comment on pull requests while modules are fetched. That is accepted: it cannot write repository contents.
 
+**Amended in review.** The residual above is removed. The contention guard moved to its own job, `guard`, which holds the `pull-requests: write` scope, checks out nothing and runs no Go tooling. `refresh` now has `contents: read` only and references no secret, and `actions/setup-go` runs with `cache: false`. The workflow has three jobs: `guard`, `refresh`, `open-pr`.
+
 ## Testing
 
 `scripts/tests/test-go-transitive-flush-render.sh` already extracts and runs the real "Render PR body" block. Two changes:

@@ -152,7 +152,7 @@ gh pr list \
 
 The `reviews` and `reviewRequests` fields are load-bearing for re-entrant detection: if Copilot has already been requested (Phase 3.6) or already reviewed (Phase 4.0), the second invocation of the skill picks that up and routes accordingly.
 
-The second `gh pr list` call (the `author:app/github-actions` query) also catches PRs opened by repo workflows via PR-creation actions (e.g. `peter-evans/create-pull-request`) — including any label-driven reclassification extension a repo adds (see "Choosing the right workflow" above). Phase 2 applies any such repo-defined label rule.
+The second `gh pr list` call (the `author:app/github-actions` query) also catches PRs that repo workflows open with `GITHUB_TOKEN` via PR-creation actions (e.g. `peter-evans/create-pull-request`). A workflow that opens its PR with a GitHub App token is not matched by it; the third call finds those by label. Both cover any label-driven reclassification extension a repo adds (see "Choosing the right workflow" above). Phase 2 applies any such repo-defined label rule.
 
 If the user passed `$0` as a specific PR number, narrow to just that PR via `gh pr view $0 --json ...` and skip directly to Phase 2 for that one PR.
 
