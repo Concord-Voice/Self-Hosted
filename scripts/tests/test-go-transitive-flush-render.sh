@@ -109,7 +109,7 @@ render_case() {
   if [ "$got" = "$want" ]; then
     ok "$name — counts render as ${want_bump}/${want_new}/${want_orph}"
   else
-    bad "$name — wrong counts" "want: $want"$'\n'"got:  ${got:-<no count line found>}"
+    bad "$name — wrong counts" "want: $want"$'\n'"got:  ${got:-no count line found}"
   fi
 }
 
