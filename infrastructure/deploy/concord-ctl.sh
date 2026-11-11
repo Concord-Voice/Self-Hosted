@@ -736,7 +736,9 @@ control_plane_cli() (
   fi
   managed_egress_gate verify || return 1
   running="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps --status running -q control-plane)" || return 1
-  if [[ "${1:-}" == voice-enforcement-rollout ]]; then
+  # A fresh container of the selected image: the rollout verbs, and the
+  # blue-green schema check, which must be answered by the image just built.
+  if [[ "${1:-}" == voice-enforcement-rollout || "${1:-}" == migrations ]]; then
     running=''
   fi
   temporary=''
@@ -1928,7 +1930,10 @@ privacy_defaults_refuse_foreign_control_plane() {
   done
 }
 
+# activity_history_wait_control_plane [<url>]: probe <url> (default home's
+# /health) until it answers or the timeout passes.
 activity_history_wait_control_plane() {
+  local url="${1:-http://127.0.0.1:8080/health}"
   local timeout="${ACTIVITY_HISTORY_HEALTH_TIMEOUT:-60}"
   local interval="${ACTIVITY_HISTORY_HEALTH_INTERVAL:-2}"
   local deadline now remaining probe_limit sleep_for probed=0
@@ -1961,7 +1966,7 @@ activity_history_wait_control_plane() {
       probe_limit="$interval"
     fi
     if curl --connect-timeout "$probe_limit" --max-time "$probe_limit" \
-      -sf 'http://127.0.0.1:8080/health' >/dev/null 2>&1; then
+      -sf "$url" >/dev/null 2>&1; then
       return 0
     fi
     (( interval == 0 )) && break
@@ -5613,7 +5618,9 @@ control_plane_bluegreen_marker_guard() {
 }
 
 # Stop green with home's 45s drain, then remove it. A green that is already
-# gone is success; any other Docker failure is printed and returns 1.
+# gone is success; any other Docker failure is printed and returns 1. The
+# egress namespaces are then reconciled, as after any container change (a
+# no-op in direct mode); a failed reconcile returns 1.
 control_plane_bluegreen_reap_green() {
   local name=concordvoice-control-plane-green out
   if ! out="$(docker stop -t 45 "$name" 2>&1)" && [[ "$out" != *'No such container'* ]]; then
@@ -5624,6 +5631,190 @@ control_plane_bluegreen_reap_green() {
     printf '%s\n' "$out" >&2
     return 1
   fi
+  managed_egress_reconcile
+}
+
+# 0 only when the image just built reports the schema current: `migrations
+# status` (a fresh container of that image; see control_plane_cli) exits 0 and
+# prints exactly the one line `current <n>`. Any other answer, including the
+# usage error (64) of an image too old to know the subcommand, is not proof.
+control_plane_bluegreen_schema_current() {
+  local out re=$'^current [0-9]+\n$'
+  out="$(control_plane_cli migrations status </dev/null && printf x)" || return 1
+  [[ "${out%x}" =~ $re ]]
+}
+
+# Point nginx's control_plane upstream at <8080|8081> through the internal
+# nginx-reload form. The child inherits fd 9, the deploy transaction lock this
+# process holds, and validate_control_plane_flip_reentry admits it. Keep the
+# re-invocation a single line.
+control_plane_bluegreen_flip() {
+  "$0" "$CONTROL_PLANE_FLIP_REENTRY_MARKER" nginx-reload --control-plane-upstream "$1"
+}
+
+# Start green: a `compose run` one-off of the control-plane service published
+# on 127.0.0.1:8081, verifying (never applying) migrations, with the ops-metrics
+# reader off. Prints its container ID. The egress gate and reconcile bracket
+# the start as control_plane_cli brackets its maintenance container (both are
+# no-ops in direct mode); the reconcile also follows a failed start, which may
+# have created a namespace.
+control_plane_bluegreen_start_green() {
+  local id result=0
+  managed_egress_gate verify || return 1
+  id="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD run --detach --no-deps --pull never --use-aliases \
+    --name concordvoice-control-plane-green -p 127.0.0.1:8081:8080 \
+    -e MIGRATIONS_MODE=verify -e OPS_METRICS_ENABLED=false control-plane)" || result=1
+  managed_egress_reconcile || return 1
+  (( result == 0 )) || return 1
+  [[ "$id" =~ ^[a-f0-9]{64}$ ]] || {
+    echo 'control-plane-bluegreen: invalid standby container identity' >&2
+    return 1
+  }
+  printf '%s\n' "$id"
+}
+
+# The local image ID of the control-plane image this rebuild built. The model
+# is rendered here, after the rebuild cleared any rollback image pin, so it
+# names the image green and home will run.
+control_plane_bluegreen_built_image() {
+  local model image id
+  model="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD config --format json)" || return 1
+  image="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["services"]["control-plane"].get("image", ""))' <<<"$model")" || return 1
+  [[ -n "$image" ]] || return 1
+  id="$(docker image inspect --format '{{.Id}}' "$image")" || return 1
+  [[ "$id" =~ ^sha256:[a-f0-9]{64}$ ]] || return 1
+  printf '%s\n' "$id"
+}
+
+# The marker is written atomically: an empty mode-0600 temp file beside it,
+# renamed into place. A symlink or directory in its place is refused.
+control_plane_bluegreen_marker_write() {
+  local tmp
+  [[ ! -L "$CONTROL_PLANE_CUTOVER_MARKER" && ! -d "$CONTROL_PLANE_CUTOVER_MARKER" ]] || return 1
+  tmp="$(umask 077 && mktemp "${CONTROL_PLANE_CUTOVER_MARKER}.XXXXXX")" || return 1
+  if ! mv -f -- "$tmp" "$CONTROL_PLANE_CUTOVER_MARKER"; then
+    rm -f -- "$tmp"
+    return 1
+  fi
+}
+
+control_plane_bluegreen_marker_clear() {
+  rm -f -- "$CONTROL_PLANE_CUTOVER_MARKER"
+}
+
+# control_plane_bluegreen_fail <name> <what serves now>: the named error, one
+# plain line, exit 1.
+control_plane_bluegreen_fail() {
+  echo "control-plane-bluegreen: $1" >&2
+  echo "$2; run 'rebuild control-plane' to recover." >&2
+  exit 1
+}
+
+# Before any flip: remove green, clear the marker, fail with <name>.
+control_plane_bluegreen_abandon() {
+  if control_plane_bluegreen_reap_green && control_plane_bluegreen_marker_clear; then
+    control_plane_bluegreen_fail "$1" 'the previous control-plane still serves on 8080 and green was removed'
+  fi
+  control_plane_bluegreen_fail "$1" 'the previous control-plane still serves on 8080; green could not be removed and the cutover marker was kept'
+}
+
+control_plane_bluegreen_not_taken() {
+  echo "rebuild: blue-green cutover not taken ($1); taking the drained path"
+}
+
+control_plane_bluegreen_restore_traps() {
+  trap - HUP INT TERM
+  eval "$1"
+}
+
+# The blue-green round trip of `rebuild control-plane`, run after the build:
+# start the new image as green beside home, move nginx to green, stop home,
+# restart home on the new image, move nginx back and remove green. Home is
+# stopped only once green serves. Returns 0 when the round trip is done (the
+# caller skips the drained path), and 10 when the caller must take the drained
+# path with nothing changed. Anything else prints a named error and exits 1.
+# Each flip and the stop that follows it run with HUP, INT and TERM ignored:
+# an interrupt there would leave nginx on one colour with both running.
+control_plane_bluegreen_cutover() {
+  local port built green running line member=0 traps
+  local green_serves='green serves on 8081, home is not serving and the cutover marker was kept'
+  if ! port="$(control_plane_bluegreen_live_port)"; then
+    control_plane_bluegreen_not_taken 'the live nginx upstream cannot be read'
+    return 10
+  fi
+  # Until recovery exists, a live 8081 is an interrupted earlier cutover.
+  [[ "$port" == 8080 ]] || control_plane_bluegreen_fail recovery-ambiguous \
+    'nginx routes the control plane to 8081 and nothing was changed'
+  if ! control_plane_bluegreen_schema_current; then
+    control_plane_bluegreen_not_taken 'the new image does not report the schema current'
+    return 10
+  fi
+  privacy_defaults_refuse_foreign_control_plane || exit 1
+  if ! built="$(control_plane_bluegreen_built_image)"; then
+    control_plane_bluegreen_not_taken 'the built control-plane image cannot be resolved'
+    return 10
+  fi
+  if ! control_plane_bluegreen_marker_write; then
+    control_plane_bluegreen_not_taken 'the cutover marker cannot be written'
+    return 10
+  fi
+  # A leftover green from an earlier run; nginx is on 8080.
+  if ! control_plane_bluegreen_reap_green; then
+    control_plane_bluegreen_marker_clear
+    control_plane_bluegreen_not_taken 'a leftover standby cannot be removed'
+    return 10
+  fi
+
+  green="$(control_plane_bluegreen_start_green)" || control_plane_bluegreen_abandon standby-not-ready
+  running="$(cd "$DEPLOY_DIR" && $COMPOSE_CMD ps --status running -q -- control-plane)" || running=''
+  while IFS= read -r line; do
+    [[ "$line" == "$green" ]] && member=1
+  done <<<"$running"
+  if (( !member )); then
+    if ! { control_plane_bluegreen_reap_green && control_plane_bluegreen_marker_clear; }; then
+      control_plane_bluegreen_fail standby-not-ready \
+        'the previous control-plane still serves on 8080; green could not be removed and the cutover marker was kept'
+    fi
+    control_plane_bluegreen_not_taken 'the standby is not running in this Compose project'
+    return 10
+  fi
+  [[ "$(docker inspect --format '{{.Image}}' "$green")" == "$built" ]] \
+    || control_plane_bluegreen_abandon standby-image-mismatch
+  activity_history_wait_control_plane 'http://127.0.0.1:8081/readyz' \
+    || control_plane_bluegreen_abandon standby-not-ready
+
+  traps="$(trap -p HUP INT TERM)"
+  trap '' HUP INT TERM
+  if ! control_plane_bluegreen_flip 8081; then
+    control_plane_bluegreen_restore_traps "$traps"
+    control_plane_bluegreen_abandon flip-failed
+  fi
+  if ! activity_history_stop_control_plane; then
+    control_plane_bluegreen_restore_traps "$traps"
+    control_plane_bluegreen_fail old-colour-stop-failed \
+      'green serves on 8081, the previous control-plane may still run and the cutover marker was kept'
+  fi
+  control_plane_bluegreen_restore_traps "$traps"
+
+  control_plane_bluegreen_schema_current || control_plane_bluegreen_fail home-not-ready "$green_serves"
+  (cd "$DEPLOY_DIR" && managed_compose_mutate up -d --no-build --no-deps --wait --wait-timeout 180 control-plane) \
+    || control_plane_bluegreen_fail home-not-ready "$green_serves"
+  activity_history_wait_control_plane 'http://127.0.0.1:8080/readyz' \
+    || control_plane_bluegreen_fail home-not-ready "$green_serves"
+
+  trap '' HUP INT TERM
+  if ! control_plane_bluegreen_flip 8080; then
+    control_plane_bluegreen_restore_traps "$traps"
+    control_plane_bluegreen_fail flip-failed 'green still serves on 8081 and the cutover marker was kept'
+  fi
+  if ! control_plane_bluegreen_reap_green; then
+    control_plane_bluegreen_restore_traps "$traps"
+    control_plane_bluegreen_fail old-colour-stop-failed \
+      'home serves on 8080, green could not be removed and the cutover marker was kept'
+  fi
+  control_plane_bluegreen_restore_traps "$traps"
+  control_plane_bluegreen_marker_clear || control_plane_bluegreen_fail cutover-incomplete \
+    'home serves on 8080 and green was removed, but the cutover marker could not be removed'
 }
 
 # Unscoped rebuild (#3524). Every service, ordered so the paired voice handoff
@@ -6579,16 +6770,34 @@ else:
     # only when WaitTimeout > 0, so a bare --wait blocks forever and would hang
     # the deploy's SSH session with the stack in an indeterminate state.
     echo "Scope: ${REBUILD_SCOPE[*]} (--no-deps --wait)"
+    # Build while the previous control-plane is still serving. A slow or
+    # failed image build must not extend the migration drain or leave it down.
+    # Two paths follow the build. With the control-plane blue-green rail on and
+    # the scope exactly control-plane, the cutover starts the new image as green
+    # beside home, moves nginx to it, restarts home on the new image and moves
+    # nginx back; it returns 0 when that round trip is done. It returns 10, with
+    # nothing changed, when the schema is not provably current or a
+    # precondition fails, and every other scope or the rail off never runs it.
+    # Then home is drained as before: stopped, so its startup migrations never
+    # run beside an older binary, and started on the new image.
+    _cutover_done=0
     if [[ $_has_control_plane -eq 1 ]]; then
-      # Build while the previous control-plane is still serving. A slow or
-      # failed image build must not extend the migration drain or leave it down.
       managed_compose_build build "${REBUILD_SCOPE[@]}" || exit 1
+      if (( CONTROL_PLANE_BLUEGREEN )) && [[ $_rebuild_scoped -eq 1 && ${#REBUILD_SCOPE[@]} -eq 1 \
+         && "${REBUILD_SCOPE[0]}" == control-plane ]]; then
+        _cutover_rc=0
+        control_plane_bluegreen_cutover || _cutover_rc=$?
+        [[ $_cutover_rc -eq 0 || $_cutover_rc -eq 10 ]] || exit 1
+        [[ $_cutover_rc -ne 0 ]] || _cutover_done=1
+      fi
+    fi
+    if [[ $_has_control_plane -eq 1 && $_cutover_done -eq 0 ]]; then
       echo "rebuild: draining the previous control-plane before its startup migrations"
       privacy_defaults_refuse_foreign_control_plane || exit 1
       activity_history_stop_control_plane || exit 1
       privacy_defaults_require_local_control_plane_drained || exit 1
       cd "$DEPLOY_DIR" && managed_compose_mutate up -d --no-build --no-deps --wait --wait-timeout 180 "${REBUILD_SCOPE[@]}"
-    else
+    elif [[ $_has_control_plane -eq 0 ]]; then
       managed_compose_build up -d --build --no-deps --wait --wait-timeout 180 "${REBUILD_SCOPE[@]}"
     fi
     selfhost_post_up_check || exit 1
@@ -7547,7 +7756,14 @@ else:
     # file targets 127.0.0.1, never `localhost`: the self-host overlay binds 8080
     # and 3000 to 127.0.0.1 only, so [::1] is free for any local user to answer a
     # `localhost` probe (curl tries it first) and fake readiness (#3538).
-    CP_PROBE_BASE="http://127.0.0.1:8080"
+    # With the control-plane blue-green rail on, the port is the live vhost's
+    # (8080 or 8081); a vhost that cannot be read fails the gate.
+    CP_PROBE_PORT=8080
+    if (( CONTROL_PLANE_BLUEGREEN )) && ! CP_PROBE_PORT="$(control_plane_bluegreen_live_port)"; then
+      echo 'control-plane-bluegreen: live-upstream-unparseable' >&2
+      exit 1
+    fi
+    CP_PROBE_BASE="http://127.0.0.1:${CP_PROBE_PORT}"
     COTURN_PROBE_HOST="${stage_private_address:-127.0.0.1}"
     egress_mode="$(managed_egress_mode)" || exit 1
     cp_ok=0; mp_ok=0; coturn_ok=0; tls_ok=0; egress_ok=1

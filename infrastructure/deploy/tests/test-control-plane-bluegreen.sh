@@ -127,6 +127,22 @@ if [[ -f "$TMP/rules.err.\$tool" ]]; then
     case "\$argv" in \$pat) printf '%b' "\$text" >&2; break ;; esac
   done <"$TMP/rules.err.\$tool"
 fi
+if [[ -f "$TMP/rules.reply.\$tool" ]]; then
+  n=0
+  while IFS='|' read -r pat code once text; do
+    n=\$((n + 1))
+    # shellcheck disable=SC2254
+    case "\$argv" in
+      \$pat)
+        if [[ "\$once" == 1 ]]; then
+          awk -v n="\$n" 'NR != n' "$TMP/rules.reply.\$tool" >"$TMP/rules.reply.\$tool.new"
+          mv "$TMP/rules.reply.\$tool.new" "$TMP/rules.reply.\$tool"
+        fi
+        printf '%b' "\$text"
+        exit "\$code" ;;
+    esac
+  done <"$TMP/rules.reply.\$tool"
+fi
 if [[ -f "$TMP/rules.exit.\$tool" ]]; then
   while IFS='|' read -r pat code; do
     # shellcheck disable=SC2254
@@ -151,6 +167,10 @@ stub_exit() { printf '%s|%s\n' "$2" "$3" >>"$TMP/rules.exit.$1"; }
 stub_out() { printf '%s|%s\n' "$2" "$3" >>"$TMP/rules.out.$1"; }
 # stub_err <tool> <glob-pattern-on-argv> <stderr-text>: printed before any exit rule.
 stub_err() { printf '%s|%s\n' "$2" "$3" >>"$TMP/rules.err.$1"; }
+# stub_reply <tool> <glob-pattern-on-argv> <code> <stdout-text> [once]: stdout
+# and exit code together, checked before the exit and out rules (first match
+# wins). With `once` the rule is consumed by its first match.
+stub_reply() { printf '%s|%s|%s|%s\n' "$2" "$3" "$([[ "${5:-}" == once ]] && echo 1 || echo 0)" "$4" >>"$TMP/rules.reply.$1"; }
 # transcript: ordered argv log of every stub call, fixture root shown as <P>
 transcript() { sed "s#$PROJECT/infrastructure/deploy/../..#<P>#g" "$TMP/calls"; }
 
@@ -160,7 +180,7 @@ COMPOSE_MODEL='{"services":{"control-plane":{"image":"cp:fixture","depends_on":{
 # container, and a NATS container with no published host ports.
 reset_stubs() {
   : >"$TMP/calls"
-  rm -f "$TMP"/rules.exit.* "$TMP"/rules.out.* "$TMP"/rules.err.*
+  rm -f "$TMP"/rules.exit.* "$TMP"/rules.out.* "$TMP"/rules.err.* "$TMP"/rules.reply.*
   stub_out docker '*config --format json*' "$COMPOSE_MODEL\\n"
   stub_out docker '*ps --status running -q -- control-plane*' 'c0ffee000001\n'
   stub_out docker '*ps -q nats' 'ab12ab12ab12\n'
@@ -1141,6 +1161,498 @@ stop_without_marker_unchanged() {
   fi
 }
 
+# ---------------------------------------------------------------------------
+# Control-plane cutover: `rebuild control-plane` with the rail on. Rewrite 8
+# replaces the cutover's one nested nginx-reload line with the ctlflip stub
+# (under the stubs a real nested nginx-reload stops at the managed identity
+# admission). ctlflip logs "ctlflip <port>" and rewrites the fixture live vhost
+# to that port.
+CUT_CTL="$RAIL_PROJECT/infrastructure/deploy/concord-ctl-cutover.sh"
+LIVE_VHOST="$TMP/live/concordvoice"
+GREEN_ID="$(printf 'fe%.0s' {1..32})"
+BUILT_ID="sha256:$(printf 'b1%.0s' {1..32})"
+OTHER_ID="sha256:$(printf 'a0%.0s' {1..32})"
+src="$(cat "$RAIL_CTL")"
+# shellcheck disable=SC2016
+fixture_rewrite '  "$0" "$CONTROL_PLANE_FLIP_REENTRY_MARKER" nginx-reload --control-plane-upstream "$1"' \
+  '  ctlflip "$1"'
+printf '%s\n' "$src" >"$CUT_CTL"
+chmod +x "$CUT_CTL"
+# ctlflip <port>: with $TMP/ctlflip.sleep.<port> (seconds) it records
+# $TMP/ctlflip.started and sleeps first; with $TMP/ctlflip.fail.<port> it
+# exits 1 and leaves the vhost alone.
+cat >"$STUBS/ctlflip" <<STUB
+#!/usr/bin/env bash
+printf 'ctlflip %s\n' "\$*" >>"$TMP/calls"
+if [[ -f "$TMP/ctlflip.sleep.\$1" ]]; then
+  : >"$TMP/ctlflip.started"
+  sleep "\$(cat "$TMP/ctlflip.sleep.\$1")"
+fi
+[[ ! -e "$TMP/ctlflip.fail.\$1" ]] || exit 1
+mkdir -p "$TMP/live"
+awk -v port="\$1" '\$0 == "    server 127.0.0.1:8080;" { \$0 = "    server 127.0.0.1:" port ";" } { print }' \
+  "$VHOST_SRC" >"$LIVE_VHOST"
+STUB
+chmod +x "$STUBS/ctlflip"
+
+C="$T0_COMPOSE"
+STATUS_PAT='*run --rm --no-deps --pull never control-plane ./main migrations status'
+STATUS_RUN="$C run --rm --no-deps --pull never control-plane ./main migrations status"
+GREEN_RUN="$C run --detach --no-deps --pull never --use-aliases --name $GREEN -p 127.0.0.1:8081:8080 -e MIGRATIONS_MODE=verify -e OPS_METRICS_ENABLED=false control-plane"
+CP_PS="$C ps --status running -q -- control-plane"
+DAEMON_PS='docker ps --filter label=com.docker.compose.service=control-plane --format {{.ID}}'
+HOME_STOP="$C stop --timeout 45 control-plane"
+HOME_UP="$C up -d --no-build --no-deps --wait --wait-timeout 180 control-plane"
+GREEN_STOP="docker stop -t 45 $GREEN"
+GREEN_RM="docker rm -f $GREEN"
+GREEN_REAP="$GREEN_STOP"$'\n'"$GREEN_RM"
+# The T0 golden through the build: what precedes the hook.
+CUT_PREFIX="$(cat <<GOLDEN
+$C config --format json
+docker ps --all --quiet --no-trunc --filter label=com.docker.compose.service=media-plane
+$C config --format json
+$C config --format json
+$CP_PS
+$C config --format json
+$C config --format json
+$C up -d --no-deps --no-build --pull missing --wait --wait-timeout 180 nats
+$C ps -q nats
+docker inspect --format {{json .HostConfig.PortBindings}}|{{.HostConfig.PublishAllPorts}} ab12ab12ab12
+$C build control-plane
+GOLDEN
+)"
+CUT_HAPPY="$(cat <<GOLDEN
+$CUT_PREFIX
+$STATUS_RUN
+$DAEMON_PS
+$CP_PS
+$C config --format json
+docker image inspect --format {{.Id}} cp:fixture
+$GREEN_REAP
+$GREEN_RUN
+$CP_PS
+docker inspect --format {{.Image}} $GREEN_ID
+curl --connect-timeout 1 --max-time 1 -sf http://127.0.0.1:8081/readyz
+ctlflip 8081
+$HOME_STOP
+$STATUS_RUN
+$HOME_UP
+curl --connect-timeout 1 --max-time 1 -sf http://127.0.0.1:8080/readyz
+ctlflip 8080
+$GREEN_REAP
+GOLDEN
+)"
+# The four drained calls after the build, in their original order.
+DRAINED_TAIL="$(printf '%s\n' "$DAEMON_PS" "$CP_PS" "$HOME_STOP" "$DAEMON_PS" "$HOME_UP")"
+
+# cut_prepare: clean stubs, marker, live vhost and ctlflip controls. Case rules
+# go after it; run_cut_at then appends the healthy cutover defaults, which the
+# case rules override (first match wins).
+cut_prepare() {
+  reset_stubs
+  rm -f "$RAIL_MARKER" "$LIVE_VHOST" "$TMP"/ctlflip.*
+}
+cut_defaults() {
+  stub_reply docker "$STATUS_PAT" 0 'current 12\n'
+  stub_reply docker '*run --detach --no-deps *' 0 "$GREEN_ID\\n"
+  stub_reply docker '*ps --status running -q -- control-plane' 0 "c0ffee000001\\n$GREEN_ID\\n"
+  stub_out docker 'image inspect --format {{.Id}} cp:fixture' "$BUILT_ID\\n"
+  stub_out docker "inspect --format {{.Image}} $GREEN_ID" "$BUILT_ID\\n"
+}
+# run_cut_at <ctl> <args...>: run_ctl_at with the cutover defaults and a short
+# health wait (2s, probing every second).
+run_cut_at() {
+  local ctl="$1"
+  shift
+  cut_defaults
+  rc=0
+  PATH="$STUBS:$PATH" COMPOSE_OVERRIDE=docker-compose.production.yml \
+    ACTIVITY_HISTORY_HEALTH_TIMEOUT=2 ACTIVITY_HISTORY_HEALTH_INTERVAL=1 \
+    bash "$ctl" "$@" >"$TMP/out" 2>&1 </dev/null || rc=$?
+}
+has_call() { grep -qFx -- "$1" <<<"$(rail_transcript)"; }
+ncalls() { grep -cFx -- "$1" <<<"$(rail_transcript)" || true; }
+last_calls() { rail_transcript | tail -n "$1"; }
+# lines_after <line> <n>: the <n> calls after the first <line>.
+lines_after() {
+  rail_transcript | awk -v l="$1" -v n="$2" 'hit && n-- > 0 { print } !hit && $0 == l { hit = 1 }'
+}
+# drained_ok [allow-green]: exit 0 with Done., the build, the drained calls as
+# the last calls, no marker, no flip; without allow-green also no green start
+# and no call naming green.
+drained_ok() {
+  local t
+  t="$(rail_transcript)"
+  [[ $rc -eq 0 && "$(tail -n 5 <<<"$t")" == "$DRAINED_TAIL" && ! -e "$RAIL_MARKER" ]] && saw 'Done.' \
+    && grep -qFx -- "$C build control-plane" <<<"$t" && ! grep -q '^ctlflip ' <<<"$t" \
+    && { [[ "${1:-}" == allow-green ]] || ! grep -qF -e ' run --detach ' -e "$GREEN" <<<"$t"; }
+}
+# named_error <name>: exit 1, the named line, then a line that names the
+# recovery command.
+named_error() {
+  local next
+  next="$(awk -v l="control-plane-bluegreen: $1" 'hit { print; exit } $0 == l { hit = 1 }' "$TMP/out")"
+  [[ $rc -eq 1 && "$next" == *'rebuild control-plane'* ]]
+}
+cut_report() {
+  if [[ "$2" == ok ]]; then pass "$1"; else fail "$1 rc=$rc: $(brief_out)"; last_calls 6 >&2; fi
+}
+
+cutover_happy_transcript() {
+  need_flock cutover_happy_transcript || return 0
+  cut_prepare
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  rail_transcript >"$TMP/happy.calls"
+  # Mutation that turns this red: drop any step, or reorder two (for example
+  # inspect green's image after the readiness gate).
+  if [[ $rc -eq 0 && "$(cat "$TMP/happy.calls")" == "$CUT_HAPPY" && ! -e "$RAIL_MARKER" ]] && saw 'Done.' \
+     && grep -qFx '    server 127.0.0.1:8080;' "$LIVE_VHOST"; then
+    pass "cutover_happy_transcript"
+  else
+    fail "cutover_happy_transcript rc=$rc marker=$([[ -e "$RAIL_MARKER" ]] && echo kept || echo absent): $(brief_out)"
+    diff <(printf '%s\n' "$CUT_HAPPY") "$TMP/happy.calls" >&2 || true
+  fi
+}
+
+cutover_gates_on_readyz_not_health() {
+  need_flock cutover_gates_on_readyz_not_health || return 0
+  local probes
+  cut_prepare
+  stub_exit curl '*/health' 22
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  probes="$(rail_transcript | awk '/^curl / { printf "%s ", $NF }')"
+  # Mutation that turns this red: call activity_history_wait_control_plane
+  # without its URL at either gate (the /health default fails here).
+  if [[ $rc -eq 0 && "$probes" == 'http://127.0.0.1:8081/readyz http://127.0.0.1:8080/readyz ' ]]; then
+    pass "cutover_gates_on_readyz_not_health"
+  else
+    fail "cutover_gates_on_readyz_not_health rc=$rc probes=[$probes]: $(brief_out)"
+  fi
+}
+
+# Rail off and rail on make the same calls and print the same output for any
+# scope other than exactly control-plane.
+cutover_only_for_exact_scope() {
+  need_flock cutover_only_for_exact_scope || return 0
+  local spec bad='' off_rc off_t off_o
+  local -a v
+  for spec in 'control-plane nats' 'control-plane media-plane'; do
+    read -r -a v <<<"$spec"
+    cut_prepare
+    stub_out docker '*ps --status running -q -- nats' 'ab12ab12ab12\n'
+    run_cut_at "$CTL" rebuild "${v[@]}"
+    off_rc=$rc off_t="$(rail_transcript)" off_o="$(rail_out)"
+    cut_prepare
+    stub_out docker '*ps --status running -q -- nats' 'ab12ab12ab12\n'
+    run_cut_at "$CUT_CTL" rebuild "${v[@]}"
+    [[ $rc -eq $off_rc && -n "$off_t" && "$(rail_transcript)" == "$off_t" && "$(rail_out)" == "$off_o" ]] \
+      && ! grep -qF -e ' run --detach ' -e 'migrations status' -e ctlflip <<<"$off_t" \
+      || bad+=" [$spec off-rc=$off_rc on-rc=$rc]"
+  done
+  # Mutation that turns this red: test _has_control_plane instead of the exact
+  # scope in the hook (the control-plane nats run then cuts over).
+  if [[ -z "$bad" ]]; then pass "cutover_only_for_exact_scope"; else fail "cutover_only_for_exact_scope:$bad"; fi
+}
+
+cutover_not_run_with_rail_off() {
+  local got
+  got="$( (char_rebuild_control_plane_transcript) 2>&1)"
+  # Mutation that turns this red: drop the CONTROL_PLANE_BLUEGREEN test from
+  # the hook.
+  if [[ "$got" == 'PASS: char_rebuild_control_plane_transcript' ]] \
+     && ! grep -qF -e 'migrations status' -e ' run --detach ' -e "$GREEN" "$TMP/calls"; then
+    pass "cutover_not_run_with_rail_off"
+  else
+    fail "cutover_not_run_with_rail_off: $(tr '\n' ';' <<<"$got")"
+  fi
+}
+
+# gate_status <case> (<code> <stdout>)...: each status answer takes the
+# drained path with nothing started.
+gate_status() {
+  local name="$1" bad=''
+  need_flock "$name" || return 0
+  shift
+  while (( $# >= 2 )); do
+    cut_prepare
+    stub_reply docker "$STATUS_PAT" "$1" "$2"
+    run_cut_at "$CUT_CTL" rebuild control-plane
+    drained_ok || bad+=" [$1:$2 rc=$rc: $(brief_out)]"
+    shift 2
+  done
+  if [[ -z "$bad" ]]; then pass "$name"; else fail "$name:$bad"; fi
+}
+gate_cases() {
+  # Mutation: match the status line with `^current( [0-9]+)?$`.
+  gate_status gate_status_bare_current 0 'current\n'
+  # Mutation: test only the first line of the status output.
+  gate_status gate_status_extra_line 0 'current 12\nextra\n'
+  # Mutation (second answer): ignore the status run's exit code.
+  gate_status gate_status_exit_3 3 'pending 11 12\n' 3 'current 12\n'
+  gate_status gate_status_exit_64 64 '' 64 'current 12\n'
+  gate_status gate_status_exit_1 1 '' 1 'current 12\n'
+}
+
+gate_live_port_unparseable() {
+  need_flock gate_live_port_unparseable || return 0
+  cut_prepare
+  mkdir -p "$TMP/live"
+  printf 'not an nginx vhost\n' >"$LIVE_VHOST"
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: read an unparseable live vhost as 8080.
+  if drained_ok && ! has_call "$STATUS_RUN"; then cut_report gate_live_port_unparseable ok; else cut_report gate_live_port_unparseable bad; fi
+}
+
+gate_marker_write_failure() {
+  need_flock gate_marker_write_failure || return 0
+  local dir="$RAIL_PROJECT/infrastructure/deploy" left
+  # Root writes into a mode-555 directory, so this cannot be simulated as root.
+  if [[ "$(id -u)" == 0 ]]; then
+    printf 'SKIP: gate_marker_write_failure (running as root; a read-only directory cannot be simulated)\n'
+    return 0
+  fi
+  cut_prepare
+  chmod a-w "$dir"
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  chmod u+w "$dir"
+  left="$(find "$dir" -name '.control-plane-cutover.local*' | wc -l | tr -d ' ')"
+  # Mutation that turns this red: ignore the marker write's status.
+  if drained_ok && [[ "$left" == 0 ]]; then cut_report gate_marker_write_failure ok; else cut_report gate_marker_write_failure bad; fi
+}
+
+gate_green_missing_from_compose_ps() {
+  need_flock gate_green_missing_from_compose_ps || return 0
+  cut_prepare
+  stub_reply docker '*ps --status running -q -- control-plane' 0 'c0ffee000001\n'
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: skip the membership check (green's image is
+  # inspected and the cutover goes on).
+  if drained_ok allow-green && [[ "$(lines_after "$GREEN_RUN" 3)" == "$CP_PS"$'\n'"$GREEN_REAP" ]] \
+     && ! grep -qF 'inspect --format {{.Image}}' <<<"$(rail_transcript)"; then
+    cut_report gate_green_missing_from_compose_ps ok
+  else
+    cut_report gate_green_missing_from_compose_ps bad
+  fi
+}
+
+stop_follows_flip_leg1() {
+  need_flock stop_follows_flip_leg1 || return 0
+  local next
+  next="$(awk '$0 == "ctlflip 8081" { getline; print; exit }' "$TMP/happy.calls" 2>/dev/null || true)"
+  # Mutation that turns this red: make any call between the 8081 flip and the
+  # home stop (for example the status re-check first).
+  if [[ "$next" == "$HOME_STOP" ]]; then pass "stop_follows_flip_leg1"; else fail "stop_follows_flip_leg1 next=[$next]"; fi
+}
+
+reap_follows_flip_leg2() {
+  need_flock reap_follows_flip_leg2 || return 0
+  local next
+  next="$(awk '$0 == "ctlflip 8080" { getline; print; exit }' "$TMP/happy.calls" 2>/dev/null || true)"
+  # Mutation that turns this red: make any call between the 8080 flip and the
+  # green stop.
+  if [[ "$next" == "$GREEN_STOP" ]]; then pass "reap_follows_flip_leg2"; else fail "reap_follows_flip_leg2 next=[$next]"; fi
+}
+
+# The controller runs as its own process-group leader with SIGINT at its
+# default (a background job would start with it ignored); the whole group gets
+# the INT while the first flip sleeps, as a terminal Ctrl-C would deliver it.
+int_during_flip_still_stops() {
+  need_flock int_during_flip_still_stops || return 0
+  local pid i started=0
+  cut_prepare
+  printf '3\n' >"$TMP/ctlflip.sleep.8081"
+  cut_defaults
+  rc=0
+  # shellcheck disable=SC2016
+  PATH="$STUBS:$PATH" COMPOSE_OVERRIDE=docker-compose.production.yml \
+    ACTIVITY_HISTORY_HEALTH_TIMEOUT=2 ACTIVITY_HISTORY_HEALTH_INTERVAL=1 \
+    python3 -c 'import os, signal, sys
+os.setpgid(0, 0)
+signal.signal(signal.SIGINT, signal.SIG_DFL)
+os.execvp(sys.argv[1], sys.argv[1:])' bash "$CUT_CTL" rebuild control-plane >"$TMP/out" 2>&1 </dev/null &
+  pid=$!
+  for ((i = 0; i < 200; i++)); do
+    if [[ -e "$TMP/ctlflip.started" ]]; then started=1; break; fi
+    sleep 0.1
+  done
+  if (( started )); then kill -INT -- "-$pid" 2>/dev/null || true; fi
+  wait "$pid" || rc=$?
+  # Mutation that turns this red: drop the `trap '' HUP INT TERM` before the
+  # first flip (the INT kills the flip and the controller before the stop).
+  if (( started )) && [[ $rc -eq 0 && "$(lines_after 'ctlflip 8081' 1)" == "$HOME_STOP" ]] && saw 'Done.'; then
+    pass "int_during_flip_still_stops"
+  else
+    fail "int_during_flip_still_stops started=$started rc=$rc: $(brief_out)"
+  fi
+}
+
+err_standby_start_failed() {
+  need_flock err_standby_start_failed || return 0
+  cut_prepare
+  stub_reply docker '*run --detach --no-deps *' 1 ''
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: take the drained path (return 10) when the
+  # green start fails.
+  if named_error standby-not-ready && [[ ! -e "$RAIL_MARKER" && "$(last_calls 2)" == "$GREEN_REAP" ]] \
+     && ! has_call "$HOME_STOP" && ! has_call 'ctlflip 8081'; then
+    cut_report err_standby_start_failed ok
+  else
+    cut_report err_standby_start_failed bad
+  fi
+}
+
+err_standby_image_mismatch() {
+  need_flock err_standby_image_mismatch || return 0
+  cut_prepare
+  stub_out docker "inspect --format {{.Image}} $GREEN_ID" "$OTHER_ID\\n"
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: drop the image comparison.
+  if named_error standby-image-mismatch && [[ ! -e "$RAIL_MARKER" && "$(last_calls 2)" == "$GREEN_REAP" ]] \
+     && ! grep -q '^curl ' <<<"$(rail_transcript)" && ! has_call 'ctlflip 8081'; then
+    cut_report err_standby_image_mismatch ok
+  else
+    cut_report err_standby_image_mismatch bad
+  fi
+}
+
+err_standby_not_ready() {
+  need_flock err_standby_not_ready || return 0
+  cut_prepare
+  stub_exit curl '*8081/readyz' 22
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: ignore the 8081 readiness gate's status.
+  if named_error standby-not-ready && [[ ! -e "$RAIL_MARKER" && "$(last_calls 2)" == "$GREEN_REAP" ]] \
+     && ! has_call "$HOME_STOP" && ! grep -q '^ctlflip ' <<<"$(rail_transcript)"; then
+    cut_report err_standby_not_ready ok
+  else
+    cut_report err_standby_not_ready bad
+  fi
+}
+
+err_flip_failed_leg1() {
+  need_flock err_flip_failed_leg1 || return 0
+  cut_prepare
+  : >"$TMP/ctlflip.fail.8081"
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: keep the marker (or skip the reap) after a
+  # failed first flip.
+  if named_error flip-failed && [[ ! -e "$RAIL_MARKER" && "$(lines_after 'ctlflip 8081' 3)" == "$GREEN_REAP" ]] \
+     && ! has_call "$HOME_STOP"; then
+    cut_report err_flip_failed_leg1 ok
+  else
+    cut_report err_flip_failed_leg1 bad
+  fi
+}
+
+err_old_colour_stop_failed() {
+  need_flock err_old_colour_stop_failed || return 0
+  cut_prepare
+  stub_exit docker '*stop --timeout 45 control-plane' 1
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: clear the marker when the home stop fails.
+  if named_error old-colour-stop-failed && [[ -e "$RAIL_MARKER" && "$(last_calls 1)" == "$HOME_STOP" ]] \
+     && [[ $(ncalls "$STATUS_RUN") -eq 1 ]]; then
+    cut_report err_old_colour_stop_failed ok
+  else
+    cut_report err_old_colour_stop_failed bad
+  fi
+  rm -f "$RAIL_MARKER"
+}
+
+# home_not_ready_ok <last-call>: home-not-ready, marker kept, green stopped only
+# by the leftover reap, no flip back, and <last-call> was the last call.
+home_not_ready_ok() {
+  named_error home-not-ready && [[ -e "$RAIL_MARKER" && "$(last_calls 1)" == "$1" ]] \
+    && [[ $(ncalls "$GREEN_STOP") -eq 1 ]] && ! has_call 'ctlflip 8080'
+}
+err_home_not_ready_status_changed() {
+  need_flock err_home_not_ready_status_changed || return 0
+  cut_prepare
+  stub_reply docker "$STATUS_PAT" 0 'current 12\n' once
+  stub_reply docker "$STATUS_PAT" 3 'pending 12 13\n'
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: drop the status re-check before home starts.
+  if home_not_ready_ok "$STATUS_RUN" && ! has_call "$HOME_UP"; then
+    cut_report err_home_not_ready_status_changed ok
+  else
+    cut_report err_home_not_ready_status_changed bad
+  fi
+  rm -f "$RAIL_MARKER"
+}
+err_home_not_ready_up_failed() {
+  need_flock err_home_not_ready_up_failed || return 0
+  cut_prepare
+  stub_exit docker '*up -d --no-build --no-deps --wait --wait-timeout 180 control-plane' 1
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: ignore the home start's status.
+  if home_not_ready_ok "$HOME_UP"; then cut_report err_home_not_ready_up_failed ok; else cut_report err_home_not_ready_up_failed bad; fi
+  rm -f "$RAIL_MARKER"
+}
+err_home_not_ready_readyz() {
+  need_flock err_home_not_ready_readyz || return 0
+  cut_prepare
+  stub_exit curl '*8080/readyz' 22
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: ignore the 8080 readiness gate's status.
+  if home_not_ready_ok 'curl --connect-timeout 1 --max-time 1 -sf http://127.0.0.1:8080/readyz'; then
+    cut_report err_home_not_ready_readyz ok
+  else
+    cut_report err_home_not_ready_readyz bad
+  fi
+  rm -f "$RAIL_MARKER"
+}
+
+err_flip_failed_leg2() {
+  need_flock err_flip_failed_leg2 || return 0
+  cut_prepare
+  : >"$TMP/ctlflip.fail.8080"
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: reap green (or clear the marker) after a
+  # failed flip back.
+  if named_error flip-failed && [[ -e "$RAIL_MARKER" && "$(last_calls 1)" == 'ctlflip 8080' ]] \
+     && [[ $(ncalls "$GREEN_STOP") -eq 1 ]]; then
+    cut_report err_flip_failed_leg2 ok
+  else
+    cut_report err_flip_failed_leg2 bad
+  fi
+  rm -f "$RAIL_MARKER"
+}
+
+wait_healthy_rail_on_uses_live_port() {
+  need_flock wait_healthy_rail_on_uses_live_port || return 0
+  local probes bad
+  cut_prepare
+  mkdir -p "$TMP/live"
+  awk -v port=8081 "$AWK_CP_SERVER_TO" "$VHOST_SRC" >"$LIVE_VHOST"
+  run_cut_at "$RAIL_CTL" wait-healthy --timeout 4
+  probes="$(grep -c '^curl -sf http://127\.0\.0\.1:8081/[a-z]*$' "$TMP/calls" || true)"
+  bad="$(grep '^curl ' "$TMP/calls" | grep -v 'http://127\.0\.0\.1:3000/' \
+    | grep -cv '^curl -sf http://127\.0\.0\.1:8081/[a-z]*$' || true)"
+  rm -f "$LIVE_VHOST"
+  # Mutation that turns this red: drop the rail branch before CP_PROBE_BASE.
+  if [[ $rc -eq 0 && "$probes" -ge 1 && "$bad" -eq 0 ]]; then
+    pass "wait_healthy_rail_on_uses_live_port"
+  else
+    fail "wait_healthy_rail_on_uses_live_port rc=$rc probes=$probes offending=$bad: $(brief_out)"
+  fi
+}
+
+wait_healthy_rail_on_unparseable_exits_1() {
+  need_flock wait_healthy_rail_on_unparseable_exits_1 || return 0
+  cut_prepare
+  mkdir -p "$TMP/live"
+  printf 'not an nginx vhost\n' >"$LIVE_VHOST"
+  run_cut_at "$RAIL_CTL" wait-healthy --timeout 4
+  rm -f "$LIVE_VHOST"
+  # Mutation that turns this red: fall back to 8080 when the live vhost cannot
+  # be read.
+  if [[ $rc -eq 1 ]] && saw 'control-plane-bluegreen: live-upstream-unparseable' && ! grep -q '^curl ' "$TMP/calls"; then
+    pass "wait_healthy_rail_on_unparseable_exits_1"
+  else
+    fail "wait_healthy_rail_on_unparseable_exits_1 rc=$rc: $(brief_out)"
+  fi
+}
+
 char_rebuild_control_plane_transcript
 char_wait_healthy_curl_argv
 char_nginx_render_hash
@@ -1180,4 +1692,26 @@ marker_rail_on_refuses_restart
 marker_rail_on_allows_nginx_reload_and_stop
 stop_with_marker_reaps_green_and_keeps_marker
 stop_without_marker_unchanged
+cutover_happy_transcript
+cutover_gates_on_readyz_not_health
+cutover_only_for_exact_scope
+cutover_not_run_with_rail_off
+gate_cases
+gate_live_port_unparseable
+gate_marker_write_failure
+gate_green_missing_from_compose_ps
+stop_follows_flip_leg1
+reap_follows_flip_leg2
+int_during_flip_still_stops
+err_standby_start_failed
+err_standby_image_mismatch
+err_standby_not_ready
+err_flip_failed_leg1
+err_old_colour_stop_failed
+err_home_not_ready_status_changed
+err_home_not_ready_up_failed
+err_home_not_ready_readyz
+err_flip_failed_leg2
+wait_healthy_rail_on_uses_live_port
+wait_healthy_rail_on_unparseable_exits_1
 exit $((fails > 0))
