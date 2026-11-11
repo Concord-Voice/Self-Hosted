@@ -1255,7 +1255,9 @@ The `services/media-plane/Dockerfile` builder stage uses `ghcr.io/concord-voice/
 
 **Refresh procedure:** see `docs/runbooks/refresh-buildtools-base.md`. Quarterly cadence OR alpine/python3/g++/linux-headers CVE event; 7-day SLO for critical CVEs.
 
-**Owner:** repo admin (currently @markdrogersjr).
+**Owner:** repo admin (currently `@markdrogersjr`).
+
+**Base-image manifest:** `.github/base-images.json` declares the identity of every stage, and its tag patterns carry the Node major. A Node-major bump therefore also needs manifest edits: the buildtools entry in the publisher PR, and both media-plane stages in the consumer PR. See `docs/development.md` § Changing a Docker Base Image.
 
 **SHA-pin requirement:** the builder stage MUST reference the GHCR image by manifest digest (`@sha256:...`), not by floating tag. The date-stamped tag (`<node-tag>-<DATE>`) is for human readability only; the digest is the authoritative supply-chain handle.
 

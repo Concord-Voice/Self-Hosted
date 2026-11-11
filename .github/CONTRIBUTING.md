@@ -333,6 +333,8 @@ The hooks are configured in `.pre-commit-config.yaml` via the Python `pre-commit
 | TypeScript | prettier, eslint, tsc --noEmit                                                                                                                        |
 | Commit     | commit-msg-format (conventional commits)                                                                                                              |
 
+A change to a Dockerfile `FROM` line can need a matching edit to `.github/base-images.json`. See [Changing a Docker base image](../docs/development.md#changing-a-docker-base-image).
+
 ### CI: GitHub Actions (Mandatory)
 
 `pr-ci.yml` is the entry point for **all PRs**. `build.yml` has no direct trigger — it is

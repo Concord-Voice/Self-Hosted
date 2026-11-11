@@ -346,6 +346,12 @@ run_policy_case workflow-lint-source-root-dockerfile advisory-only Dockerfile
 # form, and a file under a directory with such a name, both count.
 run_policy_case workflow-lint-source-suffix-dockerfile advisory-only tools/example/api.Dockerfile
 run_policy_case workflow-lint-source-dockerfile-dir advisory-only tools/example/Dockerfile.d/conf
+# The base-image check treats a path that contains "dockerfile" in any letter
+# case as a Dockerfile: on a case-insensitive checkout such a path replaces the
+# real file. The filter must start the job for those paths too.
+run_policy_case workflow-lint-source-lowercase-dockerfile advisory-only services/example/dockerfile
+run_policy_case workflow-lint-source-mixed-case-dockerfile-dir advisory-only tools/example/DOCKERFILE.d/conf
+run_policy_case workflow-lint-source-base-images advisory-only .github/base-images.json
 run_policy_case workflow-lint-only advisory-only .github/scripts/workflow-lint-only.txt
 run_policy_case workflow-lint-legacy-changelog advisory-only CHANGELOG.md
 run_policy_case guard-go-toolchain semgrep_community scripts/check-go-toolchain.py scripts/test-check-go-toolchain.py

@@ -244,6 +244,8 @@ In a new feature branch (e.g., `feature/<N>-bump-buildtools-<date>`):
 
    The runtime digest is mandatory and is revalidated in the same PR as the builder digest. If it is unchanged, do not churn the pin. Never substitute an amd64- or arm64-specific child manifest in the Dockerfile.
 
+   A new digest, or a new date in the `node-buildtools` tag, needs no edit to `.github/base-images.json`: the builder stage's pattern accepts any date. A new Node major does, in two pull requests. The publisher PR of §10 edits the `infrastructure/docker/buildtools/Dockerfile` entry. The consumer PR of this section then edits both `services/media-plane/Dockerfile` stages, because the published tag prefix and the runtime tag both carry the major. A different flavor or repository needs the same edits. Make each edit in the PR that changes the Dockerfile, then run `python3 .github/scripts/check-base-images.py`. See [Changing a Docker base image](../development.md#changing-a-docker-base-image).
+
 4. Run the local builder and final-image smokes:
 
    ```bash
