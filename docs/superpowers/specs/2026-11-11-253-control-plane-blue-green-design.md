@@ -123,33 +123,44 @@ Three options were weighed:
 
 **Hook.** In `rebuild`, between the image build and the "draining the previous control-plane" step. It runs only when the rail is on and the scope is exactly `control-plane`. The existing five-line drained sequence stays in place, in order, as the fallback.
 
-**Sequence.**
+**Sequence.** `control_plane_bluegreen_cutover` returns "done", or "take the drained path, nothing was changed", or exits 1 with a named error.
 
-1. Preconditions: the live port reads 8080 (anything else: `recovery-ambiguous`, nothing changed). A leftover `concordvoice-control-plane-green` container is then removed; nginx is not pointing at it.
+1. Read the live port. Unparseable → drained path (today's `rebuild` never depended on the vhost). A live port of 8081 never reaches here; recovery handles it first.
 2. Status check (4.5). Not provably current → drained path.
 3. `privacy_defaults_refuse_foreign_control_plane`.
-4. Record the built image ID. Write the marker atomically (mode 0600, no content).
-5. Start green with the `compose run` form in 4.1. Confirm its ID is in `compose ps --status running -q -- control-plane`; if it is not: reap, clear the marker, drained path. If its image ID differs from the built one: reap, clear the marker, `standby-image-mismatch`.
+4. Resolve the built image ID. Write the marker atomically (mode 0600, no content). Either fails → drained path, nothing started.
+5. Remove a leftover `concordvoice-control-plane-green` (nginx is on 8080, so it is not serving). Start green with the `compose run` form in 4.1.
+   - Start failed: reap, clear the marker, `standby-not-ready`. Home keeps serving. A new image that cannot boot is caught here, before any user is moved.
+   - Its ID is not in `compose ps --status running -q -- control-plane`: reap, clear the marker, drained path.
+   - Its image ID differs from the built one: reap, clear the marker, `standby-image-mismatch`.
 6. Gate on green's `/readyz`. On failure: reap green, clear the marker, `standby-not-ready`. No flip is attempted and home keeps serving.
 7. Ignore HUP, INT and TERM. Flip to 8081. On success stop home with nothing in between, then restore the traps.
    - Flip failed: nginx restored itself; reap green, clear the marker, `flip-failed`.
    - Stop failed: `old-colour-stop-failed`, marker kept.
-8. Repeat the status check. If it is still current, start home normally (`up -d --no-build --no-deps --wait --wait-timeout 180 control-plane`): on a schema proven current its startup migration run changes nothing. Check its image and gate on its `/readyz`. On a non-current status or any failure: `home-not-ready`; green keeps serving and the marker stays.
-9. Ignore signals. Flip to 8080. On success stop green at once (`docker stop -t 45`) and remove it, restore the traps, clear the marker. On flip failure: `flip-failed`, marker kept.
+8. Repeat the status check. If it is still current, start home with the unchanged drained-path `up` line: on a schema proven current its startup migration run changes nothing. Gate on its `/readyz`. On a non-current status or any failure: `home-not-ready`; green keeps serving and the marker stays. Home's image is not checked (today's path does not check it either).
+9. Ignore signals. Flip to 8080. On success stop green at once (`docker stop -t 45`) and remove it, restore the traps, clear the marker. On flip failure: `flip-failed`, marker kept. On a failed reap: `old-colour-stop-failed`, marker kept.
 10. The rest of `rebuild` runs unchanged.
 
 **Bounded split.** Each leg overlaps from a successful reload until the old colour exits: at most the 45 s stop grace.
 
-**Recovery.** Runs when `rebuild` is dispatched with a marker present, after the lock and before `activity_history_routine_guard` (which would otherwise count two containers). Recovery always builds first and then converges to home, so a bad image recorded by an interrupted run can never block the deploy that fixes it.
+**Recovery** has two parts, so that no container is ever started ahead of `activity_history_routine_guard` (the first-activation boundary).
 
-| Live port | Green | Action |
-|---|---|---|
-| unparseable | any | `recovery-ambiguous`; nothing changed |
-| 8080 | any | Reap green, clear the marker, continue |
-| 8081 | `/readyz` OK | Scope must be exactly `control-plane`, else `cutover-incomplete`. Stop home if running, then build. If status is current: steps 8-9 with the new image. Otherwise: guard, stop and remove green, drained check, start home in apply mode, gate 8080, flip to 8080, clear the marker. |
-| 8081 | not ready or absent | Reap green, run the drained sequence for home on the current tag, gate 8080, flip to 8080, clear the marker, continue |
+*Pre-step*, in `rebuild`, immediately before that guard, rail on only. It triggers when the marker exists **or** the live port reads 8081 (so a lost marker cannot leave a deploy stuck). Otherwise it does nothing: one file test and one file read.
 
-- While a marker exists, other locked verbs refuse with `cutover-incomplete`. Exceptions: operator `nginx-reload`, and `stop`, which also reaps green.
+| Live port | Action |
+|---|---|
+| unparseable (marker present) | `recovery-ambiguous`; nothing changed |
+| 8080 | Reap green, clear the marker, continue. The rebuild may then run a fresh cutover. |
+| 8081 | The effective scope must be exactly `control-plane`, else `cutover-incomplete` and nothing changed. Write the marker if it is missing. Stop home if it is running. Continue with the marker in place: exactly one control-plane container (green) or none is left for the guard to count. |
+
+*Resume*, at the hook, when the marker is present. It replaces steps 1-7:
+
+- green answers `/readyz` and the status is current → steps 8-9 with the newly built image;
+- otherwise → the foreign-project guard, reap green, the daemon-wide drained check, start home in the ordinary apply mode, gate 8080, flip to 8080, clear the marker. This is the drained path with a flip at the end.
+
+Because the resume runs after the build, a bad image recorded by an interrupted run can never block the deploy that fixes it.
+
+- While a marker exists, other locked verbs refuse with `cutover-incomplete`. Exceptions: operator `nginx-reload`; `stop`, which also reaps green; and `sudoers-sync`, which touches neither containers nor nginx and runs in a deploy pipeline before the `rebuild` that recovers.
 - A SIGKILL between a flip and its stop leaves both colours serving until the next `rebuild`. This is documented, not engineered away.
 
 **Errors.** Named errors are prefixed `control-plane-bluegreen:` and exit 1: `standby-image-mismatch`, `standby-not-ready`, `flip-failed`, `old-colour-stop-failed`, `home-not-ready`, `cutover-incomplete`, `recovery-ambiguous`, `live-upstream-unparseable`, `rail-off-with-cutover-marker`. Mode refusals are `rail-refused-<reason>` and exit 2.
