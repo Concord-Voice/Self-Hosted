@@ -928,6 +928,12 @@ jobs:
       - name: Image publisher Docker Engine pins
         run: python3 scripts/tests/test-publish-minio-engine-pins.py
 
+      # Every FROM and COPY --from= in a tracked Dockerfile must match the
+      # identity declared in .github/base-images.json. Advisory here: this
+      # job does not block a merge. Exit 2 means the check could not complete.
+      - name: Base images match their declared identity
+        run: python3 .github/scripts/check-base-images.py
+
       - name: Self-host release tag check and bundle builder
         run: |
           bash scripts/tests/test-check-release-tag.sh
@@ -956,6 +962,7 @@ jobs:
           bash .github/scripts/tests/lint-test-suite-wiring.test.sh
           bash .github/scripts/tests/ci-scan-relevance.test.sh
           bash .github/scripts/tests/trivy-assert-os.test.sh
+          bash .github/scripts/tests/check-base-images.test.sh
           bash scripts/test-nats-server-bootstrap.sh
 
   # ─── PostgreSQL migration lint (squawk, #4175) ───────────────────────

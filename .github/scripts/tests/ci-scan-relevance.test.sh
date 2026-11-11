@@ -332,6 +332,7 @@ run_policy_case workflow-lint-source-suite advisory-only .github/scripts/tests/c
 run_policy_case workflow-lint-source-helper advisory-only .github/scripts/ci-scan-relevance.mjs
 run_policy_case workflow-lint-source-remote-builder advisory-only scripts/ci/require-remote-buildkit.py
 run_policy_case workflow-lint-source-map advisory-only .github/ci/scan-relevance.yml
+run_policy_case workflow-lint-source-base-images advisory-only .github/base-images.json
 run_policy_case workflow-lint-only advisory-only .github/scripts/workflow-lint-only.txt
 run_policy_case workflow-lint-legacy-changelog advisory-only CHANGELOG.md
 run_policy_case guard-go-toolchain semgrep_community scripts/check-go-toolchain.py scripts/test-check-go-toolchain.py
