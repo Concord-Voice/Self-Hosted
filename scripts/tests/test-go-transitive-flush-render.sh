@@ -157,14 +157,17 @@ render_case "directive churn is not counted as modules" \
   $'module x\n\ngo 1.26.6\n\ntoolchain go1.26.6\n\nrequire (\n\tgithub.com/foo/bar v1.0.0\n)\n' \
   0 0 0
 
-# ── the body must carry the CI re-trigger warning ────────────────────────────
-# pr-ci.yml does not fire for GITHUB_TOKEN-authored PRs, so the body is the only
-# place a reviewer learns the checklist is unsatisfiable until they act.
-if grep -q "Close and reopen this PR" /tmp/pr-body.md; then
-  ok "body carries the CI re-trigger instruction"
-else
-  bad "body is missing the CI re-trigger instruction"
-fi
+# ── the body must NOT tell the reviewer to re-trigger CI ─────────────────────
+# The PR is opened with an App installation token, so `pull_request` workflows
+# start on their own. A leftover re-trigger instruction would send the reviewer
+# to close and reopen a PR whose checks are already running.
+for stale in "Close and reopen this PR" "GITHUB_TOKEN" "#1212"; do
+  if grep -qF -- "$stale" /tmp/pr-body.md; then
+    bad "body still contains '$stale'"
+  else
+    ok "body does not contain '$stale'"
+  fi
+done
 
 # ── the body must render a REAL stamp, not the hardcoded cron literals ───────
 # The guard used to be `grep -qE 'on Tuesday|at 06:00 UTC'`, which was wrong in a
@@ -180,6 +183,47 @@ if grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}' /tmp/pr-body.md; then
   ok "body renders a real generation stamp (ISO date present)"
 else
   bad "body has no real date — the generation stamp is hardcoded again"
+fi
+
+# ── static: the App token is minted late, and only when a PR will be opened ──
+# Ordering is the security property. The mint step must come AFTER the module
+# refresh, so no write-capable token exists while `go get -u` downloads and
+# resolves third-party modules, and it must share the PR-opening gate, so a
+# deferred or no-change run never mints one.
+line_of() { grep -n -- "$1" "$WORKFLOW" | first_line | cut -d: -f1; }
+refresh_at=$(line_of '^      - name: Refresh transitive Go module graph')
+mint_at=$(line_of '^      - name: Mint flush App token')
+open_at=$(line_of '^      - name: Open PR if changed')
+GATE="if: steps.contention.outputs.deferred != 'true' && steps.refresh.outputs.has_changes == 'true'"
+
+if [ -n "$refresh_at" ] && [ -n "$mint_at" ] && [ -n "$open_at" ] \
+   && [ "$refresh_at" -lt "$mint_at" ] && [ "$mint_at" -lt "$open_at" ]; then
+  ok "mint step sits after the module refresh and before the PR is opened"
+else
+  bad "mint step is missing or out of order" \
+      "refresh=${refresh_at:-<none>} mint=${mint_at:-<none>} open=${open_at:-<none>}"
+fi
+
+gate_count=$(grep -cF -- "$GATE" "$WORKFLOW" || true)
+if [ "$gate_count" -eq 3 ]; then
+  ok "render, mint and open steps all carry the PR-opening gate"
+else
+  bad "expected the PR-opening gate on exactly 3 steps" "found: $gate_count"
+fi
+
+# shellcheck disable=SC2016  # literal GitHub expression, not a shell expansion
+if grep -qF 'token: ${{ steps.app-token.outputs.token }}' "$WORKFLOW" \
+   && ! grep -qF 'token: ${{ github.token }}' "$WORKFLOW"; then
+  ok "the PR is opened with the App token, not github.token"
+else
+  bad "create-pull-request does not take its token from steps.app-token"
+fi
+
+if ! grep -qE '^      contents: write' "$WORKFLOW" \
+   && grep -qE '^      contents: read' "$WORKFLOW"; then
+  ok "job GITHUB_TOKEN is contents: read"
+else
+  bad "job permissions must be contents: read, never contents: write"
 fi
 
 echo "─────────────────────────────────"

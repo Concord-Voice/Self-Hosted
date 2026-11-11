@@ -7,18 +7,18 @@ name: Refresh transitive Go module graph
 # guard step below, NOT via this cron's choice; do not rely on "06:00
 # precedes Dependabot" as an invariant.
 #
-# CI re-trigger note (per Copilot review on #1228): PRs created by this
-# workflow are authored by `GITHUB_TOKEN`. Per `peter-evans/create-pull-request`
-# known limitation, `pull_request` workflows do NOT auto-trigger on these PRs.
-# Reviewers must push an empty commit (or close+reopen the PR) to run CI
-# before merging. See [internal]rules/backend.md § Dependency Hygiene for the
-# full triage path.
+# PR authorship: the PR is opened with a short-lived GitHub App installation
+# token, not `GITHUB_TOKEN`. A `GITHUB_TOKEN`-authored PR starts no
+# `pull_request` workflows, and this repository does not let Actions create
+# pull requests at all. An App-authored PR runs the full PR check set on its
+# own, with no close-and-reopen step for the reviewer.
 #
-# That instruction is ALSO rendered into the PR body itself (see "Render PR
-# body" below). It used to live only here and in backend.md — i.e. everywhere
-# except the one artifact a reviewer actually reads — so the body presented an
-# unrunnable "green in CI" checkbox with no hint that CI had not run. Keep the
-# two copies in sync if either changes.
+# Token ordering is a security property: "Mint flush App token" runs AFTER
+# "Refresh transitive Go module graph" and carries the same `if:` gate as
+# "Open PR if changed". No write-capable token exists while `go get -u`
+# downloads and resolves third-party modules, and a deferred or no-change run
+# mints nothing. Do not move the mint step earlier.
+# scripts/tests/test-go-transitive-flush-render.sh locks the order.
 #
 # Output PR is processed by /weekly-deps Wednesday review window.
 # See [internal]rules/backend.md § Dependency Hygiene.
@@ -29,9 +29,9 @@ on:
     - cron: "0 6 * * 2"
   workflow_dispatch:
 
-# Least-privilege default; the flush job elevates to the writes it needs
-# (peter-evans/create-pull-request: contents + pull-requests; the contention
-# guard's gh pr comment: pull-requests).
+# Least-privilege default. The flush job adds only `pull-requests: write`, for
+# the contention guard's `gh pr comment`. The branch push and the PR itself use
+# the App installation token, so `GITHUB_TOKEN` never needs `contents: write`.
 permissions:
   contents: read
 
@@ -44,7 +44,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:
-      contents: write
+      contents: read
       pull-requests: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -200,19 +200,6 @@ jobs:
           - Indirect deps that newer direct/indirect versions now require (MVS resolution)
           - Orphan cleanup by \`go mod tidy\` (the count above is measured from the diff, not assumed)
 
-          ## ⚠ CI does not run on this PR until you re-trigger it
-
-          This PR is authored by \`GITHUB_TOKEN\`, and GitHub does not fire \`pull_request\`
-          workflows for PRs created that way — a known \`peter-evans/create-pull-request\`
-          limitation. \`pr-ci.yml\` therefore never runs here on its own, which makes the
-          first two checklist items below **unsatisfiable until you act**.
-
-          **Close and reopen this PR** (or push an empty commit) to run the full suite.
-
-          The only checks that appear without that step are scanners which do not depend on
-          the \`pull_request\` event. Do NOT read those few green marks as "CI is green" —
-          the build, race tests, integration suite, govulncheck and SonarCloud have not run.
-
           ## Review checklist
 
           - [ ] \`go test -race ./...\` is green in CI
@@ -229,18 +216,29 @@ jobs:
 
           - Mechanism rationale: the backend Dependency Hygiene rule (internal development docs)
           - Triage workflow: \`/weekly-deps\` Phase 1
-          - Founding issue: #1212
           EOF
           echo "Rendered PR body to /tmp/pr-body.md"
 
+      # Minted here, after the module refresh, and only when a PR will be opened.
+      # Same App and same pinned action as refresh-ioc-list.yml.
+      - name: Mint flush App token
+        id: app-token
+        if: steps.contention.outputs.deferred != 'true' && steps.refresh.outputs.has_changes == 'true'
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.PUBLIC_MIRROR_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PUBLIC_MIRROR_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
       - name: Open PR if changed
         if: steps.contention.outputs.deferred != 'true' && steps.refresh.outputs.has_changes == 'true'
-        # SHA-pinned per supply-chain hardening (#847). Same SHA as refresh-ioc-list.yml.
+        # SHA-pinned per supply-chain hardening. Same SHA as refresh-ioc-list.yml.
         # Upgrade procedure: `gh api repos/peter-evans/create-pull-request/git/refs/tags/vX.Y.Z`,
         # replace SHA + comment.
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
-          token: ${{ github.token }}
+          token: ${{ steps.app-token.outputs.token }}
           # Pin BOTH identities. create-pull-request defaults `author` to
           # `github.actor`, which on a workflow_dispatch run is whoever pressed the
           # button — so `git log --format=%an` on main attributed a machine-generated
