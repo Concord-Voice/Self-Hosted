@@ -472,9 +472,8 @@ _authority_lifecycle() {
       _authority_compose stop authority || { _authority_fail 'cannot stop the authority'; return 1; }
       _authority_compose --profile authority-owner run --rm authority-owner migrate --realm "$realm" \
         || { _authority_fail 'authority migrate failed; the authority is stopped'; return 1; }
-      if ! { _authority_compose up -d --no-deps --force-recreate authority && _authority_running; }; then
-        _authority_fail 'the authority did not stay up'; return 1
-      fi
+      _authority_compose up -d --no-deps --force-recreate authority || { _authority_fail 'the authority did not start'; return 1; }
+      _authority_running || { _authority_fail 'the authority did not stay up'; return 1; }
       ;;
     stop) _authority_compose stop ;;
     down) _authority_compose --profile authority-owner down ;;
