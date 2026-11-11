@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "dockerfiles": {
-    "app.dockerfile": {
+    "app.df": {
       "stages": [
         {
           "alias": "builder",

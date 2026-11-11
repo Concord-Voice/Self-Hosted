@@ -153,5 +153,11 @@ git commit -m "docs: say how to change a base image"
 
 ## After the tasks
 
+**As built.** This plan is the record of what was planned. Where it differs from the code, the spec and the code are right:
+
+- The checker has 13 rule names. `heredoc` and `unsupported-character` were added after this plan; a heredoc case reports `heredoc` as well as any stage rule.
+- The pre-commit hooks of Task 2 are not in the pull request. It wires the `workflow-lint` CI job only.
+- The spec section "Amended in the final review" lists the later changes to the parsing rules, the checked file set and the fixtures.
+
 - The protected job in `required-pr-build.yml` is not in this plan. It is added here or in a follow-up once the maintainer decides; the spec section "Where it runs" fixes its shape.
 - Committing `.pre-commit-config.yaml` triggers hooks that fail on macOS for environment reasons. That commit needs the maintainer's go-ahead to skip those hooks, or a Linux session.

@@ -218,37 +218,82 @@ verification, and commissioning live in the dedicated
 
 `.github/base-images.json` declares which image each stage of each tracked
 Dockerfile is built from: registry, repository and a tag pattern. A static
-check compares every `FROM`, every `COPY --from=` and every
+check compares every `FROM`, every `COPY --from=` or `ADD --from=`, and every
 `RUN --mount=...,from=` with it:
 
 ```bash
 python3 .github/scripts/check-base-images.py
 ```
 
-It runs in the `workflow-lint` CI job. It needs no Docker daemon and no
-network.
+It checks every tracked path that contains `dockerfile` in any letter case. It
+needs no Docker daemon and no network. It runs in the `workflow-lint` CI job,
+which is advisory: a failure shows red on the pull request but does not block
+the merge.
 
-| Change | Manifest edit |
-|---|---|
-| New digest, same tag | None |
-| New patch of a patch-pinned tag (`1.27.3-alpine` to `1.27.4-alpine`) | None |
-| New minor or major, new flavor, new repository or registry | Edit the stage entry in the same pull request |
-| New Dockerfile, new stage, or a new `AS` name | Add or edit the entry in the same pull request |
-| New `COPY --from=<build context>` | Add the name to `build_contexts` |
+Each violation is one line, `<file>:<line>: <rule>: <message>`, and the exit
+code is 1. Exit code 2 means the check could not complete, for example because
+it cannot parse the manifest. Fix that first.
 
-Every image reference needs a tag and a `@sha256:` digest. The check refuses a
-reference built from an `ARG`, and a `COPY --from=` or mount that names an
-external image. A `# syntax=` directive must equal the `syntax` value in the
-manifest entry.
+An entry is keyed by the Dockerfile's path from the repository root:
 
-The check also refuses what it cannot read the way BuildKit does: a heredoc
-(any `<<`), an `# escape=` directive, a line that starts with `//`, a quoted or
-backslash-escaped flag such as `COPY "--from=x"`, a control character, and a
-non-ASCII character outside a comment line.
+```json
+"services/example/Dockerfile": {
+  "stages": [
+    { "alias": "builder", "registry": "docker.io", "repository": "library/golang", "tag": "^1\\.27\\.[0-9]+-alpine$" },
+    { "scratch": true }
+  ]
+}
+```
+
+- `stages` has one item for each `FROM`, in file order. `alias` is the `AS`
+  name, when the stage has one.
+- `tag` is a Python regular expression. It must start with `^` and end with
+  `$`. Escape each dot, and double each backslash for JSON.
+- A `FROM scratch` stage is `{"scratch": true}`.
+- Optional keys of the entry: `build_contexts` (names that `COPY --from=` may
+  use) and `syntax` (the exact value of the `# syntax=` line).
+
+| Change | Rule reported | Manifest edit |
+|---|---|---|
+| New digest, same tag | None | None |
+| New tag that still matches the stage's `tag` pattern | None | None |
+| New tag outside the pattern (a new minor, major or flavor) | `tag-mismatch` | Edit `tag` |
+| New repository or registry | `identity-mismatch` | Edit `registry` and `repository` |
+| Stage added, removed or reordered, or an `AS` name changed | `stage-mismatch` | Edit `stages` to match the file |
+| New Dockerfile | `unlisted-dockerfile` | Add an entry |
+| Dockerfile deleted or renamed | `stale-entry`, and `unlisted-dockerfile` for a new name | Remove or rename the entry |
+| New `COPY --from=<build context>` | `external-copy-source` | Add the name to `build_contexts` |
+
+Make the manifest edit in the same pull request as the Dockerfile change. The
+patterns differ by image: one accepts any patch (`^1\.27\.[0-9]+-alpine$`),
+another accepts one exact tag (`^3\.24$`). Read the entry before you bump.
+
+The check also reports:
+
+- `missing-tag`, `missing-digest`: every image reference needs a tag and a
+  `@sha256:` digest. A `FROM` that names an earlier stage (`FROM builder AS
+  final`) is not supported and is reported as `missing-tag`.
+- `variable-reference`: a reference built from an `ARG`.
+- `external-copy-source`: a `COPY --from=`, `ADD --from=` or mount that names
+  an external image; a stage index in `RUN --mount` (BuildKit reads it as an
+  image name); and any such source in an `ONBUILD` instruction, which the child
+  build resolves.
+- `syntax-directive`: a `# syntax=` line that differs from the `syntax` value
+  of the entry, or that is not at the top of the file and unindented, where
+  BuildKit ignores it.
+
+It refuses what it cannot read the way BuildKit does: a heredoc or any `<<`
+(`heredoc`), an `# escape=` directive (`escape-directive`), a line that starts
+with `//` (`syntax-directive`), a control character or a non-ASCII character
+outside a comment line (`unsupported-character`), and a quote or a backslash in
+`FROM` or in the flags of `COPY`, `ADD` and `RUN`. Write
+`COPY --chown=1000:1000`, not `COPY --chown="1000:1000"`.
 
 The manifest has a code owner. A pull request that changes a Dockerfile and
 its manifest entry together passes the check, so review of the manifest diff
-is the control: read it as a change of supplier.
+is the control: read it as a change of supplier. A green result is evidence
+only when the pull request changes none of the checker, the manifest, the CI
+workflow and the CI path filter. All four are code-owned.
 
 The check reads text and nothing else. It does not cover:
 
@@ -258,9 +303,16 @@ The check reads text and nothing else. It does not cover:
 - `image:` references in Compose files, and build contexts supplied from
   outside the Dockerfile (Compose `additional_contexts`,
   `docker build --build-context`), which can replace a named context or an
-  image.
-- A Dockerfile whose path does not contain `Dockerfile`, a Dockerfile written
-  inline by a script, and `ADD` from a URL or a git repository.
+  image. A declared build context that the build command does not supply is
+  pulled by BuildKit as an image of that name.
+- A Compose `build:` entry that takes its Dockerfile from somewhere else: a
+  remote `context`, `dockerfile_inline`, or a `dockerfile:` path that does not
+  contain `dockerfile`.
+- A Dockerfile written inline by a script, and `ADD` from a URL or a git
+  repository.
+
+A tracked Dockerfile that is a symbolic link or a submodule entry stops the
+check with exit code 2.
 
 ### Database Migrations
 

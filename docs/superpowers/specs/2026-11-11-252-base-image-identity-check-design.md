@@ -62,14 +62,14 @@ Rules:
 |---|---|
 | `unlisted-dockerfile` | a tracked Dockerfile has no manifest entry |
 | `stale-entry` | a manifest entry names a file that is not tracked |
-| `stage-mismatch` | the number of `FROM` lines, an alias, or scratch-versus-image differs from the manifest |
+| `stage-mismatch` | the number of `FROM` lines, an alias, or scratch-versus-image differs from the manifest; or the arguments of a `FROM` cannot be parsed (a quote or a backslash among them included) |
 | `variable-reference` | an image reference contains `$` |
 | `missing-tag` | an image reference has no tag |
 | `missing-digest` | an image reference has no `@sha256:` digest of 64 hex characters |
 | `identity-mismatch` | registry or repository differs from the manifest |
 | `tag-mismatch` | the tag does not fully match the manifest pattern |
-| `external-copy-source` | `COPY --from=` or `RUN --mount=…from=` names something that is not an earlier stage alias, an earlier stage index, or a declared build context |
-| `syntax-directive` | a `# syntax=` directive is absent from the manifest, or differs from it |
+| `external-copy-source` | `COPY --from=`, `ADD --from=` or `RUN --mount=…from=` names something that is not an earlier stage alias, an earlier stage index (`COPY` and `ADD` only) or a declared build context; any such source in an `ONBUILD` instruction; a quoted or escaped flag word |
+| `syntax-directive` | a `# syntax=` directive is absent from the manifest, differs from it, is declared but missing from the file, or is not at the top of the file where BuildKit reads it; a line that starts with `//` |
 | `escape-directive` | a `# escape=` directive is present |
 | `heredoc` | an instruction contains `<<` |
 | `unsupported-character` | the file holds a control character (a lone CR included), or a non-ASCII character outside a comment line |
@@ -88,7 +88,7 @@ Parsing choices. The parser splits lines, continuations and flag words the way B
 
 ### 3. Where it runs
 
-- **pre-commit:** one hook for the check (triggered by any Dockerfile, the manifest or the script) and one for its self-test.
+- **pre-commit:** one hook for the check (triggered by any Dockerfile, the manifest or the script) and one for its self-test. Planned; not part of this pull request, which wires CI only.
 - **CI, advisory:** a step in the `workflow-lint` job of `pr-ci.yml` runs the check over the whole tree, and the job's self-test step runs the suite. The `workflow_lint` relevance filter gains `.github/base-images.json`; `.github/scripts/**` is already there. The filter entry for every Dockerfile arrives with the docker Dependabot tier change (#251), so that change should merge first.
 - **CI, merge-blocking:** a protected job in `required-pr-build.yml`. That workflow is loaded from protected `main`, so a pull request cannot test its own change to it, and a defect in a new job there blocks every pull request until an organization admin intervenes. Whether that job lands in this change or in a follow-up after the advisory step has run on real pull requests is the maintainer's decision; it is recorded on the issue. The design of that job, for either answer: no `needs`, no `if`, the checker read from the base commit, the manifest read from the pull request, and `result` requiring `success`.
 - **CODEOWNERS:** `/.github/base-images.json` is added, so a manifest edit needs code-owner review. Review of the manifest diff is the control when a pull request changes a Dockerfile and the manifest together.
@@ -112,6 +112,17 @@ Parsing choices. The parser splits lines, continuations and flag words the way B
 - A build from a file whose path does not contain `Dockerfile`, and a Dockerfile written inline by a script.
 - `ADD` from a URL or a git repository.
 
+## Amended in the final review
+
+- **Which files are checked.** The tracked set is every tracked path that contains `dockerfile` once compatibility forms, letter case and accents are folded. A case-sensitive listing missed `dockerfile`, which a case-insensitive checkout (macOS, Windows) writes over the real `Dockerfile`. A symbolic link or a submodule entry among those paths ends the check with exit 2. The CI path filter matches any ASCII letter case of the name.
+- **Stage index in a mount.** BuildKit accepts a stage index for `COPY` and `ADD` only. In `RUN --mount=…,from=0` the value is an image name, so it is refused.
+- **`ONBUILD`.** A trigger runs in the child build and is resolved against the child's stages. Every image source in an `ONBUILD` instruction is refused.
+- **`# syntax=` position.** BuildKit reads the directive only while every line above it is a directive (a shebang on line 1 excepted) and the line is unindented. Elsewhere in the leading comment block it is refused, because the build would silently use the built-in frontend.
+- **Quoting in `FROM`.** A quote or a backslash in the arguments of `FROM` is refused under `stage-mismatch`.
+- **Flag words** are read for `COPY`, `ADD` and `RUN` only.
+- **Fixtures.** A case with the standard manifest is one line in the suite. Fixture files end in `.df`, and no fixture path contains `dockerfile`.
+- **Not covered, added:** a Compose `build:` entry with a remote `context`, `dockerfile_inline`, or a `dockerfile:` path that does not contain `dockerfile`; a declared build context that the build command does not supply.
+
 ## Deviation from the issue
 
 The issue asked for a cross-check of the `os` values in the `container-image-scan.yml` matrix against the manifest. It is left out. The repository and tag pattern already pin the flavor statically, the post-build OS assertion still runs, and the cross-check would need a YAML parser or a fragile text match in a standard-library script.
@@ -124,7 +135,7 @@ Must fail, each with its own rule name: digest-only `FROM` with no tag; registry
 
 Must fail, added after the branch review, each an input BuildKit reads differently from a naive line parser: a doubled backslash at line end before a `FROM`; a lone CR; a control byte on a line of its own inside a continuation; a heredoc; a quoted `--from`; a backslash-escaped `--from`; a quoted `from=` field in `--mount`; a `--from` behind a quoted flag that holds a space; a CR or a non-ASCII byte used as a word separator; a `// syntax=` line behind a `//` continuation.
 
-Must pass: the current tree; a digest-only bump; a same-flavor patch bump; `FROM scratch`; a `--platform=$BUILDPLATFORM` flag; a declared build context; a line continuation inside `FROM`.
+Must pass: the current tree; a digest-only bump; a same-flavor patch bump; `FROM scratch`; a `--platform=$BUILDPLATFORM` flag; a declared build context; a `COPY --from=<index>`; a registry with a port; lower-case instructions; a `# syntax=` after the first instruction; a matching `# syntax=`, also below a shebang; a line continuation inside `FROM`. The suite is the complete list.
 
 Mutation check: disabling any one rule makes that rule's fixture test fail.
 

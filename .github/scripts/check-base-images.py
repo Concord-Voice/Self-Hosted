@@ -3,10 +3,12 @@
 
     check-base-images.py [--root DIR] [--manifest PATH] [FILE...]
 
-Every FROM, COPY --from= and RUN --mount=...,from= is compared with the identity
-declared in .github/base-images.json. With no FILE the tracked set is
-`git ls-files -- '*Dockerfile*'` under --root. Standard library only; no Docker
-daemon, no network.
+Every FROM, COPY --from=, ADD --from= and RUN --mount=...,from= is compared with
+the identity declared in .github/base-images.json. With no FILE the checked set
+is every tracked path under --root whose text contains "dockerfile" in any
+letter case. A FILE list replaces that set, so manifest entries that are not in
+the list are reported as stale. Standard library only; no Docker daemon, no
+network.
 
 Exit 0: no violations. Exit 1: violations, one "<file>:<line>: <rule>: <message>"
 line each on stdout. Exit 2: the check could not complete, message on stderr.
@@ -14,7 +16,8 @@ line each on stdout. Exit 2: the check could not complete, message on stderr.
 The parser reads lines, continuations and flag words the way BuildKit does, and
 refuses what it cannot read that way: a heredoc, "# escape=", a line that starts
 with "//", a control character, a non-ASCII character outside a comment line,
-and a quoted or escaped flag.
+a quoted or escaped word in FROM or in the flags of COPY, ADD and RUN, and any
+image source in an ONBUILD trigger.
 """
 
 import argparse
@@ -24,23 +27,23 @@ import re
 import subprocess
 import sys
 import traceback
+import unicodedata
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 DIRECTIVE = re.compile(r"#\s*(syntax|escape)\s*=\s*(.*)", re.IGNORECASE)
+# BuildKit's own directive pattern. It reads directives from the top of the file
+# and stops at the first line that does not match.
+DIRECTIVE_LINE = re.compile(r"#\s*[a-zA-Z][a-zA-Z0-9]*\s*=\s*.+")
 # BuildKit: a backslash ends the line as a continuation unless another backslash
 # precedes it.
 CONTINUATION = re.compile(r"(?<!\\)\\[ \t]*$")
-# Refused anywhere: C0 controls except tab (a lone CR included), DEL, C1 controls,
-# the Unicode line separators and a byte order mark inside the file. Python and
-# BuildKit disagree on which of these are blank or end a word.
-CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\ufeff]")
 QUOTING = re.compile(r"[\"'\\]")
 BLANK = " \t"
 ENTRY_KEYS = {"stages", "build_contexts", "syntax"}
 IMAGE_KEYS = {"registry", "repository", "tag"}
 
-violations = []  # (path, line, rule, message)
+violations = []  # (path, line, rule, message); main() empties it
 
 
 class CheckError(Exception):
@@ -49,6 +52,17 @@ class CheckError(Exception):
 
 def violation(path, line, rule, message):
     violations.append((path, line, rule, message))
+
+
+def has_control(line):
+    """True for a C0 control except tab (a lone CR included), DEL, a C1 control,
+    a Unicode line separator or a byte order mark. Python and BuildKit disagree
+    on which of these are blank or end a word.
+    """
+    return any(
+        char != "\t" and (ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F or char in "\u2028\u2029\ufeff")
+        for char in line
+    )
 
 
 # ── manifest ────────────────────────────────────────────────────────────────
@@ -117,20 +131,25 @@ def load_manifest(path):
 def parse(text):
     """Split a Dockerfile into parser directives and logical instructions.
 
-    Returns (directives, instructions): (line, name, value) and (line, text)
-    tuples. Continuation, comment and blank-line handling follow Docker. A
-    directive counts only in the leading comment block, before the first
-    instruction.
+    Returns (directives, instructions): (line, name, value, at_top) and
+    (line, text) tuples. Continuation, comment and blank-line handling follow
+    Docker. A directive is collected anywhere in the leading comment block,
+    before the first instruction. at_top is True only where BuildKit reads a
+    "# syntax=" line: unindented, with nothing above it but other directive
+    lines and an optional shebang on line 1.
     """
     directives, instructions = [], []
     pending = None  # [first line, text so far] while a continuation is open
+    top = True  # every line so far is a directive line (or the shebang)
     for number, line in enumerate(text.split("\n"), 1):
         stripped = line.strip(BLANK)
+        directive_line = top and DIRECTIVE_LINE.fullmatch(line.rstrip(BLANK)) is not None
+        top = directive_line or (number == 1 and line.startswith("#!"))
         if pending is None:
             if stripped.startswith("#"):
                 match = DIRECTIVE.fullmatch(stripped)
                 if match and not instructions:
-                    directives.append((number, match.group(1).lower(), match.group(2).strip()))
+                    directives.append((number, match.group(1).lower(), match.group(2).strip(), directive_line))
                 continue
             if not stripped:
                 continue
@@ -147,7 +166,13 @@ def parse(text):
 
 
 def parse_from(args):
-    """Return (reference, lower-cased alias or None) from FROM's arguments, or None."""
+    """Return (reference, lower-cased alias or None) from FROM's arguments, or None.
+
+    None also for a quote or a backslash anywhere: BuildKit removes them from a
+    flag word, so the words that follow cannot be told apart reliably.
+    """
+    if QUOTING.search(args):
+        return None
     tokens = args.split()
     while tokens and tokens[0].startswith("--"):  # --platform=... and other flags
         tokens.pop(0)
@@ -177,9 +202,10 @@ def split_reference(ref):
 def sources(keyword, args):
     """Yield (name, quoted) for each --from= (COPY, ADD) and --mount=...,from= (RUN) in the leading flags.
 
-    BuildKit removes quotes and backslashes from a flag word before it reads it,
-    so a word is a flag when it starts with "--" after that removal. quoted is
-    True for such a word; the caller refuses it instead of guessing its value.
+    BuildKit removes quotes and backslashes from a flag word before it reads it.
+    A leading word that starts with "--" once they are removed, and that held
+    any, is yielded with quoted True; the caller refuses it instead of guessing
+    its value. The caller passes COPY, ADD and RUN only.
     """
     for token in args.split():
         plain = QUOTING.sub("", token)
@@ -230,7 +256,7 @@ def check_file(path, text, entry):
     unreadable = False
     for number, line in enumerate(text.split("\n"), 1):
         start = line.lstrip(BLANK)
-        if CONTROL.search(line) or not (line.isascii() or start.startswith("#")):
+        if has_control(line) or not (line.isascii() or start.startswith("#")):
             violation(
                 path,
                 number,
@@ -244,14 +270,21 @@ def check_file(path, text, entry):
         return  # the lines below cannot be split the way BuildKit splits them
     directives, instructions = parse(text)
     declared = entry.get("syntax")
-    for line, key, value in directives:
+    for line, key, value, at_top in directives:
         if key == "escape":
             violation(path, line, "escape-directive", "# escape= is not supported; continuation assumes a backslash")
+        elif not at_top:
+            violation(
+                path,
+                line,
+                "syntax-directive",
+                "BuildKit reads # syntax= only at the top of the file, unindented; here it is a comment",
+            )
         elif declared is None:
             violation(path, line, "syntax-directive", f"# syntax={value} is not declared in the manifest")
         elif value != declared:
             violation(path, line, "syntax-directive", f"# syntax={value} differs from the manifest value {declared}")
-    if declared is not None and not any(key == "syntax" for _, key, _ in directives):
+    if declared is not None and not any(key == "syntax" for _, key, _, _ in directives):
         violation(path, 1, "syntax-directive", f"the manifest declares # syntax={declared} but the file has none")
 
     wanted = entry["stages"]
@@ -260,12 +293,13 @@ def check_file(path, text, entry):
     for line, body in instructions:
         if "<<" in body:
             violation(path, line, "heredoc", "a heredoc (or any <<) is not supported; its body can hide instructions")
-        keyword, args = (body.split(None, 1) + [""])[:2]
-        if keyword.lower() == "onbuild":  # the trigger's source is pulled by a child build
+        keyword, args = (body.split(None, 1) + ["", ""])[:2]  # body is empty for a lone backslash
+        onbuild = keyword.lower() == "onbuild"
+        if onbuild:
             keyword, args = (args.split(None, 1) + ["", ""])[:2]
         keyword = keyword.lower()
         if keyword != "from":
-            for source, quoted in sources(keyword, args):
+            for source, quoted in sources(keyword, args) if keyword in ("copy", "add", "run") else ():
                 if quoted:
                     violation(
                         path,
@@ -274,12 +308,18 @@ def check_file(path, text, entry):
                         f"flag {source} is quoted or escaped and cannot be checked",
                     )
                     continue
+                if onbuild:  # BuildKit resolves a trigger's source against the child build's stages
+                    violation(
+                        path,
+                        line,
+                        "external-copy-source",
+                        f"ONBUILD {keyword.upper()} source {source} is resolved by the child build, not by this file",
+                    )
+                    continue
                 earlier = len(aliases) - 1  # stages 0..earlier-1 precede the current one
-                if not (
-                    source.lower() in aliases[:-1]
-                    or (re.fullmatch(r"[0-9]+", source) and int(source) < earlier)
-                    or source in contexts
-                ):
+                # A stage index is valid for COPY and ADD only; in a mount it is an image name.
+                by_index = keyword != "run" and re.fullmatch(r"[0-9]+", source) and int(source) < earlier
+                if not (source.lower() in aliases[:-1] or by_index or source in contexts):
                     violation(
                         path,
                         line,
@@ -296,7 +336,7 @@ def check_file(path, text, entry):
             continue
         ref, alias = parsed
         aliases.append(alias)
-        want_alias = want.get("alias", "").lower() or None if want is not None else alias
+        want_alias = alias if want is None else (want.get("alias", "").lower() or None)
         if alias != want_alias:
             violation(
                 path,
@@ -339,19 +379,38 @@ def read_text(path):
     return text.replace("\r\n", "\n")
 
 
+def names_dockerfile(path):
+    """True when the path contains "dockerfile" once compatibility forms, letter case and accents are folded.
+
+    A case-insensitive checkout (macOS, Windows) writes "dockerfile", or a name
+    with U+212A KELVIN SIGN for K, over the real Dockerfile. Such a path must be
+    listed so that it is refused as unlisted.
+    """
+    folded = unicodedata.normalize("NFKD", path).casefold()
+    return "dockerfile" in "".join(char for char in folded if not unicodedata.combining(char))
+
+
 def tracked_files(root):
+    """Return the tracked Dockerfile paths; a symbolic link or a submodule among them is a CheckError."""
     try:
-        proc = subprocess.run(
-            ["git", "-C", root, "ls-files", "-z", "--", "*Dockerfile*"],
-            capture_output=True,
-            check=False,
-        )
+        proc = subprocess.run(["git", "-C", root, "ls-files", "-s", "-z"], capture_output=True, check=False)
     except OSError as err:
         raise CheckError(f"cannot run git ls-files in {root}: {err}") from err
     if proc.returncode != 0:
         detail = proc.stderr.decode(errors="replace").strip()
         raise CheckError(f"git ls-files failed in {root} (exit {proc.returncode}): {detail}")
-    return [os.fsdecode(name) for name in proc.stdout.split(b"\0") if name]
+    found = set()
+    for record in proc.stdout.split(b"\0"):
+        if not record:
+            continue
+        meta, _, name = record.partition(b"\t")  # "<mode> <object> <stage>\t<path>"
+        path = os.fsdecode(name)
+        if not names_dockerfile(path):
+            continue
+        if not meta.startswith(b"100"):
+            raise CheckError(f"{path} is tracked with mode {meta[:6].decode()}, not a regular file")
+        found.add(path)
+    return found
 
 
 def run(root, manifest_path, files):
@@ -359,7 +418,7 @@ def run(root, manifest_path, files):
     if files:
         tracked = {os.path.relpath(os.path.join(root, name), root) for name in files}
     else:
-        tracked = set(tracked_files(root))
+        tracked = tracked_files(root)
     rel = os.path.relpath(manifest_path, root)
     shown = manifest_path if rel.startswith("..") else rel
     for path in sorted(tracked):
@@ -379,10 +438,12 @@ def main(argv=None):
         "files",
         nargs="*",
         metavar="FILE",
-        help="Dockerfiles relative to --root (default: git ls-files -- '*Dockerfile*')",
+        help='the complete set of Dockerfiles to check, relative to --root; manifest entries outside it are '
+        'reported as stale (default: every tracked path that contains "dockerfile" in any letter case)',
     )
     args = parser.parse_args(argv)
     manifest_path = args.manifest or os.path.join(args.root, ".github", "base-images.json")
+    violations.clear()
     try:
         run(args.root, manifest_path, args.files)
     except CheckError as err:
@@ -392,7 +453,8 @@ def main(argv=None):
         traceback.print_exc()
         return 2
     for path, line, rule, message in sorted(violations, key=lambda v: (v[0], v[1])):
-        print(f"{path}:{line}: {rule}: {message}")
+        # A path that is not valid UTF-8 carries surrogates; print it escaped.
+        print(f"{path}:{line}: {rule}: {message}".encode(errors="backslashreplace").decode())
     return 1 if violations else 0
 
 
