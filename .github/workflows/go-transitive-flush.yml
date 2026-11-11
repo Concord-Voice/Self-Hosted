@@ -18,7 +18,7 @@ name: Refresh transitive Go module graph
 # order. Minting the token "late" inside one job would still put the App private
 # key on the runner while `go get -u` downloads and resolves third-party modules.
 #   guard    holds the only `GITHUB_TOKEN` write scope (`pull-requests`), for
-#            the deferral comment. It checks out nothing and runs no Go tooling.
+#            the deferral comment. It runs no Go tooling.
 #   refresh  fetches modules. Its `GITHUB_TOKEN` is read-only and it references
 #            no secret.
 #   open-pr  holds the App key. It runs no Go tooling: it copies go.mod and
@@ -56,12 +56,15 @@ jobs:
     outputs:
       deferred: ${{ steps.contention.outputs.deferred }}
     steps:
+      # `gh` infers the repository from the checkout. Nothing in it is executed.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
       - name: Contention guard — defer if open Dependabot Go PRs exist
         id: contention
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # No checkout in this job, so `gh` cannot infer the repository.
-          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
 

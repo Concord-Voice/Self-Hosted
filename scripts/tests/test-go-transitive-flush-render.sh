@@ -237,8 +237,8 @@ fi
 if grep -qE '^    needs: guard$' <<<"$REFRESH_JOB" \
    && grep -qxF "    if: needs.guard.outputs.deferred != 'true'" <<<"$REFRESH_JOB" \
    && [ -n "$GUARD_JOB" ] \
-   && ! grep -qE "$GO_TOOLING|actions/checkout|PUBLIC_MIRROR_APP_|create-github-app-token" <<<"$GUARD_JOB"; then
-  ok "the guard job runs first, with no checkout, no Go tooling and no App credential"
+   && ! grep -qE "$GO_TOOLING|PUBLIC_MIRROR_APP_|create-github-app-token" <<<"$GUARD_JOB"; then
+  ok "the guard job runs first, with no Go tooling and no App credential"
 else
   bad "the guard job is missing, is not a gate on refresh, or does more than query pull requests"
 fi
