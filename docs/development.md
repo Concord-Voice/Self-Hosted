@@ -226,8 +226,8 @@ python3 .github/scripts/check-base-images.py
 ```
 
 It checks every tracked path that contains `dockerfile` in any letter case. It
-needs no Docker daemon and no network. It runs as a pre-commit hook when a
-commit touches a Dockerfile, the manifest or the checker, and in the
+needs no Docker daemon and no network. It runs as a pre-commit hook on every
+commit, so deleting or renaming a Dockerfile is caught too, and in the
 `workflow-lint` CI job. That job is advisory: a failure shows red on the pull
 request but does not block the merge.
 

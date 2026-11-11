@@ -289,14 +289,16 @@ repos:
 
       # Every image source in a tracked Dockerfile must match the identity
       # declared in .github/base-images.json. Standard library only, no daemon,
-      # no network. The trigger ignores letter case, like the checker's own
-      # listing. pass_filenames is false on purpose: the checker reads the whole
-      # tracked set, and a FILE list would report every other entry as stale.
+      # no network. It runs on every commit (about 0.05 s): pre-commit leaves
+      # deleted files out of its list, so a files: trigger would miss a deleted
+      # or renamed Dockerfile and the stale manifest entry it leaves behind.
+      # pass_filenames is false on purpose: the checker reads the whole tracked
+      # set, and a FILE list would report every other entry as stale.
       - id: check-base-images
         name: base images match their declared identity
         entry: python3 .github/scripts/check-base-images.py
         language: system
-        files: '((?i:dockerfile)|^\.github/base-images\.json$|^\.github/scripts/check-base-images\.py$)'
+        always_run: true
         pass_filenames: false
       - id: test-check-base-images
         name: base-image identity check self-test
