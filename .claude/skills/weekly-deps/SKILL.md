@@ -139,9 +139,16 @@ gh pr list \
   --search "author:app/github-actions is:open" \
   --json number,title,labels,headRefName,mergeable,mergeStateStatus,statusCheckRollup,files,reviews,reviewRequests,isDraft,createdAt,updatedAt \
   --limit 20
+
+# App-authored routine PRs (the weekly Go transitive flush). These match neither
+# author query above, so find them by label.
+gh pr list \
+  --search 'label:"routine: go-transitive-hygiene" is:open' \
+  --json number,title,labels,headRefName,mergeable,mergeStateStatus,statusCheckRollup,files,reviews,reviewRequests,isDraft,createdAt,updatedAt \
+  --limit 20
 ```
 
-**Note on the search query:** the two calls cannot be combined into `author:app/dependabot author:app/github-actions` — GitHub treats multiple `author:` qualifiers as AND, not OR, which returns empty. Always use two separate calls and union the results.
+**Note on the search query:** the two calls cannot be combined into `author:app/dependabot author:app/github-actions` — GitHub treats multiple `author:` qualifiers as AND, not OR, which returns empty. Always use separate calls and union the results.
 
 The `reviews` and `reviewRequests` fields are load-bearing for re-entrant detection: if Copilot has already been requested (Phase 3.6) or already reviewed (Phase 4.0), the second invocation of the skill picks that up and routes accordingly.
 
