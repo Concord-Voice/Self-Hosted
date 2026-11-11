@@ -118,7 +118,7 @@ func readRecordedVersion(ctx context.Context, db *sql.DB) (st Status, err error)
 
 	// nosemgrep: go.lang.security.audit.database.string-formatted-query.string-formatted-query -- identifiers are quoted with pq.QuoteIdentifier
 	versionSQL := `SELECT version, dirty FROM ` + qualified // #nosec G202 -- both identifiers are quoted with pq.QuoteIdentifier
-	rows, err := tx.QueryContext(ctx, versionSQL)           // NOSONAR -- go:S2077: both identifiers are quoted with pq.QuoteIdentifier; a table name cannot be a bind parameter
+	rows, err := tx.QueryContext(ctx, versionSQL)
 	if err != nil {
 		return Status{}, fmt.Errorf("read migration version: %w", err)
 	}
