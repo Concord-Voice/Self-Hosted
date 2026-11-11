@@ -218,14 +218,15 @@ verification, and commissioning live in the dedicated
 
 `.github/base-images.json` declares which image each stage of each tracked
 Dockerfile is built from: registry, repository and a tag pattern. A static
-check compares every `FROM` and every `COPY --from=` with it:
+check compares every `FROM`, every `COPY --from=` and every
+`RUN --mount=...,from=` with it:
 
 ```bash
 python3 .github/scripts/check-base-images.py
 ```
 
-It runs in pre-commit and in the `workflow-lint` CI job. It needs no Docker
-daemon and no network.
+It runs in the `workflow-lint` CI job. It needs no Docker daemon and no
+network.
 
 | Change | Manifest edit |
 |---|---|
@@ -236,16 +237,30 @@ daemon and no network.
 | New `COPY --from=<build context>` | Add the name to `build_contexts` |
 
 Every image reference needs a tag and a `@sha256:` digest. The check refuses a
-reference built from an `ARG`, a `COPY --from=` that names an external image,
-and an `# escape=` directive. A `# syntax=` directive must equal the `syntax`
-value in the manifest entry.
+reference built from an `ARG`, and a `COPY --from=` or mount that names an
+external image. A `# syntax=` directive must equal the `syntax` value in the
+manifest entry.
+
+The check also refuses what it cannot read the way BuildKit does: a heredoc
+(any `<<`), an `# escape=` directive, a line that starts with `//`, a quoted or
+backslash-escaped flag such as `COPY "--from=x"`, a control character, and a
+non-ASCII character outside a comment line.
 
 The manifest has a code owner. A pull request that changes a Dockerfile and
 its manifest entry together passes the check, so review of the manifest diff
 is the control: read it as a change of supplier.
 
-The check does not verify image signatures, image contents, or `image:`
-references in Compose files.
+The check reads text and nothing else. It does not cover:
+
+- Image signatures and image contents.
+- Whether a digest belongs to its tag. A digest-only edit can point a stage at
+  another flavor of the same repository, so review a digest change as well.
+- `image:` references in Compose files, and build contexts supplied from
+  outside the Dockerfile (Compose `additional_contexts`,
+  `docker build --build-context`), which can replace a named context or an
+  image.
+- A Dockerfile whose path does not contain `Dockerfile`, a Dockerfile written
+  inline by a script, and `ADD` from a URL or a git repository.
 
 ### Database Migrations
 

@@ -127,7 +127,7 @@ expect_fail fail-stage-alias-dropped      stage-mismatch       "a dropped alias 
 expect_fail fail-stage-alias-added        stage-mismatch       "an added alias is refused"
 expect_fail fail-stage-image-for-scratch  stage-mismatch       "an image where the manifest says scratch is refused"
 expect_fail fail-stage-scratch-for-image  stage-mismatch       "scratch where the manifest says an image is refused"
-expect_fail fail-stage-heredoc-from       stage-mismatch       "a FROM-looking line in a heredoc body counts as a stage"
+expect_fail fail-stage-heredoc-from       heredoc,stage-mismatch "a FROM-looking line inside a heredoc body is a stage, and the heredoc is refused"
 
 echo ""
 echo "── must fail (exit 2, could not complete) ──"
@@ -146,6 +146,37 @@ dyn not-json 'FROM scratch\n'
 printf 'this is not json\n' > "$WORK/not-json/manifest.json"
 run "$WORK/not-json"
 expect_exit2 "a manifest that is not JSON is refused" "not valid JSON"
+
+# Inputs that BuildKit reads differently from a naive line parser. Each one hid
+# an image from an earlier version of the checker. Built here because the
+# repository's own hooks would rewrite a CR or a control byte in a fixture.
+EVIL="evil.example/base:1@${DIGEST}"
+HEAD_LINE="FROM ${IMAGE} AS builder"
+dyn hidden-double-backslash "${HEAD_LINE}"'\nENV PAD=x\\\\\nFROM '"${EVIL}"'\n'
+expect_fail "$WORK/hidden-double-backslash" stage-mismatch       "a doubled backslash at line end does not continue the line, so the next FROM is a stage"
+dyn hidden-lone-cr "${HEAD_LINE}"'\nRUN echo \\\r#c\nFROM '"${EVIL}"'\n'
+expect_fail "$WORK/hidden-lone-cr"          unsupported-character "a lone CR is refused"
+dyn hidden-control-blank "${HEAD_LINE}"'\nRUN echo a \\\n\x1f\nFROM '"${EVIL}"'\n'
+expect_fail "$WORK/hidden-control-blank"    unsupported-character "a control byte that Python reads as a blank line is refused"
+dyn hidden-heredoc "${HEAD_LINE}"'\nRUN <<\x27#END\x27\ntrue \\\n#END\nFROM '"${EVIL}"'\n'
+expect_fail "$WORK/hidden-heredoc"          heredoc              "a heredoc is refused, whatever its body hides"
+dyn flag-quoted "${HEAD_LINE}"'\nCOPY --fr"o"m='"${EVIL}"' /a /b\n'
+expect_fail "$WORK/flag-quoted"             external-copy-source "a quoted --from flag is refused"
+dyn flag-escaped "${HEAD_LINE}"'\nCOPY --fr\\om='"${EVIL}"' /a /b\n'
+expect_fail "$WORK/flag-escaped"            external-copy-source "a backslash-escaped --from flag is refused"
+# A quoted word can hold a space, so splitting on blanks would stop reading flags
+# one word early and never reach the --from behind it.
+dyn flag-behind-quoted-space "${HEAD_LINE}"'\nCOPY --chown="a b" --from='"${EVIL}"' /a /b\n'
+expect_fail "$WORK/flag-behind-quoted-space" external-copy-source "a --from behind a quoted flag that holds a space is refused"
+dyn mount-quoted-field "${HEAD_LINE}"'\nRUN --mount=type=bind,"from='"${EVIL}"'",target=/m true\n'
+expect_fail "$WORK/mount-quoted-field"      external-copy-source "a quoted from= field in --mount is refused"
+dyn flag-after-cr "${HEAD_LINE}"'\nCOPY\r--from='"${EVIL}"' /a /b\n'
+expect_fail "$WORK/flag-after-cr"           unsupported-character "a CR used as a word separator is refused"
+dyn flag-after-nbsp-byte "${HEAD_LINE}"'\nCOPY --exclude=x\xc3\xa0--from='"${EVIL}"' /a /b\n'
+expect_fail "$WORK/flag-after-nbsp-byte"    unsupported-character "a non-ASCII character in an instruction is refused"
+dyn slash-directive-joined '// escape=\\\n// syntax=evil.example/frontend:1\n'"${HEAD_LINE}"'\n'
+expect_fail "$WORK/slash-directive-joined"  syntax-directive     "a // syntax= line hidden behind a // continuation is refused"
+
 
 dyn unreadable 'FROM scratch\n'
 rm "$WORK/unreadable/app.dockerfile"
@@ -176,6 +207,8 @@ dyn trailing-blank "FROM ${IMAGE} AS \\\\ \\t\\nbuilder\\n"
 expect_pass "$WORK/trailing-blank"          "a continuation backslash followed by blanks continues the line"
 dyn crlf "FROM ${IMAGE} \\\\\\r\\nAS builder\\r\\n"
 expect_pass "$WORK/crlf"                    "CRLF line endings, including a continuation"
+dyn comment-non-ascii '# caf\xc3\xa9 \xe2\x80\x94 a note\n'"${HEAD_LINE}"'\n'
+expect_pass "$WORK/comment-non-ascii"       "non-ASCII text in a comment line is allowed"
 dyn bom "\\xef\\xbb\\xbfFROM ${IMAGE} AS builder\\n"
 expect_pass "$WORK/bom"                     "a UTF-8 byte order mark before the first instruction"
 

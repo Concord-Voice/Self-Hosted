@@ -11,8 +11,10 @@ daemon, no network.
 Exit 0: no violations. Exit 1: violations, one "<file>:<line>: <rule>: <message>"
 line each on stdout. Exit 2: the check could not complete, message on stderr.
 
-The parser is fail-closed: it may see more instructions than Docker does, never
-fewer. Heredoc bodies are not skipped, and "# escape=" is refused.
+The parser reads lines, continuations and flag words the way BuildKit does, and
+refuses what it cannot read that way: a heredoc, "# escape=", a line that starts
+with "//", a control character, a non-ASCII character outside a comment line,
+and a quoted or escaped flag.
 """
 
 import argparse
@@ -26,9 +28,15 @@ import traceback
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.realpath(__file__))))
 DIGEST = re.compile(r"sha256:[0-9a-f]{64}")
 DIRECTIVE = re.compile(r"#\s*(syntax|escape)\s*=\s*(.*)", re.IGNORECASE)
-CONTINUATION = re.compile(r"\\[ \t]*$")
-# BuildKit also reads the syntax directive from a line that starts with "//".
-SLASH_SYNTAX = re.compile(r"//\s*syntax\s*=", re.IGNORECASE)
+# BuildKit: a backslash ends the line as a continuation unless another backslash
+# precedes it.
+CONTINUATION = re.compile(r"(?<!\\)\\[ \t]*$")
+# Refused anywhere: C0 controls except tab (a lone CR included), DEL, C1 controls,
+# the Unicode line separators and a byte order mark inside the file. Python and
+# BuildKit disagree on which of these are blank or end a word.
+CONTROL = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u2028\u2029\ufeff]")
+QUOTING = re.compile(r"[\"'\\]")
+BLANK = " \t"
 ENTRY_KEYS = {"stages", "build_contexts", "syntax"}
 IMAGE_KEYS = {"registry", "repository", "tag"}
 
@@ -117,7 +125,7 @@ def parse(text):
     directives, instructions = [], []
     pending = None  # [first line, text so far] while a continuation is open
     for number, line in enumerate(text.split("\n"), 1):
-        stripped = line.strip()
+        stripped = line.strip(BLANK)
         if pending is None:
             if stripped.startswith("#"):
                 match = DIRECTIVE.fullmatch(stripped)
@@ -167,19 +175,28 @@ def split_reference(ref):
 
 
 def sources(keyword, args):
-    """Yield the names given to --from= (COPY, ADD) or --mount=...,from= (RUN) in the leading flags."""
+    """Yield (name, quoted) for each --from= (COPY, ADD) and --mount=...,from= (RUN) in the leading flags.
+
+    BuildKit removes quotes and backslashes from a flag word before it reads it,
+    so a word is a flag when it starts with "--" after that removal. quoted is
+    True for such a word; the caller refuses it instead of guessing its value.
+    """
     for token in args.split():
-        if not token.startswith("--"):
+        plain = QUOTING.sub("", token)
+        if not plain.startswith("--"):
             return
-        flag, _, value = token.partition("=")
+        if plain != token:
+            yield token, True
+            continue
+        flag, _, value = plain.partition("=")
         flag = flag.lower()
         if flag == "--from" and keyword in ("copy", "add"):
-            yield value
+            yield value, False
         elif flag == "--mount" and keyword == "run":
-            for field in value.strip("\"'").split(","):
+            for field in value.split(","):
                 key, _, name = field.partition("=")
-                if key.strip().lower() == "from":
-                    yield name.strip("\"'")
+                if key.lower() == "from":
+                    yield name, False
 
 
 # ── rules ───────────────────────────────────────────────────────────────────
@@ -210,6 +227,21 @@ def check_image(path, line, ref, want):
 
 
 def check_file(path, text, entry):
+    unreadable = False
+    for number, line in enumerate(text.split("\n"), 1):
+        start = line.lstrip(BLANK)
+        if CONTROL.search(line) or not (line.isascii() or start.startswith("#")):
+            violation(
+                path,
+                number,
+                "unsupported-character",
+                "a control character, or a non-ASCII character outside a comment line",
+            )
+            unreadable = True
+        elif start.startswith("//"):
+            violation(path, number, "syntax-directive", "a line that starts with // can carry a BuildKit directive")
+    if unreadable:
+        return  # the lines below cannot be split the way BuildKit splits them
     directives, instructions = parse(text)
     declared = entry.get("syntax")
     for line, key, value in directives:
@@ -226,15 +258,22 @@ def check_file(path, text, entry):
     contexts = entry.get("build_contexts", [])
     aliases, from_lines = [], []  # one item per FROM seen so far
     for line, body in instructions:
-        if SLASH_SYNTAX.match(body.strip()):
-            violation(path, line, "syntax-directive", "the // form of the syntax directive is not allowed")
-            continue
+        if "<<" in body:
+            violation(path, line, "heredoc", "a heredoc (or any <<) is not supported; its body can hide instructions")
         keyword, args = (body.split(None, 1) + [""])[:2]
         if keyword.lower() == "onbuild":  # the trigger's source is pulled by a child build
             keyword, args = (args.split(None, 1) + ["", ""])[:2]
         keyword = keyword.lower()
         if keyword != "from":
-            for source in sources(keyword, args):
+            for source, quoted in sources(keyword, args):
+                if quoted:
+                    violation(
+                        path,
+                        line,
+                        "external-copy-source",
+                        f"flag {source} is quoted or escaped and cannot be checked",
+                    )
+                    continue
                 earlier = len(aliases) - 1  # stages 0..earlier-1 precede the current one
                 if not (
                     source.lower() in aliases[:-1]
@@ -288,11 +327,16 @@ def check_file(path, text, entry):
 
 
 def read_text(path):
+    """Return the file's text with CRLF as LF and a leading BOM dropped, as BuildKit reads it.
+
+    Binary mode on purpose: text mode would turn a lone CR into a line break.
+    """
     try:
-        with open(path, encoding="utf-8-sig") as fh:  # utf-8-sig drops a BOM, as Docker does
-            return fh.read()
+        with open(path, "rb") as fh:
+            text = fh.read().decode("utf-8-sig")
     except (OSError, ValueError) as err:
         raise CheckError(f"cannot read {path}: {err}") from err
+    return text.replace("\r\n", "\n")
 
 
 def tracked_files(root):

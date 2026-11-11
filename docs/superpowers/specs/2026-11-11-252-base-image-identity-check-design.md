@@ -71,11 +71,17 @@ Rules:
 | `external-copy-source` | `COPY --from=` or `RUN --mount=…from=` names something that is not an earlier stage alias, an earlier stage index, or a declared build context |
 | `syntax-directive` | a `# syntax=` directive is absent from the manifest, or differs from it |
 | `escape-directive` | a `# escape=` directive is present |
+| `heredoc` | an instruction contains `<<` |
+| `unsupported-character` | the file holds a control character (a lone CR included), or a non-ASCII character outside a comment line |
 
-Parsing choices, all of them fail-closed:
+Parsing choices. The parser splits lines, continuations and flag words the way BuildKit does, and refuses an input it cannot split that way:
 
-- Instructions are case-insensitive. A line that ends in `\` followed by optional spaces or tabs continues on the next line, as Docker does.
-- Heredoc bodies are not skipped. A body line that looks like `FROM` is counted as a stage and fails `stage-mismatch`. The parser can see more instructions than Docker does, never fewer.
+- Instructions are case-insensitive. A line that ends in `\` followed by optional spaces or tabs continues on the next line, unless another `\` precedes that backslash. This is BuildKit's rule.
+- The file is read as bytes. CRLF is a line end; a lone CR is a control character. Control characters are refused, and so is a non-ASCII character outside a comment line, because Python and BuildKit disagree on which of them are blank or end a word.
+- A heredoc is refused. Its body is opaque to a line parser and can hide an instruction or forge one. No tracked Dockerfile uses one.
+- A flag word is a word that starts with `--` after quotes and backslashes are removed, which is how BuildKit reads it. A flag word that carries a quote or a backslash is refused under `external-copy-source`.
+- A line that starts with `//` fails `syntax-directive`: BuildKit also reads the syntax directive from that form.
+- `ONBUILD` is stripped before an instruction is read, so `ONBUILD COPY --from=` is checked.
 - `# escape=` is refused because a different escape character would make the continuation rule above wrong.
 - A `FROM` that names an earlier stage is not supported. It fails `missing-tag`. No tracked Dockerfile does this.
 - `--platform=` and other `FROM` flags are not image references. `$BUILDPLATFORM` there is allowed.
@@ -101,6 +107,10 @@ Parsing choices, all of them fail-closed:
 - The contents of an image.
 - `image:` references in compose files, and images pulled by scripts.
 - A pull request that edits the manifest and a Dockerfile together. Code-owner review of the manifest is the control.
+- Whether a digest belongs to its tag. A digest-only edit can point a stage at another flavor of the same repository while the tag text stays the same. The check reads text; it does not query a registry.
+- A build context supplied from outside the Dockerfile. Compose `additional_contexts` and `docker build --build-context` can point a named context, a stage name or an image name at another image.
+- A build from a file whose path does not contain `Dockerfile`, and a Dockerfile written inline by a script.
+- `ADD` from a URL or a git repository.
 
 ## Deviation from the issue
 
@@ -111,6 +121,8 @@ The issue asked for a cross-check of the `os` values in the `container-image-sca
 `.github/scripts/tests/check-base-images.test.sh`, hermetic, with one fixture directory per case under `.github/scripts/tests/fixtures/base-images/`. Fixture files are not named `Dockerfile*`.
 
 Must fail, each with its own rule name: digest-only `FROM` with no tag; registry not in the manifest; missing digest; flavor swap under one image name (Alpine to Debian); `ARG`-templated reference; `COPY --from=` an external image; a Dockerfile absent from the manifest; a stale manifest entry; a changed `# syntax=` directive; an `# escape=` directive; an extra stage; an unanchored tag pattern (exit 2).
+
+Must fail, added after the branch review, each an input BuildKit reads differently from a naive line parser: a doubled backslash at line end before a `FROM`; a lone CR; a control byte on a line of its own inside a continuation; a heredoc; a quoted `--from`; a backslash-escaped `--from`; a quoted `from=` field in `--mount`; a `--from` behind a quoted flag that holds a space; a CR or a non-ASCII byte used as a word separator; a `// syntax=` line behind a `//` continuation.
 
 Must pass: the current tree; a digest-only bump; a same-flavor patch bump; `FROM scratch`; a `--platform=$BUILDPLATFORM` flag; a declared build context; a line continuation inside `FROM`.
 
