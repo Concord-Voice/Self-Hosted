@@ -775,11 +775,18 @@ class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
         jobs = self.wrapper["jobs"]
         lint = jobs["base-image-lint"]
         self.assertEqual(lint["permissions"], {"contents": "read"})
-        self.assertEqual(lint["steps"][0]["with"], {"fetch-depth": "2", "persist-credentials": "false"})
-        check = lint["steps"][1]["run"]
-        # The checker is read from the base, never the PR it judges.
-        self.assertIn("git show HEAD^1:.github/scripts/check-base-images.py", check)
-        self.assertIn('python3 -I "$RUNNER_TEMP/check-base-images.py" --root "$GITHUB_WORKSPACE"', check)
+        pr_checkout, protected_checkout, check_step = lint["steps"]
+        self.assertEqual(pr_checkout["with"], {"persist-credentials": "false", "path": "pr"})
+        # The checker comes from the protected workflow revision, never the PR it judges.
+        self.assertEqual(protected_checkout["with"]["ref"], "${{ fromJSON(toJSON(job)).workflow_sha }}")
+        self.assertEqual(protected_checkout["with"]["repository"],
+                         "${{ fromJSON(toJSON(job)).workflow_repository }}")
+        self.assertEqual(protected_checkout["with"]["persist-credentials"], "false")
+        self.assertEqual(protected_checkout["with"]["path"], "protected")
+        check = check_step["run"]
+        self.assertIn('"$(git -C protected rev-parse HEAD)" != "$WORKFLOW_SHA"', check)
+        self.assertIn('python3 -I protected/.github/scripts/check-base-images.py --root "$GITHUB_WORKSPACE/pr"',
+                      check)
         require = next(s for s in jobs["result"]["steps"]
                        if s.get("name") == "Require protected verdict and warning publication")
         self.assertEqual(require["env"]["BASE_IMAGE_LINT_RESULT"], "${{ needs.base-image-lint.result }}")

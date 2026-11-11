@@ -231,9 +231,11 @@ commit, so deleting or renaming a Dockerfile is caught too. In CI it runs
 twice:
 
 - The `Protected base-image identity check` job of the required PR build
-  blocks the merge. It runs the checker from the base commit against the pull
+  blocks the merge. It runs the checker from protected `main` against the pull
   request's Dockerfiles and manifest, so a change to the checker takes effect
-  only after it merges.
+  only after it merges. Keep a checker change compatible with the current
+  manifest and Dockerfiles. If it cannot be, land it in two pull requests: the
+  checker first, then the manifest or Dockerfiles that need it.
 - The `workflow-lint` job runs the pull request's own copy. It is advisory, and
   it is where a change to the checker is tested.
 
