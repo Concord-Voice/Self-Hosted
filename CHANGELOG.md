@@ -75,6 +75,7 @@ Android.
 
 ### Fixed
 
+- **Redis:** With managed Redis credentials (`REDIS_CREDENTIAL_MODE=managed`), the control plane may now use the Admin Console's step-up handles for server actions and read (but not write) the voice-join pause. Without them, step-up-gated server actions could never complete and a voice-join pause was not enforced.
 - **Account authority:** Recovery ceremonies can sign and add a succession that clears a delegation halt, while other commands and malformed trust inputs remain refused. Removed an obsolete private-policy citation that blocked importing the server changes into Hosted.
 
 - **Authentication:** Removed the compiled `authority-ceremony` binary that was committed with the tool's source. Build the tool from source; build outputs are now ignored.
