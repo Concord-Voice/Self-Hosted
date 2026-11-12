@@ -301,8 +301,10 @@ fi
 # managed production or staging host; every other branch above forced
 # control-plane-single. While it is off nothing that reads these runs a new
 # command or changes any output. The rail needs the flock backend (its nested
-# flip re-enters on fd 9) and cannot share a host with the media colours; the
-# managed lock state directory is checked once its path is known. The cutover
+# flip re-enters on fd 9) and cannot share a host with the media colours or the
+# Activity History cluster; the managed lock state directory is checked once
+# its path is known. West staging forces control-plane-single above, so the
+# rail is never on beside the stage nginx render. The cutover
 # marker exists only while a cutover is in flight and drives recovery; the live
 # vhost is the rail's only record of the active control-plane port and is the
 # same path as nginx-reload's NGINX_DST.
@@ -313,15 +315,21 @@ if [[ "$CONTROL_PLANE_DEPLOY_PROFILE" == control-plane-bluegreen \
     echo 'control-plane-bluegreen: rail-refused-media-bluegreen' >&2
     exit 2
   fi
+  # Green beside home is a second replica, which the Activity History cluster
+  # rollout does not admit. Either canonical writer enabling it refuses.
+  if [[ "$ACTIVITY_HISTORY_DEPLOY_WRITER_GATE" == true \
+     || "$(canonical_identity_value "${CONFIG_ROOT}/.env" ACTIVITY_HISTORY_CLUSTER_ENABLED || true)" == true ]]; then
+    echo 'control-plane-bluegreen: rail-refused-activity-history-cluster' >&2
+    exit 2
+  fi
   [[ -x /usr/bin/flock ]] || { echo 'control-plane-bluegreen: rail-refused-no-flock' >&2; exit 2; }
   CONTROL_PLANE_BLUEGREEN=1
 fi
 CONTROL_PLANE_CUTOVER_MARKER="${CONFIG_DEPLOY_DIR}/.control-plane-cutover.local"
 CONTROL_PLANE_LIVE_VHOST="/etc/nginx/sites-available/concordvoice"
-# The host nginx master's pid file: the distribution package's path (its
-# nginx.conf `pid` and its unit's PIDFile). Each flip waits, at most this many
-# seconds, for that master to run a worker it did not run before the reload.
-CONTROL_PLANE_NGINX_PID_FILE="/run/nginx.pid"
+# Each flip waits, at most this many seconds, for the host nginx master
+# (systemd's main PID of the nginx unit) to run a worker it did not run before
+# the reload.
 readonly CONTROL_PLANE_FLIP_WORKER_WAIT_SECS=15
 [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" == selfhost ]] || export COMPOSE_PROFILES
 if [[ "$ACTIVITY_HISTORY_CONTRACT_MODE" != selfhost ]]; then
@@ -5664,9 +5672,14 @@ control_plane_bluegreen_reap_green() {
 # status` (a fresh container of that image; see control_plane_cli) exits 0 and
 # prints exactly the one line `current <n>`. Any other answer, including the
 # usage error (64) of an image too old to know the subcommand, is not proof.
+# Returns 3 when the status run exits 3 (the image reports the schema not
+# current) and 1 for any other answer (it could not report the status). The
+# status run's stderr is left as it is.
 control_plane_bluegreen_schema_current() {
-  local out re=$'^current [0-9]+\n$'
-  out="$(control_plane_cli migrations status </dev/null && printf x)" || return 1
+  local out rc=0 re=$'^current [0-9]+\n$'
+  out="$(control_plane_cli migrations status </dev/null && printf x)" || rc=$?
+  (( rc != 3 )) || return 3
+  (( rc == 0 )) || return 1
   [[ "${out%x}" =~ $re ]]
 }
 
@@ -5679,13 +5692,14 @@ control_plane_bluegreen_nginx_reload() {
   "$0" "$CONTROL_PLANE_FLIP_REENTRY_MARKER" nginx-reload --control-plane-upstream "$1"
 }
 
-# The PIDs of the nginx master's children, one per line; none when no master
-# pid file exists (nginx is stopped; the reload starts it). An unreadable pid
-# file or a failed pgrep returns 1.
+# The PIDs of the nginx master's children, one per line. The master is the
+# nginx unit's main PID as systemd reports it (the controller drives nginx
+# through systemctl, so no pid-file path is assumed). A failed read, a main PID
+# that is not a positive integer (0: the unit is not running) or a failed pgrep
+# returns 1.
 control_plane_bluegreen_nginx_workers() {
-  local master='' rc=0
-  [[ -e "$CONTROL_PLANE_NGINX_PID_FILE" ]] || return 0
-  read -r master <"$CONTROL_PLANE_NGINX_PID_FILE" || [[ -n "$master" ]] || return 1
+  local master rc=0
+  master="$(systemctl show -p MainPID --value nginx)" || return 1
   [[ "$master" =~ ^[1-9][0-9]*$ ]] || return 1
   pgrep -P "$master" || rc=$?
   (( rc <= 1 ))
@@ -5873,6 +5887,7 @@ control_plane_bluegreen_resume() {
   if activity_history_wait_control_plane 'http://127.0.0.1:8081/readyz' \
      && control_plane_bluegreen_schema_current; then
     echo 'rebuild: resuming the interrupted blue-green cutover'
+    privacy_defaults_refuse_foreign_control_plane || exit 1
     control_plane_bluegreen_home_back 'green serves on 8081'
     return 0
   fi
@@ -5886,12 +5901,33 @@ control_plane_bluegreen_resume() {
   control_plane_bluegreen_home_back "$none"
 }
 
+# No marker and nginx on 8080: a green that outlived its marker (removed by
+# hand) would be a second control-plane, which the drained check counts after
+# home stops. One `docker ps -a` by name, matched exactly as the green probe
+# below is; green is removed only when listed. A failed listing is
+# recovery-ambiguous with nothing changed.
+control_plane_bluegreen_reap_leftover() {
+  local name=concordvoice-control-plane-green names line found=0
+  if ! names="$(docker ps -a --filter "name=$name" --format '{{.Names}}')"; then
+    control_plane_bluegreen_fail recovery-ambiguous \
+      'nginx routes the control plane to 8080, whether a leftover green exists cannot be read and nothing was changed'
+  fi
+  while IFS= read -r line; do
+    [[ "$line" == "$name" ]] && found=1
+  done <<<"$names"
+  (( found )) || return 0
+  echo 'rebuild: removing a leftover green (no cutover marker; nginx routes to 8080)'
+  control_plane_bluegreen_reap_green || control_plane_bluegreen_fail old-colour-stop-failed \
+    'nginx routes the control plane to 8080 and a leftover green could not be removed'
+}
+
 # The recovery pre-step of `rebuild` with the rail on, called with the
 # effective scope (none for a full or escalated rebuild) immediately before
 # activity_history_routine_guard. Nothing here starts a container, so none is
 # started ahead of that first-activation boundary. It acts only when the
 # cutover marker exists or nginx routes the control plane to 8081; otherwise it
-# returns after one file test and one file read. By the live port:
+# returns after one file test, one file read and, on 8080, one leftover-green
+# listing (control_plane_bluegreen_reap_leftover). By the live port:
 #   unparseable   recovery-ambiguous (the marker is present), nothing changed;
 #   8080          green is not serving: remove it, clear the marker, go on (the
 #                 rebuild may cut over afresh);
@@ -5917,7 +5953,9 @@ control_plane_bluegreen_recover() {
   local none='nginx routes the control plane to 8081, where nothing serves'
   control_plane_bluegreen_marker_refuse_invalid
   if ! control_plane_bluegreen_marker_present; then
-    if ! port="$(control_plane_bluegreen_live_port)" || [[ "$port" != 8081 ]]; then
+    port="$(control_plane_bluegreen_live_port)" || return 0
+    if [[ "$port" == 8080 ]]; then
+      control_plane_bluegreen_reap_leftover
       return 0
     fi
   elif ! port="$(control_plane_bluegreen_live_port)"; then
@@ -5993,7 +6031,7 @@ control_plane_bluegreen_recover() {
 # Each flip and the stop that follows it run with HUP, INT, TERM and PIPE
 # ignored: an interrupt there would leave nginx on one colour with both running.
 control_plane_bluegreen_cutover() {
-  local built green running line member=0 traps image
+  local built green running line member=0 traps image status_rc=0
   control_plane_bluegreen_marker_refuse_invalid
   if control_plane_bluegreen_marker_present; then
     control_plane_bluegreen_resume
@@ -6003,8 +6041,12 @@ control_plane_bluegreen_cutover() {
     control_plane_bluegreen_not_taken 'the live nginx upstream cannot be read'
     return 10
   fi
-  if ! control_plane_bluegreen_schema_current; then
-    control_plane_bluegreen_not_taken 'the new image does not report the schema current'
+  control_plane_bluegreen_schema_current || status_rc=$?
+  if (( status_rc == 3 )); then
+    control_plane_bluegreen_not_taken 'the new image reports the schema not current'
+    return 10
+  elif (( status_rc != 0 )); then
+    control_plane_bluegreen_not_taken 'the new image could not report the migration status'
     return 10
   fi
   privacy_defaults_refuse_foreign_control_plane || exit 1
@@ -6349,8 +6391,11 @@ validate_control_plane_flip_reentry() {
   control_plane_bluegreen_marker_valid || return 1
   [[ -x /usr/bin/flock ]] || return 1
   [[ /dev/fd/9 -ef "$DEPLOY_TRANSACTION_LOCK_PATH" ]] || return 1
-  /usr/bin/flock -n "$DEPLOY_TRANSACTION_LOCK_PATH" -c : || probe_rc=$?
-  [[ "$probe_rc" -eq 1 ]] || return 1
+  # A fresh open file description must meet contention (200 only for that):
+  # `flock -c` would run its command through the caller's $SHELL, and a shell
+  # that fails made an unheld lock look held.
+  ( exec 7<"$DEPLOY_TRANSACTION_LOCK_PATH" && /usr/bin/flock -n -E 200 7 ) || probe_rc=$?
+  [[ "$probe_rc" -eq 200 ]] || return 1
   /usr/bin/flock -n 9
 }
 
@@ -8369,16 +8414,18 @@ else:
       selfhost_storage_stop_stale_minio || exit 1
     fi
     voice_enforcement_rollout_stop_media || exit 1
+    # An interrupted cutover can leave the green one-off running, and stopping
+    # the service set does not reach it. It is removed first: `compose down`
+    # would find it still attached to the project network. A failed removal
+    # stops nothing else. The marker stays: the next `rebuild control-plane`
+    # recovers.
+    if (( CONTROL_PLANE_BLUEGREEN )) && control_plane_bluegreen_marker_present; then
+      control_plane_bluegreen_reap_green || exit 1
+    fi
     if [[ "$REDIS_CREDENTIAL_MODE" == managed ]]; then
       cd "$DEPLOY_DIR" && managed_compose_mutate stop || exit 1
     else
       cd "$DEPLOY_DIR" && managed_compose_mutate down || exit 1
-    fi
-    # An interrupted cutover can leave the green one-off running, and stopping
-    # the service set does not reach it. The marker stays: the next
-    # `rebuild control-plane` recovers.
-    if (( CONTROL_PLANE_BLUEGREEN )) && control_plane_bluegreen_marker_present; then
-      control_plane_bluegreen_reap_green || exit 1
     fi
     echo "Done."
     ;;

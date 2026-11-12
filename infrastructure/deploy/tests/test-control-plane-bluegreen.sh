@@ -65,9 +65,6 @@ fixture_rewrite '     && [[ "$DEPLOY_TRANSACTION_LOCK_PATH" != /var/lib/concord/
   "     && [[ \"\$DEPLOY_TRANSACTION_LOCK_PATH\" != $TMP/lock/* ]]; then"
 fixture_rewrite 'CONTROL_PLANE_LIVE_VHOST="/etc/nginx/sites-available/concordvoice"' \
   "CONTROL_PLANE_LIVE_VHOST=\"$TMP/live/concordvoice\""
-#   4b. CONTROL_PLANE_NGINX_PID_FILE (the flip's worker wait reads it) -> $TMP
-fixture_rewrite 'CONTROL_PLANE_NGINX_PID_FILE="/run/nginx.pid"' \
-  "CONTROL_PLANE_NGINX_PID_FILE=\"$TMP/nginx.pid\""
 #   5. the rail's managed-lock admission (rail-refused-no-state-dir) -> $TMP/lock
 # shellcheck disable=SC2016
 fixture_rewrite 'if (( CONTROL_PLANE_BLUEGREEN )) && [[ "$DEPLOY_TRANSACTION_LOCK_PATH" != /var/lib/concord/* ]]; then' \
@@ -123,7 +120,11 @@ for tool in docker curl nginx systemctl flock nc sudo; do
 #!/usr/bin/env bash
 tool="$tool"
 argv="\$*"
-printf '%s %s\n' "\$tool" "\$argv" >>"$TMP/calls"
+log="$TMP/calls"
+# The flip's worker wait reads nginx's main PID: a read-only poll, logged
+# beside pgrep's so the goldens pin only the calls that change state.
+[[ "\$tool \$argv" != 'systemctl show -p MainPID --value nginx' ]] || log="$TMP/pgrep.calls"
+printf '%s %s\n' "\$tool" "\$argv" >>"\$log"
 if [[ -f "$TMP/rules.err.\$tool" ]]; then
   while IFS='|' read -r pat text; do
     # shellcheck disable=SC2254
@@ -158,6 +159,9 @@ if [[ -f "$TMP/rules.out.\$tool" ]]; then
     case "\$argv" in \$pat) printf '%b' "\$text"; break ;; esac
   done <"$TMP/rules.out.\$tool"
 fi
+# A case that needs the tool's real effect installs $TMP/exec.<tool>, run
+# after the rules (an exit rule still wins).
+[[ ! -x "$TMP/exec.\$tool" ]] || exec "$TMP/exec.\$tool" "\$@"
 exit 0
 STUB
   chmod +x "$STUBS/$tool"
@@ -1038,11 +1042,12 @@ guards_unchanged_from_baseline() {
   if [[ -z "$bad" ]]; then pass "guards_unchanged_from_baseline"; else fail "guards_unchanged_from_baseline:$bad"; fi
 }
 
-# Rail on, no marker: a non-control-plane rebuild is byte-identical to rail off.
+# Rail on, no marker, nginx on 8080: a non-control-plane rebuild is
+# byte-identical to rail off but for the pre-step's one leftover-green listing.
 marker_absent_no_extra_calls() {
   need_flock marker_absent_no_extra_calls || return 0
   local off_t off_o off_rc
-  rm -f "$PLAIN_MARKER" "$RAIL_MARKER"
+  rm -f "$PLAIN_MARKER" "$RAIL_MARKER" "$LIVE_VHOST"
   reset_nats
   run_ctl rebuild nats
   off_rc=$rc off_t="$(rail_transcript)" off_o="$(rail_out)"
@@ -1050,7 +1055,8 @@ marker_absent_no_extra_calls() {
   run_ctl_at "$RAIL_CTL" rebuild nats
   # Mutation that turns this red: make any call from the marker guard before its
   # marker test (for example a docker ps probe for green).
-  if [[ $off_rc -eq 0 && $rc -eq 0 && -n "$off_t" && "$(rail_transcript)" == "$off_t" && "$(rail_out)" == "$off_o" ]]; then
+  if [[ $off_rc -eq 0 && $rc -eq 0 && -n "$off_t" && "$(rail_out)" == "$off_o" \
+     && "$(rail_transcript)" == "$(insert_after "$off_t" "$C ps --status running -q -- nats" "$LEFTOVER_PS")" ]]; then
     pass "marker_absent_no_extra_calls"
   else
     fail "marker_absent_no_extra_calls off-rc=$off_rc on-rc=$rc"
@@ -1144,9 +1150,11 @@ stop_with_marker_reaps_green_and_keeps_marker() {
   reset_stubs
   : >"$RAIL_MARKER"
   run_ctl_at "$RAIL_STOP_CTL" stop
-  # Mutations: drop the reap (the last calls are compose's); remove the marker.
-  [[ $rc -eq 0 && "$(tail -n 2 "$TMP/calls")" == "$want" && -e "$RAIL_MARKER" ]] \
-    || bad+=" reap:rc=$rc,last=$(tail -n 2 "$TMP/calls" | tr '\n' ';')"
+  # Green is removed before `compose down`, which would otherwise find it on
+  # the project network.
+  # Mutations: drop the reap; reap after the down; remove the marker.
+  [[ $rc -eq 0 && "$(rail_transcript | tail -n 3)" == "$want"$'\n'"$T0_COMPOSE down" && -e "$RAIL_MARKER" ]] \
+    || bad+=" reap:rc=$rc,last=$(rail_transcript | tail -n 3 | tr '\n' ';')"
   # Green already gone: both calls report No such container; stop succeeds.
   # Mutation: treat a missing green as a failure.
   reset_stubs
@@ -1163,7 +1171,7 @@ stop_with_marker_reaps_green_and_keeps_marker() {
   stub_exit docker "stop -t 45 $GREEN" 1
   run_ctl_at "$RAIL_STOP_CTL" stop
   [[ $rc -eq 1 && -e "$RAIL_MARKER" ]] && saw 'Cannot connect to the Docker daemon' \
-    || bad+=" daemon-error:rc=$rc: $(brief_out)"
+    && ! grep -q ' down$' "$TMP/calls" || bad+=" daemon-error:rc=$rc: $(brief_out)"
   rm -f "$RAIL_MARKER"
   if [[ -z "$bad" ]]; then pass "stop_with_marker_reaps_green_and_keeps_marker"; else fail "stop_with_marker_reaps_green_and_keeps_marker:$bad"; fi
 }
@@ -1210,6 +1218,32 @@ fixture_rewrite 'readonly CONTROL_PLANE_FLIP_WORKER_WAIT_SECS=15' \
   'readonly CONTROL_PLANE_FLIP_WORKER_WAIT_SECS=2'
 printf '%s\n' "$src" >"$CUT_CTL"
 chmod +x "$CUT_CTL"
+# Nested-nginx twin (rewrite 9): the real nested nginx-reload past the managed
+# identity admission (which returns 0 here, as the stop twins' helpers do),
+# with the live vhost, its candidate and backup in $TMP/live, the admin vhost
+# in $TMP/ngx-admin and no /opt/concord/.env. The rail project gets the
+# shipped vhost source the render reads.
+NGX_CTL="$RAIL_PROJECT/infrastructure/deploy/concord-ctl-nginx.sh"
+src="$(cat "$RAIL_CTL")"
+fixture_rewrite 'managed_core_identity_admit() {' 'managed_core_identity_admit() { return 0; }
+managed_core_identity_admit_fixture_unused() {'
+fixture_rewrite '    NGINX_DST="/etc/nginx/sites-available/concordvoice"' "    NGINX_DST=\"$TMP/live/concordvoice\""
+fixture_rewrite '    NGINX_CANDIDATE="/etc/nginx/sites-available/.concordvoice.candidate"' \
+  "    NGINX_CANDIDATE=\"$TMP/live/.concordvoice.candidate\""
+fixture_rewrite '    NGINX_BACKUP="/etc/nginx/sites-available/.concordvoice.backup"' \
+  "    NGINX_BACKUP=\"$TMP/live/.concordvoice.backup\""
+fixture_rewrite '    ADMIN_DST="/etc/nginx/conf.d/concord-admin.conf"' "    ADMIN_DST=\"$TMP/ngx-admin/concord-admin.conf\""
+fixture_rewrite '    ADMIN_CANDIDATE="/etc/nginx/conf.d/.concord-admin.candidate"' \
+  "    ADMIN_CANDIDATE=\"$TMP/ngx-admin/.concord-admin.candidate\""
+fixture_rewrite '    ADMIN_BACKUP="/etc/nginx/conf.d/.concord-admin.backup"' \
+  "    ADMIN_BACKUP=\"$TMP/ngx-admin/.concord-admin.backup\""
+# shellcheck disable=SC2016
+fixture_rewrite '    CONCORD_ENV_FILE="${CONCORD_ENV_FILE:-/opt/concord/.env}"' \
+  "    CONCORD_ENV_FILE=\"$TMP/no-concord-env\""
+printf '%s\n' "$src" >"$NGX_CTL"
+chmod +x "$NGX_CTL"
+mkdir -p "$RAIL_PROJECT/infrastructure/deploy/nginx"
+cp "$ROOT/infrastructure/deploy/nginx/concordvoice.conf" "$RAIL_PROJECT/infrastructure/deploy/nginx/"
 # ctlflip <port>: with $TMP/ctlflip.sleep.<port> (seconds) it records
 # $TMP/ctlflip.started and sleeps first. Like the real re-entry it refuses
 # (exit 1) without the cutover marker. With $TMP/ctlflip.fail.<port> it exits
@@ -1240,7 +1274,7 @@ awk -v port="\$1" '\$0 == "    server 127.0.0.1:8080;" { \$0 = "    server 127.0
   || printf '%s\n' "\$(( \$(cat "$TMP/nginx.gen" 2>/dev/null || echo 0) + 1 ))" >"$TMP/nginx.gen"
 STUB
 chmod +x "$STUBS/ctlflip"
-# pgrep -P <master>: the nginx master (4242, from $TMP/nginx.pid) has one
+# pgrep -P <master>: the nginx master (4242, systemd's MainPID) has one
 # worker per generation, PID 1000 + $TMP/nginx.gen. It logs to its own file,
 # $TMP/pgrep.calls: the worker wait is a read-only poll, and the goldens pin
 # only the order of the calls that change state.
@@ -1268,6 +1302,7 @@ GREEN_REAP="$GREEN_STOP"$'\n'"$GREEN_RM"
 GREEN_LOGS="docker logs --tail 200 $GREEN"
 GREEN_SAVE="$GREEN_LOGS"$'\n'"docker inspect --format {{json .State}} $GREEN"
 PORT_PROBE='nc -z -w2 127.0.0.1 8081'
+LEFTOVER_PS="docker ps -a --filter name=$GREEN --format {{.Names}}"
 GREEN_LOG_DIR="$RAIL_PROJECT/infrastructure/deploy"
 # The T0 golden through the build: what precedes the hook.
 CUT_PREFIX="$(cat <<GOLDEN
@@ -1316,7 +1351,7 @@ cut_prepare() {
   reset_stubs
   rm -rf "$RAIL_MARKER"
   rm -f "$LIVE_VHOST" "$TMP"/ctlflip.* "$TMP"/pgrep.* "$TMP/nginx.gen" "$GREEN_LOG_DIR"/.control-plane-green-*.log
-  printf '4242\n' >"$TMP/nginx.pid"
+  stub_out systemctl 'show -p MainPID --value nginx' '4242\n'
 }
 cut_defaults() {
   # Nothing listens on 8081 (nc -z fails).
@@ -1353,7 +1388,7 @@ drained_ok() {
   t="$(rail_transcript)"
   [[ $rc -eq 0 && "$(tail -n 5 <<<"$t")" == "$DRAINED_TAIL" && ! -e "$RAIL_MARKER" ]] && saw 'Done.' \
     && grep -qFx -- "$C build control-plane" <<<"$t" && ! grep -q '^ctlflip ' <<<"$t" \
-    && { [[ "${1:-}" == allow-green ]] || ! grep -qF -e ' run --detach ' -e "$GREEN" <<<"$t"; }
+    && { [[ "${1:-}" == allow-green ]] || ! grep -vFx -- "$LEFTOVER_PS" <<<"$t" | grep -qF -e ' run --detach ' -e "$GREEN"; }
 }
 # named_error <name>: exit 1, the named line, then a line that names the
 # recovery command.
@@ -1413,7 +1448,9 @@ cutover_only_for_exact_scope() {
     cut_prepare
     stub_out docker '*ps --status running -q -- nats' 'ab12ab12ab12\n'
     run_cut_at "$CUT_CTL" rebuild "${v[@]}"
-    [[ $rc -eq $off_rc && -n "$off_t" && "$(rail_transcript)" == "$off_t" && "$(rail_out)" == "$off_o" ]] \
+    # The pre-step's leftover-green listing is the one rail-on call.
+    [[ $rc -eq $off_rc && -n "$off_t" && "$(rail_transcript | grep -vFx -- "$LEFTOVER_PS")" == "$off_t" \
+       && $(ncalls "$LEFTOVER_PS") -eq 1 && "$(rail_out)" == "$off_o" ]] \
       && ! grep -qF -e ' run --detach ' -e 'migrations status' -e ctlflip <<<"$off_t" \
       || bad+=" [$spec off-rc=$off_rc on-rc=$rc]"
   done
@@ -1435,30 +1472,37 @@ cutover_not_run_with_rail_off() {
   fi
 }
 
-# gate_status <case> (<code> <stdout>)...: each status answer takes the
-# drained path with nothing started.
+# gate_status <case> <reason> (<code> <stdout>)...: each status answer takes
+# the drained path with nothing started, after the status run (the positive
+# control: a refusal before the gate would also look drained), naming <reason>.
+STATUS_NOT_CURRENT='the new image reports the schema not current'
+STATUS_UNREPORTED='the new image could not report the migration status'
 gate_status() {
-  local name="$1" bad=''
+  local name="$1" reason="$2" bad=''
   need_flock "$name" || return 0
-  shift
+  shift 2
   while (( $# >= 2 )); do
     cut_prepare
     stub_reply docker "$STATUS_PAT" "$1" "$2"
     run_cut_at "$CUT_CTL" rebuild control-plane
-    drained_ok || bad+=" [$1:$2 rc=$rc: $(brief_out)]"
+    { drained_ok && has_call "$STATUS_RUN" \
+      && saw "rebuild: blue-green cutover not taken ($reason); taking the drained path"; } \
+      || bad+=" [$1:$2 rc=$rc: $(brief_out)]"
     shift 2
   done
   if [[ -z "$bad" ]]; then pass "$name"; else fail "$name:$bad"; fi
 }
 gate_cases() {
   # Mutation: match the status line with `^current( [0-9]+)?$`.
-  gate_status gate_status_bare_current 0 'current\n'
+  gate_status gate_status_bare_current "$STATUS_UNREPORTED" 0 'current\n'
   # Mutation: test only the first line of the status output.
-  gate_status gate_status_extra_line 0 'current 12\nextra\n'
-  # Mutation (second answer): ignore the status run's exit code.
-  gate_status gate_status_exit_3 3 'pending 11 12\n' 3 'current 12\n'
-  gate_status gate_status_exit_64 64 '' 64 'current 12\n'
-  gate_status gate_status_exit_1 1 '' 1 'current 12\n'
+  gate_status gate_status_extra_line "$STATUS_UNREPORTED" 0 'current 12\nextra\n'
+  # Mutation (second answer): ignore the status run's exit code. Exit 3 is
+  # "not current"; any other failure could not report (one reason for both
+  # turns either red).
+  gate_status gate_status_exit_3 "$STATUS_NOT_CURRENT" 3 'pending 11 12\n' 3 'current 12\n'
+  gate_status gate_status_exit_64 "$STATUS_UNREPORTED" 64 '' 64 'current 12\n'
+  gate_status gate_status_exit_1 "$STATUS_UNREPORTED" 1 '' 1 'current 12\n'
 }
 
 gate_live_port_unparseable() {
@@ -1802,6 +1846,10 @@ nats_running() { stub_out docker '*ps --status running -q -- nats' 'ab12ab12ab12
 insert_after() {
   INS="$3" awk -v l="$2" '{ print } !done && $0 == l { print ENVIRON["INS"]; done = 1 }' <<<"$1"
 }
+# Without a marker and with nginx on 8080 the pre-step lists a leftover green
+# once (all states, by name), after the scope probe; with a marker it does not.
+CUT_HAPPY_MARKED="$CUT_HAPPY"
+CUT_HAPPY="$(insert_after "$CUT_HAPPY_MARKED" "$CP_PS" "$LEFTOVER_PS")"
 # The pre-step's calls follow the scope probe (the first $CP_PS) and precede
 # the guard's config render. Green running: green probe, one probe of green's
 # /readyz (ready), home stop. Both unready: the same with one probe of home's.
@@ -1812,15 +1860,16 @@ both_unready() {
   stub_exit curl '*8081/readyz' 22
   stub_reply curl '*8080/readyz' 22 '' once
 }
-RESUME_READY="$(printf '%s\n' "$RESUME_HEAD" "$CURL_8081" "$STATUS_RUN" "$HOME_UP" "$CURL_8080" 'ctlflip 8080' "$GREEN_REAP")"
+# The ready resume: gate, foreign guard, home up, gate, flip back, reap.
+RESUME_READY="$(printf '%s\n' "$RESUME_HEAD" "$CURL_8081" "$STATUS_RUN" "$DAEMON_PS" "$CP_PS" "$HOME_UP" "$CURL_8080" 'ctlflip 8080' "$GREEN_REAP")"
 # The drained resume: foreign guard, reap, drained check, home up, gate, flip
 # back (its reap finds green already removed).
 RESUME_DRAINED_TAIL="$(printf '%s\n' "$DAEMON_PS" "$CP_PS" "$GREEN_REAP" "$DAEMON_PS" "$HOME_UP" "$CURL_8080" 'ctlflip 8080' "$GREEN_REAP")"
 # resumed_ok: exit 0 with Done., marker cleared, nginx back on 8080.
 resumed_ok() { [[ $rc -eq 0 && ! -e "$RAIL_MARKER" ]] && saw 'Done.' && live_is 8080; }
 
-recover_no_marker_live_8080_is_noop_no_docker_call() {
-  need_flock recover_no_marker_live_8080_is_noop_no_docker_call || return 0
+recover_no_marker_live_8080_one_docker_call() {
+  need_flock recover_no_marker_live_8080_one_docker_call || return 0
   local off_rc off_t off_o bad=''
   cut_prepare
   nats_running
@@ -1830,15 +1879,15 @@ recover_no_marker_live_8080_is_noop_no_docker_call() {
   live_at 8080
   nats_running
   run_cut_at "$CUT_CTL" rebuild nats
-  [[ $off_rc -eq 0 && $rc -eq 0 && -n "$off_t" && "$(rail_transcript)" == "$off_t" && "$(rail_out)" == "$off_o" ]] \
-    || bad+=" [nats off-rc=$off_rc on-rc=$rc]"
+  [[ $off_rc -eq 0 && $rc -eq 0 && -n "$off_t" && "$(rail_transcript)" == "$(insert_after "$off_t" "$NATS_PS" "$LEFTOVER_PS")" \
+     && "$(rail_out)" == "$off_o" ]] || bad+=" [nats off-rc=$off_rc on-rc=$rc]"
   cut_prepare
   live_at 8080
   run_cut_at "$CUT_CTL" rebuild control-plane
   [[ $rc -eq 0 && "$(rail_transcript)" == "$CUT_HAPPY" ]] || bad+=" [control-plane rc=$rc: $(brief_out)]"
-  # Mutation that turns this red: query docker for green in the pre-step
-  # before its marker and live-port test.
-  if [[ -z "$bad" ]]; then pass "recover_no_marker_live_8080_is_noop_no_docker_call"; else fail "recover_no_marker_live_8080_is_noop_no_docker_call:$bad"; fi
+  # Mutation that turns this red: make any other docker call in the pre-step
+  # (for example reap green whenever the listing runs).
+  if [[ -z "$bad" ]]; then pass "recover_no_marker_live_8080_one_docker_call"; else fail "recover_no_marker_live_8080_one_docker_call:$bad"; fi
 }
 
 recover_marker_unparseable_refuses() {
@@ -1867,7 +1916,7 @@ recover_live_8080_reaps_and_continues() {
   run_cut_at "$CUT_CTL" rebuild control-plane
   # Mutation that turns this red: leave the marker in the 8080 arm (the hook
   # then resumes instead of cutting over afresh).
-  if [[ "$(rail_transcript)" == "$(insert_after "$CUT_HAPPY" "$CP_PS" "$GREEN_REAP")" ]] && resumed_ok; then
+  if [[ "$(rail_transcript)" == "$(insert_after "$CUT_HAPPY_MARKED" "$CP_PS" "$GREEN_REAP")" ]] && resumed_ok; then
     cut_report recover_live_8080_reaps_and_continues ok
   else
     cut_report recover_live_8080_reaps_and_continues bad
@@ -2030,7 +2079,7 @@ recover_live_8081_green_unready_goes_drained_then_flips_home() {
 recover_live_8081_green_unready_home_ready_flips_home() {
   need_flock recover_live_8081_green_unready_home_ready_flips_home || return 0
   local want
-  want="$(insert_after "$CUT_HAPPY" "$CP_PS" "$GREEN_PS"$'\n'"$CURL_8081"$'\n'"$CURL_8080"$'\n''ctlflip 8080'$'\n'"$GREEN_REAP")"
+  want="$(insert_after "$CUT_HAPPY_MARKED" "$CP_PS" "$GREEN_PS"$'\n'"$CURL_8081"$'\n'"$CURL_8080"$'\n''ctlflip 8080'$'\n'"$GREEN_REAP")"
   cut_prepare
   : >"$RAIL_MARKER"
   live_at 8081
@@ -2104,7 +2153,7 @@ foreign_project_refused_before_green_start() {
   # Mutation that turns this red: drop `privacy_defaults_refuse_foreign_control_plane
   # || exit 1` from control_plane_bluegreen_cutover (green starts and the
   # round trip runs beside the foreign control-plane).
-  if [[ $rc -eq 1 && "$(rail_transcript)" == "$(printf '%s\n' "$CUT_PREFIX" "$STATUS_RUN" "$DAEMON_PS" "$CP_PS")" \
+  if [[ $rc -eq 1 && "$(rail_transcript)" == "$(insert_after "$CUT_PREFIX" "$CP_PS" "$LEFTOVER_PS"; printf '%s\n' "$STATUS_RUN" "$DAEMON_PS" "$CP_PS")" \
      && ! -e "$RAIL_MARKER" ]] && saw "$FOREIGN_REFUSAL" \
      && ! grep -qE -e ' run --detach ' -e '^ctlflip ' -e ' stop ' <<<"$(rail_transcript)"; then
     cut_report foreign_project_refused_before_green_start ok
@@ -2346,6 +2395,15 @@ flip_waits_for_new_nginx_workers() {
   { named_error flip-failed && [[ -e "$RAIL_MARKER" ]] && ! grep -q '^ctlflip ' "$TMP/calls" \
     && ! has_call "$HOME_STOP"; } || bad+=" [unreadable rc=$rc: $(brief_out)]"
   rm -f "$RAIL_MARKER"
+  # systemd reports no main PID for nginx (0: the unit is not running): the
+  # same, and the master is read from systemd, not a pid file.
+  cut_prepare
+  stub_reply systemctl 'show -p MainPID --value nginx' 0 '0\n'
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  { named_error flip-failed && [[ -e "$RAIL_MARKER" ]] && ! grep -q '^ctlflip ' "$TMP/calls" \
+    && ! has_call "$HOME_STOP" && grep -qF 'the nginx workers cannot be listed' "$TMP/out"; } \
+    || bad+=" [no-main-pid rc=$rc: $(brief_out)]"
+  rm -f "$RAIL_MARKER"
   # Mutation that turns this red: return the nested nginx-reload's status
   # without the new-worker wait.
   if [[ -z "$bad" ]]; then pass "flip_waits_for_new_nginx_workers"; else fail "flip_waits_for_new_nginx_workers:$bad"; fi
@@ -2381,6 +2439,325 @@ os.execvp(sys.argv[1], sys.argv[1:])' bash "$CUT_CTL" rebuild control-plane >"$T
   else
     fail "pipe_during_flip_still_stops started=$started rc=$rc: $(brief_out)"
   fi
+}
+
+# ---------------------------------------------------------------------------
+# Rail admission, re-entry and the remaining branches (review batch B).
+
+# D1: the rail refuses at selection when either canonical writer enables the
+# Activity History cluster. Checked before flock, so this runs on every host.
+CLUSTER_REFUSED='control-plane-bluegreen: rail-refused-activity-history-cluster'
+rail_refused_activity_history_cluster() {
+  local root="$RAIL_PROJECT/.env" probe bad=''
+  reset_stubs
+  with_env_line "$RAIL_ENV" "ACTIVITY_HISTORY_CLUSTER_ENABLED='true'" run_ctl_at "$RAIL_CTL" rebuild control-plane
+  refused_exactly 2 "$CLUSTER_REFUSED" || bad+=" [deploy.env.local rc=$rc: $(brief_out)]"
+  reset_stubs
+  cp "$root" "$TMP/root-env.bak"
+  sed 's/^ACTIVITY_HISTORY_CLUSTER_ENABLED=false$/ACTIVITY_HISTORY_CLUSTER_ENABLED=true/' "$TMP/root-env.bak" >"$root"
+  run_ctl_at "$RAIL_CTL" rebuild control-plane
+  cp "$TMP/root-env.bak" "$root"
+  refused_exactly 2 "$CLUSTER_REFUSED" || bad+=" [.env rc=$rc: $(brief_out)]"
+  # Control: with the rail off the cluster setting changes nothing here.
+  probe="$(with_env_line "$PLAIN_ENV" "ACTIVITY_HISTORY_CLUSTER_ENABLED='true'" \
+    head_probe "$PROJECT" COMPOSE_OVERRIDE=docker-compose.production.yml)"
+  [[ "$probe" == "$T0_PROBE" ]] || bad+=" [rail-off probe=$probe]"
+  # Mutation that turns this red: drop the cluster refusal (or read only one writer).
+  if [[ -z "$bad" ]]; then pass "rail_refused_activity_history_cluster"; else fail "rail_refused_activity_history_cluster:$bad"; fi
+}
+
+# West staging forces control-plane-single whatever deploy.env.local selects,
+# so the rail (and the cutover) is never on beside the stage nginx render.
+# The admitted stage identity is read from the controller, not restated here.
+switch_forced_single_on_west_staging() {
+  local ws="$TMP/ws-project" pair name value key probe
+  local -A keys=([stage_target]=DEPLOY_TARGET_ID [stage_role]=DEPLOY_ROLE [stage_site]=SITE_ID
+    [stage_host]=DEPLOY_CANONICAL_HOST [stage_public_ip]=PUBLIC_IP [stage_environment]=ENVIRONMENT
+    [stage_domain]=DOMAIN [stage_private_address]=STAGE_PRIVATE_ADDRESS)
+  mkdir -p "$ws/infrastructure/deploy"
+  : >"$ws/.env"
+  # shellcheck disable=SC2016
+  while IFS= read -r pair; do
+    [[ "$pair" =~ ^\"\$([a-z_]+)\"\ !=\ (.+)$ ]] || continue
+    name="${BASH_REMATCH[1]}" value="${BASH_REMATCH[2]}"
+    key="${keys[$name]-}"
+    [[ -n "$key" ]] && printf '%s=%s\n' "$key" "$value" >>"$ws/.env"
+  done < <(sed -n '/^  if \[\[ "\$stage_target" != /,/; then$/p' "$CTL_SRC" | grep -oE '"\$stage_[a-z_]+" != [^ ]+')
+  cp "$ws/.env" "$ws/infrastructure/deploy/deploy.env.local"
+  printf '%s\n' 'COMPOSE_OVERRIDE=docker-compose.west-staging.yml' \
+    "CONTROL_PLANE_DEPLOY_PROFILE='control-plane-bluegreen'" >>"$ws/infrastructure/deploy/deploy.env.local"
+  sed -n '1,/^COMPOSE_CMD=/p' "$CTL" >"$ws/infrastructure/deploy/$HEAD_NAME"
+  probe="$(head_probe "$ws")"
+  # Mutation that turns this red: keep the sourced profile in the West staging
+  # branch (the rail turns on, or refuses for want of flock).
+  if [[ $(wc -l <"$ws/.env") -eq 8 && "$probe" == 'rc=0 flag=0 profile=control-plane-single cmd=docker compose '* \
+     && "$probe" == *' -p concord-west-stage '* ]]; then
+    pass "switch_forced_single_on_west_staging"
+  else
+    fail "switch_forced_single_on_west_staging keys=$(wc -l <"$ws/.env") probe=[$probe]"
+  fi
+}
+
+# An invalid exported profile is refused like a sourced one: on managed
+# production every verb exits 2 before it runs anything (pinned behaviour).
+switch_invalid_exported_profile_refuses_status() {
+  reset_stubs
+  export CONTROL_PLANE_DEPLOY_PROFILE=not-a-profile
+  run_ctl status
+  unset CONTROL_PLANE_DEPLOY_PROFILE
+  # Mutation that turns this red: ignore an exported profile (or default an
+  # invalid one to control-plane-single).
+  if refused_exactly 2 "$SWITCH_INVALID"; then
+    pass "switch_invalid_exported_profile_refuses_status"
+  else
+    fail "switch_invalid_exported_profile_refuses_status rc=$rc: $(brief_out)"
+  fi
+}
+
+# The re-entry's held-lock probe must not run through the caller's $SHELL:
+# with SHELL=/bin/false a `flock -c :` probe fails as if the lock were held.
+reentry_unheld_lock_ignores_caller_shell() {
+  need_flock reentry_unheld_lock_ignores_caller_shell || return 0
+  local had=0 old="${SHELL-}"
+  [[ -z "${SHELL+x}" ]] || had=1
+  reset_stubs
+  : >"$RAIL_MARKER"
+  export SHELL=/bin/false
+  flip_run unheld "$RAIL_CTL" "$FLIP_MARKER" nginx-reload --control-plane-upstream 8081
+  if (( had )); then export SHELL="$old"; else unset SHELL; fi
+  # Mutation that turns this red: probe with `flock -n <path> -c :`.
+  expect_flip_rejected reentry_unheld_lock_ignores_caller_shell
+}
+
+# Recovery's `docker ps` for green fails: recovery-ambiguous, nothing changed.
+recover_green_probe_failure_is_ambiguous() {
+  need_flock recover_green_probe_failure_is_ambiguous || return 0
+  cut_prepare
+  : >"$RAIL_MARKER"
+  live_at 8081
+  stub_exit docker "ps --filter name=$GREEN *" 1
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: read a failed `docker ps` as green not running.
+  if named_error recovery-ambiguous && [[ -f "$RAIL_MARKER" && "$(last_calls 1)" == "$GREEN_PS" \
+     && "$(mutating_calls)" == 0 ]] && live_is 8081 && ! grep -q '^ctlflip ' "$TMP/calls"; then
+    cut_report recover_green_probe_failure_is_ambiguous ok
+  else
+    cut_report recover_green_probe_failure_is_ambiguous bad
+  fi
+  rm -f "$RAIL_MARKER"
+}
+
+# The drained resume: green's reap fails (old-colour-stop-failed), or home is
+# not drained after it (home-not-ready). Either keeps the marker and starts
+# nothing.
+resume_drained_branch_failures() {
+  need_flock resume_drained_branch_failures || return 0
+  local bad=''
+  cut_prepare
+  : >"$RAIL_MARKER"
+  live_at 8081
+  green_running
+  both_unready
+  stub_err docker "stop -t 45 $GREEN" 'Cannot connect to the Docker daemon\n'
+  stub_exit docker "stop -t 45 $GREEN" 1
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  { named_error old-colour-stop-failed && [[ -f "$RAIL_MARKER" && "$(last_calls 1)" == "$GREEN_STOP" ]] \
+    && has_call "$HOME_STOP" && ! has_call "$HOME_UP" && live_is 8081; } || bad+=" [reap rc=$rc: $(brief_out)]"
+  cut_prepare
+  : >"$RAIL_MARKER"
+  live_at 8081
+  green_running
+  both_unready
+  # The foreign guard's daemon-wide list is empty; the drained check's is not.
+  stub_reply docker 'ps --filter label=com.docker.compose.service=control-plane *' 0 '' once
+  stub_out docker 'ps --filter label=com.docker.compose.service=control-plane *' 'c0ffee000001\n'
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  { named_error home-not-ready && [[ -f "$RAIL_MARKER" && "$(last_calls 1)" == "$DAEMON_PS" ]] \
+    && has_call "$GREEN_STOP" && ! has_call "$HOME_UP" && live_is 8081; } \
+    || bad+=" [drained rc=$rc: $(brief_out)]"
+  rm -f "$RAIL_MARKER"
+  # Mutations that turn this red: ignore either status in the drained resume.
+  if [[ -z "$bad" ]]; then pass "resume_drained_branch_failures"; else fail "resume_drained_branch_failures:$bad"; last_calls 6 >&2; fi
+}
+
+# The recovery's marker write (green absent or running, no marker) and clear
+# (the 8080 arm, and the flip home after nothing serves on 8081) failing.
+recover_marker_write_and_clear_failures() {
+  need_flock recover_marker_write_and_clear_failures || return 0
+  local dir="$RAIL_PROJECT/infrastructure/deploy" g p bad=''
+  if [[ "$(id -u)" == 0 ]]; then
+    printf 'SKIP: recover_marker_write_and_clear_failures (running as root; a read-only directory cannot be simulated)\n'
+    return 0
+  fi
+  for g in absent running; do
+    cut_prepare
+    live_at 8081
+    [[ "$g" == absent ]] || green_running
+    chmod a-w "$dir"
+    run_cut_at "$CUT_CTL" rebuild control-plane
+    chmod u+w "$dir"
+    { named_error cutover-incomplete && grep -qF 'the cutover marker could not be written and nothing was changed' "$TMP/out" \
+      && [[ ! -e "$RAIL_MARKER" && "$(mutating_calls)" == 0 ]] && live_is 8081 && ! grep -q '^ctlflip ' "$TMP/calls"; } \
+      || bad+=" [write green-$g rc=$rc: $(brief_out)]"
+  done
+  for p in 8080 8081; do
+    cut_prepare
+    : >"$RAIL_MARKER"
+    live_at "$p"
+    chmod a-w "$dir"
+    run_cut_at "$CUT_CTL" rebuild control-plane
+    chmod u+w "$dir"
+    { named_error cutover-incomplete && grep -qF 'but the cutover marker could not be removed' "$TMP/out" \
+      && [[ -f "$RAIL_MARKER" ]] && live_is 8080 && has_call "$GREEN_STOP" && ! has_call "$HOME_STOP" \
+      && ! has_call "$C build control-plane"; } || bad+=" [clear live-$p rc=$rc: $(brief_out)]"
+  done
+  rm -f "$RAIL_MARKER"
+  # Mutation that turns this red: ignore the marker write's or clear's status
+  # in the pre-step.
+  if [[ -z "$bad" ]]; then pass "recover_marker_write_and_clear_failures"; else fail "recover_marker_write_and_clear_failures:$bad"; fi
+}
+
+# The built image cannot be resolved (its inspect fails, or reports an ID
+# that is not sha256 hex): the drained path, nothing started.
+gate_built_image_unresolvable() {
+  need_flock gate_built_image_unresolvable || return 0
+  local leg bad=''
+  for leg in inspect-failed non-hex; do
+    cut_prepare
+    if [[ "$leg" == inspect-failed ]]; then
+      stub_reply docker 'image inspect --format {{.Id}} cp:fixture' 1 ''
+    else
+      stub_reply docker 'image inspect --format {{.Id}} cp:fixture' 0 'sha256:B1B1\n'
+    fi
+    run_cut_at "$CUT_CTL" rebuild control-plane
+    { drained_ok && has_call 'docker image inspect --format {{.Id}} cp:fixture' \
+      && saw 'rebuild: blue-green cutover not taken (the built control-plane image cannot be resolved); taking the drained path'; } \
+      || bad+=" [$leg rc=$rc: $(brief_out)]"
+  done
+  # Mutation that turns this red: drop the sha256 hex test on the image ID.
+  if [[ -z "$bad" ]]; then pass "gate_built_image_unresolvable"; else fail "gate_built_image_unresolvable:$bad"; fi
+}
+
+# The real nested nginx-reload --control-plane-upstream (NGX_CTL). While
+# $TMP/exec.sudo exists the sudo stub runs the file steps (install, mv, ln, rm,
+# test) for real, install without its root ownership, and refuses any absolute
+# path outside $TMP; nginx -t and systemctl keep the stub's rules.
+write_exec_sudo() {
+  cat >"$TMP/exec.sudo" <<EXEC
+#!/usr/bin/env bash
+cmd="\$1"
+shift
+case "\$cmd" in
+  /usr/bin/install|/usr/bin/mv|/usr/bin/ln|/bin/rm|/usr/bin/test) ;;
+  *) exit 0 ;;
+esac
+args=()
+while (( \$# )); do
+  if [[ "\$cmd" == /usr/bin/install && ( "\$1" == -o || "\$1" == -g ) ]]; then shift 2; continue; fi
+  if [[ "\$1" == /* && "\$1" != "$TMP"/* ]]; then echo "exec.sudo: refusing \$1" >&2; exit 97; fi
+  args+=("\$1")
+  shift
+done
+exec "\${cmd##*/}" "\${args[@]}"
+EXEC
+  chmod +x "$TMP/exec.sudo"
+}
+NGX_RELOAD='sudo /bin/systemctl reload nginx'
+NGX_BACKUP="$TMP/live/.concordvoice.backup"
+ngx_prepare() {
+  reset_stubs
+  rm -rf "$RAIL_MARKER" "$TMP/ngx-admin"
+  rm -f "$TMP"/live/.concordvoice.*
+  mkdir -p "$TMP/ngx-admin"
+  : >"$RAIL_MARKER"
+  live_at 8080
+  cp "$LIVE_VHOST" "$TMP/live.8080"
+  write_exec_sudo
+  stub_out curl '*/nginx-health' 'HTTP/1.1 200 OK\nStrict-Transport-Security: max-age=63072000; includeSubDomains; preload\n'
+}
+# cp_server_in_block <port>: the live vhost's control_plane upstream names <port>.
+cp_server_in_block() {
+  awk -v want="    server 127.0.0.1:$1;" '$0 == "upstream control_plane {" { b = 1; next }
+    b && $0 == "}" { b = 0 } b && $0 == want { f = 1 } END { exit !f }' "$LIVE_VHOST"
+}
+ngx_debris() { find "$TMP/live" -name '.concordvoice.*' | grep -q .; }
+nested_flip_real_nginx_reload() {
+  need_flock nested_flip_real_nginx_reload || return 0
+  local bad=''
+  # (a) 8081 is rendered inside the control_plane upstream, activated, reloaded.
+  ngx_prepare
+  flip_run genuine "$NGX_CTL" "$FLIP_MARKER" nginx-reload --control-plane-upstream 8081
+  { [[ "$rc" == 0 ]] && cp_server_in_block 8081 && ! live_is 8080 && [[ $(grep -cFx "$NGX_RELOAD" "$TMP/calls") -eq 1 ]] \
+    && ! ngx_debris; } || bad+=" [8081 rc=$rc: $(brief_out)]"
+  # (b) The reload fails once: the previous (8080) vhost is restored and reloaded.
+  ngx_prepare
+  stub_reply sudo '/bin/systemctl reload nginx' 1 '' once
+  flip_run genuine "$NGX_CTL" "$FLIP_MARKER" nginx-reload --control-plane-upstream 8081
+  { [[ "$rc" == 1 ]] && cmp -s "$LIVE_VHOST" "$TMP/live.8080" && [[ $(grep -cFx "$NGX_RELOAD" "$TMP/calls") -eq 2 ]] \
+    && ! ngx_debris; } || bad+=" [reload-failed rc=$rc: $(brief_out)]"
+  # (c) Rollback incomplete after the activation: exit 3, whether the restored
+  # vhost reads 8080 (the old configuration's reload failed) or 8081 (the
+  # restore itself failed; the backup is kept).
+  ngx_prepare
+  stub_exit sudo '/bin/systemctl reload nginx' 1
+  flip_run genuine "$NGX_CTL" "$FLIP_MARKER" nginx-reload --control-plane-upstream 8081
+  { [[ "$rc" == 3 ]] && cmp -s "$LIVE_VHOST" "$TMP/live.8080" && saw '  ✗ nginx-reload: automatic rollback was incomplete; operator intervention is required'; } \
+    || bad+=" [re-reload-failed rc=$rc: $(brief_out)]"
+  ngx_prepare
+  stub_reply sudo '/bin/systemctl reload nginx' 1 '' once
+  stub_exit sudo "/usr/bin/mv -fT -- $NGX_BACKUP $LIVE_VHOST" 1
+  flip_run genuine "$NGX_CTL" "$FLIP_MARKER" nginx-reload --control-plane-upstream 8081
+  { [[ "$rc" == 3 ]] && cp_server_in_block 8081 && [[ -f "$NGX_BACKUP" ]] && cmp -s "$NGX_BACKUP" "$TMP/live.8080"; } \
+    || bad+=" [restore-failed rc=$rc: $(brief_out)]"
+  rm -f "$TMP/exec.sudo" "$RAIL_MARKER" "$TMP"/live/.concordvoice.*
+  # Mutations that turn this red: render the flip's port outside the
+  # control_plane block (or not at all); skip the restore after a failed
+  # reload; exit with the failing step's status when the rollback is incomplete.
+  if [[ -z "$bad" ]]; then pass "nested_flip_real_nginx_reload"; else fail "nested_flip_real_nginx_reload:$bad"; fi
+}
+
+# No marker, nginx on 8080, and a green left over (one that outlived a deleted
+# marker): the pre-step removes it before the guard. A failed listing is
+# recovery-ambiguous with nothing changed.
+recover_no_marker_leftover_green_is_reaped() {
+  need_flock recover_no_marker_leftover_green_is_reaped || return 0
+  local bad=''
+  cut_prepare
+  live_at 8080
+  nats_running
+  stub_out docker "ps -a --filter name=$GREEN *" "$GREEN\\n"
+  run_cut_at "$CUT_CTL" rebuild nats
+  { [[ $rc -eq 0 && "$(lines_after "$NATS_PS" 4)" == "$LEFTOVER_PS"$'\n'"$GREEN_REAP"$'\n'"$GUARD_CONFIG" && ! -e "$RAIL_MARKER" ]] \
+    && saw 'rebuild: removing a leftover green (no cutover marker; nginx routes to 8080)'; } || bad+=" [reaped rc=$rc: $(brief_out)]"
+  cut_prepare
+  live_at 8080
+  nats_running
+  stub_exit docker "ps -a --filter name=$GREEN *" 1
+  run_cut_at "$CUT_CTL" rebuild nats
+  { named_error recovery-ambiguous && [[ "$(last_calls 1)" == "$LEFTOVER_PS" && "$(mutating_calls)" == 0 && ! -e "$RAIL_MARKER" ]]; } \
+    || bad+=" [list-failed rc=$rc: $(brief_out)]"
+  # Mutation that turns this red: return from the no-marker 8080 pre-step
+  # without listing (the leftover survives), or reap without listing.
+  if [[ -z "$bad" ]]; then pass "recover_no_marker_leftover_green_is_reaped"; else fail "recover_no_marker_leftover_green_is_reaped:$bad"; fi
+}
+
+foreign_project_refused_on_ready_resume() {
+  need_flock foreign_project_refused_on_ready_resume || return 0
+  cut_prepare
+  : >"$RAIL_MARKER"
+  live_at 8081
+  green_running
+  foreign_running
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: drop the foreign guard from the resume's
+  # ready branch (home starts beside the foreign control-plane).
+  if [[ $rc -eq 1 && "$(rail_transcript)" == "$(printf '%s\n' "$RESUME_HEAD" "$CURL_8081" "$STATUS_RUN" "$DAEMON_PS" "$CP_PS")" \
+     && -e "$RAIL_MARKER" ]] && saw "$FOREIGN_REFUSAL" && live_is 8081; then
+    cut_report foreign_project_refused_on_ready_resume ok
+  else
+    cut_report foreign_project_refused_on_ready_resume bad
+  fi
+  rm -f "$RAIL_MARKER"
 }
 
 char_rebuild_control_plane_transcript
@@ -2446,7 +2823,7 @@ err_home_not_ready_readyz
 err_flip_failed_leg2
 wait_healthy_rail_on_uses_live_port
 wait_healthy_rail_on_unparseable_exits_1
-recover_no_marker_live_8080_is_noop_no_docker_call
+recover_no_marker_live_8080_one_docker_call
 recover_marker_unparseable_refuses
 recover_live_8080_reaps_and_continues
 recover_stale_marker_unscoped_rebuild_continues
@@ -2470,4 +2847,15 @@ err_standby_inspect_failed
 gate_port_8081_in_use
 flip_waits_for_new_nginx_workers
 pipe_during_flip_still_stops
+rail_refused_activity_history_cluster
+switch_forced_single_on_west_staging
+switch_invalid_exported_profile_refuses_status
+reentry_unheld_lock_ignores_caller_shell
+recover_green_probe_failure_is_ambiguous
+resume_drained_branch_failures
+recover_marker_write_and_clear_failures
+gate_built_image_unresolvable
+nested_flip_real_nginx_reload
+recover_no_marker_leftover_green_is_reaped
+foreign_project_refused_on_ready_resume
 exit $((fails > 0))

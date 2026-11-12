@@ -1782,13 +1782,13 @@ Set `CONTROL_PLANE_DEPLOY_PROFILE` in the deploy env file (`deploy.env.local` in
 | `control-plane-single` (default) | Rail off. Today's stop-first rebuild. |
 | `control-plane-bluegreen` | Rail on, on a managed production or staging selection only. |
 
-On a managed production or staging selection, the controller exits 2 before doing anything, for every verb, when the value is invalid. Every other selection, including West staging, forces the rail off and never reads the value. With `control-plane-bluegreen` it also exits 2 when combined with `MEDIA_DEPLOY_PROFILE=media-bluegreen` or `ACTIVITY_HISTORY_CLUSTER_ENABLED=true`, on a host without `/usr/bin/flock`, or on a host without the `/var/lib/concord` deploy state directory.
+On a managed production or staging selection, the controller exits 2 before doing anything, for every verb, when the value is invalid. Every other selection, including West staging, forces the rail off and never reads the value. With `control-plane-bluegreen` it also exits 2 when combined with `MEDIA_DEPLOY_PROFILE=media-bluegreen` or with `ACTIVITY_HISTORY_CLUSTER_ENABLED=true` in either `deploy.env.local` or the root `.env`, on a host without `/usr/bin/flock`, or on a host without the `/var/lib/concord` deploy state directory.
 
 #### The cutover
 
 The cutover runs inside `rebuild` when the rail is on and the rebuild scope is exactly `control-plane`, after the image build. It holds the deploy transaction lock throughout.
 
-1. **Migration gate.** The controller runs `migrations status` (see [development.md](development.md#database-migrations)) in a fresh container of the built image. It overlaps only on exit 0 with stdout `current <n>`. A pending migration, any other answer, or an image too old to have the subcommand takes the stop-first drained path instead, with the brief downtime that path has always had. Green also refuses to start unless the schema is current, so a colour started beside a serving colour never migrates.
+1. **Migration gate.** The controller runs `migrations status` (see [development.md](development.md#database-migrations)) in a fresh container of the built image. It overlaps only on exit 0 with stdout `current <n>`. A pending migration (exit 3, logged as "reports the schema not current"), any other answer, or an image too old to have the subcommand ("could not report the migration status") takes the stop-first drained path instead, with the brief downtime that path has always had. Green also refuses to start unless the schema is current, so a colour started beside a serving colour never migrates.
 2. **Marker.** It writes the cutover marker, an empty regular file at `.control-plane-cutover.local` in the deploy directory. The marker exists only while a cutover is in flight. It then removes any leftover green from an earlier run.
 3. **Port check.** If something already listens on `127.0.0.1:8081` (for example the `tools` profile), the marker is cleared and the drained path runs instead.
 4. **Start green** and wait for its `/readyz`. If green fails here, home is still serving and no user was moved. Before green is removed on a failure, its last 200 log lines and its container state are saved to a mode-0600 file `.control-plane-green-<UTC time>.log` in the deploy directory; the path is printed.
@@ -1810,7 +1810,7 @@ In the steady state the vhost reads 8080, there is no marker and there is no gre
 
 #### Recovery and forcing back
 
-To force the control plane back to home, rerun `rebuild control-plane` with the rail still on. Before its first-activation guard, `rebuild` runs a recovery pre-step whenever the marker exists or the live vhost reads 8081:
+To force the control plane back to home, rerun `rebuild control-plane` with the rail still on. Before its first-activation guard, every `rebuild` with the rail on checks for a leftover green with no marker while the vhost reads 8080, and removes it (a failed listing is `recovery-ambiguous`). It then runs a recovery pre-step whenever the marker exists or the live vhost reads 8081:
 
 | Live port | Recovery |
 |---|---|
@@ -1826,7 +1826,7 @@ The resume runs after the image build, so a bad image left by an interrupted run
 
 While a marker exists, the controller restricts the other locked verbs:
 
-- **Rail on:** only `rebuild`, `nginx-reload`, `stop` and `sudoers-sync` run. Every other locked verb refuses with `cutover-incomplete`. `stop` also removes green and keeps the marker.
+- **Rail on:** only `rebuild`, `nginx-reload`, `stop` and `sudoers-sync` run. Every other locked verb refuses with `cutover-incomplete`. `stop` removes green first and keeps the marker; if green cannot be removed it exits 1 before stopping anything else.
 - **Rail off:** every locked verb except `sudoers-sync` refuses with `rail-off-with-cutover-marker`. Turn the rail back on and rerun `rebuild control-plane` to finish recovery before turning it off.
 
 If a `rebuild control-plane` does not converge, stop everything and rebuild. This causes downtime.
