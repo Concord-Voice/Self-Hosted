@@ -195,7 +195,8 @@ func TestCredentialDisableDenialsEmitAuthenticationEvents(t *testing.T) {
 			}
 			db := sql.OpenDB(mfaEventConnector{state: state})
 			t.Cleanup(func() { require.NoError(t, db.Close()) })
-			h := NewHandler(db, nil, logger.New("test"), nil, "test", nil, "test")
+			_, lockoutRedis := newEnrollmentRedis(t)
+			h := NewHandler(db, lockoutRedis, logger.New("test"), nil, "test", nil, "test")
 			recorder := &securityEventRecorder{}
 			h.SetSecurityEvents(recorder)
 			response := httptest.NewRecorder()
@@ -969,6 +970,9 @@ func (c mfaEventConn) QueryContext(_ context.Context, query string, args []drive
 			return nil, errors.New("raw-error-fixture: forced users-row lock failure")
 		}
 		return &mfaEventRows{values: []driver.Value{nil, c.state.passwordHash}}, nil
+	// stepup.ReserveUserPasswordAttempt's pre-transaction lockout-key read.
+	case strings.Contains(query, "SELECT u.email FROM users AS u"):
+		return &mfaEventRows{values: []driver.Value{mfaEventEmail}}, nil
 	// stepup.LoadSubject's combined read (hash + both P1 EXISTS) — matched
 	// ahead of the two cases below, whose substrings it also contains.
 	case strings.Contains(query, "FROM users u WHERE u.id"):
@@ -987,6 +991,9 @@ func (c mfaEventConn) QueryContext(_ context.Context, query string, args []drive
 		return &mfaEventRows{values: []driver.Value{false, false}}, nil
 	case strings.Contains(query, "SELECT EXISTS"):
 		return &mfaEventRows{values: []driver.Value{c.state.totpExists}}, nil
+	// verifyUserPassword's lockout-keyed read.
+	case strings.Contains(query, "SELECT email, password_hash"):
+		return &mfaEventRows{values: []driver.Value{mfaEventEmail, c.state.passwordHash}}, nil
 	case strings.Contains(query, "password_hash"):
 		return &mfaEventRows{values: []driver.Value{c.state.passwordHash}}, nil
 	case strings.Contains(query, "totp_secret_enc"):
@@ -1008,6 +1015,10 @@ func (c mfaEventConn) QueryContext(_ context.Context, query string, args []drive
 		return &mfaEventRows{values: []driver.Value{int64(0)}}, nil
 	}
 }
+
+// mfaEventEmail is the account email the fake users row carries; it keys the
+// shared login lockout the step-up password counts against.
+const mfaEventEmail = "lockout-fixture@example.test"
 
 type mfaEventRows struct {
 	values []driver.Value

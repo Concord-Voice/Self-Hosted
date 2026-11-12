@@ -265,6 +265,8 @@ type fakeAuthAdapter struct {
 	// translates to HTTP 423 Locked. Used by CompleteLink's
 	// 423-translation test path.
 	VerifyPasswordLocked bool
+	// VerifyPasswordErr, when set, is returned as-is (an infrastructure error).
+	VerifyPasswordErr error
 	// DefaultMethod is what ChallengeDefaultMethod answers; DefaultMethodOffered
 	// records the methods it was asked about. DefaultMethodVia, when set, answers
 	// instead, so a test can run the production read-failure handling.
@@ -320,8 +322,11 @@ func (f *fakeAuthAdapter) VerifyPassword(_ context.Context, _, password string) 
 		// errors.Is — same wire as the real auth.Handler.VerifyPassword.
 		return "", auth.ErrAccountLocked
 	}
+	if f.VerifyPasswordErr != nil { // pragma: allowlist secret (error field name, not a secret)
+		return "", f.VerifyPasswordErr
+	}
 	if password != "correct-password" { // pragma: allowlist secret
-		return "", fmt.Errorf("invalid_credentials")
+		return "", auth.ErrInvalidCredentials
 	}
 	verifiedEpoch := f.CredentialEpoch
 	if f.AdvanceCredentialEpochAfterVerify {
@@ -1262,6 +1267,43 @@ func TestCompleteLink_AccountLocked(t *testing.T) {
 		`SELECT COUNT(*) FROM user_sso_identities WHERE user_id = $1`, userID,
 	).Scan(&n))
 	assert.Zero(t, n, "account_locked must not create an SSO identity row")
+}
+
+// TestCompleteLink_VerifyPasswordInfraError_Is500 covers an outage during the
+// password check (for example Redis down): it must be a 500, never a 401 that
+// looks like a wrong password.
+func TestCompleteLink_VerifyPasswordInfraError_Is500(t *testing.T) {
+	rig := newSSOCallbackTestRigWithAuth(t, "http://unused", &fakeAuthAdapter{VerifyPasswordErr: fmt.Errorf("reserve login attempt: redis down")})
+	rig.Engine.POST("/api/v1/auth/sso/:provider/complete-link", rig.Handler.CompleteLink)
+
+	userID := insertSSOTestUser(t, rig.DB, "infra@example.test", "infrauser")
+
+	ssoToken := "sso-link-token-infra" //nolint:gosec // test fixture, not a real secret
+	payload, err := json.Marshal(map[string]any{
+		"provider":         "google",
+		"provider_user_id": "google-sub-infra",
+		"provider_email":   "infra@example.test",
+		"target_user_id":   userID,
+		"branch":           "account_link",
+		"created_at":       time.Now().UTC().Format(time.RFC3339),
+	})
+	require.NoError(t, err)
+	require.NoError(t, rig.Redis.Set(context.Background(),
+		"sso_token:"+ssoToken, payload, 15*time.Minute).Err())
+
+	body, err := json.Marshal(map[string]string{
+		"sso_token": ssoToken,
+		"password":  "correct-password", // pragma: allowlist secret
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost,
+		"/api/v1/auth/sso/google/complete-link", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	rig.Engine.ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	assert.Contains(t, w.Body.String(), "password_verify_failed")
 }
 
 // TestCompleteLink_NewUserBranch_Rejected covers the symmetric security check

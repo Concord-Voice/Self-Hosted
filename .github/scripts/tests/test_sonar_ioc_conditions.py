@@ -9,6 +9,7 @@ import re
 import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 import yaml
 
@@ -78,6 +79,22 @@ def validate_consumer_wiring(text):
         raise AssertionError('IOC consumer must unconditionally call loaded fixed policy with parsed pr_ci')
 
 
+def evaluate_osv_baseline(expression, selection):
+    """Evaluate the checked-in Action expression after replacing its fixed report-selection access."""
+    body = expression.removeprefix("${{ ").removesuffix(" }}")
+    access = "needs.pr-ci.outputs.report-selection"
+    body = body.replace(access, json.dumps(json.dumps(selection)))
+    result = subprocess.run(
+        ["node", "-e", "const fromJSON = JSON.parse; const toJSON = JSON.stringify; process.stdout.write(String(" + body + "));"],
+        check=True, capture_output=True, text=True,
+    )
+    return result.stdout
+
+
+def git_revision(directory, *args):
+    return subprocess.check_output(["git", "-C", str(directory), *args], text=True).strip()
+
+
 def provision_job(*, needs='ioc', condition=None, continue_on_error=None):
     job = {'needs': needs,
            'steps': [{'run': 'bash scripts/tests/test-provision-cert.sh'}]}
@@ -115,6 +132,90 @@ class IOCConditionPolicyTests(unittest.TestCase):
         self.assertIn("pr-ci", needs if isinstance(needs, list) else [needs])
         self.assertIn("workflow_call", osv.get("on", {}),
                       "the reusable OSV source must execute from the protected workflow commit")
+
+    def test_protected_osv_baseline_uses_v2_merge_parent_with_bounded_v1_fallback(self):
+        """The old OSV side must follow merge provenance during the staged v1-to-v2 rollout."""
+        root = CHECKER.parents[3]
+        required = yaml.load((root / ".github/workflows/required-pr-build.yml").read_text(),
+                             Loader=yaml.BaseLoader)
+        scanner = yaml.load((root / ".github/workflows/osv-scanner.yml").read_text(),
+                            Loader=yaml.BaseLoader)
+        call = required["jobs"]["osv"]
+        baseline = call["with"]["base-sha"]
+        legacy_pin = "5fa007d8e1979c3368181dc6f79e3fb1c8235beb"  # pragma: allowlist secret -- public immutable Git commit, not credential
+
+        selected_merge = "c" * 40
+        cases = (
+            ("v2 merge parent", {"version": 2, "base_sha": "a" * 40,
+                                  "merge_base_sha": "b" * 40}, "b" * 40, True),
+            ("v2 missing parent", {"version": 2, "base_sha": "a" * 40}, "", False),
+            ("v2 malformed parent", {"version": 2, "base_sha": "a" * 40,
+                                      "merge_base_sha": "forged"}, "forged", False),
+            ("approved v1 legacy", {"version": 1, "policy_sha": legacy_pin,
+                                    "base_sha": "a" * 40}, "a" * 40, True),
+            ("unapproved v1", {"version": 1, "policy_sha": "d" * 40,
+                                "base_sha": "a" * 40}, "", False),
+            ("unknown version", {"version": 3, "base_sha": "a" * 40,
+                                 "merge_base_sha": "b" * 40}, "", False),
+            ("string v2", {"version": "2", "base_sha": "a" * 40,
+                           "merge_base_sha": "b" * 40}, "", False),
+            ("string v1", {"version": "1", "policy_sha": legacy_pin,
+                           "base_sha": "a" * 40}, "", False),
+            ("boolean true", {"version": True, "policy_sha": legacy_pin,
+                              "base_sha": "a" * 40}, "", False),
+            ("boolean false", {"version": False, "base_sha": "a" * 40,
+                               "merge_base_sha": "b" * 40}, "", False),
+        )
+
+        steps = scanner["jobs"]["protected-pr-scan"]["steps"]
+        old_checkout = next(step for step in steps
+                            if step.get("with", {}).get("ref") == "${{ inputs.base-sha }}")
+        old_scan = next(step for step in steps if step.get("name") == "Scan base dependencies")
+        self.assertEqual("scan", old_checkout["with"]["path"])
+        self.assertEqual("${{ inputs.base-sha }}", old_scan["env"]["EXPECTED_SHA"])
+        self.assertIn('git -C scan rev-parse HEAD', old_scan["run"])
+        input_check = next(step for step in steps if step.get("name") == "Check protected revision inputs")
+        for name, selection, expected, valid in cases:
+            with self.subTest(name=name):
+                resolved = evaluate_osv_baseline(baseline, selection)
+                self.assertEqual(expected, resolved)
+                check = subprocess.run(
+                    ["bash", "-c", input_check["run"]], text=True, capture_output=True,
+                    env={**os.environ, "BASE_SHA": resolved, "MERGE_SHA": selected_merge},
+                )
+                self.assertEqual(0 if valid else 1, check.returncode, check.stderr)
+
+    def test_protected_preparer_rejects_a_forged_v2_osv_merge_parent(self):
+        """A SHA-shaped parent still needs to belong to protected main first-parent history."""
+        root = CHECKER.parents[3]
+        source = root / "scripts/sonar/prepare-protected-pr-analysis.py"
+        spec = importlib.util.spec_from_file_location("osv_merge_parent_preparer", source)
+        preparer = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(preparer)
+        with tempfile.TemporaryDirectory() as directory:
+            temporary = Path(directory)
+            upstream, trusted, analysis = temporary / "upstream", temporary / "trusted", temporary / "analysis"
+            subprocess.run(["git", "init", "-q", "-b", "main", str(upstream)], check=True)
+            git_revision(upstream, "config", "user.name", "Test")
+            git_revision(upstream, "config", "user.email", "test@example.invalid")
+            (upstream / "README.md").write_text("base\n")
+            git_revision(upstream, "add", "README.md")
+            git_revision(upstream, "commit", "-qm", "base")
+            base = git_revision(upstream, "rev-parse", "HEAD")
+            subprocess.run(["git", "clone", "-q", str(upstream), str(trusted)], check=True)
+            (upstream / "README.md").write_text("head\n")
+            git_revision(upstream, "add", "README.md")
+            git_revision(upstream, "commit", "-qm", "head")
+            head = git_revision(upstream, "rev-parse", "HEAD")
+            git_revision(upstream, "update-ref", "refs/pull/7/head", head)
+            git_revision(upstream, "update-ref", "refs/heads/main", base)
+            candidate = {"expected_base_sha": base, "expected_head_sha": head}
+            claims = {"workflow_sha": base}
+            payload = {"selection": {"version": 2, "policy_sha": base,
+                                     "merge_base_sha": "f" * 40}}
+            with patch.object(preparer, "ROOT", trusted), patch.object(preparer, "GIT_REMOTE", str(upstream)):
+                with self.assertRaisesRegex(preparer.Reject, "first-parent history"):
+                    preparer.prepare_git(analysis, claims, payload, candidate, "test-token")
 
     def test_ordinary_pr_passes_booleans_to_reusable_workflows(self):
         root = CHECKER.parents[3]
@@ -631,7 +732,7 @@ class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
         jobs = self.wrapper["jobs"]
         call = jobs["pr-ci"]
         self.assertEqual(call["uses"],
-                         "Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@5fa007d8e1979c3368181dc6f79e3fb1c8235beb")
+                         "Concord-Voice/Self-Hosted/.github/workflows/pr-ci.yml@6614ec9fbcc8aa19f76cf8cd8dd326ef06cf4979")
         self.assertEqual(call["with"], {"trusted-source": "true", "enforcement-only": "true"})
         self.assertNotIn("secrets", call)
         self.assertNotIn("ioc", jobs)
@@ -645,13 +746,19 @@ class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
         report = self.pr["jobs"]["report"]
         self.assertEqual(report["outputs"]["selection"], "${{ steps.report.outputs.selection }}")
         self.assertEqual(jobs["result"]["needs"],
-                         ["pr-ci", "protected-sonar", "osv", "publish-install-script-warnings", "migration-lint"])
+                         ["pr-ci", "protected-sonar", "osv", "publish-install-script-warnings", "migration-lint",
+                          "base-image-lint"])
         # The protected migration lint (#4175) waits on pr-ci's IOC gate, runs only for
         # control-plane changes or an unknown selection, and may only pass or skip.
         lint_if = jobs["migration-lint"]["if"]
         for token in ("needs.pr-ci.result == 'success'", """'"known":true'""", """'"control_plane":true'"""):
             self.assertIn(token, lint_if)
         self.assertIn('"$MIGRATION_LINT_RESULT" == skipped', str(jobs["result"]))
+        # The protected base-image check (#252) installs nothing, so it has no needs
+        # and no if, and result accepts only success from it.
+        self.assertNotIn("needs", jobs["base-image-lint"])
+        self.assertNotIn("if", jobs["base-image-lint"])
+        self.assertIn('"$BASE_IMAGE_LINT_RESULT" == success', str(jobs["result"]))
         result_text = str(jobs["result"])
         for token in ("needs.pr-ci.outputs.report-selection", "needs.pr-ci.outputs.report-jobs",
                       "needs.pr-ci.outputs.coverage-uploads"):
@@ -663,6 +770,40 @@ class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
         for token in ("verify-pr-scan-results.py", "GITHUB_RUN_ATTEMPT", "SCAN_EVIDENCE_DIR"):
             self.assertIn(token, wrapper_result)
         self.assertIn("needs.osv.result", str(jobs["result"]))
+
+    def test_protected_base_image_lint_blocks_unless_it_succeeds(self):
+        jobs = self.wrapper["jobs"]
+        lint = jobs["base-image-lint"]
+        self.assertEqual(lint["permissions"], {"contents": "read"})
+        pr_checkout, protected_checkout, check_step = lint["steps"]
+        self.assertEqual(pr_checkout["with"], {"persist-credentials": "false", "path": "pr"})
+        # The checker comes from the protected workflow revision, never the PR it judges.
+        self.assertEqual(protected_checkout["with"]["ref"], "${{ fromJSON(toJSON(job)).workflow_sha }}")
+        self.assertEqual(protected_checkout["with"]["repository"],
+                         "${{ fromJSON(toJSON(job)).workflow_repository }}")
+        self.assertEqual(protected_checkout["with"]["persist-credentials"], "false")
+        self.assertEqual(protected_checkout["with"]["path"], "protected")
+        check = check_step["run"]
+        self.assertIn('"$(git -C protected rev-parse HEAD)" != "$WORKFLOW_SHA"', check)
+        self.assertIn('python3 -I protected/.github/scripts/check-base-images.py --root "$GITHUB_WORKSPACE/pr"',
+                      check)
+        require = next(s for s in jobs["result"]["steps"]
+                       if s.get("name") == "Require protected verdict and warning publication")
+        self.assertEqual(require["env"]["BASE_IMAGE_LINT_RESULT"], "${{ needs.base-image-lint.result }}")
+        # Nothing legitimately skips this job, so unlike migration-lint, skipped blocks.
+        for base_image, passes in (("success", True), ("skipped", False), ("failure", False),
+                                   ("cancelled", False), ("", False)):
+            with self.subTest(base_image=base_image):
+                run = subprocess.run(
+                    ["bash", "-e", "-o", "pipefail", "-c", require["run"]],
+                    env={**os.environ, "PR_CI_RESULT": "success", "PUBLISH_RESULT": "success",
+                         "VERIFIER_OUTCOME": "success", "PINS_OUTCOME": "success",
+                         "OSV_RESULT": "skipped", "SONAR_RESULT": "skipped",
+                         "MIGRATION_LINT_RESULT": "skipped", "BASE_IMAGE_LINT_RESULT": base_image},
+                    capture_output=True, text=True)
+                self.assertEqual(run.returncode == 0, passes, run)
+                if not passes:
+                    self.assertIn(f"base-image-lint={base_image},", run.stdout)
 
     def test_protected_pr_ci_keeps_ioc_first_and_limits_enforcement_mode(self):
         jobs = self.pr["jobs"]
@@ -707,13 +848,16 @@ class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
           const keys = [...policy.matchAll(/^([a-z][a-z0-9_]*):$/gm)].map(match => match[1]);
           const filters = Object.fromEntries(keys.map(k => [k, 'false']));
           const metadata = {event_name:'pull_request', head_sha:'a'.repeat(40), base_sha:'b'.repeat(40),
-            merge_sha:'c'.repeat(40), changed_files:0, hotfix:false};
+            merge_base_sha:'b'.repeat(40), merge_sha:'c'.repeat(40), changed_files:0, hotfix:false};
           const policySha = 'd'.repeat(40);
           const full = composeSelection(filters, metadata, {mode:'required-full', policySha});
           const legacy = composeSelection(filters, metadata, {mode:'legacy', policySha});
+          const {merge_base_sha, ...withoutMergeBase} = metadata;
+          const missingRequired = composeSelection(filters, withoutMergeBase, {mode:'required-full', policySha});
+          const legacyWithoutMergeBase = composeSelection(filters, withoutMergeBase, {mode:'legacy', policySha});
           const hotfix = composeSelection(filters, {...metadata, hotfix:true}, {mode:'required-relevant', policySha});
           const unknown = composeSelection(filters, metadata, {mode:'invalid', policySha});
-          console.log(JSON.stringify({full, legacy, hotfix, unknown}));
+          console.log(JSON.stringify({full, legacy, missingRequired, legacyWithoutMergeBase, hotfix, unknown}));
         '''
         run = subprocess.run(["node", "--input-type=module", "-e", node], cwd=self.root,
                              text=True, capture_output=True, check=True)
@@ -735,6 +879,13 @@ class ProtectedRequiredWorkflowWiringTests(unittest.TestCase):
         self.assertTrue(selections["hotfix"]["selected"]["osv"],
                         "Hotfix keeps standalone OSV selected even when component filters are empty")
         self.assertEqual(selections["legacy"]["coverage_required"],
+                         {key: False for key in ("desktop", "control_plane", "media_plane", "admin")})
+        self.assertFalse(selections["missingRequired"]["known"],
+                         "required scan modes fail closed without a protected merge base")
+        self.assertTrue(selections["legacyWithoutMergeBase"]["known"],
+                        "legacy standalone mode remains compatible with old metadata")
+        self.assertEqual(selections["legacyWithoutMergeBase"]["version"], 1)
+        self.assertEqual(selections["legacyWithoutMergeBase"]["coverage_required"],
                          {key: False for key in ("desktop", "control_plane", "media_plane", "admin")})
         self.assertFalse(selections["unknown"]["known"])
 

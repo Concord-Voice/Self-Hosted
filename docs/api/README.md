@@ -10,7 +10,8 @@ cover every control-plane surface.
 - [admin-metrics.openapi.yaml](./admin-metrics.openapi.yaml) — supported admin metrics `/admin/api/v1` GET operations
 
 The specs intentionally exclude other control-plane surfaces, including admin
-authentication and enrollment. Explicit method-denial registrations on the four
+authentication, enrollment and the self-hosted Server routes
+(`/admin/api/v1/server/*`, described in `docs/architecture.md`). Explicit method-denial registrations on the four
 admin metrics paths are enforcement behavior, not supported operations.
 
 > **Drift gate (#822):** `scripts/api/check-openapi-coverage.sh` runs in the pr-ci `verify-openapi-coverage` job. It independently checks the public router against `openapi.yaml`, and the supported admin metrics GET routes against `admin-metrics.openapi.yaml`, in both drift directions. Unlisted public delegated registrars fail extraction rather than silently dropping routes. Inventory tooling is `scripts/api/extract-routes.py` (`--list` / `--missing` / `--stale` / `--check`). The `--list` flag prints the union of supported operations from both surfaces.

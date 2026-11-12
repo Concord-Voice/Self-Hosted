@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "dockerfiles": {
+    "app.df": {
+      "stages": [
+        {
+          "alias": "builder",
+          "registry": "registry.example:5000",
+          "repository": "team/app",
+          "tag": "^1\\.2$"
+        },
+        {
+          "registry": "localhost",
+          "repository": "tools",
+          "tag": "^2\\.0$"
+        },
+        {
+          "registry": "docker.io",
+          "repository": "library/golang",
+          "tag": "^1\\.27\\.[0-9]+-alpine$"
+        },
+        {
+          "registry": "docker.io",
+          "repository": "someorg/tools",
+          "tag": "^3\\.1$"
+        },
+        {
+          "registry": "buildhost:5000",
+          "repository": "tools",
+          "tag": "^1\\.0$"
+        }
+      ]
+    }
+  }
+}

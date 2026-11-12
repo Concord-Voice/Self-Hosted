@@ -396,5 +396,13 @@ _None yet._
 
 ### Instance-Specific Entries
 
-_None yet._
+#### Alert #489 — `go/weak-sensitive-data-hashing` — `services/control-plane/cmd/authority-ceremony/keys.go:115`
 
+| Field | Value |
+|---|---|
+| Alert | #489 (`go/weak-sensitive-data-hashing`) |
+| Location | `services/control-plane/cmd/authority-ceremony/keys.go:115`, `h := sha512.Sum384(msg)` in `keySigner.sign`; PR #214, Go analysis 2122883906 of merge `7f273c1` |
+| Dismissed | 2026-11-08, in PR #214 (approved by Mark) |
+| Reason | `false positive` |
+| Justification | The SARIF code flow starts at `selection of PasswordLogin` (`authoritycontract/msg_published.go:153`) and crosses `m.spec()` at `codec.go:96`, the pattern in the legacy calibration note for this rule. The sink is the ECDSA P-384 pre-hash of a delegation or succession message, which the ceremony tool signs with an operator key file. The contract requires ECDSA P-384 over SHA-384, and `keySigner.sign` checks each signature with `VerifyP384`, so another hash would make the signature fail. |
+| Re-check | Reopen if `keySigner.sign` is ever given credential material, or if the operator signature algorithm changes. |

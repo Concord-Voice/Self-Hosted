@@ -2,6 +2,7 @@ import {
   Activity,
   ChartLine,
   Gauge,
+  HardDrive,
   ListChecks,
   LogOut,
   RefreshCw,
@@ -39,6 +40,8 @@ import {
   type ThresholdName,
   type Thresholds,
 } from "./preferences";
+import { LOG_SERVICES } from "./server";
+import { ServerWorkspace } from "./ServerWorkspace";
 import { usePolling, type PollingState } from "./usePolling";
 import {
   ChangesWorkspace,
@@ -54,7 +57,7 @@ import {
 import type { TimeMode } from "./time";
 
 export type Workspace =
-  "host" | "services" | "users" | "counters" | "series" | "changes";
+  "host" | "services" | "users" | "counters" | "series" | "changes" | "server";
 
 interface WorkspaceDefinition {
   count: string;
@@ -99,6 +102,12 @@ const WORKSPACES: readonly WorkspaceDefinition[] = [
   },
   { count: "1", icon: ChartLine, id: "series", label: "Time Series" },
   { count: "Live", icon: Activity, id: "changes", label: "Health & Changes" },
+  {
+    count: String(LOG_SERVICES.length),
+    icon: HardDrive,
+    id: "server",
+    label: "Server",
+  },
 ];
 
 const THRESHOLD_FIELDS: readonly {
@@ -228,7 +237,9 @@ interface WorkspaceContentProps {
   events: HealthChange[];
   health: PollingResource<AdminHealthResponse>;
   metricKey: MetricKey;
+  onForbidden: () => void;
   onMetricKeyChange: (key: MetricKey) => void;
+  onUnauthorized: () => void;
   onWindowChange: (window: SeriesWindow) => void;
   previousCounters: AdminCountersResponse | null;
   series: PollingResource<AdminSeriesResponse>;
@@ -244,7 +255,9 @@ function WorkspaceContent({
   events,
   health,
   metricKey,
+  onForbidden,
   onMetricKeyChange,
+  onUnauthorized,
   onWindowChange,
   previousCounters,
   series,
@@ -306,6 +319,13 @@ function WorkspaceContent({
     case "changes":
       return (
         <ChangesWorkspace events={events} health={health} timeMode={timeMode} />
+      );
+    case "server":
+      return (
+        <ServerWorkspace
+          onForbidden={onForbidden}
+          onUnauthorized={onUnauthorized}
+        />
       );
   }
 }
@@ -798,7 +818,9 @@ export function Portal({
             events={healthEvents}
             health={healthResource}
             metricKey={seriesKey}
+            onForbidden={handleForbidden}
             onMetricKeyChange={setSeriesKey}
+            onUnauthorized={handleUnauthorized}
             onWindowChange={setSeriesWindow}
             previousCounters={previousCountersRef.current}
             series={seriesResource}

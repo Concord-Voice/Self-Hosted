@@ -213,7 +213,8 @@ code,
 .auth-panel input,
 .settings-dialog input,
 .settings-dialog select,
-.series-controls select {
+.series-controls select,
+.series-controls input {
   width: 100%;
   min-height: 42px;
   padding: 8px 10px;
@@ -1222,4 +1223,141 @@ td .status {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
   }
+}
+
+/* Server area (#186) */
+.server-action {
+  min-height: 42px;
+  padding: 7px 14px;
+  color: var(--paper);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-base);
+  background: var(--surface-raised);
+  font-weight: 700;
+}
+
+.server-log-controls {
+  grid-template-columns: minmax(180px, 1fr) minmax(120px, auto) auto;
+}
+
+.server-image {
+  overflow-wrap: anywhere;
+  color: var(--muted-strong);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+
+.server-checks {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.server-checks li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.server-logs {
+  display: block;
+  width: 100%;
+  max-height: 480px;
+  resize: vertical;
+  margin: 12px 0 0;
+  padding: 12px;
+  overflow: auto;
+  color: var(--paper);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-base);
+  background: var(--night);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.server-logs:focus-visible {
+  outline: 2px solid var(--paper);
+  outline-offset: 2px;
+}
+
+.server-logs-caption {
+  margin: 12px 0 0;
+  color: var(--muted-strong);
+}
+
+@media (max-width: 720px) {
+  .server-log-controls {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* First-run setup wizard (#187), served by the host agent. */
+.setup-main {
+  max-width: 640px;
+  margin: 0 auto;
+}
+
+.setup-panel h2 {
+  margin: 18px 0 8px;
+  font-size: 18px;
+}
+
+.setup-panel fieldset {
+  display: grid;
+  gap: 8px;
+  margin: 10px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-base);
+}
+
+.setup-panel legend {
+  padding: 0 4px;
+  color: var(--muted-strong);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.auth-panel .setup-choice {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  font-weight: 400;
+}
+
+.auth-panel .setup-choice input {
+  width: auto;
+  min-height: 0;
+  margin-top: 3px;
+}
+
+.setup-checks {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.server-action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.server-help {
+  margin: 6px 0 16px;
+  color: var(--muted-strong);
+  font-size: 0.875rem;
+}
+
+.server-actions-output,
+.server-actions-jobs {
+  margin-top: 16px;
 }

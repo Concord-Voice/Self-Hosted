@@ -331,7 +331,10 @@ The hooks are configured in `.pre-commit-config.yaml` via the Python `pre-commit
 | General    | check-added-large-files, check-case-conflict, check-merge-conflict, check-yaml, check-json, end-of-file-fixer, trailing-whitespace, mixed-line-ending |
 | Go         | golangci-lint, go vet, gofmt, go build                                                                                                                |
 | TypeScript | prettier, eslint, tsc --noEmit                                                                                                                        |
+| Docker     | check-base-images (every image source matches `.github/base-images.json`) and its self-test                                                           |
 | Commit     | commit-msg-format (conventional commits)                                                                                                              |
+
+A change to a Dockerfile `FROM` line can need a matching edit to `.github/base-images.json`. See [Changing a Docker base image](../docs/development.md#changing-a-docker-base-image).
 
 ### CI: GitHub Actions (Mandatory)
 

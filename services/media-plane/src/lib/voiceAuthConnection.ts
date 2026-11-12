@@ -470,7 +470,7 @@ export class VoiceAuthConnections {
 
   retryPending(): Promise<void> {
     for (const room of this.legacyRooms.values()) {
-      if (room.started) this.releaseLegacyRoom(room.session);
+      if (room.started) void this.releaseLegacyRoom(room.session);
     }
     for (const room of this.rooms.values()) {
       if (room.terminal) this.start(room.terminal, () => this.closeRoom(room));

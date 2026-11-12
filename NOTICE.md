@@ -120,7 +120,7 @@ reproducible build recipe. The upstream tag and commit remain unchanged; the
 derivative commit records only the bounded manifest patch. See the
 [MinIO refresh runbook](docs/runbooks/refresh-minio-image.md) for verified
 release identities. The public build materials are maintained at
-[Concord-Voice/Concord-Voice `infrastructure/docker/minio`](https://github.com/Concord-Voice/Concord-Voice/tree/main/infrastructure/docker/minio).
+[`infrastructure/docker/minio`](infrastructure/docker/minio) in this repository.
 The runtime image preserves upstream `LICENSE`, `NOTICE`, and `CREDITS`
 unchanged under `/licenses`.
 

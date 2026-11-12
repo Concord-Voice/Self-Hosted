@@ -56,8 +56,13 @@ Neither package is published yet.
 
 ### Run it
 
-See `docs/runbooks/selfhost-public-acceptance.md` and run
-`infrastructure/deploy/install-selfhost.sh` on a fresh host.
+[v0.3.0](https://github.com/Concord-Voice/Self-Hosted/releases/tag/v0.3.0)
+is published with its bundle, manifest and `SHA256SUMS`, but there is no
+supported install procedure yet: fresh-host acceptance
+([#74](https://github.com/Concord-Voice/Self-Hosted/issues/74)) has not
+passed. See `docs/runbooks/selfhost-quickstart.md` for the current status. A
+guided installer and a server-management area in the Admin Console are being
+built under [#182](https://github.com/Concord-Voice/Self-Hosted/issues/182).
 
 ### Develop
 
@@ -82,7 +87,7 @@ Report a vulnerability by email to security@concordvoice.com. Do not open a publ
 
 ## Contributing
 
-We welcome help. Read the [contributing guide](./.github/CONTRIBUTING.md) and the [code of conduct](./.github/CODE_OF_CONDUCT.md) before you open a pull request. Report bugs and request features in our [feedback repository](https://github.com/Concord-Voice/Concord-Voice/issues).
+We welcome help. Read the [contributing guide](./.github/CONTRIBUTING.md) and the [code of conduct](./.github/CODE_OF_CONDUCT.md) before you open a pull request. Report bugs and request features in our [feedback repository](https://github.com/Concord-Voice/Feedback/issues).
 
 ---
 

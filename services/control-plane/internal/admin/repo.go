@@ -15,6 +15,10 @@ var (
 	ErrAdminNotFound = errors.New("admin: admin not found")
 	// ErrDuplicateUsername is returned when CreatePending hits the UNIQUE(username) constraint.
 	ErrDuplicateUsername = errors.New("admin: username already exists")
+	// ErrDuplicateCredential is returned when AddCredential hits a UNIQUE constraint:
+	// the attestation reused a credential ID that is already registered. That is the
+	// client's input, not a storage fault, so enrollment answers it as a rejection.
+	ErrDuplicateCredential = errors.New("admin: credential already registered")
 )
 
 // pgUniqueViolation is the Postgres SQLSTATE for a unique-constraint violation.
@@ -130,6 +134,10 @@ func (r *AdminRepo) AddCredential(ctx context.Context, c AdminCredential) (Admin
 		c.AdminID, c.CredentialID, c.PublicKey, c.AAGUID, c.SignCount, name, pq.Array(c.Transports),
 	).Scan(&c.ID, &c.CreatedAt)
 	if err != nil {
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && string(pqErr.Code) == pgUniqueViolation {
+			return AdminCredential{}, ErrDuplicateCredential
+		}
 		return AdminCredential{}, fmt.Errorf("add admin credential: %w", err)
 	}
 	return c, nil

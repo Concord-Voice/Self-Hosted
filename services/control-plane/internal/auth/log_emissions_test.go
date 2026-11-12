@@ -334,7 +334,8 @@ var closedEventIdentifierAllowances = []closedEventIdentifierAllowance{
 	{path: "../admin/audit.go", field: "Outcome", identifier: "outcome", count: 5},
 	{path: "../rbac/audit.go", field: "EvidenceRef", identifier: "evidenceRef", count: 1},
 	// authenticateForRevoke receives only closed route constants from its three callers.
-	{path: "../sessions/handlers.go", field: "RouteTemplate", identifier: "route", count: 2},
+	// Three events use it: the MFA refusal, the wrong-password refusal and the lockout.
+	{path: "../sessions/handlers.go", field: "RouteTemplate", identifier: "route", count: 3},
 }
 
 func TestSecurityEventPrivacyGuardRejectsNonExactClosedIdentifier(t *testing.T) {

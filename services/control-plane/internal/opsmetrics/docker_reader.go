@@ -26,22 +26,22 @@ const (
 var dockerContainerIDPattern = regexp.MustCompile(`^[a-f0-9]{12,64}$`)
 
 type concordService struct {
-	serviceID     string
-	containerName string
-	running       MetricKey
-	healthy       MetricKey
-	cpu           MetricKey
-	memory        MetricKey
+	serviceID      string
+	containerNames []string
+	running        MetricKey
+	healthy        MetricKey
+	cpu            MetricKey
+	memory         MetricKey
 }
 
 var concordServiceAllowlist = []concordService{
-	{serviceID: "control_plane", containerName: "concordvoice-control-plane", running: MetricServiceControlPlaneRunning, healthy: MetricServiceControlPlaneHealthy, cpu: MetricServiceControlPlaneCPUPercent, memory: MetricServiceControlPlaneMemoryBytes},
-	{serviceID: "media_plane", containerName: "concordvoice-media-plane", running: MetricServiceMediaPlaneRunning, healthy: MetricServiceMediaPlaneHealthy, cpu: MetricServiceMediaPlaneCPUPercent, memory: MetricServiceMediaPlaneMemoryBytes},
-	{serviceID: "postgres", containerName: "concordvoice-postgres", running: MetricServicePostgresRunning, healthy: MetricServicePostgresHealthy, cpu: MetricServicePostgresCPUPercent, memory: MetricServicePostgresMemoryBytes},
-	{serviceID: "redis", containerName: "concordvoice-redis", running: MetricServiceRedisRunning, healthy: MetricServiceRedisHealthy, cpu: MetricServiceRedisCPUPercent, memory: MetricServiceRedisMemoryBytes},
-	{serviceID: "nats", containerName: "concordvoice-nats", running: MetricServiceNATSRunning, healthy: MetricServiceNATSHealthy, cpu: MetricServiceNATSCPUPercent, memory: MetricServiceNATSMemoryBytes},
-	{serviceID: "minio", containerName: "concordvoice-minio", running: MetricServiceMinIORunning, healthy: MetricServiceMinIOHealthy, cpu: MetricServiceMinIOCPUPercent, memory: MetricServiceMinIOMemoryBytes},
-	{serviceID: "coturn", containerName: "concordvoice-coturn", running: MetricServiceCoturnRunning, healthy: MetricServiceCoturnHealthy, cpu: MetricServiceCoturnCPUPercent, memory: MetricServiceCoturnMemoryBytes},
+	{serviceID: "control_plane", containerNames: []string{"concordvoice-control-plane"}, running: MetricServiceControlPlaneRunning, healthy: MetricServiceControlPlaneHealthy, cpu: MetricServiceControlPlaneCPUPercent, memory: MetricServiceControlPlaneMemoryBytes},
+	{serviceID: "media_plane", containerNames: []string{"concordvoice-media-plane", "concordvoice-media-plane-blue", "concordvoice-media-plane-green"}, running: MetricServiceMediaPlaneRunning, healthy: MetricServiceMediaPlaneHealthy, cpu: MetricServiceMediaPlaneCPUPercent, memory: MetricServiceMediaPlaneMemoryBytes},
+	{serviceID: "postgres", containerNames: []string{"concordvoice-postgres"}, running: MetricServicePostgresRunning, healthy: MetricServicePostgresHealthy, cpu: MetricServicePostgresCPUPercent, memory: MetricServicePostgresMemoryBytes},
+	{serviceID: "redis", containerNames: []string{"concordvoice-redis"}, running: MetricServiceRedisRunning, healthy: MetricServiceRedisHealthy, cpu: MetricServiceRedisCPUPercent, memory: MetricServiceRedisMemoryBytes},
+	{serviceID: "nats", containerNames: []string{"concordvoice-nats"}, running: MetricServiceNATSRunning, healthy: MetricServiceNATSHealthy, cpu: MetricServiceNATSCPUPercent, memory: MetricServiceNATSMemoryBytes},
+	{serviceID: "minio", containerNames: []string{"concordvoice-minio"}, running: MetricServiceMinIORunning, healthy: MetricServiceMinIOHealthy, cpu: MetricServiceMinIOCPUPercent, memory: MetricServiceMinIOMemoryBytes},
+	{serviceID: "coturn", containerNames: []string{"concordvoice-coturn"}, running: MetricServiceCoturnRunning, healthy: MetricServiceCoturnHealthy, cpu: MetricServiceCoturnCPUPercent, memory: MetricServiceCoturnMemoryBytes},
 }
 
 type dockerContainerSummary struct {
@@ -151,8 +151,11 @@ func (r *DockerReader) readServiceMetrics(ctx context.Context, metrics map[Metri
 	metrics[service.cpu] = 0
 	metrics[service.memory] = 0
 
-	container, exists := allowed[service.containerName]
-	if !exists || container.State != "running" {
+	container, err := runningServiceContainer(allowed, service)
+	if err != nil {
+		return err
+	}
+	if container.State != "running" {
 		return nil
 	}
 	metrics[service.running] = 1
@@ -175,10 +178,32 @@ func (r *DockerReader) readServiceMetrics(ctx context.Context, metrics map[Metri
 	return nil
 }
 
+// runningServiceContainer reports container liveness, not routing readiness.
+// A stopped predecessor is expected during a media handover. Multiple distinct
+// running instances are ambiguous: reject the collection rather than choosing a
+// healthy standby or combining unrelated process metrics. Repeated aliases of
+// the same Docker ID still describe one container.
+func runningServiceContainer(allowed map[string]dockerContainerSummary, service concordService) (dockerContainerSummary, error) {
+	var selected dockerContainerSummary
+	for _, name := range service.containerNames {
+		container, exists := allowed[name]
+		if !exists || container.State != "running" {
+			continue
+		}
+		if selected.State == "running" && selected.ID != container.ID {
+			return dockerContainerSummary{}, errors.New("multiple running Docker containers for allowlisted service")
+		}
+		selected = container
+	}
+	return selected, nil
+}
+
 func indexAllowlistedContainers(containers []dockerContainerSummary) (map[string]dockerContainerSummary, error) {
 	allowedNames := make(map[string]struct{}, len(concordServiceAllowlist))
 	for _, service := range concordServiceAllowlist {
-		allowedNames["/"+service.containerName] = struct{}{}
+		for _, name := range service.containerNames {
+			allowedNames["/"+name] = struct{}{}
+		}
 	}
 
 	result := make(map[string]dockerContainerSummary, len(concordServiceAllowlist))

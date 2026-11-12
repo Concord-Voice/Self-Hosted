@@ -32,12 +32,14 @@ mkdir -p "$SIMPLE_ROOT/infrastructure/deploy"
 TARGET="$SIMPLE_ROOT/infrastructure/deploy/concord-selfhost"
 cp "$SOURCE_TARGET" "$TARGET"
 STORAGE_HELPER="$ROOT/infrastructure/deploy/selfhost-storage.sh"
+AUTHORITY_HELPER="$ROOT/infrastructure/deploy/selfhost-authority.sh"
 if [[ ! -f "$STORAGE_HELPER" ]]; then
   printf '%s\n' 'FAIL: prerequisite missing: accepted selfhost-storage helper' >&2
   exit 1
 fi
 cp "$STORAGE_HELPER" "$SIMPLE_ROOT/infrastructure/deploy/selfhost-storage.sh"
-printf 'INSTANCE_TYPE=self-hosted\n' >"$SIMPLE_ROOT/.env"
+cp "$AUTHORITY_HELPER" "$SIMPLE_ROOT/infrastructure/deploy/selfhost-authority.sh"
+printf 'INSTANCE_TYPE=self-hosted\nAUTHORITY_DIR=%s/no-authority\n' "$SIMPLE_ROOT" >"$SIMPLE_ROOT/.env"
 touch "$SIMPLE_ROOT/docker-compose.yml" "$SIMPLE_ROOT/docker-compose.production.yml" \
   "$SIMPLE_ROOT/docker-compose.selfhost.yml"
 export SELFHOST_STUB_REJECT_LOG="$STUB/docker-reject.log"
@@ -102,6 +104,7 @@ if [[ "${1:-}" == compose ]]; then
         printf '%s\n' 'REJECT: all-profile option on mutating or untargeted operation' >>"$SELFHOST_STUB_REJECT_LOG"
         exit 97
       }
+      [[ "${args[i]}" != ps || -z "${STUB_PS_JSON:-}" ]] || printf '%s\n' "$STUB_PS_JSON"
       exit 0 ;;
     logs)
       targeted=0 skip=0
@@ -222,6 +225,7 @@ CLONE="$STUB/clone dir"
 mkdir -p "$CLONE/infrastructure/deploy"
 cp "$TARGET" "$CLONE/infrastructure/deploy/concord-selfhost"
 cp "$STORAGE_HELPER" "$CLONE/infrastructure/deploy/selfhost-storage.sh"
+cp "$AUTHORITY_HELPER" "$CLONE/infrastructure/deploy/selfhost-authority.sh"
 : >"$STUB/ctl.log"
 up_err=$( PATH="$STUB:$PATH" SELFHOST_CTL_LOG="$STUB/ctl.log" \
   CONCORD_CTL_OVERRIDE="$STUB/concord-ctl" \
@@ -260,6 +264,31 @@ else
   fail "stop should call compose stop, not down: $(cat "$STUB/docker.log")"
 fi
 
+# ── Test 3b: up, stop and down hand the authority its turn after the stack's ─
+# The real authority_lifecycle wrapper, with the authority's own step stubbed.
+lifecycle_log="$( bash -c '
+  source "$1"
+  compose() { echo "compose $*"; }
+  require_security_log_boundary() { :; }
+  guarded_ctl() { echo "ctl $*"; }
+  _authority_lifecycle() { echo "authority $1"; }
+  main up; main stop; main down
+  compose() { echo "compose $*"; return 1; }
+  main down || echo "down failed"
+  guarded_ctl() { echo "ctl $*"; return 1; }
+  main up || echo "up failed"
+  guarded_ctl() { echo "ctl $*"; }
+  _authority_lifecycle() { echo "authority $1"; return 1; }
+  main up && echo "up ok"
+' lifecycle "$TARGET" 2>&1 )"
+expected=$'ctl rebuild\nauthority up\ncompose stop\nauthority stop\ncompose down\nauthority down\ncompose down\ndown failed\nctl rebuild\nup failed'
+expected+=$'\nctl rebuild\nauthority up\nWARNING: the stack\'s up finished, but the account-key authority\'s did not (see above)\nup ok'
+if [[ "$lifecycle_log" == "$expected" ]]; then
+  pass "up, stop and down run the authority's step after the stack's, not after a failure, and only warn when it fails"
+else
+  fail "authority lifecycle wiring: $lifecycle_log"
+fi
+
 # ── Test 4: 'status' invokes compose ps ───────────────────────────────
 : >"$STUB/docker.log"
 ( PATH="$STUB:$PATH" bash "$TARGET" status )
@@ -268,6 +297,58 @@ if grep -q -- '--profile.*services.*ps' "$STUB/docker.log"; then
 else
   fail "status argv wrong: $(cat "$STUB/docker.log")"
 fi
+
+# ── #183: status --json and health --json ─────────────────────────────
+: >"$STUB/docker.log"
+st_out="$(PATH="$STUB:$PATH" STUB_PS_JSON=$'{"Service":"redis","Name":"r-1","State":"running","Health":"healthy","Image":"redis:8","ExitCode":0}\n{"Service":"control-plane","Name":"cp-1","State":"exited","Health":"","Image":"cp:local","ExitCode":1}' \
+  bash "$TARGET" status --json 2>/dev/null)"; st_rc=$?
+st_want='{"schema":1,"services":[{"service":"control-plane","name":"cp-1","state":"exited","health":"","image":"cp:local","exit_code":1},{"service":"redis","name":"r-1","state":"running","health":"healthy","image":"redis:8","exit_code":0}]}'
+if [[ $st_rc -eq 0 && "$st_out" == "$st_want" ]] && grep -q -- '--profile.*services.*ps --all --format json' "$STUB/docker.log"; then
+  pass "status --json normalizes line-delimited compose ps output, sorted by service"
+else
+  fail "status --json rc=$st_rc out=$st_out argv=$(cat "$STUB/docker.log")"
+fi
+st_out="$(PATH="$STUB:$PATH" STUB_PS_JSON='[{"Service":"nats","Name":"n-1","State":"running","Image":"nats:2"}]' \
+  bash "$TARGET" status --json 2>/dev/null)"
+[[ "$st_out" == '{"schema":1,"services":[{"service":"nats","name":"n-1","state":"running","health":"","image":"nats:2","exit_code":null}]}' ]] \
+  && pass "status --json accepts the older JSON-array form" \
+  || fail "status --json array form printed: $st_out"
+st_out="$(PATH="$STUB:$PATH" STUB_PS_JSON='[{"Service":"nats","Name":"a b","State":"up for <b>1h</b>","Health":"weird","Image":"nats:2"}]' \
+  bash "$TARGET" status --json 2>/dev/null)"
+[[ "$st_out" == '{"schema":1,"services":[{"service":"nats","name":"unknown","state":"unknown","health":"unknown","image":"nats:2","exit_code":null}]}' ]] \
+  && pass "status --json reports free text from compose as unknown" \
+  || fail "status --json free-text fields printed: $st_out"
+PATH="$STUB:$PATH" STUB_PS_JSON='not json' bash "$TARGET" status --json >/dev/null 2>&1 \
+  && fail "status --json accepted unparseable compose output" \
+  || pass "status --json fails closed on unparseable compose output"
+: >"$STUB/docker.log"
+PATH="$STUB:$PATH" bash "$TARGET" status --yaml >/dev/null 2>&1; st_rc=$?
+[[ $st_rc -eq 1 && ! -s "$STUB/docker.log" ]] \
+  && pass "status refuses an unknown option before calling Docker" \
+  || fail "status --yaml rc=$st_rc docker=$(cat "$STUB/docker.log")"
+: >"$STUB/docker.log"
+PATH="$STUB:$PATH" bash "$TARGET" health --yaml >/dev/null 2>&1; st_rc=$?
+[[ $st_rc -eq 1 && ! -s "$STUB/docker.log" ]] \
+  && pass "health refuses an unknown option before calling Docker" \
+  || fail "health --yaml rc=$st_rc docker=$(cat "$STUB/docker.log")"
+hj_out="$( source "$TARGET"
+  HEALTH_RESULTS=(storage_model:0 control_plane:1 coturn_tls:0)
+  health_json )"
+[[ "$hj_out" == '{"schema":1,"checks":[{"name":"storage_model","ok":true},{"name":"control_plane","ok":false},{"name":"coturn_tls","ok":true}],"ok":false}' ]] \
+  && pass "health --json object marks ok=false when any check fails" \
+  || fail "health_json printed: $hj_out"
+hj_out="$( source "$TARGET"
+  health_checks() { echo 'human line'; HEALTH_RESULTS=(storage_model:0 port_posture:0); }
+  verb_health --json 2>/dev/null )"
+[[ "$hj_out" == '{"schema":1,"checks":[{"name":"storage_model","ok":true},{"name":"port_posture","ok":true}],"ok":true}' ]] \
+  && pass "health --json keeps human lines off stdout" \
+  || fail "health --json stdout: $hj_out"
+hj_out="$( source "$TARGET"
+  HEALTH_RESULTS=(authority_delegation:0) HEALTH_WARNINGS=(authority_delegation_expiring)
+  health_json )"
+[[ "$hj_out" == '{"schema":1,"checks":[{"name":"authority_delegation","ok":true}],"warnings":["authority_delegation_expiring"],"ok":true}' ]] \
+  && pass "health --json lists a warning without failing the object" \
+  || fail "health_json with a warning printed: $hj_out"
 
 # ── Test 5: 'logs' passes remaining args to compose logs -f ───────────
 : >"$STUB/docker.log"
@@ -420,6 +501,7 @@ BEHAVIOR_STUB="$STUB/behavior-stubs"
 mkdir -p "$BEHAVIOR_ROOT/infrastructure/deploy" "$BEHAVIOR_STUB"
 cp "$SOURCE_TARGET" "$BEHAVIOR_ROOT/infrastructure/deploy/concord-selfhost"
 cp "$STORAGE_HELPER" "$BEHAVIOR_ROOT/infrastructure/deploy/selfhost-storage.sh"
+cp "$AUTHORITY_HELPER" "$BEHAVIOR_ROOT/infrastructure/deploy/selfhost-authority.sh"
 SELFHOST_LOCK_PARENT="$STUB/selfhost-lock-parent"
 lock_declaration='DEPLOY_TRANSACTION_LOCK_PATH="/var/lib/concord/deploy-transaction.lock"'
 lock_parent_probe='if [[ ! -d /var/lib/concord ]]; then'

@@ -210,29 +210,7 @@ func (h *Handler) applyReceiverHide(ctx context.Context, userID, convID string, 
 		if err != nil {
 			return 0, fmt.Errorf("begin hide tx: %w", err)
 		}
-		hidden := 0
-		err = func() error {
-			if err := guardDMPurgeTx(ctx, tx, convID, userID, &userID); err != nil {
-				return err
-			}
-			if err := credepoch.GuardFamilyTx(ctx, tx, userID, credentialEpoch); err != nil {
-				return fmt.Errorf("guard DM hide credential epoch: %w", err)
-			}
-			var err error
-			// Microsecond-truncated like ParseRange's lower bound, so both ends
-			// are exactly what the database stores.
-			hidden, err = InsertHiddenRange(ctx, tx, userID, convID, from, time.Now().UTC().Truncate(time.Microsecond))
-			if err != nil {
-				return fmt.Errorf("insert hidden range: %w", err)
-			}
-			if err := h.purgeEngine.FinalizeHiddenTx(ctx, tx, res.PurgeID, res.DeletedCount, hidden); err != nil {
-				return err
-			}
-			if err := tx.Commit(); err != nil {
-				return fmt.Errorf("commit hide tx: %w", err)
-			}
-			return nil
-		}()
+		hidden, err := h.hideOnceTx(ctx, tx, userID, convID, from, res, credentialEpoch)
 		if rbErr := tx.Rollback(); rbErr != nil && !errors.Is(rbErr, sql.ErrTxDone) {
 			return 0, fmt.Errorf("rollback hide tx: %w", rbErr)
 		}
@@ -245,6 +223,30 @@ func (h *Handler) applyReceiverHide(ctx context.Context, userID, convID string, 
 		return hidden, nil
 	}
 	return 0, dmblock.ErrMembershipChanged
+}
+
+// hideOnceTx is one attempt of applyReceiverHide's transaction: guard, insert
+// the hidden window, finalize the audit row and commit. The caller rolls back.
+func (h *Handler) hideOnceTx(ctx context.Context, tx *sql.Tx, userID, convID string, from time.Time, res purge.Result, credentialEpoch string) (int, error) {
+	if err := guardDMPurgeTx(ctx, tx, convID, userID, &userID); err != nil {
+		return 0, err
+	}
+	if err := credepoch.GuardFamilyTx(ctx, tx, userID, credentialEpoch); err != nil {
+		return 0, fmt.Errorf("guard DM hide credential epoch: %w", err)
+	}
+	// Microsecond-truncated like ParseRange's lower bound, so both ends
+	// are exactly what the database stores.
+	hidden, err := InsertHiddenRange(ctx, tx, userID, convID, from, time.Now().UTC().Truncate(time.Microsecond))
+	if err != nil {
+		return 0, fmt.Errorf("insert hidden range: %w", err)
+	}
+	if err := h.purgeEngine.FinalizeHiddenTx(ctx, tx, res.PurgeID, res.DeletedCount, hidden); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("commit hide tx: %w", err)
+	}
+	return hidden, nil
 }
 
 func guardDMPurgeTx(ctx context.Context, tx *sql.Tx, convID, userID string, expectedAuthor *string) error {
@@ -330,7 +332,21 @@ var purgeStepUpCopy = stepup.Copy{
 //
 // Policy lives in internal/stepup (#2765); this is the DM binding of it. There
 // is no enclosing transaction here, so the non-tx MFA form is correct.
+//
+// The password counts against the account's shared /auth/login lockout: a
+// locked account is a 423 even for the correct password, a wrong guess is
+// recorded at once (no transaction is open), and the count is reset only
+// once every factor has passed.
 func (h *Handler) verifyPurgeStepUp(ctx context.Context, c *gin.Context, userID, currentPassword, mfaCode string) bool {
+	attempt, rErr := stepup.ReserveUserPasswordAttempt(ctx, h.db, h.redis, userID, currentPassword)
+	if rErr != nil {
+		if rErr.Status == http.StatusLocked {
+			stepup.MarkAccountLocked(c)
+		}
+		h.logPurgeStepUpFailure(rErr)
+		rErr.Write(c)
+		return false
+	}
 	// LoadSubject derives MFA from the factor tables (policy P1) and fails
 	// closed on a read error; it no longer consults IsEnabled.
 	subj, sErr := stepup.LoadSubject(ctx, h.db, userID)
@@ -339,7 +355,13 @@ func (h *Handler) verifyPurgeStepUp(ctx context.Context, c *gin.Context, userID,
 		sErr.Write(c)
 		return false
 	}
-	if pErr := stepup.VerifyPasswordFactor(subj, currentPassword, purgeStepUpCopy); pErr != nil {
+	// Settled before the MFA leg, as /auth/login does: a correct password
+	// resets the lockout count even if the MFA code is then wrong.
+	pErr := stepup.VerifyPasswordFactor(attempt, subj, currentPassword, purgeStepUpCopy)
+	if err := attempt.Settle(ctx); err != nil {
+		h.log.Warn("Could not settle a purge step-up password against the lockout", "error", err)
+	}
+	if pErr != nil {
 		h.logPurgeStepUpFailure(pErr)
 		pErr.Write(c)
 		return false

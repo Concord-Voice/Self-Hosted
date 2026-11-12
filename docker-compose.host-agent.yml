@@ -1,0 +1,10 @@
+# Host agent overlay (#186). selfhost-storage.sh adds this file only when
+# ADMIN_CONSOLE_ENABLED=true in .env and the concord-agent group exists, and
+# sets CONCORD_AGENT_GID from the group database. The directory, not the socket,
+# is mounted so the container keeps seeing the live socket across agent restarts.
+services:
+  control-plane:
+    group_add:
+      - "${CONCORD_AGENT_GID:?CONCORD_AGENT_GID is set by concord-selfhost}"
+    volumes:
+      - /run/concord-agent:/run/concord-agent:ro

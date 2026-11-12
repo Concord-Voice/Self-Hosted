@@ -1,0 +1,640 @@
+name: Publish Concord-built MinIO image
+
+on:
+  workflow_dispatch:
+    inputs:
+      reason:
+        description: Reason; for an already-public package include the pre-dispatch legal approval record
+        required: true
+        type: string
+
+concurrency:
+  group: publish-minio-image
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  MINIO_COMMIT: 9e49d5e7a648f00e26f2246f4dc28e6b07f8c84a # pragma: allowlist secret -- public upstream Git commit
+  MINIO_TAG: RELEASE.2025-10-15T17-29-55Z
+  MINIO_DERIVATIVE_COMMIT: c7d942fa52807929e119bcb4531e21d099ccd1a8 # pragma: allowlist secret -- public reproducible source identity
+  MINIO_DERIVATIVE_TREE: 02a0f6c098c96088d2e46d7fb19286d79269d674 # pragma: allowlist secret -- public reproducible source identity
+  MINIO_DERIVATIVE_TAG: RELEASE.2025-10-15T17-29-55Z.CONCORD.c7d942fa5280
+  MINIO_PATCH_SHA256: 4b27aac2247f59fbe60ca02ad507cf2775dfa74f0bf78d559afa3024e1137642 # pragma: allowlist secret -- public reproducible source identity
+  MINIO_GO_MOD_SHA256: 8da7dd5cb011e71491c39350ef0014817acfa6ae983c6d212e5802d5508cae1d # pragma: allowlist secret -- public reproducible source identity
+  MINIO_GO_SUM_SHA256: b6ebc303ee7255db47ed2610b9271876da1146b734ce92ac99ea519a244b9fcc # pragma: allowlist secret -- public reproducible source identity
+  MINIO_SOURCE_SHA256: 7097139b7d2db54fda66c1e6fe18dd743a5baac67a0a3900372bdc37f8d17cca # pragma: allowlist secret -- public reproducible source identity
+  BUILDX_VERSION: v0.35.0
+  BUILDX_LINUX_AMD64_SHA256: d41ece72044243b4f58b343441ae37446d9c29a7d6b5e11c61847bbcf8f7dfda # pragma: allowlist secret -- public release-asset digest
+  RUNTIME_IMAGE: ghcr.io/concord-voice/minio:RELEASE.2025-10-15T17-29-55Z.CONCORD.c7d942fa5280
+  SOURCE_IMAGE: ghcr.io/concord-voice/minio-source:RELEASE.2025-10-15T17-29-55Z.CONCORD.c7d942fa5280
+  STAGING_RUNTIME_IMAGE: ghcr.io/concord-voice/minio-staging:RELEASE.2025-10-15T17-29-55Z.CONCORD.c7d942fa5280-${{ github.run_id }}
+  STAGING_SOURCE_IMAGE: ghcr.io/concord-voice/minio-source-staging:RELEASE.2025-10-15T17-29-55Z.CONCORD.c7d942fa5280-${{ github.run_id }}
+
+jobs:
+  publish:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04 # trust-boundary (ADR-0016); stable official Docker apt suite
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      runtime_digest: ${{ steps.push.outputs.digest }}
+      source_digest: ${{ steps.source.outputs.digest }}
+    steps:
+      - name: Checkout Concord build recipe
+        # pragma: allowlist nextline secret
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The hosted image's preinstalled daemon is below the 29.8.2 security
+      # floor. Upgrade from Docker's signed apt repository before admission.
+      - name: Install official Docker CE on the amd64 runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q ca-certificates curl gnupg
+          sudo install -m 0755 -d /etc/apt/keyrings
+          docker_key_dir=$(mktemp -d)
+          trap 'rm -rf -- "$docker_key_dir"' EXIT
+          curl --fail --show-error --silent --location --proto '=https' --tlsv1.2 https://download.docker.com/linux/ubuntu/gpg -o "$docker_key_dir/docker.asc"
+          # Primary identity independently reviewed from Docker docs d813acb6e172a9af209c4acdc0d6c7c03d969aa2.
+          if ! docker_primary=$(gpg --homedir "$docker_key_dir" --batch --with-colons --show-keys --fingerprint "$docker_key_dir/docker.asc" 2>/dev/null | awk -F: '
+            $1 == "pub" { if (primary) exit 1; primary=1; count++; next }
+            $1 == "fpr" && primary { print $10; primary=0 }
+            END { if (primary || count != 1) exit 1 }
+          '); then
+            printf 'error: Docker signing key verification failed\n' >&2
+            exit 1
+          fi
+          if [[ "$docker_primary" != 9DC858229FC7DD38854AE2D88D81803C0EBFCD88 ]]; then
+            printf 'error: Docker signing key identity refused\n' >&2
+            exit 1
+          fi
+          sudo install -m 0644 "$docker_key_dir/docker.asc" /etc/apt/keyrings/docker.asc
+          . /etc/os-release
+          sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
+          Types: deb
+          URIs: https://download.docker.com/linux/ubuntu
+          Suites: ${UBUNTU_CODENAME:-$VERSION_CODENAME}
+          Components: stable
+          Architectures: $(dpkg --print-architecture)
+          Signed-By: /etc/apt/keyrings/docker.asc 9DC858229FC7DD38854AE2D88D81803C0EBFCD88
+          EOF
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            docker-ce=5:29.9.2-1~ubuntu.24.04~noble \
+            docker-ce-cli=5:29.9.2-1~ubuntu.24.04~noble \
+            docker-ce-rootless-extras=5:29.9.2-1~ubuntu.24.04~noble \
+            containerd.io=2.4.2-3~ubuntu.24.04~noble \
+            docker-buildx-plugin=0.36.1-1~ubuntu.24.04~noble \
+            docker-compose-plugin=5.5.0-1~ubuntu.24.04~noble
+          sudo systemctl restart docker
+
+      - name: Require supported Docker Engine server
+        run: bash scripts/ci/require-docker-engine.sh
+
+      - name: Checkout exact upstream MinIO source
+        # pragma: allowlist nextline secret
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: minio/minio
+          ref: ${{ env.MINIO_TAG }}
+          path: minio-source
+          persist-credentials: false
+
+      - name: Verify exact unchanged upstream source and apply reviewed dependency patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          ACTUAL_COMMIT="$(git -C minio-source rev-parse HEAD)"
+          test "$ACTUAL_COMMIT" = "$MINIO_COMMIT"
+          SOURCE_STATUS="$(git -C minio-source status --porcelain --untracked-files=all --ignored)"
+          test -z "$SOURCE_STATUS"
+          printf '%s  %s\n' "$MINIO_PATCH_SHA256" infrastructure/docker/minio/dependencies.patch | sha256sum -c -
+          git -C minio-source apply --check --whitespace=error "$GITHUB_WORKSPACE/infrastructure/docker/minio/dependencies.patch"
+          git -C minio-source apply --whitespace=error "$GITHUB_WORKSPACE/infrastructure/docker/minio/dependencies.patch"
+          PATCHED_STATUS="$(git -C minio-source status --porcelain --untracked-files=all --ignored)"
+          test "$PATCHED_STATUS" = $' M go.mod\n M go.sum'
+          test "$(git -C minio-source diff --name-only --no-renames)" = $'go.mod\ngo.sum'
+          printf '%s  %s\n' "$MINIO_GO_MOD_SHA256" minio-source/go.mod "$MINIO_GO_SUM_SHA256" minio-source/go.sum | sha256sum -c -
+          git -C minio-source add -- go.mod go.sum
+          DERIVATIVE_TREE="$(git -C minio-source write-tree)"
+          test "$DERIVATIVE_TREE" = "$MINIO_DERIVATIVE_TREE"
+          DERIVATIVE_COMMIT="$(GIT_AUTHOR_NAME='Concord Voice' GIT_AUTHOR_EMAIL='build@concordvoice.com' GIT_AUTHOR_DATE='2026-11-02T00:00:00Z' GIT_COMMITTER_NAME='Concord Voice' GIT_COMMITTER_EMAIL='build@concordvoice.com' GIT_COMMITTER_DATE='2026-11-02T00:00:00Z' git -C minio-source -c commit.gpgsign=false commit-tree "$DERIVATIVE_TREE" -p "$MINIO_COMMIT" -m 'Concord fresh dependency remediation for #3441 #3469 #3527 #3528 #3530-#3534 #3716')"
+          test "$DERIVATIVE_COMMIT" = "$MINIO_DERIVATIVE_COMMIT"
+          test "$(git -C minio-source show -s --format=%P "$DERIVATIVE_COMMIT")" = "$MINIO_COMMIT"
+
+      - name: Install SHA-256-pinned Buildx
+        shell: bash
+        run: |
+          set -euo pipefail
+          BUILDX_PATH="$HOME/.docker/cli-plugins/docker-buildx"
+          install -d -m 0700 "$(dirname "$BUILDX_PATH")"
+          curl --fail --show-error --silent --location --proto '=https' --tlsv1.2 --retry 3 --output "$BUILDX_PATH" "https://github.com/docker/buildx/releases/download/${BUILDX_VERSION}/buildx-${BUILDX_VERSION}.linux-amd64"
+          printf '%s  %s\n' "$BUILDX_LINUX_AMD64_SHA256" "$BUILDX_PATH" | sha256sum -c -
+          chmod 0755 "$BUILDX_PATH"
+          docker buildx version | grep -F "github.com/docker/buildx ${BUILDX_VERSION} "
+
+      - name: Set up verified Buildx and digest-pinned BuildKit
+        # pragma: allowlist nextline secret
+        uses: docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003 # v4.4.0
+        with:
+          cache-binary: false
+          driver-opts: image=moby/buildkit:v0.34.1@sha256:99368f3e46177c6405b9740e4461d91cee004128daeecca78d4ceac50ec1da5c
+          buildkitd-flags: --debug
+
+      - name: Set up ORAS
+        # pragma: allowlist nextline secret
+        uses: oras-project/setup-oras@5e2f2482b30b0cb3e14e67f89a80c88c659a7c63 # v2.0.3
+        with:
+          version: 1.3.3
+
+      - name: Log in to GHCR
+        # pragma: allowlist nextline secret
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare deterministic corresponding source
+        shell: bash
+        run: |
+          set -euo pipefail
+          git -C minio-source archive --format=tar "$MINIO_DERIVATIVE_COMMIT" | gzip -n > minio-source.tar.gz
+          sha256sum minio-source.tar.gz > minio-source.tar.gz.sha256
+          printf '%s  %s\n' "$MINIO_SOURCE_SHA256" minio-source.tar.gz | sha256sum -c -
+          mkdir minio-build-context
+          tar -xzf minio-source.tar.gz -C minio-build-context
+          cp infrastructure/docker/minio/dependencies.patch dependencies.patch
+          sha256sum dependencies.patch > dependencies.patch.sha256
+          printf '%s  %s\n' "$MINIO_PATCH_SHA256" dependencies.patch | sha256sum -c -
+          printf '%s  %s\n' "$MINIO_GO_MOD_SHA256" minio-build-context/go.mod > go.mod.sha256
+          printf '%s  %s\n' "$MINIO_GO_SUM_SHA256" minio-build-context/go.sum > go.sum.sha256
+          cat > source-provenance.txt <<EOF
+          upstream_tag=$MINIO_TAG
+          upstream_commit=$MINIO_COMMIT
+          derivative_tag=$MINIO_DERIVATIVE_TAG
+          derivative_commit=$MINIO_DERIVATIVE_COMMIT
+          derivative_tree=$MINIO_DERIVATIVE_TREE
+          patch_sha256=$MINIO_PATCH_SHA256
+          go_mod_sha256=$MINIO_GO_MOD_SHA256
+          go_sum_sha256=$MINIO_GO_SUM_SHA256
+          source_archive_sha256=$MINIO_SOURCE_SHA256
+          go_builder=golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af
+          EOF
+          cp infrastructure/docker/minio/Dockerfile Dockerfile
+          cp infrastructure/docker/minio/SOURCE-BUILD.md SOURCE-BUILD.md
+
+      - name: Build and push run-scoped runtime staging manifest
+        id: push
+        # pragma: allowlist nextline secret
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: minio-build-context
+          file: infrastructure/docker/minio/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          outputs: type=image,name=${{ env.STAGING_RUNTIME_IMAGE }},push=true,rewrite-timestamp=true
+          build-args: |
+            SOURCE_DATE_EPOCH=1760549395
+            DERIVATIVE_COMMIT=${{ env.MINIO_DERIVATIVE_COMMIT }}
+            DERIVATIVE_TAG=${{ env.MINIO_DERIVATIVE_TAG }}
+            UPSTREAM_COMMIT=${{ env.MINIO_COMMIT }}
+          provenance: false
+
+      - name: Publish run-scoped corresponding-source staging artifact
+        id: source
+        shell: bash
+        env:
+          RUNTIME_DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNTIME_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf '%s\n' "$RUNTIME_DIGEST" > runtime-manifest-digest.txt
+          ORAS_OUTPUT="$(oras push --format json --annotation org.opencontainers.image.created=2025-10-15T17:29:55Z "$STAGING_SOURCE_IMAGE" minio-source.tar.gz:application/vnd.concord.minio.source.v1.tar+gzip minio-source.tar.gz.sha256:text/plain dependencies.patch:application/vnd.concord.minio.dependencies.patch.v1+diff dependencies.patch.sha256:text/plain go.mod.sha256:text/plain go.sum.sha256:text/plain source-provenance.txt:text/plain runtime-manifest-digest.txt:text/plain Dockerfile:text/plain SOURCE-BUILD.md:text/markdown)"
+          SOURCE_DIGEST="$(jq -r '.digest' <<<"$ORAS_OUTPUT")"
+          [[ "$SOURCE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          echo "digest=$SOURCE_DIGEST" >> "$GITHUB_OUTPUT"
+
+      - name: Fail closed if final tags conflict with staged digests
+        shell: bash
+        env:
+          RUNTIME_DIGEST: ${{ steps.push.outputs.digest }}
+          SOURCE_DIGEST: ${{ steps.source.outputs.digest }}
+        run: |
+          set -euo pipefail
+          RUNTIME_STATE="$(scripts/ci/check-oci-tag.sh "$RUNTIME_IMAGE" "$RUNTIME_DIGEST")"
+          SOURCE_STATE="$(scripts/ci/check-oci-tag.sh "$SOURCE_IMAGE" "$SOURCE_DIGEST")"
+          [[ "$RUNTIME_STATE" == "absent" || "$RUNTIME_STATE" == "matching" ]]
+          [[ "$SOURCE_STATE" == "absent" || "$SOURCE_STATE" == "matching" ]]
+          if [[ "$RUNTIME_STATE" == "matching" && "$SOURCE_STATE" == "absent" ]]; then
+            echo "::error::Runtime stable tag exists without corresponding source; stop and escalate"
+            exit 1
+          fi
+
+      - name: Verify staged runtime and S3 lifecycle on native amd64
+        shell: bash
+        env:
+          RUNTIME_DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNTIME_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          SERVER_CONTAINER="minio-amd64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          NETWORK="minio-amd64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          DATA_VOLUME="minio-amd64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          SMOKE_DIR="$(mktemp -d)"
+          cleanup() {
+            docker rm -fv "$SERVER_CONTAINER" >/dev/null 2>&1 || true
+            docker network rm "$NETWORK" >/dev/null 2>&1 || true
+            docker volume rm "$DATA_VOLUME" >/dev/null 2>&1 || true
+            rm -rf "$SMOKE_DIR"
+          }
+          trap cleanup EXIT
+          RUNTIME_REF="${STAGING_RUNTIME_IMAGE}@${RUNTIME_DIGEST}"
+          docker pull "$RUNTIME_REF"
+          test "$(docker image inspect "$RUNTIME_REF" --format '{{.Config.User}}')" = "0"
+          LABELS="$(docker image inspect "$RUNTIME_REF" --format '{{json .Config.Labels}}')"
+          jq -e --arg commit "$MINIO_DERIVATIVE_COMMIT" --arg tag "$MINIO_DERIVATIVE_TAG" --arg upstream "$MINIO_COMMIT" --arg upstream_tag "$MINIO_TAG" '.["org.opencontainers.image.revision"] == $commit and .["org.opencontainers.image.version"] == $tag and .["io.concordvoice.minio.upstream-tag"] == $upstream_tag and .["io.concordvoice.minio.upstream-commit"] == $upstream and .["org.opencontainers.image.licenses"] == "AGPL-3.0-or-later" and .["org.opencontainers.image.source"] == "https://github.com/minio/minio" and .["org.opencontainers.image.created"] == "2025-10-15T17:29:55Z"' <<<"$LABELS" >/dev/null
+          VERSION_OUTPUT="$(docker run --rm --platform linux/amd64 "$RUNTIME_REF" --version)"
+          VERSION_LINE="$(printf '%s\n' "$VERSION_OUTPUT" | sed -n '1p')"
+          test "$VERSION_LINE" = "minio version $MINIO_DERIVATIVE_TAG (commit-id=$MINIO_DERIVATIVE_COMMIT)"
+          ACTUAL_PLATFORMS="$(docker buildx imagetools inspect "$RUNTIME_REF" --raw | jq -r '.manifests[].platform | "\(.os)/\(.architecture)"' | sort -u | paste -sd, -)"
+          test "$ACTUAL_PLATFORMS" = "linux/amd64,linux/arm64"
+          MINIO_ROOT_USER="concord-smoke"
+          MINIO_ROOT_PASSWORD="$(openssl rand -hex 24)"
+          export MINIO_ROOT_USER MINIO_ROOT_PASSWORD
+          printf 'Concord MinIO digest smoke\n' > "$SMOKE_DIR/payload"
+          docker network create "$NETWORK" >/dev/null
+          docker volume create "$DATA_VOLUME" >/dev/null
+          docker run -d --name "$SERVER_CONTAINER" --network "$NETWORK" --network-alias minio -p 127.0.0.1:19000:9000 -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD --security-opt no-new-privileges:true --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add SETGID --cap-add SETUID --mount "type=volume,source=$DATA_VOLUME,target=/data" "$RUNTIME_REF" server /data --console-address ":9001"
+          ready=false
+          for _ in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:19000/minio/health/ready >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = true
+          curl --fail --silent --show-error http://127.0.0.1:19000/minio/health/live
+          curl --fail --silent --show-error http://127.0.0.1:19000/minio/health/ready
+          CURL_HELP="$(curl --help all)"
+          grep -Fq -- '--aws-sigv4' <<<"$CURL_HELP"
+          S3_CURL_CONFIG="$SMOKE_DIR/s3-curl.conf"
+          (umask 077; printf 'user = "%s:%s"\n' "$MINIO_ROOT_USER" "$MINIO_ROOT_PASSWORD" > "$S3_CURL_CONFIG")
+          chmod 0600 "$S3_CURL_CONFIG"
+          S3_ENDPOINT="http://127.0.0.1:19000"
+          S3_BUCKET="concord-smoke"
+          S3_OBJECT="payload"
+          s3_request() {
+            local expected_status="$1" output_path="$2" actual_status
+            shift 2
+            actual_status="$(curl --disable --fail --silent --show-error --aws-sigv4 'aws:amz:us-east-1:s3' --config "$S3_CURL_CONFIG" --output "$output_path" --write-out '%{http_code}' "$@")"
+            test "$actual_status" = "$expected_status"
+          }
+          s3_request 200 /dev/null --request PUT "$S3_ENDPOINT/$S3_BUCKET"
+          s3_request 200 /dev/null --request PUT --data-binary "@$SMOKE_DIR/payload" "$S3_ENDPOINT/$S3_BUCKET/$S3_OBJECT"
+          s3_request 200 /dev/null --head "$S3_ENDPOINT/$S3_BUCKET/$S3_OBJECT"
+          s3_request 200 "$SMOKE_DIR/download" --request GET "$S3_ENDPOINT/$S3_BUCKET/$S3_OBJECT"
+          s3_request 204 /dev/null --request DELETE "$S3_ENDPOINT/$S3_BUCKET/$S3_OBJECT"
+          s3_request 204 /dev/null --request DELETE "$S3_ENDPOINT/$S3_BUCKET"
+          test "$(sha256sum "$SMOKE_DIR/payload" | cut -d ' ' -f1)" = "$(sha256sum "$SMOKE_DIR/download" | cut -d ' ' -f1)"
+          docker stop --time 30 "$SERVER_CONTAINER"
+          test "$(docker inspect --format '{{.State.ExitCode}}' "$SERVER_CONTAINER")" = "0"
+
+      - name: Verify embedded Go module metadata on native amd64
+        shell: bash
+        env:
+          RUNTIME_DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNTIME_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          RUNTIME_REF="${STAGING_RUNTIME_IMAGE}@${RUNTIME_DIGEST}"
+          METADATA_CONTAINER="minio-metadata-amd64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          SMOKE_DIR="$(mktemp -d)"
+          cleanup() {
+            docker rm -f "$METADATA_CONTAINER" >/dev/null 2>&1 || true
+            rm -rf "$SMOKE_DIR"
+          }
+          trap cleanup EXIT
+          docker pull "$RUNTIME_REF"
+          docker create --name "$METADATA_CONTAINER" "$RUNTIME_REF" >/dev/null
+          docker cp "$METADATA_CONTAINER:/usr/bin/minio" "$SMOKE_DIR/minio"
+          GO_BUILD_INFO="$(docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true --mount "type=bind,source=$SMOKE_DIR/minio,target=/inspect/minio,readonly" --platform linux/amd64 golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af /usr/local/go/bin/go version -m /inspect/minio)"
+          grep -Eq '^/inspect/minio: go1\.26\.10$' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+github\.com/rabbitmq/amqp091-go[[:space:]]+v1\.14\.0([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+github\.com/go-jose/go-jose/v4[[:space:]]+v4\.1\.6([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+golang\.org/x/net[[:space:]]+v0\.62\.0([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+google\.golang\.org/grpc[[:space:]]+v1\.83\.2([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+github\.com/apache/thrift[[:space:]]+v0\.25\.0([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+github\.com/buger/jsonparser[[:space:]]+v1\.1\.2([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+github\.com/eclipse/paho\.mqtt\.golang[[:space:]]+v1\.5\.1([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+github\.com/Azure/go-ntlmssp[[:space:]]+v0\.1\.1([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+go\.mongodb\.org/mongo-driver[[:space:]]+v1\.17\.7([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+golang\.org/x/crypto[[:space:]]+v0\.58\.0([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+filippo\.io/edwards25519[[:space:]]+v1\.1\.1([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+github\.com/klauspost/compress[[:space:]]+v1\.18\.7([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+go\.etcd\.io/etcd/client/pkg/v3[[:space:]]+v3\.5\.33([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+github\.com/prometheus/prometheus[[:space:]]+v0\.303\.0([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+go\.opentelemetry\.io/otel/sdk[[:space:]]+v1\.44\.0([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          ! grep -Eq '^[[:space:]]*=>' <<<"$GO_BUILD_INFO"
+
+  smoke-arm64:
+    name: Verify staged MinIO on native arm64
+    needs: publish
+    runs-on: ubuntu-24.04-arm # trust-boundary (ADR-0016); native-arm64 correctness (ADR-0013 section 3)
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - name: Checkout Docker Engine guard
+        # pragma: allowlist nextline secret
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install official Docker CE on the arm64 runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          conflicts=()
+          for package in docker.io docker-compose docker-compose-v2 docker-doc podman-docker containerd runc; do
+            if dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null | grep -qx installed; then
+              conflicts+=("$package")
+            fi
+          done
+          if (( ${#conflicts[@]} )); then
+            sudo apt-get remove -y "${conflicts[@]}"
+          fi
+          sudo apt-get update -q
+          sudo apt-get install -y -q ca-certificates curl gnupg
+          sudo install -m 0755 -d /etc/apt/keyrings
+          docker_key_dir=$(mktemp -d)
+          trap 'rm -rf -- "$docker_key_dir"' EXIT
+          curl --fail --show-error --silent --location --proto '=https' --tlsv1.2 https://download.docker.com/linux/ubuntu/gpg -o "$docker_key_dir/docker.asc"
+          # Primary identity independently reviewed from Docker docs d813acb6e172a9af209c4acdc0d6c7c03d969aa2.
+          if ! docker_primary=$(gpg --homedir "$docker_key_dir" --batch --with-colons --show-keys --fingerprint "$docker_key_dir/docker.asc" 2>/dev/null | awk -F: '
+            $1 == "pub" { if (primary) exit 1; primary=1; count++; next }
+            $1 == "fpr" && primary { print $10; primary=0 }
+            END { if (primary || count != 1) exit 1 }
+          '); then
+            printf 'error: Docker signing key verification failed\n' >&2
+            exit 1
+          fi
+          if [[ "$docker_primary" != 9DC858229FC7DD38854AE2D88D81803C0EBFCD88 ]]; then
+            printf 'error: Docker signing key identity refused\n' >&2
+            exit 1
+          fi
+          sudo install -m 0644 "$docker_key_dir/docker.asc" /etc/apt/keyrings/docker.asc
+          . /etc/os-release
+          sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
+          Types: deb
+          URIs: https://download.docker.com/linux/ubuntu
+          Suites: ${UBUNTU_CODENAME:-$VERSION_CODENAME}
+          Components: stable
+          Architectures: $(dpkg --print-architecture)
+          Signed-By: /etc/apt/keyrings/docker.asc 9DC858229FC7DD38854AE2D88D81803C0EBFCD88
+          EOF
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            docker-ce=5:29.9.2-1~ubuntu.24.04~noble \
+            docker-ce-cli=5:29.9.2-1~ubuntu.24.04~noble \
+            docker-ce-rootless-extras=5:29.9.2-1~ubuntu.24.04~noble \
+            containerd.io=2.4.2-3~ubuntu.24.04~noble \
+            docker-buildx-plugin=0.36.1-1~ubuntu.24.04~noble \
+            docker-compose-plugin=5.5.0-1~ubuntu.24.04~noble
+          sudo systemctl start docker
+
+      - name: Require supported Docker Engine server (root docker)
+        run: sudo bash scripts/ci/require-docker-engine.sh
+
+      - name: Log root Docker in to GHCR
+        shell: bash
+        env:
+          GH_TOKEN_FOR_GHCR: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USER: ${{ github.actor }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$GH_TOKEN_FOR_GHCR" | sudo docker login ghcr.io -u "$GHCR_USER" --password-stdin
+
+      - name: Verify embedded Go module metadata on native arm64
+        shell: bash
+        env:
+          RUNTIME_DIGEST: ${{ needs.publish.outputs.runtime_digest }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNTIME_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          RUNTIME_REF="${STAGING_RUNTIME_IMAGE}@${RUNTIME_DIGEST}"
+          METADATA_CONTAINER="minio-metadata-arm64-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          SMOKE_DIR="$(mktemp -d)"
+          cleanup() {
+            sudo docker rm -f "$METADATA_CONTAINER" >/dev/null 2>&1 || true
+            rm -rf "$SMOKE_DIR"
+          }
+          trap cleanup EXIT
+          sudo docker pull "$RUNTIME_REF"
+          sudo docker create --name "$METADATA_CONTAINER" "$RUNTIME_REF" >/dev/null
+          sudo docker cp "$METADATA_CONTAINER:/usr/bin/minio" "$SMOKE_DIR/minio"
+          GO_BUILD_INFO="$(sudo docker run --rm --network none --read-only --cap-drop ALL --security-opt no-new-privileges:true --mount "type=bind,source=$SMOKE_DIR/minio,target=/inspect/minio,readonly" golang:1.26.10-bookworm@sha256:632dff7351799a5a9954a48dc06670ade72ee44e8c351cdc0e5a57af2fea21af /usr/local/go/bin/go version -m /inspect/minio)"
+          grep -Eq '^/inspect/minio: go1\.26\.10$' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+github\.com/rabbitmq/amqp091-go[[:space:]]+v1\.14\.0([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+github\.com/go-jose/go-jose/v4[[:space:]]+v4\.1\.6([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+golang\.org/x/net[[:space:]]+v0\.62\.0([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+google\.golang\.org/grpc[[:space:]]+v1\.83\.2([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+github\.com/apache/thrift[[:space:]]+v0\.25\.0([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+github\.com/buger/jsonparser[[:space:]]+v1\.1\.2([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+github\.com/eclipse/paho\.mqtt\.golang[[:space:]]+v1\.5\.1([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+github\.com/Azure/go-ntlmssp[[:space:]]+v0\.1\.1([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+go\.mongodb\.org/mongo-driver[[:space:]]+v1\.17\.7([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+golang\.org/x/crypto[[:space:]]+v0\.58\.0([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+filippo\.io/edwards25519[[:space:]]+v1\.1\.1([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+github\.com/klauspost/compress[[:space:]]+v1\.18\.7([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+go\.etcd\.io/etcd/client/pkg/v3[[:space:]]+v3\.5\.33([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+github\.com/prometheus/prometheus[[:space:]]+v0\.303\.0([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          grep -Eq '^[[:space:]]*dep[[:space:]]+go\.opentelemetry\.io/otel/sdk[[:space:]]+v1\.44\.0([[:space:]]|$)' <<<"$GO_BUILD_INFO"
+          ! grep -Eq '^[[:space:]]*=>' <<<"$GO_BUILD_INFO"
+
+      - name: Verify staged digest on native arm64
+        shell: bash
+        env:
+          RUNTIME_DIGEST: ${{ needs.publish.outputs.runtime_digest }}
+        run: |
+          set -euo pipefail
+          cleanup() {
+            sudo docker rm -fv minio-arm64-smoke >/dev/null 2>&1 || true
+          }
+          trap cleanup EXIT
+          RUNTIME_REF="${STAGING_RUNTIME_IMAGE}@${RUNTIME_DIGEST}"
+          sudo docker pull "$RUNTIME_REF"
+          VERSION_OUTPUT="$(sudo docker run --rm "$RUNTIME_REF" --version)"
+          VERSION_LINE="$(printf '%s\n' "$VERSION_OUTPUT" | sed -n '1p')"
+          test "$VERSION_LINE" = "minio version $MINIO_DERIVATIVE_TAG (commit-id=$MINIO_DERIVATIVE_COMMIT)"
+          MINIO_ROOT_USER="concord-arm64-smoke"
+          MINIO_ROOT_PASSWORD="$(openssl rand -hex 24)"
+          export MINIO_ROOT_USER MINIO_ROOT_PASSWORD
+          sudo --preserve-env=MINIO_ROOT_USER,MINIO_ROOT_PASSWORD docker run -d --name minio-arm64-smoke -p 127.0.0.1:19001:9000 -e MINIO_ROOT_USER -e MINIO_ROOT_PASSWORD --security-opt no-new-privileges:true --cap-drop ALL --cap-add CHOWN --cap-add DAC_OVERRIDE --cap-add FOWNER --cap-add SETGID --cap-add SETUID "$RUNTIME_REF" server /data --console-address ":9001"
+          ready=false
+          for _ in {1..60}; do
+            if curl --fail --silent http://127.0.0.1:19001/minio/health/ready >/dev/null; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          test "$ready" = true
+          curl --fail --silent --show-error http://127.0.0.1:19001/minio/health/ready
+          sudo docker stop --time 30 minio-arm64-smoke
+          test "$(sudo docker inspect --format '{{.State.ExitCode}}' minio-arm64-smoke)" = "0"
+
+  finalize:
+    name: Promote verified runtime and source tags
+    needs: [publish, smoke-arm64]
+    runs-on: ubuntu-24.04 # trust-boundary (ADR-0016); stable official Docker apt suite
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout finalization guard
+        # pragma: allowlist nextline secret
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # The hosted image's preinstalled daemon is below the 29.8.2 security
+      # floor. Upgrade from Docker's signed apt repository before admission.
+      - name: Install official Docker CE on the amd64 runner
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update -q
+          sudo apt-get install -y -q ca-certificates curl gnupg
+          sudo install -m 0755 -d /etc/apt/keyrings
+          docker_key_dir=$(mktemp -d)
+          trap 'rm -rf -- "$docker_key_dir"' EXIT
+          curl --fail --show-error --silent --location --proto '=https' --tlsv1.2 https://download.docker.com/linux/ubuntu/gpg -o "$docker_key_dir/docker.asc"
+          # Primary identity independently reviewed from Docker docs d813acb6e172a9af209c4acdc0d6c7c03d969aa2.
+          if ! docker_primary=$(gpg --homedir "$docker_key_dir" --batch --with-colons --show-keys --fingerprint "$docker_key_dir/docker.asc" 2>/dev/null | awk -F: '
+            $1 == "pub" { if (primary) exit 1; primary=1; count++; next }
+            $1 == "fpr" && primary { print $10; primary=0 }
+            END { if (primary || count != 1) exit 1 }
+          '); then
+            printf 'error: Docker signing key verification failed\n' >&2
+            exit 1
+          fi
+          if [[ "$docker_primary" != 9DC858229FC7DD38854AE2D88D81803C0EBFCD88 ]]; then
+            printf 'error: Docker signing key identity refused\n' >&2
+            exit 1
+          fi
+          sudo install -m 0644 "$docker_key_dir/docker.asc" /etc/apt/keyrings/docker.asc
+          . /etc/os-release
+          sudo tee /etc/apt/sources.list.d/docker.sources >/dev/null <<EOF
+          Types: deb
+          URIs: https://download.docker.com/linux/ubuntu
+          Suites: ${UBUNTU_CODENAME:-$VERSION_CODENAME}
+          Components: stable
+          Architectures: $(dpkg --print-architecture)
+          Signed-By: /etc/apt/keyrings/docker.asc 9DC858229FC7DD38854AE2D88D81803C0EBFCD88
+          EOF
+          sudo apt-get update -q
+          sudo apt-get install -y -q --no-install-recommends \
+            docker-ce=5:29.9.2-1~ubuntu.24.04~noble \
+            docker-ce-cli=5:29.9.2-1~ubuntu.24.04~noble \
+            docker-ce-rootless-extras=5:29.9.2-1~ubuntu.24.04~noble \
+            containerd.io=2.4.2-3~ubuntu.24.04~noble \
+            docker-buildx-plugin=0.36.1-1~ubuntu.24.04~noble \
+            docker-compose-plugin=5.5.0-1~ubuntu.24.04~noble
+          sudo systemctl restart docker
+
+      - name: Require supported Docker Engine server
+        run: bash scripts/ci/require-docker-engine.sh
+
+      - name: Set up ORAS
+        # pragma: allowlist nextline secret
+        uses: oras-project/setup-oras@5e2f2482b30b0cb3e14e67f89a80c88c659a7c63 # v2.0.3
+        with:
+          version: 1.3.3
+
+      - name: Log in to GHCR
+        # pragma: allowlist nextline secret
+        uses: docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6 # v4.7.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Finalize or safely resume verified tags
+        shell: bash
+        env:
+          RUNTIME_DIGEST: ${{ needs.publish.outputs.runtime_digest }}
+          SOURCE_DIGEST: ${{ needs.publish.outputs.source_digest }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNTIME_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+          [[ "$SOURCE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]
+
+          SOURCE_CHECK_DIR="$(mktemp -d)"
+          trap 'rm -rf "$SOURCE_CHECK_DIR"' EXIT
+          oras pull --output "$SOURCE_CHECK_DIR" "${STAGING_SOURCE_IMAGE}@${SOURCE_DIGEST}"
+          test "$(cat "$SOURCE_CHECK_DIR/runtime-manifest-digest.txt")" = "$RUNTIME_DIGEST"
+
+          RUNTIME_STATE="$(scripts/ci/check-oci-tag.sh "$RUNTIME_IMAGE" "$RUNTIME_DIGEST")"
+          SOURCE_STATE="$(scripts/ci/check-oci-tag.sh "$SOURCE_IMAGE" "$SOURCE_DIGEST")"
+
+          if [[ "$RUNTIME_STATE" == "matching" && "$SOURCE_STATE" == "absent" ]]; then
+            echo "::error::Runtime stable tag exists without corresponding source; stop and escalate"
+            exit 1
+          fi
+
+          if [[ "$SOURCE_STATE" == "absent" ]]; then
+            oras cp "${STAGING_SOURCE_IMAGE}@${SOURCE_DIGEST}" "$SOURCE_IMAGE"
+          fi
+          test "$(scripts/ci/check-oci-tag.sh "$SOURCE_IMAGE" "$SOURCE_DIGEST")" = "matching"
+
+          if [[ "$RUNTIME_STATE" == "absent" ]]; then
+            oras cp "${STAGING_RUNTIME_IMAGE}@${RUNTIME_DIGEST}" "$RUNTIME_IMAGE"
+          fi
+          test "$(scripts/ci/check-oci-tag.sh "$RUNTIME_IMAGE" "$RUNTIME_DIGEST")" = "matching"
+
+      - name: Write immutable publication summary
+        shell: bash
+        env:
+          DISPATCH_REASON: ${{ inputs.reason }}
+          RUNTIME_DIGEST: ${{ needs.publish.outputs.runtime_digest }}
+          SOURCE_DIGEST: ${{ needs.publish.outputs.source_digest }}
+        run: |
+          set -euo pipefail
+          FULL_RUNTIME_REF="$(printf '%s@%s' "$RUNTIME_IMAGE" "$RUNTIME_DIGEST")"
+          RUNTIME_MANIFEST="$(oras manifest fetch "$FULL_RUNTIME_REF")"
+          PLATFORM_DIGESTS="$(jq -r '.manifests[] | select(.platform.os != "unknown") | "\(.platform.os)/\(.platform.architecture): \(.digest)"' <<<"$RUNTIME_MANIFEST")"
+          SAFE_REASON="$(printf '%s' "$DISPATCH_REASON" | tr '\r\n' '  ' | cut -c1-500 | sed -e 's/&/\&amp;/g' -e 's/</\&lt;/g' -e 's/>/\&gt;/g')"
+          # shellcheck disable=SC2129
+          printf '## Concord-built MinIO publication\n' >> "$GITHUB_STEP_SUMMARY"
+          # shellcheck disable=SC2016
+          printf '**Tag:** `%s`\n' "$MINIO_DERIVATIVE_TAG" >> "$GITHUB_STEP_SUMMARY"
+          # shellcheck disable=SC2016
+          printf '**Commit:** `%s`\n' "$MINIO_DERIVATIVE_COMMIT" >> "$GITHUB_STEP_SUMMARY"
+          # shellcheck disable=SC2016
+          printf '**Upstream tag:** `%s`\n' "$MINIO_TAG" >> "$GITHUB_STEP_SUMMARY"
+          # shellcheck disable=SC2016
+          printf '**Upstream commit:** `%s`\n' "$MINIO_COMMIT" >> "$GITHUB_STEP_SUMMARY"
+          # shellcheck disable=SC2016
+          printf '**Runtime digest:** `%s`\n' "$RUNTIME_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          # shellcheck disable=SC2016
+          printf '**Runtime ref:** `%s`\n' "$FULL_RUNTIME_REF" >> "$GITHUB_STEP_SUMMARY"
+          # shellcheck disable=SC2016
+          printf '**Source digest:** `%s`\n' "$SOURCE_DIGEST" >> "$GITHUB_STEP_SUMMARY"
+          # shellcheck disable=SC2016
+          printf '**Platforms:**\n```text\n%s\n```\n' "$PLATFORM_DIGESTS" >> "$GITHUB_STEP_SUMMARY"
+          printf '**Reason:** <code>%s</code>\n' "$SAFE_REASON" >> "$GITHUB_STEP_SUMMARY"
+          INITIAL_PUBLICATION_NOTE='Initial package creation: complete legal review; make the source package public '
+          INITIAL_PUBLICATION_NOTE+='and prove an anonymous source pull by digest; then make the runtime package public '
+          INITIAL_PUBLICATION_NOTE+='and prove an anonymous runtime pull by digest.'
+          printf '%s\n' "$INITIAL_PUBLICATION_NOTE" >> "$GITHUB_STEP_SUMMARY"
+          printf '%s\n' 'For already-public packages, legal approval must precede dispatch; prove anonymous pulls by digest before updating the shared Compose digest.' >> "$GITHUB_STEP_SUMMARY"

@@ -287,6 +287,26 @@ repos:
         files: '^(\.github/scripts/trivy-assert-os\.sh|\.github/scripts/tests/trivy-assert-os\.test\.sh|\.github/workflows/container-image-scan\.ya?ml)$'
         pass_filenames: false
 
+      # Every image source in a tracked Dockerfile must match the identity
+      # declared in .github/base-images.json. Standard library only, no daemon,
+      # no network. It runs on every commit (about 0.05 s): pre-commit leaves
+      # deleted files out of its list, so a files: trigger would miss a deleted
+      # or renamed Dockerfile and the stale manifest entry it leaves behind.
+      # pass_filenames is false on purpose: the checker reads the whole tracked
+      # set, and a FILE list would report every other entry as stale.
+      - id: check-base-images
+        name: base images match their declared identity
+        entry: python3 .github/scripts/check-base-images.py
+        language: system
+        always_run: true
+        pass_filenames: false
+      - id: test-check-base-images
+        name: base-image identity check self-test
+        entry: bash .github/scripts/tests/check-base-images.test.sh
+        language: system
+        files: '^\.github/scripts/(check-base-images\.py|tests/check-base-images\.test\.sh|tests/fixtures/base-images/)'
+        pass_filenames: false
+
       - id: lint-workflow-call-contract
         name: workflow lint — workflow_call contract (permissions superset + secrets agree)
         entry: bash .github/scripts/lint-workflow-call-contract.sh .
@@ -670,7 +690,7 @@ repos:
         # test-selfhost-byo-s3.sh parses Compose files with PyYAML.
         language: python
         additional_dependencies: ['PyYAML==6.0.3']
-        files: '^(\.pre-commit-config\.yaml|docker-compose(\.production)?\.yml|docker-compose\.(selfhost|byo-s3)\.yml|infrastructure/deploy/(deploy-manifest\.txt|install-selfhost\.sh|provision-cert\.sh|copy-certs\.sh|provision-production\.sh|concord-selfhost|concord-ctl\.sh|selfhost-port-posture\.py|selfhost-storage\.sh|selfhost-security-event-logging\.sh|selfhost-tls\.(sh|py)|tests/(Dockerfile\.selfhost-hook|selfhost-acceptance\.py|test-(selfhost-(storage|byo-s3|cert-delivery|tls-readiness|tls-callers|tls-selected-consumer|acceptance)|copy-certs)\.sh|test-selfhost-tls-selected-consumer\.py|test-copy-certs-labels\.py|(?:test_selfhost_(tls|acceptance)|selfhost_acceptance_support)\.py|selfhost-cert-test-tools\.sh|test-security-event-logging\.sh|test-control-plane-secrets\.sh|security_event_publication_test\.py))|infrastructure/docker/coturn/turnserver\.conf|scripts/tests/(run-selfhost-deploy-tests\.sh|test-(install-selfhost|provision-cert|concord-selfhost)\.sh|provision_cert_replacement_test\.py))$'
+        files: '^(\.pre-commit-config\.yaml|docker-compose(\.production)?\.yml|docker-compose\.(selfhost|byo-s3)\.yml|infrastructure/deploy/(deploy-manifest\.txt|install-selfhost\.sh|provision-cert\.sh|copy-certs\.sh|provision-production\.sh|concord-selfhost|concord-ctl\.sh|selfhost-port-posture\.py|selfhost-storage\.sh|selfhost-(backup|update|authority)\.sh|release-signers|selfhost-security-event-logging\.sh|selfhost-tls\.(sh|py)|tests/(Dockerfile\.selfhost-hook|selfhost-acceptance\.py|test-(selfhost-(storage|backup|update|authority|byo-s3|cert-delivery|tls-readiness|tls-callers|tls-selected-consumer|acceptance)|copy-certs)\.sh|test-selfhost-tls-selected-consumer\.py|test-copy-certs-labels\.py|(?:test_selfhost_(tls|acceptance)|selfhost_acceptance_support)\.py|selfhost-cert-test-tools\.sh|test-security-event-logging\.sh|test-control-plane-secrets\.sh|security_event_publication_test\.py))|infrastructure/docker/coturn/turnserver\.conf|scripts/tests/(run-selfhost-deploy-tests\.sh|test-(install-selfhost|provision-cert|concord-selfhost)\.sh|provision_cert_replacement_test\.py))$'
         pass_filenames: false
 
 
@@ -852,4 +872,38 @@ repos:
         language: python
         additional_dependencies: ['PyYAML==6.0.3']
         files: '^(\.pre-commit-config\.yaml|scripts/test-hook-revs-are-shas\.py)$'
+        pass_filenames: false
+
+  # ── Concord-built MinIO and buildtools image publishers ────────────────
+  # Hermetic structural and fail-closed registry-state tests. These run when
+  # the source recipe, publisher, shared consumer, guards, or their tests change.
+  - repo: local
+    hooks:
+      - id: test-publish-minio-image
+        name: 'Test Concord-built MinIO publisher and consumer (#1220)'
+        entry: bash scripts/tests/test-publish-minio-image.sh
+        language: system
+        files: '^(\.pre-commit-config\.yaml|\.github/workflows/publish-minio-image\.yml|(?:\.zap/)?docker-compose(?:\.[A-Za-z0-9_-]+)*\.ya?ml|infrastructure/docker/minio/(Dockerfile|SOURCE-BUILD\.md|dependencies\.patch|minio\.openvex\.json)|scripts/(ci/check-oci-tag|tests/test-(publish-minio-image|check-oci-tag))\.sh)$'
+        pass_filenames: false
+
+      - id: test-check-oci-tag
+        name: 'Test fail-closed OCI tag guard (#1220)'
+        entry: bash scripts/tests/test-check-oci-tag.sh
+        language: system
+        files: '^(\.pre-commit-config\.yaml|scripts/(ci/check-oci-tag|tests/test-check-oci-tag)\.sh)$'
+        pass_filenames: false
+
+      - id: test-publish-minio-engine-pins
+        name: 'Test image publisher Docker Engine pins'
+        entry: python3 scripts/tests/test-publish-minio-engine-pins.py
+        language: python
+        additional_dependencies: ['PyYAML==6.0.3']
+        files: '^(\.pre-commit-config\.yaml|\.github/(workflows/publish-(buildtools-base|minio-image)\.yml|ci/docker-engine-packages\.lock)|scripts/ci/(probe-publisher-engine\.py|require-docker-engine\.sh)|scripts/tests/test-publish-minio-engine-pins\.py)$'
+        pass_filenames: false
+
+      - id: test-selfhost-release
+        name: 'Test self-host release tag check and bundle builder'
+        entry: bash -c 'bash scripts/tests/test-check-release-tag.sh && python3 scripts/tests/test-selfhost-bundle.py'
+        language: system
+        files: '^(\.pre-commit-config\.yaml|VERSION|scripts/release/.*|scripts/tests/test-(check-release-tag\.sh|selfhost-bundle\.py))$'
         pass_filenames: false

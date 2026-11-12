@@ -20,6 +20,7 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/authority/store"
@@ -477,21 +478,23 @@ func TestALateResultIsReplacedAndCounted(t *testing.T) {
 }
 
 // B2-D7: the deadline starts when the request arrives, so the revocation read
-// spends from it. 30 ms of peer check plus 30 ms of handler overrun a 50-ms
-// route; with a fresh deadline after the check, each half alone would fit.
+// spends from it. Virtual time makes 30 ms of peer check plus 30 ms of handler
+// deterministically overrun the route's 50-ms budget.
 func TestThePeerCheckSpendsTheRequestDeadline(t *testing.T) {
-	for _, c := range []struct{ method, target string }{
-		{"GET", "/v1/pending-heads"},
-		{"POST", "/v1/transactions"},
-	} {
-		f := &fake{sleep: 30 * time.Millisecond, revSleep: 30 * time.Millisecond}
-		s, leaf := testServer(t, f)
-		s.txDeadline, s.readDeadline = 50*time.Millisecond, 50*time.Millisecond
-		w := serveReq(s, peerReq(leaf, c.method, c.target, []byte("x")))
-		if w.Code != 503 || f.noted != 1 {
-			t.Errorf("%s %s: %d noted=%d, want 503 and one non-client 503", c.method, c.target, w.Code, f.noted)
+	synctest.Test(t, func(t *testing.T) {
+		for _, c := range []struct{ method, target string }{
+			{"GET", "/v1/pending-heads"},
+			{"POST", "/v1/transactions"},
+		} {
+			f := &fake{sleep: 30 * time.Millisecond, revSleep: 30 * time.Millisecond}
+			s, leaf := testServer(t, f)
+			s.txDeadline, s.readDeadline = 50*time.Millisecond, 50*time.Millisecond
+			w := serveReq(s, peerReq(leaf, c.method, c.target, []byte("x")))
+			if w.Code != 503 || f.noted != 1 {
+				t.Errorf("%s %s: %d noted=%d, want 503 and one non-client 503", c.method, c.target, w.Code, f.noted)
+			}
 		}
-	}
+	})
 }
 
 // B2-D34: once shutdown holds the write lock, a new request is aborted

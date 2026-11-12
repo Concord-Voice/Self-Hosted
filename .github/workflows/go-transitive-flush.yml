@@ -4,21 +4,28 @@ name: Refresh transitive Go module graph
 # (`day: tuesday` in .github/dependabot.yml, no `time:` pinned) — its exact
 # fire time isn't guaranteed and may land before, during, or after our
 # 06:00 UTC slot. Timing-independence is structural via the contention
-# guard step below, NOT via this cron's choice; do not rely on "06:00
+# guard job below, NOT via this cron's choice; do not rely on "06:00
 # precedes Dependabot" as an invariant.
 #
-# CI re-trigger note (per Copilot review on #1228): PRs created by this
-# workflow are authored by `GITHUB_TOKEN`. Per `peter-evans/create-pull-request`
-# known limitation, `pull_request` workflows do NOT auto-trigger on these PRs.
-# Reviewers must push an empty commit (or close+reopen the PR) to run CI
-# before merging. See [internal]rules/backend.md § Dependency Hygiene for the
-# full triage path.
+# PR authorship: the PR is opened with a short-lived GitHub App installation
+# token, not `GITHUB_TOKEN`. A `GITHUB_TOKEN`-authored PR starts no
+# `pull_request` workflows, and this repository does not let Actions create
+# pull requests at all. An App-authored PR runs the full PR check set on its
+# own, with no close-and-reopen step for the reviewer.
 #
-# That instruction is ALSO rendered into the PR body itself (see "Render PR
-# body" below). It used to live only here and in backend.md — i.e. everywhere
-# except the one artifact a reviewer actually reads — so the body presented an
-# unrunnable "green in CI" checkbox with no hint that CI had not run. Keep the
-# two copies in sync if either changes.
+# Three jobs, and the split is a security boundary. A job receives every secret
+# it references, and its `GITHUB_TOKEN`, when the job starts, whatever the step
+# order. Minting the token "late" inside one job would still put the App private
+# key on the runner while `go get -u` downloads and resolves third-party modules.
+#   guard    holds the only `GITHUB_TOKEN` write scope (`pull-requests`), for
+#            the deferral comment. It runs no Go tooling.
+#   refresh  fetches modules. Its `GITHUB_TOKEN` is read-only and it references
+#            no secret.
+#   open-pr  holds the App key. It runs no Go tooling: it copies go.mod and
+#            go.sum out of the artifact, and create-pull-request reads the
+#            rendered body from the artifact directory.
+# Do not merge the jobs, and do not add Go commands to guard or open-pr.
+# scripts/tests/test-go-transitive-flush-render.sh locks these rules.
 #
 # Output PR is processed by /weekly-deps Wednesday review window.
 # See [internal]rules/backend.md § Dependency Hygiene.
@@ -29,9 +36,9 @@ on:
     - cron: "0 6 * * 2"
   workflow_dispatch:
 
-# Least-privilege default; the flush job elevates to the writes it needs
-# (peter-evans/create-pull-request: contents + pull-requests; the contention
-# guard's gh pr comment: pull-requests).
+# Least-privilege default. The guard job adds only `pull-requests: write`, for
+# its `gh pr comment`. The branch push and the PR itself use
+# the App installation token, so `GITHUB_TOKEN` never needs `contents: write`.
 permissions:
   contents: read
 
@@ -40,21 +47,19 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  flush:
+  guard:
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 5
     permissions:
-      contents: write
+      contents: read
       pull-requests: write
+    outputs:
+      deferred: ${{ steps.contention.outputs.deferred }}
     steps:
+      # `gh` infers the repository from the checkout. Nothing in it is executed.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: services/control-plane/go.mod
-          cache-dependency-path: services/control-plane/go.sum
 
       - name: Contention guard — defer if open Dependabot Go PRs exist
         id: contention
@@ -116,9 +121,30 @@ jobs:
           echo "Exiting success-skip due to contention."
           exit 0
 
+  refresh:
+    needs: guard
+    if: needs.guard.outputs.deferred != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      # 'true' or 'false' from the refresh step; empty when this job is skipped.
+      has_changes: ${{ steps.refresh.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No module or build cache: a cache entry is state shared between runs,
+      # and this job resolves third-party modules.
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: services/control-plane/go.mod
+          cache: false
+
       - name: Refresh transitive Go module graph
         id: refresh
-        if: steps.contention.outputs.deferred != 'true'
         working-directory: services/control-plane
         run: |
           set -euo pipefail
@@ -128,7 +154,7 @@ jobs:
 
           # Stat the result for the PR body
           if git diff --quiet go.mod go.sum 2>/dev/null; then
-            echo "No transitive updates available. Workflow will exit success-skip after PR-creation step skips."
+            echo "No transitive updates available. The open-pr job will be skipped."
             echo "has_changes=false" >> "$GITHUB_OUTPUT"
           else
             echo "Changes detected in go.mod / go.sum."
@@ -137,7 +163,7 @@ jobs:
           fi
 
       - name: Render PR body
-        if: steps.contention.outputs.deferred != 'true' && steps.refresh.outputs.has_changes == 'true'
+        if: steps.refresh.outputs.has_changes == 'true'
         env:
           # Passed via env rather than inlined into the script. `github.event_name` is
           # a fixed enum and not attacker-controllable, but the env-block form is the
@@ -200,19 +226,6 @@ jobs:
           - Indirect deps that newer direct/indirect versions now require (MVS resolution)
           - Orphan cleanup by \`go mod tidy\` (the count above is measured from the diff, not assumed)
 
-          ## ⚠ CI does not run on this PR until you re-trigger it
-
-          This PR is authored by \`GITHUB_TOKEN\`, and GitHub does not fire \`pull_request\`
-          workflows for PRs created that way — a known \`peter-evans/create-pull-request\`
-          limitation. \`pr-ci.yml\` therefore never runs here on its own, which makes the
-          first two checklist items below **unsatisfiable until you act**.
-
-          **Close and reopen this PR** (or push an empty commit) to run the full suite.
-
-          The only checks that appear without that step are scanners which do not depend on
-          the \`pull_request\` event. Do NOT read those few green marks as "CI is green" —
-          the build, race tests, integration suite, govulncheck and SonarCloud have not run.
-
           ## Review checklist
 
           - [ ] \`go test -race ./...\` is green in CI
@@ -229,18 +242,65 @@ jobs:
 
           - Mechanism rationale: the backend Dependency Hygiene rule (internal development docs)
           - Triage workflow: \`/weekly-deps\` Phase 1
-          - Founding issue: #1212
           EOF
           echo "Rendered PR body to /tmp/pr-body.md"
 
-      - name: Open PR if changed
-        if: steps.contention.outputs.deferred != 'true' && steps.refresh.outputs.has_changes == 'true'
-        # SHA-pinned per supply-chain hardening (#847). Same SHA as refresh-ioc-list.yml.
+      - name: Stage the PR payload
+        if: steps.refresh.outputs.has_changes == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/flush"
+          cp services/control-plane/go.mod services/control-plane/go.sum /tmp/pr-body.md "$RUNNER_TEMP/flush/"
+
+      - name: Upload the PR payload
+        if: steps.refresh.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: go-transitive-flush
+          path: ${{ runner.temp }}/flush
+          retention-days: 1
+          if-no-files-found: error
+
+  open-pr:
+    needs: refresh
+    if: needs.refresh.outputs.has_changes == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: go-transitive-flush
+          path: ${{ runner.temp }}/flush
+
+      # The payload is data from the lower-trust job. It is copied, never executed.
+      - name: Apply the refreshed module files
+        run: |
+          set -euo pipefail
+          cp "$RUNNER_TEMP/flush/go.mod" "$RUNNER_TEMP/flush/go.sum" services/control-plane/
+
+      # Same App and same pinned action as refresh-ioc-list.yml.
+      - name: Mint flush App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.PUBLIC_MIRROR_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PUBLIC_MIRROR_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Open PR
+        # SHA-pinned per supply-chain hardening. Same SHA as refresh-ioc-list.yml.
         # Upgrade procedure: `gh api repos/peter-evans/create-pull-request/git/refs/tags/vX.Y.Z`,
         # replace SHA + comment.
         uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
         with:
-          token: ${{ github.token }}
+          token: ${{ steps.app-token.outputs.token }}
           # Pin BOTH identities. create-pull-request defaults `author` to
           # `github.actor`, which on a workflow_dispatch run is whoever pressed the
           # button — so `git log --format=%an` on main attributed a machine-generated
@@ -253,7 +313,7 @@ jobs:
           title: "chore: refresh transitive Go module graph (services/control-plane)"
           labels: "area: deps,area: control-plane,area: ci-cd,domain: developer-experience,routine: go-transitive-hygiene"
           commit-message: "chore: refresh transitive Go module graph"
-          body-path: /tmp/pr-body.md
+          body-path: ${{ runner.temp }}/flush/pr-body.md
           add-paths: |
             services/control-plane/go.mod
             services/control-plane/go.sum

@@ -76,6 +76,7 @@ pnpm-lock.yaml
 
 # Build Outputs
 dist/
+dist-setup/
 build/
 !client/desktop/build/
 !client/desktop/tests/unit/build/
@@ -115,6 +116,10 @@ vendor/
 bin/
 services/control-plane/server
 services/control-plane/migrate-media
+services/control-plane/account-authority
+services/control-plane/authority-ceremony
+services/control-plane/cmd/*/account-authority
+services/control-plane/cmd/*/authority-ceremony
 client/desktop/Helper
 coverage.txt
 *.prof
@@ -297,3 +302,9 @@ graphify-out/*
 # Tri-Harness Concord Bridge worktrees and audit traces
 .worktrees/
 .agent-bus/
+
+# concord-selfhost backup archives hold .env secrets
+/backups/
+
+# A stray `go build ./cmd/concord-agent` output.
+services/control-plane/concord-agent

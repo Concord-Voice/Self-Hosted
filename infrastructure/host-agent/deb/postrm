@@ -1,0 +1,16 @@
+#!/bin/sh
+# Concord Voice self-hosted package (#187). /opt/concord is never removed.
+set -e
+
+# As debhelper does: mask on removal, so the enable state survives a
+# reinstall, and forget it on purge.
+case "$1" in
+remove) deb-systemd-helper mask concord-agent.service >/dev/null || true ;;
+purge)
+  deb-systemd-helper purge concord-agent.service >/dev/null || true
+  deb-systemd-helper unmask concord-agent.service >/dev/null || true
+  ;;
+esac
+if { [ "$1" = remove ] || [ "$1" = purge ]; } && [ -d /run/systemd/system ]; then
+  systemctl --system daemon-reload >/dev/null || true
+fi

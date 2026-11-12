@@ -1119,38 +1119,97 @@ func (h *Handler) checkLoginLockout(ctx context.Context, email string) bool {
 	return false
 }
 
-// recordFailedLogin increments the failure counter and applies lockout if threshold is reached.
-func (h *Handler) recordFailedLogin(ctx context.Context, email string) {
-	attemptsKey := fmt.Sprintf("login_attempts:%s", email)
-	lockoutKey := fmt.Sprintf(redisKeyLoginLockout, email)
-	lockoutCountKey := fmt.Sprintf("login_lockout_count:%s", email)
+// loginAttemptScript counts and locks in one atomic Redis step, so a burst of
+// concurrent guesses cannot all pass the lockout check before any failure is
+// recorded. KEYS: attempts, lockout, lockout count. ARGV[1] is the mode:
+//
+//	reserve - count a guess BEFORE its password is checked. Returns 1 if the
+//	          check may run, 0 if the account is locked. A guess over the
+//	          threshold locks the account at once.
+//	checked - a reserved guess failed; lock if the threshold is reached.
+//	fail    - count and lock-check a failure that was not reserved.
+//	clear   - a guess succeeded; reset the counters. Does nothing while the
+//	          account is locked, so a correct guess that was in flight while a
+//	          burst set the lock cannot lift that lock or its escalation.
+//
+// ARGV[2] is the threshold, ARGV[3] the attempts window in seconds, and the
+// rest the escalating lock lengths in seconds. Only the call that sets the lock
+// escalates its length.
+//
+// Counting before the check has one cost: six guesses sent at the same moment
+// lock the account even if they are all correct, because the sixth is refused
+// before any success clears the count. A real user does not do this.
+var loginAttemptScript = redis.NewScript(`
+local locked = redis.call('EXISTS', KEYS[2]) == 1
+local mode = ARGV[1]
+if mode == 'clear' then
+  if locked then return 0 end
+  redis.call('DEL', KEYS[1], KEYS[3])
+  return 1
+end
+if mode == 'reserve' and locked then return 0 end
+local n
+if mode == 'checked' then
+  n = tonumber(redis.call('GET', KEYS[1]) or '0')
+else
+  n = redis.call('INCR', KEYS[1])
+  redis.call('EXPIRE', KEYS[1], ARGV[3])
+end
+local limit = tonumber(ARGV[2])
+if mode == 'reserve' and n <= limit then return 1 end
+if n >= limit and not locked then
+  local lc = redis.call('INCR', KEYS[3])
+  redis.call('EXPIRE', KEYS[3], 86400)
+  local idx = math.min(lc, #ARGV - 3)
+  redis.call('SET', KEYS[2], '1', 'EX', ARGV[3 + idx])
+  redis.call('DEL', KEYS[1])
+end
+return 0
+`)
 
-	count, _ := h.redis.Incr(ctx, attemptsKey).Result()
-	// Set a 1-hour window for the attempts counter to auto-expire
-	h.redis.Expire(ctx, attemptsKey, 1*time.Hour)
+// The handler methods below are thin wrappers over the package-level
+// functions in login_lockout.go, which hold the one implementation. They add
+// only the handler's logging. A Redis error never carries the password.
 
-	if count >= int64(loginLockoutThreshold) {
-		// Determine lockout duration (escalating)
-		lockoutCount, _ := h.redis.Incr(ctx, lockoutCountKey).Result()
-		h.redis.Expire(ctx, lockoutCountKey, 24*time.Hour)
-		idx := int(lockoutCount) - 1
-		if idx >= len(loginLockoutDurations) {
-			idx = len(loginLockoutDurations) - 1
-		}
-		duration := loginLockoutDurations[idx]
+// reserveLoginAttempt is ReserveLoginAttempt on the handler's client. A Redis
+// failure returns an error, and the caller must refuse the guess (an uncounted
+// guess would reopen unlimited guessing) without reporting it as a lock. After
+// a reserved guess fails, call recordCheckedFailure, not recordFailedLogin.
+func (h *Handler) reserveLoginAttempt(ctx context.Context, email string) (bool, error) {
+	ok, err := ReserveLoginAttempt(ctx, h.redis, email)
+	if err != nil {
+		h.log.Error("login lockout: reserve attempt failed", "error", err)
+		return false, err
+	}
+	return ok, nil
+}
 
-		h.redis.Set(ctx, lockoutKey, "1", duration)
-		h.redis.Del(ctx, attemptsKey) // Reset attempts counter
+// recordCheckedFailure is RecordCheckedFailure on the handler's client. A
+// Redis failure is logged and dropped here: the guess was already counted.
+func (h *Handler) recordCheckedFailure(ctx context.Context, email string) {
+	if err := RecordCheckedFailure(ctx, h.redis, email); err != nil {
+		h.log.Error("login lockout: record failure failed", "error", err)
 	}
 }
 
-// clearLoginAttempts resets counters on successful login.
+// recordFailedLogin counts a failure that was not reserved (for example an
+// unknown email) and locks the account if the threshold is reached. A Redis
+// failure is returned so the caller can answer it the same way as a failed
+// reserve; otherwise an outage would tell unknown emails from known ones.
+func (h *Handler) recordFailedLogin(ctx context.Context, email string) error {
+	if _, err := runLoginAttemptScript(ctx, h.redis, email, loginAttemptFail); err != nil {
+		h.log.Error("login lockout: record failure failed", "error", err)
+		return err
+	}
+	return nil
+}
+
+// clearLoginAttempts is ClearLoginAttempts on the handler's client. It leaves
+// a lock that a concurrent burst set in place (see the script's clear mode).
 func (h *Handler) clearLoginAttempts(ctx context.Context, email string) {
-	h.redis.Del(ctx,
-		fmt.Sprintf("login_attempts:%s", email),
-		fmt.Sprintf(redisKeyLoginLockout, email),
-		fmt.Sprintf("login_lockout_count:%s", email),
-	)
+	if err := ClearLoginAttempts(ctx, h.redis, email); err != nil {
+		h.log.Error("login lockout: clear attempts failed", "error", err)
+	}
 }
 
 // Login handles user authentication
@@ -1193,6 +1252,20 @@ func (h *Handler) readCredentialEpoch(ctx context.Context, userID string) (strin
 }
 
 func (h *Handler) verifyCredentials(ctx context.Context, c *gin.Context, email, password, passwordHash string) bool {
+	// Count the guess before checking it, so concurrent guesses cannot all slip
+	// past the lockout check at the top of Login.
+	allowed, err := h.reserveLoginAttempt(ctx, email)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
+		return false
+	}
+	if !allowed {
+		// Deliberately not fed to the per-IP ban, matching the lock check at
+		// the top of Login: a locked account is already refusing guesses.
+		h.emitHTTPEvent(c, accountLockedEvent())
+		c.JSON(http.StatusUnauthorized, gin.H{"error": errMsgInvalidCredentials})
+		return false
+	}
 	valid, err := VerifyPassword(password, passwordHash)
 	if err != nil {
 		h.log.Error("Failed to verify password", "error", err)
@@ -1200,7 +1273,7 @@ func (h *Handler) verifyCredentials(ctx context.Context, c *gin.Context, email, 
 		return false
 	}
 	if !valid {
-		h.recordFailedLogin(ctx, email)
+		h.recordCheckedFailure(ctx, email)
 		outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
 		h.emitHTTPEvent(c, loginInvalidCredentialsEvent())
 		middleware.MarkAuthFailureOutcome(c, outcome)
@@ -1343,7 +1416,10 @@ func (h *Handler) Login(c *gin.Context) {
 
 	user, loginEpoch, err := h.lookupUserForLogin(req.Email)
 	if err == sql.ErrNoRows {
-		h.recordFailedLogin(ctx, req.Email)
+		if h.recordFailedLogin(ctx, req.Email) != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgLoginFailed})
+			return
+		}
 		outcome := middleware.RecordAuthFailure(ctx, h.redis, c.ClientIP(), middleware.DefaultAuthBanConfig())
 		h.emitHTTPEvent(c, loginInvalidCredentialsEvent())
 		middleware.MarkAuthFailureOutcome(c, outcome)

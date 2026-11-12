@@ -1082,15 +1082,23 @@ func (h *Handler) CompleteLink(c *gin.Context) {
 	// Verify password — shares /login's lockout counter via the AuthAdapter.
 	// The production adapter increments the failure counter on
 	// invalid_credentials and returns auth.ErrAccountLocked once threshold is
-	// reached. We translate to 423 Locked for the locked path; everything
-	// else is opaque 401 invalid_credentials.
+	// reached. We translate to 423 Locked for the locked path and 401 for a
+	// wrong password. Anything else (Redis or database down) is a 500, so an
+	// outage never looks like a wrong password.
 	expectedEpoch, err := h.deps.AuthHandler.VerifyPassword(ctx, info.TargetUserID, req.Password)
-	if err != nil {
-		if errors.Is(err, auth.ErrAccountLocked) {
-			c.JSON(http.StatusLocked, gin.H{"error_code": "account_locked"})
-			return
-		}
+	switch {
+	case err == nil:
+	case errors.Is(err, auth.ErrAccountLocked):
+		c.JSON(http.StatusLocked, gin.H{"error_code": "account_locked"})
+		return
+	case errors.Is(err, auth.ErrInvalidCredentials):
 		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "invalid_credentials"})
+		return
+	default:
+		if h.deps.Log != nil {
+			h.deps.Log.Error("sso complete-link: password verification failed", "failure_class", "verify_password_error")
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "password_verify_failed"})
 		return
 	}
 

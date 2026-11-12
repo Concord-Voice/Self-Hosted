@@ -1,0 +1,14 @@
+#!/bin/sh
+# Concord Voice self-hosted package (#187). /opt/concord is never removed.
+set -e
+
+# Stopping the agent would kill a restore or update halfway: refuse until it
+# is done. The agent removes the marker when the job ends or it restarts.
+if [ "$1" = remove ] && [ -e /run/concord-agent/write-in-progress ]; then
+  echo "concord-selfhost: a write action is running; remove the package after it finishes." >&2
+  exit 1
+fi
+# Any other failure here must not leave the package impossible to remove.
+if [ "$1" = remove ] && [ -d /run/systemd/system ]; then
+  deb-systemd-invoke stop concord-agent.service || true
+fi

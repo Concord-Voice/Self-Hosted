@@ -104,6 +104,7 @@ func TestAdminAuditMirrorMappingsHaveExactEvents(t *testing.T) {
 		{name: "enrollment", eventType: admin.EventEnrollComplete, result: admin.AuditSuccess, expected: securityevent.Event{EventType: securityevent.EventPrivilegedAction, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityHigh, ReasonCode: securityevent.ReasonAuditCommitted}},
 		{name: "credential revoked", eventType: admin.EventCredentialRevoked, result: admin.AuditSuccess, expected: securityevent.Event{EventType: securityevent.EventPrivilegedAction, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityHigh, ReasonCode: securityevent.ReasonAuditCommitted}},
 		{name: "bootstrap", eventType: admin.EventBootstrap, result: admin.AuditSuccess, expected: securityevent.Event{EventType: securityevent.EventPrivilegedAction, Outcome: securityevent.OutcomeSuccess, Severity: securityevent.SeverityHigh, ReasonCode: securityevent.ReasonAuditCommitted}},
+		{name: "server write", eventType: admin.EventServerWrite, result: admin.AuditDenied, expected: securityevent.Event{EventType: securityevent.EventPrivilegedAction, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityHigh, ReasonCode: securityevent.ReasonAuditCommitted}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

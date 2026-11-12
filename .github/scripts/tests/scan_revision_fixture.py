@@ -119,6 +119,9 @@ def twin_merges(root):
     init_fixture_repo(root)
     base = commit_files(root, 'base', {'fixture.txt': 'base\n'})
     head = commit_files(root, 'head', {'fixture.txt': 'base\nhead\n'})
+    # The protected-main assertion is intentionally an independent ref, not a
+    # fact inferred from any synthetic merge object's parents.
+    run_git(root, 'update-ref', 'refs/heads/main', base)
     tree = run_git(root, 'rev-parse', head + '^{tree}')
     merges = []
     for date in ('2000-01-01T00:00:00Z', '2000-01-01T00:00:01Z'):
@@ -129,42 +132,84 @@ def twin_merges(root):
     return base, head, *merges
 
 
+def main_ancestry_reply(repo, merge_base):
+    """Build GitHub's ref/compare shapes from real fixture refs and graph data."""
+    main = run_git(repo, 'rev-parse', 'refs/heads/main')
+    common = run_git(repo, 'merge-base', merge_base, main)
+    if merge_base == main:
+        status = 'identical'
+        ahead = behind = 0
+    elif common == merge_base:
+        status = 'ahead'
+        ahead = int(run_git(repo, 'rev-list', '--count', merge_base + '..' + main))
+        behind = 0
+    elif common == main:
+        status = 'behind'
+        ahead = 0
+        behind = int(run_git(repo, 'rev-list', '--count', main + '..' + merge_base))
+    else:
+        status = 'diverged'
+        ahead = int(run_git(repo, 'rev-list', '--count', merge_base + '..' + main))
+        behind = int(run_git(repo, 'rev-list', '--count', main + '..' + merge_base))
+    return ({'ref': 'refs/heads/main', 'object': {'type': 'commit', 'sha': main}},
+            {'status': status, 'ahead_by': ahead, 'behind_by': behind, 'total_commits': ahead,
+             'base_commit': {'sha': merge_base}, 'merge_base_commit': {'sha': common}})
+
+
 def admitted_metadata(repo, response):
     """Run the actual detector's metadata consumer against an offline GET stub."""
     step = next(step for step in workflow('pr-ci.yml')['jobs']['detect-changes']['steps']
                 if step.get('id') == 'metadata')
     with tempfile.TemporaryDirectory() as directory:
         fixture = Path(directory)
-        reply = fixture / 'pr.json'
-        reply.write_text(json.dumps(response))
+        merge = response['merge_commit_sha']
+        merge_base = run_git(repo, 'show', '-s', '--format=%P', merge).split()[0]
+        main_reply, comparison_reply = main_ancestry_reply(repo, merge_base)
+        responses = fixture / 'responses.json'
+        responses.write_text(json.dumps({
+            'repos/Concord-Voice/Self-Hosted/pulls/3691': response,
+            'repos/Concord-Voice/Self-Hosted/commits/' + merge: {
+                'sha': merge,
+                'parents': [{'sha': parent} for parent in
+                            run_git(repo, 'show', '-s', '--format=%P', merge).split()],
+            },
+            'repos/Concord-Voice/Self-Hosted/git/ref/heads/main': main_reply,
+            'repos/Concord-Voice/Self-Hosted/compare/' + merge_base + '...' +
+            main_reply['object']['sha']: comparison_reply,
+        }))
         calls = fixture / 'http-calls.jsonl'
         output = fixture / 'outputs'
         gh = fixture / 'gh'
         gh.write_text("""#!/usr/bin/env python3
 import json, os, pathlib, sys
-expected = ['api', 'repos/Concord-Voice/Self-Hosted/pulls/3691']
-if sys.argv[1:] != expected:
+responses = json.loads(pathlib.Path(os.environ['FIXTURE_HTTP_RESPONSES']).read_text())
+if len(sys.argv) != 3 or sys.argv[1] != 'api' or sys.argv[2] not in responses:
     raise SystemExit('unexpected fixture HTTP request')
 with pathlib.Path(os.environ['FIXTURE_HTTP_CALLS']).open('a') as stream:
     stream.write(json.dumps(sys.argv[1:]) + '\\n')
-sys.stdout.write(pathlib.Path(os.environ['FIXTURE_HTTP_REPLY']).read_text())
+sys.stdout.write(json.dumps(responses[sys.argv[2]]))
 """)
         gh.chmod(0o700)
         env = {'PATH': str(fixture) + os.pathsep + os.environ.get('PATH', ''),
                'LANG': 'C', 'LC_ALL': 'C', 'GITHUB_REPOSITORY': 'Concord-Voice/Self-Hosted',
                'PR_NUMBER': '3691', 'RUNNER_TEMP': str(fixture), 'GITHUB_OUTPUT': str(output),
-               'FIXTURE_HTTP_REPLY': str(reply), 'FIXTURE_HTTP_CALLS': str(calls)}
+               'FIXTURE_HTTP_RESPONSES': str(responses), 'FIXTURE_HTTP_CALLS': str(calls)}
         completed = subprocess.run(['bash', '-e', '-o', 'pipefail', '-c', step['run']],
             cwd=repo, env=env, capture_output=True, text=True)
         if completed.returncode:
             raise AssertionError('actual metadata consumer failed: ' + completed.stderr)
         observations = [json.loads(line) for line in calls.read_text().splitlines()]
-        if observations != [['api', 'repos/Concord-Voice/Self-Hosted/pulls/3691']]:
-            raise AssertionError('metadata fixture must make exactly one bounded GET')
+        if observations != [
+            ['api', 'repos/Concord-Voice/Self-Hosted/pulls/3691'],
+            ['api', 'repos/Concord-Voice/Self-Hosted/commits/' + merge],
+            ['api', 'repos/Concord-Voice/Self-Hosted/git/ref/heads/main'],
+            ['api', 'repos/Concord-Voice/Self-Hosted/compare/' + merge_base + '...' + main_reply['object']['sha']],
+        ]:
+            raise AssertionError('metadata fixture must make exactly four bounded provenance GETs')
         return dict(line.split('=', 1) for line in output.read_text().splitlines())
 
 
-def revision_step(step, context, repo, live_pr, merge_reply):
+def revision_step(step, context, repo, live_pr, merge_reply, main_reply, comparison_reply):
     """Execute the actual inline preflight with only exact offline GET routes."""
     with tempfile.TemporaryDirectory() as directory:
         fixture = Path(directory)
@@ -173,6 +218,9 @@ def revision_step(step, context, repo, live_pr, merge_reply):
         responses.write_text(json.dumps({
             'repos/Concord-Voice/Self-Hosted/pulls/3691': live_pr,
             'repos/Concord-Voice/Self-Hosted/commits/' + str(live_pr['merge_commit_sha']): merge_reply,
+            'repos/Concord-Voice/Self-Hosted/git/ref/heads/main': main_reply,
+            'repos/Concord-Voice/Self-Hosted/compare/' + str(comparison_reply['base_commit']['sha']) +
+            '...' + str(main_reply['object']['sha']): comparison_reply,
         }))
         gh = fixture / 'gh'
         gh.write_text("""#!/usr/bin/env python3
@@ -228,6 +276,7 @@ class WorkflowConsumer:
         self.live_pr = dict(event_pr, merge_commit_sha=selection['merge_sha'])
         parents = run_git(repo, 'show', '-s', '--format=%P', selection['merge_sha']).split()
         self.merge_reply = {'sha': selection['merge_sha'], 'parents': [{'sha': sha} for sha in parents]}
+        self.main_reply, self.comparison_reply = main_ancestry_reply(repo, selection['merge_base_sha'])
 
     def run_scanner(self, name, *, overrides=None, input_overrides=None):
         caller = workflow('pr-ci.yml')['jobs'][name]
@@ -247,7 +296,8 @@ class WorkflowConsumer:
             for step in job.get('steps', []):
                 if step.get('id') == 'revision':
                     if condition(step.get('if'), context):
-                        outcome = revision_step(step, context, self.repo, self.live_pr, self.merge_reply)
+                        outcome = revision_step(step, context, self.repo, self.live_pr, self.merge_reply,
+                                                self.main_reply, self.comparison_reply)
                         self.preflights.append((name, outcome))
                         context['steps']['revision'] = {'outcome': 'success' if outcome.returncode == 0 else 'failure'}
                         if outcome.returncode != 0: return False

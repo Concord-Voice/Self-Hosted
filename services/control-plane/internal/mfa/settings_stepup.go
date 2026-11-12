@@ -20,8 +20,9 @@ import (
 //
 //   - In-transaction, for the four writes that must serialize against a
 //     destructive reset (EmailSmsDisable, SetBackupEmail, StoreRecoveryKey
-//     overwrite, DeleteRecoveryKey): openMFASettingsTx takes the budget, opens
-//     the transaction and runs stepup.LockSubjectTx (first-statement users-row
+//     overwrite, DeleteRecoveryKey): openMFASettingsTx takes the budget and
+//     the password's lockout reservation, opens the transaction and runs
+//     stepup.LockSubjectTx (first-statement users-row
 //     lock, credential-epoch fence, P1 factor read); verifyMFASettingsStepUpTx
 //     then checks the factors on that transaction.
 //   - Pool-side, for the nine routes that hold no transaction (TOTPSetup,
@@ -75,7 +76,16 @@ const (
 	stageMFAInvalid
 	stageInternal
 	stageSubjectGone
+	stageAccountLocked
 )
+
+// accountLockedEvent is the step-up mint's lockout event: the account's
+// shared /auth/login lockout refused a password before any hash work.
+var accountLockedEvent = securityevent.Event{
+	EventType: securityevent.EventSecurityControl, Outcome: securityevent.OutcomeDenied,
+	Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonAccountLocked,
+	AuthMethod: securityevent.AuthPassword,
+}
 
 const (
 	// mfaSettingsStepUpLimit is the shared budget's bound, re-exported for
@@ -121,29 +131,88 @@ func (h *Handler) rollbackQuietly(tx *sql.Tx) {
 }
 
 // openMFASettingsTx runs the common prefix of every in-transaction gated
-// write: the fail-closed budget (only when credentials were sent), BeginTx,
-// and stepup.LockSubjectTx. On refusal it has already written the response
-// and returns ok=false with a nil tx.
+// write: the fail-closed budget (only when credentials were sent), the
+// password's lockout reservation, BeginTx, and stepup.LockSubjectTx. Both
+// Redis steps run BEFORE BeginTx (see stepup.Budget). On refusal it has
+// already written the response and returns ok=false with a nil tx.
+//
+// The caller defers endMFASettingsTx(tx, attempt) and, once its write has
+// committed, calls clearTxStepUpAfterCommit.
 func (h *Handler) openMFASettingsTx(
 	c *gin.Context, userID string, creds mfaStepUpCredentials, lock stepUpLock,
-) (tx *sql.Tx, subj stepup.Subject, ok bool) {
+) (tx *sql.Tx, subj stepup.Subject, attempt *stepup.PasswordAttempt, ok bool) {
 	if creds.sent() && !h.allowMFASettingsStepUp(c, userID) {
-		return nil, stepup.Subject{}, false
+		return nil, stepup.Subject{}, nil, false
+	}
+	attempt, ok = h.reserveStepUpPassword(c, userID, creds.Password)
+	if !ok {
+		return nil, stepup.Subject{}, nil, false
 	}
 	ctx := c.Request.Context()
 	tx, err := h.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 	if err != nil {
 		h.log.Error("Failed to begin MFA settings transaction", "error", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": stepup.ErrMsgVerificationFailed})
-		return nil, stepup.Subject{}, false
+		return nil, stepup.Subject{}, nil, false
 	}
 	subj, e := stepup.LockSubjectTx(ctx, tx, userID, lock, middleware.TokenCredentialEpoch(c))
 	if e != nil {
 		h.rollbackQuietly(tx)
 		h.refuseMFASettingsStepUp(c, e, subjectStage(e))
-		return nil, stepup.Subject{}, false
+		return nil, stepup.Subject{}, nil, false
 	}
-	return tx, subj, true
+	return tx, subj, attempt, true
+}
+
+// reserveStepUpPassword counts a supplied password against the account's
+// shared /auth/login lockout. Call it BEFORE BeginTx: it reads the email
+// through the pool and makes a Redis round trip. On refusal it has written
+// the response (423 while locked, 500 when the guess cannot be counted, 401
+// for a deleted account) and returns ok=false. An empty password counts
+// nothing and returns an unreserved attempt.
+func (h *Handler) reserveStepUpPassword(c *gin.Context, userID, password string) (*stepup.PasswordAttempt, bool) {
+	attempt, e := stepup.ReserveUserPasswordAttempt(c.Request.Context(), h.db, h.redis, userID, password)
+	if e != nil {
+		h.refuseMFASettingsStepUp(c, e, reserveStage(e))
+		return nil, false
+	}
+	return attempt, true
+}
+
+// reserveStage classifies a refusal from stepup.ReserveUserPasswordAttempt.
+func reserveStage(e *stepup.Error) gateStage {
+	switch {
+	case e.Status == http.StatusLocked:
+		return stageAccountLocked
+	case e.Status >= http.StatusInternalServerError:
+		return stageInternal
+	default:
+		return stageSubjectGone
+	}
+}
+
+// endMFASettingsTx is the deferred end of a gated transaction: the rollback
+// (a no-op after a commit), THEN the lockout settle of the password guess, so
+// the Redis round trip never runs while the transaction holds its lock.
+func (h *Handler) endMFASettingsTx(tx *sql.Tx, attempt *stepup.PasswordAttempt) {
+	h.rollbackQuietly(tx)
+	h.settleStepUpPassword(attempt)
+}
+
+// settleStepUpPassword records a wrong step-up password against the lockout
+// or resets the count after a correct one (stepup.PasswordAttempt.Settle).
+// Best-effort: the guess was already counted when it was reserved.
+func (h *Handler) settleStepUpPassword(attempt *stepup.PasswordAttempt) {
+	if err := attempt.Settle(context.Background()); err != nil {
+		h.log.Warn("Could not settle a step-up password against the lockout", "error", err)
+	}
+}
+
+// clearTxStepUpAfterCommit is the in-transaction gate's post-commit reset of
+// the shared budget. Call it only after the write committed; the deferred
+// endMFASettingsTx settles the password's lockout count.
+func (h *Handler) clearTxStepUpAfterCommit(c *gin.Context, userID string) {
+	h.clearStepUpAfterSuccess(c, userID)
 }
 
 // subjectStage classifies a refusal from stepup.LoadSubject/LockSubjectTx.
@@ -160,12 +229,13 @@ func subjectStage(e *stepup.Error) gateStage {
 
 // verifyMFASettingsStepUpTx checks the factors on the caller's transaction.
 // The Subject already carries the P1 set LockSubjectTx read under the lock,
-// so nothing here touches the pool.
+// and attempt was reserved by openMFASettingsTx, so nothing here touches the
+// pool or Redis.
 func (h *Handler) verifyMFASettingsStepUpTx(
 	ctx context.Context, tx *sql.Tx, userID string, subj stepup.Subject,
-	creds mfaStepUpCredentials, gate settingsStepUp,
+	creds mfaStepUpCredentials, gate settingsStepUp, attempt *stepup.PasswordAttempt,
 ) (*stepup.Error, gateStage) {
-	return verifyStepUpFactors(subj, creds, gate.wording, func() *stepup.Error {
+	return verifyStepUpFactors(attempt, subj, creds, gate.wording, func() *stepup.Error {
 		// Tx form: backup-code redemption is a write that a rollback must be
 		// able to undo. The preloaded set keeps GetEnabledMethods (a pool
 		// read) from ever running under the lock.
@@ -176,10 +246,15 @@ func (h *Handler) verifyMFASettingsStepUpTx(
 // verifyStepUpFactors is the one decision table both gate shapes share: the
 // password factor, then — only for an inline-verifiable factor (policy P1) —
 // the MFA factor, each refusal tagged with the stage its event is chosen by.
+//
+// attempt is the password's lockout reservation, taken before any
+// transaction; this makes no Redis call. A locked account was refused at the
+// reservation, so no 423 comes from here.
 func verifyStepUpFactors(
+	attempt *stepup.PasswordAttempt,
 	subj stepup.Subject, creds mfaStepUpCredentials, wording stepup.Copy, verifyMFA func() *stepup.Error,
 ) (*stepup.Error, gateStage) {
-	if pErr := stepup.VerifyPasswordFactor(subj, creds.Password, wording); pErr != nil {
+	if pErr := stepup.VerifyPasswordFactor(attempt, subj, creds.Password, wording); pErr != nil {
 		switch {
 		case pErr.Status >= http.StatusInternalServerError:
 			return pErr, stageInternal
@@ -212,10 +287,18 @@ func verifyStepUpFactors(
 //
 // It charges the same fail-closed budget as the in-transaction gate. The
 // route must call clearStepUpAfterSuccess once its own write has succeeded.
+//
+// The password counts against the shared /auth/login lockout. No transaction
+// is open here, so the guess is settled at once: a wrong one is recorded and
+// a correct one resets the count, even when the MFA leg then fails.
 func (h *Handler) requirePasswordAndMFA(
 	c *gin.Context, userID string, creds mfaStepUpCredentials, gate settingsStepUp,
 ) (stepup.Subject, bool) {
 	if creds.sent() && !h.allowMFASettingsStepUp(c, userID) {
+		return stepup.Subject{}, false
+	}
+	attempt, ok := h.reserveStepUpPassword(c, userID, creds.Password)
+	if !ok {
 		return stepup.Subject{}, false
 	}
 	ctx := c.Request.Context()
@@ -224,9 +307,10 @@ func (h *Handler) requirePasswordAndMFA(
 		h.refuseMFASettingsStepUp(c, e, subjectStage(e))
 		return stepup.Subject{}, false
 	}
-	e, stage := verifyStepUpFactors(subj, creds, gate.wording, func() *stepup.Error {
+	e, stage := verifyStepUpFactors(attempt, subj, creds, gate.wording, func() *stepup.Error {
 		return stepup.VerifyMFAFactor(ctx, h, userID, gate.purpose, creds.MFACode, subj.MFAMethods)
 	})
+	h.settleStepUpPassword(attempt)
 	if e != nil {
 		h.refuseMFASettingsStepUp(c, e, stage)
 		return stepup.Subject{}, false
@@ -239,6 +323,8 @@ func (h *Handler) requirePasswordAndMFA(
 // writes the seam's body unchanged.
 func (h *Handler) refuseMFASettingsStepUp(c *gin.Context, e *stepup.Error, stage gateStage) {
 	switch stage {
+	case stageAccountLocked:
+		h.emitHTTPEvent(c, accountLockedEvent)
 	case stagePasswordInvalid:
 		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventAuthentication, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonInvalidCredentials, AuthMethod: securityevent.AuthPassword})
 	case stageMFAInvalid:

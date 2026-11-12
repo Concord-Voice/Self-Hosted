@@ -334,6 +334,7 @@ go_toolchain:
   - '**/go.work.sum'
   - 'services/control-plane/Dockerfile'
   - 'services/control-plane/Dockerfile.ops-agent'
+  - 'services/control-plane/Dockerfile.account-authority'
   - 'scripts/check-go-toolchain.py'
   - 'scripts/test-check-go-toolchain.py'
 openapi:
@@ -375,6 +376,9 @@ selfhost:
   # these extra fixtures for the distinct public packaging and installer path.
   - 'infrastructure/deploy/**'
   - 'infrastructure/docker/**'
+  - 'infrastructure/host-agent/**'
+  - 'scripts/release/build-selfhost-deb.sh'
+  - 'scripts/release/selfhost-bundle.py'
   - 'infrastructure/ingress/**'
   - 'docker-compose*.yml'
   - '.env.example'
@@ -468,9 +472,11 @@ changelog:
   - '.github/scripts/verify-changelog.sh'
   - '.github/scripts/tests/verify-changelog.test.sh'
   - 'CHANGELOG.md'
+  - 'VERSION'
   - 'package.json'
   - 'packages/**'
-  - '.github/scripts/promote-unreleased-changelog.py'
+  - '.github/scripts/promote-unreleased-changelog.sh'
+  - '.github/scripts/promote_unreleased_changelog.py'
   - '.github/scripts/tests/promote-unreleased-changelog.test.sh'
   - 'services/control-plane/**'
   - 'services/media-plane/**'
@@ -492,6 +498,20 @@ dev_checks:
   - 'scripts/test-check-counts.sh'
   - 'services/control-plane/migrations/**'
 workflow_lint:
+  # Dependabot coverage audit (runs in workflow-lint): the config, the audit,
+  # its regression suite and the helper it imports, and every path that contains
+  # `Dockerfile` (the audit's own pathspec). A new npm, Go, pip or non-root
+  # compose root that arrives with none of these paths does not start the job.
+  # The Dockerfile globs match any ASCII letter case, because the base-image
+  # check (same job) must see a `dockerfile` that a case-insensitive checkout
+  # would write over the real file. A name that only folds to it through a
+  # non-ASCII character is not matched here; the check itself still lists it.
+  - '.github/dependabot.yml'
+  - 'scripts/security/audit-dependabot-coverage.sh'
+  - 'scripts/security/test-audit-dependabot-coverage.sh'
+  - 'scripts/security/check-pin-exceptions.mjs'
+  - '**/*[Dd][Oo][Cc][Kk][Ee][Rr][Ff][Ii][Ll][Ee]*'
+  - '**/*[Dd][Oo][Cc][Kk][Ee][Rr][Ff][Ii][Ll][Ee]*/**'
   - '.github/ci/docker-engine-packages.lock'
   - 'scripts/ci/install-docker-engine.sh'
   - 'scripts/ci/start-control-plane-services.sh'
@@ -516,9 +536,20 @@ workflow_lint:
   - 'infrastructure/docker/minio/dependencies.patch'
   - 'infrastructure/docker/minio/minio.openvex.json'
   - 'infrastructure/docker/minio/SOURCE-BUILD.md'
+  - 'infrastructure/docker/buildtools/Dockerfile'
+  - 'scripts/ci/check-oci-tag.sh'
+  - 'scripts/ci/probe-publisher-engine.py'
+  - 'scripts/tests/test-check-oci-tag.sh'
+  - 'scripts/tests/test-publish-minio-image.sh'
+  - 'scripts/tests/test-publish-minio-engine-pins.py'
+  - 'VERSION'
+  - 'scripts/release/**'
+  - 'scripts/tests/test-check-release-tag.sh'
+  - 'scripts/tests/test-selfhost-bundle.py'
   - 'scripts/ci/require-docker-engine.sh'
   - 'scripts/ci/require-remote-buildkit.py'
   - 'scripts/test-check-*.sh'
+  - '.github/base-images.json'
 worker_apple:
   - '.github/ci/scan-relevance.yml'
   - '.github/scripts/ci-scan-relevance.mjs'

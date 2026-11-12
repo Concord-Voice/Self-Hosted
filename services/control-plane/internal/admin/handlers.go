@@ -41,7 +41,12 @@ const loginChallengePrefix = "admin_login_challenge:"
 const (
 	msgInvalidRequestBody = "invalid request body"
 	msgInternalError      = "internal error"
+	msgTooManyAttempts    = "too many attempts, try again later"
+	logLockoutCheckFailed = "admin lockout check failed"
 )
+
+// errInvalidAdminChallenge denotes an absent, expired or already consumed handle.
+var errInvalidAdminChallenge = errors.New("invalid admin challenge")
 
 // adminWebAuthnUserHandle is the stable WebAuthn user handle for the admin RP.
 // The admin RP authenticates a single logical "operator" identity per browser
@@ -66,6 +71,7 @@ type Handler struct {
 	redis    *redis.Client
 	cfg      *config.Config
 	log      *logger.Logger
+	server   *ServerArea
 
 	// dummyPasswordHash is a throwaway Argon2id hash verified against when the
 	// requested username does not exist, so the password step takes the same time
@@ -99,9 +105,11 @@ func NewHandler(db *sql.DB, rdb *redis.Client, log *logger.Logger, cfg *config.C
 		return nil, fmt.Errorf("admin handler: seed enumeration-defense hash: %w", err)
 	}
 
+	audit := NewAuditLog(db)
 	return &Handler{
 		repo:              NewAdminRepo(db),
-		audit:             NewAuditLog(db),
+		audit:             audit,
+		server:            NewServerArea(audit, log),
 		sessions:          NewSessionStore(rdb, nil),
 		lockout:           NewLockout(rdb, nil),
 		enroll:            NewEnrollmentStore(rdb),
@@ -146,10 +154,19 @@ type passwordResponse struct {
 // loginChallenge is the value stored under the opaque login handle between the
 // password and WebAuthn steps.
 type loginChallenge struct {
-	AdminID  string               `json:"admin_id"`
-	Username string               `json:"username"`
-	Session  webauthn.SessionData `json:"session"`
+	AdminID  string `json:"admin_id"`
+	Username string `json:"username"`
+	// IPHash is hashIP of the address the password step ran from. Reset refunds the
+	// guess on that address, not on the one that completes the sign-in. The raw IP
+	// is never stored.
+	IPHash  string               `json:"ip_hash"`
+	Session webauthn.SessionData `json:"session"`
 }
+
+// maxCredentialBodyBytes bounds the body of the two routes that take a password:
+// the guess is counted in Redis under the submitted username before the lookup,
+// so an unbounded username would let any caller write megabyte-long keys.
+const maxCredentialBodyBytes = 8 << 10
 
 // genericAuthError is the single response shape for every password-step failure
 // (unknown user, wrong password, locked out). Keeping it uniform prevents an
@@ -158,31 +175,31 @@ var genericAuthError = gin.H{"error": "authentication failed"}
 
 // PasswordLogin handles step 1 of admin login: verify the password (constant
 // time, enumeration-safe), and on success begin a WebAuthn assertion ceremony
-// whose SessionData is stashed under an opaque handle. Lockout is checked FIRST.
+// whose SessionData is stashed under an opaque handle. The guess is counted, and
+// the lock checked, FIRST — before the lookup and the verify.
 func (h *Handler) PasswordLogin(c *gin.Context) {
 	ctx := c.Request.Context()
 	ip := c.ClientIP()
 
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxCredentialBodyBytes)
 	var req passwordRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": msgInvalidRequestBody})
 		return
 	}
 
-	// Lockout gate FIRST — a locked account/IP never reaches password verify.
-	locked, _, err := h.lockout.IsLocked(ctx, req.Username, ip)
-	if err != nil {
-		h.log.Error("admin lockout check failed", "error", err)
-		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
-		return
-	}
-	if locked {
-		h.auditDenied(ctx, req.Username, EventLoginFailure, "locked_out")
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many attempts, try again later"})
+	// Count the guess FIRST, in one atomic step with the lock check — a locked
+	// account/IP never reaches password verify, and a burst cannot pass the check
+	// together before any guess is counted (CWE-367). It runs for every username,
+	// known or not, so it adds no enumeration oracle.
+	if h.reserveGuess(c, req.Username, ip, EventLoginFailure) {
 		return
 	}
 
 	admin, lookupErr := h.repo.GetByUsername(ctx, req.Username)
+	if h.lookupFailed(c, lookupErr, EventLoginFailure) {
+		return
+	}
 
 	// Enumeration defense: when the username is unknown, still run a constant-time
 	// verify against the dummy hash so timing/response are uniform.
@@ -191,10 +208,11 @@ func (h *Handler) PasswordLogin(c *gin.Context) {
 		verifyHash = admin.PasswordHash
 	}
 	ok, verifyErr := auth.VerifyPassword(req.Password, verifyHash)
+	h.logVerifyFault(verifyErr, EventLoginFailure)
 
 	// Treat unknown user, disabled admin, verify error, or mismatch identically.
 	if lookupErr != nil || admin == nil || verifyErr != nil || !ok || admin.Status != StatusActive {
-		h.failLogin(ctx, req.Username, ip)
+		h.failPassword(ctx, req.Username, ip, EventLoginFailure)
 		c.JSON(http.StatusUnauthorized, genericAuthError)
 		return
 	}
@@ -206,7 +224,7 @@ func (h *Handler) PasswordLogin(c *gin.Context) {
 		h.log.Error("admin webauthn user build failed", "error", err)
 		// A configured admin with no/unreadable credentials cannot 2FA; fail closed
 		// without leaking the cause.
-		h.failLogin(ctx, req.Username, ip)
+		h.failPassword(ctx, req.Username, ip, EventLoginFailure)
 		c.JSON(http.StatusUnauthorized, genericAuthError)
 		return
 	}
@@ -214,7 +232,7 @@ func (h *Handler) PasswordLogin(c *gin.Context) {
 	assertion, session, err := h.webauthn.BeginLogin(user, webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
 		h.log.Error("admin begin login failed", "error", err)
-		h.failLogin(ctx, req.Username, ip)
+		h.failPassword(ctx, req.Username, ip, EventLoginFailure)
 		c.JSON(http.StatusUnauthorized, genericAuthError)
 		return
 	}
@@ -222,6 +240,7 @@ func (h *Handler) PasswordLogin(c *gin.Context) {
 	handle, err := h.storeLoginChallenge(ctx, loginChallenge{
 		AdminID:  admin.ID,
 		Username: admin.Username,
+		IPHash:   hashIP(ip),
 		Session:  *session,
 	})
 	if err != nil {
@@ -255,30 +274,31 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 
 	challenge, err := h.consumeLoginChallenge(ctx, req.Handle)
 	if err != nil {
-		// Unknown/expired/replayed handle.
-		c.JSON(http.StatusUnauthorized, genericAuthError)
+		h.challengeFailure(c, err, EventLoginFailure)
 		return
 	}
 
 	// Defense-in-depth: re-check lockout in the WebAuthn step (#1688 / Gitar). The
 	// handle is single-use, but an account locked AFTER its handle was issued could
-	// otherwise still redeem it once. Mirrors PasswordLogin's gate.
-	locked, _, lerr := h.lockout.IsLocked(ctx, challenge.Username, ip)
+	// otherwise still redeem it once. A pure read (IsLocked counts nothing), so a
+	// held handle can never lock the account it is redeeming. The handle itself is
+	// not a guessing surface: only a counted password step issues one.
+	locked, lerr := h.lockout.IsLocked(ctx, challenge.Username, ip)
 	if lerr != nil {
-		h.log.Error("admin lockout check failed", "error", lerr)
+		h.log.Error(logLockoutCheckFailed, "event", EventLoginFailure)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 		return
 	}
 	if locked {
 		h.auditDenied(ctx, challenge.Username, EventLoginFailure, "locked_out")
-		c.JSON(http.StatusTooManyRequests, gin.H{"error": "too many attempts, try again later"})
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": msgTooManyAttempts})
 		return
 	}
 
 	user, err := h.webAuthnUserForAdmin(ctx, challenge.AdminID)
 	if err != nil {
 		h.log.Error("admin webauthn user build failed", "error", err)
-		h.failLogin(ctx, challenge.Username, ip)
+		h.auditFailure(ctx, challenge.Username, EventLoginFailure)
 		c.JSON(http.StatusUnauthorized, genericAuthError)
 		return
 	}
@@ -286,7 +306,7 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 	cred, err := h.webauthn.FinishLoginWithBytes(user, challenge.Session, []byte(req.Assertion))
 	if err != nil {
 		h.log.Warn("admin webauthn assertion rejected", "error", err)
-		h.failLogin(ctx, challenge.Username, ip)
+		h.auditFailure(ctx, challenge.Username, EventLoginFailure)
 		c.JSON(http.StatusUnauthorized, genericAuthError)
 		return
 	}
@@ -306,9 +326,11 @@ func (h *Handler) WebAuthnLogin(c *gin.Context) {
 	}
 	SetAdminSessionCookie(c, sid)
 
-	if err := h.lockout.Reset(ctx, challenge.Username, ip); err != nil {
-		// Non-fatal: the login succeeded; a stale lockout counter self-expires.
-		h.log.Warn("admin lockout reset failed", "error", err)
+	if err := h.lockout.Reset(ctx, challenge.Username, challenge.IPHash); err != nil {
+		// Non-fatal: the login succeeded. A stale counter ages out on its own (the
+		// lock within lockoutMaxWindow, the attempts within lockoutAttemptsWindow of
+		// the last guess); `admin unlock` clears it sooner.
+		h.log.Warn("admin lockout reset failed", "event", EventLoginSuccess)
 	}
 
 	adminID := challenge.AdminID
@@ -338,14 +360,72 @@ func (h *Handler) Logout(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"status": "logged out"})
 }
 
-// failLogin records a lockout failure and writes the EventLoginFailure audit row.
-// Errors from the side effects are logged, never surfaced to the client (which
-// always gets the uniform generic error).
-func (h *Handler) failLogin(ctx context.Context, username, ip string) {
-	if err := h.lockout.RecordFailure(ctx, username, ip); err != nil {
-		h.log.Warn("admin lockout record failed", "error", err)
+// reserveGuess counts a password guess on both lockout axes before its password
+// is checked. It writes the response and returns true when the guess must not go
+// on: a lockout store fault is a logged 500 (fail closed, before any password
+// verify), a locked account or IP is the uniform 429 plus a locked_out audit row.
+func (h *Handler) reserveGuess(c *gin.Context, username, ip, event string) bool {
+	ctx := c.Request.Context()
+	allowed, err := h.lockout.Reserve(ctx, username, ip)
+	if err != nil {
+		h.log.Error(logLockoutCheckFailed, "event", event)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
+		return true
 	}
-	h.auditFailure(ctx, username, EventLoginFailure)
+	if !allowed {
+		h.auditDenied(ctx, username, event, "locked_out")
+		c.JSON(http.StatusTooManyRequests, gin.H{"error": msgTooManyAttempts})
+		return true
+	}
+	return false
+}
+
+// failPassword finishes a reserved guess that failed: it locks any axis that
+// reached the threshold (the guess was already counted by reserveGuess) and
+// writes the failure audit row. A lockout write fault is logged, never surfaced
+// to the client, who always gets the uniform generic error: the guess is
+// counted, so the next reserve locks the axis even if this write was lost.
+func (h *Handler) failPassword(ctx context.Context, username, ip, event string) {
+	if err := h.lockout.RecordCheckedFailure(ctx, username, ip); err != nil {
+		h.log.Warn("admin lockout record failed", "event", event)
+	}
+	h.auditFailure(ctx, username, event)
+}
+
+// lookupFailed answers a database fault in the admin lookup with a logged 500 and
+// reports true. An unknown username (ErrAdminNotFound) is not a fault: the caller
+// carries on and answers it with the uniform 401. Treating a fault as "unknown
+// user" would turn a Postgres outage into a 401 for every admin, each one counted
+// as a wrong guess and given a failure audit row, with nothing logged. The fault
+// does not depend on the username, so the 500 is no enumeration oracle.
+func (h *Handler) lookupFailed(c *gin.Context, err error, event string) bool {
+	if err == nil || errors.Is(err, ErrAdminNotFound) {
+		return false
+	}
+	h.log.Error("admin lookup failed", "event", event)
+	c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
+	return true
+}
+
+// logVerifyFault records a password-verification fault (a stored hash that does
+// not decode) without changing the client's uniform 401. The error itself is not
+// logged: an Argon2 decode failure can echo the malformed hash.
+func (h *Handler) logVerifyFault(verifyErr error, event string) {
+	if verifyErr != nil {
+		h.log.Error("admin password verification failed", "event", event)
+	}
+}
+
+// challengeFailure keeps invalid bearer handles indistinguishable while making
+// storage/decode faults observable. Error text may contain stored data or Redis
+// command arguments, so log only a fixed failure classification and event.
+func (h *Handler) challengeFailure(c *gin.Context, err error, event string) {
+	if errors.Is(err, errInvalidAdminChallenge) {
+		c.JSON(http.StatusUnauthorized, genericAuthError)
+		return
+	}
+	h.log.Error("admin challenge load failed", "event", event)
+	c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
 }
 
 // webAuthnUserForAdmin reconstructs the WebAuthnUser (with all registered
@@ -404,11 +484,11 @@ func (h *Handler) storeLoginChallenge(ctx context.Context, ch loginChallenge) (s
 // handle (single-use via GETDEL). An unknown/expired/replayed handle errors.
 func (h *Handler) consumeLoginChallenge(ctx context.Context, handle string) (loginChallenge, error) {
 	if handle == "" {
-		return loginChallenge{}, errors.New("empty login handle")
+		return loginChallenge{}, errInvalidAdminChallenge
 	}
 	raw, err := h.redis.GetDel(ctx, loginChallengePrefix+handle).Result()
 	if errors.Is(err, redis.Nil) {
-		return loginChallenge{}, errors.New("unknown or expired login handle")
+		return loginChallenge{}, errInvalidAdminChallenge
 	}
 	if err != nil {
 		return loginChallenge{}, fmt.Errorf("load login challenge: %w", err)
@@ -473,40 +553,65 @@ type enrollBeginResponse struct {
 
 // enrollChallenge is the value stored under the begin handle.
 type enrollChallenge struct {
-	AdminID  string               `json:"admin_id"`
-	Username string               `json:"username"`
-	Session  webauthn.SessionData `json:"session"`
+	AdminID  string `json:"admin_id"`
+	Username string `json:"username"`
+	// IPHash is hashIP of the address EnrollBegin ran from; see loginChallenge.
+	IPHash  string               `json:"ip_hash"`
+	Session webauthn.SessionData `json:"session"`
 }
 
 // EnrollBegin verifies password + single-use token, then begins a hardware-key
 // registration ceremony bound to the pending admin. The token is consumed here
 // (single-use); a failed finish requires a fresh token via reset-enrollment.
+//
+// Enroll shares the login Lockout (#216): it counts each guess on the same
+// per-account and per-IP counters BEFORE the password is checked (#221), so a
+// password guessed here costs the same budget as one guessed at login and a
+// burst cannot get more than the threshold's worth of guesses verified.
 func (h *Handler) EnrollBegin(c *gin.Context) {
 	ctx := c.Request.Context()
+	ip := c.ClientIP()
 
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxCredentialBodyBytes)
 	var req enrollBeginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": msgInvalidRequestBody})
 		return
 	}
 
+	if h.reserveGuess(c, req.Username, ip, EventEnrollComplete) {
+		return
+	}
+
 	adminUser, lookupErr := h.repo.GetByUsername(ctx, req.Username)
+	if h.lookupFailed(c, lookupErr, EventEnrollComplete) {
+		return
+	}
 	verifyHash := h.dummyPasswordHash
 	if lookupErr == nil && adminUser != nil {
 		verifyHash = adminUser.PasswordHash
 	}
 	ok, verifyErr := auth.VerifyPassword(req.Password, verifyHash)
-	if lookupErr != nil || adminUser == nil || verifyErr != nil || !ok {
-		h.auditFailure(ctx, req.Username, EventEnrollComplete)
-		c.JSON(http.StatusUnauthorized, genericAuthError)
+	h.logVerifyFault(verifyErr, EventEnrollComplete)
+	// A non-pending admin is refused AFTER the constant-time verify, never by an
+	// early return, so an active admin and an unknown user look the same.
+	if lookupErr != nil || adminUser == nil || verifyErr != nil || !ok || adminUser.Status != StatusPending {
+		h.failEnroll(c, req.Username, ip)
 		return
 	}
 
 	// Consume the single-use enrollment token and verify it binds to THIS admin.
+	// A store fault is a 500, not a failed guess: it records no failure. (The
+	// guess itself was counted before the verify, so the fault still costs one
+	// attempt until the next completed enrollment clears the count.)
 	boundAdminID, err := h.enroll.ConsumeEnrollmentToken(ctx, req.Token)
+	if err != nil && !errors.Is(err, ErrEnrollTokenInvalid) {
+		h.log.Error("admin consume enrollment token failed", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
+		return
+	}
 	if err != nil || boundAdminID != adminUser.ID {
-		h.auditFailure(ctx, req.Username, EventEnrollComplete)
-		c.JSON(http.StatusUnauthorized, genericAuthError)
+		h.failEnroll(c, req.Username, ip)
 		return
 	}
 
@@ -520,6 +625,7 @@ func (h *Handler) EnrollBegin(c *gin.Context) {
 	handle, err := h.storeEnrollChallenge(ctx, enrollChallenge{
 		AdminID:  adminUser.ID,
 		Username: adminUser.Username,
+		IPHash:   hashIP(ip),
 		Session:  *session,
 	})
 	if err != nil {
@@ -552,10 +658,14 @@ func (h *Handler) EnrollFinish(c *gin.Context) {
 
 	challenge, err := h.consumeEnrollChallenge(ctx, req.Handle)
 	if err != nil {
-		c.JSON(http.StatusUnauthorized, genericAuthError)
+		h.challengeFailure(c, err, EventEnrollComplete)
 		return
 	}
 
+	// No lockout re-check here, unlike WebAuthnLogin: the handle is 256-bit and
+	// only a successful EnrollBegin issues it, so Finish is not a guessing
+	// surface. A lock landing between Begin and Finish would burn the already
+	// spent enrollment token and strand the admin until an operator resets it.
 	user := adminRegistrationUser()
 	if _, err := FinishAdminRegistration(ctx, h.webauthn, h.repo, AdminRegistrationInput{
 		User:           user,
@@ -565,6 +675,14 @@ func (h *Handler) EnrollFinish(c *gin.Context) {
 		AllowedAAGUIDs: h.allowedAAGUIDs,
 		CredentialName: req.CredentialName,
 	}); err != nil {
+		// A credential-save fault is the server's, not a rejected key: a logged
+		// 500 with no failure audit row. Attestation and AAGUID rejections stay a
+		// Warn, the audit row and the uniform 401.
+		if errors.Is(err, ErrCredentialPersist) {
+			h.log.Error("admin credential persist failed", "error", err)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": msgInternalError})
+			return
+		}
 		h.log.Warn("admin finish registration rejected", "error", err)
 		h.auditFailure(ctx, challenge.Username, EventEnrollComplete)
 		c.JSON(http.StatusUnauthorized, genericAuthError)
@@ -577,9 +695,23 @@ func (h *Handler) EnrollFinish(c *gin.Context) {
 		return
 	}
 
+	// Reset only after the key is enrolled, as WebAuthnLogin resets only after
+	// the second factor. Non-fatal: a stale counter ages out on its own (see
+	// WebAuthnLogin); `admin unlock` clears it sooner.
+	if err := h.lockout.Reset(ctx, challenge.Username, challenge.IPHash); err != nil {
+		h.log.Warn("admin lockout reset failed", "event", EventEnrollComplete)
+	}
+
 	adminID := challenge.AdminID
 	h.auditOK(ctx, &adminID, challenge.Username, EventEnrollComplete)
 	c.JSON(http.StatusOK, gin.H{"status": "enrolled"})
+}
+
+// failEnroll finishes a reserved EnrollBegin guess that failed and writes the
+// uniform 401.
+func (h *Handler) failEnroll(c *gin.Context, username, ip string) {
+	h.failPassword(c.Request.Context(), username, ip, EventEnrollComplete)
+	c.JSON(http.StatusUnauthorized, genericAuthError)
 }
 
 // adminRegistrationUser is the WebAuthnUser used for the admin registration
@@ -627,11 +759,11 @@ func (h *Handler) storeEnrollChallenge(ctx context.Context, ch enrollChallenge) 
 
 func (h *Handler) consumeEnrollChallenge(ctx context.Context, handle string) (enrollChallenge, error) {
 	if handle == "" {
-		return enrollChallenge{}, errors.New("empty enroll handle")
+		return enrollChallenge{}, errInvalidAdminChallenge
 	}
 	raw, err := h.redis.GetDel(ctx, enrollChallengePrefix+handle).Result()
 	if errors.Is(err, redis.Nil) {
-		return enrollChallenge{}, errors.New("unknown or expired enroll handle")
+		return enrollChallenge{}, errInvalidAdminChallenge
 	}
 	if err != nil {
 		return enrollChallenge{}, fmt.Errorf("load enroll challenge: %w", err)

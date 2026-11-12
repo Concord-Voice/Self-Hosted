@@ -48,7 +48,7 @@ interface RequestInitOptions extends RequestOptions {
   method?: "GET" | "POST";
 }
 
-function retryAfter(value: string | null): number | null {
+export function retryAfter(value: string | null): number | null {
   if (value === null || !/^\d+$/.test(value)) return null;
   const seconds = Number(value);
   return Number.isSafeInteger(seconds) && seconds <= 3600 ? seconds : null;

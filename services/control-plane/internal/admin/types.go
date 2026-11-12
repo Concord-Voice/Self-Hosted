@@ -69,7 +69,10 @@ const (
 	EventLoginFailure = "login_failure"
 	// EventLogout marks an explicit admin logout (session revoked).
 	EventLogout = "logout"
-	// EventLockout marks an account/IP entering exponential-backoff lockout.
+	// EventLockout marks an account/IP entering exponential-backoff lockout. It is
+	// reserved: the lock is taken inside the Redis script, which writes no audit
+	// row, so nothing emits this event today. A refused guess is recorded as a
+	// denied EventLoginFailure or EventEnrollComplete row with reason locked_out.
 	EventLockout = "lockout"
 	// EventEnrollComplete marks a pending admin flipping to active on WebAuthn enrollment.
 	EventEnrollComplete = "enroll_complete"
@@ -77,4 +80,10 @@ const (
 	EventCredentialRevoked = "credential_revoked" // #nosec G101 -- event-type label, not a secret
 	// EventBootstrap marks the out-of-band creation of an admin (adminctl / in-console).
 	EventBootstrap = "bootstrap"
+	// EventServerRead marks an admin reading server status, health or logs
+	// through the host agent (#186).
+	EventServerRead = "server_read"
+	// EventServerWrite marks an admin asking the host agent to run a write
+	// action (#188), whether it started, was refused or failed.
+	EventServerWrite = "server_write"
 )

@@ -1,0 +1,81 @@
+#!/bin/sh
+# Concord Voice self-hosted package (#187).
+set -e
+
+root=/opt/concord
+bundle=/usr/share/concord-selfhost/concord-selfhost-@VERSION@.tar.gz
+
+token=/run/concord-agent/setup-token
+marker=/run/concord-agent/write-in-progress
+
+case "$1" in
+configure | abort-upgrade | abort-deconfigure | abort-remove) ;;
+*) exit 0 ;;
+esac
+
+if [ "$1" = configure ]; then
+  getent group concord-agent >/dev/null || groupadd --system concord-agent
+
+  # The release goes to /opt/concord once. After that the directory holds the
+  # operator's .env and certificates, so the package never touches it again.
+  if [ -e "$root" ]; then
+    echo "concord-selfhost: $root already exists; leaving it as it is." >&2
+  else
+    umask 022
+    rm -rf "$root.new"
+    mkdir "$root.new"
+    # The root agent runs scripts from this tree, so no mode in the archive
+    # may make a file writable by others or setuid.
+    tar -xzf "$bundle" -C "$root.new" --strip-components=1 --no-same-owner --no-same-permissions
+    chmod -R u-s,g-s,go-w "$root.new"
+    mv "$root.new" "$root"
+  fi
+fi
+
+# As debhelper does, also when a failed upgrade or removal is rolled back:
+# enable unless the operator disabled it before. deb-systemd-helper works
+# without a running systemd (image builds), and deb-systemd-invoke honours
+# policy-rc.d. Only starting needs systemd.
+deb-systemd-helper unmask concord-agent.service >/dev/null || true
+if deb-systemd-helper --quiet was-enabled concord-agent.service; then
+  deb-systemd-helper enable concord-agent.service >/dev/null ||
+    echo "concord-selfhost: could not enable concord-agent; run: systemctl enable --now concord-agent" >&2
+else
+  deb-systemd-helper update-state concord-agent.service >/dev/null || true
+fi
+running=no
+if [ -d /run/systemd/system ]; then
+  systemctl --system daemon-reload >/dev/null || true
+  if [ -z "$2" ]; then
+    deb-systemd-invoke start concord-agent.service || true
+  elif [ -e "$marker" ]; then
+    # Restarting would kill a restore or update halfway.
+    echo "concord-selfhost: a write action (backup, restore, update, start or stop) is running, so concord-agent keeps running the old version. When it finishes, run: sudo systemctl restart concord-agent" >&2
+  elif [ ! -e "$root/.env" ] && systemctl is-active --quiet concord-agent.service; then
+    # The setup wizard may be running the installer as the agent's child, and
+    # a restart would kill it halfway.
+    echo "concord-selfhost: setup may be in progress, so concord-agent keeps running the old version. After setup finishes, run: sudo systemctl restart concord-agent" >&2
+  else
+    deb-systemd-invoke restart concord-agent.service || true
+  fi
+  if [ ! -e "$root/.env" ] && systemctl is-active --quiet concord-agent.service; then
+    # Type=simple counts the agent active as soon as it forks; the token file
+    # shows it really reached setup mode.
+    i=0
+    while [ ! -e "$token" ] && [ "$i" -lt 10 ]; do
+      sleep 1
+      i=$((i + 1))
+    done
+    [ -e "$token" ] && running=yes
+  fi
+fi
+
+if [ "$1" = configure ] && [ ! -e "$root/.env" ]; then
+  if [ "$running" = yes ]; then
+    echo "concord-selfhost: to finish, open the setup wizard from a browser on your network."
+    echo "concord-selfhost: its address, with a one-time token: sudo cat $token"
+    echo "concord-selfhost: compare the certificate fingerprint in: journalctl -u concord-agent"
+  else
+    echo "concord-selfhost: concord-agent is not in setup mode yet. Once it starts, the setup wizard address is in $token; if it does not start, see: journalctl -u concord-agent"
+  fi
+fi

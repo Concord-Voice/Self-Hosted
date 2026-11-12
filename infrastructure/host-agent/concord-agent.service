@@ -1,0 +1,37 @@
+# Concord Host Agent (#186). Serves fixed concord-selfhost reads and write
+# actions (#188) to the Admin Console on /run/concord-agent/agent.sock, and on
+# a host with no .env the first-run setup wizard on TCP 9443 (#187). See
+# docs/runbooks/selfhost-host-agent.md before installing.
+[Unit]
+Description=Concord Host Agent
+After=docker.service
+Wants=docker.service
+
+[Service]
+Type=simple
+# The packaged paths. A checkout install points both at its own copies; see
+# docs/runbooks/selfhost-host-agent.md.
+Environment=CONCORD_AGENT_CLI=/opt/concord/infrastructure/deploy/concord-selfhost
+ExecStart=/usr/libexec/concord-agent
+Restart=on-failure
+RestartSec=5s
+RuntimeDirectory=concord-agent
+RuntimeDirectoryMode=0750
+# Keep the directory across restarts: the control-plane container bind-mounts
+# it, and a new directory would leave that mount pointing at the old one.
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=full
+ProtectHome=read-only
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# docker (unix), the health check's local HTTP probe and the setup wizard (inet).
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target

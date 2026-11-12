@@ -17,8 +17,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	_ "github.com/lib/pq" // postgres driver
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -150,7 +152,7 @@ func TestSessionStore_Get_RedisIOError_PropagatesError(t *testing.T) {
 // Lockout — error paths via closed Redis (was 60–66%)
 // ─────────────────────────────────────────────────────────────────────────────
 
-func TestLockout_RecordFailure_RedisError(t *testing.T) {
+func TestLockout_Reserve_RedisError(t *testing.T) {
 	rdb, cleanup := testhelpers.SetupTestRedis(t)
 	t.Cleanup(cleanup)
 	ctx := context.Background()
@@ -158,8 +160,31 @@ func TestLockout_RecordFailure_RedisError(t *testing.T) {
 	lk := admin.NewLockout(rdb, nil)
 	require.NoError(t, rdb.Close())
 
-	err := lk.RecordFailure(ctx, "user", "1.2.3.4")
-	require.Error(t, err, "RecordFailure against closed Redis must error")
+	allowed, err := lk.Reserve(ctx, "user", "1.2.3.4")
+	require.Error(t, err, "Reserve against closed Redis must error")
+	assert.False(t, allowed, "a guess that cannot be counted must never be allowed")
+}
+
+func TestLockout_RecordCheckedFailure_RedisError(t *testing.T) {
+	rdb, cleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+
+	lk := admin.NewLockout(rdb, nil)
+	require.NoError(t, rdb.Close())
+
+	require.Error(t, lk.RecordCheckedFailure(ctx, "user", "1.2.3.4"), "RecordCheckedFailure against closed Redis must error")
+}
+
+func TestLockout_Unlock_RedisError(t *testing.T) {
+	rdb, cleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+
+	lk := admin.NewLockout(rdb, nil)
+	require.NoError(t, rdb.Close())
+
+	require.Error(t, lk.Unlock(ctx, "user"), "Unlock against closed Redis must error")
 }
 
 func TestLockout_Reset_RedisError(t *testing.T) {
@@ -182,7 +207,7 @@ func TestLockout_IsLocked_RedisError(t *testing.T) {
 	lk := admin.NewLockout(rdb, nil)
 	require.NoError(t, rdb.Close())
 
-	_, _, err := lk.IsLocked(ctx, "user", "1.2.3.4")
+	_, err := lk.IsLocked(ctx, "user", "1.2.3.4")
 	require.Error(t, err, "IsLocked against closed Redis must error")
 }
 
@@ -267,10 +292,9 @@ func testDBPassword() string {
 // under the given Redis prefix+handle so the consume*Challenge JSON-decode path fires.
 func corruptChallengeEngine(t *testing.T, prefix string) (*gin.Engine, string) {
 	t.Helper()
-	db, dbCleanup := testhelpers.SetupTestDB(t)
-	t.Cleanup(dbCleanup)
-	rdb, rCleanup := testhelpers.SetupTestRedis(t)
-	t.Cleanup(rCleanup)
+	server := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	t.Cleanup(func() { require.NoError(t, rdb.Close()) })
 
 	handle := "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
 	require.NoError(t,
@@ -278,7 +302,7 @@ func corruptChallengeEngine(t *testing.T, prefix string) (*gin.Engine, string) {
 	)
 
 	gin.SetMode(gin.TestMode)
-	h, err := admin.NewHandler(db, rdb, logger.NewWithWriter(&bytes.Buffer{}), authHandlerCfg())
+	h, err := admin.NewHandler(nil, rdb, logger.NewWithWriter(&bytes.Buffer{}), authHandlerCfg())
 	require.NoError(t, err)
 
 	r := gin.New()
@@ -288,18 +312,18 @@ func corruptChallengeEngine(t *testing.T, prefix string) (*gin.Engine, string) {
 	return r, handle
 }
 
-func TestWebAuthnLogin_CorruptChallengeJSON_Returns401(t *testing.T) {
+func TestWebAuthnLogin_CorruptChallengeJSON_Returns500(t *testing.T) {
 	engine, handle := corruptChallengeEngine(t, "admin_login_challenge:")
 
 	rec := postJSON(engine, "/admin/api/v1/auth/webauthn", map[string]any{
 		"handle":    handle,
 		"assertion": json.RawMessage(`{}`),
 	})
-	// consumeLoginChallenge returns error on unmarshal; handler responds 401.
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	// consumeLoginChallenge returns error on unmarshal; handler responds 500.
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
-func TestEnrollFinish_CorruptChallengeJSON_Returns401(t *testing.T) {
+func TestEnrollFinish_CorruptChallengeJSON_Returns500(t *testing.T) {
 	engine, handle := corruptChallengeEngine(t, "admin_enroll_challenge:")
 
 	rec := postJSON(engine, "/admin/api/v1/enroll/finish", map[string]any{
@@ -307,8 +331,8 @@ func TestEnrollFinish_CorruptChallengeJSON_Returns401(t *testing.T) {
 		"attestation":     json.RawMessage(`{}`),
 		"credential_name": "key",
 	})
-	// consumeEnrollChallenge returns error on unmarshal; handler responds 401.
-	assert.Equal(t, http.StatusUnauthorized, rec.Code)
+	// consumeEnrollChallenge returns error on unmarshal; handler responds 500.
+	assert.Equal(t, http.StatusInternalServerError, rec.Code)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -324,10 +348,7 @@ func TestPasswordLogin_LockedOut_Returns429(t *testing.T) {
 	engine := adminAuthEngine(t, db, rdb)
 	_, username, _ := enrolledAdmin(t, db, rdb)
 
-	lk := admin.NewLockout(rdb, nil)
-	for i := 0; i < 5; i++ {
-		require.NoError(t, lk.RecordFailure(context.Background(), username, "203.0.113.10"))
-	}
+	lockOut(t, admin.NewLockout(rdb, nil), username, "203.0.113.10")
 
 	// Locked branch -> auditDenied is called -> 429.
 	rec := postJSON(engine, "/admin/api/v1/auth/password", map[string]string{
