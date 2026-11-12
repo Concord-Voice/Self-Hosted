@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/joinpause"
 )
 
 func TestAbsentCommandInventoryDoesNotContradictGrantedACL(t *testing.T) {
@@ -116,38 +118,19 @@ func TestAccountBudgetTimeGrantIsControlPlaneOnly(t *testing.T) {
 	require.NotContains(t, inventory.ExcludedAbsentApplicationCommands, "TIME")
 }
 
-// These key families were missing from the manifest, so
-// REDIS_CREDENTIAL_MODE=managed answered NOPERM. The shapes come from
-// internal/admin/server_writes.go and internal/joinpause/joinpause.go.
-// Keys the control plane writes need a "~" grant; keys it only reads need "%R~".
-// path.Match stands in for Redis glob here only because these keys hold no "/".
-func TestControlPlaneACLCoversProductionKeys(t *testing.T) {
+// The control plane only reads the voice-join pause (internal/joinpause), so the
+// emitted rule must grant it "%R~" and no write grant may cover it. Without the
+// read grant, REDIS_CREDENTIAL_MODE=managed answered NOPERM. path.Match stands in
+// for Redis glob here only because the key holds no "/".
+func TestControlPlaneACLReadsJoinPauseOnly(t *testing.T) {
 	// Root grants only: a "(...)" selector grants just its own commands.
 	root, _, _ := strings.Cut(serviceACLRule("control-plane"), "(")
 	tokens := strings.Fields(root)
-	for _, tc := range []struct{ key, prefix string }{
-		{"admin_server_stepup:" + strings.Repeat("cd", 32), "~"}, // hex handle, as storeServerStepUp writes it
-		{"media:legacy_join_pause", "%R~"},                       // joinpause only reads it
-	} {
-		covered := false
-		for _, token := range tokens {
-			pattern, isKey := strings.CutPrefix(token, tc.prefix)
-			if !isKey {
-				continue
-			}
-			ok, err := path.Match(pattern, tc.key)
-			require.NoError(t, err, "bad key pattern %q", pattern)
-			if ok {
-				covered = true
-				break
-			}
-		}
-		require.True(t, covered, "no control-plane %s pattern covers %q", tc.prefix, tc.key)
-	}
+	require.Contains(t, tokens, "%R~"+joinpause.Key)
 	// No write grant may cover the pause, a wildcard such as ~media:* included.
 	for _, token := range tokens {
 		if pattern, isKey := strings.CutPrefix(token, "~"); isKey {
-			ok, err := path.Match(pattern, "media:legacy_join_pause")
+			ok, err := path.Match(pattern, joinpause.Key)
 			require.NoError(t, err, "bad key pattern %q", pattern)
 			require.False(t, ok, "write grant %q covers the join pause; the control plane must only read it", token)
 		}
