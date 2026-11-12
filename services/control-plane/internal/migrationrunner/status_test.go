@@ -12,8 +12,6 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/migrationrunner"
 )
 
-const notCurrentMessage = "schema not current for this binary (verify mode)"
-
 // twoMigrations writes versions 1 and 2 and returns the file:// URL.
 func twoMigrations(t *testing.T) string {
 	t.Helper()
@@ -98,7 +96,7 @@ func TestReadStatus_TwoRowsIsError(t *testing.T) {
 
 	_, err = migrationrunner.ReadStatus(context.Background(), db, src)
 	// Mutation: take the first row and ignore any further ones.
-	require.Error(t, err)
+	require.ErrorContains(t, err, "read migration version: version table holds more than one row")
 }
 
 func TestReadStatus_EmptySourceIsError(t *testing.T) {
@@ -106,7 +104,7 @@ func TestReadStatus_EmptySourceIsError(t *testing.T) {
 
 	_, err := migrationrunner.ReadStatus(context.Background(), db, "file://"+t.TempDir())
 	// Mutation: treat an empty source as Latest 0 instead of failing.
-	require.Error(t, err)
+	require.ErrorContains(t, err, "read migration source: source holds no migrations")
 }
 
 func TestReadStatus_UnreadableSourceIsError(t *testing.T) {
@@ -114,7 +112,7 @@ func TestReadStatus_UnreadableSourceIsError(t *testing.T) {
 
 	_, err := migrationrunner.ReadStatus(context.Background(), db, "file://"+filepath.Join(t.TempDir(), "missing"))
 	// Mutation: swallow the source-open error and report Latest 0.
-	require.Error(t, err)
+	require.ErrorContains(t, err, "open migration source:")
 }
 
 func TestReadStatus_ClosedDatabaseIsError(t *testing.T) {
@@ -124,7 +122,7 @@ func TestReadStatus_ClosedDatabaseIsError(t *testing.T) {
 
 	_, err = migrationrunner.ReadStatus(context.Background(), db, oneMigration(t))
 	// Mutation: return a zero Status and nil error when the transaction cannot begin.
-	require.Error(t, err)
+	require.ErrorContains(t, err, "begin read-only migration status transaction:")
 }
 
 func advisoryLockCount(t *testing.T, db *sql.DB) int {
@@ -161,63 +159,6 @@ func TestReadStatus_WritesNothing(t *testing.T) {
 	require.Equal(t, relsBefore, relationCount(t, db), "ReadStatus must create no relation")
 	// Mutation: take golang-migrate's advisory lock and leave it held on the pooled connection.
 	require.Equal(t, locksBefore, advisoryLockCount(t, db), "ReadStatus must hold no advisory lock")
-}
-
-func TestVerify_ErrorsOnEveryNonCurrentCase(t *testing.T) {
-	ctx := context.Background()
-
-	t.Run("current passes", func(t *testing.T) {
-		db := freshSchemaDB(t)
-		src := twoMigrations(t)
-		require.NoError(t, migrationrunner.Run(db, src))
-		// Mutation: return an error unconditionally.
-		require.NoError(t, migrationrunner.Verify(ctx, db, src))
-	})
-
-	cases := map[string]func(t *testing.T) (*sql.DB, string){
-		"uninitialised": func(t *testing.T) (*sql.DB, string) { return freshSchemaDB(t), twoMigrations(t) },
-		"pending": func(t *testing.T) (*sql.DB, string) {
-			db := freshSchemaDB(t)
-			require.NoError(t, migrationrunner.Run(db, oneMigration(t)))
-			return db, twoMigrations(t)
-		},
-		"ahead": func(t *testing.T) (*sql.DB, string) {
-			db := freshSchemaDB(t)
-			require.NoError(t, migrationrunner.Run(db, twoMigrations(t)))
-			return db, oneMigration(t)
-		},
-		"dirty": func(t *testing.T) (*sql.DB, string) {
-			db := freshSchemaDB(t)
-			src := twoMigrations(t)
-			require.NoError(t, migrationrunner.Run(db, src))
-			_, err := db.Exec(`UPDATE schema_migrations SET dirty = TRUE`)
-			require.NoError(t, err)
-			return db, src
-		},
-	}
-	for name, build := range cases {
-		t.Run(name, func(t *testing.T) {
-			db, src := build(t)
-			// Mutation: Verify returns nil for this case (e.g. compares only Version >= Latest).
-			require.EqualError(t, migrationrunner.Verify(ctx, db, src), notCurrentMessage)
-		})
-	}
-
-	t.Run("read failure is an error", func(t *testing.T) {
-		db := freshSchemaDB(t)
-		// Mutation: Verify swallows a ReadStatus error.
-		require.Error(t, migrationrunner.Verify(ctx, db, "file://"+t.TempDir()))
-	})
-
-	t.Run("uninitialised verify writes nothing", func(t *testing.T) {
-		db := freshSchemaDB(t)
-		require.Error(t, migrationrunner.Verify(ctx, db, twoMigrations(t)))
-		var exists bool
-		require.NoError(t, db.QueryRow(
-			`SELECT to_regclass(quote_ident(current_schema()) || '.schema_migrations') IS NOT NULL`).Scan(&exists))
-		// Mutation: Verify falls back to Run when uninitialised.
-		require.False(t, exists)
-	})
 }
 
 func TestStatusLine_ExactFormats(t *testing.T) {

@@ -4,8 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"os"
-	"strings"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -140,10 +139,10 @@ func TestMigrationsCtl_UnreachableDatabaseLeaksNoDSN(t *testing.T) {
 }
 
 func TestMigrationsMode_Parse(t *testing.T) {
-	ok := map[string]migrationsMode{
-		"":       migrationsModeApply,
-		"apply":  migrationsModeApply,
-		"verify": migrationsModeVerify,
+	ok := map[string]bool{
+		"":       false,
+		"apply":  false,
+		"verify": true,
 	}
 	for in, want := range ok {
 		got, err := parseMigrationsMode(in)
@@ -151,12 +150,11 @@ func TestMigrationsMode_Parse(t *testing.T) {
 		require.NoError(t, err, "input %q", in)
 		require.Equal(t, want, got, "input %q", in)
 	}
-	require.NotEqual(t, migrationsModeApply, migrationsModeVerify)
 
 	for _, in := range []string{"Verify", "APPLY", "skip", " verify", "verify ", "off"} {
 		_, err := parseMigrationsMode(in)
 		// Mutation: case-fold or trim the value, or default unknown values to apply.
-		require.ErrorContains(t, err, "invalid MIGRATIONS_MODE", "input %q", in)
+		require.EqualError(t, err, "invalid MIGRATIONS_MODE: want empty, apply or verify", "input %q", in)
 	}
 }
 
@@ -164,7 +162,7 @@ func TestMigrationsMode_VerifyNeverApplies(t *testing.T) {
 	boom := errors.New("boom")
 	cases := []struct {
 		name        string
-		mode        migrationsMode
+		verifyOnly  bool
 		applyErr    error
 		verifyErr   error
 		wantApply   int
@@ -172,15 +170,15 @@ func TestMigrationsMode_VerifyNeverApplies(t *testing.T) {
 		wantErrIs   error
 		wantNoError bool
 	}{
-		{"verify ok", migrationsModeVerify, nil, nil, 0, 1, nil, true},
-		{"verify refuses", migrationsModeVerify, nil, boom, 0, 1, boom, false},
-		{"apply ok", migrationsModeApply, nil, nil, 1, 0, nil, true},
-		{"apply fails", migrationsModeApply, boom, nil, 1, 0, boom, false},
+		{"verify ok", true, nil, nil, 0, 1, nil, true},
+		{"verify refuses", true, nil, boom, 0, 1, boom, false},
+		{"apply ok", false, nil, nil, 1, 0, nil, true},
+		{"apply fails", false, boom, nil, 1, 0, boom, false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			applyCalls, verifyCalls := 0, 0
-			err := runStartupMigrations(tc.mode,
+			err := runStartupMigrations(tc.verifyOnly,
 				func() error { applyCalls++; return tc.applyErr },
 				func() error { verifyCalls++; return tc.verifyErr })
 			// Mutation: verify mode also calls apply (before, after, or on verify failure), or apply mode calls verify.
@@ -196,16 +194,25 @@ func TestMigrationsMode_VerifyNeverApplies(t *testing.T) {
 	}
 }
 
-func TestServePathParsesModeBeforeOpeningDatabase(t *testing.T) {
-	source, err := os.ReadFile("main.go") // #nosec G304 -- fixed test-only source path
-	require.NoError(t, err)
-	text := string(source)
-	parse := strings.Index(text, "parseMigrationsMode(")
-	open := strings.Index(text, "database.New(cfg.DatabaseURL)")
-	startup := strings.Index(text, "runStartupMigrations(")
-	// Mutation: parse the mode after database.New, or revert to the direct RunMigrations call.
-	require.GreaterOrEqual(t, parse, 0, "serve path must parse MIGRATIONS_MODE")
-	require.GreaterOrEqual(t, open, 0)
-	require.Less(t, parse, open, "invalid MIGRATIONS_MODE must fail before any database connection")
-	require.GreaterOrEqual(t, startup, 0, "serve path must route migrations through runStartupMigrations")
+// TestServePathRefusesInvalidModeBeforeOpeningDatabase drives the serve path
+// itself. DATABASE_URL names a socket directory that does not exist, so a serve
+// path that reached database.New before parsing MIGRATIONS_MODE would return
+// the connection error instead of the mode error; the control case proves the
+// fixture fails there when the mode is valid.
+func TestServePathRefusesInvalidModeBeforeOpeningDatabase(t *testing.T) {
+	previous := slog.Default()
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	t.Setenv("ENVIRONMENT", "development")
+	t.Setenv("DATABASE_URL", "postgres:///concord?host=/nonexistent-concord-test-socket&sslmode=disable")
+
+	t.Run("invalid mode stops before the database", func(t *testing.T) {
+		t.Setenv("MIGRATIONS_MODE", "Verify")
+		// Mutation: parse MIGRATIONS_MODE after database.New, or default an unknown value to apply.
+		require.EqualError(t, runControlPlane(), "configure migrations: invalid MIGRATIONS_MODE: want empty, apply or verify")
+	})
+
+	t.Run("control: a valid mode reaches the unreachable database", func(t *testing.T) {
+		t.Setenv("MIGRATIONS_MODE", "verify")
+		require.ErrorContains(t, runControlPlane(), "connect to database:")
+	})
 }

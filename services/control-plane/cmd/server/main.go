@@ -134,7 +134,7 @@ func runControlPlane() (runErr error) {
 	}
 	// Parsed before the database opens, so an invalid value stops startup
 	// without a connection.
-	migrationMode, err := parseMigrationsMode(os.Getenv("MIGRATIONS_MODE"))
+	migrationsVerify, err := parseMigrationsMode(os.Getenv("MIGRATIONS_MODE"))
 	if err != nil {
 		return fmt.Errorf("configure migrations: %w", err)
 	}
@@ -171,7 +171,7 @@ func runControlPlane() (runErr error) {
 
 	// Run migrations, or in verify mode refuse to start unless the schema is
 	// already current for this binary, writing nothing.
-	if err := runStartupMigrations(migrationMode,
+	if err := runStartupMigrations(migrationsVerify,
 		func() error { return database.RunMigrations(db) },
 		func() error {
 			verifyCtx, verifyCancel := context.WithTimeout(context.Background(), migrationsStatusBudget)
@@ -189,8 +189,14 @@ func runControlPlane() (runErr error) {
 
 	// Revoke any credential left by an unclean prior exit before initializing
 	// dependencies that may still terminate the process during construction.
+	// Verify mode skips it: the reader role belongs to the live colour.
 	readerSetupCtx, readerSetupCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	err = database.EnsureOpsMetricsReaderLoginDisabled(readerSetupCtx, db)
+	err = reconcileAdminOpsMetricsReaderAtBoot(
+		readerSetupCtx,
+		migrationsVerify,
+		db,
+		database.EnsureOpsMetricsReaderLoginDisabled,
+	)
 	readerSetupCancel()
 	if err != nil {
 		return fmt.Errorf("reconcile restricted admin operations metrics reader: %w", err)
@@ -611,6 +617,7 @@ func runControlPlane() (runErr error) {
 		readerSetupCtx,
 		cfg,
 		db,
+		migrationsVerify,
 		openAdminOpsMetricsReader,
 		database.EnsureOpsMetricsReaderLoginDisabled,
 	)
@@ -625,7 +632,9 @@ func runControlPlane() (runErr error) {
 			log.Error("Failed to clean up restricted admin operations metrics reader", "error", cleanupErr)
 		}
 	}()
-	if deferredAdminMetricsReader != nil {
+	// In verify mode the reader stays stopped and the admin metrics routes
+	// answer unavailable, so there is no reader to bind.
+	if deferredAdminMetricsReader != nil && !migrationsVerify {
 		if err := deferredAdminMetricsReader.Bind(adminMetricsReaderRuntime.Reader()); err != nil {
 			return fmt.Errorf("bind restricted admin operations metrics reader: %w", err)
 		}
@@ -1421,15 +1430,6 @@ func cleanupStalePresence(ctx context.Context, redisClient stalePresenceStore, l
 	)
 }
 
-// migrationsMode selects what serve does with migrations at startup. The zero
-// value is not a mode, so a mode that was never parsed runs neither branch.
-type migrationsMode int
-
-const (
-	migrationsModeApply migrationsMode = iota + 1
-	migrationsModeVerify
-)
-
 const (
 	migrationsCtlUsage       = "usage: control-plane migrations status"
 	migrationsCtlUnavailable = "migrations status: unavailable"
@@ -1438,30 +1438,27 @@ const (
 	migrationsExitUsage      = 64
 )
 
-// parseMigrationsMode accepts exactly "", "apply" or "verify". Anything else,
-// including a case or whitespace variant, is refused rather than defaulted.
-func parseMigrationsMode(s string) (migrationsMode, error) {
+// parseMigrationsMode reports whether MIGRATIONS_MODE selects verify mode. It
+// accepts exactly "", "apply" or "verify". Anything else, including a case or
+// whitespace variant, is refused rather than defaulted.
+func parseMigrationsMode(s string) (verify bool, err error) {
 	switch s {
 	case "", "apply":
-		return migrationsModeApply, nil
+		return false, nil
 	case "verify":
-		return migrationsModeVerify, nil
+		return true, nil
 	default:
-		return 0, errors.New("invalid MIGRATIONS_MODE: want empty, apply or verify")
+		return false, errors.New("invalid MIGRATIONS_MODE: want empty, apply or verify")
 	}
 }
 
-// runStartupMigrations calls apply in apply mode and verify in verify mode,
-// never both.
-func runStartupMigrations(mode migrationsMode, apply func() error, verify func() error) error {
-	switch mode {
-	case migrationsModeApply:
-		return apply()
-	case migrationsModeVerify:
+// runStartupMigrations calls verify when verifyOnly is set and apply
+// otherwise, never both.
+func runStartupMigrations(verifyOnly bool, apply func() error, verify func() error) error {
+	if verifyOnly {
 		return verify()
-	default:
-		return errors.New("invalid MIGRATIONS_MODE")
 	}
+	return apply()
 }
 
 // runMigrationsCtl serves `control-plane migrations status`. It reads

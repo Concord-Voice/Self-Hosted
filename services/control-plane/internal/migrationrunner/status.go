@@ -16,8 +16,6 @@ import (
 // in the connection's current schema.
 const versionTable = "schema_migrations"
 
-var errSchemaNotCurrent = errors.New("schema not current for this binary (verify mode)")
-
 // Status is the recorded schema version set against the latest version a
 // migration source carries. Version and Dirty are meaningful only when
 // Initialised is true.
@@ -67,20 +65,6 @@ func ReadStatus(ctx context.Context, db *sql.DB, sourceURL string) (Status, erro
 	}
 	st.Latest = latest
 	return st, nil
-}
-
-// Verify returns nil only when ReadStatus reports the schema current. It
-// writes nothing, so an uninitialised, pending, ahead or dirty schema stays as
-// it is.
-func Verify(ctx context.Context, db *sql.DB, sourceURL string) error {
-	st, err := ReadStatus(ctx, db, sourceURL)
-	if err != nil {
-		return fmt.Errorf("read migration status: %w", err)
-	}
-	if !st.Current() {
-		return errSchemaNotCurrent
-	}
-	return nil
 }
 
 func readRecordedVersion(ctx context.Context, db *sql.DB) (st Status, err error) {

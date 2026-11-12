@@ -4,6 +4,7 @@ package database
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -15,6 +16,8 @@ import (
 // migrationsSourceURL is the control plane's migrations directory, relative to
 // the working directory the binary runs in.
 const migrationsSourceURL = "file://migrations"
+
+var errSchemaNotCurrent = errors.New("schema not current for this binary (verify mode)")
 
 // New creates a new PostgreSQL database connection
 func New(databaseURL string) (*sql.DB, error) {
@@ -50,7 +53,15 @@ func MigrationStatus(ctx context.Context, db *sql.DB) (migrationrunner.Status, e
 }
 
 // VerifyMigrations fails unless the control plane's schema is current for its
-// migrations. It never applies a migration.
+// migrations, naming the status line in the refusal. It never applies a
+// migration, so an uninitialised, pending, ahead or dirty schema stays as it is.
 func VerifyMigrations(ctx context.Context, db *sql.DB) error {
-	return migrationrunner.Verify(ctx, db, migrationsSourceURL)
+	st, err := migrationrunner.ReadStatus(ctx, db, migrationsSourceURL)
+	if err != nil {
+		return fmt.Errorf("read migration status: %w", err)
+	}
+	if !st.Current() {
+		return fmt.Errorf("%w: %s", errSchemaNotCurrent, st.Line())
+	}
+	return nil
 }
