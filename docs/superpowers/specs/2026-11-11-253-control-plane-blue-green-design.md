@@ -18,7 +18,7 @@ The rail ships **default-off**. With the switch unset, `rebuild`, `nginx-reload`
 
 | # | Ruling | Effect on the design |
 |---|---|---|
-| R1 | **Option B.** Ship before WS state externalization with a bounded split. Rail is default-off. | The stop signal follows each successful reload at once. Activation is out of scope and gated on Concord-Voice/Desktop#68 and Concord-Voice/Desktop#64. |
+| R1 | **Option B.** Ship before WS state externalization with a bounded split. Rail is default-off. | The stop signal follows each successful reload at once. Activation is out of scope and gated on Concord-Voice/Desktop#68, Concord-Voice/Desktop#64 and a decision on the two-process overlap (voice lifecycle subscription without a queue group, the process-local revocation fence). The rail refuses `ACTIVITY_HISTORY_CLUSTER_ENABLED=true` (PR #259 review). |
 | R2 | **Migration-gated flip.** | Overlap only on a schema proven current. Any colour started beside a serving colour refuses to migrate. A deploy that carries migrations, or any doubt, takes today's stop-first drained path. |
 | R3 | **Round-trip colour model.** | Blue is home and keeps the service name `control-plane` on 8080. Green is transient. Two reconnect waves per overlapped deploy are accepted. |
 | R4 | **Smallest design that works, one PR.** | No new state store. Reuse the existing lock, the `nginx-reload` transaction and the media rail's render helper. |
@@ -50,7 +50,7 @@ Three options were weighed:
   the same mechanism `control_plane_cli` already uses for maintenance containers. There is no overlay file and no compose file is edited.
   - It inherits every compose layer of `control-plane` by construction (hardening, volumes, env, healthcheck, 45 s stop grace), including layers a deployment adds on top. Nothing has to be mirrored and nothing can drift.
   - Only the `-p` port is published; the service's own `8080:8080` publish is not applied to a one-off.
-  - `OPS_METRICS_ENABLED=false` keeps green from opening or closing the single ops-metrics reader role that home owns.
+  - `OPS_METRICS_ENABLED=false` keeps green's admin metrics off. That flag alone did not protect home: the control plane reconciled the shared ops-metrics reader role at every boot (NOLOGIN plus terminating its sessions). So verify mode itself skips every reader-role write at boot, configure and shutdown (PR #259 review), and green's admin metrics routes answer unavailable.
   - Its restart policy is `no`. If green dies while it is the only serving colour, the next `rebuild` recovers. Documented, not engineered away.
 - **Why this cannot fail open** (measured on Docker Compose v5.7.0 and pinned by a contract test):
   - a one-off carries the label `com.docker.compose.service=control-plane`, so the daemon-wide drained check (`activity_history_refresh_daemon_ids`) already counts it;
@@ -248,7 +248,7 @@ It must pass on the unmodified tree and on every later commit.
 | 4 | Zero non-200 on `/health` across a full flip | Real-nginx test |
 | 5 | A WebSocket opened before the flip survives the reload | Real-nginx test |
 | 6 | `wait-healthy` gates on the live colour and fails when it is not ready; the combined unscoped requirement is preserved | Hermetic |
-| 7 | Bounded split: stop follows reload at once, an interrupt cannot separate them, overlap is at most 45 s | Order and signal cases |
+| 7 | Bounded split: stop follows reload at once once nginx runs a new worker generation; HUP, INT, TERM and PIPE are ignored by the controller in that window (children such as `docker` reset their own handling, so a signal narrows rather than cannot split it; SIGKILL is a documented limit); overlap is at most 45 s | Order and signal cases |
 | 8 | Standby fails `/readyz`: no flip, home serves, green reaped, exit 1 `standby-not-ready` | Failure case |
 | 9 | Pending or undeterminable migrations take the drained path with both guards in order; verify mode on a non-current schema fails and writes nothing | Status table; Go tests |
 | 10 | A foreign-project control plane is refused in both paths | Guard cases |

@@ -375,7 +375,7 @@ bash infrastructure/deploy/tests/test-control-plane-bluegreen.sh
 bash infrastructure/deploy/tests/test-control-plane-bluegreen-nginx.sh
 ```
 
-Some cases need Linux. The rail-on and lock re-entry cases need `/usr/bin/flock`, and the compose one-off contract case needs a running Docker daemon. The nginx script needs `nginx` and `python3` on `PATH` and free loopback ports 8080 and 8081. macOS has no `/usr/bin/flock`, so the flock cases print `SKIP` there; any other missing prerequisite also skips its cases locally. With `CI` set, a missing prerequisite is a failure, not a skip. CI runs both scripts through the deploy-test step's `infrastructure/deploy/tests/test-*.sh` glob.
+Some cases need Linux. The rail-on and lock re-entry cases need `/usr/bin/flock`, and the compose one-off contract case needs a running Docker daemon. The nginx script needs `nginx` and `python3` on `PATH` and free loopback ports 8080, 8081 and 18088. macOS has no `/usr/bin/flock`, so the flock cases print `SKIP` there; any other missing prerequisite also skips its cases locally. With `CI` set, a missing prerequisite is a failure, not a skip. CI runs both scripts through the deploy-test step's `infrastructure/deploy/tests/test-*.sh` glob.
 
 ### Media Plane
 

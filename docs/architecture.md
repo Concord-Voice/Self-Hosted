@@ -1741,9 +1741,17 @@ The deploy controller (`infrastructure/deploy/concord-ctl.sh`) has an optional r
 
 **Do not turn the rail on before Concord-Voice/Desktop#68 and Concord-Voice/Desktop#64 are released.** Each overlapped deploy drops connected clients twice, and they reconnect each time. Without the client's reconnect refetch (Concord-Voice/Desktop#68) and its session-drain handling (Concord-Voice/Desktop#64), users can see stale state after a deploy.
 
+**A third gate is the overlap itself.** From green's boot until home is ready again, two control-plane processes run against the same database, Redis and NATS. `validateControlPlaneReplicaCount` cannot stop this: it reads configuration, and both colours read the same `CONTROL_PLANE_REPLICA_COUNT=1`. The backend assumes one process in at least three places:
+
+- the voice lifecycle subscription has no queue group, so both colours apply every event, and the receipt-time clamp argument in `.claude/rules/domains/backend.md` assumes one;
+- the presence-audience revocation fence is process-local, so neither colour sees the other's in-flight revocations;
+- Activity History has a single writer.
+
+The rail refuses to start when `ACTIVITY_HISTORY_CLUSTER_ENABLED=true` (`rail-refused-activity-history-cluster`, exit 2). The voice and revocation-fence windows remain. Decide whether they are acceptable for the overlap's length, as recorded on Self-Hosted#253, before turning the rail on.
+
 **Before turning it on, verify on the target host.** The hermetic tests stub Docker, nginx and the nested reload, so these paths have not run end to end anywhere yet:
 
-1. A full nested flip: `rebuild control-plane` with the rail on must reach the internal `nginx-reload --control-plane-upstream 8081`, pass identity admission, render, `nginx -t`, reload and the `/nginx-health` probe, and then do the same for 8080.
+1. A full nested flip: `rebuild control-plane` with the rail on must reach the internal `nginx-reload --control-plane-upstream 8081`, pass identity admission, render, `nginx -t`, reload and the `/nginx-health` probe, see a new nginx worker generation (the master PID comes from systemd), and then do the same for 8080.
 2. Green's start and removal in the host's egress mode, when that mode is not `direct`.
 3. A deploy with a pending migration, to confirm it takes the stop-first path.
 4. Background jobs and event subscribers during the overlap: two control planes run from green's boot until home is ready again, which is longer than the 45-second nginx split.
@@ -1761,31 +1769,34 @@ The two instances are called colours.
 | Home (blue) | The Compose service `control-plane`, container `concordvoice-control-plane`. Always the steady-state server. | `127.0.0.1:8080` |
 | Green | A transient `docker compose run` one-off container of the same `control-plane` service, named `concordvoice-control-plane-green`. It exists only during a cutover. | `127.0.0.1:8081` |
 
-The colour model is a round trip. Home is never renamed, and green never becomes the long-lived server. Because green is a one-off of the same service, it inherits every Compose layer of `control-plane`, including hardening, volumes, environment, healthcheck and the 45-second stop grace, and any layer a deployment adds. Nothing has to be mirrored onto green. Green starts with `MIGRATIONS_MODE=verify` and `OPS_METRICS_ENABLED=false`. Home's configuration is never changed.
+The colour model is a round trip. Home is never renamed, and green never becomes the long-lived server. Because green is a one-off of the same service, it inherits every Compose layer of `control-plane`, including hardening, volumes, environment, healthcheck and the 45-second stop grace, and any layer a deployment adds. Nothing has to be mirrored onto green. Green starts with `MIGRATIONS_MODE=verify` and `OPS_METRICS_ENABLED=false`. In verify mode the control plane also leaves the ops-metrics reader role alone: it does not reconcile it at boot, open it, or disable it on exit. That role is shared with home, and disabling its login ends home's reader sessions. Green's admin metrics routes answer unavailable. Home's configuration is never changed.
 
 Green's restart policy is `no`. If green dies while it is the only serving colour, Docker does not restart it, and nginx returns errors until the next `rebuild control-plane`, which recovers.
 
 #### Switch
 
-Set `CONTROL_PLANE_DEPLOY_PROFILE` in the deploy env file (`deploy.env.local` in the deploy directory), as for `MEDIA_DEPLOY_PROFILE`.
+Set `CONTROL_PLANE_DEPLOY_PROFILE` in the deploy env file (`deploy.env.local` in the deploy directory), as for `MEDIA_DEPLOY_PROFILE`. Like that switch, it can also come from the caller's environment: an exported `CONTROL_PLANE_DEPLOY_PROFILE` applies when the env files do not set it.
 
 | Value | Effect |
 |---|---|
 | `control-plane-single` (default) | Rail off. Today's stop-first rebuild. |
 | `control-plane-bluegreen` | Rail on, on a managed production or staging selection only. |
 
-The controller exits 2 before doing anything for an invalid value, and for `control-plane-bluegreen` combined with `MEDIA_DEPLOY_PROFILE=media-bluegreen`, a host without `/usr/bin/flock`, or a host without the `/var/lib/concord` deploy state directory.
+On a managed production or staging selection, the controller exits 2 before doing anything, for every verb, when the value is invalid. Every other selection, including West staging, forces the rail off and never reads the value. With `control-plane-bluegreen` it also exits 2 when combined with `MEDIA_DEPLOY_PROFILE=media-bluegreen` or `ACTIVITY_HISTORY_CLUSTER_ENABLED=true`, on a host without `/usr/bin/flock`, or on a host without the `/var/lib/concord` deploy state directory.
 
 #### The cutover
 
 The cutover runs inside `rebuild` when the rail is on and the rebuild scope is exactly `control-plane`, after the image build. It holds the deploy transaction lock throughout.
 
 1. **Migration gate.** The controller runs `migrations status` (see [development.md](development.md#database-migrations)) in a fresh container of the built image. It overlaps only on exit 0 with stdout `current <n>`. A pending migration, any other answer, or an image too old to have the subcommand takes the stop-first drained path instead, with the brief downtime that path has always had. Green also refuses to start unless the schema is current, so a colour started beside a serving colour never migrates.
-2. **Marker.** It writes the cutover marker, an empty file at `.control-plane-cutover.local` in the deploy directory. The marker exists only while a cutover is in flight.
-3. **Start green** and wait for its `/readyz`. If green fails here, home is still serving and no user was moved.
-4. **Flip to green.** It re-renders the live vhost's `upstream control_plane` block to `127.0.0.1:8081`, runs `nginx -t` and reloads, then stops home at once. HUP, INT and TERM are ignored between the reload and the stop.
-5. **Start home** with the new image once the status check still reads current, and wait for its `/readyz` on 8080.
-6. **Flip back** to 8080, stop and remove green at once, and clear the marker.
+2. **Marker.** It writes the cutover marker, an empty regular file at `.control-plane-cutover.local` in the deploy directory. The marker exists only while a cutover is in flight. It then removes any leftover green from an earlier run.
+3. **Port check.** If something already listens on `127.0.0.1:8081` (for example the `tools` profile), the marker is cleared and the drained path runs instead.
+4. **Start green** and wait for its `/readyz`. If green fails here, home is still serving and no user was moved. Before green is removed on a failure, its last 200 log lines and its container state are saved to a mode-0600 file `.control-plane-green-<UTC time>.log` in the deploy directory; the path is printed.
+5. **Flip to green.** It re-renders the live vhost's `upstream control_plane` block to `127.0.0.1:8081`, runs `nginx -t` and reloads. It waits up to 15 seconds for nginx to run a new worker generation, which shows the master loaded the new config and told the old workers to stop accepting connections. Then it stops home at once. If the flip fails at any point, home is still running, so nginx is moved back to 8080 before green is removed.
+6. **Start home** with the new image once the status check still reads current, and wait for its `/readyz` on 8080.
+7. **Flip back** to 8080 the same way, stop and remove green at once, and clear the marker.
+
+HUP, INT, TERM and PIPE are ignored by the controller between each reload and the stop that follows it. Child processes such as `docker` set their own signal handling, so this narrows the window rather than closing it; a SIGKILL is a documented limit (below).
 
 Each flip overlaps the two colours from the successful reload until the old colour exits: at most the 45-second stop grace. With the rail on, an operator `nginx-reload` (for a certificate or HSTS change) renders whichever port is live, so it keeps the active colour. `wait-healthy` probes the live colour.
 
@@ -1804,9 +1815,12 @@ To force the control plane back to home, rerun `rebuild control-plane` with the 
 | Live port | Recovery |
 |---|---|
 | 8080 | Remove green, clear the marker, continue. The rebuild may then run a fresh cutover. |
-| 8081, green not running | Nothing is serving on 8081. Flip nginx to 8080, clear the marker, continue with the rebuild as requested (any scope). |
+| 8081, green not running | Nothing is serving on 8081. Flip nginx to 8080, clear the marker, and continue with the rebuild as requested. When the scope does not include `control-plane` and home is not running, nothing would serve afterwards, so it refuses with `cutover-incomplete` and changes nothing. |
+| 8081, green running, green not ready | Green answers nothing. If home answers `/readyz` on 8080, flip nginx to 8080, remove green, clear the marker and continue. Otherwise as below. |
 | 8081, green running | Green is serving. Needs the scope to be exactly `control-plane`, else `cutover-incomplete` and nothing is changed. Write the marker if it is missing, stop home if it is running, and continue. At the cutover step, either finish the move back to home with the newly built image, or take the drained path and flip to 8080 at the end. |
-| Unreadable (marker present) | `recovery-ambiguous`. Nothing is changed. |
+| Unreadable (marker present), marker not a regular file, or `docker ps` failed | `recovery-ambiguous`. Nothing is changed. |
+
+If a later step of that same `rebuild` fails while the recovered cutover is still in place (the image build, the NATS reconcile, the first-activation guard), the controller prints `cutover-incomplete` with what is serving before it exits.
 
 The resume runs after the image build, so a bad image left by an interrupted run cannot block the rebuild that fixes it.
 
@@ -1833,30 +1847,33 @@ A SIGKILL that lands between a flip and the stop that follows it leaves both col
 
 #### Named errors
 
-Rail errors are prefixed `control-plane-bluegreen:` on stderr. The first nine exit 1; the mode refusals exit 2.
+Rail errors are prefixed `control-plane-bluegreen:` on stderr. The first ten exit 1; the mode refusals exit 2. For the three `standby-*` errors, if green cannot be removed the marker is kept and the message says so; rerun `rebuild control-plane`.
 
 | Error | What is serving afterwards | What to do |
 |---|---|---|
 | `standby-image-mismatch` | Home. Green was removed and the marker cleared. | Green was not running the image just built. Check the build, then rerun `rebuild control-plane`. |
-| `standby-not-ready` | Home. Green was removed and the marker cleared. No flip happened. | The new image did not start or did not pass `/readyz`. Fix the image, then rerun. |
-| `flip-failed` | nginx restored its previous config, so the colour it was on keeps serving. On the first flip: home. Green is removed and the marker cleared only when the live vhost reads 8080 again; otherwise green and the marker are kept, because nginx may be routing to green. On the flip back: green, with the marker kept. | Check `nginx -t` output, then rerun `rebuild control-plane`. |
+| `standby-inspect-failed` | Home. Green was removed and the marker cleared. | `docker compose ps` or `docker inspect` failed, so green's identity or image could not be checked. Check the Docker daemon, then rerun. |
+| `standby-not-ready` | Home. Green was removed and the marker cleared. No flip happened. Also printed, after `invalid standby container identity`, when `compose run` did not return a container ID. | The new image did not start or did not pass `/readyz`. Read the saved green log, fix the image, then rerun. |
+| `flip-failed` | On the first flip: the controller moved nginx back to 8080, so home serves, and green was removed and the marker cleared. If that move back also failed, nginx may be routing to green; green and the marker are kept. On the flip back, or on recovery's flip to 8080: green (or nothing, if recovery found green gone), with the marker kept. A nested flip that applied its config but could not restore the previous one exits 3. | Check `nginx -t` output, then rerun `rebuild control-plane`. |
 | `old-colour-stop-failed` | The new colour, and possibly the old one too. The marker is kept. | Rerun `rebuild control-plane`. |
 | `home-not-ready` | Green. Home did not pass `/readyz` on 8080, or the schema no longer read current. The marker is kept. | Fix the cause, then rerun `rebuild control-plane`. |
-| `cutover-incomplete` | Unchanged. A marker exists, or the vhost reads 8081 while green runs, and this verb or scope cannot recover it. Also printed when the marker file cannot be written or removed. | Run `rebuild control-plane`. If the marker file is the cause, fix the deploy directory's permissions first. |
-| `recovery-ambiguous` | Unchanged. A marker exists and the live vhost's upstream block cannot be read. | Follow the manual reset above. |
+| `cutover-incomplete` | Unchanged. A marker exists, or the vhost reads 8081 while green runs, and this verb or scope cannot recover it. Also printed when the marker file cannot be written or removed, when out-of-scope recovery finds home down, and when a later step fails while a recovered cutover is in place. | Run `rebuild control-plane`. If the marker file is the cause, fix the deploy directory's permissions first. |
+| `recovery-ambiguous` | Unchanged. A marker exists and the live vhost's upstream block cannot be read, the marker is not a regular file, or `docker ps` failed. | For a marker that is not a regular file, remove it and rerun. Otherwise follow the manual reset above. |
 | `live-upstream-unparseable` | Unchanged. `nginx-reload` or `wait-healthy` could not read the live port. | Follow the manual reset above. |
 | `rail-off-with-cutover-marker` | Unchanged. The rail is off but a cutover marker exists. | Turn the rail back on and run `rebuild control-plane`. |
 | `rail-refused-media-bluegreen` (exit 2) | Unchanged. | Use only one of the two blue-green rails. |
+| `rail-refused-activity-history-cluster` (exit 2) | Unchanged. | Activity History cluster mode cannot overlap two control planes. Turn the rail off. |
 | `rail-refused-no-flock` (exit 2) | Unchanged. | Install `flock`, or turn the rail off. |
 | `rail-refused-no-state-dir` (exit 2) | Unchanged. | Provision the `/var/lib/concord` deploy state directory, or turn the rail off. |
-| `invalid control-plane deployment profile` (exit 2) | Unchanged. | Set `CONTROL_PLANE_DEPLOY_PROFILE` to one of the two values above. |
+| `invalid control-plane deployment profile` (exit 2) | Unchanged. Only on a managed production or staging selection, and for every verb. | Set `CONTROL_PLANE_DEPLOY_PROFILE` (in the env file or the caller's environment) to one of the two values above. |
 
 #### Known limits
 
 - Every overlapped deploy causes two reconnect waves.
 - A deploy that carries a pending migration takes the stop-first drained path, with the same brief downtime as before.
 - A SIGKILL between a flip and its stop leaves both colours serving until the next `rebuild`.
-- During an overlap, the media plane's calls to `control-plane:8080` can reach either colour. Calls that reach a colour that is starting or stopping are refused, and voice authorization fails closed.
+- During an overlap, the media plane's calls to `control-plane:8080` can reach either colour. Green joins the `control-plane` network alias when it starts, so internal callers can reach it before its `/readyz` gate passes, not only after the flip. Calls that reach a colour that is starting or stopping are refused, and voice authorization fails closed.
+- Two control planes run at once for the whole overlap; see the third gate above.
 
 The environment variables are listed in [development.md](development.md#environment-variables-reference): `MIGRATIONS_MODE` under Control Plane, `CONTROL_PLANE_DEPLOY_PROFILE` under Deploy Controller (managed hosts).
 

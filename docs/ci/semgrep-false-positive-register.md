@@ -233,7 +233,7 @@ _None yet._
 
 | Field | Value |
 |---|---|
-| File | `services/control-plane/internal/migrationrunner/status.go`, line 119 |
+| File | `services/control-plane/internal/migrationrunner/status.go`, lines 104–105 (the `nosemgrep` comment is on line 103) |
 | First recorded | 2026-11-11, PR #259 |
 | Suppressed by | `// nosemgrep:` with the rule ID on the line above `versionSQL` (also `#nosec G202`) |
 | Rationale | The table name is `pq.QuoteIdentifier(current_schema()) + "." + pq.QuoteIdentifier("schema_migrations")`: the schema comes from the server, the table name is a constant, and both are driver-quoted. A table name cannot be a bind parameter. The read must be schema-qualified to match the table golang-migrate writes; an unqualified name could resolve to another schema on the `search_path`. |

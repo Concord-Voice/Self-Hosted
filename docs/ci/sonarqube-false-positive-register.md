@@ -430,7 +430,7 @@ Rows marked one at a time after the sweep. Paths are relative to the repo root. 
 | # | Date | Issue key | Rule | Location | Marker | Justification |
 |---|---|---|---|---|---|---|
 | 77 | 2026-11-08 | `AaG9AnwuTyWH8afVCQo8` | `docker:S8431` | `services/control-plane/Dockerfile.account-authority:5` | Claude (#213) | `golang:1.27.3-alpine@sha256:<digest>`, the same reviewed builder pin as `Dockerfile.ops-agent`. The tag is the Dependabot lineage anchor and the digest gives immutability. Legacy note `docker:S8431`. |
-| 78 | 2026-11-11 | `AaHLw8t_1M2WySR0ou3q` | `go:S2077` | `services/control-plane/internal/migrationrunner/status.go:121` | Claude (#259) | Version-table read in the current schema; both identifiers driver-quoted, schema from `current_schema()`, table name constant (sub-pattern C). Marked with Mark's explicit approval. |
+| 78 | 2026-11-11 | `AaHLw8t_1M2WySR0ou3q` | `go:S2077` | `services/control-plane/internal/migrationrunner/status.go:104-105` (raised on line 121, before the PR review removed the `Verify` wrapper above it) | Claude (#259) | Version-table read in the current schema; both identifiers driver-quoted, schema from `current_schema()`, table name constant (sub-pattern C). Marked with Mark's explicit approval. |
 
 ## Recreation-recovery / drift-guard (ADR-0017 narrowed profile)
 
