@@ -227,9 +227,17 @@ python3 .github/scripts/check-base-images.py
 
 It checks every tracked path that contains `dockerfile` in any letter case. It
 needs no Docker daemon and no network. It runs as a pre-commit hook on every
-commit, so deleting or renaming a Dockerfile is caught too, and in the
-`workflow-lint` CI job. That job is advisory: a failure shows red on the pull
-request but does not block the merge.
+commit, so deleting or renaming a Dockerfile is caught too. In CI it runs
+twice:
+
+- The `Protected base-image identity check` job of the required PR build
+  blocks the merge. It runs the checker from protected `main` against the pull
+  request's Dockerfiles and manifest, so a change to the checker takes effect
+  only after it merges. Keep a checker change compatible with the current
+  manifest and Dockerfiles. If it cannot be, land it in two pull requests: the
+  checker first, then the manifest or Dockerfiles that need it.
+- The `workflow-lint` job runs the pull request's own copy. It is advisory, and
+  it is where a change to the checker is tested.
 
 Each violation is one line, `<file>:<line>: <rule>: <message>`, and the exit
 code is 1. Exit code 2 means the check could not complete, for example because
