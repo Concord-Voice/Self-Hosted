@@ -65,6 +65,9 @@ fixture_rewrite '     && [[ "$DEPLOY_TRANSACTION_LOCK_PATH" != /var/lib/concord/
   "     && [[ \"\$DEPLOY_TRANSACTION_LOCK_PATH\" != $TMP/lock/* ]]; then"
 fixture_rewrite 'CONTROL_PLANE_LIVE_VHOST="/etc/nginx/sites-available/concordvoice"' \
   "CONTROL_PLANE_LIVE_VHOST=\"$TMP/live/concordvoice\""
+#   4b. CONTROL_PLANE_NGINX_PID_FILE (the flip's worker wait reads it) -> $TMP
+fixture_rewrite 'CONTROL_PLANE_NGINX_PID_FILE="/run/nginx.pid"' \
+  "CONTROL_PLANE_NGINX_PID_FILE=\"$TMP/nginx.pid\""
 #   5. the rail's managed-lock admission (rail-refused-no-state-dir) -> $TMP/lock
 # shellcheck disable=SC2016
 fixture_rewrite 'if (( CONTROL_PLANE_BLUEGREEN )) && [[ "$DEPLOY_TRANSACTION_LOCK_PATH" != /var/lib/concord/* ]]; then' \
@@ -1202,13 +1205,18 @@ src="$(cat "$RAIL_CTL")"
 # shellcheck disable=SC2016
 fixture_rewrite '  "$0" "$CONTROL_PLANE_FLIP_REENTRY_MARKER" nginx-reload --control-plane-upstream "$1"' \
   '  ctlflip "$1"'
+# The flip's new-worker wait: 2s here instead of 15s, so a timeout case is short.
+fixture_rewrite 'readonly CONTROL_PLANE_FLIP_WORKER_WAIT_SECS=15' \
+  'readonly CONTROL_PLANE_FLIP_WORKER_WAIT_SECS=2'
 printf '%s\n' "$src" >"$CUT_CTL"
 chmod +x "$CUT_CTL"
 # ctlflip <port>: with $TMP/ctlflip.sleep.<port> (seconds) it records
 # $TMP/ctlflip.started and sleeps first. Like the real re-entry it refuses
 # (exit 1) without the cutover marker. With $TMP/ctlflip.fail.<port> it exits
 # 1: an empty file leaves the vhost alone, `applied` rewrites it to <port>
-# first, and `garble` leaves it unparseable.
+# first, and `garble` leaves it unparseable. A flip that succeeds starts a new
+# nginx worker generation ($TMP/nginx.gen), as a real reload does, unless
+# $TMP/ctlflip.noworkers.<port> exists.
 cat >"$STUBS/ctlflip" <<STUB
 #!/usr/bin/env bash
 printf 'ctlflip %s\n' "\$*" >>"$TMP/calls"
@@ -1228,8 +1236,22 @@ fi
 awk -v port="\$1" '\$0 == "    server 127.0.0.1:8080;" { \$0 = "    server 127.0.0.1:" port ";" } { print }' \
   "$VHOST_SRC" >"$LIVE_VHOST"
 [[ "\$fail" != applied ]] || exit 1
+[[ -e "$TMP/ctlflip.noworkers.\$1" ]] \
+  || printf '%s\n' "\$(( \$(cat "$TMP/nginx.gen" 2>/dev/null || echo 0) + 1 ))" >"$TMP/nginx.gen"
 STUB
 chmod +x "$STUBS/ctlflip"
+# pgrep -P <master>: the nginx master (4242, from $TMP/nginx.pid) has one
+# worker per generation, PID 1000 + $TMP/nginx.gen. It logs to its own file,
+# $TMP/pgrep.calls: the worker wait is a read-only poll, and the goldens pin
+# only the order of the calls that change state.
+cat >"$STUBS/pgrep" <<STUB
+#!/usr/bin/env bash
+printf 'pgrep %s\n' "\$*" >>"$TMP/pgrep.calls"
+[[ ! -f "$TMP/pgrep.exit" ]] || exit "\$(cat "$TMP/pgrep.exit")"
+[[ "\$*" == '-P 4242' ]] || exit 1
+printf '%s\n' "\$(( 1000 + \$(cat "$TMP/nginx.gen" 2>/dev/null || echo 0) ))"
+STUB
+chmod +x "$STUBS/pgrep"
 
 C="$T0_COMPOSE"
 STATUS_PAT='*run --rm --no-deps --pull never control-plane ./main migrations status'
@@ -1242,6 +1264,11 @@ HOME_UP="$C up -d --no-build --no-deps --wait --wait-timeout 180 control-plane"
 GREEN_STOP="docker stop -t 45 $GREEN"
 GREEN_RM="docker rm -f $GREEN"
 GREEN_REAP="$GREEN_STOP"$'\n'"$GREEN_RM"
+# What a failure path saves of green before it removes it.
+GREEN_LOGS="docker logs --tail 200 $GREEN"
+GREEN_SAVE="$GREEN_LOGS"$'\n'"docker inspect --format {{json .State}} $GREEN"
+PORT_PROBE='nc -z -w2 127.0.0.1 8081'
+GREEN_LOG_DIR="$RAIL_PROJECT/infrastructure/deploy"
 # The T0 golden through the build: what precedes the hook.
 CUT_PREFIX="$(cat <<GOLDEN
 $C config --format json
@@ -1265,6 +1292,7 @@ $CP_PS
 $C config --format json
 docker image inspect --format {{.Id}} cp:fixture
 $GREEN_REAP
+$PORT_PROBE
 $GREEN_RUN
 $CP_PS
 docker inspect --format {{.Image}} $GREEN_ID
@@ -1286,9 +1314,13 @@ DRAINED_TAIL="$(printf '%s\n' "$DAEMON_PS" "$CP_PS" "$HOME_STOP" "$DAEMON_PS" "$
 # case rules override (first match wins).
 cut_prepare() {
   reset_stubs
-  rm -f "$RAIL_MARKER" "$LIVE_VHOST" "$TMP"/ctlflip.*
+  rm -rf "$RAIL_MARKER"
+  rm -f "$LIVE_VHOST" "$TMP"/ctlflip.* "$TMP"/pgrep.* "$TMP/nginx.gen" "$GREEN_LOG_DIR"/.control-plane-green-*.log
+  printf '4242\n' >"$TMP/nginx.pid"
 }
 cut_defaults() {
+  # Nothing listens on 8081 (nc -z fails).
+  stub_exit nc "-z -w2 127.0.0.1 8081" 1
   stub_reply docker "$STATUS_PAT" 0 'current 12\n'
   stub_reply docker '*run --detach --no-deps *' 0 "$GREEN_ID\\n"
   stub_reply docker '*ps --status running -q -- control-plane' 0 "c0ffee000001\\n$GREEN_ID\\n"
@@ -1463,7 +1495,7 @@ gate_green_missing_from_compose_ps() {
   run_cut_at "$CUT_CTL" rebuild control-plane
   # Mutation that turns this red: skip the membership check (green's image is
   # inspected and the cutover goes on).
-  if drained_ok allow-green && [[ "$(lines_after "$GREEN_RUN" 3)" == "$CP_PS"$'\n'"$GREEN_REAP" ]] \
+  if drained_ok allow-green && [[ "$(lines_after "$GREEN_RUN" 5)" == "$CP_PS"$'\n'"$GREEN_SAVE"$'\n'"$GREEN_REAP" ]] \
      && ! grep -qF 'inspect --format {{.Image}}' <<<"$(rail_transcript)"; then
     cut_report gate_green_missing_from_compose_ps ok
   else
@@ -1565,38 +1597,79 @@ err_standby_not_ready() {
   fi
 }
 
+# A failed first flip, whatever the vhost then reads (left on 8080, reloaded to
+# green, or unparseable): home still runs, so nginx is moved back to 8080 once;
+# that flip succeeding proves nginx routes to home, and green is removed.
+FLIP_HOME_ABANDON="ctlflip 8080"$'\n'"$GREEN_SAVE"$'\n'"$GREEN_REAP"
 err_flip_failed_leg1() {
   need_flock err_flip_failed_leg1 || return 0
-  cut_prepare
-  : >"$TMP/ctlflip.fail.8081"
-  run_cut_at "$CUT_CTL" rebuild control-plane
-  # Mutation that turns this red: keep the marker (or skip the reap) after a
-  # failed first flip.
-  if named_error flip-failed && [[ ! -e "$RAIL_MARKER" && "$(lines_after 'ctlflip 8081' 3)" == "$GREEN_REAP" ]] \
-     && ! has_call "$HOME_STOP"; then
-    cut_report err_flip_failed_leg1 ok
-  else
-    cut_report err_flip_failed_leg1 bad
-  fi
+  local mode bad=''
+  for mode in '' applied garble; do
+    cut_prepare
+    printf '%s' "$mode" >"$TMP/ctlflip.fail.8081"
+    run_cut_at "$CUT_CTL" rebuild control-plane
+    { named_error flip-failed && [[ ! -e "$RAIL_MARKER" && "$(lines_after 'ctlflip 8081' 5)" == "$FLIP_HOME_ABANDON" ]] \
+      && ! has_call "$HOME_STOP" && live_is 8080; } || bad+=" [${mode:-left} rc=$rc: $(brief_out)]"
+  done
+  # Mutation that turns this red: trust the vhost read-back instead of flipping
+  # home (applied and garble keep green), or skip the reap after the flip home.
+  if [[ -z "$bad" ]]; then pass "err_flip_failed_leg1"; else fail "err_flip_failed_leg1:$bad"; last_calls 6 >&2; fi
 }
 
-# A failed first flip whose vhost no longer reads 8080 (reloaded to green, or
-# unparseable) may route to green: green and the marker stay.
-err_flip_failed_leg1_live_port_not_8080_keeps_green() {
-  need_flock err_flip_failed_leg1_live_port_not_8080_keeps_green || return 0
+# A failed first flip whose flip home also fails may route to green, even when
+# the vhost file reads 8080 (nginx-reload's own rollback may have failed after
+# activating 8081): green and the marker stay.
+err_flip_failed_leg1_flip_home_failed_keeps_green() {
+  need_flock err_flip_failed_leg1_flip_home_failed_keeps_green || return 0
   local mode bad=''
-  for mode in applied garble; do
+  for mode in '' applied; do
     cut_prepare
-    printf '%s\n' "$mode" >"$TMP/ctlflip.fail.8081"
+    printf '%s' "$mode" >"$TMP/ctlflip.fail.8081"
+    : >"$TMP/ctlflip.fail.8080"
     run_cut_at "$CUT_CTL" rebuild control-plane
-    { named_error flip-failed && [[ -e "$RAIL_MARKER" && "$(last_calls 1)" == 'ctlflip 8081' ]] \
+    { named_error flip-failed && [[ -e "$RAIL_MARKER" && "$(last_calls 2)" == 'ctlflip 8081'$'\n''ctlflip 8080' ]] \
       && [[ $(ncalls "$GREEN_STOP") -eq 1 ]] && ! has_call "$HOME_STOP" && grep -qF 'may be routing' "$TMP/out"; } \
-      || bad+=" [$mode rc=$rc: $(brief_out)]"
+      || bad+=" [${mode:-left} rc=$rc: $(brief_out)]"
     rm -f "$RAIL_MARKER"
   done
-  # Mutation that turns this red: drop the live-port re-read after a failed
-  # first flip (green is reaped and the marker cleared whatever nginx routes).
-  if [[ -z "$bad" ]]; then pass "err_flip_failed_leg1_live_port_not_8080_keeps_green"; else fail "err_flip_failed_leg1_live_port_not_8080_keeps_green:$bad"; fi
+  # Mutation that turns this red: abandon (remove green) when the vhost reads
+  # 8080 without a successful flip home.
+  if [[ -z "$bad" ]]; then pass "err_flip_failed_leg1_flip_home_failed_keeps_green"; else fail "err_flip_failed_leg1_flip_home_failed_keeps_green:$bad"; fi
+}
+
+# nginx-reload's rollback: the nested flip exits 3 when it activated the new
+# configuration and could not restore the previous one; any other run keeps
+# the step's own status (1).
+nginx_reload_rollback_incomplete_exits_3() {
+  local fns mode got bad='' who what act want
+  fns="$(extract_fn restore_nginx_transaction; extract_fn rollback_nginx_on_exit)"
+  for mode in nested:mvfail:1:3 plain:mvfail:1:1 nested:ok:1:1 nested:mvfail:0:1 nested:reloadfail:1:3; do
+    IFS=: read -r who what act want <<<"$mode"
+    reset_stubs
+    case "$what" in
+      mvfail) stub_exit sudo '/usr/bin/mv *' 1 ;;
+      reloadfail) stub_exit sudo '/bin/systemctl reload nginx' 1 ;;
+    esac
+    got=0
+    # The variables and stubs are read by the eval'd functions; PATH is the
+    # subshell's own.
+    # shellcheck disable=SC2030,SC2034,SC2329
+    ( PATH="$STUBS:$PATH"
+      eval "$fns"
+      cleanup_nginx_candidates() { :; }
+      cleanup_nginx_backups() { :; }
+      CONCORD_CTL_FLIP_REENTRY_INTERNAL=0
+      [[ "$who" == plain ]] || CONCORD_CTL_FLIP_REENTRY_INTERNAL=1
+      NGINX_STAGE_BOOTSTRAP=0 NGINX_BACKUP=/b NGINX_DST=/d ADMIN_BACKUP=/ab ADMIN_DST=/ad
+      main_swapped=1 main_was_present=1 admin_mutated=0 admin_was_present=0
+      activation_attempted="$act" transaction_pending=1 rollback_incomplete=0
+      trap rollback_nginx_on_exit EXIT
+      exit 1 ) >/dev/null 2>&1 || got=$?
+    [[ "$got" == "$want" ]] || bad+=" [$mode got=$got]"
+  done
+  # Mutation that turns this red: exit with the failing step's status when the
+  # rollback after an activation is incomplete.
+  if [[ -n "$fns" && -z "$bad" ]]; then pass "nginx_reload_rollback_incomplete_exits_3"; else fail "nginx_reload_rollback_incomplete_exits_3:$bad"; fi
 }
 
 err_old_colour_stop_failed() {
@@ -1730,8 +1803,15 @@ insert_after() {
   INS="$3" awk -v l="$2" '{ print } !done && $0 == l { print ENVIRON["INS"]; done = 1 }' <<<"$1"
 }
 # The pre-step's calls follow the scope probe (the first $CP_PS) and precede
-# the guard's config render. Green running: green probe, home stop.
-RESUME_HEAD="$(insert_after "$CUT_PREFIX" "$CP_PS" "$GREEN_PS"$'\n'"$HOME_STOP")"
+# the guard's config render. Green running: green probe, one probe of green's
+# /readyz (ready), home stop. Both unready: the same with one probe of home's.
+RESUME_HEAD="$(insert_after "$CUT_PREFIX" "$CP_PS" "$GREEN_PS"$'\n'"$CURL_8081"$'\n'"$HOME_STOP")"
+RESUME_HEAD_UNREADY="$(insert_after "$CUT_PREFIX" "$CP_PS" "$GREEN_PS"$'\n'"$CURL_8081"$'\n'"$CURL_8080"$'\n'"$HOME_STOP")"
+# both_unready: green's /readyz never answers, home's fails its first probe only.
+both_unready() {
+  stub_exit curl '*8081/readyz' 22
+  stub_reply curl '*8080/readyz' 22 '' once
+}
 RESUME_READY="$(printf '%s\n' "$RESUME_HEAD" "$CURL_8081" "$STATUS_RUN" "$HOME_UP" "$CURL_8080" 'ctlflip 8080' "$GREEN_REAP")"
 # The drained resume: foreign guard, reap, drained check, home up, gate, flip
 # back (its reap finds green already removed).
@@ -1906,7 +1986,8 @@ recover_live_8081_green_absent_flips_home_and_continues_any_scope() {
   nats_running
   run_cut_at "$CTL" rebuild nats
   off_rc=$rc off_t="$(rail_transcript)"
-  want="$(insert_after "$off_t" "$NATS_PS" "$GREEN_PS"$'\n''ctlflip 8080'$'\n'"$GREEN_REAP")"
+  # A scope without control-plane first checks that home runs ($CP_PS).
+  want="$(insert_after "$off_t" "$NATS_PS" "$GREEN_PS"$'\n'"$CP_PS"$'\n''ctlflip 8080'$'\n'"$GREEN_REAP")"
   for m in marker no-marker; do
     cut_prepare
     [[ "$m" == no-marker ]] || : >"$RAIL_MARKER"
@@ -1927,15 +2008,42 @@ recover_live_8081_green_unready_goes_drained_then_flips_home() {
   : >"$RAIL_MARKER"
   live_at 8081
   green_running
-  stub_exit curl '*8081/readyz' 22
+  # Updated deliberately for the pre-step's readiness probes: with green AND
+  # home unready the pre-step still stops home and the resume goes drained.
+  both_unready
   run_cut_at "$CUT_CTL" rebuild control-plane
   # Mutation that turns this red: ignore the 8081 readiness result in the
   # resume (the ready path starts home beside an unready green).
-  if [[ "$(rail_transcript | grep -vFx -- "$CURL_8081")" == "$RESUME_HEAD"$'\n'"$RESUME_DRAINED_TAIL" ]] \
-     && has_call "$CURL_8081" && [[ $(ncalls "$STATUS_RUN") -eq 0 ]] && resumed_ok; then
+  if [[ "$(rail_transcript | grep -vFx -- "$CURL_8081")" == "$(grep -vFx -- "$CURL_8081" <<<"$RESUME_HEAD_UNREADY")"$'\n'"$RESUME_DRAINED_TAIL" ]] \
+     && [[ "$(lines_after "$GREEN_PS" 3)" == "$CURL_8081"$'\n'"$CURL_8080"$'\n'"$HOME_STOP" ]] \
+     && [[ $(ncalls "$STATUS_RUN") -eq 0 ]] && resumed_ok; then
     cut_report recover_live_8081_green_unready_goes_drained_then_flips_home ok
   else
     cut_report recover_live_8081_green_unready_goes_drained_then_flips_home bad
+  fi
+  rm -f "$RAIL_MARKER"
+}
+
+# Green running but unready while home still answers /readyz: the pre-step
+# moves nginx home and removes green instead of stopping home, and the hook
+# then cuts over afresh.
+recover_live_8081_green_unready_home_ready_flips_home() {
+  need_flock recover_live_8081_green_unready_home_ready_flips_home || return 0
+  local want
+  want="$(insert_after "$CUT_HAPPY" "$CP_PS" "$GREEN_PS"$'\n'"$CURL_8081"$'\n'"$CURL_8080"$'\n''ctlflip 8080'$'\n'"$GREEN_REAP")"
+  cut_prepare
+  : >"$RAIL_MARKER"
+  live_at 8081
+  green_running
+  stub_reply curl '*8081/readyz' 22 '' once
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: stop home in the green-running arm without
+  # probing green's readiness.
+  if [[ "$(rail_transcript)" == "$want" ]] && resumed_ok; then
+    cut_report recover_live_8081_green_unready_home_ready_flips_home ok
+  else
+    cut_report recover_live_8081_green_unready_home_ready_flips_home bad
+    diff <(printf '%s\n' "$want") <(rail_transcript) >&2 || true
   fi
   rm -f "$RAIL_MARKER"
 }
@@ -1956,8 +2064,8 @@ recover_runs_before_routine_guard() {
   live_at 8081
   green_running
   run_cut_at "$CUT_CTL" rebuild control-plane
-  [[ $rc -eq 0 && "$(lines_after "$CP_PS" 3)" == "$GREEN_PS"$'\n'"$HOME_STOP"$'\n'"$GUARD_CONFIG" ]] \
-    || bad+=" [8081 rc=$rc: $(lines_after "$CP_PS" 3 | tr '\n' ';')]"
+  [[ $rc -eq 0 && "$(lines_after "$CP_PS" 4)" == "$GREEN_PS"$'\n'"$CURL_8081"$'\n'"$HOME_STOP"$'\n'"$GUARD_CONFIG" ]] \
+    || bad+=" [8081 rc=$rc: $(lines_after "$CP_PS" 4 | tr '\n' ';')]"
   rm -f "$RAIL_MARKER"
   # Mutation that turns this red: move the pre-step call after
   # activity_history_routine_guard.
@@ -2012,12 +2120,12 @@ foreign_project_refused_on_drained_resume() {
   live_at 8081
   green_running
   foreign_running
-  stub_exit curl '*8081/readyz' 22
+  both_unready
   run_cut_at "$CUT_CTL" rebuild control-plane
   # Mutation that turns this red: drop `privacy_defaults_refuse_foreign_control_plane
   # || exit 1` from control_plane_bluegreen_resume (green is reaped, then the
   # drained check refuses with home and green both down).
-  if [[ $rc -eq 1 && "$(rail_transcript | grep -vFx -- "$CURL_8081")" == "$(printf '%s\n' "$RESUME_HEAD" "$DAEMON_PS" "$CP_PS")" \
+  if [[ $rc -eq 1 && "$(rail_transcript | grep -vFx -- "$CURL_8081")" == "$(grep -vFx -- "$CURL_8081" <<<"$RESUME_HEAD_UNREADY"; printf '%s\n' "$DAEMON_PS" "$CP_PS")" \
      && -e "$RAIL_MARKER" ]] && has_call "$CURL_8081" && saw "$FOREIGN_REFUSAL" && live_is 8081; then
     cut_report foreign_project_refused_on_drained_resume ok
   else
@@ -2052,6 +2160,227 @@ leftover_green_unremovable_keeps_home_serving() {
   # leftover green cannot be removed (home is stopped, and the drained check
   # would count the surviving green and refuse with nothing serving).
   if [[ -z "$bad" ]]; then pass "leftover_green_unremovable_keeps_home_serving"; else fail "leftover_green_unremovable_keeps_home_serving:$bad"; last_calls 6 >&2; fi
+}
+
+# ---------------------------------------------------------------------------
+# Cutover and recovery correctness (review batch A).
+
+# A failure path saves green's last logs and State (mode 0600, in the deploy
+# config directory) before it removes green; a failed save only warns; the
+# round trip saves nothing.
+green_logs_saved_before_failure_reap() {
+  need_flock green_logs_saved_before_failure_reap || return 0
+  local f mode bad=''
+  cut_prepare
+  stub_exit curl '*8081/readyz' 22
+  stub_out docker "logs --tail 200 $GREEN" 'green log line\n'
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  f="$(find "$GREEN_LOG_DIR" -maxdepth 1 -name '.control-plane-green-*.log')"
+  mode="$(stat -c %a "$f" 2>/dev/null || stat -f %Lp "$f" 2>/dev/null || true)"
+  { named_error standby-not-ready && [[ -n "$f" && "$f" != *$'\n'* && "$mode" == 600 ]] \
+    && [[ "$(last_calls 4)" == "$GREEN_SAVE"$'\n'"$GREEN_REAP" ]] && grep -qFx 'green log line' "$f" \
+    && grep -qF "$f" "$TMP/out"; } || bad+=" [saved rc=$rc mode=$mode f=$f: $(brief_out)]"
+  cut_prepare
+  stub_exit curl '*8081/readyz' 22
+  stub_exit docker "logs --tail 200 $GREEN" 1
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  { named_error standby-not-ready && [[ "$(last_calls 2)" == "$GREEN_REAP" && ! -e "$RAIL_MARKER" ]] \
+    && grep -qF 'could not be saved' "$TMP/out"; } || bad+=" [save-failed rc=$rc: $(brief_out)]"
+  cut_prepare
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  { [[ $rc -eq 0 ]] && ! grep -qF "$GREEN_LOGS" "$TMP/calls" \
+    && [[ -z "$(find "$GREEN_LOG_DIR" -maxdepth 1 -name '.control-plane-green-*.log')" ]]; } || bad+=" [round-trip rc=$rc]"
+  # Mutation that turns this red: reap green in control_plane_bluegreen_abandon
+  # without saving its logs first.
+  if [[ -z "$bad" ]]; then pass "green_logs_saved_before_failure_reap"; else fail "green_logs_saved_before_failure_reap:$bad"; fi
+}
+
+# A marker that is present but not a regular file (directory, symlink, fifo):
+# rebuild, nginx-reload and stop refuse with recovery-ambiguous and change
+# nothing; the nested flip's re-entry refuses a symlinked marker.
+marker_not_regular_file_refused() {
+  need_flock marker_not_regular_file_refused || return 0
+  local kind verb bad=''
+  : >"$TMP/marker-target"
+  for kind in dir symlink fifo; do
+    for verb in rebuild nginx-reload stop; do
+      cut_prepare
+      case "$kind" in
+        dir) mkdir "$RAIL_MARKER" ;;
+        symlink) ln -s "$TMP/marker-target" "$RAIL_MARKER" ;;
+        fifo) mkfifo "$RAIL_MARKER" ;;
+      esac
+      live_at 8081
+      green_running
+      case "$verb" in
+        rebuild) run_cut_at "$CUT_CTL" rebuild control-plane ;;
+        nginx-reload) run_cut_at "$RAIL_CTL" nginx-reload ;;
+        stop) run_cut_at "$RAIL_STOP_CTL" stop ;;
+      esac
+      { named_error recovery-ambiguous && [[ "$(mutating_calls)" == 0 ]] && live_is 8081 \
+        && ! grep -q '^sudo ' "$TMP/calls" && [[ -e "$RAIL_MARKER" || -L "$RAIL_MARKER" ]]; } \
+        || bad+=" [$kind $verb rc=$rc: $(brief_out)]"
+    done
+  done
+  cut_prepare
+  ln -s "$TMP/marker-target" "$RAIL_MARKER"
+  flip_run genuine "$RAIL_CTL" "$FLIP_MARKER" nginx-reload --control-plane-upstream 8081
+  { [[ "$rc" == 1 ]] && grep -qFx -- "$FLIP_REJECTED" "$TMP/out"; } || bad+=" [reentry symlink rc=$rc]"
+  rm -rf "$RAIL_MARKER"
+  # Mutation that turns this red: test the marker with -e/-f only (a directory
+  # passes the guard and the pre-step stops home; a symlink passes re-entry).
+  if [[ -z "$bad" ]]; then pass "marker_not_regular_file_refused"; else fail "marker_not_regular_file_refused:$bad"; fi
+}
+
+# Nothing serves on 8081 and home is not running: a scope without
+# control-plane would leave nothing serving after the flip home, so the
+# pre-step refuses with nothing changed. A full rebuild keeps today's path.
+recover_live_8081_green_absent_home_down_out_of_scope_refuses() {
+  need_flock recover_live_8081_green_absent_home_down_out_of_scope_refuses || return 0
+  local m bad=''
+  for m in marker no-marker; do
+    cut_prepare
+    [[ "$m" == no-marker ]] || : >"$RAIL_MARKER"
+    live_at 8081
+    nats_running
+    stub_reply docker '*ps --status running -q -- control-plane' 0 ''
+    run_cut_at "$CUT_CTL" rebuild nats
+    { named_error cutover-incomplete && [[ "$(mutating_calls)" == 0 && "$(last_calls 1)" == "$CP_PS" ]] \
+      && live_is 8081 && ! grep -q '^ctlflip ' "$TMP/calls"; } || bad+=" [$m rc=$rc: $(brief_out)]"
+    if [[ "$m" == marker ]]; then [[ -f "$RAIL_MARKER" ]] || bad+=" [marker removed]"; fi
+    if [[ "$m" == no-marker ]]; then [[ ! -e "$RAIL_MARKER" ]] || bad+=" [marker written]"; fi
+  done
+  rm -f "$RAIL_MARKER"
+  # Mutation that turns this red: flip home and clear the marker whatever the
+  # scope without checking that home runs.
+  if [[ -z "$bad" ]]; then pass "recover_live_8081_green_absent_home_down_out_of_scope_refuses"; else fail "recover_live_8081_green_absent_home_down_out_of_scope_refuses:$bad"; fi
+}
+
+# The pre-step left the cutover in place (green serves, home stopped): a later
+# failure before the hook (the NATS reconcile, the build) ends with the named
+# cutover-incomplete line and keeps the marker.
+recovered_cutover_later_failure_is_named() {
+  need_flock recovered_cutover_later_failure_is_named || return 0
+  local pat bad=''
+  for pat in '*--wait-timeout 180 nats' '* build control-plane'; do
+    cut_prepare
+    : >"$RAIL_MARKER"
+    live_at 8081
+    green_running
+    stub_exit docker "$pat" 1
+    run_cut_at "$CUT_CTL" rebuild control-plane
+    { named_error cutover-incomplete && [[ -f "$RAIL_MARKER" ]] && has_call "$HOME_STOP" && live_is 8081 \
+      && saw "green serves on 8081, home is stopped and the cutover marker was kept; run 'rebuild control-plane' to recover."; } \
+      || bad+=" [$pat rc=$rc: $(brief_out)]"
+  done
+  rm -f "$RAIL_MARKER"
+  # Mutation that turns this red: drop the EXIT trap the pre-step arms when it
+  # leaves the cutover in place.
+  if [[ -z "$bad" ]]; then pass "recovered_cutover_later_failure_is_named"; else fail "recovered_cutover_later_failure_is_named:$bad"; fi
+}
+
+# A failed `compose ps` after the green start, or a failed `docker inspect` of
+# green's image, abandons with standby-inspect-failed.
+err_standby_inspect_failed() {
+  need_flock err_standby_inspect_failed || return 0
+  local leg bad=''
+  for leg in compose-ps inspect; do
+    cut_prepare
+    if [[ "$leg" == compose-ps ]]; then
+      stub_reply docker '*ps --status running -q -- control-plane' 0 'c0ffee000001\n' once
+      stub_reply docker '*ps --status running -q -- control-plane' 0 'c0ffee000001\n' once
+      stub_reply docker '*ps --status running -q -- control-plane' 1 ''
+    else
+      stub_reply docker "inspect --format {{.Image}} $GREEN_ID" 1 ''
+    fi
+    run_cut_at "$CUT_CTL" rebuild control-plane
+    { named_error standby-inspect-failed && [[ ! -e "$RAIL_MARKER" && "$(last_calls 2)" == "$GREEN_REAP" ]] \
+      && ! has_call "$HOME_STOP" && ! grep -q '^ctlflip ' "$TMP/calls"; } || bad+=" [$leg rc=$rc: $(brief_out)]"
+  done
+  # Mutation that turns this red: read a failed compose ps as "not running in
+  # this Compose project", or a failed inspect as an image mismatch.
+  if [[ -z "$bad" ]]; then pass "err_standby_inspect_failed"; else fail "err_standby_inspect_failed:$bad"; fi
+}
+
+# Something already listens on 127.0.0.1:8081: the cutover is not taken.
+gate_port_8081_in_use() {
+  need_flock gate_port_8081_in_use || return 0
+  cut_prepare
+  stub_exit nc '-z -w2 127.0.0.1 8081' 0
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  # Mutation that turns this red: drop the port probe (green's start fails to
+  # bind and the cutover abandons).
+  if drained_ok allow-green && saw 'rebuild: blue-green cutover not taken (port 8081 is in use); taking the drained path' \
+     && [[ "$(lines_after 'docker image inspect --format {{.Id}} cp:fixture' 3)" == "$GREEN_REAP"$'\n'"$PORT_PROBE" ]] \
+     && ! has_call "$GREEN_RUN"; then
+    cut_report gate_port_8081_in_use ok
+  else
+    cut_report gate_port_8081_in_use bad
+  fi
+}
+
+# Each flip waits until the nginx master runs a worker that was not running
+# before the reload. No new worker in time is a failed flip: the first flip
+# then moves nginx home and abandons; the flip home keeps the marker.
+flip_waits_for_new_nginx_workers() {
+  need_flock flip_waits_for_new_nginx_workers || return 0
+  local bad=''
+  cut_prepare
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  [[ $rc -eq 0 && "$(grep -cFx 'pgrep -P 4242' "$TMP/pgrep.calls" 2>/dev/null)" == 4 ]] || bad+=" [happy rc=$rc]"
+  cut_prepare
+  : >"$TMP/ctlflip.noworkers.8081"
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  { named_error flip-failed && [[ ! -e "$RAIL_MARKER" && "$(lines_after 'ctlflip 8081' 5)" == "$FLIP_HOME_ABANDON" ]] \
+    && ! has_call "$HOME_STOP" && live_is 8080; } || bad+=" [leg1 rc=$rc: $(brief_out)]"
+  cut_prepare
+  : >"$TMP/ctlflip.noworkers.8080"
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  { named_error flip-failed && [[ -e "$RAIL_MARKER" && "$(last_calls 1)" == 'ctlflip 8080' ]] \
+    && [[ $(ncalls "$GREEN_STOP") -eq 1 ]]; } || bad+=" [home rc=$rc: $(brief_out)]"
+  rm -f "$RAIL_MARKER"
+  # The worker list cannot be read before the flip: nothing is reloaded.
+  cut_prepare
+  printf '3\n' >"$TMP/pgrep.exit"
+  run_cut_at "$CUT_CTL" rebuild control-plane
+  { named_error flip-failed && [[ -e "$RAIL_MARKER" ]] && ! grep -q '^ctlflip ' "$TMP/calls" \
+    && ! has_call "$HOME_STOP"; } || bad+=" [unreadable rc=$rc: $(brief_out)]"
+  rm -f "$RAIL_MARKER"
+  # Mutation that turns this red: return the nested nginx-reload's status
+  # without the new-worker wait.
+  if [[ -z "$bad" ]]; then pass "flip_waits_for_new_nginx_workers"; else fail "flip_waits_for_new_nginx_workers:$bad"; fi
+}
+
+# As int_during_flip_still_stops, with SIGPIPE.
+pipe_during_flip_still_stops() {
+  need_flock pipe_during_flip_still_stops || return 0
+  local pid i started=0
+  cut_prepare
+  printf '3\n' >"$TMP/ctlflip.sleep.8081"
+  cut_defaults
+  rc=0
+  # The PATH prefix is this command's own (SC2031 follows the rollback case's subshell).
+  # shellcheck disable=SC2016,SC2031
+  PATH="$STUBS:$PATH" COMPOSE_OVERRIDE=docker-compose.production.yml \
+    ACTIVITY_HISTORY_HEALTH_TIMEOUT=2 ACTIVITY_HISTORY_HEALTH_INTERVAL=1 \
+    python3 -c 'import os, signal, sys
+os.setpgid(0, 0)
+signal.signal(signal.SIGPIPE, signal.SIG_DFL)
+os.execvp(sys.argv[1], sys.argv[1:])' bash "$CUT_CTL" rebuild control-plane >"$TMP/out" 2>&1 </dev/null &
+  pid=$!
+  for ((i = 0; i < 200; i++)); do
+    if [[ -e "$TMP/ctlflip.started" ]]; then started=1; break; fi
+    sleep 0.1
+  done
+  if (( started )); then kill -PIPE -- "-$pid" 2>/dev/null || true; fi
+  wait "$pid" || rc=$?
+  # Mutation that turns this red: drop PIPE from the `trap '' HUP INT TERM PIPE`
+  # before the first flip.
+  if (( started )) && [[ $rc -eq 0 && "$(lines_after 'ctlflip 8081' 1)" == "$HOME_STOP" ]] && saw 'Done.'; then
+    pass "pipe_during_flip_still_stops"
+  else
+    fail "pipe_during_flip_still_stops started=$started rc=$rc: $(brief_out)"
+  fi
 }
 
 char_rebuild_control_plane_transcript
@@ -2108,7 +2437,8 @@ err_standby_start_failed
 err_standby_image_mismatch
 err_standby_not_ready
 err_flip_failed_leg1
-err_flip_failed_leg1_live_port_not_8080_keeps_green
+err_flip_failed_leg1_flip_home_failed_keeps_green
+nginx_reload_rollback_incomplete_exits_3
 err_old_colour_stop_failed
 err_home_not_ready_status_changed
 err_home_not_ready_up_failed
@@ -2126,9 +2456,18 @@ recover_live_8081_green_ready_current_resumes
 recover_live_8081_green_ready_pending_goes_drained_then_flips_home
 recover_live_8081_green_absent_flips_home_and_continues_any_scope
 recover_live_8081_green_unready_goes_drained_then_flips_home
+recover_live_8081_green_unready_home_ready_flips_home
 recover_runs_before_routine_guard
 recover_home_stop_failure_keeps_marker
 foreign_project_refused_before_green_start
 foreign_project_refused_on_drained_resume
 leftover_green_unremovable_keeps_home_serving
+green_logs_saved_before_failure_reap
+marker_not_regular_file_refused
+recover_live_8081_green_absent_home_down_out_of_scope_refuses
+recovered_cutover_later_failure_is_named
+err_standby_inspect_failed
+gate_port_8081_in_use
+flip_waits_for_new_nginx_workers
+pipe_during_flip_still_stops
 exit $((fails > 0))
