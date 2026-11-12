@@ -51,10 +51,10 @@ readonly BUILDKIT_DIGEST='99368f3e46177c6405b9740e4461d91cee004128daeecca78d4cea
 readonly BUILDX_VERSION='v0.35.0'
 readonly BUILDX_LINUX_AMD64_SHA256='d41ece72044243b4f58b343441ae37446d9c29a7d6b5e11c61847bbcf8f7dfda' # pragma: allowlist secret -- public release-asset digest
 readonly CHECKOUT_ACTION='actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1' # pragma: allowlist secret -- public action commit
-readonly LOGIN_ACTION='docker/login-action@dbcb813823bdd20940b903addbd779551569679f' # pragma: allowlist secret -- public action commit (v4.6.0)
+readonly LOGIN_ACTION='docker/login-action@81c6f93d4bc991e510b342a00b419b3bb4efc5c6' # pragma: allowlist secret -- public action commit (v4.7.0)
 readonly BUILDX_ACTION='docker/setup-buildx-action@594f3bf4285d9ea8dc53c9a0c9c4092420091003' # pragma: allowlist secret -- public action commit
 readonly BUILD_PUSH_ACTION='docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc' # pragma: allowlist secret -- public action commit
-readonly ORAS_ACTION='oras-project/setup-oras@005458ad77f1c8facd38a094e4af2e69e5607ff4' # pragma: allowlist secret -- public action commit
+readonly ORAS_ACTION='oras-project/setup-oras@5e2f2482b30b0cb3e14e67f89a80c88c659a7c63' # pragma: allowlist secret -- public action commit
 readonly PROBE_RUNTIME_REF='example.invalid/minio-contract-probe:invalid'
 
 REQUIRE_COMPOSE=0
