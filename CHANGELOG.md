@@ -33,7 +33,8 @@ belongs in it, and write it if the section has none. Do not edit the
 WebSocket event budgets are ready for self-hosted operators and stay off
 until an operator turns them on. Self-hosted deployments now ship from this
 repository, and operators can set separate minimum app versions for iOS and
-Android.
+Android. Backup-code readers now accept the versioned formats needed for a
+later storage migration.
 
 **22 Total Changes** | 8 Added | 5 Changed | 7 Fixed | 2 Security
 
@@ -94,6 +95,7 @@ Android.
 
 ### Security
 
+- **Authentication:** Backup-code verification and status reads now accept only exact bare SHA-256, `v1$` SHA-256, or bounded `v2$` Argon2id hashes, and fail closed on malformed stored values. New codes still use the bare format until all serving replicas have this reader; the v2 writer and database migration follow in a separate rollout.
 - **Dependencies:** Go 1.27.4 for the control plane and its container builders ([GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859), a `net/http` request-body limit race).
 - **Container images:** The control-plane and Redis auth controller images upgrade zlib to 1.3.2-r1 for CVE-2026-85091 (heap buffer overflow in `gz_vacate()`).
 - **Dependencies:** Updated media development tooling and the CI license checker to patched minimatch and glob versions while retaining dependency attribution checks.

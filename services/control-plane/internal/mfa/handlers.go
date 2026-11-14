@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/backuphash"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/devicerecovery"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/email"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
@@ -454,7 +455,10 @@ func consumeBackupCode(ctx context.Context, store codeVerificationStore, userID 
 		return false, fmt.Errorf("read backup codes: %w", err)
 	}
 
-	idx, matched := VerifyBackupCode(code, hashes, used)
+	idx, matched, err := VerifyBackupCode(code, hashes, used)
+	if err != nil {
+		return false, fmt.Errorf("verify stored backup code: %w", err)
+	}
 	if !matched {
 		return false, nil
 	}
@@ -1004,11 +1008,9 @@ func (h *Handler) addTOTPStatus(ctx context.Context, userID string, result gin.H
 	}
 	result["totp_enabled"] = totpEnabled
 	result["totp_confirmed"] = totpConfirmed
-	remaining := 0
-	for i, used := range backupUsed {
-		if !used && i < len(backupHashes) {
-			remaining++
-		}
+	remaining, err := backuphash.CountAvailable(backupHashes, backupUsed)
+	if err != nil {
+		return false, fmt.Errorf("validate stored backup codes: %w", err)
 	}
 	result["backup_codes_remaining"] = remaining
 	return totpEnabled && totpConfirmed, nil

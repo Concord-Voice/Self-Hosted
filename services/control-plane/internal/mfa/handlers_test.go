@@ -2062,6 +2062,21 @@ func TestBackupCodeUsageReducesCount(t *testing.T) {
 	assert.Equal(t, float64(7), status["backup_codes_remaining"])
 }
 
+func TestGetStatusRejectsMalformedStoredBackupHash(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "malformedbackupstatus")
+	_, _ = enrollTOTP(t, ts, user)
+	_, err := ts.DB.Exec(`UPDATE user_mfa_totp
+		SET backup_codes_hash = backup_codes_hash || ARRAY['v2$argon2id$v=19$m=999999999,t=1,p=1$AA$AA']::TEXT[],
+		    backup_codes_used = backup_codes_used || ARRAY[FALSE]::BOOLEAN[]
+		WHERE user_id = $1`, user.ID)
+	require.NoError(t, err)
+
+	w := ts.DoRequest("GET", urlMFAStatus, nil, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusInternalServerError, w.Code)
+	require.NotContains(t, w.Body.String(), "backup_codes_remaining")
+}
+
 // --- Same Backup Code Cannot Be Used Twice ---
 
 func TestBackupCodeSingleUse(t *testing.T) {
