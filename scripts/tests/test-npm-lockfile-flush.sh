@@ -60,12 +60,16 @@ done
 lock() { # $1 = name, $2 = version of node_modules/dep
   printf '{"name":"%s","lockfileVersion":3,"packages":{"":{"name":"%s"},"node_modules/dep":{"version":"%s"}}}\n' "$1" "$1" "$2"
 }
-make_repo() { # prints the repo path
-  local dir="$WORK/repo-$RANDOM$RANDOM"
+make_repo() { # [$1 = extra base entry "path:version"]; prints the repo path
+  local dir="$WORK/repo-$RANDOM$RANDOM" extra="${1:-}"
   mkdir -p "$dir/client/admin" "$dir/services/media-plane"
   for root in . client/admin services/media-plane; do
     printf '{"name":"r","devDependencies":{"dep":"^1.0.0"}}\n' > "$dir/$root/package.json"
-    lock r 1.0.0 > "$dir/$root/package-lock.json"
+    if [ -n "$extra" ]; then
+      lock r 1.0.0 | jq -c --arg k "${extra%%:*}" --arg v "${extra#*:}" '.packages[$k] = {version: $v}' > "$dir/$root/package-lock.json"
+    else
+      lock r 1.0.0 > "$dir/$root/package-lock.json"
+    fi
   done
   ( cd "$dir" && git init -q . && git config user.email t@t.t && git config user.name t \
       && git add -A && git commit -qm base )
@@ -91,6 +95,10 @@ case "$NPM_STUB_MODE" in
   stray)    [ "$PWD" = "$NPM_STUB_ROOT" ] && touch stray.txt ;;
   downgrade) [ "$PWD" = "$NPM_STUB_ROOT/services/media-plane" ] && \
               printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"0.9.0"}}}\n' > package-lock.json ;;
+  hoist)    [ "$PWD" = "$NPM_STUB_ROOT/client/admin" ] && \
+              printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"1.0.0"},"node_modules/x":{"version":"2.1.0"}}}\n' > package-lock.json ;;
+  rc)       [ "$PWD" = "$NPM_STUB_ROOT" ] && \
+              printf '{"name":"r","lockfileVersion":3,"packages":{"":{"name":"r"},"node_modules/dep":{"version":"1.0.0"},"node_modules/x":{"version":"3.0.0-rc.9"}}}\n' > package-lock.json ;;
   none)     ;;
 esac
 exit 0
@@ -99,8 +107,8 @@ STUB
 }
 make_stub
 
-run_refresh() { # $1 = mode, [$2 = knows-age 0/1]; sets OUT, RC, REPO, OUTPUTS
-  REPO=$(make_repo)
+run_refresh() { # $1 = mode, [$2 = knows-age 0/1], [$3 = extra base entry]; sets OUT, RC, REPO, OUTPUTS
+  REPO=$(make_repo "${3:-}")
   : > "$WORK/npm.log"; : > "$WORK/gh_output"
   OUT=$(cd "$REPO" && PATH="$WORK/bin:$PATH" NPM_STUB_MODE="$1" NPM_STUB_KNOWS_AGE="${2:-1}" \
         NPM_STUB_ROOT="$REPO" NPM_STUB_LOG="$WORK/npm.log" GITHUB_OUTPUT="$WORK/gh_output" \
@@ -143,6 +151,17 @@ run_refresh downgrade
 [ "$RC" -ne 0 ] && [ -z "$OUTPUTS" ] && grep -q 'services/media-plane/package-lock.json: node_modules/dep 1.0.0 -> 0.9.0' <<<"$OUT" \
   && ok "a downgrade fails the run and names the lockfile, package and versions" \
   || bad "a downgrade must fail the run" "rc=$RC outputs=$OUTPUTS"$'\n'"$OUT"
+
+# A hoist: the newer nested copy goes away and an older copy lands at another path.
+run_refresh hoist "" 'node_modules/dep/node_modules/x:2.1.1'
+[ "$RC" -ne 0 ] && grep -q 'client/admin/package-lock.json: x@2 2.1.1 -> 2.1.0' <<<"$OUT" \
+  && ok "a downgrade that moves the package to another path fails the run" \
+  || bad "a hoisted downgrade must fail the run" "rc=$RC"$'\n'"$OUT"
+
+run_refresh rc "" 'node_modules/x:3.0.0-rc.10'
+[ "$RC" -ne 0 ] && grep -q 'node_modules/x 3.0.0-rc.10 -> 3.0.0-rc.9' <<<"$OUT" \
+  && ok "prerelease numbers compare as numbers (rc.10 -> rc.9 is a downgrade)" \
+  || bad "rc.10 -> rc.9 must fail the run" "rc=$RC"$'\n'"$OUT"
 
 run_refresh bump 0
 [ "$RC" -ne 0 ] && [ ! -s "$WORK/npm.log" ] && grep -q 'no min-release-age' <<<"$OUT" \

@@ -172,18 +172,29 @@ jobs:
           # tree under min-release-age, so a version locked less than 7 days ago
           # (a Dependabot security fix has no cooldown) is pulled back to an
           # older one in range. Fail and list them; the next run, once they are
-          # 7 days old, keeps them.
+          # 7 days old, keeps them. Two checks: per install path, and per package
+          # name and major (the highest copy), because a dedupe or hoist can move
+          # a package to another path and drop the newer copy.
           DOWNGRADES=""
           for lock in package-lock.json client/admin/package-lock.json services/media-plane/package-lock.json; do
-            DOWNGRADES+=$(jq -rn --slurpfile old <(git show "HEAD:$lock") --slurpfile new "$lock" --arg lock "$lock" '
-              def core: capture("^(?<a>[0-9]+)[.](?<b>[0-9]+)[.](?<c>[0-9]+)(-(?<p>[0-9A-Za-z.-]+))?$")
-                | [(.a | tonumber), (.b | tonumber), (.c | tonumber), (if .p then 0 else 1 end), (.p // "")];
-              def semver: type == "string" and test("^[0-9]+[.][0-9]+[.][0-9]+(-[0-9A-Za-z.-]+)?$");
-              ($old[0].packages | with_entries(.value = .value.version)) as $o
-              | ($new[0].packages | with_entries(.value = .value.version)) as $n
-              | $o | keys[] | select(($o[.] | semver) and ($n[.] | semver))
-              | select(($n[.] | core) < ($o[.] | core))
-              | "\($lock): \(.) \($o[.]) -> \($n[.])\n"')
+            FOUND=$(jq -rn --slurpfile old <(git show "HEAD:$lock") --slurpfile new "$lock" --arg lock "$lock" '
+              def core: capture("^(?<a>[0-9]+)[.](?<b>[0-9]+)[.](?<c>[0-9]+)(-(?<p>[0-9A-Za-z.-]+))?([+].*)?$")
+                | [(.a | tonumber), (.b | tonumber), (.c | tonumber), (if .p then 0 else 1 end),
+                   ((.p // "") | split(".") | map(tonumber? // .))];
+              def semver: type == "string" and test("^[0-9]+[.][0-9]+[.][0-9]+(-[0-9A-Za-z.-]+)?([+].*)?$");
+              def paths: .packages | with_entries(.value = .value.version);
+              def bymajor: [.packages | to_entries[] | select(.key != "" and (.value.version | semver))
+                  | {k: "\(.value.name // (.key | sub("^.*node_modules/"; "")))@\(.value.version | core | .[0])",
+                     v: (.value.version | core), s: .value.version}]
+                | group_by(.k) | map({key: .[0].k, value: max_by(.v)}) | from_entries;
+              ($old[0] | paths) as $o | ($new[0] | paths) as $n
+              | ($old[0] | bymajor) as $O | ($new[0] | bymajor) as $N
+              | [ ($o | keys[] | select(($o[.] | semver) and ($n[.] | semver))
+                    | select(($n[.] | core) < ($o[.] | core)) | "\($lock): \(.) \($o[.]) -> \($n[.])"),
+                  ($O | keys[] | select($N[.] != null and ($N[.].v < $O[.].v))
+                    | "\($lock): \(.) \($O[.].s) -> \($N[.].s)") ]
+              | unique[]')
+            if [ -n "$FOUND" ]; then DOWNGRADES+="$FOUND"$'\n'; fi
           done
           if [ -n "$DOWNGRADES" ]; then
             echo "::error::the refresh would downgrade these locked versions (each is newer than the 7-day window):"
@@ -323,7 +334,7 @@ jobs:
           branch: chore/npm-lockfile-flush
           delete-branch: true
           title: "chore: refresh npm lockfiles (workspace, admin, media plane)"
-          labels: "area: deps,area: ci-cd"
+          labels: "type: chore,area: deps,area: ci-cd"
           commit-message: "chore: refresh npm lockfiles"
           body-path: ${{ runner.temp }}/flush/pr-body.md
           # The only paths the PR may carry. Anything else in the working tree
