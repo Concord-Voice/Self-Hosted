@@ -726,9 +726,14 @@ func (ts *TestServer) CreateTestMessage(t *testing.T, channelID string, user Tes
 // CONCORD_ENV=test). Fails the test immediately if the key is absent.
 func FetchVerificationCode(t *testing.T, ts *TestServer, pendingID string) string {
 	t.Helper()
-	code, err := ts.Redis.Get(context.Background(), "test_only:"+pendingID).Result()
+	parsedID, err := uuid.Parse(pendingID)
 	if err != nil {
-		t.Fatalf("testhelpers: FetchVerificationCode: key test_only:%s not found in Redis: %v", pendingID, err)
+		t.Fatalf("testhelpers: FetchVerificationCode: invalid pending ID: %v", err)
+	}
+	key := "test_only:" + parsedID.String()
+	code, err := ts.Redis.Get(context.Background(), key).Result()
+	if err != nil {
+		t.Fatalf("testhelpers: FetchVerificationCode: key %s not found in Redis: %v", key, err)
 	}
 	return code
 }

@@ -40,6 +40,13 @@ TTL. The account-wide bound stays
 for the same reason as recovery's: a limit tied to a pending row would let a
 caller cancel, re-register and restart guessing.
 
+**Security #160 registration-code binding:** a registration verification code is
+evidence for its canonical pending UUID and normalized recipient email. The
+control plane carries that recipient through verification and compares it with
+the pending row while locked before promotion. Email rotation invalidates current
+code material before the row changes, preserves #157's pending-lifetime attempt
+budget, and leaves a newer racing code intact.
+
 #2553 assumes CP user authentication is sound (ADR-0045 decision-table row D21, `0045:672`) and freezes its protocol-v1 contract at #3587 PR-A, so any factor this design needs must be named first.
 
 Two hard constraints pull against each other. An attacker who changed the password or email must not lock the owner out or stop the owner's recovery. And an intimate-partner abuser who knows the old password or shares the mailbox must be cut off quickly, with no delay that shields the abuser. When owner and attacker hold the same credentials, no rule over credentials alone can separate them: the two cases are mirror images.

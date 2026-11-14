@@ -3,7 +3,6 @@ package auth
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -11,6 +10,7 @@ import (
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/redistest"
 	"github.com/gin-gonic/gin"
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/require"
 )
@@ -33,7 +33,7 @@ func TestAttemptsGuardCountsStaleConcurrentInvalidAttemptsAtomically(t *testing.
 	ctx := context.Background()
 	client := setupAuthAttemptRedis(t)
 	h := &Handler{redis: client}
-	pendingID := "550e8400-e29b-41d4-a716-446655440000"
+	pendingID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440000")
 	record := verificationRecord{
 		CodeHash: hashCode("123456"),
 		Email:    "race@example.com",
@@ -57,8 +57,8 @@ func TestAttemptsGuardCountsStaleConcurrentInvalidAttemptsAtomically(t *testing.
 			w := httptest.NewRecorder()
 			c, _ := gin.CreateTestContext(w)
 
-			ok := h.attemptsGuard(ctx, c, pendingID, "000000") //nolint:gosec // test value, not a credential
-			results <- attemptResult{ok: ok, status: w.Code}
+			proof := h.attemptsGuard(ctx, c, pendingID, "000000") //nolint:gosec // test value, not a credential
+			results <- attemptResult{ok: proof != nil, status: w.Code}
 		}()
 	}
 	wg.Wait()
@@ -80,7 +80,7 @@ func TestAttemptsGuardCountsStaleConcurrentInvalidAttemptsAtomically(t *testing.
 	require.Equal(t, MaxCodeAttempts, unauthorized)
 	require.Equal(t, totalAttempts-MaxCodeAttempts, tooMany)
 
-	attempts, err := client.Get(ctx, fmt.Sprintf("email_verify_attempts:%s", pendingID)).Int()
+	attempts, err := client.Get(ctx, verificationAttemptsKey(pendingID)).Int()
 	require.NoError(t, err)
 	require.GreaterOrEqual(t, attempts, MaxCodeAttempts)
 }
@@ -91,7 +91,7 @@ func TestAttemptsGuardReturnsTooManyWhenCodeAlreadyExhausted(t *testing.T) {
 	ctx := context.Background()
 	client := setupAuthAttemptRedis(t)
 	h := &Handler{redis: client}
-	pendingID := "550e8400-e29b-41d4-a716-446655440002"
+	pendingID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440002")
 	record := verificationRecord{
 		CodeHash: hashCode("123456"),
 		Email:    "exhausted@example.com",
@@ -105,8 +105,8 @@ func TestAttemptsGuardReturnsTooManyWhenCodeAlreadyExhausted(t *testing.T) {
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
-	ok := h.attemptsGuard(ctx, c, pendingID, "000000") //nolint:gosec // test value, not a credential
-	require.False(t, ok)
+	proof := h.attemptsGuard(ctx, c, pendingID, "000000") //nolint:gosec // test value, not a credential
+	require.Nil(t, proof)
 	require.Equal(t, http.StatusTooManyRequests, w.Code)
 
 	var body map[string]string
@@ -119,7 +119,7 @@ func TestAttemptsGuardRearmsMissingAttemptTTL(t *testing.T) {
 	ctx := context.Background()
 	client := setupAuthAttemptRedis(t)
 	h := &Handler{redis: client}
-	pendingID := "550e8400-e29b-41d4-a716-446655440001"
+	pendingID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440001")
 	record := verificationRecord{
 		CodeHash: hashCode("123456"),
 		Email:    "ttl@example.com",
@@ -128,14 +128,34 @@ func TestAttemptsGuardRearmsMissingAttemptTTL(t *testing.T) {
 	raw, err := json.Marshal(record)
 	require.NoError(t, err)
 	require.NoError(t, client.Set(ctx, redisKey(pendingID), raw, VerifyCodeTTLNew).Err())
-	require.NoError(t, client.Set(ctx, fmt.Sprintf("email_verify_attempts:%s", pendingID), "1", 0).Err())
+	require.NoError(t, client.Set(ctx, verificationAttemptsKey(pendingID), "1", 0).Err())
 
 	w := httptest.NewRecorder()
 	c, _ := gin.CreateTestContext(w)
-	ok := h.attemptsGuard(ctx, c, pendingID, "000000") //nolint:gosec // test value, not a credential
-	require.False(t, ok)
+	proof := h.attemptsGuard(ctx, c, pendingID, "000000") //nolint:gosec // test value, not a credential
+	require.Nil(t, proof)
 	require.Equal(t, http.StatusUnauthorized, w.Code)
 
-	ttl := client.TTL(ctx, fmt.Sprintf("email_verify_attempts:%s", pendingID)).Val()
+	ttl := client.TTL(ctx, verificationAttemptsKey(pendingID)).Val()
 	require.Positive(t, ttl)
+}
+
+func TestDeleteVerificationMaterialIfCurrentPreservesReplacement(t *testing.T) {
+	ctx := context.Background()
+	client := setupAuthAttemptRedis(t)
+	h := &Handler{redis: client}
+	pendingID := uuid.MustParse("550e8400-e29b-41d4-a716-446655440003")
+
+	oldRaw := `{"code_hash":"old","email":"a@example.test"}`
+	newRaw := `{"code_hash":"new","email":"b@example.test"}`
+	require.NoError(t, client.Set(ctx, redisKey(pendingID), newRaw, VerifyCodeTTLNew).Err())
+	require.NoError(t, client.Set(ctx, testVerificationCodeKey(pendingID), "654321", VerifyCodeTTLNew).Err())
+	require.NoError(t, client.Set(ctx, verificationAttemptsKey(pendingID), "2", VerifyCodeTTLNew).Err())
+
+	require.NoError(t, h.deleteVerificationMaterialIfCurrent(ctx, pendingID, oldRaw))
+	stored, err := client.Get(ctx, redisKey(pendingID)).Result()
+	require.NoError(t, err)
+	require.Equal(t, newRaw, stored)
+	require.Equal(t, "654321", client.Get(ctx, testVerificationCodeKey(pendingID)).Val())
+	require.Equal(t, "2", client.Get(ctx, verificationAttemptsKey(pendingID)).Val())
 }
