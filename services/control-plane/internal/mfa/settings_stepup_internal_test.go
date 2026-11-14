@@ -238,7 +238,7 @@ func TestLegacyMFASettingsMFABudgetStopsTOTPDisableAndBackupRegeneration(t *test
 			w := route.call(userID, iuTOTPCode(t, secret))
 			require.Equal(t, http.StatusTooManyRequests, w.Code, w.Body.String())
 			require.NotEmpty(t, w.Header().Get("Retry-After"))
-			require.True(t, iuBody(t, w)["step_up_budget_exhausted"].(bool))
+			require.Equal(t, true, iuBody(t, w)["step_up_budget_exhausted"])
 			var rows int
 			require.NoError(t, db.QueryRow(`SELECT count(*) FROM user_mfa_totp WHERE user_id = $1`, userID).Scan(&rows))
 			require.Equal(t, 1, rows, "the budget must stop the write before factor mutation")
