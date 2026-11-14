@@ -211,6 +211,50 @@ func TestWebAuthnLogin_HappyPath_MintsSession(t *testing.T) {
 	assert.Equal(t, int64(va.signCount), storedCount, "login must persist the advanced sign count")
 }
 
+func TestWebAuthnLogin_CloneWarningRejectsWithoutSessionOrCounterUpdate(t *testing.T) {
+	db, dbCleanup := testhelpers.SetupTestDB(t)
+	t.Cleanup(dbCleanup)
+	rdb, rCleanup := testhelpers.SetupTestRedis(t)
+	t.Cleanup(rCleanup)
+
+	adminID, username, va := enrolledAdmin(t, db, rdb)
+	engine := adminAuthEngine(t, db, rdb)
+
+	pwRec := postJSON(engine, "/admin/api/v1/auth/password", map[string]string{
+		"username": username,
+		"password": adminTestPassword,
+	})
+	require.Equal(t, http.StatusOK, pwRec.Code, pwRec.Body.String())
+	var pwResp struct {
+		Handle    string                        `json:"handle"`
+		PublicKey *protocol.CredentialAssertion `json:"publicKey"`
+	}
+	require.NoError(t, json.Unmarshal(pwRec.Body.Bytes(), &pwResp))
+
+	// Registration persisted signCount 1. Reusing it yields a valid assertion
+	// with a clone warning from go-webauthn, which must never mint a session.
+	assertionBody := va.assertionResponse(t, testAdminRPID, pwResp.PublicKey.Response.Challenge.String(), testAdminOrigin, flagUP|flagUV, false)
+	successesBefore := auditRows(t, db, username, admin.EventLoginSuccess, admin.AuditSuccess)
+	failuresBefore := auditRows(t, db, username, admin.EventLoginFailure, admin.AuditFailure)
+
+	waRec := postJSON(engine, "/admin/api/v1/auth/webauthn", map[string]any{
+		"handle":    pwResp.Handle,
+		"assertion": json.RawMessage(assertionBody),
+	})
+	require.Equal(t, http.StatusUnauthorized, waRec.Code, waRec.Body.String())
+	assert.Empty(t, waRec.Header().Get("Set-Cookie"))
+	assert.Equal(t, successesBefore, auditRows(t, db, username, admin.EventLoginSuccess, admin.AuditSuccess))
+	assert.Equal(t, failuresBefore+1, auditRows(t, db, username, admin.EventLoginFailure, admin.AuditFailure))
+
+	var storedCount int64
+	require.NoError(t, db.QueryRowContext(context.Background(),
+		`SELECT sign_count FROM admin_webauthn_credentials WHERE admin_id = $1`, adminID).Scan(&storedCount))
+	assert.Equal(t, int64(va.signCount), storedCount)
+	sessions, err := rdb.Keys(context.Background(), "admin_session:*").Result()
+	require.NoError(t, err)
+	assert.Empty(t, sessions)
+}
+
 // TestWebAuthnLogin_LockedAfterHandleIssued_Returns429 covers the Gitar #1703 fix:
 // the WebAuthn step re-checks lockout, so a handle issued before the account was
 // locked cannot be redeemed once the lock engages.

@@ -1,12 +1,14 @@
 package middleware
 
 import (
+	"bytes"
 	"crypto/rsa"
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net/http"
 	"strings"
@@ -14,11 +16,16 @@ import (
 	"time"
 
 	"github.com/golang-jwt/jwt/v5"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
-	jwksTTL   = time.Hour
-	clockSkew = 60 * time.Second
+	jwksTTL             = time.Hour
+	jwksRefreshInterval = time.Second
+	negativeKIDTTL      = time.Minute
+	maxNegativeKIDs     = 256
+	maxJWKSBody         = 1 << 20
+	clockSkew           = 60 * time.Second
 )
 
 var (
@@ -64,19 +71,23 @@ type accessVerifier struct {
 	aud     string
 	client  *http.Client
 
-	mu        sync.RWMutex
-	keys      map[string]*rsa.PublicKey
-	fetchedAt time.Time
+	mu           sync.RWMutex
+	keys         map[string]*rsa.PublicKey
+	fetchedAt    time.Time
+	lastAttempt  time.Time
+	negativeKIDs map[string]time.Time
+	refreshGroup singleflight.Group
 }
 
 func newAccessVerifier(teamDomain, aud string) *accessVerifier {
 	td := strings.TrimRight(teamDomain, "/")
 	return &accessVerifier{
-		jwksURL: td + "/cdn-cgi/access/certs",
-		issuer:  td,
-		aud:     aud,
-		client:  &http.Client{Timeout: 5 * time.Second},
-		keys:    map[string]*rsa.PublicKey{},
+		jwksURL:      td + "/cdn-cgi/access/certs",
+		issuer:       td,
+		aud:          aud,
+		client:       &http.Client{Timeout: 5 * time.Second},
+		keys:         map[string]*rsa.PublicKey{},
+		negativeKIDs: map[string]time.Time{},
 	}
 }
 
@@ -148,19 +159,20 @@ func (v *accessVerifier) lookupKey(kid string) (*rsa.PublicKey, error) {
 		return nil, errUnknownKID
 	}
 
+	now := nowFunc()
 	v.mu.RLock()
 	k, ok := v.keys[kid]
-	fresh := nowFunc().Sub(v.fetchedAt) < jwksTTL
-	hadKeys := len(v.keys) > 0
+	fresh := now.Sub(v.fetchedAt) < jwksTTL
+	negativeUntil, negative := v.negativeKIDs[kid]
 	v.mu.RUnlock()
 	if ok && fresh {
 		return k, nil
 	}
+	if negative && now.Before(negativeUntil) {
+		return nil, errUnknownKID
+	}
 
 	if err := v.refresh(); err != nil {
-		if hadKeys {
-			return nil, errUnknownKID
-		}
 		return nil, fmt.Errorf("%w: jwks unavailable", errUnknownKID)
 	}
 
@@ -168,17 +180,28 @@ func (v *accessVerifier) lookupKey(kid string) (*rsa.PublicKey, error) {
 	k, ok = v.keys[kid]
 	v.mu.RUnlock()
 	if !ok {
+		v.cacheNegativeKID(kid, nowFunc())
 		return nil, errUnknownKID
 	}
 	return k, nil
 }
 
 func (v *accessVerifier) refresh() error {
+	_, err, _ := v.refreshGroup.Do("jwks", func() (any, error) {
+		return nil, v.refreshOnce()
+	})
+	return err
+}
+
+func (v *accessVerifier) refreshOnce() error {
+	now := nowFunc()
 	v.mu.Lock()
-	defer v.mu.Unlock()
-	if nowFunc().Sub(v.fetchedAt) < time.Second {
+	if now.Sub(v.lastAttempt) < jwksRefreshInterval {
+		v.mu.Unlock()
 		return nil
 	}
+	v.lastAttempt = now
+	v.mu.Unlock()
 
 	resp, err := v.client.Get(v.jwksURL)
 	if err != nil {
@@ -189,6 +212,13 @@ func (v *accessVerifier) refresh() error {
 		return fmt.Errorf("jwks status %d", resp.StatusCode)
 	}
 
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxJWKSBody+1))
+	if err != nil {
+		return fmt.Errorf("read jwks: %w", err)
+	}
+	if len(body) > maxJWKSBody {
+		return errors.New("jwks response too large")
+	}
 	var doc struct {
 		Keys []struct {
 			Kid string `json:"kid"`
@@ -198,8 +228,12 @@ func (v *accessVerifier) refresh() error {
 			E   string `json:"e"`
 		} `json:"keys"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&doc); err != nil {
-		return err
+	decoder := json.NewDecoder(bytes.NewReader(body))
+	if err := decoder.Decode(&doc); err != nil {
+		return fmt.Errorf("decode jwks: %w", err)
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("jwks has trailing data")
 	}
 
 	next := make(map[string]*rsa.PublicKey, len(doc.Keys))
@@ -212,9 +246,28 @@ func (v *accessVerifier) refresh() error {
 	if len(next) == 0 {
 		return errors.New("jwks empty")
 	}
+	v.mu.Lock()
 	v.keys = next
 	v.fetchedAt = nowFunc()
+	v.mu.Unlock()
 	return nil
+}
+
+func (v *accessVerifier) cacheNegativeKID(kid string, now time.Time) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	for cachedKID, until := range v.negativeKIDs {
+		if !now.Before(until) {
+			delete(v.negativeKIDs, cachedKID)
+		}
+	}
+	if len(v.negativeKIDs) >= maxNegativeKIDs {
+		for cachedKID := range v.negativeKIDs {
+			delete(v.negativeKIDs, cachedKID)
+			break
+		}
+	}
+	v.negativeKIDs[kid] = now.Add(negativeKIDTTL)
 }
 
 func rsaPublicKeyFromJWK(kty, alg, n, e string) (*rsa.PublicKey, bool) {

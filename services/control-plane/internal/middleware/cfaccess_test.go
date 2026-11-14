@@ -10,10 +10,12 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"math/big"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -126,10 +128,163 @@ func TestAccessVerifierDebouncesUnknownKidRefresh(t *testing.T) {
 	require.ErrorIs(t, err, errUnknownKID)
 	require.Equal(t, 1, hits)
 
-	nowFunc = func() time.Time { return fixedNow.Add(time.Second + time.Millisecond) }
+	nowFunc = func() time.Time { return fixedNow.Add(negativeKIDTTL + time.Millisecond) }
 	_, err = verifier.Verify(signJWT(t, key, "k2", claims))
 	require.ErrorIs(t, err, errUnknownKID)
 	require.Equal(t, 2, hits)
+}
+
+func TestAccessVerifierKnownKeyRemainsAvailableDuringUnknownKIDRefresh(t *testing.T) {
+	key := newRSAKey(t)
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseRefresh) }) }
+	t.Cleanup(release)
+	var hits int32
+	jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&hits, 1) == 2 {
+			close(refreshStarted)
+			<-releaseRefresh
+		}
+		_, _ = w.Write(jwksJSON(t, "known", key))
+	}))
+	t.Cleanup(jwks.Close)
+
+	claims := map[string]any{"aud": "test-aud", "exp": time.Now().Add(time.Hour).Unix(), "iss": jwks.URL}
+	verifier := newAccessVerifier(jwks.URL, "test-aud")
+	known := signJWT(t, key, "known", claims)
+	require.NoError(t, verifyAccessToken(verifier, known))
+	verifier.mu.Lock()
+	verifier.lastAttempt = time.Now().Add(-jwksRefreshInterval)
+	verifier.mu.Unlock()
+
+	unknownDone := make(chan error, 1)
+	unknown := signJWT(t, key, "unknown", claims)
+	go func() { unknownDone <- verifyAccessToken(verifier, unknown) }()
+	select {
+	case <-refreshStarted:
+	case <-time.After(time.Second):
+		t.Fatal("unknown KID did not start a JWKS refresh")
+	}
+
+	knownDone := make(chan error, 1)
+	go func() { knownDone <- verifyAccessToken(verifier, known) }()
+	select {
+	case err := <-knownDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("fresh known KID blocked on unknown KID refresh")
+	}
+	release()
+	require.ErrorIs(t, <-unknownDone, errUnknownKID)
+}
+
+func TestAccessVerifierSingleflightRefreshAndBoundedNegativeKIDs(t *testing.T) {
+	key := newRSAKey(t)
+	refreshStarted := make(chan struct{})
+	releaseRefresh := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseRefresh) }) }
+	t.Cleanup(release)
+	var hits int32
+	jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&hits, 1) == 2 {
+			close(refreshStarted)
+			<-releaseRefresh
+		}
+		_, _ = w.Write(jwksJSON(t, "known", key))
+	}))
+	t.Cleanup(jwks.Close)
+
+	claims := map[string]any{"aud": "test-aud", "exp": time.Now().Add(time.Hour).Unix(), "iss": jwks.URL}
+	verifier := newAccessVerifier(jwks.URL, "test-aud")
+	require.NoError(t, verifyAccessToken(verifier, signJWT(t, key, "known", claims)))
+	verifier.mu.Lock()
+	verifier.lastAttempt = time.Now().Add(-jwksRefreshInterval)
+	verifier.mu.Unlock()
+
+	const callers = 16
+	tokens := make([]string, callers)
+	for i := range tokens {
+		tokens[i] = signJWT(t, key, fmt.Sprintf("unknown-%d", i), claims)
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func(token string) {
+			defer wg.Done()
+			errs <- verifyAccessToken(verifier, token)
+		}(tokens[i])
+	}
+	select {
+	case <-refreshStarted:
+	case <-time.After(time.Second):
+		t.Fatal("unknown KID burst did not start a JWKS refresh")
+	}
+	release()
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		require.ErrorIs(t, err, errUnknownKID)
+	}
+	require.Equal(t, int32(2), atomic.LoadInt32(&hits), "one JWKS refresh per unknown-KID burst")
+
+	for i := 0; i < maxNegativeKIDs+20; i++ {
+		verifier.cacheNegativeKID(fmt.Sprintf("negative-%d", i), time.Now())
+	}
+	verifier.mu.RLock()
+	negativeCount := len(verifier.negativeKIDs)
+	verifier.mu.RUnlock()
+	require.LessOrEqual(t, negativeCount, maxNegativeKIDs)
+}
+
+func TestAccessVerifierRejectsOversizedAndTrailingJWKS(t *testing.T) {
+	key := newRSAKey(t)
+	claims := func(issuer string) map[string]any {
+		return map[string]any{"aud": "test-aud", "exp": time.Now().Add(time.Hour).Unix(), "iss": issuer}
+	}
+	for name, body := range map[string]string{
+		"oversized": string(make([]byte, maxJWKSBody+1)),
+		"trailing":  string(jwksJSON(t, "known", key)) + `{}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(body)) }))
+			t.Cleanup(jwks.Close)
+			_, err := newAccessVerifier(jwks.URL, "test-aud").Verify(signJWT(t, key, "known", claims(jwks.URL)))
+			require.ErrorIs(t, err, errUnknownKID)
+		})
+	}
+}
+
+func TestAccessVerifierFailedRefreshPreservesFreshKeys(t *testing.T) {
+	key := newRSAKey(t)
+	var failRefresh atomic.Bool
+	jwks := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if failRefresh.Load() {
+			http.Error(w, "unavailable", http.StatusServiceUnavailable)
+			return
+		}
+		_, _ = w.Write(jwksJSON(t, "known", key))
+	}))
+	t.Cleanup(jwks.Close)
+
+	claims := map[string]any{"aud": "test-aud", "exp": time.Now().Add(time.Hour).Unix(), "iss": jwks.URL}
+	verifier := newAccessVerifier(jwks.URL, "test-aud")
+	known := signJWT(t, key, "known", claims)
+	require.NoError(t, verifyAccessToken(verifier, known))
+	verifier.mu.Lock()
+	verifier.lastAttempt = time.Now().Add(-jwksRefreshInterval)
+	verifier.mu.Unlock()
+	failRefresh.Store(true)
+	require.ErrorIs(t, verifyAccessToken(verifier, signJWT(t, key, "unknown", claims)), errUnknownKID)
+	require.NoError(t, verifyAccessToken(verifier, known))
+}
+
+func verifyAccessToken(verifier *accessVerifier, token string) error {
+	_, err := verifier.Verify(token)
+	return err
 }
 
 func TestRequireCloudflareAccessFromConfigAllowsValidToken(t *testing.T) {
