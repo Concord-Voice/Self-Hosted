@@ -79,7 +79,7 @@ done
 printf 'module example.invalid/x\n\ngo 1.26\n\nreplace example.invalid/a => "./x\\"y"\n' > "$WORK/esc.mod"
 expect 'escaped quoted target cannot run' 2 'cannot parse replace target' --go-mod "$WORK/esc.mod"
 printf 'module example.invalid/x\n\ngo 1.26\n\nreplace example.invalid/a => "./my dir" v1.0.0\n' > "$WORK/sp.mod"
-expect 'quoted path with a space stays one token' 0 '^ok:' --go-mod "$WORK/sp.mod"
+expect 'quoted path with a space stays one token' 1 'points at another module, \./my dir,' --go-mod "$WORK/sp.mod"
 printf 'module example.invalid/x\n\ngo 1.26\n\nreplace example.invalid/a => "./x" "v1.0.0"\n' > "$WORK/qv.mod"
 expect 'quoted version cannot run' 2 'is not a version' --go-mod "$WORK/qv.mod"
 printf 'module example.invalid/x\n\ngo 1.26\n\nreplace example.invalid/a => ./x v1.0.0 extra\n' > "$WORK/x3.mod"
@@ -208,6 +208,11 @@ cp "$WORK/listed/go.mod" "$LISTED"
 printf '{"npm_registry_hosts":["registry.npmjs.org"],"go_local_replacements":["scripts"]}\n' > "$WORK/cfg.json"
 expect 'listed in-repo local replace passes' 0 '^ok:' --config "$WORK/cfg.json" --go-mod "$LISTED"
 expect 'the same replace fails when not listed' 1 'replace example\.invalid/a => \./scripts' --go-mod "$LISTED"
+# With GOPROXY ending in direct, Go fetches an unlisted module path from its origin.
+printf 'module example.invalid/x\n\ngo 1.26\n\nreplace example.invalid/a => attacker.invalid/mod v1.0.0\n' > "$WORK/xmod.mod"
+expect 'versioned replace to another module fails' 1 'points at another module, attacker\.invalid/mod' --go-mod "$WORK/xmod.mod"
+printf '{"npm_registry_hosts":["registry.npmjs.org"],"go_module_replacements":["attacker.invalid/mod"]}\n' > "$WORK/cfgmod.json"
+expect 'a listed module replacement passes' 0 '^ok:' --config "$WORK/cfgmod.json" --go-mod "$WORK/xmod.mod"
 
 # Fail closed.
 expect 'missing file cannot run' 2 'could not run' --npm-lock "$WORK/absent.json"

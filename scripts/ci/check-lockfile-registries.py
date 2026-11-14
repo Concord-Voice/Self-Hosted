@@ -11,9 +11,11 @@ npm parses URLs the WHATWG way, so a `resolved` URL must match a strict
 `https://<host>/...` shape (no userinfo, port, backslash or escape in the
 authority) before its host is compared.
 
-Go: a go.mod `replace` whose target carries a version is a module path,
-fetched through the module proxy and checked against the checksum database, so
-it passes. A target without a version is a filesystem path (Go's own rule,
+Go: a go.mod `replace` whose target carries a version is a module path. A
+version pin of the same module passes. A different module path passes only when
+listed in `go_module_replacements`: with the default GOPROXY (`…,direct`) Go
+fetches a module the proxy does not serve from its own origin, so an unlisted
+target could pull code from any host. A target without a version is a filesystem path (Go's own rule,
 however it is spelled or quoted); it bypasses both, so it passes only when the
 directory it names is inside the repository and listed in
 `go_local_replacements`. GOPROXY and GOPRIVATE settings are out of scope.
@@ -309,7 +311,7 @@ def parse_target(rhs, path, number):
     return dest, version
 
 
-def go_violations(path, root, local_allowed, work=False):
+def go_violations(path, root, local_allowed, work=False, module_allowed=frozenset()):
     try:
         with open(path, encoding="utf-8") as fh:
             text = fh.read()
@@ -327,11 +329,19 @@ def go_violations(path, root, local_allowed, work=False):
     for number, directive in go_directives(text, "replace", path):
         if "=>" not in directive:
             raise CannotRun(f"{path}:{number}: cannot parse replace directive: {directive}")
-        dest, version = parse_target(directive.split("=>", 1)[1], path, number)
-        # Go's own rule: a replacement with a version is a module path, fetched
-        # through the module proxy. One without a version is a filesystem path,
-        # whatever it looks like (`.`, `"./x"`, `..\x`, an absolute path).
+        left, right = directive.split("=>", 1)
+        dest, version = parse_target(right, path, number)
+        # Go's own rule: a replacement with a version is a module path. One
+        # without a version is a filesystem path, whatever it looks like (`.`,
+        # `"./x"`, `..\x`, an absolute path).
         if version is not None:
+            old = (left.split() or [""])[0].strip('"`')
+            if dest == old or dest in module_allowed:
+                continue
+            out.append(
+                f"{path}:{number}: replace {directive} points at another module, {dest}, "
+                "which is not in go_module_replacements"
+            )
             continue
         resolved = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(path)), dest))
         rel = os.path.relpath(resolved, root)
@@ -429,6 +439,7 @@ def main():
         config = load_json(args.config or os.path.join(root, ".github/ci/approved-registries.json"))
         hosts = set(config.get("npm_registry_hosts", []))
         local_allowed = {os.path.normpath(p) for p in config.get("go_local_replacements", [])}
+        module_allowed = frozenset(config.get("go_module_replacements", []))
         if not hosts:
             raise CannotRun("config lists no npm_registry_hosts")
         explicit = args.npm_lock or args.go_mod or args.go_work or args.npmrc
@@ -443,7 +454,7 @@ def main():
         for path in npm:
             problems += npm_violations(path, hosts)
         for path in gomod:
-            problems += go_violations(path, root, local_allowed, work=path in work)
+            problems += go_violations(path, root, local_allowed, work=path in work, module_allowed=module_allowed)
         for path in npmrc:
             problems += npmrc_violations(path, hosts)
     except (CannotRun, subprocess.CalledProcessError, OSError) as exc:
