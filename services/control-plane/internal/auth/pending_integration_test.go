@@ -253,7 +253,7 @@ func TestResendPublicationSerializesChangeEmail(t *testing.T) {
 	}()
 	resendDone := make(chan error, 1)
 	go func() {
-		_, _, _, resendErr := repo.IncrementResend(ctx, id, func(tx *sql.Tx, recipient string) error {
+		_, _, _, resendErr := repo.IncrementResend(ctx, id, func(tx *sql.Tx, recipient string, _ int) error {
 			if recipient != oldEmail {
 				return fmt.Errorf("resend recipient = %q, want %q", recipient, oldEmail)
 			}
@@ -315,7 +315,7 @@ func TestPromoteRejectsCodeForDifferentEmail(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	_, err = repo.Promote(ctx, id, "recipient-b@test.concord.chat")
+	_, err = repo.Promote(ctx, id, "recipient-b@test.concord.chat", 0)
 	require.ErrorIs(t, err, auth.ErrVerificationEmailChanged)
 
 	var userCount int
@@ -328,6 +328,38 @@ func TestPromoteRejectsCodeForDifferentEmail(t *testing.T) {
 		`SELECT COUNT(*) FROM pending_registrations WHERE id = $1`, id,
 	).Scan(&pendingCount))
 	assert.Equal(t, 1, pendingCount)
+}
+
+// TestPromoteRejectsCodeReservedBeforeResend pins the confirm-reserve → resend
+// → promote interleaving. A confirm can reserve the old Redis record before a
+// resend takes the pending-row lock; promotion must reject that stale proof.
+func TestPromoteRejectsCodeReservedBeforeResend(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	repo := auth.NewPendingRepo(ts.DB)
+	ctx := context.Background()
+	const email = "reserved-before-resend@test.concord.chat"
+	id, _, _, err := repo.InsertOrTakeover(ctx,
+		insertPendingParams(t, email, "reservedbefore", "TestPassword123!"),
+		"TestPassword123!",
+	)
+	require.NoError(t, err)
+
+	// The code reservation occurred while this was the initial (count 0) code.
+	_, _, _, err = repo.IncrementResend(ctx, id, nil)
+	require.NoError(t, err)
+
+	_, err = repo.Promote(ctx, id, email, 0)
+	require.ErrorIs(t, err, auth.ErrVerificationCodeReplaced)
+
+	var users, pending int
+	require.NoError(t, ts.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM users WHERE email = $1`, email,
+	).Scan(&users))
+	require.NoError(t, ts.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pending_registrations WHERE id = $1`, id,
+	).Scan(&pending))
+	assert.Zero(t, users)
+	assert.Equal(t, 1, pending)
 }
 
 // TestInsertOrTakeover_UsesPolicyTTL regresses Copilot comment 3104406713:

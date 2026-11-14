@@ -857,6 +857,17 @@ func TestResendRegistrationCode(t *testing.T) {
 
 	secondCode := testhelpers.FetchVerificationCode(t, ts, reg.PendingID)
 	require.NotEqual(t, firstCode, secondCode)
+	raw, err := ts.Redis.Get(context.Background(), "email_verify:"+reg.PendingID).Bytes()
+	require.NoError(t, err)
+	var record struct {
+		ResendCount int `json:"resend_count"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &record))
+	require.Equal(t, 1, record.ResendCount)
+
+	w3 := ts.DoRequest("POST", "/api/v1/auth/register/confirm",
+		map[string]string{"pending_id": reg.PendingID, "code": secondCode}, nil)
+	require.Equal(t, http.StatusOK, w3.Code)
 }
 
 func TestResendRegistrationCodeExtendsPendingExpiryToCodeExpiry(t *testing.T) {
