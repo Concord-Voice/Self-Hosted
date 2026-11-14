@@ -167,30 +167,19 @@ func TestLimitPerSourceReleasesAfterTLSHandshakeFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	t.Cleanup(func() { _ = plain.Close() })
+	listener := limited.(*perSourceListener)
+	if !waitForSourceSlots(listener, "127.0.0.1", 1, time.Second) {
+		t.Fatal("TLS handshake did not reserve source slot")
+	}
 	if _, err := plain.Write([]byte("not tls")); err != nil {
-		_ = plain.Close()
 		t.Fatal(err)
 	}
 	if err := plain.Close(); err != nil {
 		t.Fatal(err)
 	}
-
-	listener := limited.(*perSourceListener)
-	deadline := time.Now().Add(time.Second)
-	for time.Now().Before(deadline) {
-		listener.mu.Lock()
-		active := listener.active["127.0.0.1"]
-		listener.mu.Unlock()
-		if active == 0 {
-			break
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	listener.mu.Lock()
-	active := listener.active["127.0.0.1"]
-	listener.mu.Unlock()
-	if active != 0 {
-		t.Fatalf("TLS handshake failure held source slot: %d", active)
+	if !waitForSourceSlots(listener, "127.0.0.1", 0, time.Second) {
+		t.Fatal("TLS handshake failure held source slot")
 	}
 
 	conn, err := tls.Dial("tcp", raw.Addr().String(), &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12}) //nolint:gosec // self-signed test listener
@@ -200,4 +189,18 @@ func TestLimitPerSourceReleasesAfterTLSHandshakeFailure(t *testing.T) {
 	if err := conn.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func waitForSourceSlots(listener *perSourceListener, source string, want int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		listener.mu.Lock()
+		active := listener.active[source]
+		listener.mu.Unlock()
+		if active == want {
+			return true
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return false
 }
