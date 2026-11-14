@@ -67,6 +67,7 @@ func TestConfigureAdminOpsMetricsReaderActivatesOnlyWhenBothFeaturesEnabled(t *t
 		context.Background(),
 		cfg,
 		nil,
+		false,
 		func(_ context.Context, _ *sql.DB, databaseURL string) (opsmetrics.Reader, func(context.Context) error, error) {
 			openCalls++
 			if databaseURL != cfg.DatabaseURL {
@@ -169,6 +170,7 @@ func TestConfigureAdminOpsMetricsReaderDisablesLoginWhenEitherFeatureIsOff(t *te
 				context.Background(),
 				cfg,
 				nil,
+				false,
 				func(context.Context, *sql.DB, string) (opsmetrics.Reader, func(context.Context) error, error) {
 					openCalls++
 					return serverOpsMetricsReader{}, func(context.Context) error { return nil }, nil
@@ -202,6 +204,7 @@ func TestConfigureAdminOpsMetricsReaderFailsClosed(t *testing.T) {
 		context.Background(),
 		cfg,
 		nil,
+		false,
 		func(context.Context, *sql.DB, string) (opsmetrics.Reader, func(context.Context) error, error) {
 			return nil, nil, wantOpenErr
 		},
@@ -224,6 +227,7 @@ func TestConfigureAdminOpsMetricsReaderPropagatesDisableFailure(t *testing.T) {
 		context.Background(),
 		&config.Config{},
 		nil,
+		false,
 		func(context.Context, *sql.DB, string) (opsmetrics.Reader, func(context.Context) error, error) {
 			t.Fatal("disabled configuration must not open a reader")
 			return nil, nil, nil
@@ -248,6 +252,7 @@ func TestConfigureAdminOpsMetricsReaderRejectsIncompleteOpenResult(t *testing.T)
 		context.Background(),
 		cfg,
 		nil,
+		false,
 		func(context.Context, *sql.DB, string) (opsmetrics.Reader, func(context.Context) error, error) {
 			return nil, func(context.Context) error {
 				closeCalls++

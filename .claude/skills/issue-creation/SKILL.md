@@ -26,7 +26,30 @@ This skill is **config-driven and stack-neutral**. It reads an OPTIONAL
 start of any phase that needs config:
 
 ```bash
-source "$(git rev-parse --show-toplevel)/scripts/repo-config.sh"   # path where the org tooling is installed/symlinked
+# Load the helper from the default branch, never this checkout (on a PR branch it is the PR's code).
+RC_REF="refs/remotes/origin/$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null)"   # the API is the authority; origin/HEAD goes stale after a rename
+[ "$RC_REF" != refs/remotes/origin/ ] || RC_REF="$(git symbolic-ref --quiet refs/remotes/origin/HEAD || echo refs/remotes/origin/main)"
+case "$RC_REF" in refs/remotes/origin/HEAD) RC_REF= ;; refs/remotes/origin/?*) ;; *) RC_REF= ;; esac
+RC_OID="$([ -n "$RC_REF" ] && git show-ref --verify --hash "$RC_REF" 2>/dev/null)"   # exact refname, no DWIM: a same-named branch or tag cannot stand in
+case "$([ -n "$RC_OID" ] && git ls-tree "$RC_OID" -- scripts/repo-config.sh | cut -d' ' -f1)" in
+  100644|100755) ;;
+  *) echo "FATAL: ${RC_REF:-the default branch} is not fetched or has no regular scripts/repo-config.sh" >&2; return 1 2>/dev/null || exit 1 ;;
+esac
+RC_SRC="$(git show "$RC_OID:scripts/repo-config.sh")" || { echo "FATAL: could not read the default-branch helper" >&2; return 1 2>/dev/null || exit 1; }
+eval "$RC_SRC"   # the commit that was checked; the checkout's copy is never sourced
+unset RC_TRUSTED_STATE RC_TRUSTED_CFG   # nothing carries over from an earlier run in this shell
+# Presence comes from the tree, not from a read: a blob that is listed but cannot be read is an
+# error, never "absent". RC_TRUSTED_STATE: absent = no config on the default branch; present = read.
+RC_ENT="$(git ls-tree "$RC_OID" -- .claude/repo-config.json)" || { echo "FATAL: could not list the default-branch tree" >&2; return 1 2>/dev/null || exit 1; }
+case "${RC_ENT%% *}" in
+  "") RC_TRUSTED_STATE=absent ;;
+  100644|100755)
+    RC_TRUSTED_CFG="$(git show "$RC_OID:.claude/repo-config.json")" && [ -n "$RC_TRUSTED_CFG" ] \
+      || { echo "FATAL: could not read the default-branch .claude/repo-config.json" >&2; return 1 2>/dev/null || exit 1; }
+    RC_TRUSTED_STATE=present ;;
+  *) echo "FATAL: the default-branch .claude/repo-config.json is not a regular file" >&2; return 1 2>/dev/null || exit 1 ;;
+esac
+DEFAULT_BRANCH="${RC_REF#refs/remotes/origin/}"
 ```
 
 Three rules make this skill work in ANY repo:
@@ -70,7 +93,30 @@ Flags:
 ### Step 1 — Resolve repo + taxonomy context
 
 ```bash
-source "$(git rev-parse --show-toplevel)/scripts/repo-config.sh"
+# Load the helper from the default branch, never this checkout (on a PR branch it is the PR's code).
+RC_REF="refs/remotes/origin/$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null)"   # the API is the authority; origin/HEAD goes stale after a rename
+[ "$RC_REF" != refs/remotes/origin/ ] || RC_REF="$(git symbolic-ref --quiet refs/remotes/origin/HEAD || echo refs/remotes/origin/main)"
+case "$RC_REF" in refs/remotes/origin/HEAD) RC_REF= ;; refs/remotes/origin/?*) ;; *) RC_REF= ;; esac
+RC_OID="$([ -n "$RC_REF" ] && git show-ref --verify --hash "$RC_REF" 2>/dev/null)"   # exact refname, no DWIM: a same-named branch or tag cannot stand in
+case "$([ -n "$RC_OID" ] && git ls-tree "$RC_OID" -- scripts/repo-config.sh | cut -d' ' -f1)" in
+  100644|100755) ;;
+  *) echo "FATAL: ${RC_REF:-the default branch} is not fetched or has no regular scripts/repo-config.sh" >&2; return 1 2>/dev/null || exit 1 ;;
+esac
+RC_SRC="$(git show "$RC_OID:scripts/repo-config.sh")" || { echo "FATAL: could not read the default-branch helper" >&2; return 1 2>/dev/null || exit 1; }
+eval "$RC_SRC"   # the commit that was checked; the checkout's copy is never sourced
+unset RC_TRUSTED_STATE RC_TRUSTED_CFG   # nothing carries over from an earlier run in this shell
+# Presence comes from the tree, not from a read: a blob that is listed but cannot be read is an
+# error, never "absent". RC_TRUSTED_STATE: absent = no config on the default branch; present = read.
+RC_ENT="$(git ls-tree "$RC_OID" -- .claude/repo-config.json)" || { echo "FATAL: could not list the default-branch tree" >&2; return 1 2>/dev/null || exit 1; }
+case "${RC_ENT%% *}" in
+  "") RC_TRUSTED_STATE=absent ;;
+  100644|100755)
+    RC_TRUSTED_CFG="$(git show "$RC_OID:.claude/repo-config.json")" && [ -n "$RC_TRUSTED_CFG" ] \
+      || { echo "FATAL: could not read the default-branch .claude/repo-config.json" >&2; return 1 2>/dev/null || exit 1; }
+    RC_TRUSTED_STATE=present ;;
+  *) echo "FATAL: the default-branch .claude/repo-config.json is not a regular file" >&2; return 1 2>/dev/null || exit 1 ;;
+esac
+DEFAULT_BRANCH="${RC_REF#refs/remotes/origin/}"
 OWNER_REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 OWNER=${OWNER_REPO%%/*}; REPO=${OWNER_REPO#*/}
 gh label list --limit 300 --json name,description > /tmp/issue-creation-labels.json
@@ -202,7 +248,7 @@ For each issue to be created (parent + any children), generate the body using th
 
 ### Step 1 — Gather documentation references
 
-If a documentation-lookup MCP (e.g. Context7) is available, use it to fetch current docs for any external library/framework mentioned in the topic — resolve the library id, then query the relevant feature. If no such MCP is available, fall back to the library's official docs URL. This is best-effort: skip it for changes with no external-dependency surface.
+**Context7 docs discipline.** When a documentation-lookup MCP (e.g. Context7) is available, fetching current docs is MANDATORY for every third-party dependency this issue will engage, per [`_shared/context7-docs-discipline.md`](../_shared/context7-docs-discipline.md). The trigger is the API surface the issue touches (inferred from its `area:` labels and predicted file surfaces), not only the libraries named in the topic: resolve the library id, then query the relevant feature, and capture each library id and doc URL in `## References`. If no such MCP is available, fall back to the library's official docs URL. Skip this only for changes with no external-dependency surface.
 
 Glob `.claude/rules/*.md` and match the discovered rule files against the topic's keywords/surfaces to identify applicable domain rules. Read each matching rule and treat it as a hard constraint — in particular, any rule whose subject matter is directly touched by the change (e.g. a crypto/key rule when key material is involved, a migrations rule when SQL schema changes) is MANDATORY to cite. Do not assume specific rule filenames; use whatever `*.md` files the repo actually ships under `.claude/rules/`.
 
@@ -212,7 +258,12 @@ Build a `references` list: external doc URLs + internal rule file paths + any OW
 
 Run the catalog's "## Dynamic skill scoping (mandatory)" algorithm for Phase 2/Pre-Spec against the proposed issue's signature (labels, predicted file surfaces, title/body keywords). Dispatch every matched **`design-class`** skill (`/engineering:architecture`, `/engineering:system-design`, `/frontend-design:frontend-design`, `/engineering:testing-strategy`, etc.) via the `Skill` tool and capture each one's artifact (ADR link, service-boundary sketch, component notes) into the issue body's `## Design Dossier` section. Emit the visibility line: `Scoped skills (Pre-Spec): [...]`.
 
-**Fallback when no design-class skill matches** (trivial bug/chore): dispatch the **`@architect`** agent for a lightweight options pass so small issues still get an options section, and record `Scoped skills: none (design-class) — architect fallback`. This replaces the retired `planner` agent. Architect prompt:
+**Agent dispatch.** Where the issue's predicted surfaces make an agent cheaper or sharper than a skill, dispatch it via the Agent tool alongside the design-class skills (see [`_shared/lifecycle-agent-dispatch.md`](../_shared/lifecycle-agent-dispatch.md), which governs the same agents at `/dev-lifecycle` Phases 1–4):
+
+- **`@architect` (Mode 1 — blast-radius scout)** on any non-trivial issue: it predicts affected surfaces, governing rules files, and **which Phase-8 reviewers the eventual diff will trigger**. Fold that prediction into the issue body — it is what lets `/dev-lifecycle` Phase 2 start from a real impact map instead of rediscovering it.
+- **`@researcher`** when the issue turns on an external fact (a library's current contract, prior art, an upstream change) that Step 1's reference-gathering could not settle.
+
+**Fallback when no design-class skill matches** (trivial bug/chore): dispatch the **`@architect`** agent (Mode 2, scoped down to a lightweight options pass) so small issues still get an options section, and record `Scoped skills: none (design-class) — architect fallback`. This replaces the retired `planner` agent. Architect prompt:
 
 ```
 Design 2–3 implementation options for this proposed issue:
@@ -358,7 +409,8 @@ NAMESPACES=$(rc_get '.labels.namespaces | join(" ")' "type area domain release r
 | Namespace | Cardinality | When to apply |
 |---|---|---|
 | `domain:` | additive | business / concern dimension (what the change is about) |
-| `risk:` | additive | when a security / privacy / breaking-change / data-loss / release-gate concern is present |
+| `risk:` | additive | when a security / privacy / breaking-change / data-loss / release-gate concern is present, or the fix is urgent enough to warrant `risk: hotfix` |
+| `severity:` | at most one | only when the issue tracks a confirmed upstream advisory — records the advisory's CVSS band, not Priority |
 | `routine:` | additive | only for auto-generated issues (daily security review, weekly deps, etc.) |
 
 **Decision tree for `type:` (mandatory, exactly one)**
@@ -383,29 +435,55 @@ Map the change to the repo's `domain:` labels, discovered via `gh label list`. M
 - Blocks the milestone tag → `risk: release-gate`
 - API / contract break → `risk: breaking-change`
 - Potential for data loss in operation or migration → `risk: data-loss`
+- A day's delay is itself the harm (critical vulnerability, urgent user-facing
+  break) → `risk: hotfix`, when the repo defines it. **Ask before applying it.**
+  Unlike the labels above it is not a descriptor of the problem — in repos that
+  use it, it is a release control: on the PR that fixes this issue it means the
+  merge cuts a release immediately, bypassing the scheduled blocking-red gate. A
+  hotfix can therefore ship on a red suite. Applying it here records urgency; it
+  does **not** propagate — `/pr-creation` deliberately refuses to inherit it, so
+  somebody must apply it to the PR knowingly.
+
+**Decision tree for `severity:` (at most one — only for a confirmed upstream advisory, when the repo defines the namespace)**
+- Upstream advisory rated CVSS v3.1 9.0–10.0 → `severity: critical`
+- Upstream advisory rated CVSS v3.1 7.0–8.9 → `severity: high`
+- Below 7.0, or an internal finding with no upstream rating → no `severity:` label
+- It records the publisher's rating, not the repo's urgency: a CISA KEV entry rated 7.5 is
+  `severity: high` with a top board Priority. `/pr-creation` inherits it onto the PR.
 
 **Note: Priority is a project board field, NOT a label** (when a board is configured). If `rc_has '.project'` and the board defines a Priority field, prompt the developer for the priority and set it via the Step 4 mutation. Do NOT apply any `P:*` priority label — priority lives on the board, not in the label taxonomy. When no project board is configured, skip priority entirely.
 
 **Note: Status is also a project board field**, not a label — set via the Step 4 mutation (only when a board is configured).
 
-### Step 2 — Infer milestone
+### Step 2 — Set the milestone (deadline), separately from the `release:` label
 
-Discover the repo's open milestones at runtime and map the chosen `release:` value (or, if the repo has no `release:` labels, the change's target version) onto the best-matching milestone:
+The `release:` label and the milestone are **two different axes** — do NOT copy the label version into the milestone by reflex:
+
+- The **`release:` label** is the *shipping stream* — which release train the work rides.
+- The **milestone** is the *deadline* — the version this work must be complete **by**.
+
+They often differ by one version: work riding a pre-release stream must usually be done by the next version boundary. They coincide when the change ships in the milestone version's own bump. So infer the shipping stream from the label, then **prompt the developer for the milestone**, offering the release boundary that ends the labeled stream as the default and letting them override. If the repo defines no `release:` labels, map the change's target version onto a milestone directly.
+
+Discover the repo's open milestones at runtime, pick the one whose title is the chosen deadline, and pass that **exact, bare** title to `--milestone` (`gh issue create` / `gh issue edit` / `gh pr edit` error on anything else). Never assume a fixed naming scheme: milestone titles drift, and a remembered title that is not the real one fails the create (`could not add to milestone '<title>': '<title>' not found`). Resolve the title against the repo before assigning it:
 
 ```bash
-gh api "repos/$OWNER/$REPO/milestones?state=open" --jq '.[].title'
+gh api --paginate "repos/$OWNER/$REPO/milestones?state=open" --jq '.[].title'
 ```
 
-Pick the milestone whose title corresponds to the release line the issue belongs to. If the work has no specific target version (e.g. a `release: future`-style value) or the repo defines no milestones, attach no milestone. Never assume a fixed milestone naming scheme — match against the titles the repo actually returns.
+`--paginate` is load-bearing — `gh api` returns only the first 30 results otherwise, and a valid title on page 2 would read as absent and wrongly trip the leave-it-unset branch below. `state=open` is the API default, stated explicitly so this command does not depend on a remembered default; open is the correct candidate set because a closed milestone is not a valid deadline for new work.
+
+Leave the milestone **unset** (and say so) when: the work has no specific target version (a `release: future`-style value), the next-boundary milestone has not been cut yet, the repo defines no milestones, or this is an unattended run that defers the deadline to human triage. If the intended title is genuinely absent, leave it unset rather than guessing at a near-match.
+
+**Version epics follow the repo's release-tracking rule.** If the repo tracks a release by milestone + `release:` label alone, a topic like "track the vX.Y.Z release" is answered by a milestone, not an issue. If it ships a release-tracking-epics rule under `.claude/rules/`, follow that rule instead. `type: epic` remains correct for **feature** epics.
 
 ### Step 3 — Validate issue-level metadata
 
 Before Phase 5, double-check:
 - No conflicting `type:` labels (e.g., `bug` + `chore`)
 - No conflicting `release:` labels (pick one), if the repo uses that namespace
-- Milestone aligns with the chosen release line, where a milestone applies
+- Milestone (deadline) is consistent with the `release:` label (shipping stream) per Step 2 — often one version apart, and identical only when the change ships in the milestone version's own bump. It may also be legitimately **unset** (see Step 2)
 - Priority is planned — only when a board is configured (`rc_has '.project'`)
-- For parent epics, the `type: epic` label is present AND the body has a tasklist
+- For **feature** epics, the `type: epic` label is present AND the body has a tasklist, with children reachable via REST `/sub_issues` — the reliable attachment path, since GitHub's `- [ ] #N` tasklist auto-link heuristic frequently fails on programmatic body edits. GitHub enforces a strict one-parent tree: attaching a child that already has a parent returns HTTP 422 unless `replace_parent` is set. (Phase 7 writes the tasklist first and REST-attaches as the verified fallback.)
 
 ### Step 4 — Project v2 field plan (config-gated)
 
@@ -424,7 +502,7 @@ When a board IS configured, read all board identifiers from `.claude/repo-config
 
 ```bash
 PROJ_ID=$(rc_get '.project.id')                    # PVT_… board node id
-PROJ_NUMBER=$(rc_get '.project.number')            # for `gh project item-add`
+PROJ_NUMBER=$(rc_get '.project.number')            # for field re-discovery (below)
 PROJ_OWNER=$(rc_get '.project.owner' "$OWNER")     # falls back to the gh-authed owner
 PRIORITY_FIELD=$(rc_get '.project.fields.priority.id')
 STATUS_FIELD=$(rc_get '.project.fields.status.id')
@@ -546,37 +624,64 @@ Create? [yes / edit title / edit body / change labels / cancel]
 ### Step 1 — Create the issue
 
 ```bash
+# Include --milestone only when a deadline was assigned in Phase 4 Step 2. The milestone is
+# legitimately unset for release: future, a stream whose next-boundary milestone is not
+# cut yet, or an unattended auto-run that defers the deadline to human triage — in
+# those cases omit the flag entirely (passing --milestone "" errors).
+MILESTONE_FLAG=()
+[ -n "$MILESTONE" ] && MILESTONE_FLAG=(--milestone "$MILESTONE")
+
 gh issue create \
   --title "<title>" \
   --body-file /tmp/issue-creation-<slug>.md \
   --label "<comma-separated labels>" \
-  --milestone "<milestone>"
+  "${MILESTONE_FLAG[@]}"
 ```
 
 Capture the returned issue URL as `NEW_URL` and parse the issue number as `NEW` (e.g. `NEW=${NEW_URL##*/}`).
 
-### Step 2 — Verify project auto-add + populate fields (config-gated)
+### Step 2 — Add to the project board + populate fields (config-gated)
 
 **Skip this whole step unless a board is configured.** Structured guard:
 
 ```bash
+# Load the helper from the default branch, never this checkout (on a PR branch it is the PR's code).
+RC_REF="refs/remotes/origin/$(gh repo view --json defaultBranchRef --jq '.defaultBranchRef.name' 2>/dev/null)"   # the API is the authority; origin/HEAD goes stale after a rename
+[ "$RC_REF" != refs/remotes/origin/ ] || RC_REF="$(git symbolic-ref --quiet refs/remotes/origin/HEAD || echo refs/remotes/origin/main)"
+case "$RC_REF" in refs/remotes/origin/HEAD) RC_REF= ;; refs/remotes/origin/?*) ;; *) RC_REF= ;; esac
+RC_OID="$([ -n "$RC_REF" ] && git show-ref --verify --hash "$RC_REF" 2>/dev/null)"   # exact refname, no DWIM: a same-named branch or tag cannot stand in
+case "$([ -n "$RC_OID" ] && git ls-tree "$RC_OID" -- scripts/repo-config.sh | cut -d' ' -f1)" in
+  100644|100755) ;;
+  *) echo "FATAL: ${RC_REF:-the default branch} is not fetched or has no regular scripts/repo-config.sh" >&2; return 1 2>/dev/null || exit 1 ;;
+esac
+RC_SRC="$(git show "$RC_OID:scripts/repo-config.sh")" || { echo "FATAL: could not read the default-branch helper" >&2; return 1 2>/dev/null || exit 1; }
+eval "$RC_SRC"   # the commit that was checked; the checkout's copy is never sourced
+unset RC_TRUSTED_STATE RC_TRUSTED_CFG   # nothing carries over from an earlier run in this shell
+# Presence comes from the tree, not from a read: a blob that is listed but cannot be read is an
+# error, never "absent". RC_TRUSTED_STATE: absent = no config on the default branch; present = read.
+RC_ENT="$(git ls-tree "$RC_OID" -- .claude/repo-config.json)" || { echo "FATAL: could not list the default-branch tree" >&2; return 1 2>/dev/null || exit 1; }
+case "${RC_ENT%% *}" in
+  "") RC_TRUSTED_STATE=absent ;;
+  100644|100755)
+    RC_TRUSTED_CFG="$(git show "$RC_OID:.claude/repo-config.json")" && [ -n "$RC_TRUSTED_CFG" ] \
+      || { echo "FATAL: could not read the default-branch .claude/repo-config.json" >&2; return 1 2>/dev/null || exit 1; }
+    RC_TRUSTED_STATE=present ;;
+  *) echo "FATAL: the default-branch .claude/repo-config.json is not a regular file" >&2; return 1 2>/dev/null || exit 1 ;;
+esac
+DEFAULT_BRANCH="${RC_REF#refs/remotes/origin/}"
 if rc_has '.project'; then
-  source "$(git rev-parse --show-toplevel)/scripts/repo-config.sh"
-  OWNER_REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner); OWNER="${OWNER_REPO%%/*}"; REPO="${OWNER_REPO##*/}"
-
   PROJ_ID=$(rc_get '.project.id')
-  PROJ_NUMBER=$(rc_get '.project.number')
-  PROJ_OWNER=$(rc_get '.project.owner' "$OWNER")
   PRIORITY_FIELD=$(rc_get '.project.fields.priority.id')
 
-  # Verify presence + fetch project item ID (owner/repo derived at runtime)
-  ITEM_ID=$(gh api graphql -f query="{ repository(owner: \"$OWNER\", name: \"$REPO\") { issue(number: $NEW) { projectItems(first: 3) { nodes { id project { id } } } } } }" \
-    --jq ".data.repository.issue.projectItems.nodes[] | select(.project.id == \"$PROJ_ID\") | .id" | head -1)
-
-  # If empty, add manually (the board's auto-add workflow may be off):
-  if [ -z "$ITEM_ID" ] || [ "$ITEM_ID" = "null" ]; then
-    ITEM_ID=$(gh project item-add "$PROJ_NUMBER" --owner "$PROJ_OWNER" --url "$NEW_URL" --format json | jq -r .id)
-  fi
+  # Add the issue by node id (idempotent: a no-op that returns the existing item id
+  # if the board's auto-add already placed it). Do NOT rely on auto-add or on a
+  # `projectItems` lookup for field-setting: that lookup can return an item on the
+  # WRONG board when the issue sits on more than one. Resolve the node from the
+  # created issue's own URL — an org board can span several repos that reuse
+  # issue numbers, so a hard-coded repo would fetch the wrong issue.
+  NODE=$(gh issue view "$NEW_URL" --json id --jq .id)
+  ITEM_ID=$(gh api graphql -f query='mutation($p:ID!,$c:ID!){ addProjectV2ItemById(input:{projectId:$p, contentId:$c}){ item { id } } }' \
+    -f p="$PROJ_ID" -f c="$NODE" --jq '.data.addProjectV2ItemById.item.id')
 
   # Set Priority (mandatory when a board IS configured — resolve the option id from config by name):
   #   PRIORITY_OPT=$(rc_get ".project.fields.priority.options.$CHOSEN_PRIORITY")
@@ -671,7 +776,7 @@ If the issue lacks acceptance-criteria specificity, note it. If a board is confi
 - Does not apply `release-gate` or `security` labels speculatively — only when scope genuinely demands them
 - Does not create labels — if a needed label doesn't exist, it reports the gap and asks the user to confirm creation via `gh label create` before proceeding
 - Does not bypass Phase 6 preview for any reason
-- Does not do `gh issue create` with a missing `type:` or missing mandatory namespace labels that the repo defines; when a board is configured, also not with a missing milestone (where one applies) or missing priority
+- Does not do `gh issue create` with a missing `type:` or missing mandatory namespace labels that the repo defines; when a board is configured, also not with a missing priority. A missing **milestone** is NOT by itself a violation — it is legitimately unset for `release: future`, a stream whose next-boundary milestone has not been cut yet, or an unattended run that defers the deadline to human triage (see Phase 4 Step 2)
 - **Does not leave a configured project's Priority field UNSET** — when `rc_has '.project'` and the board has a Priority field, setting it is mandatory (Phase 7 Step 2). Labels alone are insufficient; the project field is a separate data plane that board views (and your repo's status skill, if present) read from. When no board is configured, there is no Priority field to set.
 - **Does not assume tasklist edits propagate to native sub-issue links** — the verification-and-fallback in Phase 7 Step 3 is mandatory.
 

@@ -49,7 +49,7 @@ Before dispatching the publish workflow, confirm:
 
    This is the same expression the publish workflow uses to build the tag prefix, so what you inspect and what it publishes cannot disagree.
 
-2. **The parent pin is current — refresh it BEFORE dispatching, never after.** The parent is digest-pinned, so the publish builds from whatever digest is committed *now*. If upstream has advanced and you dispatch first, you publish an image built from the stale digest, and §5's comparison against the freshly-resolved runtime index then mandates STOP — after the push has already happened, with a junk tag occupying that date. Re-resolve per §10 and land any change before §4.
+2. **The parent pin is current — confirm it BEFORE dispatching, never after.** Dependabot watches `infrastructure/docker/buildtools` and proposes the parent bump weekly, so the first check is that no Dependabot pull request for that directory is open and unmerged: `gh pr list --search "head:dependabot/docker/infrastructure/docker/buildtools" --state open`. Merge or close any that is open first, then pull and re-run item 1: a bump can move the tag as well as the digest, and the tag is the published prefix (§10). Merging publishes nothing; that happens in §4. The media-plane runtime stage pins the same Node image and gets its own Dependabot pull request (`head:dependabot/docker/services/media-plane`); that one is the runtime pin of §6. The parent is digest-pinned, so the publish builds from whatever digest is committed *now*. If upstream has advanced and you dispatch first, you publish an image built from the stale digest, and §5's comparison against the freshly-resolved runtime index then mandates STOP — after the push has already happened, with a junk tag occupying that date. Dependabot runs weekly and can lag upstream, so an absent pull request does not prove the pin is current: re-resolve per §10 as well, and land any change before §4.
 3. **No in-flight breaking change in the consumer.** Check `services/media-plane/Dockerfile` for any recent edits that depend on toolchain version specifics. If there's an in-flight PR touching the builder stage, coordinate with its author.
 4. **Alpine version is current.** `node:${NODE_TAG}` tracks alpine major lines automatically. Verify on Docker Hub that no critical advisories are outstanding for the current line.
 5. **No known broken packages.** Check the alpine-linux Bugtraq feed and CVE-tracking sources for advisories on the four apk packages we install.
@@ -243,6 +243,8 @@ In a new feature branch (e.g., `feature/<N>-bump-buildtools-<date>`):
    ```
 
    The runtime digest is mandatory and is revalidated in the same PR as the builder digest. If it is unchanged, do not churn the pin. Never substitute an amd64- or arm64-specific child manifest in the Dockerfile.
+
+   A new digest, or a new date in the `node-buildtools` tag, needs no edit to `.github/base-images.json`: the builder stage's pattern accepts any date. A new Node major does, in two pull requests. The publisher PR of §10 edits the `infrastructure/docker/buildtools/Dockerfile` entry. The consumer PR of this section then edits both `services/media-plane/Dockerfile` stages, because the published tag prefix and the runtime tag both carry the major. A different flavor or repository needs the same edits. Make each edit in the PR that changes the Dockerfile, then run `python3 .github/scripts/check-base-images.py`. See [Changing a Docker base image](../development.md#changing-a-docker-base-image).
 
 4. Run the local builder and final-image smokes:
 

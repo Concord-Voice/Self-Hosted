@@ -77,3 +77,6 @@ func RunAdminCtlWithWriterForTest(ctx context.Context, db *sql.DB, rdb *redis.Cl
 func UseServerAgentForTest(h *Handler, sock string) {
 	h.server.agent = unixClient(sock)
 }
+
+// ServerStepUpPrefix exposes the step-up handle key prefix for the ACL manifest test.
+const ServerStepUpPrefix = serverStepUpPrefix

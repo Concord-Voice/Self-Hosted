@@ -1,0 +1,12 @@
+{
+  "schema": 1,
+  "dockerfiles": {
+    "app.df": {
+      "stages": [
+        {
+          "scratch": true
+        }
+      ]
+    }
+  }
+}

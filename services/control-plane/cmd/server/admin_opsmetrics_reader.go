@@ -113,15 +113,44 @@ func (runtime *adminOpsMetricsReaderRuntime) Stop(ctx context.Context) error {
 	return nil
 }
 
+// reconcileAdminOpsMetricsReaderAtBoot revokes any reader credential an
+// unclean prior exit left behind. In migrations verify mode it writes nothing:
+// the reader role is a cluster resource the live colour is still using, and
+// disabling its login terminates that colour's reader sessions.
+func reconcileAdminOpsMetricsReaderAtBoot(
+	ctx context.Context,
+	migrationsVerify bool,
+	adminDB *sql.DB,
+	ensureReaderDisabled ensureAdminOpsMetricsReaderDisabledFunc,
+) error {
+	if ensureReaderDisabled == nil {
+		return errors.New("admin operations metrics reader reconciliation is incomplete")
+	}
+	if migrationsVerify {
+		return nil
+	}
+	return ensureReaderDisabled(ctx, adminDB)
+}
+
+// configureAdminOpsMetricsReader opens the restricted reader when both features
+// are enabled and otherwise disables its login. In migrations verify mode it
+// does neither and returns a stopped runtime whose Stop writes nothing: opening
+// rotates the shared role's password and closing or disabling sets NOLOGIN and
+// terminates every reader session, either of which breaks the live colour's
+// reader.
 func configureAdminOpsMetricsReader(
 	ctx context.Context,
 	cfg *config.Config,
 	adminDB *sql.DB,
+	migrationsVerify bool,
 	openReader openAdminOpsMetricsReaderFunc,
 	ensureReaderDisabled ensureAdminOpsMetricsReaderDisabledFunc,
 ) (*adminOpsMetricsReaderRuntime, error) {
 	if cfg == nil || openReader == nil || ensureReaderDisabled == nil {
 		return nil, errors.New("admin operations metrics reader configuration is incomplete")
+	}
+	if migrationsVerify {
+		return &adminOpsMetricsReaderRuntime{stopped: true}, nil
 	}
 	if !cfg.AdminConsoleEnabled || !cfg.OpsMetrics.Enabled {
 		if err := ensureReaderDisabled(ctx, adminDB); err != nil {

@@ -37,6 +37,11 @@ inside a transaction block. A file whose **only** statement is a
 `CREATE INDEX CONCURRENTLY` is legal, because that single statement has
 nothing to be implicitly wrapped with (000139).
 
+`migrationrunner.ReadStatus` and `Verify` (behind `control-plane migrations
+status` and `MIGRATIONS_MODE=verify`) are read-only and must never build the
+migrate driver, because building it takes the advisory lock and can create the
+version table.
+
 ## Activity History (migration 000087)
 
 Migration 000087 adds these eight columns to `user_presence_settings`:
