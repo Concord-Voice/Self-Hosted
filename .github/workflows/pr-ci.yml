@@ -844,6 +844,12 @@ jobs:
           bash scripts/tests/test-check-lockfile-registries.sh
           python3 scripts/ci/check-lockfile-registries.py
 
+      # The weekly npm lockfile flush (#272) runs only on its cron, so a broken
+      # step would look like "nothing to update". This runs its real refresh and
+      # render steps against a stub npm and locks its credential split.
+      - name: npm lockfile flush workflow behaves
+        run: bash scripts/tests/test-npm-lockfile-flush.sh
+
       # Runs when a workflow_lint path in .github/ci/scan-relevance.yml changes;
       # a new package.json, go.mod or requirements root alone does not start it.
       # Fails if a tracked update root is in no block of .github/dependabot.yml,

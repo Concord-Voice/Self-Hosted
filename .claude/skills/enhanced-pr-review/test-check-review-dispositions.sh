@@ -27,7 +27,8 @@ cat > "$TMP/repo-config.json" <<'ROSTER'
   {"match":"coderabbit","name":"CodeRabbit","login":"coderabbitai[bot]"},
   {"name":"Semgrep SAST","login":"github-actions[bot]","marker":"<!-- semgrep-results -->"},
   {"name":"Release Classifier","login":"github-actions[bot]","marker":"<!-- classify-release -->"},
-  {"match":"copilot","name":"Copilot Code Review","login":"copilot-pull-request-reviewer[bot]"},
+  {"match":"copilot","name":"Copilot Code Review","login":["copilot-pull-request-reviewer[bot]","Copilot"]},
+  {"match":"chatgpt-codex-connector","name":"Codex","login":"chatgpt-codex-connector[bot]"},
   {"match":"ci-machine","name":"CI Machine","login":"ci-machine"}
 ]}
 ROSTER
@@ -75,7 +76,7 @@ run_out() {
     printf '%s' "$json" > "$TMP/f.json"
     local out
     out=$(CV_REVIEW_FIXTURE="$TMP/f.json" CV_SKIP_EXISTENCE_CHECKS=1 "$SCRIPT" 999 2>&1)
-    if printf '%s' "$out" | grep -qF -- "$want"; then
+    if printf '%s' "$out" | grep -F -- "$want" >/dev/null; then
         printf '  ok   %-52s\n' "$name"
         pass=$((pass + 1))
     else
@@ -183,11 +184,71 @@ run "BLOCK: zero threads, bot comments, NO reconciliation post" 1 \
 run "ok: zero threads but reconciliation post present" 0 \
     "$(doc "" "$BOT_TOP,$RECON")"
 
+# Regression: grep is allowed to stop reading after an early fixed-string
+# match. The PATH shim makes that behavior deterministic across grep versions;
+# it reads only a 4 KiB prefix, then exits, so the gate's long-body printf gets
+# SIGPIPE under pipefail. The match is real (Gitar is in the prefix), and the
+# existing omitted-reviewer case below remains the negative control.
+cat > "$TMP/grep" <<'GREPSHIM'
+#!/bin/bash
+if [[ "$#" -eq 3 ]] && [[ "$1" = "-qiF" ]] && [[ "$2" = "--" ]] && [[ "$3" = "Gitar" ]]; then
+    prefix=$(dd bs=4096 count=1 2>/dev/null)
+    /usr/bin/grep -qiF -- Gitar <<<"$prefix"
+    exit $?
+fi
+exec /usr/bin/grep "$@"
+GREPSHIM
+chmod +x "$TMP/grep"
+LONG_RECON_PADDING=$(printf '%*s' 131072 '' | tr ' ' x)
+LONG_RECON=$(printf '%s%s%s' \
+    '{"author":{"__typename":"User","login":"dev"},"authorAssociation":"OWNER","body":"<!-- cv-review-reconciliation -->\\n| Gitar | ' \
+    "$LONG_RECON_PADDING" \
+    '"}')
+LONG_FIXTURE=$(doc "" "$BOT_TOP,$LONG_RECON")
+printf '%s' "$LONG_FIXTURE" > "$TMP/f.json"
+LONG_OUT=$(CV_REVIEW_FIXTURE="$TMP/f.json" CV_SKIP_EXISTENCE_CHECKS=1 PATH="$TMP:$PATH" "$SCRIPT" 999 2>&1)
+LONG_GOT=$?
+if [[ "$LONG_GOT" -eq 0 ]]; then
+    printf '  ok   %-52s (exit %d)\n' \
+        "regression: early grep match does not false-block" "$LONG_GOT"
+    pass=$((pass + 1))
+else
+    printf '  FAIL %-52s (want 0, got %d)\n' \
+        "regression: early grep match does not false-block" "$LONG_GOT"
+    printf '%s\n' "$LONG_OUT" | sed 's/^/         | /'
+    fail=$((fail + 1))
+fi
+
 run "BLOCK: reconciliation post omits a bot that spoke" 1 \
     "$(doc "" "$BOT_TOP,$(botsay sonarqubecloud 'QG passed'),$RECON")"
 
 run "BLOCK: two reconciliation posts (must edit in place)" 1 \
     "$(doc "" "$BOT_TOP,$RECON,$RECON")"
+
+# --- Assertion 3b: a reviewer that owns SEVERAL logins -----------------------
+# `.bots[].login` is a string OR an array of them. Copilot posts inline comments
+# as `Copilot` and review summaries as `copilot-pull-request-reviewer[bot]`, so
+# the roster was widened to carry both — and every roster read still fed the
+# value straight to `ascii_downcase`, which raises `explode input must be a
+# string` on an array and ABORTS THE WHOLE JQ PROGRAM. The script caught that as
+# JQERR and exited 2 (UNKNOWN) for every PR in the repo until this was fixed.
+#
+# It shipped green because THIS SUITE's roster still spelled that entry as a
+# string, so the array form the real `.claude/repo-config.json` carries was
+# exercised by nothing. The roster above now matches the real one; these two
+# cases are what hold it there.
+COPILOT_INLINE='{"author":{"__typename":"Bot","login":"Copilot"},"body":"missing null check"}'
+RECON_COPILOT='{"author":{"__typename":"User","login":"dev"},"authorAssociation":"OWNER","body":"<!-- cv-review-reconciliation -->\n| Copilot Code Review |"}'
+
+# Resolves to the DISPLAY NAME via the second element of the array. Before the
+# fix this exited 2, not 0 — and 2 is UNKNOWN, which is not a refusal.
+run "ok: array-login reviewer resolves to its display name" 0 \
+    "$(doc "" "$COPILOT_INLINE,$RECON_COPILOT")"
+
+# And it must still BLOCK when the post omits it — proving the case above passes
+# because the name was matched, not because the reviewer was skipped entirely.
+run "BLOCK: post omits the array-login reviewer that spoke" 1 \
+    "$(doc "" "$COPILOT_INLINE,$RECON")"
 
 # `superseded` was deleted: it validated identically to `rejected`, no fixture
 # ever exercised it, and nothing branched on it. It must now read as unknown.
@@ -275,6 +336,15 @@ run "BLOCK: two markers in one comment require BOTH personas" 1 \
 run "ok: naming both personas of a two-marker comment passes" 0 \
     "$(doc "" "$(botsay github-actions '<!-- semgrep-results --> and <!-- classify-release --> in one body'),$(human '<!-- cv-review-reconciliation -->\n| Semgrep SAST | Release Classifier |')")"
 
+# A rostered machine account can hold OWNER/MEMBER (an org bot user). Its own
+# reconciliation post must not count, or it could sign off on its own review.
+machinemember() { printf '{"author":{"__typename":"User","login":"ci-machine"},"authorAssociation":"MEMBER","body":"%s"}' "$1"; }
+run "BLOCK: a rostered member account cannot post the reconciliation" 1 \
+    "$(doc "" "$(machinemember 'SECURITY: hardcoded key'),$(machinemember '<!-- cv-review-reconciliation -->\n| CI Machine |')")"
+
+run "ok: a human reconciliation still counts beside a machine one" 0 \
+    "$(doc "" "$(machinemember '<!-- cv-review-reconciliation -->\n| CI Machine |'),$(human '<!-- cv-review-reconciliation -->\n| CI Machine |')")"
+
 # --- Roster validation: an alias is a key, so it is validated before trust ---
 badroster() { # badroster <name> <expected-exit> <roster-json>
     printf '%s' "$3" > "$TMP/bad.json"
@@ -293,11 +363,257 @@ badroster "STOP: newline in name splits into a 1-char alias" 2 \
 badroster "STOP: single-char match donates its alias to the fleet" 2 \
     '{"bots":[{"match":"o","name":"Gitar","login":"x"}]}'
 
+badroster "STOP: a 3-char match is too broad for a substring test" 2 \
+    '{"bots":[{"match":"bot","name":"Gitar","login":"x"}]}'
+
+ambig_json=$(doc "" "$(botsay gitar-bot 'verdict'),$(botsay security-bot 'SECURITY: hardcoded key'),$(human '<!-- cv-review-reconciliation -->\n| Gitar |')")
+printf '%s' '{"bots":[{"match":"-bot","name":"Gitar","login":"x"}]}' > "$TMP/ambig.json"
+printf '%s' "$ambig_json" > "$TMP/ambig-f.json"
+CV_REVIEW_FIXTURE="$TMP/ambig-f.json" CV_REPO_CONFIG="$TMP/ambig.json" CV_SKIP_EXISTENCE_CHECKS=1 "$SCRIPT" 999 >/dev/null 2>&1; got=$?
+if [[ "$got" -eq 2 ]]; then printf '  ok   %-52s (exit %d)\n' "STOP: a match that hits two logins on the PR" "$got"; pass=$((pass+1))
+else printf '  FAIL %-52s (want 2, got %d)\n' "STOP: a match that hits two logins on the PR" "$got"; fail=$((fail+1)); fi
+# One reviewer posting as two of its own listed logins is not a clash.
+own_json=$(doc "" "$(botsay copilot-pull-request-reviewer 'verdict'),$(botsay Copilot 'note'),$(human '<!-- cv-review-reconciliation -->\n| Copilot |')")
+printf '%s' '{"bots":[{"match":"copilot","name":"Copilot","login":["copilot-pull-request-reviewer[bot]","Copilot"]}]}' > "$TMP/own.json"
+printf '%s' "$own_json" > "$TMP/own-f.json"
+err=$(CV_REVIEW_FIXTURE="$TMP/own-f.json" CV_REPO_CONFIG="$TMP/own.json" CV_SKIP_EXISTENCE_CHECKS=1 "$SCRIPT" 999 2>&1 >/dev/null); rc=$?
+if [[ "$rc" -eq 0 && "$err" != *"more than one account"* ]]; then printf '  ok   %-52s\n' "no STOP: a match hitting only the entry's own logins"; pass=$((pass+1))
+else printf '  FAIL %-52s (exit %d)\n' "no STOP: a match hitting only the entry's own logins" "$rc"; printf '%s\n' "$err" | sed 's/^/         | /'; fail=$((fail+1)); fi
+
 badroster "STOP: malformed roster is loud, not silent login-only" 2 \
     '{"bots":[{"match":'
 
 badroster "ok: a well-formed roster is accepted" 1 \
     '{"bots":[{"match":"gitar","name":"Gitar","login":"gitar-bot[bot]"}]}'
+
+# --- Login SHAPE: the same abort one level down (found in review) ----------------
+# `[null,"Copilot"]` survives the array normalisation and still reaches
+# `ascii_downcase`, aborting the whole jq program. The validator refuses it
+# instead. Both outcomes exit 2, so `badroster` is VACUOUS here — it passes with
+# or without the validator, which is tests.md § Vacuity's "a diagnosis and a
+# crash are both non-zero". Assert the message, and mutation-prove it: reverting
+# the validator's login arm turns all three red on the message, never the code.
+# The rejected alternative was `map(select(type == "string"))` at the read sites;
+# that drops the malformed login, unrosters its reviewer, and passes — a false
+# PASS is strictly worse here than a loud UNKNOWN.
+badroster_msg() { # badroster_msg <name> <expected-exit> <expected-substring> <roster-json>
+    local name="$1" want="$2" msg="$3"
+    printf '%s' "$4" > "$TMP/bad.json"
+    printf '%s' "$(doc "" "$(botsay gitar-bot 'verdict'),$(human '<!-- cv-review-reconciliation -->\nNothing to see here.')")" > "$TMP/f.json"
+    local out; out=$(CV_REVIEW_FIXTURE="$TMP/f.json" CV_REPO_CONFIG="$TMP/bad.json" CV_SKIP_EXISTENCE_CHECKS=1 "$SCRIPT" 999 2>&1); local got=$?
+    if [[ "$got" -eq "$want" ]] && printf '%s' "$out" | grep -F "$msg" >/dev/null; then
+        printf '  ok   %-52s (exit %d)\n' "$name" "$got"; pass=$((pass+1))
+    else
+        printf '  FAIL %-52s (want %d + msg %s)\n' "$name" "$want" "$msg"; printf '%s\n' "$out" | sed 's/^/         | /'; fail=$((fail+1))
+    fi
+}
+
+badroster_msg "STOP: null inside a login array is named, not aborted" 2 \
+    'login element types [null, string]' \
+    '{"bots":[{"match":"copilot","name":"Copilot Code Review","login":[null,"Copilot"]}]}'
+
+badroster_msg "STOP: a scalar non-string login is refused, not coerced" 2 \
+    'login element types [number]' \
+    '{"bots":[{"match":"gitar","name":"Gitar","login":12}]}'
+
+badroster_msg "STOP: a nested login array is refused" 2 \
+    'login element types [array]' \
+    '{"bots":[{"match":"gitar","name":"Gitar","login":[["gitar-bot[bot]"]]}]}'
+
+# Found in review: each of these unrostered a reviewer and exited 0.
+badroster_msg "STOP: a non-array .bots is refused, not read as empty" 2 \
+    'not an array' '{"bots":{"match":"gitar","name":"Gitar","login":"gitar-bot[bot]"}}'
+badroster_msg "STOP: a match with a space can never match a login" 2 \
+    'can never match' '{"bots":[{"match":"CI Reviewer","name":"CI Reviewer"}]}'
+badroster_msg "STOP: a match with an underscore can never match a login" 2 \
+    'can never match' '{"bots":[{"match":"ci_reviewer","name":"CI Reviewer"}]}'
+badroster_msg "STOP: a non-string name is refused" 2 \
+    'must be a string' '{"bots":[{"match":"gitar","name":7,"login":"gitar-bot[bot]"}]}'
+
+# The other direction: absent and explicit-null logins are LEGAL (an entry may
+# match on `.match` alone), so the new arm must not widen into them.
+badroster "ok: an absent login is not a malformed one" 1 \
+    '{"bots":[{"match":"gitar","name":"Gitar"}]}'
+
+badroster "ok: an explicit null login is not a malformed one" 1 \
+    '{"bots":[{"match":"gitar","name":"Gitar","login":null}]}'
+
+# --- Login USABILITY: the same false PASS with no type error (found in review) ---
+# `[]`, `[""]`, `["  "]` and the scalar `""` all normalise cleanly and match
+# nothing, leaving the entry unrostered. A BOT-typed reviewer survives that (the
+# gate falls back to the bare login) but a machine reviewer GraphQL types as
+# `User` is in scope ONLY because it is rostered — so it silently stops owing a
+# coverage row and the gate reports CLEAN. Measured at that placement before
+# fixing: exit 0 on `[]` / `[""]` / `["  "]` / `""`, exit 1 on `["Copilot"]`.
+# A bot-typed probe refutes nothing here, which is why the first probe missed it.
+badroster_msg "STOP: an empty login array is refused, not silently unrostered" 2 \
+    'declares no login alias at all' \
+    '{"bots":[{"name":"Copilot Code Review","login":[]}]}'
+
+badroster_msg "STOP: a blank-string login array is refused" 2 \
+    'can never match' \
+    '{"bots":[{"name":"Copilot Code Review","login":[""]}]}'
+
+badroster_msg "STOP: a whitespace-only login is refused" 2 \
+    'can never match' \
+    '{"bots":[{"name":"Copilot Code Review","login":["  "]}]}'
+
+# The scalar form was ALREADY a false PASS on main — a pre-existing hole this arm
+# closes, not a regression introduced by the array normalisation.
+badroster_msg "STOP: a scalar empty-string login is refused" 2 \
+    'can never match' \
+    '{"bots":[{"name":"Copilot Code Review","login":""}]}'
+
+# REVERSED IN ROUND 6, and left here as the reversal rather than deleted. This
+# case used to assert the opposite -- "one usable login is enough, blank siblings
+# are inert" -- and that was a recorded decision, not an oversight. It was wrong.
+# A multi-login entry exists BECAUSE one reviewer posts under several logins,
+# so a malformed member silently drops the surface it was added to
+# cover, and the entry keeps passing on the member that happens to be spelled
+# right. Every declared alias must be usable.
+badroster_msg "STOP: a blank sibling DOES spoil the entry (reversed in round 6)" 2 \
+    'can never match' \
+    '{"bots":[{"match":"gitar","name":"Gitar","login":["","gitar-bot[bot]"]}]}'
+
+# The finding's own fixture: valid review-surface login, malformed inline one.
+# Measured before the fix: exit 0, with a User-typed `Copilot` comment matching
+# neither stored value and leaving scope entirely.
+badroster_msg "STOP: a mixed array drops the surface its sibling covers" 2 \
+    'can never match' \
+    '{"bots":[{"name":"Copilot Code Review","login":["copilot-pull-request-reviewer[bot]","Copilot "]}]}'
+
+# THE FLOOR for the reversal: a correctly-spelled multi-login entry -- the real
+# multi-login shape -- must still be accepted, or the stricter rule refuses the very
+# roster it was written to protect.
+badroster "ok: a correctly spelled multi-login entry is still accepted" 1 \
+    '{"bots":[{"match":"copilot","name":"Copilot Code Review","login":["copilot-pull-request-reviewer[bot]","Copilot"]}]}'
+
+# The usability check runs AFTER the consumers' own normalisation, because
+# checking the raw string is the same bug one step earlier: `loginset` applies
+# `ascii_downcase | sub("\\[bot\\]$";"")`, so `["[bot]"]` is non-blank at
+# the validator and EMPTY at the read path (found in review — within one
+# commit of the raw check landing). Measured before fixing: exit 0 on all three
+# shapes below with a User-typed machine reviewer.
+badroster_msg "STOP: a bare bot suffix normalises to nothing and is refused" 2 \
+    'can never match' \
+    '{"bots":[{"name":"Copilot Code Review","login":["[bot]"]}]}'
+
+badroster_msg "STOP: a scalar bare bot suffix is refused too" 2 \
+    'can never match' \
+    '{"bots":[{"name":"Copilot Code Review","login":"[bot]"}]}'
+
+badroster_msg "STOP: whitespace plus a bot suffix still normalises to nothing" 2 \
+    'can never match' \
+    '{"bots":[{"name":"Copilot Code Review","login":["  [bot]"]}]}'
+
+# THE FLOOR for that arm. Every real roster login ends in `[bot]`, so an arm that
+# rejected the suffix itself rather than a login that is ONLY the suffix would
+# refuse the entire shipped roster. This case fails first if that happens.
+badroster "ok: a real bot login survives the suffix normalisation" 1 \
+    '{"bots":[{"match":"gitar","name":"Gitar","login":["gitar-bot[bot]","sonarqubecloud[bot]"]}]}'
+
+# ROUND 4, and the reason the arm above is now DERIVED rather than patched.
+# `["Copilot "]` was blank-STRIPPED by the old validator (non-empty, accepted)
+# and whitespace-PRESERVING in `loginset`, so the `== "copilot"` missed it
+# and the reviewer went unrostered. That is the same validator/consumer
+# divergence as the `[bot]` round, in the opposite direction -- which is what
+# retired approximation in favour of the matching rule itself: after
+# normalisation an alias must still be a possible GitHub login.
+badroster_msg "STOP: a trailing-space alias can never match, and is refused" 2 \
+    'can never match' \
+    '{"bots":[{"name":"Copilot Code Review","login":["Copilot "]}]}'
+
+badroster_msg "STOP: a leading-space alias is refused" 2 \
+    'can never match' \
+    '{"bots":[{"name":"Copilot Code Review","login":[" Copilot"]}]}'
+
+badroster_msg "STOP: a scalar padded alias is refused too" 2 \
+    'can never match' \
+    '{"bots":[{"name":"Copilot Code Review","login":"Copilot "}]}'
+
+badroster_msg "STOP: an interior space can never match either" 2 \
+    'can never match' \
+    '{"bots":[{"name":"Copilot Code Review","login":["Co pilot"]}]}'
+
+# FLOOR for the derived rule: it must still admit every shape the SHIPPED roster
+# uses -- hyphens, digits, and a plain lowercase alias. An over-strict regex here
+# refuses the whole roster and takes every PR in the repo to exit 2, which is the
+# failure this PR exists to fix, re-entered through the fix itself.
+badroster "ok: hyphens and digits in a real login are admitted" 1 \
+    '{"bots":[{"match":"gitar","name":"Gitar","login":["chatgpt-codex-connector[bot]","github-actions[bot]","coderabbitai[bot]","gitar-bot[bot]","Copilot","s0nar2"]}]}'
+
+# ROUND 5, and the character class was never the hole -- the ANCHOR was. jq's
+# Oniguruma `$` also matches BEFORE a trailing newline, so `^[a-z0-9][a-z0-9-]*$`
+# accepted `"copilot\\n"` while `\\A...\\z` refuses it. Measured directly:
+#   ["copilot\\n"] | test("^[a-z0-9][a-z0-9-]*$") -> true
+#   ["copilot\\n"] | test("\\A[a-z0-9][a-z0-9-]*\\z") -> false
+# and the fixture reached exit 0 before the anchor change. Same class as the
+# whitespace round: a character the reads PRESERVE and no login contains.
+badroster_msg "STOP: a trailing newline alias can never match" 2 \
+    'can never match' \
+    '{"bots":[{"name":"Copilot Code Review","login":["Copilot\n"]}]}'
+
+# NOT a discriminating case for the anchor, and labelled so nobody reads it as
+# one: `$` can only match before a TRAILING newline, so an embedded one is
+# refused under both anchors and this case stays GREEN under the mutant. It is
+# kept because refusing it is real behaviour worth pinning -- the case above is
+# the one that goes red. Measured: mutant kills 1 of these 2.
+badroster_msg "STOP: an embedded newline alias is refused (both anchors)" 2 \
+    'can never match' \
+    '{"bots":[{"name":"Copilot Code Review","login":["Copilot\nevil"]}]}'
+
+# THE DECLINED BOUNDARY, pinned on purpose. Round 5 also asked for GitHub's
+# signup grammar -- no terminal or doubled hyphen. Declined: `["Copilot-"]` is a
+# wrong NAME, identical in kind and consequence to `["Copilto"]`, which no
+# grammar catches. A newline is an invisible accident this gate can refuse; a
+# misspelling is not, and only the roster's author can see it. Encoding the
+# grammar would shrink an unclosable set while binding the gate to an external
+# policy, in the direction that refuses a real roster.
+# If you deliberately tighten this later, THIS case goes red first -- read the
+# rationale in check-review-dispositions.sh before changing the expectation.
+badroster "ok: an ungrammatical login is ACCEPTED (typo class, not catchable)" 1 \
+    '{"bots":[{"match":"gitar","name":"Gitar","login":["Copilot-","co--pilot"]}]}'
+
+# ROUND 7 (Gitar): the VALIDATOR ITSELF must fail closed. Its jq used
+# `2>/dev/null` and never read `$?`, so a roster whose `.bots` member is not an
+# object made the validator ERROR, produce no findings, and -- under
+# `set -euo pipefail` -- kill the script at a bare `exit 5` with ZERO output.
+# Not exit 2, so nothing downstream reads it as UNKNOWN, and the operator sees
+# nothing. A validator that cannot run must never read as a clean roster.
+badroster_msg "STOP: a validator jq that ERRORS is exit 2, not a silent crash" 2 \
+    'could not validate the reviewer roster' \
+    '{"bots":[42]}'
+
+badroster_msg "STOP: a string roster member also fails the validator closed" 2 \
+    'could not validate the reviewer roster' \
+    '{"bots":["not-an-object"]}'
+
+# ROUND 8 (CodeRabbit): the same false PASS through the OTHER selector. An entry
+# with no `.login` is legal -- match-only is a real shape -- but the match arm
+# stringifies with `tostring`, so `match: false` became the 5-character "false"
+# and passed, while `matchstr` in the read path takes STRINGS ONLY and returns
+# "". The entry selected nothing and a User-typed reviewer relying on it left
+# scope. Measured before the fix: all three reported CLEAN.
+badroster_msg "STOP: no login and a boolean match selects nothing" 2 \
+    'has no usable selector' \
+    '{"bots":[{"name":"Copilot Code Review","match":false}]}'
+
+badroster_msg "STOP: no login and NO match selects nothing" 2 \
+    'has no usable selector' \
+    '{"bots":[{"name":"Copilot Code Review"}]}'
+
+badroster_msg "STOP: no login and a null match selects nothing" 2 \
+    'has no usable selector' \
+    '{"bots":[{"name":"Copilot Code Review","match":null}]}'
+
+# FLOORS for round 8 -- both legal shapes must survive, or the arm refuses real
+# rosters. A match-only entry IS a supported shape, and every shipped entry is
+# login-only; refusing either would take every PR in the repo to exit 2.
+badroster "ok: a match-only entry with a usable match is accepted" 1 \
+    '{"bots":[{"name":"Gitar Reviewer","match":"gitar"}]}'
+
+badroster "ok: a login-only entry needs no match at all" 1 \
+    '{"bots":[{"name":"Gitar Reviewer","login":"gitar-bot[bot]"}]}'
 
 # --- Roster degradation: no config means login-only matching ----------------
 # Not merely "safe" — correct. An unregistered reviewer has no display name to
@@ -356,7 +672,7 @@ run "ok: MEMBER association is accepted" 0 \
 # coverage. These three shim `gh` to exercise it for real.
 gh_shim() { # gh_shim <issue-view-behavior>
     cat > "$TMP/gh" <<SHIM
-#!/bin/sh
+#!/bin/bash
 case "\$1 \$2" in
   "repo view")  echo "example-org/example-repo"; exit 0 ;;
   "issue view") $1 ;;
@@ -395,7 +711,7 @@ run_shim "Assertion 2: deferred ref is a PR, not an issue -> block" 1 "$DEFER_DO
 # The earlier shim fails on the FIRST gh call, so only the repo-resolution guard
 # was exercised; the graphql guard was never reached.
 cat > "$TMP/gh" <<'SHIM'
-#!/bin/sh
+#!/bin/bash
 case "$1 $2" in
   "repo view") echo "example-org/example-repo"; exit 0 ;;
   *) echo "error connecting to api.github.com" >&2; exit 1 ;;
@@ -410,6 +726,289 @@ else printf '  FAIL %-52s (want 2, got %d)\n' "FAIL-CLOSED: graphql failure is e
 out=$(CV_REVIEW_FIXTURE="$TMP/does-not-exist.json" "$SCRIPT" 999 2>&1); got=$?
 if [ "$got" -eq 2 ]; then printf '  ok   %-52s (exit 2)\n' "FAIL-CLOSED: unreadable fixture is exit 2"; pass=$((pass+1))
 else printf '  FAIL %-52s (want 2, got %d)\n' "FAIL-CLOSED: unreadable fixture is exit 2" "$got"; fail=$((fail+1)); fi
+
+# --- Live-path pagination ----------------------------------------------------
+# The live path fetches each connection with `gh api graphql --paginate --slurp`,
+# which hands back an ARRAY of pages. These cases shim that array directly: gh's
+# own cursor-following is gh's problem, but whether this script MERGES every page
+# is ours, and a merge that silently kept only the first page would still exit 0
+# on a clean PR. Every case here puts the deciding evidence on page TWO.
+
+# thread2 <id> <resolved> <resolvedBy> <comments-json>  — thread() hardcodes id "T"
+thread2() {
+    printf '{"id":"%s","isResolved":%s,"resolvedBy":{"login":"%s"},"path":"a/b.go","line":12,"comments":{"pageInfo":{"hasNextPage":false},"nodes":[%s]}}' "$1" "$2" "$3" "$4"
+}
+tpage() { printf '{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":%s},"nodes":[%s]}}}}}' "$1" "$2"; }
+cpage() { printf '{"data":{"repository":{"pullRequest":{"comments":{"pageInfo":{"hasNextPage":%s},"nodes":[%s]}}}}}' "$1" "$2"; }
+rpage() { printf '{"data":{"repository":{"pullRequest":{"reviews":{"pageInfo":{"hasNextPage":%s},"nodes":[%s]}}}}}' "$1" "$2"; }
+
+# Discriminates on the query text, in the same order the script's own queries are
+# distinguishable: the nested one first (it alone says `node(id:`), then threads,
+# then reviews, and conversation comments last as the fallback.
+paginate_shim() {
+    cat > "$TMP/gh" <<'SHIM'
+#!/bin/bash
+case "$1 $2" in
+  "repo view") echo "example-org/example-repo"; exit 0 ;;
+esac
+q=""
+for a in "$@"; do case "$a" in query=*) q="$a" ;; esac; done
+case "$q" in
+  *"node(id:"*)        f=threadcomments ;;
+  *reviewThreads*)     f=threads ;;
+  *"reviews(first"*)   f=reviews ;;
+  *)                   f=comments ;;
+esac
+if [[ -f "$CV_TEST_PAGES/$f.json" ]] && [[ "$(cat "$CV_TEST_PAGES/$f.json")" != "MISSING-FIXTURE-SENTINEL" ]]; then
+  cat "$CV_TEST_PAGES/$f.json"; exit 0
+fi
+echo "no fixture for $f" >&2; exit 1
+SHIM
+    chmod +x "$TMP/gh"
+}
+
+run_pages() { # run_pages <name> <expected-exit> <threads-array> <comments-array> <reviews-array> [threadcomments-array]
+    local name="$1" want="$2"
+    mkdir -p "$TMP/pages"
+    printf '%s' "$3" > "$TMP/pages/threads.json"
+    printf '%s' "$4" > "$TMP/pages/comments.json"
+    printf '%s' "$5" > "$TMP/pages/reviews.json"
+    if [[ -n "${6:-}" ]]; then printf '%s' "$6" > "$TMP/pages/threadcomments.json"
+    else rm -f "$TMP/pages/threadcomments.json"; fi
+    paginate_shim
+    local out; out=$(CV_TEST_PAGES="$TMP/pages" PATH="$TMP:$PATH" "$SCRIPT" 999 2>&1); local got=$?
+    if [[ "$got" -eq "$want" ]]; then printf '  ok   %-52s (exit %d)\n' "$name" "$got"; pass=$((pass+1))
+    else printf '  FAIL %-52s (want %d, got %d)\n' "$name" "$want" "$got"; printf '%s\n' "$out" | sed 's/^/         | /'; fail=$((fail+1)); fi
+}
+
+CLEAN_T="$(thread2 T1 true 'coderabbitai[bot]' "$BOT,$(human '<!-- cv-disposition: accepted evidence: e5c34d0 -->')")"
+NAKED_T="$(thread2 T2 true 'coderabbitai[bot]' "$BOT")"
+
+# THE case this whole change exists for: page 1 is clean, the violation is on
+# page 2. A merge that drops page 2 reports the PR clean and exits 0.
+run_pages "pagination: a violation on thread page 2 still blocks" 1 \
+    "[$(tpage true "$CLEAN_T"),$(tpage false "$NAKED_T")]" \
+    "[$(cpage false "$BOT_TOP,$RECON")]" \
+    "[$(rpage false "")]"
+
+# Same shape on the two other connections. Assertion 3 needs every bot that spoke
+# anywhere to be named, so a dropped page-2 bot makes the gate report clean over
+# a reviewer nobody reconciled.
+run_pages "pagination: a bot on comment page 2 must be reconciled" 1 \
+    "[$(tpage false "$CLEAN_T")]" \
+    "[$(cpage true "$RECON"),$(cpage false "$(botsay 'copilot-pull-request-reviewer' 'looks fine')")]" \
+    "[$(rpage false "")]"
+
+run_pages "pagination: a bot on review page 2 must be reconciled" 1 \
+    "[$(tpage false "$CLEAN_T")]" \
+    "[$(cpage false "$BOT_TOP,$RECON")]" \
+    "[$(rpage true ""),$(rpage false "$(botsay 'copilot-pull-request-reviewer' 'looks fine')")]"
+
+# ...and the same surfaces, fully reconciled, are green — otherwise the three
+# cases above would pass on a gate that simply blocks everything.
+RECON3='{"author":{"__typename":"User","login":"dev"},"authorAssociation":"OWNER","body":"<!-- cv-review-reconciliation -->\n| CodeRabbit | Gitar | Copilot Code Review |"}'
+run_pages "pagination: page 2 reconciled on every surface is green" 0 \
+    "[$(tpage true "$CLEAN_T"),$(tpage false "")]" \
+    "[$(cpage true "$BOT_TOP,$RECON3"),$(cpage false "$(botsay 'copilot-pull-request-reviewer' 'looks fine')")]" \
+    "[$(rpage false "")]"
+
+# NESTED connection: --paginate follows only the outermost cursor, so a thread
+# with >100 comments needs its own pass. The disposition lives on comment page 2;
+# without the nested fetch the thread reads as undispositioned.
+NESTED_T="$(printf '{"id":"T9","isResolved":true,"resolvedBy":{"login":"coderabbitai[bot]"},"path":"a/b.go","line":12,"comments":{"pageInfo":{"hasNextPage":true},"nodes":[%s]}}' "$BOT")"
+run_pages "pagination: a disposition on thread-comment page 2 is found" 0 \
+    "[$(tpage false "$NESTED_T")]" \
+    "[$(cpage false "$BOT_TOP,$RECON")]" \
+    "[$(rpage false "")]" \
+    "[{\"data\":{\"node\":{\"comments\":{\"pageInfo\":{\"hasNextPage\":true},\"nodes\":[$BOT]}}}},{\"data\":{\"node\":{\"comments\":{\"pageInfo\":{\"hasNextPage\":false},\"nodes\":[$(human '<!-- cv-disposition: accepted evidence: e5c34d0 -->')]}}}}]"
+
+# Page size: Linux caps one argv string at 128 KiB, so pages handed to jq as
+# --argjson made a large PR exit 2 (UNKNOWN) instead of being read. One ~200 KB
+# review page and one ~200 KB nested thread-comment page must still go green.
+BIG_BODY="$(head -c 200000 /dev/zero | tr '\0' 'x')"
+run_pages "pagination: pages over 128 KiB are still read" 0 \
+    "[$(tpage false "$NESTED_T")]" \
+    "[$(cpage false "$BOT_TOP,$RECON3")]" \
+    "[$(rpage false "$(botsay 'copilot-pull-request-reviewer' "$BIG_BODY")")]" \
+    "[{\"data\":{\"node\":{\"comments\":{\"pageInfo\":{\"hasNextPage\":false},\"nodes\":[$(botsay 'coderabbitai[bot]' "$BIG_BODY"),$(human '<!-- cv-disposition: accepted evidence: e5c34d0 -->')]}}}}]"
+
+# Found in review: each of these exited 0 over a surface that was never read.
+run_pages "FAIL-CLOSED: an empty nested comment fetch is a STOP" 2 \
+    "[$(tpage false "$NESTED_T")]" \
+    "[$(cpage false "$BOT_TOP,$RECON")]" \
+    "[$(rpage false "")]" \
+    "[]"
+
+# Fail-closed still holds per connection. An error envelope on a LATER page is
+# the dangerous one: page 1 parses and only page 2 carries the null.
+#
+# Asserted on the MESSAGE, not just the exit code, and that is the point. jq's
+# indexing strictness makes the assembly step throw on a null page all by
+# itself, so an exit-2-only assertion passes with the per-page probe deleted —
+# it would be pinning a side effect of `null | .reviewThreads` rather than the
+# guard. One `// empty` or `?` added to that jq for robustness turns the side
+# effect into a fail-OPEN, and the exit-code test would still be green. Naming
+# the guard in the assertion is what keeps the two distinguishable.
+run_pages_out() { # run_pages_out <name> <expected-substring> <threads> <comments> <reviews>
+    local name="$1" want="$2"
+    mkdir -p "$TMP/pages"
+    printf '%s' "$3" > "$TMP/pages/threads.json"
+    printf '%s' "$4" > "$TMP/pages/comments.json"
+    printf '%s' "$5" > "$TMP/pages/reviews.json"
+    rm -f "$TMP/pages/threadcomments.json"
+    paginate_shim
+    local out; out=$(CV_TEST_PAGES="$TMP/pages" PATH="$TMP:$PATH" "$SCRIPT" 999 2>&1)
+    if printf '%s' "$out" | grep -F -- "$want" >/dev/null; then
+        printf '  ok   %-52s\n' "$name"; pass=$((pass+1))
+    else
+        printf '  FAIL %-52s (missing: %s)\n' "$name" "$want"
+        printf '%s\n' "$out" | sed 's/^/         | /'; fail=$((fail+1))
+    fi
+}
+ERR_PAGES="[$(tpage true "$CLEAN_T"),{\"data\":{\"repository\":{\"pullRequest\":null}},\"errors\":[{\"message\":\"rate limited\"}]}]"
+run_pages "FAIL-CLOSED: an error envelope on page 2 is exit 2" 2 \
+    "$ERR_PAGES" "[$(cpage false "$BOT_TOP,$RECON")]" "[$(rpage false "")]"
+run_pages_out "FAIL-CLOSED: ...and the per-page probe is what caught it" \
+    "returned no pullRequest" \
+    "$ERR_PAGES" "[$(cpage false "$BOT_TOP,$RECON")]" "[$(rpage false "")]"
+
+# A connection whose fetch fails outright, mid-way through the three. Pinned by
+# MESSAGE for the same reason as the probe above: the per-page probe backstops a
+# swallowed fetch failure (empty output is not a JSON array either), so an
+# exit-code-only assertion stays green with `|| true` appended to the fetch. Two
+# independent guards on the most dangerous failure is deliberate; a test that
+# cannot tell which one fired is not.
+run_pages_out "FAIL-CLOSED: a failed reviews fetch names that fetch" \
+    "could not read reviews" \
+    "[$(tpage false "$CLEAN_T")]" "[$(cpage false "$BOT_TOP,$RECON")]" "MISSING-FIXTURE-SENTINEL"
+
+# Found in review: both exited 0 over a surface that was never read.
+run_pages_out "FAIL-CLOSED: every connection returning [] is a STOP" \
+    "returned no pullRequest" "[]" "[]" "[]"
+# gh stops quietly when the last page says hasNextPage:true but has no cursor.
+run_pages_out "FAIL-CLOSED: a last page still reporting more is truncated" \
+    "review surface is truncated" \
+    "[$(tpage true "$CLEAN_T")]" \
+    "[$(cpage false "$BOT_TOP,$RECON")]" \
+    "[$(rpage false "")]"
+
+# ---------------------------------------------------------------------------
+# REGRESSION: a roster entry may carry SEVERAL logins.
+#
+# Copilot posts inline comments as `Copilot` and review summaries as
+# `copilot-pull-request-reviewer[bot]`, so the roster made `.login` an array. Nothing in
+# the enumeration was taught that shape, and `["a","b"] | ascii_downcase` is a HARD
+# jq abort -- "explode input must be a string" -- which killed the whole program.
+# The gate then STOPped (exit 2) on EVERY pr in the repository, not merely on a PR
+# that happened to involve Copilot, because the roster is walked for every author.
+#
+# It failed CLOSED, which is the right direction, but a merge gate that can never
+# pass is still a broken merge gate. These cases pin both shapes.
+# ---------------------------------------------------------------------------
+cat > "$TMP/roster-multi.json" <<'ROSTER'
+{"bots":[
+  {"match": "gitar", "name": "Gitar", "login": "gitar-bot[bot]"},
+  {"match": "copilot", "name": "Copilot Code Review",
+   "login": ["copilot-pull-request-reviewer[bot]", "Copilot"]}
+]}
+ROSTER
+
+# A roster field that is neither string nor array must not abort it either: the
+# entry is skipped, the program survives, and the other reviewers still resolve.
+# This fixture was SPLIT in two because its halves have opposite correct
+# answers and one fixture cannot assert both.
+#
+# This half: a non-string `.marker` or `.match` must not abort the program. The
+# roster validator checks neither field's type, so this case still expects exit 0.
+cat > "$TMP/roster-weird.json" <<'ROSTER'
+{"bots":[
+  {"match": "gitar", "name": "Gitar", "login": "gitar-bot[bot]"},
+  {"name": "Broken Entry", "login": "broken-bot[bot]", "marker": 7, "match": false}
+]}
+ROSTER
+
+# The other half -- a non-string `.login` -- is a DELIBERATE reversal of an
+# earlier behaviour, and the reasoning is on the record. Skipping the member keeps
+# the rest of the roster working (availability); the validator instead refuses
+# the roster (integrity), because skipping leaves that entry's
+# reviewer unrostered: for a BOT-typed reviewer the bare-login fallback saves it,
+# but a reviewer GitHub types as `User` is in scope ONLY because it is rostered,
+# so it silently stops owing a coverage row. Measured against the skipping version:
+# `[null]`, `[12]` and a bare `null` each report CLEAN with such a reviewer.
+#
+# The earlier objection -- "a merge gate that can never pass is still a broken
+# merge gate" -- was about aborting on EVERY roster including valid ones. This
+# refuses only a roster that is actually malformed, and the shipped roster passes,
+# so that objection does not reach it. For a gate whose whole thesis is that it
+# never reports clean over an undecided thread, a loud UNKNOWN naming the entry
+# beats a quiet degraded run.
+cat > "$TMP/roster-badlogin.json" <<'ROSTER'
+{"bots":[
+  {"match": "gitar", "name": "Gitar", "login": "gitar-bot[bot]"},
+  {"name": "Broken Entry", "login": 42}
+]}
+ROSTER
+
+run_roster() { # run_roster <name> <roster-file> <expected-exit> <fixture-json>
+    local name="$1" roster="$2" want="$3" json="$4"
+    printf '%s' "$json" > "$TMP/f.json"
+    local out
+    out=$(CV_REVIEW_FIXTURE="$TMP/f.json" CV_REPO_CONFIG="$roster" CV_SKIP_EXISTENCE_CHECKS=1 "$SCRIPT" 999 2>&1)
+    local got=$?
+    # An abort is the specific failure being pinned, so name it explicitly rather
+    # than letting it hide inside a generic exit-code mismatch.
+    if printf '%s' "$out" | grep "could not enumerate reviewers" >/dev/null; then
+        printf '  FAIL %-52s (reviewer enumeration ABORTED)\n' "$name"
+        printf '%s\n' "$out" | sed 's/^/         | /'
+        fail=$((fail + 1))
+        return
+    fi
+    if [[ "$got" -eq "$want" ]]; then
+        printf '  ok   %-52s (exit %d)\n' "$name" "$got"
+        pass=$((pass + 1))
+    else
+        printf '  FAIL %-52s (want %d, got %d)\n' "$name" "$want" "$got"
+        printf '%s\n' "$out" | sed 's/^/         | /'
+        fail=$((fail + 1))
+    fi
+}
+
+COPILOT_SUMMARY='{"author":{"__typename":"Bot","login":"Copilot"},"body":"looks fine"}'
+RECON_COPILOT='{"author":{"__typename":"User","login":"dev"},"authorAssociation":"OWNER","body":"<!-- cv-review-reconciliation -->\n| Copilot Code Review |"}'
+NO_THREADS='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[]},"comments":{"pageInfo":{"hasNextPage":false},"nodes":['"$COPILOT_SUMMARY"','"$RECON_COPILOT"']},"reviews":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}}'
+
+run_roster "ARRAY login resolves its persona instead of aborting" \
+    "$TMP/roster-multi.json" 0 "$NO_THREADS"
+
+# The SECOND login in the array must resolve too -- matching only the first would
+# pass the test above while still losing the persona this change exists to capture.
+RECON_WRONG='{"author":{"__typename":"User","login":"dev"},"authorAssociation":"OWNER","body":"<!-- cv-review-reconciliation -->\n| Gitar |"}'
+NO_THREADS_WRONG='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[]},"comments":{"pageInfo":{"hasNextPage":false},"nodes":['"$COPILOT_SUMMARY"','"$RECON_WRONG"']},"reviews":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}}'
+run_roster "CONTROL: an unnamed array-login persona still BLOCKS" \
+    "$TMP/roster-multi.json" 1 "$NO_THREADS_WRONG"
+
+GITAR_TOP='{"author":{"__typename":"Bot","login":"gitar-bot"},"body":"hi"}'
+RECON_GITAR='{"author":{"__typename":"User","login":"dev"},"authorAssociation":"OWNER","body":"<!-- cv-review-reconciliation -->\n| Gitar |"}'
+WEIRD='{"data":{"repository":{"pullRequest":{"reviewThreads":{"pageInfo":{"hasNextPage":false},"nodes":[]},"comments":{"pageInfo":{"hasNextPage":false},"nodes":['"$GITAR_TOP"','"$RECON_GITAR"']},"reviews":{"pageInfo":{"hasNextPage":false},"nodes":[]}}}}}'
+run_roster "a non-string marker/match does not abort the program (type check)" \
+    "$TMP/roster-weird.json" 0 "$WEIRD"
+
+run_roster "a non-string LOGIN is refused, not skipped (validator wins)" \
+    "$TMP/roster-badlogin.json" 2 "$WEIRD"
+
+# Regression: coverage matching is fed through a pipe under `set -o pipefail`.
+# grep exits as soon as it finds the reviewer name, so a sufficiently large
+# reconciliation body can make the producer receive SIGPIPE and turn a real
+# match into a false BLOCK. Keep the name near the beginning and make the tail
+# exceed the pipe buffer deterministically; the body is otherwise an ordinary
+# one-reviewer reconciliation fixture.
+LONG_FIXTURE=$(jq -cn --argjson reviewer "$BOT_TOP" '
+    {data:{repository:{pullRequest:{reviewThreads:{nodes:[]},comments:{nodes:[
+        $reviewer,
+        {author:{__typename:"User",login:"dev"},authorAssociation:"OWNER",
+         body:("<!-- cv-review-reconciliation -->\n| Gitar |\n" + ("padding evidence\n" * 8192))}
+    ]},reviews:{nodes:[]}}}}}')
+run "large reconciliation body keeps an early reviewer match" 0 "$LONG_FIXTURE"
 
 echo ""
 echo "passed: $pass   failed: $fail"

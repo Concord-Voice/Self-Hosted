@@ -32,6 +32,8 @@ Other subjects in this directory:
 - `test-check-lockfile-registries.sh` — the approved-registry guard for npm
   lockfiles and go.mod (`scripts/ci/check-lockfile-registries.py`,
   `.github/ci/approved-registries.json`); its fixtures are in `fixtures/registries/`
+- `test-npm-lockfile-flush.sh` — the weekly npm lockfile flush: its refresh and render
+  steps against a stub npm, and its guard / refresh / open-pr credential split
 
 The `selfhost-deploy-tests` commit hook runs all twelve self-host suites directly on Linux.
 On macOS it uses `run-selfhost-deploy-tests.sh` and a cached Ubuntu image; Docker Desktop

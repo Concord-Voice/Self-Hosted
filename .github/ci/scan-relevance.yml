@@ -563,6 +563,8 @@ workflow_lint:
   - 'scripts/ci/check-lockfile-registries.py'
   - 'scripts/tests/test-check-lockfile-registries.sh'
   - 'scripts/tests/fixtures/registries/**'
+  # npm lockfile flush test (#272, runs in workflow-lint).
+  - 'scripts/tests/test-npm-lockfile-flush.sh'
 worker_apple:
   - '.github/ci/scan-relevance.yml'
   - '.github/scripts/ci-scan-relevance.mjs'
