@@ -76,9 +76,11 @@ Android.
 
 ### Fixed
 
+- **Redis:** With managed Redis credentials (`REDIS_CREDENTIAL_MODE=managed`), the control plane may now use the Admin Console's step-up handles for server actions, so step-up-gated server actions complete. It may also read (but not write) the voice-join pause key, so voice joins no longer log a Redis permission error on every attempt.
 - **Account authority:** Recovery ceremonies can sign and add a succession that clears a delegation halt, while other commands and malformed trust inputs remain refused. Removed an obsolete private-policy citation that blocked importing the server changes into Hosted.
 
 - **Authentication:** Removed the compiled `authority-ceremony` binary that was committed with the tool's source. Build the tool from source; build outputs are now ignored.
+- **Voice:** `concord-ctl.sh media-legacy-pause` and `media-legacy-resume` now work with managed Redis credentials (`REDIS_CREDENTIAL_MODE=managed`). The Redis credential controller used to refuse every read and write of the voice-join pause, so a pause could not be set, given a test user or lifted.
 - **Voice:** Voice room presence writes to Redis now time out like the other media-plane Redis calls, and clearing an empty room no longer removes a user who joined during the clear.
 - **Self-hosted CI:** Build and configuration checks now provide explicit WebSocket budget settings, so required production inputs do not prevent those checks from rendering Compose.
 - **Account authority:** Owner cancellation now lets an in-flight lock-health ping finish within its existing timeout before explicitly releasing the serve lock.
@@ -92,6 +94,7 @@ Android.
 
 ### Security
 
+- **Dependencies:** Go 1.27.4 for the control plane and its container builders ([GO-2026-6859](https://pkg.go.dev/vuln/GO-2026-6859), a `net/http` request-body limit race).
 - **Container images:** The control-plane and Redis auth controller images upgrade zlib to 1.3.2-r1 for CVE-2026-85091 (heap buffer overflow in `gz_vacate()`).
 - **Dependencies:** Updated media development tooling and the CI license checker to patched minimatch and glob versions while retaining dependency attribution checks.
 - **Accounts:** **BREAKING** Guessing passwords on the key-reveal route now counts toward the same sign-in failure ban as the login page, and its attempt limits fail closed. Wrong passwords there, and when changing your password, resetting your encryption keys or changing your sign-in security settings, now count toward the same lockout as sign-in: five lock the account. API: a wrong `current_password` on `POST /api/v1/users/me/keys/reveal` is now 403 `invalid_current_password` instead of 401, a locked account gets 423 `account_locked`, and an account with no password gets 400 `no_password`.
@@ -101,6 +104,7 @@ Android.
 - **Admin Console:** Sending many wrong passwords at the same moment no longer gets more than five of them checked, on sign-in or on the enrollment page. Each guess now counts toward the lockout, for the account and for the IP address, before its password is checked. A lock that runs out no longer resets the penalty: repeated locks now last 1, 2, 4 ... up to 60 minutes. Failed guesses now stay counted until an hour passes with no new guess, not one minute. A completed sign-in clears the account's failed attempts and lock but keeps the penalty level, and it never lifts an IP address lock or clears the failed attempts of other guesses from that address; it gives back only the one guess its password step counted, on the address that password step came from. A correct password that never finishes the hardware-key step now counts as a guess. A rejected hardware-key response at sign-in no longer counts as a guess: only password guesses do.
 - **Admin Console:** Sign-in and enrollment failure logs no longer include submitted usernames; failure classification and audit records are preserved. Challenge-store and corrupt-challenge failures now return a logged 500 rather than an unlogged 401; unknown and expired handles still return 401.
 - **Admin Console:** New `control-plane admin unlock <username>` command clears an admin's lock, failed attempts and penalty level, so the next correct sign-in succeeds. Managed Redis deployments need the updated ACL manifest, which lists the new `admin_lockout:*_lock:*` and `admin_lockout:*_level:*` keys.
+- **Attestation:** `ATTESTATION_OIDC_SUBJECT_PREFIX` now accepts the immutable GitHub subject form `repo:<owner>@<id>/<repo>@<id>:`, which binds release publishing to fixed owner and repository IDs, so a renamed or re-registered name cannot publish. The server warns at startup when the prefix uses the name-only form `repo:<owner>/<repo>:`, which matches no token from a repository that issues immutable subjects.
 
 ## [0.3.0] - 2026-11-01
 
