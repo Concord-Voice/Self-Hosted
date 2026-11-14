@@ -106,7 +106,7 @@ jobs:
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: selfhost-sbom
-          path: ${{ runner.temp }}/sbom/
+          path: ${{ runner.temp }}/sbom/concord-selfhost-v${{ needs.check-tag.outputs.version }}.cdx.json
           if-no-files-found: error
           retention-days: 1
 
@@ -148,12 +148,26 @@ jobs:
             --sums "$RUNNER_TEMP/assets/SHA256SUMS"
       # Release-Ops expects the SBOM at the top of the release artifact as
       # <artifact>.cdx.json. SHA256SUMS keeps listing only the archive and
-      # manifest.
-      - name: Add the SBOM
+      # manifest. The sbom job ran third-party code, so its artifact lands in
+      # its own directory and only the one expected file is copied into the
+      # attested set: anything else there could replace a bundle file.
+      - name: Download the SBOM
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: selfhost-sbom
-          path: ${{ runner.temp }}/assets/
+          path: ${{ runner.temp }}/sbom-in/
+      - name: Add the SBOM
+        run: |
+          set -euo pipefail
+          name="concord-selfhost-v${VERSION}.cdx.json"
+          found=$(find "$RUNNER_TEMP/sbom-in" -mindepth 1 -printf '%y %P\n')
+          if [ "$found" != "f $name" ]; then
+            echo "::error::the SBOM artifact must hold exactly one regular file, $name; it holds:"
+            printf '%s\n' "$found"
+            exit 1
+          fi
+          jq -e '.bomFormat == "CycloneDX"' "$RUNNER_TEMP/sbom-in/$name" >/dev/null
+          cp "$RUNNER_TEMP/sbom-in/$name" "$RUNNER_TEMP/assets/$name"
       - name: Upload the bundle
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:

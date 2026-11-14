@@ -108,12 +108,20 @@ class WorkflowTests(unittest.TestCase):
         upload = next(s for s in self.steps('sbom') if s['name'] == 'Upload the SBOM')
         # Release-Ops treats an artifact named *-<tag> as a release artifact.
         self.assertFalse(re.search(r'-v\$\{\{|-v\d', upload['with']['name']))
+        self.assertTrue(upload['with']['path'].endswith('.cdx.json'))
 
     def test_bundle_job_adds_and_attests_the_sbom(self):
         self.assertIn('sbom', self.jobs['bundle']['needs'])
         self.assertIn('needs.sbom.result', self.jobs['bundle']['if'])
         names = [s['name'] for s in self.steps('bundle')]
         self.assertLess(names.index('Add the SBOM'), names.index('Upload the bundle'))
+        # The untrusted artifact lands outside the attested set, and only the
+        # one expected file is copied in.
+        dl = next(s for s in self.steps('bundle') if s['name'] == 'Download the SBOM')
+        self.assertNotIn('assets', dl['with']['path'])
+        add = next(s['run'] for s in self.steps('bundle') if s['name'] == 'Add the SBOM')
+        self.assertIn('"f $name"', add)
+        self.assertIn('cp "$RUNNER_TEMP/sbom-in/$name" "$RUNNER_TEMP/assets/$name"', add)
         attest = next(s for s in self.steps('bundle') if s['name'] == 'Attest build provenance')
         self.assertIn('concord-selfhost-v*.cdx.json', attest['with']['subject-path'])
 
