@@ -1391,7 +1391,8 @@ type totpDisableRequest struct {
 	Code     string `json:"code"`
 }
 
-// TOTPDisable disables TOTP MFA. Requires password + a valid MFA code.
+// TOTPDisable disables TOTP MFA. Removing an enrolled factor requires password
+// and a valid MFA code; an absent factor is an idempotent no-op.
 //
 // The enrollment probe and any attempt-budget admission run before the
 // transaction. The transaction then takes the users row FOR NO KEY UPDATE:
@@ -1404,6 +1405,18 @@ func (h *Handler) TOTPDisable(c *gin.Context) {
 	var req totpDisableRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Password and MFA code are required"})
+		return
+	}
+	// A missing TOTP factor is an idempotent no-op, so no code was verified.
+	// Keep the locked read below for factors that change after this probe.
+	var enrolled bool
+	if err := h.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM user_mfa_totp WHERE user_id = $1)`, userID).Scan(&enrolled); err != nil {
+		h.log.Error("Failed to read TOTP enrollment", "error", err)
+		c.JSON(http.StatusInternalServerError, gin.H{"error": errMsgFailedDisableMFA})
+		return
+	}
+	if !enrolled {
+		c.JSON(http.StatusOK, gin.H{"message": "TOTP MFA has been disabled"})
 		return
 	}
 	if !h.chargeMFASettingsCode(c, userID, req.Code) {
