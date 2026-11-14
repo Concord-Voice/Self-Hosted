@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -63,9 +64,12 @@ type AuthAdapter interface {
 	// IssueAccessAndRefresh mints the access token, refresh token, and refresh-row
 	// session ID for the given userID. The caller owns the response cookie/body.
 	IssueAccessAndRefresh(ctx context.Context, userID string) (accessToken, refreshToken, sessionID string, err error)
-	// IssueAccessAndRefreshBound additionally refuses when the credential epoch
-	// has advanced since authorization.
+	// IssueAccessAndRefreshBound refuses a changed credential epoch, effective
+	// password disable, or newly enrolled login MFA at the locked final read.
 	IssueAccessAndRefreshBound(ctx context.Context, userID, expectedEpoch string, identity auth.SSOIdentityLink) (accessToken, refreshToken, sessionID string, err error)
+	// PrepareSSOLink returns a signed MFA challenge when the password-authorized
+	// target has a login-eligible factor; nil permits the locked no-proof mint.
+	PrepareSSOLink(ctx context.Context, userID, expectedEpoch string, identity auth.SSOIdentityLink) (*auth.SSOLinkChallenge, error)
 	// IssueMFAChallenge mints a short-lived MFA challenge token for users with
 	// MFA enabled. Returns:
 	//   - challengeToken: short-lived JWT the renderer presents to the modal
@@ -177,11 +181,26 @@ type ssoStateRecord struct {
 	// against a server-held copy instead of trusting key-lookup semantics.
 	// Records written before this field existed decode as "" and fail the
 	// broker's comparison closed.
-	State        string    `json:"state"`
-	Nonce        string    `json:"nonce"`
-	CodeVerifier string    `json:"code_verifier"`
-	RedirectURI  string    `json:"redirect_uri"`
-	CreatedAt    time.Time `json:"created_at"`
+	State               string    `json:"state"`
+	Nonce               string    `json:"nonce"`
+	ClientBindingDigest []byte    `json:"client_binding_digest"`
+	CodeVerifier        string    `json:"code_verifier"`
+	RedirectURI         string    `json:"redirect_uri"`
+	CreatedAt           time.Time `json:"created_at"`
+}
+
+const clientBindingHeader = "X-Concord-SSO-Client-Binding"
+
+func clientBindingDigest(c *gin.Context) ([32]byte, bool) {
+	values := c.Request.Header.Values(clientBindingHeader)
+	if len(values) != 1 || len(values[0]) != 43 {
+		return [32]byte{}, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(values[0])
+	if err != nil || len(raw) != 32 || base64.RawURLEncoding.EncodeToString(raw) != values[0] {
+		return [32]byte{}, false
+	}
+	return sha256.Sum256(append([]byte("concord-sso-client-binding-v1\x00"), raw...)), true
 }
 
 // ssoTokenPayload is the JSON payload stored in Redis under sso_token:<token>.
@@ -248,27 +267,17 @@ func (h *Handler) consumeSSOToken(ctx context.Context, token, expectedBranch str
 // need to discriminate.
 var errSSOTokenInvalid = errors.New("oauth: sso_token invalid")
 
-// decodeSSOKeyMaterial decodes the three base64-StdEncoding fields from the
-// CompleteRegistration request body. Returns the first failing decode's error
-// so the caller's error_code translation stays opaque (all three failures map
-// to invalid_key_material).
-func decodeSSOKeyMaterial(req *completeRegistrationRequest) (wrapped, salt, pubKey []byte, err error) {
-	wrapped, err = base64.StdEncoding.DecodeString(req.WrappedPrivateKey)
+// decodeSSOPublicKey keeps public-key parsing after the single-use SSO token
+// gate. Opaque wrapped-key and salt bounds are checked earlier without RSA work.
+func decodeSSOPublicKey(publicKey string) ([]byte, error) {
+	pubKey, err := base64.StdEncoding.DecodeString(publicKey)
 	if err != nil {
-		return nil, nil, nil, err
-	}
-	salt, err = base64.StdEncoding.DecodeString(req.KeyDerivationSalt)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	pubKey, err = base64.StdEncoding.DecodeString(req.PublicKey)
-	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	if err := auth.ValidateE2EEPublicKey(pubKey); err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
-	return wrapped, salt, pubKey, nil
+	return pubKey, nil
 }
 
 // createSSOUserParams bundles the non-context inputs to createSSOUser so the
@@ -385,6 +394,21 @@ func (h *Handler) Initiate(c *gin.Context) {
 	if !ok {
 		return
 	}
+	bindingDigest, ok := clientBindingDigest(c)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_request"})
+		return
+	}
+	allowed, err := middleware.AllowUserAction(c.Request.Context(), h.deps.Redis,
+		"ratelimit:sso:initiate:"+providerName, 600, time.Minute)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error_code": "redis_unavailable"})
+		return
+	}
+	if !allowed {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error_code": "rate_limited"})
+		return
+	}
 
 	state := randomString(entropyBytes)
 	nonce := randomString(entropyBytes)
@@ -409,12 +433,13 @@ func (h *Handler) Initiate(c *gin.Context) {
 	}
 
 	rec := ssoStateRecord{
-		Provider:     providerName,
-		State:        state,
-		Nonce:        nonce,
-		CodeVerifier: verifier,
-		RedirectURI:  redirectURI,
-		CreatedAt:    time.Now().UTC(),
+		Provider:            providerName,
+		State:               state,
+		Nonce:               nonce,
+		ClientBindingDigest: bindingDigest[:],
+		CodeVerifier:        verifier,
+		RedirectURI:         redirectURI,
+		CreatedAt:           time.Now().UTC(),
 	}
 	payload, err := json.Marshal(rec)
 	if err != nil {
@@ -688,6 +713,14 @@ func handleSSOIssueError(c *gin.Context, err error) bool {
 		c.JSON(http.StatusForbidden, gin.H{"error_code": "account_disabled"})
 		return true
 	}
+	if errors.Is(err, auth.ErrSSOPasswordDisabled) {
+		c.JSON(http.StatusForbidden, gin.H{"error_code": "account_uses_sso"})
+		return true
+	}
+	if errors.Is(err, auth.ErrMFARequired) {
+		c.JSON(http.StatusForbidden, gin.H{"error_code": "mfa_required"})
+		return true
+	}
 	if errors.Is(err, auth.ErrSSOIdentityInsert) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "sso_identity_insert_failed"})
 		return true
@@ -932,6 +965,14 @@ func (h *Handler) CompleteRegistration(c *gin.Context) {
 		})
 		return
 	}
+	// Reject oversized or malformed opaque material before consuming the
+	// one-use SSO token or spending Argon2 work. Public-key RSA parsing stays
+	// behind the token gate.
+	wrapped, salt, err := auth.DecodeRegistrationPrivateMaterial(req.WrappedPrivateKey, req.KeyDerivationSalt)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_key_material"})
+		return
+	}
 
 	ctx := c.Request.Context()
 
@@ -953,11 +994,7 @@ func (h *Handler) CompleteRegistration(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "hash_failed"})
 		return
 	}
-
-	// Decode key material. base64.StdEncoding (NOT RawURLEncoding) matches
-	// the existing pending-registrations path; the test fixture also uses
-	// StdEncoding.EncodeToString.
-	wrapped, salt, pubKey, err := decodeSSOKeyMaterial(&req)
+	pubKey, err := decodeSSOPublicKey(req.PublicKey)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_key_material"})
 		return
@@ -1053,8 +1090,11 @@ type completeLinkRequest struct {
 //     the SAME counter that gates /login. The adapter returns the
 //     auth.ErrAccountLocked sentinel when the threshold is reached
 //     (matched via errors.Is); the handler translates that to 423 Locked.
-//  5. Atomically insert user_sso_identities and issue a bound access + refresh
-//     pair under the users row lock. password_login_disabled is NOT modified.
+//  5. If login MFA is enrolled, return a signed sso_link challenge and store
+//     only pending provider identity; the verifier performs the final mint.
+//  6. Otherwise atomically insert identity and issue access + refresh under
+//     the users row lock, rechecking current policy. The stored password
+//     preference is not modified.
 //
 // The password proof is authorized under the epoch returned by VerifyPassword.
 // The bound mint compares it and persists both the identity and refresh row in
@@ -1102,15 +1142,40 @@ func (h *Handler) CompleteLink(c *gin.Context) {
 		return
 	}
 
-	// Do NOT modify password_login_disabled — the user is opting INTO an
-	// additional sign-in option, not opting OUT. Persist the identity in the
-	// same transaction as the bound mint so a reset-race rolls back both.
-	access, refresh, sessionID, err := h.deps.AuthHandler.IssueAccessAndRefreshBound(ctx, info.TargetUserID, expectedEpoch, auth.SSOIdentityLink{
+	// The password proof alone cannot complete a link when current login MFA is
+	// enabled. Keep provider identity server-side until the signed challenge is
+	// verified; the response carries no credential or session cookie.
+	identity := auth.SSOIdentityLink{
 		Provider:       info.Provider,
 		ProviderUserID: info.ProviderUserID,
 		ProviderEmail:  info.ProviderEmail,
 		IsRelayEmail:   info.IsRelayEmail,
-	})
+	}
+	challenge, err := h.deps.AuthHandler.PrepareSSOLink(ctx, info.TargetUserID, expectedEpoch, identity)
+	if handleSSOIssueError(c, err) {
+		return
+	}
+	if challenge != nil {
+		body := gin.H{
+			"mfa_required":        true,
+			"mfa_challenge_token": challenge.Token,
+			"methods":             challenge.Methods,
+		}
+		if len(challenge.RecoveryOnlyMethods) > 0 {
+			body["recovery_only_methods"] = challenge.RecoveryOnlyMethods
+		}
+		if method := h.deps.AuthHandler.ChallengeDefaultMethod(ctx, info.TargetUserID, challenge.Methods); method != "" {
+			body["default_method"] = method
+		}
+		if challenge.WebAuthnOptions != nil {
+			body["webauthn_options"] = challenge.WebAuthnOptions
+		}
+		c.JSON(http.StatusOK, body)
+		return
+	}
+	// Do not modify password_login_disabled. The final locked transaction
+	// independently refuses policy or MFA enrollment changes before any insert.
+	access, refresh, sessionID, err := h.deps.AuthHandler.IssueAccessAndRefreshBound(ctx, info.TargetUserID, expectedEpoch, identity)
 	if handleSSOIssueError(c, err) {
 		return
 	}

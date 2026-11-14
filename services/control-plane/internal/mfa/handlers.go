@@ -122,6 +122,9 @@ type LoginCompleter interface {
 	// transaction has committed. MFA must not record challenge verification
 	// before that point.
 	CompleteLogin(c *gin.Context, userID string, rememberMe bool, expectedEpoch string, primaryAuthMethod securityevent.AuthMethod) bool
+	// CompleteSSOLink receives only signed challenge identity and a verified
+	// factor after the one-use challenge claim succeeds.
+	CompleteSSOLink(c *gin.Context, userID, challengeJTI, expectedEpoch, verifiedMethod string) bool
 }
 
 // PermissionInvalidator makes a user's cached permissions miss on their next
@@ -542,6 +545,15 @@ func (h *Handler) GenerateLoginChallenge(ctx context.Context, userID string, rem
 	}
 
 	return token, jti, nil
+}
+
+// GenerateSSOLinkChallenge signs a dedicated continuation for an account link.
+// The auth adapter stores the provider identity separately under this JTI.
+func (h *Handler) GenerateSSOLinkChallenge(_ context.Context, userID, credEpoch string) (string, string, error) {
+	return generateChallengeTokenWithTTL(ChallengeClaims{
+		UserID: userID, Purpose: PurposeLogin, CompletionKind: CompletionKindSSOLink,
+		CredentialEpoch: credEpoch, PrimaryAuthMethod: securityevent.AuthSSO,
+	}, JWTSecret(h.jwtSecret), challengeTTL)
 }
 
 // GenerateUpgradeChallenge creates a challenge token for pre-MFA session upgrades.
@@ -2378,7 +2390,7 @@ func (h *Handler) verifyByMethod(ctx context.Context, c *gin.Context, req verify
 		return verified, "webauthn", responded
 	case "email":
 		verified, responded := h.verifyEmailCode(ctx, c, req.Code, claims)
-		return verified, "", responded
+		return verified, "email", responded
 	default:
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid method. Use 'totp', 'backup_code', 'webauthn', or 'email'"})
 		return false, "", true
@@ -2505,6 +2517,12 @@ func (h *Handler) completeVerifyPurpose(ctx context.Context, c *gin.Context, cla
 		return h.recoveryCompleter.CompleteRecovery(c, claims.UserID, recoveryFactor(verifiedMethod))
 
 	case PurposeLogin:
+		switch claims.CompletionKind {
+		case "", CompletionKindLogin, CompletionKindSSOLink:
+		default:
+			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid MFA challenge"})
+			return false
+		}
 		if h.loginCompleter == nil {
 			h.log.Error("MFA login verified with no login completer wired", "user_id", claims.UserID)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Login completion not configured"})
@@ -2512,6 +2530,9 @@ func (h *Handler) completeVerifyPurpose(ctx context.Context, c *gin.Context, cla
 		}
 		// The key expires with the challenge, which is already claimed.
 		h.delBestEffort(ctx, "Failed to clear MFA challenge remember-me state", claims.UserID, auth.MFAChallengeRememberMeKey(claims.ID))
+		if claims.CompletionKind == CompletionKindSSOLink {
+			return h.loginCompleter.CompleteSSOLink(c, claims.UserID, claims.ID, claims.CredentialEpoch, verifiedMethod)
+		}
 		primaryAuthMethod, err := normalizePrimaryAuthMethod(claims.PrimaryAuthMethod)
 		if err != nil {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "Invalid MFA challenge"})

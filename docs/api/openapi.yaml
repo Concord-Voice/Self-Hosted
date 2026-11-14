@@ -517,6 +517,10 @@ paths:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '403':
+          description: Cross-site Fetch Metadata or an Origin outside the configured allowlist (`cross_site_request` / `invalid_origin`).
+        '415':
+          description: Missing, malformed or non-JSON Content-Type (`unsupported_media_type`).
         '423':
           description: Account locked due to too many failed attempts
           content:
@@ -659,7 +663,9 @@ paths:
       description: 'Validate a TOTP, backup code, WebAuthn assertion, or email code against an MFA challenge
         token issued at login or after recovery email verification.
 
-        Identity comes from the challenge token (single-use). Per-user lockout after 5 failed attempts
+        Identity and completion kind come from the signed challenge token (single-use). A `sso_link`
+        challenge consumes its pending provider identity before the locked final transaction; missing,
+        expired, malformed and replayed pending records cannot complete ordinary login. Per-user lockout after 5 failed attempts
         (15 minutes).
 
         Rate limit: 10 requests per 15 minutes (IP-based).
@@ -675,8 +681,9 @@ paths:
               $ref: '#/components/schemas/MFAVerifyRequest'
       responses:
         '200':
-          description: 'MFA verified. For a login-purpose challenge the full login response is returned
-            (with refresh cookie);
+          description: 'MFA verified. An ordinary login challenge returns the full login response;
+            an SSO-link challenge returns access and refresh credentials only after the identity and
+            session commit. Both successful session branches set the refresh cookie.
 
             a recovery_challenge returns the recovery_token and recovery key metadata described
             by /auth/recovery/verify-code after a currently reserved TOTP/backup code or WebAuthn
@@ -687,7 +694,7 @@ paths:
           content:
             application/json:
               schema:
-                oneOf:
+                anyOf:
                 - type: object
                   description: Login completion (purpose = login)
                   required:
@@ -714,6 +721,20 @@ paths:
                       $ref: '#/components/schemas/User'
                     e2ee_keys:
                       $ref: '#/components/schemas/E2EEKeys'
+                - type: object
+                  description: SSO account-link completion after verified MFA
+                  required: [access_token, refresh_token, session_id, remember_me]
+                  properties:
+                    access_token:
+                      type: string
+                    refresh_token:
+                      type: string
+                    session_id:
+                      type: string
+                      format: uuid
+                    remember_me:
+                      type: boolean
+                      enum: [true]
                 - type: object
                   description: Recovery completion (purpose = recovery_challenge)
                   required:
@@ -762,7 +783,7 @@ paths:
               schema:
                 type: string
             X-Concord-Session-Issued:
-              description: Present with value true for login-purpose MFA completion only
+              description: Present with value true for ordinary login MFA completion only
               schema:
                 type: string
                 enum:
@@ -775,17 +796,19 @@ paths:
         '400':
           $ref: '#/components/responses/BadRequest'
         '401':
-          description: Invalid, expired, or already-used MFA challenge token
+          description: Invalid, expired, or already-used MFA challenge token, or missing/mismatched/replayed SSO-link pending state (`sso_link_invalid`).
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
         '403':
-          description: Invalid MFA code
+          description: Invalid MFA code, cross-site Fetch Metadata, or Origin outside the configured allowlist.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/Error'
+        '415':
+          description: Missing, malformed or non-JSON Content-Type (`unsupported_media_type`).
         '429':
           description: Too many failed attempts (per-user lockout) or IP rate limit exceeded
           content:
@@ -799,7 +822,7 @@ paths:
               schema:
                 $ref: '#/components/schemas/Error'
         '503':
-          description: Recovery completion could not confirm current policy or commit after a reserved factor was accepted. The recovery challenge is spent; restart at email verification.
+          description: Recovery completion could not confirm current policy or commit, or SSO-link pending state was unavailable after accepted MFA. The challenge is spent; restart the appropriate flow.
           content:
             application/json:
               schema:
@@ -1622,6 +1645,10 @@ paths:
                     example: invalid_code
                   attempts_remaining:
                     type: integer
+        '403':
+          description: Cross-site Fetch Metadata or an Origin outside the configured allowlist (`cross_site_request` / `invalid_origin`).
+        '415':
+          description: Missing, malformed or non-JSON Content-Type (`unsupported_media_type`).
         '404':
           description: Pending registration not found
           content:
@@ -1733,11 +1760,13 @@ paths:
       tags:
       - Auth
       summary: Initiate an SSO flow
-      description: 'Generate state, nonce, and PKCE verifier (10-minute TTL) and return the provider authorization
-        URL.
+      description: 'Validate the Desktop-supplied PKCE challenge and client binding, then generate
+        state and nonce (10-minute TTL) and return the provider authorization URL. The binding
+        must be the same canonical 43-character base64url value on this request and /session;
+        Redis stores only its digest. In-flight attempts created before this requirement must restart.
 
         redirect_uri must be an RFC 8252 loopback (http://127.0.0.1/oauth/callback). Rate limit: 10 requests
-        per 15 minutes (IP-based).
+        per 15 minutes per IP and 600 accepted requests per minute per provider.
 
         '
       operationId: ssoInitiate
@@ -1759,6 +1788,22 @@ paths:
           type: string
         description: Loopback redirect URI (must be http://127.0.0.1 with path /oauth/callback; explicit
           port required for apple)
+      - name: code_challenge
+        in: query
+        required: true
+        schema:
+          type: string
+          minLength: 43
+          maxLength: 128
+        description: Desktop-generated PKCE S256 challenge; the verifier remains in Desktop main.
+      - name: X-Concord-SSO-Client-Binding
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 43
+          maxLength: 43
+        description: Canonical unpadded base64url encoding of 32 random bytes, generated and held by Desktop main.
       responses:
         '200':
           description: Authorization URL issued
@@ -1772,7 +1817,7 @@ paths:
                   state:
                     type: string
         '400':
-          description: Invalid redirect_uri (`invalid_redirect_uri` with detail)
+          description: Invalid redirect URI, PKCE challenge, bridge port, or client binding (`invalid_redirect_uri`, `code_challenge_required`, or `invalid_request`).
           content:
             application/json:
               schema:
@@ -1790,7 +1835,17 @@ paths:
               schema:
                 $ref: '#/components/schemas/SSOError'
         '429':
-          $ref: '#/components/responses/RateLimited'
+          description: Per-IP or provider-wide initiation budget exhausted (`rate_limited`).
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
+        '503':
+          description: Provider-wide initiation budget could not be checked (`redis_unavailable`); no state was allocated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SSOError'
         '500':
           description: State store or apple-sso-bridge unavailable (`redis_unavailable` / `bridge_unavailable`)
           content:
@@ -1805,9 +1860,11 @@ paths:
       description: 'Prove ownership of the email-matched account with its password (shares the /auth/login
         lockout counter),
 
-        then atomically attach the SSO identity and issue a session. The password proof is bound to the
-        credential epoch it verified; an intervening credential reset refuses both the identity link and session.
-        Rate limit: 5 requests per 15 minutes (IP-based).
+        then check effective password policy and login MFA. If MFA is enrolled, the response is a signed
+        challenge and the identity/session are written only after /auth/mfa/verify. Otherwise the final
+        locked transaction rechecks policy and atomically attaches the identity and issues a session.
+        The password proof is bound to its credential epoch. JSON and same-site Origin/Fetch Metadata
+        rules apply. Rate limit: 5 requests per 15 minutes (IP-based).
 
         '
       operationId: ssoCompleteLink
@@ -1830,35 +1887,55 @@ paths:
               $ref: '#/components/schemas/SSOCompleteLinkRequest'
       responses:
         '200':
-          description: Account linked — session issued
+          description: >-
+            With no login MFA, the account is linked and a session is issued.
+            With login MFA, returns only an MFA challenge; identity and session
+            writes wait for /auth/mfa/verify. The challenge branch sets no
+            refresh cookie or session ID header.
           content:
             application/json:
               schema:
-                type: object
-                required:
-                - access_token
-                - refresh_token
-                - session_id
-                - remember_me
-                properties:
-                  access_token:
-                    type: string
-                  refresh_token:
-                    type: string
-                  session_id:
-                    type: string
-                    format: uuid
-                  remember_me:
-                    type: boolean
-                    enum:
-                    - true
+                oneOf:
+                - type: object
+                  required: [access_token, refresh_token, session_id, remember_me]
+                  properties:
+                    access_token:
+                      type: string
+                    refresh_token:
+                      type: string
+                    session_id:
+                      type: string
+                      format: uuid
+                    remember_me:
+                      type: boolean
+                      enum: [true]
+                - type: object
+                  required: [mfa_required, mfa_challenge_token, methods]
+                  properties:
+                    mfa_required:
+                      type: boolean
+                      enum: [true]
+                    mfa_challenge_token:
+                      type: string
+                    methods:
+                      type: array
+                      items:
+                        type: string
+                    recovery_only_methods:
+                      type: array
+                      items:
+                        type: string
+                    default_method:
+                      type: string
+                    webauthn_options:
+                      type: object
           headers:
             Set-Cookie:
-              description: HttpOnly refresh token cookie
+              description: HttpOnly refresh token cookie, session branch only
               schema:
                 type: string
             X-Concord-Session-ID:
-              description: Refresh-session UUID corresponding to the Set-Cookie value
+              description: Refresh-session UUID corresponding to the Set-Cookie value, session branch only
               schema:
                 type: string
                 format: uuid
@@ -1875,11 +1952,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/SSOError'
         '403':
-          description: Self-hosted deployments reject requests reaching the SSO group (`sso_disabled_self_hosted`)
+          description: Effective password login disabled (`account_uses_sso`), account disabled, MFA enrolled during final no-proof mint (`mfa_required`), cross-site request, invalid Origin, or self-host SSO disabled.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/SSOError'
+        '415':
+          description: Missing, malformed or non-JSON Content-Type (`unsupported_media_type`).
         '423':
           description: Account locked after repeated failed password attempts (`account_locked`)
           content:
@@ -1971,11 +2050,13 @@ paths:
               schema:
                 $ref: '#/components/schemas/SSOError'
         '403':
-          description: Self-hosted deployments reject requests reaching the SSO group (`sso_disabled_self_hosted`)
+          description: Cross-site request, invalid Origin, or self-host SSO disabled.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/SSOError'
+        '415':
+          description: Missing, malformed or non-JSON Content-Type (`unsupported_media_type`).
         '409':
           description: Email or username already taken (`email_taken` / `username_taken`)
           content:
@@ -1994,7 +2075,10 @@ paths:
         id_token for server-side re-verification (signature via JWKS, iss/aud/exp/iat, nonce binding
         against the single-use state record) — the server never trusts client-side verification.
         Response shapes are identical across providers. Accepts apple or google; 404 for any other
-        provider. Rate limit: 10 requests per 15 minutes (IP-based).
+        provider. The X-Concord-SSO-Client-Binding header must exactly match the value sent at
+        initiation; missing, malformed, or mismatched values consume state and return the same
+        opaque `invalid_state` error before provider-token work. Rate limit: 10 requests per 15
+        minutes (IP-based).
 
         '
       operationId: ssoProviderSession
@@ -2009,6 +2093,14 @@ paths:
           - apple
           - google
         description: apple or google (404 for any other provider)
+      - name: X-Concord-SSO-Client-Binding
+        in: header
+        required: true
+        schema:
+          type: string
+          minLength: 43
+          maxLength: 43
+        description: Exact canonical binding value used on the matching SSO initiation request.
       requestBody:
         required: true
         content:
@@ -2126,11 +2218,13 @@ paths:
                 $ref: '#/components/schemas/SSOError'
         '403':
           description: Self-hosted deployments reject requests reaching the SSO group (`sso_disabled_self_hosted`),
-            or Apple reports the email as unverified (`oauth_email_unverified`)
+            Apple reports the email as unverified (`oauth_email_unverified`), cross-site request, or invalid Origin.
           content:
             application/json:
               schema:
                 $ref: '#/components/schemas/SSOError'
+        '415':
+          description: Missing, malformed or non-JSON Content-Type (`unsupported_media_type`).
         '404':
           description: Unknown provider (`unknown_provider`)
           content:
@@ -22375,9 +22469,11 @@ components:
           description: Base64-encoded SPKI RSA-4096 public key
         wrapped_private_key:
           type: string
+          maxLength: 16384
           description: Base64-encoded AES-GCM encrypted private key
         key_derivation_salt:
           type: string
+          maxLength: 1024
           description: Base64-encoded 16-byte PBKDF2 salt
     LoginRequest:
       type: object
@@ -24765,9 +24861,11 @@ components:
         wrapped_private_key:
           type: string
           format: byte
+          maxLength: 16384
         key_derivation_salt:
           type: string
           format: byte
+          maxLength: 1024
         public_key:
           type: string
           format: byte

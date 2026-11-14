@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -26,6 +27,12 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/oauth"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
 )
+
+func newBoundInitiateRequest(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Header.Set("X-Concord-SSO-Client-Binding", testSSOClientBinding)
+	return req
+}
 
 // newSSOTestRig wires a Gin engine, test Redis, and a Handler with the Google
 // provider registered. Returns the engine, the Redis client (so tests can read
@@ -59,7 +66,7 @@ func TestInitiate_StoresStateInRedis(t *testing.T) {
 
 	// After #975, google is client-driven — a code_challenge is required.
 	challenge := strings.Repeat("c", 43)
-	req := httptest.NewRequest(http.MethodGet,
+	req := newBoundInitiateRequest(http.MethodGet,
 		"/api/v1/auth/sso/google?redirect_uri=http%3A%2F%2F127.0.0.1%3A65000%2Foauth%2Fcallback&code_challenge="+challenge, nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -87,7 +94,7 @@ func TestInitiate_AuthURLEmbedsState(t *testing.T) {
 	r, _, _ := newSSOTestRig(t)
 	// After #975, google is client-driven — supply a valid code_challenge.
 	challenge := strings.Repeat("d", 43)
-	req := httptest.NewRequest(http.MethodGet,
+	req := newBoundInitiateRequest(http.MethodGet,
 		"/api/v1/auth/sso/google?redirect_uri=http%3A%2F%2F127.0.0.1%3A65000%2Foauth%2Fcallback&code_challenge="+challenge, nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -109,7 +116,7 @@ func TestInitiate_AuthURLEmbedsState(t *testing.T) {
 
 func TestInitiate_RejectsNonLoopbackRedirect(t *testing.T) {
 	r, _, _ := newSSOTestRig(t)
-	req := httptest.NewRequest(http.MethodGet,
+	req := newBoundInitiateRequest(http.MethodGet,
 		"/api/v1/auth/sso/google?redirect_uri=https%3A%2F%2Fevil.example%2Fcallback", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -127,7 +134,7 @@ func TestInitiate_UnknownProvider(t *testing.T) {
 	r := gin.New()
 	r.GET("/api/v1/auth/sso/:provider", h.Initiate)
 
-	req := httptest.NewRequest(http.MethodGet,
+	req := newBoundInitiateRequest(http.MethodGet,
 		"/api/v1/auth/sso/google?redirect_uri=http%3A%2F%2F127.0.0.1%3A1%2Foauth%2Fcallback", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -254,6 +261,8 @@ type fakeAuthAdapter struct {
 	IssueAccessAndRefreshBoundCalls int
 	IssueAccessAndRefreshBoundErr   error
 	LinkedIdentity                  *auth.SSOIdentityLink
+	PrepareSSOLinkResult            *auth.SSOLinkChallenge
+	PrepareSSOLinkErr               error
 	// AdvanceCredentialEpochAfterVerify models a destructive credential reset
 	// committing immediately after CompleteLink verifies the password.
 	AdvanceCredentialEpochAfterVerify bool
@@ -300,6 +309,9 @@ func (f *fakeAuthAdapter) IssueAccessAndRefreshBound(ctx context.Context, userID
 	}
 	f.LinkedIdentity = &identity
 	return f.IssueAccessAndRefresh(ctx, userID)
+}
+func (f *fakeAuthAdapter) PrepareSSOLink(_ context.Context, _, _ string, _ auth.SSOIdentityLink) (*auth.SSOLinkChallenge, error) {
+	return f.PrepareSSOLinkResult, f.PrepareSSOLinkErr
 }
 func (f *fakeAuthAdapter) IssueMFAChallenge(_ context.Context, userID string) (string, []string, []string, interface{}, bool, error) {
 	if f.IssueMFAFail {
@@ -391,8 +403,8 @@ func TestCompleteRegistration_HappyPath(t *testing.T) {
 		"sso_token":           ssoToken,
 		"username":            "newcomp",
 		"password":            "TestPassphrase!12345", // pragma: allowlist secret
-		"wrapped_private_key": base64.StdEncoding.EncodeToString([]byte("wrapped-priv-key-bytes")),
-		"key_derivation_salt": base64.StdEncoding.EncodeToString([]byte("salt-bytes-xxxxxxx")),
+		"wrapped_private_key": base64.StdEncoding.EncodeToString([]byte(strings.Repeat("w", auth.MaxWrappedPrivateKeyDecoded))),
+		"key_derivation_salt": base64.StdEncoding.EncodeToString([]byte(strings.Repeat("s", auth.MaxKeyDerivationSaltDecoded))),
 		"public_key":          testhelpers.E2EETestPublicKey,
 	}
 	bodyJSON, err := json.Marshal(body)
@@ -431,6 +443,47 @@ func TestCompleteRegistration_HappyPath(t *testing.T) {
 	require.Error(t, err, "sso_token must be deleted after consumption")
 	assert.Equal(t, 1, rig.Adapter.IssueAccessAndRefreshCalls)
 	assert.Zero(t, rig.Adapter.IssueAccessAndRefreshBoundCalls)
+}
+
+func TestCompleteRegistrationKeyMaterialLimitPreservesToken(t *testing.T) {
+	rig := newSSOCallbackTestRig(t, "http://unused")
+	rig.Engine.POST("/api/v1/auth/sso/:provider/complete-registration", rig.Handler.CompleteRegistration)
+	payload, err := json.Marshal(map[string]any{
+		"provider": "google", "provider_user_id": "key-limit-subject", "provider_email": "key-limit@example.test",
+		"name": "Key Limit", "branch": "new_user", "created_at": time.Now().UTC().Format(time.RFC3339),
+	})
+	require.NoError(t, err)
+	require.NoError(t, rig.Redis.Set(context.Background(), "sso_token:key-limit-token", payload, 15*time.Minute).Err())
+	for _, test := range []struct {
+		name, field, value string
+	}{
+		{"wrapped encoded", "wrapped_private_key", strings.Repeat("A", auth.MaxWrappedPrivateKeyEncoded+1)},
+		{"wrapped decoded", "wrapped_private_key", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("w", auth.MaxWrappedPrivateKeyDecoded+1)))},
+		{"salt encoded", "key_derivation_salt", strings.Repeat("A", auth.MaxKeyDerivationSaltEncoded+1)},
+		{"salt decoded", "key_derivation_salt", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("s", auth.MaxKeyDerivationSaltDecoded+1)))},
+		{"malformed", "wrapped_private_key", "not-base64"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := map[string]any{
+				"sso_token": "key-limit-token", "username": "keylimit", "password": "TestPassphrase!12345", //nolint:gosec // test-only credential fixture
+				"wrapped_private_key": base64.StdEncoding.EncodeToString([]byte("wrapped")),
+				"key_derivation_salt": base64.StdEncoding.EncodeToString([]byte("salt")),
+				"public_key":          testhelpers.E2EETestPublicKey,
+			}
+			body[test.field] = test.value
+			encoded, err := json.Marshal(body)
+			require.NoError(t, err)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/complete-registration", bytes.NewReader(encoded))
+			req.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			rig.Engine.ServeHTTP(response, req)
+			require.Equal(t, http.StatusBadRequest, response.Code)
+			require.Contains(t, response.Body.String(), "invalid_key_material")
+			require.NotContains(t, response.Body.String(), strings.Repeat("w", 64))
+			_, err = rig.Redis.Get(context.Background(), "sso_token:key-limit-token").Bytes()
+			require.NoError(t, err, "bad key material must not consume the SSO token")
+		})
+	}
 }
 
 // TestCompleteRegistration_ConsumedTokenNotReusable locks the single-use
@@ -1110,6 +1163,43 @@ func TestCompleteLink_HappyPath(t *testing.T) {
 	assert.Equal(t, 1, rig.Adapter.IssueAccessAndRefreshBoundCalls)
 }
 
+func TestCompleteLink_MFAChallengeHasNoSessionOrIdentity(t *testing.T) {
+	rig := newSSOCallbackTestRig(t, "http://unused")
+	rig.Engine.POST("/api/v1/auth/sso/:provider/complete-link", rig.Handler.CompleteLink)
+	userID := insertSSOTestUser(t, rig.DB, "linkmfa@example.test", "linkmfa")
+	rig.Adapter.PrepareSSOLinkResult = &auth.SSOLinkChallenge{Token: "signed-link-challenge", Methods: []string{"totp"}}
+	payload, err := json.Marshal(map[string]any{
+		"provider": "google", "provider_user_id": "google-sub-link-mfa", "provider_email": "linkmfa@example.test",
+		"target_user_id": userID, "branch": "account_link", "created_at": time.Now().UTC().Format(time.RFC3339),
+	})
+	require.NoError(t, err)
+	require.NoError(t, rig.Redis.Set(context.Background(), "sso_token:link-mfa-token", payload, 15*time.Minute).Err())
+	body, err := json.Marshal(map[string]string{"sso_token": "link-mfa-token", "password": "correct-password"}) //nolint:gosec // test-only credential fixture
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/complete-link", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	rig.Engine.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	var response map[string]any
+	require.NoError(t, json.NewDecoder(w.Body).Decode(&response))
+	require.Equal(t, true, response["mfa_required"])
+	require.Equal(t, "signed-link-challenge", response["mfa_challenge_token"])
+	require.Empty(t, response["access_token"])
+	require.Empty(t, response["refresh_token"])
+	require.Empty(t, response["session_id"])
+	require.Empty(t, w.Header().Get(middleware.SessionIDHeader))
+	require.Empty(t, w.Header().Values("Set-Cookie"))
+	require.Zero(t, rig.Adapter.IssueAccessAndRefreshBoundCalls)
+	var identities, families, refreshes int
+	require.NoError(t, rig.DB.QueryRow(`SELECT COUNT(*) FROM user_sso_identities WHERE user_id=$1`, userID).Scan(&identities))
+	require.NoError(t, rig.DB.QueryRow(`SELECT COUNT(*) FROM login_families WHERE user_id=$1`, userID).Scan(&families))
+	require.NoError(t, rig.DB.QueryRow(`SELECT COUNT(*) FROM refresh_tokens WHERE user_id=$1`, userID).Scan(&refreshes))
+	require.Zero(t, identities)
+	require.Zero(t, families)
+	require.Zero(t, refreshes)
+}
+
 // TestCompleteLink_RefusesMintAfterCredentialEpochAdvances is a regression for
 // #2458. It models a password-reset commit between the password proof and SSO
 // session mint; CompleteLink must not return a session from the old proof.
@@ -1453,7 +1543,7 @@ func initiateRequest(t *testing.T, r *gin.Engine, provider, redirectURI string) 
 	t.Helper()
 	target := "/api/v1/auth/sso/" + provider + "?redirect_uri=" + url.QueryEscape(redirectURI) +
 		"&code_challenge=" + strings.Repeat("c", 43)
-	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req := newBoundInitiateRequest(http.MethodGet, target, nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	return w
@@ -1569,7 +1659,7 @@ func TestInitiate_EmbedsStateInRecord(t *testing.T) {
 	r, rdb, _ := newSSOTestRig(t)
 
 	// After #975 google is client-driven — code_challenge is required.
-	req := httptest.NewRequest(http.MethodGet,
+	req := newBoundInitiateRequest(http.MethodGet,
 		"/api/v1/auth/sso/google?redirect_uri="+url.QueryEscape("http://127.0.0.1:51620/oauth/callback")+
 			"&code_challenge="+strings.Repeat("e", 43), nil)
 	w := httptest.NewRecorder()
@@ -1644,7 +1734,7 @@ func TestInitiate_Apple_KVFailureCleanupSurvivesClientAbort(t *testing.T) {
 
 	target := "/api/v1/auth/sso/apple?redirect_uri=" + url.QueryEscape("http://127.0.0.1:51620/oauth/callback") +
 		"&code_challenge=" + strings.Repeat("c", 43)
-	req := httptest.NewRequest(http.MethodGet, target, nil).WithContext(ctx)
+	req := newBoundInitiateRequest(http.MethodGet, target, nil).WithContext(ctx)
 	w := httptest.NewRecorder()
 	rig.ServeHTTP(w, req)
 

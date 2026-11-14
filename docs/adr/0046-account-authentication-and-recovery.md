@@ -50,6 +50,32 @@ Two hard constraints pull against each other. An attacker who changed the passwo
 - **Delivery becomes a security control.** Notices go through a durable outbox, and completion holds while they are undelivered.
 - **To revisit:** passwordless accounts (needs a floor branch and PRF); Touch ID for the recovery device (needs a signed-build entitlements spike); a hardware security key used only for recovery.
 
+## Current SSO authentication boundary (Security #159)
+
+The account-link path proves the existing password, applies the deployment's
+effective password-login policy, then either mints under a locked final policy
+read or issues a signed `sso_link` MFA challenge. A five-minute Redis record
+holds only target user, credential epoch and provider identity under the
+challenge JTI. The verifier claims the challenge once, checks the factor and
+dispatches by the signed completion kind; the SSO-link completer consumes that
+pending record with `GETDEL`. The final users-row lock rechecks disabled state,
+password policy, epoch and current login MFA before one transaction inserts
+identity, login family and refresh row. Cookie and session response follow
+commit. Factor writers and recovery-only preference writes take the same
+users-row lock, so an enrollment or removal cannot cross the final read.
+
+Desktop main binds each Apple or Google state to the initiating process with
+the same canonical 32-byte client secret on initiation and session exchange;
+Redis holds only a domain-separated SHA-256 digest. A missing or mismatched
+binding consumes state and fails before provider token validation. Six public
+cookie-establishing auth POST routes require JSON, reject cross-site Fetch
+Metadata and enforce an exact configured Origin when one is supplied; native
+clients may omit Origin. Provider initiation also has a fail-closed per-provider
+600/minute cap alongside the existing per-IP cap. Registration bounds encoded
+and decoded E2EE envelopes and salts. A valid JWKS fetch replaces the provider
+snapshot so withdrawn keys disappear; unknown-key refresh attempts are bounded
+to one per provider per minute, which can briefly delay a new provider key.
+
 ## Action items
 
 1. [x] Lead answers Tier 1 of the spec's §9 before #3587 PR-A merges (2026-10-07, spec §9.5).

@@ -14,6 +14,16 @@ const challengeTTL = 5 * time.Minute
 // ChallengePurpose identifies what the MFA challenge is for.
 type ChallengePurpose string
 
+// CompletionKind selects the post-MFA login continuation from signed claims.
+type CompletionKind string
+
+const (
+	// CompletionKindLogin is the legacy ordinary login continuation.
+	CompletionKindLogin CompletionKind = "login"
+	// CompletionKindSSOLink requires the pending SSO identity and verified MFA.
+	CompletionKindSSOLink CompletionKind = "sso_link"
+)
+
 // MFA challenge purposes.
 const (
 	PurposeLogin             ChallengePurpose = "login"
@@ -40,6 +50,8 @@ type ChallengeClaims struct {
 	jwt.RegisteredClaims
 	UserID  string           `json:"user_id"`
 	Purpose ChallengePurpose `json:"purpose"`
+	// Empty is the legacy login continuation. A client cannot choose this in MFA verify.
+	CompletionKind CompletionKind `json:"completion_kind,omitempty"`
 	// RecoveryFactor is the server-verified factor authorizing final recovery.
 	RecoveryFactor string `json:"recovery_factor,omitempty"`
 	// CredentialEpoch is the durable users.credential_epoch in effect when this
@@ -146,6 +158,10 @@ func ValidateChallengeToken(tokenString, jwtSecret string, expectedPurpose Chall
 
 	if claims.Purpose != expectedPurpose {
 		return nil, fmt.Errorf("purpose mismatch: got %s, want %s", claims.Purpose, expectedPurpose)
+	}
+	if claims.CompletionKind != "" && (claims.Purpose != PurposeLogin ||
+		(claims.CompletionKind != CompletionKindLogin && claims.CompletionKind != CompletionKindSSOLink)) {
+		return nil, fmt.Errorf("invalid challenge completion kind")
 	}
 
 	return claims, nil

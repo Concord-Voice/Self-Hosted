@@ -819,6 +819,34 @@ npm install --global windows-build-tools
 - Minimum: 4 CPU cores, 8 GB RAM
 - Use volumes for faster I/O
 
+## SSO security cutover
+
+An observable shipped Desktop build with IPC contract 34 must precede mandatory server enforcement. Its main
+process sends the same 32-byte, canonical base64url value in
+`X-Concord-SSO-Client-Binding` on both SSO initiation and session exchange, and
+its MFA modal completes an account link through `/auth/mfa/verify`. Advance the
+supported Desktop minimum to that build before deploying this server change;
+`SPA_MIN_CONTRACT` metadata or a green source build alone does not prove the
+client floor is live.
+Old in-flight SSO states and MFA challenges restart after deployment; older
+Desktop builds cannot initiate Apple or Google SSO once the header is required.
+
+Run focused server regressions from `services/control-plane` with an isolated
+`DATABASE_URL` and `REDIS_URL` (never the shared `concord` database):
+
+```sh
+go test -p 1 ./internal/oauth ./internal/auth ./internal/mfa ./internal/middleware ./internal/api -run 'Test.*(SSOLink|CompletionKind|ClientBinding|JWKS|LoginCSRF|InitiateGlobalLimit|KeyMaterialLimit)' -count=1
+go test -race -p 1 ./internal/oauth ./internal/auth ./internal/mfa -run 'Test.*(SSOLink|CompletionKind|JWKS)' -count=1
+```
+
+SSO initiation keeps the per-IP 10/15-minute cap and adds a fail-closed
+600/minute budget per provider before state or Apple bridge allocation.
+Registration rejects encoded wrapped keys above 16,384 characters or salts
+above 1,024 characters, and decoded values above 12,288 or 768 bytes.
+Provider JWKS snapshots replace withdrawn keys; an unknown key ID gets at most
+one refresh opportunity per provider per minute, including failed fetches.
+That bound may delay use of a newly rotated key for up to a minute.
+
 ## Next Steps
 
 - Read [API Documentation](./api/): the OpenAPI 3.0 specification. `scripts/api/check-openapi-coverage.sh` enforces full live-route coverage
