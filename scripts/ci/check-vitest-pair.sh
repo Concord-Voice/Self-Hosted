@@ -10,62 +10,106 @@
 # check fails the PR and tells the reader how to fix it. It reads files only and
 # needs no token.
 #
-# Usage: check-vitest-pair.sh [root ...]
-#   Each root is a directory that holds a package-lock.json. With no argument it
-#   checks the three npm roots: . client/admin services/media-plane
+# Every copy counts, not only the hoisted one: when a bump crosses a range, npm
+# nests the old version under a workspace (packages/x/node_modules/vitest), and
+# that copy is out of step too. Versions compare as semver, so 5.1.0 is ahead
+# of 5.1.0-beta.1.
 #
-# Exit 0 = every root has a matched pair. Exit 1 = a root is out of step, or its
-# lockfile is missing, unreadable, or does not resolve both packages (a guard
-# that cannot see the pair must not pass).
+# Usage: check-vitest-pair.sh [package-lock.json ...]
+#   With no argument it checks the three npm roots' lockfiles:
+#   package-lock.json, client/admin/package-lock.json and
+#   services/media-plane/package-lock.json.
+#
+# Exit 0 = every lockfile has one version for both packages. Exit 1 = a lockfile
+# is out of step, or is missing, unreadable, or does not resolve both packages
+# (a guard that cannot see the pair must not pass).
 
 set -uo pipefail
 
 if [ "$#" -gt 0 ]; then
-  roots=("$@")
+  locks=("$@")
 else
-  roots=(. client/admin services/media-plane)
+  locks=(package-lock.json client/admin/package-lock.json services/media-plane/package-lock.json)
 fi
 
-PLUGIN='@vitest/coverage-istanbul'
-status=0
+if ! command -v jq >/dev/null 2>&1; then
+  echo "::error::vitest pair: jq is not installed"
+  exit 1
+fi
 
-for root in "${roots[@]}"; do
-  lock="$root/package-lock.json"
-  if ! pair=$(jq -er --arg p "node_modules/$PLUGIN" \
-      '[.packages["node_modules/vitest"].version // "missing", .packages[$p].version // "missing"] | @tsv' \
-      "$lock" 2>/dev/null); then
-    echo "::error file=$lock::vitest pair: cannot read $lock"
-    status=1
-    continue
-  fi
-  IFS=$'\t' read -r vitest plugin <<<"$pair"
-
-  if [ "$vitest" = missing ] || [ "$plugin" = missing ]; then
-    echo "::error file=$lock::vitest pair: $root does not resolve both halves (vitest $vitest, $PLUGIN $plugin)."
-    status=1
-    continue
-  fi
-
-  if [ "$vitest" = "$plugin" ]; then
-    echo "ok: $root vitest $vitest = $PLUGIN $plugin"
-    continue
-  fi
-
-  # The lower version is the half that is behind.
-  lower=$(printf '%s\n%s\n' "$vitest" "$plugin" | sort -V | head -n1)
-  # One assignment per line: Semgrep's bash parser rejects `a=x b=y` here and
-  # reports the whole file as a scanner error.
-  if [ "$lower" = "$vitest" ]; then
-    behind=vitest
-    ahead="$plugin"
+# Prints a status word on the first line, then the lines to report.
+# shellcheck disable=SC2016  # jq program, not shell expansions
+PROGRAM='
+def ver: (capture("^(?<a>[0-9]+)\\.(?<b>[0-9]+)\\.(?<c>[0-9]+)(-(?<p>[0-9A-Za-z.-]+))?$")
+          // error("not a semver version: \(.)"))
+  | [(.a | tonumber), (.b | tonumber), (.c | tonumber), (if .p then 0 else 1 end), (.p // "")];
+def show: map("\(.path) \(.v)") | join(", ");
+[ .packages | to_entries[]
+  | select(.key | test("(^|/)node_modules/(vitest|@vitest/coverage-istanbul)$"))
+  | select(.value.link != true)
+  | {path: .key, pkg: (.key | sub("^.*node_modules/"; "")), v: (.value.version // "")} ] as $c
+| if ($c | map(select(.pkg == "vitest")) | length) == 0
+     or ($c | map(select(.pkg != "vitest")) | length) == 0 then
+    "missing", "found: \(if $c == [] then "none" else ($c | show) end)"
+  elif any($c[]; (.v | type) != "string" or .v == "") then
+    "empty", ($c | show)
+  elif ($c | map(.v) | unique | length) == 1 then
+    "ok", $c[0].v
   else
-    behind="$PLUGIN"
-    ahead="$vitest"
+    ($c | map(.v) | max_by(ver)) as $top
+    | "split", $top, ($c[] | select(.v != $top) | "\(.pkg)\t\(.path)\t\(.v)")
+  end
+'
+
+status=0
+for lock in "${locks[@]}"; do
+  root=$(dirname "$lock")
+  if [ ! -f "$lock" ]; then
+    echo "::error file=$lock::vitest pair: $lock does not exist"
+    status=1
+    continue
   fi
-  echo "::error file=$lock::vitest pair out of step in $root: vitest $vitest, $PLUGIN $plugin. $behind is behind."
-  echo "  Fix: on this branch, run 'npm install --save-dev --ignore-scripts $behind@$ahead' in $root and commit package.json and package-lock.json."
-  echo "  Or close this PR and open one that bumps vitest and $PLUGIN together."
-  status=1
+  if ! out=$(jq -r "$PROGRAM" "$lock" 2>&1); then
+    echo "::error file=$lock::vitest pair: cannot read $lock: $out"
+    status=1
+    continue
+  fi
+  kind=$(head -n1 <<<"$out")
+  rest=$(tail -n +2 <<<"$out")
+  case "$kind" in
+    ok)
+      echo "ok: $root vitest = @vitest/coverage-istanbul = $rest"
+      ;;
+    missing)
+      echo "::error file=$lock::vitest pair: $root does not resolve both vitest and @vitest/coverage-istanbul ($rest)."
+      status=1
+      ;;
+    empty)
+      echo "::error file=$lock::vitest pair: $root has a copy with no version ($rest)."
+      status=1
+      ;;
+    split)
+      top=$(head -n1 <<<"$rest")
+      echo "::error file=$lock::vitest pair out of step in $root: the newest copy is $top; these copies are behind:"
+      while IFS=$'\t' read -r pkg path v; do
+        [ -n "$pkg" ] || continue
+        # A copy under a workspace (packages/x/node_modules/...) is fixed in
+        # that workspace; a hoisted copy is fixed at the root.
+        ws=""
+        case "$path" in
+          node_modules/*) ;;
+          *) ws=" -w ${path%%/node_modules/*}" ;;
+        esac
+        echo "  $path is $v. Fix: in $root, run 'npm install --save-dev --ignore-scripts $pkg@$top$ws'."
+      done < <(tail -n +2 <<<"$rest")
+      echo "  Commit the changed package.json and package-lock.json files on this branch, or close this PR and open one that bumps vitest and @vitest/coverage-istanbul together."
+      status=1
+      ;;
+    *)
+      echo "::error file=$lock::vitest pair: unexpected result for $lock: $kind"
+      status=1
+      ;;
+  esac
 done
 
 exit "$status"

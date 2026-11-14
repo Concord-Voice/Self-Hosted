@@ -852,6 +852,8 @@ jobs:
       # behind and the fix. The job reads files only and never pushes to the PR
       # branch. The fixture suite runs first and must see the split pair fail.
       - name: vitest pair is in step
+        # Runs even when an earlier lint step failed, so one red step does not hide this one.
+        if: ${{ !cancelled() }}
         run: |
           bash scripts/tests/test-check-vitest-pair.sh
           bash scripts/ci/check-vitest-pair.sh
