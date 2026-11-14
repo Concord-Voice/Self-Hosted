@@ -403,8 +403,8 @@ func TestCompleteRegistration_HappyPath(t *testing.T) {
 		"sso_token":           ssoToken,
 		"username":            "newcomp",
 		"password":            "TestPassphrase!12345", // pragma: allowlist secret
-		"wrapped_private_key": base64.StdEncoding.EncodeToString([]byte("wrapped-priv-key-bytes")),
-		"key_derivation_salt": base64.StdEncoding.EncodeToString([]byte("salt-bytes-xxxxxxx")),
+		"wrapped_private_key": base64.StdEncoding.EncodeToString([]byte(strings.Repeat("w", auth.MaxWrappedPrivateKeyDecoded))),
+		"key_derivation_salt": base64.StdEncoding.EncodeToString([]byte(strings.Repeat("s", auth.MaxKeyDerivationSaltDecoded))),
 		"public_key":          testhelpers.E2EETestPublicKey,
 	}
 	bodyJSON, err := json.Marshal(body)
@@ -443,6 +443,47 @@ func TestCompleteRegistration_HappyPath(t *testing.T) {
 	require.Error(t, err, "sso_token must be deleted after consumption")
 	assert.Equal(t, 1, rig.Adapter.IssueAccessAndRefreshCalls)
 	assert.Zero(t, rig.Adapter.IssueAccessAndRefreshBoundCalls)
+}
+
+func TestCompleteRegistrationKeyMaterialLimitPreservesToken(t *testing.T) {
+	rig := newSSOCallbackTestRig(t, "http://unused")
+	rig.Engine.POST("/api/v1/auth/sso/:provider/complete-registration", rig.Handler.CompleteRegistration)
+	payload, err := json.Marshal(map[string]any{
+		"provider": "google", "provider_user_id": "key-limit-subject", "provider_email": "key-limit@example.test",
+		"name": "Key Limit", "branch": "new_user", "created_at": time.Now().UTC().Format(time.RFC3339),
+	})
+	require.NoError(t, err)
+	require.NoError(t, rig.Redis.Set(context.Background(), "sso_token:key-limit-token", payload, 15*time.Minute).Err())
+	for _, test := range []struct {
+		name, field, value string
+	}{
+		{"wrapped encoded", "wrapped_private_key", strings.Repeat("A", auth.MaxWrappedPrivateKeyEncoded+1)},
+		{"wrapped decoded", "wrapped_private_key", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("w", auth.MaxWrappedPrivateKeyDecoded+1)))},
+		{"salt encoded", "key_derivation_salt", strings.Repeat("A", auth.MaxKeyDerivationSaltEncoded+1)},
+		{"salt decoded", "key_derivation_salt", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("s", auth.MaxKeyDerivationSaltDecoded+1)))},
+		{"malformed", "wrapped_private_key", "not-base64"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := map[string]any{
+				"sso_token": "key-limit-token", "username": "keylimit", "password": "TestPassphrase!12345", //nolint:gosec // test-only credential fixture
+				"wrapped_private_key": base64.StdEncoding.EncodeToString([]byte("wrapped")),
+				"key_derivation_salt": base64.StdEncoding.EncodeToString([]byte("salt")),
+				"public_key":          testhelpers.E2EETestPublicKey,
+			}
+			body[test.field] = test.value
+			encoded, err := json.Marshal(body)
+			require.NoError(t, err)
+			req := httptest.NewRequest(http.MethodPost, "/api/v1/auth/sso/google/complete-registration", bytes.NewReader(encoded))
+			req.Header.Set("Content-Type", "application/json")
+			response := httptest.NewRecorder()
+			rig.Engine.ServeHTTP(response, req)
+			require.Equal(t, http.StatusBadRequest, response.Code)
+			require.Contains(t, response.Body.String(), "invalid_key_material")
+			require.NotContains(t, response.Body.String(), strings.Repeat("w", 64))
+			_, err = rig.Redis.Get(context.Background(), "sso_token:key-limit-token").Bytes()
+			require.NoError(t, err, "bad key material must not consume the SSO token")
+		})
+	}
 }
 
 // TestCompleteRegistration_ConsumedTokenNotReusable locks the single-use

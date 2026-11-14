@@ -267,27 +267,17 @@ func (h *Handler) consumeSSOToken(ctx context.Context, token, expectedBranch str
 // need to discriminate.
 var errSSOTokenInvalid = errors.New("oauth: sso_token invalid")
 
-// decodeSSOKeyMaterial decodes the three base64-StdEncoding fields from the
-// CompleteRegistration request body. Returns the first failing decode's error
-// so the caller's error_code translation stays opaque (all three failures map
-// to invalid_key_material).
-func decodeSSOKeyMaterial(req *completeRegistrationRequest) (wrapped, salt, pubKey []byte, err error) {
-	wrapped, err = base64.StdEncoding.DecodeString(req.WrappedPrivateKey)
+// decodeSSOPublicKey keeps public-key parsing after the single-use SSO token
+// gate. Opaque wrapped-key and salt bounds are checked earlier without RSA work.
+func decodeSSOPublicKey(publicKey string) ([]byte, error) {
+	pubKey, err := base64.StdEncoding.DecodeString(publicKey)
 	if err != nil {
-		return nil, nil, nil, err
-	}
-	salt, err = base64.StdEncoding.DecodeString(req.KeyDerivationSalt)
-	if err != nil {
-		return nil, nil, nil, err
-	}
-	pubKey, err = base64.StdEncoding.DecodeString(req.PublicKey)
-	if err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
 	if err := auth.ValidateE2EEPublicKey(pubKey); err != nil {
-		return nil, nil, nil, err
+		return nil, err
 	}
-	return wrapped, salt, pubKey, nil
+	return pubKey, nil
 }
 
 // createSSOUserParams bundles the non-context inputs to createSSOUser so the
@@ -407,6 +397,16 @@ func (h *Handler) Initiate(c *gin.Context) {
 	bindingDigest, ok := clientBindingDigest(c)
 	if !ok {
 		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_request"})
+		return
+	}
+	allowed, err := middleware.AllowUserAction(c.Request.Context(), h.deps.Redis,
+		"ratelimit:sso:initiate:"+providerName, 600, time.Minute)
+	if err != nil {
+		c.JSON(http.StatusServiceUnavailable, gin.H{"error_code": "redis_unavailable"})
+		return
+	}
+	if !allowed {
+		c.JSON(http.StatusTooManyRequests, gin.H{"error_code": "rate_limited"})
 		return
 	}
 
@@ -965,6 +965,14 @@ func (h *Handler) CompleteRegistration(c *gin.Context) {
 		})
 		return
 	}
+	// Reject oversized or malformed opaque material before consuming the
+	// one-use SSO token or spending Argon2 work. Public-key RSA parsing stays
+	// behind the token gate.
+	wrapped, salt, err := auth.DecodeRegistrationPrivateMaterial(req.WrappedPrivateKey, req.KeyDerivationSalt)
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_key_material"})
+		return
+	}
 
 	ctx := c.Request.Context()
 
@@ -986,11 +994,7 @@ func (h *Handler) CompleteRegistration(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error_code": "hash_failed"})
 		return
 	}
-
-	// Decode key material. base64.StdEncoding (NOT RawURLEncoding) matches
-	// the existing pending-registrations path; the test fixture also uses
-	// StdEncoding.EncodeToString.
-	wrapped, salt, pubKey, err := decodeSSOKeyMaterial(&req)
+	pubKey, err := decodeSSOPublicKey(req.PublicKey)
 	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_key_material"})
 		return

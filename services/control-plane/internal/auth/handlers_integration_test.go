@@ -3,6 +3,7 @@ package auth_test
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"net/http"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -44,6 +46,37 @@ func registerPayload() map[string]interface{} {
 		"wrapped_private_key": priv,
 		"key_derivation_salt": salt,
 	}
+}
+
+func TestRegisterKeyMaterialLimitReturnsOpaqueError(t *testing.T) {
+	ts := setupTS(t)
+	for _, test := range []struct {
+		name, field, value string
+	}{
+		{"wrapped encoded", "wrapped_private_key", strings.Repeat("A", auth.MaxWrappedPrivateKeyEncoded+1)},
+		{"wrapped decoded", "wrapped_private_key", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("w", auth.MaxWrappedPrivateKeyDecoded+1)))},
+		{"salt encoded", "key_derivation_salt", strings.Repeat("A", auth.MaxKeyDerivationSaltEncoded+1)},
+		{"salt decoded", "key_derivation_salt", base64.StdEncoding.EncodeToString([]byte(strings.Repeat("s", auth.MaxKeyDerivationSaltDecoded+1)))},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			body := registerPayload()
+			body[test.field] = test.value
+			response := ts.DoRequest("POST", pathRegister, body, nil)
+			require.Equal(t, http.StatusBadRequest, response.Code)
+			require.Contains(t, response.Body.String(), `"error_code":"invalid_key_material"`)
+			require.NotContains(t, response.Body.String(), strings.Repeat("w", 64))
+			require.NotContains(t, response.Body.String(), strings.Repeat("s", 64))
+		})
+	}
+}
+
+func TestRegisterKeyMaterialLimitExactMaximumAccepted(t *testing.T) {
+	ts := setupTS(t)
+	body := registerPayload()
+	body["wrapped_private_key"] = base64.StdEncoding.EncodeToString([]byte(strings.Repeat("w", auth.MaxWrappedPrivateKeyDecoded)))
+	body["key_derivation_salt"] = base64.StdEncoding.EncodeToString([]byte(strings.Repeat("s", auth.MaxKeyDerivationSaltDecoded)))
+	response := ts.DoRequest("POST", pathRegister, body, nil)
+	require.Equal(t, http.StatusCreated, response.Code, response.Body.String())
 }
 
 // --- Registration Tests ---

@@ -5,11 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -81,6 +83,57 @@ func getInitiateWithBinding(r *gin.Engine, provider, challenge, binding string) 
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	return w
+}
+
+func TestInitiateGlobalLimitRejectsBeforeStateAllocationAndSeparatesProviders(t *testing.T) {
+	r, rdb, putter := newDualProviderInitiateRig(t)
+	ctx := context.Background()
+	invalid := getInitiateWithBinding(r, "google", strings.Repeat("a", 43), "")
+	require.Equal(t, http.StatusBadRequest, invalid.Code)
+	noBudget, err := rdb.Exists(ctx, "ratelimit:sso:initiate:google").Result()
+	require.NoError(t, err)
+	require.Zero(t, noBudget, "invalid client binding must not spend the provider budget")
+	require.NoError(t, rdb.Set(ctx, "ratelimit:sso:initiate:apple", "600", time.Minute).Err())
+	blocked := getInitiate(r, "apple", strings.Repeat("a", 43))
+	require.Equal(t, http.StatusTooManyRequests, blocked.Code, blocked.Body.String())
+	require.Contains(t, blocked.Body.String(), "rate_limited")
+	keys, err := rdb.Keys(ctx, "sso_state:*").Result()
+	require.NoError(t, err)
+	require.Empty(t, keys)
+	require.Empty(t, putter.calls)
+
+	allowed := getInitiate(r, "google", strings.Repeat("a", 43))
+	require.Equal(t, http.StatusOK, allowed.Code, allowed.Body.String())
+	count, err := rdb.Get(ctx, "ratelimit:sso:initiate:google").Int64()
+	require.NoError(t, err)
+	require.Equal(t, int64(1), count)
+}
+
+type rejectInitiateCounterHook struct{}
+
+func (rejectInitiateCounterHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+func (rejectInitiateCounterHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+func (rejectInitiateCounterHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "incr" && strings.HasPrefix(cmd.Args()[1].(string), "ratelimit:sso:initiate:") {
+			return errors.New("counter unavailable")
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func TestInitiateGlobalLimitFailsClosedOnRedisError(t *testing.T) {
+	r, rdb, putter := newDualProviderInitiateRig(t)
+	rdb.AddHook(rejectInitiateCounterHook{})
+	response := getInitiate(r, "apple", strings.Repeat("a", 43))
+	require.Equal(t, http.StatusServiceUnavailable, response.Code)
+	require.Contains(t, response.Body.String(), "redis_unavailable")
+	keys, err := rdb.Keys(context.Background(), "sso_state:*").Result()
+	require.NoError(t, err)
+	require.Empty(t, keys)
+	require.Empty(t, putter.calls)
 }
 
 func TestInitiate_ClientBindingRequiredAndStoredAsDigest(t *testing.T) {
