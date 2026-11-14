@@ -17,7 +17,7 @@ An invisible member must be indistinguishable from an offline member in counts, 
 
 No schema, route, configuration, entitlement, frontend, or media-plane change. Preserve transaction and lock ordering. Do not hold the Hub lock across Redis. Do not reveal an excluded profile through a distinct error or status. Keep the existing HTTP responses for ring and block except for the privacy-driven recipient/status cases.
 
-Self-Hosted and Hosted implement the same control-plane behavior. Their `CHANGELOG.md`, OpenAPI, and architecture docs must be rebased after #166 merges. Ship Self-Hosted first, then Hosted. Separate approval is required for each merge.
+Rebase the changelog, OpenAPI, and architecture docs after the preceding authorization change merges. Every PR requires its own merge approval.
 
 ## Proof
 

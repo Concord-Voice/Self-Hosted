@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development or superpowers:executing-plans task by task. Checkboxes track progress.
 
-**Goal:** Close six privacy exits across presence, profiles, ownership, and friendship notifications in Self-Hosted and Hosted.
+**Goal:** Close six privacy exits across presence, profiles, ownership, and friendship notifications in this repository.
 
 **Architecture:** One Hub visible-online predicate feeds the two current raw-presence callers. Other exits enforce their existing audience or prior-relationship rule at their write/read boundary.
 
@@ -10,7 +10,7 @@
 
 ## Constraints
 
-- Use isolated worktrees and isolated `DATABASE_URL` / `REDIS_URL`; use shared default Go caches.
+- Use an isolated worktree and isolated `DATABASE_URL` / `REDIS_URL`; use shared default Go caches.
 - No migration or new dependency. Preserve transaction order and current client contracts where the privacy rule does not require a change.
 - #166 must merge and pass postmerge before #171 merges; rebase shared docs and rerun exact-head gates.
 - Test authoring is a separate `@test-writer` dispatch; Phase 4 and Phase 8 both require `@red-team`.
@@ -19,7 +19,7 @@
 
 ### 1. Baseline and test proof
 
-- [ ] Run the five supplied exploit tests on unfixed Self-Hosted with isolated services and record attacker-goal success.
+- [ ] Run the five supplied exploit tests on unfixed `origin/main` with isolated services and record attacker-goal success.
 - [ ] Add small RED tests for server count, last-seen, group ring, profile, transfer event, and stranger block; include positive controls.
 
 ### 2. Presence exits
@@ -39,19 +39,13 @@
 - [ ] Send transfer initiation only to both parties.
 - [ ] Capture prior accepted-friendship status inside the block transaction and condition target notification on it.
 
-### 4. Self-Hosted validation and docs
+### 4. Validation and docs
 
 - [ ] Run focused package tests, race checks where practical, exploit replays, lint/vet, and quality gate against isolated services.
 - [ ] Update OpenAPI, architecture, and changelog for changed privacy semantics.
-- [ ] Dispatch pre-PR red team; fix concrete findings. Commit and push a draft Self-Hosted PR.
+- [ ] Dispatch pre-PR red team; fix concrete findings. Commit and push a draft PR.
 
-### 5. Hosted mirror
-
-- [ ] Port semantic hunks into Hosted without replacing drifted files wholesale.
-- [ ] Run the same focused tests and exploit replays against a separate database and Redis.
-- [ ] Update Hosted docs/changelog and push a draft PR linked to Security#171.
-
-### 6. Lifecycle gates
+### 5. Lifecycle gates
 
 - [ ] Rebase after #166 merges and Phase 10 is green; rerun exact-head CI and quality gates.
 - [ ] Mark ready, wait for required online bots, run the full Phase-8 specialist suite and disposition gate.
