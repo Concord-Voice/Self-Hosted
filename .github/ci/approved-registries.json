@@ -1,0 +1,7 @@
+{
+  "_about": "Read by scripts/ci/check-lockfile-registries.py (#271). npm_registry_hosts: hosts an npm lockfile may resolve a package from (https only). go_local_replacements: repository-relative directories a go.mod replace directive may point at. A go.mod replace to another module path is fetched through the module proxy and needs no entry here.",
+  "npm_registry_hosts": [
+    "registry.npmjs.org"
+  ],
+  "go_local_replacements": []
+}

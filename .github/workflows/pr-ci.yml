@@ -834,6 +834,16 @@ jobs:
         run: |
           python3 -m pip install --user --quiet --require-hashes --only-binary=:all: -r .github/requirements-pyyaml.txt
 
+      # Fails when a package-lock.json resolves a package from a host that is
+      # not in .github/ci/approved-registries.json, or a go.mod replace points
+      # at an unlisted filesystem path (#271). Every lockfile and go.mod path
+      # selects this job. The fixture suite runs first and must see both
+      # committed fixtures fail. Exit 2 (could not run) is a failure too.
+      - name: Lockfiles resolve from approved registries
+        run: |
+          bash scripts/tests/test-check-lockfile-registries.sh
+          python3 scripts/ci/check-lockfile-registries.py
+
       # Runs when a workflow_lint path in .github/ci/scan-relevance.yml changes;
       # a new package.json, go.mod or requirements root alone does not start it.
       # Fails if a tracked update root is in no block of .github/dependabot.yml,

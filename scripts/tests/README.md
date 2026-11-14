@@ -29,6 +29,9 @@ Other subjects in this directory:
 - `test-publish-minio-image.sh` — MinIO image publishing
 - `test-check-oci-tag.sh` — OCI tag validation
 - `test-go-transitive-flush-render.sh` — Go transitive-flush issue rendering
+- `test-check-lockfile-registries.sh` — the approved-registry guard for npm
+  lockfiles and go.mod (`scripts/ci/check-lockfile-registries.py`,
+  `.github/ci/approved-registries.json`); its fixtures are in `fixtures/registries/`
 
 The `selfhost-deploy-tests` commit hook runs all twelve self-host suites directly on Linux.
 On macOS it uses `run-selfhost-deploy-tests.sh` and a cached Ubuntu image; Docker Desktop
