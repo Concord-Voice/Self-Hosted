@@ -67,9 +67,9 @@ No deletion is planned. `Desktop/` denotes the sibling repository root, not a di
 **Interfaces:** Each flow creates one 32-byte random secret per attempt, encodes it as unpadded base64url, and passes exactly the same header on initiate and session through its existing `controlPlaneFetch`. No signature or IPC shape changes.
 
 - [ ] Write provider tests asserting 43 canonical characters, same header on the two requests, distinct values on two attempts, and absence from URL/query/body/result/log/IPC sentinel captures; cancel, timeout, error and supersession clear the flow-held value.
-- [ ] Run `cd /Users/markd/.codex/worktrees/security-151-desktop/Desktop/desktop && npm test -- tests/unit/main/oauth/apple/appleFlow.test.ts tests/unit/main/oauth/google/googleFlow.test.ts`; expect the new header/custody assertions to fail.
+- [ ] Run `cd /Users/markd/.codex/worktrees/security-159-desktop/Desktop/desktop && npm test -- tests/unit/main/oauth/apple/appleFlow.test.ts tests/unit/main/oauth/google/googleFlow.test.ts`; expect the new header/custody assertions to fail.
 - [ ] Add the minimum main-process secret lifecycle to both existing flows; keep PKCE, loopback, provider exchange and Concord session exchange in main.
-- [ ] Rerun the same Vitest command and `cd /Users/markd/.codex/worktrees/security-151-desktop/Desktop/desktop && npm run typecheck`; expect pass, then commit only this provider-flow slice.
+- [ ] Rerun the same Vitest command and `cd /Users/markd/.codex/worktrees/security-159-desktop/Desktop/desktop && npm run typecheck`; expect pass, then commit only this provider-flow slice.
 
 ### Task 2: Carry complete-link MFA through the existing Desktop bridge
 
@@ -78,9 +78,9 @@ No deletion is planned. `Desktop/` denotes the sibling repository root, not a di
 **Interfaces:** Widen `SSOCompletionResult` in `shared/sso.ts` with the existing public `kind: 'mfa_challenge'` fields and `credentialOwner`; `sso:completeLink` returns tokens/challenge/error; `sso:completeMFA` remains the only proof submission and refresh-token storage bridge. Set `IPC_CONTRACT_VERSION=34`; keep `SPA_MIN_CONTRACT=19` until remote SPA reliance is actually released.
 
 - [ ] Write tests: complete-link challenge returns no refresh credential, moves pending owner from link to MFA, and a successful `sso:completeMFA` stores the refresh token under that owner. Test owner/provider/token mismatch and an error path; modal uses purpose `sso_login` without a new submission path.
-- [ ] Run `cd /Users/markd/.codex/worktrees/security-151-desktop/Desktop/desktop && npm test -- tests/unit/main/ipc/sso.test.ts tests/unit/main/ipcContract.test.ts tests/unit/renderer/services/ssoService.test.ts tests/unit/components/Auth/SSOAccountLinkConfirm.test.tsx tests/unit/stores/mfaChallengeStore.test.ts`; expect new branch assertions to fail.
+- [ ] Run `cd /Users/markd/.codex/worktrees/security-159-desktop/Desktop/desktop && npm test -- tests/unit/main/ipc/sso.test.ts tests/unit/main/ipcContract.test.ts tests/unit/renderer/services/ssoService.test.ts tests/unit/components/Auth/SSOAccountLinkConfirm.test.tsx tests/unit/stores/mfaChallengeStore.test.ts`; expect new branch assertions to fail.
 - [ ] Implement the union and main/preload/service/component dispatch using the existing SSO sign-in MFA path; preserve main-only refresh custody and existing IPC channel names. Bump contract to 34 and update its comment/history.
-- [ ] Rerun the focused Vitest command, `cd /Users/markd/.codex/worktrees/security-151-desktop/Desktop/desktop && npm run typecheck`, and `cd /Users/markd/.codex/worktrees/security-151-desktop/Desktop/desktop && npm run build:main`; expect pass. Add an Unreleased Desktop changelog entry and run `BASE_SHA="$(git merge-base HEAD origin/main)" GITHUB_BASE_REF=main bash .github/scripts/verify-changelog.sh` from the Desktop root. Commit the companion slice.
+- [ ] Rerun the focused Vitest command, `cd /Users/markd/.codex/worktrees/security-159-desktop/Desktop/desktop && npm run typecheck`, and `cd /Users/markd/.codex/worktrees/security-159-desktop/Desktop/desktop && npm run build:main`; expect pass. Add an Unreleased Desktop changelog entry and run `BASE_SHA="$(git merge-base HEAD origin/main)" GITHUB_BASE_REF=main bash .github/scripts/verify-changelog.sh` from the Desktop root. Commit the companion slice.
 
 ### Task 3: Close the signed MFA completion dispatcher
 
