@@ -39,7 +39,7 @@ func TestJWTWebSocketAttestationOnlyOnFallback(t *testing.T) {
 		return c, out
 	}
 	jwtPath := wsTokenPath + access.token
-	missing, missingOut := request(jwtPath, nil)
+	missing, missingOut := request(jwtPath, http.Header{"X-Session-Id": []string{access.sid.String()}})
 	h.HandleWebSocket(missing)
 	require.Equal(t, http.StatusForbidden, missingOut.Code)
 	require.Contains(t, missingOut.Body.String(), string(attestation.ErrMissing))
