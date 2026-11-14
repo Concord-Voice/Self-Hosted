@@ -730,6 +730,8 @@ describe('config', () => {
       ['10.0.0.9,172.16.0.0/12', 2],
       ['10.0.0.9/31', 1],
       ['2001:db8::1/127', 1],
+      ['::ffff:10.0.0.9', 1],
+      ['::ffff:10.0.0.9/128', 1],
       ['0.0.0.0/0', 1],
     ])('rejects production TRUSTED_PROXIES %j at position %i', async (value, position) => {
       const error = vi.spyOn(console, 'error').mockImplementation(() => {});

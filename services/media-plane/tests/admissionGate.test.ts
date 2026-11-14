@@ -110,6 +110,8 @@ describe('compileTrustedProxies', () => {
     expect(parseTrustedProxyEntry('2001:db8::1/128')).toEqual({ address: '2001:db8::1', prefix: 128, family: 'ipv6' });
     expect(parseTrustedProxyEntry('172.16.0.0/12')?.prefix).toBe(12);
     expect(parseTrustedProxyEntry('::/0')).toBeNull();
+    expect(parseTrustedProxyEntry('::ffff:10.0.0.9')).toBeNull();
+    expect(parseTrustedProxyEntry('0:0:0:0:0:ffff:a00:9/128')).toBeNull();
     expect(parseTrustedProxyEntry('not-an-ip')).toBeNull();
     expect(trust('10.0.0.9/32').has('::ffff:10.0.0.9')).toBe(true);
   });

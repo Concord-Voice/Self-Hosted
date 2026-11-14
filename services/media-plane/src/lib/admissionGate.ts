@@ -50,10 +50,17 @@ export interface TrustedProxies {
 
 type IpFamily = 'ipv4' | 'ipv6';
 
+const ipv4AddressSpace = new BlockList();
+ipv4AddressSpace.addSubnet('0.0.0.0', 0, 'ipv4');
+
 function ipFamily(address: string): IpFamily | null {
   if (isIPv4(address)) return 'ipv4';
   if (isIPv6(address)) return 'ipv6';
   return null;
+}
+
+function isIPv4MappedIPv6(address: string, family: IpFamily): boolean {
+  return family === 'ipv6' && ipv4AddressSpace.check(address, 'ipv6');
 }
 
 /** Parse once for both the development matcher and production startup guard. */
@@ -64,7 +71,7 @@ export function parseTrustedProxyEntry(
   const slash = entry.lastIndexOf('/');
   const address = slash < 0 ? entry : entry.slice(0, slash);
   const family = ipFamily(address);
-  if (!family) return null;
+  if (!family || isIPv4MappedIPv6(address, family)) return null;
   if (slash < 0) return { address, prefix: family === 'ipv4' ? 32 : 128, family };
 
   const prefixText = entry.slice(slash + 1);
