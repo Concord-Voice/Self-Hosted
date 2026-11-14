@@ -88,15 +88,22 @@ expect 'three tokens cannot run' 2 'cannot parse replace target' --go-mod "$WORK
 jq '.packages["node_modules/left-pad"] = {"version": "1.3.0", "resolved": "https://registry.npmjs.org/evil-pkg/-/evil-pkg-1.0.0.tgz"}' "$FIX/off-registry-lock.json" > "$WORK/swap-lock.json"
 expect 'resolved on the approved host but for another package fails' 1 'left-pad: resolved .* is not the tarball of left-pad@1.3.0' --npm-lock "$WORK/swap-lock.json"
 
+# `name` puts another package at an install location: only a declared npm: alias may.
+jq '.packages["node_modules/left-pad"] = {"name": "evil-pkg", "version": "1.0.0", "resolved": "https://registry.npmjs.org/evil-pkg/-/evil-pkg-1.0.0.tgz"}' "$FIX/off-registry-lock.json" > "$WORK/alias-lock.json"
+expect 'an undeclared alias fails' 1 "left-pad: entry names package 'evil-pkg', but no dependency declares" --npm-lock "$WORK/alias-lock.json"
+jq '.packages[""].dependencies["left-pad"] = "npm:evil-pkg@^1.0.0"' "$WORK/alias-lock.json" > "$WORK/alias-ok-lock.json"
+expect 'a declared npm: alias passes' 0 '^ok:' --npm-lock "$WORK/alias-ok-lock.json"
+
 # package.json specs: npm ci re-resolves an edge the lockfile does not satisfy.
 mkdir -p "$WORK/mf/stubs/x"
 lockv3='{"lockfileVersion":3,"packages":{"":{"name":"m"}}}'
 printf '%s\n' "$lockv3" > "$WORK/mf/package-lock.json"
-for spec in 'https://npm.example.invalid/x.tgz' 'git+ssh://git@example.invalid/x.git' 'evil/x' 'npm:x@https://npm.example.invalid/x.tgz' 'file:../outside'; do
+for spec in 'https://npm.example.invalid/x.tgz' 'git+ssh://git@example.invalid/x.git' 'evil/x' 'npm:x@https://npm.example.invalid/x.tgz' 'file:../outside' \
+            'evil.tgz' '.evil' '..\\x'; do
   jq -n --arg s "$spec" '{name: "m", dependencies: {x: $s}}' > "$WORK/mf/package.json"
   expect "package.json spec fails: $spec" 1 'dependencies\.x = .* is not a registry range' --npm-lock "$WORK/mf/package-lock.json"
 done
-jq -n '{name: "m", dependencies: {x: "^1.2.0", y: "latest", z: "npm:@s/z@^2"}, overrides: {q: {".": "1.0.0", r: "file:./stubs/x"}, w: "$x"}}' > "$WORK/mf/package.json"
+jq -n '{name: "m", dependencies: {x: "^1.2.0", y: "latest", z: "npm:@s/z@^2", a: "~1.2.3", b: "1.x || >=2.5.0", c: ""}, overrides: {q: {".": "1.0.0", r: "file:./stubs/x"}, w: "$x"}}' > "$WORK/mf/package.json"
 expect 'registry ranges, tags, npm: aliases, override refs and in-tree file: overrides pass' 0 '^ok:' --npm-lock "$WORK/mf/package-lock.json"
 jq -n '{name: "m", overrides: {q: {r: "https://npm.example.invalid/r.tgz"}}}' > "$WORK/mf/package.json"
 expect 'a nested override with a URL fails' 1 'overrides\.q\.r = ' --npm-lock "$WORK/mf/package-lock.json"

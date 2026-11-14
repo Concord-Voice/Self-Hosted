@@ -52,6 +52,13 @@ from urllib.parse import urlparse
 
 NPM_NAMES = {"package-lock.json", "npm-shrinkwrap.json"}
 INSTALL_KEY = re.compile(r"(^|/)node_modules/(@[^/]+/)?[^/]+$")
+DEP_FIELDS = ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies")
+# Positive spec grammar: a semver range, a dist-tag, or an override `$name`
+# reference. Nothing that npm reads as a URL, git spec, shorthand or path.
+RANGE_SPEC = re.compile(r"^(\s*|[\d^~<>=*xXv][\dA-Za-z.*^~<>=|\s+-]*|[A-Za-z][A-Za-z0-9._-]*)$")
+REF_SPEC = re.compile(r"^\$(@[a-z0-9~-][a-z0-9._~-]*/)?[a-z0-9~-][a-z0-9._~-]*$")
+PKG_NAME = re.compile(r"^(@[a-z0-9~-][a-z0-9._~-]*/)?[a-z0-9~-][a-z0-9._~-]*$")
+TARBALL = re.compile(r"\.(tgz|tar|tar\.gz)$", re.I)
 PLAIN_VERSION = re.compile(r"^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$")
 SAFE_URL = re.compile(r"^https://(?P<host>[A-Za-z0-9.-]+)/[^\\\s]*$")
 
@@ -96,7 +103,7 @@ def manifest_violations(lock_path, packages):
         data = load_json(manifest)
         here = os.path.join(base, rel)
         specs = []
-        for field in ("dependencies", "devDependencies", "optionalDependencies", "peerDependencies"):
+        for field in DEP_FIELDS:
             specs += [(f"{field}.{k}", v) for k, v in (data.get(field) or {}).items()]
         stack = [("overrides", data.get("overrides") or {})]
         while stack:
@@ -119,11 +126,20 @@ def registry_spec(spec, here, base):
         return inside(base, os.path.relpath(os.path.join(here, spec[5:]), base))
     if spec.startswith("npm:"):
         name, at, spec = spec[4:].rpartition("@")
-        if not at or not name:
+        if not at or not PKG_NAME.match(name):
             return False
-    # Ranges, tags and `$name` override references hold no ':' or '/'; URLs,
-    # git specs, `user/repo` shorthands and paths all do.
-    return ":" not in spec and "/" not in spec
+    return bool((RANGE_SPEC.match(spec) or REF_SPEC.match(spec)) and not TARBALL.search(spec))
+
+
+def declared_aliases(packages):
+    """(install name, real name) pairs that some dependency edge declares with npm:."""
+    out = set()
+    for entry in packages.values():
+        for field in DEP_FIELDS:
+            for dep, spec in ((entry or {}).get(field) or {}).items():
+                if isinstance(spec, str) and spec.startswith("npm:"):
+                    out.add((dep, spec[4:].rpartition("@")[0]))
+    return out
 
 
 def npm_violations(path, hosts):
@@ -133,10 +149,19 @@ def npm_violations(path, hosts):
         raise CannotRun(f"{path}: lockfileVersion {version!r} is not supported (need 2 or 3)")
     out = []
     base = os.path.dirname(path) or "."
+    aliases = declared_aliases(lock["packages"])
     for key, entry in lock["packages"].items():
         if not isinstance(entry, dict):
             raise CannotRun(f"{path}: packages[{key!r}] is not an object")
         name = key.rsplit("node_modules/", 1)[-1] or "(root)"
+        # `name` installs another package at this location. Only an npm: alias
+        # that a dependency edge declares may do that.
+        real = entry.get("name")
+        if (INSTALL_KEY.search(key) and real is not None and real != name
+                and (name, real) not in aliases):
+            out.append(f"{path}: {name}: entry names package {real!r}, but no dependency "
+                       f"declares {name} as npm:{real}@...")
+            continue
         resolved = entry.get("resolved")
         if resolved is not None and not isinstance(resolved, str):
             out.append(f"{path}: {name}: resolved is not a string ({resolved!r})")
