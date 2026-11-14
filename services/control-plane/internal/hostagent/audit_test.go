@@ -83,6 +83,10 @@ func TestAuditRejectsUnsafePathAndFullStream(t *testing.T) {
 	_, err := openAuditAt(path, testOwnerUID(), root)
 	require.Error(t, err)
 	require.NoError(t, os.Remove(path))
+	require.NoError(t, os.WriteFile(path, nil, 0o644)) //nolint:gosec // deliberately unsafe fixture
+	_, err = openAuditAt(path, testOwnerUID(), root)
+	require.ErrorContains(t, err, "unsafe host-agent audit file")
+	require.NoError(t, os.Chmod(path, 0o600)) //nolint:gosec // restore fixture
 	audit, err := openAuditAt(path, testOwnerUID(), root)
 	require.NoError(t, err)
 	_, err = openAuditAt(path, testOwnerUID()+1, root)
@@ -94,14 +98,35 @@ func TestAuditRejectsUnsafePathAndFullStream(t *testing.T) {
 	require.Error(t, audit.Write(AuditEvent{Outcome: "denied", Reason: "peer_forbidden"}))
 }
 
+func TestAuditRefusesBoundaryChangesAfterOpen(t *testing.T) {
+	audit := testAudit(t)
+	event := AuditEvent{Outcome: "denied", Reason: "peer_forbidden"}
+	parent := filepath.Dir(audit.path)
+	require.NoError(t, os.Chmod(parent, 0o777)) //nolint:gosec // deliberately unsafe fixture
+	require.ErrorContains(t, audit.Write(event), "unsafe host-agent audit directory")
+	require.NoError(t, os.Chmod(parent, 0o700)) //nolint:gosec // restore test directory permissions
+
+	target := filepath.Join(t.TempDir(), "other-events.jsonl")
+	require.NoError(t, os.WriteFile(target, []byte("untouched\n"), 0o600))
+	require.NoError(t, os.Remove(audit.path))
+	require.NoError(t, os.Symlink(target, audit.path))
+	require.ErrorContains(t, audit.Write(event), "open host-agent audit")
+	content, err := os.ReadFile(target) //nolint:gosec // test-created target
+	require.NoError(t, err)
+	require.Equal(t, "untouched\n", string(content))
+}
+
 func TestAuditPublicSetupAndIdentityValidationFailClosed(t *testing.T) {
 	_, err := OpenAudit(filepath.Join(t.TempDir(), "events.jsonl"))
 	require.Error(t, err)
+	_, err = openAuditAt("relative/events.jsonl", testOwnerUID(), t.TempDir())
+	require.ErrorContains(t, err, "invalid host-agent audit path")
 
 	id := uuid.NewString()
 	require.Equal(t, id, canonicalAuditAdminID(id))
 	require.Empty(t, canonicalAuditAdminID("not-a-uuid"))
 	require.False(t, validAuditEvent(AuditEvent{Action: "start/extra", Outcome: "denied", Reason: "peer_forbidden"}))
+	require.False(t, validAuditEvent(AuditEvent{Outcome: "unknown", Reason: "peer_forbidden"}))
 	require.False(t, validAuditEvent(AuditEvent{Outcome: "denied", Reason: "client_reason"}))
 }
 

@@ -220,6 +220,23 @@ func TestRestoreTakesOnlyAnArchiveInBackups(t *testing.T) {
 	}
 }
 
+func TestRestoreRechecksArchiveAfterAuthorization(t *testing.T) {
+	runner := &fakeRunner{}
+	s, dir := writeServer(t, runner)
+	name := "concord-backup-20261106T071500Z.tar.gz"
+	path := filepath.Join(dir, name)
+	require.NoError(t, os.WriteFile(path, []byte("backup"), 0o600))
+	list, err := s.authorizations.authorizers.List()
+	require.NoError(t, err)
+	handle, _, err := s.authorizations.Begin(list[0].AdminID, "restore", actionRequest{Archive: name})
+	require.NoError(t, err)
+	require.NoError(t, os.Remove(path))
+	rec := post(t, s, "/v1/actions/restore", fmt.Sprintf(`{"handle":%q,"assertion":{"test":true}}`, handle))
+	require.Equal(t, http.StatusNotFound, rec.Code)
+	require.Contains(t, rec.Body.String(), "unknown_archive")
+	require.Empty(t, runner.args)
+}
+
 func TestRefusesBadWriteRequests(t *testing.T) {
 	f := &fakeRunner{}
 	s, _ := writeServer(t, f)
@@ -367,6 +384,17 @@ func TestBackupAdmissionRejectsInvalidAndUntrustedState(t *testing.T) {
 	require.NoError(t, os.WriteFile(target, []byte("0\n"), 0o600))
 	require.NoError(t, os.Symlink(target, s.writes.admission))
 	require.Error(t, s.writes.admitBackup(now))
+}
+
+func TestBackupAdmissionRefusesUnsafeDirectoryAndStateType(t *testing.T) {
+	now := time.Date(2026, time.November, 14, 12, 0, 0, 0, time.UTC)
+	s, _ := writeServer(t, &fakeRunner{})
+	dir := filepath.Dir(s.writes.admission)
+	require.NoError(t, os.Chmod(dir, 0o777)) //nolint:gosec // deliberately unsafe fixture
+	require.ErrorContains(t, s.writes.admitBackup(now), "backup admission directory")
+	require.NoError(t, os.Chmod(dir, 0o700)) //nolint:gosec // restore test directory permissions
+	require.NoError(t, os.Mkdir(s.writes.admission, 0o700))
+	require.ErrorContains(t, s.writes.admitBackup(now), "backup admission state is untrusted")
 }
 
 func TestBackupAdmissionConcurrent(t *testing.T) {

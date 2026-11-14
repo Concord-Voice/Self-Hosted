@@ -252,6 +252,45 @@ func TestServerStepUpBeginRefusesActionsWithoutStepUp(t *testing.T) {
 	}
 }
 
+func TestServerStepUpBeginFailsClosedOnAgentRefusal(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+		want   int
+		reason string
+		result string
+	}{
+		{"denied proof", http.StatusForbidden, `{}`, http.StatusForbidden, "stepup_failed", AuditDenied},
+		{"agent unavailable", http.StatusServiceUnavailable, `{}`, http.StatusServiceUnavailable, "stepup_unavailable", AuditFailure},
+		{"agent rate limit", http.StatusTooManyRequests, `{}`, http.StatusTooManyRequests, "stepup_unavailable", AuditFailure},
+		{"unexpected refusal", http.StatusConflict, `{}`, http.StatusBadGateway, "agent_error", AuditFailure},
+		{"invalid authorization", http.StatusOK, `{"handle":"short","options":{}}`, http.StatusBadGateway, "agent_error", AuditFailure},
+		{"missing options", http.StatusOK, `{"handle":"` + testAuthorizationHandle + `"}`, http.StatusBadGateway, "agent_error", AuditFailure},
+		{"oversized response", http.StatusOK, strings.Repeat("x", maxAgentJob+1), http.StatusBadGateway, "agent_error", AuditFailure},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sock, calls := recordingAgent(t, tc.status, tc.body)
+			audit := &fakeAudit{}
+			rec := send(writeEngine(sock, audit), "/server/stepup", `{"action":"backup"}`)
+			if rec.Code != tc.want || !strings.Contains(rec.Body.String(), tc.reason) {
+				t.Fatalf("got %d %s, want %d %s", rec.Code, rec.Body, tc.want, tc.reason)
+			}
+			if got := calls(); len(got) != 1 || got[0].path != "POST /v1/authorizations" {
+				t.Fatalf("agent calls: %+v", got)
+			}
+			if len(audit.events) != 1 || audit.events[0].Result != tc.result || audit.events[0].Detail["reason"] != tc.reason {
+				t.Fatalf("audit: %+v", audit.events)
+			}
+		})
+	}
+
+	rec := send(writeEngine("/nonexistent/agent.sock", &fakeAudit{}), "/server/stepup", `{"action":"backup"}`)
+	if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "stepup_unavailable") {
+		t.Fatalf("agent transport failure: %d %s", rec.Code, rec.Body)
+	}
+}
+
 func TestServerActionFailsClosedWhenAuditIsDown(t *testing.T) {
 	sock, calls := recordingAgent(t, http.StatusAccepted, `{"id":"`+testJobID+`"}`)
 	rec := send(writeEngine(sock, &fakeAudit{err: errors.New("db down")}), "/server/actions/backup", `{"stepup":{"handle":"`+testAuthorizationHandle+`","assertion":{}}}`)

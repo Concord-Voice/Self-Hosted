@@ -293,6 +293,12 @@ func TestAuthorizerStoreImportBatchRejectsAllOnMalformedEntry(t *testing.T) {
 	require.Error(t, err)
 	require.Zero(t, created)
 	require.Empty(t, store.Credentials(doc.AdminID))
+
+	badAdmin := testAuthorizerImport(t)
+	badAdmin.AdminID = "not-a-uuid"
+	created, err = store.ImportMany(badAdmin)
+	require.Error(t, err)
+	require.Zero(t, created)
 }
 
 func TestAuthorizerStoreImportDoesNotReplaceTrustedCredential(t *testing.T) {
@@ -368,12 +374,26 @@ func TestAuthorizerStoreCreateRejectsConfigMismatchAndUnsafeExistingFile(t *test
 	require.NoError(t, err)
 	_, err = loadOrCreateAuthorizersAt(path, testOwnerUID(), root, "admin.example.test", []string{"https://wrong.example.test"})
 	require.Error(t, err)
+	_, err = loadOrCreateAuthorizersAt(path, testOwnerUID(), root, "admin.example.test", []string{"https://admin.example.test"})
+	require.NoError(t, err, "a matching root configuration must remain reloadable")
 	require.NoError(t, os.Remove(path))
 	unsafe := filepath.Join(root, "unsafe.json")
 	require.NoError(t, os.WriteFile(unsafe, []byte(`{}`), 0o600))
 	require.NoError(t, os.Symlink(unsafe, path))
 	_, err = loadOrCreateAuthorizersAt(path, testOwnerUID(), root, "admin.example.test", []string{"https://admin.example.test"})
 	require.Error(t, err)
+}
+
+func TestAuthorizerStoreCreateRejectsUntrustedPathAndLock(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "authorizers.json")
+	_, err := loadOrCreateAuthorizersAt(path, testOwnerUID(), filepath.Join(root, "other"), "admin.example.test", []string{"https://admin.example.test"})
+	require.Error(t, err)
+	require.NoFileExists(t, path)
+	require.NoError(t, os.Symlink(path, filepath.Join(root, ".authorizers.lock")))
+	_, err = loadOrCreateAuthorizersAt(path, testOwnerUID(), root, "admin.example.test", []string{"https://admin.example.test"})
+	require.Error(t, err)
+	require.NoFileExists(t, path)
 }
 
 func TestAuthorizerStoreImportFailurePreservesPriorFile(t *testing.T) {
@@ -396,6 +416,104 @@ func TestAuthorizerStoreImportFailurePreservesPriorFile(t *testing.T) {
 			after, err := os.ReadFile(path) //nolint:gosec // path is this test's temporary fixture
 			require.NoError(t, err)
 			require.Equal(t, before, after)
+		})
+	}
+}
+
+func TestAuthorizerStoreRejectsTamperedLockWithoutChangingCounter(t *testing.T) {
+	for _, kind := range []string{"symlink", "writable"} {
+		t.Run(kind, func(t *testing.T) {
+			root := t.TempDir()
+			doc := testAuthorizerDoc(t)
+			path := writeAuthorizerDoc(t, root, doc)
+			store := loadTestAuthorizers(t, path, root)
+			before, err := os.ReadFile(path) //nolint:gosec // test-owned trust file
+			require.NoError(t, err)
+			lockPath := filepath.Join(root, ".authorizers.lock")
+			if kind == "symlink" {
+				require.NoError(t, os.Symlink(path, lockPath))
+			} else {
+				require.NoError(t, os.WriteFile(lockPath, nil, 0o666)) //nolint:gosec // deliberate unsafe lock fixture
+				require.NoError(t, os.Chmod(lockPath, 0o666))          //nolint:gosec // umask must not mask the unsafe mode
+			}
+			require.Error(t, store.AdvanceCounter([]byte("credential-1"), 5))
+			after, err := os.ReadFile(path) //nolint:gosec // test-owned trust file
+			require.NoError(t, err)
+			require.Equal(t, before, after)
+		})
+	}
+}
+
+func TestAuthorizerStoreCounterAndRevocationRefusals(t *testing.T) {
+	root := t.TempDir()
+	doc := testAuthorizerDoc(t)
+	entry := testAuthorizerEntry(t, doc)
+	entry["sign_count"] = 0
+	path := writeAuthorizerDoc(t, root, doc)
+	store := loadTestAuthorizers(t, path, root)
+	before, err := os.ReadFile(path) //nolint:gosec // test-owned trust file
+	require.NoError(t, err)
+	require.NoError(t, store.AdvanceCounter([]byte("credential-1"), 0), "zero-count authenticators may repeat zero")
+	require.Error(t, store.AdvanceCounter([]byte("untrusted"), 1))
+	_, err = store.Revoke("not-a-uuid")
+	require.Error(t, err)
+	after, err := os.ReadFile(path) //nolint:gosec // test-owned trust file
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+
+	other := testAuthorizerDoc(t)["authorizers"].([]map[string]any)[0]
+	other["credential_id"] = base64.RawURLEncoding.EncodeToString([]byte("credential-2"))
+	doc["authorizers"] = append(doc["authorizers"].([]map[string]any), other)
+	path = writeAuthorizerDoc(t, root, doc)
+	store = loadTestAuthorizers(t, path, root)
+	removed, err := store.Revoke(testAuthorizerString(t, entry, "admin_id"))
+	require.NoError(t, err)
+	require.Equal(t, 1, removed)
+	require.Len(t, store.Credentials(testAuthorizerString(t, other, "admin_id")), 1)
+}
+
+func TestAuthorizerStoreRefusesGenerationExhaustion(t *testing.T) {
+	root := t.TempDir()
+	doc := testAuthorizerDoc(t)
+	doc["generation"] = ^uint64(0)
+	path := writeAuthorizerDoc(t, root, doc)
+	store := loadTestAuthorizers(t, path, root)
+	before, err := os.ReadFile(path) //nolint:gosec // test-owned trust file
+	require.NoError(t, err)
+	require.ErrorContains(t, store.AdvanceCounter([]byte("credential-1"), 5), "generation exhausted")
+	after, err := os.ReadFile(path) //nolint:gosec // test-owned trust file
+	require.NoError(t, err)
+	require.Equal(t, before, after)
+}
+
+func TestAuthorizerStoreMalformedFileFailsClosedAfterLoad(t *testing.T) {
+	root := t.TempDir()
+	doc := testAuthorizerDoc(t)
+	path := writeAuthorizerDoc(t, root, doc)
+	store := loadTestAuthorizers(t, path, root)
+	adminID := testAuthorizerString(t, testAuthorizerEntry(t, doc), "admin_id")
+	require.NoError(t, os.WriteFile(path, []byte{0xff}, 0o644)) //nolint:gosec // invalid UTF-8 in test-owned trust file
+	require.Empty(t, store.Credentials(adminID))
+	require.Error(t, store.AdvanceCounter([]byte("credential-1"), 5))
+}
+
+func TestAuthorizerStoreRejectsMalformedCredentialFields(t *testing.T) {
+	for name, mutate := range map[string]func(map[string]any){
+		"empty credential ID": func(d map[string]any) { testAuthorizerEntry(t, d)["credential_id"] = "" },
+		"empty public key":    func(d map[string]any) { testAuthorizerEntry(t, d)["public_key"] = "" },
+		"uppercase RP ID":     func(d map[string]any) { d["rp_id"] = "Admin.example.test" },
+		"empty RP ID":         func(d map[string]any) { d["rp_id"] = "" },
+		"duplicate origin": func(d map[string]any) {
+			d["origins"] = []string{"https://admin.example.test", "https://admin.example.test"}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			root := t.TempDir()
+			doc := testAuthorizerDoc(t)
+			mutate(doc)
+			path := writeAuthorizerDoc(t, root, doc)
+			_, err := loadAuthorizersAt(path, testOwnerUID(), root)
+			require.Error(t, err)
 		})
 	}
 }
