@@ -19,7 +19,7 @@ info:
       role, voice moderation or move, and message-send paths, accepted UUID
       spellings are normalized to lowercase hyphenated text before authorization
       and persistence; responses and events emit that canonical form. A malformed
-      route or request-body ID on those paths returns 400 before any write.
+      route or write-target ID on those paths returns 400 before any write.
 
     - All timestamps are ISO 8601 with timezone (TIMESTAMPTZ)
 
@@ -7179,7 +7179,7 @@ paths:
                   maxProperties: 500
                   additionalProperties:
                     type: integer
-                  description: Map of channel_id → key_version. Malformed channel IDs return 400; accepted UUID aliases are returned canonically.
+                  description: Map of channel_id → key_version. Malformed cached IDs and nonpositive epochs are skipped; UUID aliases are validated once at the oldest positive cached epoch and returned canonically.
       responses:
         '200':
           description: Epoch validation results

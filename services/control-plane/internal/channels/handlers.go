@@ -4925,19 +4925,22 @@ func (h *Handler) ValidateEpochs(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgTooManyEpochs})
 		return
 	}
-	for channelID := range req.Epochs {
-		if _, err := requestid.Canonical(channelID); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
-			return
+	canonicalEpochs := make(map[string]int, len(req.Epochs))
+	for channelID, clientEpoch := range req.Epochs {
+		canonicalChannelID, err := requestid.Canonical(channelID)
+		if err != nil || clientEpoch <= 0 {
+			continue // A stale cache key must not block validation of valid channels.
+		}
+		// Check the oldest positive epoch so an alias cannot hide a missed revocation.
+		if previous, exists := canonicalEpochs[canonicalChannelID]; !exists || clientEpoch < previous {
+			canonicalEpochs[canonicalChannelID] = clientEpoch
 		}
 	}
 
 	var revocations []epochRevocationInfo
 	accessLost := []string{}
 
-	for channelID, clientEpoch := range req.Epochs {
-		canonicalChannelID, _ := requestid.Canonical(channelID)
-
+	for canonicalChannelID, clientEpoch := range canonicalEpochs {
 		// CV-CAN-005: revocation metadata, like wrapped keys, must not reveal
 		// a hidden channel to a server member who lacks channel VIEW.
 		isMember, canView, accessErr := h.channelKeyAccess(c.Request.Context(), canonicalChannelID, userID)

@@ -1050,6 +1050,25 @@ func TestValidateEpochsAllPaths(t *testing.T) {
 		revocation := testhelpers.JSONElem[map[string]interface{}](t, revocations, 0)
 		assert.Equal(t, float64(1), revocation["revoked_epoch"])
 		assert.Equal(t, float64(3), revocation["successor_epoch"])
+
+		alias := ts.DoRequest("POST", pathValidateEpochs, map[string]interface{}{
+			"epochs": map[string]int{channelID: 2, "{" + channelID + "}": 1},
+		}, testhelpers.AuthHeaders(user.AccessToken))
+		require.Equal(t, http.StatusOK, alias.Code)
+		testhelpers.ParseJSON(t, alias, &body)
+		revocations = testhelpers.JSONField[[]interface{}](t, body, "revocations")
+		require.Len(t, revocations, 1, "aliases must validate once at the oldest cached epoch")
+		assert.Equal(t, float64(1), testhelpers.JSONElem[map[string]interface{}](t, revocations, 0)["revoked_epoch"])
+		for _, badEpoch := range []int{0, -1} {
+			alias = ts.DoRequest("POST", pathValidateEpochs, map[string]interface{}{
+				"epochs": map[string]int{channelID: 1, "{" + channelID + "}": badEpoch},
+			}, testhelpers.AuthHeaders(user.AccessToken))
+			require.Equal(t, http.StatusOK, alias.Code)
+			testhelpers.ParseJSON(t, alias, &body)
+			revocations = testhelpers.JSONField[[]interface{}](t, body, "revocations")
+			require.Len(t, revocations, 1, "nonpositive alias epochs must not hide a valid revocation")
+			assert.Equal(t, float64(1), testhelpers.JSONElem[map[string]interface{}](t, revocations, 0)["revoked_epoch"])
+		}
 	})
 
 	t.Run("BadBody", func(t *testing.T) {
@@ -1064,13 +1083,18 @@ func TestValidateEpochsAllPaths(t *testing.T) {
 		assert.Equal(t, http.StatusUnauthorized, w.Code)
 	})
 
-	t.Run("InvalidChannelIDRejected", func(t *testing.T) {
+	t.Run("MalformedKeySkippedButValidKeyProcessed", func(t *testing.T) {
 		w := ts.DoRequest("POST", pathValidateEpochs, map[string]interface{}{
 			"epochs": map[string]int{
-				notAUUID: 1,
+				notAUUID:              1,
+				channelID:             1,
+				"{" + channelID + "}": 2,
 			},
-		}, testhelpers.AuthHeaders(user.AccessToken))
-		assert.Equal(t, http.StatusBadRequest, w.Code)
+		}, testhelpers.AuthHeaders(outsider.AccessToken))
+		require.Equal(t, http.StatusOK, w.Code)
+		var body map[string]interface{}
+		testhelpers.ParseJSON(t, w, &body)
+		assert.Equal(t, []interface{}{channelID}, body["access_lost"])
 	})
 
 	t.Run("NoAccessChannelSkipped", func(t *testing.T) {
