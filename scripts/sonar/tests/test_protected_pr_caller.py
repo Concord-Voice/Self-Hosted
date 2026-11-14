@@ -233,6 +233,71 @@ class CallerTests(unittest.TestCase):
         self.assertEqual([request.full_url for request in calls[1:]], [f"{CALLER.API}/actions/runs/777"] * 2)
         self.assertTrue(all(request.get_header("Authorization") == "Bearer private-gh-token" for request in calls))
 
+    def _http_error(self, code):
+        return HTTPError("https://private-api.invalid/run", code, "private", {}, BytesIO(b""))
+
+    def test_dispatch_waits_out_brief_404_before_new_run_is_visible(self):
+        # GitHub can answer 404 for a run it created moments ago; the dispatch
+        # reply already named it, so the first polls wait instead of failing.
+        args = self._watch_args()
+        calls = []
+
+        def open_mock(request, timeout):
+            calls.append(request)
+            if len(calls) == 1:
+                return Response(200, {"workflow_run_id": 777})
+            if len(calls) in (2, 3):
+                raise self._http_error(404)
+            return Response(200, {"id": 777, "run_attempt": 1, "event": "workflow_dispatch",
+                                  "head_branch": "main", "status": "completed", "conclusion": "success"})
+
+        with patch.dict(CALLER.os.environ, {"GH_TOKEN": "private-gh-token"}, clear=True), \
+                patch.object(CALLER, "urlopen", open_mock), \
+                patch.object(CALLER.time, "sleep") as sleep:
+            CALLER.dispatch_watch(args)
+        self.assertEqual(len(calls), 4)
+        self.assertEqual(sleep.call_count, 2)
+        self.assertEqual([request.full_url for request in calls[1:]], [f"{CALLER.API}/actions/runs/777"] * 3)
+
+    def test_dispatch_run_404_past_visibility_window_fails(self):
+        args = self._watch_args()
+        calls = []
+
+        def open_mock(request, timeout):
+            calls.append(request)
+            if len(calls) == 1:
+                return Response(200, {"workflow_run_id": 777})
+            raise self._http_error(404)
+
+        with patch.dict(CALLER.os.environ, {"GH_TOKEN": "private-gh-token"}, clear=True), \
+                patch.object(CALLER, "urlopen", open_mock), \
+                patch.object(CALLER.time, "sleep") as sleep:
+            with self.assertRaises(HTTPError):
+                CALLER.dispatch_watch(args)
+        self.assertEqual(len(calls), 1 + CALLER.MAX_NOT_VISIBLE + 1)
+        self.assertEqual(sleep.call_count, CALLER.MAX_NOT_VISIBLE)
+
+    def test_dispatch_run_other_http_error_is_not_retried(self):
+        for code in (401, 403, 500):
+            with self.subTest(code=code):
+                args = self._watch_args()
+                args.out.unlink(missing_ok=True)
+                calls = []
+
+                def open_mock(request, timeout):
+                    calls.append(request)
+                    if len(calls) == 1:
+                        return Response(200, {"workflow_run_id": 777})
+                    raise self._http_error(code)
+
+                with patch.dict(CALLER.os.environ, {"GH_TOKEN": "private-gh-token"}, clear=True), \
+                        patch.object(CALLER, "urlopen", open_mock), \
+                        patch.object(CALLER.time, "sleep") as sleep:
+                    with self.assertRaises(HTTPError):
+                        CALLER.dispatch_watch(args)
+                self.assertEqual(len(calls), 2)
+                sleep.assert_not_called()
+
     def test_dispatch_accepts_success_after_old_thirty_minute_window(self):
         args = self._watch_args()
         calls = []
@@ -335,7 +400,8 @@ class CallerTests(unittest.TestCase):
             def read(self, *args):
                 raise AssertionError("must not read HTTP error response body")
 
-        cases = [(code, str(code)) for code in (403, 422, 429, 500)]
+        # 404 included: only the run poll waits out a 404, never the dispatch.
+        cases = [(code, str(code)) for code in (403, 404, 422, 429, 500)]
         cases += [(code, "unknown") for code in
                   (None, True, False, "403", 403.0, 0, 99, 600, -1, PrivateCode())]
         for index, (code, expected) in enumerate(cases):

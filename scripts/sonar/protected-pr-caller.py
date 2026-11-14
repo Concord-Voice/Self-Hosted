@@ -39,6 +39,9 @@ MAX_INPUT = 24 * 1024
 MAX_PROOF = 64 * 1024
 MAX_RESPONSE = 64 * 1024
 MAX_POLLS = 270  # 45 minutes at 10 seconds; the child scanner may run for 40.
+# A run GitHub created seconds ago can still answer 404. Its ID came from the
+# dispatch reply, so the first polls wait for it: one minute at 10 seconds.
+MAX_NOT_VISIBLE = 6
 RESULTS = {"success", "failure", "cancelled", "skipped"}
 
 
@@ -248,7 +251,16 @@ def dispatch_watch(args):
     write_private(args.out, canonical({"workflow_run_id": child_id, "run_attempt": 1}))
     url = f"{API}/actions/runs/{child_id}"
     for attempt in range(MAX_POLLS):
-        run = request_json(url, token)
+        try:
+            run = request_json(url, token)
+        except HTTPError as exc:
+            # Only a 404 on a just-dispatched run is waited out; the dispatch
+            # itself and every other status still fail at once.
+            exc.close()
+            if exc.code != 404 or attempt >= MAX_NOT_VISIBLE:
+                raise
+            time.sleep(10)
+            continue
         if (run.get("id") != child_id or run.get("run_attempt") != 1
                 or run.get("event") != "workflow_dispatch" or run.get("head_branch") != "main"):
             raise Invalid("dispatch child identity invalid")
