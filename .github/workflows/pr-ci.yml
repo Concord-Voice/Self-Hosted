@@ -834,6 +834,12 @@ jobs:
         run: |
           python3 -m pip install --user --quiet --require-hashes --only-binary=:all: -r .github/requirements-pyyaml.txt
 
+      # The weekly npm lockfile flush (#272) runs only on its cron, so a broken
+      # step would look like "nothing to update". This runs its real refresh and
+      # render steps against a stub npm and locks its credential split.
+      - name: npm lockfile flush workflow behaves
+        run: bash scripts/tests/test-npm-lockfile-flush.sh
+
       # Runs when a workflow_lint path in .github/ci/scan-relevance.yml changes;
       # a new package.json, go.mod or requirements root alone does not start it.
       # Fails if a tracked update root is in no block of .github/dependabot.yml,
@@ -950,6 +956,7 @@ jobs:
         run: |
           bash scripts/tests/test-check-release-tag.sh
           python3 scripts/tests/test-selfhost-bundle.py
+          python3 scripts/tests/test-check-selfhost-sbom.py
 
       - name: Self-test — lint scripts pass their own test suites
         # Defense-in-depth: re-run each lint's hermetic test suite in CI
@@ -976,6 +983,22 @@ jobs:
           bash .github/scripts/tests/trivy-assert-os.test.sh
           bash .github/scripts/tests/check-base-images.test.sh
           bash scripts/test-nats-server-bootstrap.sh
+
+      # Fails a dependency PR whose lockfile resolves vitest and
+      # @vitest/coverage-istanbul to different versions, in the workspace root,
+      # client/admin or services/media-plane (#270). A one-sided advisory bump
+      # leaves such a PR unable to install; the message names the half that is
+      # behind and the fix. The job reads files only and never pushes to the PR
+      # branch. The fixture suite runs first and must see the split pair fail.
+      # Advisory: workflow-lint is not a required check, so this step explains
+      # the install failure but does not block a merge by itself.
+      - name: vitest pair is in step
+        # Last in the job, and runs even when an earlier step failed: one red
+        # step does not hide this one, and this one hides no other step.
+        if: ${{ !cancelled() }}
+        run: |
+          bash scripts/tests/test-check-vitest-pair.sh
+          bash scripts/ci/check-vitest-pair.sh
 
   # ─── PostgreSQL migration lint (squawk, #4175) ───────────────────────
   # SonarCloud has no PostgreSQL analyzer, so `.sql` is excluded from it.

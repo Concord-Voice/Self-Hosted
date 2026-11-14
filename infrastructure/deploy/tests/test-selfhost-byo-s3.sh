@@ -84,12 +84,13 @@ except ImportError:
 # persistent deny state, and the coturn credential-source entrypoint with
 # softened TURN_SECRET guards, the BuildKit v0.34.1-rootless image pin, and
 # the dormant iOS App Attest env mapping (ADR-0010 D17), and the production
-# media-plane restatement of CONTROL_PLANE_URL/JWT_SECRET/PORT for the colours.
+# media-plane restatement of CONTROL_PLANE_URL/JWT_SECRET/PORT for the colours,
+# and the control-plane 8080 loopback-only publication (#275).
 # Keep explicit digests so source
 # changes require baseline review. Snapshot all inputs to detect test-side mutations.
 SOURCE_HASHES = {
     "docker-compose.yml": "".join(('6ddb13ff', 'e83d4e6a', '114632bb', '2d05f787', '278da56c', 'cbfe2b41', 'dc25e570', 'c5f2ae6d')),
-    "docker-compose.production.yml": "".join(('8aa635dc', '3f372743', '674fdfd2', '2df55e7e', '85414bd3', '6eba87c6', 'c21831b5', '21b2724b')),
+    "docker-compose.production.yml": "".join(('d2752890', '91362580', '437ada7a', '65d6f9bc', '3d841829', '8ff5a7c4', 'be2ab616', 'ca06a7ef')),
 }
 SOURCE_FILES = tuple(SOURCE_HASHES) + ("docker-compose.selfhost.yml",)
 if not check("all shared Compose source inputs are available",

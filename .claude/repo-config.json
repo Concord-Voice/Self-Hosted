@@ -24,5 +24,10 @@
       "(^|/)\\.claude/(hooks/|settings\\.json|repo-config\\.json|\\.agentic-dev-tooling\\.lock$)",
       "scripts/repo-config\\.sh$"
     ]
+  },
+  "feedback_triage": {
+    "public": "Concord-Voice/Feedback",
+    "tracker": "Concord-Voice/Self-Hosted",
+    "sentinel_prefix": "concord-feedback-triage"
   }
 }
