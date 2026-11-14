@@ -638,7 +638,7 @@ A bot-authored PR can merge with nobody having reviewed it: Copilot does not rev
 
 ```bash
 COVERAGE="${COVERAGE_SCRIPT:-.claude/skills/enhanced-pr-review/review-coverage.sh}"   # plugin install: point at the plugin's copy
-for PR in $ALL_PRS; do   # ALL_PRS = every PR number from the two Phase 1 queries, unioned
+for PR in $ALL_PRS; do   # ALL_PRS = every PR number from all three Phase 1 queries (both author queries and the label query), unioned
   "$COVERAGE" "$PR"   # exit 0 covered · 1 zero · 2 UNKNOWN
 done
 ```

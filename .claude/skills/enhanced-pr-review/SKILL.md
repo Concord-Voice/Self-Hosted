@@ -167,10 +167,10 @@ Why a third fetch — this is where verdict-only reviewers and CI-poster workflo
 
 Coverage is SHA-bound and comes from a trusted reviewer. It is either a submitted review whose `commit_id` is the head SHA, by someone other than the PR author who is a human repo insider (`author_association` `OWNER` / `MEMBER` / `COLLABORATOR`) or an allowlisted review bot, or a **first-party coverage record**. A bot must be on the allowlist even when it carries an insider association. The allowlist is Copilot plus the logins in the base branch's `.claude/repo-config.json` `.review_coverage.reviewer_bots`; other bots, such as a code-scanning bot, do not count. A first-party record is a conversation comment with `<!-- cv-review-coverage: sha=<head SHA> reviewer=<login> suite=<skill> -->` on a line of its own, posted by `<login>`, a human insider who is not the PR author (a bot, even an allowlisted one, counts only through a submitted review). A review or record on an older SHA is stale and does not count — a push or an `@dependabot rebase` moves the head and resets coverage. Comments and check runs that name no SHA do not count either. Put the printed line in the Phase 3 table as its own row (Thread `—`, Source `review-coverage.sh`, Category PR-level verdict, Action `Note`, or `Block` when it fails §6.0 precondition 10), and feed the exit code to §6.0 precondition 10.
 
-This skill's Step 5 specialist-suite pass is not coverage until it is recorded, because the record is what puts a reviewer's identity against the SHA. To record it, after the Phase 3 triage and with the developer's go-ahead, post from a body file:
+This skill's Step 5 specialist-suite pass is not coverage until it is recorded, because the record is what puts a reviewer's identity against the SHA. Before Step 5 dispatches, capture the head SHA (`gh pr view $0 --json headRefOid --jq .headRefOid`) and review that commit. To record it, after the Phase 3 triage and with the developer's go-ahead, re-read the head: if it moved since the capture (a push or `@dependabot rebase` landed), post nothing, because the suite reviewed an older commit. Otherwise post from a body file, with the captured SHA:
 
 ```markdown
-<!-- cv-review-coverage: sha=<head SHA> reviewer=<gh user login> suite=/enhanced-pr-review -->
+<!-- cv-review-coverage: sha=<captured head SHA> reviewer=<gh user login> suite=/enhanced-pr-review -->
 **First-party review** at `<sha7>` by <login> via `/enhanced-pr-review` (<agents that ran>): <N findings | clean>.
 ```
 
