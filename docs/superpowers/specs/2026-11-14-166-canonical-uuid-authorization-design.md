@@ -29,11 +29,13 @@ The RBAC resolver canonicalizes textual server, user, and channel IDs before cac
 
 Affected purge, channel-key, role-assign/unassign, group-DM role, message-send, and voice-moderation handlers carry one canonical local ID from validation through authorization, write, response, and event emission. The group-DM role update also adds a creator predicate to the `UPDATE` itself; zero changed rows follow the existing unavailable/refusal path.
 
+Epoch validation treats cached keys as advisory: malformed IDs and nonpositive epochs are skipped, while aliases of a valid channel use the oldest positive cached epoch so a missed revocation remains visible.
+
 ## Verification
 
-- The six scan exploit tests VULN-077, 064, 099, 195, 196, and 205 first reproduce on Self-Hosted `origin/main` at `7e66479b`; after the fix each must fail because the attacker goal is denied, not because its source-shape assertion or setup fails.
+- The six scan exploit tests VULN-077, 064, 099, 195, 196, and 205 first reproduce on `origin/main` at `7e66479b`; after the fix each must fail because the attacker goal is denied, not because its source-shape assertion or setup fails.
 - Focused regression tests assert authorization and output equivalence for accepted spellings, malformed-ID refusal before writes, no false key revocation, creator protection at the SQL write, and canonical response/event fields.
-- Run focused Go packages and quality checks in Self-Hosted, then port and rerun the same proofs in Hosted. PostgreSQL integration tests require an isolated `DATABASE_URL`.
+- Run focused Go packages and quality checks on the final branch. PostgreSQL integration tests require an isolated `DATABASE_URL`.
 
 ## Dependency references
 

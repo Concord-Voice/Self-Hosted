@@ -15,13 +15,13 @@
 - Preserve valid UUID spellings accepted today; malformed IDs fail before writes.
 - Preserve permission precedence, transaction/lock order, status codes, and hidden-resource error privacy.
 - Use the shared default Go caches. Use only an isolated `DATABASE_URL` for PostgreSQL tests.
-- Do not touch unrelated dirty checkouts; Self-Hosted and Hosted each use an isolated issue worktree.
-- The six supplied scan exploit tests must stop reaching their attacker goals in both repositories.
+- Use an isolated issue worktree and do not touch unrelated dirty checkouts.
+- The six supplied scan exploit tests must stop reaching their attacker goals.
 
 ## Review Focus
 
 - A batch containing the same UUID in two spellings must resolve once and return one canonical key.
-- A malformed ID in a batch must fail before any transaction begins.
+- Malformed cached epoch keys are skipped so valid channels still receive revocations; malformed route and write-target IDs fail before writes.
 - An uppercase still-visible role target must not enter the denied-key set.
 - A creator's role must remain unchanged even if the Go preflight is bypassed or races.
 - An accepted alternate spelling must not leak back into a response, audit row, cache key, or WebSocket payload.
@@ -32,7 +32,7 @@
 
 **Files:** Existing scan exploit tests through temporary Go overlays; new focused tests in the affected package suites.
 
-- [x] Replay VULN-077, 064, 099, 195, 196, and 205 against Self-Hosted `origin/main` at `7e66479b`; all six currently demonstrate attacker success.
+- [x] Replay VULN-077, 064, 099, 195, 196, and 205 against `origin/main` at `7e66479b`; all six currently demonstrate attacker success.
 - [ ] Provision an isolated PostgreSQL database or mark the real-DB cases unavailable; never use the shared `concord` database.
 - [ ] Write the smallest failing behavior tests for resolver spelling equivalence, owner hierarchy, key candidate visibility, group creator demotion, and affected handler canonical output/refusal. Use the existing package test fixtures where possible.
 - [ ] Run each targeted test against the unfixed branch. Require an assertion failure on the expected security property, plus a positive control showing the authorized path works. Commit the red tests alone: `test: reproduce Security #166 UUID authorization bypasses`.
@@ -69,16 +69,15 @@
 
 - [ ] Document case-insensitive UUID input, canonical output, and malformed-ID 400s for affected routes; record the RBAC canonicalization rule.
 - [ ] Add a small guard that catches a new comparison between a request-derived raw ID and a database UUID text in `internal/rbac`, or make that class impossible through a typed API if a smaller safe change emerges.
-- [ ] Run changelog/count and quality-gate checks required by the repository. Commit the verified Self-Hosted fix.
+- [ ] Run changelog/count and quality-gate checks required by the repository. Commit the verified fix.
 
-### Task 6: Hosted mirror and lifecycle gates
+### Task 6: Lifecycle gates
 
-**Files:** The corresponding Hosted control-plane and docs files; adapt drifted handlers by semantic hunk.
+**Files:** The reviewed control-plane and documentation changes.
 
-- [ ] Port the reviewed Self-Hosted behavior into the isolated Hosted worktree. Compare the touched caller inventory; do not copy whole drifted files.
-- [ ] Rerun all six exploit overlays, focused route/permission tests, and quality checks against Hosted.
-- [ ] Open draft PRs with `Concord-Voice/Security#166` linkage, monitor CI, run required red-team/security/RBAC/E2EE and code review, and keep each merge behind its own Phase 9 approval.
+- [ ] Rerun all six exploit overlays, focused route/permission tests, and quality checks on the final branch.
+- [ ] Open a draft PR, monitor CI, run required red-team/security/RBAC/E2EE and code review, and keep merge behind Phase 9 approval.
 
 ## Self-review
 
-The tasks cover each of the six findings, the accepted-input and emitted-output contracts, malformed input, docs, and both owning repositories. No migration or new dependency is planned. The batch remains serialized: #169 starts implementation only after #166 is merged and its post-merge checks are green.
+The tasks cover each of the six findings, the accepted-input and emitted-output contracts, malformed input, and docs. No migration or new dependency is planned.
