@@ -7,11 +7,16 @@ https on a host in `npm_registry_hosts`. A workspace link (`"link": true`) whose
 and is allowed. Anything else fails: another host, plain http, git+ssh, file:,
 a tarball path, or a link that leaves the directory.
 
-Go: a go.mod `replace` to another module path is fetched through the module
-proxy and checked against the checksum database, so it passes. A `replace` to a
-filesystem path bypasses both, so it passes only when the directory it names
-is inside the repository and listed in `go_local_replacements`. GOPROXY and
-GOPRIVATE settings are out of scope.
+npm parses URLs the WHATWG way, so a `resolved` URL must match a strict
+`https://<host>/...` shape (no userinfo, port, backslash or escape in the
+authority) before its host is compared.
+
+Go: a go.mod `replace` whose target carries a version is a module path,
+fetched through the module proxy and checked against the checksum database, so
+it passes. A target without a version is a filesystem path (Go's own rule,
+however it is spelled or quoted); it bypasses both, so it passes only when the
+directory it names is inside the repository and listed in
+`go_local_replacements`. GOPROXY and GOPRIVATE settings are out of scope.
 
 The approved hosts and paths live in .github/ci/approved-registries.json, so a
 change to them is a visible diff.
@@ -34,6 +39,7 @@ import sys
 from urllib.parse import urlparse
 
 NPM_NAMES = {"package-lock.json", "npm-shrinkwrap.json"}
+SAFE_URL = re.compile(r"^https://(?P<host>[A-Za-z0-9.-]+)/[^\\\s]*$")
 
 
 class CannotRun(Exception):
@@ -73,10 +79,16 @@ def npm_violations(path, hosts):
                 continue
             out.append(f"{path}: {name}: link {resolved} leaves the lockfile directory")
             continue
-        url = urlparse(resolved)
-        if url.scheme == "https" and url.hostname in hosts:
+        # Anchored match, not urlparse alone: Python and npm (WHATWG URL) parse
+        # `\`, `@`, ports and escapes in the authority differently, so
+        # `https://evil.example\@registry.npmjs.org/x` reads as the approved
+        # host to urlparse and as evil.example to npm. The authority must be a
+        # bare host name, and nothing after it may hold a backslash.
+        match = SAFE_URL.match(resolved)
+        if match and match.group("host") in hosts:
             continue
-        where = url.hostname or f"{url.scheme or 'no'} scheme"
+        url = urlparse(resolved)
+        where = (match and match.group("host")) or url.hostname or f"{url.scheme or 'no'} scheme"
         out.append(
             f"{path}: {name}: resolved from {where} ({resolved}); "
             f"approved npm hosts: {', '.join(sorted(hosts)) or 'none'}"
@@ -107,6 +119,15 @@ def go_replaces(text):
                 yield number, rest
 
 
+def unquote_go(token, path, number):
+    """Strip Go's "..." or `...` quoting. Escapes are refused, not guessed."""
+    if token[:1] in ('"', "`"):
+        if len(token) < 2 or token[-1] != token[0] or "\\" in token:
+            raise CannotRun(f"{path}:{number}: cannot parse quoted replace target {token}")
+        return token[1:-1]
+    return token
+
+
 def go_violations(path, root, local_allowed):
     try:
         with open(path, encoding="utf-8") as fh:
@@ -118,11 +139,14 @@ def go_violations(path, root, local_allowed):
         if "=>" not in directive:
             raise CannotRun(f"{path}:{number}: cannot parse replace directive: {directive}")
         target = directive.split("=>", 1)[1].split()
-        if not target:
-            raise CannotRun(f"{path}:{number}: replace directive has no target: {directive}")
-        dest = target[0]
-        if not (dest.startswith(("./", "../")) or os.path.isabs(dest)):
-            continue  # module path: fetched through the module proxy
+        if not target or len(target) > 2:
+            raise CannotRun(f"{path}:{number}: cannot parse replace target: {directive}")
+        dest = unquote_go(target[0], path, number)
+        # Go's own rule: a replacement with a version is a module path, fetched
+        # through the module proxy. One without a version is a filesystem path,
+        # whatever it looks like (`.`, `"./x"`, `..\x`, an absolute path).
+        if len(target) == 2:
+            continue
         resolved = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(path)), dest))
         rel = os.path.relpath(resolved, root)
         if not os.path.isabs(dest) and inside(root, rel) and rel in local_allowed:

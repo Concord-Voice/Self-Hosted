@@ -60,6 +60,24 @@ jq '.packages["node_modules/left-pad"] = {"resolved": "packages/left-pad", "link
   "$FIX/off-registry-lock.json" > "$WORK/workspace-lock.json"
 expect 'in-tree workspace link passes' 0 '^ok:' --npm-lock "$WORK/workspace-lock.json"
 
+# Parser-differential bypasses: npm (WHATWG URL) and Python disagree on these.
+for url in 'https://evil.example\@registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz' \
+           'https://registry.npmjs.org@evil.example/left-pad/-/left-pad-1.3.0.tgz' \
+           'https://user:pw@registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz' \
+           'https://registry.npmjs.org:8443/left-pad/-/left-pad-1.3.0.tgz' \
+           'https://registry.npmjs.org/left-pad/..\..\evil/x.tgz'; do
+  jq --arg u "$url" '.packages["node_modules/left-pad"].resolved = $u' \
+    "$FIX/off-registry-lock.json" > "$WORK/diff-lock.json"
+  expect "differential URL fails: $url" 1 'left-pad: resolved from' --npm-lock "$WORK/diff-lock.json"
+done
+# shellcheck disable=SC2016  # literal Go raw-string quoting, not a shell expansion
+for target in '"./vendored"' '`../vendored`' '.' '..\vendored' 'vendored'; do
+  printf 'module example.invalid/x\n\ngo 1.26\n\nreplace example.invalid/a => %s\n' "$target" > "$WORK/q.mod"
+  expect "unversioned replace target is local: $target" 1 'points at local path' --go-mod "$WORK/q.mod"
+done
+printf 'module example.invalid/x\n\ngo 1.26\n\nreplace example.invalid/a => "./x\\"y"\n' > "$WORK/esc.mod"
+expect 'escaped quoted target cannot run' 2 'cannot parse quoted' --go-mod "$WORK/esc.mod"
+
 # A listed local replacement passes. The fixture's target resolves to a path
 # outside the repository, so list a replacement that resolves inside it.
 mkdir -p "$WORK/listed"
