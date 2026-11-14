@@ -97,3 +97,9 @@ func TestOperatorScriptsMatchConcordCtl(t *testing.T) {
 		require.Contains(t, string(raw), script)
 	}
 }
+
+// concord-ctl.sh media-legacy-pause reaches Redis through the operator user, so
+// that user's rule must cover the pause key.
+func TestOperatorACLCoversJoinPause(t *testing.T) {
+	require.Contains(t, strings.Fields(operatorACLRule()), "~media:legacy_join_pause")
+}

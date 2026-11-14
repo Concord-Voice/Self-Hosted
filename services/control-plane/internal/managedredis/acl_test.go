@@ -114,9 +114,3 @@ func TestAccountBudgetTimeGrantIsControlPlaneOnly(t *testing.T) {
 	require.NoError(t, json.Unmarshal(aclManifestJSON, &inventory))
 	require.NotContains(t, inventory.ExcludedAbsentApplicationCommands, "TIME")
 }
-
-// concord-ctl.sh media-legacy-pause reaches Redis through the operator user, so
-// that user's rule must cover the pause key.
-func TestOperatorACLCoversJoinPause(t *testing.T) {
-	require.Contains(t, strings.Fields(operatorACLRule()), "~media:legacy_join_pause")
-}
