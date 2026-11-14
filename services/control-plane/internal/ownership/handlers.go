@@ -482,18 +482,19 @@ func (h *Handler) ConfirmTransfer(c *gin.Context) {
 		return
 	}
 
-	// The password lockout and MFA guess budget both make Redis calls. Reserve
-	// them before the coordinator transaction takes its user/server locks.
+	// The password lockout and MFA guess budget both make Redis calls, before
+	// the coordinator transaction takes its user/server locks. Charge MFA first:
+	// an exhausted budget must not leave an unchecked password guess reserved.
+	if stepErr := stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), userID, req.MFACode); stepErr != nil {
+		h.writeOwnershipConfirmStepUpError(c, stepErr)
+		return
+	}
 	attempt, stepErr := stepup.ReserveUserPasswordAttempt(ctx, h.db, h.redis, userID, req.Password)
 	if stepErr != nil {
 		h.writeOwnershipConfirmStepUpError(c, stepErr)
 		return
 	}
 	defer h.settleOwnershipConfirmPassword(attempt)
-	if stepErr = stepup.Charge(ctx, stepup.DangerousActionBudget(h.redis), userID, req.MFACode); stepErr != nil {
-		h.writeOwnershipConfirmStepUpError(c, stepErr)
-		return
-	}
 
 	// Execute the proof and transfer under the same coordinator transaction.
 	// In particular, backup-code redemption must roll back with any rejected
