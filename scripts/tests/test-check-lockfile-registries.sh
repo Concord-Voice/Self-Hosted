@@ -87,6 +87,10 @@ expect 'three tokens cannot run' 2 'cannot parse replace target' --go-mod "$WORK
 
 # An approved host is not enough: the path must be this entry's own tarball.
 jq '.packages["node_modules/left-pad"] = {"version": "1.3.0", "resolved": "https://registry.npmjs.org/evil-pkg/-/evil-pkg-1.0.0.tgz"}' "$FIX/off-registry-lock.json" > "$WORK/swap-lock.json"
+jq '.packages["node_modules/left-pad"] = {"version": "1.3.0/../../../is-number/-/is-number-7.0.0", "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0/../../../is-number/-/is-number-7.0.0.tgz"}' "$FIX/off-registry-lock.json" > "$WORK/dots-lock.json"
+expect 'dot segments mirrored into version and resolved fail' 1 'left-pad: resolved .* is not the tarball of' --npm-lock "$WORK/dots-lock.json"
+jq '.packages["node_modules/left-pad"] = {"version": "1.3.0", "resolved": "https://registry.npmjs.org/left-pad/-/left-pad-1.3.0.tgz%2F..%2F"}' "$FIX/off-registry-lock.json" > "$WORK/esc-lock.json"
+expect 'an escaped path fails' 1 'left-pad: resolved .* is not the tarball of' --npm-lock "$WORK/esc-lock.json"
 expect 'resolved on the approved host but for another package fails' 1 'left-pad: resolved .* is not the tarball of left-pad@1.3.0' --npm-lock "$WORK/swap-lock.json"
 
 # `name` puts another package at an install location: only a declared npm: alias may.

@@ -219,8 +219,15 @@ def npm_violations(path, hosts):
             # and a `resolved` that names another package's tarball installs
             # that package here. The path must be the tarball of this entry.
             real = entry.get("name") or name
-            want = f"/{real}/-/{real.rsplit('/', 1)[-1]}-{entry.get('version')}.tgz"
-            if urlparse(resolved).path == want:
+            version = str(entry.get("version"))
+            want = f"/{real}/-/{real.rsplit('/', 1)[-1]}-{version}.tgz"
+            # npm normalizes the URL (WHATWG) before it fetches, so dot
+            # segments or escapes in a `version` mirrored into `resolved` would
+            # name another tarball. Only a plain version and package name, and
+            # a path with nothing to normalize, can match.
+            raw = urlparse(resolved).path
+            if (PLAIN_VERSION.match(version) and PKG_NAME.match(real) and raw == want
+                    and not re.search(r"(^|/)\.\.?(/|$)|%", raw)):
                 continue
             out.append(f"{path}: {name}: resolved {resolved} is not the tarball of "
                        f"{real}@{entry.get('version')} (expected path {want})")
