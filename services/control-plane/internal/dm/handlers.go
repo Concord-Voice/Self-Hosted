@@ -4341,17 +4341,10 @@ func dmVoiceInvitedData(convID uuid.UUID, isGroup bool, caller map[string]interf
 	}
 }
 
-// filterOnlineCallees returns the subset of callees with at least one live WS
-// client (#1219 B2, decision G1), keeping offline group members out of the
-// caller's ringing tally. It reuses the input slice's backing array.
-func (h *Handler) filterOnlineCallees(callees []uuid.UUID) []uuid.UUID {
-	online := callees[:0]
-	for _, callee := range callees {
-		if h.hub.IsUserOnline(callee) {
-			online = append(online, callee)
-		}
-	}
-	return online
+// filterOnlineCallees returns only callees whose presence is explicitly
+// visible. It drives the invitation list and the externally visible tally.
+func (h *Handler) filterOnlineCallees(ctx context.Context, callees []uuid.UUID) []uuid.UUID {
+	return h.hub.VisibleOnlineSubset(ctx, callees)
 }
 
 // writeRingConflict writes the 409 Conflict response for a ring already in
@@ -4615,7 +4608,7 @@ func (h *Handler) loadVoiceRingRecipientsTx(
 		return voiceRingRecipients{}, fmt.Errorf("iterate DM ring recipients: %w", err)
 	}
 	if isGroup {
-		callees = h.filterOnlineCallees(callees)
+		callees = h.filterOnlineCallees(ctx, callees)
 	}
 	return voiceRingRecipients{calleeIDs: callees, isGroup: isGroup}, nil
 }

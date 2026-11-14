@@ -2,12 +2,16 @@ package ownership_test
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
+	ws "github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -56,6 +60,71 @@ func TestInitiateTransferSuccess(t *testing.T) {
 	assert.Equal(t, member.ID, body[keyToUserID])
 	assert.NotEmpty(t, body["transfer_id"])
 	assert.NotEmpty(t, body["expires_at"])
+}
+
+// Security #171: initiating a transfer is a private owner/target workflow.
+// A server member who is neither party must not receive its WebSocket frame.
+func TestSecurity171_InitiateTransferNotifiesOnlyTransferParties(t *testing.T) {
+	ts := setupTS(t)
+	owner := ts.CreateTestUser(t, "transferprivateowner")
+	target := ts.CreateTestUser(t, "transferprivatetarget")
+	bystander := ts.CreateTestUser(t, "transferprivatebystander")
+	serverID := ts.CreateTestServer(t, owner.ID, "Private Transfer Server")
+	ts.AddMemberToServer(t, serverID, target.ID, keyMember)
+	ts.AddMemberToServer(t, serverID, bystander.ID, keyMember)
+
+	wsServer := httptest.NewServer(ts.Router)
+	t.Cleanup(wsServer.Close)
+	ownerConn := connectTransferNotifications(t, wsServer.URL, owner.AccessToken)
+	targetConn := connectTransferNotifications(t, wsServer.URL, target.AccessToken)
+	bystanderConn := connectTransferNotifications(t, wsServer.URL, bystander.AccessToken)
+	t.Cleanup(func() { _ = ownerConn.Close() })
+	t.Cleanup(func() { _ = targetConn.Close() })
+	t.Cleanup(func() { _ = bystanderConn.Close() })
+	w := ts.DoRequest(http.MethodPost, pathServersPrefix+serverID+pathTransferOwnership, map[string]interface{}{
+		keyTargetUserID: target.ID,
+		keyPassword:     testhelpers.TestAuthPlaintext,
+	}, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	assertTransferInitiatedFrame(t, ownerConn, true)
+	assertTransferInitiatedFrame(t, targetConn, true)
+	assertTransferInitiatedFrame(t, bystanderConn, false)
+}
+
+func connectTransferNotifications(t *testing.T, serverURL, token string) *ws.Conn {
+	t.Helper()
+	headers := testhelpers.AuthHeaders(token)
+	conn, _, err := ws.DefaultDialer.Dial("ws"+strings.TrimPrefix(serverURL, "http")+"/api/v1/ws", headers)
+	require.NoError(t, err)
+	return conn
+}
+
+func assertTransferInitiatedFrame(t *testing.T, conn *ws.Conn, want bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		_ = conn.SetReadDeadline(deadline)
+		_, raw, err := conn.ReadMessage()
+		if !want && ws.IsUnexpectedCloseError(err) {
+			require.NoError(t, err)
+		}
+		if err != nil {
+			if want {
+				require.NoError(t, err)
+			}
+			return
+		}
+		var frame struct {
+			Type string `json:"type"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &frame))
+		if frame.Type == "ownership_transfer_initiated" {
+			assert.True(t, want, "a non-party received the private transfer frame")
+			return
+		}
+	}
+	assert.False(t, want, "a transfer party did not receive its private frame")
 }
 
 func TestInitiateTransferNotOwner(t *testing.T) {

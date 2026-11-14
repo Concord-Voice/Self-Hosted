@@ -7,16 +7,20 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	ws "github.com/gorilla/websocket"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/friends"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/invites"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/testdb"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
@@ -232,6 +236,86 @@ func TestBlockUser_NoExistingFriendship(t *testing.T) {
 	).Scan(&status)
 	require.NoError(t, err)
 	assert.Equal(t, statusBlocked, status)
+}
+
+// Security #171: a stranger has no friendship state to remove, so notifying
+// them of a block exposes the blocker's private decision.
+func TestSecurity171_BlockingStrangerDoesNotSendFriendRemoved(t *testing.T) {
+	ts := setupTS(t)
+	blocker := ts.CreateTestUser(t, "blocknotificationactor")
+	stranger := ts.CreateTestUser(t, "blocknotificationstranger")
+	wsServer := httptest.NewServer(ts.Router)
+	t.Cleanup(wsServer.Close)
+	strangerConn := connectFriendNotifications(t, wsServer.URL, stranger.AccessToken)
+	t.Cleanup(func() { _ = strangerConn.Close() })
+
+	w := ts.DoRequest(http.MethodPost, pathFriendsPrefix+stranger.ID+pathBlock, nil, testhelpers.AuthHeaders(blocker.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+	assertFriendRemovedFrame(t, strangerConn, false)
+}
+
+// Security #171: suppressing the stranger notification must not suppress the
+// existing accepted-friend removal cue.
+func TestSecurity171_BlockingAcceptedFriendStillSendsFriendRemoved(t *testing.T) {
+	ts := setupTS(t)
+	blocker := ts.CreateTestUser(t, "blocknotificationfriendactor")
+	friend := ts.CreateTestUser(t, "blocknotificationfriendtarget")
+	ts.CreateFriendship(t, blocker.ID, friend.ID, statusAccepted)
+	broadcaster := &recordingBroadcaster{}
+	h := friends.NewHandler(ts.DB, logger.New("test"), broadcaster)
+	identity := testhelpers.AccessIdentityForToken(t, blocker.AccessToken)
+	engine := gin.New()
+	engine.Use(func(c *gin.Context) {
+		c.Set("user_id", blocker.ID)
+		c.Set(middleware.JWTClaimsContextKey, jwt.MapClaims{"cred_epoch": identity.CredentialEpoch})
+		testhelpers.AttachAccessIdentity(t, c, blocker)
+		c.Next()
+	})
+	engine.POST(pathFriendsPrefix+":user_id"+pathBlock, h.BlockUser)
+
+	w := httptest.NewRecorder()
+	engine.ServeHTTP(w, httptest.NewRequest(http.MethodPost, pathFriendsPrefix+friend.ID+pathBlock, nil))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	broadcaster.mu.Lock()
+	defer broadcaster.mu.Unlock()
+	for _, message := range broadcaster.messages {
+		if message.userID.String() == friend.ID && message.msg.Type == "friend_removed" {
+			return
+		}
+	}
+	require.Fail(t, "accepted friend was not notified of removal")
+}
+
+func connectFriendNotifications(t *testing.T, serverURL, token string) *ws.Conn {
+	t.Helper()
+	conn, _, err := ws.DefaultDialer.Dial("ws"+strings.TrimPrefix(serverURL, "http")+"/api/v1/ws", testhelpers.AuthHeaders(token))
+	require.NoError(t, err)
+	return conn
+}
+
+func assertFriendRemovedFrame(t *testing.T, conn *ws.Conn, want bool) {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		_ = conn.SetReadDeadline(deadline)
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			if want {
+				require.NoError(t, err)
+			}
+			return
+		}
+		var frame struct {
+			Type string `json:"type"`
+		}
+		require.NoError(t, json.Unmarshal(raw, &frame))
+		if frame.Type == "friend_removed" {
+			assert.True(t, want, "a stranger received friend_removed")
+			return
+		}
+	}
+	assert.False(t, want, "accepted friend was not notified of removal")
 }
 
 func TestBlockUser_PendingRequest(t *testing.T) {

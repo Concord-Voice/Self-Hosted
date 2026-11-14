@@ -6471,9 +6471,13 @@ paths:
       summary: Ring a DM voice call
       description: 'Initiate server-authoritative ring signaling for a DM voice call (#1209).
 
-        Broadcasts dm_voice_call_invited to all other participants; only one ring
+        Broadcasts dm_voice_call_invited to other participants; in a group, invitations
 
-        may be pending per conversation at a time.
+        and `ringing_user_ids` include only participants whose presence is visible online.
+
+        Invisible, missing, unknown, or unavailable presence is treated as offline and
+
+        receives no invitation. Only one ring may be pending per conversation at a time.
 
         Rate limit: 10 requests per minute (user-based).
 
@@ -6508,6 +6512,7 @@ paths:
                     items:
                       type: string
                       format: uuid
+                    description: Participants invited to ring; for a group, only participants whose presence is visible online.
         '400':
           description: Invalid conversation ID, or no callees in this conversation (personal DM)
           content:
@@ -8067,7 +8072,9 @@ paths:
       tags:
       - Friends
       summary: Remove a friend
-      description: 'Remove a user from your friend list.
+      description: 'Remove a user from your friend list. The other user receives the
+
+        `friend_removed` WebSocket event only when the friendship was accepted.
 
         Rate limit: 5 requests per minute (user-based).
 
@@ -8094,6 +8101,8 @@ paths:
       - Friends
       summary: Block a user
       description: 'Block a user. Removes any existing friendship and prevents future requests.
+
+        Blocking a user with no accepted friendship does not notify that user.
 
         Rate limit: 5 requests per minute (user-based).
 
@@ -16640,7 +16649,9 @@ paths:
 
         owner receives a notification email containing a reversal token, and an
 
-        `ownership_transfer_initiated` WebSocket event is broadcast to the server.
+        `ownership_transfer_initiated` WebSocket event is sent only to the current
+
+        owner and transfer target.
 
         Rate limit: 3 requests per minute (user-based).
 
@@ -19614,7 +19625,13 @@ paths:
       tags:
       - Users
       summary: Get a user's public profile
-      description: 'Get another user''s public profile including bio, links, and avatar.
+      description: 'Get your own profile or another user''s discoverable profile, including bio,
+
+        links, and avatar. Direct profile reads use the same audience rule as username
+
+        search: users who opt out of username discovery, and users separated by a block
+
+        in either direction, are not disclosed.
 
         Rate limit: 30 requests per minute (user-based).
 
@@ -19638,8 +19655,14 @@ paths:
                 properties:
                   user:
                     $ref: '#/components/schemas/UserProfile'
+        '400':
+          description: user_id is not a UUID
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Error'
         '404':
-          description: User not found
+          description: User not found or unavailable to the caller
           content:
             application/json:
               schema:
@@ -23314,6 +23337,7 @@ components:
             type: integer
           online_count:
             type: integer
+            description: Count of members whose presence is visible online. Invisible, missing, unknown, or unavailable presence is counted as offline.
           permissions:
             type: string
             pattern: '^[0-9]+$'
@@ -23473,7 +23497,7 @@ components:
           type: integer
           format: int64
           nullable: true
-          description: Unix timestamp of last activity
+          description: Unix timestamp of last activity. Omitted for an invisible member when viewed by another user; callers may see their own timestamp.
         timed_out_until:
           type: string
           format: date-time

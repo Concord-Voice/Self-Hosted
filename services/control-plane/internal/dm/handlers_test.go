@@ -4760,8 +4760,8 @@ func TestRingDMCall_Group_ExcludesOfflineCallees(t *testing.T) {
 	online := ts.CreateTestUser(t, "rg-online")
 	offline := ts.CreateTestUser(t, "rg-offline")
 	convID := ts.CreateGroupDMConversation(t, caller.ID, online.ID, offline.ID)
-	ts.Hub.MarkUserOnlineForTest(uuid.MustParse(caller.ID))
-	ts.Hub.MarkUserOnlineForTest(uuid.MustParse(online.ID)) // offline is NOT marked
+	markDMUserVisible(t, ts, caller.ID)
+	markDMUserVisible(t, ts, online.ID) // offline is NOT marked
 
 	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceRing, nil, testhelpers.AuthHeaders(caller.AccessToken))
 	require.Equal(t, http.StatusOK, w.Code, "body: %s", w.Body.String())
@@ -4795,6 +4795,22 @@ func TestRingDMCall_Group_AllOffline_Returns400(t *testing.T) {
 	assert.False(t, dm.PendingDMCallExistsForTest(convUUID), "no ring created when all callees offline")
 }
 
+func TestSecurity171_RingDMCall_GroupAllInvisibleMatchesOffline(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	t.Cleanup(dm.ResetPendingDMCallsForTest)
+
+	caller := ts.CreateTestUser(t, "ring-invisible-caller")
+	invisible := ts.CreateTestUser(t, "ring-invisible-callee")
+	convID := ts.CreateGroupDMConversation(t, caller.ID, invisible.ID)
+	ts.Hub.MarkUserOnlineForTest(uuid.MustParse(caller.ID))
+	ts.Hub.MarkUserOnlineForTest(uuid.MustParse(invisible.ID))
+	require.NoError(t, ts.Redis.Set(context.Background(), "presence:"+invisible.ID, "invisible", 0).Err())
+
+	w := ts.DoRequest("POST", pathDMConversationsPrefix+convID+pathVoiceRing, nil, testhelpers.AuthHeaders(caller.AccessToken))
+	assert.Equal(t, http.StatusBadRequest, w.Code, "an all-invisible group must ring exactly like an offline group: %s", w.Body.String())
+	assert.False(t, dm.PendingDMCallExistsForTest(uuid.MustParse(convID)), "no ring may be created when every callee is invisible")
+}
+
 // ─── DeclineDMCall tests (#1209, plan Task B4) ───────────────────────────
 
 const pathVoiceDecline = "/voice/decline"
@@ -4812,6 +4828,14 @@ func ringForTest(t *testing.T, ts *testhelpers.TestServer, caller testhelpers.Te
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	require.NotEmpty(t, body.RingID)
 	return body.RingID
+}
+
+// markDMUserVisible makes a synthetic hub connection observable to DM ringing.
+// Production only rings members with an explicit visible Redis presence record.
+func markDMUserVisible(t *testing.T, ts *testhelpers.TestServer, userID string) {
+	t.Helper()
+	ts.Hub.MarkUserOnlineForTest(uuid.MustParse(userID))
+	require.NoError(t, ts.Redis.Set(context.Background(), "presence:"+userID, "online", 0).Err())
 }
 
 func TestDeclineDMCall_DM1on1_EndsCallAndClearsRing(t *testing.T) {
@@ -4841,7 +4865,7 @@ func TestDeclineDMCall_Group_RingPersistsUntilLastDecline(t *testing.T) {
 	cc := ts.CreateTestUser(t, "gd-c")
 	convID := ts.CreateGroupDMConversation(t, caller.ID, b.ID, cc.ID)
 	for _, u := range []string{caller.ID, b.ID, cc.ID} {
-		ts.Hub.MarkUserOnlineForTest(uuid.MustParse(u))
+		markDMUserVisible(t, ts, u)
 	}
 
 	ringForTest(t, ts, caller, convID)
@@ -4867,7 +4891,7 @@ func TestJoinDMCall_Group_AcceptClearsRingForRemaining(t *testing.T) {
 	cc := ts.CreateTestUser(t, "gj-c")
 	convID := ts.CreateGroupDMConversation(t, caller.ID, b.ID, cc.ID)
 	for _, u := range []string{caller.ID, b.ID, cc.ID} {
-		ts.Hub.MarkUserOnlineForTest(uuid.MustParse(u))
+		markDMUserVisible(t, ts, u)
 	}
 
 	ringForTest(t, ts, caller, convID)
