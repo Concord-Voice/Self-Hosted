@@ -322,6 +322,9 @@ func TestBackupAdmissionPersistsAcrossFailureAndRestart(t *testing.T) {
 		!strings.Contains(rec.Body.String(), "backup_rate_limited") {
 		t.Fatalf("second backup: %d %s", rec.Code, rec.Body)
 	}
+	if lines := readAuditLines(t, s.audit.path); len(lines) != 4 || lines[len(lines)-1]["reason_code"] != "backup_rate_limited" || lines[len(lines)-1]["outcome"] != "denied" {
+		t.Fatalf("backup limit audit: %#v", lines)
+	}
 
 	s2, _ := writeServer(t, &fakeRunner{})
 	s2.writes.admission = s.writes.admission
@@ -332,6 +335,22 @@ func TestBackupAdmissionPersistsAcrossFailureAndRestart(t *testing.T) {
 	s2.writes.now = func() time.Time { return now.Add(backupWindow) }
 	if job := started(t, postAuthorized(t, s2, "/v1/actions/backup", "")); waitJob(t, s2, job.ID).State != "succeeded" {
 		t.Fatalf("backup at window boundary did not succeed")
+	}
+}
+
+func TestBackupAdmissionAuditFailurePreventsLimitResponse(t *testing.T) {
+	s, _ := writeServer(t, &fakeRunner{})
+	now := time.Date(2026, time.November, 14, 12, 0, 0, 0, time.UTC)
+	s.writes.now = func() time.Time { return now }
+	first := started(t, postAuthorized(t, s, "/v1/actions/backup", ""))
+	waitJob(t, s, first.ID)
+	s.audit.syncFile = func(*os.File) error { return errors.New("injected audit failure") }
+	if rec := postAuthorized(t, s, "/v1/actions/backup", ""); rec.Code != http.StatusServiceUnavailable ||
+		!strings.Contains(rec.Body.String(), "job_unavailable") {
+		t.Fatalf("limited backup with audit failure: %d %s", rec.Code, rec.Body)
+	}
+	if len(s.writes.list) != 1 {
+		t.Fatalf("audit failure started another job: %#v", s.writes.list)
 	}
 }
 

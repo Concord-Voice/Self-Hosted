@@ -428,6 +428,11 @@ func (s *Server) handleWrite(w http.ResponseWriter, r *http.Request, action stri
 	job, err := s.writes.start(name, adminID, cmds, budget)
 	if err != nil {
 		if errors.Is(err, errBackupLimited) {
+			if auditErr := s.audit.Write(AuditEvent{Action: name, Outcome: "denied", Reason: "backup_rate_limited", AdminID: adminID}); auditErr != nil {
+				refuse(w, http.StatusServiceUnavailable, "job_unavailable")
+				log.Printf("concord-agent: action=%s outcome=error", name)
+				return
+			}
 			refuse(w, http.StatusTooManyRequests, "backup_rate_limited")
 			return
 		}
