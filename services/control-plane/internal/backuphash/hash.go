@@ -9,6 +9,7 @@ import (
 	"strings"
 )
 
+// V2Prefix identifies the bounded Argon2id backup-code format.
 const V2Prefix = "v2$argon2id$v=19$m=8192,t=1,p=1$"
 
 var errInvalidStoredHash = errors.New("invalid stored backup hash")

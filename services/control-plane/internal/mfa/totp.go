@@ -197,7 +197,10 @@ func VerifyBackupCode(code string, hashes []string, used []bool) (index int, mat
 		// A code with no used flag is treated as used: the arrays are written
 		// together, so a short one is a damaged row, and the caller indexes
 		// used[i] to mark the match.
-		if i >= len(used) || used[i] {
+		if i >= len(used) {
+			continue
+		}
+		if used[i] {
 			continue
 		}
 		candidate := codeHash[:]
