@@ -1,0 +1,312 @@
+name: Refresh npm lockfiles
+
+# Weekly refresh of the three npm lockfiles this repository ships: the
+# workspace root, client/admin and services/media-plane (#272). Dependabot only
+# moves direct dependencies; this moves transitive packages to the newest
+# version their existing ranges allow.
+#
+# What it may change: the three package-lock.json files, nothing else. It runs
+# `npm update --package-lock-only`, so it stays inside the ranges already in
+# package.json and never installs a package. `--ignore-scripts` is set as well,
+# and `min-release-age=7` keeps any version published in the last 7 days out of
+# the lockfile. Majors stay with Dependabot. The refresh job fails if anything
+# other than those three lockfiles changed, including any package.json.
+#
+# Runs Tuesday 06:30 UTC, after Dependabot's npm entries (05:00 in
+# .github/dependabot.yml) and the Go flush (06:00). Ordering is not an
+# invariant: the contention guard below defers the run when a Dependabot npm PR
+# for one of these roots is open, whatever the time.
+#
+# Same three-job shape as go-transitive-flush.yml, and the split is the same
+# security boundary. A job receives every secret it references, and its
+# `GITHUB_TOKEN`, when the job starts, whatever the step order.
+#   guard    holds the only `GITHUB_TOKEN` write scope (`pull-requests`), for
+#            the deferral comment. It runs no npm.
+#   refresh  resolves packages from the registry. Its `GITHUB_TOKEN` is
+#            read-only and it references no secret.
+#   open-pr  holds the App key. It runs no npm: it copies the three lockfiles
+#            out of the artifact, and create-pull-request reads the rendered
+#            body from the artifact directory.
+# Do not merge the jobs, and do not add npm commands to guard or open-pr.
+# scripts/tests/test-npm-lockfile-flush-shape.sh locks these rules.
+
+on:
+  schedule:
+    - cron: "30 6 * * 2"
+  workflow_dispatch:
+
+# Least-privilege default. The guard job adds only `pull-requests: write`, for
+# its `gh pr comment`. The branch push and the PR itself use the App
+# installation token, so `GITHUB_TOKEN` never needs `contents: write`.
+permissions:
+  contents: read
+
+concurrency:
+  group: npm-lockfile-flush
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      pull-requests: write
+    outputs:
+      deferred: ${{ steps.contention.outputs.deferred }}
+    steps:
+      # `gh` infers the repository from the checkout. Nothing in it is executed.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Contention guard — defer if open Dependabot npm PRs touch these lockfiles
+        id: contention
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # Dependabot names npm branches dependabot/npm_and_yarn/<directory>/<package>,
+          # with no directory for the root entry. The license-checker tool
+          # (dependabot/npm_and_yarn/dot-github/...) is not refreshed here.
+          # Only PRs Dependabot opened from this repository count: anyone can open
+          # a fork PR with a dependabot/... branch name, and that must neither
+          # stall the flush nor draw the deferral comment.
+          OPEN_PRS=$(gh pr list \
+            --author app/dependabot \
+            --search "head:dependabot/npm_and_yarn/" \
+            --state open \
+            --json number,headRefName,author,isCrossRepository \
+            --jq '[.[] | select(.author.login == "app/dependabot" and .isCrossRepository == false)
+                       | select(.headRefName | startswith("dependabot/npm_and_yarn/"))
+                       | select(.headRefName | startswith("dependabot/npm_and_yarn/dot-github/") | not)
+                       | .number | tostring] | join(" ")')
+
+          if [ -z "$OPEN_PRS" ]; then
+            echo "No open Dependabot npm PRs for these roots. Proceeding."
+            echo "deferred=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Open Dependabot npm PRs detected: $OPEN_PRS"
+          echo "deferred=true" >> "$GITHUB_OUTPUT"
+
+          TODAY=$(date -u +%Y-%m-%d)
+          MARKER="<!-- npm-lockfile-flush-deferral-${TODAY} -->"
+          RUN_URL="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+
+          # One body for every PR in the loop: it has no per-PR substitutions.
+          cat > /tmp/deferral-comment.md <<DEFERRAL
+          ${MARKER}
+
+          \`npm-lockfile-flush\` deferred this week's run. This branch is open against an npm lockfile the flush would also change, so the two PRs would conflict. It runs again next Tuesday 06:30 UTC.
+
+          No action needed. Next week the workflow checks again and proceeds once this branch has merged or closed.
+
+          — Run: ${RUN_URL}
+          DEFERRAL
+
+          # Idempotency: skip a PR that already got a deferral comment in the last 6 days (518400s).
+          for PR in $OPEN_PRS; do
+            RECENT=$(gh api "repos/${GITHUB_REPOSITORY}/issues/${PR}/comments" \
+              --jq '[.[] | select(.body | contains("<!-- npm-lockfile-flush-deferral-")) | select(.created_at | fromdateiso8601 > (now - 518400))] | length')
+
+            if [ "$RECENT" -gt 0 ]; then
+              echo "PR #${PR} already has a recent deferral comment. Skipping."
+              continue
+            fi
+
+            gh pr comment "$PR" --body-file /tmp/deferral-comment.md
+            echo "Added deferral comment to PR #${PR}."
+          done
+
+          echo "Exiting success-skip due to contention."
+          exit 0
+
+  refresh:
+    needs: guard
+    if: needs.guard.outputs.deferred != 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      # 'true' or 'false' from the refresh step; empty when this job is skipped.
+      has_changes: ${{ steps.refresh.outputs.has_changes }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # No npm cache: a cache entry is state shared between runs, and this job
+      # resolves third-party packages.
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: '24'
+
+      - name: Refresh the three lockfiles within existing ranges
+        id: refresh
+        env:
+          # Also set as flags below; the env form covers any npm sub-process.
+          npm_config_ignore_scripts: 'true'
+          npm_config_min_release_age: '7'
+        run: |
+          set -euo pipefail
+
+          # An npm without min-release-age would accept the flag and ignore it,
+          # letting a version from the last 7 days through. Fail instead. The
+          # probe unsets the env value: npm echoes unknown env settings in its
+          # listing, so only the built-in default line proves npm knows it.
+          if ! env -u npm_config_min_release_age npm config ls -l | grep -qx 'min-release-age = null'; then
+            echo "::error::npm $(npm --version) has no min-release-age setting; refusing to refresh without the 7-day window"
+            exit 1
+          fi
+
+          for root in . client/admin services/media-plane; do
+            echo "::group::npm update in $root"
+            (cd "$root" && npm update --package-lock-only --ignore-scripts --min-release-age=7 --no-audit --no-fund)
+            echo "::endgroup::"
+          done
+
+          # Lockfiles only. Any other change, a package.json above all, means npm
+          # did something this workflow does not allow: stop.
+          ALLOWED='^(package-lock\.json|client/admin/package-lock\.json|services/media-plane/package-lock\.json)$'
+          OTHER=$(git status --porcelain --untracked-files=all | cut -c4- | { grep -vE "$ALLOWED" || true; })
+          if [ -n "$OTHER" ]; then
+            echo "::error::the refresh changed files other than the three lockfiles:"
+            printf '%s\n' "$OTHER"
+            exit 1
+          fi
+
+          if git diff --quiet; then
+            echo "No lockfile updates available. The open-pr job will be skipped."
+            echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          else
+            git diff --stat
+            echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Render PR body
+        if: steps.refresh.outputs.has_changes == 'true'
+        env:
+          TRIGGER: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          GEN_STAMP=$(date -u '+%A %Y-%m-%d at %H:%M UTC')
+
+          # Entries whose version changed, appeared or went away, per lockfile.
+          changed() { # $1 = lockfile path
+            jq -n --slurpfile old <(git show "HEAD:$1") --slurpfile new "$1" '
+              def versions: .packages | with_entries(.value = .value.version);
+              ($old[0] | versions) as $o | ($new[0] | versions) as $n
+              | [($o + $n) | keys[] | select($o[.] != $n[.])] | length'
+          }
+          ROWS=""
+          for lock in package-lock.json client/admin/package-lock.json services/media-plane/package-lock.json; do
+            ROWS="${ROWS}| \`${lock}\` | $(changed "$lock") |"$'\n'
+          done
+
+          cat > /tmp/pr-body.md <<EOF
+          Automated refresh of the npm lockfiles for the workspace root, \`client/admin\` and \`services/media-plane\`.
+
+          Generated by \`.github/workflows/npm-lockfile-flush.yml\` (trigger: \`${TRIGGER}\`) on ${GEN_STAMP}.
+
+          ## What this PR contains
+
+          \`npm update --package-lock-only --ignore-scripts --min-release-age=7\` was run in each root against the current \`main\`.
+
+          | Lockfile | Entries changed |
+          |---|---|
+          ${ROWS}
+          - Lockfiles only: the workflow fails if any \`package.json\` or other file changes.
+          - Within existing ranges: no major bump unless a range already allowed it. Majors stay with Dependabot.
+          - No version published in the last 7 days (\`min-release-age\`).
+          - No install scripts ran: \`--package-lock-only\` installs nothing, and \`--ignore-scripts\` is set too.
+
+          ## Review checklist
+
+          - [ ] Test suites for the workspace, Admin Portal and Media Plane are green in CI
+          - [ ] The vitest pair check and the approved-registry check are green
+          - [ ] Diff size is plausible
+
+          ## Coordination
+
+          The contention guard ran first and found no open Dependabot npm PR for these roots. If one opens before this PR merges, expect a rebase.
+          EOF
+          echo "Rendered PR body to /tmp/pr-body.md"
+
+      - name: Stage the PR payload
+        if: steps.refresh.outputs.has_changes == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/flush/client/admin" "$RUNNER_TEMP/flush/services/media-plane"
+          cp package-lock.json /tmp/pr-body.md "$RUNNER_TEMP/flush/"
+          cp client/admin/package-lock.json "$RUNNER_TEMP/flush/client/admin/"
+          cp services/media-plane/package-lock.json "$RUNNER_TEMP/flush/services/media-plane/"
+
+      - name: Upload the PR payload
+        if: steps.refresh.outputs.has_changes == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: npm-lockfile-flush
+          path: ${{ runner.temp }}/flush
+          retention-days: 1
+          if-no-files-found: error
+
+  open-pr:
+    needs: refresh
+    if: needs.refresh.outputs.has_changes == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: npm-lockfile-flush
+          path: ${{ runner.temp }}/flush
+
+      # The payload is data from the lower-trust job. It is copied, never executed.
+      - name: Apply the refreshed lockfiles
+        run: |
+          set -euo pipefail
+          cp "$RUNNER_TEMP/flush/package-lock.json" package-lock.json
+          cp "$RUNNER_TEMP/flush/client/admin/package-lock.json" client/admin/package-lock.json
+          cp "$RUNNER_TEMP/flush/services/media-plane/package-lock.json" services/media-plane/package-lock.json
+
+      # Same App and same pinned action as go-transitive-flush.yml.
+      - name: Mint flush App token
+        id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ vars.PUBLIC_MIRROR_APP_CLIENT_ID }}
+          private-key: ${{ secrets.PUBLIC_MIRROR_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+
+      - name: Open PR
+        # Same SHA as go-transitive-flush.yml and refresh-ioc-list.yml.
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          # Pin BOTH identities, as go-transitive-flush.yml does: the default
+          # author is github.actor, which on a dispatch is whoever pressed it.
+          author: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          committer: "github-actions[bot] <41898282+github-actions[bot]@users.noreply.github.com>"
+          branch: chore/npm-lockfile-flush
+          delete-branch: true
+          title: "chore: refresh npm lockfiles (workspace, admin, media plane)"
+          labels: "area: deps,area: ci-cd"
+          commit-message: "chore: refresh npm lockfiles"
+          body-path: ${{ runner.temp }}/flush/pr-body.md
+          # The only paths the PR may carry. Anything else in the working tree
+          # is ignored even if a copy above went wrong.
+          add-paths: |
+            package-lock.json
+            client/admin/package-lock.json
+            services/media-plane/package-lock.json
