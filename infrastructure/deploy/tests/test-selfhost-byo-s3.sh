@@ -88,7 +88,7 @@ except ImportError:
 # Keep explicit digests so source
 # changes require baseline review. Snapshot all inputs to detect test-side mutations.
 SOURCE_HASHES = {
-    "docker-compose.yml": "".join(('bdad506e', '1c166bec', '88960d3e', '1fcc62c1', '6be3f8ec', 'a9e58f62', '19d455a6', '252fa641')),
+    "docker-compose.yml": "".join(('e986aa7d', 'fecc2036', 'c70fbe96', 'bc87bdd0', 'abca9050', '81861760', '4fce4887', 'ffc84780')),
     "docker-compose.production.yml": "".join(('3221ce8d', '0111c0f8', 'c69fd81b', '069c4695', '6f83f390', '8dcc3a6e', 'f2e8a0c6', '9f369e85')),
 }
 SOURCE_FILES = tuple(SOURCE_HASHES) + ("docker-compose.selfhost.yml",)
