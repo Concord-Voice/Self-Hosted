@@ -193,9 +193,14 @@ reports through `voiceSkewShed` when the pre-clamp difference exceeded
   the divergence, which is what `TestVoiceLifecycleDispatcherStampsReceiptTimeAtEnqueue`
   pins. Do not justify it by fan-out — there is indeed no queue group on the
   voice wildcard subscribe, but `validateControlPlaneReplicaCount`
-  (`pkg/config/config.go:646`) refuses an explicit `CONTROL_PLANE_REPLICA_COUNT != 1`,
+  (`pkg/config/config.go`) refuses an explicit `CONTROL_PLANE_REPLICA_COUNT != 1`,
   so "every replica applies every event" describes the topology #2757 would
-  introduce, not the one in production.
+  introduce, not the one in production. One exception that check cannot see:
+  the default-off control-plane blue-green rail (`docs/architecture.md`
+  § "Control-plane blue-green deploys") runs two control-plane processes,
+  both configured for one replica, for the length of a cutover overlap. That
+  window is an activation gate for the rail, not a supported topology; do not
+  cite the rail as precedent for relaxing this argument.
 - **Validate, then clamp.** Parse, then `presence.IsValidActivitySourceTime`, then
   clamp. The reverse order makes the year-2255 representability ceiling
   unreachable and silently vacuates the test that guards it.

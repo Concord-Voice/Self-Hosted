@@ -313,6 +313,15 @@ High-level stances on SonarQube rules whose mismatch with this project's idiomat
 | Instance count in Section 2 | 1 (row 51) |
 | Disposition | Per-instance `FALSE_POSITIVE` only where STARTTLS is mandatory and refusal is fail-closed before authentication. An opportunistic upgrade (send anyway when STARTTLS is missing) is a real finding. Rule-level disable is prohibited by project SonarQube AI-Code Assurance policy. |
 
+#### `go:S2077` — sub-pattern C: schema-qualified table name from `current_schema()`
+
+| Field | Value |
+|---|---|
+| First recorded | 2026-11-11 (PR #259) |
+| Rationale | A read of a fixed table in the connection's current schema. The SQL is `SELECT version, dirty FROM ` + `pq.QuoteIdentifier(<current_schema()>) + "." + pq.QuoteIdentifier(<constant>)`. The schema name comes from the server in the same transaction, the table name is a constant, both are driver-quoted, and no request or configuration value reaches the string. A table name cannot be a bind parameter, and the read must be schema-qualified to match the table golang-migrate writes (an unqualified name could resolve to another schema on the `search_path`). Neither legacy sub-pattern fits: A needs every identifier chosen from hardcoded literals, B needs a utility command. |
+| Instance count in Section 2 | 1 (row 78) |
+| Disposition | Per-instance `FALSE_POSITIVE` only when the dynamic identifier is read from the server (`current_schema()`, `current_database()`) and driver-quoted, and every other identifier is a constant. An identifier from configuration, a request, or a stored row is a real finding. Rule-level disable is prohibited by project SonarQube AI-Code Assurance policy. |
+
 ### Instance-Specific Entries
 
 The maintainer confirmed on 2026-11-02 that the following two PR #145 findings
@@ -421,6 +430,7 @@ Rows marked one at a time after the sweep. Paths are relative to the repo root. 
 | # | Date | Issue key | Rule | Location | Marker | Justification |
 |---|---|---|---|---|---|---|
 | 77 | 2026-11-08 | `AaG9AnwuTyWH8afVCQo8` | `docker:S8431` | `services/control-plane/Dockerfile.account-authority:5` | Claude (#213) | `golang:1.27.3-alpine@sha256:<digest>`, the same reviewed builder pin as `Dockerfile.ops-agent`. The tag is the Dependabot lineage anchor and the digest gives immutability. Legacy note `docker:S8431`. |
+| 78 | 2026-11-11 | `AaHLw8t_1M2WySR0ou3q` | `go:S2077` | `services/control-plane/internal/migrationrunner/status.go:104-105` (raised on line 121, before the PR review removed the `Verify` wrapper above it) | Claude (#259) | Version-table read in the current schema; both identifiers driver-quoted, schema from `current_schema()`, table name constant (sub-pattern C). Marked with Mark's explicit approval. |
 
 ## Recreation-recovery / drift-guard (ADR-0017 narrowed profile)
 

@@ -40,7 +40,7 @@ const (
 // lock (exists while the axis is locked) and level (how many times it has
 // locked). The account keys carry the operator handle directly (not PII — admin
 // handles are not emails); the IP keys carry a SHA-256 hash of the IP so the RAW
-// IP is NEVER stored at rest (#1688 §7 / [internal]rules/observability.md).
+// IP is NEVER stored at rest (#1688 §7).
 // The kind sits before the colon ("acct_lock:", not "acct:lock:") so a handle
 // can never collide with another kind's key. The managed-Redis ACL manifest
 // lists every prefix.

@@ -7,6 +7,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"log/slog"
 	"net/http"
@@ -32,6 +33,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/managedredis"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/media"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/migrationrunner"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/opsmetrics"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presence"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/presencehistory"
@@ -65,6 +67,7 @@ type controlPlaneSubcommandRunners struct {
 	storageProbe            func([]string) int
 	voiceEnforcementRollout func([]string) int
 	voiceCommandOwner       func([]string) int
+	migrations              func([]string) int
 }
 
 func dispatchControlPlaneSubcommand(args []string) (int, bool) {
@@ -74,6 +77,9 @@ func dispatchControlPlaneSubcommand(args []string) (int, bool) {
 		storageProbe:            probe.Run,
 		voiceEnforcementRollout: runVoiceEnforcementRollout,
 		voiceCommandOwner:       runVoiceCommandOwner,
+		migrations: func(a []string) int {
+			return runMigrationsCtl(a, os.Getenv, os.Stdout, os.Stderr)
+		},
 	})
 }
 
@@ -95,13 +101,15 @@ func dispatchControlPlaneSubcommandWithRunners(
 		return runners.voiceEnforcementRollout(args[2:]), true
 	case "voice-command-owner":
 		return runners.voiceCommandOwner(args[2:]), true
+	case "migrations":
+		return runners.migrations(args[2:]), true
 	case "serve":
 		return 0, false
 	default:
 		if args[1] == "" {
 			return 0, false
 		}
-		fmt.Fprintln(os.Stderr, "usage: control-plane [admin|activity-history|storage-probe|voice-enforcement-rollout|voice-command-owner] ...")
+		fmt.Fprintln(os.Stderr, "usage: control-plane [admin|activity-history|storage-probe|voice-enforcement-rollout|voice-command-owner|migrations] ...")
 		return 64, true
 	}
 }
@@ -123,6 +131,12 @@ func runControlPlane() (runErr error) {
 	cfg, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("load configuration: %w", err)
+	}
+	// Parsed before the database opens, so an invalid value stops startup
+	// without a connection.
+	migrationsVerify, err := parseMigrationsMode(os.Getenv("MIGRATIONS_MODE"))
+	if err != nil {
+		return fmt.Errorf("configure migrations: %w", err)
 	}
 
 	// Initialize logger
@@ -155,8 +169,16 @@ func runControlPlane() (runErr error) {
 	}
 	defer closeDatabase(db, log)
 
-	// Run migrations
-	if err := database.RunMigrations(db); err != nil {
+	// Run migrations, or in verify mode refuse to start unless the schema is
+	// already current for this binary, writing nothing.
+	if err := runStartupMigrations(migrationsVerify,
+		func() error { return database.RunMigrations(db) },
+		func() error {
+			verifyCtx, verifyCancel := context.WithTimeout(context.Background(), migrationsStatusBudget)
+			defer verifyCancel()
+			return database.VerifyMigrations(verifyCtx, db)
+		},
+	); err != nil {
 		return fmt.Errorf("run migrations: %w", err)
 	}
 	presenceHistoryService := presencehistory.NewService(
@@ -167,8 +189,14 @@ func runControlPlane() (runErr error) {
 
 	// Revoke any credential left by an unclean prior exit before initializing
 	// dependencies that may still terminate the process during construction.
+	// Verify mode skips it: the reader role belongs to the live colour.
 	readerSetupCtx, readerSetupCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	err = database.EnsureOpsMetricsReaderLoginDisabled(readerSetupCtx, db)
+	err = reconcileAdminOpsMetricsReaderAtBoot(
+		readerSetupCtx,
+		migrationsVerify,
+		db,
+		database.EnsureOpsMetricsReaderLoginDisabled,
+	)
 	readerSetupCancel()
 	if err != nil {
 		return fmt.Errorf("reconcile restricted admin operations metrics reader: %w", err)
@@ -589,6 +617,7 @@ func runControlPlane() (runErr error) {
 		readerSetupCtx,
 		cfg,
 		db,
+		migrationsVerify,
 		openAdminOpsMetricsReader,
 		database.EnsureOpsMetricsReaderLoginDisabled,
 	)
@@ -603,7 +632,9 @@ func runControlPlane() (runErr error) {
 			log.Error("Failed to clean up restricted admin operations metrics reader", "error", cleanupErr)
 		}
 	}()
-	if deferredAdminMetricsReader != nil {
+	// In verify mode the reader stays stopped and the admin metrics routes
+	// answer unavailable, so there is no reader to bind.
+	if deferredAdminMetricsReader != nil && !migrationsVerify {
 		if err := deferredAdminMetricsReader.Bind(adminMetricsReaderRuntime.Reader()); err != nil {
 			return fmt.Errorf("bind restricted admin operations metrics reader: %w", err)
 		}
@@ -1397,4 +1428,94 @@ func cleanupStalePresence(ctx context.Context, redisClient stalePresenceStore, l
 		"ttl_errors", ttlErrors,
 		"partial", partial,
 	)
+}
+
+const (
+	migrationsCtlUsage       = "usage: control-plane migrations status"
+	migrationsCtlUnavailable = "migrations status: unavailable"
+	migrationsStatusBudget   = 15 * time.Second
+	migrationsExitNotCurrent = 3
+	migrationsExitUsage      = 64
+)
+
+// parseMigrationsMode reports whether MIGRATIONS_MODE selects verify mode. It
+// accepts exactly "", "apply" or "verify". Anything else, including a case or
+// whitespace variant, is refused rather than defaulted.
+func parseMigrationsMode(s string) (verify bool, err error) {
+	switch s {
+	case "", "apply":
+		return false, nil
+	case "verify":
+		return true, nil
+	default:
+		return false, errors.New("invalid MIGRATIONS_MODE: want empty, apply or verify")
+	}
+}
+
+// runStartupMigrations calls verify when verifyOnly is set and apply
+// otherwise, never both.
+func runStartupMigrations(verifyOnly bool, apply func() error, verify func() error) error {
+	if verifyOnly {
+		return verify()
+	}
+	return apply()
+}
+
+// runMigrationsCtl serves `control-plane migrations status`. It reads
+// DATABASE_URL directly rather than loading the full configuration.
+func runMigrationsCtl(args []string, getenv func(string) string, stdout, stderr io.Writer) int {
+	return runMigrationsCtlWith(args, getenv, stdout, stderr, readMigrationStatus)
+}
+
+// runMigrationsCtlWith prints the status line and exits 0 when the schema is
+// current and 3 otherwise. Any failure prints one fixed stderr line and exits
+// 1: connection and driver errors can echo the DSN's host, user or password.
+func runMigrationsCtlWith(
+	args []string,
+	getenv func(string) string,
+	stdout, stderr io.Writer,
+	status func(ctx context.Context, dsn string) (migrationrunner.Status, error),
+) int {
+	if len(args) != 1 || args[0] != "status" {
+		return migrationsCtlRefuse(stderr, migrationsCtlUsage, migrationsExitUsage)
+	}
+	dsn := getenv("DATABASE_URL")
+	if dsn == "" {
+		return migrationsCtlRefuse(stderr, migrationsCtlUnavailable, 1)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), migrationsStatusBudget)
+	defer cancel()
+	st, err := status(ctx, dsn)
+	if err != nil {
+		return migrationsCtlRefuse(stderr, migrationsCtlUnavailable, 1)
+	}
+	if _, err := fmt.Fprintln(stdout, st.Line()); err != nil {
+		return migrationsCtlRefuse(stderr, migrationsCtlUnavailable, 1)
+	}
+	if !st.Current() {
+		return migrationsExitNotCurrent
+	}
+	return 0
+}
+
+// migrationsCtlRefuse writes one fixed line to stderr and returns code. A
+// failed stderr write has nowhere left to be reported, and the exit code
+// already carries the refusal, so its error is deliberately dropped.
+func migrationsCtlRefuse(stderr io.Writer, line string, code int) int {
+	_, _ = fmt.Fprintln(stderr, line)
+	return code
+}
+
+func readMigrationStatus(ctx context.Context, dsn string) (st migrationrunner.Status, err error) {
+	db, err := sql.Open("postgres", dsn)
+	if err != nil {
+		return migrationrunner.Status{}, fmt.Errorf("open database: %w", err)
+	}
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			st = migrationrunner.Status{}
+			err = errors.Join(err, fmt.Errorf("close database: %w", closeErr))
+		}
+	}()
+	return database.MigrationStatus(ctx, db)
 }
