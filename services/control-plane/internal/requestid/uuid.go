@@ -1,3 +1,4 @@
+// Package requestid normalizes request UUIDs before authorization and writes.
 package requestid
 
 import (
