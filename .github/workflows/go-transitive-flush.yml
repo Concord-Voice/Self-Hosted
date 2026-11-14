@@ -164,7 +164,16 @@ jobs:
             exit 1
           fi
           echo "Pinning modernc.org/libc to $LIBC (required by modernc.org/sqlite $SQLITE)"
-          go get "modernc.org/libc@$LIBC"
+          PIN_LOG=$(go get "modernc.org/libc@$LIBC" 2>&1) || { printf '%s\n' "$PIN_LOG"; exit 1; }
+          printf '%s\n' "$PIN_LOG"
+          # Moving libc down also moves down any module that needs a newer libc.
+          # That would undo part of the flush without a sign, so stop instead.
+          OTHER=$(printf '%s\n' "$PIN_LOG" | grep -E '^go: (downgraded|removed) ' | grep -v '^go: downgraded modernc\.org/libc ' || true)
+          if [ -n "$OTHER" ]; then
+            echo "::error::pinning modernc.org/libc to $LIBC also changed other modules"
+            printf '%s\n' "$OTHER"
+            exit 1
+          fi
           go mod tidy
 
           # Stat the result for the PR body
