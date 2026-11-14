@@ -117,8 +117,11 @@ func (rejectInitiateCounterHook) ProcessPipelineHook(next redis.ProcessPipelineH
 }
 func (rejectInitiateCounterHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
 	return func(ctx context.Context, cmd redis.Cmder) error {
-		if cmd.Name() == "incr" && strings.HasPrefix(cmd.Args()[1].(string), "ratelimit:sso:initiate:") {
-			return errors.New("counter unavailable")
+		if cmd.Name() == "incr" && len(cmd.Args()) > 1 {
+			key, ok := cmd.Args()[1].(string)
+			if ok && strings.HasPrefix(key, "ratelimit:sso:initiate:") {
+				return errors.New("counter unavailable")
+			}
 		}
 		return next(ctx, cmd)
 	}

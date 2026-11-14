@@ -38,7 +38,12 @@ func TestJWKSCacheWithdrawnKeyAndUnknownKidBound(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				requests.Add(1)
 				w.Header().Set("Content-Type", "application/json")
-				_, _ = w.Write([]byte(body.Load().(string)))
+				value, ok := body.Load().(string)
+				if !ok {
+					http.Error(w, "invalid JWKS fixture", http.StatusInternalServerError)
+					return
+				}
+				_, _ = w.Write([]byte(value))
 			}))
 			t.Cleanup(server.Close)
 
@@ -145,7 +150,12 @@ func TestJWKSCacheRefreshIntervalAndExpiry(t *testing.T) {
 			var requests atomic.Int64
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				requests.Add(1)
-				_, _ = w.Write([]byte(body.Load().(string)))
+				value, ok := body.Load().(string)
+				if !ok {
+					http.Error(w, "invalid JWKS fixture", http.StatusInternalServerError)
+					return
+				}
+				_, _ = w.Write([]byte(value))
 			}))
 			t.Cleanup(server.Close)
 			var lookup func(string) (*rsa.PublicKey, error)
