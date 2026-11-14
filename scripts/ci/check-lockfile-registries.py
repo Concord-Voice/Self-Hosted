@@ -23,7 +23,7 @@ On an approved host the `resolved` path must be the entry's own tarball
 install location without `resolved` must have a plain version, which npm
 fetches from the registry; any other `version` may be a URL. Each package.json
 next to a lockfile (root and workspaces) may use only registry ranges, tags,
-`npm:` aliases and in-tree `file:` paths, because npm ci re-resolves a spec the
+`npm:` aliases and in-tree `file:` directories, because npm ci re-resolves a spec the
 lockfile does not satisfy. A tracked .npmrc may set
 `registry` or `@scope:registry` only to an approved host, because npm rewrites
 registry.npmjs.org in `resolved` to the configured registry. A go.work is read
@@ -91,8 +91,8 @@ def manifest_violations(lock_path, packages):
     npm ci re-resolves an edge whose package.json spec the lockfile does not
     satisfy, so a URL or git spec in package.json downloads from anywhere while
     the lockfile still reads clean. Each dependency spec and override must be a
-    registry range or tag, an `npm:` alias of one, or a `file:` path inside the
-    lockfile's directory.
+    registry range or tag, an `npm:` alias of one, or a `file:` directory inside
+    the lockfile's directory (a local tarball is refused: its manifest is not read).
     """
     base = os.path.dirname(lock_path) or "."
     dirs = {""} | {k for k in packages if k and "node_modules/" not in k}
@@ -170,7 +170,10 @@ def registry_spec(spec, here, base):
         # npm expands `~` to the home directory; this check does not.
         if path.startswith("~") or os.path.isabs(path):
             return False
-        return inside(base, os.path.relpath(os.path.join(here, path), base))
+        target = os.path.join(here, path)
+        # Only a directory is followed. A local tarball's own package.json is
+        # not read, so its dependencies would go unchecked: refuse it.
+        return os.path.isdir(target) and inside(base, os.path.relpath(target, base))
     if spec.startswith("npm:"):
         name, at, spec = spec[4:].rpartition("@")
         if not at or not PKG_NAME.match(name):

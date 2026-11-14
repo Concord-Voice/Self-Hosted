@@ -135,6 +135,10 @@ jq -n '{name: "m", dependencies: {new: "file:./packages/new"}}' > "$WORK/mf/pack
 expect 'a manifest reached through a file: dependency is checked' 1 'packages/new/package\.json: dependencies\.x' --npm-lock "$WORK/mf/package-lock.json"
 jq -n '{name: "new", dependencies: {m: "file:../.."}}' > "$WORK/mf/packages/new/package.json"
 expect 'a file: dependency cycle ends' 0 '^ok:' --npm-lock "$WORK/mf/package-lock.json"
+# A local tarball's own package.json is not read, so a file: tarball is refused.
+: > "$WORK/mf/a.tgz"
+jq -n '{name: "m", dependencies: {a: "file:./a.tgz"}}' > "$WORK/mf/package.json"
+expect 'an in-tree file: tarball fails' 1 'dependencies\.a = .file:\./a\.tgz' --npm-lock "$WORK/mf/package-lock.json"
 jq -n '{name: "m", workspaces: ["../*"]}' > "$WORK/mf/package.json"
 expect 'a workspaces glob outside the lockfile directory cannot run' 2 'workspaces entry' --npm-lock "$WORK/mf/package-lock.json"
 jq -n '{name: "m"}' > "$WORK/mf/package.json"
