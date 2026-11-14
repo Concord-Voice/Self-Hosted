@@ -15,7 +15,8 @@ WORK="$(mktemp -d)"
 # A local replace is resolved against the repository, so that case needs a
 # go.mod inside it. The trap removes it on every exit path.
 LISTED="$HERE/../../.listed-replace-test.mod"
-trap 'rm -rf "$WORK" "$LISTED"' EXIT
+LINK="$HERE/../../.registry-test-link"
+trap 'rm -rf "$WORK" "$LISTED" "$LINK"' EXIT
 
 pass=0
 fail=0
@@ -107,6 +108,20 @@ jq -n '{name: "m", dependencies: {x: "^1.2.0", y: "latest", z: "npm:@s/z@^2", a:
 expect 'registry ranges, tags, npm: aliases, override refs and in-tree file: overrides pass' 0 '^ok:' --npm-lock "$WORK/mf/package-lock.json"
 jq -n '{name: "m", overrides: {q: {r: "https://npm.example.invalid/r.tgz"}}}' > "$WORK/mf/package.json"
 expect 'a nested override with a URL fails' 1 'overrides\.q\.r = ' --npm-lock "$WORK/mf/package-lock.json"
+jq -n '{name: "m", dependencies: {x: "file:~/outside"}}' > "$WORK/mf/package.json"
+expect 'a home-relative file: spec fails' 1 'dependencies\.x = .file:~/outside' --npm-lock "$WORK/mf/package-lock.json"
+# A workspace the lockfile does not list yet is still installed by npm.
+jq -n '{name: "m", workspaces: ["packages/*"]}' > "$WORK/mf/package.json"
+mkdir -p "$WORK/mf/packages/new"
+jq -n '{name: "new", dependencies: {x: "https://npm.example.invalid/x.tgz"}}' > "$WORK/mf/packages/new/package.json"
+expect 'a workspace missing from the lockfile is still checked' 1 'packages/new/package\.json: dependencies\.x' --npm-lock "$WORK/mf/package-lock.json"
+jq -n '{name: "m", workspaces: ["../*"]}' > "$WORK/mf/package.json"
+expect 'a workspaces glob outside the lockfile directory cannot run' 2 'workspaces entry' --npm-lock "$WORK/mf/package-lock.json"
+jq -n '{name: "m"}' > "$WORK/mf/package.json"
+# Dependency edges inside the lockfile are fetched too.
+jq '.packages["node_modules/a"] = {version: "1.0.0", resolved: "https://registry.npmjs.org/a/-/a-1.0.0.tgz", dependencies: {x: "https://npm.example.invalid/x.tgz"}}' "$WORK/mf/package-lock.json" > "$WORK/edge-lock.json"
+cp "$WORK/edge-lock.json" "$WORK/mf/package-lock.json"
+expect 'an off-registry dependency edge inside the lockfile fails' 1 "packages\['node_modules/a'\]\.dependencies\.x" --npm-lock "$WORK/mf/package-lock.json"
 
 # npm falls back to `version` when an install location has no `resolved`.
 L='.packages["node_modules/left-pad"]'
@@ -155,6 +170,9 @@ printf 'go 1.26\n\nuse (\n\t./scripts\n\t../../outside\n)\n' > "$LISTED"
 expect 'go.work use outside the repository fails' 1 'use \.\./\.\./outside is not a directory inside' --go-work "$LISTED"
 printf 'go 1.26\n\nuse ./scripts\n' > "$LISTED"
 expect 'go.work use inside the repository passes' 0 '^ok:' --go-work "$LISTED"
+mkdir -p "$WORK/outside-mod" && ln -s "$WORK/outside-mod" "$LINK"
+printf 'go 1.26\n\nuse ./.registry-test-link\n' > "$LISTED"
+expect 'go.work use through a symlink to outside the repository fails' 1 'use \./\.registry-test-link is not a directory inside' --go-work "$LISTED"
 printf 'module example.invalid/x\n\ngo 1.26\n\nreplace (\n\texample.invalid/a => ./x\n' > "$WORK/open.mod"
 expect 'unterminated replace block cannot run' 2 'unterminated replace block' --go-mod "$WORK/open.mod"
 

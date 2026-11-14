@@ -43,6 +43,7 @@ config, unreadable file, unsupported lockfile version); that is a failure too.
 """
 
 import argparse
+import glob
 import json
 import os
 import re
@@ -76,11 +77,11 @@ def load_json(path):
 
 
 def inside(base, rel):
-    """True when rel, joined to base, stays inside base."""
+    """True when rel, joined to base, stays inside base (symlinks resolved)."""
     if os.path.isabs(rel):
         return False
-    base = os.path.abspath(base)
-    target = os.path.abspath(os.path.join(base, rel))
+    base = os.path.realpath(base)
+    target = os.path.realpath(os.path.join(base, rel))
     return target == base or target.startswith(base + os.sep)
 
 
@@ -94,9 +95,31 @@ def manifest_violations(lock_path, packages):
     lockfile's directory.
     """
     base = os.path.dirname(lock_path) or "."
-    dirs = [""] + [k for k in packages if k and "node_modules/" not in k]
+    dirs = {""} | {k for k in packages if k and "node_modules/" not in k}
+    # npm reads workspaces from the root package.json, not from the lockfile,
+    # so a workspace the lockfile does not list yet is still installed.
+    root = os.path.join(base, "package.json")
+    if os.path.isfile(root):
+        ws = load_json(root).get("workspaces") or []
+        if isinstance(ws, dict):
+            ws = ws.get("packages") or []
+        for pattern in ws if isinstance(ws, list) else []:
+            if not isinstance(pattern, str) or not inside(base, pattern):
+                raise CannotRun(f"{root}: workspaces entry {pattern!r} is not a path inside {base}")
+            for hit in glob.glob(os.path.join(base, pattern)):
+                dirs.add(os.path.relpath(hit, base))
     out = []
-    for rel in dirs:
+    # Dependency edges inside the lockfile: npm ci builds the ideal tree before
+    # it checks the lockfile, so an off-registry edge spec is fetched even when
+    # every `resolved` URL is approved.
+    for key, entry in packages.items():
+        here = os.path.join(base, key)
+        for field in DEP_FIELDS:
+            for dep, spec in ((entry or {}).get(field) or {}).items():
+                if not registry_spec(spec, here, base):
+                    out.append(f"{lock_path}: packages[{key!r}].{field}.{dep} = {spec!r} is not a "
+                               "registry range, tag or in-tree file: path")
+    for rel in sorted(dirs):
         manifest = os.path.join(base, rel, "package.json")
         if not os.path.isfile(manifest):
             continue
@@ -123,7 +146,11 @@ def registry_spec(spec, here, base):
     if not isinstance(spec, str):
         return False
     if spec.startswith("file:"):
-        return inside(base, os.path.relpath(os.path.join(here, spec[5:]), base))
+        path = spec[5:]
+        # npm expands `~` to the home directory; this check does not.
+        if path.startswith("~") or os.path.isabs(path):
+            return False
+        return inside(base, os.path.relpath(os.path.join(here, path), base))
     if spec.startswith("npm:"):
         name, at, spec = spec[4:].rpartition("@")
         if not at or not PKG_NAME.match(name):
