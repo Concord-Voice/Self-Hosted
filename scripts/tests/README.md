@@ -31,6 +31,8 @@ Other subjects in this directory:
 - `test-go-transitive-flush-render.sh` — Go transitive-flush issue rendering
 - `test-check-vitest-pair.sh` — the vitest / coverage-plugin pair guard
   (`scripts/ci/check-vitest-pair.sh`); its fixture lockfiles are `fixtures/vitest-pair/*-lock.json`
+- `test-npm-lockfile-flush.sh` — the weekly npm lockfile flush: its refresh and render
+  steps against a stub npm, and its guard / refresh / open-pr credential split
 
 The `selfhost-deploy-tests` commit hook runs all twelve self-host suites directly on Linux.
 On macOS it uses `run-selfhost-deploy-tests.sh` and a cached Ubuntu image; Docker Desktop

@@ -70,7 +70,7 @@
   "skip_commit_patterns": ["chore: update spa.env"],
   "ai_policy_doc": "docs/policies/ai-generated-code-policy.md",
   "hooks": {
-    "protected_patterns": ["/e2ee","/crypto","/auth/","/mfa/","/rbac/","/password","/sessions/","/middleware/security","/middleware/cors","/middleware/ratelimit","/preload/","src/main/ipc","deploy-secrets","deploy-production"],
+    "protected_patterns": ["/e2ee","/crypto","/auth/","/mfa/","/rbac/","/password","/sessions/","/middleware/security","/middleware/cors","/middleware/ratelimit","/preload/","src/main/ipc","deploy-secrets","deploy-production","(^|/)\\.claude/(hooks/|settings\\.json|repo-config\\.json|\\.agentic-dev-tooling\\.lock$|state/hook-bypass/)","(^|/)scripts/repo-config\\.sh$","(^|/)\\.github/workflows/"],
     "test_reminders": [
       { "regex": "migrations/.*\\.(up|down)\\.sql$", "message": "Reminder: Migration touched — run the 'migration-reviewer' subagent (up/down symmetry, zero-downtime, sensitive tables).", "stop": true },
       { "regex": "(src/preload/|src/main/ipc)", "message": "Reminder: Electron IPC surface touched — run '/ipc-channel-audit --only-new'.", "stop": false }

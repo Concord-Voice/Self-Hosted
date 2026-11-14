@@ -58,6 +58,18 @@ class GoToolchainGuardTest(unittest.TestCase):
                 self.assertIn("disagrees", result.stderr)
                 path.write_text(original)
 
+    def test_in_image_go_version_check_must_match(self):
+        path = self.module / "Dockerfile.redis-auth-controller"
+        builder = path.read_text()
+        for check, code in (("go1\\.27\\.1 ", 0), ("go1\\.26\\.6 ", 1), ("go1.26.6 ", 1)):
+            with self.subTest(check=check):
+                path.write_text(builder + f"RUN go version | grep -q '^go version {check}'\n")
+                result = self.run_guard()
+                self.assertEqual(result.returncode, code, result.stderr)
+                if code:
+                    self.assertIn("go version check", result.stderr)
+        path.write_text(builder)
+
     def test_unpinned_or_missing_builder_fails(self):
         for image in ("golang:latest", "golang:1.27-alpine", "golang@sha256:abc", "alpine:3.24"):
             with self.subTest(image=image):
