@@ -3868,12 +3868,16 @@ func moveServerVoiceParticipant(
 	var (
 		upsertedCount int
 		priorTarget   bool
-		priorExact    bool
+		priorAdmitted bool
 		removedRaw    []string
 	)
+	var admissionParam, socketParam interface{}
+	if admission != nil {
+		admissionParam, socketParam = admission.admissionID, admission.socketID
+	}
 	err := tx.QueryRowContext(ctx, `
 		WITH prior_target AS MATERIALIZED (
-			SELECT lifecycle_event_at
+			SELECT admission_id, admission_socket_id
 			FROM voice_participants
 			WHERE channel_id = $1 AND user_id = $2
 		), blocked AS MATERIALIZED (
@@ -3890,26 +3894,31 @@ func moveServerVoiceParticipant(
 			RETURNING channel_id
 		), upserted AS (
 			INSERT INTO voice_participants AS participant
-				(channel_id, user_id, joined_at, lifecycle_event_at)
-			SELECT $1, $2, $3, $3
+				(channel_id, user_id, joined_at, lifecycle_event_at,
+				 admission_id, admission_socket_id)
+			SELECT $1, $2, $3, $3, $5::uuid, $6::text
 			WHERE NOT EXISTS (SELECT 1 FROM blocked)
 			ON CONFLICT (channel_id, user_id) DO UPDATE
-			SET lifecycle_event_at = EXCLUDED.lifecycle_event_at
+			SET lifecycle_event_at = EXCLUDED.lifecycle_event_at,
+			    admission_id = COALESCE(EXCLUDED.admission_id, participant.admission_id),
+			    admission_socket_id = CASE WHEN EXCLUDED.admission_id IS NULL
+			        THEN participant.admission_socket_id ELSE EXCLUDED.admission_socket_id END
 			WHERE participant.lifecycle_event_at <= EXCLUDED.lifecycle_event_at
 			RETURNING 1
 		)
 		SELECT
 			(SELECT COUNT(*) FROM upserted),
 			EXISTS (SELECT 1 FROM prior_target),
-			EXISTS (SELECT 1 FROM prior_target WHERE lifecycle_event_at = $3),
+			EXISTS (SELECT 1 FROM prior_target
+			        WHERE admission_id = $5::uuid AND admission_socket_id = $6::text),
 			COALESCE(ARRAY(
 				SELECT channel_id::text
 				FROM removed
 				ORDER BY channel_id
 				LIMIT $4
 			), ARRAY[]::text[])
-	`, channelID, senderID, eventAt, maxVoiceReplayRemovedRooms+1).Scan(
-		&upsertedCount, &priorTarget, &priorExact, pq.Array(&removedRaw),
+	`, channelID, senderID, eventAt, maxVoiceReplayRemovedRooms+1, admissionParam, socketParam).Scan(
+		&upsertedCount, &priorTarget, &priorAdmitted, pq.Array(&removedRaw),
 	)
 	if err != nil {
 		return serverVoiceMutationResult{}, fmt.Errorf("move server voice participant: %w", err)
@@ -3919,19 +3928,20 @@ func moveServerVoiceParticipant(
 			"server voice participant upsert affected %d rows", upsertedCount,
 		)
 	}
-	// Always try the consume first. If no reservation is left, priorExact
-	// decides: the row already carries this join's stamp, so this exact join
-	// committed and consumed it, and a second delivery is a replay rather than
-	// an admission mismatch that would eject the peer who just joined. Core NATS
-	// delivers every voice.* event to every control plane, so a replay happens
-	// whenever two run at once (blue-green cutover, #253). Trying the consume
-	// first means a stamp collision with a heartbeat-written row cannot strand a
-	// valid reservation. Do NOT key the replay on the Redis claim's duplicate
-	// status: a first attempt can claim and then roll back, and its redelivery
-	// is a duplicate claim that must still consume the reservation.
-	// priorExact is sound only because every voice_participants deleter holds
-	// the per-user lifecycle lock this transaction holds; an unlocked deleter
-	// could remove the row between the snapshot and ON CONFLICT.
+	// Always try the consume first. If no reservation is left, priorAdmitted
+	// decides: the row already holds this join's admission and socket, which only a
+	// committed consume of that admission writes, so a second delivery is a
+	// replay rather than an admission mismatch that would eject the peer who
+	// just joined. Core NATS delivers every voice.* event to every control
+	// plane, so a replay happens whenever two run at once (blue-green cutover,
+	// #253). Key it on the admission, not the stamp: each control plane clamps
+	// a forward-skewed stamp to its own receipt time, so the two stamps of one
+	// join can differ, and a heartbeat can share a stamp with a join. Do NOT key
+	// it on the Redis claim's duplicate status either: a first attempt can
+	// claim and then roll back, and its redelivery must still consume.
+	// priorAdmitted is sound only because every voice_participants deleter
+	// holds the per-user lifecycle lock this transaction holds; an unlocked
+	// deleter could remove the row between the snapshot and ON CONFLICT.
 	if upsertedCount == 1 && admission != nil {
 		result, err := tx.ExecContext(ctx, `
 			DELETE FROM voice_pending_admissions
@@ -3944,7 +3954,7 @@ func moveServerVoiceParticipant(
 		}
 		if rowsAffected, err := result.RowsAffected(); err != nil {
 			return serverVoiceMutationResult{}, fmt.Errorf("read pending voice admission consume result: %w", err)
-		} else if rowsAffected != 1 && !priorExact {
+		} else if rowsAffected != 1 && !priorAdmitted {
 			return serverVoiceMutationResult{}, fmt.Errorf(
 				"%w: consume affected %d rows", errVoicePendingAdmissionMismatch, rowsAffected,
 			)

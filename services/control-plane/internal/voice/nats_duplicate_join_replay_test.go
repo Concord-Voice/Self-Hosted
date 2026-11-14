@@ -78,9 +78,19 @@ func (f duplicateJoinFixture) reserve(t *testing.T) {
 
 func (f duplicateJoinFixture) joinedEvent(t *testing.T, at time.Time) []byte {
 	t.Helper()
+	return f.joinedEventFor(t, f.admissionID, at)
+}
+
+func (f duplicateJoinFixture) joinedEventFor(t *testing.T, admissionID uuid.UUID, at time.Time) []byte {
+	t.Helper()
+	return f.joinedEventOn(t, admissionID, "socket-dup-replay", at)
+}
+
+func (f duplicateJoinFixture) joinedEventOn(t *testing.T, admissionID uuid.UUID, socketID string, at time.Time) []byte {
+	t.Helper()
 	return mustJSON(t, map[string]interface{}{
 		"channelId": f.channelID, "userId": f.userID, "username": "dup_join_replay_user",
-		"admissionId": f.admissionID.String(), "socketId": "socket-dup-replay",
+		"admissionId": admissionID.String(), "socketId": socketID,
 		"timestamp": at.Format(time.RFC3339Nano),
 	})
 }
@@ -122,8 +132,8 @@ func TestHandleJoined_DuplicateAcrossProcessesIsReplayNotEjection(t *testing.T) 
 }
 
 // Positive control for the reader above, and the boundary of the replay rule:
-// a join whose stamp the participant row does NOT already carry, arriving after
-// its reservation is gone, is still a mismatch and still ejects that exact peer.
+// a join whose admission the participant row does NOT hold, arriving with no
+// reservation, is still a mismatch and still ejects that exact peer.
 func TestHandleJoined_ConsumedAdmissionWithoutCommittedJoinStillEjects(t *testing.T) {
 	f := newDuplicateJoinFixture(t)
 	f.reserve(t)
@@ -135,12 +145,13 @@ func TestHandleJoined_ConsumedAdmissionWithoutCommittedJoinStillEjects(t *testin
 	require.False(t, ejected, "the first admitted join must not eject")
 
 	later := now.Add(time.Second)
-	home.HandleJoinedAt(f.joinedEvent(t, later), later)
+	unreserved := uuid.New()
+	home.HandleJoinedAt(f.joinedEventFor(t, unreserved, later), later)
 	payload, ejected := f.awaitDisconnect(t)
-	require.True(t, ejected, "a non-replay join with a consumed admission must eject")
+	require.True(t, ejected, "a join whose admission the row does not hold must eject")
 	assert.Equal(t, f.userID, payload["userId"])
 	assert.Equal(t, "socket-dup-replay", payload["socketId"])
-	assert.Equal(t, f.admissionID.String(), payload["admissionId"])
+	assert.Equal(t, unreserved.String(), payload["admissionId"])
 }
 
 // The other half of the replay rule. A first attempt can claim the lifecycle
@@ -175,7 +186,8 @@ func TestHandleJoined_DuplicateClaimAfterRolledBackAttemptStillConsumesAdmission
 
 // A row can carry a join's stamp without that join having committed, for
 // example a heartbeat clamped to the same receipt microsecond. The join must
-// still consume its own valid reservation rather than leave it to expire.
+// still consume its own valid reservation rather than leave it to expire, and
+// a matching stamp alone must never stand in for the admission.
 func TestHandleJoined_StampCollisionStillConsumesValidAdmission(t *testing.T) {
 	f := newDuplicateJoinFixture(t)
 	f.reserve(t)
@@ -197,4 +209,50 @@ func TestHandleJoined_StampCollisionStillConsumesValidAdmission(t *testing.T) {
 		f.channelID, f.userID,
 	).Scan(&pending))
 	assert.Zero(t, pending, "a stamp collision stranded a valid reservation")
+}
+
+// V3 in the #253 overlap analysis: a producer stamp ahead of receipt is clamped
+// to each control plane's own receipt time, so the two deliveries of one join
+// carry different stamps. The row holds the join's admission, so the second
+// delivery is still a replay and must not eject.
+func TestHandleJoined_ClampedStampsAcrossProcessesAreStillReplay(t *testing.T) {
+	f := newDuplicateJoinFixture(t)
+	f.reserve(t)
+	home := newTestSubscriberWithHubAndNATS(f.ts, f.ts.Hub, f.publisher)
+	green := newTestSubscriberWithHubAndNATS(f.ts, f.ts.Hub, f.publisher)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	event := f.joinedEvent(t, now.Add(time.Second))
+
+	home.HandleJoinedAt(event, now)
+	green.HandleJoinedAt(event, now.Add(2*time.Millisecond))
+
+	payload, ejected := f.awaitDisconnect(t)
+	assert.False(t, ejected, "a clamped duplicate voice.joined ejected the peer: %v", payload)
+	assert.Equal(t, 1, countVoiceParticipants(t, f.ts.DB, f.channelID))
+	var stored uuid.NullUUID
+	require.NoError(t, f.ts.DB.QueryRow(
+		`SELECT admission_id FROM voice_participants WHERE channel_id = $1 AND user_id = $2`,
+		f.channelID, f.userID,
+	).Scan(&stored))
+	assert.Equal(t, uuid.NullUUID{UUID: f.admissionID, Valid: true}, stored)
+}
+
+// The replay key is the exact (admission, socket) pair the consume matched. A
+// join that reuses a committed admission on another socket is not a replay of
+// that join, so it still ejects that exact socket.
+func TestHandleJoined_CommittedAdmissionOnAnotherSocketStillEjects(t *testing.T) {
+	f := newDuplicateJoinFixture(t)
+	f.reserve(t)
+	home := newTestSubscriberWithHubAndNATS(f.ts, f.ts.Hub, f.publisher)
+	now := time.Now().UTC().Truncate(time.Microsecond)
+	home.HandleJoinedAt(f.joinedEvent(t, now), now)
+	_, ejected := f.awaitDisconnect(t)
+	require.False(t, ejected, "the first admitted join must not eject")
+
+	later := now.Add(time.Second)
+	home.HandleJoinedAt(f.joinedEventOn(t, f.admissionID, "socket-other", later), later)
+	payload, ejected := f.awaitDisconnect(t)
+	require.True(t, ejected, "a committed admission on another socket must eject")
+	assert.Equal(t, "socket-other", payload["socketId"])
+	assert.Equal(t, f.admissionID.String(), payload["admissionId"])
 }
