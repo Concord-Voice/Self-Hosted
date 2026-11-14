@@ -647,6 +647,43 @@ func TestLogout_SessionIDRequiresBearerOwnedRow(t *testing.T) {
 	assert.Empty(t, w.Header().Values("Set-Cookie"), "bearer-authorized cleanup must not erase an ambient cookie")
 }
 
+func TestLogout_CrossFamilySessionIDIsRefusedWithoutSideEffects(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "logoutcrossfamily")
+	claims, err := auth.ValidateAccessToken(user.AccessToken, testhelpers.TestJWTSecret)
+	require.NoError(t, err)
+	otherAccess := ts.VerifyUserEmail(t, user.ID)
+	otherClaims, err := auth.ValidateAccessToken(otherAccess, testhelpers.TestJWTSecret)
+	require.NoError(t, err)
+
+	var targetFamily string
+	require.NoError(t, ts.DB.QueryRow(`SELECT family_id FROM login_family_sids WHERE sid = $1`, otherClaims.SessionID).Scan(&targetFamily))
+	var bearerFamily string
+	require.NoError(t, ts.DB.QueryRow(`SELECT family_id FROM login_family_sids WHERE sid = $1`, claims.SessionID).Scan(&bearerFamily))
+	require.NotEqual(t, bearerFamily, targetFamily, "fixture must create a distinct same-user family")
+	var beforeRevocations int
+	require.NoError(t, ts.DB.QueryRow(`SELECT COUNT(*) FROM login_family_revocations WHERE user_id = $1`, user.ID).Scan(&beforeRevocations))
+
+	headers := testhelpers.AuthHeaders(user.AccessToken)
+	headers.Set("X-Session-ID", otherClaims.SessionID)
+	w := ts.DoRequest("POST", pathLogout, nil, headers)
+	require.Equal(t, http.StatusForbidden, w.Code, w.Body.String())
+	assert.JSONEq(t, `{"error_code":"invalid_logout_target"}`, w.Body.String())
+
+	var terminal bool
+	require.NoError(t, ts.DB.QueryRow(`SELECT terminal_at IS NOT NULL FROM login_families WHERE family_id = $1`, targetFamily).Scan(&terminal))
+	assert.False(t, terminal, "a foreign family must remain live")
+	require.NoError(t, ts.DB.QueryRow(`SELECT terminal_at IS NOT NULL FROM login_families WHERE family_id = $1`, bearerFamily).Scan(&terminal))
+	assert.False(t, terminal, "the bearer family must remain live")
+	var afterRevocations int
+	require.NoError(t, ts.DB.QueryRow(`SELECT COUNT(*) FROM login_family_revocations WHERE user_id = $1`, user.ID).Scan(&afterRevocations))
+	assert.Equal(t, beforeRevocations, afterRevocations, "a refused target must not create a revocation")
+	blacklisted, err := ts.Redis.Exists(context.Background(), "blacklist:"+claims.ID).Result()
+	require.NoError(t, err)
+	assert.Zero(t, blacklisted, "a refused target must not blacklist the bearer")
+	assert.Empty(t, w.Header().Values("Set-Cookie"), "a refused target must not clear cookies")
+}
+
 func TestLogout_SessionIDBindsToAmbientCookieWithoutBearer(t *testing.T) {
 	ts := setupTS(t)
 

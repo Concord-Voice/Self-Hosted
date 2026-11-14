@@ -2787,6 +2787,10 @@ func (h *Handler) Logout(c *gin.Context) {
 	}
 	revoked := h.revokeLogoutSession(c, claims, c.GetHeader(refreshTokenHeader), c.GetHeader("X-Session-ID"))
 	if revoked.err != nil {
+		if errors.Is(revoked.err, errInvalidLogoutTarget) {
+			c.JSON(http.StatusForbidden, gin.H{"error_code": "invalid_logout_target"})
+			return
+		}
 		// An unknown commit may have terminalized the family: fence what committed.
 		h.closeCommittedFamilies(c.Request.Context(), revoked.result)
 		writeLoginFamilyError(c, revoked.err, errMsgInvalidCredentials, errMsgInternalError)
@@ -2838,6 +2842,10 @@ type logoutRevocation struct {
 	result              loginfamily.RevocationResult
 	err                 error
 }
+
+// errInvalidLogoutTarget marks an attempt to select another live family with
+// an otherwise valid bearer. It is not an idempotent missing-session case.
+var errInvalidLogoutTarget = errors.New("invalid logout target")
 
 type logoutSelection struct {
 	sid              string
@@ -2985,6 +2993,10 @@ func (h *Handler) revokeLogoutSession(c *gin.Context, claims *Claims, refreshTok
 		}
 	}
 	if selection.bearerAuthorized && bearerFamily == uuid.Nil {
+		return result
+	}
+	if selection.bearerAuthorized && bearerFamily != family {
+		result.err = errInvalidLogoutTarget
 		return result
 	}
 	sidID, err := uuid.Parse(sid)
