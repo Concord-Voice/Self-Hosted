@@ -28,14 +28,6 @@
   "feedback_triage": {
     "public": "Concord-Voice/Feedback",
     "tracker": "Concord-Voice/Self-Hosted",
-    "routing": {
-      "desktop": "Concord-Voice/Desktop",
-      "mobile": "Concord-Voice/Mobile",
-      "self-hosted": "Concord-Voice/Self-Hosted",
-      "hosted": "Concord-Voice/Hosted",
-      "release-ops": "Concord-Voice/Release-Ops",
-      "internal-tooling": "Concord-Voice/Internal-Dev-Tooling"
-    },
     "sentinel_prefix": "concord-feedback-triage"
   }
 }
