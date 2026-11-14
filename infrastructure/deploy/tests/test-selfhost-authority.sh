@@ -77,6 +77,11 @@ if [[ " $* " == *" go build "* ]]; then
   cp "$TOOL" "$vol/authority-ceremony"
 else
   if [[ "${LINK%%:*}" == "$name" ]]; then ln -s "${LINK#*:}" "$vol/$name"
+  elif [[ "$name" == tls-key ]]; then
+    # A real P-384 key: renew reads the live TLS key's point from the file.
+    openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out "$vol/$name" 2>/dev/null
+    printf 'point=%s\npin=%s\n' "$(openssl pkey -in "$vol/$name" -pubout -outform DER | tail -c 97 | od -An -v -tx1 | tr -d ' \n')" "$(hex384 "$name.pin")"
+    exit 0
   else printf 'key %s%s' "$name" "${SALT:-}" >"$vol/$name"; fi
   printf 'point=04%s%s\npin=%s\n' "$(hex384 "$name${SALT:-}")" "$(hex384 "$name.y")" "$(hex384 "$name.pin")"
 fi
@@ -379,6 +384,23 @@ VERB=renew run_init '' && fail "renew ran over a stage left behind" \
 rmdir "$AUTH/stage"
 NOT_ROOT=1 VERB=renew run_init '' && fail "renew ran as non-root" \
   || { grep -qF 'must run as root' "$ROOT/out" && pass "renew refuses non-root" || fail "root refusal: $(cat "$ROOT/out")"; }
+# Renew refuses when the key in use is not the last one listed, when a
+# FILE.prev is left from a failed rollback, when a TLS key was staged without
+# the flag, and an empty argument.
+: >"$CALLS"; saved_tls="$(cat "$AUTH/secrets/tls-key")"
+openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-384 -out "$ROOT/other-tls-key" 2>/dev/null
+cp "$AUTH/secrets/tls-key" "$ROOT/live-tls-key"; cat "$ROOT/other-tls-key" >"$AUTH/secrets/tls-key"
+VERB=renew run_init '' && fail "renew ran with a TLS key the delegation does not list" \
+  || { grep -qF 'is not the last TLS key' "$ROOT/out" && [[ ! -e "$AUTH/stage" && ! -e "$AUTH/ceremony/delegation-7.json" ]] \
+       && pass "renew refuses when the live TLS key is not the last one listed" || fail "tls drift: $(cat "$ROOT/out")"; }
+cat "$ROOT/live-tls-key" >"$AUTH/secrets/tls-key"
+printf x >"$AUTH/secrets/rsk.prev"
+VERB=renew run_init '' && fail "renew ran over a .prev left behind" \
+  || { grep -qF 'rsk.prev exists' "$ROOT/out" && [[ "$(cat "$AUTH/secrets/rsk.prev")" == x ]] \
+       && pass "renew refuses over a FILE.prev left behind and keeps it" || fail "prev refusal: $(cat "$ROOT/out")"; }
+rm -f "$AUTH/secrets/rsk.prev"
+VERB=renew run_init '' '' && fail "renew took an empty argument" \
+  || { grep -qF 'usage: concord-selfhost authority renew [--rotate-tls]' "$ROOT/out" && pass "renew refuses an empty argument" || fail "empty argument: $(cat "$ROOT/out")"; }
 VERB=renew run_init '' --now && fail "renew took an argument" \
   || { grep -qF 'usage: concord-selfhost authority renew [--rotate-tls]' "$ROOT/out" && pass "renew refuses arguments" || fail "usage: $(cat "$ROOT/out")"; }
 saved_root="$ROOT"

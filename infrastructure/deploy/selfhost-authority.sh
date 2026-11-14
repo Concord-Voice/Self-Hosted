@@ -511,9 +511,9 @@ _authority_lifecycle() {
 # client integration; until then nothing holds the old CAK.
 _authority_renew() {
   local rotate_tls=0
-  case "$*" in
-    '') ;;
-    --rotate-tls) rotate_tls=1 ;;
+  case "$#:${1-}" in
+    0:) ;;
+    1:--rotate-tls) rotate_tls=1 ;;
     *) _authority_fail 'usage: concord-selfhost authority renew [--rotate-tls]'; return 1 ;;
   esac
   _authority_require_root || return 1
@@ -527,6 +527,15 @@ _authority_renew() {
   [[ -f "$dir/public/trust" ]] || { _authority_fail "no authority in $dir: run concord-selfhost authority init first"; return 1; }
   _authority_safe_dir "$dir" || return 1
   [[ ! -e "$dir/stage" ]] || { _authority_fail "$dir/stage exists: a renew is running, or one stopped; remove it and try again"; return 1; }
+  # A rollback that failed leaves FILE.prev and FILE.next; the operator puts them
+  # back by hand, and until then another renew would overwrite them.
+  local f s
+  for f in public/trust secrets/rsk cp/cak secrets/tls-key; do
+    for s in prev next; do
+      [[ ! -e "$dir/$f.$s" && ! -L "$dir/$f.$s" ]] \
+        || { _authority_fail "$dir/$f.$s exists: a renew stopped part way; put the old files back (move FILE.prev to FILE), remove the .next files, and try again"; return 1; }
+    done
+  done
   selfhost_storage_project_identity "$PROJECT_ROOT" || return 1
   ( umask 077 && _authority_renew_keys "$dir" "$rotate_tls" )
 }
@@ -541,6 +550,16 @@ _authority_renew_keys() {
   next=$((serial + 1)) spec="$dir/ceremony/delegation-$next.json" signed="$dir/ceremony/delegation-$next.signed"
   [[ -f "$dir/ceremony/delegation-$serial.json" ]] || { _authority_fail "no record of delegation $serial in $dir/ceremony"; return 1; }
   [[ ! -e "$spec" && ! -e "$signed" ]] || { _authority_fail "$spec or its signed copy already exists"; return 1; }
+  # The next delegation keeps the last TLS key listed, so that must be the key
+  # in use. If it is not (files restored by hand), renew would drop the live key
+  # and the authority would refuse to start after the point of no return.
+  local live_tls listed_tls
+  _authority_point live_tls -in "$dir/secrets/tls-key" 2>/dev/null \
+    || { _authority_fail "cannot read the TLS key point from $dir/secrets/tls-key"; return 1; }
+  listed_tls="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["authority_tls_keys"][-1])' "$dir/ceremony/delegation-$serial.json")" \
+    || { _authority_fail "cannot read the TLS keys of delegation $serial"; return 1; }
+  [[ "$live_tls" == "$listed_tls" ]] \
+    || { _authority_fail "$dir/secrets/tls-key is not the last TLS key delegation $serial lists: restore the key the authority uses, then try again"; return 1; }
 
   echo "Generating the new RSK and CAK..."
   mkdir -m 0700 "$stage" || { _authority_fail "cannot create $stage"; return 1; }
@@ -581,7 +600,7 @@ with open(dst, "x") as f:
     || { _authority_warn "the new trust does not hold delegation $next"; _authority_renew_unstage "$dir" "$next"; return 1; }
 
   echo "Installing delegation $next and restarting the authority..."
-  _authority_renew_place "$dir" || { _authority_warn 'cannot stage the new keys'; _authority_renew_unstage "$dir" "$next"; return 1; }
+  _authority_renew_place "$dir" "$rotate_tls" || { _authority_warn 'cannot stage the new keys'; _authority_renew_unstage "$dir" "$next"; return 1; }
   if ! _authority_renew_swap "$dir" next prev; then
     if _authority_renew_swap "$dir" prev next; then
       _authority_renew_unstage "$dir" "$next"
@@ -596,14 +615,14 @@ with open(dst, "x") as f:
     || _authority_warn "health's expiry record was not updated; run: $tool show-trust --anchors $dir/public/anchors --trust $dir/public/trust | sed -n 's/^not_after_ms=//p' >$dir/public/delegation-not-after-ms"
   if _authority_compose up -d --no-deps --force-recreate authority && _authority_running; then
     printf 'Delegation %s is installed; it expires in 180 days.\n' "$next"
-    (( rotate_tls )) && echo 'The authority now uses a new TLS key. The old one stays listed until the next renew drops it.'
+    (( rotate_tls )) && echo 'The authority now uses a new TLS key. The old one stays listed until the next renew drops it: renew again only after every client holds this delegation.'
     return 0
   fi
   # A retry would sign another delegation for nothing: fix the cause instead.
   _authority_fail "delegation $next and its keys are in place, but the authority did not stay up on them. Fix the cause from its logs, then recreate it. Do not put the old files back: the authority may already hold delegation $next."
 }
 
-# _authority_renew_place DIR — the new RSK, CAK and, after --rotate-tls,
+# _authority_renew_place DIR ROTATE_TLS — the new RSK, CAK and, after --rotate-tls,
 # TLS key from the stage to FILE.next beside the live ones, with their final
 # owners and modes.
 _authority_renew_place() {
@@ -615,7 +634,8 @@ _authority_renew_place() {
   _authority_regular "$1/cp/cak.next" || return 1
   _authority_chown "$AUTHORITY_CP_UID:$AUTHORITY_CP_UID" "$1/cp/cak.next" || return 1
   chmod 0400 "$1/cp/cak.next" || return 1
-  if [[ -e "$1/stage/tls-key" || -L "$1/stage/tls-key" ]]; then
+  [[ $2 == 1 || ( ! -e "$1/stage/tls-key" && ! -L "$1/stage/tls-key" ) ]] || return 1
+  if (( $2 )); then
     mv -- "$1/stage/tls-key" "$1/secrets/tls-key.next" || return 1
     _authority_regular "$1/secrets/tls-key.next" || return 1
     chmod 0400 "$1/secrets/tls-key.next" || return 1
