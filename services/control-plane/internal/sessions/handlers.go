@@ -405,7 +405,7 @@ func (h *Handler) RevokeSession(c *gin.Context) {
 	// Parse optional password from request body
 	var req struct {
 		Password string `json:"password"` // #nosec G117 -- not a secret field, receives user input for auth verification
-		MFACode  string `json:"mfa_code"` // Framework: accepted but unused until MFA is implemented
+		MFACode  string `json:"mfa_code"`
 	}
 	if c.ContentType() == "application/json" {
 		_ = c.ShouldBindJSON(&req)
@@ -730,7 +730,7 @@ func (h *Handler) UpdateRevocationMode(c *gin.Context) {
 	var req struct {
 		Mode     string `json:"mode"`     // "simple" or "secure"
 		Password string `json:"password"` // #nosec G117 -- not a secret field, receives user input for auth verification
-		MFACode  string `json:"mfa_code"` // Framework: accepted but unused until MFA is implemented
+		MFACode  string `json:"mfa_code"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})

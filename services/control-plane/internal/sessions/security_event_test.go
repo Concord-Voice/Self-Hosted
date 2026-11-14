@@ -279,11 +279,15 @@ func (r securityEventFamilyRig) requireCommittedOwner(t *testing.T) {
 	require.Equal(t, 1, count, "committed refresh revocation must have its exact sealed durable family owner")
 }
 
-type revokeMFAVerifier struct{ enabled bool }
+type revokeMFAVerifier struct {
+	enabled   bool
+	valid     bool
+	verifyErr error
+}
 
 func (v revokeMFAVerifier) IsEnabled(context.Context, string) bool { return v.enabled }
-func (revokeMFAVerifier) VerifyCode(context.Context, string, stepup.Purpose, string) (bool, error) {
-	return false, nil
+func (v revokeMFAVerifier) VerifyCode(context.Context, string, stepup.Purpose, string) (bool, error) {
+	return v.valid, v.verifyErr
 }
 func (revokeMFAVerifier) GetEnabledMethods(context.Context, string) ([]string, error) {
 	return []string{"totp"}, nil
@@ -437,6 +441,60 @@ func TestAuthenticateForRevoke_MFABudgetUnavailableIs503(t *testing.T) {
 	require.True(t, h.authenticateForRevoke(context.Background(), c, privacyUserID, privacyPassword, "bad-code", revokeAllSessionsAction))
 	require.Equal(t, http.StatusServiceUnavailable, response.Code)
 	require.Contains(t, response.Body.String(), "step_up_budget_unavailable")
+}
+
+func TestAuthenticateForRevoke_VerifierResultControlsRevocation(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	passwordHash, err := auth.HashPasswordWithParams(privacyPassword, &auth.Argon2Params{Memory: 8, Iterations: 1, Parallelism: 1, SaltLength: 8, KeyLength: 16})
+	require.NoError(t, err)
+	for _, tc := range []struct {
+		name       string
+		verifier   revokeMFAVerifier
+		wantStatus int
+		blocked    bool
+		verified   bool
+	}{
+		{name: "valid factor", verifier: revokeMFAVerifier{enabled: true, valid: true}, wantStatus: http.StatusOK, verified: true},
+		{name: "verifier fault", verifier: revokeMFAVerifier{enabled: true, verifyErr: errors.New("verification unavailable")}, wantStatus: http.StatusInternalServerError, blocked: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := sql.OpenDB(execConnector{passwordHash: passwordHash})
+			t.Cleanup(func() { require.NoError(t, db.Close()) })
+			mini := miniredis.RunT(t)
+			rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+			t.Cleanup(func() { require.NoError(t, rdb.Close()) })
+			h := NewHandler(db, rdb, logger.New("test"), testDisconnector{}, tc.verifier)
+			response := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(response)
+			c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/sessions", nil)
+			blocked, verified := h.authenticateForRevokeWithMFA(context.Background(), c, privacyUserID, privacyPassword, "123456", revokeAllSessionsAction)
+			require.Equal(t, tc.blocked, blocked)
+			require.Equal(t, tc.verified, verified)
+			require.Equal(t, tc.wantStatus, response.Code)
+		})
+	}
+}
+
+func TestUpdateRevocationMode_ValidMFAClearsSharedBudget(t *testing.T) {
+	gin.SetMode(gin.TestMode)
+	passwordHash, err := auth.HashPasswordWithParams(privacyPassword, &auth.Argon2Params{Memory: 8, Iterations: 1, Parallelism: 1, SaltLength: 8, KeyLength: 16})
+	require.NoError(t, err)
+	db := sql.OpenDB(execConnector{passwordHash: passwordHash, rows: 1})
+	t.Cleanup(func() { require.NoError(t, db.Close()) })
+	mini := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { require.NoError(t, rdb.Close()) })
+	key := stepup.DangerousActionBudget(rdb).Key(privacyUserID)
+	require.NoError(t, rdb.Set(context.Background(), key, "4", stepup.BudgetWindow).Err())
+	h := NewHandler(db, rdb, logger.New("test"), testDisconnector{}, revokeMFAVerifier{enabled: true, valid: true})
+	response := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(response)
+	c.Request = httptest.NewRequest(http.MethodPut, "/api/v1/sessions/revocation-mode", strings.NewReader(`{"mode":"simple","password":"`+privacyPassword+`","mfa_code":"123456"}`))
+	c.Request.Header.Set("Content-Type", "application/json")
+	c.Set("user_id", privacyUserID)
+	h.UpdateRevocationMode(c)
+	require.Equal(t, http.StatusOK, response.Code, response.Body.String())
+	require.False(t, mini.Exists(key), "successful password-and-MFA update clears the shared budget")
 }
 
 type revokeBudgetIncrFaultHook struct{ key string }

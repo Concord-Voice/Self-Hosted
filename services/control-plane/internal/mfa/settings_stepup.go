@@ -347,13 +347,7 @@ func (h *Handler) allowMFASettingsStepUp(c *gin.Context, userID string) bool {
 	if e == nil {
 		return true
 	}
-	if e.Status == http.StatusServiceUnavailable {
-		h.log.Error("MFA settings step-up budget unavailable", "error", e.Cause)
-		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSecurityControl, Outcome: securityevent.OutcomeDegraded, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonRateLimitBackendUnavailable})
-	} else {
-		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSecurityControl, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonRateLimitExceeded})
-	}
-	e.Write(c)
+	h.refuseMFASettingsBudget(c, e)
 	return false
 }
 
@@ -364,6 +358,11 @@ func (h *Handler) chargeMFASettingsCode(c *gin.Context, userID, code string) boo
 	if e == nil {
 		return true
 	}
+	h.refuseMFASettingsBudget(c, e)
+	return false
+}
+
+func (h *Handler) refuseMFASettingsBudget(c *gin.Context, e *stepup.Error) {
 	if e.Status == http.StatusServiceUnavailable {
 		h.log.Error("MFA settings step-up budget unavailable", "error", e.Cause)
 		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSecurityControl, Outcome: securityevent.OutcomeDegraded, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonRateLimitBackendUnavailable})
@@ -371,7 +370,6 @@ func (h *Handler) chargeMFASettingsCode(c *gin.Context, userID, code string) boo
 		h.emitHTTPEvent(c, securityevent.Event{EventType: securityevent.EventSecurityControl, Outcome: securityevent.OutcomeDenied, Severity: securityevent.SeverityMedium, ReasonCode: securityevent.ReasonRateLimitExceeded})
 	}
 	e.Write(c)
-	return false
 }
 
 // clearMFASettingsStepUp resets the budget after a VERIFIED success, so a

@@ -3325,13 +3325,13 @@ func (h *Handler) RecoveryVerifyCode(c *gin.Context) {
 
 func (h *Handler) allowRecoveryFailureAttempt(ctx context.Context, c *gin.Context, key string) bool {
 	if h.redis == nil {
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Verification is temporarily unavailable. Try again in a few minutes.", "step_up_budget_unavailable": true})
+		writeRecoveryBudgetUnavailable(c)
 		return false
 	}
 	allowed, err := middleware.AllowUserAction(ctx, h.redis, key, recoveryFailureLimit, recoveryFailureWindow)
 	if err != nil {
 		h.log.Error("Recovery attempt budget unavailable", "error", err)
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Verification is temporarily unavailable. Try again in a few minutes.", "step_up_budget_unavailable": true})
+		writeRecoveryBudgetUnavailable(c)
 		return false
 	}
 	if allowed {
@@ -3340,17 +3340,21 @@ func (h *Handler) allowRecoveryFailureAttempt(ctx context.Context, c *gin.Contex
 	ttl, err := h.redis.PTTL(ctx, key).Result()
 	if err != nil {
 		h.log.Error("Recovery attempt budget PTTL unavailable", "error", err)
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Verification is temporarily unavailable. Try again in a few minutes.", "step_up_budget_unavailable": true})
+		writeRecoveryBudgetUnavailable(c)
 		return false
 	}
 	if ttl <= 0 {
 		h.log.Error("Recovery attempt budget PTTL unavailable", "error", fmt.Errorf("non-positive PTTL %s", ttl))
-		c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Verification is temporarily unavailable. Try again in a few minutes.", "step_up_budget_unavailable": true})
+		writeRecoveryBudgetUnavailable(c)
 		return false
 	}
 	c.Header("Retry-After", strconv.Itoa(int((ttl+time.Second-1)/time.Second)))
 	c.JSON(http.StatusTooManyRequests, gin.H{"error": "Too many verification attempts", "step_up_budget_exhausted": true})
 	return false
+}
+
+func writeRecoveryBudgetUnavailable(c *gin.Context) {
+	c.JSON(http.StatusServiceUnavailable, gin.H{"error": "Verification is temporarily unavailable. Try again in a few minutes.", "step_up_budget_unavailable": true})
 }
 
 func (h *Handler) recoveryPolicyAllowsEmailCompletion(ctx context.Context, c *gin.Context, userID string) bool {

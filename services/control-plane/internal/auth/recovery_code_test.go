@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 	"github.com/alicebob/miniredis/v2"
 	"github.com/gin-gonic/gin"
 	"github.com/redis/go-redis/v9"
@@ -178,4 +179,63 @@ func TestRecoveryFailureBudgetRoundsPTTLUp(t *testing.T) {
 	require.False(t, h.allowRecoveryFailureAttempt(ctx, c, key))
 	require.Equal(t, http.StatusTooManyRequests, w.Code)
 	require.Equal(t, "86400", w.Header().Get("Retry-After"))
+}
+
+type recoveryBudgetFaultHook struct {
+	command string
+	zero    bool
+}
+
+func (recoveryBudgetFaultHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+func (h recoveryBudgetFaultHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() != h.command {
+			return next(ctx, cmd)
+		}
+		if h.zero {
+			cmd.(*redis.DurationCmd).SetVal(0)
+			return nil
+		}
+		err := errors.New("forced recovery budget fault")
+		cmd.SetErr(err)
+		return err
+	}
+}
+func (recoveryBudgetFaultHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+
+func TestRecoveryFailureBudgetBackendFailureIs503(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hook recoveryBudgetFaultHook
+	}{
+		{name: "increment fault", hook: recoveryBudgetFaultHook{command: "incr"}},
+		{name: "PTTL fault", hook: recoveryBudgetFaultHook{command: "pttl"}},
+		{name: "nonpositive PTTL", hook: recoveryBudgetFaultHook{command: "pttl", zero: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			mini := miniredis.RunT(t)
+			rdb := redis.NewClient(&redis.Options{Addr: mini.Addr(), MaxRetries: -1})
+			t.Cleanup(func() { require.NoError(t, rdb.Close()) })
+			key := recoveryFailureKeyPrefix + "backend-fault@test.local"
+			require.NoError(t, rdb.Set(ctx, key, "10", time.Minute).Err())
+			rdb.AddHook(tc.hook)
+			h := &Handler{redis: rdb, log: logger.New("test")}
+			w := httptest.NewRecorder()
+			c, _ := gin.CreateTestContext(w)
+			require.False(t, h.allowRecoveryFailureAttempt(ctx, c, key))
+			require.Equal(t, http.StatusServiceUnavailable, w.Code)
+			require.Contains(t, w.Body.String(), "step_up_budget_unavailable")
+			require.Empty(t, w.Header().Get("Retry-After"))
+		})
+	}
+
+	w := httptest.NewRecorder()
+	c, _ := gin.CreateTestContext(w)
+	h := &Handler{}
+	require.False(t, h.allowRecoveryFailureAttempt(context.Background(), c, recoveryFailureKeyPrefix+"no-client@test.local"))
+	require.Equal(t, http.StatusServiceUnavailable, w.Code)
+	require.Contains(t, w.Body.String(), "step_up_budget_unavailable")
 }

@@ -319,33 +319,9 @@ func (r *PendingRepo) IncrementResend(ctx context.Context, id string) (int, time
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	var count int
-	var lastResendAt sql.NullTime
-	var expiresAt time.Time
-
-	if err = tx.QueryRowContext(ctx,
-		`SELECT resend_count, last_resend_at, expires_at
-		   FROM pending_registrations
-		  WHERE id = $1
-		  FOR UPDATE`,
-		id,
-	).Scan(&count, &lastResendAt, &expiresAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, time.Time{}, ErrPendingNotFound
-		}
+	count, err := pendingResendCount(ctx, tx, id)
+	if err != nil {
 		return 0, time.Time{}, err
-	}
-
-	if time.Now().After(expiresAt) {
-		return 0, time.Time{}, ErrPendingExpired
-	}
-
-	if count >= MaxResends {
-		return 0, time.Time{}, ErrResendsExhausted
-	}
-
-	if lastResendAt.Valid && time.Since(lastResendAt.Time) < ResendCooldown {
-		return 0, time.Time{}, ErrResendCooldown
 	}
 
 	var reservedAt time.Time
@@ -411,27 +387,9 @@ func (r *PendingRepo) updateEmail(ctx context.Context, id, newEmail string) (int
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Step 1: Lock the pending row and check expiry.
-	var count int
-	var lastResendAt sql.NullTime
-	var expiresAt time.Time
-	if err = tx.QueryRowContext(ctx,
-		`SELECT resend_count, last_resend_at, expires_at FROM pending_registrations WHERE id = $1 FOR UPDATE`,
-		id,
-	).Scan(&count, &lastResendAt, &expiresAt); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return 0, time.Time{}, ErrPendingNotFound
-		}
+	count, err := pendingResendCount(ctx, tx, id)
+	if err != nil {
 		return 0, time.Time{}, err
-	}
-	if time.Now().After(expiresAt) {
-		return 0, time.Time{}, ErrPendingExpired
-	}
-	if count >= MaxResends {
-		return 0, time.Time{}, ErrResendsExhausted
-	}
-	if lastResendAt.Valid && time.Since(lastResendAt.Time) < ResendCooldown {
-		return 0, time.Time{}, ErrResendCooldown
 	}
 
 	lowerEmail := strings.ToLower(strings.TrimSpace(newEmail))
@@ -475,6 +433,32 @@ func (r *PendingRepo) updateEmail(ctx context.Context, id, newEmail string) (int
 		return 0, time.Time{}, err
 	}
 	return count + 1, reservedAt, nil
+}
+
+func pendingResendCount(ctx context.Context, tx *sql.Tx, id string) (int, error) {
+	var count int
+	var lastResendAt sql.NullTime
+	var expiresAt time.Time
+	err := tx.QueryRowContext(ctx,
+		`SELECT resend_count, last_resend_at, expires_at FROM pending_registrations WHERE id = $1 FOR UPDATE`,
+		id,
+	).Scan(&count, &lastResendAt, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, ErrPendingNotFound
+	}
+	if err != nil {
+		return 0, err
+	}
+	if time.Now().After(expiresAt) {
+		return 0, ErrPendingExpired
+	}
+	if count >= MaxResends {
+		return 0, ErrResendsExhausted
+	}
+	if lastResendAt.Valid && time.Since(lastResendAt.Time) < ResendCooldown {
+		return 0, ErrResendCooldown
+	}
+	return count, nil
 }
 
 // Promote atomically converts a pending registration into a full user account,
