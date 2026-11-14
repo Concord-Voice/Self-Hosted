@@ -7,14 +7,33 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/auth"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/loginfamily"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers/stmthook"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/users"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 	"github.com/gin-gonic/gin"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func attachAccessIdentity(t *testing.T, c *gin.Context, accessToken string) {
+	t.Helper()
+	claims, err := auth.ValidateAccessToken(accessToken, testhelpers.TestJWTSecret)
+	require.NoError(t, err)
+	userID, err := uuid.Parse(claims.UserID)
+	require.NoError(t, err)
+	sid, err := uuid.Parse(claims.SessionID)
+	require.NoError(t, err)
+	c.Set(middleware.JWTClaimsContextKey, jwt.MapClaims{"cred_epoch": claims.CredentialEpoch})
+	c.Request = c.Request.WithContext(loginfamily.WithAccessIdentity(c.Request.Context(), loginfamily.AccessIdentity{
+		UserID: userID, SID: sid, CredentialEpoch: claims.CredentialEpoch, AccessExpiresAt: claims.ExpiresAt.Time,
+	}))
+}
 
 func TestGetSecurity_DeploymentPasswordPolicy(t *testing.T) {
 	for _, tc := range []struct {
@@ -129,7 +148,7 @@ func TestDeleteSSOIdentity_DeploymentPasswordFallback(t *testing.T) {
 				VALUES ($1, 'google', 'deployment-unlink-subject', $2)`, user.ID, user.Email)
 			require.NoError(t, err)
 
-			w := ts.DoRequest(http.MethodDelete, urlUsersMeSSOIdentities+"/google", nil, testhelpers.AuthHeaders(user.AccessToken))
+			w := ts.DoRequest(http.MethodDelete, urlUsersMeSSOIdentities+"/google", map[string]any{"password": testPassword}, testhelpers.AuthHeaders(user.AccessToken))
 			require.Equal(t, tc.status, w.Code, w.Body.String())
 			if tc.status == http.StatusBadRequest {
 				var body struct {
@@ -156,8 +175,8 @@ func TestPatchSecurity_SelfHostedTrustOnlyPreservesPasswordPreference(t *testing
 		wantTrust        bool
 	}{
 		{name: "valid proof", passphrase: testPassword, status: http.StatusOK, wantTrust: true},
-		{name: "wrong proof", passphrase: "wrong-test-passphrase", status: http.StatusUnauthorized},
-		{name: "missing proof", status: http.StatusUnauthorized},
+		{name: "wrong proof", passphrase: "wrong-test-passphrase", status: http.StatusForbidden},
+		{name: "missing proof", status: http.StatusForbidden},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("INSTANCE_TYPE", "self-hosted")
@@ -251,6 +270,7 @@ func TestSecurityFallback_DatabaseFailurePreservesState(t *testing.T) {
 			hook, hookedDB := stmthook.Open(t)
 			h := users.NewHandler(hookedDB, logger.NewWithWriter(io.Discard), nil, nil, nil, nil, nil)
 			h.SetPasswordVerifier(testhelpers.HashVerifier{DB: hookedDB})
+			h.SetRedis(ts.Redis)
 			if tc.commitFailure {
 				// ArmCommit(false) rolls back the transaction before returning the
 				// injected error, so unchanged state is a determinate expectation.
@@ -264,7 +284,9 @@ func TestSecurityFallback_DatabaseFailurePreservesState(t *testing.T) {
 				c.Set("user_id", user.ID)
 				if tc.unlink {
 					c.Params = gin.Params{{Key: "provider", Value: "google"}}
-					c.Request = httptest.NewRequest(http.MethodDelete, urlUsersMeSSOIdentities+"/google", nil)
+					c.Request = httptest.NewRequest(http.MethodDelete, urlUsersMeSSOIdentities+"/google", strings.NewReader(`{"password":"TestPassword123!"}`))
+					c.Request.Header.Set("Content-Type", "application/json")
+					attachAccessIdentity(t, c, user.AccessToken)
 					h.DeleteSSOIdentity(c)
 				} else {
 					c.Request = httptest.NewRequest(http.MethodPatch, urlUsersMeSecurity, strings.NewReader(
@@ -333,6 +355,7 @@ func TestDeleteSSOIdentity_SelfHostedFinalUnlinkFailurePreservesPreference(t *te
 			hook, hookedDB := stmthook.Open(t)
 			h := users.NewHandler(hookedDB, logger.NewWithWriter(io.Discard), nil, nil, nil, nil, nil)
 			h.SetPasswordVerifier(testhelpers.HashVerifier{DB: hookedDB})
+			h.SetRedis(ts.Redis)
 			h.SetInstanceType("self-hosted")
 			if tc.commitFailure {
 				hook.ArmCommit(false, stmthook.ErrInjected)
@@ -344,7 +367,9 @@ func TestDeleteSSOIdentity_SelfHostedFinalUnlinkFailurePreservesPreference(t *te
 				c, _ := gin.CreateTestContext(w)
 				c.Set("user_id", user.ID)
 				c.Params = gin.Params{{Key: "provider", Value: "google"}}
-				c.Request = httptest.NewRequest(http.MethodDelete, urlUsersMeSSOIdentities+"/google", nil)
+				c.Request = httptest.NewRequest(http.MethodDelete, urlUsersMeSSOIdentities+"/google", strings.NewReader(`{"password":"TestPassword123!"}`))
+				c.Request.Header.Set("Content-Type", "application/json")
+				attachAccessIdentity(t, c, user.AccessToken)
 				h.DeleteSSOIdentity(c)
 				return w
 			}
@@ -388,7 +413,7 @@ func TestDeleteSSOIdentity_SelfHostedNotLinkedPreservesAccountPreferences(t *tes
 	_, err := ts.DB.Exec(`INSERT INTO user_sso_identities (user_id, provider, provider_user_id, provider_email)
 		VALUES ($1, 'google', 'not-linked-other-account-subject', $2)`, otherUser.ID, otherUser.Email)
 	require.NoError(t, err)
-	w := ts.DoRequest(http.MethodDelete, urlUsersMeSSOIdentities+"/google", nil, testhelpers.AuthHeaders(user.AccessToken))
+	w := ts.DoRequest(http.MethodDelete, urlUsersMeSSOIdentities+"/google", map[string]any{"password": testPassword}, testhelpers.AuthHeaders(user.AccessToken))
 	require.Equal(t, http.StatusNotFound, w.Code, w.Body.String())
 	assert.JSONEq(t, `{"error_code":"not_linked"}`, w.Body.String())
 	for _, account := range []struct {
