@@ -106,7 +106,13 @@ def manifest_violations(lock_path, packages):
         for pattern in ws if isinstance(ws, list) else []:
             if not isinstance(pattern, str) or not inside(base, pattern):
                 raise CannotRun(f"{root}: workspaces entry {pattern!r} is not a path inside {base}")
-            for hit in glob.glob(os.path.join(base, pattern)):
+            # npm matches with minimatch. Python's glob agrees on `*`, `?` and
+            # `**` only; braces, classes and negation would find fewer
+            # workspaces than npm installs, so refuse them.
+            if re.search(r"[{}\[\]!()+@\\]", pattern):
+                raise CannotRun(f"{root}: workspaces entry {pattern!r} uses glob syntax this check "
+                                "does not match the way npm does")
+            for hit in glob.glob(os.path.join(base, pattern), recursive=True):
                 dirs.add(os.path.relpath(hit, base))
     out = []
     # Dependency edges inside the lockfile: npm ci builds the ideal tree before
@@ -119,7 +125,14 @@ def manifest_violations(lock_path, packages):
                 if not registry_spec(spec, here, base):
                     out.append(f"{lock_path}: packages[{key!r}].{field}.{dep} = {spec!r} is not a "
                                "registry range, tag or in-tree file: path")
-    for rel in sorted(dirs):
+    # A `file:` dependency on an in-tree directory installs that package, and
+    # npm resolves its own dependencies too, so follow it (once per directory).
+    todo, seen = sorted(dirs), set()
+    while todo:
+        rel = os.path.normpath(todo.pop())
+        if rel in seen:
+            continue
+        seen.add(rel)
         manifest = os.path.join(base, rel, "package.json")
         if not os.path.isfile(manifest):
             continue
@@ -139,6 +152,10 @@ def manifest_violations(lock_path, packages):
             if not registry_spec(spec, here, base):
                 out.append(f"{manifest}: {where} = {spec!r} is not a registry range, tag or "
                            "in-tree file: path")
+            elif isinstance(spec, str) and spec.startswith("file:"):
+                target = os.path.join(here, spec[5:])
+                if os.path.isdir(target):
+                    todo.append(os.path.relpath(target, base))
     return out
 
 
