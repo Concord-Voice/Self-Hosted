@@ -2,6 +2,10 @@ package auth_test
 
 import (
 	"context"
+	"database/sql"
+	"encoding/json"
+	"fmt"
+	"net/http"
 	"testing"
 	"time"
 
@@ -200,7 +204,7 @@ func TestRevertResendIfCurrentPreservesLaterReservation(t *testing.T) {
 		"TestPassword123!",
 	)
 	require.NoError(t, err)
-	count, _, err := repo.IncrementResend(ctx, id)
+	count, _, _, err := repo.IncrementResend(ctx, id, nil)
 	require.NoError(t, err)
 	var reservedAt time.Time
 	require.NoError(t, ts.DB.QueryRowContext(ctx,
@@ -224,6 +228,106 @@ func TestRevertResendIfCurrentPreservesLaterReservation(t *testing.T) {
 	).Scan(&storedCount, &storedAt))
 	assert.Equal(t, count+1, storedCount)
 	assert.True(t, storedAt.After(reservedAt))
+}
+
+func TestResendPublicationSerializesChangeEmail(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	repo := auth.NewPendingRepo(ts.DB)
+	ctx := context.Background()
+	const oldEmail = "resend-old@test.concord.chat"
+	const newEmail = "resend-new@test.concord.chat"
+	id, _, _, err := repo.InsertOrTakeover(ctx,
+		insertPendingParams(t, oldEmail, "resendpublication", "TestPassword123!"),
+		"TestPassword123!",
+	)
+	require.NoError(t, err)
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+	resendDone := make(chan error, 1)
+	go func() {
+		_, _, _, resendErr := repo.IncrementResend(ctx, id, func(tx *sql.Tx, recipient string) error {
+			if recipient != oldEmail {
+				return fmt.Errorf("resend recipient = %q, want %q", recipient, oldEmail)
+			}
+			// Simulate a resend whose publication is delayed beyond the cooldown.
+			if _, updateErr := tx.ExecContext(ctx,
+				`UPDATE pending_registrations SET last_resend_at = NOW() - INTERVAL '3 minutes' WHERE id = $1`, id,
+			); updateErr != nil {
+				return updateErr
+			}
+			if setErr := ts.Redis.Set(ctx, "email_verify:"+id,
+				`{"code_hash":"old","email":"`+oldEmail+`","attempts":0}`, time.Minute).Err(); setErr != nil {
+				return setErr
+			}
+			close(entered)
+			<-release
+			return nil
+		})
+		resendDone <- resendErr
+	}()
+	select {
+	case <-entered:
+	case resendErr := <-resendDone:
+		t.Fatalf("resend returned before publication: %v", resendErr)
+	case <-time.After(10 * time.Second):
+		t.Fatal("resend publication did not start")
+	}
+
+	changeCtx, cancel := context.WithTimeout(ctx, 150*time.Millisecond)
+	defer cancel()
+	err = repo.UpdateEmail(changeCtx, id, newEmail)
+	require.Error(t, err)
+	require.ErrorIs(t, changeCtx.Err(), context.DeadlineExceeded)
+	close(release)
+	require.NoError(t, <-resendDone)
+	w := ts.DoRequest(http.MethodPost, "/api/v1/auth/register/change-email",
+		map[string]string{"pending_id": id, "new_email": newEmail}, nil)
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	var storedEmail string
+	require.NoError(t, ts.DB.QueryRowContext(ctx,
+		`SELECT email FROM pending_registrations WHERE id = $1`, id,
+	).Scan(&storedEmail))
+	require.Equal(t, newEmail, storedEmail)
+	raw, err := ts.Redis.Get(ctx, "email_verify:"+id).Bytes()
+	require.NoError(t, err)
+	var published struct {
+		Email string `json:"email"`
+	}
+	require.NoError(t, json.Unmarshal(raw, &published))
+	require.Equal(t, newEmail, published.Email)
+}
+
+func TestPromoteRejectsCodeForDifferentEmail(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	repo := auth.NewPendingRepo(ts.DB)
+	ctx := context.Background()
+	id, _, _, err := repo.InsertOrTakeover(ctx,
+		insertPendingParams(t, "recipient-a@test.concord.chat", "recipienta", "TestPassword123!"),
+		"TestPassword123!",
+	)
+	require.NoError(t, err)
+
+	_, err = repo.Promote(ctx, id, "recipient-b@test.concord.chat")
+	require.ErrorIs(t, err, auth.ErrVerificationEmailChanged)
+
+	var userCount int
+	require.NoError(t, ts.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM users WHERE email = $1`, "recipient-a@test.concord.chat",
+	).Scan(&userCount))
+	assert.Zero(t, userCount)
+	var pendingCount int
+	require.NoError(t, ts.DB.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM pending_registrations WHERE id = $1`, id,
+	).Scan(&pendingCount))
+	assert.Equal(t, 1, pendingCount)
 }
 
 // TestInsertOrTakeover_UsesPolicyTTL regresses Copilot comment 3104406713:

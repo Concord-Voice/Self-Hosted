@@ -91,6 +91,37 @@ func TestRegisterCreatesPendingNotUser(t *testing.T) {
 	assert.Equal(t, 1, pendingCount)
 }
 
+func TestRegisterDoesNotLogPendingID(t *testing.T) {
+	ts := setupTS(t)
+	logs := ts.CaptureLogs(t)
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	var body struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	assert.Contains(t, logs.String(), "Pending registration created")
+	assert.NotContains(t, logs.String(), body.PendingID)
+}
+
+func TestConfirmRegistrationCanonicalizesPendingID(t *testing.T) {
+	ts := setupTS(t)
+	w := ts.DoRequest("POST", pathRegister, registerPayload(), nil)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	var body struct {
+		PendingID string `json:"pending_id"`
+	}
+	testhelpers.ParseJSON(t, w, &body)
+	code := testhelpers.FetchVerificationCode(t, ts, strings.ToUpper(body.PendingID))
+	w = ts.DoRequest("POST", "/api/v1/auth/register/confirm", map[string]string{
+		"pending_id": strings.ToUpper(body.PendingID),
+		"code":       code,
+	}, nil)
+	require.Equal(t, http.StatusOK, w.Code)
+}
+
 // TestRegisterTakeoverByEmailMatch verifies that a second registration with
 // the SAME email+password replaces the earlier pending row (takeover flow).
 func TestRegisterTakeoverByEmailMatch(t *testing.T) {

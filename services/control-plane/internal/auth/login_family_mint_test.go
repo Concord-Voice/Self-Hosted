@@ -186,7 +186,7 @@ func TestLoginFamilyRegistrationConfirmationRouteBindsFirstFamily(t *testing.T) 
 	require.NoError(t, err)
 	rec, err := json.Marshal(verificationRecord{CodeHash: hashCode("123456"), Email: "family-registration@example.test"})
 	require.NoError(t, err)
-	require.NoError(t, rig.h.redis.Set(ctx, redisKey(pending), rec, time.Minute).Err())
+	require.NoError(t, rig.h.redis.Set(ctx, redisKey(uuid.MustParse(pending)), rec, time.Minute).Err())
 	c, w := familyTestContext()
 	c.Request = httptest.NewRequest(http.MethodPost, "/api/v1/auth/register/confirm", strings.NewReader(`{"pending_id":"`+pending+`","code":"123456"}`))
 	c.Request.RemoteAddr = "192.0.2.10:1234"
