@@ -534,7 +534,7 @@ func (r *PendingRepo) Promote(ctx context.Context, id, expectedEmail string) (us
 	if time.Now().After(p.ExpiresAt) {
 		return "", ErrPendingExpired
 	}
-	if strings.ToLower(strings.TrimSpace(p.Email)) != strings.ToLower(strings.TrimSpace(expectedEmail)) {
+	if !strings.EqualFold(strings.TrimSpace(p.Email), strings.TrimSpace(expectedEmail)) {
 		return "", ErrVerificationEmailChanged
 	}
 
