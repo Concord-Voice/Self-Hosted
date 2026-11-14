@@ -307,6 +307,30 @@ func TestPurgeChannel_ViewDenyBlocksPurge(t *testing.T) {
 	assert.Equal(t, 0, countPurgeAudits(t, ts, channelID), "denied purge must write no audit row")
 }
 
+// regression for Security #166: a route UUID spelling must not change the
+// permission result or permit a destructive purge of a hidden channel.
+func TestPurgeChannel_UppercaseIDStillHonorsViewDeny(t *testing.T) {
+	ts := testhelpers.SetupTestServer(t)
+	owner := ts.CreateTestUser(t, "uuid_purge_owner")
+	mod := ts.CreateTestUser(t, "uuid_purge_mod")
+	serverID := ts.CreateTestServer(t, owner.ID, "uuid-purge-server")
+	ts.AddMemberToServer(t, serverID, mod.ID, "member")
+	modRole := ts.CreateTestRole(t, serverID, "Mods", 5, int64(rbac.ModeratorPermissions))
+	ts.AssignRoleToUser(t, serverID, mod.ID, modRole)
+	channelID := ts.CreateTestChannel(t, serverID, "private")
+	ts.CreateTestMessage(t, channelID, owner, "must-survive")
+	ts.CreateChannelOverride(t, channelID, "role", modRole, 0, int64(rbac.PermViewTextChannels))
+
+	w := ts.DoRequest(http.MethodDelete, purgeChannelPath(strings.ToUpper(channelID)),
+		map[string]any{"range": "all"}, testhelpers.AuthHeaders(mod.AccessToken))
+	assert.Equal(t, http.StatusForbidden, w.Code,
+		"alternate channel UUID spelling must retain the VIEW denial")
+	assert.Equal(t, 1, countChannelMessages(t, ts, channelID),
+		"denied alternate-ID purge must leave the message intact")
+	assert.Equal(t, 0, countPurgeAudits(t, ts, channelID),
+		"denied alternate-ID purge must write no audit row")
+}
+
 // regression for #2344: the view gate must match the channel type. Granting text
 // visibility must not authorize a destructive purge of a voice channel.
 func TestPurgeChannel_VoiceViewDenyBlocksPurge(t *testing.T) {
@@ -537,12 +561,17 @@ func TestPurgeChannel_RejectsInvalidInput(t *testing.T) {
 	owner := ts.CreateTestUser(t, "iv_owner")
 	serverID := ts.CreateTestServer(t, owner.ID, "iv-server")
 	channelID := ts.CreateTestChannel(t, serverID, "general")
+	ts.CreateTestMessage(t, channelID, owner, "must survive malformed purge path")
 	hdrs := testhelpers.AuthHeaders(owner.AccessToken)
 
 	t.Run("non-uuid channel id", func(t *testing.T) {
 		w := ts.DoRequest(http.MethodDelete, "/api/v1/channels/not-a-uuid/messages",
 			map[string]any{"range": "all"}, hdrs)
 		assert.Equal(t, http.StatusBadRequest, w.Code)
+		assert.Equal(t, 1, countChannelMessages(t, ts, channelID),
+			"malformed channel ID must be rejected before any purge write")
+		assert.Zero(t, countPurgeAudits(t, ts, channelID),
+			"malformed channel ID must not create a purge audit row")
 	})
 
 	t.Run("missing range", func(t *testing.T) {

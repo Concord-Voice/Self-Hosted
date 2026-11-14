@@ -23,6 +23,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/models"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/rbac"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/requestid"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/stepup"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/websocket"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/e2eekeys"
@@ -2244,6 +2245,14 @@ func sanitizeID(s string) string {
 }
 
 func (h *Handler) channelKeyAccess(ctx context.Context, channelID, userID string) (isMember, canView bool, err error) {
+	channelID, err = requestid.Canonical(channelID)
+	if err != nil {
+		return false, false, fmt.Errorf("canonicalize channel key access channel: %w", err)
+	}
+	userID, err = requestid.Canonical(userID)
+	if err != nil {
+		return false, false, fmt.Errorf("canonicalize channel key access user: %w", err)
+	}
 	var serverID, channelType string
 	qErr := h.db.QueryRowContext(ctx, `
 		SELECT c.server_id, c.type FROM channels c
@@ -2275,8 +2284,8 @@ func (h *Handler) channelKeyAccess(ctx context.Context, channelID, userID string
 func (h *Handler) GetChannelKeys(c *gin.Context) {
 	userID := c.GetString("user_id")
 	channelID := c.Param("id")
-
-	if _, err := uuid.Parse(channelID); err != nil {
+	channelID, err := requestid.Canonical(channelID)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidChannelID})
 		return
 	}
@@ -2349,8 +2358,8 @@ type DistributeChannelKeysRequest struct {
 func (h *Handler) DistributeChannelKeys(c *gin.Context) {
 	userID := c.GetString("user_id")
 	channelID := c.Param("id")
-
-	if _, err := uuid.Parse(channelID); err != nil {
+	channelID, err := requestid.Canonical(channelID)
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidChannelID})
 		return
 	}
@@ -3408,9 +3417,8 @@ func (h *Handler) dmPendingConversationAvailable(ctx context.Context, conversati
 // GET /e2ee/keys/:context_id
 func (h *Handler) GetUnifiedKeys(c *gin.Context) {
 	userID := c.GetString("user_id")
-	contextID := c.Param("context_id")
-
-	if _, err := uuid.Parse(contextID); err != nil {
+	contextID, err := requestid.Param(c, "context_id")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, e2eekeys.ErrorResponse{
 			Error: errMsgInvalidContextID,
 			Code:  e2eekeys.CodeInvalidRequest,
@@ -3546,9 +3554,8 @@ func (h *Handler) enrollDMPendingGuarded(ctx context.Context, conversationID, us
 // two enrollment paths.
 func (h *Handler) RequestRewrap(c *gin.Context) {
 	userID := c.GetString("user_id")
-	contextID := c.Param("context_id")
-
-	if _, err := uuid.Parse(contextID); err != nil {
+	contextID, err := requestid.Param(c, "context_id")
+	if err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgInvalidContextID})
 		return
 	}
@@ -4918,18 +4925,25 @@ func (h *Handler) ValidateEpochs(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": errMsgTooManyEpochs})
 		return
 	}
+	canonicalEpochs := make(map[string]int, len(req.Epochs))
+	for channelID, clientEpoch := range req.Epochs {
+		canonicalChannelID, err := requestid.Canonical(channelID)
+		if err != nil || clientEpoch <= 0 {
+			continue // A stale cache key must not block validation of valid channels.
+		}
+		// Check the oldest positive epoch so an alias cannot hide a missed revocation.
+		if previous, exists := canonicalEpochs[canonicalChannelID]; !exists || clientEpoch < previous {
+			canonicalEpochs[canonicalChannelID] = clientEpoch
+		}
+	}
 
 	var revocations []epochRevocationInfo
 	accessLost := []string{}
 
-	for channelID, clientEpoch := range req.Epochs {
-		if _, parseErr := uuid.Parse(channelID); parseErr != nil {
-			continue
-		}
-
+	for canonicalChannelID, clientEpoch := range canonicalEpochs {
 		// CV-CAN-005: revocation metadata, like wrapped keys, must not reveal
 		// a hidden channel to a server member who lacks channel VIEW.
-		isMember, canView, accessErr := h.channelKeyAccess(c.Request.Context(), channelID, userID)
+		isMember, canView, accessErr := h.channelKeyAccess(c.Request.Context(), canonicalChannelID, userID)
 		if accessErr != nil {
 			h.log.Error("Failed to check channel access for epoch validation", "error", accessErr)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate epochs"})
@@ -4939,11 +4953,11 @@ func (h *Handler) ValidateEpochs(c *gin.Context) {
 			// Return every inaccessible submitted UUID, including unknown IDs, so
 			// a missed channel_access_revoked event can purge the local key without
 			// revealing whether the channel exists or why access was denied.
-			accessLost = append(accessLost, channelID)
+			accessLost = append(accessLost, canonicalChannelID)
 			continue
 		}
 
-		if err := h.appendEpochRevocation(&revocations, channelID, clientEpoch); err != nil {
+		if err := h.appendEpochRevocation(&revocations, canonicalChannelID, clientEpoch); err != nil {
 			h.log.Error("Failed to check epoch revocation", "error", err)
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to validate epochs"})
 			return

@@ -310,6 +310,108 @@ func TestWithAuthorityCapture_NilRecheck_SkipsCaptureEntirely(t *testing.T) {
 	assert.Nil(t, plan, "a nil recheck produces no plan and therefore no dispatch")
 }
 
+// regression for Security #166: a visible member's UUID spelling cannot turn
+// them into a denied key recipient and purge their durable key.
+func TestSecurity166_UppercaseVisibleCandidateKeepsChannelKey(t *testing.T) {
+	db, cleanup := dbtest.SetupTestDB(t)
+	t.Cleanup(cleanup)
+	ctx := context.Background()
+
+	owner := dbtest.CreateUser(t, db)
+	actor := dbtest.CreateUser(t, db)
+	member := dbtest.CreateUser(t, db)
+	serverID, channelID, roleID := uuid.NewString(), uuid.NewString(), uuid.NewString()
+	_, err := db.Exec(`INSERT INTO servers (id, name, owner_id) VALUES ($1, 'uuid-case-keys', $2)`, serverID, owner)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO server_members (server_id, user_id, role) VALUES ($1, $2, 'member')`, serverID, member)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO roles (id, server_id, name, position, permissions, is_default, is_managed) VALUES ($1, $2, '@all', 0, $3, TRUE, TRUE)`, roleID, serverID, int64(BasePermissions))
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO member_roles (server_id, user_id, role_id) VALUES ($1, $2, $3)`, serverID, member, roleID)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO channels (id, server_id, name, type) VALUES ($1, $2, 'keys', 'text')`, channelID, serverID)
+	require.NoError(t, err)
+	_, err = db.Exec(`INSERT INTO channel_keys (channel_id, user_id, wrapped_key, key_version) VALUES ($1, $2, 'a2V5', 1)`, channelID, member)
+	require.NoError(t, err)
+
+	tx, err := db.BeginTx(ctx, nil)
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = tx.Rollback() })
+	h := &Handler{db: db, resolver: NewResolver(db, nil, nil)}
+	_, denied, err := h.RevokeDeniedChannelKeyCandidatesTx(ctx, tx, serverID, actor.String(), []string{channelID}, ChannelKeyCandidates{
+		channelID: {strings.ToUpper(member.String())},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, denied, "a visible member must not be marked denied because their UUID is uppercase")
+	var retained int
+	require.NoError(t, tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM channel_keys WHERE channel_id = $1 AND user_id = $2`, channelID, member).Scan(&retained))
+	assert.Equal(t, 1, retained, "a visible member's durable key must remain")
+}
+
+func TestSecurity166_CanonicalChannelKeyCandidatesMergeUUIDAliases(t *testing.T) {
+	channelID := uuid.NewString()
+	userID := uuid.NewString()
+
+	channels, candidates, err := canonicalChannelKeyCandidates(
+		[]string{strings.ToUpper(channelID), "{" + channelID + "}", channelID},
+		ChannelKeyCandidates{
+			strings.ToUpper(channelID): {strings.ToUpper(userID), userID},
+			"{" + channelID + "}":      {userID},
+		},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, []string{channelID}, channels, "one channel rotation per UUID regardless of spelling")
+	assert.Equal(t, ChannelKeyCandidates{channelID: {userID}}, candidates,
+		"candidate aliases must merge into one canonical, deduplicated recipient set")
+}
+
+func TestSecurity166_CanonicalChannelKeyCandidatesRejectMalformedIDs(t *testing.T) {
+	channelID := uuid.NewString()
+	userID := uuid.NewString()
+	for name, tc := range map[string]struct {
+		channelIDs []string
+		candidates ChannelKeyCandidates
+	}{
+		"candidate channel": {nil, ChannelKeyCandidates{"bad-channel": {userID}}},
+		"candidate user":    {nil, ChannelKeyCandidates{channelID: {"bad-user"}}},
+		"requested channel": {[]string{"bad-channel"}, nil},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, _, err := canonicalChannelKeyCandidates(tc.channelIDs, tc.candidates)
+			require.Error(t, err)
+		})
+	}
+}
+
+func TestSecurity166_DeniedChannelKeyCandidatesComparesUUIDValues(t *testing.T) {
+	visibleID := uuid.NewString()
+	deniedID := uuid.NewString()
+
+	denied, err := deniedChannelKeyCandidates(
+		[]string{strings.ToUpper(visibleID), deniedID},
+		[]string{visibleID},
+	)
+	require.NoError(t, err)
+	assert.Equal(t, []string{deniedID}, denied,
+		"a visible UUID alias must be retained while a distinct candidate is denied")
+}
+
+func TestSecurity166_DeniedChannelKeyCandidatesRejectMalformedIDs(t *testing.T) {
+	validID := uuid.NewString()
+	for name, tc := range map[string]struct {
+		candidates []string
+		visible    []string
+	}{
+		"visible":   {[]string{validID}, []string{"bad-visible"}},
+		"candidate": {[]string{"bad-candidate"}, []string{validID}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			_, err := deniedChannelKeyCandidates(tc.candidates, tc.visible)
+			require.Error(t, err)
+		})
+	}
+}
+
 func advisoryKeyForTest(domain string) int64 {
 	digest := sha256.Sum256([]byte(domain))
 	return int64(binary.BigEndian.Uint64(digest[:8])) //nolint:gosec // test-local mirror of the production derivation

@@ -6,9 +6,14 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1450,6 +1455,176 @@ func TestAssignRole_Success_Owner(t *testing.T) {
 	var resp map[string]interface{}
 	testhelpers.ParseJSON(t, w, &resp)
 	assert.Equal(t, "Role assigned", resp["message"])
+}
+
+// regression for Security #166: accepted UUID aliases must not be retained in
+// identity-bearing audit metadata after a role mutation.
+func TestAssignRole_UppercaseIDsWriteCanonicalAuditMetadata(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+	roleID := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "CanonicalAudit", 0)
+
+	// Positive control: the normal spelling reaches the mutation path.
+	w := ts.DoRequest("POST", assignRolePath(serverID, member.ID), map[string]interface{}{
+		"role_id": roleID,
+	}, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// Remove it so the alias request performs a distinct durable mutation.
+	w = ts.DoRequest("DELETE", unassignRolePath(serverID, member.ID, roleID), nil, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code)
+
+	w = ts.DoRequest("POST", assignRolePath(strings.ToUpper(serverID), strings.ToUpper(member.ID)), map[string]interface{}{
+		"role_id": strings.ToUpper(roleID),
+	}, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, "alternate UUID spellings must preserve role-assignment authorization")
+
+	var auditedRoleID string
+	require.NoError(t, ts.DB.QueryRow(`
+		SELECT metadata->>'role_id'
+		FROM audit_log
+		WHERE action = 'role_assigned' AND target_id = $1
+		ORDER BY created_at DESC
+		LIMIT 1`, member.ID).Scan(&auditedRoleID))
+	assert.Equal(t, roleID, auditedRoleID,
+		"accepted UUID aliases must be emitted to audit metadata in canonical form")
+}
+
+// regression for Security #166: unassignment must carry accepted aliases into
+// the audit record in canonical form too.
+func TestUnassignRole_UppercaseIDsWriteCanonicalAuditMetadata(t *testing.T) {
+	ts, owner, member, serverID := setupOwnerAndMember(t)
+	roleID := createRoleViaAPI(t, ts, serverID, owner.AccessToken, "CanonicalUnassign", 0)
+
+	w := ts.DoRequest("POST", assignRolePath(serverID, member.ID), map[string]interface{}{
+		"role_id": roleID,
+	}, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, "canonical control must create the assignment")
+
+	w = ts.DoRequest("DELETE", unassignRolePath(
+		strings.ToUpper(serverID), strings.ToUpper(member.ID), strings.ToUpper(roleID),
+	), nil, testhelpers.AuthHeaders(owner.AccessToken))
+	require.Equal(t, http.StatusOK, w.Code, "alternate UUID spellings must preserve role-unassignment authorization")
+
+	var auditedRoleID string
+	require.NoError(t, ts.DB.QueryRow(`
+		SELECT metadata->>'role_id'
+		FROM audit_log
+		WHERE action = 'role_unassigned' AND target_id = $1
+		ORDER BY created_at DESC
+		LIMIT 1`, member.ID).Scan(&auditedRoleID))
+	assert.Equal(t, roleID, auditedRoleID,
+		"accepted UUID aliases must be emitted to audit metadata in canonical form")
+}
+
+// Security #166 keeps raw route UUID text out of the two role-mutation
+// handlers, so no new request-vs-database string comparison can be introduced
+// there without this guard failing.
+func TestSecurity166_RoleMutationHandlersUseCanonicalRequestIDs(t *testing.T) {
+	source, err := os.ReadFile("handlers.go")
+	require.NoError(t, err)
+
+	for _, name := range []string{"AssignRole", "UnassignRole"} {
+		t.Run(name, func(t *testing.T) {
+			body := roleMutationHandlerBody(t, string(source), name)
+			assert.NotContains(t, body, "c.Param(",
+				"raw request IDs must not reach role mutation authorization or writes")
+			assert.Contains(t, body, "requestid.Param(",
+				"route IDs must be canonicalized at the handler boundary")
+		})
+	}
+
+	body := roleMutationHandlerBody(t, string(source), "AssignRole")
+	assert.Contains(t, body, "requestid.Canonical(req.RoleID)",
+		"the role body ID must be canonicalized before audit and mutation")
+}
+
+// A request ID must be canonical before any value comparison, including a
+// comparison with a UUID read from the database.
+func TestSecurity166_NoRawRequestIDEqualityAcrossRBAC(t *testing.T) {
+	fset := token.NewFileSet()
+	files, err := os.ReadDir(".")
+	require.NoError(t, err)
+	for _, entry := range files {
+		filename := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(filename, ".go") || strings.HasSuffix(filename, "_test.go") {
+			continue
+		}
+		file, parseErr := parser.ParseFile(fset, filename, nil, 0)
+		require.NoError(t, parseErr)
+		bodyRequest := filename == "handlers.go"
+		ast.Inspect(file, func(node ast.Node) bool {
+			fn, ok := node.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				return true
+			}
+			raw := map[string]bool{}
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				assign, ok := node.(*ast.AssignStmt)
+				if !ok || len(assign.Lhs) != len(assign.Rhs) {
+					return true
+				}
+				for i, rhs := range assign.Rhs {
+					id, ok := assign.Lhs[i].(*ast.Ident)
+					if ok && rawRequestID(rhs, raw, bodyRequest) {
+						raw[id.Name] = true
+					}
+				}
+				return true
+			})
+			ast.Inspect(fn.Body, func(node ast.Node) bool {
+				cmp, ok := node.(*ast.BinaryExpr)
+				if !ok || cmp.Op != token.EQL && cmp.Op != token.NEQ {
+					return true
+				}
+				if rawRequestID(cmp.X, raw, bodyRequest) && !emptyStringLiteral(cmp.Y) || rawRequestID(cmp.Y, raw, bodyRequest) && !emptyStringLiteral(cmp.X) {
+					t.Errorf("%s: compare canonical UUIDs, not raw request IDs", fset.Position(cmp.Pos()))
+				}
+				return true
+			})
+			return false
+		})
+	}
+}
+
+func TestSecurity166_RawRequestIDGuardRecognizesSources(t *testing.T) {
+	for _, source := range []string{`c.Param("id")`, `req.RoleID`, `routeID`} {
+		expr, err := parser.ParseExpr(source)
+		require.NoError(t, err)
+		assert.True(t, rawRequestID(expr, map[string]bool{"routeID": true}, true), source)
+	}
+}
+
+func rawRequestID(expr ast.Expr, raw map[string]bool, bodyRequest bool) bool {
+	switch x := expr.(type) {
+	case *ast.Ident:
+		return raw[x.Name]
+	case *ast.SelectorExpr:
+		base, ok := x.X.(*ast.Ident)
+		return bodyRequest && ok && base.Name == "req" && strings.HasSuffix(x.Sel.Name, "ID")
+	case *ast.CallExpr:
+		s, ok := x.Fun.(*ast.SelectorExpr)
+		if !ok || s.Sel.Name != "Param" {
+			return false
+		}
+		base, ok := s.X.(*ast.Ident)
+		return ok && base.Name == "c"
+	}
+	return false
+}
+
+func emptyStringLiteral(expr ast.Expr) bool {
+	lit, ok := expr.(*ast.BasicLit)
+	return ok && lit.Kind == token.STRING && lit.Value == `""`
+}
+
+func roleMutationHandlerBody(t *testing.T, source, name string) string {
+	t.Helper()
+	start := strings.Index(source, "func (h *Handler) "+name+"(")
+	require.GreaterOrEqual(t, start, 0)
+	tail := source[start:]
+	end := strings.Index(tail[1:], "\nfunc ")
+	require.Greater(t, end, 0)
+	return tail[:end+1]
 }
 
 func TestAssignRole_BaseMember_Forbidden(t *testing.T) {

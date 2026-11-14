@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
@@ -131,6 +132,36 @@ func TestSendMessageInvalidChannelID(t *testing.T) {
 	}, testhelpers.AuthHeaders(user.AccessToken))
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+	var messageCount int
+	require.NoError(t, ts.DB.QueryRow(`SELECT count(*) FROM messages`).Scan(&messageCount))
+	assert.Zero(t, messageCount, "malformed channel_id must be rejected before creating a message")
+}
+
+// regression for Security #166: accepted UUID aliases must not leak back in a
+// response or a stored message identity.
+func TestSendMessage_UppercaseChannelIDReturnsCanonicalIdentity(t *testing.T) {
+	ts := setupTS(t)
+	user := ts.CreateTestUser(t, "sendmsgcase")
+	serverID := ts.CreateTestServer(t, user.ID, "Canonical Send Server")
+	channelID := ts.CreateTestChannel(t, serverID, "general")
+
+	w := ts.DoRequest("POST", pathAPIMessages, map[string]interface{}{
+		"channel_id":  strings.ToUpper(channelID),
+		"content":     testhelpers.ValidCiphertext(),
+		"key_version": 1,
+	}, testhelpers.AuthHeaders(user.AccessToken))
+	require.Equal(t, http.StatusCreated, w.Code, "uppercase UUID remains an accepted channel reference")
+
+	var body map[string]interface{}
+	testhelpers.ParseJSON(t, w, &body)
+	message, ok := body["message"].(map[string]interface{})
+	require.True(t, ok, "created response must contain a message")
+	assert.Equal(t, channelID, message["channel_id"],
+		"accepted UUID aliases must be emitted in canonical form")
+
+	var storedChannelID string
+	require.NoError(t, ts.DB.QueryRow(`SELECT channel_id FROM messages WHERE id = $1`, message["id"]).Scan(&storedChannelID))
+	assert.Equal(t, channelID, storedChannelID, "stored message must remain attached to the canonical channel identity")
 }
 
 func TestSendMessageMissingContent(t *testing.T) {
