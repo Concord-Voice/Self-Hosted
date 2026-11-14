@@ -113,7 +113,10 @@ def manifest_violations(lock_path, packages):
                 raise CannotRun(f"{root}: workspaces entry {pattern!r} uses glob syntax this check "
                                 "does not match the way npm does")
             for hit in glob.glob(os.path.join(base, pattern), recursive=True):
-                dirs.add(os.path.relpath(hit, base))
+                rel = os.path.relpath(hit, base)
+                if not inside(base, rel):  # a symlinked workspace directory
+                    raise CannotRun(f"{root}: workspace {rel} resolves outside {base}")
+                dirs.add(rel)
     out = []
     # Dependency edges inside the lockfile: npm ci builds the ideal tree before
     # it checks the lockfile, so an off-registry edge spec is fetched even when
