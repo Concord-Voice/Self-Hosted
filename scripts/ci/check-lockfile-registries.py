@@ -119,13 +119,25 @@ def go_replaces(text):
                 yield number, rest
 
 
-def unquote_go(token, path, number):
-    """Strip Go's "..." or `...` quoting. Escapes are refused, not guessed."""
-    if token[:1] in ('"', "`"):
-        if len(token) < 2 or token[-1] != token[0] or "\\" in token:
-            raise CannotRun(f"{path}:{number}: cannot parse quoted replace target {token}")
-        return token[1:-1]
-    return token
+# Go's tokens: an interpreted "..." string (escapes refused, not guessed), a raw
+# `...` string, or a bare word. The whole right-hand side must be one target and
+# at most one version, or the check cannot run.
+GO_TOKEN = r'"[^"\\]*"|`[^`]*`|[^\s"`]+'
+GO_TARGET = re.compile(rf"\s*({GO_TOKEN})(?:\s+({GO_TOKEN}))?\s*")
+GO_VERSION = re.compile(r"v[0-9][^\s\"`]*")
+
+
+def parse_target(rhs, path, number):
+    """Return (dest, version or None) for a replace right-hand side."""
+    match = GO_TARGET.fullmatch(rhs)
+    if not match:
+        raise CannotRun(f"{path}:{number}: cannot parse replace target: {rhs.strip()}")
+    dest, version = match.group(1), match.group(2)
+    if dest[:1] in ('"', "`"):
+        dest = dest[1:-1]
+    if version is not None and not GO_VERSION.fullmatch(version):
+        raise CannotRun(f"{path}:{number}: replace version is not a version: {version}")
+    return dest, version
 
 
 def go_violations(path, root, local_allowed):
@@ -138,14 +150,11 @@ def go_violations(path, root, local_allowed):
     for number, directive in go_replaces(text):
         if "=>" not in directive:
             raise CannotRun(f"{path}:{number}: cannot parse replace directive: {directive}")
-        target = directive.split("=>", 1)[1].split()
-        if not target or len(target) > 2:
-            raise CannotRun(f"{path}:{number}: cannot parse replace target: {directive}")
-        dest = unquote_go(target[0], path, number)
+        dest, version = parse_target(directive.split("=>", 1)[1], path, number)
         # Go's own rule: a replacement with a version is a module path, fetched
         # through the module proxy. One without a version is a filesystem path,
         # whatever it looks like (`.`, `"./x"`, `..\x`, an absolute path).
-        if len(target) == 2:
+        if version is not None:
             continue
         resolved = os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(path)), dest))
         rel = os.path.relpath(resolved, root)

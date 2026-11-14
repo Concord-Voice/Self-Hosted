@@ -76,7 +76,13 @@ for target in '"./vendored"' '`../vendored`' '.' '..\vendored' 'vendored'; do
   expect "unversioned replace target is local: $target" 1 'points at local path' --go-mod "$WORK/q.mod"
 done
 printf 'module example.invalid/x\n\ngo 1.26\n\nreplace example.invalid/a => "./x\\"y"\n' > "$WORK/esc.mod"
-expect 'escaped quoted target cannot run' 2 'cannot parse quoted' --go-mod "$WORK/esc.mod"
+expect 'escaped quoted target cannot run' 2 'cannot parse replace target' --go-mod "$WORK/esc.mod"
+printf 'module example.invalid/x\n\ngo 1.26\n\nreplace example.invalid/a => "./my dir" v1.0.0\n' > "$WORK/sp.mod"
+expect 'quoted path with a space stays one token' 0 '^ok:' --go-mod "$WORK/sp.mod"
+printf 'module example.invalid/x\n\ngo 1.26\n\nreplace example.invalid/a => "./x" "v1.0.0"\n' > "$WORK/qv.mod"
+expect 'quoted version cannot run' 2 'is not a version' --go-mod "$WORK/qv.mod"
+printf 'module example.invalid/x\n\ngo 1.26\n\nreplace example.invalid/a => ./x v1.0.0 extra\n' > "$WORK/x3.mod"
+expect 'three tokens cannot run' 2 'cannot parse replace target' --go-mod "$WORK/x3.mod"
 
 # A listed local replacement passes. The fixture's target resolves to a path
 # outside the repository, so list a replacement that resolves inside it.
