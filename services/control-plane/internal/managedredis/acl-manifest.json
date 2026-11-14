@@ -201,7 +201,8 @@
       "media:colour_draining:blue",
       "media:colour_draining:green",
       "voice:room_owner:*",
-      "voice:room_live:*"
+      "voice:room_live:*",
+      "media:legacy_join_pause"
     ]
   },
   "excludedAbsentApplicationCommands": [

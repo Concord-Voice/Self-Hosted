@@ -75,6 +75,7 @@ Android.
 
 ### Fixed
 
+- **Voice:** `concord-ctl.sh media-legacy-pause` and `media-legacy-resume` now work with managed Redis credentials (`REDIS_CREDENTIAL_MODE=managed`). The Redis credential controller used to refuse every read and write of the voice-join pause, so a pause could not be set, given a test user or lifted.
 - **Account authority:** Recovery ceremonies can sign and add a succession that clears a delegation halt, while other commands and malformed trust inputs remain refused. Removed an obsolete private-policy citation that blocked importing the server changes into Hosted.
 
 - **Authentication:** Removed the compiled `authority-ceremony` binary that was committed with the tool's source. Build the tool from source; build outputs are now ignored.
