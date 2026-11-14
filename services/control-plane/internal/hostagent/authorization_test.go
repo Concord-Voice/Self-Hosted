@@ -67,7 +67,7 @@ func newAuthorizationFixture(t *testing.T) (*AuthorizationStore, *fakeAgentWebAu
 	doc := testAuthorizerDoc(t)
 	path := writeAuthorizerDoc(t, root, doc)
 	authorizers := loadTestAuthorizers(t, path, root)
-	adminID := doc["authorizers"].([]map[string]any)[0]["admin_id"].(string)
+	adminID := testAuthorizerString(t, testAuthorizerEntry(t, doc), "admin_id")
 	credential := authorizers.Credentials(adminID)[0]
 	credential.Authenticator.SignCount = 5
 	verifier := &fakeAgentWebAuthn{
@@ -218,10 +218,10 @@ func TestAuthorizationRealWebAuthnVerifierRejectsWrongTrustClaims(t *testing.T) 
 			require.NoError(t, err)
 			root := t.TempDir()
 			doc := testAuthorizerDoc(t)
-			doc["authorizers"].([]map[string]any)[0]["public_key"] = base64.RawURLEncoding.EncodeToString(coseKey)
+			testAuthorizerEntry(t, doc)["public_key"] = base64.RawURLEncoding.EncodeToString(coseKey)
 			path := writeAuthorizerDoc(t, root, doc)
 			authorizers := loadTestAuthorizers(t, path, root)
-			adminID := doc["authorizers"].([]map[string]any)[0]["admin_id"].(string)
+			adminID := testAuthorizerString(t, testAuthorizerEntry(t, doc), "admin_id")
 			verifier, err := mfa.NewWebAuthnService("admin.example.test", "Concord Voice", []string{"https://admin.example.test"})
 			require.NoError(t, err)
 			store := NewAuthorizationStore(authorizers, verifier, time.Now)

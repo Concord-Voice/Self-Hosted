@@ -140,7 +140,9 @@ func TestAuditRecordsPeerBeginReplayAndJobOutcomes(t *testing.T) {
 	lines := readAuditLines(t, server.audit.path)
 	reasons := make([]string, 0, len(lines))
 	for _, line := range lines {
-		reasons = append(reasons, line["reason_code"].(string))
+		reason, ok := line["reason_code"].(string)
+		require.True(t, ok)
+		reasons = append(reasons, reason)
 	}
 	for _, want := range []string{"peer_forbidden", "begin_denied", "admission_approved", "job_started", "job_succeeded", "replay_denied"} {
 		require.Contains(t, reasons, want)

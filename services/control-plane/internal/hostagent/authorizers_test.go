@@ -20,6 +20,21 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func testAuthorizerEntry(t *testing.T, doc map[string]any) map[string]any {
+	t.Helper()
+	entries, ok := doc["authorizers"].([]map[string]any)
+	require.True(t, ok)
+	require.NotEmpty(t, entries)
+	return entries[0]
+}
+
+func testAuthorizerString(t *testing.T, entry map[string]any, key string) string {
+	t.Helper()
+	value, ok := entry[key].(string)
+	require.True(t, ok, "authorizer %s must be a string", key)
+	return value
+}
+
 func testAuthorizerDoc(t *testing.T) map[string]any {
 	t.Helper()
 	private, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
@@ -65,7 +80,7 @@ func TestAuthorizerStoreValidAndCounterAdvance(t *testing.T) {
 	doc := testAuthorizerDoc(t)
 	path := writeAuthorizerDoc(t, root, doc)
 	store := loadTestAuthorizers(t, path, root)
-	adminID := doc["authorizers"].([]map[string]any)[0]["admin_id"].(string)
+	adminID := testAuthorizerString(t, testAuthorizerEntry(t, doc), "admin_id")
 	creds := store.Credentials(adminID)
 	require.Len(t, creds, 1)
 	require.Equal(t, uint32(4), creds[0].Authenticator.SignCount)
@@ -177,7 +192,8 @@ func TestAuthorizerStoreAtomicWriteFailurePreservesFile(t *testing.T) {
 			} else {
 				store.renameFile = func(string, string) error { return errors.New("injected rename failure") }
 			}
-			id := store.Credentials(doc["authorizers"].([]map[string]any)[0]["admin_id"].(string))[0].ID
+			adminID := testAuthorizerString(t, testAuthorizerEntry(t, doc), "admin_id")
+			id := store.Credentials(adminID)[0].ID
 			require.Error(t, store.AdvanceCounter(id, 5))
 			after, err := os.ReadFile(path) //nolint:gosec // path is this test's temporary fixture
 			require.NoError(t, err)
@@ -189,12 +205,12 @@ func TestAuthorizerStoreAtomicWriteFailurePreservesFile(t *testing.T) {
 func testAuthorizerImport(t *testing.T) AuthorizerImport {
 	t.Helper()
 	doc := testAuthorizerDoc(t)
-	entry := doc["authorizers"].([]map[string]any)[0]
+	entry := testAuthorizerEntry(t, doc)
 	return AuthorizerImport{
 		Schema: 1, RPID: "admin.example.test", Origins: []string{"https://admin.example.test"},
-		AdminID: entry["admin_id"].(string),
+		AdminID: testAuthorizerString(t, entry, "admin_id"),
 		Credentials: []AuthorizerCredentialImport{{
-			CredentialID: entry["credential_id"].(string), PublicKey: entry["public_key"].(string),
+			CredentialID: testAuthorizerString(t, entry, "credential_id"), PublicKey: testAuthorizerString(t, entry, "public_key"),
 			SignCount: 4, Label: "primary hardware key",
 		}},
 	}
