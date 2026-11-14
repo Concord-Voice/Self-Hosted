@@ -67,6 +67,10 @@ Android.
 - **Self-hosting:** Each self-host release now carries a CycloneDX JSON SBOM, `concord-selfhost-v<version>.cdx.json`, as an attested release asset. It lists every npm package and Go module the bundle's lockfiles and `go.mod` files pin, dev dependencies included.
 - **Self-hosting:** Pushing a `v<VERSION>` tag now builds the self-host bundle (`concord-selfhost-<version>.tar.gz`, its manifest and `SHA256SUMS`) from the tagged tree in this repository and attests each file's build provenance. The release pipeline verifies the attestations and opens an unsigned draft. A release is not a supported install until it passes fresh-host acceptance.
 
+### Security
+
+- **Authorization:** UUID spelling no longer changes permission checks, hierarchy protection, channel-key access, or emitted IDs. Invalid IDs are refused before a write.
+
 ### Changed
 
 - **Self-hosted setup:** The production Compose model now requires both WebSocket event-budget settings and forwards them to control-plane. Selected self-host commands take these values from root `.env`, so existing installations must prepare both keys before adopting this model; rendering does not authorize activation.

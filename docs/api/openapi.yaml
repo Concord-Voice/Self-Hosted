@@ -15,7 +15,11 @@ info:
 
     ## Conventions
 
-    - All IDs are UUIDs (v4)
+    - All IDs are UUIDs (v4). On purge, channel-key, role-assignment, group-DM
+      role, voice moderation or move, and message-send paths, accepted UUID
+      spellings are normalized to lowercase hyphenated text before authorization
+      and persistence; responses and events emit that canonical form. A malformed
+      route or request-body ID on those paths returns 400 before any write.
 
     - All timestamps are ISO 8601 with timezone (TIMESTAMPTZ)
 
