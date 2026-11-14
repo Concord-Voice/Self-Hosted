@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
 	"encoding/json"
@@ -177,11 +178,26 @@ type ssoStateRecord struct {
 	// against a server-held copy instead of trusting key-lookup semantics.
 	// Records written before this field existed decode as "" and fail the
 	// broker's comparison closed.
-	State        string    `json:"state"`
-	Nonce        string    `json:"nonce"`
-	CodeVerifier string    `json:"code_verifier"`
-	RedirectURI  string    `json:"redirect_uri"`
-	CreatedAt    time.Time `json:"created_at"`
+	State               string    `json:"state"`
+	Nonce               string    `json:"nonce"`
+	ClientBindingDigest []byte    `json:"client_binding_digest"`
+	CodeVerifier        string    `json:"code_verifier"`
+	RedirectURI         string    `json:"redirect_uri"`
+	CreatedAt           time.Time `json:"created_at"`
+}
+
+const clientBindingHeader = "X-Concord-SSO-Client-Binding"
+
+func clientBindingDigest(c *gin.Context) ([32]byte, bool) {
+	values := c.Request.Header.Values(clientBindingHeader)
+	if len(values) != 1 || len(values[0]) != 43 {
+		return [32]byte{}, false
+	}
+	raw, err := base64.RawURLEncoding.DecodeString(values[0])
+	if err != nil || len(raw) != 32 || base64.RawURLEncoding.EncodeToString(raw) != values[0] {
+		return [32]byte{}, false
+	}
+	return sha256.Sum256(append([]byte("concord-sso-client-binding-v1\x00"), raw...)), true
 }
 
 // ssoTokenPayload is the JSON payload stored in Redis under sso_token:<token>.
@@ -385,6 +401,11 @@ func (h *Handler) Initiate(c *gin.Context) {
 	if !ok {
 		return
 	}
+	bindingDigest, ok := clientBindingDigest(c)
+	if !ok {
+		c.JSON(http.StatusBadRequest, gin.H{"error_code": "invalid_request"})
+		return
+	}
 
 	state := randomString(entropyBytes)
 	nonce := randomString(entropyBytes)
@@ -409,12 +430,13 @@ func (h *Handler) Initiate(c *gin.Context) {
 	}
 
 	rec := ssoStateRecord{
-		Provider:     providerName,
-		State:        state,
-		Nonce:        nonce,
-		CodeVerifier: verifier,
-		RedirectURI:  redirectURI,
-		CreatedAt:    time.Now().UTC(),
+		Provider:            providerName,
+		State:               state,
+		Nonce:               nonce,
+		ClientBindingDigest: bindingDigest[:],
+		CodeVerifier:        verifier,
+		RedirectURI:         redirectURI,
+		CreatedAt:           time.Now().UTC(),
 	}
 	payload, err := json.Marshal(rec)
 	if err != nil {

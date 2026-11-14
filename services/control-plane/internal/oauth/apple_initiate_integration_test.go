@@ -2,6 +2,8 @@ package oauth_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -53,15 +55,74 @@ func newDualProviderInitiateRig(t *testing.T) (*gin.Engine, *redis.Client, *reco
 
 const initiateRedirect = "http://127.0.0.1:65000/oauth/callback"
 
+var testSSOClientBinding = strings.Repeat("A", 43)
+
+func testSSOClientBindingDigest(t *testing.T) []byte {
+	t.Helper()
+	raw, err := base64.RawURLEncoding.DecodeString(testSSOClientBinding)
+	require.NoError(t, err)
+	digest := sha256.Sum256(append([]byte("concord-sso-client-binding-v1\x00"), raw...))
+	return digest[:]
+}
+
 func getInitiate(r *gin.Engine, provider, challenge string) *httptest.ResponseRecorder {
+	return getInitiateWithBinding(r, provider, challenge, testSSOClientBinding)
+}
+
+func getInitiateWithBinding(r *gin.Engine, provider, challenge, binding string) *httptest.ResponseRecorder {
 	target := "/api/v1/auth/sso/" + provider + "?redirect_uri=" + url.QueryEscape(initiateRedirect)
 	if challenge != "" {
 		target += "&code_challenge=" + url.QueryEscape(challenge)
 	}
 	req := httptest.NewRequest(http.MethodGet, target, nil)
+	if binding != "" {
+		req.Header.Set("X-Concord-SSO-Client-Binding", binding)
+	}
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	return w
+}
+
+func TestInitiate_ClientBindingRequiredAndStoredAsDigest(t *testing.T) {
+	r, rdb, _ := newDualProviderInitiateRig(t)
+	for _, provider := range []string{"apple", "google"} {
+		t.Run(provider, func(t *testing.T) {
+			for name, binding := range map[string]string{
+				"missing": "", "short": strings.Repeat("A", 42),
+				"long": strings.Repeat("A", 44), "padded": testSSOClientBinding + "=",
+				"invalid": strings.Repeat("!", 43), "noncanonical": strings.Repeat("A", 42) + "B",
+			} {
+				t.Run(name, func(t *testing.T) {
+					w := getInitiateWithBinding(r, provider, strings.Repeat("a", 43), binding)
+					require.Equal(t, http.StatusBadRequest, w.Code, w.Body.String())
+					assert.Contains(t, w.Body.String(), "invalid_request")
+				})
+			}
+			t.Run("duplicate", func(t *testing.T) {
+				req := httptest.NewRequest(http.MethodGet, "/api/v1/auth/sso/"+provider+"?redirect_uri="+url.QueryEscape(initiateRedirect)+"&code_challenge="+strings.Repeat("a", 43), nil)
+				req.Header.Add("X-Concord-SSO-Client-Binding", testSSOClientBinding)
+				req.Header.Add("X-Concord-SSO-Client-Binding", testSSOClientBinding)
+				w := httptest.NewRecorder()
+				r.ServeHTTP(w, req)
+				require.Equal(t, http.StatusBadRequest, w.Code)
+			})
+			w := getInitiate(r, provider, strings.Repeat("a", 43))
+			require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+			var resp struct {
+				State string `json:"state"`
+			}
+			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+			raw, err := rdb.Get(context.Background(), "sso_state:"+resp.State).Bytes()
+			require.NoError(t, err)
+			assert.NotContains(t, string(raw), testSSOClientBinding)
+			assert.NotContains(t, w.Body.String(), testSSOClientBinding)
+			var rec struct {
+				ClientBindingDigest []byte `json:"client_binding_digest"`
+			}
+			require.NoError(t, json.Unmarshal(raw, &rec))
+			assert.Equal(t, testSSOClientBindingDigest(t), rec.ClientBindingDigest)
+		})
+	}
 }
 
 func TestInitiate_Apple_RequiresCodeChallenge(t *testing.T) {

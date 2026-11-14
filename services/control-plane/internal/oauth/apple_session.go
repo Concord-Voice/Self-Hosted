@@ -87,6 +87,13 @@ func (h *Handler) ProviderSession(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "invalid_state"})
 		return
 	}
+	bindingDigest, bindingOK := clientBindingDigest(c)
+	var recordedDigest [32]byte
+	copy(recordedDigest[:], rec.ClientBindingDigest)
+	if !bindingOK || len(rec.ClientBindingDigest) != len(recordedDigest) || subtle.ConstantTimeCompare(bindingDigest[:], recordedDigest[:]) != 1 {
+		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "invalid_state"})
+		return
+	}
 	// Provider names are not secret material — plain equality is correct.
 	if rec.Provider != providerName {
 		c.JSON(http.StatusUnauthorized, gin.H{"error_code": "invalid_state"})

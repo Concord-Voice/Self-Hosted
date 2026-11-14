@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -26,6 +27,12 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/oauth"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
 )
+
+func newBoundInitiateRequest(method, target string, body io.Reader) *http.Request {
+	req := httptest.NewRequest(method, target, body)
+	req.Header.Set("X-Concord-SSO-Client-Binding", testSSOClientBinding)
+	return req
+}
 
 // newSSOTestRig wires a Gin engine, test Redis, and a Handler with the Google
 // provider registered. Returns the engine, the Redis client (so tests can read
@@ -59,7 +66,7 @@ func TestInitiate_StoresStateInRedis(t *testing.T) {
 
 	// After #975, google is client-driven — a code_challenge is required.
 	challenge := strings.Repeat("c", 43)
-	req := httptest.NewRequest(http.MethodGet,
+	req := newBoundInitiateRequest(http.MethodGet,
 		"/api/v1/auth/sso/google?redirect_uri=http%3A%2F%2F127.0.0.1%3A65000%2Foauth%2Fcallback&code_challenge="+challenge, nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -87,7 +94,7 @@ func TestInitiate_AuthURLEmbedsState(t *testing.T) {
 	r, _, _ := newSSOTestRig(t)
 	// After #975, google is client-driven — supply a valid code_challenge.
 	challenge := strings.Repeat("d", 43)
-	req := httptest.NewRequest(http.MethodGet,
+	req := newBoundInitiateRequest(http.MethodGet,
 		"/api/v1/auth/sso/google?redirect_uri=http%3A%2F%2F127.0.0.1%3A65000%2Foauth%2Fcallback&code_challenge="+challenge, nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -109,7 +116,7 @@ func TestInitiate_AuthURLEmbedsState(t *testing.T) {
 
 func TestInitiate_RejectsNonLoopbackRedirect(t *testing.T) {
 	r, _, _ := newSSOTestRig(t)
-	req := httptest.NewRequest(http.MethodGet,
+	req := newBoundInitiateRequest(http.MethodGet,
 		"/api/v1/auth/sso/google?redirect_uri=https%3A%2F%2Fevil.example%2Fcallback", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -127,7 +134,7 @@ func TestInitiate_UnknownProvider(t *testing.T) {
 	r := gin.New()
 	r.GET("/api/v1/auth/sso/:provider", h.Initiate)
 
-	req := httptest.NewRequest(http.MethodGet,
+	req := newBoundInitiateRequest(http.MethodGet,
 		"/api/v1/auth/sso/google?redirect_uri=http%3A%2F%2F127.0.0.1%3A1%2Foauth%2Fcallback", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
@@ -1453,7 +1460,7 @@ func initiateRequest(t *testing.T, r *gin.Engine, provider, redirectURI string) 
 	t.Helper()
 	target := "/api/v1/auth/sso/" + provider + "?redirect_uri=" + url.QueryEscape(redirectURI) +
 		"&code_challenge=" + strings.Repeat("c", 43)
-	req := httptest.NewRequest(http.MethodGet, target, nil)
+	req := newBoundInitiateRequest(http.MethodGet, target, nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	return w
@@ -1569,7 +1576,7 @@ func TestInitiate_EmbedsStateInRecord(t *testing.T) {
 	r, rdb, _ := newSSOTestRig(t)
 
 	// After #975 google is client-driven — code_challenge is required.
-	req := httptest.NewRequest(http.MethodGet,
+	req := newBoundInitiateRequest(http.MethodGet,
 		"/api/v1/auth/sso/google?redirect_uri="+url.QueryEscape("http://127.0.0.1:51620/oauth/callback")+
 			"&code_challenge="+strings.Repeat("e", 43), nil)
 	w := httptest.NewRecorder()
@@ -1644,7 +1651,7 @@ func TestInitiate_Apple_KVFailureCleanupSurvivesClientAbort(t *testing.T) {
 
 	target := "/api/v1/auth/sso/apple?redirect_uri=" + url.QueryEscape("http://127.0.0.1:51620/oauth/callback") +
 		"&code_challenge=" + strings.Repeat("c", 43)
-	req := httptest.NewRequest(http.MethodGet, target, nil).WithContext(ctx)
+	req := newBoundInitiateRequest(http.MethodGet, target, nil).WithContext(ctx)
 	w := httptest.NewRecorder()
 	rig.ServeHTTP(w, req)
 
