@@ -10,14 +10,17 @@ import (
 	"github.com/coreos/go-oidc/v3/oidc"
 )
 
-// subjectPrefixShape requires a fully-qualified "repo:<owner>/<repo>:"
-// SubjectPrefix. Defence-in-depth: pkg/config enforces the same shape at
-// startup, but the verifier must refuse to construct with an unbindable
+// subjectPrefixShape requires a fully-qualified repository SubjectPrefix.
+// Defence-in-depth: pkg/config enforces the same shape at startup, but the verifier must refuse to construct with an unbindable
 // prefix even when built outside that path. The prefix is the sole
 // repository binding — matchWorkflow deliberately ignores the owner/repo
 // segment — so an under-qualified value silently admits any repo's token
 // (#2021).
-var subjectPrefixShape = regexp.MustCompile(`^repo:[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9._-]*:`)
+//
+// Accepts the name form "repo:<owner>/<repo>:" and the immutable form
+// "repo:<owner>@<id>/<repo>@<id>:", ids on both segments or neither.
+// Keep this pattern identical to oidcSubjectPrefixShape in pkg/config.
+var subjectPrefixShape = regexp.MustCompile(`^repo:[A-Za-z0-9][A-Za-z0-9-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*|@[1-9][0-9]*/[A-Za-z0-9][A-Za-z0-9._-]*@[1-9][0-9]*):`)
 
 // githubWorkflowsPathSegment is the canonical path segment GitHub OIDC
 // embeds in the workflow_ref claim before the workflow filename. Used by
@@ -130,7 +133,7 @@ func validateOIDCConfig(cfg OIDCConfig) error {
 		}
 	}
 	if !subjectPrefixShape.MatchString(cfg.SubjectPrefix) {
-		return fmt.Errorf("oidc config: SubjectPrefix %q is not a fully-qualified %q prefix", cfg.SubjectPrefix, "repo:<owner>/<repo>:")
+		return fmt.Errorf("oidc config: SubjectPrefix %q is not a fully-qualified %q or %q prefix", cfg.SubjectPrefix, "repo:<owner>/<repo>:", "repo:<owner>@<id>/<repo>@<id>:")
 	}
 	return nil
 }

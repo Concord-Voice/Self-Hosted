@@ -1495,7 +1495,14 @@ func (c *Config) validateProduction() error {
 // (an org anyone can register a lookalike of), or an unterminated
 // "repo:Owner/Repo" (which HasPrefix-matches "repo:Owner/Repo-Evil:") each
 // collapse that binding. The trailing colon is load-bearing (#2021).
-var oidcSubjectPrefixShape = regexp.MustCompile(`^repo:[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9][A-Za-z0-9._-]*:`)
+//
+// Two forms are accepted: the name form "repo:<owner>/<repo>:" and the
+// immutable form "repo:<owner>@<id>/<repo>@<id>:" that GitHub issues when a
+// repository uses immutable subject claims. The ids are decimal and must be on
+// both segments or neither; a half-immutable prefix matches no token GitHub
+// mints. Keep this pattern identical to subjectPrefixShape in
+// internal/attestation/oidc.go.
+var oidcSubjectPrefixShape = regexp.MustCompile(`^repo:[A-Za-z0-9][A-Za-z0-9-]*(?:/[A-Za-z0-9][A-Za-z0-9._-]*|@[1-9][0-9]*/[A-Za-z0-9][A-Za-z0-9._-]*@[1-9][0-9]*):`)
 
 func (c *Config) validateAttestation() error {
 	if err := c.validateAppAttest(); err != nil {
@@ -1511,7 +1518,15 @@ func (c *Config) validateAttestation() error {
 		return fmt.Errorf("ATTESTATION_OIDC_SUBJECT_PREFIX must be set when REQUIRE_CLIENT_ATTESTATION=true")
 	}
 	if !oidcSubjectPrefixShape.MatchString(c.OIDCSubjectPrefix) {
-		return fmt.Errorf("ATTESTATION_OIDC_SUBJECT_PREFIX must start with %q — a fully-qualified %q prefix (GitHub OIDC sub claim shape), got %q", "repo:", "repo:<owner>/<repo>:", c.OIDCSubjectPrefix)
+		return fmt.Errorf("ATTESTATION_OIDC_SUBJECT_PREFIX must start with %q — a fully-qualified %q or %q prefix (GitHub OIDC sub claim shape), got %q", "repo:", "repo:<owner>/<repo>:", "repo:<owner>@<id>/<repo>@<id>:", c.OIDCSubjectPrefix)
+	}
+	// The shape is valid here, so no "@" means the name-only form. It binds to
+	// names, which can be re-registered after a rename or deletion; the
+	// immutable form binds to ids, which cannot. Advisory: a repository without
+	// immutable subject claims has no other form to configure. The value is
+	// not logged.
+	if !strings.Contains(c.OIDCSubjectPrefix, "@") {
+		log.Printf("WARN: ATTESTATION_OIDC_SUBJECT_PREFIX uses the name-only form repo:<owner>/<repo>:, which is open to organization or repository name reuse and matches no token from a repository that issues immutable subject claims; prefer the immutable form repo:<owner>@<id>/<repo>@<id>: when the repository issues them")
 	}
 	if c.Environment == "production" && c.OIDCIssuer != "https://token.actions.githubusercontent.com" {
 		return fmt.Errorf("ATTESTATION_OIDC_ISSUER must be the canonical GitHub issuer in production")

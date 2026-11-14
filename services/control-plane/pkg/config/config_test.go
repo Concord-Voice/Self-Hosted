@@ -1431,6 +1431,19 @@ func TestValidateAttestation_OverbroadSubjectPrefix(t *testing.T) {
 		{"owner only", "repo:Concord-Voice", "matches a lookalike org anyone can register"},
 		{"owner with slash", "repo:Concord-Voice/", "matches any repo under the org"},
 		{"missing trailing colon", "repo:Concord-Voice/Concord-Voice-Alpha", "also matches ...-Alpha-Evil:"},
+		// The immutable owner@id/repo@id form must stay fully qualified.
+		{"id form bare org", "repo:Concord-Voice@264583090:", "matches every repo under the org"},
+		{"id form owner with slash", "repo:Concord-Voice@264583090/", "matches any repo under the org"},
+		{"id form missing trailing colon", "repo:Concord-Voice@264583090/Hosted@1158152129", "also matches a repo id with more digits"},
+		{"id form repo without id", "repo:Concord-Voice@264583090/Hosted:", "GitHub never emits a half-immutable subject"},
+		{"id form owner without id", "repo:Concord-Voice/Hosted@1158152129:", "GitHub never emits a half-immutable subject"},
+		{"id form non-numeric owner id", "repo:Concord-Voice@abc/Hosted@1158152129:", "ids are decimal"},
+		{"id form empty repo id", "repo:Concord-Voice@264583090/Hosted@:", "ids are decimal"},
+		{"id form leading-zero id", "repo:Concord-Voice@0264583090/Hosted@1158152129:", "GitHub ids have no leading zero"},
+		{"id form leading-zero repo id", "repo:Concord-Voice@264583090/Hosted@01158152129:", "GitHub ids have no leading zero"},
+		{"id form non-numeric repo id", "repo:Concord-Voice@264583090/Hosted@abc:", "ids are decimal"},
+		{"id form not at start", "xrepo:Concord-Voice@264583090/Hosted@1158152129:", "the shape is anchored"},
+		{"name form not at start", "evil:repo:Concord-Voice/Hosted:", "the shape is anchored"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1448,6 +1461,7 @@ func TestValidateAttestation_OverbroadSubjectPrefix(t *testing.T) {
 // own slug must both still pass.
 func TestValidateAttestation_AcceptsFullyQualifiedSubjectPrefix(t *testing.T) {
 	for _, prefix := range []string{
+		"repo:Concord-Voice@264583090/Hosted@1158152129:",
 		"repo:Concord-Voice/Concord-Voice-Alpha:",
 		"repo:some-operator/their.fork_name:",
 	} {
@@ -1844,4 +1858,33 @@ func TestValidateAppAttest(t *testing.T) {
 	require.ErrorContains(t, (&Config{AppAttestAllowDevelopment: true, Environment: "production"}).validateAppAttest(), "APP_ATTEST_ALLOW_DEVELOPMENT")
 	// The check runs even with attestation off.
 	require.Error(t, (&Config{AppAttestAppIDs: []string{"bad"}}).validateAttestation())
+}
+
+// TestValidateAttestation_WarnsOnNameFormSubjectPrefix: a name-only prefix is
+// accepted but open to organization or repository name reuse, so startup says
+// so. The immutable form must not warn, and the value itself is never logged.
+func TestValidateAttestation_WarnsOnNameFormSubjectPrefix(t *testing.T) {
+	const marker = "ATTESTATION_OIDC_SUBJECT_PREFIX uses the name-only form"
+	run := func(t *testing.T, prefix string) string {
+		var buf bytes.Buffer
+		oldFlags, oldOutput := log.Flags(), log.Writer()
+		log.SetFlags(0)
+		log.SetOutput(&buf)
+		t.Cleanup(func() {
+			log.SetFlags(oldFlags)
+			log.SetOutput(oldOutput)
+		})
+		cfg := validAttestationConfig()
+		cfg.OIDCSubjectPrefix = prefix
+		require.NoError(t, cfg.validateAttestation())
+		return buf.String()
+	}
+	t.Run("name form warns", func(t *testing.T) {
+		out := run(t, "repo:some-operator/their.fork_name:")
+		assert.Contains(t, out, marker)
+		assert.NotContains(t, out, "some-operator")
+	})
+	t.Run("immutable form does not warn", func(t *testing.T) {
+		assert.NotContains(t, run(t, "repo:some-operator@123/their.fork_name@456:"), marker)
+	})
 }
