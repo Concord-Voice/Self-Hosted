@@ -130,6 +130,9 @@ def manifest_violations(lock_path, packages):
                 if not registry_spec(spec, here, base):
                     out.append(f"{lock_path}: packages[{key!r}].{field}.{dep} = {spec!r} is not a "
                                "registry range, tag or in-tree file: path")
+                elif spec.startswith("file:"):
+                    # npm installs that directory and resolves its manifest too.
+                    dirs.add(os.path.relpath(os.path.normpath(os.path.join(here, spec[5:])), base))
     # A `file:` dependency on an in-tree directory installs that package, and
     # npm resolves its own dependencies too, so follow it (once per directory).
     todo, seen = sorted(dirs), set()
@@ -172,15 +175,23 @@ def registry_spec(spec, here, base):
         # npm expands `~` to the home directory; this check does not.
         if path.startswith("~") or os.path.isabs(path):
             return False
-        target = os.path.join(here, path)
+        # npm resolves the path lexically (path.resolve), so `node_modules/a/..`
+        # works even when node_modules/a is not on disk, as in a CI checkout.
+        target = os.path.normpath(os.path.join(here, path))
         # Only a directory is followed. A local tarball's own package.json is
         # not read, so its dependencies would go unchecked: refuse it.
         return os.path.isdir(target) and inside(base, os.path.relpath(target, base))
     if spec.startswith("npm:"):
-        name, at, spec = spec[4:].rpartition("@")
-        if not at or not PKG_NAME.match(name):
+        name, spec = split_alias(spec[4:])
+        if not PKG_NAME.match(name):
             return False
     return bool((RANGE_SPEC.match(spec) or REF_SPEC.match(spec)) and not TARBALL.search(spec))
+
+
+def split_alias(body):
+    """`name@range` of an npm: alias. npm defaults an omitted range to `*`."""
+    at = body.find("@", 1)  # a scope's leading `@` is part of the name
+    return (body, "*") if at < 0 else (body[:at], body[at + 1:])
 
 
 def declared_aliases(packages):
@@ -190,7 +201,7 @@ def declared_aliases(packages):
         for field in DEP_FIELDS:
             for dep, spec in ((entry or {}).get(field) or {}).items():
                 if isinstance(spec, str) and spec.startswith("npm:"):
-                    out.add((dep, spec[4:].rpartition("@")[0]))
+                    out.add((dep, split_alias(spec[4:])[0]))
     return out
 
 

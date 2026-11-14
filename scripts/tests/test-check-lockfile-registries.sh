@@ -146,6 +146,17 @@ jq -n '{name: "m"}' > "$WORK/mf/package.json"
 jq '.packages["node_modules/a"] = {version: "1.0.0", resolved: "https://registry.npmjs.org/a/-/a-1.0.0.tgz", dependencies: {x: "https://npm.example.invalid/x.tgz"}}' "$WORK/mf/package-lock.json" > "$WORK/edge-lock.json"
 cp "$WORK/edge-lock.json" "$WORK/mf/package-lock.json"
 expect 'an off-registry dependency edge inside the lockfile fails' 1 "packages\['node_modules/a'\]\.dependencies\.x" --npm-lock "$WORK/mf/package-lock.json"
+# A file: directory named by a lockfile edge is installed, so its manifest is read
+# (node_modules/a is not on disk, as in a CI checkout: npm resolves the path lexically).
+mkdir -p "$WORK/fe/packages/b"
+jq -n '{name: "b", dependencies: {x: "https://npm.example.invalid/x.tgz"}}' > "$WORK/fe/packages/b/package.json"
+jq -n '{lockfileVersion: 3, packages: {"": {name: "m"}, "node_modules/a": {version: "1.0.0", resolved: "https://registry.npmjs.org/a/-/a-1.0.0.tgz", dependencies: {b: "file:../../packages/b"}}}}' > "$WORK/fe/package-lock.json"
+expect 'a file: directory in a lockfile edge is followed' 1 'packages/b/package\.json: dependencies\.x' --npm-lock "$WORK/fe/package-lock.json"
+jq -n '{name: "b"}' > "$WORK/fe/packages/b/package.json"
+expect 'the same edge passes once that manifest is clean' 0 '^ok:' --npm-lock "$WORK/fe/package-lock.json"
+# npm defaults an alias with no version to `*`.
+jq -n '{lockfileVersion: 3, packages: {"": {name: "m", dependencies: {num: "npm:is-number", sc: "npm:@s/z"}}, "node_modules/num": {name: "is-number", version: "7.0.0", resolved: "https://registry.npmjs.org/is-number/-/is-number-7.0.0.tgz"}, "node_modules/sc": {name: "@s/z", version: "2.0.0", resolved: "https://registry.npmjs.org/@s/z/-/z-2.0.0.tgz"}}}' > "$WORK/fe/package-lock.json"
+expect 'npm: aliases without a version pass' 0 '^ok:' --npm-lock "$WORK/fe/package-lock.json"
 
 # npm falls back to `version` when an install location has no `resolved`.
 L='.packages["node_modules/left-pad"]'
