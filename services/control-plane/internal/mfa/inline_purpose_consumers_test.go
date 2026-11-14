@@ -4,7 +4,7 @@ package mfa
 // RS11). Tokens come from a real ceremony (ipMintInlineToken), never from a
 // seeded key, so these tests do not depend on how a token is stored.
 //
-// Levels: the fourteen MFA-settings consumers are driven at the HANDLER; the
+// Levels: the fifteen MFA-settings consumers are driven at the HANDLER; the
 // twenty-eight consumers outside this package are driven through the entry point each
 // calls with the real verifier (stepup.VerifyMFAFactor/Tx, mfaenforce.ConfirmTx,
 // or VerifyCode/VerifyCodeTx directly), because their handlers live in packages
@@ -61,16 +61,22 @@ func TestInlinePurpose_EveryMFASettingsConsumer(t *testing.T) {
 	key := base64.StdEncoding.EncodeToString([]byte("ip-overwrite-recovery-key-32-byt"))
 	salt := base64.StdEncoding.EncodeToString([]byte("ip-overwrite-salt-16"))
 	routes := []struct {
-		purpose stepup.Purpose
-		method  string
-		body    string // %[1]q = password, %[2]q = mfa code
-		param   string
-		prepare func(t *testing.T, userID string)
-		handler func(*gin.Context)
+		purpose  stepup.Purpose
+		method   string
+		body     string // %[1]q = password, %[2]q = mfa code
+		param    string
+		paramFor func(t *testing.T, userID string) string
+		prepare  func(t *testing.T, userID string)
+		handler  func(*gin.Context)
 	}{
 		{purpose: stepup.PurposeTOTPSetup, method: http.MethodPost, body: `{"password":%[1]q,"mfa_code":%[2]q}`, handler: h.TOTPSetup},
 		{purpose: stepup.PurposeTOTPDisable, method: http.MethodPost, body: `{"password":%[1]q,"code":%[2]q}`, handler: h.TOTPDisable,
 			prepare: func(t *testing.T, userID string) { iuEnrollTOTP(t, db, kr, userID) }},
+		{purpose: stepup.PurposeWebAuthnDelete, method: http.MethodDelete, body: `{"password":%[1]q,"mfa_code":%[2]q}`, handler: h.WebAuthnDeleteCredential,
+			prepare: func(t *testing.T, userID string) { iuEnrollTOTP(t, db, kr, userID) },
+			paramFor: func(t *testing.T, userID string) string {
+				return iuWebAuthnCredentialID(t, db, userID)
+			}},
 		{purpose: stepup.PurposeWebAuthnRegister, method: http.MethodPost, body: `{"password":%[1]q,"mfa_code":%[2]q,"credential_name":"k","credential_type":"hardware"}`, handler: h.WebAuthnRegisterBegin},
 		{purpose: stepup.PurposeRecoveryOnlySet, method: http.MethodPut, body: `{"password":%[1]q,"mfa_code":%[2]q,"methods":[]}`, handler: h.SetRecoveryOnly},
 		{purpose: stepup.PurposeRecoveryHardenedSet, method: http.MethodPut, body: `{"password":%[1]q,"mfa_code":%[2]q,"enabled":true}`, handler: h.SetRecoveryHardened},
@@ -89,7 +95,7 @@ func TestInlinePurpose_EveryMFASettingsConsumer(t *testing.T) {
 		{purpose: stepup.PurposeRecoveryCircleUpsert, method: http.MethodPut, body: `{"password":%[1]q,"mfa_code":%[2]q,"threshold_k":2,"total_shares_n":3,"shares":[]}`, handler: h.UpsertRecoveryCircle},
 		{purpose: stepup.PurposeRecoveryCircleDelete, method: http.MethodDelete, body: `{"password":%[1]q,"mfa_code":%[2]q}`, handler: h.DeleteRecoveryCircle},
 	}
-	require.Len(t, routes, 14, "every MFA-settings consumer, including TOTPDisable")
+	require.Len(t, routes, 15, "every MFA-settings consumer, including factor removal")
 
 	for _, r := range routes {
 		t.Run(string(r.purpose), func(t *testing.T) {
@@ -100,8 +106,12 @@ func TestInlinePurpose_EveryMFASettingsConsumer(t *testing.T) {
 			}
 			drive := func(token string) (int, map[string]interface{}) {
 				c, w := iuGinContext(r.method, "/api/v1/mfa/x", fmt.Sprintf(r.body, iuPassword, token), userID, "")
-				if r.param != "" {
-					c.Params = gin.Params{{Key: "id", Value: r.param}}
+				param := r.param
+				if r.paramFor != nil {
+					param = r.paramFor(t, userID)
+				}
+				if param != "" {
+					c.Params = gin.Params{{Key: "id", Value: param}}
 				}
 				r.handler(c)
 				return w.Code, iuBody(t, w)
@@ -238,7 +248,7 @@ func TestInlinePurpose_EveryOtherConsumerPurpose(t *testing.T) {
 // route passing another route's purpose: that is pinned at the handler, as in
 // internal/users/key_reset_inline_purpose_test.go.
 func TestInlinePurpose_TablesCoverTheClosedSet(t *testing.T) {
-	require.Len(t, stepup.Purposes(), 14+28)
+	require.Len(t, stepup.Purposes(), 14+33)
 }
 
 // TestInlinePurpose_ProductionVerifierCallerCensus makes a new verifier caller
@@ -269,31 +279,32 @@ func TestInlinePurpose_ProductionVerifierCallerCensus(t *testing.T) {
 		seam   string
 	}
 	want := map[string]entry{
-		"dm/message_delete_softlock.go:confirmDMDeleteTx:VerifyOwnRuleTx":    {owners: []string{"confirmDMMessageDelete"}},
-		"dm/purge.go:verifyPurgeStepUpWithMFA:VerifyMFAFactor":               {owners: []string{"verifyPurgeStepUpWithMFA"}},
-		"dm/visibility.go:verifyClearStepUp:VerifyOwnRuleTx":                 {owners: []string{"ClearConversation"}},
-		"messages/softlock.go:confirmServerRuleTx:ConfirmTx":                 {owners: []string{"DeleteMessage", "PurgeChannel", "PurgeServer"}},
-		"messages/softlock.go:verifyOwnRuleTx:VerifyOwnRuleTx":               {owners: []string{"DeleteMessage", "PurgeChannel", "PurgeServer"}},
-		"mfa/handlers.go:verifyAndDeleteTOTPTx:VerifyCodeTx":                 {owners: []string{"TOTPDisable"}},
-		"mfa/settings_stepup.go:requirePasswordAndMFA:VerifyMFAFactor":       {owners: []string{"requirePasswordAndMFA"}},
-		"mfa/settings_stepup.go:verifyMFASettingsStepUpTx:VerifyMFAFactorTx": {owners: []string{"EmailSmsDisable", "SetBackupEmail", "StoreRecoveryKey", "DeleteRecoveryKey"}},
-		"mfaenforce/dangerous.go:Require:ConfirmTx":                          {seam: "the dangerous-action gate; each mfaenforce.Require caller is censused and charges before its gate"},
-		"mfaenforce/mfaenforce.go:ConfirmTx:VerifyMFAFactorTx":               {seam: "the server-rule confirmation; each ConfirmTx caller is censused"},
-		"mfaenforce/mfaenforce.go:RequireConfirmationTx:ConfirmTx":           {seam: "a ConfirmTx wrapper; it has no production caller today, and any added one is censused"},
-		"ownership/handlers.go:verifyMFA:VerifyCode":                         {owners: []string{"verifyMFA"}},
-		"rbac/role_gates.go:requireRoleGate:Require":                         {owners: []string{"CreateRole", "UpdateRole", "DeleteRole", "UpsertChannelOverride", "UpsertCategoryOverride"}},
-		"members/moderation_gate.go:requireModerationGate:Require":           {owners: []string{"RemoveMember", "BanMember"}},
-		"servers/dangerous_gates.go:updateServerGated:Require":               {owners: []string{"updateServerGated"}},
-		"servers/dangerous_gates.go:gateServerDeleteTx:Require":              {owners: []string{"DeleteServer"}},
-		"servers/mfa_enforcement.go:confirmMFAEnforcementRequest:ConfirmTx":  {owners: []string{"PutMFAEnforcement"}},
-		"channels/dangerous_gates.go:requireChannelGate:Require":             {owners: []string{"DeleteChannel", "UpdateExpiration"}},
-		"media/dangerous_gates.go:admitAndStoreServerImage:Require":          {owners: []string{"storeServerImageGated"}},
-		"sessions/handlers.go:authenticateForRevokeWithMFA:VerifyCode":       {owners: []string{"authenticateForRevokeWithMFA"}},
-		"stepup/ownrule.go:VerifyOwnRuleTx:VerifyMFAFactorTx":                {seam: "the own-rule seam; each VerifyOwnRuleTx caller is censused"},
-		"stepup/stepup.go:VerifyMFAFactor:VerifyCode":                        {seam: "the pool-side factor seam; each VerifyMFAFactor caller is censused"},
-		"stepup/stepup.go:VerifyMFAFactorTx:VerifyCodeTx":                    {seam: "the in-transaction factor seam; each VerifyMFAFactorTx caller is censused"},
-		"users/handlers.go:gatePurgeFenceDisable:VerifyMFAFactorTx":          {owners: []string{"UpdatePrivacySettings"}},
-		"users/handlers.go:verifyMFAWithLockedUser:VerifyCodeTx":             {owners: []string{"ChangePassword", "ReplaceMyKeys"}},
+		"dm/message_delete_softlock.go:confirmDMDeleteTx:VerifyOwnRuleTx":             {owners: []string{"confirmDMMessageDelete"}},
+		"dm/purge.go:verifyPurgeStepUpWithMFA:VerifyMFAFactor":                        {owners: []string{"verifyPurgeStepUpWithMFA"}},
+		"dm/visibility.go:verifyClearStepUp:VerifyOwnRuleTx":                          {owners: []string{"ClearConversation"}},
+		"messages/softlock.go:confirmServerRuleTx:ConfirmTx":                          {owners: []string{"DeleteMessage", "PurgeChannel", "PurgeServer"}},
+		"messages/softlock.go:verifyOwnRuleTx:VerifyOwnRuleTx":                        {owners: []string{"DeleteMessage", "PurgeChannel", "PurgeServer"}},
+		"mfa/factor_removal_stepup.go:requireFactorRemovalStepUpTx:VerifyMFAFactorTx": {owners: []string{"TOTPDisable", "WebAuthnDeleteCredential"}},
+		"mfa/settings_stepup.go:requirePasswordAndMFA:VerifyMFAFactor":                {owners: []string{"requirePasswordAndMFA"}},
+		"mfa/settings_stepup.go:verifyMFASettingsStepUpTx:VerifyMFAFactorTx":          {owners: []string{"EmailSmsDisable", "SetBackupEmail", "StoreRecoveryKey", "DeleteRecoveryKey"}},
+		"mfaenforce/dangerous.go:Require:ConfirmTx":                                   {seam: "the dangerous-action gate; each mfaenforce.Require caller is censused and charges before its gate"},
+		"mfaenforce/mfaenforce.go:ConfirmTx:VerifyMFAFactorTx":                        {seam: "the server-rule confirmation; each ConfirmTx caller is censused"},
+		"mfaenforce/mfaenforce.go:RequireConfirmationTx:ConfirmTx":                    {seam: "a ConfirmTx wrapper; it has no production caller today, and any added one is censused"},
+		"ownership/handlers.go:verifyMFA:VerifyCode":                                  {owners: []string{"verifyMFA"}},
+		"rbac/role_gates.go:requireRoleGate:Require":                                  {owners: []string{"CreateRole", "UpdateRole", "DeleteRole", "UpsertChannelOverride", "UpsertCategoryOverride"}},
+		"members/moderation_gate.go:requireModerationGate:Require":                    {owners: []string{"RemoveMember", "BanMember"}},
+		"servers/dangerous_gates.go:updateServerGated:Require":                        {owners: []string{"updateServerGated"}},
+		"servers/dangerous_gates.go:gateServerDeleteTx:Require":                       {owners: []string{"DeleteServer"}},
+		"servers/mfa_enforcement.go:confirmMFAEnforcementRequest:ConfirmTx":           {owners: []string{"PutMFAEnforcement"}},
+		"channels/dangerous_gates.go:requireChannelGate:Require":                      {owners: []string{"DeleteChannel", "UpdateExpiration"}},
+		"media/dangerous_gates.go:admitAndStoreServerImage:Require":                   {owners: []string{"storeServerImageGated"}},
+		"sessions/handlers.go:authenticateForRevokeWithMFA:VerifyCode":                {owners: []string{"authenticateForRevokeWithMFA"}},
+		"stepup/ownrule.go:VerifyOwnRuleTx:VerifyMFAFactorTx":                         {seam: "the own-rule seam; each VerifyOwnRuleTx caller is censused"},
+		"stepup/stepup.go:VerifyMFAFactor:VerifyCode":                                 {seam: "the pool-side factor seam; each VerifyMFAFactor caller is censused"},
+		"stepup/stepup.go:VerifyMFAFactorTx:VerifyCodeTx":                             {seam: "the in-transaction factor seam; each VerifyMFAFactorTx caller is censused"},
+		"users/handlers.go:gatePurgeFenceDisable:VerifyMFAFactorTx":                   {owners: []string{"UpdatePrivacySettings"}},
+		"users/handlers.go:verifyMFAWithLockedUser:VerifyCodeTx":                      {owners: []string{"ChangePassword", "ReplaceMyKeys"}},
+		"users/handlers.go:verifySSOStepUpLockedTx:VerifyMFAFactorTx":                 {owners: []string{"PatchSecurity", "DeleteSSOIdentity"}},
 	}
 
 	gotSites := make([]string, 0, len(sites))
