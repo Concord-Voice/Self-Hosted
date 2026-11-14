@@ -121,6 +121,14 @@ Already requested in a prior week (skipped, idempotent):
 Already reviewed (skipped, will be triaged in the triage run):
 - (none)
 
+### 🛡 Review coverage — head SHA
+
+One line per bot PR (SKILL.md Phase 3.7). Coverage counts only against the current head SHA; a review on an older SHA is listed as stale.
+
+- #101 @1a2b3c4 covered: copilot-pull-request-reviewer[bot] (COMMENTED)
+- #102 @2b3c4d5 ZERO coverage
+- #104 @5d6e7f8 ZERO coverage; stale: copilot-pull-request-reviewer[bot]@9a8b7c6
+
 ### 🔄 Rebase commands sent
 
 Sent `@dependabot rebase` to:
@@ -152,7 +160,8 @@ The triage run finds the existing comment by `<!-- routine-week: 2026-WNN -->` m
 
 1. The `routine-triage-run` front-matter timestamp
 2. The status table (Triage → ✅ Complete)
-3. Adds a new section **"### 🤖 Copilot reconciliation"** after the "Copilot review requests" section:
+3. Replaces the "🛡 Review coverage" lines with the triage run's re-checked lines. A PR the triage run reviewed itself now reads `covered: <login> (first-party specialist-suite:unattended)`.
+4. Adds a new section **"### 🤖 Copilot reconciliation"** after the "Copilot review requests" section:
 
 ```markdown
 ### 🤖 Copilot reconciliation (triage run)
