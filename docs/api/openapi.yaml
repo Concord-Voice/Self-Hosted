@@ -39,7 +39,10 @@ info:
       `error` envelope; global header validation, account state, email verification,
       and client-attestation gates keep the distinct shapes documented per operation.
 
-    - Rate limits are documented per-endpoint; exceeded limits return 429
+    - Rate limits are documented per-endpoint; exceeded limits return 429.
+      Public `/auth` source-budget checks return the fixed 503 response with
+      `Retry-After: 1` when Redis is unavailable, rather than admitting an
+      uncounted authentication attempt.
 
 
     ## End-to-End Encryption (E2EE)

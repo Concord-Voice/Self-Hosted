@@ -54,6 +54,14 @@ output](selfhost-machine-output.md)). Verify host-nginx attribution at the edge
 for the selected release. Generic Cloudflare traffic remains attributed to
 the edge until authenticated origin provenance is supplied by #80.
 
+Pre-auth source controls use an IPv4 `/32` or native IPv6 `/64` identity across
+nginx, control-plane Redis budgets, Admin Console lockout, and media admission.
+`TRUSTED_PROXY_CIDRS` and `TRUSTED_PROXIES` must therefore be established before
+those controls can safely count a forwarded address. In production the media
+plane refuses startup if it has no valid exact trusted-proxy host route. A Redis
+failure on `/api/v1/auth/*` returns 503 with `Retry-After: 1` rather than
+admitting an uncounted credential attempt.
+
 ### WebSocket event-budget preparation
 
 The fresh installer prepares `WS_EVENT_BUDGET_ENABLED=false` and

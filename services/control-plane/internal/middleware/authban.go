@@ -47,26 +47,23 @@ const (
 
 // AuthBanCheck returns middleware that blocks requests from IPs temporarily
 // banned due to cumulative auth failures across all auth endpoints.
-// Returns 429 with Retry-After header when banned. Fails open if Redis is
-// unavailable or not configured (nil client).
+// Returns 429 with Retry-After header when banned and fails closed (503) if
+// the counter backend cannot be consulted.
 func AuthBanCheck(redisClient *redis.Client) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		if redisClient == nil {
-			c.Next()
+			abortAuthBudgetBackendUnavailable(c)
 			return
 		}
 
-		ip := c.ClientIP()
-		key := authBanKeyPrefix + ip
+		key := authBanKeyPrefix + ClientIPBucket(c)
 
 		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
 		defer cancel()
 
 		ttl, err := redisClient.TTL(ctx, key).Result()
 		if err != nil {
-			// Redis down — fail open to prevent total outage
-			MarkNightwatchVerdict(c, NightwatchVerdict{EventType: securityevent.EventSecurityControl, Outcome: securityevent.OutcomeDegraded, Severity: securityevent.SeverityMedium, Reason: securityevent.ReasonRateLimitBackendUnavailable})
-			c.Next()
+			abortAuthBudgetBackendUnavailable(c)
 			return
 		}
 
@@ -92,16 +89,25 @@ func AuthBanCheck(redisClient *redis.Client) gin.HandlerFunc {
 	}
 }
 
+func abortAuthBudgetBackendUnavailable(c *gin.Context) {
+	MarkNightwatchVerdict(c, NightwatchVerdict{EventType: securityevent.EventSecurityControl, Outcome: securityevent.OutcomeDegraded, Severity: securityevent.SeverityMedium, Reason: securityevent.ReasonRateLimitBackendUnavailable})
+	c.Header("Retry-After", "1")
+	c.AbortWithStatusJSON(http.StatusServiceUnavailable, gin.H{
+		"error":   "service unavailable",
+		"message": "rate-limit backend unavailable; please retry shortly",
+	})
+}
+
 // RecordAuthFailure increments the cumulative failure counter for an IP.
 // When the counter reaches the configured threshold, the IP is banned for
 // the configured duration and the counter is reset atomically via a pipeline.
-func RecordAuthFailure(ctx context.Context, redisClient *redis.Client, ip string, cfg AuthBanConfig) AuthFailureOutcome {
+func recordAuthFailure(ctx context.Context, redisClient *redis.Client, bucket string, cfg AuthBanConfig) AuthFailureOutcome {
 	if redisClient == nil {
 		return AuthFailureBackendUnavailable
 	}
 
-	failureKey := authFailureKeyPrefix + ip
-	banKey := authBanKeyPrefix + ip
+	failureKey := authFailureKeyPrefix + bucket
+	banKey := authBanKeyPrefix + bucket
 
 	count, err := redisClient.Incr(ctx, failureKey).Result()
 	if err != nil {
@@ -127,6 +133,19 @@ func RecordAuthFailure(ctx context.Context, redisClient *redis.Client, ip string
 	return AuthFailureRecorded
 }
 
+// RecordAuthFailure records an auth failure against Gin's trusted-proxy source
+// bucket. It returns false only after writing the fixed fail-closed 503, and a
+// caller that receives false must return before any ordinary denial response.
+func RecordAuthFailure(c *gin.Context, redisClient *redis.Client, cfg AuthBanConfig) bool {
+	outcome := recordAuthFailure(c.Request.Context(), redisClient, ClientIPBucket(c), cfg)
+	MarkAuthFailureOutcome(c, outcome)
+	if outcome == AuthFailureBackendUnavailable {
+		abortAuthBudgetBackendUnavailable(c)
+		return false
+	}
+	return true
+}
+
 // MarkAuthFailureOutcome makes the closed control result available to the
 // post-response observer; the caller still owns its domain authentication event.
 func MarkAuthFailureOutcome(c *gin.Context, outcome AuthFailureOutcome) {
@@ -143,5 +162,7 @@ func ClearAuthFailures(ctx context.Context, redisClient *redis.Client, ip string
 	if redisClient == nil {
 		return
 	}
-	redisClient.Del(ctx, authFailureKeyPrefix+ip)
+	if err := redisClient.Del(ctx, authFailureKeyPrefix+IPBucket(ip)).Err(); err != nil {
+		return
+	}
 }

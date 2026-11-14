@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/admin"
+	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/pkg/logger"
 )
@@ -70,7 +71,7 @@ const defaultTestIP = "192.0.2.1"
 func acctKey(username string) string { return "admin_lockout:acct:" + username }
 
 func ipKey(ip string) string {
-	sum := sha256.Sum256([]byte(ip))
+	sum := sha256.Sum256([]byte(middleware.IPBucket(ip)))
 	return "admin_lockout:ip:" + hex.EncodeToString(sum[:])
 }
 

@@ -11,6 +11,7 @@
  */
 
 import { BlockList, isIPv4, isIPv6 } from 'node:net';
+import * as ipaddr from 'ipaddr.js';
 
 /** 60 handshakes per 10 s = 6/s sustained per source IP. */
 export const HANDSHAKE_BURST = 60;
@@ -30,6 +31,8 @@ export interface AdmissionGateOptions {
    * nginx front). An EMPTY list makes the gate inert — see createAdmissionGate.
    */
   trustedProxies: readonly string[];
+  /** Production requires a usable trusted-proxy rule for address attribution. */
+  required?: boolean;
   /** PII-safe rejection hook — receives no address. */
   onReject?: () => void;
   /**
@@ -190,23 +193,25 @@ export function resolveClientIp(
       if (last && ipFamily(last)) return last;
     }
 
-    // Trusted peer, but nothing attributable to the actual client: fail OPEN.
-    //
-    // Falling through to `peer` here would return the PROXY's address, so every
-    // such request would land in ONE shared bucket and a handful of clients
-    // would trip the 60/10s ceiling for the whole deployment — the exact
-    // fail-shared outcome `createAdmissionGate` refuses when no proxy is
-    // configured at all. Latent in the shipped topology (nginx.conf always sets
-    // X-Real-IP), but a config change that dropped the header would otherwise
-    // convert a header omission into a service-wide denial. Returning null
-    // matches the documented posture for an unresolvable address: a
-    // topology/operator error degrades to pre-gate behaviour, never to a
-    // deployment-wide bucket. (#2793 Gitar review.)
-    return null;
+    // A verified proxy peer that omits usable forwarding headers still has an
+    // attributable observed source. Count it rather than creating an unmetered
+    // path; nginx normally overwrites these headers.
+    return peer;
   }
 
   // Untrusted peer: it IS the client, so attribute the request to it directly.
   return peer ?? null;
+}
+
+// bucketClientIp returns canonical IPv4 /32 identities and masks native IPv6
+// identities to /64. ipaddr.process also folds IPv4-mapped IPv6 into IPv4.
+export function bucketClientIp(address: string): string {
+  const parsed = ipaddr.process(address);
+  if (parsed.kind() === 'ipv4') return parsed.toString();
+
+  const bytes = parsed.toByteArray();
+  bytes.fill(0, 8);
+  return ipaddr.fromByteArray(bytes).toString();
 }
 
 interface WindowCounters {
@@ -241,6 +246,9 @@ export function createAdmissionGate(options: AdmissionGateOptions): AdmissionGat
   // storm. A misconfiguration must degrade to the pre-gate behaviour — the same
   // fail-open posture the design specifies for an unresolvable IP.
   if (trustedProxies.size === 0) {
+    if (options.required) {
+      throw new Error('Admission gate requires at least one valid trusted proxy.');
+    }
     warn(
       'Admission gate INACTIVE: no trusted proxies configured (TRUSTED_PROXIES). ' +
         'Every client would otherwise be attributed to the reverse proxy and share ' +
@@ -259,14 +267,17 @@ export function createAdmissionGate(options: AdmissionGateOptions): AdmissionGat
   const gate = ((req, callback) => {
     const ip = resolveClientIp(req, trustedProxies);
 
-    // Documented fail-open. See the admissionGate test that asserts this.
+    // A genuinely peerless request has no source identity and cannot enter an
+    // admission budget.
     if (!ip) {
-      callback(null, true);
+      options.onReject?.();
+      callback(null, false);
       return;
     }
+    const bucket = bucketClientIp(ip);
 
     const nowMs = now();
-    let entry = counters.get(ip);
+    let entry = counters.get(bucket);
 
     if (!entry) {
       // Bounded store: evict the oldest insertion (Map preserves insertion
@@ -276,7 +287,7 @@ export function createAdmissionGate(options: AdmissionGateOptions): AdmissionGat
         if (!oldest.done) counters.delete(oldest.value);
       }
       entry = { windowStartMs: nowMs, current: 0, previous: 0 };
-      counters.set(ip, entry);
+      counters.set(bucket, entry);
     }
 
     const elapsed = nowMs - entry.windowStartMs;

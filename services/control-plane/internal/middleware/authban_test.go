@@ -11,6 +11,7 @@ import (
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/middleware"
 	"github.com/Concord-Voice/Concord-Voice-Alpha/services/control-plane/internal/testhelpers"
 	"github.com/gin-gonic/gin"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -57,6 +58,16 @@ func doAuthBanRequest(router *gin.Engine, ip string) *httptest.ResponseRecorder 
 	return w
 }
 
+func recordAuthFailure(t *testing.T, redisClient *redis.Client, ip string, cfg middleware.AuthBanConfig) bool {
+	t.Helper()
+	writer := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(writer)
+	request := httptest.NewRequest(http.MethodPost, pathAuthBanTest, nil)
+	request.RemoteAddr = ip + ":12345"
+	ctx.Request = request
+	return middleware.RecordAuthFailure(ctx, redisClient, cfg)
+}
+
 func TestAuthBanCheckAllowsCleanIP(t *testing.T) {
 	router, _ := setupAuthBanRouter(t)
 
@@ -99,7 +110,7 @@ func TestAuthBanCheckRetryAfterMatchesTTL(t *testing.T) {
 	assert.True(t, retryAfterInt > 0 && retryAfterInt <= 120, "Retry-After should be >0 and <=120, got %d", retryAfterInt)
 }
 
-func TestAuthBanCheckFailsOpenOnRedisDown(t *testing.T) {
+func TestAuthBanCheckFailsClosedOnRedisDown(t *testing.T) {
 	ts := setupTS(t)
 
 	// Close Redis to simulate failure
@@ -107,36 +118,41 @@ func TestAuthBanCheckFailsOpenOnRedisDown(t *testing.T) {
 
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
+	handlerCalled := false
 	router.POST(pathAuthBanTest,
 		middleware.AuthBanCheck(ts.Redis),
 		func(c *gin.Context) {
+			handlerCalled = true
 			c.JSON(http.StatusOK, gin.H{"status": "ok"})
 		},
 	)
 
 	w := doAuthBanRequest(router, "10.0.0.4")
-	// Should fail open — allow the request
-	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, "1", w.Header().Get("Retry-After"))
+	assert.False(t, handlerCalled)
 }
 
-func TestAuthBanCheckNilRedisPassesThrough(t *testing.T) {
+func TestAuthBanCheckNilRedisFailsClosed(t *testing.T) {
 	gin.SetMode(gin.TestMode)
 	router := gin.New()
+	handlerCalled := false
 	router.POST(pathAuthBanTest,
 		middleware.AuthBanCheck(nil),
 		func(c *gin.Context) {
+			handlerCalled = true
 			c.JSON(http.StatusOK, gin.H{"status": "ok"})
 		},
 	)
 
 	w := doAuthBanRequest(router, "10.0.0.5")
-	assert.Equal(t, http.StatusOK, w.Code)
+	assert.Equal(t, http.StatusServiceUnavailable, w.Code)
+	assert.Equal(t, "1", w.Header().Get("Retry-After"))
+	assert.False(t, handlerCalled)
 }
 
-func TestRecordAuthFailureNilRedisNoOp(_ *testing.T) {
-	ctx := context.Background()
-	// Should not panic
-	middleware.RecordAuthFailure(ctx, nil, "10.0.0.6", testBanConfig)
+func TestRecordAuthFailureNilRedisFailsClosed(t *testing.T) {
+	assert.False(t, recordAuthFailure(t, nil, "10.0.0.6", testBanConfig))
 }
 
 func TestClearAuthFailuresNilRedisNoOp(_ *testing.T) {
@@ -149,8 +165,8 @@ func TestRecordAuthFailureIncrementsCounter(t *testing.T) {
 	ts := setupTS(t)
 	ctx := context.Background()
 
-	middleware.RecordAuthFailure(ctx, ts.Redis, "10.0.0.10", testBanConfig)
-	middleware.RecordAuthFailure(ctx, ts.Redis, "10.0.0.10", testBanConfig)
+	require.True(t, recordAuthFailure(t, ts.Redis, "10.0.0.10", testBanConfig))
+	require.True(t, recordAuthFailure(t, ts.Redis, "10.0.0.10", testBanConfig))
 
 	count, err := ts.Redis.Get(ctx, "auth_failures:ip:10.0.0.10").Int()
 	require.NoError(t, err)
@@ -161,7 +177,7 @@ func TestRecordAuthFailureSetsWindowTTL(t *testing.T) {
 	ts := setupTS(t)
 	ctx := context.Background()
 
-	middleware.RecordAuthFailure(ctx, ts.Redis, "10.0.0.11", testBanConfig)
+	require.True(t, recordAuthFailure(t, ts.Redis, "10.0.0.11", testBanConfig))
 
 	ttl, err := ts.Redis.TTL(ctx, "auth_failures:ip:10.0.0.11").Result()
 	require.NoError(t, err)
@@ -173,7 +189,7 @@ func TestRecordAuthFailureBansAtThreshold(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < testBanConfig.Threshold; i++ {
-		middleware.RecordAuthFailure(ctx, ts.Redis, "10.0.0.12", testBanConfig)
+		require.True(t, recordAuthFailure(t, ts.Redis, "10.0.0.12", testBanConfig))
 	}
 
 	// Ban key should now exist
@@ -192,7 +208,7 @@ func TestRecordAuthFailureNoBanBelowThreshold(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < testBanConfig.Threshold-1; i++ {
-		middleware.RecordAuthFailure(ctx, ts.Redis, "10.0.0.13", testBanConfig)
+		require.True(t, recordAuthFailure(t, ts.Redis, "10.0.0.13", testBanConfig))
 	}
 
 	exists, err := ts.Redis.Exists(ctx, "auth_ban:ip:10.0.0.13").Result()
@@ -205,7 +221,7 @@ func TestRecordAuthFailureResetsCounterOnBan(t *testing.T) {
 	ctx := context.Background()
 
 	for i := 0; i < testBanConfig.Threshold; i++ {
-		middleware.RecordAuthFailure(ctx, ts.Redis, "10.0.0.14", testBanConfig)
+		require.True(t, recordAuthFailure(t, ts.Redis, "10.0.0.14", testBanConfig))
 	}
 
 	// Failure counter should be deleted after ban
@@ -219,8 +235,8 @@ func TestClearAuthFailuresRemovesCounter(t *testing.T) {
 	ctx := context.Background()
 
 	// Record some failures
-	middleware.RecordAuthFailure(ctx, ts.Redis, testIPClearAuth, testBanConfig)
-	middleware.RecordAuthFailure(ctx, ts.Redis, testIPClearAuth, testBanConfig)
+	require.True(t, recordAuthFailure(t, ts.Redis, testIPClearAuth, testBanConfig))
+	require.True(t, recordAuthFailure(t, ts.Redis, testIPClearAuth, testBanConfig))
 
 	// Clear
 	middleware.ClearAuthFailures(ctx, ts.Redis, testIPClearAuth)
@@ -236,7 +252,7 @@ func TestAuthBanDifferentIPsIndependent(t *testing.T) {
 
 	// Ban IP A
 	for i := 0; i < testBanConfig.Threshold; i++ {
-		middleware.RecordAuthFailure(ctx, ts.Redis, "10.0.0.20", testBanConfig)
+		require.True(t, recordAuthFailure(t, ts.Redis, "10.0.0.20", testBanConfig))
 	}
 
 	// IP A should be banned
@@ -262,7 +278,9 @@ func TestAuthBanIntegrationFullFlow(t *testing.T) {
 		middleware.AuthBanCheck(ts.Redis),
 		func(c *gin.Context) {
 			// Simulate auth failure
-			middleware.RecordAuthFailure(c.Request.Context(), ts.Redis, c.ClientIP(), testBanConfig)
+			if !middleware.RecordAuthFailure(c, ts.Redis, testBanConfig) {
+				return
+			}
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid"})
 		},
 	)
