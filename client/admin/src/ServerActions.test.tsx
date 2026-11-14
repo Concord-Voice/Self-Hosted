@@ -24,6 +24,10 @@ function lists(jobs: unknown[] = [], backups: unknown[] = []) {
   server.use(
     http.get(`${base}/jobs`, () => HttpResponse.json({ jobs })),
     http.get(`${base}/backups`, () => HttpResponse.json({ backups })),
+    http.post(`${base}/stepup`, () => HttpResponse.json(stepUpOptions)),
+  );
+  vi.spyOn(navigator.credentials, "get").mockResolvedValue(
+    assertionCredential(),
   );
 }
 
@@ -61,11 +65,16 @@ const stepUpOptions = {
 };
 
 describe("ServerActions", () => {
-  it("backs up without a security key and follows the job", async () => {
+  it("binds a backup proof before starting and follows the job", async () => {
     lists();
     const bodies: unknown[] = [];
+    const stepUpBodies: unknown[] = [];
     let polls = 0;
     server.use(
+      http.post(`${base}/stepup`, async ({ request }) => {
+        stepUpBodies.push(await request.json());
+        return HttpResponse.json(stepUpOptions);
+      }),
       http.post(`${base}/actions/backup`, async ({ request }) => {
         bodies.push(await request.json());
         return HttpResponse.json(job("running"), { status: 202 });
@@ -83,7 +92,9 @@ describe("ServerActions", () => {
         );
       }),
     );
-    const get = vi.spyOn(navigator.credentials, "get");
+    const get = vi
+      .spyOn(navigator.credentials, "get")
+      .mockResolvedValue(assertionCredential());
     renderActions();
     await userEvent
       .setup()
@@ -98,8 +109,16 @@ describe("ServerActions", () => {
     expect(screen.getByRole("textbox", { name: "Back up output" })).toHaveValue(
       "done\n",
     );
-    expect(bodies).toEqual([{}]);
-    expect(get).not.toHaveBeenCalled();
+    expect(stepUpBodies).toEqual([{ action: "backup" }]);
+    expect(bodies).toEqual([
+      {
+        stepup: {
+          handle: stepUpOptions.handle,
+          assertion: expect.any(Object),
+        },
+      },
+    ]);
+    expect(get).toHaveBeenCalledOnce();
   });
 
   it("locks the buttons while its own job runs and rides out a rate limit", async () => {
@@ -192,12 +211,16 @@ describe("ServerActions", () => {
   it("turns read-only when a write finds an appliance", async () => {
     lists();
     server.use(
+      http.post(`${base}/stepup`, () => HttpResponse.json(stepUpOptions)),
       http.post(`${base}/actions/start`, () =>
         HttpResponse.json(
           { error: "appliance_managed", appliance: "truenas" },
           { status: 409 },
         ),
       ),
+    );
+    vi.spyOn(navigator.credentials, "get").mockResolvedValue(
+      assertionCredential(),
     );
     renderActions();
     await userEvent
@@ -237,7 +260,7 @@ describe("ServerActions", () => {
     expect(
       await screen.findByText("The action failed. Its output is below."),
     ).toBeVisible();
-    expect(stepUpBody).toEqual({ action: "restore" });
+    expect(stepUpBody).toEqual({ action: "restore", archive });
     expect(actionBody.archive).toBe(archive);
     expect((actionBody.stepup as { handle: string }).handle).toBe(
       stepUpOptions.handle,
@@ -285,9 +308,13 @@ describe("ServerActions", () => {
   it("passes other errors to the session handler", async () => {
     lists();
     server.use(
+      http.post(`${base}/stepup`, () => HttpResponse.json(stepUpOptions)),
       http.post(`${base}/actions/start`, () =>
         HttpResponse.json({}, { status: 401 }),
       ),
+    );
+    vi.spyOn(navigator.credentials, "get").mockResolvedValue(
+      assertionCredential(),
     );
     const { onSessionError } = renderActions();
     await userEvent
@@ -316,6 +343,42 @@ describe("ServerActions", () => {
       "v0.3.1",
     );
     expect(update).toBeEnabled();
+  });
+
+  it("binds the selected release tag before updating", async () => {
+    lists();
+    let stepUpBody: unknown;
+    let actionBody: Record<string, unknown> = {};
+    server.use(
+      http.post(`${base}/stepup`, async ({ request }) => {
+        stepUpBody = await request.json();
+        return HttpResponse.json(stepUpOptions);
+      }),
+      http.post(`${base}/actions/update`, async ({ request }) => {
+        actionBody = (await request.json()) as Record<string, unknown>;
+        return HttpResponse.json(job("running", { action: "update" }), {
+          status: 202,
+        });
+      }),
+      http.get(`${base}/jobs/${id}`, () =>
+        HttpResponse.json(
+          job("succeeded", { action: "update", finished: started }),
+        ),
+      ),
+    );
+    renderActions();
+    const user = userEvent.setup();
+    await user.type(
+      await screen.findByRole("textbox", { name: "Update to release tag" }),
+      "v0.3.1",
+    );
+    await user.click(screen.getByRole("button", { name: "Update" }));
+    await screen.findByText("Update: succeeded");
+    expect(stepUpBody).toEqual({ action: "update", tag: "v0.3.1" });
+    expect(actionBody.tag).toBe("v0.3.1");
+    expect((actionBody.stepup as { handle: string }).handle).toBe(
+      stepUpOptions.handle,
+    );
   });
 
   it("locks the buttons while a job runs elsewhere", async () => {
