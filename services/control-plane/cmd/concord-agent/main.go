@@ -61,11 +61,11 @@ func envOr(key, def string) string {
 }
 
 func expectedControlPlaneUID() (int, error) {
-	value, err := strconv.ParseUint(envOr("CONCORD_AGENT_CONTROL_PLANE_UID", "10006"), 10, 32)
-	if err != nil || value == 0 || value > uint64(^uint(0)>>1) {
+	value, err := strconv.Atoi(envOr("CONCORD_AGENT_CONTROL_PLANE_UID", "10006"))
+	if err != nil || value <= 0 || uint64(value) > (1<<32)-1 {
 		return 0, errors.New("invalid CONCORD_AGENT_CONTROL_PLANE_UID")
 	}
-	return int(value), nil
+	return value, nil
 }
 
 func run() int {
