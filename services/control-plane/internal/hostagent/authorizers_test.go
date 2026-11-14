@@ -90,6 +90,22 @@ func TestAuthorizerStoreValidAndCounterAdvance(t *testing.T) {
 	require.Empty(t, store.Credentials(uuid.NewString()))
 }
 
+func TestAuthorizerStoreRPConfigReturnsCloneAndFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	path := writeAuthorizerDoc(t, root, testAuthorizerDoc(t))
+	store := loadTestAuthorizers(t, path, root)
+	rpID, origins, err := store.RPConfig()
+	require.NoError(t, err)
+	require.Equal(t, "admin.example.test", rpID)
+	origins[0] = "https://changed.example.test"
+	_, current, err := store.RPConfig()
+	require.NoError(t, err)
+	require.Equal(t, []string{"https://admin.example.test"}, current)
+	require.NoError(t, os.Chmod(path, 0o666)) //nolint:gosec // deliberate unsafe-mode fixture
+	_, _, err = store.RPConfig()
+	require.Error(t, err)
+}
+
 func TestAuthorizerStoreRejectsInvalidTrustFile(t *testing.T) {
 	for name, mutate := range map[string]func(map[string]any){
 		"unknown schema":   func(d map[string]any) { d["schema"] = 2 },
@@ -277,6 +293,42 @@ func TestAuthorizerStoreImportBatchRejectsAllOnMalformedEntry(t *testing.T) {
 	require.Error(t, err)
 	require.Zero(t, created)
 	require.Empty(t, store.Credentials(doc.AdminID))
+}
+
+func TestAuthorizerStoreImportDoesNotReplaceTrustedCredential(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "authorizers.json")
+	store, err := loadOrCreateAuthorizersAt(path, testOwnerUID(), root, "admin.example.test", []string{"https://admin.example.test"})
+	require.NoError(t, err)
+	imp := testAuthorizerImport(t)
+	_, err = store.ImportMany(imp)
+	require.NoError(t, err)
+	id, err := base64.RawURLEncoding.DecodeString(imp.Credentials[0].CredentialID)
+	require.NoError(t, err)
+	require.NoError(t, store.AdvanceCounter(id, 8))
+
+	stale := imp
+	stale.Credentials = append([]AuthorizerCredentialImport(nil), imp.Credentials...)
+	stale.Credentials[0].SignCount = 1
+	stale.Credentials[0].Label = "stale label"
+	created, err := store.ImportMany(stale)
+	require.NoError(t, err)
+	require.Zero(t, created)
+	list, err := store.List()
+	require.NoError(t, err)
+	require.Equal(t, uint32(8), list[0].SignCount)
+	require.Equal(t, "primary hardware key", list[0].Label)
+
+	conflict := imp
+	conflict.AdminID = uuid.NewString()
+	before, err := os.ReadFile(path) //nolint:gosec // test-created trust file
+	require.NoError(t, err)
+	created, err = store.ImportMany(conflict)
+	require.Error(t, err)
+	require.Zero(t, created)
+	after, err := os.ReadFile(path) //nolint:gosec // test-created trust file
+	require.NoError(t, err)
+	require.Equal(t, before, after)
 }
 
 func TestAuthorizerStoreListExposesOnlyBoundedMetadata(t *testing.T) {

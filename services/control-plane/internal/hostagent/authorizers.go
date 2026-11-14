@@ -218,31 +218,46 @@ func validateAuthorizerFile(doc authorizerFile) error {
 	}
 	seenOrigins := make(map[string]bool, len(doc.Origins))
 	for _, origin := range doc.Origins {
-		u, err := url.Parse(origin)
-		if err != nil || len(origin) > 512 || u.Scheme != "https" || u.Host == "" || u.User != nil || u.Path != "" || u.RawQuery != "" || u.Fragment != "" || u.String() != origin || seenOrigins[origin] || u.Hostname() != doc.RPID && !strings.HasSuffix(u.Hostname(), "."+doc.RPID) {
+		if !validAuthorizerOrigin(origin, doc.RPID) || seenOrigins[origin] {
 			return errors.New("invalid authorizer origin")
 		}
 		seenOrigins[origin] = true
 	}
 	seenIDs := make(map[string]bool, len(doc.Authorizers))
 	for _, entry := range doc.Authorizers {
-		parsed, err := uuid.Parse(entry.AdminID)
-		if err != nil || parsed.String() != entry.AdminID || len(entry.Label) > maxAuthorizerLabel || !utf8.ValidString(entry.Label) || strings.IndexFunc(entry.Label, unicode.IsControl) >= 0 {
-			return errors.New("invalid authorizer entry")
-		}
-		id, err := decodeAuthorizerField(entry.CredentialID, maxAuthorizerIDBytes)
-		if err != nil || seenIDs[string(id)] {
-			return errors.New("duplicate or malformed authorizer credential")
-		}
-		seenIDs[string(id)] = true
-		key, err := decodeAuthorizerField(entry.PublicKey, maxAuthorizerKeyBytes)
-		if err != nil {
-			return errors.New("malformed authorizer key")
-		}
-		if _, err := webauthncose.ParsePublicKey(key); err != nil {
-			return errors.New("malformed authorizer COSE key")
+		if err := validateAuthorizerRecord(entry, seenIDs); err != nil {
+			return err
 		}
 	}
+	return nil
+}
+
+func validAuthorizerOrigin(origin, rpID string) bool {
+	u, err := url.Parse(origin)
+	return err == nil && len(origin) <= 512 && u.Scheme == "https" && u.Host != "" && u.User == nil && u.Path == "" && u.RawQuery == "" && u.Fragment == "" && u.String() == origin && (u.Hostname() == rpID || strings.HasSuffix(u.Hostname(), "."+rpID))
+}
+
+func validAuthorizerLabel(label string) bool {
+	return len(label) <= maxAuthorizerLabel && utf8.ValidString(label) && strings.IndexFunc(label, unicode.IsControl) < 0
+}
+
+func validateAuthorizerRecord(entry authorizerRecord, seenIDs map[string]bool) error {
+	parsed, err := uuid.Parse(entry.AdminID)
+	if err != nil || parsed.String() != entry.AdminID || !validAuthorizerLabel(entry.Label) {
+		return errors.New("invalid authorizer entry")
+	}
+	id, err := decodeAuthorizerField(entry.CredentialID, maxAuthorizerIDBytes)
+	if err != nil || seenIDs[string(id)] {
+		return errors.New("duplicate or malformed authorizer credential")
+	}
+	key, err := decodeAuthorizerField(entry.PublicKey, maxAuthorizerKeyBytes)
+	if err != nil {
+		return errors.New("malformed authorizer key")
+	}
+	if _, err := webauthncose.ParsePublicKey(key); err != nil {
+		return errors.New("malformed authorizer COSE key")
+	}
+	seenIDs[string(id)] = true
 	return nil
 }
 
@@ -394,44 +409,20 @@ func (s *AuthorizerStore) AdvanceCounter(credentialID []byte, count uint32) erro
 func (s *AuthorizerStore) ImportMany(in AuthorizerImport) (int, error) {
 	added := 0
 	err := s.mutate(func(doc *authorizerFile) (bool, error) {
-		if in.Schema != 1 || in.RPID != doc.RPID || !slices.Equal(in.Origins, doc.Origins) || len(in.Credentials) == 0 || len(in.Credentials) > maxAuthorizers {
-			return false, errors.New("invalid authorizer import")
-		}
-		parsed, err := uuid.Parse(in.AdminID)
-		if err != nil || parsed.String() != in.AdminID {
-			return false, errors.New("invalid authorizer admin")
+		if err := validateAuthorizerImport(in, *doc); err != nil {
+			return false, err
 		}
 		seen := make(map[string]bool, len(in.Credentials))
 		for _, input := range in.Credentials {
-			if len(input.Label) > maxAuthorizerLabel || !utf8.ValidString(input.Label) || strings.IndexFunc(input.Label, unicode.IsControl) >= 0 {
-				return false, errors.New("invalid import label")
-			}
-			id, err := decodeAuthorizerField(input.CredentialID, maxAuthorizerIDBytes)
-			if err != nil || seen[string(id)] {
-				return false, errors.New("duplicate or malformed import credential")
-			}
-			seen[string(id)] = true
-			key, err := decodeAuthorizerField(input.PublicKey, maxAuthorizerKeyBytes)
+			candidate, err := importAuthorizerRecord(in.AdminID, input, seen)
 			if err != nil {
-				return false, errors.New("malformed import key")
+				return false, err
 			}
-			if _, err := webauthncose.ParsePublicKey(key); err != nil {
-				return false, errors.New("malformed import COSE key")
+			created, err := addAuthorizerRecord(doc, candidate)
+			if err != nil {
+				return false, err
 			}
-			candidate := authorizerRecord{AdminID: in.AdminID, CredentialID: input.CredentialID, PublicKey: input.PublicKey, SignCount: input.SignCount, Label: input.Label}
-			matched := false
-			for _, existing := range doc.Authorizers {
-				if existing.CredentialID != input.CredentialID {
-					continue
-				}
-				if existing.AdminID != in.AdminID || existing.PublicKey != input.PublicKey {
-					return false, errors.New("conflicting import credential")
-				}
-				matched = true
-				break
-			}
-			if !matched {
-				doc.Authorizers = append(doc.Authorizers, candidate)
+			if created {
 				added++
 			}
 		}
@@ -444,6 +435,39 @@ func (s *AuthorizerStore) ImportMany(in AuthorizerImport) (int, error) {
 		return 0, err
 	}
 	return added, nil
+}
+
+func validateAuthorizerImport(in AuthorizerImport, doc authorizerFile) error {
+	if in.Schema != 1 || in.RPID != doc.RPID || !slices.Equal(in.Origins, doc.Origins) || len(in.Credentials) == 0 || len(in.Credentials) > maxAuthorizers {
+		return errors.New("invalid authorizer import")
+	}
+	parsed, err := uuid.Parse(in.AdminID)
+	if err != nil || parsed.String() != in.AdminID {
+		return errors.New("invalid authorizer admin")
+	}
+	return nil
+}
+
+func importAuthorizerRecord(adminID string, input AuthorizerCredentialImport, seen map[string]bool) (authorizerRecord, error) {
+	record := authorizerRecord{AdminID: adminID, CredentialID: input.CredentialID, PublicKey: input.PublicKey, SignCount: input.SignCount, Label: input.Label}
+	if err := validateAuthorizerRecord(record, seen); err != nil {
+		return authorizerRecord{}, err
+	}
+	return record, nil
+}
+
+func addAuthorizerRecord(doc *authorizerFile, candidate authorizerRecord) (bool, error) {
+	for _, existing := range doc.Authorizers {
+		if existing.CredentialID != candidate.CredentialID {
+			continue
+		}
+		if existing.AdminID != candidate.AdminID || existing.PublicKey != candidate.PublicKey {
+			return false, errors.New("conflicting import credential")
+		}
+		return false, nil
+	}
+	doc.Authorizers = append(doc.Authorizers, candidate)
+	return true, nil
 }
 
 // Revoke removes every credential for one admin in one durable update.
